@@ -603,10 +603,48 @@ std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTrea
     r2::Definition candidate=original->definition_;
     if(const auto* amount=std::get_if<et::SetAmount>(&edit)){auto row=std::find_if(candidate.steps.begin(),candidate.steps.end(),[&](const et::Step&s){return s.feature==amount->feature;});if(row==candidate.steps.end()){refusal=et::Refusal::IdentityMismatch;return {};}row->amountMM=amount->amountMM;}
     else if(const auto* remove=std::get_if<et::Remove>(&edit)){auto row=std::find_if(candidate.steps.begin(),candidate.steps.end(),[&](const et::Step&s){return s.feature==remove->feature;});if(row==candidate.steps.end()){refusal=et::Refusal::IdentityMismatch;return {};}candidate.issuance.retiredLocalIDs.push_back(row->localID);candidate.steps.erase(row);candidate.outputNode=candidate.steps.empty()?std::get<r2::BooleanBaseBinding>(candidate.base).sourceNode:candidate.steps.back().node;}
+    else if(const auto* rebuild=std::get_if<r2::RebuildBooleanInput>(&edit)){
+        // Admitted only for the rectangular-loft input of a legacy SYRS prefix:
+        // the locator must name the captured left source input exactly and the
+        // requested recipe must keep family and unit. Profile/enclosure input
+        // rebuilds require the viewer-level construction seam (outside this
+        // change) and refuse atomically here instead of being approximated.
+        const auto* boolean=std::get_if<r2::BooleanBaseBinding>(&candidate.base);
+        const auto* source=std::get_if<r2::RetainedBooleanBase>(&original->source_);
+        const auto* legacy=source?std::get_if<r2::LegacyBooleanBase>(&source->source):nullptr;
+        const auto* program=legacy?std::get_if<retained_boolean::Program>(&legacy->prefix):nullptr;
+        const auto* links=boolean?std::get_if<r2::LegacyPrefixBinding>(&boolean->prefix):nullptr;
+        if(!boolean||!program||!links||original->sourceBase_.IsNull()
+            ||rebuild->locator.owner!=candidate.owner||rebuild->locator.node!=links->rootNode
+            ||rebuild->locator.sourceFeature!=boolean->source.sourceFeature){refusal=et::Refusal::IdentityMismatch;return {};}
+        const auto* loft=std::get_if<rectangular_loft::Definition>(&rebuild->requested);
+        if(!loft||program->source.family!=3||loft->dimensionMetersPerUnit!=boolean->metersPerLocalUnit){
+            refusal=et::Refusal::UnsupportedBase;return {};
+        }
+    }
+    else if(const auto* tool=std::get_if<r2::RebuildAnalyticTool>(&edit)){
+        // The operand must exist exactly in both the captured program and the
+        // retained prefix binding, and the request must keep the stable ID.
+        const auto* boolean=std::get_if<r2::BooleanBaseBinding>(&candidate.base);
+        const auto* source=std::get_if<r2::RetainedBooleanBase>(&original->source_);
+        const auto* legacy=source?std::get_if<r2::LegacyBooleanBase>(&source->source):nullptr;
+        const auto* program=legacy?std::get_if<retained_boolean::Program>(&legacy->prefix):nullptr;
+        const auto* links=boolean?std::get_if<r2::LegacyPrefixBinding>(&boolean->prefix):nullptr;
+        const bool known=program&&links&&tool->operandID&&!original->sourceBase_.IsNull()
+            &&std::any_of(program->steps.begin(),program->steps.end(),[&](const retained_boolean::Step&s){return s.operand.identifier==tool->operandID;})
+            &&std::any_of(links->links.begin(),links->links.end(),[&](const r2::LegacyLink&l){return l.operandID==tool->operandID;});
+        if(!known||tool->requested.identifier!=tool->operandID){refusal=et::Refusal::IdentityMismatch;return {};}
+    }
+    else if(std::holds_alternative<r2::SetBooleanOperation>(edit)||std::holds_alternative<r2::SetInputPlacement>(edit)){
+        // The A1 composite graph rebuild (operation change or input placement)
+        // has no existing detached builder inside this change's file scope;
+        // refuse atomically rather than widening scope or faking a lifecycle.
+        refusal=et::Refusal::UnsupportedDependency;return {};
+    }
     else {refusal=et::Refusal::UnsupportedDependency;return {};}
     std::vector<std::uint8_t> bytes;if(!r2::Encode(candidate,bytes,refusal))return {};
     auto work=std::make_shared<r2::Work>();work->snapshot_=original;work->mutation_=edit;work->candidate_=candidate;
-    work->source_=original->source_;work->base_=original->base_;work->originalCurrent_=original->current_;work->nonce_=original->nonce_;
+    work->source_=original->source_;work->sourceBase_=original->sourceBase_;work->base_=original->base_;work->originalCurrent_=original->current_;work->nonce_=original->nonce_;
     work->label_=original->ownerLabel_;work->state_=r2::Work::State::Prepared;refusal=et::Refusal::None;return work;
 }
 
@@ -615,6 +653,8 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedInput> Core3DViewer::
     namespace r2=retained_edge_treatment::r2;if(![NSThread isMainThread]||!work||work->state_!=r2::Work::State::Prepared)return {};
     auto input=std::shared_ptr<r2::DetachedInput>(new r2::DetachedInput);input->nonce_=work->nonce_;input->candidate_=work->candidate_;
     input->source_=work->source_;input->base_=work->base_;input->originalCurrent_=work->originalCurrent_;input->chargedBudget_=work->chargedBudget_;
+    input->sourceBase_=work->sourceBase_;
+    if(const auto* edit=std::get_if<r2::Edit>(&work->mutation_))input->edit_=*edit;
     input->cancelled_=work->cancelled_;work->state_=r2::Work::State::Building;return input;
 }
 
@@ -625,6 +665,17 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
     if(!input||!input->cancelled_||input->cancelled_->load()){refusal=et::Refusal::Cancelled;return {};}
     auto result=std::shared_ptr<r2::DetachedResult>(new r2::DetachedResult);result->nonce_=input->nonce_;result->definition_=input->candidate_;
     result->source_=input->source_;result->base_=input->base_;std::visit([&](const auto& source){if constexpr(std::is_same_v<std::decay_t<decltype(source)>,r2::RetainedBooleanBase>)result->prefixBytes_=std::visit([](const auto& arm){return arm.canonicalPrefixBytes;},source.source);},input->source_);
+    if(input->edit_&&(std::holds_alternative<r2::RebuildBooleanInput>(*input->edit_)||std::holds_alternative<r2::RebuildAnalyticTool>(*input->edit_))){
+        // Replay the complete changed prefix first; the preserved suffix is
+        // replayed on its result below. The candidate binding is re-digested
+        // against the exact new prefix bytes, never copied forward.
+        r2::RetainedBooleanBase edited;std::vector<std::uint8_t> editedBytes;TopoDS_Shape prefixResult,editedBase;
+        const auto* booleanBase=std::get_if<r2::RetainedBooleanBase>(&input->source_);
+        if(!booleanBase||!r2::RebuildEditedPrefix(*booleanBase,*input->edit_,input->sourceBase_,*input->cancelled_,edited,editedBytes,prefixResult,editedBase,refusal))return {};
+        result->source_=edited;result->prefixBytes_=editedBytes;result->base_=prefixResult;result->editedSourceBase_=editedBase;result->sourceChanged_=true;
+        auto& binding=std::get<r2::BooleanBaseBinding>(result->definition_.base);
+        if(!CC_SHA256(editedBytes.data(),CC_LONG(editedBytes.size()),binding.sourceRecipeDigest.data()))return {};
+    }
     if(!r2::Encode(result->definition_,result->definitionBytes_,refusal))return {};
     et::ReplayBudget budget;if(!r2::ReplayTreatmentSuffix(result->base_,result->definition_,result->result_,budget,refusal))return {};
     refusal=et::Refusal::None;return result;

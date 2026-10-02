@@ -2303,6 +2303,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             Handle(AIS_Shape) candidate = new AIS_Shape(record.requested.shape);
             candidate->SetLocalTransformation(record.requested.transform);
             bool sweepStaged=false,loftStaged=false,cutStaged=false,cutSourceStaged=false,programSourceStaged=false,treatmentStaged=false,treatmentStagedR2=false;
+            bool treatmentSourceEditedR2=false;
             if(record.requested.edgeTreatmentSnapshot){
                 core3d::retained_edge_treatment::Refusal refusal;
                 core3d::retained_edge_treatment::Record readback;
@@ -2328,6 +2329,8 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 if(!treatmentStagedR2)throw Standard_Failure(core3d::retained_edge_treatment::RefusalCode(refusal));
                 ledger.edgeTreatmentReadbackR2=std::move(readback);
             }
+            treatmentSourceEditedR2=treatmentStagedR2&&record.requested.edgeTreatmentResultR2
+                &&record.requested.edgeTreatmentResultR2->sourceChanged();
             if (record.requested.operation==OrdinaryTransformOperation::SweepRebuild) {
                 bool pairedFault=false;
 #if DEBUG
@@ -2468,7 +2471,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     : record.candidate.scalars != EncodedTransform(record.requested.transform))
                 || (!sweepStaged && !record.candidate.sweep.IsEqual(record.previous.sweep))
                 || (!loftStaged && !cutStaged && !record.candidate.loft.IsEqual(record.previous.loft))
-                || (!cutStaged && !cutSourceStaged && !programSourceStaged && !record.candidate.retained.IsEqual(record.previous.retained))
+                || (!cutStaged && !cutSourceStaged && !programSourceStaged && !treatmentSourceEditedR2 && !record.candidate.retained.IsEqual(record.previous.retained))
                 || (treatmentStaged
                     ?(!record.candidate.edgeTreatment||!ledger.edgeTreatmentReadback
                         ||record.candidate.edgeTreatment->value->bytes!=ledger.edgeTreatmentReadback->value->bytes)
@@ -2488,6 +2491,18 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     ? 3 : record.previous.meshUVAtlasVersion)) {
                 CORE3D_CUT_NOTE("staging.ordinary-candidate-readback");
                 throw Standard_Failure("Ordinary transform candidate readback failed");
+            }
+            if (treatmentSourceEditedR2) {
+                // An R2 source edit legitimately restaged the retained carrier
+                // inside the same open command. Require the exact staged prefix
+                // bytes and a present R2 readback — never the previous carrier
+                // and never an unchecked change.
+                if (!ledger.edgeTreatmentReadbackR2 || ledger.edgeTreatmentReadbackR2->sourceBytes.empty()
+                    || !record.candidate.retained.value
+                    || record.candidate.retained.value->bytes != ledger.edgeTreatmentReadbackR2->sourceBytes) {
+                    CORE3D_CUT_NOTE("staging.ordinary-candidate-readback");
+                    throw Standard_Failure("R2 retained carrier readback failed");
+                }
             }
             if (record.requested.operation == OrdinaryTransformOperation::ProfileRebuild) {
                 std::vector<double> values;

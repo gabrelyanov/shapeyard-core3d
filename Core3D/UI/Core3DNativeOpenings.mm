@@ -2519,6 +2519,15 @@ extern "C" std::uint64_t Core3DDebugNativeOpeningBodiesProbe(
                     && withProfile.admitted()
                     && !withProfile.sourceProfileAndEnclosure.object.profile.label
                         .IsNull()) bits |= 2;
+                // The malformed/restored arms must corrupt and clear the
+                // captured profile record itself, never a guessed child tag:
+                // ProfilePersistence allocates the record label dynamically
+                // above the maximum existing child tag.
+                const TDF_Label profileLabel =
+                    withProfile.sourceProfileAndEnclosure.object.profile.label;
+                if (profileLabel.IsNull()
+                    || profileLabel.Data() != document->GetData()
+                    || !profileLabel.Father().IsEqual(sourceLabel)) return bits;
                 // A present-but-stale profile (document unit moved on) refuses.
                 XCAFDoc_DocumentTool::SetLengthUnit(document, 1.0);
                 core3d::pattern_owner::Snapshot stale;
@@ -2526,15 +2535,18 @@ extern "C" std::uint64_t Core3DDebugNativeOpeningBodiesProbe(
                         == core3d::pattern_owner::Refusal::UnsupportedSource)
                     bits |= 4;
                 XCAFDoc_DocumentTool::SetLengthUnit(document, 0.001);
-                // A malformed present profile record refuses closed.
-                TDataStd_Integer::Set(sourceLabel.FindChild(64, Standard_True),
+                // A malformed present profile record refuses closed: corrupt
+                // the schema of the captured profile record itself.
+                TDataStd_Integer::Set(profileLabel,
                     core3d::profile::SchemaID(), 999);
                 core3d::pattern_owner::Snapshot malformed;
                 if (core3d::pattern_owner::Capture(owner, selected, malformed)
                         == core3d::pattern_owner::Refusal::UnsupportedSource)
                     bits |= 8;
-                sourceLabel.FindChild(64, Standard_False)
-                    .ForgetAllAttributes(Standard_True);
+                // Clear that same record recursively; no live profile
+                // attributes may remain on it.
+                profileLabel.ForgetAllAttributes(Standard_True);
+                if (core3d::profile::HasAttribute(profileLabel)) return bits;
                 // With the malformed record gone the source is admitted again.
                 core3d::pattern_owner::Snapshot restored;
                 if (core3d::pattern_owner::Capture(owner, selected, restored)

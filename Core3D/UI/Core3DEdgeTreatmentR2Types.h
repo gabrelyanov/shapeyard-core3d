@@ -29,6 +29,12 @@ typedef NS_ENUM(NSInteger, Core3DRetainedBooleanEditKindR2) {
 @interface Core3DRetainedBooleanRecipeLocatorR2 : NSObject
 @property(nonatomic,copy,readonly) NSString *documentIdentifier, *entityIdentifier,
     *definitionIdentifier, *nodeIdentifier, *sourceFeatureIdentifier;
+//! Bounded typed construction for edit requests. Every identifier must be a
+//! canonical UUID string; any violation returns nil. Observation snapshots
+//! keep using the native-only population path.
+- (nullable instancetype)initWithDocumentIdentifier:(NSString *)documentIdentifier
+    entityIdentifier:(NSString *)entityIdentifier definitionIdentifier:(NSString *)definitionIdentifier
+    nodeIdentifier:(NSString *)nodeIdentifier sourceFeatureIdentifier:(NSString *)sourceFeatureIdentifier NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE; + (instancetype)new NS_UNAVAILABLE;
 @end
 
@@ -41,12 +47,24 @@ typedef NS_ENUM(NSInteger, Core3DRetainedBooleanEditKindR2) {
 @property(nonatomic,readonly) NSUInteger count;
 @property(nonatomic,strong,readonly) Core3DRetainedBooleanRecipeLocatorR2 *locator;
 - (instancetype)init NS_UNAVAILABLE; + (instancetype)new NS_UNAVAILABLE;
+//! Bounded typed construction for an analytic-tool edit request. All values
+//! must be finite, kind/extent/axis must be declared enum values, the radius
+//! must be positive and bounded, and count is capped; nil on any violation.
+- (nullable instancetype)initWithOperandID:(uint32_t)operandID kind:(NSInteger)kind extent:(NSInteger)extent
+    axis:(NSInteger)axis point:(Core3DEdgeTreatmentVector3 *)point radius:(double)radius
+    boltCircleRadius:(double)boltCircleRadius hostRadiusRatio:(double)hostRadiusRatio
+    directionAngle:(double)directionAngle halfWidthApex:(double)halfWidthApex
+    halfWidthMouth:(double)halfWidthMouth length:(double)length count:(NSUInteger)count NS_DESIGNATED_INITIALIZER;
 @end
 
 @interface Core3DRetainedBooleanInputPlacementR2 : NSObject
 @property(nonatomic,copy,readonly) NSArray<NSNumber *> *rowMajorMatrix;
 @property(nonatomic,readonly) double sourceMetersPerUnit, carrierMetersPerUnit;
 - (instancetype)init NS_UNAVAILABLE; + (instancetype)new NS_UNAVAILABLE;
+//! Bounded typed construction for a placement edit request: exactly 16 finite
+//! row-major entries and positive finite unit values; nil otherwise.
+- (nullable instancetype)initWithRowMajorMatrix:(NSArray<NSNumber *> *)rowMajorMatrix
+    sourceMetersPerUnit:(double)sourceMetersPerUnit carrierMetersPerUnit:(double)carrierMetersPerUnit NS_DESIGNATED_INITIALIZER;
 @end
 
 @interface Core3DRetainedBooleanInputR2 : NSObject
@@ -122,6 +140,11 @@ typedef NS_ENUM(NSInteger, Core3DRetainedBooleanEditKindR2) {
 @interface Core3DEdgeTreatmentCaptureR2 : NSObject
 @property(nonatomic,readonly) Core3DEdgeTreatmentStatus status;
 @property(nonatomic,strong,readonly,nullable) Core3DEdgeTreatmentSnapshotR2 *snapshot;
+//! Echo of the requested owner identity and the native carrier, populated by
+//! the native capture path even when the snapshot itself cannot be produced.
+//! Lets a recovery receipt prove it refers to the same native operation and
+//! carrier; never caller-writable and never synthesized from provider data.
+@property(nonatomic,copy,readonly,nullable) NSString *documentIdentifier, *entityIdentifier, *carrier;
 @property(nonatomic,copy,readonly) NSString *refusalCode, *refusalMessage;
 - (instancetype)init NS_UNAVAILABLE; + (instancetype)new NS_UNAVAILABLE;
 @end
@@ -193,5 +216,19 @@ typedef NS_ENUM(NSInteger, Core3DRetainedBooleanEditKindR2) {
 @property(nonatomic,strong,readonly,nullable) Core3DRetainedBooleanInputPlacementR2 *completeInputPlacement;
 @property(nonatomic,strong,readonly,nullable) NSNumber *amountMM, *operation, *operandID;
 - (instancetype)init NS_UNAVAILABLE; + (instancetype)new NS_UNAVAILABLE;
+//! Bounded typed edit-request construction for the declared value requests.
+//! Each factory validates its values and returns nil on any violation, so an
+//! unknown or invalid request can never silently become another edit kind.
+//! Native proofs and native results remain non-constructible.
++ (nullable instancetype)editSetAmountWithFeatureIdentifier:(NSString *)featureIdentifier amountMM:(double)amountMM;
++ (nullable instancetype)editRemoveWithFeatureIdentifier:(NSString *)featureIdentifier;
++ (nullable instancetype)editRebuildBooleanInputWithLocator:(Core3DRetainedBooleanRecipeLocatorR2 *)locator
+    profile:(nullable Core3DProfileDefinition *)profile enclosure:(nullable Core3DEnclosureDefinition *)enclosure
+    rectangularLoft:(nullable Core3DRectangularLoftDefinition *)rectangularLoft;
++ (nullable instancetype)editRebuildAnalyticToolWithOperandID:(uint32_t)operandID
+    completeAnalyticTool:(Core3DRetainedBooleanAnalyticToolR2 *)completeAnalyticTool;
++ (nullable instancetype)editSetBooleanOperationWithFeatureIdentifier:(NSString *)featureIdentifier operation:(NSInteger)operation;
++ (nullable instancetype)editSetInputPlacementWithLocator:(Core3DRetainedBooleanRecipeLocatorR2 *)locator
+    completeInputPlacement:(Core3DRetainedBooleanInputPlacementR2 *)completeInputPlacement;
 @end
 NS_ASSUME_NONNULL_END

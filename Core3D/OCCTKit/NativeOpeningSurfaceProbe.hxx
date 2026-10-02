@@ -7,6 +7,7 @@
 #include "FeaturePatternChildBinaryDriver.hxx"
 #include "FeaturePatternNativeBuild.hxx"
 #include <BinDrivers_DocumentRetrievalDriver.hxx>
+#include <BinMDF_ReferenceDriver.hxx>
 #include <BinXCAFDrivers_DocumentStorageDriver.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <Message.hxx>
@@ -19,7 +20,9 @@
 #include <TDocStd_Application.hxx>
 #include <TopExp_Explorer.hxx>
 
+#include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -623,6 +626,13 @@ inline void PatchInt(std::string& bytes, std::size_t offset,
     std::memcpy(raw, &value, sizeof(raw));
     bytes.replace(offset, sizeof(raw), raw, sizeof(raw));
 }
+inline bool PeekInt(const std::string& bytes, std::size_t offset,
+                    Standard_Integer& value) {
+    if (offset > bytes.size()
+        || bytes.size() - offset < sizeof(Standard_Integer)) return false;
+    std::memcpy(&value, bytes.data() + offset, sizeof(value));
+    return true;
+}
 struct SavedPairs final {
     std::string bytes;
     std::string referenceSignature;
@@ -809,10 +819,36 @@ inline std::uint64_t Run(std::int32_t scenario) noexcept {
             if (records.size() != 2) return 0;
             const std::size_t record = records.front();
             std::uint64_t bits = SafeReopenExact(saved) ? 1ULL : 0ULL;
-            // Malformed: the encoded tag count claims one more path tag than
-            // the record length admits.
+            // Malformed: the encoded tag count is raised one above the number
+            // of path-tag integers the located record's declared Length can
+            // hold. The value is derived from the saved bytes themselves;
+            // the current label depth is never hard-coded.
+            Standard_Integer declaredLength = 0, originalCount = 0;
+            if (!PeekInt(saved.bytes, record, declaredLength)
+                || !PeekInt(saved.bytes, record + sizeof(Standard_Integer),
+                    originalCount)
+                || declaredLength <= Standard_Integer(sizeof(Standard_Integer))
+                || declaredLength % Standard_Integer(sizeof(Standard_Integer))
+                    != 0)
+                return bits;
+            const Standard_Integer capacity =
+                declaredLength / Standard_Integer(sizeof(Standard_Integer)) - 1;
+            // The original count must match both the record capacity and the
+            // encoded path of the signature that located this record.
+            if (saved.referenceSignature.size()
+                    < 2 * sizeof(Standard_Integer)
+                || saved.referenceSignature.size()
+                        % sizeof(Standard_Integer) != 0
+                || capacity < 1 || originalCount != capacity
+                || originalCount
+                    != Standard_Integer(saved.referenceSignature.size()
+                        / sizeof(Standard_Integer)) - 2
+                || capacity == std::numeric_limits<Standard_Integer>::max())
+                return bits;
             std::string malformed = saved.bytes;
-            PatchInt(malformed, record + sizeof(Standard_Integer), 4);
+            PatchInt(malformed, record + sizeof(Standard_Integer),
+                capacity + 1);
+            if (malformed == saved.bytes) return bits;
             const OpenObservation malformedOpen = ObserveSafeOpen(malformed);
             if (malformedOpen.refused && malformedOpen.sticky) bits |= 2ULL;
             // Truncated: the record length word drops the trailing path tags.
@@ -897,7 +933,8 @@ inline bool AttachOrdered(const TDF_Label& record, const TDF_Label& host,
 }
 
 inline bool StageBothOrders(const Handle(TDocStd_Document)& document,
-                            std::vector<TDF_Label>& records) {
+                            std::vector<TDF_Label>& records,
+                            paired_receipt_probe::Labels* outLabels) {
     using namespace feature_pattern_child;
     records.clear();
     const auto definition = detached_tool_probe::Definition(2);
@@ -916,7 +953,14 @@ inline bool StageBothOrders(const Handle(TDocStd_Document)& document,
                 (index++ & 1U) == 0)) return false;
         records.push_back(record);
     }
-    return records.size() == 2;
+    if (records.size() != 2) return false;
+    if (outLabels) *outLabels = labels;
+    return true;
+}
+
+inline bool StageBothOrders(const Handle(TDocStd_Document)& document,
+                            std::vector<TDF_Label>& records) {
+    return StageBothOrders(document, records, nullptr);
 }
 
 inline bool ExactPairs(const std::vector<feature_pattern_child::PairedRecord>& left,
@@ -1017,6 +1061,344 @@ inline bool InvalidBaselineControl(std::int32_t mode) {
     return refused;
 }
 
+// The deliberately invalid field a DEBUG fixture writer emits into the one
+// known baseline TDF_Reference record payload. Production writer and reader
+// registrations are untouched.
+enum class ReferenceCorruption : int {
+    None = 0,
+    CountOverCapacity = 1, // Declared count exceeds the payload capacity.
+    MissingTagBytes = 2,   // Final path-tag bytes absent from the record.
+    OverDeep = 3,          // Depth 65 with all 65 tag integers present.
+    TailInteger = 4        // Extra integer after the complete path.
+};
+
+// Parses a "0:1:10:1" label entry into its root-to-leaf tag list; every tag
+// must be a non-negative integer that fits Standard_Integer.
+inline bool ReferencePathTags(const TCollection_AsciiString& entry,
+                              std::vector<Standard_Integer>& tags) {
+    tags.clear();
+    const std::string text = entry.ToCString();
+    if (text.empty()) return false;
+    std::size_t at = 0;
+    while (at <= text.size()) {
+        const std::size_t colon = text.find(':', at);
+        const std::string tag =
+            text.substr(at, colon == std::string::npos ? colon : colon - at);
+        if (tag.empty()) return false;
+        char* end = nullptr;
+        const long value = std::strtol(tag.c_str(), &end, 10);
+        if (end == nullptr || *end != 0 || value < 0 || value > 0x7fffffffL)
+            return false;
+        tags.push_back(Standard_Integer(value));
+        if (colon == std::string::npos) break;
+        at = colon + 1;
+    }
+    return !tags.empty();
+}
+
+// The exact record payload the fixture writer emits for the targeted
+// baseline reference, shared by the driver and the byte-level proof so the
+// intended invalid field is identical by construction: one tag-count word
+// followed by the path-tag integers the variant carries.
+inline bool ControlledReferencePayload(
+    ReferenceCorruption mode, const std::vector<Standard_Integer>& tags,
+    std::vector<Standard_Integer>& payload) {
+    payload.clear();
+    if (tags.empty()) return false;
+    const Standard_Integer count = Standard_Integer(tags.size());
+    switch (mode) {
+        case ReferenceCorruption::None:
+            payload.push_back(count);
+            payload.insert(payload.end(), tags.begin(), tags.end());
+            return true;
+        case ReferenceCorruption::CountOverCapacity:
+            if (count == std::numeric_limits<Standard_Integer>::max())
+                return false;
+            payload.push_back(count + 1);
+            payload.insert(payload.end(), tags.begin(), tags.end());
+            return true;
+        case ReferenceCorruption::MissingTagBytes:
+            if (count < 2) return false;
+            payload.push_back(count);
+            payload.insert(payload.end(), tags.begin(), tags.end() - 1);
+            return true;
+        case ReferenceCorruption::OverDeep: {
+            constexpr Standard_Integer depthBudget = 64;
+            payload.push_back(depthBudget + 1);
+            payload.insert(payload.end(), tags.begin(), tags.end());
+            // Enough encoded tag bytes for the whole declared path, so the
+            // size-consistency bound admits the record and the 64-tag depth
+            // budget alone refuses it.
+            while (payload.size() < std::size_t(depthBudget) + 2)
+                payload.push_back(1);
+            return true;
+        }
+        case ReferenceCorruption::TailInteger:
+            payload.push_back(count);
+            payload.insert(payload.end(), tags.begin(), tags.end());
+            payload.push_back(0);
+            return true;
+    }
+    return false;
+}
+
+// Serializes a payload as the exact saved record signature: the Length word
+// covering every payload integer, then the payload integers themselves.
+inline std::string ReferenceRecordSignature(
+    const std::vector<Standard_Integer>& payload) {
+    std::string signature;
+    if (payload.empty()
+        || payload.size()
+            > std::size_t(std::numeric_limits<Standard_Integer>::max()
+                / Standard_Integer(sizeof(Standard_Integer))))
+        return signature;
+    const auto appendInt = [&signature](Standard_Integer value) {
+        char raw[sizeof(Standard_Integer)];
+        std::memcpy(raw, &value, sizeof(raw));
+        signature.append(raw, sizeof(raw));
+    };
+    appendInt(Standard_Integer(payload.size())
+        * Standard_Integer(sizeof(Standard_Integer)));
+    for (const Standard_Integer cell : payload) appendInt(cell);
+    return signature;
+}
+
+struct ReferenceFixtureArming final {
+    std::string baselineEntry;
+    ReferenceCorruption mode = ReferenceCorruption::None;
+    int fired = 0;
+};
+
+// DEBUG storage fixture only: delegates every ordinary reference record to
+// the stock driver and emits the shared controlled payload for the one known
+// baseline reference. Never registered for retrieval.
+class ControlledReferenceDriver final : public BinMDF_ReferenceDriver {
+public:
+    ControlledReferenceDriver(
+        const Handle(Message_Messenger)& messenger,
+        std::shared_ptr<ReferenceFixtureArming> arming)
+        : BinMDF_ReferenceDriver(messenger), arming_(std::move(arming)) {}
+    Standard_Boolean Paste(const BinObjMgt_Persistent&,
+        const Handle(TDF_Attribute)&,
+        BinObjMgt_RRelocationTable&) const override {
+        return Standard_False; // Storage-only DEBUG fixture driver.
+    }
+    void Paste(const Handle(TDF_Attribute)& source,
+               BinObjMgt_Persistent& target,
+               BinObjMgt_SRelocationTable& reloc) const override {
+        const auto reference = Handle(TDF_Reference)::DownCast(source);
+        TCollection_AsciiString entry;
+        if (!reference.IsNull() && !reference->Get().IsNull())
+            TDF_Tool::Entry(reference->Get(), entry);
+        std::vector<Standard_Integer> tags;
+        if (arming_ && !entry.IsEmpty()
+            && arming_->baselineEntry == entry.ToCString()
+            && ReferencePathTags(entry, tags)) {
+            std::vector<Standard_Integer> payload;
+            if (!ControlledReferencePayload(arming_->mode, tags, payload))
+                Standard_Failure::Raise("Reference fixture payload");
+            ++arming_->fired;
+            for (const Standard_Integer cell : payload) target << cell;
+            return;
+        }
+        BinMDF_ReferenceDriver::Paste(source, target, reloc);
+    }
+private:
+    const std::shared_ptr<ReferenceFixtureArming> arming_;
+};
+
+// Persists the probe document through the normal BinXCAF storage driver and
+// container framing; only the targeted TDF_Reference record carries a
+// controlled payload. Mirrors the StockStorageDriver registration pattern
+// below; the production safe reader registration is unchanged.
+class ReferenceFixtureStorageDriver final
+    : public BinXCAFDrivers_DocumentStorageDriver {
+public:
+    explicit ReferenceFixtureStorageDriver(
+        std::shared_ptr<ReferenceFixtureArming> arming)
+        : arming_(std::move(arming)) {}
+    Handle(BinMDF_ADriverTable) AttributeDrivers(
+        const Handle(Message_Messenger)& messenger) override {
+        auto table =
+            BinXCAFDrivers_DocumentStorageDriver::AttributeDrivers(messenger);
+        table->AddDriver(new ControlledReferenceDriver(messenger, arming_));
+        feature_pattern_child::Register(table, messenger,
+            std::make_shared<feature_pattern_child::Budget>());
+        feature_pattern_baseline::Register(table, messenger,
+            std::make_shared<feature_pattern_baseline::Budget>());
+        return table;
+    }
+private:
+    const std::shared_ptr<ReferenceFixtureArming> arming_;
+};
+
+// Value-only copy of the staged pair, taken while the writer document is
+// open. ReadPairs labels point into the writer's TDF_Data, which is freed once
+// SaveReferenceFixture closes and releases that document, so the reopen
+// comparison must never dereference them afterwards.
+struct ReferencePairSnapshot final {
+    std::string baselineEntry;
+    std::string sourceEntry;
+    std::vector<std::uint8_t> pattern;
+    std::vector<std::vector<std::uint8_t>> children;
+};
+
+struct ReferenceFixtureBytes final {
+    std::string bytes;
+    std::string baselineEntry;
+    std::string validSignature;
+    ReferencePairSnapshot original;
+    int fired = -1;
+};
+
+// Captures exactly the fields ExactPairs compares: one pair, its baseline and
+// source entries, the pattern bytes and every child's canonical bytes in order.
+inline bool SnapshotPairs(
+    const std::vector<feature_pattern_child::PairedRecord>& pairs,
+    ReferencePairSnapshot& snapshot) {
+    snapshot = ReferencePairSnapshot();
+    if (pairs.size() != 1) return false;
+    const auto& pair = pairs.front();
+    TCollection_AsciiString baseline, source;
+    TDF_Tool::Entry(pair.baselineRecipe, baseline);
+    TDF_Tool::Entry(pair.source, source);
+    if (baseline.IsEmpty() || source.IsEmpty()) return false;
+    snapshot.baselineEntry = baseline.ToCString();
+    snapshot.sourceEntry = source.ToCString();
+    snapshot.pattern = pair.pattern.bytes;
+    for (const auto& child : pair.children) {
+        if (!child) return false;
+        snapshot.children.push_back(child->canonicalBytes);
+    }
+    return true;
+}
+
+// ExactPairs with the writer side read from the value snapshot.
+inline bool MatchesSnapshot(
+    const ReferencePairSnapshot& snapshot,
+    const std::vector<feature_pattern_child::PairedRecord>& pairs) {
+    if (pairs.size() != 1) return false;
+    const auto& pair = pairs.front();
+    TCollection_AsciiString baseline, source;
+    TDF_Tool::Entry(pair.baselineRecipe, baseline);
+    TDF_Tool::Entry(pair.source, source);
+    if (baseline.IsEmpty() || snapshot.baselineEntry != baseline.ToCString()
+        || source.IsEmpty() || snapshot.sourceEntry != source.ToCString()
+        || pair.pattern.bytes != snapshot.pattern
+        || pair.children.size() != snapshot.children.size()) return false;
+    for (std::size_t index = 0; index < pair.children.size(); ++index)
+        if (!pair.children[index]
+            || pair.children[index]->canonicalBytes
+                != snapshot.children[index]) return false;
+    return true;
+}
+
+// DEBUG probe trace naming the first unmet predicate of a scenario-2 bit.
+inline void TraceReferenceProbe(const char* predicate) {
+    std::fprintf(stderr, "R179_D4_REF_PROBE predicate=%s failed=1\n",
+        predicate);
+}
+
+// Stages the exact two-child fixture in both native attribute orders and
+// saves it through the DEBUG fixture writer armed with one corruption mode
+// (None for the valid control). The arming identifies the targeted baseline
+// reference by its actual label entry and counts the records the driver
+// rewrote, so the damaged attribute/label is proven before any read.
+inline bool SaveReferenceFixture(ReferenceCorruption mode,
+                                 ReferenceFixtureBytes& saved) {
+    using namespace feature_pattern_child;
+    try {
+        Handle(TDocStd_Application) app = new TDocStd_Application();
+        auto arming = std::make_shared<ReferenceFixtureArming>();
+        arming->mode = mode;
+        app->DefineFormat(TCollection_AsciiString("BinXCAF"),
+            TCollection_AsciiString("Binary XCAF Document"),
+            TCollection_AsciiString("xbf"),
+            new BinDrivers_DocumentRetrievalDriver(),
+            new ReferenceFixtureStorageDriver(arming));
+        Handle(TDocStd_Document) document;
+        app->NewDocument(TCollection_ExtendedString("BinXCAF"), document);
+        if (document.IsNull()) return false;
+        // OCCT's default undo limit 0 makes CommitCommand() return false;
+        // match the Document and Holder fixtures so the staged command commits.
+        document->SetUndoLimit(8);
+        document->NewCommand();
+        Labels labels;
+        std::vector<TDF_Label> records;
+        if (!StageBothOrders(document, records, &labels)
+            || !document->CommitCommand()) return false;
+        std::vector<PairedRecord> original;
+        ReferencePairSnapshot snapshot;
+        if (ReadPairs(document, original) != PairStatus::Valid
+            || !SnapshotPairs(original, snapshot)) return false;
+        TCollection_AsciiString entry;
+        TDF_Tool::Entry(labels.baseline, entry);
+        std::vector<Standard_Integer> tags;
+        if (entry.IsEmpty() || !ReferencePathTags(entry, tags)) return false;
+        arming->baselineEntry = entry.ToCString();
+        std::vector<Standard_Integer> validPayload;
+        if (!ControlledReferencePayload(ReferenceCorruption::None, tags,
+                validPayload)) return false;
+        std::ostringstream output(std::ios::out | std::ios::binary);
+        if (app->SaveAs(document, output) != PCDM_SS_OK) return false;
+        app->Close(document);
+        saved.bytes = output.str();
+        saved.baselineEntry = arming->baselineEntry;
+        saved.validSignature = ReferenceRecordSignature(validPayload);
+        saved.original = std::move(snapshot);
+        saved.fired = arming->fired;
+        return !saved.bytes.empty() && !saved.validSignature.empty();
+    } catch (...) { return false; }
+}
+
+// Proves the armed writer damaged exactly the intended field of the two
+// staged baseline reference records: the mutated record signature occurs
+// exactly twice and the valid record framing is gone.
+inline bool FixtureDamageIsExact(const ReferenceFixtureBytes& saved,
+                                 ReferenceCorruption mode) {
+    if (saved.fired != 2 || saved.bytes.empty()
+        || saved.validSignature.empty()) return false;
+    std::vector<Standard_Integer> tags;
+    if (!ReferencePathTags(
+            TCollection_AsciiString(saved.baselineEntry.c_str()), tags))
+        return false;
+    std::vector<Standard_Integer> payload;
+    if (!ControlledReferencePayload(mode, tags, payload)) return false;
+    const std::string signature = ReferenceRecordSignature(payload);
+    return !signature.empty()
+        && paired_receipt_probe::FindAll(saved.bytes, signature).size() == 2
+        && paired_receipt_probe::FindAll(saved.bytes, saved.validSignature)
+            .empty();
+}
+
+// Exact valid control: the production safe reader reopens the fixture bytes
+// with no sticky rejection and reproduces the staged pairs exactly.
+inline bool ReopenFixtureExact(const ReferenceFixtureBytes& saved) {
+    using namespace feature_pattern_child;
+    try {
+        Handle(TDocStd_Application) reader = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(reader);
+        Handle(TDocStd_Document) opened;
+        std::istringstream input(saved.bytes, std::ios::in | std::ios::binary);
+        Core3DBeginSafeBinaryRead();
+        if (reader->Open(input, opened) != PCDM_RS_OK
+            || Core3DSafeBinaryReadWasRejected() || opened.IsNull()) {
+            TraceReferenceProbe("valid-reopen-safe-open");
+            return false;
+        }
+        std::vector<PairedRecord> pairs;
+        const bool census = ReadPairs(opened, pairs) == PairStatus::Valid;
+        const bool exact = census && MatchesSnapshot(saved.original, pairs);
+        reader->Close(opened);
+        if (!census) TraceReferenceProbe("valid-reopen-pair-census");
+        else if (!exact) TraceReferenceProbe("valid-reopen-exact-pairs");
+        return exact;
+    } catch (...) {
+        TraceReferenceProbe("valid-reopen-exception");
+        return false;
+    }
+}
+
 inline std::uint64_t Run(std::int32_t scenario) noexcept {
     try {
         if (scenario == 0) {
@@ -1043,33 +1425,89 @@ inline std::uint64_t Run(std::int32_t scenario) noexcept {
         }
         if (scenario == 2) {
             // The production safe reader supplies the bounded native-reference
-            // driver. Truncation, an appended record tail, and a damaged native
-            // header must all refuse without publishing a document.
-            Document writer; writer.value->NewCommand();
-            std::vector<TDF_Label> records;
-            if (!StageBothOrders(writer.value, records)
-                || !writer.value->CommitCommand()) return 0;
-            std::ostringstream output(std::ios::out | std::ios::binary);
-            if (writer.app->SaveAs(writer.value, output) != PCDM_SS_OK) return 0;
-            const std::string valid = output.str();
-            const auto refuses = [](const std::string& bytes) {
-                Handle(TDocStd_Application) reader = new TDocStd_Application();
-                Core3DDefineSafeBinXCAFFormat(reader);
-                Handle(TDocStd_Document) opened;
-                std::istringstream input(bytes, std::ios::in | std::ios::binary);
-                Core3DBeginSafeBinaryRead();
-                const auto status = reader->Open(input, opened);
-                if (!opened.IsNull()) reader->Close(opened);
-                return status != PCDM_RS_OK || Core3DSafeBinaryReadWasRejected();
-            };
-            std::uint64_t bits = !valid.empty() ? 1ULL : 0ULL;
-            if (valid.size() > 16 && refuses(valid.substr(0, valid.size() - 1))) bits |= 2ULL;
-            std::string trailing = valid; trailing.append(4096, '\x7f');
-            if (refuses(trailing)) bits |= 4ULL;
-            std::string malformed = valid;
-            if (malformed.size() > 24) malformed[malformed.size() / 2] ^= char(0xff);
-            if (refuses(malformed)) bits |= 8ULL;
-            if ((bits & 0x0f) == 0x0f && ValidBothOrdersAndRoundTrip(false)) bits |= 16ULL;
+            // driver. A DEBUG fixture writer emits correctly framed
+            // TDF_Reference records for the one known baseline reference with
+            // exactly one deliberately invalid field per variant; every
+            // variant must refuse sticky without publishing a document,
+            // paired state or edit authority. Container truncation remains an
+            // additional negative condition.
+            ReferenceFixtureBytes valid;
+            if (!SaveReferenceFixture(ReferenceCorruption::None, valid)
+                || valid.bytes.size() <= 16) return 0;
+            std::uint64_t bits = 0;
+            if (valid.fired != 2) TraceReferenceProbe("valid-fired");
+            else if (paired_receipt_probe::FindAll(valid.bytes,
+                         valid.validSignature).size() != 2)
+                TraceReferenceProbe("valid-signature-count");
+            else if (ReopenFixtureExact(valid)) bits |= 1ULL;
+            // Truncation: the container-level cut plus the record variant
+            // whose final path-tag bytes are absent. Whole-file truncation
+            // belongs to the container reader (as in baseline_probe below): it
+            // must refuse and publish no authority, but it never reaches a
+            // bounded driver, so the sticky flag is not part of its contract
+            // (Astra FIX-SPEC P5 keeps the pre-P5 refusal-only check).
+            const paired_receipt_probe::OpenObservation containerCut =
+                paired_receipt_probe::ObserveSafeOpen(
+                    valid.bytes.substr(0, valid.bytes.size() - 1));
+            ReferenceFixtureBytes missing;
+            const bool missingReady =
+                SaveReferenceFixture(ReferenceCorruption::MissingTagBytes,
+                    missing)
+                && FixtureDamageIsExact(missing,
+                    ReferenceCorruption::MissingTagBytes);
+            const paired_receipt_probe::OpenObservation missingOpen =
+                missingReady
+                    ? paired_receipt_probe::ObserveSafeOpen(missing.bytes)
+                    : paired_receipt_probe::OpenObservation();
+            const bool containerRefused =
+                containerCut.refused && containerCut.noAuthority;
+            const bool missingRefused = missingReady && missingOpen.refused
+                && missingOpen.sticky && missingOpen.noAuthority;
+            if (containerRefused && missingRefused) bits |= 2ULL;
+            if (!containerCut.refused)
+                TraceReferenceProbe("container-cut-refused");
+            else if (!containerCut.noAuthority)
+                TraceReferenceProbe("container-cut-authority");
+            if (!missingRefused) TraceReferenceProbe("missing-tag-bytes");
+            // Record tail and oversize: an extra integer after the complete
+            // path, and a path depth beyond the 64-tag budget with enough
+            // encoded tag bytes to isolate the depth bound.
+            ReferenceFixtureBytes tail, deep;
+            const bool tailReady =
+                SaveReferenceFixture(ReferenceCorruption::TailInteger, tail)
+                && FixtureDamageIsExact(tail,
+                    ReferenceCorruption::TailInteger);
+            const bool deepReady =
+                SaveReferenceFixture(ReferenceCorruption::OverDeep, deep)
+                && FixtureDamageIsExact(deep, ReferenceCorruption::OverDeep);
+            const paired_receipt_probe::OpenObservation tailOpen =
+                tailReady
+                    ? paired_receipt_probe::ObserveSafeOpen(tail.bytes)
+                    : paired_receipt_probe::OpenObservation();
+            const paired_receipt_probe::OpenObservation deepOpen =
+                deepReady
+                    ? paired_receipt_probe::ObserveSafeOpen(deep.bytes)
+                    : paired_receipt_probe::OpenObservation();
+            if (tailReady && tailOpen.refused && tailOpen.sticky
+                && tailOpen.noAuthority
+                && deepReady && deepOpen.refused && deepOpen.sticky
+                && deepOpen.noAuthority) bits |= 4ULL;
+            // Malformed count: the declared tag count exceeds the record
+            // payload capacity by one.
+            ReferenceFixtureBytes over;
+            const bool overReady =
+                SaveReferenceFixture(ReferenceCorruption::CountOverCapacity,
+                    over)
+                && FixtureDamageIsExact(over,
+                    ReferenceCorruption::CountOverCapacity);
+            const paired_receipt_probe::OpenObservation overOpen =
+                overReady
+                    ? paired_receipt_probe::ObserveSafeOpen(over.bytes)
+                    : paired_receipt_probe::OpenObservation();
+            if (overReady && overOpen.refused && overOpen.sticky
+                && overOpen.noAuthority) bits |= 8ULL;
+            if ((bits & 0x0f) == 0x0f && ReopenFixtureExact(valid)
+                && ValidBothOrdersAndRoundTrip(false)) bits |= 16ULL;
             return bits;
         }
         if (scenario == 3) return ValidBothOrdersAndRoundTrip(true) ? 0x1f : 0;

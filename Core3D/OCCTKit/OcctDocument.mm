@@ -113,6 +113,7 @@ OcctDocument::CaptureRetainedEdgeTreatmentR2(
             r2::LegacyBooleanBase retained{source->value()->envelope,source->value()->bytes};
             result->source_=r2::RetainedBooleanBase{*boolean,std::move(retained)};
             result->sourceBytes_=source->value()->bytes;
+            result->sourceBase_=source->value()->base;
         }else{
             Handle(core3d::composite_recipe::Attribute) source;
             if(!treatment->label.FindAttribute(core3d::composite_recipe::AttributeID(),source)
@@ -203,12 +204,34 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
             ||live->value->bytes!=original.definitionBytes_)return Standard_False;
         std::vector<std::uint8_t> exact;if(!r2::Encode(built.definition_,exact,refusal)||exact!=built.definitionBytes_)return Standard_False;
         Handle(AIS_Shape) presentation=new AIS_Shape(built.result_);if(!ReplaceShape(original.ownerLabel_,presentation))return Standard_False;
+        if(built.sourceChanged()){
+            // An admitted source edit restages the retained source carrier
+            // atomically with the treatment payload inside the same already
+            // open command: exact new prefix bytes, decoded recipe with no
+            // fillet tail, and the proven pre-Boolean source base. Any
+            // inconsistency fails the stage and reaches the existing verified
+            // rollback; the old carrier is never partially overwritten.
+            const auto* booleanBase=std::get_if<r2::RetainedBooleanBase>(&built.source_);
+            if(!booleanBase||built.canonicalPrefixBytes().empty()||built.canonicalPrefixBytes()==original.sourceBytes_
+                ||!std::holds_alternative<r2::LegacyBooleanBase>(booleanBase->source))return Standard_False;
+            core3d::retained_boolean::Recipe prefix;
+            if(!core3d::retained_boolean::Decode(built.canonicalPrefixBytes(),prefix))return Standard_False;
+            if(const auto* program=std::get_if<core3d::retained_boolean::Program>(&prefix);
+                program&&!program->filletSteps.empty())return Standard_False;
+            Handle(core3d::retained_solid::Attribute) source;
+            if(!original.sourceLabel_.FindAttribute(core3d::retained_solid::AttributeID(),source)||source.IsNull())return Standard_False;
+            auto sourcePayload=std::make_shared<core3d::retained_solid::Payload>();
+            sourcePayload->envelope=std::move(prefix);sourcePayload->bytes=built.canonicalPrefixBytes();
+            sourcePayload->base=built.editedSourceBase().IsNull()?original.sourceBase_:built.editedSourceBase();
+            source->Backup();source->value_=sourcePayload;
+        }
         auto payload=std::make_shared<et::PayloadR2>();payload->definition=built.definition_;
         payload->bytes=built.definitionBytes_;payload->base=built.base_;
         et::Attribute::SetR2(original.sourceLabel_,payload);TNaming_Builder(original.sourceLabel_).Select(built.result_,built.result_);
         if(!ValidateRetainedEdgeTreatmentsR2(refusal))return Standard_False;
         std::optional<et::RecordR2> stored;if(!et::ReadR2(myOcafDoc,original.ownerLabel_,stored,refusal)||!stored)return Standard_False;
-        readback={stored->label,stored->owner,std::make_shared<r2::Definition>(stored->value->definition),stored->value->bytes,stored->value->base,stored->current};
+        readback={stored->label,stored->owner,std::make_shared<r2::Definition>(stored->value->definition),stored->value->bytes,{},stored->value->base,stored->current};
+        readback.sourceBytes=built.sourceChanged()?built.canonicalPrefixBytes():original.sourceBytes_;
         refusal=et::Refusal::None;return Standard_True;
     }catch(...){readback={};refusal=et::Refusal::StageFailed;return Standard_False;}
 }
@@ -260,7 +283,7 @@ Standard_Boolean OcctDocument::StageRetainedBooleanMigrationR2(
     if(!et::ReadR2(myOcafDoc,original.ownerLabel_,stored,refusal)||!stored)return Standard_False;
     readback={stored->label,stored->owner,
         std::make_shared<core3d::retained_edge_treatment::r2::Definition>(stored->value->definition),
-        stored->value->bytes,stored->value->base,stored->current};
+        stored->value->bytes,{},stored->value->base,stored->current};
     refusal=et::Refusal::None;return Standard_True;
 }
 
@@ -14801,7 +14824,7 @@ Standard_Boolean OcctDocument::CaptureObjectTransformStateForLabel(
             captured.edgeTreatmentR2=core3d::retained_edge_treatment::r2::Record{
                 treatmentR2->label,treatmentR2->owner,
                 std::make_shared<core3d::retained_edge_treatment::r2::Definition>(treatmentR2->value->definition),
-                treatmentR2->value->bytes,treatmentR2->value->base,treatmentR2->current};
+                treatmentR2->value->bytes,{},treatmentR2->value->base,treatmentR2->current};
         }
         else{treatmentRefusal=core3d::retained_edge_treatment::Refusal::MalformedCarrier;
 #if DEBUG
@@ -19421,6 +19444,7 @@ Core3DDebugLayerGraphRoleAdmissionProbe(Standard_Integer scenario) noexcept
 
         if (scenario == 0) {
             Handle(OcctDocument) anOwner = new OcctDocument();
+            anOwner->InitDoc();
             const Handle(TDocStd_Document)& aLive = anOwner->Document();
             const std::string aSaveBase =
                 Core3DDebugTempPath("layer-graph-save", "");

@@ -10,7 +10,7 @@ typedef NS_ENUM(NSInteger,Core3DEdgeTreatmentSourceKind){Core3DEdgeTreatmentSour
 
 @interface Core3DEdgeTreatmentVector3:NSObject
 @property(nonatomic,readonly)double x,y,z;
-- (instancetype)init NS_UNAVAILABLE; +(instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithX:(double)x y:(double)y z:(double)z NS_DESIGNATED_INITIALIZER; - (instancetype)init NS_UNAVAILABLE; +(instancetype)new NS_UNAVAILABLE;
 @end
 @interface Core3DEdgeTreatmentAnchor:NSObject
 @property(nonatomic,copy,readonly)NSData *key;
@@ -53,6 +53,11 @@ typedef NS_ENUM(NSInteger,Core3DEdgeTreatmentSourceKind){Core3DEdgeTreatmentSour
 @interface Core3DEdgeTreatmentCapture:NSObject
 @property(nonatomic,readonly)Core3DEdgeTreatmentStatus status;
 @property(nonatomic,strong,readonly,nullable)Core3DEdgeTreatmentSnapshot *snapshot;
+//! Echo of the requested owner identity and the native carrier, populated by
+//! the native capture path even when the snapshot itself cannot be produced.
+//! Lets a recovery receipt prove it refers to the same native operation and
+//! carrier; never caller-writable and never synthesized from provider data.
+@property(nonatomic,copy,readonly,nullable)NSString *documentIdentifier,*entityIdentifier,*carrier;
 @property(nonatomic,copy,readonly)NSString *refusalCode,*refusalMessage;
 - (instancetype)init NS_UNAVAILABLE; +(instancetype)new NS_UNAVAILABLE;
 @end
@@ -68,6 +73,16 @@ typedef NS_ENUM(NSInteger,Core3DEdgeTreatmentSourceKind){Core3DEdgeTreatmentSour
 @property(nonatomic,copy,readonly)NSString *refusalCode,*refusalMessage;
 @property(nonatomic,strong,readonly,nullable)NSNumber *measuredUndoDelta;
 @property(nonatomic,copy,readonly)NSArray<NSString*> *replayedFeatureIdentifiers;
+//! Native provenance binding this result to its operation, owner, actual unit,
+//! source family/carrier/prefix and the original and candidate source/SYET
+//! byte digests. Populated only by Core3D's own completion path from the
+//! retained snapshot and detached result; nil means unavailable and is never
+//! substituted with a zero-filled or fabricated value. The class has no public
+//! initializer, so none of these fields can be minted by a caller.
+@property(nonatomic,copy,readonly,nullable)NSString *documentIdentifier,*entityIdentifier,*sourceFeatureIdentifier;
+@property(nonatomic,readonly)double dimensionMetersPerUnit;
+@property(nonatomic,copy,readonly,nullable)NSString *sourceFamily,*carrier,*prefixState;
+@property(nonatomic,copy,readonly,nullable)NSString *originalSourceSHA256,*candidateSourceSHA256,*originalRecipeSHA256,*candidateRecipeSHA256;
 - (instancetype)init NS_UNAVAILABLE; +(instancetype)new NS_UNAVAILABLE;
 @end
 @interface Core3DEdgeTreatmentOperation:NSObject

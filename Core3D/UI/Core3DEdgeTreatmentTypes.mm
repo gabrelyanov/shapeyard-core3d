@@ -6,7 +6,7 @@ static id B1Object(Class type) { return class_createInstance(type, 0); }
 
 @interface Core3DEdgeTreatmentVector3()-(instancetype)initWithX:(double)x y:(double)y z:(double)z;@end
 @implementation Core3DEdgeTreatmentVector3
--(instancetype)initWithX:(double)x y:(double)y z:(double)z{if((self=[super init])){_x=x;_y=y;_z=z;}return self;}@end
+-(instancetype)initWithX:(double)x y:(double)y z:(double)z{if(!isfinite(x)||!isfinite(y)||!isfinite(z))return nil;if((self=[super init])){_x=x;_y=y;_z=z;}return self;}@end
 @implementation Core3DEdgeTreatmentAnchor @end
 @implementation Core3DEdgeTreatmentStep @end
 @implementation Core3DEdgeTreatmentProfileSource @end

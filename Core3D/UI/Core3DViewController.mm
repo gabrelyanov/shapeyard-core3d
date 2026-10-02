@@ -78,6 +78,10 @@
 #include "OrdinaryEditController.hpp"
 #include "TransformInspectorMeasurementController.hpp"
 #include "../OCCTKit/OcctDocument.h"
+#include "../OCCTKit/ProfilePersistence.hxx"
+#include "../OCCTKit/EnclosureParameters.hxx"
+#include "../OCCTKit/RectangularLoftPersistence.hxx"
+#include <CommonCrypto/CommonDigest.h>
 #include "Core3DFaceSelectorTypes.h"
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
@@ -3895,7 +3899,7 @@ static void Core3DExpireDebugNativeSolidCompletion(NSUUID *token,Core3DDebugNati
 @implementation Core3DEdgeTreatmentNativeSnapshot @end
 @interface Core3DEdgeTreatmentNativeTargets:Core3DEdgeTreatmentTargetCapture {@public std::vector<core3d::retained_edge_treatment::Anchor> nativeAnchors;std::shared_ptr<const core3d::retained_edge_treatment::Snapshot> nativeSnapshot;}@end
 @implementation Core3DEdgeTreatmentNativeTargets @end
-@interface Core3DEdgeTreatmentNativeOperation:Core3DEdgeTreatmentOperation {@public std::shared_ptr<core3d::retained_edge_treatment::Work> nativeWork;std::shared_ptr<core3d::retained_edge_treatment::r2::Work> nativeWorkR2;void(^completion)(Core3DEdgeTreatmentResult *);BOOL settled;}@end
+@interface Core3DEdgeTreatmentNativeOperation:Core3DEdgeTreatmentOperation {@public std::shared_ptr<core3d::retained_edge_treatment::Work> nativeWork;std::shared_ptr<core3d::retained_edge_treatment::r2::Work> nativeWorkR2;void(^completion)(Core3DEdgeTreatmentResult *);void(^stopProvenance)(Core3DEdgeTreatmentResult *);BOOL settled;}@end
 @implementation Core3DEdgeTreatmentNativeOperation @end
 @interface Core3DEdgeTreatmentNativeSnapshotR2:Core3DEdgeTreatmentSnapshotR2 {@public std::shared_ptr<const core3d::retained_edge_treatment::r2::Snapshot> native;}@end
 @implementation Core3DEdgeTreatmentNativeSnapshotR2 @end
@@ -3906,12 +3910,372 @@ static void Core3DExpireDebugNativeSolidCompletion(NSUUID *token,Core3DDebugNati
 @interface Core3DRetainedBooleanNativeMigrationProofR2:Core3DRetainedBooleanMigrationProofR2 {@public std::shared_ptr<const core3d::retained_edge_treatment::r2::MigrationReview> native;}@end
 @implementation Core3DRetainedBooleanNativeMigrationProofR2 @end
 
+@interface Core3DEdgeTreatmentVector3 ()
+- (instancetype)initWithX:(double)x y:(double)y z:(double)z;
+@end
 namespace {
 NSString *B1ID(const core3d::retained_edge_treatment::UUID&v){return [[NSUUID alloc]initWithUUIDBytes:v.data()].UUIDString;}
 template<class T>T *B1Object(Class cls){return (T*)class_createInstance(cls,0);}
 Core3DEdgeTreatmentAnchor *B1Anchor(const core3d::retained_edge_treatment::Anchor&a){auto value=B1Object<Core3DEdgeTreatmentAnchor>(Core3DEdgeTreatmentAnchor.class);[value setValue:[NSData dataWithBytes:a.key.data() length:a.key.size()] forKey:@"key"];[value setValue:@(NSInteger(a.curve)) forKey:@"curve"];[value setValue:@(a.circleRadiusMM) forKey:@"circleRadiusMM"];return value;}
 Core3DEdgeTreatmentNativeSnapshot *B1Snapshot(const std::shared_ptr<const core3d::retained_edge_treatment::Snapshot>&native){if(!native)return nil;auto value=B1Object<Core3DEdgeTreatmentNativeSnapshot>(Core3DEdgeTreatmentNativeSnapshot.class);value->native=native;const auto&d=native->effectiveDefinition();[value setValue:B1ID(d.owner.document) forKey:@"documentIdentifier"];[value setValue:B1ID(d.owner.entity) forKey:@"entityIdentifier"];[value setValue:B1ID(d.owner.definition) forKey:@"definitionIdentifier"];[value setValue:B1ID(d.base.source.sourceFeature) forKey:@"sourceFeatureIdentifier"];[value setValue:B1ID(d.base.sourceNode) forKey:@"baseNodeIdentifier"];[value setValue:B1ID(d.outputNode) forKey:@"outputNodeIdentifier"];[value setValue:@(NSInteger(d.base.family)) forKey:@"sourceKind"];NSMutableArray*steps=[NSMutableArray array];for(const auto&s:d.steps){auto step=B1Object<Core3DEdgeTreatmentStep>(Core3DEdgeTreatmentStep.class);[step setValue:B1ID(s.node) forKey:@"nodeIdentifier"];[step setValue:B1ID(s.feature) forKey:@"featureIdentifier"];[step setValue:@(s.localID) forKey:@"localID"];[step setValue:@(NSInteger(s.kind)) forKey:@"kind"];[step setValue:@(s.amountMM) forKey:@"amountMM"];NSMutableArray*anchors=[NSMutableArray array];for(const auto&a:s.anchors)[anchors addObject:B1Anchor(a)];[step setValue:anchors forKey:@"anchors"];[steps addObject:step];}[value setValue:steps forKey:@"steps"];[value setValue:@0 forKey:@"prefixOperandCount"];[value setValue:[NSData dataWithBytes:native->canonicalBytes().data() length:native->canonicalBytes().size()] forKey:@"canonicalRecipeBytes"];[value setValue:@(native->current()) forKey:@"current"];[value setValue:@(native->dimensionMetersPerUnit()) forKey:@"dimensionMetersPerUnit"];if(const auto*p=std::get_if<core3d::profile::Parameters>(&native->source())){auto source=B1Object<Core3DEdgeTreatmentProfileSource>(Core3DEdgeTreatmentProfileSource.class);[source setValue:[[Core3DProfileDefinition alloc]initWithNativeParameters:*p] forKey:@"definition"];[source setValue:@[] forKey:@"shells"];[source setValue:NSData.data forKey:@"canonicalSourceBytes"];[value setValue:source forKey:@"profileSource"];}else{auto source=B1Object<Core3DEdgeTreatmentEnclosureSource>(Core3DEdgeTreatmentEnclosureSource.class);[source setValue:[[Core3DEnclosureDefinition alloc]initWithNativeParameters:std::get<core3d::enclosure::Parameters>(native->source())] forKey:@"definition"];[source setValue:NSData.data forKey:@"canonicalSourceBytes"];[value setValue:source forKey:@"enclosureSource"];}return value;}
 Core3DEdgeTreatmentResult *B1Result(const core3d::retained_edge_treatment::CommitResult&r){auto value=B1Object<Core3DEdgeTreatmentResult>(Core3DEdgeTreatmentResult.class);[value setValue:@(NSInteger(r.outcome)) forKey:@"outcome"];[value setValue:@(core3d::retained_edge_treatment::RefusalCode(r.refusal)) forKey:@"refusalCode"];[value setValue:@(core3d::retained_edge_treatment::RefusalMessage(r.refusal)) forKey:@"refusalMessage"];[value setValue:r.measuredUndoDelta?@(*r.measuredUndoDelta):nil forKey:@"measuredUndoDelta"];NSMutableArray*ids=[NSMutableArray array];for(const auto&id:r.replayedFeatures)[ids addObject:B1ID(id)];[value setValue:ids forKey:@"replayedFeatureIdentifiers"];return value;}
+Core3DEdgeTreatmentVector3 *B1Vector(const std::array<double,3>&v){return [[Core3DEdgeTreatmentVector3 alloc]initWithX:v[0] y:v[1] z:v[2]];}
+NSString *B1SHA256(NSData *bytes){
+    if(!bytes.length)return @"";
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(bytes.bytes,CC_LONG(bytes.length),digest);
+    NSMutableString *hex=[NSMutableString stringWithString:@"sha256:"];
+    for(std::size_t index=0;index<CC_SHA256_DIGEST_LENGTH;++index)[hex appendFormat:@"%02x",digest[index]];
+    return hex;
+}
+NSData *B1DoubleData(const std::vector<double>&values){
+    return values.empty()?NSData.data:[NSData dataWithBytes:values.data() length:values.size()*sizeof(double)];
+}
+NSData *B1SourceBytes(const core3d::retained_edge_treatment::BaseRecipe&source){
+    std::vector<double> values;bool encoded=false;
+    if(const auto*p=std::get_if<core3d::profile::Parameters>(&source))encoded=core3d::profile::Encode(*p,values);
+    else if(const auto*e=std::get_if<core3d::enclosure::Parameters>(&source))encoded=core3d::enclosure::Encode(*e,values);
+    return encoded?B1DoubleData(values):NSData.data;
+}
+NSData *B1R2PrefixBytes(const core3d::retained_edge_treatment::r2::BaseRecipe&source){
+    namespace r2=core3d::retained_edge_treatment::r2;
+    if(const auto*boolean=std::get_if<r2::RetainedBooleanBase>(&source)){
+        const auto&bytes=std::visit([](const auto&arm)->const std::vector<std::uint8_t>&{return arm.canonicalPrefixBytes;},boolean->source);
+        return bytes.empty()?NSData.data:[NSData dataWithBytes:bytes.data() length:bytes.size()];
+    }
+    return NSData.data;
+}
+NSString *B1ProgramPrefixState(const core3d::retained_boolean::Recipe&recipe){
+    const auto*program=std::get_if<core3d::retained_boolean::Program>(&recipe);
+    if(program){
+        bool ring=false;
+        for(const auto&step:program->steps){
+            if(step.operand.kind==core3d::analytic_boolean::OperandKind::Wedge)return @"c16EyeWedge";
+            if(step.operand.kind==core3d::analytic_boolean::OperandKind::CylinderRing)ring=true;
+        }
+        if(ring)return @"c16Eye";
+    }
+    return @"analyticCut";
+}
+NSString *B1R2PrefixState(const core3d::retained_edge_treatment::r2::BaseRecipe&source,
+    const core3d::retained_edge_treatment::r2::BooleanBaseBinding&binding){
+    namespace r2=core3d::retained_edge_treatment::r2;
+    if(binding.format==r2::PrefixFormat::A1Composite)return @"a1TwoInput";
+    const auto*boolean=std::get_if<r2::RetainedBooleanBase>(&source);
+    const auto*legacy=boolean?std::get_if<r2::LegacyBooleanBase>(&boolean->source):nullptr;
+    if(!legacy)return @"analyticCut";
+    return B1ProgramPrefixState(legacy->prefix);
+}
+// Bind a terminal result to its native operation/owner, actual unit, source
+// family/carrier/prefix and the original/candidate source and SYET bytes.
+// Everything is copied from the retained snapshot and detached result; a
+// missing candidate stays empty (unavailable), never zero-filled.
+void B1BindQ2(Core3DEdgeTreatmentResult *value,
+    const std::shared_ptr<const core3d::retained_edge_treatment::Snapshot>&snapshot,
+    NSData *requestedSourceBytes,
+    const std::shared_ptr<const core3d::retained_edge_treatment::DetachedResult>&built){
+    namespace et=core3d::retained_edge_treatment;
+    if(!value||!snapshot)return;
+    const auto&d=snapshot->effectiveDefinition();
+    [value setValue:B1ID(d.owner.document) forKey:@"documentIdentifier"];
+    [value setValue:B1ID(d.owner.entity) forKey:@"entityIdentifier"];
+    [value setValue:B1ID(d.base.source.sourceFeature) forKey:@"sourceFeatureIdentifier"];
+    [value setValue:@(snapshot->dimensionMetersPerUnit()) forKey:@"dimensionMetersPerUnit"];
+    [value setValue:(d.base.family==et::SourceFamily::Profile?@"profile":@"enclosure") forKey:@"sourceFamily"];
+    [value setValue:(d.schema==2?@"syet2":d.schema==1?@"syet1":@"bare") forKey:@"carrier"];
+    [value setValue:@"none" forKey:@"prefixState"];
+    NSData *originalSource=B1SourceBytes(snapshot->source());
+    [value setValue:B1SHA256(originalSource) forKey:@"originalSourceSHA256"];
+    [value setValue:B1SHA256(requestedSourceBytes?requestedSourceBytes:originalSource) forKey:@"candidateSourceSHA256"];
+    [value setValue:B1SHA256([NSData dataWithBytes:snapshot->canonicalBytes().data() length:snapshot->canonicalBytes().size()]) forKey:@"originalRecipeSHA256"];
+    std::vector<std::uint8_t> candidateBytes;et::Refusal refusal=et::Refusal::None;
+    if(built&&et::Encode(built->definition(),candidateBytes,refusal))
+        [value setValue:B1SHA256([NSData dataWithBytes:candidateBytes.data() length:candidateBytes.size()]) forKey:@"candidateRecipeSHA256"];
+}
+void B1BindR2(Core3DEdgeTreatmentResult *value,
+    const std::shared_ptr<const core3d::retained_edge_treatment::r2::Snapshot>&snapshot,
+    const std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>&built){
+    namespace et=core3d::retained_edge_treatment;namespace r2=et::r2;
+    if(!value||!snapshot)return;
+    const auto&d=snapshot->definition();
+    const auto*boolean=std::get_if<r2::BooleanBaseBinding>(&d.base);
+    if(!boolean)return;
+    [value setValue:B1ID(d.owner.document) forKey:@"documentIdentifier"];
+    [value setValue:B1ID(d.owner.entity) forKey:@"entityIdentifier"];
+    [value setValue:B1ID(boolean->source.sourceFeature) forKey:@"sourceFeatureIdentifier"];
+    [value setValue:@(boolean->metersPerLocalUnit) forKey:@"dimensionMetersPerUnit"];
+    [value setValue:@"composite" forKey:@"sourceFamily"];
+    [value setValue:(boolean->format==r2::PrefixFormat::SYRS?@"legacySYRS":@"a1Composite") forKey:@"carrier"];
+    [value setValue:B1R2PrefixState(snapshot->source(),*boolean) forKey:@"prefixState"];
+    NSData *originalSource=B1R2PrefixBytes(snapshot->source());
+    [value setValue:B1SHA256(originalSource) forKey:@"originalSourceSHA256"];
+    [value setValue:B1SHA256([NSData dataWithBytes:snapshot->canonicalBytes().data() length:snapshot->canonicalBytes().size()]) forKey:@"originalRecipeSHA256"];
+    NSData *candidateSource=originalSource;
+    if(built&&built->sourceChanged()&&!built->canonicalPrefixBytes().empty())
+        candidateSource=[NSData dataWithBytes:built->canonicalPrefixBytes().data() length:built->canonicalPrefixBytes().size()];
+    [value setValue:B1SHA256(candidateSource) forKey:@"candidateSourceSHA256"];
+    std::vector<std::uint8_t> candidateBytes;et::Refusal refusal=et::Refusal::None;
+    if(built&&r2::Encode(built->definition(),candidateBytes,refusal))
+        [value setValue:B1SHA256([NSData dataWithBytes:candidateBytes.data() length:candidateBytes.size()]) forKey:@"candidateRecipeSHA256"];
+}
+void B1BindR2Migration(Core3DEdgeTreatmentResult *value,
+    const std::shared_ptr<const core3d::retained_edge_treatment::r2::MigrationCapture>&capture,
+    const std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>&built){
+    namespace et=core3d::retained_edge_treatment;namespace r2=et::r2;
+    if(!value||!capture)return;
+    const auto identity=core3d::retained_boolean::Identities(capture->source());
+    [value setValue:B1ID(identity.document) forKey:@"documentIdentifier"];
+    [value setValue:B1ID(identity.entity) forKey:@"entityIdentifier"];
+    [value setValue:B1ID(identity.sourceFeature) forKey:@"sourceFeatureIdentifier"];
+    [value setValue:@(identity.metersPerUnit) forKey:@"dimensionMetersPerUnit"];
+    [value setValue:@"composite" forKey:@"sourceFamily"];
+    [value setValue:@"legacySYRS" forKey:@"carrier"];
+    [value setValue:B1ProgramPrefixState(capture->source()) forKey:@"prefixState"];
+    NSData *originalSource=[NSData dataWithBytes:capture->canonicalOriginalBytes().data() length:capture->canonicalOriginalBytes().size()];
+    [value setValue:B1SHA256(originalSource) forKey:@"originalSourceSHA256"];
+    // No pre-migration SYET exists; the original recipe digest stays empty
+    // (unknown), never a zero-filled or fabricated value.
+    [value setValue:@"" forKey:@"originalRecipeSHA256"];
+    NSData *candidateSource=originalSource;
+    if(built&&!built->canonicalPrefixBytes().empty())
+        candidateSource=[NSData dataWithBytes:built->canonicalPrefixBytes().data() length:built->canonicalPrefixBytes().size()];
+    [value setValue:B1SHA256(candidateSource) forKey:@"candidateSourceSHA256"];
+    std::vector<std::uint8_t> candidateBytes;et::Refusal refusal=et::Refusal::None;
+    if(built&&r2::Encode(built->definition(),candidateBytes,refusal))
+        [value setValue:B1SHA256([NSData dataWithBytes:candidateBytes.data() length:candidateBytes.size()]) forKey:@"candidateRecipeSHA256"];
+}
+Core3DEdgeTreatmentStep *B1StepR2(const core3d::retained_edge_treatment::Step&s){
+    auto step=B1Object<Core3DEdgeTreatmentStep>(Core3DEdgeTreatmentStep.class);
+    [step setValue:B1ID(s.node) forKey:@"nodeIdentifier"];[step setValue:B1ID(s.feature) forKey:@"featureIdentifier"];
+    [step setValue:@(s.localID) forKey:@"localID"];[step setValue:@(NSInteger(s.kind)) forKey:@"kind"];
+    [step setValue:@(s.amountMM) forKey:@"amountMM"];
+    NSMutableArray *anchors=[NSMutableArray array];
+    for(const auto&a:s.anchors){
+        auto anchor=B1Object<Core3DEdgeTreatmentAnchor>(Core3DEdgeTreatmentAnchor.class);
+        [anchor setValue:[NSData dataWithBytes:a.key.data() length:a.key.size()] forKey:@"key"];
+        [anchor setValue:@(NSInteger(a.curve)) forKey:@"curve"];
+        [anchor setValue:B1Vector(a.pointMM) forKey:@"pointMM"];[anchor setValue:B1Vector(a.tangent) forKey:@"tangent"];
+        [anchor setValue:B1Vector(a.normalA) forKey:@"normalA"];[anchor setValue:B1Vector(a.normalB) forKey:@"normalB"];
+        [anchor setValue:@(a.circleRadiusMM) forKey:@"circleRadiusMM"];
+        [anchors addObject:anchor];
+    }
+    [step setValue:anchors forKey:@"anchors"];
+    return step;
+}
+Core3DRetainedBooleanRecipeLocatorR2 *B1LocatorR2(const core3d::retained_recipe::UUID&document,
+    const core3d::retained_recipe::UUID&entity,const core3d::retained_recipe::UUID&definition,
+    const core3d::retained_recipe::UUID&node,const core3d::retained_recipe::UUID&sourceFeature){
+    return [[Core3DRetainedBooleanRecipeLocatorR2 alloc]initWithDocumentIdentifier:B1ID(document)
+        entityIdentifier:B1ID(entity) definitionIdentifier:B1ID(definition)
+        nodeIdentifier:B1ID(node) sourceFeatureIdentifier:B1ID(sourceFeature)];
+}
+// Build the complete retained Boolean source/input/tool/operation/placement/
+// migration maps from the captured native snapshot. Any undecodable or
+// unsupported piece returns nil so the capture refuses as malformed instead
+// of publishing a partial map.
+Core3DRetainedBooleanSourceR2 *B1RetainedBooleanSourceR2(
+    const std::shared_ptr<const core3d::retained_edge_treatment::r2::Snapshot>&native){
+    namespace et=core3d::retained_edge_treatment;namespace r2=et::r2;
+    if(!native)return nil;
+    const auto*boolean=std::get_if<r2::RetainedBooleanBase>(&native->source());
+    if(!boolean)return nil;
+    const auto&binding=boolean->binding;
+    auto source=B1Object<Core3DRetainedBooleanSourceR2>(Core3DRetainedBooleanSourceR2.class);
+    [source setValue:@(binding.sourceContractRevision) forKey:@"sourceContractRevision"];
+    [source setValue:@(binding.prefixBindingVersion) forKey:@"prefixBindingVersion"];
+    [source setValue:@(binding.sourceSchema) forKey:@"sourceSchema"];
+    [source setValue:@(binding.sourceWireMajor) forKey:@"sourceWireMajor"];
+    [source setValue:@(binding.sourceWireMinor) forKey:@"sourceWireMinor"];
+    [source setValue:@(NSInteger(binding.format)) forKey:@"prefixFormat"];
+    NSData *prefixBytes=B1R2PrefixBytes(native->source());
+    [source setValue:prefixBytes forKey:@"canonicalPrefixBytes"];
+    [source setValue:B1ID(binding.source.document) forKey:@"sourceDocumentIdentifier"];
+    [source setValue:B1ID(binding.source.entity) forKey:@"sourceEntityIdentifier"];
+    [source setValue:B1ID(binding.source.definition) forKey:@"sourceDefinitionIdentifier"];
+    [source setValue:B1ID(binding.source.sourceFeature) forKey:@"sourceFeatureIdentifier"];
+    [source setValue:B1ID(binding.sourceNode) forKey:@"prefixOutputNodeIdentifier"];
+    [source setValue:B1SHA256(prefixBytes) forKey:@"sourceRecipeDigest"];
+    [source setValue:@(binding.metersPerLocalUnit) forKey:@"metersPerLocalUnit"];
+    NSMutableArray *inputs=[NSMutableArray array],*operations=[NSMutableArray array];
+    NSMutableArray *stepMappings=[NSMutableArray array],*anchorMappings=[NSMutableArray array];
+    if(const auto*legacy=std::get_if<r2::LegacyBooleanBase>(&boolean->source)){
+        core3d::retained_boolean::Program program;
+        if(const auto*p=std::get_if<core3d::retained_boolean::Program>(&legacy->prefix))program=*p;
+        else if(const auto*old=std::get_if<core3d::retained_boolean::Legacy>(&legacy->prefix)){
+            if(!core3d::retained_boolean::Promote(*old,program))return nil;
+        }else return nil;
+        const auto*links=std::get_if<r2::LegacyPrefixBinding>(&binding.prefix);
+        if(!links||program.steps.size()!=links->links.size())return nil;
+        auto left=B1Object<Core3DRetainedBooleanInputR2>(Core3DRetainedBooleanInputR2.class);
+        [left setValue:@(Core3DRetainedBooleanInputRoleR2Left) forKey:@"role"];
+        auto locator=B1LocatorR2(binding.source.document,binding.source.entity,binding.source.definition,
+            links->rootNode,program.source.sourceFeature);
+        if(!locator)return nil;
+        [left setValue:locator forKey:@"locator"];
+        if(program.source.family==1){
+            core3d::profile::Parameters decoded;
+            if(!core3d::profile::Decode(program.source.values,decoded))return nil;
+            [left setValue:[[Core3DProfileDefinition alloc]initWithNativeParameters:decoded] forKey:@"profile"];
+        }else if(program.source.family==2){
+            core3d::enclosure::Parameters decoded;
+            if(!core3d::enclosure::Decode(program.source.schema,program.source.values,decoded))return nil;
+            [left setValue:[[Core3DEnclosureDefinition alloc]initWithNativeParameters:decoded] forKey:@"enclosure"];
+        }else if(program.source.family==3){
+            core3d::rectangular_loft::Definition decoded;
+            if(!core3d::loft_persistence::Decode(program.source.values,decoded))return nil;
+            [left setValue:[[Core3DRectangularLoftDefinition alloc]initWithNativeDefinition:decoded] forKey:@"rectangularLoft"];
+        }else return nil;
+        NSData *recipeBytes=B1DoubleData(program.source.values);
+        [left setValue:recipeBytes forKey:@"canonicalRecipeBytes"];
+        [left setValue:B1SHA256(recipeBytes) forKey:@"recipeDigest"];
+        [left setValue:@(program.source.schema) forKey:@"recipeSchema"];
+        [left setValue:@0 forKey:@"sourceShapeSlot"];
+        [inputs addObject:left];
+        for(std::size_t index=0;index<program.steps.size();++index){
+            const auto&step=program.steps[index];const auto&link=links->links[index];
+            if(step.operand.identifier!=link.operandID)return nil;
+            auto toolInput=B1Object<Core3DRetainedBooleanInputR2>(Core3DRetainedBooleanInputR2.class);
+            [toolInput setValue:@(Core3DRetainedBooleanInputRoleR2AnalyticTool) forKey:@"role"];
+            auto toolLocator=B1LocatorR2(binding.source.document,binding.source.entity,binding.source.definition,
+                link.toolNode,link.toolFeature);
+            if(!toolLocator)return nil;
+            [toolInput setValue:toolLocator forKey:@"locator"];
+            auto tool=[[Core3DRetainedBooleanAnalyticToolR2 alloc]initWithOperandID:step.operand.identifier
+                kind:NSInteger(step.operand.kind) extent:NSInteger(step.operand.extent) axis:NSInteger(step.operand.axis)
+                point:B1Vector(step.operand.point) radius:step.operand.radius
+                boltCircleRadius:step.operand.boltCircleRadius hostRadiusRatio:step.operand.hostRadiusRatio
+                directionAngle:step.operand.directionAngle halfWidthApex:step.operand.halfWidthApex
+                halfWidthMouth:step.operand.halfWidthMouth length:step.operand.length count:step.operand.count];
+            if(!tool)return nil;
+            [toolInput setValue:tool forKey:@"analyticTool"];
+            [inputs addObject:toolInput];
+            auto operation=B1Object<Core3DRetainedBooleanOperationR2>(Core3DRetainedBooleanOperationR2.class);
+            [operation setValue:B1ID(link.node) forKey:@"nodeIdentifier"];
+            [operation setValue:B1ID(link.feature) forKey:@"featureIdentifier"];
+            [operation setValue:B1ID(link.leftNode) forKey:@"leftNodeIdentifier"];
+            [operation setValue:B1ID(link.rightNode) forKey:@"rightNodeIdentifier"];
+            [operation setValue:@(NSInteger(step.operation)) forKey:@"operation"];
+            [operation setValue:@(program.codecMinor) forKey:@"codecVersion"];
+            [operation setValue:@(link.operandID) forKey:@"operandID"];
+            [operations addObject:operation];
+        }
+        [source setValue:@(program.nextOperandID) forKey:@"nextOperandID"];
+        [source setValue:@(program.nextFilletStepID) forKey:@"nextFilletStepID"];
+        [source setValue:@(program.nextFilletEdgeID) forKey:@"nextFilletEdgeID"];
+    }else{
+        const auto&composite=std::get<r2::CompositeBooleanBase>(boolean->source);
+        std::size_t role=0;
+        for(const auto&node:composite.prefix.nodes){
+            if(const auto*sourceNode=std::get_if<core3d::composite_recipe::SourceNode>(&node.value)){
+                if(++role>2)return nil;
+                auto input=B1Object<Core3DRetainedBooleanInputR2>(Core3DRetainedBooleanInputR2.class);
+                [input setValue:@(role==1?Core3DRetainedBooleanInputRoleR2Left:Core3DRetainedBooleanInputRoleR2Right) forKey:@"role"];
+                auto locator=B1LocatorR2(binding.source.document,binding.source.entity,binding.source.definition,
+                    sourceNode->node,sourceNode->original.sourceFeature);
+                if(!locator)return nil;
+                [input setValue:locator forKey:@"locator"];
+                std::vector<double> values;
+                if(!core3d::composite_recipe::DecodeScalarRecipe(sourceNode->recipe,values))return nil;
+                if(sourceNode->recipe.kind==core3d::composite_recipe::RecipeKind::Profile){
+                    core3d::profile::Parameters decoded;
+                    if(!core3d::profile::Decode(values,decoded))return nil;
+                    [input setValue:[[Core3DProfileDefinition alloc]initWithNativeParameters:decoded] forKey:@"profile"];
+                }else if(sourceNode->recipe.kind==core3d::composite_recipe::RecipeKind::Enclosure){
+                    core3d::enclosure::Parameters decoded;
+                    if(!core3d::enclosure::Decode(sourceNode->recipe.schema,values,decoded))return nil;
+                    [input setValue:[[Core3DEnclosureDefinition alloc]initWithNativeParameters:decoded] forKey:@"enclosure"];
+                }else if(sourceNode->recipe.kind==core3d::composite_recipe::RecipeKind::RectangularLoft){
+                    core3d::rectangular_loft::Definition decoded;
+                    if(!core3d::loft_persistence::Decode(values,decoded))return nil;
+                    [input setValue:[[Core3DRectangularLoftDefinition alloc]initWithNativeDefinition:decoded] forKey:@"rectangularLoft"];
+                }else return nil;
+                NSData *recipeBytes=[NSData dataWithBytes:sourceNode->recipe.bytes.data() length:sourceNode->recipe.bytes.size()];
+                [input setValue:recipeBytes forKey:@"canonicalRecipeBytes"];
+                [input setValue:B1SHA256(recipeBytes) forKey:@"recipeDigest"];
+                [input setValue:@(sourceNode->recipe.schema) forKey:@"recipeSchema"];
+                [input setValue:@(sourceNode->shapeSlot) forKey:@"sourceShapeSlot"];
+                NSMutableArray *matrix=[NSMutableArray arrayWithCapacity:16];
+                for(double entry:sourceNode->inputToCarrier.matrix)[matrix addObject:@(entry)];
+                auto placement=[[Core3DRetainedBooleanInputPlacementR2 alloc]initWithRowMajorMatrix:matrix
+                    sourceMetersPerUnit:sourceNode->inputToCarrier.sourceMetersPerUnit
+                    carrierMetersPerUnit:sourceNode->inputToCarrier.carrierMetersPerUnit];
+                if(!placement)return nil;
+                [input setValue:placement forKey:@"inputPlacement"];
+                [inputs addObject:input];
+            }else if(const auto*feature=std::get_if<core3d::composite_recipe::FeatureNode>(&node.value)){
+                if(feature->inputs.size()!=2)return nil;
+                auto operation=B1Object<Core3DRetainedBooleanOperationR2>(Core3DRetainedBooleanOperationR2.class);
+                [operation setValue:B1ID(feature->node) forKey:@"nodeIdentifier"];
+                [operation setValue:B1ID(feature->feature) forKey:@"featureIdentifier"];
+                [operation setValue:B1ID(feature->inputs[0]) forKey:@"leftNodeIdentifier"];
+                [operation setValue:B1ID(feature->inputs[1]) forKey:@"rightNodeIdentifier"];
+                [operation setValue:@(feature->kind) forKey:@"operation"];
+                [operation setValue:@(feature->codecVersion) forKey:@"codecVersion"];
+                [operations addObject:operation];
+            }
+        }
+        // A1 composite carries no legacy issuance counters; zero means
+        // not-applicable here, never a measured history value.
+        [source setValue:@0 forKey:@"nextOperandID"];
+        [source setValue:@0 forKey:@"nextFilletStepID"];
+        [source setValue:@0 forKey:@"nextFilletEdgeID"];
+    }
+    if(binding.migration){
+        for(const auto&row:binding.migration->steps){
+            auto map=B1Object<Core3DRetainedBooleanMigrationStepMapR2>(Core3DRetainedBooleanMigrationStepMapR2.class);
+            [map setValue:@(row.oldStepID) forKey:@"oldStepID"];
+            [map setValue:B1ID(row.node) forKey:@"nodeIdentifier"];
+            [map setValue:B1ID(row.feature) forKey:@"featureIdentifier"];
+            [map setValue:@(row.retired) forKey:@"retired"];
+            [stepMappings addObject:map];
+        }
+        for(const auto&row:binding.migration->anchors){
+            auto map=B1Object<Core3DRetainedBooleanMigrationAnchorMapR2>(Core3DRetainedBooleanMigrationAnchorMapR2.class);
+            [map setValue:@(row.oldEdgeID) forKey:@"oldEdgeID"];
+            [map setValue:[NSData dataWithBytes:row.key.data() length:row.key.size()] forKey:@"key"];
+            [map setValue:@(row.retired) forKey:@"retired"];
+            [anchorMappings addObject:map];
+        }
+    }
+    [source setValue:inputs forKey:@"inputs"];
+    [source setValue:operations forKey:@"operations"];
+    [source setValue:stepMappings forKey:@"stepMappings"];
+    [source setValue:anchorMappings forKey:@"anchorMappings"];
+    return source;
+}
+bool B1ParseUUID(NSString *text,core3d::retained_recipe::UUID&out){
+    if(!text.length)return false;
+    core3d::receipt::ParseUUID(text.UTF8String,out);
+    return core3d::retained_recipe::Nonzero(out);
+}
+bool B1Locator(Core3DRetainedBooleanRecipeLocatorR2 *dto,core3d::retained_recipe::RecipeLocator&out){
+    if(!dto)return false;
+    return B1ParseUUID(dto.documentIdentifier,out.owner.document)
+        &&B1ParseUUID(dto.entityIdentifier,out.owner.entity)
+        &&B1ParseUUID(dto.definitionIdentifier,out.owner.definition)
+        &&B1ParseUUID(dto.nodeIdentifier,out.node)
+        &&B1ParseUUID(dto.sourceFeatureIdentifier,out.sourceFeature);
+}
+bool B1Operand(Core3DRetainedBooleanAnalyticToolR2 *dto,core3d::analytic_boolean::Operand&out){
+    if(!dto||!dto.operandID)return false;
+    out.identifier=dto.operandID;
+    out.kind=core3d::analytic_boolean::OperandKind(dto.kind);
+    out.extent=core3d::analytic_boolean::Extent(dto.extent);
+    out.axis=core3d::analytic_boolean::Axis(dto.axis);
+    if(dto.point)out.point={dto.point.x,dto.point.y,dto.point.z};
+    out.radius=dto.radius;out.boltCircleRadius=dto.boltCircleRadius;
+    out.hostRadiusRatio=dto.hostRadiusRatio;out.directionAngle=dto.directionAngle;
+    out.halfWidthApex=dto.halfWidthApex;out.halfWidthMouth=dto.halfWidthMouth;
+    out.length=dto.length;out.count=std::uint32_t(dto.count);
+    return true;
+}
+bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_recipe::InputPlacement&out){
+    if(!dto||dto.rowMajorMatrix.count!=16)return false;
+    for(NSUInteger index=0;index<16;++index)out.matrix[index]=dto.rowMajorMatrix[index].doubleValue;
+    out.sourceMetersPerUnit=dto.sourceMetersPerUnit;
+    out.carrierMetersPerUnit=dto.carrierMetersPerUnit;
+    return true;
+}
 }
 
 @implementation Core3DViewController {
@@ -20933,8 +21297,9 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
 
 - (Core3DEdgeTreatmentCapture *)captureEdgeTreatment:(NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected {
     auto capture=B1Object<Core3DEdgeTreatmentCapture>(Core3DEdgeTreatmentCapture.class);[capture setValue:@(Core3DEdgeTreatmentStatusMalformed) forKey:@"status"];[capture setValue:@"b1.StaleSnapshot" forKey:@"refusalCode"];[capture setValue:@"The model changed; reopen the edge-treatment editor." forKey:@"refusalMessage"];
+    [capture setValue:entityIdentifier forKey:@"entityIdentifier"];[capture setValue:@"" forKey:@"documentIdentifier"];[capture setValue:@"" forKey:@"carrier"];
     if(!NSThread.isMainThread||!GLController||!GLController.viewer||!expected||entityIdentifier.length==0)return capture;
-    try{const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;std::shared_ptr<const core3d::retained_edge_treatment::Snapshot>native;if(auto profile=GLController.viewer->storedProfileDefinition(identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height)))native=profile->edgeTreatment;else if(auto enclosure=GLController.viewer->storedEnclosureDefinition(identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height)))native=enclosure->edgeTreatment;if(!native)return capture;[capture setValue:@(Core3DEdgeTreatmentStatusCurrentEditable) forKey:@"status"];[capture setValue:B1Snapshot(native) forKey:@"snapshot"];[capture setValue:@"b1.None" forKey:@"refusalCode"];[capture setValue:@"" forKey:@"refusalMessage"];return capture;}catch(...){return capture;}
+    try{const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;std::shared_ptr<const core3d::retained_edge_treatment::Snapshot>native;if(auto profile=GLController.viewer->storedProfileDefinition(identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height)))native=profile->edgeTreatment;else if(auto enclosure=GLController.viewer->storedEnclosureDefinition(identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height)))native=enclosure->edgeTreatment;if(!native)return capture;auto snapshot=B1Snapshot(native);NSData *canonicalSource=B1SourceBytes(native->source());if(snapshot.profileSource)[snapshot.profileSource setValue:canonicalSource forKey:@"canonicalSourceBytes"];if(snapshot.enclosureSource)[snapshot.enclosureSource setValue:canonicalSource forKey:@"canonicalSourceBytes"];[capture setValue:snapshot.documentIdentifier forKey:@"documentIdentifier"];[capture setValue:(native->effectiveDefinition().schema==2?@"syet2":@"syet1") forKey:@"carrier"];[capture setValue:@(Core3DEdgeTreatmentStatusCurrentEditable) forKey:@"status"];[capture setValue:snapshot forKey:@"snapshot"];[capture setValue:@"b1.None" forKey:@"refusalCode"];[capture setValue:@"" forKey:@"refusalMessage"];return capture;}catch(...){return capture;}
 }
 
 - (Core3DEdgeTreatmentTargetCapture *)captureEdgeTreatmentTargets:(NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected {
@@ -21074,8 +21439,12 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
 #endif
 
 - (Core3DEdgeTreatmentOperation *)core3d_beginEdgeTreatment:(Core3DEdgeTreatmentNativeSnapshot *)snapshot edit:(const core3d::retained_edge_treatment::Edit&)edit expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {
-    auto operation=B1Object<Core3DEdgeTreatmentNativeOperation>(Core3DEdgeTreatmentNativeOperation.class);if(!completion)return operation;operation->completion=[completion copy];auto refuse=^(core3d::retained_edge_treatment::Refusal refusal){if(operation->settled)return;operation->settled=YES;core3d::retained_edge_treatment::CommitResult r;r.outcome=core3d::retained_edge_treatment::CommitOutcome::Refused;r.refusal=refusal;r.measuredUndoDelta=0;auto callback=operation->completion;operation->completion=nil;if(callback)callback(B1Result(r));};if(!NSThread.isMainThread||!snapshot||!snapshot->native||!GLController.viewer||!expected){refuse(core3d::retained_edge_treatment::Refusal::StaleSnapshot);return operation;}
-    try{const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=snapshot.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;core3d::retained_edge_treatment::Refusal refusal;auto viewer=GLController.viewer;operation->nativeWork=viewer->prepareEdgeTreatment(snapshot->native,edit,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);auto geometry=viewer->edgeTreatmentGeometry(operation->nativeWork);if(!geometry){refuse(refusal);return operation;}dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{core3d::retained_edge_treatment::Refusal buildRefusal;auto built=core3d::Core3DViewer::buildEdgeTreatment(geometry,buildRefusal);dispatch_async(dispatch_get_main_queue(),^{if(operation->settled)return;operation->settled=YES;core3d::retained_edge_treatment::CommitResult r;if(!built){r.outcome=buildRefusal==core3d::retained_edge_treatment::Refusal::Cancelled?core3d::retained_edge_treatment::CommitOutcome::Cancelled:core3d::retained_edge_treatment::CommitOutcome::Refused;r.refusal=buildRefusal;r.measuredUndoDelta=0;}else r=viewer->commitEdgeTreatment(operation->nativeWork,built);auto callback=operation->completion;operation->completion=nil;if(callback)callback(B1Result(r));});});return operation;}catch(...){refuse(core3d::retained_edge_treatment::Refusal::BuildFailed);return operation;}
+    auto operation=B1Object<Core3DEdgeTreatmentNativeOperation>(Core3DEdgeTreatmentNativeOperation.class);if(!completion)return operation;operation->completion=[completion copy];auto refuse=^(core3d::retained_edge_treatment::Refusal refusal){if(operation->settled)return;operation->settled=YES;core3d::retained_edge_treatment::CommitResult r;r.outcome=core3d::retained_edge_treatment::CommitOutcome::Refused;r.refusal=refusal;r.measuredUndoDelta=0;auto callback=operation->completion;operation->completion=nil;operation->stopProvenance=nil;if(callback)callback(B1Result(r));};if(!NSThread.isMainThread||!snapshot||!snapshot->native||!GLController.viewer||!expected){refuse(core3d::retained_edge_treatment::Refusal::StaleSnapshot);return operation;}
+    NSData *requestedSource=nil;if(const auto*requested=std::get_if<core3d::retained_edge_treatment::RebuildSource>(&edit))requestedSource=B1SourceBytes(requested->requested);
+    // Cancellation provenance: retain only the admitted immutable snapshot
+    // and any native requested-source bytes; never a recaptured scene.
+    std::shared_ptr<const core3d::retained_edge_treatment::Snapshot> stopSnapshot=snapshot->native;NSData *stopRequestedSource=requestedSource;operation->stopProvenance=[^(Core3DEdgeTreatmentResult *dto){B1BindQ2(dto,stopSnapshot,stopRequestedSource,nil);[dto setValue:@"" forKey:@"candidateRecipeSHA256"];} copy];
+    try{const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=snapshot.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;core3d::retained_edge_treatment::Refusal refusal;auto viewer=GLController.viewer;operation->nativeWork=viewer->prepareEdgeTreatment(snapshot->native,edit,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);auto geometry=viewer->edgeTreatmentGeometry(operation->nativeWork);if(!geometry){refuse(refusal);return operation;}dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{core3d::retained_edge_treatment::Refusal buildRefusal;auto built=core3d::Core3DViewer::buildEdgeTreatment(geometry,buildRefusal);dispatch_async(dispatch_get_main_queue(),^{if(operation->settled)return;operation->settled=YES;core3d::retained_edge_treatment::CommitResult r;if(!built){r.outcome=buildRefusal==core3d::retained_edge_treatment::Refusal::Cancelled?core3d::retained_edge_treatment::CommitOutcome::Cancelled:core3d::retained_edge_treatment::CommitOutcome::Refused;r.refusal=buildRefusal;r.measuredUndoDelta=0;}else r=viewer->commitEdgeTreatment(operation->nativeWork,built);auto dto=B1Result(r);B1BindQ2(dto,snapshot->native,requestedSource,built);auto callback=operation->completion;operation->completion=nil;operation->stopProvenance=nil;if(callback)callback(dto);});});return operation;}catch(...){refuse(core3d::retained_edge_treatment::Refusal::BuildFailed);return operation;}
 }
 
 - (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentAppend:(Core3DEdgeTreatmentSnapshot *)snapshot kind:(Core3DEdgeTreatmentKind)kind amountMM:(double)amountMM targets:(Core3DEdgeTreatmentTargetCapture *)targets expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {auto native=(Core3DEdgeTreatmentNativeSnapshot*)snapshot;auto target=(Core3DEdgeTreatmentNativeTargets*)targets;if(![native isKindOfClass:Core3DEdgeTreatmentNativeSnapshot.class]||![target isKindOfClass:Core3DEdgeTreatmentNativeTargets.class]||target->nativeSnapshot!=native->native)return [self core3d_beginEdgeTreatment:nil edit:core3d::retained_edge_treatment::Append{} expected:expected completion:completion];core3d::retained_edge_treatment::Append edit{core3d::retained_edge_treatment::Kind(kind),amountMM,target->nativeAnchors};return [self core3d_beginEdgeTreatment:native edit:edit expected:expected completion:completion];}
@@ -21090,7 +21459,7 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         core3d::retained_edge_treatment::CommitResult result;
         result.outcome=core3d::retained_edge_treatment::CommitOutcome::Refused;
         result.refusal=refusal;result.measuredUndoDelta=0;auto callback=operation->completion;
-        operation->completion=nil;if(callback)callback(B1Result(result));
+        operation->completion=nil;operation->stopProvenance=nil;if(callback)callback(B1Result(result));
     };
     auto native=(Core3DEdgeTreatmentNativeSnapshot*)snapshot;
     auto targets=core3d::face_selector_bridge::Targets(proof);
@@ -21098,6 +21467,9 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         ||!native->native||!targets||!expected||!GLController.viewer){
         refuse(core3d::retained_edge_treatment::Refusal::StaleSnapshot);return operation;
     }
+    // Cancellation provenance: retain only the admitted immutable snapshot.
+    std::shared_ptr<const core3d::retained_edge_treatment::Snapshot> stopSnapshot=native->native;
+    operation->stopProvenance=[^(Core3DEdgeTreatmentResult *dto){B1BindQ2(dto,stopSnapshot,nil,nil);[dto setValue:@"" forKey:@"candidateRecipeSHA256"];} copy];
     try{
         const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;
         identity.entityIdentifier=native.entityIdentifier.UTF8String;
@@ -21120,11 +21492,13 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
                         ?core3d::retained_edge_treatment::CommitOutcome::Cancelled
                         :core3d::retained_edge_treatment::CommitOutcome::Refused;
                     result.refusal=buildRefusal;result.measuredUndoDelta=0;
-                    auto callback=operation->completion;operation->completion=nil;
-                    if(callback)callback(B1Result(result));return;}
+                    auto dto=B1Result(result);B1BindQ2(dto,native->native,nil,nil);
+                    auto callback=operation->completion;operation->completion=nil;operation->stopProvenance=nil;
+                    if(callback)callback(dto);return;}
                 auto result=viewer->commitEdgeTreatment(operation->nativeWork,built);
-                auto callback=operation->completion;operation->completion=nil;
-                if(callback)callback(B1Result(result));
+                auto dto=B1Result(result);B1BindQ2(dto,native->native,nil,built);
+                auto callback=operation->completion;operation->completion=nil;operation->stopProvenance=nil;
+                if(callback)callback(dto);
             });
         });
         return operation;
@@ -21139,6 +21513,7 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     [capture setValue:@(Core3DEdgeTreatmentStatusMalformed) forKey:@"status"];
     [capture setValue:@"b1.StaleSnapshot" forKey:@"refusalCode"];
     [capture setValue:@"The retained Boolean owner changed; reopen the editor." forKey:@"refusalMessage"];
+    [capture setValue:entityIdentifier forKey:@"entityIdentifier"];[capture setValue:@"" forKey:@"documentIdentifier"];[capture setValue:@"" forKey:@"carrier"];
     if(!NSThread.isMainThread||!expected||!GLController.viewer)return capture;
     const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;
     identity.entityIdentifier=entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;
@@ -21153,8 +21528,23 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     [snapshot setValue:B1ID(binding.source.sourceFeature) forKey:@"sourceFeatureIdentifier"];[snapshot setValue:B1ID(binding.sourceNode) forKey:@"baseNodeIdentifier"];
     [snapshot setValue:B1ID(definition.outputNode) forKey:@"outputNodeIdentifier"];[snapshot setValue:@(Core3DEdgeTreatmentSourceKindR2RetainedBoolean) forKey:@"sourceKind"];
     [snapshot setValue:[NSData dataWithBytes:native->canonicalBytes().data() length:native->canonicalBytes().size()] forKey:@"canonicalRecipeBytes"];
-    [snapshot setValue:@(definition.steps.size()) forKey:@"prefixOperandCount"];[snapshot setValue:@YES forKey:@"current"];
+    NSMutableArray *steps=[NSMutableArray array];
+    for(const auto&step:definition.steps)[steps addObject:B1StepR2(step)];
+    [snapshot setValue:steps forKey:@"steps"];
+    auto retainedSource=B1RetainedBooleanSourceR2(native);
+    if(!retainedSource){[capture setValue:@(Core3DEdgeTreatmentStatusMalformed) forKey:@"status"];
+        [capture setValue:@"b1.MalformedCarrier" forKey:@"refusalCode"];
+        [capture setValue:@"The retained Boolean source is incomplete; reopen the editor." forKey:@"refusalMessage"];
+        return capture;}
+    [snapshot setValue:retainedSource forKey:@"retainedBooleanSource"];
+    // The prefix operand count comes from the real retained Boolean prefix
+    // (one root input plus one operand per prefix link), never from the
+    // treatment suffix length.
+    const std::size_t prefixOperands=std::visit([](const auto&prefix)->std::size_t{return prefix.links.size()+1;},binding.prefix);
+    [snapshot setValue:@(prefixOperands) forKey:@"prefixOperandCount"];[snapshot setValue:@YES forKey:@"current"];
     [snapshot setValue:@(native->dimensionMetersPerUnit()) forKey:@"dimensionMetersPerUnit"];
+    [capture setValue:B1ID(definition.owner.document) forKey:@"documentIdentifier"];
+    [capture setValue:(binding.format==core3d::retained_edge_treatment::r2::PrefixFormat::SYRS?@"legacySYRS":@"a1Composite") forKey:@"carrier"];
     [capture setValue:@(Core3DEdgeTreatmentStatusCurrentEditable) forKey:@"status"];[capture setValue:snapshot forKey:@"snapshot"];
     [capture setValue:@"b1.None" forKey:@"refusalCode"];[capture setValue:@"" forKey:@"refusalMessage"];return capture;
 }
@@ -21203,34 +21593,76 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
 }
 
 - (Core3DEdgeTreatmentOperation *)core3d_beginEdgeTreatmentR2:(std::shared_ptr<core3d::retained_edge_treatment::r2::Work>)work
-    completion:(void(^)(Core3DEdgeTreatmentResult *))completion {
+    completion:(void(^)(Core3DEdgeTreatmentResult *))completion
+    provenance:(void(^)(Core3DEdgeTreatmentResult *,const std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>&))provenance {
     auto operation=B1Object<Core3DEdgeTreatmentNativeOperation>(Core3DEdgeTreatmentNativeOperation.class);operation->completion=[completion copy];operation->nativeWorkR2=work;
     if(!work){core3d::retained_edge_treatment::CommitResult refused;refused.refusal=core3d::retained_edge_treatment::Refusal::StaleSnapshot;if(completion)completion(B1Result(refused));operation->settled=YES;return operation;}
+    // Cancellation provenance: the admitted R2 snapshot/migration capture
+    // already lives in the producer-supplied provenance block.
+    if(provenance){void(^stopBinder)(Core3DEdgeTreatmentResult *,const std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>&)=[provenance copy];operation->stopProvenance=[^(Core3DEdgeTreatmentResult *dto){stopBinder(dto,std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>());[dto setValue:@"" forKey:@"candidateRecipeSHA256"];} copy];}
     auto geometry=core3d::Core3DViewer::edgeTreatmentGeometryR2(work);auto viewer=GLController.viewer;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{core3d::retained_edge_treatment::Refusal refusal;auto built=core3d::Core3DViewer::buildEdgeTreatmentR2(geometry,refusal);
-        dispatch_async(dispatch_get_main_queue(),^{if(operation->settled)return;operation->settled=YES;core3d::retained_edge_treatment::CommitResult answer;if(built)answer=viewer->commitEdgeTreatmentR2(work,built);else answer.refusal=refusal;auto callback=operation->completion;operation->completion=nil;if(callback)callback(B1Result(answer));});});return operation;
+        dispatch_async(dispatch_get_main_queue(),^{if(operation->settled)return;operation->settled=YES;core3d::retained_edge_treatment::CommitResult answer;if(built)answer=viewer->commitEdgeTreatmentR2(work,built);else answer.refusal=refusal;auto dto=B1Result(answer);if(provenance)provenance(dto,built);auto callback=operation->completion;operation->completion=nil;operation->stopProvenance=nil;if(callback)callback(dto);});});return operation;
 }
 
 - (Core3DEdgeTreatmentOperation *)beginRetainedBooleanMigrationR2:(Core3DRetainedBooleanMigrationCaptureR2 *)original request:(Core3DRetainedBooleanMigrationRequestR2 *)request proof:(Core3DRetainedBooleanMigrationProofR2 *)proof expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {
     auto capture=(Core3DRetainedBooleanNativeMigrationCaptureR2*)original;auto admitted=(Core3DRetainedBooleanNativeMigrationProofR2*)proof;core3d::retained_edge_treatment::r2::MigrationM3 mutation;
-    for(Core3DRetainedBooleanLegacySelectorBindingR2*binding in request.selectors){core3d::retained_face_selector::SelectorIntent intent;if(!core3d::face_selector_bridge::Intent(binding.intent,intent))return [self core3d_beginEdgeTreatmentR2:std::shared_ptr<core3d::retained_edge_treatment::r2::Work>() completion:completion];mutation.selectors.push_back({binding.oldStepID,intent});}
-    if(request.append){core3d::retained_face_selector::SelectorIntent intent;if(!core3d::face_selector_bridge::Intent(request.append.intent,intent))return [self core3d_beginEdgeTreatmentR2:std::shared_ptr<core3d::retained_edge_treatment::r2::Work>() completion:completion];mutation.append=core3d::retained_edge_treatment::r2::SelectorAppendIntent{intent,request.append.amountMM};}
+    for(Core3DRetainedBooleanLegacySelectorBindingR2*binding in request.selectors){core3d::retained_face_selector::SelectorIntent intent;if(!core3d::face_selector_bridge::Intent(binding.intent,intent))return [self core3d_beginEdgeTreatmentR2:std::shared_ptr<core3d::retained_edge_treatment::r2::Work>() completion:completion provenance:nil];mutation.selectors.push_back({binding.oldStepID,intent});}
+    if(request.append){core3d::retained_face_selector::SelectorIntent intent;if(!core3d::face_selector_bridge::Intent(request.append.intent,intent))return [self core3d_beginEdgeTreatmentR2:std::shared_ptr<core3d::retained_edge_treatment::r2::Work>() completion:completion provenance:nil];mutation.append=core3d::retained_edge_treatment::r2::SelectorAppendIntent{intent,request.append.amountMM};}
     const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=original.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;
-    core3d::retained_edge_treatment::Refusal refusal;auto work=GLController.viewer->prepareRetainedBooleanMigrationR2(capture->native,mutation,admitted->native,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);return [self core3d_beginEdgeTreatmentR2:work completion:completion];
+    core3d::retained_edge_treatment::Refusal refusal;auto work=GLController.viewer->prepareRetainedBooleanMigrationR2(capture->native,mutation,admitted->native,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);auto nativeCapture=capture->native;return [self core3d_beginEdgeTreatmentR2:work completion:completion provenance:^(Core3DEdgeTreatmentResult *dto,const std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>&built){B1BindR2Migration(dto,nativeCapture,built);}];
 }
 
 - (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentSelectorAppendR2:(Core3DEdgeTreatmentSnapshotR2 *)original amountMM:(double)amountMM proof:(Core3DFaceSelectorProofR2 *)proof expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {
-    auto snapshot=(Core3DEdgeTreatmentNativeSnapshotR2*)original;auto admitted=(Core3DFaceSelectorNativeProofR2*)proof;const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=original.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;core3d::retained_edge_treatment::Refusal refusal;auto work=GLController.viewer->prepareEdgeTreatmentSelectorAppendR2(snapshot->native,admitted->native,amountMM,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);return [self core3d_beginEdgeTreatmentR2:work completion:completion];
+    auto snapshot=(Core3DEdgeTreatmentNativeSnapshotR2*)original;auto admitted=(Core3DFaceSelectorNativeProofR2*)proof;const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=original.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;core3d::retained_edge_treatment::Refusal refusal;auto work=GLController.viewer->prepareEdgeTreatmentSelectorAppendR2(snapshot->native,admitted->native,amountMM,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);auto nativeSnapshot=snapshot->native;return [self core3d_beginEdgeTreatmentR2:work completion:completion provenance:^(Core3DEdgeTreatmentResult *dto,const std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>&built){B1BindR2(dto,nativeSnapshot,built);}];
 }
 
 - (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentEditR2:(Core3DEdgeTreatmentSnapshotR2 *)original edit:(Core3DRetainedBooleanEditR2 *)edit expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {
-    auto snapshot=(Core3DEdgeTreatmentNativeSnapshotR2*)original;core3d::retained_edge_treatment::r2::Edit mutation=core3d::retained_edge_treatment::SetAmount{};
-    if(edit.kind==Core3DRetainedBooleanEditKindR2SetAmount){core3d::retained_edge_treatment::SetAmount value;core3d::receipt::ParseUUID(edit.featureIdentifier.UTF8String,value.feature);value.amountMM=edit.amountMM.doubleValue;mutation=value;}
-    else if(edit.kind==Core3DRetainedBooleanEditKindR2Remove){core3d::retained_edge_treatment::Remove value;core3d::receipt::ParseUUID(edit.featureIdentifier.UTF8String,value.feature);mutation=value;}
-    const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=original.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;core3d::retained_edge_treatment::Refusal refusal;auto work=GLController.viewer->prepareEdgeTreatmentEditR2(snapshot->native,mutation,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);return [self core3d_beginEdgeTreatmentR2:work completion:completion];
+    namespace r2=core3d::retained_edge_treatment::r2;
+    auto snapshot=(Core3DEdgeTreatmentNativeSnapshotR2*)original;
+    // Every admitted request kind is translated explicitly. An unknown kind or
+    // an invalid payload refuses through the nil-work path below; it can never
+    // fall through to an empty SetAmount.
+    std::optional<r2::Edit> mutation;
+    if(edit)switch(edit.kind){
+        case Core3DRetainedBooleanEditKindR2SetAmount:
+            if(edit.featureIdentifier&&edit.amountMM){core3d::retained_edge_treatment::SetAmount value;core3d::receipt::ParseUUID(edit.featureIdentifier.UTF8String,value.feature);value.amountMM=edit.amountMM.doubleValue;mutation=r2::Edit(value);}
+            break;
+        case Core3DRetainedBooleanEditKindR2Remove:
+            if(edit.featureIdentifier){core3d::retained_edge_treatment::Remove value;core3d::receipt::ParseUUID(edit.featureIdentifier.UTF8String,value.feature);mutation=r2::Edit(value);}
+            break;
+        case Core3DRetainedBooleanEditKindR2RebuildBooleanInput:
+            if(edit.locator&&edit.completeInput){r2::RebuildBooleanInput value;
+                if(!B1Locator(edit.locator,value.locator))break;
+                if(edit.completeInput.profile)value.requested=[edit.completeInput.profile nativeParameters];
+                else if(edit.completeInput.enclosure)value.requested=[edit.completeInput.enclosure nativeParameters];
+                else if(edit.completeInput.rectangularLoft)value.requested=[edit.completeInput.rectangularLoft nativeDefinition];
+                else break;
+                mutation=r2::Edit(value);}
+            break;
+        case Core3DRetainedBooleanEditKindR2RebuildAnalyticTool:
+            if(edit.operandID&&edit.completeAnalyticTool){r2::RebuildAnalyticTool value;
+                if(!B1Operand(edit.completeAnalyticTool,value.requested)||value.requested.identifier!=edit.operandID.unsignedIntValue)break;
+                value.operandID=edit.operandID.unsignedIntValue;mutation=r2::Edit(value);}
+            break;
+        case Core3DRetainedBooleanEditKindR2SetBooleanOperation:
+            if(edit.featureIdentifier&&edit.operation){r2::SetBooleanOperation value;
+                core3d::receipt::ParseUUID(edit.featureIdentifier.UTF8String,value.feature);
+                value.requested=core3d::retained_part_boolean::Operation(edit.operation.integerValue);mutation=r2::Edit(value);}
+            break;
+        case Core3DRetainedBooleanEditKindR2SetInputPlacement:
+            if(edit.locator&&edit.completeInputPlacement){r2::SetInputPlacement value;
+                if(!B1Locator(edit.locator,value.locator)||!B1Placement(edit.completeInputPlacement,value.requested))break;
+                mutation=r2::Edit(value);}
+            break;
+        default:break;
+    }
+    if(!mutation||![snapshot isKindOfClass:Core3DEdgeTreatmentNativeSnapshotR2.class]||!snapshot->native)
+        return [self core3d_beginEdgeTreatmentR2:std::shared_ptr<r2::Work>() completion:completion provenance:nil];
+    const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=original.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;core3d::retained_edge_treatment::Refusal refusal;auto work=GLController.viewer->prepareEdgeTreatmentEditR2(snapshot->native,*mutation,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);auto nativeSnapshot=snapshot->native;return [self core3d_beginEdgeTreatmentR2:work completion:completion provenance:^(Core3DEdgeTreatmentResult *dto,const std::shared_ptr<const r2::DetachedResult>&built){B1BindR2(dto,nativeSnapshot,built);}];
 }
 
-- (void)cancelEdgeTreatment:(Core3DEdgeTreatmentOperation *)operation {if(!NSThread.isMainThread||![operation isKindOfClass:Core3DEdgeTreatmentNativeOperation.class])return;auto native=(Core3DEdgeTreatmentNativeOperation*)operation;if(!native->settled){native->settled=YES;if(native->nativeWorkR2)core3d::Core3DViewer::cancelEdgeTreatmentR2(native->nativeWorkR2);else core3d::Core3DViewer::cancelEdgeTreatment(native->nativeWork);core3d::retained_edge_treatment::CommitResult result;result.outcome=core3d::retained_edge_treatment::CommitOutcome::Cancelled;result.refusal=core3d::retained_edge_treatment::Refusal::Cancelled;result.measuredUndoDelta=0;auto callback=native->completion;native->completion=nil;if(callback)callback(B1Result(result));}}
+- (void)cancelEdgeTreatment:(Core3DEdgeTreatmentOperation *)operation {if(!NSThread.isMainThread||![operation isKindOfClass:Core3DEdgeTreatmentNativeOperation.class])return;auto native=(Core3DEdgeTreatmentNativeOperation*)operation;if(!native->settled){native->settled=YES;if(native->nativeWorkR2)core3d::Core3DViewer::cancelEdgeTreatmentR2(native->nativeWorkR2);else core3d::Core3DViewer::cancelEdgeTreatment(native->nativeWork);core3d::retained_edge_treatment::CommitResult result;result.outcome=core3d::retained_edge_treatment::CommitOutcome::Cancelled;result.refusal=core3d::retained_edge_treatment::Refusal::Cancelled;result.measuredUndoDelta=0;auto dto=B1Result(result);auto bind=native->stopProvenance;native->stopProvenance=nil;if(bind)bind(dto);auto callback=native->completion;native->completion=nil;if(callback)callback(dto);}}
 
 - (void)addTestPrimitives {
     [_glController addTestPrimitives];

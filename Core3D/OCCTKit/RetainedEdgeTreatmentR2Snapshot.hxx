@@ -8,6 +8,7 @@
 #include <TopoDS_Shape.hxx>
 #include <atomic>
 #include <memory>
+#include <optional>
 
 class OcctDocument;
 namespace core3d { class Core3DViewer; }
@@ -31,6 +32,10 @@ class Snapshot final {
     BaseRecipe source_;
     Definition definition_;
     std::vector<std::uint8_t> sourceBytes_, definitionBytes_;
+    // The proven pre-Boolean source base. An admitted prefix source edit
+    // rebuilds the complete prefix from this shape, never from the treated
+    // current shape.
+    TopoDS_Shape sourceBase_;
     TopoDS_Shape base_, current_;
     ReplayBudget chargedBudget_;
     std::uint64_t nonce_ = 0, presentationRevision_ = 0;
@@ -79,6 +84,10 @@ class DetachedInput final {
     std::uint64_t nonce_ = 0;
     Definition candidate_;
     BaseRecipe source_;
+    // The admitted edit and the proven pre-Boolean source base travel across
+    // the detached boundary as values/shapes only; no document authority.
+    std::optional<Edit> edit_;
+    TopoDS_Shape sourceBase_;
     TopoDS_Shape base_, originalCurrent_;
     ReplayBudget chargedBudget_;
     std::shared_ptr<std::atomic_bool> cancelled_;
@@ -89,11 +98,19 @@ class DetachedResult final {
     Definition definition_;
     BaseRecipe source_;
     std::vector<std::uint8_t> definitionBytes_, prefixBytes_;
+    // Set only when an admitted source edit rebuilt the prefix: the restaged
+    // pre-Boolean source base and a marker the staging path requires before
+    // it may touch the retained source carrier.
+    TopoDS_Shape editedSourceBase_;
+    bool sourceChanged_ = false;
     TopoDS_Shape base_, result_;
     ReplayBudget budget_;
 public:
     const Definition& definition() const noexcept { return definition_; }
     const TopoDS_Shape& result() const noexcept { return result_; }
+    const std::vector<std::uint8_t>& canonicalPrefixBytes() const noexcept { return prefixBytes_; }
+    const TopoDS_Shape& editedSourceBase() const noexcept { return editedSourceBase_; }
+    bool sourceChanged() const noexcept { return sourceChanged_; }
 };
 class Work final {
     friend class core3d::Core3DViewer;
@@ -105,6 +122,7 @@ private:
     std::variant<Edit, MigrationM3> mutation_;
     Definition candidate_;
     BaseRecipe source_;
+    TopoDS_Shape sourceBase_;
     std::vector<std::uint8_t> prefixBytes_;
     TopoDS_Shape base_, originalCurrent_;
     ReplayBudget chargedBudget_;
@@ -117,6 +135,9 @@ struct Record {
     TDF_Label label, owner;
     std::shared_ptr<const Definition> definition;
     std::vector<std::uint8_t> bytes;
+    // The exact retained source-carrier bytes staged by the same transaction;
+    // empty only when the carrier was not touched.
+    std::vector<std::uint8_t> sourceBytes;
     TopoDS_Shape base, current;
 };
 } // namespace core3d::retained_edge_treatment::r2
