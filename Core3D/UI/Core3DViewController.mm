@@ -16966,6 +16966,21 @@ static bool Core3DPublishCommittedSpatialSweep(
     candidate:(NSDictionary<NSString *, id> *)candidate
     completion:(void(^)(Core3DProfileConstructionResult result, NSString *detail))completion {
     if (!completion) return nil;
+#if DEBUG
+    const NSString *const diagnosticOperation = NSUUID.UUID.UUIDString;
+    const NSTimeInterval diagnosticStarted = NSDate.timeIntervalSinceReferenceDate;
+    void (^const originalCompletion)(Core3DProfileConstructionResult, NSString *) = completion;
+    completion = ^(Core3DProfileConstructionResult result, NSString *detail) {
+        NSLog(@"C2SpatialSweep op=%@ stage=completion.before result=%ld elapsed=%.3f main=%d detail=%@",
+            diagnosticOperation, (long)result, NSDate.timeIntervalSinceReferenceDate - diagnosticStarted,
+            NSThread.isMainThread, detail ?: @"");
+        originalCompletion(result, detail);
+        NSLog(@"C2SpatialSweep op=%@ stage=completion.after elapsed=%.3f main=%d",
+            diagnosticOperation, NSDate.timeIntervalSinceReferenceDate - diagnosticStarted, NSThread.isMainThread);
+    };
+    NSLog(@"C2SpatialSweep op=%@ stage=entry elapsed=%.3f main=%d",
+        diagnosticOperation, 0.0, NSThread.isMainThread);
+#endif
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected,
             @"Spatial sweep edits must start on the model thread."); });
@@ -16998,10 +17013,38 @@ static bool Core3DPublishCommittedSpatialSweep(
     Core3DSpatialSweepEditOperation *operation = [[Core3DSpatialSweepEditOperation alloc]
         initWithCancellation:cancellation];
     const auto opening = context->_opening;
+#if DEBUG
+    const std::string diagnosticOperationUTF8([diagnosticOperation UTF8String] ?: "");
+    const auto diagnosticSink = [diagnosticOperationUTF8, diagnosticStarted](const char *stage) {
+        try {
+            NSLog(@"C2SpatialSweep op=%s stage=%s elapsed=%.3f main=%d",
+                diagnosticOperationUTF8.c_str(), stage ?: "", NSDate.timeIntervalSinceReferenceDate - diagnosticStarted,
+                NSThread.isMainThread);
+        } catch (...) {}
+    };
+#endif
     __weak Core3DViewController *weakSelf = self;
+#if DEBUG
+    NSLog(@"C2SpatialSweep op=%@ stage=worker.enqueue elapsed=%.3f", diagnosticOperation,
+        NSDate.timeIntervalSinceReferenceDate - diagnosticStarted);
+#endif
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        const auto prepared = core3d::spatial_sweep::editor::Prepare(opening, nativeCandidate, *cancellation);
+#if DEBUG
+        diagnosticSink("worker.entry");
+#endif
+        const auto prepared = core3d::spatial_sweep::editor::Prepare(opening, nativeCandidate, *cancellation
+#if DEBUG
+            , diagnosticSink
+#endif
+            );
+#if DEBUG
+        diagnosticSink("worker.prepare-return");
+        diagnosticSink("main.enqueue");
+#endif
         dispatch_async(dispatch_get_main_queue(), ^{
+#if DEBUG
+            diagnosticSink("main.entry");
+#endif
             Core3DViewController *ownerController = weakSelf;
             if (!ownerController) {
                 NSString *detail = @"The editor closed.";
@@ -17060,12 +17103,24 @@ static bool Core3DPublishCommittedSpatialSweep(
                         Core3DProfileConstructionResultRejected, nil));
                 return;
             }
+ #if DEBUG
+            diagnosticSink("transaction.apply.before");
+ #endif
             const auto applied = core3d::composite_recipe::spatial_g0::Transaction::Apply(
                 documentOwner->Document(), prepared.prepared);
+#if DEBUG
+            diagnosticSink("transaction.apply.after");
+#endif
             using Outcome = core3d::composite_recipe::spatial_g0::ApplyOutcome;
             if (applied.outcome == Outcome::Committed) {
+ #if DEBUG
+                diagnosticSink("publication.before");
+ #endif
                 bool published = Core3DPublishCommittedSpatialSweep(ownerController,
                     glController, viewer, documentOwner, prepared.prepared);
+#if DEBUG
+                diagnosticSink("publication.after");
+#endif
                 try { documentOwner->NotifyChanges(); } catch (...) { published = false; }
                 [glController refreshSelectionState];
                 [ownerController viewDidChangeViewportPresentationState];

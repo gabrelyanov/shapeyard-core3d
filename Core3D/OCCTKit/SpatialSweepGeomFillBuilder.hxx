@@ -43,8 +43,19 @@
 #include <TopoDS_Solid.hxx>
 #include <gp_Pln.hxx>
 #include <sstream>
+#if DEBUG
+#include <functional>
+#endif
 
 namespace core3d::spatial_sweep {
+#if DEBUG
+using SpatialSweepDiagnosticSink = std::function<void(const char *)>;
+inline void SpatialSweepDiagnostic(const SpatialSweepDiagnosticSink& sink, const char *stage) noexcept {
+    try { if (sink) sink(stage); } catch (...) {}
+}
+#else
+struct SpatialSweepDiagnosticSink {};
+#endif
 class ArcLengthRadiusLaw final : public Law_Function {
     DEFINE_STANDARD_RTTI_INLINE(ArcLengthRadiusLaw,Law_Function)
 public:
@@ -285,17 +296,52 @@ inline bool EverySectionAccountedFor(const TopoDS_Shell& shell,const std::array<
 }
 } // namespace geomfill_detail
 
-inline GeomFillBuildResult BuildGeomFillSweep(const bounded_curve::Definition& curve,const Definition& definition,const std::atomic_bool& cancelled) noexcept {
+inline GeomFillBuildResult BuildGeomFillSweep(const bounded_curve::Definition& curve,const Definition& definition,const std::atomic_bool& cancelled
+#if DEBUG
+    , const SpatialSweepDiagnosticSink& diagnostic = {}
+#endif
+    ) noexcept {
     GeomFillBuildResult output;try{
+#if DEBUG
+        SpatialSweepDiagnostic(diagnostic, "geomfill.enter");
+#endif
         if(cancelled.load()||bounded_curve::Validate(curve)!=bounded_curve::Refusal::None||Validate(definition)!=Refusal::None)return output;const double mmPerUnit=definition.dimensionMetersPerUnit*1000,r0=definition.radius.startRadius*mmPerUnit,r1=definition.radius.endRadius*mmPerUnit,R=std::max(r0,r1)+4*PositionalEpsilonMM;
         Handle(Geom_BSplineCurve) geometry=geomfill_detail::Curve(curve,mmPerUnit);Handle(GeomAdaptor_Curve) adaptor=new GeomAdaptor_Curve(geometry);gp_Pnt p;gp_Vec startDerivative;adaptor->D1(adaptor->FirstParameter(),p,startDerivative);
-        auto preliminary=proof_producer::Produce(curve,mmPerUnit,R,definition.closure==ClosureKind::ClosedNoCaps,{0,0},&cancelled);if(!preliminary.produced()){output.status=GeomFillBuildStatus::ProofRefused;return output;}
-        const double frameTolerance=FrameTolerance(R);auto bishopOnly=PrepareBishopTransport(adaptor,geomfill_detail::WorldSeed(curve,definition.orientation.authoredSeed),0,0,frameTolerance,&cancelled);if(!bishopOnly){output.status=GeomFillBuildStatus::TransportRefused;return output;}
+        auto preliminary=proof_producer::Produce(curve,mmPerUnit,R,definition.closure==ClosureKind::ClosedNoCaps,{0,0},&cancelled);
+#if DEBUG
+        SpatialSweepDiagnostic(diagnostic, preliminary.produced() ? "geomfill.preliminary-proof.ok" : "geomfill.preliminary-proof.refused");
+#endif
+        if(!preliminary.produced()){output.status=GeomFillBuildStatus::ProofRefused;return output;}
+        const double frameTolerance=FrameTolerance(R);auto bishopOnly=PrepareBishopTransport(adaptor,geomfill_detail::WorldSeed(curve,definition.orientation.authoredSeed),0,0,frameTolerance,&cancelled);
+#if DEBUG
+        SpatialSweepDiagnostic(diagnostic, bishopOnly ? "geomfill.transport-1.ok" : "geomfill.transport-1.refused");
+#endif
+        if(!bishopOnly){output.status=GeomFillBuildStatus::TransportRefused;return output;}
         Interval holonomy{0,0};if(definition.closure==ClosureKind::ClosedNoCaps){double h=0;if(!Holonomy(bishopOnly->nodes.front().bishop,bishopOnly->nodes.back().bishop,h)){output.status=GeomFillBuildStatus::TransportRefused;return output;}holonomy={std::nextafter(h,-std::numeric_limits<double>::infinity()),std::nextafter(h,std::numeric_limits<double>::infinity())};}
-        auto proof=proof_producer::Produce(curve,mmPerUnit,R,definition.closure==ClosureKind::ClosedNoCaps,holonomy,&cancelled);if(!proof.produced()){output.status=GeomFillBuildStatus::ProofRefused;return output;}output.curveProof=proof.certificate;output.admission=Admit(definition,curve,output.curveProof,geomfill_detail::RetainedTangent(curve,startDerivative),true);if(!output.admission.admitted()){output.status=GeomFillBuildStatus::ProofRefused;return output;}
-        auto table=PrepareBishopTransport(adaptor,geomfill_detail::WorldSeed(curve,definition.orientation.authoredSeed),definition.orientation.phaseRadians,output.admission.correctedTotalSpin,frameTolerance,&cancelled);if(!table){output.status=GeomFillBuildStatus::TransportRefused;return output;}Handle(BishopTrihedronLaw) trihedron=new BishopTrihedronLaw(table,definition.orientation.phaseRadians,output.admission.correctedTotalSpin);Handle(GeomFill_CurveAndTrihedron) location=new GeomFill_CurveAndTrihedron(trihedron);if(!location->SetCurve(adaptor)){output.status=GeomFillBuildStatus::TransportRefused;return output;}Handle(ArcLengthRadiusLaw) radius=new ArcLengthRadiusLaw(table,r0,r1);
+        auto proof=proof_producer::Produce(curve,mmPerUnit,R,definition.closure==ClosureKind::ClosedNoCaps,holonomy,&cancelled);
+#if DEBUG
+        SpatialSweepDiagnostic(diagnostic, proof.produced() ? "geomfill.final-proof.ok" : "geomfill.final-proof.refused");
+#endif
+        if(!proof.produced()){output.status=GeomFillBuildStatus::ProofRefused;return output;}output.curveProof=proof.certificate;output.admission=Admit(definition,curve,output.curveProof,geomfill_detail::RetainedTangent(curve,startDerivative),true);
+#if DEBUG
+        SpatialSweepDiagnostic(diagnostic, output.admission.admitted() ? "geomfill.admission.ok" : "geomfill.admission.refused");
+#endif
+        if(!output.admission.admitted()){output.status=GeomFillBuildStatus::ProofRefused;return output;}
+        auto table=PrepareBishopTransport(adaptor,geomfill_detail::WorldSeed(curve,definition.orientation.authoredSeed),definition.orientation.phaseRadians,output.admission.correctedTotalSpin,frameTolerance,&cancelled);
+#if DEBUG
+        SpatialSweepDiagnostic(diagnostic, table ? "geomfill.transport-2.ok" : "geomfill.transport-2.refused");
+#endif
+        if(!table){output.status=GeomFillBuildStatus::TransportRefused;return output;}Handle(BishopTrihedronLaw) trihedron=new BishopTrihedronLaw(table,definition.orientation.phaseRadians,output.admission.correctedTotalSpin);Handle(GeomFill_CurveAndTrihedron) location=new GeomFill_CurveAndTrihedron(trihedron);if(!location->SetCurve(adaptor)){output.status=GeomFillBuildStatus::TransportRefused;return output;}Handle(ArcLengthRadiusLaw) radius=new ArcLengthRadiusLaw(table,r0,r1);
         std::array<TopoDS_Face,4> sides;std::array<Handle(Geom_Surface),4> surfaces;std::array<bool,4> exchange{};BRepBuilderAPI_Sewing sewing(PositionalEpsilonMM/8,Standard_True,Standard_True,Standard_True,Standard_False);double fitting=0;
-        for(unsigned q=0;q<4;++q){if(cancelled.load()){output.status=GeomFillBuildStatus::Cancelled;return output;}Handle(GeomFill_EvolvedSection) section=new GeomFill_EvolvedSection(geomfill_detail::Quarter(q),radius);GeomFill_Sweep sweep(location,Standard_False);sweep.SetDomain(table->first,table->last,table->first,table->last);sweep.SetTolerance(PositionalEpsilonMM/4,PositionalEpsilonMM/8,PositionalEpsilonMM/8,frameTolerance);sweep.SetForceApproxC1(Standard_False);sweep.Build(section,GeomFill_Section,GeomAbs_C1,12,256);if(!sweep.IsDone()||!std::isfinite(sweep.ErrorOnSurface())||sweep.ErrorOnSurface()>PositionalEpsilonMM/4){output.status=GeomFillBuildStatus::SurfaceRefused;return output;}surfaces[q]=sweep.Surface();exchange[q]=sweep.ExchangeUV();if(sweep.UReversed()||sweep.VReversed()||!geomfill_detail::PositiveReturnedSurface(surfaces[q])){output.status=GeomFillBuildStatus::SurfaceRefused;return output;}BRepBuilderAPI_MakeFace face(surfaces[q],PositionalEpsilonMM/8);if(!face.IsDone()){output.status=GeomFillBuildStatus::SurfaceRefused;return output;}sides[q]=face.Face();sewing.Add(sides[q]);fitting=std::max(fitting,sweep.ErrorOnSurface());}
+        for(unsigned q=0;q<4;++q){if(cancelled.load()){output.status=GeomFillBuildStatus::Cancelled;return output;}Handle(GeomFill_EvolvedSection) section=new GeomFill_EvolvedSection(geomfill_detail::Quarter(q),radius);GeomFill_Sweep sweep(location,Standard_False);sweep.SetDomain(table->first,table->last,table->first,table->last);sweep.SetTolerance(PositionalEpsilonMM/4,PositionalEpsilonMM/8,PositionalEpsilonMM/8,frameTolerance);sweep.SetForceApproxC1(Standard_False);
+#if DEBUG
+            SpatialSweepDiagnostic(diagnostic, q == 0 ? "geomfill.build-1.enter" : q == 1 ? "geomfill.build-2.enter" : q == 2 ? "geomfill.build-3.enter" : "geomfill.build-4.enter");
+#endif
+            sweep.Build(section,GeomFill_Section,GeomAbs_C1,12,256);
+#if DEBUG
+            SpatialSweepDiagnostic(diagnostic, sweep.IsDone() ? "geomfill.build.exit.ok" : "geomfill.build.exit.refused");
+#endif
+            if(!sweep.IsDone()||!std::isfinite(sweep.ErrorOnSurface())||sweep.ErrorOnSurface()>PositionalEpsilonMM/4){output.status=GeomFillBuildStatus::SurfaceRefused;return output;}surfaces[q]=sweep.Surface();exchange[q]=sweep.ExchangeUV();if(sweep.UReversed()||sweep.VReversed()||!geomfill_detail::PositiveReturnedSurface(surfaces[q])){output.status=GeomFillBuildStatus::SurfaceRefused;return output;}BRepBuilderAPI_MakeFace face(surfaces[q],PositionalEpsilonMM/8);if(!face.IsDone()){output.status=GeomFillBuildStatus::SurfaceRefused;return output;}sides[q]=face.Face();sewing.Add(sides[q]);fitting=std::max(fitting,sweep.ErrorOnSurface());}
         auto cap=[&](double u,bool reverse,TopoDS_Face& face)->bool{BRepBuilderAPI_MakeWire wire;for(unsigned q=0;q<4;++q){BRepBuilderAPI_MakeEdge edge(geomfill_detail::PathBoundary(surfaces[q],exchange[q],u));if(!edge.IsDone())return false;wire.Add(edge.Edge());}if(!wire.IsDone()||!geomfill_detail::SerializerStableCap(wire.Wire(),face))return false;if(reverse)face.Reverse();return true;};
         TopoDS_Face firstCap,lastCap;
         if(definition.closure==ClosureKind::OpenFlatCaps){if(!cap(table->first,true,firstCap)||!cap(table->last,false,lastCap)){output.status=GeomFillBuildStatus::SurfaceRefused;return output;}sewing.Add(firstCap);sewing.Add(lastCap);}sewing.Perform();if(sewing.NbFreeEdges()!=0||sewing.NbMultipleEdges()!=0){output.status=GeomFillBuildStatus::SewingRefused;return output;}TopoDS_Shell shell=geomfill_detail::OneShell(sewing.SewedShape());if(shell.IsNull()){output.status=GeomFillBuildStatus::SewingRefused;return output;}BRepBuilderAPI_MakeSolid makeSolid(shell);if(!makeSolid.IsDone()){output.status=GeomFillBuildStatus::SolidRefused;return output;}TopoDS_Solid solid=makeSolid.Solid();if(!BRepLib::OrientClosedSolid(solid)||!BRepCheck_Analyzer(solid,Standard_True).IsValid()||!BRep_Tool::IsClosed(shell)){output.status=GeomFillBuildStatus::SolidRefused;return output;}

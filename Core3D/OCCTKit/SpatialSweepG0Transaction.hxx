@@ -274,7 +274,11 @@ inline Prepared Prepare(const CaptureResult& captured,
                         const spatial_sweep::GeomFillBuildResult& first,
                         const spatial_sweep::GeomFillBuildResult& second,
                         const std::shared_ptr<const Payload>& payload,
-                        const PinnedGeometryProfile& actual) noexcept {
+                        const PinnedGeometryProfile& actual
+#if DEBUG
+                        , const spatial_sweep::SpatialSweepDiagnosticSink& diagnostic = {}
+#endif
+                        ) noexcept {
     Prepared result;
     try {
         if (!captured.admitted() || !captured.fence.descendantsSupported
@@ -284,6 +288,10 @@ inline Prepared Prepare(const CaptureResult& captured,
             || !(payload->definition.owner == captured.fence.owner)
             || payload->definition.outputNode != captured.fence.outputNode) return result;
         const auto fixed = PrepareFixedPoint(first.solid, second.solid, actual);
+#if DEBUG
+        spatial_sweep::SpatialSweepDiagnostic(diagnostic,
+            fixed.admitted() ? "g0.fixed-point.refusal.none" : "g0.fixed-point.refusal.present");
+#endif
         if (!fixed.admitted()) return result;
         result.captured = captured.fence; result.payload = payload;
         result.canonicalSolid = fixed.canonical;

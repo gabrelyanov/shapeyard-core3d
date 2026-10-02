@@ -80,9 +80,16 @@ inline bool MakeNativeWire(const bounded_curve::Definition& definition,
 
 inline Result Prepare(const CaptureResult& opening,
                       Candidate candidate,
-                      const std::atomic_bool& cancelled) noexcept {
+                      const std::atomic_bool& cancelled
+#if DEBUG
+                      , const SpatialSweepDiagnosticSink& diagnostic = {}
+#endif
+                      ) noexcept {
     Result result;
     try {
+#if DEBUG
+        SpatialSweepDiagnostic(diagnostic, "editor.prepare.enter");
+#endif
         if (cancelled.load()) { result.status = Status::Cancelled; return result; }
         if (!opening.admitted() || !opening.payload) {
             result.status = opening.refusal == composite_recipe::spatial_g0::CaptureRefusal::UnsupportedDescendant
@@ -184,21 +191,45 @@ inline Result Prepare(const CaptureResult& opening,
             result.status = Status::InvalidBinding; return result;
         }
 
+ #if DEBUG
+        SpatialSweepDiagnostic(diagnostic, "editor.build-1.enter");
+ #endif
         const GeomFillBuildResult first = BuildGeomFillSweep(candidate.curve,
                                                               candidate.sweep,
-                                                              cancelled);
+                                                              cancelled
+#if DEBUG
+                                                              , diagnostic
+#endif
+                                                              );
         if (cancelled.load()) { result.status = Status::Cancelled; return result; }
+ #if DEBUG
+        SpatialSweepDiagnostic(diagnostic, "editor.build-2.enter");
+ #endif
         const GeomFillBuildResult second = BuildGeomFillSweep(candidate.curve,
                                                                candidate.sweep,
-                                                               cancelled);
+                                                               cancelled
+#if DEBUG
+                                                               , diagnostic
+#endif
+                                                               );
         if (!first.built() || !second.built()) {
             result.status = Status::BuildRefused; return result;
         }
+ #if DEBUG
+        SpatialSweepDiagnostic(diagnostic, "editor.fixed-point.enter");
+ #endif
         result.prepared = composite_recipe::spatial_g0::Prepare(
             opening, first, second, payload,
-            composite_recipe::spatial_g0::PinnedProfile);
+            composite_recipe::spatial_g0::PinnedProfile
+#if DEBUG
+            , diagnostic
+#endif
+            );
         result.status = result.prepared.admitted()
             ? Status::Prepared : Status::FixedPointRefused;
+ #if DEBUG
+        SpatialSweepDiagnostic(diagnostic, result.admitted() ? "editor.prepare.exit.prepared" : "editor.prepare.exit.refused");
+ #endif
         return result;
     } catch (...) { return result; }
 }
