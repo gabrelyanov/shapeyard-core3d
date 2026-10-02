@@ -476,17 +476,24 @@ bool CaptureTreatmentSourceBytes(const Handle(TDocStd_Document)& document, const
     try {
         core3d::profile::Record profile;
         core3d::enclosure::Record enclosure;
+        core3d::loft_persistence::Record loft;
         if (!core3d::profile::Read(document, owner, profile)
-            || !core3d::enclosure::Read(document, owner, enclosure)) return false;
-        const bool hasProfile = !profile.label.IsNull(), hasEnclosure = !enclosure.label.IsNull();
-        if (hasProfile == hasEnclosure) return false;
+            || !core3d::enclosure::Read(document, owner, enclosure)
+            || !core3d::loft_persistence::Read(document, owner, loft)) return false;
+        const bool hasProfile = !profile.label.IsNull(), hasEnclosure = !enclosure.label.IsNull(),
+            hasLoft = !loft.label.IsNull();
+        if (int(hasProfile) + int(hasEnclosure) + int(hasLoft) != 1) return false;
         if (hasProfile)
             return core3d::composite_recipe::EncodeScalarRecipe(
                 core3d::composite_recipe::RecipeKind::Profile,
                 core3d::profile::SchemaFor(profile.parameters), profile.values, bytes);
+        if (hasEnclosure)
+            return core3d::composite_recipe::EncodeScalarRecipe(
+                core3d::composite_recipe::RecipeKind::Enclosure,
+                enclosure.parameters.definition.constructionFrame ? 2 : 1, enclosure.values, bytes);
         return core3d::composite_recipe::EncodeScalarRecipe(
-            core3d::composite_recipe::RecipeKind::Enclosure,
-            enclosure.parameters.definition.constructionFrame ? 2 : 1, enclosure.values, bytes);
+            core3d::composite_recipe::RecipeKind::RectangularLoft,
+            std::uint32_t(core3d::loft_persistence::Schema), loft.values, bytes);
     } catch (...) { bytes.clear(); return false; }
 }
 
@@ -554,17 +561,20 @@ OcctDocument::CaptureRetainedEdgeTreatment(
             refusal=Refusal::StaleSnapshot;return {};
         }
         core3d::profile::Record profile;core3d::enclosure::Record enclosure;
+        core3d::loft_persistence::Record loft;
         if(!core3d::profile::Read(myOcafDoc,owner,profile)
-            ||!core3d::enclosure::Read(myOcafDoc,owner,enclosure))return {};
-        const bool hasProfile=!profile.label.IsNull(),hasEnclosure=!enclosure.label.IsNull();
-        if(hasProfile==hasEnclosure){refusal=Refusal::UnsupportedBase;return {};}
+            ||!core3d::enclosure::Read(myOcafDoc,owner,enclosure)
+            ||!core3d::loft_persistence::Read(myOcafDoc,owner,loft))return {};
+        const bool hasProfile=!profile.label.IsNull(),hasEnclosure=!enclosure.label.IsNull(),hasLoft=!loft.label.IsNull();
+        if(int(hasProfile)+int(hasEnclosure)+int(hasLoft)!=1){refusal=Refusal::UnsupportedBase;return {};}
         std::optional<Record> treatment;
         if(!Read(myOcafDoc,owner,treatment,refusal))return {};
         auto result=std::shared_ptr<Snapshot>(new Snapshot);
         result->ownerLabel_=owner;result->owner_.fence=expected;result->current_=XCAFDoc_ShapeTool::GetShape(owner);
         if(result->current_.IsNull()){refusal=Refusal::NoncurrentSource;return {};}
         if(hasProfile){if(!profile.IsCurrent(myOcafDoc,owner)){refusal=Refusal::NoncurrentSource;return {};}result->source_=profile.parameters;result->sourceLabel_=profile.label;result->sourceIdentifier_=profile.identifier;core3d::composite_recipe::EncodeScalarRecipe(core3d::composite_recipe::RecipeKind::Profile,core3d::profile::SchemaFor(profile.parameters),profile.values,result->sourceBytes_);}
-        else {if(!enclosure.IsCurrent(myOcafDoc,owner)){refusal=Refusal::NoncurrentSource;return {};}result->source_=enclosure.parameters;result->sourceLabel_=enclosure.label;result->sourceIdentifier_=enclosure.identifier;core3d::composite_recipe::EncodeScalarRecipe(core3d::composite_recipe::RecipeKind::Enclosure,enclosure.parameters.definition.constructionFrame?2:1,enclosure.values,result->sourceBytes_);}
+        else if(hasEnclosure){if(!enclosure.IsCurrent(myOcafDoc,owner)){refusal=Refusal::NoncurrentSource;return {};}result->source_=enclosure.parameters;result->sourceLabel_=enclosure.label;result->sourceIdentifier_=enclosure.identifier;core3d::composite_recipe::EncodeScalarRecipe(core3d::composite_recipe::RecipeKind::Enclosure,enclosure.parameters.definition.constructionFrame?2:1,enclosure.values,result->sourceBytes_);}
+        else {if(!loft.IsCurrent(myOcafDoc,owner)){refusal=Refusal::NoncurrentSource;return {};}result->source_=loft.definition;result->sourceLabel_=loft.label;result->sourceIdentifier_=loft.identifier;core3d::composite_recipe::EncodeScalarRecipe(core3d::composite_recipe::RecipeKind::RectangularLoft,std::uint32_t(core3d::loft_persistence::Schema),loft.values,result->sourceBytes_);}
         if(treatment){result->definition_=treatment->value->definition;result->definitionBytes_=treatment->value->bytes;result->base_=treatment->value->base;TopoDS_Shape replayed;std::vector<StepProof>proofs;ReplayBudget budget;if(!Replay(result->base_,*result->definition_,replayed,proofs,budget,refusal)||!EquivalentReplayGeometry(result->current_,replayed,budget,refusal))return {};result->chargedBudget_=budget;}
         else result->base_=result->current_;
         result->owner_.status=core3d::retained_recipe::OwnerStatus::CurrentEditable;
@@ -640,6 +650,14 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
                 ||!priorState.enclosure.IsCurrent(myOcafDoc,original.ownerLabel_)){
                 refusal=Refusal::NoncurrentSource;return Standard_False;
             }
+        }else if(const auto*loftSource=std::get_if<core3d::rectangular_loft::Definition>(&original.source_)){
+            (void)loftSource;
+            if(priorState.loft.label.IsNull()
+                ||!priorState.loft.label.IsEqual(original.sourceLabel_)
+                ||priorState.loft.identifier!=original.sourceIdentifier_
+                ||!priorState.loft.IsCurrent(myOcafDoc,original.ownerLabel_)){
+                refusal=Refusal::NoncurrentSource;return Standard_False;
+            }
         }else{refusal=Refusal::MalformedCarrier;return Standard_False;}
         // D253 measured history companion: capture the actual owner-subtree
         // naming state, the exact source/SYET state and the original
@@ -693,6 +711,13 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
                 if(!core3d::enclosure::Encode(*enclosure,values)
                     ||!core3d::composite_recipe::EncodeScalarRecipe(core3d::composite_recipe::RecipeKind::Enclosure,
                         enclosure->definition.constructionFrame?2:1,values,admittedSourceBytes)){
+                    refusal=Refusal::MalformedCarrier;return Standard_False;
+                }
+            }else if(const auto* loft=std::get_if<core3d::rectangular_loft::Definition>(&admitted.source_)){
+                std::vector<double> values;
+                if(!core3d::loft_persistence::Encode(*loft,values)
+                    ||!core3d::composite_recipe::EncodeScalarRecipe(core3d::composite_recipe::RecipeKind::RectangularLoft,
+                        std::uint32_t(core3d::loft_persistence::Schema),values,admittedSourceBytes)){
                     refusal=Refusal::MalformedCarrier;return Standard_False;
                 }
             }
@@ -760,12 +785,12 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
         std::fprintf(stderr,"B1B2_STAGE phase=replace-shape result=%d\n",shapeStaged?1:0);
 #endif
         if(!shapeStaged){refusal=Refusal::StageFailed;return Standard_False;}
-        bool sourceStaged=false;if(const auto*p=std::get_if<RebuildSource>(&edit)){if(const auto*profile=std::get_if<core3d::profile::Parameters>(&p->requested))sourceStaged=core3d::profile::Stage(myOcafDoc,original.ownerLabel_,*profile,original.sourceIdentifier_);else if(const auto*enclosure=std::get_if<core3d::enclosure::Parameters>(&p->requested))sourceStaged=core3d::enclosure::Stage(myOcafDoc,original.ownerLabel_,*enclosure,original.sourceIdentifier_);}else if(const auto*profile=std::get_if<core3d::profile::Parameters>(&original.source_))sourceStaged=core3d::profile::Stage(myOcafDoc,original.ownerLabel_,*profile,original.sourceIdentifier_);else if(const auto*enclosure=std::get_if<core3d::enclosure::Parameters>(&original.source_))sourceStaged=core3d::enclosure::Stage(myOcafDoc,original.ownerLabel_,*enclosure,original.sourceIdentifier_);
+        bool sourceStaged=false;if(const auto*p=std::get_if<RebuildSource>(&edit)){if(const auto*profile=std::get_if<core3d::profile::Parameters>(&p->requested))sourceStaged=core3d::profile::Stage(myOcafDoc,original.ownerLabel_,*profile,original.sourceIdentifier_);else if(const auto*enclosure=std::get_if<core3d::enclosure::Parameters>(&p->requested))sourceStaged=core3d::enclosure::Stage(myOcafDoc,original.ownerLabel_,*enclosure,original.sourceIdentifier_);else if(const auto*loft=std::get_if<core3d::rectangular_loft::Definition>(&p->requested))sourceStaged=core3d::loft_persistence::Stage(myOcafDoc,original.ownerLabel_,*loft,original.sourceIdentifier_);}else if(const auto*profile=std::get_if<core3d::profile::Parameters>(&original.source_))sourceStaged=core3d::profile::Stage(myOcafDoc,original.ownerLabel_,*profile,original.sourceIdentifier_);else if(const auto*enclosure=std::get_if<core3d::enclosure::Parameters>(&original.source_))sourceStaged=core3d::enclosure::Stage(myOcafDoc,original.ownerLabel_,*enclosure,original.sourceIdentifier_);else if(const auto*loft=std::get_if<core3d::rectangular_loft::Definition>(&original.source_))sourceStaged=core3d::loft_persistence::Stage(myOcafDoc,original.ownerLabel_,*loft,original.sourceIdentifier_);
 #if DEBUG
         std::fprintf(stderr,"B1B2_STAGE phase=source-stage result=%d\n",sourceStaged?1:0);
 #endif
         if(!sourceStaged){refusal=Refusal::StageFailed;return Standard_False;}
-        core3d::profile::Record profile;core3d::enclosure::Record enclosure;if(!core3d::profile::Read(myOcafDoc,original.ownerLabel_,profile)||!core3d::enclosure::Read(myOcafDoc,original.ownerLabel_,enclosure)){refusal=Refusal::StageFailed;return Standard_False;}const TDF_Label metadata=!profile.label.IsNull()?profile.label:enclosure.label;
+        core3d::profile::Record profile;core3d::enclosure::Record enclosure;core3d::loft_persistence::Record loft;if(!core3d::profile::Read(myOcafDoc,original.ownerLabel_,profile)||!core3d::enclosure::Read(myOcafDoc,original.ownerLabel_,enclosure)||!core3d::loft_persistence::Read(myOcafDoc,original.ownerLabel_,loft)){refusal=Refusal::StageFailed;return Standard_False;}const TDF_Label metadata=!profile.label.IsNull()?profile.label:!enclosure.label.IsNull()?enclosure.label:loft.label;
         auto payload=std::make_shared<Payload>();payload->definition=built.definition_;payload->bytes=built.definitionBytes_;payload->base=built.base_;Attribute::Set(metadata,payload);TNaming_Builder(metadata).Select(built.result_,built.result_);
         // Strict full capture/readback, performed once now that the owner
         // shape, its source recipe and the SYET payload/binding are coherent:
@@ -791,6 +816,14 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
                 &&staged.parameters.metersPerUnit==prior.parameters.metersPerUnit
                 &&staged.IsCurrent(myOcafDoc,original.ownerLabel_);
         };
+        const auto sameRestagedLoft=[&](const core3d::loft_persistence::Record&staged,const core3d::loft_persistence::Record&prior){
+            if(staged.label.IsNull()!=prior.label.IsNull())return false;
+            if(staged.label.IsNull())return true;
+            return staged.label.IsEqual(prior.label)&&staged.label.Data()==prior.label.Data()
+                &&staged.identifier==prior.identifier&&staged.values==prior.values
+                &&staged.definition.dimensionMetersPerUnit==prior.definition.dimensionMetersPerUnit
+                &&staged.IsCurrent(myOcafDoc,original.ownerLabel_);
+        };
         if(pairedReadback){
             if(const auto*rebuild=std::get_if<RebuildSource>(&edit)){
                 std::vector<double> requestedValues;
@@ -814,10 +847,22 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
                         &&stagedState.enclosure.parameters.metersPerUnit==priorState.enclosure.parameters.metersPerUnit
                         &&stagedState.enclosure.IsCurrent(myOcafDoc,original.ownerLabel_)
                         &&sameRestagedSource(stagedState.profile,priorState.profile);
+                else if(const auto*requestedLoft=std::get_if<core3d::rectangular_loft::Definition>(&rebuild->requested))
+                    pairedReadback=core3d::loft_persistence::Encode(*requestedLoft,requestedValues)
+                        &&!stagedState.loft.label.IsNull()
+                        &&stagedState.loft.label.IsEqual(priorState.loft.label)
+                        &&stagedState.loft.label.Data()==priorState.loft.label.Data()
+                        &&stagedState.loft.identifier==original.sourceIdentifier_
+                        &&core3d::loft_persistence::SameBits(stagedState.loft.values,requestedValues)
+                        &&stagedState.loft.definition.dimensionMetersPerUnit==priorState.loft.definition.dimensionMetersPerUnit
+                        &&stagedState.loft.IsCurrent(myOcafDoc,original.ownerLabel_)
+                        &&sameRestagedSource(stagedState.profile,priorState.profile)
+                        &&sameRestagedSource(stagedState.enclosure,priorState.enclosure);
                 else pairedReadback=false;
             }else{
                 pairedReadback=sameRestagedSource(stagedState.profile,priorState.profile)
-                    &&sameRestagedSource(stagedState.enclosure,priorState.enclosure);
+                    &&sameRestagedSource(stagedState.enclosure,priorState.enclosure)
+                    &&sameRestagedLoft(stagedState.loft,priorState.loft);
             }
         }
 #if DEBUG

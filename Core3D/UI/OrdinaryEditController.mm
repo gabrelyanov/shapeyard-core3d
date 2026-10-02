@@ -482,7 +482,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
             const bool requestsTreatmentR2=bool(request.edgeTreatmentSnapshotR2)||bool(request.edgeTreatmentMigrationR2);
             const bool pairedTreatment=!requestsTreatmentR2&&(request.operation==OrdinaryTransformOperation::RetainedEdgeTreatment
                 ||((request.operation==OrdinaryTransformOperation::ProfileRebuild
-                    ||request.operation==OrdinaryTransformOperation::EnclosureRebuild)
+                    ||request.operation==OrdinaryTransformOperation::EnclosureRebuild
+                    ||request.operation==OrdinaryTransformOperation::LoftStationRebuild)
                     &&record.previous.edgeTreatment.has_value()));
             const bool pairedTreatmentR2=request.operation==OrdinaryTransformOperation::RetainedEdgeTreatment
                 &&(bool(request.edgeTreatmentSnapshotR2)||bool(request.edgeTreatmentMigrationR2));
@@ -2345,9 +2346,14 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
 #if DEBUG
                 if(_stageFailureIndex==2){_stageFailureIndex=-1;pairedFault=true;}
 #endif
+                // A paired B1 treatment staging already restaged the rebuilt loft
+                // recipe atomically with the owner shape and SYET carrier above;
+                // the exact candidate values are verified in the dedicated
+                // readback below instead of staging the same record twice.
                 loftStaged=record.requested.loftRebuild && record.requested.loftStationEdit
-                    && _document->StageSavedLoftReplacement(record.previous,record.requested.shape,
-                        *record.requested.loftRebuild,*record.requested.loftStationEdit,pairedFault);
+                    && (treatmentStaged
+                        || _document->StageSavedLoftReplacement(record.previous,record.requested.shape,
+                            *record.requested.loftRebuild,*record.requested.loftStationEdit,pairedFault));
                 if(!loftStaged)throw Standard_Failure("Saved loft paired staging failed");
             }
             if(IsCylindricalCutOperation(record.requested.operation)) {
@@ -2470,7 +2476,23 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     || !sweep_rebuild::SameRawScalars(record.candidate.scalars,record.previous.scalars))
                     : record.candidate.scalars != EncodedTransform(record.requested.transform))
                 || (!sweepStaged && !record.candidate.sweep.IsEqual(record.previous.sweep))
-                || (!loftStaged && !cutStaged && !record.candidate.loft.IsEqual(record.previous.loft))
+                || (!loftStaged && !cutStaged && (treatmentStaged
+                    // A staged B1 treatment restages the same loft recipe
+                    // against the new owner shape, so the old bound shape
+                    // must not be required. Recipe label, identifier,
+                    // values and unit stay exact and the binding must be
+                    // current on the candidate owner.
+                    ? (record.candidate.loft.label.IsNull()!=record.previous.loft.label.IsNull()
+                        || (!record.candidate.loft.label.IsNull()
+                            && (!record.candidate.loft.label.IsEqual(record.previous.loft.label)
+                                || record.candidate.loft.label.Data()!=record.previous.loft.label.Data()
+                                || record.candidate.loft.identifier!=record.previous.loft.identifier
+                                || record.candidate.loft.values!=record.previous.loft.values
+                                || record.candidate.loft.definition.dimensionMetersPerUnit
+                                    !=record.previous.loft.definition.dimensionMetersPerUnit
+                                || !record.candidate.loft.IsCurrent(
+                                    _document->Document(),record.previous.label))))
+                    : !record.candidate.loft.IsEqual(record.previous.loft)))
                 || (!cutStaged && !cutSourceStaged && !programSourceStaged && !treatmentSourceEditedR2 && !record.candidate.retained.IsEqual(record.previous.retained))
                 || (treatmentStaged
                     ?(!record.candidate.edgeTreatment||!ledger.edgeTreatmentReadback
@@ -2524,6 +2546,20 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     || !record.candidate.enclosure.IsCurrent(_document->Document(),record.previous.label)
                     || !_document->ValidateGeometryRepresentations())
                     throw Standard_Failure("Enclosure rebuild candidate readback failed");
+            }
+            if (treatmentStaged && record.requested.operation == OrdinaryTransformOperation::LoftStationRebuild) {
+                // The paired treatment staging restaged the rebuilt loft recipe
+                // in place of StageSavedLoftReplacement; verify the exact
+                // candidate values against the request here.
+                std::vector<double> values;
+                if (!core3d::loft_persistence::Encode(*record.requested.loftRebuild, values)
+                    || record.candidate.loft.identifier != record.previous.loft.identifier
+                    || !record.candidate.loft.label.IsEqual(record.previous.loft.label)
+                    || !core3d::loft_persistence::SameBits(record.candidate.loft.values, values)
+                    || !record.candidate.loft.IsCurrent(_document->Document(), record.previous.label)
+                    || !_document->ValidateGeometryRepresentations()) {
+                    throw Standard_Failure("Loft rebuild candidate readback failed");
+                }
             }
             if (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas) {
                 if (record.candidate.authoredFramesPresent) {

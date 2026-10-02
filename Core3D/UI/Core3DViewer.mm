@@ -218,7 +218,7 @@ std::shared_ptr<retained_edge_treatment::Work> Core3DViewer::prepareEdgeTreatmen
         }else if(const auto* amount=std::get_if<et::SetAmount>(&edit)){auto i=std::find_if(candidate.steps.begin(),candidate.steps.end(),[&](const et::Step&s){return s.feature==amount->feature;});if(i==candidate.steps.end()){refusal=et::Refusal::IdentityMismatch;return {};}i->amountMM=amount->amountMM;
         }else if(const auto* targets=std::get_if<et::ReplaceTargets>(&edit)){auto i=std::find_if(candidate.steps.begin(),candidate.steps.end(),[&](const et::Step&s){return s.feature==targets->feature;});if(i==candidate.steps.end()){refusal=et::Refusal::IdentityMismatch;return {};}if(i->selector){refusal=et::Refusal::UnsupportedOperation;return {};}i->anchors=targets->anchors;std::sort(i->anchors.begin(),i->anchors.end(),[](const et::Anchor&a,const et::Anchor&b){return a.key<b.key;});
         }else if(const auto* remove=std::get_if<et::Remove>(&edit)){auto i=std::find_if(candidate.steps.begin(),candidate.steps.end(),[&](const et::Step&s){return s.feature==remove->feature;});if(i==candidate.steps.end()){refusal=et::Refusal::IdentityMismatch;return {};}candidate.issuance.retiredLocalIDs.push_back(i->localID);std::sort(candidate.issuance.retiredLocalIDs.begin(),candidate.issuance.retiredLocalIDs.end());candidate.steps.erase(i);candidate.outputNode=candidate.steps.empty()?candidate.base.sourceNode:candidate.steps.back().node;
-        }else if(const auto* rebuild=std::get_if<et::RebuildSource>(&edit)){std::vector<double>values;std::vector<std::uint8_t>bytes;bool encoded=false;if(const auto*p=std::get_if<profile::Parameters>(&rebuild->requested)){encoded=profile::Encode(*p,values)&&composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::Profile,profile::SchemaFor(*p),values,bytes);}else if(const auto*e=std::get_if<enclosure::Parameters>(&rebuild->requested)){encoded=enclosure::Encode(*e,values)&&composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::Enclosure,e->definition.constructionFrame?2:1,values,bytes);}if(!encoded||!composite_recipe::Hash(bytes,candidate.base.sourceRecipeDigest)){refusal=et::Refusal::MalformedCarrier;return {};}}
+        }else if(const auto* rebuild=std::get_if<et::RebuildSource>(&edit)){std::vector<double>values;std::vector<std::uint8_t>bytes;bool encoded=false;if(const auto*p=std::get_if<profile::Parameters>(&rebuild->requested)){encoded=profile::Encode(*p,values)&&composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::Profile,profile::SchemaFor(*p),values,bytes);}else if(const auto*e=std::get_if<enclosure::Parameters>(&rebuild->requested)){encoded=enclosure::Encode(*e,values)&&composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::Enclosure,e->definition.constructionFrame?2:1,values,bytes);}else if(const auto*l=std::get_if<rectangular_loft::Definition>(&rebuild->requested)){encoded=loft_persistence::Encode(*l,values)&&composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::RectangularLoft,std::uint32_t(loft_persistence::Schema),values,bytes);}if(!encoded||!composite_recipe::Hash(bytes,candidate.base.sourceRecipeDigest)){refusal=et::Refusal::MalformedCarrier;return {};}}
         std::vector<std::uint8_t>bytes;if(!et::Encode(candidate,bytes,refusal))return {};
         auto work=std::make_shared<et::Work>();work->snapshot_=snapshot;work->edit_=edit;work->candidate_=std::move(candidate);work->label_=snapshot->ownerLabel_;work->presentation_=selected;work->state_=et::Work::State::Prepared;refusal=et::Refusal::None;return work;
     }catch(...){refusal=et::Refusal::BuildFailed;return {};}
@@ -3386,6 +3386,12 @@ struct LoftSolidGeometry {
     std::atomic_bool cancelled{false};
     rectangular_loft::SolidResult result;
     bool built=false;
+    std::optional<retained_edge_treatment::Definition> treatmentDefinition;
+    TopoDS_Shape treatmentBase;
+    std::vector<retained_edge_treatment::StepProof> treatmentProofs;
+    // D253 source-edit rebind inputs: main-thread verified value data only.
+    std::optional<retained_edge_treatment::SourceRebindRoles> treatmentRebind;
+    std::optional<retained_edge_treatment::BaseRecipe> treatmentRebuildSource;
 };
 struct SweepSolidGeometry {
     std::shared_ptr<const planar_sweep::Prepared> prepared;
@@ -4626,10 +4632,18 @@ std::optional<StoredRectangularLoftSnapshot> Core3DViewer::storedRectangularLoft
         const auto after=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
         if (!guard || !after || !(*after==*stamp) || !std::isfinite(effective) || effective<=0
             || !std::isfinite(effective*1000)) return {};
+        std::shared_ptr<const retained_edge_treatment::Snapshot> treatment;
+        {
+            namespace et=retained_edge_treatment;auto capture=std::shared_ptr<et::Snapshot>(new et::Snapshot);
+            capture->ownerLabel_=label;capture->sourceLabel_=state.loft.label;capture->sourceIdentifier_=state.loft.identifier;capture->source_=state.loft.definition;capture->current_=state.shape;capture->base_=state.edgeTreatment?state.edgeTreatment->value->base:state.shape;capture->nonce_=std::uint64_t(myDoc->Document()->GetData()->Time());capture->presentationRevision_=presentationRevision;
+            auto&seed=capture->seed_;seed.schema=1;receipt::ParseUUID(myDoc->DocumentIdentifier(),seed.owner.document);receipt::ParseUUID(state.entityIdentifier,seed.owner.entity);receipt::ParseUUID(state.definitionIdentifier,seed.owner.definition);seed.base.source.document=seed.owner.document;seed.base.source.entity=seed.owner.entity;seed.base.source.definition=seed.owner.definition;receipt::ParseUUID(state.loft.identifier,seed.base.source.sourceFeature);seed.base.sourceNode=MintEdgeTreatmentUUID();seed.base.family=et::SourceFamily::RectangularLoft;seed.base.sourceSchema=std::uint32_t(loft_persistence::Schema);seed.base.metersPerLocalUnit=effective;seed.outputNode=seed.base.sourceNode;seed.issuance.nextLocalID=1;composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::RectangularLoft,seed.base.sourceSchema,state.loft.values,capture->sourceBytes_);composite_recipe::Hash(capture->sourceBytes_,seed.base.sourceRecipeDigest);
+            if(state.edgeTreatment){capture->definition_=state.edgeTreatment->value->definition;capture->definitionBytes_=state.edgeTreatment->value->bytes;capture->seed_=*capture->definition_;TopoDS_Shape replayed;std::vector<et::StepProof>proofs;et::Refusal replayRefusal;if(!et::Replay(capture->base_,*capture->definition_,replayed,proofs,capture->chargedBudget_,replayRefusal)||!et::EquivalentReplayGeometry(capture->current_,replayed,capture->chargedBudget_,replayRefusal))return {};}
+            capture->owner_.owner=seed.owner;capture->owner_.outputNode=capture->seed_.outputNode;capture->owner_.status=retained_recipe::OwnerStatus::CurrentEditable;treatment=std::move(capture);
+        }
         StoredRectangularLoftSnapshot result;result.definition=state.loft.definition;result.identity=identity;
         result.definitionIdentifier=state.definitionIdentifier;result.featureIdentifier=state.loft.identifier;
         result.sourceState=std::move(state);result.authorityStamp=*stamp;result.sourceGuard=guard;
-        result.effectiveDimensionMetersPerUnit=effective;result.current=true;return result;
+        result.effectiveDimensionMetersPerUnit=effective;result.current=true;result.edgeTreatment=std::move(treatment);return result;
     } catch (...) {return {};}
 }
 
@@ -4647,6 +4661,9 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredLoftStationRebuild(
         if (!current || !current->current || !(current->authorityStamp==original.authorityStamp)
             || current->featureIdentifier!=original.featureIdentifier || current->definitionIdentifier!=original.definitionIdentifier
             || current->effectiveDimensionMetersPerUnit!=original.effectiveDimensionMetersPerUnit
+            || bool(current->edgeTreatment)!=bool(original.edgeTreatment)
+            || (current->edgeTreatment&&original.edgeTreatment
+                && current->edgeTreatment->definitionBytes_!=original.edgeTreatment->definitionBytes_)
             || !current->sourceState.IsEqual(original.sourceState)
             || !sweep_rebuild::SameRawScalars(current->sourceState.scalars,original.sourceState.scalars)
             || !_ordinaryEditController || !_ordinaryEditController->savedSweepRebuildSourceIsCurrent(original.sourceGuard)) return {};
@@ -4656,7 +4673,19 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredLoftStationRebuild(
         if (!work || sweep_persistence::Bits(work->metersPerUnit)!=sweep_persistence::Bits(definition.dimensionMetersPerUnit))return {};
         myContext->InitSelected();const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
         if(selected.IsNull())return {};
-        auto geometry=std::make_shared<LoftSolidGeometry>();geometry->prepared=prepared;work->geometry=std::move(geometry);
+        auto geometry=std::make_shared<LoftSolidGeometry>();geometry->prepared=prepared;
+        if(original.edgeTreatment&&original.edgeTreatment->definition_){
+            namespace et=retained_edge_treatment;
+            // A source edit moves native edges; the stored selector witnesses
+            // must be verified against the old source and rebound against the
+            // actually rebuilt stage, never replayed with stale midpoints.
+            et::SourceRebindRoles roles;et::ReplayBudget rebindBudget;et::Refusal rebindRefusal=et::Refusal::ReplayMismatch;
+            if(!et::CaptureSourceRebindRoles(original.edgeTreatment->base_,*original.edgeTreatment->definition_,
+                original.edgeTreatment->definitionBytes_,rebindBudget,rebindRefusal,roles))return {};
+            geometry->treatmentRebind=std::move(roles);geometry->treatmentRebuildSource=definition;
+            work->edgeTreatmentSnapshot=original.edgeTreatment;work->edgeTreatmentEdit=retained_edge_treatment::RebuildSource{definition};
+        }
+        work->geometry=std::move(geometry);
         OrdinaryTransformRecord record;record.previous=current->sourceState;
         record.requested.label=record.previous.label;record.requested.presentation=selected;
         record.requested.shape=record.previous.shape;record.requested.transform=record.previous.transform;
@@ -5056,6 +5085,7 @@ bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& pa
     if (const auto p=std::get_if<std::shared_ptr<LoftSolidGeometry>>(&payload)) {
         if (!*p || (*p)->built || (*p)->cancelled.load()) return false;
         (*p)->built=rectangular_loft::Build((*p)->prepared,(*p)->cancelled,(*p)->result)==rectangular_loft::BuildStatus::Built;
+        if((*p)->built&&(*p)->treatmentRebind&&(*p)->treatmentRebuildSource){(*p)->treatmentBase=(*p)->result.solid;retained_edge_treatment::SourceRebindResult rebound;retained_edge_treatment::ReplayBudget budget;retained_edge_treatment::Refusal refusal=retained_edge_treatment::Refusal::BuildFailed;if(!retained_edge_treatment::ApplySourceRebind(*(*p)->treatmentRebind,*(*p)->treatmentRebuildSource,(*p)->treatmentBase,budget,refusal,rebound))return (*p)->built=false;(*p)->treatmentDefinition=rebound.definition;(*p)->treatmentProofs=rebound.proofs;(*p)->result.solid=rebound.treated;}
         return (*p)->built;
     }
     if (const auto p=std::get_if<std::shared_ptr<SweepSolidGeometry>>(&payload)) {
@@ -5343,6 +5373,8 @@ OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeS
                     if(!*profileGeometry||!(*profileGeometry)->treatmentDefinition)return OrdinaryEditResult::Invalid;treatment->definition_=*(*profileGeometry)->treatmentDefinition;treatment->base_=(*profileGeometry)->treatmentBase;treatment->proofs_=(*profileGeometry)->treatmentProofs;
                 }else if(const auto enclosureGeometry=std::get_if<std::shared_ptr<EnclosureSolidGeometry>>(&work->geometry)){
                     if(!*enclosureGeometry||!(*enclosureGeometry)->treatmentDefinition)return OrdinaryEditResult::Invalid;treatment->definition_=*(*enclosureGeometry)->treatmentDefinition;treatment->base_=(*enclosureGeometry)->treatmentBase;treatment->proofs_=(*enclosureGeometry)->treatmentProofs;
+                }else if(const auto loftGeometry=std::get_if<std::shared_ptr<LoftSolidGeometry>>(&work->geometry)){
+                    if(!*loftGeometry||!(*loftGeometry)->treatmentDefinition)return OrdinaryEditResult::Invalid;treatment->definition_=*(*loftGeometry)->treatmentDefinition;treatment->base_=(*loftGeometry)->treatmentBase;treatment->proofs_=(*loftGeometry)->treatmentProofs;
                 }else return OrdinaryEditResult::Invalid;
                 treatment->result_=completed->solid;retained_edge_treatment::Refusal refusal;if(!retained_edge_treatment::Encode(treatment->definition_,treatment->definitionBytes_,refusal))return OrdinaryEditResult::Invalid;
                 record.requested.edgeTreatmentSnapshot=work->edgeTreatmentSnapshot;record.requested.edgeTreatmentEdit=work->edgeTreatmentEdit;record.requested.edgeTreatmentResult=std::move(treatment);

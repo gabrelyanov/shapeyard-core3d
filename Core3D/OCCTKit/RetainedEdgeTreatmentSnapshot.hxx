@@ -3,6 +3,7 @@
 #include "RetainedRecipeSnapshot.hxx"
 #include "ProfilePersistence.hxx"
 #include "EnclosurePersistence.hxx"
+#include "RectangularLoftDefinition.hxx"
 #include <AIS_Shape.hxx>
 #include <atomic>
 #include <variant>
@@ -12,7 +13,7 @@ namespace core3d { class Core3DViewer; }
 namespace core3d::retained_face_selector { class FaceMembershipProof; }
 
 namespace core3d::retained_edge_treatment {
-using BaseRecipe=std::variant<profile::Parameters,enclosure::Parameters>;
+using BaseRecipe=std::variant<profile::Parameters,enclosure::Parameters,rectangular_loft::Definition>;
 struct Append {Kind kind;double amountMM;std::vector<Anchor> anchors;};
 struct SetAmount {UUID feature;double amountMM;};
 struct ReplaceTargets {UUID feature;std::vector<Anchor> anchors;};

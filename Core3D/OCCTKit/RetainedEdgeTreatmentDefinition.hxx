@@ -15,7 +15,10 @@ namespace core3d::retained_edge_treatment {
 using UUID = retained_recipe::UUID;
 using Digest = retained_recipe::Digest;
 enum class Kind : std::uint8_t { Chamfer = 1, ConstantFillet = 2 };
-enum class SourceFamily : std::uint8_t { Profile = 1, Enclosure = 2 };
+// 3 is reserved on the SYET wire by the R2 RetainedBoolean carrier
+// (RetainedEdgeTreatmentR2Values.hxx); the bare-loft base is 4 so a
+// schema 1/2 carrier can never be misread as an R2 Boolean base.
+enum class SourceFamily : std::uint8_t { Profile = 1, Enclosure = 2, RectangularLoft = 4 };
 enum class CurveKind : std::uint8_t { Line = 1, Circle = 2 };
 enum class Refusal : std::uint8_t {
     None = 0, UnsupportedBase, MultipleOwners, NoncurrentSource, MalformedCarrier,
@@ -258,7 +261,9 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes, std::optional<Definit
             || !reader.raw(definition.owner.definition) || !reader.u(4, count) || count != 1) {
             refusal = Refusal::MalformedCarrier; return false;
         }
-        if (!reader.u(1, value) || (value != 1 && value != 2)) { refusal = Refusal::UnsupportedBase; return false; }
+        // Family 3 (R2 RetainedBoolean) is not admitted by the schema 1/2
+        // layout and stays refused; no silent coercion.
+        if (!reader.u(1, value) || (value != 1 && value != 2 && value != 4)) { refusal = Refusal::UnsupportedBase; return false; }
         definition.base.family = SourceFamily(value);
         if (!reader.raw(definition.base.source.document) || !reader.raw(definition.base.source.entity)
             || !reader.raw(definition.base.source.definition) || !reader.raw(definition.base.source.sourceFeature)

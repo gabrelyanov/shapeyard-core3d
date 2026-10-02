@@ -3,6 +3,7 @@
 #include "RectangularLoftDefinition.hxx"
 #include "SweepPersistence.hxx"
 #include "EnclosurePersistence.hxx"
+#include "RetainedEdgeTreatmentStorageKey.hxx"
 #include <cstdint>
 #include <cstring>
 
@@ -127,7 +128,11 @@ inline bool Read(const Handle(TDocStd_Document)& document,const TDF_Label& owner
         if (r.boundShape.IsNull() || r.boundShape.ShapeType()!=TopAbs_SOLID) return false;
         for (TDF_AttributeIterator it(r.label);it.More();it.Next()) {
             const auto& id=it.Value()->ID();
-            if (id!=SchemaID() && id!=CountID() && id!=IdentityID() && id!=TNaming_NamedShape::GetID()) return false;
+            // A B1 edge-treatment payload may share this label (the same
+            // carrier rule as profile/enclosure); tolerate exactly that GUID.
+            if (id!=SchemaID() && id!=CountID() && id!=IdentityID()
+                && id!=TNaming_NamedShape::GetID()
+                && id!=retained_edge_treatment::AttributeID()) return false;
         }
         r.values.resize(count->Get()); int present=0;
         for (TDF_ChildIterator it(r.label,Standard_False);it.More();it.Next()) {

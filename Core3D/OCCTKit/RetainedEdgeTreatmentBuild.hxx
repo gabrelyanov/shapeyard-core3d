@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RetainedEdgeTreatmentSnapshot.hxx"
+#include "RectangularLoftPersistence.hxx"
 #include "RetainedFaceSelector.hxx"
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
@@ -527,6 +528,15 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
             }
             sourceSchema = enclosure->definition.constructionFrame ? 2 : 1;
             family = SourceFamily::Enclosure;
+        } else if (const auto* loft = std::get_if<core3d::rectangular_loft::Definition>(&requested)) {
+            if (!core3d::loft_persistence::Encode(*loft, values)
+                || !core3d::composite_recipe::EncodeScalarRecipe(
+                    core3d::composite_recipe::RecipeKind::RectangularLoft,
+                    std::uint32_t(core3d::loft_persistence::Schema), values, sourceBytes)) {
+                refusal = Refusal::MalformedCarrier; return false;
+            }
+            sourceSchema = std::uint32_t(core3d::loft_persistence::Schema);
+            family = SourceFamily::RectangularLoft;
         } else { refusal = Refusal::MalformedCarrier; return false; }
         Digest sourceDigest{};
         if (!core3d::composite_recipe::Hash(sourceBytes, sourceDigest)

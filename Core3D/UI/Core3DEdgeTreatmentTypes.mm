@@ -11,6 +11,7 @@ static id B1Object(Class type) { return class_createInstance(type, 0); }
 @implementation Core3DEdgeTreatmentStep @end
 @implementation Core3DEdgeTreatmentProfileSource @end
 @implementation Core3DEdgeTreatmentEnclosureSource @end
+@implementation Core3DEdgeTreatmentLoftSource @end
 @implementation Core3DEdgeTreatmentSnapshot @end
 @implementation Core3DEdgeTreatmentCapture @end
 @implementation Core3DEdgeTreatmentTargetCapture @end

@@ -140,6 +140,7 @@ namespace core3d {
         std::shared_ptr<const SweepRebuildGuard> sourceGuard;
         double effectiveDimensionMetersPerUnit=0;
         bool current=false;
+        std::shared_ptr<const retained_edge_treatment::Snapshot> edgeTreatment;
     };
     struct StoredProfileSnapshot {
         profile::Parameters parameters;
