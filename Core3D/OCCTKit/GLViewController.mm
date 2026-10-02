@@ -2117,6 +2117,12 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
         && !_isConstructorMode && _viewer != nullptr && _viewer->canBeginCommittedEdit();
 }
 
+- (BOOL)canIssueModelingPlanningContextHoldingSplineProfileOpening:(Core3DSplineProfileEditingOpening *)opening {
+    return [NSThread isMainThread] && _didSetupViewer && !_isPreviewMode
+        && !_isConstructorMode && _viewer != nullptr
+        && _viewer->canBeginCommittedEditHolding([opening core3d_nativeOpeningContext]);
+}
+
 - (void)refreshSelectionState {
     [self checkSelections];
 }

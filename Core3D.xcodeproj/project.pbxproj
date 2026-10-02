@@ -280,6 +280,7 @@
 		C3N269020000000000000002 /* GeneralLoftOwner.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C3N269120000000000000012 /* GeneralLoftOwner.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		C3N269030000000000000003 /* GeneralLoftOwner.mm in Sources */ = {isa = PBXBuildFile; fileRef = C3N269130000000000000013 /* GeneralLoftOwner.mm */; };
 		C1F100010000000000000001 /* BoundedCurveOwner.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C1F100110000000000000011 /* BoundedCurveOwner.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		E27100040000000000000001 /* AssetAtlasOwner.mm in Sources */ = {isa = PBXBuildFile; fileRef = E27100040000000000000002 /* AssetAtlasOwner.mm */; };
 		E26600010000000000000001 /* RetainedFinishingAttribute.hxx in Headers */ = {isa = PBXBuildFile; fileRef = E26600010000000000000002 /* RetainedFinishingAttribute.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		E26600020000000000000001 /* RetainedFinishingBinaryDriver.hxx in Headers */ = {isa = PBXBuildFile; fileRef = E26600020000000000000002 /* RetainedFinishingBinaryDriver.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		E26600030000000000000001 /* RetainedFinishingOwner.mm in Sources */ = {isa = PBXBuildFile; fileRef = E26600030000000000000002 /* RetainedFinishingOwner.mm */; };
@@ -579,6 +580,10 @@
 		C3N269120000000000000012 /* GeneralLoftOwner.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = GeneralLoftOwner.hxx; sourceTree = "<group>"; };
 		C3N269130000000000000013 /* GeneralLoftOwner.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = GeneralLoftOwner.mm; sourceTree = "<group>"; };
 		C1F100110000000000000011 /* BoundedCurveOwner.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = BoundedCurveOwner.hxx; sourceTree = "<group>"; };
+		E27100010000000000000002 /* AssetAtlasDefinition.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = AssetAtlasDefinition.hxx; sourceTree = "<group>"; };
+		E27100020000000000000002 /* AssetAtlasBuild.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = AssetAtlasBuild.hxx; sourceTree = "<group>"; };
+		E27100030000000000000002 /* AssetAtlasPersistence.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = AssetAtlasPersistence.hxx; sourceTree = "<group>"; };
+		E27100040000000000000002 /* AssetAtlasOwner.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AssetAtlasOwner.mm; sourceTree = "<group>"; };
 		E26600010000000000000002 /* RetainedFinishingAttribute.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedFinishingAttribute.hxx; sourceTree = "<group>"; };
 		E26600020000000000000002 /* RetainedFinishingBinaryDriver.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedFinishingBinaryDriver.hxx; sourceTree = "<group>"; };
 		E26600030000000000000002 /* RetainedFinishingOwner.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = RetainedFinishingOwner.mm; sourceTree = "<group>"; };
@@ -910,6 +915,10 @@
 				C3N269120000000000000012 /* GeneralLoftOwner.hxx */,
 				C3N269130000000000000013 /* GeneralLoftOwner.mm */,
 				C1F100110000000000000011 /* BoundedCurveOwner.hxx */,
+				E27100010000000000000002 /* AssetAtlasDefinition.hxx */,
+				E27100020000000000000002 /* AssetAtlasBuild.hxx */,
+				E27100030000000000000002 /* AssetAtlasPersistence.hxx */,
+				E27100040000000000000002 /* AssetAtlasOwner.mm */,
 				E26600010000000000000002 /* RetainedFinishingAttribute.hxx */,
 				E26600020000000000000002 /* RetainedFinishingBinaryDriver.hxx */,
 				E26600030000000000000002 /* RetainedFinishingOwner.mm */,
@@ -1404,6 +1413,7 @@
 				E17900010000000000000001 /* BoundedCurveOwner.mm in Sources */,
 				C3N269030000000000000003 /* GeneralLoftOwner.mm in Sources */,
 				C4A000010000000000000001 /* SplineProfileOwner.mm in Sources */,
+				E27100040000000000000001 /* AssetAtlasOwner.mm in Sources */,
 				E26600030000000000000001 /* RetainedFinishingOwner.mm in Sources */,
 				322185742BB5CC1500040E84 /* OcctDocument.mm in Sources */,
 				3240475A2C00C7F6009E4B86 /* Core3DViewController+ExportManager.mm in Sources */,

@@ -659,6 +659,14 @@ __attribute__((objc_subclassing_restricted))
 
 - (BOOL)isModelingPlanningContextCurrent:(Core3DModelingPlanningContext *)context
     NS_SWIFT_NAME(isModelingPlanningContextCurrent(_:));
+//! Row-277 variant of isModelingPlanningContextCurrent: with exactly one
+//! tolerated blocker: the native opening context held by the given
+//! spline-profile opening while that opening is live and owned by this same
+//! viewer and document. A nil, foreign, applied or cancelled opening — and
+//! every other existing blocker — still refuses with the same result.
+- (BOOL)isModelingPlanningContextCurrent:(Core3DModelingPlanningContext *)context
+    holdingSplineProfileOpening:(Core3DSplineProfileEditingOpening *)opening
+    NS_SWIFT_NAME(isModelingPlanningContextCurrent(_:holding:));
 //! Idempotently retires this exact lease. Stops only construction owned by it;
 //! unrelated later touch work is never cancelled. Worker completion still drains.
 - (void)retireModelingPlanningContext:(Core3DModelingPlanningContext *)context

@@ -70,7 +70,20 @@ class MigrationReview final {
     Digest requestDigest_{};
     MigrationM3 request_;
     ReplayBudget chargedBudget_;
+    // proofs_[index] is the resolved membership proof for
+    // request_.selectors[index], resolved on the replay stage immediately
+    // before that legacy step; appendProof_ belongs to the optional append and
+    // is resolved on the post-existing-treatment stage.
     std::vector<std::shared_ptr<const fs::FaceMembershipProof>> proofs_;
+    std::shared_ptr<const fs::FaceMembershipProof> appendProof_;
+    // Reviewed stage values (copied shapes only, no document authority): the
+    // true untreated post-Boolean base — never originalCurrent_ when the
+    // recipe carries a legacy tail — and the post-existing-treatment stage.
+    TopoDS_Shape postBooleanBase_, postTreatmentStage_;
+public:
+    const Digest& requestDigest() const noexcept { return requestDigest_; }
+    const std::vector<std::shared_ptr<const fs::FaceMembershipProof>>& proofs() const noexcept { return proofs_; }
+    const std::shared_ptr<const fs::FaceMembershipProof>& appendProof() const noexcept { return appendProof_; }
 };
 // A1 first enrollment: the read-only capture of an A1-composite RetainedBoolean
 // owner that holds no R2 record yet, and the reviewed first append (selector

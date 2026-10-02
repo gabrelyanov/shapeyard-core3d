@@ -3747,6 +3747,7 @@ struct NativeModelingPermitIssuer final {
     asyncCompletion:(Core3DModelingAsyncCompletion *)box completion:(void (^)(Core3DProfileConstructionResult))completion;
 - (BOOL)core3d_startReservedCreation:(Core3DModelingPreparedRequest *)request completion:(void (^)(Core3DProfileConstructionResult))completion;
 - (BOOL)core3d_canBeginCommittedEdit;
+- (BOOL)core3d_canBeginCommittedEditHoldingSplineProfileOpening:(Core3DSplineProfileEditingOpening *)opening;
 - (Core3DModelingPreparedRequest *)core3d_prepareRequest:(const core3d::request::Descriptor&)descriptor
     context:(Core3DModelingPlanningContext *)context session:(Core3DModelingHostSession *)session
     requestID:(NSUUID *)requestID featureIDs:(const std::vector<core3d::request::UUID>&)featureIDs
@@ -3761,8 +3762,13 @@ struct NativeModelingPermitIssuer final {
     completion:(void(^)(Core3DProfileConstructionResult))completion;
 - (BOOL)core3d_modelingContext:(Core3DModelingPlanningContext *)context
     matchesAllowingConsumed:(BOOL)allowConsumed;
+- (BOOL)core3d_modelingContext:(Core3DModelingPlanningContext *)context
+    matchesAllowingConsumed:(BOOL)allowConsumed
+    holdingSplineProfileOpening:(Core3DSplineProfileEditingOpening *)opening;
 - (BOOL)core3d_canCaptureModelingContext;
 - (BOOL)core3d_canCaptureModelingContextForReservation:(Core3DModelingPlanningContext *)context;
+- (BOOL)core3d_canCaptureModelingContextForReservation:(Core3DModelingPlanningContext *)context
+    holdingSplineProfileOpening:(Core3DSplineProfileEditingOpening *)opening;
 - (void)core3d_retireReservationContext:(Core3DModelingPlanningContext *)context;
 - (std::optional<core3d::request::ReservationDispatch>)core3d_registerReservation:
     (Core3DModelingPreparedRequest *)request completion:(Core3DReservationCompletion)completion;
@@ -3920,6 +3926,34 @@ static void Core3DExpireDebugNativeSolidCompletion(NSUUID *token,Core3DDebugNati
 namespace {
 NSString *B1ID(const core3d::retained_edge_treatment::UUID&v){return [[NSUUID alloc]initWithUUIDBytes:v.data()].UUIDString;}
 template<class T>T *B1Object(Class cls){return (T*)class_createInstance(cls,0);}
+// Value census of a genuine native membership proof, mirroring the BuildQuery
+// population in Core3DFaceSelectorTypes.mm exactly. Construction stays gated:
+// the proof is created only inside the bridge from a native-resolved proof.
+Core3DFaceSelectorProof *B1SelectorProof(Core3DFaceSelectorIntent *intent,
+    const core3d::retained_face_selector::FaceMembershipProof&native){
+    auto proof=B1Object<Core3DFaceSelectorProof>(Core3DFaceSelectorProof.class);
+    [proof setValue:intent forKey:@"intent"];
+    [proof setValue:[[Core3DFaceSelectorVector3 alloc]initWithX:native.plane().outwardNormal[0] y:native.plane().outwardNormal[1] z:native.plane().outwardNormal[2]] forKey:@"outwardNormal"];
+    [proof setValue:@(native.plane().offsetMM) forKey:@"planeOffsetMM"];
+    [proof setValue:@(NSInteger(native.coverage())) forKey:@"coverage"];
+    [proof setValue:@1 forKey:@"matchedFaceCount"];[proof setValue:@(native.wireCount()) forKey:@"wireCount"];
+    [proof setValue:@(native.boundaryUses().size()) forKey:@"boundaryUseCount"];
+    [proof setValue:@(native.uniqueEdgeCount()) forKey:@"boundaryUniqueEdgeCount"];
+    [proof setValue:@(native.selectedEdgeCount()) forKey:@"selectedEdgeCount"];
+    [proof setValue:@YES forKey:@"discoveryComplete"];[proof setValue:@NO forKey:@"truncated"];
+    NSMutableArray *uses=[NSMutableArray arrayWithCapacity:native.boundaryUses().size()];
+    for(const auto&use:native.boundaryUses()){
+        auto value=B1Object<Core3DFaceBoundaryUse>(Core3DFaceBoundaryUse.class);
+        [value setValue:@(use.selected) forKey:@"selected"];
+        [value setValue:@(NSInteger(use.direction)) forKey:@"canonicalFaceUseDirection"];
+        [value setValue:@(use.ownerFaces.size()) forKey:@"ownerFaceCount"];[value setValue:@YES forKey:@"selectedFaceIsOwner"];
+        BRepAdaptor_Curve curve(use.edge);
+        [value setValue:@(curve.GetType()==GeomAbs_Circle?Core3DEdgeTreatmentCurveKindCircle:Core3DEdgeTreatmentCurveKindLine) forKey:@"curveKind"];
+        [value setValue:@(Core3DFaceSelectorWirePositionOuter) forKey:@"outerOrInnerWire"];
+        [uses addObject:value];
+    }
+    [proof setValue:uses forKey:@"boundaryUses"];return proof;
+}
 Core3DEdgeTreatmentAnchor *B1Anchor(const core3d::retained_edge_treatment::Anchor&a){auto value=B1Object<Core3DEdgeTreatmentAnchor>(Core3DEdgeTreatmentAnchor.class);[value setValue:[NSData dataWithBytes:a.key.data() length:a.key.size()] forKey:@"key"];[value setValue:@(NSInteger(a.curve)) forKey:@"curve"];[value setValue:@(a.circleRadiusMM) forKey:@"circleRadiusMM"];return value;}
 Core3DEdgeTreatmentNativeSnapshot *B1Snapshot(const std::shared_ptr<const core3d::retained_edge_treatment::Snapshot>&native){if(!native)return nil;auto value=B1Object<Core3DEdgeTreatmentNativeSnapshot>(Core3DEdgeTreatmentNativeSnapshot.class);value->native=native;const auto&d=native->effectiveDefinition();[value setValue:B1ID(d.owner.document) forKey:@"documentIdentifier"];[value setValue:B1ID(d.owner.entity) forKey:@"entityIdentifier"];[value setValue:B1ID(d.owner.definition) forKey:@"definitionIdentifier"];[value setValue:B1ID(d.base.source.sourceFeature) forKey:@"sourceFeatureIdentifier"];[value setValue:B1ID(d.base.sourceNode) forKey:@"baseNodeIdentifier"];[value setValue:B1ID(d.outputNode) forKey:@"outputNodeIdentifier"];[value setValue:@(NSInteger(d.base.family)) forKey:@"sourceKind"];NSMutableArray*steps=[NSMutableArray array];for(const auto&s:d.steps){auto step=B1Object<Core3DEdgeTreatmentStep>(Core3DEdgeTreatmentStep.class);[step setValue:B1ID(s.node) forKey:@"nodeIdentifier"];[step setValue:B1ID(s.feature) forKey:@"featureIdentifier"];[step setValue:@(s.localID) forKey:@"localID"];[step setValue:@(NSInteger(s.kind)) forKey:@"kind"];[step setValue:@(s.amountMM) forKey:@"amountMM"];NSMutableArray*anchors=[NSMutableArray array];for(const auto&a:s.anchors)[anchors addObject:B1Anchor(a)];[step setValue:anchors forKey:@"anchors"];[steps addObject:step];}[value setValue:steps forKey:@"steps"];[value setValue:@0 forKey:@"prefixOperandCount"];[value setValue:[NSData dataWithBytes:native->canonicalBytes().data() length:native->canonicalBytes().size()] forKey:@"canonicalRecipeBytes"];[value setValue:@(native->current()) forKey:@"current"];[value setValue:@(native->dimensionMetersPerUnit()) forKey:@"dimensionMetersPerUnit"];if(const auto*p=std::get_if<core3d::profile::Parameters>(&native->source())){auto source=B1Object<Core3DEdgeTreatmentProfileSource>(Core3DEdgeTreatmentProfileSource.class);[source setValue:[[Core3DProfileDefinition alloc]initWithNativeParameters:*p] forKey:@"definition"];[source setValue:@[] forKey:@"shells"];[source setValue:NSData.data forKey:@"canonicalSourceBytes"];[value setValue:source forKey:@"profileSource"];}else if(const auto*e=std::get_if<core3d::enclosure::Parameters>(&native->source())){auto source=B1Object<Core3DEdgeTreatmentEnclosureSource>(Core3DEdgeTreatmentEnclosureSource.class);[source setValue:[[Core3DEnclosureDefinition alloc]initWithNativeParameters:*e] forKey:@"definition"];[source setValue:NSData.data forKey:@"canonicalSourceBytes"];[value setValue:source forKey:@"enclosureSource"];}else if(const auto*l=std::get_if<core3d::rectangular_loft::Definition>(&native->source())){auto source=B1Object<Core3DEdgeTreatmentLoftSource>(Core3DEdgeTreatmentLoftSource.class);[source setValue:[[Core3DRectangularLoftDefinition alloc]initWithNativeDefinition:*l] forKey:@"definition"];[source setValue:NSData.data forKey:@"canonicalSourceBytes"];[value setValue:source forKey:@"loftSource"];}else return nil;return value;}
 Core3DEdgeTreatmentResult *B1Result(const core3d::retained_edge_treatment::CommitResult&r){auto value=B1Object<Core3DEdgeTreatmentResult>(Core3DEdgeTreatmentResult.class);[value setValue:@(NSInteger(r.outcome)) forKey:@"outcome"];[value setValue:@(core3d::retained_edge_treatment::RefusalCode(r.refusal)) forKey:@"refusalCode"];[value setValue:@(core3d::retained_edge_treatment::RefusalMessage(r.refusal)) forKey:@"refusalMessage"];[value setValue:r.measuredUndoDelta?@(*r.measuredUndoDelta):nil forKey:@"measuredUndoDelta"];NSMutableArray*ids=[NSMutableArray array];for(const auto&id:r.replayedFeatures)[ids addObject:B1ID(id)];[value setValue:ids forKey:@"replayedFeatureIdentifiers"];return value;}
@@ -4454,6 +4488,13 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
         && GLController != nil
         && GLController.viewer != nullptr
         && GLController.viewer->canBeginCommittedEdit();
+}
+
+- (BOOL)core3d_canBeginCommittedEditHoldingSplineProfileOpening:(Core3DSplineProfileEditingOpening *)opening {
+    return [NSThread isMainThread]
+        && GLController != nil
+        && GLController.viewer != nullptr
+        && GLController.viewer->canBeginCommittedEditHolding([opening core3d_nativeOpeningContext]);
 }
 
 -(void) updateSelectionWithMaterial:(Core3DMaterial*)material color:(Core3DColor*)color {
@@ -15088,6 +15129,24 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
         && !GLController.viewer->getObjectInteractor()->isManipulatorGestureActive();
 }
 
+// Holding variant: identical checks to the reservation predicate above with
+// exactly one tolerated blocker — the given opening's own live native opening
+// context. Every other check (main thread, pending reservation, setup/preview,
+// competing load work, selection type Shape, gizmo None, no manipulator
+// gesture) is unchanged.
+- (BOOL)core3d_canCaptureModelingContextForReservation:(Core3DModelingPlanningContext *)context
+    holdingSplineProfileOpening:(Core3DSplineProfileEditingOpening *)opening {
+    if(!NSThread.isMainThread)return NO;
+    if(_pendingModelingReservation&&(!context||_pendingModelingReservation->_requestContext!=context))return NO;
+    return [NSThread isMainThread] && _isSetuped && !_isPreviewMode
+        && [GLController canIssueModelingPlanningContextHoldingSplineProfileOpening:opening]
+        && ![self core3d_hasCompetingLoadOrControllerWork]
+        && [self core3d_canBeginCommittedEditHoldingSplineProfileOpening:opening]
+        && [GLController getSelectionType] == PrimitiveSelectionTypeShape
+        && [GLController getGizmoType] == PrimitiveGizmoTypeNone
+        && !GLController.viewer->getObjectInteractor()->isManipulatorGestureActive();
+}
+
 - (BOOL)prepareForModelingPlanning {
     if (!NSThread.isMainThread || _pendingModelingReservation) return NO;
     if (![NSThread isMainThread] || !_isSetuped || _isPreviewMode
@@ -16126,8 +16185,67 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
     } catch (...) { return NO; }
 }
 
+// Holding variant: the identical check sequence as
+// core3d_modelingContext:matchesAllowingConsumed: — main thread, issued-context
+// identity, owner, retired/consumed, pending reservation, setup/preview/
+// constructor mode, competing load work, selection type Shape, gizmo None, no
+// manipulator gesture, viewer identity, document identity, both stamp
+// captures, overlay kind and revision, selection mode, publication source,
+// the three revisions, metersPerUnit, selected elements — with exactly ONE
+// tolerated blocker: the native opening context held by the given
+// spline-profile opening. Every read of canBeginCommittedEdit() (the
+// reservation predicate, both CaptureNativePlanningStamp arguments) uses the
+// holding form, which tolerates only that opening's own live context.
+- (BOOL)core3d_modelingContext:(Core3DModelingPlanningContext *)context
+    matchesAllowingConsumed:(BOOL)allowConsumed
+    holdingSplineProfileOpening:(Core3DSplineProfileEditingOpening *)opening {
+    if (![NSThread isMainThread] || ![context isKindOfClass:Core3DModelingPlanningContext.class]
+        || context != _issuedModelingPlanningContext || context->_planningOwner != self
+        || context->_planningRetired || (!allowConsumed && context->_planningConsumed)
+        || ![self core3d_canCaptureModelingContextForReservation:allowConsumed?context:nil
+            holdingSplineProfileOpening:opening]) return NO;
+    try {
+        const auto viewer = context->_planningViewer.lock();
+        if (!viewer || viewer != GLController.viewer) return NO;
+        const auto document = viewer->getDocument();
+        if (document.IsNull()) return NO;
+        const auto stamp = document->CaptureNativePlanningStamp(
+            viewer->canBeginCommittedEditHolding([opening core3d_nativeOpeningContext]));
+        if (!stamp || !(*stamp == context->_planningStamp)) return NO;
+        NSString *documentID = [[NSString alloc] initWithUTF8String:document->DocumentIdentifier().c_str()];
+        if (![documentID isEqualToString:context.documentIdentifier]) return NO;
+        Core3DSceneSnapshot *live = [self captureSceneSnapshot];
+        Core3DScenePresentationOverlaySnapshot *overlay = [self captureScenePresentationOverlay];
+        Core3DSceneSnapshot *expected = context.scene;
+        if (!live || !overlay || overlay.kind != Core3DScenePresentationOverlayKindNone
+            || overlay.overlayRevision != context->_planningOverlayRevision
+            || live.selectionMode != expected.selectionMode
+            || ![live.publicationSourceIdentifier isEqualToString:expected.publicationSourceIdentifier]
+            || live.revisions.documentGeneration != expected.revisions.documentGeneration
+            || live.revisions.modelRevision != expected.revisions.modelRevision
+            || live.revisions.presentationRevision != expected.revisions.presentationRevision
+            || live.metersPerUnit != expected.metersPerUnit
+            || live.selection.selectedElements.count != expected.selection.selectedElements.count) return NO;
+        for (NSUInteger i = 0; i < live.selection.selectedElements.count; ++i) {
+            Core3DSceneElementIdentifier *a = live.selection.selectedElements[i];
+            Core3DSceneElementIdentifier *b = expected.selection.selectedElements[i];
+            if (![a.entityIdentifier isEqualToString:b.entityIdentifier] || a.kind != b.kind
+                || a.topologyIndex != b.topologyIndex || a.geometryRevision != b.geometryRevision) return NO;
+        }
+        const auto after = document->CaptureNativePlanningStamp(
+            viewer->canBeginCommittedEditHolding([opening core3d_nativeOpeningContext]));
+        return after && *after == context->_planningStamp;
+    } catch (...) { return NO; }
+}
+
 - (BOOL)isModelingPlanningContextCurrent:(Core3DModelingPlanningContext *)context {
     return [self core3d_modelingContext:context matchesAllowingConsumed:NO];
+}
+
+- (BOOL)isModelingPlanningContextCurrent:(Core3DModelingPlanningContext *)context
+    holdingSplineProfileOpening:(Core3DSplineProfileEditingOpening *)opening {
+    return [self core3d_modelingContext:context matchesAllowingConsumed:NO
+        holdingSplineProfileOpening:opening];
 }
 
 - (void)retireModelingPlanningContext:(Core3DModelingPlanningContext *)context {
@@ -21698,7 +21816,26 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;
     core3d::retained_edge_treatment::Refusal refusal;auto review=GLController.viewer->reviewRetainedBooleanMigrationR2(native->native,mutation,identity,
         expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);
-    if(!review)return result;auto proof=B1Object<Core3DRetainedBooleanNativeMigrationProofR2>(Core3DRetainedBooleanNativeMigrationProofR2.class);proof->native=review;
+    if(!review){[result setValue:@(core3d::retained_edge_treatment::RefusalCode(refusal)) forKey:@"refusalCode"];[result setValue:@(core3d::retained_edge_treatment::RefusalMessage(refusal)) forKey:@"refusalMessage"];return result;}auto proof=B1Object<Core3DRetainedBooleanNativeMigrationProofR2>(Core3DRetainedBooleanNativeMigrationProofR2.class);proof->native=review;
+    // Expose the reviewed census: the exact request digest and one value proof
+    // per reviewed binding (in request order, each carrying the request DTO's
+    // own intent object) plus the optional append proof. Everything is copied
+    // from the genuine native proofs; nothing is synthesized in the bridge.
+    [proof setValue:[NSData dataWithBytes:review->requestDigest().data() length:review->requestDigest().size()] forKey:@"requestDigest"];
+    NSMutableArray *steps=[NSMutableArray arrayWithCapacity:review->proofs().size()];
+    for(std::size_t index=0;index<review->proofs().size();++index){
+        auto value=B1Object<Core3DFaceSelectorProofR2>(Core3DFaceSelectorProofR2.class);
+        [value setValue:@2 forKey:@"contractRevision"];
+        [value setValue:B1SelectorProof(request.selectors[index].intent,*review->proofs()[index]) forKey:@"selectorProof"];
+        [steps addObject:value];
+    }
+    [proof setValue:steps forKey:@"existingStepProofs"];
+    if(review->appendProof()){
+        auto value=B1Object<Core3DFaceSelectorProofR2>(Core3DFaceSelectorProofR2.class);
+        [value setValue:@2 forKey:@"contractRevision"];
+        [value setValue:B1SelectorProof(request.append.intent,*review->appendProof()) forKey:@"selectorProof"];
+        [proof setValue:value forKey:@"appendProof"];
+    }
     [result setValue:proof forKey:@"proof"];[result setValue:@"b1.None" forKey:@"refusalCode"];[result setValue:@"" forKey:@"refusalMessage"];return result;
 }
 
@@ -21712,7 +21849,7 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;
     core3d::retained_edge_treatment::Refusal refusal;auto review=GLController.viewer->reviewRetainedBooleanEnrollmentR2(native->native,mutation,identity,
         expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);
-    if(!review)return result;auto proof=B1Object<Core3DRetainedBooleanNativeEnrollmentProofR2>(Core3DRetainedBooleanNativeEnrollmentProofR2.class);proof->native=review;
+    if(!review){[result setValue:@(core3d::retained_edge_treatment::RefusalCode(refusal)) forKey:@"refusalCode"];[result setValue:@(core3d::retained_edge_treatment::RefusalMessage(refusal)) forKey:@"refusalMessage"];return result;}auto proof=B1Object<Core3DRetainedBooleanNativeEnrollmentProofR2>(Core3DRetainedBooleanNativeEnrollmentProofR2.class);proof->native=review;
     [result setValue:proof forKey:@"proof"];[result setValue:@"b1.None" forKey:@"refusalCode"];[result setValue:@"" forKey:@"refusalMessage"];return result;
 }
 
@@ -21729,12 +21866,25 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         dispatch_async(dispatch_get_main_queue(),^{if(operation->settled)return;operation->settled=YES;core3d::retained_edge_treatment::CommitResult answer;if(built)answer=viewer->commitEdgeTreatmentR2(work,built);else answer.refusal=refusal;auto dto=B1Result(answer);if(provenance)provenance(dto,built);auto callback=operation->completion;operation->completion=nil;operation->stopProvenance=nil;if(callback)callback(dto);});});return operation;
 }
 
+// Refusal-carrying variant: a nil work settles the completion exactly once
+// with the ACTUAL native preparation refusal instead of a generic
+// StaleSnapshot. No success or provenance is minted for a refusal; a non-nil
+// work follows the ordinary path unchanged.
+- (Core3DEdgeTreatmentOperation *)core3d_beginEdgeTreatmentR2:(std::shared_ptr<core3d::retained_edge_treatment::r2::Work>)work
+    completion:(void(^)(Core3DEdgeTreatmentResult *))completion
+    provenance:(void(^)(Core3DEdgeTreatmentResult *,const std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>&))provenance
+    refusal:(core3d::retained_edge_treatment::Refusal)refusal {
+    if(work)return [self core3d_beginEdgeTreatmentR2:work completion:completion provenance:provenance];
+    auto operation=B1Object<Core3DEdgeTreatmentNativeOperation>(Core3DEdgeTreatmentNativeOperation.class);operation->completion=[completion copy];
+    core3d::retained_edge_treatment::CommitResult refused;refused.refusal=refusal;if(completion)completion(B1Result(refused));operation->settled=YES;return operation;
+}
+
 - (Core3DEdgeTreatmentOperation *)beginRetainedBooleanMigrationR2:(Core3DRetainedBooleanMigrationCaptureR2 *)original request:(Core3DRetainedBooleanMigrationRequestR2 *)request proof:(Core3DRetainedBooleanMigrationProofR2 *)proof expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {
     auto capture=(Core3DRetainedBooleanNativeMigrationCaptureR2*)original;auto admitted=(Core3DRetainedBooleanNativeMigrationProofR2*)proof;core3d::retained_edge_treatment::r2::MigrationM3 mutation;
     for(Core3DRetainedBooleanLegacySelectorBindingR2*binding in request.selectors){core3d::retained_face_selector::SelectorIntent intent;if(!core3d::face_selector_bridge::Intent(binding.intent,intent))return [self core3d_beginEdgeTreatmentR2:std::shared_ptr<core3d::retained_edge_treatment::r2::Work>() completion:completion provenance:nil];mutation.selectors.push_back({binding.oldStepID,intent});}
     if(request.append){core3d::retained_face_selector::SelectorIntent intent;if(!core3d::face_selector_bridge::Intent(request.append.intent,intent))return [self core3d_beginEdgeTreatmentR2:std::shared_ptr<core3d::retained_edge_treatment::r2::Work>() completion:completion provenance:nil];mutation.append=core3d::retained_edge_treatment::r2::SelectorAppendIntent{intent,request.append.amountMM};}
     const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=original.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;
-    core3d::retained_edge_treatment::Refusal refusal;auto work=GLController.viewer->prepareRetainedBooleanMigrationR2(capture->native,mutation,admitted->native,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);auto nativeCapture=capture->native;return [self core3d_beginEdgeTreatmentR2:work completion:completion provenance:^(Core3DEdgeTreatmentResult *dto,const std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>&built){B1BindR2Migration(dto,nativeCapture,built);}];
+    core3d::retained_edge_treatment::Refusal refusal;auto work=GLController.viewer->prepareRetainedBooleanMigrationR2(capture->native,mutation,admitted->native,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);auto nativeCapture=capture->native;return [self core3d_beginEdgeTreatmentR2:work completion:completion provenance:^(Core3DEdgeTreatmentResult *dto,const std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>&built){B1BindR2Migration(dto,nativeCapture,built);} refusal:refusal];
 }
 
 - (Core3DEdgeTreatmentOperation *)beginRetainedBooleanEnrollmentR2:(Core3DRetainedBooleanEnrollmentCaptureR2 *)original proof:(Core3DRetainedBooleanEnrollmentProofR2 *)proof expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {
@@ -21742,7 +21892,7 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=original.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;
     // The reviewed request travels inside the proof; prepare consumes only the
     // reviewed values, so no second unbound request copy is accepted here.
-    core3d::retained_edge_treatment::Refusal refusal;auto work=GLController.viewer->prepareRetainedBooleanEnrollmentR2(capture->native,admitted->native,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);auto nativeCapture=capture->native;return [self core3d_beginEdgeTreatmentR2:work completion:completion provenance:^(Core3DEdgeTreatmentResult *dto,const std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>&built){B1BindR2Enrollment(dto,nativeCapture,built);}];
+    core3d::retained_edge_treatment::Refusal refusal;auto work=GLController.viewer->prepareRetainedBooleanEnrollmentR2(capture->native,admitted->native,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);auto nativeCapture=capture->native;return [self core3d_beginEdgeTreatmentR2:work completion:completion provenance:^(Core3DEdgeTreatmentResult *dto,const std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>&built){B1BindR2Enrollment(dto,nativeCapture,built);} refusal:refusal];
 }
 
 - (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentSelectorAppendR2:(Core3DEdgeTreatmentSnapshotR2 *)original amountMM:(double)amountMM proof:(Core3DFaceSelectorProofR2 *)proof expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {

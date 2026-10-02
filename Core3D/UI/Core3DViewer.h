@@ -484,6 +484,13 @@ namespace core3d {
         //! editor, owns a command, preview, or exactly-once recovery ledger and
         //! the OCAF document is writable.
         bool canBeginCommittedEdit() const noexcept;
+        //! canBeginCommittedEdit() with exactly one tolerated blocker: the
+        //! given opening's own native opening context, which must be this
+        //! viewer's active opening context for this same document with no
+        //! active or recovery marker set. A null, foreign, settled or inactive
+        //! context refuses, as does every other existing blocker.
+        bool canBeginCommittedEditHolding(
+            const std::shared_ptr<native_opening::Context>& openingContext) const noexcept;
         bool captureShellOpenings(const std::string& entityIdentifier,
             const std::vector<ShellOpeningSelector>& selectors,
             FaceOperationSourceProof& proof) const noexcept;

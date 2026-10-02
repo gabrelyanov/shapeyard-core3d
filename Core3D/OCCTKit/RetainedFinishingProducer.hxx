@@ -46,7 +46,7 @@ inline bool HashBytes(const void* bytes, std::size_t size, Digest& output) noexc
     try {
         if (!bytes || size == 0 || size > kMaximumBytes) return false;
         const auto* first = static_cast<const std::uint8_t*>(bytes);
-        return retained_solid::Hash(std::vector<std::uint8_t>(first, first + size), output)
+        return HashFinishingBytes(first, size, output)
             && Nonzero(output);
     } catch (...) { output = {}; return false; }
 }
@@ -278,7 +278,7 @@ inline Status BuildDerivative(const Handle(TDocStd_Document)& document,
                     const auto* first = reinterpret_cast<const std::uint8_t*>(&scalar);
                     chartBytes.insert(chartBytes.end(), first, first + sizeof scalar);
                 }
-        if (!retained_solid::Hash(chartBytes, candidate.chartProof)) return Status::Malformed;
+        if (!HashFinishingBytes(chartBytes, candidate.chartProof)) return Status::Malformed;
         const UUID material = candidate.materials.front().identity;
         for (std::size_t index = 0; index < faces.size(); ++index) {
             FaceAssignment assignment;

@@ -2198,6 +2198,18 @@ bool C4DefaultDefinition(OcctDocument& document, C4Definition& value) noexcept {
 }
 @end
 
+@implementation Core3DSplineProfileEditingOpening (Core3DNativeOpeningHold)
+- (std::shared_ptr<core3d::native_opening::Context>)core3d_nativeOpeningContext {
+    // Only a live opening (Open or Prepared) may be the tolerated blocker of
+    // the holding planning-context predicate; an applied, cancelled, applying
+    // or recovery opening — or one whose context was already released —
+    // unwraps to null and the viewer predicate refuses it.
+    const State state = _c4State.load();
+    if (state != State::Open && state != State::Prepared) return {};
+    return _c4Context;
+}
+@end
+
 namespace {
 struct ControllerOpeningInput final {
     Handle(OcctDocument) owner;

@@ -36,6 +36,7 @@
 #include "SplineProfilePersistence.hxx"
 #include "FeaturePatternChildAttribute.hxx"
 #include "RetainedFinishingRecord.hxx"
+namespace core3d::asset_atlas { struct Capture; struct Definition; struct Key; }
 
 #include <XCAFApp_Application.hxx>
 #include <TDocStd_Document.hxx>
@@ -208,6 +209,19 @@ enum class OcctRetainedFinishingOutcome : int {
 enum class OcctRetainedFinishingCurrentness : int {
     Absent = 0, Current = 1, Stale = 2
 };
+
+struct OcctAssetAtlasSettings final {
+    int resolutionTexels = 2048; // power of two in [256, 4096]; ONE shared texture
+    int gutterTexels = 2;        // in [1, 8]
+};
+
+enum class OcctAssetAtlasOutcome : int {
+    Committed = 0, Refused, StaleSource, MissingMember, ForeignMember,
+    OverBudget, PaintedRebakeRequired, UnsupportedSurface, OwnerMismatch,
+    Busy, Malformed, PersistenceFailure, Absent
+};
+
+enum class OcctAssetAtlasCurrentness : int { Absent = 0, Current = 1, Stale = 2 };
 
 //! Read-only resolved region. Ordinals are session-local and never persistent IDs.
 struct OcctMeshRegionExtrudePreview {
@@ -568,6 +582,9 @@ Standard_EXPORT Standard_Boolean Core3DValidateCompositeRecipeDocument(const Han
 //! Retained finishing receipt admission: exact owner bindings, canonical
 //! SYEF/1 bytes, aggregate budget, and an admitted retained carrier owner.
 Standard_EXPORT Standard_Boolean Core3DValidateRetainedFinishingDocument(const Handle(TDocStd_Document)& document);
+//! Asset-wide atlas admission: exact key/member bindings, canonical SYEA/1
+//! bytes, aggregate budgets, and admitted retained carrier owners.
+Standard_EXPORT Standard_Boolean Core3DValidateAssetAtlasDocument(const Handle(TDocStd_Document)& document);
 
 //! Read-only classification used by destructive native operation gates. A
 //! malformed/unknown record is deliberately not collapsed to legacy absence.
@@ -754,6 +771,9 @@ Standard_EXPORT std::map<std::string,bool> Core3DDebugCircularHostProofProbe(Sta
 //! E1 DEBUG native persistence evidence only; no finishing edit authority.
 extern "C" Standard_EXPORT std::uint64_t Core3DDebugRetainedFinishingProbe(std::int32_t scenario) noexcept;
 extern "C" Standard_EXPORT std::uint64_t Core3DDebugRetainedFinishingProducerProbe(
+    std::int32_t scenario) noexcept;
+//! E2a DEBUG asset-atlas evidence only; no atlas edit authority.
+extern "C" Standard_EXPORT std::uint64_t Core3DDebugAssetAtlasProbe(
     std::int32_t scenario) noexcept;
 void Core3DDebugDefineLegacyReceiptFormats(const Handle(TDocStd_Application)& application);
 namespace core3d::persistence { struct AuthoredFrameReadBudget; }
@@ -1402,6 +1422,22 @@ public:
     Standard_EXPORT OcctRetainedFinishingCurrentness RetainedFinishingCurrentness(
         const core3d::retained_recipe::OwnerKey& owner,
         core3d::retained_finishing::Definition* record = nullptr) const noexcept;
+    Standard_EXPORT Standard_Boolean CaptureAssetAtlasMembers(
+        const std::vector<core3d::retained_recipe::OwnerKey>& members,
+        core3d::asset_atlas::Capture& output) noexcept;
+    Standard_EXPORT OcctAssetAtlasOutcome BuildAssetAtlas(
+        const core3d::asset_atlas::Key& atlas,
+        const std::vector<core3d::retained_recipe::OwnerKey>& members,
+        const OcctAssetAtlasSettings& settings) noexcept;
+    Standard_EXPORT OcctAssetAtlasOutcome RegenerateAssetAtlas(
+        const core3d::asset_atlas::Key& atlas) noexcept;
+    Standard_EXPORT OcctAssetAtlasOutcome EditAssetAtlasMembership(
+        const core3d::asset_atlas::Key& atlas,
+        const std::vector<core3d::retained_recipe::OwnerKey>& remove,
+        const std::vector<core3d::retained_recipe::OwnerKey>& add) noexcept;
+    Standard_EXPORT OcctAssetAtlasCurrentness AssetAtlasCurrentness(
+        const core3d::asset_atlas::Key& atlas,
+        core3d::asset_atlas::Definition* record = nullptr) const noexcept;
     //! Additive curved-layout presence, used to distinguish a planar v2 atlas migration.
     Standard_EXPORT Standard_Boolean HasCurvedUVLayoutForLabel(const TDF_Label& label) const noexcept;
     //! Same v2/prefix payload and ordinary MeshUVAtlas transaction as planar.

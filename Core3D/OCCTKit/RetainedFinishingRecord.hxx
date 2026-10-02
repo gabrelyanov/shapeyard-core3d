@@ -3,10 +3,12 @@
 // E1 retained per-part finishing. This value is a derivative of one retained
 // parametric owner; it never grants authority to mutate the source BRep.
 #include "RetainedRecipeIdentity.hxx"
+#include <CommonCrypto/CommonDigest.h>
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <set>
 #include <string>
 #include <vector>
@@ -158,6 +160,23 @@ private:
 };
 } // namespace detail
 
+// SHA-256 over finishing-scale bytes, bounded by this module's own
+// kMaximumBytes. retained_solid::Hash carries the 64 KiB retained-envelope
+// bound and must not be used for finishing-scale bytes. Null, empty and
+// over-bound input is refused with a zeroed digest.
+static_assert(kMaximumBytes <= std::numeric_limits<CC_LONG>::max(),
+              "finishing byte bound must fit CC_LONG");
+inline bool HashFinishingBytes(const std::uint8_t* bytes, std::size_t size,
+                               Digest& output) noexcept {
+    output = {};
+    if (!bytes || size == 0 || size > kMaximumBytes) return false;
+    return CC_SHA256(bytes, CC_LONG(size), output.data()) != nullptr;
+}
+inline bool HashFinishingBytes(const std::vector<std::uint8_t>& bytes,
+                               Digest& output) noexcept {
+    return HashFinishingBytes(bytes.data(), bytes.size(), output);
+}
+
 inline bool Encode(const Definition& value, std::vector<std::uint8_t>& output) noexcept {
     output.clear(); Refusal refusal;
     try {
@@ -182,7 +201,7 @@ inline bool Encode(const Definition& value, std::vector<std::uint8_t>& output) n
             writer.raw(corner.position); writer.raw(corner.uv); writer.raw(corner.normal); writer.raw(corner.material);
         }
         if (!writer.ok || writer.bytes.size() > kMaximumBytes - 32) return false;
-        Digest digest{}; if (!retained_solid::Hash(writer.bytes, digest)) return false;
+        Digest digest{}; if (!HashFinishingBytes(writer.bytes, digest)) return false;
         writer.raw(digest); if (!writer.ok) return false;
         output = std::move(writer.bytes); return true;
     } catch (...) { output.clear(); return false; }
@@ -196,7 +215,7 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes, Definition& output,
         if (bytes.size() < fixed || bytes.size() > kMaximumBytes
             || std::memcmp(bytes.data(), "SYEF\1\0\0\0", 8) != 0) return false;
         std::vector<std::uint8_t> body(bytes.begin(), bytes.end() - 32);
-        Digest expected{}, actual{}; if (!retained_solid::Hash(body, expected)) return false;
+        Digest expected{}, actual{}; if (!HashFinishingBytes(body, expected)) return false;
         std::copy_n(bytes.end() - 32, 32, actual.begin()); if (actual != expected) return false;
         detail::Reader reader(bytes, bytes.size() - 32); std::array<std::uint8_t, 8> prefix{};
         Definition value; std::uint64_t unwrap = 0, quality = 0, reserved = 0;

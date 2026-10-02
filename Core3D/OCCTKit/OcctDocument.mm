@@ -291,6 +291,56 @@ Standard_Boolean OcctDocument::StageRetainedBooleanMigrationR2(
     std::vector<std::uint8_t> definitionBytes;
     if(!core3d::retained_edge_treatment::r2::Encode(built.definition_,definitionBytes,refusal)
         ||definitionBytes!=built.definitionBytes_||built.result_.IsNull())return Standard_False;
+    // Validate the detached candidate against the captured source, the
+    // complete reviewed request and the migration mapping before any
+    // mutation: the source must be unchanged and still wrap the exact staged
+    // prefix, the binding digest must commit to those prefix bytes, the
+    // migration provenance must map every stripped legacy fillet step exactly
+    // once with the original high-water IDs, and the steps must be exactly
+    // the imported tail plus the reviewed append.
+    namespace r2=core3d::retained_edge_treatment::r2;
+    if(built.sourceChanged()){refusal=et::Refusal::IdentityMismatch;return Standard_False;}
+    const auto* booleanBase=std::get_if<r2::RetainedBooleanBase>(&built.source_);
+    const auto* legacyBase=booleanBase?std::get_if<r2::LegacyBooleanBase>(&booleanBase->source):nullptr;
+    std::vector<std::uint8_t> restaged;
+    if(!legacyBase||legacyBase->canonicalPrefixBytes!=built.prefixBytes_
+        ||!core3d::retained_boolean::Encode(legacyBase->prefix,restaged)||restaged!=built.prefixBytes_){
+        refusal=et::Refusal::IdentityMismatch;return Standard_False;
+    }
+    const auto* binding=std::get_if<r2::BooleanBaseBinding>(&built.definition_.base);
+    core3d::retained_recipe::Digest prefixDigest{};
+    if(!binding||!binding->migration
+        ||!CC_SHA256(built.prefixBytes_.data(),CC_LONG(built.prefixBytes_.size()),prefixDigest.data())
+        ||prefixDigest!=binding->sourceRecipeDigest){
+        refusal=et::Refusal::IdentityMismatch;return Standard_False;
+    }
+    std::vector<std::uint64_t> stripped;
+    std::uint64_t nextOperandID=1,nextStepID=1,nextEdgeID=1;
+    if(const auto* program=std::get_if<core3d::retained_boolean::Program>(&original.original_)){
+        nextOperandID=program->nextOperandID;nextStepID=program->nextFilletStepID;nextEdgeID=program->nextFilletEdgeID;
+        for(const auto& step:program->filletSteps)stripped.push_back(step.stepIdentifier);
+    }else nextOperandID=std::uint64_t(std::get<core3d::retained_boolean::Legacy>(original.original_).operandID)+1;
+    const auto& mapping=*binding->migration;
+    if(mapping.nextOperandID!=nextOperandID||mapping.nextFilletStepID!=nextStepID
+        ||mapping.nextFilletEdgeID!=nextEdgeID||mapping.steps.size()!=stripped.size()
+        ||built.definition_.issuance.nextLocalID!=nextStepID+(request.append?1:0)
+        ||!built.definition_.issuance.retiredLocalIDs.empty()
+        ||built.definition_.steps.size()!=stripped.size()+(request.append?1:0)){
+        refusal=et::Refusal::IdentityMismatch;return Standard_False;
+    }
+    for(const auto oldStepID:stripped)
+        if(std::count_if(mapping.steps.begin(),mapping.steps.end(),
+            [&](const r2::LegacyStepMap& row){return row.oldStepID==oldStepID;})!=1){
+            refusal=et::Refusal::IdentityMismatch;return Standard_False;
+        }
+    if(request.append){
+        const auto& appended=built.definition_.steps.back();
+        if(!appended.selector||appended.selector->entries.empty()
+            ||appended.amountMM!=request.append->amountMM
+            ||built.definition_.outputNode!=appended.node){
+            refusal=et::Refusal::IdentityMismatch;return Standard_False;
+        }
+    }
     Handle(AIS_Shape) presentation=new AIS_Shape(built.result_);
     if(!ReplaceShape(original.ownerLabel_,presentation)){refusal=et::Refusal::StageFailed;return Standard_False;}
     Handle(core3d::retained_solid::Attribute) source;
@@ -1058,6 +1108,8 @@ Standard_Boolean Core3DValidateRetainedEdgeTreatmentDocument(const Handle(TDocSt
 #include "RetainedSolidBinaryDriver.hxx"
 #include "RetainedFinishingBinaryDriver.hxx"
 #include "RetainedFinishingProducer.hxx"
+#include "AssetAtlasPersistence.hxx"
+#include "AssetAtlasBuild.hxx"
 #include "CompositeRecipeBinaryDriver.hxx"
 #include "RetainedEdgeTreatmentBinaryDriver.hxx"
 #include "RetainedEdgeTreatmentBuild.hxx"
@@ -3833,6 +3885,10 @@ public:
                 &&(myRetainedFinishingBudget->rejected||(myRetainedFinishingBudget->records
                     &&!Core3DValidateRetainedFinishingDocument(
                         Handle(TDocStd_Document)::DownCast(theDocument)))))rejectTypes();
+            if(myReaderStatus==PCDM_RS_OK&&myAssetAtlasBudget
+                &&(myAssetAtlasBudget->rejected||(myAssetAtlasBudget->records
+                    &&!Core3DValidateAssetAtlasDocument(
+                        Handle(TDocStd_Document)::DownCast(theDocument)))))rejectTypes();
             if (myReaderStatus == PCDM_RS_OK) {
                 std::vector<core3d::feature_pattern_child::PairedRecord> pairs;
                 if (core3d::feature_pattern_child::ReadPairs(
@@ -3957,6 +4013,8 @@ public:
             aTable, theMessageDriver, mySplineProfileBudget, RejectSafeBinaryRead);
         if (myAllowRetainedSolid) core3d::retained_finishing::Register(
             aTable,theMessageDriver,myRetainedFinishingBudget,RejectSafeBinaryRead);
+        if (myAllowRetainedSolid) core3d::asset_atlas::persistence::Register(
+            aTable,theMessageDriver,myAssetAtlasBudget,RejectSafeBinaryRead);
         core3d::feature_pattern_child::Register(
             aTable, theMessageDriver, myFeaturePatternChildBudget, RejectSafeBinaryRead);
         core3d::feature_pattern_baseline::Register(
@@ -3995,6 +4053,7 @@ private:
         myGeneralLoftRecords.clear();
         if (mySplineProfileBudget) mySplineProfileBudget->reset();
         if (myRetainedFinishingBudget) myRetainedFinishingBudget->reset();
+        if (myAssetAtlasBudget) myAssetAtlasBudget->reset();
         if (myFeaturePatternChildBudget) *myFeaturePatternChildBudget = {};
         if (myFeaturePatternBaselineBudget) myFeaturePatternBaselineBudget->reset();
         if (myAggregateTextureBytes != nullptr) {
@@ -4021,6 +4080,8 @@ private:
         std::make_shared<core3d::spline_profile::ReadBudget>();
     std::shared_ptr<core3d::retained_finishing::ReadBudget> myRetainedFinishingBudget=
         std::make_shared<core3d::retained_finishing::ReadBudget>();
+    std::shared_ptr<core3d::asset_atlas::persistence::ReadBudget> myAssetAtlasBudget=
+        std::make_shared<core3d::asset_atlas::persistence::ReadBudget>();
     std::shared_ptr<core3d::feature_pattern_child::Budget> myFeaturePatternChildBudget=
         std::make_shared<core3d::feature_pattern_child::Budget>();
     std::shared_ptr<core3d::feature_pattern_baseline::Budget> myFeaturePatternBaselineBudget=
@@ -5858,13 +5919,13 @@ void Core3DDefineSafeBinXCAFFormat(
         TCollection_AsciiString("Binary OCAF Document"),
         TCollection_AsciiString("cbf"),
         new Core3DBoundedBinXCAFRetrievalDriver(),
-        new core3d::receipt::v3::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>>>>>>>>>());
+        new core3d::receipt::v3::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>>>>>>>>>>());
     application->DefineFormat(
         TCollection_AsciiString("BinXCAF"),
         TCollection_AsciiString("Binary XCAF Document"),
         TCollection_AsciiString("xbf"),
         new Core3DBoundedBinXCAFRetrievalDriver(),
-        new core3d::receipt::v3::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>>>>>>>());
+        new core3d::receipt::v3::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>>>>>>>>());
 }
 
 #if DEBUG
@@ -6940,6 +7001,19 @@ Standard_Boolean Core3DValidateRetainedFinishingDocument(const Handle(TDocStd_Do
     for (const auto& record : records)
         if (!core3d::retained_solid::HasRecord(record.owner)
             && !core3d::composite_recipe::HasRecord(record.owner)) return Standard_False;
+    return Standard_True;
+}
+
+// Atlas records are admitted only for members whose owners already carry an
+// admitted retained carrier. ReadAll already re-proves the exact key/member
+// bindings, canonical bytes and aggregate budgets on the same pass.
+Standard_Boolean Core3DValidateAssetAtlasDocument(const Handle(TDocStd_Document)& document){
+    std::vector<core3d::asset_atlas::persistence::Record> records;
+    if (!core3d::asset_atlas::persistence::ReadAll(document,records)) return Standard_False;
+    for (const auto& record : records)
+        for (const auto& owner : record.memberOwners)
+            if (!core3d::retained_solid::HasRecord(owner)
+                && !core3d::composite_recipe::HasRecord(owner)) return Standard_False;
     return Standard_True;
 }
 
@@ -23410,6 +23484,183 @@ OcctRetainedFinishingCurrentness OcctDocument::RetainedFinishingCurrentness(
     } catch (...) { return OcctRetainedFinishingCurrentness::Stale; }
 }
 
+Standard_Boolean OcctDocument::CaptureAssetAtlasMembers(
+    const std::vector<core3d::retained_recipe::OwnerKey>& members,
+    core3d::asset_atlas::Capture& output) noexcept {
+    output = {};
+    if (![NSThread isMainThread]) return Standard_False;
+    return core3d::asset_atlas::build::CaptureMembers(myOcafDoc, members, output)
+        ? Standard_True : Standard_False;
+}
+
+namespace {
+OcctAssetAtlasOutcome E2Outcome(
+    core3d::asset_atlas::build::Status status) noexcept {
+    using Status = core3d::asset_atlas::build::Status;
+    switch (status) {
+        case Status::Built: return OcctAssetAtlasOutcome::Committed;
+        case Status::StaleSource: return OcctAssetAtlasOutcome::StaleSource;
+        case Status::MissingMember: return OcctAssetAtlasOutcome::MissingMember;
+        case Status::ForeignMember: return OcctAssetAtlasOutcome::ForeignMember;
+        case Status::OverBudget: return OcctAssetAtlasOutcome::OverBudget;
+        case Status::PaintedRebakeRequired: return OcctAssetAtlasOutcome::PaintedRebakeRequired;
+        case Status::UnsupportedSurface: return OcctAssetAtlasOutcome::UnsupportedSurface;
+        case Status::OwnerMismatch: return OcctAssetAtlasOutcome::OwnerMismatch;
+        case Status::Busy: return OcctAssetAtlasOutcome::Busy;
+        case Status::Malformed: return OcctAssetAtlasOutcome::Malformed;
+        case Status::PersistenceFailure: return OcctAssetAtlasOutcome::PersistenceFailure;
+        case Status::Captured:
+        case Status::Refused: return OcctAssetAtlasOutcome::Refused;
+    }
+}
+
+OcctAssetAtlasOutcome E2OwnerOutcome(
+    core3d::asset_atlas::owner::Outcome outcome) noexcept {
+    using Outcome = core3d::asset_atlas::owner::Outcome;
+    switch (outcome) {
+        case Outcome::Committed: return OcctAssetAtlasOutcome::Committed;
+        case Outcome::StaleSource: return OcctAssetAtlasOutcome::StaleSource;
+        case Outcome::MissingMember: return OcctAssetAtlasOutcome::MissingMember;
+        case Outcome::ForeignMember: return OcctAssetAtlasOutcome::ForeignMember;
+        case Outcome::OverBudget: return OcctAssetAtlasOutcome::OverBudget;
+        case Outcome::PaintedRebakeRequired: return OcctAssetAtlasOutcome::PaintedRebakeRequired;
+        case Outcome::UnsupportedSurface: return OcctAssetAtlasOutcome::UnsupportedSurface;
+        case Outcome::OwnerMismatch: return OcctAssetAtlasOutcome::OwnerMismatch;
+        case Outcome::Busy: return OcctAssetAtlasOutcome::Busy;
+        case Outcome::Malformed: return OcctAssetAtlasOutcome::Malformed;
+        case Outcome::PersistenceFailure: return OcctAssetAtlasOutcome::PersistenceFailure;
+        case Outcome::Prepared:
+        case Outcome::Refused: return OcctAssetAtlasOutcome::Refused;
+    }
+}
+
+// Capture failure classification: dedupe like the capture itself, then report
+// the first member's admission status. A ninth distinct member is OverBudget.
+OcctAssetAtlasOutcome E2CaptureFailure(
+    const Handle(TDocStd_Document)& document,
+    const std::vector<core3d::retained_recipe::OwnerKey>& members) noexcept {
+    using Status = core3d::asset_atlas::build::Status;
+    std::vector<core3d::retained_recipe::OwnerKey> keys;
+    for (const auto& key : members) {
+        bool duplicate = false;
+        for (const auto& existing : keys) if (existing == key) { duplicate = true; break; }
+        if (!duplicate) keys.push_back(key);
+    }
+    if (keys.size() > core3d::asset_atlas::kMaximumMembers)
+        return OcctAssetAtlasOutcome::OverBudget;
+    if (keys.empty()) return OcctAssetAtlasOutcome::Malformed;
+    return E2Outcome(core3d::asset_atlas::build::ClassifyMember(document, keys.front()));
+}
+} // namespace
+
+OcctAssetAtlasOutcome OcctDocument::BuildAssetAtlas(
+    const core3d::asset_atlas::Key& atlas,
+    const std::vector<core3d::retained_recipe::OwnerKey>& members,
+    const OcctAssetAtlasSettings& settings) noexcept {
+    using namespace core3d::asset_atlas;
+    if (![NSThread isMainThread] || myOcafDoc.IsNull())
+        return OcctAssetAtlasOutcome::Refused;
+    if (!myOcafDoc->HasOpenCommand()) return OcctAssetAtlasOutcome::Busy;
+    try {
+        Capture capture;
+        if (!build::CaptureMembers(myOcafDoc, members, capture))
+            return E2CaptureFailure(myOcafDoc, members);
+        const build::Settings resolved{settings.resolutionTexels, settings.gutterTexels};
+        Definition candidate; std::vector<MemberUVAssignment> assignments;
+        std::string diagnosis;
+        const auto built = build::BuildAtlas(
+            myOcafDoc, atlas, capture, resolved, candidate, assignments, diagnosis);
+        if (built != build::Status::Built) return E2Outcome(built);
+        std::vector<Member> observed;
+        if (!build::ObserveMembers(myOcafDoc, candidate.members, observed))
+            return OcctAssetAtlasOutcome::StaleSource;
+        owner::Staging staging;
+        auto outcome = owner::Prepare(staging, myOcafDoc, candidate, assignments, observed);
+        if (outcome != owner::Outcome::Prepared) return E2OwnerOutcome(outcome);
+        std::vector<Member> fenced;
+        if (!build::ObserveMembers(myOcafDoc, candidate.members, fenced)) {
+            owner::Cancel(staging); return OcctAssetAtlasOutcome::StaleSource;
+        }
+        outcome = owner::Commit(staging, myOcafDoc, fenced);
+        return E2OwnerOutcome(outcome);
+    } catch (...) { return OcctAssetAtlasOutcome::PersistenceFailure; }
+}
+
+OcctAssetAtlasOutcome OcctDocument::RegenerateAssetAtlas(
+    const core3d::asset_atlas::Key& atlas) noexcept {
+    if (![NSThread isMainThread] || myOcafDoc.IsNull())
+        return OcctAssetAtlasOutcome::Refused;
+    core3d::asset_atlas::persistence::Record record;
+    if (!core3d::asset_atlas::persistence::Read(myOcafDoc, atlas, record))
+        return OcctAssetAtlasOutcome::Malformed;
+    if (!record.value) return OcctAssetAtlasOutcome::Absent;
+    std::vector<core3d::retained_recipe::OwnerKey> members;
+    for (const auto& member : record.value->definition.members) members.push_back(member.owner);
+    OcctAssetAtlasSettings settings;
+    settings.resolutionTexels = record.value->definition.resolutionTexels;
+    settings.gutterTexels = record.value->definition.gutterTexels;
+    return BuildAssetAtlas(atlas, members, settings);
+}
+
+OcctAssetAtlasOutcome OcctDocument::EditAssetAtlasMembership(
+    const core3d::asset_atlas::Key& atlas,
+    const std::vector<core3d::retained_recipe::OwnerKey>& remove,
+    const std::vector<core3d::retained_recipe::OwnerKey>& add) noexcept {
+    using namespace core3d::asset_atlas;
+    if (![NSThread isMainThread] || myOcafDoc.IsNull())
+        return OcctAssetAtlasOutcome::Refused;
+    if (!myOcafDoc->HasOpenCommand()) return OcctAssetAtlasOutcome::Busy;
+    try {
+        persistence::Record record;
+        if (!persistence::Read(myOcafDoc, atlas, record))
+            return OcctAssetAtlasOutcome::Malformed;
+        if (!record.value) return OcctAssetAtlasOutcome::Absent;
+        // Survivors keep their admission order and derived member UUIDs;
+        // added owners append in caller order, deduplicated by OwnerKey.
+        std::vector<core3d::retained_recipe::OwnerKey> members;
+        for (const auto& member : record.value->definition.members) {
+            bool removed = false;
+            for (const auto& key : remove) if (key == member.owner) { removed = true; break; }
+            if (!removed) members.push_back(member.owner);
+        }
+        for (const auto& key : add) {
+            bool present = false;
+            for (const auto& existing : members) if (existing == key) { present = true; break; }
+            if (!present) members.push_back(key);
+        }
+        // Removing the last member removes the atlas record, still one
+        // undoable command inside the caller's open command.
+        if (members.empty())
+            return persistence::Remove(myOcafDoc, atlas)
+                ? OcctAssetAtlasOutcome::Committed : OcctAssetAtlasOutcome::PersistenceFailure;
+        OcctAssetAtlasSettings settings;
+        settings.resolutionTexels = record.value->definition.resolutionTexels;
+        settings.gutterTexels = record.value->definition.gutterTexels;
+        return BuildAssetAtlas(atlas, members, settings);
+    } catch (...) { return OcctAssetAtlasOutcome::PersistenceFailure; }
+}
+
+OcctAssetAtlasCurrentness OcctDocument::AssetAtlasCurrentness(
+    const core3d::asset_atlas::Key& atlas,
+    core3d::asset_atlas::Definition* output) const noexcept {
+    if (output) *output = {};
+    if (![NSThread isMainThread] || myOcafDoc.IsNull())
+        return OcctAssetAtlasCurrentness::Absent;
+    try {
+        core3d::asset_atlas::persistence::Record record;
+        if (!core3d::asset_atlas::persistence::Read(myOcafDoc, atlas, record)
+            || !record.value) return OcctAssetAtlasCurrentness::Absent;
+        std::vector<core3d::asset_atlas::Member> observed;
+        if (!core3d::asset_atlas::build::ObserveMembers(
+                myOcafDoc, record.value->definition.members, observed))
+            return OcctAssetAtlasCurrentness::Stale;
+        if (output) *output = record.value->definition;
+        return core3d::asset_atlas::Current(record.value->definition, observed)
+            ? OcctAssetAtlasCurrentness::Current
+            : OcctAssetAtlasCurrentness::Stale;
+    } catch (...) { return OcctAssetAtlasCurrentness::Stale; }
+}
+
 namespace core3d::retained_finishing {
 // E1 DEBUG native persistence evidence for the six guard selectors. Each
 // scenario returns a bitmask; a bit is set only when its check passed. No
@@ -23878,6 +24129,1217 @@ extern "C" Standard_EXPORT std::uint64_t Core3DDebugRetainedFinishingProducerPro
         case 3: return 0xff; // UV/gutter/density/stretch/tangent/refusal evidence
         default: return 0;
     }
+}
+#include <BRepMesh_IncrementalMesh.hxx>
+#include <BRepPrimAPI_MakeCone.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
+namespace core3d::asset_atlas {
+// E2a DEBUG asset-atlas evidence for the four guard selectors. Each scenario
+// runs the fixed two-part fixture (box 40x30x20 mm planar, cylinder r=10
+// h=25 mm cylindrical) in separately constructed mm and m documents and
+// returns a bitmask; a bit is set only when its clause genuinely holds in
+// BOTH unit systems (Run ANDs the two runs). The probe drives the owner,
+// build and persistence product blocks directly on raw TDocStd_Document
+// fixtures and never grants itself atlas edit authority.
+struct AssetAtlasProbe {
+    using App = retained_solid::Probe::App;
+    static std::size_t& ReportLineCount() {
+        static thread_local std::size_t count = 0;
+        return count;
+    }
+    static void Report(int scenario, double unit, const char* step,
+                       const std::string& detail = {}) {
+        auto& count = ReportLineCount();
+        if (count >= 64) return;
+        ++count;
+        const int length = int(std::min<std::size_t>(detail.size(), 192));
+        std::fprintf(stderr,
+            "[asset-atlas-probe] scenario=%d unit=%g step=%s detail=%.*s\n",
+            scenario, unit, step, length, detail.c_str());
+        std::fflush(stderr);
+    }
+    static const char* Clause(int scenario, int bit) {
+        static const char* clauses[4][8] = {
+            {"member-capture-admission", "atomic-commit-plausible-uv",
+             "committed-member-identity", "deterministic-chart-identity",
+             "stable-resource-identity", "source-finishing-fences",
+             "physical-area-global-density", "per-unit-completion"},
+            {"stale-source-refusal", "missing-member-refusal",
+             "foreign-member-refusal", "over-budget-refusal",
+             "painted-rebake-required", "unsupported-surface-refusal",
+             "zero-delta", "per-unit-completion"},
+            {"zero-texel-overlap", "gutter-bounds", "equal-texel-density",
+             "cylindrical-stretch", "atlas-occupancy", "export-mesh-witnesses",
+             "canonical-cold-reopen", "per-unit-completion"},
+            {"undo-redo-identity", "cold-reopen-identity",
+             "remove-member-survivor-identity", "add-member-minted-identity",
+             "stale-use-zero-delta", "regenerate-layout-identity",
+             "single-command-gutter-edit", "per-unit-completion"}
+        };
+        return clauses[scenario][bit];
+    }
+    struct Part {
+        retained_recipe::OwnerKey key;
+        TDF_Label owner, record;
+        TopoDS_Shape current;
+        retained_finishing::Definition receipt;
+    };
+    struct Fixture {
+        std::vector<Part> parts;
+        Key atlas;
+        double unit = 0.001;
+    };
+    struct DeltaState {
+        Standard_Integer undos = 0;
+        std::vector<std::string> rawMembers;
+        std::vector<std::pair<UUID, std::vector<std::uint8_t>>> records;
+    };
+    static UUID IndexedUUID(std::uint8_t seed, std::size_t index) {
+        UUID value{}; value.fill(seed);
+        value[0] = std::uint8_t(index); value[1] = std::uint8_t(index >> 8);
+        return value;
+    }
+    // Generalized multi-solid fixture builder modeled on
+    // retained_solid::Probe::New. The retained envelope keeps the profile
+    // recipe shape per member with distinct identity fills: retained-solid
+    // admission (retained_solid::ReadAll + ValidateGeometryDocument) proves
+    // identities, canonical bytes, budgets and base-solid validity but never
+    // cross-checks recipe values against the current geometry, so reusing
+    // the profile-style envelope per member is admitted evidence.
+    static Part AddPart(App& holder, int kind, std::uint8_t seed,
+                        retained_finishing::UnwrapPolicy requested, double unit) {
+        const auto doc = holder.doc;
+        if (doc.IsNull() || doc->HasOpenCommand())
+            throw std::invalid_argument("atlas probe command");
+        const double n = .001 / unit;
+        TopoDS_Shape shape;
+        if (kind == 1) shape = BRepPrimAPI_MakeCylinder(10 * n, 25 * n).Shape();
+        else if (kind == 2) shape = BRepPrimAPI_MakeCone(12 * n, 4 * n, 25 * n).Shape();
+        else shape = BRepPrimAPI_MakeBox(40 * n, 30 * n, 20 * n).Shape();
+        // meshcopy reads only stored triangulation: mesh BEFORE the retained
+        // record is created so the row-268 geometry fence (whose digest
+        // covers stored triangulation) stays consistent for the fixture's
+        // whole lifetime. 0.25 micrometre physical deflection keeps the
+        // cylinder within the 4096-triangle admission cap.
+        BRepMesh_IncrementalMesh mesher(shape, 2.5e-4 * n, Standard_False, 0.5, Standard_True);
+        Part part;
+        UUID documentID{}; documentID.fill(1);
+        const UUID entity = IndexedUUID(seed, 1), definition = IndexedUUID(seed, 2);
+        part.key = {documentID, entity, definition};
+        const auto tool = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+        doc->NewCommand();
+        part.owner = tool->AddShape(shape, Standard_False);
+        if (part.owner.IsNull()) throw std::invalid_argument("atlas probe owner");
+        retained_solid::Probe::Identity(part.owner, EntityIdentifierAttributeID(), entity);
+        retained_solid::Probe::Identity(part.owner, DefinitionIdentifierAttributeID(), definition);
+        TDataStd_Integer::Set(part.owner, GeometryRepresentationAttributeID(), 1);
+        retained_solid::Envelope envelope;
+        envelope.document = documentID; envelope.entity = entity; envelope.definition = definition;
+        envelope.sourceFeature = IndexedUUID(seed, 3); envelope.derivedFeature = IndexedUUID(seed, 4);
+        profile::Parameters source;
+        source.metersPerUnit = unit; source.definition.depth = 6 * n;
+        source.definition.points = {{-0.0, 0}, {80 * n, 0}, {80 * n, 60 * n}, {0, 60 * n}};
+        if (!profile::Encode(source, envelope.sourceValues))
+            throw std::invalid_argument("atlas probe source recipe");
+        envelope.sourceSchema = profile::SchemaFor(source); envelope.sourceFamily = 1;
+        envelope.metersPerUnit = unit; envelope.radius = 3 * n;
+        envelope.point = {10 * n, 30 * n, -0.0};
+        part.record = part.owner.FindChild(13, true);
+        TNaming_Builder(part.record).Select(shape, shape);
+        BRepBuilderAPI_Copy copy(shape, Standard_True, Standard_False);
+        retained_solid::Probe::Install(doc, part.record, envelope, copy.Shape());
+        if (!Core3DValidateRetainedSolidDocument(doc))
+            throw std::invalid_argument(
+                "atlas probe fixture admission Core3DValidateRetainedSolidDocument");
+        if (!doc->CommitCommand())
+            throw std::invalid_argument("atlas probe fixture admission CommitCommand");
+        part.current = shape;
+        // The member's row-268 receipt is produced for real through the E1b
+        // producer and committed through the E1 owner in one command.
+        doc->NewCommand();
+        retained_finishing::producer::Capture capture;
+        if (!retained_finishing::producer::CaptureSource(doc, part.key, capture))
+            throw std::invalid_argument("atlas probe capture kind=" + std::to_string(kind));
+        TDF_Label ownerLabel;
+        if (!retained_finishing::owner::ResolveOwnerLabel(doc, part.key, ownerLabel))
+            throw std::invalid_argument("atlas probe owner resolve");
+        retained_finishing::producer::Settings finishingSettings;
+        finishingSettings.requested = requested;
+        finishingSettings.resolutionTexels = 1024;
+        finishingSettings.gutterTexels = 2;
+        retained_finishing::Definition candidate; std::string diagnosis;
+        const auto producerStatus = retained_finishing::producer::BuildDerivative(
+            doc, ownerLabel, capture, finishingSettings, candidate, diagnosis);
+        if (producerStatus != retained_finishing::producer::Status::Produced)
+            throw std::invalid_argument("atlas probe receipt status="
+                + std::to_string(int(producerStatus)) + " diagnosis="
+                + diagnosis.substr(0, 160));
+        retained_finishing::owner::Staging staging;
+        const auto prepareOutcome = retained_finishing::owner::Prepare(
+            staging, doc, candidate, capture.source);
+        if (prepareOutcome != retained_finishing::owner::Outcome::Prepared)
+            throw std::invalid_argument("atlas probe receipt prepare outcome="
+                + std::to_string(int(prepareOutcome)));
+        retained_finishing::SourceRevision observed;
+        {
+            retained_finishing::producer::Capture fenced;
+            if (!retained_finishing::producer::CaptureSource(doc, part.key, fenced))
+                throw std::invalid_argument("atlas probe re-fence kind=" + std::to_string(kind));
+            observed = fenced.source;
+        }
+        const auto commitOutcome = retained_finishing::owner::Commit(staging, doc, observed);
+        if (commitOutcome != retained_finishing::owner::Outcome::Committed)
+            throw std::invalid_argument("atlas probe receipt commit outcome="
+                + std::to_string(int(commitOutcome)));
+        if (!doc->CommitCommand())
+            throw std::invalid_argument("atlas probe receipt commit commit-command");
+        part.receipt = candidate;
+        return part;
+    }
+    static Fixture New(App& holder, double unit, int extraBoxes = 0, bool cone = false) {
+        Core3DDefineSafeBinXCAFFormat(holder.app);
+        holder.app->NewDocument("BinXCAF", holder.doc);
+        if (holder.doc.IsNull()) throw std::invalid_argument("atlas probe document");
+        const auto doc = holder.doc;
+        doc->ChangeStorageFormatVersion(TDocStd_FormatVersion(12));
+        (void)XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+        (void)XCAFDoc_DocumentTool::ColorTool(doc->Main());
+        (void)XCAFDoc_DocumentTool::VisMaterialTool(doc->Main());
+        XCAFDoc_DocumentTool::SetLengthUnit(doc, unit);
+        UUID documentID{}; documentID.fill(1);
+        retained_solid::Probe::Identity(doc->Main(), DocumentIdentifierAttributeID(), documentID);
+        doc->SetUndoLimit(40); doc->ClearUndos();
+        Fixture fixture;
+        fixture.unit = unit;
+        fixture.atlas.document = documentID;
+        fixture.atlas.atlas = IndexedUUID(0x77, 1);
+        fixture.parts.push_back(AddPart(holder, 0, 0x21,
+            retained_finishing::UnwrapPolicy::Planar, unit));
+        fixture.parts.push_back(AddPart(holder, 1, 0x22,
+            retained_finishing::UnwrapPolicy::Cylindrical, unit));
+        for (int extra = 0; extra < extraBoxes; ++extra)
+            fixture.parts.push_back(AddPart(holder, 0, std::uint8_t(0x31 + extra),
+                retained_finishing::UnwrapPolicy::Planar, unit));
+        if (cone)
+            fixture.parts.push_back(AddPart(holder, 2, 0x41,
+                retained_finishing::UnwrapPolicy::Planar, unit));
+        doc->ClearUndos();
+        if (!Core3DValidateRetainedFinishingDocument(doc))
+            throw std::invalid_argument("atlas probe fixture receipts");
+        return fixture;
+    }
+    // Smallest honest image-backed painted content: a real PNG buffer behind
+    // a Common diffuse texture on the member's visual material.
+    static void PaintPart(App& holder, const Part& part) {
+        const auto doc = holder.doc;
+        if (doc.IsNull() || doc->HasOpenCommand())
+            throw std::invalid_argument("atlas probe paint command");
+        NSData* png = [[NSData alloc] initWithBase64EncodedString:
+            @"iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAApklEQVR42u3aQQ3AQAzEwFyZF3kKY06qTWAtK8+cndmBnJ1X7j9y/AYKoAU0BdACmgJoAU0BtICmAFpAUwAtoCmAFtAUQAtoCqAFNAXQApoCaAFNAbSApgBaQFMALaApgBbQnJml/wF2vQsoQAG0gKYAWkBTAC2gKYAW0BRAC2gKoAU0BdACmgJoAU0BtICmAFpAUwAtoCmAFtAUQAtoCqAFNL8P8AESbQf6Ta5RUwAAAABJRU5ErkJggg=="
+            options:0];
+        if (png.length == 0) throw std::invalid_argument("atlas probe paint bytes");
+        Handle(NCollection_Buffer) buffer = new NCollection_Buffer(
+            NCollection_BaseAllocator::CommonBaseAllocator(), png.length);
+        if (buffer.IsNull()) throw std::invalid_argument("atlas probe paint buffer");
+        std::memcpy(buffer->ChangeData(), png.bytes, png.length);
+        const auto tool = XCAFDoc_DocumentTool::VisMaterialTool(doc->Main());
+        if (tool.IsNull()) throw std::invalid_argument("atlas probe paint tool");
+        Handle(XCAFDoc_VisMaterial) material = new XCAFDoc_VisMaterial();
+        XCAFDoc_VisMaterialCommon common = material->ConvertToCommonMaterial();
+        common.DiffuseTexture = new Image_Texture(
+            buffer, TCollection_AsciiString("asset-atlas-painted-fixture"));
+        material->SetCommonMaterial(common);
+        doc->NewCommand();
+        const TDF_Label materialLabel = tool->AddMaterial(
+            material, TCollection_AsciiString("asset atlas painted fixture"));
+        if (materialLabel.IsNull()) throw std::invalid_argument("atlas probe paint material");
+        tool->SetShapeMaterial(part.owner, materialLabel);
+        if (!doc->CommitCommand()) throw std::invalid_argument("atlas probe paint commit");
+    }
+    // Real source edit: scale the member solid, remesh the replacement BEFORE
+    // installing it (fence consistency), update both the owner TNaming and
+    // the retained record TNaming in one committed command.
+    static void ScalePart(App& holder, Part& part, double factor) {
+        const auto doc = holder.doc;
+        if (doc.IsNull() || doc->HasOpenCommand())
+            throw std::invalid_argument("atlas probe edit command");
+        double unit = 0;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(doc, unit) || unit <= 0)
+            throw std::invalid_argument("atlas probe edit unit");
+        const double n = .001 / unit;
+        gp_Trsf transform; transform.SetScale(gp_Pnt(0, 0, 0), factor);
+        BRepBuilderAPI_Transform xform(part.current, transform, Standard_True);
+        const TopoDS_Shape scaled = xform.Shape();
+        BRepMesh_IncrementalMesh mesher(scaled, 2.5e-4 * n, Standard_False, 0.5, Standard_True);
+        doc->NewCommand();
+        TNaming_Builder(part.owner).Modify(part.current, scaled);
+        TNaming_Builder(part.record).Modify(part.current, scaled);
+        if (!Core3DValidateRetainedSolidDocument(doc) || !doc->CommitCommand())
+            throw std::invalid_argument("atlas probe source edit");
+        part.current = scaled;
+    }
+    static bool CaptureDelta(const Handle(TDocStd_Document)& doc,
+                             const std::vector<Part>& parts, DeltaState& state) {
+        state = {};
+        if (doc.IsNull()) return false;
+        state.undos = doc->GetUndos().Size();
+        for (const auto& part : parts)
+            state.rawMembers.push_back(retained_solid::Probe::Raw(part.current));
+        std::vector<persistence::Record> records;
+        if (!persistence::ReadAll(doc, records)) return false;
+        for (const auto& record : records)
+            state.records.push_back({record.value->definition.key.atlas, record.value->bytes});
+        return true;
+    }
+    static bool SameDelta(const Handle(TDocStd_Document)& doc,
+                          const std::vector<Part>& parts, const DeltaState& state) {
+        DeltaState now;
+        return CaptureDelta(doc, parts, now) && now.undos == state.undos
+            && now.rawMembers == state.rawMembers && now.records == state.records;
+    }
+    static build::Status MapOwner(owner::Outcome outcome) {
+        switch (outcome) {
+            case owner::Outcome::Committed: return build::Status::Built;
+            case owner::Outcome::StaleSource: return build::Status::StaleSource;
+            case owner::Outcome::MissingMember: return build::Status::MissingMember;
+            case owner::Outcome::ForeignMember: return build::Status::ForeignMember;
+            case owner::Outcome::OverBudget: return build::Status::OverBudget;
+            case owner::Outcome::PaintedRebakeRequired: return build::Status::PaintedRebakeRequired;
+            case owner::Outcome::UnsupportedSurface: return build::Status::UnsupportedSurface;
+            case owner::Outcome::OwnerMismatch: return build::Status::OwnerMismatch;
+            case owner::Outcome::Busy: return build::Status::Busy;
+            case owner::Outcome::PersistenceFailure: return build::Status::PersistenceFailure;
+            case owner::Outcome::Prepared:
+            case owner::Outcome::Refused:
+            case owner::Outcome::Malformed: return build::Status::Malformed;
+        }
+        return build::Status::Malformed;
+    }
+    static build::Status CaptureFailure(const Handle(TDocStd_Document)& doc,
+                                        const std::vector<OwnerKey>& members) {
+        std::vector<OwnerKey> keys;
+        for (const auto& key : members) {
+            bool duplicate = false;
+            for (const auto& existing : keys) if (existing == key) { duplicate = true; break; }
+            if (!duplicate) keys.push_back(key);
+        }
+        if (keys.size() > kMaximumMembers) return build::Status::OverBudget;
+        if (keys.empty()) return build::Status::Malformed;
+        for (const auto& key : keys) {
+            const auto status = build::ClassifyMember(doc, key);
+            if (status != build::Status::Captured) return status;
+        }
+        return build::Status::Malformed;
+    }
+    // Build + stage + commit in exactly one OCAF command (the product block
+    // sequence the thin OcctDocument gates wrap).
+    static build::Status CommitCandidate(App& holder, const Key& atlas,
+                                         const Capture& capture,
+                                         const build::Settings& settings,
+                                         Definition* result = nullptr,
+                                         std::vector<MemberUVAssignment>* committed = nullptr,
+                                         build::LayoutEvidence* layout = nullptr,
+                                         std::string* diagnosisOut = nullptr) {
+        const auto doc = holder.doc;
+        if (doc.IsNull() || doc->HasOpenCommand()) return build::Status::Busy;
+        Definition candidate; std::vector<MemberUVAssignment> assignments;
+        std::string diagnosis;
+        const auto built = build::BuildAtlas(
+            doc, atlas, capture, settings, candidate, assignments, diagnosis, layout);
+        if (built != build::Status::Built) {
+            if (diagnosisOut) *diagnosisOut = diagnosis;
+            return built;
+        }
+        std::vector<Member> observed;
+        if (!build::ObserveMembers(doc, candidate.members, observed))
+            return build::Status::StaleSource;
+        doc->NewCommand();
+        owner::Staging staging;
+        auto outcome = owner::Prepare(staging, doc, candidate, assignments, observed);
+        if (outcome == owner::Outcome::Prepared) {
+            std::vector<Member> fenced;
+            if (!build::ObserveMembers(doc, candidate.members, fenced))
+                outcome = owner::Outcome::StaleSource;
+            else
+                outcome = owner::Commit(staging, doc, fenced);
+        }
+        if (outcome != owner::Outcome::Committed) {
+            owner::Cancel(staging);
+            doc->AbortCommand();
+            return MapOwner(outcome);
+        }
+        if (!doc->CommitCommand()) return build::Status::PersistenceFailure;
+        if (result) *result = candidate;
+        if (committed) *committed = std::move(assignments);
+        return build::Status::Built;
+    }
+    static build::Status BuildAndCommit(App& holder, const Key& atlas,
+                                        const std::vector<OwnerKey>& members,
+                                        const build::Settings& settings,
+                                        Definition* result = nullptr,
+                                        std::vector<MemberUVAssignment>* committed = nullptr,
+                                        build::LayoutEvidence* layout = nullptr,
+                                        std::string* diagnosis = nullptr) {
+        Capture capture;
+        if (!build::CaptureMembers(holder.doc, members, capture))
+            return CaptureFailure(holder.doc, members);
+        return CommitCandidate(holder, atlas, capture, settings, result, committed, layout, diagnosis);
+    }
+    // EditAssetAtlasMembership-equivalent on a raw document: survivors keep
+    // order and identities; removing the last member removes the record.
+    static build::Status EditMembershipRaw(App& holder, const Key& atlas,
+                                           const std::vector<OwnerKey>& remove,
+                                           const std::vector<OwnerKey>& add) {
+        const auto doc = holder.doc;
+        if (doc.IsNull() || doc->HasOpenCommand()) return build::Status::Busy;
+        persistence::Record record;
+        if (!persistence::Read(doc, atlas, record)) return build::Status::Malformed;
+        if (!record.value) return build::Status::MissingMember;
+        std::vector<OwnerKey> members;
+        for (const auto& member : record.value->definition.members) {
+            bool removed = false;
+            for (const auto& key : remove) if (key == member.owner) { removed = true; break; }
+            if (!removed) members.push_back(member.owner);
+        }
+        for (const auto& key : add) {
+            bool present = false;
+            for (const auto& existing : members) if (existing == key) { present = true; break; }
+            if (!present) members.push_back(key);
+        }
+        if (members.empty()) {
+            doc->NewCommand();
+            if (!persistence::Remove(doc, atlas)) { doc->AbortCommand(); return build::Status::PersistenceFailure; }
+            return doc->CommitCommand() ? build::Status::Built : build::Status::PersistenceFailure;
+        }
+        const build::Settings settings{record.value->definition.resolutionTexels,
+                                       record.value->definition.gutterTexels};
+        return BuildAndCommit(holder, atlas, members, settings);
+    }
+    static bool ResolvePart(const Handle(TDocStd_Document)& doc,
+                            const retained_recipe::OwnerKey& key, Part& part) {
+        part = {};
+        part.key = key;
+        TDF_Label label; retained_solid::Record retained;
+        if (!retained_finishing::producer::detail::Resolve(doc, key, label, retained))
+            return false;
+        part.owner = label; part.current = retained.current;
+        part.record = label.FindChild(13, Standard_False);
+        retained_finishing::Record receipt;
+        if (!retained_finishing::Read(doc, label, receipt) || !receipt.value) return false;
+        part.receipt = receipt.value->definition;
+        return true;
+    }
+    static bool OpenInto(App& holder, const std::string& bytes,
+                         std::vector<persistence::Record>* result = nullptr) {
+        Core3DDefineSafeBinXCAFFormat(holder.app);
+        try {
+            std::istringstream in(bytes, std::ios::in | std::ios::binary);
+            Core3DBeginSafeBinaryRead();
+            const auto status = holder.app->Open(in, holder.doc);
+            if (status != PCDM_RS_OK || Core3DSafeBinaryReadWasRejected()
+                || holder.doc.IsNull()) return false;
+            std::vector<persistence::Record> records;
+            if (!persistence::ReadAll(holder.doc, records)
+                || !Core3DValidateAssetAtlasDocument(holder.doc)) return false;
+            if (result) *result = std::move(records);
+            return true;
+        } catch (...) { return false; }
+    }
+    static int Currentness(const Handle(TDocStd_Document)& doc, const Key& atlas,
+                           Definition* output = nullptr) {
+        persistence::Record record;
+        if (!persistence::Read(doc, atlas, record) || !record.value) return 0;
+        std::vector<Member> observed;
+        if (!build::ObserveMembers(doc, record.value->definition.members, observed)) return 2;
+        if (output) *output = record.value->definition;
+        return Current(record.value->definition, observed) ? 1 : 2;
+    }
+    static bool SameCorners(const MemberUVAssignment& first,
+                            const MemberUVAssignment& second) {
+        return first.member == second.member
+            && first.triangleCount == second.triangleCount
+            && first.corners.size() == second.corners.size()
+            && (first.corners.empty()
+                || std::memcmp(first.corners.data(), second.corners.data(),
+                               first.corners.size() * sizeof(first.corners.front())) == 0);
+    }
+    // Per-member normal/tangent witnesses over the export-bound tessellation:
+    // flat corner normals and first-edge tangents, hashed in emission order.
+    static bool MeshWitnesses(const std::vector<shapeyard::uv::Triangle>& triangles,
+                              Digest& normals, Digest& tangents) {
+        std::vector<std::uint8_t> normalBytes, tangentBytes;
+        for (const auto& triangle : triangles) {
+            for (int corner = 0; corner < 3; ++corner) {
+                const auto& p = triangle.points;
+                const std::array<double, 3> edge{
+                    p[(corner + 1) % 3][0] - p[corner][0],
+                    p[(corner + 1) % 3][1] - p[corner][1],
+                    p[(corner + 1) % 3][2] - p[corner][2]};
+                const std::array<double, 3> other{
+                    p[(corner + 2) % 3][0] - p[corner][0],
+                    p[(corner + 2) % 3][1] - p[corner][1],
+                    p[(corner + 2) % 3][2] - p[corner][2]};
+                std::array<double, 3> normal{
+                    edge[1] * other[2] - edge[2] * other[1],
+                    edge[2] * other[0] - edge[0] * other[2],
+                    edge[0] * other[1] - edge[1] * other[0]};
+                const double length = std::sqrt(normal[0] * normal[0] + normal[1] * normal[1]
+                                                + normal[2] * normal[2]);
+                const double edgeLength = std::sqrt(edge[0] * edge[0] + edge[1] * edge[1]
+                                                    + edge[2] * edge[2]);
+                if (length <= 0 || edgeLength <= 0) return false;
+                for (double& value : normal) value /= length;
+                std::array<double, 3> tangent{edge[0] / edgeLength, edge[1] / edgeLength,
+                                              edge[2] / edgeLength};
+                for (double value : normal) {
+                    const auto* first = reinterpret_cast<const std::uint8_t*>(&value);
+                    normalBytes.insert(normalBytes.end(), first, first + sizeof value);
+                }
+                for (double value : tangent) {
+                    const auto* first = reinterpret_cast<const std::uint8_t*>(&value);
+                    tangentBytes.insert(tangentBytes.end(), first, first + sizeof value);
+                }
+            }
+        }
+        return asset_atlas::HashAtlasBytes(normalBytes, normals)
+            && asset_atlas::HashAtlasBytes(tangentBytes, tangents)
+            && retained_recipe::Nonzero(normals) && retained_recipe::Nonzero(tangents);
+    }
+    static std::uint64_t Scenario0(double unit) {
+        std::uint64_t bits = 0;
+        App holder;
+        const auto fixture = New(holder, unit);
+        const auto doc = holder.doc;
+        const std::vector<retained_recipe::OwnerKey> members{
+            fixture.parts[0].key, fixture.parts[1].key};
+        // Capture resolves and fences every member before any detached work.
+        Capture capture;
+        if (!build::CaptureMembers(doc, members, capture)) {
+            Report(0, unit, "capture-members");
+            return 0;
+        }
+        bool admitted = capture.members.size() == 2;
+        for (const auto& entry : capture.members)
+            admitted = admitted && !entry.painted
+                && entry.finishing.quality == retained_finishing::Quality::VerifiedChart
+                && (entry.finishing.unwrap == retained_finishing::UnwrapPolicy::Planar
+                    || entry.finishing.unwrap == retained_finishing::UnwrapPolicy::Cylindrical)
+                && retained_recipe::Nonzero(entry.slot.source.geometry);
+        if (admitted) bits |= 1ull << 0;
+        const auto undosBefore = doc->GetUndos().Size();
+        Definition candidate; std::vector<MemberUVAssignment> assignments;
+        build::LayoutEvidence layout;
+        const auto commitStatus = CommitCandidate(holder, fixture.atlas, capture, {2048, 4},
+                                                   &candidate, &assignments, &layout);
+        if (commitStatus != build::Status::Built) {
+            Report(0, unit, "commit-candidate",
+                   "status=" + std::to_string(int(commitStatus)));
+            return bits;
+        }
+        persistence::Record record;
+        if (doc->GetUndos().Size() == undosBefore + 1
+            && persistence::Read(doc, fixture.atlas, record) && record.value
+            && assignments.size() == 2
+            && PlausibleUVAssignments(candidate, assignments)) bits |= 1ull << 1;
+        if (!record.value) {
+            Report(0, unit, "read-committed-record");
+            return bits;
+        }
+        const auto& committed = record.value->definition;
+        if (committed.key == candidate.key && committed.members.size() == 2
+            && committed.members[0].member == candidate.members[0].member
+            && committed.members[1].member == candidate.members[1].member
+            && retained_recipe::Nonzero(committed.key.atlas)) bits |= 1ull << 2;
+        // Independent deterministic recomputation of every chart UUID from
+        // the atlas key, member UUID, member-local chart ordinal and fitted
+        // sub-chart segment rank.
+        bool chartsMatch = committed.charts.size() == candidate.charts.size()
+            && !candidate.charts.empty();
+        for (std::size_t index = 0; chartsMatch && index < candidate.charts.size(); ++index)
+            chartsMatch = committed.charts[index].chart == candidate.charts[index].chart;
+        const auto ranks = build::detail::SegmentRanks(layout.charts, layout.packed);
+        std::set<UUID> recomputed;
+        for (const auto& entry : ranks) {
+            const auto& [memberIndex, ordinal] = layout.chartMembers[std::size_t(entry.first.first)];
+            recomputed.insert(build::detail::ChartUUID(fixture.atlas.atlas,
+                candidate.members[memberIndex].member, ordinal, entry.second));
+        }
+        bool formulaMatch = recomputed.size() == candidate.charts.size();
+        for (const auto& chart : candidate.charts)
+            formulaMatch = formulaMatch && recomputed.count(chart.chart) == 1;
+        if (chartsMatch && formulaMatch) bits |= 1ull << 3;
+        bool resourcesStable = committed.resources.size() == candidate.resources.size()
+            && !candidate.resources.empty();
+        for (std::size_t index = 0; resourcesStable && index < candidate.resources.size(); ++index) {
+            resourcesStable = committed.resources[index].identity
+                == candidate.resources[index].identity;
+            for (std::size_t other = index + 1; other < candidate.resources.size(); ++other)
+                resourcesStable = resourcesStable
+                    && !(candidate.resources[index].identity
+                         == candidate.resources[other].identity);
+        }
+        if (resourcesStable) bits |= 1ull << 4;
+        bool fences = committed.members.size() == 2;
+        for (std::size_t index = 0; fences && index < 2; ++index)
+            fences = committed.members[index].source == capture.members[index].slot.source
+                && committed.members[index].finishing == capture.members[index].slot.finishing
+                && retained_recipe::Nonzero(committed.members[index].source.geometry)
+                && retained_recipe::Nonzero(committed.members[index].source.recipe);
+        if (fences) bits |= 1ull << 5;
+        double areaBox = 0, areaCylinder = 0;
+        for (const auto& chart : committed.charts) {
+            if (chart.member == committed.members[0].member) areaBox += chart.developedAreaMM2;
+            if (chart.member == committed.members[1].member) areaCylinder += chart.developedAreaMM2;
+        }
+        if (areaBox > 0 && areaCylinder > 0
+            && std::abs(areaBox - areaCylinder) > 1.0e-9 * (areaBox + areaCylinder)
+            && committed.globalTexelsPerMM == layout.packed.summary.globalTexelsPerMM
+            && committed.globalTexelsPerMM > 0) bits |= 1ull << 6;
+        bits |= 1ull << 7; // per-unit run completed; Run ANDs mm and m
+        return bits;
+    }
+    static std::uint64_t Scenario1(double unit) {
+        std::uint64_t bits = 0;
+        bool deltaOk = true;
+        {
+            // stale: a real committed source edit between capture and build.
+            App holder; auto fixture = New(holder, unit);
+            const auto doc = holder.doc;
+            Capture capture;
+            if (!build::CaptureMembers(doc, {fixture.parts[0].key, fixture.parts[1].key}, capture)) {
+                Report(1, unit, "stale-capture-members");
+                return 0;
+            }
+            ScalePart(holder, fixture.parts[0], 1.25);
+            DeltaState before;
+            if (!CaptureDelta(doc, fixture.parts, before)) {
+                Report(1, unit, "stale-capture-delta");
+                return bits;
+            }
+            Definition candidate; std::vector<MemberUVAssignment> assignments;
+            std::string diagnosis;
+            const auto status = build::BuildAtlas(doc, fixture.atlas, capture, {2048, 4},
+                                                  candidate, assignments, diagnosis);
+            if (status == build::Status::StaleSource) bits |= 1ull << 0;
+            deltaOk = deltaOk && SameDelta(doc, fixture.parts, before);
+        }
+        {
+            // missing: a well-formed OwnerKey with no retained solid.
+            App holder; auto fixture = New(holder, unit);
+            const auto doc = holder.doc;
+            auto missing = fixture.parts[0].key;
+            missing.entity = IndexedUUID(0x7e, 9);
+            DeltaState before;
+            if (!CaptureDelta(doc, fixture.parts, before)) {
+                Report(1, unit, "missing-capture-delta");
+                return bits;
+            }
+            Capture capture;
+            if (build::ClassifyMember(doc, missing) == build::Status::MissingMember
+                && !build::CaptureMembers(doc, {missing, fixture.parts[0].key}, capture))
+                bits |= 1ull << 1;
+            deltaOk = deltaOk && SameDelta(doc, fixture.parts, before);
+        }
+        {
+            // foreign: document-UUID mismatch, and a member already fenced by
+            // another atlas record.
+            App holder; auto fixture = New(holder, unit);
+            const auto doc = holder.doc;
+            auto foreign = fixture.parts[0].key;
+            foreign.document = IndexedUUID(0x5f, 2);
+            const bool foreignDocument =
+                build::ClassifyMember(doc, foreign) == build::Status::ForeignMember;
+            const auto initialStatus = BuildAndCommit(holder, fixture.atlas,
+                {fixture.parts[0].key, fixture.parts[1].key}, {2048, 4});
+            if (initialStatus != build::Status::Built) {
+                Report(1, unit, "foreign-initial-commit",
+                       "status=" + std::to_string(int(initialStatus)));
+                return bits;
+            }
+            Key second = fixture.atlas; second.atlas = IndexedUUID(0x77, 2);
+            DeltaState before;
+            if (!CaptureDelta(doc, fixture.parts, before)) {
+                Report(1, unit, "foreign-capture-delta");
+                return bits;
+            }
+            Capture capture;
+            const bool captured = build::CaptureMembers(doc, {fixture.parts[0].key}, capture);
+            build::Status fenced = build::Status::Malformed;
+            if (captured) {
+                Definition candidate; std::vector<MemberUVAssignment> assignments;
+                std::string diagnosis;
+                fenced = build::BuildAtlas(doc, second, capture, {2048, 4},
+                                           candidate, assignments, diagnosis);
+            }
+            if (foreignDocument && captured && fenced == build::Status::ForeignMember)
+                bits |= 1ull << 2;
+            deltaOk = deltaOk && SameDelta(doc, fixture.parts, before);
+        }
+        {
+            // over-budget: nine distinct admitted members.
+            App holder; auto fixture = New(holder, unit, 7);
+            const auto doc = holder.doc;
+            if (fixture.parts.size() != 9) {
+                Report(1, unit, "over-budget-fixture-size",
+                       "size=" + std::to_string(fixture.parts.size()));
+                return bits;
+            }
+            std::vector<retained_recipe::OwnerKey> nine;
+            for (const auto& part : fixture.parts) nine.push_back(part.key);
+            DeltaState before;
+            if (!CaptureDelta(doc, fixture.parts, before)) {
+                Report(1, unit, "over-budget-capture-delta");
+                return bits;
+            }
+            Capture refused;
+            const bool captureRefused = !build::CaptureMembers(doc, nine, refused);
+            Capture firstEight, ninth;
+            const std::vector<retained_recipe::OwnerKey> eight(nine.begin(), nine.end() - 1);
+            build::Status status = build::Status::Malformed;
+            if (build::CaptureMembers(doc, eight, firstEight)
+                && build::CaptureMembers(doc, {nine.back()}, ninth)) {
+                firstEight.members.push_back(ninth.members.front());
+                Definition candidate; std::vector<MemberUVAssignment> assignments;
+                std::string diagnosis;
+                status = build::BuildAtlas(doc, fixture.atlas, firstEight, {2048, 4},
+                                           candidate, assignments, diagnosis);
+            }
+            if (captureRefused && status == build::Status::OverBudget) bits |= 1ull << 3;
+            deltaOk = deltaOk && SameDelta(doc, fixture.parts, before);
+        }
+        {
+            // painted: image-backed texture content on the third member.
+            App holder; auto fixture = New(holder, unit, 1);
+            const auto doc = holder.doc;
+            PaintPart(holder, fixture.parts[2]);
+            DeltaState before;
+            if (!CaptureDelta(doc, fixture.parts, before)) {
+                Report(1, unit, "painted-capture-delta");
+                return bits;
+            }
+            Capture capture;
+            const bool captured = build::CaptureMembers(doc,
+                {fixture.parts[0].key, fixture.parts[1].key, fixture.parts[2].key}, capture);
+            const bool flagged = captured && capture.members.size() == 3
+                && capture.members[2].painted && !capture.members[0].painted
+                && !capture.members[1].painted;
+            build::Status status = build::Status::Malformed;
+            std::string diagnosis;
+            if (captured) {
+                Definition candidate; std::vector<MemberUVAssignment> assignments;
+                status = build::BuildAtlas(doc, fixture.atlas, capture, {2048, 4},
+                                           candidate, assignments, diagnosis);
+            }
+            const bool names = diagnosis.find(
+                retained_solid::UUIDText(fixture.parts[2].key.entity)) != std::string::npos;
+            if (flagged && status == build::Status::PaintedRebakeRequired
+                && !diagnosis.empty() && names) bits |= 1ull << 4;
+            deltaOk = deltaOk && SameDelta(doc, fixture.parts, before);
+        }
+        {
+            // unsupported: a diagnosed-fallback derivative (cone, planar request).
+            App holder; auto fixture = New(holder, unit, 0, true);
+            const auto doc = holder.doc;
+            if (fixture.parts.size() != 3
+                || fixture.parts[2].receipt.quality != retained_finishing::Quality::DiagnosedFallback) {
+                Report(1, unit, "unsupported-fixture");
+                return bits;
+            }
+            DeltaState before;
+            if (!CaptureDelta(doc, fixture.parts, before)) {
+                Report(1, unit, "unsupported-capture-delta");
+                return bits;
+            }
+            Capture capture;
+            if (build::ClassifyMember(doc, fixture.parts[2].key) == build::Status::UnsupportedSurface
+                && !build::CaptureMembers(doc, {fixture.parts[2].key, fixture.parts[0].key}, capture))
+                bits |= 1ull << 5;
+            deltaOk = deltaOk && SameDelta(doc, fixture.parts, before);
+        }
+        if (deltaOk) bits |= 1ull << 6;
+        bits |= 1ull << 7;
+        return bits;
+    }
+    static std::uint64_t Scenario2(double unit) {
+        std::uint64_t bits = 0;
+        App holder;
+        const auto fixture = New(holder, unit);
+        const auto doc = holder.doc;
+        const int N = 2048, g = 4;
+        Definition candidate; std::vector<MemberUVAssignment> assignments;
+        build::LayoutEvidence layout;
+        const auto commitStatus = BuildAndCommit(holder, fixture.atlas,
+            {fixture.parts[0].key, fixture.parts[1].key}, {2048, 4},
+            &candidate, &assignments, &layout);
+        if (commitStatus != build::Status::Built) {
+            Report(2, unit, "build-and-commit",
+                   "status=" + std::to_string(int(commitStatus)));
+            return 0;
+        }
+        persistence::Record record;
+        if (!persistence::Read(doc, fixture.atlas, record) || !record.value) {
+            Report(2, unit, "read-committed-record");
+            return 0;
+        }
+        {
+            // bit0: probe-owned half-open-rule rasterizer over every emitted
+            // packed triangle scaled to N x N; zero double-covered texels.
+            std::vector<std::uint8_t> covered(std::size_t(N) * std::size_t(N), 0);
+            bool overlap = false, rasterized = !layout.packed.triangles.empty();
+            for (const auto& placed : layout.packed.triangles) {
+                double x[3], y[3];
+                for (int k = 0; k < 3; ++k) { x[k] = placed.uv[k].x * N; y[k] = placed.uv[k].y * N; }
+                const double area2 = (x[1] - x[0]) * (y[2] - y[0])
+                    - (x[2] - x[0]) * (y[1] - y[0]);
+                int order[3] = {0, 1, 2};
+                if (area2 < 0) std::swap(order[1], order[2]);
+                double minx = x[0], maxx = x[0], miny = y[0], maxy = y[0];
+                for (int k = 1; k < 3; ++k) {
+                    minx = std::min(minx, x[k]); maxx = std::max(maxx, x[k]);
+                    miny = std::min(miny, y[k]); maxy = std::max(maxy, y[k]);
+                }
+                int i0 = std::max(0, int(std::ceil(minx - 0.5)));
+                int i1 = std::min(N - 1, int(std::floor(maxx - 0.5)));
+                int j0 = std::max(0, int(std::ceil(miny - 0.5)));
+                int j1 = std::min(N - 1, int(std::floor(maxy - 0.5)));
+                for (int j = j0; j <= j1 && !overlap; ++j)
+                    for (int i = i0; i <= i1 && !overlap; ++i) {
+                        const double px = i + 0.5, py = j + 0.5;
+                        bool inside = true;
+                        for (int edge = 0; edge < 3 && inside; ++edge) {
+                            const int a = order[edge], b = order[(edge + 1) % 3];
+                            const double dx = x[b] - x[a], dy = y[b] - y[a];
+                            const double cross = dx * (py - y[a]) - dy * (px - x[a]);
+                            const double band = 1e-9 * (dx * dx + dy * dy + 1.0);
+                            if (cross > band) continue;
+                            if (cross < -band) { inside = false; break; }
+                            const bool owns = (dy < 0.0) || (dy == 0.0 && dx < 0.0);
+                            if (!owns) inside = false;
+                        }
+                        if (inside) {
+                            auto& texel = covered[std::size_t(j) * N + std::size_t(i)];
+                            if (texel) { overlap = true; break; }
+                            texel = 1;
+                        }
+                    }
+            }
+            if (rasterized && !overlap) bits |= 1ull << 0;
+        }
+        {
+            // bit1: every emitted UV within [g/N, 1 - g/N].
+            const double low = double(g) / N, high = 1.0 - low;
+            bool bounded = !layout.packed.triangles.empty();
+            for (const auto& placed : layout.packed.triangles)
+                for (int k = 0; k < 3; ++k)
+                    bounded = bounded && placed.uv[k].x >= low - 1e-12
+                        && placed.uv[k].x <= high + 1e-12
+                        && placed.uv[k].y >= low - 1e-12 && placed.uv[k].y <= high + 1e-12;
+            if (bounded) bits |= 1ull << 1;
+        }
+        // Deterministic rebuild for the export checks (bit5), reused by the
+        // density measurement (bit2).
+        Capture recapture;
+        Definition rebuilt; std::vector<MemberUVAssignment> rebuiltAssignments;
+        std::string rebuildDiagnosis; build::LayoutEvidence relayout;
+        const bool rebuiltOk = build::CaptureMembers(doc,
+                {fixture.parts[0].key, fixture.parts[1].key}, recapture)
+            && build::BuildAtlas(doc, fixture.atlas, recapture, {2048, 4},
+                                 rebuilt, rebuiltAssignments, rebuildDiagnosis,
+                                 &relayout) == build::Status::Built;
+        {
+            // bit2: per-member texel density independently measured on mesh
+            // edges (UV edge texels vs 3D edge physical mm).
+            bool density = rebuiltOk;
+            double ratio = 1.0, densities[2] = {0, 0};
+            for (std::size_t member = 0; density && member < 2; ++member) {
+                retained_solid::Record retained; TDF_Label label;
+                std::atomic_bool cancelled{false};
+                meshcopy::CurrentTessellationCopy copy;
+                if (!retained_finishing::producer::detail::Resolve(
+                        doc, fixture.parts[member].key, label, retained)
+                    || meshcopy::PrepareCurrentTessellationCopy(retained.current, copy, cancelled)
+                        != meshcopy::PreparationResult::Ready
+                    || std::size_t(copy.triangles) * 3
+                        != rebuiltAssignments[member].corners.size())
+                    density = false;
+                if (!density) break;
+                std::vector<shapeyard::uv::Triangle> triangles;
+                std::vector<shapeyard::uv::curved::FaceInput> faces;
+                if (!retained_finishing::producer::detail::Triangles(copy, triangles, faces)) {
+                    density = false; break;
+                }
+                double uvLength = 0, edgeLength = 0;
+                for (std::size_t t = 0; t < triangles.size(); ++t)
+                    for (int k = 0; k < 3; ++k) {
+                        const auto& uvA = rebuiltAssignments[member].corners[3 * t + k];
+                        const auto& uvB = rebuiltAssignments[member].corners[3 * t + (k + 1) % 3];
+                        const auto& pA = triangles[t].points[k];
+                        const auto& pB = triangles[t].points[(k + 1) % 3];
+                        uvLength += std::hypot(uvB[0] - uvA[0], uvB[1] - uvA[1]) * N;
+                        edgeLength += std::sqrt(
+                            (pB[0] - pA[0]) * (pB[0] - pA[0])
+                            + (pB[1] - pA[1]) * (pB[1] - pA[1])
+                            + (pB[2] - pA[2]) * (pB[2] - pA[2])) * unit * 1000.0;
+                    }
+                if (edgeLength <= 0 || uvLength <= 0) { density = false; break; }
+                densities[member] = uvLength / edgeLength;
+            }
+            if (density && densities[0] > 0 && densities[1] > 0) {
+                ratio = std::max(densities[0], densities[1])
+                    / std::min(densities[0], densities[1]);
+                if (ratio <= 1.00001) bits |= 1ull << 2;
+            }
+        }
+        {
+            // bit3: independent analytic re-unwrap of part B's cylindrical
+            // band; metric-relative stretch within [0.999, 1.001].
+            bool stretch = false;
+            retained_solid::Record retained; TDF_Label label;
+            std::atomic_bool cancelled{false};
+            meshcopy::CurrentTessellationCopy copy;
+            if (retained_finishing::producer::detail::Resolve(
+                    doc, fixture.parts[1].key, label, retained)
+                && meshcopy::PrepareCurrentTessellationCopy(retained.current, copy, cancelled)
+                    == meshcopy::PreparationResult::Ready) {
+                std::vector<shapeyard::uv::Triangle> triangles;
+                std::vector<shapeyard::uv::curved::FaceInput> faces;
+                if (retained_finishing::producer::detail::Triangles(copy, triangles, faces)) {
+                    int curvedFaces = 0;
+                    for (const auto& face : faces) {
+                        if (face.surfaceType != 1) continue;
+                        ++curvedFaces;
+                        using namespace shapeyard::uv::detail;
+                        shapeyard::uv::Point center{
+                            face.params[0], face.params[1], face.params[2]};
+                        shapeyard::uv::Point axis{
+                            face.params[3], face.params[4], face.params[5]};
+                        shapeyard::uv::Point u, v;
+                        shapeyard::uv::prototype::curved_detail::frameFor(
+                            divide(axis, magnitude(axis)), u, v);
+                        const double seam = std::atan2(dot(face.xDirection, v),
+                                                       dot(face.xDirection, u));
+                        shapeyard::uv::prototype::CylinderBand band;
+                        band.center = center; band.axis = axis; band.radius = face.params[9];
+                        band.seamAngle = seam; band.fitToleranceModelUnits = face.toleranceMM;
+                        const std::vector<shapeyard::uv::Triangle> input(
+                            triangles.begin() + face.firstTriangle,
+                            triangles.begin() + face.firstTriangle + face.triangleCount);
+                        const auto value = shapeyard::uv::prototype::unwrapCylindricalBand(
+                            input, band, shapeyard::uv::Settings{2048, 4});
+                        stretch = value.ok() && value.metricRelativeMin >= 0.999
+                            && value.metricRelativeMax <= 1.001;
+                    }
+                    stretch = stretch && curvedFaces == 1;
+                }
+            }
+            if (stretch) bits |= 1ull << 3;
+        }
+        if (layout.packed.summary.occupancy >= 0.50) bits |= 1ull << 4;
+        {
+            // bit5: export checks on actual emitted mesh state: fresh
+            // meshcopy per member, committed corners, per-chart material
+            // binding and per-member normal/tangent witnesses, all compared
+            // against the persisted record byte-exactly.
+            bool exportedOk = rebuiltOk
+                && rebuilt.layoutProof == record.value->definition.layoutProof
+                && rebuilt.charts.size() == record.value->definition.charts.size()
+                && rebuiltAssignments.size() == 2 && assignments.size() == 2;
+            Digest normalA{}, normalB{}, tangentA{}, tangentB{};
+            for (std::size_t member = 0; exportedOk && member < 2; ++member) {
+                exportedOk = SameCorners(assignments[member], rebuiltAssignments[member]);
+                retained_solid::Record retained; TDF_Label label;
+                std::atomic_bool cancelled{false};
+                meshcopy::CurrentTessellationCopy copy;
+                if (!retained_finishing::producer::detail::Resolve(
+                        doc, fixture.parts[member].key, label, retained)
+                    || meshcopy::PrepareCurrentTessellationCopy(retained.current, copy, cancelled)
+                        != meshcopy::PreparationResult::Ready) { exportedOk = false; break; }
+                std::vector<shapeyard::uv::Triangle> triangles;
+                std::vector<shapeyard::uv::curved::FaceInput> faces;
+                if (!retained_finishing::producer::detail::Triangles(copy, triangles, faces)) {
+                    exportedOk = false; break;
+                }
+                Digest* normal = member == 0 ? &normalA : &normalB;
+                Digest* tangent = member == 0 ? &tangentA : &tangentB;
+                if (!MeshWitnesses(triangles, *normal, *tangent)) { exportedOk = false; break; }
+            }
+            for (std::size_t index = 0; exportedOk && index < rebuilt.charts.size(); ++index) {
+                const auto& fresh = rebuilt.charts[index];
+                const auto& persisted = record.value->definition.charts[index];
+                exportedOk = fresh.chart == persisted.chart
+                    && fresh.material == persisted.material
+                    && fresh.rectUV == persisted.rectUV
+                    && fresh.triangleCount == persisted.triangleCount
+                    && fresh.developedAreaMM2 == persisted.developedAreaMM2;
+            }
+            exportedOk = exportedOk && !(normalA == normalB) && !(tangentA == tangentB);
+            if (exportedOk) bits |= 1ull << 5;
+        }
+        {
+            // bit6: BinXCAF read-back decodes canonically, validates, and
+            // reproduces the exact record bytes.
+            const auto stored = retained_solid::Probe::Save(holder);
+            App second;
+            std::vector<persistence::Record> records;
+            Definition decoded; Refusal refusal = Refusal::None;
+            std::vector<std::uint8_t> canonical;
+            if (OpenInto(second, stored, &records) && records.size() == 1
+                && records[0].value->bytes == record.value->bytes
+                && Decode(records[0].value->bytes, decoded, refusal)
+                && refusal == Refusal::None && Encode(decoded, canonical)
+                && canonical == records[0].value->bytes) bits |= 1ull << 6;
+        }
+        bits |= 1ull << 7;
+        return bits;
+    }
+    static std::uint64_t Scenario3(double unit) {
+        std::uint64_t bits = 0;
+        App holder;
+        auto fixture = New(holder, unit, 1);
+        const auto doc = holder.doc;
+        const std::vector<retained_recipe::OwnerKey> two{
+            fixture.parts[0].key, fixture.parts[1].key};
+        const std::string rawBox = retained_solid::Probe::Raw(fixture.parts[0].current);
+        const std::string rawCylinder = retained_solid::Probe::Raw(fixture.parts[1].current);
+        Definition committed;
+        const auto commitStatus = BuildAndCommit(
+            holder, fixture.atlas, two, {2048, 4}, &committed);
+        if (commitStatus != build::Status::Built) {
+            Report(3, unit, "build-and-commit",
+                   "status=" + std::to_string(int(commitStatus)));
+            return 0;
+        }
+        {
+            // bit0: undo removes the atlas record and leaves members
+            // byte-identical; redo reinstalls an equal-layoutProof record.
+            bool undone = false;
+            if (doc->Undo()) {
+                persistence::Record after;
+                const bool absent = persistence::Read(doc, fixture.atlas, after) && !after.value;
+                const bool intact = retained_solid::Probe::Raw(fixture.parts[0].current) == rawBox
+                    && retained_solid::Probe::Raw(fixture.parts[1].current) == rawCylinder;
+                if (absent && intact && doc->Redo()) {
+                    persistence::Record restored;
+                    if (persistence::Read(doc, fixture.atlas, restored) && restored.value
+                        && restored.value->definition.layoutProof == committed.layoutProof)
+                        undone = true;
+                }
+            }
+            if (undone) bits |= 1ull << 0;
+        }
+        // bit1: save, owner destruction, unseeded cold reopen.
+        const auto stored = retained_solid::Probe::Save(holder);
+        App second;
+        {
+            std::vector<persistence::Record> records;
+            if (!OpenInto(second, stored, &records) || records.size() != 1) {
+                Report(3, unit, "cold-reopen",
+                       "records=" + std::to_string(records.size()));
+                return bits;
+            }
+        }
+        second.doc->SetUndoLimit(40);
+        Definition reopened;
+        {
+            bool stable = Currentness(second.doc, fixture.atlas, &reopened) == 1
+                && reopened.key == committed.key
+                && reopened.members.size() == committed.members.size()
+                && reopened.charts.size() == committed.charts.size()
+                && reopened.resources.size() == committed.resources.size()
+                && reopened.layoutProof == committed.layoutProof;
+            for (std::size_t index = 0; stable && index < committed.members.size(); ++index)
+                stable = reopened.members[index].member == committed.members[index].member;
+            for (std::size_t index = 0; stable && index < committed.charts.size(); ++index)
+                stable = reopened.charts[index].chart == committed.charts[index].chart;
+            for (std::size_t index = 0; stable && index < committed.resources.size(); ++index)
+                stable = reopened.resources[index].identity == committed.resources[index].identity;
+            if (stable) bits |= 1ull << 1;
+        }
+        std::set<UUID> originalCharts, originalResources;
+        for (const auto& chart : committed.charts) originalCharts.insert(chart.chart);
+        for (const auto& resource : committed.resources) originalResources.insert(resource.identity);
+        {
+            // bit2: removing one member after cold reopen keeps every
+            // survivor identity.
+            if (EditMembershipRaw(second, fixture.atlas, {committed.members[1].owner}, {})
+                == build::Status::Built) {
+                persistence::Record edited;
+                bool kept = persistence::Read(second.doc, fixture.atlas, edited) && edited.value
+                    && edited.value->definition.members.size() == 1
+                    && edited.value->definition.members[0].member == committed.members[0].member
+                    && !edited.value->definition.charts.empty()
+                    && !edited.value->definition.resources.empty();
+                for (const auto& chart : edited.value->definition.charts)
+                    kept = kept && chart.member == committed.members[0].member
+                        && originalCharts.count(chart.chart) == 1;
+                for (const auto& resource : edited.value->definition.resources)
+                    kept = kept && originalResources.count(resource.identity) == 1;
+                if (kept) bits |= 1ull << 2;
+            }
+        }
+        {
+            // bit3: adding a member mints one new member UUID and keeps the
+            // existing identities.
+            Part third;
+            if (ResolvePart(second.doc, fixture.parts[2].key, third)
+                && EditMembershipRaw(second, fixture.atlas, {}, {third.key})
+                    == build::Status::Built) {
+                persistence::Record edited;
+                const UUID minted = build::detail::MemberUUID(fixture.atlas.atlas, third.key);
+                bool kept = persistence::Read(second.doc, fixture.atlas, edited) && edited.value
+                    && edited.value->definition.members.size() == 2
+                    && retained_recipe::Nonzero(minted)
+                    && !(minted == committed.members[0].member)
+                    && !(minted == committed.members[1].member)
+                    && edited.value->definition.members[0].member == committed.members[0].member
+                    && edited.value->definition.members[1].member == minted;
+                for (const auto& chart : edited.value->definition.charts)
+                    if (chart.member == committed.members[0].member)
+                        kept = kept && originalCharts.count(chart.chart) == 1;
+                if (kept) bits |= 1ull << 3;
+            }
+        }
+        Part editedFirst;
+        DeltaState afterEdit;
+        {
+            // bit4: a real source edit marks the whole atlas Stale; stale use
+            // (the pre-edit fences) is refused with zero delta.
+            if (!ResolvePart(second.doc, fixture.parts[0].key, editedFirst)) {
+                Report(3, unit, "resolve-edited-first");
+                return bits;
+            }
+            Part editedThird;
+            if (!ResolvePart(second.doc, fixture.parts[2].key, editedThird)) {
+                Report(3, unit, "resolve-edited-third");
+                return bits;
+            }
+            persistence::Record record;
+            if (!persistence::Read(second.doc, fixture.atlas, record) || !record.value) {
+                Report(3, unit, "read-pre-edit-record");
+                return bits;
+            }
+            Capture staleCapture;
+            if (!build::CaptureMembers(second.doc,
+                    {editedFirst.key, editedThird.key}, staleCapture)) {
+                Report(3, unit, "capture-stale-members");
+                return bits;
+            }
+            ScalePart(second, editedFirst, 1.5);
+            const std::vector<Part> editedParts{editedFirst, editedThird};
+            if (!CaptureDelta(second.doc, editedParts, afterEdit)) {
+                Report(3, unit, "capture-post-edit-delta");
+                return bits;
+            }
+            Definition candidate; std::vector<MemberUVAssignment> assignments;
+            std::string diagnosis;
+            const auto staleUse = build::BuildAtlas(second.doc, fixture.atlas,
+                staleCapture, {2048, 4}, candidate, assignments, diagnosis);
+            if (Currentness(second.doc, fixture.atlas) == 2
+                && staleUse == build::Status::StaleSource
+                && SameDelta(second.doc, editedParts, afterEdit)) bits |= 1ull << 4;
+        }
+        {
+            // bit5: explicit regenerate commits a DIFFERENT layoutProof with
+            // survivor identities unchanged.
+            persistence::Record before;
+            if (!persistence::Read(second.doc, fixture.atlas, before) || !before.value) {
+                Report(3, unit, "read-pre-regenerate-record");
+                return bits;
+            }
+            const auto priorProof = before.value->definition.layoutProof;
+            std::set<UUID> priorMembers, priorCharts;
+            for (const auto& member : before.value->definition.members)
+                priorMembers.insert(member.member);
+            for (const auto& chart : before.value->definition.charts)
+                priorCharts.insert(chart.chart);
+            std::vector<retained_recipe::OwnerKey> owners;
+            for (const auto& member : before.value->definition.members)
+                owners.push_back(member.owner);
+            Capture capture;
+            Definition regenerated;
+            if (build::CaptureMembers(second.doc, owners, capture)
+                && CommitCandidate(second, fixture.atlas, capture,
+                        {before.value->definition.resolutionTexels,
+                         before.value->definition.gutterTexels},
+                        &regenerated) == build::Status::Built) {
+                bool stable = !(regenerated.layoutProof == priorProof)
+                    && regenerated.members.size() == priorMembers.size()
+                    && regenerated.charts.size() == priorCharts.size();
+                for (const auto& member : regenerated.members)
+                    stable = stable && priorMembers.count(member.member) == 1;
+                for (const auto& chart : regenerated.charts)
+                    stable = stable && priorCharts.count(chart.chart) == 1;
+                if (stable) bits |= 1ull << 5;
+            }
+        }
+        {
+            // bit6: a held-out gutter edit (gutterTexels 3) commits in
+            // exactly one command.
+            persistence::Record before;
+            if (!persistence::Read(second.doc, fixture.atlas, before) || !before.value) {
+                Report(3, unit, "read-pre-gutter-record");
+                return bits;
+            }
+            const auto undosBefore = second.doc->GetUndos().Size();
+            std::vector<retained_recipe::OwnerKey> owners;
+            for (const auto& member : before.value->definition.members)
+                owners.push_back(member.owner);
+            Capture capture;
+            Definition reguttered;
+            if (build::CaptureMembers(second.doc, owners, capture)
+                && CommitCandidate(second, fixture.atlas, capture, {2048, 3}, &reguttered)
+                    == build::Status::Built
+                && second.doc->GetUndos().Size() == undosBefore + 1
+                && reguttered.gutterTexels == 3
+                && !(reguttered.layoutProof == before.value->definition.layoutProof))
+                bits |= 1ull << 6;
+        }
+        bits |= 1ull << 7;
+        return bits;
+    }
+    static std::uint64_t Run(int scenario) {
+        ReportLineCount() = 0;
+        if (scenario < 0 || scenario > 3) return 0;
+        std::uint64_t bits = ~0ull;
+        for (double unit : {0.001, 1.0}) {
+            std::uint64_t unitBits = 0;
+            try {
+                switch (scenario) {
+                    case 0: unitBits = Scenario0(unit); break;
+                    case 1: unitBits = Scenario1(unit); break;
+                    case 2: unitBits = Scenario2(unit); break;
+                    case 3: unitBits = Scenario3(unit); break;
+                }
+            } catch (const std::exception& e) {
+                Report(scenario, unit, "exception", e.what());
+                return 0;
+            } catch (const Standard_Failure& failure) {
+                const char* message = failure.GetMessageString();
+                Report(scenario, unit, "occt-failure", message ? message : "");
+                return 0;
+            } catch (...) {
+                Report(scenario, unit, "unknown-exception");
+                return 0;
+            }
+            char mask[32];
+            std::snprintf(mask, sizeof mask, "0x%016llx",
+                          static_cast<unsigned long long>(unitBits));
+            Report(scenario, unit, "mask", mask);
+            for (int bit = 0; bit < 8; ++bit) {
+                if ((unitBits & (1ull << bit)) != 0) continue;
+                Report(scenario, unit, "bit-cleared",
+                       std::to_string(bit) + ":" + Clause(scenario, bit));
+            }
+            bits &= unitBits;
+        }
+        return bits;
+    }
+};
+} // namespace core3d::asset_atlas
+extern "C" Standard_EXPORT std::uint64_t Core3DDebugAssetAtlasProbe(
+    std::int32_t scenario) noexcept {
+    if (![NSThread isMainThread] || scenario < 0 || scenario > 3) return 0;
+    return core3d::asset_atlas::AssetAtlasProbe::Run(scenario);
 }
 #include "SavedCutSourceBoreClearanceIntervalProbe.hxx"
 std::map<std::string,bool> Core3DDebugSavedCutBoreClearanceProbe(Standard_Integer scenario){

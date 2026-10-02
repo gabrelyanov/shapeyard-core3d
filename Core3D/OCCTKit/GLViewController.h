@@ -82,6 +82,11 @@ NS_ASSUME_NONNULL_BEGIN
 //! Internal native planning readiness; preview/gallery and constructor views
 //! never issue production model-edit permission.
 - (BOOL)canIssueModelingPlanningContext;
+//! Holding variant of canIssueModelingPlanningContext: identical except the
+//! given opening's own live native opening context is the one tolerated
+//! blocker. A nil, foreign, settled or inactive opening — and every other
+//! existing blocker — still refuses.
+- (BOOL)canIssueModelingPlanningContextHoldingSplineProfileOpening:(Core3DSplineProfileEditingOpening *)opening;
 - (void)refreshSelectionState;
 - (BOOL)isSelected;
 
@@ -302,5 +307,14 @@ NS_ASSUME_NONNULL_BEGIN
 @end
 
 NS_ASSUME_NONNULL_END
+
+//! Internal unwrap for the holding planning-context predicates only. Returns
+//! the opening's retained native opening context while the opening is live
+//! (Open or Prepared), null otherwise; the viewer predicate re-proves
+//! ownership, document identity, markers and active-context currency.
+//! Implemented in Core3DNativeOpenings.mm beside the @package ivars.
+@interface Core3DSplineProfileEditingOpening (Core3DNativeOpeningHold)
+- (std::shared_ptr<core3d::native_opening::Context>)core3d_nativeOpeningContext;
+@end
 
 #endif // GLViewController_h

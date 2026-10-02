@@ -228,6 +228,73 @@ bool SelectorAnchor(const retained_face_selector::BoundaryUse& use, double meter
     output.normalA = normals[0]; output.normalB = normals[1];
     return true;
 }
+
+// Shared proof-to-step issuance: the native membership proof is the only
+// authority input; the minted step carries the proof's selected boundary uses
+// as anchors and its census as the schema-2 selector receipt, with anchors and
+// receipt entries kept in the same key order.
+bool IssueSelectorStep(const retained_face_selector::FaceMembershipProof& proof,
+    double metersPerLocalUnit, double amountMM, std::uint64_t localID,
+    retained_edge_treatment::Step& step, retained_edge_treatment::Refusal& refusal) {
+    namespace et = retained_edge_treatment; namespace fs = retained_face_selector;
+    step = et::Step();
+    step.node = MintEdgeTreatmentUUID(); step.feature = MintEdgeTreatmentUUID();
+    step.localID = localID; step.kind = et::Kind::ConstantFillet; step.amountMM = amountMM;
+    fs::SelectorReceipt receipt; receipt.intent = proof.intent(); receipt.face = proof.plane();
+    receipt.coverage = proof.coverage(); receipt.wireCount = proof.wireCount();
+    receipt.boundaryUseCount = std::uint32_t(proof.boundaryUses().size());
+    receipt.boundaryUniqueEdgeCount = proof.uniqueEdgeCount();
+    for (const auto& use : proof.boundaryUses()) if (use.selected) {
+        et::Anchor anchor;
+        if (!SelectorAnchor(use, metersPerLocalUnit, anchor)) {
+            refusal = et::Refusal::UnsupportedEdge; return false;
+        }
+        step.anchors.push_back(anchor); receipt.entries.push_back({anchor.key, use.direction});
+    }
+    if (step.anchors.empty() || step.anchors.size() != proof.selectedEdgeCount()) {
+        refusal = et::Refusal::ReplayMismatch; return false;
+    }
+    std::sort(step.anchors.begin(), step.anchors.end(), [](const et::Anchor& a, const et::Anchor& b) {
+        return a.key < b.key;
+    });
+    std::sort(receipt.entries.begin(), receipt.entries.end(), [](const fs::ReceiptEntry& a,
+        const fs::ReceiptEntry& b) { return a.anchorKey < b.anchorKey; });
+    step.selector = std::move(receipt);
+    return true;
+}
+
+// Complete value equality for a migration request: every selector's old step
+// ID and full intent value, the append's presence, full intent and amount.
+bool SameMigrationRequest(const retained_edge_treatment::r2::MigrationM3& first,
+    const retained_edge_treatment::r2::MigrationM3& second) noexcept {
+    if (first.version != second.version || first.selectors.size() != second.selectors.size()
+        || bool(first.append) != bool(second.append)) return false;
+    for (std::size_t index = 0; index < first.selectors.size(); ++index)
+        if (first.selectors[index].oldStepID != second.selectors[index].oldStepID
+            || !(first.selectors[index].intent == second.selectors[index].intent)) return false;
+    return !first.append || (first.append->intent == second.append->intent
+        && first.append->amountMM == second.append->amountMM);
+}
+
+// Canonical deterministic serialization of every request field for the review
+// digest: no pointers, no addresses, intent values through the existing
+// canonical intent writer, amount as its exact bits.
+void AppendMigrationRequestDigest(std::vector<std::uint8_t>& output,
+    const retained_edge_treatment::r2::MigrationM3& request) {
+    retained_edge_treatment::detail::Writer writer;
+    writer.u(request.version, 4);
+    writer.u(request.selectors.size(), 4);
+    for (const auto& binding : request.selectors) {
+        writer.u(binding.oldStepID, 8);
+        retained_face_selector::WriteIntent(writer, binding.intent);
+    }
+    writer.u(request.append ? 1 : 0, 1);
+    if (request.append) {
+        retained_face_selector::WriteIntent(writer, request.append->intent);
+        writer.d(request.append->amountMM);
+    }
+    output.insert(output.end(), writer.b.begin(), writer.b.end());
+}
 }
 
 std::shared_ptr<retained_edge_treatment::Work> Core3DViewer::prepareEdgeTreatment(
@@ -331,34 +398,10 @@ std::shared_ptr<retained_edge_treatment::Work> Core3DViewer::prepareEdgeTreatmen
         }
         et::Definition candidate = original->definition_.value_or(original->seed_);
         if (candidate.steps.size() >= et::MaximumSteps) { refusal = et::Refusal::Budget; return {}; }
-        struct Issued { et::Anchor anchor; fs::FaceUseDirection direction; };
-        std::vector<Issued> issued;
-        for (const auto& use : refreshed.proof->boundaryUses()) if (use.selected) {
-            Issued value;
-            if (!SelectorAnchor(use, original->dimensionMetersPerUnit(), value.anchor)) {
-                refusal = et::Refusal::UnsupportedEdge; return {};
-            }
-            value.direction = use.direction; issued.push_back(std::move(value));
-        }
-        if (issued.empty() || issued.size() != refreshed.proof->selectedEdgeCount()) {
-            refusal = et::Refusal::ReplayMismatch; return {};
-        }
-        std::sort(issued.begin(), issued.end(), [](const Issued& lhs, const Issued& rhs) {
-            return lhs.anchor.key < rhs.anchor.key;
-        });
-        et::Step step; step.node = MintEdgeTreatmentUUID(); step.feature = MintEdgeTreatmentUUID();
-        step.localID = candidate.issuance.nextLocalID++; step.kind = et::Kind::ConstantFillet;
-        step.amountMM = amountMM;
-        fs::SelectorReceipt receipt; receipt.intent = refreshed.proof->intent();
-        receipt.face = refreshed.proof->plane(); receipt.coverage = refreshed.proof->coverage();
-        receipt.wireCount = refreshed.proof->wireCount();
-        receipt.boundaryUseCount = std::uint32_t(refreshed.proof->boundaryUses().size());
-        receipt.boundaryUniqueEdgeCount = refreshed.proof->uniqueEdgeCount();
-        for (const auto& value : issued) {
-            step.anchors.push_back(value.anchor);
-            receipt.entries.push_back({value.anchor.key, value.direction});
-        }
-        step.selector = std::move(receipt); candidate.schema = 2;
+        et::Step step;
+        if (!IssueSelectorStep(*refreshed.proof, original->dimensionMetersPerUnit(), amountMM,
+            candidate.issuance.nextLocalID++, step, refusal)) return {};
+        candidate.schema = 2;
         candidate.steps.push_back(step); candidate.outputNode = step.node;
         std::vector<std::uint8_t> encoded;
         if (!et::Encode(candidate, encoded, refusal)) return {};
@@ -463,13 +506,48 @@ Core3DViewer::reviewRetainedBooleanMigrationR2(
             ||scene->revisions.documentGeneration!=identity.documentGeneration
             ||scene->revisions.model!=identity.modelRevision
             ||scene->revisions.presentation!=presentationRevision)return {};
+        // Complete native review: rebuild the exact replay stages from the
+        // proven pre-Boolean source base, prove the captured current shape is
+        // the final replayed stage, then resolve each requested binding on the
+        // stage immediately before its legacy step and the optional append on
+        // the post-existing-treatment stage. Review stores proofs, stage
+        // values and the charged budget only; it never issues identities.
+        namespace fs=retained_face_selector;
+        et::ReplayBudget budget;const std::atomic_bool cancelled{false};
+        r2::MigrationStages stages;
+        if(!r2::PrepareMigrationStages(original->original_,original->originalBase_,cancelled,
+            budget,stages,refusal))return {};
+        if(!et::EquivalentReplayGeometry(stages.postTreatment,original->originalCurrent_,budget,refusal)){
+            refusal=et::Refusal::StaleSnapshot;return {};
+        }
+        const auto identityValue=retained_boolean::Identities(original->original_);
+        const auto* program=std::get_if<retained_boolean::Program>(&original->original_);
         auto review=std::shared_ptr<r2::MigrationReview>(new r2::MigrationReview);
         review->original_=original;review->request_=request;
+        review->postBooleanBase_=stages.postBoolean;review->postTreatmentStage_=stages.postTreatment;
+        for(const auto& binding:request.selectors){
+            std::size_t stageIndex=stages.stepStages.size();
+            if(program)for(std::size_t index=0;index<program->filletSteps.size();++index)
+                if(program->filletSteps[index].stepIdentifier==binding.oldStepID){stageIndex=index;break;}
+            if(stageIndex>=stages.stepStages.size()){refusal=et::Refusal::IdentityMismatch;return {};}
+            fs::Resolution resolution;
+            const auto queryRefusal=fs::Resolve(stages.stepStages[stageIndex],binding.intent,
+                identityValue.metersPerUnit,budget,cancelled,resolution);
+            if(queryRefusal!=fs::Refusal::None||!resolution.proof){refusal=fs::MapToB1(queryRefusal);return {};}
+            review->proofs_.push_back(resolution.proof);
+        }
+        if(request.append){
+            fs::Resolution resolution;
+            const auto queryRefusal=fs::Resolve(stages.postTreatment,request.append->intent,
+                identityValue.metersPerUnit,budget,cancelled,resolution);
+            if(queryRefusal!=fs::Refusal::None||!resolution.proof){refusal=fs::MapToB1(queryRefusal);return {};}
+            review->appendProof_=resolution.proof;
+        }
+        review->chargedBudget_.buildStages=budget.buildStages;
+        review->chargedBudget_.topologyVisits=budget.topologyVisits;
         std::vector<std::uint8_t> digestBytes=original->originalBytes_;
-        digestBytes.push_back(std::uint8_t(request.selectors.size()));digestBytes.push_back(request.append?1:0);
+        AppendMigrationRequestDigest(digestBytes,request);
         CC_SHA256(digestBytes.data(),CC_LONG(digestBytes.size()),review->requestDigest_.data());
-        // Each requested semantic binding is independently resolved on its exact
-        // preceding replay stage during prepare; review never issues identities.
         refusal=et::Refusal::None;return review;
     }catch(...){refusal=et::Refusal::BuildFailed;return {};}
 }
@@ -602,6 +680,18 @@ Core3DViewer::prepareRetainedBooleanMigrationR2(
         auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());myContext->NextSelected();
         if(myContext->MoreSelected()||selected.IsNull()||!myDoc->ShapeLabel(selected).IsEqual(original->ownerLabel_)
             ||!selected->Shape().IsEqual(original->originalCurrent_))return {};
+        // Exact request identity: the passed request must be the complete
+        // reviewed value, the review must carry every binding proof and the
+        // reviewed stage values, and the recomputed request digest must match.
+        if(!SameMigrationRequest(request,review->request_)
+            ||review->proofs_.size()!=request.selectors.size()
+            ||bool(request.append)!=bool(review->appendProof_)
+            ||review->postBooleanBase_.IsNull()){refusal=et::Refusal::IdentityMismatch;return {};}
+        {std::vector<std::uint8_t> digestBytes=original->originalBytes_;
+        AppendMigrationRequestDigest(digestBytes,request);
+        r2::Digest requestDigest{};
+        CC_SHA256(digestBytes.data(),CC_LONG(digestBytes.size()),requestDigest.data());
+        if(requestDigest!=review->requestDigest_){refusal=et::Refusal::IdentityMismatch;return {};}}
         auto prefix=original->original_;
         const auto identityValue=retained_boolean::Identities(prefix);
         std::uint64_t nextOperandID=std::uint64_t(1),nextStepID=1,nextEdgeID=1;
@@ -645,12 +735,38 @@ Core3DViewer::prepareRetainedBooleanMigrationR2(
             std::sort(step.anchors.begin(),step.anchors.end(),[](const et::Anchor&a,const et::Anchor&b){return a.key<b.key;});
             candidate.steps.push_back(step);provenance.steps.push_back({old.stepIdentifier,step.node,step.feature,false});candidate.outputNode=step.node;
         }
+        // Re-anchor every imported step named by a reviewed binding from that
+        // binding's proof only; the step keeps its provenance-mapped
+        // node/feature/local ID and the replaced legacy anchors are marked
+        // retired in the provenance anchor map. The optional append is issued
+        // from the reviewed append proof, exactly as the A1 lane issues it.
+        for(std::size_t index=0;index<request.selectors.size();++index){
+            const auto oldStepID=request.selectors[index].oldStepID;
+            auto row=std::find_if(candidate.steps.begin(),candidate.steps.end(),
+                [&](const et::Step& value){return value.localID==oldStepID;});
+            if(row==candidate.steps.end()){refusal=et::Refusal::IdentityMismatch;return {};}
+            et::Step issued;
+            if(!IssueSelectorStep(*review->proofs_[index],binding.metersPerLocalUnit,
+                row->amountMM,row->localID,issued,refusal))return {};
+            issued.node=row->node;issued.feature=row->feature;
+            for(auto& mapping:provenance.anchors)
+                if(std::any_of(row->anchors.begin(),row->anchors.end(),
+                    [&](const et::Anchor& anchor){return anchor.key==mapping.key;}))mapping.retired=true;
+            *row=std::move(issued);
+        }
+        if(request.append){
+            if(candidate.steps.size()>=et::MaximumSteps){refusal=et::Refusal::Budget;return {};}
+            et::Step issued;
+            if(!IssueSelectorStep(*review->appendProof_,binding.metersPerLocalUnit,
+                request.append->amountMM,candidate.issuance.nextLocalID++,issued,refusal))return {};
+            candidate.steps.push_back(std::move(issued));candidate.outputNode=candidate.steps.back().node;
+        }
         binding.migration=std::move(provenance);candidate.base=binding;
-        if(request.append){refusal=et::Refusal::UnsupportedOperation;return {};}
         std::vector<std::uint8_t> bytes;if(!r2::Encode(candidate,bytes,refusal))return {};
         auto work=std::make_shared<r2::Work>();work->migration_=original;work->review_=review;work->mutation_=request;
         work->candidate_=candidate;work->source_=r2::RetainedBooleanBase{binding,r2::LegacyBooleanBase{prefix,prefixBytes}};
-        work->prefixBytes_=prefixBytes;work->base_=original->originalCurrent_;work->originalCurrent_=original->originalCurrent_;
+        work->prefixBytes_=prefixBytes;work->base_=review->postBooleanBase_;work->originalCurrent_=original->originalCurrent_;
+        work->chargedBudget_=review->chargedBudget_;
         work->nonce_=original->nonce_;work->label_=original->ownerLabel_;work->presentation_=selected;work->state_=r2::Work::State::Prepared;
         refusal=et::Refusal::None;return work;
     }catch(...){refusal=et::Refusal::BuildFailed;return {};}
@@ -691,20 +807,9 @@ Core3DViewer::prepareRetainedBooleanEnrollmentR2(
         binding.prefix=links;
         r2::Definition candidate;candidate.owner=graph.owner;candidate.base=binding;
         candidate.issuance.nextLocalID=1;candidate.outputNode=binding.sourceNode;
-        et::Step step;step.node=MintEdgeTreatmentUUID();step.feature=MintEdgeTreatmentUUID();
-        step.localID=candidate.issuance.nextLocalID++;step.kind=et::Kind::ConstantFillet;
-        step.amountMM=review->request_.amountMM;
-        fs::SelectorReceipt receipt;receipt.intent=review->proof_->intent();receipt.face=review->proof_->plane();
-        receipt.coverage=review->proof_->coverage();
-        receipt.wireCount=review->proof_->wireCount();
-        receipt.boundaryUseCount=std::uint32_t(review->proof_->boundaryUses().size());
-        receipt.boundaryUniqueEdgeCount=review->proof_->uniqueEdgeCount();
-        for(const auto& use:review->proof_->boundaryUses())if(use.selected){et::Anchor anchor;
-            if(!SelectorAnchor(use,binding.metersPerLocalUnit,anchor)){refusal=et::Refusal::UnsupportedEdge;return {};}
-            step.anchors.push_back(anchor);receipt.entries.push_back({anchor.key,use.direction});}
-        std::sort(step.anchors.begin(),step.anchors.end(),[](const et::Anchor&a,const et::Anchor&b){return a.key<b.key;});
-        std::sort(receipt.entries.begin(),receipt.entries.end(),[](const fs::ReceiptEntry&a,const fs::ReceiptEntry&b){return a.anchorKey<b.anchorKey;});
-        step.selector=receipt;
+        et::Step step;
+        if(!IssueSelectorStep(*review->proof_,binding.metersPerLocalUnit,review->request_.amountMM,
+            candidate.issuance.nextLocalID++,step,refusal))return {};
         candidate.steps.push_back(step);candidate.outputNode=step.node;
         std::vector<std::uint8_t> bytes;if(!r2::Encode(candidate,bytes,refusal))return {};
         auto work=std::make_shared<r2::Work>();work->enrollment_=original;work->candidate_=candidate;
@@ -736,24 +841,31 @@ std::shared_ptr<retained_edge_treatment::r2::Work>
 Core3DViewer::prepareEdgeTreatmentSelectorAppendR2(
     const std::shared_ptr<const retained_edge_treatment::r2::Snapshot>& original,
     const std::shared_ptr<const retained_edge_treatment::r2::SelectorTargetCapture>& targets,
-    double amountMM,const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t,
+    double amountMM,const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
+    std::uint32_t width,std::uint32_t height,
     retained_edge_treatment::Refusal& refusal) noexcept {
     namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;namespace fs=retained_face_selector;
     refusal=et::Refusal::StaleSnapshot;
     if(![NSThread isMainThread]||!original||!targets||targets->original_!=original
-        ||!std::isfinite(amountMM)||amountMM<=0||amountMM>20||original->definition_.steps.size()>=et::MaximumSteps)return {};
-    r2::Definition candidate=original->definition_;et::Step step;step.node=MintEdgeTreatmentUUID();step.feature=MintEdgeTreatmentUUID();
-    step.localID=candidate.issuance.nextLocalID++;step.kind=et::Kind::ConstantFillet;step.amountMM=amountMM;
-    fs::SelectorReceipt receipt;receipt.intent=targets->proof_->intent();receipt.face=targets->proof_->plane();receipt.coverage=targets->proof_->coverage();
-    receipt.wireCount=targets->proof_->wireCount();receipt.boundaryUseCount=std::uint32_t(targets->proof_->boundaryUses().size());receipt.boundaryUniqueEdgeCount=targets->proof_->uniqueEdgeCount();
-    for(const auto& use:targets->proof_->boundaryUses())if(use.selected){et::Anchor anchor;if(!SelectorAnchor(use,original->dimensionMetersPerUnit(),anchor)){refusal=et::Refusal::UnsupportedEdge;return {};}
-        step.anchors.push_back(anchor);receipt.entries.push_back({anchor.key,use.direction});}
-    std::sort(step.anchors.begin(),step.anchors.end(),[](const et::Anchor&a,const et::Anchor&b){return a.key<b.key;});
-    std::sort(receipt.entries.begin(),receipt.entries.end(),[](const fs::ReceiptEntry&a,const fs::ReceiptEntry&b){return a.anchorKey<b.anchorKey;});step.selector=receipt;
+        ||!std::isfinite(amountMM)||amountMM<=0||amountMM>20||original->definition_.steps.size()>=et::MaximumSteps
+        ||!canBeginCommittedEdit()||myDoc.IsNull()||myContext.IsNull()||!width||!height
+        ||original->ownerLabel_.IsNull())return {};
+    const auto scene=captureSceneSnapshot(width,height);
+    if(!scene||scene->publicationSourceIdentifier!=identity.publicationSourceIdentifier
+        ||scene->revisions.documentGeneration!=identity.documentGeneration
+        ||scene->revisions.model!=identity.modelRevision
+        ||scene->revisions.presentation!=presentationRevision)return {};
+    myContext->InitSelected();if(!myContext->MoreSelected())return {};
+    const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());myContext->NextSelected();
+    if(myContext->MoreSelected()||selected.IsNull()||!myDoc->ShapeLabel(selected).IsEqual(original->ownerLabel_)
+        ||!selected->Shape().IsEqual(original->current_))return {};
+    r2::Definition candidate=original->definition_;et::Step step;
+    if(!IssueSelectorStep(*targets->proof_,original->dimensionMetersPerUnit(),amountMM,
+        candidate.issuance.nextLocalID++,step,refusal))return {};
     candidate.steps.push_back(step);candidate.outputNode=step.node;std::vector<std::uint8_t> bytes;if(!r2::Encode(candidate,bytes,refusal))return {};
     auto work=std::make_shared<r2::Work>();work->snapshot_=original;work->candidate_=candidate;work->source_=original->source_;
     work->base_=original->base_;work->originalCurrent_=original->current_;work->nonce_=original->nonce_;work->label_=original->ownerLabel_;
-    work->state_=r2::Work::State::Prepared;refusal=et::Refusal::None;return work;
+    work->presentation_=selected;work->state_=r2::Work::State::Prepared;refusal=et::Refusal::None;return work;
 }
 
 std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTreatmentEditR2(
@@ -3148,6 +3260,29 @@ bool Core3DViewer::canBeginCommittedEdit() const noexcept {
         if (!nativeOpeningReady(0)) return false;
         const Handle(TDocStd_Document) document = myDoc->Document();
         return !document.IsNull() && !document->HasOpenCommand();
+    } catch (...) {
+        return false;
+    }
+}
+
+bool Core3DViewer::canBeginCommittedEditHolding(
+    const std::shared_ptr<native_opening::Context>& openingContext) const noexcept {
+    try {
+        if (!openingContext || _objectInteractor == nullptr || _shapeInteractor == nullptr
+            || hasUnresolvedOrdinaryEdit()
+            || HasActiveOperationLedger(
+                _objectInteractor, _shapeInteractor)
+            || myDoc.IsNull() || myDoc->NativeBooleanOwnerBlocksOtherWork()) {
+            return false;
+        }
+        const Handle(TDocStd_Document) document = myDoc->Document();
+        if (document.IsNull() || document->HasOpenCommand()
+            || openingContext->openingFence().document() != document) return false;
+        // nativeOpeningReady with the opening's own identifier still requires
+        // this viewer to own the opening state, no active/recovery marker and
+        // the context to be the active one; a settled or foreign context
+        // therefore refuses here.
+        return nativeOpeningReady(openingContext->identifier_);
     } catch (...) {
         return false;
     }
