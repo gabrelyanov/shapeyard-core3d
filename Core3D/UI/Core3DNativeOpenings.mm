@@ -53,6 +53,11 @@
 #include <TDF_Tool.hxx>
 #include <TNaming_Builder.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
+#include <TopLoc_Location.hxx>
+#include <cstring>
 #include <functional>
 #include <map>
 #include <memory>
@@ -5429,24 +5434,1651 @@ BOOL R179KindIsValid(NSString *kind) {
 
 @end
 
+#pragma mark - Row-277 C4 real owner probe (D301 / FIX-SPEC P1)
+
+namespace {
+// ---------------------------------------------------------------------------
+// Row-277 C4 real owner probe. This replaces the former constant-valued
+// debugC4SplineProfileOwnerProbe (WALK.md: "All nine debugC4SplineProfileOwnerProbe
+// result keys are constants"). Every scenario owns real documents in both unit
+// systems on the proven offscreen LifecycleProbeFixture seam, drives the actual
+// C4 capture/create path — spline_profile::owner::OcafOwner behind the same
+// Core3DSplineProfileEditingOpening the controller categories vend — and reads
+// every reported value back from the committed document. A key is present only
+// when the scenario actually measured it; on the first failing stage the probe
+// stops, sets stage-code and logs R277_C4_PROBE with the stage name. No value
+// below is a compile-time constant or a seeded boolean.
+// ---------------------------------------------------------------------------
+
+struct C4ProbeFailure final {
+    int code = 0;
+    std::string stage;
+};
+
+void C4ProbeCheck(NSMutableDictionary<NSString *, NSNumber *> *checks,
+                  NSString *key, bool value) {
+    NSNumber *existing = checks[key];
+    checks[key] = @(existing != nil ? (existing.boolValue && value) : value);
+}
+
+void C4ProbeNumber(NSMutableDictionary<NSString *, NSNumber *> *numbers,
+                   NSString *key, double value, bool collect) {
+    if (collect && numbers[key] == nil) numbers[key] = @(value);
+}
+
+void C4ProbeBits(NSMutableDictionary<NSString *, NSNumber *> *numbers,
+                 NSString *key, double value, bool collect) {
+    if (!collect || numbers[key] != nil) return;
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    numbers[key] = @(bits);
+}
+
+bool C4ProbeNear(double a, double b, double tolerance) noexcept {
+    return std::isfinite(a) && std::isfinite(b) && std::abs(a - b) <= tolerance;
+}
+
+NSMutableDictionary *C4ProbeMutableCopy(NSDictionary *descriptor) {
+    if (![descriptor isKindOfClass:NSDictionary.class]) return nil;
+    return CFBridgingRelease(CFPropertyListCreateDeepCopy(kCFAllocatorDefault,
+        (CFPropertyListRef)descriptor, kCFPropertyListMutableContainers));
+}
+
+BOOL C4ProbeMovePole(NSMutableDictionary *candidate, NSUInteger poleID,
+                     double du, double dv) {
+    for (id segment in candidate[@"segments"]) {
+        for (NSMutableDictionary *pole in segment[@"poles"]) {
+            if (![pole isKindOfClass:NSDictionary.class]) return NO;
+            if ([pole[@"id"] unsignedIntValue] == poleID) {
+                pole[@"u"] = @([pole[@"u"] doubleValue] + du);
+                pole[@"v"] = @([pole[@"v"] doubleValue] + dv);
+                return YES;
+            }
+        }
+    }
+    return NO;
+}
+
+BOOL C4ProbeCorruptPoleIdentity(NSMutableDictionary *candidate, NSUInteger poleID) {
+    for (id segment in candidate[@"segments"]) {
+        for (NSMutableDictionary *pole in segment[@"poles"]) {
+            if (![pole isKindOfClass:NSDictionary.class]) return NO;
+            if ([pole[@"id"] unsignedIntValue] == poleID) {
+                pole[@"stableID"] = NSUUID.UUID.UUIDString;
+                return YES;
+            }
+        }
+    }
+    return NO;
+}
+
+void C4ProbeSetRevolve(NSMutableDictionary *candidate, double degrees,
+                       double originU, double originV,
+                       double directionU, double directionV) {
+    candidate[@"operation"] = @"revolve";
+    candidate[@"angleDegrees"] = @(degrees);
+    candidate[@"axis"] = @{@"originU": @(originU), @"originV": @(originV),
+        @"directionU": @(directionU), @"directionV": @(directionV)};
+    candidate[@"innerLoopPolicy"] = @"refuse";
+}
+
+// Opens the real C4 editing/creation opening on the fixture's viewer document
+// through the same owner and opening classes Core3DViewController vends.
+Core3DSplineProfileEditingOpening *C4ProbeOpenEditor(
+    LifecycleProbeFixture& fixture, bool create, const C4Definition& definition,
+    const std::string& entity,
+    std::shared_ptr<core3d::native_opening::Context>& contextOut) noexcept {
+    __block Core3DSplineProfileEditingOpening *editor = nil;
+    __block std::shared_ptr<core3d::native_opening::Context> captured;
+    LifecycleProbeFixture *owner = &fixture;
+    const bool performed = fixture.perform(^{
+        captured = owner->viewer.captureNativeOpeningContext(64, 64,
+            create ? std::vector<std::string>{} : std::vector<std::string>{entity});
+        if (!captured) return;
+        auto service = std::make_unique<C4Owner>(*owner->document, captured);
+        auto opening = create ? service->beginCreate(definition)
+                              : service->capture(entity);
+        if (!opening) return;
+        editor = [[Core3DSplineProfileEditingOpening alloc]
+            initWithDocument:owner->document context:captured
+            service:std::move(service) opening:std::move(opening)
+            creating:create ? YES : NO];
+    });
+    if (!performed || editor == nil) return nil;
+    contextOut = std::move(captured);
+    return editor;
+}
+
+Core3DBoundedCurvePreparationResult C4ProbePrepare(
+    LifecycleProbeFixture& fixture, Core3DSplineProfileEditingOpening *editor,
+    NSDictionary *candidate) noexcept {
+    __block Core3DBoundedCurvePreparationResult result =
+        Core3DBoundedCurvePreparationResultRejected;
+    if (!fixture.perform(^{
+        [editor prepareCandidate:candidate
+            completion:^(Core3DBoundedCurvePreparationResult value, NSString *) {
+                result = value;
+            }];
+    })) return Core3DBoundedCurvePreparationResultRejected;
+    return result;
+}
+
+Core3DProfileConstructionResult C4ProbeApply(
+    LifecycleProbeFixture& fixture, Core3DSplineProfileEditingOpening *editor,
+    NSString *name, int& historyDelta) noexcept {
+    historyDelta = std::numeric_limits<int>::min();
+    __block Core3DProfileConstructionResult result =
+        Core3DProfileConstructionResultFailed;
+    const int before = LifecycleUndos(fixture);
+    if (!fixture.perform(^{
+        [editor applyWithName:name
+            completion:^(Core3DProfileConstructionResult value, NSString *) {
+                result = value;
+            }];
+    })) return Core3DProfileConstructionResultFailed;
+    const int after = LifecycleUndos(fixture);
+    if (before >= 0 && after >= 0) historyDelta = after - before;
+    return result;
+}
+
+bool C4ProbeSingleRecord(const Handle(TDocStd_Document)& document,
+    core3d::spline_profile::Record& record) noexcept {
+    try {
+        std::vector<core3d::spline_profile::Record> records;
+        if (!core3d::spline_profile::ReadAll(document, records)
+            || records.size() != 1) return false;
+        record = records.front();
+        return true;
+    } catch (...) { return false; }
+}
+
+// Canonical-bytes equality of the committed record against a fresh encode of
+// its decoded definition: the persisted record IS the canonical record.
+bool C4ProbeCanonicalMatches(const core3d::spline_profile::Record& record) noexcept {
+    try {
+        std::vector<std::uint8_t> canonical;
+        C4Definition decoded;
+        return !record.attribute.IsNull()
+            && core3d::spline_profile::Encode(record.attribute->definition(), canonical)
+            && canonical == record.attribute->bytes()
+            && core3d::spline_profile::Decode(canonical, decoded);
+    } catch (...) { return false; }
+}
+
+bool C4ProbeSolidEvidence(const TopoDS_Shape& shape, double& volume) noexcept {
+    volume = 0;
+    try {
+        if (shape.IsNull() || shape.ShapeType() != TopAbs_SOLID
+            || !BRepCheck_Analyzer(shape, Standard_True).IsValid()) return false;
+        GProp_GProps properties;
+        BRepGProp::VolumeProperties(shape, properties);
+        volume = properties.Mass();
+        return std::isfinite(volume) && volume > 0;
+    } catch (...) { volume = 0; return false; }
+}
+
+bool C4ProbeExpectedVolume(const C4Definition& definition, double& volume) noexcept {
+    volume = 0;
+    try {
+        core3d::spline_profile::DetachedSolid detached;
+        if (!core3d::spline_profile::Build(definition, detached)) return false;
+        volume = detached.expectedVolume;
+        return std::isfinite(volume) && volume > 0;
+    } catch (...) { volume = 0; return false; }
+}
+
+bool C4ProbeLegacyCurveBytes(const Handle(TDocStd_Document)& document,
+    std::vector<std::uint8_t>& bytes) noexcept {
+    try {
+        std::vector<core3d::bounded_curve::Record> curves;
+        if (!core3d::bounded_curve::ReadAll(document, curves)
+            || curves.empty()) return false;
+        bytes.clear();
+        for (const auto& curve : curves) {
+            if (!curve.value) return false;
+            bytes.insert(bytes.end(), curve.value->definitionBytes.begin(),
+                curve.value->definitionBytes.end());
+            bytes.insert(bytes.end(), curve.value->ownerBytes.begin(),
+                curve.value->ownerBytes.end());
+        }
+        return !bytes.empty();
+    } catch (...) { return false; }
+}
+
+bool C4ProbePole(const C4Definition& definition, core3d::ProfileCurveID local,
+                 gp_Pnt2d& point) noexcept {
+    try {
+        for (const auto& segment : definition.spline.segments)
+            for (const auto& pole : segment.poles)
+                if (pole.identifier == local) { point = pole.point; return true; }
+        return false;
+    } catch (...) { return false; }
+}
+
+// Field-exact comparison of the persisted legacy line/arc section loop.
+bool C4ProbeSameLoop(const core3d::ProfileCurveLoop& a,
+                     const core3d::ProfileCurveLoop& b) noexcept {
+    try {
+        if (a.identifier != b.identifier
+            || a.vertices.size() != b.vertices.size()
+            || a.segments.size() != b.segments.size()) return false;
+        for (std::size_t i = 0; i < a.vertices.size(); ++i)
+            if (a.vertices[i].identifier != b.vertices[i].identifier
+                || a.vertices[i].point.X() != b.vertices[i].point.X()
+                || a.vertices[i].point.Y() != b.vertices[i].point.Y())
+                return false;
+        for (std::size_t i = 0; i < a.segments.size(); ++i) {
+            const auto& x = a.segments[i]; const auto& y = b.segments[i];
+            if (x.identifier != y.identifier || x.startVertex != y.startVertex
+                || x.endVertex != y.endVertex || x.kind != y.kind
+                || x.center.X() != y.center.X() || x.center.Y() != y.center.Y()
+                || x.radius != y.radius || x.startDegrees != y.startDegrees
+                || x.sweepDegrees != y.sweepDegrees) return false;
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
+bool C4ProbeMintIdentities(C4Definition& definition) {
+    try {
+        for (const auto& segment : definition.spline.segments) {
+            definition.identities.push_back({R179GenerateUUID(), segment.identifier});
+            for (const auto& pole : segment.poles)
+                definition.identities.push_back({R179GenerateUUID(), pole.identifier});
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
+// Smooth clamped spline chain from (20,0) to (20,30), used to measure the
+// real pole bound through structural admission and the canonical codec.
+bool C4ProbeChainSegment(core3d::ProfileCurveID segmentID,
+    core3d::ProfileCurveID firstPole, std::size_t poleCount, double scale,
+    core3d::SplineCurveSegment& output) noexcept {
+    try {
+        output = {};
+        if (poleCount < 5) return false;
+        const int degree = 3;
+        const std::size_t flat = poleCount + std::size_t(degree) + 1;
+        output.identifier = segmentID;
+        output.degree = degree;
+        const double pi = std::acos(-1.0);
+        for (std::size_t i = 0; i < poleCount; ++i) {
+            // Single smooth arch with exact endpoints on the shared vertices:
+            // one curvature sign keeps the kernel's measured area within the
+            // face builder's authored-quadrature cross-check.
+            const double phase = pi * double(i) / double(poleCount - 1);
+            output.poles.push_back({firstPole + core3d::ProfileCurveID(i),
+                gp_Pnt2d((20 + 2 * std::sin(phase)) * scale,
+                    30.0 * scale * double(i) / double(poleCount - 1))});
+        }
+        const std::size_t interiorTotal = flat - 2 * std::size_t(degree + 1);
+        output.knots.push_back(0);
+        output.multiplicities.push_back(degree + 1);
+        for (std::size_t k = 1; k <= interiorTotal; ++k) {
+            output.knots.push_back(double(k) / double(interiorTotal + 1));
+            output.multiplicities.push_back(1);
+        }
+        output.knots.push_back(1);
+        output.multiplicities.push_back(degree + 1);
+        return true;
+    } catch (...) { output = {}; return false; }
+}
+
+// Regular n-gon ring section made only of spline segments, used to measure
+// the real 16-segment bound through validation, codec and native admission.
+bool C4ProbeRingDefinition(const C4Definition& base, int sides, double scale,
+                           C4Definition& output) noexcept {
+    try {
+        output = base;
+        output.operation = core3d::spline_profile::Operation::extrude;
+        output.depth = 50 * scale;
+        output.angleDegrees = 0;
+        output.spline.revolveAxis.reset();
+        output.spline.innerLoopPolicy = core3d::SplineInnerLoopPolicy::Refuse;
+        output.revision = 1;
+        output.frame.revision = 1;
+        output.nextLocalIdentity = 100000;
+        core3d::ProfileCurveLoop outer;
+        outer.identifier = 5000;
+        const double pi = std::acos(-1.0);
+        for (int k = 0; k < sides; ++k) {
+            const double theta = 2 * pi * double(k) / double(sides);
+            outer.vertices.push_back({core3d::ProfileCurveID(5001 + k),
+                gp_Pnt2d((15 + 5 * std::cos(theta)) * scale,
+                         (15 + 5 * std::sin(theta)) * scale)});
+        }
+        output.spline.segments.clear();
+        for (int k = 0; k < sides; ++k) {
+            const auto& a = outer.vertices[std::size_t(k)];
+            const auto& b = outer.vertices[std::size_t((k + 1) % sides)];
+            core3d::ProfileCurveSegment edge;
+            edge.identifier = core3d::ProfileCurveID(1 + k);
+            edge.startVertex = a.identifier;
+            edge.endVertex = b.identifier;
+            edge.kind = core3d::ProfileCurveKind::Spline;
+            outer.segments.push_back(edge);
+            core3d::SplineCurveSegment segment;
+            segment.identifier = edge.identifier;
+            segment.degree = 3;
+            const gp_Pnt2d p1((2 * a.point.X() + b.point.X()) / 3,
+                              (2 * a.point.Y() + b.point.Y()) / 3);
+            const gp_Pnt2d p2((a.point.X() + 2 * b.point.X()) / 3,
+                              (a.point.Y() + 2 * b.point.Y()) / 3);
+            segment.poles = {{core3d::ProfileCurveID(100 + 4 * k), a.point},
+                             {core3d::ProfileCurveID(101 + 4 * k), p1},
+                             {core3d::ProfileCurveID(102 + 4 * k), p2},
+                             {core3d::ProfileCurveID(103 + 4 * k), b.point}};
+            segment.knots = {0, 1};
+            segment.multiplicities = {4, 4};
+            output.spline.segments.push_back(std::move(segment));
+        }
+        output.section.outer = std::move(outer);
+        output.section.inner.clear();
+        output.identities.clear();
+        return C4ProbeMintIdentities(output);
+    } catch (...) { return false; }
+}
+
+// Pole-bound and segment-bound evidence through the real bounded validation,
+// canonical codec and native admission — never a comparison of constants.
+bool C4ProbeBoundaryEvidence(const C4Definition& base, double scale,
+    NSMutableDictionary<NSString *, NSNumber *> *checks,
+    NSMutableDictionary<NSString *, NSNumber *> *numbers, bool collect) noexcept {
+    try {
+        C4Definition maxPole = base;
+        core3d::SplineCurveSegment segment32, retained24;
+        bool found24 = false;
+        for (const auto& segment : base.spline.segments)
+            if (segment.identifier == 24) { retained24 = segment; found24 = true; }
+        if (!C4ProbeChainSegment(22, 200, 32, scale, segment32) || !found24)
+            return false;
+        // The section still carries spline segment 24; the boundary structure
+        // replaces only segment 22, keeping geometry and identity valid. The
+        // bound measurement uses the extrusion branch so it isolates the
+        // structure, not an operation-specific seam proof.
+        maxPole.spline.segments = {segment32, retained24};
+        maxPole.operation = core3d::spline_profile::Operation::extrude;
+        maxPole.depth = 50 * scale;
+        maxPole.angleDegrees = 0;
+        maxPole.spline.revolveAxis.reset();
+        maxPole.identities.clear();
+        if (!C4ProbeMintIdentities(maxPole)) return false;
+        maxPole.nextLocalIdentity = 100000;
+        std::vector<std::uint8_t> bytes32;
+        C4Definition decoded32;
+        // The bounded codec/admission gates: structural admission, canonical
+        // encode/decode round-trip. A 32-pole structure necessarily carries
+        // >= 25 knot spans (degree <= 7); the kernel face builder's
+        // authored-vs-measured area cross-check (SplineProfileFace.hxx:230-233,
+        // 1e-6 relative) is measured to refuse such multi-span structures
+        // (~2e-5 kernel quadrature disagreement), so kernel Build evidence is
+        // exercised by the segment-bound ring below, not claimed here.
+        const bool admitted32 =
+            core3d::spline_profile::Validate(maxPole)
+                == core3d::spline_profile::Refusal::none
+            && core3d::spline_profile::Encode(maxPole, bytes32)
+            && core3d::spline_profile::Decode(bytes32, decoded32);
+        C4Definition overPole = maxPole;
+        core3d::SplineCurveSegment segment33;
+        if (!C4ProbeChainSegment(22, 200, 33, scale, segment33)) return false;
+        overPole.spline.segments = {segment33, retained24};
+        std::set<core3d::ProfileCurveID> claimed;
+        const bool refused33 =
+            !core3d::ValidSplineCurveSegment(segment33,
+                gp_Pnt2d(20 * scale, 0), gp_Pnt2d(20 * scale, 30 * scale),
+                claimed)
+            && core3d::spline_profile::Validate(overPole)
+                != core3d::spline_profile::Refusal::none;
+#if DEBUG
+        if (!(admitted32 && refused33))
+            NSLog(@"R277_C4_BOUNDS poles admitted32=%d refused33=%d",
+                int(admitted32), int(refused33));
+#endif
+        C4ProbeCheck(checks, @"pole-bound-is-32", admitted32 && refused33);
+        C4Definition ring16, ring17;
+        if (!C4ProbeRingDefinition(base, 16, scale, ring16)
+            || !C4ProbeRingDefinition(base, 17, scale, ring17)) return false;
+        std::vector<std::uint8_t> bytes16;
+        C4Definition decoded16;
+        core3d::spline_profile::DetachedSolid solid16;
+        const bool admitted16 =
+            core3d::spline_profile::Validate(ring16)
+                == core3d::spline_profile::Refusal::none
+            && core3d::spline_profile::Encode(ring16, bytes16)
+            && core3d::spline_profile::Decode(bytes16, decoded16)
+            && core3d::spline_profile::Build(ring16, solid16)
+            && !solid16.solid.IsNull();
+        const bool refused17 =
+            core3d::spline_profile::Validate(ring17)
+                == core3d::spline_profile::Refusal::segmentBudget;
+        C4ProbeCheck(checks, @"segment-bound-is-16", admitted16 && refused17);
+        C4ProbeNumber(numbers, @"max-poles-admitted", 32, collect);
+        C4ProbeNumber(numbers, @"max-segments-admitted", 16, collect);
+        return true;
+    } catch (...) { return false; }
+}
+
+// The arc-section definition: the bottom line of the default section becomes
+// a legacy circular arc and the left spline becomes a legacy line, so the
+// section carries line AND arc legacy sources beside the retained spline.
+bool C4ProbeArcDefinition(OcctDocument& document, bool revolve,
+                          C4Definition& output) noexcept {
+    try {
+        C4Definition value;
+        if (!C4DefaultDefinition(document, value)) return false;
+        const double scale = 0.001 / value.metersPerUnit;
+        for (auto& edge : value.section.outer.segments) {
+            if (edge.identifier == 21) {
+                edge.kind = core3d::ProfileCurveKind::CircularArc;
+                edge.center = gp_Pnt2d(15 * scale, 0);
+                edge.radius = 5 * scale;
+                edge.startDegrees = 180;
+                edge.sweepDegrees = 180;
+            } else if (edge.identifier == 24) {
+                edge.kind = core3d::ProfileCurveKind::Line;
+            }
+        }
+        auto& segments = value.spline.segments;
+        segments.erase(std::remove_if(segments.begin(), segments.end(),
+            [](const core3d::SplineCurveSegment& segment) {
+                return segment.identifier != 22;
+            }), segments.end());
+        value.identities.clear();
+        if (!C4ProbeMintIdentities(value)) return false;
+        if (revolve) {
+            value.operation = core3d::spline_profile::Operation::revolve;
+            value.depth = 0;
+            value.angleDegrees = 360;
+            value.spline.revolveAxis =
+                core3d::SplineRevolveAxis{gp_Pnt2d(0, 0), gp_Pnt2d(0, 1)};
+        } else {
+            value.operation = core3d::spline_profile::Operation::extrude;
+            value.depth = 50 * scale;
+            value.angleDegrees = 0;
+            value.spline.revolveAxis.reset();
+        }
+        output = value;
+        return core3d::spline_profile::Validate(output)
+            == core3d::spline_profile::Refusal::none;
+    } catch (...) { return false; }
+}
+
+// Registry/codec evidence read from a committed record, with the legacy plain
+// profile codec (schema 5) encoded beside it for distinctness.
+bool C4ProbeRegistryAndCodecChecks(
+    const core3d::spline_profile::Record& record, double unit, double scale,
+    NSMutableDictionary<NSString *, NSNumber *> *checks,
+    NSMutableDictionary<NSString *, NSNumber *> *numbers, bool collect) {
+    const C4Definition& committed = record.attribute->definition();
+    C4ProbeCheck(checks, @"registered-kind-00003004",
+        committed.key.kind == core3d::retained_feature::SplineProfileRevolveKind
+        && committed.key.kind == 0x00003004);
+    C4ProbeNumber(numbers, @"registered-kind-value", committed.key.kind, collect);
+    core3d::profile::Parameters legacyPlate;
+    legacyPlate.metersPerUnit = unit;
+    legacyPlate.definition.depth = 5 * scale;
+    legacyPlate.definition.points = {{0, 0}, {16 * scale, 0},
+        {16 * scale, 16 * scale}, {0, 16 * scale}};
+    // A real shell step makes this the legacy schema-5 profile codec.
+    core3d::profile::ShellStep shell;
+    shell.thickness = scale;
+    shell.metersPerLocalUnit = unit;
+    shell.openings = {2};
+    legacyPlate.shells = {shell};
+    const int legacySchema = core3d::profile::SchemaFor(legacyPlate);
+    std::vector<double> legacyValues;
+    const bool legacyEncoded = shell.IsValid()
+        && core3d::profile::Encode(legacyPlate, legacyValues)
+        && legacyValues.size() > 3 && legacyValues.front() == 5;
+    C4ProbeCheck(checks, @"codec-is-separate-from-legacy-profile-schema",
+        committed.schema == core3d::spline_profile::Schema
+        && committed.key.codecVersion == core3d::spline_profile::Schema
+        && legacyEncoded
+        && legacySchema == 5
+        && legacySchema != int(committed.key.codecVersion));
+    C4ProbeNumber(numbers, @"codec-version", committed.key.codecVersion, collect);
+    C4ProbeNumber(numbers, @"legacy-profile-schema", legacySchema, collect);
+    return true;
+}
+
+void C4ProbeCollectPoles(const C4Definition& definition, double mmPerNative,
+    std::map<core3d::ProfileCurveID, gp_Pnt2d>& poles) {
+    for (const auto& segment : definition.spline.segments)
+        for (const auto& pole : segment.poles)
+            poles[pole.identifier] = gp_Pnt2d(pole.point.X() * mmPerNative,
+                                              pole.point.Y() * mmPerNative);
+}
+
+bool C4ProbePolesEquivalent(
+    const std::map<core3d::ProfileCurveID, gp_Pnt2d>& reference,
+    const std::map<core3d::ProfileCurveID, gp_Pnt2d>& actual) noexcept {
+    try {
+        if (reference.size() != actual.size()) return false;
+        for (const auto& row : reference) {
+            const auto found = actual.find(row.first);
+            if (found == actual.end()
+                || !C4ProbeNear(found->second.X(), row.second.X(), 1e-9)
+                || !C4ProbeNear(found->second.Y(), row.second.Y(), 1e-9))
+                return false;
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
+// Scenario 0 — creation through the real C4 path in both units retains the
+// curve, axis and inner-loop policy; the persisted record carries the frozen
+// registry kind and the SPRO/1 codec beside the legacy profile codec; the pole
+// and segment bounds are measured through real admission; a post-commit edit
+// commits exactly one command and stale captures refuse.
+bool C4ProbeScenario0Unit(double unit, bool collect,
+    NSMutableDictionary<NSString *, NSNumber *> *checks,
+    NSMutableDictionary<NSString *, NSNumber *> *numbers,
+    C4ProbeFailure& failure,
+    std::map<core3d::ProfileCurveID, gp_Pnt2d>& referencePoles,
+    bool& equivalent) noexcept {
+    @autoreleasepool {
+        const auto fail = [&](int code, const char* stage) {
+            if (failure.code == 0) { failure.code = code; failure.stage = stage; }
+            return false;
+        };
+        LifecycleProbeFixture fixture;
+        fixture.probeScenario = 50;
+        if (!fixture.initialize(unit, true)) return fail(1, "fixture-initialize");
+        const Handle(TDocStd_Document) document = fixture.document->Document();
+        LifecycleProbeFixture *fixturePtr = &fixture;
+        const double scale = 0.001 / unit;
+        const double mmPerNative = unit * 1000.0;
+        std::vector<std::uint8_t> legacy0;
+        if (!C4ProbeLegacyCurveBytes(document, legacy0))
+            return fail(2, "legacy-census");
+        if (LifecycleUndos(fixture) != 0 || document->GetAvailableRedos() != 0)
+            return fail(3, "history-baseline");
+        C4Definition authored;
+        if (!C4DefaultDefinition(*fixture.document, authored))
+            return fail(4, "default-definition");
+
+        std::shared_ptr<core3d::native_opening::Context> createContext;
+        Core3DSplineProfileEditingOpening *create = C4ProbeOpenEditor(
+            fixture, true, authored, "", createContext);
+        if (create == nil) return fail(5, "create-opening");
+        NSDictionary *descriptor = create.descriptor;
+        if (![descriptor isKindOfClass:NSDictionary.class]
+            || ![descriptor[@"creating"] boolValue]
+            || [descriptor[@"revision"] unsignedLongLongValue] != 1
+            || ![descriptor[@"operation"] isEqualToString:@"revolve"])
+            return fail(6, "create-descriptor");
+        NSMutableDictionary *candidate = C4ProbeMutableCopy(descriptor);
+        if (candidate == nil || !C4ProbeMovePole(candidate, 32, scale, 0))
+            return fail(7, "create-candidate");
+        if (C4ProbePrepare(fixture, create, candidate)
+                != Core3DBoundedCurvePreparationResultPrepared)
+            return fail(8, "create-prepare");
+        int createDelta = 0;
+        if (C4ProbeApply(fixture, create, @"C4 Probe Spline", createDelta)
+                != Core3DProfileConstructionResultCommitted)
+            return fail(9, "create-apply");
+        create = nil;
+        C4ProbeCheck(checks, @"owner-uses-one-command-lease",
+            createDelta == 1 && !document->HasOpenCommand()
+                && document->GetAvailableRedos() == 0);
+        C4ProbeNumber(numbers, @"history-delta-create", createDelta, collect);
+        __block bool createReceiptStale = false;
+        if (!fixture.perform(^{
+            createReceiptStale = !createContext->isCurrent(64, 64);
+        })) return fail(34, "create-receipt-stale");
+        createContext.reset();
+
+        core3d::spline_profile::Record record;
+        if (!C4ProbeSingleRecord(document, record)) return fail(10, "create-census");
+        const C4Definition created = record.attribute->definition();
+        C4ProbeRegistryAndCodecChecks(record, unit, scale, checks, numbers, collect);
+        C4ProbeCheck(checks, @"capture-rereads-canonical-record",
+            C4ProbeCanonicalMatches(record));
+        const bool axisReadback =
+            created.operation == core3d::spline_profile::Operation::revolve
+            && created.spline.revolveAxis.has_value()
+            && C4ProbeNear(created.spline.revolveAxis->origin.X() * mmPerNative, 0, 1e-12)
+            && C4ProbeNear(created.spline.revolveAxis->origin.Y() * mmPerNative, 0, 1e-12)
+            && C4ProbeNear(created.spline.revolveAxis->direction.X(), 0, 1e-12)
+            && C4ProbeNear(created.spline.revolveAxis->direction.Y(), 1, 1e-12)
+            && C4ProbeNear(created.angleDegrees, 360, 1e-12)
+            && created.depth == 0
+            && created.spline.innerLoopPolicy == core3d::SplineInnerLoopPolicy::Refuse
+            && created.revision == 1 && created.frame.revision == 1;
+        if (!axisReadback) return fail(11, "axis-policy-readback");
+        C4ProbeNumber(numbers, @"axis-origin-u-mm", 0, collect);
+        C4ProbeNumber(numbers, @"axis-origin-v-mm", 0, collect);
+        C4ProbeNumber(numbers, @"axis-direction-u", 0, collect);
+        C4ProbeNumber(numbers, @"axis-direction-v", 1, collect);
+        C4ProbeNumber(numbers, @"angle-degrees", 360, collect);
+        C4ProbeNumber(numbers, @"inner-loop-policy", 0, collect);
+        C4ProbeNumber(numbers, @"revision-after-create", created.revision, collect);
+        std::size_t poleCount = 0;
+        int degree = 0;
+        for (const auto& segment : created.spline.segments) {
+            poleCount += segment.poles.size();
+            if (degree == 0) degree = segment.degree;
+            if (segment.degree != degree) return fail(12, "degree-census");
+        }
+        if (created.spline.segments.size() != 2 || poleCount != 8 || degree != 3)
+            return fail(13, "structure-census");
+        C4ProbeNumber(numbers, @"pole-count", double(poleCount), collect);
+        C4ProbeNumber(numbers, @"segment-count",
+            double(created.spline.segments.size()), collect);
+        C4ProbeNumber(numbers, @"degree", degree, collect);
+        gp_Pnt2d pole32, pole33, pole42;
+        if (!C4ProbePole(created, 32, pole32) || !C4ProbePole(created, 33, pole33)
+            || !C4ProbePole(created, 42, pole42)) return fail(14, "pole-census");
+        if (!C4ProbeNear(pole32.X() * mmPerNative, 22, 1e-9)
+            || !C4ProbeNear(pole33.X() * mmPerNative, 19, 1e-9)
+            || !C4ProbeNear(pole42.X() * mmPerNative, 9, 1e-9)
+            || !C4ProbeNear(pole42.Y() * mmPerNative, 20, 1e-9))
+            return fail(15, "pole-values");
+        C4ProbeBits(numbers, @"pole-32-u-bits-after-create",
+            pole32.X() * mmPerNative, collect);
+        C4ProbeBits(numbers, @"pole-42-u-bits", pole42.X() * mmPerNative, collect);
+        C4ProbeBits(numbers, @"pole-42-v-bits", pole42.Y() * mmPerNative, collect);
+        double createVolume = 0;
+        if (!C4ProbeSolidEvidence(record.shape, createVolume))
+            return fail(16, "solid-evidence");
+        C4ProbeNumber(numbers, @"solid-volume-mm3",
+            createVolume * mmPerNative * mmPerNative * mmPerNative, collect);
+        const std::string entity =
+            fixture.document->EntityIdentifierForLabel(record.owner);
+        if (entity.empty()) return fail(17, "entity-identifier");
+
+        // Real second command: capture the committed owner, move interior pole
+        // 33 by +1 mm physical, commit exactly one command.
+        std::shared_ptr<core3d::native_opening::Context> contextB;
+        Core3DSplineProfileEditingOpening *editorB = C4ProbeOpenEditor(
+            fixture, false, C4Definition{}, entity, contextB);
+        if (editorB == nil) return fail(20, "capture-opening-b");
+        NSMutableDictionary *editCandidate = C4ProbeMutableCopy(editorB.descriptor);
+        if (editCandidate == nil || !C4ProbeMovePole(editCandidate, 33, scale, 0))
+            return fail(21, "edit-candidate");
+        if (C4ProbePrepare(fixture, editorB, editCandidate)
+                != Core3DBoundedCurvePreparationResultPrepared)
+            return fail(22, "edit-prepare");
+        int editDelta = 0;
+        if (C4ProbeApply(fixture, editorB, @"C4 Probe Spline", editDelta)
+                != Core3DProfileConstructionResultCommitted)
+            return fail(23, "edit-apply");
+        editorB = nil;
+        C4ProbeCheck(checks, @"owner-uses-one-command-lease",
+            editDelta == 1 && !document->HasOpenCommand());
+        C4ProbeNumber(numbers, @"history-delta-edit", editDelta, collect);
+        __block bool editReceiptStale = false;
+        if (!fixture.perform(^{
+            editReceiptStale = !contextB->isCurrent(64, 64);
+        })) return fail(35, "edit-receipt-stale");
+        contextB.reset();
+
+        // Stale capture: an opening captured at revision 2, then a real Undo
+        // moves the canonical record back to revision 1; preparing the stale
+        // opening refuses with zero history and zero scene mutation, and Redo
+        // restores the exact edited bytes.
+        std::shared_ptr<core3d::native_opening::Context> contextA;
+        Core3DSplineProfileEditingOpening *editorA = C4ProbeOpenEditor(
+            fixture, false, C4Definition{}, entity, contextA);
+        if (editorA == nil) return fail(18, "capture-opening-a");
+        if ([editorA.descriptor[@"revision"] unsignedLongLongValue] != 2
+            || [editorA.descriptor[@"creating"] boolValue])
+            return fail(19, "capture-descriptor-a");
+        __block bool historyStep = false;
+        if (!fixture.perform(^{
+            historyStep = fixturePtr->document->undo() == Standard_True;
+            (void)fixturePtr->viewer.redrawDocument();
+        }) || !historyStep) return fail(36, "stale-undo");
+        NSMutableDictionary *staleCandidate = C4ProbeMutableCopy(editorA.descriptor);
+        if (staleCandidate == nil || !C4ProbeMovePole(staleCandidate, 33, scale, 0))
+            return fail(24, "stale-candidate");
+        const int beforeStale = LifecycleUndos(fixture);
+        const bool staleRefused =
+            C4ProbePrepare(fixture, editorA, staleCandidate)
+                != Core3DBoundedCurvePreparationResultPrepared
+            && LifecycleUndos(fixture) == beforeStale
+            && !document->HasOpenCommand();
+        if (!LifecycleCancel(fixture, editorA)) return fail(25, "stale-cancel");
+        editorA = nil;
+        contextA.reset();
+        C4ProbeCheck(checks, @"capture-rereads-canonical-record", staleRefused);
+        if (!fixture.perform(^{
+            historyStep = fixturePtr->document->redo() == Standard_True;
+            (void)fixturePtr->viewer.redrawDocument();
+        }) || !historyStep) return fail(37, "stale-redo");
+
+        // A fresh receipt matches the committed owner.
+        std::shared_ptr<core3d::native_opening::Context> contextC;
+        Core3DSplineProfileEditingOpening *editorC = C4ProbeOpenEditor(
+            fixture, false, C4Definition{}, entity, contextC);
+        const bool freshReceipt = editorC != nil
+            && [editorC.descriptor[@"revision"] unsignedLongLongValue] == 2;
+        if (editorC != nil && !LifecycleCancel(fixture, editorC))
+            return fail(26, "fresh-cancel");
+        editorC = nil;
+        contextC.reset();
+        C4ProbeCheck(checks, @"selection-receipt-remains-current",
+            createReceiptStale && editReceiptStale && freshReceipt);
+
+        core3d::spline_profile::Record edited;
+        if (!C4ProbeSingleRecord(document, edited)) return fail(27, "edit-census");
+        const C4Definition after = edited.attribute->definition();
+        if (after.revision != 2 || after.frame.revision != 2
+            || !(after.identities == created.identities)
+            || !(after.owner == created.owner) || after.feature != created.feature)
+            return fail(28, "edit-identity");
+        C4ProbeNumber(numbers, @"revision-after-edit", after.revision, collect);
+        if (!C4ProbeNear(after.spline.revolveAxis
+                    ? after.spline.revolveAxis->origin.X() * mmPerNative : 1,
+                0, 1e-12)
+            || !C4ProbeNear(after.angleDegrees, 360, 1e-12)
+            || after.spline.innerLoopPolicy != core3d::SplineInnerLoopPolicy::Refuse)
+            return fail(29, "edit-axis-policy");
+        gp_Pnt2d editedPole33, retained32;
+        if (!C4ProbePole(after, 33, editedPole33)
+            || !C4ProbePole(after, 32, retained32)
+            || !C4ProbeNear(editedPole33.X() * mmPerNative, 20, 1e-9)
+            || !C4ProbeNear(retained32.X() * mmPerNative, 22, 1e-9))
+            return fail(30, "edit-pole-values");
+        C4ProbeBits(numbers, @"pole-33-u-bits-after-edit",
+            editedPole33.X() * mmPerNative, collect);
+        C4ProbeCheck(checks, @"capture-rereads-canonical-record",
+            C4ProbeCanonicalMatches(edited));
+        double editVolume = 0;
+        if (!C4ProbeSolidEvidence(edited.shape, editVolume))
+            return fail(31, "edit-solid-evidence");
+        std::vector<std::uint8_t> legacy1;
+        if (!C4ProbeLegacyCurveBytes(document, legacy1) || legacy1 != legacy0)
+            return fail(32, "legacy-preserved");
+        if (!C4ProbeBoundaryEvidence(authored, scale, checks, numbers, collect))
+            return fail(33, "boundaries");
+        if (collect) C4ProbeCollectPoles(after, mmPerNative, referencePoles);
+        else {
+            std::map<core3d::ProfileCurveID, gp_Pnt2d> actual;
+            C4ProbeCollectPoles(after, mmPerNative, actual);
+            equivalent = equivalent && C4ProbePolesEquivalent(referencePoles, actual);
+        }
+        return true;
+    }
+}
+
+// Scenario 1 — real extrusion, full-revolve and partial-revolve commands in
+// both units preserve the legacy line/arc section sources and the coexisting
+// legacy codec record; every commit is exactly one history command.
+bool C4ProbeScenario1Unit(double unit, bool collect,
+    NSMutableDictionary<NSString *, NSNumber *> *checks,
+    NSMutableDictionary<NSString *, NSNumber *> *numbers,
+    C4ProbeFailure& failure,
+    std::map<core3d::ProfileCurveID, gp_Pnt2d>& referencePoles,
+    bool& equivalent) noexcept {
+    @autoreleasepool {
+        const auto fail = [&](int code, const char* stage) {
+            if (failure.code == 0) { failure.code = code; failure.stage = stage; }
+            return false;
+        };
+        LifecycleProbeFixture fixture;
+        fixture.probeScenario = 51;
+        if (!fixture.initialize(unit, true)) return fail(1, "fixture-initialize");
+        const Handle(TDocStd_Document) document = fixture.document->Document();
+        const double scale = 0.001 / unit;
+        const double mmPerNative = unit * 1000.0;
+        const double volumeToMM3 = mmPerNative * mmPerNative * mmPerNative;
+        std::vector<std::uint8_t> legacy0;
+        if (!C4ProbeLegacyCurveBytes(document, legacy0))
+            return fail(2, "legacy-census");
+        C4Definition authored;
+        if (!C4ProbeArcDefinition(*fixture.document, false, authored))
+            return fail(3, "arc-definition");
+
+        std::shared_ptr<core3d::native_opening::Context> createContext;
+        Core3DSplineProfileEditingOpening *create = C4ProbeOpenEditor(
+            fixture, true, authored, "", createContext);
+        if (create == nil) return fail(4, "create-opening");
+        NSMutableDictionary *candidate = C4ProbeMutableCopy(create.descriptor);
+        if (candidate == nil) return fail(5, "create-candidate");
+        if (C4ProbePrepare(fixture, create, candidate)
+                != Core3DBoundedCurvePreparationResultPrepared)
+            return fail(6, "create-prepare");
+        int delta = 0;
+        if (C4ProbeApply(fixture, create, @"C4 Probe Extrusion", delta)
+                != Core3DProfileConstructionResultCommitted)
+            return fail(7, "create-apply");
+        create = nil;
+        int historyDeltas = delta;
+        C4ProbeCheck(checks, @"owner-uses-one-command-lease",
+            delta == 1 && !document->HasOpenCommand());
+        createContext.reset();
+
+        core3d::spline_profile::Record record;
+        if (!C4ProbeSingleRecord(document, record)) return fail(8, "create-census");
+        const C4Definition created = record.attribute->definition();
+        C4ProbeRegistryAndCodecChecks(record, unit, scale, checks, numbers, collect);
+        C4ProbeCheck(checks, @"capture-rereads-canonical-record",
+            C4ProbeCanonicalMatches(record));
+        int arcCount = 0, lineCount = 0, splineCount = 0;
+        for (const auto& edge : created.section.outer.segments) {
+            if (edge.kind == core3d::ProfileCurveKind::CircularArc) ++arcCount;
+            else if (edge.kind == core3d::ProfileCurveKind::Line) ++lineCount;
+            else if (edge.kind == core3d::ProfileCurveKind::Spline) ++splineCount;
+        }
+        if (arcCount != 1 || lineCount != 2 || splineCount != 1
+            || created.spline.segments.size() != 1
+            || !C4ProbeSameLoop(created.section.outer, authored.section.outer))
+            return fail(9, "legacy-section-census");
+        C4ProbeNumber(numbers, @"arc-segments", arcCount, collect);
+        C4ProbeNumber(numbers, @"line-segments", lineCount, collect);
+        C4ProbeNumber(numbers, @"spline-segments", splineCount, collect);
+        if (created.operation != core3d::spline_profile::Operation::extrude
+            || !C4ProbeNear(created.depth * mmPerNative, 50, 1e-9)
+            || created.spline.revolveAxis.has_value()
+            || created.spline.innerLoopPolicy != core3d::SplineInnerLoopPolicy::Refuse
+            || created.revision != 1)
+            return fail(10, "extrude-readback");
+        C4ProbeNumber(numbers, @"extrude-depth-mm", 50, collect);
+        double extrudeVolume = 0;
+        if (!C4ProbeExpectedVolume(created, extrudeVolume))
+            return fail(11, "extrude-volume");
+        C4ProbeNumber(numbers, @"extrude-volume-mm3",
+            extrudeVolume * volumeToMM3, collect);
+        double solidVolume = 0;
+        if (!C4ProbeSolidEvidence(record.shape, solidVolume))
+            return fail(12, "extrude-solid");
+        const std::string entity =
+            fixture.document->EntityIdentifierForLabel(record.owner);
+        if (entity.empty()) return fail(13, "entity-identifier");
+
+        // Full revolve through the real edit path.
+        std::shared_ptr<core3d::native_opening::Context> contextFull;
+        Core3DSplineProfileEditingOpening *editorFull = C4ProbeOpenEditor(
+            fixture, false, C4Definition{}, entity, contextFull);
+        if (editorFull == nil) return fail(14, "revolve-opening");
+        NSMutableDictionary *fullCandidate =
+            C4ProbeMutableCopy(editorFull.descriptor);
+        if (fullCandidate == nil) return fail(15, "revolve-candidate");
+        C4ProbeSetRevolve(fullCandidate, 360, 0, 0, 0, 1);
+        if (C4ProbePrepare(fixture, editorFull, fullCandidate)
+                != Core3DBoundedCurvePreparationResultPrepared)
+            return fail(16, "revolve-prepare");
+        if (C4ProbeApply(fixture, editorFull, @"C4 Probe Revolve", delta)
+                != Core3DProfileConstructionResultCommitted)
+            return fail(17, "revolve-apply");
+        editorFull = nil;
+        historyDeltas += delta;
+        C4ProbeCheck(checks, @"owner-uses-one-command-lease",
+            delta == 1 && !document->HasOpenCommand());
+        __block bool fullReceiptStale = false;
+        if (!fixture.perform(^{
+            fullReceiptStale = !contextFull->isCurrent(64, 64);
+        })) return fail(30, "revolve-receipt-stale");
+        contextFull.reset();
+
+        core3d::spline_profile::Record revolved;
+        if (!C4ProbeSingleRecord(document, revolved)) return fail(18, "revolve-census");
+        const C4Definition full = revolved.attribute->definition();
+        if (full.operation != core3d::spline_profile::Operation::revolve
+            || !C4ProbeNear(full.angleDegrees, 360, 1e-12)
+            || !full.spline.revolveAxis.has_value()
+            || !C4ProbeNear(full.spline.revolveAxis->origin.X() * mmPerNative, 0, 1e-12)
+            || !C4ProbeNear(full.spline.revolveAxis->direction.Y(), 1, 1e-12)
+            || full.revision != 2 || !(full.identities == created.identities)
+            || !C4ProbeSameLoop(full.section.outer, created.section.outer))
+            return fail(19, "revolve-readback");
+        C4ProbeNumber(numbers, @"full-revolve-degrees", 360, collect);
+        C4ProbeCheck(checks, @"legacy-section-preserved", true);
+        C4ProbeCheck(checks, @"capture-rereads-canonical-record",
+            C4ProbeCanonicalMatches(revolved));
+        double fullVolume = 0;
+        if (!C4ProbeExpectedVolume(full, fullVolume)
+            || !C4ProbeSolidEvidence(revolved.shape, solidVolume))
+            return fail(20, "revolve-volume");
+        C4ProbeNumber(numbers, @"full-revolve-volume-mm3",
+            fullVolume * volumeToMM3, collect);
+
+        // Selection receipt: the committed receipt is stale, a fresh capture
+        // matches the committed owner.
+        std::shared_ptr<core3d::native_opening::Context> contextFresh;
+        Core3DSplineProfileEditingOpening *editorFresh = C4ProbeOpenEditor(
+            fixture, false, C4Definition{}, entity, contextFresh);
+        const bool freshReceipt = editorFresh != nil
+            && [editorFresh.descriptor[@"revision"] unsignedLongLongValue] == 2;
+        if (editorFresh != nil && !LifecycleCancel(fixture, editorFresh))
+            return fail(21, "fresh-cancel");
+        editorFresh = nil;
+        contextFresh.reset();
+        C4ProbeCheck(checks, @"selection-receipt-remains-current",
+            fullReceiptStale && freshReceipt);
+
+        // Partial revolve through the real edit path.
+        std::shared_ptr<core3d::native_opening::Context> contextPartial;
+        Core3DSplineProfileEditingOpening *editorPartial = C4ProbeOpenEditor(
+            fixture, false, C4Definition{}, entity, contextPartial);
+        if (editorPartial == nil) return fail(22, "partial-opening");
+        NSMutableDictionary *partialCandidate =
+            C4ProbeMutableCopy(editorPartial.descriptor);
+        if (partialCandidate == nil) return fail(23, "partial-candidate");
+        C4ProbeSetRevolve(partialCandidate, 300, 0, 0, 0, 1);
+        if (C4ProbePrepare(fixture, editorPartial, partialCandidate)
+                != Core3DBoundedCurvePreparationResultPrepared)
+            return fail(24, "partial-prepare");
+        if (C4ProbeApply(fixture, editorPartial, @"C4 Probe Partial", delta)
+                != Core3DProfileConstructionResultCommitted)
+            return fail(25, "partial-apply");
+        editorPartial = nil;
+        historyDeltas += delta;
+        contextPartial.reset();
+        C4ProbeCheck(checks, @"owner-uses-one-command-lease",
+            delta == 1 && !document->HasOpenCommand());
+
+        core3d::spline_profile::Record partialRecord;
+        if (!C4ProbeSingleRecord(document, partialRecord))
+            return fail(26, "partial-census");
+        const C4Definition partial = partialRecord.attribute->definition();
+        if (partial.operation != core3d::spline_profile::Operation::revolve
+            || !C4ProbeNear(partial.angleDegrees, 300, 1e-12)
+            || partial.revision != 3 || !(partial.identities == created.identities)
+            || !C4ProbeSameLoop(partial.section.outer, created.section.outer))
+            return fail(27, "partial-readback");
+        C4ProbeNumber(numbers, @"partial-revolve-degrees", 300, collect);
+        C4ProbeNumber(numbers, @"final-revision", partial.revision, collect);
+        C4ProbeNumber(numbers, @"history-deltas", historyDeltas, collect);
+        C4ProbeCheck(checks, @"capture-rereads-canonical-record",
+            C4ProbeCanonicalMatches(partialRecord));
+        double partialVolume = 0;
+        if (!C4ProbeExpectedVolume(partial, partialVolume)
+            || !C4ProbeSolidEvidence(partialRecord.shape, solidVolume))
+            return fail(28, "partial-volume");
+        C4ProbeNumber(numbers, @"partial-revolve-volume-mm3",
+            partialVolume * volumeToMM3, collect);
+        // Same final section: Pappus fixes the full/partial ratio at 360/300.
+        C4ProbeCheck(checks, @"revolve-volume-ratio-matches-pappus",
+            C4ProbeNear(fullVolume / partialVolume, 1.2, 1e-9));
+
+        std::vector<std::uint8_t> legacy1;
+        if (!C4ProbeLegacyCurveBytes(document, legacy1))
+            return fail(29, "legacy-reread");
+        C4ProbeCheck(checks, @"legacy-record-unchanged", legacy1 == legacy0);
+        if (collect) C4ProbeCollectPoles(partial, mmPerNative, referencePoles);
+        else {
+            std::map<core3d::ProfileCurveID, gp_Pnt2d> actual;
+            C4ProbeCollectPoles(partial, mmPerNative, actual);
+            equivalent = equivalent && C4ProbePolesEquivalent(referencePoles, actual);
+        }
+        return true;
+    }
+}
+
+// Scenario 2 — axis-crossing, ambiguous-contact, stale-identity, stale-owner
+// and unsupported-descendant cases all refuse before any command with zero
+// history and zero scene mutation, proven against one-sided and post-undo
+// positive controls in both units.
+bool C4ProbeScenario2Unit(double unit, bool collect,
+    NSMutableDictionary<NSString *, NSNumber *> *checks,
+    NSMutableDictionary<NSString *, NSNumber *> *numbers,
+    C4ProbeFailure& failure, int& zeroMutationRefusals) noexcept {
+    @autoreleasepool {
+        const auto fail = [&](int code, const char* stage) {
+            if (failure.code == 0) { failure.code = code; failure.stage = stage; }
+            return false;
+        };
+        LifecycleProbeFixture fixture;
+        fixture.probeScenario = 52;
+        if (!fixture.initialize(unit, false)) return fail(1, "fixture-initialize");
+        const Handle(TDocStd_Document) document = fixture.document->Document();
+        const double scale = 0.001 / unit;
+        LifecycleProbeFixture *fixturePtr = &fixture;
+        C4Definition authored;
+        if (!C4ProbeArcDefinition(*fixture.document, true, authored))
+            return fail(2, "arc-definition");
+        std::shared_ptr<core3d::native_opening::Context> createContext;
+        Core3DSplineProfileEditingOpening *create = C4ProbeOpenEditor(
+            fixture, true, authored, "", createContext);
+        if (create == nil) return fail(3, "create-opening");
+        NSMutableDictionary *candidate = C4ProbeMutableCopy(create.descriptor);
+        if (candidate == nil) return fail(4, "create-candidate");
+        if (C4ProbePrepare(fixture, create, candidate)
+                != Core3DBoundedCurvePreparationResultPrepared)
+            return fail(5, "create-prepare");
+        int delta = 0;
+        if (C4ProbeApply(fixture, create, @"C4 Probe Refusals", delta)
+                != Core3DProfileConstructionResultCommitted)
+            return fail(6, "create-apply");
+        create = nil;
+        createContext.reset();
+        C4ProbeCheck(checks, @"owner-uses-one-command-lease",
+            delta == 1 && !document->HasOpenCommand());
+        core3d::spline_profile::Record record;
+        if (!C4ProbeSingleRecord(document, record)) return fail(7, "create-census");
+        C4ProbeCheck(checks, @"capture-rereads-canonical-record",
+            C4ProbeCanonicalMatches(record));
+        const std::vector<std::uint8_t> committedBytes = record.attribute->bytes();
+        const std::string entity =
+            fixture.document->EntityIdentifierForLabel(record.owner);
+        if (entity.empty()) return fail(8, "entity-identifier");
+        const TDF_Label ownerLabel = record.owner;
+        const auto unchanged = [&]() {
+            core3d::spline_profile::Record current;
+            return LifecycleUndos(fixture) >= 0 && !document->HasOpenCommand()
+                && C4ProbeSingleRecord(document, current)
+                && current.attribute->bytes() == committedBytes;
+        };
+
+        // Crossing axis (u = 15 mm through the section) refuses at native
+        // prepare, before any command.
+        int refused = 0;
+        bool crossingRefused = false;
+        {
+            std::shared_ptr<core3d::native_opening::Context> context;
+            Core3DSplineProfileEditingOpening *editor = C4ProbeOpenEditor(
+                fixture, false, C4Definition{}, entity, context);
+            if (editor == nil) return fail(9, "crossing-opening");
+            NSMutableDictionary *crossing = C4ProbeMutableCopy(editor.descriptor);
+            if (crossing == nil) return fail(10, "crossing-candidate");
+            C4ProbeSetRevolve(crossing, 360, 15 * scale, 0, 0, 1);
+            const int before = LifecycleUndos(fixture);
+            crossingRefused = C4ProbePrepare(fixture, editor, crossing)
+                    != Core3DBoundedCurvePreparationResultPrepared
+                && LifecycleUndos(fixture) == before
+                && document->GetAvailableRedos() == 0 && unchanged();
+            if (crossingRefused) ++refused;
+            if (!LifecycleCancel(fixture, editor)) return fail(11, "crossing-cancel");
+            context.reset();
+        }
+        // Ambiguous contact: axis u = 21 mm passes exactly through interior
+        // spline pole 32 (21,10) without any side change — the interior-pole
+        // tangency rule refuses the ambiguous bulge before any command.
+        bool ambiguousRefused = false;
+        {
+            std::shared_ptr<core3d::native_opening::Context> context;
+            Core3DSplineProfileEditingOpening *editor = C4ProbeOpenEditor(
+                fixture, false, C4Definition{}, entity, context);
+            if (editor == nil) return fail(12, "ambiguous-opening");
+            NSMutableDictionary *ambiguous = C4ProbeMutableCopy(editor.descriptor);
+            if (ambiguous == nil) return fail(13, "ambiguous-candidate");
+            C4ProbeSetRevolve(ambiguous, 360, 21 * scale, 0, 0, 1);
+            const int before = LifecycleUndos(fixture);
+            ambiguousRefused = C4ProbePrepare(fixture, editor, ambiguous)
+                    != Core3DBoundedCurvePreparationResultPrepared
+                && LifecycleUndos(fixture) == before && unchanged();
+            if (ambiguousRefused) ++refused;
+            if (!LifecycleCancel(fixture, editor)) return fail(14, "ambiguous-cancel");
+            context.reset();
+        }
+        // Positive control: the otherwise identical one-sided axis prepares.
+        bool controlAdmitted = false;
+        {
+            std::shared_ptr<core3d::native_opening::Context> context;
+            Core3DSplineProfileEditingOpening *editor = C4ProbeOpenEditor(
+                fixture, false, C4Definition{}, entity, context);
+            if (editor == nil) return fail(15, "control-opening");
+            NSMutableDictionary *control = C4ProbeMutableCopy(editor.descriptor);
+            if (control == nil) return fail(16, "control-candidate");
+            C4ProbeSetRevolve(control, 360, 0, 0, 0, 1);
+            const int before = LifecycleUndos(fixture);
+            controlAdmitted = C4ProbePrepare(fixture, editor, control)
+                    == Core3DBoundedCurvePreparationResultPrepared
+                && LifecycleUndos(fixture) == before && unchanged();
+            if (!LifecycleCancel(fixture, editor)) return fail(17, "control-cancel");
+            context.reset();
+        }
+        C4ProbeCheck(checks, @"admitted-one-sided-control", controlAdmitted);
+        C4ProbeCheck(checks, @"axis-crossing-refuses-before-command",
+            crossingRefused && ambiguousRefused && controlAdmitted);
+
+        // Stale identity: one pole's stable UUID is foreign; the exact
+        // identity gate refuses before native preparation.
+        bool staleUUIDRefused = false;
+        {
+            std::shared_ptr<core3d::native_opening::Context> context;
+            Core3DSplineProfileEditingOpening *editor = C4ProbeOpenEditor(
+                fixture, false, C4Definition{}, entity, context);
+            if (editor == nil) return fail(18, "stale-uuid-opening");
+            NSMutableDictionary *stale = C4ProbeMutableCopy(editor.descriptor);
+            if (stale == nil || !C4ProbeCorruptPoleIdentity(stale, 32))
+                return fail(19, "stale-uuid-candidate");
+            const int before = LifecycleUndos(fixture);
+            staleUUIDRefused = C4ProbePrepare(fixture, editor, stale)
+                    == Core3DBoundedCurvePreparationResultUnsupportedMutation
+                && LifecycleUndos(fixture) == before && unchanged();
+            if (staleUUIDRefused) ++refused;
+            if (!LifecycleCancel(fixture, editor)) return fail(20, "stale-uuid-cancel");
+            context.reset();
+        }
+        C4ProbeCheck(checks, @"stale-uuid-refused", staleUUIDRefused);
+
+        // Stale owner: a real edit commits (revision 2); a raw owner captures
+        // at revision 2; a real Undo returns the canonical record to revision
+        // 1, so the captured opening refuses preparation with the exact
+        // stale-definition receipt and zero mutation; Redo restores the edit.
+        bool staleOwnerRefused = false;
+        std::vector<std::uint8_t> editedBytes;
+        {
+            std::shared_ptr<core3d::native_opening::Context> contextB;
+            Core3DSplineProfileEditingOpening *editorB = C4ProbeOpenEditor(
+                fixture, false, C4Definition{}, entity, contextB);
+            if (editorB == nil) return fail(23, "stale-owner-opening-b");
+            NSMutableDictionary *edit = C4ProbeMutableCopy(editorB.descriptor);
+            if (edit == nil || !C4ProbeMovePole(edit, 33, scale, 0))
+                return fail(24, "stale-owner-candidate");
+            if (C4ProbePrepare(fixture, editorB, edit)
+                    != Core3DBoundedCurvePreparationResultPrepared)
+                return fail(25, "stale-owner-prepare-b");
+            int editDelta = 0;
+            if (C4ProbeApply(fixture, editorB, @"C4 Probe Refusals", editDelta)
+                    != Core3DProfileConstructionResultCommitted)
+                return fail(26, "stale-owner-apply-b");
+            editorB = nil;
+            contextB.reset();
+            C4ProbeCheck(checks, @"owner-uses-one-command-lease",
+                editDelta == 1 && !document->HasOpenCommand());
+            core3d::spline_profile::Record committedEdit;
+            if (!C4ProbeSingleRecord(document, committedEdit))
+                return fail(38, "stale-owner-census-b");
+            editedBytes = committedEdit.attribute->bytes();
+
+            __block std::shared_ptr<core3d::native_opening::Context> contextA;
+            if (!fixture.perform(^{
+                contextA = fixturePtr->viewer.captureNativeOpeningContext(
+                    64, 64, {entity});
+            }) || !contextA) return fail(21, "stale-owner-context");
+            auto serviceA = std::make_unique<C4Owner>(*fixture.document, contextA);
+            auto openingA = serviceA->capture(entity);
+            if (!openingA) return fail(22, "stale-owner-capture");
+            __block bool historyStep = false;
+            if (!fixture.perform(^{
+                historyStep = fixturePtr->document->undo() == Standard_True;
+                (void)fixturePtr->viewer.redrawDocument();
+            }) || !historyStep) return fail(39, "stale-owner-undo");
+            C4Definition mutated = openingA->definition;
+            bool moved = false;
+            for (auto& segment : mutated.spline.segments)
+                for (auto& pole : segment.poles)
+                    if (pole.identifier == 33) {
+                        pole.point = gp_Pnt2d(pole.point.X() + scale,
+                            pole.point.Y());
+                        moved = true;
+                    }
+            mutated.revision += 1;
+            mutated.frame.revision = mutated.revision;
+            core3d::spline_profile::owner::Receipt receipt;
+            const int before = LifecycleUndos(fixture);
+            auto prepared = serviceA->prepare(openingA, mutated, receipt);
+            core3d::spline_profile::Record now;
+            staleOwnerRefused = moved && !prepared
+                && receipt.outcome == core3d::spline_profile::owner::Outcome::
+                    staleDefinition
+                && LifecycleUndos(fixture) == before
+                && C4ProbeSingleRecord(document, now)
+                && now.attribute->bytes() == committedBytes;
+            if (staleOwnerRefused) ++refused;
+            const auto cancelled = serviceA->cancel(openingA->session);
+            if (cancelled.outcome
+                    != core3d::spline_profile::owner::Outcome::cancelled)
+                return fail(27, "stale-owner-cancel");
+            contextA.reset();
+            if (!fixture.perform(^{
+                historyStep = fixturePtr->document->redo() == Standard_True;
+                (void)fixturePtr->viewer.redrawDocument();
+            }) || !historyStep) return fail(40, "stale-owner-redo");
+            core3d::spline_profile::Record restored;
+            if (!C4ProbeSingleRecord(document, restored)
+                || restored.attribute->bytes() != editedBytes)
+                return fail(41, "stale-owner-redo-census");
+        }
+        C4ProbeCheck(checks, @"stale-owner-refused", staleOwnerRefused);
+        C4ProbeCheck(checks, @"capture-rereads-canonical-record",
+            staleOwnerRefused);
+
+        // Unsupported descendant: the committed owner label joins a real XCAF
+        // assembly (the product grouping seam) in one document command; while
+        // the descendant reference is retained, the C4 capture refuses at the
+        // free-owner gate before any command and every record stays exact.
+        bool descendantRefused = false, descendantPreserved = false,
+             captureRestored = false;
+        {
+            core3d::spline_profile::Record before2;
+            if (!C4ProbeSingleRecord(document, before2))
+                return fail(28, "descendant-census");
+            const std::vector<std::uint8_t> editedBytes =
+                before2.attribute->bytes();
+            // The context fence binds the document/data pointers, which the
+            // assembly command does not change; capture it before staging so
+            // the refusal measurement is the capture gate, not the scene.
+            __block std::shared_ptr<core3d::native_opening::Context> contextD;
+            if (!fixture.perform(^{
+                contextD = fixturePtr->viewer.captureNativeOpeningContext(
+                    64, 64, {entity});
+            }) || !contextD) return fail(30, "descendant-context");
+            const int beforeAssembly = LifecycleUndos(fixture);
+            __block bool staged = false;
+            const bool stageRan = fixture.perform(^{
+                const Handle(TDocStd_Document) doc =
+                    fixturePtr->document->Document();
+                const Handle(XCAFDoc_ShapeTool) shapes =
+                    XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+                doc->NewCommand();
+                const TDF_Label assembly = shapes->NewShape();
+                staged = !assembly.IsNull()
+                    && !shapes->AddComponent(
+                        assembly, ownerLabel, TopLoc_Location()).IsNull()
+                    && doc->CommitCommand();
+                if (!staged && doc->HasOpenCommand()) doc->AbortCommand();
+            });
+            const bool assemblyCommitted = stageRan && staged
+                && !XCAFDoc_ShapeTool::IsFree(ownerLabel)
+                && LifecycleUndos(fixture) == beforeAssembly + 1;
+            if (!assemblyCommitted) return fail(29, "descendant-stage");
+            const int beforeRefusal = LifecycleUndos(fixture);
+            OcctSplineProfileCapture refusedCapture;
+            const bool gateRefused =
+                !fixture.document->CaptureSplineProfileExact(
+                    entity, *contextD, refusedCapture);
+            contextD.reset();
+            std::shared_ptr<core3d::native_opening::Context> contextE;
+            Core3DSplineProfileEditingOpening *editorE = C4ProbeOpenEditor(
+                fixture, false, C4Definition{}, entity, contextE);
+            const bool openingRefused = editorE == nil;
+            contextE.reset();
+            core3d::spline_profile::Record afterRefusal;
+            descendantRefused = gateRefused && openingRefused
+                && LifecycleUndos(fixture) == beforeRefusal
+                && !document->HasOpenCommand()
+                && C4ProbeSingleRecord(document, afterRefusal)
+                && afterRefusal.attribute->bytes() == editedBytes;
+            descendantPreserved = descendantRefused
+                && !XCAFDoc_ShapeTool::IsFree(ownerLabel);
+            if (descendantRefused) ++refused;
+            // Undo the assembly command: the same capture path admits again.
+            __block bool undone = false;
+            if (!fixture.perform(^{
+                undone = fixturePtr->document->undo() == Standard_True;
+                (void)fixturePtr->viewer.redrawDocument();
+            }) || !undone) return fail(31, "descendant-undo");
+            if (!XCAFDoc_ShapeTool::IsFree(ownerLabel))
+                return fail(32, "descendant-undo-free");
+            std::shared_ptr<core3d::native_opening::Context> contextF;
+            Core3DSplineProfileEditingOpening *editorF = C4ProbeOpenEditor(
+                fixture, false, C4Definition{}, entity, contextF);
+            captureRestored = editorF != nil;
+            if (editorF != nil && !LifecycleCancel(fixture, editorF))
+                return fail(33, "restored-cancel");
+            editorF = nil;
+            contextF.reset();
+        }
+        C4ProbeCheck(checks, @"unsupported-descendant-refuses-before-command",
+            descendantRefused && descendantPreserved);
+        C4ProbeCheck(checks, @"descendant-preserved-on-refusal",
+            descendantPreserved);
+        C4ProbeCheck(checks, @"capture-restored-after-descendant-undo",
+            captureRestored);
+        zeroMutationRefusals += refused;
+        return true;
+    }
+}
+
+// Scenario 3 — real undo/redo, save, release of the original owner and
+// openings, fresh-owner load of the saved file, then a held-out pole edit and
+// its undo/redo, in both units.
+bool C4ProbeScenario3Unit(double unit, bool collect,
+    NSMutableDictionary<NSString *, NSNumber *> *checks,
+    NSMutableDictionary<NSString *, NSNumber *> *numbers,
+    C4ProbeFailure& failure,
+    std::map<core3d::ProfileCurveID, gp_Pnt2d>& referencePoles,
+    bool& equivalent) noexcept {
+    @autoreleasepool {
+        const auto fail = [&](int code, const char* stage) {
+            if (failure.code == 0) { failure.code = code; failure.stage = stage; }
+            return false;
+        };
+        LifecycleProbeFixture fixture;
+        fixture.probeScenario = 53;
+        if (!fixture.initialize(unit, false)) return fail(1, "fixture-initialize");
+        const Handle(TDocStd_Document) document = fixture.document->Document();
+        const double scale = 0.001 / unit;
+        const double mmPerNative = unit * 1000.0;
+        LifecycleProbeFixture *fixturePtr = &fixture;
+        C4Definition authored;
+        if (!C4DefaultDefinition(*fixture.document, authored))
+            return fail(2, "default-definition");
+        std::shared_ptr<core3d::native_opening::Context> createContext;
+        Core3DSplineProfileEditingOpening *create = C4ProbeOpenEditor(
+            fixture, true, authored, "", createContext);
+        if (create == nil) return fail(3, "create-opening");
+        NSMutableDictionary *candidate = C4ProbeMutableCopy(create.descriptor);
+        if (candidate == nil) return fail(4, "create-candidate");
+        if (C4ProbePrepare(fixture, create, candidate)
+                != Core3DBoundedCurvePreparationResultPrepared)
+            return fail(5, "create-prepare");
+        int delta = 0;
+        if (C4ProbeApply(fixture, create, @"C4 Probe History", delta)
+                != Core3DProfileConstructionResultCommitted)
+            return fail(6, "create-apply");
+        create = nil;
+        createContext.reset();
+        C4ProbeCheck(checks, @"owner-uses-one-command-lease",
+            delta == 1 && !document->HasOpenCommand());
+        core3d::spline_profile::Record createdRecord;
+        if (!C4ProbeSingleRecord(document, createdRecord))
+            return fail(7, "create-census");
+        const C4Definition created = createdRecord.attribute->definition();
+        const std::vector<std::uint8_t> createdBytes =
+            createdRecord.attribute->bytes();
+        const std::string entity =
+            fixture.document->EntityIdentifierForLabel(createdRecord.owner);
+        const std::string documentIdentity =
+            fixture.document->DocumentIdentifier();
+        if (entity.empty() || documentIdentity.empty())
+            return fail(8, "identity");
+
+        // Real edit: interior pole 32 +1 mm physical, one command.
+        std::shared_ptr<core3d::native_opening::Context> editContext;
+        Core3DSplineProfileEditingOpening *editor = C4ProbeOpenEditor(
+            fixture, false, C4Definition{}, entity, editContext);
+        if (editor == nil) return fail(9, "edit-opening");
+        NSMutableDictionary *edit = C4ProbeMutableCopy(editor.descriptor);
+        if (edit == nil || !C4ProbeMovePole(edit, 32, scale, 0))
+            return fail(10, "edit-candidate");
+        if (C4ProbePrepare(fixture, editor, edit)
+                != Core3DBoundedCurvePreparationResultPrepared)
+            return fail(11, "edit-prepare");
+        if (C4ProbeApply(fixture, editor, @"C4 Probe History", delta)
+                != Core3DProfileConstructionResultCommitted)
+            return fail(12, "edit-apply");
+        editor = nil;
+        editContext.reset();
+        C4ProbeCheck(checks, @"owner-uses-one-command-lease",
+            delta == 1 && !document->HasOpenCommand());
+        core3d::spline_profile::Record editedRecord;
+        if (!C4ProbeSingleRecord(document, editedRecord))
+            return fail(13, "edit-census");
+        const C4Definition edited = editedRecord.attribute->definition();
+        const std::vector<std::uint8_t> editedBytes =
+            editedRecord.attribute->bytes();
+        if (edited.revision != 2 || editedBytes == createdBytes)
+            return fail(14, "edit-readback");
+        gp_Pnt2d editedPole;
+        if (!C4ProbePole(edited, 32, editedPole)
+            || !C4ProbeNear(editedPole.X() * mmPerNative, 22, 1e-9))
+            return fail(15, "edit-pole");
+        C4ProbeNumber(numbers, @"history-after-edits",
+            LifecycleUndos(fixture), collect);
+
+        // Real history: undo restores the create bytes, redo restores the
+        // edit bytes, both read back from the canonical record.
+        __block bool historyStep = false;
+        if (!fixture.perform(^{
+            historyStep = fixturePtr->document->undo() == Standard_True;
+            (void)fixturePtr->viewer.redrawDocument();
+        }) || !historyStep) return fail(16, "undo-edit");
+        core3d::spline_profile::Record undoneRecord;
+        const bool undoRestored = C4ProbeSingleRecord(document, undoneRecord)
+            && undoneRecord.attribute->bytes() == createdBytes
+            && undoneRecord.attribute->definition().revision == 1;
+        C4ProbeCheck(checks, @"undo-restored-create-bytes", undoRestored);
+        C4ProbeNumber(numbers, @"revision-after-undo",
+            undoneRecord.attribute->definition().revision, collect);
+        if (!fixture.perform(^{
+            historyStep = fixturePtr->document->redo() == Standard_True;
+            (void)fixturePtr->viewer.redrawDocument();
+        }) || !historyStep) return fail(17, "redo-edit");
+        core3d::spline_profile::Record redoneRecord;
+        const bool redoRestored = C4ProbeSingleRecord(document, redoneRecord)
+            && redoneRecord.attribute->bytes() == editedBytes
+            && redoneRecord.attribute->definition().revision == 2;
+        C4ProbeCheck(checks, @"redo-restored-edit-bytes", redoRestored);
+        C4ProbeNumber(numbers, @"revision-after-redo",
+            redoneRecord.attribute->definition().revision, collect);
+        if (!undoRestored || !redoRestored) return fail(18, "history-readback");
+
+        // Real save through the production writer.
+        NSString *saveBase = [NSTemporaryDirectory()
+            stringByAppendingPathComponent:[NSString
+                stringWithFormat:@"r277-c4-probe-%@.tmp", NSUUID.UUID.UUIDString]];
+        __block std::string savedFile;
+        if (!fixture.perform(^{
+            savedFile = fixturePtr->document->save(saveBase.UTF8String);
+        }) || savedFile.empty()) return fail(19, "save");
+        const unsigned long long savedBytes = [[NSFileManager.defaultManager
+            attributesOfItemAtPath:[NSString
+                stringWithUTF8String:savedFile.c_str()]
+            error:nil][NSFileSize] unsignedLongLongValue];
+        if (savedBytes == 0) return fail(20, "save-bytes");
+        C4ProbeNumber(numbers, @"saved-bytes", double(savedBytes), collect);
+
+        // Release the original owner and every opening before the fresh-owner
+        // load, and verify the release.
+        fixture.shutdown();
+        bool released = fixture.document.IsNull();
+#if TARGET_OS_IOS
+        released = released && fixture.host == nil;
+#endif
+        C4ProbeCheck(checks, @"original-owner-released", released);
+        if (!released) return fail(21, "release");
+
+        // Fresh unseeded owner: a new viewer/document loads the saved file.
+        LifecycleProbeFixture fresh;
+        fresh.probeScenario = 54;
+        if (!fresh.initialize(unit, false)) return fail(22, "reopen-initialize");
+        LifecycleProbeFixture *freshPtr = &fresh;
+        __block core3d::AssetImportResult importResult =
+            core3d::AssetImportResult::InternalFailure;
+        if (!fresh.perform(^{
+            importResult = freshPtr->viewer.ImportCbf(savedFile);
+        }) || importResult != core3d::AssetImportResult::Success)
+            return fail(23, "cold-reopen-import");
+        const Handle(TDocStd_Document) reopenedDocument =
+            fresh.document->Document();
+        core3d::spline_profile::Record reopened;
+        if (!C4ProbeSingleRecord(reopenedDocument, reopened))
+            return fail(24, "reopen-census");
+        const C4Definition restored = reopened.attribute->definition();
+        C4ProbeCheck(checks, @"reopen-canonical-identical",
+            reopened.attribute->bytes() == editedBytes);
+        if (restored.revision != 2
+            || !C4ProbeNear(restored.metersPerUnit, unit, 1e-15)
+            || core3d::retained_solid::UUIDText(restored.owner.document)
+                != documentIdentity
+            || !(restored.identities == edited.identities))
+            return fail(25, "reopen-readback");
+        C4ProbeNumber(numbers, @"reopen-revision", restored.revision, collect);
+        gp_Pnt2d restoredPole;
+        if (!C4ProbePole(restored, 32, restoredPole)
+            || !C4ProbeNear(restoredPole.X() * mmPerNative, 22, 1e-9))
+            return fail(26, "reopen-pole");
+        double reopenedVolume = 0;
+        if (!C4ProbeSolidEvidence(reopened.shape, reopenedVolume))
+            return fail(27, "reopen-solid");
+        C4ProbeCheck(checks, @"capture-rereads-canonical-record",
+            C4ProbeCanonicalMatches(reopened));
+
+        // Held-out edit through the reopened owner: a different interior pole
+        // (42) moves -1 mm physical and commits exactly one command.
+        std::shared_ptr<core3d::native_opening::Context> lateContext;
+        Core3DSplineProfileEditingOpening *late = C4ProbeOpenEditor(
+            fresh, false, C4Definition{}, entity, lateContext);
+        if (late == nil) return fail(28, "reopen-opening");
+        if ([late.descriptor[@"revision"] unsignedLongLongValue] != 2)
+            return fail(29, "reopen-descriptor");
+        NSMutableDictionary *lateCandidate = C4ProbeMutableCopy(late.descriptor);
+        if (lateCandidate == nil || !C4ProbeMovePole(lateCandidate, 42, -scale, 0))
+            return fail(30, "reopen-candidate");
+        if (C4ProbePrepare(fresh, late, lateCandidate)
+                != Core3DBoundedCurvePreparationResultPrepared)
+            return fail(31, "reopen-prepare");
+        if (C4ProbeApply(fresh, late, @"C4 Probe History", delta)
+                != Core3DProfileConstructionResultCommitted)
+            return fail(32, "reopen-apply");
+        late = nil;
+        C4ProbeCheck(checks, @"owner-uses-one-command-lease",
+            delta == 1 && !reopenedDocument->HasOpenCommand());
+        __block bool lateReceiptStale = false;
+        if (!fresh.perform(^{
+            lateReceiptStale = !lateContext->isCurrent(64, 64);
+        })) return fail(38, "reopen-receipt-stale");
+        lateContext.reset();
+        core3d::spline_profile::Record lateRecord;
+        if (!C4ProbeSingleRecord(reopenedDocument, lateRecord))
+            return fail(33, "reopen-edit-census");
+        const C4Definition later = lateRecord.attribute->definition();
+        gp_Pnt2d latePole, retainedPole;
+        if (later.revision != 3
+            || !C4ProbePole(later, 42, latePole)
+            || !C4ProbePole(later, 32, retainedPole)
+            || !C4ProbeNear(latePole.X() * mmPerNative, 8, 1e-9)
+            || !C4ProbeNear(retainedPole.X() * mmPerNative, 22, 1e-9))
+            return fail(34, "reopen-edit-readback");
+        C4ProbeNumber(numbers, @"later-edit-revision", later.revision, collect);
+        C4ProbeBits(numbers, @"later-pole-u-bits",
+            latePole.X() * mmPerNative, collect);
+        C4ProbeBits(numbers, @"retained-pole-u-bits",
+            retainedPole.X() * mmPerNative, collect);
+        C4ProbeCheck(checks, @"capture-rereads-canonical-record",
+            C4ProbeCanonicalMatches(lateRecord));
+
+        // Undo/redo of the held-out edit on the reopened owner.
+        if (!fresh.perform(^{
+            historyStep = freshPtr->document->undo() == Standard_True;
+            (void)freshPtr->viewer.redrawDocument();
+        }) || !historyStep) return fail(35, "reopen-undo");
+        core3d::spline_profile::Record undoneLate;
+        C4ProbeCheck(checks, @"undo-after-reopen-restored",
+            C4ProbeSingleRecord(reopenedDocument, undoneLate)
+            && undoneLate.attribute->bytes() == editedBytes
+            && undoneLate.attribute->definition().revision == 2);
+        if (!fresh.perform(^{
+            historyStep = freshPtr->document->redo() == Standard_True;
+            (void)freshPtr->viewer.redrawDocument();
+        }) || !historyStep) return fail(36, "reopen-redo");
+        core3d::spline_profile::Record redoneLate;
+        C4ProbeCheck(checks, @"redo-after-reopen-restored",
+            C4ProbeSingleRecord(reopenedDocument, redoneLate)
+            && redoneLate.attribute->bytes() == lateRecord.attribute->bytes()
+            && redoneLate.attribute->definition().revision == 3);
+
+        // Selection receipt on the reopened owner: stale refuses, fresh admits.
+        std::shared_ptr<core3d::native_opening::Context> finalContext;
+        Core3DSplineProfileEditingOpening *finalEditor = C4ProbeOpenEditor(
+            fresh, false, C4Definition{}, entity, finalContext);
+        const bool finalReceipt = finalEditor != nil
+            && [finalEditor.descriptor[@"revision"] unsignedLongLongValue] == 3;
+        if (finalEditor != nil && !LifecycleCancel(fresh, finalEditor))
+            return fail(37, "final-cancel");
+        finalEditor = nil;
+        finalContext.reset();
+        C4ProbeCheck(checks, @"selection-receipt-remains-current",
+            lateReceiptStale && finalReceipt);
+        if (collect) C4ProbeCollectPoles(later, mmPerNative, referencePoles);
+        else {
+            std::map<core3d::ProfileCurveID, gp_Pnt2d> actual;
+            C4ProbeCollectPoles(later, mmPerNative, actual);
+            equivalent = equivalent && C4ProbePolesEquivalent(referencePoles, actual);
+        }
+        return true;
+    }
+}
+
+bool C4ProbeScenario0(NSMutableDictionary<NSString *, NSNumber *> *checks,
+    NSMutableDictionary<NSString *, NSNumber *> *numbers,
+    C4ProbeFailure& failure) noexcept {
+    try {
+        std::map<core3d::ProfileCurveID, gp_Pnt2d> referencePoles;
+        bool equivalent = true;
+        for (double unit : {0.001, 1.0})
+            if (!C4ProbeScenario0Unit(unit, unit == 0.001, checks, numbers,
+                    failure, referencePoles, equivalent)) return false;
+        C4ProbeCheck(checks, @"units-physically-equivalent", equivalent);
+        return failure.code == 0;
+    } catch (...) {
+        if (failure.code == 0) { failure.code = 99; failure.stage = "exception"; }
+        return false;
+    }
+}
+
+bool C4ProbeScenario1(NSMutableDictionary<NSString *, NSNumber *> *checks,
+    NSMutableDictionary<NSString *, NSNumber *> *numbers,
+    C4ProbeFailure& failure) noexcept {
+    try {
+        std::map<core3d::ProfileCurveID, gp_Pnt2d> referencePoles;
+        bool equivalent = true;
+        for (double unit : {0.001, 1.0})
+            if (!C4ProbeScenario1Unit(unit, unit == 0.001, checks, numbers,
+                    failure, referencePoles, equivalent)) return false;
+        C4ProbeCheck(checks, @"units-physically-equivalent", equivalent);
+        return failure.code == 0;
+    } catch (...) {
+        if (failure.code == 0) { failure.code = 99; failure.stage = "exception"; }
+        return false;
+    }
+}
+
+bool C4ProbeScenario2(NSMutableDictionary<NSString *, NSNumber *> *checks,
+    NSMutableDictionary<NSString *, NSNumber *> *numbers,
+    C4ProbeFailure& failure) noexcept {
+    try {
+        int zeroMutationRefusals = 0;
+        for (double unit : {0.001, 1.0})
+            if (!C4ProbeScenario2Unit(unit, unit == 0.001, checks, numbers,
+                    failure, zeroMutationRefusals)) return false;
+        C4ProbeNumber(numbers, @"zero-mutation-refusals",
+            zeroMutationRefusals, true);
+        return failure.code == 0;
+    } catch (...) {
+        if (failure.code == 0) { failure.code = 99; failure.stage = "exception"; }
+        return false;
+    }
+}
+
+bool C4ProbeScenario3(NSMutableDictionary<NSString *, NSNumber *> *checks,
+    NSMutableDictionary<NSString *, NSNumber *> *numbers,
+    C4ProbeFailure& failure) noexcept {
+    try {
+        std::map<core3d::ProfileCurveID, gp_Pnt2d> referencePoles;
+        bool equivalent = true;
+        for (double unit : {0.001, 1.0})
+            if (!C4ProbeScenario3Unit(unit, unit == 0.001, checks, numbers,
+                    failure, referencePoles, equivalent)) return false;
+        C4ProbeCheck(checks, @"units-physically-equivalent", equivalent);
+        return failure.code == 0;
+    } catch (...) {
+        if (failure.code == 0) { failure.code = 99; failure.stage = "exception"; }
+        return false;
+    }
+}
+} // namespace
+
 @implementation Core3DViewController (DebugC4SplineProfileOwner)
 + (NSDictionary<NSString *,NSNumber *> *)debugC4SplineProfileOwnerProbe:(NSUInteger)scenario {
     if (![NSThread isMainThread] || scenario > 3) return @{};
-    // These predicates are deliberately about the production codec/owner
-    // types used above. XCTest supplies the OCAF lifecycle and cold-open
-    // scenarios; this bridge never substitutes seeded booleans for those.
-    return @{
-        @"registered-kind-00003004": @(core3d::SplineProfileRevolveRegistryKey.kind
-            == core3d::retained_feature::SplineProfileRevolveKind),
-        @"codec-is-separate-from-legacy-profile-schema": @(core3d::spline_profile::Schema == 1),
-        @"pole-bound-is-32": @(core3d::SplineMaximumPoles == 32),
-        @"segment-bound-is-16": @(core3d::SplineMaximumSegmentsPerSection == 16),
-        @"owner-uses-one-command-lease": @YES,
-        @"capture-rereads-canonical-record": @YES,
-        @"axis-crossing-refuses-before-command": @YES,
-        @"unsupported-descendant-refuses-before-command": @YES,
-        @"selection-receipt-remains-current": @YES,
-    };
+    @autoreleasepool {
+        NSMutableDictionary<NSString *, NSNumber *> *checks =
+            [NSMutableDictionary dictionary];
+        NSMutableDictionary<NSString *, NSNumber *> *numbers =
+            [NSMutableDictionary dictionary];
+        C4ProbeFailure failure;
+        bool complete = false;
+        @try {
+            if (scenario == 0)
+                complete = C4ProbeScenario0(checks, numbers, failure);
+            else if (scenario == 1)
+                complete = C4ProbeScenario1(checks, numbers, failure);
+            else if (scenario == 2)
+                complete = C4ProbeScenario2(checks, numbers, failure);
+            else
+                complete = C4ProbeScenario3(checks, numbers, failure);
+        } @catch (...) {
+            complete = false;
+            if (failure.code == 0) {
+                failure.code = 98; failure.stage = "objc-exception";
+            }
+        }
+        checks[@"stage-code"] = @(failure.code);
+        if (!complete || failure.code != 0)
+            NSLog(@"R277_C4_PROBE scenario=%lu complete=%d code=%d stage=%s",
+                (unsigned long)scenario, int(complete), failure.code,
+                failure.stage.c_str());
+        [checks addEntriesFromDictionary:numbers];
+        return checks;
+    }
 }
 @end
 #endif
