@@ -1402,4 +1402,45 @@ __attribute__((objc_subclassing_restricted))
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+typedef NS_ENUM(NSInteger, Core3DAssetAtlasPreparationResult) {
+    Core3DAssetAtlasPreparationResultPrepared = 0,
+    Core3DAssetAtlasPreparationResultUnchanged,
+    Core3DAssetAtlasPreparationResultStaleSource,
+    Core3DAssetAtlasPreparationResultMissingMember,
+    Core3DAssetAtlasPreparationResultForeignMember,
+    Core3DAssetAtlasPreparationResultOverBudget,
+    Core3DAssetAtlasPreparationResultPaintedRebakeRequired,
+    Core3DAssetAtlasPreparationResultUnsupportedSurface,
+    Core3DAssetAtlasPreparationResultRejected,
+};
+
+typedef NS_ENUM(NSInteger, Core3DAssetAtlasCurrentness) {
+    Core3DAssetAtlasCurrentnessAbsent = 0,
+    Core3DAssetAtlasCurrentnessCurrent,
+    Core3DAssetAtlasCurrentnessStale,
+};
+
+//! One fail-closed, document-bound opening for the E2 asset-wide atlas owner
+//! (row 278a; consumes the row-271 SYEA/1 owner). Descriptors are presentation
+//! data; only this opaque opening may mutate. Painted members surface
+//! PaintedRebakeRequired; this opening never rebakes painted content.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DAssetAtlasOpening : NSObject
+@property(nonatomic,copy,readonly) NSDictionary<NSString *, id> *descriptor;
+@property(nonatomic,readonly) Core3DAssetAtlasCurrentness currentness;
+- (void)prepareCandidate:(NSDictionary<NSString *, id> *)candidate
+              completion:(void (^)(Core3DAssetAtlasPreparationResult result,
+                                   NSString *detail))completion
+    NS_SWIFT_NAME(prepare(candidate:completion:));
+- (void)applyWithCompletion:(void (^)(Core3DProfileConstructionResult result,
+                                      NSString *detail))completion
+    NS_SWIFT_NAME(apply(completion:));
+- (void)regenerateWithCompletion:(void (^)(Core3DProfileConstructionResult result,
+                                           NSString *detail))completion
+    NS_SWIFT_NAME(regenerate(completion:));
+- (BOOL)cancel;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 NS_ASSUME_NONNULL_END

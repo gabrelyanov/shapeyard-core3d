@@ -16,6 +16,7 @@
 		C4A000030000000000000003 /* SplineProfilePersistence.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C4A000130000000000000003 /* SplineProfilePersistence.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		E18A00010000000000000001 /* Core3DNativeOpenings.mm in Sources */ = {isa = PBXBuildFile; fileRef = E18A00020000000000000002 /* Core3DNativeOpenings.mm */; };
 		E26800020000000000000001 /* Core3DFinishingOpenings.mm in Sources */ = {isa = PBXBuildFile; fileRef = E26800020000000000000002 /* Core3DFinishingOpenings.mm */; };
+		E27800010000000000000001 /* Core3DAssetAtlasOpenings.mm in Sources */ = {isa = PBXBuildFile; fileRef = E27800010000000000000002 /* Core3DAssetAtlasOpenings.mm */; };
 		E18A00030000000000000003 /* NativeOpeningFactories.hxx in Headers */ = {isa = PBXBuildFile; fileRef = E18A00040000000000000004 /* NativeOpeningFactories.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		C3D5A0010000000000000001 /* Core3DModelingTypes.mm in Sources */ = {isa = PBXBuildFile; fileRef = C3D5A0010000000000000002 /* Core3DModelingTypes.mm */; };
 		B1E000010000000000000001 /* Core3DEdgeTreatmentTypes.mm in Sources */ = {isa = PBXBuildFile; fileRef = B1E000110000000000000011 /* Core3DEdgeTreatmentTypes.mm */; };
@@ -298,6 +299,7 @@
 		C4A000130000000000000003 /* SplineProfilePersistence.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = SplineProfilePersistence.hxx; sourceTree = "<group>"; };
 		E18A00020000000000000002 /* Core3DNativeOpenings.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DNativeOpenings.mm; sourceTree = "<group>"; };
 		E26800020000000000000002 /* Core3DFinishingOpenings.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DFinishingOpenings.mm; sourceTree = "<group>"; };
+		E27800010000000000000002 /* Core3DAssetAtlasOpenings.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DAssetAtlasOpenings.mm; sourceTree = "<group>"; };
 		E18A00040000000000000004 /* NativeOpeningFactories.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = NativeOpeningFactories.hxx; sourceTree = "<group>"; };
 		C3D5A0010000000000000002 /* Core3DModelingTypes.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DModelingTypes.mm; sourceTree = "<group>"; };
 		B1E000110000000000000011 /* Core3DEdgeTreatmentTypes.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DEdgeTreatmentTypes.mm; sourceTree = "<group>"; };
@@ -958,6 +960,7 @@
 				B2E000110000000000000011 /* Core3DFaceSelectorTypes.mm */,
 				E18A00020000000000000002 /* Core3DNativeOpenings.mm */,
 				E26800020000000000000002 /* Core3DFinishingOpenings.mm */,
+				E27800010000000000000002 /* Core3DAssetAtlasOpenings.mm */,
 				322185842BB5D5E100040E84 /* Core3DViewController.mm */,
 				324EF2CB2BC7D08D00A05295 /* Core3DViewController+PrimitiveManager.h */,
 				324EF2CD2BC7D0C200A05295 /* Core3DViewController+PrimitiveManager.mm */,
@@ -1354,6 +1357,7 @@
 				D4E100010000000000000001 /* FeaturePatternNativeCollaborators.mm in Sources */,
 				E18A00010000000000000001 /* Core3DNativeOpenings.mm in Sources */,
 				E26800020000000000000001 /* Core3DFinishingOpenings.mm in Sources */,
+				E27800010000000000000001 /* Core3DAssetAtlasOpenings.mm in Sources */,
 				C03D91010000000000000002 /* Core3DQueuedAssetInput.mm in Sources */,
 				C03D91010000000000000004 /* Core3DQueuedAssetRequest.mm in Sources */,
 				C3D0E0022F10000100000002 /* Core3DNativeExportOperation.mm in Sources */,

@@ -522,6 +522,11 @@ __attribute__((objc_subclassing_restricted))
 //! changes model/history/selection.
 - (Core3DRetainedFinishingOpening *_Nullable)openRetainedFinishingOpeningForEntityIdentifier:(NSString *)entityIdentifier
     NS_SWIFT_NAME(openRetainedFinishingOpening(entityIdentifier:));
+//! Capture one fail-closed asset-atlas opening from the exact current
+//! whole-object selection set of admitted retained-finishing members.
+//! Main-thread only; nil never changes model/history.
+- (Core3DAssetAtlasOpening *_Nullable)openAssetAtlasEditor
+    NS_SWIFT_NAME(openAssetAtlasEditor());
 #if DEBUG
 //! One-shot main delivery gate for real worker lifecycle qualification.
 - (void)debugSetSavedCutSourceDeliveryGate:(void (^_Nullable)(void (^resume)(void)))gate
@@ -542,6 +547,11 @@ __attribute__((objc_subclassing_restricted))
 //! UI-test fixture data for one retained cylindrical solid in the requested units.
 + (NSData *_Nullable)debugRetainedFinishingFixtureAssetData:(double)metersPerUnit
     NS_SWIFT_NAME(debugRetainedFinishingFixtureAssetData(metersPerUnit:));
+//! UI-test fixture: asset data for the frozen E2 two-part box/cylinder atlas
+//! fixture in the requested unit system. nil on any failure; never mutates an
+//! open document.
++ (NSData *_Nullable)debugAssetAtlasFixtureAssetData:(double)metersPerUnit
+    NS_SWIFT_NAME(debugAssetAtlasFixtureAssetData(metersPerUnit:));
 #endif
 - (nullable Core3DStoredRectangularLoftSnapshot *)storedRectangularLoftWithEntityIdentifier:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(storedRectangularLoft(entityIdentifier:expected:));
