@@ -109,7 +109,20 @@ OcctDocument::CaptureRetainedEdgeTreatmentR2(
         if(boolean->format==r2::PrefixFormat::SYRS){
             Handle(core3d::retained_solid::Attribute) source;
             if(!treatment->label.FindAttribute(core3d::retained_solid::AttributeID(),source)
-                ||source.IsNull()||!source->value()){refusal=et::Refusal::MalformedCarrier;return {};}
+                ||source.IsNull()||!source->value()){
+                // Split carrier layout: the retained-solid record lives on its
+                // own child label of the owner; an ambiguous owner refuses.
+                source.Nullify();
+                for(TDF_ChildIterator sibling(owner);sibling.More();sibling.Next()){
+                    Handle(core3d::retained_solid::Attribute) candidate;
+                    if(sibling.Value().FindAttribute(core3d::retained_solid::AttributeID(),candidate)
+                        &&!candidate.IsNull()&&candidate->value()){
+                        if(!source.IsNull()){source.Nullify();break;}
+                        source=candidate;
+                    }
+                }
+            }
+            if(source.IsNull()||!source->value()){refusal=et::Refusal::MalformedCarrier;return {};}
             r2::LegacyBooleanBase retained{source->value()->envelope,source->value()->bytes};
             result->source_=r2::RetainedBooleanBase{*boolean,std::move(retained)};
             result->sourceBytes_=source->value()->bytes;
@@ -207,8 +220,27 @@ static bool Core3DValidateRetainedEdgeTreatmentR2Carrier(
         if(!base){refusal=et::Refusal::Budget;return false;}
         Handle(core3d::retained_solid::Attribute) syrs;Handle(core3d::composite_recipe::Attribute) a1;
         Handle(TNaming_NamedShape) named;
-        const bool hasSYRS=label.FindAttribute(core3d::retained_solid::AttributeID(),syrs);
-        const bool hasA1=label.FindAttribute(core3d::composite_recipe::AttributeID(),a1);
+        bool hasSYRS=label.FindAttribute(core3d::retained_solid::AttributeID(),syrs);
+        bool hasA1=label.FindAttribute(core3d::composite_recipe::AttributeID(),a1);
+        if(!hasSYRS&&!hasA1){
+            // Split carrier layout: resolve the exclusive source carrier among
+            // the owner's remaining children under the same exactly-one rule.
+            for(TDF_ChildIterator sibling(label.Father());sibling.More();sibling.Next()){
+                if(sibling.Value().IsEqual(label))continue;
+                Handle(core3d::retained_solid::Attribute) s;
+                if(sibling.Value().FindAttribute(core3d::retained_solid::AttributeID(),s)
+                    &&!s.IsNull()&&s->value()){
+                    if(hasSYRS){refusal=et::Refusal::MalformedCarrier;return false;}
+                    hasSYRS=true;syrs=s;
+                }
+                Handle(core3d::composite_recipe::Attribute) c;
+                if(sibling.Value().FindAttribute(core3d::composite_recipe::AttributeID(),c)
+                    &&!c.IsNull()&&c->value()){
+                    if(hasA1){refusal=et::Refusal::MalformedCarrier;return false;}
+                    hasA1=true;a1=c;
+                }
+            }
+        }
         if(hasSYRS==hasA1||!label.FindAttribute(TNaming_NamedShape::GetID(),named)
             ||(base->format==r2::PrefixFormat::SYRS)!=hasSYRS){
             refusal=et::Refusal::MalformedCarrier;return false;
@@ -243,8 +275,29 @@ Standard_Boolean OcctDocument::ValidateRetainedEdgeTreatmentsR2(
             if(!base||treatment->valueR2()->bytes.size()>8'388'608-aggregate){refusal=et::Refusal::Budget;return Standard_False;}
             aggregate+=treatment->valueR2()->bytes.size();
             Handle(core3d::retained_solid::Attribute) syrs;Handle(core3d::composite_recipe::Attribute) a1;Handle(TNaming_NamedShape) named;
-            const bool hasSYRS=it.Value().FindAttribute(core3d::retained_solid::AttributeID(),syrs);
-            const bool hasA1=it.Value().FindAttribute(core3d::composite_recipe::AttributeID(),a1);
+            bool hasSYRS=it.Value().FindAttribute(core3d::retained_solid::AttributeID(),syrs);
+            bool hasA1=it.Value().FindAttribute(core3d::composite_recipe::AttributeID(),a1);
+            if(!hasSYRS&&!hasA1){
+                // Split carrier layout: the migrated R2 carrier occupies its
+                // own child label; the exclusive source carrier is resolved
+                // among the owner's remaining children under the same
+                // exactly-one rule.
+                for(TDF_ChildIterator sibling(owner);sibling.More();sibling.Next()){
+                    if(sibling.Value().IsEqual(it.Value()))continue;
+                    Handle(core3d::retained_solid::Attribute) s;
+                    if(sibling.Value().FindAttribute(core3d::retained_solid::AttributeID(),s)
+                        &&!s.IsNull()&&s->value()){
+                        if(hasSYRS){refusal=et::Refusal::MalformedCarrier;return Standard_False;}
+                        hasSYRS=true;syrs=s;
+                    }
+                    Handle(core3d::composite_recipe::Attribute) c;
+                    if(sibling.Value().FindAttribute(core3d::composite_recipe::AttributeID(),c)
+                        &&!c.IsNull()&&c->value()){
+                        if(hasA1){refusal=et::Refusal::MalformedCarrier;return Standard_False;}
+                        hasA1=true;a1=c;
+                    }
+                }
+            }
             if(hasSYRS==hasA1||!it.Value().FindAttribute(TNaming_NamedShape::GetID(),named)
                 ||(base->format==r2::PrefixFormat::SYRS)!=hasSYRS){refusal=et::Refusal::MalformedCarrier;return Standard_False;}
             const std::vector<std::uint8_t>* sourceBytes=hasSYRS?&syrs->value()->bytes:&a1->value()->bytes;
@@ -278,6 +331,26 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
         std::optional<et::RecordR2> live;if(!et::ReadR2(myOcafDoc,original.ownerLabel_,live,refusal)||!live
             ||live->value->bytes!=original.definitionBytes_)return Standard_False;
         std::vector<std::uint8_t> exact;if(!r2::Encode(built.definition_,exact,refusal)||exact!=built.definitionBytes_)return Standard_False;
+        // Split carrier layout: the retained-solid record may live on its own
+        // child label of the owner rather than sharing the R2 carrier label.
+        // Resolve it once and bind it to the staged result before the
+        // replacement so the strict whole-document read inside ReplaceShape
+        // sees a current binding, exactly as the migration lane does.
+        Handle(core3d::retained_solid::Attribute) retainedSource;
+        TDF_Label retainedSourceLabel;
+        if(original.sourceLabel_.FindAttribute(core3d::retained_solid::AttributeID(),retainedSource)
+            &&!retainedSource.IsNull()){
+            retainedSourceLabel=original.sourceLabel_;
+        }else{
+            for(TDF_ChildIterator it(original.ownerLabel_);it.More();it.Next()){
+                Handle(core3d::retained_solid::Attribute) candidate;
+                if(it.Value().FindAttribute(core3d::retained_solid::AttributeID(),candidate)
+                    &&!candidate.IsNull()){
+                    retainedSource=candidate;retainedSourceLabel=it.Value();break;
+                }
+            }
+        }
+        if(!retainedSourceLabel.IsNull())TNaming_Builder(retainedSourceLabel).Select(built.result_,built.result_);
         Handle(AIS_Shape) presentation=new AIS_Shape(built.result_);if(!ReplaceShape(original.ownerLabel_,presentation))return Standard_False;
         if(built.sourceChanged()){
             // An admitted source edit restages the retained source carrier
@@ -293,16 +366,17 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
             if(!core3d::retained_boolean::Decode(built.canonicalPrefixBytes(),prefix))return Standard_False;
             if(const auto* program=std::get_if<core3d::retained_boolean::Program>(&prefix);
                 program&&!program->filletSteps.empty())return Standard_False;
-            Handle(core3d::retained_solid::Attribute) source;
-            if(!original.sourceLabel_.FindAttribute(core3d::retained_solid::AttributeID(),source)||source.IsNull())return Standard_False;
+            if(retainedSource.IsNull())return Standard_False;
             auto sourcePayload=std::make_shared<core3d::retained_solid::Payload>();
             sourcePayload->envelope=std::move(prefix);sourcePayload->bytes=built.canonicalPrefixBytes();
             sourcePayload->base=built.editedSourceBase().IsNull()?original.sourceBase_:built.editedSourceBase();
-            source->Backup();source->value_=sourcePayload;
+            retainedSource->Backup();retainedSource->value_=sourcePayload;
         }
         auto payload=std::make_shared<et::PayloadR2>();payload->definition=built.definition_;
         payload->bytes=built.definitionBytes_;payload->base=built.base_;
         et::Attribute::SetR2(original.sourceLabel_,payload);TNaming_Builder(original.sourceLabel_).Select(built.result_,built.result_);
+        if(!retainedSourceLabel.IsNull()&&!retainedSourceLabel.IsEqual(original.sourceLabel_))
+            TNaming_Builder(retainedSourceLabel).Select(built.result_,built.result_);
         if(!ValidateRetainedEdgeTreatmentsR2(refusal))return Standard_False;
         std::optional<et::RecordR2> stored;if(!et::ReadR2(myOcafDoc,original.ownerLabel_,stored,refusal)||!stored)return Standard_False;
         readback={stored->label,stored->owner,std::make_shared<r2::Definition>(stored->value->definition),stored->value->bytes,{},stored->value->base,stored->current};
@@ -389,6 +463,14 @@ Standard_Boolean OcctDocument::StageRetainedBooleanMigrationR2(
             refusal=et::Refusal::IdentityMismatch;return Standard_False;
         }
     }
+    // ReplaceShape re-captures the owner state after SetShape (through
+    // SaveObjectTransform), and the SYRS record's strict whole-document read
+    // requires the record's bound shape to equal the owner's current shape.
+    // Bind the record to the migration result before the replacement; the
+    // record payload itself is restaged below only after every validation
+    // has passed.
+    if(original.sourceLabel_.IsNull()){refusal=et::Refusal::StageFailed;return Standard_False;}
+    TNaming_Builder(original.sourceLabel_).Select(built.result_,built.result_);
     Handle(AIS_Shape) presentation=new AIS_Shape(built.result_);
     if(!ReplaceShape(original.ownerLabel_,presentation)){refusal=et::Refusal::StageFailed;return Standard_False;}
     Handle(core3d::retained_solid::Attribute) source;
@@ -401,14 +483,27 @@ Standard_Boolean OcctDocument::StageRetainedBooleanMigrationR2(
     auto treatmentPayload=std::make_shared<et::PayloadR2>();
     treatmentPayload->definition=built.definition_;treatmentPayload->bytes=built.definitionBytes_;
     treatmentPayload->base=built.base_;
-    et::Attribute::SetR2(original.sourceLabel_,treatmentPayload);
+    // The retained-solid record label admits exactly its own attribute and
+    // the naming binding (retained_solid::ReadAll refuses any third
+    // attribute), so the migrated R2 treatment carrier gets a dedicated child
+    // label of the owner above the minimum record tag, bound to the exact
+    // migration result; the retained-solid record keeps its own binding.
+    Standard_Integer carrierTag=core3d::retained_solid::MinimumRecordTag;
+    for(TDF_ChildIterator ownerChild(original.ownerLabel_);ownerChild.More();ownerChild.Next())
+        if(ownerChild.Value().Tag()>=carrierTag)carrierTag=ownerChild.Value().Tag()+1;
+    const TDF_Label treatmentLabel=original.ownerLabel_.FindChild(carrierTag,Standard_True);
+    et::Attribute::SetR2(treatmentLabel,treatmentPayload);
+    TNaming_Builder(treatmentLabel).Select(built.result_,built.result_);
     TNaming_Builder(original.sourceLabel_).Select(built.result_,built.result_);
     if(!ValidateRetainedEdgeTreatmentsR2(refusal))return Standard_False;
     std::optional<et::RecordR2> stored;
     if(!et::ReadR2(myOcafDoc,original.ownerLabel_,stored,refusal)||!stored)return Standard_False;
+    // The same command restaged the retained source carrier to the stripped
+    // prefix, so the readback carries those exact bytes for the ordinary
+    // controller's paired carrier verification.
     readback={stored->label,stored->owner,
         std::make_shared<core3d::retained_edge_treatment::r2::Definition>(stored->value->definition),
-        stored->value->bytes,{},stored->value->base,stored->current};
+        stored->value->bytes,built.prefixBytes_,stored->value->base,stored->current};
     refusal=et::Refusal::None;return Standard_True;
 }
 
@@ -971,6 +1066,13 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
         std::fprintf(stderr,"B1B2_STAGE phase=replace-shape result=%d\n",shapeStaged?1:0);
 #endif
         if(!shapeStaged){refusal=Refusal::StageFailed;return Standard_False;}
+        // The loft record's strict in-read currency check compares its bound
+        // shape against the owner's current shape; the owner shape was just
+        // replaced above, so rebind the existing loft record's naming to the
+        // staged result before the loft source restage below. The recipe
+        // values and identity are untouched here and are re-proven by the
+        // paired readback below.
+        if(!priorState.loft.label.IsNull())TNaming_Builder(priorState.loft.label).Select(built.result_,built.result_);
         bool sourceStaged=false;if(const auto*p=std::get_if<RebuildSource>(&edit)){if(const auto*profile=std::get_if<core3d::profile::Parameters>(&p->requested))sourceStaged=core3d::profile::Stage(myOcafDoc,original.ownerLabel_,*profile,original.sourceIdentifier_);else if(const auto*enclosure=std::get_if<core3d::enclosure::Parameters>(&p->requested))sourceStaged=core3d::enclosure::Stage(myOcafDoc,original.ownerLabel_,*enclosure,original.sourceIdentifier_);else if(const auto*loft=std::get_if<core3d::rectangular_loft::Definition>(&p->requested))sourceStaged=core3d::loft_persistence::Stage(myOcafDoc,original.ownerLabel_,*loft,original.sourceIdentifier_);}else if(const auto*profile=std::get_if<core3d::profile::Parameters>(&original.source_))sourceStaged=core3d::profile::Stage(myOcafDoc,original.ownerLabel_,*profile,original.sourceIdentifier_);else if(const auto*enclosure=std::get_if<core3d::enclosure::Parameters>(&original.source_))sourceStaged=core3d::enclosure::Stage(myOcafDoc,original.ownerLabel_,*enclosure,original.sourceIdentifier_);else if(const auto*loft=std::get_if<core3d::rectangular_loft::Definition>(&original.source_))sourceStaged=core3d::loft_persistence::Stage(myOcafDoc,original.ownerLabel_,*loft,original.sourceIdentifier_);
 #if DEBUG
         std::fprintf(stderr,"B1B2_STAGE phase=source-stage result=%d\n",sourceStaged?1:0);

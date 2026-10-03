@@ -2371,8 +2371,13 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 if(!treatmentStagedR2)throw Standard_Failure(core3d::retained_edge_treatment::RefusalCode(refusal));
                 ledger.edgeTreatmentReadbackR2=std::move(readback);
             }
+            // A retained-Boolean migration restages the retained source
+            // carrier in this same command (the stripped prefix replaces the
+            // legacy program), so it takes the same exact-bytes readback
+            // contract below as an explicit R2 source edit.
             treatmentSourceEditedR2=treatmentStagedR2&&record.requested.edgeTreatmentResultR2
-                &&record.requested.edgeTreatmentResultR2->sourceChanged();
+                &&(record.requested.edgeTreatmentResultR2->sourceChanged()
+                    ||record.requested.edgeTreatmentMigrationR2);
             if (record.requested.operation==OrdinaryTransformOperation::SweepRebuild) {
                 bool pairedFault=false;
 #if DEBUG

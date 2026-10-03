@@ -525,6 +525,39 @@ Core3DViewer::reviewRetainedBooleanMigrationR2(
 #endif
             return {};
         }
+        // Legacy fillet tail: rebuild the per-step and post-treatment stages
+        // with the legacy authority's own retained-fillet build on the proven
+        // post-Boolean stage -- the exact construction the live legacy commit
+        // used -- so the exact mesh-independent V3 equivalence below compares
+        // the captured current shape against the stage that construction
+        // actually produced. Every stage stays bounded and validated, each
+        // legacy step is replayed exactly once per prefix, and the
+        // post-Boolean base is unchanged.
+        {
+            retained_boolean::Program tailProgram;
+            if(const auto* capturedProgram=std::get_if<retained_boolean::Program>(&original->original_))tailProgram=*capturedProgram;
+            else if(!retained_boolean::Promote(std::get<retained_boolean::Legacy>(original->original_),tailProgram)){refusal=et::Refusal::UnsupportedBase;return {};}
+            if(!tailProgram.filletSteps.empty()){
+                std::vector<TopoDS_Shape> mirroredStages;TopoDS_Shape mirroredPost;
+                for(std::size_t prefixCount=0;prefixCount<=tailProgram.filletSteps.size();++prefixCount){
+                    TopoDS_Shape stage=stages.postBoolean;
+                    if(prefixCount){
+                        retained_boolean::Program prefix=tailProgram;
+                        prefix.filletSteps.resize(prefixCount);
+                        const auto built=retained_fillet::Build(stages.postBoolean,prefix,cancelled,
+                            [&](const TopoDS_Shape& shape){return et::detail::ChargeTopology(shape,budget);});
+                        if(built.outcome!=retained_fillet::Outcome::Built||built.solid.IsNull()){
+                            refusal=cancelled.load()?et::Refusal::Cancelled:et::Refusal::BuildFailed;return {};
+                        }
+                        stage=built.solid;
+                    }
+                    if(prefixCount<tailProgram.filletSteps.size())mirroredStages.push_back(stage);
+                    else mirroredPost=stage;
+                }
+                stages.stepStages=std::move(mirroredStages);
+                stages.postTreatment=mirroredPost;
+            }
+        }
         // Actual/expectation roles: the live captured current is the actual;
         // the independently replayed post-treatment stage is the authoritative
         // rebuilt expectation. Only the expectation may undergo the bounded
@@ -5421,6 +5454,24 @@ bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& pa
     if (const auto p=std::get_if<std::shared_ptr<EnclosureSolidGeometry>>(&payload)) {
         if (!*p || (*p)->built || !(*p)->cancelled || (*p)->cancelled->load()) return false;
         (*p)->built=BuildEnclosureSolidGeometry((*p)->parameters.definition,(*p)->cancelled,(*p)->result);
+        // Publish the persistence-canonical representation of a rounded
+        // enclosure: the bounded binary readback phase reconstructs
+        // gp_Dir/gp_Ax components (signed zeros included), and only the
+        // canonical form is a fixed point of the verified detachment round
+        // trip that retained edge-treatment replay requires. The canonical
+        // form is adopted only when a second readback preserves its exact
+        // mesh-independent V3 commitment; otherwise the built result is kept
+        // unchanged and the detachment gate's behavior is untouched.
+        if((*p)->built&&(*p)->parameters.definition.dimensions.cornerRadius>0){
+            retained_edge_treatment::ReplayBudget canonicalBudget;TopoDS_Shape canonical;
+            if(retained_edge_treatment::detail::ReadbackGeometry((*p)->result.solid,canonicalBudget,canonical)){
+                TopoDS_Shape reopened;retained_edge_treatment::Digest canonicalDigest,reopenedDigest;
+                if(retained_edge_treatment::detail::ReadbackGeometry(canonical,canonicalBudget,reopened)
+                    &&retained_edge_treatment::detail::CommitGeometry(canonical,canonicalBudget,canonicalDigest)
+                    &&retained_edge_treatment::detail::CommitGeometry(reopened,canonicalBudget,reopenedDigest)
+                    &&canonicalDigest==reopenedDigest)(*p)->result.solid=canonical;
+            }
+        }
         if((*p)->built&&(*p)->treatmentRebind&&(*p)->treatmentRebuildSource){(*p)->treatmentBase=(*p)->result.solid;retained_edge_treatment::SourceRebindResult rebound;retained_edge_treatment::ReplayBudget budget;retained_edge_treatment::Refusal refusal=retained_edge_treatment::Refusal::BuildFailed;if(!retained_edge_treatment::ApplySourceRebind(*(*p)->treatmentRebind,*(*p)->treatmentRebuildSource,(*p)->treatmentBase,budget,refusal,rebound))return (*p)->built=false;(*p)->treatmentDefinition=rebound.definition;(*p)->treatmentProofs=rebound.proofs;(*p)->result.solid=rebound.treated;}
         return (*p)->built;
     }
