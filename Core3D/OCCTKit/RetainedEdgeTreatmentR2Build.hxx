@@ -5,6 +5,7 @@
 #include "RetainedTopologyBudget.hxx"
 #include "CompositeRecipeCodec.hxx"
 #include "AnalyticBooleanSolid.hxx"
+#include "SavedBooleanResultCorrespondence.hxx" // saved-program wedge expectation contract
 #include "SavedCutSourceEdit.hxx"
 #include "RectangularLoftPersistence.hxx"
 #include "RetainedSolidEnvelope.hxx"
@@ -141,11 +142,29 @@ inline bool PrepareMigrationStages(const retained_boolean::Recipe& recipe,
             stepRecipe.metersPerUnit = program.source.metersPerUnit;
             stepRecipe.tool = step.operand;
             analytic_boolean::Result stepResult;
+            // Wedge expectation: derive the admitted removed volume from the
+            // validated authored source recipe and the operand boundary proof
+            // -- the same contract the saved-program path uses -- never from
+            // the Boolean result under test. The independent volume check in
+            // analytic_boolean::Build stays in force; non-wedge steps keep 0.
+            double expectedWedgeVolume = 0;
+            if (step.operand.kind == analytic_boolean::OperandKind::Wedge) {
+                saved_cut_whole_result::Expected expected;
+                const auto view = saved_boolean_result::detail::GeometryView(program, step.operand);
+                if (!saved_cut_whole_result::ExpectedSource(view, expected)) {
+                    refusal = et::Refusal::BuildFailed; return false;
+                }
+                const auto admitted = analytic_boolean_wedge::ExpectedBoundary(view, step.operand, expected);
+                if (admitted.status != analytic_boolean_wedge::Status::Clear) {
+                    refusal = et::Refusal::BuildFailed; return false;
+                }
+                expectedWedgeVolume = admitted.removedVolume;
+            }
             // C19/C25/C26: the analytic step borrows this operation's shared
             // counter; its raw occurrences, passes and Boolean stage debit
             // are charged there. BudgetExceeded stays Budget through here.
             const auto status = analytic_boolean::Build(current, stepRecipe, stop, stepResult,
-                0.0, budget);
+                expectedWedgeVolume, budget);
             if (status == analytic_boolean::Status::Cancelled) { refusal = et::Refusal::Cancelled; return false; }
             if (status == analytic_boolean::Status::BudgetExceeded) { refusal = et::Refusal::Budget; return false; }
             if (status != analytic_boolean::Status::Built || stepResult.solid.IsNull()) {
@@ -368,8 +387,23 @@ inline bool RebuildEditedPrefix(const RetainedBooleanBase& original,
             stepRecipe.metersPerUnit = edited.source.metersPerUnit;
             stepRecipe.tool = step.operand;
             analytic_boolean::Result stepResult;
+            // Wedge expectation: the same authored-source / operand boundary
+            // proof as above, derived from the validated edited program.
+            double expectedWedgeVolume = 0;
+            if (step.operand.kind == analytic_boolean::OperandKind::Wedge) {
+                saved_cut_whole_result::Expected expected;
+                const auto view = saved_boolean_result::detail::GeometryView(edited, step.operand);
+                if (!saved_cut_whole_result::ExpectedSource(view, expected)) {
+                    refusal = et::Refusal::BuildFailed; return false;
+                }
+                const auto admitted = analytic_boolean_wedge::ExpectedBoundary(view, step.operand, expected);
+                if (admitted.status != analytic_boolean_wedge::Status::Clear) {
+                    refusal = et::Refusal::BuildFailed; return false;
+                }
+                expectedWedgeVolume = admitted.removedVolume;
+            }
             const auto status = analytic_boolean::Build(current, stepRecipe, stop, stepResult,
-                0.0, budget);
+                expectedWedgeVolume, budget);
             if (status == analytic_boolean::Status::Cancelled) { refusal = et::Refusal::Cancelled; return false; }
             if (status == analytic_boolean::Status::BudgetExceeded) { refusal = et::Refusal::Budget; return false; }
             if (status != analytic_boolean::Status::Built || stepResult.solid.IsNull()) {
