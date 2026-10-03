@@ -2,6 +2,7 @@
 
 #include "RetainedEdgeTreatmentR2Snapshot.hxx"
 #include "RetainedEdgeTreatmentBuild.hxx"
+#include "RetainedTopologyBudget.hxx"
 #include "CompositeRecipeCodec.hxx"
 #include "AnalyticBooleanSolid.hxx"
 #include "SavedCutSourceEdit.hxx"
@@ -12,6 +13,7 @@
 #include <algorithm>
 
 namespace core3d::retained_edge_treatment::r2 {
+namespace tb = core3d::retained_topology_budget;
 inline bool ValidateCompletePrefix(const RetainedBooleanBase& source,
                                    const BooleanBaseBinding& binding,
                                    et::Refusal& refusal) noexcept {
@@ -45,7 +47,16 @@ inline bool ReplayTreatmentSuffix(const TopoDS_Shape& postBoolean,
                                   TopoDS_Shape& output,
                                   et::ReplayBudget& budget,
                                   et::Refusal& refusal) noexcept {
-    if (postBoolean.IsNull() || !BRepCheck_Analyzer(postBoolean).IsValid()) {
+    if (postBoolean.IsNull()) {
+        refusal = et::Refusal::UnsupportedBase; return false;
+    }
+    // C19: the analyzer input pass is debited before validity checking.
+    const std::atomic_bool neverCancelled{false};
+    if (tb::ChargeTraversal(postBoolean, budget, neverCancelled, tb::Site::C19R2Prefix)
+        != tb::WalkStatus::Completed) {
+        refusal = et::Refusal::Budget; return false;
+    }
+    if (!BRepCheck_Analyzer(postBoolean).IsValid()) {
         refusal = et::Refusal::UnsupportedBase; return false;
     }
     et::BaseBinding shadow;
@@ -98,12 +109,31 @@ inline bool PrepareMigrationStages(const retained_boolean::Recipe& recipe,
         }
         // Replay the complete analytic prefix on a private copy of the proven
         // pre-Boolean source base, exactly once per step.
+        // C19: the bounded census of the proven source base and the reserved
+        // private-copy pass are debited before the copy is constructed; the
+        // stage debit counts this prefix census stage.
+        tb::Census baseCensus;
+        const tb::WalkStatus baseWalk = tb::CensusTopology(sourceBase, budget, stop,
+            baseCensus, tb::Site::C19R2Prefix, true);
+        if (baseWalk == tb::WalkStatus::Cancelled) { refusal = et::Refusal::Cancelled; return false; }
+        if (baseWalk != tb::WalkStatus::Completed
+            || !tb::ReserveTraversal(baseCensus, budget, tb::Site::C19R2Prefix)) {
+            refusal = et::Refusal::Budget; return false;
+        }
         TopoDS_Shape current = BRepBuilderAPI_Copy(sourceBase).Shape();
-        if (stop.load() || current.IsNull() || !BRepCheck_Analyzer(current).IsValid()) {
+        if (stop.load() || current.IsNull()) {
+            refusal = stop.load() ? et::Refusal::Cancelled : et::Refusal::UnsupportedBase; return false;
+        }
+        // C19: the validity-analysis pass over the private copy is reserved
+        // from the source census (the copy preserves the occurrence count).
+        if (!tb::ReserveTraversal(baseCensus, budget, tb::Site::C19R2Prefix)) {
+            refusal = et::Refusal::Budget; return false;
+        }
+        if (!BRepCheck_Analyzer(current).IsValid()) {
             refusal = stop.load() ? et::Refusal::Cancelled : et::Refusal::UnsupportedBase; return false;
         }
         for (const auto& step : program.steps) {
-            if (stop.load() || !budget.chargeStage(1)) {
+            if (stop.load() || !budget.chargeStage(1, tb::Site::C19R2Prefix)) {
                 refusal = stop.load() ? et::Refusal::Cancelled : et::Refusal::Budget; return false;
             }
             analytic_boolean::Recipe stepRecipe;
@@ -111,14 +141,28 @@ inline bool PrepareMigrationStages(const retained_boolean::Recipe& recipe,
             stepRecipe.metersPerUnit = program.source.metersPerUnit;
             stepRecipe.tool = step.operand;
             analytic_boolean::Result stepResult;
-            const auto status = analytic_boolean::Build(current, stepRecipe, stop, stepResult);
+            // C19/C25/C26: the analytic step borrows this operation's shared
+            // counter; its raw occurrences, passes and Boolean stage debit
+            // are charged there. BudgetExceeded stays Budget through here.
+            const auto status = analytic_boolean::Build(current, stepRecipe, stop, stepResult,
+                0.0, budget);
             if (status == analytic_boolean::Status::Cancelled) { refusal = et::Refusal::Cancelled; return false; }
+            if (status == analytic_boolean::Status::BudgetExceeded) { refusal = et::Refusal::Budget; return false; }
             if (status != analytic_boolean::Status::Built || stepResult.solid.IsNull()) {
                 refusal = et::Refusal::BuildFailed; return false;
             }
             current = stepResult.solid;
         }
-        if (stop.load() || current.IsNull() || !BRepCheck_Analyzer(current).IsValid()) {
+        if (stop.load() || current.IsNull()) {
+            refusal = stop.load() ? et::Refusal::Cancelled : et::Refusal::BuildFailed; return false;
+        }
+        // C19: the post-prefix validity-analysis pass is charged.
+        const tb::WalkStatus postWalk = tb::ChargeTraversal(current, budget, stop,
+            tb::Site::C19R2Prefix);
+        if (postWalk == tb::WalkStatus::Cancelled) { refusal = et::Refusal::Cancelled; return false; }
+        if (postWalk == tb::WalkStatus::BudgetDenied) { refusal = et::Refusal::Budget; return false; }
+        if (postWalk != tb::WalkStatus::Completed) { refusal = et::Refusal::BuildFailed; return false; }
+        if (!BRepCheck_Analyzer(current).IsValid()) {
             refusal = stop.load() ? et::Refusal::Cancelled : et::Refusal::BuildFailed; return false;
         }
         stages.postBoolean = current;
@@ -182,7 +226,22 @@ inline bool PrepareMigrationStages(const retained_boolean::Recipe& recipe,
             single.outputNode = step.node;
             TopoDS_Shape next; std::vector<et::StepProof> proofs;
             if (!et::Replay(current, single, next, proofs, budget, refusal)) { stages = {}; return false; }
-            if (proofs.size() != 1 || stop.load() || next.IsNull() || !BRepCheck_Analyzer(next).IsValid()) {
+            if (proofs.size() != 1 || stop.load() || next.IsNull()) {
+                stages = {};
+                refusal = stop.load() ? et::Refusal::Cancelled : et::Refusal::ReplayMismatch; return false;
+            }
+            // C19: the per-stage validity-analysis pass after each old-tail
+            // replay is charged to the same operation budget.
+            const tb::WalkStatus tailWalk = tb::ChargeTraversal(next, budget, stop,
+                tb::Site::C19R2Prefix);
+            if (tailWalk == tb::WalkStatus::Cancelled) {
+                stages = {}; refusal = et::Refusal::Cancelled; return false;
+            }
+            if (tailWalk == tb::WalkStatus::BudgetDenied) {
+                stages = {}; refusal = et::Refusal::Budget; return false;
+            }
+            if (tailWalk != tb::WalkStatus::Completed
+                || !BRepCheck_Analyzer(next).IsValid()) {
                 stages = {};
                 refusal = stop.load() ? et::Refusal::Cancelled : et::Refusal::ReplayMismatch; return false;
             }
@@ -211,6 +270,7 @@ inline bool RebuildEditedPrefix(const RetainedBooleanBase& original,
                                 std::vector<std::uint8_t>& editedBytes,
                                 TopoDS_Shape& prefixResult,
                                 TopoDS_Shape& editedSourceBase,
+                                et::ReplayBudget& budget,
                                 et::Refusal& refusal) noexcept {
     try {
         editedBytes.clear(); editedSourceBase = TopoDS_Shape();
@@ -288,10 +348,19 @@ inline bool RebuildEditedPrefix(const RetainedBooleanBase& original,
             editedSourceBase = rebuilt;
         }
         // Replay the complete edited analytic prefix on the proven source base.
+        // C20: no locally fresh counters — the operation's shared budget pays
+        // the bounded input census and the reserved private-copy pass.
+        tb::Census inputCensus;
+        const tb::WalkStatus inputWalk = tb::CensusTopology(editedSourceBase, budget, stop,
+            inputCensus, tb::Site::C20R2EditedPrefix, true);
+        if (inputWalk == tb::WalkStatus::Cancelled) { refusal = et::Refusal::Cancelled; return false; }
+        if (inputWalk != tb::WalkStatus::Completed
+            || !tb::ReserveTraversal(inputCensus, budget, tb::Site::C20R2EditedPrefix)) {
+            refusal = et::Refusal::Budget; return false;
+        }
         TopoDS_Shape current = BRepBuilderAPI_Copy(editedSourceBase).Shape();
-        et::ReplayBudget budget;
         for (const auto& step : edited.steps) {
-            if (stop.load() || !budget.chargeStage(1)) {
+            if (stop.load() || !budget.chargeStage(1, tb::Site::C20R2EditedPrefix)) {
                 refusal = stop.load() ? et::Refusal::Cancelled : et::Refusal::Budget; return false;
             }
             analytic_boolean::Recipe stepRecipe;
@@ -299,20 +368,53 @@ inline bool RebuildEditedPrefix(const RetainedBooleanBase& original,
             stepRecipe.metersPerUnit = edited.source.metersPerUnit;
             stepRecipe.tool = step.operand;
             analytic_boolean::Result stepResult;
-            const auto status = analytic_boolean::Build(current, stepRecipe, stop, stepResult);
+            const auto status = analytic_boolean::Build(current, stepRecipe, stop, stepResult,
+                0.0, budget);
             if (status == analytic_boolean::Status::Cancelled) { refusal = et::Refusal::Cancelled; return false; }
+            if (status == analytic_boolean::Status::BudgetExceeded) { refusal = et::Refusal::Budget; return false; }
             if (status != analytic_boolean::Status::Built || stepResult.solid.IsNull()) {
                 refusal = et::Refusal::BuildFailed; return false;
             }
             current = stepResult.solid;
         }
-        if (stop.load() || current.IsNull() || !BRepCheck_Analyzer(current).IsValid()) {
+        if (stop.load() || current.IsNull()) {
             refusal = stop.load() ? et::Refusal::Cancelled : et::Refusal::BuildFailed; return false;
         }
+        // C20: the candidate checks — post-prefix validity-analysis pass and
+        // the bounded output census — are charged before publication.
+        const tb::WalkStatus prefixWalk = tb::ChargeTraversal(current, budget, stop,
+            tb::Site::C20R2EditedPrefix);
+        if (prefixWalk == tb::WalkStatus::Cancelled) { refusal = et::Refusal::Cancelled; return false; }
+        if (prefixWalk == tb::WalkStatus::BudgetDenied) { refusal = et::Refusal::Budget; return false; }
+        if (prefixWalk != tb::WalkStatus::Completed
+            || !BRepCheck_Analyzer(current).IsValid()) {
+            refusal = stop.load() ? et::Refusal::Cancelled : et::Refusal::BuildFailed; return false;
+        }
+        tb::Census prefixCensus;
+        const tb::WalkStatus censusWalk = tb::CensusTopology(current, budget, stop,
+            prefixCensus, tb::Site::C20R2EditedPrefix, false);
+        if (censusWalk == tb::WalkStatus::Cancelled) { refusal = et::Refusal::Cancelled; return false; }
+        if (censusWalk != tb::WalkStatus::Completed) { refusal = et::Refusal::Budget; return false; }
         prefixResult = current;
         editedSource = RetainedBooleanBase{original.binding, LegacyBooleanBase{edited, editedBytes}};
         refusal = et::Refusal::None;
         return true;
     } catch (...) { refusal = et::Refusal::BuildFailed; return false; }
+}
+
+// Compatibility signature: a fresh budget for independent callers outside a
+// B2 operation. Operation-internal callers must use the budgeted overload.
+inline bool RebuildEditedPrefix(const RetainedBooleanBase& original,
+                                const Edit& edit,
+                                const TopoDS_Shape& sourceBase,
+                                const std::atomic_bool& stop,
+                                RetainedBooleanBase& editedSource,
+                                std::vector<std::uint8_t>& editedBytes,
+                                TopoDS_Shape& prefixResult,
+                                TopoDS_Shape& editedSourceBase,
+                                et::Refusal& refusal) noexcept {
+    et::ReplayBudget fresh;
+    return RebuildEditedPrefix(original, edit, sourceBase, stop, editedSource, editedBytes,
+        prefixResult, editedSourceBase, fresh, refusal);
 }
 } // namespace core3d::retained_edge_treatment::r2

@@ -1,6 +1,7 @@
 #pragma once
 #include "RetainedEdgeTreatmentAttribute.hxx"
 #include "RetainedRecipeSnapshot.hxx"
+#include "RetainedTopologyBudget.hxx"
 #include "ProfilePersistence.hxx"
 #include "EnclosurePersistence.hxx"
 #include "RectangularLoftDefinition.hxx"
@@ -20,7 +21,12 @@ struct ReplaceTargets {UUID feature;std::vector<Anchor> anchors;};
 struct Remove {UUID feature;};
 struct RebuildSource {BaseRecipe requested;};
 using Edit=std::variant<Append,SetAmount,ReplaceTargets,Remove,RebuildSource>;
-struct ReplayBudget {std::size_t buildStages=0,topologyVisits=0;bool chargeStage(std::size_t visits) noexcept {if(buildStages>=64||visits>65536-topologyVisits)return false;++buildStages;topologyVisits+=visits;return true;}};
+// B1 replay accounting is the common per-operation topology counter (frozen
+// B2 limits: 4,096 faces+edges per stage census, 65,536 visits, 64 stages).
+// The public buildStages/topologyVisits members and chargeStage(visits)
+// semantics are inherited unchanged; the base adds validation-first
+// arithmetic, sticky refusal and the DEBUG per-site trace.
+struct ReplayBudget : retained_topology_budget::Counter {};
 class Snapshot final {friend class ::OcctDocument;friend class core3d::Core3DViewer;TDF_Label ownerLabel_,sourceLabel_;std::string sourceIdentifier_;retained_recipe::OwnerSnapshot owner_;BaseRecipe source_;Definition seed_;std::optional<Definition> definition_;std::vector<std::uint8_t> sourceBytes_,definitionBytes_;TopoDS_Shape base_,current_;std::uint64_t nonce_=0,presentationRevision_=0;ReplayBudget chargedBudget_;public:const retained_recipe::OwnerSnapshot& owner()const noexcept{return owner_;}const BaseRecipe& source()const noexcept{return source_;}const Definition& effectiveDefinition()const noexcept{return definition_?*definition_:seed_;}const std::optional<Definition>& definition()const noexcept{return definition_;}const std::vector<std::uint8_t>& canonicalBytes()const noexcept{return definitionBytes_;}bool current()const noexcept{return owner_.status==retained_recipe::OwnerStatus::CurrentEditable&&!current_.IsNull();}double dimensionMetersPerUnit()const noexcept{return seed_.base.metersPerLocalUnit;}};
 class SelectorTargetCapture final {
     friend class core3d::Core3DViewer;

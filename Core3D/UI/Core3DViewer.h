@@ -32,6 +32,7 @@
 #include "../OCCTKit/NativeMeshElementSelection.hpp"
 #include "../OCCTKit/NativeOpeningContext.hxx"
 #include "../OCCTKit/RetainedFaceSelector.hxx"
+#include <unordered_map>
 #include "../OCCTKit/RetainedEdgeTreatmentR2Build.hxx"
 
 #include "OrthoProjectionType.h"
@@ -277,7 +278,8 @@ namespace core3d {
         const std::shared_ptr<const retained_edge_treatment::Snapshot>&,
         const retained_edge_treatment::Edit&,const ObjectFrameIdentity&,
         std::uint64_t,std::uint32_t,std::uint32_t,
-        retained_edge_treatment::Refusal&) noexcept;
+        retained_edge_treatment::Refusal&,
+        const retained_edge_treatment::ReplayBudget* continuation=nullptr) noexcept;
     std::shared_ptr<const retained_edge_treatment::SelectorTargetCapture>
     captureEdgeTreatmentSelectorTargets(
         const std::shared_ptr<const retained_edge_treatment::Snapshot>& original,
@@ -286,6 +288,11 @@ namespace core3d {
         std::uint64_t presentationRevision,
         std::uint32_t width, std::uint32_t height,
         retained_face_selector::Refusal& refusal) noexcept;
+    std::shared_ptr<const retained_edge_treatment::SelectorTargetCapture>
+    projectEdgeTreatmentSelectorTargets(
+        const std::shared_ptr<const retained_edge_treatment::SelectorTargetCapture>&,
+        std::vector<retained_edge_treatment::CurveKind>&,
+        retained_face_selector::Refusal&) noexcept;
     std::shared_ptr<retained_edge_treatment::Work> prepareEdgeTreatmentSelectorAppend(
         const std::shared_ptr<const retained_edge_treatment::Snapshot>& original,
         const std::shared_ptr<const retained_edge_treatment::SelectorTargetCapture>& targets,
@@ -296,7 +303,7 @@ namespace core3d {
     // The internal native refusal output carries the real geometry-stage
     // cause (thread/work/state or the D253 detachment refusal) so a null
     // detached input never loses it. No public Swift DTO/enum change.
-    static std::shared_ptr<const retained_edge_treatment::DetachedInput> edgeTreatmentGeometry(
+    std::shared_ptr<const retained_edge_treatment::DetachedInput> edgeTreatmentGeometry(
         const std::shared_ptr<retained_edge_treatment::Work>&,
         retained_edge_treatment::Refusal&) noexcept;
     static std::shared_ptr<const retained_edge_treatment::DetachedResult> buildEdgeTreatment(
@@ -305,6 +312,7 @@ namespace core3d {
     static bool cancelEdgeTreatment(const std::shared_ptr<retained_edge_treatment::Work>&) noexcept;
     std::vector<retained_edge_treatment::Anchor> captureEdgeTreatmentTargets(
         const std::shared_ptr<const retained_edge_treatment::Snapshot>&,
+        retained_edge_treatment::ReplayBudget&,
         retained_edge_treatment::Refusal&) noexcept;
     retained_face_selector::Resolution resolveFaceSelector(
         const std::shared_ptr<const retained_edge_treatment::Snapshot>&,
@@ -891,6 +899,11 @@ namespace core3d {
 
     private:
         std::shared_ptr<OrdinaryEditController> _ordinaryEditController;
+        // Main-owned, single-use continuation sidecar for the legacy captured-
+        // anchor API. Work itself lives in the frozen P1 header; this map lets
+        // C27 debt reach detachment without altering that predecessor file.
+        std::unordered_map<const retained_edge_treatment::Work*,
+            retained_edge_treatment::ReplayBudget> _edgeTreatmentContinuations;
         // Weak slot cannot keep a dropped main-thread lease or scene alive.
         std::weak_ptr<SavedCutSourceEditWork> _savedCutSourceEditWork;
         // Same single-lease discipline for the whole-program source family;

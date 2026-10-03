@@ -2348,7 +2348,11 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 treatmentStaged=record.requested.edgeTreatmentEdit&&record.requested.edgeTreatmentResult
                     &&_document->StageRetainedEdgeTreatment(*record.requested.edgeTreatmentSnapshot,
                         *record.requested.edgeTreatmentEdit,*record.requested.edgeTreatmentResult,readback,refusal);
-                if(!treatmentStaged)throw Standard_Failure(core3d::retained_edge_treatment::RefusalCode(refusal));
+                if(!treatmentStaged){
+                    if(refusal==core3d::retained_edge_treatment::Refusal::Budget)
+                        ledger.retainedBudgetRefused=true;
+                    throw Standard_Failure(core3d::retained_edge_treatment::RefusalCode(refusal));
+                }
                 ledger.edgeTreatmentReadback=std::move(readback);
             }
             if(record.requested.edgeTreatmentResultR2){
@@ -2368,7 +2372,11 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                         *record.requested.edgeTreatmentSnapshotR2,*record.requested.edgeTreatmentResultR2,
                         readback,refusal);
                 }
-                if(!treatmentStagedR2)throw Standard_Failure(core3d::retained_edge_treatment::RefusalCode(refusal));
+                if(!treatmentStagedR2){
+                    if(refusal==core3d::retained_edge_treatment::Refusal::Budget)
+                        ledger.retainedBudgetRefused=true;
+                    throw Standard_Failure(core3d::retained_edge_treatment::RefusalCode(refusal));
+                }
                 ledger.edgeTreatmentReadbackR2=std::move(readback);
             }
             // A retained-Boolean migration restages the retained source
@@ -2893,8 +2901,10 @@ OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
             _didPublish = true;
             try { _document->NotifyChanges(); } catch (...) {}
         }
+        const bool budgetRefused=ledger.retainedBudgetRefused;
         clearResolved();
-        return candidate ? OrdinaryEditResult::Committed : OrdinaryEditResult::RetryableFailure;
+        return candidate ? OrdinaryEditResult::Committed
+            :budgetRefused?OrdinaryEditResult::BudgetRefused:OrdinaryEditResult::RetryableFailure;
     } catch (...) {
         _state = OrdinaryEditState::OutcomeUnknown;
         return OrdinaryEditResult::OutcomeUnknown;

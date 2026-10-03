@@ -1,5 +1,6 @@
 #pragma once
 #include "SavedBooleanResultCorrespondence.hxx"
+#include "RetainedTopologyBudget.hxx"
 #include "SavedCutSourceEdit.hxx"
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
@@ -16,6 +17,7 @@
 #include <map>
 #include <functional>
 namespace core3d::retained_fillet {
+namespace tb = core3d::retained_topology_budget;
 inline bool IsDeclined(Outcome outcome) noexcept {
     switch(outcome){
         case Outcome::DeclinedUnsupportedEdge:
@@ -68,12 +70,30 @@ inline bool Matches(const TopoDS_Edge& edge,const EdgeAnchor& anchor,double mm){
     while(u<first-tol/circle.Radius())u+=turn;while(u>first+turn)u-=turn;
     return u>=first-tol/circle.Radius()&&u<=last+tol/circle.Radius();
 }
-inline Outcome Resolve(const TopoDS_Shape& shape,const EdgeAnchor& anchor,double mm,TopoDS_Edge& out) noexcept {
+inline Outcome Resolve(const TopoDS_Shape& shape,const EdgeAnchor& anchor,double mm,TopoDS_Edge& out,
+    tb::Counter* shared=nullptr) noexcept {
     out.Nullify();try {
         if(!ValidAnchor(anchor,mm)||shape.IsNull())return Outcome::DeclinedAnchorNoMatch;
-        TopTools_IndexedMapOfShape edges;TopExp::MapShapes(shape,TopAbs_EDGE,edges);
-        if(edges.Extent()>4096)return Outcome::DeclinedBudget;unsigned count=0;
-        for(int i=1;i<=edges.Extent();++i){const auto edge=TopoDS::Edge(edges(i));
+        TopTools_IndexedMapOfShape edges;
+        if(shared){
+            // C22: with a shared operation counter the unbounded map is
+            // replaced by the bounded occurrence walk; the combined face+edge
+            // stage census is enforced while walking, before map growth, and
+            // subsumes the local 4,096-edge cap.
+            tb::Census census;const std::atomic_bool neverCancelled{false};
+            if(tb::CensusTopology(shape,*shared,neverCancelled,census,
+                tb::Site::C22FilletAdmission,false)!=tb::WalkStatus::Completed)
+                return Outcome::DeclinedBudget;
+            edges=census.edges;
+        }else{
+            TopExp::MapShapes(shape,TopAbs_EDGE,edges);
+            if(edges.Extent()>4096)return Outcome::DeclinedBudget;
+        }
+        unsigned count=0;
+        for(int i=1;i<=edges.Extent();++i){
+            // C22: every scanned edge is charged, including nonmatches.
+            if(shared&&!shared->visit(1,tb::Site::C22FilletAdmission))return Outcome::DeclinedBudget;
+            const auto edge=TopoDS::Edge(edges(i));
             if(BRep_Tool::Degenerated(edge)||!Matches(edge,anchor,mm))continue;
             if(++count>1){out.Nullify();return Outcome::DeclinedAnchorAmbiguous;}out=edge;}
         return count==1?Outcome::Built:Outcome::DeclinedAnchorNoMatch;
@@ -83,7 +103,7 @@ inline Outcome Resolve(const TopoDS_Shape& shape,const EdgeAnchor& anchor,double
 // chord through the anchor on EACH adjacent planar/cylindrical face. We never
 // substitute a bounding-box dimension or a remote face's width.
 inline bool RadiusAdmitted(const TopoDS_Shape& shape,const TopoDS_Edge& edge,const EdgeAnchor& anchor,
-    double radius,double mm,double* minimumWidth=nullptr) noexcept {
+    double radius,double mm,double* minimumWidth=nullptr,tb::Counter* shared=nullptr) noexcept {
     try {
         if(!Dimension(radius,mm))return false;
         BRepAdaptor_Curve curve(edge);gp_Vec tangent;
@@ -91,16 +111,40 @@ inline bool RadiusAdmitted(const TopoDS_Shape& shape,const TopoDS_Edge& edge,con
         else if(curve.GetType()==GeomAbs_Circle)tangent=gp_Vec(curve.Circle().Axis().Direction()).Crossed(gp_Vec(curve.Circle().Location(),Point(anchor)));
         else return false;
         const gp_Pln plane(Point(anchor),gp_Dir(tangent));const double tol=1e-4/mm;
+        if(shared){
+            // C22: the full ancestor-map pass (traversal plus one relation
+            // insertion per edge occurrence as the measured upper bound) is
+            // reserved before the bulk call.
+            const std::atomic_bool neverCancelled{false};std::size_t occurrences=0;
+            if(tb::ChargeTraversal(shape,*shared,neverCancelled,tb::Site::C22FilletAdmission,&occurrences)
+                !=tb::WalkStatus::Completed
+                ||!shared->visit(occurrences,tb::Site::C22FilletAdmission))return false;
+        }
         TopTools_IndexedDataMapOfShapeListOfShape owners;TopExp::MapShapesAndAncestors(shape,TopAbs_EDGE,TopAbs_FACE,owners);
         if(!owners.Contains(edge))return false;TopTools_IndexedMapOfShape faces;
-        for(TopTools_ListIteratorOfListOfShape it(owners.FindFromKey(edge));it.More();it.Next())faces.Add(it.Value());
+        for(TopTools_ListIteratorOfListOfShape it(owners.FindFromKey(edge));it.More();it.Next()){
+            if(shared&&!shared->visit(1,tb::Site::C22FilletAdmission))return false;
+            faces.Add(it.Value());}
         if(faces.Extent()!=2)return false;double width=INFINITY;
-        for(int i=1;i<=faces.Extent();++i){const auto face=TopoDS::Face(faces(i));BRepAdaptor_Surface surface(face);
+        for(int i=1;i<=faces.Extent();++i){
+            // C22: each adjacent-face section pass is charged, its input
+            // traversal reserved before the section build, and every section
+            // edge inspected is charged.
+            if(shared&&!shared->visit(1,tb::Site::C22FilletAdmission))return false;
+            const auto face=TopoDS::Face(faces(i));BRepAdaptor_Surface surface(face);
             if(surface.GetType()!=GeomAbs_Plane&&surface.GetType()!=GeomAbs_Cylinder)return false;
+            if(shared){
+                const std::atomic_bool neverCancelled{false};std::size_t faceOccurrences=0;
+                if(tb::ChargeTraversal(face,*shared,neverCancelled,tb::Site::C22FilletAdmission,&faceOccurrences)
+                    !=tb::WalkStatus::Completed
+                    ||!shared->visit(faceOccurrences,tb::Site::C22FilletAdmission))return false;
+            }
             BRepAlgoAPI_Section section(face,plane,Standard_False);section.Approximation(Standard_False);section.Build();
             if(!section.IsDone())return false;unsigned hits=0;double chord=0;
             TopTools_IndexedMapOfShape lines;TopExp::MapShapes(section.Shape(),TopAbs_EDGE,lines);
-            for(int k=1;k<=lines.Extent();++k){BRepAdaptor_Curve c(TopoDS::Edge(lines(k)));if(c.GetType()!=GeomAbs_Line)continue;
+            for(int k=1;k<=lines.Extent();++k){
+                if(shared&&!shared->visit(1,tb::Site::C22FilletAdmission))return false;
+                BRepAdaptor_Curve c(TopoDS::Edge(lines(k)));if(c.GetType()!=GeomAbs_Line)continue;
                 const auto a=c.Value(c.FirstParameter()),b=c.Value(c.LastParameter());
                 if(OnSegment(Point(anchor),a,b,tol)){++hits;chord=a.Distance(b);}}
             if(hits!=1||!std::isfinite(chord)||chord<=tol)return false;width=std::min(width,chord);
@@ -192,36 +236,85 @@ inline bool BoundsContained(const TopoDS_Shape& before,const TopoDS_Shape& after
 // One detached kernel round. This is used independently for the expectation
 // and the candidate; neither may grow the certified Boolean carrier.
 inline Outcome Round(const TopoDS_Shape& current,const Step& step,double mm,
-    const std::atomic_bool& stop,TopoDS_Shape& solid,bool exactContainment=false) {
+    const std::atomic_bool& stop,TopoDS_Shape& solid,bool exactContainment=false,
+    tb::Counter* shared=nullptr) {
     solid.Nullify();if(stop.load())return Outcome::Cancelled;
     std::vector<TopoDS_Edge> selected;TopTools_IndexedMapOfShape unique;
     TopTools_IndexedDataMapOfShapeListOfShape owners;
+    if(shared){
+        // C23: the full adjacency pass (traversal plus one relation insertion
+        // per edge occurrence as the measured upper bound) is reserved before
+        // the ancestor map is constructed.
+        const std::atomic_bool neverCancelled{false};std::size_t occurrences=0;
+        if(tb::ChargeTraversal(current,*shared,neverCancelled,tb::Site::C23FilletRound,&occurrences)
+            !=tb::WalkStatus::Completed
+            ||!shared->visit(occurrences,tb::Site::C23FilletRound))return Outcome::DeclinedBudget;
+    }
     TopExp::MapShapesAndAncestors(current,TopAbs_EDGE,TopAbs_FACE,owners);
-    for(const auto& anchor:step.anchors){TopoDS_Edge edge;const auto resolved=Resolve(current,anchor,mm,edge);
+    for(const auto& anchor:step.anchors){TopoDS_Edge edge;const auto resolved=Resolve(current,anchor,mm,edge,shared);
         if(resolved!=Outcome::Built)return resolved;
+        if(shared&&!shared->visit(1,tb::Site::C23FilletRound))return Outcome::DeclinedBudget;
         if(unique.Contains(edge))return Outcome::DeclinedAnchorAmbiguous;unique.Add(edge);
         if(!owners.Contains(edge))return Outcome::DeclinedUnsupportedEdge;
         TopTools_IndexedMapOfShape faces;
-        for(TopTools_ListIteratorOfListOfShape it(owners.FindFromKey(edge));it.More();it.Next())faces.Add(it.Value());
+        for(TopTools_ListIteratorOfListOfShape it(owners.FindFromKey(edge));it.More();it.Next()){
+            if(shared&&!shared->visit(1,tb::Site::C23FilletRound))return Outcome::DeclinedBudget;
+            faces.Add(it.Value());}
         if(faces.Extent()!=2)return Outcome::DeclinedUnsupportedEdge;
-        for(int i=1;i<=faces.Extent();++i){BRepAdaptor_Surface surface(TopoDS::Face(faces(i)));
+        for(int i=1;i<=faces.Extent();++i){
+            if(shared&&!shared->visit(1,tb::Site::C23FilletRound))return Outcome::DeclinedBudget;
+            BRepAdaptor_Surface surface(TopoDS::Face(faces(i)));
             if(surface.GetType()!=GeomAbs_Plane&&surface.GetType()!=GeomAbs_Cylinder)return Outcome::DeclinedUnsupportedEdge;}
-        if(!RadiusAdmitted(current,edge,anchor,step.radiusLocal,mm))return Outcome::DeclinedRadiusAdmission;
+        if(!RadiusAdmitted(current,edge,anchor,step.radiusLocal,mm,nullptr,shared))
+            return shared&&shared->exhausted?Outcome::DeclinedBudget:Outcome::DeclinedRadiusAdmission;
         selected.push_back(edge);
+    }
+    if(shared){
+        // C23: the kernel input pass is debited before the fillet build.
+        const std::atomic_bool neverCancelled{false};
+        if(tb::ChargeTraversal(current,*shared,neverCancelled,tb::Site::C23FilletRound)
+            !=tb::WalkStatus::Completed)return Outcome::DeclinedBudget;
     }
     BRepFilletAPI_MakeFillet fillet(current);for(const auto& edge:selected)fillet.Add(step.radiusLocal,edge);
     fillet.Build();if(stop.load())return Outcome::Cancelled;
     if(!fillet.IsDone()||fillet.Shape().IsNull())return Outcome::DeclinedOcctFailure;
     auto result=fillet.Shape();
     if(result.ShapeType()==TopAbs_COMPOUND){TopoDS_Iterator child(result);
-        if(!child.More()||child.Value().ShapeType()!=TopAbs_SOLID)return Outcome::DeclinedOcctFailure;
-        const auto only=child.Value();child.Next();if(child.More())return Outcome::DeclinedOcctFailure;result=only;}
-    if(result.ShapeType()!=TopAbs_SOLID||result.Orientation()!=TopAbs_FORWARD
-        ||!BRepCheck_Analyzer(result).IsValid())return Outcome::DeclinedOcctFailure;
+        if(!child.More())return Outcome::DeclinedOcctFailure;
+        // C23: compound-child inspection is charged per child.
+        if(shared&&!shared->visit(1,tb::Site::C23FilletRound))return Outcome::DeclinedBudget;
+        if(child.Value().ShapeType()!=TopAbs_SOLID)return Outcome::DeclinedOcctFailure;
+        const auto only=child.Value();child.Next();
+        if(child.More()){
+            if(shared&&!shared->visit(1,tb::Site::C23FilletRound))return Outcome::DeclinedBudget;
+            return Outcome::DeclinedOcctFailure;}
+        result=only;}
+    if(result.ShapeType()!=TopAbs_SOLID||result.Orientation()!=TopAbs_FORWARD)return Outcome::DeclinedOcctFailure;
+    if(shared){
+        // C23: the rounded output is censused and its validity-analysis pass
+        // reserved before the analyzer runs.
+        tb::Census produced;const std::atomic_bool neverCancelled{false};
+        if(tb::CensusTopology(result,*shared,neverCancelled,produced,tb::Site::C23FilletRound,false)
+            !=tb::WalkStatus::Completed
+            ||!tb::ReserveTraversal(produced,*shared,tb::Site::C23FilletRound))return Outcome::DeclinedBudget;
+    }
+    if(!BRepCheck_Analyzer(result).IsValid())return Outcome::DeclinedOcctFailure;
     TopTools_IndexedMapOfShape consumed;
-    for(int c=1;c<=fillet.NbContours();++c)for(int e=1;e<=fillet.NbEdges(c);++e)consumed.Add(fillet.Edge(c,e));
+    for(int c=1;c<=fillet.NbContours();++c)for(int e=1;e<=fillet.NbEdges(c);++e){
+        if(shared&&!shared->visit(1,tb::Site::C23FilletRound))return Outcome::DeclinedBudget;
+        consumed.Add(fillet.Edge(c,e));}
     if(consumed.Extent()!=unique.Extent())return Outcome::DeclinedUnsupportedEdge;
-    for(int i=1;i<=unique.Extent();++i)if(!consumed.Contains(unique(i)))return Outcome::DeclinedUnsupportedEdge;
+    for(int i=1;i<=unique.Extent();++i){
+        if(shared&&!shared->visit(1,tb::Site::C23FilletRound))return Outcome::DeclinedBudget;
+        if(!consumed.Contains(unique(i)))return Outcome::DeclinedUnsupportedEdge;}
+    if(shared){
+        // C23: both volume-measurement passes are charged before they run.
+        const std::atomic_bool neverCancelled{false};
+        if(tb::ChargeTraversal(current,*shared,neverCancelled,tb::Site::C23FilletRound)
+            !=tb::WalkStatus::Completed
+            ||tb::ChargeTraversal(result,*shared,neverCancelled,tb::Site::C23FilletRound)
+            !=tb::WalkStatus::Completed)return Outcome::DeclinedBudget;
+    }
     const double before=Volume(current),after=Volume(result);
     if(!std::isfinite(before)||!std::isfinite(after)||after<=0||after>=before)return Outcome::DeclinedNonRemoving;
     if(exactContainment){
@@ -229,19 +322,46 @@ inline Outcome Round(const TopoDS_Shape& current,const Step& step,double mm,
         // can have net removal while adding material inside those bounds.
         // Require an empty regularized difference for EVERY transverse round,
         // never a larger physical tolerance or a small allowed extra volume.
+        if(shared){
+            // C23: the exact-containment difference input passes are debited
+            // before the cut runs.
+            const std::atomic_bool neverCancelled{false};
+            if(tb::ChargeTraversal(result,*shared,neverCancelled,tb::Site::C23FilletRound)
+                !=tb::WalkStatus::Completed
+                ||tb::ChargeTraversal(current,*shared,neverCancelled,tb::Site::C23FilletRound)
+                !=tb::WalkStatus::Completed)return Outcome::DeclinedBudget;
+        }
         BRepAlgoAPI_Cut excess;excess.SetNonDestructive(Standard_True);
         TopTools_ListOfShape arguments,tools;arguments.Append(result);tools.Append(current);
         excess.SetArguments(arguments);excess.SetTools(tools);excess.Build();
         if(stop.load())return Outcome::Cancelled;
         if(!excess.IsDone()||excess.Shape().IsNull())return Outcome::DeclinedNonRemoving;
+        if(shared){
+            // C23: the excess output is censused before the remaining-face
+            // inspection.
+            tb::Census excessCensus;const std::atomic_bool neverCancelled{false};
+            if(tb::CensusTopology(excess.Shape(),*shared,neverCancelled,excessCensus,
+                tb::Site::C23FilletRound,false)!=tb::WalkStatus::Completed)return Outcome::DeclinedBudget;
+        }
         TopExp_Explorer remaining(excess.Shape(),TopAbs_FACE);
         if(remaining.More())return Outcome::DeclinedNonRemoving;
-    }else if(!BoundsContained(current,result,1e-4/mm))return Outcome::DeclinedNonRemoving;
+    }else{
+        if(shared){
+            // C23: both bounds passes are charged before they run.
+            const std::atomic_bool neverCancelled{false};
+            if(tb::ChargeTraversal(current,*shared,neverCancelled,tb::Site::C23FilletRound)
+                !=tb::WalkStatus::Completed
+                ||tb::ChargeTraversal(result,*shared,neverCancelled,tb::Site::C23FilletRound)
+                !=tb::WalkStatus::Completed)return Outcome::DeclinedBudget;
+        }
+        if(!BoundsContained(current,result,1e-4/mm))return Outcome::DeclinedNonRemoving;
+    }
     solid=result;return Outcome::Built;
 }
 // Discovery has no carrier argument. Reconstruct it exclusively from the
 // authored source/tools, never from a candidate fillet or fitted dimensions.
-inline bool TransverseCarrier(const retained_boolean::Program& program,const std::atomic_bool& stop,TopoDS_Shape& carrier,std::uint64_t stopBefore=0){
+inline bool TransverseCarrier(const retained_boolean::Program& program,const std::atomic_bool& stop,
+    TopoDS_Shape& carrier,std::uint64_t stopBefore=0,tb::Counter* shared=nullptr){
     rectangular_loft::Definition loft;if(!loft_persistence::Decode(program.source.values,loft))return false;
     rectangular_loft::Admission admission;auto prepared=rectangular_loft::Prepare(loft,admission);
     rectangular_loft::SolidResult source;if(!prepared||rectangular_loft::Build(prepared,stop,source)!=rectangular_loft::BuildStatus::Built)return false;
@@ -252,32 +372,66 @@ inline bool TransverseCarrier(const retained_boolean::Program& program,const std
         if(step.operand.kind==analytic_boolean::OperandKind::Wedge){const auto strip=analytic_boolean_wedge::TransverseBoundary(
             saved_boolean_result::detail::GeometryView(program,step.operand),step.operand);
             if(strip.status!=analytic_boolean_wedge::Status::Clear)return false;removed=strip.removedVolume;}
-        analytic_boolean::Result cut;if(analytic_boolean::Build(carrier,recipe,stop,cut,removed)!=analytic_boolean::Status::Built)return false;
+        // C23/C25: with a shared operation counter the analytic pass borrows it.
+        analytic_boolean::Result cut;
+        const auto cutStatus=shared?analytic_boolean::Build(carrier,recipe,stop,cut,removed,*shared)
+            :analytic_boolean::Build(carrier,recipe,stop,cut,removed);
+        if(cutStatus!=analytic_boolean::Status::Built)return false;
         carrier=cut.solid;
     }
     for(const auto& step:program.filletSteps){if(step.stepIdentifier==stopBefore)break;TopoDS_Shape rounded;
-        if(Round(carrier,step,program.source.metersPerUnit*1000,stop,rounded,true)!=Outcome::Built)return false;carrier=rounded;}
+        if(Round(carrier,step,program.source.metersPerUnit*1000,stop,rounded,true,shared)!=Outcome::Built)return false;carrier=rounded;}
     return true;
 }
 inline bool ExpectedRemoval(const retained_boolean::Program& program,const Step& step,Interval& out,
-    const std::vector<TopoDS_Edge>* resolved=nullptr) noexcept {
+    const std::vector<TopoDS_Edge>* resolved=nullptr,tb::Counter* shared=nullptr) noexcept {
     if(AnalyticExpectedRemoval(program,step,out,resolved))return true;
     try {
         if(!saved_boolean_result::detail::TransverseProgram(program)||!saved_boolean_result::detail::AdmitSections(program))return false;
         std::atomic_bool stop(false);TopoDS_Shape carrier,rounded;
-        if(!TransverseCarrier(program,stop,carrier,step.stepIdentifier)||Round(carrier,step,program.source.metersPerUnit*1000,stop,rounded,true)!=Outcome::Built)return false;
+        if(!TransverseCarrier(program,stop,carrier,step.stepIdentifier,shared)
+            ||Round(carrier,step,program.source.metersPerUnit*1000,stop,rounded,true,shared)!=Outcome::Built)return false;
+        // C23: both volume-measurement passes are charged before they run.
+        if(shared){
+            const std::atomic_bool neverCancelled{false};
+            if(tb::ChargeTraversal(carrier,*shared,neverCancelled,tb::Site::C23FilletRound)
+                !=tb::WalkStatus::Completed
+                ||tb::ChargeTraversal(rounded,*shared,neverCancelled,tb::Site::C23FilletRound)
+                !=tb::WalkStatus::Completed){out={};return false;}
+        }
         out={Volume(carrier)-Volume(rounded),Volume(carrier)-Volume(rounded),0};return true;
     }catch(...){out={};return false;}
 }
-inline bool SameBoundary(const TopoDS_Shape& actual,const TopoDS_Shape& expected,const std::atomic_bool& stop,std::size_t& streamBytes){
-    if(!analytic_boolean::detail::Bounded(actual,65536,stop)||!analytic_boolean::detail::Bounded(expected,65536,stop))return false;
+inline bool SameBoundary(const TopoDS_Shape& actual,const TopoDS_Shape& expected,
+    const std::atomic_bool& stop,std::size_t& streamBytes,tb::Counter* shared=nullptr){
+    // C24: both bounded walks charge the shared counter; the local 65,536
+    // caps stay in force.
+    if(!analytic_boolean::detail::Bounded(actual,65536,stop,shared,tb::Site::C24FilletBuild)
+        ||!analytic_boolean::detail::Bounded(expected,65536,stop,shared,tb::Site::C24FilletBuild))return false;
+    const std::atomic_bool neverCancelled{false};
     for(auto type:{TopAbs_VERTEX,TopAbs_EDGE,TopAbs_WIRE,TopAbs_FACE,TopAbs_SHELL,TopAbs_SOLID}){
+        // C24: each of the six topology-type map passes is charged per side
+        // before the bulk call.
+        if(shared){
+            if(tb::ChargeTraversal(actual,*shared,neverCancelled,tb::Site::C24FilletBuild)
+                !=tb::WalkStatus::Completed
+                ||tb::ChargeTraversal(expected,*shared,neverCancelled,tb::Site::C24FilletBuild)
+                !=tb::WalkStatus::Completed)return false;
+        }
         TopTools_IndexedMapOfShape a,b;TopExp::MapShapes(actual,type,a);TopExp::MapShapes(expected,type,b);
         if(a.Extent()!=b.Extent())return false;
     }
     // Reuse the bounded geometry commitment stream and aggregate work budget.
     saved_cut_source_edit::ShapeCommitment a,b;
     const auto commit=[&](const TopoDS_Shape& shape,saved_cut_source_edit::ShapeCommitment& out){
+        if(shared){
+            // C24: each commitment's serialization pass is reserved before
+            // the write runs.
+            std::size_t occurrences=0;
+            if(tb::ChargeTraversal(shape,*shared,neverCancelled,tb::Site::C24FilletBuild,&occurrences)
+                !=tb::WalkStatus::Completed
+                ||!shared->visit(occurrences,tb::Site::C24FilletBuild))return false;
+        }
         saved_cut_source_edit::CommitmentStream sink(stop,streamBytes);std::ostream stream(&sink);
         stream.imbue(std::locale::classic());
         BRepTools::Write(shape,stream,Standard_False,Standard_False,TopTools_FormatVersion_VERSION_3);
@@ -287,42 +441,77 @@ inline bool SameBoundary(const TopoDS_Shape& actual,const TopoDS_Shape& expected
 }
 struct Result {Outcome outcome=Outcome::DeclinedOcctFailure;TopoDS_Shape solid;std::vector<Interval> intervals;};
 inline Result Build(const TopoDS_Shape& input,const retained_boolean::Program& program,const std::atomic_bool& stop,
-    const std::function<bool(const TopoDS_Shape&)>& charge={},std::size_t* aggregateStreamBytes=nullptr) noexcept {
+    const std::function<bool(const TopoDS_Shape&)>& charge={},std::size_t* aggregateStreamBytes=nullptr,
+    tb::Counter* shared=nullptr) noexcept {
     std::size_t localStreamBytes=0;auto& streamBytes=aggregateStreamBytes?*aggregateStreamBytes:localStreamBytes;
     Result out;const auto fail=[&](Outcome why){Result r;r.outcome=stop.load()?Outcome::Cancelled:why;CORE3D_CUT_NOTE(Reason(r.outcome));return r;};
     try {
         if(stop.load())return fail(Outcome::Cancelled);
         if(!retained_boolean::Valid(program)||input.IsNull())return fail(Outcome::DeclinedOcctFailure);
+        if(shared){
+            // C24: the private copy's bounded census and its reserved copy
+            // pass are debited before the copy runs.
+            tb::Census inputCensus;const std::atomic_bool neverCancelled{false};
+            if(tb::CensusTopology(input,*shared,neverCancelled,inputCensus,tb::Site::C24FilletBuild,false)
+                !=tb::WalkStatus::Completed
+                ||!tb::ReserveTraversal(inputCensus,*shared,tb::Site::C24FilletBuild))
+                return fail(Outcome::DeclinedBudget);
+        }
         BRepBuilderAPI_Copy copy(input,Standard_True,Standard_False);if(!copy.IsDone())return fail(Outcome::DeclinedOcctFailure);
         TopoDS_Shape current=copy.Shape();const double mm=program.source.metersPerUnit*1000;
         const bool transverse=saved_boolean_result::detail::TransverseProgram(program);
         for(const auto& step:program.filletSteps){
             if(stop.load())return fail(Outcome::Cancelled);
             std::vector<TopoDS_Edge> selected;
-            for(const auto& anchor:step.anchors){TopoDS_Edge edge;const auto resolved=Resolve(current,anchor,mm,edge);
+            for(const auto& anchor:step.anchors){TopoDS_Edge edge;const auto resolved=Resolve(current,anchor,mm,edge,shared);
                 if(resolved!=Outcome::Built)return fail(resolved);selected.push_back(edge);}
             Interval analytic;const bool hasAnalytic=AnalyticExpectedRemoval(program,step,analytic,&selected);
             if(!transverse&&!hasAnalytic)return fail(Outcome::DeclinedUnsupportedEdge);
             Interval interval=analytic;TopoDS_Shape expected;
             if(transverse){
+                if(shared){
+                    // C24: the expectation copy pass is reserved before it runs.
+                    const std::atomic_bool neverCancelled{false};
+                    if(tb::ChargeTraversal(current,*shared,neverCancelled,tb::Site::C24FilletBuild)
+                        !=tb::WalkStatus::Completed)return fail(Outcome::DeclinedBudget);
+                }
                 BRepBuilderAPI_Copy expectation(current,Standard_True,Standard_False);
                 if(!expectation.IsDone())return fail(Outcome::DeclinedOcctFailure);
-                const auto outcome=Round(expectation.Shape(),step,mm,stop,expected,true);
+                const auto outcome=Round(expectation.Shape(),step,mm,stop,expected,true,shared);
                 if(outcome!=Outcome::Built)return fail(outcome);
                 if(charge&&!charge(expected))return fail(Outcome::DeclinedBudget);
+                if(shared){
+                    // C24: both volume passes of the expectation comparison.
+                    const std::atomic_bool neverCancelled{false};
+                    if(tb::ChargeTraversal(expectation.Shape(),*shared,neverCancelled,tb::Site::C24FilletBuild)
+                        !=tb::WalkStatus::Completed
+                        ||tb::ChargeTraversal(expected,*shared,neverCancelled,tb::Site::C24FilletBuild)
+                        !=tb::WalkStatus::Completed)return fail(Outcome::DeclinedBudget);
+                }
                 const double loss=Volume(expectation.Shape())-Volume(expected);
                 interval={loss,loss,0};
             }
 #if DEBUG
             if(ConsumeFailure())return fail(Outcome::DeclinedOcctFailure);
 #endif
-            TopoDS_Shape solid;const auto outcome=Round(current,step,mm,stop,solid,transverse);
+            TopoDS_Shape solid;const auto outcome=Round(current,step,mm,stop,solid,transverse,shared);
             if(outcome!=Outcome::Built)return fail(outcome);
+            if(shared){
+                // C24: both volume passes of the removal comparison.
+                const std::atomic_bool neverCancelled{false};
+                if(tb::ChargeTraversal(current,*shared,neverCancelled,tb::Site::C24FilletBuild)
+                    !=tb::WalkStatus::Completed
+                    ||tb::ChargeTraversal(solid,*shared,neverCancelled,tb::Site::C24FilletBuild)
+                    !=tb::WalkStatus::Completed)return fail(Outcome::DeclinedBudget);
+            }
             const double removed=Volume(current)-Volume(solid);
             const auto contains=[&](const Interval& i){return removed>=i.lower-std::abs(i.lower)*1e-6
                 &&removed<=i.upper+std::abs(i.upper)*1e-6;};
+            // C24: a shared-counter denial inside SameBoundary surfaces as
+            // DeclinedBudget, never as a generic kernel failure.
             if(!contains(interval)||(hasAnalytic&&!contains(analytic))
-                ||(transverse&&!SameBoundary(solid,expected,stop,streamBytes)))return fail(Outcome::DeclinedOcctFailure);
+                ||(transverse&&!SameBoundary(solid,expected,stop,streamBytes,shared)))
+                return fail(shared&&shared->exhausted?Outcome::DeclinedBudget:Outcome::DeclinedOcctFailure);
             if(charge&&!charge(solid))return fail(Outcome::DeclinedBudget);
             current=solid;out.intervals.push_back(interval);
         }
@@ -338,37 +527,70 @@ inline Result Build(const TopoDS_Shape& input,const retained_boolean::Program& p
 // above is untouched; a composite host never enters it.
 inline Result BuildComposite(const TopoDS_Shape& input,const Program& fillet,double metersPerUnit,
     const std::atomic_bool& stop,
-    const std::function<bool(const TopoDS_Shape&)>& charge={},std::size_t* aggregateStreamBytes=nullptr) noexcept {
+    const std::function<bool(const TopoDS_Shape&)>& charge={},std::size_t* aggregateStreamBytes=nullptr,
+    tb::Counter* shared=nullptr) noexcept {
     std::size_t localStreamBytes=0;auto& streamBytes=aggregateStreamBytes?*aggregateStreamBytes:localStreamBytes;
     Result out;const auto fail=[&](Outcome why){Result r;r.outcome=stop.load()?Outcome::Cancelled:why;CORE3D_CUT_NOTE(Reason(r.outcome));return r;};
     try {
         if(stop.load())return fail(Outcome::Cancelled);
         const double mm=metersPerUnit*1000;
         if(!Valid(fillet,mm)||input.IsNull())return fail(Outcome::DeclinedOcctFailure);
+        if(shared){
+            // C24: the private copy's bounded census and its reserved copy
+            // pass are debited before the copy runs.
+            tb::Census inputCensus;const std::atomic_bool neverCancelled{false};
+            if(tb::CensusTopology(input,*shared,neverCancelled,inputCensus,tb::Site::C24FilletBuild,false)
+                !=tb::WalkStatus::Completed
+                ||!tb::ReserveTraversal(inputCensus,*shared,tb::Site::C24FilletBuild))
+                return fail(Outcome::DeclinedBudget);
+        }
         BRepBuilderAPI_Copy copy(input,Standard_True,Standard_False);if(!copy.IsDone())return fail(Outcome::DeclinedOcctFailure);
         TopoDS_Shape current=copy.Shape();
         for(const auto& step:fillet.filletSteps){
             if(stop.load())return fail(Outcome::Cancelled);
             std::vector<TopoDS_Edge> selected;
-            for(const auto& anchor:step.anchors){TopoDS_Edge edge;const auto resolved=Resolve(current,anchor,mm,edge);
+            for(const auto& anchor:step.anchors){TopoDS_Edge edge;const auto resolved=Resolve(current,anchor,mm,edge,shared);
                 if(resolved!=Outcome::Built)return fail(resolved);selected.push_back(edge);}
+            if(shared){
+                // C24: the expectation copy pass is reserved before it runs.
+                const std::atomic_bool neverCancelled{false};
+                if(tb::ChargeTraversal(current,*shared,neverCancelled,tb::Site::C24FilletBuild)
+                    !=tb::WalkStatus::Completed)return fail(Outcome::DeclinedBudget);
+            }
             BRepBuilderAPI_Copy expectation(current,Standard_True,Standard_False);
             if(!expectation.IsDone())return fail(Outcome::DeclinedOcctFailure);
             TopoDS_Shape expected;
-            const auto expectedOutcome=Round(expectation.Shape(),step,mm,stop,expected,true);
+            const auto expectedOutcome=Round(expectation.Shape(),step,mm,stop,expected,true,shared);
             if(expectedOutcome!=Outcome::Built)return fail(expectedOutcome);
             if(charge&&!charge(expected))return fail(Outcome::DeclinedBudget);
+            if(shared){
+                // C24: both volume passes of the expectation comparison.
+                const std::atomic_bool neverCancelled{false};
+                if(tb::ChargeTraversal(expectation.Shape(),*shared,neverCancelled,tb::Site::C24FilletBuild)
+                    !=tb::WalkStatus::Completed
+                    ||tb::ChargeTraversal(expected,*shared,neverCancelled,tb::Site::C24FilletBuild)
+                    !=tb::WalkStatus::Completed)return fail(Outcome::DeclinedBudget);
+            }
             const double loss=Volume(expectation.Shape())-Volume(expected);
             const Interval interval{loss,loss,0};
 #if DEBUG
             if(ConsumeFailure())return fail(Outcome::DeclinedOcctFailure);
 #endif
-            TopoDS_Shape solid;const auto outcome=Round(current,step,mm,stop,solid,true);
+            TopoDS_Shape solid;const auto outcome=Round(current,step,mm,stop,solid,true,shared);
             if(outcome!=Outcome::Built)return fail(outcome);
+            if(shared){
+                // C24: both volume passes of the removal comparison.
+                const std::atomic_bool neverCancelled{false};
+                if(tb::ChargeTraversal(current,*shared,neverCancelled,tb::Site::C24FilletBuild)
+                    !=tb::WalkStatus::Completed
+                    ||tb::ChargeTraversal(solid,*shared,neverCancelled,tb::Site::C24FilletBuild)
+                    !=tb::WalkStatus::Completed)return fail(Outcome::DeclinedBudget);
+            }
             const double removed=Volume(current)-Volume(solid);
             const auto contains=[&](const Interval& i){return removed>=i.lower-std::abs(i.lower)*1e-6
                 &&removed<=i.upper+std::abs(i.upper)*1e-6;};
-            if(!contains(interval)||!SameBoundary(solid,expected,stop,streamBytes))return fail(Outcome::DeclinedOcctFailure);
+            if(!contains(interval)||!SameBoundary(solid,expected,stop,streamBytes,shared))
+                return fail(shared&&shared->exhausted?Outcome::DeclinedBudget:Outcome::DeclinedOcctFailure);
             if(charge&&!charge(solid))return fail(Outcome::DeclinedBudget);
             current=solid;out.intervals.push_back(interval);
         }

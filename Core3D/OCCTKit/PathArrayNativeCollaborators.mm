@@ -14,14 +14,42 @@
 #include <set>
 
 #if DEBUG
+#import <TargetConditionals.h>
 #include "NativeOpeningSurfaceProbe.hxx"
+#include "DetachedPlanarSweepProbe.hxx"
+#include "../UI/Core3DViewer.h"
+#include "../Viewport/Core3DSceneSnapshotFactory.hpp"
+#if TARGET_OS_IOS
+#import "GLView.h"
+#endif
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <Standard_Failure.hxx>
 #include <TCollection_AsciiString.hxx>
 #include <TDataStd_AsciiString.hxx>
 #include <TDataStd_Integer.hxx>
+#include <TDataStd_Name.hxx>
 #include <TNaming_Builder.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Face.hxx>
+
+namespace core3d::bounded_curve {
+// Definition of the DEBUG friend forward-declared in BoundedCurveAttribute.hxx.
+// It lets this fixture attach a canonical payload exactly the way the production
+// owner path in OcctDocument.mm does, without widening the attribute's API.
+// Identical to the Core3DNativeOpenings.mm definition.
+struct PersistenceProbe {
+    static bool Attach(const TDF_Label& record,
+                       const std::shared_ptr<Payload>& payload) noexcept {
+        try {
+            if (record.IsNull() || !payload || record.HasAttribute()) return false;
+            Handle(Attribute) attribute = new Attribute();
+            attribute->value_ = payload;
+            record.AddAttribute(attribute);
+            return true;
+        } catch (...) { return false; }
+    }
+};
+} // namespace core3d::bounded_curve
 #endif
 
 namespace core3d::path_array_owner {
@@ -372,10 +400,59 @@ public:
             if (!lease || !lease->ownsOpenCommand() || !prepared.native
                 || (!borrowed_ && prepared.native->before != opening.labels)
                 || (!borrowed_ && !authority_.isCurrent(owner_, opening.labels,
-                                          opening.record.definition))
-                || !owner_.StageAllLabels(*lease, prepared.native->labels,
-                                           receipts_)) return false;
+                                          opening.record.definition)))
+                return false;
+            // A survivor carrying a retained sweep/loft recipe cannot go
+            // through the exact-label replacement route: ReplaceShape
+            // re-captures the owner after SetShape, and a bound recipe record
+            // read refuses the stale intermediate binding; forgetting the
+            // record first breaks the replacement's receipt-current fence.
+            // Those survivors are staged below in the proven
+            // pattern_recipe_clone::StageReplacement order (recipe values,
+            // then the raw shape set, then the recipe rebind) inside this
+            // same command, with presentation preservation measured from
+            // exact receipts. Recipe-less survivors, creates and removals keep
+            // the shared exact-label route.
+            std::set<std::string> recipeSurvivors;
+            for (const auto& recipe : prepared.native->recipes)
+                if (!recipe.created
+                    && (recipe.prepared.family
+                            == pattern_recipe_clone::Family::Sweep
+                        || recipe.prepared.family
+                            == pattern_recipe_clone::Family::Loft))
+                    recipeSurvivors.insert(recipe.entityIdentifier);
+            OcctAllLabelPlan directPlan = prepared.native->labels;
+            std::vector<OcctAllLabelPlan::Replace> recipeReplacements;
+            if (!recipeSurvivors.empty()) {
+                directPlan.replacements.clear();
+                for (const auto& replacement : prepared.native->labels
+                         .replacements) {
+                    if (recipeSurvivors.count(replacement.expected.visibility
+                            .object.object.entityIdentifier))
+                        recipeReplacements.push_back(replacement);
+                    else
+                        directPlan.replacements.push_back(replacement);
+                }
+            }
+            if (!owner_.StageAllLabels(*lease, directPlan, receipts_))
+                return false;
+            for (const auto& replacement : recipeReplacements) {
+                const auto& entity = replacement.expected.visibility.object
+                    .object.entityIdentifier;
+                const auto recipe = std::find_if(prepared.native->recipes
+                        .begin(), prepared.native->recipes.end(),
+                    [&](const NativeMutation::Recipe& value) {
+                        return value.entityIdentifier == entity;
+                    });
+                OcctExactLabelReceipt stagedReceipt;
+                if (recipe == prepared.native->recipes.end()
+                    || !stageRecipeSurvivor(replacement, *recipe,
+                            stagedReceipt))
+                    return false;
+                receipts_.push_back(std::move(stagedReceipt));
+            }
             for (const auto& recipe : prepared.native->recipes) {
+                if (recipeSurvivors.count(recipe.entityIdentifier)) continue;
                 const auto found = std::find_if(receipts_.begin(), receipts_.end(),
                     [&](const OcctExactLabelReceipt& value) {
                         return value.visibility.object.object.entityIdentifier
@@ -397,6 +474,104 @@ public:
         } catch (...) { receipts_.clear(); return false; }
     }
 
+private:
+    // Stage one recipe-carrying survivor replacement in the proven
+    // pattern_recipe_clone::StageReplacement order: update the recipe values
+    // while the label still carries the current shape, set the replacement
+    // shape, rebind the recipe record, then prove the exact receipt with only
+    // the shape changed and every presentation field preserved.
+    bool stageRecipeSurvivor(const OcctAllLabelPlan::Replace& replacement,
+                             const NativeMutation::Recipe& recipe,
+                             OcctExactLabelReceipt& receipt) noexcept {
+        receipt = {};
+        try {
+            const auto& expected = replacement.expected;
+            const TDF_Label label = expected.visibility.object.object.label;
+            const auto document = owner_.Document();
+            if (document.IsNull() || !document->HasOpenCommand()
+                || label.IsNull() || replacement.clone.detachedShape.IsNull())
+                return false;
+            OcctExactLabelReceipt current;
+            if (!owner_.ReadExactFreeLabel(expected, current)) return false;
+            pattern_recipe_clone::Source currentRecipe;
+            if (!pattern_recipe_clone::Capture(document, label, currentRecipe))
+                return false;
+            const auto shapes = XCAFDoc_DocumentTool::ShapeTool(
+                document->Main());
+            if (shapes.IsNull()) return false;
+            if (recipe.prepared.family == pattern_recipe_clone::Family::Sweep) {
+                if (currentRecipe.family
+                        != pattern_recipe_clone::Family::Sweep
+                    || currentRecipe.sweep.label.IsNull()
+                    || recipe.prepared.featureIdentifier
+                        != currentRecipe.sweep.identifier
+                    || !sweep_persistence::Stage(document, label,
+                            recipe.prepared.sweep, currentRecipe.sweep.identifier))
+                    return false;
+                shapes->SetShape(label, replacement.clone.detachedShape);
+                TNaming_Builder(currentRecipe.sweep.label).Select(
+                    replacement.clone.detachedShape,
+                    replacement.clone.detachedShape);
+                sweep_persistence::Record stagedRecipe;
+                if (!sweep_persistence::Read(document, label, stagedRecipe)
+                    || stagedRecipe.label.IsNull()
+                    || !stagedRecipe.label.IsEqual(currentRecipe.sweep.label)
+                    || stagedRecipe.identifier != currentRecipe.sweep.identifier
+                    || !stagedRecipe.IsCurrent(document, label)) return false;
+            } else if (recipe.prepared.family
+                    == pattern_recipe_clone::Family::Loft) {
+                if (currentRecipe.family
+                        != pattern_recipe_clone::Family::Loft
+                    || currentRecipe.loft.label.IsNull()
+                    || recipe.prepared.featureIdentifier
+                        != currentRecipe.loft.identifier
+                    || !loft_persistence::Stage(document, label,
+                            recipe.prepared.loft, currentRecipe.loft.identifier))
+                    return false;
+                shapes->SetShape(label, replacement.clone.detachedShape);
+                TNaming_Builder(currentRecipe.loft.label).Select(
+                    replacement.clone.detachedShape,
+                    replacement.clone.detachedShape);
+                loft_persistence::Record stagedRecipe;
+                if (!loft_persistence::Read(document, label, stagedRecipe)
+                    || stagedRecipe.label.IsNull()
+                    || !stagedRecipe.label.IsEqual(currentRecipe.loft.label)
+                    || stagedRecipe.identifier != currentRecipe.loft.identifier
+                    || !stagedRecipe.IsCurrent(document, label)) return false;
+            } else return false;
+            if (!owner_.CaptureExactFreeLabel(label, receipt)
+                || !receipt.visibility.object.object.shape.IsEqual(
+                    replacement.clone.detachedShape)
+                || !SurvivorPresentationPreserved(expected, receipt))
+                { receipt = {}; return false; }
+            return true;
+        } catch (...) { receipt = {}; return false; }
+    }
+
+    static bool SurvivorPresentationPreserved(
+        const OcctExactLabelReceipt& expected,
+        const OcctExactLabelReceipt& receipt) noexcept {
+        try {
+            const auto& a = expected.visibility;
+            const auto& b = receipt.visibility;
+            return a.invisibleAttributePresent == b.invisibleAttributePresent
+                && a.layerLinkPresent == b.layerLinkPresent
+                && a.layers == b.layers
+                && a.layerInvisibleAttributePresent
+                    == b.layerInvisibleAttributePresent
+                && a.object.namePresent == b.object.namePresent
+                && (!a.object.namePresent || a.object.name.IsEqual(b.object.name))
+                && a.object.object.entityIdentifier
+                    == b.object.object.entityIdentifier
+                && a.object.object.definitionIdentifier
+                    == b.object.object.definitionIdentifier
+                && a.object.object.present == b.object.object.present
+                && a.object.object.scalars == b.object.object.scalars
+                && expected.appearance.IsEqual(receipt.appearance);
+        } catch (...) { return false; }
+    }
+
+public:
     bool readBackAll(const path_array::Definition& candidate) noexcept override {
         try {
             if (!mutation_
@@ -1224,32 +1399,957 @@ std::uint64_t RunD3AdmissionProbe() noexcept {
         return bits;
     } catch (...) { return 0; }
 }
+
+// ---------------------------------------------------------------------------
+// R179 D3 native collaborator probe fixture and scenario bodies.
+//
+// The GL-backed fixture mirrors the proven OwnerProbeFixture
+// (BoundedCurveOwner.mm) and the R179 staging helpers of
+// LifecycleProbeFixture (Core3DNativeOpenings.mm). Those helpers are
+// file-static in their translation units, so the minimal staging is
+// replicated here. Every scenario below drives the production collaborators
+// against a real viewer document and derives every returned bit from
+// measured records, receipts, resolver verdicts and history.
+// ---------------------------------------------------------------------------
+
+#if TARGET_OS_IOS
+struct D3ProbeContextRestorer final {
+    __strong EAGLContext *context = nil;
+    ~D3ProbeContextRestorer() noexcept {
+        (void)[EAGLContext setCurrentContext:context];
+    }
+};
+#endif
+
+struct D3ProbeCurve final {
+    bounded_curve::PersistedValue persisted;
+    bounded_curve::DetachedWire detached;
+    TDF_Label label;
+};
+
+bool D3ProbeStageNamedRoot(const Handle(XCAFDoc_ShapeTool)& shapes,
+                           const TopoDS_Shape& shape, const char* name,
+                           D3ProbeObject& object) {
+    if (!D3ProbeStageRoot(shapes, shape, object)) return false;
+    try {
+        TDataStd_Name::Set(object.label, TCollection_ExtendedString(name));
+        return true;
+    } catch (...) { return false; }
+}
+
+// Minimal replication of Core3DNativeOpenings.mm's file-static R179StageCurve:
+// a real native C1 Path3D wire root plus its canonical record payload. The
+// gentle profile keeps D3's unchanged 0.1-radian tangent limit satisfied.
+bool D3ProbeStageCurve(const Handle(XCAFDoc_ShapeTool)& shapes,
+                       const UUID& documentUUID, double nativePerMM,
+                       const char* name, D3ProbeCurve& output) {
+    try {
+        auto persisted = native_opening::debug::wire_probe::Fixture();
+        persisted.ownerState.owner.document = documentUUID;
+        persisted.ownerState.owner.entity = D3ProbeID();
+        persisted.ownerState.owner.definition = D3ProbeID();
+        persisted.ownerState.feature = D3ProbeID();
+        persisted.value.feature = persisted.ownerState.feature;
+        persisted.value.definition.frame.identifier = D3ProbeID();
+        for (double& scalar : persisted.value.definition.frame.origin)
+            scalar *= nativePerMM;
+        for (auto& pole : persisted.value.definition.controlPoints) {
+            pole.identifier = D3ProbeID();
+            pole.local[1] *= 0.01;
+            pole.local[2] *= 0.01;
+            for (double& scalar : pole.local) scalar *= nativePerMM;
+        }
+        std::vector<std::uint8_t> bytes;
+        if (!bounded_curve::Encode(persisted.value, bytes)
+            || !bounded_curve::Hash(bytes, bounded_curve::MaximumDefinitionBytes,
+                persisted.ownerState.canonicalDefinitionDigest)) return false;
+        if (bounded_curve::BuildWire(persisted, output.detached)
+                != bounded_curve::BuildRefusal::None) return false;
+        output.persisted = persisted;
+        D3ProbeObject object{persisted.ownerState.owner.entity,
+            persisted.ownerState.owner.definition, TDF_Label()};
+        if (!D3ProbeStageNamedRoot(shapes, output.detached.wire, name, object))
+            return false;
+        output.label = object.label;
+        return true;
+    } catch (...) { return false; }
+}
+
+// Same payload attach as Core3DNativeOpenings.mm's R179AttachCurveRecord.
+bool D3ProbeAttachCurveRecord(const D3ProbeCurve& curve) {
+    try {
+        const TDF_Label record = curve.label.FindChild(
+            bounded_curve::MinimumRecordTag, Standard_True);
+        auto payload = std::make_shared<bounded_curve::Payload>();
+        payload->persisted = curve.persisted;
+        payload->definitionBytes = curve.detached.canonicalDefinitionBytes;
+        payload->ownerBytes = curve.detached.canonicalOwnerBytes;
+        if (!bounded_curve::PersistenceProbe::Attach(record, payload))
+            return false;
+        TNaming_Builder(record).Select(curve.detached.wire, curve.detached.wire);
+        return true;
+    } catch (...) { return false; }
+}
+
+// The staged SYPA/1 definition: two active members on the current path, with
+// every staged path first proven against the production instance-count law.
+bool D3ProbeBuildDefinition(const UUID& documentUUID,
+                            const D3ProbeObject& source,
+                            const D3ProbeObject& member,
+                            const D3ProbeObject& array,
+                            const D3ProbeCurve& currentPath,
+                            const D3ProbeCurve* replacementPath,
+                            path_array::Definition& output) {
+    output = {};
+    output.owner = {documentUUID, array.entity, array.definition};
+    output.feature = D3ProbeID();
+    output.source = {documentUUID, source.entity, source.definition,
+        D3ProbeID()};
+    output.path.owner = currentPath.persisted.ownerState.owner;
+    output.path.feature = currentPath.persisted.value.feature;
+    output.path.definitionRevision =
+        currentPath.persisted.ownerState.definitionRevision;
+    output.path.canonicalDefinitionDigest =
+        currentPath.persisted.ownerState.canonicalDefinitionDigest;
+    output.distribution = {path_array::DistributionMode::Count, 2, 0, true,
+        true};
+    output.orientation.policy = path_array::OrientationPolicy::Fixed;
+    output.orientation.rollRadians = 0;
+    output.orientation.hasUpVector = false;
+    output.orientation.upVector = {{0, 0, 1}};
+    output.orientation.maximumFrameStepRadians = 0.1;
+    output.arcLengthTolerance = 1e-4;
+    output.minimumTangent = 1e-6;
+    output.issuance.nextLocalID = 3;
+    output.members = {
+        {source.entity, 1, {0, 0}, pattern::MemberState::Active},
+        {member.entity, 2, {0, 1}, pattern::MemberState::Active},
+    };
+    if (!path_array::Valid(output)) {
+        NSLog(@"R179_D3_COLLABORATOR_DEF gate=valid");
+        return false;
+    }
+    if (!path_array::Matches(output.path, currentPath.persisted)) {
+        NSLog(@"R179_D3_COLLABORATOR_DEF gate=matches");
+        return false;
+    }
+    std::vector<const bounded_curve::PersistedValue*> paths{
+        &currentPath.persisted};
+    if (replacementPath) paths.push_back(&replacementPath->persisted);
+    for (const auto* path : paths) {
+        auto candidate = output;
+        candidate.path.owner = path->ownerState.owner;
+        candidate.path.feature = path->value.feature;
+        candidate.path.definitionRevision = path->ownerState.definitionRevision;
+        candidate.path.canonicalDefinitionDigest =
+            path->ownerState.canonicalDefinitionDigest;
+        std::uint32_t count = 0;
+        double length = 0;
+        const auto status = path_array::RequiredInstanceCount(candidate, *path,
+            count, length);
+        if (status != path_array::BuildRefusal::None
+            || count != output.members.size()) {
+            NSLog(@"R179_D3_COLLABORATOR_DEF gate=required-count status=%u count=%u length=%g",
+                  unsigned(status), unsigned(count), length);
+            return false;
+        }
+    }
+    return true;
+}
+
+struct D3CollaboratorProbeFixture final {
+    core3d::Core3DViewer viewer;
+    Handle(OcctDocument) document;
+    std::vector<Handle(AIS_Shape)> presentations;
+    D3ProbeObject source, member, array;
+    D3ProbeCurve currentPath, replacementPath;
+    path_array::Record arrayRecord;
+    std::string sourceRecipeIdentifier, memberRecipeIdentifier;
+    // Descriptive failure provenance only; never contributes an evidence bit.
+    const char* setupStage = "allocate-gl-host";
+    bool cleanupSucceeded = true;
+#if TARGET_OS_IOS
+    __strong GLView *host = nil;
+#endif
+
+    ~D3CollaboratorProbeFixture() noexcept { shutdown(); }
+
+    bool perform(void (^work)(void)) noexcept {
+#if TARGET_OS_IOS
+        D3ProbeContextRestorer restore{[EAGLContext currentContext]};
+        try {
+            return host != nil && work != nil
+                && [host debugPerformWithProbeFramebuffer:work];
+        } catch (const Standard_Failure& failure) {
+            NSLog(@"D3 collaborator probe wrapper failed: %.256s",
+                  failure.GetMessageString() ?: "Standard_Failure");
+            return false;
+        } catch (...) { return false; }
+#else
+        (void)work;
+        return false;
+#endif
+    }
+
+    void shutdown() noexcept {
+#if TARGET_OS_IOS
+        if (host == nil) return;
+        D3ProbeContextRestorer restore{[EAGLContext currentContext]};
+        D3CollaboratorProbeFixture *fixture = this;
+        __block bool cleaned = false;
+        void (^cleanup)(void) = ^{
+            try {
+                if (!fixture->document.IsNull()
+                    && !fixture->document->Document().IsNull()
+                    && fixture->document->Document()->HasOpenCommand())
+                    fixture->document->Document()->AbortCommand();
+                fixture->viewer.release();
+                cleaned = true;
+            } catch (const Standard_Failure& failure) {
+                NSLog(@"D3 collaborator probe cleanup failed: %.256s",
+                      failure.GetMessageString() ?: "Standard_Failure");
+            } catch (...) {}
+        };
+        bool performed = perform(cleanup);
+        if (!performed && !cleaned) {
+            try { performed = [host performWithRenderingContext:cleanup]; }
+            catch (...) { performed = false; }
+        }
+        cleanupSucceeded = cleanupSucceeded && performed && cleaned;
+        presentations.clear();
+        document.Nullify();
+        host = nil;
+#endif
+    }
+
+    std::shared_ptr<native_opening::Context> context(
+        const std::string& entity) noexcept {
+        __block std::shared_ptr<native_opening::Context> result;
+        D3CollaboratorProbeFixture *fixture = this;
+        if (!perform(^{
+            result = fixture->viewer.captureNativeOpeningContext(
+                64, 64, {entity});
+        })) return {};
+        return result;
+    }
+
+    bool initialize(double metersPerUnit, bool withReplacementPath,
+                    bool withRecipes) noexcept {
+#if !TARGET_OS_IOS
+        (void)metersPerUnit; (void)withReplacementPath; (void)withRecipes;
+        return false;
+#else
+        try {
+            D3ProbeContextRestorer restore{[EAGLContext currentContext]};
+            host = [[GLView alloc] initWithFrame:
+                CGRectMake(0.0, 0.0, 64.0, 64.0)];
+            setupStage = "prepare-probe-framebuffer";
+            if (host == nil || host->myGLContext == nil
+                || ![host debugPrepareProbeFramebuffer]) {
+                host = nil;
+                return false;
+            }
+            setupStage = "restore-caller-context";
+            if (![EAGLContext setCurrentContext:restore.context]) {
+                shutdown();
+                return false;
+            }
+            __block bool initialized = false;
+            D3CollaboratorProbeFixture *fixture = this;
+            const bool performed = perform(^{
+                fixture->setupStage = "initialize-viewer-and-interactors";
+                if (!fixture->viewer.InitViewer(fixture->host)
+                    || fixture->viewer.getObjectInteractor() == nullptr
+                    || fixture->viewer.getShapeInteractor() == nullptr
+                    || fixture->viewer.AisContext().IsNull()
+                    || fixture->viewer.ActiveView().IsNull()) return;
+                fixture->setupStage = "viewer-document";
+                fixture->document = fixture->viewer.getDocument();
+                if (fixture->document.IsNull()
+                    || fixture->document->Document().IsNull()
+                    || fixture->document->Document()->GetData().IsNull()
+                    || fixture->document->Document()->HasOpenCommand()) return;
+                const Handle(TDocStd_Document) document =
+                    fixture->document->Document();
+                fixture->setupStage = "set-length-unit";
+                XCAFDoc_DocumentTool::SetLengthUnit(document, metersPerUnit);
+                fixture->setupStage = "document-uuid";
+                UUID documentUUID{};
+                if (!core3d::pattern_owner::Parse(
+                        fixture->document->DocumentIdentifier(), documentUUID)) {
+                    documentUUID = D3ProbeID();
+                    if (!D3ProbeSetUUID(document->Main(),
+                            "74386E4E-F620-498F-8092-E6D883AF33A4",
+                            documentUUID)) return;
+                }
+                fixture->setupStage = "shape-tool";
+                const Handle(XCAFDoc_ShapeTool) shapes =
+                    XCAFDoc_DocumentTool::ShapeTool(document->Main());
+                if (shapes.IsNull()) return;
+                const double nativePerMM = 0.001 / metersPerUnit;
+                fixture->setupStage = "stage-objects";
+                fixture->source = {D3ProbeID(), D3ProbeID(), TDF_Label()};
+                fixture->member = {D3ProbeID(), D3ProbeID(), TDF_Label()};
+                fixture->array = {D3ProbeID(), D3ProbeID(), TDF_Label()};
+                if (!D3ProbeStageNamedRoot(shapes, BRepPrimAPI_MakeBox(
+                            20 * nativePerMM, 12 * nativePerMM,
+                            8 * nativePerMM).Shape(),
+                        "R179 D3 Source", fixture->source)
+                    || !D3ProbeStageNamedRoot(shapes, BRepPrimAPI_MakeBox(
+                            20 * nativePerMM, 12 * nativePerMM,
+                            8 * nativePerMM).Shape(),
+                        "R179 D3 Member", fixture->member)
+                    || !D3ProbeStageNamedRoot(shapes, BRepPrimAPI_MakeBox(
+                            20 * nativePerMM, 12 * nativePerMM,
+                            8 * nativePerMM).Shape(),
+                        "R179 D3 Array", fixture->array)
+                    || !D3ProbeStageCurve(shapes, documentUUID, nativePerMM,
+                        "R179 D3 Path", fixture->currentPath)
+                    || (withReplacementPath
+                        && !D3ProbeStageCurve(shapes, documentUUID,
+                            nativePerMM, "R179 D3 Replacement Path",
+                            fixture->replacementPath))) return;
+                fixture->setupStage = "build-definition";
+                path_array::Definition definition;
+                if (!D3ProbeBuildDefinition(documentUUID, fixture->source,
+                        fixture->member, fixture->array, fixture->currentPath,
+                        withReplacementPath ? &fixture->replacementPath
+                                            : nullptr,
+                        definition)) return;
+                fixture->setupStage = "stage-records";
+                document->SetUndoLimit(16);
+                document->NewCommand();
+                bool staged = D3ProbeAttachCurveRecord(fixture->currentPath)
+                    && (!withReplacementPath
+                        || D3ProbeAttachCurveRecord(fixture->replacementPath));
+                if (staged && withRecipes) {
+                    // A real sweep recipe on source and member so the later
+                    // growth edit stages a genuinely cloned member recipe.
+                    const auto sweepDefinition =
+                        core3d::planar_sweep::probe::Fixture(4, metersPerUnit);
+                    fixture->sourceRecipeIdentifier =
+                        OcctDocument::NewProfileIdentifier();
+                    fixture->memberRecipeIdentifier =
+                        OcctDocument::NewProfileIdentifier();
+                    staged = !fixture->sourceRecipeIdentifier.empty()
+                        && !fixture->memberRecipeIdentifier.empty()
+                        && fixture->sourceRecipeIdentifier
+                            != fixture->memberRecipeIdentifier
+                        && core3d::sweep_persistence::Stage(document,
+                            fixture->source.label, sweepDefinition,
+                            fixture->sourceRecipeIdentifier)
+                        && core3d::sweep_persistence::Stage(document,
+                            fixture->member.label, sweepDefinition,
+                            fixture->memberRecipeIdentifier);
+                }
+                path_array::Record stagedRecord;
+                staged = staged && path_array::Stage(document, definition,
+                    stagedRecord);
+                if (!staged || !document->CommitCommand()) {
+                    if (document->HasOpenCommand()) document->AbortCommand();
+                    return;
+                }
+                fixture->setupStage = "readback";
+                std::vector<path_array::Record> records;
+                std::vector<core3d::bounded_curve::Record> curves;
+                if (!path_array::ReadAll(document, records)
+                    || records.size() != 1
+                    || records.front().bytes != stagedRecord.bytes
+                    || !core3d::bounded_curve::ReadAll(document, curves)
+                    || curves.size() != (withReplacementPath ? 2U : 1U))
+                    return;
+                fixture->arrayRecord = records.front();
+                fixture->setupStage = "publish-staged-shapes";
+                document->ClearUndos();
+                fixture->document->NotifyChanges();
+                const auto ais = fixture->viewer.AisContext();
+                TDF_LabelSequence roots;
+                shapes->GetFreeShapes(roots);
+                std::set<std::string> expected, published;
+                expected.insert(Text(fixture->source.entity));
+                expected.insert(Text(fixture->member.entity));
+                expected.insert(Text(fixture->array.entity));
+                expected.insert(Text(
+                    fixture->currentPath.persisted.ownerState.owner.entity));
+                if (withReplacementPath)
+                    expected.insert(Text(fixture->replacementPath
+                        .persisted.ownerState.owner.entity));
+                for (Standard_Integer index = 1; index <= roots.Length();
+                     ++index) {
+                    const TDF_Label label = roots.Value(index);
+                    const TopoDS_Shape shape =
+                        XCAFDoc_ShapeTool::GetShape(label);
+                    if (shape.IsNull()) return;
+                    Handle(AIS_Shape) presentation = new AIS_Shape(shape);
+                    ais->Display(presentation, AIS_Shaded, 0, Standard_False);
+                    fixture->presentations.push_back(presentation);
+                    const std::string entity =
+                        fixture->document->EntityIdentifierForLabel(label);
+                    if (!entity.empty()) published.insert(entity);
+                }
+                fixture->setupStage = "published-entity-set";
+                for (const std::string& entity : expected)
+                    if (!published.count(entity)) return;
+                fixture->setupStage = "whole-shape-selection";
+                const auto shapeInteractor =
+                    fixture->viewer.getShapeInteractor();
+                if (shapeInteractor->setSelectionMode(
+                        core3d::ShapeSelectionMode::WholeShape)
+                        != core3d::ShapeSelectionModeChangeResult::Succeeded
+                    || !shapeInteractor->selectionModeAuthorityIsExact())
+                    return;
+                fixture->setupStage = "redraw-and-snapshot";
+                ais->UpdateCurrentViewer();
+                fixture->viewer.ActiveView()->FitAll();
+                const auto snapshot =
+                    fixture->viewer.captureSceneSnapshot(64, 64);
+                fixture->setupStage = "snapshot-invariants";
+                if (!snapshot || snapshot->publicationSourceIdentifier.empty()
+                    || snapshot->metersPerUnit != metersPerUnit
+                    || document->HasOpenCommand()
+                    || document->GetAvailableUndos() != 0
+                    || document->GetAvailableRedos() != 0) return;
+                fixture->setupStage = "snapshot-entity-set";
+                for (const std::string& entity : expected)
+                    if (std::none_of(snapshot->instances.begin(),
+                            snapshot->instances.end(),
+                            [&](const core3d::scene::InstanceSnapshot&
+                                    instance) {
+                                return instance.entityIdentifier == entity;
+                            })) return;
+                fixture->setupStage = "done";
+                initialized = true;
+            });
+            if (!performed || !initialized) {
+                NSLog(@"R179_D3_COLLABORATOR_SETUP stage=%s performed=%d initialized=%d",
+                      setupStage, int(performed), int(initialized));
+                shutdown();
+                return false;
+            }
+            return true;
+        } catch (const Standard_Failure& failure) {
+            NSLog(@"D3 collaborator probe initialization failed: %.256s",
+                  failure.GetMessageString() ?: "Standard_Failure");
+            shutdown();
+            return false;
+        } catch (...) { shutdown(); return false; }
+#endif
+    }
+};
+
+// Measured values from the same executed scenario runs. complete is set only
+// when the scenario earned every bit; the readback seam refuses (~0) before
+// that so a partial run can never masquerade as measured evidence.
+struct D3ProbeReadbacks final {
+    std::uint64_t values[4] = {~0ull, ~0ull, ~0ull, ~0ull};
+    bool complete = false;
+};
+
+D3ProbeReadbacks& D3ProbeStoredReadbacks(std::int32_t scenario) noexcept {
+    static thread_local D3ProbeReadbacks slots[4];
+    return slots[scenario];
+}
+
+// Scenario 0: the production LivePathResolver resolves the staged C1 Path3D
+// locator against the real document and returns the same owner label, receipt
+// authority and persisted value an independent exact read reports.
+std::uint64_t RunD3ProductionResolverProbe(D3ProbeReadbacks& readbacks)
+    noexcept {
+    D3CollaboratorProbeFixture fixture;
+    if (!fixture.initialize(0.001, false, false)) return 0;
+    __block std::uint64_t bits = 0;
+    __block D3ProbeReadbacks measured;
+    D3CollaboratorProbeFixture *fixturePointer = &fixture;
+    if (!fixture.perform(^{
+        OcctDocument& owner = *fixturePointer->document;
+        const Handle(TDocStd_Document) document = owner.Document();
+        const auto context = fixturePointer->context(Text(
+            fixturePointer->currentPath.persisted.ownerState.owner.entity));
+        if (!context) return;
+        Snapshot opening;
+        if (CaptureNative(owner, Text(fixturePointer->source.entity), context,
+                opening) != Refusal::None || !opening.admitted()) return;
+        bits |= 1;
+        LivePathResolver resolver(owner, context);
+        PathAuthority authority;
+        if (resolver.resolveCurrent(opening.record.definition.path, authority)
+                != Refusal::None
+            || !authority.currentFor(opening.record.definition.path)) return;
+        bits |= 2;
+        OcctBoundedCurveCapture exact;
+        if (!authority.receipt
+            || !owner.ReadBoundedCurveExact(
+                opening.record.definition.path.owner, exact)
+            || !(authority.receipt->owner == authority.locator.owner)
+            || authority.receipt->feature != authority.locator.feature
+            || authority.receipt->definitionRevision
+                != authority.locator.definitionRevision
+            || authority.receipt->canonicalDefinitionDigest
+                != authority.locator.canonicalDefinitionDigest
+            || !authority.ownerLabel.IsEqual(
+                exact.ownerReceipt.visibility.object.object.label)
+            || !bounded_curve::owner::ValidPathReceipt(*authority.receipt))
+            return;
+        bits |= 4;
+        std::vector<std::uint8_t> resolvedDefinition;
+        if (!bounded_curve::Encode(authority.persisted.value,
+                resolvedDefinition)
+            || resolvedDefinition != exact.record.value->definitionBytes
+            || !(authority.persisted.ownerState.owner
+                == exact.persisted.ownerState.owner)
+            || authority.persisted.ownerState.feature
+                != exact.persisted.ownerState.feature
+            || authority.persisted.ownerState.definitionRevision
+                != exact.persisted.ownerState.definitionRevision
+            || authority.persisted.ownerState.canonicalDefinitionDigest
+                != exact.persisted.ownerState.canonicalDefinitionDigest)
+            return;
+        bits |= 8;
+        path_array::CurveReference tampered = opening.record.definition.path;
+        tampered.canonicalDefinitionDigest[0] ^= 0x5a;
+        PathAuthority stale;
+        if (resolver.resolveCurrent(tampered, stale) != Refusal::StalePath
+            || stale.currentFor(tampered)
+            || document->HasOpenCommand()
+            || document->GetAvailableUndos() != 0) return;
+        bits |= 16;
+        measured.values[0] = authority.receipt->definitionRevision;
+        measured.values[1] = authority.receipt->issuance;
+        measured.values[2] = std::uint64_t(
+            authority.persisted.value.definition.controlPoints.size());
+        measured.values[3] = std::uint64_t(document->GetAvailableUndos());
+    })) return 0;
+    readbacks = measured;
+    return bits;
+}
+
+// Scenario 1: a real replacement path is minted by RefreshPathNative, the
+// edit is admitted by PrepareNative, the replacement path record is then
+// changed inside the document, and ApplyNative refuses without touching the
+// array record or history. The two independent resolver verdicts are measured
+// after the refusal: the opening path still resolves current, the changed
+// replacement resolves stale.
+std::uint64_t RunD3ReplacementChangedProbe(D3ProbeReadbacks& readbacks)
+    noexcept {
+    D3CollaboratorProbeFixture fixture;
+    if (!fixture.initialize(0.001, true, false)) return 0;
+    __block std::uint64_t bits = 0;
+    __block D3ProbeReadbacks measured;
+    D3CollaboratorProbeFixture *fixturePointer = &fixture;
+    if (!fixture.perform(^{
+        OcctDocument& owner = *fixturePointer->document;
+        const Handle(TDocStd_Document) document = owner.Document();
+        const auto context = fixturePointer->context(
+            Text(fixturePointer->source.entity));
+        if (!context) return;
+        Snapshot opening;
+        if (CaptureNative(owner, Text(fixturePointer->source.entity), context,
+                opening) != Refusal::None || !opening.admitted()) return;
+        bits |= 1;
+        Snapshot refreshed;
+        PathAuthority replacement;
+        if (RefreshPathNative(owner, opening,
+                Text(fixturePointer->replacementPath.persisted.ownerState
+                    .owner.entity),
+                context, refreshed, replacement) != Refusal::None
+            || !replacement.currentFor(replacement.locator)) return;
+        bits |= 2;
+        Edit edit = RetainedEdit(refreshed.record.definition);
+        edit.replacementPath = replacement;
+        const PreparedEdit prepared =
+            PrepareNative(owner, refreshed, edit, Limits{});
+        if (!prepared.admitted() || !prepared.native
+            || !prepared.candidatePath.currentFor(prepared.candidate.path)
+            || !(prepared.candidate.path.owner
+                == fixturePointer->replacementPath.persisted.ownerState.owner))
+            return;
+        bits |= 4;
+        // Change the replacement path inside the document between the
+        // admitted prepare and the apply: one real committed revision bump.
+        document->NewCommand();
+        const TDF_Label record = fixturePointer->replacementPath.label
+            .FindChild(bounded_curve::MinimumRecordTag, Standard_False);
+        auto modified = fixturePointer->replacementPath.persisted;
+        ++modified.ownerState.definitionRevision;
+        std::vector<std::uint8_t> ownerBytes;
+        bool mutated = !record.IsNull()
+            && bounded_curve::EncodeOwnerState(modified.ownerState, ownerBytes);
+        if (mutated) {
+            record.ForgetAllAttributes(Standard_True);
+            auto payload = std::make_shared<bounded_curve::Payload>();
+            payload->persisted = modified;
+            payload->definitionBytes = fixturePointer->replacementPath
+                .detached.canonicalDefinitionBytes;
+            payload->ownerBytes = ownerBytes;
+            mutated = bounded_curve::PersistenceProbe::Attach(record, payload);
+            if (mutated)
+                TNaming_Builder(record).Select(
+                    fixturePointer->replacementPath.detached.wire,
+                    fixturePointer->replacementPath.detached.wire);
+        }
+        if (mutated && !document->CommitCommand()) mutated = false;
+        if (!mutated) {
+            if (document->HasOpenCommand()) document->AbortCommand();
+            return;
+        }
+        OcctBoundedCurveCapture changed;
+        if (!owner.ReadBoundedCurveExact(modified.ownerState.owner, changed)
+            || changed.persisted.ownerState.definitionRevision
+                != fixturePointer->replacementPath.persisted.ownerState
+                    .definitionRevision + 1) return;
+        const int undosBeforeApply = document->GetAvailableUndos();
+        const auto outcome = ApplyNative(owner, prepared, context);
+        if (outcome != ApplyOutcome::Refused) return;
+        bits |= 8;
+        LivePathResolver resolver(owner, context);
+        PathAuthority openingPath, replacementNow;
+        path_array::Record after;
+        if (resolver.resolveCurrent(opening.record.definition.path,
+                    openingPath) != Refusal::None
+            || !openingPath.currentFor(opening.record.definition.path)
+            || resolver.resolveCurrent(prepared.candidate.path,
+                    replacementNow) != Refusal::StalePath
+            || !path_array::ReadFeature(document,
+                    opening.record.definition.feature, after)
+            || after.bytes != opening.record.bytes
+            || document->GetAvailableUndos() != undosBeforeApply
+            || document->HasOpenCommand()) return;
+        bits |= 16;
+        measured.values[0] = std::uint64_t(outcome);
+        measured.values[1] = changed.persisted.ownerState.definitionRevision;
+        measured.values[2] = std::uint64_t(
+            document->GetAvailableUndos() - undosBeforeApply);
+        measured.values[3] = after.bytes == opening.record.bytes ? 1 : 0;
+    })) return 0;
+    readbacks = measured;
+    return bits;
+}
+
+// Scenario 2: a real C1 owner capture/prepare/apply edits the array's path in
+// one command. PrepareDependentReplay is additionally driven directly so the
+// plan contents are measured, and VerifyDependentReplayAfterCommit re-proves
+// the replayed record from the post-commit document.
+std::uint64_t RunD3DependentReplayProbe(D3ProbeReadbacks& readbacks)
+    noexcept {
+    D3CollaboratorProbeFixture fixture;
+    if (!fixture.initialize(0.001, false, false)) return 0;
+    __block std::uint64_t bits = 0;
+    __block D3ProbeReadbacks measured;
+    D3CollaboratorProbeFixture *fixturePointer = &fixture;
+    if (!fixture.perform(^{
+        OcctDocument& owner = *fixturePointer->document;
+        const Handle(TDocStd_Document) document = owner.Document();
+        const std::string c1Entity = Text(
+            fixturePointer->currentPath.persisted.ownerState.owner.entity);
+        const auto context = fixturePointer->context(c1Entity);
+        if (!context) return;
+        c1_owner::OcafOwner c1(owner, context);
+        const c1_owner::SceneFence scene{
+            context->openingFence().documentGeneration(),
+            context->openingFence().modelRevision(),
+            context->openingFence().metersPerUnit()};
+        const auto opening = c1.capture(c1Entity, scene);
+        if (!opening || opening->retained.definition.controlPoints.empty()
+            || !(opening->retained.authority.owner
+                == fixturePointer->currentPath.persisted.ownerState.owner))
+            return;
+        bits |= 1;
+        c1_owner::Candidate candidate;
+        candidate.proposal.kind = bounded_curve::EditKind::MovePole;
+        candidate.proposal.expected = opening->retained.authority;
+        candidate.proposal.controlPoint =
+            opening->retained.definition.controlPoints.front().identifier;
+        candidate.proposal.replacementLocal =
+            opening->retained.definition.controlPoints.front().local;
+        candidate.proposal.replacementLocal[0] += 0.5;
+        candidate.completeDefinition = opening->retained.definition;
+        candidate.completeDefinition.controlPoints.front().local =
+            candidate.proposal.replacementLocal;
+        c1_owner::Receipt preparedReceipt;
+        const auto prepared = c1.prepare(opening, candidate, preparedReceipt);
+        if (!prepared
+            || preparedReceipt.outcome != c1_owner::Outcome::prepared) return;
+        DependentReplayPlan plan;
+        if (!PrepareDependentReplay(owner, context, prepared, plan)
+            || !plan.admitted || plan.c1Seal != prepared
+            || plan.arrays.size() != 1 || !plan.arrays.front().native
+            || plan.arrays.front().candidate.members.size() != 2) return;
+        bits |= 2;
+        const int undosBefore = document->GetAvailableUndos();
+        const auto applied = c1.apply(prepared);
+        if (applied.outcome != c1_owner::Outcome::committed
+            || applied.historyDelta != 1
+            || document->GetAvailableUndos() != undosBefore + 1
+            || document->HasOpenCommand()) return;
+        bits |= 4;
+        OcctBoundedCurveCapture edited;
+        std::vector<path_array::Record> arrays;
+        if (!owner.ReadBoundedCurveExact(
+                fixturePointer->currentPath.persisted.ownerState.owner, edited)
+            || edited.persisted.ownerState.definitionRevision
+                != fixturePointer->currentPath.persisted.ownerState
+                    .definitionRevision + 1
+            || !path_array::ReadAll(document, arrays) || arrays.size() != 1
+            || !(arrays.front().definition.path.owner
+                == edited.persisted.ownerState.owner)
+            || arrays.front().definition.path.definitionRevision
+                != edited.persisted.ownerState.definitionRevision
+            || arrays.front().definition.path.canonicalDefinitionDigest
+                != edited.persisted.ownerState.canonicalDefinitionDigest
+            || arrays.front().definition.members.size() != 2
+            || arrays.front().bytes == fixturePointer->arrayRecord.bytes)
+            return;
+        bits |= 8;
+        if (!VerifyDependentReplayAfterCommit(owner, plan)
+            || document->HasOpenCommand()) return;
+        bits |= 16;
+        measured.values[0] = std::uint64_t(applied.historyDelta);
+        measured.values[1] = std::uint64_t(plan.arrays.size());
+        measured.values[2] = edited.persisted.ownerState.definitionRevision;
+        measured.values[3] = std::uint64_t(
+            arrays.front().definition.members.size());
+    })) return 0;
+    readbacks = measured;
+    return bits;
+}
+
+// Measured pre-save D3 state for the cold-reopen comparison.
+struct D3ProbePreSaveState final {
+    std::vector<std::uint8_t> recordBytes;
+    std::vector<pattern::Member> members;
+    std::vector<std::string> recipeIdentifiers;
+    std::vector<std::vector<double>> recipeValues;
+};
+
+// Scenario 3, one unit system: grow the recipe-carrying array 2 -> 3 with
+// ordinal 2 suppressed through the production CaptureNative/PrepareNative/
+// ApplyNative path, save the real document, cold-reopen it through the
+// production import, and re-derive every member ordinal/localID, suppression
+// state, cloned recipe and record byte from the reopened document.
+std::uint64_t RunD3ColdReopenUnitProbe(double unit, D3ProbePreSaveState* saved,
+                                       std::string* savedPath,
+                                       std::uint64_t unitReadbacks[4])
+    noexcept {
+    std::uint64_t bits = 0;
+    D3CollaboratorProbeFixture writer;
+    if (!writer.initialize(unit, false, true)) return bits;
+    __block bool grown = false;
+    __block bool savedOk = false;
+    D3CollaboratorProbeFixture *writerPointer = &writer;
+    if (!writer.perform(^{
+        OcctDocument& owner = *writerPointer->document;
+        const Handle(TDocStd_Document) document = owner.Document();
+        const auto context = writerPointer->context(
+            Text(writerPointer->source.entity));
+        if (!context) return;
+        Snapshot opening;
+        if (CaptureNative(owner, Text(writerPointer->source.entity), context,
+                opening) != Refusal::None || !opening.admitted()) return;
+        Edit edit = RetainedEdit(opening.record.definition);
+        edit.count = 3;
+        edit.suppressedOrdinals.insert(2);
+        const PreparedEdit prepared =
+            PrepareNative(owner, opening, edit, Limits{});
+        if (!prepared.admitted() || !prepared.native
+            || prepared.candidate.members.size() != 3
+            || prepared.candidate.members[2].state
+                != pattern::MemberState::Suppressed) return;
+        if (ApplyNative(owner, prepared, context) != ApplyOutcome::Committed
+            || document->HasOpenCommand()) return;
+        std::vector<path_array::Record> records;
+        if (!path_array::ReadAll(document, records) || records.size() != 1
+            || records.front().definition.members.size() != 3) return;
+        const auto& members = records.front().definition.members;
+        for (std::size_t ordinal = 0; ordinal < members.size(); ++ordinal) {
+            if (members[ordinal].localID != ordinal + 1
+                || members[ordinal].coordinate.row != 0
+                || members[ordinal].coordinate.column != ordinal) return;
+        }
+        if (members[0].state != pattern::MemberState::Active
+            || members[1].state != pattern::MemberState::Active
+            || members[2].state != pattern::MemberState::Suppressed) return;
+        OcafD3Authority authority;
+        path_array::Record selectedRecord;
+        std::shared_ptr<const pattern_owner::AllLabelSnapshot> snapshot;
+        SourceMetrics metrics;
+        if (authority.captureCurrent(owner, records,
+                Text(writerPointer->source.entity), selectedRecord, snapshot,
+                metrics) != Refusal::None || !snapshot
+            || snapshot->members.size() != 3) return;
+        saved->recipeIdentifiers.clear();
+        saved->recipeValues.clear();
+        for (const auto& member : snapshot->members) {
+            if (member.recipe.family != pattern_recipe_clone::Family::Sweep
+                || member.recipe.sweep.identifier.empty()) return;
+            std::vector<double> values;
+            if (!sweep_persistence::Encode(member.recipe.sweep.definition,
+                    values)) return;
+            saved->recipeIdentifiers.push_back(member.recipe.sweep.identifier);
+            saved->recipeValues.push_back(std::move(values));
+        }
+        if (saved->recipeIdentifiers[0] == saved->recipeIdentifiers[1]
+            || saved->recipeIdentifiers[0] == saved->recipeIdentifiers[2]
+            || saved->recipeIdentifiers[1] == saved->recipeIdentifiers[2])
+            return;
+        saved->recordBytes = records.front().bytes;
+        saved->members = members;
+        grown = true;
+        NSString *filename = [NSString stringWithFormat:
+            @"r179-d3-collaborator-%@.cbf", NSUUID.UUID.UUIDString];
+        NSString *temporary = [NSTemporaryDirectory()
+            stringByAppendingPathComponent:filename];
+        const std::string written = owner.save(temporary.UTF8String);
+        if (written.empty()) return;
+        NSDictionary *attributes = [[NSFileManager defaultManager]
+            attributesOfItemAtPath:
+                [NSString stringWithUTF8String:written.c_str()] error:nil];
+        if (attributes == nil
+            || [attributes[NSFileSize] unsignedLongLongValue] == 0) return;
+        *savedPath = written;
+        savedOk = true;
+    })) return bits;
+    if (!grown) return bits;
+    bits |= 1;
+    if (!savedOk) return bits;
+    bits |= 2;
+    // End the writer session outside its active framebuffer block, exactly
+    // like the proven bounded-curve cold probe ordering.
+    writer.shutdown();
+    if (!writer.cleanupSucceeded || !writer.document.IsNull()) return bits;
+
+    D3CollaboratorProbeFixture reader;
+    if (!reader.initialize(unit, false, false)) return bits;
+    __block bool reopened = false;
+    __block bool identical = false;
+    __block bool recipesEqual = false;
+    __block std::uint64_t reopenedMembers = 0;
+    __block std::uint64_t reopenedMaxLocalID = 0;
+    __block std::uint64_t reopenedSweepRecipes = 0;
+    D3CollaboratorProbeFixture *readerPointer = &reader;
+    if (!reader.perform(^{
+        const auto initialDocument = readerPointer->document->Document();
+        if (readerPointer->viewer.ImportCbf(*savedPath)
+                != core3d::AssetImportResult::Success) return;
+        readerPointer->document = readerPointer->viewer.getDocument();
+        if (readerPointer->document.IsNull()
+            || readerPointer->document->Document().IsNull()
+            || readerPointer->document->Document().get()
+                == initialDocument.get()) return;
+        const Handle(TDocStd_Document) document =
+            readerPointer->document->Document();
+        double reopenedUnit = 0;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(document, reopenedUnit)
+            || reopenedUnit != unit) return;
+        reopened = true;
+        OcctDocument& owner = *readerPointer->document;
+        std::vector<path_array::Record> records;
+        if (!path_array::ReadAll(document, records) || records.size() != 1
+            || records.front().bytes != saved->recordBytes) return;
+        const auto& members = records.front().definition.members;
+        if (members.size() != saved->members.size()) return;
+        for (std::size_t ordinal = 0; ordinal < members.size(); ++ordinal) {
+            const auto& before = saved->members[ordinal];
+            const auto& after = members[ordinal];
+            if (!(after.identity == before.identity)
+                || after.localID != before.localID
+                || after.coordinate.row != before.coordinate.row
+                || after.coordinate.column != before.coordinate.column
+                || after.state != before.state) return;
+        }
+        identical = true;
+        reopenedMembers = members.size();
+        for (const auto& member : members)
+            reopenedMaxLocalID = std::max<std::uint64_t>(reopenedMaxLocalID,
+                member.localID);
+        OcafD3Authority authority;
+        path_array::Record selectedRecord;
+        std::shared_ptr<const pattern_owner::AllLabelSnapshot> snapshot;
+        SourceMetrics metrics;
+        if (authority.captureCurrent(owner, records,
+                Text(saved->members.front().identity), selectedRecord,
+                snapshot, metrics) != Refusal::None || !snapshot
+            || snapshot->members.size() != saved->members.size()) return;
+        for (std::size_t ordinal = 0; ordinal < snapshot->members.size();
+             ++ordinal) {
+            const auto& member = snapshot->members[ordinal];
+            if (member.recipe.family != pattern_recipe_clone::Family::Sweep
+                || member.recipe.sweep.identifier
+                    != saved->recipeIdentifiers[ordinal]) return;
+            std::vector<double> values;
+            if (!sweep_persistence::Encode(member.recipe.sweep.definition,
+                    values)
+                || values != saved->recipeValues[ordinal]) return;
+            const auto* key =
+                std::get_if<pattern_owner::D3Ordinal>(&member.key);
+            if (!key || key->ordinal != ordinal
+                || member.localIdentifier != saved->members[ordinal].localID
+                || member.suppressed != (saved->members[ordinal].state
+                    == pattern::MemberState::Suppressed)) return;
+            ++reopenedSweepRecipes;
+        }
+        recipesEqual = true;
+    })) return bits;
+    if (!reopened) return bits;
+    bits |= 4;
+    if (!identical) return bits;
+    bits |= 8;
+    if (!recipesEqual) return bits;
+    bits |= 16;
+    unitReadbacks[0] = reopenedMembers;
+    unitReadbacks[1] = 1;
+    unitReadbacks[2] = reopenedMaxLocalID;
+    unitReadbacks[3] = reopenedSweepRecipes;
+    return bits;
+}
+
+std::uint64_t RunD3ColdReopenProbe(D3ProbeReadbacks& readbacks) noexcept {
+    const std::array<double, 2> units{{0.001, 1.0}};
+    std::uint64_t perUnitBits[2] = {0, 0};
+    std::uint64_t perUnitReadbacks[2][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+    for (std::size_t index = 0; index < units.size(); ++index) {
+        D3ProbePreSaveState saved;
+        std::string savedPath;
+        perUnitBits[index] = RunD3ColdReopenUnitProbe(units[index], &saved,
+            &savedPath, perUnitReadbacks[index]);
+    }
+    const std::uint64_t bits = perUnitBits[0] & perUnitBits[1];
+    if (bits == 0x1f)
+        for (int value = 0; value < 4; ++value)
+            readbacks.values[value] = std::min(perUnitReadbacks[0][value],
+                perUnitReadbacks[1][value]);
+    return bits;
+}
 } // namespace
 
 extern "C" std::uint64_t
 Core3DDebugPathArrayNativeCollaboratorsProbe(std::int32_t scenario) noexcept {
     try {
-        if (scenario == 0) {
-            // The production resolver's invariant is same-label receipt/value.
-            PathAuthority value;
-            return !value.currentFor({}) ? 0x1f : 0;
-        }
-        if (scenario == 1) {
-            // Apply has two independent resolver calls; a changed replacement
-            // cannot borrow the opening path's successful currentness result.
-            return 0x1f;
-        }
-        if (scenario == 2) {
-            DependentReplayPlan plan;
-            return !plan.admitted && plan.arrays.empty() ? 0x1f : 0;
-        }
-        if (scenario == 3) {
-            path_array::Definition value;
-            return value.members.empty() && value.removals.empty() ? 0x1f : 0;
-        }
         if (scenario == 4) return RunD3AdmissionProbe();
+        if (![NSThread isMainThread] || scenario < 0 || scenario > 3) return 0;
+        auto& readbacks = D3ProbeStoredReadbacks(scenario);
+        readbacks = {};
+        std::uint64_t bits = 0;
+        if (scenario == 0) bits = RunD3ProductionResolverProbe(readbacks);
+        else if (scenario == 1) bits = RunD3ReplacementChangedProbe(readbacks);
+        else if (scenario == 2) bits = RunD3DependentReplayProbe(readbacks);
+        else bits = RunD3ColdReopenProbe(readbacks);
+        readbacks.complete = bits == 0x1f;
+        return bits;
     } catch (...) {}
     return 0;
+}
+
+// Companion readbacks measured from the same executed scenario runs (receipt
+// revision and issuance, the measured apply refusal, history deltas, replayed
+// array cardinality, reopened member/localID/recipe counts). Returns ~0 when
+// the scenario has not run to completion in this process.
+extern "C" std::uint64_t
+Core3DDebugPathArrayNativeCollaboratorsReadback(std::int32_t scenario,
+                                                std::int32_t index) noexcept {
+    if (![NSThread isMainThread] || scenario < 0 || scenario > 3
+        || index < 0 || index > 3) return ~0ull;
+    const auto& readbacks = D3ProbeStoredReadbacks(scenario);
+    return readbacks.complete ? readbacks.values[index] : ~0ull;
 }
 
 ApplyOutcome ApplyReplacementPathForDebugProbe(

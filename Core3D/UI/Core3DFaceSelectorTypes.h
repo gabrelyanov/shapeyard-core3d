@@ -168,4 +168,83 @@ __attribute__((objc_subclassing_restricted))
 - (instancetype)init NS_UNAVAILABLE;
 @end
 
+#if DEBUG
+// Closed, native-only topology-budget observer vocabulary. These values are
+// diagnostics, never selector/mutation authority and never persisted.
+typedef NS_ENUM(NSInteger, Core3DB2TopologyBudgetScenario) {
+    Core3DB2TopologyBudgetScenarioBox = 1,
+    Core3DB2TopologyBudgetScenarioBoxWithHole,
+    Core3DB2TopologyBudgetScenarioEdge4095,
+    Core3DB2TopologyBudgetScenarioEdge4096,
+    Core3DB2TopologyBudgetScenarioEdge4097,
+    Core3DB2TopologyBudgetScenarioFace4095,
+    Core3DB2TopologyBudgetScenarioFace4096,
+    Core3DB2TopologyBudgetScenarioFace4097,
+    Core3DB2TopologyBudgetScenarioMixed4097,
+    Core3DB2TopologyBudgetScenarioRepeatedOccurrences,
+    Core3DB2TopologyBudgetScenarioDeepContainers,
+    Core3DB2TopologyBudgetScenarioVertexFanout,
+    Core3DB2TopologyBudgetScenarioEmptyWireFanout,
+    Core3DB2TopologyBudgetScenarioTruncated65,
+    Core3DB2TopologyBudgetScenarioRepeatedAncestry,
+    Core3DB2TopologyBudgetScenarioProfileOwner,
+    Core3DB2TopologyBudgetScenarioEnclosureOwner,
+    Core3DB2TopologyBudgetScenarioLoftOwner,
+    Core3DB2TopologyBudgetScenarioLegacyOwner,
+    Core3DB2TopologyBudgetScenarioR2Owner,
+};
+typedef NS_ENUM(NSInteger, Core3DB2TopologyBudgetInjectionKind) {
+    Core3DB2TopologyBudgetInjectionNone = 0,
+    Core3DB2TopologyBudgetInjectionLeaveExactly,
+    Core3DB2TopologyBudgetInjectionLeaveOneLess,
+    Core3DB2TopologyBudgetInjectionCorrupt,
+};
+typedef NS_ENUM(NSInteger, Core3DB2TopologyBudgetDimension) {
+    Core3DB2TopologyBudgetDimensionNone = -1,
+    Core3DB2TopologyBudgetDimensionVisit = 0,
+    Core3DB2TopologyBudgetDimensionBuildStage = 1,
+    Core3DB2TopologyBudgetDimensionStageCensus = 2,
+    Core3DB2TopologyBudgetDimensionDiscoveryUse = 3,
+};
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DB2TopologyBudgetInjection : NSObject
+@property(nonatomic, readonly) Core3DB2TopologyBudgetInjectionKind kind;
+@property(nonatomic, readonly) NSUInteger remainingVisits, remainingStages;
+@property(nonatomic, readonly) NSInteger site, occurrence;
+- (instancetype)initWithKind:(Core3DB2TopologyBudgetInjectionKind)kind
+    remainingVisits:(NSUInteger)remainingVisits remainingStages:(NSUInteger)remainingStages
+    site:(NSInteger)site occurrence:(NSInteger)occurrence NS_DESIGNATED_INITIALIZER;
+- (instancetype)init NS_UNAVAILABLE;
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DB2TopologyBudgetObservation : NSObject
+@property(nonatomic, readonly) Core3DB2TopologyBudgetScenario scenario;
+@property(nonatomic, readonly) uint64_t metersPerLocalUnitBits, operationSequence;
+@property(nonatomic, readonly) NSUInteger entryVisits, entryStages, exitVisits, exitStages;
+@property(nonatomic, readonly) NSUInteger faceCount, edgeCount, occurrenceCount;
+@property(nonatomic, readonly) NSInteger deniedSite;
+@property(nonatomic, readonly) Core3DB2TopologyBudgetDimension deniedDimension;
+@property(nonatomic, readonly) NSUInteger deniedRequested, deniedVisits, deniedStages;
+@property(nonatomic, readonly) BOOL exhausted, protectedWorkStarted, partialOutputEscaped;
+@property(nonatomic, readonly) BOOL supported, traceComplete;
+@property(nonatomic, copy, readonly) NSString *refusalCode;
+@property(nonatomic, copy, readonly) NSArray<NSNumber *> *visitsBySite, *stagesBySite;
+// Root-container readback for the diagnostic input shape: TopAbs type of the
+// root, its direct child count, and the first child's TopAbs type (-1 when
+// the shape is null or has no children). Lets a test assert a surrounding
+// diagnostic compound together with its occurrence count.
+@property(nonatomic, readonly) NSInteger rootShapeType, rootChildShapeType;
+@property(nonatomic, readonly) NSInteger rootChildCount;
+// Owner-operation observation (begin/end bridge): bounded phase ring of the
+// real operation's per-phase entry/exit counters, plus completion count.
+@property(nonatomic, readonly) NSUInteger completionCount;
+@property(nonatomic, copy, readonly) NSArray<NSString *> *phaseNames;
+@property(nonatomic, copy, readonly) NSArray<NSNumber *> *phaseEntryVisits,
+    *phaseExitVisits, *phaseEntryStages, *phaseExitStages;
+- (instancetype)init NS_UNAVAILABLE;
+@end
+#endif
+
 NS_ASSUME_NONNULL_END

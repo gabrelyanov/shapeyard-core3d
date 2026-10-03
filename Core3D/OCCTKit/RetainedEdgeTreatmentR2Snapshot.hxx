@@ -16,12 +16,11 @@ namespace core3d { class Core3DViewer; }
 namespace core3d::retained_edge_treatment::r2 {
 using Edit = std::variant<et::SetAmount, et::Remove, RebuildBooleanInput,
                           RebuildAnalyticTool, SetBooleanOperation, SetInputPlacement>;
-struct ReplayBudget {
-    std::size_t buildStages = 0, topologyVisits = 0, envelopeBytes = 0, featureIdentities = 0;
-    bool chargeStage(std::size_t visits) noexcept {
-        if (buildStages >= 64 || visits > 65'536 - topologyVisits) return false;
-        ++buildStages; topologyVisits += visits; return true;
-    }
+// R2 replay accounting shares the common per-operation topology counter with
+// B1 (same frozen limits, validation-first arithmetic, sticky refusal, DEBUG
+// trace) and keeps the R2-only envelope/identity dimensions untouched.
+struct ReplayBudget : core3d::retained_topology_budget::Counter {
+    std::size_t envelopeBytes = 0, featureIdentities = 0;
 };
 struct LegacyStepSelectorBinding { std::uint64_t oldStepID = 0; fs::SelectorIntent intent; };
 

@@ -100,6 +100,20 @@ static BOOL B2FiniteVector(Core3DFaceSelectorVector3 *value, BOOL unit) {
 @implementation Core3DFaceSelectorProof @end
 @implementation Core3DFaceSelectorQuery @end
 @implementation Core3DFaceSelectorProbeResult @end
+#if DEBUG
+@implementation Core3DB2TopologyBudgetInjection
+- (instancetype)initWithKind:(Core3DB2TopologyBudgetInjectionKind)kind
+    remainingVisits:(NSUInteger)remainingVisits remainingStages:(NSUInteger)remainingStages
+    site:(NSInteger)site occurrence:(NSInteger)occurrence {
+    if(kind<Core3DB2TopologyBudgetInjectionNone||kind>Core3DB2TopologyBudgetInjectionCorrupt)
+        return nil;
+    if((self=[super init])){_kind=kind;_remainingVisits=remainingVisits;
+        _remainingStages=remainingStages;_site=site;_occurrence=occurrence;}
+    return self;
+}
+@end
+@implementation Core3DB2TopologyBudgetObservation @end
+#endif
 
 @interface Core3DFaceSelectorNativeProof : Core3DFaceSelectorProof {
 @public
@@ -157,7 +171,8 @@ static Core3DFaceSelectorStatus Status(Refusal refusal) {
 }
 static Core3DFaceSelectorQuery *BuildQuery(Core3DFaceSelectorIntent *intent,
     const Resolution& resolution,
-    const std::shared_ptr<const core3d::retained_edge_treatment::SelectorTargetCapture>& targets) {
+    const std::shared_ptr<const core3d::retained_edge_treatment::SelectorTargetCapture>& targets,
+    const std::vector<core3d::retained_edge_treatment::CurveKind>* projectedKinds=nullptr) {
     Core3DFaceSelectorQuery *query = B2Object(Core3DFaceSelectorQuery.class);
     [query setValue:intent forKey:@"intent"];
     [query setValue:@(NSInteger(Status(resolution.refusal))) forKey:@"status"];
@@ -178,15 +193,21 @@ static Core3DFaceSelectorQuery *BuildQuery(Core3DFaceSelectorIntent *intent,
     [proof setValue:@(resolution.proof->selectedEdgeCount()) forKey:@"selectedEdgeCount"];
     [proof setValue:@YES forKey:@"discoveryComplete"]; [proof setValue:@NO forKey:@"truncated"];
     NSMutableArray *uses = [NSMutableArray arrayWithCapacity:resolution.proof->boundaryUses().size()];
+    std::size_t useIndex=0;
     for (const auto& native : resolution.proof->boundaryUses()) {
         Core3DFaceBoundaryUse *use = B2Object(Core3DFaceBoundaryUse.class);
         [use setValue:@(native.selected) forKey:@"selected"];
         [use setValue:@(NSInteger(native.direction)) forKey:@"canonicalFaceUseDirection"];
         [use setValue:@(native.ownerFaces.size()) forKey:@"ownerFaceCount"]; [use setValue:@YES forKey:@"selectedFaceIsOwner"];
-        BRepAdaptor_Curve curve(native.edge);
-        [use setValue:@(curve.GetType() == GeomAbs_Circle ? Core3DEdgeTreatmentCurveKindCircle : Core3DEdgeTreatmentCurveKindLine) forKey:@"curveKind"];
+        const auto kind=projectedKinds&&useIndex<projectedKinds->size()
+            ?(*projectedKinds)[useIndex]
+            :(BRepAdaptor_Curve(native.edge).GetType()==GeomAbs_Circle
+                ?core3d::retained_edge_treatment::CurveKind::Circle
+                :core3d::retained_edge_treatment::CurveKind::Line);
+        [use setValue:@(kind==core3d::retained_edge_treatment::CurveKind::Circle
+            ?Core3DEdgeTreatmentCurveKindCircle:Core3DEdgeTreatmentCurveKindLine) forKey:@"curveKind"];
         [use setValue:@(Core3DFaceSelectorWirePositionOuter) forKey:@"outerOrInnerWire"];
-        [uses addObject:use];
+        [uses addObject:use];++useIndex;
     }
     [proof setValue:uses forKey:@"boundaryUses"]; [query setValue:proof forKey:@"proof"];
     return query;
@@ -195,12 +216,13 @@ Core3DFaceSelectorQuery *Query(Core3DFaceSelectorIntent *intent, const Resolutio
     return BuildQuery(intent, resolution, {});
 }
 Core3DFaceSelectorQuery *BoundQuery(Core3DFaceSelectorIntent *intent,
-    const std::shared_ptr<const core3d::retained_edge_treatment::SelectorTargetCapture>& targets) {
+    const std::shared_ptr<const core3d::retained_edge_treatment::SelectorTargetCapture>& targets,
+    const std::vector<core3d::retained_edge_treatment::CurveKind>& projectedKinds) {
     Resolution resolution;
     if (!targets) { resolution.refusal = Refusal::StaleSource; return BuildQuery(intent, resolution, {}); }
     resolution.refusal = Refusal::None;
     resolution.proof = std::shared_ptr<const FaceMembershipProof>(targets, &targets->proof());
-    return BuildQuery(intent, resolution, targets);
+    return BuildQuery(intent, resolution, targets, &projectedKinds);
 }
 std::shared_ptr<const core3d::retained_edge_treatment::SelectorTargetCapture>
 Targets(Core3DFaceSelectorProof *proof) noexcept {

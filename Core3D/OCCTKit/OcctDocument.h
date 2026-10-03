@@ -1298,6 +1298,14 @@ public:
         const core3d::retained_edge_treatment::Snapshot& snapshot,
         const core3d::retained_face_selector::SelectorIntent& intent,
         const core3d::retained_recipe::RevisionFence& expected) const noexcept;
+    //! Operation-internal continuation. The caller supplies capture debt and
+    //! receives the successor counter; the public overload above remains the
+    //! fresh top-level inspection entry and still includes capture debt.
+    Standard_EXPORT core3d::retained_face_selector::Resolution ResolveRetainedFaceSelector(
+        const core3d::retained_edge_treatment::Snapshot& snapshot,
+        const core3d::retained_face_selector::SelectorIntent& intent,
+        const core3d::retained_recipe::RevisionFence& expected,
+        core3d::retained_edge_treatment::ReplayBudget& budget) const noexcept;
     //! Write exactly one translation scalar in the caller's already-open OCAF
     //! command. Axis is 0...2 and value uses raw document model units. The
     //! definition, representation, coordinate ceiling, and read-back are

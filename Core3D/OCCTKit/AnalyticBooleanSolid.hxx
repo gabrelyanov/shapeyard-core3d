@@ -3,6 +3,7 @@
 // public UI/AI API is provided. Caller supplies an already detached base shape.
 #include "AnalyticBooleanRingOperand.hxx"
 #include "AnalyticBooleanWedgeOperand.hxx"
+#include "RetainedTopologyBudget.hxx"
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -23,6 +24,7 @@
 #include <vector>
 
 namespace core3d::analytic_boolean {
+namespace tb = core3d::retained_topology_budget;
 enum class Status { Built, InvalidRecipe, Cancelled, UnsupportedSource,
     UnsupportedTool, BudgetExceeded, KernelFailure, UnsupportedResult,
     NoRemovedVolume, VerificationFailed };
@@ -34,13 +36,17 @@ struct Result {
 };
 namespace detail {
 inline bool Bounded(const TopoDS_Shape& shape, std::size_t limit,
-    const std::atomic_bool& stop) {
+    const std::atomic_bool& stop,
+    tb::Counter* shared = nullptr, tb::Site site = tb::Site::None) {
     if (shape.IsNull()) return false;
     struct Item { TopoDS_Shape shape; unsigned depth; };
     std::vector<Item> pending{{shape,0}};
     std::size_t visited = 0;
     while (!pending.empty()) {
         if (stop.load() || ++visited > limit) return false;
+        // C25/C26: with a shared operation counter every raw occurrence pays;
+        // the legacy local bound above stays in force unchanged.
+        if (shared && !shared->visit(1, site)) return false;
         const auto item = pending.back(); pending.pop_back();
         if (item.depth > 64) return false;
         for (TopoDS_Iterator it(item.shape); it.More(); it.Next()) {
@@ -50,7 +56,8 @@ inline bool Bounded(const TopoDS_Shape& shape, std::size_t limit,
     }
     return true; // Counts occurrences as well as shared unique subshapes.
 }
-inline bool Bounds(const TopoDS_Shape& shape, double mm, std::array<double,6>& out) {
+inline bool Bounds(const TopoDS_Shape& shape, double mm, std::array<double,6>& out,
+    tb::Counter* shared = nullptr, tb::Site site = tb::Site::None) {
     Bnd_Box box;
     // A trimmed planar polygon attains its extrema at its vertices. Measure
     // those stored points directly: evaluating the plane at UV limits can
@@ -59,10 +66,14 @@ inline bool Bounds(const TopoDS_Shape& shape, double mm, std::array<double,6>& o
     // This uses actual topology, never the source recipe or rounded values.
     if (shape.IsNull() || shape.ShapeType()!=TopAbs_SOLID) return false;
     for (TopExp_Explorer faces(shape,TopAbs_FACE);faces.More();faces.Next()) {
+        // C25: every inspected face/edge/vertex is charged to the shared
+        // operation counter when one is borrowed.
+        if (shared && !shared->visit(1, site)) return false;
         const auto face=TopoDS::Face(faces.Current());
         bool polygon=BRepAdaptor_Surface(face).GetType()==GeomAbs_Plane;
         unsigned edges=0;
         for (TopExp_Explorer it(face,TopAbs_EDGE);polygon&&it.More();it.Next()) {
+            if (shared && !shared->visit(1, site)) return false;
             ++edges;
             polygon=BRepAdaptor_Curve(TopoDS::Edge(it.Current())).GetType()==GeomAbs_Line;
         }
@@ -72,6 +83,7 @@ inline bool Bounds(const TopoDS_Shape& shape, double mm, std::array<double,6>& o
         }
         unsigned vertices=0;
         for (TopExp_Explorer it(face,TopAbs_VERTEX);it.More();it.Next()) {
+            if (shared && !shared->visit(1, site)) return false;
             box.Add(BRep_Tool::Pnt(TopoDS::Vertex(it.Current())));
             ++vertices;
         }
@@ -83,11 +95,14 @@ inline bool Bounds(const TopoDS_Shape& shape, double mm, std::array<double,6>& o
     for (unsigned i=0;i<3;++i) if (out[i+3]<=out[i]) return false;
     return true;
 }
-inline bool ValidSolid(const TopoDS_Shape& shape, double& volume) {
+inline bool ValidSolid(const TopoDS_Shape& shape, double& volume,
+    tb::Counter* shared = nullptr, tb::Site site = tb::Site::None) {
     if (shape.IsNull() || shape.ShapeType()!=TopAbs_SOLID
         || !BRepCheck_Analyzer(shape,Standard_True).IsValid()) return false;
     unsigned shells=0;
     for (TopExp_Explorer it(shape,TopAbs_SHELL);it.More();it.Next()) {
+        // C25: every inspected shell is charged to the shared counter.
+        if (shared && !shared->visit(1, site)) return false;
         ++shells;if (!BRep_Tool::IsClosed(it.Current())) return false;
     }
     if (!shells) return false;
@@ -98,11 +113,14 @@ inline bool ValidSolid(const TopoDS_Shape& shape, double& volume) {
     BRepGProp::VolumeProperties(shape,props,Standard_True,Standard_False,Standard_False);
     volume=props.Mass(); return std::isfinite(volume) && volume>0;
 }
-inline bool SingleResult(const TopoDS_Shape& raw, TopoDS_Shape& solid) {
+inline bool SingleResult(const TopoDS_Shape& raw, TopoDS_Shape& solid,
+    tb::Counter* shared = nullptr, tb::Site site = tb::Site::None) {
     if (raw.ShapeType()==TopAbs_SOLID) {solid=raw;return true;}
     if (raw.ShapeType()!=TopAbs_COMPOUND) return false;
     unsigned children=0;
     for (TopoDS_Iterator it(raw);it.More();it.Next()) {
+        // C25: every inspected result child is charged to the shared counter.
+        if (shared && !shared->visit(1, site)) return false;
         if (++children!=1 || it.Value().ShapeType()!=TopAbs_SOLID) return false;
         solid=it.Value();
     }
@@ -121,9 +139,9 @@ struct CylinderToolResult {
     double toolStart = 0, toolEnd = 0;
 };
 
-inline Status BuildCylinderTool(const TopoDS_Shape& detachedBase,
+inline Status BuildCylinderToolShared(const TopoDS_Shape& detachedBase,
     const Recipe& recipe, const std::atomic_bool& stop,
-    CylinderToolResult& output) noexcept {
+    CylinderToolResult& output, tb::Counter* shared) noexcept {
     output = {};
     if (stop.load()) return Status::Cancelled;
     if (!Inspect(recipe)) return Status::InvalidRecipe;
@@ -132,15 +150,25 @@ inline Status BuildCylinderTool(const TopoDS_Shape& detachedBase,
         return Status::UnsupportedTool;
     try {
         OCC_CATCH_SIGNALS
-        if (!detail::Bounded(detachedBase, 1024, stop))
+        if (!detail::Bounded(detachedBase, 1024, stop, shared, tb::Site::C25AnalyticInput))
             return stop.load() ? Status::Cancelled : Status::BudgetExceeded;
         if (detachedBase.ShapeType() != TopAbs_SOLID)
             return Status::UnsupportedSource;
         CylinderToolResult result;
         const double mm = recipe.metersPerUnit * 1000;
-        if (!detail::ValidSolid(detachedBase, result.sourceVolume)
-            || !detail::Bounds(detachedBase, mm, result.sourceBounds))
-            return Status::UnsupportedSource;
+        if (shared) {
+            // C25: validity, classification, volume and bounds passes over the
+            // input are debited before they run.
+            for (int pass = 0; pass < 4; ++pass) {
+                const auto walk = tb::ChargeTraversal(detachedBase, *shared, stop,
+                    tb::Site::C25AnalyticInput);
+                if (walk == tb::WalkStatus::Cancelled) return Status::Cancelled;
+                if (walk != tb::WalkStatus::Completed) return Status::BudgetExceeded;
+            }
+        }
+        if (!detail::ValidSolid(detachedBase, result.sourceVolume, shared, tb::Site::C25AnalyticInput)
+            || !detail::Bounds(detachedBase, mm, result.sourceBounds, shared, tb::Site::C25AnalyticInput))
+            return shared && shared->exhausted ? Status::BudgetExceeded : Status::UnsupportedSource;
         const unsigned axis = static_cast<unsigned>(recipe.tool.axis);
         const double tolerance = std::max(Precision::Confusion() * 32, 1e-5 / mm);
         const double margin = std::max(tolerance * 4, .001 / mm);
@@ -161,9 +189,10 @@ inline Status BuildCylinderTool(const TopoDS_Shape& detachedBase,
         if (!cylinder.IsDone() || stop.load())
             return stop.load() ? Status::Cancelled : Status::KernelFailure;
         double toolVolume = 0;
-        if (!detail::ValidSolid(cylinder.Shape(), toolVolume)
-            || !detail::Bounded(cylinder.Shape(), 1024, stop))
-            return stop.load() ? Status::Cancelled : Status::KernelFailure;
+        if (!detail::ValidSolid(cylinder.Shape(), toolVolume, shared, tb::Site::C25AnalyticInput)
+            || !detail::Bounded(cylinder.Shape(), 1024, stop, shared, tb::Site::C25AnalyticInput))
+            return stop.load() ? Status::Cancelled
+                : (shared && shared->exhausted ? Status::BudgetExceeded : Status::KernelFailure);
         result.solid = cylinder.Shape();
         output = std::move(result);
         return Status::Built;
@@ -173,15 +202,38 @@ inline Status BuildCylinderTool(const TopoDS_Shape& detachedBase,
     }
 }
 
-inline Status Build(const TopoDS_Shape& detachedBase, const Recipe& recipe,
-    const std::atomic_bool& stop, Result& output, double expectedWedgeVolume=0) noexcept {
+inline Status BuildCylinderTool(const TopoDS_Shape& detachedBase,
+    const Recipe& recipe, const std::atomic_bool& stop,
+    CylinderToolResult& output) noexcept {
+    // Compatibility entry: no shared operation context.
+    return BuildCylinderToolShared(detachedBase, recipe, stop, output, nullptr);
+}
+// C25/C26: budgeted overload for B2 prefix paths; charges the shared
+// per-operation counter while keeping the legacy local bounds in force.
+inline Status BuildCylinderTool(const TopoDS_Shape& detachedBase,
+    const Recipe& recipe, const std::atomic_bool& stop,
+    CylinderToolResult& output, tb::Counter& shared) noexcept {
+    return BuildCylinderToolShared(detachedBase, recipe, stop, output, &shared);
+}
+
+inline Status BuildShared(const TopoDS_Shape& detachedBase, const Recipe& recipe,
+    const std::atomic_bool& stop, Result& output, double expectedWedgeVolume,
+    tb::Counter* shared) noexcept {
     output={};
     if (stop.load()) return Status::Cancelled;
     if (!Inspect(recipe)) return Status::InvalidRecipe;
     try {
         OCC_CATCH_SIGNALS
-        if (!detail::Bounded(detachedBase,1024,stop)) return stop.load()?Status::Cancelled:Status::BudgetExceeded;
+        // C25: the bounded input census charges every raw occurrence; the
+        // legacy local 1,024/32,768 limits stay in force unchanged.
+        if (!detail::Bounded(detachedBase,1024,stop,shared,tb::Site::C25AnalyticInput)) return stop.load()?Status::Cancelled:Status::BudgetExceeded;
         if (detachedBase.ShapeType()!=TopAbs_SOLID) return Status::UnsupportedSource;
+        if (shared) {
+            // C26: the private-copy pass is reserved before it runs.
+            const auto copyWalk=tb::ChargeTraversal(detachedBase,*shared,stop,tb::Site::C26AnalyticBoolean);
+            if (copyWalk==tb::WalkStatus::Cancelled) return Status::Cancelled;
+            if (copyWalk!=tb::WalkStatus::Completed) return Status::BudgetExceeded;
+        }
         // Even detached caller input is copied with geometry; OCCT work never
         // edits the supplied source. Copy excludes mesh caches deliberately.
         BRepBuilderAPI_Copy copy(detachedBase,Standard_True,Standard_False);
@@ -189,8 +241,24 @@ inline Status Build(const TopoDS_Shape& detachedBase, const Recipe& recipe,
         const auto base=copy.Shape();
         Result result;
         const double mm=recipe.metersPerUnit*1000;
-        if (!detail::ValidSolid(base,result.sourceVolume)
-            || !detail::Bounds(base,mm,result.sourceBounds)) return Status::UnsupportedSource;
+        if (shared) {
+            // C25: validity, classification, volume and bounds passes over the
+            // copied base are debited before they run.
+            for (int pass=0;pass<4;++pass) {
+                const auto walk=tb::ChargeTraversal(base,*shared,stop,tb::Site::C25AnalyticInput);
+                if (walk==tb::WalkStatus::Cancelled) return Status::Cancelled;
+                if (walk!=tb::WalkStatus::Completed) return Status::BudgetExceeded;
+            }
+        }
+        if (!detail::ValidSolid(base,result.sourceVolume,shared,tb::Site::C25AnalyticInput)
+            || !detail::Bounds(base,mm,result.sourceBounds,shared,tb::Site::C25AnalyticInput))
+            return shared&&shared->exhausted?Status::BudgetExceeded:Status::UnsupportedSource;
+        if (shared) {
+            // C26: the self-interference pass is reserved before it runs.
+            const auto walk=tb::ChargeTraversal(base,*shared,stop,tb::Site::C26AnalyticBoolean);
+            if (walk==tb::WalkStatus::Cancelled) return Status::Cancelled;
+            if (walk!=tb::WalkStatus::Completed) return Status::BudgetExceeded;
+        }
         Handle(Message_ProgressIndicator) indicator=new planar_sweep::detail::CancellationProgress(stop);
         Message_ProgressScope progress(indicator->Start(),"Cylindrical through-cut",3);
         if (planar_sweep::detail::CheckInterference(base,stop,progress.Next())!=planar_sweep::BuildStatus::Built)
@@ -221,13 +289,15 @@ inline Status Build(const TopoDS_Shape& detachedBase, const Recipe& recipe,
             BRepBuilderAPI_MakeFace face(polygon.Wire());if(!face.IsDone())return Status::KernelFailure;
             gp_Vec direction;direction.SetCoord(axis+1,length);BRepPrimAPI_MakePrism prism(face.Face(),direction);
             prism.Build();if(!prism.IsDone()||stop.load())return stop.load()?Status::Cancelled:Status::KernelFailure;
+            // C26: each constructed tool solid is one charged unit.
+            if(shared&&!shared->visit(1,tb::Site::C26AnalyticBoolean))return Status::BudgetExceeded;
             tools.Append(prism.Shape());
         }else for(unsigned k=0;k<diskCount;++k){
             auto disk=ring?analytic_boolean_ring::Expand(ringValue,k,recipe.metersPerUnit):recipe.tool;
             if(!disk.identifier)return Status::InvalidRecipe;
             if(!ring){
                 CylinderToolResult detached;
-                const auto toolStatus=BuildCylinderTool(base,recipe,stop,detached);
+                const auto toolStatus=BuildCylinderToolShared(base,recipe,stop,detached,shared);
                 if(toolStatus!=Status::Built)return toolStatus;
                 result.toolStart=detached.toolStart;result.toolEnd=detached.toolEnd;
                 tools.Append(detached.solid);continue;
@@ -236,7 +306,22 @@ inline Status Build(const TopoDS_Shape& detachedBase, const Recipe& recipe,
             const gp_Dir direction=axis==0?gp::DX():axis==1?gp::DY():gp::DZ();
             BRepPrimAPI_MakeCylinder cylinder(gp_Ax2(gp_Pnt(origin[0],origin[1],origin[2]),direction),recipe.tool.radius,length);
             cylinder.Build();if(!cylinder.IsDone())return Status::KernelFailure;
-            if(stop.load())return Status::Cancelled;tools.Append(cylinder.Shape());
+            if(stop.load())return Status::Cancelled;
+            if(shared&&!shared->visit(1,tb::Site::C26AnalyticBoolean))return Status::BudgetExceeded;
+            tools.Append(cylinder.Shape());
+        }
+        if (shared) {
+            // C26: the Boolean stage is debited and its input passes (base
+            // plus every tool) are reserved before the kernel runs.
+            if(!shared->beginStage(tb::Site::C26AnalyticBoolean))return Status::BudgetExceeded;
+            const auto baseWalk=tb::ChargeTraversal(base,*shared,stop,tb::Site::C26AnalyticBoolean);
+            if (baseWalk==tb::WalkStatus::Cancelled) return Status::Cancelled;
+            if (baseWalk!=tb::WalkStatus::Completed) return Status::BudgetExceeded;
+            for(const auto& tool:tools){
+                const auto toolWalk=tb::ChargeTraversal(tool,*shared,stop,tb::Site::C26AnalyticBoolean);
+                if (toolWalk==tb::WalkStatus::Cancelled) return Status::Cancelled;
+                if (toolWalk!=tb::WalkStatus::Completed) return Status::BudgetExceeded;
+            }
         }
         BRepAlgoAPI_Cut cut;
         cut.SetArguments(arguments);cut.SetTools(tools);
@@ -245,10 +330,31 @@ inline Status Build(const TopoDS_Shape& detachedBase, const Recipe& recipe,
         cut.Build(progress.Next());
         if (stop.load()) return Status::Cancelled;
         if (!cut.IsDone() || cut.HasErrors() || cut.HasWarnings() || cut.Shape().IsNull()) return Status::KernelFailure;
-        if (!detail::Bounded(cut.Shape(),32768,stop)) return stop.load()?Status::Cancelled:Status::BudgetExceeded;
-        if (!detail::SingleResult(cut.Shape(),result.solid)
-            || !detail::ValidSolid(result.solid,result.resultVolume)
-            || !detail::Bounds(result.solid,mm,result.resultBounds)) return Status::UnsupportedResult;
+        if (shared) {
+            // C26: the produced shape is censused before any consumer, and
+            // the result validity/classification/volume/bounds passes are
+            // debited before they run.
+            tb::Census outputCensus;
+            const auto censusWalk=tb::CensusTopology(cut.Shape(),*shared,stop,outputCensus,
+                tb::Site::C26AnalyticBoolean,false);
+            if (censusWalk==tb::WalkStatus::Cancelled) return Status::Cancelled;
+            if (censusWalk!=tb::WalkStatus::Completed) return Status::BudgetExceeded;
+            for (int pass=0;pass<4;++pass) {
+                const auto walk=tb::ChargeTraversal(cut.Shape(),*shared,stop,tb::Site::C26AnalyticBoolean);
+                if (walk==tb::WalkStatus::Cancelled) return Status::Cancelled;
+                if (walk!=tb::WalkStatus::Completed) return Status::BudgetExceeded;
+            }
+        }
+        if (!detail::Bounded(cut.Shape(),32768,stop,shared,tb::Site::C26AnalyticBoolean)) return stop.load()?Status::Cancelled:Status::BudgetExceeded;
+        if (!detail::SingleResult(cut.Shape(),result.solid,shared,tb::Site::C26AnalyticBoolean)
+            || !detail::ValidSolid(result.solid,result.resultVolume,shared,tb::Site::C26AnalyticBoolean)
+            || !detail::Bounds(result.solid,mm,result.resultBounds,shared,tb::Site::C26AnalyticBoolean))
+            return shared&&shared->exhausted?Status::BudgetExceeded:Status::UnsupportedResult;
+        if (shared) {
+            const auto walk=tb::ChargeTraversal(result.solid,*shared,stop,tb::Site::C26AnalyticBoolean);
+            if (walk==tb::WalkStatus::Cancelled) return Status::Cancelled;
+            if (walk!=tb::WalkStatus::Completed) return Status::BudgetExceeded;
+        }
         if (planar_sweep::detail::CheckInterference(result.solid,stop,progress.Next())!=planar_sweep::BuildStatus::Built)
             return stop.load()?Status::Cancelled:Status::UnsupportedResult;
         result.removedVolume=result.sourceVolume-result.resultVolume;
@@ -270,5 +376,20 @@ inline Status Build(const TopoDS_Shape& detachedBase, const Recipe& recipe,
         if (stop.load()) return Status::Cancelled;
         output=std::move(result);return Status::Built;
     } catch (...) {output={};return stop.load()?Status::Cancelled:Status::KernelFailure;}
+}
+
+inline Status Build(const TopoDS_Shape& detachedBase, const Recipe& recipe,
+    const std::atomic_bool& stop, Result& output, double expectedWedgeVolume=0) noexcept {
+    // Compatibility entry: unrelated callers keep their existing local
+    // behavior with no shared operation context.
+    return BuildShared(detachedBase, recipe, stop, output, expectedWedgeVolume, nullptr);
+}
+// C25/C26: budgeted overload for B2 prefix paths; the shared per-operation
+// counter pays the raw occurrences, passes and the Boolean stage while the
+// legacy local bounds stay in force.
+inline Status Build(const TopoDS_Shape& detachedBase, const Recipe& recipe,
+    const std::atomic_bool& stop, Result& output, double expectedWedgeVolume,
+    tb::Counter& shared) noexcept {
+    return BuildShared(detachedBase, recipe, stop, output, expectedWedgeVolume, &shared);
 }
 } // namespace core3d::analytic_boolean

@@ -75,6 +75,20 @@ bool SameB1Base(const core3d::retained_edge_treatment::BaseBinding& first,
         && first.sourceRecipeDigest == second.sourceRecipeDigest
         && first.metersPerLocalUnit == second.metersPerLocalUnit;
 }
+#if DEBUG
+// F10 observation (DEBUG): records the commit-stage phase of the observed
+// owner operation on scope exit — every return path of the stage function,
+// including a budget denial, leaves exact entry/exit counters in the active
+// session trace.
+struct B2BudgetStageGuard {
+    const core3d::retained_topology_budget::Counter& entry;
+    const core3d::retained_topology_budget::Counter& budget;
+    const char* name;
+    ~B2BudgetStageGuard() noexcept {
+        core3d::retained_topology_budget::debug::RecordPhase(name,entry,budget);
+    }
+};
+#endif
 } // namespace
 // OcctDocument member definitions must sit at global scope: inside the
 // anonymous namespace they do not bind to ::OcctDocument, so the Snapshot
@@ -136,6 +150,17 @@ OcctDocument::CaptureRetainedEdgeTreatmentR2(
             result->sourceBytes_=source->value()->bytes;
         }
         if(!ValidateRetainedEdgeTreatmentsR2(refusal))return {};
+        // L08: structural capture is real topology work. Charge the actual
+        // captured current-shape pass once; do not invent a replay that this
+        // capture path does not perform.
+        core3d::retained_edge_treatment::ReplayBudget topology;
+        const std::atomic_bool neverCancelled{false};
+        if(core3d::retained_topology_budget::ChargeTraversal(result->current_,topology,
+                neverCancelled,core3d::retained_topology_budget::Site::C19R2Prefix)
+            !=core3d::retained_topology_budget::WalkStatus::Completed){
+            refusal=et::Refusal::Budget;return {};
+        }
+        static_cast<core3d::retained_topology_budget::Counter&>(result->chargedBudget_)=topology;
         refusal=et::Refusal::None;return result;
     }catch(...){refusal=et::Refusal::MalformedCarrier;return {};}
 }
@@ -164,6 +189,13 @@ OcctDocument::CaptureRetainedBooleanMigrationR2(
         result->owner_.owner={identity.document,identity.entity,identity.definition};
         result->owner_.status=core3d::retained_recipe::OwnerStatus::CurrentEditable;
         result->nonce_=std::uint64_t(myOcafDoc->GetData()->Time());
+        et::ReplayBudget topology;const std::atomic_bool neverCancelled{false};
+        if(core3d::retained_topology_budget::ChargeTraversal(result->originalCurrent_,topology,
+                neverCancelled,core3d::retained_topology_budget::Site::C19R2Prefix)
+            !=core3d::retained_topology_budget::WalkStatus::Completed){
+            refusal=et::Refusal::Budget;return {};
+        }
+        static_cast<core3d::retained_topology_budget::Counter&>(result->chargedBudget_)=topology;
         refusal=et::Refusal::None;return result;
     }catch(...){refusal=et::Refusal::MalformedCarrier;return {};}
 }
@@ -191,6 +223,13 @@ OcctDocument::CaptureRetainedBooleanEnrollmentR2(
         result->owner_.owner=source.value->definition.owner;
         result->owner_.status=core3d::retained_recipe::OwnerStatus::CurrentEditable;
         result->nonce_=std::uint64_t(myOcafDoc->GetData()->Time());
+        et::ReplayBudget topology;const std::atomic_bool neverCancelled{false};
+        if(core3d::retained_topology_budget::ChargeTraversal(result->originalCurrent_,topology,
+                neverCancelled,core3d::retained_topology_budget::Site::C19R2Prefix)
+            !=core3d::retained_topology_budget::WalkStatus::Completed){
+            refusal=et::Refusal::Budget;return {};
+        }
+        static_cast<core3d::retained_topology_budget::Counter&>(result->chargedBudget_)=topology;
         refusal=et::Refusal::None;return result;
     }catch(...){refusal=et::Refusal::MalformedCarrier;return {};}
 }
@@ -366,6 +405,24 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
         std::optional<et::RecordR2> live;if(!et::ReadR2(myOcafDoc,original.ownerLabel_,live,refusal)||!live
             ||live->value->bytes!=original.definitionBytes_)return Standard_False;
         std::vector<std::uint8_t> exact;if(!r2::Encode(built.definition_,exact,refusal)||exact!=built.definitionBytes_)return Standard_False;
+        // L11: one continuation verifies the complete detached candidate and
+        // reserves its protected readback before any carrier or shape write.
+        et::ReplayBudget commitBudget;
+        static_cast<core3d::retained_topology_budget::Counter&>(commitBudget)=
+            static_cast<const core3d::retained_topology_budget::Counter&>(built.budget_);
+#if DEBUG
+        const core3d::retained_topology_budget::Counter b2StageEntry=
+            static_cast<const core3d::retained_topology_budget::Counter&>(built.budget_);
+        const B2BudgetStageGuard b2StageGuard{b2StageEntry,commitBudget,"commit-stage-r2"};
+#endif
+        TopoDS_Shape verified;const std::atomic_bool neverCancelled{false};
+        if(!r2::ReplayTreatmentSuffix(built.base_,built.definition_,verified,commitBudget,refusal)
+            ||!et::EquivalentReplayGeometry(built.result_,verified,commitBudget,refusal)
+            ||core3d::retained_topology_budget::ChargeTraversal(built.result_,commitBudget,
+                neverCancelled,core3d::retained_topology_budget::Site::C28CompanionCapture)
+                !=core3d::retained_topology_budget::WalkStatus::Completed){
+            if(commitBudget.exhausted)refusal=et::Refusal::Budget;return Standard_False;
+        }
         // Split carrier layout: the retained-solid record may live on its own
         // child label of the owner rather than sharing the R2 carrier label.
         // Resolve it once and bind it to the staged result before the
@@ -387,6 +444,9 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
         }
         if(!retainedSourceLabel.IsNull())TNaming_Builder(retainedSourceLabel).Select(built.result_,built.result_);
         Handle(AIS_Shape) presentation=new AIS_Shape(built.result_);if(!ReplaceShape(original.ownerLabel_,presentation))return Standard_False;
+#if DEBUG
+    core3d::retained_topology_budget::debug::RecordMutation();
+#endif
         if(built.sourceChanged()){
             // An admitted source edit restages the retained source carrier
             // atomically with the treatment payload inside the same already
@@ -498,6 +558,22 @@ Standard_Boolean OcctDocument::StageRetainedBooleanMigrationR2(
             refusal=et::Refusal::IdentityMismatch;return Standard_False;
         }
     }
+    et::ReplayBudget commitBudget;
+    static_cast<core3d::retained_topology_budget::Counter&>(commitBudget)=
+        static_cast<const core3d::retained_topology_budget::Counter&>(built.budget_);
+#if DEBUG
+    const core3d::retained_topology_budget::Counter b2StageEntry=
+        static_cast<const core3d::retained_topology_budget::Counter&>(built.budget_);
+    const B2BudgetStageGuard b2StageGuard{b2StageEntry,commitBudget,"commit-stage-r2"};
+#endif
+    TopoDS_Shape verified;const std::atomic_bool neverCancelled{false};
+    if(!r2::ReplayTreatmentSuffix(built.base_,built.definition_,verified,commitBudget,refusal)
+        ||!et::EquivalentReplayGeometry(built.result_,verified,commitBudget,refusal)
+        ||core3d::retained_topology_budget::ChargeTraversal(built.result_,commitBudget,
+            neverCancelled,core3d::retained_topology_budget::Site::C28CompanionCapture)
+            !=core3d::retained_topology_budget::WalkStatus::Completed){
+        if(commitBudget.exhausted)refusal=et::Refusal::Budget;return Standard_False;
+    }
     // ReplaceShape re-captures the owner state after SetShape (through
     // SaveObjectTransform), and the SYRS record's strict whole-document read
     // requires the record's bound shape to equal the owner's current shape.
@@ -508,6 +584,9 @@ Standard_Boolean OcctDocument::StageRetainedBooleanMigrationR2(
     TNaming_Builder(original.sourceLabel_).Select(built.result_,built.result_);
     Handle(AIS_Shape) presentation=new AIS_Shape(built.result_);
     if(!ReplaceShape(original.ownerLabel_,presentation)){refusal=et::Refusal::StageFailed;return Standard_False;}
+#if DEBUG
+    core3d::retained_topology_budget::debug::RecordMutation();
+#endif
     Handle(core3d::retained_solid::Attribute) source;
     if(!original.sourceLabel_.FindAttribute(core3d::retained_solid::AttributeID(),source)||source.IsNull()){
         refusal=et::Refusal::StageFailed;return Standard_False;
@@ -572,8 +651,27 @@ Standard_Boolean OcctDocument::StageRetainedBooleanEnrollmentR2(
         std::vector<std::uint8_t> definitionBytes;
         if(!r2::Encode(built.definition_,definitionBytes,refusal)
             ||definitionBytes!=built.definitionBytes_||built.result_.IsNull())return Standard_False;
+        et::ReplayBudget commitBudget;
+        static_cast<core3d::retained_topology_budget::Counter&>(commitBudget)=
+            static_cast<const core3d::retained_topology_budget::Counter&>(built.budget_);
+#if DEBUG
+        const core3d::retained_topology_budget::Counter b2StageEntry=
+            static_cast<const core3d::retained_topology_budget::Counter&>(built.budget_);
+        const B2BudgetStageGuard b2StageGuard{b2StageEntry,commitBudget,"commit-stage-r2"};
+#endif
+        TopoDS_Shape verified;const std::atomic_bool neverCancelled{false};
+        if(!r2::ReplayTreatmentSuffix(built.base_,built.definition_,verified,commitBudget,refusal)
+            ||!et::EquivalentReplayGeometry(built.result_,verified,commitBudget,refusal)
+            ||core3d::retained_topology_budget::ChargeTraversal(built.result_,commitBudget,
+                neverCancelled,core3d::retained_topology_budget::Site::C28CompanionCapture)
+                !=core3d::retained_topology_budget::WalkStatus::Completed){
+            if(commitBudget.exhausted)refusal=et::Refusal::Budget;return Standard_False;
+        }
         Handle(AIS_Shape) presentation=new AIS_Shape(built.result_);
         if(!ReplaceShape(original.ownerLabel_,presentation)){refusal=et::Refusal::StageFailed;return Standard_False;}
+#if DEBUG
+    core3d::retained_topology_budget::debug::RecordMutation();
+#endif
         Handle(core3d::composite_recipe::Attribute) source;
         if(!original.sourceLabel_.FindAttribute(core3d::composite_recipe::AttributeID(),source)||source.IsNull()){
             refusal=et::Refusal::StageFailed;return Standard_False;
@@ -833,6 +931,15 @@ core3d::retained_face_selector::Resolution OcctDocument::ResolveRetainedFaceSele
     const core3d::retained_edge_treatment::Snapshot& snapshot,
     const core3d::retained_face_selector::SelectorIntent& intent,
     const core3d::retained_recipe::RevisionFence& expected) const noexcept {
+    core3d::retained_edge_treatment::ReplayBudget budget=snapshot.chargedBudget_;
+    return ResolveRetainedFaceSelector(snapshot,intent,expected,budget);
+}
+
+core3d::retained_face_selector::Resolution OcctDocument::ResolveRetainedFaceSelector(
+    const core3d::retained_edge_treatment::Snapshot& snapshot,
+    const core3d::retained_face_selector::SelectorIntent& intent,
+    const core3d::retained_recipe::RevisionFence& expected,
+    core3d::retained_edge_treatment::ReplayBudget& budget) const noexcept {
     using namespace core3d::retained_face_selector;
     Resolution output;
     try {
@@ -843,7 +950,6 @@ core3d::retained_face_selector::Resolution OcctDocument::ResolveRetainedFaceSele
             output.refusal = Refusal::StaleSource;
             return output;
         }
-        core3d::retained_edge_treatment::ReplayBudget budget;
         const std::atomic_bool cancelled{false};
         Resolve(snapshot.current_, intent, snapshot.dimensionMetersPerUnit(), budget, cancelled, output);
         return output;
@@ -932,6 +1038,33 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
         if(bool(live)!=bool(original.definition_)||(live&&live->value->bytes!=original.definitionBytes_)
             ||!XCAFDoc_ShapeTool::GetShape(original.ownerLabel_).IsEqual(original.current_)){
             refusal=Refusal::StaleSnapshot;return Standard_False;
+        }
+        // L04/L05: commit validation is one sequential continuation beginning
+        // at detached-build debt. Verify the complete candidate before any
+        // owner/carrier mutation and retain the resulting debt for every
+        // subsequent branch below.
+        ReplayBudget stageBudget=built.budget_;
+#if DEBUG
+        const ReplayBudget b2StageEntry=built.budget_;
+        const B2BudgetStageGuard b2StageGuard{b2StageEntry,stageBudget,"commit-stage"};
+#endif
+        if(!VerifyCurrent(built.base_,built.result_,built.definition_,built.proofs_,stageBudget,refusal))
+            return Standard_False;
+        // C28: reserve the unbounded flag-map passes and both protected
+        // forward/prior-state verification sides before mutation. Recovery
+        // consumes these admissions; it never asks an exhausted operation for
+        // new credit after SetShape.
+        const std::atomic_bool neverCancelled{false};
+        using namespace core3d::retained_topology_budget;
+        if(ChargeTraversal(original.current_,stageBudget,neverCancelled,Site::C28CompanionCapture)
+                !=WalkStatus::Completed
+            ||ChargeTraversal(original.current_,stageBudget,neverCancelled,Site::C28CompanionCapture)
+                !=WalkStatus::Completed
+            ||ChargeTraversal(built.result_,stageBudget,neverCancelled,Site::C28CompanionCapture)
+                !=WalkStatus::Completed
+            ||ChargeTraversal(built.result_,stageBudget,neverCancelled,Site::C28CompanionCapture)
+                !=WalkStatus::Completed){
+            refusal=Refusal::Budget;return Standard_False;
         }
         // Paired staging prevalidation: capture and validate the complete old
         // owner state while its carrier is still current, before any mutation.
@@ -1038,15 +1171,18 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
                 }
             }
             if(admittedSourceBytes!=original.sourceBytes_){refusal=Refusal::IdentityMismatch;return Standard_False;}
-            ReplayBudget stageBudget=built.budget_;core3d::retained_face_selector::Resolution resolution;
+            core3d::retained_face_selector::Resolution resolution;
             const std::atomic_bool cancelled{false};
             const auto selectorRefusal=core3d::retained_face_selector::Resolve(original.current_,
                 admitted.issuedStep_.selector->intent,expected.base.metersPerLocalUnit,
                 stageBudget,cancelled,resolution);
-            if(selectorRefusal!=core3d::retained_face_selector::Refusal::None||!resolution.proof
-                ||core3d::retained_face_selector::VerifyReceipt(*resolution.proof,admitted.issuedStep_,
-                    expected.base.metersPerLocalUnit,stageBudget)!=core3d::retained_face_selector::Refusal::None){
-                refusal=Refusal::ReplayMismatch;return Standard_False;
+            if(selectorRefusal!=core3d::retained_face_selector::Refusal::None||!resolution.proof){
+                refusal=core3d::retained_face_selector::MapToB1(selectorRefusal);return Standard_False;
+            }
+            const auto receiptRefusal=core3d::retained_face_selector::VerifyReceipt(*resolution.proof,
+                admitted.issuedStep_,expected.base.metersPerLocalUnit,stageBudget);
+            if(receiptRefusal!=core3d::retained_face_selector::Refusal::None){
+                refusal=core3d::retained_face_selector::MapToB1(receiptRefusal);return Standard_False;
             }
             expected.schema=2;++expected.issuance.nextLocalID;
             expected.steps.push_back(admitted.issuedStep_);expected.outputNode=admitted.issuedStep_.node;
@@ -1064,15 +1200,13 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
             // Exact byte equality to that expectation stays binding, and the
             // candidate base/result are independently tied to it.
             if(!original.definition_){refusal=Refusal::IdentityMismatch;return Standard_False;}
-            SourceRebindRoles roles;ReplayBudget roleBudget;
-            SourceRebindResult expectation;ReplayBudget expectationBudget=built.budget_;
-            if(!CaptureSourceRebindRoles(original.base_,*original.definition_,original.definitionBytes_,roleBudget,refusal,roles)
-                ||!ApplySourceRebind(roles,rebuild->requested,built.base_,expectationBudget,refusal,expectation))return Standard_False;
+            SourceRebindRoles roles;SourceRebindResult expectation;
+            if(!CaptureSourceRebindRoles(original.base_,*original.definition_,original.definitionBytes_,stageBudget,refusal,roles)
+                ||!ApplySourceRebind(roles,rebuild->requested,built.base_,stageBudget,refusal,expectation))return Standard_False;
             if(expectation.bytes!=built.definitionBytes_){
                 refusal=Refusal::ReplayMismatch;return Standard_False;
             }
-            ReplayBudget geometryBudget=built.budget_;
-            if(!EquivalentReplayGeometry(built.result_,expectation.treated,geometryBudget,refusal))return Standard_False;
+            if(!EquivalentReplayGeometry(built.result_,expectation.treated,stageBudget,refusal))return Standard_False;
             expected=expectation.definition;
         }else{
             std::vector<std::uint8_t>expectedBytes;
@@ -1092,6 +1226,9 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
             &&pairedRepresentation==OcctGeometryRepresentation::BRep
             &&built.result_.ShapeType()==TopAbs_SOLID){
             shapeTool->SetShape(original.ownerLabel_,built.result_);
+#if DEBUG
+            core3d::retained_topology_budget::debug::RecordMutation();
+#endif
             const TopoDS_Shape storedShape=XCAFDoc_ShapeTool::GetShape(original.ownerLabel_);
             shapeStaged=!storedShape.IsNull()&&storedShape.IsEqual(built.result_)
                 &&IsEditableFreeSimpleDefinitionLabel(original.ownerLabel_)

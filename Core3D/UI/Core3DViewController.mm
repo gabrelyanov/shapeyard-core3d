@@ -89,6 +89,7 @@
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRep_Builder.hxx>
 #include <TopoDS_Compound.hxx>
 
@@ -96,10 +97,12 @@ namespace core3d::face_selector_bridge {
 bool Intent(Core3DFaceSelectorIntent *, retained_face_selector::SelectorIntent&);
 Core3DFaceSelectorQuery *Query(Core3DFaceSelectorIntent *, const retained_face_selector::Resolution&);
 Core3DFaceSelectorQuery *BoundQuery(Core3DFaceSelectorIntent *,
-    const std::shared_ptr<const retained_edge_treatment::SelectorTargetCapture>&);
+    const std::shared_ptr<const retained_edge_treatment::SelectorTargetCapture>&,
+    const std::vector<retained_edge_treatment::CurveKind>&);
 std::shared_ptr<const retained_edge_treatment::SelectorTargetCapture>
 Targets(Core3DFaceSelectorProof *) noexcept;
 }
+namespace b2tb=core3d::retained_topology_budget;
 #include "../OCCTKit/SavedCutSourceDetachedWork.hxx"
 #include <set>
 #include <chrono>
@@ -3903,7 +3906,7 @@ static void Core3DExpireDebugNativeSolidCompletion(NSUUID *token,Core3DDebugNati
 
 @interface Core3DEdgeTreatmentNativeSnapshot:Core3DEdgeTreatmentSnapshot {@public std::shared_ptr<const core3d::retained_edge_treatment::Snapshot> native;}@end
 @implementation Core3DEdgeTreatmentNativeSnapshot @end
-@interface Core3DEdgeTreatmentNativeTargets:Core3DEdgeTreatmentTargetCapture {@public std::vector<core3d::retained_edge_treatment::Anchor> nativeAnchors;std::shared_ptr<const core3d::retained_edge_treatment::Snapshot> nativeSnapshot;}@end
+@interface Core3DEdgeTreatmentNativeTargets:Core3DEdgeTreatmentTargetCapture {@public std::vector<core3d::retained_edge_treatment::Anchor> nativeAnchors;std::shared_ptr<const core3d::retained_edge_treatment::Snapshot> nativeSnapshot;core3d::retained_edge_treatment::ReplayBudget nativeBudget;BOOL continuationUsed;}@end
 @implementation Core3DEdgeTreatmentNativeTargets @end
 @interface Core3DEdgeTreatmentNativeOperation:Core3DEdgeTreatmentOperation {@public std::shared_ptr<core3d::retained_edge_treatment::Work> nativeWork;std::shared_ptr<core3d::retained_edge_treatment::r2::Work> nativeWorkR2;void(^completion)(Core3DEdgeTreatmentResult *);void(^stopProvenance)(Core3DEdgeTreatmentResult *);BOOL settled;}@end
 @implementation Core3DEdgeTreatmentNativeOperation @end
@@ -21528,7 +21531,7 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
 }
 
 - (Core3DEdgeTreatmentTargetCapture *)captureEdgeTreatmentTargets:(NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected {
-    auto result=B1Object<Core3DEdgeTreatmentNativeTargets>(Core3DEdgeTreatmentNativeTargets.class);[result setValue:@(Core3DEdgeTreatmentStatusMalformed) forKey:@"status"];[result setValue:@[] forKey:@"anchors"];[result setValue:@"b1.UnsupportedEdge" forKey:@"refusalCode"];[result setValue:@"The selected edge geometry cannot be retained by this tool." forKey:@"refusalMessage"];auto capture=[self captureEdgeTreatment:entityIdentifier expected:expected];if(!capture.snapshot||!GLController.viewer)return result;auto snapshot=(Core3DEdgeTreatmentNativeSnapshot*)capture.snapshot;core3d::retained_edge_treatment::Refusal refusal;result->nativeAnchors=GLController.viewer->captureEdgeTreatmentTargets(snapshot->native,refusal);if(refusal!=core3d::retained_edge_treatment::Refusal::None)return result;result->nativeSnapshot=snapshot->native;NSMutableArray*anchors=[NSMutableArray array];for(const auto&a:result->nativeAnchors)[anchors addObject:B1Anchor(a)];[result setValue:@(Core3DEdgeTreatmentStatusCurrentEditable) forKey:@"status"];[result setValue:capture.snapshot forKey:@"snapshot"];[result setValue:anchors forKey:@"anchors"];[result setValue:@"b1.None" forKey:@"refusalCode"];[result setValue:@"" forKey:@"refusalMessage"];return result;
+    auto result=B1Object<Core3DEdgeTreatmentNativeTargets>(Core3DEdgeTreatmentNativeTargets.class);[result setValue:@(Core3DEdgeTreatmentStatusMalformed) forKey:@"status"];[result setValue:@[] forKey:@"anchors"];[result setValue:@"b1.UnsupportedEdge" forKey:@"refusalCode"];[result setValue:@"The selected edge geometry cannot be retained by this tool." forKey:@"refusalMessage"];auto capture=[self captureEdgeTreatment:entityIdentifier expected:expected];if(!capture.snapshot||!GLController.viewer)return result;auto snapshot=(Core3DEdgeTreatmentNativeSnapshot*)capture.snapshot;core3d::retained_edge_treatment::Refusal refusal;result->nativeAnchors=GLController.viewer->captureEdgeTreatmentTargets(snapshot->native,result->nativeBudget,refusal);if(refusal!=core3d::retained_edge_treatment::Refusal::None)return result;result->nativeSnapshot=snapshot->native;NSMutableArray*anchors=[NSMutableArray array];for(const auto&a:result->nativeAnchors)[anchors addObject:B1Anchor(a)];[result setValue:@(Core3DEdgeTreatmentStatusCurrentEditable) forKey:@"status"];[result setValue:capture.snapshot forKey:@"snapshot"];[result setValue:anchors forKey:@"anchors"];[result setValue:@"b1.None" forKey:@"refusalCode"];[result setValue:@"" forKey:@"refusalMessage"];return result;
 }
 
 - (Core3DFaceSelectorQuery *)resolveFaceSelector:(Core3DEdgeTreatmentSnapshot *)snapshot
@@ -21555,9 +21558,20 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         std::uint32_t(size.width), std::uint32_t(size.height), refusal);
     if (!targets) {
         resolution.refusal = refusal;
+#if DEBUG
+        // F10: nil alone is never budget evidence — the typed cause is recorded.
+        b2tb::debug::RecordRefusal(core3d::retained_face_selector::RefusalCode(refusal));
+#endif
         return core3d::face_selector_bridge::Query(intent, resolution);
     }
-    return core3d::face_selector_bridge::BoundQuery(intent, targets);
+    std::vector<core3d::retained_edge_treatment::CurveKind> projectedKinds;
+    targets=GLController.viewer->projectEdgeTreatmentSelectorTargets(targets,projectedKinds,refusal);
+    if(!targets){resolution.refusal=refusal;
+#if DEBUG
+        b2tb::debug::RecordRefusal(core3d::retained_face_selector::RefusalCode(refusal));
+#endif
+        return core3d::face_selector_bridge::Query(intent,resolution);}
+    return core3d::face_selector_bridge::BoundQuery(intent, targets, projectedKinds);
 }
 
 - (Core3DFaceSelectorQuery *)resolveLegacyFaceSelector:(Core3DCylindricalCutProgramSnapshot *)snapshot
@@ -21661,15 +21675,353 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     [result setValue:@YES forKey:@"geometryBytesEqual"]; [result setValue:@YES forKey:@"displayBytesEqual"];
     [result setValue:@YES forKey:@"historyEqual"]; return result;
 }
+
+- (Core3DB2TopologyBudgetObservation *)debugB2TopologyBudgetProbe:
+    (Core3DB2TopologyBudgetScenario)scenario metersPerLocalUnit:(double)metersPerLocalUnit
+    injection:(Core3DB2TopologyBudgetInjection *)injection {
+    auto observation=(Core3DB2TopologyBudgetObservation *)class_createInstance(
+        Core3DB2TopologyBudgetObservation.class,0);
+    [observation setValue:@(scenario) forKey:@"scenario"];
+    std::uint64_t unitBits=0;std::memcpy(&unitBits,&metersPerLocalUnit,sizeof(unitBits));
+    [observation setValue:@(unitBits) forKey:@"metersPerLocalUnitBits"];
+    const std::uint64_t sequence=(std::uint64_t(arc4random())<<32)|arc4random();
+    [observation setValue:@(sequence?sequence:1) forKey:@"operationSequence"];
+    [observation setValue:@NO forKey:@"supported"];
+    [observation setValue:@YES forKey:@"traceComplete"];
+    [observation setValue:@"b1.UnsupportedDependency" forKey:@"refusalCode"];
+    if(![NSThread isMainThread]||!std::isfinite(metersPerLocalUnit)
+        ||metersPerLocalUnit<=0)return observation;
+    try{
+        // The probe counter is the real B1 ReplayBudget so the resolver rows
+        // below run through the same checked accounting type as production.
+        core3d::retained_edge_treatment::ReplayBudget budget;
+        if(injection.kind==Core3DB2TopologyBudgetInjectionCorrupt){
+            // U22 validation-only seed: out-of-range counters must be denied
+            // validation-first by the next real checked admission. A corrupt
+            // seed can never enter an owner operation (the begin/end bridge
+            // rejects it outright).
+            budget.topologyVisits=injection.remainingVisits;
+            budget.buildStages=injection.remainingStages;
+        }else if(injection.kind==Core3DB2TopologyBudgetInjectionLeaveExactly
+            ||injection.kind==Core3DB2TopologyBudgetInjectionLeaveOneLess){
+            std::size_t goalVisits=(std::size_t)injection.remainingVisits;
+            if(injection.kind==Core3DB2TopologyBudgetInjectionLeaveOneLess&&goalVisits)--goalVisits;
+            if(injection.remainingVisits>b2tb::MaximumTopologyVisits
+                ||injection.remainingStages>b2tb::MaximumBuildStages
+                ||injection.site<0||injection.site>=NSInteger(b2tb::Site::Count))
+                return observation;
+            // Site- and occurrence-honouring: the debt enters through the real
+            // checked accounting API at the requested deterministic charge
+            // event, immediately before the tagged work — never up front and
+            // never by writing counters directly.
+            b2tb::debug::ArmDebtHook(b2tb::Site(injection.site),
+                injection.occurrence>0?(std::size_t)injection.occurrence:1,
+                goalVisits,(std::size_t)injection.remainingStages);
+        }
+        struct B2HookReset { ~B2HookReset(){ b2tb::debug::ClearDebtHook(); } };
+        const B2HookReset b2HookReset{};(void)b2HookReset;
+        [observation setValue:@(budget.topologyVisits) forKey:@"entryVisits"];
+        [observation setValue:@(budget.buildStages) forKey:@"entryStages"];
+        TopoDS_Shape shape;BRep_Builder builder;TopoDS_Compound compound;
+        const double local=1.0/(1000.0*metersPerLocalUnit);
+        const auto addEdge=[&](std::size_t index){
+            builder.Add(compound,BRepBuilderAPI_MakeEdge(
+                gp_Pnt((100.0+2.0*double(index))*local,0,-10*local),
+                gp_Pnt((101.0+2.0*double(index))*local,0,-10*local)).Edge());
+        };
+        const auto addFace=[&](){TopoDS_Face face;builder.MakeFace(face);builder.Add(compound,face);};
+        const auto boundary=[](Core3DB2TopologyBudgetScenario value)->std::size_t{
+            switch(value){
+            case Core3DB2TopologyBudgetScenarioEdge4095:
+            case Core3DB2TopologyBudgetScenarioFace4095:return 4095;
+            case Core3DB2TopologyBudgetScenarioEdge4096:
+            case Core3DB2TopologyBudgetScenarioFace4096:return 4096;
+            default:return 4097;
+            }
+        };
+        if(scenario==Core3DB2TopologyBudgetScenarioBox)
+            shape=BRepPrimAPI_MakeBox(60*local,40*local,30*local).Shape();
+        else if(scenario==Core3DB2TopologyBudgetScenarioBoxWithHole){
+            auto outer=BRepPrimAPI_MakeBox(60*local,40*local,30*local).Shape();
+            auto opening=BRepPrimAPI_MakeBox(gp_Pnt(20*local,10*local,-local),
+                20*local,20*local,32*local).Shape();BRepAlgoAPI_Cut cut(outer,opening);cut.Build();shape=cut.Shape();
+        }else if(scenario>=Core3DB2TopologyBudgetScenarioEdge4095
+            &&scenario<=Core3DB2TopologyBudgetScenarioFace4097){
+            const std::size_t target=boundary(scenario);builder.MakeCompound(compound);
+            builder.Add(compound,BRepPrimAPI_MakeBox(60*local,40*local,30*local).Shape());
+            const bool faces=scenario>=Core3DB2TopologyBudgetScenarioFace4095;
+            for(std::size_t index=18;index<target;++index)faces?addFace():addEdge(index);
+            shape=compound;
+        }else if(scenario==Core3DB2TopologyBudgetScenarioMixed4097){
+            builder.MakeCompound(compound);
+            builder.Add(compound,BRepPrimAPI_MakeBox(60*local,40*local,30*local).Shape());
+            for(std::size_t n=0;n<2039;++n)addFace();
+            for(std::size_t n=0;n<2040;++n)addEdge(n);shape=compound;
+        }else if(scenario==Core3DB2TopologyBudgetScenarioRepeatedOccurrences){
+            // F04: one shared edge (with its two vertices) re-inserted through
+            // 257 separate child compounds per group, repeated for 86 groups.
+            // Fixed iterative constructor; the unique face/edge census stays
+            // tiny while occurrence visits run to the 65,536 cap.
+            const TopoDS_Edge sharedEdge=BRepBuilderAPI_MakeEdge(
+                gp_Pnt(0,0,-10*local),gp_Pnt(local,0,-10*local)).Edge();
+            builder.MakeCompound(compound);
+            for(std::size_t group=0;group<86;++group){
+                TopoDS_Compound groupCompound;builder.MakeCompound(groupCompound);
+                for(std::size_t child=0;child<257;++child){
+                    TopoDS_Compound childCompound;builder.MakeCompound(childCompound);
+                    builder.Add(childCompound,sharedEdge);
+                    builder.Add(groupCompound,childCompound);
+                }
+                builder.Add(compound,groupCompound);
+            }
+            shape=compound;
+        }else if(scenario==Core3DB2TopologyBudgetScenarioDeepContainers){
+            // F04: a fixed nested chain of 65 compounds around the F01 box —
+            // deep traversal without recursion; 65+86=151 occurrences.
+            TopoDS_Shape current=BRepPrimAPI_MakeBox(60*local,40*local,30*local).Shape();
+            for(int depth=0;depth<65;++depth){
+                TopoDS_Compound chain;builder.MakeCompound(chain);
+                builder.Add(chain,current);current=chain;
+            }
+            shape=current;
+        }else if(scenario==Core3DB2TopologyBudgetScenarioVertexFanout){
+            // F04: vertex-only fan-out; construction is outside the measured
+            // operation, traversal is not.
+            builder.MakeCompound(compound);
+            for(std::size_t index=0;index<65537;++index)
+                builder.Add(compound,BRepBuilderAPI_MakeVertex(
+                    gp_Pnt(double(index)*local,0,-10*local)).Vertex());
+            shape=compound;
+        }else if(scenario==Core3DB2TopologyBudgetScenarioEmptyWireFanout){
+            // F04: 65,537 empty wire TShapes; the walker stops at the visit cap.
+            builder.MakeCompound(compound);
+            for(std::size_t index=0;index<65537;++index){
+                TopoDS_Wire wire;builder.MakeWire(wire);builder.Add(compound,wire);
+            }
+            shape=compound;
+        }else if(scenario==Core3DB2TopologyBudgetScenarioTruncated65){
+            // F04 discovery case: 65-use prism, Z/max intent count 64.
+            BRepBuilderAPI_MakePolygon polygon;
+            for(int index=0;index<65;++index){
+                const double angle=2.0*M_PI*double(index)/65.0;
+                polygon.Add(gp_Pnt((30.0+20.0*std::cos(angle))*local,
+                    (30.0+20.0*std::sin(angle))*local,0));
+            }
+            polygon.Close();
+            shape=BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(polygon.Wire()).Face(),
+                gp_Vec(0,0,30*local)).Shape();
+        }else if(scenario==Core3DB2TopologyBudgetScenarioRepeatedAncestry){
+            // F05: the F01 box plus 64 further occurrences of its exact
+            // selected top face — deliberately invalid repeated ownership.
+            const TopoDS_Shape baseBox=BRepPrimAPI_MakeBox(60*local,40*local,30*local).Shape();
+            builder.MakeCompound(compound);builder.Add(compound,baseBox);
+            TopTools_IndexedMapOfShape boxFaces;TopExp::MapShapes(baseBox,TopAbs_FACE,boxFaces);
+            TopoDS_Face topFace;double topZ=0;bool haveTop=false;
+            for(int index=1;index<=boxFaces.Extent();++index){
+                const TopoDS_Face face=TopoDS::Face(boxFaces.FindKey(index));
+                BRepAdaptor_Surface adaptor(face);
+                if(adaptor.GetType()!=GeomAbs_Plane)continue;
+                const double z=adaptor.Plane().Location().Z();
+                if(!haveTop||z>topZ){haveTop=true;topZ=z;topFace=face;}
+            }
+            if(topFace.IsNull())return observation;
+            for(int copy=0;copy<64;++copy)builder.Add(compound,topFace);
+            shape=compound;
+        }else return observation; // Owner scenarios are intentionally not faked by this low-level probe.
+        // Root-container readback (U20b diagnosis): the walked root's type,
+        // its direct child count and the first child's type, so a surrounding
+        // diagnostic compound is asserted together with its one extra root
+        // visit rather than copied from the counter under test.
+        NSInteger rootType=-1,rootChildren=-1,rootFirstChild=-1;
+        if(!shape.IsNull()){
+            rootType=NSInteger(shape.ShapeType());rootChildren=0;
+            for(TopoDS_Iterator it(shape);it.More();it.Next()){
+                if(rootFirstChild<0)rootFirstChild=NSInteger(it.Value().ShapeType());
+                ++rootChildren;
+            }
+        }
+        [observation setValue:@(rootType) forKey:@"rootShapeType"];
+        [observation setValue:@(rootChildren) forKey:@"rootChildCount"];
+        [observation setValue:@(rootFirstChild) forKey:@"rootChildShapeType"];
+        const bool resolverScenario=scenario==Core3DB2TopologyBudgetScenarioTruncated65
+            ||scenario==Core3DB2TopologyBudgetScenarioRepeatedAncestry;
+        const std::atomic_bool cancelled{false};b2tb::Census census;
+        const auto status=b2tb::CensusTopology(shape,budget,cancelled,census,
+            b2tb::Site::C01StageCensus,true);
+        NSString *resolverRefusal=nil;
+        if(resolverScenario&&status==b2tb::WalkStatus::Completed){
+            // F04/F05 discovery rows run the REAL resolver on the continuing
+            // counter: truncated65 must give exact b2.TruncatedDiscovery under
+            // sufficient work credit, and the repeated-ancestry fixture must
+            // give the resolver's ordinary ownership refusal.
+            auto faceScope=[[Core3DPlanarFaceScope alloc] initWithAxis:Core3DFaceSelectorAxisZ
+                side:Core3DFaceSelectorSideMaximum];
+            Core3DFaceSelectorIntent *intent=[Core3DFaceSelectorIntent
+                planarFaceBoundary:[[Core3DPlanarFaceBoundaryIntent alloc]
+                    initWithFace:faceScope edgeKind:Core3DFaceSelectorBoundaryCurveLine
+                    expectedCount:scenario==Core3DB2TopologyBudgetScenarioTruncated65?64:4]];
+            core3d::retained_face_selector::SelectorIntent nativeIntent;
+            if(!core3d::face_selector_bridge::Intent(intent,nativeIntent))
+                resolverRefusal=@"b2.InvalidIntent";
+            else{
+                core3d::retained_face_selector::Resolution resolution;
+                const auto queryRefusal=core3d::retained_face_selector::Resolve(shape,
+                    nativeIntent,metersPerLocalUnit,budget,cancelled,resolution);
+                resolverRefusal=@(core3d::retained_face_selector::RefusalCode(queryRefusal));
+            }
+        }
+        [observation setValue:@YES forKey:@"supported"];
+        [observation setValue:@(budget.topologyVisits) forKey:@"exitVisits"];
+        [observation setValue:@(budget.buildStages) forKey:@"exitStages"];
+        [observation setValue:@(census.faces.Extent()) forKey:@"faceCount"];
+        [observation setValue:@(census.edges.Extent()) forKey:@"edgeCount"];
+        [observation setValue:@(census.occurrences) forKey:@"occurrenceCount"];
+        [observation setValue:@(budget.exhausted) forKey:@"exhausted"];
+        [observation setValue:@(status==b2tb::WalkStatus::Completed) forKey:@"protectedWorkStarted"];
+        [observation setValue:@NO forKey:@"partialOutputEscaped"];
+        [observation setValue:@(NSInteger(budget.firstDeniedSite)) forKey:@"deniedSite"];
+        [observation setValue:@(NSInteger(budget.firstDeniedDimension)) forKey:@"deniedDimension"];
+        [observation setValue:@(budget.firstDeniedRequested) forKey:@"deniedRequested"];
+        [observation setValue:@(budget.firstDeniedVisitsAdmitted) forKey:@"deniedVisits"];
+        [observation setValue:@(budget.firstDeniedStagesAdmitted) forKey:@"deniedStages"];
+        NSMutableArray *visits=[NSMutableArray array],*stages=[NSMutableArray array];
+        for(std::size_t site=0;site<std::size_t(b2tb::Site::Count);++site){
+            [visits addObject:@(budget.visitsBySite[site])];[stages addObject:@(budget.stagesBySite[site])];
+        }
+        [observation setValue:visits forKey:@"visitsBySite"];
+        [observation setValue:stages forKey:@"stagesBySite"];
+        NSString *probeRefusal=status==b2tb::WalkStatus::Completed?@"b2.None":
+            status==b2tb::WalkStatus::BudgetDenied?@"b2.Budget":@"b2.NativeFailure";
+        if(resolverRefusal)probeRefusal=resolverRefusal;
+        [observation setValue:probeRefusal forKey:@"refusalCode"];
+        return observation;
+    }catch(...){[observation setValue:@"b2.NativeFailure" forKey:@"refusalCode"];return observation;}
+}
+
+namespace {
+// F10 owner-observation sessions (DEBUG only), keyed by token. A session is
+// bound to this controller's begin/end pair and records only what the real
+// owner operation APIs actually charged while it was active.
+struct B2BudgetSessionBox {
+    std::unique_ptr<b2tb::debug::SessionTrace> trace;
+    Core3DB2TopologyBudgetScenario scenario;
+    std::uint64_t unitBits = 0, sequence = 0;
+};
+std::unordered_map<NSUInteger,B2BudgetSessionBox>& B2BudgetSessions(){
+    static auto *sessions=new std::unordered_map<NSUInteger,B2BudgetSessionBox>();
+    return *sessions;
+}
+}
+
+- (NSUInteger)debugBeginB2BudgetObservation:(Core3DB2TopologyBudgetScenario)scenario
+    metersPerLocalUnit:(double)metersPerLocalUnit
+    injection:(Core3DB2TopologyBudgetInjection *)injection {
+    if(![NSThread isMainThread]||!std::isfinite(metersPerLocalUnit)||metersPerLocalUnit<=0)return 0;
+    if(scenario<Core3DB2TopologyBudgetScenarioProfileOwner
+        ||scenario>Core3DB2TopologyBudgetScenarioR2Owner)return 0;
+    // A stale session from an aborted run never leaks into the new one.
+    b2tb::debug::ActiveSession()=nullptr;b2tb::debug::ClearDebtHook();
+    B2BudgetSessions().clear();
+    const auto kind=injection?injection.kind:Core3DB2TopologyBudgetInjectionNone;
+    // Corrupt seeds stay arithmetic-only; they can never enter an owner op.
+    if(kind==Core3DB2TopologyBudgetInjectionCorrupt)return 0;
+    if(kind!=Core3DB2TopologyBudgetInjectionNone){
+        if(injection.remainingVisits>b2tb::MaximumTopologyVisits
+            ||injection.remainingStages>b2tb::MaximumBuildStages
+            ||injection.site<0||injection.site>=NSInteger(b2tb::Site::Count))return 0;
+        std::size_t goalVisits=(std::size_t)injection.remainingVisits;
+        if(kind==Core3DB2TopologyBudgetInjectionLeaveOneLess&&goalVisits)--goalVisits;
+        b2tb::debug::ArmDebtHook(b2tb::Site(injection.site),
+            injection.occurrence>0?(std::size_t)injection.occurrence:1,
+            goalVisits,(std::size_t)injection.remainingStages);
+    }
+    NSUInteger token=0;
+    do{token=(NSUInteger(arc4random())<<32)|arc4random();}
+    while(!token||B2BudgetSessions().count(token));
+    B2BudgetSessionBox box;box.trace.reset(new b2tb::debug::SessionTrace);
+    box.scenario=scenario;std::memcpy(&box.unitBits,&metersPerLocalUnit,sizeof(box.unitBits));
+    box.sequence=(std::uint64_t(arc4random())<<32)|arc4random();if(!box.sequence)box.sequence=1;
+    b2tb::debug::ActiveSession()=box.trace.get();
+    B2BudgetSessions().emplace(token,std::move(box));
+    return token;
+}
+
+- (Core3DB2TopologyBudgetObservation *)debugEndB2BudgetObservation:(NSUInteger)token {
+    auto observation=(Core3DB2TopologyBudgetObservation *)class_createInstance(
+        Core3DB2TopologyBudgetObservation.class,0);
+    [observation setValue:@NO forKey:@"supported"];
+    [observation setValue:@NO forKey:@"traceComplete"];
+    [observation setValue:@"b1.UnsupportedDependency" forKey:@"refusalCode"];
+    [observation setValue:@(NSInteger(-1)) forKey:@"rootShapeType"];
+    [observation setValue:@(NSInteger(-1)) forKey:@"rootChildCount"];
+    [observation setValue:@(NSInteger(-1)) forKey:@"rootChildShapeType"];
+    // Settlement: the debt hook and the active session are always removed here.
+    b2tb::debug::ActiveSession()=nullptr;b2tb::debug::ClearDebtHook();
+    auto it=B2BudgetSessions().find(token);
+    if(it==B2BudgetSessions().end())return observation;
+    B2BudgetSessionBox box=std::move(it->second);B2BudgetSessions().erase(it);
+    const b2tb::debug::SessionTrace& trace=*box.trace;
+    const b2tb::Counter& budget=trace.budget;
+    [observation setValue:@(box.scenario) forKey:@"scenario"];
+    [observation setValue:@(box.unitBits) forKey:@"metersPerLocalUnitBits"];
+    [observation setValue:@(box.sequence) forKey:@"operationSequence"];
+    [observation setValue:@(!trace.overflow) forKey:@"traceComplete"];
+    [observation setValue:@(!trace.phases.empty()) forKey:@"supported"];
+    const std::size_t entryVisits=trace.phases.empty()?0:trace.phases.front().entryVisits;
+    const std::size_t entryStages=trace.phases.empty()?0:trace.phases.front().entryStages;
+    [observation setValue:@(entryVisits) forKey:@"entryVisits"];
+    [observation setValue:@(entryStages) forKey:@"entryStages"];
+    [observation setValue:@(trace.hasBudget?budget.topologyVisits:entryVisits) forKey:@"exitVisits"];
+    [observation setValue:@(trace.hasBudget?budget.buildStages:entryStages) forKey:@"exitStages"];
+    [observation setValue:@(trace.hasBudget&&budget.exhausted) forKey:@"exhausted"];
+    [observation setValue:@(NSInteger(trace.hasBudget?budget.firstDeniedSite:b2tb::Site::None))
+        forKey:@"deniedSite"];
+    [observation setValue:@(NSInteger(trace.hasBudget?budget.firstDeniedDimension
+            :b2tb::Dimension::Visit)) forKey:@"deniedDimension"];
+    [observation setValue:@(trace.hasBudget?budget.firstDeniedRequested:0) forKey:@"deniedRequested"];
+    [observation setValue:@(trace.hasBudget?budget.firstDeniedVisitsAdmitted:0) forKey:@"deniedVisits"];
+    [observation setValue:@(trace.hasBudget?budget.firstDeniedStagesAdmitted:0) forKey:@"deniedStages"];
+    [observation setValue:@(trace.protectedWorkStarted) forKey:@"protectedWorkStarted"];
+    [observation setValue:@(trace.partialOutputEscaped) forKey:@"partialOutputEscaped"];
+    [observation setValue:@(trace.completionCount) forKey:@"completionCount"];
+    NSString *refusalCode=@"b1.None";
+    if(trace.commitSeen)refusalCode=@(trace.commitRefusal.c_str());
+    else if(!trace.operationRefusal.empty())refusalCode=@(trace.operationRefusal.c_str());
+    [observation setValue:refusalCode forKey:@"refusalCode"];
+    NSMutableArray *visits=[NSMutableArray array],*stages=[NSMutableArray array];
+    for(std::size_t site=0;site<std::size_t(b2tb::Site::Count);++site){
+        [visits addObject:@(trace.hasBudget?budget.visitsBySite[site]:std::size_t(0))];
+        [stages addObject:@(trace.hasBudget?budget.stagesBySite[site]:std::size_t(0))];
+    }
+    [observation setValue:visits forKey:@"visitsBySite"];
+    [observation setValue:stages forKey:@"stagesBySite"];
+    NSMutableArray *names=[NSMutableArray array],*entryV=[NSMutableArray array],
+        *exitV=[NSMutableArray array],*entryS=[NSMutableArray array],*exitS=[NSMutableArray array];
+    for(const auto& phase:trace.phases){
+        [names addObject:@(phase.name.c_str())];
+        [entryV addObject:@(phase.entryVisits)];[exitV addObject:@(phase.exitVisits)];
+        [entryS addObject:@(phase.entryStages)];[exitS addObject:@(phase.exitStages)];
+    }
+    [observation setValue:names forKey:@"phaseNames"];
+    [observation setValue:entryV forKey:@"phaseEntryVisits"];
+    [observation setValue:exitV forKey:@"phaseExitVisits"];
+    [observation setValue:entryS forKey:@"phaseEntryStages"];
+    [observation setValue:exitS forKey:@"phaseExitStages"];
+    return observation;
+}
 #endif
 
-- (Core3DEdgeTreatmentOperation *)core3d_beginEdgeTreatment:(Core3DEdgeTreatmentNativeSnapshot *)snapshot edit:(const core3d::retained_edge_treatment::Edit&)edit expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {
-    auto operation=B1Object<Core3DEdgeTreatmentNativeOperation>(Core3DEdgeTreatmentNativeOperation.class);if(!completion)return operation;operation->completion=[completion copy];auto refuse=^(core3d::retained_edge_treatment::Refusal refusal){if(operation->settled)return;operation->settled=YES;core3d::retained_edge_treatment::CommitResult r;r.outcome=core3d::retained_edge_treatment::CommitOutcome::Refused;r.refusal=refusal;r.measuredUndoDelta=0;auto callback=operation->completion;operation->completion=nil;operation->stopProvenance=nil;if(callback)callback(B1Result(r));};if(!NSThread.isMainThread||!snapshot||!snapshot->native||!GLController.viewer||!expected){refuse(core3d::retained_edge_treatment::Refusal::StaleSnapshot);return operation;}
+- (Core3DEdgeTreatmentOperation *)core3d_beginEdgeTreatment:(Core3DEdgeTreatmentNativeSnapshot *)snapshot edit:(const core3d::retained_edge_treatment::Edit&)edit expected:(Core3DSceneSnapshot *)expected budget:(const core3d::retained_edge_treatment::ReplayBudget *)continuation completion:(void(^)(Core3DEdgeTreatmentResult *))completion {
+    auto operation=B1Object<Core3DEdgeTreatmentNativeOperation>(Core3DEdgeTreatmentNativeOperation.class);if(!completion)return operation;operation->completion=[completion copy];auto refuse=^(core3d::retained_edge_treatment::Refusal refusal){if(operation->settled)return;operation->settled=YES;
+#if DEBUG
+        b2tb::debug::RecordRefusal(core3d::retained_edge_treatment::RefusalCode(refusal));
+#endif
+        core3d::retained_edge_treatment::CommitResult r;r.outcome=core3d::retained_edge_treatment::CommitOutcome::Refused;r.refusal=refusal;r.measuredUndoDelta=0;auto callback=operation->completion;operation->completion=nil;operation->stopProvenance=nil;if(callback)callback(B1Result(r));};if(!NSThread.isMainThread||!snapshot||!snapshot->native||!GLController.viewer||!expected){refuse(core3d::retained_edge_treatment::Refusal::StaleSnapshot);return operation;}
     NSData *requestedSource=nil;if(const auto*requested=std::get_if<core3d::retained_edge_treatment::RebuildSource>(&edit))requestedSource=B1SourceBytes(requested->requested);
     // Cancellation provenance: retain only the admitted immutable snapshot
     // and any native requested-source bytes; never a recaptured scene.
     std::shared_ptr<const core3d::retained_edge_treatment::Snapshot> stopSnapshot=snapshot->native;NSData *stopRequestedSource=requestedSource;operation->stopProvenance=[^(Core3DEdgeTreatmentResult *dto){B1BindQ2(dto,stopSnapshot,stopRequestedSource,nil);[dto setValue:@"" forKey:@"candidateRecipeSHA256"];} copy];
-    try{const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=snapshot.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;core3d::retained_edge_treatment::Refusal refusal;auto viewer=GLController.viewer;operation->nativeWork=viewer->prepareEdgeTreatment(snapshot->native,edit,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);core3d::retained_edge_treatment::Refusal geometryRefusal;auto geometry=viewer->edgeTreatmentGeometry(operation->nativeWork,geometryRefusal);
+    try{const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=snapshot.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;core3d::retained_edge_treatment::Refusal refusal;auto viewer=GLController.viewer;operation->nativeWork=viewer->prepareEdgeTreatment(snapshot->native,edit,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal,continuation);core3d::retained_edge_treatment::Refusal geometryRefusal;auto geometry=viewer->edgeTreatmentGeometry(operation->nativeWork,geometryRefusal);
 #if DEBUG
     std::fprintf(stderr,"B1B2_Q2 op=%p phase=prepare refusal=%s detach refusal=%s\n",(__bridge void*)operation,core3d::retained_edge_treatment::RefusalCode(refusal),core3d::retained_edge_treatment::RefusalCode(geometryRefusal));
 #endif
@@ -21684,7 +22036,7 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     auto dto=B1Result(r);B1BindQ2(dto,snapshot->native,requestedSource,built);auto callback=operation->completion;operation->completion=nil;operation->stopProvenance=nil;if(callback)callback(dto);});});return operation;}catch(...){refuse(core3d::retained_edge_treatment::Refusal::BuildFailed);return operation;}
 }
 
-- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentAppend:(Core3DEdgeTreatmentSnapshot *)snapshot kind:(Core3DEdgeTreatmentKind)kind amountMM:(double)amountMM targets:(Core3DEdgeTreatmentTargetCapture *)targets expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {auto native=(Core3DEdgeTreatmentNativeSnapshot*)snapshot;auto target=(Core3DEdgeTreatmentNativeTargets*)targets;if(![native isKindOfClass:Core3DEdgeTreatmentNativeSnapshot.class]||![target isKindOfClass:Core3DEdgeTreatmentNativeTargets.class]||target->nativeSnapshot!=native->native)return [self core3d_beginEdgeTreatment:nil edit:core3d::retained_edge_treatment::Append{} expected:expected completion:completion];core3d::retained_edge_treatment::Append edit{core3d::retained_edge_treatment::Kind(kind),amountMM,target->nativeAnchors};return [self core3d_beginEdgeTreatment:native edit:edit expected:expected completion:completion];}
+- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentAppend:(Core3DEdgeTreatmentSnapshot *)snapshot kind:(Core3DEdgeTreatmentKind)kind amountMM:(double)amountMM targets:(Core3DEdgeTreatmentTargetCapture *)targets expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {auto native=(Core3DEdgeTreatmentNativeSnapshot*)snapshot;auto target=(Core3DEdgeTreatmentNativeTargets*)targets;if(![native isKindOfClass:Core3DEdgeTreatmentNativeSnapshot.class]||![target isKindOfClass:Core3DEdgeTreatmentNativeTargets.class]||target->nativeSnapshot!=native->native||target->continuationUsed)return [self core3d_beginEdgeTreatment:nil edit:core3d::retained_edge_treatment::Append{} expected:expected budget:nullptr completion:completion];target->continuationUsed=YES;core3d::retained_edge_treatment::Append edit{core3d::retained_edge_treatment::Kind(kind),amountMM,target->nativeAnchors};return [self core3d_beginEdgeTreatment:native edit:edit expected:expected budget:&target->nativeBudget completion:completion];}
 - (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentSelectorAppend:
     (Core3DEdgeTreatmentSnapshot *)snapshot amountMM:(double)amountMM
     proof:(Core3DFaceSelectorProof *)proof expected:(Core3DSceneSnapshot *)expected
@@ -21693,6 +22045,9 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     if(!completion)return operation;operation->completion=[completion copy];
     auto refuse=^(core3d::retained_edge_treatment::Refusal refusal){
         if(operation->settled)return;operation->settled=YES;
+#if DEBUG
+        b2tb::debug::RecordRefusal(core3d::retained_edge_treatment::RefusalCode(refusal));
+#endif
         core3d::retained_edge_treatment::CommitResult result;
         result.outcome=core3d::retained_edge_treatment::CommitOutcome::Refused;
         result.refusal=refusal;result.measuredUndoDelta=0;auto callback=operation->completion;
@@ -21751,9 +22106,9 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         return operation;
     }catch(...){refuse(core3d::retained_edge_treatment::Refusal::BuildFailed);return operation;}
 }
-- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentAmount:(Core3DEdgeTreatmentSnapshot *)snapshot featureIdentifier:(NSString *)featureIdentifier amountMM:(double)amountMM expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {core3d::retained_edge_treatment::SetAmount edit;core3d::receipt::ParseUUID(featureIdentifier.UTF8String,edit.feature);edit.amountMM=amountMM;return [self core3d_beginEdgeTreatment:(Core3DEdgeTreatmentNativeSnapshot*)snapshot edit:edit expected:expected completion:completion];}
-- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentTargets:(Core3DEdgeTreatmentSnapshot *)snapshot featureIdentifier:(NSString *)featureIdentifier targets:(Core3DEdgeTreatmentTargetCapture *)targets expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {auto target=(Core3DEdgeTreatmentNativeTargets*)targets;core3d::retained_edge_treatment::ReplaceTargets edit;core3d::receipt::ParseUUID(featureIdentifier.UTF8String,edit.feature);if([target isKindOfClass:Core3DEdgeTreatmentNativeTargets.class])edit.anchors=target->nativeAnchors;return [self core3d_beginEdgeTreatment:(Core3DEdgeTreatmentNativeSnapshot*)snapshot edit:edit expected:expected completion:completion];}
-- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentRemoval:(Core3DEdgeTreatmentSnapshot *)snapshot featureIdentifier:(NSString *)featureIdentifier expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {core3d::retained_edge_treatment::Remove edit;core3d::receipt::ParseUUID(featureIdentifier.UTF8String,edit.feature);return [self core3d_beginEdgeTreatment:(Core3DEdgeTreatmentNativeSnapshot*)snapshot edit:edit expected:expected completion:completion];}
+- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentAmount:(Core3DEdgeTreatmentSnapshot *)snapshot featureIdentifier:(NSString *)featureIdentifier amountMM:(double)amountMM expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {core3d::retained_edge_treatment::SetAmount edit;core3d::receipt::ParseUUID(featureIdentifier.UTF8String,edit.feature);edit.amountMM=amountMM;return [self core3d_beginEdgeTreatment:(Core3DEdgeTreatmentNativeSnapshot*)snapshot edit:edit expected:expected budget:nullptr completion:completion];}
+- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentTargets:(Core3DEdgeTreatmentSnapshot *)snapshot featureIdentifier:(NSString *)featureIdentifier targets:(Core3DEdgeTreatmentTargetCapture *)targets expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {auto target=(Core3DEdgeTreatmentNativeTargets*)targets;core3d::retained_edge_treatment::ReplaceTargets edit;core3d::receipt::ParseUUID(featureIdentifier.UTF8String,edit.feature);if(![target isKindOfClass:Core3DEdgeTreatmentNativeTargets.class]||target->continuationUsed)return [self core3d_beginEdgeTreatment:nil edit:edit expected:expected budget:nullptr completion:completion];target->continuationUsed=YES;edit.anchors=target->nativeAnchors;return [self core3d_beginEdgeTreatment:(Core3DEdgeTreatmentNativeSnapshot*)snapshot edit:edit expected:expected budget:&target->nativeBudget completion:completion];}
+- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentRemoval:(Core3DEdgeTreatmentSnapshot *)snapshot featureIdentifier:(NSString *)featureIdentifier expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {core3d::retained_edge_treatment::Remove edit;core3d::receipt::ParseUUID(featureIdentifier.UTF8String,edit.feature);return [self core3d_beginEdgeTreatment:(Core3DEdgeTreatmentNativeSnapshot*)snapshot edit:edit expected:expected budget:nullptr completion:completion];}
 
 - (Core3DEdgeTreatmentCaptureR2 *)captureEdgeTreatmentR2:(NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected {
     auto capture=B1Object<Core3DEdgeTreatmentCaptureR2>(Core3DEdgeTreatmentCaptureR2.class);
@@ -21891,7 +22246,11 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     completion:(void(^)(Core3DEdgeTreatmentResult *))completion
     provenance:(void(^)(Core3DEdgeTreatmentResult *,const std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>&))provenance {
     auto operation=B1Object<Core3DEdgeTreatmentNativeOperation>(Core3DEdgeTreatmentNativeOperation.class);operation->completion=[completion copy];operation->nativeWorkR2=work;
-    if(!work){core3d::retained_edge_treatment::CommitResult refused;refused.refusal=core3d::retained_edge_treatment::Refusal::StaleSnapshot;if(completion)completion(B1Result(refused));operation->settled=YES;return operation;}
+    if(!work){core3d::retained_edge_treatment::CommitResult refused;refused.refusal=core3d::retained_edge_treatment::Refusal::StaleSnapshot;
+#if DEBUG
+        b2tb::debug::RecordRefusal(core3d::retained_edge_treatment::RefusalCode(refused.refusal));
+#endif
+        if(completion)completion(B1Result(refused));operation->settled=YES;return operation;}
     // Cancellation provenance: the admitted R2 snapshot/migration capture
     // already lives in the producer-supplied provenance block.
     if(provenance){void(^stopBinder)(Core3DEdgeTreatmentResult *,const std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>&)=[provenance copy];operation->stopProvenance=[^(Core3DEdgeTreatmentResult *dto){stopBinder(dto,std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>());[dto setValue:@"" forKey:@"candidateRecipeSHA256"];} copy];}
@@ -21910,7 +22269,11 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     refusal:(core3d::retained_edge_treatment::Refusal)refusal {
     if(work)return [self core3d_beginEdgeTreatmentR2:work completion:completion provenance:provenance];
     auto operation=B1Object<Core3DEdgeTreatmentNativeOperation>(Core3DEdgeTreatmentNativeOperation.class);operation->completion=[completion copy];
-    core3d::retained_edge_treatment::CommitResult refused;refused.refusal=refusal;if(completion)completion(B1Result(refused));operation->settled=YES;return operation;
+    core3d::retained_edge_treatment::CommitResult refused;refused.refusal=refusal;
+#if DEBUG
+    b2tb::debug::RecordRefusal(core3d::retained_edge_treatment::RefusalCode(refusal));
+#endif
+    if(completion)completion(B1Result(refused));operation->settled=YES;return operation;
 }
 
 - (Core3DEdgeTreatmentOperation *)beginRetainedBooleanMigrationR2:(Core3DRetainedBooleanMigrationCaptureR2 *)original request:(Core3DRetainedBooleanMigrationRequestR2 *)request proof:(Core3DRetainedBooleanMigrationProofR2 *)proof expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {

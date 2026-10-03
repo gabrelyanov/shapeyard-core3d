@@ -2,6 +2,7 @@
 
 #include "RetainedEdgeTreatmentSnapshot.hxx"
 #include "RetainedFaceSelectorValues.hxx"
+#include "RetainedTopologyBudget.hxx"
 
 #include <BRepAdaptor_Curve.hxx>
 #include <ElCLib.hxx>
@@ -30,6 +31,7 @@
 
 namespace core3d::retained_face_selector {
 namespace et = core3d::retained_edge_treatment;
+namespace tb = core3d::retained_topology_budget;
 
 enum class Refusal : std::uint8_t {
     None = 0, InvalidIntent, FaceMissing, FaceAmbiguous, IncompleteBoundary,
@@ -144,8 +146,12 @@ inline bool ScopeOf(const SelectorIntent& intent, PlanarFaceScope& output) {
     if (const auto* line = std::get_if<Line>(&intent)) { output = line->face; return true; }
     return false;
 }
-inline bool Charge(et::ReplayBudget& budget, std::size_t visits) noexcept {
-    return visits <= 4096 && budget.chargeStage(visits);
+inline Refusal MapWalk(tb::WalkStatus status) noexcept {
+    // A cancelled walk reports cancellation; only a genuine denial or a
+    // failed traversal maps to the budget/native refusals.
+    if (status == tb::WalkStatus::Cancelled) return Refusal::Cancelled;
+    if (status == tb::WalkStatus::BudgetDenied) return Refusal::Budget;
+    return Refusal::NativeFailure;
 }
 inline bool FacePlane(const TopoDS_Face& face, gp_Pln& plane) {
     BRepAdaptor_Surface surface(face, true);
@@ -171,17 +177,28 @@ inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& int
         if (cancelled.load()) { output.refusal = Refusal::Cancelled; return output.refusal; }
         const double localTolerance = 1e-4 / (1000.0 * metersPerLocalUnit);
 
-        TopTools_IndexedMapOfShape faceMap;
-        TopExp::MapShapes(inputStage, TopAbs_FACE, faceMap);
-        if (!detail::Charge(budget, std::size_t(faceMap.Extent()))) {
-            output.refusal = Refusal::Budget; return output.refusal;
+        // C01: bounded raw stage census. Every root/child occurrence is
+        // charged while walking, before the face map grows; the combined
+        // face+edge census refuses the 4,097th distinct admission instead of
+        // inspecting a completed oversized map. The stage debit is preserved.
+        tb::Census census;
+        const tb::WalkStatus censusStatus = tb::CensusTopology(inputStage, budget,
+            cancelled, census, tb::Site::C01StageCensus, true);
+        if (censusStatus != tb::WalkStatus::Completed) {
+            output.refusal = detail::MapWalk(censusStatus); return output.refusal;
         }
+        const TopTools_IndexedMapOfShape& faceMap = census.faces;
         std::vector<TopoDS_Face> candidates;
         PlanarFaceScope scope;
         if (detail::ScopeOf(intent, scope)) {
             double extreme = scope.side == Side::Max
                 ? -std::numeric_limits<double>::infinity() : std::numeric_limits<double>::infinity();
             for (int index = 1; index <= faceMap.Extent(); ++index) {
+                // C02: every extrema-pass face inspection is charged, even
+                // rejected or duplicate candidates.
+                if (!budget.visit(1, tb::Site::C02FacePasses)) {
+                    output.refusal = Refusal::Budget; return output.refusal;
+                }
                 gp_Pln plane; if (!detail::FacePlane(TopoDS::Face(faceMap(index)), plane)) continue;
                 if (!plane.Axis().Direction().IsParallel(detail::RequestedNormal(scope), 1e-8)) continue;
                 const double coordinate = detail::Component(plane.Location(), scope.axis);
@@ -189,6 +206,10 @@ inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& int
             }
             if (!std::isfinite(extreme)) { output.refusal = Refusal::FaceMissing; return output.refusal; }
             for (int index = 1; index <= faceMap.Extent(); ++index) {
+                // C02: collection pass, same per-inspection charge.
+                if (!budget.visit(1, tb::Site::C02FacePasses)) {
+                    output.refusal = Refusal::Budget; return output.refusal;
+                }
                 gp_Pln plane; const TopoDS_Face face = TopoDS::Face(faceMap(index));
                 if (!detail::FacePlane(face, plane)
                     || !plane.Axis().Direction().IsParallel(detail::RequestedNormal(scope), 1e-8)) continue;
@@ -201,6 +222,10 @@ inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& int
                 circle.centerMM[1] / (1000.0 * metersPerLocalUnit),
                 circle.centerMM[2] / (1000.0 * metersPerLocalUnit));
             for (int index = 1; index <= faceMap.Extent(); ++index) {
+                // C02: circle-plane pass, same per-inspection charge.
+                if (!budget.visit(1, tb::Site::C02FacePasses)) {
+                    output.refusal = Refusal::Budget; return output.refusal;
+                }
                 gp_Pln plane; const TopoDS_Face face = TopoDS::Face(faceMap(index));
                 if (!detail::FacePlane(face, plane) || !detail::Parallel(plane.Axis().Direction(), circle.normal)
                     || plane.Distance(center) > localTolerance) continue;
@@ -212,11 +237,24 @@ inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& int
 
         auto proof = std::shared_ptr<FaceMembershipProof>(new FaceMembershipProof);
         proof->intent_ = intent; proof->face_ = candidates.front();
+        // C02: the selected-face plane read is charged like every other face
+        // inspection.
+        if (!budget.visit(1, tb::Site::C02FacePasses)) {
+            output.refusal = Refusal::Budget; return output.refusal;
+        }
         gp_Pln selectedPlane; detail::FacePlane(proof->face_, selectedPlane);
         proof->plane_.outwardNormal = detail::Components(selectedPlane.Axis().Direction());
         proof->plane_.offsetMM = selectedPlane.Axis().Direction().XYZ().Dot(selectedPlane.Location().XYZ())
             * 1000.0 * metersPerLocalUnit;
 
+        // C03: the edge→face ancestor map over the whole input stage is a bulk
+        // OCCT pass. Its full traversal plus every edge-face relation
+        // insertion (measured on the C01 census: one per edge occurrence under
+        // a face, selected and nonselected) is reserved before the call; the
+        // reserved pass is not charged again afterwards.
+        if (!budget.visit(census.occurrences + census.edgeUsesUnderFaces, tb::Site::C03AncestorMap)) {
+            output.refusal = Refusal::Budget; return output.refusal;
+        }
         TopTools_IndexedDataMapOfShapeListOfShape owners;
         TopExp::MapShapesAndAncestors(inputStage, TopAbs_EDGE, TopAbs_FACE, owners);
         TopTools_IndexedMapOfShape uniqueEdges;
@@ -224,14 +262,45 @@ inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& int
         for (TopExp_Explorer wireExplorer(proof->face_, TopAbs_WIRE); wireExplorer.More(); wireExplorer.Next()) {
             if (cancelled.load()) { output.refusal = Refusal::Cancelled; return output.refusal; }
             const TopoDS_Wire wire = TopoDS::Wire(wireExplorer.Current());
+            // C04: every inspected wire occurrence is charged.
+            if (!budget.visit(1, tb::Site::C04WireExplorers)) {
+                output.refusal = Refusal::Budget; return output.refusal;
+            }
             ++proof->wireCount_;
+            // C06: the independent direct-use census runs before the ordered
+            // walk and measures the wire-explorer initialization reservation.
+            // A budget denial here takes precedence over any later ownership
+            // or malformed-wire diagnosis.
+            std::size_t direct = 0;
+            for (TopExp_Explorer directExplorer(wire, TopAbs_EDGE); directExplorer.More(); directExplorer.Next()) {
+                if (!budget.visit(1, tb::Site::C06DirectCensus)) {
+                    output.refusal = Refusal::Budget; return output.refusal;
+                }
+                ++direct;
+            }
+            // C04: BRepTools_WireExplorer traverses during construction;
+            // reserve that pass (measured: the wire's edge-use count) before
+            // constructing it.
+            if (!budget.visit(direct, tb::Site::C04WireExplorers)) {
+                output.refusal = Refusal::Budget; return output.refusal;
+            }
             std::size_t explored = 0;
             for (BRepTools_WireExplorer edgeExplorer(wire, proof->face_); edgeExplorer.More(); edgeExplorer.Next()) {
+                // C04: every raw ordered edge use is charged, preserving raw
+                // orientations and holes exactly.
+                if (!budget.visit(1, tb::Site::C04WireExplorers)) {
+                    output.refusal = Refusal::Budget; return output.refusal;
+                }
                 ++explored;
                 const TopoDS_Edge edge = edgeExplorer.Current();
                 const TopAbs_Orientation orientation = edge.Orientation();
                 if (orientation != TopAbs_FORWARD && orientation != TopAbs_REVERSED) {
                     output.refusal = Refusal::InvalidFaceUse; return output.refusal;
+                }
+                // C05: the owner lookup and the per-wire deduplication are
+                // charged ancestry/comparison work.
+                if (!budget.visit(2, tb::Site::C05OwnerScan)) {
+                    output.refusal = Refusal::Budget; return output.refusal;
                 }
                 const int edgeIndex = owners.FindIndex(edge);
                 if (edgeIndex <= 0 || !usesOnFace.insert(edgeIndex).second || BRep_Tool::Degenerated(edge)) {
@@ -240,20 +309,51 @@ inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& int
                 BoundaryUse use; use.wire = wire; use.edge = edge; use.rawFaceUse = orientation;
                 use.direction = orientation == TopAbs_FORWARD ? FaceUseDirection::Forward : FaceUseDirection::Reversed;
                 const TopTools_ListOfShape& ancestors = owners.FindFromIndex(edgeIndex);
+                bool repeatedOwnerOccurrence = false;
                 for (TopTools_ListIteratorOfListOfShape iterator(ancestors); iterator.More(); iterator.Next()) {
+                    // C05: every ancestry entry is charged before access, and
+                    // every dedup comparison against a prior owner is charged,
+                    // not just the two surviving owners.
+                    if (!budget.visit(1, tb::Site::C05OwnerScan)) {
+                        output.refusal = Refusal::Budget; return output.refusal;
+                    }
                     const TopoDS_Face owner = TopoDS::Face(iterator.Value());
-                    if (std::none_of(use.ownerFaces.begin(), use.ownerFaces.end(), [&](const TopoDS_Face& prior) {
-                        return prior.IsSame(owner);
-                    })) use.ownerFaces.push_back(owner);
+                    bool known = false;
+                    for (const TopoDS_Face& prior : use.ownerFaces) {
+                        if (!budget.visit(1, tb::Site::C05OwnerScan)) {
+                            output.refusal = Refusal::Budget; return output.refusal;
+                        }
+                        if (prior.IsSame(owner)) { known = true; repeatedOwnerOccurrence = true; break; }
+                    }
+                    if (!known) use.ownerFaces.push_back(owner);
                 }
-                if (use.ownerFaces.size() != 2 || std::none_of(use.ownerFaces.begin(), use.ownerFaces.end(),
-                    [&](const TopoDS_Face& owner) { return owner.IsSame(proof->face_); })) {
+                // C05: the selected-owner comparison is charged per owner.
+                bool selectedOwner = false;
+                for (const TopoDS_Face& owner : use.ownerFaces) {
+                    if (!budget.visit(1, tb::Site::C05OwnerScan)) {
+                        output.refusal = Refusal::Budget; return output.refusal;
+                    }
+                    if (owner.IsSame(proof->face_)) { selectedOwner = true; break; }
+                }
+                // F05: a repeated occurrence of the same owner is still an
+                // invalid ownership relation. It is charged before
+                // deduplication above, but deduplication must not turn the
+                // deliberately invalid diagnostic compound into mutation
+                // authority.
+                if (repeatedOwnerOccurrence || use.ownerFaces.size() != 2 || !selectedOwner) {
                     output.refusal = Refusal::OwnershipMismatch; return output.refusal;
+                }
+                // C05: the unique-edge/use insertion is charged.
+                if (!budget.visit(1, tb::Site::C05OwnerScan)) {
+                    output.refusal = Refusal::Budget; return output.refusal;
                 }
                 uniqueEdges.Add(edge); proof->boundaryUses_.push_back(std::move(use));
             }
-            std::size_t direct = 0;
-            for (TopExp_Explorer directExplorer(wire, TopAbs_EDGE); directExplorer.More(); directExplorer.Next()) ++direct;
+            // C06: the direct-use census was charged before the ordered walk;
+            // the completeness comparison itself is one charged unit.
+            if (!budget.visit(1, tb::Site::C06DirectCensus)) {
+                output.refusal = Refusal::Budget; return output.refusal;
+            }
             if (explored == 0 || explored != direct) { output.refusal = Refusal::IncompleteBoundary; return output.refusal; }
         }
         if (proof->wireCount_ == 0 || proof->wireCount_ > 64 || proof->boundaryUses_.size() > 64) {
@@ -261,6 +361,10 @@ inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& int
             return output.refusal;
         }
         proof->uniqueEdgeCount_ = std::uint32_t(uniqueEdges.Extent());
+        // C06: the uniqueness comparison over the census result is charged.
+        if (!budget.visit(1, tb::Site::C06DirectCensus)) {
+            output.refusal = Refusal::Budget; return output.refusal;
+        }
         if (proof->uniqueEdgeCount_ != proof->boundaryUses_.size()) {
             output.refusal = Refusal::InvalidFaceUse; return output.refusal;
         }
@@ -271,6 +375,10 @@ inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& int
                 line->locationMM[1] / (1000.0 * metersPerLocalUnit),
                 line->locationMM[2] / (1000.0 * metersPerLocalUnit));
             for (auto& use : proof->boundaryUses_) {
+                // C07: every inspected use pays for its line classification.
+                if (!budget.visit(1, tb::Site::C07CurveClassification)) {
+                    output.refusal = Refusal::Budget; return output.refusal;
+                }
                 BRepAdaptor_Curve curve(use.edge);
                 if (curve.GetType() != GeomAbs_Line || !detail::Parallel(curve.Line().Direction(), line->direction)) continue;
                 const double parameter = ElCLib::Parameter(curve.Line(), witness);
@@ -285,7 +393,12 @@ inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& int
             if (proof->wireCount_ != 1 || proof->boundaryUses_.size() != 1) {
                 output.refusal = Refusal::PartialCircle; return output.refusal;
             }
-            auto& use = proof->boundaryUses_.front(); BRepAdaptor_Curve curve(use.edge);
+            auto& use = proof->boundaryUses_.front();
+            // C07: the circle/domain and full-boundary inspection is charged.
+            if (!budget.visit(1, tb::Site::C07CurveClassification)) {
+                output.refusal = Refusal::Budget; return output.refusal;
+            }
+            BRepAdaptor_Curve curve(use.edge);
             if (curve.GetType() != GeomAbs_Circle || !curve.IsClosed()
                 || std::abs((curve.LastParameter() - curve.FirstParameter()) - 2.0 * M_PI) > 1e-8
                 || curve.Circle().Location().Distance(gp_Pnt(circle->centerMM[0] / (1000.0 * metersPerLocalUnit),
@@ -298,6 +411,10 @@ inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& int
         } else {
             proof->coverage_ = Coverage::EntireBoundary;
             for (auto& use : proof->boundaryUses_) {
+                // C07: every full-boundary use inspection is charged.
+                if (!budget.visit(1, tb::Site::C07CurveClassification)) {
+                    output.refusal = Refusal::Budget; return output.refusal;
+                }
                 if (BRepAdaptor_Curve(use.edge).GetType() != GeomAbs_Line) {
                     output.refusal = Refusal::IncompleteBoundary; return output.refusal;
                 }
@@ -312,15 +429,20 @@ inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& int
 }
 
 inline Refusal VerifyReceipt(const FaceMembershipProof& proof, const et::Step& step,
-    double, et::ReplayBudget&) noexcept {
+    double, et::ReplayBudget& budget) noexcept {
     if (!step.selector || !ValidReceipt(*step.selector)) return Refusal::ReplayMismatch;
     const auto& receipt = *step.selector;
+    // C08: the receipt/witness header comparison block and every key-entry
+    // comparison charge the caller's operation budget; no fresh budget is
+    // created and receipt equality is unchanged.
+    if (!budget.visit(1, tb::Site::C08ReceiptVerify)) return Refusal::Budget;
     if (!(receipt.intent == proof.intent()) || !(receipt.face == proof.plane())
         || receipt.coverage != proof.coverage() || receipt.wireCount != proof.wireCount()
         || receipt.boundaryUseCount != proof.boundaryUses().size()
         || receipt.boundaryUniqueEdgeCount != proof.uniqueEdgeCount()
         || receipt.entries.size() != step.anchors.size()) return Refusal::ReplayMismatch;
     for (std::size_t index = 0; index < step.anchors.size(); ++index) {
+        if (!budget.visit(1, tb::Site::C08ReceiptVerify)) return Refusal::Budget;
         if (receipt.entries[index].anchorKey != step.anchors[index].key) return Refusal::ReplayMismatch;
     }
     return Refusal::None;

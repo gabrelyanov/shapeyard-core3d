@@ -134,19 +134,29 @@
 namespace core3d {
 
 namespace {
+namespace tb = retained_topology_budget;
+
+template <class Destination, class Source>
+void CopyTopologyBudget(Destination& destination, const Source& source) noexcept {
+    static_cast<tb::Counter&>(destination)=static_cast<const tb::Counter&>(source);
+}
+
 retained_edge_treatment::UUID MintEdgeTreatmentUUID() noexcept {
     retained_edge_treatment::UUID id{};arc4random_buf(id.data(),id.size());
     id[6]=std::uint8_t((id[6]&0x0f)|0x40);id[8]=std::uint8_t((id[8]&0x3f)|0x80);return id;
 }
 
 bool SameSelectorMembership(const retained_face_selector::FaceMembershipProof& lhs,
-    const retained_face_selector::FaceMembershipProof& rhs) noexcept {
+    const retained_face_selector::FaceMembershipProof& rhs,
+    retained_edge_treatment::ReplayBudget& budget) noexcept {
+    if(!budget.visit(1,tb::Site::C09ViewerIssuance))return false;
     if (lhs.intent() != rhs.intent() || lhs.plane() != rhs.plane()
         || lhs.coverage() != rhs.coverage() || lhs.wireCount() != rhs.wireCount()
         || lhs.uniqueEdgeCount() != rhs.uniqueEdgeCount()
         || lhs.selectedEdgeCount() != rhs.selectedEdgeCount()
         || lhs.boundaryUses().size() != rhs.boundaryUses().size()) return false;
     for (std::size_t index = 0; index < lhs.boundaryUses().size(); ++index) {
+        if(!budget.visit(1,tb::Site::C09ViewerIssuance))return false;
         const auto& first = lhs.boundaryUses()[index];
         const auto& second = rhs.boundaryUses()[index];
         if (first.selected != second.selected || first.direction != second.direction
@@ -192,10 +202,12 @@ bool AdmitA1Graph(const core3d::composite_recipe::Definition& graph, A1GraphAdmi
 }
 
 bool SelectorAnchor(const retained_face_selector::BoundaryUse& use, double metersPerLocalUnit,
+    retained_edge_treatment::ReplayBudget& budget,
     retained_edge_treatment::Anchor& output) {
     namespace et = retained_edge_treatment;
     if (use.ownerFaces.size() != 2 || !std::isfinite(metersPerLocalUnit)
         || metersPerLocalUnit <= 0) return false;
+    if(!budget.visit(1,tb::Site::C09ViewerIssuance))return false;
     BRepAdaptor_Curve curve(use.edge);
     const auto type = curve.GetType();
     if (type != GeomAbs_Line && type != GeomAbs_Circle) return false;
@@ -214,6 +226,7 @@ bool SelectorAnchor(const retained_face_selector::BoundaryUse& use, double meter
         ? curve.Circle().Radius() * millimetersPerLocal : 0;
     std::array<std::array<double, 3>, 2> normals{};
     for (std::size_t index = 0; index < 2; ++index) {
+        if(!budget.visit(1,tb::Site::C09ViewerIssuance))return false;
         const TopoDS_Face& face = use.ownerFaces[index];
         Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
         ShapeAnalysis_Surface analysis(surface);
@@ -235,6 +248,7 @@ bool SelectorAnchor(const retained_face_selector::BoundaryUse& use, double meter
 // receipt entries kept in the same key order.
 bool IssueSelectorStep(const retained_face_selector::FaceMembershipProof& proof,
     double metersPerLocalUnit, double amountMM, std::uint64_t localID,
+    retained_edge_treatment::ReplayBudget& budget,
     retained_edge_treatment::Step& step, retained_edge_treatment::Refusal& refusal) {
     namespace et = retained_edge_treatment; namespace fs = retained_face_selector;
     step = et::Step();
@@ -246,8 +260,8 @@ bool IssueSelectorStep(const retained_face_selector::FaceMembershipProof& proof,
     receipt.boundaryUniqueEdgeCount = proof.uniqueEdgeCount();
     for (const auto& use : proof.boundaryUses()) if (use.selected) {
         et::Anchor anchor;
-        if (!SelectorAnchor(use, metersPerLocalUnit, anchor)) {
-            refusal = et::Refusal::UnsupportedEdge; return false;
+        if (!SelectorAnchor(use, metersPerLocalUnit, budget, anchor)) {
+            refusal = budget.exhausted?et::Refusal::Budget:et::Refusal::UnsupportedEdge; return false;
         }
         step.anchors.push_back(anchor); receipt.entries.push_back({anchor.key, use.direction});
     }
@@ -301,7 +315,8 @@ std::shared_ptr<retained_edge_treatment::Work> Core3DViewer::prepareEdgeTreatmen
     const std::shared_ptr<const retained_edge_treatment::Snapshot>& snapshot,
     const retained_edge_treatment::Edit& edit,const ObjectFrameIdentity& identity,
     std::uint64_t presentationRevision,std::uint32_t width,std::uint32_t height,
-    retained_edge_treatment::Refusal& refusal) noexcept {
+    retained_edge_treatment::Refusal& refusal,
+    const retained_edge_treatment::ReplayBudget* continuation) noexcept {
     namespace et=retained_edge_treatment;refusal=et::Refusal::StaleSnapshot;
     if(![NSThread isMainThread]||!snapshot||!canBeginCommittedEdit()||myDoc.IsNull()
         ||myContext.IsNull()||!width||!height||snapshot->ownerLabel_.IsNull())return {};
@@ -323,7 +338,9 @@ std::shared_ptr<retained_edge_treatment::Work> Core3DViewer::prepareEdgeTreatmen
         }else if(const auto* remove=std::get_if<et::Remove>(&edit)){auto i=std::find_if(candidate.steps.begin(),candidate.steps.end(),[&](const et::Step&s){return s.feature==remove->feature;});if(i==candidate.steps.end()){refusal=et::Refusal::IdentityMismatch;return {};}candidate.issuance.retiredLocalIDs.push_back(i->localID);std::sort(candidate.issuance.retiredLocalIDs.begin(),candidate.issuance.retiredLocalIDs.end());candidate.steps.erase(i);candidate.outputNode=candidate.steps.empty()?candidate.base.sourceNode:candidate.steps.back().node;
         }else if(const auto* rebuild=std::get_if<et::RebuildSource>(&edit)){std::vector<double>values;std::vector<std::uint8_t>bytes;bool encoded=false;if(const auto*p=std::get_if<profile::Parameters>(&rebuild->requested)){encoded=profile::Encode(*p,values)&&composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::Profile,profile::SchemaFor(*p),values,bytes);}else if(const auto*e=std::get_if<enclosure::Parameters>(&rebuild->requested)){encoded=enclosure::Encode(*e,values)&&composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::Enclosure,e->definition.constructionFrame?2:1,values,bytes);}else if(const auto*l=std::get_if<rectangular_loft::Definition>(&rebuild->requested)){encoded=loft_persistence::Encode(*l,values)&&composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::RectangularLoft,std::uint32_t(loft_persistence::Schema),values,bytes);}if(!encoded||!composite_recipe::Hash(bytes,candidate.base.sourceRecipeDigest)){refusal=et::Refusal::MalformedCarrier;return {};}}
         std::vector<std::uint8_t>bytes;if(!et::Encode(candidate,bytes,refusal))return {};
-        auto work=std::make_shared<et::Work>();work->snapshot_=snapshot;work->edit_=edit;work->candidate_=std::move(candidate);work->label_=snapshot->ownerLabel_;work->presentation_=selected;work->state_=et::Work::State::Prepared;refusal=et::Refusal::None;return work;
+        auto work=std::make_shared<et::Work>();work->snapshot_=snapshot;work->edit_=edit;work->candidate_=std::move(candidate);work->label_=snapshot->ownerLabel_;work->presentation_=selected;work->state_=et::Work::State::Prepared;
+        if(continuation)_edgeTreatmentContinuations.emplace(work.get(),*continuation);
+        refusal=et::Refusal::None;return work;
     }catch(...){refusal=et::Refusal::BuildFailed;return {};}
 }
 
@@ -355,10 +372,46 @@ Core3DViewer::captureEdgeTreatmentSelectorTargets(
         const std::atomic_bool cancelled{false}; fs::Resolution resolution;
         refusal = fs::Resolve(original->current_, intent, original->dimensionMetersPerUnit(),
             budget, cancelled, resolution);
+#if DEBUG
+        tb::debug::RecordPhase("capture", original->chargedBudget_, budget);
+#endif
         if (refusal != fs::Refusal::None || !resolution.proof) return {};
         return std::shared_ptr<const et::SelectorTargetCapture>(
             new et::SelectorTargetCapture(original, resolution.proof, budget));
     } catch (...) { refusal = fs::Refusal::NativeFailure; return {}; }
+}
+
+std::shared_ptr<const retained_edge_treatment::SelectorTargetCapture>
+Core3DViewer::projectEdgeTreatmentSelectorTargets(
+    const std::shared_ptr<const retained_edge_treatment::SelectorTargetCapture>& targets,
+    std::vector<retained_edge_treatment::CurveKind>& kinds,
+    retained_face_selector::Refusal& refusal) noexcept {
+    namespace et=retained_edge_treatment;namespace fs=retained_face_selector;
+    kinds.clear();refusal=fs::Refusal::NativeFailure;
+    if(![NSThread isMainThread]||!targets)return {};
+    try{
+        et::ReplayBudget budget=targets->chargedBudget_;
+        kinds.reserve(targets->proof().boundaryUses().size());
+        for(const auto& use:targets->proof().boundaryUses()){
+            if(!budget.visit(1,tb::Site::C10ReceiptProjection)){
+#if DEBUG
+                tb::debug::RecordPhase("project",targets->chargedBudget_,budget);
+#endif
+                kinds.clear();refusal=fs::Refusal::Budget;return {};
+            }
+            const auto type=BRepAdaptor_Curve(use.edge).GetType();
+            if(type!=GeomAbs_Line&&type!=GeomAbs_Circle){
+                kinds.clear();refusal=fs::Refusal::InvalidFaceUse;return {};
+            }
+            kinds.push_back(type==GeomAbs_Circle?et::CurveKind::Circle:et::CurveKind::Line);
+        }
+#if DEBUG
+        tb::debug::RecordPhase("project",targets->chargedBudget_,budget);
+#endif
+        refusal=fs::Refusal::None;
+        return std::shared_ptr<const et::SelectorTargetCapture>(
+            new et::SelectorTargetCapture(targets->original_,targets->proof_,budget));
+    }catch(...){kinds.clear();return {};}
 }
 
 std::shared_ptr<retained_edge_treatment::Work> Core3DViewer::prepareEdgeTreatmentSelectorAppend(
@@ -392,15 +445,27 @@ std::shared_ptr<retained_edge_treatment::Work> Core3DViewer::prepareEdgeTreatmen
         const std::atomic_bool cancelled{false}; fs::Resolution refreshed;
         const fs::Refusal queryRefusal = fs::Resolve(original->current_, targets->proof().intent(),
             original->dimensionMetersPerUnit(), budget, cancelled, refreshed);
-        if (queryRefusal != fs::Refusal::None || !refreshed.proof
-            || !SameSelectorMembership(targets->proof(), *refreshed.proof)) {
-            refusal = et::Refusal::StaleSnapshot; return {};
+        if (queryRefusal != fs::Refusal::None || !refreshed.proof) {
+#if DEBUG
+            tb::debug::RecordPhase("prepare", targets->chargedBudget_, budget);
+#endif
+            refusal = fs::MapToB1(queryRefusal); return {};
+        }
+        if (!SameSelectorMembership(targets->proof(), *refreshed.proof, budget)) {
+#if DEBUG
+            tb::debug::RecordPhase("prepare", targets->chargedBudget_, budget);
+#endif
+            refusal = budget.exhausted?et::Refusal::Budget:et::Refusal::StaleSnapshot; return {};
         }
         et::Definition candidate = original->definition_.value_or(original->seed_);
         if (candidate.steps.size() >= et::MaximumSteps) { refusal = et::Refusal::Budget; return {}; }
         et::Step step;
         if (!IssueSelectorStep(*refreshed.proof, original->dimensionMetersPerUnit(), amountMM,
-            candidate.issuance.nextLocalID++, step, refusal)) return {};
+            candidate.issuance.nextLocalID++, budget, step, refusal)){
+#if DEBUG
+            tb::debug::RecordPhase("prepare", targets->chargedBudget_, budget);
+#endif
+            return {};}
         candidate.schema = 2;
         candidate.steps.push_back(step); candidate.outputNode = step.node;
         std::vector<std::uint8_t> encoded;
@@ -410,6 +475,9 @@ std::shared_ptr<retained_edge_treatment::Work> Core3DViewer::prepareEdgeTreatmen
         admitted->source_ = original->source_; admitted->base_ = candidate.base;
         admitted->edit_ = et::Append{et::Kind::ConstantFillet, amountMM, step.anchors};
         admitted->issuedStep_ = step; admitted->chargedBudget_ = budget;
+#if DEBUG
+        tb::debug::RecordPhase("prepare", targets->chargedBudget_, budget);
+#endif
         auto work = std::make_shared<et::Work>(); work->snapshot_ = original;
         work->selectorAppend_ = admitted; work->edit_ = admitted->edit_;
         work->candidate_ = std::move(candidate); work->label_ = original->ownerLabel_;
@@ -439,11 +507,26 @@ std::shared_ptr<const retained_edge_treatment::DetachedInput> Core3DViewer::edge
     // The snapshot retains document authority; only private geometry crosses.
     // The exact D253 detachment gate is preserved; on refusal the real
     // detachment cause propagates to the caller instead of being lost.
-    {ReplayBudget detachBudget;Refusal detachRefusal=Refusal::None;TopoDS_Shape detachedBase;
-    if(!DetachReplayGeometry(work->snapshot_->base_,detachBudget,detachedBase,detachRefusal)){refusal=detachRefusal;return {};}
-    input->base_=detachedBase;}
-    input->chargedBudget_=work->selectorAppend_?work->selectorAppend_->chargedBudget_
+    {ReplayBudget detachBudget=work->selectorAppend_?work->selectorAppend_->chargedBudget_
         :work->snapshot_->chargedBudget_;
+    const auto continuation=_edgeTreatmentContinuations.find(work.get());
+    if(continuation!=_edgeTreatmentContinuations.end()){
+        detachBudget=continuation->second;_edgeTreatmentContinuations.erase(continuation);
+    }
+#if DEBUG
+    const ReplayBudget b2DetachEntry=detachBudget;
+#endif
+    Refusal detachRefusal=Refusal::None;TopoDS_Shape detachedBase;
+    if(!DetachReplayGeometry(work->snapshot_->base_,detachBudget,detachedBase,detachRefusal)){
+#if DEBUG
+        tb::debug::RecordPhase("detach",b2DetachEntry,detachBudget);
+#endif
+        refusal=detachRefusal;return {};}
+    input->base_=detachedBase;input->chargedBudget_=detachBudget;
+#if DEBUG
+    tb::debug::RecordPhase("detach",b2DetachEntry,detachBudget);
+#endif
+    }
     input->cancelled_=work->cancelled_;work->state_=Work::State::Building;refusal=Refusal::None;return input;
 }
 
@@ -456,16 +539,78 @@ std::shared_ptr<const retained_edge_treatment::DetachedResult> Core3DViewer::bui
         result->definition_=input->candidate_;result->base_=input->base_;
         result->selectorAppend_=input->selectorAppend_;result->budget_=input->chargedBudget_;
         if(!Encode(result->definition_,result->definitionBytes_,refusal)
-            ||!Replay(result->base_,result->definition_,result->result_,result->proofs_,result->budget_,refusal))return {};
+            ||!Replay(result->base_,result->definition_,result->result_,result->proofs_,result->budget_,refusal)){
+#if DEBUG
+            tb::debug::RecordPhase("build",input->chargedBudget_,result->budget_);
+#endif
+            return {};}
+#if DEBUG
+        tb::debug::RecordPhase("build",input->chargedBudget_,result->budget_);
+#endif
         if(input->cancelled_->load()){refusal=Refusal::Cancelled;return { };}
         refusal=Refusal::None;return result;}catch(...){refusal=Refusal::BuildFailed;return {};}
 }
 
 bool Core3DViewer::cancelEdgeTreatment(const std::shared_ptr<retained_edge_treatment::Work>&work) noexcept {if(!work)return false;work->cancelled_->store(true);if([NSThread isMainThread])work->state_=retained_edge_treatment::Work::State::Settled;return true;}
 
-std::vector<retained_edge_treatment::Anchor> Core3DViewer::captureEdgeTreatmentTargets(const std::shared_ptr<const retained_edge_treatment::Snapshot>&snapshot,retained_edge_treatment::Refusal&refusal) noexcept {
-    namespace et=retained_edge_treatment;std::vector<et::Anchor> result;refusal=et::Refusal::UnsupportedEdge;if(![NSThread isMainThread]||!snapshot||myContext.IsNull()||!canBeginCommittedEdit())return result;
-    try{TopTools_IndexedDataMapOfShapeListOfShape adjacency;TopExp::MapShapesAndAncestors(snapshot->current_,TopAbs_EDGE,TopAbs_FACE,adjacency);myContext->InitSelected();while(myContext->MoreSelected()){if(!myContext->HasSelectedShape()){myContext->NextSelected();continue;}TopoDS_Shape selected=myContext->SelectedShape();myContext->NextSelected();if(selected.ShapeType()!=TopAbs_EDGE)continue;TopoDS_Edge edge=TopoDS::Edge(selected);int index=adjacency.FindIndex(edge);if(index<=0||adjacency.FindFromIndex(index).Extent()!=2){result.clear();return result;}BRepAdaptor_Curve curve(edge);double t=(curve.FirstParameter()+curve.LastParameter())*.5;gp_Pnt point;gp_Vec derivative;curve.D1(t,point,derivative);if(derivative.SquareMagnitude()<=Precision::SquareConfusion()){result.clear();return result;}derivative.Normalize();et::Anchor anchor;anchor.key=MintEdgeTreatmentUUID();anchor.curve=curve.GetType()==GeomAbs_Line?et::CurveKind::Line:curve.GetType()==GeomAbs_Circle?et::CurveKind::Circle:et::CurveKind(0);if(int(anchor.curve)==0){result.clear();return result;}anchor.pointMM={point.X(),point.Y(),point.Z()};anchor.tangent={derivative.X(),derivative.Y(),derivative.Z()};anchor.circleRadiusMM=anchor.curve==et::CurveKind::Circle?curve.Circle().Radius():0;std::array<std::array<double,3>,2>normals{};int faceIndex=0;for(TopTools_ListIteratorOfListOfShape it(adjacency.FindFromIndex(index));it.More();it.Next()){TopoDS_Face face=TopoDS::Face(it.Value());Handle(Geom_Surface)surface=BRep_Tool::Surface(face);ShapeAnalysis_Surface analysis(surface);gp_Pnt2d uv=analysis.ValueOfUV(point,1e-7);BRepLProp_SLProps props(BRepAdaptor_Surface(face),uv.X(),uv.Y(),1,1e-9);if(!props.IsNormalDefined()){result.clear();return result;}gp_Dir normal=props.Normal();if(face.Orientation()==TopAbs_REVERSED)normal.Reverse();normals[faceIndex++]={normal.X(),normal.Y(),normal.Z()};}anchor.normalA=normals[0];anchor.normalB=normals[1];result.push_back(anchor);}if(result.empty()||result.size()>et::MaximumAnchorsPerStep){result.clear();return result;}std::sort(result.begin(),result.end(),[](const et::Anchor&a,const et::Anchor&b){return a.key<b.key;});refusal=et::Refusal::None;return result;}catch(...){result.clear();return result;}
+std::vector<retained_edge_treatment::Anchor> Core3DViewer::captureEdgeTreatmentTargets(
+    const std::shared_ptr<const retained_edge_treatment::Snapshot>& snapshot,
+    retained_edge_treatment::ReplayBudget& budget,
+    retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et=retained_edge_treatment;
+    std::vector<et::Anchor> result;refusal=et::Refusal::UnsupportedEdge;
+    if(![NSThread isMainThread]||!snapshot||myContext.IsNull()||!canBeginCommittedEdit())return result;
+    try{
+        budget=snapshot->chargedBudget_;
+        const std::atomic_bool cancelled{false};tb::Census census;
+        if(tb::CensusTopology(snapshot->current_,budget,cancelled,census,tb::Site::C27CapturedAnchor,false)
+                !=tb::WalkStatus::Completed
+            ||!budget.visit(census.occurrences+census.edgeUsesUnderFaces,tb::Site::C27CapturedAnchor)){
+#if DEBUG
+            tb::debug::RecordPhase("capture-anchors",snapshot->chargedBudget_,budget);
+#endif
+            refusal=et::Refusal::Budget;return {};
+        }
+        TopTools_IndexedDataMapOfShapeListOfShape adjacency;
+        TopExp::MapShapesAndAncestors(snapshot->current_,TopAbs_EDGE,TopAbs_FACE,adjacency);
+        myContext->InitSelected();
+        while(myContext->MoreSelected()){
+            if(!myContext->HasSelectedShape()){myContext->NextSelected();continue;}
+            TopoDS_Shape selected=myContext->SelectedShape();myContext->NextSelected();
+            if(selected.ShapeType()!=TopAbs_EDGE)continue;
+            if(!budget.visit(1,tb::Site::C27CapturedAnchor)){refusal=et::Refusal::Budget;return {};}
+            TopoDS_Edge edge=TopoDS::Edge(selected);int index=adjacency.FindIndex(edge);
+            if(index<=0||adjacency.FindFromIndex(index).Extent()!=2)return {};
+            if(!budget.visit(1,tb::Site::C27CapturedAnchor)){refusal=et::Refusal::Budget;return {};}
+            BRepAdaptor_Curve curve(edge);double t=(curve.FirstParameter()+curve.LastParameter())*.5;
+            gp_Pnt point;gp_Vec derivative;curve.D1(t,point,derivative);
+            if(derivative.SquareMagnitude()<=Precision::SquareConfusion())return {};
+            derivative.Normalize();et::Anchor anchor;anchor.key=MintEdgeTreatmentUUID();
+            anchor.curve=curve.GetType()==GeomAbs_Line?et::CurveKind::Line
+                :curve.GetType()==GeomAbs_Circle?et::CurveKind::Circle:et::CurveKind(0);
+            if(int(anchor.curve)==0)return {};
+            anchor.pointMM={point.X(),point.Y(),point.Z()};
+            anchor.tangent={derivative.X(),derivative.Y(),derivative.Z()};
+            anchor.circleRadiusMM=anchor.curve==et::CurveKind::Circle?curve.Circle().Radius():0;
+            std::array<std::array<double,3>,2>normals{};int faceIndex=0;
+            for(TopTools_ListIteratorOfListOfShape it(adjacency.FindFromIndex(index));it.More();it.Next()){
+                if(!budget.visit(1,tb::Site::C27CapturedAnchor)){refusal=et::Refusal::Budget;return {};}
+                TopoDS_Face face=TopoDS::Face(it.Value());Handle(Geom_Surface)surface=BRep_Tool::Surface(face);
+                ShapeAnalysis_Surface analysis(surface);gp_Pnt2d uv=analysis.ValueOfUV(point,1e-7);
+                BRepLProp_SLProps props(BRepAdaptor_Surface(face),uv.X(),uv.Y(),1,1e-9);
+                if(!props.IsNormalDefined())return {};
+                gp_Dir normal=props.Normal();if(face.Orientation()==TopAbs_REVERSED)normal.Reverse();
+                normals[faceIndex++]={normal.X(),normal.Y(),normal.Z()};
+            }
+            anchor.normalA=normals[0];anchor.normalB=normals[1];result.push_back(anchor);
+        }
+        if(result.empty()||result.size()>et::MaximumAnchorsPerStep)return {};
+        std::sort(result.begin(),result.end(),[](const et::Anchor&a,const et::Anchor&b){return a.key<b.key;});
+#if DEBUG
+        tb::debug::RecordPhase("capture-anchors",snapshot->chargedBudget_,budget);
+#endif
+        refusal=et::Refusal::None;return result;
+    }catch(...){result.clear();return result;}
 }
 
 retained_face_selector::Resolution Core3DViewer::resolveFaceSelector(
@@ -480,8 +625,24 @@ retained_face_selector::Resolution Core3DViewer::resolveFaceSelector(
 }
 
 retained_edge_treatment::CommitResult Core3DViewer::commitEdgeTreatment(const std::shared_ptr<retained_edge_treatment::Work>&work,const std::shared_ptr<const retained_edge_treatment::DetachedResult>&result) noexcept {
-    namespace et=retained_edge_treatment;et::CommitResult answer;if(![NSThread isMainThread]||!work||!result||work->state_!=et::Work::State::Building||result->nonce_!=work->snapshot_->nonce_){answer.outcome=et::CommitOutcome::Refused;answer.refusal=et::Refusal::StaleSnapshot;return answer;}if(work->cancelled_->load()){work->state_=et::Work::State::Settled;answer.outcome=et::CommitOutcome::Cancelled;answer.refusal=et::Refusal::Cancelled;return answer;}
-    try{OrdinaryTransformChange change;change.label=work->label_;change.presentation=work->presentation_;change.shape=result->result_;change.transform=work->presentation_->LocalTransformation();change.operation=OrdinaryTransformOperation::RetainedEdgeTreatment;change.edgeTreatmentSnapshot=work->snapshot_;change.edgeTreatmentEdit=work->edit_;change.edgeTreatmentResult=result;OrdinaryEditResult ordinary=OrdinaryEditResult::Invalid;work->state_=et::Work::State::Committing;auto lease=_ordinaryEditController->beginTransform({change},&ordinary);if(lease)ordinary=lease.stageAndCommit();work->state_=et::Work::State::Settled;if(ordinary==OrdinaryEditResult::Committed){answer.outcome=et::CommitOutcome::Committed;answer.refusal=et::Refusal::None;answer.measuredUndoDelta=1;for(const auto&s:result->definition_.steps)answer.replayedFeatures.push_back(s.feature);}else if(ordinary==OrdinaryEditResult::NoChange){answer.outcome=et::CommitOutcome::Unchanged;answer.refusal=et::Refusal::None;answer.measuredUndoDelta=0;}else if(ordinary==OrdinaryEditResult::Busy){answer.outcome=et::CommitOutcome::Busy;answer.refusal=et::Refusal::Busy;}else if(ordinary==OrdinaryEditResult::OutcomeUnknown){answer.outcome=et::CommitOutcome::OutcomeUnknown;answer.refusal=et::Refusal::OutcomeUnknown;answer.measuredUndoDelta.reset();}else{answer.outcome=et::CommitOutcome::Refused;answer.refusal=et::Refusal::StageFailed;}return answer;}catch(...){work->state_=et::Work::State::Settled;answer.outcome=et::CommitOutcome::OutcomeUnknown;answer.refusal=et::Refusal::OutcomeUnknown;answer.measuredUndoDelta.reset();return answer;}
+    namespace et=retained_edge_treatment;et::CommitResult answer;if(![NSThread isMainThread]||!work||!result||work->state_!=et::Work::State::Building||result->nonce_!=work->snapshot_->nonce_){answer.outcome=et::CommitOutcome::Refused;answer.refusal=et::Refusal::StaleSnapshot;
+#if DEBUG
+        tb::debug::RecordCommit(int(answer.outcome),et::RefusalCode(answer.refusal),false);
+#endif
+        return answer;}if(work->cancelled_->load()){work->state_=et::Work::State::Settled;answer.outcome=et::CommitOutcome::Cancelled;answer.refusal=et::Refusal::Cancelled;
+#if DEBUG
+        tb::debug::RecordCommit(int(answer.outcome),et::RefusalCode(answer.refusal),false);
+#endif
+        return answer;}
+    try{OrdinaryTransformChange change;change.label=work->label_;change.presentation=work->presentation_;change.shape=result->result_;change.transform=work->presentation_->LocalTransformation();change.operation=OrdinaryTransformOperation::RetainedEdgeTreatment;change.edgeTreatmentSnapshot=work->snapshot_;change.edgeTreatmentEdit=work->edit_;change.edgeTreatmentResult=result;OrdinaryEditResult ordinary=OrdinaryEditResult::Invalid;work->state_=et::Work::State::Committing;auto lease=_ordinaryEditController->beginTransform({change},&ordinary);if(lease)ordinary=lease.stageAndCommit();work->state_=et::Work::State::Settled;if(ordinary==OrdinaryEditResult::Committed){answer.outcome=et::CommitOutcome::Committed;answer.refusal=et::Refusal::None;answer.measuredUndoDelta=1;for(const auto&s:result->definition_.steps)answer.replayedFeatures.push_back(s.feature);}else if(ordinary==OrdinaryEditResult::NoChange){answer.outcome=et::CommitOutcome::Unchanged;answer.refusal=et::Refusal::None;answer.measuredUndoDelta=0;}else if(ordinary==OrdinaryEditResult::Busy){answer.outcome=et::CommitOutcome::Busy;answer.refusal=et::Refusal::Busy;}else if(ordinary==OrdinaryEditResult::OutcomeUnknown){answer.outcome=et::CommitOutcome::OutcomeUnknown;answer.refusal=et::Refusal::OutcomeUnknown;answer.measuredUndoDelta.reset();}else{answer.outcome=et::CommitOutcome::Refused;answer.refusal=ordinary==OrdinaryEditResult::BudgetRefused?et::Refusal::Budget:et::Refusal::StageFailed;}
+#if DEBUG
+        tb::debug::RecordCommit(int(answer.outcome),et::RefusalCode(answer.refusal),answer.outcome==et::CommitOutcome::OutcomeUnknown);
+#endif
+        return answer;}catch(...){work->state_=et::Work::State::Settled;answer.outcome=et::CommitOutcome::OutcomeUnknown;answer.refusal=et::Refusal::OutcomeUnknown;answer.measuredUndoDelta.reset();
+#if DEBUG
+        tb::debug::RecordCommit(int(answer.outcome),et::RefusalCode(answer.refusal),true);
+#endif
+        return answer;}
 }
 
 std::shared_ptr<const retained_edge_treatment::r2::MigrationReview>
@@ -516,11 +677,13 @@ Core3DViewer::reviewRetainedBooleanMigrationR2(
         // the post-existing-treatment stage. Review stores proofs, stage
         // values and the charged budget only; it never issues identities.
         namespace fs=retained_face_selector;
-        et::ReplayBudget budget;const std::atomic_bool cancelled{false};
+        et::ReplayBudget budget;CopyTopologyBudget(budget,original->chargedBudget_);
+        const std::atomic_bool cancelled{false};
         r2::MigrationStages stages;
         if(!r2::PrepareMigrationStages(original->original_,original->originalBase_,cancelled,
             budget,stages,refusal)){
 #if DEBUG
+            tb::debug::RecordPhase("review-r2",original->chargedBudget_,budget);
             std::fprintf(stderr,"B1B2_REVIEW phase=stage-preparation refusal=%s\n",et::RefusalCode(refusal));
 #endif
             return {};
@@ -545,9 +708,15 @@ Core3DViewer::reviewRetainedBooleanMigrationR2(
                         retained_boolean::Program prefix=tailProgram;
                         prefix.filletSteps.resize(prefixCount);
                         const auto built=retained_fillet::Build(stages.postBoolean,prefix,cancelled,
-                            [&](const TopoDS_Shape& shape){return et::detail::ChargeTopology(shape,budget);});
+                            [&](const TopoDS_Shape& shape){return et::detail::ChargeTopology(shape,budget);},
+                            nullptr,&budget);
                         if(built.outcome!=retained_fillet::Outcome::Built||built.solid.IsNull()){
-                            refusal=cancelled.load()?et::Refusal::Cancelled:et::Refusal::BuildFailed;return {};
+                            refusal=cancelled.load()?et::Refusal::Cancelled
+                                :budget.exhausted?et::Refusal::Budget:et::Refusal::BuildFailed;
+#if DEBUG
+                            tb::debug::RecordPhase("review-r2",original->chargedBudget_,budget);
+#endif
+                            return {};
                         }
                         stage=built.solid;
                     }
@@ -565,9 +734,10 @@ Core3DViewer::reviewRetainedBooleanMigrationR2(
         // observed candidate is never normalized to make it pass.
         if(!et::EquivalentReplayGeometry(original->originalCurrent_,stages.postTreatment,budget,refusal)){
 #if DEBUG
+            tb::debug::RecordPhase("review-r2",original->chargedBudget_,budget);
             std::fprintf(stderr,"B1B2_REVIEW phase=equivalence refusal=%s\n",et::RefusalCode(refusal));
 #endif
-            refusal=et::Refusal::StaleSnapshot;return {};
+            if(refusal!=et::Refusal::Budget)refusal=et::Refusal::StaleSnapshot;return {};
         }
         const auto identityValue=retained_boolean::Identities(original->original_);
         const auto* program=std::get_if<retained_boolean::Program>(&original->original_);
@@ -584,6 +754,7 @@ Core3DViewer::reviewRetainedBooleanMigrationR2(
                 identityValue.metersPerUnit,budget,cancelled,resolution);
             if(queryRefusal!=fs::Refusal::None||!resolution.proof){refusal=fs::MapToB1(queryRefusal);
 #if DEBUG
+                tb::debug::RecordPhase("review-r2",original->chargedBudget_,budget);
                 std::fprintf(stderr,"B1B2_REVIEW phase=old-step-membership refusal=%s\n",et::RefusalCode(refusal));
 #endif
                 return {};}
@@ -595,13 +766,16 @@ Core3DViewer::reviewRetainedBooleanMigrationR2(
                 identityValue.metersPerUnit,budget,cancelled,resolution);
             if(queryRefusal!=fs::Refusal::None||!resolution.proof){refusal=fs::MapToB1(queryRefusal);
 #if DEBUG
+                tb::debug::RecordPhase("review-r2",original->chargedBudget_,budget);
                 std::fprintf(stderr,"B1B2_REVIEW phase=append-membership refusal=%s\n",et::RefusalCode(refusal));
 #endif
                 return {};}
             review->appendProof_=resolution.proof;
         }
-        review->chargedBudget_.buildStages=budget.buildStages;
-        review->chargedBudget_.topologyVisits=budget.topologyVisits;
+        review->chargedBudget_=original->chargedBudget_;CopyTopologyBudget(review->chargedBudget_,budget);
+#if DEBUG
+        tb::debug::RecordPhase("review-r2",original->chargedBudget_,budget);
+#endif
         std::vector<std::uint8_t> digestBytes=original->originalBytes_;
         AppendMigrationRequestDigest(digestBytes,request);
         CC_SHA256(digestBytes.data(),CC_LONG(digestBytes.size()),review->requestDigest_.data());
@@ -634,15 +808,22 @@ Core3DViewer::reviewRetainedBooleanEnrollmentR2(
         if(!AdmitA1Graph(original->original_,admitted)||original->originalCurrent_.IsNull()){
             refusal=et::Refusal::UnsupportedBase;return {};
         }
-        et::ReplayBudget budget;fs::Resolution resolution;const std::atomic_bool cancelled{false};
-        if(fs::Resolve(original->originalCurrent_,request.intent,admitted.metersPerLocalUnit,
-            budget,cancelled,resolution)!=fs::Refusal::None||!resolution.proof){
-            refusal=et::Refusal::UnsupportedEdge;return {};
+        et::ReplayBudget budget;CopyTopologyBudget(budget,original->chargedBudget_);
+        fs::Resolution resolution;const std::atomic_bool cancelled{false};
+        const auto selectorRefusal=fs::Resolve(original->originalCurrent_,request.intent,
+            admitted.metersPerLocalUnit,budget,cancelled,resolution);
+        if(selectorRefusal!=fs::Refusal::None||!resolution.proof){
+#if DEBUG
+            tb::debug::RecordPhase("review-r2",original->chargedBudget_,budget);
+#endif
+            refusal=fs::MapToB1(selectorRefusal);return {};
         }
         auto review=std::shared_ptr<r2::EnrollmentReview>(new r2::EnrollmentReview);
         review->original_=original;review->request_=request;review->proof_=resolution.proof;
-        review->chargedBudget_.buildStages=budget.buildStages;
-        review->chargedBudget_.topologyVisits=budget.topologyVisits;
+        review->chargedBudget_=original->chargedBudget_;CopyTopologyBudget(review->chargedBudget_,budget);
+#if DEBUG
+        tb::debug::RecordPhase("review-r2",original->chargedBudget_,budget);
+#endif
         std::vector<std::uint8_t> digestBytes=original->originalBytes_;
         digestBytes.push_back(0);digestBytes.push_back(1);
         CC_SHA256(digestBytes.data(),CC_LONG(digestBytes.size()),review->requestDigest_.data());
@@ -733,6 +914,7 @@ Core3DViewer::prepareRetainedBooleanMigrationR2(
     if(![NSThread isMainThread]||!original||!review||review->original_!=original
         ||request.version!=1||!canBeginCommittedEdit()||myDoc.IsNull()||myContext.IsNull())return {};
     try{
+        et::ReplayBudget budget;CopyTopologyBudget(budget,review->chargedBudget_);
         myContext->InitSelected();if(!myContext->MoreSelected())return {};
         auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());myContext->NextSelected();
         if(myContext->MoreSelected()||selected.IsNull()||!myDoc->ShapeLabel(selected).IsEqual(original->ownerLabel_)
@@ -804,7 +986,11 @@ Core3DViewer::prepareRetainedBooleanMigrationR2(
             if(row==candidate.steps.end()){refusal=et::Refusal::IdentityMismatch;return {};}
             et::Step issued;
             if(!IssueSelectorStep(*review->proofs_[index],binding.metersPerLocalUnit,
-                row->amountMM,row->localID,issued,refusal))return {};
+                row->amountMM,row->localID,budget,issued,refusal)){
+#if DEBUG
+                tb::debug::RecordPhase("prepare-r2",review->chargedBudget_,budget);
+#endif
+                return {};}
             issued.node=row->node;issued.feature=row->feature;
             for(auto& mapping:provenance.anchors)
                 if(std::any_of(row->anchors.begin(),row->anchors.end(),
@@ -815,7 +1001,11 @@ Core3DViewer::prepareRetainedBooleanMigrationR2(
             if(candidate.steps.size()>=et::MaximumSteps){refusal=et::Refusal::Budget;return {};}
             et::Step issued;
             if(!IssueSelectorStep(*review->appendProof_,binding.metersPerLocalUnit,
-                request.append->amountMM,candidate.issuance.nextLocalID++,issued,refusal))return {};
+                request.append->amountMM,candidate.issuance.nextLocalID++,budget,issued,refusal)){
+#if DEBUG
+                tb::debug::RecordPhase("prepare-r2",review->chargedBudget_,budget);
+#endif
+                return {};}
             candidate.steps.push_back(std::move(issued));candidate.outputNode=candidate.steps.back().node;
         }
         binding.migration=std::move(provenance);candidate.base=binding;
@@ -823,7 +1013,10 @@ Core3DViewer::prepareRetainedBooleanMigrationR2(
         auto work=std::make_shared<r2::Work>();work->migration_=original;work->review_=review;work->mutation_=request;
         work->candidate_=candidate;work->source_=r2::RetainedBooleanBase{binding,r2::LegacyBooleanBase{prefix,prefixBytes}};
         work->prefixBytes_=prefixBytes;work->base_=review->postBooleanBase_;work->originalCurrent_=original->originalCurrent_;
-        work->chargedBudget_=review->chargedBudget_;
+        work->chargedBudget_=review->chargedBudget_;CopyTopologyBudget(work->chargedBudget_,budget);
+#if DEBUG
+        tb::debug::RecordPhase("prepare-r2",review->chargedBudget_,budget);
+#endif
         work->nonce_=original->nonce_;work->label_=original->ownerLabel_;work->presentation_=selected;work->state_=r2::Work::State::Prepared;
         refusal=et::Refusal::None;return work;
     }catch(...){refusal=et::Refusal::BuildFailed;return {};}
@@ -841,6 +1034,7 @@ Core3DViewer::prepareRetainedBooleanEnrollmentR2(
     if(![NSThread isMainThread]||!original||!review||review->original_!=original
         ||!review->proof_||!canBeginCommittedEdit()||myDoc.IsNull()||myContext.IsNull())return {};
     try{
+        et::ReplayBudget budget;CopyTopologyBudget(budget,review->chargedBudget_);
         myContext->InitSelected();if(!myContext->MoreSelected())return {};
         auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());myContext->NextSelected();
         if(myContext->MoreSelected()||selected.IsNull()||!myDoc->ShapeLabel(selected).IsEqual(original->ownerLabel_)
@@ -866,13 +1060,21 @@ Core3DViewer::prepareRetainedBooleanEnrollmentR2(
         candidate.issuance.nextLocalID=1;candidate.outputNode=binding.sourceNode;
         et::Step step;
         if(!IssueSelectorStep(*review->proof_,binding.metersPerLocalUnit,review->request_.amountMM,
-            candidate.issuance.nextLocalID++,step,refusal))return {};
+            candidate.issuance.nextLocalID++,budget,step,refusal)){
+#if DEBUG
+            tb::debug::RecordPhase("prepare-r2",review->chargedBudget_,budget);
+#endif
+            return {};}
         candidate.steps.push_back(step);candidate.outputNode=step.node;
         std::vector<std::uint8_t> bytes;if(!r2::Encode(candidate,bytes,refusal))return {};
         auto work=std::make_shared<r2::Work>();work->enrollment_=original;work->candidate_=candidate;
         work->source_=r2::RetainedBooleanBase{binding,r2::CompositeBooleanBase{graph,original->originalBytes_}};
         work->prefixBytes_=original->originalBytes_;work->base_=original->originalCurrent_;
         work->originalCurrent_=original->originalCurrent_;
+        work->chargedBudget_=review->chargedBudget_;CopyTopologyBudget(work->chargedBudget_,budget);
+#if DEBUG
+        tb::debug::RecordPhase("prepare-r2",review->chargedBudget_,budget);
+#endif
         work->nonce_=original->nonce_;work->label_=original->ownerLabel_;work->presentation_=selected;
         work->state_=r2::Work::State::Prepared;
         refusal=et::Refusal::None;return work;
@@ -886,12 +1088,16 @@ Core3DViewer::captureEdgeTreatmentSelectorTargetsR2(
     std::uint64_t,std::uint32_t,std::uint32_t,retained_face_selector::Refusal& refusal) noexcept {
     namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;namespace fs=retained_face_selector;
     refusal=fs::Refusal::StaleSource;if(![NSThread isMainThread]||!original||!original->current())return {};
-    et::ReplayBudget budget;fs::Resolution resolution;const std::atomic_bool cancelled{false};
+    et::ReplayBudget budget;CopyTopologyBudget(budget,original->chargedBudget_);
+    fs::Resolution resolution;const std::atomic_bool cancelled{false};
     refusal=fs::Resolve(original->current_,intent,original->dimensionMetersPerUnit(),budget,cancelled,resolution);
+#if DEBUG
+    tb::debug::RecordPhase("capture-r2",original->chargedBudget_,budget);
+#endif
     if(refusal!=fs::Refusal::None||!resolution.proof)return {};
     auto value=std::shared_ptr<r2::SelectorTargetCapture>(new r2::SelectorTargetCapture);
-    value->original_=original;value->proof_=resolution.proof;value->chargedBudget_.buildStages=budget.buildStages;
-    value->chargedBudget_.topologyVisits=budget.topologyVisits;return value;
+    value->original_=original;value->proof_=resolution.proof;value->chargedBudget_=original->chargedBudget_;
+    CopyTopologyBudget(value->chargedBudget_,budget);return value;
 }
 
 std::shared_ptr<retained_edge_treatment::r2::Work>
@@ -916,12 +1122,21 @@ Core3DViewer::prepareEdgeTreatmentSelectorAppendR2(
     const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());myContext->NextSelected();
     if(myContext->MoreSelected()||selected.IsNull()||!myDoc->ShapeLabel(selected).IsEqual(original->ownerLabel_)
         ||!selected->Shape().IsEqual(original->current_))return {};
+    et::ReplayBudget budget;CopyTopologyBudget(budget,targets->chargedBudget_);
     r2::Definition candidate=original->definition_;et::Step step;
     if(!IssueSelectorStep(*targets->proof_,original->dimensionMetersPerUnit(),amountMM,
-        candidate.issuance.nextLocalID++,step,refusal))return {};
+        candidate.issuance.nextLocalID++,budget,step,refusal)){
+#if DEBUG
+        tb::debug::RecordPhase("prepare-r2",targets->chargedBudget_,budget);
+#endif
+        return {};}
     candidate.steps.push_back(step);candidate.outputNode=step.node;std::vector<std::uint8_t> bytes;if(!r2::Encode(candidate,bytes,refusal))return {};
     auto work=std::make_shared<r2::Work>();work->snapshot_=original;work->candidate_=candidate;work->source_=original->source_;
     work->base_=original->base_;work->originalCurrent_=original->current_;work->nonce_=original->nonce_;work->label_=original->ownerLabel_;
+    work->chargedBudget_=targets->chargedBudget_;CopyTopologyBudget(work->chargedBudget_,budget);
+#if DEBUG
+    tb::debug::RecordPhase("prepare-r2",targets->chargedBudget_,budget);
+#endif
     work->presentation_=selected;work->state_=r2::Work::State::Prepared;refusal=et::Refusal::None;return work;
 }
 
@@ -976,7 +1191,11 @@ std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTrea
     std::vector<std::uint8_t> bytes;if(!r2::Encode(candidate,bytes,refusal))return {};
     auto work=std::make_shared<r2::Work>();work->snapshot_=original;work->mutation_=edit;work->candidate_=candidate;
     work->source_=original->source_;work->sourceBase_=original->sourceBase_;work->base_=original->base_;work->originalCurrent_=original->current_;work->nonce_=original->nonce_;
-    work->label_=original->ownerLabel_;work->state_=r2::Work::State::Prepared;refusal=et::Refusal::None;return work;
+    work->chargedBudget_=original->chargedBudget_;work->label_=original->ownerLabel_;work->state_=r2::Work::State::Prepared;
+#if DEBUG
+    tb::debug::RecordPhase("prepare-r2",original->chargedBudget_,work->chargedBudget_);
+#endif
+    refusal=et::Refusal::None;return work;
 }
 
 std::shared_ptr<const retained_edge_treatment::r2::DetachedInput> Core3DViewer::edgeTreatmentGeometryR2(
@@ -986,6 +1205,9 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedInput> Core3DViewer::
     input->source_=work->source_;input->base_=work->base_;input->originalCurrent_=work->originalCurrent_;input->chargedBudget_=work->chargedBudget_;
     input->sourceBase_=work->sourceBase_;
     if(const auto* edit=std::get_if<r2::Edit>(&work->mutation_))input->edit_=*edit;
+#if DEBUG
+    tb::debug::RecordPhase("detach-r2",work->chargedBudget_,input->chargedBudget_);
+#endif
     input->cancelled_=work->cancelled_;work->state_=r2::Work::State::Building;return input;
 }
 
@@ -995,6 +1217,7 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
     namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;refusal=et::Refusal::BuildFailed;
     if(!input||!input->cancelled_||input->cancelled_->load()){refusal=et::Refusal::Cancelled;return {};}
     auto result=std::shared_ptr<r2::DetachedResult>(new r2::DetachedResult);result->nonce_=input->nonce_;result->definition_=input->candidate_;
+    result->budget_=input->chargedBudget_;et::ReplayBudget budget;CopyTopologyBudget(budget,input->chargedBudget_);
     result->source_=input->source_;result->base_=input->base_;std::visit([&](const auto& source){if constexpr(std::is_same_v<std::decay_t<decltype(source)>,r2::RetainedBooleanBase>)result->prefixBytes_=std::visit([](const auto& arm){return arm.canonicalPrefixBytes;},source.source);},input->source_);
     if(input->edit_&&(std::holds_alternative<r2::RebuildBooleanInput>(*input->edit_)||std::holds_alternative<r2::RebuildAnalyticTool>(*input->edit_))){
         // Replay the complete changed prefix first; the preserved suffix is
@@ -1002,13 +1225,25 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
         // against the exact new prefix bytes, never copied forward.
         r2::RetainedBooleanBase edited;std::vector<std::uint8_t> editedBytes;TopoDS_Shape prefixResult,editedBase;
         const auto* booleanBase=std::get_if<r2::RetainedBooleanBase>(&input->source_);
-        if(!booleanBase||!r2::RebuildEditedPrefix(*booleanBase,*input->edit_,input->sourceBase_,*input->cancelled_,edited,editedBytes,prefixResult,editedBase,refusal))return {};
+        if(!booleanBase||!r2::RebuildEditedPrefix(*booleanBase,*input->edit_,input->sourceBase_,*input->cancelled_,edited,editedBytes,prefixResult,editedBase,budget,refusal)){
+#if DEBUG
+            tb::debug::RecordPhase("build-r2",input->chargedBudget_,budget);
+#endif
+            return {};}
         result->source_=edited;result->prefixBytes_=editedBytes;result->base_=prefixResult;result->editedSourceBase_=editedBase;result->sourceChanged_=true;
         auto& binding=std::get<r2::BooleanBaseBinding>(result->definition_.base);
         if(!CC_SHA256(editedBytes.data(),CC_LONG(editedBytes.size()),binding.sourceRecipeDigest.data()))return {};
     }
     if(!r2::Encode(result->definition_,result->definitionBytes_,refusal))return {};
-    et::ReplayBudget budget;if(!r2::ReplayTreatmentSuffix(result->base_,result->definition_,result->result_,budget,refusal))return {};
+    if(!r2::ReplayTreatmentSuffix(result->base_,result->definition_,result->result_,budget,refusal)){
+#if DEBUG
+        tb::debug::RecordPhase("build-r2",input->chargedBudget_,budget);
+#endif
+        return {};}
+    CopyTopologyBudget(result->budget_,budget);
+#if DEBUG
+    tb::debug::RecordPhase("build-r2",input->chargedBudget_,budget);
+#endif
     refusal=et::Refusal::None;return result;
 }
 bool Core3DViewer::cancelEdgeTreatmentR2(const std::shared_ptr<retained_edge_treatment::r2::Work>& work) noexcept {if(!work)return false;work->cancelled_->store(true);return true;}
@@ -1017,14 +1252,22 @@ retained_edge_treatment::CommitResult Core3DViewer::commitEdgeTreatmentR2(
     const std::shared_ptr<retained_edge_treatment::r2::Work>& work,
     const std::shared_ptr<const retained_edge_treatment::r2::DetachedResult>& result) noexcept {
     namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;et::CommitResult answer;
-    if(![NSThread isMainThread]||!work||!result||result->nonce_!=work->nonce_){answer.refusal=et::Refusal::StaleSnapshot;return answer;}
+    if(![NSThread isMainThread]||!work||!result||result->nonce_!=work->nonce_){answer.refusal=et::Refusal::StaleSnapshot;
+#if DEBUG
+        tb::debug::RecordCommit(int(answer.outcome),et::RefusalCode(answer.refusal),false);
+#endif
+        return answer;}
     OrdinaryTransformChange change;change.label=work->label_;change.presentation=work->presentation_;change.shape=result->result_;
     change.transform=work->presentation_.IsNull()?gp_Trsf():work->presentation_->LocalTransformation();change.operation=OrdinaryTransformOperation::RetainedEdgeTreatment;
     change.edgeTreatmentSnapshotR2=work->snapshot_;change.edgeTreatmentMigrationR2=work->migration_;if(work->migration_)change.edgeTreatmentMigrationRequestR2=std::get<r2::MigrationM3>(work->mutation_);change.edgeTreatmentEnrollmentR2=work->enrollment_;change.edgeTreatmentResultR2=result;
     OrdinaryEditResult ordinary=OrdinaryEditResult::Invalid;auto lease=_ordinaryEditController->beginTransform({change},&ordinary);if(lease)ordinary=lease.stageAndCommit();
     if(ordinary==OrdinaryEditResult::Committed){answer.outcome=et::CommitOutcome::Committed;answer.refusal=et::Refusal::None;answer.measuredUndoDelta=1;}
     else if(ordinary==OrdinaryEditResult::OutcomeUnknown){answer.outcome=et::CommitOutcome::OutcomeUnknown;answer.refusal=et::Refusal::OutcomeUnknown;answer.measuredUndoDelta.reset();}
-    else{answer.outcome=et::CommitOutcome::Refused;answer.refusal=et::Refusal::StageFailed;answer.measuredUndoDelta=0;}return answer;
+    else{answer.outcome=et::CommitOutcome::Refused;answer.refusal=ordinary==OrdinaryEditResult::BudgetRefused?et::Refusal::Budget:et::Refusal::StageFailed;answer.measuredUndoDelta=0;}
+#if DEBUG
+    tb::debug::RecordCommit(int(answer.outcome),et::RefusalCode(answer.refusal),answer.outcome==et::CommitOutcome::OutcomeUnknown);
+#endif
+    return answer;
 }
 namespace native_opening::detail {
 struct State final {
@@ -3362,6 +3605,7 @@ struct ProfileSolidGeometry : ProfileDefinition {
     std::optional<retained_edge_treatment::Definition> treatmentDefinition;
     TopoDS_Shape treatmentBase;
     std::vector<retained_edge_treatment::StepProof> treatmentProofs;
+    retained_edge_treatment::ReplayBudget treatmentBudget;
     // D253 source-edit rebind inputs: main-thread verified value data only.
     std::optional<retained_edge_treatment::SourceRebindRoles> treatmentRebind;
     std::optional<retained_edge_treatment::BaseRecipe> treatmentRebuildSource;
@@ -3511,7 +3755,7 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
             solid = TopoDS::Solid(shelled);
             if (!BRepCheck_Analyzer(solid, Standard_True).IsValid()) return false;
         }
-        if(geometry->treatmentRebind&&geometry->treatmentRebuildSource){geometry->treatmentBase=solid;retained_edge_treatment::SourceRebindResult rebound;retained_edge_treatment::ReplayBudget budget;retained_edge_treatment::Refusal refusal=retained_edge_treatment::Refusal::BuildFailed;if(!retained_edge_treatment::ApplySourceRebind(*geometry->treatmentRebind,*geometry->treatmentRebuildSource,solid,budget,refusal,rebound))return false;geometry->treatmentDefinition=rebound.definition;geometry->treatmentProofs=rebound.proofs;solid=TopoDS::Solid(rebound.treated);}
+        if(geometry->treatmentRebind&&geometry->treatmentRebuildSource){geometry->treatmentBase=solid;retained_edge_treatment::SourceRebindResult rebound;retained_edge_treatment::Refusal refusal=retained_edge_treatment::Refusal::BuildFailed;if(!retained_edge_treatment::ApplySourceRebind(*geometry->treatmentRebind,*geometry->treatmentRebuildSource,solid,geometry->treatmentBudget,refusal,rebound))return false;geometry->treatmentDefinition=rebound.definition;geometry->treatmentProofs=rebound.proofs;solid=TopoDS::Solid(rebound.treated);}
         Bnd_Box bounds;
         BRepBndLib::AddOptimal(solid, bounds, Standard_False, Standard_False);
         if (bounds.IsVoid() || bounds.IsOpen()) { return false; }
@@ -3708,6 +3952,7 @@ struct EnclosureSolidGeometry {
     std::optional<retained_edge_treatment::Definition> treatmentDefinition;
     TopoDS_Shape treatmentBase;
     std::vector<retained_edge_treatment::StepProof> treatmentProofs;
+    retained_edge_treatment::ReplayBudget treatmentBudget;
     // D253 source-edit rebind inputs: main-thread verified value data only.
     std::optional<retained_edge_treatment::SourceRebindRoles> treatmentRebind;
     std::optional<retained_edge_treatment::BaseRecipe> treatmentRebuildSource;
@@ -3743,6 +3988,7 @@ struct LoftSolidGeometry {
     std::optional<retained_edge_treatment::Definition> treatmentDefinition;
     TopoDS_Shape treatmentBase;
     std::vector<retained_edge_treatment::StepProof> treatmentProofs;
+    retained_edge_treatment::ReplayBudget treatmentBudget;
     // D253 source-edit rebind inputs: main-thread verified value data only.
     std::optional<retained_edge_treatment::SourceRebindRoles> treatmentRebind;
     std::optional<retained_edge_treatment::BaseRecipe> treatmentRebuildSource;
@@ -4812,11 +5058,11 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredProfileRebuild(
             // A source edit moves native edges; the stored selector witnesses
             // must be verified against the old source and rebound against the
             // actually rebuilt stage, never replayed with stale midpoints.
-            et::SourceRebindRoles roles;et::ReplayBudget rebindBudget;et::Refusal rebindRefusal=et::Refusal::ReplayMismatch;
+            et::SourceRebindRoles roles;et::ReplayBudget rebindBudget=original.edgeTreatment->chargedBudget_;et::Refusal rebindRefusal=et::Refusal::ReplayMismatch;
             if(!et::CaptureSourceRebindRoles(original.edgeTreatment->base_,*original.edgeTreatment->definition_,
                 original.edgeTreatment->definitionBytes_,rebindBudget,rebindRefusal,roles))return {};
             auto geometry=profileSolidGeometry(work);
-            geometry->treatmentRebind=std::move(roles);geometry->treatmentRebuildSource=parameters;
+            geometry->treatmentRebind=std::move(roles);geometry->treatmentRebuildSource=parameters;geometry->treatmentBudget=rebindBudget;
             work->edgeTreatmentSnapshot=original.edgeTreatment;work->edgeTreatmentEdit=retained_edge_treatment::RebuildSource{parameters};
         }
         record.requested.label = label; record.requested.presentation = selected;
@@ -4866,11 +5112,11 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredEnclosureRebuild(
             // A source edit moves native edges; the stored selector witnesses
             // must be verified against the old source and rebound against the
             // actually rebuilt stage, never replayed with stale midpoints.
-            et::SourceRebindRoles roles;et::ReplayBudget rebindBudget;et::Refusal rebindRefusal=et::Refusal::ReplayMismatch;
+            et::SourceRebindRoles roles;et::ReplayBudget rebindBudget=original.edgeTreatment->chargedBudget_;et::Refusal rebindRefusal=et::Refusal::ReplayMismatch;
             if(!et::CaptureSourceRebindRoles(original.edgeTreatment->base_,*original.edgeTreatment->definition_,
                 original.edgeTreatment->definitionBytes_,rebindBudget,rebindRefusal,roles))return {};
             auto enclosureGeometry=std::get<std::shared_ptr<EnclosureSolidGeometry>>(work->geometry);
-            enclosureGeometry->treatmentRebind=std::move(roles);enclosureGeometry->treatmentRebuildSource=parameters;
+            enclosureGeometry->treatmentRebind=std::move(roles);enclosureGeometry->treatmentRebuildSource=parameters;enclosureGeometry->treatmentBudget=rebindBudget;
             work->edgeTreatmentSnapshot=original.edgeTreatment;work->edgeTreatmentEdit=retained_edge_treatment::RebuildSource{parameters};
         }
         record.requested.label = label; record.requested.presentation = selected;
@@ -5033,10 +5279,10 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredLoftStationRebuild(
             // A source edit moves native edges; the stored selector witnesses
             // must be verified against the old source and rebound against the
             // actually rebuilt stage, never replayed with stale midpoints.
-            et::SourceRebindRoles roles;et::ReplayBudget rebindBudget;et::Refusal rebindRefusal=et::Refusal::ReplayMismatch;
+            et::SourceRebindRoles roles;et::ReplayBudget rebindBudget=original.edgeTreatment->chargedBudget_;et::Refusal rebindRefusal=et::Refusal::ReplayMismatch;
             if(!et::CaptureSourceRebindRoles(original.edgeTreatment->base_,*original.edgeTreatment->definition_,
                 original.edgeTreatment->definitionBytes_,rebindBudget,rebindRefusal,roles))return {};
-            geometry->treatmentRebind=std::move(roles);geometry->treatmentRebuildSource=definition;
+            geometry->treatmentRebind=std::move(roles);geometry->treatmentRebuildSource=definition;geometry->treatmentBudget=rebindBudget;
             work->edgeTreatmentSnapshot=original.edgeTreatment;work->edgeTreatmentEdit=retained_edge_treatment::RebuildSource{definition};
         }
         work->geometry=std::move(geometry);
@@ -5439,7 +5685,7 @@ bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& pa
     if (const auto p=std::get_if<std::shared_ptr<LoftSolidGeometry>>(&payload)) {
         if (!*p || (*p)->built || (*p)->cancelled.load()) return false;
         (*p)->built=rectangular_loft::Build((*p)->prepared,(*p)->cancelled,(*p)->result)==rectangular_loft::BuildStatus::Built;
-        if((*p)->built&&(*p)->treatmentRebind&&(*p)->treatmentRebuildSource){(*p)->treatmentBase=(*p)->result.solid;retained_edge_treatment::SourceRebindResult rebound;retained_edge_treatment::ReplayBudget budget;retained_edge_treatment::Refusal refusal=retained_edge_treatment::Refusal::BuildFailed;if(!retained_edge_treatment::ApplySourceRebind(*(*p)->treatmentRebind,*(*p)->treatmentRebuildSource,(*p)->treatmentBase,budget,refusal,rebound))return (*p)->built=false;(*p)->treatmentDefinition=rebound.definition;(*p)->treatmentProofs=rebound.proofs;(*p)->result.solid=rebound.treated;}
+        if((*p)->built&&(*p)->treatmentRebind&&(*p)->treatmentRebuildSource){(*p)->treatmentBase=(*p)->result.solid;retained_edge_treatment::SourceRebindResult rebound;retained_edge_treatment::Refusal refusal=retained_edge_treatment::Refusal::BuildFailed;if(!retained_edge_treatment::ApplySourceRebind(*(*p)->treatmentRebind,*(*p)->treatmentRebuildSource,(*p)->treatmentBase,(*p)->treatmentBudget,refusal,rebound))return (*p)->built=false;(*p)->treatmentDefinition=rebound.definition;(*p)->treatmentProofs=rebound.proofs;(*p)->result.solid=rebound.treated;}
         return (*p)->built;
     }
     if (const auto p=std::get_if<std::shared_ptr<SweepSolidGeometry>>(&payload)) {
@@ -5472,7 +5718,7 @@ bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& pa
                     &&canonicalDigest==reopenedDigest)(*p)->result.solid=canonical;
             }
         }
-        if((*p)->built&&(*p)->treatmentRebind&&(*p)->treatmentRebuildSource){(*p)->treatmentBase=(*p)->result.solid;retained_edge_treatment::SourceRebindResult rebound;retained_edge_treatment::ReplayBudget budget;retained_edge_treatment::Refusal refusal=retained_edge_treatment::Refusal::BuildFailed;if(!retained_edge_treatment::ApplySourceRebind(*(*p)->treatmentRebind,*(*p)->treatmentRebuildSource,(*p)->treatmentBase,budget,refusal,rebound))return (*p)->built=false;(*p)->treatmentDefinition=rebound.definition;(*p)->treatmentProofs=rebound.proofs;(*p)->result.solid=rebound.treated;}
+        if((*p)->built&&(*p)->treatmentRebind&&(*p)->treatmentRebuildSource){(*p)->treatmentBase=(*p)->result.solid;retained_edge_treatment::SourceRebindResult rebound;retained_edge_treatment::Refusal refusal=retained_edge_treatment::Refusal::BuildFailed;if(!retained_edge_treatment::ApplySourceRebind(*(*p)->treatmentRebind,*(*p)->treatmentRebuildSource,(*p)->treatmentBase,(*p)->treatmentBudget,refusal,rebound))return (*p)->built=false;(*p)->treatmentDefinition=rebound.definition;(*p)->treatmentProofs=rebound.proofs;(*p)->result.solid=rebound.treated;}
         return (*p)->built;
     }
     return false;
@@ -5742,11 +5988,11 @@ OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeS
                 auto treatment=std::shared_ptr<retained_edge_treatment::DetachedResult>(new retained_edge_treatment::DetachedResult);
                 treatment->nonce_=work->edgeTreatmentSnapshot->nonce_;treatment->source_=std::get<retained_edge_treatment::RebuildSource>(*work->edgeTreatmentEdit).requested;
                 if(const auto profileGeometry=std::get_if<std::shared_ptr<ProfileSolidGeometry>>(&work->geometry)){
-                    if(!*profileGeometry||!(*profileGeometry)->treatmentDefinition)return OrdinaryEditResult::Invalid;treatment->definition_=*(*profileGeometry)->treatmentDefinition;treatment->base_=(*profileGeometry)->treatmentBase;treatment->proofs_=(*profileGeometry)->treatmentProofs;
+                    if(!*profileGeometry||!(*profileGeometry)->treatmentDefinition)return OrdinaryEditResult::Invalid;treatment->definition_=*(*profileGeometry)->treatmentDefinition;treatment->base_=(*profileGeometry)->treatmentBase;treatment->proofs_=(*profileGeometry)->treatmentProofs;treatment->budget_=(*profileGeometry)->treatmentBudget;
                 }else if(const auto enclosureGeometry=std::get_if<std::shared_ptr<EnclosureSolidGeometry>>(&work->geometry)){
-                    if(!*enclosureGeometry||!(*enclosureGeometry)->treatmentDefinition)return OrdinaryEditResult::Invalid;treatment->definition_=*(*enclosureGeometry)->treatmentDefinition;treatment->base_=(*enclosureGeometry)->treatmentBase;treatment->proofs_=(*enclosureGeometry)->treatmentProofs;
+                    if(!*enclosureGeometry||!(*enclosureGeometry)->treatmentDefinition)return OrdinaryEditResult::Invalid;treatment->definition_=*(*enclosureGeometry)->treatmentDefinition;treatment->base_=(*enclosureGeometry)->treatmentBase;treatment->proofs_=(*enclosureGeometry)->treatmentProofs;treatment->budget_=(*enclosureGeometry)->treatmentBudget;
                 }else if(const auto loftGeometry=std::get_if<std::shared_ptr<LoftSolidGeometry>>(&work->geometry)){
-                    if(!*loftGeometry||!(*loftGeometry)->treatmentDefinition)return OrdinaryEditResult::Invalid;treatment->definition_=*(*loftGeometry)->treatmentDefinition;treatment->base_=(*loftGeometry)->treatmentBase;treatment->proofs_=(*loftGeometry)->treatmentProofs;
+                    if(!*loftGeometry||!(*loftGeometry)->treatmentDefinition)return OrdinaryEditResult::Invalid;treatment->definition_=*(*loftGeometry)->treatmentDefinition;treatment->base_=(*loftGeometry)->treatmentBase;treatment->proofs_=(*loftGeometry)->treatmentProofs;treatment->budget_=(*loftGeometry)->treatmentBudget;
                 }else return OrdinaryEditResult::Invalid;
                 treatment->result_=completed->solid;retained_edge_treatment::Refusal refusal;if(!retained_edge_treatment::Encode(treatment->definition_,treatment->definitionBytes_,refusal))return OrdinaryEditResult::Invalid;
                 record.requested.edgeTreatmentSnapshot=work->edgeTreatmentSnapshot;record.requested.edgeTreatmentEdit=work->edgeTreatmentEdit;record.requested.edgeTreatmentResult=std::move(treatment);

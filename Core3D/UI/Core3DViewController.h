@@ -1879,6 +1879,25 @@ __attribute__((objc_subclassing_restricted))
 - (Core3DFaceSelectorProbeResult *)debugFaceSelectorProof:(Core3DFaceSelectorFixture)fixture
     metersPerLocalUnit:(double)metersPerLocalUnit
     NS_SWIFT_NAME(debugFaceSelectorProof(_:metersPerLocalUnit:));
+//! Raw native accounting observation only. Diagnostic shapes never acquire
+//! document, receipt, selector or mutation authority.
+- (Core3DB2TopologyBudgetObservation *)debugB2TopologyBudgetProbe:
+    (Core3DB2TopologyBudgetScenario)scenario metersPerLocalUnit:(double)metersPerLocalUnit
+    injection:(nullable Core3DB2TopologyBudgetInjection *)injection
+    NS_SWIFT_NAME(debugB2TopologyBudgetProbe(_:metersPerLocalUnit:injection:));
+//! F10 owner observation: begin arms a session bound to one owner scenario on
+//! this controller (and an optional site/occurrence debt injection through the
+//! real checked accounting API); the test then drives the REAL owner operation
+//! APIs and end freezes the recorded phase ring into an immutable observation.
+//! Returns 0 when the request is not an admissible owner observation (wrong
+//! scenario family, corrupt seed, invalid injection) — a corrupt seed can
+//! never enter an owner operation.
+- (NSUInteger)debugBeginB2BudgetObservation:(Core3DB2TopologyBudgetScenario)scenario
+    metersPerLocalUnit:(double)metersPerLocalUnit
+    injection:(nullable Core3DB2TopologyBudgetInjection *)injection
+    NS_SWIFT_NAME(debugBeginB2BudgetObservation(_:metersPerLocalUnit:injection:));
+- (Core3DB2TopologyBudgetObservation *)debugEndB2BudgetObservation:(NSUInteger)token
+    NS_SWIFT_NAME(debugEndB2BudgetObservation(_:));
 #endif
 - (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentAppend:(Core3DEdgeTreatmentSnapshot *)snapshot
     kind:(Core3DEdgeTreatmentKind)kind amountMM:(double)amountMM

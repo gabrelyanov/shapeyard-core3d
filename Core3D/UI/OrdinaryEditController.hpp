@@ -30,7 +30,9 @@ enum class ShapeSelectionMode;
 
 enum class OrdinaryEditKind : std::uint8_t { Transform, Add, Remove, Appearance, Name, Visibility, Grouping };
 enum class OrdinaryEditState : std::uint8_t { Idle, OpenOwned, OutcomeUnknown, RepairPending, Publishing };
-enum class OrdinaryEditResult : std::uint8_t { NoChange, Committed, RetryableFailure, OutcomeUnknown, Busy, Invalid };
+enum class OrdinaryEditResult : std::uint8_t {
+    NoChange, Committed, RetryableFailure, BudgetRefused, OutcomeUnknown, Busy, Invalid
+};
 enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild, LoftStationRebuild, CylindricalCut, CylindricalCutSourceRebuild, CylindricalCutProgramSourceRebuild, MeshRegionExtrude, MeshRegionInset, CylindricalCutRing, WedgeCut, RetainedFillet, RetainedEdgeTreatment };
 inline bool IsCylindricalCutOperation(OrdinaryTransformOperation op) noexcept {
     return op==OrdinaryTransformOperation::CylindricalCut||op==OrdinaryTransformOperation::CylindricalCutRing||op==OrdinaryTransformOperation::WedgeCut||op==OrdinaryTransformOperation::RetainedFillet;
@@ -198,6 +200,11 @@ struct OrdinaryTransformLedger {
     OcctSavedGroupState groupsPrevious, groupsRequested, groupsCandidate;
     bool groupOriginChanges = false;
     bool candidateSealed = false;
+    // Typed, native-only failure evidence. This is set only when a retained
+    // operation's checked budget rejects work. Reconciliation still proves
+    // prior/candidate state; the flag merely preserves the refusal cause once
+    // a verified prior-state settlement has been established.
+    bool retainedBudgetRefused = false;
     std::shared_ptr<const dependent_replay::Plan> dependentReplay;
     std::shared_ptr<native_opening::Context> dependentContext;
     std::shared_ptr<native_opening::CommandLease> dependentLease;

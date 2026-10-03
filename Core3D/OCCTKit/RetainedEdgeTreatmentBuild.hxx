@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RetainedEdgeTreatmentSnapshot.hxx"
+#include "RetainedTopologyBudget.hxx"
 #include "RectangularLoftPersistence.hxx"
 #include "RetainedFaceSelector.hxx"
 #include <BRepCheck_Analyzer.hxx>
@@ -24,6 +25,7 @@
 #include <utility>
 
 namespace core3d::retained_edge_treatment {
+namespace tb = core3d::retained_topology_budget;
 inline bool ResolveAnchors(const TopoDS_Shape& source, const std::vector<Anchor>& anchors,
     double metersPerLocalUnit, std::vector<TopoDS_Edge>& edges,
     ReplayBudget& budget, Refusal& refusal) noexcept;
@@ -63,14 +65,27 @@ protected:
         return seekoff(off_type(position), std::ios_base::beg, mode);
     }
 };
+// C11: bounded stage census. The stage debit is preserved; the unbounded
+// whole-topology map is replaced by the explicit-stack occurrence walk that
+// charges every occurrence and enforces the combined face+edge census before
+// map growth.
 inline bool ChargeTopology(const TopoDS_Shape& shape, ReplayBudget& budget) noexcept {
-    TopTools_IndexedMapOfShape map;
-    TopExp::MapShapes(shape, map);
-    return budget.chargeStage(std::size_t(map.Extent()));
+    const std::atomic_bool neverCancelled{false};
+    tb::Census census;
+    return tb::CensusTopology(shape, budget, neverCancelled, census,
+        tb::Site::C11GeometryCensus, true) == tb::WalkStatus::Completed;
 }
 inline bool CommitGeometry(const TopoDS_Shape& shape, ReplayBudget& budget, Digest& digest) noexcept {
     try {
-        if (shape.IsNull() || !ChargeTopology(shape, budget)) return false;
+        if (shape.IsNull()) return false;
+        const std::atomic_bool neverCancelled{false};
+        tb::Census census;
+        if (tb::CensusTopology(shape, budget, neverCancelled, census,
+                tb::Site::C11GeometryCensus, true) != tb::WalkStatus::Completed) return false;
+        // C11: the exact V3 serialization pass is reserved (one admitted
+        // occurrence census) before it runs; the 8 MiB cap and exact bytes
+        // are unchanged.
+        if (!tb::ReserveTraversal(census, budget, tb::Site::C11GeometryCensus)) return false;
         GeometryBuffer buffer; std::ostream stream(&buffer); stream.imbue(std::locale::classic());
         BRepTools::Write(shape, stream, Standard_False, Standard_False, TopTools_FormatVersion_VERSION_3);
         if (!stream.good() || buffer.size() == 0 || buffer.size() >= MaximumGeometryBytes) return false;
@@ -83,12 +98,22 @@ inline bool CommitGeometry(const TopoDS_Shape& shape, ReplayBudget& budget, Dige
 inline bool ReadbackGeometry(const TopoDS_Shape& shape, ReplayBudget& budget, TopoDS_Shape& reopened) noexcept {
     reopened.Nullify();
     try {
+        const std::atomic_bool neverCancelled{false};
+        // C12: the source pass is debited before the bounded binary write/read.
+        if (tb::ChargeTraversal(shape, budget, neverCancelled, tb::Site::C12Detachment)
+            != tb::WalkStatus::Completed) return false;
         GeometryBuffer buffer; std::ostream writer(&buffer);
         BinTools::Write(shape, writer, Standard_False, Standard_False, BinTools_FormatVersion_VERSION_4);
         if (!writer.good() || buffer.size() == 0 || buffer.size() >= MaximumGeometryBytes) return false;
         buffer.read(); std::istream reader(&buffer); BinTools::Read(reopened, reader);
-        return reader.good() && !reopened.IsNull() && ChargeTopology(reopened, budget)
-            && BRepCheck_Analyzer(reopened).IsValid();
+        if (!reader.good() || reopened.IsNull()) return false;
+        // C12: the reopened shape is censused before its validity analysis,
+        // and the analyzer pass is reserved.
+        tb::Census census;
+        if (tb::CensusTopology(reopened, budget, neverCancelled, census,
+                tb::Site::C11GeometryCensus, true) != tb::WalkStatus::Completed
+            || !tb::ReserveTraversal(census, budget, tb::Site::C12Detachment)) return false;
+        return BRepCheck_Analyzer(reopened).IsValid();
     } catch (...) { reopened.Nullify(); return false; }
 }
 } // namespace detail
@@ -131,6 +156,20 @@ inline bool DetachReplayGeometry(const TopoDS_Shape& shared, ReplayBudget& budge
             traceFailure("null-input");
 #endif
             return false; }
+        // C12: the source pass is debited before serialization; the round
+        // trip, both exact commitments and the reopened census keep their
+        // existing charges below.
+        const std::atomic_bool neverCancelled{false};
+        std::size_t sourceOccurrences = 0;
+        if (tb::ChargeTraversal(shared, budget, neverCancelled, tb::Site::C12Detachment,
+                &sourceOccurrences) != tb::WalkStatus::Completed
+            || !budget.visit(sourceOccurrences, tb::Site::C12Detachment)) {
+            refusal = Refusal::Budget;
+#if DEBUG
+            traceFailure("source-pass");
+#endif
+            return false;
+        }
         detail::GeometryBuffer buffer; std::ostream writer(&buffer);
         BinTools::Write(shared, writer, Standard_False, Standard_False, BinTools_FormatVersion_VERSION_4);
         if (!writer.good() || buffer.size() == 0 || buffer.size() >= detail::MaximumGeometryBytes) {
@@ -199,14 +238,24 @@ inline bool EquivalentReplayGeometry(const TopoDS_Shape& actual, const TopoDS_Sh
     } catch (...) { refusal = Refusal::ReplayMismatch; return false; }
 }
 
+// L05/C13: the budgeted overload continues the caller's operation budget
+// through the whole actual/expectation/readback verification; the analyzer
+// input pass is charged first, and a budget failure survives error mapping
+// instead of being rewritten to ReplayMismatch.
 inline bool VerifyCurrent(const TopoDS_Shape& base, const TopoDS_Shape& current,
-    const Definition& definition, const std::vector<StepProof>& proofs, Refusal& refusal) noexcept {
+    const Definition& definition, const std::vector<StepProof>& proofs,
+    ReplayBudget& budget, Refusal& refusal) noexcept {
     try {
-        if (base.IsNull() || current.IsNull() || !BRepCheck_Analyzer(current).IsValid()
+        if (base.IsNull() || current.IsNull()) { refusal = Refusal::ReplayMismatch; return false; }
+        const std::atomic_bool neverCancelled{false};
+        if (tb::ChargeTraversal(current, budget, neverCancelled, tb::Site::C13CommitVerify)
+            != tb::WalkStatus::Completed) { refusal = Refusal::Budget; return false; }
+        if (!BRepCheck_Analyzer(current).IsValid()
             || proofs.size() != definition.steps.size()) { refusal = Refusal::ReplayMismatch; return false; }
-        TopoDS_Shape replayed; std::vector<StepProof> fresh; ReplayBudget budget;
+        TopoDS_Shape replayed; std::vector<StepProof> fresh;
         if (!Replay(base, definition, replayed, fresh, budget, refusal) || fresh.size() != proofs.size()) {
-            refusal = Refusal::ReplayMismatch; return false;
+            if (refusal != Refusal::Budget) refusal = Refusal::ReplayMismatch;
+            return false;
         }
         if (!EquivalentReplayGeometry(current, replayed, budget, refusal)) return false;
         for (std::size_t index = 0; index < fresh.size(); ++index) {
@@ -218,6 +267,13 @@ inline bool VerifyCurrent(const TopoDS_Shape& base, const TopoDS_Shape& current,
         refusal = Refusal::None; return true;
     } catch (...) { refusal = Refusal::ReplayMismatch; return false; }
 }
+// Compatibility signature for independent calls outside an operation; B2
+// operation-internal callers must use the budgeted overload above.
+inline bool VerifyCurrent(const TopoDS_Shape& base, const TopoDS_Shape& current,
+    const Definition& definition, const std::vector<StepProof>& proofs, Refusal& refusal) noexcept {
+    ReplayBudget budget;
+    return VerifyCurrent(base, current, definition, proofs, budget, refusal);
+}
 
 inline bool ResolveAnchors(const TopoDS_Shape& source, const std::vector<Anchor>& anchors,
     double metersPerLocalUnit, std::vector<TopoDS_Edge>& edges,
@@ -228,12 +284,24 @@ inline bool ResolveAnchors(const TopoDS_Shape& source, const std::vector<Anchor>
         refusal = Refusal::UnsupportedEdge; return false;
     }
     const double localPerMM = 0.001 / metersPerLocalUnit;
-    TopTools_IndexedMapOfShape map; TopExp::MapShapes(source, TopAbs_EDGE, map);
-    if (!budget.chargeStage(std::size_t(map.Extent()))) { refusal = Refusal::Budget; return false; }
+    // C14: bounded combined face+edge census with the stage debit preserved;
+    // the edge map used for lookups is produced by the same bounded walk.
+    const std::atomic_bool neverCancelled{false};
+    tb::Census census;
+    if (tb::CensusTopology(source, budget, neverCancelled, census,
+            tb::Site::C14AnchorResolve, true) != tb::WalkStatus::Completed) {
+        refusal = Refusal::Budget; return false;
+    }
+    const TopTools_IndexedMapOfShape& map = census.edges;
     std::set<int> used;
     for (const Anchor& anchor : anchors) {
         int unique = 0; TopoDS_Edge selected;
         for (int index = 1; index <= map.Extent(); ++index) {
+            // C14: every anchor-edge comparison is charged, including
+            // unsuccessful matches.
+            if (!budget.visit(1, tb::Site::C14AnchorResolve)) {
+                refusal = Refusal::Budget; return false;
+            }
             const TopoDS_Edge edge = TopoDS::Edge(map(index)); BRepAdaptor_Curve curve(edge);
             const bool kind = (anchor.curve == CurveKind::Line && curve.GetType() == GeomAbs_Line)
                 || (anchor.curve == CurveKind::Circle && curve.GetType() == GeomAbs_Circle);
@@ -265,6 +333,10 @@ inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoD
         TopoDS_Shape current;
         if (!DetachReplayGeometry(base, budget, current, refusal)) return false;
         const std::atomic_bool neverCancelled{false};
+        // C15: proofs accumulate into a private temporary and are published
+        // only on whole-operation success; every refusal path below leaves
+        // output null and proofs cleared.
+        std::vector<StepProof> pending;
         for (const Step& step : definition.steps) {
             if (step.selector) {
                 retained_face_selector::Resolution resolution;
@@ -282,16 +354,34 @@ inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoD
             std::vector<TopoDS_Edge> edges;
             if (!ResolveAnchors(current, step.anchors, definition.base.metersPerLocalUnit,
                 edges, budget, refusal)) return false;
+            // C16: the kernel build stage is debited before the build, and the
+            // relevant input pass (volume measurement plus kernel traversal)
+            // is charged up front.
+            if (!budget.beginStage(tb::Site::C16KernelBuild)
+                || tb::ChargeTraversal(current, budget, neverCancelled, tb::Site::C16KernelBuild)
+                    != tb::WalkStatus::Completed) {
+                refusal = Refusal::Budget; return false;
+            }
             GProp_GProps before; BRepGProp::VolumeProperties(current, before); TopoDS_Shape candidate;
             const double localAmount = step.amountMM * 0.001 / definition.base.metersPerLocalUnit;
             if (step.kind == Kind::Chamfer) {
                 BRepFilletAPI_MakeChamfer build(current);
-                for (const auto& edge : edges) build.Add(localAmount, edge);
+                for (const auto& edge : edges) {
+                    if (!budget.visit(1, tb::Site::C16KernelBuild)) {
+                        refusal = Refusal::Budget; return false;
+                    }
+                    build.Add(localAmount, edge);
+                }
                 build.Build(); if (!build.IsDone()) { refusal = Refusal::BuildFailed; return false; }
                 candidate = build.Shape();
             } else {
                 BRepFilletAPI_MakeFillet build(current);
-                for (const auto& edge : edges) build.Add(localAmount, edge);
+                for (const auto& edge : edges) {
+                    if (!budget.visit(1, tb::Site::C16KernelBuild)) {
+                        refusal = Refusal::Budget; return false;
+                    }
+                    build.Add(localAmount, edge);
+                }
                 build.Build(); if (!build.IsDone()) { refusal = Refusal::BuildFailed; return false; }
                 candidate = build.Shape();
             }
@@ -309,16 +399,36 @@ inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoD
             // are refused with the existing build failure.
             if (candidate.IsNull()) { refusal = Refusal::BuildFailed; return false; }
             if (candidate.ShapeType() == TopAbs_COMPOUND) {
+                // C16: compound-child inspection is charged per child.
                 TopoDS_Iterator child(candidate);
-                if (!child.More() || child.Value().ShapeType() != TopAbs_SOLID) {
+                if (!child.More()) { refusal = Refusal::BuildFailed; return false; }
+                if (!budget.visit(1, tb::Site::C16KernelBuild)) {
+                    refusal = Refusal::Budget; return false;
+                }
+                if (child.Value().ShapeType() != TopAbs_SOLID) {
                     refusal = Refusal::BuildFailed; return false;
                 }
                 const TopoDS_Shape only = child.Value(); child.Next();
-                if (child.More()) { refusal = Refusal::BuildFailed; return false; }
+                if (child.More()) {
+                    if (!budget.visit(1, tb::Site::C16KernelBuild)) {
+                        refusal = Refusal::Budget; return false;
+                    }
+                    refusal = Refusal::BuildFailed; return false;
+                }
                 candidate = only;
             }
             if (candidate.ShapeType() != TopAbs_SOLID || candidate.Orientation() != TopAbs_FORWARD) {
                 refusal = Refusal::BuildFailed; return false;
+            }
+            // C16: the produced shape is bounded and charged immediately,
+            // before its volume measurement and validity analysis; both later
+            // passes are reserved from the measured census.
+            tb::Census candidateCensus;
+            if (tb::CensusTopology(candidate, budget, neverCancelled, candidateCensus,
+                    tb::Site::C16KernelBuild, false) != tb::WalkStatus::Completed
+                || !tb::ReserveTraversal(candidateCensus, budget, tb::Site::C16KernelBuild)
+                || !tb::ReserveTraversal(candidateCensus, budget, tb::Site::C16KernelBuild)) {
+                refusal = Refusal::Budget; return false;
             }
 #if DEBUG
             std::fprintf(stderr, "B1B2_REPLAY phase=kernel-root-accepted raw=%d type=%d\n",
@@ -340,9 +450,9 @@ inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoD
             proof.inputVolumeMM3 = before.Mass() * mm3PerLocalUnitCubed;
             proof.outputVolumeMM3 = after.Mass() * mm3PerLocalUnitCubed;
             for (const auto& anchor : step.anchors) proof.consumedKeys.push_back(anchor.key);
-            proofs.push_back(std::move(proof)); current = candidate;
+            pending.push_back(std::move(proof)); current = candidate;
         }
-        output = current; refusal = Refusal::None; return true;
+        output = current; proofs = std::move(pending); refusal = Refusal::None; return true;
     } catch (...) { output.Nullify(); proofs.clear(); refusal = Refusal::BuildFailed; return false; }
 }
 
@@ -390,10 +500,13 @@ namespace detail {
 inline bool MeasureUseWitness(const retained_face_selector::BoundaryUse& use,
     double metersPerLocalUnit, CurveKind& curve, std::array<double, 3>& pointMM,
     std::array<double, 3>& tangent, std::array<double, 3>& normalA,
-    std::array<double, 3>& normalB, double& circleRadiusMM) noexcept {
+    std::array<double, 3>& normalB, double& circleRadiusMM,
+    tb::Counter* shared = nullptr, tb::Site site = tb::Site::None) noexcept {
     try {
         if (use.ownerFaces.size() != 2 || !std::isfinite(metersPerLocalUnit)
             || metersPerLocalUnit <= 0) return false;
+        // C17/C18: the edge witness measurement is one charged unit.
+        if (shared && !shared->visit(1, site)) return false;
         BRepAdaptor_Curve adaptor(use.edge);
         const auto type = adaptor.GetType();
         if (type != GeomAbs_Line && type != GeomAbs_Circle) return false;
@@ -411,6 +524,8 @@ inline bool MeasureUseWitness(const retained_face_selector::BoundaryUse& use,
             ? adaptor.Circle().Radius() * millimetersPerLocal : 0;
         std::array<std::array<double, 3>, 2> normals{};
         for (std::size_t index = 0; index < 2; ++index) {
+            // C18: each adjacent-face normal measurement is charged.
+            if (shared && !shared->visit(1, site)) return false;
             const TopoDS_Face& face = use.ownerFaces[index];
             Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
             ShapeAnalysis_Surface analysis(surface);
@@ -462,28 +577,46 @@ inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
         if (!detail::ChargeTopology(oldStage, budget)) { refusal = Refusal::Budget; return false; }
         const std::atomic_bool neverCancelled{false};
         TopoDS_Shape current = oldStage;
+        // C15-style publication: roles accumulate into a private temporary
+        // and are published only on whole-operation success.
+        SourceRebindRoles pending;
         for (const Step& step : original.steps) {
             if (step.selector) {
                 retained_face_selector::Resolution resolution;
                 const auto selectorRefusal = retained_face_selector::Resolve(current,
                     step.selector->intent, original.base.metersPerLocalUnit, budget,
                     neverCancelled, resolution);
+                retained_face_selector::Refusal receiptRefusal =
+                    retained_face_selector::Refusal::ReplayMismatch;
+                if (selectorRefusal == retained_face_selector::Refusal::None && resolution.proof) {
+                    receiptRefusal = retained_face_selector::VerifyReceipt(*resolution.proof, step,
+                        original.base.metersPerLocalUnit, budget);
+                }
+                // C17: a budget refusal propagates as Budget instead of the
+                // blanket ReplayMismatch; every other failure keeps the
+                // existing mapping.
                 if (selectorRefusal != retained_face_selector::Refusal::None || !resolution.proof
-                    || retained_face_selector::VerifyReceipt(*resolution.proof, step,
-                        original.base.metersPerLocalUnit, budget)
-                        != retained_face_selector::Refusal::None
+                    || receiptRefusal != retained_face_selector::Refusal::None
                     || resolution.proof->selectedEdgeCount() != step.anchors.size()) {
-                    refusal = Refusal::ReplayMismatch; return false;
+                    refusal = (selectorRefusal == retained_face_selector::Refusal::Budget
+                        || receiptRefusal == retained_face_selector::Refusal::Budget)
+                        ? Refusal::Budget : Refusal::ReplayMismatch;
+                    return false;
                 }
                 const auto& proof = *resolution.proof;
                 std::vector<SelectorUseRole> measured;
                 for (const auto& use : proof.boundaryUses()) {
+                    // C17: every captured witness loop entry is charged.
+                    if (!budget.visit(1, tb::Site::C17SourceRebindOld)) {
+                        refusal = Refusal::Budget; return false;
+                    }
                     SelectorUseRole role;
                     if (use.selected
                         && !detail::MeasureUseWitness(use, original.base.metersPerLocalUnit,
                             role.curve, role.pointMM, role.tangent, role.normalA, role.normalB,
-                            role.circleRadiusMM)) {
-                        refusal = Refusal::UnsupportedEdge; return false;
+                            role.circleRadiusMM, &budget, tb::Site::C17SourceRebindOld)) {
+                        refusal = budget.exhausted ? Refusal::Budget : Refusal::UnsupportedEdge;
+                        return false;
                     }
                     measured.push_back(role);
                 }
@@ -496,6 +629,11 @@ inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
                     const Anchor& anchor = step.anchors[index];
                     int found = -1;
                     for (std::size_t useIndex = 0; useIndex < measured.size(); ++useIndex) {
+                        // C17: every old-side role/witness correspondence
+                        // comparison is charged, including nonmatches.
+                        if (!budget.visit(1, tb::Site::C17SourceRebindOld)) {
+                            refusal = Refusal::Budget; return false;
+                        }
                         if (!proof.boundaryUses()[useIndex].selected
                             || matched.count(int(useIndex))) continue;
                         const SelectorUseRole& role = measured[useIndex];
@@ -518,18 +656,19 @@ inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
                     role.direction = proof.boundaryUses()[std::size_t(found)].direction;
                     ordered.push_back(role);
                 }
-                output.selectorSteps.push_back({step.feature, std::move(ordered)});
+                pending.selectorSteps.push_back({step.feature, std::move(ordered)});
             }
             Definition single = original;
             single.steps = {step};
             single.outputNode = step.node;
             TopoDS_Shape next; std::vector<StepProof> proofs;
             if (!Replay(current, single, next, proofs, budget, refusal)) {
-                output = {}; return false;
+                return false;
             }
             current = next;
         }
-        output.original = original; output.originalBytes = originalBytes;
+        pending.original = original; pending.originalBytes = originalBytes;
+        output = std::move(pending);
         refusal = Refusal::None; return true;
     } catch (...) { output = {}; refusal = Refusal::ReplayMismatch; return false; }
 }
@@ -544,8 +683,18 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
     Refusal& refusal, SourceRebindResult& output) noexcept {
     output = {};
     try {
-        if (newStage.IsNull() || !BRepCheck_Analyzer(newStage).IsValid()
-            || !detail::ChargeTopology(newStage, budget)) {
+        // C18: the new-stage census is debited before the analyzer, and the
+        // analyzer pass is reserved; a budget failure is never mapped to
+        // ReplayMismatch.
+        if (newStage.IsNull()) { refusal = Refusal::ReplayMismatch; return false; }
+        const std::atomic_bool neverCancelledRebind{false};
+        tb::Census newStageCensus;
+        if (tb::CensusTopology(newStage, budget, neverCancelledRebind, newStageCensus,
+                tb::Site::C18SourceRebindNew, true) != tb::WalkStatus::Completed
+            || !tb::ReserveTraversal(newStageCensus, budget, tb::Site::C18SourceRebindNew)) {
+            refusal = Refusal::Budget; return false;
+        }
+        if (!BRepCheck_Analyzer(newStage).IsValid()) {
             refusal = Refusal::ReplayMismatch; return false;
         }
         std::vector<double> values; std::vector<std::uint8_t> sourceBytes;
@@ -590,6 +739,9 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
         const std::atomic_bool neverCancelled{false};
         TopoDS_Shape current = newStage;
         std::size_t selectorIndex = 0;
+        // Publish-on-success: suffix proofs accumulate privately and are
+        // published only when the whole rebind succeeds.
+        std::vector<StepProof> pendingProofs;
         for (std::size_t index = 0; index < rebound.steps.size(); ++index) {
             Step step = rebound.steps[index];
             if (step.selector) {
@@ -613,12 +765,17 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
                 }
                 std::vector<SelectorUseRole> measured;
                 for (const auto& use : proof.boundaryUses()) {
+                    // C18: every new-side witness loop entry is charged.
+                    if (!budget.visit(1, tb::Site::C18SourceRebindNew)) {
+                        refusal = Refusal::Budget; return false;
+                    }
                     SelectorUseRole role;
                     if (use.selected
                         && !detail::MeasureUseWitness(use, rebound.base.metersPerLocalUnit,
                             role.curve, role.pointMM, role.tangent, role.normalA, role.normalB,
-                            role.circleRadiusMM)) {
-                        refusal = Refusal::UnsupportedEdge; return false;
+                            role.circleRadiusMM, &budget, tb::Site::C18SourceRebindNew)) {
+                        refusal = budget.exhausted ? Refusal::Budget : Refusal::UnsupportedEdge;
+                        return false;
                     }
                     measured.push_back(role);
                 }
@@ -637,6 +794,11 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
                     }
                     int found = -1;
                     for (std::size_t useIndex = 0; useIndex < measured.size(); ++useIndex) {
+                        // C18: every new-side role correspondence comparison
+                        // is charged, including nonmatches.
+                        if (!budget.visit(1, tb::Site::C18SourceRebindNew)) {
+                            refusal = Refusal::Budget; return false;
+                        }
                         if (!proof.boundaryUses()[useIndex].selected
                             || consumed.count(int(useIndex))) continue;
                         const SelectorUseRole& candidate = measured[useIndex];
@@ -688,21 +850,22 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
             single.outputNode = step.node;
             TopoDS_Shape next; std::vector<StepProof> proofs;
             if (!Replay(current, single, next, proofs, budget, refusal)) {
-                output = {}; return false;
+                return false;
             }
-            if (proofs.size() != 1) { output = {}; refusal = Refusal::ReplayMismatch; return false; }
+            if (proofs.size() != 1) { refusal = Refusal::ReplayMismatch; return false; }
             rebound.steps[index] = step;
-            output.proofs.push_back(proofs.front());
+            pendingProofs.push_back(proofs.front());
             current = next;
         }
         if (selectorIndex != roles.selectorSteps.size()) {
-            output = {}; refusal = Refusal::ReplayMismatch; return false;
+            refusal = Refusal::ReplayMismatch; return false;
         }
         rebound.outputNode = rebound.steps.empty()
             ? rebound.base.sourceNode : rebound.steps.back().node;
         output.definition = rebound;
         if (!Encode(output.definition, output.bytes, refusal)) { output = {}; return false; }
         output.treated = current;
+        output.proofs = std::move(pendingProofs);
         refusal = Refusal::None; return true;
     } catch (...) { output = {}; refusal = Refusal::BuildFailed; return false; }
 }
