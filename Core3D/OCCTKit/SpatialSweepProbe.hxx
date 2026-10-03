@@ -350,6 +350,86 @@ inline std::map<std::string, bool> RetainedReplayChecks() {
     return checks;
 }
 
+// Field-by-field certificate equality for the proof-reuse equivalence
+// evidence: every interval endpoint, every flag, every work counter and the
+// provenance tag are compared explicitly rather than struct padding.
+inline bool SameCertificate(const CurveCertificate& a, const CurveCertificate& b) {
+    auto sameInterval = [](const Interval& x, const Interval& y) {
+        return x.lower == y.lower && x.upper == y.upper;
+    };
+    return sameInterval(a.lengthMM, b.lengthMM)
+        && sameInterval(a.speedPerNormalizedParameter, b.speedPerNormalizedParameter)
+        && sameInterval(a.curvaturePerMM, b.curvaturePerMM)
+        && sameInterval(a.maximumAbsCoordinateMM, b.maximumAbsCoordinateMM)
+        && sameInterval(a.nonlocalCentrelineDistanceMM, b.nonlocalCentrelineDistanceMM)
+        && sameInterval(a.holonomyRadians, b.holonomyRadians)
+        && a.homogeneousBernsteinBounds == b.homogeneousBernsteinBounds
+        && a.everyJoinExactG1G2 == b.everyJoinExactG1G2
+        && a.localBandInjective == b.localBandInjective
+        && a.fullPairDomainVisited == b.fullPairDomainVisited
+        && a.endpointsExactlyEqual == b.endpointsExactlyEqual
+        && a.seamExactG1G2 == b.seamExactG1G2
+        && a.work.proofLeaves == b.work.proofLeaves
+        && a.work.maximumDepth == b.work.maximumDepth
+        && a.work.curvePairCells == b.work.curvePairCells
+        && a.work.surfaceCells == b.work.surfaceCells
+        && a.work.exactArithmeticBits == b.work.exactArithmeticBits
+        && a.provenance == b.provenance;
+}
+
+// Equivalence/cancellation evidence for the bounded open-sweep final-proof
+// reuse in BuildGeomFillSweep. For the exact open C2 candidate (first human
+// edit state) in both persisted unit systems, the reused certificate must
+// equal a fresh Produce field by field and the built sweep's retained curve
+// proof must equal that fresh certificate; a raised cancellation flag must
+// still refuse fail-closed. The closed-sweep control proves the computed
+// holonomy still reaches a fresh final proof: its certificate carries the
+// outward one-ulp interval around the measured holonomy, never the
+// preliminary {0,0}.
+inline std::map<std::string, bool> ProofReuseChecks() {
+    std::map<std::string, bool> checks;
+    std::atomic_bool cancelled{false};
+    auto openCase = [&](double metersPerUnit, const char* unit) {
+        auto curve = SpatialPolynomialCurve();
+        const double nativePerMM = 0.001 / metersPerUnit;
+        for (auto& pole : curve.controlPoints)
+            for (double& scalar : pole.local) scalar *= nativePerMM;
+        curve.controlPoints[1].local[2] += 6 * nativePerMM;
+        auto definition = Sweep();
+        definition.dimensionMetersPerUnit = metersPerUnit;
+        definition.radius = {RadiusLawKind::LinearArcLength, 2 * nativePerMM, 3 * nativePerMM};
+        definition.orientation.phaseRadians = 7 * Pi / 180;
+        const double mmPerUnit = metersPerUnit * 1000, R = 3 + 4 * PositionalEpsilonMM;
+        const auto reused = proof_producer::Produce(curve, mmPerUnit, R, false, {0, 0}, &cancelled);
+        const auto fresh = proof_producer::Produce(curve, mmPerUnit, R, false, {0, 0}, &cancelled);
+        checks[std::string("proof-reuse-open-") + unit + "-certificate-identical"] =
+            reused.produced() && fresh.produced()
+            && SameCertificate(reused.certificate, fresh.certificate);
+        const auto built = BuildGeomFillSweep(curve, definition, cancelled);
+        checks[std::string("proof-reuse-open-") + unit + "-build-matches-fresh"] =
+            built.built() && SameCertificate(built.curveProof, fresh.certificate);
+        std::atomic_bool stop{true};
+        const auto refused = proof_producer::Produce(curve, mmPerUnit, R, false, {0, 0}, &stop);
+        checks[std::string("proof-reuse-open-") + unit + "-cancel-refuses"] =
+            refused.status == proof_producer::Status::Cancelled && !refused.produced();
+    };
+    openCase(0.001, "millimetres");
+    openCase(1.0, "metres");
+    auto closedSweep = Sweep();
+    closedSweep.radius = {RadiusLawKind::Constant, 5, 5};
+    closedSweep.closure = ClosureKind::ClosedNoCaps;
+    closedSweep.twist = {TwistLawKind::CloseFrame, 0, 0};
+    closedSweep.witness.present = true;
+    closedSweep.witness.unwrappedHolonomyReference = 0;
+    const auto closedBuilt = BuildGeomFillSweep(CircleCurve(), closedSweep, cancelled);
+    checks["proof-reuse-closed-final-proof-fresh"] = closedBuilt.built()
+        && closedBuilt.curveProof.holonomyRadians.lower
+            < closedBuilt.curveProof.holonomyRadians.upper
+        && !(closedBuilt.curveProof.holonomyRadians.lower == 0
+            && closedBuilt.curveProof.holonomyRadians.upper == 0);
+    return checks;
+}
+
 inline std::map<std::string, bool> K2Probe() {
     std::map<std::string, bool> checks;
     Definition sweep = Sweep();
@@ -521,6 +601,8 @@ inline std::map<std::string, bool> K2Probe() {
 
     const auto replayChecks = RetainedReplayChecks();
     checks.insert(replayChecks.begin(), replayChecks.end());
+    const auto proofReuse = ProofReuseChecks();
+    checks.insert(proofReuse.begin(), proofReuse.end());
     checks["g0-pinned-occt-platform-fp-profile"] =
         composite_recipe::spatial_g0::RuntimeProfileIsPinned(
             composite_recipe::spatial_g0::PinnedProfile);

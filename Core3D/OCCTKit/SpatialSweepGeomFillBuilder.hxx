@@ -318,7 +318,26 @@ inline GeomFillBuildResult BuildGeomFillSweep(const bounded_curve::Definition& c
 #endif
         if(!bishopOnly){output.status=GeomFillBuildStatus::TransportRefused;return output;}
         Interval holonomy{0,0};if(definition.closure==ClosureKind::ClosedNoCaps){double h=0;if(!Holonomy(bishopOnly->nodes.front().bishop,bishopOnly->nodes.back().bishop,h)){output.status=GeomFillBuildStatus::TransportRefused;return output;}holonomy={std::nextafter(h,-std::numeric_limits<double>::infinity()),std::nextafter(h,std::numeric_limits<double>::infinity())};}
-        auto proof=proof_producer::Produce(curve,mmPerUnit,R,definition.closure==ClosureKind::ClosedNoCaps,holonomy,&cancelled);
+        proof_producer::Result proof;
+        if(definition.closure==ClosureKind::OpenFlatCaps){
+            // For OpenFlatCaps the final proof's inputs are exactly the
+            // preliminary proof's: the same immutable retained curve,
+            // mmPerUnit, radius envelope, closed=false and holonomy {0,0}, so
+            // the produced certificate is reused instead of running the
+            // identical exact-arithmetic proof loop a second time. The closed
+            // holonomy path above keeps its fresh final proof. Cancellation
+            // is re-checked at this boundary so bypassing the second proof
+            // loop cannot bypass Stop, and refused proof/transport remains
+            // fail-closed. The reuse is local to this call: no global cache,
+            // no approximate keys, no rounding, no changed limits.
+            if(cancelled.load()){output.status=GeomFillBuildStatus::Cancelled;return output;}
+            proof=preliminary;
+#if DEBUG
+            SpatialSweepDiagnostic(diagnostic, "geomfill.final-proof.reused-open");
+#endif
+        }else{
+            proof=proof_producer::Produce(curve,mmPerUnit,R,definition.closure==ClosureKind::ClosedNoCaps,holonomy,&cancelled);
+        }
 #if DEBUG
         SpatialSweepDiagnostic(diagnostic, proof.produced() ? "geomfill.final-proof.ok" : "geomfill.final-proof.refused");
 #endif
