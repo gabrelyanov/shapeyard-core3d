@@ -57,6 +57,17 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if DEBUG
+// D333/D326 probe (defined in OcctDocument.mm): real measurements of
+// relocation-table payloads still bound when a bounded retrieval driver dies.
+void Core3DDebugResetBoundedRetrievalDriverTeardownStats();
+void Core3DDebugBoundedRetrievalDriverTeardownStats(
+    unsigned long long& teardowns,
+    unsigned long long& retainedEntries,
+    unsigned long long& retainedNamedShapes);
+void Core3DDebugSetRelocationReadThrowAfterNamedShapeBinding(int armed);
+#endif
+
 using namespace core3d;
 
 namespace {
@@ -5988,6 +5999,31 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
         @"nativeReady": @(_viewer != nullptr && _viewer->canBeginCommittedEdit()),
         @"privatePath": file.URL.path ?: @"",
         @"privateFileExists": @(file != nil && [NSFileManager.defaultManager fileExistsAtPath:file.URL.path]) };
+}
+// D333/D326: exposes the real teardown measurement from OcctDocument.mm. A
+// leftover relocation-table payload at driver death is the state whose
+// destructor terminates the Xcode Cloud test host.
+- (void)debugResetBoundedRetrievalDriverTeardownStats {
+    if ([NSThread isMainThread])
+        Core3DDebugResetBoundedRetrievalDriverTeardownStats();
+}
+- (NSDictionary<NSString *, id> *)debugBoundedRetrievalDriverTeardownStats {
+    if (![NSThread isMainThread]) return @{};
+    unsigned long long teardowns = 0, retainedEntries = 0, retainedNamedShapes = 0;
+    Core3DDebugBoundedRetrievalDriverTeardownStats(
+        teardowns, retainedEntries, retainedNamedShapes);
+    return @{ @"teardowns": @(teardowns),
+        @"retainedEntries": @(retainedEntries),
+        @"retainedNamedShapes": @(retainedNamedShapes) };
+}
+// Arms the D333 fault injection: the bounded retrieval driver throws out of a
+// subtree read once its relocation table really holds a TNaming_NamedShape,
+// simulating the cloud crash precondition (an OCCT exception escaping a failed
+// retrieval after bindings, which skips the base reader's table Clear).
+- (void)debugSetRelocationReadThrowAfterNamedShapeBinding:(NSNumber *)enabled {
+    if ([NSThread isMainThread])
+        Core3DDebugSetRelocationReadThrowAfterNamedShapeBinding(
+            enabled.boolValue ? 1 : 0);
 }
 #endif
 

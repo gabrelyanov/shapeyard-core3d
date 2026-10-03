@@ -31,8 +31,21 @@ enum class ShapeSelectionMode;
 enum class OrdinaryEditKind : std::uint8_t { Transform, Add, Remove, Appearance, Name, Visibility, Grouping };
 enum class OrdinaryEditState : std::uint8_t { Idle, OpenOwned, OutcomeUnknown, RepairPending, Publishing };
 enum class OrdinaryEditResult : std::uint8_t {
-    NoChange, Committed, RetryableFailure, BudgetRefused, OutcomeUnknown, Busy, Invalid
+    NoChange = 0,
+    Committed = 1,
+    RetryableFailure = 2,
+    BudgetRefused = 6,
+    OutcomeUnknown = 3,
+    Busy = 4,
+    Invalid = 5
 };
+static_assert(static_cast<std::uint8_t>(OrdinaryEditResult::NoChange) == 0);
+static_assert(static_cast<std::uint8_t>(OrdinaryEditResult::Committed) == 1);
+static_assert(static_cast<std::uint8_t>(OrdinaryEditResult::RetryableFailure) == 2);
+static_assert(static_cast<std::uint8_t>(OrdinaryEditResult::BudgetRefused) == 6);
+static_assert(static_cast<std::uint8_t>(OrdinaryEditResult::OutcomeUnknown) == 3);
+static_assert(static_cast<std::uint8_t>(OrdinaryEditResult::Busy) == 4);
+static_assert(static_cast<std::uint8_t>(OrdinaryEditResult::Invalid) == 5);
 enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild, LoftStationRebuild, CylindricalCut, CylindricalCutSourceRebuild, CylindricalCutProgramSourceRebuild, MeshRegionExtrude, MeshRegionInset, CylindricalCutRing, WedgeCut, RetainedFillet, RetainedEdgeTreatment };
 inline bool IsCylindricalCutOperation(OrdinaryTransformOperation op) noexcept {
     return op==OrdinaryTransformOperation::CylindricalCut||op==OrdinaryTransformOperation::CylindricalCutRing||op==OrdinaryTransformOperation::WedgeCut||op==OrdinaryTransformOperation::RetainedFillet;

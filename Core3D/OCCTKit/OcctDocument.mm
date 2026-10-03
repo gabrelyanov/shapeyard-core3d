@@ -2026,6 +2026,80 @@ const Standard_GUID& Core3DRadialArrayCommandOwnerAttributeID()
     return anId;
 }
 
+#if DEBUG
+// D333/D326 measurement surface for the import-validation teardown crash
+// family (Xcode Cloud #8208/#8211/#8215/#8218). The bounded retrieval
+// driver's destructor records how many relocation-table payloads, and how
+// many of them TNaming_NamedShape instances, were still bound when the driver
+// died. The DEBUG controller surface reads the counters back; they report
+// real teardown state only and never alter it.
+namespace Core3DBoundedRetrievalDriverTeardownProbeDetail {
+struct Stats {
+    // Trivially destructible members only: this static is never registered
+    // with __cxa_atexit, so it cannot join the static-destruction-order
+    // family observed at process exit.
+    std::atomic<unsigned long long> teardowns{0};
+    std::atomic<unsigned long long> retainedEntries{0};
+    std::atomic<unsigned long long> retainedNamedShapes{0};
+};
+Stats& SharedStats()
+{
+    static Stats stats;
+    return stats;
+}
+std::atomic<int>& ThrowAfterNamedShapeBindingFlag()
+{
+    static std::atomic<int> flag{0};
+    return flag;
+}
+}
+
+void Core3DDebugRecordBoundedRetrievalDriverTeardown(
+    const unsigned long long retainedEntries,
+    const unsigned long long retainedNamedShapes)
+{
+    auto& stats = Core3DBoundedRetrievalDriverTeardownProbeDetail::SharedStats();
+    stats.teardowns.fetch_add(1, std::memory_order_relaxed);
+    stats.retainedEntries.fetch_add(retainedEntries, std::memory_order_relaxed);
+    stats.retainedNamedShapes.fetch_add(
+        retainedNamedShapes, std::memory_order_relaxed);
+}
+
+void Core3DDebugResetBoundedRetrievalDriverTeardownStats()
+{
+    auto& stats = Core3DBoundedRetrievalDriverTeardownProbeDetail::SharedStats();
+    stats.teardowns.store(0, std::memory_order_relaxed);
+    stats.retainedEntries.store(0, std::memory_order_relaxed);
+    stats.retainedNamedShapes.store(0, std::memory_order_relaxed);
+}
+
+void Core3DDebugBoundedRetrievalDriverTeardownStats(
+    unsigned long long& teardowns,
+    unsigned long long& retainedEntries,
+    unsigned long long& retainedNamedShapes)
+{
+    const auto& stats =
+        Core3DBoundedRetrievalDriverTeardownProbeDetail::SharedStats();
+    teardowns = stats.teardowns.load(std::memory_order_relaxed);
+    retainedEntries = stats.retainedEntries.load(std::memory_order_relaxed);
+    retainedNamedShapes = stats.retainedNamedShapes.load(
+        std::memory_order_relaxed);
+}
+
+// Arms a one-shot-style read fault used only by
+// testQueuedAssetImportValidateCbfTeardownReleasesRelocationTableWithoutThrow:
+// the bounded driver throws out of a subtree read once its relocation table
+// really holds a TNaming_NamedShape, simulating an OCCT exception escaping a
+// failed retrieval after bindings — the cloud crash precondition. It changes
+// no result and returns no fixed value; the real read path runs unchanged
+// until the throw.
+void Core3DDebugSetRelocationReadThrowAfterNamedShapeBinding(const int armed)
+{
+    Core3DBoundedRetrievalDriverTeardownProbeDetail::ThrowAfterNamedShapeBindingFlag()
+        .store(armed, std::memory_order_relaxed);
+}
+#endif
+
 namespace {
 
 Handle(Graphic3d_AspectFillArea3d) ClearDrawerTextureMapping(
@@ -4045,6 +4119,45 @@ private:
     std::shared_ptr<Core3DLayerGraphReadBudget> myBudget;
 };
 
+// A retrieval relocation table whose read ended by exception holds payloads
+// whose TDF_Data was already destroyed during the unwind. Those payload
+// destructors must NEVER run: ~TNaming_NamedShape reads its dead label
+// framework and raises Standard_NullObject, and because a destructor is
+// implicitly noexcept the process terminates before any surrounding catch can
+// see the exception (Xcode Cloud #8208/#8211/#8215/#8218, D326/D333; bench
+// terminate trace in this package's BENCH.md). The only noexcept-safe release
+// is to move the payloads into a never-destroyed container — a bounded,
+// deliberate leak that happens only on a failed read, where the alternative
+// is a crash.
+std::vector<Handle(Standard_Transient)>& Core3DLeakedRelocationPayloads()
+{
+    // Never destroyed: the payloads may reference dead frameworks, so their
+    // destructors must not run even at process exit.
+    static auto* leaked = new std::vector<Handle(Standard_Transient)>();
+    return *leaked;
+}
+
+#if DEBUG
+// Throws only when the D333 debug fault is armed AND the table really holds a
+// TNaming_NamedShape payload. Runs the real bindings; nothing is fabricated.
+void Core3DDebugThrowAfterNamedShapeBindingIfArmed(
+    const BinObjMgt_RRelocationTable& theTable)
+{
+    if (Core3DBoundedRetrievalDriverTeardownProbeDetail::
+            ThrowAfterNamedShapeBindingFlag().load(std::memory_order_relaxed)
+        == 0) {
+        return;
+    }
+    for (BinObjMgt_RRelocationTable::Iterator anEntry(theTable);
+         anEntry.More(); anEntry.Next()) {
+        if (!Handle(TNaming_NamedShape)::DownCast(anEntry.Value()).IsNull()) {
+            throw Standard_Failure(
+                "D333 debug injection: read failure after named-shape binding");
+        }
+    }
+}
+#endif
+
 class Core3DBoundedBinXCAFRetrievalDriver final
     : public BinDrivers_DocumentRetrievalDriver
 {
@@ -4076,6 +4189,34 @@ public:
     }
 #endif
 
+    // A retrieval relocation table is single-read state: every payload it
+    // binds belongs to the document that Read just produced, or is an orphan
+    // of it. The base reader clears it on every normal exit, so a non-empty
+    // table here means the last Read ended by exception and the payloads'
+    // framework is dead: their destructors must never run (see
+    // ReleaseRelocationTransients). The DEBUG probe above the drain measures
+    // the real leftover state for
+    // testQueuedAssetImportValidateCbfTeardownReleasesRelocationTableWithoutThrow.
+    ~Core3DBoundedBinXCAFRetrievalDriver() override
+    {
+#if DEBUG
+        unsigned long long retained = 0, retainedNamedShapes = 0;
+        try {
+            for (BinObjMgt_RRelocationTable::Iterator anEntry(myRelocTable);
+                 anEntry.More(); anEntry.Next()) {
+                const Handle(Standard_Transient)& value = anEntry.Value();
+                if (value.IsNull()) continue;
+                ++retained;
+                if (!Handle(TNaming_NamedShape)::DownCast(value).IsNull())
+                    ++retainedNamedShapes;
+            }
+        } catch (...) {}
+        Core3DDebugRecordBoundedRetrievalDriverTeardown(
+            retained, retainedNamedShapes);
+#endif
+        ReleaseRelocationTransients();
+    }
+
     void Read(
         Standard_IStream& theStream,
         const Handle(Storage_Data)& theStorageData,
@@ -4086,6 +4227,16 @@ public:
         const Message_ProgressRange& theProgress =
             Message_ProgressRange()) override
     {
+        // Empty the relocation table on every exit from Read: success,
+        // rejection, or exception. On a normal exit the base reader already
+        // cleared it; on an exception exit its payloads belong to a TDF_Data
+        // that died during the unwind, so they are moved aside without
+        // running their destructors (see ReleaseRelocationTransients).
+        struct RelocationTableDrain {
+            Core3DBoundedBinXCAFRetrievalDriver* owner;
+            ~RelocationTableDrain() { owner->ReleaseRelocationTransients(); }
+        } relocationTableDrain{this};
+        (void)relocationTableDrain;
 #if DEBUG
         ++myRetainedReadCount;
 #endif
@@ -4373,11 +4524,19 @@ public:
     Standard_Integer ReadSubTree(Standard_IStream& stream, const TDF_Label& label,
         const Handle(PCDM_ReaderFilter)& filter, const Standard_Boolean& quick,
         const Message_ProgressRange& range) override {
-        if (!myReceiptTraversal)
-            return BinDrivers_DocumentRetrievalDriver::ReadSubTree(stream,label,filter,quick,range);
-        const auto result = myReceiptTraversal->Read(stream,label,myDrivers,myRelocTable,filter,quick,range);
-        if (result < 0) myReaderStatus = myReceiptTraversal->cancelled()
-            ? PCDM_RS_UserBreak : PCDM_RS_UnrecognizedFileFormat;
+        Standard_Integer result;
+        if (!myReceiptTraversal) {
+            result = BinDrivers_DocumentRetrievalDriver::ReadSubTree(stream,label,filter,quick,range);
+        } else {
+            result = myReceiptTraversal->Read(stream,label,myDrivers,myRelocTable,filter,quick,range);
+            if (result < 0) myReaderStatus = myReceiptTraversal->cancelled()
+                ? PCDM_RS_UserBreak : PCDM_RS_UnrecognizedFileFormat;
+        }
+#if DEBUG
+        // D333 fault injection point: only fires when the test armed it and
+        // this read really bound a named shape into the relocation table.
+        Core3DDebugThrowAfterNamedShapeBindingIfArmed(myRelocTable);
+#endif
         return result;
     }
 
@@ -4389,6 +4548,45 @@ public:
     }
 
 private:
+    // Empty the retrieval relocation table without running any payload
+    // destructor. This drain only ever sees a non-empty table when a Read
+    // exited by exception (the base reader's own Clear runs on every normal
+    // exit), and then the payloads' TDF_Data is already dead — so no payload
+    // destructor may run at all: ~TNaming_NamedShape on a dead label
+    // framework raises Standard_NullObject, and a destructor's implicit
+    // noexcept turns that into std::terminate before any catch can observe it
+    // (bench terminate trace in this package's BENCH.md). Moving the handles
+    // into the never-destroyed leak container is the only noexcept release.
+    // Called on every exit from Read and again from the destructor as the
+    // last-resort guard, so the table is always empty before the validation
+    // application handle dies (Xcode Cloud #8208/#8211/#8215/#8218,
+    // D326/D333).
+    void ReleaseRelocationTransients() noexcept
+    {
+        if (myRelocTable.IsEmpty()) return;
+        bool allMoved = false;
+        try {
+            auto& leaked = Core3DLeakedRelocationPayloads();
+            leaked.reserve(leaked.size()
+                + static_cast<std::size_t>(myRelocTable.Extent()));
+            for (BinObjMgt_RRelocationTable::Iterator anEntry(myRelocTable);
+                 anEntry.More(); anEntry.Next()) {
+                Handle(Standard_Transient)& value = anEntry.ChangeValue();
+                if (!value.IsNull()) {
+                    // After the reserve above this cannot reallocate, and a
+                    // handle move never throws, so this line cannot throw.
+                    leaked.push_back(std::move(value));
+                }
+            }
+            allMoved = true;
+        } catch (...) {}
+        // Clear only when every payload was moved out; destroying a bound
+        // payload here is exactly what must never happen.
+        if (allMoved) {
+            try { myRelocTable.Clear(); } catch (...) {}
+        }
+    }
+
     void ResetAggregateReadBudgets() noexcept
     {
         if (myFrameBudget) { myFrameBudget->bytes = 0; myFrameBudget->rejected = false; }
