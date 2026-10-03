@@ -262,6 +262,41 @@ static bool Core3DValidateRetainedEdgeTreatmentR2Carrier(
     }catch(...){refusal=et::Refusal::MalformedCarrier;return false;}
 }
 
+// Cut-capture census classification for the split-carrier layout: an owner
+// subshape child that matches no family source label and no retained record
+// is retained metadata (never styling) only when it is exactly this owner's
+// validated R2 treatment carrier. The exclusive typed reader proves the sole
+// R2 arm, canonical bytes, the exact owner/document binding and the
+// current-shape naming binding; the r6 structural validator proves the
+// minimum record tag, the exclusive SYRS source co-carrier, the committed
+// source digest and the closed attribute/descendant neighbourhood. The final
+// digest comparison ties that proven source to the exact retained record the
+// caller already validated. Every other child stays a foreign subshape and
+// keeps the existing refusal.
+static bool Core3DIsValidatedRetainedR2CarrierChild(
+    const Handle(TDocStd_Document)& document,
+    const TDF_Label& owner,
+    const TDF_Label& child,
+    const core3d::retained_solid::Record& retained) noexcept {
+    namespace et=core3d::retained_edge_treatment;namespace r2=core3d::retained_edge_treatment::r2;
+    try{
+        if(document.IsNull()||owner.IsNull()||child.IsNull()
+            ||retained.label.IsNull()||!retained.value)return false;
+        et::Refusal refusal=et::Refusal::MalformedCarrier;
+        std::optional<et::RecordR2> record;
+        if(!et::ReadR2(document,owner,record,refusal)||!record
+            ||!record->label.IsEqual(child))return false;
+        Handle(et::Attribute) treatment;
+        if(!child.FindAttribute(et::AttributeID(),treatment)||treatment.IsNull())return false;
+        if(!Core3DValidateRetainedEdgeTreatmentR2Carrier(child,treatment,refusal))return false;
+        const auto* base=std::get_if<r2::BooleanBaseBinding>(&record->value->definition.base);
+        if(!base||base->format!=r2::PrefixFormat::SYRS)return false;
+        core3d::retained_recipe::Digest digest{};
+        return CC_SHA256(retained.value->bytes.data(),CC_LONG(retained.value->bytes.size()),digest.data())
+            &&digest==base->sourceRecipeDigest;
+    }catch(...){return false;}
+}
+
 Standard_Boolean OcctDocument::ValidateRetainedEdgeTreatmentsR2(
     core3d::retained_edge_treatment::Refusal& refusal) const noexcept {
     namespace et=core3d::retained_edge_treatment;namespace r2=core3d::retained_edge_treatment::r2;
@@ -12221,7 +12256,8 @@ Standard_Boolean OcctDocument::CaptureCylindricalCutProgramSource(
             ||result.base.IsNull()||result.base.ShapeType()!=TopAbs_SOLID)CORE3D_CUT_REFUSE("document-program-capture.recipe-or-base", Standard_False);
         TDF_LabelSequence children;XCAFDoc_ShapeTool::GetSubShapes(label,children);
         if(children.Length()>core3d::profile::MaximumLabels)CORE3D_CUT_REFUSE("document-program-capture.subshape-budget", Standard_False);
-        for(int i=1;i<=children.Length();++i)if(!children.Value(i).IsEqual(state.retained.label))CORE3D_CUT_REFUSE("document-program-capture.foreign-subshape", Standard_False);
+        for(int i=1;i<=children.Length();++i)if(!children.Value(i).IsEqual(state.retained.label)
+            &&!Core3DIsValidatedRetainedR2CarrierChild(myOcafDoc,label,children.Value(i),state.retained))CORE3D_CUT_REFUSE("document-program-capture.foreign-subshape", Standard_False);
         output=std::move(result);return Standard_True;
     }catch(...){output={};CORE3D_CUT_REFUSE("document-program-capture.exception", Standard_False);}
 }
@@ -14388,7 +14424,8 @@ Standard_Boolean OcctDocument::CaptureScalarAppearanceForSavedCut(
                 && (enclosure.label.IsNull() || !child.IsEqual(enclosure.label))
                 && (sweep.label.IsNull() || !child.IsEqual(sweep.label))
                 && (loft.label.IsNull() || !child.IsEqual(loft.label))
-                && (retained.label.IsNull() || !child.IsEqual(retained.label))) return Standard_False;
+                && (retained.label.IsNull() || !child.IsEqual(retained.label))
+                && !Core3DIsValidatedRetainedR2CarrierChild(myOcafDoc,label,child,retained)) return Standard_False;
         }
         for (auto color:{XCAFDoc_ColorGen,XCAFDoc_ColorSurf,XCAFDoc_ColorCurv})
             if (label.IsAttribute(XCAFDoc::ColorRefGUID(color))) return Standard_False;
