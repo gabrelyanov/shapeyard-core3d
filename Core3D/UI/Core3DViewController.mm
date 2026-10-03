@@ -8968,6 +8968,18 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
         });
 }
 
++ (NSData *)debugB04EmptyDocumentFixtureDataWithMetersPerUnit:(double)metersPerUnit {
+    if (![NSThread isMainThread]
+        || (metersPerUnit != 0.001 && metersPerUnit != 1.0)) return nil;
+    // Provider-free B04 seed: an empty BinXCAF document carrying only explicit
+    // length-unit metadata. No AddShape, no retained feature, zero history.
+    return Core3DCreateDebugBinXCAFFixture(
+        metersPerUnit == 0.001 ? @"b04-empty-document-v1-mm" : @"b04-empty-document-v1-m",
+        [metersPerUnit](const Handle(TDocStd_Document)& document) {
+            XCAFDoc_DocumentTool::SetLengthUnit(document, metersPerUnit);
+        });
+}
+
 - (NSDictionary<NSString *, id> *)debugSpatialSweepDurabilityEvidence:(NSString *)entityIdentifier {
     if (![NSThread isMainThread] || !GLController || !GLController.viewer
         || ![entityIdentifier isKindOfClass:NSString.class]

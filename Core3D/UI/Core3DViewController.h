@@ -1377,6 +1377,11 @@ __attribute__((objc_subclassing_restricted))
 + (NSData *_Nullable)debugR179ObjectsFixtureDataWithKind:(NSString *)kind
                                            metersPerUnit:(double)metersPerUnit
     NS_SWIFT_NAME(debugR179ObjectsFixtureData(kind:metersPerUnit:));
+//! Provider-free B04 fixture seed: a saved BinXCAF document holding no shape,
+//! recipe or history, only the explicit length unit (0.001 or 1.0 metres per
+//! unit). The native source document is closed before these bytes are returned.
++ (NSData *_Nullable)debugB04EmptyDocumentFixtureDataWithMetersPerUnit:(double)metersPerUnit
+    NS_SWIFT_NAME(debugB04EmptyDocumentFixtureData(metersPerUnit:));
 //! Read-only validation of the currently open document against the R179 fixture
 //! contract for kind. Returns nil when no document is open; the dictionary always
 //! carries schema/kind/stage, and valid=YES only when every native check passes.
