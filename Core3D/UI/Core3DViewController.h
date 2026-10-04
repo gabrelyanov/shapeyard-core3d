@@ -527,6 +527,20 @@ __attribute__((objc_subclassing_restricted))
 //! Main-thread only; nil never changes model/history.
 - (Core3DAssetAtlasOpening *_Nullable)openAssetAtlasEditor
     NS_SWIFT_NAME(openAssetAtlasEditor());
+//! Capture one fail-closed E3 face-image opening from the exact current
+//! selection: a face element captures its owner entity and the picked planar
+//! face's current B2 receipt; a whole-object element focuses the entity's
+//! unique committed binding. Main-thread only; nil never changes
+//! model/history.
+- (Core3DFaceImageOpening *_Nullable)openFaceImageEditor
+    NS_SWIFT_NAME(openFaceImageEditor());
+//! Capture one fail-closed E3 face-image opening for a host-resolved entity
+//! identifier only; the target is host-resolved, never response-supplied, and
+//! a currently picked face of the same entity (if any) is captured with it.
+//! Same owner/lease boundary as the selection opening. Main-thread only; nil
+//! never changes model/history/selection.
+- (Core3DFaceImageOpening *_Nullable)openFaceImageOpeningForEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(openFaceImageOpening(entityIdentifier:));
 #if DEBUG
 //! One-shot main delivery gate for real worker lifecycle qualification.
 - (void)debugSetSavedCutSourceDeliveryGate:(void (^_Nullable)(void (^resume)(void)))gate
@@ -552,6 +566,11 @@ __attribute__((objc_subclassing_restricted))
 //! open document.
 + (NSData *_Nullable)debugAssetAtlasFixtureAssetData:(double)metersPerUnit
     NS_SWIFT_NAME(debugAssetAtlasFixtureAssetData(metersPerUnit:));
+//! UI-test fixture: asset data for one retained box with one adopted E3 image
+//! resource and one committed face-image binding in the requested unit
+//! system. nil on any failure; never mutates an open document.
++ (NSData *_Nullable)debugFaceImageFixtureAssetData:(double)metersPerUnit
+    NS_SWIFT_NAME(debugFaceImageFixtureAssetData(metersPerUnit:));
 #endif
 - (nullable Core3DStoredRectangularLoftSnapshot *)storedRectangularLoftWithEntityIdentifier:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(storedRectangularLoft(entityIdentifier:expected:));

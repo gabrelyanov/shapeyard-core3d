@@ -1443,4 +1443,54 @@ __attribute__((objc_subclassing_restricted))
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+typedef NS_ENUM(NSInteger, Core3DFaceImagePreparationResult) {
+    Core3DFaceImagePreparationResultPrepared = 0,
+    Core3DFaceImagePreparationResultUnchanged,
+    Core3DFaceImagePreparationResultStaleSource,
+    Core3DFaceImagePreparationResultStaleFace,
+    Core3DFaceImagePreparationResultAmbiguousFaceRemap,
+    Core3DFaceImagePreparationResultUnsupportedSurface,
+    Core3DFaceImagePreparationResultMissingResource,
+    Core3DFaceImagePreparationResultStaleResource,
+    Core3DFaceImagePreparationResultForeignResource,
+    Core3DFaceImagePreparationResultUnsupportedDownstream,
+    Core3DFaceImagePreparationResultRejected,
+};
+
+typedef NS_ENUM(NSInteger, Core3DFaceImageCurrentness) {
+    Core3DFaceImageCurrentnessAbsent = 0,
+    Core3DFaceImageCurrentnessCurrent,
+    Core3DFaceImageCurrentnessStale,
+};
+
+//! One fail-closed, selection-bound opening for the E3 face-image bindings of
+//! one retained solid owner and one captured planar face (row 278b; consumes
+//! the portion-1 SYFI/1 owner and the portion-2 document transaction
+//! surface). Descriptors are presentation data; only this opaque opening may
+//! mutate. Set uses resourceIdentifier/role/colorSpace plus the seven
+//! transform fields; Edit uses only the seven; Remove has its own typed
+//! method. Face/owner/generation/proof remain captured authority, never
+//! candidate overrides.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DFaceImageOpening : NSObject
+@property(nonatomic,copy,readonly) NSDictionary<NSString *, id> *descriptor;
+@property(nonatomic,readonly) Core3DFaceImageCurrentness currentness;
+- (void)prepareCandidate:(NSDictionary<NSString *, id> *)candidate
+              completion:(void (^)(Core3DFaceImagePreparationResult result,
+                                   NSString *detail))completion
+    NS_SWIFT_NAME(prepare(candidate:completion:));
+- (void)applyWithCompletion:(void (^)(Core3DProfileConstructionResult result,
+                                      NSString *detail))completion
+    NS_SWIFT_NAME(apply(completion:));
+- (void)regenerateWithCompletion:(void (^)(Core3DProfileConstructionResult result,
+                                           NSString *detail))completion
+    NS_SWIFT_NAME(regenerate(completion:));
+- (void)removeWithCompletion:(void (^)(Core3DProfileConstructionResult result,
+                                       NSString *detail))completion
+    NS_SWIFT_NAME(remove(completion:));
+- (BOOL)cancel;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 NS_ASSUME_NONNULL_END
