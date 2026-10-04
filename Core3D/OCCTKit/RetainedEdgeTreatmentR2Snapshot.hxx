@@ -3,6 +3,7 @@
 #include "RetainedEdgeTreatmentR2Values.hxx"
 #include "RetainedEdgeTreatmentSnapshot.hxx"
 #include "RetainedFaceSelector.hxx"
+#include "RetainedEdgeTreatmentBuild.hxx" // SourceRebindRoles handoff
 #include <AIS_Shape.hxx>
 #include <TDF_Label.hxx>
 #include <TopoDS_Shape.hxx>
@@ -128,6 +129,10 @@ class DetachedInput final {
     std::optional<Edit> edit_;
     TopoDS_Shape sourceBase_;
     TopoDS_Shape base_, originalCurrent_;
+    // Old-stage selector roles captured on the main-thread authority side for
+    // an admitted Boolean-input edit; the detached build rebinds moved
+    // witnesses through the unique role correspondence before suffix replay.
+    std::shared_ptr<const et::SourceRebindRoles> rebindRoles_;
     ReplayBudget chargedBudget_;
     std::shared_ptr<std::atomic_bool> cancelled_;
 };
@@ -163,6 +168,7 @@ private:
     Definition candidate_;
     BaseRecipe source_;
     TopoDS_Shape sourceBase_;
+    std::shared_ptr<const et::SourceRebindRoles> rebindRoles_;
     std::vector<std::uint8_t> prefixBytes_;
     TopoDS_Shape base_, originalCurrent_;
     ReplayBudget chargedBudget_;

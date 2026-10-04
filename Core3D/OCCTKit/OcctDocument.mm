@@ -1555,6 +1555,7 @@ Standard_Boolean Core3DValidateRetainedEdgeTreatmentDocument(const Handle(TDocSt
 #include "RetainedFinishingProducer.hxx"
 #include "AssetAtlasPersistence.hxx"
 #include "AssetAtlasBuild.hxx"
+#include "FaceImagePersistence.hxx"
 #include "CompositeRecipeBinaryDriver.hxx"
 #include "RetainedEdgeTreatmentBinaryDriver.hxx"
 #include "RetainedEdgeTreatmentBuild.hxx"
@@ -4485,6 +4486,14 @@ public:
                 &&(myAssetAtlasBudget->rejected||(myAssetAtlasBudget->records
                     &&!Core3DValidateAssetAtlasDocument(
                         Handle(TDocStd_Document)::DownCast(theDocument)))))rejectTypes();
+            // E3 admission runs on every safe read, not only when the binary
+            // driver charged an envelope: the SYFI/1 binding family uses
+            // already-admitted standard attributes, so a binding-only
+            // document never touches myFaceImageBudget->records.
+            if(myReaderStatus==PCDM_RS_OK&&myFaceImageBudget
+                &&(myFaceImageBudget->rejected
+                    ||!Core3DValidateFaceImageDocument(
+                        Handle(TDocStd_Document)::DownCast(theDocument))))rejectTypes();
             if (myReaderStatus == PCDM_RS_OK) {
                 std::vector<core3d::feature_pattern_child::PairedRecord> pairs;
                 if (core3d::feature_pattern_child::ReadPairs(
@@ -4611,6 +4620,8 @@ public:
             aTable,theMessageDriver,myRetainedFinishingBudget,RejectSafeBinaryRead);
         if (myAllowRetainedSolid) core3d::asset_atlas::persistence::Register(
             aTable,theMessageDriver,myAssetAtlasBudget,RejectSafeBinaryRead);
+        if (myAllowRetainedSolid) core3d::face_image::persistence::resources::Register(
+            aTable,theMessageDriver,myFaceImageBudget,RejectSafeBinaryRead);
         core3d::feature_pattern_child::Register(
             aTable, theMessageDriver, myFeaturePatternChildBudget, RejectSafeBinaryRead);
         core3d::feature_pattern_baseline::Register(
@@ -4697,6 +4708,7 @@ private:
         if (mySplineProfileBudget) mySplineProfileBudget->reset();
         if (myRetainedFinishingBudget) myRetainedFinishingBudget->reset();
         if (myAssetAtlasBudget) myAssetAtlasBudget->reset();
+        if (myFaceImageBudget) myFaceImageBudget->reset();
         if (myFeaturePatternChildBudget) *myFeaturePatternChildBudget = {};
         if (myFeaturePatternBaselineBudget) myFeaturePatternBaselineBudget->reset();
         if (myAggregateTextureBytes != nullptr) {
@@ -4725,6 +4737,8 @@ private:
         std::make_shared<core3d::retained_finishing::ReadBudget>();
     std::shared_ptr<core3d::asset_atlas::persistence::ReadBudget> myAssetAtlasBudget=
         std::make_shared<core3d::asset_atlas::persistence::ReadBudget>();
+    std::shared_ptr<core3d::face_image::persistence::resources::ReadBudget> myFaceImageBudget=
+        std::make_shared<core3d::face_image::persistence::resources::ReadBudget>();
     std::shared_ptr<core3d::feature_pattern_child::Budget> myFeaturePatternChildBudget=
         std::make_shared<core3d::feature_pattern_child::Budget>();
     std::shared_ptr<core3d::feature_pattern_baseline::Budget> myFeaturePatternBaselineBudget=
@@ -6567,7 +6581,7 @@ void Core3DDefineSafeBinXCAFFormat(
     // that already omitted triangulation still reads back without it and
     // keeps reporting Stale.
     Handle(BinDrivers_DocumentStorageDriver) ocafStorage =
-        new core3d::receipt::v3::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>>>>>>>>>>();
+        new core3d::receipt::v3::StorageDriver<core3d::face_image::persistence::resources::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>>>>>>>>>>>();
     ocafStorage->SetWithTriangles(application->MessageDriver(), Standard_True);
     application->DefineFormat(
         TCollection_AsciiString("BinOcaf"),
@@ -6576,7 +6590,7 @@ void Core3DDefineSafeBinXCAFFormat(
         new Core3DBoundedBinXCAFRetrievalDriver(),
         ocafStorage);
     Handle(BinDrivers_DocumentStorageDriver) xcafStorage =
-        new core3d::receipt::v3::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>>>>>>>>();
+        new core3d::receipt::v3::StorageDriver<core3d::face_image::persistence::resources::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>>>>>>>>>();
     xcafStorage->SetWithTriangles(application->MessageDriver(), Standard_True);
     application->DefineFormat(
         TCollection_AsciiString("BinXCAF"),
@@ -7687,6 +7701,138 @@ Standard_Boolean Core3DValidateAssetAtlasDocument(const Handle(TDocStd_Document)
                 && !core3d::composite_recipe::HasRecord(owner)) return Standard_False;
     return Standard_True;
 }
+
+// E3 face-image admission (278b portion 2). The resource table is admitted by
+// its own strict whole-document read (canonical SYFR/1 bytes, unique
+// identities, the single aggregate budget and closed neighborhoods). Every
+// free simple-shape owner then goes through the strict SYFI/1 binding reader:
+// a Malformed verdict refuses the document, and a Present record must be
+// identity-bound to this exact document/entity/definition and to an owner
+// that carries an admitted retained carrier. Finally the closed-placement
+// census admits the five binding schema GUIDs and the resource attribute GUID
+// on exactly the labels the readers validated and nowhere else; attribute-free
+// abort/undo remnant labels carry no schema GUID and pass untouched.
+Standard_Boolean Core3DValidateFaceImageDocument(const Handle(TDocStd_Document)& document){
+    namespace fi=core3d::face_image;
+    try{
+        if(document.IsNull()||document->GetData().IsNull())return Standard_False;
+        std::vector<fi::persistence::resources::Record> resources;
+        if(!fi::persistence::resources::ReadAll(document,resources))return Standard_False;
+        const TDF_Label resourceRoot=document->Main().FindChild(
+            fi::persistence::resources::RootTag,Standard_False);
+        TDF_LabelMap admittedBindingRecords;
+        if(XCAFDoc_DocumentTool::CheckShapeTool(document->Main())){
+            const Handle(XCAFDoc_ShapeTool) tool=XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            if(!tool.IsNull()){
+                TDF_LabelSequence labels;
+                tool->GetFreeShapes(labels);
+                if(labels.Length()<0||labels.Length()>core3d::profile::MaximumLabels)
+                    return Standard_False;
+                core3d::retained_recipe::UUID documentID{};
+                bool documentIDRead=false;
+                for(Standard_Integer index=1;index<=labels.Length();++index){
+                    const TDF_Label owner=labels.Value(index);
+                    fi::Definition definition;TDF_Label record;
+                    const fi::persistence::bindings::ReadState state=
+                        fi::persistence::bindings::Read(document,owner,definition,nullptr,&record);
+                    if(state==fi::persistence::bindings::ReadState::Malformed)return Standard_False;
+                    if(state!=fi::persistence::bindings::ReadState::Present)continue;
+                    if(record.IsNull()||!XCAFDoc_ShapeTool::IsSimpleShape(owner)
+                        ||!XCAFDoc_ShapeTool::IsFree(owner)
+                        ||(!core3d::retained_solid::HasRecord(owner)
+                            &&!core3d::composite_recipe::HasRecord(owner)))
+                        return Standard_False;
+                    if(!documentIDRead){
+                        if(!core3d::retained_solid::ReadUUID(document->Main(),
+                                DocumentIdentifierAttributeID(),documentID))
+                            return Standard_False;
+                        documentIDRead=true;
+                    }
+                    core3d::retained_recipe::UUID entity{},definitionID{};
+                    if(!core3d::retained_solid::ReadUUID(owner,EntityIdentifierAttributeID(),entity)
+                        ||!core3d::retained_solid::ReadUUID(owner,DefinitionIdentifierAttributeID(),definitionID)
+                        ||!(definition.owner.document==documentID)
+                        ||!(definition.owner.entity==entity)
+                        ||!(definition.owner.definition==definitionID))
+                        return Standard_False;
+                    admittedBindingRecords.Add(record);
+                }
+            }
+        }
+        std::vector<TDF_Label> pending{document->GetData()->Root()};
+        Standard_Size visited=0;
+        while(!pending.empty()){
+            const TDF_Label label=pending.back();pending.pop_back();
+            if(++visited>Standard_Size(core3d::profile::MaximumLabels))return Standard_False;
+            Handle(TDF_Attribute) any;
+            if((label.FindAttribute(fi::persistence::bindings::MarkerID(),any)
+                ||label.FindAttribute(fi::persistence::bindings::VersionID(),any)
+                ||label.FindAttribute(fi::persistence::bindings::BindingCountID(),any)
+                ||label.FindAttribute(fi::persistence::bindings::ChunkCountID(),any)
+                ||label.FindAttribute(fi::persistence::bindings::DigestID(),any))
+                &&!admittedBindingRecords.Contains(label))
+                return Standard_False;
+            if(label.IsAttribute(fi::persistence::resources::AttributeID())
+                &&(resourceRoot.IsNull()||!label.Father().IsEqual(resourceRoot)))
+                return Standard_False;
+            for(TDF_ChildIterator child(label,Standard_False);child.More();child.Next())
+                pending.push_back(child.Value());
+        }
+        return Standard_True;
+    }catch(...){return Standard_False;}
+}
+
+#if DEBUG
+namespace core3d::face_image {
+// E3 DEBUG evidence (278b portion 2): measured registration state for the
+// later portions' probes. Read-only; no edit authority and no mutation route.
+struct FaceImageProbe final {
+    struct Observation final {
+        Standard_Integer resources = 0;
+        Standard_Integer boundOwners = 0;
+        Standard_Size aggregateBytes = 0;
+        bool complete = false;
+    };
+    // Friend seam: distinguishes a fully published payload from an empty
+    // attribute shell without reparsing its bytes.
+    static bool Published(const Handle(persistence::resources::Attribute)& attribute) noexcept {
+        return !attribute.IsNull() && attribute->value_ && !attribute->value_->bytes.empty();
+    }
+    static Observation Observe(const Handle(TDocStd_Document)& document) noexcept {
+        Observation output;
+        try {
+            if (document.IsNull() || document->GetData().IsNull()) return output;
+            std::vector<persistence::resources::Record> records;
+            if (!persistence::resources::ReadAll(document, records)) return Observation{};
+            for (const auto& record : records) {
+                Handle(persistence::resources::Attribute) attribute;
+                if (record.label.IsNull()
+                    || !record.label.FindAttribute(persistence::resources::AttributeID(), attribute)
+                    || !Published(attribute)) return Observation{};
+                output.aggregateBytes += record.value->bytes.size();
+            }
+            output.resources = Standard_Integer(records.size());
+            if (XCAFDoc_DocumentTool::CheckShapeTool(document->Main())) {
+                const Handle(XCAFDoc_ShapeTool) tool = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+                TDF_LabelSequence labels;
+                if (!tool.IsNull()) tool->GetFreeShapes(labels);
+                if (!tool.IsNull() || labels.Length() < 0
+                    || labels.Length() > core3d::profile::MaximumLabels) return Observation{};
+                for (Standard_Integer index = 1; index <= labels.Length(); ++index) {
+                    Definition definition;
+                    const auto state = persistence::bindings::Read(document, labels.Value(index), definition);
+                    if (state == persistence::bindings::ReadState::Malformed) return Observation{};
+                    if (state == persistence::bindings::ReadState::Present) ++output.boundOwners;
+                }
+            }
+            output.complete = true;
+            return output;
+        } catch (...) { return Observation{}; }
+    }
+};
+} // namespace core3d::face_image
+#endif
+
 
 OcctRetainedRecipeCoverage OcctDocument::RetainedRecipeCoverageForLabel(
     const TDF_Label& label) const noexcept
@@ -19626,6 +19772,7 @@ std::string OcctDocument::save(
     if (NativeBooleanOwnerBlocksOtherWork() || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
         || !ValidateGeometryRepresentations()
         || !ValidateLayerGraphRoles(myOcafDoc)
+        || !Core3DValidateFaceImageDocument(myOcafDoc)
         || !Core3DValidateOwnedFrameUsage(myOcafDoc,frameBytes)) {
         return {};
     }
@@ -24332,6 +24479,107 @@ OcctAssetAtlasCurrentness OcctDocument::AssetAtlasCurrentness(
             ? OcctAssetAtlasCurrentness::Current
             : OcctAssetAtlasCurrentness::Stale;
     } catch (...) { return OcctAssetAtlasCurrentness::Stale; }
+}
+
+// E3 face-image document surface (278b portion 2). These entry points bind
+// the portion-1 owner store to the live document; none of them opens its own
+// mutation route, manufactures currentness or weakens a portion-1 verdict.
+core3d::face_image::owner::Outcome OcctDocument::AdoptFaceImageResource(
+    const core3d::face_image::ResourceEnvelope& candidate) noexcept {
+    using Outcome = core3d::face_image::owner::Outcome;
+    if (![NSThread isMainThread] || myOcafDoc.IsNull()) return Outcome::Refused;
+    if (!myOcafDoc->HasOpenCommand()) return Outcome::Busy;
+    return core3d::face_image::owner::AdoptResource(myOcafDoc, candidate);
+}
+
+core3d::face_image::owner::Outcome OcctDocument::RemoveFaceImageResource(
+    const core3d::face_image::UUID& resource) noexcept {
+    using Outcome = core3d::face_image::owner::Outcome;
+    if (![NSThread isMainThread] || myOcafDoc.IsNull()) return Outcome::Refused;
+    if (!myOcafDoc->HasOpenCommand()) return Outcome::Busy;
+    return core3d::face_image::owner::RemoveResource(myOcafDoc, resource);
+}
+
+Standard_Boolean OcctDocument::ReadFaceImageResource(
+    const core3d::face_image::UUID& resource,
+    core3d::face_image::ResourceEnvelope& output) const noexcept {
+    output = {};
+    if (![NSThread isMainThread] || myOcafDoc.IsNull()) return Standard_False;
+    return core3d::face_image::owner::ReadResource(myOcafDoc, resource, output)
+        ? Standard_True : Standard_False;
+}
+
+Standard_Boolean OcctDocument::FaceImageResourceManifest(
+    std::vector<core3d::face_image::ResourceFence>& output) const noexcept {
+    output.clear();
+    if (![NSThread isMainThread] || myOcafDoc.IsNull()) return Standard_False;
+    return core3d::face_image::owner::ResourceManifest(myOcafDoc, output)
+        ? Standard_True : Standard_False;
+}
+
+core3d::face_image::owner::Outcome OcctDocument::PrepareFaceImageBindings(
+    core3d::face_image::owner::Staging& staging,
+    const core3d::face_image::Definition& candidate,
+    const core3d::face_image::Observed& observed) noexcept {
+    using Outcome = core3d::face_image::owner::Outcome;
+    if (![NSThread isMainThread] || myOcafDoc.IsNull()) return Outcome::Refused;
+    return core3d::face_image::owner::Prepare(staging, myOcafDoc, candidate, observed);
+}
+
+core3d::face_image::owner::Outcome OcctDocument::CommitFaceImageBindings(
+    core3d::face_image::owner::Staging& staging,
+    const core3d::face_image::Observed& observed) noexcept {
+    using Outcome = core3d::face_image::owner::Outcome;
+    if (![NSThread isMainThread] || myOcafDoc.IsNull()) return Outcome::Refused;
+    if (!myOcafDoc->HasOpenCommand()) return Outcome::Busy;
+    return core3d::face_image::owner::Commit(staging, myOcafDoc, observed);
+}
+
+void OcctDocument::CancelFaceImageBindings(
+    core3d::face_image::owner::Staging& staging) noexcept {
+    core3d::face_image::owner::Cancel(staging);
+}
+
+core3d::face_image::owner::Outcome OcctDocument::RemoveFaceImageBindings(
+    const core3d::face_image::OwnerKey& owner) noexcept {
+    using Outcome = core3d::face_image::owner::Outcome;
+    if (![NSThread isMainThread] || myOcafDoc.IsNull()) return Outcome::Refused;
+    if (!myOcafDoc->HasOpenCommand()) return Outcome::Busy;
+    try {
+        TDF_Label ownerLabel;
+        if (!core3d::face_image::owner::ResolveOwnerLabel(myOcafDoc, owner, ownerLabel))
+            return Outcome::OwnerMismatch;
+        core3d::face_image::Definition prior;
+        const auto state = core3d::face_image::persistence::bindings::Read(
+            myOcafDoc, ownerLabel, prior);
+        if (state == core3d::face_image::persistence::bindings::ReadState::Malformed)
+            return Outcome::Malformed;
+        if (state == core3d::face_image::persistence::bindings::ReadState::Absent)
+            return Outcome::Refused; // zero-delta: nothing to remove
+        return core3d::face_image::persistence::bindings::Remove(myOcafDoc, ownerLabel)
+            ? Outcome::Committed : Outcome::PersistenceFailure;
+    } catch (...) { return Outcome::PersistenceFailure; }
+}
+
+core3d::face_image::persistence::bindings::ReadState OcctDocument::ReadFaceImageBindings(
+    const core3d::face_image::OwnerKey& owner,
+    core3d::face_image::Definition& output,
+    std::vector<std::uint8_t>* bytes) const noexcept {
+    using ReadState = core3d::face_image::persistence::bindings::ReadState;
+    output = {};
+    if (bytes) bytes->clear();
+    if (![NSThread isMainThread] || myOcafDoc.IsNull()) return ReadState::Malformed;
+    try {
+        TDF_Label ownerLabel;
+        if (!core3d::face_image::owner::ResolveOwnerLabel(myOcafDoc, owner, ownerLabel))
+            return ReadState::Malformed;
+        return core3d::face_image::persistence::bindings::Read(
+            myOcafDoc, ownerLabel, output, bytes);
+    } catch (...) {
+        output = {};
+        if (bytes) bytes->clear();
+        return ReadState::Malformed;
+    }
 }
 
 namespace core3d::retained_finishing {

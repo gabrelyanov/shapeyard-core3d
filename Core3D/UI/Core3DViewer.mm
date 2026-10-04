@@ -1198,26 +1198,65 @@ std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTrea
         ||!selected->Shape().IsEqual(original->current_))return {};
     r2::Definition candidate=original->definition_;
     std::optional<et::ReplayBudget> intentBudget;
+    std::shared_ptr<const et::SourceRebindRoles> rebindRoles;
     if(const auto* amount=std::get_if<et::SetAmount>(&edit)){auto row=std::find_if(candidate.steps.begin(),candidate.steps.end(),[&](const et::Step&s){return s.feature==amount->feature;});if(row==candidate.steps.end()){refusal=et::Refusal::IdentityMismatch;return {};}row->amountMM=amount->amountMM;}
     else if(const auto* remove=std::get_if<et::Remove>(&edit)){auto row=std::find_if(candidate.steps.begin(),candidate.steps.end(),[&](const et::Step&s){return s.feature==remove->feature;});if(row==candidate.steps.end()){refusal=et::Refusal::IdentityMismatch;return {};}candidate.issuance.retiredLocalIDs.push_back(row->localID);candidate.steps.erase(row);candidate.outputNode=candidate.steps.empty()?std::get<r2::BooleanBaseBinding>(candidate.base).sourceNode:candidate.steps.back().node;}
     else if(const auto* rebuild=std::get_if<r2::RebuildBooleanInput>(&edit)){
-        // Admitted only for the rectangular-loft input of a legacy SYRS prefix:
+        // Admitted only for the proven source family of a legacy SYRS prefix:
         // the locator must name the captured left source input exactly and the
-        // requested recipe must keep family and unit. Profile/enclosure input
-        // rebuilds require the viewer-level construction seam (outside this
-        // change) and refuse atomically here instead of being approximated.
+        // requested recipe must keep family and unit. Recipe content is proven
+        // by the re-validation and re-encode inside RebuildEditedPrefix.
         const auto* boolean=std::get_if<r2::BooleanBaseBinding>(&candidate.base);
         const auto* source=std::get_if<r2::RetainedBooleanBase>(&original->source_);
         const auto* legacy=source?std::get_if<r2::LegacyBooleanBase>(&source->source):nullptr;
+        retained_boolean::Program promoted;
         const auto* program=legacy?std::get_if<retained_boolean::Program>(&legacy->prefix):nullptr;
+        if(!program&&legacy){const auto*old=std::get_if<retained_boolean::Legacy>(&legacy->prefix);
+            if(!old||!retained_boolean::Promote(*old,promoted)){refusal=et::Refusal::MalformedCarrier;return {};}
+            program=&promoted;}
         const auto* links=boolean?std::get_if<r2::LegacyPrefixBinding>(&boolean->prefix):nullptr;
         if(!boolean||!program||!links||original->sourceBase_.IsNull()
             ||rebuild->locator.owner!=candidate.owner||rebuild->locator.node!=links->rootNode
-            ||rebuild->locator.sourceFeature!=boolean->source.sourceFeature){refusal=et::Refusal::IdentityMismatch;return {};}
-        const auto* loft=std::get_if<rectangular_loft::Definition>(&rebuild->requested);
-        if(!loft||program->source.family!=3||loft->dimensionMetersPerUnit!=boolean->metersPerLocalUnit){
-            refusal=et::Refusal::UnsupportedBase;return {};
+            ||rebuild->locator.sourceFeature!=program->source.sourceFeature){refusal=et::Refusal::IdentityMismatch;return {};}
+        if(program->source.family==1){
+            const auto* p=std::get_if<profile::Parameters>(&rebuild->requested);
+            if(!p||p->metersPerUnit!=boolean->metersPerLocalUnit){
+                refusal=et::Refusal::UnsupportedBase;return {};
+            }
+        }else if(program->source.family==2){
+            const auto* e=std::get_if<enclosure::Parameters>(&rebuild->requested);
+            if(!e||e->metersPerUnit!=boolean->metersPerLocalUnit){
+                refusal=et::Refusal::UnsupportedBase;return {};
+            }
+        }else{
+            const auto* loft=std::get_if<rectangular_loft::Definition>(&rebuild->requested);
+            if(!loft||program->source.family!=3||loft->dimensionMetersPerUnit!=boolean->metersPerLocalUnit){
+                refusal=et::Refusal::UnsupportedBase;return {};
+            }
         }
+        // C17 capture, main-thread authority side: prove the stored witnesses
+        // against the old replay stages and record the selected-use roles so
+        // the detached build can rebind witnesses the source edit moves, under
+        // the unique-correspondence discipline of et::ApplySourceRebind. The
+        // shadow B1 view shares the exact steps/issuance; its byte proof uses
+        // the freshly encoded shadow bytes.
+        et::Definition shadowDef;shadowDef.schema=2;shadowDef.owner=candidate.owner;
+        shadowDef.base.family=program->source.family==1?et::SourceFamily::Profile
+            :program->source.family==2?et::SourceFamily::Enclosure:et::SourceFamily::RectangularLoft;
+        shadowDef.base.source=boolean->source;shadowDef.base.sourceNode=boolean->sourceNode;
+        shadowDef.base.sourceSchema=boolean->sourceSchema;
+        shadowDef.base.sourceRecipeDigest=boolean->sourceRecipeDigest;
+        shadowDef.base.metersPerLocalUnit=boolean->metersPerLocalUnit;
+        shadowDef.issuance=candidate.issuance;shadowDef.outputNode=candidate.outputNode;
+        shadowDef.steps=candidate.steps;
+        std::vector<std::uint8_t> shadowBytes;
+        if(!et::Encode(shadowDef,shadowBytes,refusal))return {};
+        auto captured=std::make_shared<et::SourceRebindRoles>();
+        et::ReplayBudget rebindBudget;CopyTopologyBudget(rebindBudget,original->chargedBudget_);
+        if(!et::CaptureSourceRebindRoles(original->base_,shadowDef,shadowBytes,rebindBudget,refusal,*captured))return {};
+        rebindRoles=std::move(captured);
+        if(!intentBudget)intentBudget.emplace();
+        CopyTopologyBudget(*intentBudget,rebindBudget);
     }
     else if(const auto* tool=std::get_if<r2::RebuildAnalyticTool>(&edit)){
         // The operand must exist exactly in both the captured program and the
@@ -1259,6 +1298,7 @@ std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTrea
     std::vector<std::uint8_t> bytes;if(!r2::Encode(candidate,bytes,refusal))return {};
     auto work=std::make_shared<r2::Work>();work->snapshot_=original;work->mutation_=edit;work->candidate_=candidate;
     work->source_=original->source_;work->sourceBase_=original->sourceBase_;work->base_=original->base_;work->originalCurrent_=original->current_;work->nonce_=original->nonce_;
+    work->rebindRoles_=std::move(rebindRoles);
     work->chargedBudget_=original->chargedBudget_;if(intentBudget)CopyTopologyBudget(work->chargedBudget_,*intentBudget);work->label_=original->ownerLabel_;work->presentation_=selected;work->state_=r2::Work::State::Prepared;
 #if DEBUG
     tb::debug::RecordPhase("prepare-r2",original->chargedBudget_,work->chargedBudget_);
@@ -1271,13 +1311,20 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedInput> Core3DViewer::
     namespace r2=retained_edge_treatment::r2;if(![NSThread isMainThread]||!work||work->state_!=r2::Work::State::Prepared)return {};
     auto input=std::shared_ptr<r2::DetachedInput>(new r2::DetachedInput);input->nonce_=work->nonce_;input->candidate_=work->candidate_;
     input->source_=work->source_;input->base_=work->base_;input->originalCurrent_=work->originalCurrent_;input->chargedBudget_=work->chargedBudget_;
-    input->sourceBase_=work->sourceBase_;
+    input->sourceBase_=work->sourceBase_;input->rebindRoles_=work->rebindRoles_;
     if(const auto* edit=std::get_if<r2::Edit>(&work->mutation_))input->edit_=*edit;
 #if DEBUG
     tb::debug::RecordPhase("detach-r2",work->chargedBudget_,input->chargedBudget_);
 #endif
     input->cancelled_=work->cancelled_;work->state_=r2::Work::State::Building;return input;
 }
+
+// Detached source-base rebuild for the admitted R2 Boolean-input edit; the
+// family switch mirrors buildSavedCutSourceDetached and is defined next to
+// the other detached source builders below.
+static bool R2RebuildBooleanInputBase(const retained_solid::Envelope& envelope,
+    const std::atomic_bool& stop, retained_edge_treatment::ReplayBudget& budget,
+    TopoDS_Shape& out) noexcept;
 
 std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer::buildEdgeTreatmentR2(
     const std::shared_ptr<const retained_edge_treatment::r2::DetachedInput>& input,
@@ -1293,7 +1340,7 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
         // against the exact new prefix bytes, never copied forward.
         r2::RetainedBooleanBase edited;std::vector<std::uint8_t> editedBytes;TopoDS_Shape prefixResult,editedBase;
         const auto* booleanBase=std::get_if<r2::RetainedBooleanBase>(&input->source_);
-        if(!booleanBase||!r2::RebuildEditedPrefix(*booleanBase,*input->edit_,input->sourceBase_,*input->cancelled_,edited,editedBytes,prefixResult,editedBase,budget,refusal)){
+        if(!booleanBase||!r2::RebuildEditedPrefix(*booleanBase,*input->edit_,input->sourceBase_,*input->cancelled_,edited,editedBytes,prefixResult,editedBase,budget,refusal,R2RebuildBooleanInputBase)){
 #if DEBUG
             tb::debug::RecordPhase("build-r2",input->chargedBudget_,budget);
 #endif
@@ -1301,9 +1348,23 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
         result->source_=edited;result->prefixBytes_=editedBytes;result->base_=prefixResult;result->editedSourceBase_=editedBase;result->sourceChanged_=true;
         auto& binding=std::get<r2::BooleanBaseBinding>(result->definition_.base);
         if(!CC_SHA256(editedBytes.data(),CC_LONG(editedBytes.size()),binding.sourceRecipeDigest.data()))return {};
+        if(input->rebindRoles_){
+            // C18: rebind the witnesses the source edit moved through the
+            // captured unique role correspondence and strictly replay the
+            // complete suffix on its proper stages; the rebound steps keep
+            // feature/node/local IDs, kind, amount and authored intent.
+            r2::Definition rebound=result->definition_;TopoDS_Shape treated;
+            if(!r2::ApplySourceRebindR2(*input->rebindRoles_,result->base_,rebound,treated,budget,refusal)){
+#if DEBUG
+                tb::debug::RecordPhase("build-r2",input->chargedBudget_,budget);
+#endif
+                return {};}
+            result->definition_=std::move(rebound);result->result_=treated;
+        }
     }
     if(!r2::Encode(result->definition_,result->definitionBytes_,refusal))return {};
-    if(!r2::ReplayTreatmentSuffix(result->base_,result->definition_,result->result_,budget,refusal)){
+    if(result->result_.IsNull()
+        &&!r2::ReplayTreatmentSuffix(result->base_,result->definition_,result->result_,budget,refusal)){
 #if DEBUG
         tb::debug::RecordPhase("build-r2",input->chargedBudget_,budget);
 #endif
@@ -3865,6 +3926,58 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
         geometry->built = true;
         return true;
     } catch (...) { return false; }
+}
+
+// Detached source-base rebuild for the admitted R2 Boolean-input edit. The
+// envelope carries the proven edited recipe values and the legacy first
+// operand; the family switch mirrors buildSavedCutSourceDetached, ending in
+// the same source-base boundary proof. Any failure or cancellation refuses.
+static bool R2RebuildBooleanInputBase(const retained_solid::Envelope& envelope,
+    const std::atomic_bool& stop, retained_edge_treatment::ReplayBudget& budget,
+    TopoDS_Shape& out) noexcept {
+    out.Nullify();
+    try {
+        if (stop.load()) return false;
+        TopoDS_Shape base;
+        if (envelope.sourceFamily == 1) {
+            profile::Parameters p;
+            if (!profile::Decode(envelope.sourceValues, p)) return false;
+            auto geometry = std::make_shared<ProfileSolidGeometry>();
+            static_cast<ProfileDefinition&>(*geometry) = p.definition;
+            geometry->constructionFrame = p.constructionFrame;
+            if (stop.load() || !BuildProfileSolidGeometry(geometry) || stop.load()) return false;
+            base = geometry->solid;
+        } else if (envelope.sourceFamily == 2) {
+            enclosure::Parameters p; EnclosureSolidResult built;
+            if (!enclosure::Decode(int(envelope.sourceSchema), envelope.sourceValues, p) || stop.load()) return false;
+            const std::shared_ptr<std::atomic_bool> cancelled(std::shared_ptr<std::atomic_bool>(),
+                const_cast<std::atomic_bool*>(&stop));
+            if (!BuildEnclosureSolidGeometry(p.definition, cancelled, built) || stop.load()) return false;
+            base = built.solid;
+            // Live rounded enclosures are published only after the bounded
+            // persistence readback reaches an exact commitment fixed point.
+            // The R2 input-rebuild seam must produce that same canonical
+            // representation before analytic-prefix replay, charged to this
+            // operation's one shared budget rather than a fresh counter.
+            if (p.definition.dimensions.cornerRadius > 0) {
+                TopoDS_Shape canonical, reopened;
+                retained_edge_treatment::Digest canonicalDigest{}, reopenedDigest{};
+                if (!retained_edge_treatment::detail::ReadbackGeometry(base, budget, canonical)
+                    || !retained_edge_treatment::detail::ReadbackGeometry(canonical, budget, reopened)
+                    || !retained_edge_treatment::detail::CommitGeometry(canonical, budget, canonicalDigest)
+                    || !retained_edge_treatment::detail::CommitGeometry(reopened, budget, reopenedDigest)
+                    || canonicalDigest != reopenedDigest) return false;
+                base = canonical;
+            }
+        } else if (envelope.sourceFamily == 3) {
+            if (saved_cut_source_edit::RebuildLoftBase(envelope, stop, base)
+                != saved_cut_source_edit::LoftBaseStatus::Built) return false;
+        } else return false;
+        if (stop.load() || base.IsNull()
+            || !saved_boolean_build::InspectSourceBase(base, envelope, stop) || stop.load()) return false;
+        out = base;
+        return true;
+    } catch (...) { out.Nullify(); return false; }
 }
 
 bool spline_profile::BuildWithDetachedProfileBranch(

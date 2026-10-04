@@ -55,8 +55,16 @@ static NSData *R2DoubleData(const std::vector<double>& values) {
     const double values[] = {radius, boltCircleRadius, hostRadiusRatio, directionAngle,
         halfWidthApex, halfWidthMouth, length};
     for (double value : values) if (!isfinite(value)) return nil;
+    // Kind-sensitive radius floor (D347): the retained wedge (kind 3, matching
+    // analytic_boolean::OperandKind::Wedge) carries radius exactly zero by
+    // contract — its validity is the direction/apex/mouth/length set checked
+    // natively — so zero is admitted for that kind only. Negative, non-finite
+    // and over-cap radii stay refused for every kind; radius <= 0 stays
+    // refused for cylinder and ring.
+    const BOOL wedge = kind == 3;
     if (!operandID || kind < 1 || kind > 3 || extent != 1 || axis < 0 || axis > 2 || !point
-        || radius <= 0 || radius > 1.0e6 || boltCircleRadius < 0 || hostRadiusRatio < 0
+        || (wedge ? radius < 0 : radius <= 0) || radius > 1.0e6 || boltCircleRadius < 0
+        || hostRadiusRatio < 0
         || hostRadiusRatio > 1 || length < 0 || count > 256) return nil;
     if ((self = [super init])) {
         _operandID = operandID; _kind = kind; _extent = extent; _axis = axis; _point = point;

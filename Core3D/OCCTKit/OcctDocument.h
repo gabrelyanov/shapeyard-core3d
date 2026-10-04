@@ -36,7 +36,10 @@
 #include "SplineProfilePersistence.hxx"
 #include "FeaturePatternChildAttribute.hxx"
 #include "RetainedFinishingRecord.hxx"
+#include "FaceImageDefinition.hxx"
 namespace core3d::asset_atlas { struct Capture; struct Definition; struct Key; }
+namespace core3d::face_image::owner { enum class Outcome : std::uint8_t; struct Staging; }
+namespace core3d::face_image::persistence::bindings { enum class ReadState : int; }
 
 #include <XCAFApp_Application.hxx>
 #include <TDocStd_Document.hxx>
@@ -585,6 +588,13 @@ Standard_EXPORT Standard_Boolean Core3DValidateRetainedFinishingDocument(const H
 //! Asset-wide atlas admission: exact key/member bindings, canonical SYEA/1
 //! bytes, aggregate budgets, and admitted retained carrier owners.
 Standard_EXPORT Standard_Boolean Core3DValidateAssetAtlasDocument(const Handle(TDocStd_Document)& document);
+//! E3 face-image admission (278b portion 2): strict whole-document SYFR/1
+//! resource-table read (canonical bytes, unique identities, the single
+//! aggregate budget, closed neighborhoods), strict per-owner SYFI/1 binding
+//! reads with the exact document/entity/definition identity binding and an
+//! admitted retained carrier owner, and a closed-placement census admitting
+//! the schema GUIDs on exactly the validated labels and nowhere else.
+Standard_EXPORT Standard_Boolean Core3DValidateFaceImageDocument(const Handle(TDocStd_Document)& document);
 
 //! Read-only classification used by destructive native operation gates. A
 //! malformed/unknown record is deliberately not collapsed to legacy absence.
@@ -1446,6 +1456,48 @@ public:
     Standard_EXPORT OcctAssetAtlasCurrentness AssetAtlasCurrentness(
         const core3d::asset_atlas::Key& atlas,
         core3d::asset_atlas::Definition* record = nullptr) const noexcept;
+    //! E3 face-image document surface (278b portion 2). The mutating entry
+    //! points never open their own mutation route: like the finishing/atlas
+    //! owners above, the caller holds the already-open OCAF command under the
+    //! existing document mutation owner (Busy otherwise), so every committed
+    //! adoption, binding commit and removal is one ordinary undoable command
+    //! and a command abort/undo restores the prior state exactly. Refusal
+    //! leaves no delta. Cold reopen is admitted only through the registered
+    //! bounded driver chain and Core3DValidateFaceImageDocument.
+    Standard_EXPORT core3d::face_image::owner::Outcome AdoptFaceImageResource(
+        const core3d::face_image::ResourceEnvelope& candidate) noexcept;
+    Standard_EXPORT core3d::face_image::owner::Outcome RemoveFaceImageResource(
+        const core3d::face_image::UUID& resource) noexcept;
+    Standard_EXPORT Standard_Boolean ReadFaceImageResource(
+        const core3d::face_image::UUID& resource,
+        core3d::face_image::ResourceEnvelope& output) const noexcept;
+    //! Role-independent manifest (resource identity + original-content
+    //! digest) for the caller-captured Observed resource fences.
+    Standard_EXPORT Standard_Boolean FaceImageResourceManifest(
+        std::vector<core3d::face_image::ResourceFence>& output) const noexcept;
+    //! Binding transaction hooks into the portion-1 owner store. Prepare
+    //! resolves the owner label and fences only; Commit re-proves the
+    //! identical fence and installs the canonical SYFI/1 record inside the
+    //! caller's open command; Cancel discards the staging whole.
+    Standard_EXPORT core3d::face_image::owner::Outcome PrepareFaceImageBindings(
+        core3d::face_image::owner::Staging& staging,
+        const core3d::face_image::Definition& candidate,
+        const core3d::face_image::Observed& observed) noexcept;
+    Standard_EXPORT core3d::face_image::owner::Outcome CommitFaceImageBindings(
+        core3d::face_image::owner::Staging& staging,
+        const core3d::face_image::Observed& observed) noexcept;
+    Standard_EXPORT void CancelFaceImageBindings(
+        core3d::face_image::owner::Staging& staging) noexcept;
+    //! Whole-record removal (last-binding removal) inside the caller's open
+    //! command; zero-delta when no record exists.
+    Standard_EXPORT core3d::face_image::owner::Outcome RemoveFaceImageBindings(
+        const core3d::face_image::OwnerKey& owner) noexcept;
+    //! Strict fail-closed binding-record read: Absent/Malformed/Present, never
+    //! a degraded verdict. Malformed also covers an unresolved owner.
+    Standard_EXPORT core3d::face_image::persistence::bindings::ReadState ReadFaceImageBindings(
+        const core3d::face_image::OwnerKey& owner,
+        core3d::face_image::Definition& output,
+        std::vector<std::uint8_t>* bytes = nullptr) const noexcept;
     //! Additive curved-layout presence, used to distinguish a planar v2 atlas migration.
     Standard_EXPORT Standard_Boolean HasCurvedUVLayoutForLabel(const TDF_Label& label) const noexcept;
     //! Same v2/prefix payload and ordinary MeshUVAtlas transaction as planar.
