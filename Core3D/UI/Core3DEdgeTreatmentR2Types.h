@@ -24,6 +24,7 @@ typedef NS_ENUM(NSInteger, Core3DRetainedBooleanEditKindR2) {
     Core3DRetainedBooleanEditKindR2RebuildAnalyticTool = 4,
     Core3DRetainedBooleanEditKindR2SetBooleanOperation = 5,
     Core3DRetainedBooleanEditKindR2SetInputPlacement = 6,
+    Core3DRetainedBooleanEditKindR2SetSelectorIntent = 7,
 };
 
 @interface Core3DRetainedBooleanRecipeLocatorR2 : NSObject
@@ -242,6 +243,7 @@ typedef NS_ENUM(NSInteger, Core3DRetainedBooleanEditKindR2) {
 @property(nonatomic,strong,readonly,nullable) Core3DRetainedBooleanInputR2 *completeInput;
 @property(nonatomic,strong,readonly,nullable) Core3DRetainedBooleanAnalyticToolR2 *completeAnalyticTool;
 @property(nonatomic,strong,readonly,nullable) Core3DRetainedBooleanInputPlacementR2 *completeInputPlacement;
+@property(nonatomic,strong,readonly,nullable) Core3DFaceSelectorIntent *selectorIntent;
 @property(nonatomic,strong,readonly,nullable) NSNumber *amountMM, *operation, *operandID;
 - (instancetype)init NS_UNAVAILABLE; + (instancetype)new NS_UNAVAILABLE;
 //! Bounded typed edit-request construction for the declared value requests.
@@ -258,5 +260,9 @@ typedef NS_ENUM(NSInteger, Core3DRetainedBooleanEditKindR2) {
 + (nullable instancetype)editSetBooleanOperationWithFeatureIdentifier:(NSString *)featureIdentifier operation:(NSInteger)operation;
 + (nullable instancetype)editSetInputPlacementWithLocator:(Core3DRetainedBooleanRecipeLocatorR2 *)locator
     completeInputPlacement:(Core3DRetainedBooleanInputPlacementR2 *)completeInputPlacement;
+//! Typed selector-intent edit request: the feature UUID must parse and the
+//! intent must be non-nil; native intent validation happens at translation.
++ (nullable instancetype)editSetSelectorIntentWithFeatureIdentifier:(NSString *)featureIdentifier
+    intent:(Core3DFaceSelectorIntent *)intent;
 @end
 NS_ASSUME_NONNULL_END

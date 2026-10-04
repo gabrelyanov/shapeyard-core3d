@@ -15,7 +15,8 @@ namespace core3d { class Core3DViewer; }
 
 namespace core3d::retained_edge_treatment::r2 {
 using Edit = std::variant<et::SetAmount, et::Remove, RebuildBooleanInput,
-                          RebuildAnalyticTool, SetBooleanOperation, SetInputPlacement>;
+                          RebuildAnalyticTool, SetBooleanOperation, SetInputPlacement,
+                          et::SetSelectorIntent>;
 // R2 replay accounting shares the common per-operation topology counter with
 // B1 (same frozen limits, validation-first arithmetic, sticky refusal, DEBUG
 // trace) and keeps the R2-only envelope/identity dimensions untouched.

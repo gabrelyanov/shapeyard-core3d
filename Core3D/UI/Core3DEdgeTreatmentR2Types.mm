@@ -180,6 +180,15 @@ static NSData *R2DoubleData(const std::vector<double>& values) {
     [edit setValue:completeInputPlacement forKey:@"completeInputPlacement"];
     return edit;
 }
++ (nullable instancetype)editSetSelectorIntentWithFeatureIdentifier:(NSString *)featureIdentifier
+    intent:(Core3DFaceSelectorIntent *)intent {
+    if (!R2UUIDValid(featureIdentifier) || !intent) return nil;
+    auto edit = (Core3DRetainedBooleanEditR2 *)class_createInstance(Core3DRetainedBooleanEditR2.class, 0);
+    [edit setValue:@(Core3DRetainedBooleanEditKindR2SetSelectorIntent) forKey:@"kind"];
+    [edit setValue:featureIdentifier forKey:@"featureIdentifier"];
+    [edit setValue:intent forKey:@"selectorIntent"];
+    return edit;
+}
 @end
 
 @implementation Core3DRetainedBooleanLegacySelectorBindingR2

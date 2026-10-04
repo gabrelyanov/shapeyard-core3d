@@ -2459,6 +2459,17 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 if(!programSourceStaged)throw Standard_Failure("Saved program source paired staging failed");
             }
             const bool featureStaged=sweepStaged||loftStaged||cutStaged||cutSourceStaged||programSourceStaged||treatmentStaged;
+            // A successfully staged paired R2 treatment result is paired
+            // feature staging: the stage already replaced the owner shape and
+            // rebound both naming records, so the fallback shape replacement
+            // below must not run a second time (the unchanged placement is
+            // still persisted exactly once). For that proved branch only, the
+            // retained source record is verified by the exact
+            // source-preservation and current-result-binding checks instead of
+            // the whole-record equality, which would reject the deliberately
+            // changed treated geometry. A source edit keeps its own
+            // exact-bytes branch; every unrelated edit keeps full equality.
+            const bool treatmentOnlyStagedR2=treatmentStagedR2&&!treatmentSourceEditedR2;
             const bool vertexMove=record.requested.operation==OrdinaryTransformOperation::MeshVertexMove;
             const bool regionExtrude=record.requested.operation==OrdinaryTransformOperation::MeshRegionExtrude;
             const bool regionInset=record.requested.operation==OrdinaryTransformOperation::MeshRegionInset;
@@ -2476,7 +2487,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             if(partitionMutation && !record.previous.meshRegionPartition.empty()
                 && !_document->ClearMeshRegionPartition(record.previous.label))
                 throw Standard_Failure("Mesh region partition clear failed");
-            if ((!featureStaged && !record.previous.shape.IsEqual(record.requested.shape)
+            if ((!featureStaged && !treatmentStagedR2 && !record.previous.shape.IsEqual(record.requested.shape)
                     && !_document->ReplaceShape(record.previous.label, candidate))
                 || (!featureStaged && !_document->SaveObjectTransform(record.previous.label, candidate))
                 || (regionMutation
@@ -2547,7 +2558,29 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                                 || !record.candidate.loft.IsCurrent(
                                     _document->Document(),record.previous.label))))
                     : !record.candidate.loft.IsEqual(record.previous.loft)))
-                || (!cutStaged && !cutSourceStaged && !programSourceStaged && !treatmentSourceEditedR2 && !record.candidate.retained.IsEqual(record.previous.retained))
+                || (!cutStaged && !cutSourceStaged && !programSourceStaged && !treatmentSourceEditedR2
+                    && (treatmentOnlyStagedR2 && record.previous.retained.value
+                        // Proved paired R2 staging: the retained source record
+                        // must still be present on the same label, owner and
+                        // document data with exactly the prior source bytes and
+                        // pre-Boolean base, matching the staged source readback;
+                        // its current naming must be bound to the verified
+                        // candidate owner geometry (already proven equal to the
+                        // staged result above). Nothing else may move.
+                        ? (!record.candidate.retained.value
+                            || !record.candidate.retained.label.IsEqual(record.previous.retained.label)
+                            || record.candidate.retained.label.Data()!=record.previous.retained.label.Data()
+                            || !record.candidate.retained.owner.IsEqual(record.previous.retained.owner)
+                            || record.candidate.retained.owner.Data()!=record.previous.retained.owner.Data()
+                            || record.candidate.retained.value->bytes!=record.previous.retained.value->bytes
+                            || !record.candidate.retained.value->base.IsEqual(record.previous.retained.value->base)
+                            || !ledger.edgeTreatmentReadbackR2
+                            || ledger.edgeTreatmentReadbackR2->sourceBytes.empty()
+                            || record.candidate.retained.value->bytes!=ledger.edgeTreatmentReadbackR2->sourceBytes
+                            || !record.candidate.retained.current.IsEqual(record.candidate.shape)
+                            || !record.candidate.edgeTreatmentR2
+                            || !record.candidate.edgeTreatmentR2->current.IsEqual(record.candidate.shape))
+                        : !record.candidate.retained.IsEqual(record.previous.retained)))
                 || (treatmentStaged
                     ?(!record.candidate.edgeTreatment||!ledger.edgeTreatmentReadback
                         ||record.candidate.edgeTreatment->value->bytes!=ledger.edgeTreatmentReadback->value->bytes)

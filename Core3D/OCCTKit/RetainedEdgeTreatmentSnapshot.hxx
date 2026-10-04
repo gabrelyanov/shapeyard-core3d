@@ -20,7 +20,8 @@ struct SetAmount {UUID feature;double amountMM;};
 struct ReplaceTargets {UUID feature;std::vector<Anchor> anchors;};
 struct Remove {UUID feature;};
 struct RebuildSource {BaseRecipe requested;};
-using Edit=std::variant<Append,SetAmount,ReplaceTargets,Remove,RebuildSource>;
+struct SetSelectorIntent {UUID feature;retained_face_selector::SelectorIntent requested;};
+using Edit=std::variant<Append,SetAmount,ReplaceTargets,Remove,RebuildSource,SetSelectorIntent>;
 // B1 replay accounting is the common per-operation topology counter (frozen
 // B2 limits: 4,096 faces+edges per stage census, 65,536 visits, 64 stages).
 // The public buildStages/topologyVisits members and chargeStage(visits)

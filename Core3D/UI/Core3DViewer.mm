@@ -309,6 +309,42 @@ void AppendMigrationRequestDigest(std::vector<std::uint8_t>& output,
     }
     output.insert(output.end(), writer.b.begin(), writer.b.end());
 }
+
+// Typed selector-intent edit (B1 and B2 lanes): re-prove the requested intent
+// against the exact pre-step shape replayed from the stored base, then replace
+// only the target step's anchors and receipt through the same proof-to-step
+// issuance the append paths use. Node, feature, localID, kind and amountMM are
+// preserved verbatim; the caller re-encodes the candidate and downstream steps
+// replay in the build. Raw-anchor replacement of a selector step stays refused.
+bool B1PrepareSelectorIntentEdit(retained_edge_treatment::Definition& candidate,
+    const TopoDS_Shape& storedBase, double metersPerLocalUnit,
+    const retained_edge_treatment::SetSelectorIntent& edit,
+    retained_edge_treatment::ReplayBudget& budget,
+    retained_edge_treatment::Refusal& refusal) {
+    namespace et = retained_edge_treatment; namespace fs = retained_face_selector;
+    auto step = std::find_if(candidate.steps.begin(), candidate.steps.end(),
+        [&](const et::Step& value) { return value.feature == edit.feature; });
+    if (step == candidate.steps.end()) { refusal = et::Refusal::IdentityMismatch; return false; }
+    if (!step->selector) { refusal = et::Refusal::UnsupportedOperation; return false; }
+    if (!fs::ValidIntent(edit.requested)) { refusal = et::Refusal::MalformedCarrier; return false; }
+    et::Definition prefix = candidate;
+    prefix.steps.resize(std::size_t(step - candidate.steps.begin()));
+    prefix.outputNode = prefix.steps.empty() ? candidate.base.sourceNode : prefix.steps.back().node;
+    TopoDS_Shape preStep; std::vector<et::StepProof> proofs;
+    if (!et::Replay(storedBase, prefix, preStep, proofs, budget, refusal)) return false;
+    const std::atomic_bool cancelled{false}; fs::Resolution resolution;
+    const fs::Refusal selectorRefusal = fs::Resolve(preStep, edit.requested,
+        metersPerLocalUnit, budget, cancelled, resolution);
+    if (selectorRefusal != fs::Refusal::None || !resolution.proof) {
+        refusal = fs::MapToB1(selectorRefusal); return false;
+    }
+    et::Step issued;
+    if (!IssueSelectorStep(*resolution.proof, metersPerLocalUnit, step->amountMM,
+        step->localID, budget, issued, refusal)) return false;
+    step->anchors = std::move(issued.anchors);
+    step->selector = std::move(issued.selector);
+    return true;
+}
 }
 
 std::shared_ptr<retained_edge_treatment::Work> Core3DViewer::prepareEdgeTreatment(
@@ -330,6 +366,7 @@ std::shared_ptr<retained_edge_treatment::Work> Core3DViewer::prepareEdgeTreatmen
         if(myContext->MoreSelected()||selected.IsNull()||!myDoc->ShapeLabel(selected).IsEqual(snapshot->ownerLabel_)
             ||!selected->Shape().IsEqual(snapshot->current_))return {};
         et::Definition candidate=snapshot->definition_.value_or(snapshot->seed_);
+        std::optional<et::ReplayBudget> intentBudget;
         if(const auto* append=std::get_if<et::Append>(&edit)){
             if(candidate.steps.size()>=et::MaximumSteps||append->anchors.empty()){refusal=et::Refusal::Budget;return {};}
             et::Step step;step.node=MintEdgeTreatmentUUID();step.feature=MintEdgeTreatmentUUID();step.localID=candidate.issuance.nextLocalID++;step.kind=append->kind;step.amountMM=append->amountMM;step.anchors=append->anchors;std::sort(step.anchors.begin(),step.anchors.end(),[](const et::Anchor&a,const et::Anchor&b){return a.key<b.key;});candidate.steps.push_back(std::move(step));candidate.outputNode=candidate.steps.back().node;
@@ -337,9 +374,11 @@ std::shared_ptr<retained_edge_treatment::Work> Core3DViewer::prepareEdgeTreatmen
         }else if(const auto* targets=std::get_if<et::ReplaceTargets>(&edit)){auto i=std::find_if(candidate.steps.begin(),candidate.steps.end(),[&](const et::Step&s){return s.feature==targets->feature;});if(i==candidate.steps.end()){refusal=et::Refusal::IdentityMismatch;return {};}if(i->selector){refusal=et::Refusal::UnsupportedOperation;return {};}i->anchors=targets->anchors;std::sort(i->anchors.begin(),i->anchors.end(),[](const et::Anchor&a,const et::Anchor&b){return a.key<b.key;});
         }else if(const auto* remove=std::get_if<et::Remove>(&edit)){auto i=std::find_if(candidate.steps.begin(),candidate.steps.end(),[&](const et::Step&s){return s.feature==remove->feature;});if(i==candidate.steps.end()){refusal=et::Refusal::IdentityMismatch;return {};}candidate.issuance.retiredLocalIDs.push_back(i->localID);std::sort(candidate.issuance.retiredLocalIDs.begin(),candidate.issuance.retiredLocalIDs.end());candidate.steps.erase(i);candidate.outputNode=candidate.steps.empty()?candidate.base.sourceNode:candidate.steps.back().node;
         }else if(const auto* rebuild=std::get_if<et::RebuildSource>(&edit)){std::vector<double>values;std::vector<std::uint8_t>bytes;bool encoded=false;if(const auto*p=std::get_if<profile::Parameters>(&rebuild->requested)){encoded=profile::Encode(*p,values)&&composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::Profile,profile::SchemaFor(*p),values,bytes);}else if(const auto*e=std::get_if<enclosure::Parameters>(&rebuild->requested)){encoded=enclosure::Encode(*e,values)&&composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::Enclosure,e->definition.constructionFrame?2:1,values,bytes);}else if(const auto*l=std::get_if<rectangular_loft::Definition>(&rebuild->requested)){encoded=loft_persistence::Encode(*l,values)&&composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::RectangularLoft,std::uint32_t(loft_persistence::Schema),values,bytes);}if(!encoded||!composite_recipe::Hash(bytes,candidate.base.sourceRecipeDigest)){refusal=et::Refusal::MalformedCarrier;return {};}}
+        else if(const auto* intent=std::get_if<et::SetSelectorIntent>(&edit)){intentBudget.emplace(continuation?*continuation:snapshot->chargedBudget_);if(!B1PrepareSelectorIntentEdit(candidate,snapshot->base_,snapshot->dimensionMetersPerUnit(),*intent,*intentBudget,refusal))return {};}
         std::vector<std::uint8_t>bytes;if(!et::Encode(candidate,bytes,refusal))return {};
         auto work=std::make_shared<et::Work>();work->snapshot_=snapshot;work->edit_=edit;work->candidate_=std::move(candidate);work->label_=snapshot->ownerLabel_;work->presentation_=selected;work->state_=et::Work::State::Prepared;
-        if(continuation)_edgeTreatmentContinuations.emplace(work.get(),*continuation);
+        if(intentBudget)_edgeTreatmentContinuations.emplace(work.get(),*intentBudget);
+        else if(continuation)_edgeTreatmentContinuations.emplace(work.get(),*continuation);
         refusal=et::Refusal::None;return work;
     }catch(...){refusal=et::Refusal::BuildFailed;return {};}
 }
@@ -1142,11 +1181,23 @@ Core3DViewer::prepareEdgeTreatmentSelectorAppendR2(
 
 std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTreatmentEditR2(
     const std::shared_ptr<const retained_edge_treatment::r2::Snapshot>& original,
-    const retained_edge_treatment::r2::Edit& edit,const ObjectFrameIdentity&,
-    std::uint64_t,std::uint32_t,std::uint32_t,retained_edge_treatment::Refusal& refusal) noexcept {
+    const retained_edge_treatment::r2::Edit& edit,const ObjectFrameIdentity& identity,
+    std::uint64_t presentationRevision,std::uint32_t width,std::uint32_t height,
+    retained_edge_treatment::Refusal& refusal) noexcept {
     namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;refusal=et::Refusal::StaleSnapshot;
-    if(![NSThread isMainThread]||!original)return {};
+    if(![NSThread isMainThread]||!original||!canBeginCommittedEdit()||myDoc.IsNull()
+        ||myContext.IsNull()||!width||!height||original->ownerLabel_.IsNull())return {};
+    const auto scene=captureSceneSnapshot(width,height);
+    if(!scene||scene->publicationSourceIdentifier!=identity.publicationSourceIdentifier
+        ||scene->revisions.documentGeneration!=identity.documentGeneration
+        ||scene->revisions.model!=identity.modelRevision
+        ||scene->revisions.presentation!=presentationRevision)return {};
+    myContext->InitSelected();if(!myContext->MoreSelected())return {};
+    const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());myContext->NextSelected();
+    if(myContext->MoreSelected()||selected.IsNull()||!myDoc->ShapeLabel(selected).IsEqual(original->ownerLabel_)
+        ||!selected->Shape().IsEqual(original->current_))return {};
     r2::Definition candidate=original->definition_;
+    std::optional<et::ReplayBudget> intentBudget;
     if(const auto* amount=std::get_if<et::SetAmount>(&edit)){auto row=std::find_if(candidate.steps.begin(),candidate.steps.end(),[&](const et::Step&s){return s.feature==amount->feature;});if(row==candidate.steps.end()){refusal=et::Refusal::IdentityMismatch;return {};}row->amountMM=amount->amountMM;}
     else if(const auto* remove=std::get_if<et::Remove>(&edit)){auto row=std::find_if(candidate.steps.begin(),candidate.steps.end(),[&](const et::Step&s){return s.feature==remove->feature;});if(row==candidate.steps.end()){refusal=et::Refusal::IdentityMismatch;return {};}candidate.issuance.retiredLocalIDs.push_back(row->localID);candidate.steps.erase(row);candidate.outputNode=candidate.steps.empty()?std::get<r2::BooleanBaseBinding>(candidate.base).sourceNode:candidate.steps.back().node;}
     else if(const auto* rebuild=std::get_if<r2::RebuildBooleanInput>(&edit)){
@@ -1181,6 +1232,23 @@ std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTrea
             &&std::any_of(links->links.begin(),links->links.end(),[&](const r2::LegacyLink&l){return l.operandID==tool->operandID;});
         if(!known||tool->requested.identifier!=tool->operandID){refusal=et::Refusal::IdentityMismatch;return {};}
     }
+    else if(const auto* intent=std::get_if<et::SetSelectorIntent>(&edit)){
+        // Typed selector-intent edit: re-prove on the replayed pre-step shape
+        // and replace only anchors/receipt. The Boolean prefix is untouched,
+        // so the suffix replay in buildEdgeTreatmentR2 re-resolves the new
+        // receipt exactly like any other candidate step.
+        et::Definition shadow;shadow.schema=2;shadow.owner=candidate.owner;
+        if(const auto* old=std::get_if<et::BaseBinding>(&candidate.base))shadow.base=*old;
+        else{const auto& boolean=std::get<r2::BooleanBaseBinding>(candidate.base);
+            shadow.base.family=et::SourceFamily::Profile;shadow.base.source=boolean.source;
+            shadow.base.sourceNode=boolean.sourceNode;shadow.base.sourceSchema=boolean.sourceSchema;
+            shadow.base.sourceRecipeDigest=boolean.sourceRecipeDigest;
+            shadow.base.metersPerLocalUnit=boolean.metersPerLocalUnit;}
+        shadow.issuance=candidate.issuance;shadow.outputNode=candidate.outputNode;shadow.steps=candidate.steps;
+        intentBudget.emplace();CopyTopologyBudget(*intentBudget,original->chargedBudget_);
+        if(!B1PrepareSelectorIntentEdit(shadow,original->base_,original->dimensionMetersPerUnit(),*intent,*intentBudget,refusal))return {};
+        candidate.steps=std::move(shadow.steps);
+    }
     else if(std::holds_alternative<r2::SetBooleanOperation>(edit)||std::holds_alternative<r2::SetInputPlacement>(edit)){
         // The A1 composite graph rebuild (operation change or input placement)
         // has no existing detached builder inside this change's file scope;
@@ -1191,7 +1259,7 @@ std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTrea
     std::vector<std::uint8_t> bytes;if(!r2::Encode(candidate,bytes,refusal))return {};
     auto work=std::make_shared<r2::Work>();work->snapshot_=original;work->mutation_=edit;work->candidate_=candidate;
     work->source_=original->source_;work->sourceBase_=original->sourceBase_;work->base_=original->base_;work->originalCurrent_=original->current_;work->nonce_=original->nonce_;
-    work->chargedBudget_=original->chargedBudget_;work->label_=original->ownerLabel_;work->state_=r2::Work::State::Prepared;
+    work->chargedBudget_=original->chargedBudget_;if(intentBudget)CopyTopologyBudget(work->chargedBudget_,*intentBudget);work->label_=original->ownerLabel_;work->presentation_=selected;work->state_=r2::Work::State::Prepared;
 #if DEBUG
     tb::debug::RecordPhase("prepare-r2",original->chargedBudget_,work->chargedBudget_);
 #endif

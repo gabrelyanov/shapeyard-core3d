@@ -90,6 +90,15 @@ struct B2BudgetStageGuard {
 };
 #endif
 } // namespace
+namespace {
+// Forward declarations for the measured history-companion capture defined in
+// the anonymous namespace below; the R2 stage precedes that block.
+bool CaptureTreatmentCompanionSide(const Handle(TDocStd_Document)& document, const TDF_Label& owner,
+    std::vector<core3d::treatment_history::NamingState>& naming, std::vector<std::uint8_t>& sourceBytes,
+    bool& syetPresent, std::vector<std::uint8_t>& syetBytes) noexcept;
+bool CaptureTreatmentTransientFlags(const TopoDS_Shape& shape,
+    std::vector<core3d::treatment_history::FlagState>& flags) noexcept;
+} // namespace
 // OcctDocument member definitions must sit at global scope: inside the
 // anonymous namespace they do not bind to ::OcctDocument, so the Snapshot
 // friendship would not cover them.
@@ -428,6 +437,28 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
         // Resolve it once and bind it to the staged result before the
         // replacement so the strict whole-document read inside ReplaceShape
         // sees a current binding, exactly as the migration lane does.
+        // D253 measured history companion: capture the actual owner-subtree
+        // naming state, the exact retained-source/R2-carrier bytes and the
+        // original topology's transient Modified/Checked bookkeeping before
+        // any mutation of this transaction. Values are measured, never
+        // hard-coded; capture failure refuses the staging atomically.
+        auto treatmentCompanion=std::unique_ptr<core3d::treatment_history::Companion>(
+            new core3d::treatment_history::Companion);
+        treatmentCompanion->data=myOcafDoc->GetData();
+        treatmentCompanion->ownerLabel=original.ownerLabel_;
+        {
+            TCollection_AsciiString ownerEntry;
+            TDF_Tool::Entry(original.ownerLabel_,ownerEntry);
+            treatmentCompanion->ownerEntry=ownerEntry.ToCString();
+        }
+        treatmentCompanion->undoDepthBefore=myOcafDoc->GetAvailableUndos();
+        treatmentCompanion->ownerShapeBefore=original.current_;
+        if(!CaptureTreatmentCompanionSide(myOcafDoc,original.ownerLabel_,treatmentCompanion->before,
+                treatmentCompanion->sourceBytesBefore,treatmentCompanion->syetBefore,
+                treatmentCompanion->syetBytesBefore)
+            ||!CaptureTreatmentTransientFlags(original.current_,treatmentCompanion->flagsBefore)){
+            refusal=et::Refusal::StageFailed;return Standard_False;
+        }
         Handle(core3d::retained_solid::Attribute) retainedSource;
         TDF_Label retainedSourceLabel;
         if(original.sourceLabel_.FindAttribute(core3d::retained_solid::AttributeID(),retainedSource)
@@ -442,7 +473,12 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
                 }
             }
         }
+        // The split source and treatment carriers are validated together by
+        // ReplaceShape's strict recapture. Rebind both naming records first so
+        // that recapture cannot observe a transient old-treatment/new-source
+        // pair and misclassify the source as noncurrent.
         if(!retainedSourceLabel.IsNull())TNaming_Builder(retainedSourceLabel).Select(built.result_,built.result_);
+        TNaming_Builder(original.sourceLabel_).Select(built.result_,built.result_);
         Handle(AIS_Shape) presentation=new AIS_Shape(built.result_);if(!ReplaceShape(original.ownerLabel_,presentation))return Standard_False;
 #if DEBUG
     core3d::retained_topology_budget::debug::RecordMutation();
@@ -476,6 +512,18 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
         std::optional<et::RecordR2> stored;if(!et::ReadR2(myOcafDoc,original.ownerLabel_,stored,refusal)||!stored)return Standard_False;
         readback={stored->label,stored->owner,std::make_shared<r2::Definition>(stored->value->definition),stored->value->bytes,{},stored->value->base,stored->current};
         readback.sourceBytes=built.sourceChanged()?built.canonicalPrefixBytes():original.sourceBytes_;
+        // D253: capture the corresponding real candidate values now that the
+        // owner shape, retained source record and R2 payload/binding are
+        // coherent and fully read back. The companion stays unfinalized until
+        // the ordinary owner proves closure with this sealed candidate.
+        treatmentCompanion->ownerShapeAfter=built.result_;
+        if(!CaptureTreatmentCompanionSide(myOcafDoc,original.ownerLabel_,treatmentCompanion->after,
+                treatmentCompanion->sourceBytesAfter,treatmentCompanion->syetAfter,
+                treatmentCompanion->syetBytesAfter)){
+            refusal=et::Refusal::StageFailed;return Standard_False;
+        }
+        treatmentCompanion->afterCaptured=true;
+        myPendingTreatmentCompanion=std::move(treatmentCompanion);
         refusal=et::Refusal::None;return Standard_True;
     }catch(...){readback={};refusal=et::Refusal::StageFailed;return Standard_False;}
 }
@@ -916,11 +964,60 @@ bool CaptureTreatmentCarrierBytes(const Handle(TDocStd_Document)& document, cons
     } catch (...) { present = false; bytes.clear(); return false; }
 }
 
+// R2 arm of the measured side capture: a retained-Boolean owner carries its
+// exact source bytes on the split SYRS/A1 carrier and its treatment bytes on
+// the R2 SYET carrier. An owner with neither source record fails closed.
+bool CaptureTreatmentSourceBytesR2(const Handle(TDocStd_Document)& document, const TDF_Label& owner,
+    std::vector<std::uint8_t>& bytes) noexcept {
+    bytes.clear();
+    try {
+        core3d::retained_solid::Record retained;
+        if (!core3d::retained_solid::Read(document, owner, retained)) return false;
+        if (retained.value) { bytes = retained.value->bytes; return true; }
+        core3d::composite_recipe::Record composite;
+        if (!core3d::composite_recipe::Read(document, owner, composite)) return false;
+        if (composite.value) { bytes = composite.value->bytes; return true; }
+        return false;
+    } catch (...) { bytes.clear(); return false; }
+}
+
+bool CaptureTreatmentCarrierBytesR2(const Handle(TDocStd_Document)& document, const TDF_Label& owner,
+    bool& present, std::vector<std::uint8_t>& bytes) noexcept {
+    present = false; bytes.clear();
+    try {
+        std::optional<core3d::retained_edge_treatment::RecordR2> record;
+        core3d::retained_edge_treatment::Refusal refusal = core3d::retained_edge_treatment::Refusal::None;
+        if (!core3d::retained_edge_treatment::ReadR2(document, owner, record, refusal)) return false;
+        if (record) {
+            if (!record->value) return false;
+            present = true; bytes = record->value->bytes;
+        }
+        return true;
+    } catch (...) { present = false; bytes.clear(); return false; }
+}
+
 // One measured side (before staging or after coherent staging) of a
 // companion: subtree naming state, exact source recipe and SYET carrier.
+// The B1 arm reads the profile/enclosure/loft source records and the B1 SYET
+// carrier; a retained-Boolean (R2) owner has none of those and instead
+// carries the SYRS/A1 source record plus the R2 carrier, so the measured
+// owner records select the arm. B1 owners take the unchanged B1 reads.
 bool CaptureTreatmentCompanionSide(const Handle(TDocStd_Document)& document, const TDF_Label& owner,
     std::vector<treatment_history::NamingState>& naming, std::vector<std::uint8_t>& sourceBytes,
     bool& syetPresent, std::vector<std::uint8_t>& syetBytes) noexcept {
+    bool r2Owner = core3d::retained_solid::HasRecord(owner);
+    if (!r2Owner) {
+        for (TDF_ChildIterator it(owner, Standard_False); it.More(); it.Next()) {
+            Handle(TDF_Attribute) attribute;
+            if (it.Value().FindAttribute(core3d::composite_recipe::AttributeID(), attribute)) {
+                r2Owner = true; break;
+            }
+        }
+    }
+    if (r2Owner)
+        return CaptureTreatmentSubtreeNaming(owner, naming)
+            && CaptureTreatmentSourceBytesR2(document, owner, sourceBytes)
+            && CaptureTreatmentCarrierBytesR2(document, owner, syetPresent, syetBytes);
     return CaptureTreatmentSubtreeNaming(owner, naming)
         && CaptureTreatmentSourceBytes(document, owner, sourceBytes)
         && CaptureTreatmentCarrierBytes(document, owner, syetPresent, syetBytes);
@@ -1191,6 +1288,7 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
         else if(const auto*p=std::get_if<SetAmount>(&edit)){auto it=std::find_if(expected.steps.begin(),expected.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(it==expected.steps.end()){refusal=Refusal::IdentityMismatch;return Standard_False;}it->amountMM=p->amountMM;}
         else if(const auto*p=std::get_if<ReplaceTargets>(&edit)){auto it=std::find_if(expected.steps.begin(),expected.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(it==expected.steps.end()){refusal=Refusal::IdentityMismatch;return Standard_False;}if(it->selector){refusal=Refusal::UnsupportedOperation;return Standard_False;}it->anchors=p->anchors;}
         else if(const auto*p=std::get_if<Remove>(&edit)){auto it=std::find_if(expected.steps.begin(),expected.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(it==expected.steps.end()){refusal=Refusal::IdentityMismatch;return Standard_False;}expected.issuance.retiredLocalIDs.push_back(it->localID);expected.steps.erase(it);}
+        else if(const auto*p=std::get_if<SetSelectorIntent>(&edit)){auto it=std::find_if(expected.steps.begin(),expected.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(it==expected.steps.end()){refusal=Refusal::IdentityMismatch;return Standard_False;}if(!it->selector){refusal=Refusal::UnsupportedOperation;return Standard_False;}auto builtStep=std::find_if(built.definition_.steps.begin(),built.definition_.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(builtStep==built.definition_.steps.end()||!builtStep->selector||builtStep->node!=it->node||builtStep->localID!=it->localID||builtStep->kind!=it->kind||builtStep->amountMM!=it->amountMM||builtStep->selector->intent!=p->requested){refusal=Refusal::ReplayMismatch;return Standard_False;}it->anchors=builtStep->anchors;it->selector=builtStep->selector;}
         if(expected.steps.empty())expected.outputNode=expected.base.sourceNode;else expected.outputNode=expected.steps.back().node;
         if(const auto*rebuild=std::get_if<RebuildSource>(&edit)){
             // A source edit moves native edges, so the valid expectation is an

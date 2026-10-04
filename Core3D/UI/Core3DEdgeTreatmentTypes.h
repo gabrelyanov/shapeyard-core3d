@@ -1,6 +1,8 @@
 #import <Foundation/Foundation.h>
 #import <Core3D/Core3DModelingTypes.h>
 
+@class Core3DFaceSelectorIntent;
+
 NS_ASSUME_NONNULL_BEGIN
 typedef NS_ENUM(NSInteger,Core3DEdgeTreatmentKind){Core3DEdgeTreatmentKindChamfer=1,Core3DEdgeTreatmentKindConstantFillet=2};
 typedef NS_ENUM(NSInteger,Core3DEdgeTreatmentCurveKind){Core3DEdgeTreatmentCurveKindLine=1,Core3DEdgeTreatmentCurveKindCircle=2};
@@ -25,6 +27,10 @@ typedef NS_ENUM(NSInteger,Core3DEdgeTreatmentSourceKind){Core3DEdgeTreatmentSour
 @property(nonatomic,readonly)Core3DEdgeTreatmentKind kind;
 @property(nonatomic,readonly)double amountMM;
 @property(nonatomic,copy,readonly)NSArray<Core3DEdgeTreatmentAnchor*> *anchors;
+//! Readback of the persisted selector receipt's typed intent; nil when the
+//! step carries raw anchors only. Populated only by Core3D's native snapshot
+//! path; never caller-writable.
+@property(nonatomic,strong,readonly,nullable)Core3DFaceSelectorIntent *selectorIntent;
 - (instancetype)init NS_UNAVAILABLE; +(instancetype)new NS_UNAVAILABLE;
 @end
 @interface Core3DEdgeTreatmentProfileSource:NSObject

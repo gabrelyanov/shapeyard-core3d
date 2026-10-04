@@ -1933,6 +1933,13 @@ __attribute__((objc_subclassing_restricted))
     featureIdentifier:(NSString *)featureIdentifier expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DEdgeTreatmentResult *))completion
     NS_SWIFT_NAME(beginEdgeTreatmentRemoval(_:featureIdentifier:expected:completion:));
+//! Typed selector-intent edit: re-proves the requested intent against the
+//! replayed pre-step shape and replaces only that step's anchors and receipt;
+//! the feature identity and amount are preserved.
+- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentSelectorIntentEdit:(Core3DEdgeTreatmentSnapshot *)snapshot
+    featureIdentifier:(NSString *)featureIdentifier intent:(Core3DFaceSelectorIntent *)intent
+    expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion
+    NS_SWIFT_NAME(beginEdgeTreatmentSelectorIntentEdit(_:featureIdentifier:intent:expected:completion:));
 - (void)cancelEdgeTreatment:(Core3DEdgeTreatmentOperation *)operation;
 - (Core3DEdgeTreatmentCaptureR2 *)captureEdgeTreatmentR2:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(captureEdgeTreatmentR2(_:expected:));
