@@ -244,16 +244,19 @@ bool SelectorAnchor(const retained_face_selector::BoundaryUse& use, double meter
 
 // Shared proof-to-step issuance: the native membership proof is the only
 // authority input; the minted step carries the proof's selected boundary uses
-// as anchors and its census as the schema-2 selector receipt, with anchors and
-// receipt entries kept in the same key order.
+// as anchors and its census as the selector receipt, with anchors and receipt
+// entries kept in the same key order. The step kind is supplied by the caller:
+// ConstantFillet keeps the schema-2 contract; Chamfer is admitted only through
+// the explicitly versioned schema-3 carrier.
 bool IssueSelectorStep(const retained_face_selector::FaceMembershipProof& proof,
-    double metersPerLocalUnit, double amountMM, std::uint64_t localID,
+    double metersPerLocalUnit, retained_edge_treatment::Kind kind, double amountMM,
+    std::uint64_t localID,
     retained_edge_treatment::ReplayBudget& budget,
     retained_edge_treatment::Step& step, retained_edge_treatment::Refusal& refusal) {
     namespace et = retained_edge_treatment; namespace fs = retained_face_selector;
     step = et::Step();
     step.node = MintEdgeTreatmentUUID(); step.feature = MintEdgeTreatmentUUID();
-    step.localID = localID; step.kind = et::Kind::ConstantFillet; step.amountMM = amountMM;
+    step.localID = localID; step.kind = kind; step.amountMM = amountMM;
     fs::SelectorReceipt receipt; receipt.intent = proof.intent(); receipt.face = proof.plane();
     receipt.coverage = proof.coverage(); receipt.wireCount = proof.wireCount();
     receipt.boundaryUseCount = std::uint32_t(proof.boundaryUses().size());
@@ -339,7 +342,7 @@ bool B1PrepareSelectorIntentEdit(retained_edge_treatment::Definition& candidate,
         refusal = fs::MapToB1(selectorRefusal); return false;
     }
     et::Step issued;
-    if (!IssueSelectorStep(*resolution.proof, metersPerLocalUnit, step->amountMM,
+    if (!IssueSelectorStep(*resolution.proof, metersPerLocalUnit, step->kind, step->amountMM,
         step->localID, budget, issued, refusal)) return false;
     step->anchors = std::move(issued.anchors);
     step->selector = std::move(issued.selector);
@@ -456,11 +459,18 @@ Core3DViewer::projectEdgeTreatmentSelectorTargets(
 std::shared_ptr<retained_edge_treatment::Work> Core3DViewer::prepareEdgeTreatmentSelectorAppend(
     const std::shared_ptr<const retained_edge_treatment::Snapshot>& original,
     const std::shared_ptr<const retained_edge_treatment::SelectorTargetCapture>& targets,
-    double amountMM, const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+    retained_edge_treatment::Kind kind, double amountMM, const ObjectFrameIdentity& identity,
+    std::uint64_t presentationRevision,
     std::uint32_t width, std::uint32_t height,
     retained_edge_treatment::Refusal& refusal) noexcept {
     namespace et = retained_edge_treatment; namespace fs = retained_face_selector;
     refusal = et::Refusal::StaleSnapshot;
+    // Only the two proved append kinds exist: ConstantFillet keeps the
+    // schema-2 receipt contract; Chamfer is admitted through the schema-3
+    // carrier below. No other kind can enter through this entry.
+    if (kind != et::Kind::ConstantFillet && kind != et::Kind::Chamfer) {
+        refusal = et::Refusal::UnsupportedOperation; return {};
+    }
     if (![NSThread isMainThread] || !original || !targets || targets->original_ != original
         || !std::isfinite(amountMM) || amountMM <= 0 || amountMM > 20
         || !canBeginCommittedEdit() || myDoc.IsNull() || myContext.IsNull()
@@ -499,20 +509,25 @@ std::shared_ptr<retained_edge_treatment::Work> Core3DViewer::prepareEdgeTreatmen
         et::Definition candidate = original->definition_.value_or(original->seed_);
         if (candidate.steps.size() >= et::MaximumSteps) { refusal = et::Refusal::Budget; return {}; }
         et::Step step;
-        if (!IssueSelectorStep(*refreshed.proof, original->dimensionMetersPerUnit(), amountMM,
+        if (!IssueSelectorStep(*refreshed.proof, original->dimensionMetersPerUnit(), kind, amountMM,
             candidate.issuance.nextLocalID++, budget, step, refusal)){
 #if DEBUG
             tb::debug::RecordPhase("prepare", targets->chargedBudget_, budget);
 #endif
             return {};}
-        candidate.schema = 2;
+        // Versioned carrier rule, mirrored exactly by the staging arm: a
+        // Chamfer selector receipt requires the schema-3 carrier; a fillet
+        // append upgrades a schema-1 carrier to schema 2 and leaves an
+        // existing schema-2/3 carrier at its version.
+        if (kind == et::Kind::Chamfer) candidate.schema = 3;
+        else if (candidate.schema < 2) candidate.schema = 2;
         candidate.steps.push_back(step); candidate.outputNode = step.node;
         std::vector<std::uint8_t> encoded;
         if (!et::Encode(candidate, encoded, refusal)) return {};
         auto admitted = std::shared_ptr<et::SelectorAppendValues>(new et::SelectorAppendValues);
         admitted->captureNonce_ = original->nonce_; admitted->fence_ = original->owner_.fence;
         admitted->source_ = original->source_; admitted->base_ = candidate.base;
-        admitted->edit_ = et::Append{et::Kind::ConstantFillet, amountMM, step.anchors};
+        admitted->edit_ = et::Append{kind, amountMM, step.anchors};
         admitted->issuedStep_ = step; admitted->chargedBudget_ = budget;
 #if DEBUG
         tb::debug::RecordPhase("prepare", targets->chargedBudget_, budget);
@@ -612,6 +627,8 @@ std::vector<retained_edge_treatment::Anchor> Core3DViewer::captureEdgeTreatmentT
         }
         TopTools_IndexedDataMapOfShapeListOfShape adjacency;
         TopExp::MapShapesAndAncestors(snapshot->current_,TopAbs_EDGE,TopAbs_FACE,adjacency);
+        const double mmPerLocal=snapshot->dimensionMetersPerUnit()*1000.0;
+        if(!std::isfinite(mmPerLocal)||mmPerLocal<=0)return {};
         myContext->InitSelected();
         while(myContext->MoreSelected()){
             if(!myContext->HasSelectedShape()){myContext->NextSelected();continue;}
@@ -628,9 +645,9 @@ std::vector<retained_edge_treatment::Anchor> Core3DViewer::captureEdgeTreatmentT
             anchor.curve=curve.GetType()==GeomAbs_Line?et::CurveKind::Line
                 :curve.GetType()==GeomAbs_Circle?et::CurveKind::Circle:et::CurveKind(0);
             if(int(anchor.curve)==0)return {};
-            anchor.pointMM={point.X(),point.Y(),point.Z()};
+            anchor.pointMM={point.X()*mmPerLocal,point.Y()*mmPerLocal,point.Z()*mmPerLocal};
             anchor.tangent={derivative.X(),derivative.Y(),derivative.Z()};
-            anchor.circleRadiusMM=anchor.curve==et::CurveKind::Circle?curve.Circle().Radius():0;
+            anchor.circleRadiusMM=anchor.curve==et::CurveKind::Circle?curve.Circle().Radius()*mmPerLocal:0;
             std::array<std::array<double,3>,2>normals{};int faceIndex=0;
             for(TopTools_ListIteratorOfListOfShape it(adjacency.FindFromIndex(index));it.More();it.Next()){
                 if(!budget.visit(1,tb::Site::C27CapturedAnchor)){refusal=et::Refusal::Budget;return {};}
@@ -1025,7 +1042,7 @@ Core3DViewer::prepareRetainedBooleanMigrationR2(
             if(row==candidate.steps.end()){refusal=et::Refusal::IdentityMismatch;return {};}
             et::Step issued;
             if(!IssueSelectorStep(*review->proofs_[index],binding.metersPerLocalUnit,
-                row->amountMM,row->localID,budget,issued,refusal)){
+                et::Kind::ConstantFillet,row->amountMM,row->localID,budget,issued,refusal)){
 #if DEBUG
                 tb::debug::RecordPhase("prepare-r2",review->chargedBudget_,budget);
 #endif
@@ -1040,7 +1057,7 @@ Core3DViewer::prepareRetainedBooleanMigrationR2(
             if(candidate.steps.size()>=et::MaximumSteps){refusal=et::Refusal::Budget;return {};}
             et::Step issued;
             if(!IssueSelectorStep(*review->appendProof_,binding.metersPerLocalUnit,
-                request.append->amountMM,candidate.issuance.nextLocalID++,budget,issued,refusal)){
+                et::Kind::ConstantFillet,request.append->amountMM,candidate.issuance.nextLocalID++,budget,issued,refusal)){
 #if DEBUG
                 tb::debug::RecordPhase("prepare-r2",review->chargedBudget_,budget);
 #endif
@@ -1098,7 +1115,7 @@ Core3DViewer::prepareRetainedBooleanEnrollmentR2(
         r2::Definition candidate;candidate.owner=graph.owner;candidate.base=binding;
         candidate.issuance.nextLocalID=1;candidate.outputNode=binding.sourceNode;
         et::Step step;
-        if(!IssueSelectorStep(*review->proof_,binding.metersPerLocalUnit,review->request_.amountMM,
+        if(!IssueSelectorStep(*review->proof_,binding.metersPerLocalUnit,et::Kind::ConstantFillet,review->request_.amountMM,
             candidate.issuance.nextLocalID++,budget,step,refusal)){
 #if DEBUG
             tb::debug::RecordPhase("prepare-r2",review->chargedBudget_,budget);
@@ -1163,7 +1180,7 @@ Core3DViewer::prepareEdgeTreatmentSelectorAppendR2(
         ||!selected->Shape().IsEqual(original->current_))return {};
     et::ReplayBudget budget;CopyTopologyBudget(budget,targets->chargedBudget_);
     r2::Definition candidate=original->definition_;et::Step step;
-    if(!IssueSelectorStep(*targets->proof_,original->dimensionMetersPerUnit(),amountMM,
+    if(!IssueSelectorStep(*targets->proof_,original->dimensionMetersPerUnit(),et::Kind::ConstantFillet,amountMM,
         candidate.issuance.nextLocalID++,budget,step,refusal)){
 #if DEBUG
         tb::debug::RecordPhase("prepare-r2",targets->chargedBudget_,budget);
@@ -5192,6 +5209,57 @@ std::optional<StoredProfileSnapshot> Core3DViewer::storedProfileDefinition(
             capture->owner_.owner=seed.owner;capture->owner_.outputNode=capture->seed_.outputNode;capture->owner_.status=retained_recipe::OwnerStatus::CurrentEditable;result.edgeTreatment=std::move(capture);
         }
         return result;
+    } catch (...) { return {}; }
+}
+
+std::shared_ptr<const retained_edge_treatment::Snapshot>
+Core3DViewer::storedEdgeTreatmentTargetSnapshot(
+    const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+    std::uint32_t width, std::uint32_t height) noexcept {
+    if (![NSThread isMainThread] || !canBeginCommittedEdit() || myContext.IsNull()
+        || myDoc.IsNull() || identity.entityIdentifier.empty() || width == 0 || height == 0) return {};
+    try {
+        const auto snapshot = captureSceneSnapshot(width, height);
+        if (!snapshot || snapshot->selectionMode != scene::ElementKind::Edge
+            || snapshot->publicationSourceIdentifier != identity.publicationSourceIdentifier
+            || snapshot->revisions.documentGeneration != identity.documentGeneration
+            || snapshot->revisions.model != identity.modelRevision
+            || snapshot->revisions.presentation != presentationRevision) return {};
+        Handle(AIS_Shape) selected;
+        myContext->InitSelected();
+        if (!myContext->MoreSelected()) return {};
+        for (; myContext->MoreSelected(); myContext->NextSelected()) {
+            if (!myContext->HasSelectedShape()) return {};
+            const TopoDS_Shape owned = myContext->SelectedShape();
+            if (owned.ShapeType() != TopAbs_EDGE) return {};
+            const auto interactive = Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+            if (interactive.IsNull() || (!selected.IsNull() && interactive != selected)) return {};
+            selected = interactive;
+        }
+        OcctObjectTransformState state;
+        const auto label = myDoc->ShapeLabel(selected);
+        if (!myDoc->CaptureObjectTransformStateForLabel(label, state)
+            || state.entityIdentifier != identity.entityIdentifier
+            || state.resolvedRepresentation != OcctGeometryRepresentation::BRep
+            || state.profile.label.IsNull()) return {};
+        const double constructionScale = state.profile.parameters.constructionFrame
+            ? state.profile.parameters.constructionFrame->values[7] : 1.0;
+        double dimensionMetersPerUnit = state.profile.parameters.metersPerUnit
+            * std::abs(constructionScale) * std::abs(state.scalars[7]);
+        if (!std::isfinite(dimensionMetersPerUnit) || dimensionMetersPerUnit <= 0
+            || !std::isfinite(dimensionMetersPerUnit * 1000.0))
+            dimensionMetersPerUnit = 0; // Unsupported physical scale does not hide a manual recipe.
+        const bool current = state.profile.IsCurrent(myDoc->Document(), label)
+            && profile::HasOnlyMetadataSubshapes(myDoc->Document(), label);
+        if (!current) return {};
+        // Byte-identical to the Object-mode snapshot construction in
+        // storedProfileDefinition; only the selection binding above differs.
+        namespace et=retained_edge_treatment;auto capture=std::shared_ptr<et::Snapshot>(new et::Snapshot);
+        capture->ownerLabel_=label;capture->sourceLabel_=state.profile.label;capture->sourceIdentifier_=state.profile.identifier;capture->source_=state.profile.parameters;capture->current_=state.shape;capture->base_=state.edgeTreatment?state.edgeTreatment->value->base:state.shape;capture->nonce_=std::uint64_t(myDoc->Document()->GetData()->Time());capture->presentationRevision_=presentationRevision;
+        auto&seed=capture->seed_;seed.schema=1;receipt::ParseUUID(myDoc->DocumentIdentifier(),seed.owner.document);receipt::ParseUUID(state.entityIdentifier,seed.owner.entity);receipt::ParseUUID(state.definitionIdentifier,seed.owner.definition);seed.base.source.document=seed.owner.document;seed.base.source.entity=seed.owner.entity;seed.base.source.definition=seed.owner.definition;receipt::ParseUUID(state.profile.identifier,seed.base.source.sourceFeature);seed.base.sourceNode=MintEdgeTreatmentUUID();seed.base.family=et::SourceFamily::Profile;seed.base.sourceSchema=std::uint32_t(profile::SchemaFor(state.profile.parameters));seed.base.metersPerLocalUnit=dimensionMetersPerUnit;seed.outputNode=seed.base.sourceNode;seed.issuance.nextLocalID=1;composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::Profile,seed.base.sourceSchema,state.profile.values,capture->sourceBytes_);composite_recipe::Hash(capture->sourceBytes_,seed.base.sourceRecipeDigest);
+        if(state.edgeTreatment){capture->definition_=state.edgeTreatment->value->definition;capture->definitionBytes_=state.edgeTreatment->value->bytes;capture->seed_=*capture->definition_;TopoDS_Shape replayed;std::vector<et::StepProof>proofs;et::Refusal replayRefusal;if(!et::Replay(capture->base_,*capture->definition_,replayed,proofs,capture->chargedBudget_,replayRefusal)||!et::EquivalentReplayGeometry(capture->current_,replayed,capture->chargedBudget_,replayRefusal))return {};}
+        capture->owner_.owner=seed.owner;capture->owner_.outputNode=capture->seed_.outputNode;capture->owner_.status=retained_recipe::OwnerStatus::CurrentEditable;
+        return capture;
     } catch (...) { return {}; }
 }
 

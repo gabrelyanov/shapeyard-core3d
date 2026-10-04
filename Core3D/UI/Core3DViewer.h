@@ -296,7 +296,7 @@ namespace core3d {
     std::shared_ptr<retained_edge_treatment::Work> prepareEdgeTreatmentSelectorAppend(
         const std::shared_ptr<const retained_edge_treatment::Snapshot>& original,
         const std::shared_ptr<const retained_edge_treatment::SelectorTargetCapture>& targets,
-        double amountMM, const ObjectFrameIdentity& identity,
+        retained_edge_treatment::Kind kind, double amountMM, const ObjectFrameIdentity& identity,
         std::uint64_t presentationRevision,
         std::uint32_t width, std::uint32_t height,
         retained_edge_treatment::Refusal& refusal) noexcept;
@@ -314,6 +314,17 @@ namespace core3d {
         const std::shared_ptr<const retained_edge_treatment::Snapshot>&,
         retained_edge_treatment::ReplayBudget&,
         retained_edge_treatment::Refusal&) noexcept;
+    // B1a owner-bound Edge-mode binding for the raw-target capture. Admits
+    // only when the scene selection mode is Edge, the expected publication
+    // source and document/model/presentation revisions match exactly, and the
+    // selection is nothing but EDGE owners of one and the same AIS_Shape
+    // whose document label resolves to identity.entityIdentifier as BRep;
+    // the snapshot construction it returns and the anchor leg that consumes
+    // it are byte-identical to the Object-mode path.
+    std::shared_ptr<const retained_edge_treatment::Snapshot>
+    storedEdgeTreatmentTargetSnapshot(
+        const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+        std::uint32_t width, std::uint32_t height) noexcept;
     retained_face_selector::Resolution resolveFaceSelector(
         const std::shared_ptr<const retained_edge_treatment::Snapshot>&,
         const retained_face_selector::SelectorIntent&) noexcept;

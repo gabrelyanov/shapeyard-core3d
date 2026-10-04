@@ -1234,10 +1234,10 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
             if(!append||admitted.captureNonce_!=original.nonce_
                 ||!SameFence(admitted.fence_,original.owner_.fence)
                 ||!SameB1Base(admitted.base_,expected.base)
-                ||admitted.edit_.kind!=Kind::ConstantFillet
+                ||(admitted.edit_.kind!=Kind::ConstantFillet&&admitted.edit_.kind!=Kind::Chamfer)
                 ||append->kind!=admitted.edit_.kind||append->amountMM!=admitted.edit_.amountMM
                 ||append->anchors!=admitted.edit_.anchors
-                ||admitted.issuedStep_.kind!=Kind::ConstantFillet
+                ||admitted.issuedStep_.kind!=admitted.edit_.kind
                 ||admitted.issuedStep_.amountMM!=admitted.edit_.amountMM
                 ||admitted.issuedStep_.anchors!=admitted.edit_.anchors
                 ||!admitted.issuedStep_.selector
@@ -1281,10 +1281,14 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
             if(receiptRefusal!=core3d::retained_face_selector::Refusal::None){
                 refusal=core3d::retained_face_selector::MapToB1(receiptRefusal);return Standard_False;
             }
-            expected.schema=2;++expected.issuance.nextLocalID;
+            // The staging mirror of the viewer's versioned carrier rule: a
+            // Chamfer selector receipt stages only as the schema-3 carrier; a
+            // fillet append upgrades schema 1 to 2 and leaves 2/3 unchanged.
+            if(append->kind==Kind::Chamfer)expected.schema=3;else if(expected.schema<2)expected.schema=2;
+            ++expected.issuance.nextLocalID;
             expected.steps.push_back(admitted.issuedStep_);expected.outputNode=admitted.issuedStep_.node;
         }
-        else if(const auto*p=std::get_if<Append>(&edit)){if(built.definition_.steps.size()!=expected.steps.size()+1||built.definition_.steps.back().selector){refusal=Refusal::ReplayMismatch;return Standard_False;}expected.steps.push_back(built.definition_.steps.back());if(expected.steps.back().kind!=p->kind||expected.steps.back().amountMM!=p->amountMM||expected.steps.back().anchors!=p->anchors){refusal=Refusal::ReplayMismatch;return Standard_False;}}
+        else if(const auto*p=std::get_if<Append>(&edit)){if(built.definition_.steps.size()!=expected.steps.size()+1||built.definition_.steps.back().selector){refusal=Refusal::ReplayMismatch;return Standard_False;}expected.steps.push_back(built.definition_.steps.back());if(expected.steps.back().kind!=p->kind||expected.steps.back().amountMM!=p->amountMM||expected.steps.back().anchors!=p->anchors){refusal=Refusal::ReplayMismatch;return Standard_False;}++expected.issuance.nextLocalID;}
         else if(const auto*p=std::get_if<SetAmount>(&edit)){auto it=std::find_if(expected.steps.begin(),expected.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(it==expected.steps.end()){refusal=Refusal::IdentityMismatch;return Standard_False;}it->amountMM=p->amountMM;}
         else if(const auto*p=std::get_if<ReplaceTargets>(&edit)){auto it=std::find_if(expected.steps.begin(),expected.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(it==expected.steps.end()){refusal=Refusal::IdentityMismatch;return Standard_False;}if(it->selector){refusal=Refusal::UnsupportedOperation;return Standard_False;}it->anchors=p->anchors;}
         else if(const auto*p=std::get_if<Remove>(&edit)){auto it=std::find_if(expected.steps.begin(),expected.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(it==expected.steps.end()){refusal=Refusal::IdentityMismatch;return Standard_False;}expected.issuance.retiredLocalIDs.push_back(it->localID);expected.steps.erase(it);}

@@ -125,7 +125,7 @@ inline bool unit(const std::array<double, 3>& value) {
     return std::isfinite(squared) && std::abs(squared - 1.0) <= 1e-12;
 }
 inline bool valid(const Definition& definition, Refusal& refusal) {
-    if (definition.schema != 1 && definition.schema != 2) { refusal = Refusal::UnsupportedVersion; return false; }
+    if (definition.schema != 1 && definition.schema != 2 && definition.schema != 3) { refusal = Refusal::UnsupportedVersion; return false; }
     if (!retained_recipe::Valid(definition.owner) || !retained_recipe::Valid(definition.base.source)
         || !retained_recipe::Nonzero(definition.base.sourceNode)
         || !retained_recipe::Nonzero(definition.base.sourceRecipeDigest)
@@ -174,7 +174,17 @@ inline bool valid(const Definition& definition, Refusal& refusal) {
         }
         if (step.selector) {
             hasSelector = true;
-            if (definition.schema != 2 || step.kind != Kind::ConstantFillet
+            // Schema 2 keeps its exact meaning: a selector receipt is admitted
+            // only on a ConstantFillet step. Schema 3 is the additive,
+            // explicitly versioned chamfer contract: a selector receipt is
+            // admitted on a Chamfer step as well. The receipt value, its
+            // proofVersion and its codec are unchanged; only the carrier
+            // schema versions the kind admission, so schema-1/2 carriers and
+            // every previously valid receipt keep their bytes and meaning.
+            const bool schemaTwo = definition.schema == 2 && step.kind == Kind::ConstantFillet;
+            const bool schemaThree = definition.schema == 3
+                && (step.kind == Kind::Chamfer || step.kind == Kind::ConstantFillet);
+            if ((!schemaTwo && !schemaThree)
                 || !retained_face_selector::ValidReceipt(*step.selector)
                 || step.selector->entries.size() != step.anchors.size()) {
                 refusal = Refusal::MalformedCarrier; return false;
@@ -224,7 +234,7 @@ inline bool Encode(const Definition& definition, std::vector<std::uint8_t>& outp
                 for (double part : anchor.normalB) writer.d(part);
                 writer.d(anchor.circleRadiusMM);
             }
-            if (definition.schema == 2) {
+            if (definition.schema >= 2) {
                 writer.u(step.selector ? 1 : 0, 1);
                 if (step.selector && !retained_face_selector::WriteReceipt(writer, *step.selector)) {
                     refusal = Refusal::MalformedCarrier; return false;
@@ -253,7 +263,7 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes, std::optional<Definit
         }
         detail::Reader reader{bytes, bytes.size() - 32};
         char magic[4]; std::uint64_t value = 0, count = 0; Definition definition;
-        if (!reader.raw(magic, 4) || !reader.u(4, value) || (value != 1 && value != 2)) {
+        if (!reader.raw(magic, 4) || !reader.u(4, value) || (value != 1 && value != 2 && value != 3)) {
             refusal = Refusal::UnsupportedVersion; return false;
         }
         definition.schema = std::uint32_t(value);
@@ -301,7 +311,7 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes, std::optional<Definit
                 if (!reader.d(anchor.circleRadiusMM)) return false;
                 step.anchors.push_back(anchor);
             }
-            if (definition.schema == 2) {
+            if (definition.schema >= 2) {
                 if (!reader.u(1, value) || value > 1) { refusal = Refusal::MalformedCarrier; return false; }
                 if (value == 1) {
                     retained_face_selector::SelectorReceipt receipt;

@@ -2022,6 +2022,17 @@ __attribute__((objc_subclassing_restricted))
     expected:(Core3DSceneSnapshot *)expected
     completion:(void (^)(Core3DEdgeTreatmentResult *result))completion
     NS_SWIFT_NAME(beginEdgeTreatmentSelectorAppend(_:amountMM:proof:expected:completion:));
+//! Proved chamfer append through the additive, explicitly versioned SYET
+//! schema-3 contract: the native proof is the only authority, the issued step
+//! carries kind Chamfer with its own newly issued receipt, and the schema-2
+//! ConstantFillet receipt contract is unchanged.
+- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentSelectorChamferAppend:
+      (Core3DEdgeTreatmentSnapshot *)snapshot
+    amountMM:(double)amountMM
+    proof:(Core3DFaceSelectorProof *)proof
+    expected:(Core3DSceneSnapshot *)expected
+    completion:(void (^)(Core3DEdgeTreatmentResult *result))completion
+    NS_SWIFT_NAME(beginEdgeTreatmentSelectorChamferAppend(_:amountMM:proof:expected:completion:));
 - (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentAmount:(Core3DEdgeTreatmentSnapshot *)snapshot
     featureIdentifier:(NSString *)featureIdentifier amountMM:(double)amountMM
     expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion

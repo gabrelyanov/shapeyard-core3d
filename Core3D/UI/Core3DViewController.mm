@@ -7,6 +7,7 @@
 #include "../OCCTKit/SavedCutSourceChangedQualification.hxx"
 #include "../OCCTKit/PartBooleanCorrespondence.hxx"
 #include "../OCCTKit/RetainedPartBoolean.hxx"
+#include "RetainedSemanticChamferAdapter.hxx"
 #include <thread>
 #endif
 #if DEBUG
@@ -4060,7 +4061,7 @@ void B1BindQ2(Core3DEdgeTreatmentResult *value,
     [value setValue:B1ID(d.base.source.sourceFeature) forKey:@"sourceFeatureIdentifier"];
     [value setValue:@(snapshot->dimensionMetersPerUnit()) forKey:@"dimensionMetersPerUnit"];
     [value setValue:sourceFamily forKey:@"sourceFamily"];
-    [value setValue:(d.schema==2?@"syet2":d.schema==1?@"syet1":@"bare") forKey:@"carrier"];
+    [value setValue:(d.schema==3?@"syet3":d.schema==2?@"syet2":d.schema==1?@"syet1":@"bare") forKey:@"carrier"];
     [value setValue:@"none" forKey:@"prefixState"];
     NSData *originalSource=B1SourceBytes(snapshot->source());
     [value setValue:B1SHA256(originalSource) forKey:@"originalSourceSHA256"];
@@ -21572,11 +21573,17 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     auto capture=B1Object<Core3DEdgeTreatmentCapture>(Core3DEdgeTreatmentCapture.class);[capture setValue:@(Core3DEdgeTreatmentStatusMalformed) forKey:@"status"];[capture setValue:@"b1.StaleSnapshot" forKey:@"refusalCode"];[capture setValue:@"The model changed; reopen the edge-treatment editor." forKey:@"refusalMessage"];
     [capture setValue:entityIdentifier forKey:@"entityIdentifier"];[capture setValue:@"" forKey:@"documentIdentifier"];[capture setValue:@"" forKey:@"carrier"];
     if(!NSThread.isMainThread||!GLController||!GLController.viewer||!expected||entityIdentifier.length==0)return capture;
-    try{const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;std::shared_ptr<const core3d::retained_edge_treatment::Snapshot>native;if(auto profile=GLController.viewer->storedProfileDefinition(identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height)))native=profile->edgeTreatment;else if(auto enclosure=GLController.viewer->storedEnclosureDefinition(identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height)))native=enclosure->edgeTreatment;else if(auto loft=GLController.viewer->storedRectangularLoftDefinition(identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height)))native=loft->edgeTreatment;if(!native)return capture;auto snapshot=B1Snapshot(native);NSData *canonicalSource=B1SourceBytes(native->source());if(snapshot.profileSource)[snapshot.profileSource setValue:canonicalSource forKey:@"canonicalSourceBytes"];if(snapshot.enclosureSource)[snapshot.enclosureSource setValue:canonicalSource forKey:@"canonicalSourceBytes"];if(snapshot.loftSource)[snapshot.loftSource setValue:canonicalSource forKey:@"canonicalSourceBytes"];[capture setValue:snapshot.documentIdentifier forKey:@"documentIdentifier"];[capture setValue:(native->effectiveDefinition().schema==2?@"syet2":@"syet1") forKey:@"carrier"];[capture setValue:@(Core3DEdgeTreatmentStatusCurrentEditable) forKey:@"status"];[capture setValue:snapshot forKey:@"snapshot"];[capture setValue:@"b1.None" forKey:@"refusalCode"];[capture setValue:@"" forKey:@"refusalMessage"];return capture;}catch(...){return capture;}
+    try{const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;std::shared_ptr<const core3d::retained_edge_treatment::Snapshot>native;if(auto profile=GLController.viewer->storedProfileDefinition(identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height)))native=profile->edgeTreatment;else if(auto enclosure=GLController.viewer->storedEnclosureDefinition(identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height)))native=enclosure->edgeTreatment;else if(auto loft=GLController.viewer->storedRectangularLoftDefinition(identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height)))native=loft->edgeTreatment;if(!native)return capture;auto snapshot=B1Snapshot(native);NSData *canonicalSource=B1SourceBytes(native->source());if(snapshot.profileSource)[snapshot.profileSource setValue:canonicalSource forKey:@"canonicalSourceBytes"];if(snapshot.enclosureSource)[snapshot.enclosureSource setValue:canonicalSource forKey:@"canonicalSourceBytes"];if(snapshot.loftSource)[snapshot.loftSource setValue:canonicalSource forKey:@"canonicalSourceBytes"];[capture setValue:snapshot.documentIdentifier forKey:@"documentIdentifier"];[capture setValue:(native->effectiveDefinition().schema==3?@"syet3":native->effectiveDefinition().schema==2?@"syet2":@"syet1") forKey:@"carrier"];[capture setValue:@(Core3DEdgeTreatmentStatusCurrentEditable) forKey:@"status"];[capture setValue:snapshot forKey:@"snapshot"];[capture setValue:@"b1.None" forKey:@"refusalCode"];[capture setValue:@"" forKey:@"refusalMessage"];return capture;}catch(...){return capture;}
 }
 
 - (Core3DEdgeTreatmentTargetCapture *)captureEdgeTreatmentTargets:(NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected {
-    auto result=B1Object<Core3DEdgeTreatmentNativeTargets>(Core3DEdgeTreatmentNativeTargets.class);[result setValue:@(Core3DEdgeTreatmentStatusMalformed) forKey:@"status"];[result setValue:@[] forKey:@"anchors"];[result setValue:@"b1.UnsupportedEdge" forKey:@"refusalCode"];[result setValue:@"The selected edge geometry cannot be retained by this tool." forKey:@"refusalMessage"];auto capture=[self captureEdgeTreatment:entityIdentifier expected:expected];if(!capture.snapshot||!GLController.viewer)return result;auto snapshot=(Core3DEdgeTreatmentNativeSnapshot*)capture.snapshot;core3d::retained_edge_treatment::Refusal refusal;result->nativeAnchors=GLController.viewer->captureEdgeTreatmentTargets(snapshot->native,result->nativeBudget,refusal);if(refusal!=core3d::retained_edge_treatment::Refusal::None)return result;result->nativeSnapshot=snapshot->native;NSMutableArray*anchors=[NSMutableArray array];for(const auto&a:result->nativeAnchors)[anchors addObject:B1Anchor(a)];[result setValue:@(Core3DEdgeTreatmentStatusCurrentEditable) forKey:@"status"];[result setValue:capture.snapshot forKey:@"snapshot"];[result setValue:anchors forKey:@"anchors"];[result setValue:@"b1.None" forKey:@"refusalCode"];[result setValue:@"" forKey:@"refusalMessage"];return result;
+    auto result=B1Object<Core3DEdgeTreatmentNativeTargets>(Core3DEdgeTreatmentNativeTargets.class);[result setValue:@(Core3DEdgeTreatmentStatusMalformed) forKey:@"status"];[result setValue:@[] forKey:@"anchors"];[result setValue:@"b1.UnsupportedEdge" forKey:@"refusalCode"];[result setValue:@"The selected edge geometry cannot be retained by this tool." forKey:@"refusalMessage"];auto capture=[self captureEdgeTreatment:entityIdentifier expected:expected];
+    // B1a owner-bound Edge-mode binding: when the Object-mode editor capture
+    // cannot bind (the scene is in Edge selection mode), the viewer's
+    // Edge-mode entry admits only under its full fail-closed conditions.
+    // Everything after the binding is byte-identical to the Object-mode path.
+    if(!capture.snapshot&&GLController.viewer&&expected&&entityIdentifier.length>0){const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;if(auto native=GLController.viewer->storedEdgeTreatmentTargetSnapshot(identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height))){if(auto edgeSnapshot=B1Snapshot(native)){NSData *canonicalSource=B1SourceBytes(native->source());if(edgeSnapshot.profileSource)[edgeSnapshot.profileSource setValue:canonicalSource forKey:@"canonicalSourceBytes"];if(edgeSnapshot.enclosureSource)[edgeSnapshot.enclosureSource setValue:canonicalSource forKey:@"canonicalSourceBytes"];if(edgeSnapshot.loftSource)[edgeSnapshot.loftSource setValue:canonicalSource forKey:@"canonicalSourceBytes"];[capture setValue:edgeSnapshot forKey:@"snapshot"];}}}
+    if(!capture.snapshot||!GLController.viewer)return result;auto snapshot=(Core3DEdgeTreatmentNativeSnapshot*)capture.snapshot;core3d::retained_edge_treatment::Refusal refusal;result->nativeAnchors=GLController.viewer->captureEdgeTreatmentTargets(snapshot->native,result->nativeBudget,refusal);if(refusal!=core3d::retained_edge_treatment::Refusal::None)return result;result->nativeSnapshot=snapshot->native;NSMutableArray*anchors=[NSMutableArray array];for(const auto&a:result->nativeAnchors)[anchors addObject:B1Anchor(a)];[result setValue:@(Core3DEdgeTreatmentStatusCurrentEditable) forKey:@"status"];[result setValue:capture.snapshot forKey:@"snapshot"];[result setValue:anchors forKey:@"anchors"];[result setValue:@"b1.None" forKey:@"refusalCode"];[result setValue:@"" forKey:@"refusalMessage"];return result;
 }
 
 - (Core3DFaceSelectorQuery *)resolveFaceSelector:(Core3DEdgeTreatmentSnapshot *)snapshot
@@ -22127,6 +22134,27 @@ std::unordered_map<NSUInteger,B2BudgetSessionBox>& B2BudgetSessions(){
     (Core3DEdgeTreatmentSnapshot *)snapshot amountMM:(double)amountMM
     proof:(Core3DFaceSelectorProof *)proof expected:(Core3DSceneSnapshot *)expected
     completion:(void (^)(Core3DEdgeTreatmentResult *))completion {
+    return [self core3d_beginEdgeTreatmentSelectorAppend:snapshot amountMM:amountMM
+        proof:proof kind:core3d::retained_edge_treatment::Kind::ConstantFillet
+        expected:expected completion:completion];
+}
+// The proved chamfer append shares the exact fillet append path; the one
+// kind-specific delegate lives in the header-only RetainedSemanticChamferAdapter
+// seam, and the viewer/staging pair versions the carrier to the schema-3
+// contract for it. No codec, staging, receipt or proof authority moves here.
+- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentSelectorChamferAppend:
+    (Core3DEdgeTreatmentSnapshot *)snapshot amountMM:(double)amountMM
+    proof:(Core3DFaceSelectorProof *)proof expected:(Core3DSceneSnapshot *)expected
+    completion:(void (^)(Core3DEdgeTreatmentResult *))completion {
+    return [self core3d_beginEdgeTreatmentSelectorAppend:snapshot amountMM:amountMM
+        proof:proof kind:core3d::retained_semantic_chamfer_adapter::SelectorAppendKind()
+        expected:expected completion:completion];
+}
+- (Core3DEdgeTreatmentOperation *)core3d_beginEdgeTreatmentSelectorAppend:
+    (Core3DEdgeTreatmentSnapshot *)snapshot amountMM:(double)amountMM
+    proof:(Core3DFaceSelectorProof *)proof kind:(core3d::retained_edge_treatment::Kind)kind
+    expected:(Core3DSceneSnapshot *)expected
+    completion:(void (^)(Core3DEdgeTreatmentResult *))completion {
     auto operation=B1Object<Core3DEdgeTreatmentNativeOperation>(Core3DEdgeTreatmentNativeOperation.class);
     if(!completion)return operation;operation->completion=[completion copy];
     auto refuse=^(core3d::retained_edge_treatment::Refusal refusal){
@@ -22156,7 +22184,7 @@ std::unordered_map<NSUInteger,B2BudgetSessionBox>& B2BudgetSessions(){
         identity.modelRevision=expected.revisions.modelRevision;
         core3d::retained_edge_treatment::Refusal refusal;auto viewer=GLController.viewer;
         operation->nativeWork=viewer->prepareEdgeTreatmentSelectorAppend(native->native,targets,
-            amountMM,identity,expected.revisions.presentationRevision,
+            kind,amountMM,identity,expected.revisions.presentationRevision,
             std::uint32_t(size.width),std::uint32_t(size.height),refusal);
         core3d::retained_edge_treatment::Refusal geometryRefusal;
         auto geometry=viewer->edgeTreatmentGeometry(operation->nativeWork,geometryRefusal);
