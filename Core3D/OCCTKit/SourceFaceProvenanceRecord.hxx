@@ -211,6 +211,54 @@ inline bool AppendHexFloat(std::string& output, double value) noexcept {
     return true;
 }
 
+// Additive E3 semantic-binding adapter (278b). One stable analytic witness
+// per planar entry, aligned with the entry order: 64 lower-hex sha256 over
+// the literal text "plane" followed by the entry's nine exact plane scalars
+// as %a hex-float text (space-separated), the same canonical scalar text as
+// the v1 payload. A semantic face association can be re-proven against this
+// witness after a geometry change without persisting any ordinal: triangle
+// ranges stay transient replay evidence and are never hashed or persisted as
+// face identity. Non-planar entries yield an empty witness; any structurally
+// invalid entry (unknown surface type, wrong parameter count, non-finite
+// scalar) refuses the whole projection. This helper adds no schema, budget
+// or digest rule to the frozen v1 record.
+inline bool PlanarFaceWitnesses(const std::vector<SourceFaceProvenanceEntry>& entries,
+                                std::vector<std::string>& output) noexcept {
+    output.clear();
+    if (entries.empty() || entries.size() > std::size_t(kMaximumProvenanceFaces)) return false;
+    try {
+        std::vector<std::string> witnesses;
+        witnesses.reserve(entries.size());
+        for (const auto& entry : entries) {
+            const int expected = ParameterCountForSurfaceType(entry.surfaceType);
+            if (expected < 0 || entry.params.size() != std::size_t(expected)) return false;
+            if (entry.surfaceType != kSurfaceTypePlane) {
+                witnesses.emplace_back();
+                continue;
+            }
+            std::string text = "plane";
+            for (double value : entry.params) {
+                if (!std::isfinite(value)) return false;
+                text.push_back(' ');
+                if (!AppendHexFloat(text, value)) return false;
+            }
+            std::uint8_t hash[CC_SHA256_DIGEST_LENGTH];
+            if (CC_SHA256(text.data(), static_cast<CC_LONG>(text.size()), hash) == nullptr)
+                return false;
+            static constexpr char digits[] = "0123456789abcdef";
+            std::string witness;
+            witness.reserve(2 * CC_SHA256_DIGEST_LENGTH);
+            for (std::uint8_t byte : hash) {
+                witness.push_back(digits[byte >> 4]);
+                witness.push_back(digits[byte & 15]);
+            }
+            witnesses.push_back(std::move(witness));
+        }
+        output = std::move(witnesses);
+        return true;
+    } catch (...) { output.clear(); return false; }
+}
+
 // Payload text: one line per face, fields separated by single spaces, lines
 // joined by '\n' with no trailing newline. Scalars are exact %a hex-floats.
 inline bool EncodeEntries(const std::vector<SourceFaceProvenanceEntry>& faces,

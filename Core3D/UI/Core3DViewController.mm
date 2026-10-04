@@ -19652,6 +19652,11 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         const double error=BRepGProp::VolumeProperties(world,props,1.0e-9,Standard_False,Standard_False);
         const double volume=props.Mass()*mm*mm*mm;
         if(!std::isfinite(volume)||!std::isfinite(error)||error<0)return nil;
+        // Actual native center of mass of the same private copy, in
+        // millimeters; measured geometry, never recipe projection.
+        const gp_Pnt centerOfMass=props.CentreOfMass();
+        const double centerMM[3]={centerOfMass.X()*mm,centerOfMass.Y()*mm,centerOfMass.Z()*mm};
+        for(double value:centerMM)if(!std::isfinite(value))return nil;
         for(double& value:bounds){value*=mm;if(!std::isfinite(value))return nil;}
         NSMutableArray *nameUnits=[NSMutableArray array];
         for(int i=1;i<=named.name.Length();++i)[nameUnits addObject:@(std::uint16_t(named.name.Value(i)))];
@@ -19663,6 +19668,7 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
             @"edges":@(edges.Extent()),@"vertices":@(vertices.Extent()),@"topologyNodes":@(nodes),
             @"valid":@(BRepCheck_Analyzer(world,Standard_True).IsValid()?YES:NO),
             @"volumeMM3":@(volume),@"volumeIntegrationRelativeError":@(error),
+            @"centerOfMassMM":@[@(centerMM[0]),@(centerMM[1]),@(centerMM[2])],
             @"localBoundsOptimalMM":localOptimal,@"localBoundsConservativeMM":localConservative,
             @"boundsMinMM":@[@(bounds[0]),@(bounds[1]),@(bounds[2])],
             @"boundsMaxMM":@[@(bounds[3]),@(bounds[4]),@(bounds[5])]};

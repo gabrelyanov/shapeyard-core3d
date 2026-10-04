@@ -282,6 +282,7 @@
 		C3N269030000000000000003 /* GeneralLoftOwner.mm in Sources */ = {isa = PBXBuildFile; fileRef = C3N269130000000000000013 /* GeneralLoftOwner.mm */; };
 		C1F100010000000000000001 /* BoundedCurveOwner.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C1F100110000000000000011 /* BoundedCurveOwner.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		E27100040000000000000001 /* AssetAtlasOwner.mm in Sources */ = {isa = PBXBuildFile; fileRef = E27100040000000000000002 /* AssetAtlasOwner.mm */; };
+		E278B1030000000000000001 /* FaceImageOwner.mm in Sources */ = {isa = PBXBuildFile; fileRef = E278B1030000000000000002 /* FaceImageOwner.mm */; };
 		E26600010000000000000001 /* RetainedFinishingAttribute.hxx in Headers */ = {isa = PBXBuildFile; fileRef = E26600010000000000000002 /* RetainedFinishingAttribute.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		E26600020000000000000001 /* RetainedFinishingBinaryDriver.hxx in Headers */ = {isa = PBXBuildFile; fileRef = E26600020000000000000002 /* RetainedFinishingBinaryDriver.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		E26600030000000000000001 /* RetainedFinishingOwner.mm in Sources */ = {isa = PBXBuildFile; fileRef = E26600030000000000000002 /* RetainedFinishingOwner.mm */; };
@@ -586,6 +587,9 @@
 		E27100020000000000000002 /* AssetAtlasBuild.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = AssetAtlasBuild.hxx; sourceTree = "<group>"; };
 		E27100030000000000000002 /* AssetAtlasPersistence.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = AssetAtlasPersistence.hxx; sourceTree = "<group>"; };
 		E27100040000000000000002 /* AssetAtlasOwner.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AssetAtlasOwner.mm; sourceTree = "<group>"; };
+		E278B1010000000000000002 /* FaceImageDefinition.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FaceImageDefinition.hxx; sourceTree = "<group>"; };
+		E278B1020000000000000002 /* FaceImagePersistence.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FaceImagePersistence.hxx; sourceTree = "<group>"; };
+		E278B1030000000000000002 /* FaceImageOwner.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = FaceImageOwner.mm; sourceTree = "<group>"; };
 		E26600010000000000000002 /* RetainedFinishingAttribute.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedFinishingAttribute.hxx; sourceTree = "<group>"; };
 		E26600020000000000000002 /* RetainedFinishingBinaryDriver.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = RetainedFinishingBinaryDriver.hxx; sourceTree = "<group>"; };
 		E26600030000000000000002 /* RetainedFinishingOwner.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = RetainedFinishingOwner.mm; sourceTree = "<group>"; };
@@ -921,6 +925,9 @@
 				E27100020000000000000002 /* AssetAtlasBuild.hxx */,
 				E27100030000000000000002 /* AssetAtlasPersistence.hxx */,
 				E27100040000000000000002 /* AssetAtlasOwner.mm */,
+				E278B1010000000000000002 /* FaceImageDefinition.hxx */,
+				E278B1020000000000000002 /* FaceImagePersistence.hxx */,
+				E278B1030000000000000002 /* FaceImageOwner.mm */,
 				E26600010000000000000002 /* RetainedFinishingAttribute.hxx */,
 				E26600020000000000000002 /* RetainedFinishingBinaryDriver.hxx */,
 				E26600030000000000000002 /* RetainedFinishingOwner.mm */,
@@ -1418,6 +1425,7 @@
 				C3N269030000000000000003 /* GeneralLoftOwner.mm in Sources */,
 				C4A000010000000000000001 /* SplineProfileOwner.mm in Sources */,
 				E27100040000000000000001 /* AssetAtlasOwner.mm in Sources */,
+				E278B1030000000000000001 /* FaceImageOwner.mm in Sources */,
 				E26600030000000000000001 /* RetainedFinishingOwner.mm in Sources */,
 				322185742BB5CC1500040E84 /* OcctDocument.mm in Sources */,
 				3240475A2C00C7F6009E4B86 /* Core3DViewController+ExportManager.mm in Sources */,
