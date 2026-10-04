@@ -640,8 +640,10 @@ struct FixturePart final {
 };
 
 // One literal primitive with stored triangulation, a retained-solid record and
-// a real row-268 finishing receipt, each committed in its own command. This
-// mirrors core3d::asset_atlas::AssetAtlasProbe::AddPart; the shapes and the
+// a real row-268 finishing receipt, each committed in its own command. Every
+// member uses production saved-cut recipe geometry so the selected member's
+// production source editor can apply a dimension change. This mirrors
+// AssetAtlasProbe::AddPart; the shapes and the
 // finishing settings are the frozen row-271 fixture values.
 FixturePart FixtureAddPart(const Handle(TDocStd_Document)& doc, int kind,
                            std::uint8_t seed, UnwrapPolicy requested, double unit) {
@@ -652,13 +654,75 @@ FixturePart FixtureAddPart(const Handle(TDocStd_Document)& doc, int kind,
     if (kind == 1) shape = BRepPrimAPI_MakeCylinder(10 * n, 25 * n).Shape();
     else if (kind == 2) shape = BRepPrimAPI_MakeBox(12 * n, 12 * n, 12 * n).Shape();
     else shape = BRepPrimAPI_MakeBox(40 * n, 30 * n, 20 * n).Shape();
-    // Mesh BEFORE the retained record exists so the row-268 geometry fence
-    // (whose digest covers stored triangulation) stays consistent.
-    BRepMesh_IncrementalMesh mesher(shape, 2.5e-4 * n, Standard_False, 0.5, Standard_True);
     FixturePart part;
     UUID documentID{}; documentID.fill(1);
     const UUID entity = FixtureIndexedUUID(seed, 1), definition = FixtureIndexedUUID(seed, 2);
     part.key = {documentID, entity, definition};
+    core3d::retained_boolean::Program program;
+    program.source.document = documentID;
+    program.source.entity = entity;
+    program.source.definition = definition;
+    program.source.sourceFeature = FixtureIndexedUUID(seed, 3);
+    program.source.derivedFeature = FixtureIndexedUUID(seed, 4);
+    program.source.family = 1;
+    program.source.metersPerUnit = unit;
+    core3d::profile::Parameters source;
+    source.metersPerUnit = unit;
+    if (kind == 1) {
+        source.definition.depth = 25 * n;
+        source.definition.circle = core3d::ProfileCircularSection{{0, 0}, 10 * n, 0};
+    } else {
+        const double width = (kind == 2 ? 12 : 40) * n;
+        const double depth = (kind == 2 ? 12 : 30) * n;
+        source.definition.depth = (kind == 2 ? 12 : 20) * n;
+        source.definition.points = {{0, 0}, {width, 0}, {width, depth}, {0, depth}};
+    }
+    if (!core3d::profile::Encode(source, program.source.values))
+        throw std::invalid_argument("atlas fixture source recipe");
+    program.source.schema = std::uint32_t(core3d::profile::SchemaFor(source));
+    core3d::retained_boolean::Step pilot;
+    pilot.operand.identifier = 1;
+    pilot.operand.axis = core3d::analytic_boolean::Axis::Z;
+    pilot.operand.point = kind == 1
+        ? std::array<double, 3>{{-4 * n, 0, 0}}
+        : kind == 2 ? std::array<double, 3>{{4 * n, 6 * n, 0}}
+                    : std::array<double, 3>{{12 * n, 15 * n, 0}};
+    pilot.operand.radius = (kind == 2 ? 1.5 : kind == 1 ? 2 : 3) * n;
+    auto second = pilot;
+    second.operand.identifier = 2;
+    second.operand.point = kind == 1
+        ? std::array<double, 3>{{4 * n, 0, 0}}
+        : kind == 2 ? std::array<double, 3>{{8 * n, 6 * n, 0}}
+                    : std::array<double, 3>{{28 * n, 15 * n, 0}};
+    program.steps = {pilot}; if (kind == 0) program.steps.push_back(second);
+    program.nextOperandID = kind == 0 ? 3 : 2;
+    if (!core3d::retained_boolean::Valid(program))
+        throw std::invalid_argument("atlas fixture program");
+    core3d::saved_cut_source_edit::Patch editableSource;
+    if (kind == 1) editableSource = core3d::saved_cut_source_values::CirclePatch{};
+    else editableSource = core3d::saved_cut_source_values::PolygonPatch{};
+    if (!core3d::saved_boolean_build::SourcePatch(program, editableSource))
+        throw std::invalid_argument("atlas fixture source editing");
+    BRepBuilderAPI_Copy retainedCopy(shape, Standard_True, Standard_False);
+    if (!retainedCopy.IsDone() || retainedCopy.Shape().IsNull())
+        throw std::invalid_argument("atlas fixture retained base");
+    const TopoDS_Shape retainedBase = retainedCopy.Shape();
+    const std::atomic_bool stop(false);
+    shape = retainedBase;
+    for (const auto& step : program.steps) {
+        core3d::analytic_boolean::Recipe recipe;
+        recipe.metersPerUnit = unit;
+        recipe.operation = step.operation;
+        recipe.tool = step.operand;
+        core3d::analytic_boolean::Result cut;
+        if (core3d::analytic_boolean::Build(shape, recipe, stop, cut)
+            != core3d::analytic_boolean::Status::Built)
+            throw std::invalid_argument("atlas fixture production cut");
+        shape = cut.solid;
+    }
+    // Mesh BEFORE the retained record exists so the row-268 geometry fence
+    // (whose digest covers stored triangulation) stays consistent.
+    BRepMesh_IncrementalMesh mesher(shape, 2.5e-4 * n, Standard_False, 0.5, Standard_True);
     const auto tool = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
     doc->NewCommand();
     part.owner = tool->AddShape(shape, Standard_False);
@@ -670,37 +734,10 @@ FixturePart FixtureAddPart(const Handle(TDocStd_Document)& doc, int kind,
         Standard_GUID("67E669F4-00C0-4C45-BC55-9CC5DA22A2B5"), 1);
     TDataStd_Name::Set(part.owner, TCollection_ExtendedString(
         kind == 1 ? "E2 atlas cylinder" : kind == 2 ? "E2 atlas painted box" : "E2 atlas box"));
-    // Retained v1 program record through the public DEBUG install seam
-    // (NativeOpeningSurfaceProbe.hxx): one real Difference step whose tool
-    // sits 100 mm-scale units outside the part, so replay reproduces the
-    // staged solid exactly. The retained base is an immutable deep copy of
-    // the current solid, as in the row-271 fixture.
-    core3d::retained_boolean::Program program;
-    program.source.document = documentID;
-    program.source.entity = entity;
-    program.source.definition = definition;
-    program.source.sourceFeature = FixtureIndexedUUID(seed, 3);
-    program.source.derivedFeature = FixtureIndexedUUID(seed, 4);
-    program.source.family = 1;
-    program.source.metersPerUnit = unit;
-    core3d::profile::Parameters source;
-    source.metersPerUnit = unit; source.definition.depth = 6 * n;
-    source.definition.points = {{-0.0, 0}, {80 * n, 0}, {80 * n, 60 * n}, {0, 60 * n}};
-    if (!core3d::profile::Encode(source, program.source.values))
-        throw std::invalid_argument("atlas fixture source recipe");
-    program.source.schema = std::uint32_t(core3d::profile::SchemaFor(source));
-    core3d::retained_boolean::Step pilot;
-    pilot.operand.identifier = 1;
-    pilot.operand.axis = core3d::analytic_boolean::Axis::Z;
-    pilot.operand.point = {{100000 * n, 0, 0}};
-    pilot.operand.radius = 1 * n;
-    program.steps = {pilot};
-    program.nextOperandID = 2;
-    if (!core3d::retained_boolean::Valid(program))
-        throw std::invalid_argument("atlas fixture program");
-    BRepBuilderAPI_Copy copy(shape, Standard_True, Standard_False);
+    // Retained v1 program record through the public DEBUG install seam. The
+    // selected member owns a real production Difference result and retained base.
     if (!core3d::native_opening::debug::Core3DDebugInstallRetainedSolidSeedRecord(
-            doc, part.owner, program, shape, copy.Shape()) || !doc->CommitCommand())
+            doc, part.owner, program, shape, retainedBase) || !doc->CommitCommand())
         throw std::invalid_argument("atlas fixture retained admission");
     doc->NewCommand();
     core3d::retained_finishing::producer::Capture capture;
@@ -778,8 +815,10 @@ void StageAssetAtlasFixture(const Handle(TDocStd_Document)& doc, double unit) {
     if (!FixtureSetUUID(doc->Main(), "74386E4E-F620-498F-8092-E6D883AF33A4", documentID))
         throw std::invalid_argument("atlas fixture document identity");
     doc->SetUndoLimit(40); doc->ClearUndos();
-    const FixturePart box = FixtureAddPart(doc, 0, 0x21, UnwrapPolicy::Planar, unit);
-    const FixturePart cylinder = FixtureAddPart(doc, 1, 0x22, UnwrapPolicy::Cylindrical, unit);
+    // The ready-state fixture selects identity seed 0x22; bind that stable
+    // identity to the production-editable box while preserving member order.
+    const FixturePart box = FixtureAddPart(doc, 0, 0x22, UnwrapPolicy::Planar, unit);
+    const FixturePart cylinder = FixtureAddPart(doc, 1, 0x21, UnwrapPolicy::Cylindrical, unit);
     const FixturePart painted = FixtureAddPart(doc, 2, 0x23, UnwrapPolicy::Planar, unit);
     FixturePaintPart(doc, painted);
     Key atlas; atlas.document = documentID; atlas.atlas = FixtureIndexedUUID(0x77, 1);
