@@ -21724,9 +21724,29 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     [observation setValue:@NO forKey:@"supported"];
     [observation setValue:@YES forKey:@"traceComplete"];
     [observation setValue:@"b1.UnsupportedDependency" forKey:@"refusalCode"];
+    [observation setValue:@[] forKey:@"identityRetiredLocalIDs"];
     if(![NSThread isMainThread]||!std::isfinite(metersPerLocalUnit)
         ||metersPerLocalUnit<=0)return observation;
     try{
+        if(scenario==Core3DB2TopologyBudgetScenarioDurableIdentityIssuance){
+            Core3DSceneSnapshot *scene=[self captureSceneSnapshot];
+            if(!scene||scene.selection.selectedElements.count!=1
+                ||scene.selection.selectedElements.firstObject.kind!=Core3DSceneElementKindObject)
+                return observation;
+            NSString *entity=scene.selection.selectedElements.firstObject.entityIdentifier;
+            Core3DEdgeTreatmentCapture *capture=[self captureEdgeTreatment:entity expected:scene];
+            auto *snapshot=(Core3DEdgeTreatmentNativeSnapshot *)capture.snapshot;
+            if(![snapshot isKindOfClass:Core3DEdgeTreatmentNativeSnapshot.class]||!snapshot->native)
+                return observation;
+            const auto& issuance=snapshot->native->effectiveDefinition().issuance;
+            NSMutableArray<NSNumber *> *retired=[NSMutableArray array];
+            for(const auto identifier:issuance.retiredLocalIDs)[retired addObject:@(identifier)];
+            [observation setValue:@(issuance.nextLocalID) forKey:@"identityNextLocalID"];
+            [observation setValue:retired forKey:@"identityRetiredLocalIDs"];
+            [observation setValue:@YES forKey:@"supported"];
+            [observation setValue:@"b2.None" forKey:@"refusalCode"];
+            return observation;
+        }
         // The probe counter is the real B1 ReplayBudget so the resolver rows
         // below run through the same checked accounting type as production.
         core3d::retained_edge_treatment::ReplayBudget budget;
@@ -21780,6 +21800,13 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
             auto outer=BRepPrimAPI_MakeBox(60*local,40*local,30*local).Shape();
             auto opening=BRepPrimAPI_MakeBox(gp_Pnt(20*local,10*local,-local),
                 20*local,20*local,32*local).Shape();BRepAlgoAPI_Cut cut(outer,opening);cut.Build();shape=cut.Shape();
+        }else if(scenario==Core3DB2TopologyBudgetScenarioEdgeHeavy4097){
+            // U24's edge-heavy diagnostic is intentionally separate from the
+            // existing combined-total boundary fixtures. Its topology is built
+            // independently, then the production census must refuse it.
+            builder.MakeCompound(compound);
+            for(std::size_t index=0;index<4097;++index)addEdge(index);
+            shape=compound;
         }else if(scenario>=Core3DB2TopologyBudgetScenarioEdge4095
             &&scenario<=Core3DB2TopologyBudgetScenarioFace4097){
             const std::size_t target=boundary(scenario);builder.MakeCompound(compound);
@@ -21908,8 +21935,21 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         [observation setValue:@YES forKey:@"supported"];
         [observation setValue:@(budget.topologyVisits) forKey:@"exitVisits"];
         [observation setValue:@(budget.buildStages) forKey:@"exitStages"];
-        [observation setValue:@(census.faces.Extent()) forKey:@"faceCount"];
-        [observation setValue:@(census.edges.Extent()) forKey:@"edgeCount"];
+        std::size_t reportedFaces=std::size_t(census.faces.Extent());
+        std::size_t reportedEdges=std::size_t(census.edges.Extent());
+        if(scenario==Core3DB2TopologyBudgetScenarioEdgeHeavy4097){
+            // The bounded walk correctly stops at its fence, so independently
+            // map the already-constructed diagnostic input for its full native
+            // census. This observes OCCT topology; it does not duplicate the
+            // budget arithmetic or continue the refused traversal.
+            TopTools_IndexedMapOfShape faces,edges;
+            TopExp::MapShapes(shape,TopAbs_FACE,faces);
+            TopExp::MapShapes(shape,TopAbs_EDGE,edges);
+            reportedFaces=std::size_t(faces.Extent());
+            reportedEdges=std::size_t(edges.Extent());
+        }
+        [observation setValue:@(reportedFaces) forKey:@"faceCount"];
+        [observation setValue:@(reportedEdges) forKey:@"edgeCount"];
         [observation setValue:@(census.occurrences) forKey:@"occurrenceCount"];
         [observation setValue:@(budget.exhausted) forKey:@"exhausted"];
         [observation setValue:@(status==b2tb::WalkStatus::Completed) forKey:@"protectedWorkStarted"];
@@ -21987,6 +22027,7 @@ std::unordered_map<NSUInteger,B2BudgetSessionBox>& B2BudgetSessions(){
     [observation setValue:@NO forKey:@"supported"];
     [observation setValue:@NO forKey:@"traceComplete"];
     [observation setValue:@"b1.UnsupportedDependency" forKey:@"refusalCode"];
+    [observation setValue:@[] forKey:@"identityRetiredLocalIDs"];
     [observation setValue:@(NSInteger(-1)) forKey:@"rootShapeType"];
     [observation setValue:@(NSInteger(-1)) forKey:@"rootChildCount"];
     [observation setValue:@(NSInteger(-1)) forKey:@"rootChildShapeType"];
@@ -22383,7 +22424,11 @@ std::unordered_map<NSUInteger,B2BudgetSessionBox>& B2BudgetSessions(){
     const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=original.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;core3d::retained_edge_treatment::Refusal refusal;auto work=GLController.viewer->prepareEdgeTreatmentEditR2(snapshot->native,*mutation,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);auto nativeSnapshot=snapshot->native;return [self core3d_beginEdgeTreatmentR2:work completion:completion provenance:^(Core3DEdgeTreatmentResult *dto,const std::shared_ptr<const r2::DetachedResult>&built){B1BindR2(dto,nativeSnapshot,built);} refusal:refusal];
 }
 
-- (void)cancelEdgeTreatment:(Core3DEdgeTreatmentOperation *)operation {if(!NSThread.isMainThread||![operation isKindOfClass:Core3DEdgeTreatmentNativeOperation.class])return;auto native=(Core3DEdgeTreatmentNativeOperation*)operation;if(!native->settled){native->settled=YES;if(native->nativeWorkR2)core3d::Core3DViewer::cancelEdgeTreatmentR2(native->nativeWorkR2);else core3d::Core3DViewer::cancelEdgeTreatment(native->nativeWork);core3d::retained_edge_treatment::CommitResult result;result.outcome=core3d::retained_edge_treatment::CommitOutcome::Cancelled;result.refusal=core3d::retained_edge_treatment::Refusal::Cancelled;result.measuredUndoDelta=0;auto dto=B1Result(result);auto bind=native->stopProvenance;native->stopProvenance=nil;if(bind)bind(dto);auto callback=native->completion;native->completion=nil;if(callback)callback(dto);}}
+- (void)cancelEdgeTreatment:(Core3DEdgeTreatmentOperation *)operation {if(!NSThread.isMainThread||![operation isKindOfClass:Core3DEdgeTreatmentNativeOperation.class])return;auto native=(Core3DEdgeTreatmentNativeOperation*)operation;if(!native->settled){native->settled=YES;if(native->nativeWorkR2)core3d::Core3DViewer::cancelEdgeTreatmentR2(native->nativeWorkR2);else core3d::Core3DViewer::cancelEdgeTreatment(native->nativeWork);
+#if DEBUG
+    b2tb::debug::RecordRefusal(core3d::retained_edge_treatment::RefusalCode(core3d::retained_edge_treatment::Refusal::Cancelled));
+#endif
+    core3d::retained_edge_treatment::CommitResult result;result.outcome=core3d::retained_edge_treatment::CommitOutcome::Cancelled;result.refusal=core3d::retained_edge_treatment::Refusal::Cancelled;result.measuredUndoDelta=0;auto dto=B1Result(result);auto bind=native->stopProvenance;native->stopProvenance=nil;if(bind)bind(dto);auto callback=native->completion;native->completion=nil;if(callback)callback(dto);}}
 
 - (void)addTestPrimitives {
     [_glController addTestPrimitives];

@@ -13,6 +13,7 @@
 #include <BRepAlgoAPI_Cut.hxx>
 #include <Precision.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRep_Tool.hxx>
@@ -278,7 +279,7 @@ inline Status BuildShared(const TopoDS_Shape& detachedBase, const Recipe& recipe
         if(ring&&analytic_boolean_ring::Inspect(ringValue,recipe.metersPerUnit)!=analytic_boolean_ring::Status::Clear)
             return Status::InvalidRecipe;
         const unsigned diskCount=ring?recipe.tool.count:1;
-        TopTools_ListOfShape arguments,tools;arguments.Append(base);
+        TopTools_ListOfShape tools;
         const bool wedge=recipe.tool.kind==OperandKind::Wedge;
         if(wedge){
             if(!std::isfinite(expectedWedgeVolume)||expectedWedgeVolume<=0)return Status::InvalidRecipe;
@@ -310,6 +311,25 @@ inline Status BuildShared(const TopoDS_Shape& detachedBase, const Recipe& recipe
             if(shared&&!shared->visit(1,tb::Site::C26AnalyticBoolean))return Status::BudgetExceeded;
             tools.Append(cylinder.Shape());
         }
+        // The kernel's section curves and edge tolerances carry an absolute
+        // model-unit precision, so at meter-scale local units they are
+        // physically 1000x coarser against the same millimeter-sized geometry
+        // (a measured 1.3e-4 relative removed-volume loss on a 3 mm
+        // transverse bore). Run the kernel cut in millimeter coordinates and
+        // scale the produced shape back; the millimeter unit system keeps the
+        // legacy path and its exact bit pattern. The recipe, tools, budgets
+        // and every product-side check stay in local coordinates.
+        TopoDS_Shape kernelBase=base;
+        TopTools_ListOfShape kernelTools;
+        gp_Trsf kernelDown;
+        if(mm!=1.0){
+            gp_Trsf kernelUp;kernelUp.SetScale(gp::Origin(),mm);
+            kernelDown.SetScale(gp::Origin(),1/mm);
+            kernelBase=BRepBuilderAPI_Transform(base,kernelUp,Standard_True).Shape();
+            for(const auto& tool:tools)
+                kernelTools.Append(BRepBuilderAPI_Transform(tool,kernelUp,Standard_True).Shape());
+        }else kernelTools=tools;
+        TopTools_ListOfShape kernelArguments;kernelArguments.Append(kernelBase);
         if (shared) {
             // C26: the Boolean stage is debited and its input passes (base
             // plus every tool) are reserved before the kernel runs.
@@ -324,29 +344,31 @@ inline Status BuildShared(const TopoDS_Shape& detachedBase, const Recipe& recipe
             }
         }
         BRepAlgoAPI_Cut cut;
-        cut.SetArguments(arguments);cut.SetTools(tools);
+        cut.SetArguments(kernelArguments);cut.SetTools(kernelTools);
         cut.SetRunParallel(Standard_False);cut.SetNonDestructive(Standard_True);
         cut.SetFuzzyValue(0);cut.SetUseOBB(Standard_True);cut.SetCheckInverted(Standard_True);
         cut.Build(progress.Next());
         if (stop.load()) return Status::Cancelled;
         if (!cut.IsDone() || cut.HasErrors() || cut.HasWarnings() || cut.Shape().IsNull()) return Status::KernelFailure;
+        TopoDS_Shape produced=cut.Shape();
+        if(mm!=1.0)produced=BRepBuilderAPI_Transform(produced,kernelDown,Standard_True).Shape();
         if (shared) {
             // C26: the produced shape is censused before any consumer, and
             // the result validity/classification/volume/bounds passes are
             // debited before they run.
             tb::Census outputCensus;
-            const auto censusWalk=tb::CensusTopology(cut.Shape(),*shared,stop,outputCensus,
+            const auto censusWalk=tb::CensusTopology(produced,*shared,stop,outputCensus,
                 tb::Site::C26AnalyticBoolean,false);
             if (censusWalk==tb::WalkStatus::Cancelled) return Status::Cancelled;
             if (censusWalk!=tb::WalkStatus::Completed) return Status::BudgetExceeded;
             for (int pass=0;pass<4;++pass) {
-                const auto walk=tb::ChargeTraversal(cut.Shape(),*shared,stop,tb::Site::C26AnalyticBoolean);
+                const auto walk=tb::ChargeTraversal(produced,*shared,stop,tb::Site::C26AnalyticBoolean);
                 if (walk==tb::WalkStatus::Cancelled) return Status::Cancelled;
                 if (walk!=tb::WalkStatus::Completed) return Status::BudgetExceeded;
             }
         }
-        if (!detail::Bounded(cut.Shape(),32768,stop,shared,tb::Site::C26AnalyticBoolean)) return stop.load()?Status::Cancelled:Status::BudgetExceeded;
-        if (!detail::SingleResult(cut.Shape(),result.solid,shared,tb::Site::C26AnalyticBoolean)
+        if (!detail::Bounded(produced,32768,stop,shared,tb::Site::C26AnalyticBoolean)) return stop.load()?Status::Cancelled:Status::BudgetExceeded;
+        if (!detail::SingleResult(produced,result.solid,shared,tb::Site::C26AnalyticBoolean)
             || !detail::ValidSolid(result.solid,result.resultVolume,shared,tb::Site::C26AnalyticBoolean)
             || !detail::Bounds(result.solid,mm,result.resultBounds,shared,tb::Site::C26AnalyticBoolean))
             return shared&&shared->exhausted?Status::BudgetExceeded:Status::UnsupportedResult;

@@ -333,7 +333,14 @@ inline bool TransverseRemovedVolume(const retained_solid::Envelope& envelope,dou
         gp_Trsf transform;
         if(loft.constructionFrame&&!loft.constructionFrame->Transform(transform))return false;
         const gp_Pnt center=gp_Pnt(envelope.point[0],envelope.point[1],envelope.point[2]).Transformed(transform.Inverted());
-        const double scale=transform.ScaleFactor(),r=envelope.radius/scale,cz=center.Z();
+        // Evaluate the antiderivatives in millimeter coordinates. The
+        // integral's value is unit-invariant, but its evaluation is not: at
+        // meter-scale inputs the cap evaluations measurably lose accuracy
+        // against the exact millimeter control (2.6e-9 relative on the same
+        // recipe), while the admission bound is 1e-9. The millimeter unit
+        // system (factor 1) keeps the legacy evaluation and its exact bits.
+        const double scale=transform.ScaleFactor(),mm=envelope.metersPerUnit*1000;
+        const double r=envelope.radius*mm/scale,cz=center.Z()*mm;
         const auto area=[&](double t){
             t=std::clamp(t,-r,r);
             return t*std::sqrt(std::max(0.,r*r-t*t))+r*r*std::asin(t/r);
@@ -341,14 +348,14 @@ inline bool TransverseRemovedVolume(const retained_solid::Envelope& envelope,dou
         const auto moment=[&](double t){return -2./3.*std::pow(std::max(0.,r*r-t*t),1.5);};
         for(std::size_t n=1;n<loft.stations.size();++n){
             const auto& a=loft.stations[n-1];const auto& b=loft.stations[n];
-            const double low=std::max(a.z,cz-r),high=std::min(b.z,cz+r);
+            const double low=std::max(a.z*mm,cz-r),high=std::min(b.z*mm,cz+r);
             if(low>=high)continue;
-            const double wa=clearance.transverseAxis==0?a.width:a.depth;
-            const double wb=clearance.transverseAxis==0?b.width:b.depth;
-            const double slope=(wb-wa)/(b.z-a.z),atCenter=wa+slope*(cz-a.z);
+            const double wa=(clearance.transverseAxis==0?a.width:a.depth)*mm;
+            const double wb=(clearance.transverseAxis==0?b.width:b.depth)*mm;
+            const double slope=(wb-wa)/(b.z*mm-a.z*mm),atCenter=wa+slope*(cz-a.z*mm);
             volume+=atCenter*(area(high-cz)-area(low-cz))+slope*(moment(high-cz)-moment(low-cz));
         }
-        volume*=scale*scale*scale;
+        volume*=scale*scale*scale/(mm*mm*mm);
         return std::isfinite(volume)&&volume>0;
     }catch(...){volume=0;return false;}
 }

@@ -192,6 +192,8 @@ typedef NS_ENUM(NSInteger, Core3DB2TopologyBudgetScenario) {
     Core3DB2TopologyBudgetScenarioLoftOwner,
     Core3DB2TopologyBudgetScenarioLegacyOwner,
     Core3DB2TopologyBudgetScenarioR2Owner,
+    Core3DB2TopologyBudgetScenarioEdgeHeavy4097,
+    Core3DB2TopologyBudgetScenarioDurableIdentityIssuance,
 };
 typedef NS_ENUM(NSInteger, Core3DB2TopologyBudgetInjectionKind) {
     Core3DB2TopologyBudgetInjectionNone = 0,
@@ -243,6 +245,10 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic, copy, readonly) NSArray<NSString *> *phaseNames;
 @property(nonatomic, copy, readonly) NSArray<NSNumber *> *phaseEntryVisits,
     *phaseExitVisits, *phaseEntryStages, *phaseExitStages;
+// Read-only native issuance state for the currently selected retained owner.
+// This is observation only: it never mints an identity or grants authority.
+@property(nonatomic, readonly) uint64_t identityNextLocalID;
+@property(nonatomic, copy, readonly) NSArray<NSNumber *> *identityRetiredLocalIDs;
 - (instancetype)init NS_UNAVAILABLE;
 @end
 #endif
