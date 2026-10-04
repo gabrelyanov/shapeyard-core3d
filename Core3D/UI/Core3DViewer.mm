@@ -3892,12 +3892,15 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
         // treatment replay — materialize it through the existing bounded
         // readback primitive and adopt the readback form only with an exact
         // fixed-point proof under the existing mesh-independent V3 commitment.
-        // A failed proof, like any other failed proof in this producer,
-        // refuses the build; a fixed-point failure is never adopted. A rebuild
-        // participating in B1/B2 debits the operation's existing shared budget
-        // before these added traversals and carries its debt forward; initial
-        // creation owns a bounded producer budget. No candidate normalization,
-        // no digest change and no repeat-until-equal loop.
+        // A fixed-point failure is never adopted, and not adopting the readback
+        // form never by itself refuses a valid source: cancellation and
+        // readback/commit budget exhaustion still refuse, and the
+        // owner-boundary exact detachment commitment stays the gate that
+        // decides. A rebuild participating in B1/B2 debits the operation's
+        // existing shared budget before these added traversals and carries its
+        // debt forward; initial creation owns a bounded producer budget. No
+        // candidate normalization, no digest change and no repeat-until-equal
+        // loop.
         if (geometry->circle && !geometry->revolve && !geometry->spline) {
             retained_edge_treatment::ReplayBudget producerBudget;
             retained_edge_treatment::ReplayBudget& budget =
@@ -3905,14 +3908,17 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
                     ? geometry->treatmentBudget : producerBudget;
             TopoDS_Shape canonical, reopened;
             retained_edge_treatment::Digest canonicalDigest{}, reopenedDigest{};
-            if (geometry->cancelled.load()
-                || !retained_edge_treatment::detail::ReadbackGeometry(solid, budget, canonical)
-                || canonical.ShapeType() != TopAbs_SOLID
-                || !retained_edge_treatment::detail::ReadbackGeometry(canonical, budget, reopened)
-                || !retained_edge_treatment::detail::CommitGeometry(canonical, budget, canonicalDigest)
-                || !retained_edge_treatment::detail::CommitGeometry(reopened, budget, reopenedDigest)
-                || canonicalDigest != reopenedDigest) { return false; }
-            solid = TopoDS::Solid(canonical);
+            if (geometry->cancelled.load()) { return false; }
+            bool fixedPoint =
+                retained_edge_treatment::detail::ReadbackGeometry(solid, budget, canonical);
+            if (budget.exhausted) { return false; }
+            fixedPoint = fixedPoint && canonical.ShapeType() == TopAbs_SOLID
+                && retained_edge_treatment::detail::ReadbackGeometry(canonical, budget, reopened)
+                && retained_edge_treatment::detail::CommitGeometry(canonical, budget, canonicalDigest)
+                && retained_edge_treatment::detail::CommitGeometry(reopened, budget, reopenedDigest)
+                && canonicalDigest == reopenedDigest;
+            if (budget.exhausted || geometry->cancelled.load()) { return false; }
+            if (fixedPoint) { solid = TopoDS::Solid(canonical); }
         }
         if(geometry->treatmentRebind&&geometry->treatmentRebuildSource){geometry->treatmentBase=solid;retained_edge_treatment::SourceRebindResult rebound;retained_edge_treatment::Refusal refusal=retained_edge_treatment::Refusal::BuildFailed;if(!retained_edge_treatment::ApplySourceRebind(*geometry->treatmentRebind,*geometry->treatmentRebuildSource,solid,geometry->treatmentBudget,refusal,rebound))return false;geometry->treatmentDefinition=rebound.definition;geometry->treatmentProofs=rebound.proofs;solid=TopoDS::Solid(rebound.treated);}
         Bnd_Box bounds;

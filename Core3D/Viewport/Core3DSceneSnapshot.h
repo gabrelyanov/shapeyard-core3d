@@ -119,6 +119,22 @@ typedef NS_ENUM(NSInteger, Core3DSceneTextureEncoding) {
     Core3DSceneTextureEncodingWebP,
 };
 
+//! E3 face-image appearance roles (278b), mirroring the committed record.
+typedef NS_ENUM(NSInteger, Core3DSceneFaceImageRole) {
+    Core3DSceneFaceImageRoleBaseColor = 0,
+    Core3DSceneFaceImageRoleEmissive,
+    Core3DSceneFaceImageRoleMetallicRoughness,
+    Core3DSceneFaceImageRoleOcclusion,
+    Core3DSceneFaceImageRoleNormal,
+};
+
+//! Independent per-binding sampler wrap modes for E3 face images.
+typedef NS_ENUM(NSInteger, Core3DSceneFaceImageWrap) {
+    Core3DSceneFaceImageWrapClampToEdge = 0,
+    Core3DSceneFaceImageWrapRepeat,
+    Core3DSceneFaceImageWrapMirroredRepeat,
+};
+
 typedef NS_ENUM(NSInteger, Core3DSceneRenderRole) {
     Core3DSceneRenderRoleModel = 0,
     Core3DSceneRenderRoleSelectionHighlight,
@@ -311,6 +327,37 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @end
 
 
+//! One committed E3 face-image binding observed on a render item: durable
+//! record identifiers, the per-binding UV transform and independent sampler
+//! wrap modes, plus this publication's transient semantic face association.
+CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
+@interface Core3DSceneFaceImageBindingSnapshot : NSObject
+
+@property (nonatomic, copy, readonly) NSString *bindingIdentifier;
+@property (nonatomic, copy, readonly) NSString *faceIdentifier;
+@property (nonatomic, copy, readonly) NSString *resourceIdentifier;
+@property (nonatomic, assign, readonly) Core3DSceneFaceImageRole role;
+@property (nonatomic, assign, readonly) BOOL srgbColorSpace;
+@property (nonatomic, assign, readonly) double scaleU;
+@property (nonatomic, assign, readonly) double scaleV;
+@property (nonatomic, assign, readonly) double offsetU;
+@property (nonatomic, assign, readonly) double offsetV;
+@property (nonatomic, assign, readonly) double rotationDegrees;
+@property (nonatomic, assign, readonly) Core3DSceneFaceImageWrap wrapU;
+@property (nonatomic, assign, readonly) Core3DSceneFaceImageWrap wrapV;
+//! Semantic topology index of the bound face in the item's mesh. Transient
+//! publication association only, never persisted face authority.
+@property (nonatomic, assign, readonly) uint32_t faceIndex;
+//! Index into Core3DSceneSnapshot.textures with the working bytes, or -1.
+@property (nonatomic, assign, readonly) NSInteger textureIndex;
+@property (nonatomic, assign, readonly) BOOL hasTexture;
+
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+
+@end
+
+
 CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @interface Core3DSceneMeshSnapshot : NSObject
 
@@ -383,6 +430,8 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, strong, readonly, nullable) Core3DSceneMaterialSnapshot *nativeWirePresentation;
 //! One binding for each face primitive in the referenced mesh.
 @property (nonatomic, copy, readonly) NSArray<Core3DScenePrimitiveBindingSnapshot *> *primitiveBindings;
+//! Committed E3 face-image bindings observed on this item; empty when none.
+@property (nonatomic, copy, readonly) NSArray<Core3DSceneFaceImageBindingSnapshot *> *faceImageBindings;
 
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;

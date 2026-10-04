@@ -47,7 +47,8 @@ inline bool ShiftSeam(const TopoDS_Shape& shape,double radius,double mm){
                 const auto& rep=it.Value();if(!rep->IsCurveOnSurface(surface.handle,relative)||!rep->IsCurveOnClosedSurface())continue;
                 auto first=Handle(Geom2d_Curve)::DownCast(rep->PCurve()->Copy());
                 auto second=Handle(Geom2d_Curve)::DownCast(rep->PCurve2()->Copy());
-                const auto line=Handle(Geom2d_Line)::DownCast(first);if(line.IsNull()||second.IsNull())return false;
+                const auto lineOf=[](Handle(Geom2d_Curve) pc){Handle(Geom2d_Line) line;for(unsigned n=0;n<8&&!pc.IsNull();++n){line=Handle(Geom2d_Line)::DownCast(pc);if(!line.IsNull())break;const auto trim=Handle(Geom2d_TrimmedCurve)::DownCast(pc);if(trim.IsNull())break;pc=trim->BasisCurve();}return line;};
+                const auto line=lineOf(first);if(line.IsNull()||second.IsNull())return false;
                 const auto oldOrigin=line->Location();const double tolerance=BRep_Tool::Tolerance(edge);
                 const bool sameParameter=BRep_Tool::SameParameter(edge),sameRange=BRep_Tool::SameRange(edge);
                 double a=0,b=0;Handle(BRep_GCurve)::DownCast(rep)->Range(a,b);
@@ -55,7 +56,7 @@ inline bool ShiftSeam(const TopoDS_Shape& shape,double radius,double mm){
                 // Read the replacement representation back, not the local copy.
                 for(BRep_ListIteratorOfListOfCurveRepresentation jt(data->Curves());jt.More();jt.Next()){
                     const auto& observed=jt.Value();if(!observed->IsCurveOnSurface(surface.handle,relative)||!observed->IsCurveOnClosedSurface())continue;
-                    const auto changed=Handle(Geom2d_Line)::DownCast(observed->PCurve());double c=0,dv=0;Handle(BRep_GCurve)::DownCast(observed)->Range(c,dv);
+                    const auto changed=lineOf(observed->PCurve());double c=0,dv=0;Handle(BRep_GCurve)::DownCast(observed)->Range(c,dv);
                     return !changed.IsNull()&&changed->Location().X()==oldOrigin.X()+.125&&changed->Location().Y()==oldOrigin.Y()
                         &&a==c&&b==dv&&sameParameter==BRep_Tool::SameParameter(edge)&&sameRange==BRep_Tool::SameRange(edge)&&tolerance==BRep_Tool::Tolerance(edge);
                 }return false;

@@ -230,6 +230,51 @@ struct PrimitiveBinding {
     bool visible = true;
 };
 
+//! E3 face-image appearance (278b): renderer-neutral role/wrap vocabulary
+//! mirroring the committed SYFI/1 record values exactly, so a published
+//! binding never needs the document codec to be interpreted.
+enum class FaceImageWrap : std::uint8_t {
+    ClampToEdge = 0,
+    Repeat = 1,
+    MirroredRepeat = 2,
+};
+
+enum class FaceImageRole : std::uint8_t {
+    BaseColor = 0,
+    Emissive = 1,
+    MetallicRoughness = 2,
+    Occlusion = 3,
+    Normal = 4,
+};
+
+//! Per-binding UV transform applied on top of the bound face's chart UVs.
+struct FaceImageUVTransform {
+    double scaleU = 1.0;
+    double scaleV = 1.0;
+    double offsetU = 0.0;
+    double offsetV = 0.0;
+    double rotationDegrees = 0.0;
+    FaceImageWrap wrapU = FaceImageWrap::Repeat;
+    FaceImageWrap wrapV = FaceImageWrap::Repeat;
+};
+
+//! One committed E3 face-image binding observed on a model instance. The
+//! identifiers are the durable record UUIDs; faceIndex is only this
+//! publication's transient semantic topology association of the bound face
+//! within the referenced mesh, never persisted face authority. textureIndex
+//! addresses SceneSnapshot::textures and carries the resource's normalized
+//! working bytes; wrap modes ride with the binding, not the shared texture.
+struct FaceImageBindingSnapshot {
+    std::string bindingIdentifier;
+    std::string faceIdentifier;
+    std::string resourceIdentifier;
+    FaceImageRole role = FaceImageRole::BaseColor;
+    bool srgbColorSpace = true;
+    FaceImageUVTransform transform;
+    std::uint32_t faceIndex = 0;
+    std::int32_t textureIndex = -1;
+};
+
 //! Exact semantic topology owned by a reusable model definition. These counts
 //! are intentionally independent of render vertices and face primitives:
 //! tessellation may duplicate vertices, omit untriangulated topology, or use
@@ -310,6 +355,9 @@ struct InstanceSnapshot {
     //! must remain absent; this is not a fabricated face binding.
     std::optional<MaterialSnapshot> nativeWirePresentation;
     std::vector<PrimitiveBinding> primitiveBindings;
+    //! Committed E3 face-image bindings observed on this instance, in record
+    //! order. Empty for every asset without face-image records.
+    std::vector<FaceImageBindingSnapshot> faceImageBindings;
 };
 
 struct CameraSnapshot {

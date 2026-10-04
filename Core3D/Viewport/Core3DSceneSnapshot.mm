@@ -150,6 +150,23 @@ static_assert(sizeof(std::uint32_t) == 4,
                               visible:(BOOL)visible;
 @end
 
+@interface Core3DSceneFaceImageBindingSnapshot ()
+- (instancetype)initWithBindingIdentifier:(NSString *)bindingIdentifier
+                         faceIdentifier:(NSString *)faceIdentifier
+                     resourceIdentifier:(NSString *)resourceIdentifier
+                                   role:(Core3DSceneFaceImageRole)role
+                         srgbColorSpace:(BOOL)srgbColorSpace
+                                 scaleU:(double)scaleU
+                                 scaleV:(double)scaleV
+                                offsetU:(double)offsetU
+                                offsetV:(double)offsetV
+                       rotationDegrees:(double)rotationDegrees
+                                  wrapU:(Core3DSceneFaceImageWrap)wrapU
+                                  wrapV:(Core3DSceneFaceImageWrap)wrapV
+                              faceIndex:(uint32_t)faceIndex
+                           textureIndex:(NSInteger)textureIndex;
+@end
+
 @interface Core3DSceneMeshSnapshot ()
 - (instancetype)initWithDefinitionIdentifier:(NSString *)definitionIdentifier
                                 geometryKind:(Core3DSceneGeometryKind)geometryKind
@@ -194,7 +211,8 @@ static_assert(sizeof(std::uint32_t) == 4,
                               depthPolicy:(Core3DSceneDepthPolicy)depthPolicy
                               renderStyle:(Core3DSceneRenderStyle)renderStyle
                     nativeWirePresentation:(nullable Core3DSceneMaterialSnapshot *)nativeWirePresentation
-                        primitiveBindings:(NSArray<Core3DScenePrimitiveBindingSnapshot *> *)primitiveBindings;
+                        primitiveBindings:(NSArray<Core3DScenePrimitiveBindingSnapshot *> *)primitiveBindings
+                       faceImageBindings:(NSArray<Core3DSceneFaceImageBindingSnapshot *> *)faceImageBindings;
 @end
 
 @interface Core3DSceneElementIdentifier ()
@@ -1712,6 +1730,46 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
 @end
 
 
+@implementation Core3DSceneFaceImageBindingSnapshot
+
+- (instancetype)initWithBindingIdentifier:(NSString *)bindingIdentifier
+                         faceIdentifier:(NSString *)faceIdentifier
+                     resourceIdentifier:(NSString *)resourceIdentifier
+                                   role:(Core3DSceneFaceImageRole)role
+                         srgbColorSpace:(BOOL)srgbColorSpace
+                                 scaleU:(double)scaleU
+                                 scaleV:(double)scaleV
+                                offsetU:(double)offsetU
+                                offsetV:(double)offsetV
+                       rotationDegrees:(double)rotationDegrees
+                                  wrapU:(Core3DSceneFaceImageWrap)wrapU
+                                  wrapV:(Core3DSceneFaceImageWrap)wrapV
+                              faceIndex:(uint32_t)faceIndex
+                           textureIndex:(NSInteger)textureIndex {
+    self = [super init];
+    if (self) {
+        _bindingIdentifier = [bindingIdentifier copy];
+        _faceIdentifier = [faceIdentifier copy];
+        _resourceIdentifier = [resourceIdentifier copy];
+        _role = role;
+        _srgbColorSpace = srgbColorSpace;
+        _scaleU = scaleU;
+        _scaleV = scaleV;
+        _offsetU = offsetU;
+        _offsetV = offsetV;
+        _rotationDegrees = rotationDegrees;
+        _wrapU = wrapU;
+        _wrapV = wrapV;
+        _faceIndex = faceIndex;
+        _textureIndex = textureIndex;
+        _hasTexture = textureIndex >= 0;
+    }
+    return self;
+}
+
+@end
+
+
 @implementation Core3DSceneMeshSnapshot
 
 - (instancetype)initWithDefinitionIdentifier:(NSString *)definitionIdentifier
@@ -1792,7 +1850,8 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
                               depthPolicy:(Core3DSceneDepthPolicy)depthPolicy
                               renderStyle:(Core3DSceneRenderStyle)renderStyle
                     nativeWirePresentation:(nullable Core3DSceneMaterialSnapshot *)nativeWirePresentation
-                        primitiveBindings:(NSArray<Core3DScenePrimitiveBindingSnapshot *> *)primitiveBindings {
+                        primitiveBindings:(NSArray<Core3DScenePrimitiveBindingSnapshot *> *)primitiveBindings
+                       faceImageBindings:(NSArray<Core3DSceneFaceImageBindingSnapshot *> *)faceImageBindings {
     self = [super init];
     if (self) {
         _entityIdentifier = [entityIdentifier copy];
@@ -1817,6 +1876,7 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
         _renderStyle = renderStyle;
         _nativeWirePresentation = nativeWirePresentation;
         _primitiveBindings = [primitiveBindings copy];
+        _faceImageBindings = [faceImageBindings copy];
     }
     return self;
 }
@@ -1959,6 +2019,9 @@ constexpr std::size_t kMaximumDTOMaterials = 50'000;
 constexpr std::size_t kMaximumDTOTextures = 256;
 constexpr std::size_t kMaximumDTOPrimitives = 250'000;
 constexpr std::size_t kMaximumDTOBindings = 250'000;
+//! 256 committed bindings per owner record, bounded across owners.
+constexpr std::size_t kMaximumDTOFaceImageBindings = 12'800;
+constexpr std::size_t kMaximumDTOFaceImageBindingsPerInstance = 256;
 constexpr std::size_t kMaximumDTOPickEntries = 250'001;
 constexpr std::size_t kMaximumDTOSelectedElements = 50'000;
 constexpr std::size_t kMaximumDTOVertices = 1'500'000;
@@ -2464,6 +2527,52 @@ bool IsValid(const CameraSnapshot& value) noexcept {
     return true;
 }
 
+bool IsValid(const FaceImageRole value) noexcept {
+    switch (value) {
+        case FaceImageRole::BaseColor:
+        case FaceImageRole::Emissive:
+        case FaceImageRole::MetallicRoughness:
+        case FaceImageRole::Occlusion:
+        case FaceImageRole::Normal:
+            return true;
+    }
+    return false;
+}
+
+bool IsValid(const FaceImageWrap value) noexcept {
+    switch (value) {
+        case FaceImageWrap::ClampToEdge:
+        case FaceImageWrap::Repeat:
+        case FaceImageWrap::MirroredRepeat:
+            return true;
+    }
+    return false;
+}
+
+bool IsValid(const FaceImageUVTransform& value) noexcept {
+    return IsFinite(value.scaleU) && IsFinite(value.scaleV)
+        && IsFinite(value.offsetU) && IsFinite(value.offsetV)
+        && IsFinite(value.rotationDegrees)
+        && value.scaleU > 0.0 && value.scaleU <= 64.0
+        && value.scaleV > 0.0 && value.scaleV <= 64.0
+        && value.offsetU >= -4096.0 && value.offsetU <= 4096.0
+        && value.offsetV >= -4096.0 && value.offsetV <= 4096.0
+        && value.rotationDegrees >= 0.0 && value.rotationDegrees < 360.0
+        && IsValid(value.wrapU) && IsValid(value.wrapV);
+}
+
+bool IsValid(const FaceImageBindingSnapshot& value) noexcept {
+    // Color space stays coupled to the role exactly as the committed record.
+    const bool srgbRole = value.role == FaceImageRole::BaseColor
+        || value.role == FaceImageRole::Emissive;
+    return IsValidIdentifier(value.bindingIdentifier)
+        && IsValidIdentifier(value.faceIdentifier)
+        && IsValidIdentifier(value.resourceIdentifier)
+        && IsValid(value.role) && IsValid(value.transform)
+        && value.srgbColorSpace == srgbRole
+        && value.textureIndex >= -1;
+}
+
 bool IsValid(const MaterialSnapshot& value) noexcept {
     return IsValidIdentifier(value.identifier)
         && IsFinite(value.baseColor) && IsFinite(value.emission)
@@ -2631,6 +2740,18 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
             referencedTextures[textureIndex] = 1;
         }
     }
+    // E3 face-image bindings reference textures independently of materials;
+    // their working-byte resources join the same referenced census.
+    for (const InstanceSnapshot& instance : snapshot.instances) {
+        for (const FaceImageBindingSnapshot& binding :
+             instance.faceImageBindings) {
+            if (binding.textureIndex < 0) { continue; }
+            const std::size_t textureIndex =
+                static_cast<std::size_t>(binding.textureIndex);
+            if (textureIndex >= snapshot.textures.size()) { return false; }
+            referencedTextures[textureIndex] = 1;
+        }
+    }
     if (!std::all_of(referencedTextures.begin(), referencedTextures.end(),
                      [](const std::uint8_t referenced) {
                          return referenced != 0;
@@ -2737,6 +2858,7 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
     }
 
     std::size_t totalBindings = 0;
+    std::size_t totalFaceImageBindings = 0;
     std::unordered_map<std::string, std::size_t> instancesByIdentifier;
     instancesByIdentifier.reserve(snapshot.instances.size());
     std::unordered_map<std::string, std::pair<std::string, std::size_t>> savedGroups;
@@ -2807,6 +2929,44 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
                 && instance.selectable
                 && mesh.topology.edgeCount == 0)) {
             return false;
+        }
+        if (instance.faceImageBindings.size()
+                > kMaximumDTOFaceImageBindingsPerInstance
+            || !CheckedAdd(totalFaceImageBindings,
+                           instance.faceImageBindings.size(),
+                           totalFaceImageBindings)
+            || totalFaceImageBindings > kMaximumDTOFaceImageBindings
+            || !CheckedAdd(totalNumericBytes,
+                           instance.faceImageBindings.size()
+                               * sizeof(FaceImageBindingSnapshot),
+                           totalNumericBytes)
+            || totalNumericBytes > kMaximumDTONumericBytes) {
+            return false;
+        }
+        std::unordered_set<std::uint64_t> faceImageFaceRoles;
+        for (const FaceImageBindingSnapshot& binding :
+             instance.faceImageBindings) {
+            if (!IsValid(binding)
+                || !accountString(binding.bindingIdentifier)
+                || !accountString(binding.faceIdentifier)
+                || !accountString(binding.resourceIdentifier)) {
+                return false;
+            }
+            bool facePublished = false;
+            for (const MeshPrimitive& primitive : mesh.primitives) {
+                if (primitive.faceIndex == binding.faceIndex) {
+                    facePublished = true;
+                    break;
+                }
+            }
+            // One binding per face/role pair, mirroring the committed record.
+            const std::uint64_t faceRole =
+                (static_cast<std::uint64_t>(binding.faceIndex) << 8)
+                | static_cast<std::uint8_t>(binding.role);
+            if (!facePublished
+                || !faceImageFaceRoles.insert(faceRole).second) {
+                return false;
+            }
         }
     }
 
@@ -4007,6 +4167,25 @@ Core3DScenePrimitiveBindingSnapshot *PrimitiveBindingFromScene(
                      visible:value.visible];
 }
 
+Core3DSceneFaceImageBindingSnapshot *FaceImageBindingFromScene(
+    const FaceImageBindingSnapshot& value) {
+    return [[Core3DSceneFaceImageBindingSnapshot alloc]
+        initWithBindingIdentifier:StringFromUTF8(value.bindingIdentifier)
+                 faceIdentifier:StringFromUTF8(value.faceIdentifier)
+             resourceIdentifier:StringFromUTF8(value.resourceIdentifier)
+                           role:static_cast<Core3DSceneFaceImageRole>(value.role)
+                 srgbColorSpace:value.srgbColorSpace
+                         scaleU:value.transform.scaleU
+                         scaleV:value.transform.scaleV
+                        offsetU:value.transform.offsetU
+                        offsetV:value.transform.offsetV
+               rotationDegrees:value.transform.rotationDegrees
+                          wrapU:static_cast<Core3DSceneFaceImageWrap>(value.transform.wrapU)
+                          wrapV:static_cast<Core3DSceneFaceImageWrap>(value.transform.wrapV)
+                      faceIndex:value.faceIndex
+                   textureIndex:value.textureIndex];
+}
+
 Core3DSceneElementIdentifier *ElementIdentifierFromScene(
     const ElementIdentifier& value) {
     return [[Core3DSceneElementIdentifier alloc]
@@ -4092,6 +4271,10 @@ Core3DSceneRenderItemSnapshot *RenderItemFromScene(const InstanceSnapshot& value
         ObjectArrayFromVector<PrimitiveBinding, Core3DScenePrimitiveBindingSnapshot>(
             value.primitiveBindings,
             PrimitiveBindingFromScene);
+    NSArray<Core3DSceneFaceImageBindingSnapshot *> *faceImageBindings =
+        ObjectArrayFromVector<FaceImageBindingSnapshot, Core3DSceneFaceImageBindingSnapshot>(
+            value.faceImageBindings,
+            FaceImageBindingFromScene);
     const ReferenceAxisSnapshot referenceAxis = value.referenceAxis.value_or(
         ReferenceAxisSnapshot());
     return [[Core3DSceneRenderItemSnapshot alloc]
@@ -4122,7 +4305,8 @@ Core3DSceneRenderItemSnapshot *RenderItemFromScene(const InstanceSnapshot& value
                      renderStyle:RenderStyleFromScene(value.renderStyle)
            nativeWirePresentation:value.nativeWirePresentation.has_value()
                ? MaterialFromScene(*value.nativeWirePresentation) : nil
-               primitiveBindings:bindings];
+               primitiveBindings:bindings
+              faceImageBindings:faceImageBindings];
 }
 
 Core3DSceneSelectionSnapshot *SelectionFromScene(const SelectionSnapshot& value) {

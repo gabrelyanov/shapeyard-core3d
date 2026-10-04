@@ -16,6 +16,7 @@
 #include "../OCCTKit/BoundedCurveEvaluation.hxx"
 #include "../OCCTKit/NativeContactMeshCapture.hxx"
 #include "../OCCTKit/PatternAllLabelAuthority.hxx"
+#include "../OCCTKit/NativeOpeningDependentReplay.hxx"
 
 #include "../Common/Core3DMobileResourceLimits.h"
 #include "../OCCTKit/OcctDocument.h"
@@ -826,6 +827,140 @@ bool AddTextureResource(SceneSnapshot& theScene,
     theState.resourcesBySourceIdentifier.emplace(aSourceIdentifier,
                                                  aResourceIndex);
     theState.aggregateEncodedBytes += aBuffer->Size();
+    theState.aggregateDecodedBytes += aDecodedBytes;
+    theTextureIndex = static_cast<std::int32_t>(aResourceIndex);
+    return true;
+}
+
+// E3 face-image appearance (278b portion 4). The durable record UUIDs are
+// published as lowercase RFC-9562 text, matching the document identity
+// strings already used by this builder.
+std::string FaceImageUUIDText(const core3d::retained_recipe::UUID& theUUID)
+{
+    static const char* const kDigits = "0123456789abcdef";
+    std::string aText;
+    aText.reserve(36);
+    for (std::size_t anIndex = 0; anIndex < theUUID.size(); ++anIndex) {
+        if (anIndex == 4 || anIndex == 6 || anIndex == 8 || anIndex == 10) {
+            aText.push_back('-');
+        }
+        aText.push_back(kDigits[theUUID[anIndex] >> 4]);
+        aText.push_back(kDigits[theUUID[anIndex] & 0x0f]);
+    }
+    return aText;
+}
+
+// Publishes the document-owned working bytes of one face-image resource with
+// the same content identity, metadata checks and aggregate budgets as an
+// embedded XCAF texture. The resource UUID is the dedup source identifier;
+// identical working content shares one immutable entry.
+bool AddFaceImageTextureResource(
+    SceneSnapshot& theScene,
+    TextureTableState& theState,
+    const core3d::face_image::ResourceEnvelope& theEnvelope,
+    std::int32_t& theTextureIndex)
+{
+    theTextureIndex = -1;
+    const std::vector<std::uint8_t>& aBytes = theEnvelope.workingBytes;
+    if (aBytes.empty() || aBytes.size() > kMaxEncodedTextureBytes) {
+        return false;
+    }
+    const std::string aSourceIdentifier =
+        "face-image-" + FaceImageUUIDText(theEnvelope.resource);
+    const auto aSourceFound =
+        theState.resourcesBySourceIdentifier.find(aSourceIdentifier);
+    if (aSourceFound != theState.resourcesBySourceIdentifier.end()) {
+        const std::size_t anExistingIndex = aSourceFound->second;
+        if (anExistingIndex >= theScene.textures.size()
+            || theScene.textures[anExistingIndex].encodedBytes.size()
+                != aBytes.size()
+            || std::memcmp(theScene.textures[anExistingIndex]
+                               .encodedBytes.data(),
+                           aBytes.data(),
+                           aBytes.size()) != 0) {
+            return false;
+        }
+        theTextureIndex = static_cast<std::int32_t>(anExistingIndex);
+        return true;
+    }
+
+    const std::string aDigest =
+        SHA256Identifier(aBytes.data(), aBytes.size());
+    if (aDigest.empty()) {
+        return false;
+    }
+    const auto aDigestFound = theState.resourcesByDigest.find(aDigest);
+    if (aDigestFound != theState.resourcesByDigest.end()) {
+        for (const std::size_t anExistingIndex : aDigestFound->second) {
+            const TextureResourceSnapshot& anExisting =
+                theScene.textures[anExistingIndex];
+            if (anExisting.encodedBytes.size() == aBytes.size()
+                && std::memcmp(anExisting.encodedBytes.data(),
+                               aBytes.data(),
+                               aBytes.size()) == 0) {
+                theState.resourcesBySourceIdentifier.emplace(
+                    aSourceIdentifier, anExistingIndex);
+                theTextureIndex = static_cast<std::int32_t>(anExistingIndex);
+                return true;
+            }
+        }
+        // A content identifier is an exact cache and revision invariant. A
+        // cryptographic collision cannot be represented safely; fail closed.
+        return false;
+    }
+
+    Handle(NCollection_Buffer) aBuffer = new NCollection_Buffer(
+        NCollection_BaseAllocator::CommonBaseAllocator(), aBytes.size());
+    if (aBuffer.IsNull() || aBuffer->ChangeData() == nullptr
+        || aBuffer->Size() != aBytes.size()) {
+        return false;
+    }
+    std::memcpy(aBuffer->ChangeData(), aBytes.data(), aBytes.size());
+    TextureEncoding anEncoding = TextureEncoding::PNG;
+    std::uint32_t aWidth = 0;
+    std::uint32_t aHeight = 0;
+    std::size_t aDecodedBytes = 0;
+    if (!ReadTextureMetadata(aBuffer,
+                             anEncoding,
+                             aWidth,
+                             aHeight,
+                             aDecodedBytes)) {
+        return false;
+    }
+    // The envelope's own validated metadata must agree with the carried
+    // bytes; a mislabeled resource never enters the snapshot.
+    const bool anEnvelopePNG = theEnvelope.workingFormat
+        == core3d::face_image::ImageEncoding::PNG;
+    if (aWidth != theEnvelope.workingWidthTexels
+        || aHeight != theEnvelope.workingHeightTexels
+        || (anEncoding == TextureEncoding::PNG) != anEnvelopePNG) {
+        return false;
+    }
+
+    if (theScene.textures.size() >= kMaxTexturesPerSnapshot
+        || theScene.textures.size()
+            > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())
+        || aBytes.size() > kMaxAggregateEncodedTextureBytes
+        || theState.aggregateEncodedBytes
+            > kMaxAggregateEncodedTextureBytes - aBytes.size()
+        || aDecodedBytes > kMaxAggregateDecodedTextureBytes
+        || theState.aggregateDecodedBytes
+            > kMaxAggregateDecodedTextureBytes - aDecodedBytes) {
+        return false;
+    }
+
+    TextureResourceSnapshot aResource;
+    aResource.identifier = aDigest;
+    aResource.encoding = anEncoding;
+    aResource.pixelWidth = aWidth;
+    aResource.pixelHeight = aHeight;
+    aResource.encodedBytes = aBytes;
+    const std::size_t aResourceIndex = theScene.textures.size();
+    theScene.textures.push_back(std::move(aResource));
+    theState.resourcesByDigest[aDigest].push_back(aResourceIndex);
+    theState.resourcesBySourceIdentifier.emplace(aSourceIdentifier,
+                                                 aResourceIndex);
+    theState.aggregateEncodedBytes += aBytes.size();
     theState.aggregateDecodedBytes += aDecodedBytes;
     theTextureIndex = static_cast<std::int32_t>(aResourceIndex);
     return true;
@@ -2538,6 +2673,26 @@ std::uint64_t PresentationFingerprint(const SceneSnapshot& theScene)
             aHash.AddInteger(aBinding.materialIndex);
             aHash.AddInteger(aBinding.pickToken);
             aHash.AddBool(aBinding.visible);
+        }
+        aHash.AddInteger<std::uint64_t>(anInstance.faceImageBindings.size());
+        for (const FaceImageBindingSnapshot& aFaceBinding :
+             anInstance.faceImageBindings) {
+            aHash.AddString(aFaceBinding.bindingIdentifier);
+            aHash.AddString(aFaceBinding.faceIdentifier);
+            aHash.AddString(aFaceBinding.resourceIdentifier);
+            aHash.AddInteger(static_cast<std::uint8_t>(aFaceBinding.role));
+            aHash.AddBool(aFaceBinding.srgbColorSpace);
+            aHash.AddDouble(aFaceBinding.transform.scaleU);
+            aHash.AddDouble(aFaceBinding.transform.scaleV);
+            aHash.AddDouble(aFaceBinding.transform.offsetU);
+            aHash.AddDouble(aFaceBinding.transform.offsetV);
+            aHash.AddDouble(aFaceBinding.transform.rotationDegrees);
+            aHash.AddInteger(
+                static_cast<std::uint8_t>(aFaceBinding.transform.wrapU));
+            aHash.AddInteger(
+                static_cast<std::uint8_t>(aFaceBinding.transform.wrapV));
+            aHash.AddInteger(aFaceBinding.faceIndex);
+            aHash.AddInteger(aFaceBinding.textureIndex);
         }
     }
     aHash.AddInteger<std::uint64_t>(theScene.pickTable.size());
@@ -5598,6 +5753,153 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
               }
             }
 
+            // E3 face-image appearance (278b portion 4). The committed
+            // binding/resource records of this owner's retained solid feed
+            // the immutable snapshot. The durable (face UUID, selectorProof)
+            // pair is matched against portion 3's exact receipt derivation;
+            // the resulting publication ordinal is a transient association,
+            // never persisted authority. A stale or ambiguous association
+            // and a missing resource publish nothing for that binding; the
+            // record itself is never touched. Assets without face-image
+            // records take none of these branches.
+            if (!aDefinition.boundedCurve && aMesh.topology.faceCount != 0
+                && !aDefinition.shape.IsNull()) {
+                core3d::face_image::OwnerKey aFaceImageOwner;
+                if (core3d::receipt::ParseUUID(aDocumentIdentifier,
+                                               aFaceImageOwner.document)
+                    && core3d::receipt::ParseUUID(
+                        theDocument->EntityIdentifierForLabel(
+                            anOccurrence.definitionLabel),
+                        aFaceImageOwner.entity)
+                    && core3d::receipt::ParseUUID(
+                        anOccurrence.definitionIdentifier,
+                        aFaceImageOwner.definition)
+                    && core3d::retained_recipe::Valid(aFaceImageOwner)) {
+                    core3d::face_image::Definition aFaceImageRecord;
+                    const auto aRecordState =
+                        theDocument->ReadFaceImageBindings(
+                            aFaceImageOwner, aFaceImageRecord, nullptr);
+                    if (aRecordState == core3d::face_image::persistence::
+                        bindings::ReadState::Malformed) {
+                        return {};
+                    }
+                    if (aRecordState == core3d::face_image::persistence::
+                        bindings::ReadState::Present
+                        && aDefinition.faces.Extent() <= 4096) {
+                        Bnd_Box aStageBox;
+                        BRepBndLib::Add(aDefinition.shape, aStageBox);
+                        if (aStageBox.IsVoid()) {
+                            return {};
+                        }
+                        namespace dr = core3d::dependent_replay;
+                        core3d::retained_edge_treatment::ReplayBudget
+                            aReplayBudget;
+                        const std::size_t aFaceCount =
+                            static_cast<std::size_t>(
+                                aDefinition.faces.Extent());
+                        std::vector<core3d::face_image::Digest>
+                            aFaceProofs(aFaceCount);
+                        std::vector<bool> aFaceAddressable(aFaceCount, false);
+                        bool aBudgetExhausted = false;
+                        for (std::size_t aFaceOrdinal = 0;
+                             aFaceOrdinal < aFaceCount; ++aFaceOrdinal) {
+                            const TopoDS_Face aFace = TopoDS::Face(
+                                aDefinition.faces.FindKey(
+                                    static_cast<Standard_Integer>(
+                                        aFaceOrdinal + 1)));
+                            dr::FaceImageGeometricReceipt aReceipt;
+                            const auto aDeriveStatus =
+                                dr::detail::DeriveFaceImageReceipt(
+                                    aStageBox, aFace, aMetersPerUnit,
+                                    aReplayBudget, aReceipt);
+                            if (aDeriveStatus == dr::detail::
+                                FaceImageDeriveStatus::Budget) {
+                                aBudgetExhausted = true;
+                                break;
+                            }
+                            if (aDeriveStatus != dr::detail::
+                                FaceImageDeriveStatus::Derived) {
+                                continue;
+                            }
+                            if (!dr::FaceImageReceiptProof(
+                                    aReceipt, aFaceProofs[aFaceOrdinal])) {
+                                return {};
+                            }
+                            aFaceAddressable[aFaceOrdinal] = true;
+                        }
+                        if (!aBudgetExhausted) {
+                            for (const auto& aCommitted :
+                                 aFaceImageRecord.bindings) {
+                                std::size_t aMatch = 0;
+                                std::size_t aMatchCount = 0;
+                                for (std::size_t aFaceOrdinal = 0;
+                                     aFaceOrdinal < aFaceCount;
+                                     ++aFaceOrdinal) {
+                                    if (aFaceAddressable[aFaceOrdinal]
+                                        && aFaceProofs[aFaceOrdinal]
+                                            == aCommitted.selectorProof) {
+                                        if (aMatchCount == 0) {
+                                            aMatch = aFaceOrdinal;
+                                        }
+                                        ++aMatchCount;
+                                    }
+                                }
+                                if (aMatchCount != 1) {
+                                    continue;
+                                }
+                                core3d::face_image::ResourceEnvelope
+                                    aEnvelope;
+                                if (!theDocument->ReadFaceImageResource(
+                                        aCommitted.resource, aEnvelope)) {
+                                    continue;
+                                }
+                                std::int32_t aTextureIndex = -1;
+                                if (!AddFaceImageTextureResource(
+                                        aScene, aTextureTable, aEnvelope,
+                                        aTextureIndex)
+                                    || aTextureIndex < 0) {
+                                    return {};
+                                }
+                                FaceImageBindingSnapshot aFaceBinding;
+                                aFaceBinding.bindingIdentifier =
+                                    FaceImageUUIDText(aCommitted.binding);
+                                aFaceBinding.faceIdentifier =
+                                    FaceImageUUIDText(aCommitted.face);
+                                aFaceBinding.resourceIdentifier =
+                                    FaceImageUUIDText(aCommitted.resource);
+                                aFaceBinding.role = static_cast<FaceImageRole>(
+                                    aCommitted.role);
+                                aFaceBinding.srgbColorSpace =
+                                    aCommitted.colorSpace
+                                        == core3d::face_image::
+                                            ColorSpace::SRGB;
+                                aFaceBinding.transform.scaleU =
+                                    aCommitted.transform.scale[0];
+                                aFaceBinding.transform.scaleV =
+                                    aCommitted.transform.scale[1];
+                                aFaceBinding.transform.offsetU =
+                                    aCommitted.transform.offset[0];
+                                aFaceBinding.transform.offsetV =
+                                    aCommitted.transform.offset[1];
+                                aFaceBinding.transform.rotationDegrees =
+                                    aCommitted.transform.rotationDegrees;
+                                aFaceBinding.transform.wrapU =
+                                    static_cast<FaceImageWrap>(
+                                        aCommitted.transform.wrapU);
+                                aFaceBinding.transform.wrapV =
+                                    static_cast<FaceImageWrap>(
+                                        aCommitted.transform.wrapV);
+                                aFaceBinding.faceIndex =
+                                    static_cast<std::uint32_t>(aMatch);
+                                aFaceBinding.textureIndex = aTextureIndex;
+                                anInstance.faceImageBindings.push_back(
+                                    std::move(aFaceBinding));
+                            }
+                        }
+                    }
+                }
+            }
+
             anInstance.primitiveBindings.reserve(aMesh.primitives.size());
             std::optional<std::uint32_t> anObjectPickToken;
             for (std::size_t aPrimitiveIndex = 0;
@@ -5714,7 +6016,16 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         std::size_t aMaterialBytes = 0;
         std::size_t aTextureMetadataBytes = 0;
         std::size_t aPickBytes = 0;
+        std::size_t aFaceImageBindingBytes = 0;
         std::size_t anAuxiliaryBytes = 0;
+        std::size_t aFaceImageBindingCount = 0;
+        for (const auto& instance : aScene.instances) {
+            if (!CheckedAdd(aFaceImageBindingCount,
+                            instance.faceImageBindings.size(),
+                            aFaceImageBindingCount)) {
+                return {};
+            }
+        }
         constexpr std::size_t anInstanceNumericSize =
             sizeof(Matrix4d) + sizeof(ReferenceAxisSnapshot);
         if (!CheckedMultiply(aScene.instances.size(),
@@ -5732,12 +6043,18 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             || !CheckedMultiply(aScene.pickTable.size(),
                                 sizeof(ElementIdentifier),
                                 aPickBytes)
+            || !CheckedMultiply(aFaceImageBindingCount,
+                                sizeof(FaceImageBindingSnapshot),
+                                aFaceImageBindingBytes)
             || !CheckedAdd(anInstanceBytes, aBindingBytes, anAuxiliaryBytes)
             || !CheckedAdd(anAuxiliaryBytes, aMaterialBytes, anAuxiliaryBytes)
             || !CheckedAdd(anAuxiliaryBytes,
                            aTextureMetadataBytes,
                            anAuxiliaryBytes)
             || !CheckedAdd(anAuxiliaryBytes, aPickBytes, anAuxiliaryBytes)
+            || !CheckedAdd(anAuxiliaryBytes,
+                           aFaceImageBindingBytes,
+                           anAuxiliaryBytes)
             || !CheckedAdd(aSnapshotNumericBytes,
                            anAuxiliaryBytes,
                            aSnapshotNumericBytes)
