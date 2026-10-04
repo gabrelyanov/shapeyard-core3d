@@ -22266,7 +22266,9 @@ std::unordered_map<NSUInteger,B2BudgetSessionBox>& B2BudgetSessions(){
     identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;
     core3d::retained_face_selector::Refusal refusal;auto proof=GLController.viewer->captureEdgeTreatmentSelectorTargetsR2(native->native,nativeIntent,identity,
         expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);
-    if(!proof){[query setValue:@(Core3DFaceSelectorStatusRefused) forKey:@"status"];[query setValue:@(NSInteger(refusal)) forKey:@"refusal"];return query;}
+    if(!proof){[query setValue:@(Core3DFaceSelectorStatusRefused) forKey:@"status"];[query setValue:@(NSInteger(refusal)) forKey:@"refusal"];
+        [query setValue:@(core3d::retained_face_selector::RefusalCode(refusal)) forKey:@"refusalCode"];
+        [query setValue:@(core3d::retained_face_selector::RefusalMessage(refusal)) forKey:@"refusalMessage"];return query;}
     auto value=B1Object<Core3DFaceSelectorNativeProofR2>(Core3DFaceSelectorNativeProofR2.class);value->native=proof;[value setValue:@2 forKey:@"contractRevision"];
     [query setValue:@(Core3DFaceSelectorStatusProved) forKey:@"status"];[query setValue:@(Core3DFaceSelectorRefusalNone) forKey:@"refusal"];
     [query setValue:value forKey:@"proof"];[query setValue:@"b2.None" forKey:@"refusalCode"];[query setValue:@"" forKey:@"refusalMessage"];return query;
