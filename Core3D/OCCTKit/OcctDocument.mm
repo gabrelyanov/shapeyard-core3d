@@ -7786,54 +7786,46 @@ Standard_Boolean Core3DValidateFaceImageDocument(const Handle(TDocStd_Document)&
 namespace core3d::face_image {
 // E3 DEBUG evidence (278b portion 2): measured registration state for the
 // later portions' probes. Read-only; no edit authority and no mutation route.
-struct FaceImageProbe final {
-    struct Observation final {
-        Standard_Integer resources = 0;
-        Standard_Integer boundOwners = 0;
-        Standard_Size aggregateBytes = 0;
-        bool complete = false;
-    };
-    // Friend seam: distinguishes a fully published payload from an empty
-    // attribute shell without reparsing its bytes.
-    static bool Published(const Handle(persistence::resources::Attribute)& attribute) noexcept {
-        return !attribute.IsNull() && attribute->value_ && !attribute->value_->bytes.empty();
-    }
-    static Observation Observe(const Handle(TDocStd_Document)& document) noexcept {
-        Observation output;
-        try {
-            if (document.IsNull() || document->GetData().IsNull()) return output;
-            std::vector<persistence::resources::Record> records;
-            if (!persistence::resources::ReadAll(document, records)) return Observation{};
-            for (const auto& record : records) {
-                Handle(persistence::resources::Attribute) attribute;
-                if (record.label.IsNull()
-                    || !record.label.FindAttribute(persistence::resources::AttributeID(), attribute)
-                    || !Published(attribute)) return Observation{};
-                output.aggregateBytes += record.value->bytes.size();
+// Declarations live in OcctDocument.h (portion 4b) so the UI-layer
+// observation seam can consume them.
+bool FaceImageProbe::Published(
+    const Handle(persistence::resources::Attribute)& attribute) noexcept {
+    return !attribute.IsNull() && attribute->value_ && !attribute->value_->bytes.empty();
+}
+FaceImageProbe::Observation FaceImageProbe::Observe(
+    const Handle(TDocStd_Document)& document) noexcept {
+    Observation output;
+    try {
+        if (document.IsNull() || document->GetData().IsNull()) return output;
+        std::vector<persistence::resources::Record> records;
+        if (!persistence::resources::ReadAll(document, records)) return Observation{};
+        for (const auto& record : records) {
+            Handle(persistence::resources::Attribute) attribute;
+            if (record.label.IsNull()
+                || !record.label.FindAttribute(persistence::resources::AttributeID(), attribute)
+                || !Published(attribute)) return Observation{};
+            output.aggregateBytes += record.value->bytes.size();
+        }
+        output.resources = Standard_Integer(records.size());
+        if (XCAFDoc_DocumentTool::CheckShapeTool(document->Main())) {
+            const Handle(XCAFDoc_ShapeTool) tool = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            TDF_LabelSequence labels;
+            if (!tool.IsNull()) tool->GetFreeShapes(labels);
+            if (!tool.IsNull() || labels.Length() < 0
+                || labels.Length() > core3d::profile::MaximumLabels) return Observation{};
+            for (Standard_Integer index = 1; index <= labels.Length(); ++index) {
+                Definition definition;
+                const auto state = persistence::bindings::Read(document, labels.Value(index), definition);
+                if (state == persistence::bindings::ReadState::Malformed) return Observation{};
+                if (state == persistence::bindings::ReadState::Present) ++output.boundOwners;
             }
-            output.resources = Standard_Integer(records.size());
-            if (XCAFDoc_DocumentTool::CheckShapeTool(document->Main())) {
-                const Handle(XCAFDoc_ShapeTool) tool = XCAFDoc_DocumentTool::ShapeTool(document->Main());
-                TDF_LabelSequence labels;
-                if (!tool.IsNull()) tool->GetFreeShapes(labels);
-                if (!tool.IsNull() || labels.Length() < 0
-                    || labels.Length() > core3d::profile::MaximumLabels) return Observation{};
-                for (Standard_Integer index = 1; index <= labels.Length(); ++index) {
-                    Definition definition;
-                    const auto state = persistence::bindings::Read(document, labels.Value(index), definition);
-                    if (state == persistence::bindings::ReadState::Malformed) return Observation{};
-                    if (state == persistence::bindings::ReadState::Present) ++output.boundOwners;
-                }
-            }
-            output.complete = true;
-            return output;
-        } catch (...) { return Observation{}; }
-    }
-};
+        }
+        output.complete = true;
+        return output;
+    } catch (...) { return Observation{}; }
+}
 } // namespace core3d::face_image
 #endif
-
-
 OcctRetainedRecipeCoverage OcctDocument::RetainedRecipeCoverageForLabel(
     const TDF_Label& label) const noexcept
 {
@@ -16902,7 +16894,19 @@ core3d::dependent_replay::Refusal OcctDocument::PrepareDependentReplayPlan(
     const core3d::dependent_replay::Limits& limits,
     core3d::dependent_replay::Preparer& preparer,
     std::shared_ptr<const core3d::dependent_replay::Plan>& output) noexcept {
-    using namespace core3d::dependent_replay;
+    // Base overload (behavior unchanged): a null prospective stage skips the
+    // E3 face-image attachment capture/prepare below (278b portion 4b).
+    return PrepareDependentReplayPlan(target, mutation, limits, preparer,
+                                      TopoDS_Shape(), output);
+}
+
+core3d::dependent_replay::Refusal OcctDocument::PrepareDependentReplayPlan(
+    const OcctExactLabelReceipt& target,
+    core3d::dependent_replay::Mutation mutation,
+    const core3d::dependent_replay::Limits& limits,
+    core3d::dependent_replay::Preparer& preparer,
+    const TopoDS_Shape& prospectiveStage,
+    std::shared_ptr<const core3d::dependent_replay::Plan>& output) noexcept {    using namespace core3d::dependent_replay;
     output.reset();
     try {
         OCC_CATCH_SIGNALS
@@ -16953,8 +16957,50 @@ core3d::dependent_replay::Refusal OcctDocument::PrepareDependentReplayPlan(
             if (!prepared->openingCurrent(*this)) return Refusal::MissingRecipe;
             plan->prepared_.push_back(std::move(prepared));
         }
-        output = std::move(plan); return Refusal::None;
-    } catch (...) { output.reset(); return Refusal::CorruptTable; }
+        // E3 face-image attachment of the edited owner (278b portion 4b):
+        // capture the committed record and prove the one-to-one reattachment
+        // of every bound face on the detached prospective post-edit stage
+        // BEFORE any mutation. A lost, split, merged, ambiguous or
+        // unsupported correspondence refuses the whole source command here,
+        // before a command exists. An owner without a face-image record skips
+        // this block entirely (byte-identical D2/D3/D4-only behavior).
+        if (!prospectiveStage.IsNull() && mutation == Mutation::Replace) {
+            core3d::face_image::OwnerKey faceImageOwner{};
+            if (!core3d::receipt::ParseUUID(plan->documentIdentifier_,
+                                            faceImageOwner.document)
+                || !core3d::receipt::ParseUUID(plan->targetEntityIdentifier_,
+                                               faceImageOwner.entity)
+                || !core3d::receipt::ParseUUID(plan->targetDefinitionIdentifier_,
+                                               faceImageOwner.definition)
+                || !core3d::retained_recipe::Valid(faceImageOwner))
+                return Refusal::StaleTarget;
+            FaceImageAttachment attachment;
+            const FaceImageReplayStatus captured =
+                CaptureFaceImageAttachment(*this, faceImageOwner, attachment);
+            if (captured == FaceImageReplayStatus::Captured) {
+                auto replay = std::make_shared<FaceImageReplay>();
+                const FaceImageReplayStatus preparedFaceImage = replay->prepare(
+                    *this, attachment, mutation, faceImageOwner.entity, prospectiveStage);
+                if (preparedFaceImage != FaceImageReplayStatus::Prepared
+                    && preparedFaceImage != FaceImageReplayStatus::NoChange) {
+                    if (preparedFaceImage == FaceImageReplayStatus::Budget)
+                        return Refusal::TopologyBudget;
+                    if (preparedFaceImage == FaceImageReplayStatus::AmbiguousFaceRemap
+                        || preparedFaceImage == FaceImageReplayStatus::UnsupportedSurface
+                        || preparedFaceImage == FaceImageReplayStatus::UnsupportedDownstream)
+                        return Refusal::UnsupportedDescendant;
+                    return Refusal::StaleClosure;
+                }
+                plan->faceImageReplay_ = std::move(replay);
+            } else if (captured != FaceImageReplayStatus::Absent) {
+                if (captured == FaceImageReplayStatus::Budget)
+                    return Refusal::TopologyBudget;
+                if (captured == FaceImageReplayStatus::AmbiguousFaceRemap)
+                    return Refusal::UnsupportedDescendant;
+                return Refusal::StaleClosure;
+            }
+        }
+        output = std::move(plan); return Refusal::None;    } catch (...) { output.reset(); return Refusal::CorruptTable; }
 }
 
 core3d::dependent_replay::Refusal OcctDocument::StageDependentReplayPlan(
@@ -16992,6 +17038,20 @@ core3d::dependent_replay::Refusal OcctDocument::StageDependentReplayPlan(
                 clear(); return Refusal::DependentStageFailed;
             }
         }
+        // E3 face-image attachment of the edited owner (278b portion 4b):
+        // staged after the source mutation and the D2/D3/D4 descendants,
+        // inside the caller's one open command. Any refusal returns without
+        // committing; the caller aborts the whole command, restoring the
+        // exact prior bytes and history.
+        if (plan.faceImageReplay_ && plan.faceImageReplay_->prepared()) {
+            const FaceImageReplayStatus staged = plan.faceImageReplay_->stage(*this);
+            if (staged != FaceImageReplayStatus::Prepared
+                && staged != FaceImageReplayStatus::NoChange
+                && staged != FaceImageReplayStatus::Deleted) {
+                plan.faceImageReplay_->cancel();
+                clear(); return Refusal::DependentStageFailed;
+            }
+        }
         clear(); return Refusal::None;
     } catch (...) {
         myDependentReplayAuthorization.clear(); return Refusal::DependentStageFailed;
@@ -17019,6 +17079,11 @@ core3d::dependent_replay::Refusal OcctDocument::ReadDependentReplayPlan(
         OcctDocument& mutableOwner = const_cast<OcctDocument&>(*this);
         for (const auto& prepared : plan.prepared_)
             if (!prepared || !prepared->read(mutableOwner)) return Refusal::ReadbackFailed;
+        // E3 face-image attachment readback (278b portion 4b): the committed
+        // record must be exactly the prepared refresh (or the unchanged
+        // committed record for a proven no-op).
+        if (plan.faceImageReplay_ && plan.faceImageReplay_->prepared()
+            && !plan.faceImageReplay_->read(mutableOwner)) return Refusal::ReadbackFailed;
         return Refusal::None;
     } catch (...) { return Refusal::ReadbackFailed; }
 }

@@ -247,6 +247,25 @@ Outcome RemoveResource(const Handle(TDocStd_Document)& document,
         persistence::resources::Record prior;
         if (!persistence::resources::Read(document, resource, prior)) return Outcome::Malformed;
         if (!prior.value) return Outcome::Refused; // zero-delta: nothing to remove
+        // Typed removal refuses while any committed binding still references
+        // the resource (278b portion 4b): the store never orphans a binding.
+        if (XCAFDoc_DocumentTool::CheckShapeTool(document->Main())) {
+            const auto tool = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            TDF_LabelSequence labels;
+            if (!tool.IsNull()) tool->GetFreeShapes(labels);
+            if (!tool.IsNull() || labels.Length() < 0
+                || labels.Length() > profile::MaximumLabels) return Outcome::Malformed;
+            for (Standard_Integer index = 1; index <= labels.Length(); ++index) {
+                Definition committed;
+                const auto state = persistence::bindings::Read(
+                    document, labels.Value(index), committed);
+                if (state == persistence::bindings::ReadState::Malformed)
+                    return Outcome::Malformed;
+                if (state != persistence::bindings::ReadState::Present) continue;
+                for (const auto& binding : committed.bindings)
+                    if (binding.resource == resource) return Outcome::Refused;
+            }
+        }
         if (!document->HasOpenCommand()) return Outcome::Refused;
         if (!persistence::resources::Remove(document, resource))
             return Outcome::PersistenceFailure;

@@ -13,10 +13,14 @@
 // reattachment) lives in NativeOpeningDependentReplay.hxx.
 #include "../OCCTKit/NativeOpeningContext.hxx"
 #include "../OCCTKit/NativeOpeningDependentReplay.hxx"
+#include "../OCCTKit/NativeDocumentSession.hxx"
 #include "../OCCTKit/OcctDocument.h"
 #include "../OCCTKit/ReceiptRecord.hxx"
 #include "../OCCTKit/RetainedSolidAttribute.hxx"
 #include "Core3DViewer.h"
+
+#include <ImageIO/ImageIO.h>
+#include <Image_Texture.hxx>
 
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
@@ -37,6 +41,7 @@
 // retained-solid record, one adopted E3 image resource and one committed
 // face-image binding, mirroring the row-278a atlas fixture seam.
 #include "../OCCTKit/NativeOpeningSurfaceProbe.hxx"
+#include "../OCCTKit/PatternPersistence.hxx"
 #include "../OCCTKit/ProfilePersistence.hxx"
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
@@ -982,6 +987,407 @@ void DeliverMutation(void (^completion)(Core3DProfileConstructionResult, NSStrin
 }
 @end
 
+// ---------------------------------------------------------------------------
+// E3 trusted resource adoption (278b portion 4b). The app's importer hands
+// over the original imported bytes and the normalized working bytes; this
+// boundary rehashes both itself (a caller digest or a decoded manifest is
+// never trusted), validates them with the existing bounded image validator
+// (Core3DCreateAuthoredTexture: PNG/JPEG signature, single complete frame,
+// 8192 per side, 16,777,216 pixels, 128 MiB decoded) and the importer caps,
+// charges the single aggregate resource budget before allocation inside
+// OcctDocument::AdoptFaceImageResource and adopts them as ONE ordinary
+// undoable command under the existing document mutation owner (a native
+// opening context command lease). The returned identifier is the runtime
+// adoption capability a Set candidate's resourceIdentifier accepts. No URL,
+// provider path, inline blob, request handle or TrustedInputAssetManifest can
+// mint it.
+namespace {
+
+NSString *DigestText(const fi::Digest& value) {
+    char text[65];
+    static const char hex[] = "0123456789abcdef";
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        text[2 * index] = hex[value[index] >> 4];
+        text[2 * index + 1] = hex[value[index] & 15];
+    }
+    text[64] = 0;
+    return [NSString stringWithUTF8String:text] ?: @"";
+}
+
+NSString *ImageFormatText(fi::ImageEncoding value) {
+    return value == fi::ImageEncoding::JPEG ? @"jpeg" : @"png";
+}
+
+NSString *AlphaText(fi::AlphaInterpretation value) {
+    return value == fi::AlphaInterpretation::Straight ? @"straight" : @"opaque";
+}
+
+struct FaceImageRasterInfo final {
+    fi::ImageEncoding format = fi::ImageEncoding::PNG;
+    std::uint32_t width = 0, height = 0;
+    bool hasAlpha = false;
+};
+
+// Measure one encoded image from its actual bytes: the shared bounded
+// validator first, then ImageIO metadata and a real pixel decode for exact
+// dimensions and alpha-channel presence. Nothing is taken from a caller
+// manifest.
+bool MeasureFaceImageRaster(NSData *data, FaceImageRasterInfo& output) {
+    output = {};
+    @try {
+        if (![data isKindOfClass:NSData.class] || data.length == 0
+            || data.length > fi::kMaximumEncodedImageBytes) return false;
+        const auto *bytes = static_cast<const std::uint8_t*>(data.bytes);
+        const std::size_t size = data.length;
+        const bool png = size >= 8
+            && std::memcmp(bytes, "\x89PNG\r\n\x1a\n", 8) == 0;
+        const bool jpeg = size >= 3
+            && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF;
+        if (!png && !jpeg) return false;
+        Handle(Image_Texture) texture;
+        if (!Core3DCreateAuthoredTexture(bytes, size,
+                png ? "image/png" : "image/jpeg", texture) || texture.IsNull())
+            return false;
+        CGImageSourceRef source =
+            CGImageSourceCreateWithData((__bridge CFDataRef)data, nullptr);
+        if (!source) return false;
+        bool ok = false;
+        std::int64_t width = 0, height = 0;
+        bool hasAlpha = false;
+        do {
+            if (CGImageSourceGetCount(source) != 1
+                || CGImageSourceGetStatusAtIndex(source, 0) != kCGImageStatusComplete)
+                break;
+            CFDictionaryRef properties =
+                CGImageSourceCopyPropertiesAtIndex(source, 0, nullptr);
+            if (!properties) break;
+            const CFTypeRef widthValue = CFDictionaryGetValue(
+                properties, kCGImagePropertyPixelWidth);
+            const CFTypeRef heightValue = CFDictionaryGetValue(
+                properties, kCGImagePropertyPixelHeight);
+            const bool measured = widthValue && heightValue
+                && CFGetTypeID(widthValue) == CFNumberGetTypeID()
+                && CFGetTypeID(heightValue) == CFNumberGetTypeID()
+                && CFNumberGetValue((CFNumberRef)widthValue, kCFNumberSInt64Type, &width)
+                && CFNumberGetValue((CFNumberRef)heightValue, kCFNumberSInt64Type, &height);
+            CFRelease(properties);
+            if (!measured) break;
+            CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, nullptr);
+            if (!image) break;
+            const CGImageAlphaInfo alphaInfo = CGImageGetAlphaInfo(image);
+            hasAlpha = alphaInfo != kCGImageAlphaNone
+                && alphaInfo != kCGImageAlphaNoneSkipFirst
+                && alphaInfo != kCGImageAlphaNoneSkipLast;
+            CGImageRelease(image);
+            ok = true;
+        } while (false);
+        CFRelease(source);
+        if (!ok || width < 1 || height < 1
+            || width > fi::kMaximumImageDimension || height > fi::kMaximumImageDimension
+            || static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height)
+                > fi::kMaximumImagePixels
+            || static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height) * 4
+                > fi::kMaximumDecodedImageBytes) return false;
+        output.format = png ? fi::ImageEncoding::PNG : fi::ImageEncoding::JPEG;
+        output.width = static_cast<std::uint32_t>(width);
+        output.height = static_cast<std::uint32_t>(height);
+        output.hasAlpha = hasAlpha;
+        return true;
+    } @catch (...) { output = {}; return false; }
+}
+
+// Build one validated envelope from trusted local bytes. Both payloads are
+// rehashed natively; formats, dimensions and alpha presence are measured from
+// the actual images. `straight` requires a real alpha channel in the working
+// image; a JPEG can never carry one.
+bool BuildFaceImageEnvelope(NSData *original, NSData *working,
+                            NSString *alphaInterpretation, NSData *provenance,
+                            const UUID& resource,
+                            fi::ResourceEnvelope& envelope) {
+    envelope = {};
+    @try {
+        FaceImageRasterInfo originalInfo, workingInfo;
+        if (!MeasureFaceImageRaster(original, originalInfo)
+            || !MeasureFaceImageRaster(working, workingInfo)) return false;
+        if ([alphaInterpretation isEqualToString:@"opaque"]) {
+            envelope.alpha = fi::AlphaInterpretation::Opaque;
+        } else if ([alphaInterpretation isEqualToString:@"straight"]) {
+            if (!workingInfo.hasAlpha || workingInfo.format == fi::ImageEncoding::JPEG)
+                return false;
+            envelope.alpha = fi::AlphaInterpretation::Straight;
+        } else {
+            return false;
+        }
+        if (![provenance isKindOfClass:NSData.class] || provenance.length == 0
+            || provenance.length > 4096) return false;
+        if (!core3d::retained_recipe::Nonzero(resource)) return false;
+        envelope.resource = resource;
+        envelope.originalBytes.assign(
+            static_cast<const std::uint8_t*>(original.bytes),
+            static_cast<const std::uint8_t*>(original.bytes) + original.length);
+        envelope.workingBytes.assign(
+            static_cast<const std::uint8_t*>(working.bytes),
+            static_cast<const std::uint8_t*>(working.bytes) + working.length);
+        if (!fi::HashFaceImageBytes(envelope.originalBytes, envelope.originalContent)
+            || !fi::HashFaceImageBytes(envelope.workingBytes, envelope.workingContent))
+            return false;
+        const std::vector<std::uint8_t> provenanceBytes(
+            static_cast<const std::uint8_t*>(provenance.bytes),
+            static_cast<const std::uint8_t*>(provenance.bytes) + provenance.length);
+        if (!fi::HashFaceImageBytes(provenanceBytes, envelope.provenance)) return false;
+        envelope.originalFormat = originalInfo.format;
+        envelope.workingFormat = workingInfo.format;
+        envelope.originalWidthTexels = originalInfo.width;
+        envelope.originalHeightTexels = originalInfo.height;
+        envelope.workingWidthTexels = workingInfo.width;
+        envelope.workingHeightTexels = workingInfo.height;
+        fi::Refusal refusal;
+        return fi::Valid(envelope, refusal);
+    } @catch (...) { envelope = {}; return false; }
+}
+
+// Capture the live document and one current native opening context for one
+// ordinary undoable command under the existing document mutation owner.
+bool CaptureFaceImageDocumentOwner(Core3DViewController *controller,
+                                   Handle(OcctDocument)& owner,
+                                   std::shared_ptr<OpeningContext>& context) noexcept {
+    owner.Nullify();
+    context.reset();
+    try {
+        if (!NSThread.isMainThread || !controller) return false;
+        GLViewController *gl = [controller.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)controller.glController : nil;
+        if (!gl) return false;
+        const std::shared_ptr<core3d::Core3DViewer> viewer = gl.viewer;
+        const CGSize drawable = controller.viewportDrawableSize;
+        if (!viewer || !std::isfinite(drawable.width) || !std::isfinite(drawable.height)
+            || drawable.width < 1 || drawable.height < 1
+            || drawable.width > UINT32_MAX || drawable.height > UINT32_MAX) return false;
+        owner = viewer->getDocument();
+        if (owner.IsNull() || owner->Document().IsNull()) return false;
+        context = viewer->captureNativeOpeningContext(
+            std::uint32_t(drawable.width), std::uint32_t(drawable.height), {});
+        return context && context->isCurrent(64, 64);
+    } catch (...) { owner.Nullify(); context.reset(); return false; }
+}
+
+void DeliverAdoption(void (^completion)(Core3DFaceImageResourceAdoptionResult,
+                                        NSString * _Nullable, NSString *),
+                     Core3DFaceImageResourceAdoptionResult result,
+                     NSString *identifier, NSString *detail) {
+    if (!completion) return;
+    if (NSThread.isMainThread) completion(result, identifier, detail);
+    else dispatch_async(dispatch_get_main_queue(), ^{ completion(result, identifier, detail); });
+}
+
+void DeliverAdoption(void (^completion)(Core3DFaceImageResourceAdoptionResult, NSString *),
+                     Core3DFaceImageResourceAdoptionResult result, NSString *detail) {
+    if (!completion) return;
+    if (NSThread.isMainThread) completion(result, detail);
+    else dispatch_async(dispatch_get_main_queue(), ^{ completion(result, detail); });
+}
+
+} // namespace
+
+@interface Core3DFaceImageResourceSnapshot ()
+- (instancetype)initWithResourceIdentifier:(NSString *)resourceIdentifier
+                       originalContentSHA256:(NSString *)originalContentSHA256
+                        workingContentSHA256:(NSString *)workingContentSHA256
+                              originalFormat:(NSString *)originalFormat
+                               workingFormat:(NSString *)workingFormat
+                         alphaInterpretation:(NSString *)alphaInterpretation
+                         originalWidthTexels:(NSUInteger)originalWidthTexels
+                        originalHeightTexels:(NSUInteger)originalHeightTexels
+                          workingWidthTexels:(NSUInteger)workingWidthTexels
+                         workingHeightTexels:(NSUInteger)workingHeightTexels
+                               originalBytes:(NSData *)originalBytes
+                                workingBytes:(NSData *)workingBytes NS_DESIGNATED_INITIALIZER;
+@end
+
+@implementation Core3DFaceImageResourceSnapshot
+- (instancetype)initWithResourceIdentifier:(NSString *)resourceIdentifier
+                       originalContentSHA256:(NSString *)originalContentSHA256
+                        workingContentSHA256:(NSString *)workingContentSHA256
+                              originalFormat:(NSString *)originalFormat
+                               workingFormat:(NSString *)workingFormat
+                         alphaInterpretation:(NSString *)alphaInterpretation
+                         originalWidthTexels:(NSUInteger)originalWidthTexels
+                        originalHeightTexels:(NSUInteger)originalHeightTexels
+                          workingWidthTexels:(NSUInteger)workingWidthTexels
+                         workingHeightTexels:(NSUInteger)workingHeightTexels
+                               originalBytes:(NSData *)originalBytes
+                                workingBytes:(NSData *)workingBytes {
+    if ((self = [super init])) {
+        _resourceIdentifier = [resourceIdentifier copy];
+        _originalContentSHA256 = [originalContentSHA256 copy];
+        _workingContentSHA256 = [workingContentSHA256 copy];
+        _originalFormat = [originalFormat copy];
+        _workingFormat = [workingFormat copy];
+        _alphaInterpretation = [alphaInterpretation copy];
+        _originalWidthTexels = originalWidthTexels;
+        _originalHeightTexels = originalHeightTexels;
+        _workingWidthTexels = workingWidthTexels;
+        _workingHeightTexels = workingHeightTexels;
+        _originalBytes = [originalBytes copy];
+        _workingBytes = [workingBytes copy];
+    }
+    return self;
+}
+@end
+
+@implementation Core3DViewController (FaceImageResourceAdoption)
+
+- (void)adoptFaceImageResourceWithOriginalBytes:(NSData *)originalBytes
+                                  workingBytes:(NSData *)workingBytes
+                           alphaInterpretation:(NSString *)alphaInterpretation
+                                    provenance:(NSData *)provenance
+                                    completion:(void (^)(Core3DFaceImageResourceAdoptionResult,
+                                                         NSString * _Nullable,
+                                                         NSString *))completion {
+    if (!NSThread.isMainThread) {
+        DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultRejected, nil,
+                        @"Face image resource adoption is main-thread only.");
+        return;
+    }
+    @try {
+        fi::UUID resource;
+        fi::ResourceEnvelope envelope;
+        Handle(OcctDocument) owner;
+        std::shared_ptr<OpeningContext> context;
+        if (!MintUUID(resource)) {
+            DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultRejected, nil,
+                            @"A durable resource identity could not be minted.");
+            return;
+        }
+        if (!BuildFaceImageEnvelope(originalBytes, workingBytes, alphaInterpretation,
+                                    provenance, resource, envelope)) {
+            DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultRejected, nil,
+                            @"The image bytes are not a supported bounded PNG/JPEG pair.");
+            return;
+        }
+        if (!CaptureFaceImageDocumentOwner(self, owner, context)) {
+            DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultRejected, nil,
+                            @"There is no current document for adoption.");
+            return;
+        }
+        const auto lease = context->beginCommandLease(context->openingFence(), 64, 64);
+        if (!lease) {
+            DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultBusy, nil,
+                            @"The adoption could not begin a native command.");
+            return;
+        }
+        const fi::owner::Outcome outcome = owner->AdoptFaceImageResource(envelope);
+        if (outcome == fi::owner::Outcome::Committed) {
+            if (lease->commit()) {
+                DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultCommitted,
+                                IdentifierText(resource),
+                                @"Image resource adopted as one undoable change.");
+            } else {
+                DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultRecoveryRequired,
+                                nil, @"Command close is unknown; native recovery ownership is retained.");
+            }
+            return;
+        }
+        if (!lease->abort()) {
+            DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultRecoveryRequired,
+                            nil, @"Command close is unknown; native recovery ownership is retained.");
+            return;
+        }
+        if (outcome == fi::owner::Outcome::Busy) {
+            DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultBusy, nil,
+                            @"The adoption could not begin a native command.");
+        } else {
+            DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultRejected, nil,
+                            @"The image resource adoption was refused without history.");
+        }
+    } @catch (...) {
+        DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultRejected, nil,
+                        @"The image resource adoption failed.");
+    }
+}
+
+- (void)removeFaceImageResourceWithIdentifier:(NSString *)resourceIdentifier
+                                   completion:(void (^)(Core3DFaceImageResourceAdoptionResult,
+                                                        NSString *))completion {
+    if (!NSThread.isMainThread) {
+        DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultRejected, @"Face image resource removal is main-thread only.");
+        return;
+    }
+    @try {
+        UUID resource;
+        Handle(OcctDocument) owner;
+        std::shared_ptr<OpeningContext> context;
+        if (!ParseIdentifier(resourceIdentifier, resource)) {
+            DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultRejected, @"The resource identifier is not a valid identity.");
+            return;
+        }
+        if (!CaptureFaceImageDocumentOwner(self, owner, context)) {
+            DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultRejected, @"There is no current document for removal.");
+            return;
+        }
+        const auto lease = context->beginCommandLease(context->openingFence(), 64, 64);
+        if (!lease) {
+            DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultBusy, @"The removal could not begin a native command.");
+            return;
+        }
+        const fi::owner::Outcome outcome = owner->RemoveFaceImageResource(resource);
+        if (outcome == fi::owner::Outcome::Committed) {
+            if (lease->commit()) {
+                DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultCommitted, @"Image resource removed as one undoable change.");
+            } else {
+                DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultRecoveryRequired, @"Command close is unknown; native recovery ownership is retained.");
+            }
+            return;
+        }
+        if (!lease->abort()) {
+            DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultRecoveryRequired, @"Command close is unknown; native recovery ownership is retained.");
+            return;
+        }
+        if (outcome == fi::owner::Outcome::Busy) {
+            DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultBusy, @"The removal could not begin a native command.");
+        } else {
+            DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultRejected, @"The image resource removal was refused without history "
+                            @"(absent, or still referenced by a committed binding).");
+        }
+    } @catch (...) {
+        DeliverAdoption(completion, Core3DFaceImageResourceAdoptionResultRejected, @"The image resource removal failed.");
+    }
+}
+
+- (Core3DFaceImageResourceSnapshot *)faceImageResourceSnapshotForIdentifier:(NSString *)resourceIdentifier {
+    if (!NSThread.isMainThread) return nil;
+    @try {
+        UUID resource;
+        if (!ParseIdentifier(resourceIdentifier, resource)) return nil;
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        if (!gl) return nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer = gl.viewer;
+        if (!viewer) return nil;
+        const Handle(OcctDocument) owner = viewer->getDocument();
+        if (owner.IsNull()) return nil;
+        fi::ResourceEnvelope envelope;
+        if (!owner->ReadFaceImageResource(resource, envelope)) return nil;
+        return [[Core3DFaceImageResourceSnapshot alloc]
+            initWithResourceIdentifier:IdentifierText(envelope.resource)
+            originalContentSHA256:DigestText(envelope.originalContent)
+            workingContentSHA256:DigestText(envelope.workingContent)
+            originalFormat:ImageFormatText(envelope.originalFormat)
+            workingFormat:ImageFormatText(envelope.workingFormat)
+            alphaInterpretation:AlphaText(envelope.alpha)
+            originalWidthTexels:envelope.originalWidthTexels
+            originalHeightTexels:envelope.originalHeightTexels
+            workingWidthTexels:envelope.workingWidthTexels
+            workingHeightTexels:envelope.workingHeightTexels
+            originalBytes:[NSData dataWithBytes:envelope.originalBytes.data()
+                                         length:envelope.originalBytes.size()]
+            workingBytes:[NSData dataWithBytes:envelope.workingBytes.data()
+                                        length:envelope.workingBytes.size()]];
+    } @catch (...) { return nil; }
+}
+
+@end
+
 #if DEBUG
 namespace {
 UUID FixtureIndexedUUID(std::uint8_t seed, std::size_t index) {
@@ -995,16 +1401,19 @@ bool FixtureSetUUID(const TDF_Label& label, const char* attributeID, const UUID&
         TCollection_AsciiString(core3d::retained_solid::UUIDText(value).c_str())).IsNull();
 }
 
-// One literal 40x30x20 mm box with a production saved-cut recipe, a stored
+// One literal WIDTHx30x20 mm box with a production saved-cut recipe, a stored
 // triangulation and the real retained-solid seed record, mirroring the
 // row-278a fixture part seam (kind 0) so the owner satisfies the
-// retained-carrier admission.
-TDF_Label FixtureAddFaceImagePart(const Handle(TDocStd_Document)& doc,
-                                  const OwnerKey& key, double unit) {
+// retained-carrier admission. The pilot cut position/radius are parameters so
+// the U22 split/merge fixture can place the cut across the bound side.
+TDF_Label FixtureAddFaceImagePartSized(const Handle(TDocStd_Document)& doc,
+                                       const OwnerKey& key, double unit,
+                                       double widthMM, double cutXMM,
+                                       double cutRMM) {
     if (doc.IsNull() || doc->HasOpenCommand())
         throw std::invalid_argument("face image fixture command");
     const double n = .001 / unit;
-    TopoDS_Shape shape = BRepPrimAPI_MakeBox(40 * n, 30 * n, 20 * n).Shape();
+    TopoDS_Shape shape = BRepPrimAPI_MakeBox(widthMM * n, 30 * n, 20 * n).Shape();
     core3d::retained_boolean::Program program;
     program.source.document = key.document;
     program.source.entity = key.entity;
@@ -1016,15 +1425,15 @@ TDF_Label FixtureAddFaceImagePart(const Handle(TDocStd_Document)& doc,
     core3d::profile::Parameters source;
     source.metersPerUnit = unit;
     source.definition.depth = 20 * n;
-    source.definition.points = {{0, 0}, {40 * n, 0}, {40 * n, 30 * n}, {0, 30 * n}};
+    source.definition.points = {{0, 0}, {widthMM * n, 0}, {widthMM * n, 30 * n}, {0, 30 * n}};
     if (!core3d::profile::Encode(source, program.source.values))
         throw std::invalid_argument("face image fixture source recipe");
     program.source.schema = std::uint32_t(core3d::profile::SchemaFor(source));
     core3d::retained_boolean::Step pilot;
     pilot.operand.identifier = 1;
     pilot.operand.axis = core3d::analytic_boolean::Axis::Z;
-    pilot.operand.point = std::array<double, 3>{{12 * n, 15 * n, 0}};
-    pilot.operand.radius = 3 * n;
+    pilot.operand.point = std::array<double, 3>{{cutXMM * n, 15 * n, 0}};
+    pilot.operand.radius = cutRMM * n;
     program.steps = {pilot};
     program.nextOperandID = 2;
     if (!core3d::retained_boolean::Valid(program))
@@ -1069,6 +1478,11 @@ TDF_Label FixtureAddFaceImagePart(const Handle(TDocStd_Document)& doc,
     return owner;
 }
 
+TDF_Label FixtureAddFaceImagePart(const Handle(TDocStd_Document)& doc,
+                                  const OwnerKey& key, double unit) {
+    return FixtureAddFaceImagePartSized(doc, key, unit, 40, 12, 3);
+}
+
 NSData *FixturePNGData() {
     return [[NSData alloc] initWithBase64EncodedString:
         @"iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAApklEQVR42u3aQQ3AQAzEwFyZF3kKY06qTWAtK8+cndmBnJ1X7j9y/AYKoAU0BdACmgJoAU0BtICmAFpAUwAtoCmAFtAUQAtoCqAFNAXQApoCaAFNAbSApgBaQFMALaApgBbQnJml/wF2vQsoQAG0gKYAWkBTAC2gKYAW0BRAC2gKoAU0BdACmgJoAU0BtICmAFtAUQAtoCqAFNL8P8AESbQf6Ta5RUwAAAABJRU5ErkJggg=="
@@ -1077,19 +1491,10 @@ NSData *FixturePNGData() {
 
 // The frozen portion-3 fixture: one adopted 64x64 PNG resource (original and
 // working bytes deliberately identical here; the importer distinction is
-// portion 5's) and one committed BaseColor binding on the box's max-X planar
-// side with a non-default transform and both non-Repeat wrap modes.
-void StageFaceImageFixture(const Handle(TDocStd_Document)& doc, double unit) {
-    doc->ChangeStorageFormatVersion(TDocStd_FormatVersion(12));
-    (void)XCAFDoc_DocumentTool::ShapeTool(doc->Main());
-    XCAFDoc_DocumentTool::SetLengthUnit(doc, unit);
-    UUID documentID{}; documentID.fill(1);
-    if (!FixtureSetUUID(doc->Main(), "74386E4E-F620-498F-8092-E6D883AF33A4", documentID))
-        throw std::invalid_argument("face image fixture document identity");
-    doc->SetUndoLimit(40); doc->ClearUndos();
-    const OwnerKey key{documentID, FixtureIndexedUUID(0x42, 1), FixtureIndexedUUID(0x42, 2)};
-    const TDF_Label ownerLabel = FixtureAddFaceImagePart(doc, key, unit);
-
+// portion 5's; portion 4b's byte-supplied fixture seam covers it for the
+// tests). Extracted verbatim from the portion-3 staging so the fixture bytes
+// are unchanged.
+fi::ResourceEnvelope FixturePNGEnvelope() {
     NSData *png = FixturePNGData();
     if (png.length == 0 || png.length > fi::kMaximumEncodedImageBytes)
         throw std::invalid_argument("face image fixture png");
@@ -1112,6 +1517,57 @@ void StageFaceImageFixture(const Handle(TDocStd_Document)& doc, double unit) {
         throw std::invalid_argument("face image fixture provenance");
     envelope.originalBytes = pngBytes;
     envelope.workingBytes = pngBytes;
+    return envelope;
+}
+
+// Capture one planar, axis-parallel bounding-box-extreme side of a shape
+// through the real derivation + B2 resolver (portion 4b: shared by the
+// fixture staging and the scenario probes).
+bool FixtureCapturePlanarFace(const TopoDS_Shape& shape, double unit,
+                              core3d::retained_face_selector::Axis axis,
+                              core3d::retained_face_selector::Side side,
+                              dr::FaceImageGeometricReceipt& captured) {
+    TopTools_IndexedMapOfShape faceMap;
+    TopExp::MapShapes(shape, TopAbs_FACE, faceMap);
+    Bnd_Box stageBox;
+    BRepBndLib::Add(shape, stageBox);
+    core3d::retained_edge_treatment::ReplayBudget budget;
+    for (int index = 1; index <= faceMap.Extent(); ++index) {
+        const TopoDS_Face face = TopoDS::Face(faceMap.FindKey(index));
+        dr::FaceImageGeometricReceipt derived;
+        if (dr::detail::DeriveFaceImageReceipt(stageBox, face, unit, budget, derived)
+            != dr::detail::FaceImageDeriveStatus::Derived) continue;
+        const auto *scope = std::get_if<core3d::retained_face_selector::PlanarFaceBoundary>(
+            &derived.intent);
+        if (!scope || scope->face.axis != axis || scope->face.side != side) continue;
+        dr::FaceImageGeometricReceipt resolved; TopoDS_Face matched;
+        if (dr::detail::ResolveFaceImageReceipt(shape, derived.intent, unit, budget,
+                resolved, matched) != core3d::retained_face_selector::Refusal::None
+            || !matched.IsSame(face)) continue;
+        captured = resolved;
+        return true;
+    }
+    return false;
+}
+
+// Shared staging for the portion-3 fixture and the portion-4b sized/caller
+// byte variants: the retained part, one adopted resource (an already
+// validated envelope) and one committed BaseColor binding on the box's max-X
+// planar side with a non-default transform and both non-Repeat wrap modes.
+void StageFaceImageFixtureSized(const Handle(TDocStd_Document)& doc, double unit,
+                                double widthMM, double cutXMM, double cutRMM,
+                                const fi::ResourceEnvelope& envelope) {
+    doc->ChangeStorageFormatVersion(TDocStd_FormatVersion(12));
+    (void)XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    XCAFDoc_DocumentTool::SetLengthUnit(doc, unit);
+    UUID documentID{}; documentID.fill(1);
+    if (!FixtureSetUUID(doc->Main(), "74386E4E-F620-498F-8092-E6D883AF33A4", documentID))
+        throw std::invalid_argument("face image fixture document identity");
+    doc->SetUndoLimit(40); doc->ClearUndos();
+    const OwnerKey key{documentID, FixtureIndexedUUID(0x42, 1), FixtureIndexedUUID(0x42, 2)};
+    const TDF_Label ownerLabel = FixtureAddFaceImagePartSized(doc, key, unit,
+                                                              widthMM, cutXMM, cutRMM);
+
     doc->NewCommand();
     if (fi::owner::AdoptResource(doc, envelope) != fi::owner::Outcome::Committed
         || !doc->CommitCommand())
@@ -1120,29 +1576,11 @@ void StageFaceImageFixture(const Handle(TDocStd_Document)& doc, double unit) {
     // Capture the max-X planar side through the real derivation + B2 resolver.
     const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(ownerLabel);
     if (shape.IsNull()) throw std::invalid_argument("face image fixture shape");
-    TopTools_IndexedMapOfShape faceMap;
-    TopExp::MapShapes(shape, TopAbs_FACE, faceMap);
-    Bnd_Box stageBox;
-    BRepBndLib::Add(shape, stageBox);
-    core3d::retained_edge_treatment::ReplayBudget budget;
     dr::FaceImageGeometricReceipt captured;
-    bool found = false;
-    for (int index = 1; index <= faceMap.Extent() && !found; ++index) {
-        const TopoDS_Face face = TopoDS::Face(faceMap.FindKey(index));
-        dr::FaceImageGeometricReceipt derived;
-        if (dr::detail::DeriveFaceImageReceipt(stageBox, face, unit, budget, derived)
-            != dr::detail::FaceImageDeriveStatus::Derived) continue;
-        const auto *scope = std::get_if<core3d::retained_face_selector::PlanarFaceBoundary>(
-            &derived.intent);
-        if (!scope || scope->face.axis != core3d::retained_face_selector::Axis::X
-            || scope->face.side != core3d::retained_face_selector::Side::Max) continue;
-        dr::FaceImageGeometricReceipt resolved; TopoDS_Face matched;
-        if (dr::detail::ResolveFaceImageReceipt(shape, derived.intent, unit, budget,
-                resolved, matched) != core3d::retained_face_selector::Refusal::None
-            || !matched.IsSame(face)) continue;
-        captured = resolved; found = true;
-    }
-    if (!found) throw std::invalid_argument("face image fixture face capture");
+    if (!FixtureCapturePlanarFace(shape, unit,
+            core3d::retained_face_selector::Axis::X,
+            core3d::retained_face_selector::Side::Max, captured))
+        throw std::invalid_argument("face image fixture face capture");
     fi::Binding binding;
     binding.binding = FixtureIndexedUUID(0x51, 2);
     binding.face = FixtureIndexedUUID(0x51, 3);
@@ -1177,6 +1615,10 @@ void StageFaceImageFixture(const Handle(TDocStd_Document)& doc, double unit) {
     doc->ClearUndos();
     if (!Core3DValidateFaceImageDocument(doc))
         throw std::invalid_argument("face image fixture validation");
+}
+
+void StageFaceImageFixture(const Handle(TDocStd_Document)& doc, double unit) {
+    StageFaceImageFixtureSized(doc, unit, 40, 12, 3, FixturePNGEnvelope());
 }
 
 // Local mirror of the file-local Core3DCreateDebugBinXCAFFixture helper in
@@ -1220,6 +1662,1205 @@ NSData *CreateFaceImageDebugFixture(
     [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
     return result;
 }
+// ---------------------------------------------------------------------------
+// E3 DEBUG scenario seams (278b portion 4b). Every seam runs the real
+// production operations (the portion-2 document surface, the portion-1 owner
+// store, the portion-3 replay collaborator) on attempt-local documents and
+// returns measured observations, never a precomputed passing mask.
+
+// Deterministic 16x16 probe raster: an asymmetric opaque gradient. The JPEG
+// and PNG encodings of the same pixels differ byte-for-byte, so the original
+// and working payloads exercise distinct content identities.
+NSData *ProbeRasterImage(BOOL jpeg) {
+    @try {
+        const NSUInteger side = 16;
+        std::vector<std::uint8_t> pixels(side * side * 4);
+        for (NSUInteger y = 0; y < side; ++y) {
+            for (NSUInteger x = 0; x < side; ++x) {
+                const std::size_t at = static_cast<std::size_t>(y * side + x) * 4;
+                pixels[at] = std::uint8_t(x * 16);
+                pixels[at + 1] = std::uint8_t(y * 16);
+                pixels[at + 2] = std::uint8_t((x + y) * 8);
+                pixels[at + 3] = 255;
+            }
+        }
+        CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+        if (!colorSpace) return nil;
+        CGContextRef context = CGBitmapContextCreate(pixels.data(), side, side, 8,
+            side * 4, colorSpace, kCGImageAlphaPremultipliedLast);
+        CGColorSpaceRelease(colorSpace);
+        if (!context) return nil;
+        CGImageRef image = CGBitmapContextCreateImage(context);
+        CGContextRelease(context);
+        if (!image) return nil;
+        NSMutableData *data = [NSMutableData data];
+        CGImageDestinationRef destination = CGImageDestinationCreateWithData(
+            (__bridge CFMutableDataRef)data,
+            jpeg ? CFSTR("public.jpeg") : CFSTR("public.png"), 1, nullptr);
+        if (destination) CGImageDestinationAddImage(destination, image, nullptr);
+        const bool finished = destination && CGImageDestinationFinalize(destination);
+        CGImageRelease(image);
+        if (destination) CFRelease(destination);
+        return finished && data.length > 0 ? data : nil;
+    } @catch (...) { return nil; }
+}
+
+// One flat-color opaque PNG of exact dimensions (DEBUG only; used by the
+// exact-limit resource fixture).
+NSData *ProbeFlatPNG(NSUInteger width, NSUInteger height) {
+    @try {
+        if (width == 0 || height == 0
+            || width > NSUInteger(fi::kMaximumImageDimension)
+            || height > NSUInteger(fi::kMaximumImageDimension)
+            || width > NSUInteger(fi::kMaximumImagePixels) / height) return nil;
+        std::vector<std::uint8_t> pixels(width * height * 4);
+        for (NSUInteger index = 0; index < width * height; ++index) {
+            pixels[index * 4] = std::uint8_t(index % 251);
+            pixels[index * 4 + 1] = std::uint8_t((index / 251) % 251);
+            pixels[index * 4 + 2] = std::uint8_t((index / 63001) % 251);
+            pixels[index * 4 + 3] = 255;
+        }
+        CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+        if (!colorSpace) return nil;
+        CGContextRef context = CGBitmapContextCreate(pixels.data(), width, height, 8,
+            width * 4, colorSpace, kCGImageAlphaPremultipliedLast);
+        CGColorSpaceRelease(colorSpace);
+        if (!context) return nil;
+        CGImageRef image = CGBitmapContextCreateImage(context);
+        CGContextRelease(context);
+        if (!image) return nil;
+        NSMutableData *data = [NSMutableData data];
+        CGImageDestinationRef destination = CGImageDestinationCreateWithData(
+            (__bridge CFMutableDataRef)data, CFSTR("public.png"), 1, nullptr);
+        if (destination) CGImageDestinationAddImage(destination, image, nullptr);
+        const bool finished = destination && CGImageDestinationFinalize(destination);
+        CGImageRelease(image);
+        if (destination) CFRelease(destination);
+        return finished && data.length > 0 ? data : nil;
+    } @catch (...) { return nil; }
+}
+
+// Real production recipe build of one box-with-pilot-cut shape without a
+// document: the exact operation sequence the fixture part performs.
+TopoDS_Shape ProbeBuildBoxWithCut(double unit, double widthMM, double cutXMM, double cutRMM) {
+    try {
+        const double n = .001 / unit;
+        TopoDS_Shape shape = BRepPrimAPI_MakeBox(widthMM * n, 30 * n, 20 * n).Shape();
+        core3d::retained_boolean::Step pilot;
+        pilot.operand.identifier = 1;
+        pilot.operand.axis = core3d::analytic_boolean::Axis::Z;
+        pilot.operand.point = std::array<double, 3>{{cutXMM * n, 15 * n, 0}};
+        pilot.operand.radius = cutRMM * n;
+        core3d::analytic_boolean::Recipe recipe;
+        recipe.metersPerUnit = unit;
+        recipe.operation = pilot.operation;
+        recipe.tool = pilot.operand;
+        const std::atomic_bool stop(false);
+        core3d::analytic_boolean::Result cut;
+        if (core3d::analytic_boolean::Build(shape, recipe, stop, cut)
+            != core3d::analytic_boolean::Status::Built) return TopoDS_Shape();
+        return cut.solid;
+    } catch (...) { return TopoDS_Shape(); }
+}
+
+// Stage the retained box owner into the probe session's document through the
+// real fixture part builder (real retained-solid seed record included).
+bool ProbeStageBase(OcctDocument& owner, double unit, OwnerKey& key,
+                    TDF_Label& ownerLabel, double widthMM, double cutXMM, double cutRMM) {
+    key = {};
+    ownerLabel = TDF_Label();
+    try {
+        const Handle(TDocStd_Document) doc = owner.Document();
+        if (doc.IsNull() || doc->HasOpenCommand()) return false;
+        doc->ChangeStorageFormatVersion(TDocStd_FormatVersion(12));
+        XCAFDoc_DocumentTool::SetLengthUnit(doc, unit);
+        if (!core3d::receipt::ParseUUID(owner.DocumentIdentifier(), key.document)) return false;
+        key.entity = FixtureIndexedUUID(0x42, 1);
+        key.definition = FixtureIndexedUUID(0x42, 2);
+        ownerLabel = FixtureAddFaceImagePartSized(doc, key, unit, widthMM, cutXMM, cutRMM);
+        return !ownerLabel.IsNull();
+    } catch (...) { key = {}; ownerLabel = TDF_Label(); return false; }
+}
+
+// The probe envelope: caller-style distinct original JPEG and working PNG
+// bytes through the shared validated envelope builder (native rehash, derived
+// formats/dimensions).
+bool ProbeEnvelopeSeeded(NSData *original, NSData *working, std::uint8_t seed,
+                         fi::ResourceEnvelope& envelope) {
+    envelope = {};
+    return BuildFaceImageEnvelope(original, working, @"opaque",
+        [@"shapeyard.e3.probe.v1" dataUsingEncoding:NSUTF8StringEncoding],
+        FixtureIndexedUUID(seed, 1), envelope);
+}
+
+bool ProbeEnvelope(NSData *original, NSData *working, fi::ResourceEnvelope& envelope) {
+    return ProbeEnvelopeSeeded(original, working, 0x51, envelope);
+}
+
+// One ordinary undoable adoption command through the production document
+// surface; the delta is the real undo-command count change.
+bool ProbeAdopt(OcctDocument& owner, const fi::ResourceEnvelope& envelope, int& delta) {
+    delta = 0;
+    try {
+        const Handle(TDocStd_Document) doc = owner.Document();
+        if (doc.IsNull() || doc->HasOpenCommand()) return false;
+        const auto before = doc->GetAvailableUndos();
+        doc->NewCommand();
+        const fi::owner::Outcome outcome = owner.AdoptFaceImageResource(envelope);
+        if (outcome != fi::owner::Outcome::Committed) {
+            if (doc->HasOpenCommand()) doc->AbortCommand();
+            return false;
+        }
+        if (!doc->CommitCommand()) return false;
+        delta = int(doc->GetAvailableUndos() - before);
+        return true;
+    } catch (...) { return false; }
+}
+
+fi::Observed ProbeObserved(OcctDocument& owner, const fi::Definition& candidate) {
+    fi::Observed observed;
+    for (const auto& binding : candidate.bindings)
+        observed.faces.push_back({binding.face, binding.selectorProof});
+    if (!owner.FaceImageResourceManifest(observed.resources))
+        throw std::invalid_argument("probe manifest");
+    return observed;
+}
+
+// One ordinary undoable binding commit through the production document
+// transaction surface (Prepare before the command, Commit inside it).
+fi::owner::Outcome ProbeCommitBindings(OcctDocument& owner, const fi::Definition& candidate,
+                                       int& delta) {
+    delta = 0;
+    try {
+        const Handle(TDocStd_Document) doc = owner.Document();
+        if (doc.IsNull() || doc->HasOpenCommand()) return fi::owner::Outcome::Busy;
+        const fi::Observed observed = ProbeObserved(owner, candidate);
+        const auto before = doc->GetAvailableUndos();
+        fi::owner::Staging staging;
+        fi::owner::Outcome outcome = owner.PrepareFaceImageBindings(staging, candidate, observed);
+        if (outcome != fi::owner::Outcome::Prepared) {
+            owner.CancelFaceImageBindings(staging);
+            return outcome;
+        }
+        doc->NewCommand();
+        outcome = owner.CommitFaceImageBindings(staging, observed);
+        if (outcome != fi::owner::Outcome::Committed) {
+            owner.CancelFaceImageBindings(staging);
+            if (doc->HasOpenCommand()) doc->AbortCommand();
+            delta = int(doc->GetAvailableUndos() - before);
+            return outcome;
+        }
+        if (!doc->CommitCommand()) return fi::owner::Outcome::PersistenceFailure;
+        delta = int(doc->GetAvailableUndos() - before);
+        return outcome;
+    } catch (...) { return fi::owner::Outcome::Malformed; }
+}
+
+NSData *ProbeRecordBytes(OcctDocument& owner, const OwnerKey& key) {
+    fi::Definition current;
+    std::vector<std::uint8_t> bytes;
+    if (owner.ReadFaceImageBindings(key, current, &bytes)
+            != fi::persistence::bindings::ReadState::Present) return nil;
+    return [NSData dataWithBytes:bytes.data() length:bytes.size()];
+}
+
+// Bind one committed BaseColor binding on the owner's max-X planar side,
+// captured through the real derivation + B2 resolver. Shared probe setup.
+bool ProbeBindBaseColor(OcctDocument& owner, const OwnerKey& key,
+                        const TDF_Label& ownerLabel, double unit,
+                        fi::ResourceEnvelope& adoptedEnvelope) {
+    int delta = 0;
+    if (!ProbeAdopt(owner, adoptedEnvelope, delta)) return false;
+    const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(ownerLabel);
+    if (shape.IsNull()) return false;
+    dr::FaceImageGeometricReceipt captured;
+    if (!FixtureCapturePlanarFace(shape, unit,
+            core3d::retained_face_selector::Axis::X,
+            core3d::retained_face_selector::Side::Max, captured)) return false;
+    fi::Binding binding;
+    binding.binding = FixtureIndexedUUID(0x52, 1);
+    binding.face = FixtureIndexedUUID(0x52, 2);
+    if (!dr::FaceImageReceiptProof(captured, binding.selectorProof)) return false;
+    binding.resource = adoptedEnvelope.resource;
+    binding.role = fi::Role::BaseColor;
+    binding.colorSpace = fi::ColorSpace::SRGB;
+    binding.transform.scale = {1.25, 2.0};
+    binding.transform.offset = {0.5, -0.25};
+    binding.transform.rotationDegrees = 30;
+    binding.transform.wrapU = fi::Wrap::MirroredRepeat;
+    binding.transform.wrapV = fi::Wrap::ClampToEdge;
+    fi::Definition candidate;
+    candidate.owner = key;
+    candidate.bindings = {binding};
+    if (!fi::BindBindingProof(candidate)) return false;
+    return ProbeCommitBindings(owner, candidate, delta) == fi::owner::Outcome::Committed
+        && delta == 1;
+}
+
+// A real D2 pattern dependency record sourced from the bound owner, staged
+// through the production pattern commit seam (278b portion 4b, U22
+// unsupported-downstream fixture).
+bool FixtureStagePatternDependency(const Handle(TDocStd_Document)& doc,
+                                   const OwnerKey& sourceKey, const UUID& sourceFeature,
+                                   const OwnerKey& resultKey, double unit) {
+    try {
+        namespace pat = core3d::pattern;
+        pat::Definition definition;
+        definition.owner = resultKey;
+        definition.feature = FixtureIndexedUUID(0x61, 1);
+        definition.source.document = sourceKey.document;
+        definition.source.entity = sourceKey.entity;
+        definition.source.definition = sourceKey.definition;
+        definition.source.sourceFeature = sourceFeature;
+        definition.kind = pat::Kind::Linear;
+        definition.columnAxis = pat::Axis::X;
+        definition.rowAxis = pat::Axis::Y;
+        definition.rowCount = 1;
+        definition.columnCount = 2;
+        definition.rowSpacing = 0;
+        definition.columnSpacing = 60 * (.001 / unit);
+        definition.issuance.nextLocalID = 3;
+        pat::Member sourceMember;
+        sourceMember.identity = sourceKey.entity;
+        sourceMember.localID = 1;
+        sourceMember.coordinate = {0, 0};
+        sourceMember.state = pat::MemberState::Active;
+        pat::Member copyMember;
+        copyMember.identity = FixtureIndexedUUID(0x61, 2);
+        copyMember.localID = 2;
+        copyMember.coordinate = {0, 1};
+        copyMember.state = pat::MemberState::Active;
+        definition.members = {sourceMember, copyMember};
+        pat::Record staged;
+        if (doc->HasOpenCommand()) return false;
+        doc->NewCommand();
+        const bool ok = pat::Stage(doc, definition, staged) && !staged.label.IsNull();
+        if (ok) {
+            if (!doc->CommitCommand()) return false;
+        } else if (doc->HasOpenCommand()) {
+            doc->AbortCommand();
+        }
+        return ok;
+    } catch (...) { return false; }
+}
+
+void ProbeRecordBit(NSMutableDictionary *bits, unsigned& mask, unsigned bit,
+                    bool pass, NSString *detail) {
+    bits[@(bit)] = @{@"passed": @(pass ? YES : NO), @"detail": detail ?: @""};
+    if (pass) mask |= (1u << bit);
+}
+
+// Scenario 0 (U19 positive lifecycle, document level): adoption, distinct
+// original/working readback, bind, edit, real Undo/Redo, every role with its
+// color-space coupling, all wrap modes, save + destroy + cold reopen through
+// the production open path, and removal/refusal semantics. Every bit is
+// measured independently; the mask is the AND of real measurements.
+NSDictionary *FaceImageScenarioZeroProbe(double unit) {
+    NSMutableDictionary *bits = [NSMutableDictionary dictionary];
+    unsigned mask = 0;
+    NSURL *baseURL = [NSFileManager.defaultManager.temporaryDirectory
+        URLByAppendingPathComponent:[NSString stringWithFormat:
+            @"%@.e3-probe-zero", NSUUID.UUID.UUIDString]];
+    NSString *xbfPath = [baseURL.path stringByAppendingString:@".xbf"];
+    @try {
+        try {
+        core3d::NativeDocumentSession session;
+        OcctDocument& owner = *session.Document();
+        OwnerKey key;
+        TDF_Label ownerLabel;
+        NSData *working = ProbeRasterImage(NO);
+        NSData *original = ProbeRasterImage(YES);
+        fi::ResourceEnvelope envelope;
+        if (!working || !original
+            || !ProbeStageBase(owner, unit, key, ownerLabel, 40, 12, 3)) {
+            ProbeRecordBit(bits, mask, 0, false, @"fixture staging failed");
+        } else {
+            if (!ProbeEnvelope(original, working, envelope))
+                ProbeRecordBit(bits, mask, 0, false, @"envelope validation failed");
+        }
+        fi::OwnerKey fiKey;
+        fiKey.document = key.document; fiKey.entity = key.entity; fiKey.definition = key.definition;
+
+        // bit 0: adoption is one ordinary undoable command with a live identity.
+        int delta = 0;
+        const bool adopted = fi::Nonzero(envelope.provenance)
+            && ProbeAdopt(owner, envelope, delta);
+        {
+            const auto probe = fi::FaceImageProbe::Observe(owner.Document());
+            ProbeRecordBit(bits, mask, 0, adopted && delta == 1 && probe.complete
+                           && probe.resources == 1,
+                [NSString stringWithFormat:@"adopted=%d commandDelta=%d probeComplete=%d resources=%ld",
+                    adopted ? 1 : 0, delta, probe.complete ? 1 : 0, (long)probe.resources]);
+        }
+        // bit 1: readback; the stored digests are the native rehashes of the
+        // exact bytes and the original/working payloads stay distinct.
+        {
+            fi::ResourceEnvelope back;
+            fi::Digest originalHash{}, workingHash{};
+            const bool ok = owner.ReadFaceImageResource(envelope.resource, back)
+                && back == envelope
+                && fi::HashFaceImageBytes(back.originalBytes, originalHash)
+                && fi::HashFaceImageBytes(back.workingBytes, workingHash)
+                && originalHash == back.originalContent
+                && workingHash == back.workingContent
+                && !(back.originalContent == back.workingContent)
+                && back.originalFormat == fi::ImageEncoding::JPEG
+                && back.workingFormat == fi::ImageEncoding::PNG
+                && back.alpha == fi::AlphaInterpretation::Opaque
+                && back.originalWidthTexels == 16 && back.originalHeightTexels == 16
+                && back.workingWidthTexels == 16 && back.workingHeightTexels == 16;
+            ProbeRecordBit(bits, mask, 1, ok, @"readback of both payloads and derived metadata");
+        }
+        // bit 2: bind one committed BaseColor binding as one command with
+        // every durable identity and exact transform/role/colorSpace/wrap.
+        fi::Definition committed;
+        {
+            const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(ownerLabel);
+            dr::FaceImageGeometricReceipt captured;
+            fi::Binding binding;
+            binding.binding = FixtureIndexedUUID(0x52, 1);
+            binding.face = FixtureIndexedUUID(0x52, 2);
+            bool ok = !shape.IsNull()
+                && FixtureCapturePlanarFace(shape, unit,
+                    core3d::retained_face_selector::Axis::X,
+                    core3d::retained_face_selector::Side::Max, captured)
+                && dr::FaceImageReceiptProof(captured, binding.selectorProof);
+            binding.resource = envelope.resource;
+            binding.role = fi::Role::BaseColor;
+            binding.colorSpace = fi::ColorSpace::SRGB;
+            binding.transform.scale = {1.25, 2.0};
+            binding.transform.offset = {0.5, -0.25};
+            binding.transform.rotationDegrees = 30;
+            binding.transform.wrapU = fi::Wrap::MirroredRepeat;
+            binding.transform.wrapV = fi::Wrap::ClampToEdge;
+            fi::Definition candidate;
+            candidate.owner = fiKey;
+            candidate.bindings = {binding};
+            ok = ok && fi::BindBindingProof(candidate)
+                && ProbeCommitBindings(owner, candidate, delta)
+                        == fi::owner::Outcome::Committed && delta == 1;
+            fi::Definition back;
+            std::vector<std::uint8_t> bytes;
+            ok = ok && owner.ReadFaceImageBindings(fiKey, back, &bytes)
+                    == fi::persistence::bindings::ReadState::Present
+                && back == candidate && !bytes.empty();
+            if (ok) committed = candidate;
+            ProbeRecordBit(bits, mask, 2, ok, @"bind committed and read back exactly");
+        }
+        // bit 3: edit the transform as one command, then Undo/Redo restore
+        // the exact record bytes with real history counts.
+        {
+            bool ok = false;
+            NSData *beforeBytes = ProbeRecordBytes(owner, fiKey);
+            fi::Definition edited = committed;
+            if (edited.bindings.empty()) {
+                ProbeRecordBit(bits, mask, 3, false, @"prerequisite binding missing");
+                goto scenarioZeroBit4;
+            }
+            edited.bindings[0].transform.scale = {2.5, 0.75};
+            edited.bindings[0].transform.rotationDegrees = 315;
+            if (beforeBytes && fi::BindBindingProof(edited)
+                && ProbeCommitBindings(owner, edited, delta) == fi::owner::Outcome::Committed
+                && delta == 1) {
+                NSData *editedBytes = ProbeRecordBytes(owner, fiKey);
+                if (editedBytes && ![editedBytes isEqualToData:beforeBytes] && owner.undo()) {
+                    NSData *undone = ProbeRecordBytes(owner, fiKey);
+                    if ([undone isEqualToData:beforeBytes] && owner.redo()) {
+                        NSData *redone = ProbeRecordBytes(owner, fiKey);
+                        ok = [redone isEqualToData:editedBytes];
+                    }
+                }
+            }
+            ProbeRecordBit(bits, mask, 3, ok, @"edit plus real Undo/Redo byte round trip");
+            committed = edited;
+        }
+        // bit 4: every role binds with its frozen color-space coupling, and a
+        // wrong coupling refuses without history.
+        scenarioZeroBit4:
+        {
+            bool ok = true;
+            const fi::Role roles[4] = {fi::Role::Emissive, fi::Role::MetallicRoughness,
+                fi::Role::Occlusion, fi::Role::Normal};
+            const fi::ColorSpace spaces[4] = {fi::ColorSpace::SRGB, fi::ColorSpace::Linear,
+                fi::ColorSpace::Linear, fi::ColorSpace::Linear};
+            if (committed.bindings.empty()) ok = false;
+            for (int index = 0; ok && index < 4; ++index) {
+                fi::Definition next = committed;
+                fi::Binding added = committed.bindings[0];
+                added.binding = FixtureIndexedUUID(0x52, std::size_t(3 + index));
+                added.role = roles[index];
+                added.colorSpace = spaces[index];
+                added.transform = fi::UVTransform{};
+                next.bindings.push_back(added);
+                ok = fi::BindBindingProof(next)
+                    && ProbeCommitBindings(owner, next, delta) == fi::owner::Outcome::Committed
+                    && delta == 1;
+                if (ok) {
+                    fi::Definition back;
+                    ok = owner.ReadFaceImageBindings(fiKey, back, nullptr)
+                            == fi::persistence::bindings::ReadState::Present
+                        && back == next;
+                    committed = next;
+                }
+            }
+            // Wrong coupling: BaseColor with Linear must refuse with no delta.
+            if (committed.bindings.empty()) ok = false;
+            fi::Definition wrong = committed;
+            if (!wrong.bindings.empty())
+                wrong.bindings[0].colorSpace = fi::ColorSpace::Linear;
+            const auto undosBefore = owner.Document()->GetAvailableUndos();
+            const fi::owner::Outcome refused = ProbeCommitBindings(owner, wrong, delta);
+            fi::Definition back;
+            ok = ok && refused != fi::owner::Outcome::Committed
+                && owner.Document()->GetAvailableUndos() == undosBefore
+                && owner.ReadFaceImageBindings(fiKey, back, nullptr)
+                        == fi::persistence::bindings::ReadState::Present
+                && back == committed;
+            ProbeRecordBit(bits, mask, 4, ok, @"five roles with coupling plus wrong-coupling refusal");
+        }
+        // bit 5: all three wrap modes round-trip exactly.
+        {
+            bool ok = true;
+            const fi::Wrap wraps[3] = {fi::Wrap::ClampToEdge, fi::Wrap::Repeat,
+                fi::Wrap::MirroredRepeat};
+            if (committed.bindings.empty()) ok = false;
+            for (int index = 0; ok && index < 3; ++index) {
+                fi::Definition next = committed;
+                next.bindings[0].transform.wrapU = wraps[index];
+                next.bindings[0].transform.wrapV = wraps[(index + 1) % 3];
+                ok = fi::BindBindingProof(next)
+                    && ProbeCommitBindings(owner, next, delta) == fi::owner::Outcome::Committed;
+                if (ok) {
+                    fi::Definition back;
+                    ok = owner.ReadFaceImageBindings(fiKey, back, nullptr)
+                            == fi::persistence::bindings::ReadState::Present && back == next;
+                    committed = next;
+                }
+            }
+            ProbeRecordBit(bits, mask, 5, ok, @"all wrap modes committed and read back exactly");
+        }
+        // bit 6: save, destroy, cold reopen through the production open path;
+        // every UUID and both byte arrays survive.
+        {
+            bool ok = false;
+            NSData *beforeBytes = ProbeRecordBytes(owner, fiKey);
+            const Handle(TDocStd_Application) application =
+                Handle(TDocStd_Application)::DownCast(owner.Document()->Application());
+            if (beforeBytes && !application.IsNull()
+                && application->SaveAs(owner.Document(),
+                       baseURL.path.UTF8String) == PCDM_SS_OK) {
+                Handle(OcctDocument) reopened = new OcctDocument();
+                if (reopened->OpenPrivateExportSnapshot(baseURL.path.UTF8String,
+                        Message_ProgressRange())) {
+                    fi::ResourceEnvelope backResource;
+                    fi::Definition backDefinition;
+                    std::vector<std::uint8_t> reopenedBytes;
+                    ok = reopened->ReadFaceImageResource(envelope.resource, backResource)
+                        && backResource == envelope
+                        && reopened->ReadFaceImageBindings(fiKey, backDefinition, &reopenedBytes)
+                            == fi::persistence::bindings::ReadState::Present
+                        && backDefinition == committed
+                        && [[NSData dataWithBytes:reopenedBytes.data()
+                                           length:reopenedBytes.size()] isEqualToData:beforeBytes]
+                        && reopened->DocumentIdentifier() == owner.DocumentIdentifier()
+                        && Core3DValidateFaceImageDocument(reopened->Document());
+                    reopened->ClosePrivateExportSnapshot();
+                }
+            }
+            ProbeRecordBit(bits, mask, 6, ok, @"save, destroy, cold reopen, exact identities");
+        }
+        // bit 7: typed resource removal refuses while bound (no history), the
+        // unbind+removal commits as one command and Undo restores both.
+        {
+            bool ok = false;
+            const Handle(TDocStd_Document) doc = owner.Document();
+            NSData *beforeBytes = ProbeRecordBytes(owner, fiKey);
+            const auto undosBefore = doc->GetAvailableUndos();
+            doc->NewCommand();
+            const fi::owner::Outcome boundRefusal =
+                owner.RemoveFaceImageResource(envelope.resource);
+            if (doc->HasOpenCommand()) doc->AbortCommand();
+            fi::ResourceEnvelope stillThere;
+            if (beforeBytes && boundRefusal == fi::owner::Outcome::Refused
+                && doc->GetAvailableUndos() == undosBefore
+                && owner.ReadFaceImageResource(envelope.resource, stillThere)
+                && stillThere == envelope) {
+                doc->NewCommand();
+                const bool removed =
+                    owner.RemoveFaceImageBindings(fiKey) == fi::owner::Outcome::Committed
+                    && owner.RemoveFaceImageResource(envelope.resource)
+                        == fi::owner::Outcome::Committed;
+                if (removed && doc->CommitCommand()
+                    && doc->GetAvailableUndos() == undosBefore + 1) {
+                    fi::ResourceEnvelope gone;
+                    fi::Definition absent;
+                    if (!owner.ReadFaceImageResource(envelope.resource, gone)
+                        && owner.ReadFaceImageBindings(fiKey, absent, nullptr)
+                            == fi::persistence::bindings::ReadState::Absent
+                        && owner.undo()) {
+                        fi::ResourceEnvelope restored;
+                        ok = owner.ReadFaceImageResource(envelope.resource, restored)
+                            && restored == envelope
+                            && [(ProbeRecordBytes(owner, fiKey)
+                                    ?: [NSData data]) isEqualToData:beforeBytes];
+                    }
+                }
+            }
+            ProbeRecordBit(bits, mask, 7, ok,
+                @"removal refused while bound; one-command unbind+remove; Undo restores");
+        }
+        } catch (...) {
+            ProbeRecordBit(bits, mask, 0, false, @"probe aborted by c++ exception");
+        }
+    } @catch (...) {
+        ProbeRecordBit(bits, mask, 0, false, @"probe aborted by exception");
+    }
+    [NSFileManager.defaultManager removeItemAtURL:baseURL error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
+    return @{@"schema": @"shapeyard.face-image.probe.v1",
+             @"scenario": @"scenario0",
+             @"metersPerUnit": @(unit),
+             @"mask": @(mask),
+             @"bits": bits};
+}
+
+// Scenario 1 (U20 negatives, document level): stale face, ambiguous remap,
+// stale/missing/foreign resource, unsupported surface, unsupported
+// downstream with a real D2 dependency record, no-op and cancelled prepare,
+// and aborted-command recovery. Every bit measures the real refusal and the
+// exact byte/history preservation; the mask is the AND of real measurements.
+NSDictionary *FaceImageScenarioOneProbe(double unit) {
+    NSMutableDictionary *bits = [NSMutableDictionary dictionary];
+    unsigned mask = 0;
+    // bit 0: a committed proof that no current face matches is StaleFace; the
+    // capture is read-only and the record/history are untouched.
+    @try {
+        try {
+        core3d::NativeDocumentSession session;
+        OcctDocument& owner = *session.Document();
+        OwnerKey key;
+        TDF_Label ownerLabel;
+        bool ok = ProbeStageBase(owner, unit, key, ownerLabel, 40, 12, 3);
+        fi::OwnerKey fiKey{key.document, key.entity, key.definition};
+        fi::ResourceEnvelope envelope;
+        if (ok) ok = ProbeEnvelope(ProbeRasterImage(YES), ProbeRasterImage(NO), envelope);
+        if (ok) {
+            int delta = 0;
+            // Commit a binding carrying the real proof of the 44 mm sibling
+            // shape's max-X side: the stored proof matches no current face.
+            const TopoDS_Shape sibling = ProbeBuildBoxWithCut(unit, 44, 12, 3);
+            dr::FaceImageGeometricReceipt captured;
+            fi::Binding binding;
+            binding.binding = FixtureIndexedUUID(0x52, 1);
+            binding.face = FixtureIndexedUUID(0x52, 2);
+            ok = !sibling.IsNull()
+                && FixtureCapturePlanarFace(sibling, unit,
+                    core3d::retained_face_selector::Axis::X,
+                    core3d::retained_face_selector::Side::Max, captured)
+                && dr::FaceImageReceiptProof(captured, binding.selectorProof)
+                && ProbeAdopt(owner, envelope, delta);
+            binding.resource = envelope.resource;
+            binding.role = fi::Role::BaseColor;
+            binding.colorSpace = fi::ColorSpace::SRGB;
+            fi::Definition candidate;
+            candidate.owner = fiKey;
+            candidate.bindings = {binding};
+            ok = ok && fi::BindBindingProof(candidate)
+                && ProbeCommitBindings(owner, candidate, delta)
+                    == fi::owner::Outcome::Committed;
+            NSData *beforeBytes = ok ? ProbeRecordBytes(owner, fiKey) : nil;
+            const auto undosBefore = owner.Document()->GetAvailableUndos();
+            dr::FaceImageAttachment attachment;
+            const auto status = dr::CaptureFaceImageAttachment(owner, fiKey, attachment);
+            ok = ok && status == dr::FaceImageReplayStatus::StaleFace
+                && [(ProbeRecordBytes(owner, fiKey) ?: [NSData data]) isEqualToData:beforeBytes]
+                && owner.Document()->GetAvailableUndos() == undosBefore;
+        }
+        ProbeRecordBit(bits, mask, 0, ok, @"stale face refusal preserves bytes and history");
+    } catch (...) { ProbeRecordBit(bits, mask, 0, false, @"c++ exception"); }
+    } @catch (...) { ProbeRecordBit(bits, mask, 0, false, @"exception"); }
+    // bit 1: a stored proof matching two current coplanar faces is
+    // AmbiguousFaceRemap; the record/history are untouched.
+    @try {
+        try {
+        core3d::NativeDocumentSession session;
+        OcctDocument& owner = *session.Document();
+        OwnerKey key;
+        TDF_Label ownerLabel;
+        // The pilot cut crosses the bound max-X side: the side is split into
+        // two coplanar faces with identical derived receipts.
+        bool ok = ProbeStageBase(owner, unit, key, ownerLabel, 40, 40, 5);
+        fi::OwnerKey fiKey{key.document, key.entity, key.definition};
+        fi::ResourceEnvelope envelope;
+        if (ok) ok = ProbeEnvelope(ProbeRasterImage(YES), ProbeRasterImage(NO), envelope);
+        if (ok) {
+            int delta = 0;
+            const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(ownerLabel);
+            dr::FaceImageGeometricReceipt captured;
+            fi::Binding binding;
+            binding.binding = FixtureIndexedUUID(0x52, 1);
+            binding.face = FixtureIndexedUUID(0x52, 2);
+            ok = !shape.IsNull()
+                && FixtureCapturePlanarFace(shape, unit,
+                    core3d::retained_face_selector::Axis::X,
+                    core3d::retained_face_selector::Side::Max, captured)
+                && dr::FaceImageReceiptProof(captured, binding.selectorProof)
+                && ProbeAdopt(owner, envelope, delta);
+            binding.resource = envelope.resource;
+            binding.role = fi::Role::BaseColor;
+            binding.colorSpace = fi::ColorSpace::SRGB;
+            fi::Definition candidate;
+            candidate.owner = fiKey;
+            candidate.bindings = {binding};
+            ok = ok && fi::BindBindingProof(candidate)
+                && ProbeCommitBindings(owner, candidate, delta)
+                    == fi::owner::Outcome::Committed;
+            NSData *beforeBytes = ok ? ProbeRecordBytes(owner, fiKey) : nil;
+            const auto undosBefore = owner.Document()->GetAvailableUndos();
+            dr::FaceImageAttachment attachment;
+            const auto status = dr::CaptureFaceImageAttachment(owner, fiKey, attachment);
+            ok = ok && status == dr::FaceImageReplayStatus::AmbiguousFaceRemap
+                && [(ProbeRecordBytes(owner, fiKey) ?: [NSData data]) isEqualToData:beforeBytes]
+                && owner.Document()->GetAvailableUndos() == undosBefore;
+        }
+        ProbeRecordBit(bits, mask, 1, ok, @"ambiguous remap refusal preserves bytes and history");
+    } catch (...) { ProbeRecordBit(bits, mask, 1, false, @"c++ exception"); }
+    } @catch (...) { ProbeRecordBit(bits, mask, 1, false, @"exception"); }
+    // bit 2: a drifted resource fence refuses StaleResource without history.
+    @try {
+        try {
+        core3d::NativeDocumentSession session;
+        OcctDocument& owner = *session.Document();
+        OwnerKey key;
+        TDF_Label ownerLabel;
+        bool ok = ProbeStageBase(owner, unit, key, ownerLabel, 40, 12, 3);
+        fi::OwnerKey fiKey{key.document, key.entity, key.definition};
+        fi::ResourceEnvelope envelope;
+        if (ok) ok = ProbeEnvelope(ProbeRasterImage(YES), ProbeRasterImage(NO), envelope);
+        if (ok) ok = ProbeBindBaseColor(owner, fiKey, ownerLabel, unit, envelope);
+        // Note: ProbeBindBaseColor adopts its own envelope; reuse the live one.
+        if (ok) {
+            fi::Definition committed;
+            ok = owner.ReadFaceImageBindings(fiKey, committed, nullptr)
+                == fi::persistence::bindings::ReadState::Present;
+            NSData *beforeBytes = ok ? ProbeRecordBytes(owner, fiKey) : nil;
+            const auto undosBefore = owner.Document()->GetAvailableUndos();
+            fi::Observed observed = ProbeObserved(owner, committed);
+            if (observed.resources.empty()) ok = false;
+            else observed.resources[0].content[0] ^= 0xFF; // drifted fence
+            fi::owner::Staging staging;
+            const fi::owner::Outcome outcome =
+                ok ? owner.PrepareFaceImageBindings(staging, committed, observed)
+                   : fi::owner::Outcome::Malformed;
+            owner.CancelFaceImageBindings(staging);
+            fi::Definition back;
+            ok = ok && outcome == fi::owner::Outcome::StaleResource
+                && owner.Document()->GetAvailableUndos() == undosBefore
+                && owner.ReadFaceImageBindings(fiKey, back, nullptr)
+                        == fi::persistence::bindings::ReadState::Present
+                && back == committed
+                && [(ProbeRecordBytes(owner, fiKey) ?: [NSData data]) isEqualToData:beforeBytes];
+        }
+        ProbeRecordBit(bits, mask, 2, ok, @"stale resource fence refuses without history");
+    } catch (...) { ProbeRecordBit(bits, mask, 2, false, @"c++ exception"); }
+    } @catch (...) { ProbeRecordBit(bits, mask, 2, false, @"exception"); }
+    // bit 3: a missing resource and a foreign (other-document) resource both
+    // refuse MissingResource without history.
+    @try {
+        try {
+        core3d::NativeDocumentSession session;
+        OcctDocument& owner = *session.Document();
+        OwnerKey key;
+        TDF_Label ownerLabel;
+        bool ok = ProbeStageBase(owner, unit, key, ownerLabel, 40, 12, 3);
+        fi::OwnerKey fiKey{key.document, key.entity, key.definition};
+        fi::ResourceEnvelope envelope;
+        if (ok) ok = ProbeEnvelope(ProbeRasterImage(YES), ProbeRasterImage(NO), envelope);
+        if (ok) ok = ProbeBindBaseColor(owner, fiKey, ownerLabel, unit, envelope);
+        if (ok) {
+            fi::Definition committed;
+            ok = owner.ReadFaceImageBindings(fiKey, committed, nullptr)
+                == fi::persistence::bindings::ReadState::Present;
+            const auto undosBefore = owner.Document()->GetAvailableUndos();
+            // Missing: a never-adopted identity.
+            fi::Definition missing = committed;
+            UUID missingResource{};
+            ok = ok && MintUUID(missingResource);
+            for (auto& binding : missing.bindings) binding.resource = missingResource;
+            ok = ok && fi::BindBindingProof(missing);
+            fi::owner::Staging staging;
+            fi::Observed observed;
+            if (ok) observed = ProbeObserved(owner, missing);
+            const fi::owner::Outcome missingOutcome =
+                ok ? owner.PrepareFaceImageBindings(staging, missing, observed)
+                   : fi::owner::Outcome::Malformed;
+            owner.CancelFaceImageBindings(staging);
+            // Foreign: an identity adopted by another document only.
+            fi::owner::Outcome foreignOutcome = fi::owner::Outcome::Malformed;
+            if (ok) {
+                core3d::NativeDocumentSession otherSession;
+                OcctDocument& other = *otherSession.Document();
+                fi::ResourceEnvelope foreign;
+                ok = ProbeEnvelopeSeeded(ProbeRasterImage(NO), ProbeRasterImage(NO), 0x54, foreign);
+                int delta = 0;
+                ok = ok && ProbeAdopt(other, foreign, delta);
+                fi::Definition foreignCandidate = committed;
+                for (auto& binding : foreignCandidate.bindings)
+                    binding.resource = foreign.resource;
+                ok = ok && fi::BindBindingProof(foreignCandidate);
+                if (ok) {
+                    observed = ProbeObserved(owner, foreignCandidate);
+                    foreignOutcome = owner.PrepareFaceImageBindings(
+                        staging, foreignCandidate, observed);
+                    owner.CancelFaceImageBindings(staging);
+                }
+            }
+            fi::Definition back;
+            ok = ok && missingOutcome == fi::owner::Outcome::MissingResource
+                && foreignOutcome == fi::owner::Outcome::MissingResource
+                && owner.Document()->GetAvailableUndos() == undosBefore
+                && owner.ReadFaceImageBindings(fiKey, back, nullptr)
+                        == fi::persistence::bindings::ReadState::Present
+                && back == committed;
+        }
+        ProbeRecordBit(bits, mask, 3, ok, @"missing and foreign resources refuse without history");
+    } catch (...) { ProbeRecordBit(bits, mask, 3, false, @"c++ exception"); }
+    } @catch (...) { ProbeRecordBit(bits, mask, 3, false, @"exception"); }
+    // bit 4: a curved (cylindrical) face is not addressable by the selector
+    // vocabulary; the derivation refuses rather than approximating.
+    @try {
+        try {
+        core3d::NativeDocumentSession session;
+        OcctDocument& owner = *session.Document();
+        OwnerKey key;
+        TDF_Label ownerLabel;
+        bool ok = ProbeStageBase(owner, unit, key, ownerLabel, 40, 12, 3);
+        if (ok) {
+            const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(ownerLabel);
+            TopTools_IndexedMapOfShape faceMap;
+            TopExp::MapShapes(shape, TopAbs_FACE, faceMap);
+            Bnd_Box stageBox;
+            BRepBndLib::Add(shape, stageBox);
+            core3d::retained_edge_treatment::ReplayBudget budget;
+            bool foundCurved = false, refused = false;
+            for (int index = 1; index <= faceMap.Extent(); ++index) {
+                const TopoDS_Face face = TopoDS::Face(faceMap.FindKey(index));
+                BRepAdaptor_Surface surface(face, true);
+                if (surface.GetType() != GeomAbs_Cylinder) continue;
+                foundCurved = true;
+                dr::FaceImageGeometricReceipt derived;
+                refused = dr::detail::DeriveFaceImageReceipt(
+                              stageBox, face, unit, budget, derived)
+                    == dr::detail::FaceImageDeriveStatus::NotAddressable;
+            }
+            ok = foundCurved && refused;
+        }
+        ProbeRecordBit(bits, mask, 4, ok, @"curved surface is not addressable");
+    } catch (...) { ProbeRecordBit(bits, mask, 4, false, @"c++ exception"); }
+    } @catch (...) { ProbeRecordBit(bits, mask, 4, false, @"exception"); }
+    // bit 5: propagation to a Boolean/duplication result entity is
+    // UnsupportedDownstream, measured against a real D2 dependency record.
+    @try {
+        try {
+        core3d::NativeDocumentSession session;
+        OcctDocument& owner = *session.Document();
+        OwnerKey key;
+        TDF_Label ownerLabel;
+        bool ok = ProbeStageBase(owner, unit, key, ownerLabel, 40, 12, 3);
+        fi::OwnerKey fiKey{key.document, key.entity, key.definition};
+        fi::ResourceEnvelope envelope;
+        if (ok) ok = ProbeEnvelope(ProbeRasterImage(YES), ProbeRasterImage(NO), envelope);
+        if (ok) ok = ProbeBindBaseColor(owner, fiKey, ownerLabel, unit, envelope);
+        if (ok) {
+            const Handle(TDocStd_Document) doc = owner.Document();
+            const OwnerKey resultKey{key.document, FixtureIndexedUUID(0x42, 11),
+                FixtureIndexedUUID(0x42, 12)};
+            const TDF_Label resultLabel =
+                FixtureAddFaceImagePartSized(doc, resultKey, unit, 40, 12, 3);
+            ok = !resultLabel.IsNull()
+                && FixtureStagePatternDependency(doc, key,
+                    FixtureIndexedUUID(0x42, 3), resultKey, unit);
+            // The dependency is a real persisted record, not a test flag.
+            std::vector<core3d::pattern::Record> records;
+            ok = ok && core3d::pattern::ReadAll(doc, records) && records.size() == 1
+                && records[0].definition.source.entity == key.entity
+                && records[0].definition.owner.entity == resultKey.entity;
+            NSData *beforeBytes = ok ? ProbeRecordBytes(owner, fiKey) : nil;
+            const auto undosBefore = doc->GetAvailableUndos();
+            dr::FaceImageAttachment attachment;
+            ok = ok && dr::CaptureFaceImageAttachment(owner, fiKey, attachment)
+                    == dr::FaceImageReplayStatus::Captured;
+            if (ok) {
+                const TopoDS_Shape currentShape = XCAFDoc_ShapeTool::GetShape(ownerLabel);
+                dr::FaceImageReplay replay;
+                const auto refused = replay.prepare(owner, attachment,
+                    dr::Mutation::Replace, resultKey.entity, currentShape);
+                dr::FaceImageReplay control;
+                const auto supported = control.prepare(owner, attachment,
+                    dr::Mutation::Replace, fiKey.entity, currentShape);
+                ok = refused == dr::FaceImageReplayStatus::UnsupportedDownstream
+                    && (supported == dr::FaceImageReplayStatus::NoChange
+                        || supported == dr::FaceImageReplayStatus::Prepared)
+                    && doc->GetAvailableUndos() == undosBefore
+                    && [(ProbeRecordBytes(owner, fiKey) ?: [NSData data]) isEqualToData:beforeBytes];
+            }
+        }
+        ProbeRecordBit(bits, mask, 5, ok,
+            @"unsupported downstream refuses against a real dependency record");
+    } catch (...) { ProbeRecordBit(bits, mask, 5, false, @"c++ exception"); }
+    } @catch (...) { ProbeRecordBit(bits, mask, 5, false, @"exception"); }
+    // bit 6: a no-op commit is a zero-delta refusal and a cancelled prepare
+    // leaves no trace; bytes and history are exact.
+    @try {
+        try {
+        core3d::NativeDocumentSession session;
+        OcctDocument& owner = *session.Document();
+        OwnerKey key;
+        TDF_Label ownerLabel;
+        bool ok = ProbeStageBase(owner, unit, key, ownerLabel, 40, 12, 3);
+        fi::OwnerKey fiKey{key.document, key.entity, key.definition};
+        fi::ResourceEnvelope envelope;
+        if (ok) ok = ProbeEnvelope(ProbeRasterImage(YES), ProbeRasterImage(NO), envelope);
+        if (ok) ok = ProbeBindBaseColor(owner, fiKey, ownerLabel, unit, envelope);
+        if (ok) {
+            fi::Definition committed;
+            ok = owner.ReadFaceImageBindings(fiKey, committed, nullptr)
+                == fi::persistence::bindings::ReadState::Present;
+            NSData *beforeBytes = ok ? ProbeRecordBytes(owner, fiKey) : nil;
+            const Handle(TDocStd_Document) doc = owner.Document();
+            const auto undosBefore = doc->GetAvailableUndos();
+            const fi::Observed observed = ProbeObserved(owner, committed);
+            fi::owner::Staging staging;
+            fi::owner::Outcome prepared =
+                owner.PrepareFaceImageBindings(staging, committed, observed);
+            fi::owner::Outcome committedOutcome = fi::owner::Outcome::Malformed;
+            if (prepared == fi::owner::Outcome::Prepared) {
+                doc->NewCommand();
+                committedOutcome = owner.CommitFaceImageBindings(staging, observed);
+                if (doc->HasOpenCommand()) doc->AbortCommand();
+            }
+            // Cancelled prepare: prepare again and discard.
+            fi::owner::Outcome cancelled = fi::owner::Outcome::Malformed;
+            if (ok) {
+                fi::owner::Staging discarded;
+                cancelled = owner.PrepareFaceImageBindings(discarded, committed, observed);
+                owner.CancelFaceImageBindings(discarded);
+            }
+            ok = ok && prepared == fi::owner::Outcome::Prepared
+                && committedOutcome == fi::owner::Outcome::Refused
+                && cancelled == fi::owner::Outcome::Prepared
+                && doc->GetAvailableUndos() == undosBefore
+                && [(ProbeRecordBytes(owner, fiKey) ?: [NSData data]) isEqualToData:beforeBytes];
+        }
+        ProbeRecordBit(bits, mask, 6, ok, @"no-op refusal and cancelled prepare leave no trace");
+    } catch (...) { ProbeRecordBit(bits, mask, 6, false, @"c++ exception"); }
+    } @catch (...) { ProbeRecordBit(bits, mask, 6, false, @"exception"); }
+    // bit 7: an aborted command restores the exact prior bytes and history
+    // (the document-level recovery measurement).
+    @try {
+        try {
+        core3d::NativeDocumentSession session;
+        OcctDocument& owner = *session.Document();
+        OwnerKey key;
+        TDF_Label ownerLabel;
+        bool ok = ProbeStageBase(owner, unit, key, ownerLabel, 40, 12, 3);
+        fi::OwnerKey fiKey{key.document, key.entity, key.definition};
+        fi::ResourceEnvelope envelope;
+        if (ok) ok = ProbeEnvelope(ProbeRasterImage(YES), ProbeRasterImage(NO), envelope);
+        if (ok) ok = ProbeBindBaseColor(owner, fiKey, ownerLabel, unit, envelope);
+        if (ok) {
+            fi::Definition committed;
+            ok = owner.ReadFaceImageBindings(fiKey, committed, nullptr)
+                == fi::persistence::bindings::ReadState::Present;
+            NSData *beforeBytes = ok ? ProbeRecordBytes(owner, fiKey) : nil;
+            const Handle(TDocStd_Document) doc = owner.Document();
+            const auto undosBefore = doc->GetAvailableUndos();
+            fi::Definition edited = committed;
+            if (edited.bindings.empty()) ok = false;
+            else edited.bindings[0].transform.rotationDegrees = 90;
+            ok = ok && fi::BindBindingProof(edited);
+            fi::Observed observed;
+            if (ok) observed = ProbeObserved(owner, edited);
+            fi::owner::Staging staging;
+            fi::owner::Outcome outcome = fi::owner::Outcome::Malformed;
+            if (ok && owner.PrepareFaceImageBindings(staging, edited, observed)
+                    == fi::owner::Outcome::Prepared) {
+                doc->NewCommand();
+                outcome = owner.CommitFaceImageBindings(staging, observed);
+                // The staged record is visible inside the open command...
+                NSData *stagedBytes = ProbeRecordBytes(owner, fiKey);
+                ok = ok && outcome == fi::owner::Outcome::Committed
+                    && stagedBytes && ![stagedBytes isEqualToData:beforeBytes];
+                // ...and the abort restores the exact prior bytes and history.
+                doc->AbortCommand();
+                ok = ok && [(ProbeRecordBytes(owner, fiKey) ?: [NSData data])
+                        isEqualToData:beforeBytes]
+                    && doc->GetAvailableUndos() == undosBefore;
+            } else {
+                ok = false;
+            }
+        }
+        ProbeRecordBit(bits, mask, 7, ok, @"aborted command restores exact bytes and history");
+    } catch (...) { ProbeRecordBit(bits, mask, 7, false, @"c++ exception"); }
+    } @catch (...) { ProbeRecordBit(bits, mask, 7, false, @"exception"); }
+    return @{@"schema": @"shapeyard.face-image.probe.v1",
+             @"scenario": @"scenario1",
+             @"metersPerUnit": @(unit),
+             @"mask": @(mask),
+             @"bits": bits};
+}
+
+// Locate the single SYFR/1 resource blob inside a saved fixture document;
+// -2 when ambiguous, -1 when absent.
+NSInteger FaceImageResourceBlobOffset(NSData *data) {
+    static const std::uint8_t magic[8] = {'S', 'Y', 'F', 'R', 1, 0, 0, 0};
+    const auto *bytes = static_cast<const std::uint8_t*>(data.bytes);
+    NSInteger found = -1;
+    for (NSUInteger at = 0; at + 8 <= data.length; ++at) {
+        if (std::memcmp(bytes + at, magic, 8) == 0) {
+            if (found >= 0) return -2;
+            found = NSInteger(at);
+        }
+    }
+    return found;
+}
+
+// Replace 32 lower-hex characters (one UUID field) of the hex-encoded SYFI/1
+// record inside the saved document bytes; the record digests no longer match,
+// so the strict reader refuses the open. Returns nil when the record text is
+// not found exactly once.
+NSData *FaceImageSpliceRecordHex(NSData *data, const std::vector<std::uint8_t>& canonical,
+                                 std::size_t byteOffset, const char *replacementHex32) {
+    std::string hex;
+    if (!fi::persistence::EncodeHex(canonical, hex)) return nil;
+    NSMutableData *mutableData = [data mutableCopy];
+    const auto *bytes = static_cast<const std::uint8_t*>(data.bytes);
+    NSInteger found = -1;
+    for (NSUInteger at = 0; at + hex.size() <= data.length; ++at) {
+        if (std::memcmp(bytes + at, hex.data(), hex.size()) == 0) {
+            if (found >= 0) return nil;
+            found = NSInteger(at);
+        }
+    }
+    if (found < 0) return nil;
+    if (std::strlen(replacementHex32) != 32) return nil;
+    [mutableData replaceBytesInRange:NSMakeRange(NSUInteger(found) + 2 * byteOffset, 32)
+                           withBytes:replacementHex32];
+    return mutableData;
+}
+
+// E3 malformed/budget fixture documents (U23). OCAF-level scenarios tamper
+// the committed state before the bounded save; byte-surgery scenarios mutate
+// the saved bytes afterwards. The safe storage writer cannot persist a
+// non-canonical SYFR/1 table at all (its Prepare raises), so resource-table
+// corruptions are produced by byte surgery on a valid saved document.
+NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
+    if (unit != 0.001 && unit != 1.0) return nil;
+    @try {
+        if ([scenario isEqualToString:@"unknownSchema"]
+            || [scenario isEqualToString:@"extraAttribute"]
+            || [scenario isEqualToString:@"crossDocumentBinding"]) {
+            return CreateFaceImageDebugFixture(
+                [NSString stringWithFormat:@"e3-malformed-%@-%@",
+                    scenario, unit == 0.001 ? @"mm" : @"m"],
+                [scenario, unit](const Handle(TDocStd_Document)& document) {
+                    StageFaceImageFixture(document, unit);
+                    UUID documentID{}; documentID.fill(1);
+                    const OwnerKey key{documentID, FixtureIndexedUUID(0x42, 1),
+                        FixtureIndexedUUID(0x42, 2)};
+                    TDF_Label ownerLabel;
+                    if (!fi::owner::ResolveOwnerLabel(document, key, ownerLabel))
+                        throw std::invalid_argument("malformed fixture owner");
+                    fi::Definition committed;
+                    std::vector<std::uint8_t> canonical;
+                    TDF_Label recordLabel;
+                    if (fi::persistence::bindings::Read(document, ownerLabel, committed,
+                            &canonical, &recordLabel)
+                            != fi::persistence::bindings::ReadState::Present
+                        || recordLabel.IsNull())
+                        throw std::invalid_argument("malformed fixture record");
+                    if ([scenario isEqualToString:@"unknownSchema"]) {
+                        TDataStd_Integer::Set(recordLabel,
+                            fi::persistence::bindings::VersionID(), 2);
+                    } else if ([scenario isEqualToString:@"extraAttribute"]) {
+                        TDataStd_Integer::Set(recordLabel,
+                            Standard_GUID("E278B1A5-1E3F-4C2A-8B3D-6F0E9A4C7D99"), 1);
+                    } else {
+                        // A well-formed record bound to a foreign document
+                        // identity: canonical and digest-valid, but the
+                        // whole-document admission refuses the open.
+                        fi::Definition foreign = committed;
+                        foreign.owner.document = FixtureIndexedUUID(0x77, 1);
+                        std::vector<std::uint8_t> foreignBytes;
+                        std::string hex, digest;
+                        if (!fi::Encode(foreign, foreignBytes)
+                            || !fi::persistence::EncodeHex(foreignBytes, hex)
+                            || !fi::persistence::HashHex(foreignBytes, digest))
+                            throw std::invalid_argument("malformed fixture reseal");
+                        recordLabel.ForgetAllAttributes(Standard_True);
+                        if (!fi::persistence::bindings::WriteChunks(recordLabel, hex,
+                                Standard_Integer(foreign.bindings.size()), digest))
+                            throw std::invalid_argument("malformed fixture rewrite");
+                    }
+                });
+        }
+        if ([scenario isEqualToString:@"duplicateBindingIdentity"]
+            || [scenario isEqualToString:@"staleFaceUUID"]
+            || [scenario isEqualToString:@"foreignResourceUUID"]) {
+            // A second committed binding gives the duplicate case its two
+            // rows; every case then patches one hex-encoded UUID field, which
+            // breaks the canonical digests and fails the strict reader.
+            auto canonicalPtr = std::make_shared<std::vector<std::uint8_t>>();
+            NSData *valid = CreateFaceImageDebugFixture(
+                [NSString stringWithFormat:@"e3-malformed-%@-%@",
+                    scenario, unit == 0.001 ? @"mm" : @"m"],
+                [unit, canonicalPtr](const Handle(TDocStd_Document)& document) {
+                    StageFaceImageFixture(document, unit);
+                    UUID documentID{}; documentID.fill(1);
+                    const OwnerKey key{documentID, FixtureIndexedUUID(0x42, 1),
+                        FixtureIndexedUUID(0x42, 2)};
+                    fi::Definition committed;
+                    TDF_Label ownerLabel;
+                    if (!fi::owner::ResolveOwnerLabel(document, key, ownerLabel)
+                        || fi::persistence::bindings::Read(document, ownerLabel, committed,
+                               nullptr, nullptr)
+                            != fi::persistence::bindings::ReadState::Present)
+                        throw std::invalid_argument("malformed fixture record");
+                    fi::Binding added = committed.bindings[0];
+                    added.binding = FixtureIndexedUUID(0x53, 1);
+                    added.role = fi::Role::Emissive;
+                    added.colorSpace = fi::ColorSpace::SRGB;
+                    fi::Definition next = committed;
+                    next.bindings.push_back(added);
+                    if (!fi::BindBindingProof(next))
+                        throw std::invalid_argument("malformed fixture binding proof");
+                    fi::Observed observed;
+                    for (const auto& binding : next.bindings)
+                        observed.faces.push_back({binding.face, binding.selectorProof});
+                    if (!fi::owner::ResourceManifest(document, observed.resources))
+                        throw std::invalid_argument("malformed fixture manifest");
+                    document->NewCommand();
+                    fi::owner::Staging staging;
+                    if (fi::owner::Prepare(staging, document, next, observed)
+                            != fi::owner::Outcome::Prepared
+                        || fi::owner::Commit(staging, document, observed)
+                            != fi::owner::Outcome::Committed
+                        || !document->CommitCommand()) {
+                        fi::owner::Cancel(staging);
+                        if (document->HasOpenCommand()) document->AbortCommand();
+                        throw std::invalid_argument("malformed fixture second binding");
+                    }
+                    // Capture the committed record's canonical bytes for the
+                    // post-save hex surgery below.
+                    fi::Definition committedNow;
+                    if (fi::persistence::bindings::Read(document, ownerLabel, committedNow,
+                            canonicalPtr.get(), nullptr)
+                            != fi::persistence::bindings::ReadState::Present
+                        || committedNow != next || !Core3DValidateFaceImageDocument(document))
+                        throw std::invalid_argument("malformed fixture canonical capture");
+                });
+            if (!valid || canonicalPtr->empty()) return nil;
+            const std::vector<std::uint8_t>& canonical = *canonicalPtr;
+            // SYFI/1 record layout (FaceImageDefinition.hxx): binding rows
+            // begin at byte 60; row i field offsets: binding +0, face +16,
+            // resource +64. Hex text is two characters per byte.
+            if ([scenario isEqualToString:@"duplicateBindingIdentity"]) {
+                // Row 1's binding identity becomes row 0's: bytes [60+124, +16)
+                // copied from [60, +16).
+                std::string hex;
+                if (!fi::persistence::EncodeHex(canonical, hex)) return nil;
+                const std::string row0Binding = hex.substr(2 * 60, 32);
+                return FaceImageSpliceRecordHex(valid, canonical, 60 + 124,
+                                                row0Binding.c_str());
+            }
+            if ([scenario isEqualToString:@"staleFaceUUID"]) {
+                // Flip the first hex character of row 0's face identity.
+                std::string hex;
+                if (!fi::persistence::EncodeHex(canonical, hex)) return nil;
+                std::string replacement = hex.substr(2 * (60 + 16), 32);
+                replacement[0] = replacement[0] == '0' ? '1' : '0';
+                return FaceImageSpliceRecordHex(valid, canonical, 60 + 16,
+                                                replacement.c_str());
+            }
+            // foreignResourceUUID: flip the first hex character of row 0's
+            // resource identity.
+            std::string hex;
+            if (!fi::persistence::EncodeHex(canonical, hex)) return nil;
+            std::string replacement = hex.substr(2 * (60 + 64), 32);
+            replacement[0] = replacement[0] == '0' ? '1' : '0';
+            return FaceImageSpliceRecordHex(valid, canonical, 60 + 64,
+                                            replacement.c_str());
+        }
+        if ([scenario isEqualToString:@"exactLimitResource"]) {
+            // Exactly 16,777,216 pixels (4096 x 4096), the pixel cap: admitted.
+            NSData *flat = ProbeFlatPNG(4096, 4096);
+            if (!flat) return nil;
+            fi::ResourceEnvelope envelope;
+            if (!BuildFaceImageEnvelope(flat, flat, @"opaque",
+                    [@"shapeyard.e3.fixture.exact-limit.v1"
+                        dataUsingEncoding:NSUTF8StringEncoding],
+                    FixtureIndexedUUID(0x51, 1), envelope)) return nil;
+            return CreateFaceImageDebugFixture(
+                unit == 0.001 ? @"e3-exact-limit-mm" : @"e3-exact-limit-m",
+                [envelope, unit](const Handle(TDocStd_Document)& document) {
+                    StageFaceImageFixtureSized(document, unit, 40, 12, 3, envelope);
+                });
+        }
+        // Byte-surgery scenarios start from a valid saved document.
+        NSData *valid = CreateFaceImageDebugFixture(
+            unit == 0.001 ? @"e3-malformed-base-mm" : @"e3-malformed-base-m",
+            [unit](const Handle(TDocStd_Document)& document) {
+                StageFaceImageFixture(document, unit);
+            });
+        if (!valid) return nil;
+        if ([scenario isEqualToString:@"trailingBytes"]) {
+            NSMutableData *mutated = [valid mutableCopy];
+            static const std::uint8_t garbage[32] = {0xA5};
+            [mutated appendBytes:garbage length:sizeof(garbage)];
+            return mutated;
+        }
+        const NSInteger blobAt = FaceImageResourceBlobOffset(valid);
+        if (blobAt < 12) return nil;
+        if ([scenario isEqualToString:@"digestMismatch"]) {
+            // Flip one byte inside the originalBytes region of the SYFR/1
+            // blob (past the 140-byte header and the 4-byte count): the
+            // content digest no longer matches the carried bytes.
+            NSMutableData *mutated = [valid mutableCopy];
+            auto *bytes = static_cast<std::uint8_t*>(mutated.mutableBytes);
+            const NSUInteger at = NSUInteger(blobAt) + 144;
+            if (at >= mutated.length) return nil;
+            bytes[at] ^= 0xFF;
+            return mutated;
+        }
+        if ([scenario isEqualToString:@"overLimitResource"]) {
+            // Inflate the driver-level record length prefix past the
+            // kMaximumEnvelopeBytes cap; the bounded reader refuses before
+            // allocation. The integer endianness is discovered from the known
+            // canonical record size.
+            std::vector<std::uint8_t> canonical;
+            if (!fi::Encode(FixturePNGEnvelope(), canonical)) return nil;
+            NSMutableData *mutated = [valid mutableCopy];
+            auto *bytes = static_cast<std::uint8_t*>(mutated.mutableBytes);
+            const NSUInteger at = NSUInteger(blobAt) - 4;
+            std::uint32_t little = 0, big = 0;
+            std::memcpy(&little, bytes + at, 4);
+            for (int index = 0; index < 4; ++index)
+                big = (big << 8) | bytes[at + index];
+            const std::uint32_t over = std::uint32_t(fi::kMaximumEnvelopeBytes) + 1;
+            if (little == canonical.size()) {
+                std::memcpy(bytes + at, &over, 4);
+            } else if (big == canonical.size()) {
+                for (int index = 0; index < 4; ++index)
+                    bytes[at + index] = std::uint8_t(over >> (8 * (3 - index)));
+            } else {
+                return nil;
+            }
+            return mutated;
+        }
+        return nil;
+    } @catch (...) { return nil; }
+}
+
 } // namespace
 #endif
 
@@ -1235,7 +2876,6 @@ NSData *CreateFaceImageDebugFixture(
     return CaptureControllerFaceImageInput(self, entityIdentifier, input)
         ? [[Core3DFaceImageOpening alloc] initWithInput:std::move(input)] : nil;
 }
-
 #if DEBUG
 + (NSData *)debugFaceImageFixtureAssetData:(double)metersPerUnit {
     if (!NSThread.isMainThread || (metersPerUnit != 0.001 && metersPerUnit != 1.0))
@@ -1244,6 +2884,160 @@ NSData *CreateFaceImageDebugFixture(
         metersPerUnit == 0.001 ? @"e3-face-image-mm" : @"e3-face-image-m",
         [metersPerUnit](const Handle(TDocStd_Document)& document) {
             StageFaceImageFixture(document, metersPerUnit);
+        });
+}
+
++ (NSData *)debugFaceImageFixtureAssetDataWithOriginalBytes:(NSData *)originalBytes
+                                               workingBytes:(NSData *)workingBytes
+                                        alphaInterpretation:(NSString *)alphaInterpretation
+                                                 provenance:(NSData *)provenance
+                                              metersPerUnit:(double)metersPerUnit {
+    if (!NSThread.isMainThread || (metersPerUnit != 0.001 && metersPerUnit != 1.0))
+        return nil;
+    fi::ResourceEnvelope envelope;
+    if (!BuildFaceImageEnvelope(originalBytes, workingBytes, alphaInterpretation,
+                                provenance, FixtureIndexedUUID(0x51, 1), envelope))
+        return nil;
+    return CreateFaceImageDebugFixture(
+        metersPerUnit == 0.001 ? @"e3-face-image-bytes-mm" : @"e3-face-image-bytes-m",
+        [envelope, metersPerUnit](const Handle(TDocStd_Document)& document) {
+            StageFaceImageFixtureSized(document, metersPerUnit, 40, 12, 3, envelope);
+        });
+}
+
+- (NSDictionary<NSString *,id> *)debugFaceImageObservationForEntityIdentifier:(NSString *)entityIdentifier {
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128) return nil;
+    @try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        if (!gl) return nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer = gl.viewer;
+        if (!viewer) return nil;
+        const Handle(OcctDocument) owner = viewer->getDocument();
+        if (owner.IsNull() || owner->Document().IsNull()) return nil;
+        const Handle(TDocStd_Document) document = owner->Document();
+        OwnerKey key;
+        TDF_Label label;
+        const char *raw = entityIdentifier.UTF8String;
+        if (!LabelForSelected(owner, raw ? raw : "", key, label)) return nil;
+        fi::Definition definition;
+        std::vector<std::uint8_t> bytes;
+        const auto state = owner->ReadFaceImageBindings(key, definition, &bytes);
+        const fi::FaceImageProbe::Observation probe = fi::FaceImageProbe::Observe(document);
+        NSString *sourceFeature = @"";
+        core3d::retained_solid::Record retained;
+        if (core3d::retained_solid::Read(document, label, retained) && retained.value) {
+            sourceFeature = IdentifierText(
+                core3d::retained_boolean::Identities(retained.value->envelope).sourceFeature);
+        }
+        NSString *currentness = @"absent";
+        if (state == fi::persistence::bindings::ReadState::Present) {
+            dr::FaceImageAttachment attachment;
+            currentness = dr::CaptureFaceImageAttachment(*owner, key, attachment)
+                    == dr::FaceImageReplayStatus::Captured ? @"current" : @"stale";
+        } else if (state == fi::persistence::bindings::ReadState::Malformed) {
+            currentness = @"malformed";
+        }
+        NSMutableArray<NSDictionary<NSString *,id> *> *bindings =
+            [NSMutableArray arrayWithCapacity:definition.bindings.size()];
+        for (const auto& binding : definition.bindings) {
+            [bindings addObject:@{
+                @"bindingIdentifier": IdentifierText(binding.binding),
+                @"faceIdentifier": IdentifierText(binding.face),
+                @"resourceIdentifier": IdentifierText(binding.resource),
+                @"selectorProof": DigestText(binding.selectorProof),
+                @"role": RoleText(binding.role),
+                @"colorSpace": ColorSpaceText(binding.colorSpace),
+                @"scaleU": @(binding.transform.scale[0]),
+                @"scaleV": @(binding.transform.scale[1]),
+                @"offsetU": @(binding.transform.offset[0]),
+                @"offsetV": @(binding.transform.offset[1]),
+                @"rotationDegrees": @(binding.transform.rotationDegrees),
+                @"wrapU": WrapText(binding.transform.wrapU),
+                @"wrapV": WrapText(binding.transform.wrapV),
+            }];
+        }
+        NSString *recordState = @"malformed";
+        if (state == fi::persistence::bindings::ReadState::Present) recordState = @"present";
+        else if (state == fi::persistence::bindings::ReadState::Absent) recordState = @"absent";
+        return @{
+            @"schema": @"shapeyard.face-image.observation.v1",
+            @"documentIdentifier": [NSString stringWithUTF8String:
+                owner->DocumentIdentifier().c_str()] ?: @"",
+            @"entityIdentifier": IdentifierText(key.entity),
+            @"definitionIdentifier": IdentifierText(key.definition),
+            @"sourceFeatureIdentifier": sourceFeature,
+            @"recordState": recordState,
+            @"recordBytes": bytes.empty()
+                ? [NSData data] : [NSData dataWithBytes:bytes.data() length:bytes.size()],
+            @"currentness": currentness,
+            @"bindings": bindings,
+            @"resources": @(probe.resources),
+            @"boundOwners": @(probe.boundOwners),
+            @"aggregateBytes": @(probe.aggregateBytes),
+            @"probeComplete": @(probe.complete ? YES : NO),
+            @"undoCount": @(document->GetAvailableUndos()),
+            @"redoCount": @(document->GetAvailableRedos()),
+            @"undoLimit": @(document->GetUndoLimit()),
+            @"hasOpenCommand": @(document->HasOpenCommand() ? YES : NO),
+            @"recoveryState": document->HasOpenCommand() ? @"openCommand" : @"clean",
+        };
+    } @catch (...) { return nil; }
+}
+
++ (NSDictionary<NSString *,id> *)debugFaceImageScenarioZeroProbe:(double)metersPerUnit {
+    if (!NSThread.isMainThread || (metersPerUnit != 0.001 && metersPerUnit != 1.0))
+        return nil;
+    return FaceImageScenarioZeroProbe(metersPerUnit);
+}
+
++ (NSDictionary<NSString *,id> *)debugFaceImageScenarioOneProbe:(double)metersPerUnit {
+    if (!NSThread.isMainThread || (metersPerUnit != 0.001 && metersPerUnit != 1.0))
+        return nil;
+    return FaceImageScenarioOneProbe(metersPerUnit);
+}
+
++ (NSData *)debugFaceImageMalformedFixtureAssetData:(NSString *)scenario
+                                      metersPerUnit:(double)metersPerUnit {
+    if (!NSThread.isMainThread || ![scenario isKindOfClass:NSString.class]
+        || scenario.length == 0 || scenario.length > 64) return nil;
+    return CreateFaceImageMalformedFixture(scenario, metersPerUnit);
+}
+
++ (NSData *)debugFaceImageSplitMergeFixtureAssetData:(double)metersPerUnit {
+    if (!NSThread.isMainThread || (metersPerUnit != 0.001 && metersPerUnit != 1.0))
+        return nil;
+    // Width 44 with the pilot cut interior (x 39..43); editing the in-plane
+    // width down to 40 mm drives the cut across the bound max-X side and
+    // splits it into two coplanar faces.
+    return CreateFaceImageDebugFixture(
+        metersPerUnit == 0.001 ? @"e3-face-image-split-mm" : @"e3-face-image-split-m",
+        [metersPerUnit](const Handle(TDocStd_Document)& document) {
+            StageFaceImageFixtureSized(document, metersPerUnit, 44, 41, 2,
+                                       FixturePNGEnvelope());
+        });
+}
+
++ (NSData *)debugFaceImageUnsupportedDownstreamFixtureAssetData:(double)metersPerUnit {
+    if (!NSThread.isMainThread || (metersPerUnit != 0.001 && metersPerUnit != 1.0))
+        return nil;
+    return CreateFaceImageDebugFixture(
+        metersPerUnit == 0.001 ? @"e3-face-image-downstream-mm" : @"e3-face-image-downstream-m",
+        [metersPerUnit](const Handle(TDocStd_Document)& document) {
+            StageFaceImageFixture(document, metersPerUnit);
+            UUID documentID{}; documentID.fill(1);
+            const OwnerKey sourceKey{documentID, FixtureIndexedUUID(0x42, 1),
+                FixtureIndexedUUID(0x42, 2)};
+            const OwnerKey resultKey{documentID, FixtureIndexedUUID(0x42, 11),
+                FixtureIndexedUUID(0x42, 12)};
+            const TDF_Label resultLabel = FixtureAddFaceImagePartSized(
+                document, resultKey, metersPerUnit, 40, 12, 3);
+            if (resultLabel.IsNull()
+                || !FixtureStagePatternDependency(document, sourceKey,
+                    FixtureIndexedUUID(0x42, 3), resultKey, metersPerUnit)
+                || !Core3DValidateFaceImageDocument(document))
+                throw std::invalid_argument("face image downstream fixture");
         });
 }
 #endif

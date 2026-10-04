@@ -128,6 +128,10 @@ public:
         std::shared_ptr<const PreparedReplay>&) noexcept = 0;
 };
 
+// E3 face-image dependent replay (defined below, portion 3) participates in
+// the plan as the edited owner's own attachment (portion 4b).
+class FaceImageReplay;
+
 //! Prospective source/host state produced by the accepted source editor. It is
 //! detached and immutable; family collaborators still capture all old OCAF
 //! authority themselves before preparing a replay.
@@ -216,6 +220,13 @@ private:
     std::vector<Dependency> dependencies_;
     std::vector<std::shared_ptr<const PreparedReplay>> prepared_;
     std::vector<std::string> authorizedEntityIdentifiers_;
+    // E3 face-image attachment replay of the edited owner itself (278b
+    // portion 4b): captured and prepared before any mutation by the additive
+    // PrepareDependentReplayPlan overload, staged and read inside the same
+    // one source command. Null when the owner carries no face-image record,
+    // in which case every plan phase is byte-identical to the D2/D3/D4-only
+    // behavior.
+    std::shared_ptr<FaceImageReplay> faceImageReplay_;
 };
 
 // ---------------------------------------------------------------------------

@@ -541,6 +541,35 @@ __attribute__((objc_subclassing_restricted))
 //! never changes model/history/selection.
 - (Core3DFaceImageOpening *_Nullable)openFaceImageOpeningForEntityIdentifier:(NSString *)entityIdentifier
     NS_SWIFT_NAME(openFaceImageOpening(entityIdentifier:));
+//! E3 trusted resource adoption (278b portion 4b). The importer hands over the
+//! original imported bytes and the normalized working bytes; the native side
+//! rehashes both itself, validates them with the existing bounded image
+//! validators and caps, derives formats/dimensions from the actual images,
+//! charges the aggregate resource budget before allocation and adopts them as
+//! ONE ordinary undoable command under the existing document mutation owner.
+//! The returned identifier is the runtime adoption capability a Set
+//! candidate's resourceIdentifier accepts. No URL, provider path, inline blob,
+//! request handle or TrustedInputAssetManifest can mint it. Main-thread only.
+- (void)adoptFaceImageResourceWithOriginalBytes:(NSData *)originalBytes
+                                  workingBytes:(NSData *)workingBytes
+                           alphaInterpretation:(NSString *)alphaInterpretation
+                                    provenance:(NSData *)provenance
+                                    completion:(void (^)(Core3DFaceImageResourceAdoptionResult result,
+                                                         NSString *_Nullable resourceIdentifier,
+                                                         NSString *detail))completion
+    NS_SWIFT_NAME(adoptFaceImageResource(originalBytes:workingBytes:alphaInterpretation:provenance:completion:));
+//! Typed removal of one adopted E3 face-image resource as one ordinary
+//! undoable command; refused while any committed binding still references the
+//! resource. Main-thread only.
+- (void)removeFaceImageResourceWithIdentifier:(NSString *)resourceIdentifier
+                                   completion:(void (^)(Core3DFaceImageResourceAdoptionResult result,
+                                                        NSString *detail))completion
+    NS_SWIFT_NAME(removeFaceImageResource(identifier:completion:));
+//! Read-only readback of one adopted E3 face-image resource: identity, both
+//! SHA-256 content digests, formats, dimensions, alpha interpretation and the
+//! exact original and working bytes. nil when absent. Main-thread only.
+- (nullable Core3DFaceImageResourceSnapshot *)faceImageResourceSnapshotForIdentifier:(NSString *)resourceIdentifier
+    NS_SWIFT_NAME(faceImageResourceSnapshot(identifier:));
 #if DEBUG
 //! One-shot main delivery gate for real worker lifecycle qualification.
 - (void)debugSetSavedCutSourceDeliveryGate:(void (^_Nullable)(void (^resume)(void)))gate
@@ -571,6 +600,55 @@ __attribute__((objc_subclassing_restricted))
 //! system. nil on any failure; never mutates an open document.
 + (NSData *_Nullable)debugFaceImageFixtureAssetData:(double)metersPerUnit
     NS_SWIFT_NAME(debugFaceImageFixtureAssetData(metersPerUnit:));
+//! E3 DEBUG scenario seam (278b portion 4b): the same fixture document, but
+//! the resource is adopted from caller-supplied original and working bytes
+//! through the real validated adoption path (native rehash, bounded image
+//! validation, derived formats/dimensions). nil on any failure.
++ (NSData *_Nullable)debugFaceImageFixtureAssetDataWithOriginalBytes:(NSData *)originalBytes
+                                                       workingBytes:(NSData *)workingBytes
+                                                alphaInterpretation:(NSString *)alphaInterpretation
+                                                         provenance:(NSData *)provenance
+                                                      metersPerUnit:(double)metersPerUnit
+    NS_SWIFT_NAME(debugFaceImageFixtureAssetData(originalBytes:workingBytes:alphaInterpretation:provenance:metersPerUnit:));
+//! E3 DEBUG read-only observation for one entity of the live document: the
+//! FaceImageProbe document observation, the per-owner binding record readback
+//! (with its canonical bytes), every durable UUID, the transform/role/
+//! colorSpace/wrap fields, the real undo/redo command counts and the recovery
+//! state. nil on any failure; never mutates model/history. Main-thread only.
+- (nullable NSDictionary<NSString *,id> *)debugFaceImageObservationForEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugFaceImageObservation(entityIdentifier:));
+//! E3 DEBUG scenario-0 probe (U19 positive lifecycle): runs the real
+//! adoption/bind/edit/undo/redo/save/cold-reopen/removal operations on an
+//! attempt-local document and returns every measured bit independently in
+//! "bits" plus the aggregate "mask" (0xff only when every bit passed).
++ (nullable NSDictionary<NSString *,id> *)debugFaceImageScenarioZeroProbe:(double)metersPerUnit
+    NS_SWIFT_NAME(debugFaceImageScenarioZeroProbe(metersPerUnit:));
+//! E3 DEBUG scenario-1 probe (U20 negative refusals): runs the real
+//! stale/ambiguous/unsupported/missing-resource/no-op/cancel/abort scenarios
+//! on attempt-local documents and returns every measured bit independently in
+//! "bits" plus the aggregate "mask" (0xff only when every bit passed).
++ (nullable NSDictionary<NSString *,id> *)debugFaceImageScenarioOneProbe:(double)metersPerUnit
+    NS_SWIFT_NAME(debugFaceImageScenarioOneProbe(metersPerUnit:));
+//! E3 DEBUG malformed/budget fixture documents (U23), returned as data for
+//! the test to open through the production open path: unknownSchema,
+//! extraAttribute, trailingBytes, duplicateBindingIdentity, staleFaceUUID,
+//! foreignResourceUUID, digestMismatch, crossDocumentBinding,
+//! exactLimitResource, overLimitResource. nil for an unknown scenario or any
+//! failure; never mutates an open document.
++ (nullable NSData *)debugFaceImageMalformedFixtureAssetData:(NSString *)scenario
+                                               metersPerUnit:(double)metersPerUnit
+    NS_SWIFT_NAME(debugFaceImageMalformedFixtureAssetData(scenario:metersPerUnit:));
+//! E3 DEBUG U22 fixture: a retained 44x30x20 mm profile/extrusion whose pilot
+//! cut is interior at 44 mm but splits the bound max-X planar side into two
+//! coplanar faces when the in-plane width is edited down to 40 mm.
++ (nullable NSData *)debugFaceImageSplitMergeFixtureAssetData:(double)metersPerUnit
+    NS_SWIFT_NAME(debugFaceImageSplitMergeFixtureAssetData(metersPerUnit:));
+//! E3 DEBUG U22 fixture: the face-image fixture owner plus a second retained
+//! owner and a real D2 pattern dependency record sourced from the bound
+//! owner, so an unsupported Boolean/duplication propagation attempt observes
+//! a real dependency record rather than a test flag.
++ (nullable NSData *)debugFaceImageUnsupportedDownstreamFixtureAssetData:(double)metersPerUnit
+    NS_SWIFT_NAME(debugFaceImageUnsupportedDownstreamFixtureAssetData(metersPerUnit:));
 #endif
 - (nullable Core3DStoredRectangularLoftSnapshot *)storedRectangularLoftWithEntityIdentifier:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(storedRectangularLoft(entityIdentifier:expected:));

@@ -4626,7 +4626,8 @@ OrdinaryEditResult Core3DViewer::commitSavedCutSourceEdit(const std::shared_ptr<
             || !myDoc->CaptureExactFreeLabel(record.previous.label, replayTarget)
             || myDoc->PrepareDependentReplayPlan(replayTarget,
                 dependent_replay::Mutation::Replace, dependent_replay::Limits{},
-                replayPreparer, replayPlan) != dependent_replay::Refusal::None
+                replayPreparer, record.requested.shape,
+                replayPlan) != dependent_replay::Refusal::None
             || !replayPlan) return finish(OrdinaryEditResult::Invalid);
         // Stop and synchronous ordinary dispatch have one atomic decision. Stop
         // that loses this race cannot change the actual ordinary result afterward.
@@ -4984,7 +4985,8 @@ OrdinaryEditResult Core3DViewer::commitSavedProgramSourceEdit(const std::shared_
             || !myDoc->CaptureExactFreeLabel(record.previous.label, replayTarget)
             || myDoc->PrepareDependentReplayPlan(replayTarget,
                 dependent_replay::Mutation::Replace, dependent_replay::Limits{},
-                replayPreparer, replayPlan) != dependent_replay::Refusal::None
+                replayPreparer, record.requested.shape,
+                replayPlan) != dependent_replay::Refusal::None
             || !replayPlan) return finish(OrdinaryEditResult::Invalid);
         // Stop and synchronous ordinary dispatch have one atomic decision. Stop
         // that loses this race cannot change the actual ordinary result afterward.

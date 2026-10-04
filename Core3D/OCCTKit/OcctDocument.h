@@ -596,6 +596,30 @@ Standard_EXPORT Standard_Boolean Core3DValidateAssetAtlasDocument(const Handle(T
 //! the schema GUIDs on exactly the validated labels and nowhere else.
 Standard_EXPORT Standard_Boolean Core3DValidateFaceImageDocument(const Handle(TDocStd_Document)& document);
 
+#if DEBUG
+namespace core3d::face_image {
+namespace persistence::resources { class Core3D_FaceImageResource; }
+//! E3 DEBUG evidence (278b portion 2; declaration surfaced in portion 4b so
+//! the UI-layer observation seam can consume it): measured registration state
+//! for the later portions' probes. Read-only; no edit authority and no
+//! mutation route. Definitions live in OcctDocument.mm beside the persistence
+//! admission they observe.
+struct FaceImageProbe final {
+    struct Observation final {
+        Standard_Integer resources = 0;
+        Standard_Integer boundOwners = 0;
+        Standard_Size aggregateBytes = 0;
+        bool complete = false;
+    };
+    // Friend seam: distinguishes a fully published payload from an empty
+    // attribute shell without reparsing its bytes.
+    static bool Published(
+        const Handle(persistence::resources::Core3D_FaceImageResource)& attribute) noexcept;
+    static Observation Observe(const Handle(TDocStd_Document)& document) noexcept;
+};
+} // namespace core3d::face_image
+#endif
+
 //! Read-only classification used by destructive native operation gates. A
 //! malformed/unknown record is deliberately not collapsed to legacy absence.
 //! `CurrentProfile` may only be consumed by the already-admitted cap-shell
@@ -1200,6 +1224,22 @@ public:
         core3d::dependent_replay::Mutation mutation,
         const core3d::dependent_replay::Limits& limits,
         core3d::dependent_replay::Preparer& preparer,
+        std::shared_ptr<const core3d::dependent_replay::Plan>& plan) noexcept;
+    //! Additive overload (278b portion 4b) for production source edits: after
+    //! the D2/D3/D4 closure is prepared it also captures the edited owner's
+    //! committed E3 face-image attachment and proves the one-to-one
+    //! reattachment of every bound face on the detached prospective post-edit
+    //! stage BEFORE any mutation. A lost, split, merged, ambiguous or
+    //! unsupported correspondence refuses the whole source command here; the
+    //! prepared replay is staged and read inside the same one command by
+    //! StageDependentReplayPlan/ReadDependentReplayPlan. An owner without
+    //! face-image records behaves byte-identically to the base overload.
+    Standard_EXPORT core3d::dependent_replay::Refusal PrepareDependentReplayPlan(
+        const OcctExactLabelReceipt& target,
+        core3d::dependent_replay::Mutation mutation,
+        const core3d::dependent_replay::Limits& limits,
+        core3d::dependent_replay::Preparer& preparer,
+        const TopoDS_Shape& prospectiveStage,
         std::shared_ptr<const core3d::dependent_replay::Plan>& plan) noexcept;
     //! Stage the source mutation and every prepared descendant under the
     //! caller's one lease. This method does not commit or begin nested work.

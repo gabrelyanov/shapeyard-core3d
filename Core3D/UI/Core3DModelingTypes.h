@@ -1493,4 +1493,32 @@ __attribute__((objc_subclassing_restricted))
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+typedef NS_ENUM(NSInteger, Core3DFaceImageResourceAdoptionResult) {
+    Core3DFaceImageResourceAdoptionResultCommitted = 0,
+    Core3DFaceImageResourceAdoptionResultRejected,
+    Core3DFaceImageResourceAdoptionResultBusy,
+    Core3DFaceImageResourceAdoptionResultRecoveryRequired,
+};
+
+//! Read-only readback of one document-owned E3 face-image resource (278b
+//! portion 4b). Snapshots are vended only by the native document surface;
+//! both byte arrays are the exact stored original and working payloads.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DFaceImageResourceSnapshot : NSObject
+@property(nonatomic,copy,readonly) NSString *resourceIdentifier;
+@property(nonatomic,copy,readonly) NSString *originalContentSHA256;
+@property(nonatomic,copy,readonly) NSString *workingContentSHA256;
+@property(nonatomic,copy,readonly) NSString *originalFormat;
+@property(nonatomic,copy,readonly) NSString *workingFormat;
+@property(nonatomic,copy,readonly) NSString *alphaInterpretation;
+@property(nonatomic,readonly) NSUInteger originalWidthTexels;
+@property(nonatomic,readonly) NSUInteger originalHeightTexels;
+@property(nonatomic,readonly) NSUInteger workingWidthTexels;
+@property(nonatomic,readonly) NSUInteger workingHeightTexels;
+@property(nonatomic,copy,readonly) NSData *originalBytes;
+@property(nonatomic,copy,readonly) NSData *workingBytes;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 NS_ASSUME_NONNULL_END
