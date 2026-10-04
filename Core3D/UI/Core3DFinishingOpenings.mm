@@ -430,7 +430,7 @@ void DeliverMutation(void (^completion)(Core3DProfileConstructionResult, NSStrin
 + (NSData *)debugRetainedFinishingFixtureAssetData:(double)metersPerUnit {
     if (!NSThread.isMainThread || (metersPerUnit != 0.001 && metersPerUnit != 1.0))
         return nil;
-    return [self debugSpatialSweepColdOpenFixtureDataWithMetersPerUnit:metersPerUnit];
+    return [self debugB04EmptyDocumentFixtureDataWithMetersPerUnit:metersPerUnit];
 }
 #endif
 @end
