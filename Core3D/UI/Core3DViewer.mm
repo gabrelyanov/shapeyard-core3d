@@ -3738,6 +3738,11 @@ struct ProfileSolidGeometry : ProfileDefinition {
     // D253 source-edit rebind inputs: main-thread verified value data only.
     std::optional<retained_edge_treatment::SourceRebindRoles> treatmentRebind;
     std::optional<retained_edge_treatment::BaseRecipe> treatmentRebuildSource;
+    // D369/O6b: non-owning pointer to the enclosing operation's shared replay
+    // budget, set only when this build runs inside a budgeted operation (the
+    // admitted R2 Boolean-input base rebuild). Null on initial creation and
+    // on every B1 route, which keep the existing budget selection below.
+    retained_edge_treatment::ReplayBudget* operationBudget = nullptr;
 };
 
 
@@ -3903,7 +3908,11 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
         // loop.
         if (geometry->circle && !geometry->revolve && !geometry->spline) {
             retained_edge_treatment::ReplayBudget producerBudget;
+            // D369/O6b: an explicit operation budget handoff (the admitted R2
+            // Boolean-input rebuild) carries the existing debt; it never
+            // implies treatmentRebind authority.
             retained_edge_treatment::ReplayBudget& budget =
+                geometry->operationBudget ? *geometry->operationBudget :
                 geometry->treatmentRebind && geometry->treatmentRebuildSource
                     ? geometry->treatmentBudget : producerBudget;
             TopoDS_Shape canonical, reopened;
@@ -3951,6 +3960,10 @@ static bool R2RebuildBooleanInputBase(const retained_solid::Envelope& envelope,
             auto geometry = std::make_shared<ProfileSolidGeometry>();
             static_cast<ProfileDefinition&>(*geometry) = p.definition;
             geometry->constructionFrame = p.constructionFrame;
+            // D369/O6b: pass this operation's existing debt explicitly into
+            // the circular producer's bounded readback/commitment traversals;
+            // no treatmentRebind authority is forged to select the budget.
+            geometry->operationBudget = &budget;
             if (stop.load() || !BuildProfileSolidGeometry(geometry) || stop.load()) return false;
             base = geometry->solid;
         } else if (envelope.sourceFamily == 2) {

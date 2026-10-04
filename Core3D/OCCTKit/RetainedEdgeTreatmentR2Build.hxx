@@ -415,7 +415,14 @@ inline bool RebuildEditedPrefix(const RetainedBooleanBase& original,
                 envelope.radius = first.kind == analytic_boolean::OperandKind::Wedge
                     ? .001 / (edited.source.metersPerUnit * 1000) : first.radius;
                 if (!rebuildBase(envelope, stop, budget, rebuilt) || rebuilt.IsNull()) {
-                    refusal = stop.load() ? et::Refusal::Cancelled : et::Refusal::BuildFailed; return false;
+                    // Cancelled keeps priority; a sticky denial inside the
+                    // budgeted base rebuild (the bounded persistence readback
+                    // of a rounded or circular source) is reported as the
+                    // exhaustion it is, never as a generic build failure.
+                    refusal = stop.load() ? et::Refusal::Cancelled
+                        : budget.exhausted ? et::Refusal::Budget
+                        : et::Refusal::BuildFailed;
+                    return false;
                 }
             } else {
                 const auto status = saved_cut_source_edit::RebuildLoftBase(envelope, stop, rebuilt);
@@ -446,6 +453,19 @@ inline bool RebuildEditedPrefix(const RetainedBooleanBase& original,
         // the same bounded BinTools round trip the proof itself trusts, so the
         // replayed prefix commits to geometry whose exact readback reproduces
         // it. No tolerance, no canonicalisation at the proof, no budget change.
+        // C20: the bounded BinTools round trip below performs two full
+        // topology passes over the private copy (the write traversal and the
+        // read reconstruction) that the byte cap does not bound; debit both
+        // on this operation's shared counter before the write runs — the
+        // same source-pass discipline as et::DetachReplayGeometry.
+        std::size_t copyOccurrences = 0;
+        const tb::WalkStatus copyWalk = tb::ChargeTraversal(copied, budget, stop,
+            tb::Site::C20R2EditedPrefix, &copyOccurrences);
+        if (copyWalk == tb::WalkStatus::Cancelled) { refusal = et::Refusal::Cancelled; return false; }
+        if (copyWalk != tb::WalkStatus::Completed
+            || !budget.visit(copyOccurrences, tb::Site::C20R2EditedPrefix)) {
+            refusal = et::Refusal::Budget; return false;
+        }
         et::detail::GeometryBuffer copyBuffer; std::ostream copyWriter(&copyBuffer);
         BinTools::Write(copied, copyWriter, Standard_False, Standard_False, BinTools_FormatVersion_VERSION_4);
         if (!copyWriter.good() || copyBuffer.size() == 0 || copyBuffer.size() >= et::detail::MaximumGeometryBytes) {
