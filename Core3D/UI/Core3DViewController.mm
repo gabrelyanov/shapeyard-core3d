@@ -23,6 +23,7 @@
 #if DEBUG
 #include "../OCCTKit/SweepPersistenceProbe.hxx"
 #include "../OCCTKit/PartBooleanCodecProbe.hxx"
+#include "../OCCTKit/PartBooleanRecipeCodecProbe.hxx"
 #include "../OCCTKit/SavedFeatureRecords.hxx"
 #include "../OCCTKit/EnclosureParameters.hxx"
 #include "../OCCTKit/EnclosureGeometry.hxx"
@@ -8806,6 +8807,15 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
 + (NSDictionary<NSString *, NSNumber *> *)debugPartBooleanCodecProbe {
     NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
     for (const auto& check : core3d::composite_recipe::Probe::Run()) {
+        NSString *key = [NSString stringWithUTF8String:check.first.c_str()];
+        if (key == nil) return @{ @"invalidKey": @NO };
+        result[key] = @(check.second);
+    }
+    return [result copy];
+}
++ (NSDictionary<NSString *, NSNumber *> *)debugPartBooleanRecipeCodecProbe {
+    NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
+    for (const auto& check : core3d::part_boolean_recipe_probe::Run()) {
         NSString *key = [NSString stringWithUTF8String:check.first.c_str()];
         if (key == nil) return @{ @"invalidKey": @NO };
         result[key] = @(check.second);

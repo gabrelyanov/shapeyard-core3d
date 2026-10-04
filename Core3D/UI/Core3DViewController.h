@@ -1437,6 +1437,10 @@ __attribute__((objc_subclassing_restricted))
 //! Pure DEBUG codec/history evidence; never observes or mutates the live document.
 + (NSDictionary<NSString *, NSNumber *> *)debugPartBooleanCodecProbe
     NS_SWIFT_NAME(debugPartBooleanCodecProbe());
+//! A1-REP persistence-only SYPB/3 and SYCR/3 codec evidence. The probe calls
+//! the production codec/registry and cannot mint an owner or execute geometry.
++ (NSDictionary<NSString *, NSNumber *> *)debugPartBooleanRecipeCodecProbe
+    NS_SWIFT_NAME(debugPartBooleanRecipeCodecProbe());
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanWedgeProbe:(NSInteger)scenario
     NS_SWIFT_NAME(debugSavedBooleanWedgeProbe(_:));
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanRingProbe:(NSInteger)scenario

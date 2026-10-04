@@ -1,5 +1,8 @@
 #pragma once
 #include "PartBooleanDefinition.hxx"
+#include "ProfilePersistence.hxx"
+#include "EnclosureParameters.hxx"
+#include "RectangularLoftPersistence.hxx"
 #include <cstring>
 #include <limits>
 
@@ -289,6 +292,205 @@ inline bool DecodeAnalytic(const std::vector<std::uint8_t>& bytes,
         std::vector<std::uint8_t> canonical;
         if (!reader.complete() || !Valid(value) || !EncodeAnalytic(value, canonical)
             || canonical != bytes) return false;
+        output = std::move(value); return true;
+    } catch (...) { output = {}; return false; }
+}
+
+inline bool SameScalarBits(const std::vector<double>& left,
+                           const std::vector<double>& right) noexcept {
+    if (left.size() != right.size()) return false;
+    for (std::size_t index = 0; index < left.size(); ++index)
+        if (std::memcmp(&left[index], &right[index], sizeof(double)) != 0) return false;
+    return true;
+}
+
+inline bool ValidNativeRecipe(const RecipeInput& input) noexcept {
+    try {
+        std::vector<double> exact;
+        double recipeUnit = 0;
+        if (input.family == RecipeInputFamily::Profile) {
+            profile::Parameters decoded;
+            if (input.recipeSchema < 1 || input.recipeSchema > 5
+                || !profile::Decode(input.recipeScalars, decoded)
+                || profile::SchemaFor(decoded) != int(input.recipeSchema)
+                || !profile::Encode(decoded, exact)) return false;
+            recipeUnit = decoded.metersPerUnit;
+        } else if (input.family == RecipeInputFamily::Enclosure) {
+            enclosure::Parameters decoded;
+            if (input.recipeSchema < 1 || input.recipeSchema > 2
+                || !enclosure::Decode(int(input.recipeSchema), input.recipeScalars, decoded)
+                || !enclosure::Encode(decoded, exact)) return false;
+            recipeUnit = decoded.metersPerUnit;
+        } else if (input.family == RecipeInputFamily::RectangularLoft) {
+            rectangular_loft::Definition decoded;
+            if (input.recipeSchema != std::uint32_t(loft_persistence::Schema)
+                || !loft_persistence::Decode(input.recipeScalars, decoded)
+                || !loft_persistence::Encode(decoded, exact)) return false;
+            recipeUnit = decoded.dimensionMetersPerUnit;
+        } else return false;
+        return SameScalarBits(input.recipeScalars, exact)
+            && std::memcmp(&recipeUnit, &input.sourceMetersPerUnit, sizeof(double)) == 0;
+    } catch (...) { return false; }
+}
+
+inline bool ValidRecipeDefinition(const RecipeDefinition& value) noexcept {
+    return Valid(value) && ValidNativeRecipe(value.inputs[0])
+        && ValidNativeRecipe(value.inputs[1]);
+}
+
+inline bool RecipePlacementDigest(const RecipeInput& input, Digest& output) noexcept {
+    output.fill(0);
+    try {
+        Writer writer;
+        static constexpr char domain[] = "SYPB3/placement";
+        writer.raw(reinterpret_cast<const std::uint8_t*>(domain), sizeof(domain));
+        for (double scalar : input.inputToCarrier) writer.scalar(scalar);
+        writer.scalar(input.sourceMetersPerUnit);
+        writer.scalar(input.carrierMetersPerUnit);
+        return writer.valid && retained_solid::Hash(writer.bytes, output);
+    } catch (...) { output.fill(0); return false; }
+}
+
+inline bool RecipeMaterialDigest(const MaterialValue& material, Digest& output) noexcept {
+    output.fill(0);
+    try {
+        Writer writer;
+        static constexpr char domain[] = "SYPB3/material";
+        writer.raw(reinterpret_cast<const std::uint8_t*>(domain), sizeof(domain));
+        WriteMaterial(writer, material);
+        return writer.valid && retained_solid::Hash(writer.bytes, output);
+    } catch (...) { output.fill(0); return false; }
+}
+
+inline bool RecipeGroupsDigest(const std::vector<std::string>& groups,
+                               Digest& output) noexcept {
+    output.fill(0);
+    try {
+        if (groups.size() > MaximumGroupsPerInput) return false;
+        Writer writer;
+        static constexpr char domain[] = "SYPB3/groups";
+        writer.raw(reinterpret_cast<const std::uint8_t*>(domain), sizeof(domain));
+        writer.integer(groups.size(), 2);
+        for (const auto& group : groups) writer.text(group);
+        return writer.valid && retained_solid::Hash(writer.bytes, output);
+    } catch (...) { output.fill(0); return false; }
+}
+
+inline bool EncodeRecipe(const RecipeDefinition& value,
+                         std::vector<std::uint8_t>& output) noexcept {
+    output.clear();
+    try {
+        if (!ValidRecipeDefinition(value)) return false;
+        Writer writer;
+        writer.raw(reinterpret_cast<const std::uint8_t*>("SYPB"), 4);
+        writer.integer(RecipePayloadVersion, 1); writer.integer(0, 3);
+        writer.integer(std::uint8_t(value.operation), 1);
+        writer.integer(std::uint8_t(value.materialPolicy), 1);
+        writer.integer(0, 2); // admission and reserved
+        for (std::uint32_t version : {value.versions.serializer, value.versions.build,
+             value.versions.proof, value.versions.selector, value.versions.material})
+            writer.integer(version, 4);
+        writer.raw(value.owner.document); writer.raw(value.owner.entity);
+        writer.raw(value.owner.definition); writer.raw(value.booleanNode);
+        writer.raw(value.feature);
+        for (const RecipeInput& input : value.inputs) {
+            writer.integer(std::uint8_t(input.role), 1);
+            writer.integer(std::uint8_t(input.family), 1);
+            writer.integer(input.originallyVisible ? 1 : 0, 1);
+            writer.integer(0, 1);
+            writer.raw(input.sourceNode); writer.integer(input.sourceLocalID, 8);
+            writer.raw(input.original.document); writer.raw(input.original.entity);
+            writer.raw(input.original.definition); writer.raw(input.original.sourceFeature);
+            writer.integer(input.shapeSlot, 4); writer.integer(input.recipeSchema, 4);
+            writer.scalar(input.sourceMetersPerUnit); writer.scalar(input.carrierMetersPerUnit);
+            for (double scalar : input.inputToCarrier) writer.scalar(scalar);
+            writer.raw(input.commitments.geometry); writer.raw(input.commitments.recipe);
+            writer.raw(input.commitments.placement); writer.raw(input.commitments.material);
+            writer.raw(input.commitments.groups); WriteMaterial(writer, input.originalMaterial);
+            writer.text(input.originalName); writer.integer(input.originalGroups.size(), 2);
+            for (const auto& group : input.originalGroups) writer.text(group);
+            writer.integer(input.recipeScalars.size(), 4);
+            for (double scalar : input.recipeScalars) writer.scalar(scalar);
+        }
+        if (!writer.valid || writer.bytes.size() > MaximumPayloadBytes - 32) return false;
+        Digest seal{};
+        if (!retained_solid::Hash(writer.bytes, seal)) return false;
+        writer.raw(seal);
+        if (!writer.valid) return false;
+        output = std::move(writer.bytes); return true;
+    } catch (...) { output.clear(); return false; }
+}
+
+inline bool DecodeRecipe(const std::vector<std::uint8_t>& bytes,
+                         RecipeDefinition& output) noexcept {
+    output = {};
+    try {
+        if (bytes.size() < 8 + 4 + 20 + 48 + 32 + 32
+            || bytes.size() > MaximumPayloadBytes
+            || std::memcmp(bytes.data(), "SYPB\3\0\0\0", 8) != 0) return false;
+        std::vector<std::uint8_t> body(bytes.begin(), bytes.end() - 32);
+        Digest expected{}, actual{};
+        if (!retained_solid::Hash(body, expected)) return false;
+        std::copy_n(bytes.end() - 32, 32, actual.begin());
+        if (expected != actual) return false;
+        Reader reader(bytes, bytes.size() - 32);
+        std::array<std::uint8_t, 8> prefix{};
+        std::uint64_t operation = 0, policy = 0, admission = 0, reserved = 0;
+        RecipeDefinition value;
+        if (!reader.raw(prefix) || !reader.integer(1, operation)
+            || !reader.integer(1, policy) || !reader.integer(1, admission)
+            || admission != 0 || !reader.integer(1, reserved) || reserved != 0) return false;
+        value.operation = Operation(operation); value.materialPolicy = MaterialPolicy(policy);
+        std::uint32_t* versions[] = {&value.versions.serializer, &value.versions.build,
+            &value.versions.proof, &value.versions.selector, &value.versions.material};
+        for (auto* version : versions) {
+            std::uint64_t decoded = 0;
+            if (!reader.integer(4, decoded) || decoded > UINT32_MAX) return false;
+            *version = std::uint32_t(decoded);
+        }
+        if (!reader.raw(value.owner.document) || !reader.raw(value.owner.entity)
+            || !reader.raw(value.owner.definition) || !reader.raw(value.booleanNode)
+            || !reader.raw(value.feature)) return false;
+        for (RecipeInput& input : value.inputs) {
+            std::uint64_t role = 0, family = 0, visible = 0, localID = 0;
+            std::uint64_t slot = 0, schema = 0, groupCount = 0, scalarCount = 0;
+            if (!reader.integer(1, role) || !reader.integer(1, family)
+                || !reader.integer(1, visible) || visible > 1
+                || !reader.integer(1, reserved) || reserved != 0
+                || !reader.raw(input.sourceNode) || !reader.integer(8, localID)
+                || !reader.raw(input.original.document) || !reader.raw(input.original.entity)
+                || !reader.raw(input.original.definition) || !reader.raw(input.original.sourceFeature)
+                || !reader.integer(4, slot) || slot > UINT32_MAX
+                || !reader.integer(4, schema) || schema > UINT32_MAX
+                || !reader.scalar(input.sourceMetersPerUnit)
+                || !reader.scalar(input.carrierMetersPerUnit)) return false;
+            input.role = RecipeInputRole(role); input.family = RecipeInputFamily(family);
+            input.originallyVisible = visible != 0; input.sourceLocalID = localID;
+            input.shapeSlot = std::uint32_t(slot); input.recipeSchema = std::uint32_t(schema);
+            for (double& scalar : input.inputToCarrier) if (!reader.scalar(scalar)) return false;
+            if (!reader.raw(input.commitments.geometry) || !reader.raw(input.commitments.recipe)
+                || !reader.raw(input.commitments.placement) || !reader.raw(input.commitments.material)
+                || !reader.raw(input.commitments.groups) || !ReadMaterial(reader, input.originalMaterial)
+                || !reader.text(input.originalName) || !reader.integer(2, groupCount)
+                || groupCount > MaximumGroupsPerInput) return false;
+            input.originalGroups.reserve(std::size_t(groupCount));
+            for (std::uint64_t index = 0; index < groupCount; ++index) {
+                std::string group;
+                if (!reader.text(group)) return false;
+                input.originalGroups.push_back(std::move(group));
+            }
+            if (!reader.integer(4, scalarCount)
+                || scalarCount == 0 || scalarCount > std::size_t(profile::MaximumScalars)) return false;
+            input.recipeScalars.reserve(std::size_t(scalarCount));
+            for (std::uint64_t index = 0; index < scalarCount; ++index) {
+                double scalar = 0;
+                if (!reader.scalar(scalar)) return false;
+                input.recipeScalars.push_back(scalar);
+            }
+        }
+        std::vector<std::uint8_t> canonical;
+        if (!reader.complete() || !ValidRecipeDefinition(value)
+            || !EncodeRecipe(value, canonical) || canonical != bytes) return false;
         output = std::move(value); return true;
     } catch (...) { output = {}; return false; }
 }

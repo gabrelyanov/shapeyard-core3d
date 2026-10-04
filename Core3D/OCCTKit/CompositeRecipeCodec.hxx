@@ -20,6 +20,7 @@ namespace core3d::composite_recipe {
 inline constexpr std::uint32_t PartBooleanFeatureKind = part_boolean::FeatureKind;
 inline constexpr std::uint32_t PartBooleanFeatureCodec = part_boolean::LegacyCodecVersion;
 inline constexpr std::uint32_t PartBooleanShellFeatureCodec = part_boolean::ShellCodecVersion;
+inline constexpr std::uint32_t PartBooleanRecipeFeatureCodec = part_boolean::RecipeCodecVersion;
 inline constexpr std::uint32_t SpatialCircleSweepFeatureKind = spatial_sweep::SpatialCircleSweepFeatureKind;
 inline constexpr std::uint32_t SpatialCircleSweepFeatureCodec = spatial_sweep::SpatialCircleSweepFeatureCodec;
 inline constexpr std::uint32_t RetainedProgramSuffixFeatureKind = retained_program_suffix::FeatureKind;
@@ -287,6 +288,66 @@ inline bool CanonicalShellFeature(const FeatureNode& feature,
         && part_boolean::Encode(decoded, exact) && exact == feature.parameters;
 }
 
+inline bool CanonicalRecipeFeature(const FeatureNode& feature,
+                                   const std::vector<Node>& priorNodes) noexcept {
+    try {
+        if (feature.kind != PartBooleanFeatureKind
+            || feature.codecVersion != PartBooleanRecipeFeatureCodec
+            || feature.inputs.size() != 2 || feature.inputs[0] == feature.inputs[1]) return false;
+        part_boolean::RecipeDefinition payload;
+        std::vector<std::uint8_t> exact;
+        if (!part_boolean::DecodeRecipe(feature.parameters, payload)
+            || !part_boolean::EncodeRecipe(payload, exact) || exact != feature.parameters
+            || payload.booleanNode != feature.node || payload.feature != feature.feature) return false;
+        for (std::size_t index = 0; index < 2; ++index) {
+            const auto& input = payload.inputs[index];
+            if (input.sourceNode != feature.inputs[index]) return false;
+            const auto found = std::find_if(priorNodes.begin(), priorNodes.end(),
+                [&](const Node& node) { return NodeID(node) == feature.inputs[index]; });
+            if (found == priorNodes.end()) return false;
+            const auto* source = std::get_if<SourceNode>(&found->value);
+            if (!source || source->node != input.sourceNode
+                || source->localID != input.sourceLocalID || !(source->original == input.original)
+                || source->shapeSlot != input.shapeSlot || source->recipe.schema != input.recipeSchema
+                || source->commitments.geometry != input.commitments.geometry
+                || source->commitments.recipe != input.commitments.recipe
+                || source->commitments.placement != input.commitments.placement
+                || source->commitments.material != input.commitments.material
+                || source->commitments.groups != input.commitments.groups
+                || std::memcmp(&source->inputToCarrier.sourceMetersPerUnit,
+                               &input.sourceMetersPerUnit, sizeof(double)) != 0
+                || std::memcmp(&source->inputToCarrier.carrierMetersPerUnit,
+                               &input.carrierMetersPerUnit, sizeof(double)) != 0) return false;
+            for (std::size_t scalar = 0; scalar < input.inputToCarrier.size(); ++scalar)
+                if (std::memcmp(&source->inputToCarrier.matrix[scalar],
+                                &input.inputToCarrier[scalar], sizeof(double)) != 0) return false;
+            RecipeKind expectedKind;
+            if (input.family == part_boolean::RecipeInputFamily::Profile)
+                expectedKind = RecipeKind::Profile;
+            else if (input.family == part_boolean::RecipeInputFamily::Enclosure)
+                expectedKind = RecipeKind::Enclosure;
+            else if (input.family == part_boolean::RecipeInputFamily::RectangularLoft)
+                expectedKind = RecipeKind::RectangularLoft;
+            else return false;
+            std::vector<std::uint8_t> scalarRecipe;
+            Digest recipeDigest{}, placementDigest{}, materialDigest{}, groupsDigest{};
+            if (source->recipe.kind != expectedKind
+                || !EncodeScalarRecipe(expectedKind, input.recipeSchema,
+                                       input.recipeScalars, scalarRecipe)
+                || scalarRecipe != source->recipe.bytes
+                || !Hash(scalarRecipe, recipeDigest)
+                || !part_boolean::RecipePlacementDigest(input, placementDigest)
+                || !part_boolean::RecipeMaterialDigest(input.originalMaterial, materialDigest)
+                || !part_boolean::RecipeGroupsDigest(input.originalGroups, groupsDigest)
+                || recipeDigest != input.commitments.recipe
+                || placementDigest != input.commitments.placement
+                || materialDigest != input.commitments.material
+                || groupsDigest != input.commitments.groups) return false;
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
 // A3/P2 is a normal SYCR/3 registry feature. Its payload is canonical and its
 // single ordered input must be an earlier PartBoolean feature. No SYCR/1 or
 // SYCR/2 validation branch is widened.
@@ -404,6 +465,16 @@ inline V3Validation ValidateV3(const Definition& definition,
             const std::vector<Node> prior(definition.nodes.begin(), definition.nodes.begin() + depths.size());
             if (!entry->codec.canonicalPayload(feature, prior)) {
                 result.refusal = V3Refusal::Payload; result.reason = "noncanonical-feature-payload"; return result;
+            }
+            if (feature.kind == PartBooleanFeatureKind
+                && feature.codecVersion == PartBooleanRecipeFeatureCodec) {
+                part_boolean::RecipeDefinition payload;
+                if (!part_boolean::DecodeRecipe(feature.parameters, payload)
+                    || !(payload.owner == definition.owner)) {
+                    result.refusal = V3Refusal::Payload;
+                    result.reason = "noncanonical-feature-payload";
+                    return result;
+                }
             }
             if (depth > MaximumDepth) {
                 result.refusal = V3Refusal::Depth; result.reason = "v3-depth"; return result;
@@ -699,13 +770,16 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes, Definition& output) n
 namespace core3d::retained_feature {
 inline const RegistryView& ProductionRegistry() noexcept {
     using namespace composite_recipe;
-    static const std::array<Entry, 3> entries{{
+    static const std::array<Entry, 4> entries{{
         {{{PartBooleanFeatureKind, PartBooleanFeatureCodec}, 3, MaximumFeaturePayloadBytes,
           {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 2,
           ShapeKind::Solid, CanonicalAnalyticFeature}, {}},
         {{{PartBooleanFeatureKind, PartBooleanShellFeatureCodec}, 3, MaximumFeaturePayloadBytes,
           {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 2,
           ShapeKind::Solid, CanonicalShellFeature}, {}},
+        {{{PartBooleanFeatureKind, PartBooleanRecipeFeatureCodec}, 3, MaximumFeaturePayloadBytes,
+          {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 2,
+          ShapeKind::Solid, CanonicalRecipeFeature}, {}},
         {{{RetainedProgramSuffixFeatureKind, RetainedProgramSuffixFeatureCodec}, 3,
           retained_program_suffix::MaximumPayloadBytes,
           {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 1,

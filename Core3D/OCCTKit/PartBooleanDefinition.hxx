@@ -18,8 +18,10 @@ using retained_recipe::UUID;
 inline constexpr std::uint32_t FeatureKind = 1;
 inline constexpr std::uint32_t LegacyCodecVersion = 1; // opaque transport remains unchanged
 inline constexpr std::uint32_t ShellCodecVersion = 2;
+inline constexpr std::uint32_t RecipeCodecVersion = 3;
 inline constexpr std::uint32_t PayloadVersion = 2;
 inline constexpr std::uint32_t AnalyticPayloadVersion = 1;
+inline constexpr std::uint32_t RecipePayloadVersion = 3;
 inline constexpr char AnalyticOwner[] = "part_boolean::analytic_owner_v1";
 inline constexpr std::size_t MaximumPayloadBytes = 16 * 1024;
 inline constexpr std::size_t MaximumMaterials = 64;
@@ -33,6 +35,12 @@ enum class Operation : std::uint8_t { Union = 1, Subtract = 2, Intersect = 3 };
 enum class InputFamily : std::uint8_t {
     ShellProfile = 1,
     AnalyticRectangularPrism = 2,
+};
+enum class RecipeInputRole : std::uint8_t { Left = 1, Right = 2 };
+enum class RecipeInputFamily : std::uint8_t {
+    Profile = 1,
+    Enclosure = 2,
+    RectangularLoft = 3,
 };
 enum class MaterialPolicy : std::uint8_t { RejectConflictingMerges = 1 };
 enum class MaterialKind : std::uint8_t { ResolvedScalars = 1, OwnedResource = 2 };
@@ -130,6 +138,44 @@ struct AnalyticDefinition final {
     std::array<AnalyticPrismInput, 2> inputs;
     MaterialPolicy materialPolicy = MaterialPolicy::RejectConflictingMerges;
     CodecVersions versions;
+    bool nativeAdmissionEnabled = false;
+};
+
+// SYPB/3 is a persistence-only copy of the two complete native source
+// recipes. It intentionally has no builder/proof/editor flag and is kept
+// distinct from the frozen SYPB/1 and SYPB/2 input families.
+struct RecipeInput final {
+    RecipeInputRole role = RecipeInputRole::Left;
+    RecipeInputFamily family = RecipeInputFamily::Profile;
+    bool originallyVisible = true;
+    UUID sourceNode{};
+    std::uint64_t sourceLocalID = 0;
+    retained_recipe::SourceIdentity original;
+    std::uint32_t shapeSlot = 0;
+    std::uint32_t recipeSchema = 0;
+    double sourceMetersPerUnit = 0;
+    double carrierMetersPerUnit = 0;
+    std::array<double, 16> inputToCarrier{{
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    }};
+    SignatureCommitments commitments;
+    MaterialValue originalMaterial;
+    std::string originalName;
+    std::vector<std::string> originalGroups;
+    std::vector<double> recipeScalars;
+};
+
+struct RecipeDefinition final {
+    Operation operation = Operation::Union;
+    MaterialPolicy materialPolicy = MaterialPolicy::RejectConflictingMerges;
+    CodecVersions versions;
+    retained_recipe::OwnerKey owner;
+    UUID booleanNode{};
+    UUID feature{};
+    std::array<RecipeInput, 2> inputs;
     bool nativeAdmissionEnabled = false;
 };
 
@@ -255,5 +301,73 @@ inline bool Valid(const AnalyticDefinition& value) noexcept {
         && value.versions.material == 1 && Valid(value.inputs[0]) && Valid(value.inputs[1])
         && value.inputs[0].rootNode != value.inputs[1].rootNode
         && value.inputs[0].originalSourceFeature != value.inputs[1].originalSourceFeature;
+}
+
+inline bool ValidRecipePlacement(const RecipeInput& value) noexcept {
+    for (double scalar : value.inputToCarrier)
+        if (!std::isfinite(scalar)) return false;
+    if (!std::isfinite(value.sourceMetersPerUnit) || value.sourceMetersPerUnit <= 0
+        || !std::isfinite(value.carrierMetersPerUnit) || value.carrierMetersPerUnit <= 0
+        || value.inputToCarrier[12] != 0 || value.inputToCarrier[13] != 0
+        || value.inputToCarrier[14] != 0 || value.inputToCarrier[15] != 1) return false;
+    const auto dot = [&](unsigned a, unsigned b) {
+        return value.inputToCarrier[a] * value.inputToCarrier[b]
+            + value.inputToCarrier[4 + a] * value.inputToCarrier[4 + b]
+            + value.inputToCarrier[8 + a] * value.inputToCarrier[8 + b];
+    };
+    const double scale2 = dot(0, 0);
+    if (!std::isfinite(scale2) || scale2 <= 0) return false;
+    const double tolerance = std::max(1.0, scale2) * 1e-12;
+    if (std::abs(dot(1, 1) - scale2) > tolerance
+        || std::abs(dot(2, 2) - scale2) > tolerance
+        || std::abs(dot(0, 1)) > tolerance
+        || std::abs(dot(0, 2)) > tolerance
+        || std::abs(dot(1, 2)) > tolerance) return false;
+    const double determinant =
+        value.inputToCarrier[0] * (value.inputToCarrier[5] * value.inputToCarrier[10]
+            - value.inputToCarrier[6] * value.inputToCarrier[9])
+      - value.inputToCarrier[1] * (value.inputToCarrier[4] * value.inputToCarrier[10]
+            - value.inputToCarrier[6] * value.inputToCarrier[8])
+      + value.inputToCarrier[2] * (value.inputToCarrier[4] * value.inputToCarrier[9]
+            - value.inputToCarrier[5] * value.inputToCarrier[8]);
+    return std::isfinite(determinant) && determinant > 0;
+}
+
+inline bool Valid(const RecipeInput& value) noexcept {
+    if ((value.role != RecipeInputRole::Left && value.role != RecipeInputRole::Right)
+        || (value.family != RecipeInputFamily::Profile
+            && value.family != RecipeInputFamily::Enclosure
+            && value.family != RecipeInputFamily::RectangularLoft)
+        || !retained_recipe::Nonzero(value.sourceNode) || value.sourceLocalID == 0
+        || !retained_recipe::Valid(value.original) || value.recipeSchema == 0
+        || !ValidRecipePlacement(value) || !Valid(value.commitments)
+        || !Valid(value.originalMaterial) || !ValidText(value.originalName)
+        || value.originalGroups.size() > MaximumGroupsPerInput
+        || value.recipeScalars.empty()) return false;
+    std::set<std::string> groups;
+    for (const auto& group : value.originalGroups)
+        if (group.empty() || !ValidText(group) || !groups.insert(group).second) return false;
+    for (double scalar : value.recipeScalars)
+        if (!std::isfinite(scalar)) return false;
+    return true;
+}
+
+inline bool Valid(const RecipeDefinition& value) noexcept {
+    return !value.nativeAdmissionEnabled && retained_recipe::Valid(value.owner)
+        && retained_recipe::Nonzero(value.booleanNode)
+        && retained_recipe::Nonzero(value.feature)
+        && value.materialPolicy == MaterialPolicy::RejectConflictingMerges
+        && (value.operation == Operation::Union || value.operation == Operation::Subtract
+            || value.operation == Operation::Intersect)
+        && value.versions.serializer == 1 && value.versions.build == 1
+        && value.versions.proof == 1 && value.versions.selector == 1
+        && value.versions.material == 1 && Valid(value.inputs[0]) && Valid(value.inputs[1])
+        && value.inputs[0].role == RecipeInputRole::Left
+        && value.inputs[1].role == RecipeInputRole::Right
+        && value.inputs[0].sourceNode != value.inputs[1].sourceNode
+        && value.inputs[0].sourceLocalID != value.inputs[1].sourceLocalID
+        && !(value.inputs[0].original == value.inputs[1].original)
+        && value.inputs[0].shapeSlot != value.inputs[1].shapeSlot
+        && value.inputs[0].shapeSlot <= 1 && value.inputs[1].shapeSlot <= 1;
 }
 } // namespace core3d::part_boolean
