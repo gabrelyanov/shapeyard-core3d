@@ -8,6 +8,7 @@
 #include "../OCCTKit/SavedCutSourceChangedQualification.hxx"
 #include "../OCCTKit/PartBooleanCorrespondence.hxx"
 #include "../OCCTKit/RetainedPartBoolean.hxx"
+#include "RetainedA1AnalyticInputAdapter.hxx"
 #include "RetainedSemanticChamferAdapter.hxx"
 #include <thread>
 #endif
@@ -3810,6 +3811,13 @@ struct NativeModelingPermitIssuer final {
 - (void)core3d_clearDebugPartBooleanFixtureBinding;
 - (BOOL)core3d_matchesDebugPartBooleanFixtureEntityIdentifier:(NSString *)entityIdentifier;
 - (NSDictionary<NSString *,NSNumber *> *)debugA1DecodedOperationReadbackProbe:(NSNumber *)metersPerUnit;
+//! A1-OWNER-budget (R4/D390/D392, T08): counted detached analytic operand
+//! replay. The spec dictionary carries operation (1 Union/2 Subtract/3
+//! Intersect), metersPerUnit, an optional Core3DB2TopologyBudgetInjection and
+//! a cancelled flag. The replay runs the real counted production,
+//! materialization, correspondence and two-pass fixed-point route on one
+//! shared continuation; it never touches the document or its history.
+- (NSDictionary<NSString *,id> *)debugA1AnalyticDetachedReplayProbe:(NSDictionary *)spec;
 - (void)core3d_publishNativeSolidDeadlineDiagnostic:(NSDictionary<NSString *,id> *)diagnostic;
 - (void)core3d_expireNativeSolidDeadlineRecord:(Core3DDebugNativeSolidDeadlineRecord *)record;
 #endif
@@ -9010,6 +9018,150 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
         checks[@"swapped-role-join-refused"]=@(!reads(arm,swapped,pb::Operation::Union));
         return [checks copy];
     }catch(...){return @{};}
+}
+- (NSDictionary<NSString *,id> *)debugA1AnalyticDetachedReplayProbe:(NSDictionary *)spec {
+    namespace pb=core3d::part_boolean;
+    namespace rpb=core3d::retained_part_boolean;
+    namespace a1=core3d::a1_analytic_input_adapter;
+    namespace tb=core3d::retained_topology_budget;
+    namespace cr=core3d::composite_recipe;
+    NSMutableDictionary<NSString *,id> *checks=[NSMutableDictionary dictionary];
+    checks[@"supported"]=@NO;checks[@"outcome"]=@"unsupported";
+    if(![NSThread isMainThread]||![spec isKindOfClass:NSDictionary.class])return checks;
+    const double unit=[spec[@"metersPerUnit"] doubleValue];
+    const NSInteger operationValue=[spec[@"operation"] integerValue];
+    const BOOL cancelled=[spec[@"cancelled"] boolValue];
+    if(!std::isfinite(unit)||unit<=0||operationValue<1||operationValue>3)return checks;
+    Core3DB2TopologyBudgetInjection *injection=spec[@"injection"];
+    if(injection&&(![injection isKindOfClass:Core3DB2TopologyBudgetInjection.class]
+        ||injection.kind==Core3DB2TopologyBudgetInjectionCorrupt))return checks;
+    try {
+        // F-A1 native seed: the identical construction values that
+        // PartBooleanOwner::installEvidenceFixture persists (two analytic
+        // prisms 40x30x20 and 20x10x10 local units, right translated by
+        // (30,10,5), identity quaternions, named/grouped/material inputs).
+        const auto identifier=[](std::uint8_t seed){
+            core3d::retained_recipe::UUID value{};
+            for(std::size_t index=0;index<value.size();++index)
+                value[index]=std::uint8_t(seed+index);
+            return value;
+        };
+        pb::AnalyticDefinition definition;
+        definition.operation=static_cast<pb::Operation>(operationValue);
+        definition.inputs[0].rootNode=identifier(40);
+        definition.inputs[1].rootNode=identifier(60);
+        definition.inputs[0].originalSourceFeature=identifier(80);
+        definition.inputs[1].originalSourceFeature=identifier(100);
+        definition.inputs[0].dimensions={40,30,20};
+        definition.inputs[1].dimensions={20,10,10};
+        definition.inputs[1].translation={30,10,5};
+        rpb::OperandReadSet reads;
+        reads.leftSource.locator.node=definition.inputs[0].rootNode;
+        reads.rightSource.locator.node=definition.inputs[1].rootNode;
+        const auto fillRead=[&](core3d::retained_recipe::DependencyRead& read,std::uint8_t seed){
+            read.locator.owner={identifier(1),identifier(2),identifier(3)};
+            read.locator.sourceFeature=identifier(seed);
+            read.geometry.fill(std::uint8_t(seed+1));read.recipe.fill(std::uint8_t(seed+2));
+            read.placement.fill(std::uint8_t(seed+3));read.material.fill(std::uint8_t(seed+4));
+            read.groups.fill(std::uint8_t(seed+5));
+        };
+        fillRead(reads.leftSource,80);fillRead(reads.rightSource,100);
+        for(std::size_t index=0;index<2;++index){
+            definition.inputs[index].metersPerUnit=unit;
+            definition.inputs[index].originalMaterial.identifier=identifier(std::uint8_t(120+index));
+            definition.inputs[index].originalName=index?"Right analytic input":"Left analytic input";
+            definition.inputs[index].originalGroups={index?"Boolean tools":"Boolean bases"};
+            const auto& source=index?reads.rightSource:reads.leftSource;
+            definition.inputs[index].commitments={source.geometry,source.recipe,
+                source.placement,source.material,source.groups};
+        }
+        if(!pb::Valid(definition)||!rpb::ValidOperandRead(reads.leftSource)
+            ||!rpb::ValidOperandRead(reads.rightSource))return checks;
+        // Exact canonical recipe evidence: the SYPB/1 bytes of this seed.
+        std::vector<std::uint8_t> recipeBytes;
+        core3d::retained_recipe::Digest recipeDigest{};
+        if(!pb::EncodeAnalytic(definition,recipeBytes)
+            ||!cr::Hash(recipeBytes,recipeDigest))return checks;
+        checks[@"supported"]=@YES;
+        tb::Counter budget;
+        if(injection){
+            if(injection.remainingVisits>tb::MaximumTopologyVisits
+                ||injection.remainingStages>tb::MaximumBuildStages
+                ||injection.site<0||injection.site>=NSInteger(tb::Site::Count))return checks;
+            std::size_t goalVisits=(std::size_t)injection.remainingVisits;
+            if(injection.kind==Core3DB2TopologyBudgetInjectionLeaveOneLess&&goalVisits)--goalVisits;
+            // Debt enters through the real checked accounting API at the
+            // requested site occurrence, immediately before the tagged work.
+            tb::debug::ArmDebtHook(tb::Site(injection.site),
+                injection.occurrence>0?(std::size_t)injection.occurrence:1,
+                goalVisits,(std::size_t)injection.remainingStages);
+        }
+        struct A1HookReset { ~A1HookReset(){ tb::debug::ClearDebtHook(); } };
+        const A1HookReset a1HookReset{};(void)a1HookReset;
+        checks[@"entryVisits"]=@(budget.topologyVisits);
+        checks[@"entryStages"]=@(budget.buildStages);
+        std::atomic_bool stop{cancelled?true:false};
+        const auto replay=a1::ReplayCounted(definition,unit,reads,reads,budget,stop);
+        // Sticky evidence: after a Budget stop the same counter must deny any
+        // further charge without recording new admitted work.
+        bool sticky=false;
+        if(replay.status==a1::ReplayStatus::Budget)
+            sticky=budget.exhausted&&!budget.visit(1,tb::Site::C25AnalyticInput)
+                &&budget.exhausted;
+        checks[@"exitVisits"]=@(budget.topologyVisits);
+        checks[@"exitStages"]=@(budget.buildStages);
+        checks[@"exhausted"]=@(budget.exhausted?YES:NO);
+        checks[@"stickyBudget"]=@(sticky?YES:NO);
+#if DEBUG
+        checks[@"chargeEvents"]=@(budget.chargeEvents);
+        checks[@"chargeEventsAtStop"]=@(replay.chargeEventsAtStop);
+        checks[@"visitsC25"]=@(budget.visitsBySite[std::size_t(tb::Site::C25AnalyticInput)]);
+        checks[@"visitsC26"]=@(budget.visitsBySite[std::size_t(tb::Site::C26AnalyticBoolean)]);
+        checks[@"stagesC25"]=@(budget.stagesBySite[std::size_t(tb::Site::C25AnalyticInput)]);
+        checks[@"stagesC26"]=@(budget.stagesBySite[std::size_t(tb::Site::C26AnalyticBoolean)]);
+        checks[@"deniedSite"]=@(budget.firstDeniedSite==tb::Site::None
+            ?-1:NSInteger(budget.firstDeniedSite));
+        checks[@"deniedDimension"]=@(budget.firstDeniedSite==tb::Site::None
+            ?-1:NSInteger(budget.firstDeniedDimension));
+        checks[@"deniedRequested"]=@(budget.firstDeniedRequested);
+        checks[@"deniedVisits"]=@(budget.firstDeniedVisitsAdmitted);
+        checks[@"deniedStages"]=@(budget.firstDeniedStagesAdmitted);
+#endif
+        checks[@"refusal"]=@(NSInteger(replay.production.candidate.refusal));
+        checks[@"candidateAdmitted"]=@(replay.production.candidate.admitted()?YES:NO);
+        checks[@"productionComplete"]=@(replay.production.complete?YES:NO);
+        checks[@"explicitDeterministicOptions"]=@(replay.production.evidence.explicitDeterministicOptions?YES:NO);
+        checks[@"inputBytesUnchanged"]=@(replay.production.evidence.inputBytesUnchanged?YES:NO);
+        checks[@"historyObserved"]=@(replay.production.evidence.historyObserved?YES:NO);
+        checks[@"proofProven"]=@(replay.proof.proven()?YES:NO);
+        checks[@"proofSourceEquations"]=@(replay.proof.sourceEquations?YES:NO);
+        checks[@"proofOperationOracle"]=@(replay.proof.operationOracle?YES:NO);
+        checks[@"proofPlanarBoundary"]=@(replay.proof.completePlanarBoundary?YES:NO);
+        checks[@"proofCorrespondence"]=@(replay.proof.correspondenceComplete?YES:NO);
+        checks[@"proofMaterials"]=@(replay.proof.materialsComplete?YES:NO);
+        checks[@"proofConnectedSolid"]=@(replay.proof.connectedPositiveSolid?YES:NO);
+        checks[@"fixedPointComplete"]=@(replay.fixedPoint.fixedPoint()?YES:NO);
+        checks[@"sourceRecipesExact"]=@(replay.fixedPoint.sourceRecipesExact?YES:NO);
+        checks[@"sourceShapesExact"]=@(replay.fixedPoint.sourceShapesExact?YES:NO);
+        checks[@"resultShapeExact"]=@(replay.fixedPoint.resultShapeExact?YES:NO);
+        checks[@"bothBuildsAdmitted"]=@(replay.fixedPoint.bothBuildsAdmitted?YES:NO);
+        checks[@"dependencyClosure"]=@(replay.fixedPoint.completeDependencyClosure?YES:NO);
+        checks[@"volumeLeft"]=@(rpb::Volume(replay.production.sources[0]));
+        checks[@"volumeRight"]=@(rpb::Volume(replay.production.sources[1]));
+        checks[@"volumeResult"]=@(rpb::Volume(replay.production.candidate.solid));
+        const auto* digestBytes=recipeDigest.data();
+        for(int quarter=0;quarter<4;++quarter){
+            std::uint64_t value=0;
+            std::memcpy(&value,digestBytes+quarter*8,8);
+            checks[[NSString stringWithFormat:@"recipeHash%d",quarter]]=@(value);
+        }
+        checks[@"recipeBytes"]=@(recipeBytes.size());
+        checks[@"outcome"]=replay.status==a1::ReplayStatus::Completed
+            ?(replay.proven()?@"completed":@"refused")
+            :replay.status==a1::ReplayStatus::Budget?@"b1.Budget"
+            :replay.status==a1::ReplayStatus::Cancelled?@"b1.Cancelled":@"failed";
+        return [checks copy];
+    }catch(...){return @{@"supported":@NO,@"outcome":@"setupException"};}
 }
 #endif
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanWedgeProbe:(NSInteger)scenario {

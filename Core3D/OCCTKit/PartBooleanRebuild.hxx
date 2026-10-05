@@ -68,6 +68,80 @@ inline AnalyticFixedPointEvidence CheckAnalytic(
     } catch (...) { return {}; }
 }
 
+// A1-OWNER-budget (R4 / D390 / D392): counted two-pass analytic fixed point.
+// The same independent encode/decode/re-encode recipe passes and the same two
+// fully detached rebuilds as CheckAnalytic, but the recipe serialization
+// passes carry a stage debit and both rebuilds plus both result readbacks
+// charge the caller's shared operation continuation before their work runs.
+// Sticky Budget/Cancelled propagate without reclassification.
+namespace tb = core3d::retained_topology_budget;
+
+inline tb::WalkStatus CheckAnalyticCounted(
+    const AnalyticDefinition& definition,
+    double carrierMetersPerUnit,
+    const retained_part_boolean::OperandReadSet& reads,
+    tb::Counter& budget, const std::atomic_bool& cancelled,
+    AnalyticFixedPointEvidence& result) noexcept {
+    result = {};
+    if (cancelled.load()) return tb::WalkStatus::Cancelled;
+    try {
+        std::vector<std::uint8_t> firstRecipe, secondRecipe;
+        AnalyticDefinition decoded;
+        // Recipe encode, decode and re-encode are three separate serialization
+        // passes; each is debited before it runs.
+        if (!budget.beginStage(tb::Site::C25AnalyticInput))
+            return tb::WalkStatus::BudgetDenied;
+        bool recipesExact = EncodeAnalytic(definition, firstRecipe);
+        if (recipesExact) {
+            if (cancelled.load()) return tb::WalkStatus::Cancelled;
+            if (!budget.beginStage(tb::Site::C25AnalyticInput))
+                return tb::WalkStatus::BudgetDenied;
+            recipesExact = DecodeAnalytic(firstRecipe, decoded);
+        }
+        if (recipesExact) {
+            if (cancelled.load()) return tb::WalkStatus::Cancelled;
+            if (!budget.beginStage(tb::Site::C25AnalyticInput))
+                return tb::WalkStatus::BudgetDenied;
+            recipesExact = EncodeAnalytic(decoded, secondRecipe)
+                && firstRecipe == secondRecipe;
+        }
+        result.sourceRecipesExact = recipesExact;
+        build::AnalyticBuild first, second;
+        tb::WalkStatus walk = build::BuildAnalyticCounted(
+            definition, carrierMetersPerUnit, reads, reads, budget, cancelled, first);
+        if (walk != tb::WalkStatus::Completed) return walk;
+        walk = build::BuildAnalyticCounted(
+            decoded, carrierMetersPerUnit, reads, reads, budget, cancelled, second);
+        if (walk != tb::WalkStatus::Completed) return walk;
+        result.bothBuildsAdmitted = first.complete && second.complete;
+        result.sourceShapesExact = result.bothBuildsAdmitted
+            && first.sourceBytes == second.sourceBytes;
+        std::string firstResult, secondResult;
+        if (result.bothBuildsAdmitted) {
+            walk = retained_part_boolean::ExactShapeBytesCounted(
+                first.candidate.solid, firstResult, budget, cancelled,
+                tb::Site::C26AnalyticBoolean);
+            if (walk == tb::WalkStatus::Cancelled
+                || walk == tb::WalkStatus::BudgetDenied) return walk;
+            bool exact = walk == tb::WalkStatus::Completed && !firstResult.empty();
+            if (exact) {
+                walk = retained_part_boolean::ExactShapeBytesCounted(
+                    second.candidate.solid, secondResult, budget, cancelled,
+                    tb::Site::C26AnalyticBoolean);
+                if (walk == tb::WalkStatus::Cancelled
+                    || walk == tb::WalkStatus::BudgetDenied) return walk;
+                exact = walk == tb::WalkStatus::Completed && !secondResult.empty()
+                    && firstResult == secondResult;
+            }
+            result.resultShapeExact = exact;
+        }
+        result.completeDependencyClosure = definition.inputs.size() == 2
+            && reads.leftSource.locator.node == definition.inputs[0].rootNode
+            && reads.rightSource.locator.node == definition.inputs[1].rootNode;
+        return tb::WalkStatus::Completed;
+    } catch (...) { result = {}; return tb::WalkStatus::Failed; }
+}
+
 //! Recipe-driven production replay. This is intentionally separate from the
 //! fixture overload below: no ShellFixture or scenario value can select this
 //! path, and both operands are rebuilt from the captured graph on every pass.

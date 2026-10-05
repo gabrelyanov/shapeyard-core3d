@@ -6,6 +6,7 @@
 // It never routes or changes the existing general UI Boolean geometry worker.
 // Agentic routing remains closed until that retained owner is implemented.
 #include "RetainedRecipeAdmission.hxx"
+#include "RetainedTopologyBudget.hxx"
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
@@ -19,6 +20,7 @@
 #include <TopTools_FormatVersion.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS_Shape.hxx>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -45,6 +47,11 @@ enum class Refusal : std::uint8_t {
     TangentOnly,
     Disconnected,
     NoInteriorOverlap,
+    // A1-OWNER-budget counted route only: sticky budget exhaustion or caller
+    // cancellation observed before a charged pass. Never produced by the
+    // uncounted entry points and never reclassified into another refusal.
+    Budget,
+    Cancelled,
 };
 
 struct OperandReadSet {
@@ -310,6 +317,342 @@ inline Candidate BuildDetachedCandidate(
         result = {};
         result.refusal = Refusal::BuildFailed;
         return result;
+    }
+}
+
+// A1-OWNER-budget (R4 / D390 / D392): counted detached analytic replay route.
+// The overloads below thread the caller's already-charged operation
+// continuation (one shared retained_topology_budget::Counter plus its
+// cancellation flag) through every pass of the analytic operand route. Each
+// traversal/copy/serialization pass is charged BEFORE its work runs; a denied
+// charge is sticky on the counter and surfaces as Refusal::Budget, and an
+// observed cancellation surfaces as Refusal::Cancelled — neither is ever
+// reclassified into another refusal. The uncounted entry points above keep
+// their exact legacy behavior; no proof or admission domain changes here.
+namespace tb = core3d::retained_topology_budget;
+
+// One measured occurrence pass over a shape, charged before the pass's work
+// (serialization, validity, volume, census or kernel reservation) runs.
+inline tb::WalkStatus ChargeAnalyticPass(const TopoDS_Shape& shape,
+    tb::Counter& budget, const std::atomic_bool& cancelled,
+    tb::Site site) noexcept {
+    if (cancelled.load()) return tb::WalkStatus::Cancelled;
+    return tb::ChargeTraversal(shape, budget, cancelled, site);
+}
+
+inline tb::WalkStatus ExactShapeBytesCounted(const TopoDS_Shape& shape,
+    std::string& bytes, tb::Counter& budget, const std::atomic_bool& cancelled,
+    tb::Site site) noexcept {
+    bytes.clear();
+    const tb::WalkStatus walk = ChargeAnalyticPass(shape, budget, cancelled, site);
+    if (walk != tb::WalkStatus::Completed) return walk;
+    return ExactShapeBytes(shape, bytes) ? tb::WalkStatus::Completed
+        : tb::WalkStatus::Failed;
+}
+
+inline tb::WalkStatus VolumeCounted(const TopoDS_Shape& shape, double& volume,
+    tb::Counter& budget, const std::atomic_bool& cancelled,
+    tb::Site site) noexcept {
+    volume = -1;
+    const tb::WalkStatus walk = ChargeAnalyticPass(shape, budget, cancelled, site);
+    if (walk != tb::WalkStatus::Completed) return walk;
+    volume = Volume(shape);
+    return tb::WalkStatus::Completed;
+}
+
+inline tb::WalkStatus ValidSolidCounted(const TopoDS_Shape& shape, bool& valid,
+    tb::Counter& budget, const std::atomic_bool& cancelled,
+    tb::Site site) noexcept {
+    valid = false;
+    const tb::WalkStatus walk = ChargeAnalyticPass(shape, budget, cancelled, site);
+    if (walk != tb::WalkStatus::Completed) return walk;
+    valid = IsOneValidForwardSolid(shape);
+    return tb::WalkStatus::Completed;
+}
+
+// Counted analytic Boolean build. Identical geometry, options and refusal
+// domains to BuildDetachedCandidate; the only additions are the per-pass
+// charges on the shared continuation and the sticky Budget/Cancelled
+// propagation. Cancellation is observed before each pass and outranks budget.
+inline tb::WalkStatus BuildDetachedCandidateCounted(
+    Operation operation,
+    const TopoDS_Shape& leftSourceShape,
+    const TopoDS_Shape& rightSourceShape,
+    double tolerance,
+    const OperandReadSet& capturedReads,
+    const OperandReadSet& currentReads,
+    tb::Counter& budget,
+    const std::atomic_bool& cancelled,
+    Candidate& result,
+    CandidateEvidence* evidence = nullptr) noexcept {
+    result = {};
+    if (evidence != nullptr) *evidence = {};
+    const auto classify = [&result](tb::WalkStatus walk) {
+        result.refusal = walk == tb::WalkStatus::Cancelled ? Refusal::Cancelled
+            : walk == tb::WalkStatus::BudgetDenied ? Refusal::Budget
+            : Refusal::BuildFailed;
+        return walk;
+    };
+    try {
+        if (cancelled.load()) {
+            result.refusal = Refusal::Cancelled;
+            return tb::WalkStatus::Cancelled;
+        }
+        if (!ValidOperandRead(capturedReads.leftSource)
+            || !ValidOperandRead(capturedReads.rightSource)
+            || !ValidOperandRead(currentReads.leftSource)
+            || !ValidOperandRead(currentReads.rightSource)) {
+            result.refusal = Refusal::Admission;
+            return tb::WalkStatus::Completed;
+        }
+        if (!SameOperandRead(capturedReads.leftSource,
+                             currentReads.leftSource)) {
+            result.refusal = Refusal::StaleLeftSource;
+            return tb::WalkStatus::Completed;
+        }
+        if (!SameOperandRead(capturedReads.rightSource,
+                             currentReads.rightSource)) {
+            result.refusal = Refusal::StaleRightSource;
+            return tb::WalkStatus::Completed;
+        }
+        if (!std::isfinite(tolerance) || tolerance <= 0) {
+            result.refusal = Refusal::InvalidInput;
+            return tb::WalkStatus::Completed;
+        }
+        // Both operand validity passes are charged before they run.
+        bool leftValid = false, rightValid = false;
+        tb::WalkStatus walk = ValidSolidCounted(leftSourceShape, leftValid,
+            budget, cancelled, tb::Site::C25AnalyticInput);
+        if (walk != tb::WalkStatus::Completed) return classify(walk);
+        walk = ValidSolidCounted(rightSourceShape, rightValid,
+            budget, cancelled, tb::Site::C25AnalyticInput);
+        if (walk != tb::WalkStatus::Completed) return classify(walk);
+        if (!leftValid || !rightValid) {
+            result.refusal = Refusal::InvalidInput;
+            return tb::WalkStatus::Completed;
+        }
+
+        std::string leftBefore, rightBefore;
+        if (evidence != nullptr) {
+            walk = ExactShapeBytesCounted(leftSourceShape, leftBefore,
+                budget, cancelled, tb::Site::C25AnalyticInput);
+            if (walk == tb::WalkStatus::Cancelled
+                || walk == tb::WalkStatus::BudgetDenied) return classify(walk);
+            const bool leftSerial = walk == tb::WalkStatus::Completed
+                && !leftBefore.empty();
+            walk = ExactShapeBytesCounted(rightSourceShape, rightBefore,
+                budget, cancelled, tb::Site::C25AnalyticInput);
+            if (walk == tb::WalkStatus::Cancelled
+                || walk == tb::WalkStatus::BudgetDenied) return classify(walk);
+            const bool rightSerial = walk == tb::WalkStatus::Completed
+                && !rightBefore.empty();
+            if (!leftSerial || !rightSerial) {
+                result.refusal = Refusal::BuildFailed;
+                return tb::WalkStatus::Completed;
+            }
+        }
+        TopTools_ListOfShape arguments, tools;
+        arguments.Append(leftSourceShape);
+        tools.Append(rightSourceShape);
+        const auto configureAndBuild = [&](auto& builder) {
+            builder.SetArguments(arguments);
+            builder.SetTools(tools);
+            builder.SetRunParallel(Standard_False);
+            builder.SetNonDestructive(Standard_True);
+            builder.SetFuzzyValue(tolerance);
+            builder.SetUseOBB(Standard_True);
+            builder.SetCheckInverted(Standard_True);
+            builder.Build();
+            if (evidence != nullptr)
+                evidence->explicitDeterministicOptions = true;
+            return builder.IsDone() && !builder.HasErrors();
+        };
+        const auto observeHistory = [&](auto& builder) {
+            if (evidence == nullptr) return;
+            const auto charge = [&](const TopoDS_Shape& source) {
+                std::size_t count = 0;
+                for (TopExp_Explorer it(source, TopAbs_FACE); it.More(); it.Next()) {
+                    count += std::size_t(builder.Modified(it.Current()).Extent());
+                    count += std::size_t(builder.Generated(it.Current()).Extent());
+                    if (builder.IsDeleted(it.Current())) ++count;
+                }
+                return count;
+            };
+            evidence->leftHistoryRelations = charge(leftSourceShape);
+            evidence->rightHistoryRelations = charge(rightSourceShape);
+            evidence->historyObserved = true;
+        };
+        // The history scan walks both operand face sets; reserve each pass
+        // before the relation scan runs.
+        const auto observeHistoryCounted = [&](auto& builder) -> tb::WalkStatus {
+            if (evidence == nullptr) return tb::WalkStatus::Completed;
+            tb::WalkStatus walked = ChargeAnalyticPass(leftSourceShape,
+                budget, cancelled, tb::Site::C26AnalyticBoolean);
+            if (walked != tb::WalkStatus::Completed) return walked;
+            walked = ChargeAnalyticPass(rightSourceShape,
+                budget, cancelled, tb::Site::C26AnalyticBoolean);
+            if (walked != tb::WalkStatus::Completed) return walked;
+            observeHistory(builder);
+            return tb::WalkStatus::Completed;
+        };
+
+        const double volumeTolerance = tolerance * tolerance * tolerance;
+        // The overlap pass is one build stage; both kernel input passes are
+        // reserved before the kernel runs.
+        if (cancelled.load()) {
+            result.refusal = Refusal::Cancelled;
+            return tb::WalkStatus::Cancelled;
+        }
+        if (!budget.beginStage(tb::Site::C26AnalyticBoolean)) {
+            result.refusal = Refusal::Budget;
+            return tb::WalkStatus::BudgetDenied;
+        }
+        walk = ChargeAnalyticPass(leftSourceShape, budget, cancelled,
+            tb::Site::C26AnalyticBoolean);
+        if (walk != tb::WalkStatus::Completed) return classify(walk);
+        walk = ChargeAnalyticPass(rightSourceShape, budget, cancelled,
+            tb::Site::C26AnalyticBoolean);
+        if (walk != tb::WalkStatus::Completed) return classify(walk);
+        BRepAlgoAPI_Common common;
+        if (!configureAndBuild(common)) {
+            result.refusal = Refusal::BuildFailed;
+            return tb::WalkStatus::Completed;
+        }
+        double commonVolume = 0;
+        if (!common.Shape().IsNull()) {
+            walk = VolumeCounted(common.Shape(), commonVolume, budget, cancelled,
+                tb::Site::C26AnalyticBoolean);
+            if (walk != tb::WalkStatus::Completed) return classify(walk);
+        }
+        if (commonVolume < 0) {
+            result.refusal = Refusal::BuildFailed;
+            return tb::WalkStatus::Completed;
+        }
+        if (commonVolume <= volumeTolerance) {
+            walk = ChargeAnalyticPass(leftSourceShape, budget, cancelled,
+                tb::Site::C26AnalyticBoolean);
+            if (walk != tb::WalkStatus::Completed) return classify(walk);
+            walk = ChargeAnalyticPass(rightSourceShape, budget, cancelled,
+                tb::Site::C26AnalyticBoolean);
+            if (walk != tb::WalkStatus::Completed) return classify(walk);
+            BRepExtrema_DistShapeShape distance(
+                leftSourceShape, rightSourceShape);
+            distance.Perform();
+            if (!distance.IsDone()) {
+                result.refusal = Refusal::BuildFailed;
+                return tb::WalkStatus::Completed;
+            }
+            if (distance.Value() <= tolerance) {
+                result.refusal = Refusal::TangentOnly;
+                return tb::WalkStatus::Completed;
+            }
+            result.refusal = operation == Operation::Intersect
+                ? Refusal::EmptyResult
+                : operation == Operation::Union
+                    ? Refusal::Disconnected
+                    : Refusal::NoInteriorOverlap;
+            return tb::WalkStatus::Completed;
+        }
+
+        TopoDS_Shape built;
+        if (operation == Operation::Union) {
+            if (cancelled.load()) {
+                result.refusal = Refusal::Cancelled;
+                return tb::WalkStatus::Cancelled;
+            }
+            if (!budget.beginStage(tb::Site::C26AnalyticBoolean)) {
+                result.refusal = Refusal::Budget;
+                return tb::WalkStatus::BudgetDenied;
+            }
+            walk = ChargeAnalyticPass(leftSourceShape, budget, cancelled,
+                tb::Site::C26AnalyticBoolean);
+            if (walk != tb::WalkStatus::Completed) return classify(walk);
+            walk = ChargeAnalyticPass(rightSourceShape, budget, cancelled,
+                tb::Site::C26AnalyticBoolean);
+            if (walk != tb::WalkStatus::Completed) return classify(walk);
+            BRepAlgoAPI_Fuse boolean;
+            if (!configureAndBuild(boolean)) {
+                result.refusal = Refusal::BuildFailed;
+                return tb::WalkStatus::Completed;
+            }
+            built = boolean.Shape();
+            walk = observeHistoryCounted(boolean);
+            if (walk != tb::WalkStatus::Completed) return classify(walk);
+        } else if (operation == Operation::Subtract) {
+            if (cancelled.load()) {
+                result.refusal = Refusal::Cancelled;
+                return tb::WalkStatus::Cancelled;
+            }
+            if (!budget.beginStage(tb::Site::C26AnalyticBoolean)) {
+                result.refusal = Refusal::Budget;
+                return tb::WalkStatus::BudgetDenied;
+            }
+            walk = ChargeAnalyticPass(leftSourceShape, budget, cancelled,
+                tb::Site::C26AnalyticBoolean);
+            if (walk != tb::WalkStatus::Completed) return classify(walk);
+            walk = ChargeAnalyticPass(rightSourceShape, budget, cancelled,
+                tb::Site::C26AnalyticBoolean);
+            if (walk != tb::WalkStatus::Completed) return classify(walk);
+            BRepAlgoAPI_Cut boolean;
+            if (!configureAndBuild(boolean)) {
+                result.refusal = Refusal::BuildFailed;
+                return tb::WalkStatus::Completed;
+            }
+            built = boolean.Shape();
+            walk = observeHistoryCounted(boolean);
+            if (walk != tb::WalkStatus::Completed) return classify(walk);
+        } else {
+            built = common.Shape();
+            walk = observeHistoryCounted(common);
+            if (walk != tb::WalkStatus::Completed) return classify(walk);
+        }
+        double builtVolume = -1;
+        walk = VolumeCounted(built, builtVolume, budget, cancelled,
+            tb::Site::C26AnalyticBoolean);
+        if (walk != tb::WalkStatus::Completed) return classify(walk);
+        if (built.IsNull() || builtVolume <= volumeTolerance) {
+            result.refusal = Refusal::EmptyResult;
+            return tb::WalkStatus::Completed;
+        }
+        // The result validity and solidity passes are charged before they run.
+        walk = ChargeAnalyticPass(built, budget, cancelled,
+            tb::Site::C26AnalyticBoolean);
+        if (walk != tb::WalkStatus::Completed) return classify(walk);
+        if (!BRepCheck_Analyzer(built).IsValid()) {
+            result.refusal = Refusal::BuildFailed;
+            return tb::WalkStatus::Completed;
+        }
+        walk = ChargeAnalyticPass(built, budget, cancelled,
+            tb::Site::C26AnalyticBoolean);
+        if (walk != tb::WalkStatus::Completed) return classify(walk);
+        if (SolidCount(built) != 1) {
+            result.refusal = Refusal::Disconnected;
+            return tb::WalkStatus::Completed;
+        }
+        result.refusal = Refusal::None;
+        result.solid = built;
+        if (evidence != nullptr) {
+            std::string leftAfter, rightAfter;
+            walk = ExactShapeBytesCounted(leftSourceShape, leftAfter,
+                budget, cancelled, tb::Site::C25AnalyticInput);
+            if (walk == tb::WalkStatus::Cancelled
+                || walk == tb::WalkStatus::BudgetDenied) return classify(walk);
+            const bool leftSerial = walk == tb::WalkStatus::Completed
+                && !leftAfter.empty();
+            walk = ExactShapeBytesCounted(rightSourceShape, rightAfter,
+                budget, cancelled, tb::Site::C25AnalyticInput);
+            if (walk == tb::WalkStatus::Cancelled
+                || walk == tb::WalkStatus::BudgetDenied) return classify(walk);
+            const bool rightSerial = walk == tb::WalkStatus::Completed
+                && !rightAfter.empty();
+            evidence->inputBytesUnchanged = leftSerial && rightSerial
+                && leftBefore == leftAfter && rightBefore == rightAfter;
+        }
+        return tb::WalkStatus::Completed;
+    } catch (...) {
+        result = {};
+        result.refusal = Refusal::BuildFailed;
+        return tb::WalkStatus::Failed;
     }
 }
 

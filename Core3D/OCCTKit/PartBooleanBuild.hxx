@@ -266,6 +266,186 @@ inline AnalyticBuild BuildAnalytic(const AnalyticDefinition& definition,
     } catch (...) { return {}; }
 }
 
+// A1-OWNER-budget (R4 / D390 / D392): counted detached analytic replay route.
+// These overloads run the identical geometry and admission logic as the
+// uncounted entry points above, but every production, serialization,
+// materialization, validity and Boolean pass is charged to the caller's
+// operation continuation BEFORE the pass runs. Sticky Budget/Cancelled
+// propagate through retained_part_boolean::Refusal without reclassification.
+// A wrapper-only charge around an uncounted multi-pass helper is deliberately
+// NOT used: each underlying pass below carries its own counted charge.
+namespace tb = core3d::retained_topology_budget;
+
+// Analytic prism producer: one stage debit before kernel construction and one
+// charged traversal debiting the produced prism's internal validity pass.
+inline tb::WalkStatus BuildAnalyticPrismCounted(const AnalyticPrismInput& input,
+    double carrierMetersPerUnit, tb::Counter& budget,
+    const std::atomic_bool& cancelled, TopoDS_Shape& result) noexcept {
+    result = {};
+    if (cancelled.load()) return tb::WalkStatus::Cancelled;
+    if (!budget.beginStage(tb::Site::C25AnalyticInput))
+        return tb::WalkStatus::BudgetDenied;
+    result = BuildAnalyticPrism(input, carrierMetersPerUnit);
+    if (result.IsNull()) return tb::WalkStatus::Completed;
+    return retained_part_boolean::ChargeAnalyticPass(result, budget, cancelled,
+        tb::Site::C25AnalyticInput);
+}
+
+// Counted single-solid extraction: the envelope validity pass and every
+// inspected compound child are charged before they are inspected.
+inline tb::WalkStatus AnalyticResultSolidCounted(const TopoDS_Shape& value,
+    tb::Counter& budget, const std::atomic_bool& cancelled,
+    TopoDS_Shape& solid) noexcept {
+    solid = {};
+    tb::WalkStatus walk = retained_part_boolean::ChargeAnalyticPass(value,
+        budget, cancelled, tb::Site::C26AnalyticBoolean);
+    if (walk != tb::WalkStatus::Completed) return walk;
+    try {
+        if (retained_part_boolean::IsOneValidForwardSolid(value)) {
+            solid = value;
+            return tb::WalkStatus::Completed;
+        }
+        if (value.IsNull() || value.ShapeType() != TopAbs_COMPOUND
+            || value.Orientation() != TopAbs_FORWARD)
+            return tb::WalkStatus::Completed;
+        TopoDS_Iterator child(value, Standard_True, Standard_True);
+        if (!child.More()) return tb::WalkStatus::Completed;
+        if (cancelled.load()) return tb::WalkStatus::Cancelled;
+        if (!budget.visit(1, tb::Site::C26AnalyticBoolean))
+            return tb::WalkStatus::BudgetDenied;
+        solid = child.Value();
+        child.Next();
+        if (child.More()) {
+            if (cancelled.load()) return tb::WalkStatus::Cancelled;
+            if (!budget.visit(1, tb::Site::C26AnalyticBoolean))
+                return tb::WalkStatus::BudgetDenied;
+            solid = {};
+            return tb::WalkStatus::Completed;
+        }
+        walk = retained_part_boolean::ChargeAnalyticPass(solid, budget,
+            cancelled, tb::Site::C26AnalyticBoolean);
+        if (walk != tb::WalkStatus::Completed) return walk;
+        if (!retained_part_boolean::IsOneValidForwardSolid(solid)) solid = {};
+        return tb::WalkStatus::Completed;
+    } catch (...) { solid = {}; return tb::WalkStatus::Failed; }
+}
+
+// Counted detached persistence materialization. Passes, each charged before
+// it runs: input validity, the BinTools serialization, the restored shape's
+// validity, and the eight per-kind topology census passes on both shapes.
+inline tb::WalkStatus PersistenceMaterializeCounted(const TopoDS_Shape& shape,
+    tb::Counter& budget, const std::atomic_bool& cancelled, tb::Site site,
+    TopoDS_Shape& restored) noexcept {
+    restored = {};
+    try {
+        tb::WalkStatus walk = retained_part_boolean::ChargeAnalyticPass(shape,
+            budget, cancelled, site);
+        if (walk != tb::WalkStatus::Completed) return walk;
+        if (!retained_part_boolean::IsOneValidForwardSolid(shape))
+            return tb::WalkStatus::Failed;
+        walk = retained_part_boolean::ChargeAnalyticPass(shape, budget,
+            cancelled, site);
+        if (walk != tb::WalkStatus::Completed) return walk;
+        PersistenceBuffer buffer;
+        std::ostream writer(&buffer);
+        BinTools::Write(shape, writer, Standard_False, Standard_False,
+                        BinTools_FormatVersion_VERSION_4);
+        if (!writer.good() || buffer.size() == 0) return tb::WalkStatus::Failed;
+        buffer.beginRead();
+        std::istream reader(&buffer);
+        BinTools::Read(restored, reader);
+        if (!reader.good() || !buffer.exhausted()) return tb::WalkStatus::Failed;
+        walk = retained_part_boolean::ChargeAnalyticPass(restored, budget,
+            cancelled, site);
+        if (walk != tb::WalkStatus::Completed) return walk;
+        if (!retained_part_boolean::IsOneValidForwardSolid(restored))
+            return tb::WalkStatus::Failed;
+        // SameTopologyCensus maps both shapes under each of the eight
+        // TopAbs kinds; reserve one measured pass per kind per shape.
+        for (int kind = 0; kind < 8; ++kind) {
+            walk = retained_part_boolean::ChargeAnalyticPass(shape, budget,
+                cancelled, site);
+            if (walk != tb::WalkStatus::Completed) return walk;
+            walk = retained_part_boolean::ChargeAnalyticPass(restored, budget,
+                cancelled, site);
+            if (walk != tb::WalkStatus::Completed) return walk;
+        }
+        if (!SameTopologyCensus(shape, restored)) return tb::WalkStatus::Failed;
+        return tb::WalkStatus::Completed;
+    } catch (...) { restored = {}; return tb::WalkStatus::Failed; }
+}
+
+// Counted production analytic-prism-pair builder: both producers, both source
+// serializations, the Boolean build, the envelope extraction and all three
+// materializations charge the shared continuation before their work.
+inline tb::WalkStatus BuildAnalyticCounted(const AnalyticDefinition& definition,
+    double carrierMetersPerUnit,
+    const retained_part_boolean::OperandReadSet& captured,
+    const retained_part_boolean::OperandReadSet& current,
+    tb::Counter& budget, const std::atomic_bool& cancelled,
+    AnalyticBuild& result) noexcept {
+    result = {};
+    if (cancelled.load()) return tb::WalkStatus::Cancelled;
+    try {
+        if (!Valid(definition)) return tb::WalkStatus::Completed;
+        for (std::size_t index = 0; index < 2; ++index) {
+            tb::WalkStatus walk = BuildAnalyticPrismCounted(
+                definition.inputs[index], carrierMetersPerUnit, budget,
+                cancelled, result.sources[index]);
+            if (walk != tb::WalkStatus::Completed) return walk;
+            if (result.sources[index].IsNull()) return tb::WalkStatus::Completed;
+            walk = retained_part_boolean::ExactShapeBytesCounted(
+                result.sources[index], result.sourceBytes[index], budget,
+                cancelled, tb::Site::C25AnalyticInput);
+            if (walk != tb::WalkStatus::Completed) return walk;
+            if (result.sourceBytes[index].empty()) return tb::WalkStatus::Completed;
+        }
+        const tb::WalkStatus walk = retained_part_boolean::BuildDetachedCandidateCounted(
+            NativeOperation(definition.operation), result.sources[0],
+            result.sources[1], Precision::Confusion(), captured, current,
+            budget, cancelled, result.candidate, &result.evidence);
+        if (walk != tb::WalkStatus::Completed) return walk;
+        if (result.candidate.admitted()) {
+            // A Budget/Cancelled stop inside extraction must propagate, not
+            // degrade into an ordinary BuildFailed.
+            TopoDS_Shape extracted;
+            const tb::WalkStatus extraction = AnalyticResultSolidCounted(
+                result.candidate.solid, budget, cancelled, extracted);
+            if (extraction != tb::WalkStatus::Completed) return extraction;
+            result.candidate.solid = extracted;
+            if (result.candidate.solid.IsNull()) {
+                result.candidate.refusal = retained_part_boolean::Refusal::BuildFailed;
+                return tb::WalkStatus::Completed;
+            }
+        }
+        result.complete = result.candidate.admitted()
+            && result.evidence.explicitDeterministicOptions
+            && result.evidence.inputBytesUnchanged
+            && result.evidence.historyObserved;
+        if (!result.complete) return tb::WalkStatus::Completed;
+        for (std::size_t index = 0; index < result.sources.size(); ++index) {
+            TopoDS_Shape materialized;
+            const tb::WalkStatus walk = PersistenceMaterializeCounted(
+                result.sources[index], budget, cancelled,
+                tb::Site::C25AnalyticInput, materialized);
+            if (walk != tb::WalkStatus::Completed) return walk;
+            result.sources[index] = materialized;
+            const tb::WalkStatus bytes = retained_part_boolean::ExactShapeBytesCounted(
+                result.sources[index], result.sourceBytes[index], budget,
+                cancelled, tb::Site::C25AnalyticInput);
+            if (bytes != tb::WalkStatus::Completed) return bytes;
+            if (result.sourceBytes[index].empty()) return tb::WalkStatus::Failed;
+        }
+        TopoDS_Shape persisted;
+        const tb::WalkStatus materialized = PersistenceMaterializeCounted(
+            result.candidate.solid, budget, cancelled,
+            tb::Site::C26AnalyticBoolean, persisted);
+        if (materialized != tb::WalkStatus::Completed) return materialized;
+        result.candidate.solid = persisted;
+        return tb::WalkStatus::Completed;
+    } catch (...) { result = {}; return tb::WalkStatus::Failed; }
+}
+
 inline profile::Parameters ShellRecipe(ShellFixture fixture) {
     profile::Parameters value;
     value.metersPerUnit = 0.001;

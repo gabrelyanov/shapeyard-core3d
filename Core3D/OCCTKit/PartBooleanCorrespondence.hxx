@@ -568,4 +568,89 @@ inline AnalyticProof ProveAnalytic(
     } catch (...) { return {}; }
 }
 
+// A1-OWNER-budget (R4 / D390 / D392): counted analytic correspondence proof.
+// Identical proof domains to ProveAnalytic — including the exact identity
+// quaternion requirement and the unchanged Near tolerances — with each volume
+// and boundary-classification pass charged to the caller's shared operation
+// continuation before the pass runs. Sticky Budget/Cancelled propagate
+// without reclassification; the proof itself is untouched on a stop.
+namespace tb = core3d::retained_topology_budget;
+
+inline tb::WalkStatus ProveAnalyticCounted(
+    const AnalyticDefinition& definition,
+    const build::AnalyticBuild& built,
+    double carrierMetersPerUnit,
+    tb::Counter& budget, const std::atomic_bool& cancelled,
+    AnalyticProof& proof) noexcept {
+    proof = {};
+    if (cancelled.load()) return tb::WalkStatus::Cancelled;
+    try {
+        if (!Valid(definition) || !built.complete || carrierMetersPerUnit <= 0)
+            return tb::WalkStatus::Completed;
+        std::array<std::array<double, 6>, 2> bounds{};
+        for (std::size_t index = 0; index < 2; ++index) {
+            const auto& input = definition.inputs[index];
+            // N1's proved transform domain is an axis-aligned pair in one
+            // proper carrier frame. Oblique values remain structurally readable
+            // but are not admitted by this proof profile.
+            if (input.rotationXYZW != std::array<double, 4>{{0, 0, 0, 1}})
+                return tb::WalkStatus::Completed;
+            const double scale = input.metersPerUnit / carrierMetersPerUnit;
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                bounds[index][axis] = input.translation[axis] * scale;
+                bounds[index][axis + 3] = bounds[index][axis] + input.dimensions[axis] * scale;
+            }
+        }
+        auto volume = [](const std::array<double, 6>& value) {
+            return (value[3] - value[0]) * (value[4] - value[1]) * (value[5] - value[2]);
+        };
+        std::array<double, 6> overlap{};
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            overlap[axis] = std::max(bounds[0][axis], bounds[1][axis]);
+            overlap[axis + 3] = std::min(bounds[0][axis + 3], bounds[1][axis + 3]);
+            if (!(overlap[axis + 3] > overlap[axis])) return tb::WalkStatus::Completed;
+        }
+        const double left = volume(bounds[0]), right = volume(bounds[1]), common = volume(overlap);
+        proof.expectedVolume = definition.operation == Operation::Union ? left + right - common
+            : definition.operation == Operation::Subtract ? left - common : common;
+        tb::WalkStatus walk = retained_part_boolean::VolumeCounted(
+            built.candidate.solid, proof.observedVolume, budget, cancelled,
+            tb::Site::C26AnalyticBoolean);
+        if (walk != tb::WalkStatus::Completed) return walk;
+        double leftVolume = -1;
+        walk = retained_part_boolean::VolumeCounted(built.sources[0],
+            leftVolume, budget, cancelled, tb::Site::C25AnalyticInput);
+        if (walk != tb::WalkStatus::Completed) return walk;
+        proof.sourceEquations = Near(leftVolume, left);
+        if (proof.sourceEquations) {
+            double rightVolume = -1;
+            walk = retained_part_boolean::VolumeCounted(built.sources[1],
+                rightVolume, budget, cancelled, tb::Site::C25AnalyticInput);
+            if (walk != tb::WalkStatus::Completed) return walk;
+            proof.sourceEquations = Near(rightVolume, right);
+        }
+        proof.operationOracle = Near(proof.observedVolume, proof.expectedVolume);
+        // The planar-boundary classification pass over the candidate's faces
+        // is reserved before the per-face surface/area inspection runs.
+        walk = retained_part_boolean::ChargeAnalyticPass(built.candidate.solid,
+            budget, cancelled, tb::Site::C26AnalyticBoolean);
+        if (walk != tb::WalkStatus::Completed) return walk;
+        std::size_t faces = 0, classified = 0;
+        for (TopExp_Explorer it(built.candidate.solid, TopAbs_FACE); it.More(); it.Next()) {
+            ++faces;
+            BRepAdaptor_Surface surface(TopoDS::Face(it.Current()), Standard_True);
+            GProp_GProps area; BRepGProp::SurfaceProperties(it.Current(), area);
+            if (surface.GetType() == GeomAbs_Plane && area.Mass() > Precision::Confusion()) ++classified;
+        }
+        proof.completePlanarBoundary = faces >= 6 && faces == classified;
+        proof.correspondenceComplete = proof.completePlanarBoundary
+            && built.evidence.historyObserved && built.evidence.inputBytesUnchanged;
+        proof.materialsComplete = definition.inputs[0].originalMaterial.kind == MaterialKind::ResolvedScalars
+            && definition.inputs[1].originalMaterial.kind == MaterialKind::ResolvedScalars;
+        proof.connectedPositiveSolid = retained_part_boolean::IsOneValidForwardSolid(built.candidate.solid)
+            && proof.observedVolume > Precision::Confusion();
+        return tb::WalkStatus::Completed;
+    } catch (...) { proof = {}; return tb::WalkStatus::Failed; }
+}
+
 } // namespace core3d::part_boolean::correspondence
