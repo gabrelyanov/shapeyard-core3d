@@ -1658,6 +1658,9 @@ namespace core3d {
 					aSource.edgeTopologyIndices = aTopologyIndices;
 					aSource.selectionMode =
 						AIS_Shape::SelectionMode(_topAbsSelMode);
+					if (!captureRetainedBevelSource(aSource)) {
+						return Standard_False;
+					}
 					aSources.push_back(std::move(aSource));
 				}
 				return _bevelController->begin(aSources);
@@ -1721,6 +1724,37 @@ namespace core3d {
 					->debugMutateFirstSourcePersistedTransform();
 		}
 #endif
+
+	Standard_Boolean ShapeInteractor::captureRetainedBevelSource(
+		BevelSourceSelection& theSelection) const noexcept {
+		if (myDoc.IsNull() || theSelection.documentLabel.IsNull()
+			|| theSelection.original.IsNull()
+			|| theSelection.original->Shape().IsNull()) {
+			return Standard_False;
+		}
+		try {
+			const OcctRetainedRecipeCoverage aCoverage =
+				myDoc->RetainedRecipeCoverageForLabel(
+					theSelection.documentLabel);
+			if (aCoverage == OcctRetainedRecipeCoverage::Absent) {
+				return Standard_True;
+			}
+			if (aCoverage != OcctRetainedRecipeCoverage::CurrentProfile
+				|| !_retainedBevelAdapter) {
+				return Standard_False;
+			}
+			retained_edge_treatment::Refusal aRefusal;
+			theSelection.retainedCapture = _retainedBevelAdapter
+				.CaptureRetainedBevelSelection(
+					theSelection.documentLabel,
+					theSelection.original->Shape(),
+					theSelection.edges,
+					aRefusal);
+			return bool(theSelection.retainedCapture);
+		} catch (...) {
+			return Standard_False;
+		}
+	}
 
 	Standard_Boolean ShapeInteractor::tryCaptureBevelSelection(
 		std::vector<BevelSourceSelection>& theSelection) const noexcept {
@@ -1969,7 +2003,11 @@ namespace core3d {
 				if (aSource->selection.edges.empty()) {
 					return Standard_False;
 				}
-				aResult.push_back(aSource->selection);
+				BevelSourceSelection aSelection = aSource->selection;
+				if (!captureRetainedBevelSource(aSelection)) {
+					return Standard_False;
+				}
+				aResult.push_back(std::move(aSelection));
 			}
 			theSelection = std::move(aResult);
 			return Standard_True;
@@ -2062,6 +2100,14 @@ namespace core3d {
 		if (_bevelController != nullptr) {
 			_bevelController->setPreviewStateChangedCallback(
 				std::move(callback));
+		}
+	}
+
+	void ShapeInteractor::setRetainedBevelAdapter(
+		RetainedBevelAdapter adapter) noexcept {
+		_retainedBevelAdapter = std::move(adapter);
+		if (_bevelController != nullptr) {
+			_bevelController->setRetainedAdapter(_retainedBevelAdapter);
 		}
 	}
 

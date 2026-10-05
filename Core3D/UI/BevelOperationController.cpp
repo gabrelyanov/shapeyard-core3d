@@ -60,6 +60,8 @@ enum class BevelPreviewWorkerOutcome : std::uint8_t {
 struct BevelPreviewWorkerSource {
     TopoDS_Shape shape;
     std::vector<TopoDS_Edge> edges;
+    std::shared_ptr<const retained_edge_treatment::DetachedInput>
+        retainedInput;
 };
 
 struct BevelPreviewWorkerRequest {
@@ -67,6 +69,7 @@ struct BevelPreviewWorkerRequest {
     Standard_Real value = 0.0;
     std::string fingerprint;
     std::vector<BevelPreviewWorkerSource> sources;
+    RetainedBevelAdapter retainedAdapter;
     std::shared_ptr<std::atomic_bool> cancellation;
     Standard_Size maximumResultTopologyNodes =
         BevelOperationController::kMaxResultTopologyNodes;
@@ -80,6 +83,8 @@ struct BevelPreviewWorkerResult {
     std::string fingerprint;
     BevelPreviewWorkerOutcome outcome = BevelPreviewWorkerOutcome::Failed;
     std::vector<TopoDS_Shape> results;
+    std::vector<std::shared_ptr<const retained_edge_treatment::DetachedResult>>
+        retainedResults;
     Standard_Boolean computeWasMainThread = Standard_False;
 };
 
@@ -741,6 +746,7 @@ private:
             Handle(BevelCancellationIndicator) aProgress =
                 new BevelCancellationIndicator(theRequest.cancellation);
             aResult.results.reserve(theRequest.sources.size());
+            aResult.retainedResults.reserve(theRequest.sources.size());
             const Standard_Boolean isChamfer = theRequest.value < 0.0;
             const Standard_Real aDistance = std::abs(theRequest.value);
             Standard_Size anAggregateResultTopologyNodes = 0;
@@ -754,7 +760,18 @@ private:
                     return aResult;
                 }
                 TopoDS_Shape aCandidate;
-                if (isChamfer) {
+                std::shared_ptr<const retained_edge_treatment::DetachedResult>
+                    aRetainedResult;
+                if (aSource.retainedInput) {
+                    retained_edge_treatment::Refusal aRefusal;
+                    aRetainedResult = theRequest.retainedAdapter
+                        .BuildRetainedBevelPreview(
+                            aSource.retainedInput, aRefusal);
+                    if (!aRetainedResult) {
+                        return aResult;
+                    }
+                    aCandidate = aRetainedResult->result();
+                } else if (isChamfer) {
                     BRepFilletAPI_MakeChamfer aBuilder(aSource.shape);
                     for (const TopoDS_Edge& anEdge : aSource.edges) {
                         aBuilder.Add(aDistance, anEdge);
@@ -791,9 +808,12 @@ private:
                     return aResult;
                 }
                 aResult.results.push_back(std::move(aCandidate));
+                aResult.retainedResults.push_back(
+                    std::move(aRetainedResult));
             }
             if (aResult.results.size() != theRequest.sources.size()) {
                 aResult.results.clear();
+                aResult.retainedResults.clear();
                 return aResult;
             }
             aResult.outcome = BevelPreviewWorkerOutcome::Success;
@@ -900,6 +920,14 @@ void BevelOperationController::setPreviewStateChangedCallback(
     std::function<void()> theCallback)
 {
     myPreviewStateChangedCallback = std::move(theCallback);
+}
+
+void BevelOperationController::setRetainedAdapter(
+    RetainedBevelAdapter theAdapter) noexcept
+{
+    if (!hasActiveOperation()) {
+        myRetainedAdapter = std::move(theAdapter);
+    }
 }
 
 void BevelOperationController::notifyPreviewStateChanged() noexcept
@@ -1066,21 +1094,19 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
             aSource.edges = std::move(aCanonicalEdges);
             aSource.edgeTopologyIndices =
                 std::move(aCanonicalEdgeIndices);
-            const bool hasRetainedPlan=bool(aSelection.retainedCapture)
-                &&aSelection.retainedEdit.has_value()&&bool(aSelection.retainedResult);
+            const bool hasRetainedCapture =
+                bool(aSelection.retainedCapture)
+                && bool(aSelection.retainedCapture->snapshot);
             const auto coverage=myDoc->RetainedRecipeCoverageForLabel(aSelection.documentLabel);
-            if ((hasRetainedPlan
+            if ((hasRetainedCapture
                     && (coverage != OcctRetainedRecipeCoverage::CurrentProfile
                         || theSelection.size() != 1
-                        || !aSelection.retainedResult->result().IsEqual(aShape)))
-                || (!hasRetainedPlan
-                    && coverage != OcctRetainedRecipeCoverage::Absent
-                    && coverage != OcctRetainedRecipeCoverage::CurrentProfile)) {
+                        || !myRetainedAdapter))
+                || (!hasRetainedCapture
+                    && coverage != OcctRetainedRecipeCoverage::Absent)) {
                 return Standard_False;
             }
             aSource.retainedCapture=aSelection.retainedCapture;
-            aSource.retainedEdit=aSelection.retainedEdit;
-            aSource.retainedResult=aSelection.retainedResult;
             if (!aSelection.edgeTopologyIndices.empty()
                 && aSelection.edgeTopologyIndices
                     != aSource.edgeTopologyIndices) {
@@ -1283,6 +1309,15 @@ void BevelOperationController::cancelWorkerRequests() noexcept
     if (myWorker != nullptr) {
         myWorker->cancelAll();
     }
+    for (Source& aSource : mySources) {
+        if (aSource.retainedPrepared) {
+            myRetainedAdapter.CancelRetainedBevelPreview(
+                aSource.retainedPrepared->work);
+        }
+        aSource.retainedPrepared.reset();
+        aSource.retainedEdit.reset();
+        aSource.retainedResult.reset();
+    }
     myCanApply = Standard_False;
     myRequestedFingerprint.clear();
 }
@@ -1301,6 +1336,7 @@ Standard_Boolean BevelOperationController::enqueuePreviewRequest() noexcept
         aRequest.generation = ++myGeneration;
         aRequest.value = myValue;
         aRequest.fingerprint = aFingerprint;
+        aRequest.retainedAdapter = myRetainedAdapter;
         aRequest.cancellation = std::make_shared<std::atomic_bool>(false);
 #ifdef DEBUG
         aRequest.maximumResultTopologyNodes =
@@ -1308,7 +1344,7 @@ Standard_Boolean BevelOperationController::enqueuePreviewRequest() noexcept
         aRequest.maximumResultSolids = myDebugMaximumResultSolids;
 #endif
         aRequest.sources.reserve(mySources.size());
-        for (const Source& aSource : mySources) {
+        for (Source& aSource : mySources) {
             BRepBuilderAPI_Copy aCopy(
                 aSource.shape,
                 Standard_True,
@@ -1327,6 +1363,20 @@ Standard_Boolean BevelOperationController::enqueuePreviewRequest() noexcept
                     return Standard_False;
                 }
                 aWorkerSource.edges.push_back(TopoDS::Edge(aCopiedEdge));
+            }
+            if (aSource.retainedCapture) {
+                retained_edge_treatment::Refusal aRefusal;
+                aSource.retainedPrepared = myRetainedAdapter
+                    .PrepareRetainedBevelPreview(
+                        aSource.retainedCapture, myValue, aRefusal);
+                if (!aSource.retainedPrepared) {
+                    return Standard_False;
+                }
+                aSource.retainedEdit =
+                    aSource.retainedPrepared->edit;
+                aSource.retainedResult.reset();
+                aWorkerSource.retainedInput =
+                    aSource.retainedPrepared->input;
             }
             aRequest.sources.push_back(std::move(aWorkerSource));
         }
@@ -1409,12 +1459,37 @@ void BevelOperationController::acceptWorkerResult(
     }
     if (theResult.outcome != BevelPreviewWorkerOutcome::Success
         || theResult.results.size() != mySources.size()
+        || theResult.retainedResults.size() != mySources.size()
         || !sourcesAreCurrent()
         || !installPreview(theResult.results)) {
         myCanApply = Standard_False;
         myState = BevelPreviewState::Failed;
         notifyPreviewStateChanged();
         return;
+    }
+    for (Standard_Size anIndex = 0;
+         anIndex < mySources.size(); ++anIndex) {
+        Source& aSource = mySources[anIndex];
+        const auto& aRetainedResult =
+            theResult.retainedResults[anIndex];
+        if (aSource.retainedCapture) {
+            if (!aRetainedResult
+                || !aRetainedResult->result().IsEqual(
+                    theResult.results[anIndex])) {
+                (void)discardPreview(Standard_True);
+                myCanApply = Standard_False;
+                myState = BevelPreviewState::Failed;
+                notifyPreviewStateChanged();
+                return;
+            }
+            aSource.retainedResult = aRetainedResult;
+        } else if (aRetainedResult) {
+            (void)discardPreview(Standard_True);
+            myCanApply = Standard_False;
+            myState = BevelPreviewState::Failed;
+            notifyPreviewStateChanged();
+            return;
+        }
     }
     myCanApply = Standard_True;
     myState = BevelPreviewState::Ready;
@@ -1657,7 +1732,10 @@ BevelApplyResult BevelOperationController::apply() noexcept
 			const OcctRetainedRecipeCoverage aCoverage =
 				myDoc->RetainedRecipeCoverageForLabel(source.label);
 			if (source.retainedCapture) {
-				if (aCoverage != OcctRetainedRecipeCoverage::CurrentProfile) {
+				if (aCoverage != OcctRetainedRecipeCoverage::CurrentProfile
+					|| !source.retainedCapture->snapshot
+					|| !source.retainedEdit
+					|| !source.retainedResult) {
 					myCanApply = Standard_False;
 					myState = BevelPreviewState::Failed;
 					notifyPreviewStateChanged();
@@ -1872,7 +1950,8 @@ BevelApplyResult BevelOperationController::apply() noexcept
                 core3d::retained_edge_treatment::Refusal refusal;
                 staged=source.retainedEdit&&source.retainedResult
                     &&source.retainedResult->result().IsEqual(myPreviewResults[anIndex]->Shape())
-                    &&myDoc->StageRetainedEdgeTreatment(*source.retainedCapture,
+                    &&source.retainedCapture->snapshot
+                    &&myDoc->StageRetainedEdgeTreatment(*source.retainedCapture->snapshot,
                         *source.retainedEdit,*source.retainedResult,readback,refusal);
             }else staged=myDoc->ReplaceShape(source.label,myPreviewResults[anIndex]);
             if (!staged) {

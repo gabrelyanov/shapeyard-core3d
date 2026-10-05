@@ -34,6 +34,7 @@
 #include "../OCCTKit/RetainedFaceSelector.hxx"
 #include <unordered_map>
 #include "../OCCTKit/RetainedEdgeTreatmentR2Build.hxx"
+#include "RetainedBevelAdapter.hxx"
 
 #include "OrthoProjectionType.h"
 #include "../Scene/OcctSceneSnapshotBuilder.hpp"
@@ -280,6 +281,16 @@ namespace core3d {
         std::uint64_t,std::uint32_t,std::uint32_t,
         retained_edge_treatment::Refusal&,
         const retained_edge_treatment::ReplayBudget* continuation=nullptr) noexcept;
+    Standard_Boolean captureRetainedBevelSelection(
+        const TDF_Label&, const TopoDS_Shape&,
+        const std::vector<TopoDS_Edge>&,
+        RetainedBevelAdapter::Capture&,
+        retained_edge_treatment::Refusal&) noexcept;
+    Standard_Boolean prepareRetainedBevelPreview(
+        const RetainedBevelAdapter::Capture&,
+        const retained_edge_treatment::Edit&,
+        RetainedBevelAdapter::PreparedPreview&,
+        retained_edge_treatment::Refusal&) noexcept;
     std::shared_ptr<const retained_edge_treatment::SelectorTargetCapture>
     captureEdgeTreatmentSelectorTargets(
         const std::shared_ptr<const retained_edge_treatment::Snapshot>& original,
@@ -325,6 +336,9 @@ namespace core3d {
     storedEdgeTreatmentTargetSnapshot(
         const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
         std::uint32_t width, std::uint32_t height) noexcept;
+    Standard_Boolean returnEdgeTreatmentTargetsToObjectMode(
+        const std::shared_ptr<const retained_edge_treatment::Snapshot>&)
+        noexcept;
     retained_face_selector::Resolution resolveFaceSelector(
         const std::shared_ptr<const retained_edge_treatment::Snapshot>&,
         const retained_face_selector::SelectorIntent&) noexcept;
@@ -905,6 +919,8 @@ namespace core3d {
                                  ShapeSelectionMode theSelectionMode);
         bool recreateFreshInteractorsForDocumentReplacement();
         bool publishRecreatedInteractorState() noexcept;
+        void registerRetainedBevelAdapter(
+            const std::shared_ptr<ShapeInteractor>&) noexcept;
         Standard_Boolean captureSelectionModeSuspendedPresentations(
             std::vector<Handle(AIS_Shape)>& presentations) const noexcept;
 

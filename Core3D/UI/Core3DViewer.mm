@@ -350,6 +350,238 @@ bool B1PrepareSelectorIntentEdit(retained_edge_treatment::Definition& candidate,
 }
 }
 
+Standard_Boolean Core3DViewer::captureRetainedBevelSelection(
+    const TDF_Label& label, const TopoDS_Shape& source,
+    const std::vector<TopoDS_Edge>& edges,
+    RetainedBevelAdapter::Capture& output,
+    retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et = retained_edge_treatment;
+    output = {};
+    refusal = et::Refusal::StaleSnapshot;
+    if (![NSThread isMainThread] || myDoc.IsNull() || myContext.IsNull()
+        || label.IsNull() || source.IsNull() || edges.empty()) return Standard_False;
+    try {
+        const auto document = myDoc->Document();
+        if (document.IsNull() || document->HasOpenCommand()
+            || label.Data() != document->GetData()
+            || myDoc->RetainedRecipeCoverageForLabel(label)
+                != OcctRetainedRecipeCoverage::CurrentProfile
+            || !XCAFDoc_ShapeTool::GetShape(label).IsEqual(source)) return Standard_False;
+
+        Handle(AIS_Shape) presentation;
+        AIS_ListOfInteractive displayed;
+        myContext->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+        for (AIS_ListIteratorOfListOfInteractive item(displayed);
+             item.More(); item.Next()) {
+            const auto candidate = Handle(AIS_Shape)::DownCast(item.Value());
+            if (candidate.IsNull() || !myDoc->ShapeLabel(candidate).IsEqual(label)) continue;
+            if (!presentation.IsNull() || !candidate->Shape().IsEqual(source)
+                || !myDoc->IsPresentationEditable(candidate)) return Standard_False;
+            presentation = candidate;
+        }
+        if (presentation.IsNull()) return Standard_False;
+
+        const auto sceneSnapshot = captureSceneSnapshot(64, 64);
+        if (!sceneSnapshot) return Standard_False;
+        ObjectFrameIdentity identity;
+        identity.entityIdentifier = myDoc->EntityIdentifierForLabel(label);
+        identity.publicationSourceIdentifier =
+            sceneSnapshot->publicationSourceIdentifier;
+        identity.documentGeneration = sceneSnapshot->revisions.documentGeneration;
+        identity.modelRevision = sceneSnapshot->revisions.model;
+        std::shared_ptr<const et::Snapshot> snapshot;
+        if (sceneSnapshot->selectionMode == scene::ElementKind::Edge) {
+            snapshot = storedEdgeTreatmentTargetSnapshot(identity,
+                sceneSnapshot->revisions.presentation, 64, 64);
+        } else if (sceneSnapshot->selectionMode == scene::ElementKind::Object) {
+            const auto profile = storedProfileDefinition(identity,
+                sceneSnapshot->revisions.presentation, 64, 64);
+            if (profile) snapshot = profile->edgeTreatment;
+        }
+        if (!snapshot || !snapshot->current()
+            || snapshot->effectiveDefinition().base.family != et::SourceFamily::Profile
+            || !snapshot->current_.IsEqual(source)) return Standard_False;
+
+        et::ReplayBudget budget = snapshot->chargedBudget_;
+        const std::atomic_bool cancelled{false};
+        tb::Census census;
+        if (tb::CensusTopology(snapshot->current_, budget, cancelled, census,
+                tb::Site::C27CapturedAnchor, false) != tb::WalkStatus::Completed
+            || !budget.visit(census.occurrences + census.edgeUsesUnderFaces,
+                tb::Site::C27CapturedAnchor)) {
+            refusal = et::Refusal::Budget;
+            return Standard_False;
+        }
+        TopTools_IndexedDataMapOfShapeListOfShape adjacency;
+        TopExp::MapShapesAndAncestors(snapshot->current_, TopAbs_EDGE,
+            TopAbs_FACE, adjacency);
+        const double mmPerLocal = snapshot->dimensionMetersPerUnit() * 1000.0;
+        if (!std::isfinite(mmPerLocal) || mmPerLocal <= 0.0) return Standard_False;
+        std::vector<et::Anchor> anchors;
+        anchors.reserve(edges.size());
+        for (const TopoDS_Edge& edge : edges) {
+            if (!budget.visit(1, tb::Site::C27CapturedAnchor)) {
+                refusal = et::Refusal::Budget;
+                return Standard_False;
+            }
+            const int index = edge.IsNull() ? 0 : adjacency.FindIndex(edge);
+            if (index <= 0 || adjacency.FindFromIndex(index).Extent() != 2)
+                return Standard_False;
+            BRepAdaptor_Curve curve(TopoDS::Edge(adjacency.FindKey(index)));
+            const double parameter = (curve.FirstParameter() + curve.LastParameter()) * 0.5;
+            gp_Pnt point; gp_Vec derivative; curve.D1(parameter, point, derivative);
+            if (derivative.SquareMagnitude() <= Precision::SquareConfusion())
+                return Standard_False;
+            derivative.Normalize();
+            et::Anchor anchor; anchor.key = MintEdgeTreatmentUUID();
+            anchor.curve = curve.GetType() == GeomAbs_Line ? et::CurveKind::Line
+                : curve.GetType() == GeomAbs_Circle ? et::CurveKind::Circle
+                : et::CurveKind(0);
+            if (int(anchor.curve) == 0) return Standard_False;
+            anchor.pointMM = {point.X() * mmPerLocal, point.Y() * mmPerLocal,
+                point.Z() * mmPerLocal};
+            anchor.tangent = {derivative.X(), derivative.Y(), derivative.Z()};
+            anchor.circleRadiusMM = anchor.curve == et::CurveKind::Circle
+                ? curve.Circle().Radius() * mmPerLocal : 0.0;
+            std::array<std::array<double, 3>, 2> normals{};
+            int faceIndex = 0;
+            for (TopTools_ListIteratorOfListOfShape face(
+                     adjacency.FindFromIndex(index)); face.More(); face.Next()) {
+                if (!budget.visit(1, tb::Site::C27CapturedAnchor)) {
+                    refusal = et::Refusal::Budget;
+                    return Standard_False;
+                }
+                const TopoDS_Face canonical = TopoDS::Face(face.Value());
+                const Handle(Geom_Surface) surface = BRep_Tool::Surface(canonical);
+                ShapeAnalysis_Surface analysis(surface);
+                const gp_Pnt2d uv = analysis.ValueOfUV(point, 1e-7);
+                BRepLProp_SLProps props(BRepAdaptor_Surface(canonical),
+                    uv.X(), uv.Y(), 1, 1e-9);
+                if (!props.IsNormalDefined()) return Standard_False;
+                gp_Dir normal = props.Normal();
+                if (canonical.Orientation() == TopAbs_REVERSED) normal.Reverse();
+                normals[faceIndex++] = {normal.X(), normal.Y(), normal.Z()};
+            }
+            anchor.normalA = normals[0]; anchor.normalB = normals[1];
+            anchors.push_back(anchor);
+        }
+        std::sort(anchors.begin(), anchors.end(),
+            [](const et::Anchor& left, const et::Anchor& right) {
+                return left.key < right.key;
+            });
+        output.snapshot = std::move(snapshot);
+        output.presentation = presentation;
+        output.anchors = std::move(anchors);
+        output.budget = budget;
+        refusal = et::Refusal::None;
+        return Standard_True;
+    } catch (...) {
+        output = {};
+        refusal = et::Refusal::BuildFailed;
+        return Standard_False;
+    }
+}
+
+Standard_Boolean Core3DViewer::prepareRetainedBevelPreview(
+    const RetainedBevelAdapter::Capture& capture,
+    const retained_edge_treatment::Edit& edit,
+    RetainedBevelAdapter::PreparedPreview& output,
+    retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et = retained_edge_treatment;
+    output = {};
+    refusal = et::Refusal::StaleSnapshot;
+    if (![NSThread isMainThread] || !capture.snapshot
+        || capture.presentation.IsNull() || myDoc.IsNull() || myContext.IsNull())
+        return Standard_False;
+    const auto* append = std::get_if<et::Append>(&edit);
+    if (!append || (append->kind != et::Kind::ConstantFillet
+            && append->kind != et::Kind::Chamfer)
+        || !std::isfinite(append->amountMM) || append->amountMM <= 0.0
+        || append->amountMM > 20.0 || append->anchors.empty()
+        || append->anchors.size() != capture.anchors.size()) {
+        refusal = et::Refusal::InvalidAmount;
+        return Standard_False;
+    }
+    try {
+        const auto& snapshot = capture.snapshot;
+        const auto document = myDoc->Document();
+        if (document.IsNull() || document->HasOpenCommand()
+            || snapshot->ownerLabel_.IsNull()
+            || snapshot->ownerLabel_.Data() != document->GetData()
+            || !myContext->IsDisplayed(capture.presentation)
+            || !myDoc->ShapeLabel(capture.presentation).IsEqual(snapshot->ownerLabel_)
+            || !capture.presentation->Shape().IsEqual(snapshot->current_)
+            || myDoc->RetainedRecipeCoverageForLabel(snapshot->ownerLabel_)
+                != OcctRetainedRecipeCoverage::CurrentProfile) return Standard_False;
+        OcctObjectTransformState live;
+        std::vector<std::uint8_t> liveSourceBytes;
+        if (!myDoc->CaptureObjectTransformStateForLabel(
+                snapshot->ownerLabel_, live)
+            || !live.shape.IsEqual(snapshot->current_)
+            || live.profile.label.IsNull()
+            || !live.profile.label.IsEqual(snapshot->sourceLabel_)
+            || live.profile.identifier != snapshot->sourceIdentifier_
+            || !live.profile.IsCurrent(document, snapshot->ownerLabel_)
+            || !composite_recipe::EncodeScalarRecipe(
+                composite_recipe::RecipeKind::Profile,
+                profile::SchemaFor(live.profile.parameters),
+                live.profile.values, liveSourceBytes)
+            || liveSourceBytes != snapshot->sourceBytes_
+            || bool(live.edgeTreatment) != bool(snapshot->definition_)
+            || (live.edgeTreatment
+                && (live.edgeTreatment->value->bytes
+                        != snapshot->definitionBytes_
+                    || !live.edgeTreatment->value->base.IsEqual(
+                        snapshot->base_)))
+            || (!live.edgeTreatment
+                && !live.shape.IsEqual(snapshot->base_))) {
+            return Standard_False;
+        }
+
+        et::Definition candidate = snapshot->definition_.value_or(snapshot->seed_);
+        if (candidate.base.family != et::SourceFamily::Profile
+            || candidate.steps.size() >= et::MaximumSteps) {
+            refusal = et::Refusal::UnsupportedBase;
+            return Standard_False;
+        }
+        et::Step step;
+        step.node = MintEdgeTreatmentUUID();
+        step.feature = MintEdgeTreatmentUUID();
+        step.localID = candidate.issuance.nextLocalID++;
+        step.kind = append->kind;
+        step.amountMM = append->amountMM;
+        step.anchors = append->anchors;
+        std::sort(step.anchors.begin(), step.anchors.end(),
+            [](const et::Anchor& left, const et::Anchor& right) {
+                return left.key < right.key;
+            });
+        candidate.steps.push_back(std::move(step));
+        candidate.outputNode = candidate.steps.back().node;
+        std::vector<std::uint8_t> encoded;
+        if (!et::Encode(candidate, encoded, refusal)) return Standard_False;
+
+        auto work = std::make_shared<et::Work>();
+        work->snapshot_ = snapshot;
+        work->edit_ = edit;
+        work->candidate_ = std::move(candidate);
+        work->label_ = snapshot->ownerLabel_;
+        work->presentation_ = capture.presentation;
+        work->state_ = et::Work::State::Prepared;
+        _edgeTreatmentContinuations.emplace(work.get(), capture.budget);
+        auto input = edgeTreatmentGeometry(work, refusal);
+        if (!input) return Standard_False;
+        output.work = std::move(work);
+        output.input = std::move(input);
+        output.edit = edit;
+        refusal = et::Refusal::None;
+        return Standard_True;
+    } catch (...) {
+        output = {};
+        refusal = et::Refusal::BuildFailed;
+        return Standard_False;
+    }
+}
+
 std::shared_ptr<retained_edge_treatment::Work> Core3DViewer::prepareEdgeTreatment(
     const std::shared_ptr<const retained_edge_treatment::Snapshot>& snapshot,
     const retained_edge_treatment::Edit& edit,const ObjectFrameIdentity& identity,
@@ -3120,6 +3352,37 @@ NSString* Core3DViewer::addTestPrimitives() {
     //    return stlFilename;
 }
 
+void Core3DViewer::registerRetainedBevelAdapter(
+    const std::shared_ptr<ShapeInteractor>& interactor) noexcept {
+    if (!interactor) return;
+    try {
+        interactor->setRetainedBevelAdapter(RetainedBevelAdapter(
+            [this](const TDF_Label& label, const TopoDS_Shape& source,
+                   const std::vector<TopoDS_Edge>& edges,
+                   RetainedBevelAdapter::Capture& capture,
+                   retained_edge_treatment::Refusal& refusal) {
+                return captureRetainedBevelSelection(
+                    label, source, edges, capture, refusal);
+            },
+            [this](const RetainedBevelAdapter::Capture& capture,
+                   const retained_edge_treatment::Edit& edit,
+                   RetainedBevelAdapter::PreparedPreview& prepared,
+                   retained_edge_treatment::Refusal& refusal) {
+                return prepareRetainedBevelPreview(
+                    capture, edit, prepared, refusal);
+            },
+            [](const std::shared_ptr<const retained_edge_treatment::DetachedInput>& input,
+               retained_edge_treatment::Refusal& refusal) {
+                return Core3DViewer::buildEdgeTreatment(input, refusal);
+            },
+            [](const std::shared_ptr<retained_edge_treatment::Work>& work) {
+                (void)Core3DViewer::cancelEdgeTreatment(work);
+            }));
+    } catch (...) {
+        interactor->setRetainedBevelAdapter(RetainedBevelAdapter());
+    }
+}
+
 bool Core3DViewer::InitViewer (Core3DPlatformView* theWin) {
     bool result = OcctViewer::InitViewer(theWin);
     if(result) {
@@ -3146,6 +3409,7 @@ bool Core3DViewer::InitViewer (Core3DPlatformView* theWin) {
             _shapeInteractor->setShellPreviewStateChangedCallback(
                 _shellPreviewStateChangedCallback);
         }
+        registerRetainedBevelAdapter(_shapeInteractor);
         if (_transformInspectorMeasurementController == nullptr) {
             try {
                 _transformInspectorMeasurementController =
@@ -3358,6 +3622,7 @@ bool Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorTy
         _bevelPreviewStateChangedCallback);
     shapeInteractor->setShellPreviewStateChangedCallback(
         _shellPreviewStateChangedCallback);
+    registerRetainedBevelAdapter(shapeInteractor);
 
     const ShapeSelectionModeChangeResult selectionResult =
         shapeInteractor->setSelectionMode(theSelectionMode);
@@ -5261,6 +5526,59 @@ Core3DViewer::storedEdgeTreatmentTargetSnapshot(
         capture->owner_.owner=seed.owner;capture->owner_.outputNode=capture->seed_.outputNode;capture->owner_.status=retained_recipe::OwnerStatus::CurrentEditable;
         return capture;
     } catch (...) { return {}; }
+}
+
+Standard_Boolean Core3DViewer::returnEdgeTreatmentTargetsToObjectMode(
+    const std::shared_ptr<const retained_edge_treatment::Snapshot>& snapshot)
+    noexcept {
+    if (![NSThread isMainThread] || !snapshot || !_shapeInteractor
+        || !_objectInteractor || myContext.IsNull() || myDoc.IsNull()
+        || _shapeInteractor->getSelectionMode() != ShapeSelectionMode::WholeShape
+        || !_shapeInteractor->selectionModeAuthorityIsExact()) return Standard_False;
+    try {
+        const auto document = myDoc->Document();
+        if (document.IsNull() || document->HasOpenCommand()
+            || snapshot->ownerLabel_.IsNull()
+            || snapshot->ownerLabel_.Data() != document->GetData()
+            || !XCAFDoc_ShapeTool::GetShape(snapshot->ownerLabel_)
+                .IsEqual(snapshot->current_)) return Standard_False;
+        Handle(AIS_Shape) presentation;
+        AIS_ListOfInteractive displayed;
+        myContext->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+        for (AIS_ListIteratorOfListOfInteractive item(displayed);
+             item.More(); item.Next()) {
+            const auto candidate = Handle(AIS_Shape)::DownCast(item.Value());
+            if (candidate.IsNull()
+                || !myDoc->ShapeLabel(candidate).IsEqual(snapshot->ownerLabel_)) continue;
+            if (!presentation.IsNull()
+                || !candidate->Shape().IsEqual(snapshot->current_)
+                || !myDoc->IsPresentationEditable(candidate)) return Standard_False;
+            presentation = candidate;
+        }
+        if (presentation.IsNull()) return Standard_False;
+        myContext->ClearSelected(Standard_False);
+        const Handle(SelectMgr_EntityOwner) owner = presentation->GlobalSelOwner();
+        const auto brepOwner = Handle(StdSelect_BRepOwner)::DownCast(owner);
+        if (owner.IsNull() || owner->Selectable() != presentation
+            || brepOwner.IsNull() || !brepOwner->HasShape()
+            || !brepOwner->Shape().IsEqual(snapshot->current_)) return Standard_False;
+        myContext->SetSelected(owner, Standard_False);
+        myContext->InitSelected();
+        if (!myContext->MoreSelected()
+            || myContext->SelectedOwner() != owner
+            || myContext->SelectedInteractive() != presentation) return Standard_False;
+        myContext->NextSelected();
+        if (myContext->MoreSelected()) return Standard_False;
+        _objectInteractor->attachManipulatorToSelection(false);
+        myContext->UpdateCurrentViewer();
+        return Standard_True;
+    } catch (...) {
+        try {
+            myContext->ClearSelected(Standard_False);
+        } catch (...) {
+        }
+        return Standard_False;
+    }
 }
 
 std::optional<StoredEnclosureSnapshot> Core3DViewer::storedEnclosureDefinition(

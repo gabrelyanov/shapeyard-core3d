@@ -130,6 +130,7 @@ namespace core3d {
 		Handle(AIS_InteractiveObject) _subtractorObjectPrs;
 			std::vector<EdgesSelection> _detectedEdges;
 			std::shared_ptr<BevelOperationController> _bevelController;
+			RetainedBevelAdapter _retainedBevelAdapter;
 			std::shared_ptr<ShellOperationController> _shellController;
 
         struct ExtrusionSelection {
@@ -238,6 +239,8 @@ namespace core3d {
 				BevelPreviewCapture& capture) const noexcept;
 			void setBevelPreviewStateChangedCallback(
 				std::function<void()> callback);
+			void setRetainedBevelAdapter(
+				RetainedBevelAdapter adapter) noexcept;
 				Standard_Boolean resetWireframeTemplateShape() noexcept;
 			Standard_Boolean cancelChamfer() noexcept;
 
@@ -387,6 +390,8 @@ namespace core3d {
             TopAbs_ShapeEnum topAbsMode) const noexcept;
 			Standard_Boolean tryCaptureBevelSelection(
 				std::vector<BevelSourceSelection>& selection) const noexcept;
+			Standard_Boolean captureRetainedBevelSource(
+				BevelSourceSelection& selection) const noexcept;
 			Standard_Boolean beginBevelSelectionFromCurrentSelection() noexcept;
         Standard_Boolean beginShellSelectionImpl(
             const FaceOperationSourceProof& proof) noexcept;

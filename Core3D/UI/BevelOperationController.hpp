@@ -8,7 +8,7 @@
 
 #include "AIS_InteractiveContext.hxx"
 #include "OcctDocument.h"
-#include "../OCCTKit/RetainedEdgeTreatmentBuild.hxx"
+#include "RetainedBevelAdapter.hxx"
 
 #include <AIS_Shape.hxx>
 #include <TopoDS_Edge.hxx>
@@ -44,11 +44,9 @@ struct BevelSourceSelection {
     //! Zero-based indices in deterministic TopExp edge traversal order.
     std::vector<Standard_Size> edgeTopologyIndices;
     Standard_Integer selectionMode = AIS_Shape::SelectionMode(TopAbs_SHAPE);
-    // Native capture/plan supplied by the view-controller's main-thread B1
-    // admission. The worker receives only detached copies and proof values.
-    std::shared_ptr<const retained_edge_treatment::Snapshot> retainedCapture;
-    std::optional<retained_edge_treatment::Edit> retainedEdit;
-    std::shared_ptr<const retained_edge_treatment::DetachedResult> retainedResult;
+    // Native capture supplied by the viewer's main-thread B1 admission. The
+    // amount-specific immutable input is prepared only when a value is set.
+    std::shared_ptr<const RetainedBevelAdapter::Capture> retainedCapture;
 };
 
 //! Frozen v1 rail eligibility shared by read-only selection capture and the
@@ -130,6 +128,7 @@ public:
         const std::vector<BevelSourceSelection>& selection) const noexcept;
     Standard_Boolean begin(
         const std::vector<BevelSourceSelection>& selection) noexcept;
+    void setRetainedAdapter(RetainedBevelAdapter adapter) noexcept;
 	//! Used only after an in-tool AIS selection refresh became empty/invalid.
 	//! It retires a coherent pristine Selecting ledger without touching any
 	//! preview or retained Computing/Ready/Failed operation.
@@ -175,7 +174,9 @@ private:
         std::string definitionIdentifier;
         Standard_Size topologyNodeCount = 0;
         Standard_Size sourceEdgeCount = 0;
-        std::shared_ptr<const retained_edge_treatment::Snapshot> retainedCapture;
+        std::shared_ptr<const RetainedBevelAdapter::Capture> retainedCapture;
+        std::shared_ptr<const RetainedBevelAdapter::PreparedPreview>
+            retainedPrepared;
         std::optional<retained_edge_treatment::Edit> retainedEdit;
         std::shared_ptr<const retained_edge_treatment::DetachedResult> retainedResult;
     };
@@ -209,6 +210,7 @@ private:
     std::vector<Source> mySources;
     std::vector<Handle(AIS_Shape)> myPreviewResults;
     std::shared_ptr<BevelPreviewWorker> myWorker;
+    RetainedBevelAdapter myRetainedAdapter;
     std::function<void()> myPreviewStateChangedCallback;
     BevelPreviewState myState = BevelPreviewState::Selecting;
     Standard_Real myValue = 0.0;

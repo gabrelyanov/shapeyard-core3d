@@ -3908,8 +3908,18 @@ static void Core3DExpireDebugNativeSolidCompletion(NSUUID *token,Core3DDebugNati
 
 @interface Core3DEdgeTreatmentNativeSnapshot:Core3DEdgeTreatmentSnapshot {@public std::shared_ptr<const core3d::retained_edge_treatment::Snapshot> native;}@end
 @implementation Core3DEdgeTreatmentNativeSnapshot @end
-@interface Core3DEdgeTreatmentNativeTargets:Core3DEdgeTreatmentTargetCapture {@public std::vector<core3d::retained_edge_treatment::Anchor> nativeAnchors;std::shared_ptr<const core3d::retained_edge_treatment::Snapshot> nativeSnapshot;core3d::retained_edge_treatment::ReplayBudget nativeBudget;BOOL continuationUsed;}@end
+@interface Core3DEdgeTreatmentNativeTargets:Core3DEdgeTreatmentTargetCapture {@public std::vector<core3d::retained_edge_treatment::Anchor> nativeAnchors;std::shared_ptr<const core3d::retained_edge_treatment::Snapshot> nativeSnapshot;core3d::retained_edge_treatment::ReplayBudget nativeBudget;Core3DSceneSnapshot *captureExpected;Core3DSceneSnapshot *commitExpected;BOOL continuationUsed;}@end
 @implementation Core3DEdgeTreatmentNativeTargets @end
+static BOOL B1TargetExpectedMatches(Core3DEdgeTreatmentNativeTargets *target,
+    Core3DSceneSnapshot *expected) {
+    return target && target->captureExpected && target->commitExpected && expected
+        && [target->captureExpected.publicationSourceIdentifier
+            isEqualToString:expected.publicationSourceIdentifier]
+        && target->captureExpected.revisions.documentGeneration
+            == expected.revisions.documentGeneration
+        && target->captureExpected.revisions.modelRevision
+            == expected.revisions.modelRevision;
+}
 @interface Core3DEdgeTreatmentNativeOperation:Core3DEdgeTreatmentOperation {@public std::shared_ptr<core3d::retained_edge_treatment::Work> nativeWork;std::shared_ptr<core3d::retained_edge_treatment::r2::Work> nativeWorkR2;void(^completion)(Core3DEdgeTreatmentResult *);void(^stopProvenance)(Core3DEdgeTreatmentResult *);BOOL settled;}@end
 @implementation Core3DEdgeTreatmentNativeOperation @end
 @interface Core3DEdgeTreatmentNativeSnapshotR2:Core3DEdgeTreatmentSnapshotR2 {@public std::shared_ptr<const core3d::retained_edge_treatment::r2::Snapshot> native;}@end
@@ -3931,6 +3941,7 @@ static void Core3DExpireDebugNativeSolidCompletion(NSUUID *token,Core3DDebugNati
 namespace {
 NSString *B1ID(const core3d::retained_edge_treatment::UUID&v){return [[NSUUID alloc]initWithUUIDBytes:v.data()].UUIDString;}
 template<class T>T *B1Object(Class cls){return (T*)class_createInstance(cls,0);}
+Core3DEdgeTreatmentVector3 *B1Vector(const std::array<double,3>&v);
 // Value census of a genuine native membership proof, mirroring the BuildQuery
 // population in Core3DFaceSelectorTypes.mm exactly. Construction stays gated:
 // the proof is created only inside the bridge from a native-resolved proof.
@@ -3959,7 +3970,7 @@ Core3DFaceSelectorProof *B1SelectorProof(Core3DFaceSelectorIntent *intent,
     }
     [proof setValue:uses forKey:@"boundaryUses"];return proof;
 }
-Core3DEdgeTreatmentAnchor *B1Anchor(const core3d::retained_edge_treatment::Anchor&a){auto value=B1Object<Core3DEdgeTreatmentAnchor>(Core3DEdgeTreatmentAnchor.class);[value setValue:[NSData dataWithBytes:a.key.data() length:a.key.size()] forKey:@"key"];[value setValue:@(NSInteger(a.curve)) forKey:@"curve"];[value setValue:@(a.circleRadiusMM) forKey:@"circleRadiusMM"];return value;}
+Core3DEdgeTreatmentAnchor *B1Anchor(const core3d::retained_edge_treatment::Anchor&a){auto value=B1Object<Core3DEdgeTreatmentAnchor>(Core3DEdgeTreatmentAnchor.class);[value setValue:[NSData dataWithBytes:a.key.data() length:a.key.size()] forKey:@"key"];[value setValue:@(NSInteger(a.curve)) forKey:@"curve"];[value setValue:B1Vector(a.pointMM) forKey:@"pointMM"];[value setValue:B1Vector(a.tangent) forKey:@"tangent"];[value setValue:B1Vector(a.normalA) forKey:@"normalA"];[value setValue:B1Vector(a.normalB) forKey:@"normalB"];[value setValue:@(a.circleRadiusMM) forKey:@"circleRadiusMM"];return value;}
 // Reverse selector-intent bridge for receipt readback. A persisted receipt can
 // only carry planar/line/circle intents (the reserved spline tag is rejected on
 // decode), so that alternative maps to nil defensively.
@@ -21578,12 +21589,54 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
 
 - (Core3DEdgeTreatmentTargetCapture *)captureEdgeTreatmentTargets:(NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected {
     auto result=B1Object<Core3DEdgeTreatmentNativeTargets>(Core3DEdgeTreatmentNativeTargets.class);[result setValue:@(Core3DEdgeTreatmentStatusMalformed) forKey:@"status"];[result setValue:@[] forKey:@"anchors"];[result setValue:@"b1.UnsupportedEdge" forKey:@"refusalCode"];[result setValue:@"The selected edge geometry cannot be retained by this tool." forKey:@"refusalMessage"];auto capture=[self captureEdgeTreatment:entityIdentifier expected:expected];
+    result->captureExpected=expected;
+    result->commitExpected=expected;
     // B1a owner-bound Edge-mode binding: when the Object-mode editor capture
     // cannot bind (the scene is in Edge selection mode), the viewer's
     // Edge-mode entry admits only under its full fail-closed conditions.
     // Everything after the binding is byte-identical to the Object-mode path.
     if(!capture.snapshot&&GLController.viewer&&expected&&entityIdentifier.length>0){const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;if(auto native=GLController.viewer->storedEdgeTreatmentTargetSnapshot(identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height))){if(auto edgeSnapshot=B1Snapshot(native)){NSData *canonicalSource=B1SourceBytes(native->source());if(edgeSnapshot.profileSource)[edgeSnapshot.profileSource setValue:canonicalSource forKey:@"canonicalSourceBytes"];if(edgeSnapshot.enclosureSource)[edgeSnapshot.enclosureSource setValue:canonicalSource forKey:@"canonicalSourceBytes"];if(edgeSnapshot.loftSource)[edgeSnapshot.loftSource setValue:canonicalSource forKey:@"canonicalSourceBytes"];[capture setValue:edgeSnapshot forKey:@"snapshot"];}}}
-    if(!capture.snapshot||!GLController.viewer)return result;auto snapshot=(Core3DEdgeTreatmentNativeSnapshot*)capture.snapshot;core3d::retained_edge_treatment::Refusal refusal;result->nativeAnchors=GLController.viewer->captureEdgeTreatmentTargets(snapshot->native,result->nativeBudget,refusal);if(refusal!=core3d::retained_edge_treatment::Refusal::None)return result;result->nativeSnapshot=snapshot->native;NSMutableArray*anchors=[NSMutableArray array];for(const auto&a:result->nativeAnchors)[anchors addObject:B1Anchor(a)];[result setValue:@(Core3DEdgeTreatmentStatusCurrentEditable) forKey:@"status"];[result setValue:capture.snapshot forKey:@"snapshot"];[result setValue:anchors forKey:@"anchors"];[result setValue:@"b1.None" forKey:@"refusalCode"];[result setValue:@"" forKey:@"refusalMessage"];return result;
+    if(!capture.snapshot||!GLController.viewer)return result;
+    auto snapshot=(Core3DEdgeTreatmentNativeSnapshot*)capture.snapshot;
+    core3d::retained_edge_treatment::Refusal refusal;
+    result->nativeAnchors=GLController.viewer->captureEdgeTreatmentTargets(
+        snapshot->native,result->nativeBudget,refusal);
+    if(refusal!=core3d::retained_edge_treatment::Refusal::None)return result;
+    // Production Replace Edges owns the complete topology-mode handoff. The
+    // target capture above remains bound to the Edge-mode owner and expected
+    // scene; only after that succeeds do we return to exact Object mode and
+    // reselect that same captured owner for ordinary commit admission.
+    Core3DSceneSnapshot *postTransition=expected;
+    if(expected.selectionMode==Core3DSceneElementKindEdge){
+        if([self trySetSelectionType:PrimitiveSelectionTypeShape]
+                !=Core3DSelectionTypeChangeResultSucceeded
+            ||!GLController.viewer->returnEdgeTreatmentTargetsToObjectMode(
+                snapshot->native))return result;
+        [GLController refreshSelectionState];
+        [self viewDidChangeViewportPresentationState];
+        [self sendNotifyUIState:UIStateChangingSelection
+                                 |UIStateChangingGizmo
+                                 |UIStateChangingApply];
+        postTransition=[self captureSceneSnapshot];
+    }
+    if(!postTransition
+        ||postTransition.selectionMode!=Core3DSceneElementKindObject
+        ||![postTransition.publicationSourceIdentifier
+            isEqualToString:expected.publicationSourceIdentifier]
+        ||postTransition.revisions.documentGeneration
+            !=expected.revisions.documentGeneration
+        ||postTransition.revisions.modelRevision
+            !=expected.revisions.modelRevision)return result;
+    result->nativeSnapshot=snapshot->native;
+    result->commitExpected=postTransition;
+    NSMutableArray*anchors=[NSMutableArray array];
+    for(const auto&a:result->nativeAnchors)[anchors addObject:B1Anchor(a)];
+    [result setValue:@(Core3DEdgeTreatmentStatusCurrentEditable) forKey:@"status"];
+    [result setValue:capture.snapshot forKey:@"snapshot"];
+    [result setValue:anchors forKey:@"anchors"];
+    [result setValue:@"b1.None" forKey:@"refusalCode"];
+    [result setValue:@"" forKey:@"refusalMessage"];
+    return result;
 }
 
 - (Core3DFaceSelectorQuery *)resolveFaceSelector:(Core3DEdgeTreatmentSnapshot *)snapshot
@@ -22129,7 +22182,7 @@ std::unordered_map<NSUInteger,B2BudgetSessionBox>& B2BudgetSessions(){
     auto dto=B1Result(r);B1BindQ2(dto,snapshot->native,requestedSource,built);auto callback=operation->completion;operation->completion=nil;operation->stopProvenance=nil;if(callback)callback(dto);});});return operation;}catch(...){refuse(core3d::retained_edge_treatment::Refusal::BuildFailed);return operation;}
 }
 
-- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentAppend:(Core3DEdgeTreatmentSnapshot *)snapshot kind:(Core3DEdgeTreatmentKind)kind amountMM:(double)amountMM targets:(Core3DEdgeTreatmentTargetCapture *)targets expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {auto native=(Core3DEdgeTreatmentNativeSnapshot*)snapshot;auto target=(Core3DEdgeTreatmentNativeTargets*)targets;if(![native isKindOfClass:Core3DEdgeTreatmentNativeSnapshot.class]||![target isKindOfClass:Core3DEdgeTreatmentNativeTargets.class]||target->nativeSnapshot!=native->native||target->continuationUsed)return [self core3d_beginEdgeTreatment:nil edit:core3d::retained_edge_treatment::Append{} expected:expected budget:nullptr completion:completion];target->continuationUsed=YES;core3d::retained_edge_treatment::Append edit{core3d::retained_edge_treatment::Kind(kind),amountMM,target->nativeAnchors};return [self core3d_beginEdgeTreatment:native edit:edit expected:expected budget:&target->nativeBudget completion:completion];}
+- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentAppend:(Core3DEdgeTreatmentSnapshot *)snapshot kind:(Core3DEdgeTreatmentKind)kind amountMM:(double)amountMM targets:(Core3DEdgeTreatmentTargetCapture *)targets expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {auto native=(Core3DEdgeTreatmentNativeSnapshot*)snapshot;auto target=(Core3DEdgeTreatmentNativeTargets*)targets;if(![native isKindOfClass:Core3DEdgeTreatmentNativeSnapshot.class]||![target isKindOfClass:Core3DEdgeTreatmentNativeTargets.class]||target->nativeSnapshot!=native->native||target->continuationUsed||!B1TargetExpectedMatches(target,expected))return [self core3d_beginEdgeTreatment:nil edit:core3d::retained_edge_treatment::Append{} expected:expected budget:nullptr completion:completion];target->continuationUsed=YES;core3d::retained_edge_treatment::Append edit{core3d::retained_edge_treatment::Kind(kind),amountMM,target->nativeAnchors};return [self core3d_beginEdgeTreatment:native edit:edit expected:target->commitExpected budget:&target->nativeBudget completion:completion];}
 - (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentSelectorAppend:
     (Core3DEdgeTreatmentSnapshot *)snapshot amountMM:(double)amountMM
     proof:(Core3DFaceSelectorProof *)proof expected:(Core3DSceneSnapshot *)expected
@@ -22221,7 +22274,7 @@ std::unordered_map<NSUInteger,B2BudgetSessionBox>& B2BudgetSessions(){
     }catch(...){refuse(core3d::retained_edge_treatment::Refusal::BuildFailed);return operation;}
 }
 - (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentAmount:(Core3DEdgeTreatmentSnapshot *)snapshot featureIdentifier:(NSString *)featureIdentifier amountMM:(double)amountMM expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {core3d::retained_edge_treatment::SetAmount edit;core3d::receipt::ParseUUID(featureIdentifier.UTF8String,edit.feature);edit.amountMM=amountMM;return [self core3d_beginEdgeTreatment:(Core3DEdgeTreatmentNativeSnapshot*)snapshot edit:edit expected:expected budget:nullptr completion:completion];}
-- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentTargets:(Core3DEdgeTreatmentSnapshot *)snapshot featureIdentifier:(NSString *)featureIdentifier targets:(Core3DEdgeTreatmentTargetCapture *)targets expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {auto target=(Core3DEdgeTreatmentNativeTargets*)targets;core3d::retained_edge_treatment::ReplaceTargets edit;core3d::receipt::ParseUUID(featureIdentifier.UTF8String,edit.feature);if(![target isKindOfClass:Core3DEdgeTreatmentNativeTargets.class]||target->continuationUsed)return [self core3d_beginEdgeTreatment:nil edit:edit expected:expected budget:nullptr completion:completion];target->continuationUsed=YES;edit.anchors=target->nativeAnchors;return [self core3d_beginEdgeTreatment:(Core3DEdgeTreatmentNativeSnapshot*)snapshot edit:edit expected:expected budget:&target->nativeBudget completion:completion];}
+- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentTargets:(Core3DEdgeTreatmentSnapshot *)snapshot featureIdentifier:(NSString *)featureIdentifier targets:(Core3DEdgeTreatmentTargetCapture *)targets expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {auto target=(Core3DEdgeTreatmentNativeTargets*)targets;core3d::retained_edge_treatment::ReplaceTargets edit;core3d::receipt::ParseUUID(featureIdentifier.UTF8String,edit.feature);if(![target isKindOfClass:Core3DEdgeTreatmentNativeTargets.class]||target->continuationUsed||!B1TargetExpectedMatches(target,expected))return [self core3d_beginEdgeTreatment:nil edit:edit expected:expected budget:nullptr completion:completion];target->continuationUsed=YES;edit.anchors=target->nativeAnchors;return [self core3d_beginEdgeTreatment:(Core3DEdgeTreatmentNativeSnapshot*)snapshot edit:edit expected:target->commitExpected budget:&target->nativeBudget completion:completion];}
 - (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentRemoval:(Core3DEdgeTreatmentSnapshot *)snapshot featureIdentifier:(NSString *)featureIdentifier expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {core3d::retained_edge_treatment::Remove edit;core3d::receipt::ParseUUID(featureIdentifier.UTF8String,edit.feature);return [self core3d_beginEdgeTreatment:(Core3DEdgeTreatmentNativeSnapshot*)snapshot edit:edit expected:expected budget:nullptr completion:completion];}
 - (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentSelectorIntentEdit:(Core3DEdgeTreatmentSnapshot *)snapshot featureIdentifier:(NSString *)featureIdentifier intent:(Core3DFaceSelectorIntent *)intent expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {core3d::retained_edge_treatment::SetSelectorIntent edit;core3d::receipt::ParseUUID(featureIdentifier.UTF8String,edit.feature);if(!core3d::face_selector_bridge::Intent(intent,edit.requested))return [self core3d_beginEdgeTreatment:nil edit:edit expected:expected budget:nullptr completion:completion];return [self core3d_beginEdgeTreatment:(Core3DEdgeTreatmentNativeSnapshot*)snapshot edit:edit expected:expected budget:nullptr completion:completion];}
 
