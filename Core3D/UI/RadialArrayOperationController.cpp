@@ -2136,8 +2136,10 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
         TopoDS_Shape enclosureBinding;
         std::string enclosureIdentifier;
         pattern_recipe_clone::Prepared sweepLoft;
+        std::shared_ptr<const core3d::retained_edge_treatment::Payload> treatmentCopy;
     };
     std::vector<PreparedResult> aPrepared;
+    core3d::retained_edge_treatment::ReplayBudget aTreatmentBudget;
     try {
         OCC_CATCH_SIGNALS
         aPrepared.reserve(static_cast<std::size_t>(_count - 1));
@@ -2252,6 +2254,42 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
                     }
                 }
             }
+            std::shared_ptr<const core3d::retained_edge_treatment::Payload> aTreatmentCopy;
+            if (!anOriginalProfile.label.IsNull()) {
+                profile::Parameters aDestinationParameters;
+                TopoDS_Shape aReplayRoot;
+                if (!profile::IndependentCopyParameters(anOriginalProfile.parameters,
+                        std::nullopt, aDestinationParameters)
+                    || !_document->PrepareRetainedEdgeTreatmentIndependentCopy(
+                        _source->label, aProfileIdentifier, aDestinationParameters,
+                        aTreatmentBudget, aTreatmentCopy, aReplayRoot)) {
+                    return RadialArrayApplyResult::NoChange;
+                }
+                if (aTreatmentCopy) {
+                    Standard_Size aReplayTopology = 0;
+                    if (aReplayRoot.IsNull() || aReplayRoot.IsPartner(_source->storedShape)
+                        || !IsTopologicallyValid(aReplayRoot)
+                        || !CountBoundedTopology(aReplayRoot, anAggregateLimit, aReplayTopology)
+                        || aReplayTopology != aResultTopology) {
+                        return RadialArrayApplyResult::NoChange;
+                    }
+                    for (const PreparedResult& anExisting : aPrepared) {
+                        if (anExisting.presentation.IsNull()
+                            || aReplayRoot.IsPartner(anExisting.presentation->Shape())) {
+                            return RadialArrayApplyResult::NoChange;
+                        }
+                    }
+                    Standard_Real replayMinimum[3] = {0.0, 0.0, 0.0};
+                    Standard_Real replayMaximum[3] = {0.0, 0.0, 0.0};
+                    if (!WorldBounds(aReplayRoot, aTransform, replayMinimum, replayMaximum))
+                        return RadialArrayApplyResult::NoChange;
+                    aPresentation = new AIS_Shape(aReplayRoot);
+                    if (aPresentation.IsNull()) return RadialArrayApplyResult::NoChange;
+                    aPresentation->SetLocalTransformation(aTransform);
+                    _document->LoadObjectMeterial(_source->label, aPresentation);
+                    aProfileBinding = aReplayRoot;
+                }
+            }
             TopoDS_Shape anEnclosureBinding;
             std::string anEnclosureIdentifier;
             const enclosure::Record& anOriginalEnclosure = _source->profileOwner.object.enclosure;
@@ -2304,7 +2342,7 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
                     return RadialArrayApplyResult::NoChange;
             aPrepared.push_back({aPresentation, aTransform, aProfileBinding,
                 aProfileIdentifier, anEnclosureBinding, anEnclosureIdentifier,
-                aSweepLoft});
+                aSweepLoft, aTreatmentCopy});
         }
     } catch (...) {
         return RadialArrayApplyResult::NoChange;
@@ -2425,7 +2463,14 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
             if (!profile::StageDuplicate(aDocument, _source->label,
                     aStageAuthority, _source->storedShape,
                     aLabel, aResult.profileBinding, aResult.profileIdentifier,
-                    aPending.expectedProfile)) {
+                    aPending.expectedProfile, aResult.treatmentCopy != nullptr)) {
+                return retainRetryableOrUnknown();
+            }
+            if (!aStageAuthority.label.IsNull()
+                && !_document->StageRetainedEdgeTreatmentIndependentCopy(
+                    _source->label, _source->profileOwner.object.profile,
+                    aLabel, aPending.expectedProfile, aTreatmentBudget,
+                    aResult.treatmentCopy)) {
                 return retainRetryableOrUnknown();
             }
             if (_source->profileOwner.namePresent) {

@@ -8,6 +8,7 @@
 #include "ObjectInteractor.hpp"
 #include "OrdinaryEditController.hpp"
 #include "../OCCTKit/ReceiptRecord.hxx"
+#include "../OCCTKit/RetainedEdgeTreatmentBuild.hxx"
 #include "../Scene/SceneSnapshot.hpp"
 #include "../Common/Core3DMobileResourceLimits.h"
 #ifdef DEBUG
@@ -1734,6 +1735,7 @@ namespace core3d {
 		minAxisDisplacement.SetTranslation(aDisplacement);
         
 		std::vector<DuplicatePendingResult> duplicates;
+        core3d::retained_edge_treatment::ReplayBudget treatmentBudget;
 		try {
 			for (const DuplicateSource& source : sources) {
 				BRepBuilderAPI_Copy shapeCopy;
@@ -1797,6 +1799,29 @@ namespace core3d {
                             || retainedCopy.Shape().IsPartner(source.savedProfile.boundShape)
                             || !IsTopologicallyValid(retainedCopy.Shape())) { return; }
                         duplicate.preparedProfileBinding = retainedCopy.Shape();
+                    }
+                    profile::Parameters destinationParameters;
+                    TopoDS_Shape replayRoot;
+                    if (!profile::IndependentCopyParameters(source.savedProfile.parameters,
+                            std::nullopt, destinationParameters)
+                        || !myDoc->PrepareRetainedEdgeTreatmentIndependentCopy(
+                            source.label, duplicate.preparedProfileIdentifier,
+                            destinationParameters, treatmentBudget,
+                            duplicate.preparedTreatmentCopy, replayRoot)) return;
+                    if (duplicate.preparedTreatmentCopy) {
+                        if (replayRoot.IsNull() || replayRoot.IsPartner(source.ownerShape)
+                            || !IsTopologicallyValid(replayRoot)) return;
+                        for (const DuplicatePendingResult& existing : duplicates) {
+                            if (replayRoot.IsPartner(existing.expectedShape)) return;
+                        }
+                        Handle(AIS_Shape) replayPresentation = new AIS_Shape(replayRoot);
+                        if (replayPresentation.IsNull()) return;
+                        replayPresentation->SetLocalTransformation(duplicate.expectedTransform);
+                        myDoc->LoadObjectMeterial(source.label, replayPresentation);
+                        copy = replayPresentation;
+                        duplicate.presentation = replayPresentation;
+                        duplicate.expectedShape = replayRoot;
+                        duplicate.preparedProfileBinding = replayRoot;
                     }
                 }
                 const auto& savedEnclosure = source.name.object.enclosure;
@@ -1979,7 +2004,15 @@ namespace core3d {
                 if (!profile::StageDuplicate(doc, duplicate.sourceLabel,
                         stageAuthority, duplicate.originalOwnerShape,
                         label, duplicate.preparedProfileBinding,
-                        duplicate.preparedProfileIdentifier, duplicate.candidateProfile)) {
+                        duplicate.preparedProfileIdentifier, duplicate.candidateProfile,
+                        duplicate.preparedTreatmentCopy != nullptr)) {
+                    retainRetryableOrUnknown(); return;
+                }
+                if (!duplicate.originalProfile.label.IsNull()
+                    && !myDoc->StageRetainedEdgeTreatmentIndependentCopy(
+                        duplicate.sourceLabel, duplicate.originalProfile,
+                        label, duplicate.candidateProfile, treatmentBudget,
+                        duplicate.preparedTreatmentCopy)) {
                     retainRetryableOrUnknown(); return;
                 }
 #ifdef DEBUG
@@ -2295,6 +2328,7 @@ namespace core3d {
 				== PrimitiveManipulatorType::PrimitiveGizmoTypeMirror
 			&& aPreviousType
 				!= PrimitiveManipulatorType::PrimitiveGizmoTypeMirror) {
+			_mirrorTreatmentBudget = {};
 			_mirrorPreviewState = MirrorPreviewState::Selecting;
 			++_mirrorPreviewGeneration;
 		} else if (_manipulatorType
@@ -4816,6 +4850,9 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                 return Standard_False;
             const auto& originalProfile = profileOwner.object.profile;
             const auto& originalEnclosure = profileOwner.object.enclosure;
+            const bool sourceHasTreatment = !originalProfile.label.IsNull()
+                && originalProfile.label.IsAttribute(
+                    retained_edge_treatment::AttributeID());
             double documentMetersPerUnit = 0;
             bool documentLengthUnitPresent = false;
             if (!ReadMirrorDocumentUnits(aSourceDocument, documentMetersPerUnit,
@@ -4866,33 +4903,81 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			// when mirror previews are replaced repeatedly. Keep mesh copying
 			// disabled; AIS Display below triangulates the owned trial before
 			// renderer-neutral capture reads that cache.
-			BRepBuilderAPI_Transform aBRepTrsf(
-				shape->Shape(),
-				aBakedTransform,
-                originalProfile.label.IsNull() && originalEnclosure.label.IsNull()
-                    && sweepLoft.family == pattern_recipe_clone::Family::None
-                    ? Standard_False : Standard_True,
-				Standard_False);
-			Handle(AIS_Shape) aShapePrs = new AIS_Shape (aBRepTrsf.Shape());
-			Standard_Size resultNodeCount = 0;
-			if (aShapePrs.IsNull() || aShapePrs->Shape().IsNull()
-				|| !IsShapeWithinModelCoordinates(aShapePrs->Shape())
-				|| !CountBoundedMirrorTopology(
-					aShapePrs->Shape(),
-					anAggregateLimit - anAggregateTopologyNodes,
-					resultNodeCount)
-				|| resultNodeCount == 0
-				|| !IsTopologicallyValid(aShapePrs->Shape())) {
-				return Standard_False;
-			}
-			anAggregateTopologyNodes += resultNodeCount;
+			Handle(AIS_Shape) aShapePrs;
+            if (!sourceHasTreatment) {
+			    BRepBuilderAPI_Transform aBRepTrsf(
+				    shape->Shape(),
+				    aBakedTransform,
+                    originalProfile.label.IsNull() && originalEnclosure.label.IsNull()
+                        && sweepLoft.family == pattern_recipe_clone::Family::None
+                        ? Standard_False : Standard_True,
+				    Standard_False);
+			    aShapePrs = new AIS_Shape(aBRepTrsf.Shape());
+            }
             TopoDS_Shape preparedProfileBinding;
             std::string profileIdentifier;
+            std::shared_ptr<const retained_edge_treatment::Payload>
+                preparedTreatmentCopy;
             if (!originalProfile.label.IsNull()) {
                 profileIdentifier = OcctDocument::NewProfileIdentifier();
                 if (!profile::IsIdentifier(profileIdentifier) || profileIdentifier == originalProfile.identifier
-                    || aShapePrs->Shape().IsPartner(sourceStoredShape)) return Standard_False;
-                if (originalProfile.boundShape.IsEqual(sourceStoredShape)) {
+                    || (!sourceHasTreatment
+                        && (aShapePrs.IsNull()
+                            || aShapePrs->Shape().IsPartner(sourceStoredShape))))
+                    return Standard_False;
+                if (sourceHasTreatment) {
+                    profile::Parameters destinationParameters;
+                    TopoDS_Shape framedBase, replayRoot;
+                    const std::atomic_bool neverCancelled{false};
+                    if (!profile::IndependentCopyParameters(
+                            originalProfile.parameters, aBakedTransform,
+                            destinationParameters)) {
+                        return Standard_False;
+                    }
+                    if (!retained_edge_treatment::BuildFramedPolygonPrism(
+                            destinationParameters, neverCancelled, framedBase)) {
+                        return Standard_False;
+                    }
+                    if (!myDoc->PrepareRetainedEdgeTreatmentIndependentCopy(
+                            sourceLabel, profileIdentifier, destinationParameters,
+                            _mirrorTreatmentBudget, preparedTreatmentCopy,
+                            replayRoot, framedBase, aBakedTransform)) {
+                        return Standard_False;
+                    }
+                    if (!preparedTreatmentCopy || replayRoot.IsNull()
+                        || replayRoot.IsPartner(sourceStoredShape)
+                        || replayRoot.IsPartner(preparedTreatmentCopy->base)
+                        || !IsShapeWithinModelCoordinates(replayRoot)
+                        || !IsTopologicallyValid(replayRoot)) {
+                        return Standard_False;
+                    }
+                    for (const Handle(AIS_Shape)& previous : replacementObjects) {
+                        if (previous.IsNull()
+                            || replayRoot.IsPartner(previous->Shape()))
+                            return Standard_False;
+                    }
+                    for (const MirrorSourceSnapshot& previous : replacementSources) {
+                        if (previous.preparedTreatmentCopy
+                            && (replayRoot.IsPartner(previous.preparedTreatmentCopy->base)
+                                || preparedTreatmentCopy->base.IsPartner(
+                                    previous.preparedTreatmentCopy->base))) return Standard_False;
+                    }
+                    aShapePrs = new AIS_Shape(replayRoot);
+                    if (aShapePrs.IsNull()) return Standard_False;
+                    if (originalProfile.boundShape.IsEqual(sourceStoredShape)) {
+                        preparedProfileBinding = replayRoot;
+                    } else {
+                        preparedProfileBinding = preparedTreatmentCopy->base;
+                    }
+                    Standard_Size baseNodes = 0;
+                    if (!CountBoundedMirrorTopology(preparedTreatmentCopy->base,
+                            anAggregateLimit - anAggregateTopologyNodes, baseNodes)
+                        || baseNodes == 0
+                        || !IsTopologicallyValid(preparedTreatmentCopy->base)) {
+                        return Standard_False;
+                    }
+                    anAggregateTopologyNodes += baseNodes;
+                } else if (originalProfile.boundShape.IsEqual(sourceStoredShape)) {
                     preparedProfileBinding = aShapePrs->Shape();
                 } else {
                     BRepBuilderAPI_Transform retained(originalProfile.boundShape, aBakedTransform,
@@ -4909,6 +4994,18 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                     preparedProfileBinding = retained.Shape();
                 }
             }
+			Standard_Size resultNodeCount = 0;
+			if (aShapePrs.IsNull() || aShapePrs->Shape().IsNull()
+				|| !IsShapeWithinModelCoordinates(aShapePrs->Shape())
+				|| !CountBoundedMirrorTopology(
+					aShapePrs->Shape(),
+					anAggregateLimit - anAggregateTopologyNodes,
+					resultNodeCount)
+				|| resultNodeCount == 0
+				|| !IsTopologicallyValid(aShapePrs->Shape())) {
+				return Standard_False;
+			}
+			anAggregateTopologyNodes += resultNodeCount;
             TopoDS_Shape preparedEnclosureBinding;
             std::string enclosureIdentifier;
             if (!originalEnclosure.label.IsNull()) {
@@ -4964,9 +5061,10 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                 retainedProfileNodes,
                 documentMetersPerUnit,
                 documentLengthUnitPresent,
-                preparedProfileBinding,
-                profileIdentifier,
-                originalEnclosure.IsCurrent(aSourceDocument, sourceLabel),
+				preparedProfileBinding,
+				profileIdentifier,
+				preparedTreatmentCopy,
+				originalEnclosure.IsCurrent(aSourceDocument, sourceLabel),
                 retainedEnclosureNodes,
                 preparedEnclosureBinding,
                 enclosureIdentifier,
@@ -6128,6 +6226,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			return Standard_False;
 		}
 		_trialMirrorSources.clear();
+		_mirrorTreatmentBudget = {};
 		_pendingMirrorResults.clear();
 		_mirrorOwnsDocumentCommand = false;
 		_mirrorPreviewState = _manipulatorType
@@ -6335,9 +6434,14 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 					|| !IsTopologicallyValid(aResult->Shape())) {
 					return Standard_False;
 				}
-				anAggregateNodes += aResultNodes;
+                anAggregateNodes += aResultNodes;
                 const auto& originalProfile = profileOwner.object.profile;
                 if (!originalProfile.label.IsNull()) {
+                    const bool sourceHasTreatment = originalProfile.label.IsAttribute(
+                        retained_edge_treatment::AttributeID());
+                    if (sourceHasTreatment
+                            != (aSource.preparedTreatmentCopy != nullptr))
+                        return Standard_False;
                     if (aSource.preparedProfileBinding.IsNull()
                         || aSource.preparedProfileBinding.IsPartner(originalProfile.boundShape)
                         || (aSource.preparedProfileBinding.IsEqual(aResult->Shape())
@@ -6353,6 +6457,33 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                             || candidateNodes != originalNodes
                             || !IsTopologicallyValid(aSource.preparedProfileBinding)) return Standard_False;
                         anAggregateNodes += candidateNodes;
+                    }
+                    if (aSource.preparedTreatmentCopy) {
+                        const TopoDS_Shape& preparedBase =
+                            aSource.preparedTreatmentCopy->base;
+                        Standard_Size preparedBaseNodes = 0;
+                        if (preparedBase.IsNull()
+                            || preparedBase.ShapeType() != TopAbs_SOLID
+                            || preparedBase.IsPartner(aStored)
+                            || preparedBase.IsPartner(aResult->Shape())
+                            || preparedBase.IsPartner(originalProfile.boundShape)
+                            || !CountBoundedMirrorTopology(preparedBase,
+                                anAggregateLimit - anAggregateNodes,
+                                preparedBaseNodes)
+                            || preparedBaseNodes == 0
+                            || !IsTopologicallyValid(preparedBase))
+                            return Standard_False;
+                        anAggregateNodes += preparedBaseNodes;
+                        for (std::size_t previous = 0;
+                                previous < anIndex; ++previous) {
+                            const auto& sibling =
+                                _trialMirrorSources[previous].preparedTreatmentCopy;
+                            if (sibling
+                                && (preparedBase.IsPartner(sibling->base)
+                                    || aResult->Shape().IsPartner(
+                                        _trialMirrorObjects[previous]->Shape())))
+                                return Standard_False;
+                        }
                     }
                 } else if (!aSource.preparedProfileBinding.IsNull() || !aSource.profileIdentifier.empty()) return Standard_False;
                 const auto& originalEnclosure = profileOwner.object.enclosure;
@@ -6533,6 +6664,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 		// Release transient ownership without erasing document-owned geometry.
 		_trialMirrorObjects.clear();
 		_trialMirrorSources.clear();
+		_mirrorTreatmentBudget = {};
 		_pendingMirrorResults.clear();
 		_trialMirrorObjectsValid = false;
 		_mirrorOwnsDocumentCommand = false;
@@ -6720,7 +6852,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 						aStoredReferenceAxis,
 						aPending.expectedReferenceAxis)) {
 					return retainRetryableOrUnknown();
-				}
+                }
                 profile::Record candidateProfile;
                 auto stageAuthority = aSource.profileOwner.object.profile;
 #ifdef DEBUG
@@ -6733,7 +6865,15 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                 if (!profile::StageTransformedCopy(aDocument, aSource.label,
                         stageAuthority, aSource.storedShape,
                         aLabel, aSource.preparedProfileBinding, aSource.profileIdentifier,
-                        aSource.bakedTransform, candidateProfile)) return retainRetryableOrUnknown();
+                        aSource.bakedTransform, candidateProfile,
+                        aSource.preparedTreatmentCopy != nullptr))
+                    return retainRetryableOrUnknown();
+                if (!stageAuthority.label.IsNull()
+                    && !myDoc->StageRetainedEdgeTreatmentIndependentCopy(
+                        aSource.label, aSource.profileOwner.object.profile,
+                        aLabel, candidateProfile, _mirrorTreatmentBudget,
+                        aSource.preparedTreatmentCopy))
+                    return retainRetryableOrUnknown();
 #ifdef DEBUG
                 if (profileFault == 2) {
                     TDataStd_Integer::Set(candidateProfile.label, profile::CountID(), static_cast<int>(candidateProfile.values.size()) + 1);

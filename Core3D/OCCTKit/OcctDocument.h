@@ -1376,6 +1376,29 @@ public:
     //! True while a measured treatment-history companion has not been bound
     //! to its own committed delta or discharged by verified prior settlement.
     Standard_EXPORT Standard_Boolean HasUnresolvedTreatmentHistoryCompanion() const noexcept;
+    //! Prepare one independent retained Profile treatment copy without
+    //! mutating the document. The returned root is produced by replay from the
+    //! returned payload's independently detached untreated base. Absence of a
+    //! source carrier succeeds with empty outputs.
+    Standard_EXPORT Standard_Boolean PrepareRetainedEdgeTreatmentIndependentCopy(
+        const TDF_Label& sourceOwner,
+        const std::string& destinationProfileIdentifier,
+        const core3d::profile::Parameters& destinationParameters,
+        core3d::retained_edge_treatment::ReplayBudget& budget,
+        std::shared_ptr<const core3d::retained_edge_treatment::Payload>& prepared,
+        TopoDS_Shape& preparedRoot,
+        const TopoDS_Shape& destinationBase = TopoDS_Shape(),
+        const std::optional<gp_Trsf>& sourceToDestination = std::nullopt) noexcept;
+    //! Bind a prepared copy to the real native destination identities, replay
+    //! the final program independently, verify the staged replay root, stage
+    //! the carrier, and read both source and destination back exactly.
+    Standard_EXPORT Standard_Boolean StageRetainedEdgeTreatmentIndependentCopy(
+        const TDF_Label& sourceOwner,
+        const core3d::profile::Record& sourceProfile,
+        const TDF_Label& destinationOwner,
+        const core3d::profile::Record& destinationProfile,
+        core3d::retained_edge_treatment::ReplayBudget& budget,
+        const std::shared_ptr<const core3d::retained_edge_treatment::Payload>& prepared) noexcept;
     Standard_EXPORT core3d::retained_face_selector::Resolution ResolveRetainedFaceSelector(
         const core3d::retained_edge_treatment::Snapshot& snapshot,
         const core3d::retained_face_selector::SelectorIntent& intent,

@@ -27,6 +27,7 @@
 #include "../OCCTKit/EnclosureGeometry.hxx"
 #include "../OCCTKit/ReceiptRecord.hxx"
 #include "../OCCTKit/RetainedFinishingAttribute.hxx"
+#include "../OCCTKit/RetainedEdgeTreatmentBuild.hxx"
 #if DEBUG
 // R179/D249 diagnostic-only include. Never compiled into Release.
 #include "../OCCTKit/GeneralLoftPersistence.hxx"
@@ -4176,15 +4177,28 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
         }
         if (geometry->cancelled.load() || result.IsNull() || result.ShapeType() != TopAbs_SOLID) { return false; }
         if (geometry->constructionFrame) {
-            gp_Trsf frame;
-            if (!geometry->constructionFrame->Transform(frame)) return false;
             expected *= geometry->constructionFrame->AbsoluteVolumeScale();
             if (!std::isfinite(expected) || expected <= 0 || geometry->cancelled.load()) return false;
-            // Only detached worker-owned geometry is transformed. Repeated
-            // reflection must never enter OCCT's negative mesh-copy path.
-            BRepBuilderAPI_Transform transformed(result, frame, Standard_True, Standard_False);
-            if (!transformed.IsDone()) return false;
-            result = transformed.Shape();
+            const bool framedPolygonPrism = !geometry->revolve
+                && !geometry->curves && !geometry->circle
+                && geometry->holes.empty() && geometry->shells.empty();
+            if (framedPolygonPrism) {
+                profile::Parameters parameters{
+                    static_cast<const ProfileDefinition&>(*geometry),
+                    geometry->shellMetersPerUnit};
+                parameters.constructionFrame = geometry->constructionFrame;
+                if (!retained_edge_treatment::BuildFramedPolygonPrism(
+                        parameters, geometry->cancelled, result)) return false;
+            } else {
+                gp_Trsf frame;
+                if (!geometry->constructionFrame->Transform(frame)) return false;
+                // Only detached worker-owned geometry is transformed. Repeated
+                // reflection must never enter OCCT's negative mesh-copy path.
+                BRepBuilderAPI_Transform transformed(
+                    result, frame, Standard_True, Standard_False);
+                if (!transformed.IsDone()) return false;
+                result = transformed.Shape();
+            }
             if (geometry->cancelled.load() || result.IsNull() || result.ShapeType() != TopAbs_SOLID) return false;
         }
         auto solid = TopoDS::Solid(result);

@@ -429,6 +429,28 @@ inline bool Stage(const Handle(TDocStd_Document)& document, const TDF_Label& own
     } catch (...) { return false; }
 }
 
+// CLOUD-8242: single source of truth for the recipe parameters of an
+// independent copy: the destination recipe is the source recipe, with the
+// construction frame composed through the admitted baked transform when there
+// is one. The native treatment-copy preparation and StageIndependentCopy must
+// agree exactly, so both derive the destination parameters here.
+inline bool IndependentCopyParameters(const Parameters& original,
+    const std::optional<gp_Trsf>& bakedTransform, Parameters& destination) noexcept {
+    destination = original;
+    try {
+        if (bakedTransform) {
+            gp_Trsf originalFrame;
+            if (original.constructionFrame
+                && !original.constructionFrame->Transform(originalFrame)) return false;
+            ConstructionFrame composed;
+            if (!ConstructionFrame::Capture(*bakedTransform * originalFrame, composed))
+                return false;
+            destination.constructionFrame = composed;
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
 inline bool StageIndependentCopy(const Handle(TDocStd_Document)& document,
                            const TDF_Label& sourceOwner, const Record& original,
                            const TopoDS_Shape& originalOwnerShape,
@@ -436,7 +458,8 @@ inline bool StageIndependentCopy(const Handle(TDocStd_Document)& document,
                            const TopoDS_Shape& preparedBinding,
                            const std::string& newIdentifier,
                            Record& candidate,
-                           const std::optional<gp_Trsf>& bakedTransform) noexcept {
+                           const std::optional<gp_Trsf>& bakedTransform,
+                           bool expectTreatmentCopy) noexcept {
     candidate = {};
     try {
         Record liveSource, previousDestination;
@@ -450,19 +473,21 @@ inline bool StageIndependentCopy(const Handle(TDocStd_Document)& document,
             || !Read(document, sourceOwner, liveSource) || !liveSource.IsEqual(original)
             || !Read(document, destinationOwner, previousDestination)
             || !previousDestination.label.IsNull()) return false;
+        // CLOUD-8242: a present treatment carrier on the source record is never
+        // silently omitted: the caller must stage the verified native copy on
+        // the destination record in the same command (and must not claim one
+        // for a source that has none). The carrier attribute itself is staged
+        // by the native document authority immediately after this record.
+        const bool sourceHasTreatment = !original.label.IsNull()
+            && original.label.IsAttribute(core3d::retained_edge_treatment::AttributeID());
+        if (sourceHasTreatment != expectTreatmentCopy) return false;
         // Legacy shapes without recipes continue to duplicate without one.
         if (original.label.IsNull())
             return preparedBinding.IsNull() && newIdentifier.empty();
         const auto destinationShape = XCAFDoc_ShapeTool::GetShape(destinationOwner);
-        Parameters destinationParameters = original.parameters;
-        if (bakedTransform) {
-            gp_Trsf originalFrame;
-            if (original.parameters.constructionFrame
-                && !original.parameters.constructionFrame->Transform(originalFrame)) return false;
-            ConstructionFrame composed;
-            if (!ConstructionFrame::Capture(*bakedTransform * originalFrame, composed)) return false;
-            destinationParameters.constructionFrame = composed;
-        }
+        Parameters destinationParameters;
+        if (!IndependentCopyParameters(original.parameters, bakedTransform, destinationParameters))
+            return false;
         std::vector<double> encoded, originalEncoded;
         if (!XCAFDoc_ShapeTool::IsSimpleShape(destinationOwner)
             || !XCAFDoc_ShapeTool::IsFree(destinationOwner)
@@ -509,10 +534,11 @@ inline bool StageDuplicate(const Handle(TDocStd_Document)& document,
                            const TDF_Label& destinationOwner,
                            const TopoDS_Shape& preparedBinding,
                            const std::string& newIdentifier,
-                           Record& candidate) noexcept {
+                           Record& candidate,
+                           bool expectTreatmentCopy) noexcept {
     return StageIndependentCopy(document, sourceOwner, original, originalOwnerShape,
                                 destinationOwner, preparedBinding, newIdentifier,
-                                candidate, std::nullopt);
+                                candidate, std::nullopt, expectTreatmentCopy);
 }
 
 inline bool StageTransformedCopy(const Handle(TDocStd_Document)& document,
@@ -522,10 +548,11 @@ inline bool StageTransformedCopy(const Handle(TDocStd_Document)& document,
                                 const TopoDS_Shape& preparedBinding,
                                 const std::string& newIdentifier,
                                 const gp_Trsf& bakedTransform,
-                                Record& candidate) noexcept {
+                                Record& candidate,
+                                bool expectTreatmentCopy) noexcept {
     return StageIndependentCopy(document, sourceOwner, original, originalOwnerShape,
                                 destinationOwner, preparedBinding, newIdentifier,
-                                candidate, bakedTransform);
+                                candidate, bakedTransform, expectTreatmentCopy);
 }
 
 inline bool ValidateDocument(const Handle(TDocStd_Document)& document, std::vector<Record>& records) noexcept {

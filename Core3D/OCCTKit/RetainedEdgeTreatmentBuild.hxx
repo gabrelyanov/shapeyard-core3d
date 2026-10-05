@@ -16,8 +16,13 @@
 #include <ShapeAnalysis_Surface.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepLib.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
 #include <TopExp.hxx>
+#include <TopoDS.hxx>
 #include <TopoDS_Iterator.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
@@ -38,6 +43,68 @@ inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoD
     std::vector<StepProof>& proofs, ReplayBudget& budget, Refusal& refusal) noexcept;
 inline bool EquivalentReplayGeometry(const TopoDS_Shape& actual, const TopoDS_Shape& expectation,
     ReplayBudget& budget, Refusal& refusal) noexcept;
+
+// CLOUD-8242 Mirror: the admitted polygon extrusion must be constructed in
+// its signed frame. Applying a negative transform to already-built planar
+// surfaces produces signed-zero frames that are not stable across mandatory
+// binary detachment. This is deliberately narrower than the general Profile
+// builder: curves, circles, holes, revolutions and shell steps stay on their
+// existing paths and are never silently normalized here.
+inline bool BuildFramedPolygonPrism(const profile::Parameters& parameters,
+    const std::atomic_bool& cancelled, TopoDS_Shape& result) noexcept {
+    result.Nullify();
+    try {
+        const ProfileDefinition& definition = parameters.definition;
+        double signedArea = 0, expectedVolume = 0;
+        if (!parameters.constructionFrame || !parameters.shells.empty()
+            || definition.revolve || definition.curves || definition.circle
+            || !definition.holes.empty()
+            || !ProfileDefinitionExpectedVolume(
+                definition, signedArea, expectedVolume)
+            || cancelled.load()) return false;
+        gp_Trsf frame;
+        if (!parameters.constructionFrame->Transform(frame)) return false;
+        expectedVolume *= parameters.constructionFrame->AbsoluteVolumeScale();
+        if (!std::isfinite(expectedVolume) || expectedVolume <= 0) return false;
+
+        auto points = definition.points;
+        if (signedArea < 0) std::reverse(points.begin(), points.end());
+        BRepBuilderAPI_MakePolygon polygon;
+        for (const gp_Pnt2d& point : points) {
+            if (cancelled.load()) return false;
+            polygon.Add(ProfilePointInPlane(point, definition.plane).Transformed(frame));
+        }
+        polygon.Close();
+        if (!polygon.IsDone()) return false;
+        BRepBuilderAPI_MakeFace face(polygon.Wire(), Standard_True);
+        if (!face.IsDone() || cancelled.load()) return false;
+
+        gp_Vec direction = definition.plane == 0
+            ? gp_Vec(0, 0, definition.depth)
+            : definition.plane == 1
+                ? gp_Vec(0, definition.depth, 0)
+                : gp_Vec(definition.depth, 0, 0);
+        direction.Transform(frame);
+        BRepPrimAPI_MakePrism prism(
+            face.Face(), direction, Standard_True, Standard_True);
+        if (!prism.IsDone() || prism.Shape().IsNull()
+            || prism.Shape().ShapeType() != TopAbs_SOLID
+            || cancelled.load()) return false;
+        TopoDS_Solid solid = TopoDS::Solid(prism.Shape());
+        if (!BRepLib::OrientClosedSolid(solid)
+            || !BRepCheck_Analyzer(solid, Standard_True).IsValid()) return false;
+        GProp_GProps properties;
+        BRepGProp::VolumeProperties(solid, properties);
+        if (!std::isfinite(properties.Mass()) || properties.Mass() <= 0
+            || std::abs(properties.Mass() - expectedVolume)
+                > std::max(1e-8, expectedVolume * 1e-8)) return false;
+        result = solid;
+        return true;
+    } catch (...) {
+        result.Nullify();
+        return false;
+    }
+}
 
 namespace detail {
 // Bounded exact V3 geometry commitment, mirroring the retained-fillet
@@ -504,6 +571,61 @@ struct SourceRebindResult {
     std::vector<StepProof> proofs;
 };
 
+// Mirror rebinding compares roles in the destination construction frame. The
+// transform is applied to pure measured values only; no observed BRep is
+// normalized and no topology/index oracle is introduced. Points remain in
+// physical millimetres, directions retain their directed meaning, and the
+// measured normal pair is restored to the same lexicographic ordering used by
+// MeasureStageRawEdgeWitnesses.
+inline bool TransformSourceRebindRoles(const SourceRebindRoles& source,
+    const gp_Trsf& transform, double metersPerLocalUnit,
+    SourceRebindRoles& destination) noexcept {
+    destination = {};
+    try {
+        if (!std::isfinite(metersPerLocalUnit)
+            || metersPerLocalUnit <= 0) return false;
+        const double millimetersPerLocal = metersPerLocalUnit * 1000.0;
+        const double radiusScale = std::abs(transform.ScaleFactor());
+        if (!std::isfinite(millimetersPerLocal)
+            || millimetersPerLocal <= 0 || !std::isfinite(radiusScale)
+            || radiusScale <= 0) return false;
+        SourceRebindRoles transformed = source;
+        auto transformRole = [&](SelectorUseRole& role) {
+            gp_Pnt point(role.pointMM[0] / millimetersPerLocal,
+                role.pointMM[1] / millimetersPerLocal,
+                role.pointMM[2] / millimetersPerLocal);
+            point.Transform(transform);
+            gp_Dir tangent(role.tangent[0], role.tangent[1], role.tangent[2]);
+            gp_Dir normalA(role.normalA[0], role.normalA[1], role.normalA[2]);
+            gp_Dir normalB(role.normalB[0], role.normalB[1], role.normalB[2]);
+            tangent.Transform(transform);
+            normalA.Transform(transform);
+            normalB.Transform(transform);
+            role.pointMM = {point.X() * millimetersPerLocal,
+                point.Y() * millimetersPerLocal,
+                point.Z() * millimetersPerLocal};
+            role.tangent = {tangent.X(), tangent.Y(), tangent.Z()};
+            role.normalA = {normalA.X(), normalA.Y(), normalA.Z()};
+            role.normalB = {normalB.X(), normalB.Y(), normalB.Z()};
+            if (role.normalB < role.normalA)
+                std::swap(role.normalA, role.normalB);
+            role.circleRadiusMM *= radiusScale;
+            return std::isfinite(role.circleRadiusMM);
+        };
+        for (auto& step : transformed.selectorSteps)
+            for (SelectorUseRole& role : step.second)
+                if (!transformRole(role)) return false;
+        for (auto& step : transformed.rawSteps)
+            for (SelectorUseRole& role : step.second)
+                if (!transformRole(role)) return false;
+        destination = std::move(transformed);
+        return true;
+    } catch (...) {
+        destination = {};
+        return false;
+    }
+}
+
 namespace detail {
 // Measurement-only counterpart of the viewer's issuance-time anchor witness:
 // identical geometry and tolerances, but it never mints an anchor key.
@@ -820,7 +942,8 @@ inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
 // strictly replay every suffix step on its correct newly rebuilt input stage.
 inline bool ApplySourceRebind(const SourceRebindRoles& roles,
     const BaseRecipe& requested, const TopoDS_Shape& newStage, ReplayBudget& budget,
-    Refusal& refusal, SourceRebindResult& output) noexcept {
+    Refusal& refusal, SourceRebindResult& output,
+    bool requireSameWitnessPoint = false) noexcept {
     output = {};
     try {
         // C18: the new-stage census is debited before the analyzer, and the
@@ -944,6 +1067,9 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
                             || consumed.count(int(useIndex))) continue;
                         const SelectorUseRole& candidate = measured[useIndex];
                         if (candidate.curve == oldRole.curve
+                            && (!requireSameWitnessPoint
+                                || detail::SameWitnessPoint(
+                                    candidate.pointMM, oldRole.pointMM))
                             && detail::SameDirection(candidate.tangent, oldRole.tangent)
                             && detail::SameDirection(candidate.normalA, oldRole.normalA)
                             && detail::SameDirection(candidate.normalB, oldRole.normalB)
@@ -1021,7 +1147,11 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
                             refusal = Refusal::Budget; return false;
                         }
                         if (consumed.count(int(useIndex))) continue;
-                        if (detail::SameRawRoleGeometry(measured[useIndex], oldRole)) {
+                        if (detail::SameRawRoleGeometry(measured[useIndex], oldRole)
+                            && (!requireSameWitnessPoint
+                                || detail::SameWitnessPoint(
+                                    measured[useIndex].pointMM,
+                                    oldRole.pointMM))) {
                             if (found >= 0) { refusal = Refusal::AnchorAmbiguous; return false; }
                             found = int(useIndex);
                         }

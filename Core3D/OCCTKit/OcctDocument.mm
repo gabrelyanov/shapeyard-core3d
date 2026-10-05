@@ -9980,6 +9980,26 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
                 }
             }
 
+            // CLOUD-8242: a current treatment carrier on the source profile
+            // record copies its own untreated base solid per destination;
+            // debit that projected carrier/base work here.
+            Handle(core3d::retained_edge_treatment::Attribute) treatmentCarrier;
+            if (!sourceProfile.label.IsNull()
+                && sourceProfile.label.FindAttribute(
+                    core3d::retained_edge_treatment::AttributeID(), treatmentCarrier)
+                && !treatmentCarrier.IsNull() && treatmentCarrier->value()) {
+                GeometryValidationBudget treatmentBaseGeometry;
+                if (ClassifyDefinitionGeometry(treatmentCarrier->value()->base,
+                        &treatmentBaseGeometry) != DefinitionGeometryClass::BRep
+                    || !AddMultipliedWithinLimit(
+                        projectedGeometry.subshapes,
+                        treatmentBaseGeometry.subshapes,
+                        destinationCount,
+                        kMaximumSubshapesPerDocument)) {
+                    return Standard_False;
+                }
+            }
+
             Standard_Size sweepLoftLabels = 0;
             if (sourceRecipe.family != core3d::pattern_recipe_clone::Family::None) {
                 if (!AddMultipliedWithinLimit(projectedFeatures, 1U,
@@ -19797,6 +19817,249 @@ void OcctDocument::PruneTreatmentHistoryCompanions() noexcept {
 
 Standard_Boolean OcctDocument::HasUnresolvedTreatmentHistoryCompanion() const noexcept {
     return myPendingTreatmentCompanion != nullptr;
+}
+
+Standard_Boolean OcctDocument::PrepareRetainedEdgeTreatmentIndependentCopy(
+    const TDF_Label& sourceOwner,
+    const std::string& destinationProfileIdentifier,
+    const core3d::profile::Parameters& destinationParameters,
+    core3d::retained_edge_treatment::ReplayBudget& budget,
+    std::shared_ptr<const core3d::retained_edge_treatment::Payload>& prepared,
+    TopoDS_Shape& preparedRoot,
+    const TopoDS_Shape& destinationBase,
+    const std::optional<gp_Trsf>& sourceToDestination) noexcept {
+    prepared.reset(); preparedRoot.Nullify();
+    if (![NSThread isMainThread] || myOcafDoc.IsNull() || sourceOwner.IsNull()
+        || sourceOwner.Data() != myOcafDoc->GetData()) return Standard_False;
+    try {
+        namespace et = core3d::retained_edge_treatment;
+        std::optional<et::Record> sourceRecord;
+        et::Refusal refusal = et::Refusal::MalformedCarrier;
+        if (!et::Read(myOcafDoc, sourceOwner, sourceRecord, refusal)) return Standard_False;
+        if (!sourceRecord) return destinationBase.IsNull();
+        core3d::profile::Record sourceProfile;
+        if (!sourceRecord->value || !sourceRecord->IsCurrent(myOcafDoc, sourceOwner)
+            || !core3d::profile::Read(myOcafDoc, sourceOwner, sourceProfile)
+            || sourceProfile.label.IsNull() || !sourceProfile.IsCurrent(myOcafDoc, sourceOwner)
+            || !sourceRecord->label.IsEqual(sourceProfile.label)
+            || sourceRecord->value->definition.base.family != et::SourceFamily::Profile
+            || sourceRecord->value->definition.base.metersPerLocalUnit
+                != destinationParameters.metersPerUnit
+            || !core3d::profile::IsIdentifier(destinationProfileIdentifier)) return Standard_False;
+
+        const bool hasDestinationBase = !destinationBase.IsNull();
+        const TopoDS_Shape sourceRoot = XCAFDoc_ShapeTool::GetShape(sourceOwner);
+        if (sourceRoot.IsNull()
+            || hasDestinationBase != sourceToDestination.has_value()
+            || (hasDestinationBase
+                && (destinationBase.ShapeType() != TopAbs_SOLID
+                    || destinationBase.IsPartner(sourceRecord->value->base)
+                    || destinationBase.IsPartner(sourceRoot)))) return Standard_False;
+        if (sourceToDestination) {
+            core3d::profile::Parameters expectedParameters;
+            std::vector<double> expectedValues, destinationValues;
+            if (!core3d::profile::IndependentCopyParameters(
+                    sourceProfile.parameters, *sourceToDestination,
+                    expectedParameters)
+                || !core3d::profile::Encode(
+                    expectedParameters, expectedValues)
+                || !core3d::profile::Encode(
+                    destinationParameters, destinationValues)
+                || expectedValues != destinationValues)
+                return Standard_False;
+        }
+        TopoDS_Shape detachedBase;
+        const TopoDS_Shape& baseToDetach = hasDestinationBase
+            ? destinationBase : sourceRecord->value->base;
+        if (!et::DetachReplayGeometry(baseToDetach, budget,
+                detachedBase, refusal)
+            || detachedBase.IsNull() || detachedBase.ShapeType() != TopAbs_SOLID
+            || detachedBase.IsPartner(baseToDetach)
+            || (hasDestinationBase
+                && detachedBase.IsPartner(sourceRecord->value->base))) return Standard_False;
+
+        et::SourceRebindRoles roles;
+        et::SourceRebindResult rebound;
+        if (!et::CaptureSourceRebindRoles(sourceRecord->value->base,
+                sourceRecord->value->definition, sourceRecord->value->bytes,
+                budget, refusal, roles)) {
+            return Standard_False;
+        }
+        et::SourceRebindRoles transformedRoles;
+        const et::SourceRebindRoles* appliedRoles = &roles;
+        if (sourceToDestination) {
+            if (!et::TransformSourceRebindRoles(roles, *sourceToDestination,
+                    sourceProfile.parameters.metersPerUnit,
+                    transformedRoles)) {
+                return Standard_False;
+            }
+            // IndependentCopyParameters above exactly proved the destination
+            // recipe, including the one existing Profile schema transition
+            // caused by adding its signed construction frame. ApplySourceRebind
+            // must bind its canonical digest to that destination schema rather
+            // than treating the admitted frame as an unrelated source family.
+            transformedRoles.original.base.sourceSchema =
+                std::uint32_t(core3d::profile::SchemaFor(
+                    destinationParameters));
+            appliedRoles = &transformedRoles;
+        }
+        if (!et::ApplySourceRebind(*appliedRoles, destinationParameters,
+                detachedBase, budget, refusal, rebound,
+                sourceToDestination.has_value())) {
+            return Standard_False;
+        }
+
+        et::Definition definition = rebound.definition;
+        if (!core3d::receipt::ParseUUID(destinationProfileIdentifier,
+                definition.base.source.sourceFeature)
+            || !core3d::receipt::ParseUUID(NewIdentifier(), definition.base.sourceNode))
+            return Standard_False;
+        for (et::Step& step : definition.steps) {
+            if (!core3d::receipt::ParseUUID(NewIdentifier(), step.node)
+                || !core3d::receipt::ParseUUID(NewIdentifier(), step.feature))
+                return Standard_False;
+            struct RemintedAnchor {
+                et::Anchor anchor;
+                core3d::retained_recipe::UUID oldKey{};
+            };
+            std::vector<RemintedAnchor> reminted;
+            reminted.reserve(step.anchors.size());
+            for (const et::Anchor& anchor : step.anchors) {
+                RemintedAnchor entry{anchor, anchor.key};
+                if (!core3d::receipt::ParseUUID(NewIdentifier(), entry.anchor.key))
+                    return Standard_False;
+                reminted.push_back(std::move(entry));
+            }
+            std::sort(reminted.begin(), reminted.end(), [](const auto& a, const auto& b) {
+                return a.anchor.key < b.anchor.key;
+            });
+            if (step.selector) {
+                const auto previous = step.selector->entries;
+                if (previous.size() != step.anchors.size()) return Standard_False;
+                std::vector<core3d::retained_face_selector::ReceiptEntry> entries;
+                entries.reserve(reminted.size());
+                for (const auto& entry : reminted) {
+                    const auto found = std::find_if(previous.begin(), previous.end(),
+                        [&](const auto& candidate) { return candidate.anchorKey == entry.oldKey; });
+                    if (found == previous.end()) return Standard_False;
+                    entries.push_back({entry.anchor.key, found->direction});
+                }
+                step.selector->entries = std::move(entries);
+            }
+            step.anchors.clear(); step.anchors.reserve(reminted.size());
+            for (auto& entry : reminted) step.anchors.push_back(std::move(entry.anchor));
+        }
+        definition.outputNode = definition.steps.empty()
+            ? definition.base.sourceNode : definition.steps.back().node;
+        auto payload = std::make_shared<et::Payload>();
+        payload->definition = std::move(definition);
+        payload->base = detachedBase;
+        if (!et::Encode(payload->definition, payload->bytes, refusal)) return Standard_False;
+
+        TopoDS_Shape replayed;
+        std::vector<et::StepProof> proofs;
+        if (!et::Replay(payload->base, payload->definition, replayed, proofs, budget, refusal)) {
+            return Standard_False;
+        }
+        if (replayed.IsNull() || replayed.ShapeType() != TopAbs_SOLID
+            || replayed.IsPartner(sourceRoot) || replayed.IsPartner(payload->base)) {
+            return Standard_False;
+        }
+        if (!et::EquivalentReplayGeometry(rebound.treated, replayed, budget, refusal)) {
+            return Standard_False;
+        }
+        if (!hasDestinationBase
+            && !et::EquivalentReplayGeometry(sourceRoot, replayed, budget, refusal))
+            return Standard_False;
+        preparedRoot = replayed;
+        prepared = std::move(payload);
+        return Standard_True;
+    } catch (...) {
+        prepared.reset(); preparedRoot.Nullify(); return Standard_False;
+    }
+}
+
+Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentIndependentCopy(
+    const TDF_Label& sourceOwner,
+    const core3d::profile::Record& sourceProfile,
+    const TDF_Label& destinationOwner,
+    const core3d::profile::Record& destinationProfile,
+    core3d::retained_edge_treatment::ReplayBudget& budget,
+    const std::shared_ptr<const core3d::retained_edge_treatment::Payload>& prepared) noexcept {
+    if (![NSThread isMainThread] || myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+        || sourceOwner.IsNull() || destinationOwner.IsNull()
+        || sourceOwner.Data() != myOcafDoc->GetData()
+        || destinationOwner.Data() != myOcafDoc->GetData()
+        || sourceOwner.IsEqual(destinationOwner)) return Standard_False;
+    try {
+        namespace et = core3d::retained_edge_treatment;
+        core3d::profile::Record liveSource, liveDestination;
+        if (sourceProfile.label.IsNull() || destinationProfile.label.IsNull()
+            || !destinationProfile.label.Father().IsEqual(destinationOwner)
+            || !core3d::profile::Read(myOcafDoc, sourceOwner, liveSource)
+            || !liveSource.IsEqual(sourceProfile)
+            || !core3d::profile::Read(myOcafDoc, destinationOwner, liveDestination)
+            || !liveDestination.IsEqual(destinationProfile)) return Standard_False;
+        Handle(et::Attribute) sourceCarrier;
+        const bool sourceHasTreatment = sourceProfile.label.FindAttribute(
+            et::AttributeID(), sourceCarrier) && !sourceCarrier.IsNull()
+            && sourceCarrier->value();
+        if (sourceHasTreatment != (prepared != nullptr)) return Standard_False;
+        if (!prepared) return Standard_True;
+
+        auto finalPayload = std::make_shared<et::Payload>(*prepared);
+        if (!core3d::receipt::ParseUUID(DocumentIdentifier(),
+                finalPayload->definition.owner.document)
+            || !core3d::receipt::ParseUUID(EntityIdentifierForLabel(destinationOwner),
+                finalPayload->definition.owner.entity)
+            || !core3d::receipt::ParseUUID(DefinitionIdentifierForLabel(destinationOwner),
+                finalPayload->definition.owner.definition)
+            || !core3d::receipt::ParseUUID(destinationProfile.identifier,
+                finalPayload->definition.base.source.sourceFeature)) return Standard_False;
+        finalPayload->definition.base.source.document = finalPayload->definition.owner.document;
+        finalPayload->definition.base.source.entity = finalPayload->definition.owner.entity;
+        finalPayload->definition.base.source.definition = finalPayload->definition.owner.definition;
+        et::Refusal refusal = et::Refusal::MalformedCarrier;
+        if (!et::Encode(finalPayload->definition, finalPayload->bytes, refusal))
+            return Standard_False;
+
+        std::vector<std::uint8_t> sourceBytes;
+        et::Digest digest{};
+        if (finalPayload->definition.base.sourceSchema
+                != std::uint32_t(core3d::profile::SchemaFor(destinationProfile.parameters))
+            || finalPayload->definition.base.metersPerLocalUnit
+                != destinationProfile.parameters.metersPerUnit
+            || !core3d::composite_recipe::EncodeScalarRecipe(
+                core3d::composite_recipe::RecipeKind::Profile,
+                finalPayload->definition.base.sourceSchema, destinationProfile.values,
+                sourceBytes)
+            || !core3d::composite_recipe::Hash(sourceBytes, digest)
+            || digest != finalPayload->definition.base.sourceRecipeDigest)
+            return Standard_False;
+
+        TopoDS_Shape verified;
+        std::vector<et::StepProof> proofs;
+        const TopoDS_Shape destinationRoot = XCAFDoc_ShapeTool::GetShape(destinationOwner);
+        if (destinationRoot.IsNull()
+            || !et::Replay(finalPayload->base, finalPayload->definition,
+                verified, proofs, budget, refusal)
+            || !et::EquivalentReplayGeometry(destinationRoot, verified, budget, refusal))
+            return Standard_False;
+        et::Attribute::Set(destinationProfile.label, finalPayload);
+
+        std::optional<et::Record> destinationReadback, sourceReadback;
+        if (!et::Read(myOcafDoc, destinationOwner, destinationReadback, refusal)
+            || !destinationReadback || !destinationReadback->value
+            || destinationReadback->value->bytes != finalPayload->bytes
+            || !destinationReadback->label.IsEqual(destinationProfile.label)
+            || !destinationReadback->IsCurrent(myOcafDoc, destinationOwner)
+            || !et::Read(myOcafDoc, sourceOwner, sourceReadback, refusal)
+            || !sourceReadback || !sourceReadback->value
+            || sourceReadback->value->bytes != sourceCarrier->value()->bytes
+            || !core3d::profile::Read(myOcafDoc, sourceOwner, liveSource)
+            || !liveSource.IsEqual(sourceProfile)) return Standard_False;
+        return Standard_True;
+    } catch (...) { return Standard_False; }
 }
 
 Standard_Boolean OcctDocument::FinalizeTreatmentHistoryCompanion() noexcept {

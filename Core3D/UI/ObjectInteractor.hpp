@@ -528,6 +528,7 @@ namespace core3d {
             bool originalProfileCurrent = false;
             TopoDS_Shape preparedProfileBinding;
             std::string preparedProfileIdentifier;
+            std::shared_ptr<const core3d::retained_edge_treatment::Payload> preparedTreatmentCopy;
             profile::Record candidateProfile;
             bool profileCandidateSealed = false;
             bool originalEnclosureCurrent = false;
@@ -566,6 +567,8 @@ namespace core3d {
             bool documentLengthUnitPresent = false;
             TopoDS_Shape preparedProfileBinding;
             std::string profileIdentifier;
+            std::shared_ptr<const core3d::retained_edge_treatment::Payload>
+                preparedTreatmentCopy;
             Standard_Boolean enclosureCurrent = Standard_False;
             Standard_Size retainedEnclosureTopologyNodes = 0;
             TopoDS_Shape preparedEnclosureBinding;
@@ -613,6 +616,7 @@ namespace core3d {
 		};
 		std::vector<MirrorSourceSnapshot> _trialMirrorSources;
 		std::vector<MirrorPendingResult> _pendingMirrorResults;
+		core3d::retained_edge_treatment::ReplayBudget _mirrorTreatmentBudget;
 		std::optional<MirrorPlaneReferenceSnapshot> _customMirrorPlane;
 		std::vector<Handle(AIS_Shape)> _mirrorReferencePresentations;
 		std::vector<MirrorPlanePickSelectionModes> _mirrorPlanePickModes;
