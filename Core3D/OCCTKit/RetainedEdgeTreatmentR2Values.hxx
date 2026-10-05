@@ -23,6 +23,12 @@ inline constexpr std::uint32_t MigrationVersion = 1;
 inline constexpr std::size_t MaximumMigrationSteps = 8;
 inline constexpr std::size_t MaximumMigrationAnchors = 16;
 
+inline bool IsR2Carrier(const std::vector<std::uint8_t>& bytes) noexcept {
+    return bytes.size() > 60 && std::memcmp(bytes.data(), "SYET", 4) == 0
+        && (bytes[4] == 2 || bytes[4] == 3) && bytes[5] == 0 && bytes[6] == 0
+        && bytes[7] == 0 && bytes[60] == 3;
+}
+
 using UUID = rr::UUID;
 using Digest = rr::Digest;
 enum class SourceFamily : std::uint8_t { Profile = 1, Enclosure = 2, RetainedBoolean = 3 };
@@ -203,7 +209,7 @@ inline bool Valid(const Definition& value, et::Refusal& refusal) noexcept {
         return et::detail::valid(lifted, refusal);
     }
     const auto* boolean = std::get_if<BooleanBaseBinding>(&value.base);
-    if (value.schema != 2 || !rr::Valid(value.owner) || !boolean || !Valid(*boolean)
+    if ((value.schema != 2 && value.schema != 3) || !rr::Valid(value.owner) || !boolean || !Valid(*boolean)
         || boolean->source.document != value.owner.document || boolean->source.entity != value.owner.entity
         || boolean->source.definition != value.owner.definition || !rr::Valid(value.issuance)
         || value.steps.size() > et::MaximumSteps) { refusal = et::Refusal::MalformedCarrier; return false; }
@@ -214,7 +220,7 @@ inline bool Valid(const Definition& value, et::Refusal& refusal) noexcept {
     shadow.sourceSchema = boolean->sourceSchema;
     shadow.sourceRecipeDigest = boolean->sourceRecipeDigest;
     shadow.metersPerLocalUnit = boolean->metersPerLocalUnit;
-    et::Definition checked{2, value.owner, shadow, value.issuance, value.outputNode, value.steps};
+    et::Definition checked{value.schema, value.owner, shadow, value.issuance, value.outputNode, value.steps};
     if (!et::detail::valid(checked, refusal)) return false;
     refusal = et::Refusal::None;
     return true;
@@ -271,7 +277,7 @@ inline bool Encode(const Definition& value, std::vector<std::uint8_t>& output, e
         }
         const auto& base = std::get<BooleanBaseBinding>(value.base);
         detail::Writer writer;
-        writer.raw("SYET", 4); writer.u(2, 4);
+        writer.raw("SYET", 4); writer.u(value.schema, 4);
         writer.raw(value.owner.document); writer.raw(value.owner.entity); writer.raw(value.owner.definition);
         writer.u(1, 4); writer.u(3, 1); writer.u(base.sourceContractRevision, 4);
         writer.u(std::uint8_t(base.format), 1); writer.u(base.prefixBindingVersion, 4);
@@ -323,20 +329,25 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes, std::optional<Definit
     try {
         if (bytes.size() < 9 || std::memcmp(bytes.data(), "SYET", 4) != 0) { refusal = et::Refusal::MalformedCarrier; return false; }
         std::uint32_t schema = 0; std::memcpy(&schema, bytes.data() + 4, 4);
-        if (schema == 1 || (schema == 2 && bytes.size() > 60 && bytes[60] != 3)) {
+        // Dispatch is the (schema,family) pair. Ordinary schema 1/2/3
+        // families stay with the ordinary decoder; family 3 is exclusively
+        // the R2 layout and is admitted only at schema 2 or 3.
+        if (!IsR2Carrier(bytes) && (schema == 1
+            || ((schema == 2 || schema == 3) && bytes.size() > 60 && bytes[60] != 3))) {
             std::optional<et::Definition> old;
             if (!et::Decode(bytes, old, refusal) || !old) return false;
             output = Definition{old->schema, old->owner, old->base, old->issuance, old->outputNode, old->steps};
             return true;
         }
-        if (schema != 2 || bytes.size() > et::MaximumEnvelopeBytes || bytes.size() < 32) {
+        if ((schema != 2 && schema != 3)
+            || bytes.size() > et::MaximumEnvelopeBytes || bytes.size() < 32) {
             refusal = et::Refusal::UnsupportedVersion; return false;
         }
         Digest actual{};
         if (!CC_SHA256(bytes.data(), CC_LONG(bytes.size() - 32), actual.data())
             || !std::equal(actual.begin(), actual.end(), bytes.end() - 32)) { refusal = et::Refusal::MalformedCarrier; return false; }
         detail::Reader reader{bytes, bytes.size() - 32, 8, true};
-        Definition value; value.schema = 2; std::uint64_t integer = 0;
+        Definition value; value.schema = schema; std::uint64_t integer = 0;
         if (!reader.raw(value.owner.document) || !reader.raw(value.owner.entity) || !reader.raw(value.owner.definition)
             || !reader.u(4, integer) || integer != 1 || !reader.u(1, integer) || integer != 3) {
             refusal = et::Refusal::MalformedCarrier; return false;

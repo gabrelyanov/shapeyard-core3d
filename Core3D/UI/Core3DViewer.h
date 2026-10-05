@@ -386,7 +386,8 @@ namespace core3d {
     std::shared_ptr<retained_edge_treatment::r2::Work> prepareEdgeTreatmentSelectorAppendR2(
         const std::shared_ptr<const retained_edge_treatment::r2::Snapshot>&,
         const std::shared_ptr<const retained_edge_treatment::r2::SelectorTargetCapture>&,
-        double, const ObjectFrameIdentity&, std::uint64_t, std::uint32_t, std::uint32_t,
+        retained_edge_treatment::Kind, double, const ObjectFrameIdentity&, std::uint64_t,
+        std::uint32_t, std::uint32_t,
         retained_edge_treatment::Refusal&) noexcept;
     std::shared_ptr<retained_edge_treatment::r2::Work> prepareEdgeTreatmentEditR2(
         const std::shared_ptr<const retained_edge_treatment::r2::Snapshot>&,

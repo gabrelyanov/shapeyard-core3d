@@ -1423,12 +1423,13 @@ std::shared_ptr<retained_edge_treatment::r2::Work>
 Core3DViewer::prepareEdgeTreatmentSelectorAppendR2(
     const std::shared_ptr<const retained_edge_treatment::r2::Snapshot>& original,
     const std::shared_ptr<const retained_edge_treatment::r2::SelectorTargetCapture>& targets,
-    double amountMM,const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
+    retained_edge_treatment::Kind kind,double amountMM,const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
     std::uint32_t width,std::uint32_t height,
     retained_edge_treatment::Refusal& refusal) noexcept {
     namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;namespace fs=retained_face_selector;
     refusal=et::Refusal::StaleSnapshot;
     if(![NSThread isMainThread]||!original||!targets||targets->original_!=original
+        ||(kind!=et::Kind::ConstantFillet&&kind!=et::Kind::Chamfer)
         ||!std::isfinite(amountMM)||amountMM<=0||amountMM>20||original->definition_.steps.size()>=et::MaximumSteps
         ||!canBeginCommittedEdit()||myDoc.IsNull()||myContext.IsNull()||!width||!height
         ||original->ownerLabel_.IsNull())return {};
@@ -1443,14 +1444,15 @@ Core3DViewer::prepareEdgeTreatmentSelectorAppendR2(
         ||!selected->Shape().IsEqual(original->current_))return {};
     et::ReplayBudget budget;CopyTopologyBudget(budget,targets->chargedBudget_);
     r2::Definition candidate=original->definition_;et::Step step;
-    if(!IssueSelectorStep(*targets->proof_,original->dimensionMetersPerUnit(),et::Kind::ConstantFillet,amountMM,
+    if(!IssueSelectorStep(*targets->proof_,original->dimensionMetersPerUnit(),kind,amountMM,
         candidate.issuance.nextLocalID++,budget,step,refusal)){
 #if DEBUG
         tb::debug::RecordPhase("prepare-r2",targets->chargedBudget_,budget);
 #endif
         return {};}
+    if(kind==et::Kind::Chamfer)candidate.schema=3;
     candidate.steps.push_back(step);candidate.outputNode=step.node;std::vector<std::uint8_t> bytes;if(!r2::Encode(candidate,bytes,refusal))return {};
-    auto work=std::make_shared<r2::Work>();work->snapshot_=original;work->candidate_=candidate;work->source_=original->source_;
+    auto work=std::make_shared<r2::Work>();work->snapshot_=original;work->mutation_=r2::Edit(r2::SelectorAppend{kind,amountMM});work->candidate_=candidate;work->source_=original->source_;
     work->base_=original->base_;work->originalCurrent_=original->current_;work->nonce_=original->nonce_;work->label_=original->ownerLabel_;
     work->chargedBudget_=targets->chargedBudget_;CopyTopologyBudget(work->chargedBudget_,budget);
 #if DEBUG
@@ -1520,7 +1522,7 @@ std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTrea
         // the unique-correspondence discipline of et::ApplySourceRebind. The
         // shadow B1 view shares the exact steps/issuance; its byte proof uses
         // the freshly encoded shadow bytes.
-        et::Definition shadowDef;shadowDef.schema=2;shadowDef.owner=candidate.owner;
+        et::Definition shadowDef;shadowDef.schema=candidate.schema;shadowDef.owner=candidate.owner;
         shadowDef.base.family=program->source.family==1?et::SourceFamily::Profile
             :program->source.family==2?et::SourceFamily::Enclosure:et::SourceFamily::RectangularLoft;
         shadowDef.base.source=boolean->source;shadowDef.base.sourceNode=boolean->sourceNode;
@@ -1544,7 +1546,11 @@ std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTrea
         const auto* boolean=std::get_if<r2::BooleanBaseBinding>(&candidate.base);
         const auto* source=std::get_if<r2::RetainedBooleanBase>(&original->source_);
         const auto* legacy=source?std::get_if<r2::LegacyBooleanBase>(&source->source):nullptr;
+        retained_boolean::Program promoted;
         const auto* program=legacy?std::get_if<retained_boolean::Program>(&legacy->prefix):nullptr;
+        if(!program&&legacy){const auto*old=std::get_if<retained_boolean::Legacy>(&legacy->prefix);
+            if(!old||!retained_boolean::Promote(*old,promoted)){refusal=et::Refusal::MalformedCarrier;return {};}
+            program=&promoted;}
         const auto* links=boolean?std::get_if<r2::LegacyPrefixBinding>(&boolean->prefix):nullptr;
         const bool known=program&&links&&tool->operandID&&!original->sourceBase_.IsNull()
             &&std::any_of(program->steps.begin(),program->steps.end(),[&](const retained_boolean::Step&s){return s.operand.identifier==tool->operandID;})
@@ -1556,7 +1562,7 @@ std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTrea
         // and replace only anchors/receipt. The Boolean prefix is untouched,
         // so the suffix replay in buildEdgeTreatmentR2 re-resolves the new
         // receipt exactly like any other candidate step.
-        et::Definition shadow;shadow.schema=2;shadow.owner=candidate.owner;
+        et::Definition shadow;shadow.schema=candidate.schema;shadow.owner=candidate.owner;
         if(const auto* old=std::get_if<et::BaseBinding>(&candidate.base))shadow.base=*old;
         else{const auto& boolean=std::get<r2::BooleanBaseBinding>(candidate.base);
             shadow.base.family=et::SourceFamily::Profile;shadow.base.source=boolean.source;
@@ -1613,7 +1619,7 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
     if(!input||!input->cancelled_||input->cancelled_->load()){refusal=et::Refusal::Cancelled;return {};}
     auto result=std::shared_ptr<r2::DetachedResult>(new r2::DetachedResult);result->nonce_=input->nonce_;result->definition_=input->candidate_;
     result->budget_=input->chargedBudget_;et::ReplayBudget budget;CopyTopologyBudget(budget,input->chargedBudget_);
-    result->source_=input->source_;result->base_=input->base_;std::visit([&](const auto& source){if constexpr(std::is_same_v<std::decay_t<decltype(source)>,r2::RetainedBooleanBase>)result->prefixBytes_=std::visit([](const auto& arm){return arm.canonicalPrefixBytes;},source.source);},input->source_);
+    result->source_=input->source_;result->edit_=input->edit_;result->base_=input->base_;std::visit([&](const auto& source){if constexpr(std::is_same_v<std::decay_t<decltype(source)>,r2::RetainedBooleanBase>)result->prefixBytes_=std::visit([](const auto& arm){return arm.canonicalPrefixBytes;},source.source);},input->source_);
     if(input->edit_&&(std::holds_alternative<r2::RebuildBooleanInput>(*input->edit_)||std::holds_alternative<r2::RebuildAnalyticTool>(*input->edit_))){
         // Replay the complete changed prefix first; the preserved suffix is
         // replayed on its result below. The candidate binding is re-digested

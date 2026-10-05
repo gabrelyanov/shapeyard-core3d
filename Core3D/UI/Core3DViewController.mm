@@ -10,6 +10,7 @@
 #include "RetainedSemanticChamferAdapter.hxx"
 #include <thread>
 #endif
+#include "RetainedR2ChamferAdapter.hxx"
 #if DEBUG
 #include "../OCCTKit/DetachedRectangularLoftProbe.hxx"
 #include <GProp_GProps.hxx>
@@ -22361,6 +22362,7 @@ std::unordered_map<NSUInteger,B2BudgetSessionBox>& B2BudgetSessions(){
         [query setValue:@(core3d::retained_face_selector::RefusalCode(refusal)) forKey:@"refusalCode"];
         [query setValue:@(core3d::retained_face_selector::RefusalMessage(refusal)) forKey:@"refusalMessage"];return query;}
     auto value=B1Object<Core3DFaceSelectorNativeProofR2>(Core3DFaceSelectorNativeProofR2.class);value->native=proof;[value setValue:@2 forKey:@"contractRevision"];
+    [value setValue:B1SelectorProof(intent,*proof->selectorProof()) forKey:@"selectorProof"];
     [query setValue:@(Core3DFaceSelectorStatusProved) forKey:@"status"];[query setValue:@(Core3DFaceSelectorRefusalNone) forKey:@"refusal"];
     [query setValue:value forKey:@"proof"];[query setValue:@"b2.None" forKey:@"refusalCode"];[query setValue:@"" forKey:@"refusalMessage"];return query;
 }
@@ -22463,7 +22465,11 @@ std::unordered_map<NSUInteger,B2BudgetSessionBox>& B2BudgetSessions(){
 }
 
 - (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentSelectorAppendR2:(Core3DEdgeTreatmentSnapshotR2 *)original amountMM:(double)amountMM proof:(Core3DFaceSelectorProofR2 *)proof expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {
-    auto snapshot=(Core3DEdgeTreatmentNativeSnapshotR2*)original;auto admitted=(Core3DFaceSelectorNativeProofR2*)proof;const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=original.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;core3d::retained_edge_treatment::Refusal refusal;auto work=GLController.viewer->prepareEdgeTreatmentSelectorAppendR2(snapshot->native,admitted->native,amountMM,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);auto nativeSnapshot=snapshot->native;return [self core3d_beginEdgeTreatmentR2:work completion:completion provenance:^(Core3DEdgeTreatmentResult *dto,const std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>&built){B1BindR2(dto,nativeSnapshot,built);}];
+    auto snapshot=(Core3DEdgeTreatmentNativeSnapshotR2*)original;auto admitted=(Core3DFaceSelectorNativeProofR2*)proof;const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=original.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;core3d::retained_edge_treatment::Refusal refusal;auto work=GLController.viewer->prepareEdgeTreatmentSelectorAppendR2(snapshot->native,admitted->native,core3d::retained_edge_treatment::Kind::ConstantFillet,amountMM,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);auto nativeSnapshot=snapshot->native;return [self core3d_beginEdgeTreatmentR2:work completion:completion provenance:^(Core3DEdgeTreatmentResult *dto,const std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>&built){B1BindR2(dto,nativeSnapshot,built);} refusal:refusal];
+}
+
+- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentSelectorChamferAppendR2:(Core3DEdgeTreatmentSnapshotR2 *)original amountMM:(double)amountMM proof:(Core3DFaceSelectorProofR2 *)proof expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {
+    auto snapshot=(Core3DEdgeTreatmentNativeSnapshotR2*)original;auto admitted=(Core3DFaceSelectorNativeProofR2*)proof;const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=original.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;core3d::retained_edge_treatment::Refusal refusal;auto work=GLController.viewer->prepareEdgeTreatmentSelectorAppendR2(snapshot->native,admitted->native,core3d::retained_r2_chamfer_adapter::SelectorAppendKind(),amountMM,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);auto nativeSnapshot=snapshot->native;return [self core3d_beginEdgeTreatmentR2:work completion:completion provenance:^(Core3DEdgeTreatmentResult *dto,const std::shared_ptr<const core3d::retained_edge_treatment::r2::DetachedResult>&built){B1BindR2(dto,nativeSnapshot,built);} refusal:refusal];
 }
 
 - (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentEditR2:(Core3DEdgeTreatmentSnapshotR2 *)original edit:(Core3DRetainedBooleanEditR2 *)edit expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {

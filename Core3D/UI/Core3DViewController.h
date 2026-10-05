@@ -2076,6 +2076,13 @@ __attribute__((objc_subclassing_restricted))
     proof:(Core3DFaceSelectorProofR2 *)proof expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DEdgeTreatmentResult *))completion
     NS_SWIFT_NAME(beginEdgeTreatmentSelectorAppendR2(_:amountMM:proof:expected:completion:));
+//! Explicit R2 semantic Chamfer append. The native proof remains the sole
+//! target authority; success upgrades only the treatment carrier to schema 3.
+- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentSelectorChamferAppendR2:
+    (Core3DEdgeTreatmentSnapshotR2 *)original amountMM:(double)amountMM
+    proof:(Core3DFaceSelectorProofR2 *)proof expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DEdgeTreatmentResult *))completion
+    NS_SWIFT_NAME(beginEdgeTreatmentSelectorChamferAppendR2(_:amountMM:proof:expected:completion:));
 - (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentEditR2:(Core3DEdgeTreatmentSnapshotR2 *)original
     edit:(Core3DRetainedBooleanEditR2 *)edit expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DEdgeTreatmentResult *))completion

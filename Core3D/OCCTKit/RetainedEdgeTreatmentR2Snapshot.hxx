@@ -15,7 +15,8 @@ class OcctDocument;
 namespace core3d { class Core3DViewer; }
 
 namespace core3d::retained_edge_treatment::r2 {
-using Edit = std::variant<et::SetAmount, et::Remove, RebuildBooleanInput,
+struct SelectorAppend { et::Kind kind = et::Kind::ConstantFillet; double amountMM = 0; };
+using Edit = std::variant<et::SetAmount, et::Remove, SelectorAppend, RebuildBooleanInput,
                           RebuildAnalyticTool, SetBooleanOperation, SetInputPlacement,
                           et::SetSelectorIntent>;
 // R2 replay accounting shares the common per-operation topology counter with
@@ -117,6 +118,8 @@ class SelectorTargetCapture final {
     std::shared_ptr<const Snapshot> original_;
     std::shared_ptr<const fs::FaceMembershipProof> proof_;
     ReplayBudget chargedBudget_;
+public:
+    const std::shared_ptr<const fs::FaceMembershipProof>& selectorProof() const noexcept { return proof_; }
 };
 
 class DetachedInput final {
@@ -141,6 +144,7 @@ class DetachedResult final {
     std::uint64_t nonce_ = 0;
     Definition definition_;
     BaseRecipe source_;
+    std::optional<Edit> edit_;
     std::vector<std::uint8_t> definitionBytes_, prefixBytes_;
     // Set only when an admitted source edit rebuilt the prefix: the restaged
     // pre-Boolean source base and a marker the staging path requires before

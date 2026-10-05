@@ -414,6 +414,35 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
         std::optional<et::RecordR2> live;if(!et::ReadR2(myOcafDoc,original.ownerLabel_,live,refusal)||!live
             ||live->value->bytes!=original.definitionBytes_)return Standard_False;
         std::vector<std::uint8_t> exact;if(!r2::Encode(built.definition_,exact,refusal)||exact!=built.definitionBytes_)return Standard_False;
+        // An explicit selector append is kind-bound at all three authority
+        // boundaries: requested kind, native-issued step kind and staged kind.
+        // Chamfer alone upgrades 2 -> 3; a fillet append preserves the live
+        // schema, and neither path may alter the prefix, prior steps or
+        // retirement ledger while presenting itself as an append.
+        if(built.edit_){
+            if(const auto* append=std::get_if<r2::SelectorAppend>(&*built.edit_)){
+                const auto* oldBase=std::get_if<r2::BooleanBaseBinding>(&original.definition_.base);
+                const auto* newBase=std::get_if<r2::BooleanBaseBinding>(&built.definition_.base);
+                const std::uint32_t expectedSchema=append->kind==et::Kind::Chamfer
+                    ?3:original.definition_.schema;
+                if(!oldBase||!newBase||!(*oldBase==*newBase)||built.sourceChanged()
+                    ||built.definition_.schema!=expectedSchema
+                    ||!(built.definition_.owner==original.definition_.owner)
+                    ||built.definition_.steps.size()!=original.definition_.steps.size()+1
+                    ||built.definition_.issuance.nextLocalID!=original.definition_.issuance.nextLocalID+1
+                    ||built.definition_.issuance.retiredLocalIDs!=original.definition_.issuance.retiredLocalIDs
+                    ||!std::equal(original.definition_.steps.begin(),original.definition_.steps.end(),
+                        built.definition_.steps.begin())){
+                    refusal=et::Refusal::IdentityMismatch;return Standard_False;
+                }
+                const auto& issued=built.definition_.steps.back();
+                if(issued.kind!=append->kind||issued.amountMM!=append->amountMM
+                    ||!issued.selector||issued.localID!=original.definition_.issuance.nextLocalID
+                    ||built.definition_.outputNode!=issued.node){
+                    refusal=et::Refusal::IdentityMismatch;return Standard_False;
+                }
+            }
+        }
         // L11: one continuation verifies the complete detached candidate and
         // reserves its protected readback before any carrier or shape write.
         et::ReplayBudget commitBudget;
