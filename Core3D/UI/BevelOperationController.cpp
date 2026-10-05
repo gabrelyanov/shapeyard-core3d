@@ -90,6 +90,22 @@ struct BevelPreviewWorkerResult {
 
 namespace {
 
+Standard_Boolean RetainedBevelCoverageMatches(
+    const OcctRetainedRecipeCoverage theCoverage,
+    const std::shared_ptr<const RetainedBevelAdapter::Capture>& theCapture) noexcept
+{
+    if (!theCapture || !theCapture->snapshot) return Standard_False;
+    switch (theCapture->snapshot->effectiveDefinition().base.family) {
+        case retained_edge_treatment::SourceFamily::Profile:
+            return theCoverage == OcctRetainedRecipeCoverage::CurrentProfile;
+        case retained_edge_treatment::SourceFamily::Enclosure:
+            return theCoverage
+                == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage;
+        default:
+            return Standard_False;
+    }
+}
+
 dispatch_queue_t BevelWorkerQueue()
 {
     static dispatch_queue_t aQueue = []() {
@@ -1099,7 +1115,8 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
                 && bool(aSelection.retainedCapture->snapshot);
             const auto coverage=myDoc->RetainedRecipeCoverageForLabel(aSelection.documentLabel);
             if ((hasRetainedCapture
-                    && (coverage != OcctRetainedRecipeCoverage::CurrentProfile
+                    && (!RetainedBevelCoverageMatches(
+                            coverage, aSelection.retainedCapture)
                         || theSelection.size() != 1
                         || !myRetainedAdapter))
                 || (!hasRetainedCapture
@@ -1732,7 +1749,8 @@ BevelApplyResult BevelOperationController::apply() noexcept
 			const OcctRetainedRecipeCoverage aCoverage =
 				myDoc->RetainedRecipeCoverageForLabel(source.label);
 			if (source.retainedCapture) {
-				if (aCoverage != OcctRetainedRecipeCoverage::CurrentProfile
+				if (!RetainedBevelCoverageMatches(
+						aCoverage, source.retainedCapture)
 					|| !source.retainedCapture->snapshot
 					|| !source.retainedEdit
 					|| !source.retainedResult) {

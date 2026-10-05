@@ -362,10 +362,12 @@ Standard_Boolean Core3DViewer::captureRetainedBevelSelection(
         || label.IsNull() || source.IsNull() || edges.empty()) return Standard_False;
     try {
         const auto document = myDoc->Document();
+        const auto coverage = myDoc->RetainedRecipeCoverageForLabel(label);
         if (document.IsNull() || document->HasOpenCommand()
             || label.Data() != document->GetData()
-            || myDoc->RetainedRecipeCoverageForLabel(label)
-                != OcctRetainedRecipeCoverage::CurrentProfile
+            || (coverage != OcctRetainedRecipeCoverage::CurrentProfile
+                && coverage
+                    != OcctRetainedRecipeCoverage::PresentOutsideP4Coverage)
             || !XCAFDoc_ShapeTool::GetShape(label).IsEqual(source)) return Standard_False;
 
         Handle(AIS_Shape) presentation;
@@ -397,9 +399,15 @@ Standard_Boolean Core3DViewer::captureRetainedBevelSelection(
             const auto profile = storedProfileDefinition(identity,
                 sceneSnapshot->revisions.presentation, 64, 64);
             if (profile) snapshot = profile->edgeTreatment;
+            if (!snapshot) {
+                const auto enclosure = storedEnclosureDefinition(identity,
+                    sceneSnapshot->revisions.presentation, 64, 64);
+                if (enclosure) snapshot = enclosure->edgeTreatment;
+            }
         }
         if (!snapshot || !snapshot->current()
-            || snapshot->effectiveDefinition().base.family != et::SourceFamily::Profile
+            || !RetainedBevelAdapter::SupportsFamily(
+                snapshot->effectiveDefinition().base.family)
             || !snapshot->current_.IsEqual(source)) return Standard_False;
 
         et::ReplayBudget budget = snapshot->chargedBudget_;
@@ -505,28 +513,50 @@ Standard_Boolean Core3DViewer::prepareRetainedBevelPreview(
     try {
         const auto& snapshot = capture.snapshot;
         const auto document = myDoc->Document();
+        const auto family = snapshot->effectiveDefinition().base.family;
+        const auto coverage = myDoc->RetainedRecipeCoverageForLabel(
+            snapshot->ownerLabel_);
+        const bool coverageMatches =
+            (family == et::SourceFamily::Profile
+                && coverage == OcctRetainedRecipeCoverage::CurrentProfile)
+            || (family == et::SourceFamily::Enclosure
+                && coverage
+                    == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage);
         if (document.IsNull() || document->HasOpenCommand()
             || snapshot->ownerLabel_.IsNull()
             || snapshot->ownerLabel_.Data() != document->GetData()
             || !myContext->IsDisplayed(capture.presentation)
             || !myDoc->ShapeLabel(capture.presentation).IsEqual(snapshot->ownerLabel_)
             || !capture.presentation->Shape().IsEqual(snapshot->current_)
-            || myDoc->RetainedRecipeCoverageForLabel(snapshot->ownerLabel_)
-                != OcctRetainedRecipeCoverage::CurrentProfile) return Standard_False;
+            || !coverageMatches) return Standard_False;
         OcctObjectTransformState live;
         std::vector<std::uint8_t> liveSourceBytes;
         if (!myDoc->CaptureObjectTransformStateForLabel(
                 snapshot->ownerLabel_, live)
-            || !live.shape.IsEqual(snapshot->current_)
-            || live.profile.label.IsNull()
-            || !live.profile.label.IsEqual(snapshot->sourceLabel_)
-            || live.profile.identifier != snapshot->sourceIdentifier_
-            || !live.profile.IsCurrent(document, snapshot->ownerLabel_)
-            || !composite_recipe::EncodeScalarRecipe(
-                composite_recipe::RecipeKind::Profile,
-                profile::SchemaFor(live.profile.parameters),
-                live.profile.values, liveSourceBytes)
-            || liveSourceBytes != snapshot->sourceBytes_
+            || !live.shape.IsEqual(snapshot->current_)) {
+            return Standard_False;
+        }
+        bool sourceMatches = false;
+        if (family == et::SourceFamily::Profile) {
+            sourceMatches = !live.profile.label.IsNull()
+                && live.profile.label.IsEqual(snapshot->sourceLabel_)
+                && live.profile.identifier == snapshot->sourceIdentifier_
+                && live.profile.IsCurrent(document, snapshot->ownerLabel_)
+                && composite_recipe::EncodeScalarRecipe(
+                    composite_recipe::RecipeKind::Profile,
+                    profile::SchemaFor(live.profile.parameters),
+                    live.profile.values, liveSourceBytes);
+        } else if (family == et::SourceFamily::Enclosure) {
+            sourceMatches = !live.enclosure.label.IsNull()
+                && live.enclosure.label.IsEqual(snapshot->sourceLabel_)
+                && live.enclosure.identifier == snapshot->sourceIdentifier_
+                && live.enclosure.IsCurrent(document, snapshot->ownerLabel_)
+                && composite_recipe::EncodeScalarRecipe(
+                    composite_recipe::RecipeKind::Enclosure,
+                    live.enclosure.parameters.definition.constructionFrame ? 2 : 1,
+                    live.enclosure.values, liveSourceBytes);
+        }
+        if (!sourceMatches || liveSourceBytes != snapshot->sourceBytes_
             || bool(live.edgeTreatment) != bool(snapshot->definition_)
             || (live.edgeTreatment
                 && (live.edgeTreatment->value->bytes
@@ -539,7 +569,8 @@ Standard_Boolean Core3DViewer::prepareRetainedBevelPreview(
         }
 
         et::Definition candidate = snapshot->definition_.value_or(snapshot->seed_);
-        if (candidate.base.family != et::SourceFamily::Profile
+        if (candidate.base.family != family
+            || !RetainedBevelAdapter::SupportsFamily(family)
             || candidate.steps.size() >= et::MaximumSteps) {
             refusal = et::Refusal::UnsupportedBase;
             return Standard_False;
@@ -5505,23 +5536,59 @@ Core3DViewer::storedEdgeTreatmentTargetSnapshot(
         const auto label = myDoc->ShapeLabel(selected);
         if (!myDoc->CaptureObjectTransformStateForLabel(label, state)
             || state.entityIdentifier != identity.entityIdentifier
-            || state.resolvedRepresentation != OcctGeometryRepresentation::BRep
-            || state.profile.label.IsNull()) return {};
-        const double constructionScale = state.profile.parameters.constructionFrame
-            ? state.profile.parameters.constructionFrame->values[7] : 1.0;
-        double dimensionMetersPerUnit = state.profile.parameters.metersPerUnit
+            || state.resolvedRepresentation != OcctGeometryRepresentation::BRep)
+            return {};
+        namespace et = retained_edge_treatment;
+        et::SourceFamily family = et::SourceFamily(0);
+        TDF_Label sourceLabel;
+        std::string sourceIdentifier;
+        std::uint32_t sourceSchema = 0;
+        composite_recipe::RecipeKind recipeKind = composite_recipe::RecipeKind(0);
+        std::vector<double> sourceValues;
+        et::BaseRecipe source;
+        double sourceMetersPerUnit = 0.0;
+        double constructionScale = 1.0;
+        bool current = false;
+        if (!state.profile.label.IsNull() && state.enclosure.label.IsNull()) {
+            family = et::SourceFamily::Profile;
+            sourceLabel = state.profile.label;
+            sourceIdentifier = state.profile.identifier;
+            sourceSchema = std::uint32_t(profile::SchemaFor(state.profile.parameters));
+            recipeKind = composite_recipe::RecipeKind::Profile;
+            sourceValues = state.profile.values;
+            source = state.profile.parameters;
+            sourceMetersPerUnit = state.profile.parameters.metersPerUnit;
+            constructionScale = state.profile.parameters.constructionFrame
+                ? state.profile.parameters.constructionFrame->values[7] : 1.0;
+            current = state.profile.IsCurrent(myDoc->Document(), label)
+                && profile::HasOnlyMetadataSubshapes(myDoc->Document(), label);
+        } else if (state.profile.label.IsNull() && !state.enclosure.label.IsNull()) {
+            family = et::SourceFamily::Enclosure;
+            sourceLabel = state.enclosure.label;
+            sourceIdentifier = state.enclosure.identifier;
+            sourceSchema = state.enclosure.parameters.definition.constructionFrame ? 2 : 1;
+            recipeKind = composite_recipe::RecipeKind::Enclosure;
+            sourceValues = state.enclosure.values;
+            source = state.enclosure.parameters;
+            sourceMetersPerUnit = state.enclosure.parameters.metersPerUnit;
+            constructionScale = state.enclosure.parameters.definition.constructionFrame
+                ? state.enclosure.parameters.definition.constructionFrame->values[7] : 1.0;
+            current = state.enclosure.IsCurrent(myDoc->Document(), label)
+                && enclosure::HasOnlyMetadataSubshapes(myDoc->Document(), label);
+        } else {
+            return {};
+        }
+        double dimensionMetersPerUnit = sourceMetersPerUnit
             * std::abs(constructionScale) * std::abs(state.scalars[7]);
         if (!std::isfinite(dimensionMetersPerUnit) || dimensionMetersPerUnit <= 0
             || !std::isfinite(dimensionMetersPerUnit * 1000.0))
             dimensionMetersPerUnit = 0; // Unsupported physical scale does not hide a manual recipe.
-        const bool current = state.profile.IsCurrent(myDoc->Document(), label)
-            && profile::HasOnlyMetadataSubshapes(myDoc->Document(), label);
         if (!current) return {};
-        // Byte-identical to the Object-mode snapshot construction in
-        // storedProfileDefinition; only the selection binding above differs.
-        namespace et=retained_edge_treatment;auto capture=std::shared_ptr<et::Snapshot>(new et::Snapshot);
-        capture->ownerLabel_=label;capture->sourceLabel_=state.profile.label;capture->sourceIdentifier_=state.profile.identifier;capture->source_=state.profile.parameters;capture->current_=state.shape;capture->base_=state.edgeTreatment?state.edgeTreatment->value->base:state.shape;capture->nonce_=std::uint64_t(myDoc->Document()->GetData()->Time());capture->presentationRevision_=presentationRevision;
-        auto&seed=capture->seed_;seed.schema=1;receipt::ParseUUID(myDoc->DocumentIdentifier(),seed.owner.document);receipt::ParseUUID(state.entityIdentifier,seed.owner.entity);receipt::ParseUUID(state.definitionIdentifier,seed.owner.definition);seed.base.source.document=seed.owner.document;seed.base.source.entity=seed.owner.entity;seed.base.source.definition=seed.owner.definition;receipt::ParseUUID(state.profile.identifier,seed.base.source.sourceFeature);seed.base.sourceNode=MintEdgeTreatmentUUID();seed.base.family=et::SourceFamily::Profile;seed.base.sourceSchema=std::uint32_t(profile::SchemaFor(state.profile.parameters));seed.base.metersPerLocalUnit=dimensionMetersPerUnit;seed.outputNode=seed.base.sourceNode;seed.issuance.nextLocalID=1;composite_recipe::EncodeScalarRecipe(composite_recipe::RecipeKind::Profile,seed.base.sourceSchema,state.profile.values,capture->sourceBytes_);composite_recipe::Hash(capture->sourceBytes_,seed.base.sourceRecipeDigest);
+        // Byte-identical to each Object-mode family snapshot construction;
+        // only the Edge-mode selection binding above differs.
+        auto capture = std::shared_ptr<et::Snapshot>(new et::Snapshot);
+        capture->ownerLabel_=label;capture->sourceLabel_=sourceLabel;capture->sourceIdentifier_=sourceIdentifier;capture->source_=source;capture->current_=state.shape;capture->base_=state.edgeTreatment?state.edgeTreatment->value->base:state.shape;capture->nonce_=std::uint64_t(myDoc->Document()->GetData()->Time());capture->presentationRevision_=presentationRevision;
+        auto&seed=capture->seed_;seed.schema=1;receipt::ParseUUID(myDoc->DocumentIdentifier(),seed.owner.document);receipt::ParseUUID(state.entityIdentifier,seed.owner.entity);receipt::ParseUUID(state.definitionIdentifier,seed.owner.definition);seed.base.source.document=seed.owner.document;seed.base.source.entity=seed.owner.entity;seed.base.source.definition=seed.owner.definition;receipt::ParseUUID(sourceIdentifier,seed.base.source.sourceFeature);seed.base.sourceNode=MintEdgeTreatmentUUID();seed.base.family=family;seed.base.sourceSchema=sourceSchema;seed.base.metersPerLocalUnit=dimensionMetersPerUnit;seed.outputNode=seed.base.sourceNode;seed.issuance.nextLocalID=1;composite_recipe::EncodeScalarRecipe(recipeKind,seed.base.sourceSchema,sourceValues,capture->sourceBytes_);composite_recipe::Hash(capture->sourceBytes_,seed.base.sourceRecipeDigest);
         if(state.edgeTreatment){capture->definition_=state.edgeTreatment->value->definition;capture->definitionBytes_=state.edgeTreatment->value->bytes;capture->seed_=*capture->definition_;TopoDS_Shape replayed;std::vector<et::StepProof>proofs;et::Refusal replayRefusal;if(!et::Replay(capture->base_,*capture->definition_,replayed,proofs,capture->chargedBudget_,replayRefusal)||!et::EquivalentReplayGeometry(capture->current_,replayed,capture->chargedBudget_,replayRefusal))return {};}
         capture->owner_.owner=seed.owner;capture->owner_.outputNode=capture->seed_.outputNode;capture->owner_.status=retained_recipe::OwnerStatus::CurrentEditable;
         return capture;

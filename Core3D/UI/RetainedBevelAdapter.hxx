@@ -21,6 +21,12 @@ namespace core3d {
 //! into the preview worker.
 class RetainedBevelAdapter final {
 public:
+    static bool SupportsFamily(
+        const retained_edge_treatment::SourceFamily family) noexcept {
+        return family == retained_edge_treatment::SourceFamily::Profile
+            || family == retained_edge_treatment::SourceFamily::Enclosure;
+    }
+
     struct Capture final {
         std::shared_ptr<const retained_edge_treatment::Snapshot> snapshot;
         Handle(AIS_Shape) presentation;
@@ -79,8 +85,8 @@ public:
             auto capture = std::make_shared<Capture>();
             if (!capture_(label, source, edges, *capture, refusal)
                 || !capture->snapshot || !capture->snapshot->current()
-                || capture->snapshot->effectiveDefinition().base.family
-                    != retained_edge_treatment::SourceFamily::Profile
+                || !SupportsFamily(
+                    capture->snapshot->effectiveDefinition().base.family)
                 || capture->anchors.empty()) {
                 return {};
             }
@@ -98,8 +104,8 @@ public:
         retained_edge_treatment::Refusal& refusal) const noexcept {
         refusal = retained_edge_treatment::Refusal::InvalidAmount;
         if (!*this || !capture || !capture->snapshot
-            || capture->snapshot->effectiveDefinition().base.family
-                != retained_edge_treatment::SourceFamily::Profile
+            || !SupportsFamily(
+                capture->snapshot->effectiveDefinition().base.family)
             || !std::isfinite(signedDistanceLocal)
             || signedDistanceLocal == 0.0) {
             return {};

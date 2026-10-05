@@ -1739,7 +1739,9 @@ namespace core3d {
 			if (aCoverage == OcctRetainedRecipeCoverage::Absent) {
 				return Standard_True;
 			}
-			if (aCoverage != OcctRetainedRecipeCoverage::CurrentProfile
+			if ((aCoverage != OcctRetainedRecipeCoverage::CurrentProfile
+					&& aCoverage
+						!= OcctRetainedRecipeCoverage::PresentOutsideP4Coverage)
 				|| !_retainedBevelAdapter) {
 				return Standard_False;
 			}
