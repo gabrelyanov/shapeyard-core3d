@@ -35,7 +35,7 @@ typedef NS_ENUM(NSInteger,Core3DEdgeTreatmentSourceKind){Core3DEdgeTreatmentSour
 @end
 @interface Core3DEdgeTreatmentProfileSource:NSObject
 @property(nonatomic,strong,readonly)Core3DProfileDefinition *definition;
-@property(nonatomic,copy,readonly)NSArray *shells;
+@property(nonatomic,copy,readonly)NSArray<Core3DProfileShellStep *> *shells;
 @property(nonatomic,copy,readonly)NSData *canonicalSourceBytes;
 - (instancetype)init NS_UNAVAILABLE; +(instancetype)new NS_UNAVAILABLE;
 @end

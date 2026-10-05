@@ -8,6 +8,7 @@
 #include "../OCCTKit/RectangularLoftRebuild.hxx"
 #include "../OCCTKit/SweepPersistence.hxx"
 #include "../OCCTKit/EnclosureParameters.hxx"
+#include "Core3DSourceValueAdapter.hxx"
 
 #if DEBUG
 #include "../OCCTKit/NativeOpeningSurfaceProbe.hxx"
@@ -236,6 +237,59 @@ SurfaceProbeEvidence RunSurfaceProbe(std::string_view scenario) noexcept {
 static NSValue *Core3DBoxPoint(CGPoint point) {
     return [NSValue valueWithBytes:&point objCType:@encode(CGPoint)];
 }
+
+@implementation Core3DConstructionFrame
+- (instancetype)initWithTranslationX:(double)translationX
+    translationY:(double)translationY translationZ:(double)translationZ
+    quaternionX:(double)quaternionX quaternionY:(double)quaternionY
+    quaternionZ:(double)quaternionZ quaternionW:(double)quaternionW
+    signedUniformScale:(double)signedUniformScale {
+    core3d::profile::ConstructionFrame frame;
+    frame.values = {translationX,translationY,translationZ,quaternionX,
+        quaternionY,quaternionZ,quaternionW,signedUniformScale};
+    if (!frame.IsValid()) return nil;
+    self = [super init];
+    if (self) {
+        _translationX=translationX;_translationY=translationY;_translationZ=translationZ;
+        _quaternionX=quaternionX;_quaternionY=quaternionY;_quaternionZ=quaternionZ;
+        _quaternionW=quaternionW;_signedUniformScale=signedUniformScale;
+    }
+    return self;
+}
+@end
+
+@implementation Core3DProfileShellOpening
+- (instancetype)initWithAxis:(Core3DProfileShellAxis)axis side:(Core3DProfileShellSide)side {
+    if (axis < Core3DProfileShellAxisX || axis > Core3DProfileShellAxisZ
+        || side < Core3DProfileShellSideMinimum || side > Core3DProfileShellSideMaximum) return nil;
+    self = [super init];
+    if (self) {_axis=axis;_side=side;}
+    return self;
+}
+@end
+
+@implementation Core3DProfileShellStep
+- (instancetype)initWithThickness:(double)thickness
+    metersPerLocalUnit:(double)metersPerLocalUnit
+    constructionFrame:(Core3DConstructionFrame *)constructionFrame
+    openings:(NSArray<Core3DProfileShellOpening *> *)openings {
+    if (![constructionFrame isMemberOfClass:Core3DConstructionFrame.class]
+        || ![openings isKindOfClass:NSArray.class]) return nil;
+    core3d::profile::ShellStep value;
+    value.thickness=thickness;value.metersPerLocalUnit=metersPerLocalUnit;
+    if (!core3d::source_value_adapter::Frame(constructionFrame,value.frame)) return nil;
+    for (id object in openings) {
+        if (![object isMemberOfClass:Core3DProfileShellOpening.class]) return nil;
+        Core3DProfileShellOpening *opening=object;
+        value.openings.push_back(int(opening.axis)*2+int(opening.side));
+    }
+    if (!value.IsValid()) return nil;
+    self=[super init];
+    if(self){_thickness=thickness;_metersPerLocalUnit=metersPerLocalUnit;
+        _constructionFrame=constructionFrame;_openings=[openings copy];}
+    return self;
+}
+@end
 
 @implementation Core3DProfileCurveVertex
 - (instancetype)initWithIdentifier:(uint32_t)identifier point:(CGPoint)point {
@@ -502,9 +556,28 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         return [[Core3DRectangularLoftDefinition alloc] initWithNativeDefinition:changed];
     }catch(...){return nil;}
 }
+- (Core3DRectangularLoftDefinition *)definitionByReplacingStations:
+    (NSArray<Core3DRectangularLoftStation *> *)stations
+    constructionFrame:(Core3DConstructionFrame *)constructionFrame {
+    NSMutableArray<NSNumber *> *frame=[NSMutableArray array];
+    if (constructionFrame) {
+        core3d::profile::ConstructionFrame native;
+        if (!core3d::source_value_adapter::Frame(constructionFrame,native)) return nil;
+        for (double value:native.values) [frame addObject:@(value)];
+    }
+    return [[Core3DRectangularLoftDefinition alloc]
+        initWithLoftIdentifier:_definition.loftIdentifier
+        correspondence:(simd_uint4){_definition.correspondence[0],_definition.correspondence[1],
+            _definition.correspondence[2],_definition.correspondence[3]}
+        stations:stations metersPerUnit:_definition.dimensionMetersPerUnit
+        constructionFrameValues:frame];
+}
 - (uint32_t)loftIdentifier {return _definition.loftIdentifier;}
 - (simd_uint4)correspondence {return {_definition.correspondence[0],_definition.correspondence[1],_definition.correspondence[2],_definition.correspondence[3]};}
 - (double)metersPerUnit {return _definition.dimensionMetersPerUnit;}
+- (Core3DConstructionFrame *)constructionFrame {
+    return core3d::source_value_adapter::Frame(_definition.constructionFrame);
+}
 - (core3d::rectangular_loft::Definition)nativeDefinition {return _definition;}
 @end
 
@@ -755,6 +828,22 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         return [[Core3DProfileDefinition alloc] initWithNativeParameters:requested];
     } catch (...) { return nil; }
 }
+- (Core3DProfileDefinition *)definitionByReplacingConstructionFrame:
+    (Core3DConstructionFrame *)constructionFrame
+    shells:(NSArray<Core3DProfileShellStep *> *)shells {
+    try {
+        auto requested=_parameters;
+        if (constructionFrame) {
+            core3d::profile::ConstructionFrame native;
+            if (!core3d::source_value_adapter::Frame(constructionFrame,native)) return nil;
+            requested.constructionFrame=native;
+        } else requested.constructionFrame.reset();
+        if (!core3d::source_value_adapter::Shells(shells,requested.shells)) return nil;
+        std::vector<double> encoded;
+        if (!core3d::profile::Encode(requested,encoded)) return nil;
+        return [[Core3DProfileDefinition alloc] initWithNativeParameters:requested];
+    } catch (...) {return nil;}
+}
 - (core3d::profile::Parameters)nativeParameters { return _parameters; }
 - (double)outerRadius { return _parameters.definition.circle ? _parameters.definition.circle->outerRadius : 0; }
 - (double)innerRadius { return _parameters.definition.circle ? _parameters.definition.circle->innerRadius : 0; }
@@ -763,10 +852,13 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 - (BOOL)revolve { return _parameters.definition.revolve; }
 - (double)metersPerUnit { return _parameters.metersPerUnit; }
 - (NSArray<NSNumber *> *)constructionFrameValues {
-    if (!_parameters.constructionFrame) return @[];
-    NSMutableArray<NSNumber *> *values = [NSMutableArray arrayWithCapacity:8];
-    for (double value : _parameters.constructionFrame->values) [values addObject:@(value)];
-    return [values copy];
+    return core3d::source_value_adapter::FrameValues(_parameters.constructionFrame);
+}
+- (Core3DConstructionFrame *)constructionFrame {
+    return core3d::source_value_adapter::Frame(_parameters.constructionFrame);
+}
+- (NSArray<Core3DProfileShellStep *> *)shells {
+    return core3d::source_value_adapter::Shells(_parameters.shells);
 }
 @end
 
@@ -818,6 +910,18 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
         return [[Core3DEnclosureDefinition alloc] initWithNativeParameters:parameters];
     } catch (...) { return nil; }
 }
+- (Core3DEnclosureDefinition *)definitionByReplacingConstructionFrame:
+    (Core3DConstructionFrame *)constructionFrame {
+    try {
+        auto parameters=_parameters;
+        if (constructionFrame) {
+            core3d::profile::ConstructionFrame native;
+            if (!core3d::source_value_adapter::Frame(constructionFrame,native)) return nil;
+            parameters.definition.constructionFrame=native;
+        } else parameters.definition.constructionFrame.reset();
+        return [[Core3DEnclosureDefinition alloc] initWithNativeParameters:parameters];
+    } catch (...) {return nil;}
+}
 - (double)width { return _parameters.definition.dimensions.width; }
 - (double)depth { return _parameters.definition.dimensions.depth; }
 - (double)height { return _parameters.definition.dimensions.height; }
@@ -826,5 +930,11 @@ static Core3DProfileCurveLoop *Core3DPublicCurveLoop(const core3d::ProfileCurveL
 - (double)cornerRadius { return _parameters.definition.dimensions.cornerRadius; }
 - (Core3DProfilePlane)plane { return static_cast<Core3DProfilePlane>(_parameters.definition.plane); }
 - (double)metersPerUnit { return _parameters.metersPerUnit; }
+- (Core3DConstructionFrame *)constructionFrame {
+    return core3d::source_value_adapter::Frame(_parameters.definition.constructionFrame);
+}
+- (NSArray<NSNumber *> *)constructionFrameValues {
+    return core3d::source_value_adapter::FrameValues(_parameters.definition.constructionFrame);
+}
 - (core3d::enclosure::Parameters)nativeParameters { return _parameters; }
 @end

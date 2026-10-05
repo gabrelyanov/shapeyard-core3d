@@ -13,6 +13,58 @@ typedef NS_ENUM(NSInteger, Core3DProfilePlane) {
     Core3DProfilePlaneXY = 0, Core3DProfilePlaneXZ, Core3DProfilePlaneYZ,
 };
 
+//! Immutable persisted local construction frame. A nil frame on a definition
+//! means absent; an explicit identity value remains distinguishable from nil.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DConstructionFrame : NSObject
+@property(nonatomic,readonly) double translationX, translationY, translationZ;
+@property(nonatomic,readonly) double quaternionX, quaternionY, quaternionZ, quaternionW;
+@property(nonatomic,readonly) double signedUniformScale;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithTranslationX:(double)translationX
+    translationY:(double)translationY translationZ:(double)translationZ
+    quaternionX:(double)quaternionX quaternionY:(double)quaternionY
+    quaternionZ:(double)quaternionZ quaternionW:(double)quaternionW
+    signedUniformScale:(double)signedUniformScale
+    NS_SWIFT_NAME(init(translationX:translationY:translationZ:quaternionX:quaternionY:quaternionZ:quaternionW:signedUniformScale:));
+@end
+
+typedef NS_ENUM(NSInteger, Core3DProfileShellAxis) {
+    Core3DProfileShellAxisX = 0, Core3DProfileShellAxisY, Core3DProfileShellAxisZ,
+};
+typedef NS_ENUM(NSInteger, Core3DProfileShellSide) {
+    Core3DProfileShellSideMinimum = 0, Core3DProfileShellSideMaximum,
+};
+
+//! Typed projection of the canonical native opening key axis*2+side.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DProfileShellOpening : NSObject
+@property(nonatomic,readonly) Core3DProfileShellAxis axis;
+@property(nonatomic,readonly) Core3DProfileShellSide side;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithAxis:(Core3DProfileShellAxis)axis
+    side:(Core3DProfileShellSide)side NS_SWIFT_NAME(init(axis:side:));
+@end
+
+//! One immutable persisted shell step. The unit and frame are frozen capture
+//! provenance; thickness and ordered openings are the authored shell values.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DProfileShellStep : NSObject
+@property(nonatomic,readonly) double thickness;
+@property(nonatomic,readonly) double metersPerLocalUnit;
+@property(nonatomic,strong,readonly) Core3DConstructionFrame *constructionFrame;
+@property(nonatomic,copy,readonly) NSArray<Core3DProfileShellOpening *> *openings;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (nullable instancetype)initWithThickness:(double)thickness
+    metersPerLocalUnit:(double)metersPerLocalUnit
+    constructionFrame:(Core3DConstructionFrame *)constructionFrame
+    openings:(NSArray<Core3DProfileShellOpening *> *)openings
+    NS_SWIFT_NAME(init(thickness:metersPerLocalUnit:constructionFrame:openings:));
+@end
+
 //! Explicit curve values carry feature-local stable IDs. Coordinates and radii
 //! use the enclosing profile's declared document unit; angles are degrees.
 //! These immutable values contain no OCCT handles or live selection authority.
@@ -172,6 +224,7 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,copy,readonly) NSArray<Core3DRectangularLoftStation *> *stations;
 @property(nonatomic,readonly) double metersPerUnit;
 @property(nonatomic,copy,readonly) NSArray<NSNumber *> *constructionFrameValues;
+@property(nonatomic,strong,readonly,nullable) Core3DConstructionFrame *constructionFrame;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 - (nullable instancetype)initWithLoftIdentifier:(uint32_t)identifier correspondence:(simd_uint4)correspondence
@@ -180,6 +233,12 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(init(loftIdentifier:correspondence:stations:metersPerUnit:constructionFrameValues:));
 - (nullable Core3DRectangularLoftDefinition *)changingStation:(Core3DRectangularLoftStationEdit *)edit
     NS_SWIFT_NAME(changingStation(_:));
+//! Complete immutable clone. The supplied station order and every stable ID are
+//! validated by the native loft inspector; nil preserves an absent frame.
+- (nullable Core3DRectangularLoftDefinition *)definitionByReplacingStations:
+    (NSArray<Core3DRectangularLoftStation *> *)stations
+    constructionFrame:(nullable Core3DConstructionFrame *)constructionFrame
+    NS_SWIFT_NAME(replacing(stations:constructionFrame:));
 @end
 
 //! One source-recipe polygon coordinate in physical millimetres.
@@ -284,6 +343,8 @@ __attribute__((objc_subclassing_restricted))
 //! Empty for legacy identity. Otherwise translation XYZ in document units,
 //! proper unit quaternion XYZW, signed uniform scale. Read-only local frame.
 @property(nonatomic,copy,readonly) NSArray<NSNumber *> *constructionFrameValues;
+@property(nonatomic,strong,readonly,nullable) Core3DConstructionFrame *constructionFrame;
+@property(nonatomic,copy,readonly) NSArray<Core3DProfileShellStep *> *shells;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 - (nullable instancetype)initWithPoints:(NSArray<NSValue *> *)points
@@ -301,6 +362,12 @@ __attribute__((objc_subclassing_restricted))
 //! No edit authority or document/history mutation is created by this value.
 - (nullable Core3DProfileDefinition *)definitionByChangingParameter:(double)parameter
     NS_SWIFT_NAME(changingParameter(_:));
+//! Complete immutable clone over the existing polygon/circle/curve definition.
+//! Nil is an absent frame; an explicit identity frame remains present.
+- (nullable Core3DProfileDefinition *)definitionByReplacingConstructionFrame:
+    (nullable Core3DConstructionFrame *)constructionFrame
+    shells:(NSArray<Core3DProfileShellStep *> *)shells
+    NS_SWIFT_NAME(replacing(constructionFrame:shells:));
 @end
 
 typedef NS_ENUM(NSInteger, Core3DEnclosureDimension) {
@@ -324,6 +391,8 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,readonly) double cornerRadius;
 @property(nonatomic,readonly) Core3DProfilePlane plane;
 @property(nonatomic,readonly) double metersPerUnit;
+@property(nonatomic,strong,readonly,nullable) Core3DConstructionFrame *constructionFrame;
+@property(nonatomic,copy,readonly) NSArray<NSNumber *> *constructionFrameValues;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 - (nullable instancetype)initWithWidth:(double)width depth:(double)depth height:(double)height
@@ -337,7 +406,10 @@ __attribute__((objc_subclassing_restricted))
 - (nullable Core3DEnclosureDefinition *)definitionByUpdatingWidth:(double)width depth:(double)depth
     height:(double)height wall:(double)wall floor:(double)floor cornerRadius:(double)cornerRadius
     plane:(Core3DProfilePlane)plane NS_SWIFT_NAME(updating(width:depth:height:wall:floor:cornerRadius:plane:));
+//! Complete immutable clone changing only the persisted construction frame.
+- (nullable Core3DEnclosureDefinition *)definitionByReplacingConstructionFrame:
+    (nullable Core3DConstructionFrame *)constructionFrame
+    NS_SWIFT_NAME(replacing(constructionFrame:));
 @end
 
 NS_ASSUME_NONNULL_END
-
