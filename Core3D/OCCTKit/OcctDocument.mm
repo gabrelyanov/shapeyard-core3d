@@ -2057,6 +2057,7 @@ void P4AbortOpenCommandNoThrow(
 #include <BinDrivers_DocumentStorageDriver.hxx>
 #include <BinXCAFDrivers_DocumentStorageDriver.hxx>
 #include <BinDrivers_DocumentRetrievalDriver.hxx>
+#include <BinLDrivers_DocumentSection.hxx>
 #include <BinMDF_ADriverTable.hxx>
 #include <BinMDF_ReferenceDriver.hxx>
 #include <BinMDF_TagSourceDriver.hxx>
@@ -4474,6 +4475,12 @@ public:
                 } catch (...) { budget.refuse(); rejectTypes(); return; }
             }
         }
+        if (myDocumentExtent.active) { rejectTypes(); return; }
+        struct DocumentExtentScope {
+            Core3DBoundedBinXCAFRetrievalDriver* owner;
+            ~DocumentExtentScope() { owner->myDocumentExtent = {}; }
+        } documentExtentScope{this};
+        if (!BeginDocumentExtent(theStream, version)) { rejectTypes(); return; }
         try {
             BinDrivers_DocumentRetrievalDriver::Read(
                 theStream,
@@ -4483,11 +4490,11 @@ public:
                 theFilter,
                 theProgress);
             if (myReaderStatus == PCDM_RS_OK) {
-                // A complete bounded read consumes the stream exactly;
-                // trailing bytes after the last section refuse the open
-                // (fail-closed cold-read admission, 278b U23 trailingBytes).
-                theStream.peek();
-                if (!theStream.eof()) rejectTypes();
+                // Decoder order is not physical order for indexed v10/v11:
+                // the shape section is decoded first even though it follows
+                // the OCAF tree. Validate the complete logical container from
+                // the actual tree/section reads instead of the final cursor.
+                if (!ValidateDocumentExtent()) rejectTypes();
             }
             if (myReaderStatus == PCDM_RS_OK && myReceiptTraversal && !myReceiptTraversal->complete()) {
                 rejectTypes();
@@ -4673,6 +4680,13 @@ public:
     Standard_Integer ReadSubTree(Standard_IStream& stream, const TDF_Label& label,
         const Handle(PCDM_ReaderFilter)& filter, const Standard_Boolean& quick,
         const Message_ProgressRange& range) override {
+        const bool outermost = myDocumentExtent.active
+            && myDocumentExtent.treeDepth == 0;
+        if (myDocumentExtent.active) ++myDocumentExtent.treeDepth;
+        struct TreeDepthScope {
+            DocumentExtent* extent;
+            ~TreeDepthScope() { if (extent != nullptr) --extent->treeDepth; }
+        } treeDepthScope{myDocumentExtent.active ? &myDocumentExtent : nullptr};
         Standard_Integer result;
         if (!myReceiptTraversal) {
             result = BinDrivers_DocumentRetrievalDriver::ReadSubTree(stream,label,filter,quick,range);
@@ -4686,7 +4700,28 @@ public:
         // this read really bound a named shape into the relocation table.
         Core3DDebugThrowAfterNamedShapeBindingIfArmed(myRelocTable);
 #endif
+        if (outermost && result >= 0) {
+            std::uint64_t end = 0;
+            if (!StreamOffset(stream.tellg(), end)) myDocumentExtent.invalid = true;
+            else { myDocumentExtent.treeEnd = end; myDocumentExtent.treeObserved = true; }
+        }
         return result;
+    }
+
+    void ReadSection(BinLDrivers_DocumentSection& section,
+        const Handle(CDM_Document)& document, Standard_IStream& stream) override {
+        const auto before = stream.tellg();
+        BinDrivers_DocumentRetrievalDriver::ReadSection(section, document, stream);
+        RecordDocumentSection(section, false, before, stream.tellg());
+    }
+
+    void ReadShapeSection(BinLDrivers_DocumentSection& section,
+        Standard_IStream& stream, const Standard_Boolean isMessage,
+        const Message_ProgressRange& range) override {
+        const auto before = stream.tellg();
+        BinDrivers_DocumentRetrievalDriver::ReadShapeSection(
+            section, stream, isMessage, range);
+        RecordDocumentSection(section, true, before, stream.tellg());
     }
 
     void Clear() override
@@ -4697,6 +4732,105 @@ public:
     }
 
 private:
+    struct SectionExtent {
+        std::uint64_t offset = 0;
+        std::uint64_t length = 0;
+        std::uint64_t consumedBegin = 0;
+        std::uint64_t consumedEnd = 0;
+        bool shape = false;
+    };
+    struct DocumentExtent {
+        bool active = false;
+        bool invalid = false;
+        bool treeObserved = false;
+        int version = 0;
+        int treeDepth = 0;
+        std::uint64_t entry = 0;
+        std::uint64_t physicalEnd = 0;
+        std::uint64_t treeEnd = 0;
+        std::vector<SectionExtent> sections;
+    };
+
+    static bool StreamOffset(std::streampos position, std::uint64_t& output) noexcept
+    {
+        if (position == std::streampos(-1)) return false;
+        const std::streamoff value = static_cast<std::streamoff>(position);
+        if (value < 0) return false;
+        output = static_cast<std::uint64_t>(value);
+        return true;
+    }
+
+    bool BeginDocumentExtent(Standard_IStream& stream, int version)
+    {
+        const std::ios::iostate state = stream.rdstate();
+        const std::streampos entryPosition = stream.tellg();
+        std::uint64_t entry = 0, physicalEnd = 0;
+        if (!StreamOffset(entryPosition, entry)) {
+            stream.clear(state); return false;
+        }
+        stream.clear();
+        stream.seekg(0, std::ios::end);
+        const std::streampos endPosition = stream.tellg();
+        const bool measured = stream.good()
+            && StreamOffset(endPosition, physicalEnd) && physicalEnd >= entry;
+        stream.clear();
+        stream.seekg(entryPosition);
+        const bool restored = stream.good() && stream.tellg() == entryPosition;
+        stream.clear(state);
+        if (!measured || !restored) return false;
+        myDocumentExtent = {};
+        myDocumentExtent.active = true;
+        myDocumentExtent.version = version;
+        myDocumentExtent.entry = entry;
+        myDocumentExtent.physicalEnd = physicalEnd;
+        return true;
+    }
+
+    void RecordDocumentSection(const BinLDrivers_DocumentSection& section,
+        bool shape, std::streampos beforePosition, std::streampos afterPosition)
+    {
+        if (!myDocumentExtent.active) return;
+        SectionExtent extent;
+        extent.offset = section.Offset(); extent.length = section.Length();
+        extent.shape = shape;
+        if (myDocumentExtent.sections.size() >= 32
+            || extent.length == 0
+            || extent.offset > myDocumentExtent.physicalEnd
+            || extent.length > myDocumentExtent.physicalEnd - extent.offset
+            || !StreamOffset(beforePosition, extent.consumedBegin)
+            || !StreamOffset(afterPosition, extent.consumedEnd)) {
+            myDocumentExtent.invalid = true; return;
+        }
+        myDocumentExtent.sections.push_back(extent);
+    }
+
+    bool ValidateDocumentExtent() const
+    {
+        const auto& extent = myDocumentExtent;
+        if (!extent.active || extent.invalid || !extent.treeObserved
+            || extent.treeDepth != 0 || extent.treeEnd < extent.entry
+            || extent.treeEnd > extent.physicalEnd) return false;
+        if (extent.sections.empty()) return extent.treeEnd == extent.physicalEnd;
+        // Quick/direct v12 embeds shapes in the tree; a legacy section table
+        // in that layout is contradictory framing.
+        if (extent.version >= TDocStd_FormatVersion_VERSION_12) return false;
+        std::vector<SectionExtent> sections = extent.sections;
+        std::sort(sections.begin(), sections.end(),
+            [](const SectionExtent& first, const SectionExtent& second) {
+                return first.offset < second.offset;
+            });
+        std::uint64_t next = extent.treeEnd;
+        bool sawShape = false;
+        for (const auto& section : sections) {
+            if (section.offset != next || section.consumedBegin != section.offset
+                || section.consumedEnd != section.offset + section.length)
+                return false;
+            next = section.offset + section.length;
+            sawShape = sawShape || section.shape;
+        }
+        return sawShape && next == extent.physicalEnd;
+    }
+
     // Empty the retrieval relocation table without running any payload
     // destructor. This drain only ever sees a non-empty table when a Read
     // exited by exception (the base reader's own Clear runs on every normal
@@ -4784,6 +4918,7 @@ private:
     std::shared_ptr<core3d::feature_pattern_baseline::Budget> myFeaturePatternBaselineBudget=
         std::make_shared<core3d::feature_pattern_baseline::Budget>();
     bool myAllowRetainedSolid=true;
+    DocumentExtent myDocumentExtent;
 #if DEBUG
     int myRetainedRoleFault=0;
     unsigned myRetainedReadCount=0;

@@ -8424,7 +8424,7 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
 }
 
 + (NSDictionary<NSString *, NSNumber *> *)debugRetainedSolidProbe:(NSInteger)scenario {
-    if (![NSThread isMainThread] || scenario < 0 || scenario > 3) return @{ @"invalidScenario": @NO };
+    if (![NSThread isMainThread] || scenario < 0 || scenario > 4) return @{ @"invalidScenario": @NO };
     try {
         const auto checks = Core3DDebugRetainedSolidProbe(static_cast<Standard_Integer>(scenario));
         NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];

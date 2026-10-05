@@ -12,6 +12,8 @@
 #include <PCDM_StoreStatus.hxx>
 #include <PCDM_ReaderStatus.hxx>
 #include <sstream>
+#include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <map>
 
@@ -114,6 +116,57 @@ struct Probe {
         std::vector<std::uint8_t> body(file.begin()+offset,file.begin()+offset+count-32);Digest hash;
         if(!Hash(body,hash))throw std::invalid_argument("probe hash");
         std::copy(hash.begin(),hash.end(),file.begin()+offset+count-32);
+    }
+    struct LegacyShapeExtent {std::size_t field=0;std::uint64_t offset=0,length=0;bool little=false;};
+    static std::uint64_t Wire64(const std::string& bytes,std::size_t at,bool little){
+        std::uint64_t value=0;for(unsigned i=0;i<8;++i)value|=std::uint64_t(std::uint8_t(bytes[at+i]))<<(8*(little?i:7-i));
+        return value;
+    }
+    static void PutWire64(std::string& bytes,std::size_t at,std::uint64_t value,bool little){
+        for(unsigned i=0;i<8;++i)bytes[at+i]=char(value>>(8*(little?i:7-i)));
+    }
+    static bool FindLegacyShapeExtent(const std::string& bytes,LegacyShapeExtent& result){
+        result={};const std::string marker="SHAPE_SECTION_POS:";const auto markerAt=bytes.find(marker);
+        if(markerAt==std::string::npos||bytes.find(marker,markerAt+1)!=std::string::npos)return false;
+        const auto begin=markerAt+marker.size();const auto limit=std::min(bytes.size(),begin+16);
+        unsigned matches=0;
+        for(std::size_t field=begin;field+16<=bytes.size()&&field<=limit;++field)for(bool little:{true,false}){
+            const auto offset=Wire64(bytes,field,little),length=Wire64(bytes,field+8,little);
+            if(offset>=field+16&&offset<=bytes.size()&&length==bytes.size()-offset){result={field,offset,length,little};++matches;}
+        }
+        return matches==1;
+    }
+    static bool ValidateExtentDocument(const Handle(TDocStd_Document)& document,
+        const std::vector<std::uint8_t>& expected,double unit){
+        double reopenedUnit=0;std::vector<Record> records;
+        return !document.IsNull()&&XCAFDoc_DocumentTool::GetLengthUnit(document,reopenedUnit)
+            &&Bits(reopenedUnit)==Bits(unit)&&ReadAll(document,records)&&records.size()==1
+            &&records[0].value&&records[0].value->bytes==expected
+            &&BoxGeometry(records[0].value->base,unit)&&BoxGeometry(records[0].current,unit);
+    }
+    static bool OpenExtent(App& holder,const std::string& bytes,bool xcaf,bool fileReader,
+        bool expectValid,const std::vector<std::uint8_t>& expected,double unit){
+        if(!holder.doc.IsNull()){holder.app->Close(holder.doc);holder.doc.Nullify();}
+        Handle(TDocStd_Document) candidate;PCDM_ReaderStatus status=PCDM_RS_OpenError;
+        Core3DBeginSafeBinaryRead();
+        if(fileReader){
+            Core3DDebugFixtureFile file{Core3DDebugTempPath("retained-document-extent",xcaf?".xbf":".cbf")};
+            std::ofstream output(file.path,std::ios::out|std::ios::binary|std::ios::trunc);
+            output.write(bytes.data(),std::streamsize(bytes.size()));output.close();if(!output)return false;
+            status=holder.app->Open(TCollection_ExtendedString(file.path.c_str(),Standard_True),candidate);
+        }else{
+            std::istringstream input(bytes,std::ios::in|std::ios::binary);status=holder.app->Open(input,candidate);
+        }
+        const bool rejected=Core3DSafeBinaryReadWasRejected()||status!=PCDM_RS_OK;
+        if(expectValid){
+            holder.doc=candidate;
+            return !rejected&&!candidate.IsNull()&&ValidateExtentDocument(candidate,expected,unit);
+        }
+        if(!candidate.IsNull()){try{holder.app->Close(candidate);}catch(...){}candidate.Nullify();}
+        return rejected&&holder.doc.IsNull();
+    }
+    static std::string Tail(const std::string& bytes,std::size_t count){
+        auto changed=bytes;for(std::size_t i=0;i<count;++i)changed.push_back(char(0xA5^i));return changed;
     }
     static std::map<std::string,bool> Run(int scenario){
         std::map<std::string,bool> checks;
@@ -271,6 +324,39 @@ struct Probe {
                 bool saveRefused=false;try{(void)Save(holder);}catch(...){saveRefused=true;}
                 checks["invalidBaseWriteRefused"]=saveRefused;doc->AbortCommand();
                 checks["invalidBaseAbortRestores"]=Core3DValidateRetainedSolidDocument(doc)&&attribute->value()==original;
+            }else if(scenario==4){
+                for(bool xcaf:{false,true})for(int version:{10,11,12})for(double unit:{.001,1.0}){
+                    const std::string prefix=std::string(xcaf?"xcaf":"ocaf")+"."+std::to_string(version)
+                        +"."+(unit==.001?"mm.":"metre.");
+                    App writer;const auto fixture=New(writer,xcaf,version,unit);const auto bytes=Save(writer);
+                    auto fresh=[&](const std::string& value,bool file,bool valid){App reader;Core3DDefineSafeBinXCAFFormat(reader.app);
+                        return OpenExtent(reader,value,xcaf,file,valid,fixture.bytes,unit);};
+                    checks[prefix+"streamValid"]=fresh(bytes,false,true);
+                    checks[prefix+"fileValid"]=fresh(bytes,true,true);
+                    checks[prefix+"streamTail1Refused"]=fresh(Tail(bytes,1),false,false);
+                    checks[prefix+"fileTail32Refused"]=fresh(Tail(bytes,32),true,false);
+                    checks[prefix+"concatenatedRefused"]=fresh(bytes+bytes,false,false);
+                    auto truncatedTail=bytes;truncatedTail.pop_back();
+                    checks[prefix+"truncatedTailRefused"]=fresh(truncatedTail,false,false);
+                    auto truncatedMiddle=bytes;truncatedMiddle.erase(truncatedMiddle.begin()+std::ptrdiff_t(bytes.size()/2));
+                    checks[prefix+"truncatedMiddleRefused"]=fresh(truncatedMiddle,false,false);
+                    App reused;Core3DDefineSafeBinXCAFFormat(reused.app);
+                    checks[prefix+"reuseFirstValid"]=OpenExtent(reused,bytes,xcaf,false,true,fixture.bytes,unit);
+                    checks[prefix+"reuseInvalidRefused"]=OpenExtent(reused,Tail(bytes,1),xcaf,false,false,fixture.bytes,unit);
+                    checks[prefix+"reuseFinalValid"]=OpenExtent(reused,bytes,xcaf,false,true,fixture.bytes,unit);
+                    if(version<12){
+                        LegacyShapeExtent toc;if(!FindLegacyShapeExtent(bytes,toc))throw std::invalid_argument("probe legacy shape extent");
+                        auto mutation=[&](std::uint64_t offset,std::uint64_t length){auto bad=bytes;
+                            PutWire64(bad,toc.field,offset,toc.little);PutWire64(bad,toc.field+8,length,toc.little);return bad;};
+                        checks[prefix+"tocOutOfFileRefused"]=fresh(mutation(toc.offset,toc.length+1),false,false);
+                        checks[prefix+"tocOverflowRefused"]=fresh(mutation(std::numeric_limits<std::uint64_t>::max()-7,16),false,false);
+                        auto extended=Tail(bytes,32);PutWire64(extended,toc.field+8,toc.length+32,toc.little);
+                        checks[prefix+"tocExtendedJunkRefused"]=fresh(extended,false,false);
+                        checks[prefix+"tocUnderreportedRefused"]=fresh(mutation(toc.offset,toc.length-1),false,false);
+                        checks[prefix+"tocOverlapRefused"]=fresh(mutation(toc.offset-1,toc.length+1),false,false);
+                        checks[prefix+"tocSkippedRefused"]=fresh(mutation(toc.offset+1,toc.length-1),false,false);
+                    }
+                }
             }else checks["invalidScenario"]=false;
         }catch(const Standard_Failure&){checks["nativeSetupFailure"]=false;}
          catch(...){checks["setupFailure"]=false;}
