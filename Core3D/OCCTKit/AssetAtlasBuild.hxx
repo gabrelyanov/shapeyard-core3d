@@ -8,6 +8,7 @@
 // packer, no per-member packing, no member-shape mutation.
 #include "AssetAtlasDefinition.hxx"
 #include "AssetAtlasPersistence.hxx"
+#include "FaceImagePersistence.hxx"
 #include "RetainedFinishingProducer.hxx"
 
 #include <TDF_Label.hxx>
@@ -50,15 +51,28 @@ struct LayoutEvidence final {           // optional BuildAtlas out-param
     std::vector<std::pair<std::size_t, std::uint64_t>> chartMembers;
 };
 
+// The legacy entry points always use Reject. Preserve is consumed only by
+// the separately named E2b opt-in bake after it captures both XCAF material
+// slots and every SYFI binding/resource fence.
+enum class PaintedAdmission : std::uint8_t { Reject = 0, Preserve = 1 };
+
 namespace detail {
 
-// Structural image-texture check mirroring PrepareTriangleUVAtlas: any
+// Structural image-content check mirroring PrepareTriangleUVAtlas: any
 // image-backed texture slot on the owner's visual material marks the member
-// painted. Detection only; no rebake is attempted here.
+// painted. 278c: the read-set must enumerate BOTH XCAF material slots and
+// SYFI/1 binding records, so a present non-empty face-image binding record on
+// the owner also marks the member painted. Detection only; no rebake is
+// attempted here, and MemberCapture.painted is never cleared to obtain an
+// admissible layout.
 inline bool Painted(const Handle(TDocStd_Document)& document,
                     const TDF_Label& label) noexcept {
     try {
         if (document.IsNull() || label.IsNull()) return false;
+        face_image::Definition bindings;
+        if (face_image::persistence::bindings::Read(document, label, bindings)
+                == face_image::persistence::bindings::ReadState::Present
+            && !bindings.bindings.empty()) return true;
         TDF_Label materialLabel;
         XCAFDoc_VisMaterialTool::GetShapeMaterial(label, materialLabel);
         if (materialLabel.IsNull()) return false;
@@ -481,7 +495,8 @@ inline Status BuildAtlas(const Handle(TDocStd_Document)& document,
                          const Settings& settings, Definition& candidate,
                          std::vector<MemberUVAssignment>& assignments,
                          std::string& diagnosis,
-                         LayoutEvidence* layout = nullptr) noexcept {
+                         LayoutEvidence* layout = nullptr,
+                         PaintedAdmission paintedAdmission = PaintedAdmission::Reject) noexcept {
     candidate = {}; assignments.clear(); diagnosis.clear();
     try {
         if (document.IsNull() || document->GetData().IsNull()
@@ -531,7 +546,7 @@ inline Status BuildAtlas(const Handle(TDocStd_Document)& document,
             if (!(observed == entry.slot.source)) return Status::StaleSource;
         }
         for (const auto& entry : capture.members)
-            if (entry.painted) {
+            if (entry.painted && paintedAdmission == PaintedAdmission::Reject) {
                 diagnosis = "asset atlas member "
                     + retained_solid::UUIDText(entry.slot.owner.entity)
                     + " carries image-backed painted content; a texture rebake proof is required";

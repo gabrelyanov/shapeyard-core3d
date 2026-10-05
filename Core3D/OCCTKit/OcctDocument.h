@@ -37,6 +37,7 @@
 #include "FeaturePatternChildAttribute.hxx"
 #include "RetainedFinishingRecord.hxx"
 #include "FaceImageDefinition.hxx"
+#include "PaintedAtlasBakeDefinition.hxx"
 namespace core3d::asset_atlas { struct Capture; struct Definition; struct Key; }
 namespace core3d::face_image::owner { enum class Outcome : std::uint8_t; struct Staging; }
 namespace core3d::face_image::persistence::bindings { enum class ReadState : int; }
@@ -225,6 +226,18 @@ enum class OcctAssetAtlasOutcome : int {
 };
 
 enum class OcctAssetAtlasCurrentness : int { Absent = 0, Current = 1, Stale = 2 };
+
+//! Explicit opt-in painted-atlas bake. Existing Build/Regenerate/Edit entry
+//! points deliberately retain their PaintedRebakeRequired refusal.
+enum class OcctPaintedAtlasBakeOutcome : int {
+    Committed = 0, Refused, StaleSource, StaleBinding, MissingResource,
+    ForeignResource, OverBudget, UnsupportedSurface, OwnerMismatch, Busy,
+    Malformed, PersistenceFailure, Absent
+};
+
+enum class OcctPaintedAtlasBakeCurrentness : int {
+    Absent = 0, Current = 1, Stale = 2
+};
 
 //! Read-only resolved region. Ordinals are session-local and never persistent IDs.
 struct OcctMeshRegionExtrudePreview {
@@ -588,6 +601,7 @@ Standard_EXPORT Standard_Boolean Core3DValidateRetainedFinishingDocument(const H
 //! Asset-wide atlas admission: exact key/member bindings, canonical SYEA/1
 //! bytes, aggregate budgets, and admitted retained carrier owners.
 Standard_EXPORT Standard_Boolean Core3DValidateAssetAtlasDocument(const Handle(TDocStd_Document)& document);
+Standard_EXPORT Standard_Boolean Core3DValidatePaintedAtlasBakeDocument(const Handle(TDocStd_Document)& document);
 //! E3 face-image admission (278b portion 2): strict whole-document SYFR/1
 //! resource-table read (canonical bytes, unique identities, the single
 //! aggregate budget, closed neighborhoods), strict per-owner SYFI/1 binding
@@ -809,6 +823,21 @@ extern "C" Standard_EXPORT std::uint64_t Core3DDebugRetainedFinishingProducerPro
 //! E2a DEBUG asset-atlas evidence only; no atlas edit authority.
 extern "C" Standard_EXPORT std::uint64_t Core3DDebugAssetAtlasProbe(
     std::int32_t scenario) noexcept;
+//! E2b DEBUG preservation evidence. Readback returns independently checkable
+//! emitted pixel/UV/sampler/tangent evidence from the most recent probe.
+extern "C" Standard_EXPORT std::uint64_t Core3DDebugPaintedAtlasBakeProbe(
+    std::int32_t scenario) noexcept;
+extern "C" Standard_EXPORT std::uint64_t Core3DDebugPaintedAtlasBakeReadback(
+    std::int32_t scenario, std::int32_t field) noexcept;
+//! Seeds the probe's E4Decals fixture resources (slot 0 base-checker, 1
+//! data-linear, 2 normal-linear); the test SHA-256-checks the exact bytes.
+extern "C" Standard_EXPORT std::uint64_t Core3DDebugPaintedAtlasBakeSeedResource(
+    std::int32_t slot, const void* bytes, std::int32_t length) noexcept;
+//! Exports measured post-cold-reopen byte blobs from the last probe run:
+//! field = unit*8 + kind, kind 0 baked baseColor PNG, 1 baked normal PNG, 2
+//! original base-checker resource bytes. Length comes from the Readback.
+extern "C" Standard_EXPORT const void* Core3DDebugPaintedAtlasBakeExport(
+    std::int32_t scenario, std::int32_t field) noexcept;
 void Core3DDebugDefineLegacyReceiptFormats(const Handle(TDocStd_Application)& application);
 namespace core3d::persistence { struct AuthoredFrameReadBudget; }
 namespace core3d::debug { struct LiveTransactionProbeState; class LiveObservedApplication; }
@@ -1499,6 +1528,11 @@ public:
     Standard_EXPORT OcctAssetAtlasCurrentness AssetAtlasCurrentness(
         const core3d::asset_atlas::Key& atlas,
         core3d::asset_atlas::Definition* record = nullptr) const noexcept;
+    Standard_EXPORT OcctPaintedAtlasBakeOutcome BakePaintedAtlas(
+        const core3d::asset_atlas::Key& atlas) noexcept;
+    Standard_EXPORT OcctPaintedAtlasBakeCurrentness PaintedAtlasBakeCurrentness(
+        const core3d::asset_atlas::Key& atlas,
+        core3d::painted_atlas_bake::Definition* record = nullptr) const noexcept;
     //! E3 face-image document surface (278b portion 2). The mutating entry
     //! points never open their own mutation route: like the finishing/atlas
     //! owners above, the caller holds the already-open OCAF command under the

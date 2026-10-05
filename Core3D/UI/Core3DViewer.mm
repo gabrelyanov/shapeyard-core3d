@@ -9,6 +9,7 @@
 
 #include "Core3DViewer.h"
 #include "OrdinaryEditCommand.hpp"
+#include "RetainedProfileSourceAdapter.hxx"
 #include "../OCCTKit/NativeOpeningDependentReplay.hxx"
 #include "../OCCTKit/SavedCutWholeResultCorrespondence.hxx"
 #include "../OCCTKit/AnalyticBooleanSolid.hxx"
@@ -5768,6 +5769,90 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredProfileRebuild(
     } catch (...) { return {}; }
 }
 
+std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCompleteProfileRebuild(
+    const profile::Parameters& parameters, const StoredProfileSnapshot& original,
+    const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+    std::uint32_t width, std::uint32_t height) noexcept {
+    profile::Parameters translated;
+    if (!original.current || !original.edgeTreatment
+        || identity.entityIdentifier != original.identity.entityIdentifier
+        || identity.publicationSourceIdentifier != original.identity.publicationSourceIdentifier
+        || identity.documentGeneration != original.identity.documentGeneration
+        || identity.modelRevision != original.identity.modelRevision
+        || !retained_profile_source_adapter::TranslateComplete(
+            original.parameters, parameters, translated)) return {};
+    try {
+        const auto current = storedProfileDefinition(
+            identity, presentationRevision, width, height);
+        if (!current || !current->current || !current->edgeTreatment
+            || current->featureIdentifier != original.featureIdentifier
+            || current->definitionIdentifier != original.definitionIdentifier
+            || current->edgeTreatment->nonce_ != original.edgeTreatment->nonce_
+            || bool(current->edgeTreatment->definition_)
+                != bool(original.edgeTreatment->definition_)
+            || (current->edgeTreatment->definition_
+                && current->edgeTreatment->definitionBytes_
+                    != original.edgeTreatment->definitionBytes_)) return {};
+        std::vector<double> originalValues, currentValues, requestedValues;
+        if (!profile::Encode(original.parameters, originalValues)
+            || !profile::Encode(current->parameters, currentValues)
+            || !retained_profile_source_adapter::SameBits(
+                originalValues, currentValues)
+            || !profile::Encode(translated, requestedValues)) return {};
+        myContext->InitSelected();
+        if (!myContext->MoreSelected()) return {};
+        const auto selected = Handle(AIS_Shape)::DownCast(
+            myContext->SelectedInteractive());
+        myContext->NextSelected();
+        if (selected.IsNull() || myContext->MoreSelected()) return {};
+        OrdinaryTransformRecord record;
+        const auto label = myDoc->ShapeLabel(selected);
+        if (!myDoc->CaptureObjectTransformStateForLabel(label, record.previous)
+            || !record.previous.profile.IsCurrent(myDoc->Document(), label)) return {};
+        auto capture = std::shared_ptr<retained_edge_treatment::CompleteProfileRebuildCapture>(
+            new retained_edge_treatment::CompleteProfileRebuildCapture);
+        capture->snapshot_ = original.edgeTreatment;
+        capture->requested_ = translated;
+        capture->capturedValues_ = originalValues;
+        capture->requestedValues_ = requestedValues;
+        capture->nonce_ = original.edgeTreatment->nonce_;
+        capture->chargedBudget_ = original.edgeTreatment->chargedBudget_;
+        auto work = prepareProfileSolid(
+            translated.definition, identity, presentationRevision, width, height);
+        if (!work) return {};
+        retained_profile_source_adapter::PopulateDetached(
+            translated, *profileSolidGeometry(work));
+        if (original.edgeTreatment->definition_) {
+            namespace et = retained_edge_treatment;
+            et::SourceRebindRoles roles;
+            et::ReplayBudget rebindBudget = original.edgeTreatment->chargedBudget_;
+            et::Refusal rebindRefusal = et::Refusal::ReplayMismatch;
+            if (!et::CaptureSourceRebindRoles(original.edgeTreatment->base_,
+                    *original.edgeTreatment->definition_,
+                    original.edgeTreatment->definitionBytes_, rebindBudget,
+                    rebindRefusal, roles)) return {};
+            auto geometry = profileSolidGeometry(work);
+            geometry->treatmentRebind = std::move(roles);
+            geometry->treatmentRebuildSource = translated;
+            geometry->treatmentBudget = rebindBudget;
+            work->edgeTreatmentSnapshot = original.edgeTreatment;
+            work->edgeTreatmentEdit = et::RebuildSource{translated};
+        }
+        record.requested.label = label;
+        record.requested.presentation = selected;
+        record.requested.shape = record.previous.shape;
+        record.requested.transform = record.previous.transform;
+        record.requested.operation = OrdinaryTransformOperation::CompleteProfileRebuild;
+        record.requested.profileRebuild = translated;
+        record.requested.completeProfileCapture = std::move(capture);
+        work->rebuildAuthority.emplace();
+        work->rebuildAuthority->records.push_back(std::move(record));
+        if (!admitTransform(*work->rebuildAuthority)) return {};
+        work->frameFirst = false;
+        return work;
+    } catch (...) { return {}; }
+}
+
 std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredEnclosureRebuild(
     const enclosure::Parameters& parameters, const StoredEnclosureSnapshot& original,
     const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
@@ -6675,6 +6760,20 @@ OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeS
                 carrier->base=(*cutPayload)->detachedBase;record.requested.cut=std::move(carrier);
             }
             record.requested.shape = completed->solid;
+            if (record.requested.operation
+                    == OrdinaryTransformOperation::CompleteProfileRebuild) {
+                const auto geometry = profileSolidGeometry(work);
+                if (!geometry || !record.requested.completeProfileCapture)
+                    return OrdinaryEditResult::Invalid;
+                auto result = std::shared_ptr<retained_edge_treatment::CompleteProfileRebuildResult>(
+                    new retained_edge_treatment::CompleteProfileRebuildResult);
+                result->capture_ = record.requested.completeProfileCapture;
+                result->builtBase_ = geometry->treatmentBase.IsNull()
+                    ? completed->solid : geometry->treatmentBase;
+                result->result_ = completed->solid;
+                result->budget_ = geometry->treatmentBudget;
+                record.requested.completeProfileResult = std::move(result);
+            }
             if(work->edgeTreatmentSnapshot&&work->edgeTreatmentEdit){
                 auto treatment=std::shared_ptr<retained_edge_treatment::DetachedResult>(new retained_edge_treatment::DetachedResult);
                 treatment->nonce_=work->edgeTreatmentSnapshot->nonce_;treatment->source_=std::get<retained_edge_treatment::RebuildSource>(*work->edgeTreatmentEdit).requested;

@@ -10,7 +10,7 @@
 #include <variant>
 
 class OcctDocument;
-namespace core3d { class Core3DViewer; }
+namespace core3d { class Core3DViewer; class OrdinaryEditController; }
 namespace core3d::retained_face_selector { class FaceMembershipProof; }
 
 namespace core3d::retained_edge_treatment {
@@ -28,7 +28,29 @@ using Edit=std::variant<Append,SetAmount,ReplaceTargets,Remove,RebuildSource,Set
 // semantics are inherited unchanged; the base adds validation-first
 // arithmetic, sticky refusal and the DEBUG per-site trace.
 struct ReplayBudget : retained_topology_budget::Counter {};
-class Snapshot final {friend class ::OcctDocument;friend class core3d::Core3DViewer;TDF_Label ownerLabel_,sourceLabel_;std::string sourceIdentifier_;retained_recipe::OwnerSnapshot owner_;BaseRecipe source_;Definition seed_;std::optional<Definition> definition_;std::vector<std::uint8_t> sourceBytes_,definitionBytes_;TopoDS_Shape base_,current_;std::uint64_t nonce_=0,presentationRevision_=0;ReplayBudget chargedBudget_;public:const retained_recipe::OwnerSnapshot& owner()const noexcept{return owner_;}const BaseRecipe& source()const noexcept{return source_;}const Definition& effectiveDefinition()const noexcept{return definition_?*definition_:seed_;}const std::optional<Definition>& definition()const noexcept{return definition_;}const std::vector<std::uint8_t>& canonicalBytes()const noexcept{return definitionBytes_;}bool current()const noexcept{return owner_.status==retained_recipe::OwnerStatus::CurrentEditable&&!current_.IsNull();}double dimensionMetersPerUnit()const noexcept{return seed_.base.metersPerLocalUnit;}};
+class Snapshot final {friend class ::OcctDocument;friend class core3d::Core3DViewer;friend class core3d::OrdinaryEditController;TDF_Label ownerLabel_,sourceLabel_;std::string sourceIdentifier_;retained_recipe::OwnerSnapshot owner_;BaseRecipe source_;Definition seed_;std::optional<Definition> definition_;std::vector<std::uint8_t> sourceBytes_,definitionBytes_;TopoDS_Shape base_,current_;std::uint64_t nonce_=0,presentationRevision_=0;ReplayBudget chargedBudget_;public:const retained_recipe::OwnerSnapshot& owner()const noexcept{return owner_;}const BaseRecipe& source()const noexcept{return source_;}const Definition& effectiveDefinition()const noexcept{return definition_?*definition_:seed_;}const std::optional<Definition>& definition()const noexcept{return definition_;}const std::vector<std::uint8_t>& canonicalBytes()const noexcept{return definitionBytes_;}bool current()const noexcept{return owner_.status==retained_recipe::OwnerStatus::CurrentEditable&&!current_.IsNull();}double dimensionMetersPerUnit()const noexcept{return seed_.base.metersPerLocalUnit;}};
+// Native-only two-phase authority for a complete ordinary Profile rebuild.
+// Capture binds the exact current source and frozen provenance before detached
+// work; Result binds that capture to the actual built base/result and the one
+// operation's existing replay debt. Neither type has a public constructor.
+class CompleteProfileRebuildCapture final {
+    friend class core3d::Core3DViewer;
+    friend class core3d::OrdinaryEditController;
+    std::shared_ptr<const Snapshot> snapshot_;
+    profile::Parameters requested_;
+    std::vector<double> capturedValues_, requestedValues_;
+    std::uint64_t nonce_ = 0;
+    ReplayBudget chargedBudget_;
+    CompleteProfileRebuildCapture() = default;
+};
+class CompleteProfileRebuildResult final {
+    friend class core3d::Core3DViewer;
+    friend class core3d::OrdinaryEditController;
+    std::shared_ptr<const CompleteProfileRebuildCapture> capture_;
+    TopoDS_Shape builtBase_, result_;
+    ReplayBudget budget_;
+    CompleteProfileRebuildResult() = default;
+};
 class SelectorTargetCapture final {
     friend class core3d::Core3DViewer;
     std::shared_ptr<const Snapshot> original_;

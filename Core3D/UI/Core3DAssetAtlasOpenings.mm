@@ -58,7 +58,7 @@ using UUID = core3d::retained_recipe::UUID;
 using OpeningContext = core3d::native_opening::Context;
 
 enum class AtlasOpeningState : std::uint8_t {
-    Open, Prepared, Applying, Regenerating, Cancelled, Settled, Recovery
+    Open, Prepared, Applying, Regenerating, Baking, Cancelled, Settled, Recovery
 };
 
 struct ControllerAtlasInput final {
@@ -278,6 +278,21 @@ Core3DProfileConstructionResult AtlasMutation(
     if (outcome == OcctAssetAtlasOutcome::Busy)
         return Core3DProfileConstructionResultBusy;
     if (outcome == OcctAssetAtlasOutcome::Absent)
+        return Core3DProfileConstructionResultUnchanged;
+    return Core3DProfileConstructionResultRejected;
+}
+
+Core3DProfileConstructionResult PaintedAtlasMutation(
+    const std::shared_ptr<core3d::native_opening::CommandLease>& lease,
+    OcctPaintedAtlasBakeOutcome outcome) noexcept {
+    if(!lease)return Core3DProfileConstructionResultBusy;
+    if(outcome==OcctPaintedAtlasBakeOutcome::Committed)
+        return lease->commit()?Core3DProfileConstructionResultCommitted
+                              :Core3DProfileConstructionResultRecoveryRequired;
+    if(!lease->abort())return Core3DProfileConstructionResultRecoveryRequired;
+    if(outcome==OcctPaintedAtlasBakeOutcome::Busy)
+        return Core3DProfileConstructionResultBusy;
+    if(outcome==OcctPaintedAtlasBakeOutcome::Absent)
         return Core3DProfileConstructionResultUnchanged;
     return Core3DProfileConstructionResultRejected;
 }
@@ -608,6 +623,37 @@ void DeliverMutation(void (^completion)(Core3DProfileConstructionResult, NSStrin
                     : @"Regeneration was refused without reusing the stale atlas.");
 }
 
+- (void)bakePaintedWithCompletion:(void (^)(Core3DProfileConstructionResult,
+                                            NSString *))completion {
+    if(!_hasAtlas){
+        DeliverMutation(completion,Core3DProfileConstructionResultRejected,
+                        @"There is no committed asset atlas to bake.");
+        return;
+    }
+    AtlasOpeningState value=_state.load();
+    while(value==AtlasOpeningState::Open||value==AtlasOpeningState::Prepared){
+        if(_state.compare_exchange_weak(value,AtlasOpeningState::Baking))break;
+    }
+    if(!NSThread.isMainThread||_state.load()!=AtlasOpeningState::Baking
+        ||_owner.IsNull()||!_context){
+        DeliverMutation(completion,Core3DProfileConstructionResultRejected,
+                        @"Opening is not available for a painted bake.");
+        return;
+    }
+    const auto lease=_context->beginCommandLease(_context->openingFence(),64,64);
+    const auto result=PaintedAtlasMutation(lease,
+        lease?_owner->BakePaintedAtlas(_atlas):OcctPaintedAtlasBakeOutcome::Busy);
+    _state.store(result==Core3DProfileConstructionResultRecoveryRequired
+        ?AtlasOpeningState::Recovery:AtlasOpeningState::Settled);
+    if(result!=Core3DProfileConstructionResultRecoveryRequired)_context.reset();
+    DeliverMutation(completion,result,
+        result==Core3DProfileConstructionResultCommitted
+            ?@"Painted atlas baked and committed as one undoable change."
+            :result==Core3DProfileConstructionResultRecoveryRequired
+                ?@"Command close is unknown; native recovery ownership is retained."
+                :@"Painted atlas bake was refused without history.");
+}
+
 - (BOOL)cancel {
     AtlasOpeningState value = _state.load();
     while (value == AtlasOpeningState::Open || value == AtlasOpeningState::Prepared) {
@@ -923,4 +969,3 @@ NSData *CreateAssetAtlasDebugFixture(
 }
 #endif
 @end
-

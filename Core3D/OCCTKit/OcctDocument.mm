@@ -1596,6 +1596,7 @@ Standard_Boolean Core3DValidateRetainedEdgeTreatmentDocument(const Handle(TDocSt
 #include "AssetAtlasPersistence.hxx"
 #include "AssetAtlasBuild.hxx"
 #include "FaceImagePersistence.hxx"
+#include "PaintedAtlasBake.hxx"
 #include "CompositeRecipeBinaryDriver.hxx"
 #include "RetainedEdgeTreatmentBinaryDriver.hxx"
 #include "RetainedEdgeTreatmentBuild.hxx"
@@ -4548,6 +4549,10 @@ public:
                 &&(myFaceImageBudget->rejected
                     ||!Core3DValidateFaceImageDocument(
                         Handle(TDocStd_Document)::DownCast(theDocument))))rejectTypes();
+            // SYEB/1 uses standard attributes, so validate on every safe read.
+            if(myReaderStatus==PCDM_RS_OK
+                &&!Core3DValidatePaintedAtlasBakeDocument(
+                    Handle(TDocStd_Document)::DownCast(theDocument)))rejectTypes();
             if (myReaderStatus == PCDM_RS_OK) {
                 std::vector<core3d::feature_pattern_child::PairedRecord> pairs;
                 if (core3d::feature_pattern_child::ReadPairs(
@@ -6763,7 +6768,7 @@ void Core3DDefineSafeBinXCAFFormat(
     // that already omitted triangulation still reads back without it and
     // keeps reporting Stale.
     Handle(BinDrivers_DocumentStorageDriver) ocafStorage =
-        new core3d::receipt::v3::StorageDriver<core3d::face_image::persistence::resources::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>>>>>>>>>>>();
+        new core3d::receipt::v3::StorageDriver<core3d::painted_atlas_bake::persistence::StorageDriver<core3d::face_image::persistence::resources::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>>>>>>>>>>>>();
     ocafStorage->SetWithTriangles(application->MessageDriver(), Standard_True);
     application->DefineFormat(
         TCollection_AsciiString("BinOcaf"),
@@ -6772,7 +6777,7 @@ void Core3DDefineSafeBinXCAFFormat(
         new Core3DBoundedBinXCAFRetrievalDriver(),
         ocafStorage);
     Handle(BinDrivers_DocumentStorageDriver) xcafStorage =
-        new core3d::receipt::v3::StorageDriver<core3d::face_image::persistence::resources::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>>>>>>>>>();
+        new core3d::receipt::v3::StorageDriver<core3d::painted_atlas_bake::persistence::StorageDriver<core3d::face_image::persistence::resources::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>>>>>>>>>>();
     xcafStorage->SetWithTriangles(application->MessageDriver(), Standard_True);
     application->DefineFormat(
         TCollection_AsciiString("BinXCAF"),
@@ -7882,6 +7887,48 @@ Standard_Boolean Core3DValidateAssetAtlasDocument(const Handle(TDocStd_Document)
             if (!core3d::retained_solid::HasRecord(owner)
                 && !core3d::composite_recipe::HasRecord(owner)) return Standard_False;
     return Standard_True;
+}
+
+// SYEB/1 is admitted only beside the exact SYEA owner/layout it fences.  Its
+// strict reader proves canonical bytes and the bounded closed record subtree;
+// this joint check prevents an otherwise well-formed bake from being moved to
+// another atlas or surviving after its source intent disappears.  Every named
+// baked derivative resource must also persist in the SYFR/1 table with the
+// exact fenced content digest and dimensions.
+Standard_Boolean Core3DValidatePaintedAtlasBakeDocument(
+    const Handle(TDocStd_Document)& document){
+    namespace pb=core3d::painted_atlas_bake;
+    namespace fi=core3d::face_image;
+    try{
+        std::vector<pb::persistence::Record> records;
+        if(!pb::persistence::ReadAll(document,records))return Standard_False;
+        for(const auto& record:records){
+            core3d::asset_atlas::persistence::Record atlas;
+            if(!core3d::asset_atlas::persistence::Read(document,record.definition.key,atlas)
+                ||!atlas.value
+                ||!(atlas.value->definition.layoutProof==record.definition.layoutProof))
+                return Standard_False;
+            for(const auto& binding:record.definition.bindings){
+                bool member=false;
+                for(const auto& candidate:atlas.value->definition.members)
+                    if(candidate.owner==binding.owner){member=true;break;}
+                if(!member)return Standard_False;
+            }
+            for(const auto& baked:record.definition.resources){
+                core3d::retained_recipe::UUID resource{};
+                std::copy_n(baked.identity.begin(),resource.size(),resource.begin());
+                if(!core3d::retained_recipe::Nonzero(resource))resource.back()=1;
+                fi::persistence::resources::Record persisted;
+                if(!fi::persistence::resources::Read(document,resource,persisted)
+                    ||!persisted.value
+                    ||!(persisted.value->envelope.workingContent==baked.content)
+                    ||persisted.value->envelope.workingWidthTexels!=baked.widthTexels
+                    ||persisted.value->envelope.workingHeightTexels!=baked.heightTexels)
+                    return Standard_False;
+            }
+        }
+        return Standard_True;
+    }catch(...){return Standard_False;}
 }
 
 // E3 face-image admission (278b portion 2). The resource table is admitted by
@@ -20025,6 +20072,7 @@ std::string OcctDocument::save(
         || !ValidateGeometryRepresentations()
         || !ValidateLayerGraphRoles(myOcafDoc)
         || !Core3DValidateFaceImageDocument(myOcafDoc)
+        || !Core3DValidatePaintedAtlasBakeDocument(myOcafDoc)
         || !Core3DValidateOwnedFrameUsage(myOcafDoc,frameBytes)) {
         return {};
     }
@@ -24733,6 +24781,57 @@ OcctAssetAtlasCurrentness OcctDocument::AssetAtlasCurrentness(
     } catch (...) { return OcctAssetAtlasCurrentness::Stale; }
 }
 
+namespace {
+OcctPaintedAtlasBakeOutcome E2bOutcome(
+    core3d::painted_atlas_bake::owner::Outcome value) noexcept {
+    using Native=core3d::painted_atlas_bake::owner::Outcome;
+    switch(value){
+        case Native::Committed:return OcctPaintedAtlasBakeOutcome::Committed;
+        case Native::StaleSource:return OcctPaintedAtlasBakeOutcome::StaleSource;
+        case Native::StaleBinding:return OcctPaintedAtlasBakeOutcome::StaleBinding;
+        case Native::MissingResource:return OcctPaintedAtlasBakeOutcome::MissingResource;
+        case Native::ForeignResource:return OcctPaintedAtlasBakeOutcome::ForeignResource;
+        case Native::OverBudget:return OcctPaintedAtlasBakeOutcome::OverBudget;
+        case Native::UnsupportedSurface:return OcctPaintedAtlasBakeOutcome::UnsupportedSurface;
+        case Native::OwnerMismatch:return OcctPaintedAtlasBakeOutcome::OwnerMismatch;
+        case Native::Busy:return OcctPaintedAtlasBakeOutcome::Busy;
+        case Native::Malformed:return OcctPaintedAtlasBakeOutcome::Malformed;
+        case Native::PersistenceFailure:return OcctPaintedAtlasBakeOutcome::PersistenceFailure;
+        case Native::Absent:return OcctPaintedAtlasBakeOutcome::Absent;
+        case Native::Prepared:
+        case Native::Refused:return OcctPaintedAtlasBakeOutcome::Refused;
+    }
+}
+}
+
+OcctPaintedAtlasBakeOutcome OcctDocument::BakePaintedAtlas(
+    const core3d::asset_atlas::Key& atlas) noexcept {
+    using namespace core3d::painted_atlas_bake;
+    if(![NSThread isMainThread]||myOcafDoc.IsNull())
+        return OcctPaintedAtlasBakeOutcome::Refused;
+    if(!myOcafDoc->HasOpenCommand())return OcctPaintedAtlasBakeOutcome::Busy;
+    owner::Staging staging;
+    auto outcome=owner::Prepare(staging,myOcafDoc,atlas);
+    if(outcome!=owner::Outcome::Prepared)return E2bOutcome(outcome);
+    outcome=owner::Commit(staging,myOcafDoc);
+    return E2bOutcome(outcome);
+}
+
+OcctPaintedAtlasBakeCurrentness OcctDocument::PaintedAtlasBakeCurrentness(
+    const core3d::asset_atlas::Key& atlas,
+    core3d::painted_atlas_bake::Definition* output) const noexcept {
+    if(output)*output={};
+    if(![NSThread isMainThread]||myOcafDoc.IsNull())
+        return OcctPaintedAtlasBakeCurrentness::Absent;
+    const auto outcome=core3d::painted_atlas_bake::owner::Currentness(
+        myOcafDoc,atlas,output);
+    if(outcome==core3d::painted_atlas_bake::owner::Outcome::Absent)
+        return OcctPaintedAtlasBakeCurrentness::Absent;
+    return outcome==core3d::painted_atlas_bake::owner::Outcome::Committed
+        ?OcctPaintedAtlasBakeCurrentness::Current
+        :OcctPaintedAtlasBakeCurrentness::Stale;
+}
+
 // E3 face-image document surface (278b portion 2). These entry points bind
 // the portion-1 owner store to the live document; none of them opens its own
 // mutation route, manufactures currentness or weakens a portion-1 verdict.
@@ -27400,6 +27499,1749 @@ extern "C" Standard_EXPORT std::uint64_t Core3DDebugAssetAtlasProbe(
     if (![NSThread isMainThread] || scenario < 0 || scenario > 3) return 0;
     return core3d::asset_atlas::AssetAtlasProbe::Run(scenario);
 }
+
+#include <chrono>
+#include <set>
+namespace core3d::painted_atlas_bake::probe {
+// Row 278c / D392 chain r2a: the E2b explicit painted-preservation probe runs
+// the REAL product path on the REAL owner. Each scenario builds the painted
+// E4Decals fixture in BOTH unit systems (0.001 and 1.0 m/unit; Run ANDs the
+// two passes): real E2 fixture members through AssetAtlasProbe::New (box
+// PartA planar, cylinder PartB cylindrical, painted box PartC planar, plus
+// one spare unpainted box), real SYFI/1 bindings committed through
+// face_image::owner with the test-seeded E4Decals PNG resources, the SYEA/1
+// atlas committed through the bake's Preserve admission, then the product
+// bake (owner::Prepare -> re-fence -> owner::Commit inside one OCAF command).
+// Scenario 0 runs the cancel, undo/redo, real source/binding edit, re-bake
+// and refusal legs; it then saves, destroys app+document and cold-reopens
+// unseeded. Scenario 1 measures the persisted derivative after the cold
+// reopen with probe-independent arithmetic. Every bit is measured from the
+// document; any exception, refusal or mismatch leaves the bit clear.
+// Frozen scenario bit tables (contract section 2):
+//   scenario 0 "preservation and atomicity", mask 0xff:
+//     0 original-bytes-preserved   original image bytes, SYFI records and
+//                                  master recipes byte-identical after bake
+//                                  and after cold reopen
+//     1 atlas-intent-unchanged     SYEA/1 bytes (settings, membership, chart
+//                                  IDs) identical after bake and re-bake
+//     2 all-member-fences          all-member capture/recheck fences hold:
+//                                  Currentness Committed after bake and after
+//                                  the cold reopen, every binding fenced
+//     3 one-command-undo-redo      bake is one undoable command; undo removes
+//                                  SYEB+baked resources exactly; redo restores
+//                                  an equal bakeProof
+//     4 cancel-zero-delta          Prepare -> Cancel -> AbortCommand leaves
+//                                  zero delta
+//     5 stale-refusal              real geometry edit -> StaleSource, real
+//                                  binding edit -> StaleBinding; stale commits
+//                                  refused with zero delta
+//     6 rebake-different-proof     explicit re-bake after the binding edit
+//                                  commits a different bakeProof
+//     7 per-unit-completion        this unit pass reached the end
+//   scenario 1 "independent quality evidence after cold reopen", mask 0xff:
+//     0 interior-error-bounds      measured per-channel interior error <=2/255
+//                                  max, <=1/255 mean on the committed bake
+//     1 seam-dilation-census       independent rasterization: zero overlap,
+//                                  gutter bounds, exact gutterTexels dilation,
+//                                  zero foreign-chart bleed, zero torn seams
+//     2 normal-rules               emitted normal texels channel-exact source
+//                                  copies or renormalized within quantization
+//     3 density-stretch-occupancy  per-member density ratio <=1.00001,
+//                                  cylinder stretch in [0.999,1.001],
+//                                  occupancy >=0.50 on the baked layout
+//     4 tangent-parity             independent per-member UV parity
+//     5 cold-reopen-witnesses      reopened SYEB/1 fields, baked resource
+//                                  bytes and original resource bytes match the
+//                                  committed witnesses
+//     6 over-budget-refusal        over-budget bake input -> OverBudget with
+//                                  zero delta
+//     7 per-unit-completion
+namespace fi = core3d::face_image;
+namespace aa = core3d::asset_atlas;
+namespace dr = core3d::dependent_replay;
+namespace pb = core3d::painted_atlas_bake;
+using App = retained_solid::Probe::App;
+using AtlasPart = aa::AssetAtlasProbe::Part;
+
+constexpr int kUnits = 2;
+constexpr int kSlots = 128;
+constexpr int kBlobs = 3; // 0 baked baseColor PNG, 1 baked normal PNG, 2 original base-checker
+
+struct SeededResources {
+    std::vector<std::uint8_t> baseChecker, dataLinear, normalLinear;
+    bool complete = false;
+};
+static SeededResources& Seeds() {
+    static thread_local SeededResources value;
+    return value;
+}
+struct Readbacks {
+    std::uint64_t values[kUnits][kSlots]{};
+    bool complete = false;
+    std::vector<std::uint8_t> blobs[kUnits][kBlobs];
+};
+static Readbacks& StoredReadbacks(int scenario) {
+    static thread_local Readbacks slots[2];
+    return slots[scenario];
+}
+static std::size_t& ReportLineCount() {
+    static thread_local std::size_t count = 0;
+    return count;
+}
+static void Report(int scenario, double unit, const char* step,
+                   const std::string& detail = {}) {
+    auto& count = ReportLineCount();
+    if (count >= 96) return;
+    ++count;
+    const int length = int(std::min<std::size_t>(detail.size(), 192));
+    std::fprintf(stderr,
+        "[painted-bake-probe] scenario=%d unit=%g step=%s detail=%.*s\n",
+        scenario, unit, step, length, detail.c_str());
+    std::fflush(stderr);
+}
+static const char* Clause(int scenario, int bit) {
+    static const char* clauses[2][8] = {
+        {"original-bytes-preserved", "atlas-intent-unchanged", "all-member-fences",
+         "one-command-undo-redo", "cancel-zero-delta", "stale-refusal",
+         "rebake-different-proof", "per-unit-completion"},
+        {"interior-error-bounds", "seam-dilation-census", "normal-rules",
+         "density-stretch-occupancy", "tangent-parity", "cold-reopen-witnesses",
+         "over-budget-refusal", "per-unit-completion"}
+    };
+    return clauses[scenario][bit];
+}
+static std::uint64_t BitsOf(double value) noexcept {
+    std::uint64_t bits = 0; std::memcpy(&bits, &value, sizeof bits); return bits;
+}
+static std::uint64_t PrefixOf(const Digest& value) noexcept {
+    std::uint64_t prefix = 0;
+    for (std::size_t index = 0; index < 8 && index < value.size(); ++index)
+        prefix |= std::uint64_t(value[index]) << (8 * index);
+    return prefix;
+}
+static UUID ResourceUUID(const Digest& identity) noexcept {
+    UUID value{};
+    std::copy_n(identity.begin(), value.size(), value.begin());
+    if (!retained_recipe::Nonzero(value)) value.back() = 1;
+    return value;
+}
+
+struct Fixture {
+    std::vector<AtlasPart> parts; // [0] PartA box, [1] PartB cylinder,
+                                  // [2] PartC painted box, [3] spare box
+    aa::Key atlas;
+    double unit = 0.001;
+};
+
+// Real E3/SYFI install route (mirrors the landed 278b fixture staging):
+// adopt the seeded E4Decals resources through face_image::owner, capture each
+// bound face through the real derivation + B2 resolver, then commit the
+// binding record through face_image::owner in one command per owner.
+static fi::ResourceEnvelope MakeEnvelope(const std::vector<std::uint8_t>& png,
+                                         const char* provenanceText,
+                                         const UUID& resource) {
+    fi::ResourceEnvelope envelope;
+    envelope.resource = resource;
+    if (!fi::HashFaceImageBytes(png, envelope.originalContent)
+        || !fi::HashFaceImageBytes(png, envelope.workingContent))
+        throw std::invalid_argument("e2b fixture content hashes");
+    envelope.originalFormat = fi::ImageEncoding::PNG;
+    envelope.workingFormat = fi::ImageEncoding::PNG;
+    envelope.alpha = fi::AlphaInterpretation::Opaque;
+    kernel::Image decoded;
+    if (!kernel::DecodeImage(png, decoded))
+        throw std::invalid_argument("e2b fixture decode");
+    envelope.originalWidthTexels = decoded.width;
+    envelope.originalHeightTexels = decoded.height;
+    envelope.workingWidthTexels = decoded.width;
+    envelope.workingHeightTexels = decoded.height;
+    const std::string text = provenanceText;
+    const std::vector<std::uint8_t> provenanceBytes(text.begin(), text.end());
+    if (!fi::HashFaceImageBytes(provenanceBytes, envelope.provenance))
+        throw std::invalid_argument("e2b fixture provenance");
+    envelope.originalBytes = png;
+    envelope.workingBytes = png;
+    fi::Refusal refusal = fi::Refusal::None;
+    if (!fi::Valid(envelope, refusal))
+        throw std::invalid_argument("e2b fixture envelope validity");
+    return envelope;
+}
+
+static bool CapturePlanarFace(const TopoDS_Shape& shape, double unit,
+                              retained_face_selector::Axis axis,
+                              retained_face_selector::Side side,
+                              dr::FaceImageGeometricReceipt& captured) {
+    TopTools_IndexedMapOfShape faceMap;
+    TopExp::MapShapes(shape, TopAbs_FACE, faceMap);
+    Bnd_Box stageBox;
+    if (!dr::detail::FaceImageStageBounds(shape, stageBox)) return false;
+    retained_edge_treatment::ReplayBudget budget;
+    for (int index = 1; index <= faceMap.Extent(); ++index) {
+        const TopoDS_Face face = TopoDS::Face(faceMap.FindKey(index));
+        dr::FaceImageGeometricReceipt derived;
+        if (dr::detail::DeriveFaceImageReceipt(stageBox, face, unit, budget, derived)
+            != dr::detail::FaceImageDeriveStatus::Derived) continue;
+        const auto* scope =
+            std::get_if<retained_face_selector::PlanarFaceBoundary>(&derived.intent);
+        if (!scope || scope->face.axis != axis || scope->face.side != side) continue;
+        dr::FaceImageGeometricReceipt resolved; TopoDS_Face matched;
+        if (dr::detail::ResolveFaceImageReceipt(shape, derived.intent, unit, budget,
+                                                resolved, matched)
+                != retained_face_selector::Refusal::None
+            || !matched.IsSame(face)) continue;
+        captured = resolved;
+        return true;
+    }
+    return false;
+}
+
+static fi::Binding MakeBinding(const AtlasPart& part, std::size_t ordinal,
+                               retained_face_selector::Axis axis,
+                               retained_face_selector::Side side,
+                               fi::Role role, fi::ColorSpace colorSpace,
+                               const UUID& resource, double unit) {
+    fi::Binding binding;
+    binding.binding = aa::AssetAtlasProbe::IndexedUUID(0x53, ordinal);
+    binding.face = aa::AssetAtlasProbe::IndexedUUID(0x52, ordinal);
+    dr::FaceImageGeometricReceipt captured;
+    if (!CapturePlanarFace(part.current, unit, axis, side, captured)
+        || !dr::FaceImageReceiptProof(captured, binding.selectorProof))
+        throw std::invalid_argument("e2b fixture face proof");
+    binding.resource = resource;
+    binding.role = role;
+    binding.colorSpace = colorSpace;
+    // The frozen painted-leg transform (fixture-spec painted_leg.transform).
+    binding.transform.scale = {1.25, 0.75};
+    binding.transform.offset = {0.125, -0.25};
+    binding.transform.rotationDegrees = 30;
+    binding.transform.wrapU = fi::Wrap::MirroredRepeat;
+    binding.transform.wrapV = fi::Wrap::ClampToEdge;
+    return binding;
+}
+
+static void CommitBindings(App& holder, const AtlasPart& part, fi::Definition& definition) {
+    const auto doc = holder.doc;
+    definition.owner = part.key;
+    if (!fi::BindBindingProof(definition))
+        throw std::invalid_argument("e2b fixture binding proof");
+    fi::Observed observed;
+    for (const auto& binding : definition.bindings)
+        observed.faces.push_back({binding.face, binding.selectorProof});
+    if (!fi::owner::ResourceManifest(doc, observed.resources))
+        throw std::invalid_argument("e2b fixture resource manifest");
+    doc->NewCommand();
+    fi::owner::Staging staging;
+    const auto prepared = fi::owner::Prepare(staging, doc, definition, observed);
+    const auto committed = prepared == fi::owner::Outcome::Prepared
+        ? fi::owner::Commit(staging, doc, observed) : fi::owner::Outcome::Malformed;
+    if (prepared != fi::owner::Outcome::Prepared
+        || committed != fi::owner::Outcome::Committed || !doc->CommitCommand()) {
+        fi::owner::Cancel(staging);
+        if (doc->HasOpenCommand()) doc->AbortCommand();
+        throw std::invalid_argument("e2b fixture binding commit");
+    }
+}
+
+// The SYEA/1 commit for the painted fixture: the exact E2a owner sequence
+// with the explicit Preserve admission the opt-in bake owns. The legacy
+// Reject admission is separately proven to keep refusing this capture.
+static bool CommitAtlasPreserve(App& holder, const aa::Key& key,
+                                const std::vector<OwnerKey>& members,
+                                const aa::build::Settings& settings,
+                                aa::Definition* candidateOut,
+                                aa::build::LayoutEvidence* layoutOut) {
+    const auto doc = holder.doc;
+    aa::Capture capture;
+    if (!aa::build::CaptureMembers(doc, members, capture)) return false;
+    aa::Definition candidate; std::vector<aa::MemberUVAssignment> assignments;
+    std::string diagnosis; aa::build::LayoutEvidence layout;
+    if (aa::build::BuildAtlas(doc, key, capture, settings, candidate, assignments,
+            diagnosis, &layout, aa::build::PaintedAdmission::Preserve)
+        != aa::build::Status::Built) return false;
+    std::vector<aa::Member> observed;
+    if (!aa::build::ObserveMembers(doc, candidate.members, observed)) return false;
+    doc->NewCommand();
+    aa::owner::Staging staging;
+    auto outcome = aa::owner::Prepare(staging, doc, candidate, assignments, observed);
+    if (outcome == aa::owner::Outcome::Prepared) {
+        std::vector<aa::Member> fenced;
+        outcome = aa::build::ObserveMembers(doc, candidate.members, fenced)
+            ? aa::owner::Commit(staging, doc, fenced) : aa::owner::Outcome::StaleSource;
+    }
+    if (outcome != aa::owner::Outcome::Committed || !doc->CommitCommand()) {
+        aa::owner::Cancel(staging);
+        if (doc->HasOpenCommand()) doc->AbortCommand();
+        return false;
+    }
+    if (candidateOut) *candidateOut = candidate;
+    if (layoutOut) *layoutOut = layout;
+    return true;
+}
+
+static Fixture New(App& holder, double unit, bool budgetFixture,
+                   std::uint64_t& rejectStatusOut) {
+    const auto& seeds = Seeds();
+    if (!seeds.complete) throw std::invalid_argument("e2b probe unseeded");
+    auto base = aa::AssetAtlasProbe::New(holder, unit, budgetFixture ? 0 : 2);
+    Fixture fixture;
+    fixture.parts = base.parts;
+    fixture.atlas = base.atlas;
+    fixture.unit = unit;
+    const auto doc = holder.doc;
+    const UUID baseResource = aa::AssetAtlasProbe::IndexedUUID(0x51, 1);
+    const UUID dataResource = aa::AssetAtlasProbe::IndexedUUID(0x51, 2);
+    const UUID normalResource = aa::AssetAtlasProbe::IndexedUUID(0x51, 3);
+    doc->NewCommand();
+    const fi::ResourceEnvelope envelopes[3] = {
+        MakeEnvelope(seeds.baseChecker, "shapeyard:e4-fixture-v1:base-checker.png", baseResource),
+        MakeEnvelope(seeds.dataLinear, "shapeyard:e4-fixture-v1:data-linear.png", dataResource),
+        MakeEnvelope(seeds.normalLinear, "shapeyard:e4-fixture-v1:normal-linear.png", normalResource)};
+    for (const auto& envelope : envelopes)
+        if (fi::owner::AdoptResource(doc, envelope) != fi::owner::Outcome::Committed)
+            throw std::invalid_argument("e2b fixture resource adoption");
+    if (!doc->CommitCommand()) throw std::invalid_argument("e2b fixture resource commit");
+    {
+        fi::Definition definition;
+        definition.bindings.push_back(MakeBinding(fixture.parts[0], 1,
+            retained_face_selector::Axis::Y, retained_face_selector::Side::Max,
+            fi::Role::BaseColor, fi::ColorSpace::SRGB, baseResource, unit));
+        definition.bindings.push_back(MakeBinding(fixture.parts[0], 2,
+            retained_face_selector::Axis::Y, retained_face_selector::Side::Min,
+            fi::Role::Emissive, fi::ColorSpace::SRGB, baseResource, unit));
+        definition.bindings.push_back(MakeBinding(fixture.parts[0], 3,
+            retained_face_selector::Axis::X, retained_face_selector::Side::Max,
+            fi::Role::MetallicRoughness, fi::ColorSpace::Linear, dataResource, unit));
+        if (!budgetFixture)
+            definition.bindings.push_back(MakeBinding(fixture.parts[0], 4,
+                retained_face_selector::Axis::X, retained_face_selector::Side::Min,
+                fi::Role::Occlusion, fi::ColorSpace::Linear, dataResource, unit));
+        CommitBindings(holder, fixture.parts[0], definition);
+    }
+    if (!budgetFixture) {
+        fi::Definition definition;
+        definition.bindings.push_back(MakeBinding(fixture.parts[2], 5,
+            retained_face_selector::Axis::Y, retained_face_selector::Side::Max,
+            fi::Role::Normal, fi::ColorSpace::Linear, normalResource, unit));
+        CommitBindings(holder, fixture.parts[2], definition);
+    }
+    // Fail-closed evidence: the unchanged legacy admission refuses this exact
+    // painted capture with PaintedRebakeRequired.
+    const std::size_t atlasMemberCount = budgetFixture ? 2 : 3;
+    std::vector<OwnerKey> members;
+    for (std::size_t index = 0; index < atlasMemberCount; ++index)
+        members.push_back(fixture.parts[index].key);
+    aa::Capture capture;
+    if (!aa::build::CaptureMembers(doc, members, capture))
+        throw std::invalid_argument("e2b fixture capture");
+    {
+        aa::Definition refused; std::vector<aa::MemberUVAssignment> refusedAssignments;
+        std::string refuseDiagnosis;
+        rejectStatusOut = std::uint64_t(aa::build::BuildAtlas(doc, fixture.atlas,
+            capture, {2048, 4}, refused, refusedAssignments, refuseDiagnosis));
+    }
+    const aa::build::Settings settings{budgetFixture ? 4096 : 2048, 4};
+    if (!CommitAtlasPreserve(holder, fixture.atlas, members, settings, nullptr, nullptr))
+        throw std::invalid_argument("e2b fixture atlas commit");
+    doc->ClearUndos();
+    if (!Core3DValidateRetainedFinishingDocument(doc)
+        || !Core3DValidateAssetAtlasDocument(doc)
+        || !Core3DValidateFaceImageDocument(doc)
+        || !Core3DValidatePaintedAtlasBakeDocument(doc))
+        throw std::invalid_argument("e2b fixture validation");
+    return fixture;
+}
+
+struct FullState {
+    Standard_Integer undos = -1;
+    std::vector<std::string> resolved;
+    std::vector<std::vector<std::uint8_t>> receipts;
+    std::vector<std::pair<UUID, std::vector<std::uint8_t>>> atlases;
+    std::vector<std::vector<std::uint8_t>> syfi;
+    std::vector<std::pair<UUID, Digest>> resources;
+    std::vector<std::uint8_t> syeb;
+    bool syebPresent = false;
+};
+static bool CaptureState(const Handle(TDocStd_Document)& doc, const Fixture& fixture,
+                         std::size_t partCount, FullState& state) {
+    state = {};
+    if (doc.IsNull()) return false;
+    state.undos = doc->GetUndos().Size();
+    for (std::size_t index = 0; index < partCount; ++index) {
+        const auto& part = fixture.parts[index];
+        std::string resolved;
+        if (!aa::AssetAtlasProbe::ResolvedCurrentWitness(doc, part.key, resolved))
+            return false;
+        state.resolved.push_back(std::move(resolved));
+        retained_finishing::Record receipt;
+        if (!retained_finishing::Read(doc, part.owner, receipt) || !receipt.value)
+            return false;
+        state.receipts.push_back(receipt.value->bytes);
+        fi::Definition bindings;
+        std::vector<std::uint8_t> bytes;
+        const auto bindingState = fi::persistence::bindings::Read(doc, part.owner,
+                                                                  bindings, &bytes);
+        if (bindingState == fi::persistence::bindings::ReadState::Malformed) return false;
+        state.syfi.push_back(bindingState == fi::persistence::bindings::ReadState::Present
+            ? std::move(bytes) : std::vector<std::uint8_t>{});
+    }
+    std::vector<aa::persistence::Record> atlases;
+    if (!aa::persistence::ReadAll(doc, atlases)) return false;
+    for (const auto& record : atlases)
+        state.atlases.push_back({record.value->definition.key.atlas, record.value->bytes});
+    std::sort(state.atlases.begin(), state.atlases.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<fi::persistence::resources::Record> resources;
+    if (!fi::persistence::resources::ReadAll(doc, resources)) return false;
+    for (const auto& record : resources)
+        state.resources.push_back({record.value->envelope.resource,
+                                   record.value->envelope.workingContent});
+    std::sort(state.resources.begin(), state.resources.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    persistence::Record bake;
+    const auto bakeState = persistence::Read(doc, fixture.atlas, bake);
+    if (bakeState == persistence::ReadState::Malformed) return false;
+    state.syebPresent = bakeState == persistence::ReadState::Present;
+    if (state.syebPresent) state.syeb = bake.bytes;
+    return true;
+}
+static bool SameState(const Handle(TDocStd_Document)& doc, const Fixture& fixture,
+                      std::size_t partCount, const FullState& expected) {
+    FullState current;
+    return CaptureState(doc, fixture, partCount, current)
+        && current.undos == expected.undos && current.resolved == expected.resolved
+        && current.receipts == expected.receipts && current.atlases == expected.atlases
+        && current.syfi == expected.syfi && current.resources == expected.resources
+        && current.syeb == expected.syeb && current.syebPresent == expected.syebPresent;
+}
+static const std::vector<std::uint8_t>* AtlasBytes(const FullState& state,
+                                                   const aa::Key& key) {
+    for (const auto& entry : state.atlases)
+        if (entry.first == key.atlas) return &entry.second;
+    return nullptr;
+}
+static bool OriginalResourcesIntact(const FullState& state) {
+    const auto& seeds = Seeds();
+    const std::pair<UUID, const std::vector<std::uint8_t>*> wanted[3] = {
+        {aa::AssetAtlasProbe::IndexedUUID(0x51, 1), &seeds.baseChecker},
+        {aa::AssetAtlasProbe::IndexedUUID(0x51, 2), &seeds.dataLinear},
+        {aa::AssetAtlasProbe::IndexedUUID(0x51, 3), &seeds.normalLinear}};
+    for (const auto& entry : wanted) {
+        Digest digest{};
+        if (!fi::HashFaceImageBytes(*entry.second, digest)) return false;
+        bool found = false;
+        for (const auto& resource : state.resources)
+            if (resource.first == entry.first) {
+                found = resource.second == digest;
+                break;
+            }
+        if (!found) return false;
+    }
+    return true;
+}
+
+// The product entry sequence: owner::Prepare -> owner::Commit inside one OCAF
+// command (exactly what OcctDocument::BakePaintedAtlas composes).
+static pb::owner::Outcome BakeOnce(App& holder, const aa::Key& key, pb::Definition* baked,
+                                   pb::kernel::Evidence* evidence) {
+    const auto doc = holder.doc;
+    if (doc.IsNull() || doc->HasOpenCommand()) return pb::owner::Outcome::Busy;
+    doc->NewCommand();
+    pb::owner::Staging staging;
+    auto outcome = pb::owner::Prepare(staging, doc, key);
+    if (outcome == pb::owner::Outcome::Prepared) {
+        if (baked) *baked = staging.bake;
+        if (evidence) *evidence = staging.evidence;
+        outcome = pb::owner::Commit(staging, doc);
+    }
+    if (outcome == pb::owner::Outcome::Committed && doc->CommitCommand())
+        return pb::owner::Outcome::Committed;
+    pb::owner::Cancel(staging);
+    if (doc->HasOpenCommand()) doc->AbortCommand();
+    return outcome;
+}
+
+static bool OpenInto(App& holder, const std::string& bytes) {
+    Core3DDefineSafeBinXCAFFormat(holder.app);
+    try {
+        std::istringstream in(bytes, std::ios::in | std::ios::binary);
+        Core3DBeginSafeBinaryRead();
+        const auto status = holder.app->Open(in, holder.doc);
+        if (status != PCDM_RS_OK || Core3DSafeBinaryReadWasRejected() || holder.doc.IsNull())
+            return false;
+        holder.doc->SetUndoLimit(40);
+        return Core3DValidateRetainedSolidDocument(holder.doc)
+            && Core3DValidateRetainedFinishingDocument(holder.doc)
+            && Core3DValidateAssetAtlasDocument(holder.doc)
+            && Core3DValidateFaceImageDocument(holder.doc)
+            && Core3DValidatePaintedAtlasBakeDocument(holder.doc);
+    } catch (...) { return false; }
+}
+
+// Real source edit replacing the member solid with the bounded conical sector
+// (remeshed BEFORE install, fence-consistent), mirroring ScalePart.
+static void ReplacePartWithCone(App& holder, AtlasPart& part) {
+    const auto doc = holder.doc;
+    if (doc.IsNull() || doc->HasOpenCommand())
+        throw std::invalid_argument("e2b cone edit command");
+    double unit = 0;
+    if (!XCAFDoc_DocumentTool::GetLengthUnit(doc, unit) || unit <= 0)
+        throw std::invalid_argument("e2b cone edit unit");
+    const double n = .001 / unit;
+    TopoDS_Shape cone = BRepPrimAPI_MakeCone(12 * n, 4 * n, 25 * n, 0.01).Shape();
+    BRepMesh_IncrementalMesh mesher(cone, 2.5e-4 * n, Standard_False, 0.5, Standard_True);
+    doc->NewCommand();
+    TNaming_Builder(part.owner).Modify(part.current, cone);
+    TNaming_Builder(part.record).Modify(part.current, cone);
+    if (!Core3DValidateRetainedSolidDocument(doc) || !doc->CommitCommand())
+        throw std::invalid_argument("e2b cone edit");
+    part.current = cone;
+}
+
+// Real regeneration of the member's row-268 receipt through the E1b producer
+// and owner in one command (mirrors producer_probe scenario 1).
+static bool RegenerateReceipt(App& holder, AtlasPart& part) {
+    const auto doc = holder.doc;
+    if (doc.IsNull() || doc->HasOpenCommand()) return false;
+    TDF_Label ownerLabel;
+    retained_finishing::producer::Settings settings;
+    settings.requested = retained_finishing::UnwrapPolicy::Planar;
+    settings.resolutionTexels = 1024;
+    settings.gutterTexels = 2;
+    retained_finishing::Definition candidate; std::string diagnosis;
+    retained_finishing::owner::Staging staging;
+    auto outcome = retained_finishing::owner::Outcome::Malformed;
+    doc->NewCommand();
+    retained_finishing::producer::Capture fresh;
+    if (retained_finishing::producer::CaptureSource(doc, part.key, fresh)
+        && retained_finishing::owner::ResolveOwnerLabel(doc, part.key, ownerLabel)
+        && retained_finishing::producer::BuildDerivative(doc, ownerLabel, fresh, settings,
+                                                         candidate, diagnosis)
+            == retained_finishing::producer::Status::Produced) {
+        outcome = retained_finishing::owner::Prepare(staging, doc, candidate, fresh.source);
+        if (outcome == retained_finishing::owner::Outcome::Prepared) {
+            retained_finishing::producer::Capture fenced;
+            if (retained_finishing::producer::CaptureSource(doc, part.key, fenced))
+                outcome = retained_finishing::owner::Commit(staging, doc, fenced.source);
+            else outcome = retained_finishing::owner::Outcome::StaleSource;
+        }
+    }
+    if (outcome == retained_finishing::owner::Outcome::Committed && doc->CommitCommand()) {
+        part.receipt = candidate;
+        return true;
+    }
+    retained_finishing::owner::Cancel(staging);
+    if (doc->HasOpenCommand()) doc->AbortCommand();
+    return false;
+}
+
+// XCAF paint with a FILE-BACKED texture: the image bytes are foreign to the
+// document, so the bake must refuse ForeignResource.
+static void PaintPartFilePath(App& holder, const AtlasPart& part) {
+    const auto doc = holder.doc;
+    if (doc.IsNull() || doc->HasOpenCommand())
+        throw std::invalid_argument("e2b foreign paint command");
+    Handle(XCAFDoc_VisMaterial) material = new XCAFDoc_VisMaterial();
+    XCAFDoc_VisMaterialCommon common = material->ConvertToCommonMaterial();
+    common.DiffuseTexture = new Image_Texture(
+        TCollection_AsciiString("/shapeyard-e2b-foreign-texture.png"));
+    material->SetCommonMaterial(common);
+    const auto tool = XCAFDoc_DocumentTool::VisMaterialTool(doc->Main());
+    doc->NewCommand();
+    const TDF_Label materialLabel = tool->AddMaterial(
+        material, TCollection_AsciiString("e2b foreign texture fixture"));
+    if (materialLabel.IsNull()) throw std::invalid_argument("e2b foreign paint material");
+    tool->SetShapeMaterial(part.owner, materialLabel);
+    if (!doc->CommitCommand()) throw std::invalid_argument("e2b foreign paint commit");
+}
+
+static std::uint64_t Scenario0(double unit, int unitIndex, Readbacks& readbacks) {
+    constexpr std::size_t kPartCount = 4;
+    std::uint64_t bits = 0;
+    auto& slots = readbacks.values[unitIndex];
+    App holder;
+    std::uint64_t rejectStatus = ~0ull;
+    auto fixture = New(holder, unit, false, rejectStatus);
+    const auto doc = holder.doc;
+    slots[19] = rejectStatus; // build::Status::PaintedRebakeRequired == 7
+    {
+        aa::Capture capture;
+        std::vector<OwnerKey> members;
+        for (std::size_t index = 0; index < 3; ++index) members.push_back(fixture.parts[index].key);
+        if (aa::build::CaptureMembers(doc, members, capture)
+            && capture.members.size() == 3 && capture.members[0].painted
+            && !capture.members[1].painted && capture.members[2].painted)
+            slots[28] = 5;
+        else Report(0, unit, "painted-flags");
+    }
+    FullState preBake;
+    if (!CaptureState(doc, fixture, kPartCount, preBake)) {
+        Report(0, unit, "witness-pre-bake"); return 0;
+    }
+    // Busy: the product owner refuses without an open command.
+    {
+        pb::owner::Staging staging;
+        slots[9] = std::uint64_t(E2bOutcome(pb::owner::Prepare(staging, doc, fixture.atlas)));
+    }
+    // Absent: no SYEA/1 record under the unknown key; zero delta.
+    {
+        aa::Key unknown = fixture.atlas;
+        unknown.atlas = aa::AssetAtlasProbe::IndexedUUID(0x77, 9);
+        doc->NewCommand();
+        pb::owner::Staging staging;
+        const auto outcome = pb::owner::Prepare(staging, doc, unknown);
+        pb::owner::Cancel(staging);
+        doc->AbortCommand();
+        slots[10] = std::uint64_t(E2bOutcome(outcome));
+        if (!SameState(doc, fixture, kPartCount, preBake)) Report(0, unit, "absent-delta");
+    }
+    // bit4 leg, cancellation: Prepare -> Cancel -> AbortCommand, zero delta.
+    {
+        doc->NewCommand();
+        pb::owner::Staging staging;
+        const auto prepared = pb::owner::Prepare(staging, doc, fixture.atlas);
+        pb::owner::Cancel(staging);
+        doc->AbortCommand();
+        if (prepared == pb::owner::Outcome::Prepared
+            && SameState(doc, fixture, kPartCount, preBake)) {
+            slots[1] = 1; bits |= 1ull << 4;
+        } else Report(0, unit, "cancel-zero-delta",
+                      "outcome=" + std::to_string(int(prepared)));
+    }
+    // PersistenceFailure: the SYEB storage root is occupied by a foreign
+    // attribute, so staging the committed record fails closed; zero delta.
+    {
+        doc->NewCommand();
+        pb::owner::Staging staging;
+        auto outcome = pb::owner::Prepare(staging, doc, fixture.atlas);
+        if (outcome == pb::owner::Outcome::Prepared) {
+            const TDF_Label root = doc->Main().FindChild(persistence::RootTag, Standard_True);
+            TDataStd_Integer::Set(root,
+                Standard_GUID("E278C2B6-2F4A-4D3B-9C4E-7A1F0B5D8E3F"), 7);
+            outcome = pb::owner::Commit(staging, doc);
+        }
+        pb::owner::Cancel(staging);
+        doc->AbortCommand();
+        slots[17] = std::uint64_t(E2bOutcome(outcome));
+        if (!SameState(doc, fixture, kPartCount, preBake))
+            Report(0, unit, "persistence-failure-delta");
+    }
+    // The bake: one command through the product owner.
+    pb::Definition firstBake; pb::kernel::Evidence firstEvidence;
+    {
+        const auto undosBefore = doc->GetUndos().Size();
+        const auto outcome = BakeOnce(holder, fixture.atlas, &firstBake, &firstEvidence);
+        slots[0] = std::uint64_t(E2bOutcome(outcome));
+        slots[20] = std::uint64_t(doc->GetUndos().Size() - undosBefore);
+        if (outcome != pb::owner::Outcome::Committed) {
+            Report(0, unit, "bake", "outcome=" + std::to_string(int(outcome)));
+            return bits;
+        }
+    }
+    FullState baked;
+    if (!CaptureState(doc, fixture, kPartCount, baked)) {
+        Report(0, unit, "witness-baked"); return bits;
+    }
+    // bit0 (live half): original image bytes, SYFI records and master recipes
+    // byte-identical after the bake.
+    slots[22] = (baked.resolved == preBake.resolved && baked.receipts == preBake.receipts
+        && baked.syfi == preBake.syfi
+        && AtlasBytes(baked, fixture.atlas) && preBake.atlases.size() == 1
+        && *AtlasBytes(baked, fixture.atlas) == *AtlasBytes(preBake, fixture.atlas)
+        && OriginalResourcesIntact(baked)) ? 1 : 0;
+    if (slots[22] != 1) Report(0, unit, "originals-after-bake");
+    // bit1: SYEA/1 bytes unchanged by the bake.
+    const bool atlasKept = baked.atlases.size() == preBake.atlases.size()
+        && AtlasBytes(baked, fixture.atlas)
+        && *AtlasBytes(baked, fixture.atlas) == *AtlasBytes(preBake, fixture.atlas);
+    // bit2 (live half): all-member capture/recheck fences hold after commit.
+    bool fencesLive = false;
+    {
+        pb::Definition current;
+        const auto currentness = pb::owner::Currentness(doc, fixture.atlas, &current);
+        fencesLive = currentness == pb::owner::Outcome::Committed
+            && current.bindings.size() == 5 && current.resources.size() == 5
+            && current.bakeProof == firstBake.bakeProof;
+        for (const auto& binding : current.bindings) {
+            bool member = false;
+            for (std::size_t index = 0; index < 3; ++index)
+                if (fixture.parts[index].key == binding.owner) { member = true; break; }
+            fencesLive = fencesLive && member;
+        }
+        if (!fencesLive) Report(0, unit, "all-member-fences-live");
+    }
+    // No-op re-bake: identical inputs commit with zero delta and identical bytes.
+    {
+        doc->NewCommand();
+        pb::owner::Staging staging;
+        auto outcome = pb::owner::Prepare(staging, doc, fixture.atlas);
+        if (outcome == pb::owner::Outcome::Prepared) outcome = pb::owner::Commit(staging, doc);
+        if (doc->HasOpenCommand()) doc->AbortCommand(); // unchanged: nothing staged
+        slots[8] = (outcome == pb::owner::Outcome::Committed
+            && SameState(doc, fixture, kPartCount, baked)) ? 1 : 0;
+        if (slots[8] != 1) Report(0, unit, "noop-rebake");
+    }
+    // bit3: undo removes SYEB and the baked resources exactly; redo restores
+    // an equal bakeProof.
+    {
+        persistence::Record record;
+        bool undoOk = doc->GetUndos().Size() > 0 && doc->Undo()
+            && persistence::Read(doc, fixture.atlas, record)
+                == persistence::ReadState::Absent;
+        if (undoOk) {
+            FullState undone;
+            undoOk = CaptureState(doc, fixture, kPartCount, undone)
+                && !undone.syebPresent && undone.resources == preBake.resources
+                && undone.syfi == preBake.syfi && undone.atlases == preBake.atlases;
+        }
+        slots[2] = undoOk ? 1 : 0;
+        bool redoOk = doc->Redo();
+        if (redoOk) {
+            persistence::Record restored;
+            redoOk = persistence::Read(doc, fixture.atlas, restored)
+                    == persistence::ReadState::Present
+                && restored.bytes == baked.syeb
+                && restored.definition.bakeProof == firstBake.bakeProof
+                && SameState(doc, fixture, kPartCount, baked);
+        }
+        slots[3] = redoOk ? 1 : 0;
+        if (slots[2] == 1 && slots[3] == 1 && slots[20] == 1) bits |= 1ull << 3;
+        else Report(0, unit, "one-command-undo-redo");
+    }
+    // Malformed: a foreign attribute on the SYEB record label fails the strict
+    // reader before any bake work; zero delta.
+    {
+        persistence::Record record;
+        if (persistence::Read(doc, fixture.atlas, record)
+                != persistence::ReadState::Present) {
+            Report(0, unit, "malformed-setup"); return bits;
+        }
+        doc->NewCommand();
+        TDataStd_Integer::Set(record.label,
+            Standard_GUID("E278C2B6-2F4A-4D3B-9C4E-7A1F0B5D8E40"), 1);
+        pb::owner::Staging staging;
+        const auto outcome = pb::owner::Prepare(staging, doc, fixture.atlas);
+        pb::owner::Cancel(staging);
+        doc->AbortCommand();
+        slots[11] = std::uint64_t(E2bOutcome(outcome));
+        if (!SameState(doc, fixture, kPartCount, baked)) Report(0, unit, "malformed-delta");
+    }
+    // Refused: the committed atlas over the spare unpainted member has no
+    // painted content, so there is nothing to bake; zero delta.
+    {
+        FullState before;
+        if (!CaptureState(doc, fixture, kPartCount, before)) {
+            Report(0, unit, "refused-witness"); return bits;
+        }
+        aa::Key unpainted = fixture.atlas;
+        unpainted.atlas = aa::AssetAtlasProbe::IndexedUUID(0x77, 2);
+        if (!CommitAtlasPreserve(holder, unpainted, {fixture.parts[3].key}, {2048, 4},
+                                 nullptr, nullptr)) {
+            Report(0, unit, "refused-atlas-commit"); return bits;
+        }
+        doc->NewCommand();
+        pb::owner::Staging staging;
+        const auto outcome = pb::owner::Prepare(staging, doc, unpainted);
+        pb::owner::Cancel(staging);
+        doc->AbortCommand();
+        slots[12] = std::uint64_t(E2bOutcome(outcome));
+        FullState after;
+        if (!CaptureState(doc, fixture, kPartCount, after)
+            || after.undos != before.undos + 1 || after.syeb != before.syeb
+            || after.syfi != before.syfi || after.resources != before.resources)
+            Report(0, unit, "refused-delta");
+    }
+    // bit5 (binding half): a real SYFI transform edit through the E3 owner
+    // stales the bake (StaleBinding); committing a pre-edit staging is refused
+    // with zero delta.
+    pb::owner::Staging staleBindingStaging;
+    {
+        doc->NewCommand();
+        const auto prepared = pb::owner::Prepare(staleBindingStaging, doc, fixture.atlas);
+        doc->AbortCommand(); // the captured staging survives the closed command
+        if (prepared != pb::owner::Outcome::Prepared) {
+            Report(0, unit, "stale-binding-capture"); return bits;
+        }
+        FullState beforeEdit;
+        if (!CaptureState(doc, fixture, kPartCount, beforeEdit)) return bits;
+        fi::Definition definition;
+        if (fi::persistence::bindings::Read(doc, fixture.parts[0].owner, definition)
+                != fi::persistence::bindings::ReadState::Present || definition.bindings.empty()) {
+            Report(0, unit, "binding-edit-read"); return bits;
+        }
+        for (auto& binding : definition.bindings)
+            if (binding.role == fi::Role::BaseColor) binding.transform.rotationDegrees = 15;
+        fi::Observed observed;
+        for (const auto& binding : definition.bindings)
+            observed.faces.push_back({binding.face, binding.selectorProof});
+        if (!fi::BindBindingProof(definition)
+            || !fi::owner::ResourceManifest(doc, observed.resources)) {
+            Report(0, unit, "binding-edit-proof"); return bits;
+        }
+        doc->NewCommand();
+        fi::owner::Staging editStaging;
+        const auto editPrepared = fi::owner::Prepare(editStaging, doc, definition, observed);
+        const auto editCommitted = editPrepared == fi::owner::Outcome::Prepared
+            ? fi::owner::Commit(editStaging, doc, observed) : fi::owner::Outcome::Malformed;
+        if (editPrepared != fi::owner::Outcome::Prepared
+            || editCommitted != fi::owner::Outcome::Committed || !doc->CommitCommand()) {
+            fi::owner::Cancel(editStaging);
+            if (doc->HasOpenCommand()) doc->AbortCommand();
+            Report(0, unit, "binding-edit-commit"); return bits;
+        }
+        slots[25] = std::uint64_t(E2bOutcome(
+            pb::owner::Currentness(doc, fixture.atlas, nullptr)));
+        doc->NewCommand();
+        const auto staleOutcome = pb::owner::Commit(staleBindingStaging, doc);
+        doc->AbortCommand();
+        slots[26] = std::uint64_t(E2bOutcome(staleOutcome));
+        FullState afterEdit;
+        const bool staleOk = CaptureState(doc, fixture, kPartCount, afterEdit)
+            && afterEdit.undos == beforeEdit.undos + 1
+            && afterEdit.syeb == beforeEdit.syeb
+            && afterEdit.atlases == beforeEdit.atlases
+            && afterEdit.resources == beforeEdit.resources;
+        if (!staleOk) Report(0, unit, "stale-binding-refusal");
+    }
+    // bit6: explicit re-bake commits a different bakeProof, one command, with
+    // the SYEA/1 bytes still unchanged.
+    pb::Definition secondBake;
+    {
+        const auto undosBefore = doc->GetUndos().Size();
+        const auto outcome = BakeOnce(holder, fixture.atlas, &secondBake, nullptr);
+        slots[6] = std::uint64_t(E2bOutcome(outcome));
+        slots[21] = std::uint64_t(doc->GetUndos().Size() - undosBefore);
+        FullState rebaked;
+        const bool captured = CaptureState(doc, fixture, kPartCount, rebaked);
+        slots[7] = (outcome == pb::owner::Outcome::Committed && captured
+            && !(secondBake.bakeProof == firstBake.bakeProof)
+            && AtlasBytes(rebaked, fixture.atlas)
+            && *AtlasBytes(rebaked, fixture.atlas) == *AtlasBytes(preBake, fixture.atlas)) ? 1 : 0;
+        if (slots[6] == 0 && slots[7] == 1 && slots[21] == 1) bits |= 1ull << 6;
+        else Report(0, unit, "rebake-different-proof");
+        if (outcome != pb::owner::Outcome::Committed) return bits;
+    }
+    FullState rebakedState;
+    if (!CaptureState(doc, fixture, kPartCount, rebakedState)) {
+        Report(0, unit, "witness-rebaked"); return bits;
+    }
+    // bit5 (geometry half): a real source edit stales the bake (StaleSource);
+    // the stale commit and a fresh Prepare are both refused with zero delta.
+    bool geometryStaleOk = false;
+    {
+        pb::owner::Staging staleStaging;
+        doc->NewCommand();
+        const auto prepared = pb::owner::Prepare(staleStaging, doc, fixture.atlas);
+        doc->AbortCommand();
+        FullState beforeEdit;
+        if (prepared != pb::owner::Outcome::Prepared
+            || !CaptureState(doc, fixture, kPartCount, beforeEdit)) {
+            Report(0, unit, "stale-source-capture"); return bits;
+        }
+        const TopoDS_Shape preEditShape = fixture.parts[1].current;
+        aa::AssetAtlasProbe::ScalePart(holder, fixture.parts[1], 1.25);
+        slots[4] = std::uint64_t(E2bOutcome(
+            pb::owner::Currentness(doc, fixture.atlas, nullptr)));
+        doc->NewCommand();
+        const auto staleCommit = pb::owner::Commit(staleStaging, doc);
+        doc->AbortCommand();
+        slots[5] = std::uint64_t(E2bOutcome(staleCommit));
+        doc->NewCommand();
+        pb::owner::Staging freshStaging;
+        const auto freshOutcome = pb::owner::Prepare(freshStaging, doc, fixture.atlas);
+        pb::owner::Cancel(freshStaging);
+        doc->AbortCommand();
+        slots[18] = std::uint64_t(E2bOutcome(freshOutcome));
+        FullState afterEdit;
+        geometryStaleOk = CaptureState(doc, fixture, kPartCount, afterEdit)
+            && afterEdit.undos == beforeEdit.undos + 1
+            && afterEdit.syeb == beforeEdit.syeb
+            && afterEdit.atlases == beforeEdit.atlases
+            && afterEdit.resources == beforeEdit.resources;
+        if (!doc->Undo()) { Report(0, unit, "geometry-edit-undo"); return bits; }
+        // Undo restores the OCAF labels. Restore the probe's non-authoritative
+        // shape cache from the pre-edit witness; all later product reads still
+        // resolve through the document and durable owner key.
+        fixture.parts[1].current = preEditShape;
+        if (!geometryStaleOk) Report(0, unit, "stale-source-refusal");
+    }
+    if (slots[25] == 3 && slots[26] == 3 && geometryStaleOk) bits |= 1ull << 5;
+    else Report(0, unit, "stale-refusal");
+    // UnsupportedSurface: a real geometry edit plus a real receipt
+    // regeneration produces a DiagnosedFallback member; refused before work.
+    {
+        FullState beforeEdit;
+        if (!CaptureState(doc, fixture, kPartCount, beforeEdit)) {
+            Report(0, unit, "us-witness"); return bits;
+        }
+        const TopoDS_Shape preConeShape = fixture.parts[2].current;
+        ReplacePartWithCone(holder, fixture.parts[2]);
+        if (!RegenerateReceipt(holder, fixture.parts[2])) {
+            Report(0, unit, "unsupported-regenerate"); return bits;
+        }
+        doc->NewCommand();
+        pb::owner::Staging staging;
+        const auto outcome = pb::owner::Prepare(staging, doc, fixture.atlas);
+        pb::owner::Cancel(staging);
+        doc->AbortCommand();
+        slots[16] = std::uint64_t(E2bOutcome(outcome));
+        FullState afterEdit;
+        const bool zeroDelta = CaptureState(doc, fixture, kPartCount, afterEdit)
+            && afterEdit.undos == beforeEdit.undos + 2
+            && afterEdit.syeb == beforeEdit.syeb
+            && afterEdit.atlases == beforeEdit.atlases;
+        if (!doc->Undo() || !doc->Undo()) {
+            Report(0, unit, "unsupported-undo"); return bits;
+        }
+        fixture.parts[2].current = preConeShape;
+        if (slots[16] != 7 || !zeroDelta) Report(0, unit, "unsupported-surface-refusal");
+    }
+    // OwnerMismatch: a duplicated member identity makes the committed member
+    // foreign; refused before any work, zero delta.
+    {
+        doc->NewCommand();
+        retained_solid::Probe::Identity(fixture.parts[1].owner,
+            EntityIdentifierAttributeID(), fixture.parts[0].key.entity);
+        pb::owner::Staging staging;
+        const auto outcome = pb::owner::Prepare(staging, doc, fixture.atlas);
+        pb::owner::Cancel(staging);
+        doc->AbortCommand();
+        slots[15] = std::uint64_t(E2bOutcome(outcome));
+        if (slots[15] != 8 || !SameState(doc, fixture, kPartCount, rebakedState))
+            Report(0, unit, "owner-mismatch-refusal");
+    }
+    // ForeignResource: a file-backed XCAF texture is foreign image content;
+    // refused, zero delta.
+    {
+        FullState beforeEdit;
+        if (!CaptureState(doc, fixture, kPartCount, beforeEdit)) {
+            Report(0, unit, "fr-witness"); return bits;
+        }
+        PaintPartFilePath(holder, fixture.parts[1]);
+        doc->NewCommand();
+        pb::owner::Staging staging;
+        const auto outcome = pb::owner::Prepare(staging, doc, fixture.atlas);
+        pb::owner::Cancel(staging);
+        doc->AbortCommand();
+        slots[13] = std::uint64_t(E2bOutcome(outcome));
+        FullState afterEdit;
+        const bool zeroDelta = CaptureState(doc, fixture, kPartCount, afterEdit)
+            && afterEdit.undos == beforeEdit.undos + 1
+            && afterEdit.syeb == beforeEdit.syeb;
+        if (!doc->Undo()) { Report(0, unit, "foreign-undo"); return bits; }
+        if (slots[13] != 5 || !zeroDelta) Report(0, unit, "foreign-resource-refusal");
+    }
+    // MissingResource: a committed SYFI binding whose resource was removed
+    // from the document store (document-admissible, owner-refused), zero
+    // delta.
+    {
+        FullState beforeEdit;
+        if (!CaptureState(doc, fixture, kPartCount, beforeEdit)) {
+            Report(0, unit, "mr-witness"); return bits;
+        }
+        fi::Definition definition;
+        if (fi::persistence::bindings::Read(doc, fixture.parts[2].owner, definition)
+                != fi::persistence::bindings::ReadState::Present) {
+            Report(0, unit, "missing-read"); return bits;
+        }
+        fi::Binding dangling = MakeBinding(fixture.parts[2], 9,
+            retained_face_selector::Axis::Y, retained_face_selector::Side::Min,
+            fi::Role::Emissive, fi::ColorSpace::SRGB,
+            aa::AssetAtlasProbe::IndexedUUID(0x51, 9), unit);
+        definition.bindings.push_back(dangling);
+        if (!fi::BindBindingProof(definition)) { Report(0, unit, "missing-proof"); return bits; }
+        std::vector<std::uint8_t> canonical;
+        if (!fi::Encode(definition, canonical)) { Report(0, unit, "missing-encode"); return bits; }
+        doc->NewCommand();
+        if (!fi::persistence::bindings::StageCommitted(doc, fixture.parts[2].owner,
+                                                       definition, canonical)
+            || !doc->CommitCommand()) {
+            if (doc->HasOpenCommand()) doc->AbortCommand();
+            Report(0, unit, "missing-stage"); return bits;
+        }
+        doc->NewCommand();
+        pb::owner::Staging staging;
+        const auto outcome = pb::owner::Prepare(staging, doc, fixture.atlas);
+        pb::owner::Cancel(staging);
+        doc->AbortCommand();
+        slots[14] = std::uint64_t(E2bOutcome(outcome));
+        FullState afterEdit;
+        const bool zeroDelta = CaptureState(doc, fixture, kPartCount, afterEdit)
+            && afterEdit.undos == beforeEdit.undos + 1
+            && afterEdit.syeb == beforeEdit.syeb;
+        if (!doc->Undo()) { Report(0, unit, "missing-undo"); return bits; }
+        if (slots[14] != 4 || !zeroDelta) Report(0, unit, "missing-resource-refusal");
+    }
+    // Lifecycle close: save, destroy app+document, cold-reopen unseeded.
+    FullState finalState;
+    if (!CaptureState(doc, fixture, kPartCount, finalState)) {
+        Report(0, unit, "witness-final"); return bits;
+    }
+    const auto stored = retained_solid::Probe::Save(holder);
+    holder.doc->Close();
+    {
+        App second;
+        if (!OpenInto(second, stored)) { Report(0, unit, "cold-reopen"); return bits; }
+        Fixture reopened;
+        reopened.atlas = fixture.atlas;
+        reopened.unit = unit;
+        bool resolved = true;
+        for (std::size_t index = 0; index < kPartCount; ++index) {
+            AtlasPart part;
+            if (!aa::AssetAtlasProbe::ResolvePart(second.doc, fixture.parts[index].key, part)) {
+                resolved = false; break;
+            }
+            reopened.parts.push_back(part);
+        }
+        FullState reopenedState;
+        if (!resolved || !CaptureState(second.doc, reopened, kPartCount, reopenedState)) {
+            Report(0, unit, "cold-reopen-witness"); return bits;
+        }
+        // bit0 (reopen half): originals and recipes byte-identical after the
+        // unseeded cold reopen.
+        slots[23] = (reopenedState.syfi == finalState.syfi
+            && reopenedState.receipts == finalState.receipts
+            && reopenedState.resolved == finalState.resolved
+            && reopenedState.resources == finalState.resources
+            && reopenedState.syeb == finalState.syeb
+            && OriginalResourcesIntact(reopenedState)) ? 1 : 0;
+        // bit2 (reopen half): fences recheck positive on the reopened document.
+        pb::Definition reopenedBake;
+        const auto currentness = pb::owner::Currentness(second.doc, fixture.atlas,
+                                                        &reopenedBake);
+        slots[24] = std::uint64_t(E2bOutcome(currentness));
+        slots[27] = (currentness == pb::owner::Outcome::Committed
+            && reopenedBake.bakeProof == secondBake.bakeProof
+            && reopenedBake == secondBake) ? 1 : 0;
+        persistence::Record record;
+        if (persistence::Read(second.doc, fixture.atlas, record)
+                == persistence::ReadState::Present)
+            slots[29] = std::uint64_t(record.bytes.size());
+        slots[30] = std::uint64_t(reopenedState.resources.size());
+        if (slots[24] == 0 && slots[27] == 1) bits |= 1ull << 2;
+        else Report(0, unit, "all-member-fences-reopen");
+    }
+    if (slots[22] == 1 && slots[23] == 1) bits |= 1ull << 0;
+    else Report(0, unit, "original-bytes-preserved");
+    if (atlasKept && slots[7] == 1) bits |= 1ull << 1;
+    else Report(0, unit, "atlas-intent-unchanged");
+    if (fencesLive && (bits & (1ull << 2))) { /* bit2 set above */ }
+    else bits &= ~(1ull << 2);
+    bits |= 1ull << 7;
+    return bits;
+}
+// Independent rasterization of the committed layout (the E2a scenario-2
+// technique: half-open top-left edge rule at texel centers), then a BFS
+// dilation census of exactly gutterTexels Manhattan steps from the sourced
+// charts of one role. Everything is measured against the decoded persisted
+// PNG, not the kernel's own coverage claims.
+struct Census {
+    bool ok = false;
+    bool overlap = false;
+    std::uint64_t covered = 0;
+    std::uint64_t dilated = 0;
+    std::uint64_t dilationChecked = 0;
+    std::uint64_t backgroundChecked = 0;
+    std::uint64_t foreignBleed = 0;
+    std::uint32_t outsideX = 0, outsideY = 0;
+    std::uint32_t dilX = 0, dilY = 0, dilSrcX = 0, dilSrcY = 0;
+    bool haveOutside = false, haveDilation = false;
+    int failure = 0;
+    std::uint32_t failureX = 0, failureY = 0;
+    // Per-texel BFS distance from the sourced coverage: 0 covered, 1..gutter
+    // dilated, -1 unreached. Exported for the role-specific rule checks.
+    std::vector<std::int32_t> distance;
+};
+static Census DilationCensus(const aa::build::LayoutEvidence& layout,
+                             const aa::Definition& atlas,
+                             const OwnerKey& sourcedOwner,
+                             const kernel::Image& decoded,
+                             const std::array<std::uint8_t, 4>& background,
+                             int resolution, int gutter) {
+    Census census;
+    const int N = resolution;
+    if (N <= 0 || decoded.width != std::uint32_t(N) || decoded.height != std::uint32_t(N))
+        return census;
+    std::vector<std::int32_t> coveredChart(std::size_t(N) * N, -1);
+    std::set<std::int32_t> sourcedCharts;
+    for (std::size_t chart = 0; chart < layout.chartMembers.size(); ++chart) {
+        const std::size_t member = layout.chartMembers[chart].first;
+        if (member < atlas.members.size() && atlas.members[member].owner == sourcedOwner)
+            sourcedCharts.insert(std::int32_t(chart));
+    }
+    bool overlap = false;
+    for (const auto& placed : layout.packed.triangles) {
+        double x[3], y[3];
+        for (int k = 0; k < 3; ++k) { x[k] = placed.uv[k].x * N; y[k] = placed.uv[k].y * N; }
+        const double area2 = (x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0]);
+        int order[3] = {0, 1, 2};
+        if (area2 < 0) std::swap(order[1], order[2]);
+        double minx = x[0], maxx = x[0], miny = y[0], maxy = y[0];
+        for (int k = 1; k < 3; ++k) {
+            minx = std::min(minx, x[k]); maxx = std::max(maxx, x[k]);
+            miny = std::min(miny, y[k]); maxy = std::max(maxy, y[k]);
+        }
+        const int i0 = std::max(0, int(std::ceil(minx - 0.5)));
+        const int i1 = std::min(N - 1, int(std::floor(maxx - 0.5)));
+        const int j0 = std::max(0, int(std::ceil(miny - 0.5)));
+        const int j1 = std::min(N - 1, int(std::floor(maxy - 0.5)));
+        for (int j = j0; j <= j1 && !overlap; ++j)
+            for (int i = i0; i <= i1 && !overlap; ++i) {
+                const double px = i + 0.5, py = j + 0.5;
+                bool inside = true;
+                for (int edge = 0; edge < 3 && inside; ++edge) {
+                    const int a = order[edge], b = order[(edge + 1) % 3];
+                    const double dx = x[b] - x[a], dy = y[b] - y[a];
+                    const double cross = dx * (py - y[a]) - dy * (px - x[a]);
+                    const double band = 1e-9 * (dx * dx + dy * dy + 1.0);
+                    if (cross > band) continue;
+                    if (cross < -band) { inside = false; break; }
+                    const bool owns = (dy < 0.0) || (dy == 0.0 && dx < 0.0);
+                    if (!owns) inside = false;
+                }
+                if (inside) {
+                    auto& texel = coveredChart[std::size_t(j) * N + std::size_t(i)];
+                    if (texel >= 0) { overlap = true; break; }
+                    texel = placed.chartIndex;
+                }
+            }
+        if (overlap) break;
+    }
+    if (overlap) { census.overlap = true; return census; }
+    // Multi-source BFS from the sourced chart coverage.
+    std::vector<std::int32_t> distance(std::size_t(N) * N, -1);
+    std::vector<std::uint32_t> source(std::size_t(N) * N, 0);
+    std::vector<std::uint32_t> frontier;
+    for (std::uint32_t pixel = 0; pixel < std::uint32_t(N) * N; ++pixel) {
+        const std::int32_t chart = coveredChart[pixel];
+        if (chart >= 0 && sourcedCharts.count(chart)) {
+            distance[pixel] = 0; source[pixel] = pixel;
+            frontier.push_back(pixel);
+            ++census.covered;
+        }
+    }
+    if (frontier.empty()) return census;
+    static const std::int32_t kOffsets[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+    for (std::size_t head = 0; head < frontier.size(); ++head) {
+        const std::uint32_t pixel = frontier[head];
+        const std::int32_t next = distance[pixel] + 1;
+        if (next > gutter) continue;
+        const int x = int(pixel % std::uint32_t(N)), y = int(pixel / std::uint32_t(N));
+        for (const auto& offset : kOffsets) {
+            const int nx = x + offset[0], ny = y + offset[1];
+            if (nx < 0 || ny < 0 || nx >= N || ny >= N) continue;
+            const std::uint32_t neighbour = std::uint32_t(ny) * N + std::uint32_t(nx);
+            if (distance[neighbour] >= 0) continue;
+            distance[neighbour] = next;
+            source[neighbour] = source[pixel];
+            frontier.push_back(neighbour);
+        }
+    }
+    const auto texel = [&](std::uint32_t pixel) -> const std::uint8_t* {
+        return decoded.rgba.data() + std::size_t(pixel) * 4;
+    };
+    bool sound = true;
+    for (std::uint32_t pixel = 0; pixel < std::uint32_t(N) * N && sound; ++pixel) {
+        const std::int32_t dist = distance[pixel];
+        const std::uint8_t* value = texel(pixel);
+        if (dist == 0) continue; // chart interior: the error oracles cover it
+        if (dist >= 1 && dist <= gutter) {
+            // The product's deterministic stepwise dilation may choose any
+            // equally near interior texel at a Manhattan tie. Verify that the
+            // emitted value is an exact copy of one independently located
+            // interior texel at this minimum distance, rather than imposing
+            // the census BFS's unrelated queue tie-break.
+            const int x = int(pixel % std::uint32_t(N));
+            const int y = int(pixel / std::uint32_t(N));
+            std::uint32_t matchedSource = 0;
+            bool copied = false;
+            for (int radius = dist; radius <= gutter && !copied; ++radius) {
+                for (int dy = -radius; dy <= radius && !copied; ++dy) {
+                    const int remaining = radius - std::abs(dy);
+                    const int offsets[2] = {-remaining, remaining};
+                    for (int candidate = 0; candidate < 2 && !copied; ++candidate) {
+                        if (candidate == 1 && remaining == 0) continue;
+                        const int sx = x + offsets[candidate], sy = y + dy;
+                        if (sx < 0 || sy < 0 || sx >= N || sy >= N) continue;
+                        const std::uint32_t sample = std::uint32_t(sy) * N
+                            + std::uint32_t(sx);
+                        if (distance[sample] == 0
+                            && std::memcmp(value, texel(sample), 4) == 0) {
+                            matchedSource = sample; copied = true;
+                        }
+                    }
+                }
+            }
+            if (!copied) {
+                census.failure = 1; census.failureX = std::uint32_t(x);
+                census.failureY = std::uint32_t(y); sound = false; break;
+            }
+            if (coveredChart[pixel] >= 0
+                && coveredChart[pixel] != coveredChart[matchedSource]) {
+                ++census.foreignBleed; census.failure = 2;
+                census.failureX = std::uint32_t(x); census.failureY = std::uint32_t(y);
+                sound = false; break;
+            }
+            ++census.dilationChecked;
+            if (!census.haveDilation) {
+                census.haveDilation = true;
+                census.dilX = pixel % std::uint32_t(N); census.dilY = pixel / std::uint32_t(N);
+                census.dilSrcX = matchedSource % std::uint32_t(N);
+                census.dilSrcY = matchedSource / std::uint32_t(N);
+            }
+            ++census.dilated;
+            continue;
+        }
+        // Beyond the exact gutter dilation band (and never covered by a
+        // sourced chart): the texel must be the role background.
+        if (std::memcmp(value, background.data(), 4) != 0) {
+            census.failure = 3; census.failureX = pixel % std::uint32_t(N);
+            census.failureY = pixel / std::uint32_t(N); sound = false; break;
+        }
+        ++census.backgroundChecked;
+        if (!census.haveOutside) {
+            census.haveOutside = true;
+            census.outsideX = pixel % std::uint32_t(N); census.outsideY = pixel / std::uint32_t(N);
+        }
+    }
+    census.ok = sound && census.covered > 0 && census.dilated > 0
+        && census.backgroundChecked > 0 && census.haveOutside && census.haveDilation;
+    census.distance = std::move(distance);
+    return census;
+}
+
+static bool OriginalResourcesIntactReopen(const Handle(TDocStd_Document)& doc);
+
+static std::uint64_t Scenario1(double unit, int unitIndex, Readbacks& readbacks) {
+    constexpr std::size_t kPartCount = 4;
+    std::uint64_t bits = 0;
+    auto& slots = readbacks.values[unitIndex];
+    auto& blobs = readbacks.blobs[unitIndex];
+    std::vector<OwnerKey> atlasMembers;
+    pb::Definition committedBake;
+    pb::kernel::Evidence committedEvidence;
+    std::string stored;
+    Fixture fixture;
+    {
+        App holder;
+        std::uint64_t rejectDummy = 0;
+        fixture = New(holder, unit, false, rejectDummy);
+        const auto doc = holder.doc;
+        if (BakeOnce(holder, fixture.atlas, &committedBake, &committedEvidence)
+                != pb::owner::Outcome::Committed) {
+            Report(1, unit, "bake"); return 0;
+        }
+        persistence::Record committedRecord;
+        if (persistence::Read(doc, fixture.atlas, committedRecord)
+                != persistence::ReadState::Present
+            || !(committedRecord.definition == committedBake)) {
+            Report(1, unit, "committed-record"); return 0;
+        }
+        stored = retained_solid::Probe::Save(holder);
+        holder.doc->Close();
+        for (std::size_t index = 0; index < 3; ++index)
+            atlasMembers.push_back(fixture.parts[index].key);
+    }
+    App second;
+    if (!OpenInto(second, stored)) { Report(1, unit, "cold-reopen"); return 0; }
+    const auto doc = second.doc;
+    Fixture reopened;
+    reopened.atlas = fixture.atlas;
+    reopened.unit = unit;
+    for (const auto& key : atlasMembers) {
+        AtlasPart part;
+        if (!aa::AssetAtlasProbe::ResolvePart(doc, key, part)) {
+            Report(1, unit, "reopen-resolve"); return 0;
+        }
+        reopened.parts.push_back(part);
+    }
+    // The persisted SYEB/1 record and the SYFR/1 resources on the reopened,
+    // unseeded document.
+    persistence::Record record;
+    if (persistence::Read(doc, fixture.atlas, record) != persistence::ReadState::Present) {
+        Report(1, unit, "reopen-syeb"); return 0;
+    }
+    const pb::Definition& baked = record.definition;
+    kernel::Image bakedImages[5];
+    bool decoded = true;
+    std::size_t baseIndex = 5, normalIndex = 5;
+    for (std::size_t index = 0; index < baked.resources.size(); ++index) {
+        const auto& descriptor = baked.resources[index];
+        fi::persistence::resources::Record resource;
+        if (!fi::persistence::resources::Read(doc, ResourceUUID(descriptor.identity), resource)
+            || !resource.value
+            || !(resource.value->envelope.workingContent == descriptor.content)) {
+            decoded = false; break;
+        }
+        kernel::Image image;
+        if (!kernel::DecodeImage(resource.value->envelope.workingBytes, image)
+            || image.width != descriptor.widthTexels
+            || image.height != descriptor.heightTexels) { decoded = false; break; }
+        if (descriptor.role == Role::BaseColor) {
+            baseIndex = index;
+            blobs[0] = resource.value->envelope.workingBytes;
+        }
+        if (descriptor.role == Role::Normal) {
+            normalIndex = index;
+            blobs[1] = resource.value->envelope.workingBytes;
+        }
+        if (index < 5) bakedImages[index] = std::move(image);
+    }
+    if (!decoded || baseIndex == 5 || normalIndex == 5) {
+        Report(1, unit, "reopen-resources"); return 0;
+    }
+    // The original E4Decals resource bytes after the unseeded cold reopen.
+    {
+        fi::persistence::resources::Record original;
+        if (!fi::persistence::resources::Read(doc, aa::AssetAtlasProbe::IndexedUUID(0x51, 1),
+                                              original)
+            || !original.value
+            || original.value->envelope.workingBytes != Seeds().baseChecker) {
+            Report(1, unit, "reopen-original"); return 0;
+        }
+        blobs[2] = original.value->envelope.workingBytes;
+    }
+    slots[0] = std::uint64_t(blobs[0].size());
+    slots[1] = std::uint64_t(blobs[1].size());
+    slots[2] = std::uint64_t(blobs[2].size());
+    slots[73] = std::uint64_t(baked.resources.size());
+    slots[74] = std::uint64_t(record.bytes.size());
+    slots[23] = PrefixOf(baked.bakeProof);
+    slots[75] = PrefixOf(baked.layoutProof);
+    for (const auto& binding : baked.bindings)
+        if (binding.role == Role::BaseColor && binding.owner == atlasMembers[0]) {
+            slots[16] = BitsOf(binding.transform.scale[0]);
+            slots[17] = BitsOf(binding.transform.scale[1]);
+            slots[18] = BitsOf(binding.transform.offset[0]);
+            slots[19] = BitsOf(binding.transform.offset[1]);
+            slots[20] = BitsOf(binding.transform.rotationDegrees);
+            slots[21] = std::uint64_t(binding.transform.wrapU);
+            slots[22] = std::uint64_t(binding.transform.wrapV);
+        }
+    // bit0: measured interior error bounds on the committed bake, and the
+    // persisted PNG content digests match the record descriptors.
+    slots[3] = BitsOf(committedEvidence.maximumInteriorError255);
+    slots[4] = BitsOf(committedEvidence.meanInteriorError255);
+    slots[5] = std::uint64_t(committedEvidence.coveredTexels);
+    slots[6] = std::uint64_t(committedEvidence.dilatedTexels);
+    if (committedEvidence.coveredTexels > 0
+        && committedEvidence.maximumInteriorError255 <= 2
+        && committedEvidence.meanInteriorError255 <= 1) bits |= 1ull << 0;
+    else Report(1, unit, "interior-error-bounds");
+    // Deterministic rebuild of the exact committed layout on the reopened
+    // document for the independent census, density and parity measurements.
+    aa::Capture capture;
+    aa::Definition rebuilt; std::vector<aa::MemberUVAssignment> rebuiltAssignments;
+    std::string rebuildDiagnosis; aa::build::LayoutEvidence layout;
+    if (!aa::build::CaptureMembers(doc, atlasMembers, capture)
+        || aa::build::BuildAtlas(doc, fixture.atlas, capture, {2048, 4}, rebuilt,
+                                 rebuiltAssignments, rebuildDiagnosis, &layout,
+                                 aa::build::PaintedAdmission::Preserve)
+            != aa::build::Status::Built
+        || !(rebuilt.layoutProof == baked.layoutProof)) {
+        Report(1, unit, "rebuild-layout", rebuildDiagnosis.substr(0, 120)); return bits;
+    }
+    // bit1: independent seam/dilation census on the decoded persisted
+    // baseColor derivative.
+    {
+        const Census census = DilationCensus(layout, rebuilt, atlasMembers[0],
+            bakedImages[baseIndex], {0, 0, 0, 0}, 2048, 4);
+        slots[77] = census.dilationChecked;
+        slots[78] = census.backgroundChecked;
+        slots[57] = census.outsideX; slots[58] = census.outsideY;
+        slots[59] = census.dilX; slots[60] = census.dilY;
+        slots[61] = census.dilSrcX; slots[62] = census.dilSrcY;
+        slots[76] = std::uint64_t(layout.packed.summary.seamCounts.torn);
+        const double low = 4.0 / 2048.0, high = 1.0 - low;
+        bool bounded = !layout.packed.triangles.empty();
+        for (const auto& placed : layout.packed.triangles)
+            for (int k = 0; k < 3; ++k)
+                bounded = bounded && placed.uv[k].x >= low - 1e-12
+                    && placed.uv[k].x <= high + 1e-12
+                    && placed.uv[k].y >= low - 1e-12 && placed.uv[k].y <= high + 1e-12;
+        if (census.ok && bounded && census.foreignBleed == 0
+            && layout.packed.summary.seamCounts.torn == 0) bits |= 1ull << 1;
+        else Report(1, unit, "seam-dilation-census",
+            "covered=" + std::to_string(census.covered)
+            + " dilated=" + std::to_string(census.dilated)
+            + " checked=" + std::to_string(census.dilationChecked)
+            + " background=" + std::to_string(census.backgroundChecked)
+            + " overlap=" + std::to_string(census.overlap ? 1 : 0)
+            + " bleed=" + std::to_string(census.foreignBleed)
+            + " failure=" + std::to_string(census.failure)
+            + " xy=" + std::to_string(census.failureX) + ","
+            + std::to_string(census.failureY));
+    }
+    // bit2: normal-map channel/renormalization rules on the decoded persisted
+    // normal derivative: every covered or dilated normal texel is either a
+    // channel-exact copy of a source texel (unresampled / exact tile sample)
+    // or renormalized to unit length within the 8-bit quantization bound.
+    {
+        kernel::Image sourceNormals;
+        std::set<std::array<std::uint8_t, 4>> sourceColors;
+        bool normalOk = kernel::DecodeImage(Seeds().normalLinear, sourceNormals);
+        if (normalOk)
+            for (std::size_t offset = 0; offset + 3 < sourceNormals.rgba.size(); offset += 4) {
+                std::array<std::uint8_t, 4> color{};
+                std::copy_n(sourceNormals.rgba.begin() + offset, 4, color.begin());
+                sourceColors.insert(color);
+            }
+        std::uint64_t checked = 0, passed = 0;
+        if (normalOk && !sourceColors.empty()) {
+            const Census census = DilationCensus(layout, rebuilt, atlasMembers[2],
+                bakedImages[normalIndex], {128, 128, 255, 255}, 2048, 4);
+            normalOk = census.ok;
+            const auto& normalImage = bakedImages[normalIndex];
+            for (std::uint32_t pixel = 0; normalOk && pixel < 2048u * 2048u; ++pixel) {
+                if (census.distance[pixel] < 0) continue;
+                const std::uint8_t* value = normalImage.rgba.data() + std::size_t(pixel) * 4;
+                std::array<std::uint8_t, 4> color{};
+                std::copy_n(value, 4, color.begin());
+                ++checked;
+                if (sourceColors.count(color)) { ++passed; continue; }
+                const double x = double(value[0]) / 127.5 - 1.0;
+                const double y = double(value[1]) / 127.5 - 1.0;
+                const double z = double(value[2]) / 127.5 - 1.0;
+                if (std::abs(std::sqrt(x * x + y * y + z * z) - 1.0) <= 0.008) ++passed;
+            }
+        }
+        slots[13] = checked; slots[14] = passed;
+        slots[12] = BitsOf(committedEvidence.maximumNormalLengthError);
+        if (normalOk && checked > 0 && checked == passed
+            && committedEvidence.maximumNormalLengthError <= 1.e-5) bits |= 1ull << 2;
+        else Report(1, unit, "normal-rules",
+            "checked=" + std::to_string(checked)
+            + " passed=" + std::to_string(passed)
+            + " census=" + std::to_string(normalOk ? 1 : 0));
+    }
+    // bit3: per-member texel density, cylindrical stretch and occupancy on the
+    // baked layout (the E2a scenario-2 measurements, three members).
+    {
+        bool density = true;
+        double ratio = 0, lowest = 0, highest = 0;
+        for (std::size_t member = 0; density && member < 3; ++member) {
+            retained_solid::Record retained; TDF_Label label;
+            std::atomic_bool cancelled{false};
+            meshcopy::CurrentTessellationCopy copy;
+            if (!retained_finishing::producer::detail::Resolve(
+                    doc, atlasMembers[member], label, retained)
+                || meshcopy::PrepareCurrentTessellationCopy(retained.current, copy, cancelled)
+                    != meshcopy::PreparationResult::Ready
+                || std::size_t(copy.triangles) * 3
+                    != rebuiltAssignments[member].corners.size()) { density = false; break; }
+            std::vector<shapeyard::uv::Triangle> triangles;
+            std::vector<shapeyard::uv::curved::FaceInput> faces;
+            if (!retained_finishing::producer::detail::Triangles(copy, triangles, faces)) {
+                density = false; break;
+            }
+            double uvLength = 0, edgeLength = 0;
+            for (std::size_t t = 0; t < triangles.size(); ++t)
+                for (int k = 0; k < 3; ++k) {
+                    const auto& uvA = rebuiltAssignments[member].corners[3 * t + k];
+                    const auto& uvB = rebuiltAssignments[member].corners[3 * t + (k + 1) % 3];
+                    const auto& pA = triangles[t].points[k];
+                    const auto& pB = triangles[t].points[(k + 1) % 3];
+                    uvLength += std::hypot(uvB[0] - uvA[0], uvB[1] - uvA[1]) * 2048.0;
+                    edgeLength += std::sqrt(
+                        (pB[0] - pA[0]) * (pB[0] - pA[0])
+                        + (pB[1] - pA[1]) * (pB[1] - pA[1])
+                        + (pB[2] - pA[2]) * (pB[2] - pA[2])) * unit * 1000.0;
+                }
+            if (edgeLength <= 0 || uvLength <= 0) { density = false; break; }
+            const double value = uvLength / edgeLength;
+            if (member == 0) lowest = highest = value;
+            lowest = std::min(lowest, value); highest = std::max(highest, value);
+        }
+        if (density && lowest > 0) ratio = highest / lowest;
+        bool stretch = false;
+        double stretchMin = 0, stretchMax = 0;
+        {
+            retained_solid::Record retained; TDF_Label label;
+            std::atomic_bool cancelled{false};
+            meshcopy::CurrentTessellationCopy copy;
+            if (retained_finishing::producer::detail::Resolve(
+                    doc, atlasMembers[1], label, retained)
+                && meshcopy::PrepareCurrentTessellationCopy(retained.current, copy, cancelled)
+                    == meshcopy::PreparationResult::Ready) {
+                std::vector<shapeyard::uv::Triangle> triangles;
+                std::vector<shapeyard::uv::curved::FaceInput> faces;
+                if (retained_finishing::producer::detail::Triangles(copy, triangles, faces)) {
+                    int curvedFaces = 0;
+                    for (const auto& face : faces) {
+                        if (face.surfaceType != 1) continue;
+                        ++curvedFaces;
+                        using namespace shapeyard::uv::detail;
+                        shapeyard::uv::Point center{
+                            face.params[0], face.params[1], face.params[2]};
+                        shapeyard::uv::Point axis{
+                            face.params[3], face.params[4], face.params[5]};
+                        shapeyard::uv::Point u, v;
+                        shapeyard::uv::prototype::curved_detail::frameFor(
+                            divide(axis, magnitude(axis)), u, v);
+                        const double seam = std::atan2(dot(face.xDirection, v),
+                                                       dot(face.xDirection, u));
+                        shapeyard::uv::prototype::CylinderBand band;
+                        band.center = center; band.axis = axis; band.radius = face.params[9];
+                        band.seamAngle = seam; band.fitToleranceModelUnits = face.toleranceMM;
+                        const std::vector<shapeyard::uv::Triangle> input(
+                            triangles.begin() + face.firstTriangle,
+                            triangles.begin() + face.firstTriangle + face.triangleCount);
+                        const auto value = shapeyard::uv::prototype::unwrapCylindricalBand(
+                            input, band, shapeyard::uv::Settings{2048, 4});
+                        stretch = value.ok() && value.metricRelativeMin >= 0.999
+                            && value.metricRelativeMax <= 1.001;
+                        stretchMin = value.metricRelativeMin;
+                        stretchMax = value.metricRelativeMax;
+                    }
+                    stretch = stretch && curvedFaces == 1;
+                }
+            }
+        }
+        slots[7] = BitsOf(layout.packed.summary.occupancy);
+        slots[8] = BitsOf(ratio);
+        slots[9] = BitsOf(stretchMin);
+        slots[10] = BitsOf(stretchMax);
+        if (density && ratio >= 1.0 && ratio <= 1.00001 && stretch
+            && layout.packed.summary.occupancy >= 0.50) bits |= 1ull << 3;
+        else Report(1, unit, "density-stretch-occupancy",
+                    "ratio=" + std::to_string(ratio)
+                    + " occupancy=" + std::to_string(layout.packed.summary.occupancy));
+    }
+    // bit4: independent per-member tangent parity over the rebuilt layout.
+    {
+        bool parity[3] = {true, true, true};
+        std::uint64_t triangles[3] = {0, 0, 0};
+        bool sound = true;
+        for (const auto& placed : layout.packed.triangles) {
+            if (placed.chartIndex < 0
+                || std::size_t(placed.chartIndex) >= layout.chartMembers.size())
+                { sound = false; break; }
+            const std::size_t member = layout.chartMembers[std::size_t(placed.chartIndex)].first;
+            if (member >= 3) { sound = false; break; }
+            const auto& chart = layout.charts[std::size_t(placed.chartIndex)];
+            if (placed.triangleIndex < 0
+                || std::size_t(placed.triangleIndex) >= chart.triangles.size())
+                { sound = false; break; }
+            const auto& developed = chart.triangles[std::size_t(placed.triangleIndex)];
+            const double du = chart.rectMax.x - chart.rectMin.x;
+            const double dv = chart.rectMax.y - chart.rectMin.y;
+            if (!(du > 0) || !(dv > 0)) { sound = false; break; }
+            double su[3], sv[3];
+            for (int corner = 0; corner < 3; ++corner) {
+                su[corner] = (developed.corner[corner].x - chart.rectMin.x) / du;
+                sv[corner] = (developed.corner[corner].y - chart.rectMin.y) / dv;
+            }
+            const double outputDet = (placed.uv[1].x - placed.uv[0].x)
+                * (placed.uv[2].y - placed.uv[0].y)
+                - (placed.uv[2].x - placed.uv[0].x)
+                * (placed.uv[1].y - placed.uv[0].y);
+            const double sourceDet = (su[1] - su[0]) * (sv[2] - sv[0])
+                - (su[2] - su[0]) * (sv[1] - sv[0]);
+            if (!(outputDet * sourceDet > 0)) parity[member] = false;
+            ++triangles[member];
+        }
+        std::uint64_t mask = 0;
+        for (int member = 0; member < 3; ++member)
+            if (parity[member] && triangles[member] > 0) mask |= 1ull << member;
+        slots[11] = mask;
+        if (sound && mask == 0b111) bits |= 1ull << 4;
+        else Report(1, unit, "tangent-parity");
+    }
+    // bit5: cold-reopen readback matches the committed witnesses: SYEB/1
+    // fields, decoded sample texels and the original resource bytes.
+    {
+        bool witnesses = record.bytes.size() > 0 && baked == committedBake
+            && OriginalResourcesIntactReopen(doc);
+        std::string witnessDetail;
+        // Sample texels: decoded persisted derivative at the kernel-exported
+        // coordinates must equal the committed emitted values exactly.
+        std::size_t baseSamples = 0, normalSamples = 0;
+        for (const auto& sample : committedEvidence.samples) {
+            if (!sample.available) continue;
+            const kernel::Image* image = nullptr;
+            if (sample.role == Role::BaseColor && baseSamples < 8)
+                image = &bakedImages[baseIndex];
+            else if (sample.role == Role::Normal && normalSamples < 4)
+                image = &bakedImages[normalIndex];
+            if (!image) continue;
+            const std::size_t pixel = (std::size_t(sample.y) * image->width + sample.x) * 4;
+            if (pixel + 3 >= image->rgba.size()
+                || std::memcmp(image->rgba.data() + pixel, sample.emitted.data(), 4) != 0) {
+                witnesses = false;
+                if (witnessDetail.empty() && pixel + 3 < image->rgba.size())
+                    witnessDetail = "role=" + std::to_string(int(sample.role))
+                        + " xy=" + std::to_string(sample.x) + "," + std::to_string(sample.y)
+                        + " actual=" + std::to_string(image->rgba[pixel]) + ","
+                        + std::to_string(image->rgba[pixel + 1]) + ","
+                        + std::to_string(image->rgba[pixel + 2])
+                        + " expected=" + std::to_string(sample.emitted[0]) + ","
+                        + std::to_string(sample.emitted[1]) + ","
+                        + std::to_string(sample.emitted[2])
+                        + " flipped=" + std::to_string(image->rgba[
+                            (std::size_t(image->height - 1 - sample.y) * image->width
+                             + sample.x) * 4]) + ","
+                        + std::to_string(image->rgba[
+                            (std::size_t(image->height - 1 - sample.y) * image->width
+                             + sample.x) * 4 + 1]) + ","
+                        + std::to_string(image->rgba[
+                            (std::size_t(image->height - 1 - sample.y) * image->width
+                             + sample.x) * 4 + 2]);
+                continue;
+            }
+            if (sample.role == Role::BaseColor) {
+                const std::size_t slot = 25 + baseSamples * 4;
+                slots[slot] = sample.x; slots[slot + 1] = sample.y;
+                slots[slot + 2] = BitsOf(sample.sourceU);
+                slots[slot + 3] = BitsOf(sample.sourceV);
+                ++baseSamples;
+            } else if (sample.role == Role::Normal) {
+                slots[64 + normalSamples * 2] = sample.x;
+                slots[65 + normalSamples * 2] = sample.y;
+                ++normalSamples;
+            }
+        }
+        slots[24] = std::uint64_t(baseSamples);
+        slots[72] = std::uint64_t(normalSamples);
+        if (witnesses && baseSamples == 8 && normalSamples == 4) bits |= 1ull << 5;
+        else Report(1, unit, "cold-reopen-witnesses",
+                    "base=" + std::to_string(baseSamples)
+                    + " normal=" + std::to_string(normalSamples)
+                    + " " + witnessDetail);
+    }
+    // bit6: an over-budget bake input refuses OverBudget with zero delta. The
+    // 4096-resolution fixture carries three painted roles, so the aggregate
+    // decoded budget (201 MiB) exceeds the frozen 128 MiB cap.
+    {
+        App budgetHolder;
+        std::uint64_t rejectDummy = 0;
+        auto budgetFixture = New(budgetHolder, unit, true, rejectDummy);
+        const auto budgetDoc = budgetHolder.doc;
+        FullState before;
+        if (!CaptureState(budgetDoc, budgetFixture, 2, before)) {
+            Report(1, unit, "overbudget-witness"); return bits;
+        }
+        budgetDoc->NewCommand();
+        pb::owner::Staging staging;
+        const auto outcome = pb::owner::Prepare(staging, budgetDoc, budgetFixture.atlas);
+        pb::owner::Cancel(staging);
+        budgetDoc->AbortCommand();
+        slots[15] = std::uint64_t(E2bOutcome(outcome));
+        if (slots[15] == 6 && SameState(budgetDoc, budgetFixture, 2, before)) bits |= 1ull << 6;
+        else Report(1, unit, "over-budget-refusal",
+                    "outcome=" + std::to_string(int(outcome)));
+    }
+    bits |= 1ull << 7;
+    return bits;
+}
+
+static bool OriginalResourcesIntactReopen(const Handle(TDocStd_Document)& doc) {
+    const auto& seeds = Seeds();
+    const std::pair<UUID, const std::vector<std::uint8_t>*> wanted[3] = {
+        {aa::AssetAtlasProbe::IndexedUUID(0x51, 1), &seeds.baseChecker},
+        {aa::AssetAtlasProbe::IndexedUUID(0x51, 2), &seeds.dataLinear},
+        {aa::AssetAtlasProbe::IndexedUUID(0x51, 3), &seeds.normalLinear}};
+    for (const auto& entry : wanted) {
+        fi::persistence::resources::Record resource;
+        if (!fi::persistence::resources::Read(doc, entry.first, resource) || !resource.value
+            || resource.value->envelope.originalBytes != *entry.second
+            || resource.value->envelope.workingBytes != *entry.second) return false;
+    }
+    return true;
+}
+
+static std::uint64_t Run(int scenario) {
+    ReportLineCount() = 0;
+    if (scenario < 0 || scenario > 1) return 0;
+    auto& stored = StoredReadbacks(scenario);
+    stored = Readbacks{};
+    std::uint64_t bits = ~0ull;
+    for (int unitIndex = 0; unitIndex < kUnits; ++unitIndex) {
+        const double unit = unitIndex == 0 ? 0.001 : 1.0;
+        const auto start = std::chrono::steady_clock::now();
+        std::uint64_t unitBits = 0;
+        try {
+            unitBits = scenario == 0
+                ? Scenario0(unit, unitIndex, stored) : Scenario1(unit, unitIndex, stored);
+        } catch (const std::exception& e) {
+            Report(scenario, unit, "exception", e.what());
+            return 0;
+        } catch (const Standard_Failure& failure) {
+            const char* message = failure.GetMessageString();
+            Report(scenario, unit, "occt-failure", message ? message : "");
+            return 0;
+        } catch (...) {
+            Report(scenario, unit, "unknown-exception");
+            return 0;
+        }
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        Report(scenario, unit, "wall-ms", std::to_string(elapsed));
+        char mask[32];
+        std::snprintf(mask, sizeof mask, "0x%016llx",
+                      static_cast<unsigned long long>(unitBits));
+        Report(scenario, unit, "mask", mask);
+        for (int bit = 0; bit < 8; ++bit) {
+            if ((unitBits & (1ull << bit)) != 0) continue;
+            Report(scenario, unit, "bit-cleared",
+                   std::to_string(bit) + ":" + Clause(scenario, bit));
+        }
+        bits &= unitBits;
+    }
+    stored.complete = true;
+    return bits;
+}
+static std::uint64_t Readback(int scenario, int field) {
+    if (scenario < 0 || scenario > 1 || field < 0 || field >= kUnits * kSlots)
+        return ~0ull;
+    const auto& stored = StoredReadbacks(scenario);
+    if (!stored.complete) return ~0ull;
+    return stored.values[field / kSlots][field % kSlots];
+}
+static const void* Export(int scenario, int field, std::uint64_t& length) {
+    length = 0;
+    if (scenario < 0 || scenario > 1 || field < 0) return nullptr;
+    const int unit = field / 8, kind = field % 8;
+    if (unit >= kUnits || kind >= kBlobs) return nullptr;
+    const auto& stored = StoredReadbacks(scenario);
+    if (!stored.complete) return nullptr;
+    const auto& blob = stored.blobs[unit][kind];
+    length = std::uint64_t(blob.size());
+    return blob.empty() ? nullptr : static_cast<const void*>(blob.data());
+}
+} // namespace core3d::painted_atlas_bake::probe
+
+extern "C" Standard_EXPORT std::uint64_t Core3DDebugPaintedAtlasBakeSeedResource(
+    std::int32_t slot, const void* bytes, std::int32_t length) noexcept {
+    if (![NSThread isMainThread] || !bytes || length <= 0
+        || std::size_t(length) > core3d::face_image::kMaximumEncodedImageBytes) return 0;
+    auto& seeds = core3d::painted_atlas_bake::probe::Seeds();
+    const auto* first = static_cast<const std::uint8_t*>(bytes);
+    std::vector<std::uint8_t> copy(first, first + length);
+    if (slot == 0) seeds.baseChecker = std::move(copy);
+    else if (slot == 1) seeds.dataLinear = std::move(copy);
+    else if (slot == 2) seeds.normalLinear = std::move(copy);
+    else return 0;
+    seeds.complete = !seeds.baseChecker.empty() && !seeds.dataLinear.empty()
+        && !seeds.normalLinear.empty();
+    return 1;
+}
+
+extern "C" Standard_EXPORT std::uint64_t Core3DDebugPaintedAtlasBakeProbe(
+    std::int32_t scenario) noexcept {
+    if (![NSThread isMainThread] || scenario < 0 || scenario > 1) return 0;
+    return core3d::painted_atlas_bake::probe::Run(scenario);
+}
+
+extern "C" Standard_EXPORT std::uint64_t Core3DDebugPaintedAtlasBakeReadback(
+    std::int32_t scenario, std::int32_t field) noexcept {
+    return core3d::painted_atlas_bake::probe::Readback(scenario, field);
+}
+
+extern "C" Standard_EXPORT const void* Core3DDebugPaintedAtlasBakeExport(
+    std::int32_t scenario, std::int32_t field) noexcept {
+    std::uint64_t length = 0;
+    return core3d::painted_atlas_bake::probe::Export(scenario, field, length);
+}
+
 namespace core3d::retained_finishing {
 // Row-442 / D293 / D295 test-honesty repair: the E1b finishing-producer probe
 // executes for real. Each scenario builds its own document in BOTH unit

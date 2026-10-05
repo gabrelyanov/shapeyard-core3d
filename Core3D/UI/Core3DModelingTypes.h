@@ -1438,6 +1438,10 @@ __attribute__((objc_subclassing_restricted))
 - (void)regenerateWithCompletion:(void (^)(Core3DProfileConstructionResult result,
                                            NSString *detail))completion
     NS_SWIFT_NAME(regenerate(completion:));
+//! Explicit SYEB/1 painted preservation; Apply and Regenerate never invoke it.
+- (void)bakePaintedWithCompletion:(void (^)(Core3DProfileConstructionResult result,
+                                            NSString *detail))completion
+    NS_SWIFT_NAME(bakePainted(completion:));
 - (BOOL)cancel;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;

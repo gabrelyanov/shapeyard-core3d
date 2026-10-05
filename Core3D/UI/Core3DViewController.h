@@ -920,6 +920,14 @@ __attribute__((objc_subclassing_restricted))
     definition:(Core3DProfileDefinition *)definition expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DProfileConstructionResult))completion
     NS_SWIFT_NAME(rebuildStoredProfile(_:definition:expected:completion:));
+//! Submit every Profile value through the ordinary owner's native complete
+//! capability, including bare sources. The exact captured shell list and shell
+//! units must be carried bit-for-bit; the parameter-only entry above keeps its
+//! old frame/shell/unit fence.
+- (void)rebuildStoredProfileComplete:(Core3DStoredProfileSnapshot *)original
+    definition:(Core3DProfileDefinition *)definition expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion
+    NS_SWIFT_NAME(rebuildStoredProfileComplete(_:definition:expected:completion:));
 //! Keep the worker slot until completion; cancel at document load/close boundaries.
 - (void)cancelProfileConstruction;
 - (BOOL)selectObjectWithEntityIdentifier:(NSString *)entityIdentifier

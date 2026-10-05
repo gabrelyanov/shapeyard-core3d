@@ -18972,6 +18972,33 @@ static bool Core3DPublishCommittedSpatialSweep(
     } catch (...) { completion(Core3DProfileConstructionResultRejected); }
 }
 
+- (void)rebuildStoredProfileComplete:(Core3DStoredProfileSnapshot *)original
+    definition:(Core3DProfileDefinition *)definition expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DProfileConstructionResult))completion {
+    if (!completion) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(Core3DProfileConstructionResultRejected); }); return;
+    }
+    if (_nativeSolidWork || _isLoading.load()) { completion(Core3DProfileConstructionResultBusy); return; }
+    if (![original isKindOfClass:[Core3DStoredProfileSnapshot class]]
+        || ![definition isKindOfClass:[Core3DProfileDefinition class]]) {
+        completion(Core3DProfileConstructionResultRejected); return;
+    }
+    const auto live = [self storedProfileWithEntityIdentifier:original.entityIdentifier expected:expected];
+    if (!live) { completion(Core3DProfileConstructionResultRejected); return; }
+    try {
+        const CGSize size = GLController.drawableSize;
+        const auto originalNative = [original nativeSnapshot];
+        const auto requested = [definition nativeParameters];
+        const auto work = GLController.viewer->prepareCompleteProfileRebuild(requested,
+            originalNative,[live nativeSnapshot].identity,expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)));
+        if (!work) { completion(Core3DProfileConstructionResultRejected); return; }
+        [self runNativeSolidWork:work completion:completion];
+    } catch (...) { completion(Core3DProfileConstructionResultRejected); }
+}
+
 - (void)setSavedGroupBaseCenterOrigin:(NSString *)identifier expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DObjectAlignmentResult))completion {
     if(!completion)return;

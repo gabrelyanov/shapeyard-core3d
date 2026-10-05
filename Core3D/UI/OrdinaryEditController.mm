@@ -21,6 +21,7 @@ struct Cut475Scope {
 }
 #endif // Cut475 phase diagnostics only
 #include "OrdinaryEditController.hpp"
+#include "RetainedProfileSourceAdapter.hxx"
 #include "../OCCTKit/SweepRebuildDefinition.hxx"
 #include "../OCCTKit/CurrentTessellationMeshCopy.hxx"
 #include "../OCCTKit/NativeMeshTopologyCapture.hxx"
@@ -428,6 +429,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 && request.operation != OrdinaryTransformOperation::MeshRegionInset
                 && request.operation != OrdinaryTransformOperation::MeshWindingRepair
                 && request.operation != OrdinaryTransformOperation::ProfileRebuild
+                && request.operation != OrdinaryTransformOperation::CompleteProfileRebuild
                 && request.operation != OrdinaryTransformOperation::EnclosureRebuild
                 && request.operation != OrdinaryTransformOperation::SweepRebuild
                 && request.operation != OrdinaryTransformOperation::LoftStationRebuild
@@ -437,8 +439,19 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 && request.operation != OrdinaryTransformOperation::RetainedEdgeTreatment) {
                 CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
-            if (request.profileRebuild.has_value() != (request.operation == OrdinaryTransformOperation::ProfileRebuild)) {
+            const bool profileRebuild = request.operation
+                    == OrdinaryTransformOperation::ProfileRebuild
+                || request.operation
+                    == OrdinaryTransformOperation::CompleteProfileRebuild;
+            if (request.profileRebuild.has_value() != profileRebuild) {
                 CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
+            }
+            const bool completeProfile = request.operation
+                == OrdinaryTransformOperation::CompleteProfileRebuild;
+            if (bool(request.completeProfileCapture) != completeProfile
+                || bool(request.completeProfileResult) != completeProfile) {
+                CORE3D_CUT_REFUSE("ordinary.complete-profile-capability",
+                    reject(OrdinaryEditResult::Invalid));
             }
             if (request.enclosureRebuild.has_value() != (request.operation == OrdinaryTransformOperation::EnclosureRebuild)) {
                 CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
@@ -483,6 +496,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 ||bool(request.edgeTreatmentEnrollmentR2);
             const bool pairedTreatment=!requestsTreatmentR2&&(request.operation==OrdinaryTransformOperation::RetainedEdgeTreatment
                 ||((request.operation==OrdinaryTransformOperation::ProfileRebuild
+                    ||request.operation==OrdinaryTransformOperation::CompleteProfileRebuild
                     ||request.operation==OrdinaryTransformOperation::EnclosureRebuild
                     ||request.operation==OrdinaryTransformOperation::LoftStationRebuild)
                     &&record.previous.edgeTreatment.has_value()));
@@ -621,6 +635,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 && request.operation != OrdinaryTransformOperation::MeshRegionInset
                 && request.operation != OrdinaryTransformOperation::MeshWindingRepair
                 && request.operation != OrdinaryTransformOperation::ProfileRebuild
+                && request.operation != OrdinaryTransformOperation::CompleteProfileRebuild
                 && request.operation != OrdinaryTransformOperation::EnclosureRebuild
                 && request.operation != OrdinaryTransformOperation::SweepRebuild
                 && request.operation != OrdinaryTransformOperation::LoftStationRebuild
@@ -764,6 +779,49 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                     CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
                 }
                 if (values == record.previous.profile.values) return unchanged();
+            }
+            if (request.operation
+                    == OrdinaryTransformOperation::CompleteProfileRebuild) {
+                std::vector<double> values;
+                const auto& capture = request.completeProfileCapture;
+                const auto& result = request.completeProfileResult;
+                const auto snapshot = capture ? capture->snapshot_ : nullptr;
+                const auto captured = snapshot
+                    ? std::get_if<profile::Parameters>(&snapshot->source_) : nullptr;
+                if (permit || changes.size() != 1
+                    || representation != OcctGeometryRepresentation::BRep
+                    || !record.previous.profile.IsCurrent(document, request.label)
+                    || !MatricesEqual(record.previous.transform, request.transform)
+                    || request.rotationAroundPivot || !geometryChanges
+                    || !profile::HasOnlyMetadataSubshapes(document, request.label)
+                    || !capture || !result || result->capture_ != capture
+                    || !snapshot || !snapshot->current() || !captured
+                    || snapshot->ownerLabel_.Data() != document->GetData()
+                    || !snapshot->ownerLabel_.IsEqual(request.label)
+                    || !snapshot->sourceLabel_.IsEqual(record.previous.profile.label)
+                    || snapshot->sourceIdentifier_ != record.previous.profile.identifier
+                    || snapshot->nonce_ != capture->nonce_
+                    || capture->nonce_ != std::uint64_t(document->GetData()->Time())
+                    || snapshot->definition_.has_value()
+                        != record.previous.edgeTreatment.has_value()
+                    || (record.previous.edgeTreatment
+                        && snapshot->definitionBytes_
+                            != record.previous.edgeTreatment->value->bytes)
+                    || !profile::Encode(*request.profileRebuild, values)
+                    || !retained_profile_source_adapter::SameBits(
+                        values, capture->requestedValues_)
+                    || !retained_profile_source_adapter::SameBits(
+                        capture->capturedValues_, record.previous.profile.values)
+                    || !retained_profile_source_adapter::SameFrozenShellBits(
+                        record.previous.profile.parameters, *request.profileRebuild)
+                    || !result->budget_.valid() || result->builtBase_.IsNull()
+                    || result->result_.IsNull()
+                    || !result->result_.IsEqual(request.shape)) {
+                    CORE3D_CUT_REFUSE("ordinary.complete-profile-admission",
+                        reject(OrdinaryEditResult::Invalid));
+                }
+                if (retained_profile_source_adapter::SameBits(
+                        values, record.previous.profile.values)) return unchanged();
             }
             if (request.operation == OrdinaryTransformOperation::EnclosureRebuild) {
                 std::vector<double> values;
@@ -2496,7 +2554,10 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     && !_document->StageMeshRegionPartition(record.previous.label,regionPartition))
                 || (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas
                     && !_document->MarkTriangleUVAtlas(record.previous.label, record.requested.meshUVAtlasOptions))
-                || (!treatmentStaged && record.requested.operation == OrdinaryTransformOperation::ProfileRebuild
+                || (!treatmentStaged
+                    && (record.requested.operation == OrdinaryTransformOperation::ProfileRebuild
+                        || record.requested.operation
+                            == OrdinaryTransformOperation::CompleteProfileRebuild)
                     && !profile::Stage(_document->Document(), record.previous.label,
                         *record.requested.profileRebuild, record.previous.profile.identifier))
                 || (!treatmentStaged && record.requested.operation == OrdinaryTransformOperation::EnclosureRebuild
@@ -2506,7 +2567,10 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 || !record.candidate.shape.IsEqual(record.requested.shape)
                 || record.candidate.entityIdentifier != record.previous.entityIdentifier
                 || record.candidate.definitionIdentifier != record.previous.definitionIdentifier
-                || (!cutStaged && record.requested.operation != OrdinaryTransformOperation::ProfileRebuild
+                || (!cutStaged
+                    && record.requested.operation != OrdinaryTransformOperation::ProfileRebuild
+                    && record.requested.operation
+                        != OrdinaryTransformOperation::CompleteProfileRebuild
                     && (treatmentStaged
                         // A staged B1 treatment restages the same source recipe
                         // against the new owner shape, so the old bound shape
@@ -2622,6 +2686,27 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     || !record.candidate.profile.IsCurrent(_document->Document(), record.previous.label)
                     || !_document->ValidateGeometryRepresentations()) {
                     throw Standard_Failure("Profile rebuild candidate readback failed");
+                }
+            }
+            if (record.requested.operation
+                    == OrdinaryTransformOperation::CompleteProfileRebuild) {
+                std::vector<double> values;
+                const auto& result = record.requested.completeProfileResult;
+                if (!result || !result->budget_.valid()
+                    || !profile::Encode(*record.requested.profileRebuild, values)
+                    || !retained_profile_source_adapter::SameBits(
+                        record.candidate.profile.values, values)
+                    || record.candidate.profile.identifier
+                        != record.previous.profile.identifier
+                    || !record.candidate.profile.label.IsEqual(
+                        record.previous.profile.label)
+                    || !record.candidate.profile.IsCurrent(
+                        _document->Document(), record.previous.label)
+                    || record.candidate.edgeTreatment.has_value()
+                        != record.previous.edgeTreatment.has_value()
+                    || !_document->ValidateGeometryRepresentations()) {
+                    throw Standard_Failure(
+                        "Complete Profile rebuild candidate readback failed");
                 }
             }
             if (record.requested.operation == OrdinaryTransformOperation::EnclosureRebuild) {

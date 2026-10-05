@@ -236,6 +236,12 @@ namespace core3d {
             const profile::Parameters& parameters, const StoredProfileSnapshot& original,
             const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
             std::uint32_t width, std::uint32_t height) noexcept;
+        //! Separate native complete-value capability. The legacy overload above
+        //! retains its dimension-only frame/shell/unit fences unchanged.
+        std::shared_ptr<NativeSolidWork> prepareCompleteProfileRebuild(
+            const profile::Parameters& parameters, const StoredProfileSnapshot& original,
+            const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+            std::uint32_t width, std::uint32_t height) noexcept;
         std::shared_ptr<NativeSolidWork> prepareNativeSolidWork(
             const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
             std::uint32_t width, std::uint32_t height) noexcept;
