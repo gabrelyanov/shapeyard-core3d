@@ -2,6 +2,7 @@
 #include "../OCCTKit/PartBooleanOwner.hxx"
 #include "../OCCTKit/PartBooleanFamilyAdmission.hxx"
 #include "../OCCTKit/PartBooleanPersistence.hxx"
+#include "../OCCTKit/CompositeRecipeCodec.hxx"
 #include "../OCCTKit/DetachedLoftCutProbe.hxx"
 #if DEBUG
 #include "../OCCTKit/SavedCutSourceChangedQualification.hxx"
@@ -3808,6 +3809,7 @@ struct NativeModelingPermitIssuer final {
     (Core3DPartBooleanOperation)operation metersPerUnit:(double)metersPerUnit shell:(BOOL)shellFixture;
 - (void)core3d_clearDebugPartBooleanFixtureBinding;
 - (BOOL)core3d_matchesDebugPartBooleanFixtureEntityIdentifier:(NSString *)entityIdentifier;
+- (NSDictionary<NSString *,NSNumber *> *)debugA1DecodedOperationReadbackProbe:(NSNumber *)metersPerUnit;
 - (void)core3d_publishNativeSolidDeadlineDiagnostic:(NSDictionary<NSString *,id> *)diagnostic;
 - (void)core3d_expireNativeSolidDeadlineRecord:(Core3DDebugNativeSolidDeadlineRecord *)record;
 #endif
@@ -4189,6 +4191,93 @@ Core3DRetainedBooleanRecipeLocatorR2 *B1LocatorR2(const core3d::retained_recipe:
         entityIdentifier:B1ID(entity) definitionIdentifier:B1ID(definition)
         nodeIdentifier:B1ID(node) sourceFeatureIdentifier:B1ID(sourceFeature)];
 }
+bool B1DecodeValidatedA1OperationReadback(
+    const core3d::retained_edge_treatment::r2::CompositeBooleanBase& composite,
+    const core3d::retained_edge_treatment::r2::BooleanBaseBinding& binding,
+    core3d::composite_recipe::Definition& prefix,
+    const core3d::composite_recipe::FeatureNode*& feature,
+    std::array<const core3d::composite_recipe::SourceNode*,2>& inputs,
+    core3d::part_boolean::Operation& operation) noexcept {
+    namespace cr=core3d::composite_recipe;
+    namespace pb=core3d::part_boolean;
+    namespace r2=core3d::retained_edge_treatment::r2;
+    prefix={};feature=nullptr;inputs={nullptr,nullptr};operation=pb::Operation::Subtract;
+    try {
+        if(!r2::detail::Valid(binding)||composite.canonicalPrefixBytes.empty())return false;
+        std::vector<std::uint8_t> typedBytes;
+        if(!cr::Encode(composite.prefix,typedBytes)
+            ||typedBytes!=composite.canonicalPrefixBytes
+            ||!cr::Decode(composite.canonicalPrefixBytes,prefix)
+            ||prefix.nodes.size()!=3||prefix.outputNode!=binding.sourceNode
+            ||prefix.schemaVersion!=binding.sourceSchema
+            ||prefix.owner.document!=binding.source.document
+            ||prefix.owner.entity!=binding.source.entity
+            ||prefix.owner.definition!=binding.source.definition)return false;
+        core3d::retained_recipe::Digest digest{};
+        if(!cr::Hash(composite.canonicalPrefixBytes,digest)
+            ||digest!=binding.sourceRecipeDigest)return false;
+        std::size_t sourceCount=0,featureCount=0;
+        for(const auto& node:prefix.nodes){
+            if(std::holds_alternative<cr::SourceNode>(node.value))++sourceCount;
+            else{
+                ++featureCount;
+                const auto& candidate=std::get<cr::FeatureNode>(node.value);
+                if(candidate.node==binding.sourceNode)feature=&candidate;
+            }
+        }
+        if(sourceCount!=2||featureCount!=1||!feature
+            ||feature->kind!=cr::PartBooleanFeatureKind||feature->inputs.size()!=2
+            ||feature->inputs[0]==feature->inputs[1])return false;
+        for(std::size_t index=0;index<2;++index){
+            const auto found=std::find_if(prefix.nodes.begin(),prefix.nodes.end(),
+                [&](const cr::Node& node){return cr::NodeID(node)==feature->inputs[index];});
+            if(found==prefix.nodes.end())return false;
+            inputs[index]=std::get_if<cr::SourceNode>(&found->value);
+            if(!inputs[index])return false;
+        }
+        const auto* links=std::get_if<r2::CompositePrefixBinding>(&binding.prefix);
+        if(!links||links->links.size()!=1)return false;
+        const auto& link=links->links.front();
+        if(link.node!=feature->node||link.feature!=feature->feature
+            ||link.leftNode!=feature->inputs[0]||link.rightNode!=feature->inputs[1]
+            ||binding.source.sourceFeature!=inputs[0]->original.sourceFeature
+            ||std::memcmp(&binding.metersPerLocalUnit,
+                &inputs[0]->inputToCarrier.carrierMetersPerUnit,sizeof(double))!=0
+            ||std::memcmp(&binding.metersPerLocalUnit,
+                &inputs[1]->inputToCarrier.carrierMetersPerUnit,sizeof(double))!=0)return false;
+        std::vector<std::uint8_t> exact;
+        if(feature->codecVersion==cr::PartBooleanFeatureCodec
+            &&binding.format==r2::PrefixFormat::A1Composite){
+            pb::AnalyticDefinition payload;
+            if(!pb::DecodeAnalytic(feature->parameters,payload)
+                ||!pb::EncodeAnalytic(payload,exact)||exact!=feature->parameters
+                ||payload.inputs[0].rootNode!=feature->inputs[0]
+                ||payload.inputs[1].rootNode!=feature->inputs[1])return false;
+            operation=payload.operation;
+        }else if(feature->codecVersion==cr::PartBooleanShellFeatureCodec
+            &&binding.format==r2::PrefixFormat::A1Composite){
+            pb::Definition payload;
+            if(!pb::Decode(feature->parameters,payload)
+                ||!pb::Encode(payload,exact)||exact!=feature->parameters
+                ||payload.inputs[0].rootNode!=feature->inputs[0]
+                ||payload.inputs[1].rootNode!=feature->inputs[1])return false;
+            operation=payload.operation;
+        }else if(feature->codecVersion==cr::PartBooleanRecipeFeatureCodec
+            &&binding.format==r2::PrefixFormat::A1RecipeComposite){
+            pb::RecipeDefinition payload;
+            if(!pb::DecodeRecipe(feature->parameters,payload)
+                ||!pb::EncodeRecipe(payload,exact)||exact!=feature->parameters
+                ||!(payload.owner==prefix.owner)||payload.booleanNode!=feature->node
+                ||payload.feature!=feature->feature
+                ||payload.inputs[0].role!=pb::RecipeInputRole::Left
+                ||payload.inputs[1].role!=pb::RecipeInputRole::Right
+                ||payload.inputs[0].sourceNode!=feature->inputs[0]
+                ||payload.inputs[1].sourceNode!=feature->inputs[1])return false;
+            operation=payload.operation;
+        }else return false;
+        return true;
+    }catch(...){prefix={};feature=nullptr;inputs={nullptr,nullptr};return false;}
+}
 // Build the complete retained Boolean source/input/tool/operation/placement/
 // migration maps from the captured native snapshot. Any undecodable or
 // unsupported piece returns nil so the capture refuses as malformed instead
@@ -4284,12 +4373,16 @@ Core3DRetainedBooleanSourceR2 *B1RetainedBooleanSourceR2(
         [source setValue:@(program.nextFilletEdgeID) forKey:@"nextFilletEdgeID"];
     }else{
         const auto&composite=std::get<r2::CompositeBooleanBase>(boolean->source);
-        std::size_t role=0;
-        for(const auto&node:composite.prefix.nodes){
-            if(const auto*sourceNode=std::get_if<core3d::composite_recipe::SourceNode>(&node.value)){
-                if(++role>2)return nil;
+        core3d::composite_recipe::Definition validatedPrefix;
+        const core3d::composite_recipe::FeatureNode*feature=nullptr;
+        std::array<const core3d::composite_recipe::SourceNode*,2>sourceNodes{};
+        core3d::part_boolean::Operation decodedOperation;
+        if(!B1DecodeValidatedA1OperationReadback(composite,binding,validatedPrefix,
+            feature,sourceNodes,decodedOperation))return nil;
+        for(std::size_t index=0;index<sourceNodes.size();++index){
+                const auto*sourceNode=sourceNodes[index];
                 auto input=B1Object<Core3DRetainedBooleanInputR2>(Core3DRetainedBooleanInputR2.class);
-                [input setValue:@(role==1?Core3DRetainedBooleanInputRoleR2Left:Core3DRetainedBooleanInputRoleR2Right) forKey:@"role"];
+                [input setValue:@(index==0?Core3DRetainedBooleanInputRoleR2Left:Core3DRetainedBooleanInputRoleR2Right) forKey:@"role"];
                 auto locator=B1LocatorR2(binding.source.document,binding.source.entity,binding.source.definition,
                     sourceNode->node,sourceNode->original.sourceFeature);
                 if(!locator)return nil;
@@ -4322,18 +4415,15 @@ Core3DRetainedBooleanSourceR2 *B1RetainedBooleanSourceR2(
                 if(!placement)return nil;
                 [input setValue:placement forKey:@"inputPlacement"];
                 [inputs addObject:input];
-            }else if(const auto*feature=std::get_if<core3d::composite_recipe::FeatureNode>(&node.value)){
-                if(feature->inputs.size()!=2)return nil;
-                auto operation=B1Object<Core3DRetainedBooleanOperationR2>(Core3DRetainedBooleanOperationR2.class);
-                [operation setValue:B1ID(feature->node) forKey:@"nodeIdentifier"];
-                [operation setValue:B1ID(feature->feature) forKey:@"featureIdentifier"];
-                [operation setValue:B1ID(feature->inputs[0]) forKey:@"leftNodeIdentifier"];
-                [operation setValue:B1ID(feature->inputs[1]) forKey:@"rightNodeIdentifier"];
-                [operation setValue:@(feature->kind) forKey:@"operation"];
-                [operation setValue:@(feature->codecVersion) forKey:@"codecVersion"];
-                [operations addObject:operation];
-            }
         }
+        auto operation=B1Object<Core3DRetainedBooleanOperationR2>(Core3DRetainedBooleanOperationR2.class);
+        [operation setValue:B1ID(feature->node) forKey:@"nodeIdentifier"];
+        [operation setValue:B1ID(feature->feature) forKey:@"featureIdentifier"];
+        [operation setValue:B1ID(feature->inputs[0]) forKey:@"leftNodeIdentifier"];
+        [operation setValue:B1ID(feature->inputs[1]) forKey:@"rightNodeIdentifier"];
+        [operation setValue:@(NSInteger(decodedOperation)) forKey:@"operation"];
+        [operation setValue:@(feature->codecVersion) forKey:@"codecVersion"];
+        [operations addObject:operation];
         // A1 composite carries no legacy issuance counters; zero means
         // not-applicable here, never a measured history value.
         [source setValue:@0 forKey:@"nextOperandID"];
@@ -8710,7 +8800,16 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
         const auto* suffix = registry.find({
             c::RetainedProgramSuffixFeatureKind,
             c::RetainedProgramSuffixFeatureCodec});
-        controls["production-registry-has-three-closed-codecs"] = registry.size() == 3;
+        controls["production-registry-has-four-closed-codecs"] =
+            registry.size() == 4
+            && registry.find({c::PartBooleanFeatureKind,
+                              c::PartBooleanFeatureCodec}) != nullptr
+            && registry.find({c::PartBooleanFeatureKind,
+                              c::PartBooleanShellFeatureCodec}) != nullptr
+            && registry.find({c::PartBooleanFeatureKind,
+                              c::PartBooleanRecipeFeatureCodec}) != nullptr
+            && registry.find({c::RetainedProgramSuffixFeatureKind,
+                              c::RetainedProgramSuffixFeatureCodec}) != nullptr;
         controls["a3p2-codec-present-execution-disabled"] =
             suffix != nullptr && !suffix->execution.installed();
         controls["plain-profile-cut-key-not-in-production-registry"] = registry.find({
@@ -8835,6 +8934,84 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
     }
     return [result copy];
 }
+#if DEBUG
+- (NSDictionary<NSString *,NSNumber *> *)debugA1DecodedOperationReadbackProbe:
+    (NSNumber *)metersPerUnit {
+    namespace cr=core3d::composite_recipe;
+    namespace pb=core3d::part_boolean;
+    namespace probe=core3d::part_boolean_recipe_probe;
+    namespace r2=core3d::retained_edge_treatment::r2;
+    NSMutableDictionary<NSString *,NSNumber *> *checks=[NSMutableDictionary dictionary];
+    const double unit=metersPerUnit.doubleValue;
+    if(!std::isfinite(unit)||unit<=0)return checks;
+    try {
+        const auto makeArm=[&](pb::Operation requested,r2::CompositeBooleanBase& arm,
+            r2::BooleanBaseBinding& binding)->bool{
+            cr::Definition graph=probe::Graph(pb::RecipeInputFamily::Profile,
+                pb::RecipeInputFamily::Enclosure,unit);
+            auto* feature=std::get_if<cr::FeatureNode>(&graph.nodes.back().value);
+            auto* left=std::get_if<cr::SourceNode>(&graph.nodes[0].value);
+            if(!feature||!left)return false;
+            pb::RecipeDefinition payload;
+            if(!pb::DecodeRecipe(feature->parameters,payload))return false;
+            payload.operation=requested;
+            if(!pb::EncodeRecipe(payload,feature->parameters))return false;
+            std::vector<std::uint8_t> bytes;
+            if(!cr::Encode(graph,bytes))return false;
+            binding={};binding.sourceContractRevision=r2::RecipeSourceContractRevision;
+            binding.format=r2::PrefixFormat::A1RecipeComposite;
+            binding.sourceWireMajor=3;binding.sourceWireMinor=0;
+            binding.source={graph.owner.document,graph.owner.entity,graph.owner.definition,
+                left->original.sourceFeature};
+            binding.sourceNode=feature->node;binding.sourceSchema=3;
+            binding.metersPerLocalUnit=unit;
+            if(!cr::Hash(bytes,binding.sourceRecipeDigest))return false;
+            r2::CompositePrefixBinding links;
+            links.links.push_back({feature->node,feature->feature,
+                feature->inputs[0],feature->inputs[1]});
+            binding.prefix=std::move(links);
+            arm={std::move(graph),std::move(bytes)};
+            return true;
+        };
+        const auto reads=[&](const r2::CompositeBooleanBase& arm,
+            const r2::BooleanBaseBinding& binding,pb::Operation expected)->bool{
+            cr::Definition decoded;
+            const cr::FeatureNode* feature=nullptr;
+            std::array<const cr::SourceNode*,2> inputs{};
+            pb::Operation operation;
+            return B1DecodeValidatedA1OperationReadback(arm,binding,decoded,
+                feature,inputs,operation)&&feature&&inputs[0]&&inputs[1]
+                &&feature->inputs[0]==inputs[0]->node
+                &&feature->inputs[1]==inputs[1]->node&&operation==expected;
+        };
+        for(const auto& row:std::array<std::pair<pb::Operation,NSString *>,3>{{
+            {pb::Operation::Union,@"recipe-union"},
+            {pb::Operation::Subtract,@"recipe-subtract"},
+            {pb::Operation::Intersect,@"recipe-intersect"}}}){
+            r2::CompositeBooleanBase arm;r2::BooleanBaseBinding binding;
+            checks[row.second]=@(makeArm(row.first,arm,binding)
+                &&reads(arm,binding,row.first));
+        }
+        r2::CompositeBooleanBase arm;r2::BooleanBaseBinding binding;
+        if(!makeArm(pb::Operation::Intersect,arm,binding))return @{};
+        auto corrupt=arm;
+        corrupt.canonicalPrefixBytes[corrupt.canonicalPrefixBytes.size()/2]^=0x40;
+        checks[@"corrupt-payload-refused"]=@(!reads(corrupt,binding,pb::Operation::Union));
+        auto unknown=arm;
+        std::get<cr::FeatureNode>(unknown.prefix.nodes.back().value).codecVersion=UINT32_MAX;
+        checks[@"unknown-codec-refused"]=@(!reads(unknown,binding,pb::Operation::Union));
+        auto badJoin=binding;
+        std::get<r2::CompositePrefixBinding>(badJoin.prefix).links[0].leftNode=
+            probe::Identifier(245);
+        checks[@"bad-binding-join-refused"]=@(!reads(arm,badJoin,pb::Operation::Union));
+        auto swapped=binding;
+        auto& link=std::get<r2::CompositePrefixBinding>(swapped.prefix).links[0];
+        std::swap(link.leftNode,link.rightNode);
+        checks[@"swapped-role-join-refused"]=@(!reads(arm,swapped,pb::Operation::Union));
+        return [checks copy];
+    }catch(...){return @{};}
+}
+#endif
 + (NSDictionary<NSString *, NSNumber *> *)debugSavedBooleanWedgeProbe:(NSInteger)scenario {
     NSMutableDictionary<NSString *,NSNumber *> *out=[NSMutableDictionary dictionary];
     for(const std::pair<const std::string,bool>& row:Core3DDebugSavedBooleanWedgeProbe(static_cast<Standard_Integer>(scenario)))
@@ -21069,6 +21246,97 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         @"hasM3RB":@(m3!=bytes.end()),@"roundTrip":@(roundTrip),@"metersPerLocalUnit":@(metersPerLocalUnit),
         @"r1Schema1Unchanged":@YES,@"oldMinor1To4Unchanged":@YES,@"malformedMapsRefuseWholeValue":@YES,
         @"faultTableCallbackOnce":@YES,@"unknownOutcomeRequiresRecovery":@YES};
+}
+
++ (NSDictionary<NSString *,id> *)debugA1RecipeR2BindingCodec:(double)metersPerLocalUnit {
+    namespace et=core3d::retained_edge_treatment;namespace r2=core3d::retained_edge_treatment::r2;
+    if(!std::isfinite(metersPerLocalUnit)||metersPerLocalUnit<=0)return @{};
+    auto nextUUID=[next=std::uint8_t(1)]()mutable{r2::UUID value{};value.fill(next++);return value;};
+    r2::Definition oldValue;oldValue.schema=2;oldValue.owner={nextUUID(),nextUUID(),nextUUID()};oldValue.issuance.nextLocalID=1;
+    r2::BooleanBaseBinding oldBase;oldBase.source={oldValue.owner.document,oldValue.owner.entity,oldValue.owner.definition,nextUUID()};
+    oldBase.sourceNode=nextUUID();oldBase.sourceSchema=1;oldBase.sourceWireMajor=1;oldBase.sourceWireMinor=0;
+    oldBase.metersPerLocalUnit=metersPerLocalUnit;oldBase.sourceRecipeDigest.fill(31);oldBase.format=r2::PrefixFormat::A1Composite;
+    r2::CompositeLink oldLink;oldLink.node=oldBase.sourceNode;oldLink.feature=nextUUID();oldLink.leftNode=nextUUID();oldLink.rightNode=nextUUID();
+    r2::CompositePrefixBinding oldPrefix;oldPrefix.links.push_back(oldLink);oldBase.prefix=oldPrefix;oldValue.base=oldBase;oldValue.outputNode=oldBase.sourceNode;
+    auto canonical=[](const r2::Definition& value,std::vector<std::uint8_t>& bytes){
+        et::Refusal refusal=et::Refusal::None;std::optional<r2::Definition> decoded;std::vector<std::uint8_t> reencoded;
+        return r2::Encode(value,bytes,refusal)&&r2::Decode(bytes,decoded,refusal)&&decoded
+            &&r2::Encode(*decoded,reencoded,refusal)&&reencoded==bytes;
+    };
+    std::vector<std::uint8_t> oldBytes;const bool oldCanonical=canonical(oldValue,oldBytes);
+    auto oldSchema3=oldValue;oldSchema3.schema=3;std::vector<std::uint8_t> oldSchema3Bytes;
+    const bool oldSchema3Canonical=canonical(oldSchema3,oldSchema3Bytes);
+
+    auto recipeValue=oldValue;recipeValue.schema=3;
+    auto& recipeBase=std::get<r2::BooleanBaseBinding>(recipeValue.base);
+    recipeBase.sourceContractRevision=r2::RecipeSourceContractRevision;
+    recipeBase.format=r2::PrefixFormat::A1RecipeComposite;recipeBase.sourceWireMajor=3;
+    recipeBase.sourceWireMinor=0;recipeBase.sourceSchema=3;
+    std::vector<std::uint8_t> recipeBytes;const bool recipeCanonical=canonical(recipeValue,recipeBytes);
+    auto encodingRefused=[](r2::Definition value){
+        et::Refusal refusal=et::Refusal::None;std::vector<std::uint8_t> bytes;
+        return !r2::Encode(value,bytes,refusal)&&bytes.empty();
+    };
+    auto changedBase=[&](auto change){auto value=recipeValue;change(std::get<r2::BooleanBaseBinding>(value.base));return encodingRefused(std::move(value));};
+    const bool contract2Format3Refused=changedBase([](auto& base){base.sourceContractRevision=r2::SourceContractRevision;});
+    const bool contract3Format2Refused=changedBase([](auto& base){base.format=r2::PrefixFormat::A1Composite;});
+    const bool wire1Format3Refused=changedBase([](auto& base){base.sourceWireMajor=1;});
+    const bool sourceSchema2Refused=changedBase([](auto& base){base.sourceSchema=2;});
+    const bool unknownContractRefused=changedBase([](auto& base){base.sourceContractRevision=4;});
+    const bool unknownFormatRefused=changedBase([](auto& base){base.format=r2::PrefixFormat(4);});
+    const bool missingFeatureRefused=changedBase([](auto& base){std::get<r2::CompositePrefixBinding>(base.prefix).links[0].feature.fill(0);});
+    const bool crossedRolesRefused=changedBase([](auto& base){auto& link=std::get<r2::CompositePrefixBinding>(base.prefix).links[0];link.rightNode=link.leftNode;});
+    const bool wrongOutputLinkRefused=changedBase([](auto& base){std::get<r2::CompositePrefixBinding>(base.prefix).links[0].node.fill(47);});
+    const bool zeroLinksRefused=changedBase([](auto& base){std::get<r2::CompositePrefixBinding>(base.prefix).links.clear();});
+    const bool duplicateLinksRefused=changedBase([](auto& base){auto& links=std::get<r2::CompositePrefixBinding>(base.prefix).links;links.push_back(links[0]);});
+    const bool migrationRefused=changedBase([](auto& base){r2::MigrationM3Provenance migration;migration.originalRecipeDigest.fill(9);migration.nextOperandID=1;migration.nextFilletStepID=1;migration.nextFilletEdgeID=1;base.migration=migration;});
+    auto schema2Recipe=recipeValue;schema2Recipe.schema=2;const bool schema2RecipeEncodeRefused=encodingRefused(schema2Recipe);
+
+    auto reseal=[](std::vector<std::uint8_t>& bytes){
+        if(bytes.size()<32)return false;r2::Digest digest{};
+        if(!CC_SHA256(bytes.data(),CC_LONG(bytes.size()-32),digest.data()))return false;
+        std::copy(digest.begin(),digest.end(),bytes.end()-32);return true;
+    };
+    auto decodeRefused=[](const std::vector<std::uint8_t>& bytes){
+        et::Refusal refusal=et::Refusal::None;std::optional<r2::Definition> decoded;
+        return !r2::Decode(bytes,decoded,refusal)&&!decoded;
+    };
+    auto mutateAndRefuse=[&](std::size_t offset,std::initializer_list<std::uint8_t> replacement){
+        if(!recipeCanonical||offset>recipeBytes.size()||replacement.size()>recipeBytes.size()-offset)return false;
+        auto bytes=recipeBytes;std::copy(replacement.begin(),replacement.end(),bytes.begin()+offset);
+        return reseal(bytes)&&decodeRefused(bytes);
+    };
+    // Fixed R2 composite layout offsets: tuple at 61/65/70 and source schema at
+    // 152; link count precedes link bytes at 196. Counts are rejected before resize.
+    const bool contract2DecodeRefused=mutateAndRefuse(61,{2,0,0,0});
+    const bool format2DecodeRefused=mutateAndRefuse(65,{2});
+    const bool wire1DecodeRefused=mutateAndRefuse(70,{1});
+    const bool schema2SourceDecodeRefused=mutateAndRefuse(152,{2,0,0,0});
+    const bool unknownContractDecodeRefused=mutateAndRefuse(61,{4,0,0,0});
+    const bool unknownFormatDecodeRefused=mutateAndRefuse(65,{4});
+    const bool zeroLinkCountDecodeRefused=mutateAndRefuse(196,{0,0,0,0});
+    const bool duplicateLinkCountDecodeRefused=mutateAndRefuse(196,{2,0,0,0});
+    const bool oversizedLinkCountDecodeRefused=mutateAndRefuse(196,{255,255,255,255});
+    const bool forgedFeatureDecodeRefused=mutateAndRefuse(216,{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0});
+    const bool schema2CarrierDecodeRefused=mutateAndRefuse(4,{2,0,0,0});
+    return @{ @"oldContract":@2,@"oldFormat":@2,@"oldWireMajor":@1,@"oldWireMinor":@0,
+        @"oldCanonicalBytes":@(oldCanonical),@"oldSchema3CanonicalBytes":@(oldSchema3Canonical),
+        @"recipeSchema":@3,@"recipeContract":@3,@"recipeFormat":@3,@"recipeWireMajor":@3,
+        @"recipeWireMinor":@0,@"recipeSourceSchema":@3,@"recipeCanonicalBytes":@(recipeCanonical),
+        @"schema3R2Dispatch":@(recipeCanonical&&r2::IsR2Carrier(recipeBytes)),
+        @"schema2RecipeEncodeRefused":@(schema2RecipeEncodeRefused),@"schema2CarrierDecodeRefused":@(schema2CarrierDecodeRefused),
+        @"contract2Format3Refused":@(contract2Format3Refused&&contract2DecodeRefused),
+        @"contract3Format2Refused":@(contract3Format2Refused&&format2DecodeRefused),
+        @"wire1Format3Refused":@(wire1Format3Refused&&wire1DecodeRefused),
+        @"sourceSchema2Refused":@(sourceSchema2Refused&&schema2SourceDecodeRefused),
+        @"unknownContractRefused":@(unknownContractRefused&&unknownContractDecodeRefused),
+        @"unknownFormatRefused":@(unknownFormatRefused&&unknownFormatDecodeRefused),
+        @"forgedFeatureRefused":@(missingFeatureRefused&&forgedFeatureDecodeRefused),
+        @"crossedRolesRefused":@(crossedRolesRefused),@"wrongOutputLinkRefused":@(wrongOutputLinkRefused),
+        @"zeroLinksRefused":@(zeroLinksRefused&&zeroLinkCountDecodeRefused),
+        @"duplicateLinksRefused":@(duplicateLinksRefused&&duplicateLinkCountDecodeRefused),
+        @"oversizedLinksRefusedBeforeResize":@(oversizedLinkCountDecodeRefused),
+        @"migrationRefused":@(migrationRefused),@"metersPerLocalUnit":@(metersPerLocalUnit)};
 }
 
 - (NSDictionary<NSString *,id> *)debugB1R2EditabilityInventory {

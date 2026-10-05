@@ -1325,6 +1325,8 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(debugB1EdgeTreatmentProbe(scenario:));
 + (NSDictionary<NSString *,id> *)debugB1R2RetainedBooleanCodec:(double)metersPerLocalUnit
     NS_SWIFT_NAME(debugB1R2RetainedBooleanCodec(metersPerLocalUnit:));
++ (NSDictionary<NSString *,id> *)debugA1RecipeR2BindingCodec:(double)metersPerLocalUnit
+    NS_SWIFT_NAME(debugA1RecipeR2BindingCodec(metersPerLocalUnit:));
 - (NSDictionary<NSString *,id> *)debugB1R2EditabilityInventory;
 //! Multi-body variant used to prove aggregate Bevel result budgets. Every
 //! entity has one nonempty array of zero-based TopExp edge indices.

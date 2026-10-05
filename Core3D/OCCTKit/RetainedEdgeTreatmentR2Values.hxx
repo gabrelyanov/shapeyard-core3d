@@ -18,6 +18,7 @@ namespace rr = core3d::retained_recipe;
 namespace fs = core3d::retained_face_selector;
 
 inline constexpr std::uint32_t SourceContractRevision = 2;
+inline constexpr std::uint32_t RecipeSourceContractRevision = 3;
 inline constexpr std::uint32_t PrefixBindingVersion = 1;
 inline constexpr std::uint32_t MigrationVersion = 1;
 inline constexpr std::size_t MaximumMigrationSteps = 8;
@@ -32,7 +33,7 @@ inline bool IsR2Carrier(const std::vector<std::uint8_t>& bytes) noexcept {
 using UUID = rr::UUID;
 using Digest = rr::Digest;
 enum class SourceFamily : std::uint8_t { Profile = 1, Enclosure = 2, RetainedBoolean = 3 };
-enum class PrefixFormat : std::uint8_t { SYRS = 1, A1Composite = 2 };
+enum class PrefixFormat : std::uint8_t { SYRS = 1, A1Composite = 2, A1RecipeComposite = 3 };
 
 struct LegacyLink {
     std::uint32_t operandID = 0;
@@ -173,14 +174,14 @@ inline bool SortedMaps(const MigrationM3Provenance& value) noexcept {
     return true;
 }
 inline bool Valid(const BooleanBaseBinding& value) noexcept {
-    if (value.sourceContractRevision != SourceContractRevision
-        || value.prefixBindingVersion != PrefixBindingVersion || !rr::Valid(value.source)
+    if (value.prefixBindingVersion != PrefixBindingVersion || !rr::Valid(value.source)
         || !Nonzero(value.sourceNode) || !rr::Nonzero(value.sourceRecipeDigest)
         || !value.sourceSchema || !std::isfinite(value.metersPerLocalUnit)
         || value.metersPerLocalUnit <= 0) return false;
     if (value.format == PrefixFormat::SYRS) {
         const auto* prefix = std::get_if<LegacyPrefixBinding>(&value.prefix);
-        if (!prefix || !Nonzero(prefix->rootNode) || prefix->links.empty() || prefix->links.size() > 4
+        if (value.sourceContractRevision != SourceContractRevision || !prefix
+            || !Nonzero(prefix->rootNode) || prefix->links.empty() || prefix->links.size() > 4
             || (value.sourceWireMajor != 1 && value.sourceWireMajor != 2)
             || value.sourceWireMinor < 1 || value.sourceWireMinor > 4
             || !value.migration || !SortedMaps(*value.migration)) return false;
@@ -196,10 +197,23 @@ inline bool Valid(const BooleanBaseBinding& value) noexcept {
     }
     if (value.format == PrefixFormat::A1Composite) {
         const auto* prefix = std::get_if<CompositePrefixBinding>(&value.prefix);
-        return prefix && prefix->links.size() == 1 && value.sourceWireMajor == 1
+        return value.sourceContractRevision == SourceContractRevision && prefix
+            && prefix->links.size() == 1 && value.sourceWireMajor == 1
             && value.sourceWireMinor == 0 && !value.migration && Nonzero(prefix->links[0].node)
             && Nonzero(prefix->links[0].feature) && Nonzero(prefix->links[0].leftNode)
             && Nonzero(prefix->links[0].rightNode) && prefix->links[0].node == value.sourceNode;
+    }
+    if (value.format == PrefixFormat::A1RecipeComposite) {
+        const auto* prefix = std::get_if<CompositePrefixBinding>(&value.prefix);
+        if (value.sourceContractRevision != RecipeSourceContractRevision || !prefix
+            || prefix->links.size() != 1 || value.sourceWireMajor != 3
+            || value.sourceWireMinor != 0 || value.sourceSchema != 3 || value.migration) return false;
+        const auto& link = prefix->links[0];
+        return Nonzero(link.node) && Nonzero(link.feature) && Nonzero(link.leftNode)
+            && Nonzero(link.rightNode) && link.node == value.sourceNode
+            && link.node != link.feature && link.node != link.leftNode && link.node != link.rightNode
+            && link.feature != link.leftNode && link.feature != link.rightNode
+            && link.leftNode != link.rightNode;
     }
     return false;
 }
@@ -210,6 +224,7 @@ inline bool Valid(const Definition& value, et::Refusal& refusal) noexcept {
     }
     const auto* boolean = std::get_if<BooleanBaseBinding>(&value.base);
     if ((value.schema != 2 && value.schema != 3) || !rr::Valid(value.owner) || !boolean || !Valid(*boolean)
+        || (boolean->format == PrefixFormat::A1RecipeComposite && value.schema != 3)
         || boolean->source.document != value.owner.document || boolean->source.entity != value.owner.entity
         || boolean->source.definition != value.owner.definition || !rr::Valid(value.issuance)
         || value.steps.size() > et::MaximumSteps) { refusal = et::Refusal::MalformedCarrier; return false; }
@@ -285,18 +300,27 @@ inline bool Encode(const Definition& value, std::vector<std::uint8_t>& output, e
         writer.raw(base.source.document); writer.raw(base.source.entity); writer.raw(base.source.definition);
         writer.raw(base.source.sourceFeature); writer.raw(base.sourceNode); writer.u(base.sourceSchema, 4);
         writer.raw(base.sourceRecipeDigest); writer.d(base.metersPerLocalUnit);
-        if (const auto* prefix = std::get_if<LegacyPrefixBinding>(&base.prefix)) {
-            writer.u(prefix->links.size(), 4); writer.raw(prefix->rootNode);
-            for (const auto& link : prefix->links) {
+        if (base.format == PrefixFormat::SYRS) {
+            const auto& prefix = std::get<LegacyPrefixBinding>(base.prefix);
+            writer.u(prefix.links.size(), 4); writer.raw(prefix.rootNode);
+            for (const auto& link : prefix.links) {
                 writer.u(link.operandID, 4); writer.raw(link.node); writer.raw(link.feature);
                 writer.raw(link.toolNode); writer.raw(link.toolFeature); writer.raw(link.leftNode); writer.raw(link.rightNode);
             }
-        } else {
+        } else if (base.format == PrefixFormat::A1Composite) {
             const auto& compositePrefix = std::get<CompositePrefixBinding>(base.prefix);
             writer.u(compositePrefix.links.size(), 4);
             for (const auto& link : compositePrefix.links) {
                 writer.raw(link.node); writer.raw(link.feature); writer.raw(link.leftNode); writer.raw(link.rightNode);
             }
+        } else if (base.format == PrefixFormat::A1RecipeComposite) {
+            const auto& recipePrefix = std::get<CompositePrefixBinding>(base.prefix);
+            writer.u(recipePrefix.links.size(), 4);
+            for (const auto& link : recipePrefix.links) {
+                writer.raw(link.node); writer.raw(link.feature); writer.raw(link.leftNode); writer.raw(link.rightNode);
+            }
+        } else {
+            refusal = et::Refusal::UnsupportedVersion; return false;
         }
         writer.u(base.migration ? 1 : 0, 1);
         if (base.migration) {
@@ -364,6 +388,7 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes, std::optional<Definit
         if (!reader.raw(base.sourceRecipeDigest) || !reader.d(base.metersPerLocalUnit) || !reader.u(4, integer)) return false;
         const std::size_t links = std::size_t(integer);
         if (base.format == PrefixFormat::SYRS) {
+            if (!links || links > 4) return false;
             LegacyPrefixBinding prefix; prefix.links.resize(links);
             if (!reader.raw(prefix.rootNode)) return false;
             for (auto& link : prefix.links) {
@@ -373,8 +398,16 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes, std::optional<Definit
             }
             base.prefix = std::move(prefix);
         } else if (base.format == PrefixFormat::A1Composite) {
+            if (links != 1) return false;
             CompositePrefixBinding prefix; prefix.links.resize(links);
             for (auto& link : prefix.links) if (!reader.raw(link.node) || !reader.raw(link.feature)
+                || !reader.raw(link.leftNode) || !reader.raw(link.rightNode)) return false;
+            base.prefix = std::move(prefix);
+        } else if (base.format == PrefixFormat::A1RecipeComposite) {
+            if (links != 1) return false;
+            CompositePrefixBinding prefix; prefix.links.resize(1);
+            auto& link = prefix.links[0];
+            if (!reader.raw(link.node) || !reader.raw(link.feature)
                 || !reader.raw(link.leftNode) || !reader.raw(link.rightNode)) return false;
             base.prefix = std::move(prefix);
         } else return false;
