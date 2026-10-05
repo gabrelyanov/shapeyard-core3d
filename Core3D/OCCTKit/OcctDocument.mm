@@ -4453,6 +4453,13 @@ public:
                 theApplication,
                 theFilter,
                 theProgress);
+            if (myReaderStatus == PCDM_RS_OK) {
+                // A complete bounded read consumes the stream exactly;
+                // trailing bytes after the last section refuse the open
+                // (fail-closed cold-read admission, 278b U23 trailingBytes).
+                theStream.peek();
+                if (!theStream.eof()) rejectTypes();
+            }
             if (myReaderStatus == PCDM_RS_OK && myReceiptTraversal && !myReceiptTraversal->complete()) {
                 rejectTypes();
             }
@@ -7815,7 +7822,7 @@ FaceImageProbe::Observation FaceImageProbe::Observe(
             const Handle(XCAFDoc_ShapeTool) tool = XCAFDoc_DocumentTool::ShapeTool(document->Main());
             TDF_LabelSequence labels;
             if (!tool.IsNull()) tool->GetFreeShapes(labels);
-            if (!tool.IsNull() || labels.Length() < 0
+            if (tool.IsNull() || labels.Length() < 0
                 || labels.Length() > core3d::profile::MaximumLabels) return Observation{};
             for (Standard_Integer index = 1; index <= labels.Length(); ++index) {
                 Definition definition;

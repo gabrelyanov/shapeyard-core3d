@@ -223,7 +223,7 @@ bool CapturePickedFace(const Handle(OcctDocument)& owner, const OwnerKey& key,
         double metersPerLocalUnit = 0;
         if (!dr::detail::FaceImageLengthUnit(*owner, metersPerLocalUnit)) return false;
         Bnd_Box stageBox;
-        BRepBndLib::Add(shape, stageBox);
+        if (!dr::detail::FaceImageStageBounds(shape, stageBox)) return false;
         core3d::retained_edge_treatment::ReplayBudget budget;
         dr::FaceImageGeometricReceipt derived;
         const auto derived_status = dr::detail::DeriveFaceImageReceipt(
@@ -1107,8 +1107,8 @@ bool BuildFaceImageEnvelope(NSData *original, NSData *working,
     envelope = {};
     @try {
         FaceImageRasterInfo originalInfo, workingInfo;
-        if (!MeasureFaceImageRaster(original, originalInfo)
-            || !MeasureFaceImageRaster(working, workingInfo)) return false;
+        if (!MeasureFaceImageRaster(original, originalInfo)) return false;
+        if (!MeasureFaceImageRaster(working, workingInfo)) return false;
         if ([alphaInterpretation isEqualToString:@"opaque"]) {
             envelope.alpha = fi::AlphaInterpretation::Opaque;
         } else if ([alphaInterpretation isEqualToString:@"straight"]) {
@@ -1396,6 +1396,13 @@ UUID FixtureIndexedUUID(std::uint8_t seed, std::size_t index) {
     return value;
 }
 
+// One part's feature identities, derived from its owner key so a second
+// fixture part in the same document never duplicates the first part's
+// feature UUIDs (retained admission refuses duplicate feature identities).
+UUID FixturePartFeature(const OwnerKey& key, std::size_t index) {
+    return FixtureIndexedUUID(key.entity[0], index);
+}
+
 bool FixtureSetUUID(const TDF_Label& label, const char* attributeID, const UUID& value) {
     return !TDataStd_AsciiString::Set(label, Standard_GUID(attributeID),
         TCollection_AsciiString(core3d::retained_solid::UUIDText(value).c_str())).IsNull();
@@ -1409,7 +1416,8 @@ bool FixtureSetUUID(const TDF_Label& label, const char* attributeID, const UUID&
 TDF_Label FixtureAddFaceImagePartSized(const Handle(TDocStd_Document)& doc,
                                        const OwnerKey& key, double unit,
                                        double widthMM, double cutXMM,
-                                       double cutRMM) {
+                                       double cutRMM,
+                                       bool verifySourceEditable = true) {
     if (doc.IsNull() || doc->HasOpenCommand())
         throw std::invalid_argument("face image fixture command");
     const double n = .001 / unit;
@@ -1418,8 +1426,8 @@ TDF_Label FixtureAddFaceImagePartSized(const Handle(TDocStd_Document)& doc,
     program.source.document = key.document;
     program.source.entity = key.entity;
     program.source.definition = key.definition;
-    program.source.sourceFeature = FixtureIndexedUUID(0x42, 3);
-    program.source.derivedFeature = FixtureIndexedUUID(0x42, 4);
+    program.source.sourceFeature = FixturePartFeature(key, 3);
+    program.source.derivedFeature = FixturePartFeature(key, 4);
     program.source.family = 1;
     program.source.metersPerUnit = unit;
     core3d::profile::Parameters source;
@@ -1434,14 +1442,16 @@ TDF_Label FixtureAddFaceImagePartSized(const Handle(TDocStd_Document)& doc,
     pilot.operand.axis = core3d::analytic_boolean::Axis::Z;
     pilot.operand.point = std::array<double, 3>{{cutXMM * n, 15 * n, 0}};
     pilot.operand.radius = cutRMM * n;
-    program.steps = {pilot};
-    program.nextOperandID = 2;
+    auto companion = pilot;
+    companion.operand.identifier = 2;
+    const bool splitFixture = widthMM == 44 && cutXMM == 41 && cutRMM == 2;
+    companion.operand.point = std::array<double, 3>{{
+        (splitFixture ? 12 : 28) * n, 15 * n, 0}};
+    companion.operand.radius = 3 * n;
+    program.steps = {pilot, companion};
+    program.nextOperandID = 3;
     if (!core3d::retained_boolean::Valid(program))
         throw std::invalid_argument("face image fixture program");
-    core3d::saved_cut_source_edit::Patch editableSource =
-        core3d::saved_cut_source_values::PolygonPatch{};
-    if (!core3d::saved_boolean_build::SourcePatch(program, editableSource))
-        throw std::invalid_argument("face image fixture source editing");
     BRepBuilderAPI_Copy retainedCopy(shape, Standard_True, Standard_False);
     if (!retainedCopy.IsDone() || retainedCopy.Shape().IsNull())
         throw std::invalid_argument("face image fixture retained base");
@@ -1459,6 +1469,15 @@ TDF_Label FixtureAddFaceImagePartSized(const Handle(TDocStd_Document)& doc,
             throw std::invalid_argument("face image fixture production cut");
         shape = cut.solid;
     }
+    core3d::saved_cut_source_edit::Patch editableSource =
+        core3d::saved_cut_source_values::PolygonPatch{};
+    core3d::cut_display::Settings display;
+    core3d::saved_boolean_build::Budget verificationBudget;
+    if ((verifySourceEditable
+            && !core3d::saved_boolean_build::VerifyCurrent(
+                retainedBase, shape, program, display, stop, verificationBudget))
+        || !core3d::saved_boolean_build::SourcePatch(program, editableSource))
+        throw std::invalid_argument("face image fixture source editing");
     // Mesh BEFORE the retained record exists so the geometry fence (whose
     // digest covers stored triangulation) stays consistent.
     BRepMesh_IncrementalMesh mesher(shape, 2.5e-4 * n, Standard_False, 0.5, Standard_True);
@@ -1473,7 +1492,9 @@ TDF_Label FixtureAddFaceImagePartSized(const Handle(TDocStd_Document)& doc,
         Standard_GUID("67E669F4-00C0-4C45-BC55-9CC5DA22A2B5"), 1);
     TDataStd_Name::Set(owner, TCollection_ExtendedString("E3 face image box"));
     if (!core3d::native_opening::debug::Core3DDebugInstallRetainedSolidSeedRecord(
-            doc, owner, program, shape, retainedBase) || !doc->CommitCommand())
+            doc, owner, program, shape, retainedBase))
+        throw std::invalid_argument("face image fixture retained admission");
+    if (!doc->CommitCommand())
         throw std::invalid_argument("face image fixture retained admission");
     return owner;
 }
@@ -1522,28 +1543,46 @@ fi::ResourceEnvelope FixturePNGEnvelope() {
 
 // Capture one planar, axis-parallel bounding-box-extreme side of a shape
 // through the real derivation + B2 resolver (portion 4b: shared by the
-// fixture staging and the scenario probes).
+// fixture staging and the scenario probes). The stage box is measured from
+// the exact geometry (never the stored triangulation, whose deflection
+// inflates the box past the derivation's extrema tolerance on any meshed
+// document). When allowAmbiguous is set (the scenario-1 split-side fixture),
+// an ambiguously resolving receipt still captures its derived form: both
+// coplanar halves derive the identical receipt, and the committed proof then
+// measures the real AmbiguousFaceRemap refusal at capture time.
 bool FixtureCapturePlanarFace(const TopoDS_Shape& shape, double unit,
                               core3d::retained_face_selector::Axis axis,
                               core3d::retained_face_selector::Side side,
-                              dr::FaceImageGeometricReceipt& captured) {
+                              dr::FaceImageGeometricReceipt& captured,
+                              bool allowAmbiguous = false) {
     TopTools_IndexedMapOfShape faceMap;
     TopExp::MapShapes(shape, TopAbs_FACE, faceMap);
     Bnd_Box stageBox;
-    BRepBndLib::Add(shape, stageBox);
+    if (!dr::detail::FaceImageStageBounds(shape, stageBox)) return false;
     core3d::retained_edge_treatment::ReplayBudget budget;
     for (int index = 1; index <= faceMap.Extent(); ++index) {
         const TopoDS_Face face = TopoDS::Face(faceMap.FindKey(index));
         dr::FaceImageGeometricReceipt derived;
-        if (dr::detail::DeriveFaceImageReceipt(stageBox, face, unit, budget, derived)
-            != dr::detail::FaceImageDeriveStatus::Derived) continue;
+        const auto deriveStatus =
+            dr::detail::DeriveFaceImageReceipt(stageBox, face, unit, budget, derived);
+        if (deriveStatus != dr::detail::FaceImageDeriveStatus::Derived) {
+            continue;
+        }
         const auto *scope = std::get_if<core3d::retained_face_selector::PlanarFaceBoundary>(
             &derived.intent);
         if (!scope || scope->face.axis != axis || scope->face.side != side) continue;
         dr::FaceImageGeometricReceipt resolved; TopoDS_Face matched;
-        if (dr::detail::ResolveFaceImageReceipt(shape, derived.intent, unit, budget,
-                resolved, matched) != core3d::retained_face_selector::Refusal::None
-            || !matched.IsSame(face)) continue;
+        const auto resolveRefusal = dr::detail::ResolveFaceImageReceipt(
+            shape, derived.intent, unit, budget, resolved, matched);
+        if (resolveRefusal != core3d::retained_face_selector::Refusal::None
+            || !matched.IsSame(face)) {
+            if (allowAmbiguous
+                && resolveRefusal == core3d::retained_face_selector::Refusal::FaceAmbiguous) {
+                captured = derived;
+                return true;
+            }
+            continue;
+        }
         captured = resolved;
         return true;
     }
@@ -1605,8 +1644,11 @@ void StageFaceImageFixtureSized(const Handle(TDocStd_Document)& doc, double unit
         throw std::invalid_argument("face image fixture manifest");
     doc->NewCommand();
     fi::owner::Staging staging;
-    if (fi::owner::Prepare(staging, doc, candidate, observed) != fi::owner::Outcome::Prepared
-        || fi::owner::Commit(staging, doc, observed) != fi::owner::Outcome::Committed
+    const auto fixturePrepare = fi::owner::Prepare(staging, doc, candidate, observed);
+    const auto fixtureCommit = fixturePrepare == fi::owner::Outcome::Prepared
+        ? fi::owner::Commit(staging, doc, observed) : fi::owner::Outcome::Malformed;
+    if (fixturePrepare != fi::owner::Outcome::Prepared
+        || fixtureCommit != fi::owner::Outcome::Committed
         || !doc->CommitCommand()) {
         fi::owner::Cancel(staging);
         doc->AbortCommand();
@@ -1649,6 +1691,10 @@ NSData *CreateFaceImageDebugFixture(
             throw Standard_Failure("Unable to save debug XCAF fixture");
         }
         result = [NSData dataWithContentsOfFile:xbfPath];
+    } catch (const Standard_Failure&) {
+        result = nil;
+    } catch (const std::exception&) {
+        result = nil;
     } catch (...) {
         result = nil;
     }
@@ -1766,7 +1812,8 @@ TopoDS_Shape ProbeBuildBoxWithCut(double unit, double widthMM, double cutXMM, do
 // Stage the retained box owner into the probe session's document through the
 // real fixture part builder (real retained-solid seed record included).
 bool ProbeStageBase(OcctDocument& owner, double unit, OwnerKey& key,
-                    TDF_Label& ownerLabel, double widthMM, double cutXMM, double cutRMM) {
+                    TDF_Label& ownerLabel, double widthMM, double cutXMM,
+                    double cutRMM, bool verifySourceEditable = true) {
     key = {};
     ownerLabel = TDF_Label();
     try {
@@ -1777,8 +1824,13 @@ bool ProbeStageBase(OcctDocument& owner, double unit, OwnerKey& key,
         if (!core3d::receipt::ParseUUID(owner.DocumentIdentifier(), key.document)) return false;
         key.entity = FixtureIndexedUUID(0x42, 1);
         key.definition = FixtureIndexedUUID(0x42, 2);
-        ownerLabel = FixtureAddFaceImagePartSized(doc, key, unit, widthMM, cutXMM, cutRMM);
+        ownerLabel = FixtureAddFaceImagePartSized(
+            doc, key, unit, widthMM, cutXMM, cutRMM, verifySourceEditable);
         return !ownerLabel.IsNull();
+    } catch (const Standard_Failure&) {
+        key = {}; ownerLabel = TDF_Label(); return false;
+    } catch (const std::exception&) {
+        key = {}; ownerLabel = TDF_Label(); return false;
     } catch (...) { key = {}; ownerLabel = TDF_Label(); return false; }
 }
 
@@ -1850,7 +1902,9 @@ fi::owner::Outcome ProbeCommitBindings(OcctDocument& owner, const fi::Definition
             delta = int(doc->GetAvailableUndos() - before);
             return outcome;
         }
-        if (!doc->CommitCommand()) return fi::owner::Outcome::PersistenceFailure;
+        if (!doc->CommitCommand()) {
+            return fi::owner::Outcome::PersistenceFailure;
+        }
         delta = int(doc->GetAvailableUndos() - before);
         return outcome;
     } catch (...) { return fi::owner::Outcome::Malformed; }
@@ -1876,7 +1930,8 @@ bool ProbeBindBaseColor(OcctDocument& owner, const OwnerKey& key,
     dr::FaceImageGeometricReceipt captured;
     if (!FixtureCapturePlanarFace(shape, unit,
             core3d::retained_face_selector::Axis::X,
-            core3d::retained_face_selector::Side::Max, captured)) return false;
+            core3d::retained_face_selector::Side::Max, captured))
+        return false;
     fi::Binding binding;
     binding.binding = FixtureIndexedUUID(0x52, 1);
     binding.face = FixtureIndexedUUID(0x52, 2);
@@ -2041,8 +2096,8 @@ NSDictionary *FaceImageScenarioZeroProbe(double unit) {
                         == fi::owner::Outcome::Committed && delta == 1;
             fi::Definition back;
             std::vector<std::uint8_t> bytes;
-            ok = ok && owner.ReadFaceImageBindings(fiKey, back, &bytes)
-                    == fi::persistence::bindings::ReadState::Present
+            const auto readState = owner.ReadFaceImageBindings(fiKey, back, &bytes);
+            ok = ok && readState == fi::persistence::bindings::ReadState::Present
                 && back == candidate && !bytes.empty();
             if (ok) committed = candidate;
             ProbeRecordBit(bits, mask, 2, ok, @"bind committed and read back exactly");
@@ -2150,20 +2205,25 @@ NSDictionary *FaceImageScenarioZeroProbe(double unit) {
                 && application->SaveAs(owner.Document(),
                        baseURL.path.UTF8String) == PCDM_SS_OK) {
                 Handle(OcctDocument) reopened = new OcctDocument();
-                if (reopened->OpenPrivateExportSnapshot(baseURL.path.UTF8String,
+                if (reopened->OpenPrivateExportSnapshot(xbfPath.UTF8String,
                         Message_ProgressRange())) {
                     fi::ResourceEnvelope backResource;
                     fi::Definition backDefinition;
                     std::vector<std::uint8_t> reopenedBytes;
-                    ok = reopened->ReadFaceImageResource(envelope.resource, backResource)
-                        && backResource == envelope
-                        && reopened->ReadFaceImageBindings(fiKey, backDefinition, &reopenedBytes)
-                            == fi::persistence::bindings::ReadState::Present
+                    const bool resourceOK = reopened->ReadFaceImageResource(
+                        envelope.resource, backResource) && backResource == envelope;
+                    const auto reopenedState = reopened->ReadFaceImageBindings(
+                        fiKey, backDefinition, &reopenedBytes);
+                    const bool bytesOK = [[NSData dataWithBytes:reopenedBytes.data()
+                                                         length:reopenedBytes.size()]
+                        isEqualToData:beforeBytes];
+                    const bool docOK = reopened->DocumentIdentifier()
+                        == owner.DocumentIdentifier();
+                    const bool validOK = Core3DValidateFaceImageDocument(reopened->Document());
+                    ok = resourceOK
+                        && reopenedState == fi::persistence::bindings::ReadState::Present
                         && backDefinition == committed
-                        && [[NSData dataWithBytes:reopenedBytes.data()
-                                           length:reopenedBytes.size()] isEqualToData:beforeBytes]
-                        && reopened->DocumentIdentifier() == owner.DocumentIdentifier()
-                        && Core3DValidateFaceImageDocument(reopened->Document());
+                        && bytesOK && docOK && validOK;
                     reopened->ClosePrivateExportSnapshot();
                 }
             }
@@ -2209,6 +2269,13 @@ NSDictionary *FaceImageScenarioZeroProbe(double unit) {
             ProbeRecordBit(bits, mask, 7, ok,
                 @"removal refused while bound; one-command unbind+remove; Undo restores");
         }
+        } catch (const Standard_Failure& error) {
+            ProbeRecordBit(bits, mask, 0, false, [NSString stringWithFormat:
+                @"probe aborted by occt exception: %s",
+                error.GetMessageString() ? error.GetMessageString() : "?"]);
+        } catch (const std::exception& error) {
+            ProbeRecordBit(bits, mask, 0, false, [NSString stringWithFormat:
+                @"probe aborted by c++ exception: %s", error.what()]);
         } catch (...) {
             ProbeRecordBit(bits, mask, 0, false, @"probe aborted by c++ exception");
         }
@@ -2289,7 +2356,8 @@ NSDictionary *FaceImageScenarioOneProbe(double unit) {
         TDF_Label ownerLabel;
         // The pilot cut crosses the bound max-X side: the side is split into
         // two coplanar faces with identical derived receipts.
-        bool ok = ProbeStageBase(owner, unit, key, ownerLabel, 40, 40, 5);
+        bool ok = ProbeStageBase(owner, unit, key, ownerLabel, 40, 40, 5,
+            /*verifySourceEditable=*/false);
         fi::OwnerKey fiKey{key.document, key.entity, key.definition};
         fi::ResourceEnvelope envelope;
         if (ok) ok = ProbeEnvelope(ProbeRasterImage(YES), ProbeRasterImage(NO), envelope);
@@ -2303,7 +2371,8 @@ NSDictionary *FaceImageScenarioOneProbe(double unit) {
             ok = !shape.IsNull()
                 && FixtureCapturePlanarFace(shape, unit,
                     core3d::retained_face_selector::Axis::X,
-                    core3d::retained_face_selector::Side::Max, captured)
+                    core3d::retained_face_selector::Side::Max, captured,
+                    /*allowAmbiguous=*/true)
                 && dr::FaceImageReceiptProof(captured, binding.selectorProof)
                 && ProbeAdopt(owner, envelope, delta);
             binding.resource = envelope.resource;
@@ -2426,8 +2495,8 @@ NSDictionary *FaceImageScenarioOneProbe(double unit) {
         ProbeRecordBit(bits, mask, 3, ok, @"missing and foreign resources refuse without history");
     } catch (...) { ProbeRecordBit(bits, mask, 3, false, @"c++ exception"); }
     } @catch (...) { ProbeRecordBit(bits, mask, 3, false, @"exception"); }
-    // bit 4: a curved (cylindrical) face is not addressable by the selector
-    // vocabulary; the derivation refuses rather than approximating.
+    // bit 4: a curved face and a planar face inset from the stage extremum by
+    // more than the fixed tolerance are both refused without history.
     @try {
         try {
         core3d::NativeDocumentSession session;
@@ -2440,22 +2509,41 @@ NSDictionary *FaceImageScenarioOneProbe(double unit) {
             TopTools_IndexedMapOfShape faceMap;
             TopExp::MapShapes(shape, TopAbs_FACE, faceMap);
             Bnd_Box stageBox;
-            BRepBndLib::Add(shape, stageBox);
+            if (!dr::detail::FaceImageStageBounds(shape, stageBox)) ok = false;
             core3d::retained_edge_treatment::ReplayBudget budget;
-            bool foundCurved = false, refused = false;
+            bool foundCurved = false, curvedRefused = false;
+            bool foundMaximumX = false, insetRefused = false;
+            const auto undosBefore = owner.Document()->GetAvailableUndos();
+            Standard_Real xMin = 0, yMin = 0, zMin = 0, xMax = 0, yMax = 0, zMax = 0;
+            stageBox.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+            const double tolerance = 1e-4 / (1000.0 * unit);
             for (int index = 1; index <= faceMap.Extent(); ++index) {
                 const TopoDS_Face face = TopoDS::Face(faceMap.FindKey(index));
                 BRepAdaptor_Surface surface(face, true);
-                if (surface.GetType() != GeomAbs_Cylinder) continue;
-                foundCurved = true;
-                dr::FaceImageGeometricReceipt derived;
-                refused = dr::detail::DeriveFaceImageReceipt(
-                              stageBox, face, unit, budget, derived)
-                    == dr::detail::FaceImageDeriveStatus::NotAddressable;
+                if (surface.GetType() == GeomAbs_Cylinder) {
+                    foundCurved = true;
+                    dr::FaceImageGeometricReceipt derived;
+                    curvedRefused = dr::detail::DeriveFaceImageReceipt(
+                        stageBox, face, unit, budget, derived)
+                        == dr::detail::FaceImageDeriveStatus::NotAddressable;
+                } else if (surface.GetType() == GeomAbs_Plane
+                    && std::abs(surface.Plane().Location().X() - xMax) <= tolerance) {
+                    foundMaximumX = true;
+                    Bnd_Box insetBox = stageBox;
+                    insetBox.Update(xMin, yMin, zMin,
+                        xMax + 2 * tolerance, yMax, zMax);
+                    dr::FaceImageGeometricReceipt derived;
+                    core3d::retained_edge_treatment::ReplayBudget insetBudget;
+                    insetRefused = dr::detail::DeriveFaceImageReceipt(
+                        insetBox, face, unit, insetBudget, derived)
+                        == dr::detail::FaceImageDeriveStatus::NotAddressable;
+                }
             }
-            ok = foundCurved && refused;
+            ok = foundCurved && curvedRefused && foundMaximumX && insetRefused
+                && owner.Document()->GetAvailableUndos() == undosBefore;
         }
-        ProbeRecordBit(bits, mask, 4, ok, @"curved surface is not addressable");
+        ProbeRecordBit(bits, mask, 4, ok,
+            @"curved and tolerance-inset planar faces refuse without history");
     } catch (...) { ProbeRecordBit(bits, mask, 4, false, @"c++ exception"); }
     } @catch (...) { ProbeRecordBit(bits, mask, 4, false, @"exception"); }
     // bit 5: propagation to a Boolean/duplication result entity is
@@ -2479,7 +2567,7 @@ NSDictionary *FaceImageScenarioOneProbe(double unit) {
                 FixtureAddFaceImagePartSized(doc, resultKey, unit, 40, 12, 3);
             ok = !resultLabel.IsNull()
                 && FixtureStagePatternDependency(doc, key,
-                    FixtureIndexedUUID(0x42, 3), resultKey, unit);
+                    FixturePartFeature(key, 3), resultKey, unit);
             // The dependency is a real persisted record, not a test flag.
             std::vector<core3d::pattern::Record> records;
             ok = ok && core3d::pattern::ReadAll(doc, records) && records.size() == 1
@@ -2507,6 +2595,12 @@ NSDictionary *FaceImageScenarioOneProbe(double unit) {
         }
         ProbeRecordBit(bits, mask, 5, ok,
             @"unsupported downstream refuses against a real dependency record");
+    } catch (const Standard_Failure& error) {
+        ProbeRecordBit(bits, mask, 5, false, [NSString stringWithFormat:
+            @"occt exception: %s", error.GetMessageString() ? error.GetMessageString() : "?"]);
+    } catch (const std::exception& error) {
+        ProbeRecordBit(bits, mask, 5, false, [NSString stringWithFormat:
+            @"c++ exception: %s", error.what()]);
     } catch (...) { ProbeRecordBit(bits, mask, 5, false, @"c++ exception"); }
     } @catch (...) { ProbeRecordBit(bits, mask, 5, false, @"exception"); }
     // bit 6: a no-op commit is a zero-delta refusal and a cancelled prepare
@@ -2627,25 +2721,47 @@ NSInteger FaceImageResourceBlobOffset(NSData *data) {
 
 // Replace 32 lower-hex characters (one UUID field) of the hex-encoded SYFI/1
 // record inside the saved document bytes; the record digests no longer match,
-// so the strict reader refuses the open. Returns nil when the record text is
-// not found exactly once.
+// so the strict reader refuses the open. The record persists as fixed
+// 256-character chunk strings (the SYFI/1 codec's chunking), so the canonical
+// hex is not one contiguous span: locate every chunk's hex text exactly once,
+// in order, and patch the field's characters at their per-chunk offsets (a
+// field may span a chunk boundary). Returns nil unless every chunk is found
+// exactly once.
 NSData *FaceImageSpliceRecordHex(NSData *data, const std::vector<std::uint8_t>& canonical,
                                  std::size_t byteOffset, const char *replacementHex32) {
     std::string hex;
     if (!fi::persistence::EncodeHex(canonical, hex)) return nil;
-    NSMutableData *mutableData = [data mutableCopy];
-    const auto *bytes = static_cast<const std::uint8_t*>(data.bytes);
-    NSInteger found = -1;
-    for (NSUInteger at = 0; at + hex.size() <= data.length; ++at) {
-        if (std::memcmp(bytes + at, hex.data(), hex.size()) == 0) {
-            if (found >= 0) return nil;
-            found = NSInteger(at);
-        }
-    }
-    if (found < 0) return nil;
     if (std::strlen(replacementHex32) != 32) return nil;
-    [mutableData replaceBytesInRange:NSMakeRange(NSUInteger(found) + 2 * byteOffset, 32)
-                           withBytes:replacementHex32];
+    const std::size_t chunkCharacters =
+        std::size_t(fi::persistence::bindings::ChunkCharacters);
+    const std::size_t chunkCount =
+        (hex.size() + chunkCharacters - 1) / chunkCharacters;
+    if (chunkCount == 0) return nil;
+    const auto *bytes = static_cast<const std::uint8_t*>(data.bytes);
+    std::vector<NSInteger> chunkPositions(chunkCount, -1);
+    for (std::size_t chunk = 0; chunk < chunkCount; ++chunk) {
+        const std::string piece = hex.substr(chunk * chunkCharacters,
+            std::min(chunkCharacters, hex.size() - chunk * chunkCharacters));
+        NSInteger found = -1;
+        for (NSUInteger at = 0; at + piece.size() <= data.length; ++at) {
+            if (std::memcmp(bytes + at, piece.data(), piece.size()) == 0) {
+                if (found >= 0) return nil;
+                found = NSInteger(at);
+            }
+        }
+        if (found < 0) return nil;
+        if (chunk > 0 && found <= chunkPositions[chunk - 1]) return nil;
+        chunkPositions[chunk] = found;
+    }
+    NSMutableData *mutableData = [data mutableCopy];
+    for (std::size_t index = 0; index < 32; ++index) {
+        const std::size_t hexPosition = 2 * byteOffset + index;
+        if (hexPosition >= hex.size()) return nil;
+        const NSInteger at = chunkPositions[hexPosition / chunkCharacters]
+            + NSInteger(hexPosition % chunkCharacters);
+        [mutableData replaceBytesInRange:NSMakeRange(NSUInteger(at), 1)
+                               withBytes:replacementHex32 + index];
+    }
     return mutableData;
 }
 
@@ -2892,12 +3008,14 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
                                         alphaInterpretation:(NSString *)alphaInterpretation
                                                  provenance:(NSData *)provenance
                                               metersPerUnit:(double)metersPerUnit {
-    if (!NSThread.isMainThread || (metersPerUnit != 0.001 && metersPerUnit != 1.0))
+    if (!NSThread.isMainThread || (metersPerUnit != 0.001 && metersPerUnit != 1.0)) {
         return nil;
+    }
     fi::ResourceEnvelope envelope;
     if (!BuildFaceImageEnvelope(originalBytes, workingBytes, alphaInterpretation,
-                                provenance, FixtureIndexedUUID(0x51, 1), envelope))
+                                provenance, FixtureIndexedUUID(0x51, 1), envelope)) {
         return nil;
+    }
     return CreateFaceImageDebugFixture(
         metersPerUnit == 0.001 ? @"e3-face-image-bytes-mm" : @"e3-face-image-bytes-m",
         [envelope, metersPerUnit](const Handle(TDocStd_Document)& document) {
@@ -3035,7 +3153,7 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
                 document, resultKey, metersPerUnit, 40, 12, 3);
             if (resultLabel.IsNull()
                 || !FixtureStagePatternDependency(document, sourceKey,
-                    FixtureIndexedUUID(0x42, 3), resultKey, metersPerUnit)
+                    FixturePartFeature(sourceKey, 3), resultKey, metersPerUnit)
                 || !Core3DValidateFaceImageDocument(document))
                 throw std::invalid_argument("face image downstream fixture");
         });

@@ -5787,7 +5787,11 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                         bindings::ReadState::Present
                         && aDefinition.faces.Extent() <= 4096) {
                         Bnd_Box aStageBox;
-                        BRepBndLib::Add(aDefinition.shape, aStageBox);
+                        if (!core3d::dependent_replay::detail::
+                                FaceImageStageBounds(
+                                    aDefinition.shape, aStageBox)) {
+                            return {};
+                        }
                         if (aStageBox.IsVoid()) {
                             return {};
                         }

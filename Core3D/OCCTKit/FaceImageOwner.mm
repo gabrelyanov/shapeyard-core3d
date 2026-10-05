@@ -253,7 +253,7 @@ Outcome RemoveResource(const Handle(TDocStd_Document)& document,
             const auto tool = XCAFDoc_DocumentTool::ShapeTool(document->Main());
             TDF_LabelSequence labels;
             if (!tool.IsNull()) tool->GetFreeShapes(labels);
-            if (!tool.IsNull() || labels.Length() < 0
+            if (tool.IsNull() || labels.Length() < 0
                 || labels.Length() > profile::MaximumLabels) return Outcome::Malformed;
             for (Standard_Integer index = 1; index <= labels.Length(); ++index) {
                 Definition committed;

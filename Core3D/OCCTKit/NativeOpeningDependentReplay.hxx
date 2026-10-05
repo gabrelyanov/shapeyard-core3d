@@ -334,6 +334,19 @@ inline TopoDS_Shape FaceImageOwnerShape(OcctDocument& owner,
     } catch (...) { label = TDF_Label(); return TopoDS_Shape(); }
 }
 
+//! The single stage-bound contract used by every face-image receipt caller.
+//! Stored triangulation and shape tolerance must never inflate the extrema.
+inline bool FaceImageStageBounds(const TopoDS_Shape& shape,
+                                 Bnd_Box& output) noexcept {
+    output.SetVoid();
+    try {
+        if (shape.IsNull()) return false;
+        BRepBndLib::AddOptimal(
+            shape, output, Standard_False, Standard_False);
+        return !output.IsVoid();
+    } catch (...) { output.SetVoid(); return false; }
+}
+
 //! Deterministic B2 intent derivation for one planar, axis-parallel face at a
 //! bounding-box extreme of the stage — the exact scope vocabulary the B2
 //! resolver admits. Faces outside that vocabulary (curved, oblique, interior,
@@ -365,7 +378,9 @@ inline FaceImageDeriveStatus DeriveFaceImageReceipt(const Bnd_Box& stageBox,
         gp_Dir axisDirection(axisIndex == 0 ? sign : 0.0,
                              axisIndex == 1 ? sign : 0.0,
                              axisIndex == 2 ? sign : 0.0);
-        if (!normal.IsParallel(axisDirection, 1e-8)) return FaceImageDeriveStatus::NotAddressable;
+        if (!normal.IsParallel(axisDirection, 1e-8)) {
+            return FaceImageDeriveStatus::NotAddressable;
+        }
         Standard_Real xMin = 0, yMin = 0, zMin = 0, xMax = 0, yMax = 0, zMax = 0;
         stageBox.Get(xMin, yMin, zMin, xMax, yMax, zMax);
         const double bounds[3][2] = {{xMin, xMax}, {yMin, yMax}, {zMin, zMax}};
@@ -374,7 +389,9 @@ inline FaceImageDeriveStatus DeriveFaceImageReceipt(const Bnd_Box& stageBox,
         const double localTolerance = 1e-4 / (1000.0 * metersPerLocalUnit);
         const bool atMin = std::abs(coordinate - bounds[axisIndex][0]) <= localTolerance;
         const bool atMax = std::abs(coordinate - bounds[axisIndex][1]) <= localTolerance;
-        if (atMin == atMax) return FaceImageDeriveStatus::NotAddressable;
+        if (atMin == atMax) {
+            return FaceImageDeriveStatus::NotAddressable;
+        }
         TopTools_IndexedMapOfShape wireMap;
         TopExp::MapShapes(face, TopAbs_WIRE, wireMap);
         TopTools_IndexedMapOfShape edgeMap;
@@ -387,8 +404,9 @@ inline FaceImageDeriveStatus DeriveFaceImageReceipt(const Bnd_Box& stageBox,
             }
         }
         if (wireMap.Extent() < 1 || wireMap.Extent() > 64 || uses == 0 || uses > 64
-            || edgeMap.Extent() != static_cast<int>(uses))
+            || edgeMap.Extent() != static_cast<int>(uses)) {
             return FaceImageDeriveStatus::NotAddressable;
+        }
         fs::PlanarFaceBoundary scope;
         scope.face.axis = axisIndex == 0 ? fs::Axis::X : axisIndex == 1 ? fs::Axis::Y : fs::Axis::Z;
         scope.face.side = atMax ? fs::Side::Max : fs::Side::Min;
@@ -536,7 +554,8 @@ inline FaceImageReplayStatus CaptureFaceImageAttachment(OcctDocument& owner,
         TopExp::MapShapes(shape, TopAbs_FACE, faceMap);
         if (faceMap.Extent() > 4096) return FaceImageReplayStatus::Budget;
         Bnd_Box stageBox;
-        BRepBndLib::Add(shape, stageBox);
+        if (!detail::FaceImageStageBounds(shape, stageBox))
+            return FaceImageReplayStatus::Malformed;
         if (stageBox.IsVoid()) return FaceImageReplayStatus::Malformed;
 
         retained_edge_treatment::ReplayBudget budget;
