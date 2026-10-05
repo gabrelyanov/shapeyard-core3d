@@ -1944,6 +1944,16 @@ BevelApplyResult BevelOperationController::apply() noexcept
 				return BevelApplyResult::NoChange;
 			}
 		}
+        // Establish creator ownership before opening the command. Because this
+        // method is main-thread serialized, any companion staged after this
+        // clean boundary is evidence from this operation, not merely a record
+        // observed at a coincident Undo depth.
+        if (myDoc->HasUnresolvedTreatmentHistoryCompanion()) {
+            myStateValid = Standard_False;
+            myState = BevelPreviewState::Failed;
+            notifyPreviewStateChanged();
+            return BevelApplyResult::NoChange;
+        }
         aDocument->NewCommand();
         if (!aDocument->HasOpenCommand()) {
             myState = BevelPreviewState::Failed;
@@ -1973,7 +1983,12 @@ BevelApplyResult BevelOperationController::apply() noexcept
                         *source.retainedEdit,*source.retainedResult,readback,refusal);
             }else staged=myDoc->ReplaceShape(source.label,myPreviewResults[anIndex]);
             if (!staged) {
-                (void)abortOpenCommand(aDocument);
+                // Discharge this command's companion only after verified
+                // prior-state settlement. A failed proof remains recovery
+                // ownership in OcctDocument and invalidates this ledger.
+                if (!abortOpenCommand(aDocument)
+                    || !myDoc->SettleTreatmentHistoryCompanionOnPrior())
+                    myStateValid = Standard_False;
                 myState = BevelPreviewState::Failed;
                 notifyPreviewStateChanged();
                 return BevelApplyResult::NoChange;
@@ -1993,7 +2008,9 @@ BevelApplyResult BevelOperationController::apply() noexcept
 			if (aCapture != nullptr
 				&& !myDoc->VerifyPlainProfileOperationReplacement(
 					*aCapture, myPreviewResults[anIndex]->Shape())) {
-				(void)abortOpenCommand(aDocument);
+				if (!abortOpenCommand(aDocument)
+					|| !myDoc->SettleTreatmentHistoryCompanionOnPrior())
+					myStateValid = Standard_False;
 				myState = BevelPreviewState::Failed;
 				notifyPreviewStateChanged();
 				return BevelApplyResult::NoChange;
@@ -2033,13 +2050,30 @@ BevelApplyResult BevelOperationController::apply() noexcept
         (void)commitReported;
         (void)commitThrew;
         if (!committedAuthoritatively) {
-            (void)abortOpenCommand(aDocument);
+            if (!abortOpenCommand(aDocument)
+                || !myDoc->SettleTreatmentHistoryCompanionOnPrior())
+                myStateValid = Standard_False;
             myState = BevelPreviewState::Failed;
             notifyPreviewStateChanged();
             return BevelApplyResult::NoChange;
         }
     } catch (...) {
-        (void)abortOpenCommand(aDocument);
+        if (!abortOpenCommand(aDocument)
+            || !myDoc->SettleTreatmentHistoryCompanionOnPrior())
+            myStateValid = Standard_False;
+        myState = BevelPreviewState::Failed;
+        notifyPreviewStateChanged();
+        return BevelApplyResult::NoChange;
+    }
+
+    // D253/CLOUD-8242: the retained staging captured a measured history
+    // companion for this command; bind it to the actual closed delta before
+    // publishing success or releasing controller state. A failed binding
+    // retains recovery ownership: the companion stays unresolved, the viewer
+    // barrier keeps blocking normal edits and snapshots, and no successful
+    // Apply is reported over unmeasured history.
+    if (!myDoc->FinalizeTreatmentHistoryCompanion()) {
+        myStateValid = Standard_False;
         myState = BevelPreviewState::Failed;
         notifyPreviewStateChanged();
         return BevelApplyResult::NoChange;

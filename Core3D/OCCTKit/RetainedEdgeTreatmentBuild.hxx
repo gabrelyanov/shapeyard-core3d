@@ -14,9 +14,14 @@
 #include <GProp_GProps.hxx>
 #include <Precision.hxx>
 #include <ShapeAnalysis_Surface.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRep_Tool.hxx>
 #include <TopExp.hxx>
 #include <TopoDS_Iterator.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <cstdio>
 #include <istream>
 #include <locale>
@@ -486,6 +491,11 @@ struct SourceRebindRoles {
     // One entry per selector step, in definition step order; each use vector
     // stays parallel to that step's key-ordered anchors.
     std::vector<std::pair<UUID, std::vector<SelectorUseRole>>> selectorSteps;
+    // CLOUD-8242: one entry per raw-anchor step of an admitted Profile source,
+    // in definition step order, parallel to that step's key-ordered anchors.
+    // The measured old-stage roles let phase two prove a unique one-to-one
+    // raw-target correspondence without a midpoint or first-match oracle.
+    std::vector<std::pair<UUID, std::vector<SelectorUseRole>>> rawSteps;
 };
 struct SourceRebindResult {
     Definition definition{};
@@ -556,6 +566,101 @@ inline bool SameWitnessPoint(const std::array<double, 3>& first,
         dz = first[2] - second[2];
     return std::isfinite(dx) && std::isfinite(dy) && std::isfinite(dz)
         && dx * dx + dy * dy + dz * dz <= 1e-8;
+}
+// CLOUD-8242: the issuance-time raw capture keeps the adjacent-face order,
+// while the measured role orders the outward normals lexicographically; an old
+// stored witness therefore matches a measured role with either normal order.
+inline bool SameUnorderedNormals(const SelectorUseRole& role, const Anchor& anchor) noexcept {
+    return (SameDirection(role.normalA, anchor.normalA)
+            && SameDirection(role.normalB, anchor.normalB))
+        || (SameDirection(role.normalA, anchor.normalB)
+            && SameDirection(role.normalB, anchor.normalA));
+}
+// A stored raw anchor is proven against the old stage only when one measured
+// role reproduces its complete witness: curve kind, physical position,
+// directed tangent, both outward normals and the circle radius.
+inline bool RawRoleMatchesAnchor(const SelectorUseRole& role, const Anchor& anchor) noexcept {
+    return role.curve == anchor.curve
+        && SameWitnessPoint(role.pointMM, anchor.pointMM)
+        && SameDirection(role.tangent, anchor.tangent)
+        && SameUnorderedNormals(role, anchor)
+        && std::abs(role.circleRadiusMM - anchor.circleRadiusMM) <= 1e-4;
+}
+// Role geometry that survives a source edit: the position is deliberately
+// excluded because it is exactly what the edit moves; opposite sides stay
+// distinguishable through the directed tangent and the ordered normals. Both
+// roles are measured with the lexicographic normal ordering, so the comparison
+// is ordered here.
+inline bool SameRawRoleGeometry(const SelectorUseRole& first,
+    const SelectorUseRole& second) noexcept {
+    return first.curve == second.curve
+        && SameDirection(first.tangent, second.tangent)
+        && SameDirection(first.normalA, second.normalA)
+        && SameDirection(first.normalB, second.normalB)
+        && std::abs(first.circleRadiusMM - second.circleRadiusMM) <= 1e-4;
+}
+// CLOUD-8242: measured raw-edge witness roles for one stage. Every edge with
+// exactly two adjacent owner faces and an admitted curve kind is measured with
+// the issuance-time geometry (physical midpoint, directed tangent,
+// lexicographically ordered outward normals, circle radius); the walk and
+// every measurement are charged to the operation budget. Pure measurement: no
+// identity is minted and no topology handle leaves the caller.
+inline bool MeasureStageRawEdgeWitnesses(const TopoDS_Shape& stage,
+    double metersPerLocalUnit, ReplayBudget& budget, tb::Site site,
+    std::vector<SelectorUseRole>& output) noexcept {
+    output.clear();
+    try {
+        if (stage.IsNull() || !std::isfinite(metersPerLocalUnit) || metersPerLocalUnit <= 0)
+            return false;
+        const std::atomic_bool neverCancelled{false};
+        tb::Census census;
+        if (tb::CensusTopology(stage, budget, neverCancelled, census, site, false)
+                != tb::WalkStatus::Completed
+            || !budget.visit(census.occurrences + census.edgeUsesUnderFaces, site)) return false;
+        TopTools_IndexedDataMapOfShapeListOfShape adjacency;
+        TopExp::MapShapesAndAncestors(stage, TopAbs_EDGE, TopAbs_FACE, adjacency);
+        const double millimetersPerLocal = metersPerLocalUnit * 1000.0;
+        for (int index = 1; index <= adjacency.Extent(); ++index) {
+            if (!budget.visit(1, site)) return false;
+            const TopoDS_Edge edge = TopoDS::Edge(adjacency.FindKey(index));
+            if (adjacency.FindFromIndex(index).Extent() != 2) continue;
+            BRepAdaptor_Curve curve(edge);
+            const auto type = curve.GetType();
+            if (type != GeomAbs_Line && type != GeomAbs_Circle) continue;
+            const double parameter = (curve.FirstParameter() + curve.LastParameter()) * .5;
+            gp_Pnt point; gp_Vec derivative; curve.D1(parameter, point, derivative);
+            if (derivative.SquareMagnitude() <= Precision::SquareConfusion()) return false;
+            derivative.Normalize();
+            SelectorUseRole role;
+            role.curve = type == GeomAbs_Line ? CurveKind::Line : CurveKind::Circle;
+            role.pointMM = {point.X() * millimetersPerLocal, point.Y() * millimetersPerLocal,
+                point.Z() * millimetersPerLocal};
+            role.tangent = {derivative.X(), derivative.Y(), derivative.Z()};
+            role.circleRadiusMM = type == GeomAbs_Circle
+                ? curve.Circle().Radius() * millimetersPerLocal : 0;
+            std::array<std::array<double, 3>, 2> normals{};
+            std::size_t faceIndex = 0;
+            for (TopTools_ListIteratorOfListOfShape it(adjacency.FindFromIndex(index));
+                it.More(); it.Next(), ++faceIndex) {
+                if (!budget.visit(1, site)) return false;
+                const TopoDS_Face face = TopoDS::Face(it.Value());
+                Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+                ShapeAnalysis_Surface analysis(surface);
+                const gp_Pnt2d uv = analysis.ValueOfUV(point, 1e-7);
+                BRepLProp_SLProps properties(BRepAdaptor_Surface(face), uv.X(), uv.Y(), 1, 1e-9);
+                if (!properties.IsNormalDefined()) return false;
+                gp_Dir normal = properties.Normal();
+                if (face.Orientation() == TopAbs_REVERSED) normal.Reverse();
+                normals[faceIndex] = {normal.X(), normal.Y(), normal.Z()};
+            }
+            if (faceIndex != 2) return false;
+            if (normals[1] < normals[0]) std::swap(normals[0], normals[1]);
+            role.normalA = normals[0];
+            role.normalB = normals[1];
+            output.push_back(role);
+        }
+        return true;
+    } catch (...) { output.clear(); return false; }
 }
 } // namespace detail
 
@@ -657,6 +762,41 @@ inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
                     ordered.push_back(role);
                 }
                 pending.selectorSteps.push_back({step.feature, std::move(ordered)});
+            } else if (original.base.family == SourceFamily::Profile) {
+                // CLOUD-8242: a raw-anchor step of an admitted Profile source
+                // captures complete measured roles on the actual old pre-step
+                // stage, and every stored anchor must be reproduced by exactly
+                // one measured role before any rebind is attempted.
+                std::vector<SelectorUseRole> measured;
+                if (!detail::MeasureStageRawEdgeWitnesses(current,
+                        original.base.metersPerLocalUnit, budget,
+                        tb::Site::C17SourceRebindOld, measured)) {
+                    refusal = budget.exhausted ? Refusal::Budget : Refusal::UnsupportedEdge;
+                    return false;
+                }
+                std::set<int> matched;
+                std::vector<SelectorUseRole> ordered;
+                for (const Anchor& anchor : step.anchors) {
+                    int found = -1;
+                    for (std::size_t useIndex = 0; useIndex < measured.size(); ++useIndex) {
+                        // C17: every old-side raw role/witness correspondence
+                        // comparison is charged, including nonmatches.
+                        if (!budget.visit(1, tb::Site::C17SourceRebindOld)) {
+                            refusal = Refusal::Budget; return false;
+                        }
+                        if (matched.count(int(useIndex))) continue;
+                        if (detail::RawRoleMatchesAnchor(measured[useIndex], anchor)) {
+                            if (found >= 0) { refusal = Refusal::AnchorAmbiguous; return false; }
+                            found = int(useIndex);
+                        }
+                    }
+                    if (found < 0) { refusal = Refusal::ReplayMismatch; return false; }
+                    matched.insert(found);
+                    SelectorUseRole role = measured[std::size_t(found)];
+                    role.anchorKey = anchor.key;
+                    ordered.push_back(role);
+                }
+                pending.rawSteps.push_back({step.feature, std::move(ordered)});
             }
             Definition single = original;
             single.steps = {step};
@@ -739,6 +879,7 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
         const std::atomic_bool neverCancelled{false};
         TopoDS_Shape current = newStage;
         std::size_t selectorIndex = 0;
+        std::size_t rawIndex = 0;
         // Publish-on-success: suffix proofs accumulate privately and are
         // published only when the whole rebind succeeds.
         std::vector<StepProof> pendingProofs;
@@ -844,6 +985,57 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
                     receipt.entries[anchorIndex] = {role.anchorKey, role.direction};
                 }
                 step.selector = std::move(receipt);
+            } else if (rebound.base.family == SourceFamily::Profile) {
+                // CLOUD-8242: rebind a raw-anchor step through the unique
+                // one-to-one role correspondence proven against the actually
+                // rebuilt pre-step stage. Only the geometric witnesses are
+                // refreshed; keys, node/feature/local identities, kind and
+                // amount carry forward verbatim. A missing or ambiguous
+                // correspondence refuses atomically before any mutation.
+                if (rawIndex >= roles.rawSteps.size()
+                    || roles.rawSteps[rawIndex].first != step.feature
+                    || roles.rawSteps[rawIndex].second.size() != step.anchors.size()) {
+                    refusal = Refusal::ReplayMismatch; return false;
+                }
+                const auto& oldRoles = roles.rawSteps[rawIndex].second;
+                ++rawIndex;
+                std::vector<SelectorUseRole> measured;
+                if (!detail::MeasureStageRawEdgeWitnesses(current,
+                        rebound.base.metersPerLocalUnit, budget,
+                        tb::Site::C18SourceRebindNew, measured)) {
+                    refusal = budget.exhausted ? Refusal::Budget : Refusal::UnsupportedEdge;
+                    return false;
+                }
+                std::set<int> consumed;
+                for (std::size_t anchorIndex = 0; anchorIndex < step.anchors.size();
+                    ++anchorIndex) {
+                    const SelectorUseRole& oldRole = oldRoles[anchorIndex];
+                    if (oldRole.anchorKey != step.anchors[anchorIndex].key) {
+                        refusal = Refusal::ReplayMismatch; return false;
+                    }
+                    int found = -1;
+                    for (std::size_t useIndex = 0; useIndex < measured.size(); ++useIndex) {
+                        // C18: every new-side raw role correspondence
+                        // comparison is charged, including nonmatches.
+                        if (!budget.visit(1, tb::Site::C18SourceRebindNew)) {
+                            refusal = Refusal::Budget; return false;
+                        }
+                        if (consumed.count(int(useIndex))) continue;
+                        if (detail::SameRawRoleGeometry(measured[useIndex], oldRole)) {
+                            if (found >= 0) { refusal = Refusal::AnchorAmbiguous; return false; }
+                            found = int(useIndex);
+                        }
+                    }
+                    if (found < 0) { refusal = Refusal::AnchorMissing; return false; }
+                    consumed.insert(found);
+                    Anchor& anchor = step.anchors[anchorIndex];
+                    anchor.curve = measured[std::size_t(found)].curve;
+                    anchor.pointMM = measured[std::size_t(found)].pointMM;
+                    anchor.tangent = measured[std::size_t(found)].tangent;
+                    anchor.normalA = measured[std::size_t(found)].normalA;
+                    anchor.normalB = measured[std::size_t(found)].normalB;
+                    anchor.circleRadiusMM = measured[std::size_t(found)].circleRadiusMM;
+                }
             }
             Definition single = rebound;
             single.steps = {step};
@@ -857,7 +1049,8 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
             pendingProofs.push_back(proofs.front());
             current = next;
         }
-        if (selectorIndex != roles.selectorSteps.size()) {
+        if (selectorIndex != roles.selectorSteps.size()
+            || rawIndex != roles.rawSteps.size()) {
             refusal = Refusal::ReplayMismatch; return false;
         }
         rebound.outputNode = rebound.steps.empty()

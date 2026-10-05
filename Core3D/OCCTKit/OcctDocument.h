@@ -1344,6 +1344,9 @@ public:
         core3d::retained_edge_treatment::Refusal&) const noexcept;
     Standard_EXPORT Standard_Boolean ValidateRetainedEdgeTreatmentsR2(
         core3d::retained_edge_treatment::Refusal&) const noexcept;
+    //! True while a measured treatment-history companion has not been bound
+    //! to its own committed delta or discharged by verified prior settlement.
+    Standard_EXPORT Standard_Boolean HasUnresolvedTreatmentHistoryCompanion() const noexcept;
     Standard_EXPORT core3d::retained_face_selector::Resolution ResolveRetainedFaceSelector(
         const core3d::retained_edge_treatment::Snapshot& snapshot,
         const core3d::retained_face_selector::SelectorIntent& intent,

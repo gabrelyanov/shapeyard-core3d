@@ -1160,6 +1160,13 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
         if(![NSThread isMainThread]||myOcafDoc.IsNull()||!myOcafDoc->HasOpenCommand()
             ||original.ownerLabel_.IsNull()||original.ownerLabel_.Data()!=myOcafDoc->GetData()
             ||built.nonce_!=original.nonce_||built.result_.IsNull())return Standard_False;
+        // A companion from an earlier command remains recovery ownership and
+        // may not be overwritten. The equal-depth case is this open command's
+        // existing multi-source staging behavior.
+        if(myPendingTreatmentCompanion
+            &&myPendingTreatmentCompanion->undoDepthBefore!=myOcafDoc->GetAvailableUndos()){
+            refusal=Refusal::Busy;return Standard_False;
+        }
         std::optional<Record> live;if(!Read(myOcafDoc,original.ownerLabel_,live,refusal))return Standard_False;
         if(bool(live)!=bool(original.definition_)||(live&&live->value->bytes!=original.definitionBytes_)
             ||!XCAFDoc_ShapeTool::GetShape(original.ownerLabel_).IsEqual(original.current_)){
@@ -19741,6 +19748,10 @@ void OcctDocument::PruneTreatmentHistoryCompanions() noexcept {
     } catch (...) { myTreatmentHistoryCompanions.clear(); }
 }
 
+Standard_Boolean OcctDocument::HasUnresolvedTreatmentHistoryCompanion() const noexcept {
+    return myPendingTreatmentCompanion != nullptr;
+}
+
 Standard_Boolean OcctDocument::FinalizeTreatmentHistoryCompanion() noexcept {
     if (!myPendingTreatmentCompanion) return Standard_True;
     try {
@@ -19784,12 +19795,11 @@ Standard_Boolean OcctDocument::FinalizeTreatmentHistoryCompanion() noexcept {
 
 Standard_Boolean OcctDocument::SettleTreatmentHistoryCompanionOnPrior() noexcept {
     if (!myPendingTreatmentCompanion) return Standard_True;
-    std::unique_ptr<core3d::treatment_history::Companion> companion =
-        std::move(myPendingTreatmentCompanion);
-    myPendingTreatmentCompanion.reset();
     try {
+        core3d::treatment_history::Companion& companion =
+            *myPendingTreatmentCompanion;
         if (![NSThread isMainThread] || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
-            || companion->data.IsNull() || companion->data.get() != myOcafDoc->GetData().get())
+            || companion.data.IsNull() || companion.data.get() != myOcafDoc->GetData().get())
             return Standard_False;
         // Verified prior-state settlement. TDF abort commits the transaction
         // and applies its inverse delta without history, so the captured
@@ -19803,23 +19813,25 @@ Standard_Boolean OcctDocument::SettleTreatmentHistoryCompanionOnPrior() noexcept
         std::vector<core3d::treatment_history::NamingState> now;
         std::vector<std::uint8_t> sourceNow, syetBytesNow;
         bool syetNow = false;
-        if (!CaptureTreatmentCompanionSide(myOcafDoc, companion->ownerLabel, now,
+        if (!CaptureTreatmentCompanionSide(myOcafDoc, companion.ownerLabel, now,
                 sourceNow, syetNow, syetBytesNow)
-            || !SameTreatmentNamingSet(companion->before, now, false)
-            || sourceNow != companion->sourceBytesBefore
-            || syetNow != companion->syetBefore || syetBytesNow != companion->syetBytesBefore
-            || !XCAFDoc_ShapeTool::GetShape(companion->ownerLabel).IsEqual(companion->ownerShapeBefore)
-            || !CheckTreatmentTransientFlags(companion->ownerShapeBefore, companion->flagsBefore))
+            || !SameTreatmentNamingSet(companion.before, now, false)
+            || sourceNow != companion.sourceBytesBefore
+            || syetNow != companion.syetBefore || syetBytesNow != companion.syetBytesBefore
+            || !XCAFDoc_ShapeTool::GetShape(companion.ownerLabel).IsEqual(companion.ownerShapeBefore)
+            || !CheckTreatmentTransientFlags(companion.ownerShapeBefore, companion.flagsBefore))
             return Standard_False;
-        for (const auto& state : companion->before) {
+        for (const auto& state : companion.before) {
             Handle(TNaming_NamedShape) naming;
             if (!state.label.FindAttribute(TNaming_NamedShape::GetID(), naming) || naming.IsNull())
                 return Standard_False;
             naming->SetVersion(state.version);
         }
         std::vector<core3d::treatment_history::NamingState> verified;
-        if (!CaptureTreatmentSubtreeNaming(companion->ownerLabel, verified)
-            || !SameTreatmentNamingSet(companion->before, verified, true)) return Standard_False;
+        if (!CaptureTreatmentSubtreeNaming(companion.ownerLabel, verified)
+            || !SameTreatmentNamingSet(companion.before, verified, true)) return Standard_False;
+        // Consume the recovery evidence only after every prior-state proof.
+        myPendingTreatmentCompanion.reset();
         return Standard_True;
     } catch (...) { return Standard_False; }
 }

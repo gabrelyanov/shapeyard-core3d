@@ -7067,6 +7067,10 @@ bool Core3DViewer::hasUnresolvedOrdinaryEdit() const noexcept {
 }
 bool Core3DViewer::hasUnresolvedEdit() const noexcept {
     if (!myDoc.IsNull() && myDoc->NativeBooleanOwnerBlocksOtherWork()) return true;
+    // CLOUD-8242: an unfinalized treatment history companion (e.g. an ordinary
+    // Bevel whose closure could not be proven) retains recovery ownership and
+    // blocks normal edits and snapshots until known settlement.
+    if (!myDoc.IsNull() && myDoc->HasUnresolvedTreatmentHistoryCompanion()) return true;
     if (hasUnresolvedOrdinaryEdit() || hasUnresolvedDuplicate()) return true;
     if (!_objectInteractor) return false;
     // Availability must agree with the authoritative preview outcome. A ready
