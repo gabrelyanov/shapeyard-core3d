@@ -27,6 +27,19 @@ enum class FixedPointStatus : std::uint8_t {
     BudgetExceeded
 };
 
+#if DEBUG
+// Observation-only, default-off seam for the DEBUG fixed-point probe. The
+// production callers never pass this object. A non-null y2 override is still
+// committed through the exact V3 path below; it only makes the otherwise rare
+// distinct-definition negative branch deterministic for XCTest.
+struct FixedPointDebugObservation {
+    TopoDS_Shape y2Override;
+    bool comparisonReached = false;
+    et::Digest y1Digest{};
+    et::Digest y2Digest{};
+};
+#endif
+
 namespace detail {
 inline FixedPointStatus ReserveReadReconstruction(const TopoDS_Shape& input,
     const std::atomic_bool& stop, et::ReplayBudget& budget) noexcept {
@@ -56,7 +69,11 @@ inline FixedPointStatus ReserveReadReconstruction(const TopoDS_Shape& input,
 // decide. Every caller must use the enclosing operation's budget and stop token.
 inline FixedPointStatus MaterializePrivateProfileProducerFixedPoint(
     const TopoDS_Shape& privateProduct, const std::atomic_bool& stop,
-    et::ReplayBudget& budget, TopoDS_Shape& output) noexcept {
+    et::ReplayBudget& budget, TopoDS_Shape& output
+#if DEBUG
+    , FixedPointDebugObservation* debugObservation = nullptr
+#endif
+    ) noexcept {
     output = privateProduct;
     if (stop.load()) return FixedPointStatus::Cancelled;
     if (budget.exhausted) return FixedPointStatus::BudgetExceeded;
@@ -92,6 +109,11 @@ inline FixedPointStatus MaterializePrivateProfileProducerFixedPoint(
     }
     if (stop.load()) return FixedPointStatus::Cancelled;
     if (budget.exhausted) return FixedPointStatus::BudgetExceeded;
+#if DEBUG
+    if (debugObservation && !debugObservation->y2Override.IsNull()) {
+        y2 = debugObservation->y2Override;
+    }
+#endif
 
     et::Digest y1Digest{}, y2Digest{};
     if (!et::detail::CommitGeometry(y1, budget, y1Digest)) {
@@ -108,6 +130,13 @@ inline FixedPointStatus MaterializePrivateProfileProducerFixedPoint(
     }
     if (stop.load()) return FixedPointStatus::Cancelled;
     if (budget.exhausted) return FixedPointStatus::BudgetExceeded;
+#if DEBUG
+    if (debugObservation) {
+        debugObservation->comparisonReached = true;
+        debugObservation->y1Digest = y1Digest;
+        debugObservation->y2Digest = y2Digest;
+    }
+#endif
     if (y1Digest != y2Digest) return FixedPointStatus::KeptOriginal;
 
     output = y1;

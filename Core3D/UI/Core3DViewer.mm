@@ -4329,6 +4329,272 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
     } catch (...) { return false; }
 }
 
+#if DEBUG
+NSDictionary<NSString *, id> *Core3DViewer::debugB2cPrivateProfileFixedPointProbe(
+    double metersPerLocalUnit, NSString *scenario) {
+    using retained_profile_producer::FixedPointDebugObservation;
+    using retained_profile_producer::FixedPointStatus;
+    const auto statusName = [](FixedPointStatus status) -> NSString * {
+        switch (status) {
+            case FixedPointStatus::KeptOriginal: return @"KeptOriginal";
+            case FixedPointStatus::Adopted: return @"Adopted";
+            case FixedPointStatus::Cancelled: return @"Cancelled";
+            case FixedPointStatus::BudgetExceeded: return @"BudgetExceeded";
+        }
+        return @"Unknown";
+    };
+    const auto digestHex = [](const retained_edge_treatment::Digest& digest) {
+        static constexpr char hex[] = "0123456789abcdef";
+        std::string value;
+        value.reserve(digest.size() * 2);
+        for (const std::uint8_t byte : digest) {
+            value.push_back(hex[byte >> 4]);
+            value.push_back(hex[byte & 15]);
+        }
+        return [NSString stringWithUTF8String:value.c_str()];
+    };
+    const auto makeFixture = [metersPerLocalUnit](double radialMM) {
+        TopoDS_Shape output;
+        if (!std::isfinite(metersPerLocalUnit) || metersPerLocalUnit <= 0.0
+            || !std::isfinite(radialMM) || radialMM <= 0.0) return output;
+        const double localPerMM = 0.001 / metersPerLocalUnit;
+        auto geometry = std::make_shared<ProfileSolidGeometry>();
+        geometry->points = {
+            gp_Pnt2d(0, -20 * localPerMM),
+            gp_Pnt2d(radialMM * localPerMM, -20 * localPerMM),
+            gp_Pnt2d(radialMM * localPerMM, 20 * localPerMM),
+            gp_Pnt2d(0, 20 * localPerMM)
+        };
+        geometry->plane = 0;
+        geometry->depth = 360;
+        geometry->revolve = true;
+        if (BuildProfileSolidGeometry(geometry)) output = geometry->solid;
+        return output;
+    };
+
+    @autoreleasepool {
+        try {
+            const bool knownScenario = [scenario isEqualToString:@"distinctDefinition"]
+                || [scenario isEqualToString:@"cancelled"]
+                || [scenario isEqualToString:@"stickyBudget"]
+                || [scenario isEqualToString:@"positive"];
+            const TopoDS_Shape privateProduct = makeFixture(140);
+            if (!knownScenario || privateProduct.IsNull()) {
+                return @{ @"schema": @1, @"fixtureBuilt": @NO,
+                    @"error": knownScenario ? @"native Profile fixture failed"
+                                             : @"unknown scenario" };
+            }
+
+            retained_edge_treatment::ReplayBudget budget;
+            std::atomic_bool stop{[scenario isEqualToString:@"cancelled"]};
+            FixedPointDebugObservation observation;
+            if ([scenario isEqualToString:@"distinctDefinition"]) {
+                observation.y2Override = makeFixture(141);
+                if (observation.y2Override.IsNull()) {
+                    return @{ @"schema": @1, @"fixtureBuilt": @NO,
+                        @"error": @"distinct native Profile fixture failed" };
+                }
+            }
+            if ([scenario isEqualToString:@"stickyBudget"]) {
+                tb::debug::ArmDebtHook(tb::Site::C12Detachment, 1, 0,
+                    tb::MaximumBuildStages);
+            }
+
+            TopoDS_Shape output;
+            const FixedPointStatus status = retained_profile_producer::
+                MaterializePrivateProfileProducerFixedPoint(
+                    privateProduct, stop, budget, output, &observation);
+            tb::debug::ClearDebtHook();
+
+            const bool outputIsOriginal = !output.IsNull()
+                && output.IsSame(privateProduct);
+            const bool adoptedY1 = status == FixedPointStatus::Adopted
+                && !outputIsOriginal;
+            retained_edge_treatment::ReplayBudget equalityBudget;
+            retained_edge_treatment::Digest originalDigest{}, outputDigest{};
+            const bool downstreamExactEqualityUnchanged = outputIsOriginal
+                && retained_edge_treatment::detail::CommitGeometry(
+                    privateProduct, equalityBudget, originalDigest)
+                && retained_edge_treatment::detail::CommitGeometry(
+                    output, equalityBudget, outputDigest)
+                && originalDigest == outputDigest;
+
+            FixedPointStatus secondStatus = FixedPointStatus::KeptOriginal;
+            bool sameCounterSecondInvocation = false;
+            bool freshCreditBeforeSecond = false;
+            bool secondOutputIsOriginal = false;
+            bool secondAdoptedY1 = false;
+            bool secondComparisonReached = false;
+            bool secondContinuationReached = false;
+            std::uint64_t secondChargeEventsDelta = 0;
+            if ([scenario isEqualToString:@"stickyBudget"]) {
+                // Restore nominal visit/stage credit while deliberately keeping
+                // the same counter's sticky exhausted bit and first denial.
+                budget.topologyVisits = 0;
+                budget.buildStages = 0;
+                freshCreditBeforeSecond = budget.topologyVisits < tb::MaximumTopologyVisits
+                    && budget.buildStages < tb::MaximumBuildStages;
+                const std::uint64_t chargeEvents = budget.chargeEvents;
+                FixedPointDebugObservation secondObservation;
+                TopoDS_Shape secondOutput;
+                secondStatus = retained_profile_producer::
+                    MaterializePrivateProfileProducerFixedPoint(
+                        privateProduct, stop, budget, secondOutput,
+                        &secondObservation);
+                sameCounterSecondInvocation = true;
+                secondOutputIsOriginal = !secondOutput.IsNull()
+                    && secondOutput.IsSame(privateProduct);
+                secondAdoptedY1 = secondStatus == FixedPointStatus::Adopted
+                    && !secondOutputIsOriginal;
+                secondComparisonReached = secondObservation.comparisonReached;
+                secondChargeEventsDelta = budget.chargeEvents - chargeEvents;
+                secondContinuationReached = secondComparisonReached
+                    || secondChargeEventsDelta != 0;
+            }
+
+            retained_edge_treatment::ReplayBudget boundaryBudget;
+            boundaryBudget.exhausted = true;
+            std::atomic_bool boundaryStop{true};
+            FixedPointDebugObservation boundaryObservation;
+            TopoDS_Shape boundaryOutput;
+            const FixedPointStatus boundaryStatus = retained_profile_producer::
+                MaterializePrivateProfileProducerFixedPoint(
+                    privateProduct, boundaryStop, boundaryBudget,
+                    boundaryOutput, &boundaryObservation);
+            const bool boundaryOutputIsOriginal = !boundaryOutput.IsNull()
+                && boundaryOutput.IsSame(privateProduct);
+            std::uint64_t metersPerLocalUnitBits = 0;
+            std::memcpy(&metersPerLocalUnitBits, &metersPerLocalUnit,
+                sizeof(metersPerLocalUnitBits));
+
+            return @{
+                @"schema": @1,
+                @"scenario": scenario,
+                @"fixture": @"fullRevolutionRectangleXY",
+                @"fixturePassingTest":
+                    @"testB2cFullRevolutionNativeMigrationFixedPointBothUnits",
+                @"fixtureBuilt": @YES,
+                @"metersPerLocalUnitBits": @(metersPerLocalUnitBits),
+                @"status": statusName(status),
+                @"statusRaw": @(static_cast<std::uint8_t>(status)),
+                @"comparisonReached": @(observation.comparisonReached),
+                @"y1Digest": observation.comparisonReached
+                    ? digestHex(observation.y1Digest) : @"",
+                @"y2Digest": observation.comparisonReached
+                    ? digestHex(observation.y2Digest) : @"",
+                @"outputIsOriginal": @(outputIsOriginal),
+                @"adoptedY1": @(adoptedY1),
+                @"downstreamExactEqualityUnchanged":
+                    @(downstreamExactEqualityUnchanged),
+                @"budgetExhausted": @(budget.exhausted),
+                @"firstDeniedSite": [NSString stringWithUTF8String:
+                    tb::SiteName(budget.firstDeniedSite)],
+                @"firstDeniedDimension": [NSString stringWithUTF8String:
+                    tb::DimensionName(budget.firstDeniedDimension)],
+                @"firstDeniedRequested": @(budget.firstDeniedRequested),
+                @"firstDeniedStagesAdmitted": @(budget.firstDeniedStagesAdmitted),
+                @"firstDeniedVisitsAdmitted": @(budget.firstDeniedVisitsAdmitted),
+                @"sameCounterSecondInvocation": @(sameCounterSecondInvocation),
+                @"freshCreditBeforeSecond": @(freshCreditBeforeSecond),
+                @"secondStatus": statusName(secondStatus),
+                @"secondBudgetExhausted": @(budget.exhausted),
+                @"secondOutputIsOriginal": @(secondOutputIsOriginal),
+                @"secondAdoptedY1": @(secondAdoptedY1),
+                @"secondComparisonReached": @(secondComparisonReached),
+                @"secondChargeEventsDelta": @(secondChargeEventsDelta),
+                @"secondContinuationReached": @(secondContinuationReached),
+                @"boundaryStatus": statusName(boundaryStatus),
+                @"boundaryBudgetExhausted": @(boundaryBudget.exhausted),
+                @"boundaryOutputIsOriginal": @(boundaryOutputIsOriginal),
+                @"boundaryAdoptedY1": @(boundaryStatus == FixedPointStatus::Adopted
+                    && !boundaryOutputIsOriginal),
+                @"boundaryComparisonReached":
+                    @(boundaryObservation.comparisonReached)
+            };
+        } catch (...) {
+            tb::debug::ClearDebtHook();
+            return @{ @"schema": @1, @"fixtureBuilt": @NO,
+                @"error": @"fixed-point probe exception" };
+        }
+    }
+}
+
+std::optional<B2cProfileSourceCorrespondenceEvidence>
+Core3DViewer::debugB2cProfileSourceCorrespondenceEvidence(
+    const profile::Parameters& independentlyAuthoredExpectation,
+    const TopoDS_Shape& capturedSource,
+    retained_edge_treatment::ReplayBudget& sharedBudget,
+    const std::atomic_bool& stop) const noexcept {
+    namespace cps = complete_profile_source;
+    try {
+        B2cProfileSourceCorrespondenceEvidence result;
+        ProfileProducerAccounting accounting(sharedBudget, stop);
+        if (stop.load() || capturedSource.IsNull()
+            || !cps::ConstructExtrusionExpectation(
+                independentlyAuthoredExpectation, accounting, result.expectation)) {
+            return std::nullopt;
+        }
+
+        // The capture remains untouched. B2 owns only a counted private copy
+        // for observation; it grants no replay/matcher authority. B3 retains
+        // the stricter exact detachment gate before correspondence success.
+        if (retained_topology_budget::ChargeTraversal(capturedSource,
+                sharedBudget, stop,
+                retained_topology_budget::Site::C12Detachment)
+                != retained_topology_budget::WalkStatus::Completed
+            || stop.load()
+            || !sharedBudget.beginStage(
+                retained_topology_budget::Site::C12Detachment)) {
+            return std::nullopt;
+        }
+        BRepBuilderAPI_Copy copy(capturedSource, Standard_True, Standard_False);
+        if (stop.load() || !copy.IsDone() || copy.Shape().IsNull())
+            return std::nullopt;
+        TopoDS_Shape detached = copy.Shape();
+        result.detachedCapture = true;
+
+        retained_topology_budget::Census census;
+        if (retained_topology_budget::CensusTopology(detached, sharedBudget,
+                stop, census, retained_topology_budget::Site::C16KernelBuild,
+                true) != retained_topology_budget::WalkStatus::Completed) {
+            return std::nullopt;
+        }
+        TopTools_IndexedMapOfShape vertices, wires;
+        if (!retained_topology_budget::ReserveTraversal(census, sharedBudget,
+                retained_topology_budget::Site::C16KernelBuild)
+            || stop.load()) return std::nullopt;
+        TopExp::MapShapes(detached, TopAbs_VERTEX, vertices);
+        if (!retained_topology_budget::ReserveTraversal(census, sharedBudget,
+                retained_topology_budget::Site::C16KernelBuild)
+            || stop.load()) return std::nullopt;
+        TopExp::MapShapes(detached, TopAbs_WIRE, wires);
+
+        auto& observation = result.observation;
+        if (!retained_edge_treatment::detail::CommitGeometry(
+                detached, sharedBudget, observation.exactGeometryCommitment)) {
+            return std::nullopt;
+        }
+        observation.vertexCount = static_cast<std::size_t>(vertices.Extent());
+        observation.edgeCount = static_cast<std::size_t>(census.edges.Extent());
+        observation.faceCount = static_cast<std::size_t>(census.faces.Extent());
+        observation.wireCount = static_cast<std::size_t>(wires.Extent());
+        observation.debt.stages = sharedBudget.buildStages;
+        observation.debt.visits = sharedBudget.topologyVisits;
+        observation.debt.faceEdgeCensus =
+            static_cast<std::size_t>(census.faceEdge.Extent());
+        observation.debt.exhausted = sharedBudget.exhausted;
+        result.observationSelfIdentical =
+            cps::SameObservationIdentity(observation, observation);
+        result.inspection = cps::MatcherUnavailableUntilB3();
+        result.chargedVisits = sharedBudget.topologyVisits;
+        result.chargedStages = sharedBudget.buildStages;
+        return result;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+#endif
+
 // Detached source-base rebuild for the admitted R2 Boolean-input edit. The
 // envelope carries the proven edited recipe values and the legacy first
 // operand; the family switch mirrors buildSavedCutSourceDetached, ending in
@@ -11837,6 +12103,25 @@ void Core3DViewer::Select(int theX, int theY) {
 }
 
 #if DEBUG
+// Runtime-only bridge for Swift XCTest. The product accessor remains on the
+// native viewer and the public framework/module surface stays unchanged.
+@interface Core3DB2cFixedPointDebugBridge : NSObject
+- (NSDictionary<NSString *, id> *)debugB2cPrivateProfileFixedPointProbeWithMetersPerLocalUnit:
+    (NSNumber *)metersPerLocalUnit scenario:(NSString *)scenario;
+@end
+@implementation Core3DB2cFixedPointDebugBridge
+- (NSDictionary<NSString *, id> *)debugB2cPrivateProfileFixedPointProbeWithMetersPerLocalUnit:
+    (NSNumber *)metersPerLocalUnit scenario:(NSString *)scenario {
+    if (![metersPerLocalUnit isKindOfClass:NSNumber.class]
+        || ![scenario isKindOfClass:NSString.class]) {
+        return @{ @"schema": @1, @"fixtureBuilt": @NO,
+            @"error": @"invalid fixed-point probe request" };
+    }
+    return core3d::Core3DViewer::debugB2cPrivateProfileFixedPointProbe(
+        metersPerLocalUnit.doubleValue, scenario);
+}
+@end
+
 // Runtime-only Objective-C surface keeps this diagnostic out of the public
 // framework module and release binary. Swift's DEBUG wrapper owns the URL.
 @interface Core3DCurvedUVDebugBridge : NSObject

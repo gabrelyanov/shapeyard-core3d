@@ -20054,6 +20054,118 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     }catch(...){return nil;}
 }
 
+- (NSDictionary<NSString *,id> *)debugB2cProfileSourceCorrespondenceEvidence:
+    (NSString *)entityIdentifier expected:(Core3DProfileDefinition *)expected {
+    if(!NSThread.isMainThread||!GLController||!GLController.viewer
+        ||![entityIdentifier isKindOfClass:NSString.class]
+        ||entityIdentifier.length==0||entityIdentifier.length>128
+        ||!entityIdentifier.UTF8String
+        ||![expected isMemberOfClass:Core3DProfileDefinition.class])return nil;
+    try {
+        if(![self core3d_canBeginCommittedEdit])return nil;
+        const auto parameters=[expected nativeParameters];
+        const auto owner=GLController.viewer->getDocument();
+        if(owner.IsNull()||owner->Document().IsNull())return nil;
+        TDF_Label label;OcctObjectNameState named;double unit=0;
+        if(!core3d::placement::Find(owner,entityIdentifier.UTF8String,label)
+            ||!owner->CaptureObjectNameStateForLabel(label,named)
+            ||named.object.resolvedRepresentation!=OcctGeometryRepresentation::BRep
+            ||named.object.shape.IsNull()
+            ||!XCAFDoc_DocumentTool::GetLengthUnit(owner->Document(),unit)
+            ||unit!=parameters.metersPerUnit)return nil;
+
+        std::atomic_bool stop{false};
+        core3d::retained_edge_treatment::ReplayBudget budget;
+        const auto evidence=GLController.viewer->
+            debugB2cProfileSourceCorrespondenceEvidence(
+                parameters,named.object.shape,budget,stop);
+        if(!evidence)return nil;
+        const auto& expectation=evidence->expectation;
+        const auto& observation=evidence->observation;
+        NSMutableArray<NSNumber *> *canonical=[NSMutableArray
+            arrayWithCapacity:expectation.canonicalValues.size()];
+        for(double value:expectation.canonicalValues)[canonical addObject:@(value)];
+        NSMutableArray *frame=[NSMutableArray
+            arrayWithCapacity:expectation.constructionFrameValues.size()];
+        for(double value:expectation.constructionFrameValues)[frame addObject:@(value)];
+        NSMutableArray *loopIDs=[NSMutableArray arrayWithCapacity:expectation.loops.size()];
+        NSMutableArray *vertexIDs=[NSMutableArray arrayWithCapacity:expectation.vertices.size()];
+        NSMutableArray *segmentIDs=[NSMutableArray arrayWithCapacity:expectation.boundaryEdges.size()];
+        NSMutableArray *loops=[NSMutableArray arrayWithCapacity:expectation.loops.size()];
+        for(const auto& loop:expectation.loops){
+            id loopID=loop.key.loopIdentifier
+                ? @(static_cast<unsigned long long>(*loop.key.loopIdentifier)):NSNull.null;
+            [loopIDs addObject:loopID];
+            NSString *representation=loop.representation==
+                core3d::complete_profile_source::LoopRepresentation::ExplicitSegments
+                ?@"explicit":loop.representation==
+                    core3d::complete_profile_source::LoopRepresentation::PeriodicCircle
+                    ?@"periodic-circle":@"polygon";
+            id seam=loop.periodicSeamEdge
+                ?@(static_cast<unsigned long long>(*loop.periodicSeamEdge)):NSNull.null;
+            [loops addObject:@{@"loopID":loopID,@"representation":representation,
+                @"inner":@(loop.inner),@"authoredWinding":@(loop.authoredWinding),
+                @"materialParity":@(loop.materialParity),@"chartParity":@(loop.chartParity),
+                @"frameParity":@(loop.frameParity),@"periodicSeamOwner":seam,
+                @"vertexCount":@(loop.vertices.size()),
+                @"boundaryEdgeCount":@(loop.boundaryEdges.size())}];
+        }
+        for(const auto& vertex:expectation.vertices)
+            [vertexIDs addObject:vertex.authoredIdentifier
+                ?@(static_cast<unsigned long long>(*vertex.authoredIdentifier)):NSNull.null];
+        NSMutableArray *sideDomains=[NSMutableArray arrayWithCapacity:expectation.sides.size()];
+        for(const auto& side:expectation.sides){
+            id segmentID=side.key.elementIdentifier
+                ?@(static_cast<unsigned long long>(*side.key.elementIdentifier)):NSNull.null;
+            [segmentIDs addObject:segmentID];
+            id seam=side.periodicSeamOwner
+                ?@(static_cast<unsigned long long>(*side.periodicSeamOwner)):NSNull.null;
+            NSMutableDictionary *row=[@{@"loopOrdinal":@(side.key.loopOrdinal),
+                @"segmentID":segmentID,@"support":@(static_cast<int>(side.support)),
+                @"outwardUseParity":@(side.outwardUseParity),
+                @"periodicSeamOwner":seam,
+                @"lowerBoundaryEdge":@(side.boundary[0].edge),
+                @"endExtrusionEdge":@(side.boundary[1].edge),
+                @"upperBoundaryEdge":@(side.boundary[2].edge),
+                @"startExtrusionEdge":@(side.boundary[3].edge)} mutableCopy];
+            if(side.interval){
+                row[@"startDegrees"]=@(side.interval->startDegrees);
+                row[@"sweepDegrees"]=@(side.interval->sweepDegrees);
+                row[@"startRadians"]=@(side.interval->startRadians);
+                row[@"endRadians"]=@(side.interval->endRadians);
+            }
+            [sideDomains addObject:row];
+        }
+        NSData *commitment=[NSData dataWithBytes:observation.exactGeometryCommitment.data()
+            length:observation.exactGeometryCommitment.size()];
+        return @{@"canonicalValues":canonical,
+            @"metersPerUnit":@(expectation.metersPerUnit),
+            @"millimetresPerUnit":@(expectation.millimetresPerUnit),
+            @"constructionFramePresent":@(expectation.constructionFramePresent),
+            @"constructionFrameValues":frame,@"plane":@(expectation.plane),
+            @"depth":@(expectation.depth),@"loopIDs":loopIDs,
+            @"vertexIDs":vertexIDs,@"segmentIDs":segmentIDs,@"loops":loops,
+            @"sideDomains":sideDomains,
+            @"expectedVertexCells":@(expectation.vertexCellCount()),
+            @"expectedEdgeCells":@(expectation.edgeCellCount()),
+            @"expectedFaceCells":@(expectation.faceCellCount()),
+            @"lowerCapWireCount":@(expectation.caps[0].wires.size()),
+            @"upperCapWireCount":@(expectation.caps[1].wires.size()),
+            @"observedVertexCells":@(observation.vertexCount),
+            @"observedEdgeCells":@(observation.edgeCount),
+            @"observedFaceCells":@(observation.faceCount),
+            @"observedWireCells":@(observation.wireCount),
+            @"observationGeometryCommitment":commitment,
+            @"observationSelfIdentical":@(evidence->observationSelfIdentical),
+            @"detachedCapture":@(evidence->detachedCapture),
+            @"chargedVisits":@(evidence->chargedVisits),
+            @"chargedStages":@(evidence->chargedStages),
+            @"budgetExhausted":@(observation.debt.exhausted),
+            @"matcherStatus":@"MatcherUnavailableUntilB3",
+            @"matcherAccepted":@NO,@"witnessAvailable":@NO};
+    }catch(...){return nil;}
+}
+
 // Isolated real OCAF metadata probe; never changes the viewer document.
 - (NSDictionary *)debugRigidPlacementAdmissionProbe {
     if(!NSThread.isMainThread)return nil;

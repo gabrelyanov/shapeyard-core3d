@@ -206,6 +206,8 @@
 		32466AAC2BDC0F5800C61638 /* NSString+StdString.h in Headers */ = {isa = PBXBuildFile; fileRef = 32466AAA2BDC0F5800C61638 /* NSString+StdString.h */; };
 		32466AAD2BDC0F5800C61638 /* NSString+StdString.mm in Sources */ = {isa = PBXBuildFile; fileRef = 32466AAB2BDC0F5800C61638 /* NSString+StdString.mm */; };
 		324EF2CC2BC7D08D00A05295 /* Core3DViewController+PrimitiveManager.h in Headers */ = {isa = PBXBuildFile; fileRef = 324EF2CB2BC7D08D00A05295 /* Core3DViewController+PrimitiveManager.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		5CD2C1000000000000000001 /* Core3DPatternCreationOpening.h in Headers */ = {isa = PBXBuildFile; fileRef = 5CD2C0000000000000000001 /* Core3DPatternCreationOpening.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		5CD2C1000000000000000002 /* Core3DPatternCreationOpening.mm in Sources */ = {isa = PBXBuildFile; fileRef = 5CD2C0000000000000000002 /* Core3DPatternCreationOpening.mm */; };
 		324EF2CE2BC7D0C200A05295 /* Core3DViewController+PrimitiveManager.mm in Sources */ = {isa = PBXBuildFile; fileRef = 324EF2CD2BC7D0C200A05295 /* Core3DViewController+PrimitiveManager.mm */; };
 		325C835A2BCE77CB000292E4 /* dispatch_cancelable_block.h in Headers */ = {isa = PBXBuildFile; fileRef = 325C83592BCE77CB000292E4 /* dispatch_cancelable_block.h */; };
 		325F58D72BD8D37C0076FC53 /* objc_try.h in Headers */ = {isa = PBXBuildFile; fileRef = 325F58D62BD8D37C0076FC53 /* objc_try.h */; settings = {ATTRIBUTES = (Public, ); }; };
@@ -501,6 +503,8 @@
 		32466AAA2BDC0F5800C61638 /* NSString+StdString.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "NSString+StdString.h"; sourceTree = "<group>"; };
 		32466AAB2BDC0F5800C61638 /* NSString+StdString.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "NSString+StdString.mm"; sourceTree = "<group>"; };
 		324EF2CB2BC7D08D00A05295 /* Core3DViewController+PrimitiveManager.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Core3DViewController+PrimitiveManager.h"; sourceTree = "<group>"; };
+		5CD2C0000000000000000001 /* Core3DPatternCreationOpening.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DPatternCreationOpening.h; sourceTree = "<group>"; };
+		5CD2C0000000000000000002 /* Core3DPatternCreationOpening.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DPatternCreationOpening.mm; sourceTree = "<group>"; };
 		324EF2CD2BC7D0C200A05295 /* Core3DViewController+PrimitiveManager.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "Core3DViewController+PrimitiveManager.mm"; sourceTree = "<group>"; };
 		324EF2D02BC7EC8C00A05295 /* GLViewController+Trick.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "GLViewController+Trick.h"; sourceTree = "<group>"; };
 		325C83592BCE77CB000292E4 /* dispatch_cancelable_block.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = dispatch_cancelable_block.h; sourceTree = "<group>"; };
@@ -981,6 +985,8 @@
 				322185842BB5D5E100040E84 /* Core3DViewController.mm */,
 				324EF2CB2BC7D08D00A05295 /* Core3DViewController+PrimitiveManager.h */,
 				324EF2CD2BC7D0C200A05295 /* Core3DViewController+PrimitiveManager.mm */,
+				5CD2C0000000000000000001 /* Core3DPatternCreationOpening.h */,
+				5CD2C0000000000000000002 /* Core3DPatternCreationOpening.mm */,
 				32ECC7DC2BCD35B000770594 /* Core3DViewController+AvailabilityManager.h */,
 				32ECC7DB2BCD35B000770594 /* Core3DViewController+AvailabilityManager.mm */,
 				324047582C00C7F6009E4B86 /* Core3DViewController+ExportManager.h */,
@@ -1167,6 +1173,7 @@
 				3229D3222C00D7780025AECD /* ExportType.h in Headers */,
 				32466AAC2BDC0F5800C61638 /* NSString+StdString.h in Headers */,
 				324EF2CC2BC7D08D00A05295 /* Core3DViewController+PrimitiveManager.h in Headers */,
+				5CD2C1000000000000000001 /* Core3DPatternCreationOpening.h in Headers */,
 				329B2ED32C1AF53900F3A763 /* importstl.h in Headers */,
 				71E871542C906DBE000112D8 /* ConstructorManipulator.hpp in Headers */,
 				328FBF2C2BC82E8300176AEA /* Core3DViewer.h in Headers */,
@@ -1405,6 +1412,7 @@
 				185461BC2C0F412B00C794A8 /* Core3DContext.cpp in Sources */,
 				18A006322BD2B306004931B1 /* ShapeInteractor.cpp in Sources */,
 				324EF2CE2BC7D0C200A05295 /* Core3DViewController+PrimitiveManager.mm in Sources */,
+				5CD2C1000000000000000002 /* Core3DPatternCreationOpening.mm in Sources */,
 				71F7ACED2C09D2BD00FDF2EA /* BooleanOperationController.cpp in Sources */,
 				BEA000032F31000100000003 /* BevelOperationController.cpp in Sources */,
 				3221857D2BB5CC1500040E84 /* GLView.mm in Sources */,

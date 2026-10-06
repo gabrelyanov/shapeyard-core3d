@@ -1019,6 +1019,13 @@ __attribute__((objc_subclassing_restricted))
 //! unresolved edit, invalid unit, non-BRep or excessive topology with nil.
 - (nullable NSDictionary<NSString *,id> *)debugNativeSolidEvidence:(NSString *)entity
     NS_SWIFT_NAME(debugNativeSolidEvidence(_:));
+//! B2-only values/observation seam. `expected` is an independently authored
+//! complete Profile value; the real entity is detached and observed separately.
+//! No accessibility attribute, witness, edit authority or matcher success is
+//! returned before B3.
+- (nullable NSDictionary<NSString *,id> *)debugB2cProfileSourceCorrespondenceEvidence:
+    (NSString *)entityIdentifier expected:(Core3DProfileDefinition *)expected
+    NS_SWIFT_NAME(debugB2cProfileSourceCorrespondenceEvidence(entityIdentifier:expected:));
 //! Signed enter/exit distances in mm along the normalized world direction from
 //! originMM. Ordered material intervals on the whole line (not a ray); [] means
 //! no material. Selection independent. Same admission/placement as the solid
@@ -2169,3 +2176,5 @@ __attribute__((objc_subclassing_restricted))
 @end
 
 NS_ASSUME_NONNULL_END
+
+#import <Core3D/Core3DPatternCreationOpening.h> // PC-D2-C: D2 creation-opening registration (one additive line).

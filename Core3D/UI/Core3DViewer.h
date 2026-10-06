@@ -23,10 +23,12 @@
 #include "ShapeInteractor.hpp"
 #include "TransformInspectorMeasurementController.hpp"
 #include "OrdinaryEditController.hpp"
+#include <atomic>
 #include <gp_Pnt2d.hxx>
 #include <optional>
 #if DEBUG
 #include <map>
+#include "../OCCTKit/ProfileSourceCorrespondence.hxx"
 #endif
 #include <variant>
 #include "../OCCTKit/NativeMeshElementSelection.hpp"
@@ -99,6 +101,17 @@ namespace core3d {
     struct LoftSolidGeometry;
     struct CutSolidGeometry;
     struct CutProgramGeometry;
+#if DEBUG
+    struct B2cProfileSourceCorrespondenceEvidence {
+        complete_profile_source::ExtrusionExpectation expectation;
+        complete_profile_source::BoundaryObservation observation;
+        complete_profile_source::InspectionResult inspection;
+        bool detachedCapture = false;
+        bool observationSelfIdentical = false;
+        std::size_t chargedVisits = 0;
+        std::size_t chargedStages = 0;
+    };
+#endif
     struct AssemblyPartDefinition {
         profile::Parameters parameters;
         TCollection_ExtendedString name;
@@ -232,6 +245,16 @@ namespace core3d {
         std::optional<StoredProfileSnapshot> storedProfileDefinition(
             const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
             std::uint32_t width, std::uint32_t height) noexcept;
+#if DEBUG
+        //! B2 values-only expectation plus a detached observation of a real
+        //! captured source. The result deliberately cannot contain a witness.
+        std::optional<B2cProfileSourceCorrespondenceEvidence>
+        debugB2cProfileSourceCorrespondenceEvidence(
+            const profile::Parameters& independentlyAuthoredExpectation,
+            const TopoDS_Shape& capturedSource,
+            retained_edge_treatment::ReplayBudget& sharedBudget,
+            const std::atomic_bool& stop) const noexcept;
+#endif
         std::shared_ptr<NativeSolidWork> prepareStoredProfileRebuild(
             const profile::Parameters& parameters, const StoredProfileSnapshot& original,
             const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
@@ -274,6 +297,10 @@ namespace core3d {
         std::optional<CylindricalCutSnapshot> cylindricalCutSource(const ObjectFrameIdentity&,
         std::uint64_t,std::uint32_t,std::uint32_t) noexcept;
 #if DEBUG
+        //! Detached DEBUG probe over the real B8 producer fixed-point helper.
+        //! Scenarios: distinctDefinition, cancelled, stickyBudget, positive.
+        static NSDictionary<NSString *, id> *debugB2cPrivateProfileFixedPointProbe(
+            double metersPerLocalUnit, NSString *scenario);
         std::map<std::string,bool> debugSavedCutSourceViewerQualification(const CylindricalCutSnapshot&,
             const ObjectFrameIdentity&,std::uint64_t,std::uint32_t,std::uint32_t);
     bool debugSetCutDisplayCoefficient(double coefficient,bool pending) noexcept;
