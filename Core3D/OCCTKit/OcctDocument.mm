@@ -25095,6 +25095,152 @@ OcctPaintedAtlasBakeCurrentness OcctDocument::PaintedAtlasBakeCurrentness(
         :OcctPaintedAtlasBakeCurrentness::Stale;
 }
 
+namespace {
+Standard_Boolean ResolvePaintedAtlasDerivative(
+    const Handle(TDocStd_Document)& document,
+    const core3d::retained_recipe::OwnerKey& owner,
+    OcctPaintedAtlasDerivative& derivative) noexcept {
+    namespace aa = core3d::asset_atlas;
+    namespace pb = core3d::painted_atlas_bake;
+    namespace fi = core3d::face_image;
+    struct Cache final {
+        const TDocStd_Document* document = nullptr;
+        Standard_Integer time = -1;
+        pb::Definition bake;
+        std::vector<fi::ResourceEnvelope> resources;
+        std::vector<std::pair<core3d::retained_recipe::OwnerKey,
+                              aa::MemberUVAssignment>> assignments;
+    };
+    static thread_local Cache cache;
+    derivative = {};
+    try {
+        if (document.IsNull() || document->HasOpenCommand()
+            || !core3d::retained_recipe::Valid(owner)) return Standard_False;
+        std::vector<pb::persistence::Record> records;
+        if (!pb::persistence::ReadAll(document, records)) return Standard_False;
+        const pb::persistence::Record* matchedRecord = nullptr;
+        aa::Member matchedMember;
+        for (const auto& record : records) {
+            aa::persistence::Record candidateAtlas;
+            if (!aa::persistence::Read(document, record.definition.key,
+                                       candidateAtlas)
+                || !candidateAtlas.value) return Standard_False;
+            bool recordMatches = false;
+            for (const auto& member : candidateAtlas.value->definition.members) {
+                if (member.owner == owner) recordMatches = true;
+            }
+            if (recordMatches) {
+                if (matchedRecord != nullptr) return Standard_False;
+                matchedRecord = &record;
+            }
+        }
+        if (matchedRecord == nullptr) return Standard_False;
+        pb::Definition current;
+        if (pb::owner::Currentness(document, matchedRecord->definition.key,
+                                   &current)
+                != pb::owner::Outcome::Committed
+            || !(current == matchedRecord->definition)) return Standard_False;
+        aa::persistence::Record atlasRecord;
+        if (!aa::persistence::Read(document, current.key, atlasRecord)
+            || !atlasRecord.value) return Standard_False;
+        std::vector<core3d::retained_recipe::OwnerKey> owners;
+        owners.reserve(atlasRecord.value->definition.members.size());
+        bool ownerFound = false;
+        for (const auto& member : atlasRecord.value->definition.members) {
+            owners.push_back(member.owner);
+            if (member.owner == owner) {
+                if (ownerFound) return Standard_False;
+                ownerFound = true;
+                matchedMember = member;
+            }
+        }
+        if (!ownerFound) return Standard_False;
+        const Standard_Integer documentTime = document->GetData()->Time();
+        if (cache.document == document.get() && cache.time == documentTime
+            && cache.bake == current) {
+            for (const auto& candidate : cache.assignments) {
+                if (!(candidate.first == owner)) continue;
+                derivative.bake = cache.bake;
+                derivative.assignment = candidate.second;
+                derivative.resources = cache.resources;
+                return Standard_True;
+            }
+            return Standard_False;
+        }
+        aa::Capture capture;
+        aa::Definition rebuilt;
+        std::vector<aa::MemberUVAssignment> assignments;
+        std::string diagnosis;
+        const aa::build::Settings settings{
+            atlasRecord.value->definition.resolutionTexels,
+            atlasRecord.value->definition.gutterTexels};
+        if (!aa::build::CaptureMembers(document, owners, capture)
+            || aa::build::BuildAtlas(document, current.key, capture, settings,
+                                     rebuilt, assignments, diagnosis, nullptr,
+                                     aa::build::PaintedAdmission::Preserve)
+                != aa::build::Status::Built
+            || !(rebuilt.layoutProof == current.layoutProof)) {
+            return Standard_False;
+        }
+        const aa::MemberUVAssignment* assignment = nullptr;
+        for (const auto& candidate : assignments) {
+            if (candidate.member == matchedMember.member) {
+                if (assignment != nullptr) return Standard_False;
+                assignment = &candidate;
+            }
+        }
+        if (assignment == nullptr) return Standard_False;
+        std::vector<fi::ResourceEnvelope> resources;
+        resources.reserve(current.resources.size());
+        for (const auto& descriptor : current.resources) {
+            fi::UUID resourceID{};
+            std::copy_n(descriptor.identity.begin(), resourceID.size(),
+                        resourceID.begin());
+            if (!core3d::retained_recipe::Nonzero(resourceID)) return Standard_False;
+            fi::ResourceEnvelope envelope;
+            fi::persistence::resources::Record resource;
+            if (!fi::persistence::resources::Read(document, resourceID, resource)
+                || !resource.value) return Standard_False;
+            envelope = resource.value->envelope;
+            if (!(envelope.workingContent == descriptor.content)
+                || envelope.workingFormat != fi::ImageEncoding::PNG
+                || envelope.workingWidthTexels != descriptor.widthTexels
+                || envelope.workingHeightTexels != descriptor.heightTexels
+                || envelope.workingBytes.empty()) return Standard_False;
+            resources.push_back(std::move(envelope));
+        }
+        derivative.bake = std::move(current);
+        derivative.assignment = *assignment;
+        derivative.resources = std::move(resources);
+        cache = {};
+        cache.document = document.get();
+        cache.time = documentTime;
+        cache.bake = derivative.bake;
+        cache.resources = derivative.resources;
+        for (std::size_t index = 0; index < assignments.size(); ++index) {
+            if (index >= atlasRecord.value->definition.members.size()) {
+                cache = {};
+                derivative = {};
+                return Standard_False;
+            }
+            cache.assignments.push_back({
+                atlasRecord.value->definition.members[index].owner,
+                assignments[index]});
+        }
+        return Standard_True;
+    } catch (...) {
+        derivative = {};
+        return Standard_False;
+    }
+}
+} // namespace
+
+Standard_Boolean OcctDocument::PaintedAtlasDerivativeForOwner(
+    const core3d::retained_recipe::OwnerKey& owner,
+    OcctPaintedAtlasDerivative& derivative) const noexcept {
+    return ResolvePaintedAtlasDerivative(myOcafDoc, owner, derivative);
+}
+
 // E3 face-image document surface (278b portion 2). These entry points bind
 // the portion-1 owner store to the live document; none of them opens its own
 // mutation route, manufactures currentness or weakens a portion-1 verdict.
@@ -28780,6 +28926,37 @@ static std::uint64_t Scenario0(double unit, int unitIndex, Readbacks& readbacks)
                 == persistence::ReadState::Present)
             slots[29] = std::uint64_t(record.bytes.size());
         slots[30] = std::uint64_t(reopenedState.resources.size());
+        bool consumerCarried = currentness == pb::owner::Outcome::Committed;
+        bool consumerRepeated = consumerCarried;
+        std::uint64_t consumerMembers = 0;
+        for (std::size_t index = 0; consumerCarried && index < 3; ++index) {
+            OcctPaintedAtlasDerivative first, repeated;
+            consumerCarried = ResolvePaintedAtlasDerivative(
+                    second.doc, reopened.parts[index].key, first)
+                && first.bake == reopenedBake
+                && first.resources.size() == reopenedBake.resources.size();
+            consumerRepeated = consumerCarried
+                && ResolvePaintedAtlasDerivative(
+                    second.doc, reopened.parts[index].key, repeated)
+                && repeated.bake == first.bake
+                && repeated.assignment.member == first.assignment.member
+                && repeated.assignment.triangleCount
+                    == first.assignment.triangleCount
+                && repeated.assignment.corners == first.assignment.corners
+                && repeated.resources.size() == first.resources.size();
+            for (std::size_t resource = 0;
+                 consumerRepeated && resource < first.resources.size(); ++resource) {
+                consumerRepeated = repeated.resources[resource].workingBytes
+                    == first.resources[resource].workingBytes;
+            }
+            consumerCarried = consumerCarried && consumerRepeated;
+            if (consumerCarried) ++consumerMembers;
+        }
+        slots[31] = consumerCarried ? 1 : 0;
+        slots[32] = SameState(second.doc, reopened, kPartCount, reopenedState)
+            ? 1 : 0;
+        slots[33] = consumerRepeated ? 1 : 0;
+        slots[34] = consumerMembers;
         if (slots[24] == 0 && slots[27] == 1) bits |= 1ull << 2;
         else Report(0, unit, "all-member-fences-reopen");
     }
@@ -28974,6 +29151,44 @@ static Census DilationCensus(const aa::build::LayoutEvidence& layout,
 
 static bool OriginalResourcesIntactReopen(const Handle(TDocStd_Document)& doc);
 
+static bool ConsumerExportWitness(const OcctPaintedAtlasDerivative& derivative,
+                                  std::vector<std::uint8_t>& output) {
+    output.clear();
+    try {
+        if (!pb::Encode(derivative.bake, output)
+            || derivative.resources.size() != derivative.bake.resources.size())
+            return false;
+        const auto append = [&output](const void* bytes, std::size_t count) {
+            if (!bytes || count > pb::kMaximumDecodedImageBytes
+                || output.size() > pb::kMaximumDecodedImageBytes - count)
+                return false;
+            const auto* first = static_cast<const std::uint8_t*>(bytes);
+            output.insert(output.end(), first, first + count);
+            return true;
+        };
+        if (!append(derivative.assignment.member.data(),
+                    derivative.assignment.member.size())) return false;
+        for (const auto& corner : derivative.assignment.corners) {
+            if (!append(corner.data(), sizeof(double) * corner.size())) return false;
+        }
+        for (const auto& resource : derivative.resources) {
+            if (!append(resource.workingBytes.data(),
+                        resource.workingBytes.size())) return false;
+        }
+        return !output.empty();
+    } catch (...) {
+        output.clear();
+        return false;
+    }
+}
+
+static bool SameAssignment(const aa::MemberUVAssignment& left,
+                           const aa::MemberUVAssignment& right) {
+    return left.member == right.member
+        && left.triangleCount == right.triangleCount
+        && left.corners == right.corners;
+}
+
 static std::uint64_t Scenario1(double unit, int unitIndex, Readbacks& readbacks) {
     constexpr std::size_t kPartCount = 4;
     std::uint64_t bits = 0;
@@ -28982,6 +29197,7 @@ static std::uint64_t Scenario1(double unit, int unitIndex, Readbacks& readbacks)
     std::vector<OwnerKey> atlasMembers;
     pb::Definition committedBake;
     pb::kernel::Evidence committedEvidence;
+    std::vector<std::vector<std::uint8_t>> committedDerivativeBytes;
     std::string stored;
     Fixture fixture;
     {
@@ -28998,6 +29214,16 @@ static std::uint64_t Scenario1(double unit, int unitIndex, Readbacks& readbacks)
                 != persistence::ReadState::Present
             || !(committedRecord.definition == committedBake)) {
             Report(1, unit, "committed-record"); return 0;
+        }
+        for (const auto& descriptor : committedBake.resources) {
+            fi::persistence::resources::Record resource;
+            if (!fi::persistence::resources::Read(
+                    doc, ResourceUUID(descriptor.identity), resource)
+                || !resource.value) {
+                Report(1, unit, "committed-resource-witness"); return 0;
+            }
+            committedDerivativeBytes.push_back(
+                resource.value->envelope.workingBytes);
         }
         stored = retained_solid::Probe::Save(holder);
         holder.doc->Close();
@@ -29102,6 +29328,58 @@ static std::uint64_t Scenario1(double unit, int unitIndex, Readbacks& readbacks)
             != aa::build::Status::Built
         || !(rebuilt.layoutProof == baked.layoutProof)) {
         Report(1, unit, "rebuild-layout", rebuildDiagnosis.substr(0, 120)); return bits;
+    }
+    // Consumer handoff measured on the unseeded cold-reopened document. The
+    // exact resolver below is shared by scene publication and private export.
+    // It must carry committed PNG bytes, leave every master byte untouched,
+    // and serialize identically when equal inputs are resolved again.
+    {
+        FullState masterBefore;
+        bool carried = CaptureState(doc, reopened, 3, masterBefore);
+        bool repeated = carried;
+        std::uint64_t resolvedMembers = 0;
+        std::uint64_t resolvedCorners = 0;
+        for (std::size_t member = 0; carried && member < atlasMembers.size();
+             ++member) {
+            OcctPaintedAtlasDerivative first, secondDerivative;
+            std::vector<std::uint8_t> firstExport, secondExport;
+            carried = ResolvePaintedAtlasDerivative(
+                    doc, atlasMembers[member], first)
+                && first.bake == baked
+                && SameAssignment(first.assignment, rebuiltAssignments[member])
+                && first.resources.size() == committedDerivativeBytes.size();
+            for (std::size_t resource = 0;
+                 carried && resource < first.resources.size(); ++resource) {
+                carried = first.resources[resource].workingBytes
+                    == committedDerivativeBytes[resource];
+            }
+            repeated = carried
+                && ResolvePaintedAtlasDerivative(
+                    doc, atlasMembers[member], secondDerivative)
+                && secondDerivative.bake == first.bake
+                && SameAssignment(secondDerivative.assignment, first.assignment)
+                && ConsumerExportWitness(first, firstExport)
+                && ConsumerExportWitness(secondDerivative, secondExport)
+                && firstExport == secondExport;
+            carried = carried && repeated;
+            if (carried) {
+                ++resolvedMembers;
+                resolvedCorners += first.assignment.corners.size();
+            }
+        }
+        const bool masterUnchanged = carried
+            && SameState(doc, reopened, 3, masterBefore)
+            && OriginalResourcesIntactReopen(doc);
+        slots[79] = carried ? 1 : 0;
+        slots[80] = masterUnchanged ? 1 : 0;
+        slots[81] = repeated ? 1 : 0;
+        slots[82] = resolvedMembers;
+        slots[83] = resolvedCorners;
+        if (!carried || !masterUnchanged || !repeated
+            || resolvedMembers != atlasMembers.size() || resolvedCorners == 0) {
+            Report(1, unit, "consumer-handoff");
+            return bits;
+        }
     }
     // bit1: independent seam/dilation census on the decoded persisted
     // baseColor derivative.

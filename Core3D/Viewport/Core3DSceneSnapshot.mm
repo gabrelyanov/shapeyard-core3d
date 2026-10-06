@@ -117,7 +117,8 @@ static_assert(sizeof(std::uint32_t) == 4,
                            encoding:(Core3DSceneTextureEncoding)encoding
                          pixelWidth:(uint32_t)pixelWidth
                         pixelHeight:(uint32_t)pixelHeight
-                        encodedData:(NSData *)encodedData;
+                        encodedData:(NSData *)encodedData
+             paintedAtlasDerivative:(BOOL)paintedAtlasDerivative;
 @end
 
 @interface Core3DSceneMaterialSnapshot ()
@@ -169,6 +170,8 @@ static_assert(sizeof(std::uint32_t) == 4,
 
 @interface Core3DSceneMeshSnapshot ()
 - (instancetype)initWithDefinitionIdentifier:(NSString *)definitionIdentifier
+              paintedAtlasMasterDefinitionIdentifier:(NSString *)paintedAtlasMasterDefinitionIdentifier
+                      paintedAtlasBakeProof:(NSString *)paintedAtlasBakeProof
                                 geometryKind:(Core3DSceneGeometryKind)geometryKind
                      nativeC1DefinitionData:(NSData *)nativeC1DefinitionData
                           nativeC1OwnerData:(NSData *)nativeC1OwnerData
@@ -1634,7 +1637,8 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
                            encoding:(Core3DSceneTextureEncoding)encoding
                          pixelWidth:(uint32_t)pixelWidth
                         pixelHeight:(uint32_t)pixelHeight
-                        encodedData:(NSData *)encodedData {
+                        encodedData:(NSData *)encodedData
+             paintedAtlasDerivative:(BOOL)paintedAtlasDerivative {
     self = [super init];
     if (self) {
         _identifier = [identifier copy];
@@ -1642,6 +1646,7 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
         _pixelWidth = pixelWidth;
         _pixelHeight = pixelHeight;
         _encodedData = [encodedData copy];
+        _paintedAtlasDerivative = paintedAtlasDerivative;
     }
     return self;
 }
@@ -1773,6 +1778,8 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
 @implementation Core3DSceneMeshSnapshot
 
 - (instancetype)initWithDefinitionIdentifier:(NSString *)definitionIdentifier
+              paintedAtlasMasterDefinitionIdentifier:(NSString *)paintedAtlasMasterDefinitionIdentifier
+                      paintedAtlasBakeProof:(NSString *)paintedAtlasBakeProof
                                 geometryKind:(Core3DSceneGeometryKind)geometryKind
                      nativeC1DefinitionData:(NSData *)nativeC1DefinitionData
                           nativeC1OwnerData:(NSData *)nativeC1OwnerData
@@ -1805,6 +1812,10 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
         _nativeC1DefinitionRevision = nativeC1DefinitionRevision;
         _nativeC1FrameRevision = nativeC1FrameRevision;
         _definitionIdentifier = [definitionIdentifier copy];
+        _paintedAtlasMasterDefinitionIdentifier =
+            [paintedAtlasMasterDefinitionIdentifier copy];
+        _paintedAtlasBakeProof = [paintedAtlasBakeProof copy];
+        _paintedAtlasDerivative = paintedAtlasBakeProof.length != 0;
         _geometryRevision = geometryRevision;
         _localBounds = localBounds;
         _faceCount = faceCount;
@@ -2673,6 +2684,8 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
             || !accountString(texture.identifier)
             || !textureIdentifiers.insert(texture.identifier).second
             || !IsValid(texture.encoding)
+            || (texture.paintedAtlasDerivative
+                && texture.encoding != TextureEncoding::PNG)
             || !HasExpectedSignature(texture)
             || !HasValidImageMetadata(texture)
             || width == 0 || height == 0
@@ -2767,6 +2780,16 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
     definitionIdentifiers.reserve(snapshot.meshes.size());
     for (const MeshSnapshot& mesh : snapshot.meshes) {
         const bool isWire = mesh.geometryKind == GeometryKind::NativeC1Wire;
+        const bool isPaintedDerivative = !mesh.paintedAtlasBakeProof.empty();
+        bool validPaintedProof = !isPaintedDerivative
+            ? mesh.paintedAtlasMasterDefinitionIdentifier.empty()
+            : IsValidIdentifier(mesh.paintedAtlasMasterDefinitionIdentifier)
+                && mesh.paintedAtlasBakeProof.size() == 64;
+        for (const char value : mesh.paintedAtlasBakeProof) {
+            validPaintedProof = validPaintedProof
+                && ((value >= '0' && value <= '9')
+                    || (value >= 'a' && value <= 'f'));
+        }
         const bool validWire = isWire && mesh.nativeC1Wire.has_value()
             && !mesh.nativeC1Wire->canonicalDefinitionBytes.empty()
             && !mesh.nativeC1Wire->canonicalOwnerBytes.empty()
@@ -2785,10 +2808,15 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
             && !mesh.vertices.empty() && !mesh.indices.empty();
         if (!IsValidIdentifier(mesh.definitionIdentifier)
             || !accountString(mesh.definitionIdentifier)
+            || !accountString(mesh.paintedAtlasMasterDefinitionIdentifier)
+            || !accountString(mesh.paintedAtlasBakeProof)
+            || !validPaintedProof
             || !definitionIdentifiers.insert(mesh.definitionIdentifier).second
             || mesh.geometryRevision == 0
             || !HasValidCornerTangents(mesh)
             || (!validWire && !validSurface)
+            || (isPaintedDerivative
+                && (isWire || mesh.vertices.size() != mesh.indices.size()))
             || !mesh.localBounds.valid || !IsValid(mesh.localBounds)
             || !CheckedAdd(totalVertices, mesh.vertices.size(), totalVertices)
             || totalVertices > kMaximumDTOVertices
@@ -2922,6 +2950,8 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
         }
         const MeshSnapshot& mesh = snapshot.meshes[instance.meshIndex];
         if (instance.primitiveBindings.size() != mesh.primitives.size()
+            || (!mesh.paintedAtlasBakeProof.empty()
+                && !instance.faceImageBindings.empty())
             || (snapshot.selectionMode == ElementKind::Face
                 && instance.selectable
                 && mesh.topology.faceCount == 0)
@@ -2929,6 +2959,27 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
                 && instance.selectable
                 && mesh.topology.edgeCount == 0)) {
             return false;
+        }
+        if (!mesh.paintedAtlasBakeProof.empty()) {
+            bool hasDerivativeTexture = false;
+            for (const PrimitiveBinding& binding : instance.primitiveBindings) {
+                if (binding.materialIndex >= snapshot.materials.size()) return false;
+                const MaterialSnapshot& material =
+                    snapshot.materials[binding.materialIndex];
+                for (const std::int32_t index : {
+                         material.baseColorTextureIndex,
+                         material.emissiveTextureIndex,
+                         material.metallicRoughnessTextureIndex,
+                         material.occlusionTextureIndex,
+                         material.normalTextureIndex}) {
+                    if (index < 0) continue;
+                    if (static_cast<std::size_t>(index) >= snapshot.textures.size()
+                        || !snapshot.textures[static_cast<std::size_t>(index)]
+                                .paintedAtlasDerivative) return false;
+                    hasDerivativeTexture = true;
+                }
+            }
+            if (!hasDerivativeTexture) return false;
         }
         if (instance.faceImageBindings.size()
                 > kMaximumDTOFaceImageBindingsPerInstance
@@ -4148,7 +4199,8 @@ Core3DSceneTextureSnapshot *TextureFromScene(
                    encoding:TextureEncodingFromScene(value.encoding)
                  pixelWidth:value.pixelWidth
                 pixelHeight:value.pixelHeight
-                encodedData:encodedData];
+                encodedData:encodedData
+     paintedAtlasDerivative:value.paintedAtlasDerivative];
 }
 
 Core3DSceneFacePrimitiveSnapshot *FacePrimitiveFromScene(const MeshPrimitive& value) {
@@ -4246,6 +4298,9 @@ Core3DSceneMeshSnapshot *MeshFromScene(const MeshSnapshot& value) {
 
     return [[Core3DSceneMeshSnapshot alloc]
         initWithDefinitionIdentifier:StringFromUTF8(value.definitionIdentifier)
+paintedAtlasMasterDefinitionIdentifier:StringFromUTF8(
+            value.paintedAtlasMasterDefinitionIdentifier)
+                paintedAtlasBakeProof:StringFromUTF8(value.paintedAtlasBakeProof)
                        geometryKind:static_cast<Core3DSceneGeometryKind>(value.geometryKind)
             nativeC1DefinitionData:wireDefinition
                  nativeC1OwnerData:wireOwner

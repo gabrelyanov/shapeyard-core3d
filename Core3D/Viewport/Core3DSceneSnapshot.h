@@ -255,6 +255,7 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, assign, readonly) uint32_t pixelWidth;
 @property (nonatomic, assign, readonly) uint32_t pixelHeight;
 @property (nonatomic, copy, readonly) NSData *encodedData;
+@property (nonatomic, assign, readonly, getter=isPaintedAtlasDerivative) BOOL paintedAtlasDerivative;
 
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
@@ -370,6 +371,11 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, assign, readonly) uint64_t nativeC1DefinitionRevision;
 @property (nonatomic, assign, readonly) uint64_t nativeC1FrameRevision;
 @property (nonatomic, copy, readonly) NSString *definitionIdentifier;
+//! Empty on master geometry. Non-empty values identify the current ephemeral
+//! final-UV SYEB derivative and the master definition it leaves untouched.
+@property (nonatomic, copy, readonly) NSString *paintedAtlasMasterDefinitionIdentifier;
+@property (nonatomic, copy, readonly) NSString *paintedAtlasBakeProof;
+@property (nonatomic, assign, readonly, getter=isPaintedAtlasDerivative) BOOL paintedAtlasDerivative;
 @property (nonatomic, assign, readonly) uint64_t geometryRevision;
 @property (nonatomic, strong, readonly) Core3DSceneBounds *localBounds;
 //! Exact semantic topology cardinality. All-zero values mean this render mesh

@@ -522,6 +522,13 @@ __attribute__((objc_subclassing_restricted))
 //! changes model/history/selection.
 - (Core3DRetainedFinishingOpening *_Nullable)openRetainedFinishingOpeningForEntityIdentifier:(NSString *)entityIdentifier
     NS_SWIFT_NAME(openRetainedFinishingOpening(entityIdentifier:));
+//! One-shot, read-only E1 observation for a host-resolved retained-finishing
+//! owner. The complete observation.v2 descriptor is returned only while the
+//! source, resource and dependent-replay closure evidence is current and
+//! canonical. Main-thread only; nil never changes model/history/selection and
+//! the transient native-opening busy fence is released before return.
+- (NSDictionary<NSString *, id> *_Nullable)captureRetainedFinishingObservationForEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(captureRetainedFinishingObservation(entityIdentifier:));
 //! Capture one fail-closed asset-atlas opening from the exact current
 //! whole-object selection set of admitted retained-finishing members.
 //! Main-thread only; nil never changes model/history.
@@ -590,6 +597,16 @@ __attribute__((objc_subclassing_restricted))
 //! UI-test fixture data for one retained cylindrical solid in the requested units.
 + (NSData *_Nullable)debugRetainedFinishingFixtureAssetData:(double)metersPerUnit
     NS_SWIFT_NAME(debugRetainedFinishingFixtureAssetData(metersPerUnit:));
+//! Independent DEBUG CaptureSource evidence used to prove the observation's
+//! three source/resource digests and full-width source fences.
+- (NSDictionary<NSString *, id> *_Nullable)debugRetainedFinishingCaptureEvidenceForEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugRetainedFinishingCaptureEvidence(entityIdentifier:));
+//! Bounded DEBUG-only setup for the E1 observation tests. Supported scenarios
+//! are dependentPattern, stale and corrupt; setup may add one
+//! history command, while the observation itself remains strictly read-only.
+- (BOOL)debugConfigureRetainedFinishingObservationForEntityIdentifier:(NSString *)entityIdentifier
+                                                              scenario:(NSString *)scenario
+    NS_SWIFT_NAME(debugConfigureRetainedFinishingObservation(entityIdentifier:scenario:));
 //! UI-test fixture: asset data for the frozen E2 two-part box/cylinder atlas
 //! fixture in the requested unit system. nil on any failure; never mutates an
 //! open document.

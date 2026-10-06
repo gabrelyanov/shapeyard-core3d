@@ -36,8 +36,9 @@ struct ProfileCurveFaceResult {
     std::array<double,4> authoredOuterBounds{};
 };
 
-inline bool BuildProfileCurveFace(const ProfileCurveSection& section, int plane,
-    const std::atomic_bool& cancelled, ProfileCurveFaceResult& output) noexcept {
+inline bool BuildProfileCurveFaceImpl(const ProfileCurveSection& section, int plane,
+    const std::atomic_bool& cancelled, ProfileCurveFaceResult& output,
+    ProfileProducerAccounting* accounting) noexcept {
     output = {};
     try {
         constexpr double clearance = 1e-3, tolerance = 1e-7;
@@ -60,27 +61,38 @@ inline bool BuildProfileCurveFace(const ProfileCurveSection& section, int plane,
         };
         std::vector<Loop> prepared;
         const auto distant = [&](const TopoDS_Shape& a,const TopoDS_Shape& b) {
-            if (cancelled.load()) return false;
+            if (cancelled.load() || (accounting && !accounting->kernelStage())) return false;
+            if (accounting
+                && (retained_topology_budget::ChargeTraversal(a,accounting->budget,cancelled,
+                        accounting->kernelSite) != retained_topology_budget::WalkStatus::Completed
+                    || retained_topology_budget::ChargeTraversal(b,accounting->budget,cancelled,
+                        accounting->kernelSite) != retained_topology_budget::WalkStatus::Completed)) return false;
             BRepExtrema_DistShapeShape distance(a,b);
             return !cancelled.load() && distance.IsDone() && distance.NbSolution() > 0
                 && std::isfinite(distance.Value()) && distance.Value() >= clearance;
         };
         for (std::size_t index = 0; index <= section.inner.size(); ++index) {
-            if (cancelled.load()) return false;
+            if (cancelled.load() || !ProfileProducerVisit(accounting)) return false;
             const auto& loop = index == 0 ? section.outer : section.inner[index-1];
             Loop built;
-            if (!InspectProfileCurveLoopStructure(loop,origin,identifiers,
-                verticesInspected,segmentsInspected,built.inspection)) return false;
+            const bool inspected = accounting
+                ? InspectProfileCurveLoopStructure(loop,origin,identifiers,
+                    verticesInspected,segmentsInspected,built.inspection,*accounting)
+                : InspectProfileCurveLoopStructure(loop,origin,identifiers,
+                    verticesInspected,segmentsInspected,built.inspection);
+            if (!inspected) return false;
             std::vector<TopoDS_Vertex> vertices;
             for (const auto& vertex : loop.vertices) {
-                if (cancelled.load()) return false;
+                if (cancelled.load() || !ProfileProducerVisit(accounting)
+                    || (accounting && !accounting->kernelStage())) return false;
                 BRepBuilderAPI_MakeVertex made(ProfilePointInPlane(vertex.point,plane));
                 if (!made.IsDone()) return false;
                 vertices.push_back(made.Vertex());
             }
             BRepBuilderAPI_MakeWire maker;
             for (std::size_t edgeIndex = 0; edgeIndex < loop.segments.size(); ++edgeIndex) {
-                if (cancelled.load()) return false;
+                if (cancelled.load() || !ProfileProducerVisit(accounting)
+                    || (accounting && !accounting->kernelStage())) return false;
                 const auto& segment = loop.segments[edgeIndex];
                 const auto& first = vertices[edgeIndex];
                 const auto& last = vertices[(edgeIndex+1)%vertices.size()];
@@ -103,6 +115,7 @@ inline bool BuildProfileCurveFace(const ProfileCurveSection& section, int plane,
                     edge = segment.sweepDegrees > 0 ? made.Edge() : TopoDS::Edge(made.Edge().Reversed());
                 }
                 if (edge.IsNull()) return false;
+                if (accounting && !accounting->kernelStage()) return false;
                 maker.Add(edge);
                 if (!maker.IsDone()) return false;
                 built.edges.push_back(edge);
@@ -110,11 +123,24 @@ inline bool BuildProfileCurveFace(const ProfileCurveSection& section, int plane,
             const TopoDS_Wire authoredWire = maker.Wire();
             if (authoredWire.IsNull() || BRepCheck_Wire(authoredWire).Closed() != BRepCheck_NoError) return false;
             built.positiveWire = built.inspection.signedArea > 0 ? authoredWire : TopoDS::Wire(authoredWire.Reversed());
+            if (accounting && !accounting->kernelStage()) return false;
             BRepBuilderAPI_MakeFace face(support,built.positiveWire,Standard_True);
             if (!face.IsDone()) return false;
             built.positiveFace = face.Face();
             BRepCheck_Wire wireCheck(built.positiveWire);
             TopoDS_Edge firstIntersection,secondIntersection;
+            if (accounting) {
+                retained_topology_budget::Census census;
+                if (retained_topology_budget::CensusTopology(built.positiveFace,
+                        accounting->budget,cancelled,census,accounting->kernelSite,true)
+                        != retained_topology_budget::WalkStatus::Completed
+                    || !retained_topology_budget::ReserveTraversal(census,accounting->budget,
+                        accounting->kernelSite)
+                    || !retained_topology_budget::ReserveTraversal(census,accounting->budget,
+                        accounting->kernelSite)
+                    || !retained_topology_budget::ReserveTraversal(census,accounting->budget,
+                        accounting->kernelSite)) return false;
+            }
             if (wireCheck.Closed2d(built.positiveFace) != BRepCheck_NoError
                 || wireCheck.SelfIntersect(built.positiveFace,firstIntersection,secondIntersection) != BRepCheck_NoError
                 || !BRepCheck_Analyzer(built.positiveFace,Standard_True).IsValid()) return false;
@@ -122,6 +148,7 @@ inline bool BuildProfileCurveFace(const ProfileCurveSection& section, int plane,
             // clearance; cancellation remains observable between bounded queries.
             for (std::size_t i = 0; i < built.edges.size(); ++i)
                 for (std::size_t j = i+1; j < built.edges.size(); ++j) {
+                    if (cancelled.load() || !ProfileProducerVisit(accounting)) return false;
                     if (j == i+1 || (i == 0 && j+1 == built.edges.size())) continue;
                     if (!distant(built.edges[i],built.edges[j])) return false;
                 }
@@ -136,21 +163,24 @@ inline bool BuildProfileCurveFace(const ProfileCurveSection& section, int plane,
         // Disjoint connected loops have a consistent containment relation.
         // Clearance rules exclude touching boundaries before point classification.
         for (std::size_t i = 1; i < prepared.size(); ++i) {
+            if (cancelled.load() || !ProfileProducerVisit(accounting)) return false;
             if (!distant(prepared.front().positiveWire,prepared[i].positiveWire)) return false;
             BRepClass_FaceClassifier outer(prepared.front().positiveFace,prepared[i].representative,tolerance);
             if (outer.State() != TopAbs_IN) return false;
             for (std::size_t j = 1; j < i; ++j) {
+                if (cancelled.load() || !ProfileProducerVisit(accounting)) return false;
                 if (!distant(prepared[i].positiveWire,prepared[j].positiveWire)) return false;
                 BRepClass_FaceClassifier a(prepared[i].positiveFace,prepared[j].representative,tolerance);
                 BRepClass_FaceClassifier b(prepared[j].positiveFace,prepared[i].representative,tolerance);
                 if (a.State() != TopAbs_OUT || b.State() != TopAbs_OUT) return false;
             }
         }
+        if (accounting && !accounting->kernelStage()) return false;
         BRepBuilderAPI_MakeFace face(support,prepared.front().positiveWire,Standard_True);
         if (!face.IsDone()) return false;
         double area = 0,firstMoment = 0;
         for (std::size_t i = 0; i < prepared.size(); ++i) {
-            if (cancelled.load()) return false;
+            if (cancelled.load() || !ProfileProducerVisit(accounting)) return false;
             const auto& loop = prepared[i];
             const double orientation = loop.inspection.signedArea > 0 ? 1 : -1;
             const double role = i == 0 ? 1 : -1;
@@ -161,6 +191,14 @@ inline bool BuildProfileCurveFace(const ProfileCurveSection& section, int plane,
         }
         firstMoment += origin.X()*area;
         const TopoDS_Face result = face.Face();
+        if (accounting) {
+            retained_topology_budget::Census census;
+            if (retained_topology_budget::CensusTopology(result,accounting->budget,
+                    cancelled,census,accounting->kernelSite,true)
+                    != retained_topology_budget::WalkStatus::Completed
+                || !retained_topology_budget::ReserveTraversal(census,accounting->budget,
+                    accounting->kernelSite)) return false;
+        }
         if (cancelled.load() || result.IsNull() || !std::isfinite(area) || area < 1e-6
             || !std::isfinite(firstMoment) || !BRepCheck_Analyzer(result,Standard_True).IsValid()) return false;
         GProp_GProps properties;
@@ -176,5 +214,14 @@ inline bool BuildProfileCurveFace(const ProfileCurveSection& section, int plane,
         output.authoredOuterBounds = prepared.front().inspection.bounds;
         return true;
     } catch (...) { output = {}; return false; }
+}
+inline bool BuildProfileCurveFace(const ProfileCurveSection& section, int plane,
+    const std::atomic_bool& cancelled, ProfileCurveFaceResult& output) noexcept {
+    return BuildProfileCurveFaceImpl(section,plane,cancelled,output,nullptr);
+}
+inline bool BuildProfileCurveFace(const ProfileCurveSection& section, int plane,
+    const std::atomic_bool& cancelled, ProfileCurveFaceResult& output,
+    ProfileProducerAccounting& accounting) noexcept {
+    return BuildProfileCurveFaceImpl(section,plane,cancelled,output,&accounting);
 }
 } // namespace core3d

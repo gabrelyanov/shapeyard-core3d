@@ -215,9 +215,10 @@ struct ProfileCurveSectionInspection {
     std::array<double,4> outerBounds{};
     std::vector<std::array<double,4>> innerBounds;
 };
-inline bool InspectProfileCurveSection(const ProfileCurveSection& section,
+inline bool InspectProfileCurveSectionImpl(const ProfileCurveSection& section,
     ProfileCurveSectionInspection& output,
-    const std::function<bool()>& cancelled = {}) noexcept {
+    const std::function<bool()>& cancelled,
+    ProfileProducerAccounting* accounting) noexcept {
     output = {};
     try {
         using namespace profile_curve_admission;
@@ -229,7 +230,13 @@ inline bool InspectProfileCurveSection(const ProfileCurveSection& section,
         double relativeMoment = 0;
         std::vector<Loop> loops;loops.reserve(section.inner.size()+1);
         const auto admitStructure=[&](const ProfileCurveLoop& loop) {
-            if (!InspectProfileCurveLoopStructure(loop,origin,ids,vertexCount,segmentCount,inspection))
+            if (!ProfileProducerVisit(accounting, loop.segments.size())) return false;
+            const bool inspected = accounting
+                ? InspectProfileCurveLoopStructure(loop,origin,ids,vertexCount,
+                    segmentCount,inspection,*accounting)
+                : InspectProfileCurveLoopStructure(loop,origin,ids,vertexCount,
+                    segmentCount,inspection);
+            if (!inspected)
                 return false;
             const double role=loops.empty()?1.0:-1.0;
             const double orientation=inspection.signedArea>0?1.0:-1.0;
@@ -240,10 +247,14 @@ inline bool InspectProfileCurveSection(const ProfileCurveSection& section,
             loops.push_back(edges(loop));return true;
         };
         if (!admitStructure(section.outer)) return false;
-        for (const auto& loop:section.inner) if (!admitStructure(loop)) return false;
+        for (const auto& loop:section.inner) {
+            if ((cancelled && cancelled()) || !ProfileProducerVisit(accounting)
+                || !admitStructure(loop)) return false;
+        }
         for (const auto& loop:loops) for (std::size_t i=0;i<loop.size();++i) {
-            if (cancelled && cancelled()) return false;
+            if ((cancelled && cancelled()) || !ProfileProducerVisit(accounting)) return false;
             for (std::size_t j=i+1;j<loop.size();++j) {
+                if ((cancelled && cancelled()) || !ProfileProducerVisit(accounting)) return false;
                 const auto& a=loop[i];const auto& b=loop[j];
                 const auto contacts=intersections(a,b);
                 if (contacts.overlap) return false;
@@ -261,13 +272,19 @@ inline bool InspectProfileCurveSection(const ProfileCurveSection& section,
         }
         for (std::size_t i=1;i<loops.size();++i) {
             for (std::size_t j=0;j<i;++j) for (const auto& a:loops[i]) {
-                if (cancelled && cancelled()) return false;
-                for (const auto& b:loops[j]) if (pairDistance(a,b)<clearance) return false;
+                if ((cancelled && cancelled()) || !ProfileProducerVisit(accounting)) return false;
+                for (const auto& b:loops[j]) {
+                    if ((cancelled && cancelled()) || !ProfileProducerVisit(accounting)) return false;
+                    if (pairDistance(a,b)<clearance) return false;
+                }
             }
+            if ((cancelled && cancelled()) || !ProfileProducerVisit(accounting)) return false;
             if (!inside(loops[i].front().a,loops.front())) return false;
-            for (std::size_t j=1;j<i;++j)
+            for (std::size_t j=1;j<i;++j) {
+                if ((cancelled && cancelled()) || !ProfileProducerVisit(accounting)) return false;
                 if (inside(loops[i].front().a,loops[j]) || inside(loops[j].front().a,loops[i]))
                     return false;
+            }
         }
         measured.firstMomentX=relativeMoment+origin.X()*measured.area;
         if ((cancelled && cancelled()) || !std::isfinite(measured.area) || measured.area<1e-6
@@ -275,9 +292,26 @@ inline bool InspectProfileCurveSection(const ProfileCurveSection& section,
         output=measured;return true;
     } catch (...) { output={};return false; }
 }
+inline bool InspectProfileCurveSection(const ProfileCurveSection& section,
+    ProfileCurveSectionInspection& output,
+    const std::function<bool()>& cancelled = {}) noexcept {
+    return InspectProfileCurveSectionImpl(section,output,cancelled,nullptr);
+}
+inline bool InspectProfileCurveSection(const ProfileCurveSection& section,
+    ProfileCurveSectionInspection& output,
+    const std::function<bool()>& cancelled,
+    ProfileProducerAccounting& accounting) noexcept {
+    return InspectProfileCurveSectionImpl(section,output,cancelled,&accounting);
+}
 inline bool ValidateProfileCurveSection(const ProfileCurveSection& section,
     const std::function<bool()>& cancelled = {}) noexcept {
     ProfileCurveSectionInspection inspection;
     return InspectProfileCurveSection(section,inspection,cancelled);
+}
+inline bool ValidateProfileCurveSection(const ProfileCurveSection& section,
+    const std::function<bool()>& cancelled,
+    ProfileProducerAccounting& accounting) noexcept {
+    ProfileCurveSectionInspection inspection;
+    return InspectProfileCurveSection(section,inspection,cancelled,accounting);
 }
 } // namespace core3d

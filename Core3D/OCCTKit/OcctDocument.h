@@ -239,6 +239,15 @@ enum class OcctPaintedAtlasBakeCurrentness : int {
     Absent = 0, Current = 1, Stale = 2
 };
 
+//! Read-only E2b consumer handoff. The UV assignment and PNG envelopes are
+//! regenerated/read from current SYEA/SYEB state and never installed on the
+//! master shape or material. An absent or stale bake yields no derivative.
+struct OcctPaintedAtlasDerivative final {
+    core3d::painted_atlas_bake::Definition bake;
+    core3d::asset_atlas::MemberUVAssignment assignment;
+    std::vector<core3d::face_image::ResourceEnvelope> resources;
+};
+
 //! Read-only resolved region. Ordinals are session-local and never persistent IDs.
 struct OcctMeshRegionExtrudePreview {
     std::vector<std::uint32_t> triangleIndices;
@@ -1556,6 +1565,9 @@ public:
     Standard_EXPORT OcctPaintedAtlasBakeCurrentness PaintedAtlasBakeCurrentness(
         const core3d::asset_atlas::Key& atlas,
         core3d::painted_atlas_bake::Definition* record = nullptr) const noexcept;
+    Standard_EXPORT Standard_Boolean PaintedAtlasDerivativeForOwner(
+        const core3d::retained_recipe::OwnerKey& owner,
+        OcctPaintedAtlasDerivative& derivative) const noexcept;
     //! E3 face-image document surface (278b portion 2). The mutating entry
     //! points never open their own mutation route: like the finishing/atlas
     //! owners above, the caller holds the already-open OCAF command under the

@@ -4,17 +4,26 @@
 #import "../Viewport/Core3DSceneSnapshot.h"
 
 #include "../OCCTKit/NativeOpeningContext.hxx"
+#include "../OCCTKit/NativeOpeningDependentReplay.hxx"
 #include "../OCCTKit/OcctDocument.h"
+#include "../OCCTKit/FeaturePatternPersistence.hxx"
+#include "../OCCTKit/PathArrayPersistence.hxx"
+#include "../OCCTKit/PatternPersistence.hxx"
 #include "../OCCTKit/ReceiptRecord.hxx"
 #include "../OCCTKit/RetainedFinishingProducer.hxx"
 #include "Core3DViewer.h"
 
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
+#include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <deque>
 #include <memory>
+#include <set>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace {
 using FinishingDefinition = core3d::retained_finishing::Definition;
@@ -182,6 +191,186 @@ NSString *CurrentnessText(OcctRetainedFinishingCurrentness value) {
         case OcctRetainedFinishingCurrentness::Absent: return @"absent";
     }
 }
+
+using ReplayFamily = core3d::dependent_replay::Family;
+using ReplayUUID = core3d::dependent_replay::UUID;
+
+struct ObservationCensus final {
+    std::size_t supported = 0;
+    std::size_t unsupported = 0;
+};
+
+struct ObservationFrontier final {
+    ReplayUUID entity{};
+    std::vector<ReplayUUID> ancestry;
+};
+
+bool ProductionSupports(ReplayFamily family) noexcept {
+    switch (family) {
+        case ReplayFamily::PatternD2:
+        case ReplayFamily::PathArrayD3:
+        case ReplayFamily::FeaturePatternD4:
+            return true;
+    }
+    return false;
+}
+
+// Read-only mirror of R179DiscoverDependentClosure. The three persistence
+// readers are the production readers, membership/dedupe/frontier rules match
+// the document closure, and every budget/cycle/corruption failure refuses the
+// whole observation rather than publishing partial or guessed counts.
+bool CaptureObservationCensus(const Handle(TDocStd_Document)& document,
+                              const OwnerKey& owner,
+                              ObservationCensus& output) noexcept {
+    output = {};
+    try {
+        if (document.IsNull() || document->GetData().IsNull()
+            || !core3d::retained_recipe::Valid(owner)) return false;
+        std::vector<core3d::pattern::Record> d2;
+        std::vector<core3d::path_array::Record> d3;
+        std::vector<core3d::feature_pattern::Record> d4;
+        if (!core3d::pattern::ReadAll(document, d2)
+            || !core3d::path_array::ReadAll(document, d3)
+            || !core3d::feature_pattern::ReadAll(document, d4)) return false;
+
+        std::deque<ObservationFrontier> frontier;
+        frontier.push_back({owner.entity, {owner.entity}});
+        std::set<ReplayUUID> expanded;
+        std::set<std::pair<ReplayFamily, ReplayUUID>> features;
+        std::size_t recordBytes = 0;
+        constexpr std::size_t maximumRecords = 128;
+        constexpr std::size_t maximumDocumentBytes = 8 * 1024 * 1024;
+        const auto append = [&](ReplayFamily family, const ReplayUUID& feature,
+                                const ReplayUUID& result,
+                                const std::vector<std::uint8_t>& bytes,
+                                const ObservationFrontier& current,
+                                bool expandResult) -> bool {
+            if (expandResult && result != current.entity
+                && std::find(current.ancestry.begin(), current.ancestry.end(), result)
+                    != current.ancestry.end()) return false;
+            if (!features.insert({family, feature}).second) return true;
+            if (features.size() > maximumRecords
+                || bytes.size() > maximumDocumentBytes
+                    - std::min(recordBytes, maximumDocumentBytes)) return false;
+            recordBytes += bytes.size();
+            if (ProductionSupports(family)) ++output.supported;
+            else ++output.unsupported;
+            if (expandResult && result != current.entity) {
+                ObservationFrontier next{result, current.ancestry};
+                next.ancestry.push_back(result);
+                frontier.push_back(std::move(next));
+            }
+            return true;
+        };
+
+        while (!frontier.empty()) {
+            ObservationFrontier current = std::move(frontier.front());
+            frontier.pop_front();
+            if (!expanded.insert(current.entity).second) continue;
+            for (const auto& record : d2) {
+                const auto& definition = record.definition;
+                if (definition.owner.document != owner.document
+                    || definition.source.document != owner.document) return false;
+                const bool source = definition.source.entity == current.entity;
+                const bool host = definition.owner.entity == current.entity;
+                if ((source || host) && !append(ReplayFamily::PatternD2,
+                        definition.feature, definition.owner.entity, record.bytes,
+                        current, source)) return false;
+            }
+            for (const auto& record : d3) {
+                const auto& definition = record.definition;
+                if (definition.owner.document != owner.document
+                    || definition.source.document != owner.document
+                    || definition.path.owner.document != owner.document) return false;
+                const bool source = definition.source.entity == current.entity;
+                const bool path = definition.path.owner.entity == current.entity;
+                const bool host = definition.owner.entity == current.entity;
+                if ((source || path || host) && !append(ReplayFamily::PathArrayD3,
+                        definition.feature, definition.owner.entity, record.bytes,
+                        current, source || path)) return false;
+            }
+            for (const auto& record : d4) {
+                const auto& definition = record.definition;
+                if (definition.host.document != owner.document
+                    || definition.sourceCut.document != owner.document) return false;
+                const bool source = definition.sourceCut.entity == current.entity;
+                const bool host = definition.host.entity == current.entity;
+                if ((source || host) && !append(ReplayFamily::FeaturePatternD4,
+                        definition.feature, definition.host.entity, record.bytes,
+                        current, source)) return false;
+            }
+        }
+        return output.supported + output.unsupported == features.size();
+    } catch (...) { output = {}; return false; }
+}
+
+NSDictionary<NSString *, id> *CaptureObservation(
+    ControllerFinishingInput& input) noexcept {
+    try {
+        if (input.owner.IsNull() || !input.context) return nil;
+        const auto document = input.owner->Document();
+        const auto currentness = input.owner->RetainedFinishingCurrentness(input.key);
+        if (currentness == OcctRetainedFinishingCurrentness::Stale) return nil;
+
+        FinishingDefinition value;
+        if (input.owner->RetainedFinishingCurrentness(input.key, &value) != currentness)
+            return nil;
+        core3d::retained_finishing::producer::Capture capture;
+        if (!core3d::retained_finishing::producer::CaptureSource(
+                document, input.key, capture)) return nil;
+        FinishingSettings settings;
+        std::string diagnosis;
+        if (!core3d::retained_recipe::Nonzero(value.finishing)) {
+            TDF_Label label;
+            if (!core3d::retained_finishing::owner::ResolveOwnerLabel(
+                    document, input.key, label)
+                || core3d::retained_finishing::producer::BuildDerivative(
+                    document, label, capture, settings, value, diagnosis)
+                    != core3d::retained_finishing::producer::Status::Produced) return nil;
+        }
+
+        ObservationCensus census;
+        if (!CaptureObservationCensus(document, input.key, census)) return nil;
+        core3d::retained_finishing::producer::Capture refenced;
+        if (!input.context->isCurrent(64, 64)
+            || input.owner->RetainedFinishingCurrentness(input.key) != currentness
+            || !core3d::retained_finishing::producer::CaptureSource(
+                document, input.key, refenced)
+            || !(refenced.source == capture.source)
+            || refenced.resourceManifest != capture.resourceManifest) return nil;
+
+        NSString *entity = [NSString stringWithUTF8String:input.selected.c_str()] ?: @"";
+        NSString *generation = [NSString stringWithUTF8String:
+            std::to_string(capture.source.documentGeneration).c_str()] ?: @"";
+        NSString *revision = [NSString stringWithUTF8String:
+            std::to_string(capture.source.modelRevision).c_str()] ?: @"";
+        return @{
+            @"descriptorSchema": @"shapeyard.retained-finishing.observation.v2",
+            @"ownerEntityIdentifier": entity,
+            @"sourceDocumentGeneration": generation,
+            @"sourceModelRevision": revision,
+            @"sourceGeometryDigest": Hex(capture.source.geometry),
+            @"sourceRecipeDigest": Hex(capture.source.recipe),
+            @"sourceResourceDigest": Hex(capture.resourceManifest),
+            @"currentness": CurrentnessText(currentness),
+            @"quality": value.quality == FinishingQuality::VerifiedChart
+                ? @"verifiedChart" : @"diagnosedFallback",
+            @"unwrapPolicy": PolicyText(value.unwrap),
+            @"resolutionTexels": @(settings.resolutionTexels),
+            @"gutterTexels": @(settings.gutterTexels),
+            @"supportedDescendantCount": @(census.supported),
+            @"unsupportedDescendantCount": @(census.unsupported),
+        };
+    } catch (...) { return nil; }
+}
+
+#if DEBUG
+ReplayUUID ObservationUUID() noexcept {
+    ReplayUUID value{};
+    [NSUUID.UUID getUUIDBytes:value.data()];
+    return value;
+}
+#endif
 
 Core3DProfileConstructionResult FinishMutation(
     const std::shared_ptr<core3d::native_opening::CommandLease>& lease,
@@ -426,11 +615,119 @@ void DeliverMutation(void (^completion)(Core3DProfileConstructionResult, NSStrin
         ? [[Core3DRetainedFinishingOpening alloc] initWithInput:std::move(input)] : nil;
 }
 
+- (NSDictionary<NSString *, id> *)captureRetainedFinishingObservationForEntityIdentifier:(NSString *)entityIdentifier {
+    ControllerFinishingInput input;
+    return CaptureControllerFinishingInputForIdentifier(self, entityIdentifier, input)
+        ? CaptureObservation(input) : nil;
+}
+
 #if DEBUG
 + (NSData *)debugRetainedFinishingFixtureAssetData:(double)metersPerUnit {
     if (!NSThread.isMainThread || (metersPerUnit != 0.001 && metersPerUnit != 1.0))
         return nil;
-    return [self debugB04EmptyDocumentFixtureDataWithMetersPerUnit:metersPerUnit];
+    return [self debugAssetAtlasFixtureAssetData:metersPerUnit];
+}
+
+- (NSDictionary<NSString *, id> *)debugRetainedFinishingCaptureEvidenceForEntityIdentifier:(NSString *)entityIdentifier {
+    ControllerFinishingInput input;
+    if (!CaptureControllerFinishingInputForIdentifier(self, entityIdentifier, input)) return nil;
+    core3d::retained_finishing::producer::Capture capture;
+    if (!core3d::retained_finishing::producer::CaptureSource(
+            input.owner->Document(), input.key, capture)) return nil;
+    return @{
+        @"sourceDocumentGeneration": [NSString stringWithUTF8String:
+            std::to_string(capture.source.documentGeneration).c_str()] ?: @"",
+        @"sourceModelRevision": [NSString stringWithUTF8String:
+            std::to_string(capture.source.modelRevision).c_str()] ?: @"",
+        @"sourceGeometryDigest": Hex(capture.source.geometry),
+        @"sourceRecipeDigest": Hex(capture.source.recipe),
+        @"sourceResourceDigest": Hex(capture.resourceManifest),
+    };
+}
+
+- (BOOL)debugConfigureRetainedFinishingObservationForEntityIdentifier:(NSString *)entityIdentifier
+                                                              scenario:(NSString *)scenario {
+    if (!NSThread.isMainThread || ![scenario isKindOfClass:NSString.class]) return NO;
+    GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)self.glController : nil;
+    const std::shared_ptr<core3d::Core3DViewer> viewer = gl ? gl.viewer : nullptr;
+    const Handle(OcctDocument) native = viewer ? viewer->getDocument() : Handle(OcctDocument)();
+    OwnerKey key;
+    if (native.IsNull() || !KeyForSelected(native, entityIdentifier.UTF8String ?: "", key))
+        return NO;
+    const auto document = native->Document();
+    if (document.IsNull() || document->HasOpenCommand()) return NO;
+    try {
+        if ([scenario isEqualToString:@"dependentPattern"]) {
+            const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            if (shapes.IsNull()) return NO;
+            TDF_LabelSequence roots; shapes->GetFreeShapes(roots);
+            OwnerKey result;
+            for (Standard_Integer index = 1; index <= roots.Length(); ++index) {
+                const std::string identifier = native->EntityIdentifierForLabel(roots.Value(index));
+                if (identifier != (entityIdentifier.UTF8String ?: "")
+                    && KeyForSelected(native, identifier, result)) break;
+                result = {};
+            }
+            if (!core3d::retained_recipe::Valid(result)) return NO;
+            core3d::pattern::Definition definition;
+            definition.owner = result;
+            definition.feature = ObservationUUID();
+            definition.source = {key.document, key.entity, key.definition, ObservationUUID()};
+            definition.kind = core3d::pattern::Kind::Linear;
+            definition.rowCount = 1; definition.columnCount = 2;
+            definition.columnSpacing = 1;
+            definition.issuance.nextLocalID = 3;
+            definition.members = {
+                {key.entity, 1, {0, 0}, core3d::pattern::MemberState::Active},
+                {result.entity, 2, {0, 1}, core3d::pattern::MemberState::Active},
+            };
+            document->NewCommand();
+            core3d::pattern::Record record;
+            if (!core3d::pattern::Stage(document, definition, record)
+                || !document->CommitCommand()) {
+                if (document->HasOpenCommand()) document->AbortCommand();
+                return NO;
+            }
+            return YES;
+        }
+        if ([scenario isEqualToString:@"stale"]) {
+            TDF_Label ownerLabel;
+            core3d::retained_finishing::Record record;
+            if (!core3d::retained_finishing::owner::ResolveOwnerLabel(
+                    document, key, ownerLabel)
+                || !core3d::retained_finishing::Read(document, ownerLabel, record)
+                || !record.value) return NO;
+            auto payload = std::make_shared<core3d::retained_finishing::Payload>();
+            payload->definition = record.value->definition;
+            payload->definition.source.geometry[0] ^= 0x80;
+            if (!core3d::retained_finishing::Encode(
+                    payload->definition, payload->bytes)) return NO;
+            document->NewCommand();
+            if (!core3d::retained_finishing::Attribute::StageCommitted(
+                    document, ownerLabel, payload)
+                || !document->CommitCommand()) {
+                if (document->HasOpenCommand()) document->AbortCommand();
+                return NO;
+            }
+            return YES;
+        }
+        if ([scenario isEqualToString:@"corrupt"]) {
+            document->NewCommand();
+            const TDF_Label root = document->Main().FindChild(
+                core3d::pattern::DocumentRootTag, Standard_True);
+            TDataStd_AsciiString::Set(root, TCollection_AsciiString(
+                "corrupt retained pattern table"));
+            if (!document->CommitCommand()) {
+                if (document->HasOpenCommand()) document->AbortCommand();
+                return NO;
+            }
+            return YES;
+        }
+    } catch (...) {
+        if (!document.IsNull() && document->HasOpenCommand()) document->AbortCommand();
+    }
+    return NO;
 }
 #endif
 @end

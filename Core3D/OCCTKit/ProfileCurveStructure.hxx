@@ -2,9 +2,11 @@
 
 // Structural inspection alone is not complete solid admission:
 // exact intersection, containment, clearance and native face checks must follow.
+#include "RetainedTopologyBudget.hxx"
 #include <gp_Pnt2d.hxx>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -12,6 +14,39 @@
 #include <vector>
 
 namespace core3d {
+
+// A counted Profile producer borrows the enclosing operation's counter and
+// stop token. Compatibility callers pass no accounting object and retain the
+// original validation/build entry points byte-for-byte at their call sites.
+// Cancellation is always observed before a debit, so an already-cancelled
+// operation cannot be converted into a budget refusal by the next phase.
+struct ProfileProducerAccounting {
+    retained_topology_budget::Counter& budget;
+    const std::atomic_bool& cancelled;
+    retained_topology_budget::Site valueSite =
+        retained_topology_budget::Site::C20R2EditedPrefix;
+    retained_topology_budget::Site kernelSite =
+        retained_topology_budget::Site::C16KernelBuild;
+
+    ProfileProducerAccounting(retained_topology_budget::Counter& counter,
+        const std::atomic_bool& stop) noexcept : budget(counter), cancelled(stop) {}
+
+    bool stopped() const noexcept { return cancelled.load(); }
+    bool visit(std::size_t count) noexcept {
+        return !stopped() && budget.visit(count, valueSite) && !stopped();
+    }
+    bool kernelVisit(std::size_t count) noexcept {
+        return !stopped() && budget.visit(count, kernelSite) && !stopped();
+    }
+    bool kernelStage() noexcept {
+        return !stopped() && budget.beginStage(kernelSite) && !stopped();
+    }
+};
+
+inline bool ProfileProducerVisit(ProfileProducerAccounting* accounting,
+    std::size_t count = 1) noexcept {
+    return !accounting || accounting->visit(count);
+}
 
 // IDs are scoped to one persistent feature. Independent copies have a new
 // feature ID and can retain local element IDs for later selected-element edits.
@@ -48,11 +83,12 @@ struct ProfileCurveLoopInspection {
     std::array<double, 4> bounds{}; // minX,maxX,minY,maxY in authored coordinates.
 };
 
-inline bool InspectProfileCurveLoopStructure(
+inline bool InspectProfileCurveLoopStructureImpl(
     const ProfileCurveLoop& loop, const gp_Pnt2d& integrationOrigin,
     std::set<ProfileCurveID>& sectionIdentifiers,
     std::size_t& inspectedVertices, std::size_t& inspectedSegments,
-    ProfileCurveLoopInspection& output) noexcept {
+    ProfileCurveLoopInspection& output,
+    ProfileProducerAccounting* accounting) noexcept {
     output = {};
     try {
         constexpr std::size_t maximumElements = 512;
@@ -66,17 +102,22 @@ inline bool InspectProfileCurveLoopStructure(
         const auto claim = [&](ProfileCurveID identifier) {
             return identifier != 0 && sectionIdentifiers.insert(identifier).second;
         };
-        if (!claim(loop.identifier) || !finitePoint(integrationOrigin)
+        if (!ProfileProducerVisit(accounting) || !claim(loop.identifier)
+            || !finitePoint(integrationOrigin)
             || loop.vertices.size() < 2 || loop.vertices.size() > maximumElements
             || loop.segments.size() != loop.vertices.size()
             || inspectedVertices > maximumElements - loop.vertices.size()
             || inspectedSegments > maximumElements - loop.segments.size()) return false;
         inspectedVertices += loop.vertices.size();
         inspectedSegments += loop.segments.size();
-        for (const auto& vertex : loop.vertices)
+        for (const auto& vertex : loop.vertices) {
+            if (!ProfileProducerVisit(accounting)) return false;
             if (!claim(vertex.identifier) || !finitePoint(vertex.point)) return false;
-        for (const auto& segment : loop.segments)
+        }
+        for (const auto& segment : loop.segments) {
+            if (!ProfileProducerVisit(accounting)) return false;
             if (!claim(segment.identifier)) return false;
+        }
         ProfileCurveLoopInspection result;
         result.bounds = {limit, -limit, limit, -limit};
         const auto includePoint = [&](const gp_Pnt2d& point) {
@@ -86,6 +127,7 @@ inline bool InspectProfileCurveLoopStructure(
             result.bounds[3] = std::max(result.bounds[3], point.Y());
         };
         for (std::size_t i = 0; i < loop.segments.size(); ++i) {
+            if (!ProfileProducerVisit(accounting)) return false;
             const auto& segment = loop.segments[i];
             const auto& a = loop.vertices[i];
             const auto& b = loop.vertices[(i + 1) % loop.vertices.size()];
@@ -127,6 +169,7 @@ inline bool InspectProfileCurveLoopStructure(
                 // Include every cardinal extremum actually traversed by the arc.
                 const double low = std::min(first, last), high = std::max(first, last);
                 for (int quadrant = -8; quadrant <= 8; ++quadrant) {
+                    if (!ProfileProducerVisit(accounting)) return false;
                     const double theta = quadrant * pi / 2.0;
                     if (theta >= low && theta <= high) {
                         const auto point = pointAt(theta);
@@ -152,6 +195,25 @@ inline bool InspectProfileCurveLoopStructure(
         output = result;
         return true;
     } catch (...) { output = {}; return false; }
+}
+
+inline bool InspectProfileCurveLoopStructure(
+    const ProfileCurveLoop& loop, const gp_Pnt2d& integrationOrigin,
+    std::set<ProfileCurveID>& sectionIdentifiers,
+    std::size_t& inspectedVertices, std::size_t& inspectedSegments,
+    ProfileCurveLoopInspection& output) noexcept {
+    return InspectProfileCurveLoopStructureImpl(loop, integrationOrigin,
+        sectionIdentifiers, inspectedVertices, inspectedSegments, output, nullptr);
+}
+
+inline bool InspectProfileCurveLoopStructure(
+    const ProfileCurveLoop& loop, const gp_Pnt2d& integrationOrigin,
+    std::set<ProfileCurveID>& sectionIdentifiers,
+    std::size_t& inspectedVertices, std::size_t& inspectedSegments,
+    ProfileCurveLoopInspection& output,
+    ProfileProducerAccounting& accounting) noexcept {
+    return InspectProfileCurveLoopStructureImpl(loop, integrationOrigin,
+        sectionIdentifiers, inspectedVertices, inspectedSegments, output, &accounting);
 }
 
 } // namespace core3d

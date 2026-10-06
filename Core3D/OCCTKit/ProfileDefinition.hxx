@@ -52,17 +52,22 @@ inline bool ProfileSegmentsMeet(const gp_Pnt2d& a, const gp_Pnt2d& b,
     return proper || ProfilePointOnSegment(c, a, b) || ProfilePointOnSegment(d, a, b)
         || ProfilePointOnSegment(a, c, d) || ProfilePointOnSegment(b, c, d);
 }
-inline bool ValidateProfileOutline(const std::vector<gp_Pnt2d>& points, int plane,
-                            double depth, double& signedArea) {
+inline bool ValidateProfileOutlineImpl(const std::vector<gp_Pnt2d>& points, int plane,
+                            double depth, double& signedArea,
+                            ProfileProducerAccounting* accounting) {
     constexpr double coordinateLimit = 1e6, minimumEdge = 1e-3;
     signedArea = 0;
     if (plane < 0 || plane > 2 || points.size() < 3 || points.size() > 64
         || !std::isfinite(depth) || depth < minimumEdge || depth > coordinateLimit) { return false; }
+    // Reserve the complete scalar-input traversal before examining its first
+    // element; the later structural and pairwise passes remain separate debt.
+    if (!ProfileProducerVisit(accounting, points.size())) return false;
     for (const auto& point : points) {
         if (!std::isfinite(point.X()) || !std::isfinite(point.Y())
             || std::abs(point.X()) > coordinateLimit || std::abs(point.Y()) > coordinateLimit) { return false; }
     }
     for (std::size_t i = 0; i < points.size(); ++i) {
+        if (!ProfileProducerVisit(accounting)) return false;
         const auto& a = points[i];
         const auto& b = points[(i + 1) % points.size()];
         const auto& c = points[(i + 2) % points.size()];
@@ -74,23 +79,37 @@ inline bool ValidateProfileOutline(const std::vector<gp_Pnt2d>& points, int plan
         // authored far from the work-plane origin.
         signedArea += ProfileCross(points.front(), a, b) * 0.5;
         for (std::size_t j = i + 1; j < points.size(); ++j) {
+            if (!ProfileProducerVisit(accounting)) return false;
             if (j == (i + 1) % points.size() || (j + 1) % points.size() == i) { continue; }
             if (ProfileSegmentsMeet(a, b, points[j], points[(j + 1) % points.size()])) { return false; }
         }
     }
     return std::isfinite(signedArea) && std::abs(signedArea) >= 1e-6;
 }
-inline bool ProfileExpectedVolume(const std::vector<gp_Pnt2d>& points, int plane,
-                           double parameter, bool revolve, double& signedArea, double& volume) {
-    if (!ValidateProfileOutline(points, plane, revolve ? 1.0 : parameter, signedArea)) { return false; }
+inline bool ValidateProfileOutline(const std::vector<gp_Pnt2d>& points, int plane,
+                            double depth, double& signedArea) {
+    return ValidateProfileOutlineImpl(points,plane,depth,signedArea,nullptr);
+}
+inline bool ValidateProfileOutline(const std::vector<gp_Pnt2d>& points, int plane,
+                            double depth, double& signedArea,
+                            ProfileProducerAccounting& accounting) {
+    return ValidateProfileOutlineImpl(points,plane,depth,signedArea,&accounting);
+}
+inline bool ProfileExpectedVolumeImpl(const std::vector<gp_Pnt2d>& points, int plane,
+                           double parameter, bool revolve, double& signedArea, double& volume,
+                           ProfileProducerAccounting* accounting) {
+    if (!ValidateProfileOutlineImpl(points, plane, revolve ? 1.0 : parameter,
+            signedArea, accounting)) { return false; }
     if (!revolve) { volume = std::abs(signedArea) * parameter; return std::isfinite(volume) && volume > 0; }
     if (!std::isfinite(parameter) || parameter < 0.001 || parameter > 360) { return false; }
     // One-sided contours avoid sweeping through the axis and self-overlapping.
     // Axis-touching edges are valid, including degenerate pole edges in the solid.
+    if (!ProfileProducerVisit(accounting, points.size())) return false;
     for (const auto& point : points) { if (point.X() < 0) { return false; } }
     double firstMoment = 0;
     const auto& origin = points.front();
     for (std::size_t i = 1; i + 1 < points.size(); ++i) {
+        if (!ProfileProducerVisit(accounting)) return false;
         const auto& a = points[i]; const auto& b = points[i + 1];
         const double area = ProfileCross(origin, a, b) * 0.5;
         firstMoment += area * (origin.X() + a.X() + b.X()) / 3.0;
@@ -98,13 +117,25 @@ inline bool ProfileExpectedVolume(const std::vector<gp_Pnt2d>& points, int plane
     volume = std::abs(firstMoment) * (parameter * std::acos(-1.0) / 180.0);
     return std::isfinite(volume) && volume > 1e-8;
 }
+inline bool ProfileExpectedVolume(const std::vector<gp_Pnt2d>& points, int plane,
+                           double parameter, bool revolve, double& signedArea, double& volume) {
+    return ProfileExpectedVolumeImpl(points,plane,parameter,revolve,signedArea,volume,nullptr);
+}
+inline bool ProfileExpectedVolume(const std::vector<gp_Pnt2d>& points, int plane,
+                           double parameter, bool revolve, double& signedArea, double& volume,
+                           ProfileProducerAccounting& accounting) {
+    return ProfileExpectedVolumeImpl(points,plane,parameter,revolve,signedArea,volume,&accounting);
+}
 
-inline bool ProfileHolesArea(const std::vector<gp_Pnt2d>& points,
-                      const std::vector<ProfileCircularHole>& holes, double& area) {
+inline bool ProfileHolesAreaImpl(const std::vector<gp_Pnt2d>& points,
+                      const std::vector<ProfileCircularHole>& holes, double& area,
+                      ProfileProducerAccounting* accounting) {
     constexpr double clearance = 1e-3, limit = 1e6;
     area = 0;
     if (holes.size() > 16 || points.size() < 3) { return false; }
+    if (!ProfileProducerVisit(accounting, holes.size())) return false;
     for (std::size_t i = 0; i < holes.size(); ++i) {
+        if (!ProfileProducerVisit(accounting)) return false;
         const auto& hole = holes[i];
         if (!std::isfinite(hole.center.X()) || !std::isfinite(hole.center.Y())
             || !std::isfinite(hole.radius) || hole.radius < clearance
@@ -112,6 +143,7 @@ inline bool ProfileHolesArea(const std::vector<gp_Pnt2d>& points,
             || std::abs(hole.center.Y()) + hole.radius > limit) { return false; }
         bool inside = false;
         for (std::size_t edge = 0; edge < points.size(); ++edge) {
+            if (!ProfileProducerVisit(accounting)) return false;
             const auto& a = points[edge]; const auto& b = points[(edge + 1) % points.size()];
             const double dx = b.X() - a.X(), dy = b.Y() - a.Y();
             const double lengthSquared = dx * dx + dy * dy;
@@ -129,6 +161,7 @@ inline bool ProfileHolesArea(const std::vector<gp_Pnt2d>& points,
         }
         if (!inside) { return false; }
         for (std::size_t other = 0; other < i; ++other) {
+            if (!ProfileProducerVisit(accounting)) return false;
             if (hole.center.Distance(holes[other].center) < hole.radius + holes[other].radius + clearance) {
                 return false;
             }
@@ -137,16 +170,27 @@ inline bool ProfileHolesArea(const std::vector<gp_Pnt2d>& points,
     }
     return std::isfinite(area);
 }
+inline bool ProfileHolesArea(const std::vector<gp_Pnt2d>& points,
+                      const std::vector<ProfileCircularHole>& holes, double& area) {
+    return ProfileHolesAreaImpl(points,holes,area,nullptr);
+}
+inline bool ProfileHolesArea(const std::vector<gp_Pnt2d>& points,
+                      const std::vector<ProfileCircularHole>& holes, double& area,
+                      ProfileProducerAccounting& accounting) {
+    return ProfileHolesAreaImpl(points,holes,area,&accounting);
+}
 
-inline bool ProfileDefinitionExpectedVolume(const std::vector<gp_Pnt2d>& points,
+inline bool ProfileDefinitionExpectedVolumeImpl(const std::vector<gp_Pnt2d>& points,
     const std::optional<ProfileCircularSection>& circle, const std::vector<ProfileCircularHole>& holes,
-    int plane, double parameter, bool revolve, double& signedArea, double& volume) {
+    int plane, double parameter, bool revolve, double& signedArea, double& volume,
+    ProfileProducerAccounting* accounting) {
     if (!holes.empty() && (circle || revolve)) { return false; }
     if (!circle) {
-        if (!ProfileExpectedVolume(points, plane, parameter, revolve, signedArea, volume)) { return false; }
+        if (!ProfileExpectedVolumeImpl(points, plane, parameter, revolve,
+                signedArea, volume, accounting)) { return false; }
         if (holes.empty()) { return true; }
         double holeArea = 0;
-        if (!ProfileHolesArea(points, holes, holeArea)) { return false; }
+        if (!ProfileHolesAreaImpl(points, holes, holeArea, accounting)) { return false; }
         const double remaining = std::abs(signedArea) - holeArea;
         volume = remaining * parameter;
         // Keep signedArea as the original outer winding for wire construction.
@@ -156,6 +200,7 @@ inline bool ProfileDefinitionExpectedVolume(const std::vector<gp_Pnt2d>& points,
     if (!points.empty() || plane < 0 || plane > 2) { return false; }
     const auto& c = *circle;
     constexpr double minimum = 1e-3, limit = 1e6;
+    if (!ProfileProducerVisit(accounting, 5)) return false;
     for (const double value : {c.center.X(), c.center.Y(), c.outerRadius, c.innerRadius, parameter}) {
         if (!std::isfinite(value)) { return false; }
     }
@@ -175,31 +220,58 @@ inline bool ProfileDefinitionExpectedVolume(const std::vector<gp_Pnt2d>& points,
     }
     return std::isfinite(volume) && volume > 0;
 }
+inline bool ProfileDefinitionExpectedVolume(const std::vector<gp_Pnt2d>& points,
+    const std::optional<ProfileCircularSection>& circle, const std::vector<ProfileCircularHole>& holes,
+    int plane, double parameter, bool revolve, double& signedArea, double& volume) {
+    return ProfileDefinitionExpectedVolumeImpl(points,circle,holes,plane,parameter,revolve,
+        signedArea,volume,nullptr);
+}
+inline bool ProfileDefinitionExpectedVolume(const std::vector<gp_Pnt2d>& points,
+    const std::optional<ProfileCircularSection>& circle, const std::vector<ProfileCircularHole>& holes,
+    int plane, double parameter, bool revolve, double& signedArea, double& volume,
+    ProfileProducerAccounting& accounting) {
+    return ProfileDefinitionExpectedVolumeImpl(points,circle,holes,plane,parameter,revolve,
+        signedArea,volume,&accounting);
+}
 
 // One typed entry point preserves all existing polygon/circular behavior.
 // Curves cannot carry a simultaneous legacy outline or hole payload.
-inline bool ProfileDefinitionExpectedVolume(const ProfileDefinition& definition,
-    double& signedArea, double& volume) {
+inline bool ProfileDefinitionExpectedVolumeImpl(const ProfileDefinition& definition,
+    double& signedArea, double& volume, ProfileProducerAccounting* accounting) {
     signedArea=0;volume=0;
     if (!definition.curves)
-        return ProfileDefinitionExpectedVolume(definition.points,definition.circle,definition.holes,
-            definition.plane,definition.depth,definition.revolve,signedArea,volume);
+        return ProfileDefinitionExpectedVolumeImpl(definition.points,definition.circle,definition.holes,
+            definition.plane,definition.depth,definition.revolve,signedArea,volume,accounting);
     if (!definition.points.empty() || definition.circle || !definition.holes.empty()
         || definition.plane<0 || definition.plane>2 || !std::isfinite(definition.depth)
         || definition.depth<1e-3 || definition.depth>(definition.revolve?360.0:1e6)) return false;
     ProfileCurveSectionInspection inspection;
-    if (!InspectProfileCurveSection(*definition.curves,inspection)) return false;
+    const auto stopped = [&] { return accounting && accounting->stopped(); };
+    const bool inspected = accounting
+        ? InspectProfileCurveSection(*definition.curves,inspection,stopped,*accounting)
+        : InspectProfileCurveSection(*definition.curves,inspection);
+    if (!inspected) return false;
     double expected=inspection.area*definition.depth;
     if (definition.revolve) {
         // Authored U is radial in each existing work-plane mapping. A section
         // crossing the axis would sweep overlapping material and is refused.
         if (inspection.outerBounds[0]<0) return false;
-        for (const auto& bounds:inspection.innerBounds)
+        for (const auto& bounds:inspection.innerBounds) {
+            if (!ProfileProducerVisit(accounting)) return false;
             if (bounds[0]<0) return false;
+        }
         expected=inspection.firstMomentX*(definition.depth*std::acos(-1.0)/180.0);
     }
     if (!std::isfinite(expected) || expected<=1e-8) return false;
     signedArea=inspection.area;volume=expected;return true;
+}
+inline bool ProfileDefinitionExpectedVolume(const ProfileDefinition& definition,
+    double& signedArea, double& volume) {
+    return ProfileDefinitionExpectedVolumeImpl(definition,signedArea,volume,nullptr);
+}
+inline bool ProfileDefinitionExpectedVolume(const ProfileDefinition& definition,
+    double& signedArea, double& volume, ProfileProducerAccounting& accounting) {
+    return ProfileDefinitionExpectedVolumeImpl(definition,signedArea,volume,&accounting);
 }
 
 inline gp_Pnt ProfilePointInPlane(const gp_Pnt2d& p, int plane) {

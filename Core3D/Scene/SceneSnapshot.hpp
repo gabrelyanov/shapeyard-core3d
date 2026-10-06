@@ -213,6 +213,9 @@ struct TextureResourceSnapshot {
     std::uint32_t pixelWidth = 0;
     std::uint32_t pixelHeight = 0;
     std::vector<std::uint8_t> encodedBytes;
+    //! True only for a current SYEB/1 export product. The identifier remains
+    //! the exact content address; this marker controls consumer precedence.
+    bool paintedAtlasDerivative = false;
 };
 
 struct MeshPrimitive {
@@ -309,6 +312,10 @@ struct MeshSnapshot {
     GeometryKind geometryKind = GeometryKind::SurfaceTriangles;
     std::optional<NativeC1WireSnapshot> nativeC1Wire;
     std::string definitionIdentifier;
+    //! Empty on the master mesh. A derivative retains its master's durable
+    //! definition identity separately from its unique cache/export key.
+    std::string paintedAtlasMasterDefinitionIdentifier;
+    std::string paintedAtlasBakeProof;
     std::uint64_t geometryRevision = 0;
     Bounds3d localBounds;
     TopologyCardinality topology;

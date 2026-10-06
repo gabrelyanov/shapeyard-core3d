@@ -1815,6 +1815,16 @@ NativeExportResult RunNativeExport(
         ThrowIfCancelled(state);
 
         if (state->sourceScene) {
+            // The live snapshot carries only current SYEB derivatives. Keep
+            // export fail-closed before touching the empty package staging
+            // root; the caller's previous destination remains outside this
+            // private-snapshot transaction and is therefore preserved on any
+            // stale/malformed derivative or downstream encoder failure.
+            if (!core3d::scene::IsValidSceneSnapshot(*state->sourceScene)) {
+                throw NativeExportFailure(
+                    Core3DNativeExportErrorInvalidState,
+                    "The painted appearance export derivative is invalid.");
+            }
             result.scene = state->meshQuality == Core3DExportMeshQualityViewport
                 ? state->sourceScene
                 : core3d::scene::OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(

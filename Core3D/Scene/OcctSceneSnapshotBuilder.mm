@@ -858,7 +858,8 @@ bool AddFaceImageTextureResource(
     SceneSnapshot& theScene,
     TextureTableState& theState,
     const core3d::face_image::ResourceEnvelope& theEnvelope,
-    std::int32_t& theTextureIndex)
+    std::int32_t& theTextureIndex,
+    const bool thePaintedAtlasDerivative = false)
 {
     theTextureIndex = -1;
     const std::vector<std::uint8_t>& aBytes = theEnvelope.workingBytes;
@@ -880,6 +881,9 @@ bool AddFaceImageTextureResource(
                            aBytes.size()) != 0) {
             return false;
         }
+        if (thePaintedAtlasDerivative) {
+            theScene.textures[anExistingIndex].paintedAtlasDerivative = true;
+        }
         theTextureIndex = static_cast<std::int32_t>(anExistingIndex);
         return true;
     }
@@ -900,6 +904,9 @@ bool AddFaceImageTextureResource(
                                aBytes.size()) == 0) {
                 theState.resourcesBySourceIdentifier.emplace(
                     aSourceIdentifier, anExistingIndex);
+                if (thePaintedAtlasDerivative) {
+                    theScene.textures[anExistingIndex].paintedAtlasDerivative = true;
+                }
                 theTextureIndex = static_cast<std::int32_t>(anExistingIndex);
                 return true;
             }
@@ -955,6 +962,7 @@ bool AddFaceImageTextureResource(
     aResource.pixelWidth = aWidth;
     aResource.pixelHeight = aHeight;
     aResource.encodedBytes = aBytes;
+    aResource.paintedAtlasDerivative = thePaintedAtlasDerivative;
     const std::size_t aResourceIndex = theScene.textures.size();
     theScene.textures.push_back(std::move(aResource));
     theState.resourcesByDigest[aDigest].push_back(aResourceIndex);
@@ -963,6 +971,68 @@ bool AddFaceImageTextureResource(
     theState.aggregateEncodedBytes += aBytes.size();
     theState.aggregateDecodedBytes += aDecodedBytes;
     theTextureIndex = static_cast<std::int32_t>(aResourceIndex);
+    return true;
+}
+
+std::string PaintedAtlasDigestText(
+    const core3d::painted_atlas_bake::Digest& theDigest)
+{
+    static const char* const kDigits = "0123456789abcdef";
+    std::string aText;
+    aText.reserve(theDigest.size() * 2);
+    for (const std::uint8_t aByte : theDigest) {
+        aText.push_back(kDigits[aByte >> 4]);
+        aText.push_back(kDigits[aByte & 0x0f]);
+    }
+    return aText;
+}
+
+// Copy-on-publication final-geometry derivative. The master MeshSnapshot is
+// never modified: every triangle corner is split so the regenerated atlas UV
+// assignment cannot alias a different chart corner through a shared vertex.
+bool ApplyPaintedAtlasDerivative(
+    const MeshSnapshot& theMaster,
+    const OcctPaintedAtlasDerivative& theDerivative,
+    MeshSnapshot& theOutput)
+{
+    const auto& anAssignment = theDerivative.assignment;
+    if (theMaster.geometryKind != GeometryKind::SurfaceTriangles
+        || theMaster.indices.empty()
+        || anAssignment.corners.size() != theMaster.indices.size()
+        || std::uint64_t(anAssignment.triangleCount) * 3
+            != theMaster.indices.size()) return false;
+    MeshSnapshot aResult = theMaster;
+    aResult.vertices.clear();
+    aResult.indices.clear();
+    aResult.vertices.reserve(theMaster.indices.size());
+    aResult.indices.reserve(theMaster.indices.size());
+    for (std::size_t anIndex = 0; anIndex < theMaster.indices.size(); ++anIndex) {
+        const std::uint32_t aSourceIndex = theMaster.indices[anIndex];
+        if (aSourceIndex >= theMaster.vertices.size()) return false;
+        const auto& aUV = anAssignment.corners[anIndex];
+        if (!IsFinite(aUV[0]) || !IsFinite(aUV[1])
+            || aUV[0] < 0.0 || aUV[0] > 1.0
+            || aUV[1] < 0.0 || aUV[1] > 1.0) return false;
+        Vertex aVertex = theMaster.vertices[aSourceIndex];
+        aVertex.textureU = static_cast<float>(aUV[0]);
+        aVertex.textureV = static_cast<float>(aUV[1]);
+        aResult.vertices.push_back(aVertex);
+        aResult.indices.push_back(static_cast<std::uint32_t>(anIndex));
+    }
+    for (MeshPrimitive& aPrimitive : aResult.primitives) {
+        aPrimitive.hasTextureCoordinates = true;
+    }
+    const std::string aProof = PaintedAtlasDigestText(
+        theDerivative.bake.bakeProof);
+    if (aProof.size() != 64) return false;
+    aResult.paintedAtlasMasterDefinitionIdentifier =
+        theMaster.paintedAtlasMasterDefinitionIdentifier.empty()
+            ? theMaster.definitionIdentifier
+            : theMaster.paintedAtlasMasterDefinitionIdentifier;
+    aResult.paintedAtlasBakeProof = aProof;
+    aResult.definitionIdentifier =
+        aResult.paintedAtlasMasterDefinitionIdentifier + ".baked-" + aProof;
+    theOutput = std::move(aResult);
     return true;
 }
 
@@ -5019,7 +5089,13 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         }
         if (wanted.empty() || (selectedObjectsOnly
             && source.selectionMode != ElementKind::Object)) { return {}; }
-        struct ExportOccurrence { std::size_t instance; std::size_t definition; gp_Trsf transform; };
+        struct ExportOccurrence {
+            std::size_t instance;
+            std::size_t definition;
+            gp_Trsf transform;
+            OcctPaintedAtlasDerivative paintedDerivative;
+            bool painted = false;
+        };
         std::vector<ExportOccurrence> occurrences;
         std::vector<DefinitionData> definitions;
         std::unordered_map<std::string, std::size_t> definitionIndices;
@@ -5045,7 +5121,25 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             const auto label = node.RefLabel.IsNull() ? node.Label : node.RefLabel;
             const auto identifier = document->DefinitionIdentifierForLabel(label);
             const auto& item = source.instances[found->second];
-            if (identifier != source.meshes[item.meshIndex].definitionIdentifier) { return {}; }
+            const auto& sourceMesh = source.meshes[item.meshIndex];
+            const std::string& masterIdentifier =
+                sourceMesh.paintedAtlasMasterDefinitionIdentifier.empty()
+                    ? sourceMesh.definitionIdentifier
+                    : sourceMesh.paintedAtlasMasterDefinitionIdentifier;
+            if (identifier != masterIdentifier) { return {}; }
+            OcctPaintedAtlasDerivative paintedDerivative;
+            const bool painted = !sourceMesh.paintedAtlasBakeProof.empty();
+            if (painted) {
+                core3d::retained_recipe::OwnerKey owner;
+                if (!core3d::receipt::ParseUUID(documentIdentifier, owner.document)
+                    || !core3d::receipt::ParseUUID(
+                        document->EntityIdentifierForLabel(label), owner.entity)
+                    || !core3d::receipt::ParseUUID(identifier, owner.definition)
+                    || !document->PaintedAtlasDerivativeForOwner(
+                        owner, paintedDerivative)
+                    || PaintedAtlasDigestText(paintedDerivative.bake.bakeProof)
+                        != sourceMesh.paintedAtlasBakeProof) return {};
+            }
             // Authored polygon topology/UVs/normals are already frozen. Do not
             // recopy, clean, remesh or transform those buffers through OCCT.
             const auto representation = document->GeometryRepresentationForLabel(label);
@@ -5065,7 +5159,8 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             gp_Trsf objectTransform;
             if (!document->TryObjectTransformForLabel(label, objectTransform)) { return {}; }
             occurrences.push_back({found->second, known->second,
-                objectTransform.Multiplied(node.Location.Transformation())});
+                objectTransform.Multiplied(node.Location.Transformation()),
+                std::move(paintedDerivative), painted});
         }
         if (matched.size() != wanted.size() || cancelled()) { return {}; }
         if (!definitions.empty()) { meshPrivateSurfaces(compound); }
@@ -5092,7 +5187,17 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                     if (mesh.primitives[i].faceIndex != definition.mesh.primitives[i].faceIndex) { return {}; }
                 }
                 const auto revision = mesh.geometryRevision;
-                mesh = std::move(definition.mesh);
+                MeshSnapshot replacement = definition.mesh;
+                if (occurrence.painted) {
+                    MeshSnapshot derivative;
+                    if (!ApplyPaintedAtlasDerivative(
+                            replacement, occurrence.paintedDerivative,
+                            derivative)
+                        || derivative.definitionIdentifier
+                            != mesh.definitionIdentifier) return {};
+                    replacement = std::move(derivative);
+                }
+                mesh = std::move(replacement);
                 mesh.geometryRevision = revision; // frozen provenance, never a live publication
             }
             gp_Trsf origin;
@@ -5422,7 +5527,9 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         aScene.metersPerUnit = aMetersPerUnit;
         aScene.selectionMode = theAcceptedSelectionKind;
         TextureTableState aTextureTable;
-        aScene.meshes.reserve(aDefinitions.size());
+        // At most one current painted-atlas derivative is published per
+        // occurrence. Masters stay resident and untouched for stale fallback.
+        aScene.meshes.reserve(aDefinitions.size() + anOccurrences.size());
         std::vector<std::string> aLiveRevisionKeys;
         aLiveRevisionKeys.reserve(aDefinitions.size());
         std::unordered_set<std::string> aLiveRevisionKeySet;
@@ -5560,6 +5667,24 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 return {};
             }
 
+            core3d::retained_recipe::OwnerKey anAppearanceOwner;
+            if (!core3d::receipt::ParseUUID(aDocumentIdentifier,
+                                            anAppearanceOwner.document)
+                || !core3d::receipt::ParseUUID(
+                    theDocument->EntityIdentifierForLabel(
+                        anOccurrence.definitionLabel),
+                    anAppearanceOwner.entity)
+                || !core3d::receipt::ParseUUID(
+                    anOccurrence.definitionIdentifier,
+                    anAppearanceOwner.definition)
+                || !core3d::retained_recipe::Valid(anAppearanceOwner)) {
+                return {};
+            }
+            OcctPaintedAtlasDerivative aPaintedDerivative;
+            const bool hasPaintedDerivative =
+                theDocument->PaintedAtlasDerivativeForOwner(
+                    anAppearanceOwner, aPaintedDerivative);
+
             // Resolve reference authority against the true object/occurrence
             // transform before the mesh-centering translation is appended.
             OcctReferenceAxis aStoredReferenceAxis;
@@ -5610,6 +5735,38 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             InstanceSnapshot anInstance;
             anInstance.entityIdentifier = anOccurrence.entityIdentifier;
             anInstance.meshIndex = static_cast<std::uint32_t>(aDefinitionIndex);
+            if (hasPaintedDerivative) {
+                MeshSnapshot aDerivativeMesh;
+                if (!ApplyPaintedAtlasDerivative(
+                        aMesh, aPaintedDerivative, aDerivativeMesh)
+                    || !FitsUInt32(aScene.meshes.size())) return {};
+                std::size_t aVertexBytes = 0;
+                std::size_t anIndexBytes = 0;
+                std::size_t aPrimitiveBytes = 0;
+                std::size_t aMeshBytes = 0;
+                if (!CheckedMultiply(aDerivativeMesh.vertices.size(), sizeof(Vertex),
+                                     aVertexBytes)
+                    || !CheckedMultiply(aDerivativeMesh.indices.size(),
+                                        sizeof(std::uint32_t), anIndexBytes)
+                    || !CheckedMultiply(aDerivativeMesh.primitives.size(),
+                                        sizeof(MeshPrimitive), aPrimitiveBytes)
+                    || !CheckedAdd(aVertexBytes, anIndexBytes, aMeshBytes)
+                    || !CheckedAdd(aMeshBytes, aPrimitiveBytes, aMeshBytes)
+                    || !CheckedAdd(aSnapshotNumericBytes, aMeshBytes,
+                                   aSnapshotNumericBytes)
+                    || !CheckedAdd(aSnapshotVertexCount,
+                                   aDerivativeMesh.vertices.size(),
+                                   aSnapshotVertexCount)
+                    || !CheckedAdd(aSnapshotIndexCount,
+                                   aDerivativeMesh.indices.size(),
+                                   aSnapshotIndexCount)
+                    || aSnapshotNumericBytes > kMaxSnapshotNumericBytes
+                    || aSnapshotVertexCount > kMaxVerticesPerSnapshot
+                    || aSnapshotIndexCount > kMaxIndicesPerSnapshot) return {};
+                anInstance.meshIndex = static_cast<std::uint32_t>(
+                    aScene.meshes.size());
+                aScene.meshes.push_back(std::move(aDerivativeMesh));
+            }
             if (!MatrixFromTransform(aWorldTransform, anInstance.worldFromObject)) {
                 return {};
             }
@@ -5630,6 +5787,25 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 anInstance.groupName = group->second.second;
             }
             anInstance.role = RenderRole::Model;
+
+            std::array<std::int32_t, 5> aPaintedTextureIndices{
+                -1, -1, -1, -1, -1};
+            if (hasPaintedDerivative) {
+                if (aPaintedDerivative.resources.size()
+                    != aPaintedDerivative.bake.resources.size()) return {};
+                for (std::size_t anIndex = 0;
+                     anIndex < aPaintedDerivative.resources.size(); ++anIndex) {
+                    const auto aRole = static_cast<std::size_t>(
+                        aPaintedDerivative.bake.resources[anIndex].role);
+                    if (aRole >= aPaintedTextureIndices.size()
+                        || aPaintedTextureIndices[aRole] >= 0
+                        || !AddFaceImageTextureResource(
+                            aScene, aTextureTable,
+                            aPaintedDerivative.resources[anIndex],
+                            aPaintedTextureIndices[aRole], true)
+                        || aPaintedTextureIndices[aRole] < 0) return {};
+                }
+            }
 
             Graphic3d_NameOfMaterial aMaterialName;
             Quantity_NameOfColor aColorName;
@@ -5723,34 +5899,50 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                                      aMetallicRoughnessTexture,
                                      anOcclusionTexture,
                                      aNormalTexture)
-                    || !AddTextureResource(
+                    || (!hasPaintedDerivative && !AddTextureResource(
                         aScene,
                         aTextureTable,
                         aBaseColorTexture,
-                        aMaterial.baseColorTextureIndex)
-                    || !AddTextureResource(
+                        aMaterial.baseColorTextureIndex))
+                    || (!hasPaintedDerivative && !AddTextureResource(
                         aScene,
                         aTextureTable,
                         anEmissiveTexture,
-                        aMaterial.emissiveTextureIndex)
-                    || !AddTextureResource(aScene, aTextureTable, aMetallicRoughnessTexture,
-                                           aMaterial.metallicRoughnessTextureIndex)
-                    || !AddTextureResource(aScene, aTextureTable, anOcclusionTexture,
-                                           aMaterial.occlusionTextureIndex)
-                    || !AddTextureResource(aScene, aTextureTable, aNormalTexture,
-                                           aMaterial.normalTextureIndex)) {
+                        aMaterial.emissiveTextureIndex))
+                    || (!hasPaintedDerivative && !AddTextureResource(
+                        aScene, aTextureTable, aMetallicRoughnessTexture,
+                        aMaterial.metallicRoughnessTextureIndex))
+                    || (!hasPaintedDerivative && !AddTextureResource(
+                        aScene, aTextureTable, anOcclusionTexture,
+                        aMaterial.occlusionTextureIndex))
+                    || (!hasPaintedDerivative && !AddTextureResource(
+                        aScene, aTextureTable, aNormalTexture,
+                        aMaterial.normalTextureIndex))) {
                     return {};
                 }
                 for (const auto& binding : {
                          std::make_pair(aMaterial.metallicRoughnessTextureIndex, aMetallicRoughnessTexture),
                          std::make_pair(aMaterial.occlusionTextureIndex, anOcclusionTexture),
                          std::make_pair(aMaterial.normalTextureIndex, aNormalTexture)}) {
-                    if (binding.first >= 0
+                    if (!hasPaintedDerivative && binding.first >= 0
                         && aTextureTable.validatedNumericResources.insert(binding.first).second
                         && !Core3DValidateNumericTexture(binding.second)) return {};
                 }
                 aFaceMaterials[aPrimitiveFound->second] = std::move(aMaterial);
               }
+            }
+
+            if (hasPaintedDerivative) {
+                for (auto& aMaterialValue : aFaceMaterials) {
+                    if (!aMaterialValue.has_value()) return {};
+                    MaterialSnapshot& aMaterial = *aMaterialValue;
+                    aMaterial.baseColorTextureIndex = aPaintedTextureIndices[0];
+                    aMaterial.emissiveTextureIndex = aPaintedTextureIndices[1];
+                    aMaterial.metallicRoughnessTextureIndex =
+                        aPaintedTextureIndices[2];
+                    aMaterial.occlusionTextureIndex = aPaintedTextureIndices[3];
+                    aMaterial.normalTextureIndex = aPaintedTextureIndices[4];
+                }
             }
 
             // E3 face-image appearance (278b portion 4). The committed
@@ -5762,19 +5954,12 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             // and a missing resource publish nothing for that binding; the
             // record itself is never touched. Assets without face-image
             // records take none of these branches.
-            if (!aDefinition.boundedCurve && aMesh.topology.faceCount != 0
+            if (!hasPaintedDerivative && !aDefinition.boundedCurve
+                && aMesh.topology.faceCount != 0
                 && !aDefinition.shape.IsNull()) {
-                core3d::face_image::OwnerKey aFaceImageOwner;
-                if (core3d::receipt::ParseUUID(aDocumentIdentifier,
-                                               aFaceImageOwner.document)
-                    && core3d::receipt::ParseUUID(
-                        theDocument->EntityIdentifierForLabel(
-                            anOccurrence.definitionLabel),
-                        aFaceImageOwner.entity)
-                    && core3d::receipt::ParseUUID(
-                        anOccurrence.definitionIdentifier,
-                        aFaceImageOwner.definition)
-                    && core3d::retained_recipe::Valid(aFaceImageOwner)) {
+                const core3d::face_image::OwnerKey& aFaceImageOwner =
+                    anAppearanceOwner;
+                {
                     core3d::face_image::Definition aFaceImageRecord;
                     const auto aRecordState =
                         theDocument->ReadFaceImageBindings(

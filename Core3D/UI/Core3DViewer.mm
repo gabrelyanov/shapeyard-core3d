@@ -4071,13 +4071,37 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
     if (!geometry || geometry->cancelled.load() || geometry->built) { return false; }
     try {
         OCC_CATCH_SIGNALS
+        std::optional<ProfileProducerAccounting> accounting;
+        if (geometry->operationBudget)
+            accounting.emplace(*geometry->operationBudget,geometry->cancelled);
+        const auto kernelStage = [&] {
+            return !accounting || accounting->kernelStage();
+        };
+        const auto chargeShape = [&](const TopoDS_Shape& shape) {
+            return !accounting
+                || retained_topology_budget::ChargeTraversal(shape,accounting->budget,
+                    geometry->cancelled,accounting->kernelSite)
+                    == retained_topology_budget::WalkStatus::Completed;
+        };
+        const auto censusOutput = [&](const TopoDS_Shape& shape) {
+            if (!accounting) return true;
+            retained_topology_budget::Census census;
+            return retained_topology_budget::CensusTopology(shape,accounting->budget,
+                geometry->cancelled,census,accounting->kernelSite,true)
+                == retained_topology_budget::WalkStatus::Completed;
+        };
         double signedArea = 0, expected = 0;
         if (geometry->spline) {
             if (!geometry->curves
                 || !SplineProfileExpectedVolume(*geometry->curves, *geometry->spline,
                     geometry->plane, geometry->depth, geometry->revolve,
                     [&] { return geometry->cancelled.load(); }, signedArea, expected)) { return false; }
-        } else if (!ProfileDefinitionExpectedVolume(*geometry, signedArea, expected)) { return false; }
+        } else {
+            const bool admitted = accounting
+                ? ProfileDefinitionExpectedVolume(*geometry,signedArea,expected,*accounting)
+                : ProfileDefinitionExpectedVolume(*geometry,signedArea,expected);
+            if (!admitted) return false;
+        }
         TopoDS_Face profileFace;
         if (geometry->spline) {
             SplineProfileFaceResult built;
@@ -4086,7 +4110,12 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
             profileFace = built.face;
         } else if (geometry->curves) {
             ProfileCurveFaceResult built;
-            if (!BuildProfileCurveFace(*geometry->curves,geometry->plane,geometry->cancelled,built)) return false;
+            const bool made = accounting
+                ? BuildProfileCurveFace(*geometry->curves,geometry->plane,
+                    geometry->cancelled,built,*accounting)
+                : BuildProfileCurveFace(*geometry->curves,geometry->plane,
+                    geometry->cancelled,built);
+            if (!made) return false;
             profileFace=built.face;
         } else if (geometry->circle) {
             const auto& circle = *geometry->circle;
@@ -4096,17 +4125,23 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
                 : (geometry->plane == 1 ? gp_Dir(0, -1, 0) : gp::DX());
             const gp_Dir uDirection = geometry->plane == 2 ? gp::DY() : gp::DX();
             const gp_Ax2 basis(center, normal, uDirection);
+            if (!kernelStage()) return false;
             BRepBuilderAPI_MakeEdge outerEdge(gp_Circ(basis, circle.outerRadius));
             if (!outerEdge.IsDone()) { return false; }
+            if (!kernelStage()) return false;
             BRepBuilderAPI_MakeWire outerWire(outerEdge.Edge());
             if (!outerWire.IsDone()) { return false; }
+            if (!kernelStage()) return false;
             BRepBuilderAPI_MakeFace face(gp_Pln(center, normal), outerWire.Wire(), Standard_True);
             if (!face.IsDone()) { return false; }
             if (circle.innerRadius > 0) {
+                if (!kernelStage()) return false;
                 BRepBuilderAPI_MakeEdge innerEdge(gp_Circ(basis, circle.innerRadius));
                 if (!innerEdge.IsDone()) { return false; }
+                if (!kernelStage()) return false;
                 BRepBuilderAPI_MakeWire innerWire(innerEdge.Edge());
                 if (!innerWire.IsDone()) { return false; }
+                if (!kernelStage()) return false;
                 face.Add(TopoDS::Wire(innerWire.Wire().Reversed()));
                 if (!face.IsDone()) { return false; }
             }
@@ -4114,31 +4149,38 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
         } else {
             auto points = geometry->points;
             if (signedArea < 0) { std::reverse(points.begin(), points.end()); }
+            if ((accounting && !accounting->visit(points.size())) || !kernelStage()) return false;
             BRepBuilderAPI_MakePolygon polygon;
             for (const auto& point : points) {
-                if (geometry->cancelled.load()) { return false; }
+                if (geometry->cancelled.load()
+                    || (accounting && !accounting->kernelVisit(1))) { return false; }
                 polygon.Add(ProfilePointInPlane(point, geometry->plane));
             }
             polygon.Close();
             if (!polygon.IsDone()) { return false; }
+            if (!kernelStage() || !chargeShape(polygon.Wire())) return false;
             BRepBuilderAPI_MakeFace face(polygon.Wire(), Standard_True);
             if (!face.IsDone()) { return false; }
             const gp_Dir normal = geometry->plane == 0 ? gp::DZ()
                 : (geometry->plane == 1 ? gp_Dir(0, -1, 0) : gp::DX());
             const gp_Dir uDirection = geometry->plane == 2 ? gp::DY() : gp::DX();
             for (const auto& hole : geometry->holes) {
-                if (geometry->cancelled.load()) { return false; }
+                if (geometry->cancelled.load() || (accounting && !accounting->visit(1))) { return false; }
                 const gp_Ax2 basis(ProfilePointInPlane(hole.center, geometry->plane), normal, uDirection);
+                if (!kernelStage()) return false;
                 BRepBuilderAPI_MakeEdge edge(gp_Circ(basis, hole.radius));
                 if (!edge.IsDone()) { return false; }
+                if (!kernelStage()) return false;
                 BRepBuilderAPI_MakeWire wire(edge.Edge());
                 if (!wire.IsDone()) { return false; }
+                if (!kernelStage() || !chargeShape(wire.Wire())) return false;
                 face.Add(TopoDS::Wire(wire.Wire().Reversed()));
                 if (!face.IsDone()) { return false; }
             }
             profileFace = face.Face();
         }
         if (profileFace.IsNull() || geometry->cancelled.load()
+            || !censusOutput(profileFace) || !kernelStage() || !chargeShape(profileFace)
             || !BRepCheck_Analyzer(profileFace, Standard_True).IsValid()) { return false; }
         TopoDS_Shape result;
         if (geometry->revolve) {
@@ -4154,10 +4196,12 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
                         geometry->depth, expected, geometry->cancelled, built)) return false;
                 result = built.solid;
             } else if (geometry->depth == 360.0) {
+                if (!kernelStage() || !chargeShape(profileFace)) return false;
                 BRepPrimAPI_MakeRevol sweep(profileFace, axis, Standard_True);
                 if (!sweep.IsDone()) { return false; }
                 result = sweep.Shape();
             } else {
+                if (!kernelStage() || !chargeShape(profileFace)) return false;
                 BRepPrimAPI_MakeRevol sweep(profileFace, axis,
                     geometry->depth * std::acos(-1.0) / 180.0, Standard_True);
                 if (!sweep.IsDone()) { return false; }
@@ -4171,6 +4215,7 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
         } else {
             const gp_Vec direction = geometry->plane == 0 ? gp_Vec(0, 0, geometry->depth)
                 : geometry->plane == 1 ? gp_Vec(0, geometry->depth, 0) : gp_Vec(geometry->depth, 0, 0);
+            if (!kernelStage() || !chargeShape(profileFace)) return false;
             BRepPrimAPI_MakePrism prism(profileFace, direction, Standard_True, Standard_True);
             if (!prism.IsDone()) { return false; }
             result = prism.Shape();
@@ -4187,6 +4232,7 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
                     static_cast<const ProfileDefinition&>(*geometry),
                     geometry->shellMetersPerUnit};
                 parameters.constructionFrame = geometry->constructionFrame;
+                if (!kernelStage() || !chargeShape(result)) return false;
                 if (!retained_edge_treatment::BuildFramedPolygonPrism(
                         parameters, geometry->cancelled, result)) return false;
             } else {
@@ -4194,6 +4240,7 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
                 if (!geometry->constructionFrame->Transform(frame)) return false;
                 // Only detached worker-owned geometry is transformed. Repeated
                 // reflection must never enter OCCT's negative mesh-copy path.
+                if (!kernelStage() || !chargeShape(result)) return false;
                 BRepBuilderAPI_Transform transformed(
                     result, frame, Standard_True, Standard_False);
                 if (!transformed.IsDone()) return false;
@@ -4201,9 +4248,12 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
             }
             if (geometry->cancelled.load() || result.IsNull() || result.ShapeType() != TopAbs_SOLID) return false;
         }
+        if (!censusOutput(result) || !kernelStage() || !chargeShape(result)) return false;
         auto solid = TopoDS::Solid(result);
-        if (!BRepLib::OrientClosedSolid(solid) || !BRepCheck_Analyzer(solid, Standard_True).IsValid()) { return false; }
+        if (!BRepLib::OrientClosedSolid(solid) || !kernelStage() || !chargeShape(solid)
+            || !BRepCheck_Analyzer(solid, Standard_True).IsValid()) { return false; }
         GProp_GProps properties;
+        if (!kernelStage() || !chargeShape(solid)) return false;
         BRepGProp::VolumeProperties(solid, properties);
         const double volumeTolerance = geometry->spline ? 1e-6 : 1e-8;
         if (!std::isfinite(properties.Mass()) || properties.Mass() <= 0
@@ -4265,6 +4315,7 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
         }
         if(geometry->treatmentRebind&&geometry->treatmentRebuildSource){geometry->treatmentBase=solid;retained_edge_treatment::SourceRebindResult rebound;retained_edge_treatment::Refusal refusal=retained_edge_treatment::Refusal::BuildFailed;if(!retained_edge_treatment::ApplySourceRebind(*geometry->treatmentRebind,*geometry->treatmentRebuildSource,solid,geometry->treatmentBudget,refusal,rebound))return false;geometry->treatmentDefinition=rebound.definition;geometry->treatmentProofs=rebound.proofs;solid=TopoDS::Solid(rebound.treated);}
         Bnd_Box bounds;
+        if (!kernelStage() || !chargeShape(solid)) return false;
         BRepBndLib::AddOptimal(solid, bounds, Standard_False, Standard_False);
         if (bounds.IsVoid() || bounds.IsOpen()) { return false; }
         auto& b = geometry->bounds;
@@ -4290,7 +4341,12 @@ static bool R2RebuildBooleanInputBase(const retained_solid::Envelope& envelope,
         TopoDS_Shape base;
         if (envelope.sourceFamily == 1) {
             profile::Parameters p;
-            if (!profile::Decode(envelope.sourceValues, p)) return false;
+            // C20: reserve the canonical scalar decode pass before Decode
+            // touches its first value. This is the enclosing R2 counter, not a
+            // fresh producer allowance, and cancellation wins before debt.
+            if (stop.load() || !budget.visit(envelope.sourceValues.size(),
+                    tb::Site::C20R2EditedPrefix) || stop.load()
+                || !profile::Decode(envelope.sourceValues, p)) return false;
             auto geometry = std::make_shared<ProfileSolidGeometry>();
             static_cast<ProfileDefinition&>(*geometry) = p.definition;
             geometry->constructionFrame = p.constructionFrame;
