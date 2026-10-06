@@ -390,6 +390,31 @@ inline InspectionResult InspectCompleteProfileBase(
             || graph.faces.size() != expected.faceCellCount())
             return fail(InspectionStatus::Mismatch);
 
+        // Collect every generated planar pcurve and its relative location
+        // before the arithmetic allowance is computed and frozen. Stored
+        // pcurves were already collected with the graph; this completes the
+        // same preflight for representations generated on demand below.
+        std::map<std::pair<unsigned, unsigned>, std::vector<x::d::PCurve>> allPCurves
+            = graph.pcurves;
+        for (unsigned f = 0; f < graph.faces.size(); ++f)
+            for (const auto& wire : graph.faces[f].wires)
+                for (const auto& use : wire) {
+                    const auto key = std::make_pair(f, use.edge);
+                    if (!allPCurves.count(key)) {
+                        x::d::PCurve pcurve;
+                        if (!accounting.visit(1)
+                            || !x::d::PairLocation(graph.edges[use.edge].shape.Location(),
+                                graph.faces[f].surface.location, graph.budget)
+                            || !x::d::ReadPCurve(graph.edges[use.edge].shape,
+                                graph.faces[f].surface, graph.edges[use.edge].curve,
+                                pcurve, graph.budget)
+                            || !x::d::PCurveMagnitude(pcurve, graph.faces[f].surface,
+                                expected.millimetresPerUnit, graph.budget))
+                            return fail(InspectionStatus::IncompleteObservation);
+                        allPCurves.emplace(key, std::vector<x::d::PCurve>{pcurve});
+                    }
+                }
+
         std::vector<x::old::detail::PointWitness> pointWitnesses;
         if (!accounting.visit(census.occurrences)
             || !x::old::detail::PointOwners(graph, expected.millimetresPerUnit,
@@ -603,26 +628,6 @@ inline InspectionResult InspectCompleteProfileBase(
             hostWalls.push_back(wall);
         }
 
-        std::map<std::pair<unsigned, unsigned>, std::vector<x::d::PCurve>> allPCurves
-            = graph.pcurves;
-        for (unsigned f = 0; f < graph.faces.size(); ++f)
-            for (const auto& wire : graph.faces[f].wires)
-                for (const auto& use : wire) {
-                    const auto key = std::make_pair(f, use.edge);
-                    if (!allPCurves.count(key)) {
-                        x::d::PCurve pcurve;
-                        if (!accounting.visit(1)
-                            || !x::d::PairLocation(graph.edges[use.edge].shape.Location(),
-                                graph.faces[f].surface.location, graph.budget)
-                            || !x::d::ReadPCurve(graph.edges[use.edge].shape,
-                                graph.faces[f].surface, graph.edges[use.edge].curve,
-                                pcurve, graph.budget)
-                            || !x::d::PCurveMagnitude(pcurve, graph.faces[f].surface,
-                                expected.millimetresPerUnit, graph.budget))
-                            return fail(InspectionStatus::IncompleteObservation);
-                        allPCurves.emplace(key, std::vector<x::d::PCurve>{pcurve});
-                    }
-                }
         for (const auto& entry : allPCurves) {
             const auto& surface = graph.faces[entry.first.first].surface;
             const auto& curve = graph.edges[entry.first.second].curve;

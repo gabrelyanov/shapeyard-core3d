@@ -151,6 +151,11 @@ __attribute__((objc_subclassing_restricted))
 //! and native code mints every durable identity. nil never changes history.
 - (Core3DBoundedCurveCreationOpening *_Nullable)openBoundedCurveCreation
     NS_SWIFT_NAME(openBoundedCurveCreation());
+//! Capture one fail-closed C2 spatial-sweep creation opening for the current
+//! document. The complete path value is explicit and native code mints every
+//! durable identity. nil never changes history.
+- (Core3DSpatialSweepCreationOpening *_Nullable)openSpatialSweepCreation
+    NS_SWIFT_NAME(openSpatialSweepCreation());
 - (Core3DSplineProfileEditingOpening *_Nullable)beginSplineProfileCreation
     NS_SWIFT_NAME(beginSplineProfileCreation());
 - (Core3DSplineProfileEditingOpening *_Nullable)openSplineProfileEditor

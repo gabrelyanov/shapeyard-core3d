@@ -343,6 +343,23 @@ __attribute__((objc_subclassing_restricted))
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+//! One native C2 creation authority. The complete path and laws are
+//! descriptive input; all retained identities and the closed-seam witness are
+//! issued by native code. Refusal leaves document history untouched.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DSpatialSweepCreationOpening : NSObject
+@property(nonatomic,copy,readonly) NSDictionary<NSString *, id> *descriptor;
+- (void)createCandidate:(NSDictionary<NSString *, id> *)candidate
+    name:(NSString *)name
+    completion:(void (^)(Core3DProfileConstructionResult result,
+                          NSString *detail,
+                          NSString *_Nullable entityIdentifier))completion
+    NS_SWIFT_NAME(create(candidate:name:completion:));
+- (BOOL)cancel;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 //! Stops only detached work started by this exact context. It cannot cancel,
 //! execute, retry or replace a later editor operation.
 __attribute__((objc_subclassing_restricted))

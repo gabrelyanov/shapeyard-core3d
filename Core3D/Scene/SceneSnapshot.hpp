@@ -278,6 +278,17 @@ struct FaceImageBindingSnapshot {
     std::int32_t textureIndex = -1;
 };
 
+//! E4's one derived appearance product after final geometry/UV selection.
+//! This is deliberately distinct from both the retained SYDL master and the
+//! SYEB painted-atlas derivative identity. A producer publishes it only after
+//! deterministic CPU bake and complete currentness validation.
+struct DecalDerivedAppearanceSnapshot {
+    std::string ownerDefinitionIdentifier;
+    std::string bakeProof; // lowercase SHA-256 of the complete bake key
+    std::uint32_t faceIndex = 0;
+    std::int32_t baseColorTextureIndex = -1;
+};
+
 //! Exact semantic topology owned by a reusable model definition. These counts
 //! are intentionally independent of render vertices and face primitives:
 //! tessellation may duplicate vertices, omit untriangulated topology, or use
@@ -365,6 +376,10 @@ struct InstanceSnapshot {
     //! Committed E3 face-image bindings observed on this instance, in record
     //! order. Empty for every asset without face-image records.
     std::vector<FaceImageBindingSnapshot> faceImageBindings;
+    //! Current E4 products, at most one per semantic face. E4 wins base-color
+    //! precedence for that face; E3 non-base roles and every material data map
+    //! remain intact. Empty means the legacy E3/SYEB routes are unchanged.
+    std::vector<DecalDerivedAppearanceSnapshot> decalDerivedAppearances;
 };
 
 struct CameraSnapshot {

@@ -1,6 +1,7 @@
 #import "Core3DNativeExportOperation+Private.h"
 
 #include "../OCCTKit/Core3DSTEPExchangeLock.h"
+#include "../OCCTKit/DecalLayerPersistence.hxx"
 #include "../OCCTKit/OcctDocument.h"
 #include "../OCCTKit/EnclosurePersistence.hxx"
 #include "../Scene/OcctSceneSnapshotBuilder.hpp"
@@ -1823,7 +1824,7 @@ NativeExportResult RunNativeExport(
             if (!core3d::scene::IsValidSceneSnapshot(*state->sourceScene)) {
                 throw NativeExportFailure(
                     Core3DNativeExportErrorInvalidState,
-                    "The painted appearance export derivative is invalid.");
+                    "The committed appearance export derivative is invalid.");
             }
             result.scene = state->meshQuality == Core3DExportMeshQualityViewport
                 ? state->sourceScene
@@ -1833,9 +1834,10 @@ NativeExportResult RunNativeExport(
                     MeshPrivateExportSurfaces(shape, state, whole.Next(4));
                 }, [&] { return state->cancelled.load(std::memory_order_acquire); });
             ThrowIfCancelled(state);
-            if (!result.scene) {
+            if (!result.scene
+                || !core3d::scene::IsValidSceneSnapshot(*result.scene)) {
                 throw NativeExportFailure(Core3DNativeExportErrorMeshingFailed,
-                    "The private GLB geometry could not be prepared safely.");
+                    "The private final-UV GLB appearance could not be prepared safely.");
             }
         } else {
         const Handle(TDocStd_Document)& ocafDocument = document->Document();
@@ -1989,6 +1991,28 @@ NativeExportResult RunNativeExport(
                         "The STL writer produced an invalid binary artifact.");
                 }
             } else if (state->exportType == ExportTypeObj) {
+                const auto decalClosure =
+                    core3d::decal_layer::persistence::ReadExportClosure(
+                        ocafDocument,
+                        rootLabels,
+                        [&state]() noexcept {
+                            return state->cancelled.load(
+                                std::memory_order_acquire);
+                        });
+                if (decalClosure
+                    == core3d::decal_layer::persistence::ExportClosureState::Cancelled) {
+                    ThrowIfCancelled(state);
+                }
+                if (decalClosure
+                    != core3d::decal_layer::persistence::ExportClosureState::Absent) {
+                    throw NativeExportFailure(
+                        Core3DNativeExportErrorInvalidState,
+                        "The committed decal appearance cannot be exported to OBJ safely.");
+                }
+                // OBJ/MTL/image writing runs only after the private document
+                // has passed the same committed-appearance admission above.
+                // The writer never receives a stale live-document pointer and
+                // publishes the staged directory only after bundle validation.
                 TColStd_IndexedDataMapOfStringString fileInfo;
                 fileInfo.Add("Author", "Shapeyard 3D");
                 ValidatedOBJWriter writer(

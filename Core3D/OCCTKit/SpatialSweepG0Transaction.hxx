@@ -309,6 +309,82 @@ struct ApplyResult {
 };
 
 struct Transaction {
+    // Stages a newly created one-source SYCR/2 record inside a command owned
+    // by the caller. Every check before marker acquisition is read-only; a
+    // false result after acquisition is erased when that caller aborts.
+    static bool StageCreation(const Handle(TDocStd_Document)& document,
+                              const TDF_Label& owner,
+                              const TopoDS_Shape& binding,
+                              const std::shared_ptr<const Payload>& payload,
+                              Standard_Integer& marker) noexcept {
+        marker = 0;
+        try {
+            if (document.IsNull() || document->GetData().IsNull()
+                || !document->HasOpenCommand() || owner.IsNull()
+                || owner.Data() != document->GetData() || binding.IsNull()
+                || !binding.IsEqual(XCAFDoc_ShapeTool::GetShape(owner))
+                || !payload || payload->sourceShapes.size() != 1
+                || payload->sourceShapes.front().IsNull()
+                || payload->sourceShapes.front().ShapeType() != TopAbs_WIRE
+                || payload->definition.schemaVersion != 2) return false;
+
+            std::vector<std::uint8_t> canonical;
+            if (!EncodeV2(payload->definition, canonical)
+                || canonical != payload->bytes
+                || payload->definition.nodes.size() != 2) return false;
+            const SourceNode* source = nullptr;
+            const FeatureNode* feature = nullptr;
+            for (const Node& node : payload->definition.nodes) {
+                if (const auto* candidate = std::get_if<SourceNode>(&node.value)) {
+                    if (source || candidate->recipe.kind != RecipeKind::BoundedCurvePath
+                        || candidate->shapeSlot != 0) return false;
+                    source = candidate;
+                } else if (const auto* candidate = std::get_if<FeatureNode>(&node.value)) {
+                    if (feature || candidate->kind != SpatialCircleSweepFeatureKind
+                        || candidate->codecVersion != SpatialCircleSweepFeatureCodec)
+                        return false;
+                    feature = candidate;
+                } else return false;
+            }
+            if (!source || !feature || feature->inputs.size() != 1
+                || feature->inputs.front() != source->node
+                || payload->definition.outputNode != feature->node
+                || owner.IsAttribute(AttributeID())) return false;
+            for (TDF_ChildIterator child(owner, Standard_True); child.More(); child.Next())
+                if (child.Value().IsAttribute(AttributeID())) return false;
+            const TDF_Label existing = owner.FindChild(MinimumRecordTag, Standard_False);
+            if (!existing.IsNull() && existing.HasAttribute()) return false;
+
+            Handle(TDataStd_Integer) priorAttribute;
+            const bool priorPresent = document->Main().FindAttribute(
+                CommandOwnerAttributeID(), priorAttribute);
+            if (document->Main().IsAttribute(CommandOwnerAttributeID())
+                && (!priorPresent || priorAttribute.IsNull())) return false;
+            const Standard_Integer prior = priorPresent ? priorAttribute->Get() : 0;
+            marker = prior == std::numeric_limits<Standard_Integer>::max()
+                ? std::numeric_limits<Standard_Integer>::min() : prior + 1;
+            TDataStd_Integer::Set(document->Main(), CommandOwnerAttributeID(), marker);
+            const TDF_Label record = owner.FindChild(MinimumRecordTag, Standard_True);
+            Handle(Attribute) attribute = new Attribute();
+            if (record.IsNull() || attribute.IsNull() || record.HasAttribute()) return false;
+            record.AddAttribute(attribute);
+            attribute->value_ = payload;
+            TNaming_Builder(record).Select(binding, binding);
+            return OwnsCreation(document, marker);
+        } catch (...) { return false; }
+    }
+
+    static bool OwnsCreation(const Handle(TDocStd_Document)& document,
+                             Standard_Integer marker) noexcept {
+        try {
+            Handle(TDataStd_Integer) value;
+            return !document.IsNull() && !document->GetData().IsNull()
+                && document->HasOpenCommand()
+                && document->Main().FindAttribute(CommandOwnerAttributeID(), value)
+                && !value.IsNull() && value->Get() == marker;
+        } catch (...) { return false; }
+    }
+
     static ApplyResult Apply(const Handle(TDocStd_Document)& document,
                              const Prepared& prepared) noexcept {
         ApplyResult result;

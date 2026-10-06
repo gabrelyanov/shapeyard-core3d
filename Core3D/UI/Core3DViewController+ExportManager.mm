@@ -13,7 +13,10 @@
 #import <Core3D/Core3DViewController+ExportManager.h>
 
 #include "GLViewController+Trick.h"
+#include "../OCCTKit/DecalLayerPersistence.hxx"
 #include <Prs3d_Drawer.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_ShapeTool.hxx>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -103,6 +106,73 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
     if (![self canExportType:exportType]) {
         return nil;
     }
+    if (exportType == ExportTypeObj || exportType == ExportTypeGltf) {
+        if (![NSThread isMainThread] || GLController == nil) return nil;
+        try {
+            const std::shared_ptr<core3d::Core3DViewer> viewer =
+                GLController.viewer;
+            const Handle(OcctDocument) document = viewer == nullptr
+                ? Handle(OcctDocument)()
+                : viewer->getDocument();
+            if (!CanCaptureCommittedExport(viewer) || document.IsNull()) {
+                return nil;
+            }
+            if (exportType == ExportTypeObj) {
+                const Handle(TDocStd_Document)& ocafDocument =
+                    document->Document();
+                if (ocafDocument.IsNull()
+                    || !XCAFDoc_DocumentTool::CheckShapeTool(
+                        ocafDocument->Main())) {
+                    return nil;
+                }
+                const Handle(XCAFDoc_ShapeTool) shapeTool =
+                    XCAFDoc_DocumentTool::ShapeTool(ocafDocument->Main());
+                if (shapeTool.IsNull()) return nil;
+                TDF_LabelSequence roots;
+                shapeTool->GetFreeShapes(roots);
+                if (core3d::decal_layer::persistence::ReadExportClosure(
+                        ocafDocument, roots, []() noexcept { return false; })
+                    != core3d::decal_layer::persistence::ExportClosureState::Absent) {
+                    return nil;
+                }
+            } else {
+                const CGSize size = GLController.drawableSize;
+                if (!std::isfinite(size.width) || !std::isfinite(size.height)
+                    || size.width < 1 || size.height < 1
+                    || size.width > std::numeric_limits<std::uint32_t>::max()
+                    || size.height > std::numeric_limits<std::uint32_t>::max()) {
+                    return nil;
+                }
+                const auto sourceScene = viewer->captureSceneSnapshot(
+                    static_cast<std::uint32_t>(std::llround(size.width)),
+                    static_cast<std::uint32_t>(std::llround(size.height)));
+                if (!sourceScene
+                    || !core3d::scene::IsValidSceneSnapshot(*sourceScene)) {
+                    return nil;
+                }
+                // This synchronous API still forwards to GLController's
+                // legacy glTF writer, which does not consume the validated
+                // E4 snapshot above. Snapshot success is not an admission
+                // token for a different writer: keep E4 strictly refused.
+                const Handle(TDocStd_Document)& ocafDocument =
+                    document->Document();
+                if (ocafDocument.IsNull()
+                    || !XCAFDoc_DocumentTool::CheckShapeTool(
+                        ocafDocument->Main())) return nil;
+                const Handle(XCAFDoc_ShapeTool) shapeTool =
+                    XCAFDoc_DocumentTool::ShapeTool(ocafDocument->Main());
+                if (shapeTool.IsNull()) return nil;
+                TDF_LabelSequence roots;
+                shapeTool->GetFreeShapes(roots);
+                if (core3d::decal_layer::persistence::ReadExportClosure(
+                        ocafDocument, roots, []() noexcept { return false; })
+                    != core3d::decal_layer::persistence::
+                        ExportClosureState::Absent) return nil;
+            }
+        } catch (...) {
+            return nil;
+        }
+    }
     return [GLController exportWithType:exportType];
 }
 
@@ -178,7 +248,14 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
             sourceScene = viewer->captureSceneSnapshot(
                 static_cast<std::uint32_t>(std::llround(size.width)),
                 static_cast<std::uint32_t>(std::llround(size.height)));
-            if (!sourceScene) { return nil; }
+            // Snapshot validation includes E4's owner/proof/face/texture
+            // cardinality. A malformed, stale, unresolved or unbaked record
+            // therefore refuses before the private snapshot or destination
+            // staging directory is created.
+            if (!sourceScene
+                || !core3d::scene::IsValidSceneSnapshot(*sourceScene)) {
+                return nil;
+            }
         }
         NSArray<NSString *> *selectedIdentifiers = nil;
         if (selectedObjectsOnly) {

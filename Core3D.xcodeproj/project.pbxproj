@@ -18,6 +18,8 @@
 		E26800020000000000000001 /* Core3DFinishingOpenings.mm in Sources */ = {isa = PBXBuildFile; fileRef = E26800020000000000000002 /* Core3DFinishingOpenings.mm */; };
 		E27800010000000000000001 /* Core3DAssetAtlasOpenings.mm in Sources */ = {isa = PBXBuildFile; fileRef = E27800010000000000000002 /* Core3DAssetAtlasOpenings.mm */; };
 		E278B1040000000000000001 /* Core3DFaceImageOpenings.mm in Sources */ = {isa = PBXBuildFile; fileRef = E278B1040000000000000002 /* Core3DFaceImageOpenings.mm */; };
+		D44500010000000000000001 /* Core3DPublishCapture.h in Headers */ = {isa = PBXBuildFile; fileRef = D44500010000000000000002 /* Core3DPublishCapture.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		D44500020000000000000001 /* Core3DPublishCapture.mm in Sources */ = {isa = PBXBuildFile; fileRef = D44500020000000000000002 /* Core3DPublishCapture.mm */; };
 		E18A00030000000000000003 /* NativeOpeningFactories.hxx in Headers */ = {isa = PBXBuildFile; fileRef = E18A00040000000000000004 /* NativeOpeningFactories.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		C3D5A0010000000000000001 /* Core3DModelingTypes.mm in Sources */ = {isa = PBXBuildFile; fileRef = C3D5A0010000000000000002 /* Core3DModelingTypes.mm */; };
 		B1E000010000000000000001 /* Core3DEdgeTreatmentTypes.mm in Sources */ = {isa = PBXBuildFile; fileRef = B1E000110000000000000011 /* Core3DEdgeTreatmentTypes.mm */; };
@@ -208,6 +210,9 @@
 		324EF2CC2BC7D08D00A05295 /* Core3DViewController+PrimitiveManager.h in Headers */ = {isa = PBXBuildFile; fileRef = 324EF2CB2BC7D08D00A05295 /* Core3DViewController+PrimitiveManager.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		5CD2C1000000000000000001 /* Core3DPatternCreationOpening.h in Headers */ = {isa = PBXBuildFile; fileRef = 5CD2C0000000000000000001 /* Core3DPatternCreationOpening.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		5CD2C1000000000000000002 /* Core3DPatternCreationOpening.mm in Sources */ = {isa = PBXBuildFile; fileRef = 5CD2C0000000000000000002 /* Core3DPatternCreationOpening.mm */; };
+		C2C100010000000000000001 /* SpatialSweepOwner.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C2C100110000000000000011 /* SpatialSweepOwner.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		C2C100020000000000000002 /* SpatialSweepOwner.mm in Sources */ = {isa = PBXBuildFile; fileRef = C2C100120000000000000012 /* SpatialSweepOwner.mm */; };
+		C2C100030000000000000003 /* Core3DSpatialSweepCreationOpening.mm in Sources */ = {isa = PBXBuildFile; fileRef = C2C100130000000000000013 /* Core3DSpatialSweepCreationOpening.mm */; };
 		324EF2CE2BC7D0C200A05295 /* Core3DViewController+PrimitiveManager.mm in Sources */ = {isa = PBXBuildFile; fileRef = 324EF2CD2BC7D0C200A05295 /* Core3DViewController+PrimitiveManager.mm */; };
 		325C835A2BCE77CB000292E4 /* dispatch_cancelable_block.h in Headers */ = {isa = PBXBuildFile; fileRef = 325C83592BCE77CB000292E4 /* dispatch_cancelable_block.h */; };
 		325F58D72BD8D37C0076FC53 /* objc_try.h in Headers */ = {isa = PBXBuildFile; fileRef = 325F58D62BD8D37C0076FC53 /* objc_try.h */; settings = {ATTRIBUTES = (Public, ); }; };
@@ -306,6 +311,8 @@
 		E26800020000000000000002 /* Core3DFinishingOpenings.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DFinishingOpenings.mm; sourceTree = "<group>"; };
 		E27800010000000000000002 /* Core3DAssetAtlasOpenings.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DAssetAtlasOpenings.mm; sourceTree = "<group>"; };
 		E278B1040000000000000002 /* Core3DFaceImageOpenings.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DFaceImageOpenings.mm; sourceTree = "<group>"; };
+		D44500010000000000000002 /* Core3DPublishCapture.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DPublishCapture.h; sourceTree = "<group>"; };
+		D44500020000000000000002 /* Core3DPublishCapture.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DPublishCapture.mm; sourceTree = "<group>"; };
 		E18A00040000000000000004 /* NativeOpeningFactories.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = NativeOpeningFactories.hxx; sourceTree = "<group>"; };
 		C3D5A0010000000000000002 /* Core3DModelingTypes.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DModelingTypes.mm; sourceTree = "<group>"; };
 		B1E000110000000000000011 /* Core3DEdgeTreatmentTypes.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DEdgeTreatmentTypes.mm; sourceTree = "<group>"; };
@@ -505,6 +512,9 @@
 		324EF2CB2BC7D08D00A05295 /* Core3DViewController+PrimitiveManager.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Core3DViewController+PrimitiveManager.h"; sourceTree = "<group>"; };
 		5CD2C0000000000000000001 /* Core3DPatternCreationOpening.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DPatternCreationOpening.h; sourceTree = "<group>"; };
 		5CD2C0000000000000000002 /* Core3DPatternCreationOpening.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DPatternCreationOpening.mm; sourceTree = "<group>"; };
+		C2C100110000000000000011 /* SpatialSweepOwner.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = SpatialSweepOwner.hxx; sourceTree = "<group>"; };
+		C2C100120000000000000012 /* SpatialSweepOwner.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = SpatialSweepOwner.mm; sourceTree = "<group>"; };
+		C2C100130000000000000013 /* Core3DSpatialSweepCreationOpening.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DSpatialSweepCreationOpening.mm; sourceTree = "<group>"; };
 		324EF2CD2BC7D0C200A05295 /* Core3DViewController+PrimitiveManager.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = "Core3DViewController+PrimitiveManager.mm"; sourceTree = "<group>"; };
 		324EF2D02BC7EC8C00A05295 /* GLViewController+Trick.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "GLViewController+Trick.h"; sourceTree = "<group>"; };
 		325C83592BCE77CB000292E4 /* dispatch_cancelable_block.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = dispatch_cancelable_block.h; sourceTree = "<group>"; };
@@ -931,6 +941,8 @@
 				C3N269120000000000000012 /* GeneralLoftOwner.hxx */,
 				C3N269130000000000000013 /* GeneralLoftOwner.mm */,
 				C1F100110000000000000011 /* BoundedCurveOwner.hxx */,
+				C2C100110000000000000011 /* SpatialSweepOwner.hxx */,
+				C2C100120000000000000012 /* SpatialSweepOwner.mm */,
 				E27100010000000000000002 /* AssetAtlasDefinition.hxx */,
 				E27100020000000000000002 /* AssetAtlasBuild.hxx */,
 				E27100030000000000000002 /* AssetAtlasPersistence.hxx */,
@@ -982,11 +994,14 @@
 				E26800020000000000000002 /* Core3DFinishingOpenings.mm */,
 				E27800010000000000000002 /* Core3DAssetAtlasOpenings.mm */,
 				E278B1040000000000000002 /* Core3DFaceImageOpenings.mm */,
+				D44500010000000000000002 /* Core3DPublishCapture.h */,
+				D44500020000000000000002 /* Core3DPublishCapture.mm */,
 				322185842BB5D5E100040E84 /* Core3DViewController.mm */,
 				324EF2CB2BC7D08D00A05295 /* Core3DViewController+PrimitiveManager.h */,
 				324EF2CD2BC7D0C200A05295 /* Core3DViewController+PrimitiveManager.mm */,
 				5CD2C0000000000000000001 /* Core3DPatternCreationOpening.h */,
 				5CD2C0000000000000000002 /* Core3DPatternCreationOpening.mm */,
+				C2C100130000000000000013 /* Core3DSpatialSweepCreationOpening.mm */,
 				32ECC7DC2BCD35B000770594 /* Core3DViewController+AvailabilityManager.h */,
 				32ECC7DB2BCD35B000770594 /* Core3DViewController+AvailabilityManager.mm */,
 				324047582C00C7F6009E4B86 /* Core3DViewController+ExportManager.h */,
@@ -1133,6 +1148,7 @@
 				1EA2D4A59925473C9BA22AAD /* Core3DModelCapability.h in Headers */,
 				D427676541F245DBAE023481 /* Core3DTransformInspectorSnapshot.h in Headers */,
 				C03D50010000000000000001 /* Core3DSceneSnapshot.h in Headers */,
+				D44500010000000000000001 /* Core3DPublishCapture.h in Headers */,
 				181242922CC25FAD002E5A39 /* Core3DMaterialController.h in Headers */,
 				18665F032CA2DA8500141E05 /* ModelPart.h in Headers */,
 				32ECC7CC2BC9428900770594 /* PrimitiveSelectionType.h in Headers */,
@@ -1244,6 +1260,7 @@
 				C3N269010000000000000001 /* GeneralLoftPersistence.hxx in Headers */,
 				C3N269020000000000000002 /* GeneralLoftOwner.hxx in Headers */,
 				C1F100010000000000000001 /* BoundedCurveOwner.hxx in Headers */,
+				C2C100010000000000000001 /* SpatialSweepOwner.hxx in Headers */,
 				C4A000020000000000000002 /* SplineProfileOwner.hxx in Headers */,
 				C4A000030000000000000003 /* SplineProfilePersistence.hxx in Headers */,
 				E26600010000000000000001 /* RetainedFinishingAttribute.hxx in Headers */,
@@ -1383,6 +1400,7 @@
 				E26800020000000000000001 /* Core3DFinishingOpenings.mm in Sources */,
 				E27800010000000000000001 /* Core3DAssetAtlasOpenings.mm in Sources */,
 				E278B1040000000000000001 /* Core3DFaceImageOpenings.mm in Sources */,
+				D44500020000000000000001 /* Core3DPublishCapture.mm in Sources */,
 				C03D91010000000000000002 /* Core3DQueuedAssetInput.mm in Sources */,
 				C03D91010000000000000004 /* Core3DQueuedAssetRequest.mm in Sources */,
 				C3D0E0022F10000100000002 /* Core3DNativeExportOperation.mm in Sources */,
@@ -1413,6 +1431,8 @@
 				18A006322BD2B306004931B1 /* ShapeInteractor.cpp in Sources */,
 				324EF2CE2BC7D0C200A05295 /* Core3DViewController+PrimitiveManager.mm in Sources */,
 				5CD2C1000000000000000002 /* Core3DPatternCreationOpening.mm in Sources */,
+				C2C100020000000000000002 /* SpatialSweepOwner.mm in Sources */,
+				C2C100030000000000000003 /* Core3DSpatialSweepCreationOpening.mm in Sources */,
 				71F7ACED2C09D2BD00FDF2EA /* BooleanOperationController.cpp in Sources */,
 				BEA000032F31000100000003 /* BevelOperationController.cpp in Sources */,
 				3221857D2BB5CC1500040E84 /* GLView.mm in Sources */,

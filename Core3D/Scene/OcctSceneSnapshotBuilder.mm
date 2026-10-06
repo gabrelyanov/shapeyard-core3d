@@ -17,6 +17,10 @@
 #include "../OCCTKit/NativeContactMeshCapture.hxx"
 #include "../OCCTKit/PatternAllLabelAuthority.hxx"
 #include "../OCCTKit/NativeOpeningDependentReplay.hxx"
+#include "../OCCTKit/DecalLayerPersistence.hxx"
+#include "../OCCTKit/DecalLayerBake.hxx"
+#include "../OCCTKit/FaceImageResourceValidation.hxx"
+#include "../OCCTKit/PaintedAtlasBake.hxx"
 
 #include "../Common/Core3DMobileResourceLimits.h"
 #include "../OCCTKit/OcctDocument.h"
@@ -24,6 +28,8 @@
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepClass_FaceClassifier.hxx>
 #include <BRep_Builder.hxx>
 #include <TopoDS_Compound.hxx>
 #include <Graphic3d_Camera.hxx>
@@ -63,6 +69,7 @@
 #include <XCAFPrs_DocumentExplorer.hxx>
 #include <V3d_View.hxx>
 #include <gp_Ax1.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
@@ -986,6 +993,235 @@ std::string PaintedAtlasDigestText(
     }
     return aText;
 }
+
+std::string DecalDigestText(const core3d::decal_layer::Digest& theDigest)
+{
+    static const char* const kDigits = "0123456789abcdef";
+    std::string aText; aText.reserve(theDigest.size() * 2);
+    for (const std::uint8_t aByte : theDigest) {
+        aText.push_back(kDigits[aByte >> 4]);
+        aText.push_back(kDigits[aByte & 0x0f]);
+    }
+    return aText;
+}
+
+bool ResolveDecalImage(
+    const Handle(OcctDocument)& theDocument,
+    const core3d::decal_layer::ImageRef& theReference,
+    core3d::decal_layer::bake::ResolvedImage& theOutput)
+{
+    theOutput = {};
+    @try {
+        namespace fi = core3d::face_image;
+        namespace dl = core3d::decal_layer;
+        if (theDocument.IsNull()
+            || !dl::image_contract::Supported(theReference)) return false;
+        fi::ResourceEnvelope anEnvelope;
+        if (!fi::owner::ReadResource(theDocument->Document(),
+                theReference.resource, anEnvelope)) return false;
+        NSData *anOriginal = [NSData dataWithBytes:anEnvelope.originalBytes.data()
+            length:anEnvelope.originalBytes.size()];
+        NSData *aWorking = [NSData dataWithBytes:anEnvelope.workingBytes.data()
+            length:anEnvelope.workingBytes.size()];
+        fi::validation::FaceImageRasterInfo anOriginalInfo, aWorkingInfo;
+        if (!fi::validation::MeasureFaceImageRaster(
+                anOriginal, anOriginalInfo)
+            || !fi::validation::MeasureFaceImageRaster(
+                aWorking, aWorkingInfo)
+            || anOriginalInfo.format != anEnvelope.originalFormat
+            || anOriginalInfo.width != anEnvelope.originalWidthTexels
+            || anOriginalInfo.height != anEnvelope.originalHeightTexels
+            || aWorkingInfo.format != anEnvelope.workingFormat
+            || aWorkingInfo.width != anEnvelope.workingWidthTexels
+            || aWorkingInfo.height != anEnvelope.workingHeightTexels)
+            return false;
+        core3d::painted_atlas_bake::kernel::Image aDecoded;
+        if (!core3d::painted_atlas_bake::kernel::DecodeImage(
+                anEnvelope.workingBytes, aDecoded)
+            || aDecoded.width != anEnvelope.workingWidthTexels
+            || aDecoded.height != anEnvelope.workingHeightTexels)
+            return false;
+        dl::bake::ResolvedImage aResolved;
+        aResolved.reference = theReference;
+        aResolved.envelope = std::move(anEnvelope);
+        aResolved.pixels.width = aDecoded.width;
+        aResolved.pixels.height = aDecoded.height;
+        aResolved.pixels.rgba = std::move(aDecoded.rgba);
+        aResolved.originalMeasured = true;
+        aResolved.workingMeasured = true;
+        aResolved.workingHasAlpha = aWorkingInfo.hasAlpha;
+        if (!dl::bake::Valid(aResolved, theReference)) return false;
+        theOutput = std::move(aResolved);
+        return true;
+    } @catch (...) { theOutput = {}; return false; }
+}
+
+namespace decal_math {
+
+struct DecalWorldTriangle final {
+    std::array<Double3, 3> points;
+    std::size_t instanceIndex = 0;
+    std::uint32_t faceIndex = 0;
+};
+
+Double3 Subtract(const Double3& theLeft, const Double3& theRight)
+{
+    return {theLeft.x - theRight.x, theLeft.y - theRight.y,
+            theLeft.z - theRight.z};
+}
+Double3 Add(const Double3& theLeft, const Double3& theRight)
+{
+    return {theLeft.x + theRight.x, theLeft.y + theRight.y,
+            theLeft.z + theRight.z};
+}
+Double3 Scale(const Double3& theValue, const double theScale)
+{
+    return {theValue.x * theScale, theValue.y * theScale,
+            theValue.z * theScale};
+}
+double Dot(const Double3& theLeft, const Double3& theRight)
+{
+    return theLeft.x * theRight.x + theLeft.y * theRight.y
+        + theLeft.z * theRight.z;
+}
+Double3 Cross(const Double3& theLeft, const Double3& theRight)
+{
+    return {
+        theLeft.y * theRight.z - theLeft.z * theRight.y,
+        theLeft.z * theRight.x - theLeft.x * theRight.z,
+        theLeft.x * theRight.y - theLeft.y * theRight.x,
+    };
+}
+bool Normalize(Double3& theValue)
+{
+    const double aLength = std::sqrt(Dot(theValue, theValue));
+    if (!IsFinite(aLength) || aLength <= 0.0) return false;
+    theValue = Scale(theValue, 1.0 / aLength); return true;
+}
+Double3 TransformVector(const Matrix4d& theMatrix, const Double3& theValue)
+{
+    return {
+        theMatrix.values[0] * theValue.x
+            + theMatrix.values[4] * theValue.y
+            + theMatrix.values[8] * theValue.z,
+        theMatrix.values[1] * theValue.x
+            + theMatrix.values[5] * theValue.y
+            + theMatrix.values[9] * theValue.z,
+        theMatrix.values[2] * theValue.x
+            + theMatrix.values[6] * theValue.y
+            + theMatrix.values[10] * theValue.z,
+    };
+}
+
+bool CaptureDecalOccluders(const SceneSnapshot& theScene,
+                           std::vector<DecalWorldTriangle>& theTriangles,
+                           Bounds3d& theBounds,
+                           core3d::decal_layer::Digest& theProof)
+{
+    theTriangles.clear(); theBounds = {}; theProof = {};
+    try {
+        core3d::face_image::detail::Writer aWriter;
+        aWriter.raw(reinterpret_cast<const std::uint8_t*>("E4OC"), 4);
+        aWriter.integer(1, 4);
+        for (std::size_t anInstanceIndex = 0;
+             anInstanceIndex < theScene.instances.size(); ++anInstanceIndex) {
+            const InstanceSnapshot& anInstance =
+                theScene.instances[anInstanceIndex];
+            if (anInstance.role != RenderRole::Model
+                || anInstance.meshIndex >= theScene.meshes.size()) continue;
+            const MeshSnapshot& aMesh = theScene.meshes[anInstance.meshIndex];
+            aWriter.integer(anInstance.entityIdentifier.size(), 4);
+            aWriter.raw(reinterpret_cast<const std::uint8_t*>(
+                    anInstance.entityIdentifier.data()),
+                anInstance.entityIdentifier.size());
+            for (double aValue : anInstance.worldFromObject.values)
+                aWriter.real(aValue);
+            for (const MeshPrimitive& aPrimitive : aMesh.primitives) {
+                if (aPrimitive.indexCount == 0
+                    || aPrimitive.indexCount % 3 != 0
+                    || aPrimitive.firstIndex > aMesh.indices.size()
+                    || aPrimitive.indexCount
+                        > aMesh.indices.size() - aPrimitive.firstIndex)
+                    return false;
+                for (std::size_t anOffset = 0;
+                     anOffset < aPrimitive.indexCount; anOffset += 3) {
+                    if (theTriangles.size() >= kMaxIndicesPerSnapshot / 3)
+                        return false;
+                    DecalWorldTriangle aTriangle;
+                    aTriangle.instanceIndex = anInstanceIndex;
+                    aTriangle.faceIndex = aPrimitive.faceIndex;
+                    for (std::size_t aCorner = 0; aCorner < 3; ++aCorner) {
+                        const std::uint32_t aVertexIndex = aMesh.indices[
+                            aPrimitive.firstIndex + anOffset + aCorner];
+                        if (aVertexIndex >= aMesh.vertices.size()) return false;
+                        const Vertex& aVertex = aMesh.vertices[aVertexIndex];
+                        Double3 aWorld;
+                        if (!TransformPoint(anInstance.worldFromObject,
+                                {aVertex.positionX, aVertex.positionY,
+                                 aVertex.positionZ}, aWorld)) return false;
+                        aTriangle.points[aCorner] = aWorld;
+                        if (!theBounds.valid) {
+                            theBounds.minimum = theBounds.maximum = aWorld;
+                            theBounds.valid = true;
+                        } else {
+                            theBounds.minimum.x = std::min(
+                                theBounds.minimum.x, aWorld.x);
+                            theBounds.minimum.y = std::min(
+                                theBounds.minimum.y, aWorld.y);
+                            theBounds.minimum.z = std::min(
+                                theBounds.minimum.z, aWorld.z);
+                            theBounds.maximum.x = std::max(
+                                theBounds.maximum.x, aWorld.x);
+                            theBounds.maximum.y = std::max(
+                                theBounds.maximum.y, aWorld.y);
+                            theBounds.maximum.z = std::max(
+                                theBounds.maximum.z, aWorld.z);
+                        }
+                        aWriter.real(aWorld.x); aWriter.real(aWorld.y);
+                        aWriter.real(aWorld.z);
+                    }
+                    aWriter.integer(aPrimitive.faceIndex, 4);
+                    theTriangles.push_back(std::move(aTriangle));
+                }
+            }
+        }
+        return aWriter.ok && theBounds.valid && !theTriangles.empty()
+            && core3d::face_image::HashFaceImageBytes(
+                aWriter.bytes, theProof)
+            && core3d::decal_layer::Nonzero(theProof);
+    } catch (...) {
+        theTriangles.clear(); theBounds = {}; theProof = {}; return false;
+    }
+}
+
+bool IntersectRayTriangle(const Double3& theOrigin,
+                          const Double3& theDirection,
+                          const DecalWorldTriangle& theTriangle,
+                          const double theTolerance,
+                          double& theDistance)
+{
+    theDistance = 0.0;
+    const Double3 anEdge1 = Subtract(
+        theTriangle.points[1], theTriangle.points[0]);
+    const Double3 anEdge2 = Subtract(
+        theTriangle.points[2], theTriangle.points[0]);
+    const Double3 aCross = Cross(theDirection, anEdge2);
+    const double aDeterminant = Dot(anEdge1, aCross);
+    if (!IsFinite(aDeterminant)
+        || std::abs(aDeterminant) <= theTolerance) return false;
+    const double anInverse = 1.0 / aDeterminant;
+    const Double3 anOffset = Subtract(theOrigin, theTriangle.points[0]);
+    const double u = Dot(anOffset, aCross) * anInverse;
+    if (u < -theTolerance || u > 1.0 + theTolerance) return false;
+    const Double3 q = Cross(anOffset, anEdge1);
+    const double v = Dot(theDirection, q) * anInverse;
+    if (v < -theTolerance || u + v > 1.0 + theTolerance) return false;
+    const double distance = Dot(anEdge2, q) * anInverse;
+    if (!IsFinite(distance) || distance < -theTolerance) return false;
+    theDistance = distance; return true;
+}
+
+} // namespace decal_math
 
 // Copy-on-publication final-geometry derivative. The master MeshSnapshot is
 // never modified: every triangle corner is split so the regenerated atlas UV
@@ -2763,6 +2999,15 @@ std::uint64_t PresentationFingerprint(const SceneSnapshot& theScene)
                 static_cast<std::uint8_t>(aFaceBinding.transform.wrapV));
             aHash.AddInteger(aFaceBinding.faceIndex);
             aHash.AddInteger(aFaceBinding.textureIndex);
+        }
+        aHash.AddInteger<std::uint64_t>(
+            anInstance.decalDerivedAppearances.size());
+        for (const DecalDerivedAppearanceSnapshot& anAppearance :
+             anInstance.decalDerivedAppearances) {
+            aHash.AddString(anAppearance.ownerDefinitionIdentifier);
+            aHash.AddString(anAppearance.bakeProof);
+            aHash.AddInteger(anAppearance.faceIndex);
+            aHash.AddInteger(anAppearance.baseColorTextureIndex);
         }
     }
     aHash.AddInteger<std::uint64_t>(theScene.pickTable.size());
@@ -5122,6 +5367,11 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             const auto identifier = document->DefinitionIdentifierForLabel(label);
             const auto& item = source.instances[found->second];
             const auto& sourceMesh = source.meshes[item.meshIndex];
+            // A remeshed branch owns different final UV/corner witnesses. The
+            // viewport derivative cannot be reused. Until the caller has
+            // published a derivative keyed to those new witnesses, refuse the
+            // private export rather than report success with stale artwork.
+            if (!item.decalDerivedAppearances.empty()) return {};
             const std::string& masterIdentifier =
                 sourceMesh.paintedAtlasMasterDefinitionIdentifier.empty()
                     ? sourceMesh.definitionIdentifier
@@ -5648,6 +5898,17 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             aLabelToInstances;
         std::unordered_map<std::string, std::vector<std::size_t>>
             aDefinitionToInstances;
+        struct PendingDecal final {
+            std::size_t instanceIndex = 0;
+            std::size_t definitionIndex = 0;
+            TDF_Label ownerLabel;
+            core3d::decal_layer::Definition definition;
+            std::vector<std::uint8_t> canonicalBytes;
+            core3d::decal_layer::source::Witness source;
+            std::shared_ptr<core3d::retained_edge_treatment::ReplayBudget>
+                budget;
+        };
+        std::vector<PendingDecal> aPendingDecals;
         std::size_t aBindingCount = 0;
         aScene.instances.reserve(anOccurrences.size());
         for (const OccurrenceData& anOccurrence : anOccurrences) {
@@ -5684,6 +5945,49 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             const bool hasPaintedDerivative =
                 theDocument->PaintedAtlasDerivativeForOwner(
                     anAppearanceOwner, aPaintedDerivative);
+
+            // E4 records are read directly under the document's existing
+            // snapshot read ownership. The record is descriptive only: it
+            // cannot mint a receiver/resource grant. Until the owner has
+            // installed a current final-UV derivative on this publication,
+            // presence is fail-closed below rather than silently showing an
+            // undecorated or stale model.
+            core3d::decal_layer::Definition aDecalRecord;
+            std::vector<std::uint8_t> aDecalCanonicalBytes;
+            const auto aDecalState = core3d::decal_layer::persistence::Read(
+                theDocument->Document(), anOccurrence.definitionLabel,
+                aDecalRecord, &aDecalCanonicalBytes, nullptr);
+            if (aDecalState
+                == core3d::decal_layer::persistence::ReadState::Malformed) {
+                return {};
+            }
+            std::optional<PendingDecal> aPendingDecal;
+            if (aDecalState
+                == core3d::decal_layer::persistence::ReadState::Present) {
+                core3d::decal_layer::Definition aProofCheck = aDecalRecord;
+                const auto aSavedLayerProof = aProofCheck.layerProof;
+                auto aBudget = std::make_shared<
+                    core3d::retained_edge_treatment::ReplayBudget>();
+                core3d::decal_layer::source::Witness aFreshSource;
+                if (!(aDecalRecord.owner == anAppearanceOwner)
+                    || !core3d::decal_layer::BindLayerProof(aProofCheck)
+                    || aProofCheck.layerProof != aSavedLayerProof
+                    || !aBudget
+                    || !core3d::decal_layer::source::CaptureSource(
+                        theDocument, anAppearanceOwner, *aBudget,
+                        [] { return false; }, aFreshSource)
+                    || !core3d::decal_layer::source::ExactMatch(
+                        aDecalRecord, aFreshSource)) return {};
+                aPendingDecal = PendingDecal{
+                    0,
+                    aDefinitionIndex,
+                    anOccurrence.definitionLabel,
+                    aDecalRecord,
+                    std::move(aDecalCanonicalBytes),
+                    aFreshSource,
+                    std::move(aBudget),
+                };
+            }
 
             // Resolve reference authority against the true object/occurrence
             // transform before the mesh-centering translation is appended.
@@ -6155,6 +6459,10 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             aDefinitionToInstances[anOccurrence.definitionIdentifier]
                 .push_back(anInstanceIndex);
             aScene.instances.push_back(std::move(anInstance));
+            if (aPendingDecal.has_value()) {
+                aPendingDecal->instanceIndex = aScene.instances.size() - 1;
+                aPendingDecals.push_back(std::move(*aPendingDecal));
+            }
         }
 
         // Supplied geometry frames persist independently of normal material.
@@ -6200,20 +6508,676 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             }
         }
 
+        // E4 production is deliberately after final tangent/UV/material
+        // choices. Reconstruct every input from the current document and the
+        // complete committed occurrence census; a cache is only an optional
+        // result of this path, never a prerequisite for cold publication.
+        if (!aPendingDecals.empty()) {
+            namespace dl = core3d::decal_layer;
+            namespace dr = core3d::dependent_replay;
+            using namespace decal_math;
+            std::vector<DecalWorldTriangle> anOccluders;
+            Bounds3d anOccluderBounds;
+            dl::Digest anOccluderProof{};
+            if (!CaptureDecalOccluders(aScene, anOccluders,
+                    anOccluderBounds, anOccluderProof)) return {};
+            const Double3 aBoundsSpan = Subtract(
+                anOccluderBounds.maximum, anOccluderBounds.minimum);
+            const double anOccluderSpan = std::sqrt(Dot(
+                aBoundsSpan, aBoundsSpan));
+            if (!IsFinite(anOccluderSpan) || anOccluderSpan <= 0.0)
+                return {};
+
+            for (PendingDecal& aPending : aPendingDecals) {
+                if (aPending.instanceIndex >= aScene.instances.size()
+                    || aPending.definitionIndex >= aDefinitions.size()
+                    || !aPending.budget) return {};
+                InstanceSnapshot& anInstance =
+                    aScene.instances[aPending.instanceIndex];
+                if (anInstance.meshIndex >= aScene.meshes.size()) return {};
+                const MeshSnapshot& aMesh = aScene.meshes[anInstance.meshIndex];
+                const DefinitionData& aNative =
+                    aDefinitions[aPending.definitionIndex];
+                if (aNative.boundedCurve || aNative.shape.IsNull()
+                    || aNative.faces.Extent() <= 0
+                    || aNative.faces.Extent() > 4096
+                    || !aPending.budget->visit(anOccluders.size(),
+                        core3d::retained_topology_budget::Site::C05OwnerScan))
+                    return {};
+                Bnd_Box aStageBox;
+                if (!dr::detail::FaceImageStageBounds(
+                        aNative.shape, aStageBox)
+                    || aStageBox.IsVoid()) return {};
+                struct ResolvedFace final {
+                    TopoDS_Face face;
+                    dr::FaceImageGeometricReceipt receipt;
+                    dl::Digest proof{};
+                    bool addressable = false;
+                };
+                std::vector<ResolvedFace> aResolvedFaces(
+                    static_cast<std::size_t>(aNative.faces.Extent()));
+                for (std::size_t anOrdinal = 0;
+                     anOrdinal < aResolvedFaces.size(); ++anOrdinal) {
+                    ResolvedFace& aResolved = aResolvedFaces[anOrdinal];
+                    aResolved.face = TopoDS::Face(aNative.faces.FindKey(
+                        Standard_Integer(anOrdinal + 1)));
+                    const auto aStatus = dr::detail::DeriveFaceImageReceipt(
+                        aStageBox, aResolved.face, aMetersPerUnit,
+                        *aPending.budget, aResolved.receipt);
+                    if (aStatus == dr::detail::FaceImageDeriveStatus::Budget)
+                        return {};
+                    if (aStatus == dr::detail::FaceImageDeriveStatus::NotAddressable)
+                        continue;
+                    if (!dr::FaceImageReceiptProof(
+                            aResolved.receipt, aResolved.proof)) return {};
+                    aResolved.addressable = true;
+                }
+                std::map<std::size_t, std::vector<std::size_t>> aLayersByFace;
+                for (std::size_t aLayerIndex = 0;
+                     aLayerIndex < aPending.definition.layers.size();
+                     ++aLayerIndex) {
+                    const dl::ReceiverReceipt anExpected =
+                        dl::bake::IntentReceipt(
+                            aPending.definition.layers[aLayerIndex]);
+                    std::size_t aMatch = 0, aMatches = 0;
+                    for (std::size_t anOrdinal = 0;
+                         anOrdinal < aResolvedFaces.size(); ++anOrdinal) {
+                        if (aResolvedFaces[anOrdinal].addressable
+                            && aResolvedFaces[anOrdinal].proof
+                                == anExpected.selectorProof) {
+                            aMatch = anOrdinal; ++aMatches;
+                        }
+                    }
+                    if (aMatches != 1) return {};
+                    aLayersByFace[aMatch].push_back(aLayerIndex);
+                }
+
+                std::vector<dl::bake::FaceProduct> aProducts;
+                aProducts.reserve(aLayersByFace.size());
+                for (const auto& aFaceLayers : aLayersByFace) {
+                    const std::size_t aFaceIndex = aFaceLayers.first;
+                    if (aFaceIndex >= aResolvedFaces.size()) return {};
+                    const auto aPrimitive = std::find_if(
+                        aMesh.primitives.begin(), aMesh.primitives.end(),
+                        [aFaceIndex](const MeshPrimitive& thePrimitive) {
+                            return thePrimitive.faceIndex == aFaceIndex;
+                        });
+                    if (aPrimitive == aMesh.primitives.end()
+                        || !aPrimitive->hasTextureCoordinates) return {};
+                    const std::size_t aPrimitiveIndex =
+                        static_cast<std::size_t>(
+                            aPrimitive - aMesh.primitives.begin());
+                    if (aPrimitiveIndex >= anInstance.primitiveBindings.size())
+                        return {};
+                    const std::uint32_t aMaterialIndex =
+                        anInstance.primitiveBindings[aPrimitiveIndex].materialIndex;
+                    if (aMaterialIndex >= aScene.materials.size()) return {};
+                    const MaterialSnapshot& aMaterial =
+                        aScene.materials[aMaterialIndex];
+
+                    // Resolve and own every layer/mask resource before any
+                    // raster or publication allocation.
+                    std::vector<dl::bake::ResolvedLayer> aResolvedLayers;
+                    aResolvedLayers.reserve(aFaceLayers.second.size());
+                    std::uint32_t anOutputWidth = 1, anOutputHeight = 1;
+                    for (const std::size_t aLayerIndex : aFaceLayers.second) {
+                        const dl::Layer& anIntent =
+                            aPending.definition.layers[aLayerIndex];
+                        dl::bake::ResolvedLayer aResolved;
+                        aResolved.intent = anIntent;
+                        if (!ResolveDecalImage(
+                                theDocument, anIntent.image, aResolved.image))
+                            return {};
+                        if (anIntent.mask.present) {
+                            dl::bake::ResolvedImage aMask;
+                            if (!ResolveDecalImage(
+                                    theDocument, anIntent.mask.image, aMask))
+                                return {};
+                            aResolved.mask = std::move(aMask);
+                        }
+                        anOutputWidth = std::max(
+                            anOutputWidth, anIntent.image.widthTexels);
+                        anOutputHeight = std::max(
+                            anOutputHeight, anIntent.image.heightTexels);
+                        aResolved.completeOccludersProved = true;
+                        aResolved.boundaryProved = true;
+                        aResolvedLayers.push_back(std::move(aResolved));
+                    }
+                    // The deterministic ordinary chart raster is bounded
+                    // independently of authored input size. Normalized UVs
+                    // preserve exact mesh/image correspondence at any size.
+                    anOutputWidth = std::min<std::uint32_t>(
+                        anOutputWidth, 64);
+                    anOutputHeight = std::min<std::uint32_t>(
+                        anOutputHeight, 64);
+
+                    dl::bake::Raster aBase;
+                    aBase.width = anOutputWidth;
+                    aBase.height = anOutputHeight;
+                    aBase.rgba.resize(std::size_t(anOutputWidth)
+                        * anOutputHeight * 4);
+                    std::int32_t aBaseTextureIndex =
+                        aMaterial.baseColorTextureIndex;
+                    bool aBaseSRGB = true;
+                    core3d::face_image::UVTransform aBaseTransform;
+                    for (const FaceImageBindingSnapshot& aBinding :
+                         anInstance.faceImageBindings) {
+                        if (aBinding.faceIndex != aFaceIndex
+                            || aBinding.role != FaceImageRole::BaseColor)
+                            continue;
+                        if (aBaseTextureIndex >= 0
+                            && aBaseTextureIndex != aBinding.textureIndex)
+                            return {};
+                        aBaseTextureIndex = aBinding.textureIndex;
+                        aBaseSRGB = aBinding.srgbColorSpace;
+                        aBaseTransform.scale = {
+                            aBinding.transform.scaleU,
+                            aBinding.transform.scaleV};
+                        aBaseTransform.offset = {
+                            aBinding.transform.offsetU,
+                            aBinding.transform.offsetV};
+                        aBaseTransform.rotationDegrees =
+                            aBinding.transform.rotationDegrees;
+                        aBaseTransform.wrapU = static_cast<core3d::face_image::Wrap>(
+                            aBinding.transform.wrapU);
+                        aBaseTransform.wrapV = static_cast<core3d::face_image::Wrap>(
+                            aBinding.transform.wrapV);
+                    }
+                    std::optional<dl::bake::Raster> aBaseSource;
+                    if (aBaseTextureIndex >= 0) {
+                        if (std::size_t(aBaseTextureIndex)
+                            >= aScene.textures.size()) return {};
+                        core3d::painted_atlas_bake::kernel::Image aDecoded;
+                        if (!core3d::painted_atlas_bake::kernel::DecodeImage(
+                                aScene.textures[aBaseTextureIndex].encodedBytes,
+                                aDecoded)) return {};
+                        dl::bake::Raster aRaster;
+                        aRaster.width = aDecoded.width;
+                        aRaster.height = aDecoded.height;
+                        aRaster.rgba = std::move(aDecoded.rgba);
+                        if (!dl::bake::Valid(aRaster)) return {};
+                        aBaseSource = std::move(aRaster);
+                    }
+                    for (std::uint32_t y = 0; y < anOutputHeight; ++y) {
+                        for (std::uint32_t x = 0; x < anOutputWidth; ++x) {
+                            const dl::bake::UV anOutputUV{
+                                (double(x) + 0.5) / anOutputWidth,
+                                1.0 - (double(y) + 0.5) / anOutputHeight};
+                            std::array<double, 4> aSample{1.0, 1.0, 1.0, 1.0};
+                            if (aBaseSource.has_value()) {
+                                const dl::bake::UV aSourceUV =
+                                    dl::bake::Transform(
+                                        anOutputUV, aBaseTransform);
+                                aSample = dl::bake::Sample(*aBaseSource,
+                                    aSourceUV, aBaseSRGB,
+                                    aBaseTransform.wrapU,
+                                    aBaseTransform.wrapV, false);
+                            }
+                            const std::size_t anOffset =
+                                (std::size_t(y) * anOutputWidth + x) * 4;
+                            aBase.rgba[anOffset] = dl::bake::LinearToSRGB(
+                                aSample[0] * aMaterial.baseColor.x);
+                            aBase.rgba[anOffset + 1] = dl::bake::LinearToSRGB(
+                                aSample[1] * aMaterial.baseColor.y);
+                            aBase.rgba[anOffset + 2] = dl::bake::LinearToSRGB(
+                                aSample[2] * aMaterial.baseColor.z);
+                            aBase.rgba[anOffset + 3] = dl::bake::LinearByte(
+                                aSample[3] * aMaterial.baseColor.w);
+                        }
+                    }
+
+                    const ResolvedFace& aFace = aResolvedFaces[aFaceIndex];
+                    const Double3 aNormal{
+                        aFace.receipt.plane.outwardNormal[0],
+                        aFace.receipt.plane.outwardNormal[1],
+                        aFace.receipt.plane.outwardNormal[2]};
+                    const double anOffsetLocal =
+                        aFace.receipt.plane.offsetMM
+                            / (1000.0 * aMetersPerUnit);
+                    const Double3 aPlaneOrigin = Scale(aNormal, anOffsetLocal);
+                    const int anAxis = std::abs(aNormal.x) >= std::abs(aNormal.y)
+                            && std::abs(aNormal.x) >= std::abs(aNormal.z) ? 0
+                        : std::abs(aNormal.y) >= std::abs(aNormal.z) ? 1 : 2;
+                    const Double3 aReference = anAxis == 0
+                        ? Double3{0, 1, 0}
+                        : anAxis == 1 ? Double3{0, 0, 1}
+                                      : Double3{1, 0, 0};
+                    Double3 aFaceU = Subtract(aReference,
+                        Scale(aNormal, Dot(aNormal, aReference)));
+                    if (!Normalize(aFaceU)) return {};
+                    Double3 aFaceV = Cross(aNormal, aFaceU);
+                    if (!Normalize(aFaceV)) return {};
+                    const auto quaternionAxis = [](const std::array<double, 4>& q,
+                                                   const Double3& v) {
+                        const Double3 qv{q[0], q[1], q[2]};
+                        return Add(v, Add(
+                            Scale(Cross(qv, v), 2.0 * q[3]),
+                            Scale(Cross(qv, Cross(qv, v)), 2.0)));
+                    };
+
+                    for (dl::bake::ResolvedLayer& aLayer : aResolvedLayers) {
+                        const dl::Layer& anIntent = aLayer.intent;
+                        Double3 anOrigin, aLayerU, aLayerV, aRayLocal;
+                        double aNearLocal = 0.0, aFarLocal = 0.0;
+                        if (anIntent.placement.kind == dl::PlacementKind::Face) {
+                            anOrigin = Add(aPlaneOrigin, Add(
+                                Scale(aFaceU,
+                                    anIntent.placement.face.anchorMeters[0]
+                                        / aMetersPerUnit),
+                                Scale(aFaceV,
+                                    anIntent.placement.face.anchorMeters[1]
+                                        / aMetersPerUnit)));
+                            const double c = std::cos(
+                                anIntent.placement.face.angleRadians);
+                            const double s = std::sin(
+                                anIntent.placement.face.angleRadians);
+                            aLayerU = Add(Scale(aFaceU, c), Scale(aFaceV, s));
+                            aLayerV = Add(Scale(aFaceV, c), Scale(aFaceU, -s));
+                            aRayLocal = Scale(aNormal, -1.0);
+                        } else {
+                            const auto& aProjector =
+                                anIntent.placement.projector;
+                            anOrigin = {
+                                aProjector.frame.origin[0] / aMetersPerUnit,
+                                aProjector.frame.origin[1] / aMetersPerUnit,
+                                aProjector.frame.origin[2] / aMetersPerUnit};
+                            aLayerU = quaternionAxis(
+                                aProjector.frame.orientation, {1, 0, 0});
+                            aLayerV = quaternionAxis(
+                                aProjector.frame.orientation, {0, 1, 0});
+                            aRayLocal = Scale(quaternionAxis(
+                                aProjector.frame.orientation, {0, 0, 1}), -1.0);
+                            aNearLocal = aProjector.nearDepthMeters
+                                / aMetersPerUnit;
+                            aFarLocal = aProjector.farDepthMeters
+                                / aMetersPerUnit;
+                        }
+                        if (!Normalize(aLayerU) || !Normalize(aLayerV)
+                            || !Normalize(aRayLocal)) return {};
+                        Double3 aRayWorld = TransformVector(
+                            anInstance.worldFromObject, aRayLocal);
+                        if (!Normalize(aRayWorld)) return {};
+
+                        // Continuous rejectCrossing proof uses the four
+                        // physical footprint corners against native trims.
+                        bool aContained = true;
+                        for (double u : {-0.5, 0.5}) for (double v : {-0.5, 0.5}) {
+                            Double3 aCorner = Add(anOrigin, Add(
+                                Scale(aLayerU, u * anIntent.widthMeters
+                                    / aMetersPerUnit),
+                                Scale(aLayerV, v * anIntent.heightMeters
+                                    / aMetersPerUnit)));
+                            if (anIntent.placement.kind
+                                == dl::PlacementKind::OrthographicProjector) {
+                                const double denominator = Dot(aRayLocal, aNormal);
+                                if (std::abs(denominator) <= 1.0e-8) {
+                                    aContained = false; break;
+                                }
+                                const double t = (anOffsetLocal
+                                    - Dot(aNormal, aCorner)) / denominator;
+                                aCorner = Add(aCorner, Scale(aRayLocal, t));
+                            }
+                            BRepClass_FaceClassifier aClassifier(
+                                aFace.face,
+                                gp_Pnt(aCorner.x, aCorner.y, aCorner.z),
+                                1.0e-7 / aMetersPerUnit);
+                            if (aClassifier.State() != TopAbs_IN
+                                && aClassifier.State() != TopAbs_ON) {
+                                aContained = false; break;
+                            }
+                        }
+                        aLayer.footprintContained = aContained;
+                        if (anIntent.placement.edgePolicy
+                                == dl::EdgePolicy::RejectCrossing
+                            && !aContained) return {};
+
+                        if (aPrimitive->firstIndex > aMesh.indices.size()
+                            || aPrimitive->indexCount
+                                > aMesh.indices.size() - aPrimitive->firstIndex
+                            || aPrimitive->indexCount % 3 != 0) return {};
+                        for (std::size_t anOffset = 0;
+                             anOffset < aPrimitive->indexCount;
+                             anOffset += 3) {
+                            dl::bake::Triangle aTriangle;
+                            aTriangle.receiver =
+                                dl::bake::IntentReceipt(anIntent);
+                            std::array<Double3, 3> aLocalPoints;
+                            std::array<Double3, 3> aWorldPoints;
+                            for (std::size_t aCorner = 0; aCorner < 3; ++aCorner) {
+                                const std::uint32_t aVertexIndex = aMesh.indices[
+                                    aPrimitive->firstIndex + anOffset + aCorner];
+                                if (aVertexIndex >= aMesh.vertices.size()) return {};
+                                const Vertex& aVertex = aMesh.vertices[aVertexIndex];
+                                if (!IsFinite(aVertex.textureU)
+                                    || !IsFinite(aVertex.textureV)
+                                    || aVertex.textureU < 0.0f
+                                    || aVertex.textureU > 1.0f
+                                    || aVertex.textureV < 0.0f
+                                    || aVertex.textureV > 1.0f) return {};
+                                aTriangle.outputPixels[aCorner] = {
+                                    double(aVertex.textureU) * anOutputWidth,
+                                    (1.0 - double(aVertex.textureV))
+                                        * anOutputHeight};
+                                aLocalPoints[aCorner] = {
+                                    aVertex.positionX, aVertex.positionY,
+                                    aVertex.positionZ};
+                                const Double3 anAuthorityPoint = Add(
+                                    aLocalPoints[aCorner], aNative.sourceOrigin);
+                                aTriangle.layerUV[aCorner] = {
+                                    0.5 + Dot(Subtract(anAuthorityPoint, anOrigin),
+                                        aLayerU) * aMetersPerUnit
+                                        / anIntent.widthMeters,
+                                    0.5 + Dot(Subtract(anAuthorityPoint, anOrigin),
+                                        aLayerV) * aMetersPerUnit
+                                        / anIntent.heightMeters};
+                                if (!TransformPoint(anInstance.worldFromObject,
+                                        aLocalPoints[aCorner],
+                                        aWorldPoints[aCorner])) return {};
+                            }
+                            Double3 aTriangleNormal = Cross(
+                                Subtract(aWorldPoints[1], aWorldPoints[0]),
+                                Subtract(aWorldPoints[2], aWorldPoints[0]));
+                            if (!Normalize(aTriangleNormal)) return {};
+                            const bool aFrontFacing = Dot(
+                                aTriangleNormal, Scale(aRayWorld, -1.0)) > 1.0e-8;
+                            double aMinX = aTriangle.outputPixels[0].x;
+                            double aMaxX = aMinX, aMinY = aTriangle.outputPixels[0].y;
+                            double aMaxY = aMinY;
+                            for (const auto& aPoint : aTriangle.outputPixels) {
+                                aMinX = std::min(aMinX, aPoint.x);
+                                aMaxX = std::max(aMaxX, aPoint.x);
+                                aMinY = std::min(aMinY, aPoint.y);
+                                aMaxY = std::max(aMaxY, aPoint.y);
+                            }
+                            const int aFirstX = std::max(0, int(std::floor(aMinX)));
+                            const int aLastX = std::min(int(anOutputWidth) - 1,
+                                int(std::ceil(aMaxX)) - 1);
+                            const int aFirstY = std::max(0, int(std::floor(aMinY)));
+                            const int aLastY = std::min(int(anOutputHeight) - 1,
+                                int(std::ceil(aMaxY)) - 1);
+                            for (int y = aFirstY; y <= aLastY; ++y) {
+                                for (int x = aFirstX; x <= aLastX; ++x) {
+                                    std::array<double, 3> aWeights{};
+                                    if (!dl::bake::BarycentricTopLeft(
+                                            aTriangle, {x + 0.5, y + 0.5},
+                                            aWeights)) continue;
+                                    dl::bake::CoverageSample aSample;
+                                    aSample.x = std::uint32_t(x);
+                                    aSample.y = std::uint32_t(y);
+                                    aSample.receiver = aTriangle.receiver;
+                                    dl::bake::UV aUV{};
+                                    Double3 aLocalSample{}, aWorldSample{};
+                                    for (std::size_t aCorner = 0;
+                                         aCorner < 3; ++aCorner) {
+                                        aUV.u += aWeights[aCorner]
+                                            * aTriangle.layerUV[aCorner].u;
+                                        aUV.v += aWeights[aCorner]
+                                            * aTriangle.layerUV[aCorner].v;
+                                        aLocalSample = Add(aLocalSample,
+                                            Scale(aLocalPoints[aCorner],
+                                                aWeights[aCorner]));
+                                        aWorldSample = Add(aWorldSample,
+                                            Scale(aWorldPoints[aCorner],
+                                                aWeights[aCorner]));
+                                    }
+                                    aSample.affected = aUV.u >= 0.0 && aUV.u <= 1.0
+                                        && aUV.v >= 0.0 && aUV.v <= 1.0;
+                                    if (aSample.affected
+                                        && anIntent.placement.kind
+                                            == dl::PlacementKind::OrthographicProjector) {
+                                        const Double3 anAuthoritySample = Add(
+                                            aLocalSample, aNative.sourceOrigin);
+                                        const double aDepth = Dot(Subtract(
+                                            anAuthoritySample, anOrigin), aRayLocal);
+                                        aSample.affected = aDepth >= aNearLocal
+                                            && aDepth <= aFarLocal;
+                                    }
+                                    if (!aSample.affected) {
+                                        aSample.conclusive = true;
+                                        aTriangle.coverage.push_back(aSample);
+                                        continue;
+                                    }
+                                    const double aTolerance =
+                                        1.0e-7 / aMetersPerUnit;
+                                    double anExpectedDistance = 0.0;
+                                    Double3 aRayOrigin;
+                                    if (anIntent.placement.kind
+                                        == dl::PlacementKind::Face) {
+                                        anExpectedDistance = anOccluderSpan
+                                            + aTolerance * 4.0;
+                                        aRayOrigin = Subtract(aWorldSample,
+                                            Scale(aRayWorld,
+                                                anExpectedDistance));
+                                    } else {
+                                        const Double3 anAuthoritySample = Add(
+                                            aLocalSample, aNative.sourceOrigin);
+                                        const double aDepth = Dot(Subtract(
+                                            anAuthoritySample, anOrigin), aRayLocal);
+                                        anExpectedDistance = aDepth - aNearLocal;
+                                        aRayOrigin = Subtract(aWorldSample,
+                                            Scale(aRayWorld,
+                                                anExpectedDistance));
+                                    }
+                                    bool aHit = false, aTie = false;
+                                    double aNearest = std::numeric_limits<double>::max();
+                                    std::size_t aNearestInstance = 0;
+                                    std::uint32_t aNearestFace = 0;
+                                    for (const DecalWorldTriangle& anOccluder :
+                                         anOccluders) {
+                                        if (!aPending.budget->visit(1,
+                                                core3d::retained_topology_budget::
+                                                    Site::C06DirectCensus))
+                                            return {};
+                                        double aDistance = 0.0;
+                                        if (!IntersectRayTriangle(aRayOrigin,
+                                                aRayWorld, anOccluder,
+                                                1.0e-12, aDistance)
+                                            || aDistance
+                                                > anExpectedDistance + aTolerance)
+                                            continue;
+                                        if (!aHit
+                                            || aDistance < aNearest - aTolerance) {
+                                            aHit = true; aTie = false;
+                                            aNearest = aDistance;
+                                            aNearestInstance =
+                                                anOccluder.instanceIndex;
+                                            aNearestFace = anOccluder.faceIndex;
+                                        } else if (std::abs(
+                                                aDistance - aNearest)
+                                            <= aTolerance
+                                            && (aNearestInstance
+                                                    != anOccluder.instanceIndex
+                                                || aNearestFace
+                                                    != anOccluder.faceIndex)) {
+                                            aTie = true;
+                                        }
+                                    }
+                                    aSample.conclusive = aHit && !aTie;
+                                    aSample.selectedReceiver =
+                                        aNearestInstance == aPending.instanceIndex
+                                        && aNearestFace == aFaceIndex;
+                                    aSample.frontFacing = aFrontFacing;
+                                    aSample.insideTrim = true;
+                                    aSample.nearestHit = aSample.selectedReceiver
+                                        && std::abs(aNearest
+                                            - anExpectedDistance) <= aTolerance;
+                                    aTriangle.coverage.push_back(aSample);
+                                }
+                            }
+                            if (aTriangle.coverage.empty()) return {};
+                            aLayer.triangles.push_back(std::move(aTriangle));
+                        }
+                        if (aLayer.triangles.empty()) return {};
+                    }
+
+                    core3d::face_image::detail::Writer aGeometryWriter;
+                    core3d::face_image::detail::Writer aTangentWriter;
+                    core3d::face_image::detail::Writer anAppearanceWriter;
+                    core3d::face_image::detail::Writer anAtlasWriter;
+                    core3d::face_image::detail::Writer anOccurrenceWriter;
+                    aGeometryWriter.raw(reinterpret_cast<const std::uint8_t*>("E4FG"), 4);
+                    aTangentWriter.raw(reinterpret_cast<const std::uint8_t*>("E4TG"), 4);
+                    anAppearanceWriter.raw(reinterpret_cast<const std::uint8_t*>("E4AP"), 4);
+                    anAtlasWriter.raw(reinterpret_cast<const std::uint8_t*>("E4AT"), 4);
+                    anOccurrenceWriter.raw(reinterpret_cast<const std::uint8_t*>("E4OR"), 4);
+                    for (const Vertex& aVertex : aMesh.vertices) {
+                        for (float aValue : {aVertex.positionX, aVertex.positionY,
+                                 aVertex.positionZ, aVertex.normalX, aVertex.normalY,
+                                 aVertex.normalZ, aVertex.textureU, aVertex.textureV}) {
+                            aGeometryWriter.real(aValue);
+                        }
+                        anAtlasWriter.real(aVertex.textureU);
+                        anAtlasWriter.real(aVertex.textureV);
+                    }
+                    for (std::uint32_t anIndex : aMesh.indices)
+                        aGeometryWriter.integer(anIndex, 4);
+                    for (const MeshPrimitive& aValue : aMesh.primitives) {
+                        aGeometryWriter.integer(aValue.firstIndex, 4);
+                        aGeometryWriter.integer(aValue.indexCount, 4);
+                        aGeometryWriter.integer(aValue.faceIndex, 4);
+                        anAtlasWriter.integer(aValue.faceIndex, 4);
+                    }
+                    aTangentWriter.integer(std::uint8_t(aMesh.tangentBasis), 1);
+                    for (const Float4& aValue : aMesh.cornerTangents) {
+                        aTangentWriter.real(aValue.x); aTangentWriter.real(aValue.y);
+                        aTangentWriter.real(aValue.z); aTangentWriter.real(aValue.w);
+                    }
+                    for (float aValue : {aMaterial.baseColor.x, aMaterial.baseColor.y,
+                             aMaterial.baseColor.z, aMaterial.baseColor.w,
+                             aMaterial.emission.x, aMaterial.emission.y,
+                             aMaterial.emission.z, aMaterial.metallic,
+                             aMaterial.roughness, aMaterial.indexOfRefraction,
+                             aMaterial.alphaCutoff})
+                        anAppearanceWriter.real(aValue);
+                    for (std::int32_t aTexture : {aMaterial.baseColorTextureIndex,
+                             aMaterial.emissiveTextureIndex,
+                             aMaterial.metallicRoughnessTextureIndex,
+                             aMaterial.occlusionTextureIndex,
+                             aMaterial.normalTextureIndex}) {
+                        anAppearanceWriter.integer(std::uint32_t(aTexture), 4);
+                        if (aTexture >= 0) {
+                            if (std::size_t(aTexture) >= aScene.textures.size())
+                                return {};
+                            dl::Digest aTextureDigest{};
+                            if (!core3d::face_image::HashFaceImageBytes(
+                                    aScene.textures[aTexture].encodedBytes,
+                                    aTextureDigest)) return {};
+                            anAppearanceWriter.raw(aTextureDigest);
+                        }
+                    }
+                    for (double aValue : anInstance.worldFromObject.values)
+                        anOccurrenceWriter.real(aValue);
+                    dl::Digest aGeometryProof{}, aTangentProof{};
+                    dl::Digest anAppearanceProof{}, anAtlasProof{};
+                    dl::Digest anOccurrenceProof{};
+                    if (!aGeometryWriter.ok || !aTangentWriter.ok
+                        || !anAppearanceWriter.ok || !anAtlasWriter.ok
+                        || !anOccurrenceWriter.ok
+                        || !core3d::face_image::HashFaceImageBytes(
+                            aGeometryWriter.bytes, aGeometryProof)
+                        || !core3d::face_image::HashFaceImageBytes(
+                            aTangentWriter.bytes, aTangentProof)
+                        || !core3d::face_image::HashFaceImageBytes(
+                            anAppearanceWriter.bytes, anAppearanceProof)
+                        || !core3d::face_image::HashFaceImageBytes(
+                            anAtlasWriter.bytes, anAtlasProof)
+                        || !core3d::face_image::HashFaceImageBytes(
+                            anOccurrenceWriter.bytes, anOccurrenceProof))
+                        return {};
+                    dl::bake::Input anInput;
+                    anInput.baseColor = std::move(aBase);
+                    anInput.layers = std::move(aResolvedLayers);
+                    anInput.canonicalLayers = aPending.canonicalBytes;
+                    anInput.sourceProof = aPending.source.sourceProof;
+                    anInput.finalGeometryUVProof = aGeometryProof;
+                    anInput.occluderProof = anOccluderProof;
+                    anInput.effectiveAppearanceProof = anAppearanceProof;
+                    anInput.tangentProof = aTangentProof;
+                    anInput.atlasProof = anAtlasProof;
+                    anInput.occurrenceProof = anOccurrenceProof;
+                    dl::bake::FaceProduct aProduct;
+                    const dl::ReceiverReceipt aReceiver = dl::bake::IntentReceipt(
+                        aPending.definition.layers[aFaceLayers.second.front()]);
+                    if (dl::bake::ProduceFace(
+                            anInput, aReceiver, aProduct)
+                        != dl::bake::Status::Baked) return {};
+                    aProducts.push_back(std::move(aProduct));
+                }
+
+                core3d::face_image::detail::Writer aFinalGeometry;
+                aFinalGeometry.raw(reinterpret_cast<const std::uint8_t*>("E4GF"), 4);
+                for (const dl::bake::FaceProduct& aProduct : aProducts)
+                    aFinalGeometry.raw(aProduct.inputKey);
+                dl::Digest aFinalGeometryProof{};
+                if (!aFinalGeometry.ok
+                    || !core3d::face_image::HashFaceImageBytes(
+                        aFinalGeometry.bytes, aFinalGeometryProof)) return {};
+                dl::bake::PublishedDerivative aPublished;
+                if (!dl::bake::Publish(aPending.definition,
+                        aFinalGeometryProof, anOccluderProof,
+                        aProducts, aPublished)) return {};
+                dl::bake::PublishedDerivative aReopened;
+                if (!dl::bake::publication::Lookup(aPending.definition.owner,
+                        aPublished.inputKey, aReopened)
+                    || aReopened.bakeKey != aPublished.bakeKey) return {};
+
+                for (const dl::bake::PublishedFace& aFace : aPublished.faces) {
+                    std::size_t aMatch = 0, aMatches = 0;
+                    for (std::size_t anOrdinal = 0;
+                         anOrdinal < aResolvedFaces.size(); ++anOrdinal)
+                        if (aResolvedFaces[anOrdinal].addressable
+                            && aResolvedFaces[anOrdinal].proof
+                                == aFace.receiver.selectorProof) {
+                            aMatch = anOrdinal; ++aMatches;
+                        }
+                    if (aMatches != 1) return {};
+                    core3d::face_image::ResourceEnvelope anEnvelope;
+                    std::copy_n(aFace.pngDigest.begin(),
+                        anEnvelope.resource.size(), anEnvelope.resource.begin());
+                    anEnvelope.workingFormat =
+                        core3d::face_image::ImageEncoding::PNG;
+                    anEnvelope.workingWidthTexels = aFace.pixelWidth;
+                    anEnvelope.workingHeightTexels = aFace.pixelHeight;
+                    anEnvelope.workingBytes = aFace.png;
+                    std::int32_t aTextureIndex = -1;
+                    if (!AddFaceImageTextureResource(
+                            aScene, aTextureTable, anEnvelope, aTextureIndex)
+                        || aTextureIndex < 0) return {};
+                    DecalDerivedAppearanceSnapshot anAppearance;
+                    anAppearance.ownerDefinitionIdentifier =
+                        aMesh.paintedAtlasMasterDefinitionIdentifier.empty()
+                            ? aMesh.definitionIdentifier
+                            : aMesh.paintedAtlasMasterDefinitionIdentifier;
+                    anAppearance.bakeProof = DecalDigestText(aPublished.bakeKey);
+                    anAppearance.faceIndex =
+                        static_cast<std::uint32_t>(aMatch);
+                    anAppearance.baseColorTextureIndex = aTextureIndex;
+                    anInstance.decalDerivedAppearances.push_back(
+                        std::move(anAppearance));
+                }
+                if (anInstance.decalDerivedAppearances.empty()) return {};
+            }
+        }
+
         std::size_t anInstanceBytes = 0;
         std::size_t aBindingBytes = 0;
         std::size_t aMaterialBytes = 0;
         std::size_t aTextureMetadataBytes = 0;
         std::size_t aPickBytes = 0;
         std::size_t aFaceImageBindingBytes = 0;
+        std::size_t aDecalAppearanceBytes = 0;
         std::size_t anAuxiliaryBytes = 0;
         std::size_t aFaceImageBindingCount = 0;
+        std::size_t aDecalAppearanceCount = 0;
         for (const auto& instance : aScene.instances) {
             if (!CheckedAdd(aFaceImageBindingCount,
                             instance.faceImageBindings.size(),
                             aFaceImageBindingCount)) {
                 return {};
             }
+            if (!CheckedAdd(aDecalAppearanceCount,
+                            instance.decalDerivedAppearances.size(),
+                            aDecalAppearanceCount)) return {};
         }
         constexpr std::size_t anInstanceNumericSize =
             sizeof(Matrix4d) + sizeof(ReferenceAxisSnapshot);
@@ -6235,6 +7199,9 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             || !CheckedMultiply(aFaceImageBindingCount,
                                 sizeof(FaceImageBindingSnapshot),
                                 aFaceImageBindingBytes)
+            || !CheckedMultiply(aDecalAppearanceCount,
+                                sizeof(DecalDerivedAppearanceSnapshot),
+                                aDecalAppearanceBytes)
             || !CheckedAdd(anInstanceBytes, aBindingBytes, anAuxiliaryBytes)
             || !CheckedAdd(anAuxiliaryBytes, aMaterialBytes, anAuxiliaryBytes)
             || !CheckedAdd(anAuxiliaryBytes,
@@ -6243,6 +7210,9 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             || !CheckedAdd(anAuxiliaryBytes, aPickBytes, anAuxiliaryBytes)
             || !CheckedAdd(anAuxiliaryBytes,
                            aFaceImageBindingBytes,
+                           anAuxiliaryBytes)
+            || !CheckedAdd(anAuxiliaryBytes,
+                           aDecalAppearanceBytes,
                            anAuxiliaryBytes)
             || !CheckedAdd(aSnapshotNumericBytes,
                            anAuxiliaryBytes,

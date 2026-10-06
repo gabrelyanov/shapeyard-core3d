@@ -359,6 +359,23 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @end
 
 
+//! One current E4 final-UV base-color derivative. It is not persisted
+//! authority and does not reuse the painted-atlas or E3 binding identities.
+CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
+@interface Core3DSceneDecalDerivedAppearanceSnapshot : NSObject
+
+@property (nonatomic, copy, readonly) NSString *ownerDefinitionIdentifier;
+@property (nonatomic, copy, readonly) NSString *bakeProof;
+@property (nonatomic, assign, readonly) uint32_t faceIndex;
+@property (nonatomic, assign, readonly) NSInteger baseColorTextureIndex;
+@property (nonatomic, assign, readonly) BOOL hasBaseColorTexture;
+
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+
+@end
+
+
 CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @interface Core3DSceneMeshSnapshot : NSObject
 
@@ -438,6 +455,8 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, copy, readonly) NSArray<Core3DScenePrimitiveBindingSnapshot *> *primitiveBindings;
 //! Committed E3 face-image bindings observed on this item; empty when none.
 @property (nonatomic, copy, readonly) NSArray<Core3DSceneFaceImageBindingSnapshot *> *faceImageBindings;
+//! Current E4 derived products. Empty preserves the existing E3/SYEB route.
+@property (nonatomic, copy, readonly) NSArray<Core3DSceneDecalDerivedAppearanceSnapshot *> *decalDerivedAppearances;
 
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;

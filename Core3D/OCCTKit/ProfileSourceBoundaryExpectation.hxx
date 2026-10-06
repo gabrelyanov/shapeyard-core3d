@@ -396,6 +396,10 @@ inline bool ConstructExtrusionExpectation(const profile::Parameters& parameters,
                     side.boundary[1].edge = *side.periodicSeamOwner;
                     side.boundary[3].edge = *side.periodicSeamOwner;
                 }
+                // Reflection, the XZ chart and inner-material parity reverse
+                // the complete oriented side wire, including both seam uses.
+                if (side.outwardUseParity < 0)
+                    for (auto& use : side.boundary) use.forward = !use.forward;
                 result.sides.push_back(std::move(side));
             }
         }

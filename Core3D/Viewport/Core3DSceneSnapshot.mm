@@ -168,6 +168,13 @@ static_assert(sizeof(std::uint32_t) == 4,
                            textureIndex:(NSInteger)textureIndex;
 @end
 
+@interface Core3DSceneDecalDerivedAppearanceSnapshot ()
+- (instancetype)initWithOwnerDefinitionIdentifier:(NSString *)ownerDefinitionIdentifier
+                                         bakeProof:(NSString *)bakeProof
+                                         faceIndex:(uint32_t)faceIndex
+                             baseColorTextureIndex:(NSInteger)baseColorTextureIndex;
+@end
+
 @interface Core3DSceneMeshSnapshot ()
 - (instancetype)initWithDefinitionIdentifier:(NSString *)definitionIdentifier
               paintedAtlasMasterDefinitionIdentifier:(NSString *)paintedAtlasMasterDefinitionIdentifier
@@ -215,7 +222,8 @@ static_assert(sizeof(std::uint32_t) == 4,
                               renderStyle:(Core3DSceneRenderStyle)renderStyle
                     nativeWirePresentation:(nullable Core3DSceneMaterialSnapshot *)nativeWirePresentation
                         primitiveBindings:(NSArray<Core3DScenePrimitiveBindingSnapshot *> *)primitiveBindings
-                       faceImageBindings:(NSArray<Core3DSceneFaceImageBindingSnapshot *> *)faceImageBindings;
+                       faceImageBindings:(NSArray<Core3DSceneFaceImageBindingSnapshot *> *)faceImageBindings
+                decalDerivedAppearances:(NSArray<Core3DSceneDecalDerivedAppearanceSnapshot *> *)decalDerivedAppearances;
 @end
 
 @interface Core3DSceneElementIdentifier ()
@@ -1775,6 +1783,26 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
 @end
 
 
+@implementation Core3DSceneDecalDerivedAppearanceSnapshot
+
+- (instancetype)initWithOwnerDefinitionIdentifier:(NSString *)ownerDefinitionIdentifier
+                                         bakeProof:(NSString *)bakeProof
+                                         faceIndex:(uint32_t)faceIndex
+                             baseColorTextureIndex:(NSInteger)baseColorTextureIndex {
+    self = [super init];
+    if (self) {
+        _ownerDefinitionIdentifier = [ownerDefinitionIdentifier copy];
+        _bakeProof = [bakeProof copy];
+        _faceIndex = faceIndex;
+        _baseColorTextureIndex = baseColorTextureIndex;
+        _hasBaseColorTexture = baseColorTextureIndex >= 0;
+    }
+    return self;
+}
+
+@end
+
+
 @implementation Core3DSceneMeshSnapshot
 
 - (instancetype)initWithDefinitionIdentifier:(NSString *)definitionIdentifier
@@ -1862,7 +1890,8 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
                               renderStyle:(Core3DSceneRenderStyle)renderStyle
                     nativeWirePresentation:(nullable Core3DSceneMaterialSnapshot *)nativeWirePresentation
                         primitiveBindings:(NSArray<Core3DScenePrimitiveBindingSnapshot *> *)primitiveBindings
-                       faceImageBindings:(NSArray<Core3DSceneFaceImageBindingSnapshot *> *)faceImageBindings {
+                       faceImageBindings:(NSArray<Core3DSceneFaceImageBindingSnapshot *> *)faceImageBindings
+                decalDerivedAppearances:(NSArray<Core3DSceneDecalDerivedAppearanceSnapshot *> *)decalDerivedAppearances {
     self = [super init];
     if (self) {
         _entityIdentifier = [entityIdentifier copy];
@@ -1888,6 +1917,7 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
         _nativeWirePresentation = nativeWirePresentation;
         _primitiveBindings = [primitiveBindings copy];
         _faceImageBindings = [faceImageBindings copy];
+        _decalDerivedAppearances = [decalDerivedAppearances copy];
     }
     return self;
 }
@@ -2033,6 +2063,8 @@ constexpr std::size_t kMaximumDTOBindings = 250'000;
 //! 256 committed bindings per owner record, bounded across owners.
 constexpr std::size_t kMaximumDTOFaceImageBindings = 12'800;
 constexpr std::size_t kMaximumDTOFaceImageBindingsPerInstance = 256;
+constexpr std::size_t kMaximumDTODecalAppearances = 12'800;
+constexpr std::size_t kMaximumDTODecalAppearancesPerInstance = 256;
 constexpr std::size_t kMaximumDTOPickEntries = 250'001;
 constexpr std::size_t kMaximumDTOSelectedElements = 50'000;
 constexpr std::size_t kMaximumDTOVertices = 1'500'000;
@@ -2584,6 +2616,15 @@ bool IsValid(const FaceImageBindingSnapshot& value) noexcept {
         && value.textureIndex >= -1;
 }
 
+bool IsValid(const DecalDerivedAppearanceSnapshot& value) noexcept {
+    if (!IsValidIdentifier(value.ownerDefinitionIdentifier)
+        || value.bakeProof.size() != 64 || value.baseColorTextureIndex < 0)
+        return false;
+    return std::all_of(value.bakeProof.begin(), value.bakeProof.end(), [](char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    });
+}
+
 bool IsValid(const MaterialSnapshot& value) noexcept {
     return IsValidIdentifier(value.identifier)
         && IsFinite(value.baseColor) && IsFinite(value.emission)
@@ -2764,6 +2805,14 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
             if (textureIndex >= snapshot.textures.size()) { return false; }
             referencedTextures[textureIndex] = 1;
         }
+        for (const DecalDerivedAppearanceSnapshot& appearance :
+             instance.decalDerivedAppearances) {
+            if (appearance.baseColorTextureIndex < 0) return false;
+            const std::size_t textureIndex = static_cast<std::size_t>(
+                appearance.baseColorTextureIndex);
+            if (textureIndex >= snapshot.textures.size()) return false;
+            referencedTextures[textureIndex] = 1;
+        }
     }
     if (!std::all_of(referencedTextures.begin(), referencedTextures.end(),
                      [](const std::uint8_t referenced) {
@@ -2887,6 +2936,7 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
 
     std::size_t totalBindings = 0;
     std::size_t totalFaceImageBindings = 0;
+    std::size_t totalDecalAppearances = 0;
     std::unordered_map<std::string, std::size_t> instancesByIdentifier;
     instancesByIdentifier.reserve(snapshot.instances.size());
     std::unordered_map<std::string, std::pair<std::string, std::size_t>> savedGroups;
@@ -3018,6 +3068,38 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
                 || !faceImageFaceRoles.insert(faceRole).second) {
                 return false;
             }
+        }
+        if (instance.decalDerivedAppearances.size()
+                > kMaximumDTODecalAppearancesPerInstance
+            || !CheckedAdd(totalDecalAppearances,
+                           instance.decalDerivedAppearances.size(),
+                           totalDecalAppearances)
+            || totalDecalAppearances > kMaximumDTODecalAppearances
+            || !CheckedAdd(totalNumericBytes,
+                           instance.decalDerivedAppearances.size()
+                               * sizeof(DecalDerivedAppearanceSnapshot),
+                           totalNumericBytes)
+            || totalNumericBytes > kMaximumDTONumericBytes) return false;
+        std::unordered_set<std::uint32_t> decalFaces;
+        const std::string& appearanceOwner =
+            mesh.paintedAtlasMasterDefinitionIdentifier.empty()
+                ? mesh.definitionIdentifier
+                : mesh.paintedAtlasMasterDefinitionIdentifier;
+        for (const DecalDerivedAppearanceSnapshot& appearance :
+             instance.decalDerivedAppearances) {
+            bool facePublished = false;
+            for (const MeshPrimitive& primitive : mesh.primitives)
+                if (primitive.faceIndex == appearance.faceIndex) {
+                    facePublished = true; break;
+                }
+            if (!IsValid(appearance)
+                || appearance.ownerDefinitionIdentifier != appearanceOwner
+                || !accountString(appearance.ownerDefinitionIdentifier)
+                || !accountString(appearance.bakeProof)
+                || static_cast<std::size_t>(appearance.baseColorTextureIndex)
+                    >= snapshot.textures.size()
+                || !facePublished
+                || !decalFaces.insert(appearance.faceIndex).second) return false;
         }
     }
 
@@ -4238,6 +4320,16 @@ Core3DSceneFaceImageBindingSnapshot *FaceImageBindingFromScene(
                    textureIndex:value.textureIndex];
 }
 
+Core3DSceneDecalDerivedAppearanceSnapshot *DecalAppearanceFromScene(
+    const DecalDerivedAppearanceSnapshot& value) {
+    return [[Core3DSceneDecalDerivedAppearanceSnapshot alloc]
+        initWithOwnerDefinitionIdentifier:StringFromUTF8(
+            value.ownerDefinitionIdentifier)
+                                   bakeProof:StringFromUTF8(value.bakeProof)
+                                   faceIndex:value.faceIndex
+                       baseColorTextureIndex:value.baseColorTextureIndex];
+}
+
 Core3DSceneElementIdentifier *ElementIdentifierFromScene(
     const ElementIdentifier& value) {
     return [[Core3DSceneElementIdentifier alloc]
@@ -4330,6 +4422,11 @@ Core3DSceneRenderItemSnapshot *RenderItemFromScene(const InstanceSnapshot& value
         ObjectArrayFromVector<FaceImageBindingSnapshot, Core3DSceneFaceImageBindingSnapshot>(
             value.faceImageBindings,
             FaceImageBindingFromScene);
+    NSArray<Core3DSceneDecalDerivedAppearanceSnapshot *> *decalAppearances =
+        ObjectArrayFromVector<DecalDerivedAppearanceSnapshot,
+            Core3DSceneDecalDerivedAppearanceSnapshot>(
+                value.decalDerivedAppearances,
+                DecalAppearanceFromScene);
     const ReferenceAxisSnapshot referenceAxis = value.referenceAxis.value_or(
         ReferenceAxisSnapshot());
     return [[Core3DSceneRenderItemSnapshot alloc]
@@ -4361,7 +4458,8 @@ Core3DSceneRenderItemSnapshot *RenderItemFromScene(const InstanceSnapshot& value
            nativeWirePresentation:value.nativeWirePresentation.has_value()
                ? MaterialFromScene(*value.nativeWirePresentation) : nil
                primitiveBindings:bindings
-              faceImageBindings:faceImageBindings];
+              faceImageBindings:faceImageBindings
+       decalDerivedAppearances:decalAppearances];
 }
 
 Core3DSceneSelectionSnapshot *SelectionFromScene(const SelectionSnapshot& value) {

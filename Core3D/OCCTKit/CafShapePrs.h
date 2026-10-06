@@ -25,6 +25,7 @@
 #include <TDF_Label.hxx>
 #include <XCAFPrs_AISObject.hxx>
 #include <XCAFPrs_Style.hxx>
+#include <Graphic3d_TextureMap.hxx>
 
 typedef NCollection_DataMap<TopoDS_Shape, Handle(AIS_ColoredDrawer), TopTools_ShapeMapHasher> CafDataMapOfShapeColor;
 typedef NCollection_DataMap<TDF_Label, Handle(AIS_InteractiveObject)> MapOfPrsForShapes;
@@ -83,6 +84,18 @@ public:
       const Graphic3d_MaterialAspect&    theMaterial,
       const Standard_Boolean             theHasColor,
       const Quantity_Color&              theColor);
+
+  //! Install one current E4 base-color derivative on one semantic face.
+  //! The drawer is presentation-only: XCAF material links, geometry and
+  //! selection owners are untouched, and every non-base texture slot is
+  //! copied from the effective drawer. The caller owns currentness/bake proof.
+  Standard_Boolean ApplyEphemeralDecalBaseColor(
+      const TopoDS_Shape& theFace,
+      const Handle(Graphic3d_TextureMap)& theTexture);
+
+  //! Rebuild ephemeral drawers from authoritative XCAF styles. No document
+  //! attribute is removed because the E4 derivative was never persisted.
+  void ClearEphemeralDecalAppearance();
 
   //! Search custom aspect for specified shape.
   Standard_Boolean FindCustomAspects (const TopoDS_Shape&        theShape,

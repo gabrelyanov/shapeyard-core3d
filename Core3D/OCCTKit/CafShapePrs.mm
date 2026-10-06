@@ -91,6 +91,48 @@ void CopyDrawerTextureMapping(
   }
 }
 
+Handle(Graphic3d_TextureSet) TextureSetReplacingBaseColor(
+    const Handle(Prs3d_Drawer)& theSource,
+    const Handle(Graphic3d_TextureMap)& theBaseColor)
+{
+  if (theBaseColor.IsNull() || theBaseColor->GetParams().IsNull())
+  {
+    return {};
+  }
+  theBaseColor->GetParams()->SetTextureUnit(Graphic3d_TextureUnit_BaseColor);
+  Handle(Graphic3d_TextureSet) aSourceSet;
+  if (!theSource.IsNull() && !theSource->ShadingAspect().IsNull()
+      && !theSource->ShadingAspect()->Aspect().IsNull())
+  {
+    aSourceSet = theSource->ShadingAspect()->Aspect()->TextureSet();
+  }
+  Standard_Integer aBaseIndex = -1;
+  const Standard_Integer aSourceSize = aSourceSet.IsNull() ? 0 : aSourceSet->Size();
+  for (Standard_Integer anIndex = 0; anIndex < aSourceSize; ++anIndex)
+  {
+    const Handle(Graphic3d_TextureMap)& aTexture = aSourceSet->Value(anIndex);
+    if (!aTexture.IsNull() && !aTexture->GetParams().IsNull()
+        && aTexture->GetParams()->TextureUnit() == Graphic3d_TextureUnit_BaseColor)
+    {
+      if (aBaseIndex >= 0) return {};
+      aBaseIndex = anIndex;
+    }
+  }
+  Handle(Graphic3d_TextureSet) aResult = new Graphic3d_TextureSet(
+      aSourceSize + (aBaseIndex < 0 ? 1 : 0));
+  Standard_Integer aDestination = 0;
+  bool aBaseWritten = false;
+  for (Standard_Integer anIndex = 0; anIndex < aSourceSize; ++anIndex)
+  {
+    const Handle(Graphic3d_TextureMap)& aTexture = aSourceSet->Value(anIndex);
+    const bool isBase = anIndex == aBaseIndex;
+    aResult->SetValue(aDestination++, isBase ? theBaseColor : aTexture);
+    aBaseWritten = aBaseWritten || isBase;
+  }
+  if (!aBaseWritten) aResult->SetValue(aDestination, theBaseColor);
+  return aResult;
+}
+
 } // namespace
 
 IMPLEMENT_STANDARD_RTTIEXT(CafShapePrs, XCAFPrs_AISObject)
@@ -249,6 +291,46 @@ void CafShapePrs::ApplyAuthoredLegacyAppearance(
     myDefStyle.SetColorCurv(theColor);
     SetColor(theColor);
   }
+  SynchronizeAspects();
+}
+
+// =======================================================================
+// function : ApplyEphemeralDecalBaseColor
+// purpose  : Per-face E4 fallback without changing XCAF authority.
+// =======================================================================
+Standard_Boolean CafShapePrs::ApplyEphemeralDecalBaseColor(
+    const TopoDS_Shape& theFace,
+    const Handle(Graphic3d_TextureMap)& theTexture)
+{
+  if (theFace.IsNull() || theTexture.IsNull()) return Standard_False;
+  const Handle(AIS_ColoredDrawer) aDrawer = CustomAspects(theFace);
+  if (aDrawer.IsNull()) return Standard_False;
+  aDrawer->SetupOwnShadingAspect();
+  if (aDrawer->ShadingAspect().IsNull()
+      || aDrawer->ShadingAspect()->Aspect().IsNull()) return Standard_False;
+  const Handle(Prs3d_Drawer) aSource = aDrawer;
+  const Handle(Graphic3d_TextureSet) aTextures =
+      TextureSetReplacingBaseColor(aSource, theTexture);
+  if (aTextures.IsNull() || aTextures->IsEmpty()) return Standard_False;
+  aDrawer->ShadingAspect()->Aspect()->SetTextureSet(aTextures);
+  aDrawer->ShadingAspect()->Aspect()->SetTextureMapOn();
+  // The shared E4 artifact already contains the resolved base factor. Keep
+  // data-map material properties but make the per-face color multiplier unity
+  // so fallback, Metal and exported GLB apply that factor exactly once.
+  aDrawer->ShadingAspect()->SetColor(Quantity_Color(Quantity_NOC_WHITE));
+  aDrawer->ShadingAspect()->SetTransparency(0.0);
+  Core3DPrepareRendererTextures(aDrawer->ShadingAspect()->Aspect());
+  SynchronizeAspects();
+  return Standard_True;
+}
+
+// =======================================================================
+// function : ClearEphemeralDecalAppearance
+// purpose  : Restore authoritative presentation styles.
+// =======================================================================
+void CafShapePrs::ClearEphemeralDecalAppearance()
+{
+  DispatchStyles(Standard_True);
   SynchronizeAspects();
 }
 
