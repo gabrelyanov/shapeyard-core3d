@@ -6,6 +6,7 @@
 #include "AnalyticBooleanSolid.hxx"
 #include "CutDisplayPreparation.hxx"
 #include "RetainedFilletBuild.hxx"
+#include "ProfileSourceCorrespondence.hxx"
 #include <BinTools.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -184,6 +185,8 @@ template<class Values,class LegacyPrepare> inline bool PrepareSourceValues(const
 inline TopoDS_Shape RebuildRevolvedBase(const retained_solid::Envelope& source,const std::atomic_bool& stop);
 inline bool InspectSourceBase(const TopoDS_Shape& base,const retained_solid::Envelope& source,
     const std::atomic_bool& stop) noexcept;
+inline bool InspectSourceBase(const TopoDS_Shape& base,const retained_solid::Envelope& source,
+    const std::atomic_bool& stop,retained_topology_budget::Counter& budget) noexcept;
 inline bool PrepareTransversePersistence(TopoDS_Shape& shape,const std::atomic_bool& stop,Budget& budget);
 inline bool SingleFilletCarrier(const Program& p){return p.codecMinor==4&&p.steps.size()==1
     &&p.steps[0].operand.kind==analytic_boolean::OperandKind::Cylinder;}
@@ -431,6 +434,27 @@ inline bool InspectSourceBase(const TopoDS_Shape& base,const retained_solid::Env
             ||!GeometryCommit(base,stop,budget.streamBytes,actual)
             ||!GeometryCommit(expected,stop,budget.streamBytes,wanted))return false;
         return !stop.load()&&(actual==wanted||(PersistedGeometry(expected,stop,budget,wanted)&&actual==wanted));
+    }catch(...){return false;}
+}
+// Counted complete-P overload for the already-authorized R2 input rebuild.
+// Old families and the old polygon/revolution gates deliberately retain the
+// exact three-argument behavior above; failure is never converted to generic
+// validity. Only representations the legacy prism gate cannot express dispatch
+// to the complete extrusion matcher.
+inline bool InspectSourceBase(const TopoDS_Shape& base,const retained_solid::Envelope& source,
+    const std::atomic_bool& stop,retained_topology_budget::Counter& budget) noexcept {
+    try {
+        if(stop.load()||!retained_solid::Valid(source))return false;
+        profile::Parameters parameters;
+        if(source.sourceFamily!=1||!profile::Decode(source.sourceValues,parameters)
+            ||parameters.definition.revolve||!parameters.shells.empty()
+            ||(!parameters.definition.curves&&!parameters.definition.circle
+                &&parameters.definition.holes.empty()))
+            return InspectSourceBase(base,source,stop);
+        ProfileProducerAccounting accounting(budget,stop);
+        const auto inspected=complete_profile_source::InspectCompleteProfileBase(
+            base,parameters,accounting);
+        return !stop.load()&&bool(inspected);
     }catch(...){return false;}
 }
 } // namespace core3d::saved_boolean_build

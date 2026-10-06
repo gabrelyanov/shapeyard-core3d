@@ -4529,11 +4529,7 @@ Core3DViewer::debugB2cProfileSourceCorrespondenceEvidence(
     try {
         B2cProfileSourceCorrespondenceEvidence result;
         ProfileProducerAccounting accounting(sharedBudget, stop);
-        if (stop.load() || capturedSource.IsNull()
-            || !cps::ConstructExtrusionExpectation(
-                independentlyAuthoredExpectation, accounting, result.expectation)) {
-            return std::nullopt;
-        }
+        if (stop.load() || capturedSource.IsNull()) return std::nullopt;
 
         // The capture remains untouched. B2 owns only a counted private copy
         // for observation; it grants no replay/matcher authority. B3 retains
@@ -4553,39 +4549,15 @@ Core3DViewer::debugB2cProfileSourceCorrespondenceEvidence(
         TopoDS_Shape detached = copy.Shape();
         result.detachedCapture = true;
 
-        retained_topology_budget::Census census;
-        if (retained_topology_budget::CensusTopology(detached, sharedBudget,
-                stop, census, retained_topology_budget::Site::C16KernelBuild,
-                true) != retained_topology_budget::WalkStatus::Completed) {
-            return std::nullopt;
-        }
-        TopTools_IndexedMapOfShape vertices, wires;
-        if (!retained_topology_budget::ReserveTraversal(census, sharedBudget,
-                retained_topology_budget::Site::C16KernelBuild)
-            || stop.load()) return std::nullopt;
-        TopExp::MapShapes(detached, TopAbs_VERTEX, vertices);
-        if (!retained_topology_budget::ReserveTraversal(census, sharedBudget,
-                retained_topology_budget::Site::C16KernelBuild)
-            || stop.load()) return std::nullopt;
-        TopExp::MapShapes(detached, TopAbs_WIRE, wires);
-
+        const auto inspection = cps::InspectCompleteProfileBase(detached,
+            independentlyAuthoredExpectation, accounting);
+        if (!inspection || !inspection.witness) return std::nullopt;
+        result.expectation = inspection.witness->expectation();
+        result.observation = inspection.witness->observation();
         auto& observation = result.observation;
-        if (!retained_edge_treatment::detail::CommitGeometry(
-                detached, sharedBudget, observation.exactGeometryCommitment)) {
-            return std::nullopt;
-        }
-        observation.vertexCount = static_cast<std::size_t>(vertices.Extent());
-        observation.edgeCount = static_cast<std::size_t>(census.edges.Extent());
-        observation.faceCount = static_cast<std::size_t>(census.faces.Extent());
-        observation.wireCount = static_cast<std::size_t>(wires.Extent());
-        observation.debt.stages = sharedBudget.buildStages;
-        observation.debt.visits = sharedBudget.topologyVisits;
-        observation.debt.faceEdgeCensus =
-            static_cast<std::size_t>(census.faceEdge.Extent());
-        observation.debt.exhausted = sharedBudget.exhausted;
         result.observationSelfIdentical =
             cps::SameObservationIdentity(observation, observation);
-        result.inspection = cps::MatcherUnavailableUntilB3();
+        result.inspection = inspection;
         result.chargedVisits = sharedBudget.topologyVisits;
         result.chargedStages = sharedBudget.buildStages;
         return result;
@@ -4650,7 +4622,8 @@ static bool R2RebuildBooleanInputBase(const retained_solid::Envelope& envelope,
                 != saved_cut_source_edit::LoftBaseStatus::Built) return false;
         } else return false;
         if (stop.load() || base.IsNull()
-            || !saved_boolean_build::InspectSourceBase(base, envelope, stop) || stop.load()) return false;
+            || !saved_boolean_build::InspectSourceBase(base, envelope, stop, budget)
+            || stop.load()) return false;
         out = base;
         return true;
     } catch (...) { out.Nullify(); return false; }

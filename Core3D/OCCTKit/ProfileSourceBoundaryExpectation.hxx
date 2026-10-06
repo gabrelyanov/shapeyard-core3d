@@ -4,6 +4,8 @@
 // Candidate geometry, native history and document state are deliberately absent.
 #include "ProfilePersistence.hxx"
 #include <gp_Pnt.hxx>
+#include <gp_Vec.hxx>
+#include <gp_Vec2d.hxx>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -57,6 +59,11 @@ struct ExpectedBoundaryEdgePair {
     std::size_t endVertex = 0;
     SegmentSupport support = SegmentSupport::Line;
     std::optional<AngularInterval> interval;
+    // Complete analytic circle coefficients in final model coordinates. They
+    // are fixed from the authored values before any candidate is observed.
+    gp_Pnt supportCenter;
+    gp_Vec supportX;
+    gp_Vec supportY;
 };
 
 struct ExpectedExtrusionEdge {
@@ -142,6 +149,22 @@ inline gp_Pnt PointAt(const profile::Parameters& parameters,
         case 0: result = gp_Pnt(point.X(), point.Y(), height); break;
         case 1: result = gp_Pnt(point.X(), height, point.Y()); break;
         default: result = gp_Pnt(height, point.X(), point.Y()); break;
+    }
+    if (parameters.constructionFrame) {
+        gp_Trsf transform;
+        if (!parameters.constructionFrame->Transform(transform)) return {};
+        result.Transform(transform);
+    }
+    return result;
+}
+
+inline gp_Vec VectorAt(const profile::Parameters& parameters,
+                       const gp_Vec2d& vector) {
+    gp_Vec result;
+    switch (parameters.definition.plane) {
+        case 0: result = gp_Vec(vector.X(), vector.Y(), 0); break;
+        case 1: result = gp_Vec(vector.X(), 0, vector.Y()); break;
+        default: result = gp_Vec(0, vector.X(), vector.Y()); break;
     }
     if (parameters.constructionFrame) {
         gp_Trsf transform;
@@ -316,11 +339,21 @@ inline bool ConstructExtrusionExpectation(const profile::Parameters& parameters,
                     edge.support = SegmentSupport::PeriodicCircle;
                     edge.endVertex = edge.startVertex;
                     edge.interval = AngularInterval{0, 360, 0, 2 * std::acos(-1.0)};
+                    edge.supportCenter = detail::PointAt(parameters, segment.center, 0);
+                    edge.supportX = detail::VectorAt(parameters,
+                        gp_Vec2d(segment.radius, 0));
+                    edge.supportY = detail::VectorAt(parameters,
+                        gp_Vec2d(0, segment.radius));
                 } else if (segment.kind == ProfileCurveKind::CircularArc) {
                     edge.support = SegmentSupport::CircularArc;
                     const double first = segment.startDegrees * std::acos(-1.0) / 180.0;
                     edge.interval = AngularInterval{segment.startDegrees, segment.sweepDegrees,
                         first, first + segment.sweepDegrees * std::acos(-1.0) / 180.0};
+                    edge.supportCenter = detail::PointAt(parameters, segment.center, 0);
+                    edge.supportX = detail::VectorAt(parameters,
+                        gp_Vec2d(segment.radius, 0));
+                    edge.supportY = detail::VectorAt(parameters,
+                        gp_Vec2d(0, segment.radius));
                 } else if (segment.kind != ProfileCurveKind::Line) return false;
                 loop.boundaryEdges.push_back(result.boundaryEdges.size());
                 result.boundaryEdges.push_back(std::move(edge));
