@@ -2,6 +2,7 @@
 
 #include "RetainedEdgeTreatmentR2Snapshot.hxx"
 #include "RetainedEdgeTreatmentBuild.hxx"
+#include "RetainedProfileProducer.hxx"
 #include "RetainedTopologyBudget.hxx"
 #include "CompositeRecipeCodec.hxx"
 #include "AnalyticBooleanSolid.hxx"
@@ -174,6 +175,22 @@ inline bool PrepareMigrationStages(const retained_boolean::Recipe& recipe,
                 refusal = et::Refusal::BuildFailed; return false;
             }
             current = stepResult.solid;
+        }
+        if (program.source.family == 1 && program.source.values.size() > 2
+            && program.source.values[2] == 1.0) {
+            TopoDS_Shape fixedPoint;
+            const auto status = retained_profile_producer::
+                MaterializePrivateProfileProducerFixedPoint(
+                    current, stop, budget, fixedPoint);
+            if (status == retained_profile_producer::FixedPointStatus::Cancelled) {
+                refusal = et::Refusal::Cancelled; return false;
+            }
+            if (status == retained_profile_producer::FixedPointStatus::BudgetExceeded) {
+                refusal = et::Refusal::Budget; return false;
+            }
+            if (status == retained_profile_producer::FixedPointStatus::Adopted) {
+                current = fixedPoint;
+            }
         }
         if (stop.load() || current.IsNull()) {
             refusal = stop.load() ? et::Refusal::Cancelled : et::Refusal::BuildFailed; return false;
@@ -507,6 +524,22 @@ inline bool RebuildEditedPrefix(const RetainedBooleanBase& original,
                 refusal = et::Refusal::BuildFailed; return false;
             }
             current = stepResult.solid;
+        }
+        if (edited.source.family == 1 && edited.source.values.size() > 2
+            && edited.source.values[2] == 1.0) {
+            TopoDS_Shape fixedPoint;
+            const auto status = retained_profile_producer::
+                MaterializePrivateProfileProducerFixedPoint(
+                    current, stop, budget, fixedPoint);
+            if (status == retained_profile_producer::FixedPointStatus::Cancelled) {
+                refusal = et::Refusal::Cancelled; return false;
+            }
+            if (status == retained_profile_producer::FixedPointStatus::BudgetExceeded) {
+                refusal = et::Refusal::Budget; return false;
+            }
+            if (status == retained_profile_producer::FixedPointStatus::Adopted) {
+                current = fixedPoint;
+            }
         }
         if (stop.load() || current.IsNull()) {
             refusal = stop.load() ? et::Refusal::Cancelled : et::Refusal::BuildFailed; return false;

@@ -28,6 +28,7 @@
 #include "../OCCTKit/ReceiptRecord.hxx"
 #include "../OCCTKit/RetainedFinishingAttribute.hxx"
 #include "../OCCTKit/RetainedEdgeTreatmentBuild.hxx"
+#include "../OCCTKit/RetainedProfileProducer.hxx"
 #if DEBUG
 // R179/D249 diagnostic-only include. Never compiled into Release.
 #include "../OCCTKit/GeneralLoftPersistence.hxx"
@@ -4290,7 +4291,9 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
         // debt forward; initial creation owns a bounded producer budget. No
         // candidate normalization, no digest change and no repeat-until-equal
         // loop.
-        if (geometry->circle && !geometry->revolve && !geometry->spline) {
+        if (retained_profile_producer::EligiblePrivateProfileSource(
+                geometry->revolve, bool(geometry->spline), bool(geometry->circle),
+                bool(geometry->curves), bool(geometry->constructionFrame))) {
             retained_edge_treatment::ReplayBudget producerBudget;
             // D369/O6b: an explicit operation budget handoff (the admitted R2
             // Boolean-input rebuild) carries the existing debt; it never
@@ -4299,19 +4302,17 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
                 geometry->operationBudget ? *geometry->operationBudget :
                 geometry->treatmentRebind && geometry->treatmentRebuildSource
                     ? geometry->treatmentBudget : producerBudget;
-            TopoDS_Shape canonical, reopened;
-            retained_edge_treatment::Digest canonicalDigest{}, reopenedDigest{};
-            if (geometry->cancelled.load()) { return false; }
-            bool fixedPoint =
-                retained_edge_treatment::detail::ReadbackGeometry(solid, budget, canonical);
-            if (budget.exhausted) { return false; }
-            fixedPoint = fixedPoint && canonical.ShapeType() == TopAbs_SOLID
-                && retained_edge_treatment::detail::ReadbackGeometry(canonical, budget, reopened)
-                && retained_edge_treatment::detail::CommitGeometry(canonical, budget, canonicalDigest)
-                && retained_edge_treatment::detail::CommitGeometry(reopened, budget, reopenedDigest)
-                && canonicalDigest == reopenedDigest;
-            if (budget.exhausted || geometry->cancelled.load()) { return false; }
-            if (fixedPoint) { solid = TopoDS::Solid(canonical); }
+            TopoDS_Shape fixedPoint;
+            const auto status = retained_profile_producer::
+                MaterializePrivateProfileProducerFixedPoint(
+                    solid, geometry->cancelled, budget, fixedPoint);
+            if (status == retained_profile_producer::FixedPointStatus::Cancelled
+                || status == retained_profile_producer::FixedPointStatus::BudgetExceeded) {
+                return false;
+            }
+            if (status == retained_profile_producer::FixedPointStatus::Adopted) {
+                solid = TopoDS::Solid(fixedPoint);
+            }
         }
         if(geometry->treatmentRebind&&geometry->treatmentRebuildSource){geometry->treatmentBase=solid;retained_edge_treatment::SourceRebindResult rebound;retained_edge_treatment::Refusal refusal=retained_edge_treatment::Refusal::BuildFailed;if(!retained_edge_treatment::ApplySourceRebind(*geometry->treatmentRebind,*geometry->treatmentRebuildSource,solid,geometry->treatmentBudget,refusal,rebound))return false;geometry->treatmentDefinition=rebound.definition;geometry->treatmentProofs=rebound.proofs;solid=TopoDS::Solid(rebound.treated);}
         Bnd_Box bounds;
@@ -6498,6 +6499,22 @@ bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& pa
         }
         const auto status=analytic_boolean::Build((*p)->detachedBase,(*p)->recipe,(*p)->cancelled,(*p)->result);
         if(status!=analytic_boolean::Status::Built){CORE3D_CUT_DETAIL("build.boolean",status);return false;}
+        if ((*p)->provenHost && (*p)->provenHost->sourceFamily == 1
+            && (*p)->provenHost->sourceValues.size() > 2
+            && (*p)->provenHost->sourceValues[2] == 1.0) {
+            retained_edge_treatment::ReplayBudget producerBudget;
+            TopoDS_Shape fixedPoint;
+            const auto fixedStatus = retained_profile_producer::
+                MaterializePrivateProfileProducerFixedPoint(
+                    (*p)->result.solid, (*p)->cancelled, producerBudget, fixedPoint);
+            if (fixedStatus == retained_profile_producer::FixedPointStatus::Cancelled
+                || fixedStatus == retained_profile_producer::FixedPointStatus::BudgetExceeded) {
+                CORE3D_CUT_REFUSE("build.profile-fixed-point", false);
+            }
+            if (fixedStatus == retained_profile_producer::FixedPointStatus::Adopted) {
+                (*p)->result.solid = fixedPoint;
+            }
+        }
         if(!cut_display::Prepare((*p)->result.solid,(*p)->displaySettings,(*p)->cancelled))
             CORE3D_CUT_REFUSE("build.display", false);
         if((*p)->provenHost){const auto& source=*(*p)->provenHost;
