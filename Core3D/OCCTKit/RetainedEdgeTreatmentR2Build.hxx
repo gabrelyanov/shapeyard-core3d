@@ -19,6 +19,29 @@
 
 namespace core3d::retained_edge_treatment::r2 {
 namespace tb = core3d::retained_topology_budget;
+inline bool EncodeCompleteProfileRequest(const profile::Parameters& requested,
+                                         double capturedMetersPerUnit,
+                                         std::vector<double>& values) noexcept {
+    values.clear();
+    try {
+        profile::Parameters decoded;
+        std::vector<double> roundTrip;
+        if (retained_solid::Bits(requested.metersPerUnit)
+                != retained_solid::Bits(capturedMetersPerUnit)
+            || !profile::Encode(requested, values)
+            || !profile::Decode(values, decoded)
+            || !profile::Encode(decoded, roundTrip)
+            || values.size() != roundTrip.size()) return false;
+        for (std::size_t i = 0; i < values.size(); ++i)
+            if (retained_solid::Bits(values[i])
+                != retained_solid::Bits(roundTrip[i])) return false;
+        return true;
+    } catch (...) {
+        values.clear();
+        return false;
+    }
+}
+
 inline bool ValidateCompletePrefix(const RetainedBooleanBase& source,
                                    const BooleanBaseBinding& binding,
                                    et::Refusal& refusal) noexcept {
@@ -362,11 +385,15 @@ inline bool RebuildEditedPrefix(const RetainedBooleanBase& original,
             // and keep the unit bit-for-bit; only values and schema may move.
             if (const auto* p = std::get_if<profile::Parameters>(&rebuild->requested)) {
                 if (edited.source.family != 1
-                    || p->metersPerUnit != edited.source.metersPerUnit) {
+                    || retained_solid::Bits(p->metersPerUnit)
+                        != retained_solid::Bits(edited.source.metersPerUnit)) {
                     refusal = et::Refusal::UnsupportedBase; return false;
                 }
                 std::vector<double> values;
-                if (!profile::Encode(*p, values)) { refusal = et::Refusal::MalformedCarrier; return false; }
+                if (!EncodeCompleteProfileRequest(*p, edited.source.metersPerUnit,
+                        values)) {
+                    refusal = et::Refusal::MalformedCarrier; return false;
+                }
                 edited.source.values = std::move(values);
                 edited.source.schema = std::uint32_t(profile::SchemaFor(*p));
             } else if (const auto* e = std::get_if<enclosure::Parameters>(&rebuild->requested)) {

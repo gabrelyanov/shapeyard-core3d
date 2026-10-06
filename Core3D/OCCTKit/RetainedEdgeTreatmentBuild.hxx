@@ -392,6 +392,165 @@ inline bool ResolveAnchors(const TopoDS_Shape& source, const std::vector<Anchor>
     refusal = Refusal::None; return true;
 }
 
+// A PlanarFaceBoundary selects the requested edge kind on the extremal planar
+// face. A complete Profile rebuild may add circular inner wires while retaining
+// the four outer line roles. The general selector deliberately rejects that
+// mixed boundary, so the source-rebind lane proves this narrow subset here: one
+// unique extremal face, one selected line wire, exact count, two-face ownership,
+// and no additional line use on any inner wire. Circular uses remain unselected.
+struct PlanarLineSubset final {
+    retained_face_selector::PlaneWitness plane{};
+    std::vector<retained_face_selector::BoundaryUse> uses;
+};
+
+inline bool ResolvePlanarLineSubset(const TopoDS_Shape& source, const Step& step,
+    double metersPerLocalUnit, ReplayBudget& budget, bool verifyReceipt,
+    PlanarLineSubset& output, Refusal& refusal) noexcept {
+    namespace fs = retained_face_selector;
+    output = {};
+    try {
+        if (source.IsNull() || !step.selector || !fs::ValidReceipt(*step.selector)
+            || !std::isfinite(metersPerLocalUnit) || metersPerLocalUnit <= 0) {
+            refusal = Refusal::MalformedCarrier; return false;
+        }
+        const auto* intent = std::get_if<fs::PlanarFaceBoundary>(
+            &step.selector->intent);
+        if (!intent || intent->edgeKind != fs::BoundaryCurve::Line
+            || intent->expectedCount != step.anchors.size()) {
+            refusal = Refusal::MalformedCarrier; return false;
+        }
+        const std::atomic_bool neverCancelled{false};
+        tb::Census census;
+        if (tb::CensusTopology(source, budget, neverCancelled, census,
+                tb::Site::C01StageCensus, true) != tb::WalkStatus::Completed) {
+            refusal = Refusal::Budget; return false;
+        }
+        const double localTolerance = 1e-4 / (1000.0 * metersPerLocalUnit);
+        double extreme = intent->face.side == fs::Side::Max
+            ? -std::numeric_limits<double>::infinity()
+            : std::numeric_limits<double>::infinity();
+        for (int index = 1; index <= census.faces.Extent(); ++index) {
+            if (!budget.visit(1, tb::Site::C02FacePasses)) {
+                refusal = Refusal::Budget; return false;
+            }
+            gp_Pln plane;
+            if (!fs::detail::FacePlane(TopoDS::Face(census.faces(index)), plane)
+                || !plane.Axis().Direction().IsParallel(
+                    fs::detail::RequestedNormal(intent->face), 1e-8)) continue;
+            const double coordinate = fs::detail::Component(
+                plane.Location(), intent->face.axis);
+            extreme = intent->face.side == fs::Side::Max
+                ? std::max(extreme, coordinate) : std::min(extreme, coordinate);
+        }
+        if (!std::isfinite(extreme)) { refusal = Refusal::AnchorMissing; return false; }
+        std::vector<TopoDS_Face> candidates;
+        for (int index = 1; index <= census.faces.Extent(); ++index) {
+            if (!budget.visit(1, tb::Site::C02FacePasses)) {
+                refusal = Refusal::Budget; return false;
+            }
+            gp_Pln plane;
+            const TopoDS_Face face = TopoDS::Face(census.faces(index));
+            if (!fs::detail::FacePlane(face, plane)
+                || !plane.Axis().Direction().IsParallel(
+                    fs::detail::RequestedNormal(intent->face), 1e-8)) continue;
+            if (std::abs(fs::detail::Component(plane.Location(), intent->face.axis)
+                    - extreme) <= localTolerance) candidates.push_back(face);
+        }
+        if (candidates.empty()) { refusal = Refusal::AnchorMissing; return false; }
+        if (candidates.size() != 1) { refusal = Refusal::AnchorAmbiguous; return false; }
+        const TopoDS_Face selectedFace = candidates.front();
+        gp_Pln selectedPlane;
+        if (!fs::detail::FacePlane(selectedFace, selectedPlane)) {
+            refusal = Refusal::UnsupportedEdge; return false;
+        }
+        output.plane.outwardNormal = fs::detail::Components(
+            selectedPlane.Axis().Direction());
+        output.plane.offsetMM = selectedPlane.Axis().Direction().XYZ().Dot(
+            selectedPlane.Location().XYZ()) * 1000.0 * metersPerLocalUnit;
+        if (verifyReceipt && !(step.selector->face == output.plane)) {
+            refusal = Refusal::ReplayMismatch; return false;
+        }
+        if (!budget.visit(census.occurrences + census.edgeUsesUnderFaces,
+                tb::Site::C03AncestorMap)) {
+            refusal = Refusal::Budget; return false;
+        }
+        TopTools_IndexedDataMapOfShapeListOfShape owners;
+        TopExp::MapShapesAndAncestors(source, TopAbs_EDGE, TopAbs_FACE, owners);
+        std::size_t selectedWires = 0;
+        for (TopExp_Explorer wireExplorer(selectedFace, TopAbs_WIRE);
+            wireExplorer.More(); wireExplorer.Next()) {
+            if (!budget.visit(1, tb::Site::C04WireExplorers)) {
+                refusal = Refusal::Budget; return false;
+            }
+            const TopoDS_Wire wire = TopoDS::Wire(wireExplorer.Current());
+            std::size_t direct = 0;
+            for (TopExp_Explorer edgeCount(wire, TopAbs_EDGE);
+                edgeCount.More(); edgeCount.Next()) {
+                if (!budget.visit(1, tb::Site::C06DirectCensus)) {
+                    refusal = Refusal::Budget; return false;
+                }
+                ++direct;
+            }
+            if (!budget.visit(direct, tb::Site::C04WireExplorers)) {
+                refusal = Refusal::Budget; return false;
+            }
+            bool selectedOnWire = false;
+            for (BRepTools_WireExplorer edgeExplorer(wire, selectedFace);
+                edgeExplorer.More(); edgeExplorer.Next()) {
+                const TopoDS_Edge edge = edgeExplorer.Current();
+                const TopAbs_Orientation orientation = edge.Orientation();
+                const int ownerIndex = owners.FindIndex(edge);
+                if (ownerIndex <= 0
+                    || owners.FindFromIndex(ownerIndex).Extent() != 2
+                    || (orientation != TopAbs_FORWARD
+                        && orientation != TopAbs_REVERSED)) {
+                    refusal = Refusal::UnsupportedEdge; return false;
+                }
+                if (BRepAdaptor_Curve(edge).GetType() != GeomAbs_Line) continue;
+                fs::BoundaryUse use;
+                use.wire = wire; use.edge = edge; use.rawFaceUse = orientation;
+                use.direction = orientation == TopAbs_FORWARD
+                    ? fs::FaceUseDirection::Forward : fs::FaceUseDirection::Reversed;
+                for (TopTools_ListIteratorOfListOfShape it(
+                        owners.FindFromIndex(ownerIndex)); it.More(); it.Next())
+                    use.ownerFaces.push_back(TopoDS::Face(it.Value()));
+                use.selected = true;
+                output.uses.push_back(std::move(use));
+                selectedOnWire = true;
+            }
+            if (selectedOnWire) ++selectedWires;
+        }
+        if (selectedWires != 1 || output.uses.size() != intent->expectedCount) {
+            const std::size_t selectedCount = output.uses.size();
+            output = {};
+            refusal = selectedWires > 1 || selectedCount > intent->expectedCount
+                ? Refusal::AnchorAmbiguous : Refusal::AnchorMissing;
+            return false;
+        }
+        if (verifyReceipt) {
+            const auto& receipt = *step.selector;
+            if (receipt.coverage != fs::Coverage::EntireBoundary
+                || receipt.wireCount != 1
+                || receipt.boundaryUseCount != output.uses.size()
+                || receipt.boundaryUniqueEdgeCount != output.uses.size()
+                || receipt.entries.size() != step.anchors.size()) {
+                output = {}; refusal = Refusal::ReplayMismatch; return false;
+            }
+            for (std::size_t index = 0; index < step.anchors.size(); ++index) {
+                if (!budget.visit(1, tb::Site::C08ReceiptVerify)) {
+                    output = {}; refusal = Refusal::Budget; return false;
+                }
+                if (receipt.entries[index].anchorKey != step.anchors[index].key) {
+                    output = {}; refusal = Refusal::ReplayMismatch; return false;
+                }
+            }
+        }
+        refusal = Refusal::None; return true;
+    } catch (...) {
+        output = {}; refusal = Refusal::BuildFailed; return false;
+    }
+}
+
 inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoDS_Shape& output,
     std::vector<StepProof>& proofs, ReplayBudget& budget, Refusal& refusal) noexcept {
     output.Nullify(); proofs.clear();
@@ -410,22 +569,69 @@ inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoD
         // output null and proofs cleared.
         std::vector<StepProof> pending;
         for (const Step& step : definition.steps) {
+            PlanarLineSubset planarSubset;
+            bool usedPlanarSubset = false;
             if (step.selector) {
                 retained_face_selector::Resolution resolution;
                 const auto selectorRefusal = retained_face_selector::Resolve(current, step.selector->intent,
                     definition.base.metersPerLocalUnit, budget, neverCancelled, resolution);
                 if (selectorRefusal != retained_face_selector::Refusal::None || !resolution.proof) {
-                    refusal = retained_face_selector::MapToB1(selectorRefusal); return false;
-                }
-                const auto receiptRefusal = retained_face_selector::VerifyReceipt(*resolution.proof, step,
-                    definition.base.metersPerLocalUnit, budget);
-                if (receiptRefusal != retained_face_selector::Refusal::None) {
-                    refusal = retained_face_selector::MapToB1(receiptRefusal); return false;
+                    const bool mixedPlanarBoundary =
+                        (selectorRefusal == retained_face_selector::Refusal::IncompleteBoundary
+                            || selectorRefusal == retained_face_selector::Refusal::ExactCount)
+                        && std::holds_alternative<
+                            retained_face_selector::PlanarFaceBoundary>(
+                                step.selector->intent);
+                    if (!mixedPlanarBoundary || !ResolvePlanarLineSubset(current,
+                            step, definition.base.metersPerLocalUnit, budget, true,
+                            planarSubset, refusal)) return false;
+                    usedPlanarSubset = true;
+                } else {
+                    const auto receiptRefusal = retained_face_selector::VerifyReceipt(
+                        *resolution.proof, step, definition.base.metersPerLocalUnit,
+                        budget);
+                    if (receiptRefusal != retained_face_selector::Refusal::None) {
+                        refusal = retained_face_selector::MapToB1(receiptRefusal);
+                        return false;
+                    }
                 }
             }
             std::vector<TopoDS_Edge> edges;
             if (!ResolveAnchors(current, step.anchors, definition.base.metersPerLocalUnit,
                 edges, budget, refusal)) return false;
+            if (usedPlanarSubset) {
+                std::set<int> consumed;
+                for (std::size_t anchorIndex = 0; anchorIndex < edges.size();
+                    ++anchorIndex) {
+                    int found = -1;
+                    for (std::size_t useIndex = 0;
+                        useIndex < planarSubset.uses.size(); ++useIndex) {
+                        if (!budget.visit(1, tb::Site::C08ReceiptVerify)) {
+                            refusal = Refusal::Budget; return false;
+                        }
+                        if (edges[anchorIndex].IsSame(
+                                planarSubset.uses[useIndex].edge)) {
+                            if (found >= 0) {
+                                refusal = Refusal::AnchorAmbiguous; return false;
+                            }
+                            found = int(useIndex);
+                        }
+                    }
+                    if (found < 0 || consumed.count(found)) {
+                        refusal = found < 0 ? Refusal::AnchorMissing
+                            : Refusal::AnchorAmbiguous;
+                        return false;
+                    }
+                    if (step.selector->entries[anchorIndex].direction
+                        != planarSubset.uses[std::size_t(found)].direction) {
+                        refusal = Refusal::ReplayMismatch; return false;
+                    }
+                    consumed.insert(found);
+                }
+                if (consumed.size() != planarSubset.uses.size()) {
+                    refusal = Refusal::ReplayMismatch; return false;
+                }
+            }
             // C16: the kernel build stage is debited before the build, and the
             // relevant input pass (volume measurement plus kernel traversal)
             // is charged up front.
@@ -784,6 +990,101 @@ inline bool MeasureStageRawEdgeWitnesses(const TopoDS_Shape& stage,
         return true;
     } catch (...) { output.clear(); return false; }
 }
+
+inline bool RebindPlanarLineSubset(const TopoDS_Shape& stage,
+    double metersPerLocalUnit, const std::vector<SelectorUseRole>& oldRoles,
+    ReplayBudget& budget, Step& step, Refusal& refusal) noexcept {
+    try {
+        PlanarLineSubset subset;
+        if (!ResolvePlanarLineSubset(stage, step, metersPerLocalUnit, budget,
+                false, subset, refusal)) return false;
+        std::vector<SelectorUseRole> measured;
+        measured.reserve(subset.uses.size());
+        for (const auto& use : subset.uses) {
+            if (!budget.visit(1, tb::Site::C18SourceRebindNew)) {
+                refusal = Refusal::Budget; return false;
+            }
+            SelectorUseRole role;
+            if (!MeasureUseWitness(use, metersPerLocalUnit, role.curve,
+                    role.pointMM, role.tangent, role.normalA, role.normalB,
+                    role.circleRadiusMM, &budget, tb::Site::C18SourceRebindNew)) {
+                refusal = budget.exhausted ? Refusal::Budget
+                    : Refusal::UnsupportedEdge;
+                return false;
+            }
+            measured.push_back(role);
+        }
+        if (oldRoles.size() != step.anchors.size()
+            || measured.size() != step.anchors.size()) {
+            refusal = Refusal::ReplayMismatch; return false;
+        }
+        std::set<int> consumed;
+        std::vector<SelectorUseRole> matched;
+        matched.reserve(oldRoles.size());
+        std::vector<retained_face_selector::FaceUseDirection> directions;
+        directions.reserve(oldRoles.size());
+        for (std::size_t anchorIndex = 0; anchorIndex < oldRoles.size();
+            ++anchorIndex) {
+            const SelectorUseRole& oldRole = oldRoles[anchorIndex];
+            if (oldRole.anchorKey != step.anchors[anchorIndex].key) {
+                refusal = Refusal::ReplayMismatch; return false;
+            }
+            int found = -1;
+            for (std::size_t useIndex = 0; useIndex < measured.size(); ++useIndex) {
+                if (!budget.visit(1, tb::Site::C18SourceRebindNew)) {
+                    refusal = Refusal::Budget; return false;
+                }
+                if (consumed.count(int(useIndex))) continue;
+                const SelectorUseRole& candidate = measured[useIndex];
+                if (candidate.curve == oldRole.curve
+                    && SameDirection(candidate.tangent, oldRole.tangent)
+                    && SameDirection(candidate.normalA, oldRole.normalA)
+                    && SameDirection(candidate.normalB, oldRole.normalB)
+                    && std::abs(candidate.circleRadiusMM - oldRole.circleRadiusMM)
+                        <= 1e-4) {
+                    if (found >= 0) {
+                        refusal = Refusal::AnchorAmbiguous; return false;
+                    }
+                    found = int(useIndex);
+                }
+            }
+            if (found < 0) { refusal = Refusal::AnchorMissing; return false; }
+            consumed.insert(found);
+            SelectorUseRole role = measured[std::size_t(found)];
+            role.anchorKey = oldRole.anchorKey;
+            role.direction = subset.uses[std::size_t(found)].direction;
+            matched.push_back(role);
+            directions.push_back(role.direction);
+        }
+        if (consumed.size() != measured.size()) {
+            refusal = Refusal::ReplayMismatch; return false;
+        }
+        auto receipt = *step.selector;
+        receipt.face = subset.plane;
+        receipt.coverage = retained_face_selector::Coverage::EntireBoundary;
+        receipt.wireCount = 1;
+        receipt.boundaryUseCount = std::uint32_t(subset.uses.size());
+        receipt.boundaryUniqueEdgeCount = std::uint32_t(subset.uses.size());
+        for (std::size_t index = 0; index < step.anchors.size(); ++index) {
+            Anchor& anchor = step.anchors[index];
+            const SelectorUseRole& role = matched[index];
+            anchor.curve = role.curve;
+            anchor.pointMM = role.pointMM;
+            anchor.tangent = role.tangent;
+            anchor.normalA = role.normalA;
+            anchor.normalB = role.normalB;
+            anchor.circleRadiusMM = role.circleRadiusMM;
+            receipt.entries[index] = {role.anchorKey, directions[index]};
+        }
+        if (!retained_face_selector::ValidReceipt(receipt)) {
+            refusal = Refusal::ReplayMismatch; return false;
+        }
+        step.selector = std::move(receipt);
+        refusal = Refusal::None; return true;
+    } catch (...) {
+        refusal = Refusal::BuildFailed; return false;
+    }
+}
 } // namespace detail
 
 // Phase one, on the main-thread authority side: verify the original definition
@@ -813,26 +1114,46 @@ inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
                 const auto selectorRefusal = retained_face_selector::Resolve(current,
                     step.selector->intent, original.base.metersPerLocalUnit, budget,
                     neverCancelled, resolution);
+                PlanarLineSubset planarSubset;
+                bool usedPlanarSubset = false;
                 retained_face_selector::Refusal receiptRefusal =
                     retained_face_selector::Refusal::ReplayMismatch;
                 if (selectorRefusal == retained_face_selector::Refusal::None && resolution.proof) {
                     receiptRefusal = retained_face_selector::VerifyReceipt(*resolution.proof, step,
                         original.base.metersPerLocalUnit, budget);
+                } else if ((selectorRefusal
+                            == retained_face_selector::Refusal::IncompleteBoundary
+                        || selectorRefusal
+                            == retained_face_selector::Refusal::ExactCount)
+                    && std::holds_alternative<
+                        retained_face_selector::PlanarFaceBoundary>(
+                            step.selector->intent)
+                    && ResolvePlanarLineSubset(current, step,
+                        original.base.metersPerLocalUnit, budget, true,
+                        planarSubset, refusal)) {
+                    usedPlanarSubset = true;
                 }
                 // C17: a budget refusal propagates as Budget instead of the
                 // blanket ReplayMismatch; every other failure keeps the
                 // existing mapping.
-                if (selectorRefusal != retained_face_selector::Refusal::None || !resolution.proof
-                    || receiptRefusal != retained_face_selector::Refusal::None
-                    || resolution.proof->selectedEdgeCount() != step.anchors.size()) {
-                    refusal = (selectorRefusal == retained_face_selector::Refusal::Budget
+                const bool regularProof = selectorRefusal
+                        == retained_face_selector::Refusal::None
+                    && resolution.proof
+                    && receiptRefusal == retained_face_selector::Refusal::None
+                    && resolution.proof->selectedEdgeCount()
+                        == step.anchors.size();
+                if (!regularProof && (!usedPlanarSubset
+                        || planarSubset.uses.size() != step.anchors.size())) {
+                    refusal = (refusal == Refusal::Budget
+                        || selectorRefusal == retained_face_selector::Refusal::Budget
                         || receiptRefusal == retained_face_selector::Refusal::Budget)
                         ? Refusal::Budget : Refusal::ReplayMismatch;
                     return false;
                 }
-                const auto& proof = *resolution.proof;
+                const auto& boundaryUses = usedPlanarSubset
+                    ? planarSubset.uses : resolution.proof->boundaryUses();
                 std::vector<SelectorUseRole> measured;
-                for (const auto& use : proof.boundaryUses()) {
+                for (const auto& use : boundaryUses) {
                     // C17: every captured witness loop entry is charged.
                     if (!budget.visit(1, tb::Site::C17SourceRebindOld)) {
                         refusal = Refusal::Budget; return false;
@@ -861,11 +1182,11 @@ inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
                         if (!budget.visit(1, tb::Site::C17SourceRebindOld)) {
                             refusal = Refusal::Budget; return false;
                         }
-                        if (!proof.boundaryUses()[useIndex].selected
+                        if (!boundaryUses[useIndex].selected
                             || matched.count(int(useIndex))) continue;
                         const SelectorUseRole& role = measured[useIndex];
                         if (role.curve == anchor.curve
-                            && proof.boundaryUses()[useIndex].direction
+                            && boundaryUses[useIndex].direction
                                 == step.selector->entries[index].direction
                             && detail::SameDirection(role.tangent, anchor.tangent)
                             && detail::SameDirection(role.normalA, anchor.normalA)
@@ -880,7 +1201,7 @@ inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
                     matched.insert(found);
                     SelectorUseRole role = measured[std::size_t(found)];
                     role.anchorKey = anchor.key;
-                    role.direction = proof.boundaryUses()[std::size_t(found)].direction;
+                    role.direction = boundaryUses[std::size_t(found)].direction;
                     ordered.push_back(role);
                 }
                 pending.selectorSteps.push_back({step.feature, std::move(ordered)});
@@ -1016,6 +1337,18 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
                 }
                 const auto& oldRoles = roles.selectorSteps[selectorIndex].second;
                 ++selectorIndex;
+                const auto* requestedProfile =
+                    std::get_if<core3d::profile::Parameters>(&requested);
+                const bool mixedPlanarProfileBoundary = requestedProfile
+                    && !requestedProfile->definition.holes.empty()
+                    && std::holds_alternative<
+                        retained_face_selector::PlanarFaceBoundary>(
+                            step.selector->intent);
+                if (mixedPlanarProfileBoundary) {
+                    if (!detail::RebindPlanarLineSubset(current,
+                            rebound.base.metersPerLocalUnit, oldRoles, budget,
+                            step, refusal)) return false;
+                } else {
                 retained_face_selector::Resolution resolution;
                 const auto selectorRefusal = retained_face_selector::Resolve(current,
                     step.selector->intent, rebound.base.metersPerLocalUnit, budget,
@@ -1111,6 +1444,7 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
                     receipt.entries[anchorIndex] = {role.anchorKey, role.direction};
                 }
                 step.selector = std::move(receipt);
+                }
             } else if (rebound.base.family == SourceFamily::Profile) {
                 // CLOUD-8242: rebind a raw-anchor step through the unique
                 // one-to-one role correspondence proven against the actually

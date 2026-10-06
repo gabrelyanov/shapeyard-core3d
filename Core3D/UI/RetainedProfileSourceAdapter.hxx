@@ -52,9 +52,19 @@ inline bool TranslateComplete(const profile::Parameters& captured,
     translated = {};
     try {
         if (!SameFrozenShellBits(captured, requested)) return false;
-        std::vector<double> canonical;
-        if (!profile::Encode(requested, canonical)) return false;
-        translated = requested;
+        // The edit boundary carries the complete canonical value stream. A
+        // successful translation must survive the persistence codec without
+        // losing IDs, signed arc intervals, inner loops or depth bits.
+        std::vector<double> canonical, roundTrip;
+        profile::Parameters decoded;
+        if (!profile::Encode(requested, canonical)
+            || !profile::Decode(canonical, decoded)
+            || !profile::Encode(decoded, roundTrip)
+            || !SameBits(canonical, roundTrip)
+            || Bits(decoded.metersPerUnit) != Bits(requested.metersPerUnit)) {
+            return false;
+        }
+        translated = std::move(decoded);
         return true;
     } catch (...) {
         translated = {};

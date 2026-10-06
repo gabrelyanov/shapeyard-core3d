@@ -4111,11 +4111,25 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
             profileFace = built.face;
         } else if (geometry->curves) {
             ProfileCurveFaceResult built;
-            const bool made = accounting
-                ? BuildProfileCurveFace(*geometry->curves,geometry->plane,
-                    geometry->cancelled,built,*accounting)
-                : BuildProfileCurveFace(*geometry->curves,geometry->plane,
-                    geometry->cancelled,built);
+            // An R2 rebuild has one shared 64-stage allowance across producer,
+            // Boolean replay and selector rebind. ProfileCurveFace's counted
+            // compatibility overload predates that aggregate boundary and
+            // treats every internal vertex, wire insertion and pairwise query
+            // as a separate outer build stage. Invoke the already bounded
+            // producer as one C16 stage here, then charge its complete output
+            // topology below; its analytic validation and native validity,
+            // clearance and containment checks remain unchanged. Ordinary
+            // creation keeps the existing compatibility route.
+            const bool aggregateR2 = accounting && geometry->operationBudget;
+            const bool made = aggregateR2
+                ? accounting->kernelStage()
+                    && BuildProfileCurveFace(*geometry->curves,geometry->plane,
+                        geometry->cancelled,built)
+                : accounting
+                    ? BuildProfileCurveFace(*geometry->curves,geometry->plane,
+                        geometry->cancelled,built,*accounting)
+                    : BuildProfileCurveFace(*geometry->curves,geometry->plane,
+                        geometry->cancelled,built);
             if (!made) return false;
             profileFace=built.face;
         } else if (geometry->circle) {
@@ -4291,9 +4305,19 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
         // debt forward; initial creation owns a bounded producer budget. No
         // candidate normalization, no digest change and no repeat-until-equal
         // loop.
-        if (retained_profile_producer::EligiblePrivateProfileSource(
+        const bool existingFixedPointProducer =
+            retained_profile_producer::EligiblePrivateProfileSource(
                 geometry->revolve, bool(geometry->spline), bool(geometry->circle),
-                bool(geometry->curves), bool(geometry->constructionFrame))) {
+                bool(geometry->curves), bool(geometry->constructionFrame));
+        // B6: a carrier-bearing polygon with circular holes must cross the same
+        // finite producer fixed point before selector rebind and owner-boundary
+        // detachment. Keep the bare producer unchanged and spend only the
+        // operation's already-carried treatment budget below.
+        const bool carrierPolygonHoles = geometry->treatmentRebind
+            && geometry->treatmentRebuildSource && !geometry->revolve
+            && !geometry->spline && !geometry->circle && !geometry->curves
+            && !geometry->constructionFrame && !geometry->holes.empty();
+        if (existingFixedPointProducer || carrierPolygonHoles) {
             retained_edge_treatment::ReplayBudget producerBudget;
             // D369/O6b: an explicit operation budget handoff (the admitted R2
             // Boolean-input rebuild) carries the existing debt; it never
@@ -4586,9 +4610,15 @@ static bool R2RebuildBooleanInputBase(const retained_solid::Envelope& envelope,
             if (stop.load() || !budget.visit(envelope.sourceValues.size(),
                     tb::Site::C20R2EditedPrefix) || stop.load()
                 || !profile::Decode(envelope.sourceValues, p)) return false;
+            // The complete R2 request is the independent source expectation.
+            // Refuse before geometry work if decoding failed to preserve any
+            // canonical curve field or identity bit.
+            std::vector<double> decodedValues;
+            if (!profile::Encode(p, decodedValues)
+                || !retained_profile_source_adapter::SameBits(
+                    envelope.sourceValues, decodedValues)) return false;
             auto geometry = std::make_shared<ProfileSolidGeometry>();
-            static_cast<ProfileDefinition&>(*geometry) = p.definition;
-            geometry->constructionFrame = p.constructionFrame;
+            retained_profile_source_adapter::PopulateDetached(p, *geometry);
             // D369/O6b: pass this operation's existing debt explicitly into
             // the circular producer's bounded readback/commitment traversals;
             // no treatmentRebind authority is forged to select the budget.
@@ -4621,6 +4651,10 @@ static bool R2RebuildBooleanInputBase(const retained_solid::Envelope& envelope,
             if (saved_cut_source_edit::RebuildLoftBase(envelope, stop, base)
                 != saved_cut_source_edit::LoftBaseStatus::Built) return false;
         } else return false;
+        // Complete curve Profile values dispatch to B3's counted whole-boundary
+        // correspondence against the same independently decoded request before
+        // a Boolean step or treatment suffix can run. Legacy polygon and
+        // non-Profile families retain their old exact gate.
         if (stop.load() || base.IsNull()
             || !saved_boolean_build::InspectSourceBase(base, envelope, stop, budget)
             || stop.load()) return false;
