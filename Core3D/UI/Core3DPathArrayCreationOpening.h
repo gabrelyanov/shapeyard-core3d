@@ -81,6 +81,8 @@ __attribute__((objc_subclassing_restricted))
 //! original reservations before staging the whole result in one command.
 __attribute__((objc_subclassing_restricted))
 @interface Core3DPathArrayCreationOpening : NSObject
+//! Native source, path, units, closure and default creation parameters.
+@property(nonatomic,copy,readonly) NSDictionary<NSString *, id> *descriptor;
 - (Core3DPathArrayPreparation *)prepareCandidate:
     (NSDictionary<NSString *, id> *)candidate
     NS_SWIFT_NAME(prepare(candidate:));

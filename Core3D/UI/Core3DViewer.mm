@@ -363,8 +363,17 @@ Standard_Boolean Core3DViewer::captureRetainedBevelSelection(
     output = {};
     refusal = et::Refusal::StaleSnapshot;
     if (![NSThread isMainThread] || myDoc.IsNull() || myContext.IsNull()
+        || myView.IsNull()
         || label.IsNull() || source.IsNull() || edges.empty()) return Standard_False;
     try {
+        const auto window = myView->Window();
+        if (window.IsNull()) return Standard_False;
+        Standard_Integer drawableWidth = 0, drawableHeight = 0;
+        window->Size(drawableWidth, drawableHeight);
+        if (drawableWidth <= 0 || drawableHeight <= 0) return Standard_False;
+        const auto viewportWidth = static_cast<std::uint32_t>(drawableWidth);
+        const auto viewportHeight = static_cast<std::uint32_t>(drawableHeight);
+
         const auto document = myDoc->Document();
         const auto coverage = myDoc->RetainedRecipeCoverageForLabel(label);
         if (document.IsNull() || document->HasOpenCommand()
@@ -387,7 +396,7 @@ Standard_Boolean Core3DViewer::captureRetainedBevelSelection(
         }
         if (presentation.IsNull()) return Standard_False;
 
-        const auto sceneSnapshot = captureSceneSnapshot(64, 64);
+        const auto sceneSnapshot = captureSceneSnapshot(viewportWidth, viewportHeight);
         if (!sceneSnapshot) return Standard_False;
         ObjectFrameIdentity identity;
         identity.entityIdentifier = myDoc->EntityIdentifierForLabel(label);
@@ -398,14 +407,14 @@ Standard_Boolean Core3DViewer::captureRetainedBevelSelection(
         std::shared_ptr<const et::Snapshot> snapshot;
         if (sceneSnapshot->selectionMode == scene::ElementKind::Edge) {
             snapshot = storedEdgeTreatmentTargetSnapshot(identity,
-                sceneSnapshot->revisions.presentation, 64, 64);
+                sceneSnapshot->revisions.presentation, viewportWidth, viewportHeight);
         } else if (sceneSnapshot->selectionMode == scene::ElementKind::Object) {
             const auto profile = storedProfileDefinition(identity,
-                sceneSnapshot->revisions.presentation, 64, 64);
+                sceneSnapshot->revisions.presentation, viewportWidth, viewportHeight);
             if (profile) snapshot = profile->edgeTreatment;
             if (!snapshot) {
                 const auto enclosure = storedEnclosureDefinition(identity,
-                    sceneSnapshot->revisions.presentation, 64, 64);
+                    sceneSnapshot->revisions.presentation, viewportWidth, viewportHeight);
                 if (enclosure) snapshot = enclosure->edgeTreatment;
             }
         }

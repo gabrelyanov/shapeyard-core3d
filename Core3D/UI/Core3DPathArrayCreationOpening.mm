@@ -52,6 +52,7 @@ using UUID = core3d::retained_recipe::UUID;
 
 constexpr double kPi = 3.1415926535897932384626433832795;
 constexpr double Radians(double degrees) noexcept { return degrees * kPi / 180.0; }
+constexpr double Degrees(double radians) noexcept { return radians * 180.0 / kPi; }
 enum class State : std::uint8_t { Open, Prepared, Applying, Cancelled, Settled, Recovery };
 
 NSString *Text(const std::string& value) {
@@ -199,6 +200,7 @@ struct CreationCapture {
     std::shared_ptr<const curve_owner::PathReceipt> pathReceipt;
     Standard_Integer documentTime = -1;
     double metersPerUnit = 0;
+    bool pathClosed = false;
 };
 
 bool ResolveFreeLabel(OcctDocument& owner, const UUID& entity,
@@ -291,11 +293,42 @@ bool CapturePath(CreationCapture& value, const std::string& entity) noexcept {
             || exact.documentData != value.owner->Document()->GetData()
             || exact.documentIdentifier != value.owner->DocumentIdentifier()
             || !PathReceiptMatches(*receipt, exact)) return false;
+        const array::Definition defaults;
+        bool closed = false;
+        if (!array::DetectClosed(exact.persisted.value.definition,
+                defaults.arcLengthTolerance, defaults.minimumTangent, closed)) return false;
         value.pathEntity = entity;
         value.pathReceipt = std::move(receipt);
         value.pathExact = std::move(exact);
+        value.pathClosed = closed;
         return true;
     } catch (...) { return false; }
+}
+
+NSDictionary<NSString *, id> *CreationDescriptor(const CreationCapture& capture) {
+    const array::Definition defaults;
+    const auto& distributionLaw = defaults.distribution;
+    const auto& orientationLaw = defaults.orientation;
+    NSString *distribution = distributionLaw.mode == array::DistributionMode::Count
+        ? @"count" : @"distance";
+    NSString *orientation = orientationLaw.policy == array::OrientationPolicy::Fixed
+        ? @"fixed" : orientationLaw.policy == array::OrientationPolicy::Tangent
+            ? @"tangent" : @"bishop";
+    return @{@"sourceEntityIdentifier": Text(capture.selected),
+        @"pathEntityIdentifier": Text(capture.pathEntity),
+        @"documentMetersPerUnit": @(capture.metersPerUnit),
+        @"closedPath": @(capture.pathClosed), @"distribution": distribution,
+        @"count": @(distributionLaw.count),
+        @"distanceInDocumentUnits": @(distributionLaw.distance),
+        @"includeStart": @(distributionLaw.includeStart),
+        @"includeEnd": @(distributionLaw.includeEnd), @"orientation": orientation,
+        @"rollDegrees": @(Degrees(orientationLaw.rollRadians)),
+        @"hasUpVector": @(orientationLaw.hasUpVector),
+        @"upVector": @[@(orientationLaw.upVector[0]), @(orientationLaw.upVector[1]),
+                       @(orientationLaw.upVector[2])],
+        @"maximumFrameStepDegrees": @(Degrees(orientationLaw.maximumFrameStepRadians)),
+        @"arcToleranceInDocumentUnits": @(defaults.arcLengthTolerance),
+        @"minimumTangentInDocumentUnits": @(defaults.minimumTangent)};
 }
 
 bool CaptureCreationSource(Core3DViewController *controller, NSString *pathIdentifier,
@@ -1110,6 +1143,7 @@ Core3DPathArrayPreview *Preview(const CreationCapture& capture,
     std::atomic<State> _state;
     std::uint64_t _generation;
     Core3DPathArrayPreparedCandidate *_token;
+    NSDictionary<NSString *, id> *_descriptor;
 #if DEBUG
     void (^_debugApplyingObserver)(Core3DPathArrayCreationOpening *);
 #endif
@@ -1119,9 +1153,12 @@ Core3DPathArrayPreview *Preview(const CreationCapture& capture,
 
 @implementation Core3DPathArrayCreationOpening
 
+@synthesize descriptor = _descriptor;
+
 - (instancetype)initWithCapture:(CreationCapture)capture {
     if ((self = [super init])) {
         _capture = std::move(capture); _state.store(State::Open); _generation = 1;
+        _descriptor = [CreationDescriptor(_capture) copy];
     }
     return self;
 }
