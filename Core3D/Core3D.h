@@ -27,6 +27,7 @@ FOUNDATION_EXPORT const unsigned char Core3DVersionString[];
 #import <Core3D/Core3DTransformInspectorSnapshot.h>
 #import <Core3D/Core3DModelingTypes.h>
 #import <Core3D/Core3DViewController.h>
+#import <Core3D/Core3DPathArrayCreationOpening.h>
 #import <Core3D/Core3DViewController+PrimitiveManager.h>
 #import <Core3D/Core3DViewController+AvailabilityManager.h>
 #import <Core3D/Core3DViewController+ExportManager.h>
