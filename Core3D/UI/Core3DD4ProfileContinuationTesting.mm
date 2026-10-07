@@ -11,6 +11,7 @@
 #include "../OCCTKit/RetainedEdgeTreatmentSnapshot.hxx"
 
 #include <cmath>
+#include <thread>
 
 namespace {
 using namespace core3d;
@@ -67,7 +68,8 @@ NSDictionary *Observe(const Handle(OcctDocument)& owner, NSString *host,
 } // namespace
 
 static NSDictionary *DebugCreate(Core3DViewController *controller,
-                                 NSString *host, NSString *source) {
+                                 NSString *host, NSString *source,
+                                 int32_t fault = 0) {
     @autoreleasepool {
         try {
             std::shared_ptr<core3d::Core3DViewer> viewer;
@@ -94,10 +96,52 @@ static NSDictionary *DebugCreate(Core3DViewController *controller,
             auto prepared = core3d::profile_d4::PrepareCreation(
                 capture, edit, stop);
             if (!prepared) return @{@"committed": @NO, @"phase": @"prepare"};
+            const int beforeUndo = owner->Document()->GetAvailableUndos();
+            const int beforeRedo = owner->Document()->GetAvailableRedos();
+            if (fault == 1) {
+                core3d::profile_d4::DebugArmCreationFault(
+                    core3d::profile_d4::CreationFault::AfterLastChild);
+            } else if (fault == 2) {
+                core3d::profile_d4::DebugArmCreationFault(
+                    core3d::profile_d4::CreationFault::CreationReadback);
+            } else if (fault != 0 && fault != 3) {
+                return @{@"committed": @NO, @"phase": @"fault-input"};
+            }
+            if (fault == 3) context->debugReportNextCloseUnproven();
             const auto outcome = core3d::profile_d4::StageCreation(*owner, prepared);
-            if (outcome != core3d::profile_d4::CreationOutcome::Committed)
+            if (outcome != core3d::profile_d4::CreationOutcome::Committed) {
+                const bool unresolved = viewer->hasUnresolvedOrdinaryEdit();
+                const bool closed = !owner->Document()->HasOpenCommand();
+                const int afterUndo = owner->Document()->GetAvailableUndos();
+                const int afterRedo = owner->Document()->GetAvailableRedos();
+                prepared.reset(); capture.reset();
+                auto blockedProbe = viewer->captureNativeOpeningContext(
+                    width, height, {hostText, sourceText});
+                const bool recoveryRequired = !blockedProbe;
+                blockedProbe.reset();
+                const bool recovered = outcome
+                        == core3d::profile_d4::CreationOutcome::OutcomeUnknown
+                    && context->reconcileRecovery(true);
+                context.reset();
+                auto recaptured = viewer->captureNativeOpeningContext(
+                    width, height, {hostText, sourceText});
+                bool absent = false;
+                if (recaptured) {
+                    std::shared_ptr<const core3d::profile_d4::CreationCapture> retry;
+                    absent = core3d::profile_d4::CaptureCreationHost(*owner,
+                        hostText, sourceText, recaptured, width, height, retry)
+                        == core3d::profile_d4::CaptureStatus::Current;
+                }
                 return @{@"committed": @NO, @"phase": @"stage",
-                    @"outcome": @(unsigned(outcome))};
+                    @"outcome": @(unsigned(outcome)), @"fault": @(fault),
+                    @"closed": @(closed), @"unresolved": @(unresolved),
+                    @"newOpeningBlocked": @(recoveryRequired),
+                    @"recovered": @(recovered),
+                    @"openingAfterRecovery": @(bool(recaptured)),
+                    @"creationAbsent": @(absent),
+                    @"undoBefore": @(beforeUndo), @"undoAfter": @(afterUndo),
+                    @"redoBefore": @(beforeRedo), @"redoAfter": @(afterRedo)};
+            }
             // Publication is terminal for the opening authority. The sealed
             // prepared value retains its capture, which in turn retains the
             // context, so retire the full chain before observing the committed
@@ -125,6 +169,57 @@ static NSDictionary *DebugObserve(Core3DViewController *controller,
     }
 }
 
+static NSDictionary *DebugCreationStop(Core3DViewController *controller,
+                                       NSString *host, NSString *source) {
+    @autoreleasepool {
+        try {
+            std::shared_ptr<core3d::Core3DViewer> viewer; Handle(OcctDocument) owner;
+            std::shared_ptr<core3d::native_opening::Context> ignored;
+            std::uint32_t width = 0, height = 0;
+            if (!source || !Inputs(controller, host, viewer, owner,
+                                  ignored, width, height))
+                return @{@"cancelled": @NO, @"phase": @"inputs"};
+            const char *hostText = host.UTF8String, *sourceText = source.UTF8String;
+            if (!hostText || !sourceText)
+                return @{@"cancelled": @NO, @"phase": @"text"};
+            ignored.reset();
+            auto context = viewer->captureNativeOpeningContext(
+                width, height, {hostText, sourceText});
+            std::shared_ptr<const core3d::profile_d4::CreationCapture> capture;
+            if (!context || core3d::profile_d4::CaptureCreationHost(*owner,
+                    hostText, sourceText, context, width, height, capture)
+                    != core3d::profile_d4::CaptureStatus::Current)
+                return @{@"cancelled": @NO, @"phase": @"capture"};
+            core3d::profile_d4::CreationEdit edit;
+            edit.kind = core3d::pattern::Kind::Grid;
+            edit.rows = 4; edit.columns = 8;
+            edit.rowSpacing = 5.0 * 0.001 / context->openingFence().metersPerUnit();
+            edit.columnSpacing = edit.rowSpacing;
+            std::atomic_bool stop{false}, entered{false};
+            std::shared_ptr<const core3d::profile_d4::PreparedCreation> prepared;
+            std::thread worker([&] {
+                entered.store(true, std::memory_order_release);
+                prepared = core3d::profile_d4::PrepareCreation(capture, edit, stop);
+            });
+            while (!entered.load(std::memory_order_acquire)) std::this_thread::yield();
+            stop.store(true, std::memory_order_release);
+            worker.join();
+            const bool cancelled = !prepared;
+            prepared.reset(); capture.reset(); context.reset();
+            auto retryContext = viewer->captureNativeOpeningContext(
+                width, height, {hostText, sourceText});
+            std::shared_ptr<const core3d::profile_d4::CreationCapture> retry;
+            const bool unchanged = retryContext
+                && core3d::profile_d4::CaptureCreationHost(*owner, hostText,
+                    sourceText, retryContext, width, height, retry)
+                    == core3d::profile_d4::CaptureStatus::Current;
+            return @{@"cancelled": @(cancelled), @"entered": @(entered.load()),
+                     @"unchanged": @(unchanged),
+                     @"closed": @(!owner->Document()->HasOpenCommand())};
+        } catch (...) { return @{@"cancelled": @NO, @"phase": @"exception"}; }
+    }
+}
+
 static NSDictionary *DebugEdit(Core3DViewController *controller,
                                NSString *host, int32_t scenario) {
     @autoreleasepool {
@@ -132,7 +227,7 @@ static NSDictionary *DebugEdit(Core3DViewController *controller,
             std::shared_ptr<core3d::Core3DViewer> viewer; Handle(OcctDocument) owner;
             std::shared_ptr<core3d::native_opening::Context> context;
             std::uint32_t width = 0, height = 0;
-            if (scenario < 0 || scenario > 3
+            if (scenario < 0 || scenario > 9
                 || !Inputs(controller, host, viewer, owner, context, width, height))
                 return @{@"committed": @NO, @"phase": @"inputs"};
             core3d::feature_pattern_owner::Snapshot opening;
@@ -168,10 +263,29 @@ static NSDictionary *DebugEdit(Core3DViewController *controller,
                 edit.columnAxis = core3d::pattern::Axis::X;
                 edit.rowSpacing = spacing; edit.columnSpacing = spacing;
             } else {
-                edit.kind = core3d::pattern::Kind::Linear;
-                edit.rows = 1; edit.columns = 3;
-                edit.columnAxis = core3d::pattern::Axis::Y;
-                edit.columnSpacing = spacing;
+                if (scenario == 3) {
+                    edit.kind = core3d::pattern::Kind::Linear;
+                    edit.rows = 1; edit.columns = 3;
+                    edit.columnAxis = core3d::pattern::Axis::Y;
+                    edit.columnSpacing = spacing;
+                } else if (scenario == 4) {
+                    edit.columns = 1;
+                } else if (scenario == 5) {
+                    edit.columns = 33;
+                } else if (scenario == 6) {
+                    edit.columnSpacing = 0;
+                } else if (scenario == 7) {
+                    edit.sourceCutStepID = 0;
+                } else if (scenario == 8) {
+                    edit.columns = 2;
+                } else {
+                    edit.kind = core3d::pattern::Kind::Grid;
+                    edit.rows = 4; edit.columns = 8;
+                    edit.rowAxis = core3d::pattern::Axis::Y;
+                    edit.columnAxis = core3d::pattern::Axis::X;
+                    edit.rowSpacing = 5.0 * 0.001 / d.metersPerUnit;
+                    edit.columnSpacing = 5.0 * 0.001 / d.metersPerUnit;
+                }
             }
             const auto prepared = core3d::feature_pattern_owner::PrepareNative(
                 *owner, opening, edit, core3d::feature_pattern_owner::Limits{});
@@ -198,6 +312,17 @@ static NSDictionary *DebugEdit(Core3DViewController *controller,
 extern "C" void *Core3DDebugD4ProfileCreate(
     Core3DViewController *controller, NSString *host, NSString *source) {
     return (__bridge_retained void *)DebugCreate(controller, host, source);
+}
+
+extern "C" void *Core3DDebugD4ProfileCreateFault(
+    Core3DViewController *controller, NSString *host, NSString *source,
+    int32_t fault) {
+    return (__bridge_retained void *)DebugCreate(controller, host, source, fault);
+}
+
+extern "C" void *Core3DDebugD4ProfileCreationStop(
+    Core3DViewController *controller, NSString *host, NSString *source) {
+    return (__bridge_retained void *)DebugCreationStop(controller, host, source);
 }
 
 extern "C" void *Core3DDebugD4ProfileObserve(

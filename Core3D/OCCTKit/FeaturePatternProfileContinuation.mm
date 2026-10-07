@@ -20,6 +20,16 @@ namespace {
 
 using UUID = feature_pattern::UUID;
 
+#if DEBUG
+std::atomic<CreationFault> gCreationFault{CreationFault::None};
+
+bool ConsumeCreationFault(CreationFault fault) noexcept {
+    auto expected = fault;
+    return gCreationFault.compare_exchange_strong(
+        expected, CreationFault::None, std::memory_order_acq_rel);
+}
+#endif
+
 bool ScalarRecipe(const profile::Parameters& parameters,
                   std::vector<std::uint8_t>& bytes) noexcept {
     bytes.clear();
@@ -158,6 +168,12 @@ feature_pattern_owner::Edit ExistingEdit(
 }
 
 } // namespace
+
+#if DEBUG
+void DebugArmCreationFault(CreationFault fault) noexcept {
+    gCreationFault.store(fault, std::memory_order_release);
+}
+#endif
 
 bool CreationReadback(OcctDocument& owner, const PreparedCreation& prepared,
                       const TDF_Label& baselineLabel) noexcept {
@@ -379,9 +395,17 @@ CreationOutcome StageCreation(OcctDocument& owner,
         if (!owner.StageFeaturePatternPair(*lease, capture.host_.label,
                 baselineLabel, capture.source_.label, prepared->definition_,
                 prepared->built_.childReceipts, pair)) return abort("pair");
+#if DEBUG
+        if (ConsumeCreationFault(CreationFault::AfterLastChild))
+            return abort("debug-after-last-child");
+#endif
         if (!profile::Stage(owner.Document(), capture.host_.label,
                 capture.profile_.parameters, capture.profile_.identifier))
             return abort("profile");
+#if DEBUG
+        if (ConsumeCreationFault(CreationFault::CreationReadback))
+            return abort("readback");
+#endif
         if (!CreationReadback(owner, *prepared, baselineLabel))
             return abort("readback");
         if (!lease->commit()) {

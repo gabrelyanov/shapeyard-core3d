@@ -105,6 +105,17 @@ std::shared_ptr<const PreparedCreation> PrepareCreation(
 CreationOutcome StageCreation(OcctDocument&,
     const std::shared_ptr<const PreparedCreation>&) noexcept;
 
+#if DEBUG
+//! Default-disarmed, one-shot test fault consumed only by StageCreation.
+//! Every fault exits through StageCreation's real command-abort path.
+enum class CreationFault : std::uint8_t {
+    None = 0,
+    AfterLastChild = 1,
+    CreationReadback = 2,
+};
+void DebugArmCreationFault(CreationFault) noexcept;
+#endif
+
 class CurrentCapture final {
     friend CaptureStatus CaptureCurrent(OcctDocument&, const std::string&,
         const std::shared_ptr<native_opening::Context>&,
