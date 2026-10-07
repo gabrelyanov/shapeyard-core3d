@@ -19,7 +19,11 @@ class OcctDocument;
 namespace core3d::profile_d4 {
 
 enum class CaptureStatus : std::uint8_t { Current, Absent, Refused };
-enum class CreationOutcome : std::uint8_t { Refused, Committed, OutcomeUnknown };
+enum class CreationOutcome : std::uint8_t {
+    Refused, Committed, OutcomeUnknown, Cancelled
+};
+
+class PendingCreation;
 
 struct CreationEdit final {
     std::uint64_t sourceCutStepID = 0;
@@ -55,6 +59,40 @@ struct Observation final {
     double baselineVolume = 0, resultVolume = 0, sourceVolume = 0;
 };
 
+#if DEBUG
+struct ReceiptSelectorObservation final {
+    std::uint8_t kind = 0;
+    feature_pattern::UUID semantic{};
+    std::uint32_t ordinal = 0;
+    feature_pattern_child::Digest proof{};
+};
+
+struct ChildReceiptObservation final {
+    feature_pattern::UUID childFeature{}, instanceIdentity{};
+    feature_pattern::UUID baselineRecipeIdentity{};
+    std::uint64_t localID = 0;
+    std::int32_t row = 0, column = 0;
+    std::uint32_t boundarySections = 0;
+    std::vector<std::uint8_t> canonicalBytes;
+    std::vector<ReceiptSelectorObservation> selectors;
+    bool resolvesOnCurrentBRep = false;
+    std::uint8_t buildStatus = 0;
+    double positiveRemovedVolume = 0;
+    std::uint32_t orientedBoundarySections = 0;
+};
+
+struct ReceiptObservation final {
+    bool current = false, allReceiptsResolve = false;
+    std::string hostEntity;
+    feature_pattern::UUID patternFeature{};
+    double metersPerUnit = 0;
+    feature_pattern::UUID retainedRecipeFeature{};
+    feature_pattern::UUID baselineRecipeIdentity{};
+    std::vector<std::uint8_t> exactRecipe, baselineCanonicalBytes;
+    std::vector<ChildReceiptObservation> children;
+};
+#endif
+
 class CreationCapture final {
     friend CaptureStatus CaptureCreationHost(OcctDocument&, const std::string&,
         const std::string&, const std::shared_ptr<native_opening::Context>&,
@@ -65,6 +103,12 @@ class CreationCapture final {
         const std::atomic_bool&) noexcept;
     friend CreationOutcome StageCreation(OcctDocument&,
         const std::shared_ptr<const class PreparedCreation>&) noexcept;
+    friend std::shared_ptr<PendingCreation> StartCreation(OcctDocument&,
+        const std::shared_ptr<const class PreparedCreation>&,
+        CreationOutcome&) noexcept;
+    friend CreationOutcome FinishCreation(
+        const std::shared_ptr<PendingCreation>&,
+        const std::atomic_bool&) noexcept;
     friend bool CreationReadback(OcctDocument&, const class PreparedCreation&,
         const TDF_Label&) noexcept;
     CreationCapture() = default;
@@ -85,6 +129,12 @@ class PreparedCreation final {
         const std::atomic_bool&) noexcept;
     friend CreationOutcome StageCreation(OcctDocument&,
         const std::shared_ptr<const PreparedCreation>&) noexcept;
+    friend std::shared_ptr<PendingCreation> StartCreation(OcctDocument&,
+        const std::shared_ptr<const PreparedCreation>&,
+        CreationOutcome&) noexcept;
+    friend CreationOutcome FinishCreation(
+        const std::shared_ptr<PendingCreation>&,
+        const std::atomic_bool&) noexcept;
     friend bool CreationReadback(OcctDocument&, const PreparedCreation&,
         const TDF_Label&) noexcept;
     friend bool ReviewPreparedCreation(const PreparedCreation&,
@@ -116,6 +166,18 @@ std::shared_ptr<const PreparedCreation> PrepareCreation(
 //! mutates, stages, rebuilds, reconciles nor consumes the capability.
 bool ReviewPreparedCreation(const PreparedCreation&,
     PreparedReview&) noexcept;
+
+//! Consumes the prepared capability, recaptures its inputs and stages through
+//! the complete baseline/host/child pair under one retained command lease.
+//! A non-null result owns that still-open command at the AfterLastChild boundary.
+std::shared_ptr<PendingCreation> StartCreation(OcctDocument&,
+    const std::shared_ptr<const PreparedCreation>&,
+    CreationOutcome& immediateOutcome) noexcept;
+
+//! Resumes the exact pending command. Stop uses the same lease abort as every
+//! post-stage refusal; only a proven clean abort reports Cancelled.
+CreationOutcome FinishCreation(const std::shared_ptr<PendingCreation>&,
+    const std::atomic_bool& stop) noexcept;
 
 //! Exact recapture, one lease, baseline/pair/Profile stage, full readback, one
 //! close and owning-viewer publication. Unknown close/publication is retained.
@@ -150,6 +212,11 @@ class CurrentCapture final {
     friend class ProfileHostPreparer;
     friend bool ObserveCurrent(OcctDocument&, const std::string&,
         const std::shared_ptr<native_opening::Context>&, Observation&) noexcept;
+#if DEBUG
+    friend bool ObserveReceipts(OcctDocument&, const std::string&,
+        const std::shared_ptr<native_opening::Context>&,
+        ReceiptObservation&) noexcept;
+#endif
     CurrentCapture() = default;
     feature_pattern_owner::Snapshot d4_;
     profile::Record profile_;
@@ -204,6 +271,11 @@ dependent_replay::Refusal PrepareHostReplay(OcctDocument&,
     std::shared_ptr<const dependent_replay::PreparedReplay>&) noexcept;
 bool ObserveCurrent(OcctDocument&, const std::string& hostEntity,
     const std::shared_ptr<native_opening::Context>&, Observation&) noexcept;
+#if DEBUG
+bool ObserveReceipts(OcctDocument&, const std::string& hostEntity,
+    const std::shared_ptr<native_opening::Context>&,
+    ReceiptObservation&) noexcept;
+#endif
 
 class ProfileHostPreparer final : public dependent_replay::Preparer {
 public:

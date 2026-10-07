@@ -105,6 +105,10 @@ struct DebugPrivateExportDecalObservation final {
     std::vector<PrivateExportFaceCorrespondence> correspondence;
     std::vector<std::string> inputKeys;
     std::vector<std::string> bakeSeals;
+    std::vector<std::string> outputRoles;
+    std::vector<std::uint64_t> outputRoleBytes;
+    std::uint64_t layoutResolution = 0;
+    std::uint64_t layoutChartCount = 0;
     std::string failureStage;
     bool captureReached = false;
     bool finalProductionReached = false;

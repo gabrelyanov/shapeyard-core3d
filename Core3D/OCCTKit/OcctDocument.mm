@@ -4418,7 +4418,7 @@ public:
         const auto& info = header->UserInfo();
         if (info.Length() < 2 || info.Length() > 1024) { rejectTypes(); return; }
         TColStd_SequenceOfAsciiString aTypeNames;
-        bool began = false, ended = false;
+        bool began = false, ended = false, hasNamedShapeType = false;
         for (Standard_Integer i = 1; i <= info.Length(); ++i) {
             const auto& line = info.Value(i);
             if (line == "START_TYPES") {
@@ -4442,6 +4442,7 @@ public:
             for (Standard_Integer j = 1; j <= aTypeNames.Length(); ++j)
                 if (aTypeNames.Value(j) == name) { rejectTypes(); return; }
             aTypeNames.Append(name);
+            hasNamedShapeType = hasNamedShapeType || name == "TNaming_NamedShape";
         }
         if (!began || !ended) { rejectTypes(); return; }
         Handle(BinMDF_ADriverTable) aSupportedDrivers =
@@ -4492,7 +4493,9 @@ public:
             Core3DBoundedBinXCAFRetrievalDriver* owner;
             ~DocumentExtentScope() { owner->myDocumentExtent = {}; }
         } documentExtentScope{this};
-        if (!BeginDocumentExtent(theStream, version)) { rejectTypes(); return; }
+        if (!BeginDocumentExtent(theStream, version, hasNamedShapeType)) {
+            rejectTypes(); return;
+        }
         try {
             BinDrivers_DocumentRetrievalDriver::Read(
                 theStream,
@@ -4734,10 +4737,31 @@ public:
     void ReadShapeSection(BinLDrivers_DocumentSection& section,
         Standard_IStream& stream, const Standard_Boolean isMessage,
         const Message_ProgressRange& range) override {
+        const std::ios::iostate beforeState = stream.rdstate();
         const auto before = stream.tellg();
         BinDrivers_DocumentRetrievalDriver::ReadShapeSection(
             section, stream, isMessage, range);
-        RecordDocumentSection(section, true, before, stream.tellg());
+        auto after = stream.tellg();
+        std::uint64_t beforeOffset = 0;
+        const bool isTerminalEmptyV11Shape = myDocumentExtent.active
+            && myDocumentExtent.version == TDocStd_FormatVersion_VERSION_11
+            && !myDocumentExtent.hasNamedShapeType
+            && section.Length() == 0
+            && section.Offset() == myDocumentExtent.physicalEnd
+            && StreamOffset(before, beforeOffset)
+            && beforeOffset == section.Offset();
+        if (isTerminalEmptyV11Shape) {
+            // OCCT probes the shape-section title even when its indexed extent
+            // is empty. At physical EOF that probe sets fail/eof; restore the
+            // exact pre-probe position and state before the tree is decoded.
+            stream.clear();
+            stream.seekg(before);
+            const bool restored = stream.good() && stream.tellg() == before;
+            stream.clear(beforeState);
+            if (!restored) myDocumentExtent.invalid = true;
+            else after = before;
+        }
+        RecordDocumentSection(section, true, before, after);
     }
 
     void Clear() override
@@ -4760,6 +4784,7 @@ private:
         bool invalid = false;
         bool treeObserved = false;
         int version = 0;
+        bool hasNamedShapeType = false;
         int treeDepth = 0;
         std::uint64_t entry = 0;
         std::uint64_t physicalEnd = 0;
@@ -4776,7 +4801,8 @@ private:
         return true;
     }
 
-    bool BeginDocumentExtent(Standard_IStream& stream, int version)
+    bool BeginDocumentExtent(Standard_IStream& stream, int version,
+        bool hasNamedShapeType)
     {
         const std::ios::iostate state = stream.rdstate();
         const std::streampos entryPosition = stream.tellg();
@@ -4797,6 +4823,7 @@ private:
         myDocumentExtent = {};
         myDocumentExtent.active = true;
         myDocumentExtent.version = version;
+        myDocumentExtent.hasNamedShapeType = hasNamedShapeType;
         myDocumentExtent.entry = entry;
         myDocumentExtent.physicalEnd = physicalEnd;
         return true;
@@ -4810,7 +4837,7 @@ private:
         extent.offset = section.Offset(); extent.length = section.Length();
         extent.shape = shape;
         if (myDocumentExtent.sections.size() >= 32
-            || extent.length == 0
+            || (extent.length == 0 && !shape)
             || extent.offset > myDocumentExtent.physicalEnd
             || extent.length > myDocumentExtent.physicalEnd - extent.offset
             || !StreamOffset(beforePosition, extent.consumedBegin)
@@ -4838,6 +4865,13 @@ private:
         std::uint64_t next = extent.treeEnd;
         bool sawShape = false;
         for (const auto& section : sections) {
+            if (section.length == 0
+                && (!section.shape || sawShape
+                    || extent.version != TDocStd_FormatVersion_VERSION_11
+                    || extent.hasNamedShapeType
+                    || section.offset != extent.treeEnd
+                    || section.offset != extent.physicalEnd))
+                return false;
             if (section.offset != next || section.consumedBegin != section.offset
                 || section.consumedEnd != section.offset + section.length)
                 return false;

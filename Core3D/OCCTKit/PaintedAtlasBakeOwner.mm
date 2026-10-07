@@ -670,8 +670,18 @@ Outcome BuildAndBakeForExport(
         const auto built = aa::build::BuildFinalAtlas(
             capture.savedAtlas.key, finalMembers, settings, atlas,
             assignments, diagnosis, &layout);
-        if (built != aa::build::Status::Built) return MapBuild(built);
-        return BakeForExport(capture, atlas, assignments, layout, output);
+        if (built != aa::build::Status::Built) {
+            if (diagnosis.empty())
+                diagnosis = "build-status-" +
+                    std::to_string(static_cast<unsigned>(built));
+            return MapBuild(built);
+        }
+        const auto outcome = BakeForExport(
+            capture, atlas, assignments, layout, output);
+        if (outcome != Outcome::Prepared && diagnosis.empty())
+            diagnosis = "bake-outcome-" +
+                std::to_string(static_cast<unsigned>(outcome));
+        return outcome;
     } catch (...) {
         output = {};
         diagnosis.clear();

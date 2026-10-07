@@ -384,7 +384,7 @@ ApplyOutcome ApplyNative(OcctDocument& owner, const PreparedEdit& prepared,
     if (context && outcome != ApplyOutcome::Refused) {
         native_opening::CommittedEditPublication publication;
         publication.replaced.push_back(
-            {Text(prepared.opening.host.entity), {}});
+            {Text(prepared.opening.host.entity), prepared.opening.host.shape});
         if (outcome == ApplyOutcome::Committed)
             return context->publishCommittedEdit(publication)
                 ? ApplyOutcome::Committed : ApplyOutcome::OutcomeUnknown;

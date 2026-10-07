@@ -444,6 +444,14 @@ NSDictionary<NSString *, id> *DebugE4ObservationDictionary(
             @"materialIndex": @(item.materialIndex),
         }];
     }
+    NSMutableDictionary<NSString *, NSNumber *> *roleBytes =
+        [NSMutableDictionary dictionaryWithCapacity:value.outputRoles.size()];
+    if (value.outputRoles.size() == value.outputRoleBytes.size()) {
+        for (std::size_t index = 0; index < value.outputRoles.size(); ++index) {
+            roleBytes[DebugE4String(value.outputRoles[index])] =
+                @(value.outputRoleBytes[index]);
+        }
+    }
     return @{
         @"ownerCount": @(value.ownerCount),
         @"requiredReceiverCount": @(value.requiredReceiverCount),
@@ -461,6 +469,9 @@ NSDictionary<NSString *, id> *DebugE4ObservationDictionary(
         @"correspondence": mapping,
         @"inputKeys": DebugE4Strings(value.inputKeys),
         @"bakeSeals": DebugE4Strings(value.bakeSeals),
+        @"outputRoleBytes": roleBytes,
+        @"layoutResolution": @(value.layoutResolution),
+        @"layoutChartCount": @(value.layoutChartCount),
         @"failureStage": DebugE4String(value.failureStage),
         @"captureReached": @(value.captureReached),
         @"finalProductionReached": @(value.finalProductionReached),

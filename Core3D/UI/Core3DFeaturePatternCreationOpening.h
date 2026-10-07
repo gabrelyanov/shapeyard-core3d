@@ -18,6 +18,10 @@ __attribute__((objc_subclassing_restricted))
     (void (^)(Core3DProfileConstructionResult result, NSString *detail,
               NSString *_Nullable hostEntityIdentifier))completion
     NS_SWIFT_NAME(apply(completion:));
+//! Requests cancellation of an in-flight apply. The eventual apply completion
+//! remains authoritative: a command that already committed still reports that
+//! commit, while a proven clean abort reports Cancelled only after drain.
+- (BOOL)requestStop NS_SWIFT_NAME(requestStop());
 - (BOOL)cancel;
 #if DEBUG
 - (void)debugArmCreationFault:(NSInteger)fault
@@ -36,6 +40,9 @@ __attribute__((objc_subclassing_restricted))
 - (NSDictionary<NSString *, id> *_Nullable)debugFeaturePatternCreationEvidenceForEntityIdentifier:
     (NSString *)entityIdentifier
     NS_SWIFT_NAME(debugFeaturePatternCreationEvidence(entityIdentifier:));
+- (NSDictionary<NSString *, id> *_Nullable)debugFeaturePatternReceiptEvidenceForEntityIdentifier:
+    (NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugFeaturePatternReceiptEvidence(entityIdentifier:));
 #endif
 @end
 

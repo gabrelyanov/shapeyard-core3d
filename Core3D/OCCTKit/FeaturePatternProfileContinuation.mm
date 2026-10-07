@@ -355,21 +355,54 @@ bool ReviewPreparedCreation(const PreparedCreation& prepared,
     } catch (...) { output = {}; return false; }
 }
 
-CreationOutcome StageCreation(OcctDocument& owner,
-    const std::shared_ptr<const PreparedCreation>& prepared) noexcept {
-    if (!prepared || !prepared->capture_) return CreationOutcome::Refused;
+class PendingCreation final {
+public:
+    PendingCreation(OcctDocument& owner,
+                    std::shared_ptr<const PreparedCreation> prepared) noexcept
+        : owner_(&owner), prepared_(std::move(prepared)) {}
+
+    Handle(OcctDocument) owner_;
+    std::shared_ptr<const PreparedCreation> prepared_;
+    std::shared_ptr<native_opening::CommandLease> lease_;
+    TDF_Label baselineLabel_;
+    std::atomic_bool finished_{false};
+};
+
+namespace {
+CreationOutcome AbortPending(const std::shared_ptr<PendingCreation>& pending,
+                             const char *gate, bool cancelled) noexcept {
+#if DEBUG
+    std::fprintf(stderr, "C1H_CREATION_STAGE gate=%s\n", gate);
+#else
+    (void)gate;
+#endif
+    if (!pending || pending->owner_.IsNull() || !pending->lease_)
+        return CreationOutcome::OutcomeUnknown;
+    return pending->lease_->abort()
+            && !pending->owner_->Document()->HasOpenCommand()
+        ? (cancelled ? CreationOutcome::Cancelled : CreationOutcome::Refused)
+        : CreationOutcome::OutcomeUnknown;
+}
+} // namespace
+
+std::shared_ptr<PendingCreation> StartCreation(OcctDocument& owner,
+    const std::shared_ptr<const PreparedCreation>& prepared,
+    CreationOutcome& immediateOutcome) noexcept {
+    immediateOutcome = CreationOutcome::Refused;
+    if (!prepared || !prepared->capture_) return {};
 #if DEBUG
     const auto refused = [](const char *gate) {
         std::fprintf(stderr, "C1H_CREATION_STAGE gate=%s\n", gate);
-        return CreationOutcome::Refused;
     };
 #else
-    const auto refused = [](const char *) { return CreationOutcome::Refused; };
+    const auto refused = [](const char *) {};
 #endif
     bool expected = false;
-    if (!prepared->consumed_.compare_exchange_strong(expected, true))
-        return refused("consumed");
+    if (!prepared->consumed_.compare_exchange_strong(expected, true)) {
+        refused("consumed"); return {};
+    }
     const auto& capture = *prepared->capture_;
+    std::shared_ptr<PendingCreation> pending;
     try {
         std::shared_ptr<const CreationCapture> current;
         if (CaptureCreationHost(owner,
@@ -382,33 +415,39 @@ CreationOutcome StageCreation(OcctDocument& owner,
             || !current->profile_.IsEqual(capture.profile_)
             || current->scalarRecipe_ != capture.scalarRecipe_
             || current->sourceProgram_.recipeBytes
-                != capture.sourceProgram_.recipeBytes) return refused("recapture");
-        auto lease = capture.context_->beginCommandLease(
+                != capture.sourceProgram_.recipeBytes) {
+            refused("recapture"); return {};
+        }
+        pending = std::make_shared<PendingCreation>(owner, prepared);
+        pending->lease_ = capture.context_->beginCommandLease(
             capture.context_->openingFence(), capture.width_, capture.height_);
-        if (!lease || !lease->ownsOpenCommand()) return refused("lease");
-        const auto abort = [&](const char *gate) {
-#if DEBUG
-            std::fprintf(stderr, "C1H_CREATION_STAGE gate=%s\n", gate);
-#endif
-            return lease->abort() && !owner.Document()->HasOpenCommand()
-                ? CreationOutcome::Refused : CreationOutcome::OutcomeUnknown;
-        };
+        if (!pending->lease_ || !pending->lease_->ownsOpenCommand()) {
+            refused("lease"); return {};
+        }
         const auto shapes = XCAFDoc_DocumentTool::ShapeTool(owner.Document()->Main());
-        if (shapes.IsNull()) return abort("shape-tool");
+        if (shapes.IsNull()) {
+            immediateOutcome = AbortPending(pending, "shape-tool", false); return {};
+        }
         // Profile metadata uses explicit legacy child tags, so a previously
         // absent TagSource may initially enumerate occupied children. Advance
         // it under the owned command until it proves a genuinely fresh label.
-        TDF_Label baselineLabel;
         for (std::size_t attempt = 0; attempt < profile::MaximumRecords; ++attempt) {
             const TDF_Label candidate = TDF_TagSource::NewChild(capture.host_.label);
-            if (!candidate.HasAttribute()) { baselineLabel = candidate; break; }
+            if (!candidate.HasAttribute()) {
+                pending->baselineLabel_ = candidate; break;
+            }
         }
-        if (baselineLabel.IsNull()) return abort("baseline-label-budget");
-        if (!feature_pattern_baseline::Stage(baselineLabel, capture.host_.label,
-                prepared->definition_.host, prepared->baseline_.retainedRecipeFeature,
+        if (pending->baselineLabel_.IsNull()) {
+            immediateOutcome = AbortPending(
+                pending, "baseline-label-budget", false); return {};
+        }
+        if (!feature_pattern_baseline::Stage(pending->baselineLabel_,
+                capture.host_.label, prepared->definition_.host,
+                prepared->baseline_.retainedRecipeFeature,
                 prepared->baseline_.baselineRecipeIdentity,
-                prepared->baseline_.exactRecipe, prepared->baseline_.solid))
-            return abort("baseline");
+                prepared->baseline_.exactRecipe, prepared->baseline_.solid)) {
+            immediateOutcome = AbortPending(pending, "baseline", false); return {};
+        }
         shapes->SetShape(capture.host_.label, prepared->built_.result);
         const Handle(TDF_TagSource) tags = TDF_TagSource::Set(capture.host_.label);
         Standard_Integer highWater = tags->Get();
@@ -417,37 +456,68 @@ CreationOutcome StageCreation(OcctDocument& owner,
             highWater = std::max(highWater, child.Value().Tag());
         tags->Set(highWater);
         feature_pattern_child::PairedRecord pair;
-        if (!owner.StageFeaturePatternPair(*lease, capture.host_.label,
-                baselineLabel, capture.source_.label, prepared->definition_,
-                prepared->built_.childReceipts, pair)) return abort("pair");
+        if (!owner.StageFeaturePatternPair(*pending->lease_, capture.host_.label,
+                pending->baselineLabel_, capture.source_.label,
+                prepared->definition_, prepared->built_.childReceipts, pair)) {
+            immediateOutcome = AbortPending(pending, "pair", false); return {};
+        }
+        return pending;
+    } catch (...) {
+        immediateOutcome = pending && pending->lease_
+            ? AbortPending(pending, "start-exception", false)
+            : CreationOutcome::Refused;
+        return {};
+    }
+}
+
+CreationOutcome FinishCreation(
+    const std::shared_ptr<PendingCreation>& pending,
+    const std::atomic_bool& stop) noexcept {
+    if (!pending || pending->owner_.IsNull() || !pending->prepared_
+        || !pending->prepared_->capture_ || !pending->lease_)
+        return CreationOutcome::Refused;
+    bool expected = false;
+    if (!pending->finished_.compare_exchange_strong(expected, true))
+        return CreationOutcome::Refused;
+    auto& owner = *pending->owner_;
+    const auto& prepared = *pending->prepared_;
+    const auto& capture = *prepared.capture_;
+    try {
+        if (stop.load()) return AbortPending(pending, "stop", true);
 #if DEBUG
         if (ConsumeCreationFault(CreationFault::AfterLastChild))
-            return abort("debug-after-last-child");
+            return AbortPending(pending, "debug-after-last-child", false);
 #endif
         if (!profile::Stage(owner.Document(), capture.host_.label,
                 capture.profile_.parameters, capture.profile_.identifier))
-            return abort("profile");
+            return AbortPending(pending, "profile", false);
 #if DEBUG
         if (ConsumeCreationFault(CreationFault::CreationReadback))
-            return abort("readback");
+            return AbortPending(pending, "readback", false);
 #endif
-        if (!CreationReadback(owner, *prepared, baselineLabel))
-            return abort("readback");
-        if (!lease->commit()) {
-            native_opening::CommittedEditPublication publication;
-            publication.replaced.push_back(
-                {retained_solid::UUIDText(capture.host_.entity),
-                 capture.host_.shape});
+        if (!CreationReadback(owner, prepared, pending->baselineLabel_))
+            return AbortPending(pending, "readback", false);
+        native_opening::CommittedEditPublication publication;
+        publication.replaced.push_back(
+            {retained_solid::UUIDText(capture.host_.entity), capture.host_.shape});
+        if (!pending->lease_->commit()) {
             capture.context_->retainUnprovenEdit(publication);
             return CreationOutcome::OutcomeUnknown;
         }
-        native_opening::CommittedEditPublication publication;
-        publication.replaced.push_back(
-            {retained_solid::UUIDText(capture.host_.entity),
-             capture.host_.shape});
         return capture.context_->publishCommittedEdit(publication)
             ? CreationOutcome::Committed : CreationOutcome::OutcomeUnknown;
-    } catch (...) { return CreationOutcome::OutcomeUnknown; }
+    } catch (...) {
+        return AbortPending(pending, "finish-exception", false);
+    }
+}
+
+CreationOutcome StageCreation(OcctDocument& owner,
+    const std::shared_ptr<const PreparedCreation>& prepared) noexcept {
+    CreationOutcome immediate = CreationOutcome::Refused;
+    const auto pending = StartCreation(owner, prepared, immediate);
+    if (!pending) return immediate;
+    const std::atomic_bool neverStop{false};
+    return FinishCreation(pending, neverStop);
 }
 
 CaptureStatus CaptureCurrent(OcctDocument& owner, const std::string& hostEntity,
@@ -621,5 +691,139 @@ bool ObserveCurrent(OcctDocument& owner, const std::string& hostEntity,
         output = std::move(value); return true;
     } catch (...) { output = {}; return false; }
 }
+
+#if DEBUG
+bool ObserveReceipts(OcctDocument& owner, const std::string& hostEntity,
+    const std::shared_ptr<native_opening::Context>& context,
+    ReceiptObservation& output) noexcept {
+    output = {};
+    try {
+        std::shared_ptr<const CurrentCapture> capture;
+        if (CaptureCurrent(owner, hostEntity, context, capture)
+                != CaptureStatus::Current || !capture) return false;
+        const auto& snapshot = capture->d4_;
+        const auto& baseline = snapshot.hostBase.retained;
+        const auto& definition = snapshot.record.definition;
+        std::shared_ptr<const feature_pattern_baseline::Payload> payload;
+        if (!feature_pattern_baseline::Read(snapshot.hostBase.recipeLabel, payload)
+            || !payload
+            || payload->envelope.retainedRecipeFeature
+                != baseline.retainedRecipeFeature
+            || payload->envelope.baselineRecipeIdentity
+                != baseline.baselineRecipeIdentity
+            || payload->envelope.exactRecipe != baseline.exactRecipe)
+            return false;
+
+        const auto* retained = std::get_if<retained_boolean::Program>(
+            &snapshot.sourceProgram.recipe);
+        if (!retained
+            || snapshot.featurePatternDocumentBytes < snapshot.record.bytes.size())
+            return false;
+        feature_pattern_native::SourceProgram source;
+        source.program = *retained;
+        source.exactProgram = snapshot.sourceProgram.recipeBytes;
+        source.retainedBase = snapshot.sourceProgram.base;
+        feature_pattern::ExpansionBudget budget;
+        budget.existingDocumentBytes = snapshot.featurePatternDocumentBytes
+            - snapshot.record.bytes.size();
+        budget.sourceRecipeBytes = source.exactProgram.size();
+        budget.existingMemoryBytes = baseline.exactRecipe.size()
+            + source.exactProgram.size();
+        if (!feature_pattern_native::detail::CountTopology(
+                baseline.solid, budget.maximumTopologyNodes,
+                budget.hostTopologyNodes)) return false;
+        std::atomic_bool stop{false};
+        feature_pattern_native::SourceTool sourceTool;
+        if (feature_pattern_native::BuildSourceTool(source,
+                definition.sourceCutStepID, stop, sourceTool)
+                    != feature_pattern_native::Status::Built
+            || !feature_pattern_native::detail::CountTopology(
+                sourceTool.detached.tool, budget.maximumTopologyNodes,
+                budget.sourceToolTopologyNodes)) return false;
+        const auto built = feature_pattern_native::BuildAttributedPattern(
+            baseline, source, definition, budget, stop);
+        if (!built.admitted() || built.result.IsNull()
+            || built.selectors.size() != built.childReceipts.size()
+            || built.positiveRemovedVolumes.size() != built.childReceipts.size()
+            || built.childReceipts.size() != snapshot.children.size()) return false;
+        const auto resolveStatus = feature_pattern_native::ResolveSelectors(
+            snapshot.host.shape, definition, built.selectors);
+        if (resolveStatus != feature_pattern_native::Status::Built) return false;
+
+        std::map<UUID, std::size_t> builtByChild;
+        for (std::size_t index = 0; index < built.childReceipts.size(); ++index)
+            if (!builtByChild.emplace(
+                    built.childReceipts[index].childFeature, index).second)
+                return false;
+        std::map<UUID, const feature_pattern_owner::ChildReceipt*> persistedByChild;
+        for (const auto& child : snapshot.children)
+            if (!persistedByChild.emplace(
+                    child.persisted.childFeature, &child).second)
+                return false;
+
+        ReceiptObservation value;
+        value.current = true;
+        value.hostEntity = retained_solid::UUIDText(snapshot.host.entity);
+        value.patternFeature = definition.feature;
+        value.metersPerUnit = capture->profile_.parameters.metersPerUnit;
+        value.retainedRecipeFeature = baseline.retainedRecipeFeature;
+        value.baselineRecipeIdentity = baseline.baselineRecipeIdentity;
+        value.exactRecipe = baseline.exactRecipe;
+        value.baselineCanonicalBytes = payload->canonicalBytes;
+        value.children.reserve(snapshot.children.size());
+        for (const auto& member : definition.distribution.members) {
+            if (member.state != pattern::MemberState::Active) continue;
+            const UUID childID = feature_pattern::ChildFeatureID(definition, member);
+            const auto builtMatch = builtByChild.find(childID);
+            const auto persistedMatch = persistedByChild.find(childID);
+            if (builtMatch == builtByChild.end()
+                || persistedMatch == persistedByChild.end()) return false;
+            const std::size_t index = builtMatch->second;
+            const auto& derived = built.childReceipts[index];
+            const auto& selector = built.selectors[index];
+            const auto& persisted = *persistedMatch->second;
+            std::vector<std::uint8_t> derivedBytes, persistedBytes;
+            if (!feature_pattern_child::Encode(derived, derivedBytes)
+                || !feature_pattern_child::Encode(
+                    persisted.persisted, persistedBytes)
+                || derivedBytes != persisted.canonicalBytes
+                || persistedBytes != persisted.canonicalBytes
+                || derived.childFeature != selector.childFeature
+                || derived.childFeature != childID
+                || derived.instanceIdentity != member.identity
+                || derived.localID != member.localID
+                || derived.row != member.coordinate.row
+                || derived.column != member.coordinate.column
+                || persisted.boundarySections
+                    != selector.orientedBoundarySections
+                || !std::isfinite(built.positiveRemovedVolumes[index])
+                || built.positiveRemovedVolumes[index] <= 0) return false;
+
+            ChildReceiptObservation child;
+            child.childFeature = persisted.persisted.childFeature;
+            child.instanceIdentity = persisted.persisted.instanceIdentity;
+            child.baselineRecipeIdentity =
+                persisted.persisted.baselineRecipeIdentity;
+            child.localID = persisted.persisted.localID;
+            child.row = persisted.persisted.row;
+            child.column = persisted.persisted.column;
+            child.boundarySections = persisted.boundarySections;
+            child.canonicalBytes = persisted.canonicalBytes;
+            child.selectors.reserve(persisted.persisted.selectors.size());
+            for (const auto& item : persisted.persisted.selectors)
+                child.selectors.push_back({std::uint8_t(item.kind), item.semantic,
+                    item.ordinal, item.proof});
+            child.resolvesOnCurrentBRep = true;
+            child.buildStatus = std::uint8_t(resolveStatus);
+            child.positiveRemovedVolume = built.positiveRemovedVolumes[index];
+            child.orientedBoundarySections = selector.orientedBoundarySections;
+            value.children.push_back(std::move(child));
+        }
+        if (value.children.size() != snapshot.children.size()) return false;
+        value.allReceiptsResolve = true;
+        output = std::move(value); return true;
+    } catch (...) { output = {}; return false; }
+}
+#endif
 
 } // namespace core3d::profile_d4

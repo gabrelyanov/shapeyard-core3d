@@ -33,6 +33,7 @@
 #include <TopoDS_Face.hxx>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -1641,7 +1642,7 @@ TDF_Label FixtureAddE4RetainedCapPart(
 
 void StageE4RetainedCapFixture(const Handle(TDocStd_Document)& doc,
                                double unit,
-                               const fi::ResourceEnvelope& envelope) {
+                               const std::vector<fi::ResourceEnvelope>& envelopes) {
     doc->ChangeStorageFormatVersion(TDocStd_FormatVersion(12));
     (void)XCAFDoc_DocumentTool::ShapeTool(doc->Main());
     XCAFDoc_DocumentTool::SetLengthUnit(doc, unit);
@@ -1654,9 +1655,13 @@ void StageE4RetainedCapFixture(const Handle(TDocStd_Document)& doc,
         FixtureIndexedUUID(0x72, 2)};
     (void)FixtureAddE4RetainedCapPart(doc, key, unit);
     doc->NewCommand();
-    if (fi::owner::AdoptResource(doc, envelope)
-            != fi::owner::Outcome::Committed
-        || !doc->CommitCommand())
+    for (const auto& envelope : envelopes)
+        if (fi::owner::AdoptResource(doc, envelope)
+                != fi::owner::Outcome::Committed) {
+            doc->AbortCommand();
+            throw std::invalid_argument("E4 cap fixture resource adoption");
+        }
+    if (!doc->CommitCommand())
         throw std::invalid_argument("E4 cap fixture resource adoption");
     doc->ClearUndos();
     if (!Core3DValidateFaceImageDocument(doc))
@@ -3007,7 +3012,35 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
     return CreateFaceImageDebugFixture(
         unit == 0.001 ? @"e4-retained-cap-mm" : @"e4-retained-cap-m",
         [envelope, unit](const Handle(TDocStd_Document)& document) {
-            StageE4RetainedCapFixture(document, unit, envelope);
+            StageE4RetainedCapFixture(document, unit, {envelope});
+        });
+}
+
++ (NSData *)debugE4RetainedCapRoleFixtureAssetDataWithResourceBytes:
+    (NSArray<NSData *> *)resourceBytes metersPerUnit:(NSNumber *)metersPerUnit {
+    const double unit = metersPerUnit.doubleValue;
+    if (!NSThread.isMainThread || resourceBytes.count != 3
+        || (unit != 0.001 && unit != 1.0)) return nil;
+    std::vector<fi::ResourceEnvelope> envelopes;
+    envelopes.reserve(3);
+    for (NSUInteger index = 0; index < resourceBytes.count; ++index) {
+        NSData *bytes = resourceBytes[index];
+        if (bytes.length == 0) return nil;
+        fi::ResourceEnvelope envelope;
+        NSData *provenance = [[NSString stringWithFormat:
+            @"shapeyard.e4.retained-cap.roles.fixture.v1.%lu",
+            (unsigned long)index] dataUsingEncoding:NSUTF8StringEncoding];
+        if (!fi::validation::BuildFaceImageEnvelope(
+                bytes, bytes, @"opaque", provenance,
+                FixtureIndexedUUID(0x73, std::uint8_t(index + 1)),
+                envelope)) return nil;
+        envelopes.push_back(std::move(envelope));
+    }
+    return CreateFaceImageDebugFixture(
+        unit == 0.001 ? @"e4-retained-cap-roles-mm"
+                      : @"e4-retained-cap-roles-m",
+        [envelopes, unit](const Handle(TDocStd_Document)& document) {
+            StageE4RetainedCapFixture(document, unit, envelopes);
         });
 }
 
@@ -3032,7 +3065,8 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         core3d::retained_edge_treatment::ReplayBudget budget;
         core3d::decal_layer::source::Witness witness;
         if (!core3d::decal_layer::source::CaptureSource(
-                wrapper, key, budget, [] { return false; }, witness)) return @NO;
+                wrapper, key, budget, [] { return false; }, witness))
+            return @NO;
         const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(owner);
         Standard_Real unit = 0.0;
         dr::FaceImageGeometricReceipt receipt;
@@ -3040,12 +3074,21 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
             || !XCAFDoc_DocumentTool::GetLengthUnit(document, unit)
             || !FixtureCapturePlanarFace(shape, unit,
                 core3d::retained_face_selector::Axis::Z,
-                core3d::retained_face_selector::Side::Max, receipt)) return @NO;
+                core3d::retained_face_selector::Side::Max, receipt))
+            return @NO;
         core3d::decal_layer::Digest selectorProof{};
-        if (!dr::FaceImageReceiptProof(receipt, selectorProof)) return @NO;
-        fi::ResourceEnvelope envelope;
-        if (!fi::owner::ReadResource(
-                document, FixtureIndexedUUID(0x73, 1), envelope)) return @NO;
+        if (!dr::FaceImageReceiptProof(receipt, selectorProof))
+            return @NO;
+        std::vector<fi::ResourceEnvelope> envelopes;
+        for (std::uint8_t slot = 1; slot <= 3; ++slot) {
+            fi::ResourceEnvelope envelope;
+            if (!fi::owner::ReadResource(
+                    document, FixtureIndexedUUID(0x73, slot), envelope)) {
+                if (slot == 1) return @NO;
+                break;
+            }
+            envelopes.push_back(std::move(envelope));
+        }
 
         core3d::decal_layer::Definition definition;
         definition.owner = key;
@@ -3054,31 +3097,42 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         definition.geometryRevision = witness.geometryRevision;
         definition.placementRevision = witness.placementRevision;
         definition.sourceProof = witness.sourceProof;
-        core3d::decal_layer::Layer layer;
-        layer.identifier = FixtureIndexedUUID(0x73, 2);
-        layer.image.resource = envelope.resource;
-        layer.image.normalizedContent = envelope.workingContent;
-        layer.image.originalContent = envelope.originalContent;
-        layer.image.provenance = envelope.provenance;
-        layer.image.producerVersion =
-            core3d::decal_layer::image_contract::kProducerVersion;
-        layer.image.mediaType = envelope.workingFormat;
-        layer.image.widthTexels = envelope.workingWidthTexels;
-        layer.image.heightTexels = envelope.workingHeightTexels;
-        layer.image.role = fi::Role::BaseColor;
-        layer.image.colorSpace = fi::ColorSpace::SRGB;
-        layer.image.alpha = envelope.alpha;
-        layer.placement.kind = core3d::decal_layer::PlacementKind::Face;
-        layer.placement.edgePolicy =
-            core3d::decal_layer::EdgePolicy::RejectCrossing;
-        layer.placement.expectedCardinality = 1;
-        layer.placement.face.receiver.face = FixtureIndexedUUID(0x73, 3);
-        layer.placement.face.receiver.selectorProof = selectorProof;
-        layer.placement.face.anchorMeters = {{0.05, 0.04}};
-        layer.widthMeters = 0.05;
-        layer.heightMeters = 0.04;
-        layer.opacity = 1.0;
-        definition.layers = {layer};
+        const std::array<fi::Role, 5> roles{{
+            fi::Role::BaseColor, fi::Role::Emissive,
+            fi::Role::MetallicRoughness, fi::Role::Occlusion,
+            fi::Role::Normal}};
+        const std::array<std::size_t, 5> resources{{0, 0, 1, 1, 2}};
+        const std::size_t roleCount = envelopes.size() == 3 ? roles.size() : 1;
+        for (std::size_t index = 0; index < roleCount; ++index) {
+            const auto& envelope = envelopes[resources[index]];
+            core3d::decal_layer::Layer layer;
+            layer.identifier = FixtureIndexedUUID(
+                0x74, std::uint8_t(index + 1));
+            layer.image.resource = envelope.resource;
+            layer.image.normalizedContent = envelope.workingContent;
+            layer.image.originalContent = envelope.originalContent;
+            layer.image.provenance = envelope.provenance;
+            layer.image.producerVersion =
+                core3d::decal_layer::image_contract::kProducerVersion;
+            layer.image.mediaType = envelope.workingFormat;
+            layer.image.widthTexels = envelope.workingWidthTexels;
+            layer.image.heightTexels = envelope.workingHeightTexels;
+            layer.image.role = roles[index];
+            layer.image.colorSpace = index < 2
+                ? fi::ColorSpace::SRGB : fi::ColorSpace::Linear;
+            layer.image.alpha = envelope.alpha;
+            layer.placement.kind = core3d::decal_layer::PlacementKind::Face;
+            layer.placement.edgePolicy =
+                core3d::decal_layer::EdgePolicy::RejectCrossing;
+            layer.placement.expectedCardinality = 1;
+            layer.placement.face.receiver.face = FixtureIndexedUUID(0x73, 3);
+            layer.placement.face.receiver.selectorProof = selectorProof;
+            layer.placement.face.anchorMeters = {{0.05, 0.04}};
+            layer.widthMeters = 0.05;
+            layer.heightMeters = 0.04;
+            layer.opacity = 1.0;
+            definition.layers.push_back(std::move(layer));
+        }
         std::vector<std::uint8_t> bytes;
         std::string hex, digest;
         if (!core3d::decal_layer::BindLayerProof(definition)
@@ -3090,17 +3144,20 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         const TDF_Label record = owner.FindChild(
             core3d::decal_layer::persistence::RecordTag, Standard_True);
         if (!core3d::decal_layer::persistence::WriteChunks(
-                record, hex, 1, digest)
+                record, hex, Standard_Integer(definition.layers.size()), digest)
             || !document->CommitCommand()) {
             document->AbortCommand(); return @NO;
         }
         core3d::decal_layer::Definition strict;
         std::vector<std::uint8_t> strictBytes;
-        return @(core3d::decal_layer::persistence::Read(
-                document, owner, strict, &strictBytes, nullptr)
-                    == core3d::decal_layer::persistence::ReadState::Present
-            && strictBytes == bytes
-            && core3d::decal_layer::source::ExactMatch(strict, witness));
+        const auto strictState = core3d::decal_layer::persistence::Read(
+            document, owner, strict, &strictBytes, nullptr);
+        const bool bytesMatch = strictBytes == bytes;
+        const bool sourceMatch =
+            core3d::decal_layer::source::ExactMatch(strict, witness);
+        return @(strictState
+                == core3d::decal_layer::persistence::ReadState::Present
+            && bytesMatch && sourceMatch);
     } @catch (...) { return @NO; }
 }
 

@@ -616,6 +616,10 @@ __attribute__((objc_subclassing_restricted))
 //! no interior bore, and one adopted caller-supplied image resource.
 + (NSData *_Nullable)debugE4RetainedCapFixtureAssetDataWithResourceBytes:
     (NSData *)resourceBytes metersPerUnit:(NSNumber *)metersPerUnit;
+//! R7B variant carrying the frozen base/data/normal resources used to prove
+//! all five painted output roles from the same retained carrier.
++ (NSData *_Nullable)debugE4RetainedCapRoleFixtureAssetDataWithResourceBytes:
+    (NSArray<NSData *> *)resourceBytes metersPerUnit:(NSNumber *)metersPerUnit;
 //! Installs one strict SYDL/1 layer after resolving the carrier's +Z face
 //! through production B2. Returns a boxed BOOL for selector-safe test use.
 - (NSNumber *)debugInstallE4RetainedCapLayerForEntityIdentifier:

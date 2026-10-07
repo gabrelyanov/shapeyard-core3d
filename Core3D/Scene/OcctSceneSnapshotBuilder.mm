@@ -3738,11 +3738,22 @@ std::uint64_t PresentationOverlayPayloadFingerprint(
 
 struct PrivateDecalCapture::Impl final {
     struct Owner final {
+        struct Receiver final {
+            decal_layer::ReceiverReceipt receipt;
+            TopoDS_Face originalFace;
+            TopoDS_Face disposableFace;
+            std::uint32_t originalFaceIndex = 0;
+            std::uint32_t disposableFaceIndex = 0;
+        };
         retained_recipe::OwnerKey owner;
         decal_layer::Definition definition;
         std::vector<std::uint8_t> canonicalBytes;
         decal_layer::source::Witness source;
         TopoDS_Shape detachedAuthorityShape;
+        std::unique_ptr<BRepBuilderAPI_Copy> copier;
+        std::vector<Receiver> receivers;
+        asset_atlas::build::FinalMemberInput savedMember;
+        painted_atlas_bake::owner::ExportCapture atlasCapture;
         std::string definitionIdentifier;
     };
 
@@ -3754,6 +3765,17 @@ struct PrivateDecalCapture::Impl final {
     double metersPerUnit = 0.0;
     bool selectedObjectsOnly = false;
 };
+
+const char* PrivatePaintedRoleText(const face_image::Role role) noexcept {
+    switch (role) {
+        case face_image::Role::BaseColor: return "baseColor";
+        case face_image::Role::Emissive: return "emissive";
+        case face_image::Role::MetallicRoughness: return "metallicRoughness";
+        case face_image::Role::Occlusion: return "occlusion";
+        case face_image::Role::Normal: return "normal";
+    }
+    return "unknown";
+}
 
 PrivateDecalCapture::PrivateDecalCapture() noexcept
     : impl_(new (std::nothrow) Impl()) {}
@@ -3848,15 +3870,134 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
                 return false;
             const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
             if (shape.IsNull()) return false;
-            BRepBuilderAPI_Copy copier(shape, Standard_True, Standard_True);
-            const TopoDS_Shape detached = copier.Shape();
-            if (detached.IsNull()) return false;
             PrivateDecalCapture::Impl::Owner value;
             value.owner = owner;
+            value.copier = std::make_unique<BRepBuilderAPI_Copy>(
+                shape, Standard_True, Standard_True);
+            if (!value.copier || !value.copier->IsDone()
+                || value.copier->Shape().IsNull())
+                return false;
+            value.detachedAuthorityShape = value.copier->Shape();
+
+            TopTools_IndexedMapOfShape originalFaces, disposableFaces;
+            TopExp::MapShapes(shape, TopAbs_FACE, originalFaces);
+            TopExp::MapShapes(value.detachedAuthorityShape,
+                TopAbs_FACE, disposableFaces);
+            if (originalFaces.IsEmpty()
+                || originalFaces.Extent() != disposableFaces.Extent())
+                return false;
+            Bnd_Box stageBox;
+            BRepBndLib::AddOptimal(
+                shape, stageBox, Standard_False, Standard_False);
+            if (stageBox.IsVoid() || stageBox.IsWhole()
+                || stageBox.IsOpen()) return false;
+            std::set<std::pair<decal_layer::UUID,
+                               decal_layer::Digest>> seenReceivers;
+            for (const auto& layer : definition.layers) {
+                const auto receipt = decal_layer::bake::IntentReceipt(layer);
+                if (!seenReceivers.emplace(
+                        receipt.face, receipt.selectorProof).second)
+                    continue;
+                int match = 0;
+                dependent_replay::FaceImageGeometricReceipt matchedReceipt;
+                TopoDS_Face originalFace;
+                for (Standard_Integer index = 1;
+                     index <= originalFaces.Extent(); ++index) {
+                    dependent_replay::FaceImageGeometricReceipt derived;
+                    const auto status = dependent_replay::detail::
+                        DeriveFaceImageReceipt(stageBox,
+                            TopoDS::Face(originalFaces.FindKey(index)),
+                            impl.metersPerUnit, *impl.budget, derived);
+                    if (status == dependent_replay::detail::
+                            FaceImageDeriveStatus::Budget)
+                        return false;
+                    if (status != dependent_replay::detail::
+                            FaceImageDeriveStatus::Derived)
+                        continue;
+                    decal_layer::Digest derivedProof{};
+                    if (!dependent_replay::FaceImageReceiptProof(
+                            derived, derivedProof)) return false;
+                    if (derivedProof != receipt.selectorProof) continue;
+                    ++match;
+                    matchedReceipt = std::move(derived);
+                    originalFace = TopoDS::Face(
+                        originalFaces.FindKey(index));
+                }
+                if (match != 1 || originalFace.IsNull()) return false;
+                dependent_replay::FaceImageGeometricReceipt resolved;
+                TopoDS_Face resolvedFace;
+                if (dependent_replay::detail::ResolveFaceImageReceipt(
+                        shape, matchedReceipt.intent, impl.metersPerUnit,
+                        *impl.budget, resolved, resolvedFace)
+                        != retained_face_selector::Refusal::None
+                    || !(resolved == matchedReceipt)
+                    || !resolvedFace.IsSame(originalFace)) return false;
+                const TopoDS_Shape copied =
+                    value.copier->ModifiedShape(originalFace);
+                const Standard_Integer originalIndex =
+                    originalFaces.FindIndex(originalFace);
+                const Standard_Integer disposableIndex =
+                    disposableFaces.FindIndex(copied);
+                if (copied.IsNull() || copied.ShapeType() != TopAbs_FACE
+                    || originalIndex <= 0 || disposableIndex <= 0
+                    || originalIndex > INT32_MAX
+                    || disposableIndex > INT32_MAX) return false;
+                value.receivers.push_back({receipt, originalFace,
+                    TopoDS::Face(copied),
+                    std::uint32_t(originalIndex - 1),
+                    std::uint32_t(disposableIndex - 1)});
+            }
+            if (value.receivers.empty())
+                return false;
+
+            retained_finishing::producer::Capture finishing;
+            if (!retained_finishing::producer::CaptureSource(
+                    document, owner, finishing))
+                return false;
+            value.savedMember.savedMember.owner = owner;
+            value.savedMember.savedMember.member =
+                definition.layers.front().identifier;
+            value.savedMember.savedMember.finishing =
+                definition.layers.front().identifier;
+            value.savedMember.savedMember.source = finishing.source;
+            value.savedMember.authority = finishing;
+            value.atlasCapture.savedAtlas.key.document = owner.document;
+            value.atlasCapture.savedAtlas.key.atlas =
+                definition.layers.front().identifier;
+            value.atlasCapture.savedAtlas.members = {
+                value.savedMember.savedMember};
+            value.atlasCapture.members.members.resize(1);
+            value.atlasCapture.canonicalAtlasBytes = canonicalBytes;
+            std::set<face_image::Role> capturedRoles;
+            for (const auto& layer : definition.layers) {
+                if (!capturedRoles.insert(layer.image.role).second)
+                    return false;
+                face_image::ResourceEnvelope envelope;
+                if (!face_image::owner::ReadResource(
+                        document, layer.image.resource, envelope))
+                    return false;
+                painted_atlas_bake::owner::CapturedSource captured;
+                captured.fence.owner = owner;
+                captured.fence.binding = layer.identifier;
+                captured.fence.resource = layer.image.resource;
+                captured.fence.selectorProof =
+                    decal_layer::bake::IntentReceipt(layer).selectorProof;
+                captured.fence.bindingProof = definition.layerProof;
+                captured.fence.originalContent =
+                    layer.image.originalContent;
+                captured.fence.workingContent =
+                    layer.image.normalizedContent;
+                captured.fence.role = layer.image.role;
+                captured.fence.colorSpace = layer.image.colorSpace;
+                captured.envelope = std::move(envelope);
+                if (!painted_atlas_bake::Valid(captured.fence))
+                    return false;
+                value.atlasCapture.sources.push_back(
+                    std::move(captured));
+            }
             value.definition = std::move(definition);
             value.canonicalBytes = std::move(canonicalBytes);
             value.source = std::move(source);
-            value.detachedAuthorityShape = detached;
             value.definitionIdentifier = definitionIdentifier;
             impl.owners.push_back(std::move(value));
         }
@@ -5591,6 +5732,10 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         }
 #endif
         Standard_Real metersPerUnit = kLegacyMetersPerUnit;
+#ifdef DEBUG
+        if (debugObservation && decalCapture)
+            debugObservation->failureStage = "preparing-occurrences";
+#endif
         XCAFDoc_DocumentTool::GetLengthUnit(ocaf, metersPerUnit);
         if (metersPerUnit != source.metersPerUnit) { return {}; }
         const auto documentIdentifier = document->DocumentIdentifier();
@@ -5614,6 +5759,13 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         std::vector<ExportOccurrence> occurrences;
         std::vector<DefinitionData> definitions;
         std::unordered_map<std::string, std::size_t> definitionIndices;
+        std::unordered_map<std::string,
+            PrivateDecalCapture::Impl::Owner*> capturedOwners;
+        if (decalCapture && decalCapture->impl_)
+            for (auto& owner : decalCapture->impl_->owners)
+                if (!capturedOwners.emplace(
+                        owner.definitionIdentifier, &owner).second)
+                    return {};
         std::unordered_set<std::string> matched;
         TopoDS_Compound compound;
         BRep_Builder builder;
@@ -5637,18 +5789,12 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             const auto identifier = document->DefinitionIdentifierForLabel(label);
             const auto& item = source.instances[found->second];
             const auto& sourceMesh = source.meshes[item.meshIndex];
-            // A remeshed branch owns different final UV/corner witnesses. The
-            // viewport derivative cannot be reused. Until the caller has
-            // published a derivative keyed to those new witnesses, refuse the
-            // private export rather than report success with stale artwork.
-            if (!item.decalDerivedAppearances.empty()) {
-#ifdef DEBUG
-                if (debugObservation)
-                    debugObservation->failureStage =
-                        "changed-remesh-final-production-not-connected";
-#endif
-                return {};
-            }
+            // Never reuse viewport derivative bytes after remeshing. A
+            // strictly captured owner continues into detached final-input
+            // preparation; an appearance without such authority fails closed.
+            if (!item.decalDerivedAppearances.empty()
+                && capturedOwners.find(identifier)
+                    == capturedOwners.end()) return {};
             const std::string& masterIdentifier =
                 sourceMesh.paintedAtlasMasterDefinitionIdentifier.empty()
                     ? sourceMesh.definitionIdentifier
@@ -5676,7 +5822,10 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             if (known == definitionIndices.end()) {
                 DefinitionData definition;
                 definition.label = label;
-                definition.shape = XCAFDoc_ShapeTool::GetShape(label);
+                const auto captured = capturedOwners.find(identifier);
+                definition.shape = captured == capturedOwners.end()
+                    ? XCAFDoc_ShapeTool::GetShape(label)
+                    : captured->second->detachedAuthorityShape;
                 definition.representation = representation;
                 if (definition.shape.IsNull()) { return {}; }
                 builder.Add(compound, definition.shape);
@@ -5690,6 +5839,10 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 std::move(paintedDerivative), painted});
         }
         if (matched.size() != wanted.size() || cancelled()) { return {}; }
+#ifdef DEBUG
+        if (debugObservation && decalCapture)
+            debugObservation->failureStage = "meshing-final-copy";
+#endif
         if (!definitions.empty()) { meshPrivateSurfaces(compound); }
         if (cancelled()) { return {}; }
 #ifdef DEBUG
@@ -5701,6 +5854,10 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
 #endif
         auto result = std::make_shared<SceneSnapshot>(source);
         std::size_t totalVertices = 0, totalIndices = 0;
+#ifdef DEBUG
+        if (debugObservation && decalCapture)
+            debugObservation->failureStage = "extracting-final-copy";
+#endif
         for (const auto& entry : definitionIndices) {
             auto& definition = definitions[entry.second];
             if (cancelled() || !ExtractDefinitionGeometry(definition.label, entry.first,
@@ -5709,6 +5866,163 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
 #endif
                     definition)) { return {}; }
         }
+        std::vector<PrivateExportFaceCorrespondence> finalCorrespondence;
+        std::vector<std::string> finalInputKeys;
+        std::vector<std::string> finalBakeSeals;
+        std::vector<std::string> finalOutputRoles;
+        std::vector<std::uint64_t> finalOutputRoleBytes;
+        std::size_t finalTriangleCount = 0;
+        std::size_t finalCornerCount = 0;
+        std::size_t finalResidentBytes = 0;
+        std::size_t finalLayoutResolution = 0;
+        std::size_t finalLayoutChartCount = 0;
+        if (decalCapture && decalCapture->impl_) {
+#ifdef DEBUG
+            if (debugObservation)
+                debugObservation->failureStage = "building-final-atlas";
+#endif
+            for (auto& owner : decalCapture->impl_->owners) {
+                if (cancelled()) return {};
+                const auto found = definitionIndices.find(
+                    owner.definitionIdentifier);
+                if (found == definitionIndices.end()) return {};
+                auto& definition = definitions[found->second];
+                std::atomic_bool neverCancelled{false};
+                meshcopy::CurrentTessellationCopy finalCopy;
+                if (meshcopy::PrepareCurrentTessellationCopy(
+                        definition.shape, finalCopy, neverCancelled)
+                        != meshcopy::PreparationResult::Ready) {
+#ifdef DEBUG
+                    if (debugObservation)
+                        debugObservation->failureStage =
+                            "final-tessellation-copy-refused";
+#endif
+                    return {};
+                }
+                asset_atlas::build::FinalMemberInput finalMember =
+                    owner.savedMember;
+                if (!retained_finishing::producer::detail::Triangles(
+                        finalCopy, finalMember.triangles,
+                        finalMember.faces)) {
+#ifdef DEBUG
+                    if (debugObservation)
+                        debugObservation->failureStage =
+                            "final-triangle-input-refused";
+#endif
+                    return {};
+                }
+                painted_atlas_bake::owner::ExportBake baked;
+                std::string diagnosis;
+                const asset_atlas::build::Settings settings{256, 4};
+                const auto bakeOutcome =
+                    painted_atlas_bake::owner::BuildAndBakeForExport(
+                        owner.atlasCapture, {finalMember}, settings,
+                        baked, diagnosis);
+                if (bakeOutcome
+                        != painted_atlas_bake::owner::Outcome::Prepared) {
+#ifdef DEBUG
+                    if (debugObservation)
+                        debugObservation->failureStage =
+                            "final-atlas-bake-refused-"
+                            + std::to_string(std::uint8_t(bakeOutcome))
+                            + "-" + diagnosis.substr(0, 96);
+#endif
+                    return {};
+                }
+                if (baked.outputs.empty() || baked.atlas.charts.empty()
+                    || baked.assignments.size() != 1
+                    || baked.assignments.front().corners.size()
+                        != finalMember.triangles.size() * 3U) {
+#ifdef DEBUG
+                    if (debugObservation)
+                        debugObservation->failureStage =
+                            "final-atlas-output-incomplete";
+#endif
+                    return {};
+                }
+                const std::string inputKey =
+                    PaintedAtlasDigestText(baked.atlas.layoutProof);
+                const std::string bakeSeal =
+                    PaintedAtlasDigestText(baked.bake.bakeProof);
+                if (inputKey.size() != 64 || bakeSeal.size() != 64)
+                    return {};
+                finalInputKeys.push_back(inputKey);
+                finalBakeSeals.push_back(bakeSeal);
+                finalLayoutResolution = std::max<std::size_t>(
+                    finalLayoutResolution,
+                    std::uint64_t(baked.atlas.resolutionTexels));
+                if (!CheckedAdd(finalLayoutChartCount,
+                        baked.atlas.charts.size(),
+                        finalLayoutChartCount)) return {};
+                for (const auto& output : baked.outputs) {
+                    if (output.png.empty()) return {};
+                    finalOutputRoles.emplace_back(
+                        PrivatePaintedRoleText(output.descriptor.role));
+                    finalOutputRoleBytes.push_back(output.png.size());
+                    std::size_t resident = 0;
+                    if (!CheckedAdd(output.png.size(), output.rgba.size(),
+                            resident)
+                        || !CheckedAdd(finalResidentBytes, resident,
+                            finalResidentBytes)) return {};
+                }
+                if (!CheckedAdd(finalTriangleCount,
+                        definition.mesh.indices.size() / 3U,
+                        finalTriangleCount)
+                    || !CheckedAdd(finalCornerCount,
+                        definition.mesh.indices.size(),
+                        finalCornerCount)) return {};
+                for (const auto& receiver : owner.receivers) {
+                    const Standard_Integer disposableIndex =
+                        definition.faces.FindIndex(receiver.disposableFace);
+                    if (disposableIndex <= 0) return {};
+                    const std::uint32_t faceIndex =
+                        std::uint32_t(disposableIndex - 1);
+                    std::size_t primitiveIndex =
+                        definition.mesh.primitives.size();
+                    for (std::size_t index = 0;
+                         index < definition.mesh.primitives.size(); ++index) {
+                        if (definition.mesh.primitives[index].faceIndex
+                                != faceIndex)
+                            continue;
+                        if (primitiveIndex
+                                != definition.mesh.primitives.size())
+                            return {};
+                        primitiveIndex = index;
+                    }
+                    if (primitiveIndex
+                            == definition.mesh.primitives.size()
+                        || !FitsUInt32(primitiveIndex)) return {};
+                    std::uint32_t materialIndex = 0;
+                    bool foundBinding = false;
+                    for (const auto& occurrence : occurrences) {
+                        if (occurrence.definition != found->second) continue;
+                        const auto& instance =
+                            source.instances[occurrence.instance];
+                        if (primitiveIndex
+                                >= instance.primitiveBindings.size())
+                            return {};
+                        const std::uint32_t candidate =
+                            instance.primitiveBindings[primitiveIndex]
+                                .materialIndex;
+                        if (foundBinding && candidate != materialIndex)
+                            return {};
+                        materialIndex = candidate;
+                        foundBinding = true;
+                    }
+                    if (!foundBinding) return {};
+                    finalCorrespondence.push_back({
+                        owner.definitionIdentifier,
+                        receiver.originalFaceIndex,
+                        faceIndex,
+                        std::uint32_t(primitiveIndex),
+                        materialIndex});
+                }
+            }
+        }
+        if (decalCapture && (finalCorrespondence.empty()
+                || finalTriangleCount == 0 || finalCornerCount == 0
+                || finalInputKeys.empty() || finalBakeSeals.empty()))
+            return {};
         std::unordered_set<std::size_t> replaced;
         for (const auto& occurrence : occurrences) {
             if (cancelled()) { return {}; }
@@ -5749,13 +6063,30 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         if (cancelled() || !IsValidSceneSnapshot(*result)) return {};
         if (!decalCapture) return result;
 #ifdef DEBUG
-        if (debugObservation)
+        if (debugObservation) {
+            debugObservation->producedReceiverCount =
+                finalCorrespondence.size();
+            debugObservation->finalTriangleCount = finalTriangleCount;
+            debugObservation->finalCornerCount = finalCornerCount;
+            debugObservation->operationWork += finalTriangleCount;
+            debugObservation->operationResidentBytes = finalResidentBytes;
+            debugObservation->correspondence =
+                std::move(finalCorrespondence);
+            debugObservation->inputKeys = std::move(finalInputKeys);
+            debugObservation->bakeSeals = std::move(finalBakeSeals);
+            debugObservation->outputRoles =
+                std::move(finalOutputRoles);
+            debugObservation->outputRoleBytes =
+                std::move(finalOutputRoleBytes);
+            debugObservation->layoutResolution = finalLayoutResolution;
+            debugObservation->layoutChartCount = finalLayoutChartCount;
+            debugObservation->finalProductionReached = true;
             debugObservation->failureStage =
-                "changed-remesh-final-production-not-connected";
+                "changed-remesh-private-publication-not-connected";
+        }
 #endif
-        // R7A proves only strict capture. Real copied-face history and final
-        // products land serially in R7B/R7C; do not manufacture ordinal
-        // correspondence or call the owner-refusing finalizer prematurely.
+        // R7B owns detached final inputs and all-role bake products only.
+        // Publication and successful public export remain the R7C boundary.
         return {};
     } catch (...) { return {}; }
 }
@@ -6870,6 +7201,13 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 for (std::size_t aLayerIndex = 0;
                      aLayerIndex < aPending.definition.layers.size();
                      ++aLayerIndex) {
+                    // The committed-scene decal derivative is a base-colour
+                    // preview. Other authored roles remain in the canonical
+                    // capture for the detached all-role export bake below;
+                    // feeding them to the base-colour compositor is invalid.
+                    if (aPending.definition.layers[aLayerIndex].image.role
+                            != core3d::face_image::Role::BaseColor)
+                        continue;
                     const dl::ReceiverReceipt anExpected =
                         dl::bake::IntentReceipt(
                             aPending.definition.layers[aLayerIndex]);

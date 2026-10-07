@@ -28,6 +28,18 @@ NSString *UUIDText(const feature_pattern::UUID& value) {
     try { return Text(retained_solid::UUIDText(value)); }
     catch (...) { return @""; }
 }
+NSData *Data(const std::vector<std::uint8_t>& value) {
+    return [NSData dataWithBytes:value.data() length:value.size()];
+}
+NSString *Hex(const feature_pattern_child::Digest& value) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string result; result.reserve(value.size() * 2);
+    for (std::uint8_t byte : value) {
+        result.push_back(digits[byte >> 4]);
+        result.push_back(digits[byte & 0x0f]);
+    }
+    return Text(result);
+}
 bool Number(id value, double& output) {
     if (![value isKindOfClass:NSNumber.class]
         || CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID())
@@ -225,6 +237,7 @@ NSDictionary *ReviewDictionary(const profile_d4::PreparedReview& review,
     std::shared_ptr<native_opening::Context> _context;
     std::shared_ptr<const profile_d4::CreationCapture> _capture;
     std::shared_ptr<const profile_d4::PreparedCreation> _prepared;
+    std::shared_ptr<profile_d4::PendingCreation> _pending;
     std::shared_ptr<std::atomic_bool> _stop;
     std::atomic<State> _state;
     NSDictionary *_review;
@@ -291,16 +304,12 @@ NSDictionary *ReviewDictionary(const profile_d4::PreparedReview& review,
     DeliverPrepared(completion, Core3DBoundedCurvePreparationResultPrepared,
                     @"Review the retained native measurements before Apply.");
 }
-- (void)applyWithCompletion:
-    (void (^)(Core3DProfileConstructionResult, NSString *, NSString *))completion {
-    State expected = State::Prepared;
-    if (!_state.compare_exchange_strong(expected, State::Applying)) {
-        DeliverCreated(completion, Core3DProfileConstructionResultRejected,
-                       @"No current prepared creation.", nil); return;
-    }
-    const auto outcome = profile_d4::StageCreation(*_opening.owner, _prepared);
+- (void)finishCreationOutcome:(profile_d4::CreationOutcome)outcome
+    completion:(void (^)(Core3DProfileConstructionResult, NSString *, NSString *))completion {
     Core3DProfileConstructionResult result = Core3DProfileConstructionResultRejected;
-    if (outcome == profile_d4::CreationOutcome::Committed)
+    if (outcome == profile_d4::CreationOutcome::Cancelled)
+        result = Core3DProfileConstructionResultCancelled;
+    else if (outcome == profile_d4::CreationOutcome::Committed)
         result = Core3DProfileConstructionResultCommitted;
     else if (outcome == profile_d4::CreationOutcome::OutcomeUnknown)
         result = Core3DProfileConstructionResultRecoveryRequired;
@@ -309,14 +318,38 @@ NSDictionary *ReviewDictionary(const profile_d4::PreparedReview& review,
     NSString *host = result == Core3DProfileConstructionResultCommitted
         ? Text(_opening.host) : nil;
     if (result != Core3DProfileConstructionResultRecoveryRequired) {
-        _prepared.reset(); _capture.reset(); _context.reset();
+        _pending.reset(); _prepared.reset(); _capture.reset(); _context.reset();
     }
     DeliverCreated(completion, result,
         result == Core3DProfileConstructionResultCommitted
             ? @"Feature pattern created as one native history command."
-            : result == Core3DProfileConstructionResultRecoveryRequired
-                ? @"Creation outcome is unknown; native recovery ownership is retained."
-                : @"Creation was refused without a committed partial result.", host);
+            : result == Core3DProfileConstructionResultCancelled
+                ? @"Stopped. The model is unchanged."
+                : result == Core3DProfileConstructionResultRecoveryRequired
+                    ? @"Creation outcome is unknown; native recovery ownership is retained."
+                    : @"Creation was refused without a committed partial result.", host);
+}
+- (void)applyWithCompletion:
+    (void (^)(Core3DProfileConstructionResult, NSString *, NSString *))completion {
+    State expected = State::Prepared;
+    if (!_state.compare_exchange_strong(expected, State::Applying)) {
+        DeliverCreated(completion, Core3DProfileConstructionResultRejected,
+                       @"No current prepared creation.", nil); return;
+    }
+    profile_d4::CreationOutcome immediate = profile_d4::CreationOutcome::Refused;
+    _pending = profile_d4::StartCreation(*_opening.owner, _prepared, immediate);
+    if (!_pending) { [self finishCreationOutcome:immediate completion:completion]; return; }
+    // Return the main run loop to event processing with the exact command lease
+    // still open at AfterLastChild. Stop can now reach that lease's abort path.
+    [NSRunLoop.mainRunLoop performBlock:^{
+        const auto outcome = profile_d4::FinishCreation(self->_pending, *self->_stop);
+        [self finishCreationOutcome:outcome completion:completion];
+    }];
+}
+- (BOOL)requestStop {
+    if (!NSThread.isMainThread || _state.load() != State::Applying || !_pending)
+        return NO;
+    _stop->store(true); return YES;
 }
 - (BOOL)cancel {
     State value = _state.load();
@@ -378,6 +411,66 @@ NSDictionary *ReviewDictionary(const profile_d4::PreparedReview& review,
             @"baselineVolumeMM3": @(value.baselineVolume * mm * mm * mm),
             @"resultVolumeMM3": @(value.resultVolume * mm * mm * mm),
             @"sourceVolumeMM3": @(value.sourceVolume * mm * mm * mm)};
+    } catch (...) { return nil; }
+}
+
+- (NSDictionary<NSString *, id> *)debugFeaturePatternReceiptEvidenceForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || !GLController || !GLController.viewer) return nil;
+    try {
+        const auto viewer = GLController.viewer;
+        const auto owner = viewer->getDocument();
+        const CGSize size = self.viewportDrawableSize;
+        const std::string host = entityIdentifier.UTF8String ?: "";
+        if (owner.IsNull() || host.empty() || size.width < 1 || size.height < 1)
+            return nil;
+        auto context = viewer->captureNativeOpeningContext(
+            std::uint32_t(size.width), std::uint32_t(size.height), {host});
+        profile_d4::ReceiptObservation value;
+        if (!context || !profile_d4::ObserveReceipts(*owner, host, context, value))
+            return @{@"current": @NO};
+        NSMutableArray<NSDictionary<NSString *, id> *> *children =
+            [NSMutableArray arrayWithCapacity:value.children.size()];
+        const double mm = value.metersPerUnit * 1000.0;
+        const double volumeScale = mm * mm * mm;
+        for (const auto& child : value.children) {
+            NSMutableArray<NSDictionary<NSString *, id> *> *selectors =
+                [NSMutableArray arrayWithCapacity:child.selectors.size()];
+            for (const auto& selector : child.selectors)
+                [selectors addObject:@{@"kind": @(selector.kind),
+                    @"semantic": UUIDText(selector.semantic),
+                    @"ordinal": @(selector.ordinal),
+                    @"proof": Hex(selector.proof)}];
+            [children addObject:@{
+                @"childFeatureIdentifier": UUIDText(child.childFeature),
+                @"instanceIdentifier": UUIDText(child.instanceIdentity),
+                @"baselineRecipeIdentity": UUIDText(
+                    child.baselineRecipeIdentity),
+                @"localID": @(child.localID), @"row": @(child.row),
+                @"column": @(child.column),
+                @"boundarySections": @(child.boundarySections),
+                @"canonicalBytes": Data(child.canonicalBytes),
+                @"selectors": selectors,
+                @"resolvesOnCurrentBRep": @(child.resolvesOnCurrentBRep),
+                @"buildStatus": @(child.buildStatus),
+                @"positiveRemovedVolumeMM3": @(
+                    child.positiveRemovedVolume * volumeScale),
+                @"orientedBoundarySections": @(
+                    child.orientedBoundarySections)}];
+        }
+        return @{@"schema": @"shapeyard.d4-feature-pattern-receipts.v1",
+            @"current": @(value.current), @"hostEntity": Text(value.hostEntity),
+            @"patternFeature": UUIDText(value.patternFeature),
+            @"metersPerUnit": @(value.metersPerUnit),
+            @"baseline": @{
+                @"retainedRecipeFeature": UUIDText(value.retainedRecipeFeature),
+                @"baselineRecipeIdentity": UUIDText(
+                    value.baselineRecipeIdentity),
+                @"exactRecipe": Data(value.exactRecipe),
+                @"canonicalBytes": Data(value.baselineCanonicalBytes)},
+            @"children": children,
+            @"allReceiptsResolve": @(value.allReceiptsResolve)};
     } catch (...) { return nil; }
 }
 #endif
