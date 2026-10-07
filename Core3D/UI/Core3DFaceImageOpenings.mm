@@ -16,6 +16,7 @@
 #include "../OCCTKit/NativeDocumentSession.hxx"
 #include "../OCCTKit/OcctDocument.h"
 #include "../OCCTKit/FaceImageResourceValidation.hxx"
+#include "../OCCTKit/DecalLayerPersistence.hxx"
 #include "../OCCTKit/ReceiptRecord.hxx"
 #include "../OCCTKit/RetainedSolidAttribute.hxx"
 #include "Core3DViewer.h"
@@ -47,6 +48,11 @@
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
+#include <BRepBndLib.hxx>
+#include <BRep_Tool.hxx>
+#include <Bnd_Box.hxx>
+#include <Poly_Triangulation.hxx>
+#include <TopLoc_Location.hxx>
 #include <TDataStd_Integer.hxx>
 #include <TDataStd_Name.hxx>
 #include <TDataStd_AsciiString.hxx>
@@ -57,6 +63,7 @@
 #include <PCDM_StoreStatus.hxx>
 #include <Standard_Failure.hxx>
 #include <functional>
+#include <limits>
 #include <stdexcept>
 #endif
 
@@ -1541,6 +1548,121 @@ void StageFaceImageFixture(const Handle(TDocStd_Document)& doc, double unit) {
     StageFaceImageFixtureSized(doc, unit, 40, 12, 3, FixturePNGEnvelope());
 }
 
+TDF_Label FixtureAddE4RetainedCapPart(
+    const Handle(TDocStd_Document)& doc, const OwnerKey& key, double unit) {
+    if (doc.IsNull() || doc->HasOpenCommand())
+        throw std::invalid_argument("E4 cap fixture command");
+    const double n = .001 / unit;
+    const TopoDS_Shape shape =
+        BRepPrimAPI_MakeBox(100 * n, 80 * n, 10 * n).Shape();
+    BRepBuilderAPI_Copy retainedCopy(shape, Standard_True, Standard_False);
+    if (!retainedCopy.IsDone() || retainedCopy.Shape().IsNull())
+        throw std::invalid_argument("E4 cap fixture retained base");
+
+    // Retained-v1 requires one bounded Difference step. Its tool is wholly
+    // outside the source, so the admitted current solid remains exactly the
+    // plain rectangular source: no bore, slot, or mixed boundary.
+    core3d::retained_boolean::Program program;
+    program.source.document = key.document;
+    program.source.entity = key.entity;
+    program.source.definition = key.definition;
+    program.source.sourceFeature = FixturePartFeature(key, 3);
+    program.source.derivedFeature = FixturePartFeature(key, 4);
+    program.source.family = 1;
+    program.source.metersPerUnit = unit;
+    core3d::profile::Parameters source;
+    source.metersPerUnit = unit;
+    source.definition.depth = 10 * n;
+    source.definition.points = {
+        {0, 0}, {100 * n, 0}, {100 * n, 80 * n}, {0, 80 * n}};
+    if (!core3d::profile::Encode(source, program.source.values))
+        throw std::invalid_argument("E4 cap fixture source recipe");
+    program.source.schema = std::uint32_t(core3d::profile::SchemaFor(source));
+    core3d::retained_boolean::Step outside;
+    outside.operand.identifier = 1;
+    outside.operand.axis = core3d::analytic_boolean::Axis::Z;
+    outside.operand.point = {{200 * n, 200 * n, 0}};
+    outside.operand.radius = 3 * n;
+    program.steps = {outside};
+    program.nextOperandID = 2;
+    if (!core3d::retained_boolean::Valid(program))
+        throw std::invalid_argument("E4 cap fixture program");
+
+    BRepMesh_IncrementalMesh mesher(
+        shape, 2.5e-4 * n, Standard_False, 0.5, Standard_True);
+    // The ordinary E4 path consumes the carrier's actual current
+    // triangulation. Normalize each analytic face's own parameter rectangle
+    // into [0,1]^2 without changing topology, positions, normals or the BRep.
+    for (TopExp_Explorer face(shape, TopAbs_FACE); face.More(); face.Next()) {
+        TopLoc_Location location;
+        const Handle(Poly_Triangulation) mesh = BRep_Tool::Triangulation(
+            TopoDS::Face(face.Current()), location);
+        if (mesh.IsNull() || !mesh->HasUVNodes() || mesh->NbNodes() <= 0)
+            throw std::invalid_argument("E4 cap fixture UV source");
+        double minU = std::numeric_limits<double>::max();
+        double minV = minU;
+        double maxU = -minU;
+        double maxV = -minU;
+        for (Standard_Integer node = 1; node <= mesh->NbNodes(); ++node) {
+            const gp_Pnt2d uv = mesh->UVNode(node);
+            minU = std::min(minU, uv.X()); maxU = std::max(maxU, uv.X());
+            minV = std::min(minV, uv.Y()); maxV = std::max(maxV, uv.Y());
+        }
+        const double spanU = maxU - minU, spanV = maxV - minV;
+        if (!std::isfinite(spanU) || !std::isfinite(spanV)
+            || spanU <= 0.0 || spanV <= 0.0)
+            throw std::invalid_argument("E4 cap fixture UV bounds");
+        for (Standard_Integer node = 1; node <= mesh->NbNodes(); ++node) {
+            const gp_Pnt2d uv = mesh->UVNode(node);
+            mesh->SetUVNode(node, gp_Pnt2d(
+                (uv.X() - minU) / spanU, (uv.Y() - minV) / spanV));
+        }
+    }
+    const auto tool = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    doc->NewCommand();
+    const TDF_Label owner = tool->AddShape(shape, Standard_False);
+    if (owner.IsNull()
+        || !FixtureSetUUID(owner,
+            "0074F7C2-9EAA-4F89-B2DE-8716E155FF62", key.entity)
+        || !FixtureSetUUID(owner,
+            "3611F2B2-C694-4E12-AED8-A2A97A3D283B", key.definition))
+        throw std::invalid_argument("E4 cap fixture identity");
+    TDataStd_Integer::Set(owner,
+        Standard_GUID("67E669F4-00C0-4C45-BC55-9CC5DA22A2B5"), 1);
+    TDataStd_Name::Set(owner,
+        TCollection_ExtendedString("E4 retained cap carrier"));
+    if (!core3d::native_opening::debug::
+            Core3DDebugInstallRetainedSolidSeedRecord(
+                doc, owner, program, shape, retainedCopy.Shape())
+        || !doc->CommitCommand())
+        throw std::invalid_argument("E4 cap fixture retained admission");
+    return owner;
+}
+
+void StageE4RetainedCapFixture(const Handle(TDocStd_Document)& doc,
+                               double unit,
+                               const fi::ResourceEnvelope& envelope) {
+    doc->ChangeStorageFormatVersion(TDocStd_FormatVersion(12));
+    (void)XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    XCAFDoc_DocumentTool::SetLengthUnit(doc, unit);
+    UUID documentID{}; documentID.fill(1);
+    if (!FixtureSetUUID(doc->Main(),
+            "74386E4E-F620-498F-8092-E6D883AF33A4", documentID))
+        throw std::invalid_argument("E4 cap fixture document identity");
+    doc->SetUndoLimit(40); doc->ClearUndos();
+    const OwnerKey key{documentID, FixtureIndexedUUID(0x72, 1),
+        FixtureIndexedUUID(0x72, 2)};
+    (void)FixtureAddE4RetainedCapPart(doc, key, unit);
+    doc->NewCommand();
+    if (fi::owner::AdoptResource(doc, envelope)
+            != fi::owner::Outcome::Committed
+        || !doc->CommitCommand())
+        throw std::invalid_argument("E4 cap fixture resource adoption");
+    doc->ClearUndos();
+    if (!Core3DValidateFaceImageDocument(doc))
+        throw std::invalid_argument("E4 cap fixture validation");
+}
+
 // Local mirror of the file-local Core3DCreateDebugBinXCAFFixture helper in
 // Core3DViewController.mm (anonymous namespace there; not linkable here):
 // one safe BinXCAF document, the caller's staging block, one bounded save.
@@ -2871,6 +2993,189 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         ? [[Core3DFaceImageOpening alloc] initWithInput:std::move(input)] : nil;
 }
 #if DEBUG
++ (NSData *)debugE4RetainedCapFixtureAssetDataWithResourceBytes:(NSData *)resourceBytes
+                                                 metersPerUnit:(NSNumber *)metersPerUnit {
+    const double unit = metersPerUnit.doubleValue;
+    if (!NSThread.isMainThread || resourceBytes.length == 0
+        || (unit != 0.001 && unit != 1.0)) return nil;
+    fi::ResourceEnvelope envelope;
+    NSData *provenance = [@"shapeyard.e4.retained-cap.fixture.v1"
+        dataUsingEncoding:NSUTF8StringEncoding];
+    if (!fi::validation::BuildFaceImageEnvelope(
+            resourceBytes, resourceBytes, @"straight", provenance,
+            FixtureIndexedUUID(0x73, 1), envelope)) return nil;
+    return CreateFaceImageDebugFixture(
+        unit == 0.001 ? @"e4-retained-cap-mm" : @"e4-retained-cap-m",
+        [envelope, unit](const Handle(TDocStd_Document)& document) {
+            StageE4RetainedCapFixture(document, unit, envelope);
+        });
+}
+
+- (NSNumber *)debugInstallE4RetainedCapLayerForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128) return @NO;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        OwnerKey key; TDF_Label owner;
+        const char *raw = entityIdentifier.UTF8String;
+        if (wrapper.IsNull()
+            || !LabelForSelected(wrapper, raw ? raw : "", key, owner)) return @NO;
+        const Handle(TDocStd_Document)& document = wrapper->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return @NO;
+
+        core3d::retained_edge_treatment::ReplayBudget budget;
+        core3d::decal_layer::source::Witness witness;
+        if (!core3d::decal_layer::source::CaptureSource(
+                wrapper, key, budget, [] { return false; }, witness)) return @NO;
+        const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(owner);
+        Standard_Real unit = 0.0;
+        dr::FaceImageGeometricReceipt receipt;
+        if (shape.IsNull()
+            || !XCAFDoc_DocumentTool::GetLengthUnit(document, unit)
+            || !FixtureCapturePlanarFace(shape, unit,
+                core3d::retained_face_selector::Axis::Z,
+                core3d::retained_face_selector::Side::Max, receipt)) return @NO;
+        core3d::decal_layer::Digest selectorProof{};
+        if (!dr::FaceImageReceiptProof(receipt, selectorProof)) return @NO;
+        fi::ResourceEnvelope envelope;
+        if (!fi::owner::ReadResource(
+                document, FixtureIndexedUUID(0x73, 1), envelope)) return @NO;
+
+        core3d::decal_layer::Definition definition;
+        definition.owner = key;
+        definition.sourceRecipe = witness.sourceRecipe;
+        definition.sourceRevision = witness.sourceRevision;
+        definition.geometryRevision = witness.geometryRevision;
+        definition.placementRevision = witness.placementRevision;
+        definition.sourceProof = witness.sourceProof;
+        core3d::decal_layer::Layer layer;
+        layer.identifier = FixtureIndexedUUID(0x73, 2);
+        layer.image.resource = envelope.resource;
+        layer.image.normalizedContent = envelope.workingContent;
+        layer.image.originalContent = envelope.originalContent;
+        layer.image.provenance = envelope.provenance;
+        layer.image.producerVersion =
+            core3d::decal_layer::image_contract::kProducerVersion;
+        layer.image.mediaType = envelope.workingFormat;
+        layer.image.widthTexels = envelope.workingWidthTexels;
+        layer.image.heightTexels = envelope.workingHeightTexels;
+        layer.image.role = fi::Role::BaseColor;
+        layer.image.colorSpace = fi::ColorSpace::SRGB;
+        layer.image.alpha = envelope.alpha;
+        layer.placement.kind = core3d::decal_layer::PlacementKind::Face;
+        layer.placement.edgePolicy =
+            core3d::decal_layer::EdgePolicy::RejectCrossing;
+        layer.placement.expectedCardinality = 1;
+        layer.placement.face.receiver.face = FixtureIndexedUUID(0x73, 3);
+        layer.placement.face.receiver.selectorProof = selectorProof;
+        layer.placement.face.anchorMeters = {{0.05, 0.04}};
+        layer.widthMeters = 0.05;
+        layer.heightMeters = 0.04;
+        layer.opacity = 1.0;
+        definition.layers = {layer};
+        std::vector<std::uint8_t> bytes;
+        std::string hex, digest;
+        if (!core3d::decal_layer::BindLayerProof(definition)
+            || !core3d::decal_layer::Encode(definition, bytes)
+            || !core3d::decal_layer::persistence::EncodeHex(bytes, hex)
+            || !core3d::decal_layer::persistence::DigestHex(bytes, digest))
+            return @NO;
+        document->NewCommand();
+        const TDF_Label record = owner.FindChild(
+            core3d::decal_layer::persistence::RecordTag, Standard_True);
+        if (!core3d::decal_layer::persistence::WriteChunks(
+                record, hex, 1, digest)
+            || !document->CommitCommand()) {
+            document->AbortCommand(); return @NO;
+        }
+        core3d::decal_layer::Definition strict;
+        std::vector<std::uint8_t> strictBytes;
+        return @(core3d::decal_layer::persistence::Read(
+                document, owner, strict, &strictBytes, nullptr)
+                    == core3d::decal_layer::persistence::ReadState::Present
+            && strictBytes == bytes
+            && core3d::decal_layer::source::ExactMatch(strict, witness));
+    } @catch (...) { return @NO; }
+}
+
+- (NSDictionary<NSString *,id> *)debugE4RetainedCapObservationForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128) return nil;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        OwnerKey key; TDF_Label owner;
+        const char *raw = entityIdentifier.UTF8String;
+        if (wrapper.IsNull()
+            || !LabelForSelected(wrapper, raw ? raw : "", key, owner)) return nil;
+        const Handle(TDocStd_Document)& document = wrapper->Document();
+        core3d::decal_layer::Definition definition;
+        std::vector<std::uint8_t> canonical;
+        if (core3d::decal_layer::persistence::Read(
+                document, owner, definition, &canonical, nullptr)
+            != core3d::decal_layer::persistence::ReadState::Present)
+            return nil;
+        core3d::retained_edge_treatment::ReplayBudget budget;
+        core3d::decal_layer::source::Witness witness;
+        if (!core3d::decal_layer::source::CaptureSource(
+                wrapper, key, budget, [] { return false; }, witness)
+            || definition.layers.size() != 1) return nil;
+        const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(owner);
+        Standard_Real unit = 0.0;
+        dr::FaceImageGeometricReceipt receipt;
+        if (shape.IsNull()
+            || !XCAFDoc_DocumentTool::GetLengthUnit(document, unit)
+            || !FixtureCapturePlanarFace(shape, unit,
+                core3d::retained_face_selector::Axis::Z,
+                core3d::retained_face_selector::Side::Max, receipt)) return nil;
+        core3d::decal_layer::Digest proof{};
+        const auto *intent = std::get_if<
+            core3d::retained_face_selector::PlanarFaceBoundary>(
+                &receipt.intent);
+        if (!intent || !dr::FaceImageReceiptProof(receipt, proof)
+            || proof != definition.layers.front().placement.face.receiver.selectorProof)
+            return nil;
+        Bnd_Box box; BRepBndLib::AddOptimal(shape, box, Standard_False, Standard_False);
+        Standard_Real x0=0,y0=0,z0=0,x1=0,y1=0,z1=0;
+        if (box.IsVoid() || box.IsWhole() || box.IsOpen()) return nil;
+        box.Get(x0,y0,z0,x1,y1,z1);
+        std::string canonicalDigest;
+        if (!core3d::decal_layer::persistence::DigestHex(
+                canonical, canonicalDigest)) return nil;
+        return @{
+            @"schema": @"shapeyard.e4-retained-cap.observation.v1",
+            @"recordState": @"present",
+            @"exactSourceMatch": @(core3d::decal_layer::source::ExactMatch(
+                definition, witness)),
+            @"axis": @"z", @"side": @"max",
+            @"intent": @"planarFaceBoundary", @"edgeKind": @"line",
+            @"coverage": @"entireBoundary",
+            @"expectedCount": @(intent->expectedCount),
+            @"wireCount": @(receipt.wireCount),
+            @"boundaryUseCount": @(receipt.boundaryUseCount),
+            @"boundaryUniqueEdgeCount": @(receipt.boundaryUniqueEdgeCount),
+            @"widthMM": @((x1-x0)*unit*1000.0),
+            @"heightMM": @((y1-y0)*unit*1000.0),
+            @"depthMM": @((z1-z0)*unit*1000.0),
+            @"canonicalByteCount": @(canonical.size()),
+            @"canonicalDigest": [NSString stringWithUTF8String:
+                canonicalDigest.c_str()] ?: @"",
+            @"sourceProof": DigestText(witness.sourceProof),
+        };
+    } @catch (...) { return nil; }
+}
+
 + (NSData *)debugFaceImageFixtureAssetData:(double)metersPerUnit {
     if (!NSThread.isMainThread || (metersPerUnit != 0.001 && metersPerUnit != 1.0))
         return nil;

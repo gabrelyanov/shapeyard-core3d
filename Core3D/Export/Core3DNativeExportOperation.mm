@@ -2,6 +2,7 @@
 
 #include "../OCCTKit/Core3DSTEPExchangeLock.h"
 #include "../OCCTKit/DecalLayerPersistence.hxx"
+#include "../OCCTKit/DecalLayerBake.hxx"
 #include "../OCCTKit/OcctDocument.h"
 #include "../OCCTKit/EnclosurePersistence.hxx"
 #include "../Scene/OcctSceneSnapshotBuilder.hpp"
@@ -128,6 +129,14 @@ struct NativeExportState {
     std::atomic_bool debugCorruptSTLTriangleCount{false};
     std::atomic_bool debugCorruptSTEPTerminator{false};
     std::atomic_bool debugExceedSTLResourceLimit{false};
+    core3d::scene::DebugPrivateExportDecalFault debugE4Fault =
+        core3d::scene::DebugPrivateExportDecalFault::None;
+    std::mutex debugE4Mutex;
+    core3d::scene::DebugPrivateExportDecalObservation debugE4Observation;
+    core3d::decal_layer::bake::publication::DebugCacheInventory
+        debugE4CacheBefore;
+    core3d::decal_layer::bake::publication::DebugCacheInventory
+        debugE4CacheAfter;
 #endif
     std::mutex lifecycleMutex;
     bool started = false;
@@ -392,6 +401,75 @@ void PreserveOBJMaterialScalars(
 std::mutex gDebugWorkerPauseMutex;
 std::condition_variable gDebugWorkerPauseCondition;
 bool gDebugWorkerPaused = false;
+
+NSString *DebugE4String(const std::string& value) {
+    NSString *result = [[NSString alloc]
+        initWithBytes:value.data()
+        length:value.size()
+        encoding:NSUTF8StringEncoding];
+    return result ?: @"";
+}
+
+NSArray<NSString *> *DebugE4Strings(
+    const std::vector<std::string>& values) {
+    NSMutableArray<NSString *> *result =
+        [NSMutableArray arrayWithCapacity:values.size()];
+    for (const std::string& value : values)
+        [result addObject:DebugE4String(value)];
+    return result;
+}
+
+NSDictionary<NSString *, id> *DebugE4CacheDictionary(
+    const core3d::decal_layer::bake::publication::DebugCacheInventory& value) {
+    return @{
+        @"keys": DebugE4Strings(value.keys),
+        @"entryCount": @(value.keys.size()),
+        @"residentBytes": @(value.residentBytes),
+    };
+}
+
+NSDictionary<NSString *, id> *DebugE4ObservationDictionary(
+    const core3d::scene::DebugPrivateExportDecalObservation& value,
+    const core3d::decal_layer::bake::publication::DebugCacheInventory& before,
+    const core3d::decal_layer::bake::publication::DebugCacheInventory& after) {
+    NSMutableArray<NSDictionary<NSString *, id> *> *mapping =
+        [NSMutableArray arrayWithCapacity:value.correspondence.size()];
+    for (const auto& item : value.correspondence) {
+        [mapping addObject:@{
+            @"ownerDefinitionIdentifier":
+                DebugE4String(item.ownerDefinitionIdentifier),
+            @"originalFaceIndex": @(item.originalFaceIndex),
+            @"disposableFaceIndex": @(item.disposableFaceIndex),
+            @"emittedPrimitiveIndex": @(item.emittedPrimitiveIndex),
+            @"materialIndex": @(item.materialIndex),
+        }];
+    }
+    return @{
+        @"ownerCount": @(value.ownerCount),
+        @"requiredReceiverCount": @(value.requiredReceiverCount),
+        @"producedReceiverCount": @(value.producedReceiverCount),
+        @"savedTriangleCount": @(value.savedTriangleCount),
+        @"savedCornerCount": @(value.savedCornerCount),
+        @"finalTriangleCount": @(value.finalTriangleCount),
+        @"finalCornerCount": @(value.finalCornerCount),
+        @"operationWork": @(value.operationWork),
+        @"operationResidentBytes": @(value.operationResidentBytes),
+        @"canonicalReadDigests":
+            DebugE4Strings(value.canonicalReadDigests),
+        @"sourceReadDigests": DebugE4Strings(value.sourceReadDigests),
+        @"occluderDigest": DebugE4String(value.occluderDigest),
+        @"correspondence": mapping,
+        @"inputKeys": DebugE4Strings(value.inputKeys),
+        @"bakeSeals": DebugE4Strings(value.bakeSeals),
+        @"failureStage": DebugE4String(value.failureStage),
+        @"captureReached": @(value.captureReached),
+        @"finalProductionReached": @(value.finalProductionReached),
+        @"publicationReached": @(value.publicationReached),
+        @"complete": @(value.complete),
+        @"cacheBefore": DebugE4CacheDictionary(before),
+        @"cacheAfter": DebugE4CacheDictionary(after),
+    };
+}
 
 void WaitForDebugWorkerBarrier(
     const std::shared_ptr<NativeExportState>& state) {
@@ -1826,13 +1904,43 @@ NativeExportResult RunNativeExport(
                     Core3DNativeExportErrorInvalidState,
                     "The committed appearance export derivative is invalid.");
             }
-            result.scene = state->meshQuality == Core3DExportMeshQualityViewport
-                ? state->sourceScene
-                : core3d::scene::OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
-                document, *state->sourceScene, state->selectedObjectsOnly,
-                [&](const TopoDS_Shape& shape) {
-                    MeshPrivateExportSurfaces(shape, state, whole.Next(4));
-                }, [&] { return state->cancelled.load(std::memory_order_acquire); });
+            if (state->meshQuality == Core3DExportMeshQualityViewport) {
+                result.scene = state->sourceScene;
+#ifdef DEBUG
+                std::lock_guard<std::mutex> debugLock(state->debugE4Mutex);
+                state->debugE4Observation.failureStage =
+                    "viewport-no-private-derivative";
+#endif
+            } else {
+#ifdef DEBUG
+                core3d::scene::DebugPrivateExportDecalObservation observation;
+                const auto cacheBefore =
+                    core3d::decal_layer::bake::publication::DebugInventory();
+#endif
+                result.scene = core3d::scene::OcctSceneSnapshotBuilder::
+                    BuildPrivateExportDerivative(
+                        document, *state->sourceScene,
+                        state->selectedObjectsOnly,
+                        [&](const TopoDS_Shape& shape) {
+                            MeshPrivateExportSurfaces(
+                                shape, state, whole.Next(4));
+                        }, [&] {
+                            return state->cancelled.load(
+                                std::memory_order_acquire);
+                        }
+#ifdef DEBUG
+                        , state->debugE4Fault, &observation
+#endif
+                        );
+#ifdef DEBUG
+                const auto cacheAfter =
+                    core3d::decal_layer::bake::publication::DebugInventory();
+                std::lock_guard<std::mutex> debugLock(state->debugE4Mutex);
+                state->debugE4Observation = std::move(observation);
+                state->debugE4CacheBefore = cacheBefore;
+                state->debugE4CacheAfter = cacheAfter;
+#endif
+            }
             ThrowIfCancelled(state);
             if (!result.scene
                 || !core3d::scene::IsValidSceneSnapshot(*result.scene)) {
@@ -2476,6 +2584,41 @@ std::string DebugExportAnalyticGeometry(const TopoDS_Face& face) {
 }
 
 #ifdef DEBUG
+- (BOOL)debugSetE4Fault:(Core3DDebugE4ExportFault)fault {
+    const std::shared_ptr<NativeExportState> state = _state;
+    if (state == nullptr
+        || fault < Core3DDebugE4ExportFaultNone
+        || fault > Core3DDebugE4ExportFaultAggregateBudget) return NO;
+    std::lock_guard<std::mutex> lock(state->lifecycleMutex);
+    if (state->started || state->finished
+        || state->cancelled.load(std::memory_order_acquire)
+        || state->exportType != ExportTypeGltf
+        || state->meshQuality == Core3DExportMeshQualityViewport)
+        return NO;
+    state->debugE4Fault =
+        static_cast<core3d::scene::DebugPrivateExportDecalFault>(fault);
+    return YES;
+}
+
+- (NSDictionary<NSString *, id> *)debugE4Observation {
+    const std::shared_ptr<NativeExportState> state = _state;
+    if (state == nullptr) return @{};
+    std::lock_guard<std::mutex> lock(state->debugE4Mutex);
+    return DebugE4ObservationDictionary(
+        state->debugE4Observation,
+        state->debugE4CacheBefore,
+        state->debugE4CacheAfter);
+}
+
++ (NSDictionary<NSString *, id> *)debugE4SharedCacheInventory {
+    return DebugE4CacheDictionary(
+        core3d::decal_layer::bake::publication::DebugInventory());
+}
+
++ (void)debugE4EvictSharedCache {
+    core3d::decal_layer::bake::publication::DebugEvictAll();
+}
+
 + (NSDictionary<NSString *, id> *)debugParametricSTLRefinement:(double)metersPerUnit {
     NSString *stage = @"admission";
     if (![NSThread isMainThread] || (metersPerUnit!=0.001 && metersPerUnit!=1.0)) return @{@"failureStage":stage};

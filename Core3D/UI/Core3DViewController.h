@@ -612,6 +612,18 @@ __attribute__((objc_subclassing_restricted))
 - (BOOL)debugConfigureRetainedFinishingObservationForEntityIdentifier:(NSString *)entityIdentifier
                                                               scenario:(NSString *)scenario
     NS_SWIFT_NAME(debugConfigureRetainedFinishingObservation(entityIdentifier:scenario:));
+//! R4 E4 R7A fixture: one plain retained 100x80x10 mm rectangular source,
+//! no interior bore, and one adopted caller-supplied image resource.
++ (NSData *_Nullable)debugE4RetainedCapFixtureAssetDataWithResourceBytes:
+    (NSData *)resourceBytes metersPerUnit:(NSNumber *)metersPerUnit;
+//! Installs one strict SYDL/1 layer after resolving the carrier's +Z face
+//! through production B2. Returns a boxed BOOL for selector-safe test use.
+- (NSNumber *)debugInstallE4RetainedCapLayerForEntityIdentifier:
+    (NSString *)entityIdentifier;
+//! Value-only strict read/source/B2 observation; no label, handle or token.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4RetainedCapObservationForEntityIdentifier:
+        (NSString *)entityIdentifier;
 //! UI-test fixture: asset data for the frozen E2 two-part box/cylinder atlas
 //! fixture in the requested unit system. nil on any failure; never mutates an
 //! open document.

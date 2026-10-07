@@ -198,6 +198,77 @@ inline bool Valid(const PublishedDerivative& value) noexcept {
         return BindBakeKey(canonical) && canonical.bakeKey == supplied;
     } catch (...) { return false; }
 }
+
+//! Operation-owned destination for the complete set of private derivatives.
+//! It owns every retained PNG across all owners and has no path to SharedState.
+//! The ordinary resident/entry ceilings apply once to the whole operation:
+//! adding another owner never creates a fresh allowance.
+struct PrivateDestination final {
+    std::vector<PublishedDerivative> values;
+    std::size_t residentBytes = 0;
+
+    PrivateDestination() = default;
+    PrivateDestination(const PrivateDestination&) = delete;
+    PrivateDestination& operator=(const PrivateDestination&) = delete;
+    PrivateDestination(PrivateDestination&&) = default;
+    PrivateDestination& operator=(PrivateDestination&&) = default;
+
+    void clear() noexcept {
+        values.clear();
+        residentBytes = 0;
+    }
+};
+
+inline bool Store(PrivateDestination& destination,
+                  const PublishedDerivative& value) noexcept {
+    try {
+        if (!Valid(value) || destination.values.size() >= kMaximumEntries)
+            return false;
+        std::size_t incoming = 0;
+        for (const PublishedFace& face : value.faces) {
+            if (incoming > kMaximumResidentPNGBytes - face.png.size())
+                return false;
+            incoming += face.png.size();
+        }
+        if (destination.residentBytes
+                > kMaximumResidentPNGBytes - incoming)
+            return false;
+        for (const PublishedDerivative& existing : destination.values)
+            if (existing.owner == value.owner
+                || existing.inputKey == value.inputKey)
+                return false;
+        destination.values.push_back(value);
+        destination.residentBytes += incoming;
+        return true;
+    } catch (...) {
+        destination.clear();
+        return false;
+    }
+}
+
+inline bool Lookup(const PrivateDestination& destination,
+                   const OwnerKey& owner,
+                   const Digest& inputKey,
+                   PublishedDerivative& output) noexcept {
+    output = {};
+    try {
+        if (!Nonzero(inputKey)) return false;
+        const PublishedDerivative* found = nullptr;
+        for (const PublishedDerivative& value : destination.values) {
+            if (!(value.owner == owner) || value.inputKey != inputKey)
+                continue;
+            if (found || !Valid(value)) return false;
+            found = &value;
+        }
+        if (!found) return false;
+        output = *found;
+        return true;
+    } catch (...) {
+        output = {};
+        return false;
+    }
+}
+
 inline bool Store(const PublishedDerivative& value) noexcept {
     try {
         if (!Valid(value)) return false;
@@ -246,6 +317,40 @@ inline void Evict(const OwnerKey& owner) noexcept {
         }
     } catch (...) {}
 }
+#ifdef DEBUG
+//! Bounded value-only cache census for native export tests. Cache keys are
+//! already derived UUID/digest text; no labels, document handles or mutable
+//! publication values cross this boundary.
+struct DebugCacheInventory final {
+    std::vector<std::string> keys;
+    std::size_t residentBytes = 0;
+};
+
+inline DebugCacheInventory DebugInventory() noexcept {
+    DebugCacheInventory result;
+    try {
+        State& state = SharedState();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        result.residentBytes = state.residentBytes;
+        result.keys.reserve(state.byInput.size());
+        for (const auto& entry : state.byInput)
+            result.keys.push_back(entry.first);
+        std::sort(result.keys.begin(), result.keys.end());
+    } catch (...) {
+        result = {};
+    }
+    return result;
+}
+
+inline void DebugEvictAll() noexcept {
+    try {
+        State& state = SharedState();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.byInput.clear();
+        state.residentBytes = 0;
+    } catch (...) {}
+}
+#endif
 } // namespace publication
 
 inline bool Valid(const Raster& value) noexcept {
@@ -756,14 +861,14 @@ inline Status ProduceFace(Input& input, const ReceiverReceipt& receiver,
     } catch (...) { product = {}; return Status::Budget; }
 }
 
-//! Atomically publish a complete multi-face artifact only after every face
-//! has been freshly produced. The aggregate input key is distinct from the
-//! output seal (bakeKey), so lookup can happen from current inputs alone.
-inline bool Publish(const Definition& definition,
-                    const Digest& finalGeometryUVProof,
-                    const Digest& occluderProof,
-                    const std::vector<FaceProduct>& products,
-                    PublishedDerivative& published) noexcept {
+//! Assemble and seal a complete multi-face artifact only after every face has
+//! been freshly produced. This is the one validation/seal algorithm for both
+//! ordinary shared publication and private operation-owned publication.
+inline bool Assemble(const Definition& definition,
+                     const Digest& finalGeometryUVProof,
+                     const Digest& occluderProof,
+                     const std::vector<FaceProduct>& products,
+                     PublishedDerivative& published) noexcept {
     published = {};
     try {
         Refusal refusal{};
@@ -806,11 +911,52 @@ inline bool Publish(const Definition& definition,
         published.finalGeometryUVProof = finalGeometryUVProof;
         published.occluderProof = occluderProof;
         if (!publication::BindBakeKey(published)
-            || !publication::Store(published)) {
+            || !publication::Valid(published)) {
             published = {}; return false;
         }
         return true;
     } catch (...) { published = {}; return false; }
+}
+
+//! Atomically publish through the ordinary process-shared cache.
+inline bool Publish(const Definition& definition,
+                    const Digest& finalGeometryUVProof,
+                    const Digest& occluderProof,
+                    const std::vector<FaceProduct>& products,
+                    PublishedDerivative& published) noexcept {
+    if (!Assemble(definition, finalGeometryUVProof, occluderProof,
+                  products, published)
+        || !publication::Store(published)) {
+        published = {};
+        return false;
+    }
+    return true;
+}
+
+//! Atomically publish into an explicit operation-owned destination without
+//! inserting, replacing, evicting, or looking up a viewport cache entry.
+inline bool PublishPrivate(const Definition& definition,
+                           const Digest& finalGeometryUVProof,
+                           const Digest& occluderProof,
+                           const std::vector<FaceProduct>& products,
+                           publication::PrivateDestination& destination,
+                           PublishedDerivative& published) noexcept {
+    if (!Assemble(definition, finalGeometryUVProof, occluderProof,
+                  products, published)
+        || !publication::Store(destination, published)) {
+        destination.clear();
+        published = {};
+        return false;
+    }
+    PublishedDerivative reopened;
+    if (!publication::Lookup(destination, published.owner,
+                             published.inputKey, reopened)
+        || reopened.bakeKey != published.bakeKey) {
+        destination.clear();
+        published = {};
+        return false;
+    }
+    return true;
 }
 
 } // namespace core3d::decal_layer::bake

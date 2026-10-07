@@ -526,6 +526,159 @@ Outcome Commit(Staging& staging, const Handle(TDocStd_Document)& document) noexc
 
 void Cancel(Staging& staging) noexcept { staging = {}; }
 
+Outcome CaptureForExport(ExportCapture& capture,
+                         const Handle(TDocStd_Document)& document,
+                         const aa::Key& key) noexcept {
+    capture = {};
+    try {
+        if (document.IsNull() || document->HasOpenCommand())
+            return Outcome::Busy;
+        aa::persistence::Record savedAtlas;
+        if (!aa::persistence::Read(document, key, savedAtlas))
+            return HasAtlasOwnerMismatch(document, key)
+                ? Outcome::OwnerMismatch : Outcome::Malformed;
+        if (!savedAtlas.value) return Outcome::Absent;
+        const Outcome classified = ClassifyMembers(
+            document, savedAtlas.value->definition);
+        if (classified != Outcome::Prepared) return classified;
+        if (!aa::build::ObserveMembers(document,
+                savedAtlas.value->definition.members,
+                capture.observedMembers)
+            || !aa::Current(savedAtlas.value->definition,
+                            capture.observedMembers)) {
+            capture = {};
+            return Outcome::StaleSource;
+        }
+        std::vector<OwnerKey> owners;
+        owners.reserve(savedAtlas.value->definition.members.size());
+        for (const auto& member : savedAtlas.value->definition.members)
+            owners.push_back(member.owner);
+        if (!aa::build::CaptureMembers(document, owners, capture.members)) {
+            capture = {};
+            return Outcome::StaleSource;
+        }
+        const Outcome sources = CaptureSources(
+            document, capture.members, capture.sources);
+        if (sources != Outcome::Prepared) {
+            capture = {};
+            return sources;
+        }
+        persistence::Record savedBake;
+        const auto bakeState = persistence::Read(document, key, savedBake);
+        if (bakeState == persistence::ReadState::Absent) {
+            capture = {};
+            return Outcome::Absent;
+        }
+        if (bakeState != persistence::ReadState::Present
+            || !(savedBake.definition.key == key)
+            || savedBake.definition.layoutProof
+                != savedAtlas.value->definition.layoutProof
+            || savedBake.definition.bindings.size()
+                != capture.sources.size()) {
+            capture = {};
+            return Outcome::Malformed;
+        }
+        for (std::size_t index = 0; index < capture.sources.size(); ++index) {
+            if (!(capture.sources[index].fence
+                    == savedBake.definition.bindings[index])) {
+                capture = {};
+                return Outcome::StaleBinding;
+            }
+        }
+        capture.savedAtlas = savedAtlas.value->definition;
+        capture.savedBake = savedBake.definition;
+        capture.canonicalAtlasBytes = savedAtlas.value->bytes;
+        if (capture.canonicalAtlasBytes.empty()) {
+            capture = {};
+            return Outcome::Malformed;
+        }
+        return Outcome::Prepared;
+    } catch (...) {
+        capture = {};
+        return Outcome::Malformed;
+    }
+}
+
+Outcome BakeForExport(const ExportCapture& capture,
+                      const aa::Definition& finalAtlas,
+                      const std::vector<aa::MemberUVAssignment>& assignments,
+                      const aa::build::LayoutEvidence& layout,
+                      ExportBake& output) noexcept {
+    output = {};
+    try {
+        if (!(finalAtlas.key == capture.savedAtlas.key)
+            || finalAtlas.members.size() != capture.savedAtlas.members.size()
+            || assignments.size() != finalAtlas.members.size()
+            || capture.members.members.size() != finalAtlas.members.size()
+            || capture.sources.empty()
+            || layout.charts.empty()
+            || layout.chartMembers.size() != layout.charts.size())
+            return Outcome::Malformed;
+        for (std::size_t index = 0; index < finalAtlas.members.size(); ++index) {
+            const auto& finalMember = finalAtlas.members[index];
+            const auto& savedMember = capture.savedAtlas.members[index];
+            if (!(finalMember.owner == savedMember.owner)
+                || !(finalMember.finishing == savedMember.finishing)
+                || !(finalMember.source == savedMember.source)
+                || assignments[index].member != finalMember.member)
+                return Outcome::StaleSource;
+        }
+        std::vector<kernel::Source> sources;
+        sources.reserve(capture.sources.size());
+        for (const auto& captured : capture.sources) {
+            kernel::Image image;
+            if (!kernel::DecodeImage(captured.envelope.workingBytes, image))
+                return Outcome::MissingResource;
+            sources.push_back({captured.fence, std::move(image)});
+        }
+        output.atlas = finalAtlas;
+        output.assignments = assignments;
+        if (!kernel::Bake(output.atlas, layout, sources,
+                          output.outputs, output.evidence)) {
+            output = {};
+            return Outcome::Refused;
+        }
+        output.bake.key = finalAtlas.key;
+        output.bake.layoutProof = finalAtlas.layoutProof;
+        for (const auto& source : capture.sources)
+            output.bake.bindings.push_back(source.fence);
+        for (const auto& baked : output.outputs)
+            output.bake.resources.push_back(baked.descriptor);
+        if (!BindBakeProof(output.bake)) {
+            output = {};
+            return Outcome::Malformed;
+        }
+        return Outcome::Prepared;
+    } catch (...) {
+        output = {};
+        return Outcome::Malformed;
+    }
+}
+
+Outcome BuildAndBakeForExport(
+    const ExportCapture& capture,
+    const std::vector<aa::build::FinalMemberInput>& finalMembers,
+    const aa::build::Settings& settings,
+    ExportBake& output,
+    std::string& diagnosis) noexcept {
+    output = {};
+    diagnosis.clear();
+    try {
+        aa::Definition atlas;
+        std::vector<aa::MemberUVAssignment> assignments;
+        aa::build::LayoutEvidence layout;
+        const auto built = aa::build::BuildFinalAtlas(
+            capture.savedAtlas.key, finalMembers, settings, atlas,
+            assignments, diagnosis, &layout);
+        if (built != aa::build::Status::Built) return MapBuild(built);
+        return BakeForExport(capture, atlas, assignments, layout, output);
+    } catch (...) {
+        output = {};
+        diagnosis.clear();
+        return Outcome::Malformed;
+    }
+}
+
 Outcome Currentness(const Handle(TDocStd_Document)& document, const aa::Key& key,
                     Definition* output) noexcept {
     if (output) *output = {};

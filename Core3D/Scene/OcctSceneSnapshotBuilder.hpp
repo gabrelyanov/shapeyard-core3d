@@ -31,7 +31,87 @@ class V3d_View;
 
 namespace core3d::scene {
 
+//! Exact mapping carried by a private export from saved authority through a
+//! disposable face to the primitive emitted by the final representation.
+struct PrivateExportFaceCorrespondence final {
+    std::string ownerDefinitionIdentifier;
+    std::uint32_t originalFaceIndex = 0;
+    std::uint32_t disposableFaceIndex = 0;
+    std::uint32_t emittedPrimitiveIndex = 0;
+    std::uint32_t materialIndex = 0;
+};
+
+//! Value-only writer-facing final mesh descriptor. MeshSnapshot owns the
+//! exact numeric vertex/index/corner/tangent streams; InstanceSnapshot owns
+//! occurrence transform, winding and primitive/material bindings.
+struct PrivateExportFinalMesh final {
+    std::string ownerDefinitionIdentifier;
+    MeshSnapshot mesh;
+    InstanceSnapshot instance;
+};
+
+struct PrivateExportDecalArtifact final {
+    std::shared_ptr<const SceneSnapshot> scene;
+    std::vector<PrivateExportFaceCorrespondence> correspondence;
+    std::vector<std::string> inputKeys;
+    std::vector<std::string> bakeSeals;
+};
+
+//! Opaque move-only authority captured before any disposable export command
+//! or remeshing. Its native shapes/resources and aggregate budget never leave
+//! the implementation file.
+class PrivateDecalCapture final {
+public:
+    PrivateDecalCapture() noexcept;
+    ~PrivateDecalCapture();
+    PrivateDecalCapture(PrivateDecalCapture&&) noexcept;
+    PrivateDecalCapture& operator=(PrivateDecalCapture&&) noexcept;
+    PrivateDecalCapture(const PrivateDecalCapture&) = delete;
+    PrivateDecalCapture& operator=(const PrivateDecalCapture&) = delete;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+    friend class OcctSceneSnapshotBuilder;
+};
+
+using PrivateDecalCapturePointer = std::unique_ptr<PrivateDecalCapture>;
+
 #ifdef DEBUG
+enum class DebugPrivateExportDecalFault : std::uint8_t {
+    None = 0,
+    Capture = 1,
+    FinalProduction = 2,
+    Publication = 3,
+    AggregateBudget = 4,
+};
+
+//! Bounded values observed from the executed private GLB derivative path.
+//! Digests and numeric streams are copied; labels, handles and authority
+//! tokens remain native and never escape this seam.
+struct DebugPrivateExportDecalObservation final {
+    std::uint64_t ownerCount = 0;
+    std::uint64_t requiredReceiverCount = 0;
+    std::uint64_t producedReceiverCount = 0;
+    std::uint64_t savedTriangleCount = 0;
+    std::uint64_t savedCornerCount = 0;
+    std::uint64_t finalTriangleCount = 0;
+    std::uint64_t finalCornerCount = 0;
+    std::uint64_t operationWork = 0;
+    std::uint64_t operationResidentBytes = 0;
+    std::vector<std::string> canonicalReadDigests;
+    std::vector<std::string> sourceReadDigests;
+    std::string occluderDigest;
+    std::vector<PrivateExportFaceCorrespondence> correspondence;
+    std::vector<std::string> inputKeys;
+    std::vector<std::string> bakeSeals;
+    std::string failureStage;
+    bool captureReached = false;
+    bool finalProductionReached = false;
+    bool publicationReached = false;
+    bool complete = false;
+};
+
 //! Value-only observation of the bounded-curve input used by one successful
 //! full-scene publication. This test seam is armed explicitly for one
 //! synchronous DEBUG capture and never retains labels, document handles or
@@ -102,7 +182,28 @@ public:
         const SceneSnapshot& source,
         bool selectedObjectsOnly,
         const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
-        const std::function<bool()>& cancelled) noexcept;
+        const std::function<bool()>& cancelled
+#ifdef DEBUG
+        , DebugPrivateExportDecalFault debugFault =
+            DebugPrivateExportDecalFault::None
+        , DebugPrivateExportDecalObservation* debugObservation = nullptr
+#endif
+        ) noexcept;
+
+    static bool CapturePrivateExportDecals(
+        const Handle(OcctDocument)& privateDocument,
+        const SceneSnapshot& wholeCommittedScene,
+        bool selectedObjectsOnly,
+        const std::function<bool()>& cancelled,
+        PrivateDecalCapturePointer& capture) noexcept;
+
+    static bool FinalizePrivateExportDecals(
+        PrivateDecalCapture& capture,
+        const SceneSnapshot& finalScene,
+        const std::vector<PrivateExportFaceCorrespondence>& correspondence,
+        const std::vector<PrivateExportFinalMesh>& emittedMeshes,
+        const std::function<bool()>& cancelled,
+        PrivateExportDecalArtifact& artifact) noexcept;
 
     //! Capture only the semantic camera and revisions. Document, model, and
     //! presentation revisions come from the most recent full snapshot; camera

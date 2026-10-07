@@ -51,6 +51,17 @@ struct LayoutEvidence final {           // optional BuildAtlas out-param
     std::vector<std::pair<std::size_t, std::uint64_t>> chartMembers;
 };
 
+//! Detached final-representation input. The immutable member/source fences
+//! are captured before disposable export work; only developed geometry comes
+//! from the final representation. No label or mutable document authority is
+//! carried across this boundary.
+struct FinalMemberInput final {
+    Member savedMember;
+    retained_finishing::producer::Capture authority;
+    std::vector<shapeyard::uv::Triangle> triangles;
+    std::vector<shapeyard::uv::curved::FaceInput> faces;
+};
+
 // The legacy entry points always use Reject. Preserve is consumed only by
 // the separately named E2b opt-in bake after it captures both XCAF material
 // slots and every SYFI binding/resource fence.
@@ -486,6 +497,199 @@ inline bool ObserveMembers(const Handle(TDocStd_Document)& document,
     } catch (...) { observed.clear(); return false; }
 }
 
+//! One asset-wide detached build over exact final triangles and developed
+//! face inputs. Authority/resource fields remain the captured saved values;
+//! this function cannot observe or mutate OCAF state.
+inline Status BuildFinalAtlas(const Key& atlas,
+                              const std::vector<FinalMemberInput>& inputs,
+                              const Settings& settings,
+                              Definition& candidate,
+                              std::vector<MemberUVAssignment>& assignments,
+                              std::string& diagnosis,
+                              LayoutEvidence* layout = nullptr) noexcept {
+    candidate = {}; assignments.clear(); diagnosis.clear();
+    try {
+        if (!retained_recipe::Nonzero(atlas.document)
+            || !retained_recipe::Nonzero(atlas.atlas)
+            || settings.resolutionTexels < 256
+            || settings.resolutionTexels > 4096
+            || (settings.resolutionTexels & (settings.resolutionTexels - 1)) != 0
+            || settings.gutterTexels < 1 || settings.gutterTexels > 8
+            || inputs.empty()) return Status::Malformed;
+        if (inputs.size() > kMaximumMembers) return Status::OverBudget;
+
+        curveduv::PackerInput packer;
+        packer.settings = {settings.resolutionTexels, settings.gutterTexels};
+        const shapeyard::uv::Settings kernelSettings{
+            settings.resolutionTexels, settings.gutterTexels};
+        const std::size_t count = inputs.size();
+        std::vector<std::vector<std::vector<int>>> memberCharts(count);
+        std::vector<std::pair<std::size_t, std::uint64_t>> chartMembers;
+        std::vector<std::size_t> memberTriangles(count, 0);
+        std::uint64_t corners = 0;
+        int nextFaceId = 0;
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto& input = inputs[index];
+            if (!retained_recipe::Valid(input.savedMember.owner)
+                || input.triangles.empty() || input.faces.empty()
+                || input.authority.resources.empty()) return Status::Malformed;
+            for (const auto& face : input.faces)
+                if (face.surfaceType == 3) return Status::UnsupportedSurface;
+            corners += 3ULL * input.triangles.size();
+            if (corners > kMaximumFinalCorners) return Status::OverBudget;
+            memberTriangles[index] = input.triangles.size();
+            int flatBase = 0;
+            for (const auto& chart : packer.charts)
+                flatBase += int(chart.triangles.size());
+            std::string reason;
+            const auto rejection = detail::AppendMemberCharts(
+                input.triangles, input.faces, kernelSettings, nextFaceId,
+                flatBase, packer, memberCharts[index], reason);
+            if (rejection != detail::ChartRejection::Ok) {
+                diagnosis = reason;
+                return rejection == detail::ChartRejection::Unsupported
+                    ? Status::UnsupportedSurface : Status::Refused;
+            }
+            for (std::size_t ordinal = 0;
+                 ordinal < memberCharts[index].size(); ++ordinal)
+                chartMembers.push_back({index, std::uint64_t(ordinal)});
+            if (packer.charts.size() > 64) return Status::OverBudget;
+        }
+        const auto packed = curveduv::pack(packer);
+        if (!packed.ok) { diagnosis = packed.reason; return Status::Refused; }
+        if (packed.summary.subChartCount <= 0
+            || packed.summary.subChartCount > int(kMaximumCharts))
+            return Status::OverBudget;
+
+        std::vector<retained_finishing::MaterialResource> resources;
+        std::vector<UUID> memberMaterial(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto& captured = inputs[index].authority.resources;
+            memberMaterial[index] = captured.front().identity;
+            for (const auto& resource : captured) {
+                bool present = false;
+                for (const auto& existing : resources)
+                    if (existing.identity == resource.identity) {
+                        present = true; break;
+                    }
+                if (!present) resources.push_back(resource);
+            }
+            if (resources.size() > kMaximumMaterials)
+                return Status::OverBudget;
+        }
+
+        candidate.key = atlas;
+        candidate.resolutionTexels = settings.resolutionTexels;
+        candidate.gutterTexels = settings.gutterTexels;
+        candidate.globalTexelsPerMM = packed.summary.globalTexelsPerMM;
+        candidate.resources = resources;
+        candidate.members.resize(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            candidate.members[index].member = detail::MemberUUID(
+                atlas.atlas, inputs[index].savedMember.owner);
+            if (!retained_recipe::Nonzero(candidate.members[index].member))
+                return Status::Malformed;
+            candidate.members[index].owner = inputs[index].savedMember.owner;
+            candidate.members[index].finishing =
+                inputs[index].savedMember.finishing;
+            candidate.members[index].source = inputs[index].savedMember.source;
+        }
+
+        assignments.resize(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            assignments[index].member = candidate.members[index].member;
+            assignments[index].triangleCount =
+                std::uint32_t(memberTriangles[index]);
+            assignments[index].corners.resize(3 * memberTriangles[index]);
+        }
+        struct ChartAccum {
+            std::uint32_t triangles = 0;
+            double area = 0;
+            double loU = INFINITY, loV = INFINITY;
+            double hiU = -INFINITY, hiV = -INFINITY;
+        };
+        std::map<std::pair<int, int>, ChartAccum> groups;
+        for (const auto& placed : packed.triangles) {
+            if (placed.chartIndex < 0
+                || std::size_t(placed.chartIndex) >= chartMembers.size()
+                || placed.triangleIndex < 0) return Status::Malformed;
+            const auto& [memberIndex, ordinal] =
+                chartMembers[std::size_t(placed.chartIndex)];
+            const auto& memberChart = memberCharts[memberIndex][ordinal];
+            if (std::size_t(placed.triangleIndex) >= memberChart.size())
+                return Status::Malformed;
+            const int original = memberChart[std::size_t(placed.triangleIndex)];
+            if (original < 0
+                || std::size_t(original) >= memberTriangles[memberIndex])
+                return Status::Malformed;
+            auto& slot = assignments[memberIndex].corners[
+                3 * std::size_t(original)];
+            std::array<double, 2>* target = &slot;
+            for (int corner = 0; corner < 3; ++corner)
+                target[corner] = {
+                    placed.uv[corner].x, placed.uv[corner].y};
+            auto& accum = groups[{placed.chartIndex, placed.subChartIndex}];
+            ++accum.triangles;
+            if (std::size_t(placed.triangleIndex)
+                >= packer.charts[std::size_t(placed.chartIndex)]
+                    .triangles.size()) return Status::Malformed;
+            const auto& developed =
+                packer.charts[std::size_t(placed.chartIndex)]
+                    .triangles[std::size_t(placed.triangleIndex)];
+            const double cross =
+                (developed.corner[1].x - developed.corner[0].x)
+                    * (developed.corner[2].y - developed.corner[0].y)
+                - (developed.corner[1].y - developed.corner[0].y)
+                    * (developed.corner[2].x - developed.corner[0].x);
+            accum.area += 0.5 * std::fabs(cross);
+            for (int corner = 0; corner < 3; ++corner) {
+                accum.loU = std::min(accum.loU, placed.uv[corner].x);
+                accum.loV = std::min(accum.loV, placed.uv[corner].y);
+                accum.hiU = std::max(accum.hiU, placed.uv[corner].x);
+                accum.hiV = std::max(accum.hiV, placed.uv[corner].y);
+            }
+        }
+        if (groups.empty() || groups.size() > kMaximumCharts)
+            return Status::OverBudget;
+        const auto ranks = detail::SegmentRanks(packer.charts, packed);
+        if (ranks.size() != groups.size()) return Status::Malformed;
+        for (const auto& [group, accum] : groups) {
+            const auto& [memberIndex, ordinal] =
+                chartMembers[std::size_t(group.first)];
+            const auto rank = ranks.find(group);
+            if (rank == ranks.end()) return Status::Malformed;
+            Chart chart;
+            chart.member = candidate.members[memberIndex].member;
+            chart.chart = detail::ChartUUID(
+                atlas.atlas, chart.member, ordinal, rank->second);
+            if (!retained_recipe::Nonzero(chart.chart))
+                return Status::Malformed;
+            chart.material = memberMaterial[memberIndex];
+            chart.triangleCount = accum.triangles;
+            chart.developedAreaMM2 = accum.area;
+            chart.rectUV = {
+                accum.loU, accum.loV, accum.hiU, accum.hiV};
+            candidate.charts.push_back(chart);
+        }
+        if (!BindLayoutProof(candidate, assignments))
+            return Status::Malformed;
+        Refusal refusal = Refusal::None;
+        if (!Valid(candidate, refusal)) return Status::Malformed;
+        std::vector<std::uint8_t> encoded;
+        if (!Encode(candidate, encoded)) return Status::OverBudget;
+        if (layout) {
+            layout->packed = packed;
+            layout->charts = packer.charts;
+            layout->chartMembers = chartMembers;
+        }
+        return Status::Built;
+    } catch (...) {
+        candidate = {}; assignments.clear(); diagnosis.clear();
+        if (layout) *layout = {};
+        return Status::Malformed;
+    }
+}
+
 // One asset-wide build. Per member the row-268 tessellation/face-input route
 // and the existing curved kernels produce developed charts; curveduv::pack
 // runs exactly once over the merged chart set; the single
@@ -553,6 +757,31 @@ inline Status BuildAtlas(const Handle(TDocStd_Document)& document,
                 return Status::PaintedRebakeRequired;
             }
 
+        // Ordinary saved-state admission ends above. From this point both the
+        // document route and private export route use the exact same detached
+        // chart/pack/assignment implementation.
+        std::vector<FinalMemberInput> finalInputs(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            std::atomic_bool cancelled{false};
+            meshcopy::CurrentTessellationCopy copy;
+            if (meshcopy::PrepareCurrentTessellationCopy(
+                    retained[index].current, copy, cancelled)
+                != meshcopy::PreparationResult::Ready)
+                return Status::UnsupportedSurface;
+            finalInputs[index].savedMember = capture.members[index].slot;
+            finalInputs[index].authority = capture.members[index].capture;
+            if (!retained_finishing::producer::detail::Triangles(
+                    copy, finalInputs[index].triangles,
+                    finalInputs[index].faces))
+                return Status::Malformed;
+        }
+        return BuildFinalAtlas(atlas, finalInputs, settings, candidate,
+                               assignments, diagnosis, layout);
+
+#if 0
+        // Retained below temporarily as a byte-for-byte review aid while the
+        // shared detached implementation above is exercised by the bench.
+        // It is not compiled and cannot become a second packing route.
         // Merged chart generation; one packer input for the whole asset.
         curveduv::PackerInput packer;
         packer.settings = {settings.resolutionTexels, settings.gutterTexels};
@@ -709,6 +938,7 @@ inline Status BuildAtlas(const Handle(TDocStd_Document)& document,
             layout->chartMembers = chartMembers;
         }
         return Status::Built;
+#endif
     } catch (...) { candidate = {}; assignments.clear(); diagnosis.clear(); return Status::Malformed; }
 }
 

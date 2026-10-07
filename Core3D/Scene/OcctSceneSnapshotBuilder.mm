@@ -29,6 +29,7 @@
 #include <AIS_Shape.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRep_Builder.hxx>
 #include <TopoDS_Compound.hxx>
@@ -84,6 +85,8 @@
 #include <functional>
 #include <iomanip>
 #include <limits>
+#include <new>
+#include <numeric>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -2241,7 +2244,8 @@ bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
                                DefinitionData& theDefinition)
 {
     theDefinition.label = theDefinitionLabel;
-    theDefinition.shape = XCAFDoc_ShapeTool::GetShape(theDefinitionLabel);
+    if (theDefinition.shape.IsNull())
+        theDefinition.shape = XCAFDoc_ShapeTool::GetShape(theDefinitionLabel);
     if (theDefinition.shape.IsNull()
         || theDefinition.representation
             == OcctGeometryRepresentation::Invalid) {
@@ -2289,7 +2293,11 @@ bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
     std::vector<bool> aVisited(static_cast<std::size_t>(theDefinition.faces.Extent()), false);
     Bounds3d aSourceBounds;
 
-    RWMesh_FaceIterator aFace(theDefinitionLabel, TopLoc_Location(), Standard_False);
+    // Iterate the explicit shape retained by DefinitionData. Private export
+    // meshes a disposable shape and must not accidentally read the original
+    // label again after that operation. Ordinary publication preloads the same
+    // label shape, so its extraction semantics remain unchanged.
+    RWMesh_FaceIterator aFace(theDefinition.shape);
     for (; aFace.More(); aFace.Next()) {
         Handle(Poly_Triangulation) aTriangulation = aFace.Triangulation();
 #ifdef DEBUG
@@ -3727,6 +3735,180 @@ std::uint64_t PresentationOverlayPayloadFingerprint(
 }
 
 } // namespace
+
+struct PrivateDecalCapture::Impl final {
+    struct Owner final {
+        retained_recipe::OwnerKey owner;
+        decal_layer::Definition definition;
+        std::vector<std::uint8_t> canonicalBytes;
+        decal_layer::source::Witness source;
+        TopoDS_Shape detachedAuthorityShape;
+        std::string definitionIdentifier;
+    };
+
+    SceneSnapshot wholeCommittedScene;
+    std::vector<Owner> owners;
+    std::shared_ptr<retained_edge_treatment::ReplayBudget> budget;
+    decal_layer::bake::publication::PrivateDestination destination;
+    std::string documentIdentifier;
+    double metersPerUnit = 0.0;
+    bool selectedObjectsOnly = false;
+};
+
+PrivateDecalCapture::PrivateDecalCapture() noexcept
+    : impl_(new (std::nothrow) Impl()) {}
+
+PrivateDecalCapture::~PrivateDecalCapture() = default;
+PrivateDecalCapture::PrivateDecalCapture(PrivateDecalCapture&&) noexcept = default;
+PrivateDecalCapture& PrivateDecalCapture::operator=(
+    PrivateDecalCapture&&) noexcept = default;
+
+bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
+    const Handle(OcctDocument)& privateDocument,
+    const SceneSnapshot& wholeCommittedScene,
+    bool selectedObjectsOnly,
+    const std::function<bool()>& cancelled,
+    PrivateDecalCapturePointer& capture) noexcept {
+    capture.reset();
+    if (privateDocument.IsNull() || !cancelled || cancelled()
+        || !IsValidSceneSnapshot(wholeCommittedScene)) return false;
+    try {
+        const Handle(TDocStd_Document)& document = privateDocument->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return false;
+        auto candidate = std::make_unique<PrivateDecalCapture>();
+        if (!candidate || !candidate->impl_) return false;
+        auto& impl = *candidate->impl_;
+        impl.wholeCommittedScene = wholeCommittedScene;
+        impl.selectedObjectsOnly = selectedObjectsOnly;
+        impl.documentIdentifier = privateDocument->DocumentIdentifier();
+        XCAFDoc_DocumentTool::GetLengthUnit(document, impl.metersPerUnit);
+        if (impl.metersPerUnit != wholeCommittedScene.metersPerUnit)
+            return false;
+        impl.budget = std::make_shared<
+            retained_edge_treatment::ReplayBudget>();
+        if (!impl.budget) return false;
+
+        std::unordered_map<std::string, const InstanceSnapshot*> occurrences;
+        for (const auto& instance : wholeCommittedScene.instances) {
+            if (instance.role == RenderRole::Model
+                && !occurrences.emplace(
+                        instance.entityIdentifier, &instance).second)
+                return false;
+        }
+        std::unordered_set<std::string> capturedDefinitions;
+        XCAFPrs_DocumentExplorer explorer(document,
+            XCAFPrs_DocumentExplorerFlags_OnlyLeafNodes, XCAFPrs_Style());
+        for (; explorer.More(); explorer.Next()) {
+            if (cancelled()) return false;
+            const auto& node = explorer.Current();
+            if (explorer.CurrentDepth() < 0
+                || explorer.CurrentDepth() >= kMaxOccurrenceDepth)
+                return false;
+            std::vector<std::string> path;
+            for (Standard_Integer depth = 0;
+                 depth <= explorer.CurrentDepth(); ++depth) {
+                path.push_back(privateDocument->EntityIdentifierForLabel(
+                    explorer.Current(depth).Label));
+            }
+            const std::string entity = DeriveOccurrenceIdentifier(
+                impl.documentIdentifier, path);
+            if (occurrences.find(entity) == occurrences.end()) continue;
+            const TDF_Label label = node.RefLabel.IsNull()
+                ? node.Label : node.RefLabel;
+            const std::string definitionIdentifier =
+                privateDocument->DefinitionIdentifierForLabel(label);
+            if (definitionIdentifier.empty()) return false;
+            decal_layer::Definition definition;
+            std::vector<std::uint8_t> canonicalBytes;
+            const auto state = decal_layer::persistence::Read(
+                document, label, definition, &canonicalBytes, nullptr);
+            if (state == decal_layer::persistence::ReadState::Malformed)
+                return false;
+            if (state == decal_layer::persistence::ReadState::Absent)
+                continue;
+            if (!capturedDefinitions.insert(definitionIdentifier).second)
+                continue;
+            retained_recipe::OwnerKey owner;
+            if (!receipt::ParseUUID(impl.documentIdentifier, owner.document)
+                || !receipt::ParseUUID(
+                    privateDocument->EntityIdentifierForLabel(label),
+                    owner.entity)
+                || !receipt::ParseUUID(definitionIdentifier,
+                                       owner.definition)
+                || !(definition.owner == owner)) return false;
+            decal_layer::Definition proof = definition;
+            const auto savedProof = proof.layerProof;
+            decal_layer::source::Witness source;
+            if (!decal_layer::BindLayerProof(proof)
+                || proof.layerProof != savedProof
+                || !decal_layer::source::CaptureSource(
+                    privateDocument, owner, *impl.budget,
+                    cancelled, source)
+                || !decal_layer::source::ExactMatch(definition, source))
+                return false;
+            const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
+            if (shape.IsNull()) return false;
+            BRepBuilderAPI_Copy copier(shape, Standard_True, Standard_True);
+            const TopoDS_Shape detached = copier.Shape();
+            if (detached.IsNull()) return false;
+            PrivateDecalCapture::Impl::Owner value;
+            value.owner = owner;
+            value.definition = std::move(definition);
+            value.canonicalBytes = std::move(canonicalBytes);
+            value.source = std::move(source);
+            value.detachedAuthorityShape = detached;
+            value.definitionIdentifier = definitionIdentifier;
+            impl.owners.push_back(std::move(value));
+        }
+        if (cancelled()) return false;
+        capture = std::move(candidate);
+        return true;
+    } catch (...) {
+        capture.reset();
+        return false;
+    }
+}
+
+bool OcctSceneSnapshotBuilder::FinalizePrivateExportDecals(
+    PrivateDecalCapture& capture,
+    const SceneSnapshot& finalScene,
+    const std::vector<PrivateExportFaceCorrespondence>& correspondence,
+    const std::vector<PrivateExportFinalMesh>& emittedMeshes,
+    const std::function<bool()>& cancelled,
+    PrivateExportDecalArtifact& artifact) noexcept {
+    artifact = {};
+    if (!capture.impl_ || !cancelled || cancelled()
+        || !IsValidSceneSnapshot(finalScene)) return false;
+    try {
+        const auto& impl = *capture.impl_;
+        if (finalScene.metersPerUnit != impl.metersPerUnit
+            || correspondence.size() > kMaxPrimitiveBindingsPerSnapshot
+            || emittedMeshes.size() > kMaxLabelInstanceMappings)
+            return false;
+        // The capture/finalize ownership seam is live for unpainted exports.
+        // E4 owners remain fail-closed until final-layout and ProduceFace are
+        // connected below this boundary; returning their old viewport images
+        // here would incorrectly certify stale triangle/corner authority.
+        if (!impl.owners.empty()) return false;
+        for (const auto& emitted : emittedMeshes) {
+            if (emitted.ownerDefinitionIdentifier.empty()
+                || emitted.mesh.definitionIdentifier.empty()
+                || emitted.instance.entityIdentifier.empty()) return false;
+        }
+        if (cancelled()) return false;
+        artifact.scene = std::make_shared<SceneSnapshot>(finalScene);
+        artifact.correspondence = correspondence;
+        if (!artifact.scene || cancelled()
+            || !IsValidSceneSnapshot(*artifact.scene)) {
+            artifact = {};
+            return false;
+        }
+        return true;
+    } catch (...) {
+        artifact = {};
+        return false;
+    }
+}
 
 #ifdef DEBUG
 void DebugBeginBoundedCurvePublicationObservation() noexcept
@@ -5313,13 +5495,101 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
     const SceneSnapshot& source,
     bool selectedObjectsOnly,
     const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
-    const std::function<bool()>& cancelled) noexcept
+    const std::function<bool()>& cancelled
+#ifdef DEBUG
+    , const DebugPrivateExportDecalFault debugFault
+    , DebugPrivateExportDecalObservation* const debugObservation
+#endif
+    ) noexcept
 {
+#ifdef DEBUG
+    if (debugObservation) {
+        *debugObservation = {};
+        debugObservation->failureStage = "admission";
+    }
+#endif
     if ([NSThread isMainThread] || document.IsNull() || !meshPrivateSurfaces
         || !cancelled || cancelled() || !IsValidSceneSnapshot(source)) { return {}; }
     try {
         const auto& ocaf = document->Document();
         if (ocaf.IsNull() || ocaf->HasOpenCommand()) { return {}; }
+        // Census the strict saved records on the private document. Viewport
+        // appearance/cache presence is never authority for whether capture is
+        // required. Absence keeps the established non-E4 remesh path; an
+        // unproven census fails closed instead of being treated as absence.
+        if (!XCAFDoc_DocumentTool::CheckShapeTool(ocaf->Main())) return {};
+        const Handle(XCAFDoc_ShapeTool) shapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(ocaf->Main());
+        if (shapeTool.IsNull()) return {};
+        TDF_LabelSequence roots;
+        shapeTool->GetFreeShapes(roots);
+        const auto closure = decal_layer::persistence::ReadExportClosure(
+            ocaf, roots, cancelled);
+        if (closure == decal_layer::persistence::ExportClosureState::Cancelled
+            || closure == decal_layer::persistence::ExportClosureState::Unproven)
+            return {};
+        const bool needsDecalCapture = closure
+            == decal_layer::persistence::ExportClosureState::ContainsRecord;
+#ifdef DEBUG
+        if (needsDecalCapture
+            && debugFault == DebugPrivateExportDecalFault::Capture) {
+            if (debugObservation)
+                debugObservation->failureStage = "capture-fault";
+            return {};
+        }
+#endif
+        PrivateDecalCapturePointer decalCapture;
+        if (needsDecalCapture
+            && (!CapturePrivateExportDecals(document, source,
+                    selectedObjectsOnly, cancelled, decalCapture)
+                || !decalCapture || !decalCapture->impl_
+                || decalCapture->impl_->owners.empty())) return {};
+#ifdef DEBUG
+        if (debugObservation && decalCapture && decalCapture->impl_) {
+            auto& observed = *debugObservation;
+            observed.captureReached = true;
+            observed.failureStage = "captured";
+            observed.ownerCount = decalCapture->impl_->owners.size();
+            std::set<std::string> receivers;
+            std::set<std::string> savedDefinitions;
+            for (const auto& owner : decalCapture->impl_->owners) {
+                core3d::decal_layer::Digest canonical{};
+                if (!core3d::face_image::HashFaceImageBytes(
+                        owner.canonicalBytes, canonical)) return {};
+                observed.canonicalReadDigests.push_back(
+                    DecalDigestText(canonical));
+                observed.sourceReadDigests.push_back(
+                    DecalDigestText(owner.source.sourceProof));
+                savedDefinitions.insert(owner.definitionIdentifier);
+                for (const auto& layer : owner.definition.layers)
+                    receivers.insert(DecalDigestText(
+                        core3d::decal_layer::bake::IntentReceipt(layer)
+                            .selectorProof));
+            }
+            observed.requiredReceiverCount = receivers.size();
+            std::set<std::size_t> countedMeshes;
+            for (const auto& instance : source.instances) {
+                if (instance.meshIndex >= source.meshes.size()) return {};
+                const auto& mesh = source.meshes[instance.meshIndex];
+                const std::string& master =
+                    mesh.paintedAtlasMasterDefinitionIdentifier.empty()
+                        ? mesh.definitionIdentifier
+                        : mesh.paintedAtlasMasterDefinitionIdentifier;
+                if (savedDefinitions.count(master) == 0
+                    || !countedMeshes.insert(instance.meshIndex).second)
+                    continue;
+                observed.savedTriangleCount += mesh.indices.size() / 3;
+                observed.savedCornerCount += mesh.indices.size();
+            }
+            std::vector<decal_math::DecalWorldTriangle> triangles;
+            Bounds3d bounds;
+            core3d::decal_layer::Digest occluders{};
+            if (!decal_math::CaptureDecalOccluders(
+                    source, triangles, bounds, occluders)) return {};
+            observed.occluderDigest = DecalDigestText(occluders);
+            observed.operationWork = triangles.size();
+        }
+#endif
         Standard_Real metersPerUnit = kLegacyMetersPerUnit;
         XCAFDoc_DocumentTool::GetLengthUnit(ocaf, metersPerUnit);
         if (metersPerUnit != source.metersPerUnit) { return {}; }
@@ -5371,7 +5641,14 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             // viewport derivative cannot be reused. Until the caller has
             // published a derivative keyed to those new witnesses, refuse the
             // private export rather than report success with stale artwork.
-            if (!item.decalDerivedAppearances.empty()) return {};
+            if (!item.decalDerivedAppearances.empty()) {
+#ifdef DEBUG
+                if (debugObservation)
+                    debugObservation->failureStage =
+                        "changed-remesh-final-production-not-connected";
+#endif
+                return {};
+            }
             const std::string& masterIdentifier =
                 sourceMesh.paintedAtlasMasterDefinitionIdentifier.empty()
                     ? sourceMesh.definitionIdentifier
@@ -5415,6 +5692,13 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         if (matched.size() != wanted.size() || cancelled()) { return {}; }
         if (!definitions.empty()) { meshPrivateSurfaces(compound); }
         if (cancelled()) { return {}; }
+#ifdef DEBUG
+        if (debugFault == DebugPrivateExportDecalFault::FinalProduction) {
+            if (debugObservation)
+                debugObservation->failureStage = "final-production-fault";
+            return {};
+        }
+#endif
         auto result = std::make_shared<SceneSnapshot>(source);
         std::size_t totalVertices = 0, totalIndices = 0;
         for (const auto& entry : definitionIndices) {
@@ -5462,7 +5746,17 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 || !CheckedAdd(totalIndices, mesh.indices.size(), totalIndices)
                 || totalVertices > kMaxVerticesPerSnapshot || totalIndices > kMaxIndicesPerSnapshot) { return {}; }
         }
-        return !cancelled() && IsValidSceneSnapshot(*result) ? result : SnapshotPointer{};
+        if (cancelled() || !IsValidSceneSnapshot(*result)) return {};
+        if (!decalCapture) return result;
+#ifdef DEBUG
+        if (debugObservation)
+            debugObservation->failureStage =
+                "changed-remesh-final-production-not-connected";
+#endif
+        // R7A proves only strict capture. Real copied-face history and final
+        // products land serially in R7B/R7C; do not manufacture ordinal
+        // correspondence or call the owner-refusing finalizer prematurely.
+        return {};
     } catch (...) { return {}; }
 }
 

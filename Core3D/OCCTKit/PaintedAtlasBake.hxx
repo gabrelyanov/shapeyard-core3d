@@ -444,6 +444,29 @@ struct Staging final {
     bool unchanged = false;
 };
 
+//! Immutable, operation-owned source authority for an export-only rebuild.
+//! Unlike Staging this value carries no prior resources to remove and grants
+//! no right to adopt resources or stage SYEA/SYEB records.
+struct ExportCapture final {
+    asset_atlas::Definition savedAtlas;
+    asset_atlas::Capture members;
+    std::vector<asset_atlas::Member> observedMembers;
+    std::vector<CapturedSource> sources;
+    Definition savedBake;
+    std::vector<std::uint8_t> canonicalAtlasBytes;
+};
+
+//! Complete detached painted result for one final layout. All applicable
+//! roles are baked together from ExportCapture::sources and remain values
+//! owned by the export operation.
+struct ExportBake final {
+    asset_atlas::Definition atlas;
+    std::vector<asset_atlas::MemberUVAssignment> assignments;
+    Definition bake;
+    std::vector<kernel::Output> outputs;
+    kernel::Evidence evidence;
+};
+
 Outcome Prepare(Staging& staging, const Handle(TDocStd_Document)& document,
                 const asset_atlas::Key& key) noexcept;
 Outcome Commit(Staging& staging, const Handle(TDocStd_Document)& document) noexcept;
@@ -451,4 +474,18 @@ void Cancel(Staging& staging) noexcept;
 Outcome Currentness(const Handle(TDocStd_Document)& document,
                     const asset_atlas::Key& key,
                     Definition* output = nullptr) noexcept;
+Outcome CaptureForExport(ExportCapture& capture,
+                         const Handle(TDocStd_Document)& document,
+                         const asset_atlas::Key& key) noexcept;
+Outcome BakeForExport(const ExportCapture& capture,
+                      const asset_atlas::Definition& finalAtlas,
+                      const std::vector<asset_atlas::MemberUVAssignment>& assignments,
+                      const asset_atlas::build::LayoutEvidence& layout,
+                      ExportBake& output) noexcept;
+Outcome BuildAndBakeForExport(
+    const ExportCapture& capture,
+    const std::vector<asset_atlas::build::FinalMemberInput>& finalMembers,
+    const asset_atlas::build::Settings& settings,
+    ExportBake& output,
+    std::string& diagnosis) noexcept;
 } // namespace core3d::painted_atlas_bake::owner

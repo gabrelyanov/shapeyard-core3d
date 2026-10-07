@@ -62,6 +62,18 @@ typedef void (NS_SWIFT_SENDABLE ^Core3DNativeExportCompletion)(
     NSError *_Nullable error
 );
 
+#ifdef DEBUG
+//! Deterministic failure points in the private E4 worker path. They are
+//! operation-local and can only be selected before start.
+typedef NS_ENUM(NSInteger, Core3DDebugE4ExportFault) {
+    Core3DDebugE4ExportFaultNone = 0,
+    Core3DDebugE4ExportFaultCapture,
+    Core3DDebugE4ExportFaultFinalProduction,
+    Core3DDebugE4ExportFaultPublication,
+    Core3DDebugE4ExportFaultAggregateBudget,
+};
+#endif
+
 //! Thread-safe, exactly-once native export operation. OCCT work is serialized
 //! on a private worker queue and completion is always delivered on the main
 //! thread. Cancellation is cooperative and owns cleanup of partial artifacts.
@@ -83,6 +95,20 @@ NS_SWIFT_SENDABLE
 - (void)cancel;
 
 #ifdef DEBUG
+//! Arms one operation-local E4 fault before the worker starts.
+- (BOOL)debugSetE4Fault:(Core3DDebugE4ExportFault)fault
+    NS_SWIFT_NAME(debugSetE4Fault(_:));
+//! Returns bounded values captured by this operation's executed native path.
+//! The result contains no OCAF labels, handles, or authority tokens.
+- (NSDictionary<NSString *, id> *)debugE4Observation
+    NS_SWIFT_NAME(debugE4Observation());
+//! Actual shared E4 cache keys and resident-byte count at the instant queried.
++ (NSDictionary<NSString *, id> *)debugE4SharedCacheInventory
+    NS_SWIFT_NAME(debugE4SharedCacheInventory());
+//! Evicts the actual shared E4 cache. Private export must remain independent.
++ (void)debugE4EvictSharedCache
+    NS_SWIFT_NAME(debugE4EvictSharedCache());
+
 // DEBUG-only export calibration seam. Applies a local-definition absolute
 // chord tolerance to the private export copy only. This is NOT a certified
 // world-space global error bound under transforms.
