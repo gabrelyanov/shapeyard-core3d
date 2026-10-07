@@ -15163,6 +15163,8 @@ Standard_Boolean OcctDocument::CaptureScalarAppearanceForSavedSweepRebuild(
         // payload bytes, base and current binding in the surrounding catalog.
         core3d::retained_solid::Record retained;
         if (!core3d::retained_solid::Read(myOcafDoc,label,retained)) return Standard_False;
+        core3d::bounded_curve::Record curve;
+        if (!core3d::bounded_curve::Read(myOcafDoc,label,curve)) return Standard_False;
         TDF_LabelSequence children;XCAFDoc_ShapeTool::GetSubShapes(label,children);
         if (children.Length()>core3d::profile::MaximumLabels) return Standard_False;
         for (int i=1;i<=children.Length();++i) {
@@ -15171,7 +15173,8 @@ Standard_Boolean OcctDocument::CaptureScalarAppearanceForSavedSweepRebuild(
                 && (enclosure.label.IsNull() || !child.IsEqual(enclosure.label))
                 && (sweep.label.IsNull() || !child.IsEqual(sweep.label))
                 && (loft.label.IsNull() || !child.IsEqual(loft.label))
-                && (retained.label.IsNull() || !child.IsEqual(retained.label))) return Standard_False;
+                && (retained.label.IsNull() || !child.IsEqual(retained.label))
+                && (curve.label.IsNull() || !child.IsEqual(curve.label))) return Standard_False;
         }
         for (auto color:{XCAFDoc_ColorGen,XCAFDoc_ColorSurf,XCAFDoc_ColorCurv})
             if (label.IsAttribute(XCAFDoc::ColorRefGUID(color))) return Standard_False;

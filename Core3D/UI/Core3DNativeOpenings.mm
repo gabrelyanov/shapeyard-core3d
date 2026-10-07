@@ -1,4 +1,7 @@
 #import "Core3DModelingTypes.h"
+#define CORE3D_PATH_ARRAY_NATIVE_SUPPORT 1
+#import "Core3DPathArrayCreationOpening.h"
+#undef CORE3D_PATH_ARRAY_NATIVE_SUPPORT
 #import "Core3DViewController.h"
 #import "../OCCTKit/GLViewController.h"
 #import "../Viewport/Core3DSceneSnapshot.h"
@@ -385,6 +388,168 @@ bool PathEdit(NSDictionary *value, const core3d::path_array_owner::Snapshot& ope
         output.replacementPath = *replacement;
     }
     return true;
+}
+
+Core3DPathArrayPreview *PathPreparationPreview(
+    const core3d::path_array_owner::Snapshot& opening,
+    const core3d::path_array_owner::PreparedEdit& prepared,
+    double metersPerUnit, NSString *phase, NSString *code) {
+    const bool admitted = prepared.admitted();
+    NSMutableArray<Core3DPathArrayPlacementPreview *> *placements =
+        [NSMutableArray arrayWithCapacity:prepared.placements.size()];
+    for (const auto& item : prepared.placements) {
+        NSMutableArray<NSNumber *> *frame = [NSMutableArray arrayWithCapacity:16];
+        for (double scalar : item.occurrenceFrame) [frame addObject:@(scalar)];
+        [placements addObject:[Core3DPathArrayPlacementPreview
+            core3dPlacementWithEntityIdentifier:UUIDText(item.identity)
+            localIdentifier:NSUInteger(item.localID) ordinal:NSUInteger(item.ordinal)
+            requestedArcLength:item.requestedArcLength
+            measuredArcLength:item.measuredArcLength occurrenceFrameValues:frame]];
+    }
+    std::set<core3d::path_array::UUID> previous;
+    for (const auto& member : opening.record.definition.members)
+        previous.insert(member.identity);
+    NSUInteger issued = 0;
+    for (const auto& member : prepared.candidate.members)
+        if (!previous.count(member.identity)) ++issued;
+    const id unavailable = NSNull.null;
+    return [Core3DPathArrayPreview core3dPreviewWithValues:@{
+        @"admitted": @(admitted), @"phase": phase ?: @"nativePrepare",
+        @"refusalDomain": admitted ? unavailable : @"core3d.path-array.edit",
+        @"refusalCode": admitted ? unavailable : (code ?: @"invalidCandidate"),
+        @"requiredInstanceCount": admitted
+            ? @(prepared.candidate.members.size()) : unavailable,
+        @"totalLength": admitted ? @(prepared.buildReceipt.totalArcLength) : unavailable,
+        @"requestedPlacementCount": admitted
+            ? @(prepared.buildReceipt.requestedInstances) : unavailable,
+        @"emittedPlacementCount": admitted
+            ? @(prepared.buildReceipt.emittedInstances) : unavailable,
+        @"maximumMeasuredArcError": admitted
+            ? @(prepared.buildReceipt.maximumMeasuredArcError) : unavailable,
+        @"closedSeamCanonicalized": admitted
+            ? @(prepared.buildReceipt.closedSeamCanonicalized) : unavailable,
+        @"projectedInstances": admitted ? @(prepared.projection.instances) : unavailable,
+        @"projectedTopologyNodes": admitted
+            ? @(prepared.projection.aggregateTopologyNodes) : unavailable,
+        @"projectedDocumentBytes": admitted
+            ? @(prepared.projection.projectedDocumentBytes) : unavailable,
+        @"projectedMemoryBytes": admitted
+            ? @(prepared.projection.projectedMemoryBytes) : unavailable,
+        @"sourceTopologyNodes": @(opening.metrics.sourceTopologyNodes),
+        @"sourceDocumentBytes": @(opening.metrics.sourceDocumentBytes),
+        @"sourceMemoryBytes": @(opening.metrics.sourceMemoryBytes),
+        @"issuedMemberIdentityCount": admitted ? @(issued) : unavailable,
+        @"documentMetersPerUnit": @(metersPerUnit),
+        @"sourceEntityIdentifier": UUIDText(opening.record.definition.source.entity),
+        @"pathEntityIdentifier": UUIDText(admitted
+            ? prepared.candidate.path.owner.entity
+            : opening.record.definition.path.owner.entity),
+        @"ownerEntityIdentifier": admitted
+            ? UUIDText(prepared.candidate.owner.entity) : unavailable,
+        @"featureIdentifier": admitted
+            ? UUIDText(prepared.candidate.feature) : unavailable,
+        @"placements": placements }];
+}
+
+bool SamePathAuthority(const core3d::path_array_owner::PathAuthority& a,
+                       const core3d::path_array_owner::PathAuthority& b) noexcept {
+    try {
+        return !a.ownerLabel.IsNull() && !b.ownerLabel.IsNull()
+            && a.ownerLabel.IsEqual(b.ownerLabel)
+            && a.ownerLabel.Data() == b.ownerLabel.Data()
+            && a.locator.owner == b.locator.owner
+            && a.locator.feature == b.locator.feature
+            && a.locator.definitionRevision == b.locator.definitionRevision
+            && a.locator.canonicalDefinitionDigest == b.locator.canonicalDefinitionDigest
+            && a.currentFor(b.locator) && b.currentFor(a.locator);
+    } catch (...) { return false; }
+}
+
+bool SamePathPrepared(const core3d::path_array_owner::PreparedEdit& frozen,
+                      const core3d::path_array_owner::PreparedEdit& fresh) noexcept {
+    try {
+        std::vector<std::uint8_t> a, b;
+        if (!frozen.admitted() || !fresh.admitted()
+            || !frozen.opening.labels || !fresh.opening.labels
+            || !core3d::pattern_owner::IsExactlyEqual(
+                *frozen.opening.labels, *fresh.opening.labels)
+            || frozen.opening.record.bytes != fresh.opening.record.bytes
+            || !SamePathAuthority(frozen.candidatePath, fresh.candidatePath)
+            || !core3d::path_array::Encode(frozen.candidate, a)
+            || !core3d::path_array::Encode(fresh.candidate, b) || a != b
+            || frozen.projection.instances != fresh.projection.instances
+            || frozen.projection.aggregateTopologyNodes
+                != fresh.projection.aggregateTopologyNodes
+            || frozen.projection.projectedDocumentBytes
+                != fresh.projection.projectedDocumentBytes
+            || frozen.projection.projectedMemoryBytes
+                != fresh.projection.projectedMemoryBytes
+            || frozen.projection.admitted != fresh.projection.admitted
+            || frozen.buildReceipt.totalArcLength != fresh.buildReceipt.totalArcLength
+            || frozen.buildReceipt.maximumMeasuredArcError
+                != fresh.buildReceipt.maximumMeasuredArcError
+            || frozen.buildReceipt.requestedInstances
+                != fresh.buildReceipt.requestedInstances
+            || frozen.buildReceipt.emittedInstances != fresh.buildReceipt.emittedInstances
+            || frozen.buildReceipt.closedSeamCanonicalized
+                != fresh.buildReceipt.closedSeamCanonicalized
+            || frozen.placements.size() != fresh.placements.size()
+            || frozen.survivorEntities != fresh.survivorEntities
+            || frozen.removedEntities != fresh.removedEntities) return false;
+        for (std::size_t index = 0; index < frozen.placements.size(); ++index) {
+            const auto& x = frozen.placements[index];
+            const auto& y = fresh.placements[index];
+            if (x.identity != y.identity || x.localID != y.localID
+                || x.ordinal != y.ordinal
+                || x.requestedArcLength != y.requestedArcLength
+                || x.measuredArcLength != y.measuredArcLength
+                || x.parameter != y.parameter
+                || x.occurrenceFrame != y.occurrenceFrame) return false;
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
+bool FreshPathPreparationProof(
+    OcctDocument& owner,
+    const std::shared_ptr<core3d::native_opening::Context>& context,
+    const core3d::path_array_owner::Snapshot& opening,
+    const std::optional<core3d::path_array_owner::PathAuthority>& replacement,
+    const core3d::path_array_owner::Edit& edit,
+    const core3d::path_array_owner::PreparedEdit& frozen) noexcept {
+    try {
+        core3d::path_array_owner::Snapshot fresh;
+        const std::string selected = core3d::retained_solid::UUIDText(
+            opening.record.definition.source.entity);
+        if (core3d::path_array_owner::CaptureNative(owner, selected, context, fresh)
+                != core3d::path_array_owner::Refusal::None) return false;
+        core3d::path_array_owner::Edit freshEdit = edit;
+        if (replacement) {
+            core3d::path_array_owner::Snapshot refreshed;
+            core3d::path_array_owner::PathAuthority freshReplacement;
+            const std::string path = core3d::retained_solid::UUIDText(
+                replacement->locator.owner.entity);
+            if (core3d::path_array_owner::RefreshPathNative(owner, fresh, path,
+                    context, refreshed, freshReplacement)
+                    != core3d::path_array_owner::Refusal::None) return false;
+            fresh = std::move(refreshed);
+            freshEdit.replacementPath = freshReplacement;
+        }
+        std::set<core3d::path_array::UUID> previous;
+        for (const auto& member : fresh.record.definition.members)
+            previous.insert(member.identity);
+        std::vector<core3d::path_array::UUID> replay;
+        for (const auto& member : frozen.candidate.members)
+            if (!previous.count(member.identity)) replay.push_back(member.identity);
+        std::size_t next = 0;
+        const core3d::pattern::IssueUUID issue = [&](core3d::path_array::UUID& value) {
+            if (next >= replay.size()) return false;
+            value = replay[next++]; return true;
+        };
+        const auto prepared = core3d::path_array_owner::Prepare(
+            fresh, freshEdit, {}, issue);
+        return next == replay.size() && SamePathPrepared(frozen, prepared);
+    } catch (...) { return false; }
 }
 
 NSDictionary *FeatureDescriptor(const core3d::feature_pattern_owner::Snapshot& opening) {
@@ -1495,6 +1660,10 @@ bool BoundedCreationCandidate(NSDictionary *value, NSString *name,
     core3d::path_array_owner::Snapshot _opening;
     std::optional<core3d::path_array_owner::PathAuthority> _replacementPath;
     std::atomic<State> _state;
+    std::uint64_t _candidateGeneration;
+    Core3DPathArrayPreparedCandidate *_candidateToken;
+    std::optional<core3d::path_array_owner::Edit> _candidateEdit;
+    std::optional<core3d::path_array_owner::PreparedEdit> _candidatePrepared;
 }
 - (instancetype)initWithOwner:(const Handle(OcctDocument)&)owner
     context:(std::shared_ptr<core3d::native_opening::Context>)context
@@ -1509,7 +1678,7 @@ bool BoundedCreationCandidate(NSDictionary *value, NSString *name,
     replacementPath:(std::optional<core3d::path_array_owner::PathAuthority>)replacementPath {
     if ((self = [super init])) { _owner = owner; _context = std::move(context);
         _opening = std::move(opening); _replacementPath = std::move(replacementPath);
-        _state.store(State::Open); }
+        _state.store(State::Open); _candidateGeneration = 1; }
     return self;
 }
 - (NSDictionary *)descriptor {
@@ -1549,6 +1718,8 @@ bool BoundedCreationCandidate(NSDictionary *value, NSString *name,
                 context:_context opening:std::move(refreshed)
                 replacementPath:std::move(replacement)];
         if (!next) { _state.store(State::Open); return nil; }
+        ++_candidateGeneration; _candidateToken = nil;
+        _candidateEdit.reset(); _candidatePrepared.reset();
         _state.store(State::Cancelled);
         _replacementPath.reset(); _context.reset();
         return next;
@@ -1585,10 +1756,82 @@ bool BoundedCreationCandidate(NSDictionary *value, NSString *name,
                 context:std::move(replacementContext) opening:std::move(refreshed)
                 replacementPath:std::move(replacement)];
         if (!next) { _state.store(State::Open); return nil; }
+        ++_candidateGeneration; _candidateToken = nil;
+        _candidateEdit.reset(); _candidatePrepared.reset();
         _state.store(State::Cancelled);
         _replacementPath.reset(); _context.reset();
         return next;
     } catch (...) { _state.store(State::Open); return nil; }
+}
+- (Core3DPathArrayPreparation *)prepareCandidate:(NSDictionary *)candidate {
+    const double unit = _context ? _context->openingFence().metersPerUnit() : 0;
+    if (!NSThread.isMainThread || _state.load() != State::Open) {
+        return [Core3DPathArrayPreparation core3dPreparationWithPreview:
+            PathPreparationPreview(_opening, {}, unit, @"lifecycle", @"issuerUnavailable")
+            prepared:nil];
+    }
+    ++_candidateGeneration; _candidateToken = nil;
+    _candidateEdit.reset(); _candidatePrepared.reset();
+    core3d::path_array_owner::Edit edit;
+    if (_owner.IsNull() || !_context
+        || !PathEdit(candidate, _opening,
+            _replacementPath ? &*_replacementPath : nullptr, edit)) {
+        return [Core3DPathArrayPreparation core3dPreparationWithPreview:
+            PathPreparationPreview(_opening, {}, unit, @"parse", @"malformedCandidate")
+            prepared:nil];
+    }
+    auto prepared = core3d::path_array_owner::PrepareNative(
+        *_owner, _opening, edit, {});
+    Core3DPathArrayPreview *preview = PathPreparationPreview(_opening, prepared,
+        unit, prepared.admitted() ? @"admitted" : @"nativePrepare",
+        prepared.admitted() ? @"none" : @"invalidCandidate");
+    if (!prepared.admitted())
+        return [Core3DPathArrayPreparation core3dPreparationWithPreview:preview
+            prepared:nil];
+    _candidateEdit = edit; _candidatePrepared = std::move(prepared);
+    _candidateToken = [Core3DPathArrayPreparedCandidate core3dTokenWithIssuer:self
+        generation:_candidateGeneration kind:2];
+    return [Core3DPathArrayPreparation core3dPreparationWithPreview:preview
+        prepared:_candidateToken];
+}
+- (void)applyPrepared:(Core3DPathArrayPreparedCandidate *)prepared
+    completion:(void (^)(Core3DProfileConstructionResult, NSString *))completion {
+    if (!NSThread.isMainThread
+        || ![prepared isMemberOfClass:Core3DPathArrayPreparedCandidate.class]
+        || ![prepared core3dMatchesIssuer:self
+            generation:_candidateGeneration kind:2]
+        || prepared != _candidateToken || !_candidateEdit || !_candidatePrepared) {
+        Deliver(completion, Core3DProfileConstructionResultRejected,
+            @"Prepared candidate belongs to another or retired issuer.");
+        return;
+    }
+    State expected = State::Open;
+    if (!_state.compare_exchange_strong(expected, State::Applying)) {
+        Deliver(completion, Core3DProfileConstructionResultRejected,
+            @"No current path-array preparation.");
+        return;
+    }
+    const auto edit = *_candidateEdit;
+    const auto frozen = *_candidatePrepared;
+    ++_candidateGeneration; _candidateToken = nil;
+    _candidateEdit.reset(); _candidatePrepared.reset();
+    auto outcome = core3d::path_array_owner::ApplyOutcome::Refused;
+    if (!_owner.IsNull() && _context
+        && FreshPathPreparationProof(*_owner, _context, _opening,
+            _replacementPath, edit, frozen)) {
+        outcome = core3d::path_array_owner::ApplyNative(*_owner, frozen, _context);
+    }
+    const auto result = MapOutcome(outcome,
+        core3d::path_array_owner::ApplyOutcome::Committed,
+        core3d::path_array_owner::ApplyOutcome::OutcomeUnknown);
+    _state.store(result == Core3DProfileConstructionResultRecoveryRequired
+        ? State::Recovery : State::Settled);
+    if (result != Core3DProfileConstructionResultRecoveryRequired) _context.reset();
+    Deliver(completion, result, result == Core3DProfileConstructionResultCommitted
+        ? @"Path array committed from the frozen native preparation."
+        : result == Core3DProfileConstructionResultRecoveryRequired
+            ? @"Path-array close is unknown; native recovery ownership is retained."
+            : @"Final currentness or equality re-preparation refused without history.");
 }
 - (void)applyCandidate:(NSDictionary *)candidate
     completion:(void (^)(Core3DProfileConstructionResult, NSString *))completion {
@@ -1596,6 +1839,8 @@ bool BoundedCreationCandidate(NSDictionary *value, NSString *name,
     if (!_state.compare_exchange_strong(expected, State::Applying)) {
         Deliver(completion, Core3DProfileConstructionResultRejected, @"Opening already consumed."); return;
     }
+    ++_candidateGeneration; _candidateToken = nil;
+    _candidateEdit.reset(); _candidatePrepared.reset();
     core3d::path_array_owner::Edit edit;
     if (_owner.IsNull() || !PathEdit(candidate, _opening,
             _replacementPath ? &*_replacementPath : nullptr, edit)) {
@@ -1614,9 +1859,67 @@ bool BoundedCreationCandidate(NSDictionary *value, NSString *name,
             ? @"Path-array close is unknown; native recovery ownership is retained."
             : @"Path-array edit refused without retry.");
 }
+#if DEBUG
+- (NSDictionary<NSString *, id> *)debugNativePreparationObservation {
+    if (!NSThread.isMainThread || _state.load() != State::Open
+        || !_candidatePrepared || !_candidatePrepared->admitted()) return nil;
+    try {
+        const auto& prepared = *_candidatePrepared;
+        std::uint32_t required = 0; double totalLength = 0;
+        if (core3d::path_array::RequiredInstanceCount(prepared.candidate,
+                prepared.candidatePath.persisted, required, totalLength)
+                != core3d::path_array::BuildRefusal::None) return nil;
+        core3d::path_array::AdmissionBudget budget;
+        budget.maximumInstances = core3d::path_array::MaximumInstances;
+        budget.sourceTopologyNodes = _opening.metrics.sourceTopologyNodes;
+        budget.maximumAggregateTopologyNodes = 2'000'000;
+        budget.sourceDocumentBytes = _opening.metrics.sourceDocumentBytes;
+        budget.existingDocumentBytes = _opening.pathArrayDocumentBytes
+            + _opening.metrics.patternDocumentBytes
+            + _opening.metrics.compositeDocumentBytes - _opening.record.bytes.size();
+        budget.maximumDocumentBytes = core3d::path_array::MaximumDocumentBytes;
+        budget.sourceMemoryBytes = _opening.metrics.sourceMemoryBytes;
+        budget.maximumMemoryBytes = 256 * 1024 * 1024;
+        const auto projection = core3d::path_array::Project(required, budget);
+        std::vector<core3d::path_array::Placement> placements;
+        core3d::path_array::BuildReceipt receipt;
+        if (!projection.admitted
+            || core3d::path_array::BuildPlacements(prepared.candidate,
+                prepared.candidatePath.persisted, placements, receipt)
+                != core3d::path_array::BuildRefusal::None) return nil;
+        std::set<core3d::path_array::UUID> previous;
+        for (const auto& member : _opening.record.definition.members)
+            previous.insert(member.identity);
+        NSUInteger issued = 0;
+        for (const auto& member : prepared.candidate.members)
+            if (!previous.count(member.identity)) ++issued;
+        NSMutableArray *rows = [NSMutableArray arrayWithCapacity:placements.size()];
+        for (const auto& placement : placements)
+            [rows addObject:@{ @"ordinal": @(placement.ordinal),
+                @"requestedArcLength": @(placement.requestedArcLength),
+                @"measuredArcLength": @(placement.measuredArcLength) }];
+        return @{ @"schema": @"shapeyard.d3-native-observation.v1",
+            @"requiredInstanceCount": @(required), @"totalLength": @(totalLength),
+            @"requestedPlacementCount": @(receipt.requestedInstances),
+            @"emittedPlacementCount": @(receipt.emittedInstances),
+            @"maximumMeasuredArcError": @(receipt.maximumMeasuredArcError),
+            @"closedSeamCanonicalized": @(receipt.closedSeamCanonicalized),
+            @"projectedInstances": @(projection.instances),
+            @"projectedTopologyNodes": @(projection.aggregateTopologyNodes),
+            @"projectedDocumentBytes": @(projection.projectedDocumentBytes),
+            @"projectedMemoryBytes": @(projection.projectedMemoryBytes),
+            @"sourceTopologyNodes": @(_opening.metrics.sourceTopologyNodes),
+            @"sourceDocumentBytes": @(_opening.metrics.sourceDocumentBytes),
+            @"sourceMemoryBytes": @(_opening.metrics.sourceMemoryBytes),
+            @"issuedMemberIdentityCount": @(issued), @"placements": rows };
+    } catch (...) { return nil; }
+}
+#endif
 - (BOOL)cancel {
     State expected = State::Open;
     if (!_state.compare_exchange_strong(expected, State::Cancelled)) return NO;
+    ++_candidateGeneration; _candidateToken = nil;
+    _candidateEdit.reset(); _candidatePrepared.reset();
     _context.reset(); return YES;
 }
 #if DEBUG

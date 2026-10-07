@@ -7,7 +7,9 @@
 //  synthesize an existing-owner Snapshot or call private D3 collaborators.
 //
 
+#define CORE3D_PATH_ARRAY_NATIVE_SUPPORT 1
 #import "Core3DPathArrayCreationOpening.h"
+#undef CORE3D_PATH_ARRAY_NATIVE_SUPPORT
 #import "GLViewController+Trick.h"
 #import "Core3DViewer.h"
 #import "../OCCTKit/GLViewController.h"
@@ -895,6 +897,20 @@ void DeliverCreated(void (^completion)(Core3DProfileConstructionResult, NSString
 @synthesize requestedArcLength = _requestedArcLength;
 @synthesize measuredArcLength = _measuredArcLength;
 @synthesize occurrenceFrameValues = _occurrenceFrameValues;
++ (instancetype)core3dPlacementWithEntityIdentifier:(NSString *)entityIdentifier
+    localIdentifier:(NSUInteger)localIdentifier
+    ordinal:(NSUInteger)ordinal
+    requestedArcLength:(double)requestedArcLength
+    measuredArcLength:(double)measuredArcLength
+    occurrenceFrameValues:(NSArray<NSNumber *> *)occurrenceFrameValues {
+    Core3DPathArrayPlacementPreview *result = [self alloc];
+    result->_entityIdentifier = [entityIdentifier copy] ?: @"";
+    result->_localIdentifier = localIdentifier; result->_ordinal = ordinal;
+    result->_requestedArcLength = requestedArcLength;
+    result->_measuredArcLength = measuredArcLength;
+    result->_occurrenceFrameValues = [occurrenceFrameValues copy] ?: @[];
+    return result;
+}
 @end
 
 @interface Core3DPathArrayPreview () {
@@ -944,18 +960,33 @@ void DeliverCreated(void (^completion)(Core3DProfileConstructionResult, NSString
 
 @interface Core3DPathArrayPreparedCandidate () {
 @package
-    __weak Core3DPathArrayCreationOpening *_issuer;
+    __weak id _issuer;
     std::uint64_t _generation;
+    std::uint8_t _kind;
 }
-- (instancetype)initWithIssuer:(Core3DPathArrayCreationOpening *)issuer
-    generation:(std::uint64_t)generation;
+- (instancetype)initWithIssuer:(id)issuer
+    generation:(std::uint64_t)generation
+    kind:(std::uint8_t)kind;
 @end
 
 @implementation Core3DPathArrayPreparedCandidate
-- (instancetype)initWithIssuer:(Core3DPathArrayCreationOpening *)issuer
-    generation:(std::uint64_t)generation {
-    if ((self = [super init])) { _issuer = issuer; _generation = generation; }
+- (instancetype)initWithIssuer:(id)issuer
+    generation:(std::uint64_t)generation
+    kind:(std::uint8_t)kind {
+    if ((self = [super init])) {
+        _issuer = issuer; _generation = generation; _kind = kind;
+    }
     return self;
+}
++ (instancetype)core3dTokenWithIssuer:(id)issuer
+    generation:(uint64_t)generation
+    kind:(uint8_t)kind {
+    return [[self alloc] initWithIssuer:issuer generation:generation kind:kind];
+}
+- (BOOL)core3dMatchesIssuer:(id)issuer
+    generation:(uint64_t)generation
+    kind:(uint8_t)kind {
+    return _issuer == issuer && _generation == generation && _kind == kind;
 }
 @end
 
@@ -975,6 +1006,44 @@ void DeliverCreated(void (^completion)(Core3DProfileConstructionResult, NSString
     prepared:(Core3DPathArrayPreparedCandidate *)prepared {
     if ((self = [super init])) { _preview = preview; _prepared = prepared; }
     return self;
+}
++ (instancetype)core3dPreparationWithPreview:(Core3DPathArrayPreview *)preview
+    prepared:(Core3DPathArrayPreparedCandidate *)prepared {
+    return [[self alloc] initWithPreview:preview prepared:prepared];
+}
+@end
+
+@implementation Core3DPathArrayPreview (Core3DNativeSupport)
++ (instancetype)core3dPreviewWithValues:(NSDictionary<NSString *, id> *)values {
+    Core3DPathArrayPreview *result = [self alloc];
+    id (^nullable)(NSString *) = ^id(NSString *key) {
+        id value = values[key]; return value == NSNull.null ? nil : value;
+    };
+    result->_admitted = [values[@"admitted"] boolValue];
+    result->_phase = [values[@"phase"] copy] ?: @"unavailable";
+    result->_refusalDomain = [nullable(@"refusalDomain") copy];
+    result->_refusalCode = [nullable(@"refusalCode") copy];
+    result->_requiredInstanceCount = nullable(@"requiredInstanceCount");
+    result->_totalLength = nullable(@"totalLength");
+    result->_requestedPlacementCount = nullable(@"requestedPlacementCount");
+    result->_emittedPlacementCount = nullable(@"emittedPlacementCount");
+    result->_maximumMeasuredArcError = nullable(@"maximumMeasuredArcError");
+    result->_closedSeamCanonicalized = nullable(@"closedSeamCanonicalized");
+    result->_projectedInstances = nullable(@"projectedInstances");
+    result->_projectedTopologyNodes = nullable(@"projectedTopologyNodes");
+    result->_projectedDocumentBytes = nullable(@"projectedDocumentBytes");
+    result->_projectedMemoryBytes = nullable(@"projectedMemoryBytes");
+    result->_sourceTopologyNodes = nullable(@"sourceTopologyNodes");
+    result->_sourceDocumentBytes = nullable(@"sourceDocumentBytes");
+    result->_sourceMemoryBytes = nullable(@"sourceMemoryBytes");
+    result->_issuedMemberIdentityCount = nullable(@"issuedMemberIdentityCount");
+    result->_documentMetersPerUnit = [values[@"documentMetersPerUnit"] doubleValue];
+    result->_sourceEntityIdentifier = [values[@"sourceEntityIdentifier"] copy] ?: @"";
+    result->_pathEntityIdentifier = [values[@"pathEntityIdentifier"] copy] ?: @"";
+    result->_ownerEntityIdentifier = [nullable(@"ownerEntityIdentifier") copy];
+    result->_featureIdentifier = [nullable(@"featureIdentifier") copy];
+    result->_placements = nullable(@"placements") ?: @[];
+    return result;
 }
 @end
 
@@ -1076,8 +1145,8 @@ Core3DPathArrayPreview *Preview(const CreationCapture& capture,
             initWithPreview:preview prepared:nil];
     _preparedPlan = std::move(prepared);
     _state.store(State::Prepared);
-    _token = [[Core3DPathArrayPreparedCandidate alloc]
-        initWithIssuer:self generation:_generation];
+    _token = [Core3DPathArrayPreparedCandidate core3dTokenWithIssuer:self
+        generation:_generation kind:1];
     return [[Core3DPathArrayPreparation alloc]
         initWithPreview:preview prepared:_token];
 }
@@ -1087,7 +1156,7 @@ Core3DPathArrayPreview *Preview(const CreationCapture& capture,
     // Validate kind/issuer/generation before spending this issuer's rightful token.
     if (!NSThread.isMainThread
         || ![prepared isMemberOfClass:Core3DPathArrayPreparedCandidate.class]
-        || prepared->_issuer != self || prepared->_generation != _generation
+        || ![prepared core3dMatchesIssuer:self generation:_generation kind:1]
         || prepared != _token) {
         DeliverCreated(completion, Core3DProfileConstructionResultRejected,
                        @"Prepared candidate belongs to another or retired issuer.", nil);
@@ -1184,6 +1253,56 @@ Core3DPathArrayPreview *Preview(const CreationCapture& capture,
         _preparedPlan = {}; _capture = {};
         return YES;
     } catch (...) { return NO; }
+}
+#endif
+
+#if DEBUG
+- (NSDictionary<NSString *, id> *)debugNativePreparationObservation {
+    if (!NSThread.isMainThread || _state.load() != State::Prepared) return nil;
+    @autoreleasepool {
+        try {
+            const array::Definition definition = _preparedPlan.definition;
+            std::uint32_t required = 0; double totalLength = 0;
+            const auto count = array::RequiredInstanceCount(definition,
+                _capture.pathExact.persisted, required, totalLength);
+            if (count != array::BuildRefusal::None) return nil;
+            array::AdmissionBudget budget;
+            budget.maximumInstances = array::MaximumInstances;
+            budget.sourceTopologyNodes = _capture.measured.topologyNodes;
+            budget.maximumAggregateTopologyNodes = 2'000'000;
+            budget.sourceDocumentBytes = _capture.measured.shapeBytes;
+            budget.existingDocumentBytes = _capture.patternDocumentBytes
+                + _capture.pathArrayDocumentBytes + _capture.compositeDocumentBytes;
+            budget.maximumDocumentBytes = array::MaximumDocumentBytes;
+            budget.sourceMemoryBytes = _capture.measured.retainedMemoryBytes;
+            budget.maximumMemoryBytes = 256 * 1024 * 1024;
+            const array::Projection projection = array::Project(required, budget);
+            std::vector<array::Placement> placements;
+            array::BuildReceipt receipt;
+            if (!projection.admitted
+                || array::BuildPlacements(definition, _capture.pathExact.persisted,
+                    placements, receipt) != array::BuildRefusal::None) return nil;
+            NSMutableArray *rows = [NSMutableArray arrayWithCapacity:placements.size()];
+            for (const auto& placement : placements)
+                [rows addObject:@{ @"ordinal": @(placement.ordinal),
+                    @"requestedArcLength": @(placement.requestedArcLength),
+                    @"measuredArcLength": @(placement.measuredArcLength) }];
+            return @{ @"schema": @"shapeyard.d3-native-observation.v1",
+                @"requiredInstanceCount": @(required), @"totalLength": @(totalLength),
+                @"requestedPlacementCount": @(receipt.requestedInstances),
+                @"emittedPlacementCount": @(receipt.emittedInstances),
+                @"maximumMeasuredArcError": @(receipt.maximumMeasuredArcError),
+                @"closedSeamCanonicalized": @(receipt.closedSeamCanonicalized),
+                @"projectedInstances": @(projection.instances),
+                @"projectedTopologyNodes": @(projection.aggregateTopologyNodes),
+                @"projectedDocumentBytes": @(projection.projectedDocumentBytes),
+                @"projectedMemoryBytes": @(projection.projectedMemoryBytes),
+                @"sourceTopologyNodes": @(_capture.measured.topologyNodes),
+                @"sourceDocumentBytes": @(_capture.measured.shapeBytes),
+                @"sourceMemoryBytes": @(_capture.measured.retainedMemoryBytes),
+                @"placements": rows };
+        } catch (...) { return nil; }
+    }
 }
 #endif
 
@@ -1301,6 +1420,21 @@ Core3DPathArrayPreview *Preview(const CreationCapture& capture,
             evidence[@"memberCount"] = @(definition.members.size());
             evidence[@"removalCount"] = @(definition.removals.size());
             evidence[@"recordBytes"] = @(match->bytes.size());
+            evidence[@"canonicalRecordBytes"] = [NSData dataWithBytes:match->bytes.data()
+                length:match->bytes.size()];
+            OcctBoundedCurveCapture path;
+            if (owner->ReadBoundedCurveExact(definition.path.owner, path)) {
+                std::vector<std::uint8_t> pathValue, pathOwner;
+                if (curve::Encode(path.persisted.value, pathValue)
+                    && curve::EncodeOwnerState(path.persisted.ownerState, pathOwner)) {
+                    evidence[@"pathDefinitionBytes"] = [NSData dataWithBytes:pathValue.data()
+                        length:pathValue.size()];
+                    evidence[@"pathOwnerBytes"] = [NSData dataWithBytes:pathOwner.data()
+                        length:pathOwner.size()];
+                    evidence[@"pathDefinitionRevision"] =
+                        @(path.persisted.ownerState.definitionRevision);
+                }
+            }
             evidence[@"members"] = members;
             evidence[@"removals"] = removals;
             evidence[@"retiredLocalIDs"] = retiredLocalIDs;

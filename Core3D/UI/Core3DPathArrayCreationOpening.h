@@ -94,6 +94,10 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(replacingPath(entityIdentifier:));
 - (BOOL)cancel;
 #if DEBUG
+//! Re-runs the public count/build/projection kernels over the issuer's frozen
+//! native definition. It is an observer, not a second preparation or token.
+- (NSDictionary<NSString *, id> * _Nullable)debugNativePreparationObservation
+    NS_SWIFT_NAME(debugNativePreparationObservation());
 //! Real-instance lifecycle forwarding only. The fault is consumed after the
 //! actual CommitCommand boundary; no owner, marker, or receipt is fabricated.
 - (void)debugReportNextCloseUnproven;
@@ -107,6 +111,23 @@ __attribute__((objc_subclassing_restricted))
 #endif
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
+@end
+
+//! Additive candidate preparation for the production existing-owner editor.
+//! The editor's original Open-only APIs remain authoritative and retire any
+//! preparation created through this category.
+@interface Core3DPathArrayEditingOpening (CandidatePreparation)
+- (Core3DPathArrayPreparation *)prepareCandidate:
+    (NSDictionary<NSString *, id> *)candidate
+    NS_SWIFT_NAME(prepare(candidate:));
+- (void)applyPrepared:(Core3DPathArrayPreparedCandidate *)prepared
+    completion:(void (^)(Core3DProfileConstructionResult result,
+                          NSString *detail))completion
+    NS_SWIFT_NAME(apply(prepared:completion:));
+#if DEBUG
+- (NSDictionary<NSString *, id> * _Nullable)debugNativePreparationObservation
+    NS_SWIFT_NAME(debugNativePreparationObservation());
+#endif
 @end
 
 #if DEBUG
@@ -133,5 +154,38 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(debugPathArrayNativeMutationEvidence(entityIdentifier:));
 #endif
 @end
+
+// Shared result/token construction is visible only while compiling the two
+// owning Objective-C++ translation units. It is absent from the public
+// Swift/Objective-C surface and carries no independently redeemable authority.
+#if defined(__cplusplus) && defined(CORE3D_PATH_ARRAY_NATIVE_SUPPORT)
+@interface Core3DPathArrayPlacementPreview (Core3DNativeSupport)
++ (instancetype)core3dPlacementWithEntityIdentifier:(NSString *)entityIdentifier
+    localIdentifier:(NSUInteger)localIdentifier
+    ordinal:(NSUInteger)ordinal
+    requestedArcLength:(double)requestedArcLength
+    measuredArcLength:(double)measuredArcLength
+    occurrenceFrameValues:(NSArray<NSNumber *> *)occurrenceFrameValues;
+@end
+
+@interface Core3DPathArrayPreview (Core3DNativeSupport)
++ (instancetype)core3dPreviewWithValues:
+    (NSDictionary<NSString *, id> *)values;
+@end
+
+@interface Core3DPathArrayPreparedCandidate (Core3DNativeSupport)
++ (instancetype)core3dTokenWithIssuer:(id)issuer
+    generation:(uint64_t)generation
+    kind:(uint8_t)kind;
+- (BOOL)core3dMatchesIssuer:(id)issuer
+    generation:(uint64_t)generation
+    kind:(uint8_t)kind;
+@end
+
+@interface Core3DPathArrayPreparation (Core3DNativeSupport)
++ (instancetype)core3dPreparationWithPreview:(Core3DPathArrayPreview *)preview
+    prepared:(Core3DPathArrayPreparedCandidate * _Nullable)prepared;
+@end
+#endif
 
 NS_ASSUME_NONNULL_END

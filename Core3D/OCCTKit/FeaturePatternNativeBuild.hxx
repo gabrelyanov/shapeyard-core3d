@@ -85,6 +85,12 @@ struct AttributedBuild final {
     SourceTool sourceTool;
     saved_cut_source_edit::ShapeCommitment retainedHost, resultGeometry;
     feature_pattern::Admission admission;
+    // Retained from the one measured build for an immutable pre-stage review.
+    // These are observations already consumed by Admit; no caller recomputes
+    // geometry or substitutes requested spacing/policy values.
+    std::vector<double> positiveRemovedVolumes;
+    std::uint32_t measuredBoundarySections = 0;
+    double measuredPairwiseLigamentMM = 0;
     std::vector<SemanticSelector> selectors;
     std::vector<feature_pattern_child::Receipt> childReceipts;
     std::vector<std::uint8_t> completeProgramBytes;
@@ -579,6 +585,16 @@ inline AttributedBuild BuildAttributedPattern(
         result.result = std::move(current);
         result.sourceTool = std::move(selected);
         result.admission = admission;
+        result.measuredBoundarySections = admission.measuredBoundarySections;
+        result.measuredPairwiseLigamentMM =
+            std::numeric_limits<double>::max();
+        result.positiveRemovedVolumes.reserve(measured.size());
+        for (const auto& item : measured) {
+            result.positiveRemovedVolumes.push_back(item.removedVolume);
+            result.measuredPairwiseLigamentMM = std::min(
+                result.measuredPairwiseLigamentMM,
+                item.minimumHostLigamentMM);
+        }
         result.selectors = selectors;
         result.completeProgramBytes = source.exactProgram;
         std::size_t commitmentBytes = 0;

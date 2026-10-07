@@ -35,6 +35,16 @@ struct CreationEdit final {
     std::set<pattern::Coordinate> suppressed;
 };
 
+//! Immutable projection of the measurements and charged budget retained by
+//! the one real detached creation build. It carries no shape or stage authority.
+struct PreparedReview final {
+    std::size_t attributedChildCount = 0;
+    std::uint32_t sectionCount = 0;
+    std::vector<double> positiveRemovedVolumes;
+    double measuredPairwiseLigamentMM = 0;
+    feature_pattern::Projection chargedProjection;
+};
+
 struct Observation final {
     bool current = false;
     std::string hostEntity, sourceEntity, profileFeature, patternFeature;
@@ -77,6 +87,8 @@ class PreparedCreation final {
         const std::shared_ptr<const PreparedCreation>&) noexcept;
     friend bool CreationReadback(OcctDocument&, const PreparedCreation&,
         const TDF_Label&) noexcept;
+    friend bool ReviewPreparedCreation(const PreparedCreation&,
+        PreparedReview&) noexcept;
     PreparedCreation() = default;
     std::shared_ptr<const CreationCapture> capture_;
     feature_pattern::Definition definition_;
@@ -99,6 +111,11 @@ CaptureStatus CaptureCreationHost(OcctDocument&, const std::string& hostEntity,
 std::shared_ptr<const PreparedCreation> PrepareCreation(
     const std::shared_ptr<const CreationCapture>&, const CreationEdit&,
     const std::atomic_bool& stop) noexcept;
+
+//! Reads only retained values from the sealed prepared capability. It neither
+//! mutates, stages, rebuilds, reconciles nor consumes the capability.
+bool ReviewPreparedCreation(const PreparedCreation&,
+    PreparedReview&) noexcept;
 
 //! Exact recapture, one lease, baseline/pair/Profile stage, full readback, one
 //! close and owning-viewer publication. Unknown close/publication is retained.

@@ -12,6 +12,7 @@
 #include <XCAFDoc_ShapeTool.hxx>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <map>
 
@@ -330,6 +331,30 @@ std::shared_ptr<const PreparedCreation> PrepareCreation(
     } catch (...) { return {}; }
 }
 
+bool ReviewPreparedCreation(const PreparedCreation& prepared,
+                            PreparedReview& output) noexcept {
+    output = {};
+    try {
+        const auto& built = prepared.built_;
+        if (!prepared.capture_ || !built.admitted()
+            || built.childReceipts.empty()
+            || built.positiveRemovedVolumes.size() != built.childReceipts.size()
+            || built.measuredBoundarySections == 0
+            || !std::isfinite(built.measuredPairwiseLigamentMM)
+            || built.measuredPairwiseLigamentMM <= 0
+            || !built.admission.projection.admitted)
+            return false;
+        for (double volume : built.positiveRemovedVolumes)
+            if (!std::isfinite(volume) || volume <= 0) return false;
+        output.attributedChildCount = built.childReceipts.size();
+        output.sectionCount = built.measuredBoundarySections;
+        output.positiveRemovedVolumes = built.positiveRemovedVolumes;
+        output.measuredPairwiseLigamentMM = built.measuredPairwiseLigamentMM;
+        output.chargedProjection = built.admission.projection;
+        return true;
+    } catch (...) { output = {}; return false; }
+}
+
 CreationOutcome StageCreation(OcctDocument& owner,
     const std::shared_ptr<const PreparedCreation>& prepared) noexcept {
     if (!prepared || !prepared->capture_) return CreationOutcome::Refused;
@@ -411,13 +436,15 @@ CreationOutcome StageCreation(OcctDocument& owner,
         if (!lease->commit()) {
             native_opening::CommittedEditPublication publication;
             publication.replaced.push_back(
-                {retained_solid::UUIDText(capture.host_.entity), {}});
+                {retained_solid::UUIDText(capture.host_.entity),
+                 capture.host_.shape});
             capture.context_->retainUnprovenEdit(publication);
             return CreationOutcome::OutcomeUnknown;
         }
         native_opening::CommittedEditPublication publication;
         publication.replaced.push_back(
-            {retained_solid::UUIDText(capture.host_.entity), {}});
+            {retained_solid::UUIDText(capture.host_.entity),
+             capture.host_.shape});
         return capture.context_->publishCommittedEdit(publication)
             ? CreationOutcome::Committed : CreationOutcome::OutcomeUnknown;
     } catch (...) { return CreationOutcome::OutcomeUnknown; }
