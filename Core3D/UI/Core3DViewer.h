@@ -165,6 +165,7 @@ namespace core3d {
         double dimensionMetersPerUnit = 0;
         bool current = false;
         std::shared_ptr<const retained_edge_treatment::Snapshot> edgeTreatment;
+        std::shared_ptr<const profile_d4::CurrentCapture> d4Continuation;
     };
     struct StoredEnclosureSnapshot {
         enclosure::Parameters parameters;
@@ -932,6 +933,11 @@ namespace core3d {
             std::uint64_t contextIdentifier,
             std::uint32_t viewportWidth, std::uint32_t viewportHeight,
             const std::vector<std::string>& sourceReceipts) noexcept;
+        std::shared_ptr<native_opening::Context>
+            captureNativeSelectionReplacementContext(
+                std::uint64_t contextIdentifier,
+                std::uint32_t viewportWidth, std::uint32_t viewportHeight,
+                const native_opening::Fence& openingFence) noexcept;
         bool nativeOpeningReady(std::uint64_t contextIdentifier) const noexcept;
         //! Reconciles the affected real AIS presentations to a known committed
         //! native edit for the same live document/data as the issuing fence.

@@ -115,6 +115,12 @@ public:
     std::shared_ptr<const Fence> recapture(
         std::uint32_t viewportWidth, std::uint32_t viewportHeight) const noexcept;
     bool isCurrent(std::uint32_t viewportWidth, std::uint32_t viewportHeight) const noexcept;
+    //! Private D3 selected-path handoff.  The viewer verifies that every
+    //! opening/document fence component is unchanged except the native
+    //! selection component, and returns a newly registered issuer.  It never
+    //! updates this context or makes an old token current again.
+    std::shared_ptr<Context> captureSelectionReplacement(
+        std::uint32_t viewportWidth, std::uint32_t viewportHeight) const noexcept;
     std::shared_ptr<CommandLease> beginCommandLease(
         const Fence& expected, std::uint32_t viewportWidth,
         std::uint32_t viewportHeight) noexcept;
@@ -147,7 +153,8 @@ private:
     friend class CommandLease;
     Context(std::weak_ptr<detail::State>, std::uint64_t, Fence) noexcept;
     bool ownsMarker(std::uint64_t marker) const noexcept;
-    void finishMarker(std::uint64_t marker, bool recovery) noexcept;
+    void finishMarker(std::uint64_t marker, bool recovery,
+                      bool retainForPublication = false) noexcept;
     std::weak_ptr<detail::State> state_;
     const std::uint64_t identifier_;
     const Fence openingFence_;

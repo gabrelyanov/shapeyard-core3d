@@ -11,6 +11,7 @@
 #include "OrdinaryEditCommand.hpp"
 #include "RetainedProfileSourceAdapter.hxx"
 #include "../OCCTKit/NativeOpeningDependentReplay.hxx"
+#include "../OCCTKit/FeaturePatternProfileContinuation.hxx"
 #include "../OCCTKit/SavedCutWholeResultCorrespondence.hxx"
 #include "../OCCTKit/AnalyticBooleanSolid.hxx"
 #include "../OCCTKit/CompositeRecipeAttribute.hxx"
@@ -1691,6 +1692,9 @@ namespace native_opening::detail {
 struct State final {
     Core3DViewer* owner = nullptr;
     std::uint64_t nextContext = 0;
+    std::unordered_set<std::uint64_t> contexts;
+    // Exact single mutation owner.  Idle registered read contexts never
+    // occupy this slot; a closed command retains it through publication.
     std::uint64_t activeContext = 0;
     std::uint64_t nextMarker = 0;
     std::uint64_t activeMarker = 0;
@@ -1741,21 +1745,37 @@ Context::Context(std::weak_ptr<detail::State> state, std::uint64_t identifier,
       openingFence_(std::move(fence)) {}
 
 Context::~Context() {
-    if (const auto state = state_.lock(); state && state->activeContext == identifier_
-        && state->activeMarker == 0 && state->recoveryMarker == 0) {
-        state->activeContext = 0;
+    if (const auto state = state_.lock()) {
+        state->contexts.erase(identifier_);
+        // A few native operations intentionally use a real lease without an
+        // AIS publication plan. Preserve their historical release on owner
+        // destruction, but never clear an active, recovery, or retained
+        // publication owner (including one owned by a peer).
+        if (state->activeContext == identifier_ && state->activeMarker == 0
+            && state->recoveryMarker == 0 && !state->pendingPublication)
+            state->activeContext = 0;
     }
 }
 
 std::shared_ptr<const Fence> Context::recapture(
     std::uint32_t width, std::uint32_t height) const noexcept {
     const auto state = state_.lock();
-    if (!state || state->owner == nullptr || state->activeContext != identifier_)
+    if (!state || state->owner == nullptr
+        || state->contexts.count(identifier_) != 1)
         return {};
     const auto current = state->owner->recaptureNativeOpeningFence(
         identifier_, width, height, openingFence_.sourceReceipts());
     if (!current || !(current->stamp() == openingFence_.stamp())) return {};
     return current;
+}
+
+std::shared_ptr<Context> Context::captureSelectionReplacement(
+    std::uint32_t width, std::uint32_t height) const noexcept {
+    const auto state = state_.lock();
+    if (!state || state->owner == nullptr
+        || state->contexts.count(identifier_) != 1) return {};
+    return state->owner->captureNativeSelectionReplacementContext(
+        identifier_, width, height, openingFence_);
 }
 
 bool Context::isCurrent(std::uint32_t width, std::uint32_t height) const noexcept {
@@ -1766,10 +1786,12 @@ bool Context::isCurrent(std::uint32_t width, std::uint32_t height) const noexcep
 bool Context::ownsMarker(std::uint64_t marker) const noexcept {
     const auto state = state_.lock();
     return state && state->activeContext == identifier_
+        && state->contexts.count(identifier_) == 1
         && state->activeMarker == marker && state->recoveryMarker == 0;
 }
 
-void Context::finishMarker(std::uint64_t marker, bool recovery) noexcept {
+void Context::finishMarker(std::uint64_t marker, bool recovery,
+                           bool retainForPublication) noexcept {
     const auto state = state_.lock();
     if (!state || state->activeContext != identifier_ || state->activeMarker != marker)
         return;
@@ -1777,6 +1799,8 @@ void Context::finishMarker(std::uint64_t marker, bool recovery) noexcept {
     if (recovery) {
         state->recoveryMarker = marker;
         state->recoveryContext = identifier_;
+    } else if (!retainForPublication) {
+        state->activeContext = 0;
     }
 }
 
@@ -1785,7 +1809,9 @@ std::shared_ptr<CommandLease> Context::beginCommandLease(
     const auto state = state_.lock();
     const auto fresh = recapture(width, height);
     if (!state || !fresh || !SameFence(expected, *fresh)
-        || !SameFence(openingFence_, expected) || state->activeMarker != 0
+        || !SameFence(openingFence_, expected)
+        || state->contexts.count(identifier_) != 1
+        || state->activeContext != 0 || state->activeMarker != 0
         || state->recoveryMarker != 0 || state->nextMarker == UINT64_MAX)
         return {};
     const auto document = expected.document();
@@ -1793,6 +1819,7 @@ std::shared_ptr<CommandLease> Context::beginCommandLease(
     if (document.IsNull() || data.IsNull() || document->GetData() != data
         || document->HasOpenCommand()) return {};
     const std::uint64_t marker = ++state->nextMarker;
+    state->activeContext = identifier_;
     state->activeMarker = marker;
     try {
         document->NewCommand();
@@ -1813,13 +1840,15 @@ std::shared_ptr<CommandLease> Context::borrowCommandLease(
     const auto state = state_.lock();
     const auto document = openingFence_.document();
     const auto data = openingFence_.data();
-    if (!state || state->activeContext != identifier_
-        || state->activeMarker != 0 || state->recoveryMarker != 0
+    if (!state || state->contexts.count(identifier_) != 1
+        || state->activeContext != 0 || state->activeMarker != 0
+        || state->recoveryMarker != 0
         || state->nextMarker == UINT64_MAX || document.IsNull() || data.IsNull()
         || document->GetData() != data) return {};
     int transaction = 0;
     if (!ordinary.lendNativeCommand(document, data, transaction)) return {};
     const std::uint64_t marker = ++state->nextMarker;
+    state->activeContext = identifier_;
     state->activeMarker = marker;
     auto lease = std::shared_ptr<CommandLease>(new CommandLease(
         shared_from_this(), document, data, transaction, marker, true));
@@ -1829,7 +1858,8 @@ std::shared_ptr<CommandLease> Context::borrowCommandLease(
 
 bool Context::reconcileRecovery(bool exactStateKnown) noexcept {
     const auto state = state_.lock();
-    if (!state || !exactStateKnown || state->activeContext != identifier_
+    if (!state || !exactStateKnown || state->contexts.count(identifier_) != 1
+        || state->activeContext != identifier_
         || state->recoveryContext != identifier_ || state->recoveryMarker == 0
         || state->activeMarker != 0 || state->owner == nullptr) return false;
     const auto document = openingFence_.document();
@@ -1852,6 +1882,7 @@ bool Context::reconcileRecovery(bool exactStateKnown) noexcept {
     // may outlive recovery, but may neither block nor acquire a new command.
     // Every identity, close, and publication proof above has already passed.
     state->activeContext = 0;
+    state->contexts.erase(identifier_);
     return true;
 }
 
@@ -1861,8 +1892,10 @@ bool Context::publishCommittedEdit(
     if (!state || state->owner == nullptr || state->activeContext != identifier_
         || state->activeMarker != 0 || state->recoveryMarker != 0) return false;
     try {
-        if (state->owner->reconcileNativeOpeningEdit(openingFence_, publication))
+        if (state->owner->reconcileNativeOpeningEdit(openingFence_, publication)) {
+            state->activeContext = 0;
             return true;
+        }
         // A proven commit without a proven publication is never reported as a
         // pre-command rejection and never retried as another edit: arm the
         // shared recovery fence and retain the same plan for exact recovery.
@@ -1881,7 +1914,8 @@ void Context::retainUnprovenEdit(
     const CommittedEditPublication& publication) noexcept {
     try {
         const auto state = state_.lock();
-        if (!state || state->activeContext != identifier_
+        if (!state || state->contexts.count(identifier_) != 1
+            || state->activeContext != identifier_
             || state->recoveryMarker == 0 || state->recoveryContext != identifier_
             || state->pendingPublication) return;
         state->pendingPublication =
@@ -1893,7 +1927,8 @@ void Context::retainUnprovenEdit(
 #if DEBUG
 void Context::debugReportNextCloseUnproven() noexcept {
     const auto state = state_.lock();
-    if (!state || state->activeContext != identifier_
+    if (!state || state->contexts.count(identifier_) != 1
+        || state->activeContext != 0
         || state->activeMarker != 0 || state->recoveryMarker != 0) return;
     ++state->debugUnprovenCloseResults;
 }
@@ -1908,7 +1943,7 @@ CommandLease::CommandLease(std::shared_ptr<Context> context,
 CommandLease::~CommandLease() {
     if (!settled_) {
         if (borrowed_) {
-            if (context_) context_->finishMarker(marker_, false);
+            if (context_) context_->finishMarker(marker_, false, false);
             settled_ = true;
         } else retainRecovery();
     }
@@ -1952,7 +1987,7 @@ bool CommandLease::commit() noexcept {
             }
         }
 #endif
-        context_->finishMarker(marker_, false);
+        context_->finishMarker(marker_, false, true);
         settled_ = true;
         return true;
     } catch (...) { retainRecovery(); return false; }
@@ -1964,7 +1999,7 @@ bool CommandLease::abort() noexcept {
     try {
         document_->AbortCommand();
         if (document_->HasOpenCommand()) { retainRecovery(); return false; }
-        context_->finishMarker(marker_, false);
+        context_->finishMarker(marker_, false, false);
         settled_ = true;
         return true;
     } catch (...) { retainRecovery(); return false; }
@@ -3891,10 +3926,12 @@ bool Core3DViewer::nativeOpeningReady(std::uint64_t contextIdentifier) const noe
         if (document.IsNull() || document->HasOpenCommand()) return false;
         if (!_nativeOpeningState) return contextIdentifier == 0;
         const auto& state = *_nativeOpeningState;
-        if (state.owner != this || state.activeMarker != 0 || state.recoveryMarker != 0)
+        if (state.owner != this || state.activeContext != 0
+            || state.activeMarker != 0 || state.recoveryMarker != 0
+            || state.pendingPublication)
             return false;
-        return contextIdentifier == 0 ? state.activeContext == 0
-                                      : state.activeContext == contextIdentifier;
+        return contextIdentifier == 0
+            || state.contexts.count(contextIdentifier) == 1;
     } catch (...) { return false; }
 }
 
@@ -3988,11 +4025,58 @@ Core3DViewer::captureNativeOpeningContext(
         return {};
     }
     const std::uint64_t identifier = ++_nativeOpeningState->nextContext;
-    _nativeOpeningState->activeContext = identifier;
+    _nativeOpeningState->contexts.insert(identifier);
     const auto fence = recaptureNativeOpeningFence(identifier, width, height, sourceReceipts);
-    if (!fence) { _nativeOpeningState->activeContext = 0; return {}; }
+    if (!fence) { _nativeOpeningState->contexts.erase(identifier); return {}; }
     return std::shared_ptr<native_opening::Context>(new native_opening::Context(
         _nativeOpeningState, identifier, *fence));
+}
+
+std::shared_ptr<native_opening::Context>
+Core3DViewer::captureNativeSelectionReplacementContext(
+    std::uint64_t contextIdentifier, std::uint32_t width, std::uint32_t height,
+    const native_opening::Fence& openingFence) noexcept {
+    if (![NSThread isMainThread] || !_nativeOpeningState
+        || _nativeOpeningState->owner != this
+        || _nativeOpeningState->contexts.count(contextIdentifier) != 1
+        || _nativeOpeningState->nextContext == UINT64_MAX) return {};
+    const auto current = recaptureNativeOpeningFence(
+        contextIdentifier, width, height, openingFence.sourceReceipts());
+    if (!current) return {};
+    const auto& before = openingFence.stamp();
+    const auto& after = current->stamp();
+    // Selection is the sole permitted authority delta.  All document, edit,
+    // scene, unit, source-read and non-selection presentation components stay
+    // exact, while the new choice must be one whole retained object.
+    if (before.instanceNonce != after.instanceNonce
+        || before.opening != after.opening || before.edit != after.edit
+        || before.selection == after.selection
+        || openingFence.publicationSourceIdentifier()
+            != current->publicationSourceIdentifier()
+        || openingFence.documentGeneration() != current->documentGeneration()
+        || openingFence.modelRevision() != current->modelRevision()
+        || openingFence.selectionMode() != current->selectionMode()
+        || openingFence.document() != current->document()
+        || openingFence.data() != current->data()
+        || openingFence.metersPerUnit() != current->metersPerUnit()
+        || openingFence.sourceReceipts() != current->sourceReceipts()
+        || openingFence.hovered().has_value() != current->hovered().has_value()
+        || (openingFence.hovered() &&
+            !SameElement(*openingFence.hovered(), *current->hovered()))
+        || current->selectionMode() != scene::ElementKind::Object
+        || current->selection().size() != 1
+        || current->selection().front().kind != scene::ElementKind::Object
+        || current->selection().front().entityIdentifier.empty()
+        || current->selection().front().entityIdentifier.size() > 128) return {};
+    const std::uint64_t replacement = ++_nativeOpeningState->nextContext;
+    _nativeOpeningState->contexts.insert(replacement);
+    try {
+        return std::shared_ptr<native_opening::Context>(
+            new native_opening::Context(_nativeOpeningState, replacement, *current));
+    } catch (...) {
+        _nativeOpeningState->contexts.erase(replacement);
+        return {};
+    }
 }
 
 void Core3DViewer::observeNativePlanningInteraction() noexcept {
@@ -4029,10 +4113,9 @@ bool Core3DViewer::canBeginCommittedEditHolding(
         const Handle(TDocStd_Document) document = myDoc->Document();
         if (document.IsNull() || document->HasOpenCommand()
             || openingContext->openingFence().document() != document) return false;
-        // nativeOpeningReady with the opening's own identifier still requires
-        // this viewer to own the opening state, no active/recovery marker and
-        // the context to be the active one; a settled or foreign context
-        // therefore refuses here.
+        // The caller must be a registered read context on this viewer.  Idle
+        // peers are tolerated, but mutation/publication/recovery ownership is
+        // still globally exclusive.
         return nativeOpeningReady(openingContext->identifier_);
     } catch (...) {
         return false;
@@ -5846,8 +5929,23 @@ std::optional<StoredProfileSnapshot> Core3DViewer::storedProfileDefinition(
         if (!std::isfinite(result.dimensionMetersPerUnit) || result.dimensionMetersPerUnit <= 0
             || !std::isfinite(result.dimensionMetersPerUnit * 1000.0))
             result.dimensionMetersPerUnit = 0; // Unsupported physical scale does not hide a manual recipe.
-        result.current = state.profile.IsCurrent(myDoc->Document(), label)
-            && profile::HasOnlyMetadataSubshapes(myDoc->Document(), label);
+        const bool profileCurrent = state.profile.IsCurrent(myDoc->Document(), label);
+        const bool genericMetadata = profile::HasOnlyMetadataSubshapes(
+            myDoc->Document(), label);
+        if (profileCurrent) {
+            auto continuationContext = captureNativeOpeningContext(
+                width, height, {identity.entityIdentifier});
+            std::shared_ptr<const profile_d4::CurrentCapture> continuation;
+            const auto continuationStatus = continuationContext
+                ? profile_d4::CaptureCurrent(*myDoc, identity.entityIdentifier,
+                    continuationContext, continuation)
+                : profile_d4::CaptureStatus::Refused;
+            if (continuationStatus == profile_d4::CaptureStatus::Current)
+                result.d4Continuation = std::move(continuation);
+            result.current = continuationStatus == profile_d4::CaptureStatus::Current
+                || (continuationStatus == profile_d4::CaptureStatus::Absent
+                    && genericMetadata);
+        }
         if(result.current){
             namespace et=retained_edge_treatment;auto capture=std::shared_ptr<et::Snapshot>(new et::Snapshot);
             capture->ownerLabel_=label;capture->sourceLabel_=state.profile.label;capture->sourceIdentifier_=state.profile.identifier;capture->source_=state.profile.parameters;capture->current_=state.shape;capture->base_=state.edgeTreatment?state.edgeTreatment->value->base:state.shape;capture->nonce_=std::uint64_t(myDoc->Document()->GetData()->Time());capture->presentationRevision_=presentationRevision;
@@ -6071,6 +6169,7 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredProfileRebuild(
         const auto current = storedProfileDefinition(identity, presentationRevision, width, height);
         if (!current || !current->current || current->featureIdentifier != original.featureIdentifier
             || current->definitionIdentifier != original.definitionIdentifier
+            || bool(current->d4Continuation) != bool(original.d4Continuation)
             || bool(current->edgeTreatment)!=bool(original.edgeTreatment)
             || (current->edgeTreatment&&original.edgeTreatment
                 && current->edgeTreatment->definitionBytes_!=original.edgeTreatment->definitionBytes_)) return {};
@@ -6105,6 +6204,7 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredProfileRebuild(
         record.requested.shape = record.previous.shape; record.requested.transform = record.previous.transform;
         record.requested.operation = OrdinaryTransformOperation::ProfileRebuild;
         record.requested.profileRebuild = parameters;
+        record.requested.profileD4Capture = current->d4Continuation;
         work->rebuildAuthority.emplace();
         work->rebuildAuthority->records.push_back(std::move(record));
         if (!admitTransform(*work->rebuildAuthority)) return {};
@@ -6131,6 +6231,7 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCompleteProfileRebuild(
         if (!current || !current->current || !current->edgeTreatment
             || current->featureIdentifier != original.featureIdentifier
             || current->definitionIdentifier != original.definitionIdentifier
+            || bool(current->d4Continuation) != bool(original.d4Continuation)
             || current->edgeTreatment->nonce_ != original.edgeTreatment->nonce_
             || bool(current->edgeTreatment->definition_)
                 != bool(original.edgeTreatment->definition_)
@@ -6189,6 +6290,7 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCompleteProfileRebuild(
         record.requested.operation = OrdinaryTransformOperation::CompleteProfileRebuild;
         record.requested.profileRebuild = translated;
         record.requested.completeProfileCapture = std::move(capture);
+        record.requested.profileD4Capture = current->d4Continuation;
         work->rebuildAuthority.emplace();
         work->rebuildAuthority->records.push_back(std::move(record));
         if (!admitTransform(*work->rebuildAuthority)) return {};
@@ -7147,11 +7249,52 @@ OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeS
                 treatment->result_=completed->solid;retained_edge_treatment::Refusal refusal;if(!retained_edge_treatment::Encode(treatment->definition_,treatment->definitionBytes_,refusal))return OrdinaryEditResult::Invalid;
                 record.requested.edgeTreatmentSnapshot=work->edgeTreatmentSnapshot;record.requested.edgeTreatmentEdit=work->edgeTreatmentEdit;record.requested.edgeTreatmentResult=std::move(treatment);
             }
+            std::shared_ptr<native_opening::Context> profileReplayContext;
+            std::shared_ptr<const dependent_replay::PreparedReplay>
+                profileD4Replay;
+            if (record.requested.profileD4Capture) {
+                // Mixed P2 -> D4 ordering is not yet proved. Refuse instead of
+                // guessing an order or resetting either family's replay debt.
+                if (work->edgeTreatmentSnapshot || !record.requested.profileRebuild)
+                    return OrdinaryEditResult::Invalid;
+                std::atomic_bool stop{false};
+                const auto prepared = profile_d4::PrepareHostEdit(*myDoc,
+                    record.requested.profileD4Capture,
+                    *record.requested.profileRebuild, completed->solid, stop);
+                if (!prepared)
+                    return OrdinaryEditResult::Invalid;
+                record.requested.profileD4Result = prepared;
+                record.requested.shape = profile_d4::Result(*prepared);
+                if (record.requested.completeProfileResult) {
+                    auto mutableComplete = std::const_pointer_cast<
+                        retained_edge_treatment::CompleteProfileRebuildResult>(
+                            record.requested.completeProfileResult);
+                    mutableComplete->result_ = record.requested.shape;
+                }
+                profileReplayContext = captureNativeOpeningContext(
+                    work->width, work->height,
+                    {record.previous.entityIdentifier});
+                if (!profileReplayContext)
+                    return OrdinaryEditResult::Invalid;
+                if (!profile_d4::OpeningMatches(*prepared, profileReplayContext))
+                    return OrdinaryEditResult::Invalid;
+                const auto replayRefusal = profile_d4::PrepareHostReplay(
+                    *myDoc, prepared, dependent_replay::Limits{},
+                    profileD4Replay);
+                if (replayRefusal != dependent_replay::Refusal::None
+                    || !profileD4Replay)
+                    return OrdinaryEditResult::Invalid;
+            }
             OrdinaryEditResult result = OrdinaryEditResult::Invalid;
             auto lease = work->modelingPermit
                 ? _ordinaryEditController->beginModelingRebuild(record.requested,work->modelingPermit,&result)
+                : profileD4Replay
+                ? _ordinaryEditController->beginProfileD4Transform(
+                    record.requested, std::move(profileD4Replay),
+                    std::move(profileReplayContext), &result)
                 : _ordinaryEditController->beginTransform({record.requested}, &result);
-            return lease ? lease.stageAndCommit() : result;
+            if (!lease) return result;
+            return lease.stageAndCommit();
         }
         Handle(AIS_Shape) presentation = new AIS_Shape(completed->solid);
         myContext->ApplyDefaultMaterial(presentation);

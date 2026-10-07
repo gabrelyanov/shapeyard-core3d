@@ -1,6 +1,8 @@
 #import <Foundation/Foundation.h>
 
 #include "FeaturePatternOwnerBridge.hxx"
+#include "FeaturePatternProfileContinuation.hxx"
+#include "CompositeRecipeCodec.hxx"
 #include "NativeOpeningDependentReplay.hxx"
 
 #include <TNaming_NamedShape.hxx>
@@ -24,6 +26,30 @@ constexpr std::uint32_t kFenceHeight = 64;
 std::string Text(const UUID& value) noexcept {
     try { return retained_solid::UUIDText(value); }
     catch (...) { return {}; }
+}
+
+bool CurrentProfileProof(OcctDocument& owner, const Snapshot& opening,
+    std::optional<profile::Parameters>& parameters,
+    std::string& identifier) noexcept {
+    parameters.reset(); identifier.clear();
+    try {
+        profile::Record record;
+        if (!profile::Read(owner.Document(), opening.host.label, record)) return false;
+        if (record.label.IsNull()
+            || !record.IsCurrent(owner.Document(), opening.host.label)) return true;
+        UUID feature{}; std::vector<double> values;
+        std::vector<std::uint8_t> scalar;
+        if (!pattern_owner::Parse(record.identifier, feature)
+            || feature != opening.hostBase.retained.retainedRecipeFeature
+            || !profile::Encode(record.parameters, values)
+            || !composite_recipe::EncodeScalarRecipe(
+                composite_recipe::RecipeKind::Profile,
+                std::uint32_t(profile::SchemaFor(record.parameters)),
+                values, scalar)
+            || scalar != opening.hostBase.retained.exactRecipe) return false;
+        parameters = record.parameters; identifier = record.identifier;
+        return true;
+    } catch (...) { parameters.reset(); identifier.clear(); return false; }
 }
 
 class OcafD4Observer final : public Observer {
@@ -207,8 +233,12 @@ public:
 class OcafD4Stager final : public Stager {
 public:
     OcafD4Stager(OcctDocument& owner,
-        std::shared_ptr<native_opening::Context> context) noexcept
-        : owner_(owner), context_(std::move(context)), observer_(owner) {}
+        std::shared_ptr<native_opening::Context> context,
+        std::optional<profile::Parameters> profile = std::nullopt,
+        std::string profileIdentifier = {}) noexcept
+        : owner_(owner), context_(std::move(context)), observer_(owner),
+          profile_(std::move(profile)),
+          profileIdentifier_(std::move(profileIdentifier)) {}
     OcafD4Stager(OcctDocument& owner,
         native_opening::CommandLease& lease) noexcept
         : owner_(owner), borrowed_(&lease), observer_(owner) {}
@@ -242,9 +272,21 @@ public:
             std::vector<feature_pattern_child::Receipt> receipts;
             for (const auto& child : prepared.rebuilt.children)
                 receipts.push_back(child.persisted);
-            return owner_.StageFeaturePatternPair(*lease, current.host.label,
+            // Profile uses explicit legacy child tags while SYFC uses the host's
+            // TagSource. Synchronize that allocator to every existing direct
+            // child before replacement so a new receipt can never overwrite the
+            // retained Profile record (including after load/Undo/Redo).
+            const Handle(TDF_TagSource) tags = TDF_TagSource::Set(current.host.label);
+            Standard_Integer highWater = tags->Get();
+            for (TDF_ChildIterator child(current.host.label, Standard_False);
+                 child.More(); child.Next())
+                highWater = std::max(highWater, child.Value().Tag());
+            tags->Set(highWater);
+            if (!owner_.StageFeaturePatternPair(*lease, current.host.label,
                 current.hostBase.recipeLabel, current.sourceCarrier.label,
-                prepared.candidate, receipts, staged_);
+                prepared.candidate, receipts, staged_)) return false;
+            return !profile_ || profile::Stage(owner_.Document(),
+                current.host.label, *profile_, profileIdentifier_);
         } catch (...) { return false; }
     }
 
@@ -266,6 +308,16 @@ public:
                 return false;
             value.sourceProgramBytes = source.recipeBytes;
             value.paired = std::move(pair);
+            if (profile_) {
+                profile::Record record;
+                std::vector<double> values;
+                if (!profile::Encode(*profile_, values)
+                    || !profile::Read(owner_.Document(), value.host.label, record)
+                    || record.identifier != profileIdentifier_
+                    || record.values != values
+                    || !record.IsCurrent(owner_.Document(), value.host.label))
+                    return false;
+            }
             output = std::move(value);
             return true;
         } catch (...) { output = {}; return false; }
@@ -287,6 +339,8 @@ private:
     std::shared_ptr<native_opening::CommandLease> lease_;
     native_opening::CommandLease* borrowed_ = nullptr;
     OcafD4Observer observer_;
+    std::optional<profile::Parameters> profile_;
+    std::string profileIdentifier_;
     feature_pattern_child::PairedRecord staged_;
 };
 } // namespace
@@ -317,7 +371,12 @@ PreparedEdit PrepareNative(OcctDocument&, const Snapshot& opening,
 ApplyOutcome ApplyNative(OcctDocument& owner, const PreparedEdit& prepared,
     const std::shared_ptr<native_opening::Context>& context) noexcept {
     OcafD4Observer observer(owner);
-    OcafD4Stager stager(owner, context);
+    std::optional<profile::Parameters> profile;
+    std::string profileIdentifier;
+    if (!CurrentProfileProof(owner, prepared.opening, profile, profileIdentifier))
+        return ApplyOutcome::Refused;
+    OcafD4Stager stager(owner, context, std::move(profile),
+                       std::move(profileIdentifier));
     const auto outcome = Apply(owner, prepared, observer, stager);
     // A proven commit is not delivered until the owning viewer has reconciled
     // the rebuilt host's real AIS presentation to the committed OCAF geometry.
@@ -392,9 +451,12 @@ bool CaptureD4InsideCommand(OcctDocument& owner, const Snapshot& opening,
 class D4DependentReplay final : public dependent_replay::PreparedReplay {
 public:
     D4DependentReplay(dependent_replay::Dependency dependency, Snapshot opening,
-        PreparedEdit prepared) noexcept
+        PreparedEdit prepared,
+        std::optional<profile::Parameters> profile = std::nullopt,
+        std::string profileIdentifier = {}) noexcept
         : dependency_(std::move(dependency)), opening_(std::move(opening)),
-          prepared_(std::move(prepared)) {}
+          prepared_(std::move(prepared)), profile_(std::move(profile)),
+          profileIdentifier_(std::move(profileIdentifier)) {}
     dependent_replay::Family family() const noexcept override {
         return dependent_replay::Family::FeaturePatternD4;
     }
@@ -433,19 +495,37 @@ public:
                 && !feature_pattern_baseline::Replace(
                     opening_.hostBase.recipeLabel, after.exactRecipe,
                     after.solid)) return false;
+            // Only the typed Profile-host preparer can populate profile_. The
+            // owner already contains R' here, so the real Profile record is
+            // bound to the complete result rather than the intermediate B'.
+            if (profile_ && !profile::Stage(owner.Document(),
+                    opening_.host.label, *profile_, profileIdentifier_))
+                return false;
             return true;
         } catch (...) { stager_.reset(); return false; }
     }
-    bool read(OcctDocument&) const noexcept override {
+    bool read(OcctDocument& owner) const noexcept override {
         if (!stager_) return false;
         Readback readback;
-        return stager_->readBackAll(prepared_.candidate, readback)
-            && ExactReadback(prepared_, readback);
+        if (!stager_->readBackAll(prepared_.candidate, readback)
+            || !ExactReadback(prepared_, readback)) return false;
+        if (profile_) {
+            profile::Record current;
+            std::vector<double> requested;
+            return profile::Encode(*profile_, requested)
+                && profile::Read(owner.Document(), opening_.host.label, current)
+                && current.identifier == profileIdentifier_
+                && current.values == requested
+                && current.IsCurrent(owner.Document(), opening_.host.label);
+        }
+        return true;
     }
 private:
     dependent_replay::Dependency dependency_;
     Snapshot opening_;
     PreparedEdit prepared_;
+    std::optional<profile::Parameters> profile_;
+    std::string profileIdentifier_;
     mutable std::unique_ptr<OcafD4Stager> stager_;
 };
 }
@@ -496,8 +576,13 @@ dependent_replay::Refusal PrepareFeaturePatternD4ReplayImpl(OcctDocument& owner,
         // A host edit keeps the prospective opening: its baseline receipt
         // carries the authorized replacement solid and exact recipe the stager
         // persists into the typed baseline inside the same owned command.
+        std::optional<profile::Parameters> profile;
+        std::string profileIdentifier;
+        if (!CurrentProfileProof(owner, opening, profile, profileIdentifier))
+            return dependent_replay::Refusal::MissingRecipe;
         output = std::make_shared<D4DependentReplay>(dependency,
-            std::move(opening), std::move(prepared));
+            std::move(opening), std::move(prepared), std::move(profile),
+            std::move(profileIdentifier));
         return dependent_replay::Refusal::None;
     } catch (...) { output.reset(); return dependent_replay::Refusal::MissingRecipe; }
 }
@@ -580,6 +665,34 @@ Core3DDebugFeaturePatternNativeCollaboratorsProbe(std::int32_t scenario) noexcep
 }
 #endif
 } // namespace core3d::feature_pattern_owner
+
+namespace core3d::profile_d4 {
+dependent_replay::Refusal ProfileHostPreparer::prepare(OcctDocument&,
+    const dependent_replay::Dependency& dependency,
+    dependent_replay::Mutation mutation,
+    std::shared_ptr<const dependent_replay::PreparedReplay>& output) noexcept {
+    output.reset();
+    try {
+        if (!prepared_ || !prepared_->capture_
+            || mutation != dependent_replay::Mutation::Replace)
+            return dependent_replay::Refusal::MissingRecipe;
+        const auto& opening = prepared_->capture_->d4_;
+        if (dependency.family != dependent_replay::Family::FeaturePatternD4
+            || dependency.feature != opening.record.definition.feature
+            || dependency.inputEntity != opening.record.definition.host.entity
+            || dependency.resultEntity != opening.record.definition.host.entity
+            || dependency.canonicalRecordBytes != opening.record.bytes)
+            return dependent_replay::Refusal::UnsupportedDescendant;
+        output = std::make_shared<feature_pattern_owner::D4DependentReplay>(
+            dependency, opening, prepared_->prepared_, prepared_->requested_,
+            prepared_->capture_->profile_.identifier);
+        return dependent_replay::Refusal::None;
+    } catch (...) {
+        output.reset();
+        return dependent_replay::Refusal::MissingRecipe;
+    }
+}
+} // namespace core3d::profile_d4
 
 namespace core3d::dependent_replay {
 Refusal PrepareFeaturePatternD4Replay(OcctDocument& owner,

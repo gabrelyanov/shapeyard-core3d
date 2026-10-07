@@ -10,6 +10,10 @@
 		F17900010000000000000001 /* PatternNativeCollaborators.mm in Sources */ = {isa = PBXBuildFile; fileRef = F17900020000000000000002 /* PatternNativeCollaborators.mm */; };
 		D3C100010000000000000001 /* PathArrayNativeCollaborators.mm in Sources */ = {isa = PBXBuildFile; fileRef = D3C100020000000000000002 /* PathArrayNativeCollaborators.mm */; };
 		D4E100010000000000000001 /* FeaturePatternNativeCollaborators.mm in Sources */ = {isa = PBXBuildFile; fileRef = D4E100020000000000000002 /* FeaturePatternNativeCollaborators.mm */; };
+		C1D400010000000000000001 /* FeaturePatternProfileContinuation.mm in Sources */ = {isa = PBXBuildFile; fileRef = C1D400020000000000000002 /* FeaturePatternProfileContinuation.mm */; };
+		C1D400030000000000000003 /* FeaturePatternProfileContinuation.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C1D400040000000000000004 /* FeaturePatternProfileContinuation.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
+		C1D400050000000000000005 /* Core3DD4ProfileContinuationTesting.mm in Sources */ = {isa = PBXBuildFile; fileRef = C1D400060000000000000006 /* Core3DD4ProfileContinuationTesting.mm */; };
+		C1D400070000000000000007 /* Core3DD4ProfileContinuationTesting.h in Headers */ = {isa = PBXBuildFile; fileRef = C1D400080000000000000008 /* Core3DD4ProfileContinuationTesting.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		E17900010000000000000001 /* BoundedCurveOwner.mm in Sources */ = {isa = PBXBuildFile; fileRef = E17900020000000000000002 /* BoundedCurveOwner.mm */; };
 		C4A000010000000000000001 /* SplineProfileOwner.mm in Sources */ = {isa = PBXBuildFile; fileRef = C4A000110000000000000001 /* SplineProfileOwner.mm */; };
 		C4A000020000000000000002 /* SplineProfileOwner.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C4A000120000000000000002 /* SplineProfileOwner.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -305,6 +309,10 @@
 		F17900020000000000000002 /* PatternNativeCollaborators.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = PatternNativeCollaborators.mm; sourceTree = "<group>"; };
 		D3C100020000000000000002 /* PathArrayNativeCollaborators.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = PathArrayNativeCollaborators.mm; sourceTree = "<group>"; };
 		D4E100020000000000000002 /* FeaturePatternNativeCollaborators.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = FeaturePatternNativeCollaborators.mm; sourceTree = "<group>"; };
+		C1D400020000000000000002 /* FeaturePatternProfileContinuation.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = FeaturePatternProfileContinuation.mm; sourceTree = "<group>"; };
+		C1D400040000000000000004 /* FeaturePatternProfileContinuation.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FeaturePatternProfileContinuation.hxx; sourceTree = "<group>"; };
+		C1D400060000000000000006 /* Core3DD4ProfileContinuationTesting.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DD4ProfileContinuationTesting.mm; sourceTree = "<group>"; };
+		C1D400080000000000000008 /* Core3DD4ProfileContinuationTesting.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DD4ProfileContinuationTesting.h; sourceTree = "<group>"; };
 		E17900020000000000000002 /* BoundedCurveOwner.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = BoundedCurveOwner.mm; sourceTree = "<group>"; };
 		C4A000110000000000000001 /* SplineProfileOwner.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = SplineProfileOwner.mm; sourceTree = "<group>"; };
 		C4A000120000000000000002 /* SplineProfileOwner.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = SplineProfileOwner.hxx; sourceTree = "<group>"; };
@@ -871,6 +879,8 @@
 				F17900020000000000000002 /* PatternNativeCollaborators.mm */,
 				D3C100020000000000000002 /* PathArrayNativeCollaborators.mm */,
 				D4E100020000000000000002 /* FeaturePatternNativeCollaborators.mm */,
+				C1D400020000000000000002 /* FeaturePatternProfileContinuation.mm */,
+				C1D400040000000000000004 /* FeaturePatternProfileContinuation.hxx */,
 				E17900020000000000000002 /* BoundedCurveOwner.mm */,
 				C4A000110000000000000001 /* SplineProfileOwner.mm */,
 				C4A000120000000000000002 /* SplineProfileOwner.hxx */,
@@ -983,6 +993,8 @@
 				3F98EB9F02FC40DF96AF3B3F /* Core3DTransformInspectorSnapshotFactory.hpp */,
 				324EF2D02BC7EC8C00A05295 /* GLViewController+Trick.h */,
 				322185832BB5D5E100040E84 /* Core3DViewController.h */,
+				C1D400060000000000000006 /* Core3DD4ProfileContinuationTesting.mm */,
+				C1D400080000000000000008 /* Core3DD4ProfileContinuationTesting.h */,
 				A11A00000000000000000001 /* Core3DAgentMeasurements.h */,
 				A11A00000000000000000002 /* Core3DAgentMeasurements.mm */,
 				C3D515020000000000000001 /* Core3DModelingTypes.h */,
@@ -1206,6 +1218,7 @@
 				32ECC7DE2BCD36E600770594 /* Core3DViewController+AvailabilityManager.h in Headers */,
 				322185792BB5CC1500040E84 /* CafShapePrs.h in Headers */,
 				322185862BB5D5E100040E84 /* Core3DViewController.h in Headers */,
+				C1D400070000000000000007 /* Core3DD4ProfileContinuationTesting.h in Headers */,
 				C3D515010000000000000001 /* Core3DModelingTypes.h in Headers */,
 				C3D5A0010000000000000003 /* Core3DSharedModelingValues.h in Headers */,
 				320197212BD7AF7A00F30E62 /* AssetBundleWriterInterface.h in Headers */,
@@ -1235,6 +1248,7 @@
 				B1E000050000000000000005 /* RetainedEdgeTreatmentAttribute.hxx in Headers */,
 				B1E000060000000000000006 /* RetainedEdgeTreatmentBinaryDriver.hxx in Headers */,
 				B1E000070000000000000007 /* RetainedEdgeTreatmentSnapshot.hxx in Headers */,
+				C1D400030000000000000003 /* FeaturePatternProfileContinuation.hxx in Headers */,
 				B1E000080000000000000008 /* RetainedEdgeTreatmentBuild.hxx in Headers */,
 				B1E200020000000000000002 /* Core3DEdgeTreatmentR2Types.h in Headers */,
 				B1E200030000000000000003 /* RetainedEdgeTreatmentR2Values.hxx in Headers */,
@@ -1403,6 +1417,7 @@
 				F17900010000000000000001 /* PatternNativeCollaborators.mm in Sources */,
 				D3C100010000000000000001 /* PathArrayNativeCollaborators.mm in Sources */,
 				D4E100010000000000000001 /* FeaturePatternNativeCollaborators.mm in Sources */,
+				C1D400010000000000000001 /* FeaturePatternProfileContinuation.mm in Sources */,
 				E18A00010000000000000001 /* Core3DNativeOpenings.mm in Sources */,
 				E26800020000000000000001 /* Core3DFinishingOpenings.mm in Sources */,
 				E27800010000000000000001 /* Core3DAssetAtlasOpenings.mm in Sources */,
@@ -1449,6 +1464,7 @@
 				1804F28E2C51140A0045084A /* CylinderDriver.cpp in Sources */,
 				18665F042CA2DA8500141E05 /* ModelPart.mm in Sources */,
 				328FBF2B2BC82E8300176AEA /* Core3DViewer.mm in Sources */,
+				C1D400050000000000000005 /* Core3DD4ProfileContinuationTesting.mm in Sources */,
 				A11A00000000000000000004 /* Core3DAgentMeasurements.mm in Sources */,
 				C3D5A0010000000000000001 /* Core3DModelingTypes.mm in Sources */,
 				B1E000010000000000000001 /* Core3DEdgeTreatmentTypes.mm in Sources */,

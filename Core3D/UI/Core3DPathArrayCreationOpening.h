@@ -93,9 +93,28 @@ __attribute__((objc_subclassing_restricted))
     replacingPathWithEntityIdentifier:(NSString *)entityIdentifier
     NS_SWIFT_NAME(replacingPath(entityIdentifier:));
 - (BOOL)cancel;
+#if DEBUG
+//! Real-instance lifecycle forwarding only. The fault is consumed after the
+//! actual CommitCommand boundary; no owner, marker, or receipt is fabricated.
+- (void)debugReportNextCloseUnproven;
+//! Reconciles only after this recovery owner re-reads its complete committed
+//! label/recipe/record plan. Failure preserves recovery ownership.
+- (BOOL)debugReconcileExactRecovery;
+//! One-shot observation at the real Applying transition. Reentrant cancel is
+//! expected to refuse because Applying is already installed.
+- (void)debugObserveApplying:
+    (void (^ _Nullable)(Core3DPathArrayCreationOpening *opening))observer;
+#endif
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end
+
+#if DEBUG
+@interface Core3DPathArrayEditingOpening (D3NativeOpeningContextDebug)
+//! Forwards the existing close fault to this actual production editor.
+- (void)debugReportNextCloseUnproven;
+@end
+#endif
 
 @interface Core3DViewController (PathArrayCreationOpening)
 - (Core3DPathArrayCreationOpening * _Nullable)
@@ -107,6 +126,11 @@ __attribute__((objc_subclassing_restricted))
 - (NSDictionary<NSString *, id> * _Nullable)
     debugPathArrayCreationEvidenceForEntityIdentifier:(NSString *)entityIdentifier
     NS_SWIFT_NAME(debugPathArrayCreationEvidence(entityIdentifier:));
+//! Read-only evidence captured by the real existing-editor PrepareNative and
+//! its final detached-plan revalidation. It cannot create or apply a plan.
+- (NSDictionary<NSString *, id> * _Nullable)
+    debugPathArrayNativeMutationEvidenceForEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugPathArrayNativeMutationEvidence(entityIdentifier:));
 #endif
 @end
 

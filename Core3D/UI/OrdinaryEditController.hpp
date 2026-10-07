@@ -13,6 +13,7 @@
 #include "../OCCTKit/SavedProgramSourceDetachedWork.hxx"
 #include "../OCCTKit/RetainedBooleanEditValues.hxx"
 #include "../OCCTKit/RetainedEdgeTreatmentSnapshot.hxx"
+#include "../OCCTKit/FeaturePatternProfileContinuation.hxx"
 #include "../OCCTKit/RetainedEdgeTreatmentR2Snapshot.hxx"
 #include "../OCCTKit/SourceFaceProvenanceRecord.hxx"
 #include <SelectMgr_EntityOwner.hxx>
@@ -164,6 +165,10 @@ struct OrdinaryTransformChange {
         completeProfileCapture;
     std::shared_ptr<const retained_edge_treatment::CompleteProfileRebuildResult>
         completeProfileResult;
+    // Present together only for the sealed Profile -> D4 continuation path.
+    // These are native capabilities, never caller-authored recipe bytes.
+    std::shared_ptr<const profile_d4::CurrentCapture> profileD4Capture;
+    std::shared_ptr<const profile_d4::PreparedHostEdit> profileD4Result;
     std::optional<enclosure::Parameters> enclosureRebuild;
     std::optional<planar_sweep::Definition> sweepRebuild;
     std::optional<rectangular_loft::Definition> loftRebuild;
@@ -223,6 +228,7 @@ struct OrdinaryTransformLedger {
     // a verified prior-state settlement has been established.
     bool retainedBudgetRefused = false;
     std::shared_ptr<const dependent_replay::Plan> dependentReplay;
+    std::shared_ptr<const dependent_replay::PreparedReplay> profileD4Replay;
     std::shared_ptr<native_opening::Context> dependentContext;
     std::shared_ptr<native_opening::CommandLease> dependentLease;
     std::vector<Handle(SelectMgr_EntityOwner)> selectionOwners;
@@ -441,6 +447,11 @@ public:
         std::shared_ptr<const dependent_replay::Plan>,
         std::shared_ptr<native_opening::Context>,
         OrdinaryEditResult* failure = nullptr) noexcept;
+    OrdinaryEditLease beginProfileD4Transform(
+        const OrdinaryTransformChange&,
+        std::shared_ptr<const dependent_replay::PreparedReplay>,
+        std::shared_ptr<native_opening::Context>,
+        OrdinaryEditResult* failure = nullptr) noexcept;
     OrdinaryEditLease beginMeshCopy(const Handle(AIS_Shape)& source,
         const TCollection_ExtendedString& name, OrdinaryEditResult* failure = nullptr) noexcept;
     OrdinaryEditLease beginCreation(const std::vector<OrdinaryCreationRequest>& requests,
@@ -481,7 +492,9 @@ private:
     OrdinaryEditLease beginTransformImpl(const std::vector<OrdinaryTransformChange>& changes,
         OrdinaryEditResult* failure, std::shared_ptr<NativeModelingCommitPermit> permit,
         std::shared_ptr<const dependent_replay::Plan> dependentReplay = {},
-        std::shared_ptr<native_opening::Context> dependentContext = {}) noexcept;
+        std::shared_ptr<native_opening::Context> dependentContext = {},
+        std::shared_ptr<const dependent_replay::PreparedReplay>
+            profileD4Replay = {}) noexcept;
     bool bindPlacementReceipt(OrdinaryTransformLedger& ledger,const OrdinaryTransformChange& change,
         const OcctObjectTransformState& previous,std::shared_ptr<NativeModelingCommitPermit> permit) noexcept;
     bool capturePlacementReceipt(const OrdinaryTransformLedger& ledger,placement::Evidence& out) noexcept;

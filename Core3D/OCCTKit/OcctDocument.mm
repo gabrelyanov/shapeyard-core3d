@@ -3566,7 +3566,8 @@ bool CollectValidatedPatternByteArrayRoles(
         }
         const TDF_Label aRoot = theDocument->Main().FindChild(
             core3d::pattern::DocumentRootTag, Standard_False);
-        if (!aRoot.IsNull()) {
+        if (!aRoot.IsNull()
+            && !Core3DAttributeFreeSubtree(aRoot)) {
             Handle(TDataStd_AsciiString) aMarker;
             if (!aRoot.FindAttribute(TDataStd_AsciiString::GetID(), aMarker)
                 || aMarker.IsNull()
@@ -3614,6 +3615,9 @@ bool CollectValidatedPatternByteArrayRoles(
             Standard_Size aDirectChildCount = 0;
             for (TDF_ChildIterator anIterator(aRoot, Standard_False);
                  anIterator.More(); anIterator.Next()) {
+                if (Core3DAttributeFreeSubtree(anIterator.Value())) {
+                    continue;
+                }
                 if (++aDirectChildCount > 100000) {
                     return false;
                 }

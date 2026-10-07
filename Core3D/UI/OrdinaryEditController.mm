@@ -366,6 +366,19 @@ OrdinaryEditLease OrdinaryEditController::beginDependentTransform(
     return beginTransformImpl({change}, failure, {}, std::move(replay),
                               std::move(context));
 }
+OrdinaryEditLease OrdinaryEditController::beginProfileD4Transform(
+    const OrdinaryTransformChange& change,
+    std::shared_ptr<const dependent_replay::PreparedReplay> replay,
+    std::shared_ptr<native_opening::Context> context,
+    OrdinaryEditResult* failure) noexcept {
+    if (!replay || !context
+        || replay->family() != dependent_replay::Family::FeaturePatternD4) {
+        if (failure) *failure = OrdinaryEditResult::Invalid;
+        return {};
+    }
+    return beginTransformImpl({change}, failure, {}, {}, std::move(context),
+                              std::move(replay));
+}
 OrdinaryEditLease OrdinaryEditController::beginModelingRebuild(const OrdinaryTransformChange& change,
     std::shared_ptr<NativeModelingCommitPermit> permit, OrdinaryEditResult* failure) noexcept {
     if (!permit) { if (failure) *failure=OrdinaryEditResult::Invalid; return {}; }
@@ -384,7 +397,9 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
     const std::vector<OrdinaryTransformChange>& changes, OrdinaryEditResult* failure,
     std::shared_ptr<NativeModelingCommitPermit> permit,
     std::shared_ptr<const dependent_replay::Plan> dependentReplay,
-    std::shared_ptr<native_opening::Context> dependentContext) noexcept
+    std::shared_ptr<native_opening::Context> dependentContext,
+    std::shared_ptr<const dependent_replay::PreparedReplay>
+        profileD4Replay) noexcept
 {
     const auto reject = [&](OrdinaryEditResult reason) {
         if (failure) { *failure = reason; }
@@ -404,14 +419,21 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
         const auto document = _document->Document();
         if (document.IsNull() || document->HasOpenCommand()) { CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Busy)); }
         OrdinaryTransformLedger ledger;
-        if (bool(dependentReplay) != bool(dependentContext)
-            || (dependentReplay && (changes.size() != 1 || permit
+        const bool dependent = bool(dependentReplay) || bool(profileD4Replay);
+        if ((bool(dependentReplay) && bool(profileD4Replay))
+                || dependent != bool(dependentContext)
+                || (dependent && (changes.size() != 1 || permit
                 || (changes.front().operation
                         != OrdinaryTransformOperation::CylindricalCutSourceRebuild
                     && changes.front().operation
-                        != OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild))))
+                        != OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild
+                    && changes.front().operation
+                        != OrdinaryTransformOperation::ProfileRebuild
+                    && changes.front().operation
+                        != OrdinaryTransformOperation::CompleteProfileRebuild))))
             return reject(OrdinaryEditResult::Invalid);
         ledger.dependentReplay = std::move(dependentReplay);
+        ledger.profileD4Replay = std::move(profileD4Replay);
         ledger.dependentContext = std::move(dependentContext);
         ledger.records.reserve(changes.size());
         if (permit && changes.size()!=1) CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
@@ -451,6 +473,15 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
             if (bool(request.completeProfileCapture) != completeProfile
                 || bool(request.completeProfileResult) != completeProfile) {
                 CORE3D_CUT_REFUSE("ordinary.complete-profile-capability",
+                    reject(OrdinaryEditResult::Invalid));
+            }
+            const bool profileD4 = bool(request.profileD4Capture);
+            if (profileD4 != bool(request.profileD4Result)
+                || (profileD4 && !profileRebuild)
+                || (profileRebuild
+                    && profileD4 != bool(ledger.dependentReplay
+                                        || ledger.profileD4Replay))) {
+                CORE3D_CUT_REFUSE("ordinary.profile-d4-capability",
                     reject(OrdinaryEditResult::Invalid));
             }
             if (request.enclosureRebuild.has_value() != (request.operation == OrdinaryTransformOperation::EnclosureRebuild)) {
@@ -772,7 +803,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                     || !record.previous.profile.IsCurrent(document, request.label)
                     || !MatricesEqual(record.previous.transform, request.transform)
                     || request.rotationAroundPivot || !geometryChanges
-                    || !profile::HasOnlyMetadataSubshapes(document, request.label)
+                    || (!profileD4
+                        && !profile::HasOnlyMetadataSubshapes(document, request.label))
                     || !profile::Encode(*request.profileRebuild, values)
                     || request.profileRebuild->metersPerUnit != record.previous.profile.parameters.metersPerUnit
                     || request.profileRebuild->constructionFrame != record.previous.profile.parameters.constructionFrame) {
@@ -793,7 +825,8 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                     || !record.previous.profile.IsCurrent(document, request.label)
                     || !MatricesEqual(record.previous.transform, request.transform)
                     || request.rotationAroundPivot || !geometryChanges
-                    || !profile::HasOnlyMetadataSubshapes(document, request.label)
+                    || (!profileD4
+                        && !profile::HasOnlyMetadataSubshapes(document, request.label))
                     || !capture || !result || result->capture_ != capture
                     || !snapshot || !snapshot->current() || !captured
                     || snapshot->ownerLabel_.Data() != document->GetData()
@@ -964,7 +997,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 ? OrdinaryEditResult::Invalid : OrdinaryEditResult::RetryableFailure);
         }
         if (auto& opened = std::get<OrdinaryTransformLedger>(*_pending);
-            opened.dependentReplay) {
+            opened.dependentReplay || opened.profileD4Replay) {
             opened.dependentLease = opened.dependentContext->borrowCommandLease(_command);
             if (!opened.dependentLease || !opened.dependentLease->ownsOpenCommand()) {
                 const auto closed = _command.abortAndObserve();
@@ -2308,6 +2341,14 @@ bool OrdinaryEditController::stageDependentSource(OrdinaryTransformLedger& ledge
             record.requested.cutProgramSourceRebuild,
             ledger.cutSourcePayload, false);
     }
+    if (record.requested.operation == OrdinaryTransformOperation::ProfileRebuild
+        || record.requested.operation
+            == OrdinaryTransformOperation::CompleteProfileRebuild) {
+        return record.requested.profileD4Capture
+            && record.requested.profileD4Result
+            && !profile_d4::Baseline(*record.requested.profileD4Result).IsNull()
+            && !profile_d4::Result(*record.requested.profileD4Result).IsNull();
+    }
     return false;
 }
 
@@ -2398,7 +2439,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             }
             Handle(AIS_Shape) candidate = new AIS_Shape(record.requested.shape);
             candidate->SetLocalTransformation(record.requested.transform);
-            bool sweepStaged=false,loftStaged=false,cutStaged=false,cutSourceStaged=false,programSourceStaged=false,treatmentStaged=false,treatmentStagedR2=false;
+            bool sweepStaged=false,loftStaged=false,cutStaged=false,cutSourceStaged=false,programSourceStaged=false,profileD4Staged=false,treatmentStaged=false,treatmentStagedR2=false;
             bool treatmentSourceEditedR2=false;
             if(record.requested.edgeTreatmentSnapshot){
                 core3d::retained_edge_treatment::Refusal refusal;
@@ -2516,7 +2557,23 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     *record.requested.cutProgramSourcePatch,record.requested.cutProgramSourceRebuild,ledger.cutSourcePayload,pairedFault);
                 if(!programSourceStaged)throw Standard_Failure("Saved program source paired staging failed");
             }
-            const bool featureStaged=sweepStaged||loftStaged||cutStaged||cutSourceStaged||programSourceStaged||treatmentStaged;
+            if ((record.requested.operation
+                    == OrdinaryTransformOperation::ProfileRebuild
+                    || record.requested.operation
+                    == OrdinaryTransformOperation::CompleteProfileRebuild)
+                && ledger.profileD4Replay) {
+                if (!ledger.dependentLease || !record.requested.profileD4Capture
+                    || !record.requested.profileD4Result)
+                    throw Standard_Failure("Profile D4 staging admission changed");
+                OrdinaryDependentSourceMutation source(*this, ledger, record);
+                profileD4Staged = ledger.profileD4Replay->openingCurrent(*_document)
+                    && source.stage(*_document, *ledger.dependentLease)
+                    && ledger.profileD4Replay->stage(
+                        *_document, *ledger.dependentLease);
+                if (!profileD4Staged)
+                    throw Standard_Failure("Profile D4 dependent staging failed");
+            }
+            const bool featureStaged=sweepStaged||loftStaged||cutStaged||cutSourceStaged||programSourceStaged||profileD4Staged||treatmentStaged;
             // A successfully staged paired R2 treatment result is paired
             // feature staging: the stage already replaced the owner shape and
             // rebound both naming records, so the fallback shape replacement
@@ -2554,7 +2611,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     && !_document->StageMeshRegionPartition(record.previous.label,regionPartition))
                 || (record.requested.operation == OrdinaryTransformOperation::MeshUVAtlas
                     && !_document->MarkTriangleUVAtlas(record.previous.label, record.requested.meshUVAtlasOptions))
-                || (!treatmentStaged
+                || (!treatmentStaged && !profileD4Staged
                     && (record.requested.operation == OrdinaryTransformOperation::ProfileRebuild
                         || record.requested.operation
                             == OrdinaryTransformOperation::CompleteProfileRebuild)
@@ -2822,6 +2879,9 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             && _document->ReadDependentReplayPlan(*ledger.dependentReplay)
                 != dependent_replay::Refusal::None)
             throw Standard_Failure("Dependent replay candidate readback failed");
+        if (ledger.profileD4Replay
+            && !ledger.profileD4Replay->read(*_document))
+            throw Standard_Failure("Profile D4 candidate readback failed");
         if (!stageRebuildReceipt(ledger) || (ledger.modelingReceipt && !ledger.modelingReceipt->permit->current()))
             throw Standard_Failure("Ordinary rebuild receipt staging failed");
         ledger.candidateSealed = true;
@@ -2939,6 +2999,11 @@ OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
         if (candidate && ledger.dependentReplay
             && _document->ReadDependentReplayPlan(*ledger.dependentReplay)
                 != dependent_replay::Refusal::None) {
+            _state = OrdinaryEditState::OutcomeUnknown;
+            return OrdinaryEditResult::OutcomeUnknown;
+        }
+        if (candidate && ledger.profileD4Replay
+            && !ledger.profileD4Replay->read(*_document)) {
             _state = OrdinaryEditState::OutcomeUnknown;
             return OrdinaryEditResult::OutcomeUnknown;
         }

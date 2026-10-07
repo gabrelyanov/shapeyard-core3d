@@ -357,6 +357,56 @@ bool PreparedRecipeMatches(const pattern_recipe_clone::Prepared& expected,
     return expected.analyticBoolean && actual.analyticBoolean.value
         && expected.analyticBoolean->bytes == actual.analyticBoolean.value->bytes;
 }
+
+bool SameMember(const path_array::Member& left,
+                const path_array::Member& right) noexcept {
+    return left.identity == right.identity && left.localID == right.localID
+        && left.coordinate.row == right.coordinate.row
+        && left.coordinate.column == right.coordinate.column
+        && left.state == right.state;
+}
+
+bool SamePlacement(const path_array::Placement& left,
+                   const path_array::Placement& right) noexcept {
+    return left.identity == right.identity && left.localID == right.localID
+        && left.ordinal == right.ordinal
+        && left.requestedArcLength == right.requestedArcLength
+        && left.measuredArcLength == right.measuredArcLength
+        && left.parameter == right.parameter
+        && left.occurrenceFrame == right.occurrenceFrame;
+}
+
+bool SamePreparedRecipe(const pattern_recipe_clone::Prepared& left,
+                        const pattern_recipe_clone::Prepared& right) noexcept {
+    try {
+        if (left.family != right.family
+            || left.featureIdentifier != right.featureIdentifier
+            || left.identities.global != right.identities.global
+            || !pattern_recipe_clone::ShapeBytesEqual(left.binding, right.binding))
+            return false;
+        if (left.family == pattern_recipe_clone::Family::None) return true;
+        if (left.family == pattern_recipe_clone::Family::Sweep) {
+            std::vector<double> a, b;
+            return sweep_persistence::Encode(left.sweep, a)
+                && sweep_persistence::Encode(right.sweep, b) && a == b;
+        }
+        if (left.family == pattern_recipe_clone::Family::Loft) {
+            std::vector<double> a, b;
+            return loft_persistence::Encode(left.loft, a)
+                && loft_persistence::Encode(right.loft, b) && a == b;
+        }
+        return left.analyticBoolean && right.analyticBoolean
+            && left.analyticBoolean->bytes == right.analyticBoolean->bytes;
+    } catch (...) { return false; }
+}
+
+bool SameClone(const OcctPreparedLabelClone& left,
+               const OcctPreparedLabelClone& right) noexcept {
+    return left.source.IsEqual(right.source)
+        && left.representation == right.representation
+        && pattern_recipe_clone::ShapeBytesEqual(left.detachedShape,
+                                                  right.detachedShape);
+}
 } // namespace
 
 struct NativeMutation final {
@@ -369,8 +419,102 @@ struct NativeMutation final {
     std::shared_ptr<const pattern_owner::AllLabelSnapshot> before;
     OcctAllLabelPlan labels;
     std::vector<Recipe> recipes;
+    std::vector<OcctIssuedLabelIdentity> issued;
+    std::vector<std::string> recipeFeatureIdentifiers;
     std::vector<std::uint8_t> canonicalCandidateBytes;
 };
+
+#if DEBUG
+namespace {
+struct DebugMutationObservation final {
+    std::vector<std::string> plannedEntities;
+    std::vector<std::string> plannedRecipeFeatures;
+    std::vector<std::string> createdEntities;
+    std::vector<std::string> revalidatedEntities;
+    std::vector<std::string> revalidatedRecipeFeatures;
+    std::size_t reservationCount = 0;
+    std::size_t historicalRemovalCount = 0;
+    std::size_t candidateRemovalCount = 0;
+    std::size_t liveRemovalCount = 0;
+    std::size_t validationCount = 0;
+    bool finalPlanEqual = false;
+};
+
+std::map<std::string, DebugMutationObservation> gDebugMutationObservations;
+
+void RecordPreparedMutation(const PreparedEdit& prepared) {
+    if (!prepared.admitted() || !prepared.native) return;
+    DebugMutationObservation value;
+    value.reservationCount = prepared.native->issued.size();
+    value.historicalRemovalCount =
+        prepared.opening.record.definition.removals.size();
+    value.candidateRemovalCount = prepared.candidate.removals.size();
+    value.liveRemovalCount = prepared.native->labels.removals.size();
+    for (const auto& recipe : prepared.native->recipes) {
+        value.plannedEntities.push_back(recipe.entityIdentifier);
+        value.plannedRecipeFeatures.push_back(
+            recipe.prepared.featureIdentifier);
+    }
+    for (const auto& created : prepared.native->labels.creates)
+        value.createdEntities.push_back(
+            created.identity.EntityIdentifier());
+    gDebugMutationObservations[Text(prepared.candidate.source.entity)] =
+        std::move(value);
+}
+
+void RecordRevalidatedMutation(const PreparedEdit& prepared,
+                               const PreparedEdit& regenerated,
+                               bool equal) {
+    const auto found = gDebugMutationObservations.find(
+        Text(prepared.candidate.source.entity));
+    if (found == gDebugMutationObservations.end()) return;
+    found->second.finalPlanEqual = equal;
+    ++found->second.validationCount;
+    if (!equal || !regenerated.native) return;
+    for (const auto& recipe : regenerated.native->recipes) {
+        found->second.revalidatedEntities.push_back(recipe.entityIdentifier);
+        found->second.revalidatedRecipeFeatures.push_back(
+            recipe.prepared.featureIdentifier);
+    }
+}
+
+NSArray<NSString *> *Strings(const std::vector<std::string>& values) {
+    NSMutableArray<NSString *> *result =
+        [NSMutableArray arrayWithCapacity:values.size()];
+    for (const auto& value : values)
+        [result addObject:[[NSString alloc]
+            initWithBytes:value.data() length:value.size()
+            encoding:NSUTF8StringEncoding] ?: @""];
+    return result;
+}
+} // namespace
+
+NSDictionary<NSString *, id> *DebugNativeMutationEvidence(
+    const std::string& sourceEntity) noexcept {
+    try {
+        const auto found = gDebugMutationObservations.find(sourceEntity);
+        if (found == gDebugMutationObservations.end()) return nil;
+        const auto& value = found->second;
+        return @{
+            @"schema": @"shapeyard.d3-native-mutation-evidence.v1",
+            @"plannedEntityIdentifiers": Strings(value.plannedEntities),
+            @"plannedRecipeFeatureIdentifiers":
+                Strings(value.plannedRecipeFeatures),
+            @"createdEntityIdentifiers": Strings(value.createdEntities),
+            @"revalidatedEntityIdentifiers":
+                Strings(value.revalidatedEntities),
+            @"revalidatedRecipeFeatureIdentifiers":
+                Strings(value.revalidatedRecipeFeatures),
+            @"reservationCount": @(value.reservationCount),
+            @"historicalRemovalCount": @(value.historicalRemovalCount),
+            @"candidateRemovalCount": @(value.candidateRemovalCount),
+            @"liveRemovalCount": @(value.liveRemovalCount),
+            @"validationCount": @(value.validationCount),
+            @"finalPlanEqual": @(value.finalPlanEqual)
+        };
+    } catch (...) { return nil; }
+}
+#endif
 
 namespace {
 class OcafD3Stager final : public Stager {
@@ -625,20 +769,46 @@ const pattern_owner::AllLabelSnapshot::Member* FindBefore(
 }
 
 PreparedEdit PrepareMutation(OcctDocument& owner, PreparedEdit result,
-    const std::vector<OcctIssuedLabelIdentity>& issued) noexcept {
+    const std::vector<OcctIssuedLabelIdentity>& issued,
+    const std::vector<std::string>* retainedRecipeFeatures = nullptr) noexcept {
     PreparedEdit refused; refused.opening = result.opening;
     try {
         if (!result.admitted() || !result.opening.labels) return refused;
         auto mutation = std::make_shared<NativeMutation>();
         mutation->before = result.opening.labels;
+        mutation->issued = issued;
         if (!path_array::Encode(result.candidate,
                                 mutation->canonicalCandidateBytes)) return refused;
         std::set<std::string> ledgerSet;
         for (const auto& removed : result.opening.record.definition.removals) {
-            ledgerSet.insert(Text(removed.identity));
+            if (FindBefore(result.opening, removed.identity)
+                || !ledgerSet.insert(Text(removed.identity)).second) return refused;
         }
         mutation->labels.retainedRemovalLedger.assign(
             ledgerSet.begin(), ledgerSet.end());
+
+        // ReconcileMembers appends new removals after the canonical historical
+        // prefix. Historical tombstones have no live label by design: compare
+        // them byte-for-byte with the opening and retain them only in SYPA/1's
+        // permanent ledger. Any altered, reordered, duplicated, resurrected or
+        // ledger-inconsistent entry refuses before a command exists.
+        const auto& openingDefinition = result.opening.record.definition;
+        if (result.candidate.removals.size() < openingDefinition.removals.size())
+            return refused;
+        std::set<std::uint64_t> expectedRetired(
+            openingDefinition.issuance.retiredLocalIDs.begin(),
+            openingDefinition.issuance.retiredLocalIDs.end());
+        if (expectedRetired.size()
+                != openingDefinition.issuance.retiredLocalIDs.size()) return refused;
+        std::set<std::uint64_t> historicalLocalIDs;
+        for (std::size_t index = 0;
+             index < openingDefinition.removals.size(); ++index) {
+            const auto& historical = openingDefinition.removals[index];
+            if (!SameMember(historical, result.candidate.removals[index])
+                || !historicalLocalIDs.insert(historical.localID).second
+                || !expectedRetired.count(historical.localID)) return refused;
+        }
+        if (historicalLocalIDs != expectedRetired) return refused;
 
         path_array::Definition allActive = result.candidate;
         for (std::size_t ordinal = 1; ordinal < allActive.members.size(); ++ordinal)
@@ -712,29 +882,110 @@ PreparedEdit PrepareMutation(OcctDocument& owner, PreparedEdit result,
                 std::string feature;
                 if (result.opening.labels->sourceRecipe.family
                         != pattern_recipe_clone::Family::None) {
-                    feature = OcctDocument::NewProfileIdentifier();
+                    feature = retainedRecipeFeatures
+                        ? (reservation < retainedRecipeFeatures->size()
+                            ? (*retainedRecipeFeatures)[reservation] : std::string{})
+                        : OcctDocument::NewProfileIdentifier();
                     if (feature.empty()) return refused;
+                } else if (retainedRecipeFeatures
+                    && (reservation >= retainedRecipeFeatures->size()
+                        || !(*retainedRecipeFeatures)[reservation].empty())) {
+                    return refused;
                 }
                 if (!pattern_recipe_clone::Prepare(
                         result.opening.labels->sourceRecipe, clone.detachedShape,
                         feature, baked, recipe.prepared)) return refused;
+                mutation->recipeFeatureIdentifiers.push_back(feature);
                 ++reservation;
             }
             mutation->recipes.push_back(std::move(recipe));
         }
-        if (reservation != issued.size()) return refused;
-        for (const auto& removed : result.candidate.removals) {
+        if (reservation != issued.size()
+            || mutation->recipeFeatureIdentifiers.size() != issued.size()
+            || (retainedRecipeFeatures
+                && *retainedRecipeFeatures
+                    != mutation->recipeFeatureIdentifiers)) return refused;
+        for (std::size_t index = openingDefinition.removals.size();
+             index < result.candidate.removals.size(); ++index) {
+            const auto& removed = result.candidate.removals[index];
             const auto* before = FindBefore(result.opening, removed.identity);
-            if (!before) return refused;
+            const auto openingMember = std::find_if(
+                openingDefinition.members.begin(), openingDefinition.members.end(),
+                [&](const path_array::Member& member) {
+                    return member.identity == removed.identity;
+                });
+            if (!before || openingMember == openingDefinition.members.end()
+                || openingMember->localID != removed.localID
+                || openingMember->coordinate.row != removed.coordinate.row
+                || openingMember->coordinate.column != removed.coordinate.column
+                || removed.state != pattern::MemberState::Removed
+                || before->localIdentifier != removed.localID
+                || !expectedRetired.insert(removed.localID).second) return refused;
             mutation->labels.removals.push_back(before->receipt);
             mutation->labels.retainedRemovalLedger.push_back(
                 before->receipt.visibility.object.object.entityIdentifier);
             mutation->labels.retainedRemovalLedger.push_back(
                 before->receipt.visibility.object.object.definitionIdentifier);
         }
+        const std::set<std::uint64_t> candidateRetired(
+            result.candidate.issuance.retiredLocalIDs.begin(),
+            result.candidate.issuance.retiredLocalIDs.end());
+        if (candidateRetired.size()
+                != result.candidate.issuance.retiredLocalIDs.size()
+            || candidateRetired != expectedRetired) return refused;
         result.native = std::move(mutation);
         return result;
     } catch (...) { return refused; }
+}
+
+bool SameLabelPlan(const OcctAllLabelPlan& left,
+                   const OcctAllLabelPlan& right) noexcept {
+    try {
+        if (left.creates.size() != right.creates.size()
+            || left.replacements.size() != right.replacements.size()
+            || left.removals.size() != right.removals.size()
+            || left.retainedRemovalLedger != right.retainedRemovalLedger)
+            return false;
+        for (std::size_t index = 0; index < left.creates.size(); ++index) {
+            const auto& a = left.creates[index]; const auto& b = right.creates[index];
+            if (a.identity.EntityIdentifier() != b.identity.EntityIdentifier()
+                || a.identity.DefinitionIdentifier()
+                    != b.identity.DefinitionIdentifier()
+                || !SameClone(a.clone, b.clone)) return false;
+        }
+        for (std::size_t index = 0; index < left.replacements.size(); ++index) {
+            const auto& a = left.replacements[index];
+            const auto& b = right.replacements[index];
+            if (!a.expected.IsEqual(b.expected)
+                || !SameClone(a.clone, b.clone)) return false;
+        }
+        for (std::size_t index = 0; index < left.removals.size(); ++index)
+            if (!left.removals[index].IsEqual(right.removals[index])) return false;
+        return true;
+    } catch (...) { return false; }
+}
+
+bool SameNativeMutation(const NativeMutation& left,
+                        const NativeMutation& right) noexcept {
+    try {
+        if (left.canonicalCandidateBytes != right.canonicalCandidateBytes
+            || left.issued.size() != right.issued.size()
+            || left.recipeFeatureIdentifiers != right.recipeFeatureIdentifiers
+            || left.recipes.size() != right.recipes.size()
+            || !SameLabelPlan(left.labels, right.labels)) return false;
+        for (std::size_t index = 0; index < left.issued.size(); ++index)
+            if (left.issued[index].EntityIdentifier()
+                    != right.issued[index].EntityIdentifier()
+                || left.issued[index].DefinitionIdentifier()
+                    != right.issued[index].DefinitionIdentifier()) return false;
+        for (std::size_t index = 0; index < left.recipes.size(); ++index) {
+            const auto& a = left.recipes[index]; const auto& b = right.recipes[index];
+            if (a.ordinal != b.ordinal || a.created != b.created
+                || a.entityIdentifier != b.entityIdentifier
+                || !SamePreparedRecipe(a.prepared, b.prepared)) return false;
+        }
+        return true;
+    } catch (...) { return false; }
 }
 
 Edit RetainedEdit(const path_array::Definition& value) {
@@ -756,6 +1007,82 @@ Edit RetainedEdit(const path_array::Definition& value) {
         if (value.members[ordinal].state == pattern::MemberState::Suppressed)
             edit.suppressedOrdinals.insert(std::uint32_t(ordinal));
     return edit;
+}
+
+bool RevalidateNativeMutation(OcctDocument& owner,
+    const PreparedEdit& prepared,
+    const std::shared_ptr<native_opening::Context>& context,
+    PreparedEdit& regenerated) noexcept {
+    regenerated = {};
+    try {
+        if (!prepared.admitted() || !prepared.native || !context
+            || owner.Document().IsNull() || owner.Document()->HasOpenCommand())
+            return false;
+        Snapshot current;
+        const std::string selected = Text(
+            prepared.opening.record.definition.members.front().identity);
+        if (CaptureNative(owner, selected, context, current) != Refusal::None
+            || !current.admitted()
+            || current.documentTime != prepared.opening.documentTime
+            || !current.record.label.IsEqual(prepared.opening.record.label)
+            || current.record.bytes != prepared.opening.record.bytes
+            || !pattern_owner::IsExactlyEqual(*current.labels,
+                                               *prepared.opening.labels))
+            return false;
+
+        LivePathResolver paths(owner, context);
+        PathAuthority candidatePath;
+        if (paths.resolveCurrent(prepared.candidate.path, candidatePath)
+                != Refusal::None
+            || !candidatePath.currentFor(prepared.candidate.path)) return false;
+        Edit edit = RetainedEdit(prepared.candidate);
+        edit.replacementPath = candidatePath;
+        std::size_t next = 0;
+        const pattern::IssueUUID issue = [&](UUID& value) {
+            return next < prepared.native->issued.size()
+                && receipt::ParseUUID(
+                    prepared.native->issued[next++].EntityIdentifier(), value);
+        };
+        regenerated = Prepare(current, edit, Limits{}, issue);
+        if (!regenerated.admitted()
+            || next != prepared.native->issued.size()) return false;
+        regenerated = PrepareMutation(owner, std::move(regenerated),
+            prepared.native->issued,
+            &prepared.native->recipeFeatureIdentifiers);
+        if (!regenerated.admitted() || !regenerated.native
+            || regenerated.candidatePath.locator.owner
+                != prepared.candidatePath.locator.owner
+            || regenerated.candidatePath.locator.feature
+                != prepared.candidatePath.locator.feature
+            || regenerated.candidatePath.locator.definitionRevision
+                != prepared.candidatePath.locator.definitionRevision
+            || regenerated.candidatePath.locator.canonicalDefinitionDigest
+                != prepared.candidatePath.locator.canonicalDefinitionDigest
+            || regenerated.placements.size() != prepared.placements.size())
+            return false;
+        for (std::size_t index = 0; index < prepared.placements.size(); ++index)
+            if (!SamePlacement(prepared.placements[index],
+                               regenerated.placements[index])) return false;
+        return prepared.projection.instances == regenerated.projection.instances
+            && prepared.projection.aggregateTopologyNodes
+                == regenerated.projection.aggregateTopologyNodes
+            && prepared.projection.projectedDocumentBytes
+                == regenerated.projection.projectedDocumentBytes
+            && prepared.projection.projectedMemoryBytes
+                == regenerated.projection.projectedMemoryBytes
+            && prepared.projection.admitted == regenerated.projection.admitted
+            && prepared.buildReceipt.totalArcLength
+                == regenerated.buildReceipt.totalArcLength
+            && prepared.buildReceipt.maximumMeasuredArcError
+                == regenerated.buildReceipt.maximumMeasuredArcError
+            && prepared.buildReceipt.requestedInstances
+                == regenerated.buildReceipt.requestedInstances
+            && prepared.buildReceipt.emittedInstances
+                == regenerated.buildReceipt.emittedInstances
+            && prepared.buildReceipt.closedSeamCanonicalized
+                == regenerated.buildReceipt.closedSeamCanonicalized
+            && SameNativeMutation(*prepared.native, *regenerated.native);
+    } catch (...) { regenerated = {}; return false; }
 }
 } // namespace
 
@@ -891,6 +1218,7 @@ PreparedEdit PrepareNative(OcctDocument& owner, const Snapshot& opening,
         }
         auto prepared = PrepareMutation(owner, std::move(result), issued);
 #if DEBUG
+        RecordPreparedMutation(prepared);
         NSLog(@"R179_D3_PREPARE gate=native-mutation admitted=%d native=%d refusal=%u",
               int(prepared.admitted()), int(prepared.native != nullptr),
               unsigned(prepared.refusal));
@@ -901,6 +1229,17 @@ PreparedEdit PrepareNative(OcctDocument& owner, const Snapshot& opening,
 
 ApplyOutcome ApplyNative(OcctDocument& owner, const PreparedEdit& prepared,
     const std::shared_ptr<native_opening::Context>& context) noexcept {
+    // Rebuild the complete detached plan after exact currentness, with the
+    // original reservation handles and recipe feature identities. Equality is
+    // proven before the one public Apply path is allowed to open its command.
+    PreparedEdit regenerated;
+    const bool revalidated = RevalidateNativeMutation(
+        owner, prepared, context, regenerated);
+#if DEBUG
+    RecordRevalidatedMutation(prepared, regenerated, revalidated);
+#endif
+    if (!revalidated)
+        return ApplyOutcome::Refused;
     OcafD3Authority labels; LivePathResolver paths(owner, context);
     OcafD3Stager stager(owner, context);
     const auto outcome = Apply(owner, prepared, labels, paths, stager);

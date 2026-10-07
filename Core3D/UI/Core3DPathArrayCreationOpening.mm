@@ -34,6 +34,13 @@
 #include <string>
 #include <vector>
 
+#if DEBUG
+namespace core3d::path_array_owner {
+NSDictionary<NSString *, id> *DebugNativeMutationEvidence(
+    const std::string& sourceEntity) noexcept;
+}
+#endif
+
 namespace {
 namespace array = core3d::path_array;
 namespace curve = core3d::bounded_curve;
@@ -1034,6 +1041,9 @@ Core3DPathArrayPreview *Preview(const CreationCapture& capture,
     std::atomic<State> _state;
     std::uint64_t _generation;
     Core3DPathArrayPreparedCandidate *_token;
+#if DEBUG
+    void (^_debugApplyingObserver)(Core3DPathArrayCreationOpening *);
+#endif
 }
 - (instancetype)initWithCapture:(CreationCapture)capture;
 @end
@@ -1089,6 +1099,13 @@ Core3DPathArrayPreview *Preview(const CreationCapture& capture,
                        @"No current path-array preparation.", nil);
         return;
     }
+#if DEBUG
+    if (_debugApplyingObserver) {
+        auto observer = _debugApplyingObserver;
+        _debugApplyingObserver = nil;
+        observer(self);
+    }
+#endif
     _token = nil; ++_generation;
     const auto outcome = ApplyCreation(_capture, _preparedPlan);
     const Core3DProfileConstructionResult result = outcome == CreateOutcome::Committed
@@ -1137,6 +1154,39 @@ Core3DPathArrayPreview *Preview(const CreationCapture& capture,
     return NO;
 }
 
+#if DEBUG
+- (void)debugReportNextCloseUnproven {
+    if (_capture.context) _capture.context->debugReportNextCloseUnproven();
+}
+
+- (void)debugObserveApplying:
+    (void (^)(Core3DPathArrayCreationOpening *))observer {
+    _debugApplyingObserver = [observer copy];
+}
+
+- (BOOL)debugReconcileExactRecovery {
+    if (_state.load() != State::Recovery || _capture.owner.IsNull()
+        || !_capture.context || _preparedPlan.recipes.empty()) return NO;
+    try {
+        std::vector<OcctExactLabelReceipt> receipts;
+        receipts.reserve(_preparedPlan.recipes.size());
+        for (const auto& entry : _preparedPlan.recipes) {
+            UUID entity{}; core3d::pattern_owner::LabelReceipt label;
+            OcctExactLabelReceipt exact;
+            if (!core3d::pattern_owner::Parse(entry.entityIdentifier, entity)
+                || !ResolveFreeLabel(*_capture.owner, entity, label)
+                || !_capture.owner->CaptureExactFreeLabel(label.label, exact)) return NO;
+            receipts.push_back(std::move(exact));
+        }
+        if (!ReadBackCreation(*_capture.owner, _capture, _preparedPlan, receipts)
+            || !_capture.context->reconcileRecovery(true)) return NO;
+        _state.store(State::Settled);
+        _preparedPlan = {}; _capture = {};
+        return YES;
+    } catch (...) { return NO; }
+}
+#endif
+
 @end
 
 @implementation Core3DViewController (PathArrayCreationOpening)
@@ -1166,6 +1216,7 @@ Core3DPathArrayPreview *Preview(const CreationCapture& capture,
                 @"schema": @"shapeyard.d3-path-array-creation-evidence.v1",
                 @"recordCount": @0, @"valid": @NO,
                 @"undoCount": @(document->GetAvailableUndos()),
+                @"redoCount": @(document->GetAvailableRedos()),
                 @"documentMetersPerUnit": @0,
                 @"openCommand": @(document->HasOpenCommand()),
                 @"tableReadable": @NO
@@ -1202,6 +1253,8 @@ Core3DPathArrayPreview *Preview(const CreationCapture& capture,
                 core3d::pattern_owner::LabelReceipt label;
                 recipe::Source memberRecipe;
                 NSString *family = @"missing", *recipeFeature = @"";
+                NSString *definitionIdentifier = @"";
+                NSData *shapeBytes = [NSData data];
                 if (ResolveFreeLabel(*owner, member.identity, label)
                     && recipe::Capture(document, label.label, memberRecipe)) {
                     family = memberRecipe.family == recipe::Family::None ? @"none"
@@ -1210,25 +1263,61 @@ Core3DPathArrayPreview *Preview(const CreationCapture& capture,
                         : @"analyticBoolean";
                     recipeFeature = Text(
                         core3d::pattern_owner::RecipeFeatureIdentifier(memberRecipe));
+                    OcctExactLabelReceipt exact;
+                    std::string bytes;
+                    if (owner->CaptureExactFreeLabel(label.label, exact)
+                        && core3d::retained_part_boolean::ExactShapeBytes(
+                            exact.visibility.object.object.shape, bytes)) {
+                        definitionIdentifier = Text(
+                            exact.visibility.object.object.definitionIdentifier);
+                        shapeBytes = [NSData dataWithBytes:bytes.data()
+                                                   length:bytes.size()];
+                    }
                 }
                 [members addObject:@{@"entityIdentifier": UUIDText(member.identity),
+                    @"definitionIdentifier": definitionIdentifier,
                     @"localID": @(member.localID), @"ordinal": @(member.coordinate.column),
                     @"suppressed": @(member.state
                         == core3d::pattern::MemberState::Suppressed),
                     @"recipeFamily": family,
-                    @"recipeFeatureIdentifier": recipeFeature}];
+                    @"recipeFeatureIdentifier": recipeFeature,
+                    @"shapeBytes": shapeBytes}];
             }
+            NSMutableArray *removals = [NSMutableArray array];
+            for (const auto& removed : definition.removals)
+                [removals addObject:@{
+                    @"entityIdentifier": UUIDText(removed.identity),
+                    @"localID": @(removed.localID),
+                    @"ordinal": @(removed.coordinate.column)
+                }];
+            NSMutableArray *retiredLocalIDs = [NSMutableArray array];
+            for (const auto localID : definition.issuance.retiredLocalIDs)
+                [retiredLocalIDs addObject:@(localID)];
             evidence[@"ownerEntityIdentifier"] = UUIDText(definition.owner.entity);
             evidence[@"ownerDefinitionIdentifier"] = UUIDText(definition.owner.definition);
             evidence[@"featureIdentifier"] = UUIDText(definition.feature);
             evidence[@"sourceEntityIdentifier"] = UUIDText(definition.source.entity);
             evidence[@"pathEntityIdentifier"] = UUIDText(definition.path.owner.entity);
             evidence[@"memberCount"] = @(definition.members.size());
+            evidence[@"removalCount"] = @(definition.removals.size());
             evidence[@"recordBytes"] = @(match->bytes.size());
             evidence[@"members"] = members;
+            evidence[@"removals"] = removals;
+            evidence[@"retiredLocalIDs"] = retiredLocalIDs;
             return evidence;
         } catch (...) { return nil; }
     }
+}
+
+- (NSDictionary<NSString *, id> *)
+    debugPathArrayNativeMutationEvidenceForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    if (![NSThread isMainThread] || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || !entityIdentifier.UTF8String) return nil;
+    const std::string entity(entityIdentifier.UTF8String,
+        [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+    return core3d::path_array_owner::DebugNativeMutationEvidence(entity);
 }
 #endif
 

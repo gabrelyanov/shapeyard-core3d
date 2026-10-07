@@ -1560,31 +1560,29 @@ bool BoundedCreationCandidate(NSDictionary *value, NSString *name,
         || !_state.compare_exchange_strong(expected, State::Prepared)) return nil;
     try {
         if (!_context) { _state.store(State::Open); return nil; }
-        const auto current = _context->recapture(64, 64);
-        const auto& openingFence = _context->openingFence();
-        if (!current || current->document() != openingFence.document()
-            || current->data() != openingFence.data()
-            || current->documentGeneration() != openingFence.documentGeneration()
-            || current->modelRevision() != openingFence.modelRevision()
-            || current->metersPerUnit() != openingFence.metersPerUnit()
-            || current->selectionMode() != core3d::scene::ElementKind::Object
-            || current->selection().size() != 1
-            || current->selection().front().kind != core3d::scene::ElementKind::Object
-            || current->selection().front().entityIdentifier.empty()
-            || current->selection().front().entityIdentifier.size() > 128) {
+        // Browser selection deliberately invalidates the old immutable fence.
+        // The native viewer may issue a new context only when selection is the
+        // sole changed component; RefreshPathNative below then re-reads the
+        // exact original D3 and selected committed C1 records under that new
+        // issuer.  The old context and every old preparation stay stale.
+        auto replacementContext = _context->captureSelectionReplacement(64, 64);
+        if (!replacementContext) {
             _state.store(State::Open); return nil;
         }
+        const auto& replacementFence = replacementContext->openingFence();
         core3d::path_array_owner::Snapshot refreshed;
         core3d::path_array_owner::PathAuthority replacement;
         if (_owner.IsNull()
             || core3d::path_array_owner::RefreshPathNative(*_owner, _opening,
-                current->selection().front().entityIdentifier, _context,
-                refreshed, replacement) != core3d::path_array_owner::Refusal::None) {
+                replacementFence.selection().front().entityIdentifier,
+                replacementContext, refreshed, replacement)
+                    != core3d::path_array_owner::Refusal::None
+            || !replacementContext->isCurrent(64, 64)) {
             _state.store(State::Open); return nil;
         }
         Core3DPathArrayEditingOpening *next =
             [[Core3DPathArrayEditingOpening alloc] initWithOwner:_owner
-                context:_context opening:std::move(refreshed)
+                context:std::move(replacementContext) opening:std::move(refreshed)
                 replacementPath:std::move(replacement)];
         if (!next) { _state.store(State::Open); return nil; }
         _state.store(State::Cancelled);
@@ -1621,6 +1619,11 @@ bool BoundedCreationCandidate(NSDictionary *value, NSString *name,
     if (!_state.compare_exchange_strong(expected, State::Cancelled)) return NO;
     _context.reset(); return YES;
 }
+#if DEBUG
+- (void)debugReportNextCloseUnproven {
+    if (_context) _context->debugReportNextCloseUnproven();
+}
+#endif
 @end
 
 @interface Core3DFeaturePatternPreview () {
