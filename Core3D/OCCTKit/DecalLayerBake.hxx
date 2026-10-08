@@ -234,8 +234,7 @@ inline bool Store(PrivateDestination& destination,
                 > kMaximumResidentPNGBytes - incoming)
             return false;
         for (const PublishedDerivative& existing : destination.values)
-            if (existing.owner == value.owner
-                || existing.inputKey == value.inputKey)
+            if (existing.inputKey == value.inputKey)
                 return false;
         destination.values.push_back(value);
         destination.residentBytes += incoming;

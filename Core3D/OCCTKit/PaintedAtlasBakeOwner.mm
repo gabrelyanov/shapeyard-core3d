@@ -689,6 +689,83 @@ Outcome BuildAndBakeForExport(
     }
 }
 
+Outcome BuildAndBakeTransientForExport(
+    const TransientExportCapture& capture,
+    const aa::build::FinalMemberInput& finalMember,
+    const aa::build::Settings& settings,
+    ExportBake& output,
+    std::string& diagnosis) noexcept {
+    output = {};
+    diagnosis.clear();
+    try {
+        if (!(capture.member.owner == finalMember.savedMember.owner)
+            || !(capture.member.finishing
+                == finalMember.savedMember.finishing)
+            || !(capture.member.source == finalMember.savedMember.source)
+            || capture.sources.empty()) {
+            diagnosis = "transient-capture-mismatch";
+            return Outcome::StaleSource;
+        }
+        aa::Definition atlas;
+        std::vector<aa::MemberUVAssignment> assignments;
+        aa::build::LayoutEvidence layout;
+        const auto built = aa::build::BuildFinalAtlas(
+            capture.atlas, {finalMember}, settings, atlas,
+            assignments, diagnosis, &layout);
+        if (built != aa::build::Status::Built) {
+            if (diagnosis.empty())
+                diagnosis = "build-status-"
+                    + std::to_string(static_cast<unsigned>(built));
+            return MapBuild(built);
+        }
+        if (atlas.members.size() != 1 || assignments.size() != 1
+            || !(atlas.members.front().owner == capture.member.owner)
+            || !(atlas.members.front().finishing
+                == capture.member.finishing)
+            || !(atlas.members.front().source == capture.member.source)
+            || assignments.front().member
+                != atlas.members.front().member) {
+            diagnosis = "transient-layout-mismatch";
+            return Outcome::StaleSource;
+        }
+        std::vector<kernel::Source> sources;
+        sources.reserve(capture.sources.size());
+        for (const auto& captured : capture.sources) {
+            kernel::Image image;
+            if (!kernel::DecodeImage(
+                    captured.envelope.workingBytes, image)) {
+                diagnosis = "transient-source-decode";
+                return Outcome::MissingResource;
+            }
+            sources.push_back({captured.fence, std::move(image)});
+        }
+        output.atlas = std::move(atlas);
+        output.assignments = std::move(assignments);
+        if (!kernel::Bake(output.atlas, layout, sources,
+                output.outputs, output.evidence)) {
+            output = {};
+            diagnosis = "transient-kernel-bake";
+            return Outcome::Refused;
+        }
+        output.bake.key = output.atlas.key;
+        output.bake.layoutProof = output.atlas.layoutProof;
+        for (const auto& source : capture.sources)
+            output.bake.bindings.push_back(source.fence);
+        for (const auto& baked : output.outputs)
+            output.bake.resources.push_back(baked.descriptor);
+        if (!BindBakeProof(output.bake)) {
+            output = {};
+            diagnosis = "transient-bake-proof";
+            return Outcome::Malformed;
+        }
+        return Outcome::Prepared;
+    } catch (...) {
+        output = {};
+        diagnosis = "transient-exception";
+        return Outcome::Malformed;
+    }
+}
+
 Outcome Currentness(const Handle(TDocStd_Document)& document, const aa::Key& key,
                     Definition* output) noexcept {
     if (output) *output = {};

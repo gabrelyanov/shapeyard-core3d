@@ -456,6 +456,15 @@ struct ExportCapture final {
     std::vector<std::uint8_t> canonicalAtlasBytes;
 };
 
+//! Operation-local authority for an owner that has no persisted SYEA/SYEB
+//! pair. This is deliberately a separate type: it cannot be mistaken for a
+//! saved atlas capture and carries no persistence/adoption capability.
+struct TransientExportCapture final {
+    asset_atlas::Key atlas;
+    asset_atlas::Member member;
+    std::vector<CapturedSource> sources;
+};
+
 //! Complete detached painted result for one final layout. All applicable
 //! roles are baked together from ExportCapture::sources and remain values
 //! owned by the export operation.
@@ -485,6 +494,12 @@ Outcome BakeForExport(const ExportCapture& capture,
 Outcome BuildAndBakeForExport(
     const ExportCapture& capture,
     const std::vector<asset_atlas::build::FinalMemberInput>& finalMembers,
+    const asset_atlas::build::Settings& settings,
+    ExportBake& output,
+    std::string& diagnosis) noexcept;
+Outcome BuildAndBakeTransientForExport(
+    const TransientExportCapture& capture,
+    const asset_atlas::build::FinalMemberInput& finalMember,
     const asset_atlas::build::Settings& settings,
     ExportBake& output,
     std::string& diagnosis) noexcept;

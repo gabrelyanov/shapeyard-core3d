@@ -98,6 +98,7 @@ namespace core3d::part_boolean::owner { class PartBooleanOwner; }
 namespace core3d::retained_feature { class OcafOwnerService; }
 namespace core3d::composite_recipe { struct Payload; }
 namespace core3d::retained_program_suffix { struct Probe; }
+namespace core3d::authored_parameter { class Capture; class Owner; }
 
 // D253 native treatment history companion — document-internal measured state
 // for one staged retained-treatment transaction. One companion records the
@@ -1382,6 +1383,24 @@ public:
         core3d::retained_edge_treatment::Refusal&) const noexcept;
     Standard_EXPORT Standard_Boolean ValidateRetainedEdgeTreatmentsR2(
         core3d::retained_edge_treatment::Refusal&) const noexcept;
+    //! N0 authored-parameter authority: capture the complete supported source
+    //! plus suffix without opening a command. Unsupported carriers refuse;
+    //! no record is projected away into a weaker DTO.
+    Standard_EXPORT std::shared_ptr<const core3d::authored_parameter::Capture>
+    CaptureAuthoredParameterAuthority(
+        const TDF_Label& owner,
+        const core3d::native_opening::Context& context) const noexcept;
+    //! Exact pre-transaction reread of document/data, owner, source/suffix,
+    //! units, history depths and the treatment-companion census.
+    Standard_EXPORT Standard_Boolean ReadAuthoredParameterAuthority(
+        const core3d::authored_parameter::Capture& capture) const noexcept;
+    //! The sole future transaction entrance for registered adapters. N0 never
+    //! calls it because no adapter can produce a candidate yet.
+    Standard_EXPORT Standard_Boolean BeginAuthoredParameterTransaction(
+        const core3d::authored_parameter::Capture& capture,
+        core3d::native_opening::Context& context,
+        std::uint32_t viewportWidth, std::uint32_t viewportHeight,
+        std::shared_ptr<core3d::native_opening::CommandLease>& lease) noexcept;
     //! True while a measured treatment-history companion has not been bound
     //! to its own committed delta or discharged by verified prior settlement.
     Standard_EXPORT Standard_Boolean HasUnresolvedTreatmentHistoryCompanion() const noexcept;
