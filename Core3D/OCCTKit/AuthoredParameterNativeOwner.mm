@@ -13,6 +13,7 @@ struct Owner::State final {
     std::shared_ptr<const Capture> capture;
     std::uint32_t width = 0, height = 0;
     bool cancelled = false;
+    bool prepared = false;
 };
 
 Owner::Owner(std::unique_ptr<State> state) noexcept : state_(std::move(state)) {}
@@ -71,6 +72,26 @@ Refusal Owner::prepare(const Mutation& mutation) noexcept {
         || mutation.requestedFieldMask != 0 || !mutation.sealedValues.empty())
         return Refusal::MalformedMutation;
     return Refusal::UnsupportedCapability;
+}
+
+authored_loft::Status Owner::prepareLoft(
+    std::uint32_t stationIdentifier, authored_loft::Field field,
+    const rectangular_loft::Definition& requested,
+    retained_edge_treatment::r2::Edit& output) noexcept {
+    if (![NSThread isMainThread] || !state_ || state_->prepared)
+        return authored_loft::Status::Malformed;
+    if (currentness() != Currentness::Current || !state_->capture->snapshot_)
+        return authored_loft::Status::Malformed;
+    const auto status = authored_loft::Prepare(*state_->capture->snapshot_,
+        stationIdentifier, field, requested, output);
+    if (status == authored_loft::Status::Prepared
+        || status == authored_loft::Status::Unchanged) state_->prepared = true;
+    return status;
+}
+
+std::shared_ptr<const retained_edge_treatment::r2::Snapshot>
+Owner::retainedSnapshot() const noexcept {
+    return state_ && state_->capture ? state_->capture->snapshot_ : nullptr;
 }
 
 bool Owner::cancel() noexcept {

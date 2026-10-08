@@ -224,8 +224,7 @@ inline bool HasRecord(const TDF_Label& owner) noexcept {
 inline bool ReadAll(const Handle(TDocStd_Document)& document, std::vector<Record>& output) noexcept {
     output.clear();
     try {
-        if (document.IsNull() || document->GetData().IsNull()
-            || !XCAFDoc_DocumentTool::CheckShapeTool(document->Main())) return false;
+        if (document.IsNull() || document->GetData().IsNull()) return false;
         const TDF_Label root = document->GetData()->Root();
         if (root.IsAttribute(AttributeID())) return false;
         std::vector<Record> staged; std::set<UUID> features; TDF_LabelMap owners, labels;
@@ -233,6 +232,7 @@ inline bool ReadAll(const Handle(TDocStd_Document)& document, std::vector<Record
         for (TDF_ChildIterator it(root, Standard_True); it.More(); it.Next()) {
             if (++visited > loft_persistence::MaximumLabels) return false;
             const TDF_Label label = it.Value(); if (!label.IsAttribute(AttributeID())) continue;
+            if (!XCAFDoc_DocumentTool::CheckShapeTool(document->Main())) return false;
             if (staged.size() >= MaximumRecords || label.Tag() < MinimumRecordTag || !labels.Add(label)) return false;
             const TDF_Label owner = label.Father(); Handle(Attribute) attribute; Handle(TNaming_NamedShape) binding;
             if (owner.IsNull() || !owners.Add(owner) || !label.FindAttribute(AttributeID(), attribute)

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AuthoredLoftParameterAdapter.hxx"
 #include "NativeOpeningContext.hxx"
 #include "RetainedEdgeTreatmentR2Snapshot.hxx"
 
@@ -93,6 +94,12 @@ public:
     bool belongsTo(const Handle(OcctDocument)& document) const noexcept;
     Currentness currentness() const noexcept;
     Refusal prepare(const Mutation& mutation) noexcept;
+    authored_loft::Status prepareLoft(
+        std::uint32_t stationIdentifier, authored_loft::Field field,
+        const rectangular_loft::Definition& requested,
+        retained_edge_treatment::r2::Edit& output) noexcept;
+    std::shared_ptr<const retained_edge_treatment::r2::Snapshot>
+    retainedSnapshot() const noexcept;
     bool cancel() noexcept;
 
 private:

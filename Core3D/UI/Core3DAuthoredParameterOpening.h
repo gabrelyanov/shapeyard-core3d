@@ -30,6 +30,46 @@ typedef NS_ENUM(NSInteger, Core3DAuthoredParameterPreparationResult) {
     Core3DAuthoredParameterPreparationResultRecoveryRequired,
 };
 
+typedef NS_ENUM(NSInteger, Core3DAuthoredLoftField) {
+    Core3DAuthoredLoftFieldStationZ = 0,
+    Core3DAuthoredLoftFieldStationCenterX,
+    Core3DAuthoredLoftFieldStationCenterY,
+    Core3DAuthoredLoftFieldFrameTranslationX,
+    Core3DAuthoredLoftFieldFrameTranslationY,
+    Core3DAuthoredLoftFieldFrameTranslationZ,
+    Core3DAuthoredLoftFieldFrameQuaternionX,
+    Core3DAuthoredLoftFieldFrameQuaternionY,
+    Core3DAuthoredLoftFieldFrameQuaternionZ,
+    Core3DAuthoredLoftFieldFrameQuaternionW,
+    Core3DAuthoredLoftFieldFrameSignedScale,
+};
+
+typedef NS_ENUM(NSInteger, Core3DAuthoredParameterApplyOutcome) {
+    Core3DAuthoredParameterApplyOutcomeCommitted = 0,
+    Core3DAuthoredParameterApplyOutcomeUnchanged,
+    Core3DAuthoredParameterApplyOutcomeRefused,
+    Core3DAuthoredParameterApplyOutcomeCancelled,
+    Core3DAuthoredParameterApplyOutcomeOutcomeUnknown,
+};
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DAuthoredParameterApplyResult : NSObject
+@property(nonatomic,readonly) Core3DAuthoredParameterApplyOutcome outcome;
+@property(nonatomic,copy,readonly) NSString *refusalCode;
+@property(nonatomic,copy,readonly,nullable) NSNumber *measuredUndoDelta;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DAuthoredParameterOperation : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+//! Stops only this operation. A settled operation returns NO and cannot affect
+//! later authored work.
+- (BOOL)cancel;
+@end
+
 //! Immutable native-issued source/suffix capture. Descriptive properties do
 //! not carry mutation authority; the private native owner and document fence do.
 __attribute__((objc_subclassing_restricted))
@@ -60,6 +100,18 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(prepareAuthoredParameter(_:mutationKind:));
 - (BOOL)cancelAuthoredParameterOpening:(Core3DAuthoredParameterOpening *)opening
     NS_SWIFT_NAME(cancelAuthoredParameter(_:));
+//! Replace exactly one declared authored rectangular-loft value. Station fields
+//! require the captured station ID; frame fields require stationIdentifier zero.
+//! All other station values, IDs, correspondence, units and suffix identities
+//! are verified natively before the existing counted source/suffix replay runs.
+- (Core3DAuthoredParameterOperation *)applyAuthoredLoftParameterOpening:
+    (Core3DAuthoredParameterOpening *)opening
+    stationIdentifier:(uint32_t)stationIdentifier
+    field:(Core3DAuthoredLoftField)field
+    definition:(Core3DRectangularLoftDefinition *)definition
+    expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DAuthoredParameterApplyResult *result))completion
+    NS_SWIFT_NAME(applyAuthoredLoftParameter(_:stationIdentifier:field:definition:expected:completion:));
 @end
 
 NS_ASSUME_NONNULL_END

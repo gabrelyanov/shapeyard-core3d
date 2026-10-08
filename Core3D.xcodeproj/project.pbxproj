@@ -16,6 +16,7 @@
 		A1A000010000000000000002 /* AuthoredParameterNativeOwner.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1A000020000000000000002 /* AuthoredParameterNativeOwner.mm */; };
 		A1A000010000000000000003 /* Core3DAuthoredParameterOpening.h in Headers */ = {isa = PBXBuildFile; fileRef = A1A000020000000000000003 /* Core3DAuthoredParameterOpening.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		A1A000010000000000000004 /* Core3DAuthoredParameterOpening.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1A000020000000000000004 /* Core3DAuthoredParameterOpening.mm */; };
+		A1A000010000000000000005 /* AuthoredLoftParameterAdapter.hxx in Headers */ = {isa = PBXBuildFile; fileRef = A1A000020000000000000005 /* AuthoredLoftParameterAdapter.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		F17900010000000000000001 /* PatternNativeCollaborators.mm in Sources */ = {isa = PBXBuildFile; fileRef = F17900020000000000000002 /* PatternNativeCollaborators.mm */; };
 		D3C100010000000000000001 /* PathArrayNativeCollaborators.mm in Sources */ = {isa = PBXBuildFile; fileRef = D3C100020000000000000002 /* PathArrayNativeCollaborators.mm */; };
 		D4E100010000000000000001 /* FeaturePatternNativeCollaborators.mm in Sources */ = {isa = PBXBuildFile; fileRef = D4E100020000000000000002 /* FeaturePatternNativeCollaborators.mm */; };
@@ -326,6 +327,7 @@
 		A1A000020000000000000002 /* AuthoredParameterNativeOwner.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AuthoredParameterNativeOwner.mm; sourceTree = "<group>"; };
 		A1A000020000000000000003 /* Core3DAuthoredParameterOpening.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DAuthoredParameterOpening.h; sourceTree = "<group>"; };
 		A1A000020000000000000004 /* Core3DAuthoredParameterOpening.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DAuthoredParameterOpening.mm; sourceTree = "<group>"; };
+		A1A000020000000000000005 /* AuthoredLoftParameterAdapter.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = AuthoredLoftParameterAdapter.hxx; sourceTree = "<group>"; };
 		F17900020000000000000002 /* PatternNativeCollaborators.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = PatternNativeCollaborators.mm; sourceTree = "<group>"; };
 		D3C100020000000000000002 /* PathArrayNativeCollaborators.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = PathArrayNativeCollaborators.mm; sourceTree = "<group>"; };
 		D4E100020000000000000002 /* FeaturePatternNativeCollaborators.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = FeaturePatternNativeCollaborators.mm; sourceTree = "<group>"; };
@@ -903,6 +905,7 @@
 				1C1C00000000000000000001 /* LoftCorrespondencePersistence.hxx */,
 				A1A000020000000000000001 /* AuthoredParameterNativeOwner.hxx */,
 				A1A000020000000000000002 /* AuthoredParameterNativeOwner.mm */,
+				A1A000020000000000000005 /* AuthoredLoftParameterAdapter.hxx */,
 				F17900020000000000000002 /* PatternNativeCollaborators.mm */,
 				D3C100020000000000000002 /* PathArrayNativeCollaborators.mm */,
 				D4E100020000000000000002 /* FeaturePatternNativeCollaborators.mm */,
@@ -1199,6 +1202,7 @@
 				1C1C01000000000000000001 /* LoftCorrespondencePersistence.hxx in Headers */,
 				A1A000010000000000000001 /* AuthoredParameterNativeOwner.hxx in Headers */,
 				A1A000010000000000000003 /* Core3DAuthoredParameterOpening.h in Headers */,
+				A1A000010000000000000005 /* AuthoredLoftParameterAdapter.hxx in Headers */,
 				C3D0E0012F10000100000001 /* Core3DNativeExportOperation.h in Headers */,
 				C3D1A0012F20000100000001 /* Core3DNativeImportOperation.h in Headers */,
 				3DF82DCF1EF97E1E6DD140F6 /* Core3DMeshContactOperation.h in Headers */,
