@@ -66,6 +66,10 @@ struct Cut475Scope {
 #include "RetainedEdgeTreatmentR2Build.hxx"
 #include "RetainedSolidAttribute.hxx"
 #include "CompositeRecipeAttribute.hxx"
+#include "AuthoredParameterNativeOwner.hxx"
+
+#include <XCAFDoc_DocumentTool.hxx>
+#include <cstring>
 
 namespace {
 bool SameB1Base(const core3d::retained_edge_treatment::BaseBinding& first,
@@ -172,6 +176,113 @@ OcctDocument::CaptureRetainedEdgeTreatmentR2(
         static_cast<core3d::retained_topology_budget::Counter&>(result->chargedBudget_)=topology;
         refusal=et::Refusal::None;return result;
     }catch(...){refusal=et::Refusal::MalformedCarrier;return {};}
+}
+
+namespace {
+bool AuthoredSourceBytes(
+    const core3d::retained_edge_treatment::r2::Snapshot& snapshot,
+    std::vector<std::uint8_t>& bytes) noexcept {
+    namespace r2 = core3d::retained_edge_treatment::r2;
+    bytes.clear();
+    try {
+        const auto* retained = std::get_if<r2::RetainedBooleanBase>(&snapshot.source());
+        if (!retained) return false;
+        std::visit([&](const auto& value) { bytes = value.canonicalPrefixBytes; },
+                   retained->source);
+        return !bytes.empty();
+    } catch (...) { bytes.clear(); return false; }
+}
+} // namespace
+
+std::shared_ptr<const core3d::authored_parameter::Capture>
+OcctDocument::CaptureAuthoredParameterAuthority(
+    const TDF_Label& owner,
+    const core3d::native_opening::Context& context) const noexcept {
+    namespace authored = core3d::authored_parameter;
+    namespace rr = core3d::retained_recipe;
+    try {
+        const auto& opening = context.openingFence();
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || owner.IsNull()
+            || owner.Data() != myOcafDoc->GetData() || myOcafDoc->HasOpenCommand()
+            || HasUnresolvedTreatmentHistoryCompanion()
+            || opening.document() != myOcafDoc || opening.data() != myOcafDoc->GetData()) return {};
+        rr::RevisionFence revision;
+        revision.documentGeneration = opening.documentGeneration();
+        revision.modelRevision = opening.modelRevision();
+        revision.effectiveMetersPerUnit = opening.metersPerUnit();
+        revision.ownerShape.fill(1); revision.ownerRecipe.fill(1);
+        revision.ownerPlacement.fill(1); revision.ownerMaterial.fill(1);
+        rr::DependencyRead dependency;
+        dependency.locator.owner.document.fill(1); dependency.locator.owner.entity.fill(1);
+        dependency.locator.owner.definition.fill(1); dependency.locator.node.fill(1);
+        dependency.locator.sourceFeature.fill(1); dependency.geometry.fill(1);
+        dependency.recipe.fill(1); dependency.placement.fill(1);
+        dependency.material.fill(1); dependency.groups.fill(1);
+        revision.dependencies.push_back(dependency);
+        core3d::retained_edge_treatment::Refusal refusal;
+        auto snapshot = CaptureRetainedEdgeTreatmentR2(owner, revision, refusal);
+        if (!snapshot || !snapshot->current() || snapshot->canonicalBytes().empty()) return {};
+        auto capture = std::shared_ptr<authored::Capture>(new authored::Capture);
+        capture->document_ = myOcafDoc;
+        capture->data_ = myOcafDoc->GetData();
+        capture->ownerLabel_ = owner;
+        capture->owner_ = snapshot->owner().owner;
+        capture->revision_ = snapshot->owner().fence;
+        capture->snapshot_ = std::move(snapshot);
+        capture->suffixBytes_ = capture->snapshot_->canonicalBytes();
+        if (!AuthoredSourceBytes(*capture->snapshot_, capture->sourceBytes_)) return {};
+        capture->metersPerUnit_ = capture->snapshot_->dimensionMetersPerUnit();
+        std::memcpy(&capture->metersPerUnitBits_, &capture->metersPerUnit_,
+                    sizeof(capture->metersPerUnitBits_));
+        std::uint64_t openingUnitBits = 0;
+        const double openingUnit = opening.metersPerUnit();
+        std::memcpy(&openingUnitBits, &openingUnit, sizeof(openingUnitBits));
+        if (capture->metersPerUnitBits_ != openingUnitBits) return {};
+        capture->undoDepth_ = myOcafDoc->GetAvailableUndos();
+        capture->redoDepth_ = myOcafDoc->GetAvailableRedos();
+        capture->companionCount_ = myTreatmentHistoryCompanions.size();
+        return capture;
+    } catch (...) { return {}; }
+}
+
+Standard_Boolean OcctDocument::ReadAuthoredParameterAuthority(
+    const core3d::authored_parameter::Capture& capture) const noexcept {
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || capture.document_ != myOcafDoc || capture.data_ != myOcafDoc->GetData()
+            || capture.ownerLabel_.IsNull() || capture.ownerLabel_.Data() != myOcafDoc->GetData()
+            || myOcafDoc->HasOpenCommand() || HasUnresolvedTreatmentHistoryCompanion()
+            || capture.undoDepth_ != myOcafDoc->GetAvailableUndos()
+            || capture.redoDepth_ != myOcafDoc->GetAvailableRedos()
+            || capture.companionCount_ != myTreatmentHistoryCompanions.size()) return Standard_False;
+        double unit = 0; std::uint64_t unitBits = 0;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(myOcafDoc, unit)) return Standard_False;
+        std::memcpy(&unitBits, &unit, sizeof(unitBits));
+        if (unitBits != capture.metersPerUnitBits_) return Standard_False;
+        core3d::retained_edge_treatment::Refusal refusal;
+        auto reread = CaptureRetainedEdgeTreatmentR2(
+            capture.ownerLabel_, capture.revision_, refusal);
+        std::vector<std::uint8_t> source;
+        return reread && reread->current() && reread->owner().owner == capture.owner_
+            && AuthoredSourceBytes(*reread, source) && source == capture.sourceBytes_
+            && reread->canonicalBytes() == capture.suffixBytes_;
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::BeginAuthoredParameterTransaction(
+    const core3d::authored_parameter::Capture& capture,
+    core3d::native_opening::Context& context,
+    std::uint32_t width, std::uint32_t height,
+    std::shared_ptr<core3d::native_opening::CommandLease>& lease) noexcept {
+    lease.reset();
+    try {
+        if (!ReadAuthoredParameterAuthority(capture) || !width || !height
+            || context.openingFence().document() != myOcafDoc
+            || context.openingFence().data() != myOcafDoc->GetData()
+            || !context.isCurrent(width, height)) return Standard_False;
+        lease = context.beginCommandLease(context.openingFence(), width, height);
+        return lease && lease->ownsOpenCommand();
+    } catch (...) { lease.reset(); return Standard_False; }
 }
 
 std::shared_ptr<const core3d::retained_edge_treatment::r2::MigrationCapture>

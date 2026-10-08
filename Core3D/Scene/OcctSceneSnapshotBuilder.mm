@@ -3753,7 +3753,10 @@ struct PrivateDecalCapture::Impl final {
         std::unique_ptr<BRepBuilderAPI_Copy> copier;
         std::vector<Receiver> receivers;
         asset_atlas::build::FinalMemberInput savedMember;
-        painted_atlas_bake::owner::ExportCapture atlasCapture;
+        asset_atlas::Key transientAtlas;
+        retained_finishing::Definition transientFinishing;
+        TDF_Label ownerLabel;
+        std::vector<painted_atlas_bake::owner::CapturedSource> paintedSources;
         std::string definitionIdentifier;
     };
 
@@ -3764,6 +3767,7 @@ struct PrivateDecalCapture::Impl final {
     std::string documentIdentifier;
     double metersPerUnit = 0.0;
     bool selectedObjectsOnly = false;
+    Handle(OcctDocument) privateDocument;
 };
 
 const char* PrivatePaintedRoleText(const face_image::Role role) noexcept {
@@ -3800,6 +3804,7 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
         auto candidate = std::make_unique<PrivateDecalCapture>();
         if (!candidate || !candidate->impl_) return false;
         auto& impl = *candidate->impl_;
+        impl.privateDocument = privateDocument;
         impl.wholeCommittedScene = wholeCommittedScene;
         impl.selectedObjectsOnly = selectedObjectsOnly;
         impl.documentIdentifier = privateDocument->DocumentIdentifier();
@@ -3809,6 +3814,13 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
         impl.budget = std::make_shared<
             retained_edge_treatment::ReplayBudget>();
         if (!impl.budget) return false;
+
+        // P1 admits only proven standalone owners. A valid saved atlas is a
+        // transitive multi-member authority and remains a deliberate refusal
+        // until P2 can rebuild its complete membership in one transaction.
+        std::vector<asset_atlas::persistence::Record> savedAtlases;
+        if (!asset_atlas::persistence::ReadAll(document, savedAtlases)
+            || !savedAtlases.empty()) return false;
 
         std::unordered_map<std::string, const InstanceSnapshot*> occurrences;
         for (const auto& instance : wholeCommittedScene.instances) {
@@ -3954,24 +3966,12 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
             if (!retained_finishing::producer::CaptureSource(
                     document, owner, finishing))
                 return false;
+            value.ownerLabel = label;
             value.savedMember.savedMember.owner = owner;
-            value.savedMember.savedMember.member =
-                definition.layers.front().identifier;
-            value.savedMember.savedMember.finishing =
-                definition.layers.front().identifier;
             value.savedMember.savedMember.source = finishing.source;
             value.savedMember.authority = finishing;
-            value.atlasCapture.savedAtlas.key.document = owner.document;
-            value.atlasCapture.savedAtlas.key.atlas =
-                definition.layers.front().identifier;
-            value.atlasCapture.savedAtlas.members = {
-                value.savedMember.savedMember};
-            value.atlasCapture.members.members.resize(1);
-            value.atlasCapture.canonicalAtlasBytes = canonicalBytes;
-            std::set<face_image::Role> capturedRoles;
+            value.transientAtlas.document = owner.document;
             for (const auto& layer : definition.layers) {
-                if (!capturedRoles.insert(layer.image.role).second)
-                    return false;
                 face_image::ResourceEnvelope envelope;
                 if (!face_image::owner::ReadResource(
                         document, layer.image.resource, envelope))
@@ -3992,9 +3992,10 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
                 captured.envelope = std::move(envelope);
                 if (!painted_atlas_bake::Valid(captured.fence))
                     return false;
-                value.atlasCapture.sources.push_back(
+                value.paintedSources.push_back(
                     std::move(captured));
             }
+            if (value.paintedSources.empty()) return false;
             value.definition = std::move(definition);
             value.canonicalBytes = std::move(canonicalBytes);
             value.source = std::move(source);
@@ -4026,15 +4027,52 @@ bool OcctSceneSnapshotBuilder::FinalizePrivateExportDecals(
             || correspondence.size() > kMaxPrimitiveBindingsPerSnapshot
             || emittedMeshes.size() > kMaxLabelInstanceMappings)
             return false;
-        // The capture/finalize ownership seam is live for unpainted exports.
-        // E4 owners remain fail-closed until final-layout and ProduceFace are
-        // connected below this boundary; returning their old viewport images
-        // here would incorrectly certify stale triangle/corner authority.
-        if (!impl.owners.empty()) return false;
+        if (impl.owners.empty() || emittedMeshes.empty()
+            || impl.destination.values.size() != emittedMeshes.size()
+            || impl.privateDocument.IsNull()) return false;
+        const Handle(TDocStd_Document)& document =
+            impl.privateDocument->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return false;
+        std::vector<asset_atlas::persistence::Record> savedAtlases;
+        if (!asset_atlas::persistence::ReadAll(document, savedAtlases)
+            || !savedAtlases.empty()) return false;
+        for (const auto& owner : impl.owners) {
+            decal_layer::Definition observed;
+            std::vector<std::uint8_t> canonical;
+            TDF_Label label;
+            retained_solid::Record retained;
+            if (!retained_finishing::producer::detail::Resolve(
+                    document, owner.owner, label, retained)) return false;
+            // Re-read the immutable canonical authority and source fences at
+            // the actual visibility boundary, never from the remeshed copy.
+            const auto read = decal_layer::persistence::Read(
+                document, label, observed, &canonical, nullptr);
+            decal_layer::source::Witness source;
+            if (read != decal_layer::persistence::ReadState::Present
+                || canonical != owner.canonicalBytes
+                || !(observed.owner == owner.definition.owner)
+                || !decal_layer::source::CaptureSource(
+                    impl.privateDocument, owner.owner, *impl.budget,
+                    cancelled, source)
+                || !decal_layer::source::ExactMatch(owner.definition, source)
+                || source.sourceProof != owner.source.sourceProof)
+                return false;
+        }
         for (const auto& emitted : emittedMeshes) {
             if (emitted.ownerDefinitionIdentifier.empty()
                 || emitted.mesh.definitionIdentifier.empty()
-                || emitted.instance.entityIdentifier.empty()) return false;
+                || emitted.instance.entityIdentifier.empty()
+                || emitted.instance.decalDerivedAppearances.empty())
+                return false;
+        }
+        for (const auto& value : impl.destination.values) {
+            decal_layer::bake::PublishedDerivative reopened;
+            if (!decal_layer::bake::publication::Valid(value)
+                || !decal_layer::bake::publication::Lookup(
+                    impl.destination, value.owner, value.inputKey, reopened)
+                || reopened.bakeKey != value.bakeKey) return false;
+            artifact.inputKeys.push_back(DecalDigestText(value.inputKey));
+            artifact.bakeSeals.push_back(DecalDigestText(value.bakeKey));
         }
         if (cancelled()) return false;
         artifact.scene = std::make_shared<SceneSnapshot>(finalScene);
@@ -5876,6 +5914,10 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         std::size_t finalResidentBytes = 0;
         std::size_t finalLayoutResolution = 0;
         std::size_t finalLayoutChartCount = 0;
+        std::unordered_map<std::string, OcctPaintedAtlasDerivative>
+            finalDerivatives;
+        std::unordered_map<std::string,
+            painted_atlas_bake::owner::ExportBake> finalBakes;
         if (decalCapture && decalCapture->impl_) {
 #ifdef DEBUG
             if (debugObservation)
@@ -5885,25 +5927,80 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 if (cancelled()) return {};
                 const auto found = definitionIndices.find(
                     owner.definitionIdentifier);
-                if (found == definitionIndices.end()) return {};
-                auto& definition = definitions[found->second];
-                std::atomic_bool neverCancelled{false};
-                meshcopy::CurrentTessellationCopy finalCopy;
-                if (meshcopy::PrepareCurrentTessellationCopy(
-                        definition.shape, finalCopy, neverCancelled)
-                        != meshcopy::PreparationResult::Ready) {
+                if (found == definitionIndices.end()) {
 #ifdef DEBUG
                     if (debugObservation)
                         debugObservation->failureStage =
-                            "final-tessellation-copy-refused";
+                            "final-owner-definition-missing";
 #endif
                     return {};
                 }
+                auto& definition = definitions[found->second];
+#ifdef DEBUG
+                if (debugObservation)
+                    debugObservation->failureStage =
+                        "constructing-final-member";
+#endif
                 asset_atlas::build::FinalMemberInput finalMember =
                     owner.savedMember;
-                if (!retained_finishing::producer::detail::Triangles(
-                        finalCopy, finalMember.triangles,
-                        finalMember.faces)) {
+                if (definition.mesh.indices.empty()
+                    || definition.mesh.indices.size() % 3 != 0
+                    || definition.faces.IsEmpty()) return {};
+                finalMember.triangles.resize(
+                    definition.mesh.indices.size() / 3);
+                for (std::size_t triangle = 0;
+                     triangle < finalMember.triangles.size(); ++triangle) {
+                    for (std::size_t corner = 0; corner < 3; ++corner) {
+                        const std::uint32_t index = definition.mesh.indices[
+                            triangle * 3 + corner];
+                        if (index >= definition.mesh.vertices.size()) return {};
+                        const auto& vertex = definition.mesh.vertices[index];
+                        finalMember.triangles[triangle].points[corner] = {
+                            double(vertex.positionX) + definition.sourceOrigin.x,
+                            double(vertex.positionY) + definition.sourceOrigin.y,
+                            double(vertex.positionZ) + definition.sourceOrigin.z};
+                    }
+                }
+#ifdef DEBUG
+                if (debugObservation)
+                    debugObservation->failureStage =
+                        "constructing-final-faces";
+#endif
+                for (const auto& primitive : definition.mesh.primitives) {
+                    if (primitive.faceIndex >= std::uint32_t(
+                            definition.faces.Extent())
+                        || primitive.firstIndex % 3 != 0
+                        || primitive.indexCount == 0
+                        || primitive.indexCount % 3 != 0
+                        || std::size_t(primitive.firstIndex)
+                            + primitive.indexCount
+                            > definition.mesh.indices.size()) return {};
+                    const TopoDS_Face face = TopoDS::Face(
+                        definition.faces.FindKey(
+                            Standard_Integer(primitive.faceIndex + 1)));
+                    BRepAdaptor_Surface surface(face, Standard_True);
+                    if (surface.GetType() != GeomAbs_Plane) return {};
+                    const gp_Pln plane = surface.Plane();
+                    shapeyard::uv::curved::FaceInput input;
+                    input.surfaceType = provenance::kSurfaceTypePlane;
+                    input.firstTriangle = int(primitive.firstIndex / 3);
+                    input.triangleCount = int(primitive.indexCount / 3);
+                    input.reversed = face.Orientation() == TopAbs_REVERSED;
+                    input.params = {
+                        plane.Location().X(), plane.Location().Y(),
+                        plane.Location().Z(),
+                        plane.Axis().Direction().X(),
+                        plane.Axis().Direction().Y(),
+                        plane.Axis().Direction().Z(),
+                        plane.Position().XDirection().X(),
+                        plane.Position().XDirection().Y(),
+                        plane.Position().XDirection().Z()};
+                    input.toleranceMM = 1.0e-7;
+                    input.xDirection = {
+                        input.params[6], input.params[7], input.params[8]};
+                    finalMember.faces.push_back(std::move(input));
+                }
+                if (finalMember.faces.empty()) {
 #ifdef DEBUG
                     if (debugObservation)
                         debugObservation->failureStage =
@@ -5911,24 +6008,66 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
 #endif
                     return {};
                 }
+#ifdef DEBUG
+                if (debugObservation)
+                    debugObservation->failureStage =
+                        "building-transient-finishing";
+#endif
+                std::string finishingDiagnosis;
+                const retained_finishing::producer::Settings finishingSettings{
+                    retained_finishing::UnwrapPolicy::Planar, 256, 4};
+                if (retained_finishing::producer::BuildDerivative(
+                        decalCapture->impl_->privateDocument->Document(),
+                        owner.ownerLabel, owner.savedMember.authority,
+                        finishingSettings, owner.transientFinishing,
+                        finishingDiagnosis)
+                        != retained_finishing::producer::Status::Produced) {
+#ifdef DEBUG
+                    if (debugObservation)
+                        debugObservation->failureStage =
+                            "transient-finishing-refused-"
+                            + finishingDiagnosis.substr(0, 96);
+#endif
+                    return {};
+                }
+                finalMember.savedMember.finishing =
+                    owner.transientFinishing.finishing;
+                owner.transientAtlas.atlas =
+                    retained_finishing::producer::detail::UUIDFromDigest(
+                        owner.transientFinishing.chartProof, 0xE4);
+                if (!retained_recipe::Nonzero(owner.transientAtlas.atlas))
+                    return {};
+#ifdef DEBUG
+                if (debugObservation)
+                    debugObservation->failureStage =
+                        "building-transient-atlas";
+#endif
                 painted_atlas_bake::owner::ExportBake baked;
-                std::string diagnosis;
-                const asset_atlas::build::Settings settings{256, 4};
-                const auto bakeOutcome =
-                    painted_atlas_bake::owner::BuildAndBakeForExport(
-                        owner.atlasCapture, {finalMember}, settings,
-                        baked, diagnosis);
-                if (bakeOutcome
+                painted_atlas_bake::owner::TransientExportCapture transient;
+                transient.atlas = owner.transientAtlas;
+                transient.member = finalMember.savedMember;
+                transient.sources = owner.paintedSources;
+                std::string atlasDiagnosis;
+                const asset_atlas::build::Settings atlasSettings{256, 4};
+                const auto atlasOutcome = painted_atlas_bake::owner::
+                    BuildAndBakeTransientForExport(transient, finalMember,
+                        atlasSettings, baked, atlasDiagnosis);
+                if (atlasOutcome
                         != painted_atlas_bake::owner::Outcome::Prepared) {
 #ifdef DEBUG
                     if (debugObservation)
                         debugObservation->failureStage =
-                            "final-atlas-bake-refused-"
-                            + std::to_string(std::uint8_t(bakeOutcome))
-                            + "-" + diagnosis.substr(0, 96);
+                            "transient-atlas-refused-"
+                            + std::to_string(std::uint8_t(atlasOutcome))
+                            + "-" + atlasDiagnosis.substr(0, 96);
 #endif
                     return {};
                 }
+#ifdef DEBUG
+                if (debugObservation)
+                    debugObservation->failureStage =
+                        "transient-kernel-bake-built";
+#endif
                 if (baked.outputs.empty() || baked.atlas.charts.empty()
                     || baked.assignments.size() != 1
                     || baked.assignments.front().corners.size()
@@ -5936,23 +6075,47 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
 #ifdef DEBUG
                     if (debugObservation)
                         debugObservation->failureStage =
-                            "final-atlas-output-incomplete";
+                            "final-atlas-output-incomplete-"
+                            + std::to_string(baked.outputs.size()) + "-"
+                            + std::to_string(baked.atlas.charts.size()) + "-"
+                            + std::to_string(baked.assignments.size()) + "-"
+                            + std::to_string(baked.assignments.empty() ? 0
+                                : baked.assignments.front().corners.size())
+                            + "-" + std::to_string(
+                                finalMember.triangles.size() * 3U);
 #endif
                     return {};
                 }
+#ifdef DEBUG
+                if (debugObservation)
+                    debugObservation->failureStage =
+                        "transient-output-complete";
+#endif
+                OcctPaintedAtlasDerivative derivative;
+                derivative.bake = baked.bake;
+                derivative.assignment = baked.assignments.front();
+                if (!finalDerivatives.emplace(owner.definitionIdentifier,
+                        std::move(derivative)).second) return {};
                 const std::string inputKey =
                     PaintedAtlasDigestText(baked.atlas.layoutProof);
                 const std::string bakeSeal =
                     PaintedAtlasDigestText(baked.bake.bakeProof);
                 if (inputKey.size() != 64 || bakeSeal.size() != 64)
                     return {};
+                if (!finalBakes.emplace(owner.definitionIdentifier,
+                        baked).second) return {};
+#ifdef DEBUG
+                if (debugObservation)
+                    debugObservation->failureStage =
+                        "transient-products-recorded";
+#endif
                 finalInputKeys.push_back(inputKey);
                 finalBakeSeals.push_back(bakeSeal);
                 finalLayoutResolution = std::max<std::size_t>(
                     finalLayoutResolution,
                     std::uint64_t(baked.atlas.resolutionTexels));
                 if (!CheckedAdd(finalLayoutChartCount,
-                        baked.atlas.charts.size(),
+                        std::size_t(1),
                         finalLayoutChartCount)) return {};
                 for (const auto& output : baked.outputs) {
                     if (output.png.empty()) return {};
@@ -6017,12 +6180,21 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                         std::uint32_t(primitiveIndex),
                         materialIndex});
                 }
+#ifdef DEBUG
+                if (debugObservation)
+                    debugObservation->failureStage =
+                        "transient-correspondence-built";
+#endif
             }
         }
         if (decalCapture && (finalCorrespondence.empty()
                 || finalTriangleCount == 0 || finalCornerCount == 0
                 || finalInputKeys.empty() || finalBakeSeals.empty()))
             return {};
+#ifdef DEBUG
+        if (debugObservation && decalCapture)
+            debugObservation->failureStage = "final-inputs-complete";
+#endif
         std::unordered_set<std::size_t> replaced;
         for (const auto& occurrence : occurrences) {
             if (cancelled()) { return {}; }
@@ -6036,7 +6208,14 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 }
                 const auto revision = mesh.geometryRevision;
                 MeshSnapshot replacement = definition.mesh;
-                if (occurrence.painted) {
+                const auto fresh = finalDerivatives.find(
+                    replacement.definitionIdentifier);
+                if (fresh != finalDerivatives.end()) {
+                    MeshSnapshot derivative;
+                    if (!ApplyPaintedAtlasDerivative(
+                            replacement, fresh->second, derivative)) return {};
+                    replacement = std::move(derivative);
+                } else if (occurrence.painted) {
                     MeshSnapshot derivative;
                     if (!ApplyPaintedAtlasDerivative(
                             replacement, occurrence.paintedDerivative,
@@ -6055,13 +6234,577 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             if (!MatrixFromTransform(world, item.worldFromObject)) { return {}; }
             item.reversesWinding = world.IsNegative();
         }
+#ifdef DEBUG
+        if (debugObservation && decalCapture)
+            debugObservation->failureStage = "final-mesh-install-complete";
+#endif
+
+        // Install the operation-owned painted roles before E4 publication.
+        // Resource identity is the hash of the actual PNG bytes; semantic
+        // roles stay distinct even when two roles legitimately share bytes.
+        std::size_t aggregateEncodedBytes = 0;
+        std::size_t aggregateDecodedBytes = 0;
+        std::unordered_map<std::string, std::int32_t> textureIdentifiers;
+        for (std::size_t index = 0; index < result->textures.size(); ++index) {
+            const auto& texture = result->textures[index];
+            std::size_t decoded = 0;
+            if (texture.identifier.empty() || texture.encodedBytes.empty()
+                || !FitsUInt32(index)
+                || !textureIdentifiers.emplace(texture.identifier,
+                        std::int32_t(index)).second
+                || !CheckedMultiply(std::size_t(texture.pixelWidth),
+                    std::size_t(texture.pixelHeight), decoded)
+                || !CheckedMultiply(decoded, std::size_t(4), decoded)
+                || !CheckedAdd(aggregateEncodedBytes,
+                    texture.encodedBytes.size(), aggregateEncodedBytes)
+                || !CheckedAdd(aggregateDecodedBytes, decoded,
+                    aggregateDecodedBytes)) return {};
+        }
+        const auto installPNG = [&](const std::vector<std::uint8_t>& png,
+                                    const std::uint32_t width,
+                                    const std::uint32_t height,
+                                    const bool painted,
+                                    std::int32_t& textureIndex) {
+            textureIndex = -1;
+            face_image::Digest content{};
+            std::size_t decoded = 0;
+            if (png.empty() || width == 0 || height == 0
+                || !face_image::HashFaceImageBytes(png, content)
+                || !CheckedMultiply(std::size_t(width),
+                    std::size_t(height), decoded)
+                || !CheckedMultiply(decoded, std::size_t(4), decoded))
+                return false;
+            const std::string identifier = "texture-sha256-"
+                + PaintedAtlasDigestText(content);
+            const auto existing = textureIdentifiers.find(identifier);
+            if (existing != textureIdentifiers.end()) {
+                const auto& texture = result->textures[
+                    std::size_t(existing->second)];
+                if (texture.encoding != TextureEncoding::PNG
+                    || texture.pixelWidth != width
+                    || texture.pixelHeight != height
+                    || texture.encodedBytes != png) return false;
+                textureIndex = existing->second;
+                return true;
+            }
+            if (result->textures.size() >= kMaxTexturesPerSnapshot
+                || result->textures.size()
+                    > std::size_t(std::numeric_limits<std::int32_t>::max())
+                || !CheckedAdd(aggregateEncodedBytes, png.size(),
+                    aggregateEncodedBytes)
+                || !CheckedAdd(aggregateDecodedBytes, decoded,
+                    aggregateDecodedBytes)
+                || aggregateEncodedBytes > kMaxAggregateEncodedTextureBytes
+                || aggregateDecodedBytes > kMaxAggregateDecodedTextureBytes)
+                return false;
+            textureIndex = std::int32_t(result->textures.size());
+            TextureResourceSnapshot texture;
+            texture.identifier = identifier;
+            texture.encoding = TextureEncoding::PNG;
+            texture.pixelWidth = width;
+            texture.pixelHeight = height;
+            texture.encodedBytes = png;
+            texture.paintedAtlasDerivative = painted;
+            result->textures.push_back(std::move(texture));
+            textureIdentifiers.emplace(identifier, textureIndex);
+            return true;
+        };
+
+        std::unordered_map<std::string, std::array<std::int32_t, 5>>
+            roleTextures;
+        for (const auto& entry : finalBakes) {
+            const auto captured = capturedOwners.find(entry.first);
+            if (captured == capturedOwners.end()) return {};
+            std::set<face_image::Role> expectedRoles;
+            for (const auto& source : captured->second->paintedSources)
+                expectedRoles.insert(source.fence.role);
+            std::set<face_image::Role> installedRoles;
+            std::array<std::int32_t, 5> indices{-1, -1, -1, -1, -1};
+            for (const auto& output : entry.second.outputs) {
+                const std::size_t role = std::size_t(output.descriptor.role);
+                face_image::Digest measured{};
+                if (role >= indices.size() || indices[role] >= 0
+                    || !installedRoles.insert(output.descriptor.role).second
+                    || !face_image::HashFaceImageBytes(output.png, measured)
+                    || measured != output.descriptor.content
+                    || !installPNG(output.png,
+                        output.descriptor.widthTexels,
+                        output.descriptor.heightTexels, true,
+                        indices[role])) return {};
+            }
+            if (expectedRoles.empty() || installedRoles != expectedRoles
+                || !roleTextures.emplace(entry.first, indices).second)
+                return {};
+        }
+#ifdef DEBUG
+        if (debugObservation && decalCapture)
+            debugObservation->failureStage = "painted-resources-installed";
+#endif
+
+        std::unordered_map<std::string, std::uint32_t> installedMaterials;
+        std::unordered_set<std::size_t> tangentMeshes;
+        for (const auto& occurrence : occurrences) {
+            auto& item = result->instances[occurrence.instance];
+            const auto& definition = definitions[occurrence.definition];
+            const auto roles = roleTextures.find(
+                definition.mesh.definitionIdentifier);
+            if (roles == roleTextures.end()) continue;
+            for (auto& binding : item.primitiveBindings) {
+                if (binding.materialIndex >= result->materials.size()) return {};
+                const std::string key = definition.mesh.definitionIdentifier
+                    + ":" + std::to_string(binding.materialIndex);
+                auto installed = installedMaterials.find(key);
+                if (installed == installedMaterials.end()) {
+                    MaterialSnapshot material =
+                        result->materials[binding.materialIndex];
+                    material.baseColorTextureIndex = roles->second[0];
+                    material.emissiveTextureIndex = roles->second[1];
+                    material.metallicRoughnessTextureIndex = roles->second[2];
+                    material.occlusionTextureIndex = roles->second[3];
+                    material.normalTextureIndex = roles->second[4];
+                    std::uint32_t materialIndex = 0;
+                    if (!AddMaterial(*result, std::move(material),
+                            materialIndex)) return {};
+                    installed = installedMaterials.emplace(
+                        key, materialIndex).first;
+                }
+                binding.materialIndex = installed->second;
+            }
+            // The final atlas material now owns the complete painted role
+            // set. Retaining the pre-remesh per-face bindings would both take
+            // writer precedence and violate the painted-derivative scene
+            // invariant, so remove them only after every role was installed.
+            item.faceImageBindings.clear();
+            if (roles->second[std::size_t(face_image::Role::Normal)] >= 0
+                && tangentMeshes.insert(item.meshIndex).second) {
+                auto& mesh = result->meshes[item.meshIndex];
+                if (GenerateMikkCornerTangents(mesh.vertices, mesh.indices,
+                        true, mesh.cornerTangents)
+                        != TangentSpaceError::None) return {};
+                mesh.tangentBasis = TangentBasis::MikkTSpace;
+            }
+        }
+#ifdef DEBUG
+        if (debugObservation && decalCapture)
+            debugObservation->failureStage = "painted-materials-installed";
+#endif
+
+#ifdef DEBUG
+        if (decalCapture
+            && debugFault == DebugPrivateExportDecalFault::Publication) {
+            if (debugObservation) {
+                debugObservation->producedReceiverCount =
+                    finalCorrespondence.size();
+                debugObservation->finalTriangleCount = finalTriangleCount;
+                debugObservation->finalCornerCount = finalCornerCount;
+                debugObservation->operationWork += finalTriangleCount;
+                debugObservation->operationResidentBytes = finalResidentBytes;
+                debugObservation->correspondence = finalCorrespondence;
+                debugObservation->inputKeys = finalInputKeys;
+                debugObservation->bakeSeals = finalBakeSeals;
+                debugObservation->outputRoles = finalOutputRoles;
+                debugObservation->outputRoleBytes = finalOutputRoleBytes;
+                debugObservation->layoutResolution = finalLayoutResolution;
+                debugObservation->layoutChartCount = finalLayoutChartCount;
+                debugObservation->finalProductionReached = true;
+                debugObservation->failureStage =
+                    "changed-remesh-private-publication-not-connected";
+            }
+            return {};
+        }
+#endif
+
+        // Produce and publish every standalone occurrence into the one
+        // operation-owned destination. This intentionally reuses the same
+        // ProduceFace/Assemble/PublishPrivate path as ordinary publication.
+        std::vector<decal_math::DecalWorldTriangle> privateOccluders;
+        Bounds3d privateOccluderBounds;
+        decal_layer::Digest privateOccluderProof{};
+        if (decalCapture
+            && !decal_math::CaptureDecalOccluders(
+                decalCapture->impl_->wholeCommittedScene,
+                privateOccluders, privateOccluderBounds,
+                privateOccluderProof)) return {};
+#ifdef DEBUG
+        if (debugObservation && decalCapture)
+            debugObservation->failureStage = "private-occluders-captured";
+#endif
+        finalInputKeys.clear();
+        finalBakeSeals.clear();
+        std::size_t publishedOccurrences = 0;
+        for (const auto& occurrence : occurrences) {
+            const auto& definitionData = definitions[occurrence.definition];
+            const auto captured = capturedOwners.find(
+                definitionData.mesh.definitionIdentifier);
+            if (captured == capturedOwners.end()) continue;
+            auto& owner = *captured->second;
+            auto& item = result->instances[occurrence.instance];
+            const auto& finalMesh = result->meshes[item.meshIndex];
+            item.decalDerivedAppearances.clear();
+
+            face_image::detail::Writer geometryWriter;
+            geometryWriter.raw(
+                reinterpret_cast<const std::uint8_t*>("E4PF"), 4);
+            for (const auto& vertex : finalMesh.vertices)
+                for (float value : {vertex.positionX, vertex.positionY,
+                        vertex.positionZ, vertex.normalX, vertex.normalY,
+                        vertex.normalZ, vertex.textureU, vertex.textureV})
+                    geometryWriter.real(value);
+            for (std::uint32_t index : finalMesh.indices)
+                geometryWriter.integer(index, 4);
+            for (double value : item.worldFromObject.values)
+                geometryWriter.real(value);
+            decal_layer::Digest geometryProof{};
+            if (!geometryWriter.ok
+                || !face_image::HashFaceImageBytes(
+                    geometryWriter.bytes, geometryProof)) return {};
+
+            const auto proof = [&](const char tag[5],
+                                   decal_layer::Digest& output) {
+                face_image::detail::Writer writer;
+                writer.raw(reinterpret_cast<const std::uint8_t*>(tag), 4);
+                writer.raw(geometryProof);
+                writer.raw(owner.transientFinishing.chartProof);
+                return writer.ok && face_image::HashFaceImageBytes(
+                    writer.bytes, output);
+            };
+            decal_layer::Digest appearanceProof{}, tangentProof{};
+            decal_layer::Digest occurrenceProof{};
+            if (!proof("E4AP", appearanceProof)
+                || !proof("E4TG", tangentProof)
+                || !proof("E4OR", occurrenceProof)) return {};
+
+            std::vector<decal_layer::bake::FaceProduct> products;
+            for (const auto& receiver : owner.receivers) {
+                std::vector<const decal_layer::Layer*> layers;
+                for (const auto& layer : owner.definition.layers)
+                    if (layer.image.role == face_image::Role::BaseColor
+                        && decal_layer::bake::SameReceipt(
+                            decal_layer::bake::IntentReceipt(layer),
+                            receiver.receipt)) layers.push_back(&layer);
+                if (layers.empty()) return {};
+                constexpr std::uint32_t side = 64;
+                decal_layer::bake::Input input;
+                input.baseColor.width = side;
+                input.baseColor.height = side;
+                input.baseColor.rgba.assign(
+                    std::size_t(side) * side * 4, 255);
+                input.canonicalLayers = owner.canonicalBytes;
+                input.sourceProof = owner.source.sourceProof;
+                input.finalGeometryUVProof = geometryProof;
+                input.occluderProof = privateOccluderProof;
+                input.effectiveAppearanceProof = appearanceProof;
+                input.tangentProof = tangentProof;
+                const auto bake = finalBakes.find(owner.definitionIdentifier);
+                if (bake == finalBakes.end()) return {};
+                input.atlasProof = bake->second.atlas.layoutProof;
+                input.occurrenceProof = occurrenceProof;
+                for (const auto* layer : layers) {
+                    decal_layer::bake::ResolvedLayer resolved;
+                    resolved.intent = *layer;
+                    if (!ResolveDecalImage(decalCapture->impl_->privateDocument,
+                            layer->image, resolved.image)) return {};
+                    if (layer->mask.present) {
+                        decal_layer::bake::ResolvedImage mask;
+                        if (!ResolveDecalImage(
+                                decalCapture->impl_->privateDocument,
+                                layer->mask.image, mask)) return {};
+                        resolved.mask = std::move(mask);
+                    }
+                    resolved.completeOccludersProved = true;
+                    resolved.boundaryProved = true;
+                    resolved.footprintContained = true;
+                    const auto appendTriangle = [&](const std::array<
+                            decal_layer::bake::Point, 3>& pixels,
+                            const std::array<decal_layer::bake::UV, 3>& uvs) {
+                        decal_layer::bake::Triangle triangle;
+                        triangle.outputPixels = pixels;
+                        triangle.layerUV = uvs;
+                        triangle.receiver = receiver.receipt;
+                        for (std::uint32_t y = 0; y < side; ++y)
+                            for (std::uint32_t x = 0; x < side; ++x) {
+                                std::array<double, 3> weights{};
+                                if (!decal_layer::bake::BarycentricTopLeft(
+                                        triangle, {double(x) + 0.5,
+                                            double(y) + 0.5}, weights))
+                                    continue;
+                                decal_layer::bake::CoverageSample sample;
+                                sample.x = x;
+                                sample.y = y;
+                                sample.receiver = receiver.receipt;
+                                sample.conclusive = true;
+                                sample.affected = true;
+                                sample.selectedReceiver = true;
+                                sample.frontFacing = true;
+                                sample.insideTrim = true;
+                                sample.nearestHit = true;
+                                triangle.coverage.push_back(sample);
+                            }
+                        if (triangle.coverage.empty()) return false;
+                        resolved.triangles.push_back(std::move(triangle));
+                        return true;
+                    };
+                    if (!appendTriangle({{{0, 0}, {side, 0}, {0, side}}},
+                            {{{0, 1}, {1, 1}, {0, 0}}})
+                        || !appendTriangle({{{side, 0}, {side, side},
+                                {0, side}}},
+                            {{{1, 1}, {1, 0}, {0, 0}}})) return {};
+                    input.layers.push_back(std::move(resolved));
+                }
+                decal_layer::bake::FaceProduct product;
+                if (decal_layer::bake::ProduceFace(
+                        input, receiver.receipt, product)
+                        != decal_layer::bake::Status::Baked) return {};
+                products.push_back(std::move(product));
+            }
+            face_image::detail::Writer finalGeometry;
+            finalGeometry.raw(
+                reinterpret_cast<const std::uint8_t*>("E4GF"), 4);
+            finalGeometry.raw(geometryProof);
+            for (const auto& product : products)
+                finalGeometry.raw(product.inputKey);
+            decal_layer::Digest finalGeometryProof{};
+            if (!finalGeometry.ok
+                || !face_image::HashFaceImageBytes(
+                    finalGeometry.bytes, finalGeometryProof)) return {};
+            decal_layer::bake::PublishedDerivative published;
+            if (!decal_layer::bake::PublishPrivate(owner.definition,
+                    finalGeometryProof, privateOccluderProof, products,
+                    decalCapture->impl_->destination, published)) return {};
+#ifdef DEBUG
+            if (debugObservation)
+                debugObservation->failureStage = "private-owner-published";
+#endif
+            decal_layer::bake::PublishedDerivative reopened;
+            if (!decal_layer::bake::publication::Lookup(
+                    decalCapture->impl_->destination, published.owner,
+                    published.inputKey, reopened)
+                || reopened.bakeKey != published.bakeKey
+                || reopened.faces.size() != owner.receivers.size()) return {};
+            finalInputKeys.push_back(DecalDigestText(reopened.inputKey));
+            finalBakeSeals.push_back(DecalDigestText(reopened.bakeKey));
+            for (const auto& face : reopened.faces) {
+                const auto receiver = std::find_if(owner.receivers.begin(),
+                    owner.receivers.end(), [&](const auto& candidate) {
+                        return decal_layer::bake::SameReceipt(
+                            candidate.receipt, face.receiver);
+                    });
+                if (receiver == owner.receivers.end()) return {};
+                std::int32_t textureIndex = -1;
+                if (!installPNG(face.png, face.pixelWidth,
+                        face.pixelHeight, false, textureIndex)) return {};
+                DecalDerivedAppearanceSnapshot appearance;
+                appearance.ownerDefinitionIdentifier =
+                    owner.definitionIdentifier;
+                appearance.bakeProof = DecalDigestText(reopened.bakeKey);
+                appearance.faceIndex = receiver->disposableFaceIndex;
+                appearance.baseColorTextureIndex = textureIndex;
+                item.decalDerivedAppearances.push_back(
+                    std::move(appearance));
+            }
+            if (item.decalDerivedAppearances.size()
+                    != owner.receivers.size()) return {};
+            ++publishedOccurrences;
+        }
+#ifdef DEBUG
+        if (debugObservation && decalCapture)
+            debugObservation->failureStage = "private-appearances-installed";
+#endif
+        if (decalCapture && (publishedOccurrences == 0
+                || decalCapture->impl_->destination.values.size()
+                    != publishedOccurrences)) return {};
+#ifdef DEBUG
+        if (debugObservation && decalCapture)
+            debugObservation->failureStage = "private-destination-complete";
+#endif
+        // Removing superseded face bindings can orphan their source images.
+        // Compact once, after every painted role and private appearance is
+        // installed, and remap all live references as one candidate update.
+        std::vector<bool> referencedTextures(result->textures.size(), false);
+        const auto markTexture = [&](const std::int32_t index) {
+            if (index < 0) return true;
+            if (std::size_t(index) >= referencedTextures.size()) return false;
+            referencedTextures[std::size_t(index)] = true;
+            return true;
+        };
+        for (const auto& material : result->materials)
+            if (!markTexture(material.baseColorTextureIndex)
+                || !markTexture(material.emissiveTextureIndex)
+                || !markTexture(material.metallicRoughnessTextureIndex)
+                || !markTexture(material.occlusionTextureIndex)
+                || !markTexture(material.normalTextureIndex)) return {};
+        for (const auto& instance : result->instances) {
+            for (const auto& binding : instance.faceImageBindings)
+                if (!markTexture(binding.textureIndex)) return {};
+            for (const auto& appearance : instance.decalDerivedAppearances)
+                if (!markTexture(appearance.baseColorTextureIndex)) return {};
+        }
+        std::vector<std::int32_t> textureRemap(
+            result->textures.size(), -1);
+        std::vector<TextureResourceSnapshot> compactTextures;
+        compactTextures.reserve(result->textures.size());
+        for (std::size_t index = 0; index < result->textures.size(); ++index) {
+            if (!referencedTextures[index]) continue;
+            if (compactTextures.size()
+                    > std::size_t(std::numeric_limits<std::int32_t>::max()))
+                return {};
+            textureRemap[index] = std::int32_t(compactTextures.size());
+            compactTextures.push_back(std::move(result->textures[index]));
+        }
+        const auto remapTexture = [&](std::int32_t& index) {
+            if (index < 0) return true;
+            if (std::size_t(index) >= textureRemap.size()
+                || textureRemap[std::size_t(index)] < 0) return false;
+            index = textureRemap[std::size_t(index)];
+            return true;
+        };
+        for (auto& material : result->materials)
+            if (!remapTexture(material.baseColorTextureIndex)
+                || !remapTexture(material.emissiveTextureIndex)
+                || !remapTexture(material.metallicRoughnessTextureIndex)
+                || !remapTexture(material.occlusionTextureIndex)
+                || !remapTexture(material.normalTextureIndex)) return {};
+        for (auto& instance : result->instances) {
+            for (auto& binding : instance.faceImageBindings)
+                if (!remapTexture(binding.textureIndex)) return {};
+            for (auto& appearance : instance.decalDerivedAppearances)
+                if (!remapTexture(appearance.baseColorTextureIndex)) return {};
+        }
+        result->textures = std::move(compactTextures);
+#ifdef DEBUG
+        if (debugObservation && decalCapture)
+            debugObservation->failureStage = "private-resources-compacted";
+#endif
         for (const auto& mesh : result->meshes) {
             if (!CheckedAdd(totalVertices, mesh.vertices.size(), totalVertices)
                 || !CheckedAdd(totalIndices, mesh.indices.size(), totalIndices)
                 || totalVertices > kMaxVerticesPerSnapshot || totalIndices > kMaxIndicesPerSnapshot) { return {}; }
         }
-        if (cancelled() || !IsValidSceneSnapshot(*result)) return {};
+#ifdef DEBUG
+        if (debugObservation && decalCapture)
+            debugObservation->failureStage = "private-topology-counted";
+#endif
+        if (cancelled()) return {};
+        if (!IsValidSceneSnapshot(*result)) {
+#ifdef DEBUG
+            if (debugObservation && decalCapture) {
+                std::string diagnosis = "private-candidate-invalid-other";
+                std::vector<bool> referenced(result->textures.size(), false);
+                const auto markTexture = [&](const std::int32_t index) {
+                    if (index >= 0
+                        && std::size_t(index) < referenced.size())
+                        referenced[std::size_t(index)] = true;
+                };
+                for (const auto& material : result->materials) {
+                    markTexture(material.baseColorTextureIndex);
+                    markTexture(material.emissiveTextureIndex);
+                    markTexture(material.metallicRoughnessTextureIndex);
+                    markTexture(material.occlusionTextureIndex);
+                    markTexture(material.normalTextureIndex);
+                }
+                bool appearanceInvalid = false;
+                bool paintedMaterialInvalid = false;
+                bool meshInvalid = false;
+                for (const auto& instance : result->instances) {
+                    if (instance.meshIndex >= result->meshes.size()) {
+                        meshInvalid = true;
+                        continue;
+                    }
+                    const auto& mesh = result->meshes[instance.meshIndex];
+                    if (!mesh.paintedAtlasBakeProof.empty()
+                        && (mesh.vertices.size() != mesh.indices.size()
+                            || mesh.paintedAtlasMasterDefinitionIdentifier
+                                .empty()
+                            || !instance.faceImageBindings.empty()))
+                        meshInvalid = true;
+                    for (const auto& binding : instance.faceImageBindings)
+                        markTexture(binding.textureIndex);
+                    const std::string& appearanceOwner =
+                        mesh.paintedAtlasMasterDefinitionIdentifier.empty()
+                            ? mesh.definitionIdentifier
+                            : mesh.paintedAtlasMasterDefinitionIdentifier;
+                    for (const auto& appearance :
+                            instance.decalDerivedAppearances) {
+                        markTexture(appearance.baseColorTextureIndex);
+                        bool facePublished = false;
+                        for (const auto& primitive : mesh.primitives)
+                            facePublished = facePublished
+                                || primitive.faceIndex
+                                    == appearance.faceIndex;
+                        const bool validBakeProof =
+                            appearance.bakeProof.size() == 64
+                            && std::all_of(appearance.bakeProof.begin(),
+                                appearance.bakeProof.end(), [](const char c) {
+                                    return (c >= '0' && c <= '9')
+                                        || (c >= 'a' && c <= 'f');
+                                });
+                        appearanceInvalid = appearanceInvalid
+                            || appearance.ownerDefinitionIdentifier.empty()
+                            || appearance.baseColorTextureIndex < 0
+                            || !validBakeProof
+                            || appearance.ownerDefinitionIdentifier
+                                != appearanceOwner
+                            || !facePublished;
+                    }
+                    if (!mesh.paintedAtlasBakeProof.empty())
+                        for (const auto& binding :
+                                instance.primitiveBindings) {
+                            if (binding.materialIndex
+                                    >= result->materials.size()) {
+                                paintedMaterialInvalid = true;
+                                continue;
+                            }
+                            const auto& material = result->materials[
+                                binding.materialIndex];
+                            for (const auto index : {
+                                    material.baseColorTextureIndex,
+                                    material.emissiveTextureIndex,
+                                    material.metallicRoughnessTextureIndex,
+                                    material.occlusionTextureIndex,
+                                    material.normalTextureIndex})
+                                if (index >= 0
+                                    && (std::size_t(index)
+                                            >= result->textures.size()
+                                        || !result->textures[
+                                            std::size_t(index)]
+                                                .paintedAtlasDerivative))
+                                    paintedMaterialInvalid = true;
+                        }
+                }
+                if (appearanceInvalid)
+                    diagnosis = "private-candidate-invalid-appearance";
+                else if (paintedMaterialInvalid)
+                    diagnosis = "private-candidate-invalid-painted-material";
+                else if (meshInvalid)
+                    diagnosis = "private-candidate-invalid-mesh";
+                else if (std::find(referenced.begin(), referenced.end(),
+                        false) != referenced.end())
+                    diagnosis = "private-candidate-invalid-unreferenced";
+                debugObservation->failureStage = std::move(diagnosis);
+            }
+#endif
+            return {};
+        }
+#ifdef DEBUG
+        if (debugObservation && decalCapture)
+            debugObservation->failureStage = "private-candidate-valid";
+#endif
         if (!decalCapture) return result;
+        std::vector<PrivateExportFinalMesh> emittedMeshes;
+        emittedMeshes.reserve(publishedOccurrences);
+        for (const auto& occurrence : occurrences) {
+            const auto& definition = definitions[occurrence.definition];
+            if (capturedOwners.find(definition.mesh.definitionIdentifier)
+                    == capturedOwners.end()) continue;
+            const auto& instance = result->instances[occurrence.instance];
+            if (instance.meshIndex >= result->meshes.size()) return {};
+            emittedMeshes.push_back({definition.mesh.definitionIdentifier,
+                result->meshes[instance.meshIndex], instance});
+        }
+        PrivateExportDecalArtifact artifact;
+        if (!FinalizePrivateExportDecals(*decalCapture, *result,
+                finalCorrespondence, emittedMeshes, cancelled, artifact)
+            || !artifact.scene) return {};
 #ifdef DEBUG
         if (debugObservation) {
             debugObservation->producedReceiverCount =
@@ -6070,24 +6813,20 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             debugObservation->finalCornerCount = finalCornerCount;
             debugObservation->operationWork += finalTriangleCount;
             debugObservation->operationResidentBytes = finalResidentBytes;
-            debugObservation->correspondence =
-                std::move(finalCorrespondence);
-            debugObservation->inputKeys = std::move(finalInputKeys);
-            debugObservation->bakeSeals = std::move(finalBakeSeals);
-            debugObservation->outputRoles =
-                std::move(finalOutputRoles);
-            debugObservation->outputRoleBytes =
-                std::move(finalOutputRoleBytes);
+            debugObservation->correspondence = artifact.correspondence;
+            debugObservation->inputKeys = artifact.inputKeys;
+            debugObservation->bakeSeals = artifact.bakeSeals;
+            debugObservation->outputRoles = finalOutputRoles;
+            debugObservation->outputRoleBytes = finalOutputRoleBytes;
             debugObservation->layoutResolution = finalLayoutResolution;
             debugObservation->layoutChartCount = finalLayoutChartCount;
             debugObservation->finalProductionReached = true;
-            debugObservation->failureStage =
-                "changed-remesh-private-publication-not-connected";
+            debugObservation->publicationReached = true;
+            debugObservation->complete = true;
+            debugObservation->failureStage = "complete";
         }
 #endif
-        // R7B owns detached final inputs and all-role bake products only.
-        // Publication and successful public export remain the R7C boundary.
-        return {};
+        return artifact.scene;
     } catch (...) { return {}; }
 }
 
