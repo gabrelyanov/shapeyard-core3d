@@ -1717,6 +1717,7 @@ Standard_Boolean Core3DValidateRetainedEdgeTreatmentDocument(const Handle(TDocSt
 #include "SplineProfilePersistence.hxx"
 #include "FeaturePatternChildBinaryDriver.hxx"
 #include "FeaturePatternBaselineBinaryDriver.hxx"
+#include "LoftCorrespondencePersistence.hxx"
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <Precision.hxx>
@@ -4643,6 +4644,14 @@ public:
                     && !core3d::general_loft::persistence::ReadAll(
                         Handle(TDocStd_Document)::DownCast(theDocument), myGeneralLoftRecords))))
                 rejectTypes();
+            if (myReaderStatus == PCDM_RS_OK && myLoftCorrespondenceBudget) {
+                std::vector<core3d::loft_correspondence::persistence::Record> records;
+                if (myLoftCorrespondenceBudget->rejected
+                    || (myLoftCorrespondenceBudget->records
+                        && !core3d::loft_correspondence::persistence::ReadAll(
+                            Handle(TDocStd_Document)::DownCast(theDocument), records)))
+                    rejectTypes();
+            }
             if (myReaderStatus == PCDM_RS_OK && mySplineProfileBudget) {
                 std::vector<core3d::spline_profile::Record> records;
                 if (mySplineProfileBudget->rejected
@@ -4791,6 +4800,8 @@ public:
             aTable,theMessageDriver,myBoundedCurveBudget,RejectSafeBinaryRead);
         core3d::general_loft::persistence::Register(
             aTable, theMessageDriver, myGeneralLoftBudget, RejectSafeBinaryRead);
+        core3d::loft_correspondence::persistence::Register(
+            aTable, theMessageDriver, myLoftCorrespondenceBudget, RejectSafeBinaryRead);
         if (myAllowRetainedSolid) core3d::spline_profile::Register(
             aTable, theMessageDriver, mySplineProfileBudget, RejectSafeBinaryRead);
         if (myAllowRetainedSolid) core3d::retained_finishing::Register(
@@ -5039,6 +5050,7 @@ private:
         if (myRetainedBudget) myRetainedBudget->reset();
         if (myBoundedCurveBudget) myBoundedCurveBudget->reset();
         if (myGeneralLoftBudget) myGeneralLoftBudget->reset();
+        if (myLoftCorrespondenceBudget) myLoftCorrespondenceBudget->reset();
         myGeneralLoftRecords.clear();
         if (mySplineProfileBudget) mySplineProfileBudget->reset();
         if (myRetainedFinishingBudget) myRetainedFinishingBudget->reset();
@@ -5065,6 +5077,8 @@ private:
         std::make_shared<core3d::bounded_curve::ReadBudget>();
     std::shared_ptr<core3d::general_loft::persistence::ReadBudget> myGeneralLoftBudget=
         std::make_shared<core3d::general_loft::persistence::ReadBudget>();
+    std::shared_ptr<core3d::loft_correspondence::persistence::ReadBudget> myLoftCorrespondenceBudget=
+        std::make_shared<core3d::loft_correspondence::persistence::ReadBudget>();
     std::vector<core3d::general_loft::persistence::Record> myGeneralLoftRecords;
     std::shared_ptr<core3d::spline_profile::ReadBudget> mySplineProfileBudget=
         std::make_shared<core3d::spline_profile::ReadBudget>();
@@ -6917,7 +6931,7 @@ void Core3DDefineSafeBinXCAFFormat(
     // that already omitted triangulation still reads back without it and
     // keeps reporting Stale.
     Handle(BinDrivers_DocumentStorageDriver) ocafStorage =
-        new core3d::receipt::v3::StorageDriver<core3d::painted_atlas_bake::persistence::StorageDriver<core3d::face_image::persistence::resources::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>>>>>>>>>>>>();
+        new core3d::receipt::v3::StorageDriver<core3d::loft_correspondence::persistence::StorageDriver<core3d::painted_atlas_bake::persistence::StorageDriver<core3d::face_image::persistence::resources::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>>>>>>>>>>>>>();
     ocafStorage->SetWithTriangles(application->MessageDriver(), Standard_True);
     application->DefineFormat(
         TCollection_AsciiString("BinOcaf"),
@@ -6926,7 +6940,7 @@ void Core3DDefineSafeBinXCAFFormat(
         new Core3DBoundedBinXCAFRetrievalDriver(),
         ocafStorage);
     Handle(BinDrivers_DocumentStorageDriver) xcafStorage =
-        new core3d::receipt::v3::StorageDriver<core3d::painted_atlas_bake::persistence::StorageDriver<core3d::face_image::persistence::resources::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>>>>>>>>>>();
+        new core3d::receipt::v3::StorageDriver<core3d::loft_correspondence::persistence::StorageDriver<core3d::painted_atlas_bake::persistence::StorageDriver<core3d::face_image::persistence::resources::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>>>>>>>>>>>();
     xcafStorage->SetWithTriangles(application->MessageDriver(), Standard_True);
     application->DefineFormat(
         TCollection_AsciiString("BinXCAF"),
@@ -7481,6 +7495,12 @@ Standard_Boolean ValidateGeometryDocument(
         std::vector<core3d::loft_persistence::Record> lofts;
         std::vector<core3d::retained_solid::Record> retained;
         if (!core3d::saved_features::Validate(document, profiles, enclosures, sweeps, lofts,&retained)) return Standard_False;
+        std::vector<core3d::loft_correspondence::persistence::Record> correspondences;
+        if (!core3d::loft_correspondence::persistence::ReadAll(document, correspondences))
+            return Standard_False;
+        TDF_LabelMap correspondenceLabels;
+        for (const auto& record : correspondences)
+            if (!correspondenceLabels.Add(record.label)) return Standard_False;
         std::size_t retainedBytes=0;
         for(const auto& record:retained){
             if(!record.value||record.value->bytes.size()>core3d::composite_recipe::MaximumDocumentAggregateBytes-retainedBytes)
@@ -7963,7 +7983,8 @@ Standard_Boolean ValidateGeometryDocument(
                     TNaming_NamedShape::GetID(), aNamedShape)
                 && !aVisitedGraphLabels.Contains(aLabel.Value())
                 && !aValidatedSubshapeLabels.Contains(
-                    aLabel.Value())) {
+                    aLabel.Value())
+                && !correspondenceLabels.Contains(aLabel.Value())) {
                 return Standard_False;
             }
             if (HasMeshRegionPartitionSchemaAttribute(aLabel.Value())) {
@@ -7989,7 +8010,7 @@ Standard_Boolean ValidateGeometryDocument(
             usage.graphVisits = anAggregateGraphVisitCount;
             usage.leafOccurrences = aLeafOccurrenceCount;
             Standard_Size compositeNodes=0;for(const auto& record:composites)compositeNodes+=record.value->definition.nodes.size();
-            usage.featureRecords = static_cast<Standard_Size>(profiles.size() + enclosures.size() + sweeps.size() + lofts.size() + 2*retained.size())+compositeNodes;
+            usage.featureRecords = static_cast<Standard_Size>(profiles.size() + enclosures.size() + sweeps.size() + lofts.size() + correspondences.size() + 2*retained.size())+compositeNodes;
             *output = usage;
         }
         return Standard_True;
@@ -10002,7 +10023,8 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
 }
 
 Standard_Boolean OcctDocument::HasNoSavedSweepForTopology(const TDF_Label& label) const noexcept {
-    if(core3d::retained_solid::HasRecord(label))return Standard_False;
+    if(core3d::retained_solid::HasRecord(label)
+        ||core3d::loft_correspondence::persistence::HasRecord(label))return Standard_False;
     core3d::sweep_persistence::Record record;
     core3d::loft_persistence::Record loft;
     return core3d::sweep_persistence::Read(myOcafDoc,label,record) && record.label.IsNull()
@@ -10414,6 +10436,7 @@ OcctDocument::EnsureGeometryRepresentationForMutation(
     try {
         OCC_CATCH_SIGNALS
         if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+            || core3d::loft_correspondence::persistence::HasRecord(label)
             || !XCAFDoc_DocumentTool::CheckShapeTool(
                 myOcafDoc->Main())) {
             return Standard_False;
@@ -16169,6 +16192,7 @@ Standard_Boolean OcctDocument::CaptureObjectTransformStateForLabel(
     try {
         OCC_CATCH_SIGNALS
         if (myOcafDoc.IsNull()
+            || core3d::loft_correspondence::persistence::HasRecord(label)
             || !XCAFDoc_DocumentTool::CheckShapeTool(myOcafDoc->Main())
             || !IsEditableFreeSimpleDefinitionLabel(label)) {
             return Standard_False;

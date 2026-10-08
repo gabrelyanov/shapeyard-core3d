@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <climits>
 #include <cmath>
 #include <map>
 #include <memory>
@@ -229,6 +230,81 @@ NSDictionary *ReviewDictionary(const profile_d4::PreparedReview& review,
         @"projectedMemoryBytes": @(review.chargedProjection.projectedMemoryBytes)
     };
 }
+
+// A finite commit/input fence. Both observers and the source are allocated
+// before StartCreation can open an OCAF command.
+struct D4CommitInputContinuation final {
+    CFRunLoopSourceRef source = nullptr;
+    CFRunLoopObserverRef commitBoundary = nullptr;
+    CFRunLoopObserverRef finishBoundary = nullptr;
+    dispatch_block_t finish = nil;
+    enum class Phase : std::uint8_t {
+        AwaitingCommit, AwaitingInput, AwaitingFinish, FinishQueued, Disposed
+    } phase = Phase::AwaitingCommit;
+};
+
+void D4DiscardContinuation(const std::shared_ptr<D4CommitInputContinuation>& value) {
+    if (!value || value->phase == D4CommitInputContinuation::Phase::Disposed) return;
+    value->phase = D4CommitInputContinuation::Phase::Disposed;
+    if (value->source) {
+        if (CFRunLoopSourceIsValid(value->source))
+            CFRunLoopSourceInvalidate(value->source);
+        CFRelease(value->source); value->source = nullptr;
+    }
+    if (value->commitBoundary) {
+        if (CFRunLoopObserverIsValid(value->commitBoundary))
+            CFRunLoopObserverInvalidate(value->commitBoundary);
+        CFRelease(value->commitBoundary); value->commitBoundary = nullptr;
+    }
+    if (value->finishBoundary) {
+        if (CFRunLoopObserverIsValid(value->finishBoundary))
+            CFRunLoopObserverInvalidate(value->finishBoundary);
+        CFRelease(value->finishBoundary); value->finishBoundary = nullptr;
+    }
+    value->finish = nil;
+}
+
+std::shared_ptr<D4CommitInputContinuation> D4MakeContinuation() {
+    try {
+        auto value = std::make_shared<D4CommitInputContinuation>();
+        D4CommitInputContinuation *raw = value.get();
+        CFRunLoopSourceContext context = {};
+        context.info = raw;
+        context.perform = [](void *info) {
+            auto *current = static_cast<D4CommitInputContinuation *>(info);
+            if (current->phase == D4CommitInputContinuation::Phase::AwaitingInput) {
+                current->phase = D4CommitInputContinuation::Phase::AwaitingFinish;
+                CFRunLoopAddObserver(CFRunLoopGetMain(), current->finishBoundary,
+                                     kCFRunLoopCommonModes);
+            }
+        };
+        value->source = CFRunLoopSourceCreate(kCFAllocatorDefault, LONG_MAX, &context);
+        if (!value->source) return {};
+        value->commitBoundary = CFRunLoopObserverCreateWithHandler(kCFAllocatorDefault,
+            kCFRunLoopBeforeWaiting, false, LONG_MAX - 1,
+            ^(CFRunLoopObserverRef, CFRunLoopActivity) {
+                if (raw->phase == D4CommitInputContinuation::Phase::AwaitingCommit) {
+                    raw->phase = D4CommitInputContinuation::Phase::AwaitingInput;
+                    CFRunLoopSourceSignal(raw->source);
+                    CFRunLoopWakeUp(CFRunLoopGetMain());
+                }
+            });
+        if (!value->commitBoundary) { D4DiscardContinuation(value); return {}; }
+        value->finishBoundary = CFRunLoopObserverCreateWithHandler(kCFAllocatorDefault,
+            kCFRunLoopBeforeWaiting, false, LONG_MAX,
+            ^(CFRunLoopObserverRef, CFRunLoopActivity) {
+                if (raw->phase == D4CommitInputContinuation::Phase::AwaitingFinish) {
+                    raw->phase = D4CommitInputContinuation::Phase::FinishQueued;
+                    dispatch_block_t finish = raw->finish;
+                    if (finish) CFRunLoopPerformBlock(CFRunLoopGetMain(),
+                                                      kCFRunLoopCommonModes, finish);
+                    CFRunLoopWakeUp(CFRunLoopGetMain());
+                }
+            });
+        if (!value->finishBoundary) { D4DiscardContinuation(value); return {}; }
+        return value;
+    } catch (...) { return {}; }
+}
 } // namespace
 
 @interface Core3DFeaturePatternCreationOpening () {
@@ -241,6 +317,7 @@ NSDictionary *ReviewDictionary(const profile_d4::PreparedReview& review,
     std::shared_ptr<std::atomic_bool> _stop;
     std::atomic<State> _state;
     NSDictionary *_review;
+    std::shared_ptr<D4CommitInputContinuation> _continuation;
 }
 - (instancetype)initWithCapture:(OpeningCapture)capture;
 @end
@@ -336,15 +413,37 @@ NSDictionary *ReviewDictionary(const profile_d4::PreparedReview& review,
         DeliverCreated(completion, Core3DProfileConstructionResultRejected,
                        @"No current prepared creation.", nil); return;
     }
+    const auto continuation = D4MakeContinuation();
+    if (!continuation) {
+        [self finishCreationOutcome:profile_d4::CreationOutcome::Refused
+                         completion:completion];
+        return;
+    }
     profile_d4::CreationOutcome immediate = profile_d4::CreationOutcome::Refused;
     _pending = profile_d4::StartCreation(*_opening.owner, _prepared, immediate);
-    if (!_pending) { [self finishCreationOutcome:immediate completion:completion]; return; }
-    // Return the main run loop to event processing with the exact command lease
-    // still open at AfterLastChild. Stop can now reach that lease's abort path.
-    [NSRunLoop.mainRunLoop performBlock:^{
+    if (!_pending) {
+        D4DiscardContinuation(continuation);
+        [self finishCreationOutcome:immediate completion:completion]; return;
+    }
+    _continuation = continuation;
+    __weak Core3DFeaturePatternCreationOpening *weakSelf = self;
+    continuation->finish = ^{
         const auto outcome = profile_d4::FinishCreation(self->_pending, *self->_stop);
         [self finishCreationOutcome:outcome completion:completion];
-    }];
+        // This runs only after Finish and after every source/observer callout has
+        // returned. Holding continuation on this stack also prevents teardown
+        // from releasing an executing callback capture.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            Core3DFeaturePatternCreationOpening *value = weakSelf;
+            D4DiscardContinuation(continuation);
+            if (value && value->_continuation == continuation)
+                value->_continuation.reset();
+        });
+    };
+    CFRunLoopAddSource(CFRunLoopGetMain(), continuation->source,
+                       kCFRunLoopCommonModes);
+    CFRunLoopAddObserver(CFRunLoopGetMain(), continuation->commitBoundary,
+                         kCFRunLoopCommonModes);
 }
 - (BOOL)requestStop {
     if (!NSThread.isMainThread || _state.load() != State::Applying || !_pending)

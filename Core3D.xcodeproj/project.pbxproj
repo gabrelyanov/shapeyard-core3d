@@ -11,6 +11,7 @@
 		1C0C01000000000000000002 /* LoftCorrespondenceProof.hxx in Headers */ = {isa = PBXBuildFile; fileRef = 1C0C00000000000000000002 /* LoftCorrespondenceProof.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		1C0C01000000000000000003 /* Core3DLoftCorrespondenceOpening.h in Headers */ = {isa = PBXBuildFile; fileRef = 1C0C00000000000000000003 /* Core3DLoftCorrespondenceOpening.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		1C0C01000000000000000004 /* Core3DLoftCorrespondenceOpening.mm in Sources */ = {isa = PBXBuildFile; fileRef = 1C0C00000000000000000004 /* Core3DLoftCorrespondenceOpening.mm */; };
+		1C1C01000000000000000001 /* LoftCorrespondencePersistence.hxx in Headers */ = {isa = PBXBuildFile; fileRef = 1C1C00000000000000000001 /* LoftCorrespondencePersistence.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		A1A000010000000000000001 /* AuthoredParameterNativeOwner.hxx in Headers */ = {isa = PBXBuildFile; fileRef = A1A000020000000000000001 /* AuthoredParameterNativeOwner.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		A1A000010000000000000002 /* AuthoredParameterNativeOwner.mm in Sources */ = {isa = PBXBuildFile; fileRef = A1A000020000000000000002 /* AuthoredParameterNativeOwner.mm */; };
 		A1A000010000000000000003 /* Core3DAuthoredParameterOpening.h in Headers */ = {isa = PBXBuildFile; fileRef = A1A000020000000000000003 /* Core3DAuthoredParameterOpening.h */; settings = {ATTRIBUTES = (Public, ); }; };
@@ -320,6 +321,7 @@
 		1C0C00000000000000000002 /* LoftCorrespondenceProof.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = LoftCorrespondenceProof.hxx; sourceTree = "<group>"; };
 		1C0C00000000000000000003 /* Core3DLoftCorrespondenceOpening.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DLoftCorrespondenceOpening.h; sourceTree = "<group>"; };
 		1C0C00000000000000000004 /* Core3DLoftCorrespondenceOpening.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DLoftCorrespondenceOpening.mm; sourceTree = "<group>"; };
+		1C1C00000000000000000001 /* LoftCorrespondencePersistence.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = LoftCorrespondencePersistence.hxx; sourceTree = "<group>"; };
 		A1A000020000000000000001 /* AuthoredParameterNativeOwner.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = AuthoredParameterNativeOwner.hxx; sourceTree = "<group>"; };
 		A1A000020000000000000002 /* AuthoredParameterNativeOwner.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AuthoredParameterNativeOwner.mm; sourceTree = "<group>"; };
 		A1A000020000000000000003 /* Core3DAuthoredParameterOpening.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DAuthoredParameterOpening.h; sourceTree = "<group>"; };
@@ -898,6 +900,7 @@
 			children = (
 				1C0C00000000000000000001 /* LoftCorrespondenceAdapter.hxx */,
 				1C0C00000000000000000002 /* LoftCorrespondenceProof.hxx */,
+				1C1C00000000000000000001 /* LoftCorrespondencePersistence.hxx */,
 				A1A000020000000000000001 /* AuthoredParameterNativeOwner.hxx */,
 				A1A000020000000000000002 /* AuthoredParameterNativeOwner.mm */,
 				F17900020000000000000002 /* PatternNativeCollaborators.mm */,
@@ -1193,6 +1196,7 @@
 				1C0C01000000000000000001 /* LoftCorrespondenceAdapter.hxx in Headers */,
 				1C0C01000000000000000002 /* LoftCorrespondenceProof.hxx in Headers */,
 				1C0C01000000000000000003 /* Core3DLoftCorrespondenceOpening.h in Headers */,
+				1C1C01000000000000000001 /* LoftCorrespondencePersistence.hxx in Headers */,
 				A1A000010000000000000001 /* AuthoredParameterNativeOwner.hxx in Headers */,
 				A1A000010000000000000003 /* Core3DAuthoredParameterOpening.h in Headers */,
 				C3D0E0012F10000100000001 /* Core3DNativeExportOperation.h in Headers */,

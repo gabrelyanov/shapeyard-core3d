@@ -20,6 +20,10 @@ FOUNDATION_EXPORT uint64_t Core3DDebugLoftCorrespondenceGeometryProbe(
     int32_t scenario, double metersPerUnit,
     double *_Nullable values, size_t valueCapacity,
     uint64_t *_Nullable words, size_t wordCapacity);
+
+FOUNDATION_EXPORT uint64_t Core3DDebugLoftCorrespondencePersistenceProbe(
+    int32_t scenario, double metersPerUnit,
+    uint64_t *_Nullable words, size_t wordCapacity);
 #endif
 
 NS_ASSUME_NONNULL_END

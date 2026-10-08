@@ -620,6 +620,16 @@ __attribute__((objc_subclassing_restricted))
 //! all five painted output roles from the same retained carrier.
 + (NSData *_Nullable)debugE4RetainedCapRoleFixtureAssetDataWithResourceBytes:
     (NSArray<NSData *> *)resourceBytes metersPerUnit:(NSNumber *)metersPerUnit;
+//! Adds frozen five-role SYFI sources to one real member of the existing
+//! persisted E2 2048/4 atlas. The sibling receives neither SYFI nor SYDL.
+- (NSNumber *)debugInstallE4PaintedAtlasSourcesForEntityIdentifier:
+    (NSString *)entityIdentifier resourceBytes:(NSArray<NSData *> *)resourceBytes
+    NS_SWIFT_NAME(debugInstallE4PaintedAtlasSources(entityIdentifier:resourceBytes:));
+//! Commits the production SYEB bake and returns YES only after a strict current
+//! persisted read observes all five role resources and a nonzero bake proof.
+- (NSNumber *)debugBakeE4PaintedAtlasForEntityIdentifier:
+    (NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugBakeE4PaintedAtlas(entityIdentifier:));
 //! Installs one strict SYDL/1 layer after resolving the carrier's +Z face
 //! through production B2. Returns a boxed BOOL for selector-safe test use.
 - (NSNumber *)debugInstallE4RetainedCapLayerForEntityIdentifier:

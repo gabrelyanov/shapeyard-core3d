@@ -5,6 +5,7 @@
 // this component owns recipe admission, frame composition, identity separation,
 // exact staging, and source/candidate read-back.
 #include "CompositeRecipeAttribute.hxx"
+#include "LoftCorrespondencePersistence.hxx"
 #include "PartBooleanBuild.hxx"
 #include "PartBooleanRebuild.hxx"
 #include "RectangularLoftPersistence.hxx"
@@ -200,7 +201,8 @@ inline bool Capture(const Handle(TDocStd_Document)& document,
     output = {};
     try {
         if (document.IsNull() || owner.IsNull() || owner.Data() != document->GetData()
-            || retained_solid::HasRecord(owner)) return false;
+            || retained_solid::HasRecord(owner)
+            || loft_correspondence::persistence::HasRecord(owner)) return false;
         Source value; value.owner = owner; value.ownerShape = XCAFDoc_ShapeTool::GetShape(owner);
         if (value.ownerShape.IsNull()) return false;
         double carrierMetersPerUnit = 0;

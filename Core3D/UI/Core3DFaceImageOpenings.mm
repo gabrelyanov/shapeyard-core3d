@@ -17,6 +17,7 @@
 #include "../OCCTKit/OcctDocument.h"
 #include "../OCCTKit/FaceImageResourceValidation.hxx"
 #include "../OCCTKit/DecalLayerPersistence.hxx"
+#include "../OCCTKit/AssetAtlasPersistence.hxx"
 #include "../OCCTKit/ReceiptRecord.hxx"
 #include "../OCCTKit/RetainedSolidAttribute.hxx"
 #include "Core3DViewer.h"
@@ -3042,6 +3043,162 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         [envelopes, unit](const Handle(TDocStd_Document)& document) {
             StageE4RetainedCapFixture(document, unit, envelopes);
         });
+}
+
+- (NSNumber *)debugInstallE4PaintedAtlasSourcesForEntityIdentifier:
+    (NSString *)entityIdentifier resourceBytes:(NSArray<NSData *> *)resourceBytes {
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128 || resourceBytes.count != 3) return @NO;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        OwnerKey key; TDF_Label owner;
+        const char *raw = entityIdentifier.UTF8String;
+        if (wrapper.IsNull()
+            || !LabelForSelected(wrapper, raw ? raw : "", key, owner)) return @NO;
+        const Handle(TDocStd_Document)& document = wrapper->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return @NO;
+
+        std::vector<core3d::asset_atlas::persistence::Record> atlases;
+        if (!core3d::asset_atlas::persistence::ReadAll(document, atlases)
+            || atlases.size() != 1 || !atlases.front().value
+            || atlases.front().value->definition.members.size() != 2
+            || atlases.front().value->definition.resolutionTexels != 2048
+            || atlases.front().value->definition.gutterTexels != 4) return @NO;
+        bool member = false;
+        for (const auto& value : atlases.front().value->definition.members)
+            member = member || value.owner == key;
+        if (!member) return @NO;
+
+        std::vector<fi::ResourceEnvelope> envelopes;
+        envelopes.reserve(3);
+        for (NSUInteger index = 0; index < resourceBytes.count; ++index) {
+            NSData *bytes = resourceBytes[index];
+            if (bytes.length == 0) return @NO;
+            fi::ResourceEnvelope envelope;
+            NSData *provenance = [[NSString stringWithFormat:
+                @"shapeyard.e4.mesh-definition.fixture.v1.%lu",
+                (unsigned long)index] dataUsingEncoding:NSUTF8StringEncoding];
+            if (!fi::validation::BuildFaceImageEnvelope(
+                    bytes, bytes, @"opaque", provenance,
+                    FixtureIndexedUUID(0x73, std::uint8_t(index + 1)),
+                    envelope)) return @NO;
+            envelopes.push_back(std::move(envelope));
+        }
+        document->NewCommand();
+        for (const auto& envelope : envelopes)
+            if (fi::owner::AdoptResource(document, envelope)
+                    != fi::owner::Outcome::Committed) {
+                document->AbortCommand(); return @NO;
+            }
+        if (!document->CommitCommand()) {
+            document->AbortCommand(); return @NO;
+        }
+
+        Standard_Real unit = 0.0;
+        dr::FaceImageGeometricReceipt receipt;
+        const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(owner);
+        if (shape.IsNull()
+            || !XCAFDoc_DocumentTool::GetLengthUnit(document, unit)
+            || !FixtureCapturePlanarFace(shape, unit,
+                core3d::retained_face_selector::Axis::X,
+                core3d::retained_face_selector::Side::Max, receipt)) return @NO;
+        fi::Digest selectorProof{};
+        if (!dr::FaceImageReceiptProof(receipt, selectorProof)) return @NO;
+        const std::array<fi::Role, 5> roles{{
+            fi::Role::BaseColor, fi::Role::Emissive,
+            fi::Role::MetallicRoughness, fi::Role::Occlusion,
+            fi::Role::Normal}};
+        const std::array<std::size_t, 5> resources{{0, 0, 1, 1, 2}};
+        fi::Definition definition;
+        definition.owner = key;
+        for (std::size_t index = 0; index < roles.size(); ++index) {
+            const auto& envelope = envelopes[resources[index]];
+            fi::Binding binding;
+            binding.binding = FixtureIndexedUUID(
+                0x75, std::uint8_t(index + 1));
+            binding.face = FixtureIndexedUUID(0x75, 7);
+            binding.selectorProof = selectorProof;
+            binding.resource = envelope.resource;
+            binding.role = roles[index];
+            binding.colorSpace = index < 2
+                ? fi::ColorSpace::SRGB : fi::ColorSpace::Linear;
+            binding.transform.scale = {1.25, 0.75};
+            binding.transform.offset = {0.125, -0.25};
+            binding.transform.rotationDegrees = 30.0;
+            binding.transform.wrapU = fi::Wrap::MirroredRepeat;
+            binding.transform.wrapV = fi::Wrap::ClampToEdge;
+            definition.bindings.push_back(std::move(binding));
+        }
+        if (!fi::BindBindingProof(definition)) return @NO;
+        fi::Observed observed;
+        observed.faces.push_back({FixtureIndexedUUID(0x75, 7), selectorProof});
+        if (!fi::owner::ResourceManifest(document, observed.resources)) return @NO;
+        document->NewCommand();
+        fi::owner::Staging staging;
+        const auto prepared = fi::owner::Prepare(
+            staging, document, definition, observed);
+        const auto committed = prepared == fi::owner::Outcome::Prepared
+            ? fi::owner::Commit(staging, document, observed)
+            : fi::owner::Outcome::Malformed;
+        if (prepared != fi::owner::Outcome::Prepared
+            || committed != fi::owner::Outcome::Committed
+            || !document->CommitCommand()) {
+            fi::owner::Cancel(staging);
+            document->AbortCommand(); return @NO;
+        }
+        return @YES;
+    } @catch (...) { return @NO; }
+}
+
+- (NSNumber *)debugBakeE4PaintedAtlasForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128) return @NO;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        OwnerKey key; TDF_Label owner;
+        const char *raw = entityIdentifier.UTF8String;
+        if (wrapper.IsNull()
+            || !LabelForSelected(wrapper, raw ? raw : "", key, owner)) return @NO;
+        const Handle(TDocStd_Document)& document = wrapper->Document();
+        std::vector<core3d::asset_atlas::persistence::Record> atlases;
+        if (document.IsNull() || document->HasOpenCommand()
+            || !core3d::asset_atlas::persistence::ReadAll(document, atlases))
+            return @NO;
+        const core3d::asset_atlas::Definition *atlas = nullptr;
+        for (const auto& record : atlases) {
+            if (!record.value) return @NO;
+            for (const auto& member : record.value->definition.members)
+                if (member.owner == key) {
+                    if (atlas) return @NO;
+                    atlas = &record.value->definition;
+                }
+        }
+        if (!atlas || atlas->resolutionTexels != 2048
+            || atlas->gutterTexels != 4) return @NO;
+        const auto atlasKey = atlas->key;
+        document->NewCommand();
+        if (wrapper->BakePaintedAtlas(atlasKey)
+                != OcctPaintedAtlasBakeOutcome::Committed
+            || !document->CommitCommand()) {
+            document->AbortCommand(); return @NO;
+        }
+        core3d::painted_atlas_bake::Definition persisted;
+        return @(wrapper->PaintedAtlasBakeCurrentness(atlasKey, &persisted)
+                == OcctPaintedAtlasBakeCurrentness::Current
+            && persisted.resources.size() == 5
+            && core3d::painted_atlas_bake::Nonzero(persisted.bakeProof));
+    } @catch (...) { return @NO; }
 }
 
 - (NSNumber *)debugInstallE4RetainedCapLayerForEntityIdentifier:

@@ -7262,6 +7262,12 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             aLabelToInstances;
         std::unordered_map<std::string, std::vector<std::size_t>>
             aDefinitionToInstances;
+        std::vector<std::size_t> aMeshDefinitionIndices;
+        aMeshDefinitionIndices.reserve(
+            aDefinitions.size() + anOccurrences.size());
+        for (std::size_t index = 0; index < aDefinitions.size(); ++index)
+            aMeshDefinitionIndices.push_back(index);
+        if (aMeshDefinitionIndices.size() != aScene.meshes.size()) return {};
         struct PendingDecal final {
             std::size_t instanceIndex = 0;
             std::size_t definitionIndex = 0;
@@ -7433,6 +7439,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                     || aSnapshotIndexCount > kMaxIndicesPerSnapshot) return {};
                 anInstance.meshIndex = static_cast<std::uint32_t>(
                     aScene.meshes.size());
+                aMeshDefinitionIndices.push_back(aDefinitionIndex);
                 aScene.meshes.push_back(std::move(aDerivativeMesh));
             }
             if (!MatrixFromTransform(aWorldTransform, anInstance.worldFromObject)) {
@@ -7831,6 +7838,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
 
         // Supplied geometry frames persist independently of normal material.
         // Mikk-only normal bindings share the existing resident frame budget.
+        if (aMeshDefinitionIndices.size() != aScene.meshes.size()) return {};
         std::vector<bool> needsNormalFrames(aScene.meshes.size(), false);
         for (const auto& instance : aScene.instances) {
             for (const auto& binding : instance.primitiveBindings) {
@@ -7840,26 +7848,32 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         }
         for (std::size_t index = 0; index < aScene.meshes.size(); ++index) {
             auto& mesh = aScene.meshes[index];
+            const std::size_t definitionIndex = aMeshDefinitionIndices[index];
+            if (definitionIndex >= aDefinitions.size()) return {};
+            const TDF_Label& definitionLabel =
+                aDefinitions[definitionIndex].label;
             OcctAuthoredFrameRecord record;
-            const auto state = Core3DReadAuthoredFrameOwner(aDocument, aDefinitions[index].label, record);
+            const auto state = Core3DReadAuthoredFrameOwner(
+                aDocument, definitionLabel, record);
             if (state == OcctAuthoredFrameReadState::Invalid) return {};
             const bool authored = state == OcctAuthoredFrameReadState::Authored;
             if (!authored && !needsNormalFrames[index]) continue;
             // Bound recipes were checked against native ownership above. Supplied
             // frames keep their exact archive identity with or without a map.
             if (authored && needsNormalFrames[index] && !Core3DValidateNormalTextureBinding(
-                    aDocument, aDefinitions[index].label)) return {};
+                    aDocument, definitionLabel)) return {};
             std::size_t frameBytes = 0;
             if (!CheckedMultiply(mesh.indices.size(), sizeof(Float4), frameBytes)
                 || !CheckedAdd(aSnapshotNumericBytes, frameBytes, aSnapshotNumericBytes)
                 || aSnapshotNumericBytes > kMaxSnapshotNumericBytes) return {};
             if (authored) {
-                if (!PublishAuthoredFrames(aDefinitions[index], record, mesh)) return {};
+                if (!PublishAuthoredFrames(
+                        aDefinitions[definitionIndex], record, mesh)) return {};
             } else {
                 std::size_t nativeBytes = 0;
                 // Owned Mikk bindings were included in the document-wide scan;
                 // reserve only legacy unowned normal derivatives here.
-                if ((Core3DNormalTextureRecipeForLabel(aDefinitions[index].label) != 1
+                if ((Core3DNormalTextureRecipeForLabel(definitionLabel) != 1
                         && !CheckedMultiply(mesh.indices.size(),64U,nativeBytes))
                     || aFrameResidentBytes > 64U * 1024U * 1024U
                     || nativeBytes > 64U * 1024U * 1024U - aFrameResidentBytes
@@ -8601,9 +8615,13 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             -> std::optional<ElementIdentifier> {
             const InstanceSnapshot& anInstance =
                 aScene.instances[theInstanceIndex];
+            if (anInstance.meshIndex >= aScene.meshes.size()
+                || anInstance.meshIndex >= aMeshDefinitionIndices.size()
+                || aMeshDefinitionIndices[anInstance.meshIndex]
+                    >= aDefinitions.size()) return std::nullopt;
             const MeshSnapshot& aMesh = aScene.meshes[anInstance.meshIndex];
             const DefinitionData& aDefinition =
-                aDefinitions[anInstance.meshIndex];
+                aDefinitions[aMeshDefinitionIndices[anInstance.meshIndex]];
             ElementIdentifier anElement;
             anElement.entityIdentifier = anInstance.entityIdentifier;
             anElement.kind = theAcceptedSelectionKind;
@@ -8807,8 +8825,13 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                             if (!anInstance.selectable) {
                                 continue;
                             }
+                            if (anInstance.meshIndex
+                                    >= aMeshDefinitionIndices.size()
+                                || aMeshDefinitionIndices[anInstance.meshIndex]
+                                    >= aDefinitions.size()) return {};
                             const DefinitionData& aDefinition =
-                                aDefinitions[anInstance.meshIndex];
+                                aDefinitions[aMeshDefinitionIndices[
+                                    anInstance.meshIndex]];
                             bool ownsDetectedSubshape = false;
                             if (theAcceptedSelectionKind
                                     == ElementKind::Face
@@ -8991,9 +9014,12 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         auto contactSources=std::make_shared<State::NativeContactSourceMap>();
         contactSources->reserve(aScene.instances.size());
         for (const auto& instance:aScene.instances) {
-            if (instance.meshIndex>=aDefinitions.size()
-                || instance.meshIndex>=aScene.meshes.size()) return {};
-            const auto& definition=aDefinitions[instance.meshIndex];
+            if (instance.meshIndex>=aScene.meshes.size()
+                || instance.meshIndex>=aMeshDefinitionIndices.size()
+                || aMeshDefinitionIndices[instance.meshIndex]
+                    >=aDefinitions.size()) return {};
+            const auto& definition=aDefinitions[
+                aMeshDefinitionIndices[instance.meshIndex]];
             const auto& mesh=aScene.meshes[instance.meshIndex];
             if (!contactSources->emplace(instance.entityIdentifier,
                 State::NativeContactSource{definition.label,

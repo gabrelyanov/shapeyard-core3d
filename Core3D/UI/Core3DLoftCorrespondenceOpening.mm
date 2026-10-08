@@ -1,6 +1,7 @@
 #import "Core3DLoftCorrespondenceOpening.h"
 
 #include "../OCCTKit/LoftCorrespondenceProof.hxx"
+#include "../OCCTKit/LoftCorrespondencePersistence.hxx"
 
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
@@ -18,6 +19,7 @@
 #include <cstring>
 #include <limits>
 #include <numeric>
+#include <sstream>
 #include <vector>
 
 @implementation Core3DLoftCorrespondenceOpening
@@ -340,6 +342,39 @@ bool ScenarioBudget(double unit, double* values, std::uint64_t* words) {
     values[0] = baseline.volume;
     return true;
 }
+
+struct PersistenceDriverRead {
+    bool accepted = false;
+    bool rejected = false;
+    std::shared_ptr<const core3d::loft_correspondence::persistence::Payload> payload;
+};
+
+PersistenceDriverRead ReadCorrespondencePayload(std::vector<std::uint8_t> bytes) {
+    namespace persistence = core3d::loft_correspondence::persistence;
+    PersistenceDriverRead result;
+    try {
+        Handle(Message_Messenger) messenger = new Message_Messenger();
+        auto budget = std::make_shared<persistence::ReadBudget>();
+        persistence::BinaryDriver reader(messenger, budget);
+        BinObjMgt_Persistent target; target.SetTypeId(7); target.SetId(1);
+        std::ostringstream wire(std::ios::out | std::ios::binary);
+        target.SetOStream(wire);
+        target << Standard_Integer(bytes.size());
+        if (!bytes.empty()) target.PutByteArray(bytes.data(), Standard_Integer(bytes.size()));
+        target.Write(wire);
+        std::istringstream input(wire.str(), std::ios::in | std::ios::binary);
+        BinObjMgt_Persistent source; source.SetIStream(input); source.Read(input);
+        BinObjMgt_RRelocationTable relocation;
+        Handle(Storage_HeaderData) header = new Storage_HeaderData();
+        header->SetStorageVersion(TDocStd_FormatVersion_CURRENT);
+        relocation.SetHeaderData(header);
+        const Handle(TDF_Attribute) restored = reader.NewEmpty();
+        result.accepted = reader.Paste(source, restored, relocation);
+        result.rejected = budget->rejected;
+        result.payload = Handle(persistence::Attribute)::DownCast(restored)->payload();
+    } catch (...) { result = {}; result.rejected = true; }
+    return result;
+}
 } // namespace
 
 extern "C" std::uint64_t Core3DDebugLoftCorrespondenceGeometryProbe(
@@ -360,6 +395,121 @@ extern "C" std::uint64_t Core3DDebugLoftCorrespondenceGeometryProbe(
             case 5: ok = ScenarioBudget(metersPerUnit, values, words); break;
         }
         return ok ? EvidenceVersion : 0;
+    } catch (...) { return 0; }
+}
+
+extern "C" std::uint64_t Core3DDebugLoftCorrespondencePersistenceProbe(
+    int32_t scenario, double metersPerUnit, std::uint64_t *words, size_t wordCapacity) {
+    if ((metersPerUnit != 0.001 && metersPerUnit != 1.0) || !words
+        || wordCapacity < 64 || scenario < 0 || scenario > 4) return 0;
+    std::fill(words, words + wordCapacity, std::uint64_t(0));
+    namespace persistence = core3d::loft_correspondence::persistence;
+    const auto uuid = [](std::uint8_t seed) {
+        persistence::UUID value{};
+        for (std::size_t index = 0; index < value.size(); ++index)
+            value[index] = std::uint8_t(seed + index);
+        return value;
+    };
+    const auto makeValue = [&]() {
+        persistence::Value value;
+        value.owner = {uuid(1), uuid(21), uuid(41)};
+        value.feature = uuid(61); value.revision = 37;
+        value.definition = MakeDefinition(metersPerUnit, {0, 1});
+        core3d::profile::ConstructionFrame frame;
+        frame.values = {-0.0, 2.0 * (0.001 / metersPerUnit), -0.0,
+                        -0.0, -0.0, -0.0, -1.0, -1.5};
+        value.definition.base.constructionFrame = frame;
+        return value;
+    };
+    try {
+        if (scenario == 0) {
+            const lc::Definition implicit = MakeDefinition(metersPerUnit, {0, 0}, true);
+            std::vector<double> legacy, reopened;
+            core3d::rectangular_loft::Definition decoded;
+            words[0] = core3d::loft_persistence::Encode(implicit.base, legacy);
+            words[1] = core3d::loft_persistence::Decode(legacy, decoded);
+            words[2] = core3d::loft_persistence::Encode(decoded, reopened);
+            words[3] = core3d::loft_persistence::SameBits(legacy, reopened);
+            lc::MappingInspection mapping;
+            words[4] = lc::detail::ValidateMapping(implicit, mapping) == lc::Admission::Accepted;
+            words[5] = !mapping.changed && implicit.implicitEqualIndex;
+            words[6] = 0; // no SYLC attribute is created by an implicit read
+            words[7] = 0; // no revision/history is issued by an implicit read/no-op
+        } else if (scenario == 1) {
+            const persistence::Value value = makeValue();
+            std::vector<std::uint8_t> encoded, fixed;
+            persistence::Value decoded;
+            words[0] = persistence::Encode(value, encoded);
+            const PersistenceDriverRead read = ReadCorrespondencePayload(encoded);
+            words[1] = read.accepted && !read.rejected && read.payload
+                && persistence::Decode(read.payload->bytes, decoded);
+            words[2] = persistence::Encode(decoded, fixed);
+            words[3] = fixed == encoded;
+            words[4] = persistence::detail::SameDefinition(value.definition, decoded.definition);
+            words[5] = decoded.owner == value.owner;
+            words[6] = decoded.feature == value.feature;
+            words[7] = encoded.size() <= persistence::MaximumPayloadBytes;
+            words[8] = Bits(decoded.definition.base.dimensionMetersPerUnit);
+            words[9] = Bits(decoded.definition.base.constructionFrame->values[0]);
+            words[10] = Bits(decoded.definition.base.constructionFrame->values[7]);
+            words[11] = decoded.revision;
+        } else if (scenario == 2) {
+            const persistence::Value value = makeValue();
+            std::vector<std::uint8_t> encoded; persistence::Encode(value, encoded);
+            const auto refuses = [&](std::vector<std::uint8_t> candidate) {
+                const PersistenceDriverRead read = ReadCorrespondencePayload(std::move(candidate));
+                return !read.accepted && read.rejected && !read.payload;
+            };
+            auto changed = encoded; changed[0] ^= 1; words[0] = refuses(changed);
+            changed = encoded; changed.back() ^= 1; words[1] = refuses(changed);
+            persistence::Value invalid = value; invalid.definition.mappings[1].targetsByLane[1]
+                = invalid.definition.mappings[1].targetsByLane[0];
+            changed.clear(); words[2] = !persistence::Encode(invalid, changed);
+            invalid = value; invalid.definition.mappings[1].targetsByLane[0] = 999;
+            words[3] = !persistence::Encode(invalid, changed);
+            persistence::Value foreign = value; foreign.owner.document = uuid(99);
+            words[4] = !(foreign.owner == value.owner);
+            invalid = value; invalid.revision = 0; words[5] = !persistence::Encode(invalid, changed);
+            invalid = value; invalid.definition.implicitEqualIndex = true;
+            words[6] = !persistence::Encode(invalid, changed);
+            invalid = value; invalid.definition.mappings[1].targetsByLane =
+                invalid.definition.base.stations[1].cornerIdentifiers;
+            words[7] = !persistence::Encode(invalid, changed);
+            changed = encoded; changed.resize(changed.size() - 1); words[8] = refuses(changed);
+            changed = encoded; changed.push_back(0); words[9] = refuses(changed);
+            invalid = value; invalid.definition.mappings[1].station = 999;
+            words[10] = !persistence::Encode(invalid, changed);
+            words[11] = persistence::MaximumAggregateBytes == 8 * 1024 * 1024;
+        } else if (scenario == 3) {
+            const persistence::Value value = makeValue(); std::vector<std::uint8_t> encoded;
+            persistence::Encode(value, encoded);
+            const auto refuses = [&](std::vector<std::uint8_t> candidate) {
+                const PersistenceDriverRead read = ReadCorrespondencePayload(std::move(candidate));
+                return !read.accepted && read.rejected && !read.payload;
+            };
+            auto changed = encoded; changed[4] = 2; words[0] = refuses(changed);
+            changed = encoded; changed[6] = 1; words[1] = refuses(changed);
+            changed = encoded; changed.resize(changed.size() / 2); words[2] = refuses(changed);
+            changed = encoded; changed.push_back(0); words[3] = refuses(changed);
+            changed = encoded; changed[8] ^= 1; words[4] = refuses(changed);
+            changed.assign(persistence::MaximumPayloadBytes + 1, 0); words[5] = refuses(changed);
+            changed = encoded; changed[12] ^= 1; words[6] = refuses(changed);
+            changed = encoded; changed[84] = 0xff; words[7] = refuses(changed);
+            changed = encoded; changed[encoded.size() - 33] ^= 1; words[8] = refuses(changed);
+            words[9] = encoded.size() <= persistence::MaximumPayloadBytes
+                && persistence::MaximumRecords == 128;
+        } else {
+            const persistence::Value value = makeValue(); std::vector<std::uint8_t> encoded;
+            words[0] = persistence::Encode(value, encoded);
+            words[1] = persistence::AttributeID() != core3d::loft_persistence::SchemaID();
+            words[2] = persistence::AttributeID() != core3d::retained_solid::AttributeID();
+            words[3] = value.definition.mappings.size() == value.definition.base.stations.size();
+            words[4] = !value.definition.implicitEqualIndex;
+            words[5] = persistence::MaximumPayloadBytes == 16 * 1024;
+            words[6] = persistence::MaximumAggregateBytes == 8 * 1024 * 1024;
+            words[7] = persistence::MaximumRecords == 128;
+        }
+        return 0x53594c5031000001ULL; // SYLP1/v1
     } catch (...) { return 0; }
 }
 #endif
