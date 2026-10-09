@@ -16,7 +16,8 @@ namespace core3d { class Core3DViewer; }
 
 namespace core3d::retained_edge_treatment::r2 {
 struct SelectorAppend { et::Kind kind = et::Kind::ConstantFillet; double amountMM = 0; };
-using Edit = std::variant<et::SetAmount, et::Remove, SelectorAppend, RebuildBooleanInput,
+struct RawAppend { et::Kind kind = et::Kind::ConstantFillet; double amountMM = 0; };
+using Edit = std::variant<et::SetAmount, et::Remove, SelectorAppend, RawAppend, RebuildBooleanInput,
                           RebuildAnalyticTool, SetBooleanOperation, SetInputPlacement,
                           et::SetSelectorIntent>;
 // R2 replay accounting shares the common per-operation topology counter with
@@ -122,6 +123,27 @@ public:
     const std::shared_ptr<const fs::FaceMembershipProof>& selectorProof() const noexcept { return proof_; }
 };
 
+// Native-only authority for a raw R2 append. The selected edges are measured
+// on the captured current R2 stage and retained as values; document authority,
+// owner presentation and the complete operation budget remain on this object.
+// The bridge may inspect the immutable values, but only Core3DViewer can bind
+// the exact Object-mode handoff or consume the capture.
+class RawTargetCapture final {
+    friend class core3d::Core3DViewer;
+    std::shared_ptr<const Snapshot> original_;
+    std::vector<et::Anchor> anchors_;
+    ReplayBudget chargedBudget_;
+    Handle(AIS_Shape) presentation_;
+    std::string entityIdentifier_, publicationSourceIdentifier_;
+    std::uint64_t documentGeneration_ = 0, modelRevision_ = 0;
+    std::uint64_t capturePresentationRevision_ = 0;
+    mutable std::atomic_bool objectModeBound_{false};
+    mutable std::atomic_bool consumed_{false};
+public:
+    const std::shared_ptr<const Snapshot>& snapshot() const noexcept { return original_; }
+    const std::vector<et::Anchor>& anchors() const noexcept { return anchors_; }
+};
+
 class DetachedInput final {
     friend class core3d::Core3DViewer;
     std::uint64_t nonce_ = 0;
@@ -168,6 +190,7 @@ private:
     std::shared_ptr<const MigrationCapture> migration_;
     std::shared_ptr<const MigrationReview> review_;
     std::shared_ptr<const EnrollmentCapture> enrollment_;
+    std::shared_ptr<const RawTargetCapture> rawTargets_;
     std::variant<Edit, MigrationM3> mutation_;
     Definition candidate_;
     BaseRecipe source_;

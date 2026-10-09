@@ -388,6 +388,15 @@ namespace core3d {
     std::shared_ptr<const retained_edge_treatment::r2::Snapshot> captureEdgeTreatmentR2(
         const ObjectFrameIdentity&, std::uint64_t, std::uint32_t, std::uint32_t,
         retained_edge_treatment::Refusal&) noexcept;
+    // Native-private raw R2 lane. Capture owns the actual Edge-mode topology,
+    // exact R2 stage/fence and accumulated operation budget; preparation is
+    // available only after the same owner is rebound in exact Object mode.
+    std::shared_ptr<const retained_edge_treatment::r2::RawTargetCapture>
+    captureEdgeTreatmentRawTargetsR2(const ObjectFrameIdentity&, std::uint64_t,
+        std::uint32_t, std::uint32_t, retained_edge_treatment::Refusal&) noexcept;
+    Standard_Boolean returnEdgeTreatmentRawTargetsToObjectModeR2(
+        const std::shared_ptr<const retained_edge_treatment::r2::RawTargetCapture>&)
+        noexcept;
     std::shared_ptr<const retained_edge_treatment::r2::MigrationCapture>
     captureRetainedBooleanMigrationR2(const ObjectFrameIdentity&, std::uint64_t,
         std::uint32_t, std::uint32_t, retained_edge_treatment::Refusal&) noexcept;
@@ -420,6 +429,11 @@ namespace core3d {
     std::shared_ptr<retained_edge_treatment::r2::Work> prepareEdgeTreatmentSelectorAppendR2(
         const std::shared_ptr<const retained_edge_treatment::r2::Snapshot>&,
         const std::shared_ptr<const retained_edge_treatment::r2::SelectorTargetCapture>&,
+        retained_edge_treatment::Kind, double, const ObjectFrameIdentity&, std::uint64_t,
+        std::uint32_t, std::uint32_t,
+        retained_edge_treatment::Refusal&) noexcept;
+    std::shared_ptr<retained_edge_treatment::r2::Work> prepareEdgeTreatmentRawAppendR2(
+        const std::shared_ptr<const retained_edge_treatment::r2::RawTargetCapture>&,
         retained_edge_treatment::Kind, double, const ObjectFrameIdentity&, std::uint64_t,
         std::uint32_t, std::uint32_t,
         retained_edge_treatment::Refusal&) noexcept;
