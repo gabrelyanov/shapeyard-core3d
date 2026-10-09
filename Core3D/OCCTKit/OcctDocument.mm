@@ -20706,11 +20706,18 @@ std::string OcctDocument::save(
                     NSString* encoded = [savedBytes base64EncodedStringWithOptions:0];
                     constexpr NSUInteger chunkExtent = 1024;
                     const NSUInteger chunks = (encoded.length + chunkExtent - 1) / chunkExtent;
-                    for (NSUInteger index = 0; index < chunks; ++index) {
-                        NSString* part = [encoded substringWithRange:NSMakeRange(index * chunkExtent,
-                            MIN(chunkExtent, encoded.length - index * chunkExtent))];
-                        std::fprintf(stderr, "B1B2_SAVE_BYTES phase=chunk index=%llu data=%s\n",
-                            (unsigned long long)index, part.UTF8String);
+                    const char* chunkSwitch = std::getenv("SHAPEYARD_B1B2_SAVE_BYTES_CHUNKS");
+                    if (chunkSwitch != nullptr && std::strcmp(chunkSwitch, "1") == 0) {
+                        for (NSUInteger index = 0; index < chunks; ++index) {
+                            NSString* part = [encoded substringWithRange:NSMakeRange(index * chunkExtent,
+                                MIN(chunkExtent, encoded.length - index * chunkExtent))];
+                            std::fprintf(stderr, "B1B2_SAVE_BYTES phase=chunk index=%llu data=%s\n",
+                                (unsigned long long)index, part.UTF8String);
+                        }
+                    } else {
+                        std::fprintf(stderr,
+                            "B1B2_SAVE_BYTES phase=chunks-omitted chunks=%llu set SHAPEYARD_B1B2_SAVE_BYTES_CHUNKS=1 to dump\n",
+                            (unsigned long long)chunks);
                     }
                     std::fprintf(stderr, "B1B2_SAVE_BYTES phase=complete chunks=%llu\n",
                         (unsigned long long)chunks);
