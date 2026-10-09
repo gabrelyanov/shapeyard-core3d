@@ -112,6 +112,17 @@ __attribute__((objc_subclassing_restricted))
     expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DAuthoredParameterApplyResult *result))completion
     NS_SWIFT_NAME(applyAuthoredLoftParameter(_:stationIdentifier:field:definition:expected:completion:));
+//! Replace exactly one analytic-prism dimension set, the Boolean operation,
+//! or one operand placement. The complete requested values are descriptive;
+//! the opening retains identities, metadata, suffix and mutation authority.
+- (Core3DAuthoredParameterOperation *)applyAuthoredBooleanParameterOpening:
+    (Core3DAuthoredParameterOpening *)opening
+    mutationKind:(Core3DAuthoredParameterMutationKind)mutationKind
+    inputIndex:(NSUInteger)inputIndex
+    values:(Core3DPartBooleanValues *)values
+    expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DAuthoredParameterApplyResult *result))completion
+    NS_SWIFT_NAME(applyAuthoredBooleanParameter(_:mutationKind:inputIndex:values:expected:completion:));
 @end
 
 NS_ASSUME_NONNULL_END

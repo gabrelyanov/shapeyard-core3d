@@ -110,6 +110,47 @@ NSString *LoftStatusCode(core3d::authored_loft::Status status) {
         case Status::InvalidDefinition: return @"authored.loft.invalid-definition";
     }
 }
+
+bool BooleanRequest(const core3d::part_boolean::AnalyticDefinition& original,
+                    Core3DPartBooleanValues *values,
+                    core3d::part_boolean::AnalyticDefinition& requested) noexcept {
+    requested = original;
+    try {
+        if (![values isKindOfClass:Core3DPartBooleanValues.class]
+            || values.inputs.count != 2
+            || values.operation < Core3DPartBooleanOperationUnion
+            || values.operation > Core3DPartBooleanOperationIntersect) return false;
+        requested.operation = static_cast<core3d::part_boolean::Operation>(values.operation);
+        for (NSUInteger index = 0; index < 2; ++index) {
+            Core3DPartBooleanInputValues *input = values.inputs[index];
+            const auto& before = original.inputs[index];
+            NSString *role = index == 0 ? @"left" : @"right";
+            NSString *name = [[NSString alloc] initWithBytes:before.originalName.data()
+                length:before.originalName.size() encoding:NSUTF8StringEncoding];
+            if (![input isKindOfClass:Core3DPartBooleanInputValues.class]
+                || input.family != Core3DPartBooleanInputFamilyAnalyticRectangularPrism
+                || ![input.role isEqualToString:role] || ![input.name isEqualToString:name]
+                || input.metersPerUnit != before.metersPerUnit
+                || input.baseColorSRGB.x != before.originalMaterial.baseColorSRGB[0]
+                || input.baseColorSRGB.y != before.originalMaterial.baseColorSRGB[1]
+                || input.baseColorSRGB.z != before.originalMaterial.baseColorSRGB[2]
+                || input.metallic != before.originalMaterial.metallic
+                || input.roughness != before.originalMaterial.roughness) return false;
+            const double mm = before.metersPerUnit * 1000.0;
+            if (!std::isfinite(mm) || mm <= 0) return false;
+            auto& after = requested.inputs[index];
+            after.dimensions = {input.dimensionsMM.x / mm,
+                                input.dimensionsMM.y / mm,
+                                input.dimensionsMM.z / mm};
+            after.translation = {input.translationMM.x / mm,
+                                 input.translationMM.y / mm,
+                                 input.translationMM.z / mm};
+            after.rotationXYZW = {input.rotationXYZW.x, input.rotationXYZW.y,
+                                  input.rotationXYZW.z, input.rotationXYZW.w};
+        }
+        return core3d::part_boolean::Valid(requested);
+    } catch (...) { requested = {}; return false; }
+}
 } // namespace
 
 @interface Core3DAuthoredParameterApplyResult ()
@@ -377,6 +418,75 @@ NSString *LoftStatusCode(core3d::authored_loft::Status status) {
             if (callback) callback(answer);
         });
     });
+    return operation;
+}
+
+- (Core3DAuthoredParameterOperation *)applyAuthoredBooleanParameterOpening:
+    (Core3DAuthoredParameterOpening *)opening
+    mutationKind:(Core3DAuthoredParameterMutationKind)mutationKind
+    inputIndex:(NSUInteger)inputIndex
+    values:(Core3DPartBooleanValues *)values
+    expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DAuthoredParameterApplyResult *))completion {
+    auto operation = [[Core3DAuthoredParameterOperation alloc]
+        initWithWork:std::shared_ptr<core3d::retained_edge_treatment::r2::Work>()
+        completion:completion];
+    const auto settle = ^(Core3DAuthoredParameterApplyOutcome outcome,
+                          NSString *code, NSNumber *delta) {
+        operation->_settled = YES;
+        auto callback = operation->_completion;
+        operation->_completion = nil;
+        if (callback) callback([[Core3DAuthoredParameterApplyResult alloc]
+            initWithOutcome:outcome refusalCode:code measuredUndoDelta:delta]);
+    };
+    if (![NSThread isMainThread]
+        || ![opening isKindOfClass:Core3DAuthoredParameterOpening.class]
+        || !opening->_nativeOwner || inputIndex > 1
+        || ![expected isKindOfClass:Core3DSceneSnapshot.class]
+        || (mutationKind != Core3DAuthoredParameterMutationKindBooleanAnalyticInput
+            && mutationKind != Core3DAuthoredParameterMutationKindBooleanOperation
+            && mutationKind != Core3DAuthoredParameterMutationKindBooleanPlacement)) {
+        settle(Core3DAuthoredParameterApplyOutcomeRefused,
+               @"authored.boolean.malformed", @0);
+        return operation;
+    }
+    GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)self.glController : nil;
+    const auto viewer = gl ? gl.viewer : nullptr;
+    const Handle(OcctDocument) document = viewer ? viewer->getDocument() : Handle(OcctDocument)();
+    Core3DSceneSnapshot *current = [self captureSceneSnapshot];
+    if (!viewer || !opening->_nativeOwner->belongsTo(document)
+        || !SameExpectedScene(expected, current, opening.entityIdentifier)) {
+        settle(Core3DAuthoredParameterApplyOutcomeRefused,
+               @"authored.stale-opening", @0);
+        return operation;
+    }
+    core3d::part_boolean::AnalyticDefinition original, requested;
+    if (!opening->_nativeOwner->describeBoolean(original)
+        || !BooleanRequest(original, values, requested)) {
+        settle(Core3DAuthoredParameterApplyOutcomeRefused,
+               @"authored.boolean.malformed", @0);
+        return operation;
+    }
+    const auto result = opening->_nativeOwner->applyBoolean(
+        static_cast<core3d::authored_parameter::Capability>(mutationKind),
+        inputIndex, requested);
+    Core3DAuthoredParameterApplyOutcome outcome;
+    using NativeOutcome = core3d::authored_parameter::ApplyOutcome;
+    switch (result.outcome) {
+        case NativeOutcome::Committed:
+            outcome = Core3DAuthoredParameterApplyOutcomeCommitted; break;
+        case NativeOutcome::Unchanged:
+            outcome = Core3DAuthoredParameterApplyOutcomeUnchanged; break;
+        case NativeOutcome::Cancelled:
+            outcome = Core3DAuthoredParameterApplyOutcomeCancelled; break;
+        case NativeOutcome::OutcomeUnknown:
+            outcome = Core3DAuthoredParameterApplyOutcomeOutcomeUnknown; break;
+        case NativeOutcome::Refused:
+            outcome = Core3DAuthoredParameterApplyOutcomeRefused; break;
+    }
+    NSNumber *delta = result.measuredUndoDelta ? @(*result.measuredUndoDelta) : nil;
+    settle(outcome, [NSString stringWithUTF8String:result.code.c_str()], delta);
     return operation;
 }
 @end

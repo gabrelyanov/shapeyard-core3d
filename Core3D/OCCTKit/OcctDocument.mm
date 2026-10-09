@@ -228,6 +228,7 @@ OcctDocument::CaptureAuthoredParameterAuthority(
         capture->ownerLabel_ = owner;
         capture->owner_ = snapshot->owner().owner;
         capture->revision_ = snapshot->owner().fence;
+        capture->untreatedBase_ = snapshot->base_;
         capture->snapshot_ = std::move(snapshot);
         capture->suffixBytes_ = capture->snapshot_->canonicalBytes();
         if (!AuthoredSourceBytes(*capture->snapshot_, capture->sourceBytes_)) return {};
@@ -283,6 +284,101 @@ Standard_Boolean OcctDocument::BeginAuthoredParameterTransaction(
         lease = context.beginCommandLease(context.openingFence(), width, height);
         return lease && lease->ownsOpenCommand();
     } catch (...) { lease.reset(); return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::StageAuthoredBooleanPair(
+    const core3d::authored_parameter::Capture& capture,
+    const core3d::authored_boolean::Candidate& candidate) noexcept {
+    namespace et = core3d::retained_edge_treatment;
+    namespace r2 = core3d::retained_edge_treatment::r2;
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || !myOcafDoc->HasOpenCommand() || capture.document_ != myOcafDoc
+            || capture.data_ != myOcafDoc->GetData()
+            || !capture.snapshot_ || !candidate.composite
+            || candidate.untreated.IsNull() || candidate.treated.IsNull()) return Standard_False;
+        const auto& original = *capture.snapshot_;
+        const auto* retained = std::get_if<r2::RetainedBooleanBase>(&original.source_);
+        const auto* composite = retained
+            ? std::get_if<r2::CompositeBooleanBase>(&retained->source) : nullptr;
+        if (!composite || original.ownerLabel_.IsNull() || original.sourceLabel_.IsNull()
+            || candidate.composite->sourceShapes.size() != 2
+            || candidate.composite->bytes == composite->canonicalPrefixBytes)
+            return Standard_False;
+
+        std::vector<std::uint8_t> graphBytes, treatmentBytes;
+        et::Refusal refusal = et::Refusal::StageFailed;
+        if (!core3d::composite_recipe::Encode(candidate.composite->definition, graphBytes)
+            || graphBytes != candidate.composite->bytes
+            || !r2::Encode(candidate.treatment, treatmentBytes, refusal)
+            || treatmentBytes != candidate.treatmentBytes) return Standard_False;
+        et::ReplayBudget verification = candidate.budget;
+        TopoDS_Shape verified;
+        const std::atomic_bool neverCancelled(false);
+        if (!r2::ReplayTreatmentSuffix(candidate.untreated, candidate.treatment,
+                verified, verification, refusal)
+            || !et::EquivalentReplayGeometry(candidate.treated, verified,
+                verification, refusal)
+            || core3d::retained_topology_budget::ChargeTraversal(candidate.treated,
+                verification, neverCancelled,
+                core3d::retained_topology_budget::Site::C28CompanionCapture)
+                != core3d::retained_topology_budget::WalkStatus::Completed)
+            return Standard_False;
+
+        auto companion = std::make_unique<core3d::treatment_history::Companion>();
+        companion->data = myOcafDoc->GetData();
+        companion->ownerLabel = original.ownerLabel_;
+        TCollection_AsciiString ownerEntry;
+        TDF_Tool::Entry(original.ownerLabel_, ownerEntry);
+        companion->ownerEntry = ownerEntry.ToCString();
+        companion->undoDepthBefore = myOcafDoc->GetAvailableUndos();
+        companion->ownerShapeBefore = original.current_;
+        if (!CaptureTreatmentCompanionSide(myOcafDoc, original.ownerLabel_,
+                companion->before, companion->sourceBytesBefore,
+                companion->syetBefore, companion->syetBytesBefore)
+            || !CaptureTreatmentTransientFlags(original.current_, companion->flagsBefore))
+            return Standard_False;
+
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (shapes.IsNull()) return Standard_False;
+        shapes->SetShape(original.ownerLabel_, candidate.treated);
+        if (!StagePartBooleanPayload(original.sourceLabel_, candidate.composite))
+            return Standard_False;
+        TNaming_Builder(original.sourceLabel_).Select(candidate.treated, candidate.treated);
+        auto treatment = std::make_shared<et::PayloadR2>();
+        treatment->definition = candidate.treatment;
+        treatment->bytes = candidate.treatmentBytes;
+        treatment->base = candidate.untreated;
+        et::Attribute::SetR2(original.sourceLabel_, treatment);
+        TNaming_Builder(original.sourceLabel_).Select(candidate.treated, candidate.treated);
+
+        core3d::composite_recipe::Record graphReadback;
+        std::optional<et::RecordR2> treatmentReadback;
+        if (!core3d::composite_recipe::Read(myOcafDoc, original.ownerLabel_, graphReadback))
+            return Standard_False;
+        if (!graphReadback.value) return Standard_False;
+        if (graphReadback.value->bytes != candidate.composite->bytes) return Standard_False;
+        if (graphReadback.value->sourceShapes.size()
+            != candidate.composite->sourceShapes.size()) return Standard_False;
+        if (!et::ReadR2(myOcafDoc, original.ownerLabel_, treatmentReadback, refusal))
+            return Standard_False;
+        if (!treatmentReadback) return Standard_False;
+        if (treatmentReadback->value->bytes != candidate.treatmentBytes) return Standard_False;
+        if (!treatmentReadback->value->base.IsEqual(candidate.untreated)) return Standard_False;
+        if (!treatmentReadback->current.IsEqual(candidate.treated)) return Standard_False;
+        if (!ValidateRetainedEdgeTreatmentsR2(refusal)) return Standard_False;
+        for (std::size_t index = 0; index < candidate.composite->sourceShapes.size(); ++index)
+            if (!graphReadback.value->sourceShapes[index].IsEqual(
+                    candidate.composite->sourceShapes[index])) return Standard_False;
+
+        companion->ownerShapeAfter = candidate.treated;
+        if (!CaptureTreatmentCompanionSide(myOcafDoc, original.ownerLabel_,
+                companion->after, companion->sourceBytesAfter,
+                companion->syetAfter, companion->syetBytesAfter)) return Standard_False;
+        companion->afterCaptured = true;
+        myPendingTreatmentCompanion = std::move(companion);
+        return Standard_True;
+    } catch (...) { return Standard_False; }
 }
 
 std::shared_ptr<const core3d::retained_edge_treatment::r2::MigrationCapture>

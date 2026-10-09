@@ -99,6 +99,7 @@ namespace core3d::retained_feature { class OcafOwnerService; }
 namespace core3d::composite_recipe { struct Payload; }
 namespace core3d::retained_program_suffix { struct Probe; }
 namespace core3d::authored_parameter { class Capture; class Owner; }
+namespace core3d::authored_boolean { struct Candidate; }
 
 // D253 native treatment history companion — document-internal measured state
 // for one staged retained-treatment transaction. One companion records the
@@ -1797,12 +1798,18 @@ private:
   friend class core3d::bounded_curve::owner::OcafOwner;
   friend class core3d::NativeDocumentSession;
   friend class core3d::part_boolean::owner::PartBooleanOwner;
+  // A0: only the shared native owner may stage the sealed analytic
+  // composite/R2 pair under its document-issued capture and command lease.
+  friend class core3d::authored_parameter::Owner;
   friend class core3d::retained_feature::OcafOwnerService;
   // A3/P2 DEBUG probe: save/reopen byte evidence for the retained program
   // suffix. No production staging authority is granted by this friendship.
   friend struct core3d::retained_program_suffix::Probe;
   bool StagePartBooleanPayload(
       const TDF_Label&, const std::shared_ptr<const core3d::composite_recipe::Payload>&) noexcept;
+  Standard_Boolean StageAuthoredBooleanPair(
+      const core3d::authored_parameter::Capture&,
+      const core3d::authored_boolean::Candidate&) noexcept;
   void CloseNativeSession() noexcept;
   bool myNativeSessionClosed = false;
   friend class core3d::OrdinaryEditController;

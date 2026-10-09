@@ -14149,6 +14149,10 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
 }
 #endif
 
+- (NSInteger)documentUndoCount {
+    return [self core3d_documentUndoCount];
+}
+
 - (NSInteger)core3d_documentUndoCount {
     if (!NSThread.isMainThread || !GLController) return 0;
     const auto viewer = GLController.viewer;

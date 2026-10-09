@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AuthoredLoftParameterAdapter.hxx"
+#include "AuthoredBooleanParameterAdapter.hxx"
 #include "NativeOpeningContext.hxx"
 #include "RetainedEdgeTreatmentR2Snapshot.hxx"
 
@@ -9,6 +10,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -44,6 +46,16 @@ enum class Refusal : std::uint8_t {
 
 enum class Currentness : std::uint8_t { Current = 0, Stale, Cancelled, Recovery };
 
+enum class ApplyOutcome : std::uint8_t {
+    Committed = 0, Unchanged, Refused, Cancelled, OutcomeUnknown,
+};
+
+struct ApplyResult final {
+    ApplyOutcome outcome = ApplyOutcome::Refused;
+    std::string code;
+    std::optional<int> measuredUndoDelta;
+};
+
 struct Mutation final {
     Capability capability = Capability::Unregistered;
     std::uint64_t requestedFieldMask = 0;
@@ -70,6 +82,7 @@ private:
     retained_recipe::OwnerKey owner_;
     retained_recipe::RevisionFence revision_;
     std::shared_ptr<const retained_edge_treatment::r2::Snapshot> snapshot_;
+    TopoDS_Shape untreatedBase_;
     std::vector<std::uint8_t> sourceBytes_, suffixBytes_;
     double metersPerUnit_ = 0;
     std::uint64_t metersPerUnitBits_ = 0;
@@ -98,6 +111,9 @@ public:
         std::uint32_t stationIdentifier, authored_loft::Field field,
         const rectangular_loft::Definition& requested,
         retained_edge_treatment::r2::Edit& output) noexcept;
+    bool describeBoolean(part_boolean::AnalyticDefinition& output) const noexcept;
+    ApplyResult applyBoolean(Capability capability, std::size_t inputIndex,
+        const part_boolean::AnalyticDefinition& requested) noexcept;
     std::shared_ptr<const retained_edge_treatment::r2::Snapshot>
     retainedSnapshot() const noexcept;
     bool cancel() noexcept;
