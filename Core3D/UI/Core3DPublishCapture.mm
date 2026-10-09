@@ -31,6 +31,37 @@
 
 NSErrorDomain const Core3DPublishCaptureErrorDomain = @"Core3DPublishCaptureErrorDomain";
 
+@interface Core3DPublishOwnerCommitments ()
+@property(nonatomic, copy, readwrite) NSString *ownerIdentifier;
+@property(nonatomic, copy, readwrite) NSData *recipeWitnessBytes;
+@property(nonatomic, copy, readwrite) NSData *geometryWitnessBytes;
+@property(nonatomic, copy, readwrite) NSData *placementWitnessBytes;
+@property(nonatomic, copy, readwrite) NSData *materialTextureWitnessBytes;
+- (instancetype)initPrivateWithOwner:(NSString *)owner
+                              recipe:(NSData *)recipe
+                            geometry:(NSData *)geometry
+                           placement:(NSData *)placement
+                     materialTexture:(NSData *)materialTexture;
+@end
+
+@implementation Core3DPublishOwnerCommitments
+- (instancetype)initPrivateWithOwner:(NSString *)owner
+                              recipe:(NSData *)recipe
+                            geometry:(NSData *)geometry
+                           placement:(NSData *)placement
+                     materialTexture:(NSData *)materialTexture {
+    self = [super init];
+    if (self) {
+        _ownerIdentifier = [owner copy];
+        _recipeWitnessBytes = [recipe copy];
+        _geometryWitnessBytes = [geometry copy];
+        _placementWitnessBytes = [placement copy];
+        _materialTextureWitnessBytes = [materialTexture copy];
+    }
+    return self;
+}
+@end
+
 namespace {
 using OpeningContext = core3d::native_opening::Context;
 using Recipe = core3d::retained_boolean::Recipe;
@@ -76,6 +107,7 @@ struct OwnerObservation final {
     NSString *definition = nil;
     NSData *envelope = nil;
     NSData *operand = nil;
+    Core3DPublishOwnerCommitments *commitments = nil;
     std::array<double, 6> boundsMM{};
 };
 
@@ -86,7 +118,38 @@ struct Observation final {
     NSArray<NSNumber *> *bounds = nil;
     NSData *source = nil;
     NSArray<NSData *> *operands = nil;
+    NSArray<Core3DPublishOwnerCommitments *> *commitments = nil;
 };
+
+bool ValidCommitments(NSArray<Core3DPublishOwnerCommitments *> *records,
+                      NSArray<NSString *> *selected) {
+    if (!records || !selected || records.count != selected.count || records.count == 0) return false;
+    for (NSUInteger index = 0; index < records.count; ++index) {
+        Core3DPublishOwnerCommitments *record = records[index];
+        if (![record isKindOfClass:Core3DPublishOwnerCommitments.class]
+            || ![record.ownerIdentifier isEqualToString:selected[index]]
+            || record.recipeWitnessBytes.length == 0
+            || record.geometryWitnessBytes.length == 0
+            || record.placementWitnessBytes.length == 0
+            || record.materialTextureWitnessBytes.length == 0) return false;
+    }
+    return true;
+}
+
+bool EqualCommitments(NSArray<Core3DPublishOwnerCommitments *> *left,
+                      NSArray<Core3DPublishOwnerCommitments *> *right,
+                      NSArray<NSString *> *selected) {
+    if (!ValidCommitments(left, selected) || !ValidCommitments(right, selected)) return false;
+    for (NSUInteger index = 0; index < left.count; ++index) {
+        Core3DPublishOwnerCommitments *a = left[index], *b = right[index];
+        if (![a.ownerIdentifier isEqualToString:b.ownerIdentifier]
+            || ![a.recipeWitnessBytes isEqualToData:b.recipeWitnessBytes]
+            || ![a.geometryWitnessBytes isEqualToData:b.geometryWitnessBytes]
+            || ![a.placementWitnessBytes isEqualToData:b.placementWitnessBytes]
+            || ![a.materialTextureWitnessBytes isEqualToData:b.materialTextureWitnessBytes]) return false;
+    }
+    return true;
+}
 
 NSError *Refusal(Core3DPublishCaptureError code, NSString *reason) {
     return [NSError errorWithDomain:Core3DPublishCaptureErrorDomain code:code
@@ -353,8 +416,45 @@ bool CaptureOwner(const Handle(OcctDocument)& owner, Core3DSceneSnapshot *scene,
     NSData *operandBytes = operands.finish();
     if (!operandBytes) { refusal = Core3DPublishCaptureErrorBudget; return false; }
 
+    if (recipeBytes.empty() || shapeCommitment.bytes == 0 || baseCommitment.bytes == 0
+        || shapeCommitment.sha256.empty() || baseCommitment.sha256.empty()
+        || materialBytes.length == 0 || operandBytes.length == 0) {
+        refusal = Core3DPublishCaptureErrorBudget; return false;
+    }
+    Bytes recipeWitness; recipeWitness.text("shapeyard.publish-owner-recipe.v1");
+    recipeWitness.text(owner->DocumentIdentifier()); recipeWitness.text(entity);
+    recipeWitness.text(owner->DefinitionIdentifierForLabel(label)); recipeWitness.text(UUIDText(identities.sourceFeature));
+    recipeWitness.text(UUIDText(identities.derivedFeature)); recipeWitness.number(identities.metersPerUnit);
+    recipeWitness.field(recipeBytes.data(), recipeBytes.size()); recipeWitness.data(operandBytes);
+
+    Bytes geometryWitness; geometryWitness.text("shapeyard.publish-owner-geometry.v1");
+    geometryWitness.number(scene.metersPerUnit);
+    geometryWitness.u64(shapeCommitment.bytes); geometryWitness.raw(shapeCommitment.sha256.data(), shapeCommitment.sha256.size());
+    geometryWitness.u64(baseCommitment.bytes); geometryWitness.raw(baseCommitment.sha256.data(), baseCommitment.sha256.size());
+    for (double value : bounds) geometryWitness.number(value);
+
+    Bytes placementWitness; placementWitness.text("shapeyard.publish-owner-placement.v1");
+    placementWitness.number(effectiveMM);
+    for (double scalar : state.scalars) placementWitness.number(scalar);
+    for (bool present : state.present) placementWitness.u64(present);
+    for (unsigned row = 1; row <= 3; ++row)
+        for (unsigned column = 1; column <= 3; ++column) placementWitness.number(matrix.Value(row, column));
+    placementWitness.number(translation.X()); placementWitness.number(translation.Y()); placementWitness.number(translation.Z());
+    if (!GroupWitness(owner, label, placementWitness)) {
+        refusal = Core3DPublishCaptureErrorUnsupportedOwner; return false;
+    }
+    NSData *recipeDomain = recipeWitness.finish();
+    NSData *geometryDomain = geometryWitness.finish();
+    NSData *placementDomain = placementWitness.finish();
+    if (!recipeDomain || !geometryDomain || !placementDomain) {
+        refusal = Core3DPublishCaptureErrorBudget; return false;
+    }
+    Core3DPublishOwnerCommitments *commitments = [[Core3DPublishOwnerCommitments alloc]
+        initPrivateWithOwner:entity recipe:recipeDomain geometry:geometryDomain
+        placement:placementDomain materialTexture:materialBytes];
+
     output.entity = [entity copy]; output.definition = [UUIDText(identities.definition) copy];
-    output.envelope = envelope; output.operand = operandBytes; output.boundsMM = bounds;
+    output.envelope = envelope; output.operand = operandBytes; output.commitments = commitments; output.boundsMM = bounds;
     return true;
 }
 
@@ -401,17 +501,24 @@ bool CaptureObservation(Core3DViewController *controller, const Handle(OcctDocum
     NSMutableArray<NSNumber *> *bounds = [NSMutableArray arrayWithCapacity:6];
     for (double value : unionBounds) [bounds addObject:@(value)];
     NSMutableArray<NSData *> *operands = [NSMutableArray arrayWithCapacity:observations.size()];
+    NSMutableArray<Core3DPublishOwnerCommitments *> *commitments = [NSMutableArray arrayWithCapacity:observations.size()];
     Bytes source; source.text("shapeyard.publish-source-witness.v1");
     source.text(owner->DocumentIdentifier()); source.text(scene.publicationSourceIdentifier);
     source.u64(scene.revisions.documentGeneration); source.u64(scene.revisions.modelRevision);
     source.u64(scene.revisions.presentationRevision); source.number(scene.metersPerUnit);
     source.text("native-rh-z-up_to_gltf-rh-y-up.v1"); source.u64(observations.size());
-    for (const auto& observation : observations) { source.data(observation.envelope); [operands addObject:observation.operand]; }
+    for (const auto& observation : observations) {
+        source.data(observation.envelope); [operands addObject:observation.operand];
+        if (!observation.commitments) { refusal = Core3DPublishCaptureErrorSelection; return false; }
+        [commitments addObject:observation.commitments];
+    }
     for (double value : unionBounds) source.number(value);
     NSData *sourceBytes = source.finish();
     if (!sourceBytes) { refusal = Core3DPublishCaptureErrorBudget; return false; }
+    if (!ValidCommitments(commitments, selected)) { refusal = Core3DPublishCaptureErrorSelection; return false; }
     output.scene = scene; output.document = [NSString stringWithUTF8String:owner->DocumentIdentifier().c_str()] ?: @"";
     output.selected = selected; output.bounds = bounds; output.source = sourceBytes; output.operands = operands;
+    output.commitments = commitments;
     return true;
 }
 } // namespace
@@ -420,6 +527,7 @@ bool CaptureObservation(Core3DViewController *controller, const Handle(OcctDocum
 @property(nonatomic, strong, readwrite) Core3DSceneSnapshot *sceneSnapshot;
 @property(nonatomic, copy, readwrite) NSData *sourceWitnessBytes;
 @property(nonatomic, copy, readwrite) NSArray<NSData *> *operandWitnessBytes;
+@property(nonatomic, copy, readwrite) NSArray<Core3DPublishOwnerCommitments *> *ownerCommitments;
 @property(nonatomic, copy, readwrite) NSArray<NSString *> *selectedEntityIdentifiers;
 @property(nonatomic, copy, readwrite) NSArray<NSNumber *> *nativeBoundsMM;
 @property(nonatomic, copy, readwrite) NSString *documentIdentifier;
@@ -469,7 +577,8 @@ bool CaptureObservation(Core3DViewController *controller, const Handle(OcctDocum
         Core3DPublishCapture *capture = [[self alloc] initPrivate];
         capture->_controller = controller; capture->_owner = owner; capture->_context = std::move(context);
         capture.sceneSnapshot = observation.scene; capture.sourceWitnessBytes = observation.source;
-        capture.operandWitnessBytes = observation.operands; capture.selectedEntityIdentifiers = observation.selected;
+        capture.operandWitnessBytes = observation.operands; capture.ownerCommitments = observation.commitments;
+        capture.selectedEntityIdentifiers = observation.selected;
         capture.nativeBoundsMM = observation.bounds; capture.documentIdentifier = observation.document;
         capture.publicationSourceIdentifier = observation.scene.publicationSourceIdentifier;
         capture.frameConvention = @"native-rh-z-up_to_gltf-rh-y-up.v1";
@@ -502,6 +611,10 @@ bool CaptureObservation(Core3DViewController *controller, const Handle(OcctDocum
         || ![fresh.bounds isEqualToArray:self.nativeBoundsMM]) {
         if (error) *error = Refusal(refusal == Core3DPublishCaptureErrorBusy ? Core3DPublishCaptureErrorStale : refusal,
                                     @"captured dependency changed");
+        return NO;
+    }
+    if (!EqualCommitments(fresh.commitments, self.ownerCommitments, self.selectedEntityIdentifiers)) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorStale, @"captured owner commitments changed");
         return NO;
     }
     return YES;
