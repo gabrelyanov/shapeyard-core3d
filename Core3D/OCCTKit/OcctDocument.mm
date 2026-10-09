@@ -612,9 +612,29 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
     const core3d::retained_edge_treatment::r2::Snapshot& original,
     const core3d::retained_edge_treatment::r2::DetachedResult& built,
     core3d::retained_edge_treatment::r2::Record& readback,
-    core3d::retained_edge_treatment::Refusal& refusal) noexcept {
+    core3d::retained_edge_treatment::Refusal& refusal,
+    bool debugFailAfterShape,
+    bool debugFailAtReadback) noexcept {
     namespace et=core3d::retained_edge_treatment;namespace r2=core3d::retained_edge_treatment::r2;
     readback={};refusal=et::Refusal::StageFailed;
+#if !DEBUG
+    (void)debugFailAfterShape;
+    (void)debugFailAtReadback;
+#endif
+    // L0b-R: the companion is hoisted above the try so that every failure
+    // exit after the measured before-capture, including the catch, can hand
+    // the before-only companion (afterCaptured=false) to the existing
+    // prior-marker settlement. An already pending companion is recovery
+    // ownership and is never overwritten on a failure path; exits before the
+    // capture and the success path stay unchanged.
+    auto treatmentCompanion=std::unique_ptr<core3d::treatment_history::Companion>(
+        new core3d::treatment_history::Companion);
+    bool treatmentBeforeCaptured=false;
+    const auto publishBeforeOnlyTreatmentCompanion=[this,&treatmentCompanion,
+        &treatmentBeforeCaptured]()noexcept{
+        if(treatmentBeforeCaptured&&treatmentCompanion&&!myPendingTreatmentCompanion)
+            myPendingTreatmentCompanion=std::move(treatmentCompanion);
+    };
     try{
         if(![NSThread isMainThread]||myOcafDoc.IsNull()||!myOcafDoc->HasOpenCommand()
             ||original.ownerLabel_.IsNull()||built.nonce_!=original.nonce_||built.result_.IsNull())return Standard_False;
@@ -678,8 +698,6 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
         // original topology's transient Modified/Checked bookkeeping before
         // any mutation of this transaction. Values are measured, never
         // hard-coded; capture failure refuses the staging atomically.
-        auto treatmentCompanion=std::unique_ptr<core3d::treatment_history::Companion>(
-            new core3d::treatment_history::Companion);
         treatmentCompanion->data=myOcafDoc->GetData();
         treatmentCompanion->ownerLabel=original.ownerLabel_;
         {
@@ -695,6 +713,7 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
             ||!CaptureTreatmentTransientFlags(original.current_,treatmentCompanion->flagsBefore)){
             refusal=et::Refusal::StageFailed;return Standard_False;
         }
+        treatmentBeforeCaptured=true;
         Handle(core3d::retained_solid::Attribute) retainedSource;
         TDF_Label retainedSourceLabel;
         if(original.sourceLabel_.FindAttribute(core3d::retained_solid::AttributeID(),retainedSource)
@@ -715,7 +734,7 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
         // pair and misclassify the source as noncurrent.
         if(!retainedSourceLabel.IsNull())TNaming_Builder(retainedSourceLabel).Select(built.result_,built.result_);
         TNaming_Builder(original.sourceLabel_).Select(built.result_,built.result_);
-        Handle(AIS_Shape) presentation=new AIS_Shape(built.result_);if(!ReplaceShape(original.ownerLabel_,presentation))return Standard_False;
+        Handle(AIS_Shape) presentation=new AIS_Shape(built.result_);if(!ReplaceShape(original.ownerLabel_,presentation)){publishBeforeOnlyTreatmentCompanion();return Standard_False;}
 #if DEBUG
     core3d::retained_topology_budget::debug::RecordMutation();
 #endif
@@ -728,12 +747,12 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
             // rollback; the old carrier is never partially overwritten.
             const auto* booleanBase=std::get_if<r2::RetainedBooleanBase>(&built.source_);
             if(!booleanBase||built.canonicalPrefixBytes().empty()||built.canonicalPrefixBytes()==original.sourceBytes_
-                ||!std::holds_alternative<r2::LegacyBooleanBase>(booleanBase->source))return Standard_False;
+                ||!std::holds_alternative<r2::LegacyBooleanBase>(booleanBase->source)){publishBeforeOnlyTreatmentCompanion();return Standard_False;}
             core3d::retained_boolean::Recipe prefix;
-            if(!core3d::retained_boolean::Decode(built.canonicalPrefixBytes(),prefix))return Standard_False;
+            if(!core3d::retained_boolean::Decode(built.canonicalPrefixBytes(),prefix)){publishBeforeOnlyTreatmentCompanion();return Standard_False;}
             if(const auto* program=std::get_if<core3d::retained_boolean::Program>(&prefix);
-                program&&!program->filletSteps.empty())return Standard_False;
-            if(retainedSource.IsNull())return Standard_False;
+                program&&!program->filletSteps.empty()){publishBeforeOnlyTreatmentCompanion();return Standard_False;}
+            if(retainedSource.IsNull()){publishBeforeOnlyTreatmentCompanion();return Standard_False;}
             auto sourcePayload=std::make_shared<core3d::retained_solid::Payload>();
             sourcePayload->envelope=std::move(prefix);sourcePayload->bytes=built.canonicalPrefixBytes();
             sourcePayload->base=built.editedSourceBase().IsNull()?original.sourceBase_:built.editedSourceBase();
@@ -741,11 +760,18 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
         }
         auto payload=std::make_shared<et::PayloadR2>();payload->definition=built.definition_;
         payload->bytes=built.definitionBytes_;payload->base=built.base_;
-        et::Attribute::SetR2(original.sourceLabel_,payload);TNaming_Builder(original.sourceLabel_).Select(built.result_,built.result_);
+        et::Attribute::SetR2(original.sourceLabel_,payload);
+#if DEBUG
+        if(debugFailAfterShape)throw Standard_Failure("Retained treatment paired-write fault");
+#endif
+        TNaming_Builder(original.sourceLabel_).Select(built.result_,built.result_);
         if(!retainedSourceLabel.IsNull()&&!retainedSourceLabel.IsEqual(original.sourceLabel_))
             TNaming_Builder(retainedSourceLabel).Select(built.result_,built.result_);
-        if(!ValidateRetainedEdgeTreatmentsR2(refusal))return Standard_False;
-        std::optional<et::RecordR2> stored;if(!et::ReadR2(myOcafDoc,original.ownerLabel_,stored,refusal)||!stored)return Standard_False;
+        if(!ValidateRetainedEdgeTreatmentsR2(refusal)){publishBeforeOnlyTreatmentCompanion();return Standard_False;}
+#if DEBUG
+        if(debugFailAtReadback)throw Standard_Failure("Retained treatment readback fault");
+#endif
+        std::optional<et::RecordR2> stored;if(!et::ReadR2(myOcafDoc,original.ownerLabel_,stored,refusal)||!stored){publishBeforeOnlyTreatmentCompanion();return Standard_False;}
         readback={stored->label,stored->owner,std::make_shared<r2::Definition>(stored->value->definition),stored->value->bytes,{},stored->value->base,stored->current};
         readback.sourceBytes=built.sourceChanged()?built.canonicalPrefixBytes():original.sourceBytes_;
         // D253: capture the corresponding real candidate values now that the
@@ -756,12 +782,12 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
         if(!CaptureTreatmentCompanionSide(myOcafDoc,original.ownerLabel_,treatmentCompanion->after,
                 treatmentCompanion->sourceBytesAfter,treatmentCompanion->syetAfter,
                 treatmentCompanion->syetBytesAfter)){
-            refusal=et::Refusal::StageFailed;return Standard_False;
+            refusal=et::Refusal::StageFailed;publishBeforeOnlyTreatmentCompanion();return Standard_False;
         }
         treatmentCompanion->afterCaptured=true;
         myPendingTreatmentCompanion=std::move(treatmentCompanion);
         refusal=et::Refusal::None;return Standard_True;
-    }catch(...){readback={};refusal=et::Refusal::StageFailed;return Standard_False;}
+    }catch(...){readback={};refusal=et::Refusal::StageFailed;publishBeforeOnlyTreatmentCompanion();return Standard_False;}
 }
 
 Standard_Boolean OcctDocument::StageRetainedBooleanMigrationR2(

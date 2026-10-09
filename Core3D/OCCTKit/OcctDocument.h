@@ -1838,7 +1838,9 @@ private:
       const core3d::retained_edge_treatment::r2::Snapshot&,
       const core3d::retained_edge_treatment::r2::DetachedResult&,
       core3d::retained_edge_treatment::r2::Record&,
-      core3d::retained_edge_treatment::Refusal&) noexcept;
+      core3d::retained_edge_treatment::Refusal&,
+      bool debugFailAfterShape = false,
+      bool debugFailAtReadback = false) noexcept;
   Standard_Boolean StageRetainedBooleanMigrationR2(
       const core3d::retained_edge_treatment::r2::MigrationCapture&,
       const core3d::retained_edge_treatment::r2::MigrationM3&,

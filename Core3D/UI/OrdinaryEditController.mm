@@ -2467,9 +2467,14 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                         *record.requested.edgeTreatmentEnrollmentR2,*record.requested.edgeTreatmentResultR2,
                         readback,refusal);
                 }else if(record.requested.edgeTreatmentSnapshotR2){
+                    bool pairedFault=false,readbackFault=false;
+#if DEBUG
+                    if(_stageFailureIndex==2){_stageFailureIndex=-1;pairedFault=true;}
+                    else if(_stageFailureIndex==3){_stageFailureIndex=-1;readbackFault=true;}
+#endif
                     treatmentStagedR2=_document->StageRetainedEdgeTreatmentR2(
                         *record.requested.edgeTreatmentSnapshotR2,*record.requested.edgeTreatmentResultR2,
-                        readback,refusal);
+                        readback,refusal,pairedFault,readbackFault);
                 }
                 if(!treatmentStagedR2){
                     if(refusal==core3d::retained_edge_treatment::Refusal::Budget)
