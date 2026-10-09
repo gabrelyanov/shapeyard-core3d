@@ -25015,6 +25015,8 @@ extern "C" bool Core3DDebugInstallRetainedSolidSeedRecord(
 std::map<std::string,bool> Core3DDebugRetainedSolidProbe(Standard_Integer scenario){
     return core3d::retained_solid::Probe::Run(scenario);
 }
+
+#endif // DEBUG
 Standard_Boolean OcctDocument::CaptureRetainedFinishingSource(
     const core3d::retained_recipe::OwnerKey& owner,
     core3d::retained_finishing::SourceRevision& output) noexcept {
@@ -25613,6 +25615,8 @@ core3d::face_image::persistence::bindings::ReadState OcctDocument::ReadFaceImage
         return ReadState::Malformed;
     }
 }
+
+#if DEBUG
 
 namespace core3d::retained_finishing {
 // E1 DEBUG native persistence evidence for the six guard selectors. Each
