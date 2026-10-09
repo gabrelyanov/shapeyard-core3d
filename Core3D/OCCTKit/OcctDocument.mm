@@ -19291,6 +19291,7 @@ std::uint64_t RunBoundedCurveMetadataBoundaryProbe(
 extern "C" bool
 core3d::native_opening::debug::Core3DDebugExactLabelProbeSetupFailureIsContained()
 noexcept {
+#if TARGET_OS_IOS
     if (![NSThread isMainThread]) return false;
     EAGLContext *callerContext = EAGLContext.currentContext;
     try {
@@ -19305,6 +19306,9 @@ noexcept {
             && fixture.owner.IsNull() && fixture.sourcePresentation.IsNull()
             && EAGLContext.currentContext == callerContext;
     } catch (...) { return false; }
+#else
+    return false;
+#endif
 }
 
 extern "C" std::uint64_t
