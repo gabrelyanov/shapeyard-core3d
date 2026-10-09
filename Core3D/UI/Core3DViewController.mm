@@ -4,12 +4,12 @@
 #include "../OCCTKit/PartBooleanPersistence.hxx"
 #include "../OCCTKit/CompositeRecipeCodec.hxx"
 #include "../OCCTKit/DetachedLoftCutProbe.hxx"
+#include "RetainedSemanticChamferAdapter.hxx"
 #if DEBUG
 #include "../OCCTKit/SavedCutSourceChangedQualification.hxx"
 #include "../OCCTKit/PartBooleanCorrespondence.hxx"
 #include "../OCCTKit/RetainedPartBoolean.hxx"
 #include "RetainedA1AnalyticInputAdapter.hxx"
-#include "RetainedSemanticChamferAdapter.hxx"
 #include <thread>
 #endif
 #include "RetainedR2ChamferAdapter.hxx"
@@ -116,6 +116,7 @@ namespace b2tb=core3d::retained_topology_budget;
 #include "../OCCTKit/NativeModelingTombstone.hxx"
 #include "../OCCTKit/NativeRigidPlacementEvidence.hxx"
 #include "../OCCTKit/SpatialSweepEditor.hxx"
+#include "../OCCTKit/SweepRebuildDefinition.hxx"
 #if DEBUG
 #include "../OCCTKit/NativeModelingReceipt.hxx"
 #include "../OCCTKit/ReceiptCatalogBinaryDriver.hxx"
@@ -127,7 +128,6 @@ namespace b2tb=core3d::retained_topology_budget;
 #include "../OCCTKit/NativeModelingReceiptLegacyDebug.hxx"
 #include "../OCCTKit/ReceiptCatalogProbe.hxx"
 #endif
-#include "../OCCTKit/SweepRebuildDefinition.hxx"
 #include <XCAFDoc_ShapeMapTool.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <TDF_Tool.hxx>
@@ -3065,6 +3065,9 @@ typedef void (^Core3DReservationCompletion)(Core3DReservationOutcome,
 - (void)core3d_releaseReservation:(Core3DModelingPreparedRequest *)request;
 - (BOOL)core3d_acceptReservedCapability:(Core3DModelingReservedCapability *)capability;
 @end
+@interface Core3DViewController (ModelingHistoryPrivate)
+- (NSInteger)core3d_documentUndoCount;
+@end
 static NSMutableDictionary<NSUUID *,Core3DModelingReservationEntry *> *Core3DReservationEntries;
 static NSUUID *Core3DReservationIdentifier(const core3d::request::UUID& value) {
     return [[NSUUID alloc] initWithUUIDBytes:value.data()];
@@ -3366,7 +3369,7 @@ static void Core3DFinishAsyncModeling(Core3DModelingAsyncCompletion *box,
     auto observer=box->_beforeCompletion;box->_beforeCompletion=nil;
 #endif
     Core3DViewController *owner=box->_owner;
-    const NSInteger historyAfter=owner?[owner debugDocumentUndoCount]:box->_historyBefore;
+    const NSInteger historyAfter=owner?[owner core3d_documentUndoCount]:box->_historyBefore;
     const NSInteger historyDelta=disposition==Core3DModelingAsyncDispositionCommitted
         ?MAX(0,historyAfter-box->_historyBefore):0;
     Core3DModelingTerminalEvidence *evidence=nil;
@@ -11576,15 +11579,7 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
 }
 
 - (NSInteger)debugDocumentUndoCount {
-    if (!NSThread.isMainThread || !GLController) return 0;
-    const auto viewer = GLController.viewer;
-    if (!viewer) return 0;
-    const auto owner = viewer->getDocument();
-    if (owner.IsNull()) return 0;
-    const auto document = owner->Document();
-    return document.IsNull()
-        ? 0
-        : static_cast<NSInteger>(document->GetAvailableUndos());
+    return [self core3d_documentUndoCount];
 }
 
 - (NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable)
@@ -14154,6 +14149,18 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
 }
 #endif
 
+- (NSInteger)core3d_documentUndoCount {
+    if (!NSThread.isMainThread || !GLController) return 0;
+    const auto viewer = GLController.viewer;
+    if (!viewer) return 0;
+    const auto owner = viewer->getDocument();
+    if (owner.IsNull()) return 0;
+    const auto document = owner->Document();
+    return document.IsNull()
+        ? 0
+        : static_cast<NSInteger>(document->GetAvailableUndos());
+}
+
 - (BOOL)previewMirrorAxis:(Core3DMirrorAxis)axis backward:(BOOL)backward {
     if (![NSThread isMainThread]
         || !_isSetuped
@@ -15940,7 +15947,7 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
         Core3DFinishAsyncModeling(box,Core3DModelingAsyncDispositionRejected);return;
     }
     box->_owner=self;box->_prepared=request;box->_requestID=request.requestIdentifier;
-    box->_historyBefore=[self debugDocumentUndoCount];
+    box->_historyBefore=[self core3d_documentUndoCount];
     box->_documentID=request.documentIdentifier;box->_key=request->_requestKey;
     const auto operation=request->_requestDescriptor.operation;
     const bool loft=operation==core3d::request::Operation::RebuildLoftStation
