@@ -11,42 +11,185 @@
 #include <XCAFDoc_VisMaterial.hxx>
 #include <XCAFDoc_VisMaterialTool.hxx>
 
+#include <new>
+
 namespace core3d::painted_atlas_bake::kernel {
+namespace {
+template <typename Reference>
+class ScopedCF final {
+public:
+    ScopedCF() = default;
+    explicit ScopedCF(Reference value) noexcept : value_(value) {}
+    ScopedCF(const ScopedCF&) = delete;
+    ScopedCF& operator=(const ScopedCF&) = delete;
+    ~ScopedCF() { reset(); }
+    Reference get() const noexcept { return value_; }
+    explicit operator bool() const noexcept { return value_ != nullptr; }
+    void reset(Reference value = nullptr) noexcept {
+        if (value_) CFRelease(value_);
+        value_ = value;
+    }
+private:
+    Reference value_ = nullptr;
+};
+} // namespace
+
 // Bounded ImageIO decode to exact straight RGBA8 working pixels (the same
 // decoder the capture path uses; declared in PaintedAtlasBake.hxx so the
 // DEBUG probe measures persisted PNG bytes through the identical route).
-bool DecodeImage(const std::vector<std::uint8_t>& bytes, Image& output) noexcept {
-    output = {};
+bool DecodeImage(
+    const std::vector<std::uint8_t>& bytes,
+    Image& output,
+    const decal_layer::bake::accounting::View& operation) noexcept {
+    namespace accounting = decal_layer::bake::accounting;
+    using accounting::FailureSite;
+    using accounting::Retention;
+    using accounting::StorageDimension;
+    using accounting::Ticket;
+    output.reset();
+    FailureSite activeAllocation = FailureSite::ImageEncodedCopy;
     @autoreleasepool {
         try {
-            if (bytes.empty() || bytes.size() > face_image::kMaximumEncodedImageBytes)
+            if (!operation.valid() || bytes.empty()
+                || bytes.size() > face_image::kMaximumEncodedImageBytes)
                 return false;
-            CFDataRef data = CFDataCreate(kCFAllocatorDefault, bytes.data(), bytes.size());
+            Ticket encodedTicket;
+            if (!encodedTicket.acquire(operation, StorageDimension::EncodedTexture,
+                    bytes.size(), Retention::Scratch,
+                    FailureSite::ImageEncodedCopy)
+                || !operation.EnterAllocation(FailureSite::ImageEncodedCopy))
+                return false;
+            ScopedCF<CFDataRef> data(CFDataCreate(
+                kCFAllocatorDefault, bytes.data(), bytes.size()));
             if (!data) return false;
-            CGImageSourceRef source = CGImageSourceCreateWithData(data, nullptr);
-            CFRelease(data);
+            Ticket sourceTicket;
+            if (!sourceTicket.acquire(operation, StorageDimension::EncodedTexture,
+                    bytes.size(), Retention::Scratch,
+                    FailureSite::ImageSourceMetadata)
+                || !operation.EnterAllocation(FailureSite::ImageSourceMetadata)) {
+                return false;
+            }
+            ScopedCF<CGImageSourceRef> source(
+                CGImageSourceCreateWithData(data.get(), nullptr));
             if (!source) return false;
-            CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, nullptr);
-            CFRelease(source);
-            if (!image) return false;
-            const std::size_t width = CGImageGetWidth(image), height = CGImageGetHeight(image);
+            ScopedCF<CFDictionaryRef> properties(
+                CGImageSourceCopyPropertiesAtIndex(source.get(), 0, nullptr));
+            if (!properties) return false;
+            const auto number = [&](CFStringRef key, std::size_t& value) {
+                CFTypeRef raw = CFDictionaryGetValue(properties.get(), key);
+                long long candidate = 0;
+                if (!raw || CFGetTypeID(raw) != CFNumberGetTypeID()
+                    || !CFNumberGetValue(static_cast<CFNumberRef>(raw),
+                        kCFNumberLongLongType, &candidate)
+                    || candidate <= 0) return false;
+                value = std::size_t(candidate);
+                return static_cast<unsigned long long>(candidate)
+                    <= std::numeric_limits<std::size_t>::max();
+            };
+            std::size_t width = 0, height = 0, depth = 0;
+            CFTypeRef colorModelValue = CFDictionaryGetValue(
+                properties.get(), kCGImagePropertyColorModel);
+            CFTypeRef alphaValue = CFDictionaryGetValue(
+                properties.get(), kCGImagePropertyHasAlpha);
+            std::size_t components = 0;
+            if (!number(kCGImagePropertyPixelWidth, width)
+                || !number(kCGImagePropertyPixelHeight, height)
+                || !number(kCGImagePropertyDepth, depth)
+                || !colorModelValue
+                || CFGetTypeID(colorModelValue) != CFStringGetTypeID()
+                || !alphaValue
+                || CFGetTypeID(alphaValue) != CFBooleanGetTypeID()) {
+                return false;
+            }
+            const auto colorModel = static_cast<CFStringRef>(colorModelValue);
+            if (CFEqual(colorModel, kCGImagePropertyColorModelRGB)) components = 3;
+            else if (CFEqual(colorModel,
+                         kCGImagePropertyColorModelGray)) components = 1;
+            else if (CFEqual(colorModel,
+                         kCGImagePropertyColorModelCMYK)) components = 4;
+            else if (CFEqual(colorModel,
+                         kCGImagePropertyColorModelLab)) components = 3;
+            else {
+                return false;
+            }
+            if (CFBooleanGetValue(static_cast<CFBooleanRef>(alphaValue)))
+                ++components;
+            properties.reset();
             if (width == 0 || height == 0
                 || width > std::size_t(face_image::kMaximumImageDimension)
                 || height > std::size_t(face_image::kMaximumImageDimension)
                 || width > face_image::kMaximumImagePixels / height) {
-                CGImageRelease(image); return false;
+                return false;
             }
+            std::size_t componentBits = 0;
+            if (!operation.CheckedProduct(components, depth, 1, componentBits,
+                    FailureSite::ImageDecodedBacking)) return false;
+            const std::size_t bytesPerPixel = componentBits / 8
+                + (componentBits % 8 == 0 ? 0 : 1);
+            Ticket decodedTicket;
+            if (!decodedTicket.acquireProduct(operation,
+                    StorageDimension::PrivateStorage, width, height,
+                    bytesPerPixel, Retention::Scratch,
+                    FailureSite::ImageDecodedBacking)) {
+                return false;
+            }
+            const void* optionKeys[] = {
+                kCGImageSourceShouldCache,
+                kCGImageSourceShouldCacheImmediately,
+            };
+            const void* optionValues[] = {kCFBooleanFalse, kCFBooleanFalse};
+            ScopedCF<CFDictionaryRef> options(CFDictionaryCreate(kCFAllocatorDefault,
+                optionKeys, optionValues, 2, &kCFTypeDictionaryKeyCallBacks,
+                &kCFTypeDictionaryValueCallBacks));
+            if (!options
+                || !operation.EnterAllocation(FailureSite::ImageCreate)) {
+                return false;
+            }
+            activeAllocation = FailureSite::ImageCreate;
+            ScopedCF<CGImageRef> image(CGImageSourceCreateImageAtIndex(
+                source.get(), 0, options.get()));
+            options.reset();
+            source.reset();
+            sourceTicket.reset();
+            encodedTicket.reset();
+            if (!image) return false;
+            if (CGImageGetWidth(image.get()) != width
+                || CGImageGetHeight(image.get()) != height) return false;
+            Ticket rgbaTicket;
+            if (!rgbaTicket.acquireProduct(operation,
+                    StorageDimension::PrivateStorage, width, height, 4,
+                    Retention::Retained, FailureSite::ImageRGBA)
+                || !operation.EnterAllocation(FailureSite::ImageRGBA)) {
+                return false;
+            }
+            activeAllocation = FailureSite::ImageRGBA;
             std::vector<std::uint8_t> rgba(width * height * 4, 0);
-            CGColorSpaceRef color = CGImageGetColorSpace(image);
-            if (color) CFRetain(color);
-            else color = CGColorSpaceCreateDeviceRGB();
-            CGContextRef context = color ? CGBitmapContextCreate(rgba.data(), width, height, 8,
-                width * 4, color, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big) : nullptr;
-            if (color) CGColorSpaceRelease(color);
-            if (!context) { CGImageRelease(image); return false; }
-            CGContextSetBlendMode(context, kCGBlendModeCopy);
-            CGContextDrawImage(context, CGRectMake(0, 0, width, height), image);
-            CGContextRelease(context); CGImageRelease(image);
+            Ticket contextTicket;
+            if (!contextTicket.acquireProduct(operation,
+                    StorageDimension::PrivateStorage, width, height, 4,
+                    Retention::Scratch, FailureSite::ImageBitmapContext)
+                || !operation.EnterAllocation(
+                    FailureSite::ImageBitmapContext)) {
+                return false;
+            }
+            activeAllocation = FailureSite::ImageBitmapContext;
+            CGColorSpaceRef borrowedColor = CGImageGetColorSpace(image.get());
+            if (borrowedColor) CFRetain(borrowedColor);
+            ScopedCF<CGColorSpaceRef> color(borrowedColor
+                ? borrowedColor : CGColorSpaceCreateDeviceRGB());
+            ScopedCF<CGContextRef> context(color
+                ? CGBitmapContextCreate(rgba.data(), width, height, 8,
+                    width * 4, color.get(), kCGImageAlphaPremultipliedLast
+                        | kCGBitmapByteOrder32Big)
+                : nullptr);
+            if (!context) return false;
+            CGContextSetBlendMode(context.get(), kCGBlendModeCopy);
+            CGContextDrawImage(context.get(), CGRectMake(0, 0, width, height),
+                image.get());
+            context.reset();
+            color.reset();
+            image.reset();
+            decodedTicket.reset();
             // Face-image normalized inputs are straight alpha. Convert the
             // CoreGraphics premultiplied readback without touching hidden RGB
             // on fully transparent texels (those contribute exactly zero).
@@ -61,9 +204,24 @@ bool DecodeImage(const std::vector<std::uint8_t>& bytes, Image& output) noexcept
                 }
             }
             output.width = std::uint32_t(width); output.height = std::uint32_t(height);
-            output.rgba = std::move(rgba); return true;
-        } catch (...) { output = {}; return false; }
+            output.rgba = std::move(rgba);
+            output.rgbaTicket = std::move(rgbaTicket);
+            return true;
+        } catch (const std::bad_alloc&) {
+            output.reset();
+            operation.AllocationFailed(activeAllocation);
+            return false;
+        } catch (...) { output.reset(); return false; }
     }
+}
+
+bool DecodeImage(const std::vector<std::uint8_t>& bytes,
+                 Image& output) noexcept {
+    auto operation = decal_layer::bake::accounting::MakeOperationOwner();
+    if (!operation.valid()) { output.reset(); return false; }
+    if (!DecodeImage(bytes, output, operation.view)) return false;
+    output.operationOwner = std::move(operation);
+    return true;
 }
 } // namespace core3d::painted_atlas_bake::kernel
 
@@ -71,6 +229,10 @@ namespace core3d::painted_atlas_bake::owner {
 namespace {
 namespace fi = core3d::face_image;
 namespace aa = core3d::asset_atlas;
+#ifdef DEBUG
+thread_local std::size_t gDebugCaptureSourceOrdinal = 0;
+thread_local std::size_t gDebugDenyCaptureSourceOrdinal = 0;
+#endif
 
 UUID UUIDFromDigest(const Digest& digest) noexcept {
     UUID value{};
@@ -79,14 +241,17 @@ UUID UUIDFromDigest(const Digest& digest) noexcept {
     return value;
 }
 
-enum class TextureCapture : std::uint8_t { Captured, Foreign, Missing };
+enum class TextureCapture : std::uint8_t {
+    Captured, Foreign, Missing, OverBudget
+};
 
 // XCAF texture slots must carry document-owned bytes: a file-backed texture
 // references foreign bytes and is refused ForeignResource, never silently
 // read from disk.
 TextureCapture SyntheticEnvelope(const Handle(Image_Texture)& texture, const OwnerKey& owner,
                        Role role, const Digest& selector, const Digest& bindingProof,
-                       CapturedSource& output) noexcept {
+                       CapturedSource& output,
+                       const decal_layer::bake::accounting::View& operation) noexcept {
     output = {};
     try {
         if (texture.IsNull()) return TextureCapture::Missing;
@@ -98,7 +263,10 @@ TextureCapture SyntheticEnvelope(const Handle(Image_Texture)& texture, const Own
         Digest content{};
         if (!fi::HashFaceImageBytes(bytes, content)) return TextureCapture::Missing;
         kernel::Image decoded;
-        if (!kernel::DecodeImage(bytes, decoded)) return TextureCapture::Missing;
+        if (!kernel::DecodeImage(bytes, decoded, operation))
+            return operation.Recheck(
+                    decal_layer::bake::accounting::FailureSite::ImageRGBA)
+                ? TextureCapture::Missing : TextureCapture::OverBudget;
         output.envelope.resource = UUIDFromDigest(content);
         output.envelope.originalContent = content;
         output.envelope.workingContent = content;
@@ -134,10 +302,24 @@ TextureCapture SyntheticEnvelope(const Handle(Image_Texture)& texture, const Own
 // resource table is Malformed.
 Outcome CaptureSources(const Handle(TDocStd_Document)& document,
                        const aa::Capture& members,
-                       std::vector<CapturedSource>& output) noexcept {
+                       std::vector<CapturedSource>& output,
+                       const decal_layer::bake::accounting::View& operation) noexcept {
     output.clear();
     try {
-        if (document.IsNull()) return Outcome::Malformed;
+        if (document.IsNull() || !operation.valid()) return Outcome::Malformed;
+#ifdef DEBUG
+        ++gDebugCaptureSourceOrdinal;
+        if (gDebugDenyCaptureSourceOrdinal != 0
+            && gDebugCaptureSourceOrdinal == gDebugDenyCaptureSourceOrdinal) {
+            gDebugDenyCaptureSourceOrdinal = 0;
+            (void)operation.Reserve(
+                decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                std::numeric_limits<std::size_t>::max(),
+                decal_layer::bake::accounting::Retention::Scratch,
+                decal_layer::bake::accounting::FailureSite::ImageDecodedBacking);
+            return Outcome::OverBudget;
+        }
+#endif
         const auto materialTool = XCAFDoc_DocumentTool::VisMaterialTool(document->Main());
         for (const auto& member : members.members) {
             fi::Definition definition;
@@ -186,8 +368,10 @@ Outcome CaptureSources(const Handle(TDocStd_Document)& document,
                         return Outcome::Prepared;
                 CapturedSource source;
                 const auto captured = SyntheticEnvelope(texture, member.slot.owner, role,
-                    member.slot.source.geometry, member.slot.source.recipe, source);
+                    member.slot.source.geometry, member.slot.source.recipe, source,
+                    operation);
                 if (captured == TextureCapture::Foreign) return Outcome::ForeignResource;
+                if (captured == TextureCapture::OverBudget) return Outcome::OverBudget;
                 if (captured != TextureCapture::Captured) return Outcome::MissingResource;
                 output.push_back(std::move(source)); return Outcome::Prepared;
             };
@@ -368,10 +552,26 @@ Outcome AdoptBakedResources(const Handle(TDocStd_Document)& document,
 }
 } // namespace
 
+#ifdef DEBUG
+void DebugDenyCaptureSourcesAtOrdinal(std::size_t ordinal) noexcept
+{
+    gDebugCaptureSourceOrdinal = 0;
+    gDebugDenyCaptureSourceOrdinal = ordinal;
+}
+
+void DebugClearCaptureSourcesDenial() noexcept
+{
+    gDebugCaptureSourceOrdinal = 0;
+    gDebugDenyCaptureSourceOrdinal = 0;
+}
+#endif
+
 Outcome Prepare(Staging& staging, const Handle(TDocStd_Document)& document,
                 const aa::Key& key) noexcept {
     staging = {};
     try {
+        staging.operation = decal_layer::bake::accounting::MakeOperationOwner();
+        if (!staging.operation.valid()) return Outcome::OverBudget;
         if (document.IsNull() || !document->HasOpenCommand()) return Outcome::Busy;
         aa::persistence::Record prior;
         if (!aa::persistence::Read(document, key, prior))
@@ -390,7 +590,8 @@ Outcome Prepare(Staging& staging, const Handle(TDocStd_Document)& document,
         for (const auto& member : prior.value->definition.members) owners.push_back(member.owner);
         aa::Capture capture;
         if (!aa::build::CaptureMembers(document, owners, capture)) return Outcome::StaleSource;
-        const Outcome captured = CaptureSources(document, capture, staging.capturedSources);
+        const Outcome captured = CaptureSources(document, capture,
+            staging.capturedSources, staging.operation.view);
         if (captured != Outcome::Prepared) return captured;
         // A malformed persisted SYEB/1 record refuses before any bake work.
         persistence::Record existing;
@@ -422,8 +623,11 @@ Outcome Prepare(Staging& staging, const Handle(TDocStd_Document)& document,
         std::vector<kernel::Source> sources;
         for (const auto& capturedSource : staging.capturedSources) {
             kernel::Image image;
-            if (!kernel::DecodeImage(capturedSource.envelope.workingBytes, image))
-                return Outcome::MissingResource;
+            if (!kernel::DecodeImage(capturedSource.envelope.workingBytes,
+                    image, staging.operation.view))
+                return staging.operation.view.Recheck(
+                        decal_layer::bake::accounting::FailureSite::ImageRGBA)
+                    ? Outcome::MissingResource : Outcome::OverBudget;
             sources.push_back({capturedSource.fence, std::move(image)});
         }
         if (!kernel::Bake(staging.atlas, layout, sources, staging.outputs,
@@ -458,7 +662,11 @@ Outcome Commit(Staging& staging, const Handle(TDocStd_Document)& document) noexc
         if (!aa::build::CaptureMembers(document, owners, capture)) {
             staging = {}; return Outcome::StaleSource;
         }
-        const Outcome recaptured = CaptureSources(document, capture, sources);
+        const Outcome recaptured = CaptureSources(document, capture, sources,
+            staging.operation.view);
+        if (recaptured == Outcome::OverBudget) {
+            staging = {}; return Outcome::OverBudget;
+        }
         if (recaptured == Outcome::MissingResource || recaptured == Outcome::ForeignResource
             || recaptured == Outcome::Malformed) {
             staging = {}; return recaptured;
@@ -531,6 +739,8 @@ Outcome CaptureForExport(ExportCapture& capture,
                          const aa::Key& key) noexcept {
     capture = {};
     try {
+        capture.operation = decal_layer::bake::accounting::MakeOperationOwner();
+        if (!capture.operation.valid()) return Outcome::OverBudget;
         if (document.IsNull() || document->HasOpenCommand())
             return Outcome::Busy;
         aa::persistence::Record savedAtlas;
@@ -558,7 +768,8 @@ Outcome CaptureForExport(ExportCapture& capture,
             return Outcome::StaleSource;
         }
         const Outcome sources = CaptureSources(
-            document, capture.members, capture.sources);
+            document, capture.members, capture.sources,
+            capture.operation.view);
         if (sources != Outcome::Prepared) {
             capture = {};
             return sources;
@@ -627,8 +838,11 @@ Outcome BakeForExport(const ExportCapture& capture,
         sources.reserve(capture.sources.size());
         for (const auto& captured : capture.sources) {
             kernel::Image image;
-            if (!kernel::DecodeImage(captured.envelope.workingBytes, image))
-                return Outcome::MissingResource;
+            if (!kernel::DecodeImage(captured.envelope.workingBytes, image,
+                    capture.operation.view))
+                return capture.operation.view.Recheck(
+                        decal_layer::bake::accounting::FailureSite::ImageRGBA)
+                    ? Outcome::MissingResource : Outcome::OverBudget;
             sources.push_back({captured.fence, std::move(image)});
         }
         output.atlas = finalAtlas;
@@ -732,10 +946,12 @@ Outcome BuildAndBakeTransientForExport(
         sources.reserve(capture.sources.size());
         for (const auto& captured : capture.sources) {
             kernel::Image image;
-            if (!kernel::DecodeImage(
-                    captured.envelope.workingBytes, image)) {
+            if (!kernel::DecodeImage(captured.envelope.workingBytes, image,
+                    capture.operation)) {
                 diagnosis = "transient-source-decode";
-                return Outcome::MissingResource;
+                return capture.operation.Recheck(
+                        decal_layer::bake::accounting::FailureSite::ImageRGBA)
+                    ? Outcome::MissingResource : Outcome::OverBudget;
             }
             sources.push_back({captured.fence, std::move(image)});
         }
@@ -770,6 +986,8 @@ Outcome Currentness(const Handle(TDocStd_Document)& document, const aa::Key& key
                     Definition* output) noexcept {
     if (output) *output = {};
     try {
+        auto operation = decal_layer::bake::accounting::MakeOperationOwner();
+        if (!operation.valid()) return Outcome::OverBudget;
         persistence::Record record;
         const auto state = persistence::Read(document, key, record);
         if (state == persistence::ReadState::Absent) return Outcome::Absent;
@@ -790,7 +1008,9 @@ Outcome Currentness(const Handle(TDocStd_Document)& document, const aa::Key& key
         aa::Capture capture;
         if (!aa::build::CaptureMembers(document, owners, capture)) return Outcome::StaleSource;
         std::vector<CapturedSource> sources;
-        const Outcome captured = CaptureSources(document, capture, sources);
+        const Outcome captured = CaptureSources(document, capture, sources,
+            operation.view);
+        if (captured == Outcome::OverBudget) return Outcome::OverBudget;
         if (captured == Outcome::MissingResource || captured == Outcome::ForeignResource)
             return captured;
         if (captured == Outcome::Malformed) return Outcome::Malformed;

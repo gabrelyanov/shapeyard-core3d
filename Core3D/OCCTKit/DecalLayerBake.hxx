@@ -61,6 +61,12 @@ enum class FailureSite : std::uint8_t {
     JobSeal,
     JobConsume,
     Cancellation,
+    ImageEncodedCopy,
+    ImageSourceMetadata,
+    ImageDecodedBacking,
+    ImageCreate,
+    ImageRGBA,
+    ImageBitmapContext,
     DebugExactLimit,
     DebugOneUnit,
     DebugCheckedProduct,
@@ -71,7 +77,8 @@ enum class FailureSite : std::uint8_t {
     DebugShared,
     DebugMove,
     DebugScratch,
-    DebugWork
+    DebugWork,
+    Count
 };
 
 struct View final {
@@ -86,10 +93,13 @@ struct View final {
     bool (*consumeJob)(void*, Job, std::size_t, FailureSite) noexcept = nullptr;
     bool (*recheck)(void*, FailureSite) noexcept = nullptr;
     void (*cancel)(void*, FailureSite) noexcept = nullptr;
+    bool (*enterAllocation)(void*, FailureSite) noexcept = nullptr;
+    void (*allocationFailure)(void*, FailureSite) noexcept = nullptr;
 
     bool valid() const noexcept {
         return context && reserve && release && checkedProduct && sealJob
-            && consumeJob && recheck && cancel;
+            && consumeJob && recheck && cancel && enterAllocation
+            && allocationFailure;
     }
     bool Reserve(StorageDimension dimension, std::size_t bytes,
                  Retention retention, FailureSite site) const noexcept {
@@ -121,7 +131,66 @@ struct View final {
     void Cancel(FailureSite site) const noexcept {
         if (valid()) cancel(context, site);
     }
+    bool EnterAllocation(FailureSite site) const noexcept {
+        return valid() && enterAllocation(context, site);
+    }
+    void AllocationFailed(FailureSite site) const noexcept {
+        if (valid()) allocationFailure(context, site);
+    }
 };
+
+//! Copyable intrusive lifetime handle for a genuine outer ordinary operation.
+//! The single concrete allocation is pre-admitted by the implementation before
+//! construction; copies only retain that allocation and never create a control
+//! block. Nested calls receive its view, while the concrete ledger stays in B.
+struct Owner final {
+    void* lifetime = nullptr;
+    View view;
+    void (*retain)(void*) noexcept = nullptr;
+    void (*release)(void*) noexcept = nullptr;
+
+    Owner() = default;
+    Owner(const Owner& other) noexcept
+        : lifetime(other.lifetime), view(other.view), retain(other.retain),
+          release(other.release) {
+        if (lifetime && retain) retain(lifetime);
+    }
+    Owner& operator=(const Owner& other) noexcept {
+        if (this != &other) {
+            reset();
+            lifetime = other.lifetime; view = other.view;
+            retain = other.retain; release = other.release;
+            if (lifetime && retain) retain(lifetime);
+        }
+        return *this;
+    }
+    Owner(Owner&& other) noexcept
+        : lifetime(other.lifetime), view(other.view), retain(other.retain),
+          release(other.release) {
+        other.lifetime = nullptr; other.view = {};
+        other.retain = nullptr; other.release = nullptr;
+    }
+    Owner& operator=(Owner&& other) noexcept {
+        if (this != &other) {
+            reset();
+            lifetime = other.lifetime; view = other.view;
+            retain = other.retain; release = other.release;
+            other.lifetime = nullptr; other.view = {};
+            other.retain = nullptr; other.release = nullptr;
+        }
+        return *this;
+    }
+    ~Owner() { reset(); }
+    void reset() noexcept {
+        if (lifetime && release) release(lifetime);
+        lifetime = nullptr; view = {}; retain = nullptr; release = nullptr;
+    }
+    bool valid() const noexcept {
+        return lifetime && retain && release && view.valid();
+    }
+};
+
+Owner MakeOperationOwner() noexcept;
 
 struct Ticket final {
     View view;
@@ -215,12 +284,45 @@ struct Triangle final {
 struct ResolvedImage final {
     ImageRef reference;
     face_image::ResourceEnvelope envelope;
+    accounting::Ticket pixelTicket;
     Raster pixels;
     // Set only by the Objective-C++ adapter after measuring both carried
     // encodings and decoding the actual working bytes.
     bool originalMeasured = false;
     bool workingMeasured = false;
     bool workingHasAlpha = false;
+
+    ResolvedImage() = default;
+    ResolvedImage(const ResolvedImage&) = delete;
+    ResolvedImage& operator=(const ResolvedImage&) = delete;
+    ResolvedImage(ResolvedImage&& other) noexcept { *this = std::move(other); }
+    ResolvedImage& operator=(ResolvedImage&& other) noexcept {
+        if (this != &other) {
+            reset();
+            reference = std::move(other.reference);
+            envelope = std::move(other.envelope);
+            pixels = std::move(other.pixels);
+            pixelTicket = std::move(other.pixelTicket);
+            originalMeasured = other.originalMeasured;
+            workingMeasured = other.workingMeasured;
+            workingHasAlpha = other.workingHasAlpha;
+            other.pixels = {};
+            other.originalMeasured = false;
+            other.workingMeasured = false;
+            other.workingHasAlpha = false;
+        }
+        return *this;
+    }
+    void reset() noexcept {
+        std::vector<std::uint8_t>().swap(pixels.rgba);
+        pixels.width = pixels.height = 0;
+        pixelTicket.reset();
+        reference = {};
+        envelope = {};
+        originalMeasured = false;
+        workingMeasured = false;
+        workingHasAlpha = false;
+    }
 };
 struct ResolvedLayer final {
     Layer intent;
@@ -232,6 +334,7 @@ struct ResolvedLayer final {
     bool footprintContained = false;
 };
 struct Input final {
+    accounting::Owner operationOwner;
     Raster baseColor;
     std::vector<ResolvedLayer> layers; // exact persisted order
     std::vector<std::uint8_t> canonicalLayers;
@@ -246,6 +349,43 @@ struct Input final {
     // Required inherited operation view for private/ordinary production.
     // S6 connects the existing ordinary entry; invalid never means uncharged.
     accounting::View operationLedger;
+
+    Input() = default;
+    Input(const Input&) = delete;
+    Input& operator=(const Input&) = delete;
+    Input(Input&& other) noexcept { *this = std::move(other); }
+    Input& operator=(Input&& other) noexcept {
+        if (this != &other) {
+            reset();
+            operationOwner = std::move(other.operationOwner);
+            baseColor = std::move(other.baseColor);
+            layers = std::move(other.layers);
+            canonicalLayers = std::move(other.canonicalLayers);
+            sourceProof = other.sourceProof;
+            finalGeometryUVProof = other.finalGeometryUVProof;
+            occluderProof = other.occluderProof;
+            effectiveAppearanceProof = other.effectiveAppearanceProof;
+            tangentProof = other.tangentProof;
+            atlasProof = other.atlasProof;
+            occurrenceProof = other.occurrenceProof;
+            inputKey = other.inputKey;
+            operationLedger = operationOwner.valid()
+                ? operationOwner.view : other.operationLedger;
+            other.operationLedger = {};
+        }
+        return *this;
+    }
+    void reset() noexcept {
+        std::vector<std::uint8_t>().swap(baseColor.rgba);
+        baseColor.width = baseColor.height = 0;
+        std::vector<ResolvedLayer>().swap(layers);
+        std::vector<std::uint8_t>().swap(canonicalLayers);
+        operationLedger = {};
+        operationOwner.reset();
+        sourceProof = {}; finalGeometryUVProof = {}; occluderProof = {};
+        effectiveAppearanceProof = {}; tangentProof = {}; atlasProof = {};
+        occurrenceProof = {}; inputKey = {};
+    }
 };
 struct Output final {
     Raster pixels;

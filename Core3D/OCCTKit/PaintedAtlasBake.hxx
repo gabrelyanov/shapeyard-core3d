@@ -9,6 +9,7 @@
 // document resource table stays far inside its aggregate budget.
 #include "PaintedAtlasBakeDefinition.hxx"
 #include "AssetAtlasBuild.hxx"
+#include "DecalLayerBake.hxx"
 
 #include <CommonCrypto/CommonDigest.h>
 #include <zlib.h>
@@ -23,15 +24,50 @@
 namespace core3d::painted_atlas_bake::kernel {
 
 struct Image final {
+    decal_layer::bake::accounting::Owner operationOwner;
+    decal_layer::bake::accounting::Ticket rgbaTicket;
     std::uint32_t width = 0, height = 0;
     std::vector<std::uint8_t> rgba;
+
+    Image() = default;
+    Image(std::uint32_t pixelWidth, std::uint32_t pixelHeight,
+          const std::vector<std::uint8_t>& pixels)
+        : width(pixelWidth), height(pixelHeight), rgba(pixels) {}
+    Image(const Image&) = delete;
+    Image& operator=(const Image&) = delete;
+    Image(Image&& other) noexcept { *this = std::move(other); }
+    Image& operator=(Image&& other) noexcept {
+        if (this != &other) {
+            reset();
+            operationOwner = std::move(other.operationOwner);
+            width = other.width; height = other.height;
+            rgba = std::move(other.rgba);
+            rgbaTicket = std::move(other.rgbaTicket);
+            other.width = other.height = 0;
+        }
+        return *this;
+    }
+    void reset() noexcept {
+        std::vector<std::uint8_t>().swap(rgba);
+        width = height = 0;
+        rgbaTicket.reset();
+        operationOwner.reset();
+    }
 };
 
 // Bounded ImageIO decode to exact straight RGBA8 working pixels.  Defined in
 // PaintedAtlasBakeOwner.mm (the one place Foundation/ImageIO is imported);
 // declared here so the DEBUG probe measures persisted PNG bytes with the same
 // decoder the product capture path uses.
-bool DecodeImage(const std::vector<std::uint8_t>& bytes, Image& output) noexcept;
+bool DecodeImage(
+    const std::vector<std::uint8_t>& bytes,
+    Image& output,
+    const decal_layer::bake::accounting::View& operation) noexcept;
+//! Source-compatible explicit standalone entry.  It acquires one real outer
+//! operation owner and retains it in Image; nested production calls use the
+//! required inherited-view overload above.
+bool DecodeImage(const std::vector<std::uint8_t>& bytes,
+                 Image& output) noexcept;
 
 struct Source final {
     BindingFence fence;
@@ -432,6 +468,7 @@ struct CapturedSource final {
 };
 
 struct Staging final {
+    decal_layer::bake::accounting::Owner operation;
     asset_atlas::Definition atlas;
     std::vector<asset_atlas::MemberUVAssignment> assignments;
     std::vector<asset_atlas::Member> observedMembers;
@@ -448,6 +485,7 @@ struct Staging final {
 //! Unlike Staging this value carries no prior resources to remove and grants
 //! no right to adopt resources or stage SYEA/SYEB records.
 struct ExportCapture final {
+    decal_layer::bake::accounting::Owner operation;
     asset_atlas::Definition savedAtlas;
     asset_atlas::Capture members;
     std::vector<asset_atlas::Member> observedMembers;
@@ -460,6 +498,7 @@ struct ExportCapture final {
 //! pair. This is deliberately a separate type: it cannot be mistaken for a
 //! saved atlas capture and carries no persistence/adoption capability.
 struct TransientExportCapture final {
+    decal_layer::bake::accounting::View operation;
     asset_atlas::Key atlas;
     asset_atlas::Member member;
     std::vector<CapturedSource> sources;

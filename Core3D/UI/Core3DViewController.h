@@ -634,6 +634,10 @@ __attribute__((objc_subclassing_restricted))
 //! through production B2. Returns a boxed BOOL for selector-safe test use.
 - (NSNumber *)debugInstallE4RetainedCapLayerForEntityIdentifier:
     (NSString *)entityIdentifier;
+- (NSNumber *)debugAddE4RetainedCapSecondReceiverForEntityIdentifier:
+    (NSString *)entityIdentifier;
+- (void)debugBeginE4OrdinaryLedgerObservation;
+- (nullable NSDictionary<NSString *,id> *)debugTakeE4OrdinaryLedgerObservation;
 //! Value-only strict read/source/B2 observation; no label, handle or token.
 - (nullable NSDictionary<NSString *,id> *)
     debugE4RetainedCapObservationForEntityIdentifier:
@@ -643,6 +647,16 @@ __attribute__((objc_subclassing_restricted))
 - (nullable NSDictionary<NSString *,id> *)
     debugE4P2b1LedgerCapForEntityIdentifier:(NSString *)entityIdentifier
     NS_SWIFT_NAME(debugE4P2b1LedgerCap(entityIdentifier:));
+//! Executes the real persisted-source decoder twice: a header-derived backing
+//! denial before CGImage creation and a normal byte-identical pixel pass.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4SourceDecodeAdmissionForEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugE4SourceDecodeAdmission(entityIdentifier:));
+//! Runs real ordinary Prepare/Commit and Currentness capture seams with a
+//! reservation denial at their CaptureSources boundary.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4DecoderOwnerOutcomesForEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugE4DecoderOwnerOutcomes(entityIdentifier:));
 //! UI-test fixture: asset data for the frozen E2 two-part box/cylinder atlas
 //! fixture in the requested unit system. nil on any failure; never mutates an
 //! open document.

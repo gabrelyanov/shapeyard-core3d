@@ -79,6 +79,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -102,6 +103,10 @@ namespace {
 thread_local bool gDebugBoundedCurveObservationArmed = false;
 thread_local std::optional<DebugBoundedCurvePublicationObservation>
     gDebugBoundedCurveObservation;
+thread_local bool gDebugOrdinaryLedgerObservationArmed = false;
+thread_local void* gDebugOrdinaryLedgerContext = nullptr;
+thread_local std::size_t gDebugOrdinaryLedgerCalls = 0;
+thread_local bool gDebugOrdinaryLedgerMismatch = false;
 #endif
 
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
@@ -1011,17 +1016,30 @@ std::string DecalDigestText(const core3d::decal_layer::Digest& theDigest)
 bool ResolveDecalImage(
     const Handle(OcctDocument)& theDocument,
     const core3d::decal_layer::ImageRef& theReference,
-    core3d::decal_layer::bake::ResolvedImage& theOutput)
+    core3d::decal_layer::bake::ResolvedImage& theOutput,
+    const core3d::decal_layer::bake::accounting::View& theOperation)
 {
     theOutput = {};
     @try {
         namespace fi = core3d::face_image;
         namespace dl = core3d::decal_layer;
-        if (theDocument.IsNull()
+        if (theDocument.IsNull() || !theOperation.valid()
             || !dl::image_contract::Supported(theReference)) return false;
         fi::ResourceEnvelope anEnvelope;
         if (!fi::owner::ReadResource(theDocument->Document(),
                 theReference.resource, anEnvelope)) return false;
+        dl::bake::accounting::Ticket anOriginalTicket, aWorkingTicket;
+        if (!anOriginalTicket.acquire(theOperation,
+                dl::bake::accounting::StorageDimension::EncodedTexture,
+                anEnvelope.originalBytes.size(),
+                dl::bake::accounting::Retention::Scratch,
+                dl::bake::accounting::FailureSite::ImageEncodedCopy)
+            || !aWorkingTicket.acquire(theOperation,
+                dl::bake::accounting::StorageDimension::EncodedTexture,
+                anEnvelope.workingBytes.size(),
+                dl::bake::accounting::Retention::Scratch,
+                dl::bake::accounting::FailureSite::ImageEncodedCopy))
+            return false;
         NSData *anOriginal = [NSData dataWithBytes:anEnvelope.originalBytes.data()
             length:anEnvelope.originalBytes.size()];
         NSData *aWorking = [NSData dataWithBytes:anEnvelope.workingBytes.data()
@@ -1040,7 +1058,7 @@ bool ResolveDecalImage(
             return false;
         core3d::painted_atlas_bake::kernel::Image aDecoded;
         if (!core3d::painted_atlas_bake::kernel::DecodeImage(
-                anEnvelope.workingBytes, aDecoded)
+                anEnvelope.workingBytes, aDecoded, theOperation)
             || aDecoded.width != anEnvelope.workingWidthTexels
             || aDecoded.height != anEnvelope.workingHeightTexels)
             return false;
@@ -1050,6 +1068,7 @@ bool ResolveDecalImage(
         aResolved.pixels.width = aDecoded.width;
         aResolved.pixels.height = aDecoded.height;
         aResolved.pixels.rgba = std::move(aDecoded.rgba);
+        aResolved.pixelTicket = std::move(aDecoded.rgbaTicket);
         aResolved.originalMeasured = true;
         aResolved.workingMeasured = true;
         aResolved.workingHasAlpha = aWorkingInfo.hasAlpha;
@@ -1252,6 +1271,7 @@ struct OrdinaryDecalFaceInputs final {
     const std::vector<std::uint8_t>& canonicalLayers;
     const core3d::decal_layer::Digest& sourceProof;
     double metersPerUnit;
+    core3d::decal_layer::bake::accounting::View operation;
     core3d::retained_edge_treatment::ReplayBudget& budget;
 };
 
@@ -1266,6 +1286,16 @@ bool PrepareOrdinaryDecalFace(
     namespace dl = core3d::decal_layer;
     using namespace decal_math;
     (void)theInputs.reversesWinding;
+    if (!theInputs.operation.valid()) return false;
+#ifdef DEBUG
+    if (gDebugOrdinaryLedgerObservationArmed) {
+        if (gDebugOrdinaryLedgerCalls == 0)
+            gDebugOrdinaryLedgerContext = theInputs.operation.context;
+        else if (gDebugOrdinaryLedgerContext != theInputs.operation.context)
+            gDebugOrdinaryLedgerMismatch = true;
+        ++gDebugOrdinaryLedgerCalls;
+    }
+#endif
     // Resolve and own every layer/mask resource before any
     // raster or publication allocation.
     std::vector<dl::bake::ResolvedLayer> aResolvedLayers;
@@ -1277,12 +1307,14 @@ bool PrepareOrdinaryDecalFace(
         dl::bake::ResolvedLayer aResolved;
         aResolved.intent = anIntent;
         if (!ResolveDecalImage(
-                theInputs.document, anIntent.image, aResolved.image))
+                theInputs.document, anIntent.image, aResolved.image,
+                theInputs.operation))
             return false;
         if (anIntent.mask.present) {
             dl::bake::ResolvedImage aMask;
             if (!ResolveDecalImage(
-                    theInputs.document, anIntent.mask.image, aMask))
+                    theInputs.document, anIntent.mask.image, aMask,
+                    theInputs.operation))
                 return false;
             aResolved.mask = std::move(aMask);
         }
@@ -1334,6 +1366,7 @@ bool PrepareOrdinaryDecalFace(
         aBaseTransform.wrapV = static_cast<core3d::face_image::Wrap>(
             aBinding.transform.wrapV);
     }
+    dl::bake::accounting::Ticket aBaseSourceTicket;
     std::optional<dl::bake::Raster> aBaseSource;
     if (aBaseTextureIndex >= 0) {
         if (std::size_t(aBaseTextureIndex)
@@ -1341,11 +1374,12 @@ bool PrepareOrdinaryDecalFace(
         core3d::painted_atlas_bake::kernel::Image aDecoded;
         if (!core3d::painted_atlas_bake::kernel::DecodeImage(
                 theInputs.textures[aBaseTextureIndex].encodedBytes,
-                aDecoded)) return false;
+                aDecoded, theInputs.operation)) return false;
         dl::bake::Raster aRaster;
         aRaster.width = aDecoded.width;
         aRaster.height = aDecoded.height;
         aRaster.rgba = std::move(aDecoded.rgba);
+        aBaseSourceTicket = std::move(aDecoded.rgbaTicket);
         if (!dl::bake::Valid(aRaster)) return false;
         aBaseSource = std::move(aRaster);
     }
@@ -1735,6 +1769,7 @@ bool PrepareOrdinaryDecalFace(
             anOccurrenceWriter.bytes, anOccurrenceProof))
         return false;
     dl::bake::Input anInput;
+    anInput.operationLedger = theInputs.operation;
     anInput.baseColor = std::move(aBase);
     anInput.layers = std::move(aResolvedLayers);
     anInput.canonicalLayers = theInputs.canonicalLayers;
@@ -4288,7 +4323,8 @@ public:
     View view() noexcept {
         return {this, &ReserveBridge, &ReleaseBridge,
             &CheckedProductBridge, &SealJobBridge, &ConsumeJobBridge,
-            &RecheckBridge, &CancelBridge};
+            &RecheckBridge, &CancelBridge, &EnterAllocationBridge,
+            &AllocationFailureBridge};
     }
 
     bool bindTopology(retained_edge_treatment::ReplayBudget& topology,
@@ -4429,6 +4465,21 @@ public:
             (void)fail(site, FailureReason::Cancelled, 0, 0);
     }
 
+    bool enterAllocation(FailureSite site) noexcept {
+        if (failed_) return false;
+        const std::size_t index = static_cast<std::size_t>(site);
+        if (index >= allocationEntries_.size())
+            return fail(site, FailureReason::Invariant, index,
+                allocationEntries_.size());
+        ++allocationEntries_[index];
+        return true;
+    }
+
+    void allocationFailure(FailureSite site) noexcept {
+        if (!failed_)
+            (void)fail(site, FailureReason::AllocationFailure, 0, 0);
+    }
+
     std::size_t live(StorageDimension dimension) const noexcept {
         const std::size_t index = storageIndex(dimension);
         return index < storage_.size() ? storage_[index].live : 0;
@@ -4443,6 +4494,11 @@ public:
     }
     std::size_t cumulativeWork() const noexcept { return cumulativeWork_; }
     FailureSite firstFailureSite() const noexcept { return firstFailure_.site; }
+    std::size_t allocationEntries(FailureSite site) const noexcept {
+        const std::size_t index = static_cast<std::size_t>(site);
+        return index < allocationEntries_.size()
+            ? allocationEntries_[index] : 0;
+    }
 
 private:
     enum class FailureReason : std::uint8_t {
@@ -4457,6 +4513,7 @@ private:
         JobLimit,
         Topology,
         Cancelled,
+        AllocationFailure,
         Invariant
     };
     struct StorageState final {
@@ -4525,18 +4582,164 @@ private:
     static void CancelBridge(void* owner, FailureSite site) noexcept {
         static_cast<OperationLedger*>(owner)->cancel(site);
     }
+    static bool EnterAllocationBridge(void* owner, FailureSite site) noexcept {
+        return static_cast<OperationLedger*>(owner)->enterAllocation(site);
+    }
+    static void AllocationFailureBridge(void* owner,
+                                        FailureSite site) noexcept {
+        static_cast<OperationLedger*>(owner)->allocationFailure(site);
+    }
 
     std::array<std::size_t, static_cast<std::size_t>(
         StorageDimension::Count)> storageLimits_{};
     std::array<StorageState, static_cast<std::size_t>(
         StorageDimension::Count)> storage_{};
     std::array<JobState, static_cast<std::size_t>(Job::Count)> jobs_{};
+    std::array<std::size_t, static_cast<std::size_t>(
+        FailureSite::Count)> allocationEntries_{};
     FailureRecord firstFailure_{};
     retained_edge_treatment::ReplayBudget* topology_ = nullptr;
     std::size_t cumulativeAdmittedWork_ = 0;
     std::size_t cumulativeWork_ = 0;
     bool failed_ = false;
 };
+
+} // namespace core3d::scene
+
+namespace core3d::decal_layer::bake::accounting {
+namespace {
+struct OwnedOperationLedger final {
+    std::atomic_size_t references{1};
+    core3d::scene::OperationLedger ledger;
+
+    explicit OwnedOperationLedger(
+        core3d::scene::OperationLedger&& admitted) noexcept
+        : ledger(std::move(admitted)) {}
+};
+
+void RetainOperation(void* raw) noexcept
+{
+    static_cast<OwnedOperationLedger*>(raw)->references.fetch_add(
+        1, std::memory_order_relaxed);
+}
+
+void ReleaseOperation(void* raw) noexcept
+{
+    auto* owner = static_cast<OwnedOperationLedger*>(raw);
+    if (owner->references.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        delete owner;
+}
+} // namespace
+
+Owner MakeOperationOwner() noexcept
+{
+    core3d::scene::OperationLedger admission;
+    if (!admission.reserve(StorageDimension::PrivateStorage,
+            sizeof(OwnedOperationLedger), Retention::Retained,
+            FailureSite::ContextControl)
+        || !admission.enterAllocation(FailureSite::ContextControl)) return {};
+    auto* concrete = new (std::nothrow) OwnedOperationLedger(
+        std::move(admission));
+    if (!concrete) return {};
+    Owner result;
+    result.lifetime = concrete;
+    result.view = concrete->ledger.view();
+    result.retain = &RetainOperation;
+    result.release = &ReleaseOperation;
+    return result;
+}
+} // namespace core3d::decal_layer::bake::accounting
+
+namespace core3d::scene {
+
+struct SceneCopyStorage final {
+    std::size_t numeric = 0;
+    std::size_t encoded = 0;
+    std::size_t privateBytes = 0;
+};
+
+bool DeepSceneStorageBytes(const SceneSnapshot& scene,
+                           SceneCopyStorage& total) noexcept
+{
+    total = {};
+    const auto add = [](std::size_t& destination, std::size_t bytes) {
+        if (bytes > std::numeric_limits<std::size_t>::max() - destination)
+            return false;
+        destination += bytes;
+        return true;
+    };
+    const auto string = [&](const std::string& value) {
+        if (value.capacity() == 0) return true;
+        const std::uintptr_t data = reinterpret_cast<std::uintptr_t>(
+            value.data());
+        const std::uintptr_t first = reinterpret_cast<std::uintptr_t>(&value);
+        if (data >= first && data < first + sizeof(value)) return true;
+        return value.capacity() < std::numeric_limits<std::size_t>::max()
+            && add(total.privateBytes, value.capacity() + 1);
+    };
+    const auto vector = [&](std::size_t& destination, std::size_t capacity,
+                            std::size_t element) {
+        return capacity == 0 || element <=
+                std::numeric_limits<std::size_t>::max() / capacity
+            ? add(destination, capacity * element) : false;
+    };
+    if (!string(scene.publicationSourceIdentifier)
+        || !vector(total.numeric, scene.meshes.capacity(), sizeof(MeshSnapshot))
+        || !vector(total.numeric, scene.instances.capacity(), sizeof(InstanceSnapshot))
+        || !vector(total.numeric, scene.materials.capacity(), sizeof(MaterialSnapshot))
+        || !vector(total.numeric, scene.textures.capacity(), sizeof(TextureResourceSnapshot))
+        || !vector(total.numeric, scene.pickTable.capacity(), sizeof(ElementIdentifier))
+        || !vector(total.numeric, scene.selection.selected.capacity(),
+            sizeof(ElementIdentifier))) return false;
+    for (const auto& mesh : scene.meshes) {
+        if (!string(mesh.definitionIdentifier)
+            || !string(mesh.paintedAtlasMasterDefinitionIdentifier)
+            || !string(mesh.paintedAtlasBakeProof)
+            || !vector(total.numeric, mesh.vertices.capacity(), sizeof(Vertex))
+            || !vector(total.numeric, mesh.indices.capacity(), sizeof(std::uint32_t))
+            || !vector(total.numeric, mesh.primitives.capacity(), sizeof(MeshPrimitive))
+            || !vector(total.numeric, mesh.cornerTangents.capacity(), sizeof(Float4)))
+            return false;
+        if (mesh.nativeC1Wire
+            && (!vector(total.privateBytes,
+                    mesh.nativeC1Wire->canonicalDefinitionBytes.capacity(), 1)
+                || !vector(total.privateBytes,
+                    mesh.nativeC1Wire->canonicalOwnerBytes.capacity(), 1)))
+            return false;
+    }
+    for (const auto& instance : scene.instances) {
+        if (!string(instance.entityIdentifier) || !string(instance.name)
+            || !string(instance.groupIdentifier) || !string(instance.groupName)
+            || !vector(total.numeric, instance.primitiveBindings.capacity(),
+                sizeof(PrimitiveBinding))
+            || !vector(total.numeric, instance.faceImageBindings.capacity(),
+                sizeof(FaceImageBindingSnapshot))
+            || !vector(total.numeric, instance.decalDerivedAppearances.capacity(),
+                sizeof(DecalDerivedAppearanceSnapshot))) return false;
+        if (instance.nativeWirePresentation
+            && !string(instance.nativeWirePresentation->identifier)) return false;
+        for (const auto& binding : instance.faceImageBindings)
+            if (!string(binding.bindingIdentifier)
+                || !string(binding.faceIdentifier)
+                || !string(binding.resourceIdentifier)) return false;
+        for (const auto& appearance : instance.decalDerivedAppearances)
+            if (!string(appearance.ownerDefinitionIdentifier)
+                || !string(appearance.bakeProof)) return false;
+    }
+    for (const auto& material : scene.materials)
+        if (!string(material.identifier)) return false;
+    for (const auto& texture : scene.textures)
+        if (!string(texture.identifier)
+            || !vector(total.encoded, texture.encodedBytes.capacity(), 1))
+            return false;
+    for (const auto& value : scene.pickTable)
+        if (!string(value.entityIdentifier)) return false;
+    for (const auto& value : scene.selection.selected)
+        if (!string(value.entityIdentifier)) return false;
+    if (scene.selection.hovered
+        && !string(scene.selection.hovered->entityIdentifier)) return false;
+    return true;
+}
 
 struct PrivateDecalCapture::Impl final {
     struct Owner final {
@@ -4565,6 +4768,9 @@ struct PrivateDecalCapture::Impl final {
     // Impl is the single operation context. The ledger is constructed first;
     // the existing ReplayBudget below remains its unchanged topology component.
     OperationLedger operationLedger;
+    decal_layer::bake::accounting::Ticket wholeSceneNumericTicket;
+    decal_layer::bake::accounting::Ticket wholeSceneEncodedTicket;
+    decal_layer::bake::accounting::Ticket wholeScenePrivateTicket;
     SceneSnapshot wholeCommittedScene;
     std::vector<Owner> owners;
     std::shared_ptr<retained_edge_treatment::ReplayBudget> budget;
@@ -4613,6 +4819,26 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
                 decal_layer::bake::accounting::FailureSite::ContextControl))
             return false;
         impl.privateDocument = privateDocument;
+        SceneCopyStorage wholeSceneBytes;
+        if (!DeepSceneStorageBytes(wholeCommittedScene, wholeSceneBytes)
+            || !impl.wholeSceneNumericTicket.acquire(impl.operationLedger.view(),
+                decal_layer::bake::accounting::StorageDimension::SnapshotNumeric,
+                wholeSceneBytes.numeric,
+                decal_layer::bake::accounting::Retention::Retained,
+                decal_layer::bake::accounting::FailureSite::ProtectedSceneCopy)
+            || !impl.wholeSceneEncodedTicket.acquire(impl.operationLedger.view(),
+                decal_layer::bake::accounting::StorageDimension::EncodedTexture,
+                wholeSceneBytes.encoded,
+                decal_layer::bake::accounting::Retention::Retained,
+                decal_layer::bake::accounting::FailureSite::ProtectedSceneCopy)
+            || !impl.wholeScenePrivateTicket.acquire(impl.operationLedger.view(),
+                decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                wholeSceneBytes.privateBytes,
+                decal_layer::bake::accounting::Retention::Retained,
+                decal_layer::bake::accounting::FailureSite::ProtectedSceneCopy)
+            || !impl.operationLedger.enterAllocation(
+                decal_layer::bake::accounting::FailureSite::ProtectedSceneCopy))
+            return false;
         impl.wholeCommittedScene = wholeCommittedScene;
         impl.selectedObjectsOnly = selectedObjectsOnly;
         impl.documentIdentifier = privateDocument->DocumentIdentifier();
@@ -5010,6 +5236,113 @@ std::array<std::size_t, 18> DebugExerciseE4OperationLedger() noexcept
         moved.peak(StorageDimension::PrivateStorage),
         scratch.peak(StorageDimension::PrivateStorage)});
     result[17] = scratch.cumulativeWork();
+    return result;
+}
+
+std::array<std::size_t, 16> DebugExerciseE4SourceDecodeAdmission(
+    const std::vector<std::uint8_t>& bytes) noexcept
+{
+    using FailureSite = decal_layer::bake::accounting::FailureSite;
+    constexpr std::size_t encodedLimit = 64U * 1024U * 1024U;
+    constexpr std::size_t privateLimit = 128U * 1024U * 1024U;
+    std::array<std::size_t, 16> result{};
+
+    OperationLedger denied(96U * 1024U * 1024U, encodedLimit, 0);
+    painted_atlas_bake::kernel::Image refused;
+    result[0] = !painted_atlas_bake::kernel::DecodeImage(
+        bytes, refused, denied.view());
+    result[1] = denied.firstFailureSite()
+        == FailureSite::ImageDecodedBacking;
+    result[2] = denied.allocationEntries(FailureSite::ImageCreate);
+    result[3] = denied.allocationEntries(FailureSite::ImageRGBA);
+
+    OperationLedger normal(96U * 1024U * 1024U, encodedLimit, privateLimit);
+    painted_atlas_bake::kernel::Image first;
+    painted_atlas_bake::kernel::Image second;
+    result[4] = painted_atlas_bake::kernel::DecodeImage(
+        bytes, first, normal.view());
+    result[5] = first.width;
+    result[6] = first.height;
+    result[7] = first.rgba.size();
+    result[8] = result[4]
+        && painted_atlas_bake::kernel::DecodeImage(
+            bytes, second, normal.view())
+        && first.width == second.width && first.height == second.height
+        && first.rgba == second.rgba;
+    result[9] = normal.allocationEntries(FailureSite::ImageCreate);
+    const std::size_t liveBeforeReplacement = normal.live(
+        decal_layer::bake::accounting::StorageDimension::PrivateStorage);
+    result[10] = painted_atlas_bake::kernel::DecodeImage(
+        bytes, first, normal.view());
+    result[11] = result[10]
+        && normal.live(decal_layer::bake::accounting::StorageDimension::PrivateStorage)
+            == liveBeforeReplacement;
+
+    painted_atlas_bake::kernel::Image standalone;
+    result[12] = painted_atlas_bake::kernel::DecodeImage(bytes, standalone)
+        && painted_atlas_bake::kernel::DecodeImage(bytes, standalone)
+        && !standalone.rgba.empty() && standalone.operationOwner.valid();
+
+    OperationLedger inputLedger(96U * 1024U * 1024U,
+        encodedLimit, privateLimit);
+    decal_layer::bake::Input input;
+    input.operationLedger = inputLedger.view();
+    decal_layer::bake::ResolvedLayer layer;
+    result[13] = layer.image.pixelTicket.acquire(inputLedger.view(),
+        decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+        16, decal_layer::bake::accounting::Retention::Retained,
+        FailureSite::ImageRGBA)
+        && inputLedger.enterAllocation(FailureSite::ImageRGBA);
+    if (result[13]) {
+        layer.image.pixels.width = 2;
+        layer.image.pixels.height = 2;
+        layer.image.pixels.rgba.resize(16);
+        input.layers.push_back(std::move(layer));
+        input = decal_layer::bake::Input{};
+        result[13] = inputLedger.live(
+                decal_layer::bake::accounting::StorageDimension::PrivateStorage) == 0
+            && inputLedger.recheck(FailureSite::ImageRGBA);
+    }
+
+    SceneSnapshot scene;
+    scene.publicationSourceIdentifier = "debug-scene-copy";
+    scene.meshes.reserve(1);
+    SceneCopyStorage sceneStorage;
+    OperationLedger sceneDenied(0, 0, 0);
+    decal_layer::bake::accounting::Ticket sceneTicket;
+    result[14] = DeepSceneStorageBytes(scene, sceneStorage)
+        && !sceneTicket.acquire(sceneDenied.view(),
+            decal_layer::bake::accounting::StorageDimension::SnapshotNumeric,
+            sceneStorage.numeric,
+            decal_layer::bake::accounting::Retention::Retained,
+            FailureSite::ProtectedSceneCopy)
+        && sceneDenied.allocationEntries(FailureSite::ProtectedSceneCopy) == 0
+        && scene.meshes.empty();
+
+    auto owned = decal_layer::bake::accounting::MakeOperationOwner();
+    result[15] = owned.valid()
+        && owned.view.Recheck(FailureSite::ContextControl);
+    return result;
+}
+
+void DebugBeginE4OrdinaryLedgerObservation() noexcept
+{
+    gDebugOrdinaryLedgerObservationArmed = true;
+    gDebugOrdinaryLedgerContext = nullptr;
+    gDebugOrdinaryLedgerCalls = 0;
+    gDebugOrdinaryLedgerMismatch = false;
+}
+
+std::array<std::size_t, 2> DebugTakeE4OrdinaryLedgerObservation() noexcept
+{
+    const std::array<std::size_t, 2> result{{
+        gDebugOrdinaryLedgerCalls,
+        gDebugOrdinaryLedgerCalls >= 2 && !gDebugOrdinaryLedgerMismatch ? 1U : 0U,
+    }};
+    gDebugOrdinaryLedgerObservationArmed = false;
+    gDebugOrdinaryLedgerContext = nullptr;
+    gDebugOrdinaryLedgerCalls = 0;
+    gDebugOrdinaryLedgerMismatch = false;
     return result;
 }
 
@@ -6970,6 +7303,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 transient.atlas = owner.transientAtlas;
                 transient.member = finalMember.savedMember;
                 transient.sources = owner.paintedSources;
+                transient.operation = decalCapture->impl_->operationLedger.view();
                 std::string atlasDiagnosis;
                 const asset_atlas::build::Settings atlasSettings{256, 4};
                 const auto atlasOutcome = painted_atlas_bake::owner::
@@ -7408,6 +7742,8 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 if (layers.empty()) return {};
                 constexpr std::uint32_t side = 64;
                 decal_layer::bake::Input input;
+                input.operationLedger =
+                    decalCapture->impl_->operationLedger.view();
                 input.baseColor.width = side;
                 input.baseColor.height = side;
                 input.baseColor.rgba.assign(
@@ -7426,12 +7762,14 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                     decal_layer::bake::ResolvedLayer resolved;
                     resolved.intent = *layer;
                     if (!ResolveDecalImage(decalCapture->impl_->privateDocument,
-                            layer->image, resolved.image)) return {};
+                            layer->image, resolved.image,
+                            input.operationLedger)) return {};
                     if (layer->mask.present) {
                         decal_layer::bake::ResolvedImage mask;
                         if (!ResolveDecalImage(
                                 decalCapture->impl_->privateDocument,
-                                layer->mask.image, mask)) return {};
+                                layer->mask.image, mask,
+                                input.operationLedger)) return {};
                         resolved.mask = std::move(mask);
                     }
                     resolved.completeOccludersProved = true;
@@ -8817,6 +9155,9 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             namespace dl = core3d::decal_layer;
             namespace dr = core3d::dependent_replay;
             using namespace decal_math;
+            auto anOrdinaryOperation =
+                dl::bake::accounting::MakeOperationOwner();
+            if (!anOrdinaryOperation.valid()) return {};
             std::vector<DecalWorldTriangle> anOccluders;
             Bounds3d anOccluderBounds;
             dl::Digest anOccluderProof{};
@@ -8951,6 +9292,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                         aPending.canonicalBytes,
                         aPending.source.sourceProof,
                         aMetersPerUnit,
+                        anOrdinaryOperation.view,
                         *aPending.budget,
                     };
                     if (!PrepareOrdinaryDecalFace(

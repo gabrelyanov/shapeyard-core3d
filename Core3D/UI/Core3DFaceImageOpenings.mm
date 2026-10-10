@@ -18,6 +18,7 @@
 #include "../OCCTKit/FaceImageResourceValidation.hxx"
 #include "../OCCTKit/DecalLayerPersistence.hxx"
 #include "../OCCTKit/AssetAtlasPersistence.hxx"
+#include "../OCCTKit/PaintedAtlasBake.hxx"
 #include "../OCCTKit/ReceiptRecord.hxx"
 #include "../OCCTKit/RetainedSolidAttribute.hxx"
 #include "Core3DViewer.h"
@@ -73,6 +74,14 @@
 #if DEBUG
 namespace core3d::scene {
 std::array<std::size_t, 18> DebugExerciseE4OperationLedger() noexcept;
+std::array<std::size_t, 16> DebugExerciseE4SourceDecodeAdmission(
+    const std::vector<std::uint8_t>& bytes) noexcept;
+void DebugBeginE4OrdinaryLedgerObservation() noexcept;
+std::array<std::size_t, 2> DebugTakeE4OrdinaryLedgerObservation() noexcept;
+}
+namespace core3d::painted_atlas_bake::owner {
+void DebugDenyCaptureSourcesAtOrdinal(std::size_t ordinal) noexcept;
+void DebugClearCaptureSourcesDenial() noexcept;
 }
 #endif
 
@@ -3325,6 +3334,79 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
     } @catch (...) { return @NO; }
 }
 
+- (NSNumber *)debugAddE4RetainedCapSecondReceiverForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128) return @NO;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        OwnerKey key; TDF_Label owner;
+        const char *raw = entityIdentifier.UTF8String;
+        if (wrapper.IsNull()
+            || !LabelForSelected(wrapper, raw ? raw : "", key, owner)) return @NO;
+        const Handle(TDocStd_Document)& document = wrapper->Document();
+        core3d::decal_layer::Definition definition;
+        std::vector<std::uint8_t> priorBytes;
+        if (document.IsNull() || document->HasOpenCommand()
+            || core3d::decal_layer::persistence::Read(
+                document, owner, definition, &priorBytes, nullptr)
+                != core3d::decal_layer::persistence::ReadState::Present
+            || definition.layers.size() != 1) return @NO;
+        Standard_Real unit = 0.0;
+        dr::FaceImageGeometricReceipt receipt;
+        const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(owner);
+        if (shape.IsNull()
+            || !XCAFDoc_DocumentTool::GetLengthUnit(document, unit)
+            || !FixtureCapturePlanarFace(shape, unit,
+                core3d::retained_face_selector::Axis::X,
+                core3d::retained_face_selector::Side::Max, receipt)) return @NO;
+        core3d::decal_layer::Digest selectorProof{};
+        if (!dr::FaceImageReceiptProof(receipt, selectorProof)) return @NO;
+        core3d::decal_layer::Layer second = definition.layers.front();
+        second.identifier = FixtureIndexedUUID(0x74, 9);
+        second.placement.face.receiver.face = FixtureIndexedUUID(0x73, 9);
+        second.placement.face.receiver.selectorProof = selectorProof;
+        second.placement.face.anchorMeters = {{0.04, 0.005}};
+        second.widthMeters = 0.04;
+        second.heightMeters = 0.005;
+        definition.layers.push_back(std::move(second));
+        std::vector<std::uint8_t> bytes;
+        std::string hex, digest;
+        if (!core3d::decal_layer::BindLayerProof(definition)
+            || !core3d::decal_layer::Encode(definition, bytes)
+            || bytes == priorBytes
+            || !core3d::decal_layer::persistence::EncodeHex(bytes, hex)
+            || !core3d::decal_layer::persistence::DigestHex(bytes, digest))
+            return @NO;
+        document->NewCommand();
+        const TDF_Label record = owner.FindChild(
+            core3d::decal_layer::persistence::RecordTag, Standard_True);
+        if (!core3d::decal_layer::persistence::WriteChunks(
+                record, hex, Standard_Integer(definition.layers.size()), digest)
+            || !document->CommitCommand()) {
+            document->AbortCommand(); return @NO;
+        }
+        return @YES;
+    } @catch (...) { return @NO; }
+}
+
+- (void)debugBeginE4OrdinaryLedgerObservation {
+    core3d::scene::DebugBeginE4OrdinaryLedgerObservation();
+}
+
+- (NSDictionary<NSString *,id> *)debugTakeE4OrdinaryLedgerObservation {
+    const auto result = core3d::scene::DebugTakeE4OrdinaryLedgerObservation();
+    return @{
+        @"adapterCalls": @(result[0]),
+        @"oneContext": @(result[1] != 0),
+    };
+}
+
 - (NSDictionary<NSString *,id> *)debugE4RetainedCapObservationForEntityIdentifier:
     (NSString *)entityIdentifier {
     if (!NSThread.isMainThread || entityIdentifier.length == 0
@@ -3430,6 +3512,126 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         @"peakBytes": @(probe[16]),
         @"cumulativeWork": @(probe[17]),
     };
+}
+
+- (NSDictionary<NSString *,id> *)debugE4SourceDecodeAdmissionForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128) return nil;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        OwnerKey key; TDF_Label owner;
+        const char *raw = entityIdentifier.UTF8String;
+        if (wrapper.IsNull()
+            || !LabelForSelected(wrapper, raw ? raw : "", key, owner)) return nil;
+        core3d::decal_layer::Definition definition;
+        if (core3d::decal_layer::persistence::Read(
+                wrapper->Document(), owner, definition, nullptr, nullptr)
+                != core3d::decal_layer::persistence::ReadState::Present
+            || definition.layers.empty()) return nil;
+        fi::ResourceEnvelope envelope;
+        if (!fi::owner::ReadResource(wrapper->Document(),
+                definition.layers.front().image.resource, envelope)) return nil;
+        const auto probe = core3d::scene::DebugExerciseE4SourceDecodeAdmission(
+            envelope.workingBytes);
+        core3d::painted_atlas_bake::kernel::Image decoded;
+        fi::Digest pixelDigest{};
+        if (!core3d::painted_atlas_bake::kernel::DecodeImage(
+                envelope.workingBytes, decoded)
+            || !fi::HashFaceImageBytes(decoded.rgba, pixelDigest)) return nil;
+        return @{
+            @"fixture": @"E4P2b1LedgerCap",
+            @"denied": @(probe[0] != 0),
+            @"firstFailure": probe[1] != 0
+                ? @"ImageDecodedBacking" : @"unexpected",
+            @"imageCreateEntriesOnDenial": @(probe[2]),
+            @"rgbaEntriesOnDenial": @(probe[3]),
+            @"normalDecoded": @(probe[4] != 0),
+            @"pixelWidth": @(probe[5]),
+            @"pixelHeight": @(probe[6]),
+            @"rgbaByteCount": @(probe[7]),
+            @"normalPixelsIdentical": @(probe[8] != 0),
+            @"normalImageCreateEntries": @(probe[9]),
+            @"populatedImageReplacementSafe": @(probe[10] != 0 && probe[11] != 0),
+            @"standaloneOwnerReplacementSafe": @(probe[12] != 0),
+            @"populatedInputReplacementSafe": @(probe[13] != 0),
+            @"initialSceneCopyDeniedBeforeAssignment": @(probe[14] != 0),
+            @"ownerControlStorageAdmitted": @(probe[15] != 0),
+            @"productPixelSHA256": DigestText(pixelDigest),
+        };
+    } @catch (...) { return nil; }
+}
+
+- (NSDictionary<NSString *,id> *)debugE4DecoderOwnerOutcomesForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128) return nil;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        OwnerKey key; TDF_Label owner;
+        const char *raw = entityIdentifier.UTF8String;
+        if (wrapper.IsNull()
+            || !LabelForSelected(wrapper, raw ? raw : "", key, owner)) return nil;
+        const Handle(TDocStd_Document)& document = wrapper->Document();
+        std::vector<core3d::asset_atlas::persistence::Record> atlases;
+        if (document.IsNull() || document->HasOpenCommand()
+            || !core3d::asset_atlas::persistence::ReadAll(document, atlases))
+            return nil;
+        const core3d::asset_atlas::Definition *atlas = nullptr;
+        for (const auto& record : atlases) {
+            if (!record.value) return nil;
+            for (const auto& member : record.value->definition.members)
+                if (member.owner == key) {
+                    if (atlas) return nil;
+                    atlas = &record.value->definition;
+                }
+        }
+        if (!atlas) return nil;
+        const auto atlasKey = atlas->key;
+        const Standard_Integer undosBefore = document->GetAvailableUndos();
+
+        core3d::painted_atlas_bake::owner::DebugDenyCaptureSourcesAtOrdinal(1);
+        const auto currentness =
+            core3d::painted_atlas_bake::owner::Currentness(
+                document, atlasKey, nullptr);
+        core3d::painted_atlas_bake::owner::DebugClearCaptureSourcesDenial();
+
+        document->NewCommand();
+        core3d::painted_atlas_bake::owner::Staging staging;
+        core3d::painted_atlas_bake::owner::DebugDenyCaptureSourcesAtOrdinal(2);
+        const auto prepared = core3d::painted_atlas_bake::owner::Prepare(
+            staging, document, atlasKey);
+        const auto committed = prepared
+                == core3d::painted_atlas_bake::owner::Outcome::Prepared
+            ? core3d::painted_atlas_bake::owner::Commit(staging, document)
+            : prepared;
+        core3d::painted_atlas_bake::owner::DebugClearCaptureSourcesDenial();
+        core3d::painted_atlas_bake::owner::Cancel(staging);
+        document->AbortCommand();
+        return @{
+            @"fixture": @"E4P2b1OrdinaryAtlas",
+            @"currentnessOverBudget": @(currentness
+                == core3d::painted_atlas_bake::owner::Outcome::OverBudget),
+            @"prepareReachedCommit": @(prepared
+                == core3d::painted_atlas_bake::owner::Outcome::Prepared),
+            @"commitOverBudget": @(committed
+                == core3d::painted_atlas_bake::owner::Outcome::OverBudget),
+            @"historyUnchanged": @(document->GetAvailableUndos() == undosBefore),
+        };
+    } @catch (...) {
+        core3d::painted_atlas_bake::owner::DebugClearCaptureSourcesDenial();
+        return nil;
+    }
 }
 
 + (NSData *)debugFaceImageFixtureAssetData:(double)metersPerUnit {

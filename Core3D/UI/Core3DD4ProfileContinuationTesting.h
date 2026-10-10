@@ -20,6 +20,10 @@ void *Core3DDebugD4ProfileCreateFault(Core3DViewController *controller,
                                      int32_t fault);
 void *Core3DDebugD4ProfileCreationStop(Core3DViewController *controller,
                                       NSString *host, NSString *source);
+// NativePhysicalWorkingFrame seam observations. Scenarios 0...7 correspond
+// one-for-one with AuthoredBooleanNativeTests' eight working-frame selectors.
+void *Core3DDebugPhysicalWorkingFrameProbe(int32_t scenario);
+void *Core3DDebugPhysicalWorkingFrameEmptyCentimetreDocumentSeed(void);
 #ifdef __cplusplus
 }
 #endif
