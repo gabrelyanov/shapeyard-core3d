@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RetainedEdgeTreatmentSnapshot.hxx"
+#include "NativePhysicalWorkingFrame.hxx"
 #include "RetainedTopologyBudget.hxx"
 #include "RectangularLoftPersistence.hxx"
 #include "RetainedFaceSelector.hxx"
@@ -33,16 +34,64 @@
 #include <ostream>
 #include <streambuf>
 #include <utility>
+#if DEBUG
+#include <BRepBndLib.hxx>
+#include <Bnd_Box.hxx>
+#include <mutex>
+#endif
 
 namespace core3d::retained_edge_treatment {
 namespace tb = core3d::retained_topology_budget;
+namespace wf = core3d::native_physical_working_frame;
 inline bool ResolveAnchors(const TopoDS_Shape& source, const std::vector<Anchor>& anchors,
     double metersPerLocalUnit, std::vector<TopoDS_Edge>& edges,
     ReplayBudget& budget, Refusal& refusal) noexcept;
 inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoDS_Shape& output,
     std::vector<StepProof>& proofs, ReplayBudget& budget, Refusal& refusal) noexcept;
+inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoDS_Shape& output,
+    std::vector<StepProof>& proofs, ReplayBudget& budget, Refusal& refusal,
+    const std::atomic_bool& stop) noexcept;
 inline bool EquivalentReplayGeometry(const TopoDS_Shape& actual, const TopoDS_Shape& expectation,
     ReplayBudget& budget, Refusal& refusal) noexcept;
+
+#if DEBUG
+namespace working_scale_debug {
+struct Observation final {
+    double metersPerLocalUnit = 0;
+    double amountMM = 0;
+    double extentXMM = 0;
+    double extentYMM = 0;
+    double extentZMM = 0;
+    double inputVolumeMM3 = 0;
+    double outputVolumeMM3 = 0;
+    bool chamfer = false;
+    bool valid = false;
+    bool accepted = false;
+    bool transformed = false;
+};
+inline std::mutex mutex;
+inline std::vector<Observation> observations;
+inline void Clear() { std::lock_guard<std::mutex> lock(mutex); observations.clear(); }
+inline std::vector<Observation> Take() {
+    std::lock_guard<std::mutex> lock(mutex);
+    auto result = observations; observations.clear(); return result;
+}
+inline void Record(const TopoDS_Shape& working, double unit, double amount,
+    bool chamfer, double before, double after, bool valid, bool accepted,
+    bool transformed) noexcept {
+    try {
+        Bnd_Box box; BRepBndLib::AddOptimal(working, box, Standard_False, Standard_False);
+        if (box.IsVoid() || box.IsOpen()) return;
+        double x0 = 0, y0 = 0, z0 = 0, x1 = 0, y1 = 0, z1 = 0;
+        box.Get(x0, y0, z0, x1, y1, z1);
+        Observation value{unit, amount, x1 - x0, y1 - y0, z1 - z0,
+            before, after, chamfer, valid, accepted, transformed};
+        std::lock_guard<std::mutex> lock(mutex);
+        if (observations.size() < 64) observations.push_back(value);
+    } catch (...) {}
+}
+} // namespace working_scale_debug
+#endif
 
 // CLOUD-8242 Mirror: the admitted polygon extrusion must be constructed in
 // its signed frame. Applying a negative transform to already-built planar
@@ -551,187 +600,253 @@ inline bool ResolvePlanarLineSubset(const TopoDS_Shape& source, const Step& step
     }
 }
 
+namespace detail {
+// A logical retained-treatment suffix owns one private physical working frame.
+// Callers may observe or rebind the actual pre-step shape, but must build every
+// step through BuildWorkingStage and publish through FinishWorkingStages. This
+// keeps public Replay as a document-to-document boundary without inserting an
+// inverse/detach/re-entry boundary between suffix steps.
+struct WorkingStageSequence final {
+    wf::Frame frame;
+    TopoDS_Shape current;
+};
+
+inline bool BeginWorkingStages(const TopoDS_Shape& base,
+    const Definition& definition, ReplayBudget& budget, Refusal& refusal,
+    const std::atomic_bool& stop, WorkingStageSequence& sequence) noexcept {
+    sequence.current.Nullify();
+    if (stop.load()) { refusal = Refusal::Cancelled; return false; }
+    if (base.IsNull() || !valid(definition, refusal)) return false;
+    TopoDS_Shape detached;
+    if (!DetachReplayGeometry(base, budget, detached, refusal)) return false;
+    const auto entry = wf::Frame::Enter(detached,
+        definition.base.metersPerLocalUnit, {}, budget, stop, sequence.frame);
+    if (entry != wf::Status::Ready) {
+        refusal = entry == wf::Status::Cancelled ? Refusal::Cancelled
+            : entry == wf::Status::BudgetDenied ? Refusal::Budget
+            : Refusal::BuildFailed;
+        return false;
+    }
+    sequence.current = sequence.frame.workingShape();
+    refusal = Refusal::None;
+    return true;
+}
+
+inline bool BuildWorkingStage(const Definition& definition, const Step& step,
+    WorkingStageSequence& sequence, StepProof& proof, ReplayBudget& budget,
+    Refusal& refusal, const std::atomic_bool& stop) noexcept {
+    try {
+    proof = {};
+    TopoDS_Shape& current = sequence.current;
+    if (stop.load()) { refusal = Refusal::Cancelled; return false; }
+    PlanarLineSubset planarSubset;
+    bool usedPlanarSubset = false;
+    if (step.selector) {
+        retained_face_selector::Resolution resolution;
+        const auto selectorRefusal = retained_face_selector::Resolve(current,
+            step.selector->intent, 0.001, budget, stop, resolution);
+        if (selectorRefusal != retained_face_selector::Refusal::None
+            || !resolution.proof) {
+            const bool mixedPlanarBoundary =
+                (selectorRefusal == retained_face_selector::Refusal::IncompleteBoundary
+                    || selectorRefusal == retained_face_selector::Refusal::ExactCount)
+                && std::holds_alternative<retained_face_selector::PlanarFaceBoundary>(
+                    step.selector->intent);
+            if (!mixedPlanarBoundary || !ResolvePlanarLineSubset(current,
+                    step, 0.001, budget, true, planarSubset, refusal)) return false;
+            usedPlanarSubset = true;
+        } else {
+            const auto receiptRefusal = retained_face_selector::VerifyReceipt(
+                *resolution.proof, step, 0.001, budget);
+            if (receiptRefusal != retained_face_selector::Refusal::None) {
+                refusal = retained_face_selector::MapToB1(receiptRefusal);
+                return false;
+            }
+        }
+    }
+    std::vector<TopoDS_Edge> edges;
+    if (!ResolveAnchors(current, step.anchors, 0.001,
+            edges, budget, refusal)) return false;
+    if (usedPlanarSubset) {
+        std::set<int> consumed;
+        for (std::size_t anchorIndex = 0; anchorIndex < edges.size();
+            ++anchorIndex) {
+            int found = -1;
+            for (std::size_t useIndex = 0;
+                useIndex < planarSubset.uses.size(); ++useIndex) {
+                if (!budget.visit(1, tb::Site::C08ReceiptVerify)) {
+                    refusal = Refusal::Budget; return false;
+                }
+                if (edges[anchorIndex].IsSame(planarSubset.uses[useIndex].edge)) {
+                    if (found >= 0) {
+                        refusal = Refusal::AnchorAmbiguous; return false;
+                    }
+                    found = int(useIndex);
+                }
+            }
+            if (found < 0 || consumed.count(found)) {
+                refusal = found < 0 ? Refusal::AnchorMissing
+                    : Refusal::AnchorAmbiguous;
+                return false;
+            }
+            if (step.selector->entries[anchorIndex].direction
+                != planarSubset.uses[std::size_t(found)].direction) {
+                refusal = Refusal::ReplayMismatch; return false;
+            }
+            consumed.insert(found);
+        }
+        if (consumed.size() != planarSubset.uses.size()) {
+            refusal = Refusal::ReplayMismatch; return false;
+        }
+    }
+    if (!budget.beginStage(tb::Site::C16KernelBuild)
+        || tb::ChargeTraversal(current, budget, stop, tb::Site::C16KernelBuild)
+            != tb::WalkStatus::Completed) {
+        refusal = stop.load() ? Refusal::Cancelled : Refusal::Budget; return false;
+    }
+    GProp_GProps before;
+    BRepGProp::VolumeProperties(current, before);
+    TopoDS_Shape candidate;
+    double localAmount = 0;
+    if (sequence.frame.preservePhysicalMillimetres(step.amountMM, localAmount)
+            != wf::Status::Ready) {
+        refusal = Refusal::BuildFailed; return false;
+    }
+    if (stop.load()) { refusal = Refusal::Cancelled; return false; }
+    if (step.kind == Kind::Chamfer) {
+        BRepFilletAPI_MakeChamfer build(current);
+        for (const auto& edge : edges) {
+            if (!budget.visit(1, tb::Site::C16KernelBuild)) {
+                refusal = Refusal::Budget; return false;
+            }
+            build.Add(localAmount, edge);
+        }
+        build.Build();
+        if (stop.load()) { refusal = Refusal::Cancelled; return false; }
+        if (!build.IsDone()) { refusal = Refusal::BuildFailed; return false; }
+        candidate = build.Shape();
+    } else {
+        BRepFilletAPI_MakeFillet build(current);
+        for (const auto& edge : edges) {
+            if (!budget.visit(1, tb::Site::C16KernelBuild)) {
+                refusal = Refusal::Budget; return false;
+            }
+            build.Add(localAmount, edge);
+        }
+        build.Build();
+        if (stop.load()) { refusal = Refusal::Cancelled; return false; }
+        if (!build.IsDone()) { refusal = Refusal::BuildFailed; return false; }
+        candidate = build.Shape();
+    }
+#if DEBUG
+    const int rawKernelRootType = candidate.IsNull() ? -1 : int(candidate.ShapeType());
+    std::fprintf(stderr, "B1B2_REPLAY phase=kernel-root-raw type=%d\n",
+        rawKernelRootType);
+#endif
+    if (candidate.IsNull()) { refusal = Refusal::BuildFailed; return false; }
+    if (candidate.ShapeType() == TopAbs_COMPOUND) {
+        TopoDS_Iterator child(candidate);
+        if (!child.More()) { refusal = Refusal::BuildFailed; return false; }
+        if (!budget.visit(1, tb::Site::C16KernelBuild)) {
+            refusal = Refusal::Budget; return false;
+        }
+        if (child.Value().ShapeType() != TopAbs_SOLID) {
+            refusal = Refusal::BuildFailed; return false;
+        }
+        const TopoDS_Shape only = child.Value(); child.Next();
+        if (child.More()) {
+            if (!budget.visit(1, tb::Site::C16KernelBuild)) {
+                refusal = Refusal::Budget; return false;
+            }
+            refusal = Refusal::BuildFailed; return false;
+        }
+        candidate = only;
+    }
+    if (candidate.ShapeType() != TopAbs_SOLID
+        || candidate.Orientation() != TopAbs_FORWARD) {
+        refusal = Refusal::BuildFailed; return false;
+    }
+    tb::Census candidateCensus;
+    if (tb::CensusTopology(candidate, budget, stop, candidateCensus,
+            tb::Site::C16KernelBuild, false) != tb::WalkStatus::Completed
+        || !tb::ReserveTraversal(candidateCensus, budget, tb::Site::C16KernelBuild)
+        || !tb::ReserveTraversal(candidateCensus, budget, tb::Site::C16KernelBuild)) {
+        refusal = stop.load() ? Refusal::Cancelled : Refusal::Budget; return false;
+    }
+#if DEBUG
+    std::fprintf(stderr, "B1B2_REPLAY phase=kernel-root-accepted raw=%d type=%d\n",
+        rawKernelRootType, int(candidate.ShapeType()));
+#endif
+    GProp_GProps after;
+    BRepGProp::VolumeProperties(candidate, after);
+    const double removedMM3 = before.Mass() - after.Mass();
+    const bool candidateValid = BRepCheck_Analyzer(candidate).IsValid();
+#if DEBUG
+    working_scale_debug::Record(current, definition.base.metersPerLocalUnit,
+        step.amountMM, step.kind == Kind::Chamfer, before.Mass(), after.Mass(),
+        candidateValid,
+        candidateValid && std::isfinite(removedMM3) && removedMM3 > 1e-5,
+        sequence.frame.usedTransform());
+#endif
+    if (!candidateValid || !std::isfinite(removedMM3) || removedMM3 <= 1e-5) {
+        refusal = Refusal::NonRemoving; return false;
+    }
+    proof.feature = step.feature;
+    proof.inputVolumeMM3 = before.Mass();
+    proof.outputVolumeMM3 = after.Mass();
+    for (const auto& anchor : step.anchors) proof.consumedKeys.push_back(anchor.key);
+    current = candidate;
+    refusal = Refusal::None;
+    return true;
+    } catch (...) {
+        proof = {};
+        refusal = Refusal::BuildFailed;
+        return false;
+    }
+}
+
+inline bool FinishWorkingStages(WorkingStageSequence& sequence,
+    ReplayBudget& budget, Refusal& refusal, const std::atomic_bool& stop,
+    TopoDS_Shape& output) noexcept {
+    const auto exit = sequence.frame.Finish(
+        sequence.current, budget, stop, output);
+    if (exit == wf::Status::Finished) { refusal = Refusal::None; return true; }
+    output.Nullify();
+    refusal = exit == wf::Status::Cancelled ? Refusal::Cancelled
+        : exit == wf::Status::BudgetDenied ? Refusal::Budget
+        : Refusal::BuildFailed;
+    return false;
+}
+} // namespace detail
+
 inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoDS_Shape& output,
-    std::vector<StepProof>& proofs, ReplayBudget& budget, Refusal& refusal) noexcept {
+    std::vector<StepProof>& proofs, ReplayBudget& budget, Refusal& refusal,
+    const std::atomic_bool& stop) noexcept {
     output.Nullify(); proofs.clear();
     try {
-        if (base.IsNull() || !detail::valid(definition, refusal)) return false;
-        // D253: every replay — detached build, synchronous verification from a
-        // stored base and source-rebind — runs on genuinely private topology
-        // produced by the shared verified detachment helper, so selector
-        // resolution, anchor resolution, the kernel and validity checking
-        // never write mutable TShape bookkeeping into live/stored shapes.
-        TopoDS_Shape current;
-        if (!DetachReplayGeometry(base, budget, current, refusal)) return false;
-        const std::atomic_bool neverCancelled{false};
+        detail::WorkingStageSequence sequence;
+        if (!detail::BeginWorkingStages(base, definition, budget, refusal,
+                stop, sequence)) return false;
         // C15: proofs accumulate into a private temporary and are published
         // only on whole-operation success; every refusal path below leaves
         // output null and proofs cleared.
         std::vector<StepProof> pending;
         for (const Step& step : definition.steps) {
-            PlanarLineSubset planarSubset;
-            bool usedPlanarSubset = false;
-            if (step.selector) {
-                retained_face_selector::Resolution resolution;
-                const auto selectorRefusal = retained_face_selector::Resolve(current, step.selector->intent,
-                    definition.base.metersPerLocalUnit, budget, neverCancelled, resolution);
-                if (selectorRefusal != retained_face_selector::Refusal::None || !resolution.proof) {
-                    const bool mixedPlanarBoundary =
-                        (selectorRefusal == retained_face_selector::Refusal::IncompleteBoundary
-                            || selectorRefusal == retained_face_selector::Refusal::ExactCount)
-                        && std::holds_alternative<
-                            retained_face_selector::PlanarFaceBoundary>(
-                                step.selector->intent);
-                    if (!mixedPlanarBoundary || !ResolvePlanarLineSubset(current,
-                            step, definition.base.metersPerLocalUnit, budget, true,
-                            planarSubset, refusal)) return false;
-                    usedPlanarSubset = true;
-                } else {
-                    const auto receiptRefusal = retained_face_selector::VerifyReceipt(
-                        *resolution.proof, step, definition.base.metersPerLocalUnit,
-                        budget);
-                    if (receiptRefusal != retained_face_selector::Refusal::None) {
-                        refusal = retained_face_selector::MapToB1(receiptRefusal);
-                        return false;
-                    }
-                }
-            }
-            std::vector<TopoDS_Edge> edges;
-            if (!ResolveAnchors(current, step.anchors, definition.base.metersPerLocalUnit,
-                edges, budget, refusal)) return false;
-            if (usedPlanarSubset) {
-                std::set<int> consumed;
-                for (std::size_t anchorIndex = 0; anchorIndex < edges.size();
-                    ++anchorIndex) {
-                    int found = -1;
-                    for (std::size_t useIndex = 0;
-                        useIndex < planarSubset.uses.size(); ++useIndex) {
-                        if (!budget.visit(1, tb::Site::C08ReceiptVerify)) {
-                            refusal = Refusal::Budget; return false;
-                        }
-                        if (edges[anchorIndex].IsSame(
-                                planarSubset.uses[useIndex].edge)) {
-                            if (found >= 0) {
-                                refusal = Refusal::AnchorAmbiguous; return false;
-                            }
-                            found = int(useIndex);
-                        }
-                    }
-                    if (found < 0 || consumed.count(found)) {
-                        refusal = found < 0 ? Refusal::AnchorMissing
-                            : Refusal::AnchorAmbiguous;
-                        return false;
-                    }
-                    if (step.selector->entries[anchorIndex].direction
-                        != planarSubset.uses[std::size_t(found)].direction) {
-                        refusal = Refusal::ReplayMismatch; return false;
-                    }
-                    consumed.insert(found);
-                }
-                if (consumed.size() != planarSubset.uses.size()) {
-                    refusal = Refusal::ReplayMismatch; return false;
-                }
-            }
-            // C16: the kernel build stage is debited before the build, and the
-            // relevant input pass (volume measurement plus kernel traversal)
-            // is charged up front.
-            if (!budget.beginStage(tb::Site::C16KernelBuild)
-                || tb::ChargeTraversal(current, budget, neverCancelled, tb::Site::C16KernelBuild)
-                    != tb::WalkStatus::Completed) {
-                refusal = Refusal::Budget; return false;
-            }
-            GProp_GProps before; BRepGProp::VolumeProperties(current, before); TopoDS_Shape candidate;
-            const double localAmount = step.amountMM * 0.001 / definition.base.metersPerLocalUnit;
-            if (step.kind == Kind::Chamfer) {
-                BRepFilletAPI_MakeChamfer build(current);
-                for (const auto& edge : edges) {
-                    if (!budget.visit(1, tb::Site::C16KernelBuild)) {
-                        refusal = Refusal::Budget; return false;
-                    }
-                    build.Add(localAmount, edge);
-                }
-                build.Build(); if (!build.IsDone()) { refusal = Refusal::BuildFailed; return false; }
-                candidate = build.Shape();
-            } else {
-                BRepFilletAPI_MakeFillet build(current);
-                for (const auto& edge : edges) {
-                    if (!budget.visit(1, tb::Site::C16KernelBuild)) {
-                        refusal = Refusal::Budget; return false;
-                    }
-                    build.Add(localAmount, edge);
-                }
-                build.Build(); if (!build.IsDone()) { refusal = Refusal::BuildFailed; return false; }
-                candidate = build.Shape();
-            }
-#if DEBUG
-            const int rawKernelRootType = candidate.IsNull() ? -1 : int(candidate.ShapeType());
-            std::fprintf(stderr, "B1B2_REPLAY phase=kernel-root-raw type=%d\n", rawKernelRootType);
-#endif
-            // Normalize every successful kernel result to a single forward
-            // valid solid before volume measurement, proof values or
-            // assignment to current: a direct solid, or a compound with
-            // exactly one immediate solid child (TopoDS_Iterator carries the
-            // cumulative location/orientation; the child's geometry and
-            // location are preserved, never rebuilt or healed). Empty,
-            // multi-child, nested-container, shell, compsolid and other roots
-            // are refused with the existing build failure.
-            if (candidate.IsNull()) { refusal = Refusal::BuildFailed; return false; }
-            if (candidate.ShapeType() == TopAbs_COMPOUND) {
-                // C16: compound-child inspection is charged per child.
-                TopoDS_Iterator child(candidate);
-                if (!child.More()) { refusal = Refusal::BuildFailed; return false; }
-                if (!budget.visit(1, tb::Site::C16KernelBuild)) {
-                    refusal = Refusal::Budget; return false;
-                }
-                if (child.Value().ShapeType() != TopAbs_SOLID) {
-                    refusal = Refusal::BuildFailed; return false;
-                }
-                const TopoDS_Shape only = child.Value(); child.Next();
-                if (child.More()) {
-                    if (!budget.visit(1, tb::Site::C16KernelBuild)) {
-                        refusal = Refusal::Budget; return false;
-                    }
-                    refusal = Refusal::BuildFailed; return false;
-                }
-                candidate = only;
-            }
-            if (candidate.ShapeType() != TopAbs_SOLID || candidate.Orientation() != TopAbs_FORWARD) {
-                refusal = Refusal::BuildFailed; return false;
-            }
-            // C16: the produced shape is bounded and charged immediately,
-            // before its volume measurement and validity analysis; both later
-            // passes are reserved from the measured census.
-            tb::Census candidateCensus;
-            if (tb::CensusTopology(candidate, budget, neverCancelled, candidateCensus,
-                    tb::Site::C16KernelBuild, false) != tb::WalkStatus::Completed
-                || !tb::ReserveTraversal(candidateCensus, budget, tb::Site::C16KernelBuild)
-                || !tb::ReserveTraversal(candidateCensus, budget, tb::Site::C16KernelBuild)) {
-                refusal = Refusal::Budget; return false;
-            }
-#if DEBUG
-            std::fprintf(stderr, "B1B2_REPLAY phase=kernel-root-accepted raw=%d type=%d\n",
-                rawKernelRootType, int(candidate.ShapeType()));
-#endif
-            GProp_GProps after; BRepGProp::VolumeProperties(candidate, after);
-            // Native volumes are local-unit-cubed; the check and the proof
-            // fields below are physical cubic millimetres. For a millimetre
-            // document the factor is 1, so the enforced physical threshold is
-            // unchanged; no tolerance is loosened for any other unit.
-            const double mmPerLocalUnit = definition.base.metersPerLocalUnit * 1000.0;
-            const double mm3PerLocalUnitCubed = mmPerLocalUnit * mmPerLocalUnit * mmPerLocalUnit;
-            const double removedMM3 = (before.Mass() - after.Mass()) * mm3PerLocalUnitCubed;
-            if (!BRepCheck_Analyzer(candidate).IsValid() || !std::isfinite(removedMM3)
-                || removedMM3 <= 1e-5) {
-                refusal = Refusal::NonRemoving; return false;
-            }
-            StepProof proof; proof.feature = step.feature;
-            proof.inputVolumeMM3 = before.Mass() * mm3PerLocalUnitCubed;
-            proof.outputVolumeMM3 = after.Mass() * mm3PerLocalUnitCubed;
-            for (const auto& anchor : step.anchors) proof.consumedKeys.push_back(anchor.key);
-            pending.push_back(std::move(proof)); current = candidate;
+            StepProof proof;
+            if (!detail::BuildWorkingStage(definition, step, sequence, proof,
+                    budget, refusal, stop)) return false;
+            pending.push_back(std::move(proof));
         }
-        output = current; proofs = std::move(pending); refusal = Refusal::None; return true;
+        if (!detail::FinishWorkingStages(sequence, budget, refusal, stop, output))
+            return false;
+        proofs = std::move(pending); refusal = Refusal::None; return true;
     } catch (...) { output.Nullify(); proofs.clear(); refusal = Refusal::BuildFailed; return false; }
+}
+
+inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoDS_Shape& output,
+    std::vector<StepProof>& proofs, ReplayBudget& budget, Refusal& refusal) noexcept {
+    const std::atomic_bool neverCancelled{false};
+    return Replay(base, definition, output, proofs, budget, refusal, neverCancelled);
 }
 
 // D253 bounded source-edit rebind. A source rebuild legitimately moves native
@@ -991,6 +1106,58 @@ inline bool MeasureStageRawEdgeWitnesses(const TopoDS_Shape& stage,
     } catch (...) { output.clear(); return false; }
 }
 
+inline bool RebindRawStep(const TopoDS_Shape& stage,
+    const std::vector<SelectorUseRole>& oldRoles, ReplayBudget& budget,
+    Step& step, Refusal& refusal, bool requireSameWitnessPoint = false) noexcept {
+    try {
+        if (oldRoles.size() != step.anchors.size()) {
+            refusal = Refusal::ReplayMismatch; return false;
+        }
+        std::vector<SelectorUseRole> measured;
+        if (!MeasureStageRawEdgeWitnesses(stage, 0.001, budget,
+                tb::Site::C18SourceRebindNew, measured)) {
+            refusal = budget.exhausted ? Refusal::Budget : Refusal::UnsupportedEdge;
+            return false;
+        }
+        std::set<int> consumed;
+        for (std::size_t anchorIndex = 0; anchorIndex < step.anchors.size();
+            ++anchorIndex) {
+            const SelectorUseRole& oldRole = oldRoles[anchorIndex];
+            if (oldRole.anchorKey != step.anchors[anchorIndex].key) {
+                refusal = Refusal::ReplayMismatch; return false;
+            }
+            int found = -1;
+            for (std::size_t useIndex = 0; useIndex < measured.size(); ++useIndex) {
+                if (!budget.visit(1, tb::Site::C18SourceRebindNew)) {
+                    refusal = Refusal::Budget; return false;
+                }
+                if (consumed.count(int(useIndex))) continue;
+                if (SameRawRoleGeometry(measured[useIndex], oldRole)
+                    && (!requireSameWitnessPoint
+                        || SameWitnessPoint(measured[useIndex].pointMM,
+                            oldRole.pointMM))) {
+                    if (found >= 0) {
+                        refusal = Refusal::AnchorAmbiguous; return false;
+                    }
+                    found = int(useIndex);
+                }
+            }
+            if (found < 0) { refusal = Refusal::AnchorMissing; return false; }
+            consumed.insert(found);
+            Anchor& anchor = step.anchors[anchorIndex];
+            const SelectorUseRole& role = measured[std::size_t(found)];
+            anchor.curve = role.curve;
+            anchor.pointMM = role.pointMM;
+            anchor.tangent = role.tangent;
+            anchor.normalA = role.normalA;
+            anchor.normalB = role.normalB;
+            anchor.circleRadiusMM = role.circleRadiusMM;
+        }
+        refusal = Refusal::None;
+        return true;
+    } catch (...) { refusal = Refusal::BuildFailed; return false; }
+}
+
 inline bool RebindPlanarLineSubset(const TopoDS_Shape& stage,
     double metersPerLocalUnit, const std::vector<SelectorUseRole>& oldRoles,
     ReplayBudget& budget, Step& step, Refusal& refusal) noexcept {
@@ -1104,15 +1271,18 @@ inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
         }
         if (!detail::ChargeTopology(oldStage, budget)) { refusal = Refusal::Budget; return false; }
         const std::atomic_bool neverCancelled{false};
-        TopoDS_Shape current = oldStage;
+        detail::WorkingStageSequence sequence;
+        if (!detail::BeginWorkingStages(oldStage, original, budget, refusal,
+                neverCancelled, sequence)) return false;
         // C15-style publication: roles accumulate into a private temporary
         // and are published only on whole-operation success.
         SourceRebindRoles pending;
         for (const Step& step : original.steps) {
+            const TopoDS_Shape& current = sequence.current;
             if (step.selector) {
                 retained_face_selector::Resolution resolution;
                 const auto selectorRefusal = retained_face_selector::Resolve(current,
-                    step.selector->intent, original.base.metersPerLocalUnit, budget,
+                    step.selector->intent, 0.001, budget,
                     neverCancelled, resolution);
                 PlanarLineSubset planarSubset;
                 bool usedPlanarSubset = false;
@@ -1120,7 +1290,7 @@ inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
                     retained_face_selector::Refusal::ReplayMismatch;
                 if (selectorRefusal == retained_face_selector::Refusal::None && resolution.proof) {
                     receiptRefusal = retained_face_selector::VerifyReceipt(*resolution.proof, step,
-                        original.base.metersPerLocalUnit, budget);
+                        0.001, budget);
                 } else if ((selectorRefusal
                             == retained_face_selector::Refusal::IncompleteBoundary
                         || selectorRefusal
@@ -1129,7 +1299,7 @@ inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
                         retained_face_selector::PlanarFaceBoundary>(
                             step.selector->intent)
                     && ResolvePlanarLineSubset(current, step,
-                        original.base.metersPerLocalUnit, budget, true,
+                        0.001, budget, true,
                         planarSubset, refusal)) {
                     usedPlanarSubset = true;
                 }
@@ -1160,7 +1330,7 @@ inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
                     }
                     SelectorUseRole role;
                     if (use.selected
-                        && !detail::MeasureUseWitness(use, original.base.metersPerLocalUnit,
+                        && !detail::MeasureUseWitness(use, 0.001,
                             role.curve, role.pointMM, role.tangent, role.normalA, role.normalB,
                             role.circleRadiusMM, &budget, tb::Site::C17SourceRebindOld)) {
                         refusal = budget.exhausted ? Refusal::Budget : Refusal::UnsupportedEdge;
@@ -1212,7 +1382,7 @@ inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
                 // one measured role before any rebind is attempted.
                 std::vector<SelectorUseRole> measured;
                 if (!detail::MeasureStageRawEdgeWitnesses(current,
-                        original.base.metersPerLocalUnit, budget,
+                        0.001, budget,
                         tb::Site::C17SourceRebindOld, measured)) {
                     refusal = budget.exhausted ? Refusal::Budget : Refusal::UnsupportedEdge;
                     return false;
@@ -1241,15 +1411,13 @@ inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
                 }
                 pending.rawSteps.push_back({step.feature, std::move(ordered)});
             }
-            Definition single = original;
-            single.steps = {step};
-            single.outputNode = step.node;
-            TopoDS_Shape next; std::vector<StepProof> proofs;
-            if (!Replay(current, single, next, proofs, budget, refusal)) {
-                return false;
-            }
-            current = next;
+            StepProof proof;
+            if (!detail::BuildWorkingStage(original, step, sequence, proof,
+                    budget, refusal, neverCancelled)) return false;
         }
+        TopoDS_Shape verified;
+        if (!detail::FinishWorkingStages(sequence, budget, refusal,
+                neverCancelled, verified)) return false;
         pending.original = original; pending.originalBytes = originalBytes;
         output = std::move(pending);
         refusal = Refusal::None; return true;
@@ -1321,13 +1489,16 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
         Definition rebound = roles.original;
         rebound.base.sourceRecipeDigest = sourceDigest;
         const std::atomic_bool neverCancelled{false};
-        TopoDS_Shape current = newStage;
+        detail::WorkingStageSequence sequence;
+        if (!detail::BeginWorkingStages(newStage, rebound, budget, refusal,
+                neverCancelled, sequence)) return false;
         std::size_t selectorIndex = 0;
         std::size_t rawIndex = 0;
         // Publish-on-success: suffix proofs accumulate privately and are
         // published only when the whole rebind succeeds.
         std::vector<StepProof> pendingProofs;
         for (std::size_t index = 0; index < rebound.steps.size(); ++index) {
+            const TopoDS_Shape& current = sequence.current;
             Step step = rebound.steps[index];
             if (step.selector) {
                 if (selectorIndex >= roles.selectorSteps.size()
@@ -1346,12 +1517,12 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
                             step.selector->intent);
                 if (mixedPlanarProfileBoundary) {
                     if (!detail::RebindPlanarLineSubset(current,
-                            rebound.base.metersPerLocalUnit, oldRoles, budget,
+                            0.001, oldRoles, budget,
                             step, refusal)) return false;
                 } else {
                 retained_face_selector::Resolution resolution;
                 const auto selectorRefusal = retained_face_selector::Resolve(current,
-                    step.selector->intent, rebound.base.metersPerLocalUnit, budget,
+                    step.selector->intent, 0.001, budget,
                     neverCancelled, resolution);
                 if (selectorRefusal != retained_face_selector::Refusal::None || !resolution.proof) {
                     refusal = retained_face_selector::MapToB1(selectorRefusal); return false;
@@ -1368,7 +1539,7 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
                     }
                     SelectorUseRole role;
                     if (use.selected
-                        && !detail::MeasureUseWitness(use, rebound.base.metersPerLocalUnit,
+                        && !detail::MeasureUseWitness(use, 0.001,
                             role.curve, role.pointMM, role.tangent, role.normalA, role.normalB,
                             role.circleRadiusMM, &budget, tb::Site::C18SourceRebindNew)) {
                         refusal = budget.exhausted ? Refusal::Budget : Refusal::UnsupportedEdge;
@@ -1446,12 +1617,8 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
                 step.selector = std::move(receipt);
                 }
             } else if (rebound.base.family == SourceFamily::Profile) {
-                // CLOUD-8242: rebind a raw-anchor step through the unique
-                // one-to-one role correspondence proven against the actually
-                // rebuilt pre-step stage. Only the geometric witnesses are
-                // refreshed; keys, node/feature/local identities, kind and
-                // amount carry forward verbatim. A missing or ambiguous
-                // correspondence refuses atomically before any mutation.
+                // Rebind a Profile raw-anchor step through the same unique
+                // role correspondence on its actual working pre-step stage.
                 if (rawIndex >= roles.rawSteps.size()
                     || roles.rawSteps[rawIndex].first != step.feature
                     || roles.rawSteps[rawIndex].second.size() != step.anchors.size()) {
@@ -1459,59 +1626,14 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
                 }
                 const auto& oldRoles = roles.rawSteps[rawIndex].second;
                 ++rawIndex;
-                std::vector<SelectorUseRole> measured;
-                if (!detail::MeasureStageRawEdgeWitnesses(current,
-                        rebound.base.metersPerLocalUnit, budget,
-                        tb::Site::C18SourceRebindNew, measured)) {
-                    refusal = budget.exhausted ? Refusal::Budget : Refusal::UnsupportedEdge;
-                    return false;
-                }
-                std::set<int> consumed;
-                for (std::size_t anchorIndex = 0; anchorIndex < step.anchors.size();
-                    ++anchorIndex) {
-                    const SelectorUseRole& oldRole = oldRoles[anchorIndex];
-                    if (oldRole.anchorKey != step.anchors[anchorIndex].key) {
-                        refusal = Refusal::ReplayMismatch; return false;
-                    }
-                    int found = -1;
-                    for (std::size_t useIndex = 0; useIndex < measured.size(); ++useIndex) {
-                        // C18: every new-side raw role correspondence
-                        // comparison is charged, including nonmatches.
-                        if (!budget.visit(1, tb::Site::C18SourceRebindNew)) {
-                            refusal = Refusal::Budget; return false;
-                        }
-                        if (consumed.count(int(useIndex))) continue;
-                        if (detail::SameRawRoleGeometry(measured[useIndex], oldRole)
-                            && (!requireSameWitnessPoint
-                                || detail::SameWitnessPoint(
-                                    measured[useIndex].pointMM,
-                                    oldRole.pointMM))) {
-                            if (found >= 0) { refusal = Refusal::AnchorAmbiguous; return false; }
-                            found = int(useIndex);
-                        }
-                    }
-                    if (found < 0) { refusal = Refusal::AnchorMissing; return false; }
-                    consumed.insert(found);
-                    Anchor& anchor = step.anchors[anchorIndex];
-                    anchor.curve = measured[std::size_t(found)].curve;
-                    anchor.pointMM = measured[std::size_t(found)].pointMM;
-                    anchor.tangent = measured[std::size_t(found)].tangent;
-                    anchor.normalA = measured[std::size_t(found)].normalA;
-                    anchor.normalB = measured[std::size_t(found)].normalB;
-                    anchor.circleRadiusMM = measured[std::size_t(found)].circleRadiusMM;
-                }
+                if (!detail::RebindRawStep(current, oldRoles, budget, step,
+                        refusal, requireSameWitnessPoint)) return false;
             }
-            Definition single = rebound;
-            single.steps = {step};
-            single.outputNode = step.node;
-            TopoDS_Shape next; std::vector<StepProof> proofs;
-            if (!Replay(current, single, next, proofs, budget, refusal)) {
-                return false;
-            }
-            if (proofs.size() != 1) { refusal = Refusal::ReplayMismatch; return false; }
+            StepProof proof;
+            if (!detail::BuildWorkingStage(rebound, step, sequence, proof,
+                    budget, refusal, neverCancelled)) return false;
             rebound.steps[index] = step;
-            pendingProofs.push_back(proofs.front());
-            current = next;
+            pendingProofs.push_back(std::move(proof));
         }
         if (selectorIndex != roles.selectorSteps.size()
             || rawIndex != roles.rawSteps.size()) {
@@ -1521,7 +1643,8 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
             ? rebound.base.sourceNode : rebound.steps.back().node;
         output.definition = rebound;
         if (!Encode(output.definition, output.bytes, refusal)) { output = {}; return false; }
-        output.treated = current;
+        if (!detail::FinishWorkingStages(sequence, budget, refusal,
+                neverCancelled, output.treated)) { output = {}; return false; }
         output.proofs = std::move(pendingProofs);
         refusal = Refusal::None; return true;
     } catch (...) { output = {}; refusal = Refusal::BuildFailed; return false; }

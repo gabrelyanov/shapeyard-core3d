@@ -70,6 +70,8 @@ struct DebugLawSpanObservation final {
     double extremumDerivative = 0;
     double minimumDerivative = 0;
     double maximumDerivative = 0;
+    double authoredMinimumDerivative = 0;
+    double authoredMaximumDerivative = 0;
 };
 
 struct DebugLawJoinObservation final {
@@ -104,8 +106,12 @@ struct DebugRealizedLawObservation final {
     double physicalLast = 0;
     double boundsFirst = 0;
     double boundsLast = 0;
+    double authoredFirst = 0;
+    double authoredLast = 0;
     std::array<double, 2> stationParameters{};
     std::array<double, 2> stationRadii{};
+    std::array<double, 2> nativeStationParameters{};
+    std::array<double, 2> nativeStationRadii{};
     std::array<double, 5> sampleParameters{};
     std::array<double, 5> samplePositionsZ{};
     std::array<double, 5> sampleValues{};
@@ -117,9 +123,30 @@ struct DebugRealizedLawObservation final {
     std::vector<DebugLawJoinObservation> joins;
 };
 
+struct DebugStationObservation final {
+    UUID identifier{};
+    double authoredParameter = 0;
+    double nativeNormalizedParameter = 0;
+    double nativeParameter = 0;
+    double radius = 0;
+    double physicalZ = 0;
+    double realizedRadius = 0;
+};
+
+struct DebugMultiStationLawObservation final {
+    bool attempted = false;
+    bool exception = false;
+    double physicalFirst = 0;
+    double physicalLast = 0;
+    double authoredFirst = 0;
+    double authoredLast = 0;
+    std::vector<DebugStationObservation> stations;
+};
+
 struct DebugBuildObservation final {
     std::size_t filletEntryCount = 0;
     std::vector<DebugRealizedLawObservation> realizedLaws;
+    std::vector<DebugMultiStationLawObservation> multiStationLaws;
 };
 inline thread_local DebugBuildObservation* debugBuildObservation = nullptr;
 #endif
@@ -133,6 +160,52 @@ inline gp_Dir direction(const std::array<double, 3>& value) {
 }
 inline bool samePoint(const gp_Pnt& a, const gp_Pnt& b, double tolerance) noexcept {
     return a.Distance(b) <= tolerance;
+}
+
+struct AuthoredParameterMap final {
+    double nativeFirst = 0;
+    double nativeLast = 0;
+    double authoredFirst = 0;
+    double authoredLast = 0;
+
+    double parameter(double authored) const noexcept {
+        return authoredFirst + (authoredLast - authoredFirst) * authored;
+    }
+    double normalized(double authored) const noexcept {
+        return (parameter(authored) - nativeFirst) / (nativeLast - nativeFirst);
+    }
+};
+
+inline bool authoredParameterMap(const TopoDS_Edge& edge,
+                                 const OrientedEdgeAnchor& anchor,
+                                 double tolerance,
+                                 AuthoredParameterMap& output) noexcept {
+    try {
+        BRepAdaptor_Curve curve(edge);
+        if (curve.GetType() != GeomAbs_Line) return false;
+        const double first = curve.FirstParameter(), last = curve.LastParameter();
+        if (!std::isfinite(first) || !std::isfinite(last) || !(last > first)) return false;
+        const gp_Pnt firstPoint = curve.Value(first), lastPoint = curve.Value(last);
+        const gp_Pnt authoredStart = point(anchor.startLocal);
+        const gp_Pnt authoredEnd = point(anchor.endLocal);
+        const bool startAtFirst = samePoint(firstPoint, authoredStart, tolerance)
+            && samePoint(lastPoint, authoredEnd, tolerance);
+        const bool startAtLast = samePoint(lastPoint, authoredStart, tolerance)
+            && samePoint(firstPoint, authoredEnd, tolerance);
+        if (startAtFirst == startAtLast) return false;
+        output.nativeFirst = first;
+        output.nativeLast = last;
+        output.authoredFirst = startAtFirst ? first : last;
+        output.authoredLast = startAtFirst ? last : first;
+        const double middle = output.parameter(.5);
+        const gp_Pnt expectedMiddle(
+            (authoredStart.X() + authoredEnd.X()) * .5,
+            (authoredStart.Y() + authoredEnd.Y()) * .5,
+            (authoredStart.Z() + authoredEnd.Z()) * .5);
+        return samePoint(curve.Value(middle), expectedMiddle, tolerance);
+    } catch (...) {
+        return false;
+    }
 }
 inline bool onLineSegment(const gp_Pnt& pointValue, const gp_Pnt& start,
                           const gp_Pnt& end, double tolerance) noexcept {
@@ -356,6 +429,8 @@ inline void appendClippedC1Intervals(const Handle(Law_Function)& law,
 inline void observeRealizedLaw(const Handle(Law_Function)& law,
                                const TopoDS_Edge& edge,
                                const Definition& definition,
+                               const AuthoredParameterMap& mapping,
+                               const std::array<double, 2>& nativeRadii,
                                double boundsFirst, double boundsLast,
                                DebugRealizedLawObservation& output) noexcept {
     output = {};
@@ -371,26 +446,33 @@ inline void observeRealizedLaw(const Handle(Law_Function)& law,
         output.physicalLast = physicalLast;
         output.boundsFirst = boundsFirst;
         output.boundsLast = boundsLast;
+        output.authoredFirst = mapping.authoredFirst;
+        output.authoredLast = mapping.authoredLast;
         output.stationParameters = {{definition.stations[0].parameter,
                                      definition.stations[1].parameter}};
         output.stationRadii = {{definition.stations[0].radiusLocal,
                                 definition.stations[1].radiusLocal}};
+        output.nativeStationParameters = {{mapping.nativeFirst, mapping.nativeLast}};
+        output.nativeStationRadii = nativeRadii;
 
         constexpr std::array<double, 5> samples{{0, 0.2, 0.5, 0.8, 1}};
         for (std::size_t index = 0; index < samples.size(); ++index) {
-            const double parameter = physicalFirst
-                + (physicalLast - physicalFirst) * samples[index];
+            const double parameter = mapping.parameter(samples[index]);
             double value = 0, derivative = 0;
             law->D1(parameter, value, derivative);
             output.sampleParameters[index] = parameter;
             output.samplePositionsZ[index] = curve.Value(parameter).Z();
             output.sampleValues[index] = value;
-            output.sampleDerivatives[index] = derivative;
+            output.sampleDerivatives[index] = derivative
+                * (mapping.authoredLast - mapping.authoredFirst);
         }
         for (std::size_t index = 0; index < output.gridValues.size(); ++index) {
             const double t = double(index + 1) / 100;
-            const double parameter = physicalFirst + (physicalLast - physicalFirst) * t;
-            law->D1(parameter, output.gridValues[index], output.gridDerivatives[index]);
+            const double parameter = mapping.parameter(t);
+            double derivative = 0;
+            law->D1(parameter, output.gridValues[index], derivative);
+            output.gridDerivatives[index] = derivative
+                * (mapping.authoredLast - mapping.authoredFirst);
         }
 
         struct Part final {
@@ -526,6 +608,14 @@ inline void observeRealizedLaw(const Handle(Law_Function)& law,
                                 if (span.maximumDerivative <= derivativeTolerance)
                                     noConstant = false;
                             }
+                            const double authoredScale =
+                                mapping.authoredLast - mapping.authoredFirst;
+                            span.authoredMinimumDerivative = std::min(
+                                span.minimumDerivative * authoredScale,
+                                span.maximumDerivative * authoredScale);
+                            span.authoredMaximumDerivative = std::max(
+                                span.minimumDerivative * authoredScale,
+                                span.maximumDerivative * authoredScale);
                             output.spans.push_back(span);
                         }
                         if (spanCount == 0) supported = false;
@@ -565,6 +655,11 @@ inline void observeRealizedLaw(const Handle(Law_Function)& law,
                 span.extremumDerivative = derivativeFirst;
                 span.minimumDerivative = std::min(derivativeFirst, derivativeLast);
                 span.maximumDerivative = std::max(derivativeFirst, derivativeLast);
+                const double authoredScale = mapping.authoredLast - mapping.authoredFirst;
+                span.authoredMinimumDerivative = std::min(
+                    derivativeFirst * authoredScale, derivativeLast * authoredScale);
+                span.authoredMaximumDerivative = std::max(
+                    derivativeFirst * authoredScale, derivativeLast * authoredScale);
                 output.spans.push_back(span);
                 if (!finiteLawSample(valueFirst, derivativeFirst)
                     || !finiteLawSample(valueLast, derivativeLast)) supported = false;
@@ -634,6 +729,8 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
         const double tolerance = std::max(Precision::Confusion() * 32,
             1e-7 / definition.metersPerLocalUnit);
         std::vector<TopoDS_Edge> edges; edges.reserve(definition.edges.size());
+        std::vector<detail::AuthoredParameterMap> mappings;
+        mappings.reserve(definition.edges.size());
         double minimumClearance = INFINITY;
         for (const auto& anchor : definition.edges) {
             if (cancelled.load()) return decline(Refusal::Cancelled);
@@ -644,8 +741,12 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
             if (!detail::continuousClearance(input, edge, anchor, tolerance,
                                              clearance, refusal))
                 return decline(refusal);
+            detail::AuthoredParameterMap mapping;
+            if (!detail::authoredParameterMap(edge, anchor, tolerance, mapping))
+                return decline(Refusal::OrientationDrift);
             minimumClearance = std::min(minimumClearance, clearance);
-            edges.push_back(edge); output.evidence.consumedEdges.push_back(anchor.identifier);
+            edges.push_back(edge); mappings.push_back(mapping);
+            output.evidence.consumedEdges.push_back(anchor.identifier);
         }
         const double maximumRadius = std::max(definition.stations[0].radiusLocal,
                                                definition.stations[1].radiusLocal);
@@ -654,12 +755,18 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
 
         BRepFilletAPI_MakeFillet fillet(input);
         std::set<int> contours;
-        for (const auto& edge : edges) {
+        for (std::size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex) {
+            const auto& edge = edges[edgeIndex];
+            const auto& mapping = mappings[edgeIndex];
+            const bool authoredStartsAtNativeFirst =
+                mapping.authoredFirst == mapping.nativeFirst;
+            const std::array<double, 2> nativeRadii{{
+                definition.stations[authoredStartsAtNativeFirst ? 0 : 1].radiusLocal,
+                definition.stations[authoredStartsAtNativeFirst ? 1 : 0].radiusLocal}};
 #if DEBUG
             if (debugBuildObservation) ++debugBuildObservation->filletEntryCount;
 #endif
-            fillet.Add(definition.stations[0].radiusLocal,
-                       definition.stations[1].radiusLocal, edge);
+            fillet.Add(nativeRadii[0], nativeRadii[1], edge);
             const int contour = fillet.Contour(edge);
             if (contour <= 0 || fillet.NbEdges(contour) != 1 || !contours.insert(contour).second)
                 return decline(Refusal::ContourExpansion);
@@ -667,17 +774,27 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
         if (fillet.NbContours() != int(edges.size())) return decline(Refusal::ContourExpansion);
         fillet.Build();
         if (!fillet.IsDone() || fillet.Shape().IsNull()) return decline(Refusal::KernelFailure);
-        for (const auto& edge : edges) {
+        for (std::size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex) {
+            const auto& edge = edges[edgeIndex];
+            const auto& mapping = mappings[edgeIndex];
+            const bool authoredStartsAtNativeFirst =
+                mapping.authoredFirst == mapping.nativeFirst;
+            const std::array<double, 2> nativeRadii{{
+                definition.stations[authoredStartsAtNativeFirst ? 0 : 1].radiusLocal,
+                definition.stations[authoredStartsAtNativeFirst ? 1 : 0].radiusLocal}};
             const int contour = fillet.Contour(edge); Standard_Real first = 0, last = 0;
             const Handle(Law_Function) law = fillet.GetLaw(contour, edge);
             if (law.IsNull() || !fillet.GetBounds(contour, edge, first, last)
-                || std::abs(law->Value(first) - definition.stations[0].radiusLocal) > tolerance
-                || std::abs(law->Value(last) - definition.stations[1].radiusLocal) > tolerance)
+                || std::abs(law->Value(mapping.authoredFirst)
+                    - definition.stations[0].radiusLocal) > tolerance
+                || std::abs(law->Value(mapping.authoredLast)
+                    - definition.stations[1].radiusLocal) > tolerance)
                 return decline(Refusal::EndpointMismatch);
 #if DEBUG
             if (debugBuildObservation) {
                 DebugRealizedLawObservation observed;
-                detail::observeRealizedLaw(law, edge, definition, first, last, observed);
+                detail::observeRealizedLaw(law, edge, definition, mapping,
+                                           nativeRadii, first, last, observed);
                 debugBuildObservation->realizedLaws.push_back(std::move(observed));
             }
 #endif
@@ -779,6 +896,8 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
         const double tolerance = std::max(Precision::Confusion() * 32,
             1e-7 / definition.metersPerLocalUnit);
         std::vector<TopoDS_Edge> edges; edges.reserve(definition.edges.size());
+        std::vector<detail::AuthoredParameterMap> mappings;
+        mappings.reserve(definition.edges.size());
         double minimumClearance = INFINITY;
         for (const auto& anchor : definition.edges) {
             if (cancelled.load()) return decline(Refusal::Cancelled);
@@ -789,8 +908,12 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
             if (!detail::continuousClearance(input, edge, anchor, tolerance,
                                              clearance, refusal))
                 return decline(refusal);
+            detail::AuthoredParameterMap mapping;
+            if (!detail::authoredParameterMap(edge, anchor, tolerance, mapping))
+                return decline(Refusal::OrientationDrift);
             minimumClearance = std::min(minimumClearance, clearance);
-            edges.push_back(edge); output.evidence.consumedEdges.push_back(anchor.identifier);
+            edges.push_back(edge); mappings.push_back(mapping);
+            output.evidence.consumedEdges.push_back(anchor.identifier);
         }
         double maximumRadius = 0;
         if (!MaximumRadiusLocal(definition, maximumRadius)
@@ -799,16 +922,33 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
 
         BRepFilletAPI_MakeFillet fillet(input);
         std::set<int> contours;
-        for (const auto& edge : edges) {
+        struct NativeStation final {
+            Station station;
+            double normalized = 0;
+        };
+        std::vector<std::vector<NativeStation>> nativeStationsByEdge;
+        nativeStationsByEdge.reserve(edges.size());
+        for (std::size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex) {
+            const auto& edge = edges[edgeIndex];
+            const auto& mapping = mappings[edgeIndex];
 #if DEBUG
             if (debugBuildObservation) ++debugBuildObservation->filletEntryCount;
 #endif
+            std::vector<NativeStation> nativeStations;
+            nativeStations.reserve(definition.stations.size());
+            for (const auto& station : definition.stations)
+                nativeStations.push_back({station, mapping.normalized(station.parameter)});
+            std::sort(nativeStations.begin(), nativeStations.end(),
+                      [](const NativeStation& lhs, const NativeStation& rhs) {
+                          return lhs.normalized < rhs.normalized;
+                      });
             TColgp_Array1OfPnt2d lawPoints(1, Standard_Integer(definition.stations.size()));
-            for (std::size_t index = 0; index < definition.stations.size(); ++index)
+            for (std::size_t index = 0; index < nativeStations.size(); ++index)
                 lawPoints.SetValue(Standard_Integer(index) + 1,
-                    gp_Pnt2d(definition.stations[index].parameter,
-                             definition.stations[index].radiusLocal));
+                    gp_Pnt2d(nativeStations[index].normalized,
+                             nativeStations[index].station.radiusLocal));
             fillet.Add(lawPoints, edge);
+            nativeStationsByEdge.push_back(std::move(nativeStations));
             const int contour = fillet.Contour(edge);
             if (contour <= 0 || fillet.NbEdges(contour) != 1 || !contours.insert(contour).second)
                 return decline(Refusal::ContourExpansion);
@@ -816,7 +956,9 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
         if (fillet.NbContours() != int(edges.size())) return decline(Refusal::ContourExpansion);
         fillet.Build();
         if (!fillet.IsDone() || fillet.Shape().IsNull()) return decline(Refusal::KernelFailure);
-        for (const auto& edge : edges) {
+        for (std::size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex) {
+            const auto& edge = edges[edgeIndex];
+            const auto& mapping = mappings[edgeIndex];
             const int contour = fillet.Contour(edge);
             const Handle(Law_Function) law = fillet.GetLaw(contour, edge);
             if (law.IsNull()) return decline(Refusal::EndpointMismatch);
@@ -824,8 +966,8 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
             const double first = spine.FirstParameter(), last = spine.LastParameter();
             if (!std::isfinite(first) || !std::isfinite(last) || !(last > first))
                 return decline(Refusal::EndpointMismatch);
-            const auto lawAt = [&](double parameter) {
-                return law->Value(first + (last - first) * parameter);
+            const auto lawAt = [&](double authoredParameter) {
+                return law->Value(mapping.parameter(authoredParameter));
             };
             // The realized kernel law must pin every authored station, not only
             // the endpoints; a law that misses a station refuses here.
@@ -834,6 +976,34 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
                     || std::abs(lawAt(station.parameter) - station.radiusLocal) > tolerance)
                     return decline(Refusal::EndpointMismatch);
             }
+#if DEBUG
+            if (debugBuildObservation) {
+                DebugMultiStationLawObservation observed;
+                observed.attempted = true;
+                observed.physicalFirst = first;
+                observed.physicalLast = last;
+                observed.authoredFirst = mapping.authoredFirst;
+                observed.authoredLast = mapping.authoredLast;
+                try {
+                    BRepAdaptor_Curve observedCurve(edge);
+                    for (const auto& native : nativeStationsByEdge[edgeIndex]) {
+                        const double nativeParameter = first
+                            + (last - first) * native.normalized;
+                        observed.stations.push_back({
+                            native.station.identifier,
+                            native.station.parameter,
+                            native.normalized,
+                            nativeParameter,
+                            native.station.radiusLocal,
+                            observedCurve.Value(nativeParameter).Z(),
+                            law->Value(nativeParameter)});
+                    }
+                } catch (...) {
+                    observed.exception = true;
+                }
+                debugBuildObservation->multiStationLaws.push_back(std::move(observed));
+            }
+#endif
             // Between stations, check finite positive realised samples at the
             // three fixed quarter-segment positions against 0.5x-2x RadiusAt
             // reference values. These bounded samples are not equality checks

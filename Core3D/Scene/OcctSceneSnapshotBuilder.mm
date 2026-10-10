@@ -107,6 +107,7 @@ thread_local bool gDebugOrdinaryLedgerObservationArmed = false;
 thread_local void* gDebugOrdinaryLedgerContext = nullptr;
 thread_local std::size_t gDebugOrdinaryLedgerCalls = 0;
 thread_local bool gDebugOrdinaryLedgerMismatch = false;
+thread_local std::size_t gDebugResolveReadResourceEntries = 0;
 #endif
 
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
@@ -1013,6 +1014,46 @@ std::string DecalDigestText(const core3d::decal_layer::Digest& theDigest)
     return aText;
 }
 
+struct FaceImageValidationAdmission final {
+    core3d::decal_layer::bake::accounting::View operation;
+    core3d::decal_layer::bake::accounting::Ticket encoded;
+    core3d::decal_layer::bake::accounting::Ticket metadata;
+    core3d::decal_layer::bake::accounting::Ticket decoded;
+};
+
+bool AdmitFaceImageValidationSource(void *raw, std::size_t bytes) noexcept
+{
+    namespace accounting = core3d::decal_layer::bake::accounting;
+    auto& admission = *static_cast<FaceImageValidationAdmission *>(raw);
+    return admission.encoded.acquire(admission.operation,
+            accounting::StorageDimension::EncodedTexture, bytes,
+            accounting::Retention::Scratch,
+            accounting::FailureSite::FaceImageValidationSource)
+        && admission.metadata.acquire(admission.operation,
+            accounting::StorageDimension::EncodedTexture, bytes,
+            accounting::Retention::Scratch,
+            accounting::FailureSite::FaceImageValidationSource);
+}
+
+bool AdmitFaceImageValidationDecoded(
+    void *raw, std::size_t width, std::size_t height) noexcept
+{
+    namespace accounting = core3d::decal_layer::bake::accounting;
+    auto& admission = *static_cast<FaceImageValidationAdmission *>(raw);
+    return admission.decoded.acquireProduct(admission.operation,
+        accounting::StorageDimension::PrivateStorage, width, height, 4,
+        accounting::Retention::Scratch,
+        accounting::FailureSite::FaceImageValidationDecoded);
+}
+
+bool EnterFaceImageValidationDecode(void *raw) noexcept
+{
+    auto& admission = *static_cast<FaceImageValidationAdmission *>(raw);
+    return admission.operation.EnterAllocation(
+        core3d::decal_layer::bake::accounting::FailureSite::
+            FaceImageValidationDecode);
+}
+
 bool ResolveDecalImage(
     const Handle(OcctDocument)& theDocument,
     const core3d::decal_layer::ImageRef& theReference,
@@ -1025,7 +1066,19 @@ bool ResolveDecalImage(
         namespace dl = core3d::decal_layer;
         if (theDocument.IsNull() || !theOperation.valid()
             || !dl::image_contract::Supported(theReference)) return false;
+        core3d::painted_atlas_bake::owner::ResourceReadAdmission
+            aReadAdmission;
+        if (core3d::painted_atlas_bake::owner::PreflightResourceRead(
+                theDocument->Document(), theReference.resource,
+                theOperation, aReadAdmission)
+                != core3d::painted_atlas_bake::owner::Outcome::Prepared
+            || !theOperation.EnterAllocation(
+                dl::bake::accounting::FailureSite::ResourceReadMaterialize))
+            return false;
         fi::ResourceEnvelope anEnvelope;
+#ifdef DEBUG
+        ++gDebugResolveReadResourceEntries;
+#endif
         if (!fi::owner::ReadResource(theDocument->Document(),
                 theReference.resource, anEnvelope)) return false;
         dl::bake::accounting::Ticket anOriginalTicket, aWorkingTicket;
@@ -1045,11 +1098,29 @@ bool ResolveDecalImage(
         NSData *aWorking = [NSData dataWithBytes:anEnvelope.workingBytes.data()
             length:anEnvelope.workingBytes.size()];
         fi::validation::FaceImageRasterInfo anOriginalInfo, aWorkingInfo;
+        FaceImageValidationAdmission anOriginalAdmission;
+        anOriginalAdmission.operation = theOperation;
+        const fi::validation::FaceImageRasterOptions anOriginalOptions{
+            &anOriginalAdmission, &AdmitFaceImageValidationSource,
+            &AdmitFaceImageValidationDecoded,
+            &EnterFaceImageValidationDecode};
         if (!fi::validation::MeasureFaceImageRaster(
-                anOriginal, anOriginalInfo)
-            || !fi::validation::MeasureFaceImageRaster(
-                aWorking, aWorkingInfo)
-            || anOriginalInfo.format != anEnvelope.originalFormat
+                anOriginal, anOriginalInfo, anOriginalOptions))
+            return false;
+        if (anEnvelope.workingBytes == anEnvelope.originalBytes) {
+            aWorkingInfo = anOriginalInfo;
+        } else {
+            FaceImageValidationAdmission aWorkingAdmission;
+            aWorkingAdmission.operation = theOperation;
+            const fi::validation::FaceImageRasterOptions aWorkingOptions{
+                &aWorkingAdmission, &AdmitFaceImageValidationSource,
+                &AdmitFaceImageValidationDecoded,
+                &EnterFaceImageValidationDecode};
+            if (!fi::validation::MeasureFaceImageRaster(
+                    aWorking, aWorkingInfo, aWorkingOptions))
+                return false;
+        }
+        if (anOriginalInfo.format != anEnvelope.originalFormat
             || anOriginalInfo.width != anEnvelope.originalWidthTexels
             || anOriginalInfo.height != anEnvelope.originalHeightTexels
             || aWorkingInfo.format != anEnvelope.workingFormat
@@ -1065,6 +1136,10 @@ bool ResolveDecalImage(
         dl::bake::ResolvedImage aResolved;
         aResolved.reference = theReference;
         aResolved.envelope = std::move(anEnvelope);
+        aResolved.originalBytesTicket =
+            std::move(aReadAdmission.originalBytes);
+        aResolved.workingBytesTicket =
+            std::move(aReadAdmission.workingBytes);
         aResolved.pixels.width = aDecoded.width;
         aResolved.pixels.height = aDecoded.height;
         aResolved.pixels.rgba = std::move(aDecoded.rgba);
@@ -5128,6 +5203,121 @@ bool OcctSceneSnapshotBuilder::FinalizePrivateExportDecals(
 }
 
 #ifdef DEBUG
+std::array<std::size_t, 4> DebugExerciseE4ResolveDecalImageReadPreflight(
+    const Handle(OcctDocument)& document,
+    const decal_layer::ImageRef& reference) noexcept
+{
+    using FailureSite = decal_layer::bake::accounting::FailureSite;
+    std::array<std::size_t, 4> result{};
+    try {
+        OperationLedger denied(0, 0, 0);
+        decal_layer::bake::ResolvedImage resolved;
+        gDebugResolveReadResourceEntries = 0;
+        result[0] = !ResolveDecalImage(
+            document, reference, resolved, denied.view());
+        result[1] = gDebugResolveReadResourceEntries;
+        result[2] = resolved.envelope.originalBytes.empty()
+            && resolved.envelope.workingBytes.empty()
+            && resolved.pixels.width == 0
+            && resolved.pixels.height == 0
+            && resolved.pixels.rgba.empty()
+            && resolved.originalBytesTicket.bytes == 0
+            && resolved.workingBytesTicket.bytes == 0
+            && resolved.pixelTicket.bytes == 0
+            && !resolved.originalMeasured
+            && !resolved.workingMeasured;
+        result[3] = denied.firstFailureSite()
+            == FailureSite::ResourceTableScratch;
+        gDebugResolveReadResourceEntries = 0;
+        return result;
+    } catch (...) {
+        gDebugResolveReadResourceEntries = 0;
+        return {};
+    }
+}
+
+std::array<std::size_t, 10> DebugExerciseE4FaceImageValidation(
+    const std::vector<std::uint8_t>& bytes) noexcept
+{
+    std::array<std::size_t, 10> result{};
+    @autoreleasepool {
+        try {
+            if (bytes.size() < 33
+                || std::memcmp(bytes.data(), "\x89PNG\r\n\x1a\n", 8) != 0)
+                return result;
+            std::vector<std::uint8_t> oversized = bytes;
+            const std::uint32_t width =
+                std::uint32_t(face_image::kMaximumImageDimension) + 1U;
+            oversized[16] = std::uint8_t(width >> 24);
+            oversized[17] = std::uint8_t(width >> 16);
+            oversized[18] = std::uint8_t(width >> 8);
+            oversized[19] = std::uint8_t(width);
+            std::uint32_t crc = 0xFFFFFFFFU;
+            for (std::size_t index = 12; index < 29; ++index) {
+                crc ^= oversized[index];
+                for (unsigned bit = 0; bit < 8; ++bit)
+                    crc = (crc >> 1)
+                        ^ (0xEDB88320U & (0U - (crc & 1U)));
+            }
+            crc ^= 0xFFFFFFFFU;
+            oversized[29] = std::uint8_t(crc >> 24);
+            oversized[30] = std::uint8_t(crc >> 16);
+            oversized[31] = std::uint8_t(crc >> 8);
+            oversized[32] = std::uint8_t(crc);
+
+            OperationLedger rejected(96U * 1024U * 1024U,
+                96U * 1024U * 1024U, 128U * 1024U * 1024U);
+            FaceImageValidationAdmission rejectedAdmission;
+            rejectedAdmission.operation = rejected.view();
+            const face_image::validation::FaceImageRasterOptions rejectedOptions{
+                &rejectedAdmission, &AdmitFaceImageValidationSource,
+                &AdmitFaceImageValidationDecoded,
+                &EnterFaceImageValidationDecode};
+            NSData *oversizedData = [NSData dataWithBytes:oversized.data()
+                length:oversized.size()];
+            face_image::validation::FaceImageRasterInfo rejectedInfo;
+            result[0] = !face_image::validation::MeasureFaceImageRaster(
+                oversizedData, rejectedInfo, rejectedOptions);
+            result[1] = rejected.allocationEntries(
+                decal_layer::bake::accounting::FailureSite::
+                    FaceImageValidationDecode);
+            result[2] = rejected.peak(
+                decal_layer::bake::accounting::StorageDimension::PrivateStorage);
+
+            OperationLedger admitted(96U * 1024U * 1024U,
+                96U * 1024U * 1024U, 128U * 1024U * 1024U);
+            FaceImageValidationAdmission admittedTickets;
+            admittedTickets.operation = admitted.view();
+            const face_image::validation::FaceImageRasterOptions admittedOptions{
+                &admittedTickets, &AdmitFaceImageValidationSource,
+                &AdmitFaceImageValidationDecoded,
+                &EnterFaceImageValidationDecode};
+            NSData *validData = [NSData dataWithBytes:bytes.data()
+                length:bytes.size()];
+            face_image::validation::FaceImageRasterInfo inheritedInfo;
+            face_image::validation::FaceImageRasterInfo controlInfo;
+            result[3] = face_image::validation::MeasureFaceImageRaster(
+                validData, inheritedInfo, admittedOptions);
+            result[4] = face_image::validation::MeasureFaceImageRaster(
+                validData, controlInfo);
+            result[5] = inheritedInfo.width;
+            result[6] = inheritedInfo.height;
+            result[7] = inheritedInfo.hasAlpha ? 1U : 0U;
+            result[8] = result[3] && result[4]
+                && inheritedInfo.format == controlInfo.format
+                && inheritedInfo.width == controlInfo.width
+                && inheritedInfo.height == controlInfo.height
+                && inheritedInfo.hasAlpha == controlInfo.hasAlpha;
+            result[9] = admitted.allocationEntries(
+                decal_layer::bake::accounting::FailureSite::
+                    FaceImageValidationDecode);
+            return result;
+        } catch (...) {
+            return {};
+        }
+    }
+}
+
 std::array<std::size_t, 18> DebugExerciseE4OperationLedger() noexcept
 {
     using FailureSite = decal_layer::bake::accounting::FailureSite;

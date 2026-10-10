@@ -74,15 +74,19 @@ inline bool ReplayTreatmentSuffix(const TopoDS_Shape& postBoolean,
                                   const Definition& definition,
                                   TopoDS_Shape& output,
                                   et::ReplayBudget& budget,
-                                  et::Refusal& refusal) noexcept {
+                                  et::Refusal& refusal,
+                                  const std::atomic_bool& stop) noexcept {
     if (postBoolean.IsNull()) {
         refusal = et::Refusal::UnsupportedBase; return false;
     }
     // C19: the analyzer input pass is debited before validity checking.
-    const std::atomic_bool neverCancelled{false};
-    if (tb::ChargeTraversal(postBoolean, budget, neverCancelled, tb::Site::C19R2Prefix)
+    if (stop.load()) { refusal = et::Refusal::Cancelled; return false; }
+    const auto inputWalk = tb::ChargeTraversal(
+        postBoolean, budget, stop, tb::Site::C19R2Prefix);
+    if (inputWalk
         != tb::WalkStatus::Completed) {
-        refusal = et::Refusal::Budget; return false;
+        refusal = inputWalk == tb::WalkStatus::Cancelled
+            ? et::Refusal::Cancelled : et::Refusal::Budget; return false;
     }
     if (!BRepCheck_Analyzer(postBoolean).IsValid()) {
         refusal = et::Refusal::UnsupportedBase; return false;
@@ -98,7 +102,16 @@ inline bool ReplayTreatmentSuffix(const TopoDS_Shape& postBoolean,
     et::Definition suffix{definition.schema, definition.owner, shadow, definition.issuance,
                           definition.outputNode, definition.steps};
     std::vector<et::StepProof> proofs;
-    return et::Replay(postBoolean, suffix, output, proofs, budget, refusal);
+    return et::Replay(postBoolean, suffix, output, proofs, budget, refusal, stop);
+}
+inline bool ReplayTreatmentSuffix(const TopoDS_Shape& postBoolean,
+                                  const Definition& definition,
+                                  TopoDS_Shape& output,
+                                  et::ReplayBudget& budget,
+                                  et::Refusal& refusal) noexcept {
+    const std::atomic_bool neverCancelled{false};
+    return ReplayTreatmentSuffix(postBoolean, definition, output, budget,
+        refusal, neverCancelled);
 }
 
 // Bounded migration replay-stage preparation. The complete captured recipe is
@@ -117,6 +130,7 @@ inline bool ReplayTreatmentSuffix(const TopoDS_Shape& postBoolean,
 struct MigrationStages {
     TopoDS_Shape postBoolean;
     std::vector<TopoDS_Shape> stepStages;
+    bool stepStagesPhysicalMM = false;
     TopoDS_Shape postTreatment;
 };
 inline bool PrepareMigrationStages(const retained_boolean::Recipe& recipe,
@@ -281,20 +295,22 @@ inline bool PrepareMigrationStages(const retained_boolean::Recipe& recipe,
             suffix.steps.push_back(step);
         }
         suffix.outputNode = suffix.steps.back().node;
+        et::detail::WorkingStageSequence sequence;
+        if (!et::detail::BeginWorkingStages(current, suffix, budget, refusal,
+                stop, sequence)) { stages = {}; return false; }
+        stages.stepStagesPhysicalMM = true;
         for (const auto& step : suffix.steps) {
-            stages.stepStages.push_back(current);
-            et::Definition single = suffix;
-            single.steps = {step};
-            single.outputNode = step.node;
-            TopoDS_Shape next; std::vector<et::StepProof> proofs;
-            if (!et::Replay(current, single, next, proofs, budget, refusal)) { stages = {}; return false; }
-            if (proofs.size() != 1 || stop.load() || next.IsNull()) {
+            stages.stepStages.push_back(sequence.current);
+            et::StepProof proof;
+            if (!et::detail::BuildWorkingStage(suffix, step, sequence, proof,
+                    budget, refusal, stop)) { stages = {}; return false; }
+            if (stop.load() || sequence.current.IsNull()) {
                 stages = {};
                 refusal = stop.load() ? et::Refusal::Cancelled : et::Refusal::ReplayMismatch; return false;
             }
             // C19: the per-stage validity-analysis pass after each old-tail
             // replay is charged to the same operation budget.
-            const tb::WalkStatus tailWalk = tb::ChargeTraversal(next, budget, stop,
+            const tb::WalkStatus tailWalk = tb::ChargeTraversal(sequence.current, budget, stop,
                 tb::Site::C19R2Prefix);
             if (tailWalk == tb::WalkStatus::Cancelled) {
                 stages = {}; refusal = et::Refusal::Cancelled; return false;
@@ -303,12 +319,13 @@ inline bool PrepareMigrationStages(const retained_boolean::Recipe& recipe,
                 stages = {}; refusal = et::Refusal::Budget; return false;
             }
             if (tailWalk != tb::WalkStatus::Completed
-                || !BRepCheck_Analyzer(next).IsValid()) {
+                || !BRepCheck_Analyzer(sequence.current).IsValid()) {
                 stages = {};
                 refusal = stop.load() ? et::Refusal::Cancelled : et::Refusal::ReplayMismatch; return false;
             }
-            current = next;
         }
+        if (!et::detail::FinishWorkingStages(sequence, budget, refusal,
+                stop, current)) { stages = {}; return false; }
         stages.postTreatment = current;
         refusal = et::Refusal::None;
         return true;
@@ -609,19 +626,22 @@ inline bool ApplySourceRebindR2(const et::SourceRebindRoles& roles,
                                 Definition& candidate,
                                 TopoDS_Shape& treated,
                                 et::ReplayBudget& budget,
-                                et::Refusal& refusal) noexcept {
+                                et::Refusal& refusal,
+                                const std::atomic_bool& stop) noexcept {
     treated.Nullify();
     try {
         if (newStage.IsNull()) { refusal = et::Refusal::ReplayMismatch; return false; }
-        const std::atomic_bool neverCancelled{false};
+        if (stop.load()) { refusal = et::Refusal::Cancelled; return false; }
         // C18: the new-stage census is debited before the analyzer, and the
         // analyzer pass is reserved; a budget failure is never mapped to
         // ReplayMismatch.
         tb::Census newStageCensus;
-        if (tb::CensusTopology(newStage, budget, neverCancelled, newStageCensus,
+        const auto stageWalk = tb::CensusTopology(newStage, budget, stop, newStageCensus,
                 tb::Site::C18SourceRebindNew, true) != tb::WalkStatus::Completed
-            || !tb::ReserveTraversal(newStageCensus, budget, tb::Site::C18SourceRebindNew)) {
-            refusal = et::Refusal::Budget; return false;
+            || !tb::ReserveTraversal(newStageCensus, budget, tb::Site::C18SourceRebindNew);
+        if (stageWalk) {
+            refusal = stop.load() ? et::Refusal::Cancelled : et::Refusal::Budget;
+            return false;
         }
         if (!BRepCheck_Analyzer(newStage).IsValid()) {
             refusal = et::Refusal::ReplayMismatch; return false;
@@ -634,11 +654,15 @@ inline bool ApplySourceRebindR2(const et::SourceRebindRoles& roles,
         shadow.sourceRecipeDigest = binding->sourceRecipeDigest;
         shadow.metersPerLocalUnit = binding->metersPerLocalUnit;
         et::Definition shadowBase{candidate.schema, candidate.owner, shadow,
-                                  candidate.issuance, candidate.outputNode, {}};
+                                  candidate.issuance, candidate.outputNode,
+                                  candidate.steps};
         Definition rebound = candidate;
-        TopoDS_Shape current = newStage;
+        et::detail::WorkingStageSequence sequence;
+        if (!et::detail::BeginWorkingStages(newStage, shadowBase, budget,
+                refusal, stop, sequence)) return false;
         std::size_t selectorIndex = 0;
         for (std::size_t index = 0; index < rebound.steps.size(); ++index) {
+            const TopoDS_Shape& current = sequence.current;
             et::Step step = rebound.steps[index];
             if (step.selector) {
                 if (selectorIndex >= roles.selectorSteps.size()
@@ -650,8 +674,8 @@ inline bool ApplySourceRebindR2(const et::SourceRebindRoles& roles,
                 ++selectorIndex;
                 retained_face_selector::Resolution resolution;
                 const auto selectorRefusal = retained_face_selector::Resolve(current,
-                    step.selector->intent, binding->metersPerLocalUnit, budget,
-                    neverCancelled, resolution);
+                    step.selector->intent, 0.001, budget,
+                    stop, resolution);
                 if (selectorRefusal != retained_face_selector::Refusal::None || !resolution.proof) {
                     refusal = retained_face_selector::MapToB1(selectorRefusal); return false;
                 }
@@ -667,7 +691,7 @@ inline bool ApplySourceRebindR2(const et::SourceRebindRoles& roles,
                     }
                     et::SelectorUseRole role;
                     if (use.selected
-                        && !et::detail::MeasureUseWitness(use, binding->metersPerLocalUnit,
+                        && !et::detail::MeasureUseWitness(use, 0.001,
                             role.curve, role.pointMM, role.tangent, role.normalA, role.normalB,
                             role.circleRadiusMM, &budget, tb::Site::C18SourceRebindNew)) {
                         refusal = budget.exhausted ? et::Refusal::Budget
@@ -738,25 +762,31 @@ inline bool ApplySourceRebindR2(const et::SourceRebindRoles& roles,
                 }
                 step.selector = std::move(receipt);
             }
-            et::Definition single = shadowBase;
-            single.steps = {step};
-            single.outputNode = step.node;
-            TopoDS_Shape next; std::vector<et::StepProof> proofs;
-            if (!et::Replay(current, single, next, proofs, budget, refusal)) {
-                return false;
-            }
-            if (proofs.size() != 1) { refusal = et::Refusal::ReplayMismatch; return false; }
+            et::StepProof proof;
+            if (!et::detail::BuildWorkingStage(shadowBase, step, sequence,
+                    proof, budget, refusal, stop)) return false;
             rebound.steps[index] = step;
-            current = next;
         }
         if (selectorIndex != roles.selectorSteps.size()) {
             refusal = et::Refusal::ReplayMismatch; return false;
         }
         candidate = std::move(rebound);
-        treated = current;
+        if (!et::detail::FinishWorkingStages(sequence, budget, refusal,
+                stop, treated)) return false;
         refusal = et::Refusal::None;
         return true;
     } catch (...) { treated.Nullify(); refusal = et::Refusal::BuildFailed; return false; }
+}
+
+inline bool ApplySourceRebindR2(const et::SourceRebindRoles& roles,
+                                const TopoDS_Shape& newStage,
+                                Definition& candidate,
+                                TopoDS_Shape& treated,
+                                et::ReplayBudget& budget,
+                                et::Refusal& refusal) noexcept {
+    const std::atomic_bool neverCancelled{false};
+    return ApplySourceRebindR2(roles, newStage, candidate, treated, budget,
+        refusal, neverCancelled);
 }
 
 // Compatibility signature: a fresh budget for independent callers outside a

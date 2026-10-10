@@ -79,6 +79,11 @@ namespace core3d::scene {
 std::array<std::size_t, 18> DebugExerciseE4OperationLedger() noexcept;
 std::array<std::size_t, 16> DebugExerciseE4SourceDecodeAdmission(
     const std::vector<std::uint8_t>& bytes) noexcept;
+std::array<std::size_t, 10> DebugExerciseE4FaceImageValidation(
+    const std::vector<std::uint8_t>& bytes) noexcept;
+std::array<std::size_t, 4> DebugExerciseE4ResolveDecalImageReadPreflight(
+    const Handle(OcctDocument)& document,
+    const decal_layer::ImageRef& reference) noexcept;
 void DebugBeginE4OrdinaryLedgerObservation() noexcept;
 std::array<std::size_t, 2> DebugTakeE4OrdinaryLedgerObservation() noexcept;
 }
@@ -3729,6 +3734,153 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         @"entries": @(values[1]),
         @"denials": @(values[2]),
     };
+}
+
+- (NSDictionary<NSString *,id> *)
+    debugE4CaptureReadPreflightForEntityIdentifier:(NSString *)entityIdentifier {
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128) return nil;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper =
+            viewer ? viewer->getDocument() : Handle(OcctDocument)();
+        OwnerKey key;
+        TDF_Label owner;
+        const char *raw = entityIdentifier.UTF8String;
+        if (wrapper.IsNull()
+            || !LabelForSelected(wrapper, raw ? raw : "", key, owner))
+            return nil;
+        const Handle(TDocStd_Document)& document = wrapper->Document();
+        std::vector<core3d::asset_atlas::persistence::Record> atlases;
+        if (document.IsNull() || document->HasOpenCommand()
+            || !core3d::asset_atlas::persistence::ReadAll(
+                document, atlases))
+            return nil;
+        const core3d::asset_atlas::Key *atlasKey = nullptr;
+        for (const auto& record : atlases) {
+            if (!record.value) return nil;
+            for (const auto& member : record.value->definition.members) {
+                if (!(member.owner == key)) continue;
+                if (atlasKey) return nil;
+                atlasKey = &record.value->definition.key;
+            }
+        }
+        if (!atlasKey) return nil;
+        const auto evidence = core3d::painted_atlas_bake::owner::
+            DebugExerciseE4CaptureReadPreflight(document, *atlasKey);
+        return @{
+            @"fixture": @"E4P2b1CaptureRead",
+            @"normalCaptured": @(evidence.normalCaptured),
+            @"envelopeBytesPreserved": @(evidence.envelopeBytesPreserved),
+            @"bindingBytesPreserved": @(evidence.bindingBytesPreserved),
+            @"ticketsRetained": @(evidence.ticketsRetained),
+            @"capturedVectorPreflighted": @(
+                evidence.capturedVectorPreflighted),
+            @"capturedVectorTicketRetained": @(
+                evidence.capturedVectorTicketRetained),
+            @"deniedOverBudget": @(evidence.deniedOverBudget),
+            @"deniedBeforeBindingRead": @(evidence.deniedBeforeBindingRead),
+            @"deniedBeforeResourceRead": @(evidence.deniedBeforeResourceRead),
+        };
+    } @catch (...) {
+        return nil;
+    }
+}
+
+- (NSDictionary<NSString *,id> *)
+    debugE4ResolveDecalImageReadPreflightForEntityIdentifier:
+        (NSString *)entityIdentifier {
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128) return nil;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper =
+            viewer ? viewer->getDocument() : Handle(OcctDocument)();
+        OwnerKey key;
+        TDF_Label owner;
+        const char *raw = entityIdentifier.UTF8String;
+        if (wrapper.IsNull()
+            || !LabelForSelected(wrapper, raw ? raw : "", key, owner))
+            return nil;
+        fi::Definition definition;
+        if (fi::persistence::bindings::Read(
+                wrapper->Document(), owner, definition)
+                != fi::persistence::bindings::ReadState::Present
+            || definition.bindings.empty())
+            return nil;
+        const fi::Binding& binding = definition.bindings.front();
+        fi::persistence::resources::Record record;
+        if (!fi::persistence::resources::Read(
+                wrapper->Document(), binding.resource, record)
+            || !record.value)
+            return nil;
+        const fi::ResourceEnvelope& envelope = record.value->envelope;
+        core3d::decal_layer::ImageRef reference;
+        reference.resource = envelope.resource;
+        reference.normalizedContent = envelope.workingContent;
+        reference.originalContent = envelope.originalContent;
+        reference.provenance = envelope.provenance;
+        reference.producerVersion =
+            core3d::decal_layer::image_contract::kProducerVersion;
+        reference.mediaType = envelope.workingFormat;
+        reference.widthTexels = envelope.workingWidthTexels;
+        reference.heightTexels = envelope.workingHeightTexels;
+        reference.role = binding.role;
+        reference.colorSpace = binding.colorSpace;
+        reference.alpha = envelope.alpha;
+        const auto result = core3d::scene::
+            DebugExerciseE4ResolveDecalImageReadPreflight(
+                wrapper, reference);
+        return @{
+            @"fixture": @"E4P2b1ResolveReadPreflight",
+            @"denied": @(result[0] != 0),
+            @"readResourceEntries": @(result[1]),
+            @"resolvedImageEmpty": @(result[2] != 0),
+            @"resourceTablePreflightDenied": @(result[3] != 0),
+        };
+    } @catch (...) {
+        return nil;
+    }
+}
+
+- (NSDictionary<NSString *,id> *)
+    debugE4FaceImageValidationForResourceBytes:(NSData *)resourceBytes {
+    if (!NSThread.isMainThread
+        || ![resourceBytes isKindOfClass:NSData.class]
+        || resourceBytes.length == 0
+        || resourceBytes.length > fi::kMaximumEncodedImageBytes)
+        return nil;
+    @try {
+        const auto *begin =
+            static_cast<const std::uint8_t *>(resourceBytes.bytes);
+        const std::vector<std::uint8_t> bytes(
+            begin, begin + resourceBytes.length);
+        const auto result =
+            core3d::scene::DebugExerciseE4FaceImageValidation(bytes);
+        return @{
+            @"fixture": @"E4P2b1FaceImageValidation",
+            @"oversizedRefused": @(result[0] != 0),
+            @"decodeEntriesOnOversized": @(result[1]),
+            @"decodedBytesOnOversized": @(result[2]),
+            @"validInherited": @(result[3] != 0),
+            @"validControl": @(result[4] != 0),
+            @"width": @(result[5]),
+            @"height": @(result[6]),
+            @"hasAlpha": @(result[7] != 0),
+            @"metadataUnchanged": @(result[8] != 0),
+            @"decodeEntriesOnValid": @(result[9]),
+        };
+    } @catch (...) {
+        return nil;
+    }
 }
 
 + (NSData *)debugFaceImageFixtureAssetData:(double)metersPerUnit {

@@ -23,11 +23,26 @@ struct FaceImageRasterInfo final {
     bool hasAlpha = false;
 };
 
+//! Optional inherited admission for this validator's native allocations.
+//! The caller owns the tickets and keeps them alive until this function
+//! returns. Header parsing is the only work done before admitDecoded.
+struct FaceImageRasterOptions final {
+    void *context = nullptr;
+    bool (*admitSource)(void *, std::size_t) noexcept = nullptr;
+    bool (*admitDecoded)(void *, std::size_t, std::size_t) noexcept = nullptr;
+    bool (*enterDecode)(void *) noexcept = nullptr;
+
+    bool enabled() const noexcept {
+        return context && admitSource && admitDecoded && enterDecode;
+    }
+};
+
 // Measure one encoded image from its actual bytes: the shared bounded
 // validator first, then ImageIO metadata and a real pixel decode for exact
 // dimensions and alpha-channel presence. Nothing is taken from a caller
 // manifest.
-inline bool MeasureFaceImageRaster(NSData *data, FaceImageRasterInfo& output) {
+inline bool MeasureFaceImageRaster(NSData *data, FaceImageRasterInfo& output,
+                                   const FaceImageRasterOptions& options) {
     output = {};
     @try {
         if (![data isKindOfClass:NSData.class] || data.length == 0
@@ -39,13 +54,24 @@ inline bool MeasureFaceImageRaster(NSData *data, FaceImageRasterInfo& output) {
         const bool jpeg = size >= 3
             && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF;
         if (!png && !jpeg) return false;
-        Handle(Image_Texture) texture;
-        if (!Core3DCreateAuthoredTexture(bytes, size,
-                png ? "image/png" : "image/jpeg", texture) || texture.IsNull())
+        if (options.context && !options.enabled()) return false;
+        if (options.enabled() && !options.admitSource(options.context, size))
             return false;
+        const void* optionKeys[] = {
+            kCGImageSourceShouldCache,
+            kCGImageSourceShouldCacheImmediately,
+        };
+        const void* optionValues[] = {kCFBooleanFalse, kCFBooleanFalse};
+        CFDictionaryRef imageOptions = CFDictionaryCreate(kCFAllocatorDefault,
+            optionKeys, optionValues, 2, &kCFTypeDictionaryKeyCallBacks,
+            &kCFTypeDictionaryValueCallBacks);
+        if (!imageOptions) return false;
         CGImageSourceRef source =
-            CGImageSourceCreateWithData((__bridge CFDataRef)data, nullptr);
-        if (!source) return false;
+            CGImageSourceCreateWithData((__bridge CFDataRef)data, imageOptions);
+        if (!source) {
+            CFRelease(imageOptions);
+            return false;
+        }
         bool ok = false;
         std::int64_t width = 0, height = 0;
         bool hasAlpha = false;
@@ -60,15 +86,69 @@ inline bool MeasureFaceImageRaster(NSData *data, FaceImageRasterInfo& output) {
                 properties, kCGImagePropertyPixelWidth);
             const CFTypeRef heightValue = CFDictionaryGetValue(
                 properties, kCGImagePropertyPixelHeight);
-            const bool measured = widthValue && heightValue
+            const CFTypeRef depthValue = CFDictionaryGetValue(
+                properties, kCGImagePropertyDepth);
+            const CFTypeRef colorModelValue = CFDictionaryGetValue(
+                properties, kCGImagePropertyColorModel);
+            const CFTypeRef alphaValue = CFDictionaryGetValue(
+                properties, kCGImagePropertyHasAlpha);
+            std::int64_t depth = 0;
+            const bool measured = widthValue && heightValue && depthValue
                 && CFGetTypeID(widthValue) == CFNumberGetTypeID()
                 && CFGetTypeID(heightValue) == CFNumberGetTypeID()
+                && CFGetTypeID(depthValue) == CFNumberGetTypeID()
+                && colorModelValue
+                && CFGetTypeID(colorModelValue) == CFStringGetTypeID()
+                && alphaValue
+                && CFGetTypeID(alphaValue) == CFBooleanGetTypeID()
                 && CFNumberGetValue((CFNumberRef)widthValue, kCFNumberSInt64Type, &width)
-                && CFNumberGetValue((CFNumberRef)heightValue, kCFNumberSInt64Type, &height);
+                && CFNumberGetValue((CFNumberRef)heightValue, kCFNumberSInt64Type, &height)
+                && CFNumberGetValue((CFNumberRef)depthValue, kCFNumberSInt64Type, &depth);
+            std::size_t components = 0;
+            if (measured) {
+                const auto colorModel =
+                    static_cast<CFStringRef>(colorModelValue);
+                if (CFEqual(colorModel, kCGImagePropertyColorModelRGB))
+                    components = 3;
+                else if (CFEqual(colorModel, kCGImagePropertyColorModelGray))
+                    components = 1;
+                else if (CFEqual(colorModel, kCGImagePropertyColorModelCMYK))
+                    components = 4;
+                else if (CFEqual(colorModel, kCGImagePropertyColorModelLab))
+                    components = 3;
+                if (CFBooleanGetValue(static_cast<CFBooleanRef>(alphaValue)))
+                    ++components;
+            }
             CFRelease(properties);
-            if (!measured) break;
-            CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, nullptr);
+            if (!measured || depth < 1 || components == 0
+                || width < 1 || height < 1
+                || width > kMaximumImageDimension
+                || height > kMaximumImageDimension
+                || static_cast<std::uint64_t>(width)
+                    * static_cast<std::uint64_t>(height) > kMaximumImagePixels
+                || static_cast<std::uint64_t>(width)
+                    * static_cast<std::uint64_t>(height) * 4
+                    > kMaximumDecodedImageBytes)
+                break;
+            if (options.enabled()
+                && !options.admitDecoded(options.context,
+                    std::size_t(width), std::size_t(height)))
+                break;
+            if (options.enabled() && !options.enterDecode(options.context))
+                break;
+            Handle(Image_Texture) texture;
+            if (!Core3DCreateAuthoredTexture(bytes, size,
+                    png ? "image/png" : "image/jpeg", texture)
+                || texture.IsNull())
+                break;
+            CGImageRef image =
+                CGImageSourceCreateImageAtIndex(source, 0, imageOptions);
             if (!image) break;
+            if (CGImageGetWidth(image) != std::size_t(width)
+                || CGImageGetHeight(image) != std::size_t(height)) {
+                CGImageRelease(image);
+                break;
+            }
             const CGImageAlphaInfo alphaInfo = CGImageGetAlphaInfo(image);
             hasAlpha = alphaInfo != kCGImageAlphaNone
                 && alphaInfo != kCGImageAlphaNoneSkipFirst
@@ -77,18 +157,18 @@ inline bool MeasureFaceImageRaster(NSData *data, FaceImageRasterInfo& output) {
             ok = true;
         } while (false);
         CFRelease(source);
-        if (!ok || width < 1 || height < 1
-            || width > kMaximumImageDimension || height > kMaximumImageDimension
-            || static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height)
-                > kMaximumImagePixels
-            || static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height) * 4
-                > kMaximumDecodedImageBytes) return false;
+        CFRelease(imageOptions);
+        if (!ok) return false;
         output.format = png ? ImageEncoding::PNG : ImageEncoding::JPEG;
         output.width = static_cast<std::uint32_t>(width);
         output.height = static_cast<std::uint32_t>(height);
         output.hasAlpha = hasAlpha;
         return true;
     } @catch (...) { output = {}; return false; }
+}
+
+inline bool MeasureFaceImageRaster(NSData *data, FaceImageRasterInfo& output) {
+    return MeasureFaceImageRaster(data, output, {});
 }
 
 // Build one validated envelope from trusted local bytes. Both payloads are

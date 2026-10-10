@@ -869,7 +869,7 @@ std::shared_ptr<const retained_edge_treatment::DetachedResult> Core3DViewer::bui
         result->definition_=input->candidate_;result->base_=input->base_;
         result->selectorAppend_=input->selectorAppend_;result->budget_=input->chargedBudget_;
         if(!Encode(result->definition_,result->definitionBytes_,refusal)
-            ||!Replay(result->base_,result->definition_,result->result_,result->proofs_,result->budget_,refusal)){
+            ||!Replay(result->base_,result->definition_,result->result_,result->proofs_,result->budget_,refusal,*input->cancelled_)){
 #if DEBUG
             tb::debug::RecordPhase("build",input->chargedBudget_,result->budget_);
 #endif
@@ -1056,6 +1056,7 @@ Core3DViewer::reviewRetainedBooleanMigrationR2(
                     else mirroredPost=stage;
                 }
                 stages.stepStages=std::move(mirroredStages);
+                stages.stepStagesPhysicalMM=false;
                 stages.postTreatment=mirroredPost;
             }
         }
@@ -1083,7 +1084,8 @@ Core3DViewer::reviewRetainedBooleanMigrationR2(
             if(stageIndex>=stages.stepStages.size()){refusal=et::Refusal::IdentityMismatch;return {};}
             fs::Resolution resolution;
             const auto queryRefusal=fs::Resolve(stages.stepStages[stageIndex],binding.intent,
-                identityValue.metersPerUnit,budget,cancelled,resolution);
+                stages.stepStagesPhysicalMM?0.001:identityValue.metersPerUnit,
+                budget,cancelled,resolution);
             if(queryRefusal!=fs::Refusal::None||!resolution.proof){refusal=fs::MapToB1(queryRefusal);
 #if DEBUG
                 tb::debug::RecordPhase("review-r2",original->chargedBudget_,budget);
@@ -1903,7 +1905,7 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
             // complete suffix on its proper stages; the rebound steps keep
             // feature/node/local IDs, kind, amount and authored intent.
             r2::Definition rebound=result->definition_;TopoDS_Shape treated;
-            if(!r2::ApplySourceRebindR2(*input->rebindRoles_,result->base_,rebound,treated,budget,refusal)){
+            if(!r2::ApplySourceRebindR2(*input->rebindRoles_,result->base_,rebound,treated,budget,refusal,*input->cancelled_)){
 #if DEBUG
                 tb::debug::RecordPhase("build-r2",input->chargedBudget_,budget);
 #endif
@@ -1913,11 +1915,12 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
     }
     if(!r2::Encode(result->definition_,result->definitionBytes_,refusal))return {};
     if(result->result_.IsNull()
-        &&!r2::ReplayTreatmentSuffix(result->base_,result->definition_,result->result_,budget,refusal)){
+        &&!r2::ReplayTreatmentSuffix(result->base_,result->definition_,result->result_,budget,refusal,*input->cancelled_)){
 #if DEBUG
         tb::debug::RecordPhase("build-r2",input->chargedBudget_,budget);
 #endif
         return {};}
+    if(input->cancelled_->load()){refusal=et::Refusal::Cancelled;return {};}
     CopyTopologyBudget(result->budget_,budget);
 #if DEBUG
     tb::debug::RecordPhase("build-r2",input->chargedBudget_,budget);

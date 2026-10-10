@@ -488,6 +488,32 @@ enum class Outcome : std::uint8_t {
     Malformed, PersistenceFailure, Absent
 };
 
+//! Tickets acquired from immutable document metadata before the strict
+//! resource reader materializes its table, canonical encodings, or returned
+//! deep envelope. Scratch dies after the read; returned byte tickets move to
+//! the value that owns the corresponding vectors.
+struct ResourceReadAdmission final {
+    decal_layer::bake::accounting::Ticket table;
+    decal_layer::bake::accounting::Ticket serialization;
+    decal_layer::bake::accounting::Ticket originalBytes;
+    decal_layer::bake::accounting::Ticket workingBytes;
+    bool selected = false;
+
+    void reset() noexcept {
+        workingBytes.reset();
+        originalBytes.reset();
+        serialization.reset();
+        table.reset();
+        selected = false;
+    }
+};
+
+Outcome PreflightResourceRead(
+    const Handle(TDocStd_Document)& document,
+    const face_image::UUID& resource,
+    const decal_layer::bake::accounting::View& operation,
+    ResourceReadAdmission& admission) noexcept;
+
 struct CapturedSource final {
     BindingFence fence;
     decal_layer::bake::accounting::Ticket originalBytesTicket;
@@ -559,6 +585,48 @@ private:
     }
 };
 
+//! Owns the admission ticket for the std::vector<CapturedSource> allocation
+//! independently of the encoded-byte tickets carried by each source and the
+//! later decoded kernel::SourceStorage allocation.  The ticket is declared
+//! first so the vector releases its backing before the accounting view does.
+struct CapturedSourceStorage final {
+    decal_layer::bake::accounting::Ticket vectorTicket;
+    std::vector<CapturedSource> values;
+
+    CapturedSourceStorage() = default;
+    CapturedSourceStorage(const CapturedSourceStorage&) = delete;
+    CapturedSourceStorage& operator=(const CapturedSourceStorage&) = delete;
+    CapturedSourceStorage(CapturedSourceStorage&& other) noexcept {
+        *this = std::move(other);
+    }
+    CapturedSourceStorage& operator=(CapturedSourceStorage&& other) noexcept {
+        if (this != &other) {
+            reset();
+            vectorTicket = std::move(other.vectorTicket);
+            values = std::move(other.values);
+        }
+        return *this;
+    }
+    ~CapturedSourceStorage() { reset(); }
+    void reset() noexcept {
+        std::vector<CapturedSource>().swap(values);
+        vectorTicket.reset();
+    }
+    void clear() noexcept { reset(); }
+    bool empty() const noexcept { return values.empty(); }
+    std::size_t size() const noexcept { return values.size(); }
+    CapturedSource& operator[](std::size_t index) noexcept {
+        return values[index];
+    }
+    const CapturedSource& operator[](std::size_t index) const noexcept {
+        return values[index];
+    }
+    auto begin() noexcept { return values.begin(); }
+    auto end() noexcept { return values.end(); }
+    auto begin() const noexcept { return values.begin(); }
+    auto end() const noexcept { return values.end(); }
+};
+
 #ifdef DEBUG
 struct DebugSourceStorageEvidence final {
     bool captured = false;
@@ -575,6 +643,20 @@ struct DebugSourceStorageEvidence final {
     std::size_t vectorBytes = 0;
     Digest decodedPixels{};
 };
+struct DebugCaptureReadEvidence final {
+    bool normalCaptured = false;
+    bool envelopeBytesPreserved = false;
+    bool bindingBytesPreserved = false;
+    bool ticketsRetained = false;
+    bool capturedVectorPreflighted = false;
+    bool capturedVectorTicketRetained = false;
+    bool deniedOverBudget = false;
+    bool deniedBeforeBindingRead = false;
+    bool deniedBeforeResourceRead = false;
+};
+DebugCaptureReadEvidence DebugExerciseE4CaptureReadPreflight(
+    const Handle(TDocStd_Document)& document,
+    const asset_atlas::Key& key) noexcept;
 DebugSourceStorageEvidence DebugExerciseE4SourceStorage(
     const Handle(TDocStd_Document)& document,
     const asset_atlas::Key& key) noexcept;
@@ -587,13 +669,50 @@ struct Staging final {
     asset_atlas::Definition atlas;
     std::vector<asset_atlas::MemberUVAssignment> assignments;
     std::vector<asset_atlas::Member> observedMembers;
-    std::vector<CapturedSource> capturedSources;
+    CapturedSourceStorage capturedSources;
     Definition bake;
     std::vector<kernel::Output> outputs;
     kernel::Evidence evidence;
     std::vector<BakedResource> priorBakeResources;
     std::vector<std::uint8_t> priorAtlasBytes; // persisted SYEA/1 at Prepare
     bool unchanged = false;
+
+    Staging() = default;
+    Staging(const Staging&) = delete;
+    Staging& operator=(const Staging&) = delete;
+    Staging(Staging&& other) noexcept { *this = std::move(other); }
+    Staging& operator=(Staging&& other) noexcept {
+        if (this != &other) {
+            reset();
+            operation = std::move(other.operation);
+            atlas = std::move(other.atlas);
+            assignments = std::move(other.assignments);
+            observedMembers = std::move(other.observedMembers);
+            capturedSources = std::move(other.capturedSources);
+            bake = std::move(other.bake);
+            outputs = std::move(other.outputs);
+            evidence = std::move(other.evidence);
+            priorBakeResources = std::move(other.priorBakeResources);
+            priorAtlasBytes = std::move(other.priorAtlasBytes);
+            unchanged = other.unchanged;
+            other.unchanged = false;
+        }
+        return *this;
+    }
+    ~Staging() { reset(); }
+    void reset() noexcept {
+        capturedSources.reset();
+        outputs.clear();
+        priorBakeResources.clear();
+        priorAtlasBytes.clear();
+        assignments.clear();
+        observedMembers.clear();
+        bake = {};
+        atlas = {};
+        evidence = {};
+        unchanged = false;
+        operation.reset();
+    }
 };
 
 //! Immutable, operation-owned source authority for an export-only rebuild.
@@ -604,9 +723,39 @@ struct ExportCapture final {
     asset_atlas::Definition savedAtlas;
     asset_atlas::Capture members;
     std::vector<asset_atlas::Member> observedMembers;
-    std::vector<CapturedSource> sources;
+    CapturedSourceStorage sources;
     Definition savedBake;
     std::vector<std::uint8_t> canonicalAtlasBytes;
+
+    ExportCapture() = default;
+    ExportCapture(const ExportCapture&) = delete;
+    ExportCapture& operator=(const ExportCapture&) = delete;
+    ExportCapture(ExportCapture&& other) noexcept {
+        *this = std::move(other);
+    }
+    ExportCapture& operator=(ExportCapture&& other) noexcept {
+        if (this != &other) {
+            reset();
+            operation = std::move(other.operation);
+            savedAtlas = std::move(other.savedAtlas);
+            members = std::move(other.members);
+            observedMembers = std::move(other.observedMembers);
+            sources = std::move(other.sources);
+            savedBake = std::move(other.savedBake);
+            canonicalAtlasBytes = std::move(other.canonicalAtlasBytes);
+        }
+        return *this;
+    }
+    ~ExportCapture() { reset(); }
+    void reset() noexcept {
+        sources.reset();
+        canonicalAtlasBytes.clear();
+        observedMembers.clear();
+        savedBake = {};
+        members = {};
+        savedAtlas = {};
+        operation.reset();
+    }
 };
 
 //! Operation-local authority for an owner that has no persisted SYEA/SYEB

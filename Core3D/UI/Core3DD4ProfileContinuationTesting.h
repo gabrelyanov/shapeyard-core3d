@@ -24,6 +24,8 @@ void *Core3DDebugD4ProfileCreationStop(Core3DViewController *controller,
 // one-for-one with AuthoredBooleanNativeTests' eight working-frame selectors.
 void *Core3DDebugPhysicalWorkingFrameProbe(int32_t scenario);
 void *Core3DDebugPhysicalWorkingFrameEmptyCentimetreDocumentSeed(void);
+void Core3DDebugWorkingScaleClear(void);
+void *Core3DDebugWorkingScaleTake(void);
 #ifdef __cplusplus
 }
 #endif

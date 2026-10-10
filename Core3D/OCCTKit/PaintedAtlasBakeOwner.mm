@@ -243,6 +243,9 @@ struct DebugSourceStorageState final {
     std::array<std::size_t, 4> denials{};
 };
 thread_local DebugSourceStorageState gDebugSourceStorage;
+thread_local bool gDebugDenyCaptureReadPreflight = false;
+thread_local std::size_t gDebugBindingReadEntries = 0;
+thread_local std::size_t gDebugResourceReadEntries = 0;
 std::atomic_bool gDebugDenyNextPrivateSourceVectorReservation{false};
 std::atomic_size_t gDebugPrivateSourceVectorAttempts{0};
 std::atomic_size_t gDebugPrivateSourceVectorEntries{0};
@@ -260,6 +263,121 @@ std::size_t DebugSourceStorageIndex(
     }
 }
 #endif
+
+bool AddReadBytes(std::size_t& total, std::size_t bytes) noexcept {
+    if (bytes > std::numeric_limits<std::size_t>::max() - total) return false;
+    total += bytes;
+    return true;
+}
+
+std::size_t BorrowedBindingCount(const TDF_Label& owner) noexcept {
+    if (owner.IsNull()) return 0;
+    const TDF_Label record = owner.FindChild(
+        fi::persistence::bindings::RecordTag, Standard_False);
+    Handle(TDF_Attribute) marker;
+    Handle(TDataStd_Integer) count;
+    if (record.IsNull()
+        || !record.FindAttribute(
+            fi::persistence::bindings::MarkerID(), marker)
+        || Handle(TDataStd_UAttribute)::DownCast(marker).IsNull()
+        || !record.FindAttribute(
+            fi::persistence::bindings::BindingCountID(), count)
+        || count.IsNull() || count->Get() <= 0
+        || count->Get() > Standard_Integer(fi::kMaximumBindings))
+        return 0;
+    return std::size_t(count->Get());
+}
+
+struct BindingReadAdmission final {
+    decal_layer::bake::accounting::Ticket scratch;
+    std::size_t bindingCount = 0;
+};
+
+Outcome PreflightBindingRead(
+    const Handle(TDocStd_Document)& document,
+    const TDF_Label& owner,
+    const decal_layer::bake::accounting::View& operation,
+    BindingReadAdmission& admission) noexcept {
+    using namespace decal_layer::bake::accounting;
+    admission = {};
+    try {
+        if (document.IsNull() || owner.IsNull() || !operation.valid())
+            return Outcome::Malformed;
+        TDF_Label record;
+        for (TDF_ChildIterator child(owner, Standard_True);
+             child.More(); child.Next()) {
+            if (!fi::persistence::bindings::HasSchemaAttribute(child.Value()))
+                continue;
+            Handle(TDF_Attribute) marker;
+            if (child.Value().Father().IsEqual(owner)
+                && child.Value().Tag() == fi::persistence::bindings::RecordTag
+                && child.Value().FindAttribute(
+                    fi::persistence::bindings::MarkerID(), marker)
+                && !Handle(TDataStd_UAttribute)::DownCast(marker).IsNull()
+                && record.IsNull())
+                record = child.Value();
+        }
+        if (record.IsNull()) return Outcome::Prepared;
+        Handle(TDataStd_Integer) count, chunks;
+        Handle(TDataStd_AsciiString) digest;
+        if (!record.FindAttribute(
+                fi::persistence::bindings::BindingCountID(), count)
+            || !record.FindAttribute(
+                fi::persistence::bindings::ChunkCountID(), chunks)
+            || !record.FindAttribute(
+                fi::persistence::bindings::DigestID(), digest)
+            || count.IsNull() || chunks.IsNull() || digest.IsNull()
+            || count->Get() <= 0
+            || count->Get() > Standard_Integer(fi::kMaximumBindings)
+            || chunks->Get() <= 0
+            || chunks->Get() > fi::persistence::bindings::MaximumChunks)
+            return Outcome::Prepared;
+        admission.bindingCount = std::size_t(count->Get());
+        std::size_t scratch = std::size_t(std::max(0, digest->Get().Length()));
+        std::size_t hexBytes = 0;
+        for (Standard_Integer index = 1; index <= chunks->Get(); ++index) {
+            const TDF_Label chunk = record.FindChild(index, Standard_False);
+            Handle(TDataStd_AsciiString) text;
+            if (chunk.IsNull()
+                || !chunk.FindAttribute(TDataStd_AsciiString::GetID(), text)
+                || text.IsNull()) continue;
+            const Standard_Integer rawLength = text->Get().Length();
+            if (rawLength < 0
+                || !AddReadBytes(hexBytes, std::size_t(rawLength))
+                || !AddReadBytes(scratch, std::size_t(rawLength)))
+                return Outcome::OverBudget;
+        }
+        const std::size_t canonicalBytes = hexBytes / 2U + hexBytes % 2U;
+        std::size_t bindingBytes = 0;
+        if (!operation.CheckedProduct(admission.bindingCount,
+                sizeof(fi::Binding), 1, bindingBytes,
+                FailureSite::BindingReadScratch)
+            || !AddReadBytes(scratch, hexBytes)
+            || !AddReadBytes(scratch, canonicalBytes)
+            || !AddReadBytes(scratch, canonicalBytes)
+            || !AddReadBytes(scratch, canonicalBytes)
+            || !AddReadBytes(scratch, bindingBytes)
+            || !AddReadBytes(scratch, 64U))
+            return Outcome::OverBudget;
+#ifdef DEBUG
+        if (gDebugDenyCaptureReadPreflight) {
+            gDebugDenyCaptureReadPreflight = false;
+            (void)operation.Reserve(StorageDimension::PrivateStorage,
+                std::numeric_limits<std::size_t>::max(), Retention::Scratch,
+                FailureSite::BindingReadScratch);
+            return Outcome::OverBudget;
+        }
+#endif
+        if (!admission.scratch.acquire(operation,
+                StorageDimension::PrivateStorage, scratch,
+                Retention::Scratch, FailureSite::BindingReadScratch))
+            return Outcome::OverBudget;
+        return Outcome::Prepared;
+    } catch (...) {
+        admission = {};
+        return Outcome::Malformed;
+    }
+}
 
 bool AcquireSourceStorage(
     decal_layer::bake::accounting::Ticket& ticket,
@@ -420,9 +538,12 @@ TextureCapture SyntheticEnvelope(const Handle(Image_Texture)& texture, const Own
 // resource table is Malformed.
 Outcome CaptureSources(const Handle(TDocStd_Document)& document,
                        const aa::Capture& members,
-                       std::vector<CapturedSource>& output,
+                       CapturedSourceStorage& output,
                        const decal_layer::bake::accounting::View& operation) noexcept {
-    output.clear();
+    output.reset();
+    CapturedSourceStorage staged;
+    auto activeAllocation =
+        decal_layer::bake::accounting::FailureSite::CapturedSourceStorage;
     try {
         if (document.IsNull() || !operation.valid()) return Outcome::Malformed;
 #ifdef DEBUG
@@ -439,16 +560,86 @@ Outcome CaptureSources(const Handle(TDocStd_Document)& document,
         }
 #endif
         const auto materialTool = XCAFDoc_DocumentTool::VisMaterialTool(document->Main());
+        std::size_t sourceCapacity = 0;
         for (const auto& member : members.members) {
+            if (!AddReadBytes(sourceCapacity,
+                    BorrowedBindingCount(member.ownerLabel)))
+                return Outcome::OverBudget;
+            if (!member.painted) continue;
+            TDF_Label materialLabel;
+            XCAFDoc_VisMaterialTool::GetShapeMaterial(
+                member.ownerLabel, materialLabel);
+            Handle(XCAFDoc_VisMaterial) material;
+            if (!materialLabel.IsNull() && !materialTool.IsNull())
+                material = materialTool->GetMaterial(materialLabel);
+            if (material.IsNull()) continue;
+            const auto countTexture = [&](const Handle(Image_Texture)& texture) {
+                return texture.IsNull()
+                    || AddReadBytes(sourceCapacity, 1U);
+            };
+            if (material->HasCommonMaterial()
+                && !countTexture(material->CommonMaterial().DiffuseTexture))
+                return Outcome::OverBudget;
+            if (material->HasPbrMaterial()) {
+                const auto& pbr = material->PbrMaterial();
+                if (!countTexture(pbr.BaseColorTexture)
+                    || !countTexture(pbr.EmissiveTexture)
+                    || !countTexture(pbr.MetallicRoughnessTexture)
+                    || !countTexture(pbr.OcclusionTexture)
+                    || !countTexture(pbr.NormalTexture))
+                    return Outcome::OverBudget;
+            }
+        }
+        if (sourceCapacity != 0) {
+            std::size_t sourceBytes = 0;
+            if (!operation.CheckedProduct(sourceCapacity,
+                    sizeof(CapturedSource), 1, sourceBytes,
+                    activeAllocation)
+                || !staged.vectorTicket.acquire(operation,
+                    decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                    sourceBytes,
+                    decal_layer::bake::accounting::Retention::Retained,
+                    activeAllocation)
+                || !operation.EnterAllocation(activeAllocation))
+                return Outcome::OverBudget;
+            staged.values.reserve(sourceCapacity);
+            if (staged.values.capacity() != sourceCapacity) {
+                operation.AllocationFailed(activeAllocation);
+                return Outcome::OverBudget;
+            }
+        }
+        for (const auto& member : members.members) {
+            BindingReadAdmission bindingAdmission;
+            const Outcome bindingPreflight = PreflightBindingRead(
+                document, member.ownerLabel, operation, bindingAdmission);
+            if (bindingPreflight != Outcome::Prepared) return bindingPreflight;
             fi::Definition definition;
             std::vector<std::uint8_t> bindingBytes;
+            activeAllocation =
+                decal_layer::bake::accounting::FailureSite::BindingReadMaterialize;
+            if (!operation.EnterAllocation(activeAllocation))
+                return Outcome::OverBudget;
+#ifdef DEBUG
+            ++gDebugBindingReadEntries;
+#endif
             const auto state = fi::persistence::bindings::Read(
                 document, member.ownerLabel, definition, &bindingBytes);
             if (state == fi::persistence::bindings::ReadState::Malformed)
                 return Outcome::Malformed;
             if (state == fi::persistence::bindings::ReadState::Present) {
                 for (const auto& binding : definition.bindings) {
+                    ResourceReadAdmission readAdmission;
+                    const Outcome preflight = PreflightResourceRead(
+                        document, binding.resource, operation, readAdmission);
+                    if (preflight != Outcome::Prepared) return preflight;
                     fi::persistence::resources::Record resource;
+                    activeAllocation = decal_layer::bake::accounting::
+                        FailureSite::ResourceReadMaterialize;
+                    if (!operation.EnterAllocation(activeAllocation))
+                        return Outcome::OverBudget;
+#ifdef DEBUG
+                    ++gDebugResourceReadEntries;
+#endif
                     if (!fi::persistence::resources::Read(document, binding.resource, resource))
                         return Outcome::Malformed;
                     if (!resource.value) return Outcome::MissingResource;
@@ -464,8 +655,18 @@ Outcome CaptureSources(const Handle(TDocStd_Document)& document,
                     source.fence.colorSpace = binding.colorSpace;
                     source.fence.transform = binding.transform;
                     source.envelope = resource.value->envelope;
+                    source.originalBytesTicket =
+                        std::move(readAdmission.originalBytes);
+                    source.workingBytesTicket =
+                        std::move(readAdmission.workingBytes);
                     if (!Valid(source.fence)) return Outcome::Malformed;
-                    output.push_back(std::move(source));
+                    if (staged.values.size() >= staged.values.capacity()) {
+                        operation.AllocationFailed(
+                            decal_layer::bake::accounting::FailureSite::
+                                CapturedSourceStorage);
+                        return Outcome::OverBudget;
+                    }
+                    staged.values.push_back(std::move(source));
                 }
             }
             if (!member.painted) continue;
@@ -481,7 +682,7 @@ Outcome CaptureSources(const Handle(TDocStd_Document)& document,
             if (material.IsNull()) continue;
             const auto add = [&](const Handle(Image_Texture)& texture, Role role) -> Outcome {
                 if (texture.IsNull()) return Outcome::Prepared;
-                for (const auto& existing : output)
+                for (const auto& existing : staged.values)
                     if (existing.fence.owner == member.slot.owner && existing.fence.role == role)
                         return Outcome::Prepared;
                 CapturedSource source;
@@ -491,7 +692,13 @@ Outcome CaptureSources(const Handle(TDocStd_Document)& document,
                 if (captured == TextureCapture::Foreign) return Outcome::ForeignResource;
                 if (captured == TextureCapture::OverBudget) return Outcome::OverBudget;
                 if (captured != TextureCapture::Captured) return Outcome::MissingResource;
-                output.push_back(std::move(source)); return Outcome::Prepared;
+                if (staged.values.size() >= staged.values.capacity()) {
+                    operation.AllocationFailed(
+                        decal_layer::bake::accounting::FailureSite::
+                            CapturedSourceStorage);
+                    return Outcome::OverBudget;
+                }
+                staged.values.push_back(std::move(source)); return Outcome::Prepared;
             };
             if (material->HasCommonMaterial()) {
                 const auto added = add(material->CommonMaterial().DiffuseTexture,
@@ -516,9 +723,9 @@ Outcome CaptureSources(const Handle(TDocStd_Document)& document,
                 }
             }
         }
-        if (output.empty()) return Outcome::Refused;
-        std::sort(output.begin(), output.end(), [&](const CapturedSource& a,
-                                                    const CapturedSource& b) {
+        if (staged.empty()) return Outcome::Refused;
+        std::sort(staged.values.begin(), staged.values.end(),
+                  [&](const CapturedSource& a, const CapturedSource& b) {
             auto memberIndex = [&](const OwnerKey& key) {
                 for (std::size_t index = 0; index < members.members.size(); ++index)
                     if (members.members[index].slot.owner == key) return index;
@@ -530,8 +737,13 @@ Outcome CaptureSources(const Handle(TDocStd_Document)& document,
                 return std::uint8_t(a.fence.role) < std::uint8_t(b.fence.role);
             return a.fence.binding < b.fence.binding;
         });
+        output = std::move(staged);
         return Outcome::Prepared;
-    } catch (...) { output.clear(); return Outcome::Malformed; }
+    } catch (const std::bad_alloc&) {
+        output.reset();
+        operation.AllocationFailed(activeAllocation);
+        return Outcome::OverBudget;
+    } catch (...) { output.reset(); return Outcome::Malformed; }
 }
 
 Outcome DecodeCapturedSources(
@@ -711,6 +923,83 @@ Outcome AdoptBakedResources(const Handle(TDocStd_Document)& document,
 }
 } // namespace
 
+Outcome PreflightResourceRead(
+    const Handle(TDocStd_Document)& document,
+    const face_image::UUID& resource,
+    const decal_layer::bake::accounting::View& operation,
+    ResourceReadAdmission& admission) noexcept {
+    namespace accounting = decal_layer::bake::accounting;
+    namespace resources = face_image::persistence::resources;
+    admission.reset();
+    try {
+        if (document.IsNull() || document->GetData().IsNull()
+            || !retained_recipe::Nonzero(resource) || !operation.valid())
+            return Outcome::Malformed;
+        const TDF_Label root = document->Main().FindChild(
+            resources::RootTag, Standard_False);
+        if (root.IsNull()) return Outcome::Prepared;
+        std::size_t records = 0;
+        std::size_t serializationBytes = 0;
+        std::size_t selectedSerializationBytes = 0;
+        std::size_t originalBytes = 0;
+        std::size_t workingBytes = 0;
+        for (TDF_ChildIterator child(root, Standard_False);
+             child.More(); child.Next()) {
+            const TDF_Label label = child.Value();
+            if (!label.IsAttribute(resources::AttributeID())) continue;
+            if (!AddReadBytes(records, 1U)) return Outcome::OverBudget;
+            Handle(resources::Attribute) attribute;
+            if (!label.FindAttribute(resources::AttributeID(), attribute)
+                || attribute.IsNull() || !attribute->value())
+                continue;
+            const auto& value = attribute->value();
+            if (!AddReadBytes(serializationBytes, value->bytes.size()))
+                return Outcome::OverBudget;
+            if (value->envelope.resource == resource) {
+                admission.selected = true;
+                selectedSerializationBytes = value->bytes.size();
+                originalBytes = value->envelope.originalBytes.size();
+                workingBytes = value->envelope.workingBytes.size();
+            }
+        }
+        std::size_t tableBytes = 0;
+        if (!operation.CheckedProduct(records, sizeof(resources::Record), 1,
+                tableBytes, accounting::FailureSite::ResourceTableScratch)
+            || !AddReadBytes(serializationBytes, selectedSerializationBytes))
+            return Outcome::OverBudget;
+        if (!admission.table.acquire(operation,
+                accounting::StorageDimension::PrivateStorage, tableBytes,
+                accounting::Retention::Scratch,
+                accounting::FailureSite::ResourceTableScratch)
+            || !admission.serialization.acquire(operation,
+                accounting::StorageDimension::EncodedTexture,
+                serializationBytes, accounting::Retention::Scratch,
+                accounting::FailureSite::ResourceSerializationScratch))
+            return Outcome::OverBudget;
+        if (admission.selected
+            && (!admission.originalBytes.acquire(operation,
+                    accounting::StorageDimension::EncodedTexture,
+                    originalBytes, accounting::Retention::Retained,
+                    accounting::FailureSite::SourceOriginalBytes)
+                || !admission.workingBytes.acquire(operation,
+                    accounting::StorageDimension::EncodedTexture,
+                    workingBytes, accounting::Retention::Retained,
+                    accounting::FailureSite::SourceWorkingBytes))) {
+            admission.reset();
+            return Outcome::OverBudget;
+        }
+        return Outcome::Prepared;
+    } catch (const std::bad_alloc&) {
+        admission.reset();
+        operation.AllocationFailed(
+            accounting::FailureSite::ResourceTableScratch);
+        return Outcome::OverBudget;
+    } catch (...) {
+        admission.reset();
+        return Outcome::Malformed;
+    }
+}
+
 #ifdef DEBUG
 void DebugDenyCaptureSourcesAtOrdinal(std::size_t ordinal) noexcept
 {
@@ -722,6 +1011,83 @@ void DebugClearCaptureSourcesDenial() noexcept
 {
     gDebugCaptureSourceOrdinal = 0;
     gDebugDenyCaptureSourceOrdinal = 0;
+}
+
+DebugCaptureReadEvidence DebugExerciseE4CaptureReadPreflight(
+    const Handle(TDocStd_Document)& document,
+    const aa::Key& key) noexcept {
+    DebugCaptureReadEvidence evidence;
+    try {
+        aa::persistence::Record atlas;
+        if (document.IsNull() || document->HasOpenCommand()
+            || !aa::persistence::Read(document, key, atlas) || !atlas.value)
+            return evidence;
+        std::vector<OwnerKey> owners;
+        for (const auto& member : atlas.value->definition.members)
+            owners.push_back(member.owner);
+        aa::Capture members;
+        if (!aa::build::CaptureMembers(document, owners, members))
+            return evidence;
+
+        auto operation = decal_layer::bake::accounting::MakeOperationOwner();
+        CapturedSourceStorage captured;
+        gDebugBindingReadEntries = 0;
+        gDebugResourceReadEntries = 0;
+        evidence.normalCaptured = operation.valid()
+            && CaptureSources(document, members, captured, operation.view)
+                == Outcome::Prepared
+            && gDebugBindingReadEntries != 0
+            && gDebugResourceReadEntries != 0;
+        evidence.capturedVectorPreflighted = captured.size() != 0
+            && captured.values.capacity() >= captured.size();
+        evidence.capturedVectorTicketRetained =
+            captured.vectorTicket.bytes
+                == captured.values.capacity() * sizeof(CapturedSource)
+            && captured.vectorTicket.retention
+                == decal_layer::bake::accounting::Retention::Retained;
+        for (const auto& member : members.members) {
+            fi::Definition definition;
+            std::vector<std::uint8_t> canonical;
+            if (fi::persistence::bindings::Read(document, member.ownerLabel,
+                    definition, &canonical)
+                    != fi::persistence::bindings::ReadState::Present)
+                continue;
+            evidence.bindingBytesPreserved =
+                !canonical.empty() && !definition.bindings.empty();
+            for (const auto& source : captured) {
+                fi::persistence::resources::Record record;
+                if (!fi::persistence::resources::Read(
+                        document, source.fence.resource, record)
+                    || !record.value) continue;
+                if (source.envelope == record.value->envelope) {
+                    evidence.envelopeBytesPreserved = true;
+                    evidence.ticketsRetained =
+                        source.originalBytesTicket.bytes
+                            == source.envelope.originalBytes.size()
+                        && source.workingBytesTicket.bytes
+                            == source.envelope.workingBytes.size();
+                }
+            }
+        }
+
+        auto deniedOperation =
+            decal_layer::bake::accounting::MakeOperationOwner();
+        CapturedSourceStorage denied;
+        gDebugBindingReadEntries = 0;
+        gDebugResourceReadEntries = 0;
+        gDebugDenyCaptureReadPreflight = true;
+        const Outcome deniedOutcome = CaptureSources(
+            document, members, denied, deniedOperation.view);
+        gDebugDenyCaptureReadPreflight = false;
+        evidence.deniedOverBudget =
+            deniedOutcome == Outcome::OverBudget && denied.empty();
+        evidence.deniedBeforeBindingRead = gDebugBindingReadEntries == 0;
+        evidence.deniedBeforeResourceRead = gDebugResourceReadEntries == 0;
+        return evidence;
+    } catch (...) {
+        gDebugDenyCaptureReadPreflight = false;
+        return {};
+    }
 }
 
 DebugSourceStorageEvidence DebugExerciseE4SourceStorage(
@@ -741,7 +1107,7 @@ DebugSourceStorageEvidence DebugExerciseE4SourceStorage(
         if (!aa::build::CaptureMembers(document, owners, members)) return evidence;
 
         auto operation = decal_layer::bake::accounting::MakeOperationOwner();
-        std::vector<CapturedSource> captured;
+        CapturedSourceStorage captured;
         gDebugSourceStorage = {};
         if (!operation.valid()
             || CaptureSources(document, members, captured, operation.view)
@@ -775,7 +1141,7 @@ DebugSourceStorageEvidence DebugExerciseE4SourceStorage(
 
         kernel::SourceStorage decoded;
         evidence.decoded = DecodeCapturedSources(
-                captured, operation.view, decoded) == Outcome::Prepared
+                captured.values, operation.view, decoded) == Outcome::Prepared
             && !decoded.values.empty()
             && fi::HashFaceImageBytes(
                 decoded.values.front().image.rgba, evidence.decodedPixels);
@@ -784,7 +1150,7 @@ DebugSourceStorageEvidence DebugExerciseE4SourceStorage(
         const auto deniedCapture = [&](Site site) {
             auto deniedOperation =
                 decal_layer::bake::accounting::MakeOperationOwner();
-            std::vector<CapturedSource> refused;
+            CapturedSourceStorage refused;
             gDebugSourceStorage = {};
             gDebugSourceStorage.deny = site;
             const auto outcome = CaptureSources(
@@ -802,7 +1168,7 @@ DebugSourceStorageEvidence DebugExerciseE4SourceStorage(
 
         auto vectorOperation =
             decal_layer::bake::accounting::MakeOperationOwner();
-        std::vector<CapturedSource> vectorCaptured;
+        CapturedSourceStorage vectorCaptured;
         gDebugSourceStorage = {};
         if (CaptureSources(document, members, vectorCaptured,
                 vectorOperation.view) == Outcome::Prepared) {
@@ -810,7 +1176,7 @@ DebugSourceStorageEvidence DebugExerciseE4SourceStorage(
             gDebugSourceStorage = {};
             gDebugSourceStorage.deny = Site::SourceVectorStorage;
             evidence.vectorDeniedBeforeEntry = DecodeCapturedSources(
-                    vectorCaptured, vectorOperation.view, refused)
+                    vectorCaptured.values, vectorOperation.view, refused)
                     == Outcome::OverBudget
                 && refused.values.empty()
                 && gDebugSourceStorage.attempts[3] == 1
@@ -904,7 +1270,7 @@ Outcome Prepare(Staging& staging, const Handle(TDocStd_Document)& document,
                                        staging.observedMembers)) return Outcome::StaleSource;
         kernel::SourceStorage sources;
         const auto decoded = DecodeCapturedSources(
-            staging.capturedSources, staging.operation.view, sources);
+            staging.capturedSources.values, staging.operation.view, sources);
         if (decoded != Outcome::Prepared) return decoded;
         if (!kernel::Bake(staging.atlas, layout, sources.values, staging.outputs,
                           staging.evidence)) return Outcome::Refused;
@@ -934,50 +1300,62 @@ Outcome Commit(Staging& staging, const Handle(TDocStd_Document)& document) noexc
         aa::Capture capture;
         std::vector<OwnerKey> owners;
         for (const auto& member : staging.atlas.members) owners.push_back(member.owner);
-        std::vector<CapturedSource> sources;
+        CapturedSourceStorage sources;
+        const auto resetStaging = [&]() noexcept {
+            // The local recapture tickets borrow staging.operation. Release
+            // them before the staging reset destroys that owner.
+            sources.reset();
+            staging = {};
+        };
         if (!aa::build::CaptureMembers(document, owners, capture)) {
             staging = {}; return Outcome::StaleSource;
         }
         const Outcome recaptured = CaptureSources(document, capture, sources,
             staging.operation.view);
         if (recaptured == Outcome::OverBudget) {
-            staging = {}; return Outcome::OverBudget;
+            resetStaging(); return Outcome::OverBudget;
         }
         if (recaptured == Outcome::MissingResource || recaptured == Outcome::ForeignResource
             || recaptured == Outcome::Malformed) {
-            staging = {}; return recaptured;
+            resetStaging(); return recaptured;
         }
-        if (recaptured != Outcome::Prepared || !SameCapture(staging.capturedSources, sources)) {
-            staging = {}; return Outcome::StaleBinding;
+        if (recaptured != Outcome::Prepared
+            || !SameCapture(staging.capturedSources.values, sources.values)) {
+            resetStaging(); return Outcome::StaleBinding;
         }
-        if (staging.unchanged) { staging = {}; return Outcome::Committed; }
+        if (staging.unchanged) { resetStaging(); return Outcome::Committed; }
         // The bake never silently rewrites the atlas: the rebuilt SYEA/1 is
         // recommitted only when its canonical bytes actually changed.
         std::vector<std::uint8_t> atlasBytes;
-        if (!aa::Encode(staging.atlas, atlasBytes)) { staging = {}; return Outcome::Malformed; }
+        if (!aa::Encode(staging.atlas, atlasBytes)) {
+            resetStaging(); return Outcome::Malformed;
+        }
         if (atlasBytes != staging.priorAtlasBytes) {
             aa::owner::Staging atlasStaging;
             auto atlasOutcome = aa::owner::Prepare(atlasStaging, document, staging.atlas,
                                                    staging.assignments, members);
             if (atlasOutcome != aa::owner::Outcome::Prepared) {
-                staging = {}; return atlasOutcome == aa::owner::Outcome::StaleSource
+                resetStaging();
+                return atlasOutcome == aa::owner::Outcome::StaleSource
                     ? Outcome::StaleSource : Outcome::PersistenceFailure;
             }
             atlasOutcome = aa::owner::Commit(atlasStaging, document, members);
             if (atlasOutcome != aa::owner::Outcome::Committed) {
-                aa::owner::Cancel(atlasStaging); staging = {};
+                aa::owner::Cancel(atlasStaging); resetStaging();
                 return Outcome::PersistenceFailure;
             }
         }
         const Outcome adopted = AdoptBakedResources(document, staging.outputs);
-        if (adopted != Outcome::Committed) { staging = {}; return adopted; }
+        if (adopted != Outcome::Committed) {
+            resetStaging(); return adopted;
+        }
         // A re-bake replaces, rather than accumulates, this atlas's derivative
         // resources. Remove superseded identities in the same OCAF command,
         // but retain any identity still named by another SYEB record or a
         // committed SYFI binding.
         std::vector<persistence::Record> bakeRecords;
         if (!persistence::ReadAll(document, bakeRecords)) {
-            staging = {}; return Outcome::PersistenceFailure;
+            resetStaging(); return Outcome::PersistenceFailure;
         }
         for (const auto& priorResource : staging.priorBakeResources) {
             bool current = false;
@@ -998,13 +1376,13 @@ Outcome Commit(Staging& staging, const Handle(TDocStd_Document)& document) noexc
                 document, UUIDFromDigest(priorResource.identity));
             if (removed != fi::owner::Outcome::Committed
                 && removed != fi::owner::Outcome::Refused) {
-                staging = {}; return Outcome::PersistenceFailure;
+                resetStaging(); return Outcome::PersistenceFailure;
             }
         }
         if (!persistence::StageCommitted(document, staging.bake)) {
-            staging = {}; return Outcome::PersistenceFailure;
+            resetStaging(); return Outcome::PersistenceFailure;
         }
-        staging = {}; return Outcome::Committed;
+        resetStaging(); return Outcome::Committed;
     } catch (...) { staging = {}; return Outcome::PersistenceFailure; }
 }
 
@@ -1112,7 +1490,7 @@ Outcome BakeForExport(const ExportCapture& capture,
         }
         kernel::SourceStorage sources;
         const auto decoded = DecodeCapturedSources(
-            capture.sources, capture.operation.view, sources);
+            capture.sources.values, capture.operation.view, sources);
         if (decoded != Outcome::Prepared) return decoded;
         output.atlas = finalAtlas;
         output.assignments = assignments;
@@ -1270,7 +1648,7 @@ Outcome Currentness(const Handle(TDocStd_Document)& document, const aa::Key& key
         for (const auto& member : atlas.value->definition.members) owners.push_back(member.owner);
         aa::Capture capture;
         if (!aa::build::CaptureMembers(document, owners, capture)) return Outcome::StaleSource;
-        std::vector<CapturedSource> sources;
+        CapturedSourceStorage sources;
         const Outcome captured = CaptureSources(document, capture, sources,
             operation.view);
         if (captured == Outcome::OverBudget) return Outcome::OverBudget;

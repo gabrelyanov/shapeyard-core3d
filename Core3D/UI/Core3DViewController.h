@@ -667,6 +667,22 @@ __attribute__((objc_subclassing_restricted))
 //! observation is value-only and records attempt/entry/denial counts.
 - (void)debugDenyNextE4SourceVectorReservation;
 - (nullable NSDictionary<NSString *,id> *)debugTakeE4SourceVectorReservationObservation;
+//! Traces real SYFI/resource reads and a denial before either strict reader
+//! enters its first materializing allocation.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4CaptureReadPreflightForEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugE4CaptureReadPreflight(entityIdentifier:));
+//! Independently drives ResolveDecalImage with a real persisted resource and
+//! a ledger that denies its resource-read preflight.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4ResolveDecalImageReadPreflightForEntityIdentifier:
+        (NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugE4ResolveDecalImageReadPreflight(entityIdentifier:));
+//! Runs the shared FV validator against an oversized-header derivative and
+//! the unchanged valid persisted bytes.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4FaceImageValidationForResourceBytes:(NSData *)resourceBytes
+    NS_SWIFT_NAME(debugE4FaceImageValidation(resourceBytes:));
 //! UI-test fixture: asset data for the frozen E2 two-part box/cylinder atlas
 //! fixture in the requested unit system. nil on any failure; never mutates an
 //! open document.

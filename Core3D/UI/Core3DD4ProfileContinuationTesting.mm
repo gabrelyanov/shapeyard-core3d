@@ -9,6 +9,7 @@
 #include "../OCCTKit/NativePhysicalWorkingFrame.hxx"
 #include "../OCCTKit/NativeOpeningDependentReplay.hxx"
 #include "../OCCTKit/RetainedBooleanProgram.hxx"
+#include "../OCCTKit/RetainedEdgeTreatmentBuild.hxx"
 #include "../OCCTKit/RetainedEdgeTreatmentSnapshot.hxx"
 
 #include <BRepBuilderAPI_Copy.hxx>
@@ -857,6 +858,28 @@ extern "C" void *Core3DDebugPhysicalWorkingFrameEmptyCentimetreDocumentSeed() {
         [NSFileManager.defaultManager removeItemAtPath:xbf error:nil];
         return result ? (__bridge_retained void *)result : nullptr;
     }
+}
+
+extern "C" void Core3DDebugWorkingScaleClear() {
+    core3d::retained_edge_treatment::working_scale_debug::Clear();
+}
+
+extern "C" void *Core3DDebugWorkingScaleTake() {
+    NSMutableArray *result = [NSMutableArray array];
+    for (const auto& value :
+         core3d::retained_edge_treatment::working_scale_debug::Take()) {
+        [result addObject:@{
+            @"metersPerLocalUnit": @(value.metersPerLocalUnit),
+            @"amountMM": @(value.amountMM),
+            @"workingExtentsMM": @[@(value.extentXMM), @(value.extentYMM),
+                                     @(value.extentZMM)],
+            @"inputVolumeMM3": @(value.inputVolumeMM3),
+            @"outputVolumeMM3": @(value.outputVolumeMM3),
+            @"chamfer": @(value.chamfer), @"valid": @(value.valid),
+            @"accepted": @(value.accepted), @"transformed": @(value.transformed),
+        }];
+    }
+    return (__bridge_retained void *)result;
 }
 
 extern "C" uint64_t Core3DDebugD4ProfileContinuationContractProbe(

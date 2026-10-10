@@ -72,6 +72,34 @@ MultiStationDefinition StationDefinition(double unit) {
     return value;
 }
 
+OrientedEdgeAnchor ReversedAnchor(double scale) {
+    OrientedEdgeAnchor edge = Anchor(scale);
+    edge.orientation = Orientation::Reversed;
+    std::swap(edge.startLocal, edge.endLocal);
+    return edge;
+}
+
+Definition ReversedLinearDefinition(double unit) {
+    Definition value = LinearDefinition(unit);
+    std::swap(value.stations[0], value.stations[1]);
+    value.stations[0].parameter = 0;
+    value.stations[1].parameter = 1;
+    value.edges[0] = ReversedAnchor(0.001 / unit);
+    return value;
+}
+
+MultiStationDefinition ReversedStationDefinition(double unit) {
+    MultiStationDefinition value = StationDefinition(unit);
+    std::reverse(value.stations.begin(), value.stations.end());
+    for (std::size_t index = 0; index < value.stations.size(); ++index)
+        value.stations[index].parameter = double(index) / 4;
+    OrientedEdgeAnchor edge = ReversedAnchor(0.001 / unit);
+    edge.identifier = UUIDValue(20);
+    edge.selectorProof = DigestValue(21);
+    value.edges[0] = edge;
+    return value;
+}
+
 template<class DefinitionType>
 bool DefinitionBytes(const DefinitionType& definition,
                      std::vector<std::uint8_t>& bytes) {
@@ -92,10 +120,12 @@ CaseResult<DefinitionType> RunCase(const TopoDS_Shape& source,
                                    const DefinitionType& definition,
                                    Builder builder) {
     CaseResult<DefinitionType> observed;
+    const DefinitionType definitionBeforeValue = definition;
     std::vector<std::uint8_t> sourceBefore, sourceAfter;
     std::vector<std::uint8_t> definitionBefore, definitionAfter;
-    if (!core3d::variable_radius_fillet::detail::exactShapeBytes(source, sourceBefore)
-        || !DefinitionBytes(definition, definitionBefore)) return observed;
+    if (!core3d::variable_radius_fillet::detail::exactShapeBytes(source, sourceBefore))
+        return observed;
+    const bool definitionEncoded = DefinitionBytes(definition, definitionBefore);
     DebugBuildObservation debug;
     DebugBuildObservation* previous = debugBuildObservation;
     debugBuildObservation = &debug;
@@ -106,8 +136,9 @@ CaseResult<DefinitionType> RunCase(const TopoDS_Shape& source,
     observed.sourceUnchanged =
         core3d::variable_radius_fillet::detail::exactShapeBytes(source, sourceAfter)
         && sourceBefore == sourceAfter;
-    observed.definitionUnchanged = DefinitionBytes(definition, definitionAfter)
-        && definitionBefore == definitionAfter;
+    observed.definitionUnchanged = definitionEncoded
+        ? DefinitionBytes(definition, definitionAfter) && definitionBefore == definitionAfter
+        : definition == definitionBeforeValue;
     return observed;
 }
 
@@ -462,7 +493,9 @@ NSDictionary *LawObservation(const DebugRealizedLawObservation& law) {
             @"extremumParameter": @(span.extremumParameter),
             @"extremumDerivative": @(span.extremumDerivative),
             @"minimumDerivative": @(span.minimumDerivative),
-            @"maximumDerivative": @(span.maximumDerivative)
+            @"maximumDerivative": @(span.maximumDerivative),
+            @"authoredMinimumDerivative": @(span.authoredMinimumDerivative),
+            @"authoredMaximumDerivative": @(span.authoredMaximumDerivative)
         }];
     }
     NSMutableArray<NSDictionary *> *joins = [NSMutableArray array];
@@ -484,8 +517,11 @@ NSDictionary *LawObservation(const DebugRealizedLawObservation& law) {
         @"noConstantSpan": @(law.noConstantSpan),
         @"physicalBounds": @[@(law.physicalFirst), @(law.physicalLast)],
         @"reportedBounds": @[@(law.boundsFirst), @(law.boundsLast)],
+        @"authoredBounds": @[@(law.authoredFirst), @(law.authoredLast)],
         @"stationParameters": Numbers(law.stationParameters),
         @"stationRadii": Numbers(law.stationRadii),
+        @"nativeStationParameters": Numbers(law.nativeStationParameters),
+        @"nativeStationRadii": Numbers(law.nativeStationRadii),
         @"sampleParameters": Numbers(law.sampleParameters),
         @"samplePositionsZ": Numbers(law.samplePositionsZ),
         @"sampleValues": Numbers(law.sampleValues),
@@ -495,6 +531,30 @@ NSDictionary *LawObservation(const DebugRealizedLawObservation& law) {
         @"pieces": pieces,
         @"spans": spans,
         @"joins": joins
+    };
+}
+
+NSDictionary *MultiStationLawObservation(
+    const DebugMultiStationLawObservation& law) {
+    NSMutableArray<NSDictionary *> *stations = [NSMutableArray array];
+    for (const auto& station : law.stations) {
+        [stations addObject:@{
+            @"identifier": DataValue(std::vector<std::uint8_t>(
+                station.identifier.begin(), station.identifier.end())),
+            @"authoredParameter": @(station.authoredParameter),
+            @"nativeNormalizedParameter": @(station.nativeNormalizedParameter),
+            @"nativeParameter": @(station.nativeParameter),
+            @"radius": @(station.radius),
+            @"physicalZ": @(station.physicalZ),
+            @"realizedRadius": @(station.realizedRadius)
+        }];
+    }
+    return @{
+        @"attempted": @(law.attempted),
+        @"exception": @(law.exception),
+        @"physicalBounds": @[@(law.physicalFirst), @(law.physicalLast)],
+        @"authoredBounds": @[@(law.authoredFirst), @(law.authoredLast)],
+        @"stations": stations
     };
 }
 
@@ -638,6 +698,189 @@ NSDictionary *ObserveRealizedLaw(double unit) {
         @"budgetReason": [NSString stringWithUTF8String:Reason(budgetRefusal)]
     };
 }
+
+NSArray<NSDictionary *> *LawObservations(const DebugBuildObservation& debug) {
+    NSMutableArray<NSDictionary *> *result = [NSMutableArray array];
+    for (const auto& law : debug.realizedLaws)
+        [result addObject:LawObservation(law)];
+    return result;
+}
+
+NSArray<NSDictionary *> *MultiLawObservations(const DebugBuildObservation& debug) {
+    NSMutableArray<NSDictionary *> *result = [NSMutableArray array];
+    for (const auto& law : debug.multiStationLaws)
+        [result addObject:MultiStationLawObservation(law)];
+    return result;
+}
+
+NSDictionary *SectionsObservation(const BuildResult& result) {
+    NSMutableArray<NSNumber *> *parameters = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *expected = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *measured = [NSMutableArray array];
+    for (const auto& section : result.evidence.sections) {
+        [parameters addObject:@(section.parameter)];
+        [expected addObject:@(section.expectedRadiusLocal)];
+        [measured addObject:@(section.measuredRadiusLocal)];
+    }
+    return @{@"parameters": parameters, @"expected": expected, @"measured": measured};
+}
+
+NSDictionary *ObserveReversedMapping(double unit) {
+    const double scale = 0.001 / unit;
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(
+        30 * scale, 30 * scale, 40 * scale).Shape();
+    const std::atomic_bool running{false};
+    const std::atomic_bool cancelledFlag{true};
+    const Definition forward = LinearDefinition(unit);
+    const Definition reversed = ReversedLinearDefinition(unit);
+    const MultiStationDefinition forwardMulti = StationDefinition(unit);
+    const MultiStationDefinition reversedMulti = ReversedStationDefinition(unit);
+
+    const auto buildLinear = [&](const TopoDS_Shape& source, const Definition& value) {
+        return BuildDeterministically(source, value, running);
+    };
+    const auto buildMulti = [&](const TopoDS_Shape& source,
+                                const MultiStationDefinition& value) {
+        return BuildMultiStationDeterministically(source, value, running);
+    };
+    const auto forwardA = RunCase(box, forward, buildLinear);
+    const auto forwardB = RunCase(box, forward, buildLinear);
+    const auto reversedA = RunCase(box, reversed, buildLinear);
+    const auto reversedB = RunCase(box, reversed, buildLinear);
+    const auto forwardMultiA = RunCase(box, forwardMulti, buildMulti);
+    const auto forwardMultiB = RunCase(box, forwardMulti, buildMulti);
+    const auto reversedMultiA = RunCase(box, reversedMulti, buildMulti);
+    const auto reversedMultiB = RunCase(box, reversedMulti, buildMulti);
+
+    Definition reversedBoth = reversed;
+    reversedBoth.edges[0].normalA = {{1, 0, 0}};
+    reversedBoth.edges[0].normalB = {{0, 1, 0}};
+    Definition reversedAFlip = reversed;
+    reversedAFlip.edges[0].normalA = {{1, 0, 0}};
+    Definition reversedBFlip = reversed;
+    reversedBFlip.edges[0].normalB = {{0, 1, 0}};
+    MultiStationDefinition reversedMultiBoth = reversedMulti;
+    reversedMultiBoth.edges[0].normalA = {{1, 0, 0}};
+    reversedMultiBoth.edges[0].normalB = {{0, 1, 0}};
+    MultiStationDefinition reversedMultiAFlip = reversedMulti;
+    reversedMultiAFlip.edges[0].normalA = {{1, 0, 0}};
+    MultiStationDefinition reversedMultiBFlip = reversedMulti;
+    reversedMultiBFlip.edges[0].normalB = {{0, 1, 0}};
+
+    const auto rejectLinear = [&](const Definition& value) {
+        return RunCase(box, value,
+            [&](const TopoDS_Shape& source, const Definition& candidate) {
+                return Build(source, candidate, running);
+            });
+    };
+    const auto rejectMulti = [&](const MultiStationDefinition& value) {
+        return RunCase(box, value,
+            [&](const TopoDS_Shape& source, const MultiStationDefinition& candidate) {
+                return BuildMultiStation(source, candidate, running);
+            });
+    };
+    const auto normalLinearBoth = rejectLinear(reversedBoth);
+    const auto normalLinearA = rejectLinear(reversedAFlip);
+    const auto normalLinearB = rejectLinear(reversedBFlip);
+    const auto normalMultiBoth = rejectMulti(reversedMultiBoth);
+    const auto normalMultiA = rejectMulti(reversedMultiAFlip);
+    const auto normalMultiB = rejectMulti(reversedMultiBFlip);
+
+    Definition malformed = forward;
+    malformed.edges[0].orientation = Orientation::Reversed;
+    MultiStationDefinition malformedMulti = forwardMulti;
+    malformedMulti.edges[0].orientation = Orientation::Reversed;
+    const auto malformedLinear = rejectLinear(malformed);
+    const auto malformedStations = rejectMulti(malformedMulti);
+    const TopoDS_Shape changedLength = BRepPrimAPI_MakeBox(
+        30 * scale, 30 * scale, 50 * scale).Shape();
+    const auto lengthDrift = RunCase(changedLength, reversed,
+        [&](const TopoDS_Shape& source, const Definition& value) {
+            return Build(source, value, running);
+        });
+    const auto missing = RunCase(TranslatedBox(scale), reversed,
+        [&](const TopoDS_Shape& source, const Definition& value) {
+            return Build(source, value, running);
+        });
+    const auto cancelledLinear = RunCase(box, reversed,
+        [&](const TopoDS_Shape& source, const Definition& value) {
+            return Build(source, value, cancelledFlag);
+        });
+    const auto cancelledMulti = RunCase(box, reversedMulti,
+        [&](const TopoDS_Shape& source, const MultiStationDefinition& value) {
+            return BuildMultiStation(source, value, cancelledFlag);
+        });
+
+    Refusal validation = Refusal::KernelFailure;
+    const bool forwardValid = Validate(forward, validation) && validation == Refusal::None;
+    const bool reversedValid = Validate(reversed, validation) && validation == Refusal::None;
+    const bool forwardMultiValid = Validate(forwardMulti, validation)
+        && validation == Refusal::None;
+    const bool reversedMultiValid = Validate(reversedMulti, validation)
+        && validation == Refusal::None;
+
+    std::vector<std::uint8_t> forwardBytes, reversedBytes;
+    std::vector<std::uint8_t> forwardMultiBytes, reversedMultiBytes;
+    const bool encoded = Encode(forward, forwardBytes) && Encode(reversed, reversedBytes)
+        && Encode(forwardMulti, forwardMultiBytes) && Encode(reversedMulti, reversedMultiBytes);
+
+    return @{
+        @"bridgeVersion": @1,
+        @"linkedOCCT": @OCC_VERSION_COMPLETE,
+        @"metersPerLocalUnit": @(unit),
+        @"scale": @(scale),
+        @"forwardValid": @(forwardValid),
+        @"reversedValid": @(reversedValid),
+        @"forwardMultiValid": @(forwardMultiValid),
+        @"reversedMultiValid": @(reversedMultiValid),
+        @"encoded": @(encoded),
+        @"forwardBytes": DataValue(forwardBytes),
+        @"reversedBytes": DataValue(reversedBytes),
+        @"forwardMultiBytes": DataValue(forwardMultiBytes),
+        @"reversedMultiBytes": DataValue(reversedMultiBytes),
+        @"sourceBytes": DataValue(ShapeBytes(box)),
+        @"forwardA": CaseObservation(forwardA),
+        @"forwardB": CaseObservation(forwardB),
+        @"reversedA": CaseObservation(reversedA),
+        @"reversedB": CaseObservation(reversedB),
+        @"forwardMultiA": CaseObservation(forwardMultiA),
+        @"forwardMultiB": CaseObservation(forwardMultiB),
+        @"reversedMultiA": CaseObservation(reversedMultiA),
+        @"reversedMultiB": CaseObservation(reversedMultiB),
+        @"forwardCandidateA": DataValue(ShapeBytes(forwardA.build.solid)),
+        @"forwardCandidateB": DataValue(ShapeBytes(forwardB.build.solid)),
+        @"reversedCandidateA": DataValue(ShapeBytes(reversedA.build.solid)),
+        @"reversedCandidateB": DataValue(ShapeBytes(reversedB.build.solid)),
+        @"forwardMultiCandidateA": DataValue(ShapeBytes(forwardMultiA.build.solid)),
+        @"forwardMultiCandidateB": DataValue(ShapeBytes(forwardMultiB.build.solid)),
+        @"reversedMultiCandidateA": DataValue(ShapeBytes(reversedMultiA.build.solid)),
+        @"reversedMultiCandidateB": DataValue(ShapeBytes(reversedMultiB.build.solid)),
+        @"forwardLawsA": LawObservations(forwardA.debug),
+        @"forwardLawsB": LawObservations(forwardB.debug),
+        @"reversedLawsA": LawObservations(reversedA.debug),
+        @"reversedLawsB": LawObservations(reversedB.debug),
+        @"forwardMultiLawsA": MultiLawObservations(forwardMultiA.debug),
+        @"forwardMultiLawsB": MultiLawObservations(forwardMultiB.debug),
+        @"reversedMultiLawsA": MultiLawObservations(reversedMultiA.debug),
+        @"reversedMultiLawsB": MultiLawObservations(reversedMultiB.debug),
+        @"forwardSections": SectionsObservation(forwardA.build),
+        @"reversedSections": SectionsObservation(reversedA.build),
+        @"forwardMultiSections": SectionsObservation(forwardMultiA.build),
+        @"reversedMultiSections": SectionsObservation(reversedMultiA.build),
+        @"normalLinearBoth": CaseObservation(normalLinearBoth),
+        @"normalLinearA": CaseObservation(normalLinearA),
+        @"normalLinearB": CaseObservation(normalLinearB),
+        @"normalMultiBoth": CaseObservation(normalMultiBoth),
+        @"normalMultiA": CaseObservation(normalMultiA),
+        @"normalMultiB": CaseObservation(normalMultiB),
+        @"malformedLinear": CaseObservation(malformedLinear),
+        @"malformedMulti": CaseObservation(malformedStations),
+        @"lengthDrift": CaseObservation(lengthDrift),
+        @"missing": CaseObservation(missing),
+        @"cancelledLinear": CaseObservation(cancelledLinear),
+        @"cancelledMulti": CaseObservation(cancelledMulti)
+    };
+}
 } // namespace
 
 extern "C" void *Core3DDebugB3F01RealizedLawObserve(double unit) {
@@ -647,6 +890,21 @@ extern "C" void *Core3DDebugB3F01RealizedLawObserve(double unit) {
         } catch (...) {
             NSDictionary *failure = @{
                 @"bridgeVersion": @2,
+                @"bridgeException": @YES,
+                @"metersPerLocalUnit": @(unit)
+            };
+            return (__bridge_retained void *)failure;
+        }
+    }
+}
+
+extern "C" void *Core3DDebugB3REVOrientedBoundsAndRadiiObserve(double unit) {
+    @autoreleasepool {
+        try {
+            return (__bridge_retained void *)ObserveReversedMapping(unit);
+        } catch (...) {
+            NSDictionary *failure = @{
+                @"bridgeVersion": @1,
                 @"bridgeException": @YES,
                 @"metersPerLocalUnit": @(unit)
             };

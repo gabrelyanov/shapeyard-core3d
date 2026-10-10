@@ -71,6 +71,15 @@ enum class FailureSite : std::uint8_t {
     SourceOriginalBytes,
     SourceIdentityBytes,
     SourceVectorStorage,
+    BindingReadScratch,
+    BindingReadMaterialize,
+    ResourceTableScratch,
+    ResourceSerializationScratch,
+    ResourceReadMaterialize,
+    CapturedSourceStorage,
+    FaceImageValidationSource,
+    FaceImageValidationDecoded,
+    FaceImageValidationDecode,
     DebugExactLimit,
     DebugOneUnit,
     DebugCheckedProduct,
@@ -288,6 +297,8 @@ struct Triangle final {
 struct ResolvedImage final {
     ImageRef reference;
     face_image::ResourceEnvelope envelope;
+    accounting::Ticket originalBytesTicket;
+    accounting::Ticket workingBytesTicket;
     accounting::Ticket pixelTicket;
     Raster pixels;
     // Set only by the Objective-C++ adapter after measuring both carried
@@ -300,11 +311,14 @@ struct ResolvedImage final {
     ResolvedImage(const ResolvedImage&) = delete;
     ResolvedImage& operator=(const ResolvedImage&) = delete;
     ResolvedImage(ResolvedImage&& other) noexcept { *this = std::move(other); }
+    ~ResolvedImage() { reset(); }
     ResolvedImage& operator=(ResolvedImage&& other) noexcept {
         if (this != &other) {
             reset();
             reference = std::move(other.reference);
             envelope = std::move(other.envelope);
+            originalBytesTicket = std::move(other.originalBytesTicket);
+            workingBytesTicket = std::move(other.workingBytesTicket);
             pixels = std::move(other.pixels);
             pixelTicket = std::move(other.pixelTicket);
             originalMeasured = other.originalMeasured;
@@ -323,6 +337,8 @@ struct ResolvedImage final {
         pixelTicket.reset();
         reference = {};
         envelope = {};
+        originalBytesTicket.reset();
+        workingBytesTicket.reset();
         originalMeasured = false;
         workingMeasured = false;
         workingHasAlpha = false;
