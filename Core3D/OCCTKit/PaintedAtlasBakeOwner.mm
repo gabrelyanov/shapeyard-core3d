@@ -11,6 +11,9 @@
 #include <XCAFDoc_VisMaterial.hxx>
 #include <XCAFDoc_VisMaterialTool.hxx>
 
+#ifdef DEBUG
+#include <atomic>
+#endif
 #include <new>
 
 namespace core3d::painted_atlas_bake::kernel {
@@ -232,7 +235,72 @@ namespace aa = core3d::asset_atlas;
 #ifdef DEBUG
 thread_local std::size_t gDebugCaptureSourceOrdinal = 0;
 thread_local std::size_t gDebugDenyCaptureSourceOrdinal = 0;
+struct DebugSourceStorageState final {
+    decal_layer::bake::accounting::FailureSite deny =
+        decal_layer::bake::accounting::FailureSite::None;
+    std::array<std::size_t, 4> attempts{};
+    std::array<std::size_t, 4> entries{};
+    std::array<std::size_t, 4> denials{};
+};
+thread_local DebugSourceStorageState gDebugSourceStorage;
+std::atomic_bool gDebugDenyNextPrivateSourceVectorReservation{false};
+std::atomic_size_t gDebugPrivateSourceVectorAttempts{0};
+std::atomic_size_t gDebugPrivateSourceVectorEntries{0};
+std::atomic_size_t gDebugPrivateSourceVectorDenials{0};
+
+std::size_t DebugSourceStorageIndex(
+    decal_layer::bake::accounting::FailureSite site) noexcept {
+    using Site = decal_layer::bake::accounting::FailureSite;
+    switch (site) {
+        case Site::SourceWorkingBytes: return 0;
+        case Site::SourceOriginalBytes: return 1;
+        case Site::SourceIdentityBytes: return 2;
+        case Site::SourceVectorStorage: return 3;
+        default: return 0;
+    }
+}
 #endif
+
+bool AcquireSourceStorage(
+    decal_layer::bake::accounting::Ticket& ticket,
+    const decal_layer::bake::accounting::View& operation,
+    decal_layer::bake::accounting::StorageDimension dimension,
+    std::size_t bytes,
+    decal_layer::bake::accounting::Retention retention,
+    decal_layer::bake::accounting::FailureSite site) noexcept {
+#ifdef DEBUG
+    const std::size_t debugIndex = DebugSourceStorageIndex(site);
+    ++gDebugSourceStorage.attempts[debugIndex];
+    const bool privateSourceVector =
+        site == decal_layer::bake::accounting::FailureSite::SourceVectorStorage;
+    if (privateSourceVector)
+        gDebugPrivateSourceVectorAttempts.fetch_add(1, std::memory_order_relaxed);
+    if (privateSourceVector
+        && gDebugDenyNextPrivateSourceVectorReservation.exchange(
+            false, std::memory_order_acq_rel)) {
+        gDebugPrivateSourceVectorDenials.fetch_add(1, std::memory_order_relaxed);
+        (void)operation.Reserve(dimension,
+            std::numeric_limits<std::size_t>::max(), retention, site);
+        return false;
+    }
+    if (gDebugSourceStorage.deny == site) {
+        gDebugSourceStorage.deny =
+            decal_layer::bake::accounting::FailureSite::None;
+        ++gDebugSourceStorage.denials[debugIndex];
+        (void)operation.Reserve(dimension,
+            std::numeric_limits<std::size_t>::max(), retention, site);
+        return false;
+    }
+#endif
+    if (!ticket.acquire(operation, dimension, bytes, retention, site)
+        || !operation.EnterAllocation(site)) return false;
+#ifdef DEBUG
+    ++gDebugSourceStorage.entries[debugIndex];
+    if (privateSourceVector)
+        gDebugPrivateSourceVectorEntries.fetch_add(1, std::memory_order_relaxed);
+#endif
+    return true;
+}
 
 UUID UUIDFromDigest(const Digest& digest) noexcept {
     UUID value{};
@@ -253,13 +321,27 @@ TextureCapture SyntheticEnvelope(const Handle(Image_Texture)& texture, const Own
                        CapturedSource& output,
                        const decal_layer::bake::accounting::View& operation) noexcept {
     output = {};
+    auto activeAllocation =
+        decal_layer::bake::accounting::FailureSite::SourceWorkingBytes;
     try {
         if (texture.IsNull()) return TextureCapture::Missing;
         if (!texture->FilePath().IsEmpty()) return TextureCapture::Foreign;
         const Handle(NCollection_Buffer)& buffer = texture->DataBuffer();
         if (buffer.IsNull() || !buffer->Data() || buffer->Size() == 0
             || buffer->Size() > fi::kMaximumEncodedImageBytes) return TextureCapture::Missing;
-        std::vector<std::uint8_t> bytes(buffer->Data(), buffer->Data() + buffer->Size());
+        decal_layer::bake::accounting::Ticket workingTicket;
+        if (!AcquireSourceStorage(workingTicket, operation,
+                decal_layer::bake::accounting::StorageDimension::EncodedTexture,
+                buffer->Size(),
+                decal_layer::bake::accounting::Retention::Retained,
+                activeAllocation)) return TextureCapture::OverBudget;
+        std::vector<std::uint8_t> bytes;
+        bytes.reserve(buffer->Size());
+        bytes.insert(bytes.end(), buffer->Data(), buffer->Data() + buffer->Size());
+        if (bytes.capacity() != buffer->Size()) {
+            operation.AllocationFailed(activeAllocation);
+            return TextureCapture::OverBudget;
+        }
         Digest content{};
         if (!fi::HashFaceImageBytes(bytes, content)) return TextureCapture::Missing;
         kernel::Image decoded;
@@ -278,20 +360,56 @@ TextureCapture SyntheticEnvelope(const Handle(Image_Texture)& texture, const Own
         output.envelope.workingWidthTexels = decoded.width;
         output.envelope.workingHeightTexels = decoded.height;
         output.envelope.provenance = content;
-        output.envelope.originalBytes = bytes; output.envelope.workingBytes = std::move(bytes);
+        activeAllocation =
+            decal_layer::bake::accounting::FailureSite::SourceOriginalBytes;
+        decal_layer::bake::accounting::Ticket originalTicket;
+        if (!AcquireSourceStorage(originalTicket, operation,
+                decal_layer::bake::accounting::StorageDimension::EncodedTexture,
+                bytes.capacity(),
+                decal_layer::bake::accounting::Retention::Retained,
+                activeAllocation)) return TextureCapture::OverBudget;
+        output.envelope.originalBytes = bytes;
+        if (output.envelope.originalBytes.capacity() != bytes.capacity()) {
+            operation.AllocationFailed(activeAllocation);
+            return TextureCapture::OverBudget;
+        }
+        output.envelope.workingBytes = std::move(bytes);
         output.fence.owner = owner; output.fence.resource = output.envelope.resource;
         output.fence.originalContent = content; output.fence.workingContent = content;
         output.fence.selectorProof = selector; output.fence.bindingProof = bindingProof;
         output.fence.role = role;
         output.fence.colorSpace = (role == Role::BaseColor || role == Role::Emissive)
             ? ColorSpace::SRGB : ColorSpace::Linear;
-        std::vector<std::uint8_t> id(owner.entity.begin(), owner.entity.end());
+        activeAllocation =
+            decal_layer::bake::accounting::FailureSite::SourceIdentityBytes;
+        constexpr std::size_t identityBytes = UUID{}.size() * 2U + 1U
+            + Digest{}.size();
+        static_assert(identityBytes == 65U);
+        decal_layer::bake::accounting::Ticket identityTicket;
+        if (!AcquireSourceStorage(identityTicket, operation,
+                decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                identityBytes,
+                decal_layer::bake::accounting::Retention::Scratch,
+                activeAllocation)) return TextureCapture::OverBudget;
+        std::vector<std::uint8_t> id;
+        id.reserve(identityBytes);
+        id.insert(id.end(), owner.entity.begin(), owner.entity.end());
         id.insert(id.end(), owner.definition.begin(), owner.definition.end());
         id.push_back(std::uint8_t(role)); id.insert(id.end(), content.begin(), content.end());
+        if (id.size() != identityBytes || id.capacity() != identityBytes) {
+            operation.AllocationFailed(activeAllocation);
+            return TextureCapture::OverBudget;
+        }
         Digest binding{};
         if (!retained_solid::Hash(id, binding)) return TextureCapture::Missing;
         output.fence.binding = UUIDFromDigest(binding);
+        output.originalBytesTicket = std::move(originalTicket);
+        output.workingBytesTicket = std::move(workingTicket);
         return Valid(output.fence) ? TextureCapture::Captured : TextureCapture::Missing;
+    } catch (const std::bad_alloc&) {
+        output = {};
+        operation.AllocationFailed(activeAllocation);
+        return TextureCapture::OverBudget;
     } catch (...) { output = {}; return TextureCapture::Missing; }
 }
 
@@ -414,6 +532,47 @@ Outcome CaptureSources(const Handle(TDocStd_Document)& document,
         });
         return Outcome::Prepared;
     } catch (...) { output.clear(); return Outcome::Malformed; }
+}
+
+Outcome DecodeCapturedSources(
+    const std::vector<CapturedSource>& captured,
+    const decal_layer::bake::accounting::View& operation,
+    kernel::SourceStorage& output) noexcept {
+    using namespace decal_layer::bake::accounting;
+    output.reset();
+    try {
+        std::size_t bytes = 0;
+        if (captured.empty()
+            || !operation.CheckedProduct(captured.size(), sizeof(kernel::Source),
+                    1, bytes, FailureSite::SourceVectorStorage)
+            || !AcquireSourceStorage(output.vectorTicket, operation,
+                    StorageDimension::PrivateStorage, bytes,
+                    Retention::Scratch, FailureSite::SourceVectorStorage))
+            return Outcome::OverBudget;
+        output.values.reserve(captured.size());
+        if (output.values.capacity() != captured.size()) {
+            operation.AllocationFailed(FailureSite::SourceVectorStorage);
+            output.reset();
+            return Outcome::OverBudget;
+        }
+        for (const auto& source : captured) {
+            kernel::Image image;
+            if (!kernel::DecodeImage(source.envelope.workingBytes, image, operation)) {
+                output.reset();
+                return operation.Recheck(FailureSite::ImageRGBA)
+                    ? Outcome::MissingResource : Outcome::OverBudget;
+            }
+            output.values.push_back({source.fence, std::move(image)});
+        }
+        return Outcome::Prepared;
+    } catch (const std::bad_alloc&) {
+        operation.AllocationFailed(FailureSite::SourceVectorStorage);
+        output.reset();
+        return Outcome::OverBudget;
+    } catch (...) {
+        output.reset();
+        return Outcome::Malformed;
+    }
 }
 
 bool SameCapture(const std::vector<CapturedSource>& first,
@@ -564,6 +723,129 @@ void DebugClearCaptureSourcesDenial() noexcept
     gDebugCaptureSourceOrdinal = 0;
     gDebugDenyCaptureSourceOrdinal = 0;
 }
+
+DebugSourceStorageEvidence DebugExerciseE4SourceStorage(
+    const Handle(TDocStd_Document)& document,
+    const aa::Key& key) noexcept {
+    using Site = decal_layer::bake::accounting::FailureSite;
+    DebugSourceStorageEvidence evidence;
+    try {
+        aa::persistence::Record atlas;
+        if (document.IsNull() || document->HasOpenCommand()
+            || !aa::persistence::Read(document, key, atlas) || !atlas.value)
+            return evidence;
+        std::vector<OwnerKey> owners;
+        for (const auto& member : atlas.value->definition.members)
+            owners.push_back(member.owner);
+        aa::Capture members;
+        if (!aa::build::CaptureMembers(document, owners, members)) return evidence;
+
+        auto operation = decal_layer::bake::accounting::MakeOperationOwner();
+        std::vector<CapturedSource> captured;
+        gDebugSourceStorage = {};
+        if (!operation.valid()
+            || CaptureSources(document, members, captured, operation.view)
+                != Outcome::Prepared) return evidence;
+        auto tracked = std::find_if(captured.begin(), captured.end(),
+            [](const CapturedSource& source) {
+                return source.originalBytesTicket.bytes != 0
+                    && source.workingBytesTicket.bytes != 0;
+            });
+        if (tracked == captured.end()) return evidence;
+        evidence.captured = true;
+        evidence.envelopeBytesEqual =
+            tracked->envelope.originalBytes == tracked->envelope.workingBytes;
+        evidence.identityValid = Valid(tracked->fence);
+        evidence.originalBytes = tracked->originalBytesTicket.bytes;
+        evidence.workingBytes = tracked->workingBytesTicket.bytes;
+
+        CapturedSource copied(*tracked);
+        evidence.copyChargedSeparately =
+            copied.envelope.originalBytes == tracked->envelope.originalBytes
+            && copied.envelope.workingBytes == tracked->envelope.workingBytes
+            && copied.originalBytesTicket.bytes
+                == tracked->originalBytesTicket.bytes
+            && copied.workingBytesTicket.bytes
+                == tracked->workingBytesTicket.bytes;
+        CapturedSource moved(std::move(copied));
+        evidence.moveTransferred = copied.originalBytesTicket.bytes == 0
+            && copied.workingBytesTicket.bytes == 0
+            && moved.originalBytesTicket.bytes == evidence.originalBytes
+            && moved.workingBytesTicket.bytes == evidence.workingBytes;
+
+        kernel::SourceStorage decoded;
+        evidence.decoded = DecodeCapturedSources(
+                captured, operation.view, decoded) == Outcome::Prepared
+            && !decoded.values.empty()
+            && fi::HashFaceImageBytes(
+                decoded.values.front().image.rgba, evidence.decodedPixels);
+        evidence.vectorBytes = decoded.vectorTicket.bytes;
+
+        const auto deniedCapture = [&](Site site) {
+            auto deniedOperation =
+                decal_layer::bake::accounting::MakeOperationOwner();
+            std::vector<CapturedSource> refused;
+            gDebugSourceStorage = {};
+            gDebugSourceStorage.deny = site;
+            const auto outcome = CaptureSources(
+                document, members, refused, deniedOperation.view);
+            const auto index = DebugSourceStorageIndex(site);
+            return outcome == Outcome::OverBudget && refused.empty()
+                && gDebugSourceStorage.attempts[index] == 1
+                && gDebugSourceStorage.entries[index] == 0
+                && gDebugSourceStorage.denials[index] == 1;
+        };
+        evidence.workingDeniedBeforeEntry =
+            deniedCapture(Site::SourceWorkingBytes);
+        evidence.originalDeniedBeforeEntry =
+            deniedCapture(Site::SourceOriginalBytes);
+
+        auto vectorOperation =
+            decal_layer::bake::accounting::MakeOperationOwner();
+        std::vector<CapturedSource> vectorCaptured;
+        gDebugSourceStorage = {};
+        if (CaptureSources(document, members, vectorCaptured,
+                vectorOperation.view) == Outcome::Prepared) {
+            kernel::SourceStorage refused;
+            gDebugSourceStorage = {};
+            gDebugSourceStorage.deny = Site::SourceVectorStorage;
+            evidence.vectorDeniedBeforeEntry = DecodeCapturedSources(
+                    vectorCaptured, vectorOperation.view, refused)
+                    == Outcome::OverBudget
+                && refused.values.empty()
+                && gDebugSourceStorage.attempts[3] == 1
+                && gDebugSourceStorage.entries[3] == 0
+                && gDebugSourceStorage.denials[3] == 1;
+        }
+        gDebugSourceStorage = {};
+        return evidence;
+    } catch (...) {
+        gDebugSourceStorage = {};
+        return {};
+    }
+}
+
+void DebugDenyNextSourceVectorReservation() noexcept {
+    gDebugSourceStorage = {};
+    gDebugPrivateSourceVectorAttempts.store(0, std::memory_order_relaxed);
+    gDebugPrivateSourceVectorEntries.store(0, std::memory_order_relaxed);
+    gDebugPrivateSourceVectorDenials.store(0, std::memory_order_relaxed);
+    gDebugDenyNextPrivateSourceVectorReservation.store(
+        true, std::memory_order_release);
+}
+
+std::array<std::size_t, 3>
+DebugTakeSourceVectorReservationObservation() noexcept {
+    const std::array<std::size_t, 3> result{{
+        gDebugPrivateSourceVectorAttempts.exchange(0, std::memory_order_acq_rel),
+        gDebugPrivateSourceVectorEntries.exchange(0, std::memory_order_acq_rel),
+        gDebugPrivateSourceVectorDenials.exchange(0, std::memory_order_acq_rel),
+    }};
+    gDebugDenyNextPrivateSourceVectorReservation.store(
+        false, std::memory_order_release);
+    gDebugSourceStorage = {};
+    return result;
+}
 #endif
 
 Outcome Prepare(Staging& staging, const Handle(TDocStd_Document)& document,
@@ -620,17 +902,11 @@ Outcome Prepare(Staging& staging, const Handle(TDocStd_Document)& document,
         if (built != aa::build::Status::Built) return MapBuild(built);
         if (!aa::build::ObserveMembers(document, staging.atlas.members,
                                        staging.observedMembers)) return Outcome::StaleSource;
-        std::vector<kernel::Source> sources;
-        for (const auto& capturedSource : staging.capturedSources) {
-            kernel::Image image;
-            if (!kernel::DecodeImage(capturedSource.envelope.workingBytes,
-                    image, staging.operation.view))
-                return staging.operation.view.Recheck(
-                        decal_layer::bake::accounting::FailureSite::ImageRGBA)
-                    ? Outcome::MissingResource : Outcome::OverBudget;
-            sources.push_back({capturedSource.fence, std::move(image)});
-        }
-        if (!kernel::Bake(staging.atlas, layout, sources, staging.outputs,
+        kernel::SourceStorage sources;
+        const auto decoded = DecodeCapturedSources(
+            staging.capturedSources, staging.operation.view, sources);
+        if (decoded != Outcome::Prepared) return decoded;
+        if (!kernel::Bake(staging.atlas, layout, sources.values, staging.outputs,
                           staging.evidence)) return Outcome::Refused;
         staging.bake.key = key; staging.bake.layoutProof = staging.atlas.layoutProof;
         for (const auto& source : staging.capturedSources)
@@ -834,20 +1110,13 @@ Outcome BakeForExport(const ExportCapture& capture,
                 || assignments[index].member != finalMember.member)
                 return Outcome::StaleSource;
         }
-        std::vector<kernel::Source> sources;
-        sources.reserve(capture.sources.size());
-        for (const auto& captured : capture.sources) {
-            kernel::Image image;
-            if (!kernel::DecodeImage(captured.envelope.workingBytes, image,
-                    capture.operation.view))
-                return capture.operation.view.Recheck(
-                        decal_layer::bake::accounting::FailureSite::ImageRGBA)
-                    ? Outcome::MissingResource : Outcome::OverBudget;
-            sources.push_back({captured.fence, std::move(image)});
-        }
+        kernel::SourceStorage sources;
+        const auto decoded = DecodeCapturedSources(
+            capture.sources, capture.operation.view, sources);
+        if (decoded != Outcome::Prepared) return decoded;
         output.atlas = finalAtlas;
         output.assignments = assignments;
-        if (!kernel::Bake(output.atlas, layout, sources,
+        if (!kernel::Bake(output.atlas, layout, sources.values,
                           output.outputs, output.evidence)) {
             output = {};
             return Outcome::Refused;
@@ -942,22 +1211,16 @@ Outcome BuildAndBakeTransientForExport(
             diagnosis = "transient-layout-mismatch";
             return Outcome::StaleSource;
         }
-        std::vector<kernel::Source> sources;
-        sources.reserve(capture.sources.size());
-        for (const auto& captured : capture.sources) {
-            kernel::Image image;
-            if (!kernel::DecodeImage(captured.envelope.workingBytes, image,
-                    capture.operation)) {
-                diagnosis = "transient-source-decode";
-                return capture.operation.Recheck(
-                        decal_layer::bake::accounting::FailureSite::ImageRGBA)
-                    ? Outcome::MissingResource : Outcome::OverBudget;
-            }
-            sources.push_back({captured.fence, std::move(image)});
+        kernel::SourceStorage sources;
+        const auto decoded = DecodeCapturedSources(
+            capture.sources, capture.operation, sources);
+        if (decoded != Outcome::Prepared) {
+            diagnosis = "transient-source-decode";
+            return decoded;
         }
         output.atlas = std::move(atlas);
         output.assignments = std::move(assignments);
-        if (!kernel::Bake(output.atlas, layout, sources,
+        if (!kernel::Bake(output.atlas, layout, sources.values,
                 output.outputs, output.evidence)) {
             output = {};
             diagnosis = "transient-kernel-bake";

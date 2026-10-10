@@ -25,9 +25,12 @@
 
 #include <ImageIO/ImageIO.h>
 #include <Image_Texture.hxx>
+#include <NCollection_Buffer.hxx>
 
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
+#include <XCAFDoc_VisMaterial.hxx>
+#include <XCAFDoc_VisMaterialTool.hxx>
 #include <TDF_LabelSequence.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -3632,6 +3635,100 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         core3d::painted_atlas_bake::owner::DebugClearCaptureSourcesDenial();
         return nil;
     }
+}
+
+- (NSDictionary<NSString *,id> *)
+    debugE4SourceStorageReservationsForEntityIdentifier:(NSString *)entityIdentifier
+                                           resourceBytes:(NSData *)resourceBytes {
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128 || resourceBytes.length == 0
+        || resourceBytes.length > fi::kMaximumEncodedImageBytes) return nil;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        OwnerKey key; TDF_Label owner;
+        const char *raw = entityIdentifier.UTF8String;
+        if (wrapper.IsNull()
+            || !LabelForSelected(wrapper, raw ? raw : "", key, owner)) return nil;
+        const Handle(TDocStd_Document)& document = wrapper->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return nil;
+
+        Handle(NCollection_Buffer) buffer = new NCollection_Buffer(
+            NCollection_BaseAllocator::CommonBaseAllocator(), resourceBytes.length);
+        if (buffer.IsNull() || !buffer->ChangeData()) return nil;
+        std::memcpy(buffer->ChangeData(), resourceBytes.bytes, resourceBytes.length);
+        const auto materialTool =
+            XCAFDoc_DocumentTool::VisMaterialTool(document->Main());
+        if (materialTool.IsNull()) return nil;
+        Handle(XCAFDoc_VisMaterial) material = new XCAFDoc_VisMaterial();
+        XCAFDoc_VisMaterialCommon common = material->ConvertToCommonMaterial();
+        common.DiffuseTexture = new Image_Texture(
+            buffer, TCollection_AsciiString("e4-source-storage-fixture"));
+        material->SetCommonMaterial(common);
+        document->NewCommand();
+        const TDF_Label materialLabel = materialTool->AddMaterial(
+            material, TCollection_AsciiString("e4 source storage fixture"));
+        if (materialLabel.IsNull()) {
+            document->AbortCommand();
+            return nil;
+        }
+        materialTool->SetShapeMaterial(owner, materialLabel);
+        if (!document->CommitCommand()) {
+            if (document->HasOpenCommand()) document->AbortCommand();
+            return nil;
+        }
+
+        std::vector<core3d::asset_atlas::persistence::Record> atlases;
+        if (!core3d::asset_atlas::persistence::ReadAll(document, atlases)) return nil;
+        const core3d::asset_atlas::Key *atlasKey = nullptr;
+        for (const auto& record : atlases) {
+            if (!record.value) return nil;
+            for (const auto& member : record.value->definition.members) {
+                if (!(member.owner == key)) continue;
+                if (atlasKey) return nil;
+                atlasKey = &record.value->definition.key;
+            }
+        }
+        if (!atlasKey) return nil;
+        const auto evidence = core3d::painted_atlas_bake::owner::
+            DebugExerciseE4SourceStorage(document, *atlasKey);
+        return @{
+            @"fixture": @"E4P2b1SourceStorage",
+            @"captured": @(evidence.captured),
+            @"envelopeBytesEqual": @(evidence.envelopeBytesEqual),
+            @"identityValid": @(evidence.identityValid),
+            @"decoded": @(evidence.decoded),
+            @"copyChargedSeparately": @(evidence.copyChargedSeparately),
+            @"moveTransferred": @(evidence.moveTransferred),
+            @"workingDeniedBeforeEntry": @(evidence.workingDeniedBeforeEntry),
+            @"originalDeniedBeforeEntry": @(evidence.originalDeniedBeforeEntry),
+            @"vectorDeniedBeforeEntry": @(evidence.vectorDeniedBeforeEntry),
+            @"originalByteCount": @(evidence.originalBytes),
+            @"workingByteCount": @(evidence.workingBytes),
+            @"sourceVectorByteCount": @(evidence.vectorBytes),
+            @"decodedPixelSHA256": DigestText(evidence.decodedPixels),
+        };
+    } @catch (...) { return nil; }
+}
+
+- (void)debugDenyNextE4SourceVectorReservation {
+    core3d::painted_atlas_bake::owner::
+        DebugDenyNextSourceVectorReservation();
+}
+
+- (NSDictionary<NSString *,id> *)
+    debugTakeE4SourceVectorReservationObservation {
+    const auto values = core3d::painted_atlas_bake::owner::
+        DebugTakeSourceVectorReservationObservation();
+    return @{
+        @"attempts": @(values[0]),
+        @"entries": @(values[1]),
+        @"denials": @(values[2]),
+    };
 }
 
 + (NSData *)debugFaceImageFixtureAssetData:(double)metersPerUnit {

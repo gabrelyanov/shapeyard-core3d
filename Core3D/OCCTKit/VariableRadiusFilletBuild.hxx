@@ -48,6 +48,15 @@ struct BuildResult final {
     bool built() const noexcept { return refusal == Refusal::None && !solid.IsNull(); }
 };
 
+#if DEBUG
+// Test observation only: the native bridge uses this to prove orientation
+// refusals happen before any edge is handed to the OCCT fillet builder.
+struct DebugBuildObservation final {
+    std::size_t filletEntryCount = 0;
+};
+inline thread_local DebugBuildObservation* debugBuildObservation = nullptr;
+#endif
+
 namespace detail {
 inline gp_Pnt point(const std::array<double, 3>& value) {
     return {value[0], value[1], value[2]};
@@ -140,23 +149,59 @@ inline bool rectangularFaceClearance(const TopoDS_Face& face, const TopoDS_Edge&
     clearance = candidate; return true;
 }
 
+inline bool outwardNormal(const TopoDS_Face& face, gp_Dir& normal) {
+    BRepAdaptor_Surface surface(face);
+    if (surface.GetType() != GeomAbs_Plane) return false;
+    normal = surface.Plane().Axis().Direction();
+    if (face.Orientation() == TopAbs_REVERSED) normal.Reverse();
+    else if (face.Orientation() != TopAbs_FORWARD) return false;
+    return true;
+}
+
+inline bool signedNormalCorrespondence(const std::array<gp_Dir, 2>& supportNormals,
+                                       const OrientedEdgeAnchor& anchor,
+                                       bool reverseEnumeration = false) {
+    const gp_Dir payloadA = direction(anchor.normalA);
+    const gp_Dir payloadB = direction(anchor.normalB);
+    const gp_Dir& first = supportNormals[reverseEnumeration ? 1 : 0];
+    const gp_Dir& second = supportNormals[reverseEnumeration ? 0 : 1];
+    unsigned assignments = 0;
+    if (first.IsEqual(payloadA, 1e-10) && second.IsEqual(payloadB, 1e-10))
+        ++assignments;
+    if (first.IsEqual(payloadB, 1e-10) && second.IsEqual(payloadA, 1e-10))
+        ++assignments;
+    return assignments == 1;
+}
+
 inline bool continuousClearance(const TopoDS_Shape& shape, const TopoDS_Edge& edge,
-                                double tolerance, double& clearance) {
+                                const OrientedEdgeAnchor& anchor, double tolerance,
+                                double& clearance, Refusal& refusal,
+                                bool reverseEnumeration = false) {
     clearance = INFINITY;
     TopTools_IndexedDataMapOfShapeListOfShape owners;
     TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, owners);
-    if (!owners.Contains(edge)) return false;
+    if (!owners.Contains(edge)) { refusal = Refusal::Clearance; return false; }
     TopTools_IndexedMapOfShape uniqueFaces;
     for (TopTools_ListIteratorOfListOfShape iterator(owners.FindFromKey(edge));
          iterator.More(); iterator.Next()) uniqueFaces.Add(iterator.Value());
-    if (uniqueFaces.Extent() != 2) return false;
+    if (uniqueFaces.Extent() != 2) { refusal = Refusal::Clearance; return false; }
+    std::array<gp_Dir, 2> supportNormals;
     for (int index = 1; index <= uniqueFaces.Extent(); ++index) {
         double faceClearance = 0;
-        if (!rectangularFaceClearance(TopoDS::Face(uniqueFaces(index)), edge,
-                                      tolerance, faceClearance)) return false;
+        const TopoDS_Face face = TopoDS::Face(uniqueFaces(index));
+        if (!rectangularFaceClearance(face, edge, tolerance, faceClearance)
+            || !outwardNormal(face, supportNormals[std::size_t(index - 1)])) {
+            refusal = Refusal::Clearance; return false;
+        }
         clearance = std::min(clearance, faceClearance);
     }
-    return std::isfinite(clearance) && clearance > tolerance;
+    if (!std::isfinite(clearance) || clearance <= tolerance) {
+        refusal = Refusal::Clearance; return false;
+    }
+    if (!signedNormalCorrespondence(supportNormals, anchor, reverseEnumeration)) {
+        refusal = Refusal::OrientationDrift; return false;
+    }
+    refusal = Refusal::None; return true;
 }
 
 inline bool measuredSection(const TopoDS_Shape& shape, const OrientedEdgeAnchor& anchor,
@@ -255,8 +300,9 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
             if (!detail::resolve(input, anchor, tolerance, edge, refusal)) return decline(refusal);
             if (BRep_Tool::IsClosed(edge)) return decline(Refusal::ClosedLoop);
             double clearance = 0;
-            if (!detail::continuousClearance(input, edge, tolerance, clearance))
-                return decline(Refusal::Clearance);
+            if (!detail::continuousClearance(input, edge, anchor, tolerance,
+                                             clearance, refusal))
+                return decline(refusal);
             minimumClearance = std::min(minimumClearance, clearance);
             edges.push_back(edge); output.evidence.consumedEdges.push_back(anchor.identifier);
         }
@@ -268,6 +314,9 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
         BRepFilletAPI_MakeFillet fillet(input);
         std::set<int> contours;
         for (const auto& edge : edges) {
+#if DEBUG
+            if (debugBuildObservation) ++debugBuildObservation->filletEntryCount;
+#endif
             fillet.Add(definition.stations[0].radiusLocal,
                        definition.stations[1].radiusLocal, edge);
             const int contour = fillet.Contour(edge);
@@ -388,8 +437,9 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
             if (!detail::resolve(input, anchor, tolerance, edge, refusal)) return decline(refusal);
             if (BRep_Tool::IsClosed(edge)) return decline(Refusal::ClosedLoop);
             double clearance = 0;
-            if (!detail::continuousClearance(input, edge, tolerance, clearance))
-                return decline(Refusal::Clearance);
+            if (!detail::continuousClearance(input, edge, anchor, tolerance,
+                                             clearance, refusal))
+                return decline(refusal);
             minimumClearance = std::min(minimumClearance, clearance);
             edges.push_back(edge); output.evidence.consumedEdges.push_back(anchor.identifier);
         }
@@ -401,6 +451,9 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
         BRepFilletAPI_MakeFillet fillet(input);
         std::set<int> contours;
         for (const auto& edge : edges) {
+#if DEBUG
+            if (debugBuildObservation) ++debugBuildObservation->filletEntryCount;
+#endif
             TColgp_Array1OfPnt2d lawPoints(1, Standard_Integer(definition.stations.size()));
             for (std::size_t index = 0; index < definition.stations.size(); ++index)
                 lawPoints.SetValue(Standard_Integer(index) + 1,

@@ -657,6 +657,16 @@ __attribute__((objc_subclassing_restricted))
 - (nullable NSDictionary<NSString *,id> *)
     debugE4DecoderOwnerOutcomesForEntityIdentifier:(NSString *)entityIdentifier
     NS_SWIFT_NAME(debugE4DecoderOwnerOutcomes(entityIdentifier:));
+//! Installs a real document-owned XCAF buffer texture on the ordinary atlas
+//! fixture, then traces the product CaptureSources storage reservations.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4SourceStorageReservationsForEntityIdentifier:(NSString *)entityIdentifier
+                                           resourceBytes:(NSData *)resourceBytes
+    NS_SWIFT_NAME(debugE4SourceStorageReservations(entityIdentifier:resourceBytes:));
+//! Arms exactly the next product source-vector capacity reservation. The
+//! observation is value-only and records attempt/entry/denial counts.
+- (void)debugDenyNextE4SourceVectorReservation;
+- (nullable NSDictionary<NSString *,id> *)debugTakeE4SourceVectorReservationObservation;
 //! UI-test fixture: asset data for the frozen E2 two-part box/cylinder atlas
 //! fixture in the requested unit system. nil on any failure; never mutates an
 //! open document.

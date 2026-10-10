@@ -23,6 +23,7 @@
 		C1D400010000000000000001 /* FeaturePatternProfileContinuation.mm in Sources */ = {isa = PBXBuildFile; fileRef = C1D400020000000000000002 /* FeaturePatternProfileContinuation.mm */; };
 		C1D400030000000000000003 /* FeaturePatternProfileContinuation.hxx in Headers */ = {isa = PBXBuildFile; fileRef = C1D400040000000000000004 /* FeaturePatternProfileContinuation.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		C1D400050000000000000005 /* Core3DD4ProfileContinuationTesting.mm in Sources */ = {isa = PBXBuildFile; fileRef = C1D400060000000000000006 /* Core3DD4ProfileContinuationTesting.mm */; };
+		B3A100000000000000000001 /* Core3DB3VariableFilletRepairTesting.mm in Sources */ = {isa = PBXBuildFile; fileRef = B3A200000000000000000001 /* Core3DB3VariableFilletRepairTesting.mm */; };
 		C1D400070000000000000007 /* Core3DD4ProfileContinuationTesting.h in Headers */ = {isa = PBXBuildFile; fileRef = C1D400080000000000000008 /* Core3DD4ProfileContinuationTesting.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		E17900010000000000000001 /* BoundedCurveOwner.mm in Sources */ = {isa = PBXBuildFile; fileRef = E17900020000000000000002 /* BoundedCurveOwner.mm */; };
 		C4A000010000000000000001 /* SplineProfileOwner.mm in Sources */ = {isa = PBXBuildFile; fileRef = C4A000110000000000000001 /* SplineProfileOwner.mm */; };
@@ -336,6 +337,7 @@
 		C1D400020000000000000002 /* FeaturePatternProfileContinuation.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = FeaturePatternProfileContinuation.mm; sourceTree = "<group>"; };
 		C1D400040000000000000004 /* FeaturePatternProfileContinuation.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = FeaturePatternProfileContinuation.hxx; sourceTree = "<group>"; };
 		C1D400060000000000000006 /* Core3DD4ProfileContinuationTesting.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DD4ProfileContinuationTesting.mm; sourceTree = "<group>"; };
+		B3A200000000000000000001 /* Core3DB3VariableFilletRepairTesting.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DB3VariableFilletRepairTesting.mm; sourceTree = "<group>"; };
 		C1D400080000000000000008 /* Core3DD4ProfileContinuationTesting.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DD4ProfileContinuationTesting.h; sourceTree = "<group>"; };
 		E17900020000000000000002 /* BoundedCurveOwner.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = BoundedCurveOwner.mm; sourceTree = "<group>"; };
 		C4A000110000000000000001 /* SplineProfileOwner.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = SplineProfileOwner.mm; sourceTree = "<group>"; };
@@ -1032,6 +1034,7 @@
 				324EF2D02BC7EC8C00A05295 /* GLViewController+Trick.h */,
 				322185832BB5D5E100040E84 /* Core3DViewController.h */,
 				C1D400060000000000000006 /* Core3DD4ProfileContinuationTesting.mm */,
+				B3A200000000000000000001 /* Core3DB3VariableFilletRepairTesting.mm */,
 				C1D400080000000000000008 /* Core3DD4ProfileContinuationTesting.h */,
 				A11A00000000000000000001 /* Core3DAgentMeasurements.h */,
 				A11A00000000000000000002 /* Core3DAgentMeasurements.mm */,
@@ -1521,6 +1524,7 @@
 				18665F042CA2DA8500141E05 /* ModelPart.mm in Sources */,
 				328FBF2B2BC82E8300176AEA /* Core3DViewer.mm in Sources */,
 				C1D400050000000000000005 /* Core3DD4ProfileContinuationTesting.mm in Sources */,
+				B3A100000000000000000001 /* Core3DB3VariableFilletRepairTesting.mm in Sources */,
 				A11A00000000000000000004 /* Core3DAgentMeasurements.mm in Sources */,
 				C3D5A0010000000000000001 /* Core3DModelingTypes.mm in Sources */,
 				B1E000010000000000000001 /* Core3DEdgeTreatmentTypes.mm in Sources */,

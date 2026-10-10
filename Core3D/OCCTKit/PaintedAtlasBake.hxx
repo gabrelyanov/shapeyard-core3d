@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cstring>
 #include <map>
+#include <new>
 #include <vector>
 
 namespace core3d::painted_atlas_bake::kernel {
@@ -72,6 +73,31 @@ bool DecodeImage(const std::vector<std::uint8_t>& bytes,
 struct Source final {
     BindingFence fence;
     Image image;
+};
+
+//! Operation-local source-vector storage. The reservation precedes vector
+//! growth and remains live until every contained Image (and its pixel ticket)
+//! has been destroyed.
+struct SourceStorage final {
+    decal_layer::bake::accounting::Ticket vectorTicket;
+    std::vector<Source> values;
+
+    SourceStorage() = default;
+    SourceStorage(const SourceStorage&) = delete;
+    SourceStorage& operator=(const SourceStorage&) = delete;
+    SourceStorage(SourceStorage&& other) noexcept { *this = std::move(other); }
+    SourceStorage& operator=(SourceStorage&& other) noexcept {
+        if (this != &other) {
+            reset();
+            values = std::move(other.values);
+            vectorTicket = std::move(other.vectorTicket);
+        }
+        return *this;
+    }
+    void reset() noexcept {
+        std::vector<Source>().swap(values);
+        vectorTicket.reset();
+    }
 };
 
 struct Output final {
@@ -464,8 +490,97 @@ enum class Outcome : std::uint8_t {
 
 struct CapturedSource final {
     BindingFence fence;
+    decal_layer::bake::accounting::Ticket originalBytesTicket;
+    decal_layer::bake::accounting::Ticket workingBytesTicket;
     face_image::ResourceEnvelope envelope;
+
+    CapturedSource() = default;
+    CapturedSource(const CapturedSource& other) { copyFrom(other); }
+    CapturedSource& operator=(const CapturedSource& other) {
+        if (this != &other) {
+            reset();
+            copyFrom(other);
+        }
+        return *this;
+    }
+    CapturedSource(CapturedSource&& other) noexcept { *this = std::move(other); }
+    CapturedSource& operator=(CapturedSource&& other) noexcept {
+        if (this != &other) {
+            reset();
+            fence = other.fence;
+            envelope = std::move(other.envelope);
+            originalBytesTicket = std::move(other.originalBytesTicket);
+            workingBytesTicket = std::move(other.workingBytesTicket);
+        }
+        return *this;
+    }
+    void reset() noexcept {
+        envelope = {};
+        originalBytesTicket.reset();
+        workingBytesTicket.reset();
+        fence = {};
+    }
+
+private:
+    void copyFrom(const CapturedSource& other) {
+        using namespace decal_layer::bake::accounting;
+        FailureSite active = FailureSite::SourceOriginalBytes;
+        View activeView;
+        try {
+            if (other.originalBytesTicket.bytes != 0) {
+                activeView = other.originalBytesTicket.view;
+                if (!originalBytesTicket.acquire(activeView,
+                        StorageDimension::EncodedTexture,
+                        other.envelope.originalBytes.capacity(),
+                        Retention::Retained, FailureSite::SourceOriginalBytes)
+                    || !activeView.EnterAllocation(FailureSite::SourceOriginalBytes))
+                    throw std::bad_alloc();
+            }
+            active = FailureSite::SourceWorkingBytes;
+            if (other.workingBytesTicket.bytes != 0) {
+                activeView = other.workingBytesTicket.view;
+                if (!workingBytesTicket.acquire(activeView,
+                        StorageDimension::EncodedTexture,
+                        other.envelope.workingBytes.capacity(),
+                        Retention::Retained, FailureSite::SourceWorkingBytes)
+                    || !activeView.EnterAllocation(FailureSite::SourceWorkingBytes))
+                    throw std::bad_alloc();
+            }
+            fence = other.fence;
+            envelope = other.envelope;
+        } catch (const std::bad_alloc&) {
+            reset();
+            activeView.AllocationFailed(active);
+            throw;
+        } catch (...) {
+            reset();
+            throw;
+        }
+    }
 };
+
+#ifdef DEBUG
+struct DebugSourceStorageEvidence final {
+    bool captured = false;
+    bool envelopeBytesEqual = false;
+    bool identityValid = false;
+    bool decoded = false;
+    bool copyChargedSeparately = false;
+    bool moveTransferred = false;
+    bool workingDeniedBeforeEntry = false;
+    bool originalDeniedBeforeEntry = false;
+    bool vectorDeniedBeforeEntry = false;
+    std::size_t originalBytes = 0;
+    std::size_t workingBytes = 0;
+    std::size_t vectorBytes = 0;
+    Digest decodedPixels{};
+};
+DebugSourceStorageEvidence DebugExerciseE4SourceStorage(
+    const Handle(TDocStd_Document)& document,
+    const asset_atlas::Key& key) noexcept;
+void DebugDenyNextSourceVectorReservation() noexcept;
+std::array<std::size_t, 3> DebugTakeSourceVectorReservationObservation() noexcept;
+#endif
 
 struct Staging final {
     decal_layer::bake::accounting::Owner operation;
