@@ -2122,6 +2122,17 @@ __attribute__((objc_subclassing_restricted))
 - (void)cancelEdgeTreatment:(Core3DEdgeTreatmentOperation *)operation;
 - (Core3DEdgeTreatmentCaptureR2 *)captureEdgeTreatmentR2:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(captureEdgeTreatmentR2(_:expected:));
+//! Capture selected native edges against the exact current R2 stage, then
+//! return the same owner to Object mode. The returned authority is opaque,
+//! native-owned and consumable by exactly one raw append attempt.
+- (Core3DEdgeTreatmentRawTargetCaptureR2 *)captureEdgeTreatmentRawTargetsR2:
+    (NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(captureEdgeTreatmentRawTargetsR2(_:expected:));
+- (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentRawAppendR2:
+    (Core3DEdgeTreatmentRawTargetCaptureR2 *)targets kind:(Core3DEdgeTreatmentKind)kind
+    amountMM:(double)amountMM expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DEdgeTreatmentResult *))completion
+    NS_SWIFT_NAME(beginEdgeTreatmentRawAppendR2(_:kind:amountMM:expected:completion:));
 - (nullable Core3DRetainedBooleanMigrationCaptureR2 *)captureRetainedBooleanMigrationR2:
     (NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(captureRetainedBooleanMigrationR2(_:expected:));

@@ -150,6 +150,17 @@ typedef NS_ENUM(NSInteger, Core3DRetainedBooleanEditKindR2) {
 - (instancetype)init NS_UNAVAILABLE; + (instancetype)new NS_UNAVAILABLE;
 @end
 
+//! Opaque native authority captured from selected edges on one exact current
+//! R2 stage. The snapshot and anchors are observations only; construction and
+//! one-shot consumption remain native-owned.
+@interface Core3DEdgeTreatmentRawTargetCaptureR2 : NSObject
+@property(nonatomic,readonly) Core3DEdgeTreatmentStatus status;
+@property(nonatomic,strong,readonly,nullable) Core3DEdgeTreatmentSnapshotR2 *snapshot;
+@property(nonatomic,copy,readonly) NSArray<Core3DEdgeTreatmentAnchor *> *anchors;
+@property(nonatomic,copy,readonly) NSString *refusalCode, *refusalMessage;
+- (instancetype)init NS_UNAVAILABLE; + (instancetype)new NS_UNAVAILABLE;
+@end
+
 @interface Core3DRetainedBooleanLegacySelectorBindingR2 : NSObject
 @property(nonatomic,readonly) uint64_t oldStepID;
 @property(nonatomic,strong,readonly) Core3DFaceSelectorIntent *intent;

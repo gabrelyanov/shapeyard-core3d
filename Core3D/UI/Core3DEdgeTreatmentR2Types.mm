@@ -100,6 +100,7 @@ static NSData *R2DoubleData(const std::vector<double>& values) {
 @implementation Core3DRetainedBooleanSourceR2 @end
 @implementation Core3DEdgeTreatmentSnapshotR2 @end
 @implementation Core3DEdgeTreatmentCaptureR2 @end
+@implementation Core3DEdgeTreatmentRawTargetCaptureR2 @end
 @implementation Core3DRetainedBooleanMigrationCaptureR2 @end
 @implementation Core3DFaceSelectorProofR2 @end
 @implementation Core3DFaceSelectorQueryR2 @end
