@@ -20,6 +20,8 @@ inline constexpr std::uint32_t CodecVersion = 1;
 inline constexpr std::size_t MaximumEdges = 16;
 inline constexpr std::size_t MaximumPayloadBytes = 4096;
 
+// LinearStartEnd is the historical persisted name for the kernel's smooth
+// two-station blend; it is not an affine radius guarantee.
 enum class LawKind : std::uint8_t { LinearStartEnd = 1, MultiStation = 2 };
 enum class ParameterConvention : std::uint8_t { OrientedNormalizedArcLength = 1 };
 enum class CurveKind : std::uint8_t { Line = 1 };
@@ -166,6 +168,8 @@ struct Reader final {
 };
 } // namespace detail
 
+// Affine admission/section reference only. Read the built kernel law for
+// realised interior radii.
 inline bool RadiusAt(const Definition& definition, double parameter,
                      double& radiusLocal) noexcept {
     radiusLocal = 0;
@@ -330,7 +334,7 @@ inline bool CanonicalPayload(const composite_recipe::FeatureNode& feature,
 }
 
 // ===== Stage 2: multi-station law. Everything above remains the stage-1 =====
-// ===== linear-law contract; nothing here edits its bytes or admission.   =====
+// ===== two-station contract; nothing here edits its bytes or admission.  =====
 
 inline constexpr std::uint32_t MultiStationCodecVersion = 2;
 inline constexpr std::size_t MinimumStations = 3;
@@ -340,7 +344,8 @@ inline constexpr std::size_t MaximumStations = 16;
 // normalized arc-length convention as stage 1. Station parameters are strictly
 // increasing, the first is exactly t=0 and the last exactly t=1, and every
 // station keeps its own stable UUID so a single-station radius re-edit never
-// rebinds identity. The law between stations is piecewise linear.
+// rebinds identity. RadiusAt supplies a piecewise-linear admission reference;
+// the realised kernel law interpolates the authored stations.
 struct MultiStationDefinition final {
     std::uint32_t schema = MultiStationCodecVersion;
     LawKind law = LawKind::MultiStation;

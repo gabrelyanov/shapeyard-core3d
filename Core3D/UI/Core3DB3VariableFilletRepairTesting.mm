@@ -1,11 +1,14 @@
 #if DEBUG
 
+#import <Foundation/Foundation.h>
+
 #include "../OCCTKit/VariableRadiusFilletBuild.hxx"
 
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRep_Builder.hxx>
+#include <Standard_Version.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_ListIteratorOfListOfShape.hxx>
@@ -81,6 +84,7 @@ struct CaseResult final {
     bool sourceUnchanged = false;
     bool definitionUnchanged = false;
     std::size_t filletEntries = 0;
+    DebugBuildObservation debug;
 };
 
 template<class DefinitionType, class Builder>
@@ -98,6 +102,7 @@ CaseResult<DefinitionType> RunCase(const TopoDS_Shape& source,
     observed.build = builder(source, definition);
     debugBuildObservation = previous;
     observed.filletEntries = debug.filletEntryCount;
+    observed.debug = std::move(debug);
     observed.sourceUnchanged =
         core3d::variable_radius_fillet::detail::exactShapeBytes(source, sourceAfter)
         && sourceBefore == sourceAfter;
@@ -381,6 +386,272 @@ extern "C" void Core3DDebugB3VariableFilletRepairProbe(
         observations[30] = 1;
         observations[0] = -1;
         debugBuildObservation = nullptr;
+    }
+}
+
+namespace {
+NSData *DataValue(const std::vector<std::uint8_t>& bytes) {
+    return [NSData dataWithBytes:bytes.data() length:bytes.size()];
+}
+
+template<std::size_t Count>
+NSArray<NSNumber *> *Numbers(const std::array<double, Count>& values) {
+    NSMutableArray<NSNumber *> *result = [NSMutableArray arrayWithCapacity:Count];
+    for (double value : values) [result addObject:@(value)];
+    return result;
+}
+
+NSArray<NSNumber *> *Numbers(const std::vector<double>& values) {
+    NSMutableArray<NSNumber *> *result = [NSMutableArray arrayWithCapacity:values.size()];
+    for (double value : values) [result addObject:@(value)];
+    return result;
+}
+
+NSArray<NSNumber *> *Integers(const std::vector<int>& values) {
+    NSMutableArray<NSNumber *> *result = [NSMutableArray arrayWithCapacity:values.size()];
+    for (int value : values) [result addObject:@(value)];
+    return result;
+}
+
+NSDictionary *BuildObservation(const BuildResult& result) {
+    return @{
+        @"raw": @(std::uint8_t(result.refusal)),
+        @"reason": [NSString stringWithUTF8String:Reason(result.refusal)],
+        @"solidNull": @(result.solid.IsNull()),
+        @"consumedCount": @(result.evidence.consumedEdges.size()),
+        @"sectionCount": @(result.evidence.sections.size()),
+        @"removedVolumeLocal3": @(result.evidence.removedVolumeLocal3),
+        @"minimumClearanceLocal": @(result.evidence.minimumClearanceLocal)
+    };
+}
+
+template<class DefinitionType>
+NSDictionary *CaseObservation(const CaseResult<DefinitionType>& result) {
+    return @{
+        @"build": BuildObservation(result.build),
+        @"sourceUnchanged": @(result.sourceUnchanged),
+        @"definitionUnchanged": @(result.definitionUnchanged),
+        @"filletEntries": @(result.filletEntries)
+    };
+}
+
+NSDictionary *LawObservation(const DebugRealizedLawObservation& law) {
+    NSMutableArray<NSDictionary *> *pieces = [NSMutableArray array];
+    for (const auto& piece : law.pieces) {
+        [pieces addObject:@{
+            @"type": [NSString stringWithUTF8String:piece.type.c_str()],
+            @"first": @(piece.first),
+            @"last": @(piece.last),
+            @"continuity": @(piece.continuity),
+            @"degree": @(piece.degree),
+            @"rational": @(piece.rational),
+            @"c1Intervals": Numbers(piece.c1Intervals),
+            @"knots": Numbers(piece.knots),
+            @"multiplicities": Integers(piece.multiplicities),
+            @"poles": Numbers(piece.poles)
+        }];
+    }
+    NSMutableArray<NSDictionary *> *spans = [NSMutableArray array];
+    for (const auto& span : law.spans) {
+        [spans addObject:@{
+            @"piece": @(span.piece),
+            @"first": @(span.first),
+            @"last": @(span.last),
+            @"derivativeFirst": @(span.derivativeFirst),
+            @"derivativeLast": @(span.derivativeLast),
+            @"extremumParameter": @(span.extremumParameter),
+            @"extremumDerivative": @(span.extremumDerivative),
+            @"minimumDerivative": @(span.minimumDerivative),
+            @"maximumDerivative": @(span.maximumDerivative)
+        }];
+    }
+    NSMutableArray<NSDictionary *> *joins = [NSMutableArray array];
+    for (const auto& join : law.joins) {
+        [joins addObject:@{
+            @"parameter": @(join.parameter),
+            @"valueLeft": @(join.valueLeft),
+            @"valueRight": @(join.valueRight),
+            @"derivativeLeft": @(join.derivativeLeft),
+            @"derivativeRight": @(join.derivativeRight)
+        }];
+    }
+    return @{
+        @"attempted": @(law.attempted),
+        @"exception": @(law.exception),
+        @"supported": @(law.supported),
+        @"c1OnPhysicalInterval": @(law.c1OnPhysicalInterval),
+        @"nonnegativeDerivative": @(law.nonnegativeDerivative),
+        @"noConstantSpan": @(law.noConstantSpan),
+        @"physicalBounds": @[@(law.physicalFirst), @(law.physicalLast)],
+        @"reportedBounds": @[@(law.boundsFirst), @(law.boundsLast)],
+        @"stationParameters": Numbers(law.stationParameters),
+        @"stationRadii": Numbers(law.stationRadii),
+        @"sampleParameters": Numbers(law.sampleParameters),
+        @"samplePositionsZ": Numbers(law.samplePositionsZ),
+        @"sampleValues": Numbers(law.sampleValues),
+        @"sampleDerivatives": Numbers(law.sampleDerivatives),
+        @"gridValues": Numbers(law.gridValues),
+        @"gridDerivatives": Numbers(law.gridDerivatives),
+        @"pieces": pieces,
+        @"spans": spans,
+        @"joins": joins
+    };
+}
+
+std::vector<std::uint8_t> ShapeBytes(const TopoDS_Shape& shape) {
+    std::vector<std::uint8_t> result;
+    core3d::variable_radius_fillet::detail::exactShapeBytes(shape, result);
+    return result;
+}
+
+NSDictionary *ObserveRealizedLaw(double unit) {
+    const double scale = 0.001 / unit;
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(
+        30 * scale, 30 * scale, 40 * scale).Shape();
+    const Definition definition = LinearDefinition(unit);
+    const std::atomic_bool running{false};
+    const std::atomic_bool cancelledFlag{true};
+
+    const auto sourceBefore = ShapeBytes(box);
+    std::vector<std::uint8_t> definitionBefore;
+    const bool definitionEncoded = Encode(definition, definitionBefore);
+    const auto positiveA = RunCase(box, definition,
+        [&](const TopoDS_Shape& source, const Definition& value) {
+            return BuildDeterministically(source, value, running);
+        });
+    const auto positiveB = RunCase(box, definition,
+        [&](const TopoDS_Shape& source, const Definition& value) {
+            return BuildDeterministically(source, value, running);
+        });
+    const auto sourceAfterPositive = ShapeBytes(box);
+    std::vector<std::uint8_t> definitionAfterPositive;
+    Encode(definition, definitionAfterPositive);
+    const auto candidateA = ShapeBytes(positiveA.build.solid);
+    const auto candidateB = ShapeBytes(positiveB.build.solid);
+
+    NSMutableArray<NSDictionary *> *laws = [NSMutableArray array];
+    for (const auto& law : positiveA.debug.realizedLaws)
+        [laws addObject:LawObservation(law)];
+    for (const auto& law : positiveB.debug.realizedLaws)
+        [laws addObject:LawObservation(law)];
+
+    NSMutableArray<NSNumber *> *sectionParameters = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *sectionExpected = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *sectionMeasured = [NSMutableArray array];
+    for (const auto& section : positiveA.build.evidence.sections) {
+        [sectionParameters addObject:@(section.parameter)];
+        [sectionExpected addObject:@(section.expectedRadiusLocal)];
+        [sectionMeasured addObject:@(section.measuredRadiusLocal)];
+    }
+
+    const auto cancelled = RunCase(box, definition,
+        [&](const TopoDS_Shape& source, const Definition& value) {
+            return Build(source, value, cancelledFlag);
+        });
+    const TopoDS_Shape tight = BRepPrimAPI_MakeBox(
+        6 * scale, 6 * scale, 40 * scale).Shape();
+    const auto clearance = RunCase(tight, definition,
+        [&](const TopoDS_Shape& source, const Definition& value) {
+            return Build(source, value, running);
+        });
+    Definition flipped = definition;
+    flipped.edges[0].normalA = {{1, 0, 0}};
+    flipped.edges[0].normalB = {{0, 1, 0}};
+    const auto orientation = RunCase(box, flipped,
+        [&](const TopoDS_Shape& source, const Definition& value) {
+            return Build(source, value, running);
+        });
+
+    Definition decoded;
+    std::vector<std::uint8_t> definitionReencoded;
+    const bool definitionDecoded = Decode(definitionBefore, decoded)
+        && Encode(decoded, definitionReencoded);
+    const MultiStationDefinition stationDefinition = StationDefinition(unit);
+    std::vector<std::uint8_t> stationBytes, stationReencoded;
+    const bool stationEncoded = Encode(stationDefinition, stationBytes);
+    MultiStationDefinition stationDecoded;
+    const bool stationDecodedOK = Decode(stationBytes, stationDecoded)
+        && Encode(stationDecoded, stationReencoded);
+    Definition rejectsStations;
+    MultiStationDefinition rejectsDefinition;
+
+    Definition equal = definition;
+    equal.stations[1].radiusLocal = equal.stations[0].radiusLocal;
+    Refusal equalRefusal = Refusal::KernelFailure;
+    const bool equalAccepted = Validate(equal, equalRefusal);
+    Definition closed = definition;
+    closed.edges[0].curve = CurveKind(2);
+    Refusal closedRefusal = Refusal::None;
+    const bool closedAccepted = Validate(closed, closedRefusal);
+    Definition budget = definition;
+    budget.edges.clear();
+    for (std::size_t index = 0; index <= MaximumEdges; ++index) {
+        OrientedEdgeAnchor edge = Anchor(scale);
+        edge.identifier = UUIDValue(std::uint8_t(30 + index));
+        edge.selectorProof = DigestValue(std::uint8_t(60 + index));
+        budget.edges.push_back(edge);
+    }
+    Refusal budgetRefusal = Refusal::None;
+    const bool budgetAccepted = Validate(budget, budgetRefusal);
+
+    return @{
+        @"bridgeVersion": @2,
+        @"linkedOCCT": @OCC_VERSION_COMPLETE,
+        @"metersPerLocalUnit": @(unit),
+        @"scale": @(scale),
+        @"positiveA": CaseObservation(positiveA),
+        @"positiveB": CaseObservation(positiveB),
+        @"positiveValid": @(!positiveA.build.solid.IsNull()
+            && BRepCheck_Analyzer(positiveA.build.solid).IsValid()),
+        @"expectedEdgeConsumed": @(positiveA.build.evidence.consumedEdges
+            == std::vector<UUID>{UUIDValue(3)}),
+        @"sourceBefore": DataValue(sourceBefore),
+        @"sourceAfterPositive": DataValue(sourceAfterPositive),
+        @"candidateA": DataValue(candidateA),
+        @"candidateB": DataValue(candidateB),
+        @"definitionEncoded": @(definitionEncoded),
+        @"definitionBefore": DataValue(definitionBefore),
+        @"definitionAfterPositive": DataValue(definitionAfterPositive),
+        @"lawInvocationCount": @(laws.count),
+        @"lawInvocations": laws,
+        @"sectionParameters": sectionParameters,
+        @"sectionExpected": sectionExpected,
+        @"sectionMeasured": sectionMeasured,
+        @"cancelled": CaseObservation(cancelled),
+        @"clearance": CaseObservation(clearance),
+        @"orientation": CaseObservation(orientation),
+        @"definitionDecoded": @(definitionDecoded),
+        @"definitionReencoded": DataValue(definitionReencoded),
+        @"stationEncoded": @(stationEncoded),
+        @"stationDecoded": @(stationDecodedOK),
+        @"stationBytes": DataValue(stationBytes),
+        @"stationReencoded": DataValue(stationReencoded),
+        @"definitionRejectsStations": @(!Decode(stationBytes, rejectsStations)),
+        @"stationsRejectDefinition": @(!Decode(definitionBefore, rejectsDefinition)),
+        @"equalAccepted": @(equalAccepted),
+        @"equalRefusal": @(std::uint8_t(equalRefusal)),
+        @"closedAccepted": @(closedAccepted),
+        @"closedRefusal": @(std::uint8_t(closedRefusal)),
+        @"closedReason": [NSString stringWithUTF8String:Reason(closedRefusal)],
+        @"budgetAccepted": @(budgetAccepted),
+        @"budgetRefusal": @(std::uint8_t(budgetRefusal)),
+        @"budgetReason": [NSString stringWithUTF8String:Reason(budgetRefusal)]
+    };
+}
+} // namespace
+
+extern "C" void *Core3DDebugB3F01RealizedLawObserve(double unit) {
+    @autoreleasepool {
+        try {
+            return (__bridge_retained void *)ObserveRealizedLaw(unit);
+        } catch (...) {
+            NSDictionary *failure = @{
+                @"bridgeVersion": @2,
+                @"bridgeException": @YES,
+                @"metersPerLocalUnit": @(unit)
+            };
+            return (__bridge_retained void *)failure;
+        }
     }
 }
 

@@ -13,7 +13,14 @@
 #include <BRepTools.hxx>
 #include <BRep_Tool.hxx>
 #include <GProp_GProps.hxx>
+#include <Law_BSpFunc.hxx>
+#include <Law_BSpline.hxx>
+#include <Law_Composite.hxx>
+#include <Law_Constant.hxx>
 #include <Law_Function.hxx>
+#include <Law_Linear.hxx>
+#include <TColStd_Array1OfInteger.hxx>
+#include <TColStd_Array1OfReal.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -24,6 +31,7 @@
 #include <locale>
 #include <set>
 #include <sstream>
+#include <string>
 
 namespace core3d::variable_radius_fillet {
 
@@ -50,9 +58,68 @@ struct BuildResult final {
 
 #if DEBUG
 // Test observation only: the native bridge uses this to prove orientation
-// refusals happen before any edge is handed to the OCCT fillet builder.
+// refusals happen before any edge is handed to the OCCT fillet builder and to
+// inspect the actual post-Build law without changing production decisions.
+struct DebugLawSpanObservation final {
+    std::size_t piece = 0;
+    double first = 0;
+    double last = 0;
+    double derivativeFirst = 0;
+    double derivativeLast = 0;
+    double extremumParameter = 0;
+    double extremumDerivative = 0;
+    double minimumDerivative = 0;
+    double maximumDerivative = 0;
+};
+
+struct DebugLawJoinObservation final {
+    double parameter = 0;
+    double valueLeft = 0;
+    double valueRight = 0;
+    double derivativeLeft = 0;
+    double derivativeRight = 0;
+};
+
+struct DebugLawPieceObservation final {
+    std::string type;
+    double first = 0;
+    double last = 0;
+    int continuity = -1;
+    int degree = 0;
+    bool rational = false;
+    std::vector<double> c1Intervals;
+    std::vector<double> knots;
+    std::vector<int> multiplicities;
+    std::vector<double> poles;
+};
+
+struct DebugRealizedLawObservation final {
+    bool attempted = false;
+    bool exception = false;
+    bool supported = false;
+    bool c1OnPhysicalInterval = false;
+    bool nonnegativeDerivative = false;
+    bool noConstantSpan = false;
+    double physicalFirst = 0;
+    double physicalLast = 0;
+    double boundsFirst = 0;
+    double boundsLast = 0;
+    std::array<double, 2> stationParameters{};
+    std::array<double, 2> stationRadii{};
+    std::array<double, 5> sampleParameters{};
+    std::array<double, 5> samplePositionsZ{};
+    std::array<double, 5> sampleValues{};
+    std::array<double, 5> sampleDerivatives{};
+    std::array<double, 99> gridValues{};
+    std::array<double, 99> gridDerivatives{};
+    std::vector<DebugLawPieceObservation> pieces;
+    std::vector<DebugLawSpanObservation> spans;
+    std::vector<DebugLawJoinObservation> joins;
+};
+
 struct DebugBuildObservation final {
     std::size_t filletEntryCount = 0;
+    std::vector<DebugRealizedLawObservation> realizedLaws;
 };
 inline thread_local DebugBuildObservation* debugBuildObservation = nullptr;
 #endif
@@ -266,6 +333,280 @@ inline bool selfIntersectionFree(const TopoDS_Shape& shape) {
     return !analyzer.HasErrors() && !analyzer.HasWarnings() && !analyzer.HasFaulty();
 }
 
+#if DEBUG
+inline bool finiteLawSample(double value, double derivative) noexcept {
+    return std::isfinite(value) && std::isfinite(derivative);
+}
+
+inline void appendClippedC1Intervals(const Handle(Law_Function)& law,
+                                     double first, double last,
+                                     DebugLawPieceObservation& output) {
+    const int count = law->NbIntervals(GeomAbs_C1);
+    if (count <= 0 || count > 128) return;
+    TColStd_Array1OfReal intervals(1, count + 1);
+    law->Intervals(intervals, GeomAbs_C1);
+    for (int index = intervals.Lower(); index <= intervals.Upper(); ++index) {
+        const double value = std::max(first, std::min(last, intervals(index)));
+        if (output.c1Intervals.empty()
+            || std::abs(value - output.c1Intervals.back()) > Precision::PConfusion())
+            output.c1Intervals.push_back(value);
+    }
+}
+
+inline void observeRealizedLaw(const Handle(Law_Function)& law,
+                               const TopoDS_Edge& edge,
+                               const Definition& definition,
+                               double boundsFirst, double boundsLast,
+                               DebugRealizedLawObservation& output) noexcept {
+    output = {};
+    output.attempted = true;
+    try {
+        if (law.IsNull()) return;
+        BRepAdaptor_Curve curve(edge);
+        const double physicalFirst = curve.FirstParameter();
+        const double physicalLast = curve.LastParameter();
+        if (!std::isfinite(physicalFirst) || !std::isfinite(physicalLast)
+            || !(physicalLast > physicalFirst)) return;
+        output.physicalFirst = physicalFirst;
+        output.physicalLast = physicalLast;
+        output.boundsFirst = boundsFirst;
+        output.boundsLast = boundsLast;
+        output.stationParameters = {{definition.stations[0].parameter,
+                                     definition.stations[1].parameter}};
+        output.stationRadii = {{definition.stations[0].radiusLocal,
+                                definition.stations[1].radiusLocal}};
+
+        constexpr std::array<double, 5> samples{{0, 0.2, 0.5, 0.8, 1}};
+        for (std::size_t index = 0; index < samples.size(); ++index) {
+            const double parameter = physicalFirst
+                + (physicalLast - physicalFirst) * samples[index];
+            double value = 0, derivative = 0;
+            law->D1(parameter, value, derivative);
+            output.sampleParameters[index] = parameter;
+            output.samplePositionsZ[index] = curve.Value(parameter).Z();
+            output.sampleValues[index] = value;
+            output.sampleDerivatives[index] = derivative;
+        }
+        for (std::size_t index = 0; index < output.gridValues.size(); ++index) {
+            const double t = double(index + 1) / 100;
+            const double parameter = physicalFirst + (physicalLast - physicalFirst) * t;
+            law->D1(parameter, output.gridValues[index], output.gridDerivatives[index]);
+        }
+
+        struct Part final {
+            Handle(Law_Function) law;
+            double first = 0;
+            double last = 0;
+        };
+        std::vector<Part> parts;
+        const Handle(Law_Composite) composite = Handle(Law_Composite)::DownCast(law);
+        if (composite.IsNull()) {
+            double first = 0, last = 0;
+            law->Bounds(first, last);
+            parts.push_back({law, first, last});
+        } else {
+            const Law_Laws& laws = composite->ChangeLaws();
+            for (Law_ListIteratorOfLaws iterator(laws); iterator.More(); iterator.Next()) {
+                double first = 0, last = 0;
+                const Handle(Law_Function) part = iterator.Value();
+                if (part.IsNull()) continue;
+                part->Bounds(first, last);
+                parts.push_back({part, first, last});
+            }
+        }
+        std::sort(parts.begin(), parts.end(), [](const Part& lhs, const Part& rhs) {
+            return lhs.first < rhs.first;
+        });
+
+        const double parameterTolerance = std::max(
+            Precision::PConfusion(), (physicalLast - physicalFirst) * 1e-12);
+        const double valueTolerance = 1e-8 * (0.001 / definition.metersPerLocalUnit);
+        const double derivativeTolerance = std::max(
+            1e-12, valueTolerance / (physicalLast - physicalFirst) * 8);
+        bool supported = true;
+        bool c1 = true;
+        bool nonnegative = true;
+        bool noConstant = true;
+        double coveredUntil = physicalFirst;
+        std::vector<Part> relevant;
+
+        for (const Part& part : parts) {
+            const double first = std::max(physicalFirst, part.first);
+            const double last = std::min(physicalLast, part.last);
+            if (!(last - first > parameterTolerance)) continue;
+            if (first > coveredUntil + parameterTolerance) c1 = false;
+            coveredUntil = std::max(coveredUntil, last);
+            relevant.push_back(part);
+
+            DebugLawPieceObservation piece;
+            piece.type = part.law->DynamicType()->Name();
+            piece.first = first;
+            piece.last = last;
+            piece.continuity = int(part.law->Continuity());
+            appendClippedC1Intervals(part.law, first, last, piece);
+            const std::size_t pieceIndex = output.pieces.size();
+
+            const Handle(Law_BSpFunc) spline = Handle(Law_BSpFunc)::DownCast(part.law);
+            const Handle(Law_Linear) linear = Handle(Law_Linear)::DownCast(part.law);
+            const Handle(Law_Constant) constant = Handle(Law_Constant)::DownCast(part.law);
+            if (!spline.IsNull()) {
+                const Handle(Law_BSpline) basis = spline->Curve();
+                if (basis.IsNull()) {
+                    supported = false;
+                } else {
+                    piece.degree = basis->Degree();
+                    piece.rational = basis->IsRational();
+                    TColStd_Array1OfReal knots(1, basis->NbKnots());
+                    TColStd_Array1OfInteger multiplicities(1, basis->NbKnots());
+                    TColStd_Array1OfReal poles(1, basis->NbPoles());
+                    basis->Knots(knots);
+                    basis->Multiplicities(multiplicities);
+                    basis->Poles(poles);
+                    for (int index = 1; index <= basis->NbKnots(); ++index) {
+                        piece.knots.push_back(knots(index));
+                        piece.multiplicities.push_back(multiplicities(index));
+                    }
+                    for (int index = 1; index <= basis->NbPoles(); ++index)
+                        piece.poles.push_back(poles(index));
+                    if (piece.rational || basis->IsPeriodic()
+                        || piece.degree < 1 || piece.degree > 3) {
+                        supported = false;
+                    } else {
+                        std::size_t spanCount = 0;
+                        for (int knot = 1; knot < basis->NbKnots(); ++knot) {
+                            const double spanFirst = std::max(first, knots(knot));
+                            const double spanLast = std::min(last, knots(knot + 1));
+                            if (!(spanLast - spanFirst > parameterTolerance)) continue;
+                            ++spanCount;
+                            double valueAtFirst = 0, derivativeAtFirst = 0, secondAtFirst = 0;
+                            double valueAtLast = 0, derivativeAtLast = 0, secondAtLast = 0;
+                            basis->LocalD2(spanFirst, knot, knot + 1, valueAtFirst,
+                                           derivativeAtFirst, secondAtFirst);
+                            basis->LocalD2(spanLast, knot, knot + 1, valueAtLast,
+                                           derivativeAtLast, secondAtLast);
+                            DebugLawSpanObservation span;
+                            span.piece = pieceIndex;
+                            span.first = spanFirst;
+                            span.last = spanLast;
+                            span.derivativeFirst = derivativeAtFirst;
+                            span.derivativeLast = derivativeAtLast;
+                            span.extremumParameter = spanFirst;
+                            span.extremumDerivative = derivativeAtFirst;
+                            span.minimumDerivative = std::min(derivativeAtFirst,
+                                                              derivativeAtLast);
+                            span.maximumDerivative = std::max(derivativeAtFirst,
+                                                              derivativeAtLast);
+                            if (piece.degree == 3
+                                && std::isfinite(secondAtFirst)
+                                && std::isfinite(secondAtLast)
+                                && std::abs(secondAtFirst - secondAtLast) > 1e-18) {
+                                const double extremum = spanFirst
+                                    + (spanLast - spanFirst) * secondAtFirst
+                                        / (secondAtFirst - secondAtLast);
+                                if (extremum > spanFirst && extremum < spanLast) {
+                                    double extremumValue = 0, extremumDerivative = 0;
+                                    basis->LocalD1(extremum, knot, knot + 1,
+                                                   extremumValue, extremumDerivative);
+                                    span.extremumParameter = extremum;
+                                    span.extremumDerivative = extremumDerivative;
+                                    span.minimumDerivative = std::min(
+                                        span.minimumDerivative, extremumDerivative);
+                                    span.maximumDerivative = std::max(
+                                        span.maximumDerivative, extremumDerivative);
+                                }
+                            }
+                            if (!finiteLawSample(valueAtFirst, derivativeAtFirst)
+                                || !finiteLawSample(valueAtLast, derivativeAtLast)
+                                || !std::isfinite(span.minimumDerivative)
+                                || !std::isfinite(span.maximumDerivative)) {
+                                supported = false;
+                            } else {
+                                if (span.minimumDerivative < -derivativeTolerance)
+                                    nonnegative = false;
+                                if (span.maximumDerivative <= derivativeTolerance)
+                                    noConstant = false;
+                            }
+                            output.spans.push_back(span);
+                        }
+                        if (spanCount == 0) supported = false;
+
+                        for (int knot = 2; knot < basis->NbKnots(); ++knot) {
+                            const double parameter = knots(knot);
+                            if (!(parameter > first + parameterTolerance
+                                  && parameter < last - parameterTolerance)) continue;
+                            DebugLawJoinObservation join;
+                            join.parameter = parameter;
+                            basis->LocalD1(parameter, knot - 1, knot,
+                                           join.valueLeft, join.derivativeLeft);
+                            basis->LocalD1(parameter, knot, knot + 1,
+                                           join.valueRight, join.derivativeRight);
+                            if (!finiteLawSample(join.valueLeft, join.derivativeLeft)
+                                || !finiteLawSample(join.valueRight, join.derivativeRight)
+                                || std::abs(join.valueLeft - join.valueRight) > valueTolerance
+                                || std::abs(join.derivativeLeft - join.derivativeRight)
+                                    > derivativeTolerance)
+                                c1 = false;
+                            output.joins.push_back(join);
+                        }
+                    }
+                }
+            } else if (!linear.IsNull() || !constant.IsNull()) {
+                double valueFirst = 0, derivativeFirst = 0;
+                double valueLast = 0, derivativeLast = 0;
+                part.law->D1(first, valueFirst, derivativeFirst);
+                part.law->D1(last, valueLast, derivativeLast);
+                DebugLawSpanObservation span;
+                span.piece = pieceIndex;
+                span.first = first;
+                span.last = last;
+                span.derivativeFirst = derivativeFirst;
+                span.derivativeLast = derivativeLast;
+                span.extremumParameter = first;
+                span.extremumDerivative = derivativeFirst;
+                span.minimumDerivative = std::min(derivativeFirst, derivativeLast);
+                span.maximumDerivative = std::max(derivativeFirst, derivativeLast);
+                output.spans.push_back(span);
+                if (!finiteLawSample(valueFirst, derivativeFirst)
+                    || !finiteLawSample(valueLast, derivativeLast)) supported = false;
+                if (span.minimumDerivative < -derivativeTolerance) nonnegative = false;
+                if (!constant.IsNull() || span.maximumDerivative <= derivativeTolerance)
+                    noConstant = false;
+            } else {
+                supported = false;
+            }
+            output.pieces.push_back(std::move(piece));
+        }
+
+        if (coveredUntil < physicalLast - parameterTolerance || relevant.empty()) c1 = false;
+        for (std::size_t index = 1; index < relevant.size(); ++index) {
+            const double joinParameter = relevant[index].first;
+            if (!(joinParameter > physicalFirst + parameterTolerance
+                  && joinParameter < physicalLast - parameterTolerance)) continue;
+            DebugLawJoinObservation join;
+            join.parameter = joinParameter;
+            relevant[index - 1].law->D1(joinParameter, join.valueLeft,
+                                         join.derivativeLeft);
+            relevant[index].law->D1(joinParameter, join.valueRight,
+                                     join.derivativeRight);
+            if (!finiteLawSample(join.valueLeft, join.derivativeLeft)
+                || !finiteLawSample(join.valueRight, join.derivativeRight)
+                || std::abs(join.valueLeft - join.valueRight) > valueTolerance
+                || std::abs(join.derivativeLeft - join.derivativeRight)
+                    > derivativeTolerance)
+                c1 = false;
+            output.joins.push_back(join);
+        }
+
+        output.supported = supported;
+        output.c1OnPhysicalInterval = supported && c1;
+        output.nonnegativeDerivative = supported && nonnegative;
+        output.noConstantSpan = supported && noConstant;
+    } catch (...) {
+        output.exception = true;
+    }
+}
+#endif
+
 inline bool exactShapeBytes(const TopoDS_Shape& shape, std::vector<std::uint8_t>& bytes) {
     bytes.clear(); std::ostringstream stream; stream.imbue(std::locale::classic());
     BRepTools::Write(shape, stream, Standard_False, Standard_False,
@@ -333,6 +674,13 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
                 || std::abs(law->Value(first) - definition.stations[0].radiusLocal) > tolerance
                 || std::abs(law->Value(last) - definition.stations[1].radiusLocal) > tolerance)
                 return decline(Refusal::EndpointMismatch);
+#if DEBUG
+            if (debugBuildObservation) {
+                DebugRealizedLawObservation observed;
+                detail::observeRealizedLaw(law, edge, definition, first, last, observed);
+                debugBuildObservation->realizedLaws.push_back(std::move(observed));
+            }
+#endif
         }
         const TopoDS_Shape candidate = fillet.Shape();
         if (!BRepCheck_Analyzer(candidate).IsValid()) return decline(Refusal::KernelFailure);
@@ -399,7 +747,7 @@ inline BuildResult BuildDeterministically(const TopoDS_Shape& source,
 }
 
 // ===== Stage 2: multi-station law. Everything above remains the stage-1 =====
-// ===== linear-law build; nothing here edits its gates or evidence.       =====
+// ===== two-station build; nothing here edits its gates or evidence.      =====
 
 #include <TColgp_Array1OfPnt2d.hxx>
 
@@ -409,8 +757,9 @@ inline BuildResult BuildDeterministically(const TopoDS_Shape& source,
 // for every law object in this OCCT build (verified locally with OCCT's own
 // Law_Linear and Law_Interpol), so no custom Law_Function subclass is used.
 // The authored contract pins the exact radius at every station and lets the
-// kernel interpolate between stations; the build re-reads the realized law
-// below and refuses any drift from the authored piecewise-linear envelope.
+// kernel interpolate between stations. Readback checks station values and
+// bounded positive samples against the existing 0.5x-2x piecewise-linear
+// admission-reference window; this is not an exact between-station guarantee.
 
 inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
                                      const MultiStationDefinition& definition,
@@ -485,10 +834,10 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
                     || std::abs(lawAt(station.parameter) - station.radiusLocal) > tolerance)
                     return decline(Refusal::EndpointMismatch);
             }
-            // Between stations the kernel interpolates; the realized law must
-            // not drift from the authored piecewise-linear envelope. Fixed
-            // deterministic samples per segment are bounded like a measured
-            // section and kept inside the admitted whole-law clearance.
+            // Between stations, check finite positive realised samples at the
+            // three fixed quarter-segment positions against 0.5x-2x RadiusAt
+            // reference values. These bounded samples are not equality checks
+            // or an independent whole-law clearance proof.
             for (std::size_t segment = 1; segment < definition.stations.size(); ++segment) {
                 const double from = definition.stations[segment - 1].parameter;
                 const double to = definition.stations[segment].parameter;
