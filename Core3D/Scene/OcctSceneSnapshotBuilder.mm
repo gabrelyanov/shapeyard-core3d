@@ -4261,6 +4261,283 @@ std::uint64_t PresentationOverlayPayloadFingerprint(
 
 } // namespace
 
+//! Concrete allocation/work ledger for one builder-owned E4 operation. It is
+//! embedded in PrivateDecalCapture::Impl, so constructing the operation has a
+//! fixed-size, allocation-free accounting owner before any protected scene
+//! copy. Shared headers expose only accounting::View and move-only Ticket.
+class OperationLedger final {
+public:
+    using FailureSite = decal_layer::bake::accounting::FailureSite;
+    using Job = decal_layer::bake::accounting::Job;
+    using Retention = decal_layer::bake::accounting::Retention;
+    using StorageDimension =
+        decal_layer::bake::accounting::StorageDimension;
+    using View = decal_layer::bake::accounting::View;
+
+    OperationLedger() noexcept
+        : storageLimits_({kMaxSnapshotNumericBytes,
+                          kMaxAggregateEncodedTextureBytes,
+                          kMaxAggregateDecodedTextureBytes}) {}
+
+#ifdef DEBUG
+    OperationLedger(std::size_t snapshotLimit, std::size_t encodedLimit,
+                    std::size_t privateLimit) noexcept
+        : storageLimits_({snapshotLimit, encodedLimit, privateLimit}) {}
+#endif
+
+    View view() noexcept {
+        return {this, &ReserveBridge, &ReleaseBridge,
+            &CheckedProductBridge, &SealJobBridge, &ConsumeJobBridge,
+            &RecheckBridge, &CancelBridge};
+    }
+
+    bool bindTopology(retained_edge_treatment::ReplayBudget& topology,
+                      FailureSite site) noexcept {
+        if (failed_) return false;
+        if (topology_ != nullptr || !topology.valid())
+            return fail(site, FailureReason::Topology, 0, 0);
+        topology_ = &topology;
+        return true;
+    }
+
+    bool reserve(StorageDimension dimension, std::size_t bytes,
+                 Retention retention, FailureSite site) noexcept {
+        if (failed_) return false;
+        const std::size_t index = storageIndex(dimension);
+        if (index >= storage_.size())
+            return fail(site, FailureReason::InvalidDimension, bytes, 0);
+        StorageState& state = storage_[index];
+        const std::size_t limit = storageLimits_[index];
+        if (state.live > limit || bytes > limit - state.live)
+            return fail(site, FailureReason::StorageLimit, bytes,
+                        state.live <= limit ? limit - state.live : 0);
+        if (bytes > std::numeric_limits<std::size_t>::max() - state.reserved
+            || (retention == Retention::Retained
+                && bytes > std::numeric_limits<std::size_t>::max()
+                    - state.retained))
+            return fail(site, FailureReason::ArithmeticOverflow, bytes, 0);
+        state.reserved += bytes;
+        state.live += bytes;
+        if (retention == Retention::Retained) state.retained += bytes;
+        state.peak = std::max(state.peak, state.live);
+        return true;
+    }
+
+    void release(StorageDimension dimension, std::size_t bytes,
+                 Retention retention) noexcept {
+        const std::size_t index = storageIndex(dimension);
+        if (index >= storage_.size()) {
+            (void)fail(FailureSite::StorageRelease,
+                       FailureReason::InvalidDimension, bytes, 0);
+            return;
+        }
+        StorageState& state = storage_[index];
+        if (bytes > state.live
+            || (retention == Retention::Retained
+                && bytes > state.retained)) {
+            (void)fail(FailureSite::StorageRelease,
+                       FailureReason::ReleaseMismatch, bytes, state.live);
+            return;
+        }
+        state.live -= bytes;
+        if (retention == Retention::Retained) state.retained -= bytes;
+    }
+
+    bool checkedProduct(std::size_t first, std::size_t second,
+                        std::size_t third, std::size_t& product,
+                        FailureSite site) noexcept {
+        product = 0;
+        if (failed_) return false;
+        if ((first != 0
+                && second > std::numeric_limits<std::size_t>::max() / first)
+            || (first * second != 0
+                && third > std::numeric_limits<std::size_t>::max()
+                    / (first * second)))
+            return fail(site, FailureReason::ArithmeticOverflow,
+                        std::numeric_limits<std::size_t>::max(), 0);
+        product = first * second * third;
+        return true;
+    }
+
+    bool sealJob(Job job, std::size_t admittedUnits,
+                 FailureSite site) noexcept {
+        if (failed_) return false;
+        const std::size_t index = jobIndex(job);
+        if (index >= jobs_.size())
+            return fail(site, FailureReason::InvalidJob, admittedUnits, 0);
+        JobState& state = jobs_[index];
+        if (state.sealed)
+            return fail(site, FailureReason::DuplicateJob,
+                        admittedUnits, state.admitted);
+        if (admittedUnits > std::numeric_limits<std::size_t>::max()
+                - cumulativeAdmittedWork_)
+            return fail(site, FailureReason::ArithmeticOverflow,
+                        admittedUnits, 0);
+        state.sealed = true;
+        state.admitted = admittedUnits;
+        cumulativeAdmittedWork_ += admittedUnits;
+        return true;
+    }
+
+    bool consumeJob(Job job, std::size_t units,
+                    FailureSite site) noexcept {
+        if (failed_) return false;
+        const std::size_t index = jobIndex(job);
+        if (index >= jobs_.size())
+            return fail(site, FailureReason::InvalidJob, units, 0);
+        JobState& state = jobs_[index];
+        if (!state.sealed)
+            return fail(site, FailureReason::UnsealedJob, units, 0);
+        if (state.consumed > state.admitted
+            || units > state.admitted - state.consumed)
+            return fail(site, FailureReason::JobLimit, units,
+                        state.consumed <= state.admitted
+                            ? state.admitted - state.consumed : 0);
+        if (units > std::numeric_limits<std::size_t>::max()
+                - cumulativeWork_)
+            return fail(site, FailureReason::ArithmeticOverflow, units, 0);
+        state.consumed += units;
+        cumulativeWork_ += units;
+        return true;
+    }
+
+    bool recheck(FailureSite site) noexcept {
+        if (failed_) return false;
+        if (topology_ != nullptr && !topology_->valid())
+            return fail(site, FailureReason::Topology,
+                        topology_->topologyVisits,
+                        retained_topology_budget::MaximumTopologyVisits);
+        for (std::size_t index = 0; index < storage_.size(); ++index) {
+            const StorageState& state = storage_[index];
+            if (state.live > storageLimits_[index]
+                || state.retained > state.live)
+                return fail(site, FailureReason::Invariant,
+                            state.live, storageLimits_[index]);
+        }
+        for (const JobState& state : jobs_)
+            if (state.consumed > state.admitted)
+                return fail(site, FailureReason::Invariant,
+                            state.consumed, state.admitted);
+        if (cumulativeWork_ > cumulativeAdmittedWork_)
+            return fail(site, FailureReason::Invariant,
+                        cumulativeWork_, cumulativeAdmittedWork_);
+        return true;
+    }
+
+    void cancel(FailureSite site) noexcept {
+        if (!failed_)
+            (void)fail(site, FailureReason::Cancelled, 0, 0);
+    }
+
+    std::size_t live(StorageDimension dimension) const noexcept {
+        const std::size_t index = storageIndex(dimension);
+        return index < storage_.size() ? storage_[index].live : 0;
+    }
+    std::size_t retained(StorageDimension dimension) const noexcept {
+        const std::size_t index = storageIndex(dimension);
+        return index < storage_.size() ? storage_[index].retained : 0;
+    }
+    std::size_t peak(StorageDimension dimension) const noexcept {
+        const std::size_t index = storageIndex(dimension);
+        return index < storage_.size() ? storage_[index].peak : 0;
+    }
+    std::size_t cumulativeWork() const noexcept { return cumulativeWork_; }
+    FailureSite firstFailureSite() const noexcept { return firstFailure_.site; }
+
+private:
+    enum class FailureReason : std::uint8_t {
+        None,
+        InvalidDimension,
+        StorageLimit,
+        ReleaseMismatch,
+        ArithmeticOverflow,
+        InvalidJob,
+        DuplicateJob,
+        UnsealedJob,
+        JobLimit,
+        Topology,
+        Cancelled,
+        Invariant
+    };
+    struct StorageState final {
+        std::size_t reserved = 0;
+        std::size_t live = 0;
+        std::size_t retained = 0;
+        std::size_t peak = 0;
+    };
+    struct JobState final {
+        std::size_t admitted = 0;
+        std::size_t consumed = 0;
+        bool sealed = false;
+    };
+    struct FailureRecord final {
+        FailureSite site = FailureSite::None;
+        FailureReason reason = FailureReason::None;
+        std::size_t requested = 0;
+        std::size_t admitted = 0;
+    };
+
+    static constexpr std::size_t storageIndex(
+        StorageDimension dimension) noexcept {
+        return static_cast<std::size_t>(dimension);
+    }
+    static constexpr std::size_t jobIndex(Job job) noexcept {
+        return static_cast<std::size_t>(job);
+    }
+    bool fail(FailureSite site, FailureReason reason,
+              std::size_t requested, std::size_t admitted) noexcept {
+        if (!failed_) {
+            failed_ = true;
+            firstFailure_ = {site, reason, requested, admitted};
+        }
+        return false;
+    }
+
+    static bool ReserveBridge(void* owner, StorageDimension dimension,
+        std::size_t bytes, Retention retention, FailureSite site) noexcept {
+        return static_cast<OperationLedger*>(owner)->reserve(
+            dimension, bytes, retention, site);
+    }
+    static void ReleaseBridge(void* owner, StorageDimension dimension,
+        std::size_t bytes, Retention retention) noexcept {
+        static_cast<OperationLedger*>(owner)->release(
+            dimension, bytes, retention);
+    }
+    static bool CheckedProductBridge(void* owner, std::size_t first,
+        std::size_t second, std::size_t third, std::size_t& product,
+        FailureSite site) noexcept {
+        return static_cast<OperationLedger*>(owner)->checkedProduct(
+            first, second, third, product, site);
+    }
+    static bool SealJobBridge(void* owner, Job job,
+        std::size_t admittedUnits, FailureSite site) noexcept {
+        return static_cast<OperationLedger*>(owner)->sealJob(
+            job, admittedUnits, site);
+    }
+    static bool ConsumeJobBridge(void* owner, Job job,
+        std::size_t units, FailureSite site) noexcept {
+        return static_cast<OperationLedger*>(owner)->consumeJob(
+            job, units, site);
+    }
+    static bool RecheckBridge(void* owner, FailureSite site) noexcept {
+        return static_cast<OperationLedger*>(owner)->recheck(site);
+    }
+    static void CancelBridge(void* owner, FailureSite site) noexcept {
+        static_cast<OperationLedger*>(owner)->cancel(site);
+    }
+
+    std::array<std::size_t, static_cast<std::size_t>(
+        StorageDimension::Count)> storageLimits_{};
+    std::array<StorageState, static_cast<std::size_t>(
+        StorageDimension::Count)> storage_{};
+    std::array<JobState, static_cast<std::size_t>(Job::Count)> jobs_{};
+    FailureRecord firstFailure_{};
+    retained_edge_treatment::ReplayBudget* topology_ = nullptr;
+    std::size_t cumulativeAdmittedWork_ = 0;
+    std::size_t cumulativeWork_ = 0;
+    bool failed_ = false;
+};
+
 struct PrivateDecalCapture::Impl final {
     struct Owner final {
         struct Receiver final {
@@ -4285,6 +4562,9 @@ struct PrivateDecalCapture::Impl final {
         std::string definitionIdentifier;
     };
 
+    // Impl is the single operation context. The ledger is constructed first;
+    // the existing ReplayBudget below remains its unchanged topology component.
+    OperationLedger operationLedger;
     SceneSnapshot wholeCommittedScene;
     std::vector<Owner> owners;
     std::shared_ptr<retained_edge_treatment::ReplayBudget> budget;
@@ -4329,6 +4609,9 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
         auto candidate = std::make_unique<PrivateDecalCapture>();
         if (!candidate || !candidate->impl_) return false;
         auto& impl = *candidate->impl_;
+        if (!impl.operationLedger.recheck(
+                decal_layer::bake::accounting::FailureSite::ContextControl))
+            return false;
         impl.privateDocument = privateDocument;
         impl.wholeCommittedScene = wholeCommittedScene;
         impl.selectedObjectsOnly = selectedObjectsOnly;
@@ -4338,7 +4621,11 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
             return false;
         impl.budget = std::make_shared<
             retained_edge_treatment::ReplayBudget>();
-        if (!impl.budget) return false;
+        if (!impl.budget
+            || !impl.operationLedger.bindTopology(
+                *impl.budget,
+                decal_layer::bake::accounting::FailureSite::ContextControl))
+            return false;
 
         // P1 admits only proven standalone owners. A valid saved atlas is a
         // transitive multi-member authority and remains a deliberate refusal
@@ -4615,6 +4902,117 @@ bool OcctSceneSnapshotBuilder::FinalizePrivateExportDecals(
 }
 
 #ifdef DEBUG
+std::array<std::size_t, 18> DebugExerciseE4OperationLedger() noexcept
+{
+    using FailureSite = decal_layer::bake::accounting::FailureSite;
+    using Job = decal_layer::bake::accounting::Job;
+    using Retention = decal_layer::bake::accounting::Retention;
+    using StorageDimension =
+        decal_layer::bake::accounting::StorageDimension;
+    using Ticket = decal_layer::bake::accounting::Ticket;
+    std::array<std::size_t, 18> result{};
+
+    OperationLedger exact(16, 16, 16);
+    result[0] = exact.reserve(StorageDimension::PrivateStorage, 16,
+            Retention::Scratch, FailureSite::DebugExactLimit)
+        && exact.live(StorageDimension::PrivateStorage) == 16;
+    result[2] = !exact.reserve(StorageDimension::PrivateStorage, 1,
+        Retention::Scratch, FailureSite::DebugOneUnit);
+    const auto sticky = exact.view();
+    result[3] = !sticky.Recheck(FailureSite::ProtectedSceneCopy);
+    result[4] = !sticky.Recheck(FailureSite::JobConsume);
+    result[5] = !sticky.Recheck(FailureSite::StorageReserve);
+    result[6] = !sticky.Recheck(FailureSite::JobSeal);
+    result[7] = !sticky.Recheck(FailureSite::ContextControl);
+
+    OperationLedger overflow(16, 16, 16);
+    result[1] = !overflow.reserve(StorageDimension::PrivateStorage,
+        std::numeric_limits<std::size_t>::max(), Retention::Scratch,
+        FailureSite::DebugOneUnit);
+
+    OperationLedger multiplied(64, 64, 64);
+    std::size_t product = 0;
+    result[13] = !multiplied.view().CheckedProduct(
+        std::numeric_limits<std::size_t>::max(), 2, 1, product,
+        FailureSite::DebugCheckedProduct)
+        && product == 0
+        && multiplied.firstFailureSite()
+            == FailureSite::DebugCheckedProduct;
+
+    OperationLedger copies(64, 64, 64);
+    const auto copyView = copies.view();
+    result[8] = copyView.Reserve(StorageDimension::PrivateStorage, 8,
+            Retention::Retained, FailureSite::DebugCopyOne)
+        && copyView.Reserve(StorageDimension::PrivateStorage, 8,
+            Retention::Retained, FailureSite::DebugCopyTwo)
+        && copies.live(StorageDimension::PrivateStorage) == 16
+        && copies.retained(StorageDimension::PrivateStorage) == 16;
+
+    OperationLedger shared(64, 64, 64);
+    result[9] = shared.view().Reserve(StorageDimension::PrivateStorage, 8,
+            Retention::Retained, FailureSite::DebugShared)
+        && shared.live(StorageDimension::PrivateStorage) == 8
+        && shared.retained(StorageDimension::PrivateStorage) == 8;
+
+    OperationLedger moved(64, 64, 64);
+    {
+        Ticket first;
+        result[10] = first.acquire(moved.view(),
+            StorageDimension::PrivateStorage, 8, Retention::Scratch,
+            FailureSite::DebugMove);
+        Ticket second(std::move(first));
+        result[10] = result[10]
+            && moved.live(StorageDimension::PrivateStorage) == 8;
+    }
+    result[10] = result[10]
+        && moved.live(StorageDimension::PrivateStorage) == 0;
+
+    OperationLedger scratch(64, 64, 64);
+    {
+        Ticket ticket;
+        result[11] = ticket.acquire(scratch.view(),
+            StorageDimension::PrivateStorage, 8, Retention::Scratch,
+            FailureSite::DebugScratch);
+    }
+    result[11] = result[11]
+        && scratch.live(StorageDimension::PrivateStorage) == 0
+        && scratch.peak(StorageDimension::PrivateStorage) == 8;
+    result[12] = scratch.sealJob(
+            Job::Debug, 5, FailureSite::DebugWork)
+        && scratch.consumeJob(Job::Debug, 5, FailureSite::DebugWork)
+        && scratch.cumulativeWork() == 5
+        && scratch.reserve(StorageDimension::PrivateStorage, 4,
+            Retention::Scratch, FailureSite::DebugWork);
+    scratch.release(StorageDimension::PrivateStorage, 4,
+        Retention::Scratch);
+    result[12] = result[12] && scratch.cumulativeWork() == 5;
+
+    OperationLedger duplicate(64, 64, 64);
+    result[14] = duplicate.sealJob(
+            Job::Debug, 5, FailureSite::DebugDuplicateJob)
+        && !duplicate.sealJob(
+            Job::Debug, 5, FailureSite::DebugDuplicateJob)
+        && duplicate.firstFailureSite()
+            == FailureSite::DebugDuplicateJob;
+
+    OperationLedger jobLimit(64, 64, 64);
+    result[15] = jobLimit.sealJob(
+            Job::Debug, 5, FailureSite::DebugJobLimit)
+        && jobLimit.consumeJob(
+            Job::Debug, 5, FailureSite::DebugJobLimit)
+        && !jobLimit.consumeJob(
+            Job::Debug, 1, FailureSite::DebugJobLimit)
+        && jobLimit.firstFailureSite() == FailureSite::DebugJobLimit;
+
+    result[16] = std::max({exact.peak(StorageDimension::PrivateStorage),
+        copies.peak(StorageDimension::PrivateStorage),
+        shared.peak(StorageDimension::PrivateStorage),
+        moved.peak(StorageDimension::PrivateStorage),
+        scratch.peak(StorageDimension::PrivateStorage)});
+    result[17] = scratch.cumulativeWork();
+    return result;
+}
+
 void DebugBeginBoundedCurvePublicationObservation() noexcept
 {
     gDebugBoundedCurveObservation.reset();

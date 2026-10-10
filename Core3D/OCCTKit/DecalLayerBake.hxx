@@ -27,6 +27,163 @@ inline constexpr std::size_t kMaximumOutputBytes = 32U * 1024U * 1024U;
 inline constexpr std::uint32_t kMaximumDimension = 8192;
 inline constexpr std::uint64_t kMaximumPixels = 16'777'216;
 
+//! Small non-owning access to the builder-owned accounting context. The
+//! concrete ledger, topology component and DEBUG exercises stay private to
+//! OcctSceneSnapshotBuilder.mm. An invalid view always refuses; it is never a
+//! permission to allocate without the operation owner.
+namespace accounting {
+enum class StorageDimension : std::uint8_t {
+    SnapshotNumeric,
+    EncodedTexture,
+    PrivateStorage,
+    Count
+};
+enum class Retention : std::uint8_t { Scratch, Retained };
+enum class Job : std::uint8_t {
+    AtlasRoles,
+    SourcePixels,
+    MaskPixels,
+    Gutter,
+    Coverage,
+    Occlusion,
+    Encoder,
+    Publication,
+    Debug,
+    Count
+};
+enum class FailureSite : std::uint8_t {
+    None,
+    ContextControl,
+    ProtectedSceneCopy,
+    StorageReserve,
+    StorageRelease,
+    CheckedProduct,
+    JobSeal,
+    JobConsume,
+    Cancellation,
+    DebugExactLimit,
+    DebugOneUnit,
+    DebugCheckedProduct,
+    DebugDuplicateJob,
+    DebugJobLimit,
+    DebugCopyOne,
+    DebugCopyTwo,
+    DebugShared,
+    DebugMove,
+    DebugScratch,
+    DebugWork
+};
+
+struct View final {
+    void* context = nullptr;
+    bool (*reserve)(void*, StorageDimension, std::size_t, Retention,
+                    FailureSite) noexcept = nullptr;
+    void (*release)(void*, StorageDimension, std::size_t,
+                    Retention) noexcept = nullptr;
+    bool (*checkedProduct)(void*, std::size_t, std::size_t, std::size_t,
+                           std::size_t&, FailureSite) noexcept = nullptr;
+    bool (*sealJob)(void*, Job, std::size_t, FailureSite) noexcept = nullptr;
+    bool (*consumeJob)(void*, Job, std::size_t, FailureSite) noexcept = nullptr;
+    bool (*recheck)(void*, FailureSite) noexcept = nullptr;
+    void (*cancel)(void*, FailureSite) noexcept = nullptr;
+
+    bool valid() const noexcept {
+        return context && reserve && release && checkedProduct && sealJob
+            && consumeJob && recheck && cancel;
+    }
+    bool Reserve(StorageDimension dimension, std::size_t bytes,
+                 Retention retention, FailureSite site) const noexcept {
+        return valid()
+            && reserve(context, dimension, bytes, retention, site);
+    }
+    void Release(StorageDimension dimension, std::size_t bytes,
+                 Retention retention) const noexcept {
+        if (valid()) release(context, dimension, bytes, retention);
+    }
+    bool CheckedProduct(std::size_t first, std::size_t second,
+                        std::size_t third, std::size_t& product,
+                        FailureSite site) const noexcept {
+        product = 0;
+        return valid()
+            && checkedProduct(context, first, second, third, product, site);
+    }
+    bool SealJob(Job job, std::size_t admittedUnits,
+                 FailureSite site) const noexcept {
+        return valid() && sealJob(context, job, admittedUnits, site);
+    }
+    bool ConsumeJob(Job job, std::size_t units,
+                    FailureSite site) const noexcept {
+        return valid() && consumeJob(context, job, units, site);
+    }
+    bool Recheck(FailureSite site) const noexcept {
+        return valid() && recheck(context, site);
+    }
+    void Cancel(FailureSite site) const noexcept {
+        if (valid()) cancel(context, site);
+    }
+};
+
+struct Ticket final {
+    View view;
+    StorageDimension dimension = StorageDimension::PrivateStorage;
+    std::size_t bytes = 0;
+    Retention retention = Retention::Scratch;
+
+    Ticket() = default;
+    Ticket(const Ticket&) = delete;
+    Ticket& operator=(const Ticket&) = delete;
+    Ticket(Ticket&& other) noexcept
+        : view(other.view), dimension(other.dimension), bytes(other.bytes),
+          retention(other.retention) {
+        other.view = {};
+        other.bytes = 0;
+    }
+    Ticket& operator=(Ticket&& other) noexcept {
+        if (this != &other) {
+            reset();
+            view = other.view;
+            dimension = other.dimension;
+            bytes = other.bytes;
+            retention = other.retention;
+            other.view = {};
+            other.bytes = 0;
+        }
+        return *this;
+    }
+    ~Ticket() { reset(); }
+
+    bool acquire(const View& candidate, StorageDimension requestedDimension,
+                 std::size_t count, Retention requestedRetention,
+                 FailureSite site) noexcept {
+        reset();
+        if (!candidate.Reserve(requestedDimension, count,
+                               requestedRetention, site)) return false;
+        view = candidate;
+        dimension = requestedDimension;
+        bytes = count;
+        retention = requestedRetention;
+        return true;
+    }
+    bool acquireProduct(const View& candidate,
+                        StorageDimension requestedDimension,
+                        std::size_t first, std::size_t second,
+                        std::size_t third, Retention requestedRetention,
+                        FailureSite site) noexcept {
+        std::size_t count = 0;
+        return candidate.CheckedProduct(
+                first, second, third, count, site)
+            && acquire(candidate, requestedDimension, count,
+                       requestedRetention, site);
+    }
+    void reset() noexcept {
+        if (bytes != 0)
+            view.Release(dimension, bytes, retention);
+        view = {};
+        bytes = 0;
+    }
+};
+} // namespace accounting
+
 struct Raster final {
     std::uint32_t width = 0, height = 0;
     // Canonical top-to-bottom, left-to-right straight RGBA8 samples.
@@ -86,6 +243,9 @@ struct Input final {
     Digest atlasProof{};
     Digest occurrenceProof{};
     Digest inputKey{};
+    // Required inherited operation view for private/ordinary production.
+    // S6 connects the existing ordinary entry; invalid never means uncharged.
+    accounting::View operationLedger;
 };
 struct Output final {
     Raster pixels;

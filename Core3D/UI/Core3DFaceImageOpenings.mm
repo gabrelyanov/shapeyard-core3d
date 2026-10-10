@@ -65,8 +65,15 @@
 #include <PCDM_StoreStatus.hxx>
 #include <Standard_Failure.hxx>
 #include <functional>
+#include <array>
 #include <limits>
 #include <stdexcept>
+#endif
+
+#if DEBUG
+namespace core3d::scene {
+std::array<std::size_t, 18> DebugExerciseE4OperationLedger() noexcept;
+}
 #endif
 
 namespace {
@@ -3388,6 +3395,41 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
             @"sourceProof": DigestText(witness.sourceProof),
         };
     } @catch (...) { return nil; }
+}
+
+- (NSDictionary<NSString *,id> *)debugE4P2b1LedgerCapForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128) return nil;
+    NSDictionary<NSString *,id> *carrier =
+        [self debugE4RetainedCapObservationForEntityIdentifier:entityIdentifier];
+    if (![carrier[@"schema"]
+            isEqual:@"shapeyard.e4-retained-cap.observation.v1"]
+        || [carrier[@"widthMM"] doubleValue] != 100.0
+        || [carrier[@"heightMM"] doubleValue] != 80.0
+        || [carrier[@"depthMM"] doubleValue] != 10.0) return nil;
+    const auto probe = core3d::scene::DebugExerciseE4OperationLedger();
+    return @{
+        @"fixture": @"E4P2b1LedgerCap",
+        @"exactLimit": @(probe[0] != 0),
+        @"overflowDenied": @(probe[1] != 0),
+        @"oneUnitDenied": @(probe[2] != 0),
+        @"stickyCapture": @(probe[3] != 0),
+        @"stickyProduce": @(probe[4] != 0),
+        @"stickyInstall": @(probe[5] != 0),
+        @"stickyFinalize": @(probe[6] != 0),
+        @"stickyReturn": @(probe[7] != 0),
+        @"copyChargedTwice": @(probe[8] != 0),
+        @"sharedChargedOnce": @(probe[9] != 0),
+        @"moveTransfers": @(probe[10] != 0),
+        @"scratchReleased": @(probe[11] != 0),
+        @"workNotRefunded": @(probe[12] != 0),
+        @"checkedMultiplyOverflowDenied": @(probe[13] != 0),
+        @"duplicateJobDenied": @(probe[14] != 0),
+        @"sealedJobLimitDenied": @(probe[15] != 0),
+        @"peakBytes": @(probe[16]),
+        @"cumulativeWork": @(probe[17]),
+    };
 }
 
 + (NSData *)debugFaceImageFixtureAssetData:(double)metersPerUnit {

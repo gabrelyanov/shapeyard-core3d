@@ -638,6 +638,11 @@ __attribute__((objc_subclassing_restricted))
 - (nullable NSDictionary<NSString *,id> *)
     debugE4RetainedCapObservationForEntityIdentifier:
         (NSString *)entityIdentifier;
+//! E4P2b1LedgerCap: validates the installed real retained-cap carrier and
+//! exercises the private builder-owned operation ledger through stage views.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4P2b1LedgerCapForEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugE4P2b1LedgerCap(entityIdentifier:));
 //! UI-test fixture: asset data for the frozen E2 two-part box/cylinder atlas
 //! fixture in the requested unit system. nil on any failure; never mutates an
 //! open document.
