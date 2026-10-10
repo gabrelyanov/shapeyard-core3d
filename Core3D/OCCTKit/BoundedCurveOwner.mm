@@ -1183,6 +1183,7 @@ bool ValidateBoundedCurvePublication(
 
 extern "C" bool Core3DDebugBoundedCurveOwnerProbeSetupFailureIsContained()
 noexcept {
+#if TARGET_OS_IOS
     if (![NSThread isMainThread]) return false;
     EAGLContext *callerContext = EAGLContext.currentContext;
     try {
@@ -1198,6 +1199,9 @@ noexcept {
             && fixture.sourcePresentation.IsNull()
             && EAGLContext.currentContext == callerContext;
     } catch (...) { return false; }
+#else
+    return false;
+#endif
 }
 
 extern "C" std::uint64_t Core3DDebugBoundedCurveOwnerProbe(
