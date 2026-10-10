@@ -1270,6 +1270,17 @@ inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
             refusal = Refusal::MalformedCarrier; return false;
         }
         if (!detail::ChargeTopology(oldStage, budget)) { refusal = Refusal::Budget; return false; }
+        // An empty retained suffix has no working stages. Preserve the
+        // canonical-byte and old-stage topology proofs above, then publish
+        // empty roles without adding a detach, frame, or budget charge.
+        if (original.steps.empty()) {
+            SourceRebindRoles pending;
+            pending.original = original;
+            pending.originalBytes = originalBytes;
+            output = std::move(pending);
+            refusal = Refusal::None;
+            return true;
+        }
         const std::atomic_bool neverCancelled{false};
         detail::WorkingStageSequence sequence;
         if (!detail::BeginWorkingStages(oldStage, original, budget, refusal,

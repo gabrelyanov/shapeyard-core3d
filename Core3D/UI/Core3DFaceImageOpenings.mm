@@ -3217,11 +3217,14 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
             || !document->CommitCommand()) {
             document->AbortCommand(); return @NO;
         }
-        core3d::painted_atlas_bake::Definition persisted;
-        return @(wrapper->PaintedAtlasBakeCurrentness(atlasKey, &persisted)
+        core3d::painted_atlas_bake::owner::CurrentnessResult persisted;
+        const auto currentness = wrapper->PaintedAtlasBakeCurrentness(
+            atlasKey, &persisted);
+        const auto& definition = persisted.definition();
+        return @(currentness
                 == OcctPaintedAtlasBakeCurrentness::Current
-            && persisted.resources.size() == 5
-            && core3d::painted_atlas_bake::Nonzero(persisted.bakeProof));
+            && definition.resources.size() == 5
+            && core3d::painted_atlas_bake::Nonzero(definition.bakeProof));
     } @catch (...) { return @NO; }
 }
 
@@ -3699,6 +3702,193 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         };
     } @catch (...) {
         core3d::painted_atlas_bake::owner::DebugClearCaptureSourcesDenial();
+        return nil;
+    }
+}
+
+- (NSDictionary<NSString *,id> *)debugE4ExportCurrentnessForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    namespace pb = core3d::painted_atlas_bake;
+    namespace accounting = core3d::decal_layer::bake::accounting;
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128) return nil;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        OwnerKey key;
+        TDF_Label ownerLabel;
+        const char *raw = entityIdentifier.UTF8String;
+        if (wrapper.IsNull()
+            || !LabelForSelected(wrapper, raw ? raw : "", key, ownerLabel))
+            return nil;
+        const Handle(TDocStd_Document)& document = wrapper->Document();
+        std::vector<core3d::asset_atlas::persistence::Record> atlases;
+        if (document.IsNull() || document->HasOpenCommand()
+            || !core3d::asset_atlas::persistence::ReadAll(document, atlases))
+            return nil;
+        const core3d::asset_atlas::Key *atlasKey = nullptr;
+        for (const auto& record : atlases) {
+            if (!record.value) return nil;
+            for (const auto& member : record.value->definition.members) {
+                if (!(member.owner == key)) continue;
+                if (atlasKey) return nil;
+                atlasKey = &record.value->definition.key;
+            }
+        }
+        if (!atlasKey) return nil;
+        const Standard_Integer undosBefore = document->GetAvailableUndos();
+
+        pb::owner::ExportCapture exportCapture;
+        const auto exportOutcome = pb::owner::CaptureForExport(
+            exportCapture, document, *atlasKey);
+        const bool exportOwned = exportOutcome == pb::owner::Outcome::Prepared
+            && exportCapture.operation.valid()
+            && exportCapture.savedAtlas.members.size() == 2
+            && exportCapture.observedMembers.size() == 2
+            && exportCapture.members.members.size() == 2
+            && exportCapture.sources.size() == 5
+            && exportCapture.savedBake.bindings.size() == 5
+            && exportCapture.savedBake.resources.size() == 5
+            && !exportCapture.canonicalAtlasBytes.empty()
+            && exportCapture.savedAtlasTicket.bytes != 0
+            && exportCapture.membersTicket.bytes != 0
+            && exportCapture.observedMembersTicket.bytes != 0
+            && exportCapture.savedBakeTicket.bytes != 0
+            && exportCapture.canonicalAtlasBytesTicket.bytes
+                >= exportCapture.canonicalAtlasBytes.capacity();
+        pb::owner::ExportCapture movedExport(std::move(exportCapture));
+        const bool exportMoveTransferred = exportOwned
+            && !exportCapture.operation.valid()
+            && movedExport.operation.valid()
+            && movedExport.savedBake.resources.size() == 5;
+
+        pb::persistence::Record persisted;
+        if (pb::persistence::Read(document, *atlasKey, persisted)
+                != pb::persistence::ReadState::Present) return nil;
+        pb::owner::CurrentnessResult current;
+        const auto currentOutcome = pb::owner::Currentness(
+            document, *atlasKey, &current);
+        std::vector<std::uint8_t> currentBytes;
+        const bool currentOwned = currentOutcome == pb::owner::Outcome::Committed
+            && current.operation.valid()
+            && current.definition() == persisted.definition
+            && current.bindingsTicket.bytes
+                >= current.definition().bindings.capacity()
+                    * sizeof(pb::BindingFence)
+            && current.resourcesTicket.bytes
+                >= current.definition().resources.capacity()
+                    * sizeof(pb::BakedResource)
+            && pb::Encode(current.definition(), currentBytes)
+            && currentBytes == persisted.bytes;
+
+        pb::owner::CurrentnessResult movedCurrent(std::move(current));
+        const bool currentMoveTransferred = currentOwned
+            && !current.operation.valid()
+            && current.definition().bindings.empty()
+            && movedCurrent.operation.valid()
+            && movedCurrent.definition() == persisted.definition;
+        pb::owner::CurrentnessResult clonedCurrent;
+        const bool cloneOwned = movedCurrent.clone(clonedCurrent)
+            && clonedCurrent.definition() == movedCurrent.definition()
+            && clonedCurrent.operation.valid()
+            && clonedCurrent.bindingsTicket.bytes != 0
+            && clonedCurrent.resourcesTicket.bytes != 0;
+
+        pb::owner::CurrentnessResult reused;
+        const bool seededReuse = movedCurrent.clone(reused);
+        pb::owner::DebugDenyNextCurrentnessReservation(
+            accounting::FailureSite::CurrentResultBindings);
+        const auto reuseDenied = pb::owner::Currentness(
+            document, *atlasKey, &reused);
+        pb::owner::DebugClearCurrentnessReservationDenial();
+        const bool reuseCleared = seededReuse
+            && reuseDenied == pb::owner::Outcome::OverBudget
+            && !reused.operation.valid()
+            && reused.definition().bindings.empty()
+            && reused.definition().resources.empty();
+
+        pb::owner::CurrentnessResult cloneDenied;
+        pb::owner::DebugDenyNextCurrentnessReservation(
+            accounting::FailureSite::CurrentCloneBindings);
+        const bool cloneRefused = !movedCurrent.clone(cloneDenied)
+            && !cloneDenied.operation.valid()
+            && cloneDenied.definition().bindings.empty();
+        pb::owner::DebugClearCurrentnessReservationDenial();
+
+        pb::owner::CurrentnessResult invalidOutput;
+        const bool seededInvalid = pb::owner::Currentness(
+            document, *atlasKey, &invalidOutput)
+                == pb::owner::Outcome::Committed;
+        Handle(OcctDocument) invalidWrapper = new OcctDocument();
+        const auto invalidMapped = invalidWrapper->PaintedAtlasBakeCurrentness(
+            *atlasKey, &invalidOutput);
+        const bool invalidCleared = seededInvalid
+            && invalidMapped == OcctPaintedAtlasBakeCurrentness::Absent
+            && !invalidOutput.operation.valid()
+            && invalidOutput.definition().bindings.empty();
+
+        OcctPaintedAtlasDerivative first, second;
+        const bool cacheMiss = wrapper->PaintedAtlasDerivativeForOwner(key, first)
+            && first.currentnessLease != nullptr
+            && first.bake == persisted.definition
+            && first.resources.size() == persisted.definition.resources.size();
+        const bool cacheHit = wrapper->PaintedAtlasDerivativeForOwner(key, second)
+            && second.currentnessLease != nullptr
+            && second.bake == first.bake
+            && second.resources.size() == first.resources.size();
+        first.reset();
+        const bool firstThenSecond = first.currentnessLease == nullptr
+            && second.currentnessLease != nullptr
+            && second.bake == persisted.definition;
+        second.reset();
+        OcctPaintedAtlasDerivative reverseFirst, reverseSecond;
+        const bool reversePrepared =
+            wrapper->PaintedAtlasDerivativeForOwner(key, reverseFirst)
+            && wrapper->PaintedAtlasDerivativeForOwner(key, reverseSecond);
+        reverseSecond.reset();
+        const bool secondThenFirst = reversePrepared
+            && reverseSecond.currentnessLease == nullptr
+            && reverseFirst.currentnessLease != nullptr
+            && reverseFirst.bake == persisted.definition;
+        reverseFirst.reset();
+
+        Core3DDebugDenyNextPaintedAtlasLease();
+        OcctPaintedAtlasDerivative deniedDerivative;
+        const bool leaseDenied =
+            !wrapper->PaintedAtlasDerivativeForOwner(key, deniedDerivative)
+            && deniedDerivative.currentnessLease == nullptr
+            && deniedDerivative.bake.bindings.empty()
+            && deniedDerivative.resources.empty();
+
+        movedExport.reset();
+        clonedCurrent.reset();
+        movedCurrent.reset();
+        return @{
+            @"fixture": @"E4S3eExportCurrentness",
+            @"exportOwned": @(exportOwned),
+            @"exportMoveTransferred": @(exportMoveTransferred),
+            @"currentOwned": @(currentOwned),
+            @"currentMoveTransferred": @(currentMoveTransferred),
+            @"cloneOwned": @(cloneOwned),
+            @"reuseDeniedOverBudget": @(reuseCleared),
+            @"cloneDeniedBeforeEntry": @(cloneRefused),
+            @"invalidMappedAbsentAndCleared": @(invalidCleared),
+            @"cacheMissLease": @(cacheMiss),
+            @"cacheHitLease": @(cacheHit),
+            @"firstThenSecondDestruction": @(firstThenSecond),
+            @"secondThenFirstDestruction": @(secondThenFirst),
+            @"leaseDeniedNoPartialDerivative": @(leaseDenied),
+            @"exactPersistedBytes": @(currentBytes == persisted.bytes),
+            @"historyUnchanged": @(
+                document->GetAvailableUndos() == undosBefore),
+        };
+    } @catch (...) {
+        pb::owner::DebugClearCurrentnessReservationDenial();
         return nil;
     }
 }

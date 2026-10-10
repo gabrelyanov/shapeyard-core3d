@@ -39,6 +39,7 @@
 #include "FaceImageDefinition.hxx"
 #include "PaintedAtlasBakeDefinition.hxx"
 namespace core3d::asset_atlas { struct Capture; struct Definition; struct Key; }
+namespace core3d::painted_atlas_bake::owner { struct CurrentnessResult; }
 namespace core3d::face_image::owner { enum class Outcome : std::uint8_t; struct Staging; }
 namespace core3d::face_image::persistence::bindings { enum class ReadState : int; }
 
@@ -241,6 +242,8 @@ enum class OcctPaintedAtlasBakeCurrentness : int {
     Absent = 0, Current = 1, Stale = 2
 };
 
+struct OcctPaintedAtlasCurrentnessLease;
+
 //! Read-only E2b consumer handoff. The UV assignment and PNG envelopes are
 //! regenerated/read from current SYEA/SYEB state and never installed on the
 //! master shape or material. An absent or stale bake yields no derivative.
@@ -248,6 +251,18 @@ struct OcctPaintedAtlasDerivative final {
     core3d::painted_atlas_bake::Definition bake;
     core3d::asset_atlas::MemberUVAssignment assignment;
     std::vector<core3d::face_image::ResourceEnvelope> resources;
+    OcctPaintedAtlasCurrentnessLease* currentnessLease = nullptr;
+
+    Standard_EXPORT OcctPaintedAtlasDerivative() noexcept;
+    OcctPaintedAtlasDerivative(const OcctPaintedAtlasDerivative&) = delete;
+    OcctPaintedAtlasDerivative& operator=(
+        const OcctPaintedAtlasDerivative&) = delete;
+    Standard_EXPORT OcctPaintedAtlasDerivative(
+        OcctPaintedAtlasDerivative&& other) noexcept;
+    Standard_EXPORT OcctPaintedAtlasDerivative& operator=(
+        OcctPaintedAtlasDerivative&& other) noexcept;
+    Standard_EXPORT ~OcctPaintedAtlasDerivative();
+    Standard_EXPORT void reset() noexcept;
 };
 
 //! Read-only resolved region. Ordinals are session-local and never persistent IDs.
@@ -838,6 +853,7 @@ extern "C" Standard_EXPORT std::uint64_t Core3DDebugAssetAtlasProbe(
 //! emitted pixel/UV/sampler/tangent evidence from the most recent probe.
 extern "C" Standard_EXPORT std::uint64_t Core3DDebugPaintedAtlasBakeProbe(
     std::int32_t scenario) noexcept;
+extern "C" Standard_EXPORT void Core3DDebugDenyNextPaintedAtlasLease() noexcept;
 extern "C" Standard_EXPORT std::uint64_t Core3DDebugPaintedAtlasBakeReadback(
     std::int32_t scenario, std::int32_t field) noexcept;
 //! Seeds the probe's E4Decals fixture resources (slot 0 base-checker, 1
@@ -1584,7 +1600,8 @@ public:
         const core3d::asset_atlas::Key& atlas) noexcept;
     Standard_EXPORT OcctPaintedAtlasBakeCurrentness PaintedAtlasBakeCurrentness(
         const core3d::asset_atlas::Key& atlas,
-        core3d::painted_atlas_bake::Definition* record = nullptr) const noexcept;
+        core3d::painted_atlas_bake::owner::CurrentnessResult* record = nullptr)
+        const noexcept;
     Standard_EXPORT Standard_Boolean PaintedAtlasDerivativeForOwner(
         const core3d::retained_recipe::OwnerKey& owner,
         OcctPaintedAtlasDerivative& derivative) const noexcept;

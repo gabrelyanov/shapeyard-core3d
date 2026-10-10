@@ -25391,10 +25391,100 @@ OcctPaintedAtlasBakeOutcome OcctDocument::BakePaintedAtlas(
     return E2bOutcome(outcome);
 }
 
+struct OcctPaintedAtlasCurrentnessLease final {
+    core3d::decal_layer::bake::accounting::Owner operation;
+    core3d::decal_layer::bake::accounting::Ticket bindings;
+    core3d::decal_layer::bake::accounting::Ticket resources;
+    core3d::decal_layer::bake::accounting::Ticket control;
+};
+
+#ifdef DEBUG
+namespace {
+thread_local bool gDebugDenyNextPaintedAtlasLease = false;
+}
+extern "C" Standard_EXPORT void
+Core3DDebugDenyNextPaintedAtlasLease() noexcept {
+    gDebugDenyNextPaintedAtlasLease = true;
+}
+#endif
+
+OcctPaintedAtlasDerivative::OcctPaintedAtlasDerivative() noexcept = default;
+
+OcctPaintedAtlasDerivative::OcctPaintedAtlasDerivative(
+    OcctPaintedAtlasDerivative&& other) noexcept {
+    *this = std::move(other);
+}
+
+OcctPaintedAtlasDerivative& OcctPaintedAtlasDerivative::operator=(
+    OcctPaintedAtlasDerivative&& other) noexcept {
+    if (this != &other) {
+        reset();
+        bake = std::move(other.bake);
+        assignment = std::move(other.assignment);
+        resources = std::move(other.resources);
+        currentnessLease = other.currentnessLease;
+        other.currentnessLease = nullptr;
+    }
+    return *this;
+}
+
+OcctPaintedAtlasDerivative::~OcctPaintedAtlasDerivative() { reset(); }
+
+void OcctPaintedAtlasDerivative::reset() noexcept {
+    std::vector<core3d::face_image::ResourceEnvelope>().swap(resources);
+    std::vector<std::array<double, 2>>().swap(assignment.corners);
+    assignment = {};
+    std::vector<core3d::painted_atlas_bake::BindingFence>().swap(
+        bake.bindings);
+    std::vector<core3d::painted_atlas_bake::BakedResource>().swap(
+        bake.resources);
+    bake = {};
+    if (currentnessLease != nullptr) {
+        auto retainedOwner = currentnessLease->operation;
+        auto control = std::move(currentnessLease->control);
+        delete currentnessLease;
+        currentnessLease = nullptr;
+        control.reset();
+        retainedOwner.reset();
+    }
+}
+
+namespace {
+bool ContinuePaintedAtlasCurrentness(
+    core3d::painted_atlas_bake::owner::CurrentnessResult&& current,
+    OcctPaintedAtlasDerivative& derivative) noexcept {
+    using Lease = OcctPaintedAtlasCurrentnessLease;
+    derivative.reset();
+    core3d::decal_layer::bake::accounting::Ticket control;
+#ifdef DEBUG
+    if (gDebugDenyNextPaintedAtlasLease) {
+        gDebugDenyNextPaintedAtlasLease = false;
+        (void)current.admitContinuation(
+            std::numeric_limits<std::size_t>::max(), control);
+        return false;
+    }
+#endif
+    if (!current.admitContinuation(sizeof(Lease), control)) return false;
+    auto* lease = new (std::nothrow) Lease;
+    if (lease == nullptr) {
+        control.view.AllocationFailed(
+            core3d::decal_layer::bake::accounting::FailureSite::CurrentnessLease);
+        control.reset();
+        return false;
+    }
+    lease->control = std::move(control);
+    current.continueInto(derivative.bake, lease->operation,
+        lease->bindings, lease->resources);
+    derivative.currentnessLease = lease;
+    return true;
+}
+} // namespace
+
 OcctPaintedAtlasBakeCurrentness OcctDocument::PaintedAtlasBakeCurrentness(
     const core3d::asset_atlas::Key& atlas,
-    core3d::painted_atlas_bake::Definition* output) const noexcept {
-    if(output)*output={};
+    core3d::painted_atlas_bake::owner::CurrentnessResult* output)
+    const noexcept {
+    if(output)output->reset();
     if(![NSThread isMainThread]||myOcafDoc.IsNull())
         return OcctPaintedAtlasBakeCurrentness::Absent;
     const auto outcome=core3d::painted_atlas_bake::owner::Currentness(
@@ -25417,7 +25507,7 @@ Standard_Boolean ResolvePaintedAtlasDerivative(
     struct Cache final {
         const TDocStd_Document* document = nullptr;
         Standard_Integer time = -1;
-        pb::Definition bake;
+        pb::owner::CurrentnessResult bake;
         std::vector<fi::ResourceEnvelope> resources;
         std::vector<std::pair<core3d::retained_recipe::OwnerKey,
                               aa::MemberUVAssignment>> assignments;
@@ -25446,13 +25536,15 @@ Standard_Boolean ResolvePaintedAtlasDerivative(
             }
         }
         if (matchedRecord == nullptr) return Standard_False;
-        pb::Definition current;
+        pb::owner::CurrentnessResult current;
         if (pb::owner::Currentness(document, matchedRecord->definition.key,
                                    &current)
                 != pb::owner::Outcome::Committed
-            || !(current == matchedRecord->definition)) return Standard_False;
+            || !(current.definition() == matchedRecord->definition))
+            return Standard_False;
+        const pb::Definition& currentDefinition = current.definition();
         aa::persistence::Record atlasRecord;
-        if (!aa::persistence::Read(document, current.key, atlasRecord)
+        if (!aa::persistence::Read(document, currentDefinition.key, atlasRecord)
             || !atlasRecord.value) return Standard_False;
         std::vector<core3d::retained_recipe::OwnerKey> owners;
         owners.reserve(atlasRecord.value->definition.members.size());
@@ -25468,10 +25560,14 @@ Standard_Boolean ResolvePaintedAtlasDerivative(
         if (!ownerFound) return Standard_False;
         const Standard_Integer documentTime = document->GetData()->Time();
         if (cache.document == document.get() && cache.time == documentTime
-            && cache.bake == current) {
+            && cache.bake.definition() == currentDefinition) {
             for (const auto& candidate : cache.assignments) {
                 if (!(candidate.first == owner)) continue;
-                derivative.bake = cache.bake;
+                pb::owner::CurrentnessResult cacheHit;
+                if (!cache.bake.cloneUsing(current, cacheHit)
+                    || !ContinuePaintedAtlasCurrentness(
+                        std::move(cacheHit), derivative))
+                    return Standard_False;
                 derivative.assignment = candidate.second;
                 derivative.resources = cache.resources;
                 return Standard_True;
@@ -25486,11 +25582,11 @@ Standard_Boolean ResolvePaintedAtlasDerivative(
             atlasRecord.value->definition.resolutionTexels,
             atlasRecord.value->definition.gutterTexels};
         if (!aa::build::CaptureMembers(document, owners, capture)
-            || aa::build::BuildAtlas(document, current.key, capture, settings,
+            || aa::build::BuildAtlas(document, currentDefinition.key, capture, settings,
                                      rebuilt, assignments, diagnosis, nullptr,
                                      aa::build::PaintedAdmission::Preserve)
                 != aa::build::Status::Built
-            || !(rebuilt.layoutProof == current.layoutProof)) {
+            || !(rebuilt.layoutProof == currentDefinition.layoutProof)) {
             return Standard_False;
         }
         const aa::MemberUVAssignment* assignment = nullptr;
@@ -25502,8 +25598,8 @@ Standard_Boolean ResolvePaintedAtlasDerivative(
         }
         if (assignment == nullptr) return Standard_False;
         std::vector<fi::ResourceEnvelope> resources;
-        resources.reserve(current.resources.size());
-        for (const auto& descriptor : current.resources) {
+        resources.reserve(currentDefinition.resources.size());
+        for (const auto& descriptor : currentDefinition.resources) {
             fi::UUID resourceID{};
             std::copy_n(descriptor.identity.begin(), resourceID.size(),
                         resourceID.begin());
@@ -25520,13 +25616,16 @@ Standard_Boolean ResolvePaintedAtlasDerivative(
                 || envelope.workingBytes.empty()) return Standard_False;
             resources.push_back(std::move(envelope));
         }
-        derivative.bake = std::move(current);
+        pb::owner::CurrentnessResult cacheBake;
+        if (!current.clone(cacheBake)
+            || !ContinuePaintedAtlasCurrentness(
+                std::move(current), derivative)) return Standard_False;
         derivative.assignment = *assignment;
         derivative.resources = std::move(resources);
         cache = {};
         cache.document = document.get();
         cache.time = documentTime;
-        cache.bake = derivative.bake;
+        cache.bake = std::move(cacheBake);
         cache.resources = derivative.resources;
         for (std::size_t index = 0; index < assignments.size(); ++index) {
             if (index >= atlasRecord.value->definition.members.size()) {
@@ -28878,12 +28977,14 @@ static std::uint64_t Scenario0(double unit, int unitIndex, Readbacks& readbacks)
     // bit2 (live half): all-member capture/recheck fences hold after commit.
     bool fencesLive = false;
     {
-        pb::Definition current;
+        pb::owner::CurrentnessResult current;
         const auto currentness = pb::owner::Currentness(doc, fixture.atlas, &current);
+        const pb::Definition& currentDefinition = current.definition();
         fencesLive = currentness == pb::owner::Outcome::Committed
-            && current.bindings.size() == 5 && current.resources.size() == 5
-            && current.bakeProof == firstBake.bakeProof;
-        for (const auto& binding : current.bindings) {
+            && currentDefinition.bindings.size() == 5
+            && currentDefinition.resources.size() == 5
+            && currentDefinition.bakeProof == firstBake.bakeProof;
+        for (const auto& binding : currentDefinition.bindings) {
             bool member = false;
             for (std::size_t index = 0; index < 3; ++index)
                 if (fixture.parts[index].key == binding.owner) { member = true; break; }
@@ -29227,9 +29328,10 @@ static std::uint64_t Scenario0(double unit, int unitIndex, Readbacks& readbacks)
             && reopenedState.syeb == finalState.syeb
             && OriginalResourcesIntact(reopenedState)) ? 1 : 0;
         // bit2 (reopen half): fences recheck positive on the reopened document.
-        pb::Definition reopenedBake;
+        pb::owner::CurrentnessResult reopenedResult;
         const auto currentness = pb::owner::Currentness(second.doc, fixture.atlas,
-                                                        &reopenedBake);
+                                                        &reopenedResult);
+        const pb::Definition& reopenedBake = reopenedResult.definition();
         slots[24] = std::uint64_t(E2bOutcome(currentness));
         slots[27] = (currentness == pb::owner::Outcome::Committed
             && reopenedBake.bakeProof == secondBake.bakeProof

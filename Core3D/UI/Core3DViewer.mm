@@ -1800,7 +1800,12 @@ std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTrea
         if(!et::Encode(shadowDef,shadowBytes,refusal))return {};
         auto captured=std::make_shared<et::SourceRebindRoles>();
         et::ReplayBudget rebindBudget;CopyTopologyBudget(rebindBudget,original->chargedBudget_);
-        if(!et::CaptureSourceRebindRoles(original->base_,shadowDef,shadowBytes,rebindBudget,refusal,*captured))return {};
+        if(!et::CaptureSourceRebindRoles(original->base_,shadowDef,shadowBytes,rebindBudget,refusal,*captured)){
+#if DEBUG
+            tb::debug::RecordPhase("prepare-r2",original->chargedBudget_,rebindBudget);
+#endif
+            return {};
+        }
         rebindRoles=std::move(captured);
         if(!intentBudget)intentBudget.emplace();
         CopyTopologyBudget(*intentBudget,rebindBudget);

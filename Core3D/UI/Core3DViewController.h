@@ -662,6 +662,11 @@ __attribute__((objc_subclassing_restricted))
 - (nullable NSDictionary<NSString *,id> *)
     debugE4OrdinaryStagingForEntityIdentifier:(NSString *)entityIdentifier
     NS_SWIFT_NAME(debugE4OrdinaryStaging(entityIdentifier:));
+//! Exercises the real export capture, owner-bearing Currentness result and
+//! public derivative cache miss/hit continuations, including typed denials.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4ExportCurrentnessForEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugE4ExportCurrentness(entityIdentifier:));
 //! Installs a real document-owned XCAF buffer texture on the ordinary atlas
 //! fixture, then traces the product CaptureSources storage reservations.
 - (nullable NSDictionary<NSString *,id> *)

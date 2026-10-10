@@ -680,6 +680,9 @@ DebugOrdinaryStagingEvidence DebugExerciseE4OrdinaryStaging(
     const asset_atlas::Key& key) noexcept;
 void DebugDenyNextSourceVectorReservation() noexcept;
 std::array<std::size_t, 3> DebugTakeSourceVectorReservationObservation() noexcept;
+void DebugDenyNextCurrentnessReservation(
+    decal_layer::bake::accounting::FailureSite site) noexcept;
+void DebugClearCurrentnessReservationDenial() noexcept;
 #endif
 
 struct Staging final {
@@ -747,6 +750,11 @@ struct Staging final {
 //! no right to adopt resources or stage SYEA/SYEB records.
 struct ExportCapture final {
     decal_layer::bake::accounting::Owner operation;
+    decal_layer::bake::accounting::Ticket savedAtlasTicket;
+    decal_layer::bake::accounting::Ticket membersTicket;
+    decal_layer::bake::accounting::Ticket observedMembersTicket;
+    decal_layer::bake::accounting::Ticket savedBakeTicket;
+    decal_layer::bake::accounting::Ticket canonicalAtlasBytesTicket;
     asset_atlas::Definition savedAtlas;
     asset_atlas::Capture members;
     std::vector<asset_atlas::Member> observedMembers;
@@ -764,6 +772,12 @@ struct ExportCapture final {
         if (this != &other) {
             reset();
             operation = std::move(other.operation);
+            savedAtlasTicket = std::move(other.savedAtlasTicket);
+            membersTicket = std::move(other.membersTicket);
+            observedMembersTicket = std::move(other.observedMembersTicket);
+            savedBakeTicket = std::move(other.savedBakeTicket);
+            canonicalAtlasBytesTicket =
+                std::move(other.canonicalAtlasBytesTicket);
             savedAtlas = std::move(other.savedAtlas);
             members = std::move(other.members);
             observedMembers = std::move(other.observedMembers);
@@ -776,13 +790,74 @@ struct ExportCapture final {
     ~ExportCapture() { reset(); }
     void reset() noexcept {
         sources.reset();
-        canonicalAtlasBytes.clear();
-        observedMembers.clear();
+        std::vector<std::uint8_t>().swap(canonicalAtlasBytes);
+        std::vector<asset_atlas::Member>().swap(observedMembers);
+        std::vector<BindingFence>().swap(savedBake.bindings);
+        std::vector<BakedResource>().swap(savedBake.resources);
         savedBake = {};
+        std::vector<asset_atlas::MemberCapture>().swap(members.members);
         members = {};
+        std::vector<asset_atlas::Member>().swap(savedAtlas.members);
+        std::vector<asset_atlas::Chart>().swap(savedAtlas.charts);
+        std::vector<retained_finishing::MaterialResource>().swap(
+            savedAtlas.resources);
         savedAtlas = {};
+        canonicalAtlasBytesTicket.reset();
+        savedBakeTicket.reset();
+        observedMembersTicket.reset();
+        membersTicket.reset();
+        savedAtlasTicket.reset();
         operation.reset();
     }
+};
+
+//! Move-only currentness value. The persisted Definition is unchanged; its
+//! two vector allocations remain charged to the one ordinary operation until
+//! reset, destruction, an admitted clone, or a continuation transfer.
+struct CurrentnessResult final {
+    decal_layer::bake::accounting::Owner operation;
+    decal_layer::bake::accounting::Ticket bindingsTicket;
+    decal_layer::bake::accounting::Ticket resourcesTicket;
+    Definition value;
+
+    CurrentnessResult() = default;
+    CurrentnessResult(const CurrentnessResult&) = delete;
+    CurrentnessResult& operator=(const CurrentnessResult&) = delete;
+    CurrentnessResult(CurrentnessResult&& other) noexcept {
+        *this = std::move(other);
+    }
+    CurrentnessResult& operator=(CurrentnessResult&& other) noexcept {
+        if (this != &other) {
+            reset();
+            operation = std::move(other.operation);
+            bindingsTicket = std::move(other.bindingsTicket);
+            resourcesTicket = std::move(other.resourcesTicket);
+            value = std::move(other.value);
+        }
+        return *this;
+    }
+    ~CurrentnessResult() { reset(); }
+    void reset() noexcept {
+        std::vector<BindingFence>().swap(value.bindings);
+        std::vector<BakedResource>().swap(value.resources);
+        value = {};
+        resourcesTicket.reset();
+        bindingsTicket.reset();
+        operation.reset();
+    }
+    const Definition& definition() const noexcept { return value; }
+
+    bool clone(CurrentnessResult& output) const noexcept;
+    bool cloneUsing(const CurrentnessResult& operationSource,
+                    CurrentnessResult& output) const noexcept;
+    bool admitContinuation(
+        std::size_t bytes,
+        decal_layer::bake::accounting::Ticket& ticket) const noexcept;
+    void continueInto(
+        Definition& output,
+        decal_layer::bake::accounting::Owner& continuedOperation,
+        decal_layer::bake::accounting::Ticket& continuedBindings,
+        decal_layer::bake::accounting::Ticket& continuedResources) noexcept;
 };
 
 //! Operation-local authority for an owner that has no persisted SYEA/SYEB
@@ -812,7 +887,11 @@ Outcome Commit(Staging& staging, const Handle(TDocStd_Document)& document) noexc
 void Cancel(Staging& staging) noexcept;
 Outcome Currentness(const Handle(TDocStd_Document)& document,
                     const asset_atlas::Key& key,
-                    Definition* output = nullptr) noexcept;
+                    CurrentnessResult* output = nullptr) noexcept;
+Outcome Currentness(const Handle(TDocStd_Document)& document,
+                    const asset_atlas::Key& key,
+                    const decal_layer::bake::accounting::Owner& operation,
+                    CurrentnessResult* output) noexcept;
 Outcome CaptureForExport(ExportCapture& capture,
                          const Handle(TDocStd_Document)& document,
                          const asset_atlas::Key& key) noexcept;
