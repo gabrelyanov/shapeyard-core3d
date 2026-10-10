@@ -3642,6 +3642,67 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
     }
 }
 
+- (NSDictionary<NSString *,id> *)debugE4OrdinaryStagingForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128) return nil;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        OwnerKey key;
+        TDF_Label owner;
+        const char *raw = entityIdentifier.UTF8String;
+        if (wrapper.IsNull()
+            || !LabelForSelected(wrapper, raw ? raw : "", key, owner))
+            return nil;
+        const Handle(TDocStd_Document)& document = wrapper->Document();
+        std::vector<core3d::asset_atlas::persistence::Record> atlases;
+        if (document.IsNull() || document->HasOpenCommand()
+            || !core3d::asset_atlas::persistence::ReadAll(
+                document, atlases)) return nil;
+        const core3d::asset_atlas::Key *atlasKey = nullptr;
+        for (const auto& record : atlases) {
+            if (!record.value) return nil;
+            for (const auto& member : record.value->definition.members) {
+                if (!(member.owner == key)) continue;
+                if (atlasKey) return nil;
+                atlasKey = &record.value->definition.key;
+            }
+        }
+        if (!atlasKey) return nil;
+        const auto evidence = core3d::painted_atlas_bake::owner::
+            DebugExerciseE4OrdinaryStaging(document, *atlasKey);
+        return @{
+            @"fixture": @"E4P2b1OrdinaryStaging",
+            @"prepareCommitPrepared": @(evidence.prepareCommitPrepared),
+            @"prepareCommitOverlapCharged": @(
+                evidence.prepareCommitOverlapCharged),
+            @"normalCommitted": @(evidence.normalCommitted),
+            @"prepareCancelPrepared": @(evidence.prepareCancelPrepared),
+            @"prepareCancelOverlapCharged": @(
+                evidence.prepareCancelOverlapCharged),
+            @"cancelReleased": @(evidence.cancelReleased),
+            @"denialPrepared": @(evidence.denialPrepared),
+            @"denialOverlapCharged": @(evidence.denialOverlapCharged),
+            @"denialOverBudget": @(evidence.denialOverBudget),
+            @"denialOutcome": evidence.denialOverBudget
+                ? @"OverBudget" : @"unexpected",
+            @"operationStableAtCommit": @(evidence.operationStableAtCommit),
+            @"noAdoptionEntry": @(evidence.noAdoptionEntry),
+            @"noPersistenceEntry": @(evidence.noPersistenceEntry),
+            @"historyUnchanged": @(evidence.historyUnchanged),
+        };
+    } @catch (...) {
+        core3d::painted_atlas_bake::owner::DebugClearCaptureSourcesDenial();
+        return nil;
+    }
+}
+
 - (NSDictionary<NSString *,id> *)
     debugE4SourceStorageReservationsForEntityIdentifier:(NSString *)entityIdentifier
                                            resourceBytes:(NSData *)resourceBytes {

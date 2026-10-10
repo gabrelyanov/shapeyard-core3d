@@ -250,6 +250,11 @@ std::atomic_bool gDebugDenyNextPrivateSourceVectorReservation{false};
 std::atomic_size_t gDebugPrivateSourceVectorAttempts{0};
 std::atomic_size_t gDebugPrivateSourceVectorEntries{0};
 std::atomic_size_t gDebugPrivateSourceVectorDenials{0};
+thread_local bool gDebugOrdinaryTraceArmed = false;
+thread_local void* gDebugExpectedOrdinaryContext = nullptr;
+thread_local bool gDebugOrdinaryCommitOverlap = false;
+thread_local std::size_t gDebugAdoptionEntries = 0;
+thread_local std::size_t gDebugPersistenceEntries = 0;
 
 std::size_t DebugSourceStorageIndex(
     decal_layer::bake::accounting::FailureSite site) noexcept {
@@ -269,6 +274,169 @@ bool AddReadBytes(std::size_t& total, std::size_t bytes) noexcept {
     total += bytes;
     return true;
 }
+
+struct OrdinaryReadAdmission final {
+    decal_layer::bake::accounting::Ticket encoded;
+    decal_layer::bake::accounting::Ticket local;
+};
+
+bool AcquireOrdinaryStorage(
+    decal_layer::bake::accounting::Ticket& ticket,
+    const decal_layer::bake::accounting::View& operation,
+    decal_layer::bake::accounting::StorageDimension dimension,
+    std::size_t bytes,
+    decal_layer::bake::accounting::Retention retention,
+    decal_layer::bake::accounting::FailureSite site) noexcept {
+    if (bytes == 0) return true;
+    return ticket.acquire(operation, dimension, bytes, retention, site)
+        && operation.EnterAllocation(site);
+}
+
+Outcome PreflightAtlasRead(
+    const Handle(TDocStd_Document)& document,
+    const decal_layer::bake::accounting::View& operation,
+    OrdinaryReadAdmission& admission) noexcept {
+    using namespace decal_layer::bake::accounting;
+    try {
+        if (document.IsNull() || document->GetData().IsNull()
+            || !operation.valid()) return Outcome::Malformed;
+        const TDF_Label root = document->Main().FindChild(
+            aa::persistence::RootTag, Standard_False);
+        std::size_t records = 0, members = 0, largestCanonical = 0;
+        if (!root.IsNull()) {
+            for (TDF_ChildIterator child(root, Standard_False);
+                 child.More(); child.Next()) {
+                Handle(aa::persistence::Attribute) attribute;
+                if (!child.Value().FindAttribute(
+                        aa::persistence::AttributeID(), attribute)
+                    || attribute.IsNull() || !attribute->value()) continue;
+                if (!AddReadBytes(records, 1U)
+                    || !AddReadBytes(members,
+                        attribute->value()->definition.members.size()))
+                    return Outcome::OverBudget;
+                largestCanonical = std::max(largestCanonical,
+                    attribute->value()->bytes.size());
+            }
+        }
+        std::size_t recordBytes = 0, memberBytes = 0, localBytes = 0;
+        if (!operation.CheckedProduct(records, sizeof(aa::persistence::Record),
+                2U, recordBytes, FailureSite::AtlasReadScratch)
+            || !operation.CheckedProduct(members + aa::kMaximumMembers,
+                sizeof(TDF_Label), 2U, memberBytes,
+                FailureSite::AtlasReadScratch)
+            || !AddReadBytes(localBytes, recordBytes)
+            || !AddReadBytes(localBytes, memberBytes)
+            || !AcquireOrdinaryStorage(admission.encoded, operation,
+                StorageDimension::EncodedTexture, largestCanonical,
+                Retention::Scratch, FailureSite::AtlasReadScratch)
+            || !AcquireOrdinaryStorage(admission.local, operation,
+                StorageDimension::PrivateStorage, localBytes,
+                Retention::Scratch, FailureSite::AtlasReadScratch))
+            return Outcome::OverBudget;
+        return Outcome::Prepared;
+    } catch (const std::bad_alloc&) {
+        operation.AllocationFailed(
+            decal_layer::bake::accounting::FailureSite::AtlasReadScratch);
+        return Outcome::OverBudget;
+    } catch (...) { return Outcome::Malformed; }
+}
+
+Outcome PreflightBakeRead(
+    const Handle(TDocStd_Document)& document,
+    const decal_layer::bake::accounting::View& operation,
+    OrdinaryReadAdmission& admission) noexcept {
+    using namespace decal_layer::bake::accounting;
+    try {
+        if (document.IsNull() || document->GetData().IsNull()
+            || !operation.valid()) return Outcome::Malformed;
+        const TDF_Label root = document->Main().FindChild(
+            persistence::RootTag, Standard_False);
+        std::size_t hexBytes = 0, records = 0, values = 0;
+        if (!root.IsNull()) {
+            for (TDF_ChildIterator child(root, Standard_False);
+                 child.More(); child.Next()) {
+                Handle(TDataStd_Integer) chunks, bindings, resources;
+                if (!child.Value().FindAttribute(
+                        persistence::ChunkCountID(), chunks)
+                    || chunks.IsNull() || chunks->Get() <= 0
+                    || chunks->Get() > persistence::MaximumChunks)
+                    continue;
+                if (!AddReadBytes(records, 1U)) return Outcome::OverBudget;
+                if (child.Value().FindAttribute(
+                        persistence::BindingCountID(), bindings)
+                    && !bindings.IsNull() && bindings->Get() > 0
+                    && !AddReadBytes(values, std::size_t(bindings->Get())))
+                    return Outcome::OverBudget;
+                if (child.Value().FindAttribute(
+                        persistence::ResourceCountID(), resources)
+                    && !resources.IsNull() && resources->Get() > 0
+                    && !AddReadBytes(values, std::size_t(resources->Get())))
+                    return Outcome::OverBudget;
+                for (Standard_Integer index = 1; index <= chunks->Get(); ++index) {
+                    Handle(TDataStd_AsciiString) text;
+                    const TDF_Label label = child.Value().FindChild(
+                        index, Standard_False);
+                    if (!label.IsNull()
+                        && label.FindAttribute(
+                            TDataStd_AsciiString::GetID(), text)
+                        && !text.IsNull()
+                        && !AddReadBytes(hexBytes,
+                            std::size_t(std::max(0, text->Get().Length()))))
+                        return Outcome::OverBudget;
+                }
+            }
+        }
+        const std::size_t canonicalBytes = hexBytes / 2U + hexBytes % 2U;
+        std::size_t encodedBytes = 0, recordBytes = 0, valueBytes = 0;
+        if (!operation.CheckedProduct(canonicalBytes, 5U, 1U,
+                encodedBytes, FailureSite::BakeReadScratch)
+            || !operation.CheckedProduct(records, sizeof(persistence::Record),
+                2U, recordBytes, FailureSite::BakeReadScratch)
+            || !operation.CheckedProduct(values,
+                std::max(sizeof(BindingFence), sizeof(BakedResource)),
+                2U, valueBytes, FailureSite::BakeReadScratch)
+            || !AddReadBytes(recordBytes, valueBytes)
+            || !AcquireOrdinaryStorage(admission.encoded, operation,
+                StorageDimension::EncodedTexture, encodedBytes,
+                Retention::Scratch, FailureSite::BakeReadScratch)
+            || !AcquireOrdinaryStorage(admission.local, operation,
+                StorageDimension::PrivateStorage, recordBytes,
+                Retention::Scratch, FailureSite::BakeReadScratch))
+            return Outcome::OverBudget;
+        return Outcome::Prepared;
+    } catch (const std::bad_alloc&) {
+        operation.AllocationFailed(
+            decal_layer::bake::accounting::FailureSite::BakeReadScratch);
+        return Outcome::OverBudget;
+    } catch (...) { return Outcome::Malformed; }
+}
+
+#ifdef DEBUG
+bool OrdinaryStagingOverlapCharged(const Staging& staging) noexcept {
+    if (!staging.operation.valid()
+        || staging.priorAtlasBytes.empty()
+        || staging.priorAtlasBytesTicket.bytes
+            < staging.priorAtlasBytes.capacity()
+        || staging.observedMembers.empty()
+        || staging.observedMembersTicket.bytes
+            < staging.observedMembers.capacity() * sizeof(aa::Member)
+        || staging.capturedSources.empty()
+        || staging.capturedSources.vectorTicket.bytes == 0)
+        return false;
+    const void* context = staging.operation.view.context;
+    if (staging.priorAtlasBytesTicket.view.context != context
+        || staging.observedMembersTicket.view.context != context
+        || staging.capturedSources.vectorTicket.view.context != context)
+        return false;
+    for (const auto& source : staging.capturedSources)
+        if (source.originalBytesTicket.bytes != 0
+                && source.originalBytesTicket.view.context != context
+            || source.workingBytesTicket.bytes != 0
+                && source.workingBytesTicket.view.context != context)
+            return false;
+    return true;
+}
+#endif
 
 std::size_t BorrowedBindingCount(const TDF_Label& owner) noexcept {
     if (owner.IsNull()) return 0;
@@ -1212,44 +1380,189 @@ DebugTakeSourceVectorReservationObservation() noexcept {
     gDebugSourceStorage = {};
     return result;
 }
+
+DebugOrdinaryStagingEvidence DebugExerciseE4OrdinaryStaging(
+    const Handle(TDocStd_Document)& document,
+    const aa::Key& key) noexcept {
+    DebugOrdinaryStagingEvidence evidence;
+    const Standard_Integer undosBefore = document.IsNull()
+        ? -1 : document->GetAvailableUndos();
+    const auto abort = [&]() noexcept {
+        if (!document.IsNull() && document->HasOpenCommand())
+            document->AbortCommand();
+    };
+    try {
+        if (document.IsNull() || document->HasOpenCommand()) return evidence;
+
+        document->NewCommand();
+        Staging commitStaging;
+        const Outcome commitPrepared = Prepare(commitStaging, document, key);
+        evidence.prepareCommitPrepared = commitPrepared == Outcome::Prepared;
+        evidence.prepareCommitOverlapCharged =
+            evidence.prepareCommitPrepared
+            && OrdinaryStagingOverlapCharged(commitStaging);
+        gDebugOrdinaryTraceArmed = evidence.prepareCommitPrepared;
+        gDebugExpectedOrdinaryContext = commitStaging.operation.view.context;
+        gDebugOrdinaryCommitOverlap = false;
+        const Outcome committed = evidence.prepareCommitPrepared
+            ? Commit(commitStaging, document) : commitPrepared;
+        gDebugOrdinaryTraceArmed = false;
+        gDebugExpectedOrdinaryContext = nullptr;
+        evidence.operationStableAtCommit = gDebugOrdinaryCommitOverlap;
+        evidence.normalCommitted = committed == Outcome::Committed;
+        Cancel(commitStaging);
+        abort();
+
+        document->NewCommand();
+        Staging cancelStaging;
+        const Outcome cancelPrepared = Prepare(cancelStaging, document, key);
+        evidence.prepareCancelPrepared = cancelPrepared == Outcome::Prepared;
+        evidence.prepareCancelOverlapCharged =
+            evidence.prepareCancelPrepared
+            && OrdinaryStagingOverlapCharged(cancelStaging);
+        Cancel(cancelStaging);
+        evidence.cancelReleased = !cancelStaging.operation.valid()
+            && cancelStaging.priorAtlasBytes.empty()
+            && cancelStaging.priorBakeResources.empty()
+            && cancelStaging.observedMembers.empty()
+            && cancelStaging.capturedSources.empty()
+            && cancelStaging.priorAtlasBytesTicket.bytes == 0
+            && cancelStaging.priorBakeResourcesTicket.bytes == 0
+            && cancelStaging.observedMembersTicket.bytes == 0;
+        abort();
+
+        document->NewCommand();
+        Staging deniedStaging;
+        DebugDenyCaptureSourcesAtOrdinal(2);
+        const Outcome denialPrepared = Prepare(deniedStaging, document, key);
+        evidence.denialPrepared = denialPrepared == Outcome::Prepared;
+        evidence.denialOverlapCharged = evidence.denialPrepared
+            && OrdinaryStagingOverlapCharged(deniedStaging);
+        gDebugAdoptionEntries = 0;
+        gDebugPersistenceEntries = 0;
+        const Outcome denied = evidence.denialPrepared
+            ? Commit(deniedStaging, document) : denialPrepared;
+        DebugClearCaptureSourcesDenial();
+        evidence.denialOverBudget = denied == Outcome::OverBudget;
+        evidence.noAdoptionEntry = gDebugAdoptionEntries == 0;
+        evidence.noPersistenceEntry = gDebugPersistenceEntries == 0;
+        Cancel(deniedStaging);
+        abort();
+        evidence.historyUnchanged =
+            document->GetAvailableUndos() == undosBefore;
+        return evidence;
+    } catch (...) {
+        gDebugOrdinaryTraceArmed = false;
+        gDebugExpectedOrdinaryContext = nullptr;
+        DebugClearCaptureSourcesDenial();
+        abort();
+        return {};
+    }
+}
 #endif
 
 Outcome Prepare(Staging& staging, const Handle(TDocStd_Document)& document,
                 const aa::Key& key) noexcept {
     staging = {};
+    using namespace decal_layer::bake::accounting;
+    FailureSite activeAllocation = FailureSite::AtlasReadScratch;
     try {
         staging.operation = decal_layer::bake::accounting::MakeOperationOwner();
         if (!staging.operation.valid()) return Outcome::OverBudget;
         if (document.IsNull() || !document->HasOpenCommand()) return Outcome::Busy;
+        OrdinaryReadAdmission atlasRead;
+        const Outcome atlasPreflight = PreflightAtlasRead(
+            document, staging.operation.view, atlasRead);
+        if (atlasPreflight != Outcome::Prepared) return atlasPreflight;
         aa::persistence::Record prior;
         if (!aa::persistence::Read(document, key, prior))
             return HasAtlasOwnerMismatch(document, key)
                 ? Outcome::OwnerMismatch : Outcome::Malformed;
         if (!prior.value) return Outcome::Absent;
+        activeAllocation = FailureSite::PriorAtlasBytes;
+        if (!AcquireOrdinaryStorage(staging.priorAtlasBytesTicket,
+                staging.operation.view, StorageDimension::EncodedTexture,
+                prior.value->bytes.size(), Retention::Retained,
+                activeAllocation)) return Outcome::OverBudget;
         staging.priorAtlasBytes = prior.value->bytes;
+        if (staging.priorAtlasBytes.capacity()
+                > staging.priorAtlasBytesTicket.bytes) {
+            staging.operation.view.AllocationFailed(activeAllocation);
+            return Outcome::OverBudget;
+        }
         const Outcome classified = ClassifyMembers(document, prior.value->definition);
         if (classified != Outcome::Prepared) return classified;
         std::vector<aa::Member> currentMembers;
+        Ticket currentMembersTicket;
+        activeAllocation = FailureSite::OrdinaryMemberStorage;
+        if (!AcquireOrdinaryStorage(currentMembersTicket,
+                staging.operation.view, StorageDimension::PrivateStorage,
+                prior.value->definition.members.size() * sizeof(aa::Member),
+                Retention::Scratch, activeAllocation))
+            return Outcome::OverBudget;
+        currentMembers.reserve(prior.value->definition.members.size());
         if (!aa::build::ObserveMembers(document, prior.value->definition.members,
                                        currentMembers)
             || !aa::Current(prior.value->definition, currentMembers))
             return Outcome::StaleSource;
         std::vector<OwnerKey> owners;
+        Ticket ownersTicket;
+        activeAllocation = FailureSite::OrdinaryOwnerStorage;
+        if (!AcquireOrdinaryStorage(ownersTicket, staging.operation.view,
+                StorageDimension::PrivateStorage,
+                prior.value->definition.members.size() * sizeof(OwnerKey),
+                Retention::Scratch, activeAllocation))
+            return Outcome::OverBudget;
+        owners.reserve(prior.value->definition.members.size());
         for (const auto& member : prior.value->definition.members) owners.push_back(member.owner);
         aa::Capture capture;
+        Ticket captureTicket;
+        activeAllocation = FailureSite::OrdinaryCaptureStorage;
+        if (!AcquireOrdinaryStorage(captureTicket, staging.operation.view,
+                StorageDimension::PrivateStorage,
+                prior.value->definition.members.size()
+                    * sizeof(aa::MemberCapture),
+                Retention::Scratch, activeAllocation))
+            return Outcome::OverBudget;
         if (!aa::build::CaptureMembers(document, owners, capture)) return Outcome::StaleSource;
         const Outcome captured = CaptureSources(document, capture,
             staging.capturedSources, staging.operation.view);
         if (captured != Outcome::Prepared) return captured;
         // A malformed persisted SYEB/1 record refuses before any bake work.
+        OrdinaryReadAdmission bakeRead;
+        const Outcome bakePreflight = PreflightBakeRead(
+            document, staging.operation.view, bakeRead);
+        if (bakePreflight != Outcome::Prepared) return bakePreflight;
         persistence::Record existing;
         const auto state = persistence::Read(document, key, existing);
         if (state == persistence::ReadState::Malformed) return Outcome::Malformed;
-        if (state == persistence::ReadState::Present)
+        if (state == persistence::ReadState::Present) {
+            activeAllocation = FailureSite::PriorBakeResources;
+            if (!AcquireOrdinaryStorage(staging.priorBakeResourcesTicket,
+                    staging.operation.view, StorageDimension::PrivateStorage,
+                    existing.definition.resources.size()
+                        * sizeof(BakedResource),
+                    Retention::Retained, activeAllocation))
+                return Outcome::OverBudget;
             staging.priorBakeResources = existing.definition.resources;
+            if (staging.priorBakeResources.capacity()
+                    * sizeof(BakedResource)
+                > staging.priorBakeResourcesTicket.bytes) {
+                staging.operation.view.AllocationFailed(activeAllocation);
+                return Outcome::OverBudget;
+            }
+        }
         // Aggregate decoded budget preflight: distinct baked roles at the
         // fenced atlas resolution must fit the frozen 128 MiB cap.
         std::vector<Role> roles;
+        Ticket rolesTicket;
+        activeAllocation = FailureSite::OrdinaryRoleStorage;
+        if (!AcquireOrdinaryStorage(rolesTicket, staging.operation.view,
+                StorageDimension::PrivateStorage,
+                staging.capturedSources.size() * sizeof(Role),
+                Retention::Scratch, activeAllocation))
+            return Outcome::OverBudget;
+        roles.reserve(staging.capturedSources.size());
         for (const auto& source : staging.capturedSources)
             if (std::find(roles.begin(), roles.end(), source.fence.role) == roles.end())
                 roles.push_back(source.fence.role);
@@ -1266,6 +1579,13 @@ Outcome Prepare(Staging& staging, const Handle(TDocStd_Document)& document,
             staging.atlas, staging.assignments, diagnosis, &layout,
             aa::build::PaintedAdmission::Preserve);
         if (built != aa::build::Status::Built) return MapBuild(built);
+        activeAllocation = FailureSite::OrdinaryObservedStorage;
+        if (!AcquireOrdinaryStorage(staging.observedMembersTicket,
+                staging.operation.view, StorageDimension::PrivateStorage,
+                staging.atlas.members.size() * sizeof(aa::Member),
+                Retention::Retained, activeAllocation))
+            return Outcome::OverBudget;
+        staging.observedMembers.reserve(staging.atlas.members.size());
         if (!aa::build::ObserveMembers(document, staging.atlas.members,
                                        staging.observedMembers)) return Outcome::StaleSource;
         kernel::SourceStorage sources;
@@ -1281,25 +1601,89 @@ Outcome Prepare(Staging& staging, const Handle(TDocStd_Document)& document,
             staging.bake.resources.push_back(output.descriptor);
         if (!BindBakeProof(staging.bake)) return Outcome::Malformed;
         std::vector<std::uint8_t> atlasBytes;
+        Ticket canonicalTicket;
+        activeAllocation = FailureSite::OrdinaryCanonicalEncoding;
+        if (!AcquireOrdinaryStorage(canonicalTicket, staging.operation.view,
+                StorageDimension::EncodedTexture, aa::kMaximumBytes,
+                Retention::Scratch, activeAllocation))
+            return Outcome::OverBudget;
         if (!aa::Encode(staging.atlas, atlasBytes)) return Outcome::Malformed;
         staging.unchanged = state == persistence::ReadState::Present
             && existing.definition == staging.bake
             && prior.value->bytes == atlasBytes;
         return Outcome::Prepared;
+    } catch (const std::bad_alloc&) {
+        staging.operation.view.AllocationFailed(activeAllocation);
+        staging = {};
+        return Outcome::OverBudget;
     } catch (...) { staging = {}; return Outcome::Malformed; }
 }
 
 Outcome Commit(Staging& staging, const Handle(TDocStd_Document)& document) noexcept {
+    using namespace decal_layer::bake::accounting;
+    FailureSite activeAllocation = FailureSite::OrdinaryObservedStorage;
     try {
         if (document.IsNull() || !document->HasOpenCommand()) {
             staging = {}; return Outcome::Busy;
         }
+        // Commit locals borrow the staging view. Retain the same concrete
+        // operation until every local ticket has unwound, including paths
+        // where resetStaging() clears the caller-owned Staging first.
+        Owner commitOwner = staging.operation;
+        if (!commitOwner.valid()) {
+            staging = {}; return Outcome::OverBudget;
+        }
+        Ticket membersTicket;
+        if (!AcquireOrdinaryStorage(membersTicket, staging.operation.view,
+                StorageDimension::PrivateStorage,
+                staging.atlas.members.size() * sizeof(aa::Member),
+                Retention::Scratch, activeAllocation)) {
+            staging = {}; return Outcome::OverBudget;
+        }
         std::vector<aa::Member> members;
+        members.reserve(staging.atlas.members.size());
         if (!aa::build::ObserveMembers(document, staging.atlas.members, members)
             || members != staging.observedMembers) { staging = {}; return Outcome::StaleSource; }
         aa::Capture capture;
         std::vector<OwnerKey> owners;
+        Ticket ownersTicket;
+        activeAllocation = FailureSite::OrdinaryOwnerStorage;
+        if (!AcquireOrdinaryStorage(ownersTicket, staging.operation.view,
+                StorageDimension::PrivateStorage,
+                staging.atlas.members.size() * sizeof(OwnerKey),
+                Retention::Scratch, activeAllocation)) {
+            staging = {}; return Outcome::OverBudget;
+        }
+        owners.reserve(staging.atlas.members.size());
         for (const auto& member : staging.atlas.members) owners.push_back(member.owner);
+        Ticket captureTicket;
+        activeAllocation = FailureSite::OrdinaryCaptureStorage;
+        if (!AcquireOrdinaryStorage(captureTicket, staging.operation.view,
+                StorageDimension::PrivateStorage,
+                staging.atlas.members.size() * sizeof(aa::MemberCapture),
+                Retention::Scratch, activeAllocation)) {
+            staging = {}; return Outcome::OverBudget;
+        }
+        Ticket atlasCanonicalTicket;
+        activeAllocation = FailureSite::OrdinaryCanonicalEncoding;
+        if (!AcquireOrdinaryStorage(atlasCanonicalTicket,
+                staging.operation.view, StorageDimension::EncodedTexture,
+                aa::kMaximumBytes, Retention::Scratch, activeAllocation)) {
+            staging = {}; return Outcome::OverBudget;
+        }
+        OrdinaryReadAdmission bakeRead;
+        const Outcome bakePreflight = PreflightBakeRead(
+            document, staging.operation.view, bakeRead);
+        if (bakePreflight != Outcome::Prepared) {
+            staging = {}; return bakePreflight;
+        }
+        Ticket recordTicket;
+        activeAllocation = FailureSite::OrdinaryRecordStorage;
+        if (!AcquireOrdinaryStorage(recordTicket, staging.operation.view,
+                StorageDimension::PrivateStorage, kMaximumBytes,
+                Retention::Scratch, activeAllocation)) {
+            staging = {}; return Outcome::OverBudget;
+        }
         CapturedSourceStorage sources;
         const auto resetStaging = [&]() noexcept {
             // The local recapture tickets borrow staging.operation. Release
@@ -1310,6 +1694,17 @@ Outcome Commit(Staging& staging, const Handle(TDocStd_Document)& document) noexc
         if (!aa::build::CaptureMembers(document, owners, capture)) {
             staging = {}; return Outcome::StaleSource;
         }
+#ifdef DEBUG
+        if (gDebugOrdinaryTraceArmed) {
+            gDebugOrdinaryCommitOverlap =
+                gDebugExpectedOrdinaryContext == staging.operation.view.context
+                && OrdinaryStagingOverlapCharged(staging)
+                && membersTicket.bytes != 0 && ownersTicket.bytes != 0
+                && captureTicket.bytes != 0
+                && atlasCanonicalTicket.bytes != 0
+                && recordTicket.bytes != 0;
+        }
+#endif
         const Outcome recaptured = CaptureSources(document, capture, sources,
             staging.operation.view);
         if (recaptured == Outcome::OverBudget) {
@@ -1345,6 +1740,9 @@ Outcome Commit(Staging& staging, const Handle(TDocStd_Document)& document) noexc
                 return Outcome::PersistenceFailure;
             }
         }
+#ifdef DEBUG
+        ++gDebugAdoptionEntries;
+#endif
         const Outcome adopted = AdoptBakedResources(document, staging.outputs);
         if (adopted != Outcome::Committed) {
             resetStaging(); return adopted;
@@ -1379,10 +1777,17 @@ Outcome Commit(Staging& staging, const Handle(TDocStd_Document)& document) noexc
                 resetStaging(); return Outcome::PersistenceFailure;
             }
         }
+#ifdef DEBUG
+        ++gDebugPersistenceEntries;
+#endif
         if (!persistence::StageCommitted(document, staging.bake)) {
             resetStaging(); return Outcome::PersistenceFailure;
         }
         resetStaging(); return Outcome::Committed;
+    } catch (const std::bad_alloc&) {
+        staging.operation.view.AllocationFailed(activeAllocation);
+        staging = {};
+        return Outcome::OverBudget;
     } catch (...) { staging = {}; return Outcome::PersistenceFailure; }
 }
 

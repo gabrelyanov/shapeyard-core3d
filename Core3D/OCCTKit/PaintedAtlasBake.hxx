@@ -654,10 +654,28 @@ struct DebugCaptureReadEvidence final {
     bool deniedBeforeBindingRead = false;
     bool deniedBeforeResourceRead = false;
 };
+struct DebugOrdinaryStagingEvidence final {
+    bool prepareCommitPrepared = false;
+    bool prepareCommitOverlapCharged = false;
+    bool normalCommitted = false;
+    bool prepareCancelPrepared = false;
+    bool prepareCancelOverlapCharged = false;
+    bool cancelReleased = false;
+    bool denialPrepared = false;
+    bool denialOverlapCharged = false;
+    bool denialOverBudget = false;
+    bool operationStableAtCommit = false;
+    bool noAdoptionEntry = false;
+    bool noPersistenceEntry = false;
+    bool historyUnchanged = false;
+};
 DebugCaptureReadEvidence DebugExerciseE4CaptureReadPreflight(
     const Handle(TDocStd_Document)& document,
     const asset_atlas::Key& key) noexcept;
 DebugSourceStorageEvidence DebugExerciseE4SourceStorage(
+    const Handle(TDocStd_Document)& document,
+    const asset_atlas::Key& key) noexcept;
+DebugOrdinaryStagingEvidence DebugExerciseE4OrdinaryStaging(
     const Handle(TDocStd_Document)& document,
     const asset_atlas::Key& key) noexcept;
 void DebugDenyNextSourceVectorReservation() noexcept;
@@ -666,6 +684,9 @@ std::array<std::size_t, 3> DebugTakeSourceVectorReservationObservation() noexcep
 
 struct Staging final {
     decal_layer::bake::accounting::Owner operation;
+    decal_layer::bake::accounting::Ticket observedMembersTicket;
+    decal_layer::bake::accounting::Ticket priorBakeResourcesTicket;
+    decal_layer::bake::accounting::Ticket priorAtlasBytesTicket;
     asset_atlas::Definition atlas;
     std::vector<asset_atlas::MemberUVAssignment> assignments;
     std::vector<asset_atlas::Member> observedMembers;
@@ -685,6 +706,9 @@ struct Staging final {
         if (this != &other) {
             reset();
             operation = std::move(other.operation);
+            observedMembersTicket = std::move(other.observedMembersTicket);
+            priorBakeResourcesTicket = std::move(other.priorBakeResourcesTicket);
+            priorAtlasBytesTicket = std::move(other.priorAtlasBytesTicket);
             atlas = std::move(other.atlas);
             assignments = std::move(other.assignments);
             observedMembers = std::move(other.observedMembers);
@@ -711,6 +735,9 @@ struct Staging final {
         atlas = {};
         evidence = {};
         unchanged = false;
+        priorAtlasBytesTicket.reset();
+        priorBakeResourcesTicket.reset();
+        observedMembersTicket.reset();
         operation.reset();
     }
 };
