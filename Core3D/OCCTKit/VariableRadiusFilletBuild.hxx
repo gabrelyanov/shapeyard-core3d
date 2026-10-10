@@ -1,5 +1,6 @@
 #pragma once
 
+#include "NativePhysicalWorkingFrame.hxx"
 #include "VariableRadiusFilletDefinition.hxx"
 #include <BOPAlgo_ArgumentAnalyzer.hxx>
 #include <BRepAdaptor_Curve.hxx>
@@ -147,6 +148,17 @@ struct DebugBuildObservation final {
     std::size_t filletEntryCount = 0;
     std::vector<DebugRealizedLawObservation> realizedLaws;
     std::vector<DebugMultiStationLawObservation> multiStationLaws;
+    struct WorkingScale final {
+        double metersPerLocalUnit = 0;
+        double toWorking = 0;
+        bool transformed = false;
+        std::array<double, 6> inputBoundsMM{};
+        std::vector<double> stationRadiiMM;
+        std::vector<double> sectionParameters;
+        std::array<double, 3> toleranceMM{};
+        bool finished = false;
+    };
+    std::vector<WorkingScale> workingScales;
 };
 inline thread_local DebugBuildObservation* debugBuildObservation = nullptr;
 #endif
@@ -710,10 +722,131 @@ inline bool exactShapeBytes(const TopoDS_Shape& shape, std::vector<std::uint8_t>
     const std::string value = stream.str();
     bytes.assign(value.begin(), value.end()); return !bytes.empty();
 }
+
+inline Refusal frameRefusal(native_physical_working_frame::Status status) noexcept {
+    using Status = native_physical_working_frame::Status;
+    if (status == Status::Cancelled) return Refusal::Cancelled;
+    if (status == Status::BudgetDenied) return Refusal::Budget;
+    return Refusal::KernelFailure;
+}
+
+inline bool toWorkingPoint(native_physical_working_frame::Frame& frame,
+                           std::array<double, 3>& value) noexcept {
+    gp_Pnt converted;
+    if (frame.toWorkingPoint(point(value), converted)
+        != native_physical_working_frame::Status::Ready) return false;
+    value = {{converted.X(), converted.Y(), converted.Z()}};
+    return true;
+}
+
+template <typename DefinitionValue>
+inline bool toWorkingDefinition(native_physical_working_frame::Frame& frame,
+                                const DefinitionValue& source,
+                                DefinitionValue& result) noexcept {
+    result = source;
+    result.metersPerLocalUnit = 0.001;
+    for (auto& station : result.stations) {
+        double radius = 0;
+        if (frame.toWorkingLength(station.radiusLocal, radius)
+            != native_physical_working_frame::Status::Ready) return false;
+        station.radiusLocal = radius;
+    }
+    for (auto& edge : result.edges) {
+        if (!toWorkingPoint(frame, edge.pointLocal)
+            || !toWorkingPoint(frame, edge.startLocal)
+            || !toWorkingPoint(frame, edge.endLocal)) return false;
+    }
+    return true;
+}
+
+#if DEBUG
+inline std::array<double, 6> bounds(const TopoDS_Shape& shape) noexcept {
+    std::array<double, 6> result{{INFINITY, INFINITY, INFINITY,
+                                  -INFINITY, -INFINITY, -INFINITY}};
+    try {
+        for (TopExp_Explorer it(shape, TopAbs_VERTEX); it.More(); it.Next()) {
+            const gp_Pnt value = BRep_Tool::Pnt(TopoDS::Vertex(it.Current()));
+            result[0] = std::min(result[0], value.X());
+            result[1] = std::min(result[1], value.Y());
+            result[2] = std::min(result[2], value.Z());
+            result[3] = std::max(result[3], value.X());
+            result[4] = std::max(result[4], value.Y());
+            result[5] = std::max(result[5], value.Z());
+        }
+    } catch (...) {}
+    return result;
+}
+
+inline double maximumTolerance(const TopoDS_Shape& shape) noexcept {
+    double result = 0;
+    try {
+        for (TopExp_Explorer it(shape, TopAbs_VERTEX); it.More(); it.Next())
+            result = std::max(result, BRep_Tool::Tolerance(TopoDS::Vertex(it.Current())));
+        for (TopExp_Explorer it(shape, TopAbs_EDGE); it.More(); it.Next())
+            result = std::max(result, BRep_Tool::Tolerance(TopoDS::Edge(it.Current())));
+        for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next())
+            result = std::max(result, BRep_Tool::Tolerance(TopoDS::Face(it.Current())));
+    } catch (...) { return INFINITY; }
+    return result;
+}
+
+inline void debugLawToDocument(DebugRealizedLawObservation& value,
+                               double scale) noexcept {
+    value.physicalFirst *= scale;
+    value.physicalLast *= scale;
+    value.boundsFirst *= scale;
+    value.boundsLast *= scale;
+    value.authoredFirst *= scale;
+    value.authoredLast *= scale;
+    for (double& radius : value.stationRadii) radius *= scale;
+    for (double& parameter : value.nativeStationParameters) parameter *= scale;
+    for (double& radius : value.nativeStationRadii) radius *= scale;
+    for (double& parameter : value.sampleParameters) parameter *= scale;
+    for (double& position : value.samplePositionsZ) position *= scale;
+    for (double& radius : value.sampleValues) radius *= scale;
+    for (double& derivative : value.sampleDerivatives) derivative *= scale;
+    for (double& radius : value.gridValues) radius *= scale;
+    for (double& derivative : value.gridDerivatives) derivative *= scale;
+    for (auto& piece : value.pieces) {
+        piece.first *= scale;
+        piece.last *= scale;
+        for (double& interval : piece.c1Intervals) interval *= scale;
+        for (double& knot : piece.knots) knot *= scale;
+        for (double& pole : piece.poles) pole *= scale;
+    }
+    for (auto& span : value.spans) {
+        span.first *= scale;
+        span.last *= scale;
+        span.extremumParameter *= scale;
+        span.authoredMinimumDerivative *= scale;
+        span.authoredMaximumDerivative *= scale;
+    }
+    for (auto& join : value.joins) {
+        join.parameter *= scale;
+        join.valueLeft *= scale;
+        join.valueRight *= scale;
+    }
+}
+
+inline void debugMultiLawToDocument(DebugMultiStationLawObservation& value,
+                                    double scale) noexcept {
+    value.physicalFirst *= scale;
+    value.physicalLast *= scale;
+    value.authoredFirst *= scale;
+    value.authoredLast *= scale;
+    for (auto& station : value.stations) {
+        station.nativeParameter *= scale;
+        station.radius *= scale;
+        station.physicalZ *= scale;
+        station.realizedRadius *= scale;
+    }
+}
+#endif
 } // namespace detail
 
 inline BuildResult Build(const TopoDS_Shape& source, const Definition& definition,
-                         const std::atomic_bool& cancelled) noexcept {
+                         const std::atomic_bool& cancelled,
+                         retained_topology_budget::Counter* sharedDebt = nullptr) noexcept {
     BuildResult output;
     const auto decline = [&](Refusal refusal) {
         BuildResult result; result.refusal = cancelled.load() ? Refusal::Cancelled : refusal; return result;
@@ -725,14 +858,38 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
         if (!Validate(definition, refusal)) return decline(refusal);
         BRepBuilderAPI_Copy detached(source, Standard_True, Standard_False);
         if (!detached.IsDone()) return decline(Refusal::KernelFailure);
-        const TopoDS_Shape input = detached.Shape();
+        retained_topology_budget::Counter localDebt;
+        auto& debt = sharedDebt ? *sharedDebt : localDebt;
+        native_physical_working_frame::Frame frame;
+        const auto entered = native_physical_working_frame::Frame::Enter(
+            detached.Shape(), definition.metersPerLocalUnit, {}, debt, cancelled, frame);
+        if (entered != native_physical_working_frame::Status::Ready)
+            return decline(detail::frameRefusal(entered));
+        Definition workingDefinition;
+        if (!detail::toWorkingDefinition(frame, definition, workingDefinition))
+            return decline(Refusal::KernelFailure);
+        const TopoDS_Shape& input = frame.workingShape();
         const double tolerance = std::max(Precision::Confusion() * 32,
-            1e-7 / definition.metersPerLocalUnit);
-        std::vector<TopoDS_Edge> edges; edges.reserve(definition.edges.size());
+            1e-7 / workingDefinition.metersPerLocalUnit);
+#if DEBUG
+        DebugBuildObservation::WorkingScale workingScale;
+        const std::size_t debugLawStart = debugBuildObservation
+            ? debugBuildObservation->realizedLaws.size() : 0;
+        if (debugBuildObservation) {
+            workingScale.metersPerLocalUnit = definition.metersPerLocalUnit;
+            workingScale.toWorking = frame.scale().toWorking;
+            workingScale.transformed = frame.usedTransform();
+            workingScale.inputBoundsMM = detail::bounds(input);
+            workingScale.toleranceMM[0] = detail::maximumTolerance(input);
+            for (const auto& station : workingDefinition.stations)
+                workingScale.stationRadiiMM.push_back(station.radiusLocal);
+        }
+#endif
+        std::vector<TopoDS_Edge> edges; edges.reserve(workingDefinition.edges.size());
         std::vector<detail::AuthoredParameterMap> mappings;
-        mappings.reserve(definition.edges.size());
+        mappings.reserve(workingDefinition.edges.size());
         double minimumClearance = INFINITY;
-        for (const auto& anchor : definition.edges) {
+        for (const auto& anchor : workingDefinition.edges) {
             if (cancelled.load()) return decline(Refusal::Cancelled);
             TopoDS_Edge edge;
             if (!detail::resolve(input, anchor, tolerance, edge, refusal)) return decline(refusal);
@@ -748,8 +905,8 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
             edges.push_back(edge); mappings.push_back(mapping);
             output.evidence.consumedEdges.push_back(anchor.identifier);
         }
-        const double maximumRadius = std::max(definition.stations[0].radiusLocal,
-                                               definition.stations[1].radiusLocal);
+        const double maximumRadius = std::max(workingDefinition.stations[0].radiusLocal,
+                                               workingDefinition.stations[1].radiusLocal);
         if (!std::isfinite(minimumClearance) || maximumRadius >= minimumClearance / 2)
             return decline(Refusal::Clearance);
 
@@ -761,8 +918,8 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
             const bool authoredStartsAtNativeFirst =
                 mapping.authoredFirst == mapping.nativeFirst;
             const std::array<double, 2> nativeRadii{{
-                definition.stations[authoredStartsAtNativeFirst ? 0 : 1].radiusLocal,
-                definition.stations[authoredStartsAtNativeFirst ? 1 : 0].radiusLocal}};
+                workingDefinition.stations[authoredStartsAtNativeFirst ? 0 : 1].radiusLocal,
+                workingDefinition.stations[authoredStartsAtNativeFirst ? 1 : 0].radiusLocal}};
 #if DEBUG
             if (debugBuildObservation) ++debugBuildObservation->filletEntryCount;
 #endif
@@ -780,49 +937,65 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
             const bool authoredStartsAtNativeFirst =
                 mapping.authoredFirst == mapping.nativeFirst;
             const std::array<double, 2> nativeRadii{{
-                definition.stations[authoredStartsAtNativeFirst ? 0 : 1].radiusLocal,
-                definition.stations[authoredStartsAtNativeFirst ? 1 : 0].radiusLocal}};
+                workingDefinition.stations[authoredStartsAtNativeFirst ? 0 : 1].radiusLocal,
+                workingDefinition.stations[authoredStartsAtNativeFirst ? 1 : 0].radiusLocal}};
             const int contour = fillet.Contour(edge); Standard_Real first = 0, last = 0;
             const Handle(Law_Function) law = fillet.GetLaw(contour, edge);
             if (law.IsNull() || !fillet.GetBounds(contour, edge, first, last)
                 || std::abs(law->Value(mapping.authoredFirst)
-                    - definition.stations[0].radiusLocal) > tolerance
+                    - workingDefinition.stations[0].radiusLocal) > tolerance
                 || std::abs(law->Value(mapping.authoredLast)
-                    - definition.stations[1].radiusLocal) > tolerance)
+                    - workingDefinition.stations[1].radiusLocal) > tolerance)
                 return decline(Refusal::EndpointMismatch);
 #if DEBUG
             if (debugBuildObservation) {
                 DebugRealizedLawObservation observed;
-                detail::observeRealizedLaw(law, edge, definition, mapping,
+                detail::observeRealizedLaw(law, edge, workingDefinition, mapping,
                                            nativeRadii, first, last, observed);
                 debugBuildObservation->realizedLaws.push_back(std::move(observed));
             }
 #endif
         }
         const TopoDS_Shape candidate = fillet.Shape();
+#if DEBUG
+        if (debugBuildObservation)
+            workingScale.toleranceMM[1] = detail::maximumTolerance(candidate);
+#endif
         if (!BRepCheck_Analyzer(candidate).IsValid()) return decline(Refusal::KernelFailure);
         if (!detail::selfIntersectionFree(candidate)) return decline(Refusal::SelfIntersection);
 
         GProp_GProps before, after; BRepGProp::VolumeProperties(input, before);
         BRepGProp::VolumeProperties(candidate, after);
         const double removed = before.Mass() - after.Mass();
-        if (!std::isfinite(removed) || removed <= std::max(1e-12, before.Mass() * 1e-10))
+        double absoluteRemovalFloor = 0;
+        if (frame.toWorkingVolume(1e-12, absoluteRemovalFloor)
+                != native_physical_working_frame::Status::Ready
+            || !std::isfinite(removed)
+            || removed <= std::max(absoluteRemovalFloor, before.Mass() * 1e-10))
             return decline(Refusal::NonRemoving);
 
         constexpr std::array<double, 3> pins{{0.2, 0.5, 0.8}};
-        for (std::size_t edgeIndex = 0; edgeIndex < definition.edges.size(); ++edgeIndex) {
+        for (std::size_t edgeIndex = 0; edgeIndex < workingDefinition.edges.size(); ++edgeIndex) {
             double previousMeasured = 0;
             for (double pin : pins) {
                 double expected = 0, measured = 0;
-                if (!RadiusAt(definition, pin, expected)
-                    || !detail::measuredSection(candidate, definition.edges[edgeIndex], pin,
+                if (!RadiusAt(workingDefinition, pin, expected)
+                    || !detail::measuredSection(candidate, workingDefinition.edges[edgeIndex], pin,
                                                 expected, tolerance, measured))
                     return decline(Refusal::SectionMismatch);
+                double expectedDocument = 0, measuredDocument = 0;
+                if (!RadiusAt(definition, pin, expectedDocument)
+                    || frame.toDocumentLength(measured, measuredDocument)
+                        != native_physical_working_frame::Status::Ready)
+                    return decline(Refusal::KernelFailure);
                 output.evidence.sections.push_back({definition.edges[edgeIndex].identifier,
-                                                    pin, expected, measured});
+                                                    pin, expectedDocument, measuredDocument});
+#if DEBUG
+                if (debugBuildObservation) workingScale.sectionParameters.push_back(pin);
+#endif
                 if (previousMeasured > 0) {
-                    const double delta = definition.stations[1].radiusLocal
-                        - definition.stations[0].radiusLocal;
+                    const double delta = workingDefinition.stations[1].radiusLocal
+                        - workingDefinition.stations[0].radiusLocal;
                     if ((delta > 0 && measured <= previousMeasured)
                         || (delta < 0 && measured >= previousMeasured)
                         || (delta == 0 && std::abs(measured - previousMeasured) > tolerance))
@@ -831,9 +1004,34 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
                 previousMeasured = measured;
             }
         }
-        output.refusal = Refusal::None; output.solid = candidate;
-        output.evidence.minimumClearanceLocal = minimumClearance;
-        output.evidence.removedVolumeLocal3 = removed;
+        const double clearanceDocument = minimumClearance * frame.scale().toDocument;
+        const double removedDocument = removed * frame.scale().toDocument3;
+        if (!std::isfinite(clearanceDocument) || !std::isfinite(removedDocument))
+            return decline(Refusal::KernelFailure);
+#if DEBUG
+        if (debugBuildObservation) {
+            for (std::size_t index = debugLawStart;
+                 index < debugBuildObservation->realizedLaws.size(); ++index)
+                detail::debugLawToDocument(
+                    debugBuildObservation->realizedLaws[index],
+                    frame.scale().toDocument);
+        }
+#endif
+        TopoDS_Shape documentCandidate;
+        const auto finished = frame.Finish(candidate, debt, cancelled, documentCandidate);
+        if (finished != native_physical_working_frame::Status::Finished)
+            return decline(detail::frameRefusal(finished));
+#if DEBUG
+        if (debugBuildObservation) {
+            workingScale.toleranceMM[2] = detail::maximumTolerance(documentCandidate)
+                * frame.scale().toWorking;
+            workingScale.finished = true;
+            debugBuildObservation->workingScales.push_back(std::move(workingScale));
+        }
+#endif
+        output.refusal = Refusal::None; output.solid = documentCandidate;
+        output.evidence.minimumClearanceLocal = clearanceDocument;
+        output.evidence.removedVolumeLocal3 = removedDocument;
         return output;
     } catch (...) { return decline(Refusal::KernelFailure); }
 }
@@ -841,9 +1039,10 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
 inline BuildResult BuildDeterministically(const TopoDS_Shape& source,
                                           const Definition& definition,
                                           const std::atomic_bool& cancelled) noexcept {
-    BuildResult first = Build(source, definition, cancelled);
+    retained_topology_budget::Counter debt;
+    BuildResult first = Build(source, definition, cancelled, &debt);
     if (!first.built()) return first;
-    BuildResult second = Build(source, definition, cancelled);
+    BuildResult second = Build(source, definition, cancelled, &debt);
     if (!second.built()) return second;
     std::vector<std::uint8_t> a, b;
     if (!detail::exactShapeBytes(first.solid, a) || !detail::exactShapeBytes(second.solid, b)
@@ -880,7 +1079,8 @@ inline BuildResult BuildDeterministically(const TopoDS_Shape& source,
 
 inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
                                      const MultiStationDefinition& definition,
-                                     const std::atomic_bool& cancelled) noexcept {
+                                     const std::atomic_bool& cancelled,
+                                     retained_topology_budget::Counter* sharedDebt = nullptr) noexcept {
     BuildResult output;
     const auto decline = [&](Refusal refusal) {
         BuildResult result; result.refusal = cancelled.load() ? Refusal::Cancelled : refusal; return result;
@@ -892,14 +1092,38 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
         if (!Validate(definition, refusal)) return decline(refusal);
         BRepBuilderAPI_Copy detached(source, Standard_True, Standard_False);
         if (!detached.IsDone()) return decline(Refusal::KernelFailure);
-        const TopoDS_Shape input = detached.Shape();
+        retained_topology_budget::Counter localDebt;
+        auto& debt = sharedDebt ? *sharedDebt : localDebt;
+        native_physical_working_frame::Frame frame;
+        const auto entered = native_physical_working_frame::Frame::Enter(
+            detached.Shape(), definition.metersPerLocalUnit, {}, debt, cancelled, frame);
+        if (entered != native_physical_working_frame::Status::Ready)
+            return decline(detail::frameRefusal(entered));
+        MultiStationDefinition workingDefinition;
+        if (!detail::toWorkingDefinition(frame, definition, workingDefinition))
+            return decline(Refusal::KernelFailure);
+        const TopoDS_Shape& input = frame.workingShape();
         const double tolerance = std::max(Precision::Confusion() * 32,
-            1e-7 / definition.metersPerLocalUnit);
-        std::vector<TopoDS_Edge> edges; edges.reserve(definition.edges.size());
+            1e-7 / workingDefinition.metersPerLocalUnit);
+#if DEBUG
+        DebugBuildObservation::WorkingScale workingScale;
+        const std::size_t debugLawStart = debugBuildObservation
+            ? debugBuildObservation->multiStationLaws.size() : 0;
+        if (debugBuildObservation) {
+            workingScale.metersPerLocalUnit = definition.metersPerLocalUnit;
+            workingScale.toWorking = frame.scale().toWorking;
+            workingScale.transformed = frame.usedTransform();
+            workingScale.inputBoundsMM = detail::bounds(input);
+            workingScale.toleranceMM[0] = detail::maximumTolerance(input);
+            for (const auto& station : workingDefinition.stations)
+                workingScale.stationRadiiMM.push_back(station.radiusLocal);
+        }
+#endif
+        std::vector<TopoDS_Edge> edges; edges.reserve(workingDefinition.edges.size());
         std::vector<detail::AuthoredParameterMap> mappings;
-        mappings.reserve(definition.edges.size());
+        mappings.reserve(workingDefinition.edges.size());
         double minimumClearance = INFINITY;
-        for (const auto& anchor : definition.edges) {
+        for (const auto& anchor : workingDefinition.edges) {
             if (cancelled.load()) return decline(Refusal::Cancelled);
             TopoDS_Edge edge;
             if (!detail::resolve(input, anchor, tolerance, edge, refusal)) return decline(refusal);
@@ -916,7 +1140,7 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
             output.evidence.consumedEdges.push_back(anchor.identifier);
         }
         double maximumRadius = 0;
-        if (!MaximumRadiusLocal(definition, maximumRadius)
+        if (!MaximumRadiusLocal(workingDefinition, maximumRadius)
             || !std::isfinite(minimumClearance) || maximumRadius >= minimumClearance / 2)
             return decline(Refusal::Clearance);
 
@@ -935,14 +1159,14 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
             if (debugBuildObservation) ++debugBuildObservation->filletEntryCount;
 #endif
             std::vector<NativeStation> nativeStations;
-            nativeStations.reserve(definition.stations.size());
-            for (const auto& station : definition.stations)
+            nativeStations.reserve(workingDefinition.stations.size());
+            for (const auto& station : workingDefinition.stations)
                 nativeStations.push_back({station, mapping.normalized(station.parameter)});
             std::sort(nativeStations.begin(), nativeStations.end(),
                       [](const NativeStation& lhs, const NativeStation& rhs) {
                           return lhs.normalized < rhs.normalized;
                       });
-            TColgp_Array1OfPnt2d lawPoints(1, Standard_Integer(definition.stations.size()));
+            TColgp_Array1OfPnt2d lawPoints(1, Standard_Integer(workingDefinition.stations.size()));
             for (std::size_t index = 0; index < nativeStations.size(); ++index)
                 lawPoints.SetValue(Standard_Integer(index) + 1,
                     gp_Pnt2d(nativeStations[index].normalized,
@@ -971,7 +1195,7 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
             };
             // The realized kernel law must pin every authored station, not only
             // the endpoints; a law that misses a station refuses here.
-            for (const auto& station : definition.stations) {
+            for (const auto& station : workingDefinition.stations) {
                 if (!std::isfinite(lawAt(station.parameter))
                     || std::abs(lawAt(station.parameter) - station.radiusLocal) > tolerance)
                     return decline(Refusal::EndpointMismatch);
@@ -1008,13 +1232,13 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
             // three fixed quarter-segment positions against 0.5x-2x RadiusAt
             // reference values. These bounded samples are not equality checks
             // or an independent whole-law clearance proof.
-            for (std::size_t segment = 1; segment < definition.stations.size(); ++segment) {
-                const double from = definition.stations[segment - 1].parameter;
-                const double to = definition.stations[segment].parameter;
+            for (std::size_t segment = 1; segment < workingDefinition.stations.size(); ++segment) {
+                const double from = workingDefinition.stations[segment - 1].parameter;
+                const double to = workingDefinition.stations[segment].parameter;
                 for (int sample = 1; sample <= 3; ++sample) {
                     const double parameter = from + (to - from) * double(sample) / 4;
                     double envelope = 0;
-                    if (!RadiusAt(definition, parameter, envelope))
+                    if (!RadiusAt(workingDefinition, parameter, envelope))
                         return decline(Refusal::EndpointMismatch);
                     const double realized = lawAt(parameter);
                     if (!std::isfinite(realized) || realized <= 0
@@ -1026,13 +1250,21 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
             }
         }
         const TopoDS_Shape candidate = fillet.Shape();
+#if DEBUG
+        if (debugBuildObservation)
+            workingScale.toleranceMM[1] = detail::maximumTolerance(candidate);
+#endif
         if (!BRepCheck_Analyzer(candidate).IsValid()) return decline(Refusal::KernelFailure);
         if (!detail::selfIntersectionFree(candidate)) return decline(Refusal::SelfIntersection);
 
         GProp_GProps before, after; BRepGProp::VolumeProperties(input, before);
         BRepGProp::VolumeProperties(candidate, after);
         const double removed = before.Mass() - after.Mass();
-        if (!std::isfinite(removed) || removed <= std::max(1e-12, before.Mass() * 1e-10))
+        double absoluteRemovalFloor = 0;
+        if (frame.toWorkingVolume(1e-12, absoluteRemovalFloor)
+                != native_physical_working_frame::Status::Ready
+            || !std::isfinite(removed)
+            || removed <= std::max(absoluteRemovalFloor, before.Mass() * 1e-10))
             return decline(Refusal::NonRemoving);
 
         // Independent section proof: one measured normal-plane section at every
@@ -1040,18 +1272,28 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
         // kernel-law check above; a plane through an endpoint vertex is not a
         // reliable independent measurement. Consecutive interior sections must
         // follow the authored segment direction, exactly as in stage 1.
-        for (std::size_t edgeIndex = 0; edgeIndex < definition.edges.size(); ++edgeIndex) {
+        for (std::size_t edgeIndex = 0; edgeIndex < workingDefinition.edges.size(); ++edgeIndex) {
             double previousMeasured = 0; double previousAuthored = 0;
-            for (std::size_t stationIndex = 1; stationIndex + 1 < definition.stations.size();
+            for (std::size_t stationIndex = 1; stationIndex + 1 < workingDefinition.stations.size();
                  ++stationIndex) {
-                const auto& station = definition.stations[stationIndex];
+                const auto& station = workingDefinition.stations[stationIndex];
                 double expected = 0, measured = 0;
-                if (!RadiusAt(definition, station.parameter, expected)
-                    || !detail::measuredSection(candidate, definition.edges[edgeIndex],
+                if (!RadiusAt(workingDefinition, station.parameter, expected)
+                    || !detail::measuredSection(candidate, workingDefinition.edges[edgeIndex],
                                                 station.parameter, expected, tolerance, measured))
                     return decline(Refusal::SectionMismatch);
+                double expectedDocument = 0, measuredDocument = 0;
+                if (!RadiusAt(definition, station.parameter, expectedDocument)
+                    || frame.toDocumentLength(measured, measuredDocument)
+                        != native_physical_working_frame::Status::Ready)
+                    return decline(Refusal::KernelFailure);
                 output.evidence.sections.push_back({definition.edges[edgeIndex].identifier,
-                                                    station.parameter, expected, measured});
+                                                    station.parameter,
+                                                    expectedDocument, measuredDocument});
+#if DEBUG
+                if (debugBuildObservation)
+                    workingScale.sectionParameters.push_back(station.parameter);
+#endif
                 if (previousMeasured > 0) {
                     const double delta = station.radiusLocal - previousAuthored;
                     if ((delta > 0 && measured <= previousMeasured)
@@ -1062,9 +1304,34 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
                 previousMeasured = measured; previousAuthored = station.radiusLocal;
             }
         }
-        output.refusal = Refusal::None; output.solid = candidate;
-        output.evidence.minimumClearanceLocal = minimumClearance;
-        output.evidence.removedVolumeLocal3 = removed;
+        const double clearanceDocument = minimumClearance * frame.scale().toDocument;
+        const double removedDocument = removed * frame.scale().toDocument3;
+        if (!std::isfinite(clearanceDocument) || !std::isfinite(removedDocument))
+            return decline(Refusal::KernelFailure);
+#if DEBUG
+        if (debugBuildObservation) {
+            for (std::size_t index = debugLawStart;
+                 index < debugBuildObservation->multiStationLaws.size(); ++index)
+                detail::debugMultiLawToDocument(
+                    debugBuildObservation->multiStationLaws[index],
+                    frame.scale().toDocument);
+        }
+#endif
+        TopoDS_Shape documentCandidate;
+        const auto finished = frame.Finish(candidate, debt, cancelled, documentCandidate);
+        if (finished != native_physical_working_frame::Status::Finished)
+            return decline(detail::frameRefusal(finished));
+#if DEBUG
+        if (debugBuildObservation) {
+            workingScale.toleranceMM[2] = detail::maximumTolerance(documentCandidate)
+                * frame.scale().toWorking;
+            workingScale.finished = true;
+            debugBuildObservation->workingScales.push_back(std::move(workingScale));
+        }
+#endif
+        output.refusal = Refusal::None; output.solid = documentCandidate;
+        output.evidence.minimumClearanceLocal = clearanceDocument;
+        output.evidence.removedVolumeLocal3 = removedDocument;
         return output;
     } catch (...) { return decline(Refusal::KernelFailure); }
 }
@@ -1072,9 +1339,10 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
 inline BuildResult BuildMultiStationDeterministically(
     const TopoDS_Shape& source, const MultiStationDefinition& definition,
     const std::atomic_bool& cancelled) noexcept {
-    BuildResult first = BuildMultiStation(source, definition, cancelled);
+    retained_topology_budget::Counter debt;
+    BuildResult first = BuildMultiStation(source, definition, cancelled, &debt);
     if (!first.built()) return first;
-    BuildResult second = BuildMultiStation(source, definition, cancelled);
+    BuildResult second = BuildMultiStation(source, definition, cancelled, &debt);
     if (!second.built()) return second;
     std::vector<std::uint8_t> a, b;
     if (!detail::exactShapeBytes(first.solid, a) || !detail::exactShapeBytes(second.solid, b)

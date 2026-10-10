@@ -11,6 +11,8 @@
 #include "../OCCTKit/RetainedBooleanProgram.hxx"
 #include "../OCCTKit/RetainedEdgeTreatmentBuild.hxx"
 #include "../OCCTKit/RetainedEdgeTreatmentSnapshot.hxx"
+#include "../OCCTKit/VariableRadiusFilletBuild.hxx"
+#include "../OCCTKit/VariableRadiusFilletRegistry.hxx"
 
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
@@ -565,6 +567,314 @@ NSDictionary *WorkingFrameProbe(int32_t scenario) {
         }
     } catch (...) { return @{ @"ok": @NO, @"phase": @"exception" }; }
 }
+
+retained_recipe::UUID B3UUID(std::uint8_t value) {
+    retained_recipe::UUID result{};
+    result.back() = value;
+    return result;
+}
+
+retained_recipe::Digest B3Digest(std::uint8_t value) {
+    retained_recipe::Digest result{};
+    result.back() = value;
+    return result;
+}
+
+variable_radius_fillet::OrientedEdgeAnchor B3Edge(double scale) {
+    variable_radius_fillet::OrientedEdgeAnchor edge;
+    edge.identifier = B3UUID(20);
+    edge.pointLocal = {{0, 0, 20 * scale}};
+    edge.tangent = {{0, 0, 1}};
+    edge.normalA = {{-1, 0, 0}};
+    edge.normalB = {{0, -1, 0}};
+    edge.startLocal = {{0, 0, 0}};
+    edge.endLocal = {{0, 0, 40 * scale}};
+    edge.selectorProof = B3Digest(21);
+    return edge;
+}
+
+variable_radius_fillet::Definition B3LinearDefinition(double unit) {
+    using namespace variable_radius_fillet;
+    const double scale = 0.001 / unit;
+    Definition value;
+    value.metersPerLocalUnit = unit;
+    value.stations = {{{B3UUID(1), 0, 2 * scale},
+                       {B3UUID(2), 1, 5 * scale}}};
+    value.edges.push_back(B3Edge(scale));
+    value.edges[0].identifier = B3UUID(3);
+    value.edges[0].selectorProof = B3Digest(4);
+    return value;
+}
+
+variable_radius_fillet::MultiStationDefinition B3MultiDefinition(
+    double unit, bool valley) {
+    using namespace variable_radius_fillet;
+    const double scale = 0.001 / unit;
+    const double monotone[5] = {2, 3, 4, 6, 8};
+    const double changing[5] = {2, 5, 3, 6, 4};
+    const double *radii = valley ? changing : monotone;
+    MultiStationDefinition value;
+    value.metersPerLocalUnit = unit;
+    for (std::size_t index = 0; index < 5; ++index)
+        value.stations.push_back({B3UUID(std::uint8_t(10 + index)),
+                                  double(index) / 4, radii[index] * scale});
+    value.edges.push_back(B3Edge(scale));
+    return value;
+}
+
+NSArray<NSNumber *> *B3PhysicalBounds(const TopoDS_Shape& shape, double unit) {
+    auto bounds = WorkingFrameVertexBounds(shape);
+    const double scale = 1000 * unit;
+    for (double& value : bounds) value *= scale;
+    return WorkingFrameNumbers(bounds);
+}
+
+NSDictionary *B3Cell(double unit, int kind, bool runOrdinary,
+                     bool runDeterministic) {
+    using namespace variable_radius_fillet;
+    WorkingFrameDocument document;
+    double observedUnit = 0;
+    if (!MakeWorkingFrameDocument(unit, document, observedUnit)
+        || observedUnit != unit)
+        return @{@"ok": @NO, @"phase": @"document-unit", @"unit": @(unit)};
+    unit = observedUnit;
+    const double localScale = 0.001 / unit;
+    const double physicalScale = 1000 * unit;
+    const TopoDS_Shape source = BRepPrimAPI_MakeBox(
+        30 * localScale, 30 * localScale, 40 * localScale).Shape();
+    const std::string sourceBytes = WorkingFrameShapeBytes(source);
+    const unsigned sourceFlags = WorkingFrameFlags(source);
+    std::atomic_bool cancelled{false};
+    DebugBuildObservation debug;
+    debugBuildObservation = &debug;
+    BuildResult ordinary, deterministic;
+    std::vector<std::uint8_t> definitionBefore, definitionAfter;
+    bool codec = false;
+    if (kind == 0) {
+        const Definition definition = B3LinearDefinition(unit);
+        codec = Encode(definition, definitionBefore);
+        if (runOrdinary) ordinary = Build(source, definition, cancelled);
+        if (runDeterministic)
+            deterministic = BuildDeterministically(source, definition, cancelled);
+        codec = codec && Encode(definition, definitionAfter);
+    } else {
+        const MultiStationDefinition definition = B3MultiDefinition(unit, kind == 2);
+        codec = Encode(definition, definitionBefore);
+        if (runOrdinary) ordinary = BuildMultiStation(source, definition, cancelled);
+        if (runDeterministic)
+            deterministic = BuildMultiStationDeterministically(source, definition, cancelled);
+        codec = codec && Encode(definition, definitionAfter);
+    }
+    debugBuildObservation = nullptr;
+    const BuildResult& result = runDeterministic ? deterministic : ordinary;
+    NSMutableArray<NSNumber *> *parameters = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *expectedMM = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *measuredMM = [NSMutableArray array];
+    for (const auto& section : result.evidence.sections) {
+        [parameters addObject:@(section.parameter)];
+        [expectedMM addObject:@(section.expectedRadiusLocal * physicalScale)];
+        [measuredMM addObject:@(section.measuredRadiusLocal * physicalScale)];
+    }
+    NSMutableArray *traces = [NSMutableArray array];
+    for (const auto& trace : debug.workingScales) {
+        [traces addObject:@{
+            @"unit": @(trace.metersPerLocalUnit),
+            @"toWorking": @(trace.toWorking),
+            @"transformed": @(trace.transformed),
+            @"boundsMM": WorkingFrameNumbers(trace.inputBoundsMM),
+            @"radiiMM": WorkingFrameNumbers(trace.stationRadiiMM),
+            @"sectionParameters": WorkingFrameNumbers(trace.sectionParameters),
+            @"tolerancesMM": WorkingFrameNumbers(std::vector<double>(
+                trace.toleranceMM.begin(), trace.toleranceMM.end())),
+            @"finished": @(trace.finished),
+        }];
+    }
+    std::vector<std::uint8_t> ordinaryBytes, deterministicBytes;
+    const bool ordinaryEncoded = !runOrdinary || (ordinary.built()
+        && variable_radius_fillet::detail::exactShapeBytes(
+            ordinary.solid, ordinaryBytes));
+    const bool deterministicEncoded = !runDeterministic || (deterministic.built()
+        && variable_radius_fillet::detail::exactShapeBytes(
+            deterministic.solid, deterministicBytes));
+    const bool bytesEqual = !runOrdinary || !runDeterministic
+        || ordinaryBytes == deterministicBytes;
+    const bool sourceUnchanged = sourceBytes == WorkingFrameShapeBytes(source)
+        && sourceFlags == WorkingFrameFlags(source);
+    const bool expectedBuilt = (!runOrdinary || ordinary.built())
+        && (!runDeterministic || deterministic.built());
+    return @{
+        @"unit": @(unit), @"kind": @(kind),
+        @"ordinaryBuilt": @(!runOrdinary || ordinary.built()),
+        @"deterministicBuilt": @(!runDeterministic || deterministic.built()),
+        @"refusal": @(unsigned(result.refusal)),
+        @"sourceUnchanged": @(sourceUnchanged),
+        @"codecStable": @(codec && definitionBefore == definitionAfter),
+        @"shapeBytesStable": @(ordinaryEncoded && deterministicEncoded && bytesEqual),
+        @"consumedCount": @(result.evidence.consumedEdges.size()),
+        @"sectionParameters": parameters,
+        @"expectedRadiusMM": expectedMM,
+        @"measuredRadiusMM": measuredMM,
+        @"minimumClearanceMM": @(result.evidence.minimumClearanceLocal * physicalScale),
+        @"removedVolumeMM3": @(result.evidence.removedVolumeLocal3
+                                 * physicalScale * physicalScale * physicalScale),
+        @"outputBoundsMM": result.built() ? B3PhysicalBounds(result.solid, unit) : @[],
+        @"outputVolumeMM3": @(result.built()
+            ? WorkingFrameVolume(result.solid) * physicalScale * physicalScale * physicalScale : 0),
+        @"traces": traces,
+        @"ok": @(expectedBuilt && sourceUnchanged && codec
+                   && ordinaryEncoded && deterministicEncoded && bytesEqual),
+    };
+}
+
+NSDictionary *B3PositiveProbe(int kind) {
+    NSMutableArray *cells = [NSMutableArray array];
+    bool ok = true;
+    for (double unit : {0.001, 1.0, 0.01}) {
+        NSDictionary *cell = B3Cell(unit, kind, true, true);
+        [cells addObject:cell];
+        ok = ok && [cell[@"ok"] boolValue];
+    }
+    return @{@"ok": @(ok), @"cells": cells};
+}
+
+NSDictionary *B3RefusalProbe() {
+    using namespace variable_radius_fillet;
+    NSMutableArray *cells = [NSMutableArray array];
+    bool ok = true;
+    for (double unit : {0.001, 1.0, 0.01}) {
+        const double scale = 0.001 / unit;
+        const TopoDS_Shape tight = BRepPrimAPI_MakeBox(
+            6 * scale, 6 * scale, 40 * scale).Shape();
+        const TopoDS_Shape regular = BRepPrimAPI_MakeBox(
+            30 * scale, 30 * scale, 40 * scale).Shape();
+        const TopoDS_Shape drifted = BRepPrimAPI_MakeBox(
+            30 * scale, 30 * scale, 50 * scale).Shape();
+        std::atomic_bool running{false};
+        std::atomic_bool stopped{true};
+        Definition value = B3LinearDefinition(unit);
+        const BuildResult clearance = Build(tight, value, running);
+        const BuildResult missing = Build(drifted, value, running);
+        value = B3LinearDefinition(unit);
+        value.edges[0].curve = CurveKind(2);
+        const BuildResult closed = Build(regular, value, running);
+        value = B3LinearDefinition(unit);
+        value.stations[0].radiusLocal = INFINITY;
+        const BuildResult malformed = Build(regular, value, running);
+        const BuildResult cancelled = Build(regular, B3LinearDefinition(unit), stopped);
+        retained_topology_budget::Counter debt;
+        debt.exhausted = true;
+        const BuildResult exhausted = Build(
+            regular, B3LinearDefinition(unit), running, &debt);
+        const bool cellOK = clearance.refusal == Refusal::Clearance
+            && (missing.refusal == Refusal::AnchorMissing
+                || missing.refusal == Refusal::OrientationDrift)
+            && closed.refusal == Refusal::ClosedLoop
+            && malformed.refusal == Refusal::InvalidRadius
+            && cancelled.refusal == Refusal::Cancelled
+            && exhausted.refusal == Refusal::Budget
+            && clearance.solid.IsNull() && missing.solid.IsNull()
+            && closed.solid.IsNull() && malformed.solid.IsNull()
+            && cancelled.solid.IsNull() && exhausted.solid.IsNull();
+        ok = ok && cellOK;
+        [cells addObject:@{@"unit": @(unit), @"ok": @(cellOK),
+            @"clearance": @(unsigned(clearance.refusal)),
+            @"missing": @(unsigned(missing.refusal)),
+            @"closed": @(unsigned(closed.refusal)),
+            @"malformed": @(unsigned(malformed.refusal)),
+            @"cancelled": @(unsigned(cancelled.refusal)),
+            @"budget": @(unsigned(exhausted.refusal))}];
+    }
+    return @{@"ok": @(ok), @"cells": cells};
+}
+
+NSDictionary *B3CodecProbe() {
+    using namespace variable_radius_fillet;
+    bool ok = CodecVersion == 1 && MultiStationCodecVersion == 2
+        && MaximumEdges == 16 && MaximumPayloadBytes == 4096
+        && MinimumStations == 3 && MaximumStations == 16;
+    NSMutableArray *cells = [NSMutableArray array];
+    for (double unit : {0.001, 1.0, 0.01}) {
+        WorkingFrameDocument document;
+        double observedUnit = 0;
+        if (!MakeWorkingFrameDocument(unit, document, observedUnit)
+            || observedUnit != unit) {
+            ok = false;
+            [cells addObject:@{@"unit": @(unit), @"ok": @NO}];
+            continue;
+        }
+        unit = observedUnit;
+        const Definition linear = B3LinearDefinition(unit);
+        const MultiStationDefinition multi = B3MultiDefinition(unit, false);
+        std::vector<std::uint8_t> linearBytes, multiBytes, second;
+        Definition decodedLinear;
+        MultiStationDefinition decodedMulti;
+        bool cellOK = Encode(linear, linearBytes) && linearBytes.size() == 280
+            && Decode(linearBytes, decodedLinear) && decodedLinear == linear
+            && Encode(decodedLinear, second) && second == linearBytes;
+        second.clear();
+        cellOK = cellOK && Encode(multi, multiBytes)
+            && Decode(multiBytes, decodedMulti) && decodedMulti == multi
+            && Encode(decodedMulti, second) && second == multiBytes
+            && !Decode(linearBytes, decodedMulti) && !Decode(multiBytes, decodedLinear);
+        const double scale = 0.001 / unit;
+        const TopoDS_Shape source = BRepPrimAPI_MakeBox(
+            30 * scale, 30 * scale, 40 * scale).Shape();
+        composite_recipe::FeatureNode linearFeature;
+        linearFeature.node = B3UUID(60);
+        linearFeature.feature = B3UUID(61);
+        linearFeature.localID = 1;
+        linearFeature.kind = FeatureKind;
+        linearFeature.codecVersion = CodecVersion;
+        linearFeature.inputs.push_back(B3UUID(62));
+        linearFeature.parameters = linearBytes;
+        retained_feature::ReplayValue input;
+        input.shape = retained_feature::ShapeKind::Solid;
+        cellOK = cellOK && variable_radius_fillet::detail::exactShapeBytes(
+                source, input.detachedShape)
+            && composite_recipe::Hash(input.detachedShape, input.geometry);
+        input.familyProof = input.geometry;
+        const retained_feature::Entry linearEntry = RegistryEntry(true, true);
+        retained_feature::ReplayBudget buildBudget, proofBudget, fixedBudget;
+        retained_feature::ReplayValue registryOutput;
+        const std::vector<retained_feature::ReplayValue> inputs{input};
+        const bool registryBuilt = linearEntry.execution.buildDetached(
+            linearFeature, inputs, buildBudget, registryOutput);
+        const bool registryProof = registryBuilt
+            && linearEntry.execution.proveFamily(
+                linearFeature, inputs, registryOutput, proofBudget)
+            && linearEntry.execution.verifyFixedPoint(
+                linearFeature, inputs, registryOutput, fixedBudget);
+        NSDictionary *linearCell = B3Cell(unit, 0, false, true);
+        NSDictionary *multiCell = B3Cell(unit, 1, false, true);
+        cellOK = cellOK && [linearCell[@"ok"] boolValue]
+            && [multiCell[@"ok"] boolValue] && registryProof;
+        ok = ok && cellOK;
+        [cells addObject:@{@"unit": @(unit), @"ok": @(cellOK),
+            @"linearBytes": @(linearBytes.size()),
+            @"multiBytes": @(multiBytes.size()),
+            @"registryFamilyProof": @(registryProof)}];
+    }
+    return @{@"ok": @(ok), @"cells": cells};
+}
+
+NSDictionary *B3WorkingScaleProbe(int32_t scenario) {
+    try {
+        switch (scenario) {
+            case 0: return B3PositiveProbe(0);
+            case 1: return B3PositiveProbe(1);
+            case 2: return B3PositiveProbe(2);
+            case 3: return B3PositiveProbe(0);
+            case 4: return B3CodecProbe();
+            case 5: return B3PositiveProbe(1);
+            case 6: return B3RefusalProbe();
+            case 7: return B3CodecProbe();
+            default: return @{@"ok": @NO, @"phase": @"scenario"};
+        }
+    } catch (...) {
+        variable_radius_fillet::debugBuildObservation = nullptr;
+        return @{@"ok": @NO, @"phase": @"exception"};
+    }
+}
 } // namespace
 
 static NSDictionary *DebugCreate(Core3DViewController *controller,
@@ -837,6 +1147,10 @@ extern "C" void *Core3DDebugD4ProfileEdit(
 
 extern "C" void *Core3DDebugPhysicalWorkingFrameProbe(int32_t scenario) {
     return (__bridge_retained void *)WorkingFrameProbe(scenario);
+}
+
+extern "C" void *Core3DDebugB3WorkingScaleProbe(int32_t scenario) {
+    return (__bridge_retained void *)B3WorkingScaleProbe(scenario);
 }
 
 extern "C" void *Core3DDebugPhysicalWorkingFrameEmptyCentimetreDocumentSeed() {

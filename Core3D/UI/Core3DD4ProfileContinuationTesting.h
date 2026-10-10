@@ -23,6 +23,9 @@ void *Core3DDebugD4ProfileCreationStop(Core3DViewController *controller,
 // NativePhysicalWorkingFrame seam observations. Scenarios 0...7 correspond
 // one-for-one with AuthoredBooleanNativeTests' eight working-frame selectors.
 void *Core3DDebugPhysicalWorkingFrameProbe(int32_t scenario);
+// B3 physical-working-scale production observations. Scenarios 0...7 map
+// one-for-one to the Portion 3 selectors in AuthoredBooleanNativeTests.
+void *Core3DDebugB3WorkingScaleProbe(int32_t scenario);
 void *Core3DDebugPhysicalWorkingFrameEmptyCentimetreDocumentSeed(void);
 void Core3DDebugWorkingScaleClear(void);
 void *Core3DDebugWorkingScaleTake(void);
