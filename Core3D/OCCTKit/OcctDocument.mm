@@ -1018,6 +1018,25 @@ bool SameFence(const core3d::retained_recipe::RevisionFence& first,
     }
     return true;
 }
+
+bool ContinuesBudget(
+    const core3d::retained_edge_treatment::ReplayBudget& admitted,
+    const core3d::retained_edge_treatment::ReplayBudget& continuation) noexcept {
+    namespace tb = core3d::retained_topology_budget;
+    if (!admitted.valid() || admitted.exhausted || !continuation.valid()
+        || continuation.exhausted || continuation.buildStages < admitted.buildStages
+        || continuation.topologyVisits < admitted.topologyVisits) return false;
+#if DEBUG
+    if (continuation.chargeEvents < admitted.chargeEvents) return false;
+    for (std::size_t index = 0;
+            index < static_cast<std::size_t>(tb::Site::Count); ++index) {
+        if (continuation.stagesBySite[index] < admitted.stagesBySite[index]
+            || continuation.visitsBySite[index] < admitted.visitsBySite[index])
+            return false;
+    }
+#endif
+    return true;
+}
 }
 
 // D253 native treatment history companion helpers: measured, bounded,
@@ -1571,9 +1590,31 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
             // Exact byte equality to that expectation stays binding, and the
             // candidate base/result are independently tied to it.
             if(!original.definition_){refusal=Refusal::IdentityMismatch;return Standard_False;}
-            SourceRebindRoles roles;SourceRebindResult expectation;
-            if(!CaptureSourceRebindRoles(original.base_,*original.definition_,original.definitionBytes_,stageBudget,refusal,roles)
-                ||!ApplySourceRebind(roles,rebuild->requested,built.base_,stageBudget,refusal,expectation))return Standard_False;
+            SourceRebindRoles capturedRoles;
+            const SourceRebindRoles* roles=&capturedRoles;
+            if(built.sourceRebindProof_){
+                const auto& proof=built.sourceRebindProof_;
+                const auto operation=proof->operation_.lock();
+                if(!operation||operation->sourceRebindProof_!=proof
+                    ||operation->snapshot_.get()!=&original
+                    ||proof->snapshot_.get()!=&original||!proof->roles_
+                    ||!proof->ownerLabel_.IsEqual(original.ownerLabel_)
+                    ||!proof->sourceLabel_.IsEqual(original.sourceLabel_)
+                    ||proof->nonce_!=original.nonce_
+                    ||!SameFence(proof->fence_,original.owner_.fence)
+                    ||proof->sourceBytes_!=original.sourceBytes_
+                    ||proof->treatmentBytes_!=original.definitionBytes_
+                    ||proof->roles_->originalBytes!=original.definitionBytes_
+                    ||!ContinuesBudget(proof->admittedBudget_,stageBudget)){
+                    refusal=Refusal::IdentityMismatch;return Standard_False;
+                }
+                roles=proof->roles_.get();
+            }else if(!CaptureSourceRebindRoles(original.base_,*original.definition_,
+                    original.definitionBytes_,stageBudget,refusal,capturedRoles)){
+                return Standard_False;
+            }
+            SourceRebindResult expectation;
+            if(!ApplySourceRebind(*roles,rebuild->requested,built.base_,stageBudget,refusal,expectation))return Standard_False;
             if(expectation.bytes!=built.definitionBytes_){
                 refusal=Refusal::ReplayMismatch;return Standard_False;
             }

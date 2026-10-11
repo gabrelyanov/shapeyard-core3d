@@ -28,12 +28,31 @@ using Edit=std::variant<Append,SetAmount,ReplaceTargets,Remove,RebuildSource,Set
 // semantics are inherited unchanged; the base adds validation-first
 // arithmetic, sticky refusal and the DEBUG per-site trace.
 struct ReplayBudget : retained_topology_budget::Counter {};
+struct SourceRebindRoles;
 class Snapshot final {friend class ::OcctDocument;friend class core3d::Core3DViewer;friend class core3d::OrdinaryEditController;TDF_Label ownerLabel_,sourceLabel_;std::string sourceIdentifier_;retained_recipe::OwnerSnapshot owner_;BaseRecipe source_;Definition seed_;std::optional<Definition> definition_;std::vector<std::uint8_t> sourceBytes_,definitionBytes_;TopoDS_Shape base_,current_;std::uint64_t nonce_=0,presentationRevision_=0;ReplayBudget chargedBudget_;public:const retained_recipe::OwnerSnapshot& owner()const noexcept{return owner_;}const BaseRecipe& source()const noexcept{return source_;}const Definition& effectiveDefinition()const noexcept{return definition_?*definition_:seed_;}const std::optional<Definition>& definition()const noexcept{return definition_;}const std::vector<std::uint8_t>& canonicalBytes()const noexcept{return definitionBytes_;}bool current()const noexcept{return owner_.status==retained_recipe::OwnerStatus::CurrentEditable&&!current_.IsNull();}double dimensionMetersPerUnit()const noexcept{return seed_.base.metersPerLocalUnit;}};
 // Native-only two-phase authority for a complete ordinary Profile rebuild.
 // Capture binds the exact current source and frozen provenance before detached
 // work; Result binds that capture to the actual built base/result and the one
 // operation's existing replay debt. Neither type has a public constructor.
+class CompleteProfileRebuildCapture;
+// Owner-issued authority for reusing one successful, already charged capture
+// of the exact old-source roles. Only the immutable shared instance crosses
+// the detached lane; value-only roles are not themselves commit authority.
+class SourceRebindProof final {
+    friend class ::OcctDocument;
+    friend class core3d::Core3DViewer;
+    std::weak_ptr<const CompleteProfileRebuildCapture> operation_;
+    std::shared_ptr<const Snapshot> snapshot_;
+    std::shared_ptr<const SourceRebindRoles> roles_;
+    TDF_Label ownerLabel_, sourceLabel_;
+    retained_recipe::RevisionFence fence_;
+    std::uint64_t nonce_ = 0;
+    std::vector<std::uint8_t> sourceBytes_, treatmentBytes_;
+    ReplayBudget admittedBudget_;
+    SourceRebindProof() = default;
+};
 class CompleteProfileRebuildCapture final {
+    friend class ::OcctDocument;
     friend class core3d::Core3DViewer;
     friend class core3d::OrdinaryEditController;
     std::shared_ptr<const Snapshot> snapshot_;
@@ -41,6 +60,7 @@ class CompleteProfileRebuildCapture final {
     std::vector<double> capturedValues_, requestedValues_;
     std::uint64_t nonce_ = 0;
     ReplayBudget chargedBudget_;
+    std::shared_ptr<const SourceRebindProof> sourceRebindProof_;
     CompleteProfileRebuildCapture() = default;
 };
 class CompleteProfileRebuildResult final {
@@ -75,7 +95,7 @@ class SelectorAppendValues final {
 };
 class DetachedInput final {friend class core3d::Core3DViewer;std::shared_ptr<const Snapshot> snapshot_;std::shared_ptr<const SelectorAppendValues> selectorAppend_;Edit edit_;Definition candidate_;BaseRecipe source_;std::uint64_t nonce_=0;TopoDS_Shape base_;ReplayBudget chargedBudget_;std::shared_ptr<std::atomic_bool> cancelled_;};
 struct StepProof {UUID feature{};Digest input{},output{};double inputVolumeMM3=0,outputVolumeMM3=0,expectedRemovedMM3=0;std::vector<UUID> consumedKeys;};
-class DetachedResult final {friend class core3d::Core3DViewer;friend class ::OcctDocument;std::uint64_t nonce_=0;Digest editDigest_{};BaseRecipe source_;Definition definition_;std::vector<std::uint8_t> definitionBytes_;TopoDS_Shape base_,result_;std::vector<StepProof> proofs_;ReplayBudget budget_;std::shared_ptr<const SelectorAppendValues> selectorAppend_;public:const TopoDS_Shape& result()const noexcept{return result_;}const Definition& definition()const noexcept{return definition_;}};
+class DetachedResult final {friend class core3d::Core3DViewer;friend class ::OcctDocument;std::uint64_t nonce_=0;Digest editDigest_{};BaseRecipe source_;Definition definition_;std::vector<std::uint8_t> definitionBytes_;TopoDS_Shape base_,result_;std::vector<StepProof> proofs_;ReplayBudget budget_;std::shared_ptr<const SelectorAppendValues> selectorAppend_;std::shared_ptr<const SourceRebindProof> sourceRebindProof_;public:const TopoDS_Shape& result()const noexcept{return result_;}const Definition& definition()const noexcept{return definition_;}};
 class Work final {friend class core3d::Core3DViewer;public:enum class State{Fresh,Prepared,Building,Ready,Committing,Settled};private:std::shared_ptr<const Snapshot> snapshot_;std::shared_ptr<const SelectorAppendValues> selectorAppend_;Edit edit_;Definition candidate_;TDF_Label label_;Handle(AIS_Shape)presentation_;std::shared_ptr<std::atomic_bool> cancelled_=std::make_shared<std::atomic_bool>(false);State state_=State::Fresh;};
 enum class CommitOutcome {Committed,Unchanged,Refused,Cancelled,Busy,OutcomeUnknown};
 struct CommitResult {CommitOutcome outcome=CommitOutcome::Refused;Refusal refusal=Refusal::StageFailed;std::optional<std::int64_t> measuredUndoDelta=0;std::vector<UUID> replayedFeatures;};

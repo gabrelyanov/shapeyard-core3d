@@ -4409,6 +4409,8 @@ struct ProfileSolidGeometry : ProfileDefinition {
     retained_edge_treatment::ReplayBudget treatmentBudget;
     // D253 source-edit rebind inputs: main-thread verified value data only.
     std::optional<retained_edge_treatment::SourceRebindRoles> treatmentRebind;
+    std::shared_ptr<const retained_edge_treatment::SourceRebindRoles> treatmentRebindRoles;
+    std::shared_ptr<const retained_edge_treatment::SourceRebindProof> treatmentRebindProof;
     std::optional<retained_edge_treatment::BaseRecipe> treatmentRebuildSource;
     // D369/O6b: non-owning pointer to the enclosing operation's shared replay
     // budget, set only when this build runs inside a budgeted operation (the
@@ -4688,7 +4690,7 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
                 solid = TopoDS::Solid(fixedPoint);
             }
         }
-        if(geometry->treatmentRebind&&geometry->treatmentRebuildSource){geometry->treatmentBase=solid;retained_edge_treatment::SourceRebindResult rebound;retained_edge_treatment::Refusal refusal=retained_edge_treatment::Refusal::BuildFailed;if(!retained_edge_treatment::ApplySourceRebind(*geometry->treatmentRebind,*geometry->treatmentRebuildSource,solid,geometry->treatmentBudget,refusal,rebound))return false;geometry->treatmentDefinition=rebound.definition;geometry->treatmentProofs=rebound.proofs;solid=TopoDS::Solid(rebound.treated);}
+        if(geometry->treatmentRebind&&geometry->treatmentRebuildSource){geometry->treatmentBase=solid;retained_edge_treatment::SourceRebindResult rebound;retained_edge_treatment::Refusal refusal=retained_edge_treatment::Refusal::BuildFailed;const auto& roles=geometry->treatmentRebindRoles?*geometry->treatmentRebindRoles:*geometry->treatmentRebind;if(!retained_edge_treatment::ApplySourceRebind(roles,*geometry->treatmentRebuildSource,solid,geometry->treatmentBudget,refusal,rebound))return false;geometry->treatmentDefinition=rebound.definition;geometry->treatmentProofs=rebound.proofs;solid=TopoDS::Solid(rebound.treated);}
         Bnd_Box bounds;
         if (!kernelStage() || !chargeShape(solid)) return false;
         BRepBndLib::AddOptimal(solid, bounds, Standard_False, Standard_False);
@@ -6536,15 +6538,30 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCompleteProfileRebuild(
             translated, *profileSolidGeometry(work));
         if (original.edgeTreatment->definition_) {
             namespace et = retained_edge_treatment;
-            et::SourceRebindRoles roles;
+            auto roles = std::shared_ptr<et::SourceRebindRoles>(new et::SourceRebindRoles);
             et::ReplayBudget rebindBudget = original.edgeTreatment->chargedBudget_;
             et::Refusal rebindRefusal = et::Refusal::ReplayMismatch;
             if (!et::CaptureSourceRebindRoles(original.edgeTreatment->base_,
                     *original.edgeTreatment->definition_,
                     original.edgeTreatment->definitionBytes_, rebindBudget,
-                    rebindRefusal, roles)) return {};
+                    rebindRefusal, *roles)) return {};
+            auto proof = std::shared_ptr<et::SourceRebindProof>(new et::SourceRebindProof);
+            proof->operation_ = capture;
+            proof->snapshot_ = original.edgeTreatment;
+            proof->roles_ = roles;
+            proof->ownerLabel_ = original.edgeTreatment->ownerLabel_;
+            proof->sourceLabel_ = original.edgeTreatment->sourceLabel_;
+            proof->fence_ = original.edgeTreatment->owner_.fence;
+            proof->nonce_ = original.edgeTreatment->nonce_;
+            proof->sourceBytes_ = original.edgeTreatment->sourceBytes_;
+            proof->treatmentBytes_ = original.edgeTreatment->definitionBytes_;
+            proof->admittedBudget_ = rebindBudget;
+            capture->chargedBudget_ = rebindBudget;
+            capture->sourceRebindProof_ = proof;
             auto geometry = profileSolidGeometry(work);
-            geometry->treatmentRebind = std::move(roles);
+            geometry->treatmentRebind = *roles;
+            geometry->treatmentRebindRoles = roles;
+            geometry->treatmentRebindProof = std::move(proof);
             geometry->treatmentRebuildSource = translated;
             geometry->treatmentBudget = rebindBudget;
             work->edgeTreatmentSnapshot = original.edgeTreatment;
@@ -7507,7 +7524,7 @@ OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeS
                 auto treatment=std::shared_ptr<retained_edge_treatment::DetachedResult>(new retained_edge_treatment::DetachedResult);
                 treatment->nonce_=work->edgeTreatmentSnapshot->nonce_;treatment->source_=std::get<retained_edge_treatment::RebuildSource>(*work->edgeTreatmentEdit).requested;
                 if(const auto profileGeometry=std::get_if<std::shared_ptr<ProfileSolidGeometry>>(&work->geometry)){
-                    if(!*profileGeometry||!(*profileGeometry)->treatmentDefinition)return OrdinaryEditResult::Invalid;treatment->definition_=*(*profileGeometry)->treatmentDefinition;treatment->base_=(*profileGeometry)->treatmentBase;treatment->proofs_=(*profileGeometry)->treatmentProofs;treatment->budget_=(*profileGeometry)->treatmentBudget;
+                    if(!*profileGeometry||!(*profileGeometry)->treatmentDefinition)return OrdinaryEditResult::Invalid;treatment->definition_=*(*profileGeometry)->treatmentDefinition;treatment->base_=(*profileGeometry)->treatmentBase;treatment->proofs_=(*profileGeometry)->treatmentProofs;treatment->budget_=(*profileGeometry)->treatmentBudget;treatment->sourceRebindProof_=(*profileGeometry)->treatmentRebindProof;
                 }else if(const auto enclosureGeometry=std::get_if<std::shared_ptr<EnclosureSolidGeometry>>(&work->geometry)){
                     if(!*enclosureGeometry||!(*enclosureGeometry)->treatmentDefinition)return OrdinaryEditResult::Invalid;treatment->definition_=*(*enclosureGeometry)->treatmentDefinition;treatment->base_=(*enclosureGeometry)->treatmentBase;treatment->proofs_=(*enclosureGeometry)->treatmentProofs;treatment->budget_=(*enclosureGeometry)->treatmentBudget;
                 }else if(const auto loftGeometry=std::get_if<std::shared_ptr<LoftSolidGeometry>>(&work->geometry)){

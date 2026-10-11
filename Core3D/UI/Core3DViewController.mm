@@ -18906,6 +18906,7 @@ static bool Core3DPublishCommittedSpatialSweep(
                     case core3d::OrdinaryEditResult::Invalid: result = Core3DProfileConstructionResultRejected; break;
                     case core3d::OrdinaryEditResult::OutcomeUnknown: result = Core3DProfileConstructionResultRecoveryRequired; break;
                     case core3d::OrdinaryEditResult::RetryableFailure: result = Core3DProfileConstructionResultFailed; break;
+                    case core3d::OrdinaryEditResult::BudgetRefused: result = Core3DProfileConstructionResultRejected; break;
                 }
                 if(result!=Core3DProfileConstructionResultCommitted)CORE3D_CUT_NOTE("commit.ordinary-result");
 #if DEBUG
