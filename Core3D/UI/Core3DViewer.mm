@@ -137,6 +137,13 @@
 #endif
 
 namespace core3d {
+
+struct RawR2PreviewPresentation {
+    std::shared_ptr<retained_edge_treatment::r2::RawPreviewSession> session;
+    std::shared_ptr<retained_edge_treatment::r2::RawPreviewCandidate> candidate;
+    Handle(AIS_Shape) source, preview;
+    TDF_Label sourceLabel;
+};
 #if DEBUG
 extern "C" void Core3DDebugFramedLoftFixedPointSetMode(int mode) {
     retained_edge_treatment::r2::DebugFramedLoftFixedPointMode.store(
@@ -1858,7 +1865,8 @@ bool Core3DViewer::validateRawR2CandidateFence(
     namespace et=retained_edge_treatment;
     refusal=et::Refusal::StaleSnapshot;
     if(![NSThread isMainThread]||!targets||!targets->original_
-        ||!targets->objectModeBound_.load()||!canBeginCommittedEdit()
+        ||!targets->objectModeBound_.load()
+        ||!canBeginCommittedEditIgnoringRawR2Preview()
         ||myDoc.IsNull()||myContext.IsNull()||!width||!height
         ||targets->original_->ownerLabel_.IsNull()||!_shapeInteractor
         ||_shapeInteractor->getSelectionMode()!=ShapeSelectionMode::WholeShape
@@ -1883,12 +1891,27 @@ bool Core3DViewer::validateRawR2CandidateFence(
             ||original->owner_.fence.modelRevision!=identity.modelRevision
             ||!XCAFDoc_ShapeTool::GetShape(original->ownerLabel_).IsEqual(original->current_))
             return false;
-        myContext->InitSelected();if(!myContext->MoreSelected())return false;
-        const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
-        myContext->NextSelected();
-        if(myContext->MoreSelected()||selected.IsNull()||selected!=targets->presentation_
-            ||!myDoc->ShapeLabel(selected).IsEqual(original->ownerLabel_)
-            ||!selected->Shape().IsEqual(original->current_))return false;
+        const bool ownedPublication=_rawR2PreviewPresentation
+            &&_rawR2PreviewPresentation->session
+            &&_rawR2PreviewPresentation->session->targets_==targets
+            &&_rawR2PreviewPresentation->source==targets->presentation_;
+        myContext->InitSelected();
+        if(!myContext->MoreSelected()){
+            if(!ownedPublication)return false;
+            if(_rawR2PreviewPresentation->source.IsNull()
+                ||!_rawR2PreviewPresentation->sourceLabel
+                    .IsEqual(original->ownerLabel_)
+                ||!_rawR2PreviewPresentation->source->Shape()
+                    .IsEqual(original->current_))return false;
+        }else{
+            const auto selected=Handle(AIS_Shape)::DownCast(
+                myContext->SelectedInteractive());
+            myContext->NextSelected();
+            if(myContext->MoreSelected()||selected.IsNull()
+                ||selected!=targets->presentation_
+                ||!myDoc->ShapeLabel(selected).IsEqual(original->ownerLabel_)
+                ||!selected->Shape().IsEqual(original->current_))return false;
+        }
         refusal=et::Refusal::None;return true;
     }catch(...){refusal=et::Refusal::BuildFailed;return false;}
 }
@@ -2088,6 +2111,170 @@ bool Core3DViewer::cancelRawR2BevelPreview(
     const std::shared_ptr<retained_edge_treatment::r2::RawPreviewCandidate>& candidate)
     noexcept {
     return _rawR2BevelPreviewAdapter&&_rawR2BevelPreviewAdapter->cancel(candidate);
+}
+
+bool Core3DViewer::hasActiveRawR2BevelPreview() const noexcept {
+    return bool(_rawR2PreviewPresentation);
+}
+
+bool Core3DViewer::publishRawR2BevelPreview(
+    const std::shared_ptr<retained_edge_treatment::r2::RawPreviewCandidate>& candidate,
+    retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et=retained_edge_treatment;namespace r2=et::r2;
+    refusal=et::Refusal::StaleSnapshot;
+    if(![NSThread isMainThread]||!candidate||myContext.IsNull()||myDoc.IsNull())return false;
+    const auto session=candidate->session_.lock();if(!session)return false;
+    std::shared_ptr<const r2::DetachedResult> built;
+    {
+        std::lock_guard<std::mutex> lock(session->mutex_);
+        if(session->active_!=candidate||session->pending_
+            ||candidate->state_!=r2::RawPreviewCandidate::State::Ready
+            ||!candidate->result_||!candidate->work_)return false;
+        built=candidate->result_;
+    }
+    ObjectFrameIdentity identity;identity.entityIdentifier=session->entityIdentifier_;
+    identity.publicationSourceIdentifier=session->publicationSourceIdentifier_;
+    identity.documentGeneration=session->documentGeneration_;
+    identity.modelRevision=session->modelRevision_;
+    if(!validateRawR2CandidateFence(session->targets_,identity,
+        session->presentationRevision_,session->width_,session->height_,refusal))return false;
+    try{
+        OCC_CATCH_SIGNALS
+        const Handle(AIS_Shape) source=candidate->work_->presentation_;
+        const TDF_Label sourceLabel=candidate->work_->label_;
+        if(source.IsNull()||sourceLabel.IsNull()||built->result_.IsNull())return false;
+        const Handle(AIS_Shape) preview=new AIS_Shape(built->result_);
+        preview->SetLocalTransformation(source->LocalTransformation());
+        const auto previous=_rawR2PreviewPresentation;
+        myDoc->LoadObjectMeterial(sourceLabel,preview);
+        myContext->Display(preview,AIS_Shaded,0,Standard_False);
+        myContext->Deactivate(preview);
+        if(!previous)myContext->Remove(source,Standard_False);
+        myContext->ClearSelected(Standard_False);
+        myContext->UpdateCurrentViewer();
+        const auto overlay=_sceneSnapshotBuilder.PublishChamferPreviewOverlay(
+            myDoc,{preview},{sourceLabel});
+        if(!overlay){myContext->Remove(preview,Standard_False);
+            if(!previous)myContext->Display(source,AIS_Shaded,0,Standard_False);
+            myContext->UpdateCurrentViewer();refusal=et::Refusal::BuildFailed;return false;}
+        if(previous){
+            if(previous->session!=session)return false;
+            if(!previous->preview.IsNull())
+                myContext->Remove(previous->preview,Standard_False);
+        }
+        myContext->UpdateCurrentViewer();
+        auto publication=std::make_shared<RawR2PreviewPresentation>();
+        publication->session=session;publication->candidate=candidate;
+        publication->source=source;publication->preview=preview;
+        publication->sourceLabel=sourceLabel;
+        _rawR2PreviewPresentation=std::move(publication);
+        refusal=et::Refusal::None;return true;
+    }catch(...){refusal=et::Refusal::BuildFailed;return false;}
+}
+
+bool Core3DViewer::acknowledgeRawR2BevelPreviewRevision(
+    const std::shared_ptr<retained_edge_treatment::r2::RawPreviewSession>& session,
+    std::uint64_t revision) noexcept {
+    if(![NSThread isMainThread]||!session||!revision
+        ||!_rawR2PreviewPresentation
+        ||_rawR2PreviewPresentation->session!=session)return false;
+    std::lock_guard<std::mutex> lock(session->mutex_);
+    session->presentationRevision_=revision;return true;
+}
+
+bool Core3DViewer::restoreRawR2PreviewSource(
+    const std::shared_ptr<RawR2PreviewPresentation>& presentation) noexcept {
+    if(!presentation||presentation->source.IsNull()||myContext.IsNull()
+        ||myDoc.IsNull()||_objectInteractor==nullptr)return false;
+    try{
+        OCC_CATCH_SIGNALS
+        myContext->Display(presentation->source,AIS_Shaded,0,Standard_False);
+        myContext->ClearSelected(Standard_False);
+        const Handle(SelectMgr_EntityOwner) owner=
+            presentation->source->GlobalSelOwner();
+        const auto brepOwner=Handle(StdSelect_BRepOwner)::DownCast(owner);
+        if(owner.IsNull()||owner->Selectable()!=presentation->source
+            ||brepOwner.IsNull()||!brepOwner->HasShape()
+            ||!brepOwner->Shape().IsEqual(presentation->source->Shape()))return false;
+        myContext->SetSelected(owner,Standard_False);myContext->InitSelected();
+        if(!myContext->MoreSelected()||myContext->SelectedOwner()!=owner
+            ||myContext->SelectedInteractive()!=presentation->source)return false;
+        myContext->NextSelected();if(myContext->MoreSelected())return false;
+        myContext->UpdateCurrentViewer();return true;
+    }catch(...){return false;}
+}
+
+bool Core3DViewer::cancelRawR2BevelPreviewSession(
+    const std::shared_ptr<retained_edge_treatment::r2::RawPreviewSession>& session)
+    noexcept {
+    namespace r2=retained_edge_treatment::r2;
+    if(![NSThread isMainThread]||!session)return false;
+    try{
+        OCC_CATCH_SIGNALS
+        {
+            std::lock_guard<std::mutex> lock(session->mutex_);
+            for(const auto& candidate:{session->active_,session->pending_}){
+                if(!candidate)continue;
+                candidate->state_=r2::RawPreviewCandidate::State::Cancelled;
+                if(candidate->work_)cancelEdgeTreatmentR2(candidate->work_);
+            }
+            session->active_.reset();session->pending_.reset();
+        }
+        if(_rawR2PreviewPresentation
+            &&_rawR2PreviewPresentation->session==session){
+            if(myContext.IsNull())return false;
+            if(!_rawR2PreviewPresentation->preview.IsNull())
+                myContext->Remove(_rawR2PreviewPresentation->preview,Standard_False);
+            if(!restoreRawR2PreviewSource(_rawR2PreviewPresentation))return false;
+            _rawR2PreviewPresentation.reset();
+        }
+        return true;
+    }catch(...){return false;}
+}
+
+bool Core3DViewer::cancelActiveRawR2BevelPreview() noexcept {
+    const auto publication=_rawR2PreviewPresentation;
+    return !publication
+        ||cancelRawR2BevelPreviewSession(publication->session);
+}
+
+retained_edge_treatment::CommitResult Core3DViewer::commitRawR2BevelPreview(
+    const std::shared_ptr<retained_edge_treatment::r2::RawPreviewSession>& session,
+    const std::shared_ptr<retained_edge_treatment::r2::RawPreviewCandidate>& candidate)
+    noexcept {
+    namespace et=retained_edge_treatment;namespace r2=et::r2;et::CommitResult answer;
+    answer.refusal=et::Refusal::StaleSnapshot;
+    if(![NSThread isMainThread]||!session||!candidate
+        ||!_rawR2PreviewPresentation
+        ||_rawR2PreviewPresentation->session!=session
+        ||_rawR2PreviewPresentation->candidate!=candidate)return answer;
+    ObjectFrameIdentity identity;identity.entityIdentifier=session->entityIdentifier_;
+    identity.publicationSourceIdentifier=session->publicationSourceIdentifier_;
+    identity.documentGeneration=session->documentGeneration_;
+    identity.modelRevision=session->modelRevision_;
+    if(!validateRawR2CandidateFence(session->targets_,identity,
+        session->presentationRevision_,session->width_,session->height_,answer.refusal))
+        return answer;
+    std::shared_ptr<r2::Work> work;std::shared_ptr<const r2::DetachedResult> result;
+    {
+        std::lock_guard<std::mutex> lock(session->mutex_);
+        if(session->active_!=candidate||session->pending_
+            ||candidate->state_!=r2::RawPreviewCandidate::State::Ready
+            ||!candidate->work_||!candidate->result_)return answer;
+        work=candidate->work_;result=candidate->result_;
+        candidate->state_=r2::RawPreviewCandidate::State::Superseded;
+        session->active_.reset();
+    }
+    try{
+        OCC_CATCH_SIGNALS
+        if(!_rawR2PreviewPresentation->preview.IsNull())
+            myContext->Remove(_rawR2PreviewPresentation->preview,Standard_False);
+        if(!restoreRawR2PreviewSource(_rawR2PreviewPresentation)){
+            answer.refusal=et::Refusal::StageFailed;return answer;
+        }
+        _rawR2PreviewPresentation.reset();
+    }catch(...){answer.refusal=et::Refusal::StageFailed;return answer;}
+    return commitEdgeTreatmentR2(work,result);
 }
 
 std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTreatmentEditR2(
@@ -3974,6 +4161,10 @@ void Core3DViewer::release() noexcept {
     // Retire pre-commit source authority on main before graphics teardown.
     (void)discardSavedCutSourceEdit(_savedCutSourceEditWork.lock());
     (void)discardSavedProgramSourceEdit(_savedProgramSourceEditWork.lock());
+    if (_rawR2PreviewPresentation) {
+        (void)cancelRawR2BevelPreviewSession(
+            _rawR2PreviewPresentation->session);
+    }
     // Interactors retain the view, context, document, and manipulator graphics.
     // GLViewController calls this while the viewport EAGL context is current,
     // so release them before the base handles and before that context is
@@ -4198,6 +4389,14 @@ NativeHistoryTransition Core3DViewer::performHistory(NativeHistoryDirection dire
         || hasUnresolvedEdit()
         || (direction != NativeHistoryDirection::Undo
             && direction != NativeHistoryDirection::Redo)) return result;
+    if (_rawR2PreviewPresentation) {
+        const bool cancelled=cancelRawR2BevelPreviewSession(
+            _rawR2PreviewPresentation->session);
+        result.outcome=cancelled?NativeHistoryOutcome::PreviewCancelled
+                                :NativeHistoryOutcome::PreviewCancellationFailed;
+        result.refreshSelection=true;result.requestRender=true;
+        result.primaryInteractionCancelled=cancelled;return result;
+    }
     // Preview notifications may synchronously replace the interactors. Keep the
     // executing owners alive and stop before touching a replacement's state.
     const auto objectInteractor = _objectInteractor;
@@ -4715,6 +4914,11 @@ void Core3DViewer::observeNativePlanningInteraction() noexcept {
 }
 
 bool Core3DViewer::canBeginCommittedEdit() const noexcept {
+    return !_rawR2PreviewPresentation
+        && canBeginCommittedEditIgnoringRawR2Preview();
+}
+
+bool Core3DViewer::canBeginCommittedEditIgnoringRawR2Preview() const noexcept {
     try {
         if (_objectInteractor == nullptr || _shapeInteractor == nullptr
             || hasUnresolvedOrdinaryEdit()
@@ -10627,7 +10831,9 @@ struct QueuedAssetLoadWork {
 };
 
 std::shared_ptr<QueuedAssetLoadWork> Core3DViewer::beginQueuedAssetLoad() noexcept {
-    if (![NSThread isMainThread] || !canBeginCommittedEdit() || myContext.IsNull()
+    if (![NSThread isMainThread]
+        || !cancelActiveRawR2BevelPreview()
+        || !canBeginCommittedEdit() || myContext.IsNull()
         || _objectInteractor == nullptr || _objectInteractor->isManipulatorGestureActive()) return {};
     try {
         auto work = std::make_shared<QueuedAssetLoadWork>();
@@ -11957,6 +12163,13 @@ scene::OcctSceneSnapshotBuilder::OverlayPointer
 Core3DViewer::captureScenePresentationOverlay() noexcept {
     if (hasUnresolvedEdit()) {
         return {};
+    }
+    if (_rawR2PreviewPresentation
+        && !_rawR2PreviewPresentation->preview.IsNull()
+        && !_rawR2PreviewPresentation->sourceLabel.IsNull()) {
+        return _sceneSnapshotBuilder.PublishChamferPreviewOverlay(
+            myDoc,{_rawR2PreviewPresentation->preview},
+            {_rawR2PreviewPresentation->sourceLabel});
     }
     if (_shapeInteractor != nullptr
         && _shapeInteractor->hasActiveShell()) {

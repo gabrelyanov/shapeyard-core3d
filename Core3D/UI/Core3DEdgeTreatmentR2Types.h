@@ -27,6 +27,18 @@ typedef NS_ENUM(NSInteger, Core3DRetainedBooleanEditKindR2) {
     Core3DRetainedBooleanEditKindR2SetSelectorIntent = 7,
 };
 
+//! Typed state of the transient raw-R2 preview command. These values describe
+//! native command ownership only; Ready is not a saved document state.
+typedef NS_ENUM(NSInteger, Core3DEdgeTreatmentRawPreviewStatusR2) {
+    Core3DEdgeTreatmentRawPreviewStatusR2Refused = 0,
+    Core3DEdgeTreatmentRawPreviewStatusR2Open = 1,
+    Core3DEdgeTreatmentRawPreviewStatusR2Building = 2,
+    Core3DEdgeTreatmentRawPreviewStatusR2Ready = 3,
+    Core3DEdgeTreatmentRawPreviewStatusR2Cancelled = 4,
+    Core3DEdgeTreatmentRawPreviewStatusR2Committed = 5,
+    Core3DEdgeTreatmentRawPreviewStatusR2OutcomeUnknown = 6,
+};
+
 @interface Core3DRetainedBooleanRecipeLocatorR2 : NSObject
 @property(nonatomic,copy,readonly) NSString *documentIdentifier, *entityIdentifier,
     *definitionIdentifier, *nodeIdentifier, *sourceFeatureIdentifier;
@@ -158,6 +170,29 @@ typedef NS_ENUM(NSInteger, Core3DRetainedBooleanEditKindR2) {
 @property(nonatomic,strong,readonly,nullable) Core3DEdgeTreatmentSnapshotR2 *snapshot;
 @property(nonatomic,copy,readonly) NSArray<Core3DEdgeTreatmentAnchor *> *anchors;
 @property(nonatomic,copy,readonly) NSString *refusalCode, *refusalMessage;
+- (instancetype)init NS_UNAVAILABLE; + (instancetype)new NS_UNAVAILABLE;
+@end
+
+//! Opaque consume-once native preview authority. Callers may observe its
+//! current state but cannot construct, copy, or replace its native session.
+@interface Core3DEdgeTreatmentRawPreviewSessionR2 : NSObject
+@property(nonatomic,readonly) Core3DEdgeTreatmentRawPreviewStatusR2 status;
+@property(nonatomic,readonly) uint64_t generation;
+@property(nonatomic,readonly) Core3DEdgeTreatmentKind kind;
+@property(nonatomic,readonly) double amountMM;
+@property(nonatomic,copy,readonly) NSString *refusalCode, *refusalMessage;
+- (instancetype)init NS_UNAVAILABLE; + (instancetype)new NS_UNAVAILABLE;
+@end
+
+//! One settled response from open/update/Done/cancel. The native edge-
+//! treatment result is present only for a genuine ordinary commit outcome.
+@interface Core3DEdgeTreatmentRawPreviewResultR2 : NSObject
+@property(nonatomic,readonly) Core3DEdgeTreatmentRawPreviewStatusR2 status;
+@property(nonatomic,readonly) uint64_t generation;
+@property(nonatomic,readonly) Core3DEdgeTreatmentKind kind;
+@property(nonatomic,readonly) double amountMM;
+@property(nonatomic,copy,readonly) NSString *refusalCode, *refusalMessage;
+@property(nonatomic,strong,readonly,nullable) Core3DEdgeTreatmentResult *commitResult;
 - (instancetype)init NS_UNAVAILABLE; + (instancetype)new NS_UNAVAILABLE;
 @end
 

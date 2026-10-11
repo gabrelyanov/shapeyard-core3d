@@ -2224,6 +2224,27 @@ __attribute__((objc_subclassing_restricted))
     amountMM:(double)amountMM expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DEdgeTreatmentResult *))completion
     NS_SWIFT_NAME(beginEdgeTreatmentRawAppendR2(_:kind:amountMM:expected:completion:));
+//! Opens the consume-once transient raw-R2 command from a genuine selected-
+//! edge capture. The immediate append API above remains unchanged.
+- (Core3DEdgeTreatmentRawPreviewSessionR2 *)openEdgeTreatmentRawPreviewR2:
+    (Core3DEdgeTreatmentRawTargetCaptureR2 *)targets expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(openEdgeTreatmentRawPreviewR2(_:expected:));
+//! Builds and publishes one detached generation. Each operation settles its
+//! callback once; superseded or cancelled worker completions never publish.
+- (Core3DEdgeTreatmentOperation *)updateEdgeTreatmentRawPreviewR2:
+    (Core3DEdgeTreatmentRawPreviewSessionR2 *)session kind:(Core3DEdgeTreatmentKind)kind
+    amountMM:(double)amountMM expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DEdgeTreatmentRawPreviewResultR2 *))completion
+    NS_SWIFT_NAME(updateEdgeTreatmentRawPreviewR2(_:kind:amountMM:expected:completion:));
+//! Commits the exact latest native Ready generation through the ordinary edit
+//! lease. Duplicate Done and non-Ready sessions refuse without rebuilding.
+- (Core3DEdgeTreatmentOperation *)commitEdgeTreatmentRawPreviewR2:
+    (Core3DEdgeTreatmentRawPreviewSessionR2 *)session expected:(Core3DSceneSnapshot *)expected
+    completion:(void(^)(Core3DEdgeTreatmentRawPreviewResultR2 *))completion
+    NS_SWIFT_NAME(commitEdgeTreatmentRawPreviewR2(_:expected:completion:));
+- (Core3DEdgeTreatmentRawPreviewResultR2 *)cancelEdgeTreatmentRawPreviewR2:
+    (Core3DEdgeTreatmentRawPreviewSessionR2 *)session
+    NS_SWIFT_NAME(cancelEdgeTreatmentRawPreviewR2(_:));
 - (nullable Core3DRetainedBooleanMigrationCaptureR2 *)captureRetainedBooleanMigrationR2:
     (NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(captureRetainedBooleanMigrationR2(_:expected:));
