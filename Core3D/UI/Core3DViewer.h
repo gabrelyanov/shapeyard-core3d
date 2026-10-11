@@ -111,6 +111,36 @@ namespace core3d {
         std::size_t chargedVisits = 0;
         std::size_t chargedStages = 0;
     };
+    //! Immutable facts from the exact raw-R2 source-local membership
+    //! classifier. This carries no selected owner, shape, snapshot or target
+    //! authority back to its caller.
+    struct RawR2MembershipObservation {
+        bool available = false;
+        bool sourcePresentationBound = false;
+        bool foreignPresentationBound = false;
+        std::uint64_t documentGeneration = 0;
+        std::uint64_t modelRevision = 0;
+        std::uint64_t presentationRevision = 0;
+        std::size_t sourceTopologyIndex = 0;
+        std::size_t foreignSourceTopologyIndex = 0;
+        int memberMapIndex = 0;
+        bool memberExact = false;
+        retained_edge_treatment::Refusal memberRefusal =
+            retained_edge_treatment::Refusal::StaleSnapshot;
+        int reversedMapIndex = 0;
+        bool reversedExact = false;
+        retained_edge_treatment::Refusal reversedRefusal =
+            retained_edge_treatment::Refusal::StaleSnapshot;
+        int foreignMapIndex = 0;
+        bool foreignExact = false;
+        retained_edge_treatment::Refusal foreignRefusal =
+            retained_edge_treatment::Refusal::StaleSnapshot;
+        std::size_t topologyVisits = 0;
+        std::size_t buildStages = 0;
+        std::size_t site27Visits = 0;
+        std::size_t sourceEdgeCount = 0;
+        std::size_t foreignEdgeCount = 0;
+    };
 #endif
     struct AssemblyPartDefinition {
         profile::Parameters parameters;
@@ -394,6 +424,12 @@ namespace core3d {
     std::shared_ptr<const retained_edge_treatment::r2::RawTargetCapture>
     captureEdgeTreatmentRawTargetsR2(const ObjectFrameIdentity&, std::uint64_t,
         std::uint32_t, std::uint32_t, retained_edge_treatment::Refusal&) noexcept;
+#if DEBUG
+    RawR2MembershipObservation DebugObserveRawR2Membership(
+        const ObjectFrameIdentity&, const std::string& foreignEntityIdentifier,
+        Standard_Size edgeTopologyIndex, std::uint64_t presentationRevision,
+        std::uint32_t width, std::uint32_t height) noexcept;
+#endif
     Standard_Boolean returnEdgeTreatmentRawTargetsToObjectModeR2(
         const std::shared_ptr<const retained_edge_treatment::r2::RawTargetCapture>&)
         noexcept;

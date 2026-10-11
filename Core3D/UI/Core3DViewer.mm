@@ -145,6 +145,15 @@ void CopyTopologyBudget(Destination& destination, const Source& source) noexcept
     static_cast<tb::Counter&>(destination)=static_cast<const tb::Counter&>(source);
 }
 
+retained_edge_treatment::Refusal ClassifyRawR2ExactMember(
+    const TopTools_IndexedDataMapOfShapeListOfShape& adjacency,
+    const TopoDS_Shape& candidate, int& index, bool& exact) noexcept {
+    namespace et = retained_edge_treatment;
+    index = candidate.IsNull() ? 0 : adjacency.FindIndex(candidate);
+    exact = index > 0 && adjacency.FindKey(index).IsEqual(candidate);
+    return exact ? et::Refusal::None : et::Refusal::AnchorMissing;
+}
+
 retained_edge_treatment::UUID MintEdgeTreatmentUUID() noexcept {
     retained_edge_treatment::UUID id{};arc4random_buf(id.data(),id.size());
     id[6]=std::uint8_t((id[6]&0x0f)|0x40);id[8]=std::uint8_t((id[8]&0x3f)|0x80);return id;
@@ -1206,10 +1215,15 @@ Core3DViewer::captureEdgeTreatmentRawTargetsR2(const ObjectFrameIdentity& identi
         Handle(AIS_Shape) presentation;TDF_Label ownerLabel;
         myContext->InitSelected();if(!myContext->MoreSelected())return {};
         for(;myContext->MoreSelected();myContext->NextSelected()){
-            if(!myContext->HasSelectedShape())return {};
-            const TopoDS_Shape selectedShape=myContext->SelectedShape();
+            const Handle(SelectMgr_EntityOwner) selectedOwner=myContext->SelectedOwner();
+            const auto brepOwner=Handle(StdSelect_BRepOwner)::DownCast(selectedOwner);
             const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
-            if(selectedShape.ShapeType()!=TopAbs_EDGE||selected.IsNull())return {};
+            if(!myContext->HasSelectedShape()||selectedOwner.IsNull()
+                ||!selectedOwner->HasSelectable()||brepOwner.IsNull()
+                ||!brepOwner->IsSelected()||!brepOwner->HasShape()
+                ||brepOwner->Shape().ShapeType()!=TopAbs_EDGE||selected.IsNull()
+                ||selectedOwner->Selectable()!=selected||!myContext->IsDisplayed(selected)
+                ||!myDoc->IsPresentationEditable(selected))return {};
             const TDF_Label label=myDoc->ShapeLabel(selected);
             if(label.IsNull()){refusal=et::Refusal::MultipleOwners;return {};}
             if(presentation.IsNull()){presentation=selected;ownerLabel=label;}
@@ -1251,17 +1265,28 @@ Core3DViewer::captureEdgeTreatmentRawTargetsR2(const ObjectFrameIdentity& identi
         std::vector<et::Anchor> anchors;std::set<int> used;
         myContext->InitSelected();
         for(;myContext->MoreSelected();myContext->NextSelected()){
-            if(!myContext->HasSelectedShape()
-                ||Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive())!=presentation){
+            const Handle(SelectMgr_EntityOwner) selectedOwner=myContext->SelectedOwner();
+            const auto brepOwner=Handle(StdSelect_BRepOwner)::DownCast(selectedOwner);
+            const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+            if(!myContext->HasSelectedShape()||selectedOwner.IsNull()
+                ||!selectedOwner->HasSelectable()||brepOwner.IsNull()
+                ||!brepOwner->IsSelected()||!brepOwner->HasShape()
+                ||selected!=presentation||selectedOwner->Selectable()!=presentation
+                ||!myContext->IsDisplayed(presentation)
+                ||!myDoc->IsPresentationEditable(presentation)
+                ||!myDoc->ShapeLabel(presentation).IsEqual(ownerLabel)
+                ||!presentation->Shape().IsEqual(state.shape)){
                 refusal=et::Refusal::MultipleOwners;return {};
             }
-            const TopoDS_Shape selectedShape=myContext->SelectedShape();
-            if(selectedShape.ShapeType()!=TopAbs_EDGE)return {};
+            const TopoDS_Shape ownedShape=brepOwner->Shape();
+            if(ownedShape.ShapeType()!=TopAbs_EDGE)return {};
             if(!budget.visit(1,tb::Site::C27CapturedAnchor)){
                 refusal=et::Refusal::Budget;return {};
             }
-            const TopoDS_Edge edge=TopoDS::Edge(selectedShape);const int index=adjacency.FindIndex(edge);
-            if(index<=0){refusal=et::Refusal::AnchorMissing;return {};}
+            int index=0;bool exact=false;
+            refusal=ClassifyRawR2ExactMember(adjacency,ownedShape,index,exact);
+            if(refusal!=et::Refusal::None)return {};
+            const TopoDS_Edge edge=TopoDS::Edge(adjacency.FindKey(index));
             if(!used.insert(index).second||adjacency.FindFromIndex(index).Extent()!=2){
                 refusal=et::Refusal::AnchorAmbiguous;return {};
             }
@@ -1318,6 +1343,114 @@ Core3DViewer::captureEdgeTreatmentRawTargetsR2(const ObjectFrameIdentity& identi
         refusal=et::Refusal::None;return capture;
     }catch(...){refusal=et::Refusal::BuildFailed;return {};}
 }
+
+#if DEBUG
+RawR2MembershipObservation Core3DViewer::DebugObserveRawR2Membership(
+    const ObjectFrameIdentity& identity,const std::string& foreignEntityIdentifier,
+    Standard_Size edgeTopologyIndex,std::uint64_t presentationRevision,
+    std::uint32_t width,std::uint32_t height) noexcept {
+    namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;
+    RawR2MembershipObservation result;
+    if(![NSThread isMainThread]||!canBeginCommittedEdit()||myDoc.IsNull()
+        ||myContext.IsNull()||identity.entityIdentifier.empty()
+        ||foreignEntityIdentifier.empty()
+        ||foreignEntityIdentifier==identity.entityIdentifier||!width||!height)return result;
+    try{
+        const auto sceneSnapshot=captureSceneSnapshot(width,height);
+        if(!sceneSnapshot
+            ||sceneSnapshot->publicationSourceIdentifier!=identity.publicationSourceIdentifier
+            ||sceneSnapshot->revisions.documentGeneration!=identity.documentGeneration
+            ||sceneSnapshot->revisions.model!=identity.modelRevision
+            ||sceneSnapshot->revisions.presentation!=presentationRevision)return result;
+
+        const auto findPresentation=[&](const std::string& entity,
+            Handle(AIS_Shape)& presentation,TDF_Label& label)->bool{
+            presentation.Nullify();label.Nullify();AIS_ListOfInteractive displayed;
+            myContext->DisplayedObjects(AIS_KOI_Shape,-1,displayed);
+            for(AIS_ListIteratorOfListOfInteractive item(displayed);item.More();item.Next()){
+                const auto candidate=Handle(AIS_Shape)::DownCast(item.Value());
+                if(candidate.IsNull())continue;
+                const TDF_Label candidateLabel=myDoc->ShapeLabel(candidate);
+                if(candidateLabel.IsNull()
+                    ||myDoc->EntityIdentifierForLabel(candidateLabel)!=entity)continue;
+                if(!presentation.IsNull()||candidate->Shape().IsNull()
+                    ||!myDoc->IsPresentationEditable(candidate))return false;
+                presentation=candidate;label=candidateLabel;
+            }
+            return !presentation.IsNull()&&!label.IsNull();
+        };
+        Handle(AIS_Shape) sourcePresentation,foreignPresentation;
+        TDF_Label sourceLabel,foreignLabel;
+        if(!findPresentation(identity.entityIdentifier,sourcePresentation,sourceLabel)
+            ||!findPresentation(foreignEntityIdentifier,foreignPresentation,foreignLabel))
+            return result;
+        OcctObjectTransformState sourceState,foreignState;
+        if(!myDoc->CaptureObjectTransformStateForLabel(sourceLabel,sourceState)
+            ||!myDoc->CaptureObjectTransformStateForLabel(foreignLabel,foreignState)
+            ||sourceState.entityIdentifier!=identity.entityIdentifier
+            ||foreignState.entityIdentifier!=foreignEntityIdentifier
+            ||sourceState.resolvedRepresentation!=OcctGeometryRepresentation::BRep
+            ||foreignState.resolvedRepresentation!=OcctGeometryRepresentation::BRep
+            ||!sourcePresentation->Shape().IsEqual(sourceState.shape)
+            ||!foreignPresentation->Shape().IsEqual(foreignState.shape))return result;
+
+        retained_recipe::RevisionFence fence;fence.documentGeneration=identity.documentGeneration;
+        fence.modelRevision=identity.modelRevision;fence.effectiveMetersPerUnit=1;
+        fence.ownerShape.fill(1);fence.ownerRecipe.fill(1);fence.ownerPlacement.fill(1);
+        fence.ownerMaterial.fill(1);retained_recipe::DependencyRead dependency;
+        dependency.locator.owner.document.fill(1);dependency.locator.owner.entity.fill(1);
+        dependency.locator.owner.definition.fill(1);dependency.locator.node.fill(1);
+        dependency.locator.sourceFeature.fill(1);dependency.geometry.fill(1);
+        dependency.recipe.fill(1);dependency.placement.fill(1);dependency.material.fill(1);
+        dependency.groups.fill(1);fence.dependencies.push_back(dependency);
+        et::Refusal snapshotRefusal=et::Refusal::StaleSnapshot;
+        auto original=myDoc->CaptureRetainedEdgeTreatmentR2(sourceLabel,fence,snapshotRefusal);
+        if(!original||!original->current()||!original->current_.IsEqual(sourceState.shape))
+            return result;
+
+        r2::ReplayBudget observationBudget;const std::atomic_bool cancelled{false};
+        tb::Census sourceCensus,foreignCensus;
+        if(tb::CensusTopology(original->current_,observationBudget,cancelled,sourceCensus,
+                tb::Site::C27CapturedAnchor,false)!=tb::WalkStatus::Completed
+            ||!observationBudget.visit(
+                sourceCensus.occurrences+sourceCensus.edgeUsesUnderFaces,
+                tb::Site::C27CapturedAnchor)
+            ||tb::CensusTopology(foreignState.shape,observationBudget,cancelled,foreignCensus,
+                tb::Site::C27CapturedAnchor,false)!=tb::WalkStatus::Completed
+            ||edgeTopologyIndex>=Standard_Size(sourceCensus.edges.Extent())
+            ||edgeTopologyIndex>=Standard_Size(foreignCensus.edges.Extent()))return result;
+        TopTools_IndexedDataMapOfShapeListOfShape adjacency;
+        TopExp::MapShapesAndAncestors(original->current_,TopAbs_EDGE,TopAbs_FACE,adjacency);
+        const TopoDS_Edge sourceEdge=TopoDS::Edge(
+            sourceCensus.edges.FindKey(Standard_Integer(edgeTopologyIndex+1)));
+        const TopoDS_Edge foreignEdge=TopoDS::Edge(
+            foreignCensus.edges.FindKey(Standard_Integer(edgeTopologyIndex+1)));
+        if(sourceEdge.IsNull()||foreignEdge.IsNull())return result;
+        const TopoDS_Edge reversedEdge=TopoDS::Edge(sourceEdge.Reversed());
+        if(!reversedEdge.IsSame(sourceEdge)||reversedEdge.IsEqual(sourceEdge))return result;
+
+        result.memberRefusal=ClassifyRawR2ExactMember(adjacency,sourceEdge,
+            result.memberMapIndex,result.memberExact);
+        result.reversedRefusal=ClassifyRawR2ExactMember(adjacency,reversedEdge,
+            result.reversedMapIndex,result.reversedExact);
+        result.foreignRefusal=ClassifyRawR2ExactMember(adjacency,foreignEdge,
+            result.foreignMapIndex,result.foreignExact);
+        result.sourcePresentationBound=true;result.foreignPresentationBound=true;
+        result.documentGeneration=identity.documentGeneration;
+        result.modelRevision=identity.modelRevision;
+        result.presentationRevision=presentationRevision;
+        result.sourceTopologyIndex=edgeTopologyIndex+1;
+        result.foreignSourceTopologyIndex=edgeTopologyIndex+1;
+        result.topologyVisits=observationBudget.topologyVisits;
+        result.buildStages=observationBudget.buildStages;
+        result.site27Visits=observationBudget.visitsBySite[
+            static_cast<std::size_t>(tb::Site::C27CapturedAnchor)];
+        result.sourceEdgeCount=Standard_Size(sourceCensus.edges.Extent());
+        result.foreignEdgeCount=Standard_Size(foreignCensus.edges.Extent());
+        result.available=true;return result;
+    }catch(...){return result;}
+}
+#endif
 
 Standard_Boolean Core3DViewer::returnEdgeTreatmentRawTargetsToObjectModeR2(
     const std::shared_ptr<const retained_edge_treatment::r2::RawTargetCapture>& targets)

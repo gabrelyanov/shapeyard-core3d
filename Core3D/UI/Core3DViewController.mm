@@ -13387,6 +13387,66 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
 		edgeTopologyIndex:edgeTopologyIndex];
 }
 
+#if DEBUG
+- (NSDictionary<NSString *, id> *)debugObserveRawR2MembershipWithEntityIdentifier:
+            (NSString *)entityIdentifier
+    foreignEntityIdentifier:(NSString *)foreignEntityIdentifier
+    edgeTopologyIndex:(NSUInteger)edgeTopologyIndex
+    expected:(Core3DSceneSnapshot *)expected {
+    namespace et=core3d::retained_edge_treatment;
+    NSMutableDictionary<NSString *,id> *facts=[@{
+        @"available":@NO,@"sourcePresentationBound":@NO,
+        @"foreignPresentationBound":@NO,@"documentGeneration":@0,
+        @"modelRevision":@0,@"presentationRevision":@0,
+        @"sourceTopologyIndex":@0,@"foreignSourceTopologyIndex":@0,
+        @"memberMapIndex":@0,@"memberExact":@NO,
+        @"memberRefusalCode":@"b1.StaleSnapshot",
+        @"reversedMapIndex":@0,@"reversedExact":@NO,
+        @"reversedRefusalCode":@"b1.StaleSnapshot",
+        @"foreignMapIndex":@0,@"foreignExact":@NO,
+        @"foreignRefusalCode":@"b1.StaleSnapshot",
+        @"topologyVisits":@0,@"buildStages":@0,@"site27Visits":@0,
+        @"sourceEdgeCount":@0,@"foreignEdgeCount":@0,
+        @"maximumTopologyVisits":@(b2tb::MaximumTopologyVisits),
+        @"maximumBuildStages":@(b2tb::MaximumBuildStages)
+    } mutableCopy];
+    if(!NSThread.isMainThread||!expected||entityIdentifier.length==0
+        ||foreignEntityIdentifier.length==0||!GLController.viewer)return [facts copy];
+    const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;
+    identity.entityIdentifier=entityIdentifier.UTF8String;
+    identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;
+    identity.documentGeneration=expected.revisions.documentGeneration;
+    identity.modelRevision=expected.revisions.modelRevision;
+    const auto observation=GLController.viewer->DebugObserveRawR2Membership(
+        identity,foreignEntityIdentifier.UTF8String,Standard_Size(edgeTopologyIndex),
+        expected.revisions.presentationRevision,std::uint32_t(size.width),
+        std::uint32_t(size.height));
+    facts[@"available"]=@(observation.available);
+    facts[@"sourcePresentationBound"]=@(observation.sourcePresentationBound);
+    facts[@"foreignPresentationBound"]=@(observation.foreignPresentationBound);
+    facts[@"documentGeneration"]=@(observation.documentGeneration);
+    facts[@"modelRevision"]=@(observation.modelRevision);
+    facts[@"presentationRevision"]=@(observation.presentationRevision);
+    facts[@"sourceTopologyIndex"]=@(observation.sourceTopologyIndex);
+    facts[@"foreignSourceTopologyIndex"]=@(observation.foreignSourceTopologyIndex);
+    facts[@"memberMapIndex"]=@(observation.memberMapIndex);
+    facts[@"memberExact"]=@(observation.memberExact);
+    facts[@"memberRefusalCode"]=@(et::RefusalCode(observation.memberRefusal));
+    facts[@"reversedMapIndex"]=@(observation.reversedMapIndex);
+    facts[@"reversedExact"]=@(observation.reversedExact);
+    facts[@"reversedRefusalCode"]=@(et::RefusalCode(observation.reversedRefusal));
+    facts[@"foreignMapIndex"]=@(observation.foreignMapIndex);
+    facts[@"foreignExact"]=@(observation.foreignExact);
+    facts[@"foreignRefusalCode"]=@(et::RefusalCode(observation.foreignRefusal));
+    facts[@"topologyVisits"]=@(observation.topologyVisits);
+    facts[@"buildStages"]=@(observation.buildStages);
+    facts[@"site27Visits"]=@(observation.site27Visits);
+    facts[@"sourceEdgeCount"]=@(observation.sourceEdgeCount);
+    facts[@"foreignEdgeCount"]=@(observation.foreignEdgeCount);
+    return [facts copy];
+}
+#endif
+
 - (Core3DSelectionTypeChangeResult)
     debugTrySetNativeSelectionTypeWithoutPublicSync:
         (PrimitiveSelectionType)mode {

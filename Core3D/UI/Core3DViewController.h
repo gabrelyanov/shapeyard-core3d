@@ -2061,6 +2061,14 @@ __attribute__((objc_subclassing_restricted))
 	foreignEntityIdentifier:(NSString *)foreignEntityIdentifier
 	edgeTopologyIndex:(NSUInteger)edgeTopologyIndex
 	NS_SWIFT_NAME(debugSelectValidAndForeignEdgeOwners(entityIdentifier:foreignEntityIdentifier:edgeTopologyIndex:));
+//! Facts-only observation of the exact production raw-R2 membership
+//! classifier. It returns no shape, selection, snapshot, target or key.
+- (NSDictionary<NSString *, id> *)debugObserveRawR2MembershipWithEntityIdentifier:
+            (NSString *)entityIdentifier
+    foreignEntityIdentifier:(NSString *)foreignEntityIdentifier
+    edgeTopologyIndex:(NSUInteger)edgeTopologyIndex
+    expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(debugObserveRawR2Membership(entityIdentifier:foreignEntityIdentifier:edgeTopologyIndex:expected:));
 //! Change only the native picker mode, deliberately leaving the public cached
 //! mode untouched. This proves shared tools fail closed when two individually
 //! legal modes disagree about the active selection authority.
