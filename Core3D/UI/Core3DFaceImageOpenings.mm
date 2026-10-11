@@ -3706,6 +3706,106 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
     }
 }
 
+- (NSDictionary<NSString *,id> *)debugE4PersistenceForEntityIdentifier:
+    (NSString *)entityIdentifier
+    scenario:(core3d::painted_atlas_bake::owner::DebugPersistenceScenario)scenario {
+    namespace pb = core3d::painted_atlas_bake;
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128) return nil;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        OwnerKey key;
+        TDF_Label owner;
+        const char *raw = entityIdentifier.UTF8String;
+        if (wrapper.IsNull()
+            || !LabelForSelected(wrapper, raw ? raw : "", key, owner))
+            return nil;
+        const Handle(TDocStd_Document)& document = wrapper->Document();
+        std::vector<core3d::asset_atlas::persistence::Record> atlases;
+        if (document.IsNull() || document->HasOpenCommand()
+            || !core3d::asset_atlas::persistence::ReadAll(document, atlases))
+            return nil;
+        const core3d::asset_atlas::Key *atlasKey = nullptr;
+        for (const auto& record : atlases) {
+            if (!record.value) return nil;
+            for (const auto& member : record.value->definition.members) {
+                if (!(member.owner == key)) continue;
+                if (atlasKey) return nil;
+                atlasKey = &record.value->definition.key;
+            }
+        }
+        if (!atlasKey) return nil;
+        const auto evidence = pb::owner::DebugExerciseE4Persistence(
+            document, *atlasKey, scenario);
+        NSString *fixture = @"E4S3gPersistenceTransfer";
+        if (scenario == pb::owner::DebugPersistenceScenario::AggregateRefusal)
+            fixture = @"E4S3gPersistenceAggregateRefusal";
+        else if (scenario == pb::owner::DebugPersistenceScenario::Settlement)
+            fixture = @"E4S3gPersistenceSettlement";
+        return @{
+            @"fixture": fixture,
+            @"prepared": @(evidence.prepared),
+            @"committed": @(evidence.committed),
+            @"commandCommitted": @(evidence.commandCommitted),
+            @"faceImageTransferred": @(evidence.faceImageTransferred),
+            @"paintedBakeTransferred": @(evidence.paintedBakeTransferred),
+            @"noTransferBeforeSuccess": @(evidence.noTransferBeforeSuccess),
+            @"exactResourceBytes": @(evidence.exactResourceBytes),
+            @"exactBakeBytes": @(evidence.exactBakeBytes),
+            @"exactTransientBytes": @(evidence.exactTransientBytes),
+            @"finalBalanceZero": @(evidence.finalBalanceZero),
+            @"contextControlDestroyed": @(evidence.contextControlDestroyed),
+            @"persistentReadback": @(evidence.persistentReadback),
+            @"unchangedAddsNoTransfer": @(evidence.unchangedAddsNoTransfer),
+            @"undoRestored": @(evidence.undoRestored),
+            @"redoRestored": @(evidence.redoRestored),
+            @"aggregateExceeded": @(evidence.aggregateExceeded),
+            @"aggregateFirstFailure": @(evidence.aggregateFirstFailure),
+            @"refusedBeforeWrites": @(evidence.refusedBeforeWrites),
+            @"noPartialArtifact": @(evidence.noPartialArtifact),
+            @"historyUnchanged": @(evidence.historyUnchanged),
+            @"manifestUnchanged": @(evidence.manifestUnchanged),
+            @"denialSitesSticky": @(evidence.denialSitesSticky),
+            @"transientSettled": @(evidence.transientSettled),
+            @"abortRestored": @(evidence.abortRestored),
+            @"cancelSettled": @(evidence.cancelSettled),
+            @"transferredNotDestroyed": @(evidence.transferredNotDestroyed),
+            @"aggregateBefore": @(evidence.aggregateBefore),
+            @"candidateDelta": @(evidence.candidateDelta),
+            @"aggregateLimit": @(evidence.aggregateLimit),
+            @"resourceBytes": @(evidence.resourceBytes),
+            @"bakeBytes": @(evidence.bakeBytes),
+            @"transientBytes": @(evidence.transientBytes),
+            @"transferEvents": @(evidence.transferEvents),
+            @"destructionEvents": @(evidence.destructionEvents),
+        };
+    } @catch (...) { return nil; }
+}
+
+- (NSDictionary<NSString *,id> *)debugE4PersistenceTransferForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    return [self debugE4PersistenceForEntityIdentifier:entityIdentifier
+        scenario:core3d::painted_atlas_bake::owner::DebugPersistenceScenario::Transfer];
+}
+
+- (NSDictionary<NSString *,id> *)debugE4PersistenceAggregateRefusalForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    return [self debugE4PersistenceForEntityIdentifier:entityIdentifier
+        scenario:core3d::painted_atlas_bake::owner::DebugPersistenceScenario::AggregateRefusal];
+}
+
+- (NSDictionary<NSString *,id> *)debugE4PersistenceSettlementForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    return [self debugE4PersistenceForEntityIdentifier:entityIdentifier
+        scenario:core3d::painted_atlas_bake::owner::DebugPersistenceScenario::Settlement];
+}
+
 - (NSDictionary<NSString *,id> *)debugE4ExportCurrentnessForEntityIdentifier:
     (NSString *)entityIdentifier {
     namespace pb = core3d::painted_atlas_bake;

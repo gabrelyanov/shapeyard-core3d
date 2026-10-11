@@ -669,6 +669,47 @@ struct DebugOrdinaryStagingEvidence final {
     bool noPersistenceEntry = false;
     bool historyUnchanged = false;
 };
+enum class DebugPersistenceScenario : std::uint8_t {
+    Transfer,
+    AggregateRefusal,
+    Settlement
+};
+struct DebugPersistenceEvidence final {
+    bool prepared = false;
+    bool committed = false;
+    bool commandCommitted = false;
+    bool faceImageTransferred = false;
+    bool paintedBakeTransferred = false;
+    bool noTransferBeforeSuccess = false;
+    bool exactResourceBytes = false;
+    bool exactBakeBytes = false;
+    bool exactTransientBytes = false;
+    bool finalBalanceZero = false;
+    bool contextControlDestroyed = false;
+    bool persistentReadback = false;
+    bool unchangedAddsNoTransfer = false;
+    bool undoRestored = false;
+    bool redoRestored = false;
+    bool aggregateExceeded = false;
+    bool aggregateFirstFailure = false;
+    bool refusedBeforeWrites = false;
+    bool noPartialArtifact = false;
+    bool historyUnchanged = false;
+    bool manifestUnchanged = false;
+    bool denialSitesSticky = false;
+    bool transientSettled = false;
+    bool abortRestored = false;
+    bool cancelSettled = false;
+    bool transferredNotDestroyed = false;
+    std::size_t aggregateBefore = 0;
+    std::size_t candidateDelta = 0;
+    std::size_t aggregateLimit = 0;
+    std::size_t resourceBytes = 0;
+    std::size_t bakeBytes = 0;
+    std::size_t transientBytes = 0;
+    std::size_t transferEvents = 0;
+    std::size_t destructionEvents = 0;
+};
 DebugCaptureReadEvidence DebugExerciseE4CaptureReadPreflight(
     const Handle(TDocStd_Document)& document,
     const asset_atlas::Key& key) noexcept;
@@ -678,6 +719,10 @@ DebugSourceStorageEvidence DebugExerciseE4SourceStorage(
 DebugOrdinaryStagingEvidence DebugExerciseE4OrdinaryStaging(
     const Handle(TDocStd_Document)& document,
     const asset_atlas::Key& key) noexcept;
+DebugPersistenceEvidence DebugExerciseE4Persistence(
+    const Handle(TDocStd_Document)& document,
+    const asset_atlas::Key& key,
+    DebugPersistenceScenario scenario) noexcept;
 void DebugDenyNextSourceVectorReservation() noexcept;
 std::array<std::size_t, 3> DebugTakeSourceVectorReservationObservation() noexcept;
 void DebugDenyNextCurrentnessReservation(

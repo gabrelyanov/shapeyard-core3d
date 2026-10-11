@@ -4379,7 +4379,10 @@ class OperationLedger final {
 public:
     using FailureSite = decal_layer::bake::accounting::FailureSite;
     using Job = decal_layer::bake::accounting::Job;
+    using OperationContext = decal_layer::bake::accounting::OperationContext;
+    using Receiver = decal_layer::bake::accounting::Receiver;
     using Retention = decal_layer::bake::accounting::Retention;
+    using Settlement = decal_layer::bake::accounting::Settlement;
     using StorageDimension =
         decal_layer::bake::accounting::StorageDimension;
     using View = decal_layer::bake::accounting::View;
@@ -4399,7 +4402,7 @@ public:
         return {this, &ReserveBridge, &ReleaseBridge,
             &CheckedProductBridge, &SealJobBridge, &ConsumeJobBridge,
             &RecheckBridge, &CancelBridge, &EnterAllocationBridge,
-            &AllocationFailureBridge};
+            &AllocationFailureBridge, &SettleBridge, &RefuseBridge};
     }
 
     bool bindTopology(retained_edge_treatment::ReplayBudget& topology,
@@ -4555,6 +4558,40 @@ public:
             (void)fail(site, FailureReason::AllocationFailure, 0, 0);
     }
 
+    void settle(StorageDimension dimension, std::size_t bytes,
+                Settlement disposition, Receiver receiver,
+                OperationContext context, FailureSite site) noexcept {
+        if (bytes == 0 || receiver == Receiver::None
+            || context == OperationContext::None) {
+            (void)fail(site, FailureReason::Invariant, bytes, 0);
+            return;
+        }
+        (void)dimension;
+#ifdef DEBUG
+        auto add = [&](std::size_t& value, std::size_t increment) {
+            if (increment > std::numeric_limits<std::size_t>::max() - value)
+                settlementOverflow_ = true;
+            else value += increment;
+        };
+        if (disposition == Settlement::Destruction) {
+            add(destructions_, 1);
+            add(destroyedBytes_, bytes);
+        } else if (receiver == Receiver::FaceImageDocumentAggregate) {
+            add(faceImageTransfers_, 1);
+            add(faceImageBytes_, bytes);
+        } else if (receiver == Receiver::PaintedBakeDefinitionOwner) {
+            add(paintedBakeTransfers_, 1);
+            add(paintedBakeBytes_, bytes);
+        }
+#else
+        (void)disposition;
+#endif
+    }
+
+    void refuse(FailureSite site) noexcept {
+        (void)fail(site, FailureReason::ExplicitRefusal, 0, 0);
+    }
+
     std::size_t live(StorageDimension dimension) const noexcept {
         const std::size_t index = storageIndex(dimension);
         return index < storage_.size() ? storage_[index].live : 0;
@@ -4574,6 +4611,27 @@ public:
         return index < allocationEntries_.size()
             ? allocationEntries_[index] : 0;
     }
+    std::size_t totalLive() const noexcept {
+        std::size_t result = 0;
+        for (const auto& state : storage_) result += state.live;
+        return result;
+    }
+#ifdef DEBUG
+    decal_layer::bake::accounting::DebugSettlementObservation
+    debugSettlementObservation() const noexcept {
+        decal_layer::bake::accounting::DebugSettlementObservation result;
+        result.faceImageTransfers = faceImageTransfers_;
+        result.paintedBakeTransfers = paintedBakeTransfers_;
+        result.destructions = destructions_;
+        result.faceImageBytes = faceImageBytes_;
+        result.paintedBakeBytes = paintedBakeBytes_;
+        result.destroyedBytes = destroyedBytes_;
+        result.finalLiveBytes = totalLive();
+        result.firstFailure = firstFailure_.site;
+        result.overflow = settlementOverflow_;
+        return result;
+    }
+#endif
 
 private:
     enum class FailureReason : std::uint8_t {
@@ -4589,6 +4647,7 @@ private:
         Topology,
         Cancelled,
         AllocationFailure,
+        ExplicitRefusal,
         Invariant
     };
     struct StorageState final {
@@ -4664,6 +4723,15 @@ private:
                                         FailureSite site) noexcept {
         static_cast<OperationLedger*>(owner)->allocationFailure(site);
     }
+    static void SettleBridge(void* owner, StorageDimension dimension,
+        std::size_t bytes, Settlement disposition, Receiver receiver,
+        OperationContext context, FailureSite site) noexcept {
+        static_cast<OperationLedger*>(owner)->settle(
+            dimension, bytes, disposition, receiver, context, site);
+    }
+    static void RefuseBridge(void* owner, FailureSite site) noexcept {
+        static_cast<OperationLedger*>(owner)->refuse(site);
+    }
 
     std::array<std::size_t, static_cast<std::size_t>(
         StorageDimension::Count)> storageLimits_{};
@@ -4677,12 +4745,55 @@ private:
     std::size_t cumulativeAdmittedWork_ = 0;
     std::size_t cumulativeWork_ = 0;
     bool failed_ = false;
+#ifdef DEBUG
+    std::size_t faceImageTransfers_ = 0;
+    std::size_t paintedBakeTransfers_ = 0;
+    std::size_t destructions_ = 0;
+    std::size_t faceImageBytes_ = 0;
+    std::size_t paintedBakeBytes_ = 0;
+    std::size_t destroyedBytes_ = 0;
+    bool settlementOverflow_ = false;
+#endif
 };
 
 } // namespace core3d::scene
 
 namespace core3d::decal_layer::bake::accounting {
 namespace {
+#ifdef DEBUG
+thread_local DebugSettlementObservation gDebugSettlementObservation;
+thread_local bool gDebugSettlementArmed = false;
+
+void AccumulateSettlement(
+    const DebugSettlementObservation& value) noexcept {
+    if (!gDebugSettlementArmed) return;
+    const auto add = [](std::size_t& target, std::size_t increment,
+                        bool& overflow) {
+        if (increment > std::numeric_limits<std::size_t>::max() - target)
+            overflow = true;
+        else target += increment;
+    };
+    add(gDebugSettlementObservation.faceImageTransfers,
+        value.faceImageTransfers, gDebugSettlementObservation.overflow);
+    add(gDebugSettlementObservation.paintedBakeTransfers,
+        value.paintedBakeTransfers, gDebugSettlementObservation.overflow);
+    add(gDebugSettlementObservation.destructions,
+        value.destructions, gDebugSettlementObservation.overflow);
+    add(gDebugSettlementObservation.faceImageBytes,
+        value.faceImageBytes, gDebugSettlementObservation.overflow);
+    add(gDebugSettlementObservation.paintedBakeBytes,
+        value.paintedBakeBytes, gDebugSettlementObservation.overflow);
+    add(gDebugSettlementObservation.destroyedBytes,
+        value.destroyedBytes, gDebugSettlementObservation.overflow);
+    gDebugSettlementObservation.finalLiveBytes = value.finalLiveBytes;
+    if (gDebugSettlementObservation.firstFailure == FailureSite::None)
+        gDebugSettlementObservation.firstFailure = value.firstFailure;
+    gDebugSettlementObservation.contextControlDestroyed =
+        value.contextControlDestroyed;
+    gDebugSettlementObservation.overflow =
+        gDebugSettlementObservation.overflow || value.overflow;
+}
+#endif
 struct OwnedOperationLedger final {
     std::atomic_size_t references{1};
     core3d::scene::OperationLedger ledger;
@@ -4701,10 +4812,34 @@ void RetainOperation(void* raw) noexcept
 void ReleaseOperation(void* raw) noexcept
 {
     auto* owner = static_cast<OwnedOperationLedger*>(raw);
-    if (owner->references.fetch_sub(1, std::memory_order_acq_rel) == 1)
+    if (owner->references.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        owner->ledger.release(StorageDimension::PrivateStorage,
+            sizeof(OwnedOperationLedger), Retention::Retained);
+#ifdef DEBUG
+        auto observation = owner->ledger.debugSettlementObservation();
+        observation.contextControlDestroyed = true;
+        AccumulateSettlement(observation);
+#endif
         delete owner;
+    }
 }
 } // namespace
+
+#ifdef DEBUG
+void DebugBeginSettlementObservation() noexcept
+{
+    gDebugSettlementObservation = {};
+    gDebugSettlementArmed = true;
+}
+
+DebugSettlementObservation DebugTakeSettlementObservation() noexcept
+{
+    DebugSettlementObservation result = gDebugSettlementObservation;
+    gDebugSettlementObservation = {};
+    gDebugSettlementArmed = false;
+    return result;
+}
+#endif
 
 Owner MakeOperationOwner() noexcept
 {

@@ -39,6 +39,13 @@ enum class StorageDimension : std::uint8_t {
     Count
 };
 enum class Retention : std::uint8_t { Scratch, Retained };
+enum class Settlement : std::uint8_t { Destruction, Transfer };
+enum class Receiver : std::uint8_t {
+    None,
+    FaceImageDocumentAggregate,
+    PaintedBakeDefinitionOwner
+};
+enum class OperationContext : std::uint8_t { None, OrdinaryPersistence };
 enum class Job : std::uint8_t {
     AtlasRoles,
     SourcePixels,
@@ -102,6 +109,13 @@ enum class FailureSite : std::uint8_t {
     CurrentCloneBindings,
     CurrentCloneResources,
     CurrentnessLease,
+    PersistenceAggregateRead,
+    PersistenceAggregateLimit,
+    PersistenceResourceLocal,
+    PersistenceResourcePayload,
+    PersistenceCanonicalValidation,
+    PersistenceBakeCandidate,
+    PersistenceBakeTransients,
     FaceImageValidationSource,
     FaceImageValidationDecoded,
     FaceImageValidationDecode,
@@ -133,11 +147,14 @@ struct View final {
     void (*cancel)(void*, FailureSite) noexcept = nullptr;
     bool (*enterAllocation)(void*, FailureSite) noexcept = nullptr;
     void (*allocationFailure)(void*, FailureSite) noexcept = nullptr;
+    void (*settle)(void*, StorageDimension, std::size_t, Settlement, Receiver,
+                   OperationContext, FailureSite) noexcept = nullptr;
+    void (*refuse)(void*, FailureSite) noexcept = nullptr;
 
     bool valid() const noexcept {
         return context && reserve && release && checkedProduct && sealJob
             && consumeJob && recheck && cancel && enterAllocation
-            && allocationFailure;
+            && allocationFailure && settle && refuse;
     }
     bool Reserve(StorageDimension dimension, std::size_t bytes,
                  Retention retention, FailureSite site) const noexcept {
@@ -174,6 +191,16 @@ struct View final {
     }
     void AllocationFailed(FailureSite site) const noexcept {
         if (valid()) allocationFailure(context, site);
+    }
+    void Settle(StorageDimension dimension, std::size_t bytes,
+                Settlement disposition, Receiver receiver,
+                OperationContext operationContext,
+                FailureSite site) const noexcept {
+        if (valid()) settle(context, dimension, bytes, disposition, receiver,
+                            operationContext, site);
+    }
+    void Refuse(FailureSite site) const noexcept {
+        if (valid()) refuse(context, site);
     }
 };
 
@@ -235,15 +262,23 @@ struct Ticket final {
     StorageDimension dimension = StorageDimension::PrivateStorage;
     std::size_t bytes = 0;
     Retention retention = Retention::Scratch;
+    Receiver receiver = Receiver::None;
+    OperationContext operationContext = OperationContext::None;
+    FailureSite settlementSite = FailureSite::None;
 
     Ticket() = default;
     Ticket(const Ticket&) = delete;
     Ticket& operator=(const Ticket&) = delete;
     Ticket(Ticket&& other) noexcept
         : view(other.view), dimension(other.dimension), bytes(other.bytes),
-          retention(other.retention) {
+          retention(other.retention), receiver(other.receiver),
+          operationContext(other.operationContext),
+          settlementSite(other.settlementSite) {
         other.view = {};
         other.bytes = 0;
+        other.receiver = Receiver::None;
+        other.operationContext = OperationContext::None;
+        other.settlementSite = FailureSite::None;
     }
     Ticket& operator=(Ticket&& other) noexcept {
         if (this != &other) {
@@ -252,8 +287,14 @@ struct Ticket final {
             dimension = other.dimension;
             bytes = other.bytes;
             retention = other.retention;
+            receiver = other.receiver;
+            operationContext = other.operationContext;
+            settlementSite = other.settlementSite;
             other.view = {};
             other.bytes = 0;
+            other.receiver = Receiver::None;
+            other.operationContext = OperationContext::None;
+            other.settlementSite = FailureSite::None;
         }
         return *this;
     }
@@ -282,13 +323,54 @@ struct Ticket final {
             && acquire(candidate, requestedDimension, count,
                        requestedRetention, site);
     }
-    void reset() noexcept {
-        if (bytes != 0)
-            view.Release(dimension, bytes, retention);
+    void classify(Receiver requestedReceiver, OperationContext context,
+                  FailureSite site) noexcept {
+        receiver = requestedReceiver;
+        operationContext = context;
+        settlementSite = site;
+    }
+    bool transfer() noexcept {
+        if (bytes == 0 || receiver == Receiver::None) return false;
+        view.Settle(dimension, bytes, Settlement::Transfer, receiver,
+                    operationContext, settlementSite);
+        view.Release(dimension, bytes, retention);
         view = {};
         bytes = 0;
+        receiver = Receiver::None;
+        operationContext = OperationContext::None;
+        settlementSite = FailureSite::None;
+        return true;
+    }
+    void reset() noexcept {
+        if (bytes != 0) {
+            if (receiver != Receiver::None)
+                view.Settle(dimension, bytes, Settlement::Destruction,
+                            receiver, operationContext, settlementSite);
+            view.Release(dimension, bytes, retention);
+        }
+        view = {};
+        bytes = 0;
+        receiver = Receiver::None;
+        operationContext = OperationContext::None;
+        settlementSite = FailureSite::None;
     }
 };
+#ifdef DEBUG
+struct DebugSettlementObservation final {
+    std::size_t faceImageTransfers = 0;
+    std::size_t paintedBakeTransfers = 0;
+    std::size_t destructions = 0;
+    std::size_t faceImageBytes = 0;
+    std::size_t paintedBakeBytes = 0;
+    std::size_t destroyedBytes = 0;
+    std::size_t finalLiveBytes = 0;
+    FailureSite firstFailure = FailureSite::None;
+    bool contextControlDestroyed = false;
+    bool overflow = false;
+};
+void DebugBeginSettlementObservation() noexcept;
+DebugSettlementObservation DebugTakeSettlementObservation() noexcept;
+#endif
 } // namespace accounting
 
 struct Raster final {

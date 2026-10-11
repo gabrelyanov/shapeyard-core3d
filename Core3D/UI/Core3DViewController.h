@@ -667,6 +667,21 @@ __attribute__((objc_subclassing_restricted))
 - (nullable NSDictionary<NSString *,id> *)
     debugE4ExportCurrentnessForEntityIdentifier:(NSString *)entityIdentifier
     NS_SWIFT_NAME(debugE4ExportCurrentness(entityIdentifier:));
+//! Exercises changed/unchanged persistence transfer, exact canonical sizing,
+//! document history and terminal operation-owner settlement.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4PersistenceTransferForEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugE4PersistenceTransfer(entityIdentifier:));
+//! Seeds valid padded PNG envelopes to the real aggregate limit and proves the
+//! ordinary Commit refuses before any atlas/resource/bake write.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4PersistenceAggregateRefusalForEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugE4PersistenceAggregateRefusal(entityIdentifier:));
+//! Drives each persistence reservation denial, explicit command abort, Cancel,
+//! and PB transient settlement in the executing ordinary owner context.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4PersistenceSettlementForEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugE4PersistenceSettlement(entityIdentifier:));
 //! Installs a real document-owned XCAF buffer texture on the ordinary atlas
 //! fixture, then traces the product CaptureSources storage reservations.
 - (nullable NSDictionary<NSString *,id> *)

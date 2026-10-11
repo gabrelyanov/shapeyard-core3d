@@ -258,6 +258,18 @@ thread_local std::size_t gDebugPersistenceEntries = 0;
 thread_local decal_layer::bake::accounting::FailureSite
     gDebugDenyCurrentnessSite =
         decal_layer::bake::accounting::FailureSite::None;
+thread_local decal_layer::bake::accounting::FailureSite
+    gDebugDenyPersistenceSite =
+        decal_layer::bake::accounting::FailureSite::None;
+struct DebugPersistenceTrace final {
+    std::size_t aggregateBefore = 0;
+    std::size_t resourceDelta = 0;
+    std::size_t bakeBytes = 0;
+    std::size_t transientBytes = 0;
+    std::size_t adoptionEntries = 0;
+    std::size_t persistenceEntries = 0;
+};
+thread_local DebugPersistenceTrace gDebugPersistenceTrace;
 
 std::size_t DebugSourceStorageIndex(
     decal_layer::bake::accounting::FailureSite site) noexcept {
@@ -353,6 +365,14 @@ bool AcquireOrdinaryStorage(
     decal_layer::bake::accounting::Retention retention,
     decal_layer::bake::accounting::FailureSite site) noexcept {
     if (bytes == 0) return true;
+#ifdef DEBUG
+    if (gDebugDenyPersistenceSite == site) {
+        gDebugDenyPersistenceSite =
+            decal_layer::bake::accounting::FailureSite::None;
+        operation.Refuse(site);
+        return false;
+    }
+#endif
     return ticket.acquire(operation, dimension, bytes, retention, site)
         && operation.EnterAllocation(site);
 }
@@ -1113,41 +1133,296 @@ bool HasAtlasOwnerMismatch(const Handle(TDocStd_Document)& document,
 // identities are deterministic role-bound digests recorded by SYEB/1; their
 // content fields remain exact PNG digests. Re-adopting identical bytes is a
 // no-op; the same identity with different bytes is ForeignResource.
+bool CheckedAdd(std::size_t& total, std::size_t value) noexcept {
+    if (value > std::numeric_limits<std::size_t>::max() - total) return false;
+    total += value;
+    return true;
+}
+
+bool ResourceEnvelopeForOutput(const kernel::Output& output,
+                               fi::ResourceEnvelope& envelope) {
+    envelope = {};
+    envelope.resource = UUIDFromDigest(output.descriptor.identity);
+    envelope.originalContent = output.descriptor.content;
+    envelope.workingContent = output.descriptor.content;
+    envelope.originalFormat = fi::ImageEncoding::PNG;
+    envelope.workingFormat = fi::ImageEncoding::PNG;
+    envelope.alpha = fi::AlphaInterpretation::Straight;
+    envelope.originalWidthTexels = output.descriptor.widthTexels;
+    envelope.originalHeightTexels = output.descriptor.heightTexels;
+    envelope.workingWidthTexels = output.descriptor.widthTexels;
+    envelope.workingHeightTexels = output.descriptor.heightTexels;
+    std::string provenance = "shapeyard:e2b-painted-bake.v1:";
+    provenance.push_back(char('a' + std::uint8_t(output.descriptor.role)));
+    std::vector<std::uint8_t> provenanceBytes(
+        provenance.begin(), provenance.end());
+    provenanceBytes.push_back(std::uint8_t(output.descriptor.role));
+    provenanceBytes.insert(provenanceBytes.end(),
+        output.descriptor.content.begin(), output.descriptor.content.end());
+    if (!fi::HashFaceImageBytes(provenanceBytes, envelope.provenance))
+        return false;
+    envelope.originalBytes = output.png;
+    envelope.workingBytes = output.png;
+    return true;
+}
+
+struct PersistenceCommitAdmission final {
+    static constexpr std::size_t MaximumResources = 8;
+    decal_layer::bake::accounting::Ticket aggregateTable;
+    decal_layer::bake::accounting::Ticket aggregateCanonical;
+    decal_layer::bake::accounting::Ticket resourceLocalPeak;
+    std::array<decal_layer::bake::accounting::Ticket,
+               MaximumResources> resourceTransfers;
+    decal_layer::bake::accounting::Ticket bakeTransfer;
+    decal_layer::bake::accounting::Ticket bakeTransients;
+    std::array<bool, MaximumResources> resourceIsNew{};
+    std::size_t aggregateBefore = 0;
+    std::size_t resourceDelta = 0;
+    std::size_t bakeBytes = 0;
+    std::size_t transientBytes = 0;
+    std::size_t resourceCount = 0;
+};
+
+Outcome PreflightPersistenceCommit(
+    const Handle(TDocStd_Document)& document,
+    const std::vector<kernel::Output>& outputs,
+    const Definition& bake,
+    const decal_layer::bake::accounting::View& operation,
+    PersistenceCommitAdmission& admission) noexcept {
+    using namespace decal_layer::bake::accounting;
+    namespace resources = fi::persistence::resources;
+    try {
+        admission = {};
+#ifdef DEBUG
+        gDebugPersistenceTrace = {};
+#endif
+        if (document.IsNull() || !document->HasOpenCommand()
+            || !operation.valid() || outputs.empty()
+            || outputs.size() > admission.resourceTransfers.size())
+            return Outcome::Malformed;
+
+        // The strict public reader grows a Record vector and serially encodes
+        // one canonical envelope at a time. Charge twice the borrowed record
+        // count for vector growth plus the largest simultaneous canonical
+        // scratch before the first Read. The 128 MiB aggregate is a document
+        // owner bound, distinct from the operation's 64 MiB encoded dimension.
+        const TDF_Label root = document->Main().FindChild(
+            resources::RootTag, Standard_False);
+        std::size_t records = 0, largestCanonical = 0;
+        if (!root.IsNull()) {
+            for (TDF_ChildIterator child(root, Standard_False);
+                 child.More(); child.Next()) {
+                Handle(resources::Attribute) attribute;
+                if (!child.Value().FindAttribute(resources::AttributeID(),
+                        attribute) || attribute.IsNull()
+                    || !attribute->value()) continue;
+                if (!CheckedAdd(records, 1U)) return Outcome::OverBudget;
+                largestCanonical = std::max(largestCanonical,
+                    attribute->value()->bytes.size());
+            }
+        }
+        std::size_t tableBytes = 0;
+        if (!operation.CheckedProduct(records, sizeof(resources::Record), 2U,
+                tableBytes, FailureSite::PersistenceAggregateRead)
+            || !AcquireOrdinaryStorage(admission.aggregateTable, operation,
+                StorageDimension::PrivateStorage, tableBytes,
+                Retention::Scratch, FailureSite::PersistenceAggregateRead)
+            || !AcquireOrdinaryStorage(admission.aggregateCanonical, operation,
+                StorageDimension::EncodedTexture, largestCanonical,
+                Retention::Scratch, FailureSite::PersistenceAggregateRead))
+            return Outcome::OverBudget;
+        if (!root.IsNull()) {
+            for (TDF_ChildIterator child(root, Standard_False);
+                 child.More(); child.Next()) {
+                Handle(resources::Attribute) attribute;
+                if (!child.Value().FindAttribute(resources::AttributeID(),
+                        attribute) || attribute.IsNull()
+                    || !attribute->value()) continue;
+                const auto identity = attribute->value()->envelope.resource;
+                if (!retained_recipe::Nonzero(identity)) return Outcome::Malformed;
+                resources::Record record;
+                if (!resources::Read(document, identity, record)
+                    || !record.value
+                    || !CheckedAdd(admission.aggregateBefore,
+                        record.value->bytes.size())) return Outcome::Malformed;
+            }
+        }
+        if (admission.aggregateBefore
+                > resources::MaximumAggregateEnvelopeBytes) {
+            operation.Refuse(FailureSite::PersistenceAggregateLimit);
+            return Outcome::OverBudget;
+        }
+
+        std::size_t localPeak = 0;
+        for (std::size_t index = 0; index < outputs.size(); ++index) {
+            const auto& output = outputs[index];
+            std::size_t twicePNG = 0, envelopeBytes = 180U;
+            if (!operation.CheckedProduct(output.png.size(), 2U, 1U,
+                    twicePNG, FailureSite::PersistenceResourcePayload)
+                || !CheckedAdd(envelopeBytes, twicePNG))
+                return Outcome::OverBudget;
+            resources::Record existing;
+            if (!resources::Read(document,
+                    UUIDFromDigest(output.descriptor.identity), existing))
+                return Outcome::Malformed;
+            if (existing.value) {
+                if (existing.value->envelope.workingContent
+                        != output.descriptor.content)
+                    return Outcome::ForeignResource;
+                continue;
+            }
+            admission.resourceIsNew[index] = true;
+            ++admission.resourceCount;
+            if (envelopeBytes > resources::MaximumAggregateEnvelopeBytes
+                || !CheckedAdd(admission.resourceDelta, envelopeBytes))
+                return Outcome::OverBudget;
+
+            // Candidate PNG copies coexist with FO's encoded payload and FI's
+            // canonical validation copy. The transferred ticket above covers
+            // the separately surviving payload envelope and canonical bytes.
+            std::size_t local = twicePNG;
+            if (!CheckedAdd(local, envelopeBytes)) return Outcome::OverBudget;
+            localPeak = std::max(localPeak, local);
+
+        }
+#ifdef DEBUG
+        gDebugPersistenceTrace.aggregateBefore = admission.aggregateBefore;
+        gDebugPersistenceTrace.resourceDelta = admission.resourceDelta;
+#endif
+        // Strict-reader scratch no longer overlaps the candidate/payload
+        // tickets. Releasing it here prevents the 128 MiB document aggregate
+        // branch from being masked by the independent 64 MiB operation
+        // encoded dimension while preserving the actual serial-read peak.
+        admission.aggregateCanonical.reset();
+        admission.aggregateTable.reset();
+        for (std::size_t index = 0; index < outputs.size(); ++index) {
+            if (!admission.resourceIsNew[index]) continue;
+            std::size_t twicePNG = 0;
+            std::size_t envelopeBytes = 180U;
+            if (!operation.CheckedProduct(outputs[index].png.size(), 2U, 1U,
+                    twicePNG, FailureSite::PersistenceResourcePayload)
+                || !CheckedAdd(envelopeBytes, twicePNG))
+                return Outcome::OverBudget;
+            std::size_t persistentBytes = twicePNG;
+            if (!CheckedAdd(persistentBytes, envelopeBytes)
+                || !AcquireOrdinaryStorage(
+                    admission.resourceTransfers[index], operation,
+                    StorageDimension::EncodedTexture, persistentBytes,
+                    Retention::Retained,
+                    FailureSite::PersistenceResourcePayload))
+                return Outcome::OverBudget;
+            admission.resourceTransfers[index].classify(
+                Receiver::FaceImageDocumentAggregate,
+                OperationContext::OrdinaryPersistence,
+                FailureSite::PersistenceResourcePayload);
+        }
+        if (admission.resourceDelta
+                > resources::MaximumAggregateEnvelopeBytes
+                    - admission.aggregateBefore) {
+#ifdef DEBUG
+            gDebugPersistenceTrace.aggregateBefore = admission.aggregateBefore;
+            gDebugPersistenceTrace.resourceDelta = admission.resourceDelta;
+#endif
+            operation.Refuse(FailureSite::PersistenceAggregateLimit);
+            return Outcome::OverBudget;
+        }
+        if (!AcquireOrdinaryStorage(admission.resourceLocalPeak, operation,
+                StorageDimension::EncodedTexture, localPeak,
+                Retention::Scratch, FailureSite::PersistenceResourceLocal))
+            return Outcome::OverBudget;
+        for (std::size_t index = 0; index < outputs.size(); ++index) {
+            if (!admission.resourceIsNew[index]) continue;
+            fi::ResourceEnvelope candidate;
+            std::vector<std::uint8_t> canonical;
+            if (!ResourceEnvelopeForOutput(outputs[index], candidate)
+                || !fi::Encode(candidate, canonical)
+                || canonical.size() != 180U + 2U * outputs[index].png.size())
+                return Outcome::Malformed;
+        }
+
+        std::size_t bindingsBytes = 0, resourcesBytes = 0;
+        admission.bakeBytes = 192U;
+        if (!operation.CheckedProduct(bake.bindings.size(), 252U, 1U,
+                bindingsBytes, FailureSite::PersistenceBakeCandidate)
+            || !operation.CheckedProduct(bake.resources.size(), 76U, 1U,
+                resourcesBytes, FailureSite::PersistenceBakeCandidate)
+            || !CheckedAdd(admission.bakeBytes, bindingsBytes)
+            || !CheckedAdd(admission.bakeBytes, resourcesBytes)
+            || admission.bakeBytes > kMaximumBytes)
+            return Outcome::PersistenceFailure;
+        if (!AcquireOrdinaryStorage(admission.bakeTransfer, operation,
+                StorageDimension::EncodedTexture, admission.bakeBytes,
+                Retention::Retained, FailureSite::PersistenceBakeCandidate))
+            return Outcome::OverBudget;
+        admission.bakeTransfer.classify(
+            Receiver::PaintedBakeDefinitionOwner,
+            OperationContext::OrdinaryPersistence,
+            FailureSite::PersistenceBakeCandidate);
+        if (!operation.CheckedProduct(admission.bakeBytes, 4U, 1U,
+                admission.transientBytes,
+                FailureSite::PersistenceBakeTransients)
+            || !AcquireOrdinaryStorage(admission.bakeTransients, operation,
+                StorageDimension::EncodedTexture, admission.transientBytes,
+                Retention::Scratch, FailureSite::PersistenceBakeTransients))
+            return Outcome::OverBudget;
+        std::vector<std::uint8_t> canonicalBake;
+        if (!Encode(bake, canonicalBake)
+            || canonicalBake.size() != admission.bakeBytes)
+            return Outcome::PersistenceFailure;
+
+        // OCAF undo retains immutable shared payloads under the document. Its
+        // derived bound is aggregate × (GetUndoLimit()+1), never an operation
+        // reservation. A negative limit is explicitly unbounded and is not
+        // converted to size_t or misreported as a finite operation allowance.
+        const Standard_Integer undoLimit = document->GetUndoLimit();
+        if (undoLimit >= 0) {
+            std::size_t historyBound = 0;
+            if (!operation.CheckedProduct(
+                    resources::MaximumAggregateEnvelopeBytes,
+                    std::size_t(undoLimit) + 1U, 1U, historyBound,
+                    FailureSite::PersistenceAggregateRead))
+                return Outcome::OverBudget;
+            (void)historyBound;
+        }
+#ifdef DEBUG
+        gDebugPersistenceTrace.aggregateBefore = admission.aggregateBefore;
+        gDebugPersistenceTrace.resourceDelta = admission.resourceDelta;
+        gDebugPersistenceTrace.bakeBytes = admission.bakeBytes;
+        gDebugPersistenceTrace.transientBytes = admission.transientBytes;
+#endif
+        return Outcome::Prepared;
+    } catch (const std::bad_alloc&) {
+        operation.AllocationFailed(FailureSite::PersistenceAggregateRead);
+        return Outcome::OverBudget;
+    } catch (...) { return Outcome::PersistenceFailure; }
+}
+
 Outcome AdoptBakedResources(const Handle(TDocStd_Document)& document,
-                            const std::vector<kernel::Output>& outputs) noexcept {
+                            const std::vector<kernel::Output>& outputs,
+                            PersistenceCommitAdmission& admission) noexcept {
     try {
         for (const auto& output : outputs) {
+            const std::size_t index = std::size_t(&output - outputs.data());
             fi::ResourceEnvelope envelope;
-            envelope.resource = UUIDFromDigest(output.descriptor.identity);
-            envelope.originalContent = output.descriptor.content;
-            envelope.workingContent = output.descriptor.content;
-            envelope.originalFormat = fi::ImageEncoding::PNG;
-            envelope.workingFormat = fi::ImageEncoding::PNG;
-            envelope.alpha = fi::AlphaInterpretation::Straight;
-            envelope.originalWidthTexels = output.descriptor.widthTexels;
-            envelope.originalHeightTexels = output.descriptor.heightTexels;
-            envelope.workingWidthTexels = output.descriptor.widthTexels;
-            envelope.workingHeightTexels = output.descriptor.heightTexels;
-            std::string provenance = "shapeyard:e2b-painted-bake.v1:";
-            provenance.push_back(char('a' + std::uint8_t(output.descriptor.role)));
-            std::vector<std::uint8_t> provenanceBytes(provenance.begin(), provenance.end());
-            provenanceBytes.push_back(std::uint8_t(output.descriptor.role));
-            provenanceBytes.insert(provenanceBytes.end(),
-                output.descriptor.content.begin(), output.descriptor.content.end());
-            if (!fi::HashFaceImageBytes(provenanceBytes, envelope.provenance))
+            if (!ResourceEnvelopeForOutput(output, envelope))
                 return Outcome::Malformed;
-            envelope.originalBytes = output.png;
-            envelope.workingBytes = output.png;
             fi::persistence::resources::Record existing;
             if (!fi::persistence::resources::Read(document, envelope.resource, existing))
                 return Outcome::Malformed;
             if (existing.value) {
                 if (!(existing.value->envelope.workingContent == output.descriptor.content))
                     return Outcome::ForeignResource;
+                if (admission.resourceIsNew[index])
+                    return Outcome::PersistenceFailure;
                 continue;
             }
             const auto adopted = fi::owner::AdoptResource(document, envelope);
-            if (adopted == fi::owner::Outcome::Committed) continue;
+            if (adopted == fi::owner::Outcome::Committed) {
+                if (!admission.resourceIsNew[index]
+                    || !admission.resourceTransfers[index].transfer())
+                    return Outcome::PersistenceFailure;
+                continue;
+            }
             if (adopted == fi::owner::Outcome::ForeignResource) return Outcome::ForeignResource;
             return Outcome::PersistenceFailure;
         }
@@ -1221,7 +1496,6 @@ Outcome PreflightResourceRead(
         if (root.IsNull()) return Outcome::Prepared;
         std::size_t records = 0;
         std::size_t serializationBytes = 0;
-        std::size_t selectedSerializationBytes = 0;
         std::size_t originalBytes = 0;
         std::size_t workingBytes = 0;
         for (TDF_ChildIterator child(root, Standard_False);
@@ -1234,19 +1508,20 @@ Outcome PreflightResourceRead(
                 || attribute.IsNull() || !attribute->value())
                 continue;
             const auto& value = attribute->value();
-            if (!AddReadBytes(serializationBytes, value->bytes.size()))
-                return Outcome::OverBudget;
+            // resources::Read validates records serially and returns a shared
+            // immutable Payload handle. Charge the maximum simultaneously
+            // live canonical Encode scratch, not the sum of document payloads.
+            serializationBytes = std::max(
+                serializationBytes, value->bytes.size());
             if (value->envelope.resource == resource) {
                 admission.selected = true;
-                selectedSerializationBytes = value->bytes.size();
                 originalBytes = value->envelope.originalBytes.size();
                 workingBytes = value->envelope.workingBytes.size();
             }
         }
         std::size_t tableBytes = 0;
-        if (!operation.CheckedProduct(records, sizeof(resources::Record), 1,
-                tableBytes, accounting::FailureSite::ResourceTableScratch)
-            || !AddReadBytes(serializationBytes, selectedSerializationBytes))
+        if (!operation.CheckedProduct(records, sizeof(resources::Record), 2,
+                tableBytes, accounting::FailureSite::ResourceTableScratch))
             return Outcome::OverBudget;
         if (!admission.table.acquire(operation,
                 accounting::StorageDimension::PrivateStorage, tableBytes,
@@ -1582,6 +1857,365 @@ DebugOrdinaryStagingEvidence DebugExerciseE4OrdinaryStaging(
         return {};
     }
 }
+
+namespace {
+struct DebugPersistenceSnapshot final {
+    fi::Digest resources{};
+    std::vector<std::uint8_t> bake;
+    std::size_t aggregate = 0;
+    std::size_t records = 0;
+    Standard_Integer undos = 0;
+    Standard_Integer redos = 0;
+};
+
+bool DebugPersistenceSnapshotRead(
+    const Handle(TDocStd_Document)& document, const aa::Key& key,
+    DebugPersistenceSnapshot& output) {
+    output = {};
+    std::vector<fi::persistence::resources::Record> resources;
+    if (!fi::persistence::resources::ReadAll(document, resources)) return false;
+    CC_SHA256_CTX hash;
+    if (CC_SHA256_Init(&hash) != 1) return false;
+    std::sort(resources.begin(), resources.end(), [](const auto& first,
+                                                      const auto& second) {
+        return first.value->envelope.resource < second.value->envelope.resource;
+    });
+    for (const auto& record : resources) {
+        if (!record.value
+            || !CheckedAdd(output.aggregate, record.value->bytes.size())
+            || CC_SHA256_Update(&hash, record.value->bytes.data(),
+                CC_LONG(record.value->bytes.size())) != 1) return false;
+    }
+    if (CC_SHA256_Final(output.resources.data(), &hash) != 1) return false;
+    output.records = resources.size();
+    persistence::Record bake;
+    const auto state = persistence::Read(document, key, bake);
+    if (state == persistence::ReadState::Malformed) return false;
+    if (state == persistence::ReadState::Present) output.bake = bake.bytes;
+    output.undos = document->GetAvailableUndos();
+    output.redos = document->GetAvailableRedos();
+    return true;
+}
+
+bool DebugSamePersistentValues(const DebugPersistenceSnapshot& first,
+                               const DebugPersistenceSnapshot& second) {
+    return first.resources == second.resources
+        && first.bake == second.bake
+        && first.aggregate == second.aggregate
+        && first.records == second.records;
+}
+
+bool DebugPaddedPNG(const std::vector<std::uint8_t>& source,
+                    std::size_t targetBytes, std::uint8_t marker,
+                    std::vector<std::uint8_t>& output) {
+    output.clear();
+    if (source.size() < 12U || targetBytes < source.size() + 12U
+        || targetBytes > fi::kMaximumEncodedImageBytes) return false;
+    output.assign(source.begin(), source.end() - 12);
+    std::vector<std::uint8_t> payload(
+        targetBytes - source.size() - 12U, marker);
+    kernel::Chunk(output, "syPD", payload);
+    output.insert(output.end(), source.end() - 12, source.end());
+    return output.size() == targetBytes;
+}
+
+bool DebugSeedAggregate(const Handle(TDocStd_Document)& document,
+                        const Staging& staging, std::size_t currentAggregate,
+                        std::size_t candidateDelta) {
+    constexpr std::size_t seedCount = 4;
+    if (staging.outputs.empty()
+        || currentAggregate > fi::persistence::resources::MaximumAggregateEnvelopeBytes
+        || candidateDelta < 2U
+        || candidateDelta > fi::persistence::resources::MaximumAggregateEnvelopeBytes
+                - currentAggregate) return false;
+    const std::size_t seedTotal =
+        fi::persistence::resources::MaximumAggregateEnvelopeBytes
+        - currentAggregate - candidateDelta + 2U;
+    if ((seedTotal & 1U) != 0 || seedTotal < seedCount * 180U)
+        return false;
+    std::size_t remaining = seedTotal;
+    for (std::size_t index = 0; index < seedCount; ++index) {
+        const std::size_t slots = seedCount - index;
+        std::size_t envelopeBytes = remaining / slots;
+        envelopeBytes -= envelopeBytes & 1U;
+        if (index + 1U == seedCount) envelopeBytes = remaining;
+        if (envelopeBytes < 180U || ((envelopeBytes - 180U) & 1U) != 0)
+            return false;
+        const std::size_t pngBytes = (envelopeBytes - 180U) / 2U;
+        std::vector<std::uint8_t> png;
+        if (!DebugPaddedPNG(staging.outputs.front().png, pngBytes,
+                std::uint8_t(index + 1U), png)) return false;
+        fi::ResourceEnvelope envelope;
+        envelope.originalFormat = fi::ImageEncoding::PNG;
+        envelope.workingFormat = fi::ImageEncoding::PNG;
+        envelope.alpha = fi::AlphaInterpretation::Straight;
+        envelope.originalWidthTexels = staging.outputs.front().descriptor.widthTexels;
+        envelope.originalHeightTexels = staging.outputs.front().descriptor.heightTexels;
+        envelope.workingWidthTexels = envelope.originalWidthTexels;
+        envelope.workingHeightTexels = envelope.originalHeightTexels;
+        envelope.originalBytes = png;
+        envelope.workingBytes = png;
+        if (!fi::HashFaceImageBytes(png, envelope.originalContent)) return false;
+        envelope.workingContent = envelope.originalContent;
+        std::vector<std::uint8_t> identitySeed{
+            'S','3','g',std::uint8_t(index)};
+        identitySeed.insert(identitySeed.end(), envelope.originalContent.begin(),
+                            envelope.originalContent.end());
+        fi::Digest identityDigest{};
+        if (!fi::HashFaceImageBytes(identitySeed, identityDigest)) return false;
+        std::copy_n(identityDigest.begin(), envelope.resource.size(),
+                    envelope.resource.begin());
+        identitySeed.push_back(0x70);
+        if (!fi::HashFaceImageBytes(identitySeed, envelope.provenance)) return false;
+        std::vector<std::uint8_t> canonical;
+        if (!fi::Encode(envelope, canonical)
+            || canonical.size() != envelopeBytes
+            || fi::owner::AdoptResource(document, envelope)
+                != fi::owner::Outcome::Committed) return false;
+        remaining -= envelopeBytes;
+    }
+    return remaining == 0;
+}
+} // namespace
+
+DebugPersistenceEvidence DebugExerciseE4Persistence(
+    const Handle(TDocStd_Document)& document, const aa::Key& key,
+    DebugPersistenceScenario scenario) noexcept {
+    using namespace decal_layer::bake::accounting;
+    DebugPersistenceEvidence evidence;
+    evidence.aggregateLimit =
+        fi::persistence::resources::MaximumAggregateEnvelopeBytes;
+    const auto abort = [&]() noexcept {
+        if (!document.IsNull() && document->HasOpenCommand())
+            document->AbortCommand();
+    };
+    try {
+        if (document.IsNull() || document->HasOpenCommand()) return evidence;
+
+        if (scenario == DebugPersistenceScenario::AggregateRefusal) {
+            document->NewCommand();
+            Staging staging;
+            evidence.prepared = Prepare(staging, document, key)
+                == Outcome::Prepared;
+            if (!evidence.prepared) { abort(); return evidence; }
+            DebugPersistenceSnapshot beforeSeed;
+            if (!DebugPersistenceSnapshotRead(document, key, beforeSeed)) {
+                abort(); return evidence;
+            }
+            std::size_t delta = 0;
+            for (const auto& output : staging.outputs) {
+                fi::persistence::resources::Record prior;
+                if (!fi::persistence::resources::Read(document,
+                        UUIDFromDigest(output.descriptor.identity), prior)) {
+                    abort(); return evidence;
+                }
+                if (!prior.value && !CheckedAdd(
+                        delta, 180U + 2U * output.png.size())) {
+                    abort(); return evidence;
+                }
+            }
+            if (!DebugSeedAggregate(document, staging,
+                    beforeSeed.aggregate, delta)
+                || !document->CommitCommand()) { abort(); return evidence; }
+            DebugPersistenceSnapshot baseline;
+            if (!DebugPersistenceSnapshotRead(document, key, baseline))
+                return evidence;
+            const Standard_Integer baselineUndos = baseline.undos;
+            const Standard_Integer baselineRedos = baseline.redos;
+            document->NewCommand();
+            gDebugAdoptionEntries = 0;
+            gDebugPersistenceEntries = 0;
+            DebugBeginSettlementObservation();
+            const Outcome refused = Commit(staging, document);
+            const auto settlement = DebugTakeSettlementObservation();
+            DebugPersistenceSnapshot afterRefusal;
+            const bool readAfter = DebugPersistenceSnapshotRead(
+                document, key, afterRefusal);
+            evidence.aggregateBefore = gDebugPersistenceTrace.aggregateBefore;
+            evidence.candidateDelta = gDebugPersistenceTrace.resourceDelta;
+            evidence.aggregateExceeded = evidence.aggregateBefore
+                    <= evidence.aggregateLimit
+                && evidence.candidateDelta
+                    > evidence.aggregateLimit - evidence.aggregateBefore;
+            evidence.aggregateFirstFailure = refused == Outcome::OverBudget
+                && settlement.firstFailure
+                    == FailureSite::PersistenceAggregateLimit;
+            evidence.refusedBeforeWrites = gDebugAdoptionEntries == 0
+                && gDebugPersistenceEntries == 0
+                && settlement.faceImageTransfers == 0
+                && settlement.paintedBakeTransfers == 0;
+            evidence.noPartialArtifact = readAfter
+                && DebugSamePersistentValues(baseline, afterRefusal);
+            abort();
+            DebugPersistenceSnapshot afterAbort;
+            evidence.manifestUnchanged =
+                DebugPersistenceSnapshotRead(document, key, afterAbort)
+                && DebugSamePersistentValues(baseline, afterAbort);
+            evidence.historyUnchanged = evidence.manifestUnchanged
+                && document->GetAvailableUndos() == baselineUndos
+                && document->GetAvailableRedos() == baselineRedos;
+            evidence.destructionEvents = settlement.destructions;
+            evidence.finalBalanceZero = settlement.finalLiveBytes == 0;
+            evidence.contextControlDestroyed =
+                settlement.contextControlDestroyed;
+            return evidence;
+        }
+
+        if (scenario == DebugPersistenceScenario::Settlement) {
+            const std::array<FailureSite, 5> denialSites{{
+                FailureSite::PersistenceAggregateRead,
+                FailureSite::PersistenceResourcePayload,
+                FailureSite::PersistenceResourceLocal,
+                FailureSite::PersistenceBakeCandidate,
+                FailureSite::PersistenceBakeTransients,
+            }};
+            bool denials = true;
+            bool settled = true;
+            for (const FailureSite site : denialSites) {
+                document->NewCommand();
+                Staging denied;
+                if (Prepare(denied, document, key) != Outcome::Prepared) {
+                    denials = false; abort(); break;
+                }
+                gDebugDenyPersistenceSite = site;
+                DebugBeginSettlementObservation();
+                const Outcome outcome = Commit(denied, document);
+                const auto observation = DebugTakeSettlementObservation();
+                denials = denials && outcome == Outcome::OverBudget
+                    && observation.firstFailure == site
+                    && observation.faceImageTransfers == 0
+                    && observation.paintedBakeTransfers == 0;
+                settled = settled && observation.finalLiveBytes == 0
+                    && observation.contextControlDestroyed;
+                abort();
+            }
+            gDebugDenyPersistenceSite = FailureSite::None;
+            evidence.denialSitesSticky = denials;
+            evidence.transientSettled = settled;
+
+            DebugPersistenceSnapshot prior;
+            if (!DebugPersistenceSnapshotRead(document, key, prior))
+                return evidence;
+            document->NewCommand();
+            Staging aborted;
+            evidence.prepared = Prepare(aborted, document, key)
+                == Outcome::Prepared;
+            DebugBeginSettlementObservation();
+            const Outcome committed = evidence.prepared
+                ? Commit(aborted, document) : Outcome::Malformed;
+            const auto transfer = DebugTakeSettlementObservation();
+            persistence::Record stagedBake;
+            const bool stagedReadback = committed == Outcome::Committed
+                && persistence::Read(document, key, stagedBake)
+                    == persistence::ReadState::Present;
+            abort();
+            DebugPersistenceSnapshot restored;
+            evidence.abortRestored = stagedReadback
+                && DebugPersistenceSnapshotRead(document, key, restored)
+                && DebugSamePersistentValues(prior, restored);
+            evidence.transferredNotDestroyed =
+                transfer.faceImageTransfers != 0
+                && transfer.paintedBakeTransfers == 1
+                && transfer.destructions == 0;
+            evidence.transferEvents = transfer.faceImageTransfers
+                + transfer.paintedBakeTransfers;
+
+            document->NewCommand();
+            Staging cancelled;
+            DebugBeginSettlementObservation();
+            const bool cancelPrepared = Prepare(cancelled, document, key)
+                == Outcome::Prepared;
+            Cancel(cancelled);
+            abort();
+            const auto cancel = DebugTakeSettlementObservation();
+            evidence.cancelSettled = cancelPrepared
+                && cancel.finalLiveBytes == 0
+                && cancel.contextControlDestroyed;
+            evidence.finalBalanceZero = evidence.transientSettled
+                && transfer.finalLiveBytes == 0
+                && cancel.finalLiveBytes == 0;
+            evidence.contextControlDestroyed =
+                transfer.contextControlDestroyed
+                && cancel.contextControlDestroyed;
+            evidence.committed = committed == Outcome::Committed;
+            evidence.persistentReadback = stagedReadback;
+            evidence.bakeBytes = gDebugPersistenceTrace.bakeBytes;
+            evidence.transientBytes = gDebugPersistenceTrace.transientBytes;
+            return evidence;
+        }
+
+        DebugPersistenceSnapshot before;
+        if (!DebugPersistenceSnapshotRead(document, key, before)) return evidence;
+        document->NewCommand();
+        Staging staging;
+        evidence.prepared = Prepare(staging, document, key) == Outcome::Prepared;
+        DebugBeginSettlementObservation();
+        const Outcome committed = evidence.prepared
+            ? Commit(staging, document) : Outcome::Malformed;
+        evidence.committed = committed == Outcome::Committed;
+        evidence.commandCommitted = evidence.committed && document->CommitCommand();
+        if (!evidence.commandCommitted) { abort(); return evidence; }
+        const auto settlement = DebugTakeSettlementObservation();
+        evidence.faceImageTransferred = settlement.faceImageTransfers != 0;
+        evidence.paintedBakeTransferred = settlement.paintedBakeTransfers == 1;
+        evidence.noTransferBeforeSuccess = evidence.committed;
+        evidence.resourceBytes = settlement.faceImageBytes;
+        evidence.aggregateBefore = gDebugPersistenceTrace.aggregateBefore;
+        evidence.candidateDelta = gDebugPersistenceTrace.resourceDelta;
+        evidence.bakeBytes = settlement.paintedBakeBytes;
+        evidence.transientBytes = gDebugPersistenceTrace.transientBytes;
+        evidence.exactResourceBytes = settlement.faceImageBytes != 0
+            && settlement.faceImageBytes
+                == gDebugPersistenceTrace.resourceDelta
+                    + 2U * (gDebugPersistenceTrace.resourceDelta
+                        - 180U * settlement.faceImageTransfers) / 2U;
+        evidence.exactBakeBytes = settlement.paintedBakeBytes
+            == gDebugPersistenceTrace.bakeBytes;
+        evidence.exactTransientBytes = gDebugPersistenceTrace.transientBytes
+            == 4U * gDebugPersistenceTrace.bakeBytes;
+        evidence.finalBalanceZero = settlement.finalLiveBytes == 0;
+        evidence.contextControlDestroyed = settlement.contextControlDestroyed;
+        evidence.transferEvents = settlement.faceImageTransfers
+            + settlement.paintedBakeTransfers;
+        evidence.destructionEvents = settlement.destructions;
+
+        DebugPersistenceSnapshot after;
+        evidence.persistentReadback =
+            DebugPersistenceSnapshotRead(document, key, after)
+            && !after.bake.empty() && after.aggregate > before.aggregate;
+        const bool undone = evidence.persistentReadback && document->Undo();
+        DebugPersistenceSnapshot undo;
+        evidence.undoRestored = undone
+            && DebugPersistenceSnapshotRead(document, key, undo)
+            && DebugSamePersistentValues(before, undo);
+        const bool redone = evidence.undoRestored && document->Redo();
+        DebugPersistenceSnapshot redo;
+        evidence.redoRestored = redone
+            && DebugPersistenceSnapshotRead(document, key, redo)
+            && DebugSamePersistentValues(after, redo);
+
+        document->NewCommand();
+        Staging unchanged;
+        const bool unchangedPrepared = Prepare(unchanged, document, key)
+            == Outcome::Prepared;
+        DebugBeginSettlementObservation();
+        const Outcome unchangedOutcome = unchangedPrepared
+            ? Commit(unchanged, document) : Outcome::Malformed;
+        abort();
+        const auto unchangedSettlement = DebugTakeSettlementObservation();
+        evidence.unchangedAddsNoTransfer = unchangedPrepared
+            && unchangedOutcome == Outcome::Committed
+            && unchangedSettlement.faceImageTransfers == 0
+            && unchangedSettlement.paintedBakeTransfers == 0
+            && unchangedSettlement.finalLiveBytes == 0;
+        return evidence;
+    } catch (...) {
+        gDebugDenyPersistenceSite = FailureSite::None;
+        abort();
+        (void)DebugTakeSettlementObservation();
+        return evidence;
+    }
+}
 #endif
 
 Outcome Prepare(Staging& staging, const Handle(TDocStd_Document)& document,
@@ -1800,13 +2434,6 @@ Outcome Commit(Staging& staging, const Handle(TDocStd_Document)& document) noexc
         if (bakePreflight != Outcome::Prepared) {
             staging = {}; return bakePreflight;
         }
-        Ticket recordTicket;
-        activeAllocation = FailureSite::OrdinaryRecordStorage;
-        if (!AcquireOrdinaryStorage(recordTicket, staging.operation.view,
-                StorageDimension::PrivateStorage, kMaximumBytes,
-                Retention::Scratch, activeAllocation)) {
-            staging = {}; return Outcome::OverBudget;
-        }
         CapturedSourceStorage sources;
         const auto resetStaging = [&]() noexcept {
             // The local recapture tickets borrow staging.operation. Release
@@ -1824,8 +2451,7 @@ Outcome Commit(Staging& staging, const Handle(TDocStd_Document)& document) noexc
                 && OrdinaryStagingOverlapCharged(staging)
                 && membersTicket.bytes != 0 && ownersTicket.bytes != 0
                 && captureTicket.bytes != 0
-                && atlasCanonicalTicket.bytes != 0
-                && recordTicket.bytes != 0;
+                && atlasCanonicalTicket.bytes != 0;
         }
 #endif
         const Outcome recaptured = CaptureSources(document, capture, sources,
@@ -1842,6 +2468,14 @@ Outcome Commit(Staging& staging, const Handle(TDocStd_Document)& document) noexc
             resetStaging(); return Outcome::StaleBinding;
         }
         if (staging.unchanged) { resetStaging(); return Outcome::Committed; }
+        PersistenceCommitAdmission persistenceAdmission;
+        const Outcome persistencePreflight = PreflightPersistenceCommit(
+            document, staging.outputs, staging.bake, staging.operation.view,
+            persistenceAdmission);
+        if (persistencePreflight != Outcome::Prepared) {
+            resetStaging();
+            return persistencePreflight;
+        }
         // The bake never silently rewrites the atlas: the rebuilt SYEA/1 is
         // recommitted only when its canonical bytes actually changed.
         std::vector<std::uint8_t> atlasBytes;
@@ -1865,8 +2499,10 @@ Outcome Commit(Staging& staging, const Handle(TDocStd_Document)& document) noexc
         }
 #ifdef DEBUG
         ++gDebugAdoptionEntries;
+        ++gDebugPersistenceTrace.adoptionEntries;
 #endif
-        const Outcome adopted = AdoptBakedResources(document, staging.outputs);
+        const Outcome adopted = AdoptBakedResources(
+            document, staging.outputs, persistenceAdmission);
         if (adopted != Outcome::Committed) {
             resetStaging(); return adopted;
         }
@@ -1902,8 +2538,12 @@ Outcome Commit(Staging& staging, const Handle(TDocStd_Document)& document) noexc
         }
 #ifdef DEBUG
         ++gDebugPersistenceEntries;
+        ++gDebugPersistenceTrace.persistenceEntries;
 #endif
         if (!persistence::StageCommitted(document, staging.bake)) {
+            resetStaging(); return Outcome::PersistenceFailure;
+        }
+        if (!persistenceAdmission.bakeTransfer.transfer()) {
             resetStaging(); return Outcome::PersistenceFailure;
         }
         resetStaging(); return Outcome::Committed;

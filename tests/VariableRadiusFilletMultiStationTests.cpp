@@ -39,9 +39,8 @@ variable_radius_fillet::MultiStationDefinition definition(double metersPerUnit) 
     value.edges.push_back(edgeAnchor(scale)); return value;
 }
 // Radii 2, 5, 3, 6, 4 mm: an up-down-up-down law for the direction-change
-// proof. This OCCT build loses the section arc at sharp radius minima when
-// the model unit is the metre (see NOTES.md), so this profile is exercised
-// at the millimetre unit only.
+// proof. The production builder now performs the complete OCCT build and
+// section interval in the shared physical-millimetre working frame.
 variable_radius_fillet::MultiStationDefinition valleyDefinition(double metersPerUnit) {
     auto value = definition(metersPerUnit);
     const double scale = 0.001 / metersPerUnit;
@@ -140,25 +139,28 @@ void testB3Stage2KernelBuildPinsInteriorStationSectionsAndKernelLaw() {
 
 void testB3Stage2KernelFollowsRadiusDirectionChangesAcrossStations() {
     using namespace variable_radius_fillet;
-    const double scale = 1; // millimetre unit; see valleyDefinition note
-    const TopoDS_Shape box = BRepPrimAPI_MakeBox(30, 30, 40).Shape();
-    const std::atomic_bool cancelled{false};
-    const BuildResult result = BuildMultiStationDeterministically(
-        box, valleyDefinition(0.001), cancelled);
-    if (!result.built()) std::cerr << "B3 stage-2 direction refusal: "
-        << Reason(result.refusal) << "\n";
-    assert(result.built());
-    assert(result.evidence.consumedEdges == std::vector<UUID>{uuid(20)});
-    assert(result.evidence.sections.size() == 3);
-    assert(result.evidence.sections[0].expectedRadiusLocal == 5 * scale);
-    assert(result.evidence.sections[1].expectedRadiusLocal == 3 * scale);
-    assert(result.evidence.sections[2].expectedRadiusLocal == 6 * scale);
-    // The authored law goes down then up across the interior stations; the
-    // independently measured sections must follow each direction change.
-    assert(result.evidence.sections[0].measuredRadiusLocal
-        > result.evidence.sections[1].measuredRadiusLocal);
-    assert(result.evidence.sections[1].measuredRadiusLocal
-        < result.evidence.sections[2].measuredRadiusLocal);
+    for (double unit : {0.001, 1.0, 0.01}) {
+        const double scale = 0.001 / unit;
+        const TopoDS_Shape box = BRepPrimAPI_MakeBox(
+            30 * scale, 30 * scale, 40 * scale).Shape();
+        const std::atomic_bool cancelled{false};
+        const BuildResult result = BuildMultiStationDeterministically(
+            box, valleyDefinition(unit), cancelled);
+        if (!result.built()) std::cerr << "B3 stage-2 direction refusal at unit "
+            << unit << ": " << Reason(result.refusal) << "\n";
+        assert(result.built());
+        assert(result.evidence.consumedEdges == std::vector<UUID>{uuid(20)});
+        assert(result.evidence.sections.size() == 3);
+        assert(result.evidence.sections[0].expectedRadiusLocal == 5 * scale);
+        assert(result.evidence.sections[1].expectedRadiusLocal == 3 * scale);
+        assert(result.evidence.sections[2].expectedRadiusLocal == 6 * scale);
+        // The authored law goes down then up across the interior stations; the
+        // independently measured sections must follow each direction change.
+        assert(result.evidence.sections[0].measuredRadiusLocal
+            > result.evidence.sections[1].measuredRadiusLocal);
+        assert(result.evidence.sections[1].measuredRadiusLocal
+            < result.evidence.sections[2].measuredRadiusLocal);
+    }
 }
 
 void testB3Stage2KernelRejectsInsufficientWholeLawClearanceAndClosedLoop() {
