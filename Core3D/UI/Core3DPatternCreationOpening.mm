@@ -20,6 +20,8 @@
 
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepBndLib.hxx>
+#include <Bnd_Box.hxx>
 #include <TDF_LabelSequence.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -884,6 +886,322 @@ CreateOutcome ApplyCreation(const CreationCapture& capture,
 
 @end
 
+@implementation Core3DPatternEditingOpening (PatternParameterPreflight)
+
+- (Core3DPatternEditParameterRefusal)parameterRefusalForCandidate:
+    (NSDictionary<NSString *, id> *)candidate {
+    NSDictionary<NSString *, id> *captured = self.descriptor;
+    Kind kind;
+    if (![candidate isKindOfClass:NSDictionary.class]
+        || ![captured isKindOfClass:NSDictionary.class]
+        || !ParseKind(captured[@"kind"], kind))
+        return Core3DPatternEditParameterRefusalInvalidDescriptor;
+    Axis rowAxis, columnAxis;
+    if (!ParseAxis(candidate[@"rowAxis"], rowAxis))
+        return Core3DPatternEditParameterRefusalInvalidRowAxis;
+    if (!ParseAxis(candidate[@"columnAxis"], columnAxis))
+        return Core3DPatternEditParameterRefusalInvalidColumnAxis;
+    if (kind == Kind::Grid && rowAxis == columnAxis)
+        return Core3DPatternEditParameterRefusalDuplicateAxes;
+    if (kind != Kind::Grid) {
+        std::uint64_t rows = 0;
+        if (!Integer(candidate[@"rowCount"], UINT32_MAX, rows))
+            return Core3DPatternEditParameterRefusalInvalidDescriptor;
+        if (rows != 1)
+            return Core3DPatternEditParameterRefusalRowCountRequiresOne;
+    }
+    return Core3DPatternEditParameterRefusalNone;
+}
+
+@end
+
+#if DEBUG
+namespace {
+
+NSString *Base64(const void *bytes, std::size_t size) {
+    if (size == 0) return @"";
+    return [[NSData dataWithBytes:bytes length:size]
+        base64EncodedStringWithOptions:0] ?: @"";
+}
+
+template <class T>
+NSString *Base64(const std::vector<T>& bytes) {
+    return Base64(bytes.data(), bytes.size() * sizeof(T));
+}
+
+NSString *Base64(const std::string& bytes) {
+    return Base64(bytes.data(), bytes.size());
+}
+
+NSString *Digest(const void *bytes, std::size_t size) {
+    const auto *value = static_cast<const std::uint8_t *>(bytes);
+    std::uint64_t digest = 1469598103934665603ULL;
+    for (std::size_t index = 0; index < size; ++index) {
+        digest ^= value[index];
+        digest *= 1099511628211ULL;
+    }
+    return [NSString stringWithFormat:@"%016llx", digest];
+}
+
+template <class T>
+NSString *Digest(const std::vector<T>& bytes) {
+    return Digest(bytes.data(), bytes.size() * sizeof(T));
+}
+
+NSString *Digest(const std::string& bytes) {
+    return Digest(bytes.data(), bytes.size());
+}
+
+NSArray<NSNumber *> *Numbers(const double *values, std::size_t count) {
+    NSMutableArray<NSNumber *> *result = [NSMutableArray arrayWithCapacity:count];
+    for (std::size_t index = 0; index < count; ++index) [result addObject:@(values[index])];
+    return result;
+}
+
+NSArray<NSNumber *> *Frame(
+    const std::optional<core3d::profile::ConstructionFrame>& value) {
+    return value ? Numbers(value->values.data(), value->values.size()) : @[];
+}
+
+NSArray<NSNumber *> *Bounds(const TopoDS_Shape& shape) {
+    if (shape.IsNull()) return @[];
+    try {
+        Bnd_Box box;
+        BRepBndLib::Add(shape, box, Standard_False);
+        if (box.IsVoid() || box.IsWhole()) return @[];
+        Standard_Real x0 = 0, y0 = 0, z0 = 0, x1 = 0, y1 = 0, z1 = 0;
+        box.Get(x0, y0, z0, x1, y1, z1);
+        const double values[] = {double(x0), double(y0), double(z0),
+                                 double(x1), double(y1), double(z1)};
+        return Numbers(values, 6);
+    } catch (...) { return @[]; }
+}
+
+NSDictionary<NSString *, id> *Appearance(const OcctExactLabelReceipt& receipt) {
+    const auto& appearance = receipt.appearance;
+    NSMutableArray *visual = [NSMutableArray arrayWithCapacity:appearance.visualValues.size()];
+    for (double value : appearance.visualValues) [visual addObject:@(value)];
+    return @{ @"legacyPresent": @[@(appearance.legacyPresent[0]),
+                                   @(appearance.legacyPresent[1])],
+              @"legacyValues": @[@(appearance.legacyValues[0]),
+                                  @(appearance.legacyValues[1])],
+              @"localPBR": @(appearance.localPBR), @"visualValues": visual,
+              @"invisible": @(receipt.visibility.invisibleAttributePresent),
+              @"layerLinkPresent": @(receipt.visibility.layerLinkPresent),
+              @"effectiveVisible": @(receipt.visibility.IsEffectivelyVisible()) };
+}
+
+NSDictionary<NSString *, id> *SourceRecipeDump(const recipe::Source& value) {
+    NSString *bytes = @"";
+    NSString *digest = @"";
+    NSArray<NSNumber *> *frame = @[];
+    if (value.family == recipe::Family::Sweep) {
+        bytes = Base64(value.sweep.values);
+        digest = Digest(value.sweep.values);
+        frame = Frame(value.sweep.definition.constructionFrame);
+    } else if (value.family == recipe::Family::Loft) {
+        bytes = Base64(value.loft.values);
+        digest = Digest(value.loft.values);
+        frame = Frame(value.loft.definition.constructionFrame);
+    } else if (value.family == recipe::Family::AnalyticBoolean
+               && value.analyticBoolean.value) {
+        bytes = Base64(value.analyticBoolean.value->bytes);
+        digest = Digest(value.analyticBoolean.value->bytes);
+    }
+    return @{ @"family": FamilyText(value.family), @"bytesBase64": bytes,
+              @"bytesDigest": digest, @"constructionFrame": frame,
+              @"featureIdentifier":
+                  Text(core3d::pattern_owner::RecipeFeatureIdentifier(value)) };
+}
+
+NSDictionary<NSString *, id> *PreparedRecipeDump(const recipe::Prepared& value) {
+    NSString *bytes = @"";
+    NSString *digest = @"";
+    NSArray<NSNumber *> *frame = @[];
+    if (value.family == recipe::Family::Sweep) {
+        std::vector<double> encoded;
+        if (!core3d::sweep_persistence::Encode(value.sweep, encoded)) return nil;
+        bytes = Base64(encoded); digest = Digest(encoded);
+        frame = Frame(value.sweep.constructionFrame);
+    } else if (value.family == recipe::Family::Loft) {
+        std::vector<double> encoded;
+        if (!core3d::loft_persistence::Encode(value.loft, encoded)) return nil;
+        bytes = Base64(encoded); digest = Digest(encoded);
+        frame = Frame(value.loft.constructionFrame);
+    } else if (value.family == recipe::Family::AnalyticBoolean
+               && value.analyticBoolean) {
+        bytes = Base64(value.analyticBoolean->bytes);
+        digest = Digest(value.analyticBoolean->bytes);
+    }
+    return @{ @"family": FamilyText(value.family), @"bytesBase64": bytes,
+              @"bytesDigest": digest, @"constructionFrame": frame,
+              @"featureIdentifier": Text(value.featureIdentifier) };
+}
+
+bool CaptureAxesSnapshot(OcctDocument& owner, NSString *identifier,
+                         core3d::pattern_owner::Snapshot& output) noexcept {
+    output = {};
+    try {
+        UUID requested{};
+        if (!core3d::pattern_owner::Parse(
+                std::string(identifier.UTF8String ?: ""), requested)) return false;
+        std::vector<core3d::pattern::Record> records;
+        if (!core3d::pattern::ReadAll(owner.Document(), records)) return false;
+        const core3d::pattern::Definition *match = nullptr;
+        for (const auto& record : records) {
+            const auto& definition = record.definition;
+            bool hit = definition.owner.entity == requested
+                || definition.owner.definition == requested
+                || definition.feature == requested
+                || definition.source.entity == requested
+                || definition.source.definition == requested
+                || definition.source.sourceFeature == requested;
+            for (const auto& member : definition.members) hit = hit || member.identity == requested;
+            for (const auto& member : definition.removals) hit = hit || member.identity == requested;
+            if (!hit) continue;
+            if (match) return false;
+            match = &definition;
+        }
+        if (!match) return false;
+        return core3d::pattern_owner::Capture(
+                   owner, core3d::retained_solid::UUIDText(match->source.entity), output)
+                == core3d::pattern_owner::Refusal::None
+            && output.record.definition.feature == match->feature;
+    } catch (...) { output = {}; return false; }
+}
+
+NSDictionary<NSString *, id> *AxesEvidence(
+    const core3d::pattern_owner::Snapshot& snapshot, double metersPerUnit) {
+    if (!snapshot.admitted() || !snapshot.allLabels) return nil;
+    const auto& definition = snapshot.record.definition;
+    const double millimetresPerUnit = metersPerUnit * 1000.0;
+    NSMutableArray *members = [NSMutableArray arrayWithCapacity:definition.members.size()];
+    if (snapshot.allLabels->members.size() != definition.members.size()) return nil;
+    for (std::size_t index = 0; index < definition.members.size(); ++index) {
+        const auto& member = definition.members[index];
+        const auto& actual = snapshot.allLabels->members[index];
+        const auto& object = actual.receipt.visibility.object.object;
+        const auto recipeDump = SourceRecipeDump(actual.recipe);
+        [members addObject:@{
+            @"row": @(member.coordinate.row), @"column": @(member.coordinate.column),
+            @"entityIdentifier": Text(object.entityIdentifier),
+            @"definitionIdentifier": Text(object.definitionIdentifier),
+            @"localID": @(member.localID),
+            @"suppressed": @(member.state == core3d::pattern::MemberState::Suppressed),
+            @"recipeFeatureIdentifier": actual.featureIdentifier.empty()
+                ? recipeDump[@"featureIdentifier"] : Text(actual.featureIdentifier),
+            @"recipe": recipeDump, @"appearance": Appearance(actual.receipt),
+            @"shapeBytesBase64": Base64(actual.shapeBytes),
+            @"shapeBytesDigest": Digest(actual.shapeBytes),
+            @"geometryBounds": Bounds(object.shape),
+        }];
+    }
+    NSMutableArray *retired = [NSMutableArray array];
+    for (std::uint64_t value : definition.issuance.retiredLocalIDs)
+        [retired addObject:@(value)];
+    NSMutableArray *removals = [NSMutableArray array];
+    for (const auto& member : definition.removals)
+        [removals addObject:@{ @"entityIdentifier": UUIDText(member.identity),
+            @"localID": @(member.localID), @"row": @(member.coordinate.row),
+            @"column": @(member.coordinate.column) }];
+    const auto& sourceObject = snapshot.allLabels->source.visibility.object.object;
+    return @{
+        @"schema": @"shapeyard.d2-pattern-axes-evidence.v1", @"valid": @YES,
+        @"document": Text(snapshot.allLabels->documentIdentifier),
+        @"metersPerUnit": @(metersPerUnit),
+        @"ownerDocument": UUIDText(definition.owner.document),
+        @"ownerEntity": UUIDText(definition.owner.entity),
+        @"ownerDefinition": UUIDText(definition.owner.definition),
+        @"patternFeatureIdentifier": UUIDText(definition.feature),
+        @"sourceEntityIdentifier": Text(sourceObject.entityIdentifier),
+        @"sourceDefinitionIdentifier": Text(sourceObject.definitionIdentifier),
+        @"sourceFeatureIdentifier": UUIDText(definition.source.sourceFeature),
+        @"sourceFrame": Numbers(definition.sourceFrame.data(), definition.sourceFrame.size()),
+        @"sourceFrameBytesBase64": Base64(definition.sourceFrame.data(),
+                                            sizeof(definition.sourceFrame)),
+        @"sourceShapeBytesBase64": Base64(snapshot.allLabels->sourceShapeBytes),
+        @"sourceShapeBytesDigest": Digest(snapshot.allLabels->sourceShapeBytes),
+        @"sourceRecipe": SourceRecipeDump(snapshot.sourceRecipe),
+        @"sourceAppearance": Appearance(snapshot.allLabels->source),
+        @"kind": KindText(definition.kind), @"rowAxis": @(unsigned(definition.rowAxis)),
+        @"columnAxis": @(unsigned(definition.columnAxis)),
+        @"rowCount": @(definition.rowCount), @"columnCount": @(definition.columnCount),
+        @"rowSpacingMM": @(definition.rowSpacing * millimetresPerUnit),
+        @"columnSpacingMM": @(definition.columnSpacing * millimetresPerUnit),
+        @"radialPivotMM": @[@(definition.radialPivotLocal[0] * millimetresPerUnit),
+                              @(definition.radialPivotLocal[1] * millimetresPerUnit),
+                              @(definition.radialPivotLocal[2] * millimetresPerUnit)],
+        @"sweepDegrees": @(Degrees(definition.sweepRadians)),
+        @"nextLocalID": @(definition.issuance.nextLocalID), @"retiredLocalIDs": retired,
+        @"removals": removals, @"members": members, @"memberCount": @(members.count),
+        @"recordBytesBase64": Base64(snapshot.record.bytes),
+        @"recordBytesDigest": Digest(snapshot.record.bytes),
+    };
+}
+
+core3d::pattern_owner::Edit EditFrom(
+    const core3d::pattern::Definition& definition) {
+    core3d::pattern_owner::Edit edit;
+    edit.rows = definition.rowCount; edit.columns = definition.columnCount;
+    edit.rowAxis = definition.rowAxis; edit.columnAxis = definition.columnAxis;
+    edit.rowSpacing = definition.rowSpacing;
+    edit.columnSpacing = definition.columnSpacing;
+    edit.sweepRadians = definition.sweepRadians;
+    edit.radialPivotLocal = definition.radialPivotLocal;
+    for (const auto& member : definition.members)
+        if (member.state == core3d::pattern::MemberState::Suppressed)
+            edit.suppressed.insert(member.coordinate);
+    return edit;
+}
+
+NSDictionary<NSString *, id> *PreparedMemberDump(
+    const core3d::pattern_owner::PreparedEdit& prepared) {
+    if (!prepared.admitted() || !prepared.native || !prepared.opening.allLabels) return nil;
+    NSMutableArray *members = [NSMutableArray arrayWithCapacity:prepared.native->recipes.size()];
+    for (const auto& recipeEntry : prepared.native->recipes) {
+        const core3d::pattern::Member *definitionMember = nullptr;
+        for (const auto& member : prepared.candidate.members)
+            if (member.coordinate.row == recipeEntry.key.row
+                && member.coordinate.column == recipeEntry.key.column) {
+                definitionMember = &member; break;
+            }
+        if (!definitionMember) return nil;
+        std::string shapeBytes;
+        TopoDS_Shape shape;
+        NSDictionary *recipeDump = nil;
+        if (recipeEntry.source) {
+            shapeBytes = prepared.opening.allLabels->sourceShapeBytes;
+            shape = prepared.opening.source.shape;
+            recipeDump = SourceRecipeDump(prepared.opening.sourceRecipe);
+        } else {
+            for (const auto& replacement : prepared.native->labels.replacements) {
+                if (replacement.expected.visibility.object.object.entityIdentifier
+                    == recipeEntry.entityIdentifier) {
+                    shape = replacement.clone.detachedShape; break;
+                }
+            }
+            if (shape.IsNull()
+                || !core3d::retained_part_boolean::ExactShapeBytes(shape, shapeBytes)) return nil;
+            recipeDump = PreparedRecipeDump(recipeEntry.prepared);
+        }
+        if (!recipeDump) return nil;
+        [members addObject:@{
+            @"row": @(recipeEntry.key.row), @"column": @(recipeEntry.key.column),
+            @"entityIdentifier": Text(recipeEntry.entityIdentifier),
+            @"definitionIdentifier": Text(recipeEntry.definitionIdentifier),
+            @"localID": @(definitionMember->localID),
+            @"suppressed": @(recipeEntry.suppressed),
+            @"recipeFeatureIdentifier": Text(recipeEntry.featureIdentifier),
+            @"recipe": recipeDump, @"shapeBytesBase64": Base64(shapeBytes),
+            @"shapeBytesDigest": Digest(shapeBytes), @"geometryBounds": Bounds(shape),
+        }];
+    }
+    return @{ @"members": members };
+}
+
+} // namespace
+#endif
+
 @implementation Core3DViewController (PatternCreationOpening)
 
 - (Core3DPatternCreationOpening *)beginPatternCreation {
@@ -987,6 +1305,121 @@ CreateOutcome ApplyCreation(const CreationCapture& capture,
             evidence[@"memberCount"] = @(members.count);
             evidence[@"valid"] = @YES;
             return evidence;
+        } catch (...) { return nil; }
+    }
+}
+
+- (NSDictionary<NSString *, id> *)debugPatternAxesEvidenceForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    if (![NSThread isMainThread] || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || !GLController || !GLController.viewer) return nil;
+    @autoreleasepool {
+        try {
+            const Handle(OcctDocument) owner = GLController.viewer->getDocument();
+            const Handle(TDocStd_Document) document = owner.IsNull()
+                ? Handle(TDocStd_Document)() : owner->Document();
+            Standard_Real unit = 0;
+            if (document.IsNull() || document->HasOpenCommand()
+                || !XCAFDoc_DocumentTool::GetLengthUnit(document, unit)) return nil;
+            core3d::pattern_owner::Snapshot snapshot;
+            if (!CaptureAxesSnapshot(*owner, entityIdentifier, snapshot))
+                return @{ @"schema": @"shapeyard.d2-pattern-axes-evidence.v1",
+                          @"valid": @NO };
+            return AxesEvidence(snapshot, double(unit));
+        } catch (...) { return nil; }
+    }
+}
+
+- (NSDictionary<NSString *, id> *)debugPatternAxesInertnessDumpForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    if (![NSThread isMainThread] || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || !GLController || !GLController.viewer) return nil;
+    @autoreleasepool {
+        try {
+            const Handle(OcctDocument) owner = GLController.viewer->getDocument();
+            const Handle(TDocStd_Document) document = owner.IsNull()
+                ? Handle(TDocStd_Document)() : owner->Document();
+            if (document.IsNull() || document->HasOpenCommand()) return nil;
+            core3d::pattern_owner::Snapshot opening;
+            if (!CaptureAxesSnapshot(*owner, entityIdentifier, opening)) return nil;
+            const auto baselineEdit = EditFrom(opening.record.definition);
+            std::vector<std::pair<std::string, core3d::pattern_owner::Edit>> variations;
+            const auto differentAxis = [](Axis value) {
+                return value == Axis::Z ? Axis::Y : Axis::Z;
+            };
+            if (opening.record.definition.kind == Kind::Linear) {
+                auto rowAxis = baselineEdit;
+                rowAxis.rowAxis = differentAxis(rowAxis.rowAxis);
+                variations.push_back({"rowAxis", rowAxis});
+                auto rowSpacing = baselineEdit;
+                rowSpacing.rowSpacing += 7.125;
+                variations.push_back({"rowSpacing", rowSpacing});
+                auto pivot = baselineEdit;
+                pivot.radialPivotLocal = {{3.25, -4.5, 5.75}};
+                variations.push_back({"pivot", pivot});
+                auto sweep = baselineEdit;
+                sweep.sweepRadians = 1.23456789;
+                variations.push_back({"sweep", sweep});
+                auto combined = rowAxis;
+                combined.rowSpacing = rowSpacing.rowSpacing;
+                combined.radialPivotLocal = pivot.radialPivotLocal;
+                combined.sweepRadians = sweep.sweepRadians;
+                variations.push_back({"combined", combined});
+            } else if (opening.record.definition.kind == Kind::Radial) {
+                auto rowAxis = baselineEdit;
+                rowAxis.rowAxis = differentAxis(rowAxis.rowAxis);
+                variations.push_back({"rowAxis", rowAxis});
+                auto rowSpacing = baselineEdit;
+                rowSpacing.rowSpacing += 7.125;
+                variations.push_back({"rowSpacing", rowSpacing});
+                auto columnSpacing = baselineEdit;
+                columnSpacing.columnSpacing += 9.875;
+                variations.push_back({"columnSpacing", columnSpacing});
+                auto combined = rowAxis;
+                combined.rowSpacing = rowSpacing.rowSpacing;
+                combined.columnSpacing = columnSpacing.columnSpacing;
+                variations.push_back({"combined", combined});
+            } else if (opening.record.definition.kind == Kind::Grid) {
+                auto pivot = baselineEdit;
+                pivot.radialPivotLocal = {{3.25, -4.5, 5.75}};
+                variations.push_back({"pivot", pivot});
+                auto sweep = baselineEdit;
+                sweep.sweepRadians = 1.23456789;
+                variations.push_back({"sweep", sweep});
+                auto combined = pivot;
+                combined.sweepRadians = sweep.sweepRadians;
+                variations.push_back({"combined", combined});
+            } else return nil;
+
+            const int undoBefore = document->GetAvailableUndos();
+            const auto recordBefore = opening.record.bytes;
+            NSMutableArray *pairs = [NSMutableArray arrayWithCapacity:variations.size()];
+            for (const auto& variation : variations) {
+                const auto baseline = core3d::pattern_owner::PrepareNative(
+                    *owner, opening, baselineEdit, {});
+                const auto changed = core3d::pattern_owner::PrepareNative(
+                    *owner, opening, variation.second, {});
+                NSDictionary *baselineDump = PreparedMemberDump(baseline);
+                NSDictionary *changedDump = PreparedMemberDump(changed);
+                if (!baselineDump || !changedDump) return nil;
+                [pairs addObject:@{ @"field": Text(variation.first),
+                                    @"baseline": baselineDump,
+                                    @"varied": changedDump }];
+            }
+            core3d::pattern_owner::Snapshot after;
+            const bool capturedAfter = CaptureAxesSnapshot(*owner, entityIdentifier, after);
+            return @{
+                @"schema": @"shapeyard.d2-pattern-axes-inertness.v1",
+                @"kind": KindText(opening.record.definition.kind), @"pairs": pairs,
+                @"historyBefore": @(undoBefore),
+                @"historyAfter": @(document->GetAvailableUndos()),
+                @"recordBeforeBase64": Base64(recordBefore),
+                @"recordAfterBase64": capturedAfter ? Base64(after.record.bytes) : @"",
+                @"completeReadSetUnchanged": @(capturedAfter
+                    && core3d::pattern_owner::SameCompleteReadSet(opening, after)),
+            };
         } catch (...) { return nil; }
     }
 }

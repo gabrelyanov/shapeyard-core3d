@@ -69,6 +69,7 @@ namespace core3d::face_image::persistence::bindings { enum class ReadState : int
 #include <TopoDS_TShape.hxx>
 #include <array>
 #include <deque>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -1233,14 +1234,16 @@ public:
         core3d::native_opening::CommandLease& lease,
         const OcctExactLabelReceipt& expected,
         const OcctPreparedLabelClone& clone,
-        OcctExactLabelReceipt& receipt) noexcept;
+        OcctExactLabelReceipt& receipt,
+        const std::function<Standard_Boolean(const TDF_Label&)>& shapeStager = {}) noexcept;
     Standard_EXPORT Standard_Boolean StageRemoveExactFreeLabel(
         core3d::native_opening::CommandLease& lease,
         const OcctExactLabelReceipt& expected) noexcept;
     Standard_EXPORT Standard_Boolean StageAllLabels(
         core3d::native_opening::CommandLease& lease,
         const OcctAllLabelPlan& plan,
-        std::vector<OcctExactLabelReceipt>& receipts) noexcept;
+        std::vector<OcctExactLabelReceipt>& receipts,
+        const std::function<Standard_Boolean(const TDF_Label&)>& shapeStager = {}) noexcept;
     Standard_EXPORT Standard_Boolean ReadBackAllLabels(
         const OcctAllLabelPlan& plan,
         const std::vector<OcctExactLabelReceipt>& receipts) const noexcept;
@@ -1774,7 +1777,8 @@ public:
 
     Standard_Boolean ReplaceShape(
         const TDF_Label& label,
-        Handle(AIS_Shape) aisShape);
+        Handle(AIS_Shape) aisShape,
+        const std::function<Standard_Boolean(const TDF_Label&)>& shapeStager = {});
     Standard_Boolean HasUnroutedRetainedDependent(
         const TDF_Label& label) const noexcept;
     
