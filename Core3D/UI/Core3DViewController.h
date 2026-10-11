@@ -2061,6 +2061,19 @@ __attribute__((objc_subclassing_restricted))
 	foreignEntityIdentifier:(NSString *)foreignEntityIdentifier
 	edgeTopologyIndex:(NSUInteger)edgeTopologyIndex
 	NS_SWIFT_NAME(debugSelectValidAndForeignEdgeOwners(entityIdentifier:foreignEntityIdentifier:edgeTopologyIndex:));
+//! Negative-only raw-R2 driver: publishes one real edge from each of two
+//! distinct native owners without clearing the first selection.
+- (BOOL)debugSelectRawR2MixedOwnerEdges:(NSString *)firstEntity
+    firstEdgeTopologyIndex:(NSUInteger)firstEdge
+    secondEntity:(NSString *)secondEntity
+    secondEdgeTopologyIndex:(NSUInteger)secondEdge
+    NS_SWIFT_NAME(debugSelectRawR2MixedOwnerEdges(_:firstEdgeTopologyIndex:secondEntity:secondEdgeTopologyIndex:));
+//! Read-only sealed-authority observation and genuine-capture pairing check.
+//! It never returns, constructs, consumes, or republishes native authority.
+- (NSDictionary<NSString *, NSNumber *> *)debugRawR2AuthorityObservation:
+    (Core3DEdgeTreatmentRawTargetCaptureR2 *)target
+    comparedWith:(nullable Core3DEdgeTreatmentRawTargetCaptureR2 *)other
+    NS_SWIFT_NAME(debugRawR2AuthorityObservation(_:comparedWith:));
 //! Facts-only observation of the exact production raw-R2 membership
 //! classifier. It returns no shape, selection, snapshot, target or key.
 - (NSDictionary<NSString *, id> *)debugObserveRawR2MembershipWithEntityIdentifier:

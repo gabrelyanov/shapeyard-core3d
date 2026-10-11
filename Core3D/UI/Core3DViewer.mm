@@ -11416,6 +11416,66 @@ bool Core3DViewer::selectionModeAuthorityAllowsRetainedOperation()
 }
 
 #ifdef DEBUG
+Standard_Boolean Core3DViewer::DebugSelectRawR2MixedOwnerEdges(
+    const std::string& firstEntity, Standard_Size firstEdge,
+    const std::string& secondEntity, Standard_Size secondEdge) noexcept {
+    if(![NSThread isMainThread]||firstEntity.empty()||secondEntity.empty()
+        ||firstEntity==secondEntity||myContext.IsNull()||myDoc.IsNull()
+        ||!_shapeInteractor||_shapeInteractor->getSelectionMode()!=ShapeSelectionMode::Edge
+        ||!_shapeInteractor->selectionModeAuthorityIsExact())return Standard_False;
+    try{
+        OCC_CATCH_SIGNALS
+        const auto find=[&](const std::string& entity,Handle(AIS_Shape)& presentation){
+            presentation.Nullify();AIS_ListOfInteractive displayed;
+            myContext->DisplayedObjects(AIS_KOI_Shape,-1,displayed);
+            for(AIS_ListIteratorOfListOfInteractive item(displayed);item.More();item.Next()){
+                const auto candidate=Handle(AIS_Shape)::DownCast(item.Value());
+                const TDF_Label label=myDoc->ShapeLabel(item.Value());
+                if(label.IsNull()||myDoc->EntityIdentifierForLabel(label)!=entity)continue;
+                if(!presentation.IsNull()||candidate.IsNull()||candidate->Shape().IsNull()
+                    ||myDoc->GeometryRepresentationForLabel(label)!=OcctGeometryRepresentation::BRep)
+                    return false;
+                presentation=candidate;
+            }
+            return !presentation.IsNull();
+        };
+        Handle(AIS_Shape) first,second;
+        if(!find(firstEntity,first)||!find(secondEntity,second))return Standard_False;
+        TopTools_IndexedMapOfShape firstEdges,secondEdges;
+        TopExp::MapShapes(first->Shape(),TopAbs_EDGE,firstEdges);
+        TopExp::MapShapes(second->Shape(),TopAbs_EDGE,secondEdges);
+        if(firstEdge>=Standard_Size(firstEdges.Extent())
+            ||secondEdge>=Standard_Size(secondEdges.Extent()))return Standard_False;
+        const Handle(StdSelect_BRepOwner) firstOwner=new StdSelect_BRepOwner(
+            TopoDS::Edge(firstEdges.FindKey(Standard_Integer(firstEdge+1))),first,0,Standard_True);
+        const Handle(StdSelect_BRepOwner) secondOwner=new StdSelect_BRepOwner(
+            TopoDS::Edge(secondEdges.FindKey(Standard_Integer(secondEdge+1))),second,0,Standard_True);
+        myContext->ClearDetected(Standard_False);myContext->ClearSelected(Standard_False);
+        myContext->AddOrRemoveSelected(firstOwner,Standard_False);
+        myContext->AddOrRemoveSelected(secondOwner,Standard_False);
+        if(!firstOwner->IsSelected()||!secondOwner->IsSelected())return Standard_False;
+        Standard_Size count=0;myContext->InitSelected();
+        for(;myContext->MoreSelected();myContext->NextSelected())++count;
+        return count==2?Standard_True:Standard_False;
+    }catch(...){
+        try{myContext->ClearSelected(Standard_False);myContext->ClearDetected(Standard_False);}
+        catch(...){}
+        return Standard_False;
+    }
+}
+
+Core3DViewer::RawR2AuthorityObservation Core3DViewer::DebugRawR2AuthorityObservation(
+    const std::shared_ptr<const retained_edge_treatment::r2::RawTargetCapture>& target,
+    const std::shared_ptr<const retained_edge_treatment::r2::RawTargetCapture>& other)
+    const noexcept {
+    RawR2AuthorityObservation answer;answer.native=bool(target);
+    if(!target)return answer;
+    answer.objectModeBound=target->objectModeBound_.load();
+    answer.consumed=target->consumed_.load();
+    answer.sameSnapshot=other&&target->original_==other->original_;
+    return answer;
+}
+
 Standard_Boolean Core3DViewer::DebugSetDetectedOwner(
 	const Handle(SelectMgr_EntityOwner)& theOwner) noexcept
 {

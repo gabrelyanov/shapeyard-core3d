@@ -13387,6 +13387,32 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
 		edgeTopologyIndex:edgeTopologyIndex];
 }
 
+- (BOOL)debugSelectRawR2MixedOwnerEdges:(NSString *)firstEntity
+    firstEdgeTopologyIndex:(NSUInteger)firstEdge
+    secondEntity:(NSString *)secondEntity
+    secondEdgeTopologyIndex:(NSUInteger)secondEdge {
+    if(!NSThread.isMainThread||!GLController.viewer||!firstEntity.length
+        ||!secondEntity.length)return NO;
+    return GLController.viewer->DebugSelectRawR2MixedOwnerEdges(
+        firstEntity.UTF8String,firstEdge,secondEntity.UTF8String,secondEdge);
+}
+
+- (NSDictionary<NSString *,NSNumber *> *)debugRawR2AuthorityObservation:
+    (Core3DEdgeTreatmentRawTargetCaptureR2 *)target
+    comparedWith:(Core3DEdgeTreatmentRawTargetCaptureR2 *)other {
+    auto first=(Core3DEdgeTreatmentNativeRawTargetsR2 *)target;
+    auto second=(Core3DEdgeTreatmentNativeRawTargetsR2 *)other;
+    if(!NSThread.isMainThread||!GLController.viewer
+        ||![first isKindOfClass:Core3DEdgeTreatmentNativeRawTargetsR2.class])
+        return @{@"native":@NO,@"objectModeBound":@NO,@"consumed":@NO,
+            @"sameSnapshot":@NO};
+    auto value=GLController.viewer->DebugRawR2AuthorityObservation(first->native,
+        [second isKindOfClass:Core3DEdgeTreatmentNativeRawTargetsR2.class]
+            ?second->native:std::shared_ptr<const core3d::retained_edge_treatment::r2::RawTargetCapture>());
+    return @{@"native":@(value.native),@"objectModeBound":@(value.objectModeBound),
+        @"consumed":@(value.consumed),@"sameSnapshot":@(value.sameSnapshot)};
+}
+
 #if DEBUG
 - (NSDictionary<NSString *, id> *)debugObserveRawR2MembershipWithEntityIdentifier:
             (NSString *)entityIdentifier

@@ -846,6 +846,22 @@ namespace core3d {
         scene::OcctSceneSnapshotBuilder::OverlayPointer
         captureScenePresentationOverlay() noexcept;
 #ifdef DEBUG
+        struct RawR2AuthorityObservation {
+            bool native = false;
+            bool objectModeBound = false;
+            bool consumed = false;
+            bool sameSnapshot = false;
+        };
+        //! Negative-only raw-R2 seams. The selector publishes two genuine edge
+        //! owners without clearing between them; the observer reports sealed
+        //! native state and never returns or mutates authority.
+        Standard_Boolean DebugSelectRawR2MixedOwnerEdges(
+            const std::string& firstEntity, Standard_Size firstEdge,
+            const std::string& secondEntity, Standard_Size secondEdge) noexcept;
+        RawR2AuthorityObservation DebugRawR2AuthorityObservation(
+            const std::shared_ptr<const retained_edge_treatment::r2::RawTargetCapture>&,
+            const std::shared_ptr<const retained_edge_treatment::r2::RawTargetCapture>&)
+            const noexcept;
         //! Select exactly one presentation whose modes are deliberately
         //! suspended by the active typed operation. This is a test-only seam
         //! for exercising the production selection callback; it never admits
