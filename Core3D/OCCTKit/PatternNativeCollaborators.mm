@@ -127,12 +127,42 @@ bool StageRecipe(const Handle(TDocStd_Document)& document,
     try {
         const auto& prepared = recipe.prepared;
         if (prepared.family == pattern_recipe_clone::Family::None) return true;
-        if (prepared.family == pattern_recipe_clone::Family::Sweep)
+        const auto forgetReplacementRecord = [&](const auto& hasAttribute,
+                                                  int minimumTag,
+                                                  int maximumLabels) {
+            if (recipe.created) return true;
+            TDF_Label record;
+            int visited = 0;
+            for (TDF_ChildIterator it(label, Standard_False);
+                 it.More(); it.Next()) {
+                if (++visited > maximumLabels) return false;
+                if (!hasAttribute(it.Value())) continue;
+                if (!record.IsNull() || it.Value().Tag() < minimumTag)
+                    return false;
+                record = it.Value();
+            }
+            if (record.IsNull()) return false;
+            record.ForgetAllAttributes(Standard_True);
+            return true;
+        };
+        if (prepared.family == pattern_recipe_clone::Family::Sweep) {
+            if (!forgetReplacementRecord(
+                    [](const TDF_Label& candidate) {
+                        return sweep_persistence::HasAttribute(candidate);
+                    }, sweep_persistence::MinimumRecordTag,
+                    sweep_persistence::MaximumLabels)) return false;
             return sweep_persistence::Stage(document, label, prepared.sweep,
                                              recipe.featureIdentifier);
-        if (prepared.family == pattern_recipe_clone::Family::Loft)
+        }
+        if (prepared.family == pattern_recipe_clone::Family::Loft) {
+            if (!forgetReplacementRecord(
+                    [](const TDF_Label& candidate) {
+                        return loft_persistence::HasAttribute(candidate);
+                    }, loft_persistence::MinimumRecordTag,
+                    loft_persistence::MaximumLabels)) return false;
             return loft_persistence::Stage(document, label, prepared.loft,
                                             recipe.featureIdentifier);
+        }
         if (prepared.family != pattern_recipe_clone::Family::AnalyticBoolean)
             return false;
         if (!recipe.created) {
@@ -189,15 +219,37 @@ public:
         };
         try {
             auto* lease = borrowed_ ? borrowed_ : lease_.get();
+            std::set<std::string> stagedReplacementRecipes;
+            const auto stageReplacementRecipe = [&](const TDF_Label& label) {
+                const std::string entity = owner_.EntityIdentifierForLabel(label);
+                const AllLabelMutation::Recipe* match = nullptr;
+                for (const auto& recipe : mutation_->recipes) {
+                    if (recipe.source || recipe.created
+                        || recipe.entityIdentifier != entity) continue;
+                    if (match) return Standard_False;
+                    match = &recipe;
+                }
+                if (!match) return Standard_False;
+                if (match->prepared.family
+                    == pattern_recipe_clone::Family::None) return Standard_True;
+                if (!StageRecipe(owner_.Document(), label, *match)
+                    || !stagedReplacementRecipes.insert(entity).second)
+                    return Standard_False;
+                return Standard_True;
+            };
             if (failed("stageAll.lease-null", !lease)
                 || failed("stageAll.lease-not-open", !lease->ownsOpenCommand())
                 || failed("stageAll.mutation-null", !mutation_)
                 || failed("stageAll.mutation-mismatch", prepared.native != mutation_)
                 || failed("stageAll.read-set", !SameCompleteReadSet(current, prepared.opening))
-                || failed("stageAll.labels", !owner_.StageAllLabels(*lease, mutation_->labels, receipts_)))
+                || failed("stageAll.labels", !owner_.StageAllLabels(
+                    *lease, mutation_->labels, receipts_,
+                    stageReplacementRecipe)))
                 return false;
             for (const auto& recipe : mutation_->recipes) {
-                if (recipe.source) continue;
+                if (recipe.source
+                    || stagedReplacementRecipes.count(
+                        recipe.entityIdentifier) != 0) continue;
                 const auto found = std::find_if(receipts_.begin(), receipts_.end(),
                     [&](const OcctExactLabelReceipt& value) {
                         return value.visibility.object.object.entityIdentifier

@@ -12,6 +12,24 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+typedef NS_ENUM(NSInteger, Core3DPatternEditParameterRefusal) {
+    Core3DPatternEditParameterRefusalNone = 0,
+    Core3DPatternEditParameterRefusalInvalidDescriptor,
+    Core3DPatternEditParameterRefusalInvalidRowAxis,
+    Core3DPatternEditParameterRefusalInvalidColumnAxis,
+    Core3DPatternEditParameterRefusalDuplicateAxes,
+    Core3DPatternEditParameterRefusalRowCountRequiresOne,
+};
+
+//! Read-only, typed diagnosis of the axis and non-grid row-count parameters.
+//! `None` means only that these parameters passed their checks; the existing
+//! apply method remains the sole full-admission and mutation route.
+@interface Core3DPatternEditingOpening (PatternParameterPreflight)
+- (Core3DPatternEditParameterRefusal)parameterRefusalForCandidate:
+    (NSDictionary<NSString *, id> *)candidate
+    NS_SWIFT_NAME(parameterRefusal(candidate:));
+@end
+
 //! One native D2 retained-pattern creation opening for ordinary authoring.
 //! Capture freezes exactly one admissible selected source object from the live
 //! document. `descriptor` projects the creation context (document identity,
@@ -65,6 +83,14 @@ __attribute__((objc_subclassing_restricted))
 //! recipe from the live document. Compiled out of Release.
 - (NSDictionary<NSString *, id> *_Nullable)debugPatternCreationEvidenceForEntityIdentifier:(NSString *)entityIdentifier
     NS_SWIFT_NAME(debugPatternCreationEvidence(entityIdentifier:));
+//! Complete identity-keyed readback for D2 axis edit evidence. Full canonical
+//! record, shape and family-recipe encodings are retained for unit tests.
+- (NSDictionary<NSString *, id> *_Nullable)debugPatternAxesEvidenceForEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugPatternAxesEvidence(entityIdentifier:));
+//! Pure paired PrepareNative dumps for the inactive fields of the captured
+//! pattern kind. No command is opened and every suppressed member is included.
+- (NSDictionary<NSString *, id> *_Nullable)debugPatternAxesInertnessDumpForEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugPatternAxesInertnessDump(entityIdentifier:));
 #endif
 @end
 

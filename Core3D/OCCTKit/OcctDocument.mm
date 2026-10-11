@@ -13215,7 +13215,8 @@ TDF_Label OcctDocument::AddShape(
 
 Standard_Boolean OcctDocument::ReplaceShape(
     const TDF_Label& label,
-    Handle(AIS_Shape) aisShape) {
+    Handle(AIS_Shape) aisShape,
+    const std::function<Standard_Boolean(const TDF_Label&)>& shapeStager) {
 	// Stable entity and definition identifiers belong to the label, so replacing
 	// its geometry deliberately leaves both identity attributes untouched.
     if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
@@ -13309,6 +13310,13 @@ Standard_Boolean OcctDocument::ReplaceShape(
                 == OcctGeometryRepresentation::LegacyUnknown
             && !WriteGeometryRepresentationMarker(
                 label, OcctGeometryRepresentation::BRep)) {
+            restorePrevious();
+            return Standard_False;
+        }
+        // D2's prepared recipe-clone replacement uses this one-shot seam to
+        // bind its already-validated recipe to the new shape before the full,
+        // unchanged transform capture. Every existing caller supplies no seam.
+        if (shapeStager && !shapeStager(label)) {
             restorePrevious();
             return Standard_False;
         }
@@ -16884,7 +16892,8 @@ Standard_Boolean OcctDocument::StageReplaceExactFreeLabel(
     core3d::native_opening::CommandLease& lease,
     const OcctExactLabelReceipt& expected,
     const OcctPreparedLabelClone& clone,
-    OcctExactLabelReceipt& receipt) noexcept {
+    OcctExactLabelReceipt& receipt,
+    const std::function<Standard_Boolean(const TDF_Label&)>& shapeStager) noexcept {
     receipt = {};
     try {
         OCC_CATCH_SIGNALS
@@ -16925,7 +16934,8 @@ Standard_Boolean OcctDocument::StageReplaceExactFreeLabel(
         candidate->SetLocalTransformation(expected.visibility.object.object.transform);
         const TDF_Label label = expected.visibility.object.object.label;
         if (!R179TraceExactLabelCheck("exact.replace.ReplaceShape",
-                !traceRefusal("ReplaceShape", !ReplaceShape(label, candidate))))
+                !traceRefusal("ReplaceShape",
+                    !ReplaceShape(label, candidate, shapeStager))))
             return Standard_False;
         // ReplaceShape materializes all eight optional transform attributes.
         // Restore the validated receipt's exact sparse representation without
@@ -17009,7 +17019,8 @@ Standard_Boolean OcctDocument::StageRemoveExactFreeLabel(
 
 Standard_Boolean OcctDocument::StageAllLabels(
     core3d::native_opening::CommandLease& lease, const OcctAllLabelPlan& plan,
-    std::vector<OcctExactLabelReceipt>& receipts) noexcept {
+    std::vector<OcctExactLabelReceipt>& receipts,
+    const std::function<Standard_Boolean(const TDF_Label&)>& shapeStager) noexcept {
     receipts.clear();
     try {
         OCC_CATCH_SIGNALS
@@ -17054,7 +17065,10 @@ Standard_Boolean OcctDocument::StageAllLabels(
         }
         for (const auto& item : plan.replacements) {
             OcctExactLabelReceipt value;
-            if (!R179TraceExactLabelCheck("exact.all.replace", StageReplaceExactFreeLabel(lease, item.expected, item.clone, value))) return Standard_False;
+            if (!R179TraceExactLabelCheck("exact.all.replace",
+                    StageReplaceExactFreeLabel(
+                        lease, item.expected, item.clone, value,
+                        shapeStager))) return Standard_False;
             staged.push_back(std::move(value));
         }
         for (const auto& item : plan.removals)
