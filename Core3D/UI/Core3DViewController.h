@@ -2292,5 +2292,6 @@ __attribute__((objc_subclassing_restricted))
 NS_ASSUME_NONNULL_END
 
 #import <Core3D/Core3DPatternCreationOpening.h> // PC-D2-C: D2 creation-opening registration (one additive line).
+#import <Core3D/Core3DPatternAIReadback.h> // D719: DEBUG-only actual-label observation.
 #import <Core3D/Core3DFeaturePatternCreationOpening.h> // PC-D4-C production creator registration.
 #import <Core3D/Core3DAuthoredParameterOpening.h> // N0 shared authored-parameter authority.
