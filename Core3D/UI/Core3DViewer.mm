@@ -9,6 +9,7 @@
 
 #include "Core3DViewer.h"
 #include "OrdinaryEditCommand.hpp"
+#include "RawR2BevelPreviewAdapter.hxx"
 #include "RetainedProfileSourceAdapter.hxx"
 #include "../OCCTKit/NativeOpeningDependentReplay.hxx"
 #include "../OCCTKit/FeaturePatternProfileContinuation.hxx"
@@ -1802,18 +1803,13 @@ Core3DViewer::prepareEdgeTreatmentSelectorAppendR2(
 }
 
 std::shared_ptr<retained_edge_treatment::r2::Work>
-Core3DViewer::prepareEdgeTreatmentRawAppendR2(
+Core3DViewer::makeRawR2CandidateWork(
     const std::shared_ptr<const retained_edge_treatment::r2::RawTargetCapture>& targets,
-    retained_edge_treatment::Kind kind,double amountMM,const ObjectFrameIdentity& identity,
-    std::uint64_t presentationRevision,std::uint32_t width,std::uint32_t height,
+    retained_edge_treatment::Kind kind,double amountMM,
     retained_edge_treatment::Refusal& refusal) noexcept {
     namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;
     refusal=et::Refusal::StaleSnapshot;
     if(![NSThread isMainThread]||!targets||!targets->original_)return {};
-    // Every preparation attempt spends this sealed authority, including a
-    // later refusal. A stale or foreign caller cannot probe and retry it.
-    bool unused=false;
-    if(!targets->consumed_.compare_exchange_strong(unused,true))return {};
     if(kind!=et::Kind::ConstantFillet&&kind!=et::Kind::Chamfer){
         refusal=et::Refusal::UnsupportedOperation;return {};
     }
@@ -1821,41 +1817,11 @@ Core3DViewer::prepareEdgeTreatmentRawAppendR2(
         refusal=et::Refusal::InvalidAmount;return {};
     }
     const auto& original=targets->original_;
-    if(!targets->objectModeBound_.load()||!original->current()
+    if(!targets->objectModeBound_.load()||!targets->consumed_.load()||!original->current()
         ||original->definition_.steps.size()>=et::MaximumSteps
-        ||targets->anchors_.empty()||targets->anchors_.size()>et::MaximumAnchorsPerStep
-        ||!canBeginCommittedEdit()||myDoc.IsNull()||myContext.IsNull()||!width||!height
-        ||original->ownerLabel_.IsNull()||!_shapeInteractor
-        ||_shapeInteractor->getSelectionMode()!=ShapeSelectionMode::WholeShape
-        ||!_shapeInteractor->selectionModeAuthorityIsExact())return {};
+        ||targets->anchors_.empty()||targets->anchors_.size()>et::MaximumAnchorsPerStep)
+        return {};
     try{
-        // Recheck both the pre-transition fence sealed by the capture and the
-        // exact post-transition scene supplied for preparation. Document and
-        // model revisions cannot change across the Edge -> Object handoff.
-        if(identity.entityIdentifier!=targets->entityIdentifier_
-            ||identity.publicationSourceIdentifier!=targets->publicationSourceIdentifier_
-            ||identity.documentGeneration!=targets->documentGeneration_
-            ||identity.modelRevision!=targets->modelRevision_)return {};
-        const auto sceneSnapshot=captureSceneSnapshot(width,height);
-        if(!sceneSnapshot||sceneSnapshot->selectionMode!=scene::ElementKind::Object
-            ||sceneSnapshot->publicationSourceIdentifier!=identity.publicationSourceIdentifier
-            ||sceneSnapshot->revisions.documentGeneration!=identity.documentGeneration
-            ||sceneSnapshot->revisions.model!=identity.modelRevision
-            ||sceneSnapshot->revisions.presentation!=presentationRevision)return {};
-        const auto document=myDoc->Document();
-        if(document.IsNull()||document->HasOpenCommand()
-            ||original->ownerLabel_.Data()!=document->GetData()
-            ||original->nonce_!=std::uint64_t(document->GetData()->Time())
-            ||original->owner_.fence.documentGeneration!=identity.documentGeneration
-            ||original->owner_.fence.modelRevision!=identity.modelRevision
-            ||!XCAFDoc_ShapeTool::GetShape(original->ownerLabel_).IsEqual(original->current_))return {};
-        myContext->InitSelected();if(!myContext->MoreSelected())return {};
-        const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
-        myContext->NextSelected();
-        if(myContext->MoreSelected()||selected.IsNull()||selected!=targets->presentation_
-            ||!myDoc->ShapeLabel(selected).IsEqual(original->ownerLabel_)
-            ||!selected->Shape().IsEqual(original->current_))return {};
-
         r2::Definition candidate=original->definition_;et::Step step;
         step.node=MintEdgeTreatmentUUID();step.feature=MintEdgeTreatmentUUID();
         step.localID=candidate.issuance.nextLocalID++;step.kind=kind;
@@ -1872,9 +1838,256 @@ Core3DViewer::prepareEdgeTreatmentRawAppendR2(
 #if DEBUG
         tb::debug::RecordPhase("prepare-raw-r2",targets->chargedBudget_,work->chargedBudget_);
 #endif
-        work->presentation_=selected;work->state_=r2::Work::State::Prepared;
+        work->presentation_=targets->presentation_;work->state_=r2::Work::State::Prepared;
         refusal=et::Refusal::None;return work;
     }catch(...){refusal=et::Refusal::BuildFailed;return {};}
+}
+
+void Core3DViewer::seedRawR2CandidateObservedDebt(
+    const std::shared_ptr<retained_edge_treatment::r2::RawPreviewCandidate>& candidate)
+    noexcept {
+    if(candidate&&candidate->work_)
+        candidate->observedBudget_=candidate->work_->chargedBudget_;
+}
+
+bool Core3DViewer::validateRawR2CandidateFence(
+    const std::shared_ptr<const retained_edge_treatment::r2::RawTargetCapture>& targets,
+    const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
+    std::uint32_t width,std::uint32_t height,
+    retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et=retained_edge_treatment;
+    refusal=et::Refusal::StaleSnapshot;
+    if(![NSThread isMainThread]||!targets||!targets->original_
+        ||!targets->objectModeBound_.load()||!canBeginCommittedEdit()
+        ||myDoc.IsNull()||myContext.IsNull()||!width||!height
+        ||targets->original_->ownerLabel_.IsNull()||!_shapeInteractor
+        ||_shapeInteractor->getSelectionMode()!=ShapeSelectionMode::WholeShape
+        ||!_shapeInteractor->selectionModeAuthorityIsExact())return false;
+    try{
+        const auto& original=targets->original_;
+        if(identity.entityIdentifier!=targets->entityIdentifier_
+            ||identity.publicationSourceIdentifier!=targets->publicationSourceIdentifier_
+            ||identity.documentGeneration!=targets->documentGeneration_
+            ||identity.modelRevision!=targets->modelRevision_)return false;
+        const auto sceneSnapshot=captureSceneSnapshot(width,height);
+        if(!sceneSnapshot||sceneSnapshot->selectionMode!=scene::ElementKind::Object
+            ||sceneSnapshot->publicationSourceIdentifier!=identity.publicationSourceIdentifier
+            ||sceneSnapshot->revisions.documentGeneration!=identity.documentGeneration
+            ||sceneSnapshot->revisions.model!=identity.modelRevision
+            ||sceneSnapshot->revisions.presentation!=presentationRevision)return false;
+        const auto document=myDoc->Document();
+        if(document.IsNull()||document->HasOpenCommand()
+            ||original->ownerLabel_.Data()!=document->GetData()
+            ||original->nonce_!=std::uint64_t(document->GetData()->Time())
+            ||original->owner_.fence.documentGeneration!=identity.documentGeneration
+            ||original->owner_.fence.modelRevision!=identity.modelRevision
+            ||!XCAFDoc_ShapeTool::GetShape(original->ownerLabel_).IsEqual(original->current_))
+            return false;
+        myContext->InitSelected();if(!myContext->MoreSelected())return false;
+        const auto selected=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+        myContext->NextSelected();
+        if(myContext->MoreSelected()||selected.IsNull()||selected!=targets->presentation_
+            ||!myDoc->ShapeLabel(selected).IsEqual(original->ownerLabel_)
+            ||!selected->Shape().IsEqual(original->current_))return false;
+        refusal=et::Refusal::None;return true;
+    }catch(...){refusal=et::Refusal::BuildFailed;return false;}
+}
+
+std::shared_ptr<retained_edge_treatment::r2::Work>
+Core3DViewer::prepareEdgeTreatmentRawAppendR2(
+    const std::shared_ptr<const retained_edge_treatment::r2::RawTargetCapture>& targets,
+    retained_edge_treatment::Kind kind,double amountMM,const ObjectFrameIdentity& identity,
+    std::uint64_t presentationRevision,std::uint32_t width,std::uint32_t height,
+    retained_edge_treatment::Refusal& refusal) noexcept {
+    // The immediate bridge takes the same sealed-session route as preview, so
+    // both origins share capture transfer, fence checks, issuance, anchors and
+    // sticky candidate debt. It returns only the Work and keeps its historical
+    // immediate build/commit behavior; P1 starts no presentation itself.
+    auto session=openRawR2BevelPreview(targets,identity,presentationRevision,
+        width,height,refusal);
+    if(!session)return {};
+    auto candidate=prepareRawR2BevelPreview(session,kind,amountMM,refusal);
+    return candidate?candidate->work_:std::shared_ptr<retained_edge_treatment::r2::Work>();
+}
+
+RawR2BevelPreviewAdapter::RawR2BevelPreviewAdapter(Core3DViewer& viewer) noexcept
+    : viewer_(viewer) {}
+
+std::shared_ptr<retained_edge_treatment::r2::RawPreviewSession>
+RawR2BevelPreviewAdapter::open(
+    const std::shared_ptr<const retained_edge_treatment::r2::RawTargetCapture>& targets,
+    const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
+    std::uint32_t width,std::uint32_t height,
+    retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et=retained_edge_treatment;namespace r2=et::r2;
+    refusal=et::Refusal::StaleSnapshot;
+    if(![NSThread isMainThread]||!targets||!targets->original_)return {};
+    bool unused=false;
+    if(!targets->consumed_.compare_exchange_strong(unused,true))return {};
+    if(!viewer_.validateRawR2CandidateFence(targets,identity,presentationRevision,
+        width,height,refusal))return {};
+    try{
+        auto session=std::shared_ptr<r2::RawPreviewSession>(new r2::RawPreviewSession);
+        session->targets_=targets;session->entityIdentifier_=identity.entityIdentifier;
+        session->publicationSourceIdentifier_=identity.publicationSourceIdentifier;
+        session->documentGeneration_=identity.documentGeneration;
+        session->modelRevision_=identity.modelRevision;
+        session->presentationRevision_=presentationRevision;
+        session->width_=width;session->height_=height;
+        refusal=et::Refusal::None;return session;
+    }catch(...){refusal=et::Refusal::BuildFailed;return {};}
+}
+
+std::shared_ptr<retained_edge_treatment::r2::RawPreviewCandidate>
+RawR2BevelPreviewAdapter::prepare(
+    const std::shared_ptr<retained_edge_treatment::r2::RawPreviewSession>& session,
+    retained_edge_treatment::Kind kind,double amountMM,
+    retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et=retained_edge_treatment;namespace r2=et::r2;
+    refusal=et::Refusal::StaleSnapshot;
+    if(![NSThread isMainThread]||!session||!session->targets_)return {};
+    if(kind!=et::Kind::ConstantFillet&&kind!=et::Kind::Chamfer){
+        refusal=et::Refusal::UnsupportedOperation;return {};
+    }
+    if(!std::isfinite(amountMM)||amountMM<=0||amountMM>20){
+        refusal=et::Refusal::InvalidAmount;return {};
+    }
+    ObjectFrameIdentity identity;identity.entityIdentifier=session->entityIdentifier_;
+    identity.publicationSourceIdentifier=session->publicationSourceIdentifier_;
+    identity.documentGeneration=session->documentGeneration_;
+    identity.modelRevision=session->modelRevision_;
+    if(!viewer_.validateRawR2CandidateFence(session->targets_,identity,
+        session->presentationRevision_,session->width_,session->height_,refusal))return {};
+    std::lock_guard<std::mutex> lock(session->mutex_);
+    const auto same=[&](const std::shared_ptr<r2::RawPreviewCandidate>& candidate){
+        return candidate&&candidate->kind_==kind&&candidate->amountMM_==amountMM
+            &&candidate->state_!=r2::RawPreviewCandidate::State::Cancelled
+            &&candidate->state_!=r2::RawPreviewCandidate::State::Superseded
+            &&candidate->state_!=r2::RawPreviewCandidate::State::Refused;
+    };
+    if(same(session->pending_)){refusal=et::Refusal::None;return session->pending_;}
+    if(same(session->active_)){refusal=et::Refusal::None;return session->active_;}
+    auto work=viewer_.makeRawR2CandidateWork(session->targets_,kind,amountMM,refusal);
+    if(!work)return {};
+    auto candidate=std::shared_ptr<r2::RawPreviewCandidate>(new r2::RawPreviewCandidate);
+    candidate->session_=session;candidate->work_=std::move(work);
+    candidate->generation_=session->nextGeneration_++;
+    candidate->kind_=kind;candidate->amountMM_=amountMM;
+    viewer_.seedRawR2CandidateObservedDebt(candidate);
+    using State=r2::RawPreviewCandidate::State;
+    if(session->active_&&session->active_->workerInFlight_){
+        session->active_->state_=State::Superseded;
+        Core3DViewer::cancelEdgeTreatmentR2(session->active_->work_);
+        if(session->pending_){session->pending_->state_=State::Superseded;
+            Core3DViewer::cancelEdgeTreatmentR2(session->pending_->work_);}
+        candidate->state_=State::Pending;session->pending_=candidate;
+    }else{
+        if(session->active_){session->active_->state_=State::Superseded;
+            Core3DViewer::cancelEdgeTreatmentR2(session->active_->work_);}
+        candidate->state_=State::Prepared;session->active_=candidate;
+        session->pending_.reset();
+    }
+    refusal=et::Refusal::None;return candidate;
+}
+
+std::shared_ptr<const retained_edge_treatment::r2::DetachedInput>
+RawR2BevelPreviewAdapter::detach(
+    const std::shared_ptr<retained_edge_treatment::r2::RawPreviewCandidate>& candidate,
+    retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et=retained_edge_treatment;namespace r2=et::r2;
+    refusal=et::Refusal::StaleSnapshot;
+    if(![NSThread isMainThread]||!candidate)return {};
+    const auto session=candidate->session_.lock();if(!session)return {};
+    std::lock_guard<std::mutex> lock(session->mutex_);
+    if(session->active_!=candidate
+        ||candidate->state_!=r2::RawPreviewCandidate::State::Prepared)return {};
+    auto input=Core3DViewer::edgeTreatmentGeometryR2(candidate->work_);
+    if(!input){candidate->state_=r2::RawPreviewCandidate::State::Refused;return {};}
+    candidate->input_=input;candidate->workerInFlight_=true;
+    candidate->state_=r2::RawPreviewCandidate::State::Building;
+    refusal=et::Refusal::None;return input;
+}
+
+bool RawR2BevelPreviewAdapter::cancel(
+    const std::shared_ptr<retained_edge_treatment::r2::RawPreviewCandidate>& candidate)
+    noexcept {
+    namespace r2=retained_edge_treatment::r2;
+    if(!candidate)return false;const auto session=candidate->session_.lock();if(!session)return false;
+    std::lock_guard<std::mutex> lock(session->mutex_);using State=r2::RawPreviewCandidate::State;
+    if(candidate->state_==State::Cancelled||candidate->state_==State::Superseded
+        ||candidate->state_==State::Refused)return false;
+    const bool building=candidate->workerInFlight_;
+    candidate->state_=State::Cancelled;Core3DViewer::cancelEdgeTreatmentR2(candidate->work_);
+    if(session->pending_==candidate)session->pending_.reset();
+    if(session->active_==candidate&&!building){
+        session->active_=session->pending_;session->pending_.reset();
+        if(session->active_)session->active_->state_=State::Prepared;
+    }
+    return true;
+}
+
+std::shared_ptr<retained_edge_treatment::r2::RawPreviewSession>
+Core3DViewer::openRawR2BevelPreview(
+    const std::shared_ptr<const retained_edge_treatment::r2::RawTargetCapture>& targets,
+    const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
+    std::uint32_t width,std::uint32_t height,
+    retained_edge_treatment::Refusal& refusal) noexcept {
+    if(!_rawR2BevelPreviewAdapter)
+        _rawR2BevelPreviewAdapter=std::make_shared<RawR2BevelPreviewAdapter>(*this);
+    return _rawR2BevelPreviewAdapter->open(targets,identity,presentationRevision,
+        width,height,refusal);
+}
+
+std::shared_ptr<retained_edge_treatment::r2::RawPreviewCandidate>
+Core3DViewer::prepareRawR2BevelPreview(
+    const std::shared_ptr<retained_edge_treatment::r2::RawPreviewSession>& session,
+    retained_edge_treatment::Kind kind,double amountMM,
+    retained_edge_treatment::Refusal& refusal) noexcept {
+    if(!_rawR2BevelPreviewAdapter)
+        _rawR2BevelPreviewAdapter=std::make_shared<RawR2BevelPreviewAdapter>(*this);
+    return _rawR2BevelPreviewAdapter->prepare(session,kind,amountMM,refusal);
+}
+
+std::shared_ptr<const retained_edge_treatment::r2::DetachedInput>
+Core3DViewer::rawR2BevelPreviewGeometry(
+    const std::shared_ptr<retained_edge_treatment::r2::RawPreviewCandidate>& candidate,
+    retained_edge_treatment::Refusal& refusal) noexcept {
+    if(!_rawR2BevelPreviewAdapter){refusal=retained_edge_treatment::Refusal::StaleSnapshot;return {};}
+    return _rawR2BevelPreviewAdapter->detach(candidate,refusal);
+}
+
+std::shared_ptr<const retained_edge_treatment::r2::DetachedResult>
+Core3DViewer::buildRawR2BevelPreview(
+    const std::shared_ptr<retained_edge_treatment::r2::RawPreviewCandidate>& candidate,
+    retained_edge_treatment::Refusal& refusal) noexcept {
+    namespace et=retained_edge_treatment;namespace r2=et::r2;
+    refusal=et::Refusal::StaleSnapshot;if(!candidate)return {};
+    const auto session=candidate->session_.lock();if(!session)return {};
+    std::shared_ptr<const r2::DetachedInput> input;
+    {std::lock_guard<std::mutex> lock(session->mutex_);
+        if(candidate->state_!=r2::RawPreviewCandidate::State::Building
+            ||!candidate->input_)return {};
+        input=candidate->input_;}
+    auto built=buildEdgeTreatmentR2(input,refusal);
+    std::lock_guard<std::mutex> lock(session->mutex_);using State=r2::RawPreviewCandidate::State;
+    candidate->workerInFlight_=false;
+    if(built)CopyTopologyBudget(candidate->observedBudget_,built->budget_);
+    else if(candidate->work_)candidate->observedBudget_=candidate->work_->chargedBudget_;
+    const bool current=session->active_==candidate;
+    if(current&&candidate->state_==State::Building&&built){
+        candidate->result_=built;candidate->state_=State::Ready;refusal=et::Refusal::None;
+    }else if(current&&candidate->state_==State::Building)candidate->state_=State::Refused;
+    if(current&&session->pending_){
+        session->active_=session->pending_;session->pending_.reset();
+        session->active_->state_=State::Prepared;
+    }
+    return candidate->state_==State::Ready?built:std::shared_ptr<const r2::DetachedResult>();
+}
+
+bool Core3DViewer::cancelRawR2BevelPreview(
+    const std::shared_ptr<retained_edge_treatment::r2::RawPreviewCandidate>& candidate)
+    noexcept {
+    return _rawR2BevelPreviewAdapter&&_rawR2BevelPreviewAdapter->cancel(candidate);
 }
 
 std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTreatmentEditR2(

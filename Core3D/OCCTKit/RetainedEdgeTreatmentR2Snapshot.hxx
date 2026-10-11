@@ -9,10 +9,11 @@
 #include <TopoDS_Shape.hxx>
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <optional>
 
 class OcctDocument;
-namespace core3d { class Core3DViewer; }
+namespace core3d { class Core3DViewer; class RawR2BevelPreviewAdapter; }
 
 namespace core3d::retained_edge_treatment::r2 {
 struct SelectorAppend { et::Kind kind = et::Kind::ConstantFillet; double amountMM = 0; };
@@ -130,6 +131,7 @@ public:
 // the exact Object-mode handoff or consume the capture.
 class RawTargetCapture final {
     friend class core3d::Core3DViewer;
+    friend class core3d::RawR2BevelPreviewAdapter;
     std::shared_ptr<const Snapshot> original_;
     std::vector<et::Anchor> anchors_;
     ReplayBudget chargedBudget_;
@@ -142,6 +144,58 @@ class RawTargetCapture final {
 public:
     const std::shared_ptr<const Snapshot>& snapshot() const noexcept { return original_; }
     const std::vector<et::Anchor>& anchors() const noexcept { return anchors_; }
+};
+
+class Work;
+class DetachedInput;
+class DetachedResult;
+class RawPreviewCandidate;
+// Native-only command ownership. The session keeps the consumed capture and
+// its fences; public anchor observations can neither construct nor copy it.
+class RawPreviewSession final {
+    friend class core3d::Core3DViewer;
+    friend class core3d::RawR2BevelPreviewAdapter;
+    friend class RawPreviewCandidate;
+    std::shared_ptr<const RawTargetCapture> targets_;
+    std::string entityIdentifier_, publicationSourceIdentifier_;
+    std::uint64_t documentGeneration_ = 0, modelRevision_ = 0;
+    std::uint64_t presentationRevision_ = 0, nextGeneration_ = 1;
+    std::uint32_t width_ = 0, height_ = 0;
+    std::shared_ptr<RawPreviewCandidate> active_, pending_;
+    mutable std::mutex mutex_;
+public:
+    std::shared_ptr<const Snapshot> snapshot() const noexcept {
+        return targets_ ? targets_->snapshot() : nullptr;
+    }
+};
+
+// Each candidate owns a distinct Work. Its sticky capture/prepare/build debt
+// is never reset when the candidate is cancelled, superseded, or observed.
+class RawPreviewCandidate final {
+    friend class core3d::Core3DViewer;
+    friend class core3d::RawR2BevelPreviewAdapter;
+public:
+    enum class State { Prepared, Pending, Building, Ready, Superseded, Cancelled, Refused };
+private:
+    std::weak_ptr<RawPreviewSession> session_;
+    std::shared_ptr<Work> work_;
+    std::shared_ptr<const DetachedInput> input_;
+    std::shared_ptr<const DetachedResult> result_;
+    ReplayBudget observedBudget_;
+    std::uint64_t generation_ = 0;
+    et::Kind kind_ = et::Kind::ConstantFillet;
+    double amountMM_ = 0;
+    std::atomic<State> state_{State::Prepared};
+    bool workerInFlight_ = false; // guarded by the owning session mutex
+public:
+    std::uint64_t generation() const noexcept { return generation_; }
+    State state() const noexcept { return state_.load(); }
+    et::Kind kind() const noexcept { return kind_; }
+    double amountMM() const noexcept { return amountMM_; }
+    std::shared_ptr<const DetachedResult> result() const noexcept {
+        const auto session=session_.lock();if(!session)return {};
+        std::lock_guard<std::mutex> lock(session->mutex_);return result_;
+    }
 };
 
 class DetachedInput final {

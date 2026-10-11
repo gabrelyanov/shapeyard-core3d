@@ -44,6 +44,8 @@
 namespace core3d {
     typedef unsigned char selection_t;
 
+    class RawR2BevelPreviewAdapter;
+
     enum class NativeHistoryDirection { Undo, Redo };
     enum class NativeHistoryOutcome {
         Unavailable, PreviewCancelled, PreviewCancellationFailed,
@@ -473,6 +475,30 @@ namespace core3d {
         retained_edge_treatment::Kind, double, const ObjectFrameIdentity&, std::uint64_t,
         std::uint32_t, std::uint32_t,
         retained_edge_treatment::Refusal&) noexcept;
+    // Headless raw-R2 preview command. Opening consumes the capture exactly
+    // once; prepare/build remain detached and cannot start presentation or an
+    // OCAF transaction. P2 owns publication and commit wiring.
+    std::shared_ptr<retained_edge_treatment::r2::RawPreviewSession>
+    openRawR2BevelPreview(
+        const std::shared_ptr<const retained_edge_treatment::r2::RawTargetCapture>&,
+        const ObjectFrameIdentity&, std::uint64_t, std::uint32_t, std::uint32_t,
+        retained_edge_treatment::Refusal&) noexcept;
+    std::shared_ptr<retained_edge_treatment::r2::RawPreviewCandidate>
+    prepareRawR2BevelPreview(
+        const std::shared_ptr<retained_edge_treatment::r2::RawPreviewSession>&,
+        retained_edge_treatment::Kind, double,
+        retained_edge_treatment::Refusal&) noexcept;
+    std::shared_ptr<const retained_edge_treatment::r2::DetachedInput>
+    rawR2BevelPreviewGeometry(
+        const std::shared_ptr<retained_edge_treatment::r2::RawPreviewCandidate>&,
+        retained_edge_treatment::Refusal&) noexcept;
+    static std::shared_ptr<const retained_edge_treatment::r2::DetachedResult>
+    buildRawR2BevelPreview(
+        const std::shared_ptr<retained_edge_treatment::r2::RawPreviewCandidate>&,
+        retained_edge_treatment::Refusal&) noexcept;
+    bool cancelRawR2BevelPreview(
+        const std::shared_ptr<retained_edge_treatment::r2::RawPreviewCandidate>&)
+        noexcept;
     std::shared_ptr<retained_edge_treatment::r2::Work> prepareEdgeTreatmentEditR2(
         const std::shared_ptr<const retained_edge_treatment::r2::Snapshot>&,
         const retained_edge_treatment::r2::Edit&, const ObjectFrameIdentity&,
@@ -1031,6 +1057,19 @@ namespace core3d {
             std::vector<Handle(AIS_Shape)>& presentations) const noexcept;
 
     private:
+        friend class RawR2BevelPreviewAdapter;
+        bool validateRawR2CandidateFence(
+            const std::shared_ptr<const retained_edge_treatment::r2::RawTargetCapture>&,
+            const ObjectFrameIdentity&, std::uint64_t, std::uint32_t, std::uint32_t,
+            retained_edge_treatment::Refusal&) noexcept;
+        std::shared_ptr<retained_edge_treatment::r2::Work> makeRawR2CandidateWork(
+            const std::shared_ptr<const retained_edge_treatment::r2::RawTargetCapture>&,
+            retained_edge_treatment::Kind, double,
+            retained_edge_treatment::Refusal&) noexcept;
+        void seedRawR2CandidateObservedDebt(
+            const std::shared_ptr<retained_edge_treatment::r2::RawPreviewCandidate>&)
+            noexcept;
+        std::shared_ptr<RawR2BevelPreviewAdapter> _rawR2BevelPreviewAdapter;
         std::shared_ptr<OrdinaryEditController> _ordinaryEditController;
         // Main-owned, single-use continuation sidecar for the legacy captured-
         // anchor API. Work itself lives in the frozen P1 header; this map lets
