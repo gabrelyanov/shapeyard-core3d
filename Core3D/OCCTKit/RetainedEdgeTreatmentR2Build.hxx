@@ -19,6 +19,92 @@
 
 namespace core3d::retained_edge_treatment::r2 {
 namespace tb = core3d::retained_topology_budget;
+enum class FramedLoftFixedPointStatus : std::uint8_t {
+    Adopted, Distinct, Cancelled, BudgetExceeded
+};
+
+#if DEBUG
+inline std::atomic<int> DebugFramedLoftFixedPointMode{0};
+inline std::atomic<unsigned> DebugFramedLoftFixedPointReached{0};
+inline std::atomic<int> DebugFramedLoftFixedPointLastStatus{-1};
+#endif
+
+// Finite private-producer materialization for a decoded, construction-framed
+// rectangular-loft Boolean product. Exactly two V4 readbacks are compared by
+// the unchanged V3 commitment. Callers must reject every result except Adopted.
+inline FramedLoftFixedPointStatus MaterializePrivateFramedLoftFixedPointImpl(
+    const TopoDS_Shape& privateProduct, const std::atomic_bool& stop,
+    et::ReplayBudget& budget, TopoDS_Shape& output) noexcept {
+    output.Nullify();
+    if (stop.load()) return FramedLoftFixedPointStatus::Cancelled;
+    if (budget.exhausted) return FramedLoftFixedPointStatus::BudgetExceeded;
+    if (privateProduct.IsNull()) return FramedLoftFixedPointStatus::Distinct;
+    try {
+        const auto reconstruct = [&](const TopoDS_Shape& input,
+            TopoDS_Shape& reconstructed) -> FramedLoftFixedPointStatus {
+            tb::Census census;
+            const tb::WalkStatus walked = tb::CensusTopology(input, budget, stop,
+                census, tb::Site::C12Detachment, false);
+            if (walked == tb::WalkStatus::Cancelled || stop.load())
+                return FramedLoftFixedPointStatus::Cancelled;
+            if (walked == tb::WalkStatus::BudgetDenied || budget.exhausted
+                || !tb::ReserveTraversal(census, budget, tb::Site::C12Detachment))
+                return FramedLoftFixedPointStatus::BudgetExceeded;
+            if (walked != tb::WalkStatus::Completed
+                || !et::detail::ReadbackGeometry(input, budget, reconstructed)) {
+                if (stop.load()) return FramedLoftFixedPointStatus::Cancelled;
+                return budget.exhausted ? FramedLoftFixedPointStatus::BudgetExceeded
+                    : FramedLoftFixedPointStatus::Distinct;
+            }
+            return FramedLoftFixedPointStatus::Adopted;
+        };
+        TopoDS_Shape y1, y2;
+        auto status = reconstruct(privateProduct, y1);
+        if (status != FramedLoftFixedPointStatus::Adopted) return status;
+        status = reconstruct(y1, y2);
+        if (status != FramedLoftFixedPointStatus::Adopted) return status;
+#if DEBUG
+        if (DebugFramedLoftFixedPointMode.load(std::memory_order_relaxed) == 1)
+            y2 = privateProduct;
+#endif
+        et::Digest y1Digest{}, y2Digest{};
+        if (!et::detail::CommitGeometry(y1, budget, y1Digest)
+            || !et::detail::CommitGeometry(y2, budget, y2Digest)) {
+            if (stop.load()) return FramedLoftFixedPointStatus::Cancelled;
+            return budget.exhausted ? FramedLoftFixedPointStatus::BudgetExceeded
+                : FramedLoftFixedPointStatus::Distinct;
+        }
+        if (y1Digest != y2Digest) return FramedLoftFixedPointStatus::Distinct;
+        output = y1;
+        return FramedLoftFixedPointStatus::Adopted;
+    } catch (...) {
+        output.Nullify();
+        return stop.load() ? FramedLoftFixedPointStatus::Cancelled
+            : FramedLoftFixedPointStatus::Distinct;
+    }
+}
+
+inline FramedLoftFixedPointStatus MaterializePrivateFramedLoftFixedPoint(
+    const TopoDS_Shape& privateProduct, const std::atomic_bool& stop,
+    et::ReplayBudget& budget, TopoDS_Shape& output) noexcept {
+#if DEBUG
+    DebugFramedLoftFixedPointReached.fetch_add(1, std::memory_order_relaxed);
+#endif
+    const auto status = MaterializePrivateFramedLoftFixedPointImpl(
+        privateProduct, stop, budget, output);
+#if DEBUG
+    DebugFramedLoftFixedPointLastStatus.store(
+        static_cast<int>(status), std::memory_order_relaxed);
+#endif
+    return status;
+}
+
+inline bool IsConstructionFramedLoft(const retained_boolean::Program& program) noexcept {
+    if (program.source.family != 3) return false;
+    rectangular_loft::Definition definition;
+    return loft_persistence::Decode(program.source.values, definition)
+        && bool(definition.constructionFrame);
+}
 inline bool EncodeCompleteProfileRequest(const profile::Parameters& requested,
                                          double capturedMetersPerUnit,
                                          std::vector<double>& values) noexcept {
@@ -213,7 +299,21 @@ inline bool PrepareMigrationStages(const retained_boolean::Recipe& recipe,
             }
             current = stepResult.solid;
         }
-        if (program.source.family == 1 && program.source.values.size() > 2
+        if (IsConstructionFramedLoft(program)) {
+            TopoDS_Shape fixedPoint;
+            const auto status = MaterializePrivateFramedLoftFixedPoint(
+                current, stop, budget, fixedPoint);
+            if (status == FramedLoftFixedPointStatus::Cancelled) {
+                refusal = et::Refusal::Cancelled; return false;
+            }
+            if (status == FramedLoftFixedPointStatus::BudgetExceeded) {
+                refusal = et::Refusal::Budget; return false;
+            }
+            if (status != FramedLoftFixedPointStatus::Adopted) {
+                refusal = et::Refusal::ReplayMismatch; return false;
+            }
+            current = fixedPoint;
+        } else if (program.source.family == 1 && program.source.values.size() > 2
             && program.source.values[2] == 1.0) {
             TopoDS_Shape fixedPoint;
             const auto status = retained_profile_producer::
@@ -569,7 +669,21 @@ inline bool RebuildEditedPrefix(const RetainedBooleanBase& original,
             }
             current = stepResult.solid;
         }
-        if (edited.source.family == 1 && edited.source.values.size() > 2
+        if (IsConstructionFramedLoft(edited)) {
+            TopoDS_Shape fixedPoint;
+            const auto status = MaterializePrivateFramedLoftFixedPoint(
+                current, stop, budget, fixedPoint);
+            if (status == FramedLoftFixedPointStatus::Cancelled) {
+                refusal = et::Refusal::Cancelled; return false;
+            }
+            if (status == FramedLoftFixedPointStatus::BudgetExceeded) {
+                refusal = et::Refusal::Budget; return false;
+            }
+            if (status != FramedLoftFixedPointStatus::Adopted) {
+                refusal = et::Refusal::ReplayMismatch; return false;
+            }
+            current = fixedPoint;
+        } else if (edited.source.family == 1 && edited.source.values.size() > 2
             && edited.source.values[2] == 1.0) {
             TopoDS_Shape fixedPoint;
             const auto status = retained_profile_producer::

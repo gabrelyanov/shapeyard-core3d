@@ -136,6 +136,24 @@
 #endif
 
 namespace core3d {
+#if DEBUG
+extern "C" void Core3DDebugFramedLoftFixedPointSetMode(int mode) {
+    retained_edge_treatment::r2::DebugFramedLoftFixedPointMode.store(
+        mode,std::memory_order_relaxed);
+    retained_edge_treatment::r2::DebugFramedLoftFixedPointReached.store(
+        0,std::memory_order_relaxed);
+    retained_edge_treatment::r2::DebugFramedLoftFixedPointLastStatus.store(
+        -1,std::memory_order_relaxed);
+}
+extern "C" unsigned Core3DDebugFramedLoftFixedPointReached() {
+    return retained_edge_treatment::r2::DebugFramedLoftFixedPointReached.load(
+        std::memory_order_relaxed);
+}
+extern "C" int Core3DDebugFramedLoftFixedPointLastStatus() {
+    return retained_edge_treatment::r2::DebugFramedLoftFixedPointLastStatus.load(
+        std::memory_order_relaxed);
+}
+#endif
 
 namespace {
 namespace tb = retained_topology_budget;
@@ -5345,6 +5363,8 @@ struct CutSolidGeometry {
     saved_cut_source_edit::LoftBaseStatus loftBaseStatus=saved_cut_source_edit::LoftBaseStatus::InvalidRecipe;
     std::atomic_bool cancelled{false};
     analytic_boolean::Result result;
+    retained_edge_treatment::ReplayBudget producerBudget;
+    bool framedLoftProducer=false;
     bool built=false;
 };
 // Whole-program payload: detached deep base copy, the complete typed program
@@ -7019,6 +7039,9 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCut(const Cylin
         BRepBuilderAPI_Copy copy(original.source.base,Standard_True,Standard_False);if(!copy.IsDone())CORE3D_CUT_REFUSE("prepare.base-copy", {});
         auto geometry=std::make_shared<CutSolidGeometry>();geometry->detachedBase=copy.Shape();geometry->recipe=cylindrical_cut::Recipe(envelope);
         if(circularHost||envelope.sourceFamily==3)geometry->provenHost=envelope;
+        if(envelope.sourceFamily==3){rectangular_loft::Definition loft;
+            if(!loft_persistence::Decode(envelope.sourceValues,loft))CORE3D_CUT_REFUSE("prepare.loft-decode", {});
+            geometry->framedLoftProducer=bool(loft.constructionFrame);}
         geometry->rebuildLoftBase=envelope.sourceFamily==3&&!original.source.rebuilding;
         myContext->InitSelected();const auto displaySource=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
         if(displaySource.IsNull()||!cut_display::Capture(displaySource->Attributes(),geometry->displaySettings))CORE3D_CUT_REFUSE("prepare.display-settings", {});
@@ -7289,8 +7312,30 @@ bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& pa
             }
             (*p)->detachedBase=planar;
         }
-        const auto status=analytic_boolean::Build((*p)->detachedBase,(*p)->recipe,(*p)->cancelled,(*p)->result);
+        const auto status=(*p)->framedLoftProducer
+            ? analytic_boolean::Build((*p)->detachedBase,(*p)->recipe,(*p)->cancelled,
+                (*p)->result,0,(*p)->producerBudget)
+            : analytic_boolean::Build((*p)->detachedBase,(*p)->recipe,(*p)->cancelled,(*p)->result);
         if(status!=analytic_boolean::Status::Built){CORE3D_CUT_DETAIL("build.boolean",status);return false;}
+        if((*p)->framedLoftProducer){
+#if DEBUG
+            const int q3Mode=retained_edge_treatment::r2::
+                DebugFramedLoftFixedPointMode.load(std::memory_order_relaxed);
+            if(q3Mode==2)(*p)->cancelled.store(true,std::memory_order_relaxed);
+            if(q3Mode==3)(*p)->producerBudget.visit(
+                retained_topology_budget::MaximumTopologyVisits
+                    -(*p)->producerBudget.topologyVisits,
+                retained_topology_budget::Site::None);
+#endif
+            TopoDS_Shape fixedPoint;
+            const auto fixedStatus=retained_edge_treatment::r2::
+                MaterializePrivateFramedLoftFixedPoint((*p)->result.solid,
+                    (*p)->cancelled,(*p)->producerBudget,fixedPoint);
+            if(fixedStatus!=retained_edge_treatment::r2::
+                    FramedLoftFixedPointStatus::Adopted)
+                CORE3D_CUT_REFUSE("build.framed-loft-fixed-point", false);
+            (*p)->result.solid=fixedPoint;
+        }
         if ((*p)->provenHost && (*p)->provenHost->sourceFamily == 1
             && (*p)->provenHost->sourceValues.size() > 2
             && (*p)->provenHost->sourceValues[2] == 1.0) {
@@ -7314,8 +7359,23 @@ bool Core3DViewer::buildNativeSolidGeometry(const NativeSolidGeometryPayload& pa
                 CORE3D_CUT_REFUSE("proof.base", false);
             if(saved_cut_bore_clearance::Inspect(source).status==saved_cut_bore_clearance::Status::ClearRecipeTransverse){
                 analytic_boolean::Result replay;
-                if(analytic_boolean::Build((*p)->detachedBase,cylindrical_cut::Recipe(source),(*p)->cancelled,replay)!=analytic_boolean::Status::Built
-                    ||!saved_cut_bore_clearance::VerifyTransverseResult((*p)->detachedBase,(*p)->result.solid,source,(*p)->cancelled,replay.solid))
+                const auto replayStatus=(*p)->framedLoftProducer
+                    ? analytic_boolean::Build((*p)->detachedBase,cylindrical_cut::Recipe(source),
+                        (*p)->cancelled,replay,0,(*p)->producerBudget)
+                    : analytic_boolean::Build((*p)->detachedBase,cylindrical_cut::Recipe(source),
+                        (*p)->cancelled,replay);
+                if(replayStatus!=analytic_boolean::Status::Built)
+                    CORE3D_CUT_REFUSE("proof.transverse-replay", false);
+                if((*p)->framedLoftProducer){
+                    TopoDS_Shape fixedReplay;
+                    if(retained_edge_treatment::r2::MaterializePrivateFramedLoftFixedPoint(
+                            replay.solid,(*p)->cancelled,(*p)->producerBudget,fixedReplay)
+                        !=retained_edge_treatment::r2::FramedLoftFixedPointStatus::Adopted)
+                        CORE3D_CUT_REFUSE("proof.transverse-fixed-point", false);
+                    replay.solid=fixedReplay;
+                }
+                if(!saved_cut_bore_clearance::VerifyTransverseResult((*p)->detachedBase,
+                    (*p)->result.solid,source,(*p)->cancelled,replay.solid))
                     CORE3D_CUT_REFUSE("proof.transverse-replay", false);
             }else{
                 const auto proof=saved_boolean_result::InspectAxialBore((*p)->result.solid,source,source,(*p)->cancelled);
