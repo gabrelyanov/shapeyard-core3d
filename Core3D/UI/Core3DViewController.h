@@ -647,6 +647,14 @@ __attribute__((objc_subclassing_restricted))
 - (nullable NSDictionary<NSString *,id> *)
     debugE4P2b1LedgerCapForEntityIdentifier:(NSString *)entityIdentifier
     NS_SWIFT_NAME(debugE4P2b1LedgerCap(entityIdentifier:));
+//! Arms the next genuine CapturePrivateExportDecals census. YES leaves one
+//! byte less than its measured ticket; NO observes the under-limit copy.
+- (void)debugArmE4BRepCensusObservationRefuseOneByteShort:
+    (NSNumber *)refuseOneByteShort;
+//! Exact source/predicted/detached control for distinct faces sharing one
+//! plane and for two occurrences of the same face key.
+- (NSDictionary<NSString *,id> *)debugE4BRepCensusCopyPrediction;
+- (NSDictionary<NSString *,id> *)debugTakeE4BRepCensusObservation;
 //! Executes the real persisted-source decoder twice: a header-derived backing
 //! denial before CGImage creation and a normal byte-identical pixel pass.
 - (nullable NSDictionary<NSString *,id> *)

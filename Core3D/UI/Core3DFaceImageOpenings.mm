@@ -76,6 +76,10 @@
 
 #if DEBUG
 namespace core3d::scene {
+std::array<std::size_t, 19>
+DebugExerciseE4BRepCensusCopyPrediction() noexcept;
+void DebugArmE4BRepCensusObservation(bool refuseOneByteShort) noexcept;
+std::array<std::size_t, 38> DebugTakeE4BRepCensusObservation() noexcept;
 std::array<std::size_t, 18> DebugExerciseE4OperationLedger() noexcept;
 std::array<std::size_t, 16> DebugExerciseE4SourceDecodeAdmission(
     const std::vector<std::uint8_t>& bytes) noexcept;
@@ -3522,6 +3526,87 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         @"sealedJobLimitDenied": @(probe[15] != 0),
         @"peakBytes": @(probe[16]),
         @"cumulativeWork": @(probe[17]),
+    };
+}
+
+- (void)debugArmE4BRepCensusObservationRefuseOneByteShort:
+    (NSNumber *)refuseOneByteShort {
+    core3d::scene::DebugArmE4BRepCensusObservation(
+        refuseOneByteShort.boolValue);
+}
+
+- (NSDictionary<NSString *,id> *)debugE4BRepCensusCopyPrediction {
+    const auto value = core3d::scene::
+        DebugExerciseE4BRepCensusCopyPrediction();
+    return @{
+        @"success": @(value[0] != 0),
+        @"sizeofPlane": @(value[1]),
+        @"distinctSourceGeometryBytes": @(value[2]),
+        @"distinctPredictedGeometryBytes": @(value[3]),
+        @"distinctGeometryDeltaBytes": @(value[4]),
+        @"distinctSourceFaceCount": @(value[5]),
+        @"sameSourceGeometryBytes": @(value[6]),
+        @"samePredictedGeometryBytes": @(value[7]),
+        @"sameGeometryDeltaBytes": @(value[8]),
+        @"sameSourceFaceCount": @(value[9]),
+        @"censusMapScratchBytes": @(value[10]),
+        @"distinctReservedBytes": @(value[11]),
+        @"censusMapCapacity": @(value[12]),
+        @"censusIndexArrayBytes": @(value[13]),
+        @"sizeofListNodePointer": @(value[14]),
+        @"preTopExpDenial": @(value[15] != 0),
+        @"deniedTopologyCount": @(value[16]),
+        @"exactlyEnoughBytes": @(value[17]),
+        @"exactlyEnoughSuccess": @(value[18] != 0),
+        @"opaqueRemainder": @"not measured: opaque O1–O33 remainder",
+    };
+}
+
+- (NSDictionary<NSString *,id> *)debugTakeE4BRepCensusObservation {
+    const auto value = core3d::scene::DebugTakeE4BRepCensusObservation();
+    const auto copySite = static_cast<std::size_t>(
+        core3d::decal_layer::bake::accounting::FailureSite::BRepCensusCopy);
+    return @{
+        @"observed": @(value[0] != 0),
+        @"refused": @(value[1] != 0),
+        @"measuredBytes": @(value[2]),
+        @"reservedBytes": @(value[3]),
+        @"tShapeBytes": @(value[4]),
+        @"listNodeBytes": @(value[5]),
+        @"locationBytes": @(value[6]),
+        @"representationBytes": @(value[7]),
+        @"geometryBytes": @(value[8]),
+        @"meshLogicalBytes": @(value[9]),
+        @"meshPhysicalBytes": @(value[10]),
+        @"meshNodeBytes": @(value[11]),
+        @"meshTriangleBytes": @(value[12]),
+        @"meshUVBytes": @(value[13]),
+        @"meshNormalBytes": @(value[14]),
+        @"polygonBytes": @(value[15]),
+        @"harrayBytes": @(value[16]),
+        @"mapScratchBytes": @(value[17]),
+        @"copyEntries": @(value[18]),
+        @"downstreamEntries": @(value[19]),
+        @"measuredEquality": @(value[20] != 0),
+        @"firstFailure": value[21] == copySite
+            ? @"BRepCensusCopy" : @"none",
+        @"predictedBytes": @(value[22]),
+        @"predictedTShapeBytes": @(value[23]),
+        @"predictedListNodeBytes": @(value[24]),
+        @"predictedLocationBytes": @(value[25]),
+        @"predictedRepresentationBytes": @(value[26]),
+        @"predictedGeometryBytes": @(value[27]),
+        @"predictedMeshLogicalBytes": @(value[28]),
+        @"predictedMeshPhysicalBytes": @(value[29]),
+        @"predictedMeshNodeBytes": @(value[30]),
+        @"predictedMeshTriangleBytes": @(value[31]),
+        @"predictedMeshUVBytes": @(value[32]),
+        @"predictedMeshNormalBytes": @(value[33]),
+        @"predictedPolygonBytes": @(value[34]),
+        @"predictedHArrayBytes": @(value[35]),
+        @"sourceFaceCount": @(value[36]),
+        @"predictedFaceCount": @(value[37]),
+        @"opaqueRemainder": @"not measured: opaque O1–O33 remainder",
     };
 }
 
