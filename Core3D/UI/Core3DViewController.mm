@@ -4577,6 +4577,238 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
     UIStateChanging _sendingState;
 
     __weak dispatch_cancelable_block_t _modifiedAssetBlock;
+    Core3DEdgeTreatmentRawPreviewSessionR2 *_visibleRawR2BevelSession;
+    Core3DEdgeTreatmentOperation *_visibleRawR2BevelOperation;
+    Core3DEdgeTreatmentRawPreviewStatusR2 _visibleRawR2BevelStatus;
+    uint64_t _visibleRawR2BevelGeneration;
+    double _visibleRawR2BevelMetersPerUnit;
+    NSNumber *_visibleRawR2BevelPendingValue;
+    NSNumber *_visibleRawR2BevelLastRequestedValue;
+    BOOL _visibleRawR2BevelActive;
+    BOOL _visibleRawR2BevelUpdateInFlight;
+}
+
+- (BOOL)core3d_hasVisibleRawR2Bevel {
+    return NSThread.isMainThread && _visibleRawR2BevelActive
+        && _visibleRawR2BevelSession != nil;
+}
+
+- (BOOL)core3d_canBeginVisibleRawR2Bevel {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr || _visibleRawR2BevelActive
+        || _currentSelectionType != PrimitiveSelectionTypeEdge
+        || [GLController getSelectionType] != PrimitiveSelectionTypeEdge
+        || GLController.viewer->hasUnresolvedEdit()) return NO;
+    Core3DSceneSnapshot *scene = [self captureSceneSnapshot];
+    if (!scene || scene.selectionMode != Core3DSceneElementKindEdge
+        || scene.selection.selectedElements.count != 1) return NO;
+    Core3DSceneElementIdentifier *selected = scene.selection.selectedElements.firstObject;
+    if (selected.kind != Core3DSceneElementKindEdge
+        || selected.entityIdentifier.length == 0) return NO;
+    Core3DEdgeTreatmentCaptureR2 *capture =
+        [self captureEdgeTreatmentR2:selected.entityIdentifier expected:scene];
+    return capture.status == Core3DEdgeTreatmentStatusCurrentEditable
+        && capture.snapshot != nil && capture.snapshot.current
+        && capture.snapshot.dimensionMetersPerUnit > 0.0
+        && std::isfinite(capture.snapshot.dimensionMetersPerUnit);
+}
+
+- (BOOL)core3d_beginVisibleRawR2Bevel {
+    if (![self core3d_canBeginVisibleRawR2Bevel]) return NO;
+    Core3DSceneSnapshot *edgeScene = [self captureSceneSnapshot];
+    Core3DSceneElementIdentifier *selected =
+        edgeScene.selection.selectedElements.firstObject;
+    Core3DEdgeTreatmentRawTargetCaptureR2 *targets =
+        [self captureEdgeTreatmentRawTargetsR2:selected.entityIdentifier
+                                      expected:edgeScene];
+    if (targets.status != Core3DEdgeTreatmentStatusCurrentEditable
+        || targets.snapshot == nil || !targets.snapshot.current
+        || targets.snapshot.dimensionMetersPerUnit <= 0.0
+        || !std::isfinite(targets.snapshot.dimensionMetersPerUnit)) return NO;
+    Core3DEdgeTreatmentRawPreviewSessionR2 *session =
+        [self openEdgeTreatmentRawPreviewR2:targets expected:edgeScene];
+    if (session.status != Core3DEdgeTreatmentRawPreviewStatusR2Open) return NO;
+    _visibleRawR2BevelSession = session;
+    _visibleRawR2BevelOperation = nil;
+    _visibleRawR2BevelStatus = session.status;
+    _visibleRawR2BevelGeneration = session.generation;
+    _visibleRawR2BevelMetersPerUnit = targets.snapshot.dimensionMetersPerUnit;
+    _visibleRawR2BevelPendingValue = nil;
+    _visibleRawR2BevelLastRequestedValue = nil;
+    _visibleRawR2BevelUpdateInFlight = NO;
+    _visibleRawR2BevelActive = YES;
+    (void)[GLController getGizmoType];
+    return YES;
+}
+
+- (Core3DModelingPreviewStatus)core3d_visibleRawR2BevelStatus {
+    Core3DModelingPreviewStatus answer = {
+        PrimitiveGizmoTypeChamfer,
+        Core3DModelingPreviewStateUnavailable,
+        _visibleRawR2BevelGeneration,
+        _visibleRawR2BevelActive,
+        NO,
+    };
+    if (!_visibleRawR2BevelActive) return answer;
+    switch (_visibleRawR2BevelStatus) {
+        case Core3DEdgeTreatmentRawPreviewStatusR2Open:
+            answer.state = Core3DModelingPreviewStateSelecting;
+            break;
+        case Core3DEdgeTreatmentRawPreviewStatusR2Building:
+            answer.state = Core3DModelingPreviewStateComputing;
+            break;
+        case Core3DEdgeTreatmentRawPreviewStatusR2Ready:
+            answer.state = Core3DModelingPreviewStateReady;
+            answer.canApply = !_visibleRawR2BevelUpdateInFlight
+                && _visibleRawR2BevelPendingValue == nil;
+            break;
+        case Core3DEdgeTreatmentRawPreviewStatusR2OutcomeUnknown:
+            answer.state = Core3DModelingPreviewStateOutcomeUnknown;
+            break;
+        case Core3DEdgeTreatmentRawPreviewStatusR2Refused:
+            answer.state = Core3DModelingPreviewStateFailed;
+            break;
+        case Core3DEdgeTreatmentRawPreviewStatusR2Cancelled:
+        case Core3DEdgeTreatmentRawPreviewStatusR2Committed:
+            answer.active = NO;
+            answer.state = Core3DModelingPreviewStateUnavailable;
+            break;
+    }
+    return answer;
+}
+
+- (double)core3d_visibleRawR2BevelMetersPerUnit {
+    return _visibleRawR2BevelActive ? _visibleRawR2BevelMetersPerUnit : 0.0;
+}
+
+- (void)core3d_publishVisibleRawR2BevelState {
+    const Core3DModelingPreviewStatus status =
+        [self core3d_visibleRawR2BevelStatus];
+    self.can_apply = status.active && status.canApply;
+    [self viewDidChangeViewportPresentationState];
+    [self sendNotifyUIState:UIStateChangingGizmo | UIStateChangingApply];
+}
+
+- (void)core3d_startVisibleRawR2BevelValue:(double)localValue {
+    if (!_visibleRawR2BevelActive || _visibleRawR2BevelUpdateInFlight
+        || !_visibleRawR2BevelSession) return;
+    _visibleRawR2BevelPendingValue = nil;
+    _visibleRawR2BevelUpdateInFlight = YES;
+    _visibleRawR2BevelStatus = Core3DEdgeTreatmentRawPreviewStatusR2Building;
+    [self core3d_publishVisibleRawR2BevelState];
+    const double amountMM = std::abs(localValue)
+        * _visibleRawR2BevelMetersPerUnit * 1000.0;
+    const Core3DEdgeTreatmentKind kind = localValue < 0.0
+        ? Core3DEdgeTreatmentKindChamfer
+        : Core3DEdgeTreatmentKindConstantFillet;
+    Core3DSceneSnapshot *expected = [self captureSceneSnapshot];
+    Core3DEdgeTreatmentRawPreviewSessionR2 *session =
+        _visibleRawR2BevelSession;
+    __weak Core3DViewController *weakSelf = self;
+    Core3DEdgeTreatmentOperation *operation =
+        [self updateEdgeTreatmentRawPreviewR2:session kind:kind
+            amountMM:amountMM expected:expected
+            completion:^(Core3DEdgeTreatmentRawPreviewResultR2 *result) {
+                Core3DViewController *strongSelf = weakSelf;
+                if (!strongSelf
+                    || strongSelf->_visibleRawR2BevelSession != session) return;
+                strongSelf->_visibleRawR2BevelOperation = nil;
+                strongSelf->_visibleRawR2BevelUpdateInFlight = NO;
+                strongSelf->_visibleRawR2BevelStatus = result.status;
+                strongSelf->_visibleRawR2BevelGeneration = result.generation;
+                if (result.status
+                        == Core3DEdgeTreatmentRawPreviewStatusR2Cancelled
+                    || result.status
+                        == Core3DEdgeTreatmentRawPreviewStatusR2Committed) {
+                    strongSelf->_visibleRawR2BevelActive = NO;
+                    strongSelf->_visibleRawR2BevelLastRequestedValue = nil;
+                }
+                NSNumber *pending = strongSelf->_visibleRawR2BevelPendingValue;
+                strongSelf->_visibleRawR2BevelPendingValue = nil;
+                if (strongSelf->_visibleRawR2BevelActive && pending != nil) {
+                    [strongSelf core3d_startVisibleRawR2BevelValue:
+                        pending.doubleValue];
+                } else {
+                    [strongSelf core3d_publishVisibleRawR2BevelState];
+                }
+            }];
+    if (_visibleRawR2BevelActive && _visibleRawR2BevelUpdateInFlight)
+        _visibleRawR2BevelOperation = operation;
+}
+
+- (void)core3d_setVisibleRawR2BevelValue:(double)localValue {
+    if (!_visibleRawR2BevelActive || !std::isfinite(localValue)) return;
+    if (_visibleRawR2BevelLastRequestedValue != nil
+        && std::abs(localValue
+            - _visibleRawR2BevelLastRequestedValue.doubleValue) < 1.0e-9
+        && _visibleRawR2BevelPendingValue == nil
+        && (_visibleRawR2BevelUpdateInFlight
+            || _visibleRawR2BevelStatus
+                == Core3DEdgeTreatmentRawPreviewStatusR2Ready)) {
+        return;
+    }
+    _visibleRawR2BevelLastRequestedValue = @(localValue);
+    if (_visibleRawR2BevelUpdateInFlight) {
+        _visibleRawR2BevelPendingValue = @(localValue);
+        self.can_apply = NO;
+        [self sendNotifyUIState:UIStateChangingApply];
+        return;
+    }
+    [self core3d_startVisibleRawR2BevelValue:localValue];
+}
+
+- (BOOL)core3d_applyVisibleRawR2Bevel {
+    if (![self core3d_visibleRawR2BevelStatus].canApply
+        || !_visibleRawR2BevelSession) return NO;
+    Core3DEdgeTreatmentRawPreviewSessionR2 *session =
+        _visibleRawR2BevelSession;
+    __block BOOL committed = NO;
+    Core3DSceneSnapshot *expected = [self captureSceneSnapshot];
+    [self commitEdgeTreatmentRawPreviewR2:session expected:expected
+        completion:^(Core3DEdgeTreatmentRawPreviewResultR2 *result) {
+            if (_visibleRawR2BevelSession != session) return;
+            _visibleRawR2BevelStatus = result.status;
+            _visibleRawR2BevelGeneration = result.generation;
+            committed = result.status
+                == Core3DEdgeTreatmentRawPreviewStatusR2Committed;
+            if (committed) {
+                _visibleRawR2BevelActive = NO;
+                _visibleRawR2BevelSession = nil;
+                _visibleRawR2BevelLastRequestedValue = nil;
+            }
+        }];
+    [self core3d_publishVisibleRawR2BevelState];
+    return committed;
+}
+
+- (BOOL)core3d_cancelVisibleRawR2Bevel {
+    if (!_visibleRawR2BevelActive || !_visibleRawR2BevelSession) return NO;
+    Core3DEdgeTreatmentRawPreviewSessionR2 *session =
+        _visibleRawR2BevelSession;
+    if (_visibleRawR2BevelOperation != nil) {
+        Core3DEdgeTreatmentOperation *operation = _visibleRawR2BevelOperation;
+        _visibleRawR2BevelOperation = nil;
+        [self cancelEdgeTreatment:operation];
+    } else {
+        Core3DEdgeTreatmentRawPreviewResultR2 *result =
+            [self cancelEdgeTreatmentRawPreviewR2:session];
+        _visibleRawR2BevelStatus = result.status;
+        _visibleRawR2BevelGeneration = result.generation;
+        if (result.status
+            != Core3DEdgeTreatmentRawPreviewStatusR2Cancelled) {
+            [self core3d_publishVisibleRawR2BevelState];
+            return NO;
+        }
+        _visibleRawR2BevelActive = NO;
+    }
+    if (!_visibleRawR2BevelActive) {
+        _visibleRawR2BevelSession = nil;
+        _visibleRawR2BevelPendingValue = nil;
+        _visibleRawR2BevelLastRequestedValue = nil;
+        _visibleRawR2BevelUpdateInFlight = NO;
+    }
+    [self core3d_publishVisibleRawR2BevelState];
+    return !_visibleRawR2BevelActive;
 }
 
 #if DEBUG
@@ -19605,6 +19837,8 @@ static bool Core3DPublishCommittedSpatialSweep(
 - (BOOL)prepareOrdinaryEditForDocumentClose {
     [self cancelObjectAlignment];
     [self cancelProfileConstruction];
+    if ([self core3d_hasVisibleRawR2Bevel]
+        && ![self core3d_cancelVisibleRawR2Bevel]) return NO;
     if (GLController.viewer
         && !GLController.viewer->cancelActiveRawR2BevelPreview()) return NO;
     return [NSThread isMainThread] && _isSetuped && GLController != nil
@@ -22060,6 +22294,11 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         return Core3DSelectionTypeChangeResultNotReady;
     }
     const BOOL requestedCurrentPublicMode = _currentSelectionType == type;
+    if (!requestedCurrentPublicMode
+        && [self core3d_hasVisibleRawR2Bevel]
+        && ![self core3d_cancelVisibleRawR2Bevel]) {
+        return Core3DSelectionTypeChangeResultPresentationFailure;
+    }
     if (!requestedCurrentPublicMode && GLController.viewer
         && !GLController.viewer->cancelActiveRawR2BevelPreview()) {
         return Core3DSelectionTypeChangeResultPresentationFailure;
@@ -22241,12 +22480,30 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
 }
 
 - (void)setGizmoType:(PrimitiveGizmoType)type {
+    if (type != PrimitiveGizmoTypeChamfer
+        && [self core3d_hasVisibleRawR2Bevel]
+        && ![self core3d_cancelVisibleRawR2Bevel]) return;
     const PrimitiveSelectionType nativeSelectionType =
         [GLController getSelectionType];
     if (type != PrimitiveGizmoTypeNone
         && (_currentSelectionType != nativeSelectionType
             || !Core3DSelectionTypeAllowsGizmo(
                 _currentSelectionType, type))) {
+        return;
+    }
+    if (type == PrimitiveGizmoTypeChamfer
+        && ![self core3d_hasVisibleRawR2Bevel]
+        && GLController.viewer != nullptr
+        && GLController.viewer->getShapeInteractor() != nullptr
+        && !GLController.viewer->getShapeInteractor()->hasActiveBevel()
+        && !GLController.viewer->getShapeInteractor()->canBeginBevelSelection()
+        && [self core3d_beginVisibleRawR2Bevel]) {
+        _currentGizmoType = PrimitiveGizmoTypeChamfer;
+        self.can_apply = NO;
+        [self viewDidChangeViewportPresentationState];
+        [self sendNotifyUIState:UIStateChangingSelection
+                                 | UIStateChangingGizmo
+                                 | UIStateChangingApply];
         return;
     }
     const PrimitiveGizmoType nativeGizmoType =

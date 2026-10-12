@@ -175,6 +175,11 @@ Core3DModelCapability DocumentExportCapabilities(
 
 } // namespace
 
+@interface Core3DViewController (VisibleRawR2BevelAvailability)
+- (BOOL)core3d_hasVisibleRawR2Bevel;
+- (BOOL)core3d_canBeginVisibleRawR2Bevel;
+@end
+
 @implementation Core3DViewController (AvailabilityManager)
 
 - (BOOL)canAdd {
@@ -356,11 +361,12 @@ Core3DModelCapability DocumentExportCapabilities(
             viewer == nullptr ? nullptr : viewer->getShapeInteractor();
 		const BOOL hasRetainedChamfer =
 			_currentGizmoType == PrimitiveGizmoTypeChamfer
-			&& [GLController hasActiveBevel]
-			&& shapeInteractor != nullptr
-			&& (shapeInteractor->isBevelSelectionFrozen()
-				|| shapeInteractor->bevelPreviewState()
-					!= core3d::BevelPreviewState::Selecting);
+			&& ([self core3d_hasVisibleRawR2Bevel]
+				|| ([GLController hasActiveBevel]
+					&& shapeInteractor != nullptr
+					&& (shapeInteractor->isBevelSelectionFrozen()
+						|| shapeInteractor->bevelPreviewState()
+							!= core3d::BevelPreviewState::Selecting)));
 		const BOOL hasSelectingChamfer =
 			_currentGizmoType == PrimitiveGizmoTypeChamfer
 			&& [GLController hasActiveBevel]
@@ -433,9 +439,12 @@ Core3DModelCapability DocumentExportCapabilities(
         const BOOL canBeginExtrusion =
             exposesExtrusion && extrusionAdmission;
         const BOOL canBeginShell = exposesShell && shellAdmission;
+		const BOOL canBeginRawR2Chamfer = exposesChamfer
+			&& [self core3d_canBeginVisibleRawR2Bevel];
 		const BOOL canBeginChamfer = exposesChamfer
-			&& shapeInteractor != nullptr
-			&& shapeInteractor->canBeginBevelSelection();
+			&& (canBeginRawR2Chamfer
+				|| (shapeInteractor != nullptr
+					&& shapeInteractor->canBeginBevelSelection()));
 		if (hasSelectingChamfer) {
 			return canBeginChamfer
 				? @[@(PrimitiveGizmoTypeChamfer)]
@@ -447,16 +456,20 @@ Core3DModelCapability DocumentExportCapabilities(
             const PrimitiveGizmoType gizmoType =
                 static_cast<PrimitiveGizmoType>(
                     value.unsignedIntegerValue);
-            const BOOL faceOperationIsAdmitted =
-                (gizmoType != PrimitiveGizmoTypeExtrude
+			const BOOL faceOperationIsAdmitted =
+				(gizmoType != PrimitiveGizmoTypeExtrude
                     || canBeginExtrusion)
                 && (gizmoType != PrimitiveGizmoTypeShell
                     || canBeginShell)
 				&& (gizmoType != PrimitiveGizmoTypeChamfer
 					|| canBeginChamfer);
-            if (faceOperationIsAdmitted
-                && CapabilitiesAllowGizmo(capabilities, gizmoType)) {
-                [available addObject:value];
+			const BOOL admittedRawR2Chamfer =
+				gizmoType == PrimitiveGizmoTypeChamfer
+				&& canBeginRawR2Chamfer;
+			if (faceOperationIsAdmitted
+				&& (admittedRawR2Chamfer
+					|| CapabilitiesAllowGizmo(capabilities, gizmoType))) {
+				[available addObject:value];
             }
         }
         return [available copy];

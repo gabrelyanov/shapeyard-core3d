@@ -30,6 +30,7 @@
 #import "NSString+StdString.h"
 #import <CommonCrypto/CommonDigest.h>
 
+#include <BRepAdaptor_Curve.hxx>
 #include "ConstructorManipulator.hpp"
 #include "CafShapePrs.h"
 #include "OcctDocument.h"
@@ -986,6 +987,21 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 	foreignEntityIdentifier:(NSString *_Nullable)foreignEntityIdentifier;
 @end
 
+@interface Core3DViewController (VisibleRawR2BevelRouting)
+- (BOOL)core3d_hasVisibleRawR2Bevel;
+- (void)core3d_setVisibleRawR2BevelValue:(double)localValue;
+- (BOOL)core3d_applyVisibleRawR2Bevel;
+- (BOOL)core3d_cancelVisibleRawR2Bevel;
+- (Core3DModelingPreviewStatus)core3d_visibleRawR2BevelStatus;
+@end
+
+static Core3DViewController *Core3DVisibleRawR2BevelOwner(
+    GLViewController *controller) {
+    id delegate = controller.delegate;
+    return [delegate isKindOfClass:Core3DViewController.class]
+        ? static_cast<Core3DViewController *>(delegate) : nil;
+}
+
 @implementation GLViewController {
     dispatch_queue_t _assetDataQueue;
     NSUInteger _pendingAssetDataCount;
@@ -1015,6 +1031,7 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
     CGPoint _pinchPreviousTouch[2];
     UITapGestureRecognizer *_tapRecognizer;
     BOOL _suppressTapSelectionForManipulatorInteraction;
+    BOOL _visibleRawR2BevelOwnsChamferTool;
 }
 
 - (void)dealloc {
@@ -2162,6 +2179,18 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 
 - (void)performNativeHistoryDirection:(NativeHistoryDirection)direction {
     if (_viewer == nullptr) return;
+    Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+    if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
+        if ([rawOwner core3d_cancelVisibleRawR2Bevel]) {
+            [self checkSelections];
+            [self requestRender];
+            if (_delegate != nil && [_delegate respondsToSelector:
+                @selector(viewer:didEndPrimaryInteractionCancelled:)]) {
+                [_delegate viewer:self didEndPrimaryInteractionCancelled:YES];
+            }
+        }
+        return;
+    }
     const NativeHistoryTransition result = _viewer->performHistory(direction);
     if (result.reconcileBooleanTool) {
         if (_delegate != nil && [_delegate respondsToSelector:
@@ -2557,6 +2586,9 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 		[self requestRender];
 		return;
 	}
+    if (type != PrimitiveGizmoTypeChamfer) {
+        _visibleRawR2BevelOwnsChamferTool = NO;
+    }
     if (type == PrimitiveGizmoTypeChamfer) {
 		if (_viewer->getShapeInteractor()->saveSelectionEdges() == 0) {
 			_viewer->getObjectInteractor()->setManipulatorType(
@@ -2589,6 +2621,12 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 }
 
 - (PrimitiveGizmoType)getGizmoType {
+    Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+    if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
+        _visibleRawR2BevelOwnsChamferTool = YES;
+    }
+    if (_visibleRawR2BevelOwnsChamferTool)
+        return PrimitiveGizmoTypeChamfer;
     if (_viewer == nullptr) { return PrimitiveGizmoTypeNone; }
     const auto interactor = _viewer->getObjectInteractor();
     if (interactor == nullptr) { return PrimitiveGizmoTypeNone; }
@@ -2641,6 +2679,12 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 
 - (void)setChamfer:(CGFloat)value {
     assert([self getGizmoType] == PrimitiveGizmoTypeChamfer);
+    Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+    if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
+        [rawOwner core3d_setVisibleRawR2BevelValue:value];
+        [self requestRender];
+        return;
+    }
     (void)_viewer->getShapeInteractor()->setChamferValueForSelection(value);
     [self requestRender];
     //if (!result)
@@ -2648,6 +2692,13 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 }
 
 - (BOOL)applyChamfer {
+    Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+    if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
+        const BOOL committed = [rawOwner core3d_applyVisibleRawR2Bevel];
+        [self checkSelections];
+        [self requestRender];
+        return committed;
+    }
     if ([self getGizmoType] != PrimitiveGizmoTypeChamfer
         || _viewer == nullptr
         || _viewer->getShapeInteractor() == nullptr) {
@@ -2664,6 +2715,13 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 }
 
 - (BOOL)cancelChamfer {
+	Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+	if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
+		const BOOL didCancel = [rawOwner core3d_cancelVisibleRawR2Bevel];
+		[self checkSelections];
+		[self requestRender];
+		return didCancel;
+	}
 	if (_viewer == nullptr || _viewer->getShapeInteractor() == nullptr) {
 		return NO;
 	}
@@ -2675,12 +2733,17 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 }
 
 - (BOOL)canApplyChamfer {
+    Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+    if ([rawOwner core3d_hasVisibleRawR2Bevel])
+        return [rawOwner core3d_visibleRawR2BevelStatus].canApply;
     return _viewer != nullptr
         && _viewer->getShapeInteractor() != nullptr
         && _viewer->getShapeInteractor()->canApplyBevel();
 }
 
 - (BOOL)hasActiveBevel {
+    Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+    if ([rawOwner core3d_hasVisibleRawR2Bevel]) return YES;
     return _viewer != nullptr
         && _viewer->getShapeInteractor() != nullptr
         && _viewer->getShapeInteractor()->hasActiveBevel();
@@ -3505,6 +3568,8 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
             @"singleSelectionExact": @NO,
             @"selectionMatchesMode": @NO,
             @"manipulatorAttached": @NO,
+            @"rawR2Record30Projection": @[],
+            @"rawR2CameraProjection": @"unavailable",
         };
     }
 
@@ -3532,7 +3597,7 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
     if (entityIdentifier == nil) {
         entityIdentifier = @"";
     }
-    return @{
+    NSMutableDictionary<NSString *, id> *answer = [@{
         @"ready": @(state.ready != Standard_False),
         @"acceptedMode": @(acceptedMode),
         @"rawSelectedOwnerCount": @(state.rawSelectedOwnerCount),
@@ -3553,7 +3618,66 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
         @"manipulatorAttached": @(
             _viewer->getObjectInteractor() != nullptr
                 && _viewer->getObjectInteractor()->isManipulatorAttached()),
-    };
+        @"rawR2Record30Projection": @[],
+        @"rawR2CameraProjection": @"unavailable",
+    } mutableCopy];
+
+    // R4/T-B/P3 DEBUG-only locator. It observes the single selected object and
+    // projects the three interior samples of edge record 30 through the exact
+    // active view used by production picking. It neither changes selection nor
+    // creates/consumes raw-R2 authority.
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(V3d_View) view = _viewer->ActiveView();
+        const Handle(AIS_InteractiveContext) context = _viewer->AisContext();
+        if (view.IsNull() || context.IsNull()) return [answer copy];
+        answer[@"rawR2CameraProjection"] =
+            view->Camera()->ProjectionType()
+                == Graphic3d_Camera::Projection_Orthographic
+            ? @"orthographic" : @"perspective";
+        context->InitSelected();
+        if (!context->MoreSelected()) return [answer copy];
+        const Handle(AIS_Shape) presentation =
+            Handle(AIS_Shape)::DownCast(context->SelectedInteractive());
+        context->NextSelected();
+        if (context->MoreSelected() || presentation.IsNull()
+            || presentation->Shape().IsNull()) return [answer copy];
+
+        TopTools_IndexedMapOfShape edges;
+        TopExp::MapShapes(presentation->Shape(), TopAbs_EDGE, edges);
+        constexpr Standard_Integer record30OneBased = 31;
+        if (edges.Extent() < record30OneBased) return [answer copy];
+        const TopoDS_Edge edge = TopoDS::Edge(
+            edges.FindKey(record30OneBased));
+        BRepAdaptor_Curve curve(edge);
+        const Standard_Real first = curve.FirstParameter();
+        const Standard_Real last = curve.LastParameter();
+        if (!std::isfinite(first) || !std::isfinite(last)
+            || last <= first) return [answer copy];
+        Standard_Integer width = 0;
+        Standard_Integer height = 0;
+        view->Window()->Size(width, height);
+        if (width <= 0 || height <= 0) return [answer copy];
+
+        NSMutableArray<NSDictionary<NSString *, NSNumber *> *> *points =
+            [NSMutableArray arrayWithCapacity:3];
+        for (const Standard_Real fraction : {0.25, 0.5, 0.75}) {
+            gp_Pnt point;
+            curve.D0(first + (last - first) * fraction, point);
+            Standard_Integer x = 0;
+            Standard_Integer y = 0;
+            view->Convert(point.X(), point.Y(), point.Z(), x, y);
+            [points addObject:@{
+                @"fraction": @(fraction),
+                @"x": @(static_cast<double>(x) / width),
+                @"y": @(static_cast<double>(y) / height),
+            }];
+        }
+        answer[@"rawR2Record30Projection"] = [points copy];
+    } catch (...) {
+        answer[@"rawR2Record30Projection"] = @[];
+    }
+    return [answer copy];
 }
 
 - (BOOL)debugDetectAnyDisplayedShape {

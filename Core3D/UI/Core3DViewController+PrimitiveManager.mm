@@ -314,6 +314,12 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 
 } // namespace
 
+@interface Core3DViewController (VisibleRawR2BevelRouting)
+- (BOOL)core3d_hasVisibleRawR2Bevel;
+- (Core3DModelingPreviewStatus)core3d_visibleRawR2BevelStatus;
+- (double)core3d_visibleRawR2BevelMetersPerUnit;
+@end
+
 @interface Core3DViewController (PrimitiveManagerOutcomePrivate)
 
 - (Core3DModelingOperationResult)core3d_tryApplyOperation:
@@ -510,6 +516,9 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     if (![NSThread isMainThread]) {
         return Core3DUnavailableModelingStatus(gizmoType);
     }
+    if (gizmoType == PrimitiveGizmoTypeChamfer
+        && [self core3d_hasVisibleRawR2Bevel])
+        return [self core3d_visibleRawR2BevelStatus];
     return Core3DCurrentModelingStatus(GLController, gizmoType);
 }
 
@@ -633,13 +642,21 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 
 - (void)setChamfer:(CGFloat)value {
     if (_currentGizmoType != PrimitiveGizmoTypeChamfer) { return; }
-    [GLController setChamfer:value*100];
+    [GLController setChamfer:[self core3d_hasVisibleRawR2Bevel]
+        ? value : value * 100.0];
     self.can_apply = [GLController canApplyChamfer];
     [self viewDidChangeViewportPresentationState];
     [self sendNotifyUIState:UIStateChangingApply];
 }
 
 - (Boundaries)getChamferBoundaries {
+    const double metersPerUnit =
+        [self core3d_visibleRawR2BevelMetersPerUnit];
+    if (metersPerUnit > 0.0 && std::isfinite(metersPerUnit)) {
+        const double maximum = 20.0 / (metersPerUnit * 1000.0);
+        if (maximum > 0.0 && std::isfinite(maximum))
+            return {.min = -maximum, .max = maximum};
+    }
     return {.min = -15, .max = 15};
 }
 
@@ -1093,6 +1110,8 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 }
 
 - (void)undo {
+    const BOOL wasChamfer =
+        _currentGizmoType == PrimitiveGizmoTypeChamfer;
     const BOOL wasExtrusion =
         _currentGizmoType == PrimitiveGizmoTypeExtrude;
     const BOOL wasShell =
@@ -1102,6 +1121,15 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     const BOOL wasRadialArray =
         _currentGizmoType == PrimitiveGizmoTypeRadialArray;
     [GLController undo];
+    if (wasChamfer) {
+        if (![GLController hasActiveBevel]
+            && _currentGizmoType == PrimitiveGizmoTypeChamfer)
+            [self completeOperationInteraction];
+        [self sendNotifyUIState:UIStateChangingGizmo
+                                | UIStateChangingApply
+                                | UIStateChangingHistory];
+        return;
+    }
     if (wasExtrusion) {
         _currentGizmoType = [GLController getGizmoType];
         if (_currentGizmoType != PrimitiveGizmoTypeExtrude) {
@@ -1192,6 +1220,8 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 }
 
 - (void)redo {
+    const BOOL wasChamfer =
+        _currentGizmoType == PrimitiveGizmoTypeChamfer;
     const BOOL wasExtrusion =
         _currentGizmoType == PrimitiveGizmoTypeExtrude;
     const BOOL wasShell =
@@ -1201,6 +1231,15 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     const BOOL wasRadialArray =
         _currentGizmoType == PrimitiveGizmoTypeRadialArray;
     [GLController redo];
+    if (wasChamfer) {
+        if (![GLController hasActiveBevel]
+            && _currentGizmoType == PrimitiveGizmoTypeChamfer)
+            [self completeOperationInteraction];
+        [self sendNotifyUIState:UIStateChangingGizmo
+                                | UIStateChangingApply
+                                | UIStateChangingHistory];
+        return;
+    }
     if (wasExtrusion) {
         _currentGizmoType = [GLController getGizmoType];
         if (_currentGizmoType != PrimitiveGizmoTypeExtrude) {
