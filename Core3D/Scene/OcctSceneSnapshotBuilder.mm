@@ -33,6 +33,9 @@
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
+#if DEBUG
+#include <BRepLib.hxx>
+#endif
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Curve3D.hxx>
@@ -135,6 +138,7 @@
 #include <XCAFPrs_DocumentExplorer.hxx>
 #include <V3d_View.hxx>
 #include <gp_Ax1.hxx>
+#include <gp_Dir2d.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Pnt2d.hxx>
@@ -146,6 +150,7 @@
 #include <TopLoc_Datum3D.hxx>
 #include <TopLoc_SListNodeOfItemLocation.hxx>
 #include <TColGeom_HArray2OfSurface.hxx>
+#include <TColgp_Array1OfPnt2d.hxx>
 #include <TColgp_Array1OfPnt.hxx>
 #include <TColgp_Array2OfPnt.hxx>
 #include <TColgp_HArray1OfPnt.hxx>
@@ -5098,6 +5103,238 @@ bool BRepCensusProduct(std::size_t first, std::size_t second,
     return true;
 }
 
+enum class BRepCensusPCurveLookupKind : std::uint8_t {
+    Stored,
+    NativeNull,
+    NeedsPlanarProjection,
+    Failure,
+};
+
+struct BRepCensusPCurveLookup final {
+    BRepCensusPCurveLookupKind kind = BRepCensusPCurveLookupKind::NativeNull;
+    Handle(Geom2d_Curve) stored;
+    const BRep_CurveRepresentation* representation = nullptr;
+    const char* reason = nullptr;
+};
+
+constexpr const char* kBRepCensusUnstoredPlanarReason =
+    "planar pcurve not stored, generation not admitted (D778)";
+
+// Compares concrete datum/power chains without asking TopLoc to multiply them.
+// This is the exact equality used by the raw representation lookup below.
+bool BRepCensusSameConcreteLocation(const TopLoc_Location& first,
+                                    const TopLoc_Location& second) noexcept {
+    TopLoc_Location left = first;
+    TopLoc_Location right = second;
+    while (!left.IsIdentity() && !right.IsIdentity()) {
+        if (left.FirstDatum() != right.FirstDatum()
+            || left.FirstPower() != right.FirstPower()) return false;
+        left = left.NextLocation();
+        right = right.NextLocation();
+    }
+    return left.IsIdentity() && right.IsIdentity();
+}
+
+BRepCensusPCurveLookup BRepCensusLookupStoredPCurve(
+    const Handle(BRep_TEdge)& edge, const Handle(BRep_TFace)& face,
+    TopAbs_Orientation edgeOrientation) noexcept {
+    BRepCensusPCurveLookup result;
+    if (edge.IsNull() || face.IsNull() || face->Surface().IsNull()) {
+        result.kind = BRepCensusPCurveLookupKind::Failure;
+        return result;
+    }
+
+    // Raw source fields are intentional: the native convenience accessor
+    // synthesizes a planar pcurve on a miss. The representation location is
+    // already face-relative for a raw incidence; exact effective-chain
+    // composition is handled by the traversal before this lookup.
+    for (const auto& candidate : edge->Curves()) {
+        if (candidate.IsNull()) {
+            result.kind = BRepCensusPCurveLookupKind::Failure;
+            return result;
+        }
+        const auto stored = Handle(BRep_CurveOnSurface)::DownCast(candidate);
+        if (stored.IsNull() || stored->Surface().get() != face->Surface().get()
+            || !BRepCensusSameConcreteLocation(
+                stored->Location(), face->Location())) continue;
+        result.kind = BRepCensusPCurveLookupKind::Stored;
+        result.representation = candidate.get();
+        result.stored = !stored->IsCurveOnClosedSurface()
+                || edgeOrientation != TopAbs_REVERSED
+            ? stored->PCurve() : stored->PCurve2();
+        return result; // A null stored PCurve is still Stored (D778).
+    }
+
+    Handle(Geom_Plane) plane = Handle(Geom_Plane)::DownCast(face->Surface());
+    if (plane.IsNull()) {
+        const auto trimmed = Handle(Geom_RectangularTrimmedSurface)::DownCast(
+            face->Surface());
+        if (!trimmed.IsNull())
+            plane = Handle(Geom_Plane)::DownCast(trimmed->BasisSurface());
+    }
+    if (plane.IsNull()) return result;
+
+    for (const auto& candidate : edge->Curves()) {
+        const auto curve = Handle(BRep_Curve3D)::DownCast(candidate);
+        if (curve.IsNull()) continue;
+        if (curve->Curve3D().IsNull()) return result;
+        result.kind = BRepCensusPCurveLookupKind::NeedsPlanarProjection;
+        result.reason = kBRepCensusUnstoredPlanarReason;
+        return result;
+    }
+    return result;
+}
+
+Handle(Geom_Curve) BRepCensusFirstCurve3D(
+    const Handle(BRep_TEdge)& edge,
+    const TopLoc_Location** location = nullptr) noexcept {
+    if (location) *location = nullptr;
+    if (edge.IsNull()) return {};
+    for (const auto& candidate : edge->Curves()) {
+        const auto stored = Handle(BRep_Curve3D)::DownCast(candidate);
+        if (!stored.IsNull()) {
+            if (location) *location = &stored->Location();
+            return stored->Curve3D();
+        }
+    }
+    return {};
+}
+
+Handle(Poly_Polygon3D) BRepCensusFirstPolygon3D(
+    const Handle(BRep_TEdge)& edge) noexcept {
+    if (edge.IsNull()) return {};
+    for (const auto& candidate : edge->Curves()) {
+        const auto stored = Handle(BRep_Polygon3D)::DownCast(candidate);
+        if (!stored.IsNull()) return stored->Polygon3D();
+    }
+    return {};
+}
+
+Handle(Poly_PolygonOnTriangulation) BRepCensusLookupStoredPolygon(
+    const Handle(BRep_TEdge)& edge,
+    const Handle(Poly_Triangulation)& mesh,
+    const TopLoc_Location& relativeLocation,
+    TopAbs_Orientation edgeOrientation) noexcept {
+    if (edge.IsNull() || mesh.IsNull()) return {};
+    for (const auto& candidate : edge->Curves()) {
+        const auto stored =
+            Handle(BRep_PolygonOnTriangulation)::DownCast(candidate);
+        if (stored.IsNull()
+            || stored->Triangulation().get() != mesh.get()
+            || !BRepCensusSameConcreteLocation(
+                stored->Location(), relativeLocation)) continue;
+        if (stored->IsPolygonOnClosedTriangulation()
+            && edgeOrientation == TopAbs_REVERSED) {
+            const auto closed =
+                Handle(BRep_PolygonOnClosedTriangulation)::DownCast(stored);
+            return closed.IsNull()
+                ? Handle(Poly_PolygonOnTriangulation)()
+                : closed->PolygonOnTriangulation2();
+        }
+        return stored->PolygonOnTriangulation();
+    }
+    return {};
+}
+
+template <typename Visitor>
+bool BRepCensusForEachRawEdge(const TopoDS_Shape& parent,
+                              TopAbs_Orientation parentOrientation,
+                              Visitor& visitor,
+                              std::size_t depth = 0) noexcept {
+    if (depth >= retained_topology_budget::MaximumTopologyVisits)
+        return false;
+    for (TopoDS_Iterator child(parent, Standard_False, Standard_False);
+         child.More(); child.Next()) {
+        TopoDS_Shape item = child.Value();
+        item.Orientation(TopAbs::Compose(
+            parentOrientation, item.Orientation()));
+        if (item.ShapeType() == TopAbs_EDGE) {
+            if (!visitor(TopoDS::Edge(item))) return false;
+        } else if (item.ShapeType() < TopAbs_EDGE
+            && !BRepCensusForEachRawEdge(
+                item, item.Orientation(), visitor, depth + 1)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool BRepCensusRawSeam(const Handle(BRep_TEdge)& edge,
+                       const Handle(BRep_TFace)& face,
+                       const TopoDS_Shape& faceShape,
+                       const Handle(Poly_Triangulation)& activeMesh) noexcept {
+    if (edge.IsNull() || face.IsNull()) return false;
+    bool hasClosedRepresentation = false;
+    for (const auto& candidate : edge->Curves()) {
+        if (const auto closed =
+                Handle(BRep_CurveOnClosedSurface)::DownCast(candidate);
+            !closed.IsNull()
+            && closed->Surface().get() == face->Surface().get()
+            && BRepCensusSameConcreteLocation(
+                closed->Location(), face->Location())) {
+            hasClosedRepresentation = true;
+            break;
+        }
+        if (const auto closed =
+                Handle(BRep_PolygonOnClosedTriangulation)::DownCast(candidate);
+            !closed.IsNull() && !activeMesh.IsNull()
+            && closed->Triangulation().get() == activeMesh.get()) {
+            hasClosedRepresentation = true;
+            break;
+        }
+    }
+    if (!hasClosedRepresentation) return false;
+    std::size_t occurrences = 0;
+    auto count = [&](const TopoDS_Edge& incidence) noexcept {
+        if (incidence.TShape().get() == edge.get())
+            return BRepCensusAdd(occurrences, 1);
+        return true;
+    };
+    return BRepCensusForEachRawEdge(
+            faceShape, faceShape.Orientation(), count)
+        && occurrences == 2;
+}
+
+bool BRepCensusFindPlanarMissInFaceChildren(
+    const TopoDS_Shape& shape, const Handle(BRep_TFace)& face,
+    BRepCensusPCurveLookup& refusal, std::size_t depth = 0) noexcept {
+    if (depth >= retained_topology_budget::MaximumTopologyVisits) return false;
+    if (shape.ShapeType() == TopAbs_EDGE) {
+        const auto edge = Handle(BRep_TEdge)::DownCast(shape.TShape());
+        const auto lookup = BRepCensusLookupStoredPCurve(
+            edge, face, shape.Orientation());
+        if (lookup.kind == BRepCensusPCurveLookupKind::Failure) return false;
+        if (lookup.kind == BRepCensusPCurveLookupKind::NeedsPlanarProjection) {
+            refusal = lookup;
+            return true;
+        }
+    }
+    for (TopoDS_Iterator child(shape, Standard_False, Standard_False);
+         child.More(); child.Next()) {
+        if (BRepCensusFindPlanarMissInFaceChildren(
+                child.Value(), face, refusal, depth + 1)) return true;
+    }
+    return false;
+}
+
+bool BRepCensusFindPlanarMiss(
+    const TopoDS_Shape& shape, BRepCensusPCurveLookup& refusal,
+    std::size_t depth = 0) noexcept {
+    if (depth >= retained_topology_budget::MaximumTopologyVisits) return false;
+    if (shape.ShapeType() == TopAbs_FACE) {
+        const auto face = Handle(BRep_TFace)::DownCast(shape.TShape());
+        if (face.IsNull()) return false;
+        if (BRepCensusFindPlanarMissInFaceChildren(shape, face, refusal))
+            return true;
+    }
+    for (TopoDS_Iterator child(shape, Standard_False, Standard_False);
+         child.More(); child.Next()) {
+        if (BRepCensusFindPlanarMiss(child.Value(), refusal, depth + 1))
+            return true;
+    }
+    return false;
+}
+
 bool BRepCensusMapCapacity(std::size_t count,
                            std::size_t& capacity) noexcept {
     capacity = 0;
@@ -5130,6 +5367,24 @@ bool BRepCensusCountOccurrences(const TopoDS_Shape& shape,
         if (!BRepCensusCountOccurrences(child.Value(), count, depth + 1))
             return false;
     return true;
+}
+
+bool BRepCensusMapRawShapes(const TopoDS_Shape& shape,
+                            BRepCensusShapeMap& topology,
+                            std::size_t depth = 0) noexcept {
+    if (depth >= retained_topology_budget::MaximumTopologyVisits)
+        return false;
+    try {
+        topology.Add(shape);
+        for (TopoDS_Iterator child(shape, Standard_False, Standard_False);
+             child.More(); child.Next()) {
+            if (!BRepCensusMapRawShapes(
+                    child.Value(), topology, depth + 1)) return false;
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 bool BRepCensusTerm(BRepRepresentationCensus& census, std::size_t& term,
@@ -5191,36 +5446,198 @@ bool BRepCensusApplyBundleDelta(
             sourceBundles.observableMapScratch);
 }
 
-// Counts the retained list nodes produced by
-// A.Predivided(B) == B.Inverted().Multiplied(A), without constructing a
-// TopLoc_Location.  TopLoc_Location.cxx reverses B, negates its powers, then
-// prepends A while merging only the one adjacent equal-datum boundary.
-std::size_t BRepCensusPredividedNodeCount(
-    const TopLoc_Location& a, const TopLoc_Location& b) noexcept {
-    std::size_t count = 0;
-    for (TopLoc_Location item = a; !item.IsIdentity();
-         item = item.NextLocation()) {
-        if (!BRepCensusAdd(count, 1)) return 0;
+struct BRepCensusReducedWordItem final {
+    const TopLoc_Datum3D* datum = nullptr;
+    Standard_Integer power = 0;
+};
+
+class BRepCensusLocationWord final {
+public:
+    explicit BRepCensusLocationWord(const TopLoc_Location& location) noexcept
+        : location_(&location) {}
+
+    bool Count(std::size_t& count) const noexcept {
+        count = 0;
+        for (const TopLoc_Location* item = location_;
+             item && !item->IsIdentity(); item = &item->NextLocation()) {
+            if (!BRepCensusAdd(count, 1)) return false;
+        }
+        return true;
     }
-    for (TopLoc_Location item = b; !item.IsIdentity();
-         item = item.NextLocation()) {
-        if (!BRepCensusAdd(count, 1)) return 0;
+
+    bool Read(std::size_t ordinal,
+              BRepCensusReducedWordItem& output) const noexcept {
+        const TopLoc_Location* item = location_;
+        while (item && !item->IsIdentity() && ordinal != 0) {
+            item = &item->NextLocation();
+            --ordinal;
+        }
+        if (!item || item->IsIdentity()) return false;
+        output = {item->FirstDatum().get(), item->FirstPower()};
+        return output.datum && output.power != 0;
     }
-    if (a.IsIdentity() || b.IsIdentity()) return count;
-    TopLoc_Location aTail = a;
-    while (!aTail.NextLocation().IsIdentity())
-        aTail = aTail.NextLocation();
-    // The head of B.Inverted() is B's last item. It is adjacent to A's last
-    // item in the constructed list; equal datums merge and a zero power drops
-    // that node completely.
-    TopLoc_Location bTail = b;
-    while (!bTail.NextLocation().IsIdentity())
-        bTail = bTail.NextLocation();
-    if (aTail.FirstDatum() == bTail.FirstDatum()) {
-        if (count < 2) return 0;
-        count -= aTail.FirstPower() == bTail.FirstPower() ? 2 : 1;
+
+private:
+    const TopLoc_Location* location_ = nullptr;
+};
+
+// A.Predivided(B) is the reduced word A + reverse-negate(B). This cursor
+// borrows both source words, rescans them for random access, and never asks
+// TopLoc to invert, multiply, or allocate a list node. Valid identity is a
+// successful empty cursor; arithmetic/traversal failure is separate state.
+template <typename LeftWord, typename RightWord>
+class BRepCensusReducedPredivisionCursor final {
+public:
+    BRepCensusReducedPredivisionCursor(
+        const LeftWord& left, const RightWord& right) noexcept
+        : left_(left), right_(right) {
+        Prepare();
     }
-    return count;
+
+    bool Next(BRepCensusReducedWordItem& output) noexcept {
+        output = {};
+        if (failed_ || emitted_ >= outputCount_) return false;
+        if (emitted_ < leftDirectCount_) {
+            if (!left_.Read(emitted_, output)) return Fail();
+        } else if (hasMerge_ && emitted_ == leftDirectCount_) {
+            output = merged_;
+        } else {
+            const std::size_t offset = emitted_ - leftDirectCount_
+                - (hasMerge_ ? 1U : 0U);
+            if (offset >= rightDirectCount_) return Fail();
+            if (!right_.Read(rightDirectCount_ - offset - 1, output)
+                || !CheckedNegate(output.power, output.power)) return Fail();
+        }
+        if (!output.datum || output.power == 0) return Fail();
+        ++emitted_;
+        return true;
+    }
+
+    bool Failed() const noexcept { return failed_; }
+    std::size_t OutputCount() const noexcept { return outputCount_; }
+
+private:
+    static bool CheckedNegate(Standard_Integer value,
+                              Standard_Integer& output) noexcept {
+        if (value == std::numeric_limits<Standard_Integer>::min())
+            return false;
+        output = -value;
+        return true;
+    }
+
+    static bool CheckedAdd(Standard_Integer left, Standard_Integer right,
+                           Standard_Integer& output) noexcept {
+        if ((right > 0
+                && left > std::numeric_limits<Standard_Integer>::max() - right)
+            || (right < 0
+                && left < std::numeric_limits<Standard_Integer>::min() - right))
+            return false;
+        output = left + right;
+        return true;
+    }
+
+    bool Fail() noexcept {
+        failed_ = true;
+        outputCount_ = 0;
+        return false;
+    }
+
+    void Prepare() noexcept {
+        std::size_t total = 0;
+        if (!left_.Count(leftCount_) || !right_.Count(rightCount_)
+            || !BRepCensusAdd(total, leftCount_)
+            || !BRepCensusAdd(total, rightCount_)) {
+            Fail();
+            return;
+        }
+        BRepCensusReducedWordItem item;
+        for (std::size_t index = 0; index < leftCount_; ++index) {
+            if (!left_.Read(index, item) || !item.datum || item.power == 0) {
+                Fail();
+                return;
+            }
+        }
+        for (std::size_t index = 0; index < rightCount_; ++index) {
+            Standard_Integer inverted = 0;
+            if (!right_.Read(index, item) || !item.datum || item.power == 0
+                || !CheckedNegate(item.power, inverted)) {
+                Fail();
+                return;
+            }
+        }
+
+        std::size_t cancelled = 0;
+        while (cancelled < leftCount_ && cancelled < rightCount_) {
+            BRepCensusReducedWordItem leftItem, rightItem;
+            if (!left_.Read(leftCount_ - cancelled - 1, leftItem)
+                || !right_.Read(rightCount_ - cancelled - 1, rightItem)) {
+                Fail();
+                return;
+            }
+            if (leftItem.datum != rightItem.datum) break;
+            Standard_Integer inverted = 0, mergedPower = 0;
+            if (!CheckedNegate(rightItem.power, inverted)
+                || !CheckedAdd(leftItem.power, inverted, mergedPower)) {
+                Fail();
+                return;
+            }
+            if (mergedPower != 0) {
+                hasMerge_ = true;
+                merged_ = {leftItem.datum, mergedPower};
+                break;
+            }
+            ++cancelled;
+        }
+
+        const std::size_t mergedItems = hasMerge_ ? 1U : 0U;
+        leftDirectCount_ = leftCount_ - cancelled - mergedItems;
+        rightDirectCount_ = rightCount_ - cancelled - mergedItems;
+        outputCount_ = leftDirectCount_ + rightDirectCount_ + mergedItems;
+        if (outputCount_ > total) Fail();
+    }
+
+    const LeftWord& left_;
+    const RightWord& right_;
+    std::size_t leftCount_ = 0;
+    std::size_t rightCount_ = 0;
+    std::size_t leftDirectCount_ = 0;
+    std::size_t rightDirectCount_ = 0;
+    std::size_t outputCount_ = 0;
+    std::size_t emitted_ = 0;
+    BRepCensusReducedWordItem merged_;
+    bool hasMerge_ = false;
+    bool failed_ = false;
+};
+
+struct BRepCensusReducedWordEvaluation final {
+    std::size_t nodeCount = 0;
+    std::size_t byteCount = 0;
+    bool failed = false;
+};
+
+template <typename LeftWord, typename RightWord>
+BRepCensusReducedWordEvaluation BRepCensusEvaluateReducedPredivision(
+    const LeftWord& left, const RightWord& right,
+    std::size_t nodeBytes) noexcept {
+    BRepCensusReducedPredivisionCursor<LeftWord, RightWord> cursor(left, right);
+    if (cursor.Failed()) return {0, 0, true};
+    std::size_t observedCount = 0;
+    BRepCensusReducedWordItem item;
+    while (cursor.Next(item)) {
+        if (!BRepCensusAdd(observedCount, 1)) return {0, 0, true};
+    }
+    std::size_t bytes = 0;
+    if (cursor.Failed() || observedCount != cursor.OutputCount()
+        || !BRepCensusProduct(observedCount, nodeBytes, bytes))
+        return {0, 0, true};
+    return {observedCount, bytes, false};
+}
+
+BRepCensusReducedWordEvaluation BRepCensusPredividedNodeEvaluation(
+    const TopLoc_Location& left, const TopLoc_Location& right) noexcept {
+    const BRepCensusLocationWord leftWord(left), rightWord(right);
+    return BRepCensusEvaluateReducedPredivision(leftWord, rightWord,
+        sizeof(TopLoc_SListNodeOfItemLocation));
 }
 
 class BRepCensusIdentitySet final {
@@ -5311,13 +5728,25 @@ bool MeasureBRepRepresentation(
     const decal_layer::bake::accounting::View& accounting,
     BRepRepresentationCensus& census,
     decal_layer::bake::accounting::Ticket& scratchTicket,
-    BRepRepresentationCensus* copyPrediction = nullptr) noexcept {
+    BRepRepresentationCensus* copyPrediction = nullptr,
+    BRepCensusPCurveLookup* rejectedLookup = nullptr) noexcept {
     using FailureSite = decal_layer::bake::accounting::FailureSite;
     using Retention = decal_layer::bake::accounting::Retention;
     using StorageDimension = decal_layer::bake::accounting::StorageDimension;
     census = {};
+    if (rejectedLookup) *rejectedLookup = {};
     if (shape.IsNull() || !accounting.valid()) return false;
     try {
+        // D778: the stored-representation decision precedes every census
+        // ticket and the target Copy. A planar miss is a typed refusal; it is
+        // never hidden by BRep_Tool's generating fallback.
+        if (copyPrediction) {
+            BRepCensusPCurveLookup refusal;
+            if (BRepCensusFindPlanarMiss(shape, refusal)) {
+                if (rejectedLookup) *rejectedLookup = refusal;
+                return false;
+            }
+        }
         // Count occurrences without materialising the census map, then admit
         // its concrete entry/index storage and the bounded identity vector.
         std::size_t occurrences = 0;
@@ -5342,7 +5771,7 @@ bool MeasureBRepRepresentation(
             return false;
 
         BRepCensusShapeMap topology;
-        TopExp::MapShapes(shape, topology);
+        if (!BRepCensusMapRawShapes(shape, topology)) return false;
         census.topologyCount = std::size_t(topology.Extent());
         if (topology.IsEmpty() || census.topologyCount > occurrences)
             return false;
@@ -5357,18 +5786,9 @@ bool MeasureBRepRepresentation(
             return seen.insert(identity, census, inserted) && inserted;
         };
 
-        std::function<bool(const TopLoc_Location&)> location;
-        std::function<bool(const Handle(Geom_Curve)&)> curve3d;
-        std::function<bool(const Handle(Geom2d_Curve)&)> curve2d;
-        std::function<bool(const Handle(Geom_Surface)&)> surface;
-        std::function<bool(const Handle(Poly_Triangulation)&)> triangulation;
-        std::function<bool(const Handle(Poly_Polygon3D)&)> polygon3d;
-        std::function<bool(const Handle(Poly_Polygon2D)&)> polygon2d;
-        std::function<bool(const Handle(Poly_PolygonOnTriangulation)&)>
-            polygonOnTriangulation;
         bool includeTriangulationParameters = true;
 
-        location = [&](const TopLoc_Location& value) {
+        const auto location = [&](const TopLoc_Location& value) {
             for (TopLoc_Location current = value; !current.IsIdentity();
                  current = current.NextLocation()) {
                 const void* node = &current.FirstDatum();
@@ -5404,7 +5824,8 @@ bool MeasureBRepRepresentation(
                         std::size_t(weights->Length()), seen));
         };
 
-        curve3d = [&](const Handle(Geom_Curve)& value) -> bool {
+        const auto curve3d = [&](auto&& recurse,
+                                 const Handle(Geom_Curve)& value) -> bool {
             if (value.IsNull() || !first(value.get())) return true;
 #define CENSUS_CURVE3D(Type) \
             if (!Handle(Type)::DownCast(value).IsNull()) \
@@ -5440,16 +5861,17 @@ bool MeasureBRepRepresentation(
                 !typed.IsNull())
                 return BRepCensusTerm(census, census.geometry,
                         sizeof(Geom_TrimmedCurve))
-                    && curve3d(typed->BasisCurve());
+                    && recurse(recurse, typed->BasisCurve());
             if (const auto typed = Handle(Geom_OffsetCurve)::DownCast(value);
                 !typed.IsNull())
                 return BRepCensusTerm(census, census.geometry,
                         sizeof(Geom_OffsetCurve))
-                    && curve3d(typed->BasisCurve());
+                    && recurse(recurse, typed->BasisCurve());
             return false;
         };
 
-        curve2d = [&](const Handle(Geom2d_Curve)& value) -> bool {
+        const auto curve2d = [&](auto&& recurse,
+                                 const Handle(Geom2d_Curve)& value) -> bool {
             if (value.IsNull() || !first(value.get())) return true;
 #define CENSUS_CURVE2D(Type) \
             if (!Handle(Type)::DownCast(value).IsNull()) \
@@ -5485,23 +5907,23 @@ bool MeasureBRepRepresentation(
                 !typed.IsNull())
                 return BRepCensusTerm(census, census.geometry,
                         sizeof(Geom2d_TrimmedCurve))
-                    && curve2d(typed->BasisCurve());
+                    && recurse(recurse, typed->BasisCurve());
             if (const auto typed = Handle(Geom2d_OffsetCurve)::DownCast(value);
                 !typed.IsNull())
                 return BRepCensusTerm(census, census.geometry,
                         sizeof(Geom2d_OffsetCurve))
-                    && curve2d(typed->BasisCurve());
+                    && recurse(recurse, typed->BasisCurve());
             if (const auto typed = Handle(Bisector_BisecAna)::DownCast(value);
                 !typed.IsNull())
                 return BRepCensusTerm(census, census.geometry,
                         sizeof(Bisector_BisecAna))
-                    && curve2d(typed->Geom2dCurve());
+                    && recurse(recurse, typed->Geom2dCurve());
             if (const auto typed = Handle(Bisector_BisecCC)::DownCast(value);
                 !typed.IsNull())
                 return BRepCensusTerm(census, census.geometry,
                         sizeof(Bisector_BisecCC))
-                    && curve2d(typed->Curve(1))
-                    && curve2d(typed->Curve(2));
+                    && recurse(recurse, typed->Curve(1))
+                    && recurse(recurse, typed->Curve(2));
             if (!Handle(Bisector_BisecPC)::DownCast(value).IsNull())
                 return BRepCensusTerm(census, census.geometry,
                     sizeof(Bisector_BisecPC));
@@ -5523,7 +5945,8 @@ bool MeasureBRepRepresentation(
             return true;
         };
 
-        surface = [&](const Handle(Geom_Surface)& value) -> bool {
+        const auto surface = [&](auto&& recurse,
+                                 const Handle(Geom_Surface)& value) -> bool {
             if (value.IsNull() || !first(value.get())) return true;
 #define CENSUS_SURFACE(Type) \
             if (!Handle(Type)::DownCast(value).IsNull()) \
@@ -5570,32 +5993,32 @@ bool MeasureBRepRepresentation(
                 !typed.IsNull())
                 return BRepCensusTerm(census, census.geometry,
                         sizeof(Geom_RectangularTrimmedSurface))
-                    && surface(typed->BasisSurface());
+                    && recurse(recurse, typed->BasisSurface());
             if (const auto typed = Handle(Geom_OffsetSurface)::DownCast(value);
                 !typed.IsNull()) {
                 if (!BRepCensusTerm(census, census.geometry,
                         sizeof(Geom_OffsetSurface))
-                    || !surface(typed->BasisSurface())) return false;
+                    || !recurse(recurse, typed->BasisSurface())) return false;
                 const Handle(Geom_OsculatingSurface)& osculating =
                     typed->OsculatingSurface();
                 if (osculating.IsNull() || !first(osculating.get()))
                     return true;
                 return BRepCensusTerm(census, census.geometry,
                         sizeof(Geom_OsculatingSurface))
-                    && surface(osculating->BasisSurface());
+                    && recurse(recurse, osculating->BasisSurface());
             }
             if (const auto typed =
                     Handle(Geom_SurfaceOfLinearExtrusion)::DownCast(value);
                 !typed.IsNull())
                 return BRepCensusTerm(census, census.geometry,
                         sizeof(Geom_SurfaceOfLinearExtrusion))
-                    && curve3d(typed->BasisCurve());
+                    && curve3d(curve3d, typed->BasisCurve());
             if (const auto typed =
                     Handle(Geom_SurfaceOfRevolution)::DownCast(value);
                 !typed.IsNull())
                 return BRepCensusTerm(census, census.geometry,
                         sizeof(Geom_SurfaceOfRevolution))
-                    && curve3d(typed->BasisCurve());
+                    && curve3d(curve3d, typed->BasisCurve());
             if (!Handle(GeomPlate_Surface)::DownCast(value).IsNull())
                 return BRepCensusTerm(census, census.geometry,
                     sizeof(GeomPlate_Surface));
@@ -5616,7 +6039,8 @@ bool MeasureBRepRepresentation(
                          u <= patches->UpperRow(); ++u)
                         for (Standard_Integer v = patches->LowerCol();
                              v <= patches->UpperCol(); ++v)
-                            if (!surface(patches->Value(u, v))) return false;
+                            if (!recurse(recurse, patches->Value(u, v)))
+                                return false;
                 }
                 const auto uj = typed->UJointValues();
                 const auto vj = typed->VJointValues();
@@ -5632,9 +6056,10 @@ bool MeasureBRepRepresentation(
             return false;
         };
 
-        triangulation = [&](const Handle(Poly_Triangulation)& value) {
+        const auto triangulation = [&](
+            const Handle(Poly_Triangulation)& value) {
             if (value.IsNull() || !first(value.get())) return true;
-            if (value->DynamicType() != STANDARD_TYPE(Poly_Triangulation))
+            if (typeid(*value.get()) != typeid(Poly_Triangulation))
                 return false; // O1: a new observed subtype is a STOP.
             if (!BRepCensusTerm(census, census.representations,
                     sizeof(Poly_Triangulation))) return false;
@@ -5688,7 +6113,7 @@ bool MeasureBRepRepresentation(
                     sizeof(Poly_TriangulationParameters));
         };
 
-        polygon3d = [&](const Handle(Poly_Polygon3D)& value) {
+        const auto polygon3d = [&](const Handle(Poly_Polygon3D)& value) {
             if (value.IsNull() || !first(value.get())) return true;
             std::size_t elements = 0;
             if (!BRepCensusProduct(std::size_t(value->NbNodes()),
@@ -5703,7 +6128,7 @@ bool MeasureBRepRepresentation(
             }
             return true;
         };
-        polygon2d = [&](const Handle(Poly_Polygon2D)& value) {
+        const auto polygon2d = [&](const Handle(Poly_Polygon2D)& value) {
             if (value.IsNull() || !first(value.get())) return true;
             std::size_t elements = 0;
             return BRepCensusProduct(std::size_t(value->NbNodes()),
@@ -5711,7 +6136,7 @@ bool MeasureBRepRepresentation(
                 && BRepCensusTerm(census, census.polygonStorage,
                     sizeof(Poly_Polygon2D) + elements);
         };
-        polygonOnTriangulation = [&] (
+        const auto polygonOnTriangulation = [&] (
             const Handle(Poly_PolygonOnTriangulation)& value) {
             if (value.IsNull() || !first(value.get())) return true;
             std::size_t elements = 0;
@@ -5798,20 +6223,20 @@ bool MeasureBRepRepresentation(
                         !typed.IsNull()) {
                         if (!BRepCensusTerm(census, census.representations,
                                 sizeof(BRep_PointOnCurve))
-                            || !curve3d(typed->Curve())) return false;
+                            || !curve3d(curve3d, typed->Curve())) return false;
                     } else if (const auto typed =
                             Handle(BRep_PointOnCurveOnSurface)::DownCast(
                                 representation); !typed.IsNull()) {
                         if (!BRepCensusTerm(census, census.representations,
                                 sizeof(BRep_PointOnCurveOnSurface))
-                            || !curve2d(typed->PCurve())
-                            || !surface(typed->Surface())) return false;
+                            || !curve2d(curve2d, typed->PCurve())
+                            || !surface(surface, typed->Surface())) return false;
                     } else if (const auto typed =
                             Handle(BRep_PointOnSurface)::DownCast(representation);
                         !typed.IsNull()) {
                         if (!BRepCensusTerm(census, census.representations,
                                 sizeof(BRep_PointOnSurface))
-                            || !surface(typed->Surface())) return false;
+                            || !surface(surface, typed->Surface())) return false;
                     } else return false;
                 }
             }
@@ -5832,29 +6257,29 @@ bool MeasureBRepRepresentation(
                                 representation); !closed.IsNull()) {
                         if (!BRepCensusTerm(census, census.representations,
                                 sizeof(BRep_CurveOnClosedSurface))
-                            || !curve2d(closed->PCurve())
-                            || !curve2d(closed->PCurve2())
-                            || !surface(closed->Surface())) return false;
+                            || !curve2d(curve2d, closed->PCurve())
+                            || !curve2d(curve2d, closed->PCurve2())
+                            || !surface(surface, closed->Surface())) return false;
                     } else if (const auto typed =
                             Handle(BRep_CurveOnSurface)::DownCast(representation);
                         !typed.IsNull()) {
                         if (!BRepCensusTerm(census, census.representations,
                                 sizeof(BRep_CurveOnSurface))
-                            || !curve2d(typed->PCurve())
-                            || !surface(typed->Surface())) return false;
+                            || !curve2d(curve2d, typed->PCurve())
+                            || !surface(surface, typed->Surface())) return false;
                     } else if (const auto typed =
                             Handle(BRep_Curve3D)::DownCast(representation);
                         !typed.IsNull()) {
                         if (!BRepCensusTerm(census, census.representations,
                                 sizeof(BRep_Curve3D))
-                            || !curve3d(typed->Curve3D())) return false;
+                            || !curve3d(curve3d, typed->Curve3D())) return false;
                     } else if (const auto typed =
                             Handle(BRep_CurveOn2Surfaces)::DownCast(
                                 representation); !typed.IsNull()) {
                         if (!BRepCensusTerm(census, census.representations,
                                 sizeof(BRep_CurveOn2Surfaces))
-                            || !surface(typed->Surface())
-                            || !surface(typed->Surface2())
+                            || !surface(surface, typed->Surface())
+                            || !surface(surface, typed->Surface2())
                             || !location(typed->Location2())) return false;
                     } else if (const auto closed =
                             Handle(BRep_PolygonOnClosedTriangulation)::DownCast(
@@ -5883,14 +6308,14 @@ bool MeasureBRepRepresentation(
                                 sizeof(BRep_PolygonOnClosedSurface))
                             || !polygon2d(closed->Polygon())
                             || !polygon2d(closed->Polygon2())
-                            || !surface(closed->Surface())) return false;
+                            || !surface(surface, closed->Surface())) return false;
                     } else if (const auto typed =
                             Handle(BRep_PolygonOnSurface)::DownCast(
                                 representation); !typed.IsNull()) {
                         if (!BRepCensusTerm(census, census.representations,
                                 sizeof(BRep_PolygonOnSurface))
                             || !polygon2d(typed->Polygon())
-                            || !surface(typed->Surface())) return false;
+                            || !surface(surface, typed->Surface())) return false;
                     } else if (const auto typed =
                             Handle(BRep_Polygon3D)::DownCast(representation);
                         !typed.IsNull()) {
@@ -5901,10 +6326,9 @@ bool MeasureBRepRepresentation(
                 }
                 if (copyPrediction) {
                     const TopoDS_Edge edgeKey = TopoDS::Edge(item);
-                    TopLoc_Location curveLocation;
-                    Standard_Real firstParameter = 0.0, lastParameter = 0.0;
-                    const Handle(Geom_Curve) edgeCurve = BRep_Tool::Curve(
-                        edgeKey, curveLocation, firstParameter, lastParameter);
+                    const TopLoc_Location* edgeCurveLocal = nullptr;
+                    const Handle(Geom_Curve) edgeCurve =
+                        BRepCensusFirstCurve3D(edge, &edgeCurveLocal);
                     std::size_t curveRepresentations = 0;
                     for (const auto& representation : edge->Curves()) {
                         const auto curveRepresentation =
@@ -5917,12 +6341,13 @@ bool MeasureBRepRepresentation(
                     if (curveRepresentations
                         != (edgeCurve.IsNull() ? 0U : 1U)) return false;
                     if (!edgeCurve.IsNull()
-                        && !measureBundle([&] { return curve3d(edgeCurve); }))
+                        && !measureBundle([&] {
+                            return curve3d(curve3d, edgeCurve);
+                        }))
                         return false;
 
-                    TopLoc_Location polygonLocation;
                     const Handle(Poly_Polygon3D) edgePolygon =
-                        BRep_Tool::Polygon3D(edgeKey, polygonLocation);
+                        BRepCensusFirstPolygon3D(edge);
                     std::size_t polygonRepresentations = 0;
                     for (const auto& representation : edge->Curves()) {
                         const auto polygonRepresentation =
@@ -5951,37 +6376,51 @@ bool MeasureBRepRepresentation(
                             incidenceFace.Orientation(
                                 incidenceFace.Orientation() == TopAbs_REVERSED
                                     ? TopAbs_REVERSED : TopAbs_FORWARD);
-                            std::size_t ordinal = 0;
-                            for (TopExp_Explorer explorer(
-                                     incidenceFace, TopAbs_EDGE);
-                                 explorer.More(); explorer.Next(), ++ordinal) {
-                                TopoDS_Edge incidenceEdge =
-                                    TopoDS::Edge(explorer.Current());
-                                if (!edgeKey.IsSame(incidenceEdge)) continue;
-                                bool duplicate = false;
-                                std::size_t priorOrdinal = 0;
-                                for (TopExp_Explorer prior(
-                                         incidenceFace, TopAbs_EDGE);
-                                     prior.More() && priorOrdinal < ordinal;
-                                     prior.Next(), ++priorOrdinal) {
-                                    if (incidenceEdge.IsSame(prior.Current())) {
-                                        duplicate = true;
-                                        break;
-                                    }
-                                }
-                                if (duplicate) continue;
-                                const bool seam = BRepTools::IsReallyClosed(
-                                    incidenceEdge, incidenceFace);
+                            const auto incidenceTFace =
+                                Handle(BRep_TFace)::DownCast(
+                                    incidenceFace.TShape());
+                            if (incidenceTFace.IsNull()) return false;
+                            const Handle(Poly_Triangulation) active =
+                                incidenceTFace->ActiveTriangulation();
+                            bool processed = false;
+                            bool found = false;
+                            auto visit = [&](TopoDS_Edge incidenceEdge) {
+                                if (incidenceEdge.TShape().get() != edge.get()
+                                    || processed) return true;
+                                processed = true;
+                                const bool seam = BRepCensusRawSeam(
+                                    edge, incidenceTFace, incidenceFace, active);
                                 for (int member = 0;
                                      member < (seam ? 2 : 1); ++member) {
                                     if (member == 1) incidenceEdge.Reverse();
-                                    Standard_Real first = 0.0, last = 0.0;
-                                    if (BRep_Tool::CurveOnSurface(
-                                            incidenceEdge, incidenceFace,
-                                            first, last).get() == identity)
-                                        return true;
+                                    TopAbs_Orientation selectedOrientation =
+                                        incidenceEdge.Orientation();
+                                    if (incidenceFace.Orientation()
+                                        == TopAbs_REVERSED) {
+                                        selectedOrientation = TopAbs::Reverse(
+                                            selectedOrientation);
+                                    }
+                                    const auto lookup =
+                                        BRepCensusLookupStoredPCurve(
+                                            edge, incidenceTFace,
+                                            selectedOrientation);
+                                    if (lookup.kind
+                                            == BRepCensusPCurveLookupKind::Failure)
+                                        return false;
+                                    if (lookup.kind
+                                            == BRepCensusPCurveLookupKind::Stored
+                                        && lookup.stored.get() == identity) {
+                                        found = true;
+                                        return false;
+                                    }
                                 }
-                            }
+                                return true;
+                            };
+                            const bool complete = BRepCensusForEachRawEdge(
+                                incidenceFace, incidenceFace.Orientation(),
+                                visit);
+                            if (found) return true;
+                            if (!complete) return false;
                         }
                         return false;
                     };
@@ -5996,47 +6435,44 @@ bool MeasureBRepRepresentation(
                                     continue;
                                 TopoDS_Face incidenceFace =
                                     TopoDS::Face(faceItem);
-                                TopLoc_Location activeLocation;
+                                const auto incidenceTFace =
+                                    Handle(BRep_TFace)::DownCast(
+                                        incidenceFace.TShape());
+                                if (incidenceTFace.IsNull()) return false;
                                 const Handle(Poly_Triangulation) active =
-                                    BRep_Tool::Triangulation(
-                                        incidenceFace, activeLocation);
+                                    incidenceTFace->ActiveTriangulation();
                                 if (active.IsNull()) continue;
-                                std::size_t ordinal = 0;
-                                for (TopExp_Explorer explorer(
-                                         incidenceFace, TopAbs_EDGE);
-                                     explorer.More();
-                                     explorer.Next(), ++ordinal) {
-                                    TopoDS_Edge incidenceEdge =
-                                        TopoDS::Edge(explorer.Current());
-                                    if (!edgeKey.IsSame(incidenceEdge)) continue;
-                                    bool duplicate = false;
-                                    std::size_t priorOrdinal = 0;
-                                    for (TopExp_Explorer prior(
-                                             incidenceFace, TopAbs_EDGE);
-                                         prior.More()
-                                            && priorOrdinal < ordinal;
-                                         prior.Next(), ++priorOrdinal) {
-                                        if (incidenceEdge.IsSame(
-                                                prior.Current())) {
-                                            duplicate = true;
-                                            break;
-                                        }
-                                    }
-                                    if (duplicate) continue;
-                                    const bool seam =
-                                        BRepTools::IsReallyClosed(
-                                            incidenceEdge, incidenceFace);
+                                bool processed = false;
+                                bool found = false;
+                                auto visit = [&](TopoDS_Edge incidenceEdge) {
+                                    if (incidenceEdge.TShape().get() != edge.get()
+                                        || processed) return true;
+                                    processed = true;
+                                    const bool seam = BRepCensusRawSeam(
+                                        edge, incidenceTFace, incidenceFace,
+                                        active);
                                     for (int member = 0;
                                          member < (seam ? 2 : 1); ++member) {
                                         if (member == 1)
                                             incidenceEdge.Reverse();
-                                        if (BRep_Tool::
-                                                PolygonOnTriangulation(
-                                                    incidenceEdge, active,
-                                                    activeLocation).get()
-                                                == identity) return true;
+                                        const auto stored =
+                                            BRepCensusLookupStoredPolygon(
+                                                edge, active,
+                                                TopLoc_Location(),
+                                                incidenceEdge.Orientation());
+                                        if (stored.get() == identity) {
+                                            found = true;
+                                            return false;
+                                        }
                                     }
-                                }
+                                    return true;
+                                };
+                                const bool complete =
+                                    BRepCensusForEachRawEdge(
+                                        incidenceFace,
+                                        incidenceFace.Orientation(), visit);
+                                if (found) return true;
+                                if (!complete) return false;
                             }
                             return false;
                         };
@@ -6072,25 +6508,28 @@ bool MeasureBRepRepresentation(
                         }
                     }
 
-                    if (!item.Location().IsIdentity()) {
-                        const std::size_t nodes =
-                            BRepCensusPredividedNodeCount(
-                                curveLocation, item.Location());
-                        if (!curveLocation.IsIdentity() && nodes == 0) {
-                            const gp_Trsf result =
-                                item.Location().Transformation().Inverted()
-                                * curveLocation.Transformation();
-                            if (result.Form() != gp_Identity) return false;
-                        }
-                        if (!BRepCensusAdd(
-                                predictedNewLocationNodes, nodes)) return false;
+                    // CopyModification returns item.Location() multiplied by
+                    // this borrowed representation-local word. Modifier then
+                    // predivides by the identical outer prefix. The reduced
+                    // retained word is exactly the local suffix; evaluate it
+                    // without materializing either intermediate location.
+                    if (!item.Location().IsIdentity()
+                        && !edgeCurve.IsNull() && edgeCurveLocal) {
+                        const TopLoc_Location identity;
+                        const auto evaluated =
+                            BRepCensusPredividedNodeEvaluation(
+                                *edgeCurveLocal, identity);
+                        if (evaluated.failed
+                            || !BRepCensusAdd(predictedNewLocationNodes,
+                                evaluated.nodeCount)) return false;
                     }
                 }
             }
             if (const auto face = Handle(BRep_TFace)::DownCast(tshape);
                 !face.IsNull()) {
                 if (!BRepCensusAdd(census.faceCount, 1)) return false;
-                if (!surface(face->Surface()) || !location(face->Location()))
+                if (!surface(surface, face->Surface())
+                    || !location(face->Location()))
                     return false;
                 std::size_t listBytes = 0;
                 if (!BRepCensusProduct(
@@ -6105,7 +6544,9 @@ bool MeasureBRepRepresentation(
                     const Handle(Geom_Surface) faceSurface = face->Surface();
                     if (!faceSurface.IsNull()
                         && !measureBundle(
-                            [&] { return surface(faceSurface); })) return false;
+                            [&] {
+                                return surface(surface, faceSurface);
+                            })) return false;
 
                     const TopoDS_Face originalFaceKey = TopoDS::Face(item);
                     TopLoc_Location meshLocation;
@@ -6129,63 +6570,86 @@ bool MeasureBRepRepresentation(
                         faceKey.Orientation() == TopAbs_REVERSED
                             ? TopAbs_REVERSED : TopAbs_FORWARD);
                     std::size_t incidence = 0;
-                    for (TopExp_Explorer explorer(faceKey, TopAbs_EDGE);
-                         explorer.More(); explorer.Next(), ++incidence) {
-                        const TopoDS_Edge edgeKey =
-                            TopoDS::Edge(explorer.Current());
+                    bool incidenceOK = true;
+                    auto visit = [&](const TopoDS_Edge& edgeKey) {
                         bool alreadyVisited = false;
                         std::size_t previousOrdinal = 0;
-                        for (TopExp_Explorer previous(faceKey, TopAbs_EDGE);
-                             previous.More() && previousOrdinal < incidence;
-                             previous.Next(), ++previousOrdinal) {
-                            if (edgeKey.IsSame(previous.Current())) {
+                        auto prior = [&](const TopoDS_Edge& previous) {
+                            if (previousOrdinal >= incidence) return false;
+                            if (edgeKey.TShape().get()
+                                    == previous.TShape().get()
+                                && BRepCensusSameConcreteLocation(
+                                    edgeKey.Location(), previous.Location())) {
                                 alreadyVisited = true;
-                                break;
+                                return false;
                             }
-                        }
-                        if (alreadyVisited) continue;
-                        const bool seam = BRepTools::IsReallyClosed(
-                            edgeKey, faceKey);
+                            ++previousOrdinal;
+                            return true;
+                        };
+                        (void)BRepCensusForEachRawEdge(
+                            faceKey, faceKey.Orientation(), prior);
+                        ++incidence;
+                        if (alreadyVisited) return true;
+                        const auto edgeTShape = Handle(BRep_TEdge)::DownCast(
+                            edgeKey.TShape());
+                        if (edgeTShape.IsNull()) return false;
+                        const bool seam = BRepCensusRawSeam(
+                            edgeTShape, face, faceKey, activeMesh);
                         for (int member = 0; member < (seam ? 2 : 1);
                              ++member) {
                             TopoDS_Edge selectedEdge = edgeKey;
                             if (member == 1) selectedEdge.Reverse();
-                            Standard_Real first = 0.0, last = 0.0;
-                            const Handle(Geom2d_Curve) pcurve =
-                                BRep_Tool::CurveOnSurface(
-                                    selectedEdge, faceKey, first, last);
+                            TopAbs_Orientation selectedOrientation =
+                                selectedEdge.Orientation();
+                            if (faceKey.Orientation() == TopAbs_REVERSED)
+                                selectedOrientation =
+                                    TopAbs::Reverse(selectedOrientation);
+                            const auto lookup = BRepCensusLookupStoredPCurve(
+                                edgeTShape, face, selectedOrientation);
+                            if (lookup.kind
+                                    == BRepCensusPCurveLookupKind::Failure
+                                || lookup.kind
+                                    == BRepCensusPCurveLookupKind::
+                                        NeedsPlanarProjection)
+                                return false;
+                            const Handle(Geom2d_Curve) pcurve = lookup.stored;
                             if (!pcurve.IsNull()
                                 && !measureBundle(
-                                    [&] { return curve2d(pcurve); }))
+                                    [&] {
+                                        return curve2d(curve2d, pcurve);
+                                    }))
                                 return false;
 
                             const Handle(Poly_PolygonOnTriangulation) polygon =
                                 activeMesh.IsNull()
                                     ? Handle(Poly_PolygonOnTriangulation)()
-                                    : BRep_Tool::PolygonOnTriangulation(
-                                        selectedEdge, activeMesh,
-                                        meshLocation);
+                                    : BRepCensusLookupStoredPolygon(
+                                        edgeTShape, activeMesh,
+                                        TopLoc_Location(),
+                                        selectedEdge.Orientation());
                             if (!polygon.IsNull()
                                 && !measureBundle([&] {
                                     return polygonOnTriangulation(polygon);
                                 })) return false;
                         }
-                    }
+                        return true;
+                    };
+                    incidenceOK = BRepCensusForEachRawEdge(
+                        faceKey, faceKey.Orientation(), visit);
+                    if (!incidenceOK) return false;
 
-                    if (!item.Location().IsIdentity()) {
-                        TopLoc_Location combined;
-                        (void)BRep_Tool::Surface(originalFaceKey, combined);
-                        const std::size_t nodes =
-                            BRepCensusPredividedNodeCount(
-                                combined, item.Location());
-                        if (!combined.IsIdentity() && nodes == 0) {
-                            const gp_Trsf result =
-                                item.Location().Transformation().Inverted()
-                                * combined.Transformation();
-                            if (result.Form() != gp_Identity) return false;
-                        }
-                        if (!BRepCensusAdd(
-                                predictedNewLocationNodes, nodes)) return false;
+                    // Surface() supplies item.Location() multiplied by the
+                    // TFace-local word, and Modifier predivides the matching
+                    // outer prefix. Count the reduced retained suffix only.
+                    if (!item.Location().IsIdentity()
+                        && !faceSurface.IsNull()) {
+                        const TopLoc_Location identity;
+                        const auto evaluated =
+                            BRepCensusPredividedNodeEvaluation(
+                                face->Location(), identity);
+                        if (evaluated.failed
+                            || !BRepCensusAdd(predictedNewLocationNodes,
+                                evaluated.nodeCount)) return false;
                     }
                 }
             }
@@ -6488,6 +6952,22 @@ bool CopyMeasuredBRep(
         && copyPrediction.meshNormals == detachedCensus.meshNormals
         && copyPrediction.polygonStorage == detachedCensus.polygonStorage
         && copyPrediction.harrayStorage == detachedCensus.harrayStorage;
+    if (!measuredEqual) {
+        std::fprintf(stderr,
+            "E4_BREP_EQUALITY pred=%zu/%zu/%zu/%zu/%zu/%zu/%zu/%zu/%zu/%zu/%zu/%zu det=%zu/%zu/%zu/%zu/%zu/%zu/%zu/%zu/%zu/%zu/%zu/%zu\n",
+            copyPrediction.total, copyPrediction.tShapes,
+            copyPrediction.listNodes, copyPrediction.locations,
+            copyPrediction.representations, copyPrediction.geometry,
+            copyPrediction.meshLogical, copyPrediction.meshPhysical,
+            copyPrediction.meshNodes, copyPrediction.meshTriangles,
+            copyPrediction.polygonStorage, copyPrediction.harrayStorage,
+            detachedCensus.total, detachedCensus.tShapes,
+            detachedCensus.listNodes, detachedCensus.locations,
+            detachedCensus.representations, detachedCensus.geometry,
+            detachedCensus.meshLogical, detachedCensus.meshPhysical,
+            detachedCensus.meshNodes, detachedCensus.meshTriangles,
+            detachedCensus.polygonStorage, detachedCensus.harrayStorage);
+    }
     assert(measuredEqual
         && "BRep true/true copy disagreed with measured prediction");
     if (!measuredEqual) return false;
@@ -6622,6 +7102,681 @@ DebugExerciseE4BRepCensusCopyPrediction() noexcept {
     } catch (...) {
         return result;
     }
+}
+
+namespace {
+enum DebugKnownBRepOption : std::uint32_t {
+    DebugKnownHasUV = 1U << 0,
+    DebugKnownHasNormals = 1U << 1,
+    DebugKnownNonrationalCurve = 1U << 2,
+    DebugKnownBezier = 1U << 3,
+    DebugKnownRationalBezier = 1U << 4,
+    DebugKnownPolygonParameters = 1U << 5,
+    DebugKnownCachedBounds = 1U << 6,
+    DebugKnownMeshParameters = 1U << 7,
+    DebugKnownTwin = 1U << 8,
+    DebugKnownSameTopology = 1U << 9,
+    DebugKnownShareSurface = 1U << 10,
+    DebugKnownShareCurve = 1U << 11,
+    DebugKnownSharePCurve = 1U << 12,
+    DebugKnownShareMesh = 1U << 13,
+    DebugKnownSharePolygons = 1U << 14,
+    DebugKnownSingleDatum = 1U << 15,
+    DebugKnownComposedDatums = 1U << 16,
+};
+
+struct DebugKnownBRepFixture final {
+    Handle(Geom_Surface) surface;
+    Handle(Geom_Curve) curve;
+    Handle(Geom2d_Curve) pcurve;
+    Handle(Poly_Triangulation) mesh;
+    Handle(Poly_Polygon3D) polygon3d;
+    Handle(Poly_PolygonOnTriangulation) polygonOnMesh;
+    TopoDS_Face face;
+    TopoDS_Wire wire;
+    TopoDS_Edge edge;
+};
+
+bool DebugBuildKnownBRepFixture(
+    BRep_Builder& builder, std::uint32_t options, double constructionScale,
+    const DebugKnownBRepFixture* shared,
+    DebugKnownBRepFixture& fixture) {
+    const bool bezier = (options & DebugKnownBezier) != 0;
+    const bool rationalBezier = (options & DebugKnownRationalBezier) != 0;
+    const bool nonrationalCurve =
+        (options & DebugKnownNonrationalCurve) != 0;
+    if (shared && (options & DebugKnownShareSurface)) {
+        fixture.surface = shared->surface;
+    } else {
+        TColgp_Array2OfPnt poles(1, 2, 1, 2);
+        poles(1, 1) = gp_Pnt(0, 0, 0);
+        poles(2, 1) = gp_Pnt(constructionScale, 0, 0);
+        poles(1, 2) = gp_Pnt(0, constructionScale, 0);
+        poles(2, 2) = gp_Pnt(constructionScale, constructionScale, 0);
+        if (bezier) {
+            if (rationalBezier) {
+                TColStd_Array2OfReal weights(1, 2, 1, 2);
+                weights(1, 1) = 1; weights(2, 1) = 2;
+                weights(1, 2) = 3; weights(2, 2) = 4;
+                fixture.surface = new Geom_BezierSurface(poles, weights);
+            } else {
+                fixture.surface = new Geom_BezierSurface(poles);
+            }
+        } else {
+            TColStd_Array2OfReal weights(1, 2, 1, 2);
+            weights(1, 1) = 1; weights(2, 1) = 2;
+            weights(1, 2) = 3; weights(2, 2) = 4;
+            TColStd_Array1OfReal knots(1, 2);
+            knots(1) = 0; knots(2) = 1;
+            TColStd_Array1OfInteger mults(1, 2);
+            mults(1) = 2; mults(2) = 2;
+            fixture.surface = new Geom_BSplineSurface(
+                poles, weights, knots, knots, mults, mults, 1, 1);
+        }
+    }
+
+    TColgp_Array1OfPnt curvePoles(1, 4);
+    curvePoles(1) = gp_Pnt(0, 0, 0);
+    curvePoles(2) = gp_Pnt(0.3 * constructionScale, 0, 0);
+    curvePoles(3) = gp_Pnt(0.7 * constructionScale, 0, 0);
+    curvePoles(4) = gp_Pnt(constructionScale, 0, 0);
+    TColStd_Array1OfReal curveWeights(1, 4);
+    curveWeights(1) = 1; curveWeights(2) = 2;
+    curveWeights(3) = 2; curveWeights(4) = 1;
+    TColStd_Array1OfReal knots(1, 3);
+    knots(1) = 0; knots(2) = 0.5; knots(3) = 1;
+    TColStd_Array1OfInteger mults(1, 3);
+    mults(1) = 3; mults(2) = 1; mults(3) = 3;
+    if (shared && (options & DebugKnownShareCurve)) {
+        fixture.curve = shared->curve;
+    } else if (bezier) {
+        fixture.curve = rationalBezier
+            ? Handle(Geom_Curve)(new Geom_BezierCurve(
+                curvePoles, curveWeights))
+            : Handle(Geom_Curve)(new Geom_BezierCurve(curvePoles));
+    } else {
+        fixture.curve = nonrationalCurve
+            ? Handle(Geom_Curve)(new Geom_BSplineCurve(
+                curvePoles, knots, mults, 2))
+            : Handle(Geom_Curve)(new Geom_BSplineCurve(
+                curvePoles, curveWeights, knots, mults, 2));
+    }
+
+    TColgp_Array1OfPnt2d pcurvePoles(1, 4);
+    pcurvePoles(1) = gp_Pnt2d(0, 0);
+    pcurvePoles(2) = gp_Pnt2d(3.0 / 17.0, 0);
+    pcurvePoles(3) = gp_Pnt2d(7.0 / 13.0, 0);
+    pcurvePoles(4) = gp_Pnt2d(1, 0);
+    TColStd_Array1OfReal pcurveWeights(1, 4);
+    if (nonrationalCurve) {
+        pcurveWeights(1) = 2; pcurveWeights(2) = 1.7;
+        pcurveWeights(3) = 1.3; pcurveWeights(4) = 1;
+    } else {
+        pcurveWeights(1) = 2; pcurveWeights(2) = 17.0 / 5.0;
+        pcurveWeights(3) = 13.0 / 5.0; pcurveWeights(4) = 1;
+    }
+    if (shared && (options & DebugKnownSharePCurve)) {
+        fixture.pcurve = shared->pcurve;
+    } else if (bezier) {
+        if (rationalBezier) {
+            fixture.pcurve = new Geom2d_BezierCurve(
+                pcurvePoles, pcurveWeights);
+        } else {
+            TColgp_Array1OfPnt2d matching(1, 4);
+            matching(1) = gp_Pnt2d(0, 0);
+            matching(2) = gp_Pnt2d(0.3, 0);
+            matching(3) = gp_Pnt2d(0.7, 0);
+            matching(4) = gp_Pnt2d(1, 0);
+            fixture.pcurve = new Geom2d_BezierCurve(matching);
+        }
+    } else {
+        fixture.pcurve = new Geom2d_BSplineCurve(
+            pcurvePoles, pcurveWeights, knots, mults, 2);
+    }
+
+    if (shared && (options & DebugKnownShareMesh)) {
+        fixture.mesh = shared->mesh;
+    } else {
+        const Standard_Boolean hasUV =
+            (options & DebugKnownHasUV) ? Standard_True : Standard_False;
+        const Standard_Boolean hasNormals = (options & DebugKnownHasNormals)
+            ? Standard_True : Standard_False;
+        fixture.mesh = new Poly_Triangulation(4, 2, hasUV, hasNormals);
+        for (Standard_Integer index = 1; index <= 3; ++index) {
+            const Standard_Real parameter = index == 1 ? 0.0
+                : (index == 2 ? 0.5 : 1.0);
+            const gp_Pnt2d uv = fixture.pcurve->Value(parameter);
+            fixture.mesh->SetNode(index, fixture.surface->Value(uv.X(), uv.Y()));
+            if (hasUV) fixture.mesh->SetUVNode(index, uv);
+        }
+        fixture.mesh->SetNode(4, fixture.surface->Value(0, 1));
+        if (hasUV) fixture.mesh->SetUVNode(4, gp_Pnt2d(0, 1));
+        if (hasNormals) {
+            for (Standard_Integer index = 1; index <= 4; ++index)
+                fixture.mesh->SetNormal(index, gp_Vec3f(0, 0, 1));
+        }
+        fixture.mesh->SetTriangle(1, Poly_Triangle(1, 2, 4));
+        fixture.mesh->SetTriangle(2, Poly_Triangle(2, 3, 4));
+        if (options & DebugKnownCachedBounds) {
+            Bnd_Box box;
+            for (Standard_Integer index = 1; index <= 4; ++index)
+                box.Add(fixture.mesh->Node(index));
+            fixture.mesh->SetCachedMinMax(box);
+        }
+        if (options & DebugKnownMeshParameters)
+            fixture.mesh->Parameters(new Poly_TriangulationParameters(
+                0.01, 0.5, 0.001));
+    }
+
+    TColgp_Array1OfPnt polygonNodes(1, 3);
+    for (Standard_Integer index = 1; index <= 3; ++index)
+        polygonNodes(index) = fixture.mesh->Node(index);
+    TColStd_Array1OfInteger polygonIndices(1, 3);
+    polygonIndices(1) = 1; polygonIndices(2) = 2; polygonIndices(3) = 3;
+    if (shared && (options & DebugKnownSharePolygons)) {
+        fixture.polygon3d = shared->polygon3d;
+        fixture.polygonOnMesh = shared->polygonOnMesh;
+    } else if (options & DebugKnownPolygonParameters) {
+        TColStd_Array1OfReal parameters(1, 3);
+        parameters(1) = 0; parameters(2) = 0.5; parameters(3) = 1;
+        fixture.polygon3d = new Poly_Polygon3D(polygonNodes, parameters);
+        fixture.polygonOnMesh = new Poly_PolygonOnTriangulation(
+            polygonIndices, parameters);
+    } else {
+        fixture.polygon3d = new Poly_Polygon3D(polygonNodes);
+        fixture.polygonOnMesh =
+            new Poly_PolygonOnTriangulation(polygonIndices);
+    }
+
+    builder.MakeFace(fixture.face, fixture.surface, Precision::Confusion());
+    builder.UpdateFace(fixture.face, fixture.mesh, Standard_True);
+    builder.MakeEdge(fixture.edge, fixture.curve, Precision::Confusion());
+    builder.UpdateEdge(fixture.edge, fixture.pcurve, fixture.face,
+        Precision::Confusion());
+    builder.Range(fixture.edge, 0.0, 1.0);
+    builder.Range(fixture.edge, fixture.face, 0.0, 1.0);
+    builder.SameParameter(fixture.edge, Standard_False);
+    builder.SameRange(fixture.edge, Standard_False);
+    builder.UpdateEdge(fixture.edge, fixture.polygon3d);
+    builder.UpdateEdge(fixture.edge, fixture.polygonOnMesh,
+        fixture.mesh, TopLoc_Location());
+    builder.MakeWire(fixture.wire);
+    builder.Add(fixture.wire, fixture.edge);
+    builder.Add(fixture.face, fixture.wire);
+    return true;
+}
+
+bool DebugKnownBRepIncidence(const DebugKnownBRepFixture& fixture) {
+    std::size_t edgeCount = 0;
+    for (TopExp_Explorer explorer(fixture.face, TopAbs_EDGE);
+         explorer.More(); explorer.Next()) ++edgeCount;
+    Standard_Real first = 0.0, last = 0.0;
+    const Handle(Geom2d_Curve) storedPCurve = BRep_Tool::CurveOnSurface(
+        fixture.edge, fixture.face, first, last);
+    TopLoc_Location meshLocation;
+    const Handle(Poly_Triangulation) storedMesh = BRep_Tool::Triangulation(
+        fixture.face, meshLocation);
+    const Handle(Poly_PolygonOnTriangulation) storedPolygon =
+        BRep_Tool::PolygonOnTriangulation(
+            fixture.edge, storedMesh, meshLocation);
+    return edgeCount == 1 && storedPCurve.get() == fixture.pcurve.get()
+        && storedMesh.get() == fixture.mesh.get()
+        && storedPolygon.get() == fixture.polygonOnMesh.get();
+}
+
+class DebugBRepCensusWord final {
+public:
+    DebugBRepCensusWord(const BRepCensusReducedWordItem* items,
+                        std::size_t storedCount,
+                        std::size_t reportedCount) noexcept
+        : items_(items), storedCount_(storedCount),
+          reportedCount_(reportedCount) {}
+
+    bool Count(std::size_t& count) const noexcept {
+        count = reportedCount_;
+        return true;
+    }
+
+    bool Read(std::size_t ordinal,
+              BRepCensusReducedWordItem& output) const noexcept {
+        if (!items_ || ordinal >= storedCount_) return false;
+        output = items_[ordinal];
+        return output.datum && output.power != 0;
+    }
+
+private:
+    const BRepCensusReducedWordItem* items_ = nullptr;
+    std::size_t storedCount_ = 0;
+    std::size_t reportedCount_ = 0;
+};
+}
+
+std::array<std::size_t, 42> DebugE4BRepKnownRepresentationSizes() noexcept {
+    return {{
+        sizeof(Standard_Real), sizeof(Standard_Integer), sizeof(void*),
+        sizeof(NCollection_ListNode*), sizeof(gp_Pnt), sizeof(gp_Pnt2d),
+        sizeof(gp_Vec3f), sizeof(Poly_Triangle),
+        sizeof(TopoDS_TCompound), sizeof(BRep_TFace), sizeof(TopoDS_TWire),
+        sizeof(BRep_TEdge), sizeof(BRep_Curve3D),
+        sizeof(BRep_CurveOnSurface), sizeof(BRep_Polygon3D),
+        sizeof(BRep_PolygonOnTriangulation), sizeof(Poly_Triangulation),
+        sizeof(Poly_Polygon3D), sizeof(Poly_PolygonOnTriangulation),
+        sizeof(Geom_BSplineSurface), sizeof(Geom_BSplineCurve),
+        sizeof(Geom2d_BSplineCurve), sizeof(Geom_BezierSurface),
+        sizeof(Geom_BezierCurve), sizeof(Geom2d_BezierCurve),
+        sizeof(TColgp_HArray2OfPnt), sizeof(TColStd_HArray2OfReal),
+        sizeof(TColgp_HArray1OfPnt), sizeof(TColgp_HArray1OfPnt2d),
+        sizeof(TColStd_HArray1OfReal),
+        sizeof(TColStd_HArray1OfInteger),
+        sizeof(NCollection_TListNode<TopoDS_Shape>),
+        sizeof(NCollection_TListNode<Handle(BRep_CurveRepresentation)>),
+        sizeof(NCollection_TListNode<Handle(Poly_Triangulation)>),
+        sizeof(BRepBuilderAPI_Copy), BRepCensusShapeMap::EntrySize(),
+        sizeof(BRepCensusShapeMap), sizeof(Bnd_Box),
+        sizeof(BRepAdaptor_Surface), sizeof(Poly_TriangulationParameters),
+        sizeof(TopLoc_SListNodeOfItemLocation), sizeof(TopLoc_Datum3D),
+    }};
+}
+
+std::array<std::array<std::size_t, 4>, 11>
+DebugExerciseE4BRepReducedWordEvaluator() noexcept {
+    std::array<std::array<std::size_t, 4>, 11> results{};
+    try {
+        gp_Trsf transformA, transformB, transformC, transformD;
+        transformA.SetTranslation(gp_Vec(1, 0, 0));
+        transformB.SetTranslation(gp_Vec(0, 1, 0));
+        transformC.SetTranslation(gp_Vec(0, 0, 1));
+        transformD.SetTranslation(gp_Vec(2, 0, 0));
+        const Handle(TopLoc_Datum3D) datumA =
+            new TopLoc_Datum3D(transformA);
+        const Handle(TopLoc_Datum3D) datumB =
+            new TopLoc_Datum3D(transformB);
+        const Handle(TopLoc_Datum3D) datumC =
+            new TopLoc_Datum3D(transformC);
+        const Handle(TopLoc_Datum3D) datumD =
+            new TopLoc_Datum3D(transformD);
+        const Handle(TopLoc_Datum3D) equalTransformA =
+            new TopLoc_Datum3D(transformA);
+        const Handle(TopLoc_Datum3D) equalTransformB =
+            new TopLoc_Datum3D(transformA);
+
+        const std::array<BRepCensusReducedWordItem, 0> empty{};
+        const std::array<BRepCensusReducedWordItem, 1> one{{
+            {datumA.get(), 1},
+        }};
+        const std::array<BRepCensusReducedWordItem, 2> two{{
+            {datumA.get(), 1}, {datumB.get(), 1},
+        }};
+        const std::array<BRepCensusReducedWordItem, 3> three{{
+            {datumA.get(), 1}, {datumB.get(), 1}, {datumC.get(), 1},
+        }};
+        const std::array<BRepCensusReducedWordItem, 1> mergeLeft{{
+            {datumA.get(), 2},
+        }};
+        const std::array<BRepCensusReducedWordItem, 3> cascadeRight{{
+            {datumD.get(), 1}, {datumB.get(), 1}, {datumC.get(), 1},
+        }};
+        const std::array<BRepCensusReducedWordItem, 1> equalLeft{{
+            {equalTransformA.get(), 1},
+        }};
+        const std::array<BRepCensusReducedWordItem, 1> equalRight{{
+            {equalTransformB.get(), 1},
+        }};
+        const std::array<BRepCensusReducedWordItem, 1> minimumPower{{
+            {datumA.get(), std::numeric_limits<Standard_Integer>::min()},
+        }};
+        const std::array<BRepCensusReducedWordItem, 1> maximumPower{{
+            {datumA.get(), std::numeric_limits<Standard_Integer>::max()},
+        }};
+        const std::array<BRepCensusReducedWordItem, 1> negativeOne{{
+            {datumA.get(), -1},
+        }};
+
+        const auto word = [](const auto& items) noexcept {
+            return DebugBRepCensusWord(
+                items.data(), items.size(), items.size());
+        };
+        const auto record = [&](std::size_t index,
+                                const DebugBRepCensusWord& left,
+                                const DebugBRepCensusWord& right,
+                                std::size_t nodeBytes) noexcept {
+            const auto value = BRepCensusEvaluateReducedPredivision(
+                left, right, nodeBytes);
+            results[index] = {{index + 1, value.nodeCount,
+                value.byteCount, value.failed ? 1U : 0U}};
+        };
+        const auto emptyWord = word(empty);
+        const auto oneWord = word(one);
+        const auto twoWord = word(two);
+        const auto threeWord = word(three);
+        const std::size_t nodeBytes =
+            sizeof(TopLoc_SListNodeOfItemLocation);
+        record(0, emptyWord, emptyWord, nodeBytes);
+        record(1, oneWord, oneWord, nodeBytes);
+        record(2, twoWord, twoWord, nodeBytes);
+        record(3, threeWord, threeWord, nodeBytes);
+        record(4, word(mergeLeft), oneWord, nodeBytes);
+        record(5, threeWord, word(cascadeRight), nodeBytes);
+        record(6, word(equalLeft), word(equalRight), nodeBytes);
+        record(7, emptyWord, word(minimumPower), nodeBytes);
+        record(8, word(maximumPower), word(negativeOne), nodeBytes);
+        const DebugBRepCensusWord impossibleCount(
+            nullptr, 0, std::numeric_limits<std::size_t>::max());
+        record(9, impossibleCount, oneWord, nodeBytes);
+        record(10, twoWord, emptyWord,
+            std::numeric_limits<std::size_t>::max() / 2 + 1);
+    } catch (...) {
+        for (auto& result : results) result[3] = 1;
+    }
+    return results;
+}
+
+std::vector<std::array<std::size_t, 64>>
+DebugExerciseE4BRepKnownRepresentations(double metersPerUnit) noexcept {
+    std::vector<std::array<std::size_t, 64>> results;
+    if (metersPerUnit != 0.001 && metersPerUnit != 1.0) return results;
+    const double constructionScale = 0.001 / metersPerUnit;
+    const std::array<std::uint32_t, 20> cases{{
+        0,
+        DebugKnownHasNormals,
+        DebugKnownHasUV,
+        DebugKnownHasUV | DebugKnownHasNormals,
+        DebugKnownHasUV | DebugKnownHasNormals | DebugKnownNonrationalCurve,
+        DebugKnownHasUV | DebugKnownHasNormals | DebugKnownBezier,
+        DebugKnownHasUV | DebugKnownHasNormals | DebugKnownBezier
+            | DebugKnownRationalBezier,
+        DebugKnownHasUV | DebugKnownHasNormals | DebugKnownPolygonParameters,
+        DebugKnownHasUV | DebugKnownHasNormals,
+        DebugKnownHasUV | DebugKnownHasNormals | DebugKnownCachedBounds,
+        DebugKnownHasUV | DebugKnownHasNormals | DebugKnownMeshParameters,
+        DebugKnownHasUV | DebugKnownHasNormals | DebugKnownTwin
+            | DebugKnownShareSurface | DebugKnownShareCurve
+            | DebugKnownSharePCurve | DebugKnownShareMesh
+            | DebugKnownSharePolygons,
+        DebugKnownHasUV | DebugKnownHasNormals | DebugKnownSameTopology,
+        DebugKnownHasUV | DebugKnownHasNormals | DebugKnownTwin
+            | DebugKnownShareSurface,
+        DebugKnownHasUV | DebugKnownHasNormals | DebugKnownTwin
+            | DebugKnownShareCurve,
+        DebugKnownHasUV | DebugKnownHasNormals | DebugKnownTwin
+            | DebugKnownSharePCurve,
+        DebugKnownHasUV | DebugKnownHasNormals | DebugKnownTwin
+            | DebugKnownShareMesh,
+        DebugKnownHasUV | DebugKnownHasNormals | DebugKnownTwin
+            | DebugKnownSharePolygons,
+        DebugKnownHasUV | DebugKnownHasNormals | DebugKnownTwin
+            | DebugKnownSingleDatum,
+        DebugKnownHasUV | DebugKnownHasNormals | DebugKnownTwin
+            | DebugKnownComposedDatums,
+    }};
+    for (std::size_t caseIndex = 0; caseIndex < cases.size(); ++caseIndex) {
+        std::fprintf(stderr, "E4_BREP_CASE %zu options=%u\n",
+            caseIndex + 1, unsigned(cases[caseIndex]));
+        std::array<std::size_t, 64> result{};
+        result[1] = caseIndex + 1;
+        result[27] = (cases[caseIndex] & DebugKnownHasUV) ? 1U : 0U;
+        result[28] = (cases[caseIndex] & DebugKnownHasNormals) ? 1U : 0U;
+        try {
+            BRep_Builder builder;
+            DebugKnownBRepFixture first, second;
+            if (!DebugBuildKnownBRepFixture(builder, cases[caseIndex],
+                    constructionScale, nullptr, first)
+                || !DebugKnownBRepIncidence(first)) {
+                results.push_back(result);
+                continue;
+            }
+            TopoDS_Compound compound;
+            builder.MakeCompound(compound);
+            if (cases[caseIndex] & DebugKnownSameTopology) {
+                builder.Add(compound, first.face);
+                builder.Add(compound, first.face);
+            } else if (cases[caseIndex] & DebugKnownTwin) {
+                if (!DebugBuildKnownBRepFixture(builder, cases[caseIndex],
+                        constructionScale, &first, second)
+                    || !DebugKnownBRepIncidence(second)) {
+                    results.push_back(result);
+                    continue;
+                }
+                if (cases[caseIndex] &
+                    (DebugKnownSingleDatum | DebugKnownComposedDatums)) {
+                    gp_Trsf firstTransform;
+                    firstTransform.SetTranslation(gp_Vec(
+                        constructionScale, 0, 0));
+                    const Handle(TopLoc_Datum3D) firstDatum =
+                        new TopLoc_Datum3D(firstTransform);
+                    TopLoc_Location location(firstDatum);
+                    if (cases[caseIndex] & DebugKnownComposedDatums) {
+                        gp_Trsf secondTransform;
+                        secondTransform.SetTranslation(gp_Vec(
+                            0, constructionScale, 0));
+                        const Handle(TopLoc_Datum3D) secondDatum =
+                            new TopLoc_Datum3D(secondTransform);
+                        location = location.Multiplied(
+                            TopLoc_Location(secondDatum));
+                    }
+                    first.face.Location(location);
+                    second.face.Location(location);
+                }
+                builder.Add(compound, first.face);
+                builder.Add(compound, second.face);
+            } else {
+                builder.Add(compound, first.face);
+            }
+
+            OperationLedger ledger(kMaxSnapshotNumericBytes,
+                kMaxAggregateEncodedTextureBytes,
+                kMaxAggregateDecodedTextureBytes);
+            retained_edge_treatment::ReplayBudget budget;
+            BRepRepresentationCensus source, prediction;
+            decal_layer::bake::accounting::Ticket scratch;
+            if (!MeasureBRepRepresentation(compound, budget, ledger.view(),
+                    source, scratch, &prediction)) {
+                results.push_back(result);
+                continue;
+            }
+            std::fprintf(stderr,
+                "E4_BREP_CASE_TERMS %zu src=%zu/%zu/%zu/%zu pred=%zu/%zu/%zu/%zu\n",
+                caseIndex + 1, source.total, source.locations,
+                source.locationNodes, source.locationDatums,
+                prediction.total, prediction.locations,
+                prediction.locationNodes, prediction.locationDatums);
+            scratch.reset();
+            decal_layer::bake::accounting::Ticket retained;
+            std::unique_ptr<BRepBuilderAPI_Copy> copier;
+            TopoDS_Shape detached;
+            TopTools_IndexedMapOfShape sourceFaces, detachedFaces;
+            std::size_t reserved = 0;
+            if (!CopyMeasuredBRep(compound, budget, ledger, source,
+                    prediction, 0, retained, copier, detached, sourceFaces,
+                    detachedFaces, reserved)) {
+                results.push_back(result);
+                continue;
+            }
+            BRepRepresentationCensus after;
+            decal_layer::bake::accounting::Ticket diagnostic;
+            if (!MeasureBRepRepresentation(detached, budget, ledger.view(),
+                    after, diagnostic)) {
+                results.push_back(result);
+                continue;
+            }
+            diagnostic.reset();
+            bool copiedIncidence = true;
+            for (Standard_Integer index = 1;
+                 index <= sourceFaces.Extent(); ++index) {
+                const TopoDS_Face copiedFace =
+                    TopoDS::Face(detachedFaces.FindKey(index));
+                TopLoc_Location copiedMeshLocation;
+                const Handle(Poly_Triangulation) copiedMesh =
+                    BRep_Tool::Triangulation(
+                        copiedFace, copiedMeshLocation);
+                std::size_t copiedEdgeCount = 0;
+                for (TopExp_Explorer explorer(copiedFace, TopAbs_EDGE);
+                     explorer.More(); explorer.Next()) {
+                    ++copiedEdgeCount;
+                    const TopoDS_Edge copiedEdge =
+                        TopoDS::Edge(explorer.Current());
+                    const Handle(Poly_PolygonOnTriangulation) copiedPolygon =
+                        BRep_Tool::PolygonOnTriangulation(
+                            copiedEdge, copiedMesh, copiedMeshLocation);
+                    copiedIncidence = copiedIncidence
+                        && !copiedPolygon.IsNull()
+                        && copiedPolygon->NbNodes() == 3
+                        && copiedPolygon->Node(1) == 1
+                        && copiedPolygon->Node(2) == 2
+                        && copiedPolygon->Node(3) == 3;
+                }
+                copiedIncidence = copiedIncidence && copiedEdgeCount == 1;
+            }
+            const std::size_t remainingWithTicket = ledger.remaining(
+                decal_layer::bake::accounting::StorageDimension::PrivateStorage);
+            sourceFaces.Clear(); detachedFaces.Clear(); detached.Nullify();
+            copier.reset();
+            const std::size_t remainingBeforeSettlement = ledger.remaining(
+                decal_layer::bake::accounting::StorageDimension::PrivateStorage);
+            retained.reset();
+            const std::size_t remainingAfterSettlement = ledger.remaining(
+                decal_layer::bake::accounting::StorageDimension::PrivateStorage);
+            const bool bezier = (cases[caseIndex] & DebugKnownBezier) != 0;
+            const bool rationalBezier =
+                (cases[caseIndex] & DebugKnownRationalBezier) != 0;
+            const bool nonrationalCurve =
+                (cases[caseIndex] & DebugKnownNonrationalCurve) != 0;
+            result = {{
+                1, caseIndex + 1, source.total, prediction.total, after.total,
+                source.tShapes, source.listNodes, source.representations,
+                source.geometry, source.meshLogical, source.meshPhysical,
+                source.meshNodes, source.meshTriangles, source.meshUVNodes,
+                source.meshNormals, source.polygonStorage,
+                source.harrayStorage, source.locations, source.topologyCount,
+                source.faceCount, reserved,
+                ledger.allocationEntries(
+                    decal_layer::bake::accounting::FailureSite::BRepCensusCopy),
+                prediction.total == after.total ? 1U : 0U,
+                remainingWithTicket == remainingBeforeSettlement ? 1U : 0U,
+                remainingAfterSettlement - remainingBeforeSettlement
+                    == reserved ? 1U : 0U,
+                copiedIncidence ? 1U : 0U, 1,
+                (cases[caseIndex] & DebugKnownHasUV) ? 1U : 0U,
+                (cases[caseIndex] & DebugKnownHasNormals) ? 1U : 0U,
+                (!bezier || rationalBezier) ? 1U : 0U,
+                (!nonrationalCurve && (!bezier || rationalBezier)) ? 1U : 0U,
+                (!bezier || rationalBezier || nonrationalCurve) ? 1U : 0U,
+                4, 4, 4,
+                (!bezier || rationalBezier) ? 4U : 0U,
+                (!nonrationalCurve && (!bezier || rationalBezier)) ? 4U : 0U,
+                (!bezier || rationalBezier || nonrationalCurve) ? 4U : 0U,
+                bezier ? 0U : 4U, bezier ? 0U : 3U,
+                bezier ? 0U : 3U, bezier ? 0U : 4U,
+                bezier ? 0U : 3U, bezier ? 0U : 3U,
+                bezier ? 0U : 8U, bezier ? 0U : 7U,
+                bezier ? 0U : 7U,
+                (cases[caseIndex] & DebugKnownPolygonParameters) ? 6U : 0U,
+                (cases[caseIndex] & DebugKnownCachedBounds) ? 1U : 0U,
+                (cases[caseIndex] & DebugKnownMeshParameters) ? 1U : 0U,
+                source.locationNodes, source.locationDatums,
+                prediction.tShapes, prediction.listNodes,
+                prediction.representations, prediction.geometry,
+                prediction.meshLogical, prediction.polygonStorage,
+                prediction.harrayStorage, prediction.locations,
+                after.geometry, after.meshLogical, after.polygonStorage,
+                after.harrayStorage,
+            }};
+        } catch (...) {
+            // A zero success field is the explicit STOP observation.
+        }
+        results.push_back(result);
+    }
+    return results;
+}
+
+std::array<std::size_t, 13>
+DebugExerciseE4BRepPlanarPCurveRefusal(bool storePCurve) noexcept {
+    std::array<std::size_t, 13> result{};
+    try {
+        BRep_Builder builder;
+        const Handle(Geom_Plane) plane =
+            new Geom_Plane(gp_Pln(gp::XOY()));
+        TopoDS_Face face;
+        TopoDS_Wire wire;
+        TopoDS_Edge edge = BRepBuilderAPI_MakeEdge(
+            gp_Pnt(0, 0, 0), gp_Pnt(1, 0, 0));
+        builder.MakeFace(face, plane, Precision::Confusion());
+        builder.MakeWire(wire);
+        builder.Add(wire, edge);
+        builder.Add(face, wire);
+        if (storePCurve) {
+            // Fixture-only equivalent of BuildPCurveForEdgeOnPlane. Keeping
+            // the authored handle makes the raw representation-list proof
+            // independent of BRep_Tool's generating lookup.
+            const Handle(Geom2d_Curve) pcurve = new Geom2d_Line(
+                gp_Pnt2d(0, 0), gp_Dir2d(1, 0));
+            builder.UpdateEdge(edge, pcurve, face, Precision::Confusion());
+            builder.Range(edge, face, 0.0, 1.0);
+        }
+
+        const auto edgeTShape = Handle(BRep_TEdge)::DownCast(edge.TShape());
+        if (edgeTShape.IsNull()) return result;
+        std::size_t representationCount = 0;
+        std::size_t storedPCurveCount = 0;
+        for (const auto& representation : edgeTShape->Curves()) {
+            if (!BRepCensusAdd(representationCount, 1)) return result;
+            if (!Handle(BRep_CurveOnSurface)::DownCast(
+                    representation).IsNull()
+                && !BRepCensusAdd(storedPCurveCount, 1)) return result;
+        }
+        result[0] = 1;
+        result[1] = representationCount;
+        result[2] = storedPCurveCount;
+
+        OperationLedger ledger(kMaxSnapshotNumericBytes,
+            kMaxAggregateEncodedTextureBytes,
+            kMaxAggregateDecodedTextureBytes);
+        retained_edge_treatment::ReplayBudget budget;
+        BRepRepresentationCensus source, prediction;
+        BRepCensusPCurveLookup lookup;
+        decal_layer::bake::accounting::Ticket scratch;
+        const bool measured = MeasureBRepRepresentation(face, budget,
+            ledger.view(), source, scratch, &prediction, &lookup);
+        result[3] = !measured
+                && lookup.kind
+                    == BRepCensusPCurveLookupKind::NeedsPlanarProjection
+            ? 1U : 0U;
+        result[4] = lookup.reason
+                && std::strcmp(lookup.reason,
+                    kBRepCensusUnstoredPlanarReason) == 0
+            ? 1U : 0U;
+        result[5] = ledger.allocationEntries(
+            decal_layer::bake::accounting::FailureSite::BRepCensusMapScratch);
+        result[6] = ledger.allocationEntries(
+            decal_layer::bake::accounting::FailureSite::BRepCensusCopy);
+        if (!storePCurve || !measured) return result;
+
+        scratch.reset();
+        decal_layer::bake::accounting::Ticket retained;
+        std::unique_ptr<BRepBuilderAPI_Copy> copier;
+        TopoDS_Shape detached;
+        TopTools_IndexedMapOfShape sourceFaces, detachedFaces;
+        std::size_t reserved = 0;
+        if (!CopyMeasuredBRep(face, budget, ledger, source, prediction, 0,
+                retained, copier, detached, sourceFaces, detachedFaces,
+                reserved)) return result;
+        result[6] = ledger.allocationEntries(
+            decal_layer::bake::accounting::FailureSite::BRepCensusCopy);
+        BRepRepresentationCensus after;
+        decal_layer::bake::accounting::Ticket diagnostic;
+        if (!MeasureBRepRepresentation(
+                detached, budget, ledger.view(), after, diagnostic))
+            return result;
+        result[7] = 1;
+        result[8] = prediction.total == after.total ? 1U : 0U;
+        result[9] = source.total;
+        result[10] = prediction.total;
+        result[11] = after.total;
+        result[12] = reserved;
+    } catch (...) {
+        return result;
+    }
+    return result;
 }
 #endif
 

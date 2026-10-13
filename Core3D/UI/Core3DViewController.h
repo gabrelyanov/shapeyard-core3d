@@ -654,6 +654,15 @@ __attribute__((objc_subclassing_restricted))
 //! Exact source/predicted/detached control for distinct faces sharing one
 //! plane and for two occurrences of the same face key.
 - (NSDictionary<NSString *,id> *)debugE4BRepCensusCopyPrediction;
+//! Constructor-authored rational/nonrational, optional mesh, stored-parameter,
+//! alias and T14 matrix. The numeric bridge exposes observations only.
+- (NSDictionary<NSString *,id> *)
+    debugE4BRepCensusKnownRepresentationForMetersPerUnit:
+        (NSNumber *)metersPerUnit;
+//! D778 lookup-unit fixture. False leaves the planar pcurve unstored and
+//! proves typed refusal before census/copy tickets; true stores it in-fixture.
+- (NSDictionary<NSString *,id> *)debugE4BRepCensusPlanarPCurveStored:
+    (NSNumber *)stored;
 - (NSDictionary<NSString *,id> *)debugTakeE4BRepCensusObservation;
 //! Executes the real persisted-source decoder twice: a header-derived backing
 //! denial before CGImage creation and a normal byte-identical pixel pass.

@@ -78,6 +78,14 @@
 namespace core3d::scene {
 std::array<std::size_t, 19>
 DebugExerciseE4BRepCensusCopyPrediction() noexcept;
+std::array<std::size_t, 42>
+DebugE4BRepKnownRepresentationSizes() noexcept;
+std::array<std::array<std::size_t, 4>, 11>
+DebugExerciseE4BRepReducedWordEvaluator() noexcept;
+std::vector<std::array<std::size_t, 64>>
+DebugExerciseE4BRepKnownRepresentations(double metersPerUnit) noexcept;
+std::array<std::size_t, 13>
+DebugExerciseE4BRepPlanarPCurveRefusal(bool storePCurve) noexcept;
 void DebugArmE4BRepCensusObservation(bool refuseOneByteShort) noexcept;
 std::array<std::size_t, 38> DebugTakeE4BRepCensusObservation() noexcept;
 std::array<std::size_t, 18> DebugExerciseE4OperationLedger() noexcept;
@@ -3559,6 +3567,148 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         @"exactlyEnoughBytes": @(value[17]),
         @"exactlyEnoughSuccess": @(value[18] != 0),
         @"opaqueRemainder": @"not measured: opaque O1–O33 remainder",
+    };
+}
+
+- (NSDictionary<NSString *,id> *)debugE4BRepCensusKnownRepresentationForMetersPerUnit:
+    (NSNumber *)metersPerUnit {
+    const auto sizes = core3d::scene::DebugE4BRepKnownRepresentationSizes();
+    const auto values = core3d::scene::DebugExerciseE4BRepKnownRepresentations(
+        metersPerUnit.doubleValue);
+    const auto evaluator =
+        core3d::scene::DebugExerciseE4BRepReducedWordEvaluator();
+    static constexpr const char *evaluatorNames[] = {
+        "identity",
+        "oneDatumCancellation",
+        "twoDatumCancellation",
+        "threeDatumCancellation",
+        "nonzeroMerge",
+        "partialCascade",
+        "equalTransformsDistinctDatums",
+        "negationOverflow",
+        "additionOverflow",
+        "countOverflow",
+        "byteOverflow",
+    };
+    NSMutableArray<NSDictionary<NSString *,id> *> *evaluatorCases =
+        [NSMutableArray arrayWithCapacity:evaluator.size()];
+    for (std::size_t index = 0; index < evaluator.size(); ++index) {
+        const auto& value = evaluator[index];
+        [evaluatorCases addObject:@{
+            @"name": [NSString stringWithUTF8String:evaluatorNames[index]],
+            @"caseID": @(value[0]),
+            @"nodeCount": @(value[1]),
+            @"byteCount": @(value[2]),
+            @"failed": @(value[3] != 0),
+        }];
+    }
+    NSMutableArray<NSDictionary<NSString *,id> *> *cases =
+        [NSMutableArray arrayWithCapacity:values.size()];
+    for (const auto& value : values) {
+        [cases addObject:@{
+            @"success": @(value[0] != 0), @"caseID": @(value[1]),
+            @"sourceBytes": @(value[2]), @"predictedBytes": @(value[3]),
+            @"detachedBytes": @(value[4]), @"tShapeBytes": @(value[5]),
+            @"listNodeBytes": @(value[6]), @"representationBytes": @(value[7]),
+            @"geometryBytes": @(value[8]), @"meshLogicalBytes": @(value[9]),
+            @"meshPhysicalBytes": @(value[10]), @"meshNodeBytes": @(value[11]),
+            @"meshTriangleBytes": @(value[12]), @"meshUVBytes": @(value[13]),
+            @"meshNormalBytes": @(value[14]), @"polygonBytes": @(value[15]),
+            @"harrayBytes": @(value[16]), @"locationBytes": @(value[17]),
+            @"topologyCount": @(value[18]), @"faceCount": @(value[19]),
+            @"reservedBytes": @(value[20]), @"copyEntries": @(value[21]),
+            @"measuredEquality": @(value[22] != 0),
+            @"ticketLive": @(value[23] != 0),
+            @"ticketSettled": @(value[24] != 0),
+            @"copiedIncidence": @(value[25] != 0),
+            @"sourceIncidence": @(value[26] != 0),
+            @"hasUV": @(value[27] != 0), @"hasNormals": @(value[28] != 0),
+            @"rationalSurface": @(value[29] != 0),
+            @"rationalCurve": @(value[30] != 0),
+            @"rationalPCurve": @(value[31] != 0),
+            @"surfacePoleCount": @(value[32]), @"curvePoleCount": @(value[33]),
+            @"pcurvePoleCount": @(value[34]),
+            @"surfaceWeightCount": @(value[35]),
+            @"curveWeightCount": @(value[36]),
+            @"pcurveWeightCount": @(value[37]),
+            @"surfaceKnotCount": @(value[38]), @"curveKnotCount": @(value[39]),
+            @"pcurveKnotCount": @(value[40]),
+            @"surfaceMultiplicityCount": @(value[41]),
+            @"curveMultiplicityCount": @(value[42]),
+            @"pcurveMultiplicityCount": @(value[43]),
+            @"surfaceFlatKnotCount": @(value[44]),
+            @"curveFlatKnotCount": @(value[45]),
+            @"pcurveFlatKnotCount": @(value[46]),
+            @"polygonParameterRealCount": @(value[47]),
+            @"cachedBoxCount": @(value[48]),
+            @"meshParameterCount": @(value[49]),
+            @"locationNodeBytes": @(value[50]),
+            @"locationDatumBytes": @(value[51]),
+            @"predictedTShapeBytes": @(value[52]),
+            @"predictedListNodeBytes": @(value[53]),
+            @"predictedRepresentationBytes": @(value[54]),
+            @"predictedGeometryBytes": @(value[55]),
+            @"predictedMeshLogicalBytes": @(value[56]),
+            @"predictedPolygonBytes": @(value[57]),
+            @"predictedHArrayBytes": @(value[58]),
+            @"predictedLocationBytes": @(value[59]),
+            @"detachedGeometryBytes": @(value[60]),
+            @"detachedMeshLogicalBytes": @(value[61]),
+            @"detachedPolygonBytes": @(value[62]),
+            @"detachedHArrayBytes": @(value[63]),
+        }];
+    }
+    return @{
+        @"fixture": @"E4BRepCensusKnownRepresentationMatrix",
+        @"opaqueRemainder": @"not measured: opaque O1–O33 remainder",
+        @"reducedWordEvaluatorCases": evaluatorCases,
+        @"sizes": @{
+            @"real": @(sizes[0]), @"integer": @(sizes[1]),
+            @"pointer": @(sizes[2]), @"listNodePointer": @(sizes[3]),
+            @"pnt": @(sizes[4]), @"pnt2d": @(sizes[5]),
+            @"vec3f": @(sizes[6]), @"triangle": @(sizes[7]),
+            @"tCompound": @(sizes[8]), @"tFace": @(sizes[9]),
+            @"tWire": @(sizes[10]), @"tEdge": @(sizes[11]),
+            @"curve3DRep": @(sizes[12]), @"curveOnSurfaceRep": @(sizes[13]),
+            @"polygon3DRep": @(sizes[14]), @"polygonOnMeshRep": @(sizes[15]),
+            @"triangulation": @(sizes[16]), @"polygon3D": @(sizes[17]),
+            @"polygonOnMesh": @(sizes[18]), @"bsplineSurface": @(sizes[19]),
+            @"bsplineCurve": @(sizes[20]), @"bsplinePCurve": @(sizes[21]),
+            @"bezierSurface": @(sizes[22]), @"bezierCurve": @(sizes[23]),
+            @"bezierPCurve": @(sizes[24]), @"harray2Pnt": @(sizes[25]),
+            @"harray2Real": @(sizes[26]), @"harray1Pnt": @(sizes[27]),
+            @"harray1Pnt2d": @(sizes[28]), @"harray1Real": @(sizes[29]),
+            @"harray1Integer": @(sizes[30]), @"shapeListNode": @(sizes[31]),
+            @"curveListNode": @(sizes[32]), @"meshListNode": @(sizes[33]),
+            @"copier": @(sizes[34]), @"indexedMapNode": @(sizes[35]),
+            @"shapeMap": @(sizes[36]), @"bndBox": @(sizes[37]),
+            @"surfaceAdaptor": @(sizes[38]), @"meshParameters": @(sizes[39]),
+            @"locationNode": @(sizes[40]), @"locationDatum": @(sizes[41]),
+        },
+        @"cases": cases,
+    };
+}
+
+- (NSDictionary<NSString *,id> *)debugE4BRepCensusPlanarPCurveStored:
+    (NSNumber *)stored {
+    const auto value = core3d::scene::DebugExerciseE4BRepPlanarPCurveRefusal(
+        stored.boolValue);
+    return @{
+        @"fixture": @"E4BRepCensusPlanarPCurveD778",
+        @"fixtureBuilt": @(value[0] != 0),
+        @"representationCount": @(value[1]),
+        @"storedPCurveCount": @(value[2]),
+        @"rejected": @(value[3] != 0),
+        @"reason": value[4] != 0
+            ? @"planar pcurve not stored, generation not admitted (D778)" : @"",
+        @"mapScratchEntries": @(value[5]),
+        @"copyEntries": @(value[6]),
+        @"controlPassed": @(value[7] != 0),
+        @"measuredEquality": @(value[8] != 0),
+        @"sourceBytes": @(value[9]),
+        @"predictedBytes": @(value[10]),
+        @"detachedBytes": @(value[11]),
+        @"reservedBytes": @(value[12]),
     };
 }
 
