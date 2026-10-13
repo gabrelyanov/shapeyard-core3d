@@ -117,6 +117,11 @@ public:
     std::shared_ptr<const retained_edge_treatment::r2::Snapshot>
     retainedSnapshot() const noexcept;
     bool cancel() noexcept;
+#if DEBUG
+    //! Arms the existing native-opening close probe only for this exact current,
+    //! unused issuer. Repeated, stale, cancelled and recovery calls fail closed.
+    bool debugReportNextCloseUnproven() noexcept;
+#endif
 
 private:
     struct State;

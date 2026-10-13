@@ -129,6 +129,13 @@ __attribute__((objc_subclassing_restricted))
     expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DAuthoredParameterApplyResult *result))completion
     NS_SWIFT_NAME(applyAuthoredBooleanParameter(_:mutationKind:inputIndex:values:expected:completion:));
+#if DEBUG
+//! Arms the existing close-unproven hook through this host's exact current
+//! authored opening. No transaction, outcome or recovery state is fabricated.
+- (BOOL)debugReportNextAuthoredParameterCloseUnproven:
+    (Core3DAuthoredParameterOpening *)opening
+    NS_SWIFT_NAME(debugReportNextAuthoredParameterCloseUnproven(_:));
+#endif
 @end
 
 NS_ASSUME_NONNULL_END

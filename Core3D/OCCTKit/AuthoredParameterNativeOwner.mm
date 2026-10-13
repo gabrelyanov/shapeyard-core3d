@@ -14,6 +14,9 @@ struct Owner::State final {
     std::uint32_t width = 0, height = 0;
     bool cancelled = false;
     bool prepared = false;
+#if DEBUG
+    bool debugCloseUnprovenArmed = false;
+#endif
 };
 
 Owner::Owner(std::unique_ptr<State> state) noexcept : state_(std::move(state)) {}
@@ -220,6 +223,17 @@ bool Owner::cancel() noexcept {
     state_->context.reset();
     return true;
 }
+
+#if DEBUG
+bool Owner::debugReportNextCloseUnproven() noexcept {
+    if (![NSThread isMainThread] || !state_ || state_->prepared
+        || state_->debugCloseUnprovenArmed
+        || currentness() != Currentness::Current || !state_->context) return false;
+    state_->context->debugReportNextCloseUnproven();
+    state_->debugCloseUnprovenArmed = true;
+    return true;
+}
+#endif
 
 const char* RefusalCode(Refusal refusal) noexcept {
     switch (refusal) {

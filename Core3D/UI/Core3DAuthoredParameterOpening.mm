@@ -668,6 +668,22 @@ NSDictionary *RotationCountedProbe(int32_t scenario) {
     return opening->_nativeOwner->belongsTo(document) && opening->_nativeOwner->cancel();
 }
 
+#if DEBUG
+- (BOOL)debugReportNextAuthoredParameterCloseUnproven:
+    (Core3DAuthoredParameterOpening *)opening {
+    if (![NSThread isMainThread]
+        || ![opening isKindOfClass:Core3DAuthoredParameterOpening.class]
+        || !opening->_nativeOwner) return NO;
+    GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)self.glController : nil;
+    const auto viewer = gl ? gl.viewer : nullptr;
+    const Handle(OcctDocument) document = viewer
+        ? viewer->getDocument() : Handle(OcctDocument)();
+    return opening->_nativeOwner->belongsTo(document)
+        && opening->_nativeOwner->debugReportNextCloseUnproven();
+}
+#endif
+
 - (Core3DAuthoredParameterOperation *)applyAuthoredLoftParameterOpening:
     (Core3DAuthoredParameterOpening *)opening
     stationIdentifier:(uint32_t)stationIdentifier
