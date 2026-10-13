@@ -82,7 +82,7 @@ std::array<std::size_t, 44>
 DebugE4BRepKnownRepresentationSizes() noexcept;
 std::array<std::array<std::size_t, 4>, 11>
 DebugExerciseE4BRepReducedWordEvaluator() noexcept;
-std::array<std::array<std::size_t, 18>, 4>
+std::array<std::array<std::size_t, 32>, 4>
 DebugExerciseE4BRepEffectiveLocationWitnesses(double metersPerUnit) noexcept;
 std::vector<std::array<std::size_t, 64>>
 DebugExerciseE4BRepKnownRepresentations(double metersPerUnit) noexcept;
@@ -3630,6 +3630,20 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
             @"occurrenceMapEntrySize": @(value[15]),
             @"sourceLocationNodes": @(value[16]),
             @"sourceLocationDatums": @(value[17]),
+            @"predictedLocationNodes": @(value[18]),
+            @"predictedLocationDatums": @(value[19]),
+            @"detachedLocationNodes": @(value[20]),
+            @"detachedLocationDatums": @(value[21]),
+            @"nativeProductOrderPassed": @(value[22] != 0),
+            @"nativeStoredPCurveSelected": @(value[23] != 0),
+            @"copiedPolygonIndependent": @(value[24] != 0),
+            @"polygonLocalPreserved": @(value[25] != 0),
+            @"sourceUnchanged": @(value[26] != 0),
+            @"copiedPCurveSelected": @(value[27] != 0),
+            @"copyPassed": @(value[28] != 0),
+            @"polygonNodeArrayIndependent": @(value[29] != 0),
+            @"polygonParameterArrayIndependent": @(value[30] != 0),
+            @"reservedBytes": @(value[31]),
         }];
     }
     NSMutableArray<NSDictionary<NSString *,id> *> *cases =
