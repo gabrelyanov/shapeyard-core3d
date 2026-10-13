@@ -352,10 +352,7 @@ bool CopyCurrentDefinition(
     return true;
 }
 
-struct OrdinaryReadAdmission final {
-    decal_layer::bake::accounting::Ticket encoded;
-    decal_layer::bake::accounting::Ticket local;
-};
+using OrdinaryReadAdmission = AtlasReadAdmission;
 
 bool AcquireOrdinaryStorage(
     decal_layer::bake::accounting::Ticket& ticket,
@@ -377,10 +374,12 @@ bool AcquireOrdinaryStorage(
         && operation.EnterAllocation(site);
 }
 
-Outcome PreflightAtlasRead(
+Outcome PreflightAtlasReadInternal(
     const Handle(TDocStd_Document)& document,
     const decal_layer::bake::accounting::View& operation,
-    OrdinaryReadAdmission& admission) noexcept {
+    OrdinaryReadAdmission& admission,
+    decal_layer::bake::accounting::FailureSite site =
+        decal_layer::bake::accounting::FailureSite::AtlasReadScratch) noexcept {
     using namespace decal_layer::bake::accounting;
     try {
         if (document.IsNull() || document->GetData().IsNull()
@@ -403,25 +402,32 @@ Outcome PreflightAtlasRead(
                     attribute->value()->bytes.size());
             }
         }
-        std::size_t recordBytes = 0, memberBytes = 0, localBytes = 0;
+        std::size_t recordBytes = 0, memberBytes = 0;
+        std::size_t freeShapeBytes = 0, localBytes = 0;
+        std::size_t encodedBytes = 0;
         if (!operation.CheckedProduct(records, sizeof(aa::persistence::Record),
-                2U, recordBytes, FailureSite::AtlasReadScratch)
-            || !operation.CheckedProduct(members + aa::kMaximumMembers,
-                sizeof(TDF_Label), 2U, memberBytes,
-                FailureSite::AtlasReadScratch)
+                2U, recordBytes, site)
+            || !operation.CheckedProduct(members, sizeof(TDF_Label), 2U,
+                memberBytes, site)
+            || !operation.CheckedProduct(
+                std::size_t(profile::MaximumLabels),
+                sizeof(TDF_LabelSequence::Node), 1U, freeShapeBytes, site)
+            || !operation.CheckedProduct(largestCanonical, 2U, 1U,
+                encodedBytes, site)
             || !AddReadBytes(localBytes, recordBytes)
             || !AddReadBytes(localBytes, memberBytes)
+            || !AddReadBytes(localBytes, freeShapeBytes)
             || !AcquireOrdinaryStorage(admission.encoded, operation,
-                StorageDimension::EncodedTexture, largestCanonical,
-                Retention::Scratch, FailureSite::AtlasReadScratch)
+                StorageDimension::EncodedTexture, encodedBytes,
+                Retention::Scratch, site)
             || !AcquireOrdinaryStorage(admission.local, operation,
                 StorageDimension::PrivateStorage, localBytes,
-                Retention::Scratch, FailureSite::AtlasReadScratch))
+                Retention::Scratch, site))
             return Outcome::OverBudget;
         return Outcome::Prepared;
     } catch (const std::bad_alloc&) {
         operation.AllocationFailed(
-            decal_layer::bake::accounting::FailureSite::AtlasReadScratch);
+            site);
         return Outcome::OverBudget;
     } catch (...) { return Outcome::Malformed; }
 }
@@ -1430,6 +1436,15 @@ Outcome AdoptBakedResources(const Handle(TDocStd_Document)& document,
     } catch (...) { return Outcome::PersistenceFailure; }
 }
 } // namespace
+
+Outcome PreflightAtlasRead(
+    const Handle(TDocStd_Document)& document,
+    const decal_layer::bake::accounting::View& operation,
+    AtlasReadAdmission& admission,
+    decal_layer::bake::accounting::FailureSite site) noexcept {
+    admission.reset();
+    return PreflightAtlasReadInternal(document, operation, admission, site);
+}
 
 bool CurrentnessResult::clone(CurrentnessResult& output) const noexcept {
     return cloneUsing(*this, output);

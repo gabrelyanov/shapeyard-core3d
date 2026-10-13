@@ -665,6 +665,13 @@ __attribute__((objc_subclassing_restricted))
 - (NSDictionary<NSString *,id> *)debugE4BRepCensusPlanarPCurveStored:
     (NSNumber *)stored;
 - (NSDictionary<NSString *,id> *)debugTakeE4BRepCensusObservation;
+//! Arms the next genuine protected-capture strict-atlas-read boundary. YES
+//! refuses at ProtectedAtlasRead before ReadAll/allocation entry; NO records
+//! the admitted capture after its retained owners have been populated.
+- (void)debugArmE4ProtectedCaptureStorageDenial:(NSNumber *)deny
+    NS_SWIFT_NAME(debugArmE4ProtectedCaptureStorageDenial(_:));
+- (NSDictionary<NSString *,id> *)debugTakeE4ProtectedCaptureStorageObservation
+    NS_SWIFT_NAME(debugTakeE4ProtectedCaptureStorageObservation());
 //! Executes the real persisted-source decoder twice: a header-derived backing
 //! denial before CGImage creation and a normal byte-identical pixel pass.
 - (nullable NSDictionary<NSString *,id> *)

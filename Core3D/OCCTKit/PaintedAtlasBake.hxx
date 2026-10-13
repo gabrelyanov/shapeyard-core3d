@@ -488,6 +488,27 @@ enum class Outcome : std::uint8_t {
     Malformed, PersistenceFailure, Absent
 };
 
+//! Admission retained across the strict whole-document SYEA reader. The
+//! encoded ticket covers the largest simultaneously-live canonical Encode
+//! scratch; local covers returned records, member-owner labels and traversal
+//! overlap. Both are acquired before persistence::ReadAll is entered.
+struct AtlasReadAdmission final {
+    decal_layer::bake::accounting::Ticket encoded;
+    decal_layer::bake::accounting::Ticket local;
+
+    void reset() noexcept {
+        local.reset();
+        encoded.reset();
+    }
+};
+
+Outcome PreflightAtlasRead(
+    const Handle(TDocStd_Document)& document,
+    const decal_layer::bake::accounting::View& operation,
+    AtlasReadAdmission& admission,
+    decal_layer::bake::accounting::FailureSite site =
+        decal_layer::bake::accounting::FailureSite::AtlasReadScratch) noexcept;
+
 //! Tickets acquired from immutable document metadata before the strict
 //! resource reader materializes its table, canonical encodings, or returned
 //! deep envelope. Scratch dies after the read; returned byte tickets move to

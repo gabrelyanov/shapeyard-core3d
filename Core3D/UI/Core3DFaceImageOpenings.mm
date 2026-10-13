@@ -90,6 +90,9 @@ std::array<std::size_t, 13>
 DebugExerciseE4BRepPlanarPCurveRefusal(bool storePCurve) noexcept;
 void DebugArmE4BRepCensusObservation(bool refuseOneByteShort) noexcept;
 std::array<std::size_t, 38> DebugTakeE4BRepCensusObservation() noexcept;
+void DebugArmE4ProtectedCaptureStorageObservation(bool denyAtlasRead) noexcept;
+std::array<std::size_t, 11>
+DebugTakeE4ProtectedCaptureStorageObservation() noexcept;
 std::array<std::size_t, 18> DebugExerciseE4OperationLedger() noexcept;
 std::array<std::size_t, 16> DebugExerciseE4SourceDecodeAdmission(
     const std::vector<std::uint8_t>& bytes) noexcept;
@@ -3458,7 +3461,7 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         core3d::decal_layer::source::Witness witness;
         if (!core3d::decal_layer::source::CaptureSource(
                 wrapper, key, budget, [] { return false; }, witness)
-            || definition.layers.size() != 1) return nil;
+            || definition.layers.empty()) return nil;
         const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(owner);
         Standard_Real unit = 0.0;
         dr::FaceImageGeometricReceipt receipt;
@@ -3946,6 +3949,33 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         @"sourceFaceCount": @(value[36]),
         @"predictedFaceCount": @(value[37]),
         @"opaqueRemainder": @"not measured: opaque O1–O33 remainder",
+    };
+}
+
+- (void)debugArmE4ProtectedCaptureStorageDenial:(NSNumber *)deny {
+    core3d::scene::DebugArmE4ProtectedCaptureStorageObservation(
+        deny.boolValue);
+}
+
+- (NSDictionary<NSString *,id> *)debugTakeE4ProtectedCaptureStorageObservation {
+    const auto value = core3d::scene::
+        DebugTakeE4ProtectedCaptureStorageObservation();
+    const auto protectedAtlasRead = static_cast<std::size_t>(
+        core3d::decal_layer::bake::accounting::FailureSite::ProtectedAtlasRead);
+    return @{
+        @"fixture": @"E4P2b1ProtectedCaptureStorage",
+        @"observed": @(value[0] != 0),
+        @"completed": @(value[1] != 0),
+        @"refused": @(value[2] != 0),
+        @"firstFailure": value[3] == protectedAtlasRead
+            ? @"ProtectedAtlasRead" : @"none",
+        @"deniedAllocationEntries": @(value[4]),
+        @"ownerCount": @(value[5]),
+        @"receiverCount": @(value[6]),
+        @"sourceCount": @(value[7]),
+        @"canonicalByteCount": @(value[8]),
+        @"resourceByteCount": @(value[9]),
+        @"liveTicketBytes": @(value[10]),
     };
 }
 

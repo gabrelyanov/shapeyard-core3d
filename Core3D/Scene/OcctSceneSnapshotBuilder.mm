@@ -10531,6 +10531,180 @@ DebugExerciseE4BRepPlanarPCurveRefusal(bool storePCurve) noexcept {
 }
 #endif
 
+bool AddProtectedBytes(std::size_t& total, std::size_t bytes) noexcept {
+    if (bytes > std::numeric_limits<std::size_t>::max() - total) return false;
+    total += bytes;
+    return true;
+}
+
+bool AcquireProtectedStorage(
+    decal_layer::bake::accounting::Ticket& ticket,
+    const decal_layer::bake::accounting::View& operation,
+    decal_layer::bake::accounting::StorageDimension dimension,
+    std::size_t bytes,
+    decal_layer::bake::accounting::Retention retention,
+    decal_layer::bake::accounting::FailureSite site) noexcept {
+    if (bytes == 0) return true;
+    return ticket.acquire(operation, dimension, bytes, retention, site)
+        && operation.EnterAllocation(site);
+}
+
+template <typename Value>
+bool ReserveProtectedVector(
+    std::vector<Value>& values,
+    decal_layer::bake::accounting::Ticket& ticket,
+    const decal_layer::bake::accounting::View& operation,
+    std::size_t capacity,
+    decal_layer::bake::accounting::Retention retention,
+    decal_layer::bake::accounting::FailureSite site) {
+    using namespace decal_layer::bake::accounting;
+    if (capacity == 0) return true;
+    std::size_t bytes = 0;
+    if (!operation.CheckedProduct(capacity, sizeof(Value), 1U, bytes, site)
+        || !AcquireProtectedStorage(ticket, operation,
+            StorageDimension::PrivateStorage, bytes, retention, site))
+        return false;
+    try {
+        values.reserve(capacity);
+    } catch (...) {
+        operation.AllocationFailed(site);
+        return false;
+    }
+    if (values.capacity() > capacity
+        || values.capacity() * sizeof(Value) > ticket.bytes) {
+        operation.AllocationFailed(site);
+        return false;
+    }
+    return true;
+}
+
+struct ProtectedDefinitionAdmission final {
+    decal_layer::bake::accounting::Ticket readScratch;
+    decal_layer::bake::accounting::Ticket canonical;
+    decal_layer::bake::accounting::Ticket layers;
+    std::size_t layerCount = 0;
+};
+
+bool PreflightProtectedDefinitionRead(
+    const TDF_Label& owner,
+    const decal_layer::bake::accounting::View& operation,
+    ProtectedDefinitionAdmission& admission) noexcept {
+    using namespace decal_layer::bake::accounting;
+    admission = {};
+    try {
+        if (owner.IsNull() || !operation.valid()) return false;
+        const TDF_Label record = owner.FindChild(
+            decal_layer::persistence::RecordTag, Standard_False);
+        if (record.IsNull()) return true;
+        Handle(TDataStd_Integer) layers, chunks;
+        if (!record.FindAttribute(
+                decal_layer::persistence::LayerCountID(), layers)
+            || !record.FindAttribute(
+                decal_layer::persistence::ChunkCountID(), chunks)
+            || layers.IsNull() || chunks.IsNull()
+            || layers->Get() <= 0
+            || layers->Get() > Standard_Integer(decal_layer::kMaximumLayers)
+            || chunks->Get() <= 0
+            || chunks->Get() > decal_layer::persistence::MaximumChunks)
+            return true;
+        admission.layerCount = std::size_t(layers->Get());
+        std::size_t hexBytes = 0;
+        for (Standard_Integer index = 1; index <= chunks->Get(); ++index) {
+            Handle(TDataStd_AsciiString) text;
+            const TDF_Label chunk = record.FindChild(index, Standard_False);
+            if (chunk.IsNull()
+                || !chunk.FindAttribute(TDataStd_AsciiString::GetID(), text)
+                || text.IsNull()) return true;
+            const Standard_Integer length = text->Get().Length();
+            if (length <= 0
+                || !AddProtectedBytes(hexBytes, std::size_t(length)))
+                return false;
+        }
+        const std::size_t canonicalBytes = hexBytes / 2U + hexBytes % 2U;
+        std::size_t scratchBytes = 0;
+        std::size_t layerBytes = 0;
+        if (!AddProtectedBytes(scratchBytes, hexBytes)
+            || !AddProtectedBytes(scratchBytes,
+                std::size_t(decal_layer::persistence::ChunkCharacters) + 1U)
+            || !AddProtectedBytes(scratchBytes, 130U)
+            || !operation.CheckedProduct(admission.layerCount,
+                sizeof(decal_layer::Layer), 1U, layerBytes,
+                FailureSite::ProtectedDefinitionStorage)
+            || !AcquireProtectedStorage(admission.readScratch, operation,
+                StorageDimension::PrivateStorage, scratchBytes,
+                Retention::Scratch, FailureSite::ProtectedDefinitionStorage)
+            || !AcquireProtectedStorage(admission.canonical, operation,
+                StorageDimension::EncodedTexture, canonicalBytes,
+                Retention::Retained, FailureSite::ProtectedDefinitionStorage)
+            || !AcquireProtectedStorage(admission.layers, operation,
+                StorageDimension::PrivateStorage, layerBytes,
+                Retention::Retained, FailureSite::ProtectedDefinitionStorage))
+            return false;
+        return true;
+    } catch (...) {
+        admission = {};
+        operation.AllocationFailed(
+            decal_layer::bake::accounting::FailureSite::ProtectedDefinitionStorage);
+        return false;
+    }
+}
+
+#ifdef DEBUG
+namespace {
+struct DebugProtectedCaptureObservation final {
+    std::size_t firstFailure = 0;
+    std::size_t deniedAllocationEntries = 0;
+    std::size_t ownerCount = 0;
+    std::size_t receiverCount = 0;
+    std::size_t sourceCount = 0;
+    std::size_t canonicalBytes = 0;
+    std::size_t resourceBytes = 0;
+    std::size_t liveBytes = 0;
+    bool observed = false;
+    bool completed = false;
+    bool refused = false;
+};
+std::atomic_int gDebugProtectedCaptureMode{0};
+std::mutex gDebugProtectedCaptureMutex;
+DebugProtectedCaptureObservation gDebugProtectedCaptureObservation;
+
+void RecordDebugProtectedCapture(
+    const DebugProtectedCaptureObservation& value) noexcept {
+    std::lock_guard<std::mutex> lock(gDebugProtectedCaptureMutex);
+    gDebugProtectedCaptureObservation = value;
+}
+}
+
+void DebugArmE4ProtectedCaptureStorageObservation(
+    bool denyAtlasRead) noexcept {
+    {
+        std::lock_guard<std::mutex> lock(gDebugProtectedCaptureMutex);
+        gDebugProtectedCaptureObservation = {};
+    }
+    gDebugProtectedCaptureMode.store(denyAtlasRead ? 2 : 1,
+        std::memory_order_release);
+}
+
+std::array<std::size_t, 11>
+DebugTakeE4ProtectedCaptureStorageObservation() noexcept {
+    std::lock_guard<std::mutex> lock(gDebugProtectedCaptureMutex);
+    const auto& value = gDebugProtectedCaptureObservation;
+    return {{
+        value.observed ? 1U : 0U,
+        value.completed ? 1U : 0U,
+        value.refused ? 1U : 0U,
+        value.firstFailure,
+        value.deniedAllocationEntries,
+        value.ownerCount,
+        value.receiverCount,
+        value.sourceCount,
+        value.canonicalBytes,
+        value.resourceBytes,
+        value.liveBytes,
+    }};
+}
+#endif
+
 struct PrivateDecalCapture::Impl final {
     struct Owner final {
         struct Receiver final {
@@ -10540,6 +10714,12 @@ struct PrivateDecalCapture::Impl final {
             std::uint32_t originalFaceIndex = 0;
             std::uint32_t disposableFaceIndex = 0;
         };
+        decal_layer::bake::accounting::Ticket definitionLayersTicket;
+        decal_layer::bake::accounting::Ticket canonicalBytesTicket;
+        decal_layer::bake::accounting::Ticket receiverVectorTicket;
+        decal_layer::bake::accounting::Ticket finishingStorageTicket;
+        decal_layer::bake::accounting::Ticket paintedSourcesTicket;
+        decal_layer::bake::accounting::Ticket definitionIdentifierTicket;
         retained_recipe::OwnerKey owner;
         decal_layer::Definition definition;
         std::vector<std::uint8_t> canonicalBytes;
@@ -10558,15 +10738,19 @@ struct PrivateDecalCapture::Impl final {
         std::string definitionIdentifier;
     };
 
-    // Impl is the single operation context. The ledger is constructed first;
-    // the existing ReplayBudget below remains its unchanged topology component.
+    // Impl is the single operation context. Capture creation transfers the
+    // already-admitted stack ledger here before any protected scene copy; the
+    // existing ReplayBudget below remains its unchanged topology component.
     OperationLedger operationLedger;
+    decal_layer::bake::accounting::Ticket controlStorageTicket;
+    decal_layer::bake::accounting::Ticket documentIdentifierTicket;
+    decal_layer::bake::accounting::Ticket ownersTicket;
     decal_layer::bake::accounting::Ticket wholeSceneNumericTicket;
     decal_layer::bake::accounting::Ticket wholeSceneEncodedTicket;
     decal_layer::bake::accounting::Ticket wholeScenePrivateTicket;
     SceneSnapshot wholeCommittedScene;
     std::vector<Owner> owners;
-    std::shared_ptr<retained_edge_treatment::ReplayBudget> budget;
+    mutable retained_edge_treatment::ReplayBudget budget;
     decal_layer::bake::publication::PrivateDestination destination;
     std::string documentIdentifier;
     double metersPerUnit = 0.0;
@@ -10605,9 +10789,34 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
     try {
         const Handle(TDocStd_Document)& document = privateDocument->Document();
         if (document.IsNull() || document->HasOpenCommand()) return false;
+        OperationLedger captureAdmission;
+        const std::size_t captureControlBytes =
+            sizeof(PrivateDecalCapture) + sizeof(PrivateDecalCapture::Impl);
+        if (!captureAdmission.reserve(
+                decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                captureControlBytes,
+                decal_layer::bake::accounting::Retention::Retained,
+                decal_layer::bake::accounting::FailureSite::ProtectedCaptureControl)
+            || !captureAdmission.enterAllocation(
+                decal_layer::bake::accounting::FailureSite::ProtectedCaptureControl)
+            || !captureAdmission.enterAllocation(
+                decal_layer::bake::accounting::FailureSite::ProtectedCaptureControl))
+            return false;
         auto candidate = std::make_unique<PrivateDecalCapture>();
         if (!candidate || !candidate->impl_) return false;
         auto& impl = *candidate->impl_;
+        impl.operationLedger = captureAdmission;
+        impl.controlStorageTicket.view = impl.operationLedger.view();
+        impl.controlStorageTicket.dimension =
+            decal_layer::bake::accounting::StorageDimension::PrivateStorage;
+        impl.controlStorageTicket.bytes = captureControlBytes;
+        impl.controlStorageTicket.retention =
+            decal_layer::bake::accounting::Retention::Retained;
+        int debugProtectedCaptureMode = 0;
+#ifdef DEBUG
+        debugProtectedCaptureMode = gDebugProtectedCaptureMode.exchange(
+            0, std::memory_order_acq_rel);
+#endif
         if (!impl.operationLedger.recheck(
                 decal_layer::bake::accounting::FailureSite::ContextControl))
             return false;
@@ -10634,15 +10843,24 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
             return false;
         impl.wholeCommittedScene = wholeCommittedScene;
         impl.selectedObjectsOnly = selectedObjectsOnly;
+        if (!AcquireProtectedStorage(impl.documentIdentifierTicket,
+                impl.operationLedger.view(),
+                decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                64U, decal_layer::bake::accounting::Retention::Retained,
+                decal_layer::bake::accounting::FailureSite::ProtectedCaptureControl))
+            return false;
         impl.documentIdentifier = privateDocument->DocumentIdentifier();
+        if (impl.documentIdentifier.capacity() + 1U
+                > impl.documentIdentifierTicket.bytes) {
+            impl.operationLedger.allocationFailure(
+                decal_layer::bake::accounting::FailureSite::ProtectedCaptureControl);
+            return false;
+        }
         XCAFDoc_DocumentTool::GetLengthUnit(document, impl.metersPerUnit);
         if (impl.metersPerUnit != wholeCommittedScene.metersPerUnit)
             return false;
-        impl.budget = std::make_shared<
-            retained_edge_treatment::ReplayBudget>();
-        if (!impl.budget
-            || !impl.operationLedger.bindTopology(
-                *impl.budget,
+        if (!impl.operationLedger.bindTopology(
+                impl.budget,
                 decal_layer::bake::accounting::FailureSite::ContextControl))
             return false;
 
@@ -10650,70 +10868,237 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
         // transitive multi-member authority and remains a deliberate refusal
         // until P2 can rebuild its complete membership in one transaction.
         std::vector<asset_atlas::persistence::Record> savedAtlases;
+        painted_atlas_bake::owner::AtlasReadAdmission atlasRead;
+#ifdef DEBUG
+        if (debugProtectedCaptureMode == 2) {
+            impl.operationLedger.refuse(
+                decal_layer::bake::accounting::FailureSite::ProtectedAtlasRead);
+            DebugProtectedCaptureObservation observation;
+            observation.observed = true;
+            observation.refused = true;
+            observation.firstFailure = std::size_t(
+                impl.operationLedger.firstFailureSite());
+            observation.deniedAllocationEntries =
+                impl.operationLedger.allocationEntries(
+                    decal_layer::bake::accounting::FailureSite::ProtectedAtlasRead);
+            observation.liveBytes = impl.operationLedger.totalLive();
+            RecordDebugProtectedCapture(observation);
+            return false;
+        }
+#endif
+        if (painted_atlas_bake::owner::PreflightAtlasRead(
+                document, impl.operationLedger.view(), atlasRead,
+                decal_layer::bake::accounting::FailureSite::ProtectedAtlasRead)
+                != painted_atlas_bake::owner::Outcome::Prepared
+            || !impl.operationLedger.enterAllocation(
+                decal_layer::bake::accounting::FailureSite::ProtectedAtlasRead))
+            return false;
         if (!asset_atlas::persistence::ReadAll(document, savedAtlases)
             || !savedAtlases.empty()) return false;
+        atlasRead.reset();
 
-        std::unordered_map<std::string, const InstanceSnapshot*> occurrences;
+        std::vector<const InstanceSnapshot*> occurrences;
+        decal_layer::bake::accounting::Ticket occurrencesTicket;
+        std::size_t modelOccurrences = 0;
+        for (const auto& instance : wholeCommittedScene.instances)
+            if (instance.role == RenderRole::Model) ++modelOccurrences;
+        if (!ReserveProtectedVector(occurrences, occurrencesTicket,
+                impl.operationLedger.view(), modelOccurrences,
+                decal_layer::bake::accounting::Retention::Scratch,
+                decal_layer::bake::accounting::FailureSite::ProtectedOccurrenceStorage))
+            return false;
         for (const auto& instance : wholeCommittedScene.instances) {
-            if (instance.role == RenderRole::Model
-                && !occurrences.emplace(
-                        instance.entityIdentifier, &instance).second)
-                return false;
+            if (instance.role != RenderRole::Model) continue;
+            if (std::any_of(occurrences.begin(), occurrences.end(),
+                    [&](const InstanceSnapshot* prior) {
+                        return prior->entityIdentifier
+                            == instance.entityIdentifier;
+                    })) return false;
+            occurrences.push_back(&instance);
         }
-        std::unordered_set<std::string> capturedDefinitions;
-        XCAFPrs_DocumentExplorer explorer(document,
-            XCAFPrs_DocumentExplorerFlags_OnlyLeafNodes, XCAFPrs_Style());
-        for (; explorer.More(); explorer.Next()) {
-            if (cancelled()) return false;
-            const auto& node = explorer.Current();
-            if (explorer.CurrentDepth() < 0
-                || explorer.CurrentDepth() >= kMaxOccurrenceDepth)
-                return false;
-            std::vector<std::string> path;
-            for (Standard_Integer depth = 0;
-                 depth <= explorer.CurrentDepth(); ++depth) {
-                path.push_back(privateDocument->EntityIdentifierForLabel(
-                    explorer.Current(depth).Label));
+        std::vector<decal_layer::UUID> capturedDefinitions;
+        decal_layer::bake::accounting::Ticket capturedDefinitionsTicket;
+        if (!ReserveProtectedVector(capturedDefinitions,
+                capturedDefinitionsTicket, impl.operationLedger.view(),
+                occurrences.size(),
+                decal_layer::bake::accounting::Retention::Scratch,
+                decal_layer::bake::accounting::FailureSite::ProtectedOccurrenceStorage)
+            || !ReserveProtectedVector(impl.owners, impl.ownersTicket,
+                impl.operationLedger.view(), occurrences.size(),
+                decal_layer::bake::accounting::Retention::Retained,
+                decal_layer::bake::accounting::FailureSite::ProtectedOwnerStorage))
+            return false;
+        // Match XCAFPrs_DocumentExplorer's OnlyLeafNodes/NoStyle walk without
+        // its NCollection_Vector node blocks or TDF_LabelSequence roots.  The
+        // shape-tool root label and each assembly definition are already
+        // ordered label trees; fixed TDF iterators therefore preserve the
+        // explorer's root/child occurrence order without owning a sequence.
+        struct ProtectedTraversalFrame final {
+            TDF_Label label;
+            TDF_ChildIterator children;
+
+            ProtectedTraversalFrame(const TDF_Label& occurrence,
+                                      const TDF_Label& definition)
+                : label(occurrence),
+                  children(definition, Standard_False) {}
+        };
+        const Handle(XCAFDoc_ShapeTool) shapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (shapeTool.IsNull()) return false;
+        std::vector<ProtectedTraversalFrame> traversal;
+        decal_layer::bake::accounting::Ticket traversalTicket;
+        if (!ReserveProtectedVector(traversal, traversalTicket,
+                impl.operationLedger.view(),
+                std::size_t(kMaxOccurrenceDepth),
+                decal_layer::bake::accounting::Retention::Scratch,
+                decal_layer::bake::accounting::FailureSite::ProtectedTraversalStorage))
+            return false;
+        TDF_ChildIterator roots(shapeTool->BaseLabel(), Standard_False);
+        while (roots.More() || !traversal.empty()) {
+            TDF_Label nodeLabel;
+            TDF_Label label;
+            std::size_t currentDepth = 0;
+            while (nodeLabel.IsNull()) {
+                if (traversal.empty()) {
+                    bool foundRoot = false;
+                    while (roots.More()) {
+                        const TDF_Label root = roots.Value();
+                        roots.Next();
+                        TopoDS_Shape rootShape;
+                        if (!XCAFDoc_ShapeTool::GetShape(root, rootShape)
+                            || !XCAFDoc_ShapeTool::IsFree(root))
+                            continue;
+                        foundRoot = true;
+                        TDF_Label rootDefinition = root;
+                        XCAFDoc_ShapeTool::GetReferredShape(
+                            root, rootDefinition);
+                        if (XCAFDoc_ShapeTool::IsAssembly(rootDefinition)) {
+                            traversal.emplace_back(root, rootDefinition);
+                        } else {
+                            nodeLabel = root;
+                            label = rootDefinition;
+                        }
+                        break;
+                    }
+                    if (!foundRoot) break;
+                    if (!nodeLabel.IsNull()) break;
+                }
+                auto& frame = traversal.back();
+                if (!frame.children.More()) {
+                    traversal.pop_back();
+                    continue;
+                }
+                const TDF_Label child = frame.children.Value();
+                frame.children.Next();
+                if (!child.HasAttribute()) continue;
+                TDF_Label childDefinition = child;
+                XCAFDoc_ShapeTool::GetReferredShape(
+                    child, childDefinition);
+                if (XCAFDoc_ShapeTool::IsAssembly(childDefinition)) {
+                    if (traversal.size()
+                            >= std::size_t(kMaxOccurrenceDepth))
+                        return false;
+                    traversal.emplace_back(child, childDefinition);
+                    continue;
+                }
+                currentDepth = traversal.size();
+                if (currentDepth >= std::size_t(kMaxOccurrenceDepth))
+                    return false;
+                nodeLabel = child;
+                label = childDefinition;
             }
+            if (nodeLabel.IsNull()) break;
+            if (cancelled()) return false;
+            std::vector<std::string> path;
+            decal_layer::bake::accounting::Ticket pathTicket;
+            std::size_t pathBytes = 0;
+            if (!impl.operationLedger.checkedProduct(
+                    currentDepth + 1U,
+                    sizeof(std::string) + 64U, 1U, pathBytes,
+                    decal_layer::bake::accounting::FailureSite::ProtectedPathStorage)
+                || !AddProtectedBytes(pathBytes, 192U)
+                || !AcquireProtectedStorage(pathTicket,
+                    impl.operationLedger.view(),
+                    decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                    pathBytes, decal_layer::bake::accounting::Retention::Scratch,
+                    decal_layer::bake::accounting::FailureSite::ProtectedPathStorage))
+                return false;
+            path.reserve(currentDepth + 1U);
+            for (const auto& frame : traversal) {
+                path.push_back(privateDocument->EntityIdentifierForLabel(
+                    frame.label));
+            }
+            path.push_back(privateDocument->EntityIdentifierForLabel(
+                nodeLabel));
             const std::string entity = DeriveOccurrenceIdentifier(
                 impl.documentIdentifier, path);
-            if (occurrences.find(entity) == occurrences.end()) continue;
-            const TDF_Label label = node.RefLabel.IsNull()
-                ? node.Label : node.RefLabel;
+            if (std::none_of(occurrences.begin(), occurrences.end(),
+                    [&](const InstanceSnapshot* occurrence) {
+                        return occurrence->entityIdentifier == entity;
+                    })) continue;
             const std::string definitionIdentifier =
                 privateDocument->DefinitionIdentifierForLabel(label);
             if (definitionIdentifier.empty()) return false;
-            decal_layer::Definition definition;
-            std::vector<std::uint8_t> canonicalBytes;
-            const auto state = decal_layer::persistence::Read(
-                document, label, definition, &canonicalBytes, nullptr);
-            if (state == decal_layer::persistence::ReadState::Malformed)
-                return false;
-            if (state == decal_layer::persistence::ReadState::Absent)
-                continue;
-            if (!capturedDefinitions.insert(definitionIdentifier).second)
-                continue;
             retained_recipe::OwnerKey owner;
             if (!receipt::ParseUUID(impl.documentIdentifier, owner.document)
                 || !receipt::ParseUUID(
                     privateDocument->EntityIdentifierForLabel(label),
                     owner.entity)
                 || !receipt::ParseUUID(definitionIdentifier,
-                                       owner.definition)
+                                       owner.definition)) return false;
+            if (std::find(capturedDefinitions.begin(),
+                    capturedDefinitions.end(), owner.definition)
+                    != capturedDefinitions.end())
+                continue;
+            decal_layer::Definition definition;
+            std::vector<std::uint8_t> canonicalBytes;
+            ProtectedDefinitionAdmission definitionAdmission;
+            if (!PreflightProtectedDefinitionRead(label,
+                    impl.operationLedger.view(), definitionAdmission)
+                || !impl.operationLedger.enterAllocation(
+                    decal_layer::bake::accounting::FailureSite::ProtectedDefinitionStorage))
+                return false;
+            const auto state = decal_layer::persistence::Read(
+                document, label, definition, &canonicalBytes, nullptr);
+            if (state == decal_layer::persistence::ReadState::Malformed)
+                return false;
+            if (state == decal_layer::persistence::ReadState::Absent)
+                continue;
+            if (definition.layers.size() != definitionAdmission.layerCount
+                || definition.layers.capacity() * sizeof(decal_layer::Layer)
+                    > definitionAdmission.layers.bytes
+                || canonicalBytes.capacity() > definitionAdmission.canonical.bytes
                 || !(definition.owner == owner)) return false;
+            capturedDefinitions.push_back(owner.definition);
+            definitionAdmission.readScratch.reset();
+            decal_layer::bake::accounting::Ticket proofTicket;
+            std::size_t proofBytes =
+                definition.layers.capacity() * sizeof(decal_layer::Layer);
+            if (!AddProtectedBytes(proofBytes, canonicalBytes.capacity())
+                || !AcquireProtectedStorage(proofTicket,
+                    impl.operationLedger.view(),
+                    decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                    proofBytes,
+                    decal_layer::bake::accounting::Retention::Scratch,
+                    decal_layer::bake::accounting::FailureSite::ProtectedDefinitionStorage))
+                return false;
             decal_layer::Definition proof = definition;
             const auto savedProof = proof.layerProof;
             decal_layer::source::Witness source;
             if (!decal_layer::BindLayerProof(proof)
                 || proof.layerProof != savedProof
                 || !decal_layer::source::CaptureSource(
-                    privateDocument, owner, *impl.budget,
+                    privateDocument, owner, impl.budget,
                     cancelled, source)
                 || !decal_layer::source::ExactMatch(definition, source))
                 return false;
             const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
             if (shape.IsNull()) return false;
             PrivateDecalCapture::Impl::Owner value;
+            value.definitionLayersTicket =
+                std::move(definitionAdmission.layers);
+            value.canonicalBytesTicket =
+                std::move(definitionAdmission.canonical);
             value.owner = owner;
             BRepRepresentationCensus preCopyCensus;
             BRepRepresentationCensus copyPrediction;
@@ -10723,13 +11108,13 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
             debugCensusMode = gDebugBRepCensusMode.exchange(
                 0, std::memory_order_acq_rel);
 #endif
-            if (!MeasureBRepRepresentation(shape, *impl.budget,
+            if (!MeasureBRepRepresentation(shape, impl.budget,
                     impl.operationLedger.view(), preCopyCensus,
                     censusScratch, &copyPrediction)) return false;
             censusScratch.reset();
             std::size_t retainedMeasuredBytes = 0;
             TopTools_IndexedMapOfShape originalFaces, disposableFaces;
-            if (!CopyMeasuredBRep(shape, *impl.budget,
+            if (!CopyMeasuredBRep(shape, impl.budget,
                     impl.operationLedger, preCopyCensus, copyPrediction,
                     debugCensusMode, value.brepCensusTicket, value.copier,
                     value.detachedAuthorityShape, originalFaces,
@@ -10740,13 +11125,33 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
                 shape, stageBox, Standard_False, Standard_False);
             if (stageBox.IsVoid() || stageBox.IsWhole()
                 || stageBox.IsOpen()) return false;
-            std::set<std::pair<decal_layer::UUID,
-                               decal_layer::Digest>> seenReceivers;
+            using ReceiverKey = std::pair<decal_layer::UUID,
+                                          decal_layer::Digest>;
+            std::vector<ReceiverKey> seenReceivers;
+            decal_layer::bake::accounting::Ticket seenReceiversTicket;
+            decal_layer::bake::accounting::Ticket receiptProofTicket;
+            if (!ReserveProtectedVector(seenReceivers, seenReceiversTicket,
+                    impl.operationLedger.view(), definition.layers.size(),
+                    decal_layer::bake::accounting::Retention::Scratch,
+                    decal_layer::bake::accounting::FailureSite::ProtectedReceiverStorage)
+                || !ReserveProtectedVector(value.receivers,
+                    value.receiverVectorTicket, impl.operationLedger.view(),
+                    definition.layers.size(),
+                    decal_layer::bake::accounting::Retention::Retained,
+                    decal_layer::bake::accounting::FailureSite::ProtectedReceiverStorage)
+                || !AcquireProtectedStorage(receiptProofTicket,
+                    impl.operationLedger.view(),
+                    decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                    4096U, decal_layer::bake::accounting::Retention::Scratch,
+                    decal_layer::bake::accounting::FailureSite::ProtectedReceiverStorage))
+                return false;
             for (const auto& layer : definition.layers) {
                 const auto receipt = decal_layer::bake::IntentReceipt(layer);
-                if (!seenReceivers.emplace(
-                        receipt.face, receipt.selectorProof).second)
+                const ReceiverKey key{receipt.face, receipt.selectorProof};
+                if (std::find(seenReceivers.begin(), seenReceivers.end(), key)
+                        != seenReceivers.end())
                     continue;
+                seenReceivers.push_back(key);
                 int match = 0;
                 dependent_replay::FaceImageGeometricReceipt matchedReceipt;
                 TopoDS_Face originalFace;
@@ -10756,7 +11161,7 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
                     const auto status = dependent_replay::detail::
                         DeriveFaceImageReceipt(stageBox,
                             TopoDS::Face(originalFaces.FindKey(index)),
-                            impl.metersPerUnit, *impl.budget, derived);
+                            impl.metersPerUnit, impl.budget, derived);
                     if (status == dependent_replay::detail::
                             FaceImageDeriveStatus::Budget)
                         return false;
@@ -10764,7 +11169,10 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
                             FaceImageDeriveStatus::Derived)
                         continue;
                     decal_layer::Digest derivedProof{};
-                    if (!dependent_replay::FaceImageReceiptProof(
+                    if (!impl.operationLedger.enterAllocation(
+                            decal_layer::bake::accounting::FailureSite::
+                                ProtectedReceiverStorage)
+                        || !dependent_replay::FaceImageReceiptProof(
                             derived, derivedProof)) return false;
                     if (derivedProof != receipt.selectorProof) continue;
                     ++match;
@@ -10777,7 +11185,7 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
                 TopoDS_Face resolvedFace;
                 if (dependent_replay::detail::ResolveFaceImageReceipt(
                         shape, matchedReceipt.intent, impl.metersPerUnit,
-                        *impl.budget, resolved, resolvedFace)
+                        impl.budget, resolved, resolvedFace)
                         != retained_face_selector::Refusal::None
                     || !(resolved == matchedReceipt)
                     || !resolvedFace.IsSame(originalFace)) return false;
@@ -10799,7 +11207,21 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
             if (value.receivers.empty())
                 return false;
 
+            decal_layer::bake::accounting::Ticket finishingScratchTicket;
             retained_finishing::producer::Capture finishing;
+            if (!AcquireProtectedStorage(finishingScratchTicket,
+                    impl.operationLedger.view(),
+                    decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                    sizeof(retained_finishing::MaterialResource) + 48U,
+                    decal_layer::bake::accounting::Retention::Scratch,
+                    decal_layer::bake::accounting::FailureSite::ProtectedFinishingStorage)
+                || !AcquireProtectedStorage(value.finishingStorageTicket,
+                    impl.operationLedger.view(),
+                    decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                    sizeof(retained_finishing::MaterialResource),
+                    decal_layer::bake::accounting::Retention::Retained,
+                    decal_layer::bake::accounting::FailureSite::ProtectedFinishingStorage))
+                return false;
             if (!retained_finishing::producer::CaptureSource(
                     document, owner, finishing))
                 return false;
@@ -10807,9 +11229,26 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
             value.savedMember.savedMember.owner = owner;
             value.savedMember.savedMember.source = finishing.source;
             value.savedMember.authority = finishing;
+            std::vector<retained_finishing::MaterialResource>().swap(
+                finishing.resources);
+            finishingScratchTicket.reset();
             value.transientAtlas.document = owner.document;
+            if (!ReserveProtectedVector(value.paintedSources,
+                    value.paintedSourcesTicket, impl.operationLedger.view(),
+                    definition.layers.size(),
+                    decal_layer::bake::accounting::Retention::Retained,
+                    decal_layer::bake::accounting::FailureSite::ProtectedSourceStorage))
+                return false;
             for (const auto& layer : definition.layers) {
                 face_image::ResourceEnvelope envelope;
+                painted_atlas_bake::owner::ResourceReadAdmission resourceRead;
+                if (painted_atlas_bake::owner::PreflightResourceRead(
+                        document, layer.image.resource,
+                        impl.operationLedger.view(), resourceRead)
+                        != painted_atlas_bake::owner::Outcome::Prepared
+                    || !impl.operationLedger.enterAllocation(
+                        decal_layer::bake::accounting::FailureSite::ResourceReadMaterialize))
+                    return false;
                 if (!face_image::owner::ReadResource(
                         document, layer.image.resource, envelope))
                     return false;
@@ -10827,6 +11266,21 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
                 captured.fence.role = layer.image.role;
                 captured.fence.colorSpace = layer.image.colorSpace;
                 captured.envelope = std::move(envelope);
+                if (!resourceRead.selected
+                    || captured.envelope.originalBytes.capacity()
+                        > resourceRead.originalBytes.bytes
+                    || captured.envelope.workingBytes.capacity()
+                        > resourceRead.workingBytes.bytes) {
+                    impl.operationLedger.allocationFailure(
+                        decal_layer::bake::accounting::FailureSite::ResourceReadMaterialize);
+                    return false;
+                }
+                resourceRead.serialization.reset();
+                resourceRead.table.reset();
+                captured.originalBytesTicket =
+                    std::move(resourceRead.originalBytes);
+                captured.workingBytesTicket =
+                    std::move(resourceRead.workingBytes);
                 if (!painted_atlas_bake::Valid(captured.fence))
                     return false;
                 value.paintedSources.push_back(
@@ -10836,10 +11290,40 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
             value.definition = std::move(definition);
             value.canonicalBytes = std::move(canonicalBytes);
             value.source = std::move(source);
+            if (!AcquireProtectedStorage(value.definitionIdentifierTicket,
+                    impl.operationLedger.view(),
+                    decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                    definitionIdentifier.capacity() + 1U,
+                    decal_layer::bake::accounting::Retention::Retained,
+                    decal_layer::bake::accounting::FailureSite::ProtectedOwnerStorage))
+                return false;
             value.definitionIdentifier = definitionIdentifier;
             impl.owners.push_back(std::move(value));
         }
         if (cancelled()) return false;
+#ifdef DEBUG
+        if (debugProtectedCaptureMode == 1) {
+            DebugProtectedCaptureObservation observation;
+            observation.observed = true;
+            observation.completed = true;
+            observation.firstFailure = std::size_t(
+                impl.operationLedger.firstFailureSite());
+            observation.ownerCount = impl.owners.size();
+            for (const auto& owner : impl.owners) {
+                observation.receiverCount += owner.receivers.size();
+                observation.sourceCount += owner.paintedSources.size();
+                observation.canonicalBytes += owner.canonicalBytes.size();
+                for (const auto& source : owner.paintedSources) {
+                    observation.resourceBytes +=
+                        source.envelope.originalBytes.size();
+                    observation.resourceBytes +=
+                        source.envelope.workingBytes.size();
+                }
+            }
+            observation.liveBytes = impl.operationLedger.totalLive();
+            RecordDebugProtectedCapture(observation);
+        }
+#endif
         capture = std::move(candidate);
         return true;
     } catch (...) {
@@ -10889,7 +11373,7 @@ bool OcctSceneSnapshotBuilder::FinalizePrivateExportDecals(
                 || canonical != owner.canonicalBytes
                 || !(observed.owner == owner.definition.owner)
                 || !decal_layer::source::CaptureSource(
-                    impl.privateDocument, owner.owner, *impl.budget,
+                    impl.privateDocument, owner.owner, impl.budget,
                     cancelled, source)
                 || !decal_layer::source::ExactMatch(owner.definition, source)
                 || source.sourceProof != owner.source.sourceProof)
