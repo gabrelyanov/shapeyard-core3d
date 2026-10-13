@@ -91,6 +91,12 @@ __attribute__((objc_subclassing_restricted))
 - (Core3DAuthoredParameterOpening *_Nullable)openAuthoredParameterForEntityIdentifier:
     (NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(openAuthoredParameter(entityIdentifier:expected:));
+//! Read the complete analytic Boolean value carried by this exact opening.
+//! Descriptive values do not carry authority; the opening remains required for
+//! Apply and is revalidated against the owning host, scene and selection here.
+- (Core3DPartBooleanValues *_Nullable)describeAuthoredBooleanParameterOpening:
+    (Core3DAuthoredParameterOpening *)opening expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(describeAuthoredBooleanParameter(_:expected:));
 //! Host-mediated prepare prevents a handle issued by another live document
 //! from being used. N0 has no registered capability, so all well-formed kinds
 //! return unsupportedCapability without opening a transaction.

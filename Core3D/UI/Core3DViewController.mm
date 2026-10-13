@@ -68,6 +68,7 @@
 #import "GLViewController.h"
 #import "GLView.h"
 #import "Core3DViewController.h"
+#import "Core3DAuthoredParameterOpening.h"
 #import <objc/runtime.h>
 #import "Core3DViewController+AvailabilityManager.h"
 #import "Core3DViewController+PrimitiveManager.h"
@@ -19684,17 +19685,19 @@ static bool Core3DPublishCommittedSpatialSweep(
 }
 
 - (Core3DPartBooleanValues *)partBooleanEditorValuesForEntityIdentifier:(NSString *)entityIdentifier {
-    using namespace core3d::part_boolean::family_admission;
-    const bool routeInstalled=(AnalyticNativeAdmissionEnabled&&AnalyticBooleanRouteInstalled)
-        ||(NativeAdmissionEnabled&&BooleanRouteInstalled);
     if (![NSThread isMainThread] || !_isSetuped || _isLoading.load()
-        || !OwnerInstalled || !RetainedInputsPersistenceInstalled || !OperandEditorInstalled
-        || !routeInstalled
         || ![entityIdentifier isKindOfClass:NSString.class] || entityIdentifier.length==0
         || entityIdentifier.length>128 || !entityIdentifier.UTF8String
         || GLController==nil || GLController.viewer==nullptr
         || !GLController.viewer->canBeginCommittedEdit()) return nil;
-    return [self core3d_partBooleanEditorValuesForEntityIdentifier:entityIdentifier];
+    Core3DSceneSnapshot *expected=[self captureSceneSnapshot];
+    Core3DAuthoredParameterOpening *opening=expected
+        ? [self openAuthoredParameterForEntityIdentifier:entityIdentifier expected:expected] : nil;
+    if (!opening) return nil;
+    Core3DPartBooleanValues *values=[self describeAuthoredBooleanParameterOpening:opening
+        expected:expected];
+    const BOOL released=[self cancelAuthoredParameterOpening:opening];
+    return released ? values : nil;
 }
 
 #if DEBUG

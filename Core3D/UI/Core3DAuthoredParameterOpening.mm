@@ -111,6 +111,42 @@ NSString *LoftStatusCode(core3d::authored_loft::Status status) {
     }
 }
 
+Core3DPartBooleanValues *BooleanPublicValues(
+    const core3d::part_boolean::AnalyticDefinition& definition) {
+    NSMutableArray<Core3DPartBooleanInputValues *> *inputs =
+        [NSMutableArray arrayWithCapacity:2];
+    for (std::size_t index = 0; index < 2; ++index) {
+        const auto& value = definition.inputs[index];
+        const double mm = value.metersPerUnit * 1000.0;
+        if (!std::isfinite(mm) || mm <= 0) return nil;
+        NSString *name = [[NSString alloc] initWithBytes:value.originalName.data()
+            length:value.originalName.size() encoding:NSUTF8StringEncoding];
+        Core3DPartBooleanInputValues *input = [[Core3DPartBooleanInputValues alloc]
+            initWithRole:index == 0 ? @"left" : @"right" name:name ?: @""
+            dimensionsMM:simd_make_double3(value.dimensions[0] * mm,
+                value.dimensions[1] * mm, value.dimensions[2] * mm)
+            translationMM:simd_make_double3(value.translation[0] * mm,
+                value.translation[1] * mm, value.translation[2] * mm)
+            rotationXYZW:simd_make_double4(value.rotationXYZW[0], value.rotationXYZW[1],
+                value.rotationXYZW[2], value.rotationXYZW[3])
+            metersPerUnit:value.metersPerUnit
+            baseColorSRGB:simd_make_double3(value.originalMaterial.baseColorSRGB[0],
+                value.originalMaterial.baseColorSRGB[1], value.originalMaterial.baseColorSRGB[2])
+            metallic:value.originalMaterial.metallic roughness:value.originalMaterial.roughness];
+        if (!input) return nil;
+        [inputs addObject:input];
+    }
+    return [[Core3DPartBooleanValues alloc] initWithOperation:
+        static_cast<Core3DPartBooleanOperation>(definition.operation) inputs:inputs];
+}
+
+double NativeLength(double publicValue, double original, double mm) noexcept {
+    // A value returned by BooleanPublicValues is an immutable native original.
+    // Preserve it instead of dividing the presentation value back into native
+    // units, including the sign bit of zero.
+    return publicValue == original * mm ? original : publicValue / mm;
+}
+
 bool BooleanRequest(const core3d::part_boolean::AnalyticDefinition& original,
                     Core3DPartBooleanValues *values,
                     core3d::part_boolean::AnalyticDefinition& requested) noexcept {
@@ -139,12 +175,12 @@ bool BooleanRequest(const core3d::part_boolean::AnalyticDefinition& original,
             const double mm = before.metersPerUnit * 1000.0;
             if (!std::isfinite(mm) || mm <= 0) return false;
             auto& after = requested.inputs[index];
-            after.dimensions = {input.dimensionsMM.x / mm,
-                                input.dimensionsMM.y / mm,
-                                input.dimensionsMM.z / mm};
-            after.translation = {input.translationMM.x / mm,
-                                 input.translationMM.y / mm,
-                                 input.translationMM.z / mm};
+            after.dimensions = {NativeLength(input.dimensionsMM.x, before.dimensions[0], mm),
+                                NativeLength(input.dimensionsMM.y, before.dimensions[1], mm),
+                                NativeLength(input.dimensionsMM.z, before.dimensions[2], mm)};
+            after.translation = {NativeLength(input.translationMM.x, before.translation[0], mm),
+                                 NativeLength(input.translationMM.y, before.translation[1], mm),
+                                 NativeLength(input.translationMM.z, before.translation[2], mm)};
             after.rotationXYZW = {input.rotationXYZW.x, input.rotationXYZW.y,
                                   input.rotationXYZW.z, input.rotationXYZW.w};
         }
@@ -296,6 +332,29 @@ bool BooleanRequest(const core3d::part_boolean::AnalyticDefinition& original,
     core3d::authored_parameter::Mutation mutation;
     mutation.capability = static_cast<core3d::authored_parameter::Capability>(mutationKind);
     return PublicResult(opening->_nativeOwner->prepare(mutation));
+}
+
+- (Core3DPartBooleanValues *)describeAuthoredBooleanParameterOpening:
+    (Core3DAuthoredParameterOpening *)opening expected:(Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread]
+        || ![opening isKindOfClass:Core3DAuthoredParameterOpening.class]
+        || !opening->_nativeOwner
+        || ![expected isKindOfClass:Core3DSceneSnapshot.class]) return nil;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) document = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        Core3DSceneSnapshot *current = [self captureSceneSnapshot];
+        if (!viewer || !opening->_nativeOwner->belongsTo(document)
+            || opening->_nativeOwner->currentness()
+                != core3d::authored_parameter::Currentness::Current
+            || !SameExpectedScene(expected, current, opening.entityIdentifier)) return nil;
+        core3d::part_boolean::AnalyticDefinition definition;
+        return opening->_nativeOwner->describeBoolean(definition)
+            ? BooleanPublicValues(definition) : nil;
+    } catch (...) { return nil; }
 }
 
 - (BOOL)cancelAuthoredParameterOpening:(Core3DAuthoredParameterOpening *)opening {
