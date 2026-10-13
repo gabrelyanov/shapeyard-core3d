@@ -20,7 +20,7 @@
 //
 // This header is deliberately not a framework-exported header and has no PBX
 // entry; it is included explicitly by the DEBUG qualification probe.
-#include "../OCCTKit/PartBooleanCorrespondence.hxx"
+#include "../OCCTKit/PartBooleanAnalyticPlacementProof.hxx"
 
 #include <atomic>
 #include <cstdint>
@@ -53,6 +53,25 @@ struct DetachedReplay final {
     bool proven() const noexcept {
         return status == ReplayStatus::Completed && production.complete
             && proof.proven() && fixedPoint.fixedPoint();
+    }
+};
+
+// Additive authored-owner replay.  Existing ReplayCounted callers keep the
+// exact legacy identity-only contract above; only the retained authored owner
+// opts into this result, whose proof branch is explicit and fail-closed.
+struct AuthoredReplay final {
+    build::AnalyticBuild production;
+    correspondence::AnalyticProof identityProof;
+    core3d::part_boolean::analytic_placement_proof::Proof rotationProof;
+    rebuild::AnalyticFixedPointEvidence fixedPoint;
+    ReplayStatus status = ReplayStatus::Completed;
+    bool usedRotationProof = false;
+    std::uint64_t chargeEventsAtStop = 0;
+    bool proven() const noexcept {
+        const bool correspondenceProven = usedRotationProof
+            ? rotationProof.proven() : identityProof.proven();
+        return status == ReplayStatus::Completed && production.complete
+            && correspondenceProven && fixedPoint.fixedPoint();
     }
 };
 
@@ -107,6 +126,71 @@ inline DetachedReplay ReplayCounted(
         walk = correspondence::ProveAnalyticCounted(definition,
             replay.production, carrierMetersPerUnit, budget, cancelled,
             replay.proof);
+        if (walk != tb::WalkStatus::Completed) {
+            replay.status = StatusFromWalk(walk);
+            recordStop();
+            return replay;
+        }
+        walk = rebuild::CheckAnalyticCounted(definition, carrierMetersPerUnit,
+            captured, budget, cancelled, replay.fixedPoint);
+        if (walk != tb::WalkStatus::Completed) {
+            replay.status = StatusFromWalk(walk);
+            recordStop();
+            return replay;
+        }
+        return replay;
+    } catch (...) {
+        replay = {};
+        replay.status = ReplayStatus::Failed;
+        return replay;
+    }
+}
+
+// Retained authored replay with nonidentity placement qualification.  An exact
+// identity pair stays on the original correspondence proof.  Every other stored
+// quaternion must earn all conjuncts of the N1 oracle through its counted
+// facade; a valid-looking quaternion or a failed rotation proof never falls
+// back to the identity proof.
+inline AuthoredReplay ReplayAuthoredCounted(
+    const core3d::part_boolean::AnalyticDefinition& definition,
+    double carrierMetersPerUnit,
+    const rpb::OperandReadSet& captured,
+    const rpb::OperandReadSet& current,
+    tb::Counter& budget, const std::atomic_bool& cancelled) noexcept {
+    AuthoredReplay replay;
+    const auto recordStop = [&]() {
+#if DEBUG
+        replay.chargeEventsAtStop = budget.chargeEvents;
+#endif
+    };
+    try {
+        if (cancelled.load()) {
+            replay.status = ReplayStatus::Cancelled;
+            replay.production.candidate.refusal = rpb::Refusal::Cancelled;
+            recordStop();
+            return replay;
+        }
+        tb::WalkStatus walk = build::BuildAnalyticCounted(definition,
+            carrierMetersPerUnit, captured, current, budget, cancelled,
+            replay.production);
+        if (walk != tb::WalkStatus::Completed) {
+            replay.status = StatusFromWalk(walk);
+            recordStop();
+            return replay;
+        }
+        if (!replay.production.complete) return replay;
+        static constexpr std::array<double, 4> Identity{{0, 0, 0, 1}};
+        replay.usedRotationProof = definition.inputs[0].rotationXYZW != Identity
+            || definition.inputs[1].rotationXYZW != Identity;
+        if (replay.usedRotationProof) {
+            walk = core3d::part_boolean::analytic_placement_proof::ProveCounted(
+                definition, replay.production, carrierMetersPerUnit, budget,
+                cancelled, replay.rotationProof);
+        } else {
+            walk = correspondence::ProveAnalyticCounted(definition,
+                replay.production, carrierMetersPerUnit, budget, cancelled,
+                replay.identityProof);
+        }
         if (walk != tb::WalkStatus::Completed) {
             replay.status = StatusFromWalk(walk);
             recordStop();

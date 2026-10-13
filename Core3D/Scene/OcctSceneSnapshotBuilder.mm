@@ -129,6 +129,7 @@
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Iterator.hxx>
 #include <TopoDS_Vertex.hxx>
+#include <TopoDS_Wire.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ColorTool.hxx>
 #include <XCAFDoc_LayerTool.hxx>
@@ -138,6 +139,8 @@
 #include <XCAFPrs_DocumentExplorer.hxx>
 #include <V3d_View.hxx>
 #include <gp_Ax1.hxx>
+#include <gp_Ax2.hxx>
+#include <gp_Ax3.hxx>
 #include <gp_Dir2d.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
@@ -5906,6 +5909,10 @@ public:
 private:
     bool SameKeyOrdinals(std::size_t first, std::size_t second,
                          bool& same) const noexcept {
+        same = false;
+        if (first >= extent_ || second >= extent_) return false;
+        if (entries_[first].shape.TShape().get()
+            != entries_[second].shape.TShape().get()) return true;
         const BRepCensusOccurrenceWord left(*root_, first);
         const BRepCensusOccurrenceWord right(*root_, second);
         return BRepCensusSameReducedWord(left, right, same);
@@ -8209,7 +8216,7 @@ private:
 };
 }
 
-std::array<std::size_t, 44> DebugE4BRepKnownRepresentationSizes() noexcept {
+std::array<std::size_t, 51> DebugE4BRepKnownRepresentationSizes() noexcept {
     return {{
         sizeof(Standard_Real), sizeof(Standard_Integer), sizeof(void*),
         sizeof(NCollection_ListNode*), sizeof(gp_Pnt), sizeof(gp_Pnt2d),
@@ -8234,6 +8241,10 @@ std::array<std::size_t, 44> DebugE4BRepKnownRepresentationSizes() noexcept {
         sizeof(BRepAdaptor_Surface), sizeof(Poly_TriangulationParameters),
         sizeof(TopLoc_SListNodeOfItemLocation), sizeof(TopLoc_Datum3D),
         BRepCensusOccurrenceMap::EntrySize(), sizeof(BRepCensusOccurrenceMap),
+        sizeof(BRep_TVertex), sizeof(BRep_CurveOnClosedSurface),
+        sizeof(BRep_PolygonOnClosedTriangulation),
+        sizeof(Geom_CylindricalSurface), sizeof(Geom_Circle),
+        sizeof(Geom_Line), sizeof(Geom2d_Line),
     }};
 }
 
@@ -8330,9 +8341,987 @@ DebugExerciseE4BRepReducedWordEvaluator() noexcept {
     return results;
 }
 
-std::array<std::array<std::size_t, 32>, 4>
+bool DebugBRepCensusFullLedgerSealed(
+    const BRepRepresentationCensus& census) noexcept {
+    std::size_t total = 0;
+    return BRepCensusAdd(total, census.tShapes)
+        && BRepCensusAdd(total, census.listNodes)
+        && BRepCensusAdd(total, census.locations)
+        && BRepCensusAdd(total, census.representations)
+        && BRepCensusAdd(total, census.geometry)
+        && BRepCensusAdd(total, census.meshLogical)
+        && BRepCensusAdd(total, census.polygonStorage)
+        && BRepCensusAdd(total, census.harrayStorage)
+        && total == census.total
+        && census.meshLogical == census.meshPhysical;
+}
+
+bool DebugBRepCensusSameFullLedger(
+    const BRepRepresentationCensus& expected,
+    const BRepRepresentationCensus& actual) noexcept {
+    return expected.total == actual.total
+        && expected.tShapes == actual.tShapes
+        && expected.listNodes == actual.listNodes
+        && expected.locations == actual.locations
+        && expected.locationNodes == actual.locationNodes
+        && expected.locationDatums == actual.locationDatums
+        && expected.representations == actual.representations
+        && expected.geometry == actual.geometry
+        && expected.meshLogical == actual.meshLogical
+        && expected.meshPhysical == actual.meshPhysical
+        && expected.meshNodes == actual.meshNodes
+        && expected.meshTriangles == actual.meshTriangles
+        && expected.meshUVNodes == actual.meshUVNodes
+        && expected.meshNormals == actual.meshNormals
+        && expected.polygonStorage == actual.polygonStorage
+        && expected.harrayStorage == actual.harrayStorage
+        && expected.topologyCount == actual.topologyCount
+        && expected.faceCount == actual.faceCount;
+}
+
+bool DebugBRepCensusShapeIncidence(const TopoDS_Shape& shape) noexcept {
+    std::size_t faceCount = 0;
+    for (TopExp_Explorer faceExplorer(shape, TopAbs_FACE);
+         faceExplorer.More(); faceExplorer.Next()) {
+        ++faceCount;
+        const TopoDS_Face face = TopoDS::Face(faceExplorer.Current());
+        TopLoc_Location meshLocation;
+        const Handle(Poly_Triangulation) mesh =
+            BRep_Tool::Triangulation(face, meshLocation);
+        if (mesh.IsNull()) return false;
+        std::size_t edgeCount = 0;
+        for (TopExp_Explorer edgeExplorer(face, TopAbs_EDGE);
+             edgeExplorer.More(); edgeExplorer.Next()) {
+            ++edgeCount;
+            const TopoDS_Edge edge = TopoDS::Edge(edgeExplorer.Current());
+            Standard_Real first = 0.0, last = 0.0;
+            if (BRep_Tool::CurveOnSurface(edge, face, first, last).IsNull()
+                || BRep_Tool::PolygonOnTriangulation(
+                    edge, mesh, meshLocation).IsNull()) return false;
+        }
+        if (edgeCount == 0) return false;
+    }
+    return faceCount != 0;
+}
+
+struct DebugCylinderWitness final {
+    TopoDS_Compound root;
+    TopoDS_Face face;
+    TopoDS_Wire wire;
+    std::array<TopoDS_Edge, 4> edges;
+    std::array<TopoDS_Vertex, 4> vertices;
+    Handle(Geom_CylindricalSurface) surface;
+    Handle(Poly_Triangulation) mesh;
+};
+
+// D791 Constructor:45-208. The order of every Add and every fresh
+// A.Inverted() call is part of the source-event oracle.
+DebugCylinderWitness DebugBuildCylinderWitness(
+    double metersPerUnit, bool seam) {
+    const double s = 0.001 / metersPerUnit;
+    const double pi = std::acos(-1.0), radius = 3 * s, height = 4 * s;
+    const double endU = seam ? 2 * pi : pi;
+    const int segments = seam ? 4 : 2, ring = segments + 1;
+    const double tolerance = Precision::Confusion();
+    BRep_Builder builder;
+    DebugCylinderWitness out;
+
+    gp_Trsf to, ta;
+    to.SetTranslation(gp_Vec(3 * s, 0, 0));
+    ta.SetTranslation(gp_Vec(0, 2 * s, 0));
+    const Handle(TopLoc_Datum3D) od = new TopLoc_Datum3D(to);
+    const Handle(TopLoc_Datum3D) ad = new TopLoc_Datum3D(ta);
+    const TopLoc_Location locationO(od), locationA(ad), identity;
+
+    out.surface = new Geom_CylindricalSurface(
+        gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0)),
+        radius);
+    out.mesh = new Poly_Triangulation(
+        2 * ring, 2 * segments, Standard_True, Standard_False);
+    for (int level = 0; level < 2; ++level) {
+        for (int column = 0; column < ring; ++column) {
+            const double u = endU * column / segments;
+            const double v = height * level;
+            gp_Pnt point(radius * std::cos(u), radius * std::sin(u), v);
+            if (seam && column == segments)
+                point = gp_Pnt(radius, 0, v);
+            const int index = 1 + level * ring + column;
+            out.mesh->SetNode(index, point);
+            out.mesh->SetUVNode(index, gp_Pnt2d(u, v));
+        }
+    }
+    for (int column = 0; column < segments; ++column) {
+        const int lower = 1 + column, upper = 1 + column + ring;
+        out.mesh->SetTriangle(2 * column + 1,
+            Poly_Triangle(lower, lower + 1, upper + 1));
+        out.mesh->SetTriangle(2 * column + 2,
+            Poly_Triangle(lower, upper + 1, upper));
+    }
+    const double deflection =
+        radius * (1 - std::cos(endU / (2 * segments)));
+    out.mesh->Deflection(deflection);
+    builder.MakeFace(out.face, out.surface, identity, tolerance);
+    builder.UpdateFace(out.face, out.mesh, Standard_True);
+
+    const auto edgePoint = [&](const gp_Pnt& point) {
+        return gp_Pnt(point.X(), point.Y() - 2 * s, point.Z());
+    };
+    if (seam) {
+        builder.MakeVertex(
+            out.vertices[0], edgePoint(out.mesh->Node(1)), tolerance);
+        builder.MakeVertex(
+            out.vertices[1], edgePoint(out.mesh->Node(ring + 1)), tolerance);
+    } else {
+        builder.MakeVertex(
+            out.vertices[0], edgePoint(out.mesh->Node(1)), tolerance);
+        builder.MakeVertex(
+            out.vertices[1], edgePoint(out.mesh->Node(ring)), tolerance);
+        builder.MakeVertex(
+            out.vertices[2], edgePoint(out.mesh->Node(ring + 1)), tolerance);
+        builder.MakeVertex(
+            out.vertices[3], edgePoint(out.mesh->Node(2 * ring)), tolerance);
+    }
+    const auto makeEdge = [&](int index, const Handle(Geom_Curve)& curve,
+                              int firstVertex, int lastVertex) {
+        builder.MakeEdge(out.edges[index], curve, identity, tolerance);
+        builder.Add(out.edges[index],
+            out.vertices[firstVertex].Oriented(TopAbs_FORWARD));
+        builder.Add(out.edges[index],
+            out.vertices[lastVertex].Oriented(TopAbs_REVERSED));
+    };
+    const auto circle = [&](double z) -> Handle(Geom_Curve) {
+        return new Geom_Circle(gp_Ax2(gp_Pnt(0, -2 * s, z),
+            gp_Dir(0, 0, 1), gp_Dir(1, 0, 0)), radius);
+    };
+    const auto generator = [&](int node) -> Handle(Geom_Curve) {
+        return new Geom_Line(gp_Ax1(
+            edgePoint(out.mesh->Node(node)), gp_Dir(0, 0, 1)));
+    };
+    makeEdge(0, circle(0), 0, seam ? 0 : 1);
+    makeEdge(1, generator(ring), seam ? 0 : 1, seam ? 1 : 3);
+    makeEdge(2, circle(height), seam ? 1 : 2, seam ? 1 : 3);
+    if (!seam) makeEdge(3, generator(1), 0, 2);
+
+    builder.UpdateEdge(out.edges[0],
+        new Geom2d_Line(gp_Pnt2d(0, 0), gp_Dir2d(1, 0)), out.surface,
+        locationA.Inverted(), tolerance);
+    if (seam) {
+        builder.UpdateEdge(out.edges[1],
+            new Geom2d_Line(gp_Pnt2d(endU, 0), gp_Dir2d(0, 1)),
+            new Geom2d_Line(gp_Pnt2d(0, 0), gp_Dir2d(0, 1)),
+            out.surface, locationA.Inverted(), tolerance);
+    } else {
+        builder.UpdateEdge(out.edges[1],
+            new Geom2d_Line(gp_Pnt2d(endU, 0), gp_Dir2d(0, 1)),
+            out.surface, locationA.Inverted(), tolerance);
+    }
+    builder.UpdateEdge(out.edges[2],
+        new Geom2d_Line(gp_Pnt2d(0, height), gp_Dir2d(1, 0)), out.surface,
+        locationA.Inverted(), tolerance);
+    if (!seam)
+        builder.UpdateEdge(out.edges[3],
+            new Geom2d_Line(gp_Pnt2d(0, 0), gp_Dir2d(0, 1)), out.surface,
+            locationA.Inverted(), tolerance);
+
+    const auto indices = [&](bool top) {
+        TColStd_Array1OfInteger values(1, ring);
+        for (int index = 1; index <= ring; ++index)
+            values(index) = (top ? ring : 0) + index;
+        return values;
+    };
+    const auto sideIndices = [&](bool right) {
+        TColStd_Array1OfInteger values(1, 2);
+        values(1) = right ? ring : 1;
+        values(2) = values(1) + ring;
+        return values;
+    };
+    const auto polygonOnMesh = [&](const TColStd_Array1OfInteger& values) {
+        Handle(Poly_PolygonOnTriangulation) polygon =
+            new Poly_PolygonOnTriangulation(values);
+        polygon->Deflection(deflection);
+        return polygon;
+    };
+    const auto polygon3d = [&](int edge,
+                               const TColStd_Array1OfInteger& values) {
+        TColgp_Array1OfPnt points(1, values.Length());
+        for (int index = 1; index <= values.Length(); ++index)
+            points(index) = edgePoint(out.mesh->Node(values(index)));
+        Handle(Poly_Polygon3D) polygon = new Poly_Polygon3D(points);
+        polygon->Deflection(deflection);
+        builder.UpdateEdge(out.edges[edge], polygon, identity);
+    };
+    const auto bottom = indices(false), top = indices(true);
+    const auto right = sideIndices(true), left = sideIndices(false);
+    polygon3d(0, bottom);
+    polygon3d(1, right);
+    polygon3d(2, top);
+    if (!seam) polygon3d(3, left);
+    builder.UpdateEdge(out.edges[0], polygonOnMesh(bottom), out.mesh,
+        locationA.Inverted());
+    if (seam) {
+        builder.UpdateEdge(out.edges[1], polygonOnMesh(right),
+            polygonOnMesh(left), out.mesh, locationA.Inverted());
+    } else {
+        builder.UpdateEdge(out.edges[1], polygonOnMesh(right), out.mesh,
+            locationA.Inverted());
+    }
+    builder.UpdateEdge(out.edges[2], polygonOnMesh(top), out.mesh,
+        locationA.Inverted());
+    if (!seam)
+        builder.UpdateEdge(out.edges[3], polygonOnMesh(left), out.mesh,
+            locationA.Inverted());
+
+    for (int index = 0; index < (seam ? 3 : 4); ++index) {
+        builder.Range(out.edges[index], 0,
+            (index == 0 || index == 2) ? endU : height, Standard_False);
+        builder.SameRange(out.edges[index], Standard_True);
+        builder.SameParameter(out.edges[index], Standard_True);
+    }
+    out.edges[0].Closed(seam);
+    out.edges[2].Closed(seam);
+    builder.MakeWire(out.wire);
+    builder.Add(out.wire, out.edges[0].Oriented(TopAbs_FORWARD));
+    builder.Add(out.wire, out.edges[1].Oriented(TopAbs_FORWARD));
+    builder.Add(out.wire, out.edges[2].Oriented(TopAbs_REVERSED));
+    builder.Add(out.wire,
+        out.edges[seam ? 1 : 3].Oriented(TopAbs_REVERSED));
+    out.wire.Closed(Standard_True);
+    out.wire.Location(locationA);
+    builder.Add(out.face, out.wire);
+    out.face.Location(locationO);
+    builder.MakeCompound(out.root);
+    builder.Add(out.root, out.face);
+    return out;
+}
+
+DebugCylinderWitness DebugBuildRealTwoUseSeam(double metersPerUnit) {
+    return DebugBuildCylinderWitness(metersPerUnit, true);
+}
+
+DebugCylinderWitness DebugBuildNonSeamControl(double metersPerUnit) {
+    return DebugBuildCylinderWitness(metersPerUnit, false);
+}
+
+bool DebugCylinderExpectedLedger(
+    bool seam, bool finalGraph, BRepRepresentationCensus& result) noexcept {
+    result = {};
+    const std::size_t edges = seam ? 3U : 4U;
+    const std::size_t vertices = seam ? 2U : 4U;
+    const std::size_t meshNodes = seam ? 10U : 6U;
+    const std::size_t triangles = seam ? 8U : 4U;
+    const std::size_t polygonPoints = seam ? 12U : 10U;
+    const std::size_t polygonIndices = seam ? 14U : 10U;
+    const std::size_t ordinaryWrappers = seam ? 2U : 4U;
+    const std::size_t closedWrappers = seam ? 1U : 0U;
+    const auto product = [](std::size_t count, std::size_t size,
+                            std::size_t& bytes) noexcept {
+        return BRepCensusProduct(count, size, bytes);
+    };
+    const auto addCounted = [&](std::size_t& term, std::size_t count,
+                                std::size_t size) noexcept {
+        std::size_t bytes = 0;
+        return product(count, size, bytes)
+            && BRepCensusTerm(result, term, bytes);
+    };
+    if (!addCounted(result.tShapes, 1, sizeof(TopoDS_TCompound))
+        || !addCounted(result.tShapes, 1, sizeof(BRep_TFace))
+        || !addCounted(result.tShapes, 1, sizeof(TopoDS_TWire))
+        || !addCounted(result.tShapes, edges, sizeof(BRep_TEdge))
+        || !addCounted(result.tShapes, vertices, sizeof(BRep_TVertex))
+        || !addCounted(result.listNodes, seam ? 12U : 14U,
+            sizeof(NCollection_TListNode<TopoDS_Shape>))
+        || !addCounted(result.listNodes, seam ? 12U : 16U,
+            sizeof(NCollection_TListNode<Handle(BRep_CurveRepresentation)>))
+        || !addCounted(result.listNodes, 1,
+            sizeof(NCollection_TListNode<Handle(Poly_Triangulation)>)))
+        return false;
+    const std::size_t nodeCount = finalGraph
+        ? 2U + 6U * edges : 2U + 2U * edges;
+    if (!product(nodeCount, sizeof(TopLoc_SListNodeOfItemLocation),
+            result.locationNodes)
+        || !product(2, sizeof(TopLoc_Datum3D), result.locationDatums)
+        || !BRepCensusTerm(result, result.locations, result.locationNodes)
+        || !BRepCensusTerm(result, result.locations, result.locationDatums)
+        || !addCounted(result.representations, edges, sizeof(BRep_Curve3D))
+        || !addCounted(result.representations, edges, sizeof(BRep_Polygon3D))
+        || !addCounted(result.representations, ordinaryWrappers,
+            sizeof(BRep_CurveOnSurface))
+        || !addCounted(result.representations, closedWrappers,
+            sizeof(BRep_CurveOnClosedSurface))
+        || !addCounted(result.representations, ordinaryWrappers,
+            sizeof(BRep_PolygonOnTriangulation))
+        || !addCounted(result.representations, closedWrappers,
+            sizeof(BRep_PolygonOnClosedTriangulation))
+        || !addCounted(result.representations, 1,
+            sizeof(Poly_Triangulation))
+        || !addCounted(result.representations, 1,
+            sizeof(BRepBuilderAPI_Copy))
+        || !addCounted(result.geometry, 1,
+            sizeof(Geom_CylindricalSurface))
+        || !addCounted(result.geometry, 2, sizeof(Geom_Circle))
+        || !addCounted(result.geometry, seam ? 1U : 2U,
+            sizeof(Geom_Line))
+        || !addCounted(result.geometry, 4, sizeof(Geom2d_Line)))
+        return false;
+    if (!product(meshNodes, sizeof(gp_Pnt), result.meshNodes)
+        || !product(triangles, sizeof(Poly_Triangle), result.meshTriangles)
+        || !product(meshNodes, sizeof(gp_Pnt2d), result.meshUVNodes))
+        return false;
+    result.meshNormals = 0;
+    std::size_t meshBytes = result.meshNodes;
+    if (!BRepCensusAdd(meshBytes, result.meshTriangles)
+        || !BRepCensusAdd(meshBytes, result.meshUVNodes)
+        || !BRepCensusTerm(result, result.meshLogical, meshBytes)) return false;
+    result.meshPhysical = meshBytes;
+    std::size_t polygon3dPayload = 0, polygonOnMeshPayload = 0;
+    if (!product(polygonPoints, sizeof(gp_Pnt), polygon3dPayload)
+        || !product(polygonIndices, sizeof(Standard_Integer),
+            polygonOnMeshPayload)
+        || !addCounted(result.polygonStorage, edges,
+            sizeof(Poly_Polygon3D))
+        || !BRepCensusTerm(
+            result, result.polygonStorage, polygon3dPayload)
+        || !addCounted(result.polygonStorage, seam ? 4U : 4U,
+            sizeof(Poly_PolygonOnTriangulation))
+        || !BRepCensusTerm(
+            result, result.polygonStorage, polygonOnMeshPayload)) return false;
+    result.topologyCount = seam ? 8U : 11U;
+    result.faceCount = 1;
+    return DebugBRepCensusFullLedgerSealed(result);
+}
+
+struct DebugCylinderGraphObservation final {
+    std::size_t rawOccurrences = 0;
+    std::size_t distinctEdges = 0;
+    std::size_t distinctVertices = 0;
+    std::size_t wireEdgeUses = 0;
+    std::size_t targetEdgeUses = 0;
+    std::size_t rims = 0;
+    std::size_t storedVertexUses = 0;
+    std::size_t pcurveMembers = 0;
+    std::size_t polygonOnMeshMembers = 0;
+    std::size_t closedPCurveWrappers = 0;
+    std::size_t closedPolygonWrappers = 0;
+    std::size_t polygon3dObjects = 0;
+    std::size_t polygon3dPoints = 0;
+    std::size_t polygonOnMeshObjects = 0;
+    std::size_t polygonOnMeshIndices = 0;
+    std::size_t meshNodes = 0;
+    std::size_t meshTriangles = 0;
+    std::size_t meshUVNodes = 0;
+    bool childOrderPassed = false;
+    bool endpointsPassed = false;
+    bool rimsPassed = false;
+    bool allBoundariesPassed = true;
+    bool selectedMembersDistinct = false;
+    const void* targetEdgeKey = nullptr;
+    const void* selectedPCurves[2]{};
+    const void* selectedPolygons[2]{};
+    const void* mesh = nullptr;
+    bool passed = false;
+};
+
+DebugCylinderGraphObservation DebugObserveCylinderGraph(
+    const TopoDS_Shape& root, bool seam, double metersPerUnit) {
+    DebugCylinderGraphObservation result;
+    if (root.IsNull() || root.ShapeType() != TopAbs_COMPOUND
+        || !BRepCensusCountOccurrences(root, result.rawOccurrences))
+        return result;
+    TopExp_Explorer faceExplorer(root, TopAbs_FACE);
+    if (!faceExplorer.More()) return result;
+    const TopoDS_Face face = TopoDS::Face(faceExplorer.Current());
+    faceExplorer.Next();
+    if (faceExplorer.More()) return result;
+    TopoDS_Iterator faceChildren(face, Standard_False, Standard_False);
+    if (!faceChildren.More()
+        || faceChildren.Value().ShapeType() != TopAbs_WIRE) return result;
+    const TopoDS_Wire wire = TopoDS::Wire(faceChildren.Value());
+    faceChildren.Next();
+    if (faceChildren.More()) return result;
+    std::array<TopoDS_Edge, 4> rawUses;
+    for (TopoDS_Iterator edgeIterator(wire, Standard_False, Standard_False);
+         edgeIterator.More(); edgeIterator.Next()) {
+        if (result.wireEdgeUses >= rawUses.size()
+            || edgeIterator.Value().ShapeType() != TopAbs_EDGE) return result;
+        rawUses[result.wireEdgeUses++] = TopoDS::Edge(edgeIterator.Value());
+    }
+    if (result.wireEdgeUses != 4) return result;
+    const std::array<TopAbs_Orientation, 4> expectedOrientations{{
+        TopAbs_FORWARD, TopAbs_FORWARD, TopAbs_REVERSED, TopAbs_REVERSED,
+    }};
+    result.childOrderPassed = true;
+    for (std::size_t index = 0; index < rawUses.size(); ++index)
+        result.childOrderPassed = result.childOrderPassed
+            && rawUses[index].Orientation() == expectedOrientations[index];
+    result.childOrderPassed = result.childOrderPassed
+        && rawUses[0].TShape().get() != rawUses[1].TShape().get()
+        && rawUses[1].TShape().get() != rawUses[2].TShape().get()
+        && rawUses[0].TShape().get() != rawUses[2].TShape().get()
+        && (seam
+            ? rawUses[1].TShape().get() == rawUses[3].TShape().get()
+            : rawUses[0].TShape().get() != rawUses[3].TShape().get()
+                && rawUses[1].TShape().get() != rawUses[3].TShape().get()
+                && rawUses[2].TShape().get() != rawUses[3].TShape().get());
+    result.targetEdgeKey = rawUses[1].TShape().get();
+    for (const auto& edge : rawUses)
+        if (edge.TShape().get() == result.targetEdgeKey)
+            ++result.targetEdgeUses;
+
+    std::array<TopoDS_Edge, 4> distinctEdges;
+    for (const auto& edge : rawUses) {
+        bool seen = false;
+        for (std::size_t index = 0; index < result.distinctEdges; ++index)
+            seen = seen
+                || distinctEdges[index].TShape().get() == edge.TShape().get();
+        if (!seen) distinctEdges[result.distinctEdges++] = edge;
+    }
+    std::array<const void*, 4> distinctVertices{};
+    result.endpointsPassed = true;
+    result.rimsPassed = true;
+    TopLoc_Location meshLocation;
+    const Handle(Poly_Triangulation) mesh =
+        BRep_Tool::Triangulation(face, meshLocation);
+    if (mesh.IsNull()) return result;
+    const double scale = 0.001 / metersPerUnit;
+    const double expectedEndU = seam ? 2 * std::acos(-1.0) : std::acos(-1.0);
+    const double expectedHeight = 4 * scale;
+    const std::size_t ring = seam ? 5U : 3U;
+    const auto expectedMeshIndex = [&](std::size_t edge,
+                                       std::size_t ordinal,
+                                       bool secondMember) noexcept {
+        if (edge == 0) return ordinal + 1;
+        if (edge == 2) return ring + ordinal + 1;
+        if (edge == 1 && !secondMember)
+            return ordinal == 0 ? ring : 2 * ring;
+        return ordinal == 0 ? 1U : ring + 1;
+    };
+    const auto polygonIndicesMatch = [&](
+        const Handle(Poly_PolygonOnTriangulation)& polygon,
+        std::size_t edge, bool secondMember) noexcept {
+        const std::size_t count = (edge == 0 || edge == 2) ? ring : 2U;
+        if (polygon.IsNull() || std::size_t(polygon->NbNodes()) != count)
+            return false;
+        for (std::size_t ordinal = 0; ordinal < count; ++ordinal)
+            if (std::size_t(polygon->Node(Standard_Integer(ordinal + 1)))
+                    != expectedMeshIndex(edge, ordinal, secondMember))
+                return false;
+        return true;
+    };
+    for (std::size_t edgeIndex = 0; edgeIndex < result.distinctEdges;
+         ++edgeIndex) {
+        const TopoDS_Edge edge = distinctEdges[edgeIndex];
+        const auto edgeTShape = Handle(BRep_TEdge)::DownCast(edge.TShape());
+        if (edgeTShape.IsNull()) return result;
+        std::size_t vertexOrdinal = 0;
+        std::array<TopoDS_Vertex, 2> edgeVertices;
+        for (TopoDS_Iterator vertexIterator(
+                 edge, Standard_False, Standard_False);
+             vertexIterator.More(); vertexIterator.Next()) {
+            if (vertexIterator.Value().ShapeType() != TopAbs_VERTEX
+                || vertexOrdinal >= 2) return result;
+            const TopoDS_Vertex vertex =
+                TopoDS::Vertex(vertexIterator.Value());
+            edgeVertices[vertexOrdinal] = vertex;
+            const TopAbs_Orientation expected = vertexOrdinal == 0
+                ? TopAbs_FORWARD : TopAbs_REVERSED;
+            result.endpointsPassed = result.endpointsPassed
+                && vertex.Orientation() == expected;
+            const void* key = vertex.TShape().get();
+            bool vertexSeen = false;
+            for (std::size_t index = 0; index < result.distinctVertices;
+                 ++index)
+                vertexSeen = vertexSeen || distinctVertices[index] == key;
+            if (!vertexSeen)
+                distinctVertices[result.distinctVertices++] = key;
+            const auto vertexTShape =
+                Handle(BRep_TVertex)::DownCast(vertex.TShape());
+            result.endpointsPassed = result.endpointsPassed
+                && !vertexTShape.IsNull() && vertexTShape->Points().IsEmpty();
+            ++vertexOrdinal;
+            ++result.storedVertexUses;
+        }
+        result.endpointsPassed = result.endpointsPassed && vertexOrdinal == 2;
+        TopLoc_Location curveLocation;
+        Standard_Real first = 0.0, last = 0.0;
+        const Handle(Geom_Curve) curve =
+            BRep_Tool::Curve(edge, curveLocation, first, last);
+        Standard_Real firstParameter = 0.0, lastParameter = 0.0;
+        const bool firstParameterFound = BRep_Tool::Parameter(
+            edgeVertices[0], edge, firstParameter);
+        const bool lastParameterFound = BRep_Tool::Parameter(
+            edgeVertices[1], edge, lastParameter);
+        const bool parametersAreEndpoints = firstParameterFound
+            && lastParameterFound
+            && ((std::abs(firstParameter - first) <= Precision::Confusion()
+                    && std::abs(lastParameter - last)
+                        <= Precision::Confusion())
+                || (std::abs(firstParameter - last)
+                        <= Precision::Confusion()
+                    && std::abs(lastParameter - first)
+                        <= Precision::Confusion()));
+        result.endpointsPassed = result.endpointsPassed
+            && parametersAreEndpoints;
+        const bool rim = edgeIndex == 0 || edgeIndex == 2;
+        if (rim) {
+            ++result.rims;
+            result.rimsPassed = result.rimsPassed
+                && !Handle(Geom_Circle)::DownCast(curve).IsNull()
+                && edge.Closed() == seam
+                && std::abs(first) <= Precision::Confusion()
+                && std::abs(last - expectedEndU) <= Precision::Confusion();
+        } else {
+            result.allBoundariesPassed = result.allBoundariesPassed
+                && !Handle(Geom_Line)::DownCast(curve).IsNull();
+            result.endpointsPassed = result.endpointsPassed
+                && std::abs(first) <= Precision::Confusion()
+                && std::abs(last - expectedHeight) <= Precision::Confusion();
+        }
+        bool hasCurve3d = false, hasPolygon3d = false;
+        bool hasPCurve = false, hasPolygonOnMesh = false;
+        for (const auto& representation : edgeTShape->Curves()) {
+            if (representation.IsNull()) return result;
+            if (const auto value = Handle(BRep_Curve3D)::DownCast(
+                    representation); !value.IsNull()) {
+                hasCurve3d = true;
+            } else if (const auto value = Handle(BRep_Polygon3D)::DownCast(
+                    representation); !value.IsNull()) {
+                if (value->Polygon3D().IsNull()) return result;
+                hasPolygon3d = true;
+                ++result.polygon3dObjects;
+                result.polygon3dPoints +=
+                    std::size_t(value->Polygon3D()->NbNodes());
+                const std::size_t expectedCount =
+                    (edgeIndex == 0 || edgeIndex == 2) ? ring : 2U;
+                result.allBoundariesPassed = result.allBoundariesPassed
+                    && std::size_t(value->Polygon3D()->NbNodes())
+                        == expectedCount;
+                for (std::size_t ordinal = 0; ordinal < expectedCount;
+                     ++ordinal) {
+                    const std::size_t meshIndex = expectedMeshIndex(
+                        edgeIndex, ordinal, false);
+                    gp_Pnt expectedPoint = mesh->Node(
+                        Standard_Integer(meshIndex));
+                    expectedPoint.SetY(expectedPoint.Y() - 2 * scale);
+                    result.allBoundariesPassed = result.allBoundariesPassed
+                        && value->Polygon3D()->Nodes()(
+                            Standard_Integer(ordinal + 1)).Distance(
+                                expectedPoint) <= Precision::Confusion();
+                }
+            } else if (const auto value =
+                    Handle(BRep_CurveOnClosedSurface)::DownCast(
+                        representation); !value.IsNull()) {
+                if (value->PCurve().IsNull() || value->PCurve2().IsNull())
+                    return result;
+                hasPCurve = true;
+                ++result.closedPCurveWrappers;
+                result.pcurveMembers += 2;
+                result.allBoundariesPassed = result.allBoundariesPassed
+                    && !Handle(Geom2d_Line)::DownCast(
+                        value->PCurve()).IsNull()
+                    && !Handle(Geom2d_Line)::DownCast(
+                        value->PCurve2()).IsNull();
+            } else if (const auto value = Handle(BRep_CurveOnSurface)::DownCast(
+                    representation); !value.IsNull()) {
+                if (value->PCurve().IsNull()) return result;
+                hasPCurve = true;
+                ++result.pcurveMembers;
+                result.allBoundariesPassed = result.allBoundariesPassed
+                    && !Handle(Geom2d_Line)::DownCast(
+                        value->PCurve()).IsNull();
+            } else if (const auto value =
+                    Handle(BRep_PolygonOnClosedTriangulation)::DownCast(
+                        representation); !value.IsNull()) {
+                const auto firstPolygon = value->PolygonOnTriangulation();
+                const auto secondPolygon = value->PolygonOnTriangulation2();
+                if (firstPolygon.IsNull() || secondPolygon.IsNull())
+                    return result;
+                hasPolygonOnMesh = true;
+                ++result.closedPolygonWrappers;
+                result.polygonOnMeshObjects += 2;
+                result.polygonOnMeshMembers += 2;
+                result.polygonOnMeshIndices +=
+                    std::size_t(firstPolygon->NbNodes()
+                        + secondPolygon->NbNodes());
+                result.allBoundariesPassed = result.allBoundariesPassed
+                    && polygonIndicesMatch(
+                        firstPolygon, edgeIndex, false)
+                    && polygonIndicesMatch(
+                        secondPolygon, edgeIndex, true);
+            } else if (const auto value =
+                    Handle(BRep_PolygonOnTriangulation)::DownCast(
+                        representation); !value.IsNull()) {
+                const auto polygon = value->PolygonOnTriangulation();
+                if (polygon.IsNull()) return result;
+                hasPolygonOnMesh = true;
+                ++result.polygonOnMeshObjects;
+                ++result.polygonOnMeshMembers;
+                result.polygonOnMeshIndices +=
+                    std::size_t(polygon->NbNodes());
+                result.allBoundariesPassed = result.allBoundariesPassed
+                    && polygonIndicesMatch(polygon, edgeIndex, false);
+            }
+        }
+        result.allBoundariesPassed = result.allBoundariesPassed
+            && hasCurve3d && hasPolygon3d && hasPCurve && hasPolygonOnMesh;
+    }
+    result.mesh = mesh.get();
+    result.meshNodes = std::size_t(mesh->NbNodes());
+    result.meshTriangles = std::size_t(mesh->NbTriangles());
+    result.meshUVNodes = mesh->HasUVNodes()
+        ? std::size_t(mesh->NbNodes()) : 0U;
+    const std::size_t segments = seam ? 4U : 2U;
+    for (std::size_t level = 0; level < 2; ++level) {
+        for (std::size_t column = 0; column < ring; ++column) {
+            const double u = expectedEndU * column / segments;
+            const double v = expectedHeight * level;
+            gp_Pnt expectedPoint(3 * scale * std::cos(u),
+                3 * scale * std::sin(u), v);
+            if (seam && column == segments)
+                expectedPoint = gp_Pnt(3 * scale, 0, v);
+            const Standard_Integer index = Standard_Integer(
+                1 + level * ring + column);
+            result.allBoundariesPassed = result.allBoundariesPassed
+                && mesh->Node(index).Distance(expectedPoint)
+                    <= Precision::Confusion()
+                && mesh->UVNode(index).Distance(gp_Pnt2d(u, v))
+                    <= Precision::Confusion();
+        }
+    }
+    for (std::size_t column = 0; column < segments; ++column) {
+        const Standard_Integer lower = Standard_Integer(1 + column);
+        const Standard_Integer upper = Standard_Integer(1 + column + ring);
+        Standard_Integer a = 0, b = 0, c = 0;
+        mesh->Triangle(Standard_Integer(2 * column + 1)).Get(a, b, c);
+        result.allBoundariesPassed = result.allBoundariesPassed
+            && a == lower && b == lower + 1 && c == upper + 1;
+        mesh->Triangle(Standard_Integer(2 * column + 2)).Get(a, b, c);
+        result.allBoundariesPassed = result.allBoundariesPassed
+            && a == lower && b == upper + 1 && c == upper;
+    }
+    std::array<TopoDS_Edge, 4> effectiveUses;
+    std::size_t effectiveCount = 0;
+    for (TopExp_Explorer edgeExplorer(face, TopAbs_EDGE);
+         edgeExplorer.More(); edgeExplorer.Next()) {
+        if (effectiveCount >= effectiveUses.size()) return result;
+        effectiveUses[effectiveCount++] = TopoDS::Edge(edgeExplorer.Current());
+    }
+    if (effectiveCount != 4) return result;
+    const std::size_t selectedCount = seam ? 2U : 1U;
+    for (std::size_t member = 0; member < selectedCount; ++member) {
+        const TopoDS_Edge edge = effectiveUses[member == 0 ? 1 : 3];
+        Standard_Real first = 0.0, last = 0.0;
+        const Handle(Geom2d_Curve) pcurve =
+            BRep_Tool::CurveOnSurface(edge, face, first, last);
+        const Handle(Poly_PolygonOnTriangulation) polygon =
+            BRep_Tool::PolygonOnTriangulation(edge, mesh, meshLocation);
+        if (pcurve.IsNull() || polygon.IsNull()) return result;
+        result.selectedPCurves[member] = pcurve.get();
+        result.selectedPolygons[member] = polygon.get();
+    }
+    result.selectedMembersDistinct = !seam
+        || (result.selectedPCurves[0] != result.selectedPCurves[1]
+            && result.selectedPolygons[0] != result.selectedPolygons[1]);
+    const bool expectedMesh = result.meshNodes == (seam ? 10U : 6U)
+        && result.meshTriangles == (seam ? 8U : 4U)
+        && result.meshUVNodes == (seam ? 10U : 6U)
+        && !mesh->HasNormals();
+    result.allBoundariesPassed = result.allBoundariesPassed
+        && result.distinctEdges == (seam ? 3U : 4U)
+        && result.distinctVertices == (seam ? 2U : 4U)
+        && result.targetEdgeUses == (seam ? 2U : 1U)
+        && result.pcurveMembers == 4
+        && result.polygonOnMeshMembers == 4
+        && result.closedPCurveWrappers == (seam ? 1U : 0U)
+        && result.closedPolygonWrappers == (seam ? 1U : 0U)
+        && result.polygon3dObjects == (seam ? 3U : 4U)
+        && result.polygon3dPoints == (seam ? 12U : 10U)
+        && result.polygonOnMeshObjects == 4
+        && result.polygonOnMeshIndices == (seam ? 14U : 10U)
+        && expectedMesh;
+    result.passed = result.rawOccurrences == 15
+        && result.childOrderPassed && result.endpointsPassed
+        && result.rimsPassed && result.rims == 2
+        && result.allBoundariesPassed && result.selectedMembersDistinct;
+    return result;
+}
+
+bool DebugObserveProductionSeamPredicate(
+    const TopoDS_Shape& root, const void* targetEdgeKey,
+    bool& seam) noexcept {
+    seam = false;
+    std::size_t occurrences = 0, capacity = 0, entryBytes = 0,
+        indexBytes = 0, allowance = sizeof(BRepCensusOccurrenceMap);
+    if (!targetEdgeKey || !BRepCensusCountOccurrences(root, occurrences)
+        || !BRepCensusProduct(occurrences,
+            BRepCensusOccurrenceMap::EntrySize(), entryBytes)
+        || !BRepCensusMapCapacity(occurrences, capacity)
+        || !BRepCensusProduct(capacity + 1,
+            sizeof(NCollection_ListNode*), indexBytes)
+        || !BRepCensusAdd(allowance, entryBytes)
+        || !BRepCensusAdd(allowance, indexBytes)) return false;
+    OperationLedger ledger(kMaxSnapshotNumericBytes,
+        kMaxAggregateEncodedTextureBytes,
+        kMaxAggregateDecodedTextureBytes);
+    decal_layer::bake::accounting::Ticket ticket;
+    if (!ticket.acquire(ledger.view(),
+            decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+            allowance,
+            decal_layer::bake::accounting::Retention::Scratch,
+            decal_layer::bake::accounting::FailureSite::BRepCensusMapScratch))
+        return false;
+    BRepCensusOccurrenceMap topology;
+    if (!topology.Initialize(root, occurrences)) return false;
+    Standard_Integer faceIndex = 0, edgeIndex = 0;
+    for (Standard_Integer index = 1; index <= topology.Extent(); ++index) {
+        if (!topology.IsRepresentative(index)) continue;
+        if (topology.FindKey(index).ShapeType() == TopAbs_FACE)
+            faceIndex = index;
+        else if (topology.FindKey(index).ShapeType() == TopAbs_EDGE
+            && topology.FindKey(index).TShape().get() == targetEdgeKey)
+            edgeIndex = index;
+    }
+    if (faceIndex == 0 || edgeIndex == 0) return false;
+    const auto face = Handle(BRep_TFace)::DownCast(
+        topology.FindKey(faceIndex).TShape());
+    if (face.IsNull()) return false;
+    return BRepCensusEffectiveSeam(topology, edgeIndex, faceIndex, face,
+        face->ActiveTriangulation(), seam);
+}
+
+bool DebugCylinderClosedWrapperOneUseIsNotSeam(
+    const DebugCylinderWitness& witness) noexcept {
+    try {
+        BRep_Builder builder;
+        TopoDS_Wire wire;
+        builder.MakeWire(wire);
+        builder.Add(wire, witness.edges[1].Oriented(TopAbs_FORWARD));
+        wire.Location(witness.wire.Location());
+        TopoDS_Face face;
+        builder.MakeFace(face, witness.surface, TopLoc_Location(),
+            Precision::Confusion());
+        builder.UpdateFace(face, witness.mesh, Standard_True);
+        builder.Add(face, wire);
+        face.Location(witness.face.Location());
+        TopoDS_Compound root;
+        builder.MakeCompound(root);
+        builder.Add(root, face);
+        bool seam = true;
+        return DebugObserveProductionSeamPredicate(
+                root, witness.edges[1].TShape().get(), seam)
+            && !seam;
+    } catch (...) {
+        return false;
+    }
+}
+
+struct DebugConstructorOwnerObservation final {
+    std::size_t constructorStagePassed = 0;
+    std::size_t termStagePassed = 0;
+    std::size_t admissionCopyStagePassed = 0;
+    std::size_t detachedCensusStagePassed = 0;
+    std::size_t wholeOwnerPassed = 0;
+    std::size_t orderedStageCount = 0;
+    std::size_t sourceBytes = 0;
+    std::size_t predictedBytes = 0;
+    std::size_t detachedBytes = 0;
+    std::size_t sourceFullLedgerSealed = 0;
+    std::size_t predictedFullLedgerSealed = 0;
+    std::size_t detachedFullLedgerSealed = 0;
+    std::size_t predictedDetachedTermsEqual = 0;
+    std::size_t ticketReservedBeforeCopy = 0;
+    std::size_t targetCopyEntries = 0;
+    std::size_t sourceIncidence = 0;
+    std::size_t copiedIncidence = 0;
+    std::size_t sourceTermsUnchanged = 0;
+    std::size_t stickyFailure = 0;
+    std::size_t handlesDestroyedBeforeSettlement = 0;
+    std::size_t ticketLiveUntilSettlement = 0;
+    std::size_t ticketSettledAfterDestruction = 0;
+    std::size_t orderedStageWord = 0;
+    std::size_t geometryDigestCopyEntries = 0;
+    std::size_t captureSourceUsed = 0;
+    std::size_t exactMatchUsed = 0;
+    std::size_t savedDefinitionUsed = 0;
+    std::size_t bareCompoundRoot = 0;
+    std::size_t expectedLocationNodes = 0;
+    std::size_t expectedLocationDatums = 0;
+    std::size_t expectedSourceLocationNodes = 0;
+    std::size_t expectedSourceLocationDatums = 0;
+    std::size_t reservedBytes = 0;
+    std::size_t numericObservationWords = 128;
+};
+
+DebugConstructorOwnerObservation DebugFinishConstructorOwnerProof(
+    const TopoDS_Shape& source,
+    std::size_t expectedSourceLocationNodes,
+    std::size_t expectedSourceLocationDatums,
+    std::size_t expectedFinalLocationNodes,
+    std::size_t expectedFinalLocationDatums,
+    bool constructorSealed,
+    bool predictedTermsSealed,
+    bool detachedTermsSealed,
+    const BRepRepresentationCensus& sourceCensus,
+    const BRepRepresentationCensus& prediction,
+    const BRepRepresentationCensus& detachedCensus,
+    OperationLedger& ledger,
+    decal_layer::bake::accounting::Ticket& retained,
+    std::unique_ptr<BRepBuilderAPI_Copy>& copier,
+    TopoDS_Shape& detached,
+    TopTools_IndexedMapOfShape& sourceFaces,
+    TopTools_IndexedMapOfShape& detachedFaces,
+    std::size_t reserved) noexcept {
+    using FailureSite = decal_layer::bake::accounting::FailureSite;
+    using StorageDimension =
+        decal_layer::bake::accounting::StorageDimension;
+    DebugConstructorOwnerObservation result;
+    result.sourceBytes = sourceCensus.total;
+    result.predictedBytes = prediction.total;
+    result.detachedBytes = detachedCensus.total;
+    result.sourceFullLedgerSealed =
+        DebugBRepCensusFullLedgerSealed(sourceCensus) ? 1U : 0U;
+    result.predictedFullLedgerSealed =
+        DebugBRepCensusFullLedgerSealed(prediction) ? 1U : 0U;
+    result.detachedFullLedgerSealed =
+        DebugBRepCensusFullLedgerSealed(detachedCensus) ? 1U : 0U;
+    result.predictedDetachedTermsEqual =
+        DebugBRepCensusSameFullLedger(prediction, detachedCensus) ? 1U : 0U;
+    result.targetCopyEntries = ledger.allocationEntries(
+        FailureSite::BRepCensusCopy);
+    result.sourceIncidence =
+        DebugBRepCensusShapeIncidence(source) ? 1U : 0U;
+    result.copiedIncidence =
+        DebugBRepCensusShapeIncidence(detached) ? 1U : 0U;
+    result.expectedLocationNodes = expectedFinalLocationNodes;
+    result.expectedLocationDatums = expectedFinalLocationDatums;
+    result.expectedSourceLocationNodes = expectedSourceLocationNodes;
+    result.expectedSourceLocationDatums = expectedSourceLocationDatums;
+    result.reservedBytes = reserved;
+    result.bareCompoundRoot = !source.IsNull()
+            && source.ShapeType() == TopAbs_COMPOUND
+        ? 1U : 0U;
+
+    BRepRepresentationCensus sourceAfterCopy;
+    retained_edge_treatment::ReplayBudget sourceAfterBudget;
+    decal_layer::bake::accounting::Ticket sourceAfterScratch;
+    const bool sourceRemeasured = MeasureBRepRepresentation(
+        source, sourceAfterBudget, ledger.view(), sourceAfterCopy,
+        sourceAfterScratch);
+    sourceAfterScratch.reset();
+    result.sourceTermsUnchanged = sourceRemeasured
+            && DebugBRepCensusSameFullLedger(sourceCensus, sourceAfterCopy)
+        ? 1U : 0U;
+
+    std::size_t orderedStageCount = 0;
+    const bool stage2a = constructorSealed
+        && result.bareCompoundRoot != 0
+        && result.sourceFullLedgerSealed != 0
+        && sourceCensus.locationNodes == expectedSourceLocationNodes
+        && sourceCensus.locationDatums == expectedSourceLocationDatums;
+    if (stage2a) ++orderedStageCount;
+    const bool stage2b = stage2a
+        && result.predictedFullLedgerSealed != 0
+        && predictedTermsSealed
+        && prediction.locationNodes == expectedFinalLocationNodes
+        && prediction.locationDatums == expectedFinalLocationDatums;
+    if (stage2b) ++orderedStageCount;
+    const std::size_t remainingWithTicket =
+        ledger.remaining(StorageDimension::PrivateStorage);
+    const bool ticketReserved = reserved <= kMaxAggregateDecodedTextureBytes
+        && remainingWithTicket
+            == kMaxAggregateDecodedTextureBytes - reserved;
+    const bool stage2c = stage2b && ticketReserved
+        && result.targetCopyEntries == 1 && copier
+        && !detached.IsNull();
+    if (stage2c) ++orderedStageCount;
+    const bool stage2d = stage2c
+        && result.detachedFullLedgerSealed != 0
+        && detachedTermsSealed
+        && result.predictedDetachedTermsEqual != 0
+        && detachedCensus.locationNodes == expectedFinalLocationNodes
+        && detachedCensus.locationDatums == expectedFinalLocationDatums
+        && result.sourceTermsUnchanged != 0
+        && result.sourceIncidence != 0
+        && result.copiedIncidence != 0;
+    if (stage2d) ++orderedStageCount;
+    result.constructorStagePassed = stage2a ? 1U : 0U;
+    result.termStagePassed = stage2b ? 1U : 0U;
+    result.admissionCopyStagePassed = stage2c ? 1U : 0U;
+    result.detachedCensusStagePassed = stage2d ? 1U : 0U;
+    result.orderedStageCount = orderedStageCount;
+    result.orderedStageWord = orderedStageCount == 4 ? 0x2a2b2c2dU : 0U;
+    result.wholeOwnerPassed = stage2a && stage2b && stage2c && stage2d
+        && orderedStageCount == 4 ? 1U : 0U;
+    result.ticketReservedBeforeCopy = ticketReserved ? 1U : 0U;
+
+    ledger.refuse(FailureSite::DebugBRepCensusDebt);
+    const FailureSite stickySite = ledger.firstFailureSite();
+    const bool refusedAgain = !ledger.recheck(FailureSite::BRepCensusCopy);
+    result.stickyFailure = refusedAgain
+            && stickySite == FailureSite::DebugBRepCensusDebt
+            && ledger.firstFailureSite() == stickySite
+        ? 1U : 0U;
+    sourceFaces.Clear();
+    detachedFaces.Clear();
+    detached.Nullify();
+    copier.reset();
+    const std::size_t remainingBeforeSettlement =
+        ledger.remaining(StorageDimension::PrivateStorage);
+    result.handlesDestroyedBeforeSettlement = !copier && detached.IsNull()
+            && sourceFaces.IsEmpty() && detachedFaces.IsEmpty()
+        ? 1U : 0U;
+    result.ticketLiveUntilSettlement =
+        remainingBeforeSettlement == remainingWithTicket ? 1U : 0U;
+    retained.reset();
+    const std::size_t remainingAfterSettlement =
+        ledger.remaining(StorageDimension::PrivateStorage);
+    result.ticketSettledAfterDestruction =
+        remainingAfterSettlement - remainingBeforeSettlement == reserved
+        ? 1U : 0U;
+    return result;
+}
+
+void DebugStoreConstructorOwnerObservation(
+    const DebugConstructorOwnerObservation& owner,
+    std::array<std::size_t, 128>& result) noexcept {
+    result[32] = owner.constructorStagePassed;
+    result[33] = owner.termStagePassed;
+    result[34] = owner.admissionCopyStagePassed;
+    result[35] = owner.detachedCensusStagePassed;
+    result[36] = owner.wholeOwnerPassed;
+    result[37] = owner.orderedStageCount;
+    result[38] = owner.sourceBytes;
+    result[39] = owner.predictedBytes;
+    result[40] = owner.detachedBytes;
+    result[41] = owner.sourceFullLedgerSealed;
+    result[42] = owner.predictedFullLedgerSealed;
+    result[43] = owner.detachedFullLedgerSealed;
+    result[44] = owner.predictedDetachedTermsEqual;
+    result[45] = owner.ticketReservedBeforeCopy;
+    result[46] = owner.targetCopyEntries;
+    result[47] = owner.sourceIncidence;
+    result[48] = owner.copiedIncidence;
+    result[49] = owner.sourceTermsUnchanged;
+    result[50] = owner.stickyFailure;
+    result[51] = owner.handlesDestroyedBeforeSettlement;
+    result[52] = owner.ticketLiveUntilSettlement;
+    result[53] = owner.ticketSettledAfterDestruction;
+    result[54] = owner.orderedStageWord;
+    result[55] = owner.geometryDigestCopyEntries;
+    result[56] = owner.captureSourceUsed;
+    result[57] = owner.exactMatchUsed;
+    result[58] = owner.savedDefinitionUsed;
+    result[59] = owner.bareCompoundRoot;
+    result[60] = owner.expectedLocationNodes;
+    result[61] = owner.expectedLocationDatums;
+    result[62] = owner.reservedBytes;
+    result[63] = owner.numericObservationWords;
+    result[64] = owner.expectedSourceLocationNodes;
+    result[65] = owner.expectedSourceLocationDatums;
+}
+
+std::array<std::array<std::size_t, 128>, 6>
 DebugExerciseE4BRepEffectiveLocationWitnesses(double metersPerUnit) noexcept {
-    std::array<std::array<std::size_t, 32>, 4> results{};
+    std::array<std::array<std::size_t, 128>, 6> results{};
     if (metersPerUnit != 0.001 && metersPerUnit != 1.0) return results;
     const double constructionScale = 0.001 / metersPerUnit;
     try {
@@ -8424,20 +9413,58 @@ DebugExerciseE4BRepEffectiveLocationWitnesses(double metersPerUnit) noexcept {
                 kMaxAggregateEncodedTextureBytes,
                 kMaxAggregateDecodedTextureBytes);
             retained_edge_treatment::ReplayBudget budget;
-            BRepRepresentationCensus census;
+            BRepRepresentationCensus census, prediction, detachedCensus;
             decal_layer::bake::accounting::Ticket scratch;
             const bool measured = MeasureBRepRepresentation(
-                root, budget, ledger.view(), census, scratch);
+                root, budget, ledger.view(), census, scratch, &prediction);
+            const bool constructorSealed = measured
+                && census.topologyCount == 6 && census.faceCount == 1
+                && DebugKnownBRepIncidence(nestedFixture);
             results[0] = {{
-                measured && census.topologyCount == 6
-                    && census.faceCount == 1 ? 1U : 0U,
+                constructorSealed ? 1U : 0U,
                 1, 9, census.topologyCount, census.faceCount, 1,
                 0, 0, 0, 0, 0, 0, 0, 0, 1, 0,
                 census.locationNodes, census.locationDatums,
             }};
+            if (constructorSealed) {
+                scratch.reset();
+                decal_layer::bake::accounting::Ticket retained;
+                std::unique_ptr<BRepBuilderAPI_Copy> copier;
+                TopoDS_Shape detached;
+                TopTools_IndexedMapOfShape sourceFaces, detachedFaces;
+                std::size_t reserved = 0;
+                const bool copied = CopyMeasuredBRep(
+                    root, budget, ledger, census, prediction, 0, retained,
+                    copier, detached, sourceFaces, detachedFaces, reserved);
+                decal_layer::bake::accounting::Ticket detachedScratch;
+                const bool detachedMeasured = copied
+                    && MeasureBRepRepresentation(detached, budget,
+                        ledger.view(), detachedCensus, detachedScratch);
+                detachedScratch.reset();
+                if (detachedMeasured) {
+                    const auto owner = DebugFinishConstructorOwnerProof(
+                        root, sizeof(TopLoc_SListNodeOfItemLocation),
+                        sizeof(TopLoc_Datum3D),
+                        sizeof(TopLoc_SListNodeOfItemLocation),
+                        sizeof(TopLoc_Datum3D), constructorSealed, true, true,
+                        census, prediction, detachedCensus, ledger, retained,
+                        copier, detached, sourceFaces, detachedFaces, reserved);
+                    results[0][0] = owner.wholeOwnerPassed;
+                    results[0][18] = prediction.locationNodes;
+                    results[0][19] = prediction.locationDatums;
+                    results[0][20] = detachedCensus.locationNodes;
+                    results[0][21] = detachedCensus.locationDatums;
+                    results[0][22] = nativeProductOrderPassed ? 1U : 0U;
+                    results[0][23] = 1;
+                    results[0][26] = owner.sourceTermsUnchanged;
+                    results[0][28] = 1;
+                    results[0][31] = reserved;
+                    DebugStoreConstructorOwnerObservation(owner, results[0]);
+                }
+            }
         }
 
-        for (std::size_t witness = 1; witness < results.size(); ++witness) {
+        for (std::size_t witness = 1; witness < 4; ++witness) {
             DebugKnownBRepFixture fixture;
             if (!DebugBuildKnownBRepFixture(builder,
                     DebugKnownHasUV | DebugKnownHasNormals
@@ -8765,6 +9792,243 @@ DebugExerciseE4BRepEffectiveLocationWitnesses(double metersPerUnit) noexcept {
             results[witness][29] = nodeArraysIndependent ? 1U : 0U;
             results[witness][30] = parameterArraysIndependent ? 1U : 0U;
             results[witness][31] = reserved;
+            detachedScratch.reset();
+            const std::size_t expectedNodeBytes =
+                (surfaceWitness ? 6U : 5U)
+                * sizeof(TopLoc_SListNodeOfItemLocation);
+            const std::size_t expectedDatumBytes =
+                3U * sizeof(TopLoc_Datum3D);
+            const bool constructorSealed = results[witness][0] != 0
+                && nativeProductOrderPassed
+                && sourceCensus.locationNodes == expectedNodeBytes
+                && sourceCensus.locationDatums == expectedDatumBytes;
+            const auto owner = DebugFinishConstructorOwnerProof(
+                root, expectedNodeBytes, expectedDatumBytes,
+                expectedNodeBytes, expectedDatumBytes, constructorSealed,
+                true, true, sourceCensus, prediction, detachedCensus,
+                copyLedger, retained, copier, detached, sourceFaces,
+                copiedFaces, reserved);
+            results[witness][0] = owner.wholeOwnerPassed;
+            DebugStoreConstructorOwnerObservation(owner, results[witness]);
+        }
+
+        for (std::size_t cylinderIndex = 0; cylinderIndex < 2;
+             ++cylinderIndex) {
+            const bool seam = cylinderIndex == 0;
+            const std::size_t witness = 4 + cylinderIndex;
+            DebugCylinderWitness fixture = seam
+                ? DebugBuildRealTwoUseSeam(metersPerUnit)
+                : DebugBuildNonSeamControl(metersPerUnit);
+            const DebugCylinderGraphObservation sourceObservation =
+                DebugObserveCylinderGraph(fixture.root, seam, metersPerUnit);
+            bool sourceSeam = false;
+            const bool sourceSeamObserved =
+                DebugObserveProductionSeamPredicate(fixture.root,
+                    sourceObservation.targetEdgeKey, sourceSeam);
+            const bool negativeControl = !seam
+                || DebugCylinderClosedWrapperOneUseIsNotSeam(fixture);
+            BRepRepresentationCensus expectedSource, expectedFinal;
+            if (!DebugCylinderExpectedLedger(
+                    seam, false, expectedSource)
+                || !DebugCylinderExpectedLedger(
+                    seam, true, expectedFinal)) continue;
+
+            OperationLedger ledger(kMaxSnapshotNumericBytes,
+                kMaxAggregateEncodedTextureBytes,
+                kMaxAggregateDecodedTextureBytes);
+            retained_edge_treatment::ReplayBudget budget;
+            BRepRepresentationCensus sourceCensus, prediction,
+                detachedCensus;
+            decal_layer::bake::accounting::Ticket sourceScratch;
+            const bool measured = MeasureBRepRepresentation(
+                fixture.root, budget, ledger.view(), sourceCensus,
+                sourceScratch);
+            if (!measured) continue;
+            sourceScratch.reset();
+            const bool sourceLedgerExact =
+                DebugBRepCensusSameFullLedger(expectedSource, sourceCensus);
+            prediction = sourceCensus;
+            const std::size_t constructorNodeDelta =
+                expectedFinal.locationNodes - expectedSource.locationNodes;
+            const bool predictionDerived =
+                expectedFinal.locationNodes >= expectedSource.locationNodes
+                && expectedFinal.locationDatums
+                    >= expectedSource.locationDatums
+                && BRepCensusAdd(
+                    prediction.locationNodes, constructorNodeDelta)
+                && BRepCensusAdd(prediction.locations, constructorNodeDelta)
+                && BRepCensusAdd(prediction.total, constructorNodeDelta);
+            const bool predictedLedgerExact =
+                predictionDerived
+                && DebugBRepCensusSameFullLedger(expectedFinal, prediction);
+            decal_layer::bake::accounting::Ticket retained;
+            std::unique_ptr<BRepBuilderAPI_Copy> copier;
+            TopoDS_Shape detached;
+            TopTools_IndexedMapOfShape sourceFaces, detachedFaces;
+            std::size_t reserved = 0;
+            if (!CopyMeasuredBRep(fixture.root, budget, ledger,
+                    sourceCensus, prediction, 0, retained, copier, detached,
+                    sourceFaces, detachedFaces, reserved)) continue;
+            decal_layer::bake::accounting::Ticket detachedScratch;
+            if (!MeasureBRepRepresentation(detached, budget, ledger.view(),
+                    detachedCensus, detachedScratch)) continue;
+            const DebugCylinderGraphObservation detachedObservation =
+                DebugObserveCylinderGraph(detached, seam, metersPerUnit);
+            const DebugCylinderGraphObservation sourceAfterObservation =
+                DebugObserveCylinderGraph(fixture.root, seam, metersPerUnit);
+            bool detachedSeam = false;
+            const bool detachedSeamObserved =
+                DebugObserveProductionSeamPredicate(detached,
+                    detachedObservation.targetEdgeKey, detachedSeam);
+            const bool selectedPCurvesIndependent =
+                detachedObservation.selectedPCurves[0]
+                    != sourceObservation.selectedPCurves[0]
+                && (!seam
+                    || detachedObservation.selectedPCurves[1]
+                        != sourceObservation.selectedPCurves[1]);
+            const bool selectedPolygonsIndependent =
+                detachedObservation.selectedPolygons[0]
+                    != sourceObservation.selectedPolygons[0]
+                && (!seam
+                    || detachedObservation.selectedPolygons[1]
+                        != sourceObservation.selectedPolygons[1]);
+            const bool sourceCylinderUnchanged =
+                sourceAfterObservation.passed
+                && sourceAfterObservation.mesh == sourceObservation.mesh
+                && sourceAfterObservation.selectedPCurves[0]
+                    == sourceObservation.selectedPCurves[0]
+                && sourceAfterObservation.selectedPolygons[0]
+                    == sourceObservation.selectedPolygons[0]
+                && (!seam
+                    || (sourceAfterObservation.selectedPCurves[1]
+                            == sourceObservation.selectedPCurves[1]
+                        && sourceAfterObservation.selectedPolygons[1]
+                            == sourceObservation.selectedPolygons[1]));
+            const bool detachedLedgerExact =
+                DebugBRepCensusSameFullLedger(expectedFinal, detachedCensus);
+            const bool constructorSealed = sourceObservation.passed
+                && sourceLedgerExact && sourceSeamObserved
+                && sourceSeam == seam && negativeControl;
+            const bool detachedOracleSealed = detachedObservation.passed
+                && detachedLedgerExact && detachedSeamObserved
+                && detachedSeam == seam && selectedPCurvesIndependent
+                && selectedPolygonsIndependent
+                && detachedObservation.mesh != sourceObservation.mesh
+                && sourceCylinderUnchanged;
+            detachedScratch.reset();
+
+            const std::size_t expectedSourceNodeBytes =
+                (seam ? 8U : 10U)
+                * sizeof(TopLoc_SListNodeOfItemLocation);
+            const std::size_t expectedFinalNodeBytes =
+                (seam ? 20U : 26U)
+                * sizeof(TopLoc_SListNodeOfItemLocation);
+            const std::size_t expectedDatumBytes =
+                2U * sizeof(TopLoc_Datum3D);
+            const auto owner = DebugFinishConstructorOwnerProof(
+                fixture.root, expectedSourceNodeBytes, expectedDatumBytes,
+                expectedFinalNodeBytes, expectedDatumBytes,
+                constructorSealed, predictedLedgerExact,
+                detachedOracleSealed, sourceCensus, prediction,
+                detachedCensus, ledger, retained, copier, detached,
+                sourceFaces, detachedFaces, reserved);
+            auto& result = results[witness];
+            result[0] = owner.wholeOwnerPassed;
+            result[1] = witness + 1;
+            result[2] = sourceObservation.rawOccurrences;
+            result[3] = sourceCensus.topologyCount;
+            result[4] = sourceCensus.faceCount;
+            result[5] = sourceObservation.distinctEdges;
+            result[11] = sourceObservation.selectedPCurves[0] ? 1U : 0U;
+            result[12] = sourceObservation.selectedPolygons[0] ? 1U : 0U;
+            result[13] = sourceSeam ? 1U : 0U;
+            result[14] = sourceObservation.targetEdgeUses;
+            result[15] = BRepCensusOccurrenceMap::EntrySize();
+            result[16] = sourceCensus.locationNodes;
+            result[17] = sourceCensus.locationDatums;
+            result[18] = prediction.locationNodes;
+            result[19] = prediction.locationDatums;
+            result[20] = detachedCensus.locationNodes;
+            result[21] = detachedCensus.locationDatums;
+            result[22] = nativeProductOrderPassed ? 1U : 0U;
+            result[23] = sourceObservation.selectedMembersDistinct ? 1U : 0U;
+            result[24] = selectedPolygonsIndependent ? 1U : 0U;
+            result[25] = 1;
+            result[26] = sourceCylinderUnchanged ? 1U : 0U;
+            result[27] = selectedPCurvesIndependent ? 1U : 0U;
+            result[28] = detachedOracleSealed ? 1U : 0U;
+            result[29] = detachedObservation.mesh != sourceObservation.mesh
+                ? 1U : 0U;
+            result[30] = 1;
+            result[31] = reserved;
+            DebugStoreConstructorOwnerObservation(owner, result);
+            result[66] = sourceLedgerExact ? 1U : 0U;
+            result[67] = predictedLedgerExact ? 1U : 0U;
+            result[68] = detachedLedgerExact ? 1U : 0U;
+            result[69] = sourceCensus.tShapes;
+            result[70] = sourceCensus.listNodes;
+            result[71] = sourceCensus.representations;
+            result[72] = sourceCensus.geometry;
+            result[73] = sourceCensus.meshLogical;
+            result[74] = sourceCensus.meshPhysical;
+            result[75] = sourceCensus.meshNodes;
+            result[76] = sourceCensus.meshTriangles;
+            result[77] = sourceCensus.meshUVNodes;
+            result[78] = sourceCensus.meshNormals;
+            result[79] = sourceCensus.polygonStorage;
+            result[80] = sourceCensus.harrayStorage;
+            result[81] = sourceCensus.topologyCount;
+            result[82] = sourceCensus.faceCount;
+            result[83] = expectedSource.tShapes;
+            result[84] = expectedSource.listNodes;
+            result[85] = expectedSource.representations;
+            result[86] = expectedSource.geometry;
+            result[87] = expectedSource.meshLogical;
+            result[88] = expectedSource.polygonStorage;
+            result[89] = expectedSource.harrayStorage;
+            result[90] = expectedSource.topologyCount;
+            result[91] = expectedSource.faceCount;
+            result[92] = sourceObservation.distinctEdges;
+            result[93] = sourceObservation.distinctVertices;
+            result[94] = sourceObservation.rawOccurrences;
+            result[95] = sourceObservation.wireEdgeUses;
+            result[96] = sourceObservation.targetEdgeUses;
+            result[97] = sourceObservation.rims;
+            result[98] = sourceObservation.storedVertexUses;
+            result[99] = sourceObservation.pcurveMembers;
+            result[100] = sourceObservation.polygonOnMeshMembers;
+            result[101] = sourceObservation.closedPCurveWrappers;
+            result[102] = sourceObservation.closedPolygonWrappers;
+            result[103] = detachedObservation.pcurveMembers;
+            result[104] = detachedObservation.polygonOnMeshMembers;
+            result[105] = detachedObservation.closedPCurveWrappers;
+            result[106] = detachedObservation.closedPolygonWrappers;
+            result[107] = sourceObservation.selectedMembersDistinct
+                    && detachedObservation.selectedMembersDistinct
+                ? 1U : 0U;
+            result[108] = result[107];
+            result[109] = selectedPCurvesIndependent ? 1U : 0U;
+            result[110] = selectedPolygonsIndependent ? 1U : 0U;
+            result[111] = sourceObservation.meshNodes;
+            result[112] = sourceObservation.meshTriangles;
+            result[113] = sourceObservation.meshUVNodes;
+            result[114] = sourceObservation.polygon3dObjects;
+            result[115] = sourceObservation.polygon3dPoints;
+            result[116] = sourceObservation.polygonOnMeshObjects;
+            result[117] = sourceObservation.polygonOnMeshIndices;
+            result[118] = sourceObservation.endpointsPassed ? 1U : 0U;
+            result[119] = sourceObservation.rimsPassed ? 1U : 0U;
+            result[120] = sourceObservation.childOrderPassed ? 1U : 0U;
+            result[121] = sourceSeamObserved && sourceSeam == seam ? 1U : 0U;
+            result[122] = negativeControl ? 1U : 0U;
+            result[123] = sourceObservation.allBoundariesPassed ? 1U : 0U;
+            result[124] = sourceCylinderUnchanged ? 1U : 0U;
+            result[125] = prediction.locationNodes - sourceCensus.locationNodes;
+            result[126] = prediction.locationDatums
+                - sourceCensus.locationDatums;
+            result[127] = constructorSealed && predictedLedgerExact
+                    && detachedOracleSealed && owner.wholeOwnerPassed
+                ? 1U : 0U;
         }
     } catch (...) {
         return results;

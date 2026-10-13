@@ -191,8 +191,15 @@ inline Status Prepare(const retained_edge_treatment::r2::Snapshot& snapshot,
         retained_part_boolean::OperandReadSet reads{
             detail::Read(graph.owner, *left), detail::Read(graph.owner, *right)};
         const double unit = snapshot.dimensionMetersPerUnit();
-        const auto replay = a1_analytic_input_adapter::ReplayCounted(
+#if DEBUG
+        const auto replayEntry = output.budget;
+#endif
+        const auto replay = a1_analytic_input_adapter::ReplayAuthoredCounted(
             requested, unit, reads, reads, output.budget, cancelled);
+#if DEBUG
+        retained_topology_budget::debug::RecordPhase(
+            "authored-analytic-replay", replayEntry, output.budget);
+#endif
         if (replay.status == a1_analytic_input_adapter::ReplayStatus::Budget)
             return Status::Budget;
         if (replay.status == a1_analytic_input_adapter::ReplayStatus::Cancelled)
@@ -242,13 +249,25 @@ inline Status Prepare(const retained_edge_treatment::r2::Snapshot& snapshot,
         shadow.steps = output.treatment.steps;
         std::vector<std::uint8_t> shadowBytes;
         auto roles = std::make_shared<retained_edge_treatment::SourceRebindRoles>();
+#if DEBUG
+        const auto suffixEntry = output.budget;
+#endif
         if (!retained_edge_treatment::Encode(shadow, shadowBytes, refusal)
             || !retained_edge_treatment::CaptureSourceRebindRoles(
                 originalUntreated, shadow, shadowBytes, output.budget, refusal, *roles)
             || !retained_edge_treatment::r2::ApplySourceRebindR2(
                 *roles, output.untreated, output.treatment, output.treated,
-                output.budget, refusal))
+                output.budget, refusal)) {
+#if DEBUG
+            retained_topology_budget::debug::RecordPhase(
+                "authored-suffix", suffixEntry, output.budget);
+#endif
             return output.budget.exhausted ? Status::Budget : Status::BuildFailed;
+        }
+#if DEBUG
+        retained_topology_budget::debug::RecordPhase(
+            "authored-suffix", suffixEntry, output.budget);
+#endif
         auto& stagedBinding = std::get<retained_edge_treatment::r2::BooleanBaseBinding>(
             output.treatment.base);
         if (!composite_recipe::Hash(payload->bytes, stagedBinding.sourceRecipeDigest)
