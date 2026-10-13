@@ -78,10 +78,12 @@
 namespace core3d::scene {
 std::array<std::size_t, 19>
 DebugExerciseE4BRepCensusCopyPrediction() noexcept;
-std::array<std::size_t, 42>
+std::array<std::size_t, 44>
 DebugE4BRepKnownRepresentationSizes() noexcept;
 std::array<std::array<std::size_t, 4>, 11>
 DebugExerciseE4BRepReducedWordEvaluator() noexcept;
+std::array<std::array<std::size_t, 18>, 4>
+DebugExerciseE4BRepEffectiveLocationWitnesses(double metersPerUnit) noexcept;
 std::vector<std::array<std::size_t, 64>>
 DebugExerciseE4BRepKnownRepresentations(double metersPerUnit) noexcept;
 std::array<std::size_t, 13>
@@ -3577,6 +3579,9 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         metersPerUnit.doubleValue);
     const auto evaluator =
         core3d::scene::DebugExerciseE4BRepReducedWordEvaluator();
+    const auto locationValues = core3d::scene::
+        DebugExerciseE4BRepEffectiveLocationWitnesses(
+            metersPerUnit.doubleValue);
     static constexpr const char *evaluatorNames[] = {
         "identity",
         "oneDatumCancellation",
@@ -3600,6 +3605,31 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
             @"nodeCount": @(value[1]),
             @"byteCount": @(value[2]),
             @"failed": @(value[3] != 0),
+        }];
+    }
+    static constexpr const char *locationNames[] = {
+        "nestedLocal", "doubleLocalSurface", "doubleLocalCurve",
+        "doubleLocalPolygon",
+    };
+    NSMutableArray<NSDictionary<NSString *,id> *> *locationWitnesses =
+        [NSMutableArray arrayWithCapacity:locationValues.size()];
+    for (std::size_t index = 0; index < locationValues.size(); ++index) {
+        const auto& value = locationValues[index];
+        [locationWitnesses addObject:@{
+            @"name": [NSString stringWithUTF8String:locationNames[index]],
+            @"success": @(value[0] != 0), @"caseID": @(value[1]),
+            @"rawOccurrences": @(value[2]), @"effectiveKeys": @(value[3]),
+            @"faceKeys": @(value[4]), @"edgeKeys": @(value[5]),
+            @"faceWordCount": @(value[6]), @"edgeWordCount": @(value[7]),
+            @"descriptorWordCount": @(value[8]),
+            @"pcurveRelativeWordCount": @(value[9]),
+            @"polygonRelativeWordCount": @(value[10]),
+            @"pcurveSelected": @(value[11] != 0),
+            @"polygonSelected": @(value[12] != 0),
+            @"seam": @(value[13] != 0), @"incidenceCount": @(value[14]),
+            @"occurrenceMapEntrySize": @(value[15]),
+            @"sourceLocationNodes": @(value[16]),
+            @"sourceLocationDatums": @(value[17]),
         }];
     }
     NSMutableArray<NSDictionary<NSString *,id> *> *cases =
@@ -3662,6 +3692,7 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         @"fixture": @"E4BRepCensusKnownRepresentationMatrix",
         @"opaqueRemainder": @"not measured: opaque O1–O33 remainder",
         @"reducedWordEvaluatorCases": evaluatorCases,
+        @"locationWitnesses": locationWitnesses,
         @"sizes": @{
             @"real": @(sizes[0]), @"integer": @(sizes[1]),
             @"pointer": @(sizes[2]), @"listNodePointer": @(sizes[3]),
@@ -3684,6 +3715,8 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
             @"shapeMap": @(sizes[36]), @"bndBox": @(sizes[37]),
             @"surfaceAdaptor": @(sizes[38]), @"meshParameters": @(sizes[39]),
             @"locationNode": @(sizes[40]), @"locationDatum": @(sizes[41]),
+            @"occurrenceMapEntry": @(sizes[42]),
+            @"occurrenceMap": @(sizes[43]),
         },
         @"cases": cases,
     };
