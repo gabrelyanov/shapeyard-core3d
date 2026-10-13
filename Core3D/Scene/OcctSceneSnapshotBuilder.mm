@@ -7842,9 +7842,9 @@ bool CopyMeasuredBRep(
 }
 
 #ifdef DEBUG
-std::array<std::size_t, 19>
+std::array<std::size_t, 23>
 DebugExerciseE4BRepCensusCopyPrediction() noexcept {
-    std::array<std::size_t, 19> result{};
+    std::array<std::size_t, 23> result{};
     try {
         BRep_Builder builder;
         const Handle(Geom_Plane) plane =
@@ -7947,6 +7947,43 @@ DebugExerciseE4BRepCensusCopyPrediction() noexcept {
                 exactDetached, exactOriginalFaces, exactDetachedFaces,
                 exactReserved)
             && exactReserved == distinctReserved;
+
+        TopoDS_Face inactiveMeshFace;
+        builder.MakeFace(inactiveMeshFace, plane, Precision::Confusion());
+        const Handle(Poly_Triangulation) activeMesh =
+            new Poly_Triangulation(3, 1, Standard_False, Standard_False);
+        const Handle(Poly_Triangulation) inactiveMesh =
+            new Poly_Triangulation(3, 1, Standard_False, Standard_False);
+        for (Standard_Integer index = 1; index <= 3; ++index) {
+            const gp_Pnt point(index == 2 ? 1.0 : 0.0,
+                index == 3 ? 1.0 : 0.0, 0.0);
+            activeMesh->SetNode(index, point);
+            inactiveMesh->SetNode(index, point);
+        }
+        activeMesh->SetTriangle(1, Poly_Triangle(1, 2, 3));
+        inactiveMesh->SetTriangle(1, Poly_Triangle(1, 2, 3));
+        const auto inactiveFaceTShape =
+            Handle(BRep_TFace)::DownCast(inactiveMeshFace.TShape());
+        Poly_ListOfTriangulation meshList;
+        meshList.Append(activeMesh);
+        meshList.Append(inactiveMesh);
+        if (!inactiveFaceTShape.IsNull())
+            inactiveFaceTShape->Triangulations(meshList, activeMesh);
+        const bool inactiveFixtureBuilt = !inactiveFaceTShape.IsNull()
+            && inactiveFaceTShape->Triangulations().Size() == 2
+            && inactiveFaceTShape->ActiveTriangulation().get()
+                == activeMesh.get();
+        OperationLedger inactiveLedger(kMaxSnapshotNumericBytes,
+            kMaxAggregateEncodedTextureBytes,
+            kMaxAggregateDecodedTextureBytes);
+        retained_edge_treatment::ReplayBudget inactiveBudget;
+        BRepRepresentationCensus inactiveSource, inactivePrediction;
+        decal_layer::bake::accounting::Ticket inactiveScratch;
+        const bool inactiveLossRefused = inactiveFixtureBuilt
+            && !MeasureBRepRepresentation(inactiveMeshFace, inactiveBudget,
+                inactiveLedger.view(), inactiveSource, inactiveScratch,
+                &inactivePrediction);
+        inactiveScratch.reset();
         result = {{
             1, sizeof(Geom_Plane), distinctSource.geometry,
             distinctPrediction.geometry,
@@ -7959,6 +7996,13 @@ DebugExerciseE4BRepCensusCopyPrediction() noexcept {
             mapCapacity, indexBytes, sizeof(NCollection_ListNode*),
             deniedBeforeTopExp ? 1U : 0U, deniedCensus.topologyCount,
             exactLimit, exactlyEnough ? 1U : 0U,
+            inactiveFixtureBuilt ? 1U : 0U,
+            inactiveLossRefused ? 1U : 0U,
+            inactiveLedger.allocationEntries(
+                decal_layer::bake::accounting::FailureSite::BRepCensusCopy),
+            inactiveLedger.allocationEntries(
+                decal_layer::bake::accounting::FailureSite::
+                    BRepCensusMapScratch),
         }};
         return result;
     } catch (...) {
@@ -8187,6 +8231,35 @@ bool DebugKnownBRepIncidence(const DebugKnownBRepFixture& fixture) {
     return edgeCount == 1 && storedPCurve.get() == fixture.pcurve.get()
         && storedMesh.get() == fixture.mesh.get()
         && storedPolygon.get() == fixture.polygonOnMesh.get();
+}
+
+struct DebugKnownBRepIncidenceObservation final {
+    bool pcurve = false;
+    bool polygonOnMesh = false;
+};
+
+DebugKnownBRepIncidenceObservation DebugObserveKnownBRepEffectiveIncidence(
+    const TopoDS_Face& face, const Handle(Geom2d_Curve)& expectedPCurve,
+    const Handle(Poly_PolygonOnTriangulation)& expectedPolygon) {
+    DebugKnownBRepIncidenceObservation result;
+    TopExp_Explorer explorer(face, TopAbs_EDGE);
+    if (!explorer.More()) return result;
+    const TopoDS_Edge edge = TopoDS::Edge(explorer.Current());
+    explorer.Next();
+    if (explorer.More()) return result;
+    Standard_Real first = 0.0, last = 0.0;
+    const Handle(Geom2d_Curve) pcurve = BRep_Tool::CurveOnSurface(
+        edge, face, first, last);
+    TopLoc_Location meshLocation;
+    const Handle(Poly_Triangulation) mesh = BRep_Tool::Triangulation(
+        face, meshLocation);
+    const Handle(Poly_PolygonOnTriangulation) polygon =
+        BRep_Tool::PolygonOnTriangulation(edge, mesh, meshLocation);
+    result.pcurve = !pcurve.IsNull()
+        && pcurve.get() == expectedPCurve.get();
+    result.polygonOnMesh = !polygon.IsNull()
+        && polygon.get() == expectedPolygon.get();
+    return result;
 }
 
 class DebugBRepCensusWord final {
@@ -10036,9 +10109,9 @@ DebugExerciseE4BRepEffectiveLocationWitnesses(double metersPerUnit) noexcept {
     return results;
 }
 
-std::vector<std::array<std::size_t, 64>>
+std::vector<std::array<std::size_t, 100>>
 DebugExerciseE4BRepKnownRepresentations(double metersPerUnit) noexcept {
-    std::vector<std::array<std::size_t, 64>> results;
+    std::vector<std::array<std::size_t, 100>> results;
     if (metersPerUnit != 0.001 && metersPerUnit != 1.0) return results;
     const double constructionScale = 0.001 / metersPerUnit;
     const std::array<std::uint32_t, 20> cases{{
@@ -10077,7 +10150,7 @@ DebugExerciseE4BRepKnownRepresentations(double metersPerUnit) noexcept {
     for (std::size_t caseIndex = 0; caseIndex < cases.size(); ++caseIndex) {
         std::fprintf(stderr, "E4_BREP_CASE %zu options=%u\n",
             caseIndex + 1, unsigned(cases[caseIndex]));
-        std::array<std::size_t, 64> result{};
+        std::array<std::size_t, 100> result{};
         result[1] = caseIndex + 1;
         result[27] = (cases[caseIndex] & DebugKnownHasUV) ? 1U : 0U;
         result[28] = (cases[caseIndex] & DebugKnownHasNormals) ? 1U : 0U;
@@ -10128,9 +10201,41 @@ DebugExerciseE4BRepKnownRepresentations(double metersPerUnit) noexcept {
                 builder.Add(compound, first.face);
             }
 
+            const bool hasSecond =
+                (cases[caseIndex] & DebugKnownTwin) != 0;
+            const auto multiplicity = [&](const auto& firstHandle,
+                                          const auto& secondHandle) {
+                return hasSecond && firstHandle.get() != secondHandle.get()
+                    ? std::size_t(2) : std::size_t(1);
+            };
+            const std::size_t surfaceMultiplicity = multiplicity(
+                first.surface, second.surface);
+            const std::size_t curveMultiplicity = multiplicity(
+                first.curve, second.curve);
+            const std::size_t pcurveMultiplicity = multiplicity(
+                first.pcurve, second.pcurve);
+            const std::size_t meshMultiplicity = multiplicity(
+                first.mesh, second.mesh);
+            const std::size_t polygon3DMultiplicity = multiplicity(
+                first.polygon3d, second.polygon3d);
+            const std::size_t polygonOnMeshMultiplicity = multiplicity(
+                first.polygonOnMesh, second.polygonOnMesh);
+            const auto firstIncidence = DebugObserveKnownBRepEffectiveIncidence(
+                first.face, first.pcurve, first.polygonOnMesh);
+            const auto secondIncidence = hasSecond
+                ? DebugObserveKnownBRepEffectiveIncidence(
+                    second.face, second.pcurve, second.polygonOnMesh)
+                : DebugKnownBRepIncidenceObservation{true, true};
+            const bool sourcePCurveIncidence = firstIncidence.pcurve
+                && secondIncidence.pcurve;
+            const bool sourcePolygonIncidence = firstIncidence.polygonOnMesh
+                && secondIncidence.polygonOnMesh;
+
             OperationLedger ledger(kMaxSnapshotNumericBytes,
                 kMaxAggregateEncodedTextureBytes,
                 kMaxAggregateDecodedTextureBytes);
+            const std::size_t initialRemaining = ledger.remaining(
+                decal_layer::bake::accounting::StorageDimension::PrivateStorage);
             retained_edge_treatment::ReplayBudget budget;
             BRepRepresentationCensus source, prediction;
             decal_layer::bake::accounting::Ticket scratch;
@@ -10165,7 +10270,10 @@ DebugExerciseE4BRepKnownRepresentations(double metersPerUnit) noexcept {
                 continue;
             }
             diagnostic.reset();
-            bool copiedIncidence = true;
+            bool copiedPCurveIncidence = true;
+            bool copiedPolygonIncidence = true;
+            bool meshParametersPassed = true;
+            bool cachedBoundsPassed = true;
             for (Standard_Integer index = 1;
                  index <= sourceFaces.Extent(); ++index) {
                 const TopoDS_Face copiedFace =
@@ -10180,20 +10288,58 @@ DebugExerciseE4BRepKnownRepresentations(double metersPerUnit) noexcept {
                     ++copiedEdgeCount;
                     const TopoDS_Edge copiedEdge =
                         TopoDS::Edge(explorer.Current());
+                    Standard_Real firstParameter = 0.0, lastParameter = 0.0;
+                    const Handle(Geom2d_Curve) copiedPCurve =
+                        BRep_Tool::CurveOnSurface(copiedEdge, copiedFace,
+                            firstParameter, lastParameter);
                     const Handle(Poly_PolygonOnTriangulation) copiedPolygon =
                         BRep_Tool::PolygonOnTriangulation(
                             copiedEdge, copiedMesh, copiedMeshLocation);
-                    copiedIncidence = copiedIncidence
+                    copiedPCurveIncidence = copiedPCurveIncidence
+                        && !copiedPCurve.IsNull();
+                    copiedPolygonIncidence = copiedPolygonIncidence
                         && !copiedPolygon.IsNull()
                         && copiedPolygon->NbNodes() == 3
                         && copiedPolygon->Node(1) == 1
                         && copiedPolygon->Node(2) == 2
                         && copiedPolygon->Node(3) == 3;
                 }
-                copiedIncidence = copiedIncidence && copiedEdgeCount == 1;
+                copiedPCurveIncidence = copiedPCurveIncidence
+                    && copiedEdgeCount == 1;
+                copiedPolygonIncidence = copiedPolygonIncidence
+                    && copiedEdgeCount == 1;
+                const bool expectsParameters =
+                    (cases[caseIndex] & DebugKnownMeshParameters) != 0;
+                const auto& copiedParameters = copiedMesh->Parameters();
+                if (expectsParameters) {
+                    const auto& sourceParameters = first.mesh->Parameters();
+                    meshParametersPassed = meshParametersPassed
+                        && !sourceParameters.IsNull()
+                        && !copiedParameters.IsNull()
+                        && copiedParameters.get() != sourceParameters.get()
+                        && copiedParameters->Deflection()
+                            == sourceParameters->Deflection()
+                        && copiedParameters->Angle()
+                            == sourceParameters->Angle()
+                        && copiedParameters->MinSize()
+                            == sourceParameters->MinSize();
+                } else {
+                    meshParametersPassed = meshParametersPassed
+                        && copiedParameters.IsNull();
+                }
+                const bool expectsBounds =
+                    (cases[caseIndex] & DebugKnownCachedBounds) != 0;
+                cachedBoundsPassed = cachedBoundsPassed
+                    && copiedMesh->HasCachedMinMax() == expectsBounds
+                    && (!expectsBounds
+                        || !copiedMesh->CachedMinMax().IsVoid());
             }
             const std::size_t remainingWithTicket = ledger.remaining(
                 decal_layer::bake::accounting::StorageDimension::PrivateStorage);
+            const std::size_t sourceFaceEntries =
+                std::size_t(sourceFaces.Extent());
+            const std::size_t detachedFaceEntries =
+                std::size_t(detachedFaces.Extent());
             sourceFaces.Clear(); detachedFaces.Clear(); detached.Nullify();
             copier.reset();
             const std::size_t remainingBeforeSettlement = ledger.remaining(
@@ -10201,6 +10347,21 @@ DebugExerciseE4BRepKnownRepresentations(double metersPerUnit) noexcept {
             retained.reset();
             const std::size_t remainingAfterSettlement = ledger.remaining(
                 decal_layer::bake::accounting::StorageDimension::PrivateStorage);
+            const bool sourceTermSum = source.total
+                == source.tShapes + source.listNodes + source.representations
+                    + source.geometry + source.meshLogical
+                    + source.polygonStorage + source.harrayStorage
+                    + source.locations;
+            const bool predictionTermSum = prediction.total
+                == prediction.tShapes + prediction.listNodes
+                    + prediction.representations + prediction.geometry
+                    + prediction.meshLogical + prediction.polygonStorage
+                    + prediction.harrayStorage + prediction.locations;
+            const bool detachedTermSum = after.total
+                == after.tShapes + after.listNodes + after.representations
+                    + after.geometry + after.meshLogical
+                    + after.polygonStorage + after.harrayStorage
+                    + after.locations;
             const bool bezier = (cases[caseIndex] & DebugKnownBezier) != 0;
             const bool rationalBezier =
                 (cases[caseIndex] & DebugKnownRationalBezier) != 0;
@@ -10220,7 +10381,8 @@ DebugExerciseE4BRepKnownRepresentations(double metersPerUnit) noexcept {
                 remainingWithTicket == remainingBeforeSettlement ? 1U : 0U,
                 remainingAfterSettlement - remainingBeforeSettlement
                     == reserved ? 1U : 0U,
-                copiedIncidence ? 1U : 0U, 1,
+                copiedPCurveIncidence && copiedPolygonIncidence ? 1U : 0U,
+                sourcePCurveIncidence && sourcePolygonIncidence ? 1U : 0U,
                 (cases[caseIndex] & DebugKnownHasUV) ? 1U : 0U,
                 (cases[caseIndex] & DebugKnownHasNormals) ? 1U : 0U,
                 (!bezier || rationalBezier) ? 1U : 0U,
@@ -10245,6 +10407,30 @@ DebugExerciseE4BRepKnownRepresentations(double metersPerUnit) noexcept {
                 prediction.harrayStorage, prediction.locations,
                 after.geometry, after.meshLogical, after.polygonStorage,
                 after.harrayStorage,
+                after.tShapes, after.listNodes, after.representations,
+                after.meshPhysical, after.meshNodes, after.meshTriangles,
+                after.meshUVNodes, after.meshNormals, after.locations,
+                after.locationNodes, after.locationDatums,
+                after.topologyCount, after.faceCount,
+                surfaceMultiplicity, curveMultiplicity, pcurveMultiplicity,
+                meshMultiplicity, polygon3DMultiplicity,
+                polygonOnMeshMultiplicity,
+                sourcePCurveIncidence ? 1U : 0U,
+                sourcePolygonIncidence ? 1U : 0U,
+                copiedPCurveIncidence ? 1U : 0U,
+                copiedPolygonIncidence ? 1U : 0U,
+                sourceFaceEntries, detachedFaceEntries,
+                meshParametersPassed ? 1U : 0U,
+                cachedBoundsPassed ? 1U : 0U,
+                sourceTermSum ? 1U : 0U,
+                predictionTermSum ? 1U : 0U,
+                detachedTermSum ? 1U : 0U,
+                source.actualMeshNodesAreDouble ? 1U : 0U,
+                source.actualMeshUVNodesAreDouble ? 1U : 0U,
+                after.actualMeshNodesAreDouble ? 1U : 0U,
+                after.actualMeshUVNodesAreDouble ? 1U : 0U,
+                remainingAfterSettlement == initialRemaining ? 1U : 0U,
+                std::size_t(cases[caseIndex]),
             }};
         } catch (...) {
             // A zero success field is the explicit STOP observation.

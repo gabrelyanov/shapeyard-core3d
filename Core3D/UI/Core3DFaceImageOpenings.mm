@@ -76,7 +76,7 @@
 
 #if DEBUG
 namespace core3d::scene {
-std::array<std::size_t, 19>
+std::array<std::size_t, 23>
 DebugExerciseE4BRepCensusCopyPrediction() noexcept;
 std::array<std::size_t, 51>
 DebugE4BRepKnownRepresentationSizes() noexcept;
@@ -84,7 +84,7 @@ std::array<std::array<std::size_t, 4>, 11>
 DebugExerciseE4BRepReducedWordEvaluator() noexcept;
 std::array<std::array<std::size_t, 128>, 6>
 DebugExerciseE4BRepEffectiveLocationWitnesses(double metersPerUnit) noexcept;
-std::vector<std::array<std::size_t, 64>>
+std::vector<std::array<std::size_t, 100>>
 DebugExerciseE4BRepKnownRepresentations(double metersPerUnit) noexcept;
 std::array<std::size_t, 13>
 DebugExerciseE4BRepPlanarPCurveRefusal(bool storePCurve) noexcept;
@@ -3568,6 +3568,10 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         @"deniedTopologyCount": @(value[16]),
         @"exactlyEnoughBytes": @(value[17]),
         @"exactlyEnoughSuccess": @(value[18] != 0),
+        @"inactiveMeshFixtureBuilt": @(value[19] != 0),
+        @"inactiveMeshLossRefused": @(value[20] != 0),
+        @"inactiveMeshCopyEntries": @(value[21]),
+        @"inactiveMeshMapScratchEntries": @(value[22]),
         @"opaqueRemainder": @"not measured: opaque O1–O33 remainder",
     };
 }
@@ -3796,6 +3800,42 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
             @"detachedMeshLogicalBytes": @(value[61]),
             @"detachedPolygonBytes": @(value[62]),
             @"detachedHArrayBytes": @(value[63]),
+            @"detachedTShapeBytes": @(value[64]),
+            @"detachedListNodeBytes": @(value[65]),
+            @"detachedRepresentationBytes": @(value[66]),
+            @"detachedMeshPhysicalBytes": @(value[67]),
+            @"detachedMeshNodeBytes": @(value[68]),
+            @"detachedMeshTriangleBytes": @(value[69]),
+            @"detachedMeshUVBytes": @(value[70]),
+            @"detachedMeshNormalBytes": @(value[71]),
+            @"detachedLocationBytes": @(value[72]),
+            @"detachedLocationNodeBytes": @(value[73]),
+            @"detachedLocationDatumBytes": @(value[74]),
+            @"detachedTopologyCount": @(value[75]),
+            @"detachedFaceCount": @(value[76]),
+            @"sourceSurfaceMultiplicity": @(value[77]),
+            @"sourceCurveMultiplicity": @(value[78]),
+            @"sourcePCurveMultiplicity": @(value[79]),
+            @"sourceMeshMultiplicity": @(value[80]),
+            @"sourcePolygon3DMultiplicity": @(value[81]),
+            @"sourcePolygonOnMeshMultiplicity": @(value[82]),
+            @"sourcePCurveIncidence": @(value[83] != 0),
+            @"sourcePolygonOnMeshIncidence": @(value[84] != 0),
+            @"copiedPCurveIncidence": @(value[85] != 0),
+            @"copiedPolygonOnMeshIncidence": @(value[86] != 0),
+            @"sourceFaceMapEntries": @(value[87]),
+            @"detachedFaceMapEntries": @(value[88]),
+            @"meshParametersCopyPassed": @(value[89] != 0),
+            @"cachedBoundsCopyPassed": @(value[90] != 0),
+            @"sourceTermSumPassed": @(value[91] != 0),
+            @"predictedTermSumPassed": @(value[92] != 0),
+            @"detachedTermSumPassed": @(value[93] != 0),
+            @"sourceMeshNodesAreDouble": @(value[94] != 0),
+            @"sourceMeshUVNodesAreDouble": @(value[95] != 0),
+            @"detachedMeshNodesAreDouble": @(value[96] != 0),
+            @"detachedMeshUVNodesAreDouble": @(value[97] != 0),
+            @"ledgerBalanced": @(value[98] != 0),
+            @"constructorOptions": @(value[99]),
         }];
     }
     return @{

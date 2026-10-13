@@ -655,7 +655,8 @@ __attribute__((objc_subclassing_restricted))
 //! plane and for two occurrences of the same face key.
 - (NSDictionary<NSString *,id> *)debugE4BRepCensusCopyPrediction;
 //! Constructor-authored rational/nonrational, optional mesh, stored-parameter,
-//! alias and T14 matrix. The numeric bridge exposes observations only.
+//! six-axis alias and T14 matrix. The numeric bridge exposes observations only;
+//! expectations remain independently authored by the test manifest.
 - (NSDictionary<NSString *,id> *)
     debugE4BRepCensusKnownRepresentationForMetersPerUnit:
         (NSNumber *)metersPerUnit;
