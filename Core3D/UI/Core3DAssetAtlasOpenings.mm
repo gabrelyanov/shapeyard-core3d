@@ -27,6 +27,13 @@
 // core3d::asset_atlas::AssetAtlasProbe::AddPart (OcctDocument.mm).
 #include "../OCCTKit/NativeOpeningSurfaceProbe.hxx"
 #include "../OCCTKit/ProfilePersistence.hxx"
+#include "../OCCTKit/RetainedPartBoolean.hxx"
+#include <BRep_Builder.hxx>
+#include <BRep_CurveOnClosedSurface.hxx>
+#include <BRep_CurveOnSurface.hxx>
+#include <BRep_ListIteratorOfListOfCurveRepresentation.hxx>
+#include <BRep_TEdge.hxx>
+#include <BRepTools.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
@@ -46,7 +53,14 @@
 #include <Image_Texture.hxx>
 #include <NCollection_Buffer.hxx>
 #include <NCollection_BaseAllocator.hxx>
+#include <Geom2d_Circle.hxx>
+#include <Geom2d_Line.hxx>
+#include <Geom2d_TrimmedCurve.hxx>
+#include <GeomAdaptor_Surface.hxx>
+#include <CommonCrypto/CommonDigest.h>
 #include <functional>
+#include <locale>
+#include <sstream>
 #include <stdexcept>
 #endif
 
@@ -685,6 +699,201 @@ struct FixturePart final {
     TDF_Label owner;
 };
 
+struct PlanarRepresentationCensus final {
+    int incidences = 0, stored = 0, nonnull = 0;
+    int lines = 0, circles = 0, representationEntries = 0;
+};
+
+PlanarRepresentationCensus CensusStoredPlanar(const TopoDS_Shape& shape) {
+    PlanarRepresentationCensus result;
+    for (TopExp_Explorer faces(shape, TopAbs_FACE); faces.More(); faces.Next()) {
+        const TopoDS_Face face = TopoDS::Face(faces.Current());
+        TopLoc_Location faceLocation;
+        const Handle(Geom_Surface) surface = BRep_Tool::Surface(face, faceLocation);
+        if (surface.IsNull()
+            || GeomAdaptor_Surface(surface).GetType() != GeomAbs_Plane) continue;
+        for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More(); edges.Next()) {
+            ++result.incidences;
+            TopoDS_Edge edge = TopoDS::Edge(edges.Current());
+            if (face.Orientation() == TopAbs_REVERSED) edge.Reverse();
+            const TopLoc_Location relative = faceLocation.Predivided(edge.Location());
+            const Handle(BRep_TEdge) implementation =
+                Handle(BRep_TEdge)::DownCast(edge.TShape());
+            if (implementation.IsNull()) continue;
+            result.representationEntries += implementation->Curves().Size();
+            for (BRep_ListIteratorOfListOfCurveRepresentation it(
+                    implementation->Curves()); it.More(); it.Next()) {
+                const Handle(BRep_CurveRepresentation)& representation = it.Value();
+                if (representation.IsNull()
+                    || !representation->IsCurveOnSurface(surface, relative)) continue;
+                ++result.stored;
+                Handle(Geom2d_Curve) curve = representation->PCurve();
+                if (representation->IsCurveOnClosedSurface()
+                    && edge.Orientation() == TopAbs_REVERSED)
+                    curve = representation->PCurve2();
+                if (curve.IsNull()) break;
+                ++result.nonnull;
+                if (curve->DynamicType() == STANDARD_TYPE(Geom2d_TrimmedCurve))
+                    curve = Handle(Geom2d_TrimmedCurve)::DownCast(curve)->BasisCurve();
+                if (curve->DynamicType() == STANDARD_TYPE(Geom2d_Line)) ++result.lines;
+                if (curve->DynamicType() == STANDARD_TYPE(Geom2d_Circle)) ++result.circles;
+                break;
+            }
+        }
+    }
+    return result;
+}
+
+TopoDS_Shape AnalyticFixtureShape(int kind, double unit) {
+    const double n = .001 / unit;
+    TopoDS_Shape shape = kind == 1
+        ? BRepPrimAPI_MakeCylinder(10 * n, 25 * n).Shape()
+        : kind == 2 ? BRepPrimAPI_MakeBox(12 * n, 12 * n, 12 * n).Shape()
+                    : BRepPrimAPI_MakeBox(40 * n, 30 * n, 20 * n).Shape();
+    std::vector<std::array<double, 3>> centers;
+    if (kind == 1) centers = {{{-4 * n, 0, 0}}};
+    else if (kind == 2) centers = {{{4 * n, 6 * n, 0}}};
+    else centers = {{{12 * n, 15 * n, 0}}, {{28 * n, 15 * n, 0}}};
+    const double radius = (kind == 2 ? 1.5 : kind == 1 ? 2 : 3) * n;
+    const std::atomic_bool stop(false);
+    for (const auto& center : centers) {
+        core3d::analytic_boolean::Recipe recipe;
+        recipe.metersPerUnit = unit;
+        recipe.operation = core3d::analytic_boolean::Operation::Difference;
+        recipe.tool.identifier = 1;
+        recipe.tool.kind = core3d::analytic_boolean::OperandKind::Cylinder;
+        recipe.tool.axis = core3d::analytic_boolean::Axis::Z;
+        recipe.tool.point = center;
+        recipe.tool.radius = radius;
+        core3d::analytic_boolean::Result cut;
+        const auto status = core3d::analytic_boolean::Build(shape, recipe, stop, cut);
+        if (status != core3d::analytic_boolean::Status::Built)
+            throw std::invalid_argument("analytic pcurve fixture cut kind "
+                + std::to_string(kind) + " unit " + std::to_string(unit)
+                + " status " + std::to_string(int(status)));
+        shape = cut.solid;
+    }
+    return shape;
+}
+
+NSString *ShapeSHA256(const TopoDS_Shape& shape, NSData **bytesOut) {
+    std::string bytes;
+    if (!core3d::retained_part_boolean::ExactShapeBytes(shape, bytes)) return nil;
+    NSData *data = [NSData dataWithBytes:bytes.data() length:bytes.size()];
+    if (bytesOut) *bytesOut = data;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH]{};
+    CC_SHA256(bytes.data(), CC_LONG(bytes.size()), digest);
+    NSMutableString *hex = [NSMutableString stringWithCapacity:64];
+    for (unsigned char value : digest) [hex appendFormat:@"%02x", value];
+    return hex;
+}
+
+NSDictionary<NSString *, NSNumber *> *CensusDictionary(
+    const PlanarRepresentationCensus& value) {
+    return @{@"incidences": @(value.incidences), @"stored": @(value.stored),
+        @"nonnull": @(value.nonnull), @"lines": @(value.lines),
+        @"circles": @(value.circles),
+        @"representationEntries": @(value.representationEntries)};
+}
+
+enum class PlanarControl { RemoveLine, RemoveCircle, StoredNull, Paired };
+
+bool AlterFirstPlanarRepresentation(TopoDS_Shape& shape, PlanarControl control) {
+    for (TopExp_Explorer faces(shape, TopAbs_FACE); faces.More(); faces.Next()) {
+        const TopoDS_Face face = TopoDS::Face(faces.Current());
+        TopLoc_Location faceLocation;
+        const Handle(Geom_Surface) surface = BRep_Tool::Surface(face, faceLocation);
+        if (surface.IsNull()
+            || GeomAdaptor_Surface(surface).GetType() != GeomAbs_Plane) continue;
+        for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More(); edges.Next()) {
+            const TopoDS_Edge edge = TopoDS::Edge(edges.Current());
+            const TopLoc_Location relative = faceLocation.Predivided(edge.Location());
+            const Handle(BRep_TEdge) implementation =
+                Handle(BRep_TEdge)::DownCast(edge.TShape());
+            if (implementation.IsNull()) continue;
+            BRep_ListOfCurveRepresentation& curves = implementation->ChangeCurves();
+            for (BRep_ListIteratorOfListOfCurveRepresentation it(curves);
+                 it.More(); it.Next()) {
+                const Handle(BRep_CurveRepresentation) representation = it.Value();
+                if (representation.IsNull()
+                    || !representation->IsCurveOnSurface(surface, relative)
+                    || representation->PCurve().IsNull()) continue;
+                Handle(Geom2d_Curve) basis = representation->PCurve();
+                if (basis->DynamicType() == STANDARD_TYPE(Geom2d_TrimmedCurve))
+                    basis = Handle(Geom2d_TrimmedCurve)::DownCast(basis)->BasisCurve();
+                const bool circle = basis->DynamicType() == STANDARD_TYPE(Geom2d_Circle);
+                if ((control == PlanarControl::RemoveLine && circle)
+                    || (control == PlanarControl::RemoveCircle && !circle)) continue;
+                if (control == PlanarControl::RemoveLine
+                    || control == PlanarControl::RemoveCircle) {
+                    curves.Remove(it);
+                    return true;
+                }
+                const Handle(BRep_CurveOnSurface) onSurface =
+                    Handle(BRep_CurveOnSurface)::DownCast(representation);
+                if (onSurface.IsNull()) return false;
+                if (control == PlanarControl::StoredNull) {
+                    onSurface->PCurve(Handle(Geom2d_Curve)());
+                    return true;
+                }
+                Handle(Geom2d_Curve) first =
+                    Handle(Geom2d_Curve)::DownCast(representation->PCurve()->Copy());
+                Handle(Geom2d_Curve) second =
+                    Handle(Geom2d_Curve)::DownCast(representation->PCurve()->Copy());
+                Handle(BRep_CurveOnClosedSurface) paired =
+                    new BRep_CurveOnClosedSurface(first, second, surface,
+                        relative, GeomAbs_C0);
+                paired->SetRange(onSurface->First(), onSurface->Last());
+                curves.Remove(it);
+                curves.Append(paired);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+NSDictionary<NSString *, NSNumber *> *AnalyticScaleControls() {
+    gp_Trsf scale; scale.SetScale(gp::Origin(), 1000);
+    TopoDS_Shape absentLine = BRepPrimAPI_MakeBox(0.04, 0.03, 0.02).Shape();
+    TopoDS_Shape absentCircle = BRepPrimAPI_MakeCylinder(0.01, 0.025).Shape();
+    TopoDS_Shape storedNull = BRepPrimAPI_MakeBox(0.04, 0.03, 0.02).Shape();
+    TopoDS_Shape paired = BRepPrimAPI_MakeBox(0.04, 0.03, 0.02).Shape();
+    gp_Trsf move; move.SetTranslation(gp_Vec(0.01, -0.02, 0.03));
+    paired.Location(TopLoc_Location(move));
+    const bool alteredLine = AlterFirstPlanarRepresentation(
+        absentLine, PlanarControl::RemoveLine);
+    const bool alteredCircle = AlterFirstPlanarRepresentation(
+        absentCircle, PlanarControl::RemoveCircle);
+    const bool alteredNull = AlterFirstPlanarRepresentation(
+        storedNull, PlanarControl::StoredNull);
+    const bool alteredPair = AlterFirstPlanarRepresentation(
+        paired, PlanarControl::Paired);
+    TopoDS_Shape lineResult, circleResult, nullResult, pairResult;
+    const bool lineScaled = core3d::analytic_boolean_scale::Scale(
+        absentLine, scale, lineResult);
+    const bool circleScaled = core3d::analytic_boolean_scale::Scale(
+        absentCircle, scale, circleResult);
+    const bool nullScaled = core3d::analytic_boolean_scale::Scale(
+        storedNull, scale, nullResult);
+    const bool pairScaled = core3d::analytic_boolean_scale::Scale(
+        paired, scale, pairResult);
+    const auto line = CensusStoredPlanar(lineResult);
+    const auto circle = CensusStoredPlanar(circleResult);
+    const auto null = CensusStoredPlanar(nullResult);
+    const auto pair = CensusStoredPlanar(pairResult);
+    return @{@"absentLineStayedAbsent": @(
+            alteredLine && lineScaled && line.stored < line.incidences),
+        @"absentCircleStayedAbsent": @(
+            alteredCircle && circleScaled && circle.stored < circle.incidences),
+        @"storedNullStayedStoredNull": @(
+            alteredNull && nullScaled && null.stored == null.incidences
+            && null.nonnull < null.stored),
+        @"pairedReversedLocatedPreserved": @(
+            alteredPair && pairScaled && pair.stored == pair.incidences
+            && pair.nonnull == pair.stored)};
+}
+
 // One literal primitive with stored triangulation, a retained-solid record and
 // a real row-268 finishing receipt, each committed in its own command. Every
 // member uses production saved-cut recipe geometry so the selected member's
@@ -966,6 +1175,69 @@ NSData *CreateAssetAtlasDebugFixture(
         [metersPerUnit](const Handle(TDocStd_Document)& document) {
             StageAssetAtlasFixture(document, metersPerUnit);
         });
+}
+
++ (NSDictionary<NSString *, id> *)
+    debugAnalyticBooleanPlanarPCurves:(double)metersPerUnit {
+    if (!NSThread.isMainThread || (metersPerUnit != 0.001 && metersPerUnit != 1.0))
+        return nil;
+    try {
+        NSMutableArray *members = [NSMutableArray arrayWithCapacity:3];
+        const int expectedIncidences[] = {28, 4, 26};
+        const int expectedLines[] = {24, 0, 24};
+        const int expectedCircles[] = {4, 4, 2};
+        bool complete = true;
+        for (int kind = 0; kind < 3; ++kind) {
+            TopoDS_Shape shape = AnalyticFixtureShape(kind, metersPerUnit);
+            const auto finalCensus = CensusStoredPlanar(shape);
+            BRepMesh_IncrementalMesh mesh(shape,
+                2.5e-4 * (.001 / metersPerUnit), Standard_False, 0.5, Standard_True);
+            const auto postMeshCensus = CensusStoredPlanar(shape);
+            NSData *rawBytes = nil;
+            NSString *digest = ShapeSHA256(shape, &rawBytes);
+            TopoDS_Shape reopened;
+            BRep_Builder builder;
+            const char *raw = static_cast<const char *>(rawBytes.bytes);
+            std::istringstream stream(std::string(raw, rawBytes.length));
+            stream.imbue(std::locale::classic());
+            BRepTools::Read(reopened, stream, builder);
+            const bool read = !reopened.IsNull();
+            const auto reopenedCensus = read
+                ? CensusStoredPlanar(reopened) : PlanarRepresentationCensus{};
+            const bool memberComplete = finalCensus.incidences == expectedIncidences[kind]
+                && finalCensus.stored == expectedIncidences[kind]
+                && finalCensus.nonnull == expectedIncidences[kind]
+                && finalCensus.lines == expectedLines[kind]
+                && finalCensus.circles == expectedCircles[kind]
+                && postMeshCensus.stored == finalCensus.stored
+                && reopenedCensus.stored == finalCensus.stored
+                && reopenedCensus.nonnull == finalCensus.nonnull;
+            complete = complete && memberComplete;
+            [members addObject:@{@"kind": @(kind),
+                @"member": kind == 0 ? @"box-22"
+                    : kind == 1 ? @"cylinder-21" : @"painted-box-23",
+                @"savedMember": @(kind != 2),
+                @"final": CensusDictionary(finalCensus),
+                @"postMesh": CensusDictionary(postMeshCensus),
+                @"reopened": CensusDictionary(reopenedCensus),
+                @"rawBRepV3": rawBytes ?: NSData.data,
+                @"rawBRepV3SHA256": digest ?: @"",
+                @"complete": @(memberComplete)}];
+        }
+        return @{@"fixture": @"AnalyticBooleanStoredPlanarPCurves",
+            @"metersPerUnit": @(metersPerUnit), @"members": members,
+            @"controls": AnalyticScaleControls(),
+            @"allStoredNonNull": @(complete)};
+    } catch (const Standard_Failure& failure) {
+        return @{@"fixture": @"AnalyticBooleanStoredPlanarPCurves",
+            @"error": [NSString stringWithUTF8String:failure.GetMessageString()] ?: @"OCCT failure"};
+    } catch (const std::exception& failure) {
+        return @{@"fixture": @"AnalyticBooleanStoredPlanarPCurves",
+            @"error": [NSString stringWithUTF8String:failure.what()] ?: @"C++ failure"};
+    } catch (...) {
+        return @{@"fixture": @"AnalyticBooleanStoredPlanarPCurves",
+            @"error": @"unknown failure"};
+    }
 }
 #endif
 @end

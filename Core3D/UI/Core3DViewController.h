@@ -764,6 +764,11 @@ __attribute__((objc_subclassing_restricted))
 //! open document.
 + (NSData *_Nullable)debugAssetAtlasFixtureAssetData:(double)metersPerUnit
     NS_SWIFT_NAME(debugAssetAtlasFixtureAssetData(metersPerUnit:));
+//! Raw BRep_TEdge planar representation census for the three production-cut
+//! atlas objects, including mesh and V3 reopen observations.
++ (NSDictionary<NSString *, id> *_Nullable)
+    debugAnalyticBooleanPlanarPCurves:(double)metersPerUnit
+    NS_SWIFT_NAME(debugAnalyticBooleanPlanarPCurves(metersPerUnit:));
 //! UI-test fixture: asset data for one retained box with one adopted E3 image
 //! resource and one committed face-image binding in the requested unit
 //! system. nil on any failure; never mutates an open document.

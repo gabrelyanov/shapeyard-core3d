@@ -2,6 +2,7 @@
 // Detached geometry only. No OCAF command, owner, catalog, material, receipt or
 // public UI/AI API is provided. Caller supplies an already detached base shape.
 #include "AnalyticBooleanRingOperand.hxx"
+#include "AnalyticBooleanScale.hxx"
 #include "AnalyticBooleanWedgeOperand.hxx"
 #include "RetainedTopologyBudget.hxx"
 #include <BRepBuilderAPI_MakePolygon.hxx>
@@ -325,9 +326,14 @@ inline Status BuildShared(const TopoDS_Shape& detachedBase, const Recipe& recipe
         if(mm!=1.0){
             gp_Trsf kernelUp;kernelUp.SetScale(gp::Origin(),mm);
             kernelDown.SetScale(gp::Origin(),1/mm);
-            kernelBase=BRepBuilderAPI_Transform(base,kernelUp,Standard_True).Shape();
-            for(const auto& tool:tools)
-                kernelTools.Append(BRepBuilderAPI_Transform(tool,kernelUp,Standard_True).Shape());
+            if(!analytic_boolean_scale::Scale(base,kernelUp,kernelBase))
+                return Status::KernelFailure;
+            for(const auto& tool:tools){
+                TopoDS_Shape scaledTool;
+                if(!analytic_boolean_scale::Scale(tool,kernelUp,scaledTool))
+                    return Status::KernelFailure;
+                kernelTools.Append(scaledTool);
+            }
         }else kernelTools=tools;
         TopTools_ListOfShape kernelArguments;kernelArguments.Append(kernelBase);
         if (shared) {
@@ -351,7 +357,12 @@ inline Status BuildShared(const TopoDS_Shape& detachedBase, const Recipe& recipe
         if (stop.load()) return Status::Cancelled;
         if (!cut.IsDone() || cut.HasErrors() || cut.HasWarnings() || cut.Shape().IsNull()) return Status::KernelFailure;
         TopoDS_Shape produced=cut.Shape();
-        if(mm!=1.0)produced=BRepBuilderAPI_Transform(produced,kernelDown,Standard_True).Shape();
+        if(mm!=1.0){
+            TopoDS_Shape scaledResult;
+            if(!analytic_boolean_scale::Scale(produced,kernelDown,scaledResult))
+                return Status::KernelFailure;
+            produced=scaledResult;
+        }
         if (shared) {
             // C26: the produced shape is censused before any consumer, and
             // the result validity/classification/volume/bounds passes are
