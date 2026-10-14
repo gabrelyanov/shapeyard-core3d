@@ -35,7 +35,64 @@ public:
 private:
     Reference value_ = nullptr;
 };
+#ifdef DEBUG
+thread_local DebugKernelObservation gDebugKernelObservation;
+thread_local bool gDebugDenyKernelEncoder = false;
+#endif
 } // namespace
+
+#ifdef DEBUG
+void DebugBeginKernelObservation(bool denyEncoder) noexcept {
+    gDebugKernelObservation = {};
+    gDebugDenyKernelEncoder = denyEncoder;
+}
+
+DebugKernelObservation DebugTakeKernelObservation() noexcept {
+    const auto result = gDebugKernelObservation;
+    gDebugKernelObservation = {};
+    gDebugDenyKernelEncoder = false;
+    return result;
+}
+
+bool DebugKernelEncoderReservationAttempt() noexcept {
+    ++gDebugKernelObservation.encoderReservationAttempts;
+    if (!gDebugDenyKernelEncoder) return false;
+    gDebugDenyKernelEncoder = false;
+    return true;
+}
+
+void DebugKernelEncoderReserved() noexcept {
+    gDebugKernelObservation.encoderReservedBeforeAllocation = true;
+}
+void DebugKernelEncoderAllocated() noexcept {
+    ++gDebugKernelObservation.encoderAllocationEntries;
+}
+void DebugKernelRolesReserved() noexcept {
+    gDebugKernelObservation.rolesReservedBeforeAllocation = true;
+}
+void DebugKernelOutputsReserved() noexcept {
+    gDebugKernelObservation.outputsReservedBeforeAllocation = true;
+}
+void DebugKernelOwnerReserved(std::size_t bytes) noexcept {
+    gDebugKernelObservation.ownerReservedBeforeAllocation = true;
+    gDebugKernelObservation.outputRGBABytes += bytes;
+}
+void DebugKernelGutterReserved(std::size_t bytes) noexcept {
+    gDebugKernelObservation.gutterReservedBeforeAllocation = true;
+    gDebugKernelObservation.gutterOverlap = bytes != 0;
+}
+void DebugKernelJobsConsumed(std::size_t roles) noexcept {
+    gDebugKernelObservation.atlasJobConsumed = true;
+    gDebugKernelObservation.sourceJobConsumed = true;
+    gDebugKernelObservation.gutterJobConsumed = true;
+    gDebugKernelObservation.encoderJobConsumed = true;
+    gDebugKernelObservation.roleCount = roles;
+}
+void DebugKernelOutputTransferred(std::size_t pngBytes) noexcept {
+    gDebugKernelObservation.outputTransferred = true;
+    gDebugKernelObservation.outputPNGBytes += pngBytes;
+}
+#endif
 
 // Bounded ImageIO decode to exact straight RGBA8 working pixels (the same
 // decoder the capture path uses; declared in PaintedAtlasBake.hxx so the
@@ -2481,8 +2538,13 @@ Outcome Prepare(Staging& staging, const Handle(TDocStd_Document)& document,
         const auto decoded = DecodeCapturedSources(
             staging.capturedSources.values, staging.operation.view, sources);
         if (decoded != Outcome::Prepared) return decoded;
-        if (!kernel::Bake(staging.atlas, layout, sources.values, staging.outputs,
-                          staging.evidence)) return Outcome::Refused;
+        if (!kernel::Bake(staging.atlas, layout, sources.values,
+                staging.outputs, staging.evidence, staging.outputVectorTicket,
+                staging.evidenceTicket,
+                staging.operation.view))
+            return staging.operation.view.Recheck(
+                FailureSite::ExportBakeStorage)
+                ? Outcome::Refused : Outcome::OverBudget;
         staging.bake.key = key; staging.bake.layoutProof = staging.atlas.layoutProof;
         for (const auto& source : staging.capturedSources)
             staging.bake.bindings.push_back(source.fence);
@@ -2888,9 +2950,15 @@ Outcome BakeForExport(const ExportCapture& capture,
         output.atlas = std::move(finalAtlas);
         output.assignments = std::move(assignments);
         if (!kernel::Bake(output.atlas, layout, sources.values,
-                          output.outputs, output.evidence)) {
+                output.outputs, output.evidence,
+                output.storage->outputVectorStorage,
+                output.storage->evidenceStorage,
+                capture.operation.view,
+                output.storage->finalAtlas.sealAtlasJob)) {
+            const bool budget = !capture.operation.view.Recheck(
+                decal_layer::bake::accounting::FailureSite::ExportBakeStorage);
             output = {};
-            return Outcome::Refused;
+            return budget ? Outcome::OverBudget : Outcome::Refused;
         }
         output.bake.key = output.atlas.key;
         output.bake.layoutProof = output.atlas.layoutProof;
@@ -3015,10 +3083,15 @@ Outcome BuildAndBakeTransientForExport(
         output.atlas = std::move(atlas);
         output.assignments = std::move(assignments);
         if (!kernel::Bake(output.atlas, layout, sources.values,
-                output.outputs, output.evidence)) {
+                output.outputs, output.evidence,
+                output.storage->outputVectorStorage,
+                output.storage->evidenceStorage, capture.operation,
+                output.storage->finalAtlas.sealAtlasJob)) {
+            const bool budget = !capture.operation.Recheck(
+                decal_layer::bake::accounting::FailureSite::ExportBakeStorage);
             output = {};
             diagnosis = "transient-kernel-bake";
-            return Outcome::Refused;
+            return budget ? Outcome::OverBudget : Outcome::Refused;
         }
         output.bake.key = output.atlas.key;
         output.bake.layoutProof = output.atlas.layoutProof;

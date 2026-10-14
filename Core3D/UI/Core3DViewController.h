@@ -652,6 +652,12 @@ __attribute__((objc_subclassing_restricted))
 - (nullable NSDictionary<NSString *,id> *)
     debugE4FinalAtlasPlanForEntityIdentifier:(NSString *)entityIdentifier
     NS_SWIFT_NAME(debugE4FinalAtlasPlan(entityIdentifier:));
+//! Runs the five-role 2048 kernel with its inherited operation, observes the
+//! retained output after return, and denies encoder admission before allocation.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4PaintedKernelReservationsForEntityIdentifier:
+        (NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugE4PaintedKernelReservations(entityIdentifier:));
 //! Arms the next genuine CapturePrivateExportDecals census. YES leaves one
 //! byte less than its measured ticket; NO observes the under-limit copy.
 - (void)debugArmE4BRepCensusObservationRefuseOneByteShort:

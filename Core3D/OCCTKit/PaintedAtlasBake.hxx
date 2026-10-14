@@ -25,6 +25,40 @@
 
 namespace core3d::painted_atlas_bake::kernel {
 
+#ifdef DEBUG
+struct DebugOperationStorage final {
+    std::size_t privateLive = 0;
+    std::size_t privateRetained = 0;
+    std::size_t privatePeak = 0;
+    std::size_t cumulativeWork = 0;
+    std::size_t encoderAllocationEntries = 0;
+    decal_layer::bake::accounting::FailureSite firstFailure =
+        decal_layer::bake::accounting::FailureSite::None;
+};
+struct DebugKernelObservation final {
+    bool rolesReservedBeforeAllocation = false;
+    bool outputsReservedBeforeAllocation = false;
+    bool ownerReservedBeforeAllocation = false;
+    bool gutterReservedBeforeAllocation = false;
+    bool encoderReservedBeforeAllocation = false;
+    bool outputTransferred = false;
+    bool gutterOverlap = false;
+    bool atlasJobConsumed = false;
+    bool sourceJobConsumed = false;
+    bool gutterJobConsumed = false;
+    bool encoderJobConsumed = false;
+    std::size_t roleCount = 0;
+    std::size_t outputRGBABytes = 0;
+    std::size_t outputPNGBytes = 0;
+    std::size_t encoderReservationAttempts = 0;
+    std::size_t encoderAllocationEntries = 0;
+};
+void DebugBeginKernelObservation(bool denyEncoder) noexcept;
+DebugKernelObservation DebugTakeKernelObservation() noexcept;
+DebugOperationStorage DebugObserveOperationStorage(
+    const decal_layer::bake::accounting::View& operation) noexcept;
+#endif
+
 struct Image final {
     decal_layer::bake::accounting::Owner operationOwner;
     decal_layer::bake::accounting::Ticket rgbaTicket;
@@ -114,6 +148,9 @@ struct SourceStorage final {
 };
 
 struct Output final {
+    // Declared before the vectors so their backing allocations die first.
+    decal_layer::bake::accounting::Ticket rgbaTicket;
+    decal_layer::bake::accounting::Ticket pngTicket;
     BakedResource descriptor;
     std::vector<std::uint8_t> rgba;
     std::vector<std::uint8_t> png;
@@ -248,35 +285,105 @@ inline void Chunk(std::vector<std::uint8_t>& png, const char type[4],
     Big(png, CRC32(png.data() + start, 4 + payload.size()));
 }
 
-inline bool EncodePNG(const Image& image, bool srgb,
-                      std::vector<std::uint8_t>& png) noexcept {
+inline bool EncodePNG(
+    std::uint32_t width, std::uint32_t height,
+    const std::vector<std::uint8_t>& rgba, bool srgb,
+    std::vector<std::uint8_t>& png,
+    decal_layer::bake::accounting::Ticket& pngTicket,
+    const decal_layer::bake::accounting::View& operation) noexcept {
+    using namespace decal_layer::bake::accounting;
     png.clear();
     try {
-        if (!ImageValid(image)) return false;
+        if (!operation.valid() || width == 0 || height == 0
+            || width > std::uint32_t(face_image::kMaximumImageDimension)
+            || height > std::uint32_t(face_image::kMaximumImageDimension)
+            || std::uint64_t(width) * height * 4U != rgba.size()) return false;
+        std::size_t scanlineBytes = 0;
+        if (!operation.CheckedProduct(height, 1U + 4U * std::size_t(width),
+                1U, scanlineBytes, FailureSite::ExportCanonicalStorage))
+            return false;
+        const uLong compressedBound = compressBound(uLong(scanlineBytes));
+        if (compressedBound == 0
+            || compressedBound > std::numeric_limits<std::size_t>::max() - 70U)
+            return false;
+        constexpr std::size_t zlibWorkspaceBytes = 512U * 1024U;
+        Ticket scanlineTicket, zlibTicket, workspaceTicket, formatTicket;
+#ifdef DEBUG
+        extern bool DebugKernelEncoderReservationAttempt() noexcept;
+        if (DebugKernelEncoderReservationAttempt()) {
+            (void)operation.Reserve(StorageDimension::PrivateStorage,
+                std::numeric_limits<std::size_t>::max(), Retention::Scratch,
+                FailureSite::ExportCanonicalStorage);
+            return false;
+        }
+#endif
+        if (!scanlineTicket.acquire(operation, StorageDimension::PrivateStorage,
+                scanlineBytes, Retention::Scratch,
+                FailureSite::ExportCanonicalStorage)
+            || !zlibTicket.acquire(operation, StorageDimension::PrivateStorage,
+                std::size_t(compressedBound), Retention::Scratch,
+                FailureSite::ExportCanonicalStorage)
+            || !workspaceTicket.acquire(operation,
+                StorageDimension::PrivateStorage, zlibWorkspaceBytes,
+                Retention::Scratch,
+                FailureSite::ExportCanonicalStorage)
+            || !formatTicket.acquire(operation,
+                StorageDimension::PrivateStorage, 13U, Retention::Scratch,
+                FailureSite::ExportCanonicalStorage)) return false;
+#ifdef DEBUG
+        extern void DebugKernelEncoderReserved() noexcept;
+        DebugKernelEncoderReserved();
+#endif
+        if (!operation.EnterAllocation(FailureSite::ExportCanonicalStorage))
+            return false;
+#ifdef DEBUG
+        extern void DebugKernelEncoderAllocated() noexcept;
+        DebugKernelEncoderAllocated();
+#endif
         std::vector<std::uint8_t> scanlines;
-        scanlines.reserve(std::size_t(image.height) * (1 + 4 * image.width));
-        for (std::uint32_t y = 0; y < image.height; ++y) {
+        scanlines.reserve(scanlineBytes);
+        for (std::uint32_t y = 0; y < height; ++y) {
             scanlines.push_back(0);
-            const auto first = image.rgba.begin() + std::size_t(y) * image.width * 4;
-            scanlines.insert(scanlines.end(), first, first + std::size_t(image.width) * 4);
+            const auto first = rgba.begin() + std::size_t(y) * width * 4;
+            scanlines.insert(scanlines.end(), first, first + std::size_t(width) * 4);
         }
         // One bounded zlib stream: fixed level and default strategy/memLevel,
         // so equal inputs deflate to identical bytes on this build.
-        uLongf compressedLength = compressBound(uLong(scanlines.size()));
+        uLongf compressedLength = compressedBound;
         std::vector<std::uint8_t> zlib(compressedLength);
         if (compress2(zlib.data(), &compressedLength, scanlines.data(),
                       uLong(scanlines.size()), Z_BEST_COMPRESSION) != Z_OK)
             return false;
         zlib.resize(compressedLength);
+        const std::size_t pngCapacity = std::size_t(compressedLength)
+            + (srgb ? 70U : 57U);
+        if (!pngTicket.acquire(operation, StorageDimension::EncodedTexture,
+                pngCapacity, Retention::Retained,
+                FailureSite::ExportCanonicalStorage)
+            || !operation.EnterAllocation(
+                FailureSite::ExportCanonicalStorage)) return false;
+        png.reserve(pngCapacity);
         png = {137,80,78,71,13,10,26,10};
         std::vector<std::uint8_t> ihdr;
-        Big(ihdr, image.width); Big(ihdr, image.height);
+        ihdr.reserve(13);
+        Big(ihdr, width); Big(ihdr, height);
         ihdr.insert(ihdr.end(), {8, 6, 0, 0, 0});
         Chunk(png, "IHDR", ihdr);
-        if (srgb) Chunk(png, "sRGB", std::vector<std::uint8_t>{0});
+        if (srgb) {
+            ihdr.assign(1U, 0U);
+            Chunk(png, "sRGB", ihdr);
+        }
         Chunk(png, "IDAT", zlib); Chunk(png, "IEND", {});
-        return png.size() <= kMaximumEncodedImageBytes;
-    } catch (...) { png.clear(); return false; }
+        if (png.capacity() > pngTicket.bytes
+            || png.size() > kMaximumEncodedImageBytes) {
+            operation.AllocationFailed(FailureSite::ExportCanonicalStorage);
+            return false;
+        }
+        return true;
+    } catch (const std::bad_alloc&) {
+        operation.AllocationFailed(FailureSite::ExportCanonicalStorage);
+        png.clear(); pngTicket.reset(); return false;
+    } catch (...) { png.clear(); pngTicket.reset(); return false; }
 }
 
 inline bool ImageHash(const std::vector<std::uint8_t>& bytes, Digest& digest) noexcept {
@@ -289,10 +396,19 @@ inline bool Bake(const asset_atlas::Definition& atlas,
                  const asset_atlas::build::LayoutEvidence& layout,
                  const std::vector<Source>& sources,
                  std::vector<Output>& outputs,
-                 Evidence& evidence) noexcept {
-    outputs.clear(); evidence = {};
+                 Evidence& evidence,
+                 decal_layer::bake::accounting::Ticket& outputVectorTicket,
+                 decal_layer::bake::accounting::Ticket& evidenceTicket,
+                 const decal_layer::bake::accounting::View& operation,
+                 bool atlasJobAlreadySealed = false) noexcept {
+    using namespace decal_layer::bake::accounting;
+    std::vector<Output>().swap(outputs);
+    outputVectorTicket.reset();
+    evidenceTicket.reset();
+    evidence = {};
     try {
-        if (atlas.resolutionTexels <= 0 || atlas.resolutionTexels > kMaximumBakedDimension
+        if (!operation.valid()
+            || atlas.resolutionTexels <= 0 || atlas.resolutionTexels > kMaximumBakedDimension
             || atlas.gutterTexels < 1 || atlas.gutterTexels > 8
             || layout.charts.empty() || layout.packed.triangles.empty()
             || layout.chartMembers.size() != layout.charts.size()
@@ -300,13 +416,119 @@ inline bool Bake(const asset_atlas::Definition& atlas,
         for (const auto& source : sources) if (!Valid(source.fence) || !ImageValid(source.image))
             return false;
         const std::uint32_t size = std::uint32_t(atlas.resolutionTexels);
+        Ticket rolesTicket;
+        std::size_t rolesBytes = 0;
+        if (!operation.CheckedProduct(sources.size(), sizeof(Role), 1U,
+                rolesBytes, FailureSite::ExportObservedStorage)
+            || !rolesTicket.acquire(operation, StorageDimension::PrivateStorage,
+                rolesBytes, Retention::Scratch,
+                FailureSite::ExportObservedStorage)
+            || !operation.EnterAllocation(FailureSite::ExportObservedStorage))
+            return false;
         std::vector<Role> roles;
+        roles.reserve(sources.size());
+#ifdef DEBUG
+        extern void DebugKernelRolesReserved() noexcept;
+        DebugKernelRolesReserved();
+#endif
         for (const auto& source : sources)
             if (std::find(roles.begin(), roles.end(), source.fence.role) == roles.end())
                 roles.push_back(source.fence.role);
         std::sort(roles.begin(), roles.end(), [](Role a, Role b) {
             return std::uint8_t(a) < std::uint8_t(b);
         });
+        if (roles.empty() || roles.capacity() * sizeof(Role) > rolesTicket.bytes)
+            return false;
+
+        std::size_t pixels = 0, pixelBytes = 0, rolePixels = 0;
+        std::size_t gutterWork = 0, encoderWork = 0;
+        std::size_t sourceWork = 0, maskWork = 0, maskCount = 0;
+        std::size_t atlasWork = 0, part = 0;
+        const auto add = [&](std::size_t value, std::size_t& total) {
+            if (value > std::numeric_limits<std::size_t>::max() - total) {
+                operation.Refuse(FailureSite::CheckedProduct);
+                return false;
+            }
+            total += value;
+            return true;
+        };
+        if (!operation.CheckedProduct(size, size, 1U, pixels,
+                FailureSite::ExportCanonicalStorage)
+            || !operation.CheckedProduct(pixels, 4U, 1U, pixelBytes,
+                FailureSite::ExportCanonicalStorage)
+            || !operation.CheckedProduct(pixels, roles.size(), 1U, rolePixels,
+                FailureSite::ExportCanonicalStorage)
+            || !operation.CheckedProduct(rolePixels,
+                std::size_t(atlas.gutterTexels), 1U, gutterWork,
+                FailureSite::ExportCanonicalStorage)
+            || !operation.CheckedProduct(pixelBytes, roles.size(), 1U,
+                encoderWork, FailureSite::ExportCanonicalStorage)) return false;
+        for (const auto& source : sources) {
+            if (!operation.CheckedProduct(source.image.width,
+                    source.image.height, 1U, part,
+                    FailureSite::ExportCanonicalStorage)
+                || !add(part, sourceWork)) return false;
+            if (source.maskPresent) {
+                ++maskCount;
+                if (!ImageValid(source.mask)
+                    || !operation.CheckedProduct(source.mask.width,
+                        source.mask.height, 1U, part,
+                        FailureSite::ExportCanonicalStorage)
+                    || !add(part, maskWork)) return false;
+            }
+        }
+        atlasWork = rolePixels;
+        if (!operation.CheckedProduct(layout.packed.triangles.size(), 3U,
+                std::size_t(atlas.gutterTexels), part,
+                FailureSite::ExportCanonicalStorage)
+            || !add(part, atlasWork)
+            || !add(layout.packed.triangles.size(), atlasWork)
+            || !add(sources.size(), atlasWork)
+            || !add(maskCount, atlasWork)
+            || (!atlasJobAlreadySealed
+                && !operation.SealJob(Job::AtlasRoles, atlasWork,
+                    FailureSite::ExportCanonicalStorage))
+            || !operation.ConsumeJob(Job::AtlasRoles, atlasWork,
+                FailureSite::ExportCanonicalStorage)
+            || !operation.SealJob(Job::SourcePixels, sourceWork,
+                FailureSite::ExportCanonicalStorage)
+            || !operation.ConsumeJob(Job::SourcePixels, sourceWork,
+                FailureSite::ExportCanonicalStorage)
+            || !operation.SealJob(Job::MaskPixels, maskWork,
+                FailureSite::ExportCanonicalStorage)
+            || !operation.ConsumeJob(Job::MaskPixels, maskWork,
+                FailureSite::ExportCanonicalStorage)
+            || !operation.SealJob(Job::Gutter, gutterWork,
+                FailureSite::ExportCanonicalStorage)
+            || !operation.ConsumeJob(Job::Gutter, gutterWork,
+                FailureSite::ExportCanonicalStorage)
+            || !operation.SealJob(Job::Encoder, encoderWork,
+                FailureSite::ExportCanonicalStorage)
+            || !operation.ConsumeJob(Job::Encoder, encoderWork,
+                FailureSite::ExportCanonicalStorage)) return false;
+#ifdef DEBUG
+        extern void DebugKernelJobsConsumed(std::size_t) noexcept;
+        DebugKernelJobsConsumed(roles.size());
+#endif
+        std::size_t outputVectorBytes = 0;
+        constexpr std::size_t maximumEvidenceSamples = 12;
+        if (!operation.CheckedProduct(roles.size(), sizeof(Output), 1U,
+                outputVectorBytes, FailureSite::ExportBakeStorage)
+            || !outputVectorTicket.acquire(operation,
+                StorageDimension::PrivateStorage, outputVectorBytes,
+                Retention::Retained, FailureSite::ExportBakeStorage)
+            || !evidenceTicket.acquireProduct(operation,
+                StorageDimension::PrivateStorage, maximumEvidenceSamples,
+                sizeof(SampleEvidence), 1U, Retention::Retained,
+                FailureSite::ExportObservedStorage)
+            || !operation.EnterAllocation(FailureSite::ExportBakeStorage))
+            return false;
+        outputs.reserve(roles.size());
+        evidence.samples.reserve(maximumEvidenceSamples);
+#ifdef DEBUG
+        extern void DebugKernelOutputsReserved() noexcept;
+        DebugKernelOutputsReserved();
+#endif
         std::uint64_t aggregate = 0;
         double interiorErrorSum = 0;
         std::uint64_t interiorErrorCount = 0;
@@ -318,13 +540,48 @@ inline bool Bake(const asset_atlas::Definition& atlas,
             output.descriptor.colorSpace = face_image::ValidColorSpaceForRole(role, ColorSpace::SRGB)
                 ? ColorSpace::SRGB : ColorSpace::Linear;
             output.descriptor.widthTexels = size; output.descriptor.heightTexels = size;
-            output.rgba.assign(std::size_t(size) * size * 4, 0);
+            Ticket applicableTicket;
+            std::size_t applicableBytes = 0;
+            if (!operation.CheckedProduct(sources.size(),
+                    sizeof(const Source*), 1U, applicableBytes,
+                    FailureSite::ExportObservedStorage)
+                || !applicableTicket.acquire(operation,
+                    StorageDimension::PrivateStorage, applicableBytes,
+                    Retention::Scratch, FailureSite::ExportObservedStorage)
+                || !operation.EnterAllocation(
+                    FailureSite::ExportObservedStorage)) return false;
+            std::vector<const Source*> applicable;
+            applicable.reserve(sources.size());
+            for (const auto& source : sources)
+                if (source.fence.role == role) applicable.push_back(&source);
+            if (applicable.empty()) return false;
+
+            Ticket ownerTicket;
+            std::size_t ownerBytes = 0;
+            if (!operation.CheckedProduct(pixels, sizeof(std::int16_t), 1U,
+                    ownerBytes, FailureSite::ExportObservedStorage)
+                || !output.rgbaTicket.acquire(operation,
+                    StorageDimension::PrivateStorage, pixelBytes,
+                    Retention::Retained, FailureSite::ExportBakeStorage)
+                || !ownerTicket.acquire(operation,
+                    StorageDimension::PrivateStorage, ownerBytes,
+                    Retention::Scratch, FailureSite::ExportObservedStorage)
+                || !operation.EnterAllocation(FailureSite::ExportBakeStorage))
+                return false;
+#ifdef DEBUG
+            extern void DebugKernelOwnerReserved(std::size_t) noexcept;
+            DebugKernelOwnerReserved(pixelBytes);
+#endif
+            output.rgba.assign(pixelBytes, 0);
             if (role == Role::Normal)
                 for (std::size_t i = 0; i < output.rgba.size(); i += 4) {
                     output.rgba[i] = 128; output.rgba[i + 1] = 128;
                     output.rgba[i + 2] = 255; output.rgba[i + 3] = 255;
                 }
-            std::vector<std::int32_t> owner(std::size_t(size) * size, -1);
+            // A final atlas has at most 64 charts, so the ownership sentinel
+            // and every chart index fit exactly in int16 without changing any
+            // comparison or raster arithmetic.
+            std::vector<std::int16_t> owner(pixels, -1);
             for (const auto& placed : layout.packed.triangles) {
                 if (placed.chartIndex < 0
                     || std::size_t(placed.chartIndex) >= layout.chartMembers.size()
@@ -336,9 +593,9 @@ inline bool Bake(const asset_atlas::Definition& atlas,
                     layout.chartMembers[std::size_t(placed.chartIndex)].first;
                 if (memberIndex >= atlas.members.size()) return false;
                 const Source* source = nullptr;
-                for (const auto& candidate : sources)
-                    if (candidate.fence.owner == atlas.members[memberIndex].owner
-                        && candidate.fence.role == role) { source = &candidate; break; }
+                for (const auto* candidate : applicable)
+                    if (candidate->fence.owner == atlas.members[memberIndex].owner)
+                        { source = candidate; break; }
                 if (!source) continue;
                 const auto& developed =
                     layout.charts[std::size_t(placed.chartIndex)]
@@ -444,6 +701,19 @@ inline bool Bake(const asset_atlas::Definition& atlas,
             // Exact N-step chart-local Manhattan dilation.  A texel is copied
             // only from one chart and never across an already owned chart.
             for (int step = 0; step < atlas.gutterTexels; ++step) {
+                Ticket gutterTicket;
+                std::size_t gutterBytes = ownerBytes;
+                if (!add(pixelBytes, gutterBytes)
+                    || !gutterTicket.acquire(operation,
+                        StorageDimension::PrivateStorage, gutterBytes,
+                        Retention::Scratch,
+                        FailureSite::ExportObservedStorage)
+                    || !operation.EnterAllocation(
+                        FailureSite::ExportObservedStorage)) return false;
+#ifdef DEBUG
+                extern void DebugKernelGutterReserved(std::size_t) noexcept;
+                DebugKernelGutterReserved(gutterBytes);
+#endif
                 auto nextOwner = owner; auto nextRGBA = output.rgba;
                 for (std::uint32_t y = 0; y < size; ++y) for (std::uint32_t x = 0; x < size; ++x) {
                     const std::size_t pixel = std::size_t(y) * size + x;
@@ -467,20 +737,40 @@ inline bool Bake(const asset_atlas::Definition& atlas,
                 }
                 owner.swap(nextOwner); output.rgba.swap(nextRGBA);
             }
-            Image encoded{size, size, output.rgba};
+            // The owner/applicable scratch has no consumer after dilation.
+            // Release it before encoder scanlines/zlib overlap the retained
+            // outputs. EncodePNG borrows the immutable RGBA bytes directly.
+            std::vector<std::int16_t>().swap(owner);
+            ownerTicket.reset();
+            std::vector<const Source*>().swap(applicable);
+            applicableTicket.reset();
             const bool srgb = role == Role::BaseColor || role == Role::Emissive;
-            if (!EncodePNG(encoded, srgb, output.png)
+            if (!EncodePNG(size, size, output.rgba, srgb, output.png,
+                    output.pngTicket, operation)
                 || !ImageHash(output.png, output.descriptor.content)) return false;
             // Resource identity is stable and role-bound, while content stays
             // the digest of the exact PNG bytes.  Two semantic roles may emit
             // equal background-heavy PNGs, but they must remain distinct
             // resources under the fail-closed SYEB validator.
-            std::vector<std::uint8_t> identityBytes{
-                'S', 'Y', 'E', 'B', '/', '1', std::uint8_t(role)};
+            Ticket identityTicket;
+            constexpr std::size_t identityBytesCount = 7U + Digest{}.size();
+            if (!identityTicket.acquire(operation,
+                    StorageDimension::PrivateStorage, identityBytesCount,
+                    Retention::Scratch, FailureSite::ExportCanonicalStorage)
+                || !operation.EnterAllocation(
+                    FailureSite::ExportCanonicalStorage)) return false;
+            std::vector<std::uint8_t> identityBytes;
+            identityBytes.reserve(identityBytesCount);
+            identityBytes.insert(identityBytes.end(), {
+                'S', 'Y', 'E', 'B', '/', '1', std::uint8_t(role)});
             identityBytes.insert(identityBytes.end(), output.descriptor.content.begin(),
                                  output.descriptor.content.end());
             if (!retained_solid::Hash(identityBytes, output.descriptor.identity)) return false;
             outputs.push_back(std::move(output));
+#ifdef DEBUG
+            extern void DebugKernelOutputTransferred(std::size_t) noexcept;
+            DebugKernelOutputTransferred(outputs.back().png.size());
+#endif
         }
         if (interiorErrorCount > 0)
             evidence.meanInteriorError255 = interiorErrorSum / double(interiorErrorCount);
@@ -491,7 +781,20 @@ inline bool Bake(const asset_atlas::Definition& atlas,
             && evidence.meanInteriorError255 <= 1
             && evidence.maximumNormalLengthError <= 1.e-5
             && evidence.tangentParity;
-    } catch (...) { outputs.clear(); evidence = {}; return false; }
+    } catch (const std::bad_alloc&) {
+        operation.AllocationFailed(FailureSite::ExportBakeStorage);
+        std::vector<Output>().swap(outputs);
+        outputVectorTicket.reset();
+        evidenceTicket.reset();
+        evidence = {};
+        return false;
+    } catch (...) {
+        std::vector<Output>().swap(outputs);
+        outputVectorTicket.reset();
+        evidenceTicket.reset();
+        evidence = {};
+        return false;
+    }
 }
 } // namespace core3d::painted_atlas_bake::kernel
 
@@ -848,6 +1151,8 @@ struct Staging final {
     std::vector<asset_atlas::Member> observedMembers;
     CapturedSourceStorage capturedSources;
     Definition bake;
+    decal_layer::bake::accounting::Ticket outputVectorTicket;
+    decal_layer::bake::accounting::Ticket evidenceTicket;
     std::vector<kernel::Output> outputs;
     kernel::Evidence evidence;
     std::vector<BakedResource> priorBakeResources;
@@ -870,6 +1175,8 @@ struct Staging final {
             observedMembers = std::move(other.observedMembers);
             capturedSources = std::move(other.capturedSources);
             bake = std::move(other.bake);
+            outputVectorTicket = std::move(other.outputVectorTicket);
+            evidenceTicket = std::move(other.evidenceTicket);
             outputs = std::move(other.outputs);
             evidence = std::move(other.evidence);
             priorBakeResources = std::move(other.priorBakeResources);
@@ -882,7 +1189,9 @@ struct Staging final {
     ~Staging() { reset(); }
     void reset() noexcept {
         capturedSources.reset();
-        outputs.clear();
+        std::vector<kernel::Output>().swap(outputs);
+        outputVectorTicket.reset();
+        evidenceTicket.reset();
         priorBakeResources.clear();
         priorAtlasBytes.clear();
         assignments.clear();
@@ -1033,6 +1342,8 @@ struct ExportBakeStorage final {
     decal_layer::bake::accounting::Owner operation;
     decal_layer::bake::accounting::Ticket controlStorage;
     decal_layer::bake::accounting::Ticket bakeValueStorage;
+    decal_layer::bake::accounting::Ticket outputVectorStorage;
+    decal_layer::bake::accounting::Ticket evidenceStorage;
     asset_atlas::build::FinalAtlasAccounting finalAtlas;
 };
 

@@ -4959,6 +4959,28 @@ Owner MakeOperationOwner() noexcept
 }
 } // namespace core3d::decal_layer::bake::accounting
 
+#ifdef DEBUG
+namespace core3d::painted_atlas_bake::kernel {
+DebugOperationStorage DebugObserveOperationStorage(
+    const decal_layer::bake::accounting::View& operation) noexcept {
+    DebugOperationStorage result;
+    if (!operation.valid()) return result;
+    const auto* ledger = static_cast<const core3d::scene::OperationLedger*>(
+        operation.context);
+    using Dimension = decal_layer::bake::accounting::StorageDimension;
+    using Site = decal_layer::bake::accounting::FailureSite;
+    result.privateLive = ledger->live(Dimension::PrivateStorage);
+    result.privateRetained = ledger->retained(Dimension::PrivateStorage);
+    result.privatePeak = ledger->peak(Dimension::PrivateStorage);
+    result.cumulativeWork = ledger->cumulativeWork();
+    result.encoderAllocationEntries = ledger->allocationEntries(
+        Site::ExportCanonicalStorage);
+    result.firstFailure = ledger->firstFailureSite();
+    return result;
+}
+} // namespace core3d::painted_atlas_bake::kernel
+#endif
+
 namespace core3d::scene {
 
 struct SceneCopyStorage final {

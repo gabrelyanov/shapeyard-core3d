@@ -3697,6 +3697,165 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
     } @catch (...) { return nil; }
 }
 
+- (NSDictionary<NSString *,id> *)
+    debugE4PaintedKernelReservationsForEntityIdentifier:
+        (NSString *)entityIdentifier {
+    namespace aa = core3d::asset_atlas;
+    namespace pb = core3d::painted_atlas_bake;
+    namespace kernel = core3d::painted_atlas_bake::kernel;
+    using Site = core3d::decal_layer::bake::accounting::FailureSite;
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128) return nil;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        OwnerKey key;
+        TDF_Label ownerLabel;
+        const char *raw = entityIdentifier.UTF8String;
+        if (wrapper.IsNull()
+            || !LabelForSelected(wrapper, raw ? raw : "", key, ownerLabel))
+            return nil;
+        const Handle(TDocStd_Document)& document = wrapper->Document();
+        std::vector<aa::persistence::Record> records;
+        if (document.IsNull() || document->HasOpenCommand()
+            || !aa::persistence::ReadAll(document, records)) return nil;
+        aa::Key atlasKey;
+        bool foundAtlas = false;
+        for (const auto& record : records) {
+            if (!record.value) return nil;
+            for (const auto& member : record.value->definition.members) {
+                if (!(member.owner == key)) continue;
+                if (foundAtlas) return nil;
+                atlasKey = record.value->definition.key;
+                foundAtlas = true;
+            }
+        }
+        if (!foundAtlas) return nil;
+        const Standard_Integer undosBefore = document->GetAvailableUndos();
+
+        pb::owner::ExportCapture capture;
+        if (pb::owner::CaptureForExport(capture, document, atlasKey)
+                != pb::owner::Outcome::Prepared
+            || capture.savedAtlas.members.size() != 2
+            || capture.members.members.size() != 2
+            || capture.sources.size() != 5) return nil;
+        std::vector<aa::build::FinalMemberInput> inputs;
+        inputs.reserve(capture.members.members.size());
+        for (const auto& member : capture.members.members) {
+            core3d::retained_solid::Record retained;
+            core3d::retained_finishing::SourceRevision observed;
+            if (!core3d::retained_finishing::producer::detail::Source(
+                    document, member.slot.owner, observed, nullptr, &retained)
+                || !(observed == member.slot.source)) return nil;
+            std::atomic_bool cancelled{false};
+            core3d::meshcopy::CurrentTessellationCopy copy;
+            if (core3d::meshcopy::PrepareCurrentTessellationCopy(
+                    retained.current, copy, cancelled)
+                    != core3d::meshcopy::PreparationResult::Ready)
+                return nil;
+            aa::build::FinalMemberInput input;
+            input.savedMember = member.slot;
+            input.authority = member.capture;
+            if (!core3d::retained_finishing::producer::detail::Triangles(
+                    copy, input.triangles, input.faces)) return nil;
+            inputs.push_back(std::move(input));
+        }
+
+        const aa::build::Settings settings{2048, 4};
+        kernel::DebugBeginKernelObservation(false);
+        pb::owner::ExportBake baked;
+        std::string diagnosis;
+        const auto outcome = pb::owner::BuildAndBakeForExport(
+            capture, inputs, settings, baked, diagnosis);
+        const auto trace = kernel::DebugTakeKernelObservation();
+        const auto retained = kernel::DebugObserveOperationStorage(
+            capture.operation.view);
+        std::size_t actualRGBA = 0, actualPNG = 0;
+        for (const auto& output : baked.outputs) {
+            actualRGBA += output.rgba.size();
+            actualPNG += output.png.size();
+        }
+        const std::size_t expectedRGBA = 5U * 2048U * 2048U * 4U;
+        const bool normalPrepared = outcome == pb::owner::Outcome::Prepared
+            && baked.outputs.size() == 5;
+        const bool retainedAfterKernel = normalPrepared
+            && retained.privateRetained >= expectedRGBA
+            && actualRGBA == expectedRGBA
+            && trace.outputRGBABytes == expectedRGBA;
+        const bool sharedOutputChargedOnce = retainedAfterKernel
+            && trace.outputRGBABytes == expectedRGBA
+            && trace.outputRGBABytes != expectedRGBA * 2U;
+        const std::size_t liveWithResult = retained.privateLive;
+        baked = {};
+        const auto released = kernel::DebugObserveOperationStorage(
+            capture.operation.view);
+        const bool releasedWithOwner = released.privateLive < liveWithResult;
+
+        pb::owner::ExportCapture deniedCapture;
+        if (pb::owner::CaptureForExport(deniedCapture, document, atlasKey)
+                != pb::owner::Outcome::Prepared) return nil;
+        kernel::DebugBeginKernelObservation(true);
+        pb::owner::ExportBake deniedBake;
+        std::string deniedDiagnosis;
+        const auto deniedOutcome = pb::owner::BuildAndBakeForExport(
+            deniedCapture, inputs, settings, deniedBake, deniedDiagnosis);
+        const auto deniedTrace = kernel::DebugTakeKernelObservation();
+        const auto deniedStorage = kernel::DebugObserveOperationStorage(
+            deniedCapture.operation.view);
+        const bool historyUnchanged =
+            document->GetAvailableUndos() == undosBefore;
+        return @{
+            @"fixture": @"E4P2b1LedgerAtlas2048",
+            @"normalPrepared": @(normalPrepared),
+            @"roleCount": @(trace.roleCount),
+            @"rolesReservedBeforeAllocation": @(
+                trace.rolesReservedBeforeAllocation),
+            @"outputsReservedBeforeAllocation": @(
+                trace.outputsReservedBeforeAllocation),
+            @"ownerReservedBeforeAllocation": @(
+                trace.ownerReservedBeforeAllocation),
+            @"gutterReservedBeforeAllocation": @(
+                trace.gutterReservedBeforeAllocation),
+            @"encoderReservedBeforeAllocation": @(
+                trace.encoderReservedBeforeAllocation),
+            @"outputTransferred": @(trace.outputTransferred),
+            @"gutterOverlap": @(trace.gutterOverlap),
+            @"atlasJobConsumed": @(trace.atlasJobConsumed),
+            @"sourceJobConsumed": @(trace.sourceJobConsumed),
+            @"gutterJobConsumed": @(trace.gutterJobConsumed),
+            @"encoderJobConsumed": @(trace.encoderJobConsumed),
+            @"outputRGBABytes": @(trace.outputRGBABytes),
+            @"actualRGBABytes": @(actualRGBA),
+            @"actualPNGBytes": @(actualPNG),
+            @"privatePeakBytes": @(retained.privatePeak),
+            @"privateLiveAfterKernel": @(retained.privateLive),
+            @"retainedAfterKernel": @(retainedAfterKernel),
+            @"sharedOutputChargedOnce": @(sharedOutputChargedOnce),
+            @"peakIncludesScratch": @(
+                retained.privatePeak > trace.outputRGBABytes),
+            @"releasedWithOwner": @(releasedWithOwner),
+            @"deniedOverBudget": @(
+                deniedOutcome == pb::owner::Outcome::OverBudget),
+            @"deniedBeforeEncoderAllocation": @(
+                deniedTrace.encoderReservationAttempts == 1
+                && deniedTrace.encoderAllocationEntries == 0),
+            @"deniedNoPublication": @(deniedBake.outputs.empty()
+                && deniedBake.assignments.empty()),
+            @"deniedFirstFailureEncoder": @(
+                deniedStorage.firstFailure == Site::ExportCanonicalStorage),
+            @"historyUnchanged": @(historyUnchanged),
+        };
+    } @catch (...) {
+        (void)kernel::DebugTakeKernelObservation();
+        return nil;
+    }
+}
+
 - (void)debugArmE4BRepCensusObservationRefuseOneByteShort:
     (NSNumber *)refuseOneByteShort {
     core3d::scene::DebugArmE4BRepCensusObservation(
