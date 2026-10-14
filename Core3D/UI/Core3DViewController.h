@@ -658,6 +658,11 @@ __attribute__((objc_subclassing_restricted))
     debugE4PaintedKernelReservationsForEntityIdentifier:
         (NSString *)entityIdentifier
     NS_SWIFT_NAME(debugE4PaintedKernelReservations(entityIdentifier:));
+//! Runs the real cold-reopened ordinary receiver, observes input/output/PNG
+//! ticket lifetimes, and denies the next receiver encoder reservation.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4ReceiverBudgetForEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugE4ReceiverBudget(entityIdentifier:));
 //! Arms the next genuine CapturePrivateExportDecals census. YES leaves one
 //! byte less than its measured ticket; NO observes the under-limit copy.
 - (void)debugArmE4BRepCensusObservationRefuseOneByteShort:

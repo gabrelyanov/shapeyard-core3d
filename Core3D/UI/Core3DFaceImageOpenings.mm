@@ -3856,6 +3856,78 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
     }
 }
 
+- (NSDictionary<NSString *,id> *)debugE4ReceiverBudgetForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    namespace bake = core3d::decal_layer::bake;
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128) return nil;
+    @try {
+        NSDictionary<NSString *,id> *carrier =
+            [self debugE4RetainedCapObservationForEntityIdentifier:
+                entityIdentifier];
+        if (![carrier[@"schema"]
+                isEqual:@"shapeyard.e4-retained-cap.observation.v1"])
+            return nil;
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        if (wrapper.IsNull() || wrapper->Document().IsNull()) return nil;
+        const Standard_Integer undosBefore =
+            wrapper->Document()->GetAvailableUndos();
+
+        bake::DebugBeginReceiverObservation(false);
+        Core3DSceneSnapshot *normal = [self captureSceneSnapshot];
+        const auto observed = bake::DebugTakeReceiverObservation();
+
+        bake::DebugBeginReceiverObservation(true);
+        Core3DSceneSnapshot *denied = [self captureSceneSnapshot];
+        const auto refused = bake::DebugTakeReceiverObservation();
+
+        bake::DebugBeginReceiverObservation(false);
+        Core3DSceneSnapshot *replayed = [self captureSceneSnapshot];
+        const auto replay = bake::DebugTakeReceiverObservation();
+        const bool stablePNG = normal != nil && replayed != nil
+            && core3d::decal_layer::Nonzero(observed.pngDigest)
+            && observed.pngDigest == replay.pngDigest;
+        return @{
+            @"fixture": @"E4P2b1LedgerCap",
+            @"normalProduced": @(normal != nil),
+            @"baseReservedBeforeAllocation": @(
+                observed.baseReservedBeforeAllocation),
+            @"inputReservedBeforeAllocation": @(
+                observed.inputReservedBeforeAllocation),
+            @"outputReservedBeforeAllocation": @(
+                observed.outputReservedBeforeAllocation),
+            @"encoderReservedBeforeAllocation": @(
+                observed.encoderReservedBeforeAllocation),
+            @"outputLiveAfterBake": @(observed.outputLiveAfterBake),
+            @"productRetained": @(observed.productRetained),
+            @"baseBytes": @(observed.baseBytes),
+            @"inputBytes": @(observed.inputBytes),
+            @"outputBytes": @(observed.outputBytes),
+            @"pngBytes": @(observed.pngBytes),
+            @"normalPNG": DigestText(observed.pngDigest),
+            @"replayPNG": DigestText(replay.pngDigest),
+            @"normalPNGStable": @(stablePNG),
+            @"deniedOverBudget": @(denied == nil),
+            @"deniedBeforeEncoderAllocation": @(
+                refused.deniedBeforeEncoderAllocation
+                && refused.encoderReservationAttempts == 1
+                && refused.encoderAllocationEntries == 0),
+            @"deniedNoProduct": @(!refused.productRetained),
+            @"historyUnchanged": @(
+                wrapper->Document()->GetAvailableUndos() == undosBefore),
+        };
+    } @catch (...) {
+        (void)bake::DebugTakeReceiverObservation();
+        return nil;
+    }
+}
+
 - (void)debugArmE4BRepCensusObservationRefuseOneByteShort:
     (NSNumber *)refuseOneByteShort {
     core3d::scene::DebugArmE4BRepCensusObservation(

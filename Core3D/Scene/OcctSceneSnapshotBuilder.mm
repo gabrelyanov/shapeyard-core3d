@@ -1306,11 +1306,66 @@ Double3 TransformVector(const Matrix4d& theMatrix, const Double3& theValue)
 bool CaptureDecalOccluders(const SceneSnapshot& theScene,
                            std::vector<DecalWorldTriangle>& theTriangles,
                            Bounds3d& theBounds,
-                           core3d::decal_layer::Digest& theProof)
+                           core3d::decal_layer::Digest& theProof,
+                           const core3d::decal_layer::bake::accounting::View&
+                               theOperation,
+                           core3d::decal_layer::bake::accounting::Ticket&
+                               theTriangleTicket)
 {
     theTriangles.clear(); theBounds = {}; theProof = {};
     try {
+        namespace accounting = core3d::decal_layer::bake::accounting;
+        if (!theOperation.valid()) return false;
+        std::size_t aTriangleCount = 0;
+        std::size_t aProofBytes = 8;
+        for (const auto& anInstance : theScene.instances) {
+            if (anInstance.role != RenderRole::Model
+                || anInstance.meshIndex >= theScene.meshes.size()) continue;
+            const auto& aMesh = theScene.meshes[anInstance.meshIndex];
+            const std::size_t anInstanceBytes = 4
+                + anInstance.entityIdentifier.size()
+                + anInstance.worldFromObject.values.size() * sizeof(double);
+            if (anInstanceBytes > std::numeric_limits<std::size_t>::max()
+                    - aProofBytes) return false;
+            aProofBytes += anInstanceBytes;
+            for (const auto& aPrimitive : aMesh.primitives) {
+                const std::size_t aCount = aPrimitive.indexCount / 3;
+                if (aCount > kMaxIndicesPerSnapshot / 3 - aTriangleCount)
+                    return false;
+                aTriangleCount += aCount;
+            }
+        }
+        std::size_t aTriangleBytes = 0, aProofTriangleBytes = 0;
+        if (!theOperation.CheckedProduct(aTriangleCount,
+                sizeof(DecalWorldTriangle), 1, aTriangleBytes,
+                accounting::FailureSite::ReceiverTriangleStorage)
+            || !theOperation.CheckedProduct(aTriangleCount, 76, 1,
+                aProofTriangleBytes,
+                accounting::FailureSite::ReceiverProofStorage)
+            || aProofTriangleBytes
+                > std::numeric_limits<std::size_t>::max() - aProofBytes)
+            return false;
+        aProofBytes += aProofTriangleBytes;
+        accounting::Ticket aProofTicket;
+        if (!theTriangleTicket.acquire(theOperation,
+                accounting::StorageDimension::PrivateStorage,
+                aTriangleBytes, accounting::Retention::Retained,
+                accounting::FailureSite::ReceiverTriangleStorage)
+            || !aProofTicket.acquire(theOperation,
+                accounting::StorageDimension::PrivateStorage,
+                aProofBytes, accounting::Retention::Scratch,
+                accounting::FailureSite::ReceiverProofStorage)
+            || !theOperation.EnterAllocation(
+                accounting::FailureSite::ReceiverTriangleStorage)
+            || !theOperation.EnterAllocation(
+                accounting::FailureSite::ReceiverProofStorage)) return false;
+        theTriangles.reserve(aTriangleCount);
         core3d::face_image::detail::Writer aWriter;
+        aWriter.bytes.reserve(aProofBytes);
+#ifdef DEBUG
+        core3d::decal_layer::bake::DebugReceiverInputReserved(
+            aTriangleBytes + aProofBytes);
+#endif
         aWriter.raw(reinterpret_cast<const std::uint8_t*>("E4OC"), 4);
         aWriter.integer(1, 4);
         for (std::size_t anInstanceIndex = 0;
@@ -1454,7 +1509,31 @@ bool PrepareOrdinaryDecalFace(
     namespace dl = core3d::decal_layer;
     using namespace decal_math;
     (void)theInputs.reversesWinding;
-    if (!theInputs.operation.valid()) return false;
+    if (!theInputs.operation.valid() || theInputs.layerIndices.empty())
+        return false;
+    dl::bake::Input anInput;
+    anInput.operationLedger = theInputs.operation;
+    std::size_t aLayerStorageBytes = 0;
+    if (!theInputs.operation.CheckedProduct(theInputs.layerIndices.size(),
+            sizeof(dl::bake::ResolvedLayer), 1, aLayerStorageBytes,
+            dl::bake::accounting::FailureSite::ReceiverLayerStorage)
+        || !anInput.layerStorageTicket.acquire(theInputs.operation,
+            dl::bake::accounting::StorageDimension::PrivateStorage,
+            aLayerStorageBytes,
+            dl::bake::accounting::Retention::Retained,
+            dl::bake::accounting::FailureSite::ReceiverLayerStorage)
+        || !anInput.canonicalLayersTicket.acquire(theInputs.operation,
+            dl::bake::accounting::StorageDimension::PrivateStorage,
+            theInputs.canonicalLayers.size(),
+            dl::bake::accounting::Retention::Retained,
+            dl::bake::accounting::FailureSite::ReceiverLayerStorage)
+        || !theInputs.operation.EnterAllocation(
+            dl::bake::accounting::FailureSite::ReceiverLayerStorage))
+        return false;
+#ifdef DEBUG
+    dl::bake::DebugReceiverInputReserved(
+        aLayerStorageBytes + theInputs.canonicalLayers.size());
+#endif
 #ifdef DEBUG
     if (gDebugOrdinaryLedgerObservationArmed) {
         if (gDebugOrdinaryLedgerCalls == 0)
@@ -1501,6 +1580,21 @@ bool PrepareOrdinaryDecalFace(
         anOutputWidth, 64);
     anOutputHeight = std::min<std::uint32_t>(
         anOutputHeight, 64);
+
+    std::size_t aBaseBytes = 0;
+    if (!theInputs.operation.CheckedProduct(anOutputWidth, anOutputHeight, 4,
+            aBaseBytes,
+            dl::bake::accounting::FailureSite::ReceiverBaseStorage)
+        || !anInput.baseColorTicket.acquire(theInputs.operation,
+            dl::bake::accounting::StorageDimension::PrivateStorage,
+            aBaseBytes, dl::bake::accounting::Retention::Retained,
+            dl::bake::accounting::FailureSite::ReceiverBaseStorage)
+        || !theInputs.operation.EnterAllocation(
+            dl::bake::accounting::FailureSite::ReceiverBaseStorage))
+        return false;
+#ifdef DEBUG
+    dl::bake::DebugReceiverBaseReserved(aBaseBytes);
+#endif
 
     dl::bake::Raster aBase;
     aBase.width = anOutputWidth;
@@ -1687,6 +1781,23 @@ bool PrepareOrdinaryDecalFace(
             || theInputs.primitive.indexCount
                 > theInputs.indices.size() - theInputs.primitive.firstIndex
             || theInputs.primitive.indexCount % 3 != 0) return false;
+        const std::size_t aTriangleCount =
+            theInputs.primitive.indexCount / 3;
+        std::size_t aTriangleBytes = 0;
+        if (!theInputs.operation.CheckedProduct(aTriangleCount,
+                sizeof(dl::bake::Triangle), 1, aTriangleBytes,
+                dl::bake::accounting::FailureSite::ReceiverTriangleStorage)
+            || !aLayer.triangleTicket.acquire(theInputs.operation,
+                dl::bake::accounting::StorageDimension::PrivateStorage,
+                aTriangleBytes, dl::bake::accounting::Retention::Retained,
+                dl::bake::accounting::FailureSite::ReceiverTriangleStorage)
+            || !theInputs.operation.EnterAllocation(
+                dl::bake::accounting::FailureSite::ReceiverTriangleStorage))
+            return false;
+        aLayer.triangles.reserve(aTriangleCount);
+#ifdef DEBUG
+        dl::bake::DebugReceiverInputReserved(aTriangleBytes);
+#endif
         for (std::size_t anOffset = 0;
              anOffset < theInputs.primitive.indexCount;
              anOffset += 3) {
@@ -1747,6 +1858,27 @@ bool PrepareOrdinaryDecalFace(
             const int aFirstY = std::max(0, int(std::floor(aMinY)));
             const int aLastY = std::min(int(anOutputHeight) - 1,
                 int(std::ceil(aMaxY)) - 1);
+            const std::size_t aCoverageWidth = aLastX >= aFirstX
+                ? std::size_t(aLastX - aFirstX + 1) : 0;
+            const std::size_t aCoverageHeight = aLastY >= aFirstY
+                ? std::size_t(aLastY - aFirstY + 1) : 0;
+            std::size_t aCoverageBytes = 0;
+            if (!theInputs.operation.CheckedProduct(aCoverageWidth,
+                    aCoverageHeight, sizeof(dl::bake::CoverageSample),
+                    aCoverageBytes,
+                    dl::bake::accounting::FailureSite::ReceiverCoverageStorage)
+                || !aTriangle.coverageTicket.acquire(theInputs.operation,
+                    dl::bake::accounting::StorageDimension::PrivateStorage,
+                    aCoverageBytes,
+                    dl::bake::accounting::Retention::Retained,
+                    dl::bake::accounting::FailureSite::ReceiverCoverageStorage)
+                || !theInputs.operation.EnterAllocation(
+                    dl::bake::accounting::FailureSite::ReceiverCoverageStorage))
+                return false;
+            aTriangle.coverage.reserve(aCoverageWidth * aCoverageHeight);
+#ifdef DEBUG
+            dl::bake::DebugReceiverInputReserved(aCoverageBytes);
+#endif
             for (int y = aFirstY; y <= aLastY; ++y) {
                 for (int x = aFirstX; x <= aLastX; ++x) {
                     std::array<double, 3> aWeights{};
@@ -1862,11 +1994,72 @@ bool PrepareOrdinaryDecalFace(
         if (aLayer.triangles.empty()) return false;
     }
 
+    const auto checkedAdd = [](std::size_t first, std::size_t second,
+                               std::size_t& result) {
+        if (second > std::numeric_limits<std::size_t>::max() - first)
+            return false;
+        result = first + second;
+        return true;
+    };
+    std::array<std::size_t, 5> aProofBytes{{4, 5, 4, 4, 4}};
+    std::size_t aPart = 0;
+    if (!theInputs.operation.CheckedProduct(theInputs.vertices.size(), 8, 8,
+            aPart, dl::bake::accounting::FailureSite::ReceiverProofStorage)
+        || !checkedAdd(aProofBytes[0], aPart, aProofBytes[0])
+        || !theInputs.operation.CheckedProduct(theInputs.indices.size(), 4, 1,
+            aPart, dl::bake::accounting::FailureSite::ReceiverProofStorage)
+        || !checkedAdd(aProofBytes[0], aPart, aProofBytes[0])
+        || !theInputs.operation.CheckedProduct(theInputs.primitives.size(),
+            12, 1, aPart,
+            dl::bake::accounting::FailureSite::ReceiverProofStorage)
+        || !checkedAdd(aProofBytes[0], aPart, aProofBytes[0])
+        || !theInputs.operation.CheckedProduct(theInputs.cornerTangents.size(),
+            32, 1, aPart,
+            dl::bake::accounting::FailureSite::ReceiverProofStorage)
+        || !checkedAdd(aProofBytes[1], aPart, aProofBytes[1])
+        || !checkedAdd(aProofBytes[2], 11 * 8 + 5 * 4, aProofBytes[2])
+        || !theInputs.operation.CheckedProduct(theInputs.vertices.size(), 16, 1,
+            aPart, dl::bake::accounting::FailureSite::ReceiverProofStorage)
+        || !checkedAdd(aProofBytes[3], aPart, aProofBytes[3])
+        || !theInputs.operation.CheckedProduct(theInputs.primitives.size(), 4, 1,
+            aPart, dl::bake::accounting::FailureSite::ReceiverProofStorage)
+        || !checkedAdd(aProofBytes[3], aPart, aProofBytes[3])
+        || !theInputs.operation.CheckedProduct(
+            theInputs.worldFromObject.values.size(), 8, 1, aPart,
+            dl::bake::accounting::FailureSite::ReceiverProofStorage)
+        || !checkedAdd(aProofBytes[4], aPart, aProofBytes[4])) return false;
+    for (std::int32_t aTexture : {theInputs.material.baseColorTextureIndex,
+             theInputs.material.emissiveTextureIndex,
+             theInputs.material.metallicRoughnessTextureIndex,
+             theInputs.material.occlusionTextureIndex,
+             theInputs.material.normalTextureIndex})
+        if (aTexture >= 0
+            && !checkedAdd(aProofBytes[2], dl::Digest{}.size(),
+                aProofBytes[2])) return false;
+    std::array<dl::bake::accounting::Ticket, 5> aProofTickets;
+    for (std::size_t anIndex = 0; anIndex < aProofTickets.size(); ++anIndex)
+        if (!aProofTickets[anIndex].acquire(theInputs.operation,
+                dl::bake::accounting::StorageDimension::PrivateStorage,
+                aProofBytes[anIndex],
+                dl::bake::accounting::Retention::Scratch,
+                dl::bake::accounting::FailureSite::ReceiverProofStorage)
+            || !theInputs.operation.EnterAllocation(
+                dl::bake::accounting::FailureSite::ReceiverProofStorage))
+            return false;
     core3d::face_image::detail::Writer aGeometryWriter;
     core3d::face_image::detail::Writer aTangentWriter;
     core3d::face_image::detail::Writer anAppearanceWriter;
     core3d::face_image::detail::Writer anAtlasWriter;
     core3d::face_image::detail::Writer anOccurrenceWriter;
+    aGeometryWriter.bytes.reserve(aProofBytes[0]);
+    aTangentWriter.bytes.reserve(aProofBytes[1]);
+    anAppearanceWriter.bytes.reserve(aProofBytes[2]);
+    anAtlasWriter.bytes.reserve(aProofBytes[3]);
+    anOccurrenceWriter.bytes.reserve(aProofBytes[4]);
+#ifdef DEBUG
+    dl::bake::DebugReceiverInputReserved(aProofBytes[0] + aProofBytes[1]
+        + aProofBytes[2] + aProofBytes[3] + aProofBytes[4]);
+#endif
     aGeometryWriter.raw(reinterpret_cast<const std::uint8_t*>("E4FG"), 4);
     aTangentWriter.raw(reinterpret_cast<const std::uint8_t*>("E4TG"), 4);
     anAppearanceWriter.raw(reinterpret_cast<const std::uint8_t*>("E4AP"), 4);
@@ -1936,8 +2129,6 @@ bool PrepareOrdinaryDecalFace(
         || !core3d::face_image::HashFaceImageBytes(
             anOccurrenceWriter.bytes, anOccurrenceProof))
         return false;
-    dl::bake::Input anInput;
-    anInput.operationLedger = theInputs.operation;
     anInput.baseColor = std::move(aBase);
     anInput.layers = std::move(aResolvedLayers);
     anInput.canonicalLayers = theInputs.canonicalLayers;
@@ -4958,6 +5149,92 @@ Owner MakeOperationOwner() noexcept
     return result;
 }
 } // namespace core3d::decal_layer::bake::accounting
+
+#ifdef DEBUG
+namespace core3d::decal_layer::bake {
+namespace {
+thread_local DebugReceiverObservation gDebugReceiverObservation;
+thread_local bool gDebugReceiverObservationArmed = false;
+thread_local bool gDebugReceiverDenyEncoder = false;
+}
+
+void DebugBeginReceiverObservation(bool denyEncoder) noexcept
+{
+    gDebugReceiverObservation = {};
+    gDebugReceiverObservationArmed = true;
+    gDebugReceiverDenyEncoder = denyEncoder;
+}
+
+DebugReceiverObservation DebugTakeReceiverObservation() noexcept
+{
+    const auto result = gDebugReceiverObservation;
+    gDebugReceiverObservation = {};
+    gDebugReceiverObservationArmed = false;
+    gDebugReceiverDenyEncoder = false;
+    return result;
+}
+
+bool DebugReceiverShouldDenyEncoder() noexcept
+{
+    if (!gDebugReceiverObservationArmed) return false;
+    ++gDebugReceiverObservation.encoderReservationAttempts;
+    if (!gDebugReceiverDenyEncoder) return false;
+    gDebugReceiverObservation.deniedBeforeEncoderAllocation =
+        gDebugReceiverObservation.encoderAllocationEntries == 0;
+    return true;
+}
+
+void DebugReceiverBaseReserved(std::size_t bytes) noexcept
+{
+    if (!gDebugReceiverObservationArmed) return;
+    gDebugReceiverObservation.baseReservedBeforeAllocation = true;
+    gDebugReceiverObservation.baseBytes += bytes;
+}
+
+void DebugReceiverInputReserved(std::size_t bytes) noexcept
+{
+    if (!gDebugReceiverObservationArmed) return;
+    gDebugReceiverObservation.inputReservedBeforeAllocation = true;
+    gDebugReceiverObservation.inputBytes += bytes;
+}
+
+void DebugReceiverOutputReserved(std::size_t bytes) noexcept
+{
+    if (!gDebugReceiverObservationArmed) return;
+    gDebugReceiverObservation.outputReservedBeforeAllocation = true;
+    gDebugReceiverObservation.outputBytes += bytes;
+}
+
+void DebugReceiverEncoderReserved() noexcept
+{
+    if (gDebugReceiverObservationArmed)
+        gDebugReceiverObservation.encoderReservedBeforeAllocation = true;
+}
+
+void DebugReceiverEncoderAllocation() noexcept
+{
+    if (gDebugReceiverObservationArmed)
+        gDebugReceiverObservation.encoderAllocationEntries += 3;
+}
+
+void DebugReceiverBakeReturned(std::size_t outputBytes,
+                               std::size_t pngBytes) noexcept
+{
+    if (!gDebugReceiverObservationArmed) return;
+    gDebugReceiverObservation.outputLiveAfterBake =
+        outputBytes != 0 && pngBytes != 0;
+    gDebugReceiverObservation.pngBytes += pngBytes;
+}
+
+void DebugReceiverProductRetained(std::size_t pngBytes,
+                                  const Digest& digest) noexcept
+{
+    if (!gDebugReceiverObservationArmed) return;
+    gDebugReceiverObservation.productRetained = pngBytes != 0;
+    gDebugReceiverObservation.pngDigest = digest;
+}
+} // namespace core3d::decal_layer::bake
+#endif
 
 #ifdef DEBUG
 namespace core3d::painted_atlas_bake::kernel {
@@ -13605,10 +13882,13 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 observed.savedCornerCount += mesh.indices.size();
             }
             std::vector<decal_math::DecalWorldTriangle> triangles;
+            decal_layer::bake::accounting::Ticket triangleTicket;
             Bounds3d bounds;
             core3d::decal_layer::Digest occluders{};
             if (!decal_math::CaptureDecalOccluders(
-                    source, triangles, bounds, occluders)) return {};
+                    source, triangles, bounds, occluders,
+                    decalCapture->impl_->operationLedger.view(),
+                    triangleTicket)) return {};
             observed.occluderDigest = DecalDigestText(occluders);
             observed.operationWork = triangles.size();
         }
@@ -14339,13 +14619,32 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         // operation-owned destination. This intentionally reuses the same
         // ProduceFace/Assemble/PublishPrivate path as ordinary publication.
         std::vector<decal_math::DecalWorldTriangle> privateOccluders;
+        decal_layer::bake::accounting::Ticket privateOccluderTicket;
         Bounds3d privateOccluderBounds;
         decal_layer::Digest privateOccluderProof{};
+        if (decalCapture
+            && (!decalCapture->impl_->operationLedger.sealJob(
+                    decal_layer::bake::accounting::Job::Coverage,
+                    decal_layer::bake::kMaximumPixels,
+                    decal_layer::bake::accounting::FailureSite::
+                        ReceiverCoverageStorage)
+                || !decalCapture->impl_->operationLedger.sealJob(
+                    decal_layer::bake::accounting::Job::Occlusion,
+                    decal_layer::bake::kMaximumPixels,
+                    decal_layer::bake::accounting::FailureSite::
+                        ReceiverCoverageStorage)
+                || !decalCapture->impl_->operationLedger.sealJob(
+                    decal_layer::bake::accounting::Job::ReceiverEncoder,
+                    kMaxAggregateDecodedTextureBytes,
+                    decal_layer::bake::accounting::FailureSite::
+                        ReceiverEncoderPNG))) return {};
         if (decalCapture
             && !decal_math::CaptureDecalOccluders(
                 decalCapture->impl_->wholeCommittedScene,
                 privateOccluders, privateOccluderBounds,
-                privateOccluderProof)) return {};
+                privateOccluderProof,
+                decalCapture->impl_->operationLedger.view(),
+                privateOccluderTicket)) return {};
 #ifdef DEBUG
         if (debugObservation && decalCapture)
             debugObservation->failureStage = "private-occluders-captured";
@@ -14363,7 +14662,34 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             const auto& finalMesh = result->meshes[item.meshIndex];
             item.decalDerivedAppearances.clear();
 
+            using PrivateDimension =
+                decal_layer::bake::accounting::StorageDimension;
+            using PrivateRetention =
+                decal_layer::bake::accounting::Retention;
+            using PrivateSite = decal_layer::bake::accounting::FailureSite;
+            const auto privateOperation =
+                decalCapture->impl_->operationLedger.view();
+            std::size_t geometryBytes = 4;
+            std::size_t geometryPart = 0;
+            if (!privateOperation.CheckedProduct(finalMesh.vertices.size(),
+                    8, 8, geometryPart, PrivateSite::ReceiverProofStorage)
+                || geometryPart > std::numeric_limits<std::size_t>::max()
+                        - geometryBytes) return {};
+            geometryBytes += geometryPart;
+            if (!privateOperation.CheckedProduct(finalMesh.indices.size(), 4,
+                    1, geometryPart, PrivateSite::ReceiverProofStorage)
+                || geometryPart > std::numeric_limits<std::size_t>::max()
+                        - geometryBytes - 16 * sizeof(double)) return {};
+            geometryBytes += geometryPart + 16 * sizeof(double);
+            decal_layer::bake::accounting::Ticket geometryTicket;
+            if (!geometryTicket.acquire(privateOperation,
+                    PrivateDimension::PrivateStorage, geometryBytes,
+                    PrivateRetention::Scratch,
+                    PrivateSite::ReceiverProofStorage)
+                || !privateOperation.EnterAllocation(
+                    PrivateSite::ReceiverProofStorage)) return {};
             face_image::detail::Writer geometryWriter;
+            geometryWriter.bytes.reserve(geometryBytes);
             geometryWriter.raw(
                 reinterpret_cast<const std::uint8_t*>("E4PF"), 4);
             for (const auto& vertex : finalMesh.vertices)
@@ -14395,7 +14721,19 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 || !proof("E4TG", tangentProof)
                 || !proof("E4OR", occurrenceProof)) return {};
 
+            std::size_t productBytes = 0;
+            decal_layer::bake::accounting::Ticket productTicket;
+            if (!privateOperation.CheckedProduct(owner.receivers.size(),
+                    sizeof(decal_layer::bake::FaceProduct), 1, productBytes,
+                    PrivateSite::ReceiverProductStorage)
+                || !productTicket.acquire(privateOperation,
+                    PrivateDimension::PrivateStorage, productBytes,
+                    PrivateRetention::Retained,
+                    PrivateSite::ReceiverProductStorage)
+                || !privateOperation.EnterAllocation(
+                    PrivateSite::ReceiverProductStorage)) return {};
             std::vector<decal_layer::bake::FaceProduct> products;
+            products.reserve(owner.receivers.size());
             for (const auto& receiver : owner.receivers) {
                 std::vector<const decal_layer::Layer*> layers;
                 for (const auto& layer : owner.definition.layers)
@@ -14408,10 +14746,43 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 decal_layer::bake::Input input;
                 input.operationLedger =
                     decalCapture->impl_->operationLedger.view();
+                using ReceiverDimension =
+                    decal_layer::bake::accounting::StorageDimension;
+                using ReceiverRetention =
+                    decal_layer::bake::accounting::Retention;
+                using ReceiverSite =
+                    decal_layer::bake::accounting::FailureSite;
+                const std::size_t baseBytes = std::size_t(side) * side * 4;
+                std::size_t layerBytes = 0;
+                if (!input.operationLedger.CheckedProduct(layers.size(),
+                        sizeof(decal_layer::bake::ResolvedLayer), 1,
+                        layerBytes, ReceiverSite::ReceiverLayerStorage)
+                    || !input.baseColorTicket.acquire(input.operationLedger,
+                        ReceiverDimension::PrivateStorage, baseBytes,
+                        ReceiverRetention::Retained,
+                        ReceiverSite::ReceiverBaseStorage)
+                    || !input.layerStorageTicket.acquire(input.operationLedger,
+                        ReceiverDimension::PrivateStorage, layerBytes,
+                        ReceiverRetention::Retained,
+                        ReceiverSite::ReceiverLayerStorage)
+                    || !input.canonicalLayersTicket.acquire(
+                        input.operationLedger, ReceiverDimension::PrivateStorage,
+                        owner.canonicalBytes.size(), ReceiverRetention::Retained,
+                        ReceiverSite::ReceiverLayerStorage)
+                    || !input.operationLedger.EnterAllocation(
+                        ReceiverSite::ReceiverBaseStorage)
+                    || !input.operationLedger.EnterAllocation(
+                        ReceiverSite::ReceiverLayerStorage)) return {};
                 input.baseColor.width = side;
                 input.baseColor.height = side;
                 input.baseColor.rgba.assign(
                     std::size_t(side) * side * 4, 255);
+                input.layers.reserve(layers.size());
+#ifdef DEBUG
+                decal_layer::bake::DebugReceiverBaseReserved(baseBytes);
+                decal_layer::bake::DebugReceiverInputReserved(
+                    layerBytes + owner.canonicalBytes.size());
+#endif
                 input.canonicalLayers = owner.canonicalBytes;
                 input.sourceProof = owner.source.sourceProof;
                 input.finalGeometryUVProof = geometryProof;
@@ -14425,6 +14796,18 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 input.occurrenceProof = occurrenceProof;
                 for (const auto* layer : layers) {
                     decal_layer::bake::ResolvedLayer resolved;
+                    const std::size_t triangleBytes =
+                        2 * sizeof(decal_layer::bake::Triangle);
+                    if (!resolved.triangleTicket.acquire(input.operationLedger,
+                            ReceiverDimension::PrivateStorage, triangleBytes,
+                            ReceiverRetention::Retained,
+                            ReceiverSite::ReceiverTriangleStorage)
+                        || !input.operationLedger.EnterAllocation(
+                            ReceiverSite::ReceiverTriangleStorage)) return {};
+                    resolved.triangles.reserve(2);
+#ifdef DEBUG
+                    decal_layer::bake::DebugReceiverInputReserved(triangleBytes);
+#endif
                     resolved.intent = *layer;
                     if (!ResolveDecalImage(decalCapture->impl_->privateDocument,
                             layer->image, resolved.image,
@@ -14444,6 +14827,21 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                             decal_layer::bake::Point, 3>& pixels,
                             const std::array<decal_layer::bake::UV, 3>& uvs) {
                         decal_layer::bake::Triangle triangle;
+                        const std::size_t coverageBytes = std::size_t(side)
+                            * side * sizeof(decal_layer::bake::CoverageSample);
+                        if (!triangle.coverageTicket.acquire(
+                                input.operationLedger,
+                                ReceiverDimension::PrivateStorage,
+                                coverageBytes, ReceiverRetention::Retained,
+                                ReceiverSite::ReceiverCoverageStorage)
+                            || !input.operationLedger.EnterAllocation(
+                                ReceiverSite::ReceiverCoverageStorage))
+                            return false;
+                        triangle.coverage.reserve(std::size_t(side) * side);
+#ifdef DEBUG
+                        decal_layer::bake::DebugReceiverInputReserved(
+                            coverageBytes);
+#endif
                         triangle.outputPixels = pixels;
                         triangle.layerUV = uvs;
                         triangle.receiver = receiver.receipt;
@@ -14483,7 +14881,17 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                         != decal_layer::bake::Status::Baked) return {};
                 products.push_back(std::move(product));
             }
+            const std::size_t finalGeometryBytes = 4
+                + products.size() * decal_layer::Digest{}.size();
+            decal_layer::bake::accounting::Ticket finalGeometryTicket;
+            if (!finalGeometryTicket.acquire(privateOperation,
+                    PrivateDimension::PrivateStorage, finalGeometryBytes,
+                    PrivateRetention::Scratch,
+                    PrivateSite::ReceiverProofStorage)
+                || !privateOperation.EnterAllocation(
+                    PrivateSite::ReceiverProofStorage)) return {};
             face_image::detail::Writer finalGeometry;
+            finalGeometry.bytes.reserve(finalGeometryBytes);
             finalGeometry.raw(
                 reinterpret_cast<const std::uint8_t*>("E4GF"), 4);
             finalGeometry.raw(geometryProof);
@@ -15204,7 +15612,36 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             std::shared_ptr<core3d::retained_edge_treatment::ReplayBudget>
                 budget;
         };
+        namespace ordinary_accounting = core3d::decal_layer::bake::accounting;
+        auto anOrdinaryOperation = ordinary_accounting::MakeOperationOwner();
+        if (!anOrdinaryOperation.valid()
+            || !anOrdinaryOperation.view.SealJob(
+                ordinary_accounting::Job::Coverage,
+                core3d::decal_layer::bake::kMaximumPixels,
+                ordinary_accounting::FailureSite::ReceiverCoverageStorage)
+            || !anOrdinaryOperation.view.SealJob(
+                ordinary_accounting::Job::Occlusion,
+                core3d::decal_layer::bake::kMaximumPixels,
+                ordinary_accounting::FailureSite::ReceiverCoverageStorage)
+            || !anOrdinaryOperation.view.SealJob(
+                ordinary_accounting::Job::ReceiverEncoder,
+                kMaxAggregateDecodedTextureBytes,
+                ordinary_accounting::FailureSite::ReceiverEncoderPNG))
+            return {};
+        ordinary_accounting::Ticket aPendingDecalTicket;
+        std::size_t aPendingDecalBytes = 0;
+        if (!anOrdinaryOperation.view.CheckedProduct(anOccurrences.size(),
+                sizeof(PendingDecal), 1, aPendingDecalBytes,
+                ordinary_accounting::FailureSite::ReceiverLayerStorage)
+            || !aPendingDecalTicket.acquire(anOrdinaryOperation.view,
+                ordinary_accounting::StorageDimension::PrivateStorage,
+                aPendingDecalBytes, ordinary_accounting::Retention::Retained,
+                ordinary_accounting::FailureSite::ReceiverLayerStorage)
+            || !anOrdinaryOperation.view.EnterAllocation(
+                ordinary_accounting::FailureSite::ReceiverLayerStorage))
+            return {};
         std::vector<PendingDecal> aPendingDecals;
+        aPendingDecals.reserve(anOccurrences.size());
         std::size_t aBindingCount = 0;
         aScene.instances.reserve(anOccurrences.size());
         for (const OccurrenceData& anOccurrence : anOccurrences) {
@@ -15830,14 +16267,13 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             namespace dl = core3d::decal_layer;
             namespace dr = core3d::dependent_replay;
             using namespace decal_math;
-            auto anOrdinaryOperation =
-                dl::bake::accounting::MakeOperationOwner();
-            if (!anOrdinaryOperation.valid()) return {};
             std::vector<DecalWorldTriangle> anOccluders;
+            dl::bake::accounting::Ticket anOccluderTicket;
             Bounds3d anOccluderBounds;
             dl::Digest anOccluderProof{};
             if (!CaptureDecalOccluders(aScene, anOccluders,
-                    anOccluderBounds, anOccluderProof)) return {};
+                    anOccluderBounds, anOccluderProof,
+                    anOrdinaryOperation.view, anOccluderTicket)) return {};
             const Double3 aBoundsSpan = Subtract(
                 anOccluderBounds.maximum, anOccluderBounds.minimum);
             const double anOccluderSpan = std::sqrt(Dot(
@@ -15871,6 +16307,22 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                     dl::Digest proof{};
                     bool addressable = false;
                 };
+                dl::bake::accounting::Ticket aResolvedFaceTicket;
+                std::size_t aResolvedFaceBytes = 0;
+                if (!anOrdinaryOperation.view.CheckedProduct(
+                        static_cast<std::size_t>(aNative.faces.Extent()),
+                        sizeof(ResolvedFace), 1, aResolvedFaceBytes,
+                        dl::bake::accounting::FailureSite::
+                            ReceiverLayerStorage)
+                    || !aResolvedFaceTicket.acquire(anOrdinaryOperation.view,
+                        dl::bake::accounting::StorageDimension::PrivateStorage,
+                        aResolvedFaceBytes,
+                        dl::bake::accounting::Retention::Scratch,
+                        dl::bake::accounting::FailureSite::
+                            ReceiverLayerStorage)
+                    || !anOrdinaryOperation.view.EnterAllocation(
+                        dl::bake::accounting::FailureSite::
+                            ReceiverLayerStorage)) return {};
                 std::vector<ResolvedFace> aResolvedFaces(
                     static_cast<std::size_t>(aNative.faces.Extent()));
                 for (std::size_t anOrdinal = 0;
@@ -15889,6 +16341,32 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                             aResolved.receipt, aResolved.proof)) return {};
                     aResolved.addressable = true;
                 }
+                std::size_t aLayerMapBytes = 0, aLayerIndexBytes = 0;
+                if (!anOrdinaryOperation.view.CheckedProduct(
+                        aResolvedFaces.size(),
+                        sizeof(std::pair<const std::size_t,
+                            std::vector<std::size_t>>) + 4 * sizeof(void*),
+                        1, aLayerMapBytes,
+                        dl::bake::accounting::FailureSite::
+                            ReceiverLayerStorage)
+                    || !anOrdinaryOperation.view.CheckedProduct(
+                        aPending.definition.layers.size(), sizeof(std::size_t),
+                        1, aLayerIndexBytes,
+                        dl::bake::accounting::FailureSite::
+                            ReceiverLayerStorage)
+                    || aLayerIndexBytes > std::numeric_limits<std::size_t>::max()
+                            - aLayerMapBytes) return {};
+                aLayerMapBytes += aLayerIndexBytes;
+                dl::bake::accounting::Ticket aLayerMapTicket;
+                if (!aLayerMapTicket.acquire(anOrdinaryOperation.view,
+                        dl::bake::accounting::StorageDimension::PrivateStorage,
+                        aLayerMapBytes,
+                        dl::bake::accounting::Retention::Scratch,
+                        dl::bake::accounting::FailureSite::
+                            ReceiverLayerStorage)
+                    || !anOrdinaryOperation.view.EnterAllocation(
+                        dl::bake::accounting::FailureSite::
+                            ReceiverLayerStorage)) return {};
                 std::map<std::size_t, std::vector<std::size_t>> aLayersByFace;
                 for (std::size_t aLayerIndex = 0;
                      aLayerIndex < aPending.definition.layers.size();
@@ -15917,6 +16395,22 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 }
 
                 std::vector<dl::bake::FaceProduct> aProducts;
+                dl::bake::accounting::Ticket aProductVectorTicket;
+                std::size_t aProductVectorBytes = 0;
+                if (!anOrdinaryOperation.view.CheckedProduct(
+                        aLayersByFace.size(), sizeof(dl::bake::FaceProduct), 1,
+                        aProductVectorBytes,
+                        dl::bake::accounting::FailureSite::
+                            ReceiverProductStorage)
+                    || !aProductVectorTicket.acquire(anOrdinaryOperation.view,
+                        dl::bake::accounting::StorageDimension::PrivateStorage,
+                        aProductVectorBytes,
+                        dl::bake::accounting::Retention::Retained,
+                        dl::bake::accounting::FailureSite::
+                            ReceiverProductStorage)
+                    || !anOrdinaryOperation.view.EnterAllocation(
+                        dl::bake::accounting::FailureSite::
+                            ReceiverProductStorage)) return {};
                 aProducts.reserve(aLayersByFace.size());
                 for (const auto& aFaceLayers : aLayersByFace) {
                     const std::size_t aFaceIndex = aFaceLayers.first;
@@ -15979,7 +16473,25 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                     aProducts.push_back(std::move(aProduct));
                 }
 
+                std::size_t aFinalGeometryBytes = 0;
+                if (!anOrdinaryOperation.view.CheckedProduct(aProducts.size(),
+                        dl::Digest{}.size(), 1, aFinalGeometryBytes,
+                        dl::bake::accounting::FailureSite::ReceiverProofStorage)
+                    || aFinalGeometryBytes
+                        > std::numeric_limits<std::size_t>::max() - 4)
+                    return {};
+                aFinalGeometryBytes += 4;
+                dl::bake::accounting::Ticket aFinalGeometryTicket;
+                if (!aFinalGeometryTicket.acquire(anOrdinaryOperation.view,
+                        dl::bake::accounting::StorageDimension::PrivateStorage,
+                        aFinalGeometryBytes,
+                        dl::bake::accounting::Retention::Scratch,
+                        dl::bake::accounting::FailureSite::ReceiverProofStorage)
+                    || !anOrdinaryOperation.view.EnterAllocation(
+                        dl::bake::accounting::FailureSite::ReceiverProofStorage))
+                    return {};
                 core3d::face_image::detail::Writer aFinalGeometry;
+                aFinalGeometry.bytes.reserve(aFinalGeometryBytes);
                 aFinalGeometry.raw(reinterpret_cast<const std::uint8_t*>("E4GF"), 4);
                 for (const dl::bake::FaceProduct& aProduct : aProducts)
                     aFinalGeometry.raw(aProduct.inputKey);

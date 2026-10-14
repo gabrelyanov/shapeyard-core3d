@@ -54,6 +54,7 @@ enum class Job : std::uint8_t {
     Coverage,
     Occlusion,
     Encoder,
+    ReceiverEncoder,
     Publication,
     Debug,
     Count
@@ -132,6 +133,18 @@ enum class FailureSite : std::uint8_t {
     ProtectedFinishingStorage,
     ProtectedSourceStorage,
     ProtectedOwnerStorage,
+    ReceiverLayerStorage,
+    ReceiverBaseStorage,
+    ReceiverTriangleStorage,
+    ReceiverCoverageStorage,
+    ReceiverProofStorage,
+    ReceiverOutputStorage,
+    ReceiverPremultipliedStorage,
+    ReceiverClaimedStorage,
+    ReceiverEncoderScanlines,
+    ReceiverEncoderZlib,
+    ReceiverEncoderPNG,
+    ReceiverProductStorage,
     DebugBRepCensusDebt,
     DebugExactLimit,
     DebugOneUnit,
@@ -413,6 +426,7 @@ struct Triangle final {
     // Exact row-major proof for every top-left-owned output sample in this
     // triangle. Bake independently enumerates coverage and rejects omissions,
     // extras and duplicates instead of trusting a triangle-wide boolean.
+    accounting::Ticket coverageTicket;
     std::vector<CoverageSample> coverage;
 };
 struct ResolvedImage final {
@@ -469,6 +483,7 @@ struct ResolvedLayer final {
     Layer intent;
     ResolvedImage image;
     std::optional<ResolvedImage> mask;
+    accounting::Ticket triangleTicket;
     std::vector<Triangle> triangles;
     bool completeOccludersProved = false;
     bool boundaryProved = false;
@@ -476,6 +491,9 @@ struct ResolvedLayer final {
 };
 struct Input final {
     accounting::Owner operationOwner;
+    accounting::Ticket baseColorTicket;
+    accounting::Ticket layerStorageTicket;
+    accounting::Ticket canonicalLayersTicket;
     Raster baseColor;
     std::vector<ResolvedLayer> layers; // exact persisted order
     std::vector<std::uint8_t> canonicalLayers;
@@ -499,6 +517,9 @@ struct Input final {
         if (this != &other) {
             reset();
             operationOwner = std::move(other.operationOwner);
+            baseColorTicket = std::move(other.baseColorTicket);
+            layerStorageTicket = std::move(other.layerStorageTicket);
+            canonicalLayersTicket = std::move(other.canonicalLayersTicket);
             baseColor = std::move(other.baseColor);
             layers = std::move(other.layers);
             canonicalLayers = std::move(other.canonicalLayers);
@@ -521,6 +542,9 @@ struct Input final {
         baseColor.width = baseColor.height = 0;
         std::vector<ResolvedLayer>().swap(layers);
         std::vector<std::uint8_t>().swap(canonicalLayers);
+        baseColorTicket.reset();
+        layerStorageTicket.reset();
+        canonicalLayersTicket.reset();
         operationLedger = {};
         operationOwner.reset();
         sourceProof = {}; finalGeometryUVProof = {}; occluderProof = {};
@@ -529,10 +553,42 @@ struct Input final {
     }
 };
 struct Output final {
+    accounting::Ticket pixelsTicket;
+    accounting::Ticket pngTicket;
     Raster pixels;
     std::vector<std::uint8_t> png;
     Digest pngDigest{};
 };
+#ifdef DEBUG
+struct DebugReceiverObservation final {
+    bool baseReservedBeforeAllocation = false;
+    bool inputReservedBeforeAllocation = false;
+    bool outputReservedBeforeAllocation = false;
+    bool encoderReservedBeforeAllocation = false;
+    bool outputLiveAfterBake = false;
+    bool productRetained = false;
+    bool deniedBeforeEncoderAllocation = false;
+    std::size_t baseBytes = 0;
+    std::size_t inputBytes = 0;
+    std::size_t outputBytes = 0;
+    std::size_t pngBytes = 0;
+    std::size_t encoderReservationAttempts = 0;
+    std::size_t encoderAllocationEntries = 0;
+    Digest pngDigest{};
+};
+void DebugBeginReceiverObservation(bool denyEncoder) noexcept;
+DebugReceiverObservation DebugTakeReceiverObservation() noexcept;
+bool DebugReceiverShouldDenyEncoder() noexcept;
+void DebugReceiverBaseReserved(std::size_t bytes) noexcept;
+void DebugReceiverInputReserved(std::size_t bytes) noexcept;
+void DebugReceiverOutputReserved(std::size_t bytes) noexcept;
+void DebugReceiverEncoderReserved() noexcept;
+void DebugReceiverEncoderAllocation() noexcept;
+void DebugReceiverBakeReturned(std::size_t outputBytes,
+                               std::size_t pngBytes) noexcept;
+void DebugReceiverProductRetained(std::size_t pngBytes,
+                                  const Digest& digest) noexcept;
+#endif
 
 //! Bounded ephemeral publication handed from the final-geometry baker to all
 //! preview/export consumers. It contains no OCAF label, lease or mutation
@@ -1114,18 +1170,75 @@ inline void Chunk(std::vector<std::uint8_t>& png, const char type[4],
     png.insert(png.end(), type, type + 4); png.insert(png.end(), payload.begin(), payload.end());
     BE32(png, CRC32(png.data() + start, png.size() - start));
 }
-inline bool EncodePNG(const Raster& raster, std::vector<std::uint8_t>& output) noexcept {
+inline bool EncodePNG(const Raster& raster, std::vector<std::uint8_t>& output,
+                      const accounting::View& operation,
+                      accounting::Ticket& retainedPNG) noexcept {
     output.clear();
     try {
-        if (!Valid(raster)) return false;
+        using Dimension = accounting::StorageDimension;
+        using Retention = accounting::Retention;
+        using Site = accounting::FailureSite;
+        if (!Valid(raster) || !operation.valid()) return false;
+        std::size_t rowBytes = 0, scanlineBytes = 0;
+        if (!operation.CheckedProduct(raster.width, 4, 1, rowBytes,
+                Site::ReceiverEncoderScanlines)
+            || rowBytes == std::numeric_limits<std::size_t>::max()) return false;
+        ++rowBytes;
+        if (!operation.CheckedProduct(rowBytes, raster.height, 1,
+                scanlineBytes, Site::ReceiverEncoderScanlines)) return false;
+        const std::size_t blockCount = scanlineBytes / 65'535
+            + (scanlineBytes % 65'535 != 0 ? 1 : 0);
+        std::size_t blockHeaderBytes = 0;
+        if (!operation.CheckedProduct(blockCount, 5, 1, blockHeaderBytes,
+                Site::ReceiverEncoderZlib)
+            || scanlineBytes > std::numeric_limits<std::size_t>::max()
+                    - blockHeaderBytes - 6) return false;
+        const std::size_t zlibBytes = scanlineBytes + blockHeaderBytes + 6;
+        if (zlibBytes > std::numeric_limits<std::size_t>::max() - 57)
+            return false;
+        const std::size_t pngBytes = zlibBytes + 57;
+#ifdef DEBUG
+        if (DebugReceiverShouldDenyEncoder()) {
+            operation.Refuse(Site::ReceiverEncoderPNG);
+            return false;
+        }
+#endif
+        accounting::Ticket scanlineTicket, zlibTicket;
+        std::size_t encoderUnits = 0;
+        if (scanlineBytes > std::numeric_limits<std::size_t>::max() - zlibBytes
+            || scanlineBytes + zlibBytes
+                > std::numeric_limits<std::size_t>::max() - pngBytes)
+            return false;
+        encoderUnits = scanlineBytes + zlibBytes + pngBytes;
+        if (!operation.ConsumeJob(accounting::Job::ReceiverEncoder,
+                encoderUnits, Site::ReceiverEncoderPNG)
+            || !scanlineTicket.acquire(operation, Dimension::PrivateStorage,
+                scanlineBytes, Retention::Scratch,
+                Site::ReceiverEncoderScanlines)
+            || !zlibTicket.acquire(operation, Dimension::PrivateStorage,
+                zlibBytes, Retention::Scratch, Site::ReceiverEncoderZlib)
+            || !retainedPNG.acquire(operation, Dimension::PrivateStorage,
+                pngBytes, Retention::Retained, Site::ReceiverEncoderPNG))
+            return false;
+#ifdef DEBUG
+        DebugReceiverEncoderReserved();
+#endif
+        if (!operation.EnterAllocation(Site::ReceiverEncoderScanlines)
+            || !operation.EnterAllocation(Site::ReceiverEncoderZlib)
+            || !operation.EnterAllocation(Site::ReceiverEncoderPNG)) return false;
+#ifdef DEBUG
+        DebugReceiverEncoderAllocation();
+#endif
         std::vector<std::uint8_t> scanlines;
-        scanlines.reserve((std::size_t(raster.width) * 4 + 1) * raster.height);
+        scanlines.reserve(scanlineBytes);
         for (std::uint32_t y = 0; y < raster.height; ++y) {
             scanlines.push_back(0); // fixed PNG filter None
             const auto first = raster.rgba.begin() + std::size_t(y) * raster.width * 4;
             scanlines.insert(scanlines.end(), first, first + std::size_t(raster.width) * 4);
         }
-        std::vector<std::uint8_t> zlib{0x78, 0x01}; // deflate, no preset dictionary
+        std::vector<std::uint8_t> zlib;
+        zlib.reserve(zlibBytes);
+        zlib.insert(zlib.end(), {0x78, 0x01}); // deflate, no preset dictionary
         for (std::size_t offset = 0; offset < scanlines.size();) {
             const std::size_t count = std::min<std::size_t>(65'535, scanlines.size() - offset);
             const bool final = offset + count == scanlines.size();
@@ -1140,6 +1253,7 @@ inline bool EncodePNG(const Raster& raster, std::vector<std::uint8_t>& output) n
         for (std::uint8_t byte : scanlines) { s1 = (s1 + byte) % 65521; s2 = (s2 + s1) % 65521; }
         BE32(zlib, (s2 << 16) | s1);
         static const std::uint8_t signature[8] = {137,80,78,71,13,10,26,10};
+        output.reserve(pngBytes);
         output.assign(signature, signature + 8);
         std::vector<std::uint8_t> ihdr; BE32(ihdr, raster.width); BE32(ihdr, raster.height);
         ihdr.insert(ihdr.end(), {8, 6, 0, 0, 0});
@@ -1151,8 +1265,38 @@ inline bool EncodePNG(const Raster& raster, std::vector<std::uint8_t>& output) n
 inline Status Bake(const Input& input, Output& output) noexcept {
     output = {};
     try {
-        if (!ValidInputKey(input))
+        using Dimension = accounting::StorageDimension;
+        using Retention = accounting::Retention;
+        using Site = accounting::FailureSite;
+        if (!ValidInputKey(input) || !input.operationLedger.valid())
             return Status::Malformed;
+        std::size_t pixelBytes = 0, premultipliedBytes = 0;
+        if (!input.operationLedger.CheckedProduct(input.baseColor.width,
+                input.baseColor.height, 4, pixelBytes,
+                Site::ReceiverOutputStorage)
+            || !input.operationLedger.CheckedProduct(input.baseColor.width,
+                input.baseColor.height, sizeof(std::array<double, 4>),
+                premultipliedBytes, Site::ReceiverPremultipliedStorage)
+            || !output.pixelsTicket.acquire(input.operationLedger,
+                Dimension::PrivateStorage, pixelBytes, Retention::Retained,
+                Site::ReceiverOutputStorage)) return Status::Budget;
+        accounting::Ticket premultipliedTicket;
+        accounting::Ticket claimedTicket;
+        if (!premultipliedTicket.acquire(input.operationLedger,
+                Dimension::PrivateStorage, premultipliedBytes,
+                Retention::Scratch, Site::ReceiverPremultipliedStorage)
+            || !claimedTicket.acquireProduct(input.operationLedger,
+                Dimension::PrivateStorage, input.baseColor.width,
+                input.baseColor.height, 1, Retention::Scratch,
+                Site::ReceiverClaimedStorage)) return Status::Budget;
+#ifdef DEBUG
+        DebugReceiverOutputReserved(pixelBytes);
+#endif
+        if (!input.operationLedger.EnterAllocation(Site::ReceiverOutputStorage)
+            || !input.operationLedger.EnterAllocation(
+                Site::ReceiverPremultipliedStorage)
+            || !input.operationLedger.EnterAllocation(
+                Site::ReceiverClaimedStorage)) return Status::Budget;
         output.pixels = input.baseColor;
         const std::size_t pixelCount = std::size_t(output.pixels.width) * output.pixels.height;
         std::vector<std::array<double, 4>> premultiplied(pixelCount);
@@ -1208,6 +1352,10 @@ inline Status Bake(const Input& input, Output& output) noexcept {
                         || !SameReceipt(expected, proof.receiver)
                         || !proof.conclusive)
                         return Status::VisibilityInconclusive;
+                    if (!input.operationLedger.ConsumeJob(
+                            accounting::Job::Coverage, 1,
+                            Site::ReceiverCoverageStorage))
+                        return Status::Budget;
                     const std::size_t pixel = std::size_t(y)
                         * output.pixels.width + std::size_t(x);
                     if (claimed[pixel] != 0) return Status::Stale;
@@ -1215,6 +1363,10 @@ inline Status Bake(const Input& input, Output& output) noexcept {
                     if (++proofSamples > kMaximumPixels)
                         return Status::Budget;
                     if (!proof.affected) continue;
+                    if (!input.operationLedger.ConsumeJob(
+                            accounting::Job::Occlusion, 1,
+                            Site::ReceiverCoverageStorage))
+                        return Status::Budget;
                     if (!proof.selectedReceiver || !proof.frontFacing
                         || !proof.insideTrim || !proof.nearestHit) continue;
                     admittedCoverage = true;
@@ -1265,15 +1417,20 @@ inline Status Bake(const Input& input, Output& output) noexcept {
                     alpha == 0.0 ? 0.0 : premultiplied[index][channel] / alpha);
             output.pixels.rgba[index * 4 + 3] = LinearByte(alpha);
         }
-        if (!EncodePNG(output.pixels, output.png)
+        if (!EncodePNG(output.pixels, output.png, input.operationLedger,
+                output.pngTicket)
             || !face_image::HashFaceImageBytes(output.png, output.pngDigest)) {
             output = {}; return Status::Budget;
         }
+#ifdef DEBUG
+        DebugReceiverBakeReturned(pixelBytes, output.png.size());
+#endif
         return Status::Baked;
     } catch (...) { output = {}; return Status::Budget; }
 }
 
 struct FaceProduct final {
+    accounting::Ticket pngTicket;
     PublishedFace face;
     Digest inputKey{};
 };
@@ -1291,12 +1448,17 @@ inline Status ProduceFace(Input& input, const ReceiverReceipt& receiver,
         Output output;
         const Status status = Bake(input, output);
         if (status != Status::Baked) return status;
+        product.pngTicket = std::move(output.pngTicket);
         product.face.receiver = receiver;
         product.face.pixelWidth = output.pixels.width;
         product.face.pixelHeight = output.pixels.height;
         product.face.png = std::move(output.png);
         product.face.pngDigest = output.pngDigest;
         product.inputKey = input.inputKey;
+#ifdef DEBUG
+        DebugReceiverProductRetained(product.face.png.size(),
+            product.face.pngDigest);
+#endif
         return Status::Baked;
     } catch (...) { product = {}; return Status::Budget; }
 }
