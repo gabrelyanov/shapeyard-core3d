@@ -162,8 +162,8 @@ typedef struct {
 } STSpace;
 
 static int GenerateInitialVerticesIndexList(STriInfo pTriInfos[], int piTriList_out[], const SMikkTSpaceContext * pContext, const int iNrTrianglesIn);
-static void GenerateSharedVerticesIndexList(int piTriList_in_and_out[], const SMikkTSpaceContext * pContext, const int iNrTrianglesIn);
-static void InitTriInfo(STriInfo pTriInfos[], const int piTriListIn[], const SMikkTSpaceContext * pContext, const int iNrTrianglesIn);
+static tbool GenerateSharedVerticesIndexList(int piTriList_in_and_out[], const SMikkTSpaceContext * pContext, const int iNrTrianglesIn);
+static tbool InitTriInfo(STriInfo pTriInfos[], const int piTriListIn[], const SMikkTSpaceContext * pContext, const int iNrTrianglesIn);
 static int Build4RuleGroups(STriInfo pTriInfos[], SGroup pGroups[], int piGroupTrianglesBuffer[], const int piTriListIn[], const int iNrTrianglesIn);
 static tbool GenerateTSpaces(STSpace psTspace[], const STriInfo pTriInfos[], const SGroup pGroups[],
                              const int iNrActiveGroups, const int piTriListIn[], const float fThresCos,
@@ -272,7 +272,12 @@ tbool genTangSpace(const SMikkTSpaceContext * pContext, const float fAngularThre
 
 	// make a welded index list of identical positions and attributes (pos, norm, texc)
 	//printf("gen welded index list begin\n");
-	GenerateSharedVerticesIndexList(piTriListIn, pContext, iNrTrianglesIn);
+	if (!GenerateSharedVerticesIndexList(piTriListIn, pContext, iNrTrianglesIn))
+	{
+		free(piTriListIn);
+		free(pTriInfos);
+		return TFALSE;
+	}
 	//printf("gen welded index list end\n");
 
 	// Mark all degenerate triangles
@@ -304,7 +309,12 @@ tbool genTangSpace(const SMikkTSpaceContext * pContext, const float fAngularThre
 	
 	// evaluate triangle level attributes and neighbor list
 	//printf("gen neighbors list begin\n");
-	InitTriInfo(pTriInfos, piTriListIn, pContext, iNrTrianglesIn);
+	if (!InitTriInfo(pTriInfos, piTriListIn, pContext, iNrTrianglesIn))
+	{
+		free(piTriListIn);
+		free(pTriInfos);
+		return TFALSE;
+	}
 	//printf("gen neighbors list end\n");
 
 	
@@ -428,6 +438,34 @@ typedef struct {
 
 static const int g_iCells = 2048;
 
+#if defined(DEBUG) && DEBUG
+enum {
+	MIKK_DEBUG_ALLOC_HASH_TABLES = 1,
+	MIKK_DEBUG_ALLOC_TEMP_VERTICES = 2,
+	MIKK_DEBUG_ALLOC_NEIGHBOR_EDGES = 3
+};
+
+static int g_mikkDebugAllocationFailureSite = 0;
+
+void mikkDebugFailNextAllocationAtSite(const int iSite);
+void mikkDebugFailNextAllocationAtSite(const int iSite)
+{
+	g_mikkDebugAllocationFailureSite = iSite;
+}
+
+static void * MikkInternalMalloc(const size_t iSize, const int iSite)
+{
+	if (g_mikkDebugAllocationFailureSite == iSite)
+	{
+		g_mikkDebugAllocationFailureSite = 0;
+		return NULL;
+	}
+	return malloc(iSize);
+}
+#else
+#define MikkInternalMalloc(iSize, iSite) malloc(iSize)
+#endif
+
 #ifdef _MSC_VER
 #  define NOINLINE __declspec(noinline)
 #else
@@ -448,7 +486,7 @@ static void MergeVertsFast(int piTriList_in_and_out[], STmpVert pTmpVert[], cons
 static void MergeVertsSlow(int piTriList_in_and_out[], const SMikkTSpaceContext * pContext, const int pTable[], const int iEntries);
 static void GenerateSharedVerticesIndexListSlow(int piTriList_in_and_out[], const SMikkTSpaceContext * pContext, const int iNrTrianglesIn);
 
-static void GenerateSharedVerticesIndexList(int piTriList_in_and_out[], const SMikkTSpaceContext * pContext, const int iNrTrianglesIn)
+static tbool GenerateSharedVerticesIndexList(int piTriList_in_and_out[], const SMikkTSpaceContext * pContext, const int iNrTrianglesIn)
 {
 
 	// Generate bounding box
@@ -488,10 +526,10 @@ static void GenerateSharedVerticesIndexList(int piTriList_in_and_out[], const SM
 	}
 
 	// make allocations
-	piHashTable = (int *) malloc(sizeof(int)*iNrTrianglesIn*3);
-	piHashCount = (int *) malloc(sizeof(int)*g_iCells);
-	piHashOffsets = (int *) malloc(sizeof(int)*g_iCells);
-	piHashCount2 = (int *) malloc(sizeof(int)*g_iCells);
+	piHashTable = (int *) MikkInternalMalloc(sizeof(int)*iNrTrianglesIn*3, MIKK_DEBUG_ALLOC_HASH_TABLES);
+	piHashCount = (int *) MikkInternalMalloc(sizeof(int)*g_iCells, MIKK_DEBUG_ALLOC_HASH_TABLES);
+	piHashOffsets = (int *) MikkInternalMalloc(sizeof(int)*g_iCells, MIKK_DEBUG_ALLOC_HASH_TABLES);
+	piHashCount2 = (int *) MikkInternalMalloc(sizeof(int)*g_iCells, MIKK_DEBUG_ALLOC_HASH_TABLES);
 
 	if (piHashTable==NULL || piHashCount==NULL || piHashOffsets==NULL || piHashCount2==NULL)
 	{
@@ -499,8 +537,7 @@ static void GenerateSharedVerticesIndexList(int piTriList_in_and_out[], const SM
 		if (piHashCount!=NULL) free(piHashCount);
 		if (piHashOffsets!=NULL) free(piHashOffsets);
 		if (piHashCount2!=NULL) free(piHashCount2);
-		GenerateSharedVerticesIndexListSlow(piTriList_in_and_out, pContext, iNrTrianglesIn);
-		return;
+		return TFALSE;
 	}
 	memset(piHashCount, 0, sizeof(int)*g_iCells);
 	memset(piHashCount2, 0, sizeof(int)*g_iCells);
@@ -543,7 +580,14 @@ static void GenerateSharedVerticesIndexList(int piTriList_in_and_out[], const SM
 	for (k=1; k<g_iCells; k++)
 		if (iMaxCount<piHashCount[k])
 			iMaxCount=piHashCount[k];
-	pTmpVert = (STmpVert *) malloc(sizeof(STmpVert)*iMaxCount);
+	pTmpVert = (STmpVert *) MikkInternalMalloc(sizeof(STmpVert)*iMaxCount, MIKK_DEBUG_ALLOC_TEMP_VERTICES);
+	if (pTmpVert==NULL)
+	{
+		free(piHashTable);
+		free(piHashCount);
+		free(piHashOffsets);
+		return TFALSE;
+	}
 	
 
 	// complete the merge
@@ -565,14 +609,13 @@ static void GenerateSharedVerticesIndexList(int piTriList_in_and_out[], const SM
 			}
 			MergeVertsFast(piTriList_in_and_out, pTmpVert, pContext, 0, iEntries-1);
 		}
-		else
-			MergeVertsSlow(piTriList_in_and_out, pContext, pTable, iEntries);
 	}
 
 	if (pTmpVert!=NULL) { free(pTmpVert); }
 	free(piHashTable);
 	free(piHashCount);
 	free(piHashOffsets);
+	return TTRUE;
 }
 
 static void MergeVertsFast(int piTriList_in_and_out[], STmpVert pTmpVert[], const SMikkTSpaceContext * pContext, const int iL_in, const int iR_in)
@@ -941,7 +984,7 @@ static float CalcTexArea(const SMikkTSpaceContext * pContext, const int indices[
 	return fSignedAreaSTx2<0 ? (-fSignedAreaSTx2) : fSignedAreaSTx2;
 }
 
-static void InitTriInfo(STriInfo pTriInfos[], const int piTriListIn[], const SMikkTSpaceContext * pContext, const int iNrTrianglesIn)
+static tbool InitTriInfo(STriInfo pTriInfos[], const int piTriListIn[], const SMikkTSpaceContext * pContext, const int iNrTrianglesIn)
 {
 	int f=0, i=0, t=0;
 	// pTriInfos[f].iFlag is cleared in GenerateInitialVerticesIndexList() which is called before this function.
@@ -1048,9 +1091,9 @@ static void InitTriInfo(STriInfo pTriInfos[], const int piTriListIn[], const SMi
 	
 	// match up edge pairs
 	{
-		SEdge * pEdges = (SEdge *) malloc(sizeof(SEdge)*iNrTrianglesIn*3);
+		SEdge * pEdges = (SEdge *) MikkInternalMalloc(sizeof(SEdge)*iNrTrianglesIn*3, MIKK_DEBUG_ALLOC_NEIGHBOR_EDGES);
 		if (pEdges==NULL)
-			BuildNeighborsSlow(pTriInfos, piTriListIn, iNrTrianglesIn);
+			return TFALSE;
 		else
 		{
 			BuildNeighborsFast(pTriInfos, pEdges, piTriListIn, iNrTrianglesIn);
@@ -1058,6 +1101,7 @@ static void InitTriInfo(STriInfo pTriInfos[], const int piTriListIn[], const SMi
 			free(pEdges);
 		}
 	}
+	return TTRUE;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////
