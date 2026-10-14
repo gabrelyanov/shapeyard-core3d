@@ -996,6 +996,21 @@ Outcome CaptureSources(const Handle(TDocStd_Document)& document,
                 return std::uint8_t(a.fence.role) < std::uint8_t(b.fence.role);
             return a.fence.binding < b.fence.binding;
         });
+        for (std::size_t sourceIndex = 0;
+             sourceIndex < staged.values.size(); ++sourceIndex) {
+            auto& source = staged.values[sourceIndex];
+            source.order = sourceIndex;
+            source.memberIndex = members.members.size();
+            for (std::size_t memberIndex = 0;
+                 memberIndex < members.members.size(); ++memberIndex)
+                if (members.members[memberIndex].slot.owner
+                        == source.fence.owner) {
+                    source.memberIndex = memberIndex;
+                    break;
+                }
+            if (source.memberIndex == members.members.size())
+                return Outcome::OwnerMismatch;
+        }
         output = std::move(staged);
         return Outcome::Prepared;
     } catch (const std::bad_alloc&) {
@@ -1027,13 +1042,32 @@ Outcome DecodeCapturedSources(
             return Outcome::OverBudget;
         }
         for (const auto& source : captured) {
-            kernel::Image image;
-            if (!kernel::DecodeImage(source.envelope.workingBytes, image, operation)) {
+            kernel::Source decoded;
+            decoded.fence = source.fence;
+            decoded.memberIndex = source.memberIndex;
+            decoded.faceIndex = source.faceIndex;
+            decoded.order = source.order;
+            decoded.boundedLayer = source.boundedLayer;
+            decoded.centerU = source.centerU;
+            decoded.centerV = source.centerV;
+            decoded.width = source.width;
+            decoded.height = source.height;
+            decoded.angle = source.angle;
+            decoded.opacity = source.opacity;
+            decoded.maskPresent = source.maskPresent;
+            decoded.maskUsesLuminance = source.maskUsesLuminance;
+            decoded.maskInverted = source.maskInverted;
+            decoded.maskTransform = source.maskTransform;
+            if (!kernel::DecodeImage(source.envelope.workingBytes,
+                    decoded.image, operation)
+                || (source.maskPresent
+                    && !kernel::DecodeImage(source.maskEnvelope.workingBytes,
+                        decoded.mask, operation))) {
                 output.reset();
                 return operation.Recheck(FailureSite::ImageRGBA)
                     ? Outcome::MissingResource : Outcome::OverBudget;
             }
-            output.values.push_back({source.fence, std::move(image)});
+            output.values.push_back(std::move(decoded));
         }
         return Outcome::Prepared;
     } catch (const std::bad_alloc&) {
@@ -1052,9 +1086,92 @@ bool SameCapture(const std::vector<CapturedSource>& first,
     for (std::size_t index = 0; index < first.size(); ++index)
         if (!(first[index].fence == second[index].fence)
             || first[index].envelope.originalBytes != second[index].envelope.originalBytes
-            || first[index].envelope.workingBytes != second[index].envelope.workingBytes)
+            || first[index].envelope.workingBytes != second[index].envelope.workingBytes
+            || first[index].memberIndex != second[index].memberIndex
+            || first[index].faceIndex != second[index].faceIndex
+            || first[index].order != second[index].order
+            || first[index].boundedLayer != second[index].boundedLayer
+            || first[index].centerU != second[index].centerU
+            || first[index].centerV != second[index].centerV
+            || first[index].width != second[index].width
+            || first[index].height != second[index].height
+            || first[index].angle != second[index].angle
+            || first[index].opacity != second[index].opacity
+            || first[index].maskPresent != second[index].maskPresent
+            || first[index].maskEnvelope.originalBytes
+                != second[index].maskEnvelope.originalBytes
+            || first[index].maskEnvelope.workingBytes
+                != second[index].maskEnvelope.workingBytes
+            || first[index].maskUsesLuminance
+                != second[index].maskUsesLuminance
+            || first[index].maskInverted != second[index].maskInverted
+            || !fi::SameScalarBits(first[index].maskTransform.scale[0],
+                second[index].maskTransform.scale[0])
+            || !fi::SameScalarBits(first[index].maskTransform.scale[1],
+                second[index].maskTransform.scale[1])
+            || !fi::SameScalarBits(first[index].maskTransform.offset[0],
+                second[index].maskTransform.offset[0])
+            || !fi::SameScalarBits(first[index].maskTransform.offset[1],
+                second[index].maskTransform.offset[1])
+            || !fi::SameScalarBits(first[index].maskTransform.rotationDegrees,
+                second[index].maskTransform.rotationDegrees)
+            || first[index].maskTransform.wrapU
+                != second[index].maskTransform.wrapU
+            || first[index].maskTransform.wrapV
+                != second[index].maskTransform.wrapV)
             return false;
     return true;
+}
+
+template <typename Sources>
+bool ConfigureFinalAtlasAccounting(
+    const Sources& sources,
+    const decal_layer::bake::accounting::View& operation,
+    bool sealAtlasJob,
+    aa::build::FinalAtlasAccounting& accounting) noexcept {
+    accounting = {};
+    if (!operation.valid() || sources.empty()) return false;
+    std::array<bool, 5> roles{};
+    accounting.operation = operation;
+    accounting.sourceCount = sources.size();
+    accounting.sealAtlasJob = sealAtlasJob;
+    for (const auto& source : sources) {
+        const std::size_t role = std::size_t(source.fence.role);
+        if (role >= roles.size()) return false;
+        roles[role] = true;
+        if (source.maskPresent) {
+            if (accounting.maskCount
+                    == std::numeric_limits<std::size_t>::max())
+                return false;
+            ++accounting.maskCount;
+        }
+    }
+    for (const bool present : roles)
+        if (present) ++accounting.roleCount;
+    return accounting.roleCount != 0;
+}
+
+std::shared_ptr<ExportBakeStorage> MakeExportBakeStorage(
+    const decal_layer::bake::accounting::View& operation,
+    const decal_layer::bake::accounting::Owner* owner,
+    aa::build::FinalAtlasAccounting&& accounting) noexcept {
+    using namespace decal_layer::bake::accounting;
+    Ticket control;
+    try {
+        if (!control.acquire(operation, StorageDimension::PrivateStorage,
+                sizeof(ExportBakeStorage), Retention::Retained,
+                FailureSite::ExportBakeStorage)
+            || !operation.EnterAllocation(FailureSite::ExportBakeStorage))
+            return {};
+        auto storage = std::make_shared<ExportBakeStorage>();
+        if (owner) storage->operation = *owner;
+        storage->controlStorage = std::move(control);
+        storage->finalAtlas = std::move(accounting);
+        return storage;
+    } catch (const std::bad_alloc&) {
+        operation.AllocationFailed(FailureSite::ExportBakeStorage);
+        return {};
+    } catch (...) { return {}; }
 }
 
 Outcome MapBuild(aa::build::Status status) noexcept {
@@ -2737,9 +2854,10 @@ Outcome CaptureForExport(ExportCapture& capture,
 }
 
 Outcome BakeForExport(const ExportCapture& capture,
-                      const aa::Definition& finalAtlas,
-                      const std::vector<aa::MemberUVAssignment>& assignments,
+                      aa::Definition finalAtlas,
+                      std::vector<aa::MemberUVAssignment> assignments,
                       const aa::build::LayoutEvidence& layout,
+                      std::shared_ptr<ExportBakeStorage> storage,
                       ExportBake& output) noexcept {
     output = {};
     try {
@@ -2749,7 +2867,9 @@ Outcome BakeForExport(const ExportCapture& capture,
             || capture.members.members.size() != finalAtlas.members.size()
             || capture.sources.empty()
             || layout.charts.empty()
-            || layout.chartMembers.size() != layout.charts.size())
+            || layout.chartMembers.size() != layout.charts.size()
+            || layout.chartFaces.size() != layout.charts.size()
+            || !storage)
             return Outcome::Malformed;
         for (std::size_t index = 0; index < finalAtlas.members.size(); ++index) {
             const auto& finalMember = finalAtlas.members[index];
@@ -2764,15 +2884,16 @@ Outcome BakeForExport(const ExportCapture& capture,
         const auto decoded = DecodeCapturedSources(
             capture.sources.values, capture.operation.view, sources);
         if (decoded != Outcome::Prepared) return decoded;
-        output.atlas = finalAtlas;
-        output.assignments = assignments;
+        output.storage = std::move(storage);
+        output.atlas = std::move(finalAtlas);
+        output.assignments = std::move(assignments);
         if (!kernel::Bake(output.atlas, layout, sources.values,
                           output.outputs, output.evidence)) {
             output = {};
             return Outcome::Refused;
         }
-        output.bake.key = finalAtlas.key;
-        output.bake.layoutProof = finalAtlas.layoutProof;
+        output.bake.key = output.atlas.key;
+        output.bake.layoutProof = output.atlas.layoutProof;
         for (const auto& source : capture.sources)
             output.bake.bindings.push_back(source.fence);
         for (const auto& baked : output.outputs)
@@ -2800,17 +2921,25 @@ Outcome BuildAndBakeForExport(
         aa::Definition atlas;
         std::vector<aa::MemberUVAssignment> assignments;
         aa::build::LayoutEvidence layout;
+        aa::build::FinalAtlasAccounting accounting;
+        if (!ConfigureFinalAtlasAccounting(capture.sources,
+                capture.operation.view, true, accounting))
+            return Outcome::OverBudget;
         const auto built = aa::build::BuildFinalAtlas(
             capture.savedAtlas.key, finalMembers, settings, atlas,
-            assignments, diagnosis, &layout);
+            assignments, diagnosis, &layout, &accounting);
         if (built != aa::build::Status::Built) {
             if (diagnosis.empty())
                 diagnosis = "build-status-" +
                     std::to_string(static_cast<unsigned>(built));
             return MapBuild(built);
         }
+        auto storage = MakeExportBakeStorage(capture.operation.view,
+            &capture.operation, std::move(accounting));
+        if (!storage) return Outcome::OverBudget;
         const auto outcome = BakeForExport(
-            capture, atlas, assignments, layout, output);
+            capture, std::move(atlas), std::move(assignments), layout,
+            std::move(storage), output);
         if (outcome != Outcome::Prepared && diagnosis.empty())
             diagnosis = "bake-outcome-" +
                 std::to_string(static_cast<unsigned>(outcome));
@@ -2831,20 +2960,31 @@ Outcome BuildAndBakeTransientForExport(
     output = {};
     diagnosis.clear();
     try {
+        if (!capture.sources) {
+            diagnosis = "transient-capture-missing-sources";
+            return Outcome::StaleSource;
+        }
         if (!(capture.member.owner == finalMember.savedMember.owner)
             || !(capture.member.finishing
                 == finalMember.savedMember.finishing)
             || !(capture.member.source == finalMember.savedMember.source)
-            || capture.sources.empty()) {
+            || capture.sources->empty()) {
             diagnosis = "transient-capture-mismatch";
             return Outcome::StaleSource;
         }
         aa::Definition atlas;
         std::vector<aa::MemberUVAssignment> assignments;
         aa::build::LayoutEvidence layout;
+        aa::build::FinalAtlasAccounting accounting;
+        // P2b2 still owns multi-owner activation. The retained transient
+        // route inherits the same operation and storage accounting but does
+        // not reseal the one all-member job for each protected owner.
+        if (!ConfigureFinalAtlasAccounting(*capture.sources,
+                capture.operation, false, accounting))
+            return Outcome::OverBudget;
         const auto built = aa::build::BuildFinalAtlas(
             capture.atlas, {finalMember}, settings, atlas,
-            assignments, diagnosis, &layout);
+            assignments, diagnosis, &layout, &accounting);
         if (built != aa::build::Status::Built) {
             if (diagnosis.empty())
                 diagnosis = "build-status-"
@@ -2863,11 +3003,15 @@ Outcome BuildAndBakeTransientForExport(
         }
         kernel::SourceStorage sources;
         const auto decoded = DecodeCapturedSources(
-            capture.sources, capture.operation, sources);
+            *capture.sources, capture.operation, sources);
         if (decoded != Outcome::Prepared) {
             diagnosis = "transient-source-decode";
             return decoded;
         }
+        auto storage = MakeExportBakeStorage(capture.operation, nullptr,
+            std::move(accounting));
+        if (!storage) return Outcome::OverBudget;
+        output.storage = std::move(storage);
         output.atlas = std::move(atlas);
         output.assignments = std::move(assignments);
         if (!kernel::Bake(output.atlas, layout, sources.values,
@@ -2878,7 +3022,7 @@ Outcome BuildAndBakeTransientForExport(
         }
         output.bake.key = output.atlas.key;
         output.bake.layoutProof = output.atlas.layoutProof;
-        for (const auto& source : capture.sources)
+        for (const auto& source : *capture.sources)
             output.bake.bindings.push_back(source.fence);
         for (const auto& baked : output.outputs)
             output.bake.resources.push_back(baked.descriptor);

@@ -3545,6 +3545,158 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
     };
 }
 
+- (NSDictionary<NSString *,id> *)debugE4FinalAtlasPlanForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    namespace aa = core3d::asset_atlas;
+    namespace accounting = core3d::decal_layer::bake::accounting;
+    namespace pb = core3d::painted_atlas_bake;
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128) return nil;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        OwnerKey key;
+        TDF_Label ownerLabel;
+        const char *raw = entityIdentifier.UTF8String;
+        if (wrapper.IsNull()
+            || !LabelForSelected(wrapper, raw ? raw : "", key, ownerLabel))
+            return nil;
+        const Handle(TDocStd_Document)& document = wrapper->Document();
+        std::vector<aa::persistence::Record> records;
+        if (document.IsNull() || document->HasOpenCommand()
+            || !aa::persistence::ReadAll(document, records)) return nil;
+        const aa::Key *atlasKey = nullptr;
+        for (const auto& record : records) {
+            if (!record.value) return nil;
+            for (const auto& member : record.value->definition.members) {
+                if (!(member.owner == key)) continue;
+                if (atlasKey) return nil;
+                atlasKey = &record.value->definition.key;
+            }
+        }
+        if (!atlasKey) return nil;
+        const Standard_Integer undosBefore = document->GetAvailableUndos();
+
+        pb::owner::ExportCapture capture;
+        if (pb::owner::CaptureForExport(capture, document, *atlasKey)
+                != pb::owner::Outcome::Prepared
+            || capture.savedAtlas.members.size() != 2
+            || capture.members.members.size() != 2
+            || capture.sources.size() != 5) return nil;
+
+        std::vector<aa::build::FinalMemberInput> inputs;
+        inputs.reserve(capture.members.members.size());
+        for (const auto& member : capture.members.members) {
+            core3d::retained_solid::Record retained;
+            core3d::retained_finishing::SourceRevision observed;
+            if (!core3d::retained_finishing::producer::detail::Source(
+                    document, member.slot.owner, observed, nullptr, &retained)
+                || !(observed == member.slot.source)) return nil;
+            std::atomic_bool cancelled{false};
+            core3d::meshcopy::CurrentTessellationCopy copy;
+            if (core3d::meshcopy::PrepareCurrentTessellationCopy(
+                    retained.current, copy, cancelled)
+                    != core3d::meshcopy::PreparationResult::Ready)
+                return nil;
+            aa::build::FinalMemberInput input;
+            input.savedMember = member.slot;
+            input.authority = member.capture;
+            if (!core3d::retained_finishing::producer::detail::Triangles(
+                    copy, input.triangles, input.faces)) return nil;
+            inputs.push_back(std::move(input));
+        }
+
+        std::array<bool, 5> roles{};
+        std::size_t masks = 0;
+        for (const auto& source : capture.sources) {
+            const auto role = static_cast<std::size_t>(source.fence.role);
+            if (role >= roles.size()) return nil;
+            roles[role] = true;
+            if (source.maskPresent) ++masks;
+        }
+        std::size_t roleCount = 0;
+        for (const bool present : roles) if (present) ++roleCount;
+
+        aa::Definition candidate;
+        std::vector<aa::MemberUVAssignment> assignments;
+        aa::build::LayoutEvidence layout;
+        std::string diagnosis;
+        aa::build::FinalAtlasAccounting normal;
+        normal.operation = capture.operation.view;
+        normal.roleCount = roleCount;
+        normal.sourceCount = capture.sources.size();
+        normal.maskCount = masks;
+        const aa::build::Settings settings{2048, 4};
+        const auto normalStatus = aa::build::BuildFinalAtlas(
+            *atlasKey, inputs, settings, candidate, assignments,
+            diagnosis, &layout, &normal);
+        bool sawFirst = false;
+        bool sawSecond = false;
+        for (const auto& chart : layout.chartMembers) {
+            sawFirst = sawFirst || chart.first == 0;
+            sawSecond = sawSecond || chart.first == 1;
+        }
+
+        accounting::Owner deniedOwner = accounting::MakeOperationOwner();
+        if (!deniedOwner.valid()) return nil;
+        aa::build::FinalAtlasAccounting denied;
+        denied.operation = deniedOwner.view;
+        denied.roleCount = roleCount;
+        denied.sourceCount = capture.sources.size();
+        denied.maskCount = masks;
+        denied.denyLayoutReservation = true;
+        aa::Definition deniedCandidate;
+        std::vector<aa::MemberUVAssignment> deniedAssignments;
+        aa::build::LayoutEvidence deniedLayout;
+        std::string deniedDiagnosis;
+        const auto deniedStatus = aa::build::BuildFinalAtlas(
+            *atlasKey, inputs, settings, deniedCandidate, deniedAssignments,
+            deniedDiagnosis, &deniedLayout, &denied);
+        const bool normalBuilt = normalStatus == aa::build::Status::Built;
+        const bool deniedEmpty = deniedCandidate.members.empty()
+            && deniedCandidate.charts.empty()
+            && deniedCandidate.resources.empty()
+            && deniedAssignments.empty() && deniedLayout.charts.empty()
+            && deniedLayout.packed.triangles.empty();
+        const bool historyUnchanged =
+            document->GetAvailableUndos() == undosBefore;
+        return @{
+            @"fixture": @"E4P2b1LedgerAtlas2048",
+            @"normalBuilt": @(normalBuilt),
+            @"members": @(normal.memberCount),
+            @"triangles": @(normal.triangleCount),
+            @"corners": @(normal.cornerCount),
+            @"jobUnits": @(normal.jobUnits),
+            @"roleCount": @(roleCount),
+            @"sourceCount": @(capture.sources.size()),
+            @"maskCount": @(masks),
+            @"resolution": @(candidate.resolutionTexels),
+            @"gutter": @(candidate.gutterTexels),
+            @"chartCount": @(layout.charts.size()),
+            @"assignmentCount": @(assignments.size()),
+            @"layoutReservationAttempts": @(
+                normal.layoutReservationAttempts),
+            @"packerEntries": @(normal.packerEntries),
+            @"oneSharedLayout": @(normalBuilt && sawFirst && sawSecond
+                && layout.chartMembers.size() == layout.charts.size()
+                && layout.chartFaces.size() == layout.charts.size()),
+            @"globalTexelsPerMM": @(candidate.globalTexelsPerMM),
+            @"deniedOverBudget": @(
+                deniedStatus == aa::build::Status::OverBudget),
+            @"deniedBeforePacker": @(denied.layoutReservationAttempts == 1
+                && denied.packerEntries == 0),
+            @"deniedNoPartialOutput": @(deniedEmpty),
+            @"deniedPackerEntries": @(denied.packerEntries),
+            @"historyUnchanged": @(historyUnchanged),
+        };
+    } @catch (...) { return nil; }
+}
+
 - (void)debugArmE4BRepCensusObservationRefuseOneByteShort:
     (NSNumber *)refuseOneByteShort {
     core3d::scene::DebugArmE4BRepCensusObservation(

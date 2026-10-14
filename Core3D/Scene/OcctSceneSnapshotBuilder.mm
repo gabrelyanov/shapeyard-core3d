@@ -11359,7 +11359,9 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
                     decal_layer::bake::accounting::Retention::Retained,
                     decal_layer::bake::accounting::FailureSite::ProtectedSourceStorage))
                 return false;
-            for (const auto& layer : definition.layers) {
+            for (std::size_t layerIndex = 0;
+                 layerIndex < definition.layers.size(); ++layerIndex) {
+                const auto& layer = definition.layers[layerIndex];
                 face_image::ResourceEnvelope envelope;
                 painted_atlas_bake::owner::ResourceReadAdmission resourceRead;
                 if (painted_atlas_bake::owner::PreflightResourceRead(
@@ -11386,6 +11388,52 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
                 captured.fence.role = layer.image.role;
                 captured.fence.colorSpace = layer.image.colorSpace;
                 captured.envelope = std::move(envelope);
+                captured.memberIndex = 0;
+                captured.order = layerIndex;
+                captured.boundedLayer = layer.placement.kind
+                    == decal_layer::PlacementKind::Face;
+                if (captured.boundedLayer) {
+                    captured.centerU =
+                        layer.placement.face.anchorMeters[0]
+                            / impl.metersPerUnit;
+                    captured.centerV =
+                        layer.placement.face.anchorMeters[1]
+                            / impl.metersPerUnit;
+                    captured.width = layer.widthMeters / impl.metersPerUnit;
+                    captured.height = layer.heightMeters / impl.metersPerUnit;
+                    captured.angle = layer.placement.face.angleRadians;
+                }
+                captured.opacity = layer.opacity;
+                captured.maskPresent = layer.mask.present;
+                if (captured.maskPresent) {
+                    painted_atlas_bake::owner::ResourceReadAdmission maskRead;
+                    if (painted_atlas_bake::owner::PreflightResourceRead(
+                            document, layer.mask.image.resource,
+                            impl.operationLedger.view(), maskRead)
+                            != painted_atlas_bake::owner::Outcome::Prepared
+                        || !impl.operationLedger.enterAllocation(
+                            decal_layer::bake::accounting::FailureSite::
+                                ResourceReadMaterialize)
+                        || !face_image::owner::ReadResource(document,
+                            layer.mask.image.resource,
+                            captured.maskEnvelope)
+                        || !maskRead.selected
+                        || captured.maskEnvelope.originalBytes.capacity()
+                            > maskRead.originalBytes.bytes
+                        || captured.maskEnvelope.workingBytes.capacity()
+                            > maskRead.workingBytes.bytes)
+                        return false;
+                    maskRead.serialization.reset();
+                    maskRead.table.reset();
+                    captured.maskOriginalBytesTicket =
+                        std::move(maskRead.originalBytes);
+                    captured.maskWorkingBytesTicket =
+                        std::move(maskRead.workingBytes);
+                    captured.maskUsesLuminance = layer.mask.channel
+                        == decal_layer::MaskChannel::LinearLuminance;
+                    captured.maskInverted = layer.mask.inverted;
+                    captured.maskTransform = layer.mask.transform;
+                }
                 if (!resourceRead.selected
                     || captured.envelope.originalBytes.capacity()
                         > resourceRead.originalBytes.bytes
@@ -13691,7 +13739,8 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         std::unordered_map<std::string, OcctPaintedAtlasDerivative>
             finalDerivatives;
         std::unordered_map<std::string,
-            painted_atlas_bake::owner::ExportBake> finalBakes;
+            std::shared_ptr<const painted_atlas_bake::owner::ExportBake>>
+            finalBakes;
         if (decalCapture && decalCapture->impl_) {
 #ifdef DEBUG
             if (debugObservation)
@@ -13715,13 +13764,57 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                     debugObservation->failureStage =
                         "constructing-final-member";
 #endif
-                asset_atlas::build::FinalMemberInput finalMember =
-                    owner.savedMember;
                 if (definition.mesh.indices.empty()
                     || definition.mesh.indices.size() % 3 != 0
                     || definition.faces.IsEmpty()) return {};
-                finalMember.triangles.resize(
-                    definition.mesh.indices.size() / 3);
+                const std::size_t finalMemberTriangleCount =
+                    definition.mesh.indices.size() / 3;
+                std::size_t finalMemberTriangleBytes = 0;
+                std::size_t finalMemberFaceBytes = 0;
+                std::size_t finalMemberAuthorityBytes = 0;
+                std::size_t finalMemberStorageBytes = 0;
+                auto finalOperation =
+                    decalCapture->impl_->operationLedger.view();
+                if (!finalOperation.CheckedProduct(finalMemberTriangleCount,
+                        sizeof(shapeyard::uv::Triangle), 1U,
+                        finalMemberTriangleBytes,
+                        decal_layer::bake::accounting::FailureSite::
+                            ExportMemberStorage)
+                    || !finalOperation.CheckedProduct(
+                        definition.mesh.primitives.size(),
+                        sizeof(shapeyard::uv::curved::FaceInput), 1U,
+                        finalMemberFaceBytes,
+                        decal_layer::bake::accounting::FailureSite::
+                            ExportMemberStorage)
+                    || !finalOperation.CheckedProduct(
+                        owner.savedMember.authority.resources.size(),
+                        sizeof(retained_finishing::MaterialResource), 1U,
+                        finalMemberAuthorityBytes,
+                        decal_layer::bake::accounting::FailureSite::
+                            ExportMemberStorage)
+                    || !CheckedAdd(finalMemberTriangleBytes,
+                        finalMemberFaceBytes, finalMemberStorageBytes)
+                    || !CheckedAdd(finalMemberStorageBytes,
+                        finalMemberAuthorityBytes, finalMemberStorageBytes)
+                    || !CheckedAdd(finalMemberStorageBytes,
+                        sizeof(asset_atlas::build::FinalMemberInput),
+                        finalMemberStorageBytes)) return {};
+                decal_layer::bake::accounting::Ticket finalMemberStorage;
+                if (!finalMemberStorage.acquire(finalOperation,
+                        decal_layer::bake::accounting::StorageDimension::
+                            PrivateStorage,
+                        finalMemberStorageBytes,
+                        decal_layer::bake::accounting::Retention::Scratch,
+                        decal_layer::bake::accounting::FailureSite::
+                            ExportMemberStorage)
+                    || !finalOperation.EnterAllocation(
+                        decal_layer::bake::accounting::FailureSite::
+                            ExportMemberStorage)) return {};
+                asset_atlas::build::FinalMemberInput finalMember =
+                    owner.savedMember;
+                finalMember.triangles.reserve(finalMemberTriangleCount);
+                finalMember.faces.reserve(definition.mesh.primitives.size());
+                finalMember.triangles.resize(finalMemberTriangleCount);
                 for (std::size_t triangle = 0;
                      triangle < finalMember.triangles.size(); ++triangle) {
                     for (std::size_t corner = 0; corner < 3; ++corner) {
@@ -13820,7 +13913,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 painted_atlas_bake::owner::TransientExportCapture transient;
                 transient.atlas = owner.transientAtlas;
                 transient.member = finalMember.savedMember;
-                transient.sources = owner.paintedSources;
+                transient.sources = &owner.paintedSources;
                 transient.operation = decalCapture->impl_->operationLedger.view();
                 std::string atlasDiagnosis;
                 const asset_atlas::build::Settings atlasSettings{256, 4};
@@ -13843,10 +13936,16 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                     debugObservation->failureStage =
                         "transient-kernel-bake-built";
 #endif
-                if (baked.outputs.empty() || baked.atlas.charts.empty()
+                std::size_t expectedFinalCorners = 0;
+                if (!finalOperation.CheckedProduct(
+                        finalMember.triangles.size(), 3U, 1U,
+                        expectedFinalCorners,
+                        decal_layer::bake::accounting::FailureSite::
+                            CheckedProduct)
+                    || baked.outputs.empty() || baked.atlas.charts.empty()
                     || baked.assignments.size() != 1
                     || baked.assignments.front().corners.size()
-                        != finalMember.triangles.size() * 3U) {
+                        != expectedFinalCorners) {
 #ifdef DEBUG
                     if (debugObservation)
                         debugObservation->failureStage =
@@ -13856,8 +13955,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                             + std::to_string(baked.assignments.size()) + "-"
                             + std::to_string(baked.assignments.empty() ? 0
                                 : baked.assignments.front().corners.size())
-                            + "-" + std::to_string(
-                                finalMember.triangles.size() * 3U);
+                            + "-" + std::to_string(expectedFinalCorners);
 #endif
                     return {};
                 }
@@ -13877,8 +13975,33 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                     PaintedAtlasDigestText(baked.bake.bakeProof);
                 if (inputKey.size() != 64 || bakeSeal.size() != 64)
                     return {};
-                if (!finalBakes.emplace(owner.definitionIdentifier,
-                        baked).second) return {};
+                if (!baked.storage
+                    || !baked.storage->bakeValueStorage.acquire(
+                        finalOperation,
+                        decal_layer::bake::accounting::StorageDimension::
+                            PrivateStorage,
+                        sizeof(painted_atlas_bake::owner::ExportBake) + 64U,
+                        decal_layer::bake::accounting::Retention::Retained,
+                        decal_layer::bake::accounting::FailureSite::
+                            ExportBakeStorage)
+                    || !finalOperation.EnterAllocation(
+                        decal_layer::bake::accounting::FailureSite::
+                            ExportBakeStorage)) return {};
+                std::shared_ptr<const painted_atlas_bake::owner::ExportBake>
+                    sharedBake;
+                try {
+                    sharedBake = std::make_shared<const
+                        painted_atlas_bake::owner::ExportBake>(
+                            std::move(baked));
+                } catch (const std::bad_alloc&) {
+                    finalOperation.AllocationFailed(
+                        decal_layer::bake::accounting::FailureSite::
+                            ExportBakeStorage);
+                    return {};
+                }
+                if (!sharedBake
+                    || !finalBakes.emplace(owner.definitionIdentifier,
+                        sharedBake).second) return {};
 #ifdef DEBUG
                 if (debugObservation)
                     debugObservation->failureStage =
@@ -13888,11 +14011,11 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 finalBakeSeals.push_back(bakeSeal);
                 finalLayoutResolution = std::max<std::size_t>(
                     finalLayoutResolution,
-                    std::uint64_t(baked.atlas.resolutionTexels));
+                    std::uint64_t(sharedBake->atlas.resolutionTexels));
                 if (!CheckedAdd(finalLayoutChartCount,
                         std::size_t(1),
                         finalLayoutChartCount)) return {};
-                for (const auto& output : baked.outputs) {
+                for (const auto& output : sharedBake->outputs) {
                     if (output.png.empty()) return {};
                     finalOutputRoles.emplace_back(
                         PrivatePaintedRoleText(output.descriptor.role));
@@ -14095,7 +14218,8 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 expectedRoles.insert(source.fence.role);
             std::set<face_image::Role> installedRoles;
             std::array<std::int32_t, 5> indices{-1, -1, -1, -1, -1};
-            for (const auto& output : entry.second.outputs) {
+            if (!entry.second) return {};
+            for (const auto& output : entry.second->outputs) {
                 const std::size_t role = std::size_t(output.descriptor.role);
                 face_image::Digest measured{};
                 if (role >= indices.size() || indices[role] >= 0
@@ -14274,7 +14398,8 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 input.tangentProof = tangentProof;
                 const auto bake = finalBakes.find(owner.definitionIdentifier);
                 if (bake == finalBakes.end()) return {};
-                input.atlasProof = bake->second.atlas.layoutProof;
+                if (!bake->second) return {};
+                input.atlasProof = bake->second->atlas.layoutProof;
                 input.occurrenceProof = occurrenceProof;
                 for (const auto* layer : layers) {
                     decal_layer::bake::ResolvedLayer resolved;

@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <new>
 #include <vector>
 
@@ -73,6 +74,18 @@ bool DecodeImage(const std::vector<std::uint8_t>& bytes,
 struct Source final {
     BindingFence fence;
     Image image;
+    std::size_t memberIndex = std::numeric_limits<std::size_t>::max();
+    std::size_t faceIndex = std::numeric_limits<std::size_t>::max();
+    std::size_t order = 0;
+    bool boundedLayer = false;
+    double centerU = 0, centerV = 0;
+    double width = 0, height = 0;
+    double angle = 0, opacity = 1;
+    bool maskPresent = false;
+    Image mask;
+    bool maskUsesLuminance = false;
+    bool maskInverted = false;
+    UVTransform maskTransform;
 };
 
 //! Operation-local source-vector storage. The reservation precedes vector
@@ -282,7 +295,8 @@ inline bool Bake(const asset_atlas::Definition& atlas,
         if (atlas.resolutionTexels <= 0 || atlas.resolutionTexels > kMaximumBakedDimension
             || atlas.gutterTexels < 1 || atlas.gutterTexels > 8
             || layout.charts.empty() || layout.packed.triangles.empty()
-            || layout.chartMembers.size() != layout.charts.size()) return false;
+            || layout.chartMembers.size() != layout.charts.size()
+            || layout.chartFaces.size() != layout.charts.size()) return false;
         for (const auto& source : sources) if (!Valid(source.fence) || !ImageValid(source.image))
             return false;
         const std::uint32_t size = std::uint32_t(atlas.resolutionTexels);
@@ -539,7 +553,21 @@ struct CapturedSource final {
     BindingFence fence;
     decal_layer::bake::accounting::Ticket originalBytesTicket;
     decal_layer::bake::accounting::Ticket workingBytesTicket;
+    decal_layer::bake::accounting::Ticket maskOriginalBytesTicket;
+    decal_layer::bake::accounting::Ticket maskWorkingBytesTicket;
     face_image::ResourceEnvelope envelope;
+    std::size_t memberIndex = std::numeric_limits<std::size_t>::max();
+    std::size_t faceIndex = std::numeric_limits<std::size_t>::max();
+    std::size_t order = 0;
+    bool boundedLayer = false;
+    double centerU = 0, centerV = 0;
+    double width = 0, height = 0;
+    double angle = 0, opacity = 1;
+    bool maskPresent = false;
+    face_image::ResourceEnvelope maskEnvelope;
+    bool maskUsesLuminance = false;
+    bool maskInverted = false;
+    UVTransform maskTransform;
 
     CapturedSource() = default;
     CapturedSource(const CapturedSource& other) { copyFrom(other); }
@@ -556,16 +584,41 @@ struct CapturedSource final {
             reset();
             fence = other.fence;
             envelope = std::move(other.envelope);
+            memberIndex = other.memberIndex;
+            faceIndex = other.faceIndex;
+            order = other.order;
+            boundedLayer = other.boundedLayer;
+            centerU = other.centerU; centerV = other.centerV;
+            width = other.width; height = other.height;
+            angle = other.angle; opacity = other.opacity;
+            maskPresent = other.maskPresent;
+            maskEnvelope = std::move(other.maskEnvelope);
+            maskUsesLuminance = other.maskUsesLuminance;
+            maskInverted = other.maskInverted;
+            maskTransform = other.maskTransform;
             originalBytesTicket = std::move(other.originalBytesTicket);
             workingBytesTicket = std::move(other.workingBytesTicket);
+            maskOriginalBytesTicket =
+                std::move(other.maskOriginalBytesTicket);
+            maskWorkingBytesTicket =
+                std::move(other.maskWorkingBytesTicket);
         }
         return *this;
     }
     void reset() noexcept {
         envelope = {};
+        maskEnvelope = {};
         originalBytesTicket.reset();
         workingBytesTicket.reset();
+        maskOriginalBytesTicket.reset();
+        maskWorkingBytesTicket.reset();
         fence = {};
+        memberIndex = faceIndex = std::numeric_limits<std::size_t>::max();
+        order = 0; boundedLayer = false;
+        centerU = centerV = width = height = angle = 0;
+        opacity = 1; maskPresent = false;
+        maskUsesLuminance = maskInverted = false;
+        maskTransform = {};
     }
 
 private:
@@ -593,8 +646,42 @@ private:
                     || !activeView.EnterAllocation(FailureSite::SourceWorkingBytes))
                     throw std::bad_alloc();
             }
+            if (other.maskOriginalBytesTicket.bytes != 0) {
+                active = FailureSite::SourceOriginalBytes;
+                activeView = other.maskOriginalBytesTicket.view;
+                if (!maskOriginalBytesTicket.acquire(activeView,
+                        StorageDimension::EncodedTexture,
+                        other.maskEnvelope.originalBytes.capacity(),
+                        Retention::Retained, FailureSite::SourceOriginalBytes)
+                    || !activeView.EnterAllocation(
+                        FailureSite::SourceOriginalBytes))
+                    throw std::bad_alloc();
+            }
+            if (other.maskWorkingBytesTicket.bytes != 0) {
+                active = FailureSite::SourceWorkingBytes;
+                activeView = other.maskWorkingBytesTicket.view;
+                if (!maskWorkingBytesTicket.acquire(activeView,
+                        StorageDimension::EncodedTexture,
+                        other.maskEnvelope.workingBytes.capacity(),
+                        Retention::Retained, FailureSite::SourceWorkingBytes)
+                    || !activeView.EnterAllocation(
+                        FailureSite::SourceWorkingBytes))
+                    throw std::bad_alloc();
+            }
             fence = other.fence;
             envelope = other.envelope;
+            memberIndex = other.memberIndex;
+            faceIndex = other.faceIndex;
+            order = other.order;
+            boundedLayer = other.boundedLayer;
+            centerU = other.centerU; centerV = other.centerV;
+            width = other.width; height = other.height;
+            angle = other.angle; opacity = other.opacity;
+            maskPresent = other.maskPresent;
+            maskEnvelope = other.maskEnvelope;
+            maskUsesLuminance = other.maskUsesLuminance;
+            maskInverted = other.maskInverted;
+            maskTransform = other.maskTransform;
         } catch (const std::bad_alloc&) {
             reset();
             activeView.AllocationFailed(active);
@@ -933,13 +1020,27 @@ struct TransientExportCapture final {
     decal_layer::bake::accounting::View operation;
     asset_atlas::Key atlas;
     asset_atlas::Member member;
-    std::vector<CapturedSource> sources;
+    // Borrow the operation-owned frozen source vector. The builder retains
+    // its ticket for the complete call; copying it here would be a second
+    // physical allocation and a second set of encoded-byte reservations.
+    const std::vector<CapturedSource>* sources = nullptr;
+};
+
+//! One shared owner for the layout/result storage emitted by the single
+//! all-member BuildFinalAtlas call. ExportBake remains cheaply copyable for
+//! per-member lookup while the physical arrays are charged exactly once.
+struct ExportBakeStorage final {
+    decal_layer::bake::accounting::Owner operation;
+    decal_layer::bake::accounting::Ticket controlStorage;
+    decal_layer::bake::accounting::Ticket bakeValueStorage;
+    asset_atlas::build::FinalAtlasAccounting finalAtlas;
 };
 
 //! Complete detached painted result for one final layout. All applicable
 //! roles are baked together from ExportCapture::sources and remain values
 //! owned by the export operation.
 struct ExportBake final {
+    std::shared_ptr<ExportBakeStorage> storage;
     asset_atlas::Definition atlas;
     std::vector<asset_atlas::MemberUVAssignment> assignments;
     Definition bake;
@@ -962,9 +1063,10 @@ Outcome CaptureForExport(ExportCapture& capture,
                          const Handle(TDocStd_Document)& document,
                          const asset_atlas::Key& key) noexcept;
 Outcome BakeForExport(const ExportCapture& capture,
-                      const asset_atlas::Definition& finalAtlas,
-                      const std::vector<asset_atlas::MemberUVAssignment>& assignments,
+                      asset_atlas::Definition finalAtlas,
+                      std::vector<asset_atlas::MemberUVAssignment> assignments,
                       const asset_atlas::build::LayoutEvidence& layout,
+                      std::shared_ptr<ExportBakeStorage> storage,
                       ExportBake& output) noexcept;
 Outcome BuildAndBakeForExport(
     const ExportCapture& capture,

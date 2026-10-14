@@ -8,6 +8,7 @@
 // packer, no per-member packing, no member-shape mutation.
 #include "AssetAtlasDefinition.hxx"
 #include "AssetAtlasPersistence.hxx"
+#include "DecalLayerBake.hxx"
 #include "FaceImagePersistence.hxx"
 #include "RetainedFinishingProducer.hxx"
 
@@ -49,6 +50,33 @@ struct LayoutEvidence final {           // optional BuildAtlas out-param
     curveduv::PackResult packed;        // the one asset-wide pack result
     std::vector<curveduv::ChartInput> charts; // exact merged packer input
     std::vector<std::pair<std::size_t, std::uint64_t>> chartMembers;
+    // The source face is structural provenance for later ordered/masked
+    // sampling. It is carried beside member/ordinal without changing any
+    // chart, packer, UV or sampling arithmetic in this portion.
+    std::vector<std::size_t> chartFaces;
+};
+
+//! Required accounting state for private final-atlas production. The caller
+//! supplies the one operation view and retains the layout/result tickets for
+//! as long as the corresponding vectors are physically live. The chart and
+//! packer scratch ticket is local to BuildFinalAtlas.
+struct FinalAtlasAccounting final {
+    decal_layer::bake::accounting::View operation;
+    decal_layer::bake::accounting::Ticket layoutStorage;
+    decal_layer::bake::accounting::Ticket resultStorage;
+    std::size_t roleCount = 0;
+    std::size_t sourceCount = 0;
+    std::size_t maskCount = 0;
+    bool sealAtlasJob = true;
+#ifdef DEBUG
+    bool denyLayoutReservation = false;
+    std::size_t memberCount = 0;
+    std::size_t triangleCount = 0;
+    std::size_t cornerCount = 0;
+    std::size_t jobUnits = 0;
+    std::size_t layoutReservationAttempts = 0;
+    std::size_t packerEntries = 0;
+#endif
 };
 
 //! Detached final-representation input. The immutable member/source fences
@@ -197,6 +225,7 @@ inline ChartRejection AppendMemberCharts(
     int flatBase,
     curveduv::PackerInput& packer,
     std::vector<std::vector<int>>& originalIndices,
+    std::vector<std::size_t>& chartFaces,
     std::string& reason) noexcept {
     reason.clear();
     try {
@@ -357,6 +386,7 @@ inline ChartRejection AppendMemberCharts(
                 }
                 packer.charts.push_back(std::move(charts[c]));
                 originalIndices.push_back(std::move(indices[c]));
+                chartFaces.push_back(std::size_t(fi));
             }
         }
         // Global flattened triangle indices in chart order across the whole
@@ -506,8 +536,32 @@ inline Status BuildFinalAtlas(const Key& atlas,
                               Definition& candidate,
                               std::vector<MemberUVAssignment>& assignments,
                               std::string& diagnosis,
-                              LayoutEvidence* layout = nullptr) noexcept {
+                              LayoutEvidence* layout = nullptr,
+                              FinalAtlasAccounting* accounting = nullptr) noexcept {
     candidate = {}; assignments.clear(); diagnosis.clear();
+    if (layout) *layout = {};
+    if (accounting) {
+        accounting->layoutStorage.reset();
+        accounting->resultStorage.reset();
+#ifdef DEBUG
+        accounting->memberCount = 0;
+        accounting->triangleCount = 0;
+        accounting->cornerCount = 0;
+        accounting->jobUnits = 0;
+        accounting->layoutReservationAttempts = 0;
+        accounting->packerEntries = 0;
+#endif
+    }
+    struct AccountingReset final {
+        FinalAtlasAccounting* value = nullptr;
+        bool committed = false;
+        ~AccountingReset() {
+            if (value && !committed) {
+                value->resultStorage.reset();
+                value->layoutStorage.reset();
+            }
+        }
+    } accountingReset{accounting};
     try {
         if (!retained_recipe::Nonzero(atlas.document)
             || !retained_recipe::Nonzero(atlas.atlas)
@@ -518,6 +572,121 @@ inline Status BuildFinalAtlas(const Key& atlas,
             || inputs.empty()) return Status::Malformed;
         if (inputs.size() > kMaximumMembers) return Status::OverBudget;
 
+        using namespace decal_layer::bake::accounting;
+        const auto checkedProduct = [&](std::size_t first,
+                std::size_t second, std::size_t third,
+                std::size_t& product, FailureSite site) {
+            product = 0;
+            if (accounting)
+                return accounting->operation.CheckedProduct(
+                    first, second, third, product, site);
+            if ((first != 0
+                    && second > std::numeric_limits<std::size_t>::max() / first)
+                || (first * second != 0
+                    && third > std::numeric_limits<std::size_t>::max()
+                        / (first * second))) return false;
+            product = first * second * third;
+            return true;
+        };
+        const auto checkedAdd = [&](std::size_t value,
+                std::size_t increment, std::size_t& result) {
+            if (increment > std::numeric_limits<std::size_t>::max() - value) {
+                if (accounting)
+                    accounting->operation.Refuse(FailureSite::CheckedProduct);
+                return false;
+            }
+            result = value + increment;
+            return true;
+        };
+
+        std::size_t totalTriangles = 0;
+        std::size_t totalFaces = 0;
+        std::size_t totalResources = 0;
+        std::size_t totalCorners = 0;
+        for (const auto& input : inputs) {
+            if (!retained_recipe::Valid(input.savedMember.owner)
+                || input.triangles.empty() || input.faces.empty()
+                || input.authority.resources.empty()) return Status::Malformed;
+            for (const auto& face : input.faces)
+                if (face.surfaceType == 3) return Status::UnsupportedSurface;
+            std::size_t memberCorners = 0;
+            if (!checkedProduct(input.triangles.size(), 3U, 1U,
+                    memberCorners, FailureSite::CheckedProduct)
+                || !checkedAdd(totalTriangles, input.triangles.size(),
+                    totalTriangles)
+                || !checkedAdd(totalFaces, input.faces.size(), totalFaces)
+                || !checkedAdd(totalResources,
+                    input.authority.resources.size(), totalResources)
+                || !checkedAdd(totalCorners, memberCorners, totalCorners))
+                return Status::OverBudget;
+        }
+        if (totalCorners > kMaximumFinalCorners
+            || totalResources > kMaximumMaterials)
+            return Status::OverBudget;
+        if (accounting && (!accounting->operation.valid() || !layout
+                || accounting->roleCount == 0
+                || accounting->sourceCount == 0)) return Status::OverBudget;
+
+        Ticket chartScratch;
+        if (accounting) {
+            std::size_t triangleScratch = 0, faceScratch = 0;
+            std::size_t memberScratch = 0, chartScratchBytes = 0;
+            if (!checkedProduct(totalTriangles,
+                    sizeof(shapeyard::uv::Triangle)
+                        + sizeof(std::array<std::array<double, 2>, 3>)
+                        + 5U * sizeof(int),
+                    1U, triangleScratch, FailureSite::ExportMemberStorage)
+                || !checkedProduct(totalFaces,
+                    sizeof(shapeyard::uv::curved::FaceInput)
+                        + sizeof(std::array<double, 2>) + 2U * sizeof(int),
+                    1U, faceScratch, FailureSite::ExportMemberStorage)
+                || !checkedProduct(inputs.size(),
+                    sizeof(std::vector<std::vector<int>>)
+                        + sizeof(std::size_t),
+                    1U, memberScratch, FailureSite::ExportMemberStorage)
+                || !checkedAdd(triangleScratch, faceScratch,
+                    chartScratchBytes)
+                || !checkedAdd(chartScratchBytes, memberScratch,
+                    chartScratchBytes)
+                || !checkedAdd(chartScratchBytes,
+                    64U * (sizeof(curveduv::ChartInput)
+                        + sizeof(std::vector<int>)
+                        + sizeof(std::pair<std::size_t, std::uint64_t>)
+                        + sizeof(std::size_t)), chartScratchBytes)
+                || !chartScratch.acquire(accounting->operation,
+                    StorageDimension::PrivateStorage, chartScratchBytes,
+                    Retention::Scratch, FailureSite::ExportMemberStorage)
+                || !accounting->operation.EnterAllocation(
+                    FailureSite::ExportMemberStorage))
+                return Status::OverBudget;
+
+            std::size_t pixels = 0, rolePixels = 0, gutterUnits = 0;
+            std::size_t sourceUnits = 0, jobUnits = 0;
+            if (!checkedProduct(std::size_t(settings.resolutionTexels),
+                    std::size_t(settings.resolutionTexels), 1U, pixels,
+                    FailureSite::ExportCanonicalStorage)
+                || !checkedProduct(pixels, accounting->roleCount, 1U,
+                    rolePixels, FailureSite::ExportCanonicalStorage)
+                || !checkedProduct(totalCorners,
+                    std::size_t(settings.gutterTexels), 1U, gutterUnits,
+                    FailureSite::ExportCanonicalStorage)
+                || !checkedAdd(accounting->sourceCount,
+                    accounting->maskCount, sourceUnits)
+                || !checkedAdd(rolePixels, gutterUnits, jobUnits)
+                || !checkedAdd(jobUnits, totalTriangles, jobUnits)
+                || !checkedAdd(jobUnits, sourceUnits, jobUnits)
+                || (accounting->sealAtlasJob
+                    && !accounting->operation.SealJob(Job::AtlasRoles,
+                        jobUnits, FailureSite::ExportCanonicalStorage)))
+                return Status::OverBudget;
+#ifdef DEBUG
+            accounting->memberCount = inputs.size();
+            accounting->triangleCount = totalTriangles;
+            accounting->cornerCount = totalCorners;
+            accounting->jobUnits = jobUnits;
+#endif
+        }
+
         curveduv::PackerInput packer;
         packer.settings = {settings.resolutionTexels, settings.gutterTexels};
         const shapeyard::uv::Settings kernelSettings{
@@ -525,18 +694,11 @@ inline Status BuildFinalAtlas(const Key& atlas,
         const std::size_t count = inputs.size();
         std::vector<std::vector<std::vector<int>>> memberCharts(count);
         std::vector<std::pair<std::size_t, std::uint64_t>> chartMembers;
+        std::vector<std::size_t> chartFaces;
         std::vector<std::size_t> memberTriangles(count, 0);
-        std::uint64_t corners = 0;
         int nextFaceId = 0;
         for (std::size_t index = 0; index < count; ++index) {
             const auto& input = inputs[index];
-            if (!retained_recipe::Valid(input.savedMember.owner)
-                || input.triangles.empty() || input.faces.empty()
-                || input.authority.resources.empty()) return Status::Malformed;
-            for (const auto& face : input.faces)
-                if (face.surfaceType == 3) return Status::UnsupportedSurface;
-            corners += 3ULL * input.triangles.size();
-            if (corners > kMaximumFinalCorners) return Status::OverBudget;
             memberTriangles[index] = input.triangles.size();
             int flatBase = 0;
             for (const auto& chart : packer.charts)
@@ -544,7 +706,7 @@ inline Status BuildFinalAtlas(const Key& atlas,
             std::string reason;
             const auto rejection = detail::AppendMemberCharts(
                 input.triangles, input.faces, kernelSettings, nextFaceId,
-                flatBase, packer, memberCharts[index], reason);
+                flatBase, packer, memberCharts[index], chartFaces, reason);
             if (rejection != detail::ChartRejection::Ok) {
                 diagnosis = reason;
                 return rejection == detail::ChartRejection::Unsupported
@@ -555,11 +717,90 @@ inline Status BuildFinalAtlas(const Key& atlas,
                 chartMembers.push_back({index, std::uint64_t(ordinal)});
             if (packer.charts.size() > 64) return Status::OverBudget;
         }
+
+        Ticket packerScratch;
+        if (accounting) {
+            std::size_t coverageBytes = 0, triangleBytes = 0;
+            std::size_t chartBytes = 0, packerBytes = 0;
+            if (!checkedProduct(std::size_t(settings.resolutionTexels),
+                    std::size_t(settings.resolutionTexels), 2U,
+                    coverageBytes, FailureSite::ExportObservedStorage)
+                || !checkedProduct(totalTriangles,
+                    sizeof(curveduv::TriangleUV)
+                        + sizeof(curveduv::detail::PlacedTriangle)
+                        + 5U * sizeof(int) + 2U * sizeof(double),
+                    1U, triangleBytes, FailureSite::ExportObservedStorage)
+                || !checkedProduct(packer.charts.size(),
+                    65U * sizeof(double) + sizeof(std::vector<int>)
+                        + sizeof(std::vector<curveduv::detail::PlacedTriangle>),
+                    1U, chartBytes, FailureSite::ExportObservedStorage)
+                || !checkedAdd(coverageBytes, triangleBytes, packerBytes)
+                || !checkedAdd(packerBytes, chartBytes, packerBytes))
+                return Status::OverBudget;
+#ifdef DEBUG
+            ++accounting->layoutReservationAttempts;
+            if (accounting->denyLayoutReservation) {
+                (void)accounting->operation.Reserve(
+                    StorageDimension::PrivateStorage,
+                    std::numeric_limits<std::size_t>::max(),
+                    Retention::Scratch, FailureSite::ExportObservedStorage);
+                return Status::OverBudget;
+            }
+#endif
+            std::size_t layoutBytes = 0, part = 0;
+            if (!checkedProduct(totalTriangles,
+                    sizeof(curveduv::TriangleUV)
+                        + sizeof(curveduv::ChartTriangle),
+                    1U, layoutBytes, FailureSite::ExportAtlasStorage)
+                || !checkedProduct(packer.charts.size(),
+                    sizeof(curveduv::ChartInput)
+                        + sizeof(std::pair<std::size_t, std::uint64_t>)
+                        + sizeof(std::size_t),
+                    1U, part, FailureSite::ExportAtlasStorage)
+                || !checkedAdd(layoutBytes, part, layoutBytes)
+                || !packerScratch.acquire(accounting->operation,
+                    StorageDimension::PrivateStorage, packerBytes,
+                    Retention::Scratch, FailureSite::ExportObservedStorage)
+                || !accounting->layoutStorage.acquire(accounting->operation,
+                    StorageDimension::PrivateStorage, layoutBytes,
+                    Retention::Retained, FailureSite::ExportAtlasStorage)
+                || !accounting->operation.EnterAllocation(
+                    FailureSite::ExportObservedStorage))
+                return Status::OverBudget;
+#ifdef DEBUG
+            ++accounting->packerEntries;
+#endif
+        }
         const auto packed = curveduv::pack(packer);
         if (!packed.ok) { diagnosis = packed.reason; return Status::Refused; }
         if (packed.summary.subChartCount <= 0
             || packed.summary.subChartCount > int(kMaximumCharts))
             return Status::OverBudget;
+
+        if (accounting) {
+            std::size_t resultBytes = 0, part = 0;
+            if (!checkedProduct(totalResources,
+                    sizeof(retained_finishing::MaterialResource), 1U,
+                    resultBytes, FailureSite::ExportBakeStorage)
+                || !checkedProduct(count,
+                    sizeof(Member) + sizeof(MemberUVAssignment), 1U,
+                    part, FailureSite::ExportBakeStorage)
+                || !checkedAdd(resultBytes, part, resultBytes)
+                || !checkedProduct(std::size_t(packed.summary.subChartCount),
+                    sizeof(Chart), 1U, part,
+                    FailureSite::ExportBakeStorage)
+                || !checkedAdd(resultBytes, part, resultBytes)
+                || !checkedProduct(totalCorners,
+                    sizeof(std::array<double, 2>), 1U, part,
+                    FailureSite::ExportBakeStorage)
+                || !checkedAdd(resultBytes, part, resultBytes)
+                || !accounting->resultStorage.acquire(accounting->operation,
+                    StorageDimension::PrivateStorage, resultBytes,
+                    Retention::Retained, FailureSite::ExportBakeStorage)
+                || !accounting->operation.EnterAllocation(
+                    FailureSite::ExportBakeStorage))
+                return Status::OverBudget;
+        }
 
         std::vector<retained_finishing::MaterialResource> resources;
         std::vector<UUID> memberMaterial(count);
@@ -600,7 +841,11 @@ inline Status BuildFinalAtlas(const Key& atlas,
             assignments[index].member = candidate.members[index].member;
             assignments[index].triangleCount =
                 std::uint32_t(memberTriangles[index]);
-            assignments[index].corners.resize(3 * memberTriangles[index]);
+            std::size_t memberCorners = 0;
+            if (!checkedProduct(memberTriangles[index], 3U, 1U,
+                    memberCorners, FailureSite::CheckedProduct))
+                return Status::OverBudget;
+            assignments[index].corners.resize(memberCorners);
         }
         struct ChartAccum {
             std::uint32_t triangles = 0;
@@ -675,13 +920,23 @@ inline Status BuildFinalAtlas(const Key& atlas,
             return Status::Malformed;
         Refusal refusal = Refusal::None;
         if (!Valid(candidate, refusal)) return Status::Malformed;
+        Ticket encodeScratch;
+        if (accounting
+            && (!encodeScratch.acquire(accounting->operation,
+                    StorageDimension::PrivateStorage, kMaximumBytes,
+                    Retention::Scratch, FailureSite::ExportCanonicalStorage)
+                || !accounting->operation.EnterAllocation(
+                    FailureSite::ExportCanonicalStorage)))
+            return Status::OverBudget;
         std::vector<std::uint8_t> encoded;
         if (!Encode(candidate, encoded)) return Status::OverBudget;
         if (layout) {
             layout->packed = packed;
             layout->charts = packer.charts;
             layout->chartMembers = chartMembers;
+            layout->chartFaces = chartFaces;
         }
+        accountingReset.committed = true;
         return Status::Built;
     } catch (...) {
         candidate = {}; assignments.clear(); diagnosis.clear();

@@ -647,6 +647,11 @@ __attribute__((objc_subclassing_restricted))
 - (nullable NSDictionary<NSString *,id> *)
     debugE4P2b1LedgerCapForEntityIdentifier:(NSString *)entityIdentifier
     NS_SWIFT_NAME(debugE4P2b1LedgerCap(entityIdentifier:));
+//! E4P2b1LedgerAtlas2048: runs the genuine two-member final atlas with its
+//! one operation plan, then denies the layout reservation before pack entry.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4FinalAtlasPlanForEntityIdentifier:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugE4FinalAtlasPlan(entityIdentifier:));
 //! Arms the next genuine CapturePrivateExportDecals census. YES leaves one
 //! byte less than its measured ticket; NO observes the under-limit copy.
 - (void)debugArmE4BRepCensusObservationRefuseOneByteShort:
