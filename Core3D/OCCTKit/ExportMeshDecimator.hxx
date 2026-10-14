@@ -132,9 +132,30 @@ inline std::size_t FaceCount(const std::vector<Face>& faces) noexcept {
         [](const Face& f) { return f.alive; }));
 }
 
+// D819(b): the welded source's own Euler characteristic is the reference.
+// Initial validation accepts any closed 2-manifold genus, and every accepted
+// collapse must preserve that source characteristic.
+inline int EulerCharacteristic(const std::vector<Face>& faces) {
+    std::set<std::array<std::size_t, 3>> uniqueFaces;
+    std::set<Edge> edges;
+    std::set<std::size_t> used;
+    for (const Face& face : faces) {
+        if (!face.alive) continue;
+        auto sorted = face.vertex;
+        std::sort(sorted.begin(), sorted.end());
+        uniqueFaces.insert(sorted);
+        used.insert(face.vertex.begin(), face.vertex.end());
+        edges.insert(MakeEdge(face.vertex[0], face.vertex[1]));
+        edges.insert(MakeEdge(face.vertex[1], face.vertex[2]));
+        edges.insert(MakeEdge(face.vertex[2], face.vertex[0]));
+    }
+    return static_cast<int>(used.size()) - static_cast<int>(edges.size())
+        + static_cast<int>(uniqueFaces.size());
+}
+
 inline bool Validate(const std::vector<Vertex>& vertices,
                      const std::vector<Face>& faces, std::uint64_t& work,
-                     const std::atomic_bool* stop, int expectedEuler = 2) {
+                     const std::atomic_bool* stop, int expectedEuler) {
     std::map<Edge, std::pair<unsigned, int>> edges;
     std::set<std::array<std::size_t, 3>> uniqueFaces;
     std::set<std::size_t> used;
@@ -217,7 +238,8 @@ inline std::vector<Edge> CurrentEdges(const std::vector<Face>& faces) {
 
 inline bool TryCollapse(std::vector<Vertex>& vertices, std::vector<Face>& faces,
                         const Candidate& candidate, const std::set<Edge>& protectedEdges,
-                        std::uint64_t& work, const std::atomic_bool* stop) {
+                        int expectedEuler, std::uint64_t& work,
+                        const std::atomic_bool* stop) {
     const std::size_t keep = candidate.kind == 1 ? candidate.high : candidate.low;
     const std::size_t remove = keep == candidate.low ? candidate.high : candidate.low;
     if (!vertices[keep].alive || !vertices[remove].alive || vertices[remove].locked) return false;
@@ -254,7 +276,7 @@ inline bool TryCollapse(std::vector<Vertex>& vertices, std::vector<Face>& faces,
     std::sort(patchTokens.begin(), patchTokens.end());
     patchTokens.erase(std::unique(patchTokens.begin(), patchTokens.end()), patchTokens.end());
     for (std::size_t index : patch) if (nextFaces[index].alive) nextFaces[index].tokens = patchTokens;
-    if (!Validate(nextVertices, nextFaces, work, stop)) return false;
+    if (!Validate(nextVertices, nextFaces, work, stop, expectedEuler)) return false;
     const auto currentEdges = CurrentEdges(nextFaces);
     const std::set<Edge> current(currentEdges.begin(), currentEdges.end());
     for (const Edge& edge : protectedEdges) if (!current.count(edge)) return false;
@@ -305,7 +327,8 @@ inline Error Decimate(const Input& input, Output& output,
     }
 
     std::uint64_t work = 0;
-    if (!detail::Validate(vertices, faces, work, stop))
+    const int sourceEuler = detail::EulerCharacteristic(faces);
+    if (!detail::Validate(vertices, faces, work, stop, sourceEuler))
         return stop && stop->load(std::memory_order_relaxed) ? Error::Cancelled : Error::InvalidTopology;
 
     // Original, normalized, unweighted plane quadrics in canonical face order.
@@ -382,7 +405,8 @@ inline Error Decimate(const Input& input, Output& output,
             if (++evaluations > kMaximumCandidateEvaluations) return Error::ResourceLimit;
             if (!detail::Charge(work, stop))
                 return stop && stop->load(std::memory_order_relaxed) ? Error::Cancelled : Error::ResourceLimit;
-            if (detail::TryCollapse(vertices, faces, candidate, protectedEdges, work, stop)) {
+            if (detail::TryCollapse(vertices, faces, candidate, protectedEdges,
+                                    sourceEuler, work, stop)) {
                 ++output.acceptedCollapses; accepted = true; break;
             }
         }
