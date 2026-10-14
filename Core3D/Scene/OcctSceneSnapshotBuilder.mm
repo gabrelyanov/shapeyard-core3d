@@ -21,6 +21,7 @@
 #include "../OCCTKit/DecalLayerBake.hxx"
 #include "../OCCTKit/FaceImageResourceValidation.hxx"
 #include "../OCCTKit/PaintedAtlasBake.hxx"
+#include "../OCCTKit/SourceFaceProvenanceRecord.hxx"
 
 #include "../Common/Core3DMobileResourceLimits.h"
 #include "../OCCTKit/OcctDocument.h"
@@ -2625,6 +2626,14 @@ std::uint64_t MeshFingerprint(const MeshSnapshot& theMesh,
         aHash.AddInteger(aPrimitive.indexCount);
         aHash.AddInteger(aPrimitive.faceIndex);
         aHash.AddBool(aPrimitive.hasTextureCoordinates);
+        aHash.AddBool(aPrimitive.analyticSourceFace.available);
+        aHash.AddInteger(aPrimitive.analyticSourceFace.surfaceType);
+        aHash.AddBool(aPrimitive.analyticSourceFace.reversed);
+        aHash.AddInteger<std::uint64_t>(
+            aPrimitive.analyticSourceFace.params.size());
+        for (const double aValue : aPrimitive.analyticSourceFace.params)
+            aHash.AddDouble(aValue);
+        aHash.AddString(aPrimitive.analyticSourceFace.digest);
     }
     return aHash.Value();
 }
@@ -3159,6 +3168,75 @@ bool ExtractWorldPreviewItem(
     return true;
 }
 
+bool CaptureAnalyticSourceFaceWitness(
+    const TopoDS_Face& theFace,
+    const std::uint32_t theFirstIndex,
+    const std::uint32_t theIndexCount,
+    AnalyticSourceFaceWitness& theOutput) noexcept
+{
+    theOutput = {};
+    try {
+        provenance::SourceFaceProvenanceEntry anEntry;
+        anEntry.firstTriangle = static_cast<int>(theFirstIndex / 3U);
+        anEntry.triangleCount = static_cast<int>(theIndexCount / 3U);
+        anEntry.reversed = theFace.Orientation() == TopAbs_REVERSED;
+        const BRepAdaptor_Surface aSurface(theFace);
+        auto appendPoint = [&anEntry](const gp_Pnt& thePoint) {
+            anEntry.params.insert(anEntry.params.end(),
+                {thePoint.X(), thePoint.Y(), thePoint.Z()});
+        };
+        auto appendDirection = [&anEntry](const gp_Dir& theDirection) {
+            anEntry.params.insert(anEntry.params.end(),
+                {theDirection.X(), theDirection.Y(), theDirection.Z()});
+        };
+        switch (aSurface.GetType()) {
+            case GeomAbs_Plane: {
+                const gp_Pln aPlane = aSurface.Plane();
+                anEntry.surfaceType = provenance::kSurfaceTypePlane;
+                appendPoint(aPlane.Location());
+                appendDirection(aPlane.Axis().Direction());
+                appendDirection(aPlane.Position().XDirection());
+                break;
+            }
+            case GeomAbs_Cylinder: {
+                const gp_Cylinder aCylinder = aSurface.Cylinder();
+                anEntry.surfaceType = provenance::kSurfaceTypeCylinder;
+                appendPoint(aCylinder.Axis().Location());
+                appendDirection(aCylinder.Axis().Direction());
+                appendDirection(aCylinder.Position().XDirection());
+                anEntry.params.push_back(aCylinder.Radius());
+                break;
+            }
+            case GeomAbs_Torus: {
+                const gp_Torus aTorus = aSurface.Torus();
+                anEntry.surfaceType = provenance::kSurfaceTypeTorus;
+                appendPoint(aTorus.Axis().Location());
+                appendDirection(aTorus.Axis().Direction());
+                appendDirection(aTorus.Position().XDirection());
+                anEntry.params.push_back(aTorus.MajorRadius());
+                anEntry.params.push_back(aTorus.MinorRadius());
+                break;
+            }
+            default:
+                anEntry.surfaceType = provenance::kSurfaceTypeOther;
+                break;
+        }
+        std::vector<std::string> aDigests;
+        if (!provenance::AnalyticFaceWitnesses({anEntry}, aDigests)
+            || aDigests.size() != 1 || aDigests.front().size() != 64)
+            return false;
+        theOutput.available = true;
+        theOutput.surfaceType = anEntry.surfaceType;
+        theOutput.reversed = anEntry.reversed;
+        theOutput.params = std::move(anEntry.params);
+        theOutput.digest = std::move(aDigests.front());
+        return true;
+    } catch (...) {
+        theOutput = {};
+        return false;
+    }
+}
+
 bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
                                const std::string& theDefinitionIdentifier,
 #ifdef DEBUG
@@ -3390,11 +3468,20 @@ bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
         if (anIndexCount == 0 || !FitsUInt32(anIndexCount)) {
             return false;
         }
+        AnalyticSourceFaceWitness anAnalyticSourceFace;
+        if (hasSemanticBRepTopology
+            && !CaptureAnalyticSourceFaceWitness(
+                aFace.Face(), aFirstIndex,
+                static_cast<std::uint32_t>(anIndexCount),
+                anAnalyticSourceFace)) {
+            return false;
+        }
         aPrimitives.push_back({
             aFirstIndex,
             static_cast<std::uint32_t>(anIndexCount),
             static_cast<std::uint32_t>(aFaceMapIndex - 1),
             hasTexCoords,
+            std::move(anAnalyticSourceFace),
         });
     }
 
@@ -3409,12 +3496,23 @@ bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
     std::size_t aVertexBytes = 0;
     std::size_t anIndexBytes = 0;
     std::size_t aPrimitiveBytes = 0;
+    std::size_t aWitnessBytes = 0;
     std::size_t aMeshBytes = 0;
+    for (const MeshPrimitive& aPrimitive : aPrimitives) {
+        std::size_t aParameterBytes = 0;
+        if (!CheckedMultiply(aPrimitive.analyticSourceFace.params.size(),
+                             sizeof(double), aParameterBytes)
+            || !CheckedAdd(aWitnessBytes, aParameterBytes, aWitnessBytes)
+            || !CheckedAdd(aWitnessBytes,
+                           aPrimitive.analyticSourceFace.digest.size(),
+                           aWitnessBytes)) return false;
+    }
     if (!CheckedMultiply(aSourceVertices.size(), sizeof(Vertex), aVertexBytes)
         || !CheckedMultiply(aSourceIndices.size(), sizeof(std::uint32_t), anIndexBytes)
         || !CheckedMultiply(aPrimitives.size(), sizeof(MeshPrimitive), aPrimitiveBytes)
         || !CheckedAdd(aVertexBytes, anIndexBytes, aMeshBytes)
         || !CheckedAdd(aMeshBytes, aPrimitiveBytes, aMeshBytes)
+        || !CheckedAdd(aMeshBytes, aWitnessBytes, aMeshBytes)
         || aMeshBytes > kMaxMeshNumericBytes) {
         return false;
     }

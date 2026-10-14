@@ -110,6 +110,14 @@ typedef NS_ENUM(NSInteger, Core3DSceneGeometryKind) {
     Core3DSceneGeometryKindNativeC1Wire = 1,
 };
 
+//! Frozen source-face analytic vocabulary shared with provenance-v1.
+typedef NS_ENUM(NSInteger, Core3DSceneAnalyticSurfaceType) {
+    Core3DSceneAnalyticSurfaceTypePlane = 0,
+    Core3DSceneAnalyticSurfaceTypeCylinder = 1,
+    Core3DSceneAnalyticSurfaceTypeTorus = 2,
+    Core3DSceneAnalyticSurfaceTypeOther = 3,
+};
+
 typedef NS_ENUM(NSInteger, Core3DSceneTextureEncoding) {
     Core3DSceneTextureEncodingPNG = 0,
     Core3DSceneTextureEncodingJPEG,
@@ -305,6 +313,14 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, assign, readonly) uint32_t faceIndex;
 //! True only when this primitive has usable UVs for every published vertex.
 @property (nonatomic, assign, readonly) BOOL hasTextureCoordinates;
+//! Immutable part-local analytic source-face evidence. Parameters are packed
+//! native-endian doubles and are bounded to 11 values; the digest is 64
+//! lower-hex characters. Polygon-only sources publish hasAnalytic... == NO.
+@property (nonatomic, assign, readonly) BOOL hasAnalyticSourceFaceWitness;
+@property (nonatomic, assign, readonly) Core3DSceneAnalyticSurfaceType analyticSurfaceType;
+@property (nonatomic, copy, readonly) NSData *analyticParameters;
+@property (nonatomic, assign, readonly, getter=isAnalyticSurfaceReversed) BOOL analyticSurfaceReversed;
+@property (nonatomic, copy, readonly) NSString *analyticSourceFaceWitnessSHA256;
 
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;

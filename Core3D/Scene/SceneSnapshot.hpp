@@ -218,6 +218,19 @@ struct TextureResourceSnapshot {
     bool paintedAtlasDerivative = false;
 };
 
+//! Exact part-local BRep source-face evidence captured during the same face
+//! traversal that creates a primitive's pre-atlas range. Parameters use the
+//! frozen provenance-v1 vocabulary (at most 11 finite doubles); the digest is
+//! a 64-character lower-hex analytic witness. Unavailable is valid for
+//! polygon-only sources but cannot satisfy F2 admission.
+struct AnalyticSourceFaceWitness {
+    bool available = false;
+    int surfaceType = 3;
+    bool reversed = false;
+    std::vector<double> params;
+    std::string digest;
+};
+
 struct MeshPrimitive {
     std::uint32_t firstIndex = 0;
     std::uint32_t indexCount = 0;
@@ -225,6 +238,7 @@ struct MeshPrimitive {
     //! True only when every vertex in this primitive owns authored/generated UVs.
     //! Zero-filled fallback coordinates are not texture coordinates.
     bool hasTextureCoordinates = false;
+    AnalyticSourceFaceWitness analyticSourceFace;
 };
 
 struct PrimitiveBinding {

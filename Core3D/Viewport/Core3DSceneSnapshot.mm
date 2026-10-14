@@ -142,7 +142,12 @@ static_assert(sizeof(std::uint32_t) == 4,
 - (instancetype)initWithFirstIndex:(uint32_t)firstIndex
                          indexCount:(uint32_t)indexCount
                           faceIndex:(uint32_t)faceIndex
-              hasTextureCoordinates:(BOOL)hasTextureCoordinates;
+              hasTextureCoordinates:(BOOL)hasTextureCoordinates
+       hasAnalyticSourceFaceWitness:(BOOL)hasAnalyticSourceFaceWitness
+                 analyticSurfaceType:(Core3DSceneAnalyticSurfaceType)analyticSurfaceType
+                  analyticParameters:(NSData *)analyticParameters
+            analyticSurfaceReversed:(BOOL)analyticSurfaceReversed
+ analyticSourceFaceWitnessSHA256:(NSString *)analyticSourceFaceWitnessSHA256;
 @end
 
 @interface Core3DScenePrimitiveBindingSnapshot ()
@@ -1712,13 +1717,24 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
 - (instancetype)initWithFirstIndex:(uint32_t)firstIndex
                          indexCount:(uint32_t)indexCount
                           faceIndex:(uint32_t)faceIndex
-              hasTextureCoordinates:(BOOL)hasTextureCoordinates {
+              hasTextureCoordinates:(BOOL)hasTextureCoordinates
+       hasAnalyticSourceFaceWitness:(BOOL)hasAnalyticSourceFaceWitness
+                 analyticSurfaceType:(Core3DSceneAnalyticSurfaceType)analyticSurfaceType
+                  analyticParameters:(NSData *)analyticParameters
+            analyticSurfaceReversed:(BOOL)analyticSurfaceReversed
+ analyticSourceFaceWitnessSHA256:(NSString *)analyticSourceFaceWitnessSHA256 {
     self = [super init];
     if (self) {
         _firstIndex = firstIndex;
         _indexCount = indexCount;
         _faceIndex = faceIndex;
         _hasTextureCoordinates = hasTextureCoordinates;
+        _hasAnalyticSourceFaceWitness = hasAnalyticSourceFaceWitness;
+        _analyticSurfaceType = analyticSurfaceType;
+        _analyticParameters = [analyticParameters copy];
+        _analyticSurfaceReversed = analyticSurfaceReversed;
+        _analyticSourceFaceWitnessSHA256 =
+            [analyticSourceFaceWitnessSHA256 copy];
     }
     return self;
 }
@@ -2917,15 +2933,47 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
         for (const MeshPrimitive& primitive : mesh.primitives) {
             const std::size_t firstIndex = primitive.firstIndex;
             const std::size_t indexCount = primitive.indexCount;
+            const AnalyticSourceFaceWitness& witness =
+                primitive.analyticSourceFace;
+            int parameterCount = -1;
+            switch (witness.surfaceType) {
+                case 0: parameterCount = 9; break;
+                case 1: parameterCount = 10; break;
+                case 2: parameterCount = 11; break;
+                case 3: parameterCount = 0; break;
+                default: break;
+            }
+            bool validDigest = witness.digest.size() == 64;
+            for (const char value : witness.digest)
+                validDigest = validDigest && ((value >= '0' && value <= '9')
+                    || (value >= 'a' && value <= 'f'));
+            bool finiteParameters = true;
+            for (const double value : witness.params)
+                finiteParameters = finiteParameters && IsFinite(value);
+            const bool validWitness = witness.available
+                ? parameterCount >= 0
+                    && witness.params.size() == std::size_t(parameterCount)
+                    && finiteParameters && validDigest
+                : witness.surfaceType == 3 && !witness.reversed
+                    && witness.params.empty() && witness.digest.empty();
             if (firstIndex != expectedFirstIndex || indexCount == 0
                 || indexCount % 3 != 0
                 || firstIndex > mesh.indices.size()
                 || indexCount > mesh.indices.size() - firstIndex
                 || (mesh.topology.faceCount != 0
                     && primitive.faceIndex >= mesh.topology.faceCount)
+                || !validWitness
+                || (witness.available && !accountString(witness.digest))
                 || !faceIndices.insert(primitive.faceIndex).second) {
                 return false;
             }
+            std::size_t witnessBytes = 0;
+            if (!CheckedMultiply(witness.params.size(), sizeof(double),
+                                 witnessBytes)
+                || !CheckedAdd(totalNumericBytes, witnessBytes,
+                               totalNumericBytes)
+                || totalNumericBytes > kMaximumDTONumericBytes)
+                return false;
             expectedFirstIndex = firstIndex + indexCount;
         }
         if ((!isWire && mesh.primitives.empty())
@@ -4286,11 +4334,21 @@ Core3DSceneTextureSnapshot *TextureFromScene(
 }
 
 Core3DSceneFacePrimitiveSnapshot *FacePrimitiveFromScene(const MeshPrimitive& value) {
+    const AnalyticSourceFaceWitness& witness = value.analyticSourceFace;
+    NSData *parameters = witness.params.empty() ? NSData.data
+        : [NSData dataWithBytes:witness.params.data()
+                         length:witness.params.size() * sizeof(double)];
     return [[Core3DSceneFacePrimitiveSnapshot alloc]
         initWithFirstIndex:value.firstIndex
                 indexCount:value.indexCount
                  faceIndex:value.faceIndex
-     hasTextureCoordinates:value.hasTextureCoordinates];
+     hasTextureCoordinates:value.hasTextureCoordinates
+hasAnalyticSourceFaceWitness:witness.available
+        analyticSurfaceType:static_cast<Core3DSceneAnalyticSurfaceType>(
+            witness.surfaceType)
+         analyticParameters:parameters
+   analyticSurfaceReversed:witness.reversed
+analyticSourceFaceWitnessSHA256:StringFromUTF8(witness.digest)];
 }
 
 Core3DScenePrimitiveBindingSnapshot *PrimitiveBindingFromScene(
