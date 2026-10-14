@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		F2E100000000000000000001 /* Core3DDecimationOpening.h in Headers */ = {isa = PBXBuildFile; fileRef = F2E200000000000000000001 /* Core3DDecimationOpening.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		F2E100000000000000000002 /* Core3DDecimationOpening.mm in Sources */ = {isa = PBXBuildFile; fileRef = F2E200000000000000000002 /* Core3DDecimationOpening.mm */; };
 		1C0C01000000000000000001 /* LoftCorrespondenceAdapter.hxx in Headers */ = {isa = PBXBuildFile; fileRef = 1C0C00000000000000000001 /* LoftCorrespondenceAdapter.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		1C0C01000000000000000002 /* LoftCorrespondenceProof.hxx in Headers */ = {isa = PBXBuildFile; fileRef = 1C0C00000000000000000002 /* LoftCorrespondenceProof.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		1C0C01000000000000000003 /* Core3DLoftCorrespondenceOpening.h in Headers */ = {isa = PBXBuildFile; fileRef = 1C0C00000000000000000003 /* Core3DLoftCorrespondenceOpening.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -323,6 +325,9 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		F2E200000000000000000001 /* Core3DDecimationOpening.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DDecimationOpening.h; sourceTree = "<group>"; };
+		F2E200000000000000000002 /* Core3DDecimationOpening.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DDecimationOpening.mm; sourceTree = "<group>"; };
+		F2E200000000000000000003 /* ExportMeshDecimator.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = ExportMeshDecimator.hxx; sourceTree = "<group>"; };
 		1C0C00000000000000000001 /* LoftCorrespondenceAdapter.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = LoftCorrespondenceAdapter.hxx; sourceTree = "<group>"; };
 		1C0C00000000000000000002 /* LoftCorrespondenceProof.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = LoftCorrespondenceProof.hxx; sourceTree = "<group>"; };
 		1C0C00000000000000000003 /* Core3DLoftCorrespondenceOpening.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DLoftCorrespondenceOpening.h; sourceTree = "<group>"; };
@@ -910,6 +915,7 @@
 		322185692BB5CB9A00040E84 /* OCCTKit */ = {
 			isa = PBXGroup;
 			children = (
+				F2E200000000000000000003 /* ExportMeshDecimator.hxx */,
 				1C0C00000000000000000001 /* LoftCorrespondenceAdapter.hxx */,
 				1C0C00000000000000000002 /* LoftCorrespondenceProof.hxx */,
 				1C1C00000000000000000001 /* LoftCorrespondencePersistence.hxx */,
@@ -1023,6 +1029,8 @@
 		3221857E2BB5D57900040E84 /* UI */ = {
 			isa = PBXGroup;
 			children = (
+				F2E200000000000000000001 /* Core3DDecimationOpening.h */,
+				F2E200000000000000000002 /* Core3DDecimationOpening.mm */,
 				1C0C00000000000000000003 /* Core3DLoftCorrespondenceOpening.h */,
 				1C0C00000000000000000004 /* Core3DLoftCorrespondenceOpening.mm */,
 				A1A000020000000000000003 /* Core3DAuthoredParameterOpening.h */,
@@ -1211,6 +1219,7 @@
 			isa = PBXHeadersBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F2E100000000000000000001 /* Core3DDecimationOpening.h in Headers */,
 				1C0C01000000000000000001 /* LoftCorrespondenceAdapter.hxx in Headers */,
 				1C0C01000000000000000002 /* LoftCorrespondenceProof.hxx in Headers */,
 				1C0C01000000000000000003 /* Core3DLoftCorrespondenceOpening.h in Headers */,
@@ -1475,6 +1484,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F2E100000000000000000002 /* Core3DDecimationOpening.mm in Sources */,
 				1C0C01000000000000000004 /* Core3DLoftCorrespondenceOpening.mm in Sources */,
 				A1A000010000000000000002 /* AuthoredParameterNativeOwner.mm in Sources */,
 				A1A000010000000000000004 /* Core3DAuthoredParameterOpening.mm in Sources */,
