@@ -116,6 +116,43 @@ struct DebugPrivateExportDecalObservation final {
     bool complete = false;
 };
 
+enum class DebugPersistedAtlasCaptureMode : std::uint8_t {
+    Capture = 0,
+    CancelBeforeCopy = 1,
+    DenyFirstCopy = 2,
+};
+
+//! Value-only observation from the production saved-atlas capture/copy/bake
+//! helpers. Native shapes, labels, operation views and persisted bytes remain
+//! private to the builder.
+struct DebugPersistedAtlasCaptureLineageObservation final {
+    std::vector<std::string> memberDefinitions;
+    std::vector<std::string> sourceDefinitions;
+    std::string failureStage;
+    std::uint64_t atlasCount = 0;
+    std::uint64_t memberCount = 0;
+    std::uint64_t measuredCopyCount = 0;
+    std::uint64_t sourceCount = 0;
+    std::uint64_t correspondenceCount = 0;
+    std::uint64_t originalOnlyCount = 0;
+    std::uint64_t nonMemberCount = 0;
+    std::uint64_t assignmentCount = 0;
+    std::uint64_t roleCount = 0;
+    std::uint64_t resolution = 0;
+    std::uint64_t gutter = 0;
+    bool inheritedOperation = false;
+    bool stableMemberOrder = false;
+    bool detachedAuthority = false;
+    bool canonicalUnchanged = false;
+    bool selectedMemberPresent = false;
+    bool allMemberBake = false;
+    bool oneSharedBake = false;
+    bool captureMovePreserved = false;
+    bool outputSurvivedCaptureReset = false;
+    bool cancelledBeforeCopy = false;
+    bool deniedBeforeCopy = false;
+};
+
 //! Value-only observation of the bounded-curve input used by one successful
 //! full-scene publication. This test seam is armed explicitly for one
 //! synchronous DEBUG capture and never retains labels, document handles or
@@ -208,6 +245,14 @@ public:
         const std::vector<PrivateExportFinalMesh>& emittedMeshes,
         const std::function<bool()>& cancelled,
         PrivateExportDecalArtifact& artifact) noexcept;
+
+#ifdef DEBUG
+    static bool DebugCapturePersistedAtlasLineage(
+        const Handle(OcctDocument)& privateDocument,
+        const std::string& selectedDefinitionIdentifier,
+        DebugPersistedAtlasCaptureMode mode,
+        DebugPersistedAtlasCaptureLineageObservation& observation) noexcept;
+#endif
 
     //! Capture only the semantic camera and revisions. Document, model, and
     //! presentation revisions come from the most recent full snapshot; camera

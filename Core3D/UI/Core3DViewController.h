@@ -652,6 +652,13 @@ __attribute__((objc_subclassing_restricted))
 - (nullable NSDictionary<NSString *,id> *)
     debugE4FinalAtlasPlanForEntityIdentifier:(NSString *)entityIdentifier
     NS_SWIFT_NAME(debugE4FinalAtlasPlan(entityIdentifier:));
+//! Captures the persisted atlas with the builder-owned inherited operation,
+//! measures one detached native copy per member, resolves authentic source
+//! receipts to final faces, and executes one all-member production bake.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4PersistedAtlasCaptureLineageForEntityIdentifier:
+        (NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugE4PersistedAtlasCaptureLineage(entityIdentifier:));
 //! Runs the five-role 2048 kernel with its inherited operation, observes the
 //! retained output after return, and denies encoder admission before allocation.
 - (nullable NSDictionary<NSString *,id> *)

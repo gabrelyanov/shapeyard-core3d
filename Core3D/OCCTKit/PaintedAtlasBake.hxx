@@ -1212,6 +1212,10 @@ struct Staging final {
 //! no right to adopt resources or stage SYEA/SYEB records.
 struct ExportCapture final {
     decal_layer::bake::accounting::Owner operation;
+    //! The operation actually used by every capture/read/decode/bake stage.
+    //! Ordinary callers retain `operation`; private builder callers borrow a
+    //! view whose concrete ledger is dominated by PrivateDecalCapture.
+    decal_layer::bake::accounting::View inheritedOperation;
     decal_layer::bake::accounting::Ticket savedAtlasTicket;
     decal_layer::bake::accounting::Ticket membersTicket;
     decal_layer::bake::accounting::Ticket observedMembersTicket;
@@ -1234,6 +1238,8 @@ struct ExportCapture final {
         if (this != &other) {
             reset();
             operation = std::move(other.operation);
+            inheritedOperation = other.inheritedOperation;
+            other.inheritedOperation = {};
             savedAtlasTicket = std::move(other.savedAtlasTicket);
             membersTicket = std::move(other.membersTicket);
             observedMembersTicket = std::move(other.observedMembersTicket);
@@ -1269,7 +1275,11 @@ struct ExportCapture final {
         observedMembersTicket.reset();
         membersTicket.reset();
         savedAtlasTicket.reset();
+        inheritedOperation = {};
         operation.reset();
+    }
+    decal_layer::bake::accounting::View operationView() const noexcept {
+        return operation.valid() ? operation.view : inheritedOperation;
     }
 };
 
@@ -1373,7 +1383,21 @@ Outcome Currentness(const Handle(TDocStd_Document)& document,
 Outcome CaptureForExport(ExportCapture& capture,
                          const Handle(TDocStd_Document)& document,
                          const asset_atlas::Key& key) noexcept;
+//! Private capture overload. It never creates an ordinary operation owner;
+//! every retained value is charged to and dominated by `operation`.
+Outcome CaptureForExport(ExportCapture& capture,
+                         const Handle(TDocStd_Document)& document,
+                         const asset_atlas::Key& key,
+                         const decal_layer::bake::accounting::View& operation)
+    noexcept;
 Outcome BakeForExport(const ExportCapture& capture,
+                      asset_atlas::Definition finalAtlas,
+                      std::vector<asset_atlas::MemberUVAssignment> assignments,
+                      const asset_atlas::build::LayoutEvidence& layout,
+                      std::shared_ptr<ExportBakeStorage> storage,
+                      ExportBake& output) noexcept;
+Outcome BakeForExport(const ExportCapture& capture,
+                      const CapturedSourceStorage& productionSources,
                       asset_atlas::Definition finalAtlas,
                       std::vector<asset_atlas::MemberUVAssignment> assignments,
                       const asset_atlas::build::LayoutEvidence& layout,
@@ -1381,6 +1405,13 @@ Outcome BakeForExport(const ExportCapture& capture,
                       ExportBake& output) noexcept;
 Outcome BuildAndBakeForExport(
     const ExportCapture& capture,
+    const std::vector<asset_atlas::build::FinalMemberInput>& finalMembers,
+    const asset_atlas::build::Settings& settings,
+    ExportBake& output,
+    std::string& diagnosis) noexcept;
+Outcome BuildAndBakeForExport(
+    const ExportCapture& capture,
+    const CapturedSourceStorage& productionSources,
     const std::vector<asset_atlas::build::FinalMemberInput>& finalMembers,
     const asset_atlas::build::Settings& settings,
     ExportBake& output,

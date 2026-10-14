@@ -3628,7 +3628,7 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         aa::build::LayoutEvidence layout;
         std::string diagnosis;
         aa::build::FinalAtlasAccounting normal;
-        normal.operation = capture.operation.view;
+        normal.operation = capture.operationView();
         normal.roleCount = roleCount;
         normal.sourceCount = capture.sources.size();
         normal.maskCount = masks;
@@ -3694,6 +3694,98 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
             @"deniedNoPartialOutput": @(deniedEmpty),
             @"deniedPackerEntries": @(denied.packerEntries),
             @"historyUnchanged": @(historyUnchanged),
+        };
+    } @catch (...) { return nil; }
+}
+
+- (NSDictionary<NSString *,id> *)
+    debugE4PersistedAtlasCaptureLineageForEntityIdentifier:
+        (NSString *)entityIdentifier {
+    namespace scene = core3d::scene;
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128) return nil;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        OwnerKey key;
+        TDF_Label ownerLabel;
+        const char *raw = entityIdentifier.UTF8String;
+        if (wrapper.IsNull()
+            || !LabelForSelected(wrapper, raw ? raw : "", key, ownerLabel))
+            return nil;
+        const Handle(TDocStd_Document)& document = wrapper->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return nil;
+        const std::string selected =
+            wrapper->DefinitionIdentifierForLabel(ownerLabel);
+        if (selected.empty()) return nil;
+        const Standard_Integer undosBefore = document->GetAvailableUndos();
+
+        scene::DebugPersistedAtlasCaptureLineageObservation normal;
+        scene::DebugPersistedAtlasCaptureLineageObservation cancelled;
+        scene::DebugPersistedAtlasCaptureLineageObservation denied;
+        const bool normalCompleted = scene::OcctSceneSnapshotBuilder::
+            DebugCapturePersistedAtlasLineage(wrapper, selected,
+                scene::DebugPersistedAtlasCaptureMode::Capture, normal);
+        const bool cancellationCompleted = scene::OcctSceneSnapshotBuilder::
+            DebugCapturePersistedAtlasLineage(wrapper, selected,
+                scene::DebugPersistedAtlasCaptureMode::CancelBeforeCopy,
+                cancelled);
+        const bool denialCompleted = scene::OcctSceneSnapshotBuilder::
+            DebugCapturePersistedAtlasLineage(wrapper, selected,
+                scene::DebugPersistedAtlasCaptureMode::DenyFirstCopy,
+                denied);
+
+        NSMutableArray<NSString *> *members = [NSMutableArray array];
+        for (const auto& value : normal.memberDefinitions) {
+            NSString *text = [NSString stringWithUTF8String:value.c_str()];
+            if (!text) return nil;
+            [members addObject:text.lowercaseString];
+        }
+        NSMutableArray<NSString *> *sources = [NSMutableArray array];
+        for (const auto& value : normal.sourceDefinitions) {
+            NSString *text = [NSString stringWithUTF8String:value.c_str()];
+            if (!text) return nil;
+            [sources addObject:text.lowercaseString];
+        }
+        return @{
+            @"fixture": @"E4PersistedAtlasCaptureLineage",
+            @"failureStage": [NSString stringWithUTF8String:
+                normal.failureStage.c_str()] ?: @"invalid-stage",
+            @"normalCompleted": @(normalCompleted),
+            @"memberDefinitions": members,
+            @"sourceDefinitions": sources,
+            @"atlasCount": @(normal.atlasCount),
+            @"memberCount": @(normal.memberCount),
+            @"measuredCopyCount": @(normal.measuredCopyCount),
+            @"sourceCount": @(normal.sourceCount),
+            @"correspondenceCount": @(normal.correspondenceCount),
+            @"originalOnlyCount": @(normal.originalOnlyCount),
+            @"nonMemberCount": @(normal.nonMemberCount),
+            @"assignmentCount": @(normal.assignmentCount),
+            @"roleCount": @(normal.roleCount),
+            @"resolution": @(normal.resolution),
+            @"gutter": @(normal.gutter),
+            @"inheritedOperation": @(normal.inheritedOperation),
+            @"stableMemberOrder": @(normal.stableMemberOrder),
+            @"detachedAuthority": @(normal.detachedAuthority),
+            @"canonicalUnchanged": @(normal.canonicalUnchanged),
+            @"selectedMemberPresent": @(normal.selectedMemberPresent),
+            @"allMemberBake": @(normal.allMemberBake),
+            @"oneSharedBake": @(normal.oneSharedBake),
+            @"captureMovePreserved": @(normal.captureMovePreserved),
+            @"outputSurvivedCaptureReset": @(
+                normal.outputSurvivedCaptureReset),
+            @"cancelledBeforeCopy": @(cancellationCompleted
+                && cancelled.cancelledBeforeCopy),
+            @"deniedBeforeCopy": @(denialCompleted
+                && denied.deniedBeforeCopy),
+            @"historyUnchanged": @(
+                document->GetAvailableUndos() == undosBefore),
         };
     } @catch (...) { return nil; }
 }
@@ -3775,7 +3867,7 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
             capture, inputs, settings, baked, diagnosis);
         const auto trace = kernel::DebugTakeKernelObservation();
         const auto retained = kernel::DebugObserveOperationStorage(
-            capture.operation.view);
+            capture.operationView());
         std::size_t actualRGBA = 0, actualPNG = 0;
         for (const auto& output : baked.outputs) {
             actualRGBA += output.rgba.size();
@@ -3794,7 +3886,7 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         const std::size_t liveWithResult = retained.privateLive;
         baked = {};
         const auto released = kernel::DebugObserveOperationStorage(
-            capture.operation.view);
+            capture.operationView());
         const bool releasedWithOwner = released.privateLive < liveWithResult;
 
         pb::owner::ExportCapture deniedCapture;
@@ -3807,7 +3899,7 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
             deniedCapture, inputs, settings, deniedBake, deniedDiagnosis);
         const auto deniedTrace = kernel::DebugTakeKernelObservation();
         const auto deniedStorage = kernel::DebugObserveOperationStorage(
-            deniedCapture.operation.view);
+            deniedCapture.operationView());
         const bool historyUnchanged =
             document->GetAvailableUndos() == undosBefore;
         return @{

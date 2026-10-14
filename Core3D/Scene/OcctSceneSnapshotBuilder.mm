@@ -11604,6 +11604,323 @@ PrivateDecalCapture::PrivateDecalCapture(PrivateDecalCapture&&) noexcept = defau
 PrivateDecalCapture& PrivateDecalCapture::operator=(
     PrivateDecalCapture&&) noexcept = default;
 
+#ifdef DEBUG
+bool OcctSceneSnapshotBuilder::DebugCapturePersistedAtlasLineage(
+    const Handle(OcctDocument)& privateDocument,
+    const std::string& selectedDefinitionIdentifier,
+    const DebugPersistedAtlasCaptureMode mode,
+    DebugPersistedAtlasCaptureLineageObservation& observation) noexcept {
+    observation = {};
+    try {
+        observation.failureStage = "entry";
+        if (privateDocument.IsNull()
+            || selectedDefinitionIdentifier.empty()) return false;
+        const Handle(TDocStd_Document)& document = privateDocument->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return false;
+        Standard_Real metersPerUnit = 0.0;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(
+                document, metersPerUnit) || !(metersPerUnit > 0.0))
+            return false;
+
+        std::vector<asset_atlas::persistence::Record> records;
+        if (!asset_atlas::persistence::ReadAll(document, records)
+            || records.size() != 1 || !records.front().value) return false;
+        observation.atlasCount = records.size();
+        const auto& persisted = *records.front().value;
+
+        // The ledger is declared before every capture/copy/bake value below:
+        // inherited views and their tickets therefore die before the concrete
+        // builder-owned operation.
+        OperationLedger ledger;
+        retained_edge_treatment::ReplayBudget budget;
+        if (!ledger.bindTopology(budget,
+                decal_layer::bake::accounting::FailureSite::ContextControl))
+            return false;
+        painted_atlas_bake::owner::ExportCapture capture;
+        observation.failureStage = "persisted-capture";
+        const auto captureOutcome = painted_atlas_bake::owner::CaptureForExport(
+            capture, document, persisted.definition.key, ledger.view());
+        if (captureOutcome
+                != painted_atlas_bake::owner::Outcome::Prepared
+            || capture.operation.valid()
+            || capture.operationView().context != ledger.view().context
+            || capture.members.members.size()
+                != persisted.definition.members.size()) return false;
+        observation.inheritedOperation = true;
+        observation.memberCount = capture.members.members.size();
+        observation.sourceCount = capture.sources.size();
+
+        painted_atlas_bake::owner::ExportCapture moved(std::move(capture));
+        observation.captureMovePreserved = !capture.operationView().valid()
+            && moved.operationView().context == ledger.view().context;
+        if (!observation.captureMovePreserved) return false;
+
+        struct MeasuredMember final {
+            decal_layer::bake::accounting::Ticket storage;
+            TopoDS_Shape original;
+            TopoDS_Shape detached;
+            std::unique_ptr<BRepBuilderAPI_Copy> copier;
+            TopTools_IndexedMapOfShape originalFaces;
+            TopTools_IndexedMapOfShape detachedFaces;
+            std::string definitionIdentifier;
+        };
+        std::vector<MeasuredMember> measured;
+        decal_layer::bake::accounting::Ticket measuredVectorTicket;
+        if (!ReserveProtectedVector(measured, measuredVectorTicket,
+                ledger.view(), moved.members.members.size(),
+                decal_layer::bake::accounting::Retention::Retained,
+                decal_layer::bake::accounting::FailureSite::
+                    ProtectedOwnerStorage)) return false;
+
+        if (mode == DebugPersistedAtlasCaptureMode::CancelBeforeCopy) {
+            observation.cancelledBeforeCopy =
+                ledger.allocationEntries(
+                    decal_layer::bake::accounting::FailureSite::
+                        BRepCensusCopy) == 0;
+            return observation.cancelledBeforeCopy;
+        }
+
+        std::size_t measuredIndex = 0;
+        for (const auto& member : moved.members.members) {
+            observation.failureStage = "measured-member-shape-"
+                + std::to_string(measuredIndex);
+            MeasuredMember value;
+            value.original = XCAFDoc_ShapeTool::GetShape(member.ownerLabel);
+            value.definitionIdentifier =
+                privateDocument->DefinitionIdentifierForLabel(
+                    member.ownerLabel);
+            if (value.original.IsNull()
+                || value.definitionIdentifier.empty()) return false;
+            BRepRepresentationCensus sourceCensus;
+            BRepRepresentationCensus copyPrediction;
+            BRepCensusPCurveLookup lookup;
+            decal_layer::bake::accounting::Ticket scratch;
+            observation.failureStage = "measured-member-census-"
+                + std::to_string(measuredIndex);
+            if (!MeasureBRepRepresentation(value.original, budget,
+                    ledger.view(), sourceCensus, scratch, &copyPrediction,
+                    &lookup)) {
+                observation.failureStage += "-lookup-"
+                    + std::to_string(std::uint8_t(lookup.kind)) + "-"
+                    + (lookup.reason ? lookup.reason : "none") + "-failure-"
+                    + std::to_string(std::uint16_t(
+                        ledger.firstFailureSite()));
+                return false;
+            }
+            scratch.reset();
+            std::size_t retainedBytes = 0;
+            observation.failureStage = "measured-member-copy-"
+                + std::to_string(measuredIndex);
+            const bool copied = CopyMeasuredBRep(value.original, budget,
+                ledger, sourceCensus, copyPrediction,
+                mode == DebugPersistedAtlasCaptureMode::DenyFirstCopy ? 2 : 0,
+                value.storage, value.copier, value.detached,
+                value.originalFaces, value.detachedFaces, retainedBytes);
+            if (mode == DebugPersistedAtlasCaptureMode::DenyFirstCopy) {
+                observation.deniedBeforeCopy = !copied
+                    && measured.empty()
+                    && ledger.allocationEntries(
+                        decal_layer::bake::accounting::FailureSite::
+                            BRepCensusCopy) == 0;
+                return observation.deniedBeforeCopy;
+            }
+            if (!copied || value.detached.IsSame(value.original)) return false;
+            for (const auto& prior : measured)
+                if (value.detached.IsSame(prior.detached)) return false;
+            observation.memberDefinitions.push_back(
+                value.definitionIdentifier);
+            measured.push_back(std::move(value));
+            ++measuredIndex;
+        }
+        observation.measuredCopyCount = measured.size();
+        observation.detachedAuthority = measured.size()
+            == moved.members.members.size();
+
+        observation.stableMemberOrder =
+            moved.savedAtlas.members.size() == measured.size();
+        for (std::size_t index = 0;
+             observation.stableMemberOrder && index < measured.size(); ++index) {
+            observation.stableMemberOrder =
+                moved.savedAtlas.members[index].owner
+                    == moved.members.members[index].slot.owner;
+            observation.selectedMemberPresent =
+                observation.selectedMemberPresent
+                || measured[index].definitionIdentifier
+                    == selectedDefinitionIdentifier;
+        }
+        if (!observation.stableMemberOrder
+            || !observation.selectedMemberPresent) return false;
+
+        const Handle(XCAFDoc_ShapeTool) shapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        TDF_LabelSequence freeShapes;
+        if (shapeTool.IsNull()) return false;
+        shapeTool->GetFreeShapes(freeShapes);
+        if (freeShapes.Length() < Standard_Integer(measured.size()))
+            return false;
+        observation.nonMemberCount = std::size_t(freeShapes.Length())
+            - measured.size();
+
+        painted_atlas_bake::owner::CapturedSourceStorage productionSources;
+        if (!ReserveProtectedVector(productionSources.values,
+                productionSources.vectorTicket, ledger.view(),
+                moved.sources.size(),
+                decal_layer::bake::accounting::Retention::Retained,
+                decal_layer::bake::accounting::FailureSite::
+                    ProtectedSourceStorage)) return false;
+        std::array<bool, asset_atlas::kMaximumMembers> memberHasSource{};
+        observation.failureStage = "source-correspondence";
+        for (std::size_t sourceIndex = 0;
+             sourceIndex < moved.sources.size(); ++sourceIndex) {
+            painted_atlas_bake::owner::CapturedSource source(
+                moved.sources[sourceIndex]);
+            std::size_t memberIndex = measured.size();
+            for (std::size_t index = 0; index < measured.size(); ++index) {
+                if (!(moved.savedAtlas.members[index].owner
+                        == source.fence.owner)) continue;
+                if (memberIndex != measured.size()) return false;
+                memberIndex = index;
+            }
+            if (memberIndex == measured.size()) return false;
+            memberHasSource[memberIndex] = true;
+            Bnd_Box bounds;
+            BRepBndLib::AddOptimal(measured[memberIndex].original, bounds,
+                Standard_False, Standard_False);
+            if (bounds.IsVoid() || bounds.IsWhole() || bounds.IsOpen())
+                return false;
+            int matches = 0;
+            TopoDS_Face originalFace;
+            for (Standard_Integer faceIndex = 1;
+                 faceIndex <= measured[memberIndex].originalFaces.Extent();
+                 ++faceIndex) {
+                const TopoDS_Face candidate = TopoDS::Face(
+                    measured[memberIndex].originalFaces.FindKey(faceIndex));
+                dependent_replay::FaceImageGeometricReceipt receipt;
+                if (dependent_replay::detail::DeriveFaceImageReceipt(
+                        bounds, candidate, metersPerUnit,
+                        budget, receipt)
+                        != dependent_replay::detail::
+                            FaceImageDeriveStatus::Derived)
+                    continue;
+                decal_layer::Digest proof{};
+                if (!dependent_replay::FaceImageReceiptProof(receipt, proof))
+                    return false;
+                if (proof != source.fence.selectorProof) continue;
+                ++matches;
+                originalFace = candidate;
+            }
+            if (matches != 1 || originalFace.IsNull()) return false;
+            const TopoDS_Shape copied =
+                measured[memberIndex].copier->ModifiedShape(originalFace);
+            const Standard_Integer finalFace =
+                measured[memberIndex].detachedFaces.FindIndex(copied);
+            if (copied.IsNull() || copied.ShapeType() != TopAbs_FACE
+                || finalFace <= 0) return false;
+            source.memberIndex = memberIndex;
+            source.faceIndex = std::size_t(finalFace - 1);
+            source.order = sourceIndex;
+            observation.sourceDefinitions.push_back(
+                measured[memberIndex].definitionIdentifier);
+            productionSources.values.push_back(std::move(source));
+            ++observation.correspondenceCount;
+        }
+        for (std::size_t index = 0; index < measured.size(); ++index)
+            if (!memberHasSource[index]) ++observation.originalOnlyCount;
+        if (productionSources.size() != moved.sources.size()
+            || observation.originalOnlyCount == 0) return false;
+
+        std::vector<asset_atlas::build::FinalMemberInput> inputs;
+        decal_layer::bake::accounting::Ticket inputsTicket;
+        if (!ReserveProtectedVector(inputs, inputsTicket, ledger.view(),
+                moved.members.members.size(),
+                decal_layer::bake::accounting::Retention::Scratch,
+                decal_layer::bake::accounting::FailureSite::
+                    ExportMemberStorage)) return false;
+        observation.failureStage = "final-member-inputs";
+        for (std::size_t index = 0;
+             index < moved.members.members.size(); ++index) {
+            const auto& member = moved.members.members[index];
+            retained_solid::Record retained;
+            retained_finishing::SourceRevision observed;
+            if (!retained_finishing::producer::detail::Source(
+                    document, member.slot.owner, observed, nullptr, &retained)
+                || !(observed == member.slot.source)) return false;
+            std::atomic_bool cancelled{false};
+            meshcopy::CurrentTessellationCopy copy;
+            if (meshcopy::PrepareCurrentTessellationCopy(
+                    retained.current, copy, cancelled)
+                    != meshcopy::PreparationResult::Ready) return false;
+            asset_atlas::build::FinalMemberInput input;
+            input.savedMember = member.slot;
+            input.authority = member.capture;
+            if (!retained_finishing::producer::detail::Triangles(
+                    copy, input.triangles, input.faces)) return false;
+            inputs.push_back(std::move(input));
+        }
+        for (const auto& source : productionSources)
+            if (source.memberIndex >= inputs.size()
+                || source.faceIndex >= inputs[source.memberIndex].faces.size())
+                return false;
+
+        painted_atlas_bake::owner::ExportBake baked;
+        std::string diagnosis;
+        const asset_atlas::build::Settings settings{
+            moved.savedAtlas.resolutionTexels,
+            moved.savedAtlas.gutterTexels};
+        observation.failureStage = "all-member-bake";
+        const auto bakeOutcome = painted_atlas_bake::owner::
+            BuildAndBakeForExport(moved, productionSources, inputs,
+                settings, baked, diagnosis);
+        if (bakeOutcome != painted_atlas_bake::owner::Outcome::Prepared) {
+            observation.failureStage += "-"
+                + std::to_string(std::uint8_t(bakeOutcome)) + "-"
+                + diagnosis.substr(0, 96);
+            return false;
+        }
+        observation.assignmentCount = baked.assignments.size();
+        observation.roleCount = baked.outputs.size();
+        observation.resolution = std::uint64_t(baked.atlas.resolutionTexels);
+        observation.gutter = std::uint64_t(baked.atlas.gutterTexels);
+        observation.allMemberBake = baked.assignments.size() == inputs.size()
+            && baked.atlas.members.size() == inputs.size()
+            && !baked.outputs.empty();
+        observation.oneSharedBake = observation.allMemberBake
+            && painted_atlas_bake::Nonzero(baked.bake.bakeProof)
+            && painted_atlas_bake::Nonzero(baked.atlas.layoutProof);
+
+        observation.failureStage = "canonical-recheck";
+        asset_atlas::persistence::Record observedAtlas;
+        painted_atlas_bake::persistence::Record observedBake;
+        observation.canonicalUnchanged =
+            asset_atlas::persistence::Read(
+                document, persisted.definition.key, observedAtlas)
+            && observedAtlas.value
+            && observedAtlas.value->bytes == moved.canonicalAtlasBytes
+            && painted_atlas_bake::persistence::Read(
+                document, persisted.definition.key, observedBake)
+                == painted_atlas_bake::persistence::ReadState::Present
+            && observedBake.definition == moved.savedBake;
+
+        moved.reset();
+        observation.outputSurvivedCaptureReset = !baked.outputs.empty()
+            && baked.assignments.size() == inputs.size()
+            && ledger.recheck(
+                decal_layer::bake::accounting::FailureSite::
+                    ProtectedRecheckStorage);
+        const bool completed = observation.detachedAuthority
+            && observation.canonicalUnchanged
+            && observation.allMemberBake
+            && observation.oneSharedBake
+            && observation.outputSurvivedCaptureReset;
+        if (completed) observation.failureStage.clear();
+        return completed;
+    } catch (...) {
+        observation = {};
+        return false;
+    }
+}
+#endif
+
 bool PrivateDecalCapture::Impl::recheckProtected(
     const std::function<bool()>& cancelled,
     const decal_layer::bake::accounting::FailureSite boundary) noexcept {
