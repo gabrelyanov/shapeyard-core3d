@@ -663,6 +663,10 @@ __attribute__((objc_subclassing_restricted))
 - (nullable NSDictionary<NSString *,id> *)
     debugE4ReceiverBudgetForEntityIdentifier:(NSString *)entityIdentifier
     NS_SWIFT_NAME(debugE4ReceiverBudget(entityIdentifier:));
+//! Arms real ordinary/private publication accounting. The denial mode latches
+//! before install allocation and destroys the operation-owned destination.
+- (void)debugBeginE4PublicationObservationDenyInstall:(BOOL)denyInstall;
+- (nullable NSDictionary<NSString *,id> *)debugTakeE4PublicationObservation;
 //! Arms the next genuine CapturePrivateExportDecals census. YES leaves one
 //! byte less than its measured ticket; NO observes the under-limit copy.
 - (void)debugArmE4BRepCensusObservationRefuseOneByteShort:

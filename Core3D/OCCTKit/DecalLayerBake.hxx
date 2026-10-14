@@ -145,6 +145,23 @@ enum class FailureSite : std::uint8_t {
     ReceiverEncoderZlib,
     ReceiverEncoderPNG,
     ReceiverProductStorage,
+    PublicationAssembleWriter,
+    PublicationAssembleFaces,
+    PublicationValidationCopy,
+    PublicationValidationWriter,
+    PublicationPrivateVector,
+    PublicationPrivateStore,
+    PublicationPrivateLookup,
+    PublicationSharedKey,
+    PublicationSharedStore,
+    PublicationSharedLookup,
+    InstallIdentifier,
+    InstallTextureMap,
+    InstallTextureCopy,
+    InstallAppearance,
+    InstallCompaction,
+    TangentOutput,
+    TangentWorkspace,
     DebugBRepCensusDebt,
     DebugExactLimit,
     DebugOneUnit,
@@ -588,6 +605,35 @@ void DebugReceiverBakeReturned(std::size_t outputBytes,
                                std::size_t pngBytes) noexcept;
 void DebugReceiverProductRetained(std::size_t pngBytes,
                                   const Digest& digest) noexcept;
+struct DebugPublicationObservation final {
+    bool assembleReached = false;
+    bool productLiveAtAssemble = false;
+    bool validationCopyCharged = false;
+    bool storeCopyConcurrent = false;
+    bool lookupCopyConcurrent = false;
+    bool privateStoreReached = false;
+    bool privateLookupReached = false;
+    bool sharedStoreReached = false;
+    bool sharedLookupReached = false;
+    bool installReservedBeforeAllocation = false;
+    bool installDeniedBeforeAllocation = false;
+    bool stagedDestinationCleared = false;
+    bool firstFailurePreserved = false;
+    std::size_t publicationBytes = 0;
+    std::size_t installAllocationEntries = 0;
+};
+void DebugBeginPublicationObservation(bool denyInstall) noexcept;
+DebugPublicationObservation DebugTakePublicationObservation() noexcept;
+void DebugPublicationAssembled(bool productLive,
+                               std::size_t bytes) noexcept;
+void DebugPublicationValidated(std::size_t bytes) noexcept;
+void DebugPublicationStored(bool isPrivate, bool concurrent) noexcept;
+void DebugPublicationLookedUp(bool isPrivate, bool concurrent) noexcept;
+bool DebugPublicationShouldDenyInstall() noexcept;
+void DebugPublicationInstallReserved() noexcept;
+void DebugPublicationInstallAllocation() noexcept;
+void DebugPublicationInstallDenied(bool destinationCleared,
+                                   bool firstFailurePreserved) noexcept;
 #endif
 
 //! Bounded ephemeral publication handed from the final-geometry baker to all
@@ -602,6 +648,9 @@ struct PublishedFace final {
     Digest pngDigest{};
 };
 struct PublishedDerivative final {
+    accounting::Owner operationOwner;
+    accounting::Ticket storageTicket;
+    accounting::Ticket containerTicket;
     OwnerKey owner{};
     Digest layerProof{};
     Digest sourceProof{};
@@ -611,6 +660,44 @@ struct PublishedDerivative final {
     Digest inputKey{};
     Digest bakeKey{};
     std::vector<PublishedFace> faces;
+
+    PublishedDerivative() = default;
+    PublishedDerivative(const PublishedDerivative&) = delete;
+    PublishedDerivative& operator=(const PublishedDerivative&) = delete;
+    PublishedDerivative(PublishedDerivative&& other) noexcept {
+        *this = std::move(other);
+    }
+    PublishedDerivative& operator=(PublishedDerivative&& other) noexcept {
+        if (this != &other) {
+            reset();
+            operationOwner = std::move(other.operationOwner);
+            storageTicket = std::move(other.storageTicket);
+            containerTicket = std::move(other.containerTicket);
+            owner = other.owner;
+            layerProof = other.layerProof;
+            sourceProof = other.sourceProof;
+            geometryRevision = other.geometryRevision;
+            finalGeometryUVProof = other.finalGeometryUVProof;
+            occluderProof = other.occluderProof;
+            inputKey = other.inputKey;
+            bakeKey = other.bakeKey;
+            faces = std::move(other.faces);
+            other.owner = {}; other.layerProof = {}; other.sourceProof = {};
+            other.geometryRevision = 0; other.finalGeometryUVProof = {};
+            other.occluderProof = {}; other.inputKey = {}; other.bakeKey = {};
+        }
+        return *this;
+    }
+    ~PublishedDerivative() { reset(); }
+    void reset() noexcept {
+        std::vector<PublishedFace>().swap(faces);
+        containerTicket.reset();
+        storageTicket.reset();
+        operationOwner.reset();
+        owner = {}; layerProof = {}; sourceProof = {}; geometryRevision = 0;
+        finalGeometryUVProof = {}; occluderProof = {}; inputKey = {};
+        bakeKey = {};
+    }
 };
 enum class Status : std::uint8_t {
     Baked, Malformed, Stale, Unsupported, VisibilityInconclusive, Budget
@@ -625,10 +712,84 @@ struct State final {
     std::size_t residentBytes = 0;
 };
 inline State& SharedState() { static State state; return state; }
-inline bool BindBakeKey(PublishedDerivative& value) noexcept {
+
+inline bool PayloadBytes(const PublishedDerivative& value,
+                         std::size_t& bytes) noexcept {
+    bytes = 0;
+    if (value.faces.size() > std::numeric_limits<std::size_t>::max()
+            / sizeof(PublishedFace)) return false;
+    bytes = value.faces.size() * sizeof(PublishedFace);
+    for (const PublishedFace& face : value.faces) {
+        if (face.png.size() > std::numeric_limits<std::size_t>::max() - bytes)
+            return false;
+        bytes += face.png.size();
+    }
+    return bytes != 0;
+}
+
+inline bool BakeKeyBytes(const PublishedDerivative& value,
+                         std::size_t& bytes) noexcept {
+    constexpr std::size_t fixed = 244;
+    constexpr std::size_t perFace = 88;
+    if (value.faces.size()
+            > (std::numeric_limits<std::size_t>::max() - fixed) / perFace)
+        return false;
+    bytes = fixed + value.faces.size() * perFace;
+    return true;
+}
+
+inline bool Clone(const PublishedDerivative& source,
+                  const accounting::Owner& operationOwner,
+                  accounting::Retention retention,
+                  accounting::FailureSite site,
+                  PublishedDerivative& output) noexcept {
+    output = {};
+    try {
+        const accounting::View operation = operationOwner.valid()
+            ? operationOwner.view : source.storageTicket.view;
+        std::size_t bytes = 0;
+        if (!operation.valid() || !PayloadBytes(source, bytes)
+            || !output.storageTicket.acquire(operation,
+                accounting::StorageDimension::PrivateStorage, bytes,
+                retention, site)
+            || !operation.EnterAllocation(site)) return false;
+        output.operationOwner = operationOwner.valid()
+            ? operationOwner : source.operationOwner;
+        output.owner = source.owner;
+        output.layerProof = source.layerProof;
+        output.sourceProof = source.sourceProof;
+        output.geometryRevision = source.geometryRevision;
+        output.finalGeometryUVProof = source.finalGeometryUVProof;
+        output.occluderProof = source.occluderProof;
+        output.inputKey = source.inputKey;
+        output.bakeKey = source.bakeKey;
+        output.faces.reserve(source.faces.size());
+        for (const PublishedFace& face : source.faces)
+            output.faces.push_back(face);
+        return true;
+    } catch (...) {
+        output = {};
+        return false;
+    }
+}
+
+inline bool BindBakeKey(PublishedDerivative& value,
+                        accounting::FailureSite writerSite =
+                            accounting::FailureSite::PublicationValidationWriter) noexcept {
     value.bakeKey = {};
     try {
+        std::size_t writerBytes = 0;
+        accounting::Ticket writerTicket;
+        const accounting::View operation = value.storageTicket.view;
+        if (!operation.valid() || !BakeKeyBytes(value, writerBytes)
+            || !writerTicket.acquire(operation,
+                accounting::StorageDimension::PrivateStorage, writerBytes,
+                accounting::Retention::Scratch,
+                writerSite)
+            || !operation.EnterAllocation(writerSite))
+            return false;
         face_image::detail::Writer writer;
+        writer.bytes.reserve(writerBytes);
         writer.raw(reinterpret_cast<const std::uint8_t*>("SYDB\1\0\0\0"), 8);
         writer.integer(kAlgorithmVersion, 4); writer.integer(kColorVersion, 4);
         writer.integer(kEncoderVersion, 4); writer.integer(0, 4);
@@ -665,7 +826,8 @@ inline std::string CacheKeyText(const OwnerKey& owner, const Digest& inputKey) {
     }
     return value;
 }
-inline bool Valid(const PublishedDerivative& value) noexcept {
+inline bool Valid(const PublishedDerivative& value,
+                  const accounting::Owner& validationOwner = {}) noexcept {
     try {
         if (!retained_recipe::Valid(value.owner) || !Nonzero(value.layerProof)
             || !Nonzero(value.sourceProof) || value.geometryRevision == 0
@@ -690,9 +852,17 @@ inline bool Valid(const PublishedDerivative& value) noexcept {
                     && face.receiver.selectorProof
                         == value.faces[other].receiver.selectorProof) return false;
         }
-        PublishedDerivative canonical = value;
-        const Digest supplied = canonical.bakeKey;
-        return BindBakeKey(canonical) && canonical.bakeKey == supplied;
+        PublishedDerivative canonical;
+        const Digest supplied = value.bakeKey;
+        const bool copied = Clone(value, validationOwner,
+                accounting::Retention::Scratch,
+                accounting::FailureSite::PublicationValidationCopy,
+                canonical);
+#ifdef DEBUG
+        if (copied) DebugPublicationValidated(canonical.storageTicket.bytes);
+#endif
+        return copied && BindBakeKey(canonical)
+            && canonical.bakeKey == supplied;
     } catch (...) { return false; }
 }
 
@@ -701,6 +871,7 @@ inline bool Valid(const PublishedDerivative& value) noexcept {
 //! The ordinary resident/entry ceilings apply once to the whole operation:
 //! adding another owner never creates a fresh allowance.
 struct PrivateDestination final {
+    accounting::Ticket vectorTicket;
     std::vector<PublishedDerivative> values;
     std::size_t residentBytes = 0;
 
@@ -712,6 +883,8 @@ struct PrivateDestination final {
 
     void clear() noexcept {
         values.clear();
+        std::vector<PublishedDerivative>().swap(values);
+        vectorTicket.reset();
         residentBytes = 0;
     }
 };
@@ -733,7 +906,31 @@ inline bool Store(PrivateDestination& destination,
         for (const PublishedDerivative& existing : destination.values)
             if (existing.inputKey == value.inputKey)
                 return false;
-        destination.values.push_back(value);
+        PublishedDerivative stored;
+        if (!Clone(value, {}, accounting::Retention::Retained,
+                accounting::FailureSite::PublicationPrivateStore, stored))
+            return false;
+#ifdef DEBUG
+        DebugPublicationStored(true,
+            value.storageTicket.bytes != 0 && stored.storageTicket.bytes != 0);
+#endif
+        if (destination.values.size() == destination.values.capacity()) {
+            const std::size_t capacity = destination.values.size() + 1;
+            if (capacity > std::numeric_limits<std::size_t>::max()
+                    / sizeof(PublishedDerivative)) return false;
+            accounting::Ticket grown;
+            const std::size_t bytes = capacity * sizeof(PublishedDerivative);
+            if (!grown.acquire(value.storageTicket.view,
+                    accounting::StorageDimension::PrivateStorage, bytes,
+                    accounting::Retention::Retained,
+                    accounting::FailureSite::PublicationPrivateVector)
+                || !value.storageTicket.view.EnterAllocation(
+                    accounting::FailureSite::PublicationPrivateVector))
+                return false;
+            destination.values.reserve(capacity);
+            destination.vectorTicket = std::move(grown);
+        }
+        destination.values.push_back(std::move(stored));
         destination.residentBytes += incoming;
         return true;
     } catch (...) {
@@ -757,8 +954,13 @@ inline bool Lookup(const PrivateDestination& destination,
             found = &value;
         }
         if (!found) return false;
-        output = *found;
-        return true;
+        const bool copied = Clone(*found, {}, accounting::Retention::Retained,
+            accounting::FailureSite::PublicationPrivateLookup, output);
+#ifdef DEBUG
+        if (copied) DebugPublicationLookedUp(true,
+            found->storageTicket.bytes != 0 && output.storageTicket.bytes != 0);
+#endif
+        return copied;
     } catch (...) {
         output = {};
         return false;
@@ -768,6 +970,13 @@ inline bool Lookup(const PrivateDestination& destination,
 inline bool Store(const PublishedDerivative& value) noexcept {
     try {
         if (!Valid(value)) return false;
+        accounting::Ticket keyScratch;
+        if (!keyScratch.acquire(value.storageTicket.view,
+                accounting::StorageDimension::PrivateStorage, 160,
+                accounting::Retention::Scratch,
+                accounting::FailureSite::PublicationSharedKey)
+            || !value.storageTicket.view.EnterAllocation(
+                accounting::FailureSite::PublicationSharedKey)) return false;
         const std::string key = CacheKeyText(value.owner, value.inputKey);
         std::size_t incoming = 0;
         for (const PublishedFace& face : value.faces) incoming += face.png.size();
@@ -782,21 +991,63 @@ inline bool Store(const PublishedDerivative& value) noexcept {
         if (state.residentBytes < previous
             || state.residentBytes - previous > kMaximumResidentPNGBytes - incoming)
             return false;
+        PublishedDerivative stored;
+        if (!Clone(value, value.operationOwner,
+                accounting::Retention::Retained,
+                accounting::FailureSite::PublicationSharedStore, stored))
+            return false;
+#ifdef DEBUG
+        DebugPublicationStored(false,
+            value.storageTicket.bytes != 0 && stored.storageTicket.bytes != 0);
+#endif
+        const std::size_t containerBytes = 160
+            + sizeof(std::pair<const std::string, PublishedDerivative>);
+        if (!stored.containerTicket.acquire(value.storageTicket.view,
+                accounting::StorageDimension::PrivateStorage,
+                containerBytes, accounting::Retention::Retained,
+                accounting::FailureSite::PublicationSharedStore))
+            return false;
+        if (found == state.byInput.end()) {
+            if (!value.storageTicket.view.EnterAllocation(
+                    accounting::FailureSite::PublicationSharedStore))
+                return false;
+            if (!state.byInput.emplace(key, std::move(stored)).second)
+                return false;
+        } else {
+            found->second = std::move(stored);
+        }
         state.residentBytes = state.residentBytes - previous + incoming;
-        state.byInput[key] = value;
         return true;
     } catch (...) { return false; }
 }
 inline bool Lookup(const OwnerKey& owner, const Digest& inputKey,
+                   const accounting::Owner& operationOwner,
                    PublishedDerivative& output) noexcept {
     output = {};
     try {
         State& state = SharedState(); std::lock_guard<std::mutex> lock(state.mutex);
         if (!Nonzero(inputKey)) return false;
-        const auto found = state.byInput.find(CacheKeyText(owner, inputKey));
-        if (found == state.byInput.end() || !Valid(found->second)
+        accounting::Ticket keyScratch;
+        if (!keyScratch.acquire(operationOwner.view,
+                accounting::StorageDimension::PrivateStorage, 160,
+                accounting::Retention::Scratch,
+                accounting::FailureSite::PublicationSharedKey)
+            || !operationOwner.view.EnterAllocation(
+                accounting::FailureSite::PublicationSharedKey)) return false;
+        const std::string key = CacheKeyText(owner, inputKey);
+        const auto found = state.byInput.find(key);
+        if (found == state.byInput.end()
+            || !Valid(found->second, operationOwner)
             || found->second.inputKey != inputKey) return false;
-        output = found->second; return true;
+        const bool copied = Clone(found->second, operationOwner,
+            accounting::Retention::Retained,
+            accounting::FailureSite::PublicationSharedLookup, output);
+#ifdef DEBUG
+        if (copied) DebugPublicationLookedUp(false,
+            found->second.storageTicket.bytes != 0
+                && output.storageTicket.bytes != 0);
+#endif
+        return copied;
     } catch (...) { output = {}; return false; }
 }
 inline void Evict(const OwnerKey& owner) noexcept {
@@ -1470,6 +1721,8 @@ inline bool Assemble(const Definition& definition,
                      const Digest& finalGeometryUVProof,
                      const Digest& occluderProof,
                      const std::vector<FaceProduct>& products,
+                     const accounting::Owner& operationOwner,
+                     const accounting::View& operation,
                      PublishedDerivative& published) noexcept {
     published = {};
     try {
@@ -1482,7 +1735,32 @@ inline bool Assemble(const Definition& definition,
             || !Nonzero(finalGeometryUVProof) || !Nonzero(occluderProof)
             || products.empty() || products.size() > kMaximumLayers)
             return false;
+        std::size_t publishedBytes = products.size() * sizeof(PublishedFace);
+        for (const FaceProduct& product : products) {
+            if (product.face.png.size()
+                    > std::numeric_limits<std::size_t>::max() - publishedBytes)
+                return false;
+            publishedBytes += product.face.png.size();
+        }
+        const std::size_t writerBytes = 196 + products.size() * 80;
+        accounting::Ticket writerTicket;
+        if (!operation.valid()
+            || !published.storageTicket.acquire(operation,
+                accounting::StorageDimension::PrivateStorage, publishedBytes,
+                accounting::Retention::Retained,
+                accounting::FailureSite::PublicationAssembleFaces)
+            || !writerTicket.acquire(operation,
+                accounting::StorageDimension::PrivateStorage, writerBytes,
+                accounting::Retention::Scratch,
+                accounting::FailureSite::PublicationAssembleWriter)
+            || !operation.EnterAllocation(
+                accounting::FailureSite::PublicationAssembleFaces)
+            || !operation.EnterAllocation(
+                accounting::FailureSite::PublicationAssembleWriter))
+            return false;
+        published.operationOwner = operationOwner;
         face_image::detail::Writer input;
+        input.bytes.reserve(writerBytes);
         input.raw(reinterpret_cast<const std::uint8_t*>("E4AK"), 4);
         input.integer(1, 4); input.raw(definition.owner.document);
         input.raw(definition.owner.entity); input.raw(definition.owner.definition);
@@ -1512,10 +1790,17 @@ inline bool Assemble(const Definition& definition,
         published.geometryRevision = definition.geometryRevision;
         published.finalGeometryUVProof = finalGeometryUVProof;
         published.occluderProof = occluderProof;
-        if (!publication::BindBakeKey(published)
+        if (!publication::BindBakeKey(published,
+                accounting::FailureSite::PublicationAssembleWriter)
             || !publication::Valid(published)) {
             published = {}; return false;
         }
+#ifdef DEBUG
+        DebugPublicationAssembled(std::all_of(products.begin(), products.end(),
+            [](const FaceProduct& product) {
+                return product.pngTicket.bytes != 0 && !product.face.png.empty();
+            }), published.storageTicket.bytes);
+#endif
         return true;
     } catch (...) { published = {}; return false; }
 }
@@ -1525,9 +1810,10 @@ inline bool Publish(const Definition& definition,
                     const Digest& finalGeometryUVProof,
                     const Digest& occluderProof,
                     const std::vector<FaceProduct>& products,
+                    const accounting::Owner& operationOwner,
                     PublishedDerivative& published) noexcept {
     if (!Assemble(definition, finalGeometryUVProof, occluderProof,
-                  products, published)
+                  products, operationOwner, operationOwner.view, published)
         || !publication::Store(published)) {
         published = {};
         return false;
@@ -1541,10 +1827,11 @@ inline bool PublishPrivate(const Definition& definition,
                            const Digest& finalGeometryUVProof,
                            const Digest& occluderProof,
                            const std::vector<FaceProduct>& products,
+                           const accounting::View& operation,
                            publication::PrivateDestination& destination,
                            PublishedDerivative& published) noexcept {
     if (!Assemble(definition, finalGeometryUVProof, occluderProof,
-                  products, published)
+                  products, {}, operation, published)
         || !publication::Store(destination, published)) {
         destination.clear();
         published = {};

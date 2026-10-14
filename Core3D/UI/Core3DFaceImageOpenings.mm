@@ -97,6 +97,7 @@ void DebugArmE4ProtectedCaptureStorageObservation(bool denyAtlasRead) noexcept;
 std::array<std::size_t, 11>
 DebugTakeE4ProtectedCaptureStorageObservation() noexcept;
 std::array<std::size_t, 18> DebugExerciseE4OperationLedger() noexcept;
+std::array<std::size_t, 6> DebugExerciseE4MikkAllocationFailure() noexcept;
 std::array<std::size_t, 16> DebugExerciseE4SourceDecodeAdmission(
     const std::vector<std::uint8_t>& bytes) noexcept;
 std::array<std::size_t, 10> DebugExerciseE4FaceImageValidation(
@@ -3926,6 +3927,44 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         (void)bake::DebugTakeReceiverObservation();
         return nil;
     }
+}
+
+- (void)debugBeginE4PublicationObservationDenyInstall:
+    (BOOL)denyInstall {
+    core3d::decal_layer::bake::DebugBeginPublicationObservation(
+        denyInstall);
+}
+
+- (NSDictionary<NSString *,id> *)debugTakeE4PublicationObservation {
+    const auto value = core3d::decal_layer::bake::
+        DebugTakePublicationObservation();
+    const auto mikk = core3d::scene::DebugExerciseE4MikkAllocationFailure();
+    return @{
+        @"fixture": @"E4P2b1LedgerCap",
+        @"assembleReached": @(value.assembleReached),
+        @"productLiveAtAssemble": @(value.productLiveAtAssemble),
+        @"validationCopyCharged": @(value.validationCopyCharged),
+        @"storeCopyConcurrent": @(value.storeCopyConcurrent),
+        @"lookupCopyConcurrent": @(value.lookupCopyConcurrent),
+        @"privateStoreReached": @(value.privateStoreReached),
+        @"privateLookupReached": @(value.privateLookupReached),
+        @"sharedStoreReached": @(value.sharedStoreReached),
+        @"sharedLookupReached": @(value.sharedLookupReached),
+        @"installReservedBeforeAllocation": @(
+            value.installReservedBeforeAllocation),
+        @"installDeniedBeforeAllocation": @(
+            value.installDeniedBeforeAllocation),
+        @"stagedDestinationCleared": @(value.stagedDestinationCleared),
+        @"firstFailurePreserved": @(value.firstFailurePreserved),
+        @"publicationBytes": @(value.publicationBytes),
+        @"installAllocationEntries": @(value.installAllocationEntries),
+        @"mikkGenerationFailed": @(mikk[0] != 0),
+        @"mikkNoStagedOutput": @(mikk[1] != 0),
+        @"mikkFirstFailureLatched": @(mikk[2] != 0),
+        @"mikkInstallRefused": @(mikk[3] != 0),
+        @"mikkInstallAllocationEntries": @(mikk[4]),
+        @"mikkLatchStayedSticky": @(mikk[5] != 0),
+    };
 }
 
 - (void)debugArmE4BRepCensusObservationRefuseOneByteShort:

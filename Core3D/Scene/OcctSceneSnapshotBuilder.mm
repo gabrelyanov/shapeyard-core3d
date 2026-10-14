@@ -190,6 +190,10 @@
 #include <utility>
 #include <vector>
 
+#ifdef DEBUG
+extern "C" void mikkDebugFailNextAllocationAtSite(int);
+#endif
+
 namespace core3d::scene {
 namespace {
 #ifdef DEBUG
@@ -4655,6 +4659,45 @@ std::uint64_t PresentationOverlayPayloadFingerprint(
 
 } // namespace
 
+TangentSpaceError GenerateAccountedMikkCornerTangents(
+    const std::vector<Vertex>& vertices,
+    const std::vector<std::uint32_t>& indices,
+    bool hasUV,
+    const decal_layer::bake::accounting::View& operation,
+    decal_layer::bake::accounting::Ticket& outputTicket,
+    std::vector<Float4>& output) noexcept
+{
+    using Dimension = decal_layer::bake::accounting::StorageDimension;
+    using Retention = decal_layer::bake::accounting::Retention;
+    using Site = decal_layer::bake::accounting::FailureSite;
+    std::size_t outputBytes = 0, workspaceBytes = 0;
+    decal_layer::bake::accounting::Ticket workspaceTicket;
+    // Mikk's bounded path has nine simultaneous arrays. 512 bytes per input
+    // corner bounds their int lists, triangle/group/subgroup records, hashes,
+    // temporary vertices, neighbour edges and ST-space records without relying
+    // on allocator slack or an unobservable slow fallback.
+    if (!operation.CheckedProduct(indices.size(), sizeof(Float4), 1,
+            outputBytes, Site::TangentOutput)
+        || !operation.CheckedProduct(indices.size(), 512, 1,
+            workspaceBytes, Site::TangentWorkspace)
+        || !outputTicket.acquire(operation, Dimension::SnapshotNumeric,
+            outputBytes, Retention::Retained, Site::TangentOutput)
+        || !workspaceTicket.acquire(operation, Dimension::PrivateStorage,
+            workspaceBytes, Retention::Scratch, Site::TangentWorkspace)
+        || !operation.EnterAllocation(Site::TangentOutput)
+        || !operation.EnterAllocation(Site::TangentWorkspace)) {
+        output.clear();
+        return TangentSpaceError::GenerationFailed;
+    }
+    const auto status = GenerateMikkCornerTangents(
+        vertices, indices, hasUV, output);
+    if (status == TangentSpaceError::GenerationFailed) {
+        operation.AllocationFailed(Site::TangentWorkspace);
+        outputTicket.reset();
+    }
+    return status;
+}
+
 //! Concrete allocation/work ledger for one builder-owned E4 operation. It is
 //! embedded in PrivateDecalCapture::Impl, so constructing the operation has a
 //! fixed-size, allocation-free accounting owner before any protected scene
@@ -5156,6 +5199,10 @@ namespace {
 thread_local DebugReceiverObservation gDebugReceiverObservation;
 thread_local bool gDebugReceiverObservationArmed = false;
 thread_local bool gDebugReceiverDenyEncoder = false;
+std::mutex gDebugPublicationMutex;
+DebugPublicationObservation gDebugPublicationObservation;
+bool gDebugPublicationObservationArmed = false;
+bool gDebugPublicationDenyInstall = false;
 }
 
 void DebugBeginReceiverObservation(bool denyEncoder) noexcept
@@ -5232,6 +5279,95 @@ void DebugReceiverProductRetained(std::size_t pngBytes,
     if (!gDebugReceiverObservationArmed) return;
     gDebugReceiverObservation.productRetained = pngBytes != 0;
     gDebugReceiverObservation.pngDigest = digest;
+}
+
+void DebugBeginPublicationObservation(bool denyInstall) noexcept
+{
+    std::lock_guard<std::mutex> lock(gDebugPublicationMutex);
+    gDebugPublicationObservation = {};
+    gDebugPublicationObservationArmed = true;
+    gDebugPublicationDenyInstall = denyInstall;
+}
+
+DebugPublicationObservation DebugTakePublicationObservation() noexcept
+{
+    std::lock_guard<std::mutex> lock(gDebugPublicationMutex);
+    const auto result = gDebugPublicationObservation;
+    gDebugPublicationObservation = {};
+    gDebugPublicationObservationArmed = false;
+    gDebugPublicationDenyInstall = false;
+    return result;
+}
+
+void DebugPublicationAssembled(bool productLive,
+                               std::size_t bytes) noexcept
+{
+    std::lock_guard<std::mutex> lock(gDebugPublicationMutex);
+    if (!gDebugPublicationObservationArmed) return;
+    gDebugPublicationObservation.assembleReached = true;
+    gDebugPublicationObservation.productLiveAtAssemble = productLive;
+    gDebugPublicationObservation.publicationBytes = std::max(
+        gDebugPublicationObservation.publicationBytes, bytes);
+}
+
+void DebugPublicationValidated(std::size_t bytes) noexcept
+{
+    std::lock_guard<std::mutex> lock(gDebugPublicationMutex);
+    if (!gDebugPublicationObservationArmed) return;
+    gDebugPublicationObservation.validationCopyCharged = bytes != 0;
+    gDebugPublicationObservation.publicationBytes = std::max(
+        gDebugPublicationObservation.publicationBytes, bytes);
+}
+
+void DebugPublicationStored(bool isPrivate, bool concurrent) noexcept
+{
+    std::lock_guard<std::mutex> lock(gDebugPublicationMutex);
+    if (!gDebugPublicationObservationArmed) return;
+    gDebugPublicationObservation.storeCopyConcurrent =
+        gDebugPublicationObservation.storeCopyConcurrent || concurrent;
+    if (isPrivate) gDebugPublicationObservation.privateStoreReached = true;
+    else gDebugPublicationObservation.sharedStoreReached = true;
+}
+
+void DebugPublicationLookedUp(bool isPrivate, bool concurrent) noexcept
+{
+    std::lock_guard<std::mutex> lock(gDebugPublicationMutex);
+    if (!gDebugPublicationObservationArmed) return;
+    gDebugPublicationObservation.lookupCopyConcurrent =
+        gDebugPublicationObservation.lookupCopyConcurrent || concurrent;
+    if (isPrivate) gDebugPublicationObservation.privateLookupReached = true;
+    else gDebugPublicationObservation.sharedLookupReached = true;
+}
+
+bool DebugPublicationShouldDenyInstall() noexcept
+{
+    std::lock_guard<std::mutex> lock(gDebugPublicationMutex);
+    return gDebugPublicationObservationArmed && gDebugPublicationDenyInstall;
+}
+
+void DebugPublicationInstallReserved() noexcept
+{
+    std::lock_guard<std::mutex> lock(gDebugPublicationMutex);
+    if (gDebugPublicationObservationArmed)
+        gDebugPublicationObservation.installReservedBeforeAllocation = true;
+}
+
+void DebugPublicationInstallAllocation() noexcept
+{
+    std::lock_guard<std::mutex> lock(gDebugPublicationMutex);
+    if (gDebugPublicationObservationArmed)
+        ++gDebugPublicationObservation.installAllocationEntries;
+}
+
+void DebugPublicationInstallDenied(bool destinationCleared,
+                                   bool firstFailurePreserved) noexcept
+{
+    std::lock_guard<std::mutex> lock(gDebugPublicationMutex);
+    if (!gDebugPublicationObservationArmed) return;
+    gDebugPublicationObservation.installDeniedBeforeAllocation =
+        gDebugPublicationObservation.installAllocationEntries == 0;
+    gDebugPublicationObservation.stagedDestinationCleared = destinationCleared;
+    gDebugPublicationObservation.firstFailurePreserved = firstFailurePreserved;
 }
 } // namespace core3d::decal_layer::bake
 #endif
@@ -12104,6 +12240,42 @@ std::array<std::size_t, 18> DebugExerciseE4OperationLedger() noexcept
     return result;
 }
 
+std::array<std::size_t, 6> DebugExerciseE4MikkAllocationFailure() noexcept
+{
+    using Dimension = decal_layer::bake::accounting::StorageDimension;
+    using Retention = decal_layer::bake::accounting::Retention;
+    using Site = decal_layer::bake::accounting::FailureSite;
+    std::array<std::size_t, 6> result{};
+    OperationLedger ledger(1024 * 1024, 1024 * 1024, 1024 * 1024);
+    std::vector<Vertex> vertices(3);
+    vertices[0].positionX = 0; vertices[0].positionY = 0;
+    vertices[1].positionX = 1; vertices[1].positionY = 0;
+    vertices[2].positionX = 0; vertices[2].positionY = 1;
+    vertices[0].normalZ = vertices[1].normalZ = vertices[2].normalZ = 1;
+    vertices[0].textureU = 0; vertices[0].textureV = 0;
+    vertices[1].textureU = 1; vertices[1].textureV = 0;
+    vertices[2].textureU = 0; vertices[2].textureV = 1;
+    const std::vector<std::uint32_t> indices{0, 1, 2};
+    decal_layer::bake::accounting::Ticket outputTicket;
+    std::vector<Float4> output;
+    mikkDebugFailNextAllocationAtSite(1);
+    const auto status = GenerateAccountedMikkCornerTangents(
+        vertices, indices, true, ledger.view(), outputTicket, output);
+    mikkDebugFailNextAllocationAtSite(0);
+    result[0] = status == TangentSpaceError::GenerationFailed;
+    result[1] = output.empty() && outputTicket.bytes == 0;
+    result[2] = ledger.firstFailureSite() == Site::TangentWorkspace;
+    decal_layer::bake::accounting::Ticket installTicket;
+    result[3] = !installTicket.acquire(ledger.view(),
+        Dimension::PrivateStorage, 1, Retention::Retained,
+        Site::InstallTextureCopy);
+    result[4] = ledger.allocationEntries(Site::InstallTextureCopy);
+    result[5] = !ledger.recheck(Site::InstallTextureCopy)
+        && result[4] == 0
+        && ledger.firstFailureSite() == Site::TangentWorkspace;
+    return result;
+}
+
 std::array<std::size_t, 16> DebugExerciseE4SourceDecodeAdmission(
     const std::vector<std::uint8_t>& bytes) noexcept
 {
@@ -14445,6 +14617,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         std::size_t aggregateEncodedBytes = 0;
         std::size_t aggregateDecodedBytes = 0;
         std::unordered_map<std::string, std::int32_t> textureIdentifiers;
+        std::vector<decal_layer::bake::accounting::Ticket> installTickets;
         for (std::size_t index = 0; index < result->textures.size(); ++index) {
             const auto& texture = result->textures[index];
             std::size_t decoded = 0;
@@ -14497,6 +14670,50 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 || aggregateEncodedBytes > kMaxAggregateEncodedTextureBytes
                 || aggregateDecodedBytes > kMaxAggregateDecodedTextureBytes)
                 return false;
+            if (!decalCapture || !decalCapture->impl_) return false;
+            std::size_t installBytes = sizeof(TextureResourceSnapshot)
+                + sizeof(std::pair<const std::string, std::int32_t>);
+            if (identifier.size() > std::numeric_limits<std::size_t>::max()
+                    - installBytes
+                || png.size() > std::numeric_limits<std::size_t>::max()
+                    - installBytes - identifier.size()) return false;
+            installBytes += identifier.size() + png.size();
+            decal_layer::bake::accounting::Ticket installTicket;
+            const auto installOperation =
+                decalCapture->impl_->operationLedger.view();
+#ifdef DEBUG
+            const bool debugDenyInstall =
+                decal_layer::bake::DebugPublicationShouldDenyInstall();
+            if (debugDenyInstall
+                && !decalCapture->impl_->destination.values.empty()) {
+                installOperation.Refuse(
+                    decal_layer::bake::accounting::FailureSite::InstallTextureCopy);
+                decalCapture->impl_->destination.clear();
+                decal_layer::bake::DebugPublicationInstallDenied(
+                    decalCapture->impl_->destination.values.empty(),
+                    decalCapture->impl_->operationLedger.firstFailureSite()
+                        == decal_layer::bake::accounting::FailureSite::
+                            InstallTextureCopy);
+                return false;
+            }
+#endif
+            if (!installTicket.acquire(installOperation,
+                    decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                    installBytes,
+                    decal_layer::bake::accounting::Retention::Retained,
+                    decal_layer::bake::accounting::FailureSite::InstallTextureCopy))
+                return false;
+#ifdef DEBUG
+            if (!debugDenyInstall)
+                decal_layer::bake::DebugPublicationInstallReserved();
+#endif
+            if (!installOperation.EnterAllocation(
+                    decal_layer::bake::accounting::FailureSite::InstallTextureCopy))
+                return false;
+#ifdef DEBUG
+            if (!debugDenyInstall)
+                decal_layer::bake::DebugPublicationInstallAllocation();
+#endif
             textureIndex = std::int32_t(result->textures.size());
             TextureResourceSnapshot texture;
             texture.identifier = identifier;
@@ -14507,6 +14724,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             texture.paintedAtlasDerivative = painted;
             result->textures.push_back(std::move(texture));
             textureIdentifiers.emplace(identifier, textureIndex);
+            installTickets.push_back(std::move(installTicket));
             return true;
         };
 
@@ -14544,6 +14762,8 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
 
         std::unordered_map<std::string, std::uint32_t> installedMaterials;
         std::unordered_set<std::size_t> tangentMeshes;
+        std::vector<decal_layer::bake::accounting::Ticket>
+            tangentOutputTickets;
         for (const auto& occurrence : occurrences) {
             auto& item = result->instances[occurrence.instance];
             const auto& definition = definitions[occurrence.definition];
@@ -14556,6 +14776,20 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                     + ":" + std::to_string(binding.materialIndex);
                 auto installed = installedMaterials.find(key);
                 if (installed == installedMaterials.end()) {
+                    const auto installOperation =
+                        decalCapture->impl_->operationLedger.view();
+                    decal_layer::bake::accounting::Ticket materialTicket;
+                    const std::size_t materialBytes = sizeof(MaterialSnapshot)
+                        + sizeof(std::pair<const std::string, std::uint32_t>)
+                        + key.size();
+                    if (!materialTicket.acquire(installOperation,
+                            decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                            materialBytes,
+                            decal_layer::bake::accounting::Retention::Retained,
+                            decal_layer::bake::accounting::FailureSite::InstallTextureMap)
+                        || !installOperation.EnterAllocation(
+                            decal_layer::bake::accounting::FailureSite::InstallTextureMap))
+                        return {};
                     MaterialSnapshot material =
                         result->materials[binding.materialIndex];
                     material.baseColorTextureIndex = roles->second[0];
@@ -14568,6 +14802,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                             materialIndex)) return {};
                     installed = installedMaterials.emplace(
                         key, materialIndex).first;
+                    installTickets.push_back(std::move(materialTicket));
                 }
                 binding.materialIndex = installed->second;
             }
@@ -14579,9 +14814,15 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             if (roles->second[std::size_t(face_image::Role::Normal)] >= 0
                 && tangentMeshes.insert(item.meshIndex).second) {
                 auto& mesh = result->meshes[item.meshIndex];
-                if (GenerateMikkCornerTangents(mesh.vertices, mesh.indices,
-                        true, mesh.cornerTangents)
+                decal_layer::bake::accounting::Ticket tangentOutputTicket;
+                if (!decalCapture || !decalCapture->impl_
+                    || GenerateAccountedMikkCornerTangents(
+                        mesh.vertices, mesh.indices, true,
+                        decalCapture->impl_->operationLedger.view(),
+                        tangentOutputTicket, mesh.cornerTangents)
                         != TangentSpaceError::None) return {};
+                tangentOutputTickets.push_back(
+                    std::move(tangentOutputTicket));
                 mesh.tangentBasis = TangentBasis::MikkTSpace;
             }
         }
@@ -14904,6 +15145,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             decal_layer::bake::PublishedDerivative published;
             if (!decal_layer::bake::PublishPrivate(owner.definition,
                     finalGeometryProof, privateOccluderProof, products,
+                    privateOperation,
                     decalCapture->impl_->destination, published)) return {};
 #ifdef DEBUG
             if (debugObservation)
@@ -14927,6 +15169,16 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 std::int32_t textureIndex = -1;
                 if (!installPNG(face.png, face.pixelWidth,
                         face.pixelHeight, false, textureIndex)) return {};
+                decal_layer::bake::accounting::Ticket appearanceTicket;
+                const std::size_t appearanceBytes =
+                    sizeof(DecalDerivedAppearanceSnapshot)
+                    + owner.definitionIdentifier.size() + 64;
+                if (!appearanceTicket.acquire(privateOperation,
+                        PrivateDimension::PrivateStorage, appearanceBytes,
+                        PrivateRetention::Retained,
+                        PrivateSite::InstallAppearance)
+                    || !privateOperation.EnterAllocation(
+                        PrivateSite::InstallAppearance)) return {};
                 DecalDerivedAppearanceSnapshot appearance;
                 appearance.ownerDefinitionIdentifier =
                     owner.definitionIdentifier;
@@ -14935,6 +15187,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 appearance.baseColorTextureIndex = textureIndex;
                 item.decalDerivedAppearances.push_back(
                     std::move(appearance));
+                installTickets.push_back(std::move(appearanceTicket));
             }
             if (item.decalDerivedAppearances.size()
                     != owner.receivers.size()) return {};
@@ -14954,6 +15207,36 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         // Removing superseded face bindings can orphan their source images.
         // Compact once, after every painted role and private appearance is
         // installed, and remap all live references as one candidate update.
+        decal_layer::bake::accounting::Ticket referencedTextureTicket;
+        decal_layer::bake::accounting::Ticket textureRemapTicket;
+        decal_layer::bake::accounting::Ticket compactTextureTicket;
+        if (decalCapture && decalCapture->impl_) {
+            const auto compactOperation =
+                decalCapture->impl_->operationLedger.view();
+            const std::size_t count = result->textures.size();
+            std::size_t remapBytes = 0, compactBytes = 0;
+            if (!compactOperation.CheckedProduct(count,
+                    sizeof(std::int32_t), 1, remapBytes,
+                    decal_layer::bake::accounting::FailureSite::InstallCompaction)
+                || !compactOperation.CheckedProduct(count,
+                    sizeof(TextureResourceSnapshot), 1, compactBytes,
+                    decal_layer::bake::accounting::FailureSite::InstallCompaction)
+                || !referencedTextureTicket.acquire(compactOperation,
+                    decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                    count, decal_layer::bake::accounting::Retention::Scratch,
+                    decal_layer::bake::accounting::FailureSite::InstallCompaction)
+                || !textureRemapTicket.acquire(compactOperation,
+                    decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                    remapBytes, decal_layer::bake::accounting::Retention::Scratch,
+                    decal_layer::bake::accounting::FailureSite::InstallCompaction)
+                || !compactTextureTicket.acquire(compactOperation,
+                    decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                    compactBytes, decal_layer::bake::accounting::Retention::Retained,
+                    decal_layer::bake::accounting::FailureSite::InstallCompaction)
+                || !compactOperation.EnterAllocation(
+                    decal_layer::bake::accounting::FailureSite::InstallCompaction))
+                return {};
+        }
         std::vector<bool> referencedTextures(result->textures.size(), false);
         const auto markTexture = [&](const std::int32_t index) {
             if (index < 0) return true;
@@ -15614,6 +15897,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         };
         namespace ordinary_accounting = core3d::decal_layer::bake::accounting;
         auto anOrdinaryOperation = ordinary_accounting::MakeOperationOwner();
+        std::vector<ordinary_accounting::Ticket> anOrdinaryInstallTickets;
         if (!anOrdinaryOperation.valid()
             || !anOrdinaryOperation.view.SealJob(
                 ordinary_accounting::Job::Coverage,
@@ -16213,6 +16497,8 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
         // Mikk-only normal bindings share the existing resident frame budget.
         if (aMeshDefinitionIndices.size() != aScene.meshes.size()) return {};
         std::vector<bool> needsNormalFrames(aScene.meshes.size(), false);
+        std::vector<core3d::decal_layer::bake::accounting::Ticket>
+            aTangentOutputTickets;
         for (const auto& instance : aScene.instances) {
             for (const auto& binding : instance.primitiveBindings) {
                 if (aScene.materials[binding.materialIndex].normalTextureIndex >= 0)
@@ -16250,10 +16536,20 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                         && !CheckedMultiply(mesh.indices.size(),64U,nativeBytes))
                     || aFrameResidentBytes > 64U * 1024U * 1024U
                     || nativeBytes > 64U * 1024U * 1024U - aFrameResidentBytes
-                    || GenerateMikkCornerTangents(mesh.vertices, mesh.indices,
+                    || ([&] {
+                        core3d::decal_layer::bake::accounting::Ticket
+                            aTangentOutputTicket;
+                        if (GenerateAccountedMikkCornerTangents(
+                            mesh.vertices, mesh.indices,
                     std::all_of(mesh.primitives.begin(), mesh.primitives.end(),
                         [](const auto& primitive) { return primitive.hasTextureCoordinates; }),
-                    mesh.cornerTangents) != TangentSpaceError::None) return {};
+                            anOrdinaryOperation.view, aTangentOutputTicket,
+                            mesh.cornerTangents) != TangentSpaceError::None)
+                            return false;
+                        aTangentOutputTickets.push_back(
+                            std::move(aTangentOutputTicket));
+                        return true;
+                    }()) == false) return {};
                 aFrameResidentBytes += nativeBytes;
                 mesh.tangentBasis = TangentBasis::MikkTSpace;
             }
@@ -16502,10 +16798,10 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 dl::bake::PublishedDerivative aPublished;
                 if (!dl::bake::Publish(aPending.definition,
                         aFinalGeometryProof, anOccluderProof,
-                        aProducts, aPublished)) return {};
+                        aProducts, anOrdinaryOperation, aPublished)) return {};
                 dl::bake::PublishedDerivative aReopened;
                 if (!dl::bake::publication::Lookup(aPending.definition.owner,
-                        aPublished.inputKey, aReopened)
+                        aPublished.inputKey, anOrdinaryOperation, aReopened)
                     || aReopened.bakeKey != aPublished.bakeKey) return {};
 
                 for (const dl::bake::PublishedFace& aFace : aPublished.faces) {
@@ -16525,22 +16821,54 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                         core3d::face_image::ImageEncoding::PNG;
                     anEnvelope.workingWidthTexels = aFace.pixelWidth;
                     anEnvelope.workingHeightTexels = aFace.pixelHeight;
+                    ordinary_accounting::Ticket aTextureInstallTicket;
+                    const std::size_t aTextureInstallBytes =
+                        sizeof(TextureResourceSnapshot)
+                        + sizeof(core3d::face_image::ResourceEnvelope)
+                        + aFace.png.size() + 64;
+                    if (!aTextureInstallTicket.acquire(
+                            anOrdinaryOperation.view,
+                            ordinary_accounting::StorageDimension::PrivateStorage,
+                            aTextureInstallBytes,
+                            ordinary_accounting::Retention::Retained,
+                            ordinary_accounting::FailureSite::InstallTextureCopy)
+                        || !anOrdinaryOperation.view.EnterAllocation(
+                            ordinary_accounting::FailureSite::InstallTextureCopy))
+                        return {};
                     anEnvelope.workingBytes = aFace.png;
                     std::int32_t aTextureIndex = -1;
                     if (!AddFaceImageTextureResource(
                             aScene, aTextureTable, anEnvelope, aTextureIndex)
                         || aTextureIndex < 0) return {};
-                    DecalDerivedAppearanceSnapshot anAppearance;
-                    anAppearance.ownerDefinitionIdentifier =
+                    ordinary_accounting::Ticket anAppearanceTicket;
+                    const std::string& anAppearanceOwner =
                         aMesh.paintedAtlasMasterDefinitionIdentifier.empty()
                             ? aMesh.definitionIdentifier
                             : aMesh.paintedAtlasMasterDefinitionIdentifier;
+                    const std::size_t anAppearanceBytes =
+                        sizeof(DecalDerivedAppearanceSnapshot)
+                        + anAppearanceOwner.size() + 64;
+                    if (!anAppearanceTicket.acquire(
+                            anOrdinaryOperation.view,
+                            ordinary_accounting::StorageDimension::PrivateStorage,
+                            anAppearanceBytes,
+                            ordinary_accounting::Retention::Retained,
+                            ordinary_accounting::FailureSite::InstallAppearance)
+                        || !anOrdinaryOperation.view.EnterAllocation(
+                            ordinary_accounting::FailureSite::InstallAppearance))
+                        return {};
+                    DecalDerivedAppearanceSnapshot anAppearance;
+                    anAppearance.ownerDefinitionIdentifier = anAppearanceOwner;
                     anAppearance.bakeProof = DecalDigestText(aPublished.bakeKey);
                     anAppearance.faceIndex =
                         static_cast<std::uint32_t>(aMatch);
                     anAppearance.baseColorTextureIndex = aTextureIndex;
                     anInstance.decalDerivedAppearances.push_back(
                         std::move(anAppearance));
+                    anOrdinaryInstallTickets.push_back(
+                        std::move(aTextureInstallTicket));
+                    anOrdinaryInstallTickets.push_back(
+                        std::move(anAppearanceTicket));
                 }
                 if (anInstance.decalDerivedAppearances.empty()) return {};
             }
