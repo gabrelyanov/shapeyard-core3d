@@ -10529,6 +10529,126 @@ DebugExerciseE4BRepPlanarPCurveRefusal(bool storePCurve) noexcept {
     }
     return result;
 }
+
+std::array<std::size_t, 12>
+DebugExerciseE4BRepPlanarClosedWrapperRefusal(
+    double metersPerUnit) noexcept {
+    std::array<std::size_t, 12> result{};
+    try {
+        if (!(metersPerUnit > 0.0) || !std::isfinite(metersPerUnit))
+            return result;
+        const double scale = 0.001 / metersPerUnit;
+        const double tolerance = Precision::Confusion();
+        BRep_Builder builder;
+        const Handle(Geom_Plane) plane =
+            new Geom_Plane(gp_Pln(gp::XOY()));
+        Handle(Poly_Triangulation) mesh = new Poly_Triangulation(
+            4, 2, Standard_True, Standard_False);
+        mesh->SetNode(1, gp_Pnt(0, 0, 0));
+        mesh->SetNode(2, gp_Pnt(scale, 0, 0));
+        mesh->SetNode(3, gp_Pnt(0, scale, 0));
+        mesh->SetNode(4, gp_Pnt(scale, scale, 0));
+        mesh->SetUVNode(1, gp_Pnt2d(0, 0));
+        mesh->SetUVNode(2, gp_Pnt2d(scale, 0));
+        mesh->SetUVNode(3, gp_Pnt2d(0, scale));
+        mesh->SetUVNode(4, gp_Pnt2d(scale, scale));
+        mesh->SetTriangle(1, Poly_Triangle(1, 2, 4));
+        mesh->SetTriangle(2, Poly_Triangle(1, 4, 3));
+
+        TopoDS_Face face;
+        TopoDS_Wire wire;
+        TopoDS_Edge edge;
+        TopoDS_Vertex firstVertex, lastVertex;
+        const TopLoc_Location identity;
+        builder.MakeFace(face, plane, identity, tolerance);
+        builder.UpdateFace(face, mesh, Standard_True);
+        builder.MakeVertex(firstVertex, gp_Pnt(0, 0, 0), tolerance);
+        builder.MakeVertex(lastVertex, gp_Pnt(scale, 0, 0), tolerance);
+        builder.MakeEdge(edge,
+            new Geom_Line(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0))),
+            identity, tolerance);
+        builder.Add(edge, firstVertex.Oriented(TopAbs_FORWARD));
+        builder.Add(edge, lastVertex.Oriented(TopAbs_REVERSED));
+        builder.Range(edge, 0.0, scale, Standard_False);
+        TColStd_Array1OfInteger firstIndices(1, 2);
+        firstIndices(1) = 1;
+        firstIndices(2) = 2;
+        TColStd_Array1OfInteger secondIndices(1, 2);
+        secondIndices(1) = 3;
+        secondIndices(2) = 4;
+        const Handle(Poly_PolygonOnTriangulation) firstPolygon =
+            new Poly_PolygonOnTriangulation(firstIndices);
+        const Handle(Poly_PolygonOnTriangulation) secondPolygon =
+            new Poly_PolygonOnTriangulation(secondIndices);
+        builder.UpdateEdge(edge, firstPolygon, secondPolygon, mesh, identity);
+        builder.MakeWire(wire);
+        builder.Add(wire, edge.Oriented(TopAbs_FORWARD));
+        builder.Add(wire, edge.Oriented(TopAbs_REVERSED));
+        wire.Closed(Standard_True);
+        builder.Add(face, wire);
+
+        const auto edgeTShape = Handle(BRep_TEdge)::DownCast(edge.TShape());
+        if (edgeTShape.IsNull()) return result;
+        std::size_t representationCount = 0, storedPCurveCount = 0;
+        std::size_t closedPolygonWrappers = 0, lineCurves = 0;
+        for (const auto& representation : edgeTShape->Curves()) {
+            if (!BRepCensusAdd(representationCount, 1)) return result;
+            if (!Handle(BRep_CurveOnSurface)::DownCast(
+                    representation).IsNull()
+                && !BRepCensusAdd(storedPCurveCount, 1)) return result;
+            if (!Handle(BRep_PolygonOnClosedTriangulation)::DownCast(
+                    representation).IsNull()
+                && !BRepCensusAdd(closedPolygonWrappers, 1)) return result;
+            const auto curve3d = Handle(BRep_Curve3D)::DownCast(
+                representation);
+            if (!curve3d.IsNull()
+                && !Handle(Geom_Line)::DownCast(
+                    curve3d->Curve3D()).IsNull()
+                && !BRepCensusAdd(lineCurves, 1)) return result;
+        }
+        std::size_t targetEdgeUses = 0;
+        for (TopoDS_Iterator use(wire, Standard_False, Standard_False);
+             use.More(); use.Next())
+            if (use.Value().ShapeType() == TopAbs_EDGE
+                && use.Value().TShape().get() == edge.TShape().get()
+                && !BRepCensusAdd(targetEdgeUses, 1)) return result;
+        result[0] = 1;
+        result[1] = representationCount;
+        result[2] = storedPCurveCount;
+        result[3] = closedPolygonWrappers;
+        result[4] = targetEdgeUses;
+        result[9] = lineCurves;
+        result[10] = std::abs(mesh->Node(2).X() - scale)
+                <= Precision::Confusion()
+            ? 1U : 0U;
+
+        OperationLedger ledger(kMaxSnapshotNumericBytes,
+            kMaxAggregateEncodedTextureBytes,
+            kMaxAggregateDecodedTextureBytes);
+        retained_edge_treatment::ReplayBudget budget;
+        BRepRepresentationCensus source, prediction;
+        BRepCensusPCurveLookup lookup;
+        decal_layer::bake::accounting::Ticket scratch;
+        const bool measured = MeasureBRepRepresentation(face, budget,
+            ledger.view(), source, scratch, &prediction, &lookup);
+        result[5] = !measured
+                && lookup.kind
+                    == BRepCensusPCurveLookupKind::NeedsPlanarProjection
+            ? 1U : 0U;
+        result[6] = lookup.reason
+                && std::strcmp(lookup.reason,
+                    kBRepCensusUnstoredPlanarReason) == 0
+            ? 1U : 0U;
+        result[7] = ledger.allocationEntries(
+            decal_layer::bake::accounting::FailureSite::BRepCensusMapScratch);
+        result[8] = ledger.allocationEntries(
+            decal_layer::bake::accounting::FailureSite::BRepCensusCopy);
+        result[11] = !measured && result[7] == 0 && result[8] == 0 ? 1U : 0U;
+    } catch (...) {
+        return result;
+    }
+    return result;
+}
 #endif
 
 bool AddProtectedBytes(std::size_t& total, std::size_t bytes) noexcept {

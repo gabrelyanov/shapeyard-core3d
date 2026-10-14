@@ -664,6 +664,12 @@ __attribute__((objc_subclassing_restricted))
 //! proves typed refusal before census/copy tickets; true stores it in-fixture.
 - (NSDictionary<NSString *,id> *)debugE4BRepCensusPlanarPCurveStored:
     (NSNumber *)stored;
+//! D801 ordinary-scope residual: a planar Line used twice with a real closed
+//! polygon-on-triangulation wrapper remains the same typed D778 refusal before
+//! census-map or retained-copy ticket acquisition.
+- (NSDictionary<NSString *,id> *)
+    debugE4BRepCensusPlanarClosedWrapperRefusalForMetersPerUnit:
+        (NSNumber *)metersPerUnit;
 - (NSDictionary<NSString *,id> *)debugTakeE4BRepCensusObservation;
 //! Arms the next genuine protected-capture strict-atlas-read boundary. YES
 //! refuses at ProtectedAtlasRead before ReadAll/allocation entry; NO records

@@ -88,6 +88,9 @@ std::vector<std::array<std::size_t, 100>>
 DebugExerciseE4BRepKnownRepresentations(double metersPerUnit) noexcept;
 std::array<std::size_t, 13>
 DebugExerciseE4BRepPlanarPCurveRefusal(bool storePCurve) noexcept;
+std::array<std::size_t, 12>
+DebugExerciseE4BRepPlanarClosedWrapperRefusal(
+    double metersPerUnit) noexcept;
 void DebugArmE4BRepCensusObservation(bool refuseOneByteShort) noexcept;
 std::array<std::size_t, 38> DebugTakeE4BRepCensusObservation() noexcept;
 void DebugArmE4ProtectedCaptureStorageObservation(bool denyAtlasRead) noexcept;
@@ -3901,6 +3904,30 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         @"predictedBytes": @(value[10]),
         @"detachedBytes": @(value[11]),
         @"reservedBytes": @(value[12]),
+    };
+}
+
+- (NSDictionary<NSString *,id> *)
+    debugE4BRepCensusPlanarClosedWrapperRefusalForMetersPerUnit:
+        (NSNumber *)metersPerUnit {
+    const auto value =
+        core3d::scene::DebugExerciseE4BRepPlanarClosedWrapperRefusal(
+            metersPerUnit.doubleValue);
+    return @{
+        @"fixture": @"E4BRepCensusPlanarClosedWrapperD778",
+        @"fixtureBuilt": @(value[0] != 0),
+        @"representationCount": @(value[1]),
+        @"storedPCurveCount": @(value[2]),
+        @"closedPolygonWrappers": @(value[3]),
+        @"targetEdgeUses": @(value[4]),
+        @"rejected": @(value[5] != 0),
+        @"reason": value[6] != 0
+            ? @"planar pcurve not stored, generation not admitted (D778)" : @"",
+        @"mapScratchEntries": @(value[7]),
+        @"copyEntries": @(value[8]),
+        @"lineCurves": @(value[9]),
+        @"scaledGeometry": @(value[10] != 0),
+        @"refusedBeforeTickets": @(value[11] != 0),
     };
 }
 
