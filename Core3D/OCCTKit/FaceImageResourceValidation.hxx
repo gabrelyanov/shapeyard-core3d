@@ -99,8 +99,8 @@ inline bool MeasureFaceImageRaster(NSData *data, FaceImageRasterInfo& output,
                 && CFGetTypeID(depthValue) == CFNumberGetTypeID()
                 && colorModelValue
                 && CFGetTypeID(colorModelValue) == CFStringGetTypeID()
-                && alphaValue
-                && CFGetTypeID(alphaValue) == CFBooleanGetTypeID()
+                && (!alphaValue
+                    || CFGetTypeID(alphaValue) == CFBooleanGetTypeID())
                 && CFNumberGetValue((CFNumberRef)widthValue, kCFNumberSInt64Type, &width)
                 && CFNumberGetValue((CFNumberRef)heightValue, kCFNumberSInt64Type, &height)
                 && CFNumberGetValue((CFNumberRef)depthValue, kCFNumberSInt64Type, &depth);
@@ -116,7 +116,8 @@ inline bool MeasureFaceImageRaster(NSData *data, FaceImageRasterInfo& output,
                     components = 4;
                 else if (CFEqual(colorModel, kCGImagePropertyColorModelLab))
                     components = 3;
-                if (CFBooleanGetValue(static_cast<CFBooleanRef>(alphaValue)))
+                if (alphaValue
+                    && CFBooleanGetValue(static_cast<CFBooleanRef>(alphaValue)))
                     ++components;
             }
             CFRelease(properties);
