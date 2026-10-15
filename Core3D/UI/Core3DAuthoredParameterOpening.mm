@@ -507,6 +507,66 @@ NSDictionary *RotationCountedProbe(int32_t scenario) {
 }
 @end
 
+#if DEBUG
+@interface Core3DDebugAuthoredBooleanFaultReceipt ()
+- (instancetype)initWithSite:(Core3DDebugAuthoredBooleanFaultSite)site
+    delivery:(Core3DDebugAuthoredBooleanFaultDelivery)delivery
+    hitCount:(NSUInteger)hitCount;
+@end
+
+@implementation Core3DDebugAuthoredBooleanFaultReceipt
+- (instancetype)initWithSite:(Core3DDebugAuthoredBooleanFaultSite)site
+    delivery:(Core3DDebugAuthoredBooleanFaultDelivery)delivery
+    hitCount:(NSUInteger)hitCount {
+    self = [super init];
+    if (self) { _site = site; _delivery = delivery; _hitCount = hitCount; }
+    return self;
+}
+@end
+
+@interface Core3DDebugTreatmentNamingVersionRow ()
+- (instancetype)initWithLabelEntry:(NSString *)labelEntry version:(NSInteger)version;
+@end
+
+@implementation Core3DDebugTreatmentNamingVersionRow
+- (instancetype)initWithLabelEntry:(NSString *)labelEntry version:(NSInteger)version {
+    self = [super init];
+    if (self) { _labelEntry = [labelEntry copy]; _version = version; }
+    return self;
+}
+@end
+
+@interface Core3DDebugAuthoredBooleanObservation ()
+- (instancetype)initWithNamingVersions:
+    (NSArray<Core3DDebugTreatmentNamingVersionRow *> *)namingVersions
+    availableUndos:(NSInteger)availableUndos availableRedos:(NSInteger)availableRedos
+    openCommand:(BOOL)openCommand pendingCompanion:(BOOL)pendingCompanion
+    pendingAfterCaptured:(BOOL)pendingAfterCaptured
+    finalizedCompanions:(NSUInteger)finalizedCompanions;
+@end
+
+@implementation Core3DDebugAuthoredBooleanObservation
+- (instancetype)initWithNamingVersions:
+    (NSArray<Core3DDebugTreatmentNamingVersionRow *> *)namingVersions
+    availableUndos:(NSInteger)availableUndos availableRedos:(NSInteger)availableRedos
+    openCommand:(BOOL)openCommand pendingCompanion:(BOOL)pendingCompanion
+    pendingAfterCaptured:(BOOL)pendingAfterCaptured
+    finalizedCompanions:(NSUInteger)finalizedCompanions {
+    self = [super init];
+    if (self) {
+        _namingVersions = [namingVersions copy];
+        _availableUndos = availableUndos;
+        _availableRedos = availableRedos;
+        _hasOpenCommand = openCommand;
+        _hasPendingCompanion = pendingCompanion;
+        _pendingCompanionAfterCaptured = pendingAfterCaptured;
+        _finalizedCompanionCount = finalizedCompanions;
+    }
+    return self;
+}
+@end
+#endif
+
 @interface Core3DAuthoredParameterOperation () {
 @public
     std::shared_ptr<core3d::retained_edge_treatment::r2::Work> _work;
@@ -681,6 +741,76 @@ NSDictionary *RotationCountedProbe(int32_t scenario) {
         ? viewer->getDocument() : Handle(OcctDocument)();
     return opening->_nativeOwner->belongsTo(document)
         && opening->_nativeOwner->debugReportNextCloseUnproven();
+}
+
+- (BOOL)debugArmAuthoredBooleanStageFault:(Core3DAuthoredParameterOpening *)opening
+    site:(Core3DDebugAuthoredBooleanFaultSite)site
+    delivery:(Core3DDebugAuthoredBooleanFaultDelivery)delivery {
+    if (![NSThread isMainThread]
+        || ![opening isKindOfClass:Core3DAuthoredParameterOpening.class]
+        || !opening->_nativeOwner) return NO;
+    GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)self.glController : nil;
+    const auto viewer = gl ? gl.viewer : nullptr;
+    const Handle(OcctDocument) document = viewer
+        ? viewer->getDocument() : Handle(OcctDocument)();
+    namespace abd = core3d::authored_parameter::debug;
+    return opening->_nativeOwner->belongsTo(document)
+        && opening->_nativeOwner->debugArmAuthoredBooleanStageFault(
+            static_cast<abd::AuthoredBooleanFaultSite>(site),
+            static_cast<abd::AuthoredBooleanFaultDelivery>(delivery));
+}
+
+- (Core3DDebugAuthoredBooleanFaultReceipt *)debugAuthoredBooleanStageFaultReceipt:
+    (Core3DAuthoredParameterOpening *)opening {
+    if (![NSThread isMainThread]
+        || ![opening isKindOfClass:Core3DAuthoredParameterOpening.class]
+        || !opening->_nativeOwner) return nil;
+    GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)self.glController : nil;
+    const auto viewer = gl ? gl.viewer : nullptr;
+    const Handle(OcctDocument) document = viewer
+        ? viewer->getDocument() : Handle(OcctDocument)();
+    if (!opening->_nativeOwner->belongsTo(document)) return nil;
+    core3d::authored_parameter::debug::AuthoredBooleanFaultReceipt native;
+    if (!opening->_nativeOwner->debugAuthoredBooleanStageFaultReceipt(native)) return nil;
+    return [[Core3DDebugAuthoredBooleanFaultReceipt alloc]
+        initWithSite:static_cast<Core3DDebugAuthoredBooleanFaultSite>(native.site)
+        delivery:static_cast<Core3DDebugAuthoredBooleanFaultDelivery>(native.delivery)
+        hitCount:native.hits];
+}
+
+- (Core3DDebugAuthoredBooleanObservation *)debugObserveAuthoredBooleanStateForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    if (![NSThread isMainThread] || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128) return nil;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) document = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        if (!viewer || document.IsNull()) return nil;
+        const TDF_Label ownerLabel = ExactRoot(document, entityIdentifier.UTF8String ?: "");
+        if (ownerLabel.IsNull()) return nil;
+        core3d::authored_parameter::debug::AuthoredBooleanObservation native;
+        if (!document->DebugObserveAuthoredBooleanState(ownerLabel, native)) return nil;
+        NSMutableArray<Core3DDebugTreatmentNamingVersionRow *> *rows =
+            [NSMutableArray arrayWithCapacity:native.naming.size()];
+        for (const auto& row : native.naming) {
+            NSString *entry = [[NSString alloc] initWithBytes:row.labelEntry.data()
+                length:row.labelEntry.size() encoding:NSUTF8StringEncoding];
+            if (!entry) return nil;
+            [rows addObject:[[Core3DDebugTreatmentNamingVersionRow alloc]
+                initWithLabelEntry:entry version:row.version]];
+        }
+        return [[Core3DDebugAuthoredBooleanObservation alloc]
+            initWithNamingVersions:rows
+            availableUndos:native.availableUndos availableRedos:native.availableRedos
+            openCommand:native.openCommand pendingCompanion:native.pendingCompanion
+            pendingAfterCaptured:native.pendingAfterCaptured
+            finalizedCompanions:native.finalizedCompanions];
+    } catch (...) { return nil; }
 }
 #endif
 

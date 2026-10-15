@@ -16,6 +16,7 @@ struct Owner::State final {
     bool prepared = false;
 #if DEBUG
     bool debugCloseUnprovenArmed = false;
+    std::shared_ptr<debug::AuthoredBooleanStageFault> debugStageFault;
 #endif
 };
 
@@ -179,7 +180,12 @@ ApplyResult Owner::applyBoolean(Capability capability, std::size_t inputIndex,
             return refuse("authored.boolean.identity-changed");
         }
         publication.replaced.push_back({entity, TopoDS_Shape()});
+#if DEBUG
+        if (!state_->document->StageAuthoredBooleanPair(*state_->capture, candidate,
+                state_->debugStageFault.get())) {
+#else
         if (!state_->document->StageAuthoredBooleanPair(*state_->capture, candidate)) {
+#endif
             const bool aborted = lease->abort();
             const bool settled = aborted
                 && state_->document->SettleTreatmentHistoryCompanionOnPrior();
@@ -220,6 +226,9 @@ bool Owner::cancel() noexcept {
     if (![NSThread isMainThread] || !state_) return false;
     if (state_->cancelled) return true;
     state_->cancelled = true;
+#if DEBUG
+    state_->debugStageFault.reset();
+#endif
     state_->context.reset();
     return true;
 }
@@ -231,6 +240,28 @@ bool Owner::debugReportNextCloseUnproven() noexcept {
         || currentness() != Currentness::Current || !state_->context) return false;
     state_->context->debugReportNextCloseUnproven();
     state_->debugCloseUnprovenArmed = true;
+    return true;
+}
+
+bool Owner::debugArmAuthoredBooleanStageFault(
+    debug::AuthoredBooleanFaultSite site,
+    debug::AuthoredBooleanFaultDelivery delivery) noexcept {
+    if (![NSThread isMainThread] || !state_ || state_->prepared
+        || state_->debugStageFault
+        || currentness() != Currentness::Current || !state_->context) return false;
+    if (static_cast<std::uint8_t>(site) > static_cast<std::uint8_t>(
+            debug::AuthoredBooleanFaultSite::AfterCaptureBeforePublish)
+        || static_cast<std::uint8_t>(delivery) > static_cast<std::uint8_t>(
+            debug::AuthoredBooleanFaultDelivery::ThrowStandardFailure)) return false;
+    state_->debugStageFault =
+        std::make_shared<debug::AuthoredBooleanStageFault>(site, delivery);
+    return state_->debugStageFault != nullptr;
+}
+
+bool Owner::debugAuthoredBooleanStageFaultReceipt(
+    debug::AuthoredBooleanFaultReceipt& receipt) const noexcept {
+    if (![NSThread isMainThread] || !state_ || !state_->debugStageFault) return false;
+    receipt = state_->debugStageFault->receipt();
     return true;
 }
 #endif

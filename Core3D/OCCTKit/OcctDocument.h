@@ -102,6 +102,12 @@ namespace core3d::composite_recipe { struct Payload; }
 namespace core3d::retained_program_suffix { struct Probe; }
 namespace core3d::authored_parameter { class Capture; class Owner; }
 namespace core3d::authored_boolean { struct Candidate; }
+#if DEBUG
+namespace core3d::authored_parameter::debug {
+class AuthoredBooleanStageFault;
+struct AuthoredBooleanObservation;
+}
+#endif
 
 // D253 native treatment history companion — document-internal measured state
 // for one staged retained-treatment transaction. One companion records the
@@ -1424,6 +1430,17 @@ public:
     //! True while a measured treatment-history companion has not been bound
     //! to its own committed delta or discharged by verified prior settlement.
     Standard_EXPORT Standard_Boolean HasUnresolvedTreatmentHistoryCompanion() const noexcept;
+#if DEBUG
+    //! SAB-N1 read-only DEBUG observation for the authored-Boolean fault
+    //! proof: exact current owner-subtree TNaming (labelEntry, version) rows
+    //! plus undo/redo depths, open-command state and the companion census. It
+    //! never settles, stages, captures or mutates; observation failure refuses
+    //! the row rather than fabricating state.
+    Standard_EXPORT Standard_Boolean DebugObserveAuthoredBooleanState(
+        const TDF_Label& owner,
+        core3d::authored_parameter::debug::AuthoredBooleanObservation& observation)
+        const noexcept;
+#endif
     //! Prepare one independent retained Profile treatment copy without
     //! mutating the document. The returned root is produced by replay from the
     //! returned payload's independently detached untreated base. Absence of a
@@ -1830,7 +1847,12 @@ private:
       const TDF_Label&, const std::shared_ptr<const core3d::composite_recipe::Payload>&) noexcept;
   Standard_Boolean StageAuthoredBooleanPair(
       const core3d::authored_parameter::Capture&,
-      const core3d::authored_boolean::Candidate&) noexcept;
+      const core3d::authored_boolean::Candidate&
+#if DEBUG
+      , core3d::authored_parameter::debug::AuthoredBooleanStageFault* debugFault
+          = nullptr
+#endif
+      ) noexcept;
   void CloseNativeSession() noexcept;
   bool myNativeSessionClosed = false;
   friend class core3d::OrdinaryEditController;

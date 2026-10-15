@@ -6,6 +6,7 @@
 #include "RetainedEdgeTreatmentR2Snapshot.hxx"
 
 #include <Standard_Handle.hxx>
+#include <Standard_Integer.hxx>
 #include <TDF_Label.hxx>
 
 #include <cstdint>
@@ -45,6 +46,93 @@ enum class Refusal : std::uint8_t {
 };
 
 enum class Currentness : std::uint8_t { Current = 0, Stale, Cancelled, Recovery };
+
+#if DEBUG
+namespace debug {
+
+//! SAB-N1 fixed post-write fault sites inside
+//! OcctDocument::StageAuthoredBooleanPair. The serialized values are the test
+//! contract: never renumber or reuse them.
+enum class AuthoredBooleanFaultSite : std::uint8_t {
+    AfterOwnerShapeWrite = 0,      // W01/X01: after the owner SetShape write
+    AfterPayloadWrite = 1,         // W02/X02: after the real payload write
+    AfterPayloadBoundary = 2,      // W03: payload written, before first binding
+    AfterFirstSourceBinding = 3,   // W04/X03: after the first source Select
+    AfterTreatmentAttribute = 4,   // W05/X04: after the R2 attribute write
+    AfterSecondSourceBinding = 5,  // W06/X05: after the second source Select
+    GraphReader = 6,               // R01
+    GraphValuePresence = 7,        // R02
+    GraphBytes = 8,                // R03
+    GraphSourceCount = 9,          // R04
+    TreatmentReader = 10,          // R05
+    TreatmentPresence = 11,        // R06
+    TreatmentBytes = 12,           // R07
+    TreatmentBase = 13,            // R08
+    TreatmentCurrentBinding = 14,  // R09
+    WholeR2Validation = 15,        // R10
+    OperandEqualityFirst = 16,     // R11
+    OperandEqualitySecond = 17,    // R12
+    AfterSideCapture = 18,         // R13: captured, before publication
+    AfterCaptureBeforePublish = 19 // X06: afterCaptured, before publish
+};
+
+enum class AuthoredBooleanFaultDelivery : std::uint8_t {
+    ReturnFalse = 0,
+    ThrowStandardFailure = 1,
+};
+
+struct AuthoredBooleanFaultReceipt final {
+    AuthoredBooleanFaultSite site = AuthoredBooleanFaultSite::AfterOwnerShapeWrite;
+    AuthoredBooleanFaultDelivery delivery = AuthoredBooleanFaultDelivery::ReturnFalse;
+    std::uint32_t hits = 0;
+};
+
+//! One-shot, test-only stage fault request bound to one armed owner. The hit
+//! receipt is recorded exactly once, only when the armed site is reached after
+//! its preceding real write or validation completed.
+class AuthoredBooleanStageFault final {
+public:
+    AuthoredBooleanStageFault(AuthoredBooleanFaultSite site,
+        AuthoredBooleanFaultDelivery delivery) noexcept
+        : site_(site), delivery_(delivery) {}
+    AuthoredBooleanFaultSite site() const noexcept { return site_; }
+    AuthoredBooleanFaultDelivery delivery() const noexcept { return delivery_; }
+    bool consumed() const noexcept { return consumed_; }
+    const AuthoredBooleanFaultReceipt& receipt() const noexcept { return receipt_; }
+    bool consumeAt(AuthoredBooleanFaultSite at) noexcept {
+        if (consumed_ || at != site_) return false;
+        consumed_ = true;
+        receipt_.site = site_;
+        receipt_.delivery = delivery_;
+        receipt_.hits = 1;
+        return true;
+    }
+private:
+    AuthoredBooleanFaultSite site_;
+    AuthoredBooleanFaultDelivery delivery_;
+    bool consumed_ = false;
+    AuthoredBooleanFaultReceipt receipt_;
+};
+
+struct AuthoredBooleanNamingRow final {
+    std::string labelEntry;
+    Standard_Integer version = 0;
+};
+
+//! Read-only document observation for the fault proof. Every naming row is
+//! read from the live TNaming attributes; never a companion's saved values.
+struct AuthoredBooleanObservation final {
+    std::vector<AuthoredBooleanNamingRow> naming;
+    Standard_Integer availableUndos = -1;
+    Standard_Integer availableRedos = -1;
+    bool openCommand = false;
+    bool pendingCompanion = false;
+    bool pendingAfterCaptured = false;
+    std::size_t finalizedCompanions = 0;
+};
+
+} // namespace debug
+#endif
 
 enum class ApplyOutcome : std::uint8_t {
     Committed = 0, Unchanged, Refused, Cancelled, OutcomeUnknown,
@@ -121,6 +209,15 @@ public:
     //! Arms the existing native-opening close probe only for this exact current,
     //! unused issuer. Repeated, stale, cancelled and recovery calls fail closed.
     bool debugReportNextCloseUnproven() noexcept;
+    //! SAB-N1: arms the one-shot authored-Boolean post-write stage fault for
+    //! this exact current, unprepared issuer. Repeated, stale, cancelled,
+    //! recovery and invalid-site requests fail closed. The armed state is
+    //! bound to this opening and cleared on consumption, cancel or disposal.
+    bool debugArmAuthoredBooleanStageFault(debug::AuthoredBooleanFaultSite site,
+        debug::AuthoredBooleanFaultDelivery delivery) noexcept;
+    //! Read-only hit receipt of the fault armed on this issuer, if any.
+    bool debugAuthoredBooleanStageFaultReceipt(
+        debug::AuthoredBooleanFaultReceipt& receipt) const noexcept;
 #endif
 
 private:

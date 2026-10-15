@@ -85,6 +85,74 @@ __attribute__((objc_subclassing_restricted))
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+#if DEBUG
+//! SAB-N1 fixed post-write fault sites for the authored-Boolean stage. The
+//! values mirror the native core3d::authored_parameter::debug site enum and
+//! are the test contract: never renumber or reuse them.
+typedef NS_ENUM(NSInteger, Core3DDebugAuthoredBooleanFaultSite) {
+    Core3DDebugAuthoredBooleanFaultSiteAfterOwnerShapeWrite = 0,
+    Core3DDebugAuthoredBooleanFaultSiteAfterPayloadWrite = 1,
+    Core3DDebugAuthoredBooleanFaultSiteAfterPayloadBoundary = 2,
+    Core3DDebugAuthoredBooleanFaultSiteAfterFirstSourceBinding = 3,
+    Core3DDebugAuthoredBooleanFaultSiteAfterTreatmentAttribute = 4,
+    Core3DDebugAuthoredBooleanFaultSiteAfterSecondSourceBinding = 5,
+    Core3DDebugAuthoredBooleanFaultSiteGraphReader = 6,
+    Core3DDebugAuthoredBooleanFaultSiteGraphValuePresence = 7,
+    Core3DDebugAuthoredBooleanFaultSiteGraphBytes = 8,
+    Core3DDebugAuthoredBooleanFaultSiteGraphSourceCount = 9,
+    Core3DDebugAuthoredBooleanFaultSiteTreatmentReader = 10,
+    Core3DDebugAuthoredBooleanFaultSiteTreatmentPresence = 11,
+    Core3DDebugAuthoredBooleanFaultSiteTreatmentBytes = 12,
+    Core3DDebugAuthoredBooleanFaultSiteTreatmentBase = 13,
+    Core3DDebugAuthoredBooleanFaultSiteTreatmentCurrentBinding = 14,
+    Core3DDebugAuthoredBooleanFaultSiteWholeR2Validation = 15,
+    Core3DDebugAuthoredBooleanFaultSiteOperandEqualityFirst = 16,
+    Core3DDebugAuthoredBooleanFaultSiteOperandEqualitySecond = 17,
+    Core3DDebugAuthoredBooleanFaultSiteAfterSideCapture = 18,
+    Core3DDebugAuthoredBooleanFaultSiteAfterCaptureBeforePublish = 19,
+};
+
+typedef NS_ENUM(NSInteger, Core3DDebugAuthoredBooleanFaultDelivery) {
+    Core3DDebugAuthoredBooleanFaultDeliveryReturnFalse = 0,
+    Core3DDebugAuthoredBooleanFaultDeliveryThrowStandardFailure = 1,
+};
+
+//! Immutable one-shot hit receipt of an armed authored-Boolean stage fault.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DDebugAuthoredBooleanFaultReceipt : NSObject
+@property(nonatomic,readonly) Core3DDebugAuthoredBooleanFaultSite site;
+@property(nonatomic,readonly) Core3DDebugAuthoredBooleanFaultDelivery delivery;
+@property(nonatomic,readonly) NSUInteger hitCount;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+//! One exact current TNaming (labelEntry, version) row read from the live
+//! document; never a companion's saved before-value.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DDebugTreatmentNamingVersionRow : NSObject
+@property(nonatomic,copy,readonly) NSString *labelEntry;
+@property(nonatomic,readonly) NSInteger version;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+//! Immutable read-only observation of one host document for the SAB-N1 fault
+//! proof: the exact naming-version vector plus history and companion counters.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DDebugAuthoredBooleanObservation : NSObject
+@property(nonatomic,copy,readonly) NSArray<Core3DDebugTreatmentNamingVersionRow *> *namingVersions;
+@property(nonatomic,readonly) NSInteger availableUndos;
+@property(nonatomic,readonly) NSInteger availableRedos;
+@property(nonatomic,readonly) BOOL hasOpenCommand;
+@property(nonatomic,readonly) BOOL hasPendingCompanion;
+@property(nonatomic,readonly) BOOL pendingCompanionAfterCaptured;
+@property(nonatomic,readonly) NSUInteger finalizedCompanionCount;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+#endif
+
 @interface Core3DViewController (AuthoredParameterOpening)
 //! Capture requires the exact selected object and caller-observed scene. It is
 //! read-only and refuses every unsupported carrier rather than dropping data.
@@ -135,6 +203,27 @@ __attribute__((objc_subclassing_restricted))
 - (BOOL)debugReportNextAuthoredParameterCloseUnproven:
     (Core3DAuthoredParameterOpening *)opening
     NS_SWIFT_NAME(debugReportNextAuthoredParameterCloseUnproven(_:));
+//! SAB-N1: arms the one-shot post-write stage fault through this host's exact
+//! current authored opening. Foreign, stale, cancelled, recovery, repeated and
+//! invalid-site requests return NO; no transaction, outcome or recovery state
+//! is fabricated and the armed state is cleared on consumption, cancel or
+//! disposal.
+- (BOOL)debugArmAuthoredBooleanStageFault:(Core3DAuthoredParameterOpening *)opening
+    site:(Core3DDebugAuthoredBooleanFaultSite)site
+    delivery:(Core3DDebugAuthoredBooleanFaultDelivery)delivery
+    NS_SWIFT_NAME(debugArmAuthoredBooleanStageFault(_:site:delivery:));
+//! Read-only hit receipt for the fault armed on this exact opening; nil when
+//! no fault was armed or the armed state was cleared by cancel or disposal.
+- (Core3DDebugAuthoredBooleanFaultReceipt *_Nullable)debugAuthoredBooleanStageFaultReceipt:
+    (Core3DAuthoredParameterOpening *)opening
+    NS_SWIFT_NAME(debugAuthoredBooleanStageFaultReceipt(_:));
+//! Read-only observation of this host's document for one entity: exact current
+//! TNaming (labelEntry, version) rows plus undo/redo depths, open-command
+//! state and the companion census. Not bound to any live opening, because an
+//! abort may stale the issuer; nil when the observation itself fails.
+- (Core3DDebugAuthoredBooleanObservation *_Nullable)debugObserveAuthoredBooleanStateForEntityIdentifier:
+    (NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugObserveAuthoredBooleanState(entityIdentifier:));
 #endif
 @end
 

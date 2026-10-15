@@ -288,15 +288,41 @@ Standard_Boolean OcctDocument::BeginAuthoredParameterTransaction(
 
 Standard_Boolean OcctDocument::StageAuthoredBooleanPair(
     const core3d::authored_parameter::Capture& capture,
-    const core3d::authored_boolean::Candidate& candidate) noexcept {
+    const core3d::authored_boolean::Candidate& candidate
+#if DEBUG
+    , core3d::authored_parameter::debug::AuthoredBooleanStageFault* debugFault
+#endif
+    ) noexcept {
     namespace et = core3d::retained_edge_treatment;
     namespace r2 = core3d::retained_edge_treatment::r2;
+#if DEBUG
+    namespace abd = core3d::authored_parameter::debug;
+    // SAB-N1 one-shot post-write fault boundary: fires only at the armed site
+    // after the preceding real write or validation completed, then stays
+    // consumed. With no armed fault the predicates and call order are exactly
+    // the production ones.
+    const auto fireFault = [debugFault](abd::AuthoredBooleanFaultSite site) {
+        if (!debugFault || !debugFault->consumeAt(site)) return false;
+        if (debugFault->delivery() == abd::AuthoredBooleanFaultDelivery::ThrowStandardFailure)
+            throw Standard_Failure("SAB-N1 authored Boolean stage fault");
+        return true;
+    };
+#endif
+    std::unique_ptr<core3d::treatment_history::Companion> companion;
+    bool beforeCaptured = false;
+    const auto fail = [this, &companion, &beforeCaptured]() noexcept {
+        if (beforeCaptured && companion && !myPendingTreatmentCompanion) {
+            companion->afterCaptured = false;
+            myPendingTreatmentCompanion = std::move(companion);
+        }
+        return Standard_False;
+    };
     try {
         if (![NSThread isMainThread] || myOcafDoc.IsNull()
             || !myOcafDoc->HasOpenCommand() || capture.document_ != myOcafDoc
             || capture.data_ != myOcafDoc->GetData()
             || !capture.snapshot_ || !candidate.composite
-            || candidate.untreated.IsNull() || candidate.treated.IsNull()) return Standard_False;
+            || candidate.untreated.IsNull() || candidate.treated.IsNull()) return fail();
         const auto& original = *capture.snapshot_;
         const auto* retained = std::get_if<r2::RetainedBooleanBase>(&original.source_);
         const auto* composite = retained
@@ -304,14 +330,14 @@ Standard_Boolean OcctDocument::StageAuthoredBooleanPair(
         if (!composite || original.ownerLabel_.IsNull() || original.sourceLabel_.IsNull()
             || candidate.composite->sourceShapes.size() != 2
             || candidate.composite->bytes == composite->canonicalPrefixBytes)
-            return Standard_False;
+            return fail();
 
         std::vector<std::uint8_t> graphBytes, treatmentBytes;
         et::Refusal refusal = et::Refusal::StageFailed;
         if (!core3d::composite_recipe::Encode(candidate.composite->definition, graphBytes)
             || graphBytes != candidate.composite->bytes
             || !r2::Encode(candidate.treatment, treatmentBytes, refusal)
-            || treatmentBytes != candidate.treatmentBytes) return Standard_False;
+            || treatmentBytes != candidate.treatmentBytes) return fail();
         et::ReplayBudget verification = candidate.budget;
         TopoDS_Shape verified;
         const std::atomic_bool neverCancelled(false);
@@ -323,9 +349,9 @@ Standard_Boolean OcctDocument::StageAuthoredBooleanPair(
                 verification, neverCancelled,
                 core3d::retained_topology_budget::Site::C28CompanionCapture)
                 != core3d::retained_topology_budget::WalkStatus::Completed)
-            return Standard_False;
+            return fail();
 
-        auto companion = std::make_unique<core3d::treatment_history::Companion>();
+        companion = std::make_unique<core3d::treatment_history::Companion>();
         companion->data = myOcafDoc->GetData();
         companion->ownerLabel = original.ownerLabel_;
         TCollection_AsciiString ownerEntry;
@@ -337,48 +363,142 @@ Standard_Boolean OcctDocument::StageAuthoredBooleanPair(
                 companion->before, companion->sourceBytesBefore,
                 companion->syetBefore, companion->syetBytesBefore)
             || !CaptureTreatmentTransientFlags(original.current_, companion->flagsBefore))
-            return Standard_False;
+            return fail();
+        beforeCaptured = true;
 
         const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
-        if (shapes.IsNull()) return Standard_False;
+        if (shapes.IsNull()) return fail();
         shapes->SetShape(original.ownerLabel_, candidate.treated);
-        if (!StagePartBooleanPayload(original.sourceLabel_, candidate.composite))
-            return Standard_False;
+#if DEBUG
+        // SAB-N1 W01/X01: the owner shape write completed.
+        if (fireFault(abd::AuthoredBooleanFaultSite::AfterOwnerShapeWrite))
+            return fail();
+#endif
+        if (!StagePartBooleanPayload(original.sourceLabel_, candidate.composite)
+#if DEBUG
+            // SAB-N1 W02/X02: the real payload write completed; the armed
+            // fault forces this boundary's existing failure exit.
+            || fireFault(abd::AuthoredBooleanFaultSite::AfterPayloadWrite)
+#endif
+            )
+            return fail();
+#if DEBUG
+        // SAB-N1 W03: independent boundary after the successful payload write,
+        // before the first source binding.
+        if (fireFault(abd::AuthoredBooleanFaultSite::AfterPayloadBoundary))
+            return fail();
+#endif
         TNaming_Builder(original.sourceLabel_).Select(candidate.treated, candidate.treated);
+#if DEBUG
+        // SAB-N1 W04/X03: the first source binding completed.
+        if (fireFault(abd::AuthoredBooleanFaultSite::AfterFirstSourceBinding))
+            return fail();
+#endif
         auto treatment = std::make_shared<et::PayloadR2>();
         treatment->definition = candidate.treatment;
         treatment->bytes = candidate.treatmentBytes;
         treatment->base = candidate.untreated;
         et::Attribute::SetR2(original.sourceLabel_, treatment);
+#if DEBUG
+        // SAB-N1 W05/X04: the treatment attribute write completed.
+        if (fireFault(abd::AuthoredBooleanFaultSite::AfterTreatmentAttribute))
+            return fail();
+#endif
         TNaming_Builder(original.sourceLabel_).Select(candidate.treated, candidate.treated);
+#if DEBUG
+        // SAB-N1 W06/X05: the second source binding completed.
+        if (fireFault(abd::AuthoredBooleanFaultSite::AfterSecondSourceBinding))
+            return fail();
+#endif
 
         core3d::composite_recipe::Record graphReadback;
         std::optional<et::RecordR2> treatmentReadback;
-        if (!core3d::composite_recipe::Read(myOcafDoc, original.ownerLabel_, graphReadback))
-            return Standard_False;
-        if (!graphReadback.value) return Standard_False;
-        if (graphReadback.value->bytes != candidate.composite->bytes) return Standard_False;
+        if (!core3d::composite_recipe::Read(myOcafDoc, original.ownerLabel_, graphReadback)
+#if DEBUG
+            // SAB-N1 R01: the production read stays intact; the armed fault
+            // adds a false result only at this boundary.
+            || fireFault(abd::AuthoredBooleanFaultSite::GraphReader)
+#endif
+            )
+            return fail();
+        if (!graphReadback.value
+#if DEBUG
+            || fireFault(abd::AuthoredBooleanFaultSite::GraphValuePresence)
+#endif
+            ) return fail();
+        if (graphReadback.value->bytes != candidate.composite->bytes
+#if DEBUG
+            || fireFault(abd::AuthoredBooleanFaultSite::GraphBytes)
+#endif
+            ) return fail();
         if (graphReadback.value->sourceShapes.size()
-            != candidate.composite->sourceShapes.size()) return Standard_False;
-        if (!et::ReadR2(myOcafDoc, original.ownerLabel_, treatmentReadback, refusal))
-            return Standard_False;
-        if (!treatmentReadback) return Standard_False;
-        if (treatmentReadback->value->bytes != candidate.treatmentBytes) return Standard_False;
-        if (!treatmentReadback->value->base.IsEqual(candidate.untreated)) return Standard_False;
-        if (!treatmentReadback->current.IsEqual(candidate.treated)) return Standard_False;
-        if (!ValidateRetainedEdgeTreatmentsR2(refusal)) return Standard_False;
-        for (std::size_t index = 0; index < candidate.composite->sourceShapes.size(); ++index)
+            != candidate.composite->sourceShapes.size()
+#if DEBUG
+            || fireFault(abd::AuthoredBooleanFaultSite::GraphSourceCount)
+#endif
+            ) return fail();
+        if (!et::ReadR2(myOcafDoc, original.ownerLabel_, treatmentReadback, refusal)
+#if DEBUG
+            || fireFault(abd::AuthoredBooleanFaultSite::TreatmentReader)
+#endif
+            )
+            return fail();
+        if (!treatmentReadback
+#if DEBUG
+            || fireFault(abd::AuthoredBooleanFaultSite::TreatmentPresence)
+#endif
+            ) return fail();
+        if (treatmentReadback->value->bytes != candidate.treatmentBytes
+#if DEBUG
+            || fireFault(abd::AuthoredBooleanFaultSite::TreatmentBytes)
+#endif
+            ) return fail();
+        if (!treatmentReadback->value->base.IsEqual(candidate.untreated)
+#if DEBUG
+            || fireFault(abd::AuthoredBooleanFaultSite::TreatmentBase)
+#endif
+            ) return fail();
+        if (!treatmentReadback->current.IsEqual(candidate.treated)
+#if DEBUG
+            || fireFault(abd::AuthoredBooleanFaultSite::TreatmentCurrentBinding)
+#endif
+            ) return fail();
+        if (!ValidateRetainedEdgeTreatmentsR2(refusal)
+#if DEBUG
+            || fireFault(abd::AuthoredBooleanFaultSite::WholeR2Validation)
+#endif
+            ) return fail();
+        for (std::size_t index = 0; index < candidate.composite->sourceShapes.size(); ++index) {
             if (!graphReadback.value->sourceShapes[index].IsEqual(
-                    candidate.composite->sourceShapes[index])) return Standard_False;
+                    candidate.composite->sourceShapes[index])
+#if DEBUG
+                || fireFault(index == 0
+                    ? abd::AuthoredBooleanFaultSite::OperandEqualityFirst
+                    : abd::AuthoredBooleanFaultSite::OperandEqualitySecond)
+#endif
+                ) return fail();
+        }
 
         companion->ownerShapeAfter = candidate.treated;
         if (!CaptureTreatmentCompanionSide(myOcafDoc, original.ownerLabel_,
                 companion->after, companion->sourceBytesAfter,
-                companion->syetAfter, companion->syetBytesAfter)) return Standard_False;
+                companion->syetAfter, companion->syetBytesAfter)) return fail();
+#if DEBUG
+        // SAB-N1 R13: the after-side capture completed; the armed fault forces
+        // its failure return before publication.
+        if (fireFault(abd::AuthoredBooleanFaultSite::AfterSideCapture))
+            return fail();
+#endif
         companion->afterCaptured = true;
+#if DEBUG
+        // SAB-N1 X06: the after-capture is complete; a thrown fault still
+        // reaches the existing stage catch before the companion is published.
+        if (fireFault(abd::AuthoredBooleanFaultSite::AfterCaptureBeforePublish))
+            return fail();
+#endif
         myPendingTreatmentCompanion = std::move(companion);
         return Standard_True;
-    } catch (...) { return Standard_False; }
+    } catch (...) { return fail(); }
 }
 
 std::shared_ptr<const core3d::retained_edge_treatment::r2::MigrationCapture>
@@ -20502,6 +20622,39 @@ Standard_Boolean OcctDocument::SettleTreatmentHistoryCompanionOnPrior() noexcept
         return Standard_True;
     } catch (...) { return Standard_False; }
 }
+
+#if DEBUG
+Standard_Boolean OcctDocument::DebugObserveAuthoredBooleanState(
+    const TDF_Label& owner,
+    core3d::authored_parameter::debug::AuthoredBooleanObservation& observation)
+    const noexcept {
+    namespace abd = core3d::authored_parameter::debug;
+    observation = abd::AuthoredBooleanObservation();
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || owner.IsNull()
+            || owner.Data() != myOcafDoc->GetData()) return Standard_False;
+        // The same current-TNaming subtree capture the companion uses, exposed
+        // read-only as (labelEntry, version) rows; never the saved before
+        // values of any companion.
+        std::vector<treatment_history::NamingState> states;
+        if (!CaptureTreatmentSubtreeNaming(owner, states) || states.empty())
+            return Standard_False;
+        for (const auto& state : states)
+            observation.naming.push_back({state.labelEntry, state.version});
+        observation.availableUndos = myOcafDoc->GetAvailableUndos();
+        observation.availableRedos = myOcafDoc->GetAvailableRedos();
+        observation.openCommand = myOcafDoc->HasOpenCommand();
+        observation.pendingCompanion = myPendingTreatmentCompanion != nullptr;
+        observation.pendingAfterCaptured = observation.pendingCompanion
+            && myPendingTreatmentCompanion->afterCaptured;
+        observation.finalizedCompanions = myTreatmentHistoryCompanions.size();
+        return Standard_True;
+    } catch (...) {
+        observation = abd::AuthoredBooleanObservation();
+        return Standard_False;
+    }
+}
+#endif
 
 // Engaged only for the matching live TDF delta, after real OCAF history has
 // been applied. Validates that the captured semantic state (label/attribute
