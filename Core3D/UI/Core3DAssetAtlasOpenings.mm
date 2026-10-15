@@ -28,12 +28,20 @@
 #include "../OCCTKit/NativeOpeningSurfaceProbe.hxx"
 #include "../OCCTKit/ProfilePersistence.hxx"
 #include "../OCCTKit/RetainedPartBoolean.hxx"
+#include "../OCCTKit/RectangularLoftSolid.hxx"
 #include <BRep_Builder.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepCheck_Analyzer.hxx>
 #include <BRep_CurveOnClosedSurface.hxx>
 #include <BRep_CurveOnSurface.hxx>
 #include <BRep_ListIteratorOfListOfCurveRepresentation.hxx>
 #include <BRep_TEdge.hxx>
 #include <BRepTools.hxx>
+#include <BinTools.hxx>
+#include <BinTools_FormatVersion.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
@@ -54,11 +62,21 @@
 #include <NCollection_Buffer.hxx>
 #include <NCollection_BaseAllocator.hxx>
 #include <Geom2d_Circle.hxx>
+#include <Geom2d_BSplineCurve.hxx>
+#include <Geom2d_Ellipse.hxx>
 #include <Geom2d_Line.hxx>
 #include <Geom2d_TrimmedCurve.hxx>
+#include <Geom_Ellipse.hxx>
+#include <Geom_Plane.hxx>
+#include <Geom_TrimmedCurve.hxx>
 #include <GeomAdaptor_Surface.hxx>
+#include <TColStd_IndexedMapOfTransient.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_LocationSet.hxx>
 #include <CommonCrypto/CommonDigest.h>
+#include <algorithm>
 #include <functional>
+#include <iomanip>
 #include <locale>
 #include <sstream>
 #include <stdexcept>
@@ -744,6 +762,439 @@ PlanarRepresentationCensus CensusStoredPlanar(const TopoDS_Shape& shape) {
     return result;
 }
 
+struct PeriodicEllipseCensus final {
+    int stored = 0, ellipses = 0, splines = 0, shifted = 0;
+    bool correspondence = true;
+    double first = 0, last = 0, centerX = 0, centerY = 0;
+    double majorRadius = 0, minorRadius = 0;
+};
+
+PeriodicEllipseCensus CensusPeriodicEllipses(const TopoDS_Shape& shape) {
+    PeriodicEllipseCensus result;
+    const double shiftedFirst = 5 * std::acos(-1.0) / 2;
+    const double shiftedLast = 3 * std::acos(-1.0);
+    for (TopExp_Explorer faces(shape, TopAbs_FACE); faces.More(); faces.Next()) {
+        const TopoDS_Face face = TopoDS::Face(faces.Current());
+        TopLoc_Location faceLocation;
+        const Handle(Geom_Surface) surface = BRep_Tool::Surface(face, faceLocation);
+        if (surface.IsNull()
+            || GeomAdaptor_Surface(surface).GetType() != GeomAbs_Plane) continue;
+        for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More(); edges.Next()) {
+            const TopoDS_Edge edge = TopoDS::Edge(edges.Current());
+            TopLoc_Location curveLocation;
+            Standard_Real curveFirst = 0, curveLast = 0;
+            const Handle(Geom_Curve) curve3d = BRep_Tool::Curve(
+                edge, curveLocation, curveFirst, curveLast);
+            if (curve3d.IsNull()) continue;
+            Handle(Geom_Curve) basis3d = curve3d;
+            if (basis3d->DynamicType() == STANDARD_TYPE(Geom_TrimmedCurve))
+                basis3d = Handle(Geom_TrimmedCurve)::DownCast(basis3d)->BasisCurve();
+            if (basis3d->DynamicType() != STANDARD_TYPE(Geom_Ellipse)) continue;
+            const TopLoc_Location relative =
+                faceLocation.Predivided(edge.Location());
+            const Handle(BRep_TEdge) implementation =
+                Handle(BRep_TEdge)::DownCast(edge.TShape());
+            if (implementation.IsNull()) continue;
+            for (BRep_ListIteratorOfListOfCurveRepresentation it(
+                    implementation->Curves()); it.More(); it.Next()) {
+                const Handle(BRep_CurveRepresentation)& representation = it.Value();
+                if (representation.IsNull()
+                    || !representation->IsCurveOnSurface(surface, relative)) continue;
+                const Handle(BRep_CurveOnSurface) onSurface =
+                    Handle(BRep_CurveOnSurface)::DownCast(representation);
+                if (onSurface.IsNull()) continue;
+                ++result.stored;
+                Handle(Geom2d_Curve) pcurve = onSurface->PCurve();
+                if (pcurve.IsNull()) continue;
+                if (pcurve->DynamicType() == STANDARD_TYPE(Geom2d_TrimmedCurve))
+                    pcurve = Handle(Geom2d_TrimmedCurve)::DownCast(pcurve)->BasisCurve();
+                if (pcurve->DynamicType() == STANDARD_TYPE(Geom2d_BSplineCurve)) {
+                    ++result.splines;
+                    continue;
+                }
+                const Handle(Geom2d_Ellipse) ellipse =
+                    Handle(Geom2d_Ellipse)::DownCast(pcurve);
+                if (ellipse.IsNull()) continue;
+                ++result.ellipses;
+                result.first = onSurface->First();
+                result.last = onSurface->Last();
+                result.centerX = ellipse->Location().X();
+                result.centerY = ellipse->Location().Y();
+                result.majorRadius = ellipse->MajorRadius();
+                result.minorRadius = ellipse->MinorRadius();
+                if (Abs(result.first - shiftedFirst) <= Precision::PConfusion()
+                    && Abs(result.last - shiftedLast) <= Precision::PConfusion())
+                    ++result.shifted;
+                for (const double parameter : {result.first,
+                        (result.first + result.last) / 2, result.last}) {
+                    gp_Pnt fromCurve = curve3d->Value(parameter);
+                    fromCurve.Transform(curveLocation.Transformation());
+                    const gp_Pnt2d uv = pcurve->Value(parameter);
+                    gp_Pnt fromSurface = surface->Value(uv.X(), uv.Y());
+                    fromSurface.Transform(faceLocation.Transformation());
+                    if (fromCurve.SquareDistance(fromSurface)
+                        > Precision::SquareConfusion()) result.correspondence = false;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+TopoDS_Shape PeriodicEllipseFixture(double first, double last) {
+    const Handle(Geom_Ellipse) ellipse = new Geom_Ellipse(
+        gp_Elips(gp_Ax2(gp::Origin(), gp::DZ()), 4, 2));
+    BRepBuilderAPI_MakeEdge arc(ellipse, first, last);
+    const gp_Pnt center = gp::Origin();
+    BRepBuilderAPI_MakeEdge toCenter(ellipse->Value(last), center);
+    BRepBuilderAPI_MakeEdge fromCenter(center, ellipse->Value(first));
+    if (!arc.IsDone() || !toCenter.IsDone() || !fromCenter.IsDone())
+        return {};
+    BRepBuilderAPI_MakeWire wire;
+    wire.Add(arc.Edge());
+    wire.Add(toCenter.Edge());
+    wire.Add(fromCenter.Edge());
+    if (!wire.IsDone()) return {};
+    BRepBuilderAPI_MakeFace face(gp_Pln(gp::Origin(), gp::DZ()),
+        wire.Wire(), Standard_False);
+    if (!face.IsDone()) return {};
+    TopoDS_Face result = face.Face();
+    TopLoc_Location faceLocation;
+    const Handle(Geom_Surface) surface = BRep_Tool::Surface(result, faceLocation);
+    if (surface.IsNull()) return {};
+    for (TopExp_Explorer edges(result, TopAbs_EDGE); edges.More(); edges.Next()) {
+        const TopoDS_Edge edge = TopoDS::Edge(edges.Current());
+        TopLoc_Location curveLocation;
+        Standard_Real curveFirst = 0, curveLast = 0;
+        Handle(Geom_Curve) curve3d = BRep_Tool::Curve(
+            edge, curveLocation, curveFirst, curveLast);
+        if (curve3d.IsNull()) continue;
+        if (curve3d->DynamicType() == STANDARD_TYPE(Geom_TrimmedCurve))
+            curve3d = Handle(Geom_TrimmedCurve)::DownCast(curve3d)->BasisCurve();
+        if (curve3d->DynamicType() != STANDARD_TYPE(Geom_Ellipse)) continue;
+        const TopLoc_Location relative =
+            faceLocation.Predivided(edge.Location());
+        const Handle(BRep_TEdge) implementation =
+            Handle(BRep_TEdge)::DownCast(edge.TShape());
+        if (implementation.IsNull()) return {};
+        BRep_ListOfCurveRepresentation& curves = implementation->ChangeCurves();
+        for (BRep_ListIteratorOfListOfCurveRepresentation it(curves);
+             it.More();) {
+            const Handle(BRep_CurveRepresentation) representation = it.Value();
+            if (!representation.IsNull()
+                && representation->IsCurveOnSurface(surface, relative))
+                curves.Remove(it);
+            else it.Next();
+        }
+        const Handle(Geom2d_Ellipse) pcurve = new Geom2d_Ellipse(
+            gp_Elips2d(gp_Ax2d(gp::Origin2d(), gp::DX2d()), 4, 2));
+        Handle(BRep_CurveOnSurface) stored = new BRep_CurveOnSurface(
+            pcurve, surface, relative);
+        stored->SetRange(first, last);
+        curves.Append(stored);
+        BRep_Builder topology;
+        topology.Range(edge, first, last);
+        TopoDS_Vertex start, finish;
+        TopExp::Vertices(TopoDS::Edge(edge.Oriented(TopAbs_FORWARD)),
+            start, finish);
+        if (!start.IsNull())
+            topology.UpdateVertex(start, first, edge, Precision::Confusion());
+        if (!finish.IsNull())
+            topology.UpdateVertex(finish, last, edge, Precision::Confusion());
+        implementation->Modified(Standard_True);
+        return result;
+    }
+    return {};
+}
+
+NSDictionary<NSString *, id> *PeriodicEllipseScaleControl(
+    double first, double last) {
+    const TopoDS_Shape source = PeriodicEllipseFixture(first, last);
+    gp_Trsf scale;
+    scale.SetScale(gp::Origin(), 1000);
+    TopoDS_Shape scaled;
+    const bool scaleBuilt = !source.IsNull()
+        && core3d::analytic_boolean_scale::Scale(source, scale, scaled);
+    const auto before = CensusPeriodicEllipses(source);
+    const auto after = CensusPeriodicEllipses(scaled);
+    return @{ @"scaleBuilt": @(scaleBuilt),
+        @"sourceStored": @(before.stored), @"sourceEllipses": @(before.ellipses),
+        @"sourceFirst": @(before.first), @"sourceLast": @(before.last),
+        @"sourceCenterX": @(before.centerX), @"sourceCenterY": @(before.centerY),
+        @"sourceMajorRadius": @(before.majorRadius),
+        @"sourceMinorRadius": @(before.minorRadius),
+        @"sourceCorrespondence": @(before.correspondence),
+        @"outputStored": @(after.stored), @"outputEllipses": @(after.ellipses),
+        @"outputSplines": @(after.splines), @"outputFirst": @(after.first),
+        @"outputLast": @(after.last), @"outputCenterX": @(after.centerX),
+        @"outputCenterY": @(after.centerY),
+        @"outputMajorRadius": @(after.majorRadius),
+        @"outputMinorRadius": @(after.minorRadius),
+        @"outputCorrespondence": @(after.correspondence) };
+}
+
+NSString *ShapeSHA256(const TopoDS_Shape& shape, NSData **bytesOut);
+
+struct V3Difference final {
+    int count = 0, line = 0, geometryIndex = 0, geometryType = 0;
+    std::string section, beforeLine, afterLine;
+    std::string beforeRepresentations, afterRepresentations;
+    std::string beforeFlags, afterFlags;
+};
+
+std::vector<std::string> V3Lines(const std::string& text) {
+    std::vector<std::string> result;
+    std::istringstream stream(text);
+    for (std::string line; std::getline(stream, line);) result.push_back(line);
+    return result;
+}
+
+std::string LimitedLine(const std::string& value) {
+    return value.substr(0, std::min<std::size_t>(value.size(), 240));
+}
+
+struct RepresentationIndices final {
+    TColStd_IndexedMapOfTransient surfaces;
+    TopTools_LocationSet locations;
+};
+
+RepresentationIndices IndexRepresentations(const TopoDS_Shape& shape) {
+    RepresentationIndices result;
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+    for (int index = 1; index <= edges.Extent(); ++index) {
+        const Handle(BRep_TEdge) edge = Handle(BRep_TEdge)::DownCast(
+            TopoDS::Edge(edges(index)).TShape());
+        if (edge.IsNull()) continue;
+        for (BRep_ListIteratorOfListOfCurveRepresentation it(edge->Curves());
+             it.More(); it.Next()) {
+            const Handle(BRep_CurveRepresentation)& representation = it.Value();
+            if (representation.IsNull()) continue;
+            result.locations.Add(representation->Location());
+            if (representation->IsCurveOnSurface()
+                && !representation->Surface().IsNull())
+                result.surfaces.Add(representation->Surface());
+        }
+    }
+    return result;
+}
+
+std::string RepresentationList(const TopoDS_Edge& edge,
+                               const RepresentationIndices& indices) {
+    const Handle(BRep_TEdge) implementation =
+        Handle(BRep_TEdge)::DownCast(edge.TShape());
+    if (implementation.IsNull()) return "null-edge";
+    std::ostringstream out;
+    out << std::hexfloat;
+    int ordinal = 0;
+    for (BRep_ListIteratorOfListOfCurveRepresentation it(
+            implementation->Curves()); it.More(); it.Next(), ++ordinal) {
+        if (ordinal) out << ';';
+        const Handle(BRep_CurveRepresentation)& representation = it.Value();
+        if (representation.IsNull()) { out << ordinal << ":null"; continue; }
+        out << ordinal << ':';
+        if (representation->IsCurve3D()) out << "c3";
+        else if (representation->IsCurveOnClosedSurface()) out << "closed";
+        else if (representation->IsCurveOnSurface()) out << "cos";
+        else if (representation->IsRegularity()) out << "reg";
+        else if (representation->IsPolygon3D()) out << "p3";
+        else if (representation->IsPolygonOnClosedTriangulation()) out << "pct";
+        else if (representation->IsPolygonOnTriangulation()) out << "pt";
+        else if (representation->IsPolygonOnClosedSurface()) out << "pcs";
+        else if (representation->IsPolygonOnSurface()) out << "ps";
+        else out << "other";
+        out << ",l" << indices.locations.Index(representation->Location());
+        const Handle(BRep_CurveOnSurface) onSurface =
+            Handle(BRep_CurveOnSurface)::DownCast(representation);
+        if (!onSurface.IsNull()) {
+            out << ",s" << indices.surfaces.FindIndex(onSurface->Surface())
+                << ",r=" << onSurface->First() << ',' << onSurface->Last();
+            gp_Pnt2d first, last;
+            onSurface->UVPoints(first, last);
+            out << ",uv=" << first.X() << ',' << first.Y() << ','
+                << last.X() << ',' << last.Y();
+        }
+    }
+    return LimitedLine(out.str());
+}
+
+std::string EdgeFlags(const TopoDS_Edge& edge) {
+    const Handle(BRep_TEdge) implementation =
+        Handle(BRep_TEdge)::DownCast(edge.TShape());
+    std::ostringstream out;
+    out << "F" << edge.Free() << " M" << edge.Modified()
+        << " C" << edge.Checked() << " O" << edge.Orientable()
+        << " Cl" << edge.Closed() << " I" << edge.Infinite()
+        << " Cv" << edge.Convex();
+    if (!implementation.IsNull())
+        out << " SR" << implementation->SameRange()
+            << " SP" << implementation->SameParameter()
+            << " D" << implementation->Degenerated();
+    out << " tol=" << std::hexfloat << BRep_Tool::Tolerance(edge);
+    return out.str();
+}
+
+V3Difference CompareV3(const TopoDS_Shape& before,
+                       const TopoDS_Shape& after) {
+    V3Difference result;
+    std::string beforeText, afterText;
+    if (!core3d::retained_part_boolean::ExactShapeBytes(before, beforeText)
+        || !core3d::retained_part_boolean::ExactShapeBytes(after, afterText))
+        return result;
+    const auto beforeLines = V3Lines(beforeText), afterLines = V3Lines(afterText);
+    const std::size_t count = std::max(beforeLines.size(), afterLines.size());
+    std::size_t first = count;
+    for (std::size_t index = 0; index < count; ++index) {
+        const std::string lhs = index < beforeLines.size() ? beforeLines[index] : "<EOF>";
+        const std::string rhs = index < afterLines.size() ? afterLines[index] : "<EOF>";
+        if (lhs != rhs) {
+            ++result.count;
+            if (first == count) first = index;
+        }
+    }
+    if (!result.count) return result;
+    result.line = int(first + 1);
+    result.beforeLine = LimitedLine(first < beforeLines.size()
+        ? beforeLines[first] : "<EOF>");
+    result.afterLine = LimitedLine(first < afterLines.size()
+        ? afterLines[first] : "<EOF>");
+    const std::array<const char *, 8> headers = {"Locations", "Curve2ds",
+        "Curves", "Polygon3D", "PolygonOnTriangulations", "Surfaces",
+        "Triangulations", "TShapes"};
+    std::size_t sectionLine = first;
+    for (std::size_t index = first + 1; index-- > 0;) {
+        const std::string& line = beforeLines[index];
+        const auto found = std::find_if(headers.begin(), headers.end(),
+            [&](const char *header) { return line.rfind(header, 0) == 0; });
+        if (found != headers.end()) {
+            result.section = *found;
+            sectionLine = index;
+            break;
+        }
+    }
+    if (result.section == "Curve2ds" || result.section == "Curves"
+        || result.section == "Surfaces") {
+        result.geometryIndex = int(first - sectionLine);
+        std::istringstream geometry(result.beforeLine);
+        geometry >> result.geometryType;
+    }
+    TopTools_IndexedMapOfShape beforeEdges, afterEdges;
+    TopExp::MapShapes(before, TopAbs_EDGE, beforeEdges);
+    TopExp::MapShapes(after, TopAbs_EDGE, afterEdges);
+    const RepresentationIndices beforeIndices = IndexRepresentations(before);
+    const RepresentationIndices afterIndices = IndexRepresentations(after);
+    const int edgeCount = std::min(beforeEdges.Extent(), afterEdges.Extent());
+    for (int index = 1; index <= edgeCount; ++index) {
+        const TopoDS_Edge beforeEdge = TopoDS::Edge(beforeEdges(index));
+        const TopoDS_Edge afterEdge = TopoDS::Edge(afterEdges(index));
+        const std::string beforeReps = RepresentationList(beforeEdge, beforeIndices);
+        const std::string afterReps = RepresentationList(afterEdge, afterIndices);
+        const std::string beforeFlags = EdgeFlags(beforeEdge);
+        const std::string afterFlags = EdgeFlags(afterEdge);
+        if (beforeReps != afterReps || beforeFlags != afterFlags) {
+            result.beforeRepresentations = beforeReps;
+            result.afterRepresentations = afterReps;
+            result.beforeFlags = beforeFlags;
+            result.afterFlags = afterFlags;
+            break;
+        }
+    }
+    return result;
+}
+
+NSDictionary<NSString *, id> *LoftBoreScaleControl(double unit) {
+    const double scale = .001 / unit;
+    core3d::rectangular_loft::Definition definition;
+    definition.loftIdentifier = 1;
+    definition.correspondence = {10, 11, 12, 13};
+    definition.dimensionMetersPerUnit = unit;
+    definition.stations = {
+        {100, {200, 201, 202, 203}, definition.correspondence,
+            0, -0.0, 0, 20 * scale, 12 * scale},
+        {103, {212, 213, 214, 215}, definition.correspondence,
+            20 * scale, -0.0, 0, 20 * scale, 12 * scale},
+        {101, {204, 205, 206, 207}, definition.correspondence,
+            60 * scale, 6 * scale, 0, 30 * scale, 20 * scale},
+        {104, {216, 217, 218, 219}, definition.correspondence,
+            100 * scale, -0.0, 0, 20 * scale, 12 * scale},
+        {102, {208, 209, 210, 211}, definition.correspondence,
+            120 * scale, -0.0, 0, 20 * scale, 12 * scale},
+    };
+    core3d::rectangular_loft::Admission admission;
+    const auto prepared = core3d::rectangular_loft::Prepare(definition, admission);
+    const std::atomic_bool stop(false);
+    core3d::rectangular_loft::SolidResult loft;
+    const auto loftStatus = core3d::rectangular_loft::Build(prepared, stop, loft);
+    core3d::analytic_boolean::Result bore;
+    auto boreStatus = core3d::analytic_boolean::Status::UnsupportedSource;
+    if (loftStatus == core3d::rectangular_loft::BuildStatus::Built) {
+        BRepBuilderAPI_Copy detached(loft.solid, Standard_True, Standard_False);
+        core3d::analytic_boolean::Recipe recipe;
+        recipe.metersPerUnit = unit;
+        recipe.operation = core3d::analytic_boolean::Operation::Difference;
+        recipe.tool.identifier = 1;
+        recipe.tool.kind = core3d::analytic_boolean::OperandKind::Cylinder;
+        recipe.tool.axis = core3d::analytic_boolean::Axis::X;
+        recipe.tool.point = {0, 6 * scale, 60 * scale};
+        recipe.tool.radius = 3 * scale;
+        boreStatus = core3d::analytic_boolean::Build(
+            detached.Shape(), recipe, stop, bore);
+    }
+    const auto periodic = CensusPeriodicEllipses(bore.solid);
+    NSString *rawDigest = ShapeSHA256(bore.solid, nullptr);
+    TopoDS_Shape reopened;
+    if (!bore.solid.IsNull()) {
+        std::ostringstream writer(std::ios::binary);
+        BinTools::Write(bore.solid, writer, Standard_False, Standard_False,
+            BinTools_FormatVersion_VERSION_4);
+        std::istringstream reader(writer.str(), std::ios::binary);
+        BinTools::Read(reopened, reader);
+    }
+    const auto reopenedPeriodic = CensusPeriodicEllipses(reopened);
+    NSString *reopenedDigest = ShapeSHA256(reopened, nullptr);
+    const V3Difference difference = CompareV3(bore.solid, reopened);
+    NSMutableArray *bounds = [NSMutableArray arrayWithCapacity:6];
+    for (double value : bore.resultBounds) [bounds addObject:@(value)];
+    return @{ @"admission": @(int(admission)),
+        @"loftStatus": @(int(loftStatus)), @"boreStatus": @(int(boreStatus)),
+        @"loftValid": @(!loft.solid.IsNull()
+            && BRepCheck_Analyzer(loft.solid, Standard_True).IsValid()),
+        @"boreValid": @(!bore.solid.IsNull()
+            && BRepCheck_Analyzer(bore.solid, Standard_True).IsValid()),
+        @"loftVolume": @(loft.volume), @"sourceVolume": @(bore.sourceVolume),
+        @"resultVolume": @(bore.resultVolume), @"resultBounds": bounds,
+        @"storedPeriodic": @(periodic.stored),
+        @"analyticEllipses": @(periodic.ellipses),
+        @"periodicSplines": @(periodic.splines),
+        @"shiftedEllipses": @(periodic.shifted),
+        @"parameterCorrespondence": @(periodic.correspondence),
+        @"roundTripStable": @(!reopened.IsNull()
+            && [rawDigest isEqualToString:reopenedDigest]),
+        @"rawDigest": rawDigest ?: @"", @"reopenedDigest": reopenedDigest ?: @"",
+        @"v3DifferenceCount": @(difference.count),
+        @"v3FirstDifferenceLine": @(difference.line),
+        @"v3Section": [NSString stringWithUTF8String:difference.section.c_str()],
+        @"v3BeforeLine": [NSString stringWithUTF8String:difference.beforeLine.c_str()],
+        @"v3AfterLine": [NSString stringWithUTF8String:difference.afterLine.c_str()],
+        @"v3GeometryIndex": @(difference.geometryIndex),
+        @"v3GeometryType": @(difference.geometryType),
+        @"v3BeforeRepresentations": [NSString stringWithUTF8String:
+            difference.beforeRepresentations.c_str()],
+        @"v3AfterRepresentations": [NSString stringWithUTF8String:
+            difference.afterRepresentations.c_str()],
+        @"v3BeforeFlags": [NSString stringWithUTF8String:
+            difference.beforeFlags.c_str()],
+        @"v3AfterFlags": [NSString stringWithUTF8String:
+            difference.afterFlags.c_str()],
+        @"reopenedEllipses": @(reopenedPeriodic.ellipses),
+        @"reopenedSplines": @(reopenedPeriodic.splines),
+        @"reopenedShifted": @(reopenedPeriodic.shifted),
+        @"reopenedFirst": @(reopenedPeriodic.first),
+        @"reopenedLast": @(reopenedPeriodic.last),
+        @"reopenedMajorRadius": @(reopenedPeriodic.majorRadius),
+        @"reopenedMinorRadius": @(reopenedPeriodic.minorRadius) };
+}
+
 TopoDS_Shape AnalyticFixtureShape(int kind, double unit) {
     const double n = .001 / unit;
     TopoDS_Shape shape = kind == 1
@@ -1227,6 +1678,11 @@ NSData *CreateAssetAtlasDebugFixture(
         return @{@"fixture": @"AnalyticBooleanStoredPlanarPCurves",
             @"metersPerUnit": @(metersPerUnit), @"members": members,
             @"controls": AnalyticScaleControls(),
+            @"shiftedEllipse": PeriodicEllipseScaleControl(
+                5 * std::acos(-1.0) / 2, 3 * std::acos(-1.0)),
+            @"unshiftedEllipse": PeriodicEllipseScaleControl(
+                std::acos(-1.0) / 2, std::acos(-1.0)),
+            @"loftBore": LoftBoreScaleControl(metersPerUnit),
             @"allStoredNonNull": @(complete)};
     } catch (const Standard_Failure& failure) {
         return @{@"fixture": @"AnalyticBooleanStoredPlanarPCurves",

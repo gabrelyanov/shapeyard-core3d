@@ -804,7 +804,8 @@ __attribute__((objc_subclassing_restricted))
 + (NSData *_Nullable)debugAssetAtlasFixtureAssetData:(double)metersPerUnit
     NS_SWIFT_NAME(debugAssetAtlasFixtureAssetData(metersPerUnit:));
 //! Raw BRep_TEdge planar representation census for the three production-cut
-//! atlas objects, including mesh and V3 reopen observations.
+//! atlas objects, including mesh and V3 reopen observations. The loft/bore row
+//! also reports the first V3 line and edge representation changed by V4 reopen.
 + (NSDictionary<NSString *, id> *_Nullable)
     debugAnalyticBooleanPlanarPCurves:(double)metersPerUnit
     NS_SWIFT_NAME(debugAnalyticBooleanPlanarPCurves(metersPerUnit:));

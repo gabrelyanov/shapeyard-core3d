@@ -56,6 +56,18 @@ inline void TransformedParameters(const TopoDS_Edge& source,
     last = parameter(vertex2, last);
 }
 
+inline void CanonicalizeForV4Readback(Handle(Geom2d_Curve)& curve) {
+    const Handle(Geom2d_Line) line = Handle(Geom2d_Line)::DownCast(curve);
+    if (line.IsNull()) return;
+    // BinTools_Curve2dSet reads its type-1 coordinates through gp_Dir2d.
+    // GeomLib's transformed line can be one normalization short of that
+    // reconstructed state, changing the V3 commitment by one ULP. Perform the
+    // same normalization before attachment so another V4 read is a fixed point.
+    const gp_Dir2d& direction = line->Direction();
+    curve = new Geom2d_Line(line->Location(),
+        gp_Dir2d(direction.X(), direction.Y()));
+}
+
 inline bool TransformPCurve(const Handle(Geom2d_Curve)& source,
                             const Handle(Geom_Surface)& surface,
                             const gp_Trsf& transform,
@@ -70,9 +82,10 @@ inline bool TransformPCurve(const Handle(Geom2d_Curve)& source,
     if (curve.IsNull()) return false;
     if (curve->DynamicType() == STANDARD_TYPE(Geom2d_TrimmedCurve))
         curve = Handle(Geom2d_TrimmedCurve)::DownCast(curve)->BasisCurve();
+    const bool periodic = curve->IsPeriodic();
     const Standard_Real basisFirst = curve->FirstParameter();
     const Standard_Real basisLast = curve->LastParameter();
-    if (!curve->IsPeriodic()) {
+    if (!periodic) {
         if (basisFirst - sourceFirst > Precision::PConfusion()) sourceFirst = basisFirst;
         if (sourceLast - basisLast > Precision::PConfusion()) sourceLast = basisLast;
         if (Abs(sourceLast - sourceFirst) < Precision::PConfusion()) {
@@ -83,14 +96,42 @@ inline bool TransformPCurve(const Handle(Geom2d_Curve)& source,
     }
     Standard_Real transformedFirst = sourceFirst, transformedLast = sourceLast;
     if (Abs(transform.ScaleFactor()) != 1.) {
-        curve = new Geom2d_TrimmedCurve(curve, sourceFirst, sourceLast);
         const gp_GTrsf2d parametric = surface->ParametricTransformation(transform);
-        if (parametric.Form() != gp_Identity) {
-            curve = GeomLib::GTransform(curve, parametric);
-            if (curve.IsNull()) return false;
-            transformedFirst = curve->FirstParameter();
-            transformedLast = curve->LastParameter();
+        if (periodic) {
+            // A temporary Geom2d_TrimmedCurve normally folds bounds into the
+            // principal period. GeomLib::GTransform copies that wrapper and
+            // folds them again, so a stored [5pi/2,3pi] ellipse becomes
+            // [pi/2,pi]. Transform the periodic analytic basis instead and
+            // carry its declared branch independently of wrapper bounds.
+            if (parametric.Form() == gp_Other) return false;
+            if (parametric.Form() != gp_Identity) {
+                const gp_Trsf2d affine = parametric.Trsf2d();
+                transformedFirst = curve->TransformedParameter(sourceFirst, affine);
+                transformedLast = curve->TransformedParameter(sourceLast, affine);
+                curve = GeomLib::GTransform(curve, parametric);
+                if (curve.IsNull() || !curve->IsPeriodic()) return false;
+            }
+        } else {
+            curve = new Geom2d_TrimmedCurve(curve, sourceFirst, sourceLast);
+            if (parametric.Form() != gp_Identity) {
+                curve = GeomLib::GTransform(curve, parametric);
+                if (curve.IsNull()) return false;
+                transformedFirst = curve->FirstParameter();
+                transformedLast = curve->LastParameter();
+            }
         }
+    }
+    if (periodic) {
+        // SameRange has an analytic phase correction for circles but not for
+        // ellipses; its generic fallback is a BSpline reparameterization.
+        // Positive uniform scale must retain the edge's parameter interval,
+        // so refuse an unexpected mapping rather than changing representation.
+        if (Abs(transformedFirst - targetFirst) > Precision::PConfusion()
+            || Abs(transformedLast - targetLast) > Precision::PConfusion())
+            return false;
+        output = curve;
+        CanonicalizeForV4Readback(output);
+        return true;
     }
     GeomLib::SameRange(Precision::PConfusion(), curve,
         transformedFirst, transformedLast, targetFirst, targetLast, output);
@@ -100,6 +141,7 @@ inline bool TransformPCurve(const Handle(Geom2d_Curve)& source,
     if (!output.IsNull()
         && output->DynamicType() == STANDARD_TYPE(Geom2d_TrimmedCurve))
         output = Handle(Geom2d_TrimmedCurve)::DownCast(output)->BasisCurve();
+    CanonicalizeForV4Readback(output);
     return !output.IsNull();
 }
 
