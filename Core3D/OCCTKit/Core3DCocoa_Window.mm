@@ -29,10 +29,43 @@
 #include <Aspect_WindowDefinitionError.hxx>
 
 #include <cmath>
+#include <atomic>
 
 IMPLEMENT_STANDARD_RTTIEXT(Core3DCocoa_Window,Cocoa_Window)
 
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+static std::atomic<uint64_t> THE_TBIDLE_OCCT_COUNT(0);
+static std::atomic<uint64_t> THE_TBIDLE_OCCT_OFF_MAIN_COUNT(0);
+static std::atomic<uint64_t> THE_TBIDLE_OCCT_BUCKET(UINT64_MAX);
+
+static bool TbidleEnabled()
+{
+#ifdef DEBUG
+    return [NSProcessInfo.processInfo.environment[@"SHAPEYARD_UITEST_A1_BOOLEAN_EVIDENCE"] isEqualToString:@"1"];
+#else
+    return false;
+#endif
+}
+
+static void TbidleLogOcct(UIView *theView, bool theOffMain)
+{
+#ifdef DEBUG
+    if (!TbidleEnabled()) return;
+    const uint64_t count = ++THE_TBIDLE_OCCT_COUNT;
+    const uint64_t offMainCount = theOffMain ? ++THE_TBIDLE_OCCT_OFF_MAIN_COUNT
+                                             : THE_TBIDLE_OCCT_OFF_MAIN_COUNT.load();
+    const CFTimeInterval now = CACurrentMediaTime();
+    const uint64_t bucket = (uint64_t)(now / 5.0);
+    uint64_t previous = THE_TBIDLE_OCCT_BUCKET.load();
+    if (previous != bucket && THE_TBIDLE_OCCT_BUCKET.compare_exchange_strong(previous, bucket)) {
+        NSLog(@"TBIDLE t=%.6f pid=%d object=%p thread=%@ event=G.occt.bucket bucket=%llu count=%llu offMain=%llu attached=%d",
+              now, NSProcessInfo.processInfo.processIdentifier, theView,
+              theOffMain ? @"background" : @"main", (unsigned long long)bucket,
+              (unsigned long long)count, (unsigned long long)offMainCount, theView.window != nil);
+    }
+#endif
+}
+
 @protocol Core3DDrawableSizing <NSObject>
 @property (nonatomic, readonly) CGSize drawableSize;
 @end
@@ -358,6 +391,14 @@ Core3DCocoa_Window::~Core3DCocoa_Window()
         if (myHView == NULL) {
             return;
         }
+#ifdef DEBUG
+        if (TbidleEnabled() && THE_TBIDLE_OCCT_COUNT.load() == 0) {
+            NSLog(@"TBIDLE t=%.6f pid=%d object=%p thread=%@ event=G.occt.READY",
+                  CACurrentMediaTime(), NSProcessInfo.processInfo.processIdentifier, myHView,
+                  NSThread.isMainThread ? @"main" : @"background");
+        }
+#endif
+        TbidleLogOcct(myHView, !NSThread.isMainThread);
         if (NSThread.isMainThread) {
             [myHView invalidateContentOcct:nil];
         } else {

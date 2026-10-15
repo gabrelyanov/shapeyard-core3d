@@ -484,6 +484,107 @@ void DeliverMutation(void (^completion)(Core3DProfileConstructionResult, NSStrin
     if (NSThread.isMainThread) completion(result, detail);
     else dispatch_async(dispatch_get_main_queue(), ^{ completion(result, detail); });
 }
+struct E4LayerFixture final {
+    core3d::painted_atlas_bake::owner::ExportCapture capture;
+    core3d::asset_atlas::Definition atlas;
+    std::vector<core3d::asset_atlas::MemberUVAssignment> assignments;
+    core3d::asset_atlas::build::LayoutEvidence layout;
+    core3d::asset_atlas::build::FinalAtlasAccounting accounting;
+};
+
+bool PrepareE4LayerFixture(Core3DViewController *controller,
+                           NSString *entityIdentifier,
+                           std::size_t roleCount,
+                           std::size_t sourceCount,
+                           std::size_t maskCount,
+                           E4LayerFixture& fixture) {
+    namespace aa = core3d::asset_atlas;
+    namespace pb = core3d::painted_atlas_bake;
+    GLViewController *gl = [controller.glController
+        isKindOfClass:GLViewController.class]
+        ? (GLViewController *)controller.glController : nil;
+    const std::shared_ptr<core3d::Core3DViewer> viewer = gl ? gl.viewer : nullptr;
+    const Handle(OcctDocument) wrapper = viewer
+        ? viewer->getDocument() : Handle(OcctDocument)();
+    OwnerKey selectedKey;
+    TDF_Label selectedLabel;
+    const char *raw = entityIdentifier.UTF8String;
+    if (wrapper.IsNull()
+        || !LabelForSelected(wrapper, raw ? raw : "", selectedKey,
+            selectedLabel)) return false;
+    const Handle(TDocStd_Document)& document = wrapper->Document();
+    std::vector<aa::persistence::Record> records;
+    if (document.IsNull() || document->HasOpenCommand()
+        || !aa::persistence::ReadAll(document, records)) return false;
+    aa::Key atlasKey;
+    bool found = false;
+    for (const auto& record : records) {
+        if (!record.value) return false;
+        for (const auto& member : record.value->definition.members)
+            if (member.owner == selectedKey) {
+                if (found) return false;
+                atlasKey = record.value->definition.key;
+                found = true;
+            }
+    }
+    if (!found
+        || pb::owner::CaptureForExport(fixture.capture, document, atlasKey)
+            != pb::owner::Outcome::Prepared
+        || fixture.capture.savedAtlas.members.size() != 2) return false;
+    std::vector<aa::build::FinalMemberInput> inputs;
+    inputs.reserve(fixture.capture.members.members.size());
+    for (const auto& member : fixture.capture.members.members) {
+        core3d::retained_solid::Record retained;
+        core3d::retained_finishing::SourceRevision observed;
+        if (!core3d::retained_finishing::producer::detail::Source(
+                document, member.slot.owner, observed, nullptr, &retained)
+            || !(observed == member.slot.source)) return false;
+        std::atomic_bool cancelled{false};
+        core3d::meshcopy::CurrentTessellationCopy copy;
+        if (core3d::meshcopy::PrepareCurrentTessellationCopy(
+                retained.current, copy, cancelled)
+                != core3d::meshcopy::PreparationResult::Ready) return false;
+        aa::build::FinalMemberInput input;
+        input.savedMember = member.slot;
+        input.authority = member.capture;
+        if (!core3d::retained_finishing::producer::detail::Triangles(
+                copy, input.triangles, input.faces)) return false;
+        inputs.push_back(std::move(input));
+    }
+    fixture.accounting.operation = fixture.capture.operationView();
+    fixture.accounting.roleCount = roleCount;
+    fixture.accounting.sourceCount = sourceCount;
+    fixture.accounting.maskCount = maskCount;
+    fixture.accounting.sealAtlasJob = true;
+    std::string diagnosis;
+    return aa::build::BuildFinalAtlas(atlasKey, inputs, {2048, 4},
+        fixture.atlas, fixture.assignments, diagnosis, &fixture.layout,
+        &fixture.accounting) == aa::build::Status::Built
+        && !fixture.layout.packed.triangles.empty();
+}
+
+std::vector<std::uint8_t> E4NSDataBytes(NSData *data) {
+    if (!data || data.length == 0) return {};
+    const auto *begin = static_cast<const std::uint8_t *>(data.bytes);
+    return {begin, begin + data.length};
+}
+
+NSArray<NSDictionary<NSString *, id> *> *E4LayerSamples(
+    const core3d::painted_atlas_bake::kernel::Evidence& evidence) {
+    NSMutableArray<NSDictionary<NSString *, id> *> *result =
+        [NSMutableArray arrayWithCapacity:evidence.samples.size()];
+    for (const auto& sample : evidence.samples) {
+        [result addObject:@{
+            @"role": @(static_cast<unsigned>(sample.role)),
+            @"x": @(sample.x), @"y": @(sample.y),
+            @"u": @(sample.sourceU), @"v": @(sample.sourceV),
+            @"rgba": @[@(sample.emitted[0]), @(sample.emitted[1]),
+                        @(sample.emitted[2]), @(sample.emitted[3])],
+        }];
+    }
+    return result;
+}
+
 } // namespace
 
 @interface Core3DFaceImageOpening () {
@@ -3947,6 +4048,416 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         (void)kernel::DebugTakeKernelObservation();
         return nil;
     }
+}
+
+- (NSDictionary<NSString *,id> *)
+    debugE4LayerCompositorApplicabilityForEntityIdentifier:
+        (NSString *)entityIdentifier
+        resourceBytes:(NSArray<NSData *> *)resourceBytes
+        reversed:(NSNumber *)reversed {
+    namespace accounting = core3d::decal_layer::bake::accounting;
+    namespace kernel = core3d::painted_atlas_bake::kernel;
+    namespace fi = core3d::face_image;
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128 || resourceBytes.count != 4)
+        return nil;
+    @try {
+        E4LayerFixture fixture;
+        if (!PrepareE4LayerFixture(self, entityIdentifier, 1, 4, 0, fixture)
+            || fixture.capture.sources.empty()) return nil;
+        const auto& firstPlaced = fixture.layout.packed.triangles.front();
+        if (firstPlaced.chartIndex < 0) return nil;
+        const std::size_t targetChart = std::size_t(firstPlaced.chartIndex);
+        if (targetChart >= fixture.layout.chartMembers.size()
+            || targetChart >= fixture.layout.chartFaces.size()) return nil;
+        const std::size_t targetMember =
+            fixture.layout.chartMembers[targetChart].first;
+        const std::size_t targetFace = fixture.layout.chartFaces[targetChart];
+        std::size_t foreignChart = fixture.layout.chartMembers.size();
+        std::size_t wrongFaceChart = fixture.layout.chartMembers.size();
+        for (std::size_t chart = 0;
+             chart < fixture.layout.chartMembers.size(); ++chart) {
+            if (fixture.layout.chartMembers[chart].first != targetMember
+                && foreignChart == fixture.layout.chartMembers.size())
+                foreignChart = chart;
+            if (fixture.layout.chartMembers[chart].first == targetMember
+                && fixture.layout.chartFaces[chart] != targetFace
+                && wrongFaceChart == fixture.layout.chartMembers.size())
+                wrongFaceChart = chart;
+        }
+        if (targetMember >= fixture.atlas.members.size()
+            || foreignChart >= fixture.layout.chartMembers.size()
+            || wrongFaceChart >= fixture.layout.chartMembers.size()) return nil;
+        const std::size_t foreignMember =
+            fixture.layout.chartMembers[foreignChart].first;
+        const std::size_t foreignFace = fixture.layout.chartFaces[foreignChart];
+        const std::size_t wrongFace = fixture.layout.chartFaces[wrongFaceChart];
+        if (foreignMember >= fixture.atlas.members.size()) return nil;
+
+        accounting::Ticket sourcesTicket;
+        std::size_t sourceBytes = 0;
+        const auto operation = fixture.capture.operationView();
+        if (!operation.CheckedProduct(4U, sizeof(kernel::Source), 1U,
+                sourceBytes, accounting::FailureSite::SourceVectorStorage)
+            || !sourcesTicket.acquire(operation,
+                accounting::StorageDimension::PrivateStorage, sourceBytes,
+                accounting::Retention::Scratch,
+                accounting::FailureSite::SourceVectorStorage)
+            || !operation.EnterAllocation(
+                accounting::FailureSite::SourceVectorStorage)) return nil;
+        std::vector<kernel::Source> sources;
+        sources.reserve(4);
+        const auto append = [&](NSUInteger resource,
+                                std::size_t member,
+                                std::size_t face,
+                                std::size_t order) {
+            kernel::Source source;
+            source.fence = fixture.capture.sources[0].fence;
+            source.fence.owner = fixture.atlas.members[member].owner;
+            source.fence.role = fi::Role::BaseColor;
+            source.fence.colorSpace = fi::ColorSpace::SRGB;
+            source.fence.transform = {};
+            source.memberIndex = member;
+            source.faceIndex = face;
+            source.order = order;
+            const auto bytes = E4NSDataBytes(resourceBytes[resource]);
+            if (!kernel::DecodeImage(bytes, source.image, operation))
+                return false;
+            sources.push_back(std::move(source));
+            return true;
+        };
+        const bool reverse = reversed.boolValue;
+        // Put both inapplicable sources first so the predecessor's
+        // first-owner/ignored-face kernel produces the causal RED.
+        if (!append(3, targetMember, wrongFace, 0)
+            || !append(2, foreignMember, foreignFace, 0)
+            || !append(0, targetMember, targetFace, reverse ? 9 : 7)
+            || !append(1, targetMember, targetFace, reverse ? 1 : 7)) return nil;
+        std::vector<kernel::Output> outputs;
+        kernel::Evidence evidence;
+        accounting::Ticket outputTicket, evidenceTicket;
+        if (!kernel::Bake(fixture.atlas, fixture.layout, sources,
+                outputs, evidence, outputTicket, evidenceTicket, operation,
+                /*atlasJobAlreadySealed=*/true)
+            || outputs.size() != 1 || evidence.samples.empty()) return nil;
+        return @{
+            @"fixture": @"E4LayerCompositorApplicability",
+            @"samples": E4LayerSamples(evidence),
+            @"resourceOrder": reverse ? @[@1, @0] : @[@0, @1],
+            @"targetMember": @(targetMember),
+            @"targetFace": @(targetFace),
+            @"foreignMember": @(foreignMember),
+            @"foreignFace": @(foreignFace),
+            @"wrongFace": @(wrongFace),
+            @"resolution": @(fixture.atlas.resolutionTexels),
+            @"gutter": @(fixture.atlas.gutterTexels),
+            @"pngBytes": @(outputs.front().png.size()),
+            @"maximumError255": @(evidence.maximumInteriorError255),
+            @"meanError255": @(evidence.meanInteriorError255),
+            @"tangentParity": @(evidence.tangentParity),
+        };
+    } @catch (...) { return nil; }
+}
+
+- (NSDictionary<NSString *,id> *)
+    debugE4LayerCompositorCompositionForEntityIdentifier:
+        (NSString *)entityIdentifier
+        resourceBytes:(NSArray<NSData *> *)resourceBytes {
+    namespace accounting = core3d::decal_layer::bake::accounting;
+    namespace kernel = core3d::painted_atlas_bake::kernel;
+    namespace fi = core3d::face_image;
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128 || resourceBytes.count != 6)
+        return nil;
+    @try {
+        E4LayerFixture fixture;
+        if (!PrepareE4LayerFixture(self, entityIdentifier, 2, 4, 2, fixture)
+            || fixture.capture.sources.empty()) return nil;
+        const auto& firstPlaced = fixture.layout.packed.triangles.front();
+        if (firstPlaced.chartIndex < 0) return nil;
+        const std::size_t targetChart = std::size_t(firstPlaced.chartIndex);
+        if (targetChart >= fixture.layout.chartMembers.size()
+            || targetChart >= fixture.layout.chartFaces.size()
+            || targetChart >= fixture.layout.charts.size()) return nil;
+        const std::size_t targetMember =
+            fixture.layout.chartMembers[targetChart].first;
+        const std::size_t targetFace = fixture.layout.chartFaces[targetChart];
+        if (targetMember >= fixture.atlas.members.size()) return nil;
+        const auto& chart = fixture.layout.charts[targetChart];
+        const double du = chart.rectMax.x - chart.rectMin.x;
+        const double dv = chart.rectMax.y - chart.rectMin.y;
+        if (!(du > 0.0) || !(dv > 0.0)) return nil;
+        const double firstCenterU = chart.rectMin.x + .42 * du;
+        const double firstCenterV = chart.rectMin.y + .52 * dv;
+        const double firstWidth = .62 * du, firstHeight = .72 * dv;
+        const double secondCenterU = chart.rectMin.x + .68 * du;
+        const double secondCenterV = chart.rectMin.y + .48 * dv;
+        const double secondWidth = .48 * du, secondHeight = .56 * dv;
+
+        accounting::Ticket sourcesTicket;
+        std::size_t sourceBytes = 0;
+        const auto operation = fixture.capture.operationView();
+        if (!operation.CheckedProduct(4U, sizeof(kernel::Source), 1U,
+                sourceBytes, accounting::FailureSite::SourceVectorStorage)
+            || !sourcesTicket.acquire(operation,
+                accounting::StorageDimension::PrivateStorage, sourceBytes,
+                accounting::Retention::Scratch,
+                accounting::FailureSite::SourceVectorStorage)
+            || !operation.EnterAllocation(
+                accounting::FailureSite::SourceVectorStorage)) return nil;
+        std::vector<kernel::Source> sources;
+        sources.reserve(4);
+        const auto makeSource = [&](NSUInteger resource, fi::Role role,
+                                    std::size_t order,
+                                    kernel::Source& source) {
+            source.fence = fixture.capture.sources[0].fence;
+            source.fence.owner = fixture.atlas.members[targetMember].owner;
+            source.fence.role = role;
+            source.fence.colorSpace = role == fi::Role::BaseColor
+                ? fi::ColorSpace::SRGB : fi::ColorSpace::Linear;
+            source.fence.transform = {};
+            source.memberIndex = targetMember;
+            source.faceIndex = targetFace;
+            source.order = order;
+            return kernel::DecodeImage(E4NSDataBytes(resourceBytes[resource]),
+                source.image, operation);
+        };
+        kernel::Source base;
+        if (!makeSource(0, fi::Role::BaseColor, 0, base)) return nil;
+        sources.push_back(std::move(base));
+        kernel::Source first;
+        if (!makeSource(1, fi::Role::BaseColor, 1, first)) return nil;
+        first.boundedLayer = true;
+        first.centerU = firstCenterU; first.centerV = firstCenterV;
+        first.width = firstWidth; first.height = firstHeight;
+        first.angle = 23.0; first.opacity = .65;
+        first.fence.transform.scale = {1.1, .8};
+        first.fence.transform.offset = {.07, -.03};
+        first.fence.transform.rotationDegrees = 11.0;
+        first.fence.transform.wrapU = fi::Wrap::Repeat;
+        first.fence.transform.wrapV = fi::Wrap::ClampToEdge;
+        first.maskPresent = true;
+        first.maskUsesLuminance = false;
+        first.maskTransform.scale = {.9, 1.2};
+        first.maskTransform.offset = {.05, .02};
+        first.maskTransform.rotationDegrees = 351.0;
+        first.maskTransform.wrapU = fi::Wrap::MirroredRepeat;
+        first.maskTransform.wrapV = fi::Wrap::ClampToEdge;
+        if (!kernel::DecodeImage(E4NSDataBytes(resourceBytes[3]),
+                first.mask, operation)) return nil;
+        sources.push_back(std::move(first));
+        kernel::Source second;
+        if (!makeSource(2, fi::Role::BaseColor, 2, second)) return nil;
+        second.boundedLayer = true;
+        second.centerU = secondCenterU; second.centerV = secondCenterV;
+        second.width = secondWidth; second.height = secondHeight;
+        second.angle = -17.0; second.opacity = .45;
+        second.fence.transform.scale = {.75, 1.25};
+        second.fence.transform.offset = {-.08, .04};
+        second.fence.transform.rotationDegrees = 347.0;
+        second.fence.transform.wrapU = fi::Wrap::ClampToEdge;
+        second.fence.transform.wrapV = fi::Wrap::Repeat;
+        second.maskPresent = true;
+        second.maskUsesLuminance = true;
+        second.maskInverted = true;
+        second.maskTransform.scale = {1.15, .85};
+        second.maskTransform.offset = {-.02, .06};
+        second.maskTransform.rotationDegrees = 17.0;
+        second.maskTransform.wrapU = fi::Wrap::Repeat;
+        second.maskTransform.wrapV = fi::Wrap::MirroredRepeat;
+        if (!kernel::DecodeImage(E4NSDataBytes(resourceBytes[4]),
+                second.mask, operation)) return nil;
+        sources.push_back(std::move(second));
+        kernel::Source normal;
+        if (!makeSource(5, fi::Role::Normal, 0, normal)) return nil;
+        sources.push_back(std::move(normal));
+
+        std::vector<kernel::Output> outputs;
+        kernel::Evidence evidence;
+        accounting::Ticket outputTicket, evidenceTicket;
+        if (!kernel::Bake(fixture.atlas, fixture.layout, sources,
+                outputs, evidence, outputTicket, evidenceTicket, operation,
+                /*atlasJobAlreadySealed=*/true)
+            || outputs.size() != 2) return nil;
+        const kernel::Output *baseOutput = nullptr;
+        NSMutableArray<NSNumber *> *roles = [NSMutableArray array];
+        for (const auto& output : outputs) {
+            [roles addObject:@(static_cast<unsigned>(output.descriptor.role))];
+            if (output.descriptor.role == fi::Role::BaseColor)
+                baseOutput = &output;
+        }
+        if (!baseOutput) return nil;
+
+        const auto placementUV = [](double developedU, double developedV,
+                                    double centerU, double centerV,
+                                    double width, double height, double angle,
+                                    double& u, double& v) {
+            constexpr double pi =
+                3.141592653589793238462643383279502884;
+            const double radians = -angle * pi / 180.0;
+            const double c = std::cos(radians), s = std::sin(radians);
+            const double x = developedU - centerU;
+            const double y = developedV - centerV;
+            u = (c * x - s * y) / width + .5;
+            v = (s * x + c * y) / height + .5;
+            return u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0;
+        };
+        NSMutableDictionary<NSNumber *, NSDictionary<NSString *, id> *> *picked =
+            [NSMutableDictionary dictionary];
+        const std::uint32_t size = std::uint32_t(fixture.atlas.resolutionTexels);
+        for (const auto& placed : fixture.layout.packed.triangles) {
+            if (placed.chartIndex != firstPlaced.chartIndex
+                || picked.count == 4) continue;
+            const auto& developed = chart.triangles[
+                std::size_t(placed.triangleIndex)];
+            double x[3], y[3], su[3], sv[3];
+            for (int corner = 0; corner < 3; ++corner) {
+                x[corner] = placed.uv[corner].x * size;
+                y[corner] = placed.uv[corner].y * size;
+                su[corner] = (developed.corner[corner].x - chart.rectMin.x) / du;
+                sv[corner] = (developed.corner[corner].y - chart.rectMin.y) / dv;
+            }
+            const double area = (x[1] - x[0]) * (y[2] - y[0])
+                - (x[2] - x[0]) * (y[1] - y[0]);
+            if (std::abs(area) <= 1.e-18) continue;
+            int winding[3] = {0, 1, 2};
+            if (area < 0.0) std::swap(winding[1], winding[2]);
+            const int minX = std::max(0, int(std::ceil(
+                std::min({x[0], x[1], x[2]}) - .5)));
+            const int maxX = std::min(int(size) - 1, int(std::floor(
+                std::max({x[0], x[1], x[2]}) - .5)));
+            const int minY = std::max(0, int(std::ceil(
+                std::min({y[0], y[1], y[2]}) - .5)));
+            const int maxY = std::min(int(size) - 1, int(std::floor(
+                std::max({y[0], y[1], y[2]}) - .5)));
+            for (int py = minY; py <= maxY && picked.count < 4; ++py)
+                for (int px = minX; px <= maxX && picked.count < 4; ++px) {
+                    const double qx = px + .5, qy = py + .5;
+                    bool inside = true;
+                    for (int edge = 0; edge < 3 && inside; ++edge) {
+                        const int a = winding[edge], b = winding[(edge + 1) % 3];
+                        const double dx = x[b] - x[a], dy = y[b] - y[a];
+                        const double cross = dx * (qy - y[a])
+                            - dy * (qx - x[a]);
+                        const double band = 1.e-9 * (dx * dx + dy * dy + 1.0);
+                        if (cross > band) continue;
+                        if (cross < -band
+                            || !(dy < 0.0 || (dy == 0.0 && dx < 0.0)))
+                            inside = false;
+                    }
+                    if (!inside) continue;
+                    const double w0 = ((x[1] - qx) * (y[2] - qy)
+                        - (x[2] - qx) * (y[1] - qy)) / area;
+                    const double w1 = ((x[2] - qx) * (y[0] - qy)
+                        - (x[0] - qx) * (y[2] - qy)) / area;
+                    const double w2 = 1.0 - w0 - w1;
+                    const double localU = w0 * su[0] + w1 * su[1] + w2 * su[2];
+                    const double localV = w0 * sv[0] + w1 * sv[1] + w2 * sv[2];
+                    const double developedU = chart.rectMin.x + localU * du;
+                    const double developedV = chart.rectMin.y + localV * dv;
+                    double firstU = 0, firstV = 0, secondU = 0, secondV = 0;
+                    const bool inFirst = placementUV(developedU, developedV,
+                        firstCenterU, firstCenterV, firstWidth, firstHeight,
+                        23.0, firstU, firstV);
+                    const bool inSecond = placementUV(developedU, developedV,
+                        secondCenterU, secondCenterV, secondWidth, secondHeight,
+                        -17.0, secondU, secondV);
+                    const unsigned kind = inFirst
+                        ? (inSecond ? 3U : 1U) : (inSecond ? 2U : 0U);
+                    if (picked[@(kind)]) continue;
+                    const std::size_t pixel = std::size_t(py) * size
+                        + std::size_t(px);
+                    const auto at = baseOutput->rgba.begin() + pixel * 4;
+                    picked[@(kind)] = @{
+                        @"kind": @(kind), @"x": @(px), @"y": @(py),
+                        @"localU": @(localU), @"localV": @(localV),
+                        @"developedU": @(developedU),
+                        @"developedV": @(developedV),
+                        @"rgba": @[@(at[0]), @(at[1]), @(at[2]), @(at[3])],
+                    };
+                }
+        }
+        NSMutableArray<NSDictionary<NSString *, id> *> *samples =
+            [NSMutableArray array];
+        for (unsigned kind = 0; kind < 4; ++kind) {
+            NSDictionary *sample = picked[@(kind)];
+            if (!sample) return nil;
+            [samples addObject:sample];
+        }
+
+        const auto rejects = [&](unsigned mode) {
+            accounting::Owner owner = accounting::MakeOperationOwner();
+            if (!owner.valid()) return false;
+            kernel::Source invalid;
+            invalid.fence = fixture.capture.sources[0].fence;
+            invalid.fence.owner = fixture.atlas.members[targetMember].owner;
+            invalid.fence.role = fi::Role::BaseColor;
+            invalid.fence.colorSpace = fi::ColorSpace::SRGB;
+            invalid.fence.transform = {};
+            invalid.memberIndex = targetMember;
+            invalid.faceIndex = targetFace;
+            invalid.image = kernel::Image(1, 1, {1, 2, 3, 255});
+            if (mode == 0) {
+                invalid.boundedLayer = true;
+                invalid.centerU = std::numeric_limits<double>::infinity();
+                invalid.width = invalid.height = 1.0;
+            } else if (mode == 1) {
+                invalid.boundedLayer = true;
+                invalid.width = 0.0; invalid.height = 1.0;
+            } else if (mode == 2) {
+                invalid.opacity = 1.01;
+            } else {
+                invalid.maskPresent = true;
+            }
+            std::vector<kernel::Source> values;
+            values.push_back(std::move(invalid));
+            std::vector<kernel::Output> refusedOutputs;
+            kernel::Evidence refusedEvidence;
+            accounting::Ticket refusedOutputTicket, refusedEvidenceTicket;
+            return !kernel::Bake(fixture.atlas, fixture.layout, values,
+                refusedOutputs, refusedEvidence, refusedOutputTicket,
+                refusedEvidenceTicket, owner.view);
+        };
+        std::vector<kernel::Output> deniedOutputs;
+        kernel::Evidence deniedEvidence;
+        accounting::Ticket deniedOutputTicket, deniedEvidenceTicket;
+        std::vector<kernel::Source> deniedSources;
+        kernel::Source denied;
+        denied.fence = fixture.capture.sources[0].fence;
+        denied.fence.owner = fixture.atlas.members[targetMember].owner;
+        denied.fence.role = fi::Role::BaseColor;
+        denied.fence.colorSpace = fi::ColorSpace::SRGB;
+        denied.fence.transform = {};
+        denied.memberIndex = targetMember; denied.faceIndex = targetFace;
+        denied.image = kernel::Image(1, 1, {1, 2, 3, 255});
+        deniedSources.push_back(std::move(denied));
+        const bool deniedBeforeEntry = !kernel::Bake(
+            fixture.atlas, fixture.layout, deniedSources, deniedOutputs,
+            deniedEvidence, deniedOutputTicket, deniedEvidenceTicket, {});
+        return @{
+            @"fixture": @"E4LayerCompositorComposition",
+            @"samples": samples,
+            @"normalSamples": E4LayerSamples(evidence),
+            @"roles": roles,
+            @"resolution": @(fixture.atlas.resolutionTexels),
+            @"gutter": @(fixture.atlas.gutterTexels),
+            @"chartMin": @[@(chart.rectMin.x), @(chart.rectMin.y)],
+            @"chartMax": @[@(chart.rectMax.x), @(chart.rectMax.y)],
+            @"firstPlacement": @[@(firstCenterU), @(firstCenterV),
+                @(firstWidth), @(firstHeight), @23.0, @0.65],
+            @"secondPlacement": @[@(secondCenterU), @(secondCenterV),
+                @(secondWidth), @(secondHeight), @-17.0, @0.45],
+            @"invalidNonfiniteRefused": @(rejects(0)),
+            @"invalidZeroSizeRefused": @(rejects(1)),
+            @"invalidOpacityRefused": @(rejects(2)),
+            @"missingMaskRefused": @(rejects(3)),
+            @"deniedBeforeEntry": @(deniedBeforeEntry),
+            @"maximumError255": @(evidence.maximumInteriorError255),
+            @"meanError255": @(evidence.meanInteriorError255),
+            @"normalLengthError": @(evidence.maximumNormalLengthError),
+            @"tangentParity": @(evidence.tangentParity),
+        };
+    } @catch (...) { return nil; }
 }
 
 - (NSDictionary<NSString *,id> *)debugE4ReceiverBudgetForEntityIdentifier:

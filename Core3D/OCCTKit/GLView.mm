@@ -119,9 +119,42 @@ private:
 #ifdef DEBUG
     BOOL _debugSkipNextPresentation;
     BOOL _debugProbeFramebufferPrepared;
+    uint64_t _tbidleTicks;
+    uint64_t _tbidleRequests;
+    uint64_t _tbidleInsideDrawRequests;
+    uint64_t _tbidleFrames;
+    uint64_t _tbidleFailures;
+    uint64_t _tbidleLastBucket;
+    NSInteger _tbidleLastRequestCategory;
+    BOOL _tbidleLastPaused;
+    BOOL _tbidleReady;
 #endif
 
 }
+
+#ifdef DEBUG
+- (BOOL)tbidleEnabled
+{
+    return [NSProcessInfo.processInfo.environment[@"SHAPEYARD_UITEST_A1_BOOLEAN_EVIDENCE"] isEqualToString:@"1"];
+}
+
+- (void)tbidleEmit:(NSString *)event force:(BOOL)force
+{
+    if (![self tbidleEnabled]) return;
+    const CFTimeInterval now = CACurrentMediaTime();
+    const uint64_t bucket = (uint64_t)(now / 5.0);
+    if (!force && bucket == _tbidleLastBucket) return;
+    _tbidleLastBucket = bucket;
+    NSLog(@"TBIDLE t=%.6f pid=%d object=%p thread=%@ event=%@ bucket=%llu ticks=%llu requests=%llu insideDraw=%llu frames=%llu failures=%llu frameRequested=%d drawing=%d depth=%lu paused=%d canRender=%d drawable=%d",
+          now, NSProcessInfo.processInfo.processIdentifier, self,
+          NSThread.isMainThread ? @"main" : @"background", event,
+          (unsigned long long)bucket, (unsigned long long)_tbidleTicks,
+          (unsigned long long)_tbidleRequests, (unsigned long long)_tbidleInsideDrawRequests,
+          (unsigned long long)_tbidleFrames, (unsigned long long)_tbidleFailures,
+          _frameRequested, _isDrawing, (unsigned long)_interactiveRenderingDepth,
+          _displayLink.paused, [self canRender], _hasDrawable);
+}
+#endif
 
 // =======================================================================
 // function : layerClass
@@ -182,6 +215,13 @@ private:
     _displayLink.paused = YES;
     [_displayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     [self updatePreferredFrameRate];
+#ifdef DEBUG
+    if ([self tbidleEnabled]) {
+        _tbidleReady = YES;
+        _tbidleLastPaused = _displayLink.paused;
+        [self tbidleEmit:@"G.READY" force:YES];
+    }
+#endif
 }
 
 - (void)updatePreferredFrameRate
@@ -808,6 +848,10 @@ private:
     myDepthBuffer = 0;
     _applicationActive = UIApplication.sharedApplication.applicationState
         == UIApplicationStateActive;
+#ifdef DEBUG
+    _tbidleLastBucket = UINT64_MAX;
+    _tbidleLastRequestCategory = -1;
+#endif
 
     [self setupLayer];
     [self setupContext];
@@ -859,6 +903,9 @@ private:
 
 - (void)dealloc
 {
+#ifdef DEBUG
+    if (_tbidleReady) [self tbidleEmit:@"G.final" force:YES];
+#endif
     // Do not call a client during partial owner destruction.
     _presentationChanged = nil;
     _presentationCapture = nil;
@@ -952,11 +999,23 @@ private:
     const BOOL shouldRun = [self canRender]
         && (_frameRequested || _interactiveRenderingDepth > 0);
     _displayLink.paused = !shouldRun;
+#ifdef DEBUG
+    if (_tbidleReady && _tbidleLastPaused != _displayLink.paused) {
+        _tbidleLastPaused = _displayLink.paused;
+        [self tbidleEmit:_displayLink.paused ? @"G.pause" : @"G.run" force:YES];
+    }
+#endif
 }
 
 - (void)requestRender
 {
     if (!NSThread.isMainThread) {
+#ifdef DEBUG
+        if ([self tbidleEnabled]) {
+            NSLog(@"TBIDLE t=%.6f pid=%d object=%p thread=background event=G.request.dispatch drawing=%d",
+                  CACurrentMediaTime(), NSProcessInfo.processInfo.processIdentifier, self, _isDrawing);
+        }
+#endif
         __weak typeof(self) weakSelf = self;
         dispatch_async(dispatch_get_main_queue(), ^{
             [weakSelf requestRender];
@@ -965,6 +1024,16 @@ private:
     }
     [self invalidatePresentationObservation];
     const BOOL beginsNewRequest = !_frameRequested;
+#ifdef DEBUG
+    if ([self tbidleEnabled]) {
+        ++_tbidleRequests;
+        if (_isDrawing) ++_tbidleInsideDrawRequests;
+        const NSInteger category = (_isDrawing ? 2 : 0) | (beginsNewRequest ? 1 : 0);
+        const BOOL changed = category != _tbidleLastRequestCategory;
+        _tbidleLastRequestCategory = category;
+        [self tbidleEmit:@"G.request" force:changed];
+    }
+#endif
     _frameRequested = YES;
     if (!_hasDrawable) {
         if (beginsNewRequest) {
@@ -996,6 +1065,9 @@ private:
     }
     [self invalidatePresentationObservation];
     ++_interactiveRenderingDepth;
+#ifdef DEBUG
+    [self tbidleEmit:@"I.begin" force:YES];
+#endif
     _frameRequested = YES;
     if (!_hasDrawable) {
         [self setNeedsLayout];
@@ -1015,6 +1087,9 @@ private:
     if (_interactiveRenderingDepth > 0) {
         --_interactiveRenderingDepth;
     }
+#ifdef DEBUG
+    [self tbidleEmit:@"I.end" force:YES];
+#endif
     _frameRequested = YES;
     [self updateDisplayLinkState];
 }
@@ -1022,6 +1097,12 @@ private:
 - (void)displayLinkDidFire:(CADisplayLink *)displayLink
 {
     (void)displayLink;
+#ifdef DEBUG
+    if ([self tbidleEnabled]) {
+        ++_tbidleTicks;
+        [self tbidleEmit:@"G.bucket" force:NO];
+    }
+#endif
     if (![self canRender]
         || (!_frameRequested && _interactiveRenderingDepth == 0)) {
         [self updateDisplayLinkState];
@@ -1033,8 +1114,14 @@ private:
     // the next display-link tick.
     _frameRequested = NO;
     if ([self drawView]) {
+#ifdef DEBUG
+        ++_tbidleFrames;
+#endif
         _consecutiveRenderFailures = 0;
     } else {
+#ifdef DEBUG
+        ++_tbidleFailures;
+#endif
         ++_consecutiveRenderFailures;
         _frameRequested = _frameRequested || _consecutiveRenderFailures < 3;
         _hasDrawable = NO;
@@ -1045,6 +1132,9 @@ private:
             NSLog(@"Viewport rendering paused after repeated frame failures.");
         }
     }
+#ifdef DEBUG
+    [self tbidleEmit:@"G.afterDraw" force:NO];
+#endif
     [self updateDisplayLinkState];
 }
 

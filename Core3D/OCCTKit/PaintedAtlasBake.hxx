@@ -413,8 +413,49 @@ inline bool Bake(const asset_atlas::Definition& atlas,
             || layout.charts.empty() || layout.packed.triangles.empty()
             || layout.chartMembers.size() != layout.charts.size()
             || layout.chartFaces.size() != layout.charts.size()) return false;
-        for (const auto& source : sources) if (!Valid(source.fence) || !ImageValid(source.image))
-            return false;
+        constexpr std::size_t unspecified =
+            std::numeric_limits<std::size_t>::max();
+        for (const auto& source : sources) {
+            bool ownerPresent = false;
+            for (const auto& member : atlas.members)
+                ownerPresent = ownerPresent || member.owner == source.fence.owner;
+            if (!Valid(source.fence) || !ImageValid(source.image)
+                || !ownerPresent
+                || !std::isfinite(source.opacity)
+                || source.opacity < 0.0 || source.opacity > 1.0
+                || (source.memberIndex != unspecified
+                    && (source.memberIndex >= atlas.members.size()
+                        || !(atlas.members[source.memberIndex].owner
+                            == source.fence.owner)))
+                || (source.boundedLayer
+                    && (!std::isfinite(source.centerU)
+                        || !std::isfinite(source.centerV)
+                        || !std::isfinite(source.width)
+                        || !std::isfinite(source.height)
+                        || !std::isfinite(source.angle)
+                        || !(source.width > 0.0)
+                        || !(source.height > 0.0)))
+                || (source.maskPresent
+                    && (!ImageValid(source.mask)
+                        || !face_image::Valid(source.maskTransform))))
+                return false;
+            if (source.faceIndex != unspecified) {
+                bool represented = false;
+                for (std::size_t chart = 0;
+                     chart < layout.chartFaces.size(); ++chart) {
+                    if (layout.chartFaces[chart] != source.faceIndex) continue;
+                    const std::size_t member = layout.chartMembers[chart].first;
+                    if (member >= atlas.members.size()) return false;
+                    if (atlas.members[member].owner == source.fence.owner
+                        && (source.memberIndex == unspecified
+                            || member == source.memberIndex)) {
+                        represented = true;
+                        break;
+                    }
+                }
+                if (!represented) return false;
+            }
+        }
         const std::uint32_t size = std::uint32_t(atlas.resolutionTexels);
         Ticket rolesTicket;
         std::size_t rolesBytes = 0;
@@ -474,7 +515,76 @@ inline bool Bake(const asset_atlas::Definition& atlas,
                     || !operation.CheckedProduct(source.mask.width,
                         source.mask.height, 1U, part,
                         FailureSite::ExportCanonicalStorage)
-                    || !add(part, maskWork)) return false;
+                || !add(part, maskWork)) return false;
+            }
+        }
+        // The source and mask jobs cover both decoded input texels and all
+        // later ordered-compositor visits. Plan the latter from the actual
+        // packed rectangles before any output allocation or sampling.
+        for (Role role : roles) {
+            std::size_t roleSources = 0;
+            for (const auto& source : sources)
+                if (source.fence.role == role) ++roleSources;
+            if (!add(sources.size(), sourceWork)
+                || !operation.CheckedProduct(roleSources, roleSources, 1U,
+                    part, FailureSite::ExportCanonicalStorage)
+                || !add(part, sourceWork)) return false;
+            for (const auto& placed : layout.packed.triangles) {
+                if (placed.chartIndex < 0
+                    || std::size_t(placed.chartIndex)
+                        >= layout.chartMembers.size()
+                    || std::size_t(placed.chartIndex)
+                        >= layout.chartFaces.size()
+                    || std::size_t(placed.chartIndex) >= layout.charts.size()
+                    || placed.triangleIndex < 0
+                    || std::size_t(placed.triangleIndex)
+                        >= layout.charts[std::size_t(placed.chartIndex)]
+                            .triangles.size())
+                    return false;
+                const std::size_t chart = std::size_t(placed.chartIndex);
+                const std::size_t member = layout.chartMembers[chart].first;
+                if (member >= atlas.members.size()) return false;
+                const std::size_t face = layout.chartFaces[chart];
+                std::size_t candidates = 0, maskedCandidates = 0;
+                for (const auto& source : sources) {
+                    if (source.fence.role != role
+                        || !(source.fence.owner == atlas.members[member].owner)
+                        || (source.memberIndex != unspecified
+                            && source.memberIndex != member)
+                        || (source.faceIndex != unspecified
+                            && source.faceIndex != face)) continue;
+                    ++candidates;
+                    if (source.maskPresent) ++maskedCandidates;
+                }
+                double x[3], y[3];
+                for (int corner = 0; corner < 3; ++corner) {
+                    x[corner] = placed.uv[corner].x * size;
+                    y[corner] = placed.uv[corner].y * size;
+                    if (!std::isfinite(x[corner]) || !std::isfinite(y[corner]))
+                        return false;
+                }
+                const int minX = std::max(0, int(std::ceil(
+                    std::min({x[0], x[1], x[2]}) - .5)));
+                const int maxX = std::min(int(size) - 1, int(std::floor(
+                    std::max({x[0], x[1], x[2]}) - .5)));
+                const int minY = std::max(0, int(std::ceil(
+                    std::min({y[0], y[1], y[2]}) - .5)));
+                const int maxY = std::min(int(size) - 1, int(std::floor(
+                    std::max({y[0], y[1], y[2]}) - .5)));
+                std::size_t visits = 0;
+                if (maxX >= minX && maxY >= minY
+                    && (!operation.CheckedProduct(
+                            std::size_t(maxX - minX + 1),
+                            std::size_t(maxY - minY + 1), 1U, visits,
+                            FailureSite::ExportCanonicalStorage)
+                        || !add(visits, sourceWork)
+                        || !operation.CheckedProduct(visits, candidates, 1U,
+                            part, FailureSite::ExportCanonicalStorage)
+                        || !add(part, sourceWork)
+                        || !operation.CheckedProduct(visits,
+                            maskedCandidates, 1U, part,
+                            FailureSite::ExportCanonicalStorage)
+                        || !add(part, maskWork))) return false;
             }
         }
         atlasWork = rolePixels;
@@ -555,6 +665,18 @@ inline bool Bake(const asset_atlas::Definition& atlas,
             for (const auto& source : sources)
                 if (source.fence.role == role) applicable.push_back(&source);
             if (applicable.empty()) return false;
+            // Stable insertion sort has no hidden allocation. Strict `>`
+            // retains capture order for equal-order layers.
+            for (std::size_t index = 1; index < applicable.size(); ++index) {
+                const Source* value = applicable[index];
+                std::size_t insertion = index;
+                while (insertion > 0
+                       && applicable[insertion - 1]->order > value->order) {
+                    applicable[insertion] = applicable[insertion - 1];
+                    --insertion;
+                }
+                applicable[insertion] = value;
+            }
 
             Ticket ownerTicket;
             std::size_t ownerBytes = 0;
@@ -592,11 +714,18 @@ inline bool Bake(const asset_atlas::Definition& atlas,
                 const std::size_t memberIndex =
                     layout.chartMembers[std::size_t(placed.chartIndex)].first;
                 if (memberIndex >= atlas.members.size()) return false;
-                const Source* source = nullptr;
+                const std::size_t faceIndex =
+                    layout.chartFaces[std::size_t(placed.chartIndex)];
+                bool hasApplicable = false;
                 for (const auto* candidate : applicable)
-                    if (candidate->fence.owner == atlas.members[memberIndex].owner)
-                        { source = candidate; break; }
-                if (!source) continue;
+                    if (candidate->fence.owner == atlas.members[memberIndex].owner
+                        && (candidate->memberIndex == unspecified
+                            || candidate->memberIndex == memberIndex)
+                        && (candidate->faceIndex == unspecified
+                            || candidate->faceIndex == faceIndex)) {
+                        hasApplicable = true;
+                        break;
+                    }
                 const auto& developed =
                     layout.charts[std::size_t(placed.chartIndex)]
                         .triangles[std::size_t(placed.triangleIndex)];
@@ -652,10 +781,81 @@ inline bool Bake(const asset_atlas::Definition& atlas,
                     owner[pixel] = placed.chartIndex;
                     const double localU = w0 * su[0] + w1 * su[1] + w2 * su[2];
                     const double localV = w0 * sv[0] + w1 * sv[1] + w2 * sv[2];
-                    const auto uv = TransformUV(localU, localV, source->fence.transform);
+                    if (!hasApplicable) continue;
+                    bool sampled = false;
+                    double accumulatedAlpha = 0.0;
+                    std::array<double, 4> composed{};
+                    double evidenceU = localU, evidenceV = localV;
+                    const double developedU = chart.rectMin.x + localU * du;
+                    const double developedV = chart.rectMin.y + localV * dv;
+                    for (const auto* source : applicable) {
+                        if (!(source->fence.owner
+                                == atlas.members[memberIndex].owner)
+                            || (source->memberIndex != unspecified
+                                && source->memberIndex != memberIndex)
+                            || (source->faceIndex != unspecified
+                                && source->faceIndex != faceIndex)) continue;
+                        double sourceU = localU, sourceV = localV;
+                        if (source->boundedLayer) {
+                            constexpr double pi =
+                                3.141592653589793238462643383279502884;
+                            const double radians = -source->angle * pi / 180.0;
+                            const double c = std::cos(radians);
+                            const double s = std::sin(radians);
+                            const double centeredU = developedU - source->centerU;
+                            const double centeredV = developedV - source->centerV;
+                            sourceU = (c * centeredU - s * centeredV)
+                                / source->width + .5;
+                            sourceV = (s * centeredU + c * centeredV)
+                                / source->height + .5;
+                            if (sourceU < 0.0 || sourceU > 1.0
+                                || sourceV < 0.0 || sourceV > 1.0) continue;
+                        }
+                        const auto uv = TransformUV(
+                            sourceU, sourceV, source->fence.transform);
+                        const auto sample = Bilinear(
+                            source->image, uv[0], uv[1]);
+                        double maskScalar = 1.0;
+                        if (source->maskPresent) {
+                            const auto maskUV = TransformUV(
+                                sourceU, sourceV, source->maskTransform);
+                            const auto mask = Bilinear(
+                                source->mask, maskUV[0], maskUV[1]);
+                            maskScalar = source->maskUsesLuminance
+                                ? (0.2126 * mask[0] + 0.7152 * mask[1]
+                                    + 0.0722 * mask[2]) / 255.0
+                                : mask[3] / 255.0;
+                            if (source->maskInverted)
+                                maskScalar = 1.0 - maskScalar;
+                            maskScalar = std::clamp(maskScalar, 0.0, 1.0);
+                        }
+                        const double sourceAlpha = std::clamp(
+                            sample[3] / 255.0 * source->opacity * maskScalar,
+                            0.0, 1.0);
+                        if (!sampled) {
+                            composed = sample;
+                            accumulatedAlpha = sourceAlpha;
+                            sampled = true;
+                            evidenceU = sourceU;
+                            evidenceV = sourceV;
+                            continue;
+                        }
+                        const double outputAlpha = sourceAlpha
+                            + accumulatedAlpha * (1.0 - sourceAlpha);
+                        if (outputAlpha > 0.0) {
+                            for (unsigned channel = 0; channel < 3; ++channel)
+                                composed[channel] = (sample[channel] * sourceAlpha
+                                    + composed[channel] * accumulatedAlpha
+                                        * (1.0 - sourceAlpha)) / outputAlpha;
+                        }
+                        accumulatedAlpha = outputAlpha;
+                        composed[3] = outputAlpha * 255.0;
+                    }
+                    if (!sampled) continue;
+                    composed[3] = accumulatedAlpha * 255.0;
                     double normalError = 0; std::array<double, 4> aimed;
-                    const auto quantized = Quantize(Bilinear(source->image, uv[0], uv[1]),
-                                                     role, normalError, aimed);
+                    const auto quantized = Quantize(
+                        composed, role, normalError, aimed);
                     evidence.maximumNormalLengthError =
                         std::max(evidence.maximumNormalLengthError, normalError);
                     // Measured interior error: quantized emission against the
@@ -672,7 +872,8 @@ inline bool Bake(const asset_atlas::Definition& atlas,
                     if (!evidence.sample.available && role == Role::BaseColor) {
                         evidence.sample.available = true; evidence.sample.role = role;
                         evidence.sample.x = std::uint32_t(px); evidence.sample.y = std::uint32_t(py);
-                        evidence.sample.sourceU = localU; evidence.sample.sourceV = localV;
+                        evidence.sample.sourceU = evidenceU;
+                        evidence.sample.sourceV = evidenceV;
                         evidence.sample.emitted = quantized;
                     }
                     const std::size_t sampleCap = role == Role::BaseColor ? 8
@@ -684,7 +885,7 @@ inline bool Bake(const asset_atlas::Definition& atlas,
                         SampleEvidence entry;
                         entry.available = true; entry.role = role;
                         entry.x = std::uint32_t(px); entry.y = std::uint32_t(py);
-                        entry.sourceU = localU; entry.sourceV = localV;
+                        entry.sourceU = evidenceU; entry.sourceV = evidenceV;
                         entry.emitted = quantized;
                         evidence.samples.push_back(entry);
                     }

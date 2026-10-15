@@ -665,6 +665,22 @@ __attribute__((objc_subclassing_restricted))
     debugE4PaintedKernelReservationsForEntityIdentifier:
         (NSString *)entityIdentifier
     NS_SWIFT_NAME(debugE4PaintedKernelReservations(entityIdentifier:));
+//! Runs the production kernel on the actual two-member final layout with
+//! same-role layers that exercise concrete member/face filtering and stable
+//! order. Returned samples are raw observations, never expected values.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4LayerCompositorApplicabilityForEntityIdentifier:
+        (NSString *)entityIdentifier
+        resourceBytes:(NSArray<NSData *> *)resourceBytes
+        reversed:(NSNumber *)reversed
+    NS_SWIFT_NAME(debugE4LayerCompositorApplicability(entityIdentifier:resourceBytes:reversed:));
+//! Runs the production kernel on the actual final layout with bounded,
+//! translucent and independently transformed masked layers plus a normal role.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4LayerCompositorCompositionForEntityIdentifier:
+        (NSString *)entityIdentifier
+        resourceBytes:(NSArray<NSData *> *)resourceBytes
+    NS_SWIFT_NAME(debugE4LayerCompositorComposition(entityIdentifier:resourceBytes:));
 //! Runs the real cold-reopened ordinary receiver, observes input/output/PNG
 //! ticket lifetimes, and denies the next receiver encoder reservation.
 - (nullable NSDictionary<NSString *,id> *)
