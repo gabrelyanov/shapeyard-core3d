@@ -3265,6 +3265,35 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         });
 }
 
++ (NSData *)debugE4MixedOriginalReceiverFixtureAssetDataWithResourceBytes:
+    (NSArray<NSData *> *)resourceBytes metersPerUnit:(NSNumber *)metersPerUnit {
+    const double unit = metersPerUnit.doubleValue;
+    if (!NSThread.isMainThread || resourceBytes.count != 4
+        || (unit != 0.001 && unit != 1.0)) return nil;
+    std::vector<fi::ResourceEnvelope> envelopes;
+    envelopes.reserve(4);
+    for (NSUInteger index = 0; index < resourceBytes.count; ++index) {
+        NSData *bytes = resourceBytes[index];
+        if (bytes.length == 0) return nil;
+        fi::ResourceEnvelope envelope;
+        NSData *provenance = [[NSString stringWithFormat:
+            @"shapeyard.e4.mixed-original-receiver.v1.%lu",
+            (unsigned long)index] dataUsingEncoding:NSUTF8StringEncoding];
+        if (!fi::validation::BuildFaceImageEnvelope(
+                bytes, bytes, @"straight",
+                provenance,
+                FixtureIndexedUUID(0x76, std::uint8_t(index + 1)),
+                envelope)) return nil;
+        envelopes.push_back(std::move(envelope));
+    }
+    return CreateFaceImageDebugFixture(
+        unit == 0.001 ? @"e4-mixed-original-mm"
+                      : @"e4-mixed-original-m",
+        [envelopes, unit](const Handle(TDocStd_Document)& document) {
+            StageE4RetainedCapFixture(document, unit, envelopes);
+        });
+}
+
 - (NSNumber *)debugInstallE4PaintedAtlasSourcesForEntityIdentifier:
     (NSString *)entityIdentifier resourceBytes:(NSArray<NSData *> *)resourceBytes {
     if (!NSThread.isMainThread || entityIdentifier.length == 0
@@ -3538,6 +3567,160 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         return @(strictState
                 == core3d::decal_layer::persistence::ReadState::Present
             && bytesMatch && sourceMatch);
+    } @catch (...) { return @NO; }
+}
+
+- (NSNumber *)debugInstallE4MixedOriginalReceiverForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128) return @NO;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        OwnerKey key; TDF_Label owner;
+        const char *raw = entityIdentifier.UTF8String;
+        if (wrapper.IsNull()
+            || !LabelForSelected(wrapper, raw ? raw : "", key, owner))
+            return @NO;
+        const Handle(TDocStd_Document)& document = wrapper->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return @NO;
+        std::vector<fi::ResourceEnvelope> resources;
+        for (std::uint8_t slot = 1; slot <= 4; ++slot) {
+            fi::ResourceEnvelope value;
+            if (!fi::owner::ReadResource(document,
+                    FixtureIndexedUUID(0x76, slot), value)) return @NO;
+            resources.push_back(std::move(value));
+        }
+        core3d::retained_edge_treatment::ReplayBudget budget;
+        core3d::decal_layer::source::Witness witness;
+        if (!core3d::decal_layer::source::CaptureSource(
+                wrapper, key, budget, [] { return false; }, witness))
+            return @NO;
+        const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(owner);
+        Standard_Real unit = 0.0;
+        dr::FaceImageGeometricReceipt receipt;
+        if (shape.IsNull()
+            || !XCAFDoc_DocumentTool::GetLengthUnit(document, unit)
+            || !FixtureCapturePlanarFace(shape, unit,
+                core3d::retained_face_selector::Axis::Z,
+                core3d::retained_face_selector::Side::Max, receipt))
+            return @NO;
+        fi::Digest selectorProof{};
+        if (!dr::FaceImageReceiptProof(receipt, selectorProof)) return @NO;
+
+        fi::Binding binding;
+        binding.binding = FixtureIndexedUUID(0x77, 1);
+        binding.face = FixtureIndexedUUID(0x77, 2);
+        binding.selectorProof = selectorProof;
+        binding.resource = resources[0].resource;
+        binding.role = fi::Role::BaseColor;
+        binding.colorSpace = fi::ColorSpace::SRGB;
+        binding.transform.scale = {1.0, 1.0};
+        binding.transform.offset = {0.0, 0.0};
+        binding.transform.rotationDegrees = 0.0;
+        binding.transform.wrapU = fi::Wrap::ClampToEdge;
+        binding.transform.wrapV = fi::Wrap::ClampToEdge;
+        fi::Definition faceDefinition;
+        faceDefinition.owner = key;
+        faceDefinition.bindings = {binding};
+        fi::Observed observed;
+        observed.faces.push_back({binding.face, selectorProof});
+        if (!fi::BindBindingProof(faceDefinition)
+            || !fi::owner::ResourceManifest(document, observed.resources))
+            return @NO;
+        document->NewCommand();
+        fi::owner::Staging faceStaging;
+        const auto facePrepared = fi::owner::Prepare(
+            faceStaging, document, faceDefinition, observed);
+        const auto faceCommitted = facePrepared == fi::owner::Outcome::Prepared
+            ? fi::owner::Commit(faceStaging, document, observed)
+            : fi::owner::Outcome::Malformed;
+        if (facePrepared != fi::owner::Outcome::Prepared
+            || faceCommitted != fi::owner::Outcome::Committed
+            || !document->CommitCommand()) {
+            fi::owner::Cancel(faceStaging);
+            document->AbortCommand();
+            return @NO;
+        }
+
+        core3d::decal_layer::Definition definition;
+        definition.owner = key;
+        definition.sourceRecipe = witness.sourceRecipe;
+        definition.sourceRevision = witness.sourceRevision;
+        definition.geometryRevision = witness.geometryRevision;
+        definition.placementRevision = witness.placementRevision;
+        definition.sourceProof = witness.sourceProof;
+        const auto makeImage = [](const fi::ResourceEnvelope& resource) {
+            core3d::decal_layer::ImageRef image;
+            image.resource = resource.resource;
+            image.normalizedContent = resource.workingContent;
+            image.originalContent = resource.originalContent;
+            image.provenance = resource.provenance;
+            image.producerVersion =
+                core3d::decal_layer::image_contract::kProducerVersion;
+            image.mediaType = resource.workingFormat;
+            image.widthTexels = resource.workingWidthTexels;
+            image.heightTexels = resource.workingHeightTexels;
+            image.role = fi::Role::BaseColor;
+            image.colorSpace = fi::ColorSpace::SRGB;
+            image.alpha = resource.alpha;
+            return image;
+        };
+        for (std::size_t index = 0; index < 2; ++index) {
+            core3d::decal_layer::Layer layer;
+            layer.identifier = FixtureIndexedUUID(
+                0x77, std::uint8_t(index + 3));
+            layer.image = makeImage(resources[index + 1]);
+            layer.placement.kind = core3d::decal_layer::PlacementKind::Face;
+            layer.placement.edgePolicy =
+                core3d::decal_layer::EdgePolicy::RejectCrossing;
+            layer.placement.expectedCardinality = 1;
+            layer.placement.face.receiver.face = binding.face;
+            layer.placement.face.receiver.selectorProof = selectorProof;
+            layer.placement.face.anchorMeters = index == 0
+                ? std::array<double, 2>{{0.042, 0.040}}
+                : std::array<double, 2>{{0.058, 0.040}};
+            layer.placement.face.angleRadians = index == 0 ? -0.12 : 0.18;
+            layer.widthMeters = index == 0 ? 0.050 : 0.045;
+            layer.heightMeters = index == 0 ? 0.044 : 0.038;
+            layer.opacity = index == 0 ? 0.72 : 0.63;
+            if (index == 1) {
+                layer.mask.present = true;
+                layer.mask.image = makeImage(resources[3]);
+                layer.mask.image.role = fi::Role::Occlusion;
+                layer.mask.image.colorSpace = fi::ColorSpace::Linear;
+                layer.mask.channel =
+                    core3d::decal_layer::MaskChannel::LinearLuminance;
+                layer.mask.transform.scale = {1.1, 0.9};
+                layer.mask.transform.offset = {-0.04, 0.03};
+                layer.mask.transform.rotationDegrees = 11.0;
+                layer.mask.transform.wrapU = fi::Wrap::Repeat;
+                layer.mask.transform.wrapV = fi::Wrap::MirroredRepeat;
+            }
+            definition.layers.push_back(std::move(layer));
+        }
+        std::vector<std::uint8_t> bytes;
+        std::string hex, digest;
+        if (!core3d::decal_layer::BindLayerProof(definition)
+            || !core3d::decal_layer::Encode(definition, bytes)
+            || !core3d::decal_layer::persistence::EncodeHex(bytes, hex)
+            || !core3d::decal_layer::persistence::DigestHex(bytes, digest))
+            return @NO;
+        document->NewCommand();
+        const TDF_Label record = owner.FindChild(
+            core3d::decal_layer::persistence::RecordTag, Standard_True);
+        if (!core3d::decal_layer::persistence::WriteChunks(
+                record, hex, Standard_Integer(definition.layers.size()), digest)
+            || !document->CommitCommand()) {
+            document->AbortCommand();
+            return @NO;
+        }
+        return @YES;
     } @catch (...) { return @NO; }
 }
 

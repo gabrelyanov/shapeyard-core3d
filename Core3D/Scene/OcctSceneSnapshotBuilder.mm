@@ -1481,6 +1481,10 @@ struct OrdinaryDecalFaceInputs final {
     const std::vector<std::uint32_t>& indices;
     const std::vector<MeshPrimitive>& primitives;
     const MeshPrimitive& primitive;
+    // Optional original material UVs, one per final index corner. Private
+    // export uses these to sample the protected SYFI/XCAF base after the
+    // final atlas has split vertices and replaced their output UVs.
+    const std::vector<core3d::decal_layer::bake::UV>* baseUVByCorner;
     TangentBasis tangentBasis;
     const std::vector<Float4>& cornerTangents;
     const Double3& sourceOrigin;
@@ -1581,10 +1585,15 @@ bool PrepareOrdinaryDecalFace(
     // The deterministic ordinary chart raster is bounded
     // independently of authored input size. Normalized UVs
     // preserve exact mesh/image correspondence at any size.
-    anOutputWidth = std::min<std::uint32_t>(
-        anOutputWidth, 64);
-    anOutputHeight = std::min<std::uint32_t>(
-        anOutputHeight, 64);
+    if (theInputs.baseUVByCorner) {
+        anOutputWidth = 64;
+        anOutputHeight = 64;
+    } else {
+        anOutputWidth = std::min<std::uint32_t>(
+            anOutputWidth, 64);
+        anOutputHeight = std::min<std::uint32_t>(
+            anOutputHeight, 64);
+    }
 
     std::size_t aBaseBytes = 0;
     if (!theInputs.operation.CheckedProduct(anOutputWidth, anOutputHeight, 4,
@@ -1655,11 +1664,62 @@ bool PrepareOrdinaryDecalFace(
             const dl::bake::UV anOutputUV{
                 (double(x) + 0.5) / anOutputWidth,
                 1.0 - (double(y) + 0.5) / anOutputHeight};
+            dl::bake::UV aBaseUV = anOutputUV;
+            if (theInputs.baseUVByCorner) {
+                const auto& aCornerUVs = *theInputs.baseUVByCorner;
+                if (aCornerUVs.size() != theInputs.indices.size()
+                    || theInputs.primitive.firstIndex
+                        > theInputs.indices.size()
+                    || theInputs.primitive.indexCount
+                        > theInputs.indices.size()
+                            - theInputs.primitive.firstIndex
+                    || theInputs.primitive.indexCount % 3 != 0)
+                    return false;
+                bool aFound = false;
+                for (std::size_t anOffset = 0;
+                     anOffset < theInputs.primitive.indexCount;
+                     anOffset += 3) {
+                    dl::bake::Triangle aTriangle;
+                    for (std::size_t aCorner = 0; aCorner < 3; ++aCorner) {
+                        const std::size_t aCornerIndex =
+                            theInputs.primitive.firstIndex
+                            + anOffset + aCorner;
+                        const std::uint32_t aVertexIndex =
+                            theInputs.indices[aCornerIndex];
+                        if (aVertexIndex >= theInputs.vertices.size())
+                            return false;
+                        const Vertex& aVertex =
+                            theInputs.vertices[aVertexIndex];
+                        aTriangle.outputPixels[aCorner] = {
+                            double(aVertex.textureU) * anOutputWidth,
+                            (1.0 - double(aVertex.textureV))
+                                * anOutputHeight};
+                    }
+                    std::array<double, 3> aWeights{};
+                    if (!dl::bake::BarycentricTopLeft(aTriangle,
+                            {double(x) + 0.5, double(y) + 0.5},
+                            aWeights))
+                        continue;
+                    if (aFound) return false;
+                    aFound = true;
+                    aBaseUV = {};
+                    for (std::size_t aCorner = 0; aCorner < 3; ++aCorner) {
+                        const dl::bake::UV& aUV = aCornerUVs[
+                            theInputs.primitive.firstIndex
+                            + anOffset + aCorner];
+                        aBaseUV.u += aWeights[aCorner] * aUV.u;
+                        aBaseUV.v += aWeights[aCorner] * aUV.v;
+                    }
+                }
+                // Pixels outside this receiver's final chart are never read
+                // by its primitive; retain the neutral base there.
+                if (!aFound) aBaseUV = anOutputUV;
+            }
             std::array<double, 4> aSample{1.0, 1.0, 1.0, 1.0};
             if (aBaseSource.has_value()) {
                 const dl::bake::UV aSourceUV =
                     dl::bake::Transform(
-                        anOutputUV, aBaseTransform);
+                        aBaseUV, aBaseTransform);
                 aSample = dl::bake::Sample(*aBaseSource,
                     aSourceUV, aBaseSRGB,
                     aBaseTransform.wrapU,
@@ -11523,6 +11583,7 @@ struct PrivateDecalCapture::Impl final {
     struct Owner final {
         struct Receiver final {
             decal_layer::ReceiverReceipt receipt;
+            dependent_replay::FaceImageGeometricReceipt geometricReceipt;
             TopoDS_Face originalFace;
             TopoDS_Face disposableFace;
             std::uint32_t originalFaceIndex = 0;
@@ -12591,7 +12652,8 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
                     || originalIndex <= 0 || disposableIndex <= 0
                     || originalIndex > INT32_MAX
                     || disposableIndex > INT32_MAX) return false;
-                value.receivers.push_back({receipt, originalFace,
+                value.receivers.push_back({receipt, matchedReceipt,
+                    originalFace,
                     TopoDS::Face(copied),
                     std::uint32_t(originalIndex - 1),
                     std::uint32_t(disposableIndex - 1)});
@@ -16050,7 +16112,147 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                     PrivateSite::ReceiverProductStorage)) return {};
             std::vector<decal_layer::bake::FaceProduct> products;
             products.reserve(owner.receivers.size());
+            const auto& protectedItem =
+                source.instances[occurrence.instance];
+#ifdef DEBUG
+            if (debugObservation)
+                debugObservation->failureStage = "receiver-base-uv-authority";
+#endif
+            if (protectedItem.meshIndex >= source.meshes.size()) return {};
+            const auto& protectedMesh =
+                source.meshes[protectedItem.meshIndex];
+            if (protectedMesh.indices.size()
+                    != finalMesh.indices.size()) return {};
+#ifdef DEBUG
+            if (debugObservation)
+                debugObservation->failureStage = "receiver-base-uv-storage";
+#endif
+            std::size_t baseUVBytes = 0;
+            if (!privateOperation.CheckedProduct(
+                    protectedMesh.indices.size(),
+                    sizeof(decal_layer::bake::UV), 1, baseUVBytes,
+                    PrivateSite::ReceiverProofStorage)) return {};
+            decal_layer::bake::accounting::Ticket baseUVTicket;
+            if (!baseUVTicket.acquire(privateOperation,
+                    PrivateDimension::PrivateStorage, baseUVBytes,
+                    PrivateRetention::Scratch,
+                    PrivateSite::ReceiverProofStorage)
+                || !privateOperation.EnterAllocation(
+                    PrivateSite::ReceiverProofStorage)) return {};
+#ifdef DEBUG
+            if (debugObservation)
+                debugObservation->failureStage = "receiver-base-uv-values";
+#endif
+            std::vector<decal_layer::bake::UV> baseUVByCorner;
+            baseUVByCorner.reserve(protectedMesh.indices.size());
+            for (const std::uint32_t vertexIndex :
+                 protectedMesh.indices) {
+                if (vertexIndex >= protectedMesh.vertices.size())
+                    return {};
+                const Vertex& vertex =
+                    protectedMesh.vertices[vertexIndex];
+                if (!IsFinite(vertex.textureU)
+                    || !IsFinite(vertex.textureV)
+                    || vertex.textureU < 0.0f || vertex.textureU > 1.0f
+                    || vertex.textureV < 0.0f || vertex.textureV > 1.0f)
+                    return {};
+                baseUVByCorner.push_back({vertex.textureU,
+                    vertex.textureV});
+            }
+#ifdef DEBUG
+            if (debugObservation)
+                debugObservation->failureStage = "receiver-occluder-span";
+#endif
+            const Double3 privateBoundsSpan = decal_math::Subtract(
+                privateOccluderBounds.maximum,
+                privateOccluderBounds.minimum);
+            const double privateOccluderSpan = std::sqrt(
+                decal_math::Dot(privateBoundsSpan, privateBoundsSpan));
+            if (!IsFinite(privateOccluderSpan)
+                || privateOccluderSpan <= 0.0) return {};
             for (const auto& receiver : owner.receivers) {
+#ifdef DEBUG
+                if (debugObservation)
+                    debugObservation->failureStage = "receiver-final-primitive";
+#endif
+                const auto primitive = std::find_if(
+                    finalMesh.primitives.begin(), finalMesh.primitives.end(),
+                    [&](const MeshPrimitive& value) {
+                        return value.faceIndex
+                            == receiver.disposableFaceIndex;
+                    });
+                if (primitive == finalMesh.primitives.end()
+                    || !primitive->hasTextureCoordinates) return {};
+                const std::size_t primitiveIndex = std::size_t(
+                    primitive - finalMesh.primitives.begin());
+                if (primitiveIndex
+                        >= protectedItem.primitiveBindings.size()) return {};
+                const std::uint32_t materialIndex =
+                    protectedItem.primitiveBindings[primitiveIndex]
+                        .materialIndex;
+                if (materialIndex >= source.materials.size()) return {};
+                std::vector<std::size_t> layerIndices;
+                for (std::size_t layerIndex = 0;
+                     layerIndex < owner.definition.layers.size();
+                     ++layerIndex) {
+                    const auto& layer = owner.definition.layers[layerIndex];
+                    if (layer.image.role == face_image::Role::BaseColor
+                        && decal_layer::bake::SameReceipt(
+                            decal_layer::bake::IntentReceipt(layer),
+                            receiver.receipt))
+                        layerIndices.push_back(layerIndex);
+                }
+                if (layerIndices.empty()) return {};
+                decal_layer::bake::Input realInput;
+                decal_layer::ReceiverReceipt realReceiver;
+                const OrdinaryDecalFaceInputs ordinaryInputs{
+                    decalCapture->impl_->privateDocument,
+                    receiver.originalFace,
+                    receiver.geometricReceipt,
+                    finalMesh.vertices,
+                    finalMesh.indices,
+                    finalMesh.primitives,
+                    *primitive,
+                    &baseUVByCorner,
+                    finalMesh.tangentBasis,
+                    finalMesh.cornerTangents,
+                    definitionData.sourceOrigin,
+                    item.worldFromObject,
+                    item.reversesWinding,
+                    occurrence.instance,
+                    receiver.originalFaceIndex,
+                    source.materials[materialIndex],
+                    protectedItem.faceImageBindings,
+                    source.textures,
+                    owner.definition,
+                    layerIndices,
+                    privateOccluders,
+                    privateOccluderSpan,
+                    privateOccluderProof,
+                    owner.canonicalBytes,
+                    owner.source.sourceProof,
+                    decalCapture->impl_->metersPerUnit,
+                    privateOperation,
+                    decalCapture->impl_->budget,
+                };
+#ifdef DEBUG
+                if (debugObservation)
+                    debugObservation->failureStage = "receiver-ordinary-prepare";
+#endif
+                if (!PrepareOrdinaryDecalFace(
+                        ordinaryInputs, realInput, realReceiver)
+                    || !decal_layer::bake::SameReceipt(
+                        realReceiver, receiver.receipt)) return {};
+                decal_layer::bake::FaceProduct realProduct;
+#ifdef DEBUG
+                if (debugObservation)
+                    debugObservation->failureStage = "receiver-ordinary-produce";
+#endif
+                if (decal_layer::bake::ProduceFace(
+                        realInput, realReceiver, realProduct)
+                        != decal_layer::bake::Status::Baked) return {};
+                products.push_back(std::move(realProduct));
+                continue;
                 std::vector<const decal_layer::Layer*> layers;
                 for (const auto& layer : owner.definition.layers)
                     if (layer.image.role == face_image::Role::BaseColor
@@ -17960,6 +18162,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                         aMesh.indices,
                         aMesh.primitives,
                         *aPrimitive,
+                        nullptr,
                         aMesh.tangentBasis,
                         aMesh.cornerTangents,
                         aNative.sourceOrigin,

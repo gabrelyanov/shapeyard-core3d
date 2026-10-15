@@ -620,6 +620,10 @@ __attribute__((objc_subclassing_restricted))
 //! all five painted output roles from the same retained carrier.
 + (NSData *_Nullable)debugE4RetainedCapRoleFixtureAssetDataWithResourceBytes:
     (NSArray<NSData *> *)resourceBytes metersPerUnit:(NSNumber *)metersPerUnit;
+//! R receiver fixture: nonwhite original SYFI plus two ordered base-colour
+//! layers and a distinct coverage mask on the unchanged retained cap.
++ (NSData *_Nullable)debugE4MixedOriginalReceiverFixtureAssetDataWithResourceBytes:
+    (NSArray<NSData *> *)resourceBytes metersPerUnit:(NSNumber *)metersPerUnit;
 //! Adds frozen five-role SYFI sources to one real member of the existing
 //! persisted E2 2048/4 atlas. The sibling receives neither SYFI nor SYDL.
 - (NSNumber *)debugInstallE4PaintedAtlasSourcesForEntityIdentifier:
@@ -633,6 +637,8 @@ __attribute__((objc_subclassing_restricted))
 //! Installs one strict SYDL/1 layer after resolving the carrier's +Z face
 //! through production B2. Returns a boxed BOOL for selector-safe test use.
 - (NSNumber *)debugInstallE4RetainedCapLayerForEntityIdentifier:
+    (NSString *)entityIdentifier;
+- (NSNumber *)debugInstallE4MixedOriginalReceiverForEntityIdentifier:
     (NSString *)entityIdentifier;
 - (NSNumber *)debugAddE4RetainedCapSecondReceiverForEntityIdentifier:
     (NSString *)entityIdentifier;
