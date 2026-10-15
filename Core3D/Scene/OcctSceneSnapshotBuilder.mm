@@ -12046,6 +12046,10 @@ bool PrivateDecalCapture::Impl::recheckProtected(
                 fence.colorSpace = layer.image.colorSpace;
                 if (!(fence == captured.fence) || captured.order != index
                     || captured.memberIndex != 0
+                    || captured.origin
+                        != painted_atlas_bake::kernel::SourceOrigin::OrderedLayer
+                    || captured.materialSlot
+                        != painted_atlas_bake::kernel::MaterialSlot::None
                     || captured.maskPresent != layer.mask.present)
                     return false;
 
@@ -12655,6 +12659,8 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
                     layer.image.normalizedContent;
                 captured.fence.role = layer.image.role;
                 captured.fence.colorSpace = layer.image.colorSpace;
+                captured.origin =
+                    painted_atlas_bake::kernel::SourceOrigin::OrderedLayer;
                 captured.envelope = std::move(envelope);
                 captured.memberIndex = 0;
                 captured.order = layerIndex;

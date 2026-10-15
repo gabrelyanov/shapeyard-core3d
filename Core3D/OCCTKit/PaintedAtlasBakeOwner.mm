@@ -3,6 +3,7 @@
 #import <ImageIO/ImageIO.h>
 
 #include "PaintedAtlasBake.hxx"
+#include "NativeOpeningDependentReplay.hxx"
 #include "OcctDocument.h"
 
 #include <Image_Texture.hxx>
@@ -10,11 +11,17 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_VisMaterial.hxx>
 #include <XCAFDoc_VisMaterialTool.hxx>
+#include <BRepBndLib.hxx>
+#include <Bnd_Box.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS.hxx>
 
 #ifdef DEBUG
 #include <atomic>
 #endif
 #include <new>
+#include <tuple>
 
 namespace core3d::painted_atlas_bake::kernel {
 namespace {
@@ -607,6 +614,7 @@ std::size_t BorrowedBindingCount(const TDF_Label& owner) noexcept {
 struct BindingReadAdmission final {
     decal_layer::bake::accounting::Ticket scratch;
     std::size_t bindingCount = 0;
+    std::size_t canonicalBytes = 0;
 };
 
 Outcome PreflightBindingRead(
@@ -664,6 +672,7 @@ Outcome PreflightBindingRead(
                 return Outcome::OverBudget;
         }
         const std::size_t canonicalBytes = hexBytes / 2U + hexBytes % 2U;
+        admission.canonicalBytes = canonicalBytes;
         std::size_t bindingBytes = 0;
         if (!operation.CheckedProduct(admission.bindingCount,
                 sizeof(fi::Binding), 1, bindingBytes,
@@ -847,6 +856,57 @@ TextureCapture SyntheticEnvelope(const Handle(Image_Texture)& texture, const Own
     } catch (...) { output = {}; return TextureCapture::Missing; }
 }
 
+bool ResolveFaceBindingIndex(
+    const Handle(TDocStd_Document)& document,
+    const TDF_Label& owner,
+    const Digest& selectorProof,
+    std::size_t& faceIndex) noexcept {
+    faceIndex = std::numeric_limits<std::size_t>::max();
+    try {
+        if (document.IsNull() || owner.IsNull()
+            || !retained_recipe::Nonzero(selectorProof)) return false;
+        const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(owner);
+        Standard_Real metersPerUnit = 0.0;
+        Bnd_Box stageBox;
+        BRepBndLib::AddOptimal(shape, stageBox, Standard_False, Standard_False);
+        if (shape.IsNull() || stageBox.IsVoid() || stageBox.IsWhole()
+            || stageBox.IsOpen()
+            || !XCAFDoc_DocumentTool::GetLengthUnit(document, metersPerUnit)
+            || !(metersPerUnit > 0.0)) return false;
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(shape, TopAbs_FACE, faces);
+        retained_edge_treatment::ReplayBudget budget;
+        int matches = 0;
+        for (Standard_Integer index = 1; index <= faces.Extent(); ++index) {
+            const TopoDS_Face candidate = TopoDS::Face(faces.FindKey(index));
+            dependent_replay::FaceImageGeometricReceipt derived;
+            const auto status = dependent_replay::detail::DeriveFaceImageReceipt(
+                stageBox, candidate, metersPerUnit, budget, derived);
+            if (status == dependent_replay::detail::FaceImageDeriveStatus::Budget)
+                return false;
+            if (status != dependent_replay::detail::FaceImageDeriveStatus::Derived)
+                continue;
+            Digest proof{};
+            if (!dependent_replay::FaceImageReceiptProof(derived, proof)
+                || proof != selectorProof) continue;
+            dependent_replay::FaceImageGeometricReceipt resolved;
+            TopoDS_Face resolvedFace;
+            if (dependent_replay::detail::ResolveFaceImageReceipt(
+                    shape, derived.intent, metersPerUnit, budget,
+                    resolved, resolvedFace)
+                    != retained_face_selector::Refusal::None
+                || !(resolved == derived) || !resolvedFace.IsSame(candidate))
+                return false;
+            ++matches;
+            faceIndex = std::size_t(index - 1);
+        }
+        return matches == 1;
+    } catch (...) {
+        faceIndex = std::numeric_limits<std::size_t>::max();
+        return false;
+    }
+}
+
 // Captures every SYFI/1 binding of every member plus the XCAF texture slots
 // of painted members. Outcome-typed: an empty capture means there is nothing
 // to bake (Refused); a dangling or undecodable resource is MissingResource;
@@ -924,13 +984,54 @@ Outcome CaptureSources(const Handle(TDocStd_Document)& document,
                 return Outcome::OverBudget;
             }
         }
-        for (const auto& member : members.members) {
+        std::size_t rawSlotCount = 0, rawSlotBytes = 0;
+        std::size_t canonicalWitnessBytes = 0;
+        if (!operation.CheckedProduct(members.members.size(), 6U, 1U,
+                rawSlotCount, activeAllocation)
+            || !operation.CheckedProduct(rawSlotCount,
+                sizeof(RawSlotWitness), 1U, rawSlotBytes, activeAllocation)
+            || !operation.CheckedProduct(members.members.size(),
+                sizeof(CanonicalBindingWitness), 1U,
+                canonicalWitnessBytes, activeAllocation)
+            || !staged.rawSlotsTicket.acquire(operation,
+                decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                rawSlotBytes,
+                decal_layer::bake::accounting::Retention::Retained,
+                activeAllocation)
+            || !staged.canonicalBindingsTicket.acquire(operation,
+                decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                canonicalWitnessBytes,
+                decal_layer::bake::accounting::Retention::Retained,
+                activeAllocation)
+            || !operation.EnterAllocation(activeAllocation))
+            return Outcome::OverBudget;
+        staged.rawSlots.reserve(rawSlotCount);
+        staged.canonicalBindings.reserve(members.members.size());
+        if (staged.rawSlots.capacity() != rawSlotCount
+            || staged.canonicalBindings.capacity() != members.members.size()) {
+            operation.AllocationFailed(activeAllocation);
+            return Outcome::OverBudget;
+        }
+        for (std::size_t capturedMemberIndex = 0;
+             capturedMemberIndex < members.members.size();
+             ++capturedMemberIndex) {
+            const auto& member = members.members[capturedMemberIndex];
             BindingReadAdmission bindingAdmission;
             const Outcome bindingPreflight = PreflightBindingRead(
                 document, member.ownerLabel, operation, bindingAdmission);
             if (bindingPreflight != Outcome::Prepared) return bindingPreflight;
             fi::Definition definition;
             std::vector<std::uint8_t> bindingBytes;
+            CanonicalBindingWitness canonicalBinding;
+            canonicalBinding.owner = member.slot.owner;
+            if (bindingAdmission.canonicalBytes != 0
+                && (!canonicalBinding.bytesTicket.acquire(operation,
+                    decal_layer::bake::accounting::StorageDimension::EncodedTexture,
+                    bindingAdmission.canonicalBytes,
+                    decal_layer::bake::accounting::Retention::Retained,
+                    decal_layer::bake::accounting::FailureSite::
+                        BindingReadMaterialize)))
+                return Outcome::OverBudget;
             activeAllocation =
                 decal_layer::bake::accounting::FailureSite::BindingReadMaterialize;
             if (!operation.EnterAllocation(activeAllocation))
@@ -943,6 +1044,8 @@ Outcome CaptureSources(const Handle(TDocStd_Document)& document,
             if (state == fi::persistence::bindings::ReadState::Malformed)
                 return Outcome::Malformed;
             if (state == fi::persistence::bindings::ReadState::Present) {
+                if (bindingBytes.size() != bindingAdmission.canonicalBytes)
+                    return Outcome::Malformed;
                 for (const auto& binding : definition.bindings) {
                     ResourceReadAdmission readAdmission;
                     const Outcome preflight = PreflightResourceRead(
@@ -970,6 +1073,12 @@ Outcome CaptureSources(const Handle(TDocStd_Document)& document,
                     source.fence.role = binding.role;
                     source.fence.colorSpace = binding.colorSpace;
                     source.fence.transform = binding.transform;
+                    source.origin = kernel::SourceOrigin::FaceBinding;
+                    source.faceIdentifier = binding.face;
+                    source.memberIndex = capturedMemberIndex;
+                    if (!ResolveFaceBindingIndex(document, member.ownerLabel,
+                            binding.selectorProof, source.faceIndex))
+                        return Outcome::StaleBinding;
                     source.envelope = resource.value->envelope;
                     source.originalBytesTicket =
                         std::move(readAdmission.originalBytes);
@@ -985,22 +1094,28 @@ Outcome CaptureSources(const Handle(TDocStd_Document)& document,
                     staged.values.push_back(std::move(source));
                 }
             }
-            if (!member.painted) continue;
+            canonicalBinding.bytes = std::move(bindingBytes);
+            if (canonicalBinding.bytes.capacity()
+                    > canonicalBinding.bytesTicket.bytes)
+                return Outcome::OverBudget;
+            staged.canonicalBindings.push_back(std::move(canonicalBinding));
             TDF_Label materialLabel;
             XCAFDoc_VisMaterialTool::GetShapeMaterial(member.ownerLabel, materialLabel);
             Handle(XCAFDoc_VisMaterial) material;
             if (!materialLabel.IsNull() && !materialTool.IsNull())
                 material = materialTool->GetMaterial(materialLabel);
-            // A member marked painted with no readable material has no
-            // document-owned image content at all.
-            // A member marked painted through SYFI/1 alone has no XCAF
-            // material; its bindings above are its painted content.
-            if (material.IsNull()) continue;
-            const auto add = [&](const Handle(Image_Texture)& texture, Role role) -> Outcome {
-                if (texture.IsNull()) return Outcome::Prepared;
-                for (const auto& existing : staged.values)
-                    if (existing.fence.owner == member.slot.owner && existing.fence.role == role)
-                        return Outcome::Prepared;
+            const auto add = [&](const Handle(Image_Texture)& texture,
+                                 Role role,
+                                 kernel::MaterialSlot slot) -> Outcome {
+                RawSlotWitness witness;
+                witness.owner = member.slot.owner;
+                witness.memberIndex = capturedMemberIndex;
+                witness.slot = slot;
+                witness.present = !texture.IsNull();
+                if (texture.IsNull()) {
+                    staged.rawSlots.push_back(std::move(witness));
+                    return Outcome::Prepared;
+                }
                 CapturedSource source;
                 const auto captured = SyntheticEnvelope(texture, member.slot.owner, role,
                     member.slot.source.geometry, member.slot.source.recipe, source,
@@ -1008,6 +1123,20 @@ Outcome CaptureSources(const Handle(TDocStd_Document)& document,
                 if (captured == TextureCapture::Foreign) return Outcome::ForeignResource;
                 if (captured == TextureCapture::OverBudget) return Outcome::OverBudget;
                 if (captured != TextureCapture::Captured) return Outcome::MissingResource;
+                source.origin = kernel::SourceOrigin::OwnerMaterialSlot;
+                source.materialSlot = slot;
+                source.memberIndex = capturedMemberIndex;
+                witness.fence = source.fence;
+                witness.originalBytes = source.envelope.originalBytes.size();
+                witness.workingBytes = source.envelope.workingBytes.size();
+                staged.rawSlots.push_back(std::move(witness));
+                // Precedence is evaluated only after the raw slot has been
+                // measured. A face binding or earlier concrete slot can make
+                // this source ineffective without erasing its witness.
+                for (const auto& existing : staged.values)
+                    if (existing.fence.owner == member.slot.owner
+                        && existing.fence.role == role)
+                        return Outcome::Prepared;
                 if (staged.values.size() >= staged.values.capacity()) {
                     operation.AllocationFailed(
                         decal_layer::bake::accounting::FailureSite::
@@ -1016,29 +1145,42 @@ Outcome CaptureSources(const Handle(TDocStd_Document)& document,
                 }
                 staged.values.push_back(std::move(source)); return Outcome::Prepared;
             };
-            if (material->HasCommonMaterial()) {
-                const auto added = add(material->CommonMaterial().DiffuseTexture,
-                                       Role::BaseColor);
+            Handle(Image_Texture) commonDiffuse, pbrBase, pbrEmissive,
+                pbrMetallicRoughness, pbrOcclusion, pbrNormal;
+            if (!material.IsNull() && material->HasCommonMaterial())
+                commonDiffuse = material->CommonMaterial().DiffuseTexture;
+            if (!material.IsNull() && material->HasPbrMaterial()) {
+                const auto& pbr = material->PbrMaterial();
+                pbrBase = pbr.BaseColorTexture;
+                pbrEmissive = pbr.EmissiveTexture;
+                pbrMetallicRoughness = pbr.MetallicRoughnessTexture;
+                pbrOcclusion = pbr.OcclusionTexture;
+                pbrNormal = pbr.NormalTexture;
+            }
+            const std::array<std::tuple<Handle(Image_Texture), Role,
+                kernel::MaterialSlot>, 6> slots{{
+                {commonDiffuse, Role::BaseColor,
+                    kernel::MaterialSlot::CommonDiffuse},
+                {pbrBase, Role::BaseColor,
+                    kernel::MaterialSlot::PBRBaseColor},
+                {pbrEmissive, Role::Emissive,
+                    kernel::MaterialSlot::PBREmissive},
+                {pbrMetallicRoughness, Role::MetallicRoughness,
+                    kernel::MaterialSlot::PBRMetallicRoughness},
+                {pbrOcclusion, Role::Occlusion,
+                    kernel::MaterialSlot::PBROcclusion},
+                {pbrNormal, Role::Normal,
+                    kernel::MaterialSlot::PBRNormal},
+            }};
+            for (const auto& slot : slots) {
+                const Outcome added = add(std::get<0>(slot), std::get<1>(slot),
+                    std::get<2>(slot));
                 if (added != Outcome::Prepared) return added;
             }
-            if (material->HasPbrMaterial()) {
-                const auto& pbr = material->PbrMaterial();
-                if (add(pbr.BaseColorTexture, Role::BaseColor) != Outcome::Prepared
-                    || add(pbr.EmissiveTexture, Role::Emissive) != Outcome::Prepared
-                    || add(pbr.MetallicRoughnessTexture, Role::MetallicRoughness) != Outcome::Prepared
-                    || add(pbr.OcclusionTexture, Role::Occlusion) != Outcome::Prepared
-                    || add(pbr.NormalTexture, Role::Normal) != Outcome::Prepared) {
-                    // Recompute the first failing outcome (the calls are
-                    // idempotent: already-captured roles short-circuit).
-                    Outcome failure = add(pbr.BaseColorTexture, Role::BaseColor);
-                    if (failure == Outcome::Prepared) failure = add(pbr.EmissiveTexture, Role::Emissive);
-                    if (failure == Outcome::Prepared) failure = add(pbr.MetallicRoughnessTexture, Role::MetallicRoughness);
-                    if (failure == Outcome::Prepared) failure = add(pbr.OcclusionTexture, Role::Occlusion);
-                    if (failure == Outcome::Prepared) failure = add(pbr.NormalTexture, Role::Normal);
-                    return failure;
-                }
-            }
         }
+        if (staged.rawSlots.size() != rawSlotCount
+            || staged.canonicalBindings.size() != members.members.size())
+            return Outcome::Malformed;
         if (staged.empty()) return Outcome::Refused;
         std::sort(staged.values.begin(), staged.values.end(),
                   [&](const CapturedSource& a, const CapturedSource& b) {
@@ -1053,6 +1195,18 @@ Outcome CaptureSources(const Handle(TDocStd_Document)& document,
                 return std::uint8_t(a.fence.role) < std::uint8_t(b.fence.role);
             return a.fence.binding < b.fence.binding;
         });
+        for (std::size_t first = 0; first < staged.values.size(); ++first)
+            for (std::size_t other = first + 1;
+                 other < staged.values.size(); ++other) {
+                const auto& a = staged.values[first];
+                const auto& b = staged.values[other];
+                if (a.origin == kernel::SourceOrigin::FaceBinding
+                    && b.origin == kernel::SourceOrigin::FaceBinding
+                    && a.fence.owner == b.fence.owner
+                    && a.fence.role == b.fence.role
+                    && a.faceIndex == b.faceIndex)
+                    return Outcome::StaleBinding;
+            }
         for (std::size_t sourceIndex = 0;
              sourceIndex < staged.values.size(); ++sourceIndex) {
             auto& source = staged.values[sourceIndex];
@@ -1101,6 +1255,8 @@ Outcome DecodeCapturedSources(
         for (const auto& source : captured) {
             kernel::Source decoded;
             decoded.fence = source.fence;
+            decoded.origin = source.origin;
+            decoded.materialSlot = source.materialSlot;
             decoded.memberIndex = source.memberIndex;
             decoded.faceIndex = source.faceIndex;
             decoded.order = source.order;
@@ -1137,11 +1293,16 @@ Outcome DecodeCapturedSources(
     }
 }
 
-bool SameCapture(const std::vector<CapturedSource>& first,
-                 const std::vector<CapturedSource>& second) noexcept {
-    if (first.size() != second.size()) return false;
+bool SameCapture(const CapturedSourceStorage& first,
+                 const CapturedSourceStorage& second) noexcept {
+    if (first.size() != second.size()
+        || first.rawSlots != second.rawSlots
+        || first.canonicalBindings != second.canonicalBindings) return false;
     for (std::size_t index = 0; index < first.size(); ++index)
         if (!(first[index].fence == second[index].fence)
+            || first[index].origin != second[index].origin
+            || first[index].materialSlot != second[index].materialSlot
+            || first[index].faceIdentifier != second[index].faceIdentifier
             || first[index].envelope.originalBytes != second[index].envelope.originalBytes
             || first[index].envelope.workingBytes != second[index].envelope.workingBytes
             || first[index].memberIndex != second[index].memberIndex
@@ -2658,7 +2819,7 @@ Outcome Commit(Staging& staging, const Handle(TDocStd_Document)& document) noexc
             resetStaging(); return recaptured;
         }
         if (recaptured != Outcome::Prepared
-            || !SameCapture(staging.capturedSources.values, sources.values)) {
+            || !SameCapture(staging.capturedSources, sources)) {
             resetStaging(); return Outcome::StaleBinding;
         }
         if (staging.unchanged) { resetStaging(); return Outcome::Committed; }
@@ -2922,6 +3083,16 @@ Outcome CaptureForExport(ExportCapture& capture,
             return Outcome::OverBudget;
         }
         if (staged.canonicalAtlasBytes.empty()) return Outcome::Malformed;
+        if (!AcquireOrdinaryStorage(staged.canonicalBakeBytesTicket,
+                staged.operationView(), StorageDimension::EncodedTexture,
+                savedBake.bytes.size(), Retention::Retained,
+                activeAllocation)) return Outcome::OverBudget;
+        staged.canonicalBakeBytes.reserve(savedBake.bytes.size());
+        staged.canonicalBakeBytes = savedBake.bytes;
+        if (staged.canonicalBakeBytes.empty()
+            || staged.canonicalBakeBytes.capacity()
+                > staged.canonicalBakeBytesTicket.bytes)
+            return Outcome::Malformed;
         capture = std::move(staged);
         return Outcome::Prepared;
     } catch (const std::bad_alloc&) {

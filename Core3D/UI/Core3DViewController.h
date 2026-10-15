@@ -681,6 +681,16 @@ __attribute__((objc_subclassing_restricted))
         (NSString *)entityIdentifier
         resourceBytes:(NSArray<NSData *> *)resourceBytes
     NS_SWIFT_NAME(debugE4LayerCompositorComposition(entityIdentifier:resourceBytes:));
+
+- (NSNumber *)debugInstallE4XCAFSourceSlotsForEntityIdentifiers:
+        (NSArray<NSString *> *)entityIdentifiers
+        resourceBytes:(NSArray<NSData *> *)resourceBytes
+    NS_SWIFT_NAME(debugInstallE4XCAFSourceSlots(entityIdentifiers:resourceBytes:));
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4XCAFTypedSourceObservationForEntityIdentifier:
+        (NSString *)entityIdentifier
+        resourceBytes:(NSArray<NSData *> *)resourceBytes
+    NS_SWIFT_NAME(debugE4XCAFTypedSourceObservation(entityIdentifier:resourceBytes:));
 //! Runs the real cold-reopened ordinary receiver, observes input/output/PNG
 //! ticket lifetimes, and denies the next receiver encoder reservation.
 - (nullable NSDictionary<NSString *,id> *)
