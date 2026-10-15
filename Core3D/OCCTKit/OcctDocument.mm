@@ -67,6 +67,9 @@ struct Cut475Scope {
 #include "RetainedSolidAttribute.hxx"
 #include "CompositeRecipeAttribute.hxx"
 #include "AuthoredParameterNativeOwner.hxx"
+#if DEBUG
+#include "../UI/OrdinaryEditController.hpp"
+#endif
 
 #include <XCAFDoc_DocumentTool.hxx>
 #include <cstring>
@@ -1525,24 +1528,47 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
     const core3d::retained_edge_treatment::Edit& edit,
     const core3d::retained_edge_treatment::DetachedResult& built,
     core3d::retained_edge_treatment::Record& readback,
-    core3d::retained_edge_treatment::Refusal& refusal) noexcept {
+    core3d::retained_edge_treatment::Refusal& refusal
+#if DEBUG
+    , core3d::debug::RetainedEdgeTreatmentStageFault* debugFault
+#endif
+    ) noexcept {
     using namespace core3d::retained_edge_treatment;
+#if DEBUG
+    namespace r1d = core3d::debug;
+    const auto fireFault = [debugFault](r1d::RetainedEdgeTreatmentFaultSite site) {
+        if (!debugFault || !debugFault->consumeAt(site)) return false;
+        if (debugFault->delivery()
+            == r1d::RetainedEdgeTreatmentFaultDelivery::ThrowStandardFailure)
+            throw Standard_Failure("SAB-N2 retained edge-treatment stage fault");
+        return true;
+    };
+#endif
     readback={};refusal=Refusal::StageFailed;
+    std::unique_ptr<core3d::treatment_history::Companion> treatmentCompanion;
+    bool beforeCaptured = false;
+    const auto fail = [this, &treatmentCompanion, &beforeCaptured]() noexcept {
+        if (beforeCaptured && treatmentCompanion && !myPendingTreatmentCompanion) {
+            treatmentCompanion->afterCaptured = false;
+            myPendingTreatmentCompanion = std::move(treatmentCompanion);
+        }
+        return Standard_False;
+    };
     try {
         if(![NSThread isMainThread]||myOcafDoc.IsNull()||!myOcafDoc->HasOpenCommand()
             ||original.ownerLabel_.IsNull()||original.ownerLabel_.Data()!=myOcafDoc->GetData()
-            ||built.nonce_!=original.nonce_||built.result_.IsNull())return Standard_False;
+            ||built.nonce_!=original.nonce_||built.result_.IsNull())return fail();
         // A companion from an earlier command remains recovery ownership and
         // may not be overwritten. The equal-depth case is this open command's
         // existing multi-source staging behavior.
         if(myPendingTreatmentCompanion
             &&myPendingTreatmentCompanion->undoDepthBefore!=myOcafDoc->GetAvailableUndos()){
-            refusal=Refusal::Busy;return Standard_False;
+            refusal=Refusal::Busy;return fail();
         }
-        std::optional<Record> live;if(!Read(myOcafDoc,original.ownerLabel_,live,refusal))return Standard_False;
+        std::optional<Record> live;if(!Read(myOcafDoc,original.ownerLabel_,live,refusal))return fail();
         if(bool(live)!=bool(original.definition_)||(live&&live->value->bytes!=original.definitionBytes_)
             ||!XCAFDoc_ShapeTool::GetShape(original.ownerLabel_).IsEqual(original.current_)){
-            refusal=Refusal::StaleSnapshot;return Standard_False;
+            refusal=Refusal::StaleSnapshot;return fail();
         }
         // L04/L05: commit validation is one sequential continuation beginning
         // at detached-build debt. Verify the complete candidate before any
@@ -1554,7 +1580,7 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
         const B2BudgetStageGuard b2StageGuard{b2StageEntry,stageBudget,"commit-stage"};
 #endif
         if(!VerifyCurrent(built.base_,built.result_,built.definition_,built.proofs_,stageBudget,refusal))
-            return Standard_False;
+            return fail();
         // C28: reserve the unbounded flag-map passes and both protected
         // forward/prior-state verification sides before mutation. Recovery
         // consumes these admissions; it never asks an exhausted operation for
@@ -1569,7 +1595,7 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
                 !=WalkStatus::Completed
             ||ChargeTraversal(built.result_,stageBudget,neverCancelled,Site::C28CompanionCapture)
                 !=WalkStatus::Completed){
-            refusal=Refusal::Budget;return Standard_False;
+            refusal=Refusal::Budget;return fail();
         }
         // Paired staging prevalidation: capture and validate the complete old
         // owner state while its carrier is still current, before any mutation.
@@ -1586,7 +1612,7 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
             ||bool(priorState.edgeTreatment)!=bool(live)
             ||(priorState.edgeTreatment&&live
                 &&priorState.edgeTreatment->value->bytes!=live->value->bytes)){
-            refusal=Refusal::StageFailed;return Standard_False;
+            refusal=Refusal::StageFailed;return fail();
         }
         if(const auto*profileSource=std::get_if<core3d::profile::Parameters>(&original.source_)){
             (void)profileSource;
@@ -1594,7 +1620,7 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
                 ||!priorState.profile.label.IsEqual(original.sourceLabel_)
                 ||priorState.profile.identifier!=original.sourceIdentifier_
                 ||!priorState.profile.IsCurrent(myOcafDoc,original.ownerLabel_)){
-                refusal=Refusal::NoncurrentSource;return Standard_False;
+                refusal=Refusal::NoncurrentSource;return fail();
             }
         }else if(const auto*enclosureSource=std::get_if<core3d::enclosure::Parameters>(&original.source_)){
             (void)enclosureSource;
@@ -1602,7 +1628,7 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
                 ||!priorState.enclosure.label.IsEqual(original.sourceLabel_)
                 ||priorState.enclosure.identifier!=original.sourceIdentifier_
                 ||!priorState.enclosure.IsCurrent(myOcafDoc,original.ownerLabel_)){
-                refusal=Refusal::NoncurrentSource;return Standard_False;
+                refusal=Refusal::NoncurrentSource;return fail();
             }
         }else if(const auto*loftSource=std::get_if<core3d::rectangular_loft::Definition>(&original.source_)){
             (void)loftSource;
@@ -1610,15 +1636,15 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
                 ||!priorState.loft.label.IsEqual(original.sourceLabel_)
                 ||priorState.loft.identifier!=original.sourceIdentifier_
                 ||!priorState.loft.IsCurrent(myOcafDoc,original.ownerLabel_)){
-                refusal=Refusal::NoncurrentSource;return Standard_False;
+                refusal=Refusal::NoncurrentSource;return fail();
             }
-        }else{refusal=Refusal::MalformedCarrier;return Standard_False;}
+        }else{refusal=Refusal::MalformedCarrier;return fail();}
         // D253 measured history companion: capture the actual owner-subtree
         // naming state, the exact source/SYET state and the original
         // topology's transient Modified/Checked bookkeeping before any
         // mutation of this transaction. Values are measured, never hard-coded;
         // capture failure refuses the staging atomically.
-        auto treatmentCompanion=std::unique_ptr<core3d::treatment_history::Companion>(
+        treatmentCompanion=std::unique_ptr<core3d::treatment_history::Companion>(
             new core3d::treatment_history::Companion);
         treatmentCompanion->data=myOcafDoc->GetData();
         treatmentCompanion->ownerLabel=original.ownerLabel_;
@@ -1633,8 +1659,9 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
                 treatmentCompanion->sourceBytesBefore,treatmentCompanion->syetBefore,
                 treatmentCompanion->syetBytesBefore)
             ||!CaptureTreatmentTransientFlags(original.current_,treatmentCompanion->flagsBefore)){
-            refusal=Refusal::StageFailed;return Standard_False;
+            refusal=Refusal::StageFailed;return fail();
         }
+        beforeCaptured = true;
         Definition expected=original.definition_.value_or(original.seed_);
         if (built.selectorAppend_) {
             const auto& admitted=*built.selectorAppend_;
@@ -1650,7 +1677,7 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
                 ||admitted.issuedStep_.anchors!=admitted.edit_.anchors
                 ||!admitted.issuedStep_.selector
                 ||admitted.issuedStep_.localID!=expected.issuance.nextLocalID){
-                refusal=Refusal::ReplayMismatch;return Standard_False;
+                refusal=Refusal::ReplayMismatch;return fail();
             }
             std::vector<std::uint8_t> admittedSourceBytes;
             if(const auto* profile=std::get_if<core3d::profile::Parameters>(&admitted.source_)){
@@ -1658,36 +1685,36 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
                 if(!core3d::profile::Encode(*profile,values)
                     ||!core3d::composite_recipe::EncodeScalarRecipe(core3d::composite_recipe::RecipeKind::Profile,
                         core3d::profile::SchemaFor(*profile),values,admittedSourceBytes)){
-                    refusal=Refusal::MalformedCarrier;return Standard_False;
+                    refusal=Refusal::MalformedCarrier;return fail();
                 }
             }else if(const auto* enclosure=std::get_if<core3d::enclosure::Parameters>(&admitted.source_)){
                 std::vector<double> values;
                 if(!core3d::enclosure::Encode(*enclosure,values)
                     ||!core3d::composite_recipe::EncodeScalarRecipe(core3d::composite_recipe::RecipeKind::Enclosure,
                         enclosure->definition.constructionFrame?2:1,values,admittedSourceBytes)){
-                    refusal=Refusal::MalformedCarrier;return Standard_False;
+                    refusal=Refusal::MalformedCarrier;return fail();
                 }
             }else if(const auto* loft=std::get_if<core3d::rectangular_loft::Definition>(&admitted.source_)){
                 std::vector<double> values;
                 if(!core3d::loft_persistence::Encode(*loft,values)
                     ||!core3d::composite_recipe::EncodeScalarRecipe(core3d::composite_recipe::RecipeKind::RectangularLoft,
                         std::uint32_t(core3d::loft_persistence::Schema),values,admittedSourceBytes)){
-                    refusal=Refusal::MalformedCarrier;return Standard_False;
+                    refusal=Refusal::MalformedCarrier;return fail();
                 }
             }
-            if(admittedSourceBytes!=original.sourceBytes_){refusal=Refusal::IdentityMismatch;return Standard_False;}
+            if(admittedSourceBytes!=original.sourceBytes_){refusal=Refusal::IdentityMismatch;return fail();}
             core3d::retained_face_selector::Resolution resolution;
             const std::atomic_bool cancelled{false};
             const auto selectorRefusal=core3d::retained_face_selector::Resolve(original.current_,
                 admitted.issuedStep_.selector->intent,expected.base.metersPerLocalUnit,
                 stageBudget,cancelled,resolution);
             if(selectorRefusal!=core3d::retained_face_selector::Refusal::None||!resolution.proof){
-                refusal=core3d::retained_face_selector::MapToB1(selectorRefusal);return Standard_False;
+                refusal=core3d::retained_face_selector::MapToB1(selectorRefusal);return fail();
             }
             const auto receiptRefusal=core3d::retained_face_selector::VerifyReceipt(*resolution.proof,
                 admitted.issuedStep_,expected.base.metersPerLocalUnit,stageBudget);
             if(receiptRefusal!=core3d::retained_face_selector::Refusal::None){
-                refusal=core3d::retained_face_selector::MapToB1(receiptRefusal);return Standard_False;
+                refusal=core3d::retained_face_selector::MapToB1(receiptRefusal);return fail();
             }
             // The staging mirror of the viewer's versioned carrier rule: a
             // Chamfer selector receipt stages only as the schema-3 carrier; a
@@ -1696,11 +1723,11 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
             ++expected.issuance.nextLocalID;
             expected.steps.push_back(admitted.issuedStep_);expected.outputNode=admitted.issuedStep_.node;
         }
-        else if(const auto*p=std::get_if<Append>(&edit)){if(built.definition_.steps.size()!=expected.steps.size()+1||built.definition_.steps.back().selector){refusal=Refusal::ReplayMismatch;return Standard_False;}expected.steps.push_back(built.definition_.steps.back());if(expected.steps.back().kind!=p->kind||expected.steps.back().amountMM!=p->amountMM||expected.steps.back().anchors!=p->anchors){refusal=Refusal::ReplayMismatch;return Standard_False;}++expected.issuance.nextLocalID;}
-        else if(const auto*p=std::get_if<SetAmount>(&edit)){auto it=std::find_if(expected.steps.begin(),expected.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(it==expected.steps.end()){refusal=Refusal::IdentityMismatch;return Standard_False;}it->amountMM=p->amountMM;}
-        else if(const auto*p=std::get_if<ReplaceTargets>(&edit)){auto it=std::find_if(expected.steps.begin(),expected.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(it==expected.steps.end()){refusal=Refusal::IdentityMismatch;return Standard_False;}if(it->selector){refusal=Refusal::UnsupportedOperation;return Standard_False;}it->anchors=p->anchors;}
-        else if(const auto*p=std::get_if<Remove>(&edit)){auto it=std::find_if(expected.steps.begin(),expected.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(it==expected.steps.end()){refusal=Refusal::IdentityMismatch;return Standard_False;}expected.issuance.retiredLocalIDs.push_back(it->localID);expected.steps.erase(it);}
-        else if(const auto*p=std::get_if<SetSelectorIntent>(&edit)){auto it=std::find_if(expected.steps.begin(),expected.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(it==expected.steps.end()){refusal=Refusal::IdentityMismatch;return Standard_False;}if(!it->selector){refusal=Refusal::UnsupportedOperation;return Standard_False;}auto builtStep=std::find_if(built.definition_.steps.begin(),built.definition_.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(builtStep==built.definition_.steps.end()||!builtStep->selector||builtStep->node!=it->node||builtStep->localID!=it->localID||builtStep->kind!=it->kind||builtStep->amountMM!=it->amountMM||builtStep->selector->intent!=p->requested){refusal=Refusal::ReplayMismatch;return Standard_False;}it->anchors=builtStep->anchors;it->selector=builtStep->selector;}
+        else if(const auto*p=std::get_if<Append>(&edit)){if(built.definition_.steps.size()!=expected.steps.size()+1||built.definition_.steps.back().selector){refusal=Refusal::ReplayMismatch;return fail();}expected.steps.push_back(built.definition_.steps.back());if(expected.steps.back().kind!=p->kind||expected.steps.back().amountMM!=p->amountMM||expected.steps.back().anchors!=p->anchors){refusal=Refusal::ReplayMismatch;return fail();}++expected.issuance.nextLocalID;}
+        else if(const auto*p=std::get_if<SetAmount>(&edit)){auto it=std::find_if(expected.steps.begin(),expected.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(it==expected.steps.end()){refusal=Refusal::IdentityMismatch;return fail();}it->amountMM=p->amountMM;}
+        else if(const auto*p=std::get_if<ReplaceTargets>(&edit)){auto it=std::find_if(expected.steps.begin(),expected.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(it==expected.steps.end()){refusal=Refusal::IdentityMismatch;return fail();}if(it->selector){refusal=Refusal::UnsupportedOperation;return fail();}it->anchors=p->anchors;}
+        else if(const auto*p=std::get_if<Remove>(&edit)){auto it=std::find_if(expected.steps.begin(),expected.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(it==expected.steps.end()){refusal=Refusal::IdentityMismatch;return fail();}expected.issuance.retiredLocalIDs.push_back(it->localID);expected.steps.erase(it);}
+        else if(const auto*p=std::get_if<SetSelectorIntent>(&edit)){auto it=std::find_if(expected.steps.begin(),expected.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(it==expected.steps.end()){refusal=Refusal::IdentityMismatch;return fail();}if(!it->selector){refusal=Refusal::UnsupportedOperation;return fail();}auto builtStep=std::find_if(built.definition_.steps.begin(),built.definition_.steps.end(),[&](const Step&s){return s.feature==p->feature;});if(builtStep==built.definition_.steps.end()||!builtStep->selector||builtStep->node!=it->node||builtStep->localID!=it->localID||builtStep->kind!=it->kind||builtStep->amountMM!=it->amountMM||builtStep->selector->intent!=p->requested){refusal=Refusal::ReplayMismatch;return fail();}it->anchors=builtStep->anchors;it->selector=builtStep->selector;}
         if(expected.steps.empty())expected.outputNode=expected.base.sourceNode;else expected.outputNode=expected.steps.back().node;
         if(const auto*rebuild=std::get_if<RebuildSource>(&edit)){
             // A source edit moves native edges, so the valid expectation is an
@@ -1709,7 +1736,7 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
             // unchanged original steps and never the worker's own output.
             // Exact byte equality to that expectation stays binding, and the
             // candidate base/result are independently tied to it.
-            if(!original.definition_){refusal=Refusal::IdentityMismatch;return Standard_False;}
+            if(!original.definition_){refusal=Refusal::IdentityMismatch;return fail();}
             SourceRebindRoles capturedRoles;
             const SourceRebindRoles* roles=&capturedRoles;
             if(built.sourceRebindProof_){
@@ -1726,25 +1753,25 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
                     ||proof->treatmentBytes_!=original.definitionBytes_
                     ||proof->roles_->originalBytes!=original.definitionBytes_
                     ||!ContinuesBudget(proof->admittedBudget_,stageBudget)){
-                    refusal=Refusal::IdentityMismatch;return Standard_False;
+                    refusal=Refusal::IdentityMismatch;return fail();
                 }
                 roles=proof->roles_.get();
             }else if(!CaptureSourceRebindRoles(original.base_,*original.definition_,
                     original.definitionBytes_,stageBudget,refusal,capturedRoles)){
-                return Standard_False;
+                return fail();
             }
             SourceRebindResult expectation;
-            if(!ApplySourceRebind(*roles,rebuild->requested,built.base_,stageBudget,refusal,expectation))return Standard_False;
+            if(!ApplySourceRebind(*roles,rebuild->requested,built.base_,stageBudget,refusal,expectation))return fail();
             if(expectation.bytes!=built.definitionBytes_){
-                refusal=Refusal::ReplayMismatch;return Standard_False;
+                refusal=Refusal::ReplayMismatch;return fail();
             }
-            if(!EquivalentReplayGeometry(built.result_,expectation.treated,stageBudget,refusal))return Standard_False;
+            if(!EquivalentReplayGeometry(built.result_,expectation.treated,stageBudget,refusal))return fail();
             expected=expectation.definition;
         }else{
             std::vector<std::uint8_t>expectedBytes;
-            if(!Encode(expected,expectedBytes,refusal)||expectedBytes!=built.definitionBytes_)return Standard_False;
+            if(!Encode(expected,expectedBytes,refusal)||expectedBytes!=built.definitionBytes_)return fail();
         }
-        if(built.definition_.steps!=expected.steps||built.definition_.outputNode!=expected.outputNode){refusal=Refusal::ReplayMismatch;return Standard_False;}
+        if(built.definition_.steps!=expected.steps||built.definition_.outputNode!=expected.outputNode){refusal=Refusal::ReplayMismatch;return fail();}
         const OcctGeometryRepresentation pairedRepresentation=
             priorState.resolvedRepresentation==OcctGeometryRepresentation::LegacyUnknown
                 ?OcctGeometryRepresentation::BRep:priorState.resolvedRepresentation;
@@ -1760,6 +1787,9 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
             shapeTool->SetShape(original.ownerLabel_,built.result_);
 #if DEBUG
             core3d::retained_topology_budget::debug::RecordMutation();
+            // SAB-N2 A01/X01: the real owner write completed.
+            if (fireFault(r1d::RetainedEdgeTreatmentFaultSite::AfterOwnerShapeWrite))
+                return fail();
 #endif
             const TopoDS_Shape storedShape=XCAFDoc_ShapeTool::GetShape(original.ownerLabel_);
             shapeStaged=!storedShape.IsNull()&&storedShape.IsEqual(built.result_)
@@ -1768,22 +1798,72 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
         }
 #if DEBUG
         std::fprintf(stderr,"B1B2_STAGE phase=replace-shape result=%d\n",shapeStaged?1:0);
+        // A02 is the existing failed-shape boundary after all native checks.
+        if (shapeStaged
+            && fireFault(r1d::RetainedEdgeTreatmentFaultSite::ShapeStagedBoundary))
+            shapeStaged = false;
 #endif
-        if(!shapeStaged){refusal=Refusal::StageFailed;return Standard_False;}
+        if(!shapeStaged){refusal=Refusal::StageFailed;return fail();}
         // The loft record's strict in-read currency check compares its bound
         // shape against the owner's current shape; the owner shape was just
         // replaced above, so rebind the existing loft record's naming to the
         // staged result before the loft source restage below. The recipe
         // values and identity are untouched here and are re-proven by the
         // paired readback below.
-        if(!priorState.loft.label.IsNull())TNaming_Builder(priorState.loft.label).Select(built.result_,built.result_);
+        if(!priorState.loft.label.IsNull()){
+            TNaming_Builder(priorState.loft.label).Select(built.result_,built.result_);
+#if DEBUG
+            // SAB-N2 A03/X02: the loft rebind completed.
+            if (fireFault(r1d::RetainedEdgeTreatmentFaultSite::AfterLoftRebind))
+                return fail();
+#endif
+        }
         bool sourceStaged=false;if(const auto*p=std::get_if<RebuildSource>(&edit)){if(const auto*profile=std::get_if<core3d::profile::Parameters>(&p->requested))sourceStaged=core3d::profile::Stage(myOcafDoc,original.ownerLabel_,*profile,original.sourceIdentifier_);else if(const auto*enclosure=std::get_if<core3d::enclosure::Parameters>(&p->requested))sourceStaged=core3d::enclosure::Stage(myOcafDoc,original.ownerLabel_,*enclosure,original.sourceIdentifier_);else if(const auto*loft=std::get_if<core3d::rectangular_loft::Definition>(&p->requested))sourceStaged=core3d::loft_persistence::Stage(myOcafDoc,original.ownerLabel_,*loft,original.sourceIdentifier_);}else if(const auto*profile=std::get_if<core3d::profile::Parameters>(&original.source_))sourceStaged=core3d::profile::Stage(myOcafDoc,original.ownerLabel_,*profile,original.sourceIdentifier_);else if(const auto*enclosure=std::get_if<core3d::enclosure::Parameters>(&original.source_))sourceStaged=core3d::enclosure::Stage(myOcafDoc,original.ownerLabel_,*enclosure,original.sourceIdentifier_);else if(const auto*loft=std::get_if<core3d::rectangular_loft::Definition>(&original.source_))sourceStaged=core3d::loft_persistence::Stage(myOcafDoc,original.ownerLabel_,*loft,original.sourceIdentifier_);
 #if DEBUG
         std::fprintf(stderr,"B1B2_STAGE phase=source-stage result=%d\n",sourceStaged?1:0);
+        // SAB-N2 A04/X03: the real source stage completed successfully.
+        if (sourceStaged
+            && fireFault(r1d::RetainedEdgeTreatmentFaultSite::AfterSourceStage))
+            sourceStaged = false;
 #endif
-        if(!sourceStaged){refusal=Refusal::StageFailed;return Standard_False;}
-        core3d::profile::Record profile;core3d::enclosure::Record enclosure;core3d::loft_persistence::Record loft;if(!core3d::profile::Read(myOcafDoc,original.ownerLabel_,profile)||!core3d::enclosure::Read(myOcafDoc,original.ownerLabel_,enclosure)||!core3d::loft_persistence::Read(myOcafDoc,original.ownerLabel_,loft)){refusal=Refusal::StageFailed;return Standard_False;}const TDF_Label metadata=!profile.label.IsNull()?profile.label:!enclosure.label.IsNull()?enclosure.label:loft.label;
-        auto payload=std::make_shared<Payload>();payload->definition=built.definition_;payload->bytes=built.definitionBytes_;payload->base=built.base_;Attribute::Set(metadata,payload);TNaming_Builder(metadata).Select(built.result_,built.result_);
+        if(!sourceStaged){refusal=Refusal::StageFailed;return fail();}
+        core3d::profile::Record profile;
+        core3d::enclosure::Record enclosure;
+        core3d::loft_persistence::Record loft;
+        bool sourceRead = core3d::profile::Read(myOcafDoc,original.ownerLabel_,profile);
+#if DEBUG
+        if (sourceRead && fireFault(r1d::RetainedEdgeTreatmentFaultSite::ProfileReader))
+            sourceRead = false;
+#endif
+        if (sourceRead) sourceRead = core3d::enclosure::Read(
+            myOcafDoc,original.ownerLabel_,enclosure);
+#if DEBUG
+        if (sourceRead && fireFault(r1d::RetainedEdgeTreatmentFaultSite::EnclosureReader))
+            sourceRead = false;
+#endif
+        if (sourceRead) sourceRead = core3d::loft_persistence::Read(
+            myOcafDoc,original.ownerLabel_,loft);
+#if DEBUG
+        if (sourceRead && fireFault(r1d::RetainedEdgeTreatmentFaultSite::LoftReader))
+            sourceRead = false;
+#endif
+        if(!sourceRead){refusal=Refusal::StageFailed;return fail();}
+        const TDF_Label metadata=!profile.label.IsNull()?profile.label:
+            !enclosure.label.IsNull()?enclosure.label:loft.label;
+        auto payload=std::make_shared<Payload>();
+        payload->definition=built.definition_;payload->bytes=built.definitionBytes_;
+        payload->base=built.base_;Attribute::Set(metadata,payload);
+#if DEBUG
+        // SAB-N2 A08/X04: attribute write completed before the binding write.
+        if (fireFault(r1d::RetainedEdgeTreatmentFaultSite::AfterTreatmentAttribute))
+            return fail();
+#endif
+        TNaming_Builder(metadata).Select(built.result_,built.result_);
+#if DEBUG
+        // SAB-N2 A09/X05: treatment binding write completed.
+        if (fireFault(r1d::RetainedEdgeTreatmentFaultSite::AfterTreatmentBinding))
+            return fail();
+#endif
         // Strict full capture/readback, performed once now that the owner
         // shape, its source recipe and the SYET payload/binding are coherent:
         // exact new owner shape, preserved identity/materials/placement, valid
@@ -1859,13 +1939,20 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
         }
 #if DEBUG
         std::fprintf(stderr,"B1B2_STAGE phase=paired-readback result=%d\n",pairedReadback?1:0);
+        if (pairedReadback
+            && fireFault(r1d::RetainedEdgeTreatmentFaultSite::PairedReadback))
+            pairedReadback = false;
 #endif
-        if(!pairedReadback){refusal=Refusal::StageFailed;return Standard_False;}
+        if(!pairedReadback){refusal=Refusal::StageFailed;return fail();}
         std::optional<Record>stored;const bool syetReadback=Read(myOcafDoc,original.ownerLabel_,stored,refusal)&&stored&&stored->value->bytes==built.definitionBytes_;
 #if DEBUG
         std::fprintf(stderr,"B1B2_STAGE phase=syet-readback result=%d\n",syetReadback?1:0);
 #endif
-        if(!syetReadback){refusal=Refusal::StageFailed;return Standard_False;}
+        if(!syetReadback
+#if DEBUG
+            || fireFault(r1d::RetainedEdgeTreatmentFaultSite::TreatmentReadback)
+#endif
+            ){refusal=Refusal::StageFailed;return fail();}
         // D253: capture the corresponding real candidate values now that the
         // owner shape, source recipe and SYET payload/binding are coherent and
         // fully read back. The companion stays unfinalized until the ordinary
@@ -1874,12 +1961,23 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatment(
         if(!CaptureTreatmentCompanionSide(myOcafDoc,original.ownerLabel_,treatmentCompanion->after,
                 treatmentCompanion->sourceBytesAfter,treatmentCompanion->syetAfter,
                 treatmentCompanion->syetBytesAfter)){
-            refusal=Refusal::StageFailed;return Standard_False;
+            refusal=Refusal::StageFailed;return fail();
         }
+#if DEBUG
+        // SAB-N2 A12: the after-side capture completed before publication.
+        if (fireFault(r1d::RetainedEdgeTreatmentFaultSite::AfterSideCapture))
+            return fail();
+#endif
         treatmentCompanion->afterCaptured=true;
+#if DEBUG
+        // SAB-N2 X06: the complete candidate companion is still local. The
+        // failure handoff deliberately downgrades it to before-only evidence.
+        if (fireFault(r1d::RetainedEdgeTreatmentFaultSite::AfterCaptureBeforePublish))
+            return fail();
+#endif
         myPendingTreatmentCompanion=std::move(treatmentCompanion);
         readback=*stored;refusal=Refusal::None;return Standard_True;
-    } catch(...){readback={};refusal=Refusal::StageFailed;return Standard_False;}
+    } catch(...){readback={};refusal=Refusal::StageFailed;return fail();}
 }
 
 Standard_Boolean Core3DValidateRetainedEdgeTreatmentDocument(const Handle(TDocStd_Document)& document){
@@ -20653,6 +20751,27 @@ Standard_Boolean OcctDocument::DebugObserveAuthoredBooleanState(
         observation = abd::AuthoredBooleanObservation();
         return Standard_False;
     }
+}
+
+Standard_Boolean OcctDocument::DebugObserveRetainedEdgeTreatmentBytes(
+    const core3d::retained_edge_treatment::Snapshot& snapshot,
+    std::vector<std::uint8_t>& source, std::vector<std::uint8_t>& syet) const noexcept {
+    source.clear();syet.clear();
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || !snapshot.current()
+            || snapshot.ownerLabel_.IsNull()
+            || snapshot.ownerLabel_.Data() != myOcafDoc->GetData()
+            || !XCAFDoc_ShapeTool::GetShape(snapshot.ownerLabel_).IsEqual(snapshot.current_))
+            return Standard_False;
+        std::vector<treatment_history::NamingState> naming;
+        bool present = false;
+        if (!CaptureTreatmentCompanionSide(myOcafDoc, snapshot.ownerLabel_, naming,
+                source, present, syet) || !present
+            || source != snapshot.sourceBytes_ || syet != snapshot.definitionBytes_) {
+            source.clear();syet.clear();return Standard_False;
+        }
+        return Standard_True;
+    } catch (...) { source.clear();syet.clear();return Standard_False; }
 }
 #endif
 

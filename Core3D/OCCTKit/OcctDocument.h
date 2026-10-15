@@ -103,6 +103,9 @@ namespace core3d::retained_program_suffix { struct Probe; }
 namespace core3d::authored_parameter { class Capture; class Owner; }
 namespace core3d::authored_boolean { struct Candidate; }
 #if DEBUG
+namespace core3d::debug { class RetainedEdgeTreatmentStageFault; }
+#endif
+#if DEBUG
 namespace core3d::authored_parameter::debug {
 class AuthoredBooleanStageFault;
 struct AuthoredBooleanObservation;
@@ -1440,6 +1443,12 @@ public:
         const TDF_Label& owner,
         core3d::authored_parameter::debug::AuthoredBooleanObservation& observation)
         const noexcept;
+    //! SAB-N2 exact current R1 source/SYET bytes. Read-only; no capture,
+    //! settlement or transaction state is changed.
+    Standard_EXPORT Standard_Boolean DebugObserveRetainedEdgeTreatmentBytes(
+        const core3d::retained_edge_treatment::Snapshot&,
+        std::vector<std::uint8_t>& source,
+        std::vector<std::uint8_t>& syet) const noexcept;
 #endif
     //! Prepare one independent retained Profile treatment copy without
     //! mutating the document. The returned root is produced by replay from the
@@ -1876,7 +1885,11 @@ private:
       const core3d::retained_edge_treatment::Edit& edit,
       const core3d::retained_edge_treatment::DetachedResult& built,
       core3d::retained_edge_treatment::Record& readback,
-      core3d::retained_edge_treatment::Refusal&) noexcept;
+      core3d::retained_edge_treatment::Refusal&
+#if DEBUG
+      , core3d::debug::RetainedEdgeTreatmentStageFault* debugFault = nullptr
+#endif
+      ) noexcept;
   Standard_Boolean StageRetainedEdgeTreatmentR2(
       const core3d::retained_edge_treatment::r2::Snapshot&,
       const core3d::retained_edge_treatment::r2::DetachedResult&,

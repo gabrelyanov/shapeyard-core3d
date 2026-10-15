@@ -326,6 +326,52 @@ OrdinaryEditController::OrdinaryEditController(Handle(OcctDocument) document,
                                              OrdinaryEditPresentationHost& host)
     : _document(std::move(document)), _host(host) {}
 
+#if DEBUG
+bool OrdinaryEditController::debugArmRetainedEdgeTreatmentStageFault(
+    std::shared_ptr<const retained_edge_treatment::Snapshot> snapshot,
+    debug::RetainedEdgeTreatmentFaultSite site,
+    debug::RetainedEdgeTreatmentFaultDelivery delivery) noexcept {
+    if (![NSThread isMainThread] || !snapshot || !snapshot->current()
+        || _document.IsNull() || blocksNormalWork()
+        || _document->HasUnresolvedTreatmentHistoryCompanion()
+        || _debugTreatmentStageFault
+        || snapshot->ownerLabel_.IsNull()
+        || snapshot->ownerLabel_.Data() != _document->Document()->GetData()
+        || snapshot->nonce_ != std::uint64_t(_document->Document()->GetData()->Time())
+        || static_cast<std::uint8_t>(site) > static_cast<std::uint8_t>(
+            debug::RetainedEdgeTreatmentFaultSite::AfterCaptureBeforePublish)
+        || static_cast<std::uint8_t>(delivery) > static_cast<std::uint8_t>(
+            debug::RetainedEdgeTreatmentFaultDelivery::ThrowStandardFailure)) return false;
+    std::vector<std::uint8_t> source, syet;
+    if (!_document->DebugObserveRetainedEdgeTreatmentBytes(*snapshot, source, syet))
+        return false;
+    _debugTreatmentFaultSnapshot = std::move(snapshot);
+    _debugTreatmentStageFault =
+        std::make_shared<debug::RetainedEdgeTreatmentStageFault>(
+            site, delivery, _debugTreatmentFaultSnapshot.get());
+    return _debugTreatmentStageFault != nullptr;
+}
+
+bool OrdinaryEditController::debugRetainedEdgeTreatmentStageFaultReceipt(
+    const std::shared_ptr<const retained_edge_treatment::Snapshot>& snapshot,
+    debug::RetainedEdgeTreatmentFaultReceipt& receipt) const noexcept {
+    if (![NSThread isMainThread] || !snapshot || !_debugTreatmentStageFault
+        || _debugTreatmentFaultSnapshot != snapshot
+        || _debugTreatmentStageFault->target() != snapshot.get()) return false;
+    receipt = _debugTreatmentStageFault->receipt();
+    return true;
+}
+
+void OrdinaryEditController::debugCancelRetainedEdgeTreatmentStageFault(
+    const std::shared_ptr<const retained_edge_treatment::Snapshot>& snapshot) noexcept {
+    if (![NSThread isMainThread] || !snapshot || !_debugTreatmentStageFault
+        || _debugTreatmentFaultSnapshot != snapshot
+        || _debugTreatmentStageFault->consumed()) return;
+    _debugTreatmentStageFault.reset();
+    _debugTreatmentFaultSnapshot.reset();
+}
+#endif
+
 std::shared_ptr<const SweepRebuildGuard> OrdinaryEditController::captureSavedSweepRebuildSource() const noexcept {
     if (!NSThread.isMainThread || blocksNormalWork() || _document.IsNull()
         || _document->Document().IsNull() || _document->Document()->HasOpenCommand()) return {};
@@ -2444,9 +2490,20 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             if(record.requested.edgeTreatmentSnapshot){
                 core3d::retained_edge_treatment::Refusal refusal;
                 core3d::retained_edge_treatment::Record readback;
+#if DEBUG
+                auto* debugFault = _debugTreatmentStageFault
+                    && _debugTreatmentFaultSnapshot == record.requested.edgeTreatmentSnapshot
+                    && _debugTreatmentStageFault->target()
+                        == record.requested.edgeTreatmentSnapshot.get()
+                    ? _debugTreatmentStageFault.get() : nullptr;
+#endif
                 treatmentStaged=record.requested.edgeTreatmentEdit&&record.requested.edgeTreatmentResult
                     &&_document->StageRetainedEdgeTreatment(*record.requested.edgeTreatmentSnapshot,
-                        *record.requested.edgeTreatmentEdit,*record.requested.edgeTreatmentResult,readback,refusal);
+                        *record.requested.edgeTreatmentEdit,*record.requested.edgeTreatmentResult,readback,refusal
+#if DEBUG
+                        , debugFault
+#endif
+                        );
                 if(!treatmentStaged){
                     if(refusal==core3d::retained_edge_treatment::Refusal::Budget)
                         ledger.retainedBudgetRefused=true;

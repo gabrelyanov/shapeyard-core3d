@@ -40,6 +40,71 @@ enum class OrdinaryEditResult : std::uint8_t {
     Busy = 4,
     Invalid = 5
 };
+
+#if DEBUG
+namespace debug {
+
+//! SAB-N2 fixed boundaries in OcctDocument::StageRetainedEdgeTreatment.
+//! Values are a test contract and must not be renumbered.
+enum class RetainedEdgeTreatmentFaultSite : std::uint8_t {
+    AfterOwnerShapeWrite = 0,
+    ShapeStagedBoundary = 1,
+    AfterLoftRebind = 2,
+    AfterSourceStage = 3,
+    ProfileReader = 4,
+    EnclosureReader = 5,
+    LoftReader = 6,
+    AfterTreatmentAttribute = 7,
+    AfterTreatmentBinding = 8,
+    PairedReadback = 9,
+    TreatmentReadback = 10,
+    AfterSideCapture = 11,
+    AfterCaptureBeforePublish = 12,
+};
+
+enum class RetainedEdgeTreatmentFaultDelivery : std::uint8_t {
+    ReturnFalse = 0,
+    ThrowStandardFailure = 1,
+};
+
+struct RetainedEdgeTreatmentFaultReceipt final {
+    RetainedEdgeTreatmentFaultSite site =
+        RetainedEdgeTreatmentFaultSite::AfterOwnerShapeWrite;
+    RetainedEdgeTreatmentFaultDelivery delivery =
+        RetainedEdgeTreatmentFaultDelivery::ReturnFalse;
+    std::uint32_t hits = 0;
+};
+
+//! Main-owned, one-shot request. The controller additionally binds the request
+//! to the exact immutable Snapshot instance before forwarding it to the stage.
+class RetainedEdgeTreatmentStageFault final {
+public:
+    RetainedEdgeTreatmentStageFault(RetainedEdgeTreatmentFaultSite site,
+        RetainedEdgeTreatmentFaultDelivery delivery,
+        const retained_edge_treatment::Snapshot* target) noexcept
+        : site_(site), delivery_(delivery), target_(target) {}
+    RetainedEdgeTreatmentFaultDelivery delivery() const noexcept { return delivery_; }
+    const retained_edge_treatment::Snapshot* target() const noexcept { return target_; }
+    bool consumed() const noexcept { return consumed_; }
+    const RetainedEdgeTreatmentFaultReceipt& receipt() const noexcept { return receipt_; }
+    bool consumeAt(RetainedEdgeTreatmentFaultSite at) noexcept {
+        if (consumed_ || at != site_) return false;
+        consumed_ = true;
+        receipt_.site = site_;
+        receipt_.delivery = delivery_;
+        receipt_.hits = 1;
+        return true;
+    }
+private:
+    RetainedEdgeTreatmentFaultSite site_;
+    RetainedEdgeTreatmentFaultDelivery delivery_;
+    const retained_edge_treatment::Snapshot* target_ = nullptr;
+    bool consumed_ = false;
+    RetainedEdgeTreatmentFaultReceipt receipt_;
+};
+
+} // namespace debug
+#endif
 static_assert(static_cast<std::uint8_t>(OrdinaryEditResult::NoChange) == 0);
 static_assert(static_cast<std::uint8_t>(OrdinaryEditResult::Committed) == 1);
 static_assert(static_cast<std::uint8_t>(OrdinaryEditResult::RetryableFailure) == 2);
@@ -479,6 +544,15 @@ public:
     OrdinaryEditCommandStamp& debugCommandStamp() noexcept { return _command; }
     void debugSetStageFailureIndex(int index) noexcept { _stageFailureIndex = index; }
     void debugSetTruthUnavailableCount(int count) noexcept { _truthUnavailableCount = count; }
+    bool debugArmRetainedEdgeTreatmentStageFault(
+        std::shared_ptr<const retained_edge_treatment::Snapshot>,
+        debug::RetainedEdgeTreatmentFaultSite,
+        debug::RetainedEdgeTreatmentFaultDelivery) noexcept;
+    bool debugRetainedEdgeTreatmentStageFaultReceipt(
+        const std::shared_ptr<const retained_edge_treatment::Snapshot>&,
+        debug::RetainedEdgeTreatmentFaultReceipt&) const noexcept;
+    void debugCancelRetainedEdgeTreatmentStageFault(
+        const std::shared_ptr<const retained_edge_treatment::Snapshot>&) noexcept;
 #endif
 private:
     friend class OrdinaryEditLease;
@@ -545,6 +619,8 @@ private:
 #ifdef DEBUG
     int _stageFailureIndex = -1;
     int _truthUnavailableCount = 0;
+    std::shared_ptr<const retained_edge_treatment::Snapshot> _debugTreatmentFaultSnapshot;
+    std::shared_ptr<debug::RetainedEdgeTreatmentStageFault> _debugTreatmentStageFault;
 #endif
 };
 

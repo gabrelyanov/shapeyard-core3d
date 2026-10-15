@@ -3935,8 +3935,26 @@ static BOOL B1TargetExpectedMatches(Core3DEdgeTreatmentNativeTargets *target,
         && target->captureExpected.revisions.modelRevision
             == expected.revisions.modelRevision;
 }
-@interface Core3DEdgeTreatmentNativeOperation:Core3DEdgeTreatmentOperation {@public std::shared_ptr<core3d::retained_edge_treatment::Work> nativeWork;std::shared_ptr<core3d::retained_edge_treatment::r2::Work> nativeWorkR2;std::shared_ptr<core3d::retained_edge_treatment::r2::RawPreviewSession> nativePreviewSession;std::shared_ptr<core3d::retained_edge_treatment::r2::RawPreviewCandidate> nativePreviewCandidate;Core3DEdgeTreatmentRawPreviewSessionR2 *previewSessionDTO;void(^completion)(Core3DEdgeTreatmentResult *);void(^previewCompletion)(Core3DEdgeTreatmentRawPreviewResultR2 *);void(^stopProvenance)(Core3DEdgeTreatmentResult *);BOOL settled;}@end
+@interface Core3DEdgeTreatmentNativeOperation:Core3DEdgeTreatmentOperation {
+@public
+    std::shared_ptr<core3d::retained_edge_treatment::Work> nativeWork;
+    std::shared_ptr<core3d::retained_edge_treatment::r2::Work> nativeWorkR2;
+    std::shared_ptr<core3d::retained_edge_treatment::r2::RawPreviewSession> nativePreviewSession;
+    std::shared_ptr<core3d::retained_edge_treatment::r2::RawPreviewCandidate> nativePreviewCandidate;
+    Core3DEdgeTreatmentRawPreviewSessionR2 *previewSessionDTO;
+    void(^completion)(Core3DEdgeTreatmentResult *);
+    void(^previewCompletion)(Core3DEdgeTreatmentRawPreviewResultR2 *);
+    void(^stopProvenance)(Core3DEdgeTreatmentResult *);
+#if DEBUG
+    std::shared_ptr<const core3d::retained_edge_treatment::Snapshot> debugFaultSnapshot;
+#endif
+    BOOL settled;
+}
+@end
 @implementation Core3DEdgeTreatmentNativeOperation @end
+#if DEBUG
+@implementation Core3DDebugRetainedEdgeTreatmentFaultReceipt @end
+#endif
 @interface Core3DEdgeTreatmentNativeSnapshotR2:Core3DEdgeTreatmentSnapshotR2 {@public std::shared_ptr<const core3d::retained_edge_treatment::r2::Snapshot> native;}@end
 @implementation Core3DEdgeTreatmentNativeSnapshotR2 @end
 @interface Core3DEdgeTreatmentNativeRawTargetsR2:Core3DEdgeTreatmentRawTargetCaptureR2 {@public std::shared_ptr<const core3d::retained_edge_treatment::r2::RawTargetCapture> native;Core3DSceneSnapshot *captureExpected;Core3DSceneSnapshot *commitExpected;}@end
@@ -23164,6 +23182,9 @@ std::unordered_map<NSUInteger,B2BudgetSessionBox>& B2BudgetSessions(){
     // Cancellation provenance: retain only the admitted immutable snapshot
     // and any native requested-source bytes; never a recaptured scene.
     std::shared_ptr<const core3d::retained_edge_treatment::Snapshot> stopSnapshot=snapshot->native;NSData *stopRequestedSource=requestedSource;operation->stopProvenance=[^(Core3DEdgeTreatmentResult *dto){B1BindQ2(dto,stopSnapshot,stopRequestedSource,nil);[dto setValue:@"" forKey:@"candidateRecipeSHA256"];} copy];
+#if DEBUG
+    operation->debugFaultSnapshot=snapshot->native;
+#endif
     try{const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=snapshot.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;core3d::retained_edge_treatment::Refusal refusal;auto viewer=GLController.viewer;operation->nativeWork=viewer->prepareEdgeTreatment(snapshot->native,edit,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal,continuation);core3d::retained_edge_treatment::Refusal geometryRefusal;auto geometry=viewer->edgeTreatmentGeometry(operation->nativeWork,geometryRefusal);
 #if DEBUG
     std::fprintf(stderr,"B1B2_Q2 op=%p phase=prepare refusal=%s detach refusal=%s\n",(__bridge void*)operation,core3d::retained_edge_treatment::RefusalCode(refusal),core3d::retained_edge_treatment::RefusalCode(geometryRefusal));
@@ -23271,6 +23292,52 @@ std::unordered_map<NSUInteger,B2BudgetSessionBox>& B2BudgetSessions(){
     }catch(...){refuse(core3d::retained_edge_treatment::Refusal::BuildFailed);return operation;}
 }
 - (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentAmount:(Core3DEdgeTreatmentSnapshot *)snapshot featureIdentifier:(NSString *)featureIdentifier amountMM:(double)amountMM expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {core3d::retained_edge_treatment::SetAmount edit;core3d::receipt::ParseUUID(featureIdentifier.UTF8String,edit.feature);edit.amountMM=amountMM;return [self core3d_beginEdgeTreatment:(Core3DEdgeTreatmentNativeSnapshot*)snapshot edit:edit expected:expected budget:nullptr completion:completion];}
+#if DEBUG
+- (BOOL)debugArmRetainedEdgeTreatmentStageFault:(Core3DEdgeTreatmentSnapshot *)snapshot
+    site:(Core3DDebugRetainedEdgeTreatmentFaultSite)site
+    delivery:(Core3DDebugRetainedEdgeTreatmentFaultDelivery)delivery {
+    if (![NSThread isMainThread] || !_isSetuped || !GLController.viewer
+        || ![snapshot isKindOfClass:Core3DEdgeTreatmentNativeSnapshot.class]) return NO;
+    auto native=(Core3DEdgeTreatmentNativeSnapshot *)snapshot;
+    const auto controller=GLController.viewer->debugOrdinaryEditController();
+    return native->native && controller
+        && controller->debugArmRetainedEdgeTreatmentStageFault(native->native,
+            static_cast<core3d::debug::RetainedEdgeTreatmentFaultSite>(site),
+            static_cast<core3d::debug::RetainedEdgeTreatmentFaultDelivery>(delivery));
+}
+
+- (Core3DDebugRetainedEdgeTreatmentFaultReceipt *)
+    debugRetainedEdgeTreatmentStageFaultReceipt:(Core3DEdgeTreatmentSnapshot *)snapshot {
+    if (![NSThread isMainThread] || !_isSetuped || !GLController.viewer
+        || ![snapshot isKindOfClass:Core3DEdgeTreatmentNativeSnapshot.class]) return nil;
+    auto native=(Core3DEdgeTreatmentNativeSnapshot *)snapshot;
+    const auto controller=GLController.viewer->debugOrdinaryEditController();
+    core3d::debug::RetainedEdgeTreatmentFaultReceipt receipt;
+    if (!native->native || !controller
+        || !controller->debugRetainedEdgeTreatmentStageFaultReceipt(
+            native->native, receipt)) return nil;
+    auto value=B1Object<Core3DDebugRetainedEdgeTreatmentFaultReceipt>(
+        Core3DDebugRetainedEdgeTreatmentFaultReceipt.class);
+    [value setValue:@(static_cast<NSInteger>(receipt.site)) forKey:@"site"];
+    [value setValue:@(static_cast<NSInteger>(receipt.delivery)) forKey:@"delivery"];
+    [value setValue:@(receipt.hits) forKey:@"hitCount"];
+    return value;
+}
+
+- (NSDictionary<NSString *,NSData *> *)
+    debugObserveRetainedEdgeTreatmentBytes:(Core3DEdgeTreatmentSnapshot *)snapshot {
+    if (![NSThread isMainThread] || !_isSetuped || !GLController.viewer
+        || ![snapshot isKindOfClass:Core3DEdgeTreatmentNativeSnapshot.class]) return nil;
+    auto native=(Core3DEdgeTreatmentNativeSnapshot *)snapshot;
+    const auto document=GLController.viewer->getDocument();
+    std::vector<std::uint8_t> source,syet;
+    if (!native->native || document.IsNull()
+        || !document->DebugObserveRetainedEdgeTreatmentBytes(
+            *native->native,source,syet)) return nil;
+    return @{ @"source": [NSData dataWithBytes:source.data() length:source.size()],
+        @"syet": [NSData dataWithBytes:syet.data() length:syet.size()] };
+}
+#endif
 - (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentTargets:(Core3DEdgeTreatmentSnapshot *)snapshot featureIdentifier:(NSString *)featureIdentifier targets:(Core3DEdgeTreatmentTargetCapture *)targets expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {auto target=(Core3DEdgeTreatmentNativeTargets*)targets;core3d::retained_edge_treatment::ReplaceTargets edit;core3d::receipt::ParseUUID(featureIdentifier.UTF8String,edit.feature);if(![target isKindOfClass:Core3DEdgeTreatmentNativeTargets.class]||target->continuationUsed||!B1TargetExpectedMatches(target,expected))return [self core3d_beginEdgeTreatment:nil edit:edit expected:expected budget:nullptr completion:completion];target->continuationUsed=YES;edit.anchors=target->nativeAnchors;return [self core3d_beginEdgeTreatment:(Core3DEdgeTreatmentNativeSnapshot*)snapshot edit:edit expected:target->commitExpected budget:&target->nativeBudget completion:completion];}
 - (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentRemoval:(Core3DEdgeTreatmentSnapshot *)snapshot featureIdentifier:(NSString *)featureIdentifier expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {core3d::retained_edge_treatment::Remove edit;core3d::receipt::ParseUUID(featureIdentifier.UTF8String,edit.feature);return [self core3d_beginEdgeTreatment:(Core3DEdgeTreatmentNativeSnapshot*)snapshot edit:edit expected:expected budget:nullptr completion:completion];}
 - (Core3DEdgeTreatmentOperation *)beginEdgeTreatmentSelectorIntentEdit:(Core3DEdgeTreatmentSnapshot *)snapshot featureIdentifier:(NSString *)featureIdentifier intent:(Core3DFaceSelectorIntent *)intent expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion {core3d::retained_edge_treatment::SetSelectorIntent edit;core3d::receipt::ParseUUID(featureIdentifier.UTF8String,edit.feature);if(!core3d::face_selector_bridge::Intent(intent,edit.requested))return [self core3d_beginEdgeTreatment:nil edit:edit expected:expected budget:nullptr completion:completion];return [self core3d_beginEdgeTreatment:(Core3DEdgeTreatmentNativeSnapshot*)snapshot edit:edit expected:expected budget:nullptr completion:completion];}
@@ -23766,11 +23833,26 @@ std::unordered_map<NSUInteger,B2BudgetSessionBox>& B2BudgetSessions(){
     const CGSize size=GLController.drawableSize;core3d::ObjectFrameIdentity identity;identity.entityIdentifier=original.entityIdentifier.UTF8String;identity.publicationSourceIdentifier=expected.publicationSourceIdentifier.UTF8String;identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;core3d::retained_edge_treatment::Refusal refusal;auto work=GLController.viewer->prepareEdgeTreatmentEditR2(snapshot->native,*mutation,identity,expected.revisions.presentationRevision,std::uint32_t(size.width),std::uint32_t(size.height),refusal);auto nativeSnapshot=snapshot->native;return [self core3d_beginEdgeTreatmentR2:work completion:completion provenance:^(Core3DEdgeTreatmentResult *dto,const std::shared_ptr<const r2::DetachedResult>&built){B1BindR2(dto,nativeSnapshot,built);} refusal:refusal];
 }
 
-- (void)cancelEdgeTreatment:(Core3DEdgeTreatmentOperation *)operation {if(!NSThread.isMainThread||![operation isKindOfClass:Core3DEdgeTreatmentNativeOperation.class])return;auto native=(Core3DEdgeTreatmentNativeOperation*)operation;if(!native->settled){native->settled=YES;if(native->nativePreviewSession){if(GLController.viewer)GLController.viewer->cancelRawR2BevelPreviewSession(native->nativePreviewSession);auto callback=native->previewCompletion;native->previewCompletion=nil;if(callback)callback(B1RawPreviewResult(native->previewSessionDTO,Core3DEdgeTreatmentRawPreviewStatusR2Cancelled,native->nativePreviewCandidate,core3d::retained_edge_treatment::Refusal::Cancelled));return;}if(native->nativeWorkR2)core3d::Core3DViewer::cancelEdgeTreatmentR2(native->nativeWorkR2);else core3d::Core3DViewer::cancelEdgeTreatment(native->nativeWork);
+- (void)cancelEdgeTreatment:(Core3DEdgeTreatmentOperation *)operation {
+    if(!NSThread.isMainThread
+        ||![operation isKindOfClass:Core3DEdgeTreatmentNativeOperation.class])return;
+    auto native=(Core3DEdgeTreatmentNativeOperation*)operation;
+    if(!native->settled){
+        native->settled=YES;
+#if DEBUG
+        if(GLController.viewer && native->debugFaultSnapshot){
+            const auto controller=GLController.viewer->debugOrdinaryEditController();
+            if(controller)controller->debugCancelRetainedEdgeTreatmentStageFault(
+                native->debugFaultSnapshot);
+        }
+#endif
+        if(native->nativePreviewSession){if(GLController.viewer)GLController.viewer->cancelRawR2BevelPreviewSession(native->nativePreviewSession);auto callback=native->previewCompletion;native->previewCompletion=nil;if(callback)callback(B1RawPreviewResult(native->previewSessionDTO,Core3DEdgeTreatmentRawPreviewStatusR2Cancelled,native->nativePreviewCandidate,core3d::retained_edge_treatment::Refusal::Cancelled));return;}if(native->nativeWorkR2)core3d::Core3DViewer::cancelEdgeTreatmentR2(native->nativeWorkR2);else core3d::Core3DViewer::cancelEdgeTreatment(native->nativeWork);
 #if DEBUG
     b2tb::debug::RecordRefusal(core3d::retained_edge_treatment::RefusalCode(core3d::retained_edge_treatment::Refusal::Cancelled));
 #endif
-    core3d::retained_edge_treatment::CommitResult result;result.outcome=core3d::retained_edge_treatment::CommitOutcome::Cancelled;result.refusal=core3d::retained_edge_treatment::Refusal::Cancelled;result.measuredUndoDelta=0;auto dto=B1Result(result);auto bind=native->stopProvenance;native->stopProvenance=nil;if(bind)bind(dto);auto callback=native->completion;native->completion=nil;if(callback)callback(dto);}}
+        core3d::retained_edge_treatment::CommitResult result;result.outcome=core3d::retained_edge_treatment::CommitOutcome::Cancelled;result.refusal=core3d::retained_edge_treatment::Refusal::Cancelled;result.measuredUndoDelta=0;auto dto=B1Result(result);auto bind=native->stopProvenance;native->stopProvenance=nil;if(bind)bind(dto);auto callback=native->completion;native->completion=nil;if(callback)callback(dto);
+    }
+}
 
 - (void)addTestPrimitives {
     [_glController addTestPrimitives];

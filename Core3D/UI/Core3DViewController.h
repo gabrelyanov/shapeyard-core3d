@@ -62,6 +62,39 @@ __attribute__((objc_subclassing_restricted))
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+#ifdef DEBUG
+//! SAB-N2 fixed R1 stage boundaries. Values mirror the native controller enum.
+typedef NS_ENUM(NSInteger, Core3DDebugRetainedEdgeTreatmentFaultSite) {
+    Core3DDebugRetainedEdgeTreatmentFaultSiteAfterOwnerShapeWrite = 0,
+    Core3DDebugRetainedEdgeTreatmentFaultSiteShapeStagedBoundary = 1,
+    Core3DDebugRetainedEdgeTreatmentFaultSiteAfterLoftRebind = 2,
+    Core3DDebugRetainedEdgeTreatmentFaultSiteAfterSourceStage = 3,
+    Core3DDebugRetainedEdgeTreatmentFaultSiteProfileReader = 4,
+    Core3DDebugRetainedEdgeTreatmentFaultSiteEnclosureReader = 5,
+    Core3DDebugRetainedEdgeTreatmentFaultSiteLoftReader = 6,
+    Core3DDebugRetainedEdgeTreatmentFaultSiteAfterTreatmentAttribute = 7,
+    Core3DDebugRetainedEdgeTreatmentFaultSiteAfterTreatmentBinding = 8,
+    Core3DDebugRetainedEdgeTreatmentFaultSitePairedReadback = 9,
+    Core3DDebugRetainedEdgeTreatmentFaultSiteTreatmentReadback = 10,
+    Core3DDebugRetainedEdgeTreatmentFaultSiteAfterSideCapture = 11,
+    Core3DDebugRetainedEdgeTreatmentFaultSiteAfterCaptureBeforePublish = 12,
+};
+
+typedef NS_ENUM(NSInteger, Core3DDebugRetainedEdgeTreatmentFaultDelivery) {
+    Core3DDebugRetainedEdgeTreatmentFaultDeliveryReturnFalse = 0,
+    Core3DDebugRetainedEdgeTreatmentFaultDeliveryThrowStandardFailure = 1,
+};
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DDebugRetainedEdgeTreatmentFaultReceipt : NSObject
+@property(nonatomic,readonly) Core3DDebugRetainedEdgeTreatmentFaultSite site;
+@property(nonatomic,readonly) Core3DDebugRetainedEdgeTreatmentFaultDelivery delivery;
+@property(nonatomic,readonly) NSUInteger hitCount;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+#endif
+
 @protocol Core3DViewControllerProtocol<NSObject>
 
 @optional
@@ -2306,6 +2339,21 @@ __attribute__((objc_subclassing_restricted))
     featureIdentifier:(NSString *)featureIdentifier intent:(Core3DFaceSelectorIntent *)intent
     expected:(Core3DSceneSnapshot *)expected completion:(void(^)(Core3DEdgeTreatmentResult *))completion
     NS_SWIFT_NAME(beginEdgeTreatmentSelectorIntentEdit(_:featureIdentifier:intent:expected:completion:));
+#ifdef DEBUG
+//! Arm the existing ordinary owner for this exact current R1 snapshot. The
+//! request is one-shot and never opens, aborts or settles a transaction.
+- (BOOL)debugArmRetainedEdgeTreatmentStageFault:(Core3DEdgeTreatmentSnapshot *)snapshot
+    site:(Core3DDebugRetainedEdgeTreatmentFaultSite)site
+    delivery:(Core3DDebugRetainedEdgeTreatmentFaultDelivery)delivery
+    NS_SWIFT_NAME(debugArmRetainedEdgeTreatmentStageFault(_:site:delivery:));
+- (Core3DDebugRetainedEdgeTreatmentFaultReceipt *_Nullable)
+    debugRetainedEdgeTreatmentStageFaultReceipt:(Core3DEdgeTreatmentSnapshot *)snapshot
+    NS_SWIFT_NAME(debugRetainedEdgeTreatmentStageFaultReceipt(_:));
+//! Exact current source and SYET bytes for the SAB-N2 preservation proof.
+- (NSDictionary<NSString *, NSData *> *_Nullable)
+    debugObserveRetainedEdgeTreatmentBytes:(Core3DEdgeTreatmentSnapshot *)snapshot
+    NS_SWIFT_NAME(debugObserveRetainedEdgeTreatmentBytes(_:));
+#endif
 - (void)cancelEdgeTreatment:(Core3DEdgeTreatmentOperation *)operation;
 - (Core3DEdgeTreatmentCaptureR2 *)captureEdgeTreatmentR2:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(captureEdgeTreatmentR2(_:expected:));
