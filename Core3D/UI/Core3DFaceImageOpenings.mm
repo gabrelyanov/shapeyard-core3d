@@ -569,6 +569,80 @@ std::vector<std::uint8_t> E4NSDataBytes(NSData *data) {
     return {begin, begin + data.length};
 }
 
+Handle(Image_Texture) E4EmbeddedTexture(NSData *data, const char *name) {
+    if (!data || data.length == 0 || !name) return {};
+    Handle(NCollection_Buffer) buffer = new NCollection_Buffer(
+        NCollection_BaseAllocator::CommonBaseAllocator(), data.length);
+    if (buffer.IsNull()) return {};
+    std::memcpy(buffer->ChangeData(), data.bytes, data.length);
+    return new Image_Texture(buffer, TCollection_AsciiString(name));
+}
+
+bool E4AssignAllXCAFSlots(const Handle(TDocStd_Document)& document,
+                          const TDF_Label& owner,
+                          NSArray<NSData *> *resourceBytes,
+                          const char *suffix,
+                          bool partial) {
+    if (document.IsNull() || owner.IsNull() || resourceBytes.count != 6)
+        return false;
+    std::array<Handle(Image_Texture), 6> textures;
+    for (NSUInteger index = 0; index < resourceBytes.count; ++index) {
+        const std::string name = std::string("e4-xcaf-")
+            + (suffix ? suffix : "slot") + "-" + std::to_string(index);
+        textures[index] = E4EmbeddedTexture(resourceBytes[index], name.c_str());
+        if (textures[index].IsNull()) return false;
+    }
+    const auto tool = XCAFDoc_DocumentTool::VisMaterialTool(document->Main());
+    if (tool.IsNull()) return false;
+    Handle(XCAFDoc_VisMaterial) material = new XCAFDoc_VisMaterial();
+    XCAFDoc_VisMaterialPBR pbr;
+    pbr.BaseColorTexture = textures[1];
+    pbr.EmissiveTexture = textures[2];
+    if (!partial) {
+        pbr.MetallicRoughnessTexture = textures[3];
+        pbr.OcclusionTexture = textures[4];
+        pbr.NormalTexture = textures[5];
+    }
+    material->SetPbrMaterial(pbr);
+    XCAFDoc_VisMaterialCommon common = material->ConvertToCommonMaterial();
+    common.DiffuseTexture = textures[0];
+    material->SetCommonMaterial(common);
+    const TDF_Label materialLabel = tool->AddMaterial(material,
+        TCollection_AsciiString((std::string("E4 typed XCAF ")
+            + (suffix ? suffix : "slot")).c_str()));
+    if (materialLabel.IsNull()) return false;
+    tool->SetShapeMaterial(owner, materialLabel);
+    return true;
+}
+
+bool E4AssignForeignShadowedSlot(
+    const Handle(TDocStd_Document)& document,
+    const TDF_Label& owner,
+    NSArray<NSData *> *resourceBytes) {
+    if (document.IsNull() || owner.IsNull() || resourceBytes.count != 6)
+        return false;
+    const auto tool = XCAFDoc_DocumentTool::VisMaterialTool(document->Main());
+    if (tool.IsNull()) return false;
+    Handle(XCAFDoc_VisMaterial) material = new XCAFDoc_VisMaterial();
+    XCAFDoc_VisMaterialPBR pbr;
+    // Capture must classify the descriptor from FilePath and refuse before
+    // attempting to open it. The path need not and must not exist.
+    pbr.BaseColorTexture = new Image_Texture(
+        TCollection_AsciiString("/nonexistent/shapeyard-xcaf-foreign.png"));
+    pbr.EmissiveTexture = E4EmbeddedTexture(
+        resourceBytes[2], "e4-xcaf-foreign-control");
+    material->SetPbrMaterial(pbr);
+    XCAFDoc_VisMaterialCommon common = material->ConvertToCommonMaterial();
+    common.DiffuseTexture = E4EmbeddedTexture(
+        resourceBytes[0], "e4-xcaf-foreign-common");
+    material->SetCommonMaterial(common);
+    const TDF_Label materialLabel = tool->AddMaterial(material,
+        TCollection_AsciiString("E4 typed XCAF foreign refusal"));
+    if (materialLabel.IsNull()) return false;
+    tool->SetShapeMaterial(owner, materialLabel);
+    return true;
+}
+
 NSArray<NSDictionary<NSString *, id> *> *E4LayerSamples(
     const core3d::painted_atlas_bake::kernel::Evidence& evidence) {
     NSMutableArray<NSDictionary<NSString *, id> *> *result =
@@ -4456,6 +4530,264 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
             @"meanError255": @(evidence.meanInteriorError255),
             @"normalLengthError": @(evidence.maximumNormalLengthError),
             @"tangentParity": @(evidence.tangentParity),
+        };
+    } @catch (...) { return nil; }
+}
+
+- (NSNumber *)debugInstallE4XCAFSourceSlotsForEntityIdentifiers:
+        (NSArray<NSString *> *)entityIdentifiers
+        resourceBytes:(NSArray<NSData *> *)resourceBytes {
+    if (!NSThread.isMainThread || entityIdentifiers.count != 2
+        || resourceBytes.count != 6) return @NO;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        if (wrapper.IsNull()) return @NO;
+        const Handle(TDocStd_Document)& document = wrapper->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return @NO;
+        std::array<TDF_Label, 2> labels;
+        for (NSUInteger index = 0; index < 2; ++index) {
+            OwnerKey key;
+            const char *raw = entityIdentifiers[index].UTF8String;
+            if (!raw || !LabelForSelected(wrapper, raw, key, labels[index]))
+                return @NO;
+        }
+        document->NewCommand();
+        if (!E4AssignAllXCAFSlots(document, labels[0], resourceBytes,
+                "shadowed", true)
+            || !E4AssignAllXCAFSlots(document, labels[1], resourceBytes,
+                "original", false)
+            || !document->CommitCommand()) {
+            document->AbortCommand();
+            return @NO;
+        }
+        return @YES;
+    } @catch (...) { return @NO; }
+}
+
+- (NSDictionary<NSString *,id> *)
+    debugE4XCAFTypedSourceObservationForEntityIdentifier:
+        (NSString *)entityIdentifier
+        resourceBytes:(NSArray<NSData *> *)resourceBytes {
+    namespace aa = core3d::asset_atlas;
+    namespace pb = core3d::painted_atlas_bake;
+    namespace kernel = core3d::painted_atlas_bake::kernel;
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128 || resourceBytes.count != 6)
+        return nil;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        OwnerKey selected;
+        TDF_Label selectedLabel;
+        const char *raw = entityIdentifier.UTF8String;
+        if (wrapper.IsNull()
+            || !LabelForSelected(wrapper, raw ? raw : "", selected,
+                selectedLabel)) return nil;
+        const Handle(TDocStd_Document)& document = wrapper->Document();
+        std::vector<aa::persistence::Record> records;
+        if (document.IsNull() || document->HasOpenCommand()
+            || !aa::persistence::ReadAll(document, records)) return nil;
+        aa::Key atlasKey;
+        bool found = false;
+        for (const auto& record : records) {
+            if (!record.value) return nil;
+            for (const auto& member : record.value->definition.members)
+                if (member.owner == selected) {
+                    if (found) return nil;
+                    found = true;
+                    atlasKey = record.value->definition.key;
+                }
+        }
+        if (!found) return nil;
+        const Standard_Integer undosBefore = document->GetAvailableUndos();
+        pb::owner::ExportCapture capture;
+        if (pb::owner::CaptureForExport(capture, document, atlasKey)
+                != pb::owner::Outcome::Prepared
+            || capture.savedAtlas.resolutionTexels != 2048
+            || capture.savedAtlas.gutterTexels != 4
+            || capture.members.members.size() != 2
+            || capture.sources.size() != 10
+            || capture.sources.rawSlots.size() != 12
+            || capture.sources.canonicalBindings.size() != 2)
+            return nil;
+
+        std::size_t faceBindings = 0, materialSources = 0;
+        std::size_t presentSlots = 0, absentSlots = 0;
+        std::array<bool, 7> concreteSlots{};
+        bool typedApplicability = true;
+        for (const auto& source : capture.sources) {
+            if (source.origin == kernel::SourceOrigin::FaceBinding) {
+                ++faceBindings;
+                typedApplicability = typedApplicability
+                    && source.memberIndex == 0
+                    && source.faceIndex != std::numeric_limits<std::size_t>::max()
+                    && source.materialSlot == kernel::MaterialSlot::None;
+            } else if (source.origin == kernel::SourceOrigin::OwnerMaterialSlot) {
+                ++materialSources;
+                typedApplicability = typedApplicability
+                    && source.memberIndex == 1
+                    && source.faceIndex == std::numeric_limits<std::size_t>::max()
+                    && source.materialSlot != kernel::MaterialSlot::None;
+            } else typedApplicability = false;
+        }
+        for (const auto& witness : capture.sources.rawSlots) {
+            if (witness.present) ++presentSlots; else ++absentSlots;
+            const auto slot = static_cast<std::size_t>(witness.slot);
+            if (slot >= concreteSlots.size() || slot == 0) return nil;
+            concreteSlots[slot] = true;
+        }
+        bool allSlots = true;
+        for (std::size_t slot = 1; slot < concreteSlots.size(); ++slot)
+            allSlots = allSlots && concreteSlots[slot];
+
+        std::vector<aa::build::FinalMemberInput> inputs;
+        inputs.reserve(capture.members.members.size());
+        for (const auto& member : capture.members.members) {
+            core3d::retained_solid::Record retained;
+            core3d::retained_finishing::SourceRevision observed;
+            if (!core3d::retained_finishing::producer::detail::Source(
+                    document, member.slot.owner, observed, nullptr, &retained)
+                || !(observed == member.slot.source)) return nil;
+            std::atomic_bool cancelled{false};
+            core3d::meshcopy::CurrentTessellationCopy copy;
+            if (core3d::meshcopy::PrepareCurrentTessellationCopy(
+                    retained.current, copy, cancelled)
+                    != core3d::meshcopy::PreparationResult::Ready) return nil;
+            aa::build::FinalMemberInput input;
+            input.savedMember = member.slot;
+            input.authority = member.capture;
+            if (!core3d::retained_finishing::producer::detail::Triangles(
+                    copy, input.triangles, input.faces)) return nil;
+            inputs.push_back(std::move(input));
+        }
+        pb::owner::ExportBake baked;
+        std::string diagnosis;
+        const auto outcome = pb::owner::BuildAndBakeForExport(
+            capture, inputs, {2048, 4}, baked, diagnosis);
+        NSMutableArray<NSNumber *> *roles = [NSMutableArray array];
+        NSMutableArray<NSData *> *pngs = [NSMutableArray array];
+        for (const auto& output : baked.outputs) {
+            [roles addObject:@(static_cast<unsigned>(output.descriptor.role))];
+            [pngs addObject:[NSData dataWithBytes:output.png.data()
+                length:output.png.size()]];
+        }
+        bool savedFencesUnchanged = baked.bake.bindings
+            == capture.savedBake.bindings;
+        const bool canonicalComplete = !capture.canonicalAtlasBytes.empty()
+            && !capture.canonicalBakeBytes.empty()
+            && !capture.sources.canonicalBindings[0].bytes.empty()
+            && capture.sources.canonicalBindings[1].bytes.empty();
+
+        NSMutableArray<NSData *> *changedResources =
+            [resourceBytes mutableCopy];
+        changedResources[1] = resourceBytes[0];
+        document->NewCommand();
+        if (!E4AssignAllXCAFSlots(document, selectedLabel,
+                changedResources, "shadowed-changed", true)
+            || !document->CommitCommand()) {
+            document->AbortCommand();
+            return nil;
+        }
+        const Standard_Integer shadowedUndos = document->GetAvailableUndos();
+        pb::owner::ExportCapture changedCapture;
+        const auto changedOutcome = pb::owner::CaptureForExport(
+            changedCapture, document, atlasKey);
+        const bool shadowedStale = changedOutcome == pb::owner::Outcome::Prepared
+            && changedCapture.sources.rawSlots != capture.sources.rawSlots
+            && changedCapture.sources.size() == capture.sources.size()
+            && changedCapture.savedBake.bindings == capture.savedBake.bindings
+            && document->GetAvailableUndos() == shadowedUndos;
+        document->Undo();
+
+        document->NewCommand();
+        if (!E4AssignForeignShadowedSlot(document, selectedLabel, resourceBytes)
+            || !document->CommitCommand()) {
+            document->AbortCommand();
+            return nil;
+        }
+        const Standard_Integer foreignUndos = document->GetAvailableUndos();
+        pb::owner::ExportCapture foreignCapture;
+        const bool foreignRefusedWithoutRead =
+            pb::owner::CaptureForExport(foreignCapture, document, atlasKey)
+                == pb::owner::Outcome::ForeignResource
+            && foreignCapture.sources.empty()
+            && document->GetAvailableUndos() == foreignUndos;
+        document->Undo();
+
+        fi::Definition originalDefinition;
+        if (wrapper->ReadFaceImageBindings(selected, originalDefinition, nullptr)
+                != fi::persistence::bindings::ReadState::Present
+            || originalDefinition.bindings.empty()) return nil;
+        fi::Definition ambiguousDefinition = originalDefinition;
+        fi::Binding duplicate = ambiguousDefinition.bindings.front();
+        duplicate.binding = FixtureIndexedUUID(0x79, 1);
+        duplicate.face = FixtureIndexedUUID(0x79, 2);
+        ambiguousDefinition.bindings.push_back(std::move(duplicate));
+        if (!fi::BindBindingProof(ambiguousDefinition)) return nil;
+        fi::Observed ambiguousObserved;
+        for (const auto& binding : ambiguousDefinition.bindings)
+            ambiguousObserved.faces.push_back(
+                {binding.face, binding.selectorProof});
+        if (!fi::owner::ResourceManifest(document,
+                ambiguousObserved.resources)) return nil;
+        document->NewCommand();
+        fi::owner::Staging ambiguousStaging;
+        const auto ambiguousPrepared = fi::owner::Prepare(
+            ambiguousStaging, document, ambiguousDefinition,
+            ambiguousObserved);
+        const auto ambiguousCommitted = ambiguousPrepared
+                == fi::owner::Outcome::Prepared
+            ? fi::owner::Commit(ambiguousStaging, document,
+                ambiguousObserved)
+            : fi::owner::Outcome::Malformed;
+        if (ambiguousPrepared != fi::owner::Outcome::Prepared
+            || ambiguousCommitted != fi::owner::Outcome::Committed
+            || !document->CommitCommand()) {
+            fi::owner::Cancel(ambiguousStaging);
+            document->AbortCommand();
+            return nil;
+        }
+        const Standard_Integer ambiguousUndos = document->GetAvailableUndos();
+        pb::owner::ExportCapture ambiguousCapture;
+        const bool ambiguousRefused = pb::owner::CaptureForExport(
+                ambiguousCapture, document, atlasKey)
+                == pb::owner::Outcome::StaleBinding
+            && ambiguousCapture.sources.empty()
+            && document->GetAvailableUndos() == ambiguousUndos;
+        document->Undo();
+
+        return @{
+            @"fixture": @"E4P2b1XCAFOriginalMembers2048",
+            @"faceBindingCount": @(faceBindings),
+            @"materialSourceCount": @(materialSources),
+            @"rawWitnessCount": @(capture.sources.rawSlots.size()),
+            @"presentSlotCount": @(presentSlots),
+            @"absentSlotCount": @(absentSlots),
+            @"allConcreteSlots": @(allSlots),
+            @"typedApplicability": @(typedApplicability),
+            @"canonicalComplete": @(canonicalComplete),
+            @"savedFencesUnchanged": @(savedFencesUnchanged),
+            @"ordinaryPrepared": @(outcome == pb::owner::Outcome::Prepared),
+            @"roles": roles,
+            @"pngs": pngs,
+            @"samples": E4LayerSamples(baked.evidence),
+            @"resolution": @(baked.atlas.resolutionTexels),
+            @"gutter": @(baked.atlas.gutterTexels),
+            @"assignmentCount": @(baked.assignments.size()),
+            @"historyUnchanged": @(
+                document->GetAvailableUndos() == undosBefore),
+            @"shadowedStale": @(shadowedStale),
+            @"foreignRefusedWithoutRead": @(foreignRefusedWithoutRead),
+            @"ambiguousRefused": @(ambiguousRefused),
         };
     } @catch (...) { return nil; }
 }

@@ -25,6 +25,22 @@
 
 namespace core3d::painted_atlas_bake::kernel {
 
+enum class SourceOrigin : std::uint8_t {
+    OrderedLayer,
+    FaceBinding,
+    OwnerMaterialSlot
+};
+
+enum class MaterialSlot : std::uint8_t {
+    None,
+    CommonDiffuse,
+    PBRBaseColor,
+    PBREmissive,
+    PBRMetallicRoughness,
+    PBROcclusion,
+    PBRNormal
+};
+
 #ifdef DEBUG
 struct DebugOperationStorage final {
     std::size_t privateLive = 0;
@@ -108,6 +124,8 @@ bool DecodeImage(const std::vector<std::uint8_t>& bytes,
 struct Source final {
     BindingFence fence;
     Image image;
+    SourceOrigin origin = SourceOrigin::OrderedLayer;
+    MaterialSlot materialSlot = MaterialSlot::None;
     std::size_t memberIndex = std::numeric_limits<std::size_t>::max();
     std::size_t faceIndex = std::numeric_limits<std::size_t>::max();
     std::size_t order = 0;
@@ -421,6 +439,16 @@ inline bool Bake(const asset_atlas::Definition& atlas,
                 ownerPresent = ownerPresent || member.owner == source.fence.owner;
             if (!Valid(source.fence) || !ImageValid(source.image)
                 || !ownerPresent
+                || (source.origin == SourceOrigin::FaceBinding
+                    && (source.memberIndex == unspecified
+                        || source.faceIndex == unspecified
+                        || source.materialSlot != MaterialSlot::None))
+                || (source.origin == SourceOrigin::OwnerMaterialSlot
+                    && (source.memberIndex == unspecified
+                        || source.materialSlot == MaterialSlot::None
+                        || source.faceIndex != unspecified))
+                || (source.origin == SourceOrigin::OrderedLayer
+                    && source.materialSlot != MaterialSlot::None)
                 || !std::isfinite(source.opacity)
                 || source.opacity < 0.0 || source.opacity > 1.0
                 || (source.memberIndex != unspecified
@@ -1060,6 +1088,9 @@ struct CapturedSource final {
     decal_layer::bake::accounting::Ticket maskOriginalBytesTicket;
     decal_layer::bake::accounting::Ticket maskWorkingBytesTicket;
     face_image::ResourceEnvelope envelope;
+    kernel::SourceOrigin origin = kernel::SourceOrigin::OrderedLayer;
+    kernel::MaterialSlot materialSlot = kernel::MaterialSlot::None;
+    face_image::UUID faceIdentifier{};
     std::size_t memberIndex = std::numeric_limits<std::size_t>::max();
     std::size_t faceIndex = std::numeric_limits<std::size_t>::max();
     std::size_t order = 0;
@@ -1088,6 +1119,9 @@ struct CapturedSource final {
             reset();
             fence = other.fence;
             envelope = std::move(other.envelope);
+            origin = other.origin;
+            materialSlot = other.materialSlot;
+            faceIdentifier = other.faceIdentifier;
             memberIndex = other.memberIndex;
             faceIndex = other.faceIndex;
             order = other.order;
@@ -1117,6 +1151,9 @@ struct CapturedSource final {
         maskOriginalBytesTicket.reset();
         maskWorkingBytesTicket.reset();
         fence = {};
+        origin = kernel::SourceOrigin::OrderedLayer;
+        materialSlot = kernel::MaterialSlot::None;
+        faceIdentifier = {};
         memberIndex = faceIndex = std::numeric_limits<std::size_t>::max();
         order = 0; boundedLayer = false;
         centerU = centerV = width = height = angle = 0;
@@ -1174,6 +1211,9 @@ private:
             }
             fence = other.fence;
             envelope = other.envelope;
+            origin = other.origin;
+            materialSlot = other.materialSlot;
+            faceIdentifier = other.faceIdentifier;
             memberIndex = other.memberIndex;
             faceIndex = other.faceIndex;
             order = other.order;
@@ -1197,13 +1237,47 @@ private:
     }
 };
 
+//! Complete operation-local observation of one concrete Common/PBR slot.
+//! Absence is a value, not a missing witness. Present encoded bytes remain
+//! owned once by the effective or shadowed CapturedSource.
+struct RawSlotWitness final {
+    retained_recipe::OwnerKey owner;
+    std::size_t memberIndex = std::numeric_limits<std::size_t>::max();
+    kernel::MaterialSlot slot = kernel::MaterialSlot::None;
+    bool present = false;
+    BindingFence fence;
+    std::size_t originalBytes = 0;
+    std::size_t workingBytes = 0;
+
+    bool operator==(const RawSlotWitness& value) const noexcept {
+        return owner == value.owner && memberIndex == value.memberIndex
+            && slot == value.slot && present == value.present
+            && fence == value.fence && originalBytes == value.originalBytes
+            && workingBytes == value.workingBytes;
+    }
+};
+
+struct CanonicalBindingWitness final {
+    decal_layer::bake::accounting::Ticket bytesTicket;
+    retained_recipe::OwnerKey owner;
+    std::vector<std::uint8_t> bytes;
+
+    bool operator==(const CanonicalBindingWitness& value) const noexcept {
+        return owner == value.owner && bytes == value.bytes;
+    }
+};
+
 //! Owns the admission ticket for the std::vector<CapturedSource> allocation
 //! independently of the encoded-byte tickets carried by each source and the
 //! later decoded kernel::SourceStorage allocation.  The ticket is declared
 //! first so the vector releases its backing before the accounting view does.
 struct CapturedSourceStorage final {
     decal_layer::bake::accounting::Ticket vectorTicket;
+    decal_layer::bake::accounting::Ticket rawSlotsTicket;
+    decal_layer::bake::accounting::Ticket canonicalBindingsTicket;
     std::vector<CapturedSource> values;
+    std::vector<RawSlotWitness> rawSlots;
+    std::vector<CanonicalBindingWitness> canonicalBindings;
 
     CapturedSourceStorage() = default;
     CapturedSourceStorage(const CapturedSourceStorage&) = delete;
@@ -1215,13 +1289,21 @@ struct CapturedSourceStorage final {
         if (this != &other) {
             reset();
             vectorTicket = std::move(other.vectorTicket);
+            rawSlotsTicket = std::move(other.rawSlotsTicket);
+            canonicalBindingsTicket = std::move(other.canonicalBindingsTicket);
             values = std::move(other.values);
+            rawSlots = std::move(other.rawSlots);
+            canonicalBindings = std::move(other.canonicalBindings);
         }
         return *this;
     }
     ~CapturedSourceStorage() { reset(); }
     void reset() noexcept {
         std::vector<CapturedSource>().swap(values);
+        std::vector<RawSlotWitness>().swap(rawSlots);
+        std::vector<CanonicalBindingWitness>().swap(canonicalBindings);
+        canonicalBindingsTicket.reset();
+        rawSlotsTicket.reset();
         vectorTicket.reset();
     }
     void clear() noexcept { reset(); }
@@ -1422,12 +1504,14 @@ struct ExportCapture final {
     decal_layer::bake::accounting::Ticket observedMembersTicket;
     decal_layer::bake::accounting::Ticket savedBakeTicket;
     decal_layer::bake::accounting::Ticket canonicalAtlasBytesTicket;
+    decal_layer::bake::accounting::Ticket canonicalBakeBytesTicket;
     asset_atlas::Definition savedAtlas;
     asset_atlas::Capture members;
     std::vector<asset_atlas::Member> observedMembers;
     CapturedSourceStorage sources;
     Definition savedBake;
     std::vector<std::uint8_t> canonicalAtlasBytes;
+    std::vector<std::uint8_t> canonicalBakeBytes;
 
     ExportCapture() = default;
     ExportCapture(const ExportCapture&) = delete;
@@ -1447,12 +1531,15 @@ struct ExportCapture final {
             savedBakeTicket = std::move(other.savedBakeTicket);
             canonicalAtlasBytesTicket =
                 std::move(other.canonicalAtlasBytesTicket);
+            canonicalBakeBytesTicket =
+                std::move(other.canonicalBakeBytesTicket);
             savedAtlas = std::move(other.savedAtlas);
             members = std::move(other.members);
             observedMembers = std::move(other.observedMembers);
             sources = std::move(other.sources);
             savedBake = std::move(other.savedBake);
             canonicalAtlasBytes = std::move(other.canonicalAtlasBytes);
+            canonicalBakeBytes = std::move(other.canonicalBakeBytes);
         }
         return *this;
     }
@@ -1460,6 +1547,7 @@ struct ExportCapture final {
     void reset() noexcept {
         sources.reset();
         std::vector<std::uint8_t>().swap(canonicalAtlasBytes);
+        std::vector<std::uint8_t>().swap(canonicalBakeBytes);
         std::vector<asset_atlas::Member>().swap(observedMembers);
         std::vector<BindingFence>().swap(savedBake.bindings);
         std::vector<BakedResource>().swap(savedBake.resources);
@@ -1472,6 +1560,7 @@ struct ExportCapture final {
             savedAtlas.resources);
         savedAtlas = {};
         canonicalAtlasBytesTicket.reset();
+        canonicalBakeBytesTicket.reset();
         savedBakeTicket.reset();
         observedMembersTicket.reset();
         membersTicket.reset();
