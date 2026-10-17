@@ -706,6 +706,16 @@ __attribute__((objc_subclassing_restricted))
         selectedObjectsOnly:
         (BOOL)selectedObjectsOnly
     NS_SWIFT_NAME(debugE4SavedGroupFinalResult(wholeCommittedScene:selectedObjectsOnly:));
+//! Adds the ruled disjoint singleton saved group on the existing retained
+//! third part through ordinary authoring, exact material restore and rebake.
+- (NSNumber *)debugPrepareE4SavedProducerBatchVariantForEntityIdentifier:
+    (NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugPrepareE4SavedProducerBatchVariant(entityIdentifier:));
+//! Runs both strict saved groups through one inherited aggregate plan.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4SavedProducerBatchForWholeCommittedScene:
+        (Core3DSceneSnapshot *)wholeCommittedScene
+    NS_SWIFT_NAME(debugE4SavedProducerBatch(wholeCommittedScene:));
 //! Runs the five-role 2048 kernel with its inherited operation, observes the
 //! retained output after return, and denies encoder admission before allocation.
 - (nullable NSDictionary<NSString *,id> *)

@@ -16,6 +16,7 @@
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
+#include <TDF_Tool.hxx>
 
 #ifdef DEBUG
 #include <atomic>
@@ -1104,6 +1105,55 @@ Outcome CaptureSources(const Handle(TDocStd_Document)& document,
             Handle(XCAFDoc_VisMaterial) material;
             if (!materialLabel.IsNull() && !materialTool.IsNull())
                 material = materialTool->GetMaterial(materialLabel);
+            Digest materialIdentity{};
+            std::array<double, 17> materialScalars{};
+            std::array<std::int32_t, 4> materialModes{};
+            if (!materialLabel.IsNull()) {
+                TCollection_AsciiString entry;
+                TDF_Tool::Entry(materialLabel, entry);
+                if (entry.IsEmpty() || !CC_SHA256(entry.ToCString(),
+                        CC_LONG(entry.Length()), materialIdentity.data()))
+                    return Outcome::Malformed;
+            }
+            materialModes[0] = !material.IsNull()
+                && material->HasCommonMaterial();
+            materialModes[1] = !material.IsNull()
+                && material->HasPbrMaterial();
+            if (!material.IsNull()) {
+                materialModes[2] = std::int32_t(material->AlphaMode());
+                materialModes[3] = std::int32_t(material->FaceCulling());
+                materialScalars[16] = material->AlphaCutOff();
+            }
+            if (materialModes[0]) {
+                const auto& common = material->CommonMaterial();
+                materialScalars[0] = common.DiffuseColor.Red();
+                materialScalars[1] = common.DiffuseColor.Green();
+                materialScalars[2] = common.DiffuseColor.Blue();
+                materialScalars[3] = common.Transparency;
+                materialScalars[4] = common.AmbientColor.Red();
+                materialScalars[5] = common.AmbientColor.Green();
+                materialScalars[6] = common.AmbientColor.Blue();
+                materialScalars[7] = common.SpecularColor.Red();
+                materialScalars[8] = common.SpecularColor.Green();
+                materialScalars[9] = common.SpecularColor.Blue();
+                materialScalars[10] = common.EmissiveColor.Red();
+                materialScalars[11] = common.EmissiveColor.Green();
+                materialScalars[12] = common.EmissiveColor.Blue();
+                materialScalars[13] = common.Shininess;
+            }
+            if (materialModes[1]) {
+                const auto& pbr = material->PbrMaterial();
+                materialScalars[0] = pbr.BaseColor.GetRGB().Red();
+                materialScalars[1] = pbr.BaseColor.GetRGB().Green();
+                materialScalars[2] = pbr.BaseColor.GetRGB().Blue();
+                materialScalars[3] = pbr.BaseColor.Alpha();
+                materialScalars[4] = pbr.EmissiveFactor.x();
+                materialScalars[5] = pbr.EmissiveFactor.y();
+                materialScalars[6] = pbr.EmissiveFactor.z();
+                materialScalars[7] = pbr.Metallic;
+                materialScalars[8] = pbr.Roughness;
+                materialScalars[9] = pbr.RefractionIndex;
+            }
             const auto add = [&](const Handle(Image_Texture)& texture,
                                  Role role,
                                  kernel::MaterialSlot slot) -> Outcome {
@@ -1112,6 +1162,9 @@ Outcome CaptureSources(const Handle(TDocStd_Document)& document,
                 witness.memberIndex = capturedMemberIndex;
                 witness.slot = slot;
                 witness.present = !texture.IsNull();
+                witness.materialIdentity = materialIdentity;
+                witness.materialScalars = materialScalars;
+                witness.materialModes = materialModes;
                 if (texture.IsNull()) {
                     staged.rawSlots.push_back(std::move(witness));
                     return Outcome::Prepared;
@@ -1129,21 +1182,25 @@ Outcome CaptureSources(const Handle(TDocStd_Document)& document,
                 witness.fence = source.fence;
                 witness.originalBytes = source.envelope.originalBytes.size();
                 witness.workingBytes = source.envelope.workingBytes.size();
-                staged.rawSlots.push_back(std::move(witness));
                 // Precedence is evaluated only after the raw slot has been
                 // measured. A face binding or earlier concrete slot can make
-                // this source ineffective without erasing its witness.
+                // this source ineffective without erasing its owned bytes.
                 for (const auto& existing : staged.values)
                     if (existing.fence.owner == member.slot.owner
-                        && existing.fence.role == role)
+                        && existing.fence.role == role) {
+                        witness.shadowedSource = std::move(source);
+                        staged.rawSlots.push_back(std::move(witness));
                         return Outcome::Prepared;
+                    }
                 if (staged.values.size() >= staged.values.capacity()) {
                     operation.AllocationFailed(
                         decal_layer::bake::accounting::FailureSite::
                             CapturedSourceStorage);
                     return Outcome::OverBudget;
                 }
-                staged.values.push_back(std::move(source)); return Outcome::Prepared;
+                staged.values.push_back(std::move(source));
+                staged.rawSlots.push_back(std::move(witness));
+                return Outcome::Prepared;
             };
             Handle(Image_Texture) commonDiffuse, pbrBase, pbrEmissive,
                 pbrMetallicRoughness, pbrOcclusion, pbrNormal;
@@ -1221,6 +1278,22 @@ Outcome CaptureSources(const Handle(TDocStd_Document)& document,
                 }
             if (source.memberIndex == members.members.size())
                 return Outcome::OwnerMismatch;
+        }
+        for (auto& witness : staged.rawSlots) {
+            if (!witness.present
+                || !witness.shadowedSource.envelope.workingBytes.empty())
+                continue;
+            std::size_t matches = 0;
+            for (std::size_t sourceIndex = 0;
+                 sourceIndex < staged.values.size(); ++sourceIndex) {
+                const auto& source = staged.values[sourceIndex];
+                if (source.fence == witness.fence
+                    && source.materialSlot == witness.slot) {
+                    witness.effectiveSourceIndex = sourceIndex;
+                    ++matches;
+                }
+            }
+            if (matches != 1) return Outcome::Malformed;
         }
         output = std::move(staged);
         return Outcome::Prepared;
@@ -3121,6 +3194,19 @@ Outcome BakeForExport(const ExportCapture& capture,
                       aa::build::LayoutEvidence&& layout,
                       std::shared_ptr<ExportBakeStorage> storage,
                       ExportBake& output) noexcept {
+    return BakeForExport(capture, productionSources, std::move(finalAtlas),
+        std::move(assignments), std::move(layout), std::move(storage),
+        nullptr, output);
+}
+
+Outcome BakeForExport(const ExportCapture& capture,
+                      const CapturedSourceStorage& productionSources,
+                      aa::Definition finalAtlas,
+                      std::vector<aa::MemberUVAssignment> assignments,
+                      aa::build::LayoutEvidence&& layout,
+                      std::shared_ptr<ExportBakeStorage> storage,
+                      const kernel::WorkMeasurement* admittedWork,
+                      ExportBake& output) noexcept {
     output = {};
     try {
         const auto operation = capture.operationView();
@@ -3155,8 +3241,7 @@ Outcome BakeForExport(const ExportCapture& capture,
                 output.outputs, output.evidence,
                 output.storage->outputVectorStorage,
                 output.storage->evidenceStorage,
-                operation,
-                output.storage->finalAtlas.sealAtlasJob)) {
+                operation, false, admittedWork)) {
             const bool budget = !operation.Recheck(
                 decal_layer::bake::accounting::FailureSite::ExportBakeStorage);
             output = {};
@@ -3190,6 +3275,147 @@ Outcome BuildAndBakeForExport(
         settings, output, diagnosis);
 }
 
+Outcome PrepareBakeForExport(
+    const ExportCapture& capture,
+    const CapturedSourceStorage& productionSources,
+    const std::vector<aa::build::FinalMemberInput>& finalMembers,
+    const aa::build::Settings& settings,
+    ExportBakePlan& plan,
+    std::string& diagnosis) noexcept {
+    plan = {};
+    diagnosis.clear();
+    try {
+        const auto operation = capture.operationView();
+        aa::build::FinalAtlasAccounting accounting;
+        if (!ConfigureFinalAtlasAccounting(productionSources,
+                operation, false, accounting))
+            return Outcome::OverBudget;
+        aa::Definition atlas;
+        std::vector<aa::MemberUVAssignment> assignments;
+        aa::build::LayoutEvidence layout;
+        const auto built = aa::build::BuildFinalAtlas(
+            capture.savedAtlas.key, finalMembers, settings, atlas,
+            assignments, diagnosis, &layout, &accounting);
+        if (built != aa::build::Status::Built) {
+            if (diagnosis.empty())
+                diagnosis = "build-status-"
+                    + std::to_string(static_cast<unsigned>(built));
+            return MapBuild(built);
+        }
+        kernel::SourceStorage measuredSources;
+        const auto decoded = DecodeCapturedSources(
+            productionSources.values, operation, measuredSources);
+        if (decoded != Outcome::Prepared) {
+            diagnosis = "plan-source-decode";
+            return decoded;
+        }
+        kernel::WorkMeasurement work;
+        if (!kernel::MeasureWork(atlas, layout, measuredSources.values,
+                operation, work)
+            || accounting.jobUnits != work.atlasRoles) {
+            diagnosis = "plan-work-measurement";
+            return operation.Recheck(
+                    decal_layer::bake::accounting::FailureSite::
+                        ExportCanonicalStorage)
+                ? Outcome::Malformed : Outcome::OverBudget;
+        }
+        const auto* owner = capture.operation.valid()
+            ? &capture.operation : nullptr;
+        auto storage = MakeExportBakeStorage(
+            operation, owner, std::move(accounting));
+        if (!storage) {
+            diagnosis = "plan-storage";
+            return Outcome::OverBudget;
+        }
+        plan.storage = std::move(storage);
+        plan.atlas = std::move(atlas);
+        plan.assignments = std::move(assignments);
+        plan.layout = std::move(layout);
+        plan.work = work;
+        return Outcome::Prepared;
+    } catch (...) {
+        plan = {};
+        diagnosis = "plan-exception";
+        return Outcome::Malformed;
+    }
+}
+
+bool AdmitBakePlan(AggregateBakePlan& aggregate,
+                   ExportBakePlan& item) noexcept {
+    using FailureSite = decal_layer::bake::accounting::FailureSite;
+    try {
+        if (!item.storage || item.admitted || item.executed
+            || aggregate.sealed
+            || !item.storage->finalAtlas.operation.valid()) return false;
+        const auto operation = item.storage->finalAtlas.operation;
+        if (!aggregate.operation.valid()) aggregate.operation = operation;
+        if (aggregate.operation.context != operation.context) {
+            aggregate.operation.Refuse(FailureSite::ContextControl);
+            return false;
+        }
+        const auto add = [&](std::size_t value, std::size_t& total) {
+            if (value > std::numeric_limits<std::size_t>::max() - total) {
+                aggregate.operation.Refuse(FailureSite::CheckedProduct);
+                return false;
+            }
+            total += value;
+            return true;
+        };
+        if (!add(item.work.atlasRoles, aggregate.admittedWork.atlasRoles)
+            || !add(item.work.sourcePixels,
+                aggregate.admittedWork.sourcePixels)
+            || !add(item.work.maskPixels, aggregate.admittedWork.maskPixels)
+            || !add(item.work.gutter, aggregate.admittedWork.gutter)
+            || !add(item.work.encoder, aggregate.admittedWork.encoder)
+            || aggregate.admittedItems
+                == std::numeric_limits<std::size_t>::max()) return false;
+        ++aggregate.admittedItems;
+        item.admitted = true;
+        return true;
+    } catch (...) { return false; }
+}
+
+bool SealBakePlan(AggregateBakePlan& aggregate) noexcept {
+    using namespace decal_layer::bake::accounting;
+    if (!aggregate.operation.valid() || aggregate.sealed
+        || aggregate.admittedItems == 0) return false;
+    const auto& work = aggregate.admittedWork;
+    if (!aggregate.operation.SealJob(Job::AtlasRoles, work.atlasRoles,
+            FailureSite::ExportCanonicalStorage)
+        || !aggregate.operation.SealJob(Job::SourcePixels,
+            work.sourcePixels, FailureSite::ExportCanonicalStorage)
+        || !aggregate.operation.SealJob(Job::MaskPixels, work.maskPixels,
+            FailureSite::ExportCanonicalStorage)
+        || !aggregate.operation.SealJob(Job::Gutter, work.gutter,
+            FailureSite::ExportCanonicalStorage)
+        || !aggregate.operation.SealJob(Job::Encoder, work.encoder,
+            FailureSite::ExportCanonicalStorage)) return false;
+    aggregate.sealed = true;
+    return true;
+}
+
+Outcome ExecuteBakeForExport(
+    const ExportCapture& capture,
+    const CapturedSourceStorage& productionSources,
+    const AggregateBakePlan& aggregate,
+    ExportBakePlan& plan,
+    ExportBake& output,
+    std::string& diagnosis) noexcept {
+    output = {};
+    if (!aggregate.sealed || !plan.admitted || plan.executed
+        || !plan.storage || aggregate.operation.context
+            != plan.storage->finalAtlas.operation.context) {
+        diagnosis = "plan-not-sealed";
+        return Outcome::Malformed;
+    }
+    const auto outcome = BakeForExport(capture, productionSources,
+        std::move(plan.atlas), std::move(plan.assignments),
+        std::move(plan.layout), std::move(plan.storage), &plan.work, output);
+    if (outcome == Outcome::Prepared) plan.executed = true;
+    else if (diagnosis.empty()) diagnosis = "plan-execute";
+    return outcome;
+}
+
 Outcome BuildAndBakeForExport(
     const ExportCapture& capture,
     const CapturedSourceStorage& productionSources,
@@ -3200,31 +3426,15 @@ Outcome BuildAndBakeForExport(
     output = {};
     diagnosis.clear();
     try {
-        const auto operation = capture.operationView();
-        aa::Definition atlas;
-        std::vector<aa::MemberUVAssignment> assignments;
-        aa::build::LayoutEvidence layout;
-        aa::build::FinalAtlasAccounting accounting;
-        if (!ConfigureFinalAtlasAccounting(productionSources,
-                operation, true, accounting))
-            return Outcome::OverBudget;
-        const auto built = aa::build::BuildFinalAtlas(
-            capture.savedAtlas.key, finalMembers, settings, atlas,
-            assignments, diagnosis, &layout, &accounting);
-        if (built != aa::build::Status::Built) {
-            if (diagnosis.empty())
-                diagnosis = "build-status-" +
-                    std::to_string(static_cast<unsigned>(built));
-            return MapBuild(built);
-        }
-        const auto* owner = capture.operation.valid()
-            ? &capture.operation : nullptr;
-        auto storage = MakeExportBakeStorage(
-            operation, owner, std::move(accounting));
-        if (!storage) return Outcome::OverBudget;
-        const auto outcome = BakeForExport(capture, productionSources,
-            std::move(atlas), std::move(assignments), std::move(layout),
-            std::move(storage), output);
+        ExportBakePlan item;
+        auto outcome = PrepareBakeForExport(capture, productionSources,
+            finalMembers, settings, item, diagnosis);
+        if (outcome != Outcome::Prepared) return outcome;
+        AggregateBakePlan aggregate;
+        if (!AdmitBakePlan(aggregate, item)
+            || !SealBakePlan(aggregate)) return Outcome::OverBudget;
+        outcome = ExecuteBakeForExport(capture, productionSources,
+            aggregate, item, output, diagnosis);
         if (outcome != Outcome::Prepared && diagnosis.empty())
             diagnosis = "bake-outcome-" +
                 std::to_string(static_cast<unsigned>(outcome));

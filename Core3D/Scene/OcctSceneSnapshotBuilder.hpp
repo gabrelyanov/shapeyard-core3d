@@ -183,6 +183,29 @@ struct DebugSavedGroupFinalObservation final {
     bool complete = false;
 };
 
+struct DebugSavedProducerBatchObservation final {
+    std::vector<std::string> strictKeys;
+    std::vector<std::uint64_t> memberCounts;
+    std::vector<std::uint64_t> assignmentCounts;
+    std::vector<std::uint64_t> outputCounts;
+    std::vector<std::uint64_t> work;
+    std::vector<std::vector<std::uint8_t>> firstGroupPNGs;
+    std::string failureStage;
+    std::uint64_t rawSlotCount = 0;
+    std::uint64_t presentSlotCount = 0;
+    std::uint64_t absentSlotCount = 0;
+    std::uint64_t shadowedByteCount = 0;
+    std::uint64_t measuredCopyCount = 0;
+    std::uint64_t layoutCount = 0;
+    bool disjointMembership = false;
+    bool rawAuthorityRetained = false;
+    bool descriptorDifferenceDetected = false;
+    bool oneAggregateSeal = false;
+    bool distinctGroupResults = false;
+    bool sharedWithinGroups = false;
+    bool complete = false;
+};
+
 //! Value-only observation of the bounded-curve input used by one successful
 //! full-scene publication. This test seam is armed explicitly for one
 //! synchronous DEBUG capture and never retains labels, document handles or
@@ -290,6 +313,12 @@ public:
         const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
         const std::function<bool()>& cancelled,
         DebugSavedGroupFinalObservation& observation) noexcept;
+    static bool DebugProduceSavedProducerBatch(
+        const Handle(OcctDocument)& exclusivelyOwnedPrivateDocument,
+        const SceneSnapshot& wholeCommittedScene,
+        const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
+        const std::function<bool()>& cancelled,
+        DebugSavedProducerBatchObservation& observation) noexcept;
 #endif
 
     //! Capture only the semantic camera and revisions. Document, model, and

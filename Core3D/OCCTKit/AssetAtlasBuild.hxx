@@ -67,13 +67,13 @@ struct FinalAtlasAccounting final {
     std::size_t roleCount = 0;
     std::size_t sourceCount = 0;
     std::size_t maskCount = 0;
+    std::size_t jobUnits = 0;
     bool sealAtlasJob = true;
 #ifdef DEBUG
     bool denyLayoutReservation = false;
     std::size_t memberCount = 0;
     std::size_t triangleCount = 0;
     std::size_t cornerCount = 0;
-    std::size_t jobUnits = 0;
     std::size_t layoutReservationAttempts = 0;
     std::size_t packerEntries = 0;
 #endif
@@ -543,11 +543,11 @@ inline Status BuildFinalAtlas(const Key& atlas,
     if (accounting) {
         accounting->layoutStorage.reset();
         accounting->resultStorage.reset();
+        accounting->jobUnits = 0;
 #ifdef DEBUG
         accounting->memberCount = 0;
         accounting->triangleCount = 0;
         accounting->cornerCount = 0;
-        accounting->jobUnits = 0;
         accounting->layoutReservationAttempts = 0;
         accounting->packerEntries = 0;
 #endif
@@ -679,11 +679,11 @@ inline Status BuildFinalAtlas(const Key& atlas,
                     && !accounting->operation.SealJob(Job::AtlasRoles,
                         jobUnits, FailureSite::ExportCanonicalStorage)))
                 return Status::OverBudget;
+            accounting->jobUnits = jobUnits;
 #ifdef DEBUG
             accounting->memberCount = inputs.size();
             accounting->triangleCount = totalTriangles;
             accounting->cornerCount = totalCorners;
-            accounting->jobUnits = jobUnits;
 #endif
         }
 

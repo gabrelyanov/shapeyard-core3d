@@ -410,6 +410,170 @@ inline bool ImageHash(const std::vector<std::uint8_t>& bytes, Digest& digest) no
         && CC_SHA256(bytes.data(), CC_LONG(bytes.size()), digest.data()) != nullptr;
 }
 
+//! Exact per-item work admitted by an aggregate painted-atlas operation.
+//! Measurement reads the retained real layout and decoded source dimensions;
+//! it never rasterizes, samples, packs or encodes.
+struct WorkMeasurement final {
+    std::size_t atlasRoles = 0;
+    std::size_t sourcePixels = 0;
+    std::size_t maskPixels = 0;
+    std::size_t gutter = 0;
+    std::size_t encoder = 0;
+
+    bool operator==(const WorkMeasurement& value) const noexcept {
+        return atlasRoles == value.atlasRoles
+            && sourcePixels == value.sourcePixels
+            && maskPixels == value.maskPixels
+            && gutter == value.gutter && encoder == value.encoder;
+    }
+};
+
+inline bool MeasureWork(
+    const asset_atlas::Definition& atlas,
+    const asset_atlas::build::LayoutEvidence& layout,
+    const std::vector<Source>& sources,
+    const decal_layer::bake::accounting::View& operation,
+    WorkMeasurement& output) noexcept {
+    using namespace decal_layer::bake::accounting;
+    output = {};
+    try {
+        if (!operation.valid() || atlas.resolutionTexels <= 0
+            || atlas.resolutionTexels > kMaximumBakedDimension
+            || atlas.gutterTexels < 1 || atlas.gutterTexels > 8
+            || sources.empty() || layout.charts.empty()
+            || layout.packed.triangles.empty()
+            || layout.chartMembers.size() != layout.charts.size()
+            || layout.chartFaces.size() != layout.charts.size()) return false;
+        constexpr std::size_t unspecified =
+            std::numeric_limits<std::size_t>::max();
+        std::array<bool, 5> presentRoles{};
+        std::size_t roleCount = 0, maskCount = 0;
+        for (const auto& source : sources) {
+            const std::size_t role = std::size_t(source.fence.role);
+            if (role >= presentRoles.size() || !Valid(source.fence)
+                || !ImageValid(source.image)) return false;
+            if (!presentRoles[role]) {
+                presentRoles[role] = true;
+                ++roleCount;
+            }
+            if (source.maskPresent) {
+                if (!ImageValid(source.mask)
+                    || maskCount == std::numeric_limits<std::size_t>::max())
+                    return false;
+                ++maskCount;
+            }
+        }
+        if (roleCount == 0) return false;
+        const std::size_t size = std::size_t(atlas.resolutionTexels);
+        std::size_t pixels = 0, pixelBytes = 0, rolePixels = 0, part = 0;
+        const auto add = [&](std::size_t value, std::size_t& total) {
+            if (value > std::numeric_limits<std::size_t>::max() - total) {
+                operation.Refuse(FailureSite::CheckedProduct);
+                return false;
+            }
+            total += value;
+            return true;
+        };
+        if (!operation.CheckedProduct(size, size, 1U, pixels,
+                FailureSite::ExportCanonicalStorage)
+            || !operation.CheckedProduct(pixels, 4U, 1U, pixelBytes,
+                FailureSite::ExportCanonicalStorage)
+            || !operation.CheckedProduct(pixels, roleCount, 1U, rolePixels,
+                FailureSite::ExportCanonicalStorage)
+            || !operation.CheckedProduct(rolePixels,
+                std::size_t(atlas.gutterTexels), 1U, output.gutter,
+                FailureSite::ExportCanonicalStorage)
+            || !operation.CheckedProduct(pixelBytes, roleCount, 1U,
+                output.encoder, FailureSite::ExportCanonicalStorage))
+            return false;
+        for (const auto& source : sources) {
+            if (!operation.CheckedProduct(source.image.width,
+                    source.image.height, 1U, part,
+                    FailureSite::ExportCanonicalStorage)
+                || !add(part, output.sourcePixels)) return false;
+            if (source.maskPresent
+                && (!operation.CheckedProduct(source.mask.width,
+                        source.mask.height, 1U, part,
+                        FailureSite::ExportCanonicalStorage)
+                    || !add(part, output.maskPixels))) return false;
+        }
+        for (std::size_t role = 0; role < presentRoles.size(); ++role) {
+            if (!presentRoles[role]) continue;
+            const Role typedRole = Role(role);
+            std::size_t roleSources = 0;
+            for (const auto& source : sources)
+                if (source.fence.role == typedRole) ++roleSources;
+            if (!add(sources.size(), output.sourcePixels)
+                || !operation.CheckedProduct(roleSources, roleSources, 1U,
+                    part, FailureSite::ExportCanonicalStorage)
+                || !add(part, output.sourcePixels)) return false;
+            for (const auto& placed : layout.packed.triangles) {
+                if (placed.chartIndex < 0
+                    || std::size_t(placed.chartIndex) >= layout.charts.size()
+                    || std::size_t(placed.chartIndex)
+                        >= layout.chartMembers.size()
+                    || std::size_t(placed.chartIndex) >= layout.chartFaces.size())
+                    return false;
+                const std::size_t chart = std::size_t(placed.chartIndex);
+                const std::size_t member = layout.chartMembers[chart].first;
+                if (member >= atlas.members.size()) return false;
+                const std::size_t face = layout.chartFaces[chart];
+                std::size_t candidates = 0, maskedCandidates = 0;
+                for (const auto& source : sources) {
+                    if (source.fence.role != typedRole
+                        || !(source.fence.owner == atlas.members[member].owner)
+                        || (source.memberIndex != unspecified
+                            && source.memberIndex != member)
+                        || (source.faceIndex != unspecified
+                            && source.faceIndex != face)) continue;
+                    ++candidates;
+                    if (source.maskPresent) ++maskedCandidates;
+                }
+                double x[3], y[3];
+                for (int corner = 0; corner < 3; ++corner) {
+                    x[corner] = placed.uv[corner].x * double(size);
+                    y[corner] = placed.uv[corner].y * double(size);
+                    if (!std::isfinite(x[corner]) || !std::isfinite(y[corner]))
+                        return false;
+                }
+                const int minX = std::max(0, int(std::ceil(
+                    std::min({x[0], x[1], x[2]}) - .5)));
+                const int maxX = std::min(int(size) - 1, int(std::floor(
+                    std::max({x[0], x[1], x[2]}) - .5)));
+                const int minY = std::max(0, int(std::ceil(
+                    std::min({y[0], y[1], y[2]}) - .5)));
+                const int maxY = std::min(int(size) - 1, int(std::floor(
+                    std::max({y[0], y[1], y[2]}) - .5)));
+                std::size_t visits = 0;
+                if (maxX >= minX && maxY >= minY
+                    && (!operation.CheckedProduct(
+                            std::size_t(maxX - minX + 1),
+                            std::size_t(maxY - minY + 1), 1U, visits,
+                            FailureSite::ExportCanonicalStorage)
+                        || !add(visits, output.sourcePixels)
+                        || !operation.CheckedProduct(visits, candidates, 1U,
+                            part, FailureSite::ExportCanonicalStorage)
+                        || !add(part, output.sourcePixels)
+                        || !operation.CheckedProduct(visits,
+                            maskedCandidates, 1U, part,
+                            FailureSite::ExportCanonicalStorage)
+                        || !add(part, output.maskPixels))) return false;
+            }
+        }
+        output.atlasRoles = rolePixels;
+        return operation.CheckedProduct(layout.packed.triangles.size(), 3U,
+                std::size_t(atlas.gutterTexels), part,
+                FailureSite::ExportCanonicalStorage)
+            && add(part, output.atlasRoles)
+            && add(layout.packed.triangles.size(), output.atlasRoles)
+            && add(sources.size(), output.atlasRoles)
+            && add(maskCount, output.atlasRoles);
+    } catch (...) {
+        output = {};
+        return false;
+    }
+}
+
 inline bool Bake(const asset_atlas::Definition& atlas,
                  const asset_atlas::build::LayoutEvidence& layout,
                  const std::vector<Source>& sources,
@@ -418,7 +582,8 @@ inline bool Bake(const asset_atlas::Definition& atlas,
                  decal_layer::bake::accounting::Ticket& outputVectorTicket,
                  decal_layer::bake::accounting::Ticket& evidenceTicket,
                  const decal_layer::bake::accounting::View& operation,
-                 bool atlasJobAlreadySealed = false) noexcept {
+                 bool atlasJobAlreadySealed = false,
+                 const WorkMeasurement* admittedWork = nullptr) noexcept {
     using namespace decal_layer::bake::accounting;
     std::vector<Output>().swap(outputs);
     outputVectorTicket.reset();
@@ -623,25 +788,28 @@ inline bool Bake(const asset_atlas::Definition& atlas,
             || !add(layout.packed.triangles.size(), atlasWork)
             || !add(sources.size(), atlasWork)
             || !add(maskCount, atlasWork)
-            || (!atlasJobAlreadySealed
+            || (admittedWork && !(*admittedWork == WorkMeasurement{
+                    atlasWork, sourceWork, maskWork, gutterWork, encoderWork}))
+            || (!admittedWork && !atlasJobAlreadySealed
                 && !operation.SealJob(Job::AtlasRoles, atlasWork,
                     FailureSite::ExportCanonicalStorage))
             || !operation.ConsumeJob(Job::AtlasRoles, atlasWork,
                 FailureSite::ExportCanonicalStorage)
-            || !operation.SealJob(Job::SourcePixels, sourceWork,
-                FailureSite::ExportCanonicalStorage)
+            || (!admittedWork && !operation.SealJob(
+                Job::SourcePixels, sourceWork,
+                FailureSite::ExportCanonicalStorage))
             || !operation.ConsumeJob(Job::SourcePixels, sourceWork,
                 FailureSite::ExportCanonicalStorage)
-            || !operation.SealJob(Job::MaskPixels, maskWork,
-                FailureSite::ExportCanonicalStorage)
+            || (!admittedWork && !operation.SealJob(Job::MaskPixels,
+                maskWork, FailureSite::ExportCanonicalStorage))
             || !operation.ConsumeJob(Job::MaskPixels, maskWork,
                 FailureSite::ExportCanonicalStorage)
-            || !operation.SealJob(Job::Gutter, gutterWork,
-                FailureSite::ExportCanonicalStorage)
+            || (!admittedWork && !operation.SealJob(Job::Gutter,
+                gutterWork, FailureSite::ExportCanonicalStorage))
             || !operation.ConsumeJob(Job::Gutter, gutterWork,
                 FailureSite::ExportCanonicalStorage)
-            || !operation.SealJob(Job::Encoder, encoderWork,
-                FailureSite::ExportCanonicalStorage)
+            || (!admittedWork && !operation.SealJob(Job::Encoder,
+                encoderWork, FailureSite::ExportCanonicalStorage))
             || !operation.ConsumeJob(Job::Encoder, encoderWork,
                 FailureSite::ExportCanonicalStorage)) return false;
 #ifdef DEBUG
@@ -1245,15 +1413,35 @@ struct RawSlotWitness final {
     std::size_t memberIndex = std::numeric_limits<std::size_t>::max();
     kernel::MaterialSlot slot = kernel::MaterialSlot::None;
     bool present = false;
+    Digest materialIdentity{};
+    std::array<double, 17> materialScalars{};
+    std::array<std::int32_t, 4> materialModes{};
     BindingFence fence;
     std::size_t originalBytes = 0;
     std::size_t workingBytes = 0;
+    // Effective slots refer to the existing value allocation. A shadowed
+    // slot owns its source here, so encoded bytes are never copied merely to
+    // preserve raw authority.
+    std::size_t effectiveSourceIndex =
+        std::numeric_limits<std::size_t>::max();
+    CapturedSource shadowedSource;
 
     bool operator==(const RawSlotWitness& value) const noexcept {
+        bool scalarsEqual = true;
+        for (std::size_t index = 0; index < materialScalars.size(); ++index)
+            scalarsEqual = scalarsEqual && face_image::SameScalarBits(
+                materialScalars[index], value.materialScalars[index]);
         return owner == value.owner && memberIndex == value.memberIndex
             && slot == value.slot && present == value.present
+            && materialIdentity == value.materialIdentity
+            && scalarsEqual && materialModes == value.materialModes
             && fence == value.fence && originalBytes == value.originalBytes
-            && workingBytes == value.workingBytes;
+            && workingBytes == value.workingBytes
+            && effectiveSourceIndex == value.effectiveSourceIndex
+            && shadowedSource.fence == value.shadowedSource.fence
+            && shadowedSource.envelope == value.shadowedSource.envelope
+            && shadowedSource.origin == value.shadowedSource.origin
+            && shadowedSource.materialSlot == value.shadowedSource.materialSlot;
     }
 };
 
@@ -1662,6 +1850,27 @@ struct ExportBake final {
     kernel::Evidence evidence;
 };
 
+//! Prepared real layout and immutable work value for one saved or transient
+//! job. The layout is built once, before the parent aggregate is sealed.
+struct ExportBakePlan final {
+    std::shared_ptr<ExportBakeStorage> storage;
+    asset_atlas::Definition atlas;
+    std::vector<asset_atlas::MemberUVAssignment> assignments;
+    asset_atlas::build::LayoutEvidence layout;
+    kernel::WorkMeasurement work;
+    bool admitted = false;
+    bool executed = false;
+};
+
+//! One operation-owned aggregate. Jobs are sealed exactly once after every
+//! concrete item has supplied its real-layout measurement.
+struct AggregateBakePlan final {
+    decal_layer::bake::accounting::View operation;
+    kernel::WorkMeasurement admittedWork;
+    std::size_t admittedItems = 0;
+    bool sealed = false;
+};
+
 Outcome Prepare(Staging& staging, const Handle(TDocStd_Document)& document,
                 const asset_atlas::Key& key) noexcept;
 Outcome Commit(Staging& staging, const Handle(TDocStd_Document)& document) noexcept;
@@ -1696,10 +1905,35 @@ Outcome BakeForExport(const ExportCapture& capture,
                       asset_atlas::build::LayoutEvidence&& layout,
                       std::shared_ptr<ExportBakeStorage> storage,
                       ExportBake& output) noexcept;
+Outcome BakeForExport(const ExportCapture& capture,
+                      const CapturedSourceStorage& productionSources,
+                      asset_atlas::Definition finalAtlas,
+                      std::vector<asset_atlas::MemberUVAssignment> assignments,
+                      asset_atlas::build::LayoutEvidence&& layout,
+                      std::shared_ptr<ExportBakeStorage> storage,
+                      const kernel::WorkMeasurement* admittedWork,
+                      ExportBake& output) noexcept;
 Outcome BuildAndBakeForExport(
     const ExportCapture& capture,
     const std::vector<asset_atlas::build::FinalMemberInput>& finalMembers,
     const asset_atlas::build::Settings& settings,
+    ExportBake& output,
+    std::string& diagnosis) noexcept;
+Outcome PrepareBakeForExport(
+    const ExportCapture& capture,
+    const CapturedSourceStorage& productionSources,
+    const std::vector<asset_atlas::build::FinalMemberInput>& finalMembers,
+    const asset_atlas::build::Settings& settings,
+    ExportBakePlan& plan,
+    std::string& diagnosis) noexcept;
+bool AdmitBakePlan(AggregateBakePlan& aggregate,
+                   ExportBakePlan& item) noexcept;
+bool SealBakePlan(AggregateBakePlan& aggregate) noexcept;
+Outcome ExecuteBakeForExport(
+    const ExportCapture& capture,
+    const CapturedSourceStorage& productionSources,
+    const AggregateBakePlan& aggregate,
+    ExportBakePlan& plan,
     ExportBake& output,
     std::string& diagnosis) noexcept;
 Outcome BuildAndBakeForExport(

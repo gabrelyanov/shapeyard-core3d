@@ -11620,6 +11620,11 @@ struct SavedGroupOwner final {
     decal_layer::bake::accounting::Ticket measuredVectorTicket;
     std::vector<SavedGroupMeasuredMember> measured;
     painted_atlas_bake::owner::CapturedSourceStorage productionSources;
+    painted_atlas_bake::owner::ExportBakePlan pendingPlan;
+    SavedGroupOccurrenceScope pendingOccurrences;
+    std::vector<std::string> pendingDefinitionOrder;
+    std::vector<std::size_t> pendingTriangleCounts;
+    std::vector<std::size_t> pendingCornerCounts;
     std::shared_ptr<const SavedGroupFinalResult> result;
 
     SavedGroupOwner() = default;
@@ -11639,7 +11644,8 @@ bool PrepareSavedGroupOwner(
     const Handle(OcctDocument)& privateDocument,
     const std::function<bool()>& cancelled,
     SavedGroupOwner& group,
-    std::string& diagnosis) noexcept {
+    std::string& diagnosis,
+    retained_edge_treatment::ReplayBudget* batchBudget = nullptr) noexcept {
     diagnosis.clear();
     try {
         const auto fail = [&diagnosis](const char* value) {
@@ -11660,6 +11666,8 @@ bool PrepareSavedGroupOwner(
             return fail("saved-group-document-invalid");
 
         group.capture = std::move(strictCapture);
+        retained_edge_treatment::ReplayBudget& activeBudget = batchBudget
+            ? *batchBudget : group.budget;
         if (!ReserveProtectedVector(group.measured,
                 group.measuredVectorTicket, operation.view(),
                 group.capture.members.members.size(),
@@ -11698,12 +11706,12 @@ bool PrepareSavedGroupOwner(
             BRepRepresentationCensus prediction;
             BRepCensusPCurveLookup lookup;
             decal_layer::bake::accounting::Ticket scratch;
-            if (!MeasureBRepRepresentation(value.original, group.budget,
+            if (!MeasureBRepRepresentation(value.original, activeBudget,
                     operation.view(), census, scratch, &prediction, &lookup))
                 return fail("saved-group-member-census");
             scratch.reset();
             std::size_t retainedBytes = 0;
-            if (!CopyMeasuredBRep(value.original, group.budget, operation,
+            if (!CopyMeasuredBRep(value.original, activeBudget, operation,
                     census, prediction, 0, value.storage, value.copier,
                     value.detached, value.originalFaces,
                     value.detachedFaces, retainedBytes)
@@ -11837,16 +11845,20 @@ bool SavedGroupExactFinalTriangles(
     }
 }
 
-painted_atlas_bake::owner::Outcome BuildSavedGroupForExport(
+painted_atlas_bake::owner::Outcome PrepareSavedGroupForBatch(
     SavedGroupOwner& group,
     const std::vector<DefinitionData>& actualFinalDefinitions,
     const SavedGroupOccurrenceScope& expectedOccurrences,
     const std::function<bool()>& cancelled,
-    std::shared_ptr<const SavedGroupFinalResult>& output,
+    painted_atlas_bake::owner::AggregateBakePlan& aggregate,
     std::string& diagnosis) noexcept {
     using Outcome = painted_atlas_bake::owner::Outcome;
-    output.reset();
     group.result.reset();
+    group.pendingPlan = {};
+    group.pendingOccurrences = {};
+    group.pendingDefinitionOrder.clear();
+    group.pendingTriangleCounts.clear();
+    group.pendingCornerCounts.clear();
     diagnosis.clear();
     try {
         if (SavedGroupCancelled(cancelled)) {
@@ -11946,18 +11958,62 @@ painted_atlas_bake::owner::Outcome BuildSavedGroupForExport(
             inputs.push_back(std::move(input));
         }
 
-        painted_atlas_bake::owner::ExportBake baked;
         const asset_atlas::build::Settings settings{
             group.capture.savedAtlas.resolutionTexels,
             group.capture.savedAtlas.gutterTexels};
-        const auto outcome = painted_atlas_bake::owner::BuildAndBakeForExport(
+        const auto outcome = painted_atlas_bake::owner::PrepareBakeForExport(
             group.capture, group.productionSources, inputs, settings,
-            baked, diagnosis);
+            group.pendingPlan, diagnosis);
+        if (outcome != Outcome::Prepared
+            || !painted_atlas_bake::owner::AdmitBakePlan(
+                aggregate, group.pendingPlan)) return outcome == Outcome::Prepared
+                    ? Outcome::OverBudget : outcome;
+        group.pendingOccurrences = expectedOccurrences;
+        group.pendingDefinitionOrder = std::move(definitionOrder);
+        group.pendingTriangleCounts = std::move(triangleCounts);
+        group.pendingCornerCounts = std::move(cornerCounts);
+        return Outcome::Prepared;
+    } catch (const std::bad_alloc&) {
+        group.capture.operationView().AllocationFailed(
+            decal_layer::bake::accounting::FailureSite::ExportBakeStorage);
+        diagnosis = "saved-group-allocation";
+        return Outcome::OverBudget;
+    } catch (...) {
+        diagnosis = "saved-group-build-exception";
+        return Outcome::Malformed;
+    }
+}
+
+painted_atlas_bake::owner::Outcome ExecuteSavedGroupForBatch(
+    SavedGroupOwner& group,
+    const painted_atlas_bake::owner::AggregateBakePlan& aggregate,
+    const std::function<bool()>& cancelled,
+    std::shared_ptr<const SavedGroupFinalResult>& output,
+    std::string& diagnosis,
+    const bool releaseEncodedRaster = false) noexcept {
+    using Outcome = painted_atlas_bake::owner::Outcome;
+    output.reset();
+    try {
+        if (SavedGroupCancelled(cancelled)) {
+            diagnosis = "saved-group-cancelled-before-execute";
+            return Outcome::Refused;
+        }
+        painted_atlas_bake::owner::ExportBake baked;
+        const auto outcome = painted_atlas_bake::owner::ExecuteBakeForExport(
+            group.capture, group.productionSources, aggregate,
+            group.pendingPlan, baked, diagnosis);
         if (outcome != Outcome::Prepared) return outcome;
         if (!baked.storage || baked.storage->layout.charts.empty()
-            || baked.assignments.size() != inputs.size()) {
+            || baked.assignments.size()
+                != group.pendingDefinitionOrder.size()) {
             diagnosis = "saved-group-result-incomplete";
             return Outcome::Malformed;
+        }
+        if (releaseEncodedRaster) {
+            for (auto& role : baked.outputs) {
+                std::vector<std::uint8_t>().swap(role.rgba);
+                role.rgbaTicket.reset();
+            }
         }
         const auto operation = group.capture.operationView();
         if (!baked.storage->bakeValueStorage.acquire(operation,
@@ -11972,10 +12028,10 @@ painted_atlas_bake::owner::Outcome BuildSavedGroupForExport(
         }
         auto result = std::make_shared<SavedGroupFinalResult>();
         result->bake = std::move(baked);
-        result->occurrences = expectedOccurrences;
-        result->memberDefinitions = std::move(definitionOrder);
-        result->finalTriangleCounts = std::move(triangleCounts);
-        result->finalCornerCounts = std::move(cornerCounts);
+        result->occurrences = std::move(group.pendingOccurrences);
+        result->memberDefinitions = std::move(group.pendingDefinitionOrder);
+        result->finalTriangleCounts = std::move(group.pendingTriangleCounts);
+        result->finalCornerCounts = std::move(group.pendingCornerCounts);
         group.result = result;
         output = std::move(result);
         return Outcome::Prepared;
@@ -11988,6 +12044,26 @@ painted_atlas_bake::owner::Outcome BuildSavedGroupForExport(
         diagnosis = "saved-group-build-exception";
         return Outcome::Malformed;
     }
+}
+
+painted_atlas_bake::owner::Outcome BuildSavedGroupForExport(
+    SavedGroupOwner& group,
+    const std::vector<DefinitionData>& actualFinalDefinitions,
+    const SavedGroupOccurrenceScope& expectedOccurrences,
+    const std::function<bool()>& cancelled,
+    std::shared_ptr<const SavedGroupFinalResult>& output,
+    std::string& diagnosis) noexcept {
+    painted_atlas_bake::owner::AggregateBakePlan aggregate;
+    auto outcome = PrepareSavedGroupForBatch(group, actualFinalDefinitions,
+        expectedOccurrences, cancelled, aggregate, diagnosis);
+    if (outcome != painted_atlas_bake::owner::Outcome::Prepared)
+        return outcome;
+    if (!painted_atlas_bake::owner::SealBakePlan(aggregate)) {
+        diagnosis = "saved-group-plan-seal";
+        return painted_atlas_bake::owner::Outcome::OverBudget;
+    }
+    return ExecuteSavedGroupForBatch(group, aggregate, cancelled,
+        output, diagnosis);
 }
 
 const SavedGroupFinalResult* LookupSavedGroupFinalResult(
@@ -12589,6 +12665,242 @@ bool OcctSceneSnapshotBuilder::DebugProduceSavedGroupFinalResult(
             && observation.resolution == 2048
             && observation.gutter == 4
             && completeCorners;
+        if (observation.complete) observation.failureStage.clear();
+        return observation.complete;
+    } catch (const std::exception& error) {
+        observation.failureStage += "-exception-";
+        observation.failureStage += error.what();
+        return false;
+    } catch (...) {
+        observation.failureStage += "-exception";
+        return false;
+    }
+}
+
+bool OcctSceneSnapshotBuilder::DebugProduceSavedProducerBatch(
+    const Handle(OcctDocument)& privateDocument,
+    const SceneSnapshot& wholeCommittedScene,
+    const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
+    const std::function<bool()>& cancelled,
+    DebugSavedProducerBatchObservation& observation) noexcept {
+    observation = {};
+    using Outcome = painted_atlas_bake::owner::Outcome;
+    try {
+        observation.failureStage = "entry";
+        if (privateDocument.IsNull()) {
+            observation.failureStage = "entry-private-document";
+            return false;
+        }
+        if (!meshPrivateSurfaces || !cancelled
+            || SavedGroupCancelled(cancelled)) {
+            observation.failureStage = "entry-callback";
+            return false;
+        }
+        const Handle(TDocStd_Document)& document = privateDocument->Document();
+        std::vector<asset_atlas::persistence::Record> records;
+        if (document.IsNull() || document->HasOpenCommand()) {
+            observation.failureStage = "entry-document-state";
+            return false;
+        }
+        if (!asset_atlas::persistence::ReadAll(document, records)) {
+            observation.failureStage = "entry-record-read";
+            return false;
+        }
+        if (records.size() != 2) {
+            observation.failureStage = "entry-record-count-"
+                + std::to_string(records.size());
+            return false;
+        }
+        if (!records[0].value || !records[1].value) {
+            observation.failureStage = "entry-record-value";
+            return false;
+        }
+        std::sort(records.begin(), records.end(), [](const auto& first,
+                const auto& second) {
+            return first.value->definition.key.atlas
+                < second.value->definition.key.atlas;
+        });
+
+        OperationLedger operation;
+        std::array<SavedGroupOwner, 2> groups;
+        retained_edge_treatment::ReplayBudget batchBudget;
+        observation.failureStage = "batch-topology";
+        if (!operation.bindTopology(batchBudget,
+                decal_layer::bake::accounting::FailureSite::ContextControl))
+            return false;
+        for (std::size_t index = 0; index < groups.size(); ++index) {
+            const auto& key = records[index].value->definition.key;
+            observation.strictKeys.push_back(
+                retained_solid::UUIDText(key.document) + "/"
+                + retained_solid::UUIDText(key.atlas));
+            painted_atlas_bake::owner::ExportCapture capture;
+            observation.failureStage = "strict-capture-" +
+                std::to_string(index);
+            if (painted_atlas_bake::owner::CaptureForExport(
+                    capture, document, key, operation.view())
+                    != Outcome::Prepared
+                || capture.operationView().context
+                    != operation.view().context) return false;
+            std::string diagnosis;
+            observation.failureStage = "group-preparation-" +
+                std::to_string(index);
+            if (!PrepareSavedGroupOwner(operation, std::move(capture),
+                    privateDocument, cancelled, groups[index], diagnosis,
+                    &batchBudget)) {
+                observation.failureStage += "-" + diagnosis;
+                return false;
+            }
+            observation.memberCounts.push_back(
+                groups[index].measured.size());
+            observation.measuredCopyCount += groups[index].measured.size();
+            for (const auto& witness : groups[index].capture.sources.rawSlots) {
+                ++observation.rawSlotCount;
+                if (witness.present) ++observation.presentSlotCount;
+                else ++observation.absentSlotCount;
+                observation.shadowedByteCount +=
+                    witness.shadowedSource.envelope.originalBytes.size()
+                    + witness.shadowedSource.envelope.workingBytes.size();
+                if (witness.present
+                    && !observation.descriptorDifferenceDetected) {
+                    auto changed = witness;
+                    changed.materialModes[0] ^= 1;
+                    observation.descriptorDifferenceDetected =
+                        !(changed == witness);
+                }
+            }
+            auto moved = std::move(groups[index].capture.sources);
+            groups[index].capture.sources = std::move(moved);
+            observation.rawAuthorityRetained =
+                observation.rawAuthorityRetained
+                || !groups[index].capture.sources.rawSlots.empty();
+        }
+        observation.disjointMembership = groups[0].measured.size() == 2
+            && groups[1].measured.size() == 1
+            && groups[0].capture.savedAtlas.members[0].owner
+                != groups[1].capture.savedAtlas.members[0].owner
+            && groups[0].capture.savedAtlas.members[1].owner
+                != groups[1].capture.savedAtlas.members[0].owner;
+
+        observation.failureStage = "native-final-mesh";
+        BRep_Builder compoundBuilder;
+        TopoDS_Compound compound;
+        compoundBuilder.MakeCompound(compound);
+        for (const auto& group : groups)
+            for (const auto& member : group.measured)
+                compoundBuilder.Add(compound, member.detached);
+        meshPrivateSurfaces(compound);
+        if (SavedGroupCancelled(cancelled)) return false;
+
+        std::array<std::vector<DefinitionData>, 2> definitions;
+        std::array<SavedGroupOccurrenceScope, 2> occurrences;
+        for (std::size_t groupIndex = 0;
+             groupIndex < groups.size(); ++groupIndex) {
+            definitions[groupIndex].reserve(groups[groupIndex].measured.size());
+            for (std::size_t memberIndex = 0;
+                 memberIndex < groups[groupIndex].measured.size(); ++memberIndex) {
+                DefinitionData definition;
+                definition.label = groups[groupIndex].capture.members
+                    .members[memberIndex].ownerLabel;
+                definition.shape = groups[groupIndex].measured[memberIndex].detached;
+                definition.representation =
+                    privateDocument->GeometryRepresentationForLabel(
+                        definition.label);
+                if (definition.representation
+                        == OcctGeometryRepresentation::Invalid
+                    || !ExtractDefinitionGeometry(definition.label,
+                        groups[groupIndex].measured[memberIndex]
+                            .definitionIdentifier,
+                        0, definition)) return false;
+                definitions[groupIndex].push_back(std::move(definition));
+            }
+            for (std::size_t instanceIndex = 0;
+                 instanceIndex < wholeCommittedScene.instances.size();
+                 ++instanceIndex) {
+                const auto& instance =
+                    wholeCommittedScene.instances[instanceIndex];
+                if (instance.meshIndex >= wholeCommittedScene.meshes.size())
+                    continue;
+                const auto& definition = wholeCommittedScene.meshes[
+                    instance.meshIndex].definitionIdentifier;
+                for (const auto& member : groups[groupIndex].measured)
+                    if (member.definitionIdentifier == definition)
+                        occurrences[groupIndex].entries.push_back({
+                            instance.entityIdentifier, definition,
+                            instanceIndex, instance.worldFromObject});
+            }
+        }
+
+        painted_atlas_bake::owner::AggregateBakePlan aggregate;
+        for (std::size_t index = 0; index < groups.size(); ++index) {
+            std::string diagnosis;
+            observation.failureStage = "plan-prepare-" +
+                std::to_string(index);
+            const auto outcome = PrepareSavedGroupForBatch(groups[index],
+                definitions[index], occurrences[index], cancelled,
+                aggregate, diagnosis);
+            if (outcome != Outcome::Prepared) {
+                observation.failureStage += "-" + diagnosis;
+                return false;
+            }
+        }
+        observation.work = {
+            aggregate.admittedWork.atlasRoles,
+            aggregate.admittedWork.sourcePixels,
+            aggregate.admittedWork.maskPixels,
+            aggregate.admittedWork.gutter,
+            aggregate.admittedWork.encoder};
+        observation.failureStage = "plan-seal";
+        if (!painted_atlas_bake::owner::SealBakePlan(aggregate)) return false;
+        observation.oneAggregateSeal = aggregate.sealed
+            && aggregate.admittedItems == groups.size();
+
+        std::array<std::shared_ptr<const SavedGroupFinalResult>, 2> results;
+        for (std::size_t index = 0; index < groups.size(); ++index) {
+            std::string diagnosis;
+            observation.failureStage = "plan-execute-" +
+                std::to_string(index);
+            const auto outcome = ExecuteSavedGroupForBatch(groups[index],
+                aggregate, cancelled, results[index], diagnosis, true);
+            if (outcome != Outcome::Prepared || !results[index]) {
+                observation.failureStage += "-" + diagnosis;
+                return false;
+            }
+            observation.assignmentCounts.push_back(
+                results[index]->bake.assignments.size());
+            observation.outputCounts.push_back(
+                results[index]->bake.outputs.size());
+            observation.layoutCount += !results[index]->bake.storage
+                || results[index]->bake.storage->layout.charts.empty()
+                ? 0 : 1;
+        }
+        for (const auto& output : results[0]->bake.outputs)
+            observation.firstGroupPNGs.push_back(output.png);
+        observation.distinctGroupResults = results[0].get()
+            != results[1].get();
+        observation.sharedWithinGroups =
+            LookupSavedGroupFinalResult(groups[0],
+                records[0].value->definition.key) == results[0].get()
+            && LookupSavedGroupFinalResult(groups[0],
+                records[0].value->definition.key) == results[0].get()
+            && LookupSavedGroupFinalResult(groups[1],
+                records[1].value->definition.key) == results[1].get();
+        observation.complete = observation.disjointMembership
+            && observation.rawAuthorityRetained
+            && observation.descriptorDifferenceDetected
+            && observation.shadowedByteCount > 0
+            && observation.oneAggregateSeal
+            && observation.distinctGroupResults
+            && observation.sharedWithinGroups
+            && observation.rawSlotCount == 18
+            && observation.presentSlotCount == 10
+            && observation.absentSlotCount == 8
+            && observation.measuredCopyCount == 3
+            && observation.assignmentCounts
+                == std::vector<std::uint64_t>({2, 1})
+            && observation.layoutCount == 2
+            && observation.outputCounts.size() == 2
+            && observation.outputCounts[0] == 5
+            && observation.outputCounts[1] == 1;
         if (observation.complete) observation.failureStage.clear();
         return observation.complete;
     } catch (const std::exception& error) {

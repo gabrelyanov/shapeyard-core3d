@@ -4058,6 +4058,100 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
     } @catch (...) { return nil; }
 }
 
+- (NSNumber *)
+    debugPrepareE4SavedProducerBatchVariantForEntityIdentifier:
+        (NSString *)entityIdentifier {
+    namespace aa = core3d::asset_atlas;
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128) return @NO;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        OwnerKey memberKey; TDF_Label memberLabel;
+        const char *raw = entityIdentifier.UTF8String;
+        if (wrapper.IsNull() || !LabelForSelected(
+                wrapper, raw ? raw : "", memberKey, memberLabel)) return @NO;
+        const Handle(TDocStd_Document)& document = wrapper->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return @NO;
+        std::vector<aa::persistence::Record> before;
+        if (!aa::persistence::ReadAll(document, before)
+            || before.size() != 1 || !before.front().value) return @NO;
+        for (const auto& existing : before.front().value->definition.members)
+            if (existing.owner == memberKey) return @NO;
+        const Handle(XCAFDoc_VisMaterialTool) materialTool =
+            XCAFDoc_DocumentTool::VisMaterialTool(document->Main());
+        TDF_Label materialLabel;
+        XCAFDoc_VisMaterialTool::GetShapeMaterial(memberLabel, materialLabel);
+        if (materialTool.IsNull() || materialLabel.IsNull()
+            || materialTool->GetMaterial(materialLabel).IsNull()) return @NO;
+
+        document->NewCommand();
+        materialTool->UnSetShapeMaterial(memberLabel);
+        if (!document->CommitCommand()) {
+            document->AbortCommand(); return @NO;
+        }
+        aa::Key key;
+        key.document = before.front().value->definition.key.document;
+        key.atlas = FixtureIndexedUUID(0x78, 1);
+        aa::Capture capture;
+        aa::Definition candidate;
+        std::vector<aa::MemberUVAssignment> assignments;
+        std::vector<aa::Member> observed;
+        std::string diagnosis;
+        bool authored = aa::build::CaptureMembers(
+                document, {memberKey}, capture)
+            && aa::build::BuildAtlas(document, key, capture, {2048, 4},
+                candidate, assignments, diagnosis) == aa::build::Status::Built
+            && aa::build::ObserveMembers(
+                document, candidate.members, observed);
+        if (!authored) return @NO;
+        document->NewCommand();
+        aa::owner::Staging staging;
+        auto outcome = aa::owner::Prepare(
+            staging, document, candidate, assignments, observed);
+        if (outcome == aa::owner::Outcome::Prepared) {
+            std::vector<aa::Member> fenced;
+            outcome = aa::build::ObserveMembers(
+                    document, candidate.members, fenced)
+                ? aa::owner::Commit(staging, document, fenced)
+                : aa::owner::Outcome::StaleSource;
+        }
+        if (outcome != aa::owner::Outcome::Committed
+            || !document->CommitCommand()) {
+            aa::owner::Cancel(staging);
+            document->AbortCommand(); return @NO;
+        }
+        document->NewCommand();
+        materialTool->SetShapeMaterial(memberLabel, materialLabel);
+        if (!document->CommitCommand()) {
+            document->AbortCommand(); return @NO;
+        }
+        document->NewCommand();
+        if (wrapper->BakePaintedAtlas(key)
+                != OcctPaintedAtlasBakeOutcome::Committed
+            || !document->CommitCommand()) {
+            document->AbortCommand(); return @NO;
+        }
+        std::vector<aa::persistence::Record> after;
+        if (!aa::persistence::ReadAll(document, after)
+            || after.size() != 2) return @NO;
+        std::size_t exact = 0;
+        for (const auto& record : after)
+            if (record.value && record.value->definition.key == key
+                && record.value->definition.members.size() == 1
+                && record.value->definition.members.front().owner == memberKey
+                && record.value->definition.resolutionTexels == 2048
+                && record.value->definition.gutterTexels == 4) ++exact;
+        return @(exact == 1
+            && XCAFDoc_VisMaterialTool::GetShapeMaterial(memberLabel)
+                == materialTool->GetMaterial(materialLabel));
+    } @catch (...) { return @NO; }
+}
+
 - (NSDictionary<NSString *,id> *)
     debugE4SavedGroupFinalResultForWholeCommittedScene:
         (Core3DSceneSnapshot *)wholeCommittedScene
@@ -4167,6 +4261,98 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         return @{@"failureStage": @"bridge-exception",
             @"complete": @NO};
     }
+}
+
+- (NSDictionary<NSString *,id> *)
+    debugE4SavedProducerBatchForWholeCommittedScene:
+        (Core3DSceneSnapshot *)wholeCommittedScene {
+    namespace scene = core3d::scene;
+    if (!NSThread.isMainThread || !wholeCommittedScene) return nil;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        if (!viewer || wrapper.IsNull()) return nil;
+        scene::SceneSnapshot scope;
+        scope.meshes.reserve(wholeCommittedScene.meshes.count);
+        for (Core3DSceneMeshSnapshot *mesh in wholeCommittedScene.meshes) {
+            scene::MeshSnapshot value;
+            const char *definition = mesh.definitionIdentifier.UTF8String;
+            value.definitionIdentifier = definition ? definition : "";
+            scope.meshes.push_back(std::move(value));
+        }
+        scope.instances.reserve(wholeCommittedScene.renderItems.count);
+        for (Core3DSceneRenderItemSnapshot *item
+                in wholeCommittedScene.renderItems) {
+            scene::InstanceSnapshot value;
+            const char *entity = item.entityIdentifier.UTF8String;
+            value.entityIdentifier = entity ? entity : "";
+            value.meshIndex = item.meshIndex;
+            value.selected = item.selected;
+            value.visible = item.visible;
+            const simd_double4x4 matrix = item.worldTransform;
+            for (std::size_t column = 0; column < 4; ++column)
+                for (std::size_t row = 0; row < 4; ++row)
+                    value.worldFromObject.values[column * 4 + row] =
+                        matrix.columns[column][row];
+            scope.instances.push_back(std::move(value));
+        }
+        scene::DebugSavedProducerBatchObservation observation;
+        std::atomic_bool cancelled{false};
+        const bool completed = scene::OcctSceneSnapshotBuilder::
+            DebugProduceSavedProducerBatch(wrapper, scope,
+                [](const TopoDS_Shape& shape) {
+                    if (!scene::DebugMeshSavedGroupPrivateSurfaces(shape))
+                        throw std::runtime_error(
+                            "saved-producer native mesher refused");
+                }, [&cancelled]() noexcept {
+                    return cancelled.load(std::memory_order_acquire);
+                }, observation);
+        const auto numbers = [](const auto& values) {
+            NSMutableArray<NSNumber *> *result = [NSMutableArray array];
+            for (const auto value : values)
+                [result addObject:@(static_cast<unsigned long long>(value))];
+            return result;
+        };
+        NSMutableArray<NSString *> *keys = [NSMutableArray array];
+        for (const auto& value : observation.strictKeys) {
+            NSString *text = [NSString stringWithUTF8String:value.c_str()];
+            if (text) [keys addObject:text.lowercaseString];
+        }
+        NSMutableArray<NSData *> *pngs = [NSMutableArray array];
+        for (const auto& value : observation.firstGroupPNGs)
+            [pngs addObject:[NSData dataWithBytes:value.data()
+                length:value.size()]];
+        return @{
+            @"fixture": @"E4SavedProducerBatch2048",
+            @"complete": @(completed && observation.complete),
+            @"failureStage": [NSString stringWithUTF8String:
+                observation.failureStage.c_str()] ?: @"invalid-stage",
+            @"strictKeys": keys,
+            @"memberCounts": numbers(observation.memberCounts),
+            @"assignmentCounts": numbers(observation.assignmentCounts),
+            @"outputCounts": numbers(observation.outputCounts),
+            @"work": numbers(observation.work),
+            @"pngs": pngs,
+            @"rawSlotCount": @(observation.rawSlotCount),
+            @"presentSlotCount": @(observation.presentSlotCount),
+            @"absentSlotCount": @(observation.absentSlotCount),
+            @"shadowedByteCount": @(observation.shadowedByteCount),
+            @"measuredCopyCount": @(observation.measuredCopyCount),
+            @"layoutCount": @(observation.layoutCount),
+            @"disjointMembership": @(observation.disjointMembership),
+            @"rawAuthorityRetained": @(observation.rawAuthorityRetained),
+            @"descriptorDifferenceDetected": @(
+                observation.descriptorDifferenceDetected),
+            @"oneAggregateSeal": @(observation.oneAggregateSeal),
+            @"distinctGroupResults": @(observation.distinctGroupResults),
+            @"sharedWithinGroups": @(observation.sharedWithinGroups),
+        };
+    } @catch (...) { return nil; }
 }
 
 - (NSDictionary<NSString *,id> *)
