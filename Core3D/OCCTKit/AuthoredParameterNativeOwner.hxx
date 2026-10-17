@@ -144,6 +144,26 @@ struct ApplyResult final {
     std::optional<int> measuredUndoDelta;
 };
 
+//! Result of inspecting the one outstanding authored-Boolean transaction.
+//! RecoveryRequired deliberately carries no delta: callers must keep the
+//! native fence until the owner can prove an exact terminal state.
+enum class BooleanRecoveryOutcome : std::uint8_t {
+    Committed = 0, PriorRestored, RecoveryRequired, NotOwner,
+};
+
+struct BooleanRecoveryResult final {
+    BooleanRecoveryOutcome outcome = BooleanRecoveryOutcome::RecoveryRequired;
+    std::string code = "authored.recovery-required";
+    std::optional<int> measuredUndoDelta;
+#if DEBUG
+    std::uint32_t reconcileCalls = 0;
+    std::uint32_t observationCalls = 0;
+    std::uint32_t observationFaultHits = 0;
+    std::uint32_t publicationCalls = 0;
+    std::uint32_t recoveryCommandCalls = 0;
+#endif
+};
+
 struct Mutation final {
     Capability capability = Capability::Unregistered;
     std::uint64_t requestedFieldMask = 0;
@@ -202,6 +222,15 @@ public:
     bool describeBoolean(part_boolean::AnalyticDefinition& output) const noexcept;
     ApplyResult applyBoolean(Capability capability, std::size_t inputIndex,
         const part_boolean::AnalyticDefinition& requested) noexcept;
+    //! A2-N2 production recovery of the one outstanding authored Boolean
+    //! transaction. Classifies the real committed candidate / exact restored
+    //! prior / still-unknown state against the document-owned recovery record
+    //! and the measured companion witnesses, settles the matching companion
+    //! exactly once, then lets the issuing context's production publication
+    //! clear the fence. It never builds, applies, opens a command, or invokes
+    //! Undo/Redo; a repeated call returns the cached terminal receipt without
+    //! publishing again. Unknown keeps the record and lock with a nil delta.
+    BooleanRecoveryResult reconcileBoolean() noexcept;
     std::shared_ptr<const retained_edge_treatment::r2::Snapshot>
     retainedSnapshot() const noexcept;
     bool cancel() noexcept;
@@ -218,6 +247,10 @@ public:
     //! Read-only hit receipt of the fault armed on this issuer, if any.
     bool debugAuthoredBooleanStageFaultReceipt(
         debug::AuthoredBooleanFaultReceipt& receipt) const noexcept;
+    //! One-shot fault after a real authored stage failure closes by Abort.
+    bool debugArmNextAbortSettlementUnproven() noexcept;
+    //! One-shot failure at the recovery owner's real current-state read.
+    bool debugArmNextRecoveryObservationFailure() noexcept;
 #endif
 
 private:

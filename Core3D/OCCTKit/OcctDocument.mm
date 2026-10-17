@@ -20368,6 +20368,9 @@ void OcctDocument::ReleaseTreatmentHistoryCompanions() noexcept {
     try {
         myPendingTreatmentCompanion.reset();
         myTreatmentHistoryCompanions.clear();
+        // A2-N2: the recovery record is bound to this session's live document
+        // and never crosses a replacement or destruction.
+        myAuthoredBooleanRecovery.reset();
     } catch (...) {}
 }
 
@@ -20719,6 +20722,155 @@ Standard_Boolean OcctDocument::SettleTreatmentHistoryCompanionOnPrior() noexcept
         myPendingTreatmentCompanion.reset();
         return Standard_True;
     } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::RetainAuthoredBooleanRecovery(
+    const std::shared_ptr<const core3d::authored_parameter::Capture>& capture,
+    const std::shared_ptr<core3d::native_opening::Context>& context,
+    std::vector<std::uint8_t> candidateCompositeBytes,
+    std::vector<std::uint8_t> candidateTreatmentBytes) noexcept {
+    try {
+        // Pre-mutation retention only: one pending record per document, bound
+        // to this exact document/data, the document-issued capture and the
+        // issuing context. Any failure refuses with the baseline unchanged.
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || myOcafDoc->HasOpenCommand() || myAuthoredBooleanRecovery
+            || !capture || !context
+            || capture->document_ != myOcafDoc
+            || capture->data_ != myOcafDoc->GetData()
+            || capture->ownerLabel_.IsNull()
+            || capture->ownerLabel_.Data() != myOcafDoc->GetData())
+            return Standard_False;
+        auto record = std::make_unique<core3d::authored_recovery::Record>();
+        record->data = myOcafDoc->GetData();
+        record->ownerLabel = capture->ownerLabel_;
+        TCollection_AsciiString entry;
+        TDF_Tool::Entry(capture->ownerLabel_, entry);
+        record->ownerEntry = entry.ToCString();
+        record->capture = capture;
+        record->context = context;
+        record->candidateCompositeBytes = std::move(candidateCompositeBytes);
+        record->candidateTreatmentBytes = std::move(candidateTreatmentBytes);
+        myAuthoredBooleanRecovery = std::move(record);
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+core3d::authored_recovery::Phase OcctDocument::AuthoredBooleanRecoveryPhase(
+    const std::shared_ptr<core3d::native_opening::Context>& issuer) const noexcept {
+    try {
+        if (myOcafDoc.IsNull() || !myAuthoredBooleanRecovery || !issuer)
+            return core3d::authored_recovery::Phase::None;
+        const auto& record = *myAuthoredBooleanRecovery;
+        // Issuer and document/data binding: a foreign or reused authority
+        // never observes the record's phase.
+        if (record.context != issuer || record.data.IsNull()
+            || record.data.get() != myOcafDoc->GetData().get())
+            return core3d::authored_recovery::Phase::None;
+        return record.phase;
+    } catch (...) { return core3d::authored_recovery::Phase::None; }
+}
+
+Standard_Boolean OcctDocument::ReconcileAuthoredBooleanRecovery(
+    core3d::authored_recovery::Class& classified,
+    Standard_Integer& measuredDelta
+#if DEBUG
+    , bool* debugFailObservationAfterRead
+#endif
+    ) noexcept {
+    classified = core3d::authored_recovery::Class::RecoveryRequired;
+    measuredDelta = 0;
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || myOcafDoc->HasOpenCommand() || !myAuthoredBooleanRecovery)
+            return Standard_False;
+        auto& record = *myAuthoredBooleanRecovery;
+        if (record.data.IsNull()
+            || record.data.get() != myOcafDoc->GetData().get())
+            return Standard_False;
+        // Idempotent continuation: the native classification/companion
+        // decision was already proven; only publication/fence settlement
+        // remains. The matching finalized/discharged companion is never
+        // finalized or settled a second time.
+        if (record.phase == core3d::authored_recovery::Phase::CompanionSettled) {
+            classified = record.settledClass;
+            measuredDelta = record.settledDelta;
+            return Standard_True;
+        }
+        if (record.phase != core3d::authored_recovery::Phase::Pending
+            || !myPendingTreatmentCompanion) return Standard_False;
+        auto& companion = *myPendingTreatmentCompanion;
+        if (companion.data.IsNull()
+            || companion.data.get() != myOcafDoc->GetData().get()
+            || !record.ownerLabel.IsEqual(companion.ownerLabel)
+            || record.ownerEntry != companion.ownerEntry)
+            return Standard_False;
+        // Read the current document state directly (actual TNaming bindings,
+        // exact source/SYET carrier bytes and owner shape), never the old
+        // opening's capture and never fixture expectations.
+        std::vector<core3d::treatment_history::NamingState> now;
+        std::vector<std::uint8_t> sourceNow, syetBytesNow;
+        bool syetNow = false;
+        if (!CaptureTreatmentCompanionSide(myOcafDoc, companion.ownerLabel, now,
+                sourceNow, syetNow, syetBytesNow))
+            return Standard_False;
+#if DEBUG
+        // A2-N2 one-shot observation fault: the real current-state capture
+        // above ran; only here is the armed observation reported failed.
+        // No state is fabricated and the record, companion and fence stay
+        // exactly as the real read left them.
+        if (debugFailObservationAfterRead && *debugFailObservationAfterRead) {
+            *debugFailObservationAfterRead = false;
+            return Standard_False;
+        }
+#endif
+        const TopoDS_Shape currentShape =
+            XCAFDoc_ShapeTool::GetShape(companion.ownerLabel);
+        if (companion.afterCaptured
+            && SameTreatmentNamingSet(companion.after, now, false)
+            && sourceNow == companion.sourceBytesAfter
+            && syetNow == companion.syetAfter
+            && syetBytesNow == companion.syetBytesAfter
+            && !currentShape.IsNull()
+            && currentShape.IsEqual(companion.ownerShapeAfter)) {
+            // Exact committed candidate: bind the companion to the one actual
+            // owned delta (depth and owner-touch proof live in Finalize).
+            if (!FinalizeTreatmentHistoryCompanion()) return Standard_False;
+            record.phase = core3d::authored_recovery::Phase::CompanionSettled;
+            record.settledClass = core3d::authored_recovery::Class::Committed;
+            record.settledDelta = 1;
+            classified = record.settledClass;
+            measuredDelta = record.settledDelta;
+            return Standard_True;
+        }
+        if (SameTreatmentNamingSet(companion.before, now, false)
+            && sourceNow == companion.sourceBytesBefore
+            && syetNow == companion.syetBefore
+            && syetBytesNow == companion.syetBytesBefore
+            && !currentShape.IsNull()
+            && currentShape.IsEqual(companion.ownerShapeBefore)) {
+            // Exact prior: the measured settlement re-proves the complete
+            // restored state, restores naming versions and only then
+            // discharges the companion. Redo history is never touched.
+            if (!SettleTreatmentHistoryCompanionOnPrior()) return Standard_False;
+            record.phase = core3d::authored_recovery::Phase::CompanionSettled;
+            record.settledClass = core3d::authored_recovery::Class::PriorRestored;
+            record.settledDelta = 0;
+            classified = record.settledClass;
+            measuredDelta = record.settledDelta;
+            return Standard_True;
+        }
+        // Genuine ambiguity: neither measured side matches the live state.
+        return Standard_False;
+    } catch (...) {
+        classified = core3d::authored_recovery::Class::RecoveryRequired;
+        measuredDelta = 0;
+        return Standard_False;
+    }
+}
+
+void OcctDocument::RetireAuthoredBooleanRecovery() noexcept {
+    try { myAuthoredBooleanRecovery.reset(); } catch (...) {}
 }
 
 #if DEBUG

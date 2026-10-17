@@ -3107,18 +3107,18 @@ Outcome CaptureForExport(ExportCapture& capture,
 Outcome BakeForExport(const ExportCapture& capture,
                       aa::Definition finalAtlas,
                       std::vector<aa::MemberUVAssignment> assignments,
-                      const aa::build::LayoutEvidence& layout,
+                      aa::build::LayoutEvidence&& layout,
                       std::shared_ptr<ExportBakeStorage> storage,
                       ExportBake& output) noexcept {
     return BakeForExport(capture, capture.sources, std::move(finalAtlas),
-        std::move(assignments), layout, std::move(storage), output);
+        std::move(assignments), std::move(layout), std::move(storage), output);
 }
 
 Outcome BakeForExport(const ExportCapture& capture,
                       const CapturedSourceStorage& productionSources,
                       aa::Definition finalAtlas,
                       std::vector<aa::MemberUVAssignment> assignments,
-                      const aa::build::LayoutEvidence& layout,
+                      aa::build::LayoutEvidence&& layout,
                       std::shared_ptr<ExportBakeStorage> storage,
                       ExportBake& output) noexcept {
     output = {};
@@ -3172,6 +3172,7 @@ Outcome BakeForExport(const ExportCapture& capture,
             output = {};
             return Outcome::Malformed;
         }
+        output.storage->layout = std::move(layout);
         return Outcome::Prepared;
     } catch (...) {
         output = {};
@@ -3222,7 +3223,7 @@ Outcome BuildAndBakeForExport(
             operation, owner, std::move(accounting));
         if (!storage) return Outcome::OverBudget;
         const auto outcome = BakeForExport(capture, productionSources,
-            std::move(atlas), std::move(assignments), layout,
+            std::move(atlas), std::move(assignments), std::move(layout),
             std::move(storage), output);
         if (outcome != Outcome::Prepared && diagnosis.empty())
             diagnosis = "bake-outcome-" +

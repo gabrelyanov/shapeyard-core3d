@@ -140,6 +140,13 @@ public:
     //! recovery can reconcile the actual committed/aborted document state.
     //! No fence state changes here; the unknown close already armed it.
     void retainUnprovenEdit(const CommittedEditPublication& publication) noexcept;
+    //! A2-N2 narrow retained-abort settlement: this exact issuer's own real
+    //! abort closed its command, but native prior settlement is not yet
+    //! proven. Re-arms the shared recovery fence for this same context so the
+    //! pending companion keeps every other opening out until the native
+    //! recovery owner decides. Refuses unless this context is registered and
+    //! every marker slot was cleanly released by its own finished lease.
+    bool armRecoveryAfterAbortedClose() noexcept;
 #if DEBUG
     //! Row-265 lifecycle probe seam: the next real close at a lease issued by
     //! this context runs the real CommitCommand and is then reported unproven

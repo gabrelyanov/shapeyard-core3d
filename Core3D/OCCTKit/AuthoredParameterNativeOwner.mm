@@ -14,9 +14,23 @@ struct Owner::State final {
     std::uint32_t width = 0, height = 0;
     bool cancelled = false;
     bool prepared = false;
+    // A2-N2 terminal recovery receipt: once the document-owned record is
+    // settled and the issuing context's publication has cleared the fence,
+    // repeated recovery calls return this cached receipt without publishing,
+    // building, finalizing or consuming a later operation again.
+    bool recoverySettled = false;
+    BooleanRecoveryOutcome recoveryReceiptOutcome =
+        BooleanRecoveryOutcome::RecoveryRequired;
+    int recoveryReceiptDelta = 0;
 #if DEBUG
     bool debugCloseUnprovenArmed = false;
     std::shared_ptr<debug::AuthoredBooleanStageFault> debugStageFault;
+    bool debugAbortSettlementUnprovenArmed = false;
+    bool debugRecoveryObservationFailureArmed = false;
+    std::uint32_t debugRecoveryObservationFaultHits = 0;
+    std::uint32_t debugRecoveryCalls = 0;
+    std::uint32_t debugRecoveryObservationCalls = 0;
+    std::uint32_t debugRecoveryPublicationCalls = 0;
 #endif
 };
 
@@ -167,19 +181,30 @@ ApplyResult Owner::applyBoolean(Capability capability, std::size_t inputIndex,
             return result;
         }
 
-        std::shared_ptr<native_opening::CommandLease> lease;
-        if (!state_->document->BeginAuthoredParameterTransaction(*state_->capture,
-                *state_->context, state_->width, state_->height, lease)
-            || !lease || !lease->ownsOpenCommand())
-            return refuse("authored.stale-opening");
+        // A2-N2: resolve the publication identity and retain the
+        // document-owned recovery record (immutable prior capture, issuing
+        // context and sealed candidate byte witnesses) before any mutation;
+        // a retention failure refuses with the baseline unchanged.
         native_opening::CommittedEditPublication publication;
         const std::string entity = state_->document->EntityIdentifierForLabel(
             state_->capture->ownerLabel_);
-        if (entity.empty()) {
-            lease->abort();
+        if (entity.empty())
             return refuse("authored.boolean.identity-changed");
-        }
         publication.replaced.push_back({entity, TopoDS_Shape()});
+        std::vector<std::uint8_t> candidateCompositeBytes;
+        if (candidate.composite)
+            candidateCompositeBytes = candidate.composite->bytes;
+        if (!state_->document->RetainAuthoredBooleanRecovery(
+                state_->capture, state_->context,
+                std::move(candidateCompositeBytes), candidate.treatmentBytes))
+            return refuse("authored.boolean.recovery-record");
+        std::shared_ptr<native_opening::CommandLease> lease;
+        if (!state_->document->BeginAuthoredParameterTransaction(*state_->capture,
+                *state_->context, state_->width, state_->height, lease)
+            || !lease || !lease->ownsOpenCommand()) {
+            state_->document->RetireAuthoredBooleanRecovery();
+            return refuse("authored.stale-opening");
+        }
 #if DEBUG
         if (!state_->document->StageAuthoredBooleanPair(*state_->capture, candidate,
                 state_->debugStageFault.get())) {
@@ -187,15 +212,28 @@ ApplyResult Owner::applyBoolean(Capability capability, std::size_t inputIndex,
         if (!state_->document->StageAuthoredBooleanPair(*state_->capture, candidate)) {
 #endif
             const bool aborted = lease->abort();
-            const bool settled = aborted
+            bool deferSettlement = false;
+#if DEBUG
+            if (aborted && state_->debugAbortSettlementUnprovenArmed) {
+                state_->debugAbortSettlementUnprovenArmed = false;
+                deferSettlement = true;
+            }
+#endif
+            const bool settled = aborted && !deferSettlement
                 && state_->document->SettleTreatmentHistoryCompanionOnPrior();
             if (!settled) {
+                // A genuinely closed real abort without proven prior
+                // settlement keeps an owned fence: the same issuing context
+                // stays the sole settlement authority until the native
+                // recovery record decides.
+                if (aborted) state_->context->armRecoveryAfterAbortedClose();
                 state_->context->retainUnprovenEdit(publication);
                 result.outcome = ApplyOutcome::OutcomeUnknown;
                 result.code = "authored.outcome-unknown";
                 result.measuredUndoDelta.reset();
                 return result;
             }
+            state_->document->RetireAuthoredBooleanRecovery();
             return refuse("authored.boolean.stage-failed");
         }
         if (!lease->commit()) {
@@ -215,11 +253,119 @@ ApplyResult Owner::applyBoolean(Capability capability, std::size_t inputIndex,
             result.measuredUndoDelta.reset();
             return result;
         }
+        state_->document->RetireAuthoredBooleanRecovery();
         result.outcome = ApplyOutcome::Committed;
         result.code = "authored.none";
         result.measuredUndoDelta = 1;
         return result;
-    } catch (...) { return refuse("authored.boolean.exception"); }
+    } catch (...) {
+        // A2-N2: an exception after the native transaction may have run is
+        // genuine uncertainty with retained evidence, never a clean
+        // pre-command rejection.
+        if (state_ && !state_->document.IsNull()
+            && state_->document->HasUnresolvedTreatmentHistoryCompanion()) {
+            result.outcome = ApplyOutcome::OutcomeUnknown;
+            result.code = "authored.outcome-unknown";
+            result.measuredUndoDelta.reset();
+            return result;
+        }
+        return refuse("authored.boolean.exception");
+    }
+}
+
+BooleanRecoveryResult Owner::reconcileBoolean() noexcept {
+    BooleanRecoveryResult result;
+    try {
+        if (![NSThread isMainThread] || !state_ || state_->document.IsNull()
+            || !state_->context) {
+            result.outcome = BooleanRecoveryOutcome::NotOwner;
+            result.code = "authored.recovery-not-owner";
+            return result;
+        }
+#if DEBUG
+        ++state_->debugRecoveryCalls;
+        result.reconcileCalls = state_->debugRecoveryCalls;
+        result.observationFaultHits = state_->debugRecoveryObservationFaultHits;
+#endif
+        if (!state_->recoverySettled && !state_->cancelled) {
+            // Issuer binding: only the context that issued the outstanding
+            // transaction observes its document-owned record; a foreign or
+            // reused authority keeps the record and the lock untouched.
+            const auto phase =
+                state_->document->AuthoredBooleanRecoveryPhase(state_->context);
+            if (phase == core3d::authored_recovery::Phase::None)
+                return result;
+            core3d::authored_recovery::Class classified =
+                core3d::authored_recovery::Class::RecoveryRequired;
+            Standard_Integer measuredDelta = 0;
+            bool reconciled = false;
+            if (phase == core3d::authored_recovery::Phase::Pending) {
+#if DEBUG
+                ++state_->debugRecoveryObservationCalls;
+                result.observationCalls = state_->debugRecoveryObservationCalls;
+                const bool observationFaultArmed =
+                    state_->debugRecoveryObservationFailureArmed;
+#endif
+                reconciled = state_->document->ReconcileAuthoredBooleanRecovery(
+                    classified, measuredDelta
+#if DEBUG
+                    , &state_->debugRecoveryObservationFailureArmed
+#endif
+                    );
+#if DEBUG
+                if (observationFaultArmed
+                    && !state_->debugRecoveryObservationFailureArmed) {
+                    ++state_->debugRecoveryObservationFaultHits;
+                    result.observationFaultHits =
+                        state_->debugRecoveryObservationFaultHits;
+                }
+#endif
+            } else {
+                // The native classification/companion decision is already
+                // proven; this returns the stored receipt without observing,
+                // finalizing or settling the companion a second time.
+                reconciled = state_->document->ReconcileAuthoredBooleanRecovery(
+                    classified, measuredDelta
+#if DEBUG
+                    , nullptr
+#endif
+                    );
+            }
+            // Failed readback, ambiguous prior/candidate, wrong issuer,
+            // missing history or an unreadable state keeps the record and
+            // the lock and exposes no measured delta.
+            if (!reconciled) return result;
+            // Terminal ordering: only after native classification/companion
+            // settlement may the issuing context reconcile the retained
+            // publication and clear both fences. A failed publication keeps
+            // the record at CompanionSettled for an exact later retry.
+            if (!state_->context->reconcileRecovery(true)) return result;
+            state_->document->RetireAuthoredBooleanRecovery();
+            state_->recoverySettled = true;
+            state_->recoveryReceiptOutcome =
+                classified == core3d::authored_recovery::Class::Committed
+                    ? BooleanRecoveryOutcome::Committed
+                    : BooleanRecoveryOutcome::PriorRestored;
+            state_->recoveryReceiptDelta = static_cast<int>(measuredDelta);
+#if DEBUG
+            ++state_->debugRecoveryPublicationCalls;
+#endif
+        }
+        if (state_->recoverySettled) {
+            result.outcome = state_->recoveryReceiptOutcome;
+            result.code = "authored.none";
+            result.measuredUndoDelta = state_->recoveryReceiptDelta;
+        }
+#if DEBUG
+        result.observationCalls = state_->debugRecoveryObservationCalls;
+        result.observationFaultHits = state_->debugRecoveryObservationFaultHits;
+        result.publicationCalls = state_->debugRecoveryPublicationCalls;
+        // Recovery never opens a command; the counter exists only so the
+        // transport can prove it.
+        result.recoveryCommandCalls = 0;
+#endif
+        return result;
+    } catch (...) { return result; }
 }
 
 bool Owner::cancel() noexcept {
@@ -262,6 +408,22 @@ bool Owner::debugAuthoredBooleanStageFaultReceipt(
     debug::AuthoredBooleanFaultReceipt& receipt) const noexcept {
     if (![NSThread isMainThread] || !state_ || !state_->debugStageFault) return false;
     receipt = state_->debugStageFault->receipt();
+    return true;
+}
+
+bool Owner::debugArmNextAbortSettlementUnproven() noexcept {
+    if (![NSThread isMainThread] || !state_ || state_->prepared
+        || state_->debugAbortSettlementUnprovenArmed
+        || currentness() != Currentness::Current || !state_->context) return false;
+    state_->debugAbortSettlementUnprovenArmed = true;
+    return true;
+}
+
+bool Owner::debugArmNextRecoveryObservationFailure() noexcept {
+    if (![NSThread isMainThread] || !state_
+        || state_->debugRecoveryObservationFailureArmed
+        || currentness() != Currentness::Recovery || !state_->context) return false;
+    state_->debugRecoveryObservationFailureArmed = true;
     return true;
 }
 #endif

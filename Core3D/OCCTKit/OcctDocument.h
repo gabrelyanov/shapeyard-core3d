@@ -162,6 +162,38 @@ struct Companion {
 };
 } // namespace core3d::treatment_history
 
+// A2-N2 document-owned authored-Boolean recovery record — nonpersisted
+// native authority for the single outstanding authored-Boolean transaction.
+// It is created from the document-issued capture and the issuing context
+// before any mutation, retains immutable prior (capture) and candidate
+// (sealed composite/treatment bytes) witnesses plus the measured settlement
+// phase, and is resolved only against the document's own pending
+// treatment-history companion. It never strongly owns its enclosing
+// OcctDocument/viewer: the issuing context keeps only its weak viewer link.
+// Terminal settlement or document replacement/destruction retires it; it can
+// never act on a new document with matching textual identifiers.
+namespace core3d::authored_recovery {
+//! Live classification of the pending transaction against its measured
+//! witnesses. RecoveryRequired deliberately carries no delta.
+enum class Class : std::uint8_t { RecoveryRequired = 0, Committed, PriorRestored };
+//! None means no record (or a foreign issuer); Pending awaits classification;
+//! CompanionSettled means the native classification/companion decision is
+//! proven and only publication/fence settlement remains.
+enum class Phase : std::uint8_t { None = 0, Pending, CompanionSettled };
+struct Record final {
+    Handle(TDF_Data) data;
+    TDF_Label ownerLabel;
+    std::string ownerEntry;
+    std::shared_ptr<const core3d::authored_parameter::Capture> capture;
+    std::shared_ptr<core3d::native_opening::Context> context;
+    std::vector<std::uint8_t> candidateCompositeBytes;
+    std::vector<std::uint8_t> candidateTreatmentBytes;
+    Phase phase = Phase::Pending;
+    Class settledClass = Class::RecoveryRequired;
+    Standard_Integer settledDelta = 0;
+};
+} // namespace core3d::authored_recovery
+
 //! Persistent geometry representation owned by each XCAF definition label.
 //! The non-negative values are serialized schema values: never renumber or
 //! reuse them. Invalid is a read-only fail-closed sentinel and must never be
@@ -1876,6 +1908,30 @@ private:
   // authority API.
   Standard_Boolean FinalizeTreatmentHistoryCompanion() noexcept;
   Standard_Boolean SettleTreatmentHistoryCompanionOnPrior() noexcept;
+  // A2-N2 authored-Boolean recovery record lifecycle, owned by the document
+  // and driven only by the shared authored-parameter owner. Retention runs
+  // before any mutation under the document-issued capture and issuing
+  // context; reconciliation classifies the pending transaction against the
+  // live document state and the measured companion witnesses (committed
+  // candidate / exact prior / still unknown), settles the matching companion
+  // exactly once, and never opens a command, rebuilds geometry or invokes
+  // Undo/Redo. Retirement follows complete terminal settlement or session
+  // release. No app/AI authority API.
+  Standard_Boolean RetainAuthoredBooleanRecovery(
+      const std::shared_ptr<const core3d::authored_parameter::Capture>& capture,
+      const std::shared_ptr<core3d::native_opening::Context>& context,
+      std::vector<std::uint8_t> candidateCompositeBytes,
+      std::vector<std::uint8_t> candidateTreatmentBytes) noexcept;
+  core3d::authored_recovery::Phase AuthoredBooleanRecoveryPhase(
+      const std::shared_ptr<core3d::native_opening::Context>& issuer) const noexcept;
+  Standard_Boolean ReconcileAuthoredBooleanRecovery(
+      core3d::authored_recovery::Class& classified,
+      Standard_Integer& measuredDelta
+#if DEBUG
+      , bool* debugFailObservationAfterRead
+#endif
+      ) noexcept;
+  void RetireAuthoredBooleanRecovery() noexcept;
   void ReleaseTreatmentHistoryCompanions() noexcept;
   void PruneTreatmentHistoryCompanions() noexcept;
   Standard_Boolean ApplyTreatmentHistoryAfterHistoryChange(
@@ -1974,6 +2030,9 @@ private:
   // transaction, and the bounded set of companions bound to live TDF deltas.
   std::unique_ptr<core3d::treatment_history::Companion> myPendingTreatmentCompanion;
   std::deque<std::unique_ptr<core3d::treatment_history::Companion>> myTreatmentHistoryCompanions;
+  // A2-N2: the single document-owned authored-Boolean recovery authority,
+  // nonpersisted and released with this native document session.
+  std::unique_ptr<core3d::authored_recovery::Record> myAuthoredBooleanRecovery;
   Standard_Size myMaximumSerializedTextureOccurrenceBytes;
   Standard_Size myMaximumDecodedTextureResourceBytes;
   Standard_Size myMaximumVisualMaterialDefinitions;

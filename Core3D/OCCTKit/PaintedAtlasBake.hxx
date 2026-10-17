@@ -1645,6 +1645,9 @@ struct ExportBakeStorage final {
     decal_layer::bake::accounting::Ticket outputVectorStorage;
     decal_layer::bake::accounting::Ticket evidenceStorage;
     asset_atlas::build::FinalAtlasAccounting finalAtlas;
+    // Declared after FinalAtlasAccounting so the retained layout payload is
+    // destroyed before the ticket that charges its physical vectors.
+    asset_atlas::build::LayoutEvidence layout;
 };
 
 //! Complete detached painted result for one final layout. All applicable
@@ -1683,14 +1686,14 @@ Outcome CaptureForExport(ExportCapture& capture,
 Outcome BakeForExport(const ExportCapture& capture,
                       asset_atlas::Definition finalAtlas,
                       std::vector<asset_atlas::MemberUVAssignment> assignments,
-                      const asset_atlas::build::LayoutEvidence& layout,
+                      asset_atlas::build::LayoutEvidence&& layout,
                       std::shared_ptr<ExportBakeStorage> storage,
                       ExportBake& output) noexcept;
 Outcome BakeForExport(const ExportCapture& capture,
                       const CapturedSourceStorage& productionSources,
                       asset_atlas::Definition finalAtlas,
                       std::vector<asset_atlas::MemberUVAssignment> assignments,
-                      const asset_atlas::build::LayoutEvidence& layout,
+                      asset_atlas::build::LayoutEvidence&& layout,
                       std::shared_ptr<ExportBakeStorage> storage,
                       ExportBake& output) noexcept;
 Outcome BuildAndBakeForExport(

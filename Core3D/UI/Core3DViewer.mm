@@ -2742,6 +2742,24 @@ void Context::retainUnprovenEdit(
     } catch (...) {}
 }
 
+bool Context::armRecoveryAfterAbortedClose() noexcept {
+    try {
+        const auto state = state_.lock();
+        // Only this exact registered issuer, immediately after its own lease
+        // finished a real abort and released every marker slot, may re-arm
+        // the fence. A foreign, still-active, already-armed or
+        // publication-retaining state refuses and changes nothing.
+        if (!state || state->contexts.count(identifier_) != 1
+            || state->activeContext != 0 || state->activeMarker != 0
+            || state->recoveryMarker != 0 || state->nextMarker == 0
+            || state->pendingPublication) return false;
+        state->activeContext = identifier_;
+        state->recoveryMarker = state->nextMarker;
+        state->recoveryContext = identifier_;
+        return true;
+    } catch (...) { return false; }
+}
+
 #if DEBUG
 void Context::debugReportNextCloseUnproven() noexcept {
     const auto state = state_.lock();

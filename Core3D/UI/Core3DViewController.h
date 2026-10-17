@@ -698,6 +698,14 @@ __attribute__((objc_subclassing_restricted))
     debugE4PersistedAtlasCaptureLineageForEntityIdentifier:
         (NSString *)entityIdentifier
     NS_SWIFT_NAME(debugE4PersistedAtlasCaptureLineage(entityIdentifier:));
+//! Executes one saved-group helper transaction over real native-remeshed
+//! detached members and returns only bounded value evidence.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4SavedGroupFinalResultForWholeCommittedScene:
+        (Core3DSceneSnapshot *)wholeCommittedScene
+        selectedObjectsOnly:
+        (BOOL)selectedObjectsOnly
+    NS_SWIFT_NAME(debugE4SavedGroupFinalResult(wholeCommittedScene:selectedObjectsOnly:));
 //! Runs the five-role 2048 kernel with its inherited operation, observes the
 //! retained output after return, and denies encoder admission before allocation.
 - (nullable NSDictionary<NSString *,id> *)

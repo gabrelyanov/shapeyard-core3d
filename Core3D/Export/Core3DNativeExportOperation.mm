@@ -2293,6 +2293,28 @@ std::string DebugExportAnalyticGeometry(const TopoDS_Face& face) {
 
 } // namespace
 
+#ifdef DEBUG
+namespace core3d::scene {
+bool DebugMeshSavedGroupPrivateSurfaces(
+    const TopoDS_Shape& shape) noexcept {
+    try {
+        if (shape.IsNull()) return false;
+        auto state = std::make_shared<NativeExportState>();
+        state->exportType = ExportTypeGltf;
+        state->meshQuality = Core3DExportMeshQualityFine;
+        state->deflectionType = Aspect_TOD_RELATIVE;
+        state->deviationCoefficient = 0.00025;
+        state->deviationAngle = 7.5 * M_PI / 180.0;
+        state->maximalChordialDeviation = 0.0001;
+        MeshPrivateExportSurfaces(shape, state, Message_ProgressRange());
+        return !state->cancelled.load(std::memory_order_acquire);
+    } catch (...) {
+        return false;
+    }
+}
+}
+#endif
+
 @interface Core3DNativeExportArtifact ()
 
 @property(nonatomic, readwrite, copy) NSURL *primaryURL;

@@ -1003,4 +1003,53 @@ extern "C" void *Core3DDebugA1AnalyticRotationOracleProbe(int32_t scenario) {
 extern "C" void *Core3DDebugA1AnalyticRotationCountedProbe(int32_t scenario) {
     return (__bridge_retained void *)RotationCountedProbe(scenario);
 }
+extern "C" bool Core3DDebugA2ArmAbortSettlementUnproven(void *openingObject) {
+    Core3DAuthoredParameterOpening *opening =
+        (__bridge Core3DAuthoredParameterOpening *)openingObject;
+    return [opening isKindOfClass:Core3DAuthoredParameterOpening.class]
+        && opening->_nativeOwner
+        && opening->_nativeOwner->debugArmNextAbortSettlementUnproven();
+}
+extern "C" bool Core3DDebugA2ArmRecoveryObservationFailure(void *openingObject) {
+    Core3DAuthoredParameterOpening *opening =
+        (__bridge Core3DAuthoredParameterOpening *)openingObject;
+    return [opening isKindOfClass:Core3DAuthoredParameterOpening.class]
+        && opening->_nativeOwner
+        && opening->_nativeOwner->debugArmNextRecoveryObservationFailure();
+}
+extern "C" void *Core3DDebugA2AuthoredBooleanRecoveryProbe(
+    void *openingObject, void *hostObject) {
+    Core3DAuthoredParameterOpening *opening =
+        (__bridge Core3DAuthoredParameterOpening *)openingObject;
+    Core3DViewController *host = (__bridge Core3DViewController *)hostObject;
+    if (![opening isKindOfClass:Core3DAuthoredParameterOpening.class]
+        || !opening->_nativeOwner || ![host isKindOfClass:Core3DViewController.class]) {
+        return (__bridge_retained void *)@{
+            @"outcome": @3, @"code": @"authored.recovery-not-owner"
+        };
+    }
+    GLViewController *gl = [host.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)host.glController : nil;
+    const auto viewer = gl ? gl.viewer : nullptr;
+    const Handle(OcctDocument) document = viewer
+        ? viewer->getDocument() : Handle(OcctDocument)();
+    if (!opening->_nativeOwner->belongsTo(document)) {
+        return (__bridge_retained void *)@{
+            @"outcome": @3, @"code": @"authored.recovery-not-owner"
+        };
+    }
+    const auto result = opening->_nativeOwner->reconcileBoolean();
+    NSMutableDictionary *answer = [@{
+        @"outcome": @(static_cast<NSInteger>(result.outcome)),
+        @"code": [NSString stringWithUTF8String:result.code.c_str()],
+        @"reconcileCalls": @(result.reconcileCalls),
+        @"observationCalls": @(result.observationCalls),
+        @"observationFaultHits": @(result.observationFaultHits),
+        @"publicationCalls": @(result.publicationCalls),
+        @"recoveryCommandCalls": @(result.recoveryCommandCalls),
+    } mutableCopy];
+    if (result.measuredUndoDelta)
+        answer[@"measuredUndoDelta"] = @(*result.measuredUndoDelta);
+    return (__bridge_retained void *)answer;
+}
 #endif

@@ -76,6 +76,8 @@
 
 #if DEBUG
 namespace core3d::scene {
+bool DebugMeshSavedGroupPrivateSurfaces(
+    const TopoDS_Shape& shape) noexcept;
 std::array<std::size_t, 23>
 DebugExerciseE4BRepCensusCopyPrediction() noexcept;
 std::array<std::size_t, 51>
@@ -4054,6 +4056,117 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
             @"historyUnchanged": @(historyUnchanged),
         };
     } @catch (...) { return nil; }
+}
+
+- (NSDictionary<NSString *,id> *)
+    debugE4SavedGroupFinalResultForWholeCommittedScene:
+        (Core3DSceneSnapshot *)wholeCommittedScene
+        selectedObjectsOnly:
+        (BOOL)selectedObjectsOnly {
+    namespace scene = core3d::scene;
+    if (!NSThread.isMainThread)
+        return @{@"failureStage": @"bridge-not-main-thread",
+            @"complete": @NO};
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        if (!viewer || wrapper.IsNull() || !wholeCommittedScene)
+            return @{@"failureStage": @"bridge-context",
+                @"complete": @NO};
+        scene::SceneSnapshot scope;
+        scope.meshes.reserve(wholeCommittedScene.meshes.count);
+        for (Core3DSceneMeshSnapshot *mesh in wholeCommittedScene.meshes) {
+            scene::MeshSnapshot value;
+            const char *definition = mesh.definitionIdentifier.UTF8String;
+            value.definitionIdentifier = definition ? definition : "";
+            scope.meshes.push_back(std::move(value));
+        }
+        scope.instances.reserve(wholeCommittedScene.renderItems.count);
+        for (Core3DSceneRenderItemSnapshot *item
+                in wholeCommittedScene.renderItems) {
+            scene::InstanceSnapshot value;
+            const char *entity = item.entityIdentifier.UTF8String;
+            value.entityIdentifier = entity ? entity : "";
+            value.meshIndex = item.meshIndex;
+            value.selected = item.selected;
+            scope.instances.push_back(std::move(value));
+        }
+
+        scene::DebugSavedGroupFinalObservation observation;
+        std::atomic_bool cancelled{false};
+        const bool completed = scene::OcctSceneSnapshotBuilder::
+            DebugProduceSavedGroupFinalResult(wrapper, scope,
+                selectedObjectsOnly,
+                [](const TopoDS_Shape& shape) {
+                    if (!scene::DebugMeshSavedGroupPrivateSurfaces(shape))
+                        throw std::runtime_error(
+                            "saved-group native mesher refused");
+                },
+                [&cancelled]() noexcept {
+                    return cancelled.load(std::memory_order_acquire);
+                }, observation);
+
+        const auto strings = [](const std::vector<std::string>& values) {
+            NSMutableArray<NSString *> *result = [NSMutableArray array];
+            for (const auto& value : values) {
+                NSString *text = [NSString stringWithUTF8String:value.c_str()];
+                if (text) [result addObject:text.lowercaseString];
+            }
+            return result;
+        };
+        const auto numbers = [](const auto& values) {
+            NSMutableArray<NSNumber *> *result = [NSMutableArray array];
+            for (const auto value : values)
+                [result addObject:@(static_cast<unsigned long long>(value))];
+            return result;
+        };
+        NSMutableArray<NSData *> *pngs = [NSMutableArray array];
+        for (const auto& png : observation.outputPNGs)
+            [pngs addObject:[NSData dataWithBytes:png.data()
+                length:png.size()]];
+        NSString *stage = [NSString stringWithUTF8String:
+            observation.failureStage.c_str()] ?: @"invalid-stage";
+        NSString *key = [NSString stringWithUTF8String:
+            observation.strictKey.c_str()] ?: @"";
+        return @{
+            @"fixture": @"E4SavedGroupFinalResult2048",
+            @"complete": @(completed && observation.complete),
+            @"failureStage": stage,
+            @"strictKey": key,
+            @"selectedObjectsOnly": @(observation.selectedObjectsOnly),
+            @"memberDefinitions": strings(observation.memberDefinitions),
+            @"savedTriangleCounts": numbers(observation.savedTriangleCounts),
+            @"finalTriangleCounts": numbers(observation.finalTriangleCounts),
+            @"finalCornerCounts": numbers(observation.finalCornerCounts),
+            @"assignmentCornerCounts": numbers(
+                observation.assignmentCornerCounts),
+            @"sourceOrigins": numbers(observation.sourceOrigins),
+            @"pngs": pngs,
+            @"measuredCopyCount": @(observation.measuredCopyCount),
+            @"occurrenceCount": @(observation.occurrenceCount),
+            @"assignmentCount": @(observation.assignmentCount),
+            @"layoutChartCount": @(observation.layoutChartCount),
+            @"outputCount": @(observation.outputCount),
+            @"resolution": @(observation.resolution),
+            @"gutter": @(observation.gutter),
+            @"fullSavedMembership": @(observation.fullSavedMembership),
+            @"exactFaceCorrespondence": @(
+                observation.exactFaceCorrespondence),
+            @"planeInput": @(observation.planeInput),
+            @"cylinderInput": @(observation.cylinderInput),
+            @"changedCylinderInput": @(observation.changedCylinderInput),
+            @"retainedLayout": @(observation.retainedLayout),
+            @"sharedResultIdentity": @(observation.sharedResultIdentity),
+        };
+    } @catch (...) {
+        return @{@"failureStage": @"bridge-exception",
+            @"complete": @NO};
+    }
 }
 
 - (NSDictionary<NSString *,id> *)

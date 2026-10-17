@@ -153,6 +153,36 @@ struct DebugPersistedAtlasCaptureLineageObservation final {
     bool deniedBeforeCopy = false;
 };
 
+//! Value-only evidence from one saved-group transaction over native-remeshed
+//! detached members. No document handles, labels or operation views escape.
+struct DebugSavedGroupFinalObservation final {
+    std::vector<std::string> memberDefinitions;
+    std::vector<std::uint64_t> savedTriangleCounts;
+    std::vector<std::uint64_t> finalTriangleCounts;
+    std::vector<std::uint64_t> finalCornerCounts;
+    std::vector<std::uint64_t> assignmentCornerCounts;
+    std::vector<std::uint8_t> sourceOrigins;
+    std::vector<std::vector<std::uint8_t>> outputPNGs;
+    std::string strictKey;
+    std::string failureStage;
+    std::uint64_t measuredCopyCount = 0;
+    std::uint64_t occurrenceCount = 0;
+    std::uint64_t assignmentCount = 0;
+    std::uint64_t layoutChartCount = 0;
+    std::uint64_t outputCount = 0;
+    std::uint64_t resolution = 0;
+    std::uint64_t gutter = 0;
+    bool selectedObjectsOnly = false;
+    bool fullSavedMembership = false;
+    bool exactFaceCorrespondence = false;
+    bool planeInput = false;
+    bool cylinderInput = false;
+    bool changedCylinderInput = false;
+    bool retainedLayout = false;
+    bool sharedResultIdentity = false;
+    bool complete = false;
+};
+
 //! Value-only observation of the bounded-curve input used by one successful
 //! full-scene publication. This test seam is armed explicitly for one
 //! synchronous DEBUG capture and never retains labels, document handles or
@@ -252,6 +282,14 @@ public:
         const std::string& selectedDefinitionIdentifier,
         DebugPersistedAtlasCaptureMode mode,
         DebugPersistedAtlasCaptureLineageObservation& observation) noexcept;
+
+    static bool DebugProduceSavedGroupFinalResult(
+        const Handle(OcctDocument)& exclusivelyOwnedPrivateDocument,
+        const SceneSnapshot& wholeCommittedScene,
+        bool selectedObjectsOnly,
+        const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
+        const std::function<bool()>& cancelled,
+        DebugSavedGroupFinalObservation& observation) noexcept;
 #endif
 
     //! Capture only the semantic camera and revisions. Document, model, and

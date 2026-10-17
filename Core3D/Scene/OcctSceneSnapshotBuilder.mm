@@ -11579,6 +11579,427 @@ DebugTakeE4ProtectedCaptureStorageObservation() noexcept {
 }
 #endif
 
+namespace {
+
+struct SavedGroupMeasuredMember final {
+    decal_layer::bake::accounting::Ticket storage;
+    TopoDS_Shape original;
+    TopoDS_Shape detached;
+    std::unique_ptr<BRepBuilderAPI_Copy> copier;
+    TopTools_IndexedMapOfShape originalFaces;
+    TopTools_IndexedMapOfShape detachedFaces;
+    std::string definitionIdentifier;
+    std::size_t savedTriangleCount = 0;
+};
+
+struct SavedGroupOccurrenceScope final {
+    struct Entry final {
+        std::string occurrenceIdentifier;
+        std::string definitionIdentifier;
+        std::size_t sourceInstanceIndex = 0;
+        Matrix4d transform;
+    };
+    std::vector<Entry> entries;
+    std::vector<std::string> expectedReceiverIdentifiers;
+};
+
+struct SavedGroupFinalResult final {
+    painted_atlas_bake::owner::ExportBake bake;
+    SavedGroupOccurrenceScope occurrences;
+    std::vector<std::string> memberDefinitions;
+    std::vector<std::size_t> finalTriangleCounts;
+    std::vector<std::size_t> finalCornerCounts;
+};
+
+//! Distinct one-group authority. It deliberately does not reuse the
+//! standalone receiver Owner above: membership comes only from the strict
+//! persisted ExportCapture and always retains saved order.
+struct SavedGroupOwner final {
+    retained_edge_treatment::ReplayBudget budget;
+    painted_atlas_bake::owner::ExportCapture capture;
+    decal_layer::bake::accounting::Ticket measuredVectorTicket;
+    std::vector<SavedGroupMeasuredMember> measured;
+    painted_atlas_bake::owner::CapturedSourceStorage productionSources;
+    std::shared_ptr<const SavedGroupFinalResult> result;
+
+    SavedGroupOwner() = default;
+    SavedGroupOwner(const SavedGroupOwner&) = delete;
+    SavedGroupOwner& operator=(const SavedGroupOwner&) = delete;
+};
+
+bool SavedGroupCancelled(const std::function<bool()>& cancelled) noexcept {
+    if (!cancelled) return true;
+    try { return cancelled(); }
+    catch (...) { return true; }
+}
+
+bool PrepareSavedGroupOwner(
+    OperationLedger& operation,
+    painted_atlas_bake::owner::ExportCapture&& strictCapture,
+    const Handle(OcctDocument)& privateDocument,
+    const std::function<bool()>& cancelled,
+    SavedGroupOwner& group,
+    std::string& diagnosis) noexcept {
+    diagnosis.clear();
+    try {
+        const auto fail = [&diagnosis](const char* value) {
+            diagnosis = value; return false;
+        };
+        if (privateDocument.IsNull() || SavedGroupCancelled(cancelled)
+            || !strictCapture.operationView().valid()
+            || strictCapture.operation.valid()
+            || strictCapture.members.members.empty()
+            || strictCapture.members.members.size()
+                != strictCapture.savedAtlas.members.size())
+            return fail("saved-group-capture-invalid");
+        const Handle(TDocStd_Document)& document = privateDocument->Document();
+        Standard_Real metersPerUnit = 0.0;
+        if (document.IsNull() || document->HasOpenCommand()
+            || !XCAFDoc_DocumentTool::GetLengthUnit(document, metersPerUnit)
+            || !(metersPerUnit > 0.0))
+            return fail("saved-group-document-invalid");
+
+        group.capture = std::move(strictCapture);
+        if (!ReserveProtectedVector(group.measured,
+                group.measuredVectorTicket, operation.view(),
+                group.capture.members.members.size(),
+                decal_layer::bake::accounting::Retention::Retained,
+                decal_layer::bake::accounting::FailureSite::
+                    ProtectedOwnerStorage))
+            return fail("saved-group-member-storage");
+
+        for (std::size_t index = 0;
+             index < group.capture.members.members.size(); ++index) {
+            if (SavedGroupCancelled(cancelled))
+                return fail("saved-group-cancelled-before-copy");
+            const auto& member = group.capture.members.members[index];
+            if (!(member.slot.owner == group.capture.savedAtlas.members[index].owner))
+                return fail("saved-group-member-order");
+            SavedGroupMeasuredMember value;
+            value.original = XCAFDoc_ShapeTool::GetShape(member.ownerLabel);
+            value.definitionIdentifier =
+                privateDocument->DefinitionIdentifierForLabel(member.ownerLabel);
+            if (value.original.IsNull() || value.definitionIdentifier.empty())
+                return fail("saved-group-member-shape");
+            retained_solid::Record retained;
+            retained_finishing::SourceRevision source;
+            std::atomic_bool noCancellation{false};
+            meshcopy::CurrentTessellationCopy savedCopy;
+            if (!retained_finishing::producer::detail::Source(
+                    document, member.slot.owner, source, nullptr, &retained)
+                || !(source == member.slot.source)
+                || meshcopy::PrepareCurrentTessellationCopy(
+                    retained.current, savedCopy, noCancellation)
+                    != meshcopy::PreparationResult::Ready
+                || savedCopy.triangles <= 0)
+                return fail("saved-group-saved-mesh");
+            value.savedTriangleCount = std::size_t(savedCopy.triangles);
+            BRepRepresentationCensus census;
+            BRepRepresentationCensus prediction;
+            BRepCensusPCurveLookup lookup;
+            decal_layer::bake::accounting::Ticket scratch;
+            if (!MeasureBRepRepresentation(value.original, group.budget,
+                    operation.view(), census, scratch, &prediction, &lookup))
+                return fail("saved-group-member-census");
+            scratch.reset();
+            std::size_t retainedBytes = 0;
+            if (!CopyMeasuredBRep(value.original, group.budget, operation,
+                    census, prediction, 0, value.storage, value.copier,
+                    value.detached, value.originalFaces,
+                    value.detachedFaces, retainedBytes)
+                || value.detached.IsNull()
+                || value.detached.IsSame(value.original))
+                return fail("saved-group-member-copy");
+            group.measured.push_back(std::move(value));
+        }
+
+        if (!ReserveProtectedVector(group.productionSources.values,
+                group.productionSources.vectorTicket, operation.view(),
+                group.capture.sources.size(),
+                decal_layer::bake::accounting::Retention::Retained,
+                decal_layer::bake::accounting::FailureSite::
+                    ProtectedSourceStorage))
+            return fail("saved-group-source-storage");
+        for (std::size_t sourceIndex = 0;
+             sourceIndex < group.capture.sources.size(); ++sourceIndex) {
+            painted_atlas_bake::owner::CapturedSource source(
+                group.capture.sources[sourceIndex]);
+            std::size_t memberIndex = group.measured.size();
+            for (std::size_t index = 0; index < group.measured.size(); ++index) {
+                if (!(group.capture.savedAtlas.members[index].owner
+                        == source.fence.owner)) continue;
+                if (memberIndex != group.measured.size())
+                    return fail("saved-group-source-owner-duplicate");
+                memberIndex = index;
+            }
+            if (memberIndex == group.measured.size())
+                return fail("saved-group-source-owner-foreign");
+            source.memberIndex = memberIndex;
+            source.order = sourceIndex;
+            if (source.origin
+                    == painted_atlas_bake::kernel::SourceOrigin::
+                        OwnerMaterialSlot) {
+                source.faceIndex = std::numeric_limits<std::size_t>::max();
+            } else {
+                Bnd_Box bounds;
+                BRepBndLib::AddOptimal(group.measured[memberIndex].original,
+                    bounds, Standard_False, Standard_False);
+                if (bounds.IsVoid() || bounds.IsWhole() || bounds.IsOpen())
+                    return fail("saved-group-source-bounds");
+                int matches = 0;
+                TopoDS_Face originalFace;
+                for (Standard_Integer faceIndex = 1;
+                     faceIndex <= group.measured[memberIndex].originalFaces.Extent();
+                     ++faceIndex) {
+                    const TopoDS_Face candidate = TopoDS::Face(
+                        group.measured[memberIndex].originalFaces.FindKey(faceIndex));
+                    dependent_replay::FaceImageGeometricReceipt receipt;
+                    if (dependent_replay::detail::DeriveFaceImageReceipt(
+                            bounds, candidate, metersPerUnit,
+                            group.budget, receipt)
+                            != dependent_replay::detail::
+                                FaceImageDeriveStatus::Derived)
+                        continue;
+                    decal_layer::Digest proof{};
+                    if (!dependent_replay::FaceImageReceiptProof(receipt, proof))
+                        return fail("saved-group-source-receipt");
+                    if (proof != source.fence.selectorProof) continue;
+                    ++matches;
+                    originalFace = candidate;
+                }
+                if (matches != 1 || originalFace.IsNull())
+                    return fail("saved-group-source-selector");
+                const TopoDS_Shape copied =
+                    group.measured[memberIndex].copier->ModifiedShape(originalFace);
+                const Standard_Integer copiedFace =
+                    group.measured[memberIndex].detachedFaces.FindIndex(copied);
+                if (copied.IsNull() || copied.ShapeType() != TopAbs_FACE
+                    || copiedFace <= 0)
+                    return fail("saved-group-source-correspondence");
+                source.faceIndex = std::size_t(copiedFace - 1);
+            }
+            group.productionSources.values.push_back(std::move(source));
+        }
+        return group.measured.size() == group.capture.savedAtlas.members.size()
+            && group.productionSources.size() == group.capture.sources.size();
+    } catch (...) {
+        diagnosis = "saved-group-preparation-exception";
+        return false;
+    }
+}
+
+bool SavedGroupExactFinalTriangles(
+    const DefinitionData& definition,
+    std::vector<shapeyard::uv::Triangle>& triangles) noexcept {
+    triangles.clear();
+    try {
+        if (definition.shape.IsNull()
+            || definition.mesh.indices.empty()
+            || definition.mesh.indices.size() % 3U != 0) return false;
+        triangles.resize(definition.mesh.indices.size() / 3U);
+        std::size_t vertexBase = 0;
+        std::size_t cornerOffset = 0;
+        RWMesh_FaceIterator face(definition.shape);
+        for (; face.More(); face.Next()) {
+            if (face.NbNodes() <= 0 || face.NbTriangles() <= 0) return false;
+            for (Standard_Integer triangleIndex = face.ElemLower();
+                 triangleIndex <= face.ElemUpper(); ++triangleIndex) {
+                const Poly_Triangle triangle =
+                    face.TriangleOriented(triangleIndex);
+                Standard_Integer nodes[3] = {0, 0, 0};
+                triangle.Get(nodes[0], nodes[1], nodes[2]);
+                if (cornerOffset + 3U > definition.mesh.indices.size())
+                    return false;
+                auto& output = triangles[cornerOffset / 3U];
+                for (std::size_t corner = 0; corner < 3; ++corner) {
+                    if (nodes[corner] < face.NodeLower()
+                        || nodes[corner] > face.NodeUpper()) return false;
+                    const std::uint32_t expected = std::uint32_t(
+                        vertexBase + std::size_t(nodes[corner]
+                            - face.NodeLower()));
+                    if (definition.mesh.indices[cornerOffset + corner]
+                            != expected) return false;
+                    const gp_Pnt point = face.NodeTransformed(nodes[corner]);
+                    if (!IsFinite(point.X()) || !IsFinite(point.Y())
+                        || !IsFinite(point.Z())) return false;
+                    output.points[corner] = {
+                        point.X(), point.Y(), point.Z()};
+                }
+                cornerOffset += 3U;
+            }
+            vertexBase += std::size_t(face.NbNodes());
+        }
+        return cornerOffset == definition.mesh.indices.size()
+            && vertexBase == definition.mesh.vertices.size();
+    } catch (...) {
+        triangles.clear();
+        return false;
+    }
+}
+
+painted_atlas_bake::owner::Outcome BuildSavedGroupForExport(
+    SavedGroupOwner& group,
+    const std::vector<DefinitionData>& actualFinalDefinitions,
+    const SavedGroupOccurrenceScope& expectedOccurrences,
+    const std::function<bool()>& cancelled,
+    std::shared_ptr<const SavedGroupFinalResult>& output,
+    std::string& diagnosis) noexcept {
+    using Outcome = painted_atlas_bake::owner::Outcome;
+    output.reset();
+    group.result.reset();
+    diagnosis.clear();
+    try {
+        if (SavedGroupCancelled(cancelled)) {
+            diagnosis = "saved-group-cancelled-before-build";
+            return Outcome::Refused;
+        }
+        if (group.measured.empty()
+            || group.measured.size() != group.capture.savedAtlas.members.size()
+            || actualFinalDefinitions.size() < group.measured.size()) {
+            diagnosis = "saved-group-final-definition-count";
+            return Outcome::Malformed;
+        }
+        std::vector<asset_atlas::build::FinalMemberInput> inputs;
+        inputs.reserve(group.measured.size());
+        std::vector<std::string> definitionOrder;
+        std::vector<std::size_t> triangleCounts;
+        std::vector<std::size_t> cornerCounts;
+        definitionOrder.reserve(group.measured.size());
+        triangleCounts.reserve(group.measured.size());
+        cornerCounts.reserve(group.measured.size());
+        for (std::size_t memberIndex = 0;
+             memberIndex < group.measured.size(); ++memberIndex) {
+            const DefinitionData* definition = nullptr;
+            for (const auto& candidate : actualFinalDefinitions) {
+                if (candidate.mesh.definitionIdentifier
+                        != group.measured[memberIndex].definitionIdentifier)
+                    continue;
+                if (definition) {
+                    diagnosis = "saved-group-final-definition-duplicate";
+                    return Outcome::Malformed;
+                }
+                definition = &candidate;
+            }
+            if (!definition || definition->shape.IsNull()
+                || !definition->shape.IsSame(group.measured[memberIndex].detached)
+                || definition->mesh.indices.empty()
+                || definition->mesh.indices.size() % 3U != 0
+                || definition->faces.Extent()
+                    != group.measured[memberIndex].detachedFaces.Extent()) {
+                diagnosis = "saved-group-final-definition-missing";
+                return Outcome::StaleSource;
+            }
+            asset_atlas::build::FinalMemberInput input;
+            input.savedMember = group.capture.members.members[memberIndex].slot;
+            input.authority = group.capture.members.members[memberIndex].capture;
+            if (!SavedGroupExactFinalTriangles(*definition,
+                    input.triangles)) {
+                diagnosis = "saved-group-final-index-stream";
+                return Outcome::Malformed;
+            }
+            std::size_t coveredCorners = 0;
+            for (const auto& primitive : definition->mesh.primitives) {
+                const auto& analytic = primitive.analyticSourceFace;
+                if (!analytic.available || primitive.firstIndex % 3U != 0
+                    || primitive.indexCount == 0
+                    || primitive.indexCount % 3U != 0
+                    || std::size_t(primitive.firstIndex) != coveredCorners
+                    || std::size_t(primitive.firstIndex)
+                        + primitive.indexCount > definition->mesh.indices.size()
+                    || (analytic.surfaceType != provenance::kSurfaceTypePlane
+                        && analytic.surfaceType
+                            != provenance::kSurfaceTypeCylinder)
+                    || analytic.params.size()
+                        != (analytic.surfaceType == provenance::kSurfaceTypePlane
+                            ? 9U : 10U)) {
+                    diagnosis = "saved-group-final-primitive";
+                    return Outcome::UnsupportedSurface;
+                }
+                shapeyard::uv::curved::FaceInput face;
+                face.surfaceType = analytic.surfaceType;
+                face.firstTriangle = int(primitive.firstIndex / 3U);
+                face.triangleCount = int(primitive.indexCount / 3U);
+                face.reversed = analytic.reversed;
+                face.params = analytic.params;
+                face.toleranceMM = 1.0e-7;
+                face.xDirection = {
+                    analytic.params[6], analytic.params[7], analytic.params[8]};
+                input.faces.push_back(std::move(face));
+                coveredCorners += primitive.indexCount;
+            }
+            if (coveredCorners != definition->mesh.indices.size()) {
+                diagnosis = "saved-group-final-corner-coverage";
+                return Outcome::Malformed;
+            }
+            for (const auto& source : group.productionSources) {
+                if (source.memberIndex == memberIndex
+                    && source.faceIndex != std::numeric_limits<std::size_t>::max()
+                    && source.faceIndex >= input.faces.size()) {
+                    diagnosis = "saved-group-final-source-face";
+                    return Outcome::StaleBinding;
+                }
+            }
+            definitionOrder.push_back(
+                group.measured[memberIndex].definitionIdentifier);
+            triangleCounts.push_back(input.triangles.size());
+            cornerCounts.push_back(definition->mesh.indices.size());
+            inputs.push_back(std::move(input));
+        }
+
+        painted_atlas_bake::owner::ExportBake baked;
+        const asset_atlas::build::Settings settings{
+            group.capture.savedAtlas.resolutionTexels,
+            group.capture.savedAtlas.gutterTexels};
+        const auto outcome = painted_atlas_bake::owner::BuildAndBakeForExport(
+            group.capture, group.productionSources, inputs, settings,
+            baked, diagnosis);
+        if (outcome != Outcome::Prepared) return outcome;
+        if (!baked.storage || baked.storage->layout.charts.empty()
+            || baked.assignments.size() != inputs.size()) {
+            diagnosis = "saved-group-result-incomplete";
+            return Outcome::Malformed;
+        }
+        const auto operation = group.capture.operationView();
+        if (!baked.storage->bakeValueStorage.acquire(operation,
+                decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                sizeof(SavedGroupFinalResult),
+                decal_layer::bake::accounting::Retention::Retained,
+                decal_layer::bake::accounting::FailureSite::ExportBakeStorage)
+            || !operation.EnterAllocation(
+                decal_layer::bake::accounting::FailureSite::ExportBakeStorage)) {
+            diagnosis = "saved-group-result-storage";
+            return Outcome::OverBudget;
+        }
+        auto result = std::make_shared<SavedGroupFinalResult>();
+        result->bake = std::move(baked);
+        result->occurrences = expectedOccurrences;
+        result->memberDefinitions = std::move(definitionOrder);
+        result->finalTriangleCounts = std::move(triangleCounts);
+        result->finalCornerCounts = std::move(cornerCounts);
+        group.result = result;
+        output = std::move(result);
+        return Outcome::Prepared;
+    } catch (const std::bad_alloc&) {
+        group.capture.operationView().AllocationFailed(
+            decal_layer::bake::accounting::FailureSite::ExportBakeStorage);
+        diagnosis = "saved-group-allocation";
+        return Outcome::OverBudget;
+    } catch (...) {
+        diagnosis = "saved-group-build-exception";
+        return Outcome::Malformed;
+    }
+}
+
+const SavedGroupFinalResult* LookupSavedGroupFinalResult(
+    const SavedGroupOwner& group,
+    const asset_atlas::Key& strictKey) noexcept {
+    return group.result && group.capture.savedAtlas.key == strictKey
+        && group.result->bake.atlas.key == strictKey
+        ? group.result.get() : nullptr;
+}
+
+} // namespace
+
 struct PrivateDecalCapture::Impl final {
     struct Owner final {
         struct Receiver final {
@@ -11634,6 +12055,10 @@ struct PrivateDecalCapture::Impl final {
     decal_layer::bake::accounting::Ticket wholeScenePrivateTicket;
     SceneSnapshot wholeCommittedScene;
     std::vector<Owner> owners;
+    // Admitted operation-owned saved-group slots. H1 has only the explicit
+    // DEBUG transaction caller; normal dispatch does not populate this yet.
+    decal_layer::bake::accounting::Ticket savedGroupsTicket;
+    std::vector<std::unique_ptr<SavedGroupOwner>> savedGroups;
     mutable retained_edge_treatment::ReplayBudget budget;
     decal_layer::bake::publication::PrivateDestination destination;
     std::string documentIdentifier;
@@ -11977,6 +12402,201 @@ bool OcctSceneSnapshotBuilder::DebugCapturePersistedAtlasLineage(
         return completed;
     } catch (...) {
         observation = {};
+        return false;
+    }
+}
+
+bool OcctSceneSnapshotBuilder::DebugProduceSavedGroupFinalResult(
+    const Handle(OcctDocument)& privateDocument,
+    const SceneSnapshot& wholeCommittedScene,
+    const bool selectedObjectsOnly,
+    const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
+    const std::function<bool()>& cancelled,
+    DebugSavedGroupFinalObservation& observation) noexcept {
+    observation = {};
+    observation.selectedObjectsOnly = selectedObjectsOnly;
+    try {
+        observation.failureStage = "entry";
+        if (privateDocument.IsNull() || !meshPrivateSurfaces
+            || !cancelled || SavedGroupCancelled(cancelled)) return false;
+        const Handle(TDocStd_Document)& document = privateDocument->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return false;
+
+        std::vector<asset_atlas::persistence::Record> records;
+        if (!asset_atlas::persistence::ReadAll(document, records)
+            || records.size() != 1 || !records.front().value) return false;
+        const asset_atlas::Key strictKey =
+            records.front().value->definition.key;
+        observation.strictKey = retained_solid::UUIDText(strictKey.document)
+            + "/" + retained_solid::UUIDText(strictKey.atlas);
+
+        // The concrete ledger dominates the group, result and every inherited
+        // capture view for the whole transaction.
+        OperationLedger operation;
+        SavedGroupOwner group;
+        if (!operation.bindTopology(group.budget,
+                decal_layer::bake::accounting::FailureSite::ContextControl))
+            return false;
+        painted_atlas_bake::owner::ExportCapture capture;
+        observation.failureStage = "strict-capture";
+        if (painted_atlas_bake::owner::CaptureForExport(
+                capture, document, strictKey, operation.view())
+                != painted_atlas_bake::owner::Outcome::Prepared
+            || capture.operation.valid()
+            || capture.operationView().context != operation.view().context)
+            return false;
+
+        std::string diagnosis;
+        observation.failureStage = "saved-group-preparation";
+        if (!PrepareSavedGroupOwner(operation, std::move(capture),
+                privateDocument, cancelled, group, diagnosis)) {
+            observation.failureStage += "-" + diagnosis;
+            return false;
+        }
+        observation.measuredCopyCount = group.measured.size();
+        for (const auto& member : group.measured) {
+            observation.memberDefinitions.push_back(
+                member.definitionIdentifier);
+            observation.savedTriangleCounts.push_back(
+                member.savedTriangleCount);
+        }
+        for (const auto& source : group.productionSources)
+            observation.sourceOrigins.push_back(
+                std::uint8_t(source.origin));
+
+        observation.failureStage = "native-final-mesh";
+        BRep_Builder compoundBuilder;
+        TopoDS_Compound compound;
+        compoundBuilder.MakeCompound(compound);
+        for (const auto& member : group.measured)
+            compoundBuilder.Add(compound, member.detached);
+        meshPrivateSurfaces(compound);
+        if (SavedGroupCancelled(cancelled)) return false;
+
+        observation.failureStage = "final-definition-extraction";
+        std::vector<DefinitionData> definitions;
+        definitions.reserve(group.measured.size());
+        for (std::size_t index = 0; index < group.measured.size(); ++index) {
+            DefinitionData definition;
+            definition.label = group.capture.members.members[index].ownerLabel;
+            definition.shape = group.measured[index].detached;
+            definition.representation =
+                privateDocument->GeometryRepresentationForLabel(
+                    definition.label);
+            if (definition.representation
+                    == OcctGeometryRepresentation::Invalid
+                || !ExtractDefinitionGeometry(definition.label,
+                    group.measured[index].definitionIdentifier, 0,
+                    definition)) return false;
+            observation.finalTriangleCounts.push_back(
+                definition.mesh.indices.size() / 3U);
+            observation.finalCornerCounts.push_back(
+                definition.mesh.indices.size());
+            for (const auto& primitive : definition.mesh.primitives) {
+                observation.planeInput = observation.planeInput
+                    || primitive.analyticSourceFace.surfaceType
+                        == provenance::kSurfaceTypePlane;
+                observation.cylinderInput = observation.cylinderInput
+                    || primitive.analyticSourceFace.surfaceType
+                        == provenance::kSurfaceTypeCylinder;
+            }
+            if (observation.cylinderInput
+                && observation.finalTriangleCounts.back()
+                    != observation.savedTriangleCounts[index])
+                observation.changedCylinderInput = true;
+            definitions.push_back(std::move(definition));
+        }
+
+        SavedGroupOccurrenceScope occurrenceScope;
+        for (std::size_t index = 0;
+             index < wholeCommittedScene.instances.size(); ++index) {
+            const auto& instance = wholeCommittedScene.instances[index];
+            if (instance.meshIndex >= wholeCommittedScene.meshes.size()
+                || (selectedObjectsOnly && !instance.selected)) continue;
+            const auto& definition =
+                wholeCommittedScene.meshes[instance.meshIndex].definitionIdentifier;
+            if (std::find(observation.memberDefinitions.begin(),
+                    observation.memberDefinitions.end(), definition)
+                    == observation.memberDefinitions.end()) continue;
+            occurrenceScope.entries.push_back({instance.entityIdentifier,
+                definition, index, instance.worldFromObject});
+        }
+        observation.occurrenceCount = occurrenceScope.entries.size();
+
+        observation.failureStage = "saved-group-build";
+        std::shared_ptr<const SavedGroupFinalResult> result;
+        const auto outcome = BuildSavedGroupForExport(group, definitions,
+            occurrenceScope, cancelled, result, diagnosis);
+        if (outcome != painted_atlas_bake::owner::Outcome::Prepared) {
+            observation.failureStage += "-"
+                + std::to_string(std::uint8_t(outcome)) + "-" + diagnosis;
+            return false;
+        }
+        const SavedGroupFinalResult* first =
+            LookupSavedGroupFinalResult(group, strictKey);
+        const SavedGroupFinalResult* second =
+            LookupSavedGroupFinalResult(group, strictKey);
+        if (!first || first != second || first != result.get()) {
+            observation.failureStage = "strict-key-lookup";
+            return false;
+        }
+        observation.sharedResultIdentity = true;
+        observation.fullSavedMembership =
+            first->memberDefinitions == observation.memberDefinitions
+            && first->bake.atlas.members.size() == group.measured.size();
+        observation.assignmentCount = first->bake.assignments.size();
+        for (const auto& assignment : first->bake.assignments)
+            observation.assignmentCornerCounts.push_back(
+                assignment.corners.size());
+        observation.outputCount = first->bake.outputs.size();
+        for (const auto& baked : first->bake.outputs)
+            observation.outputPNGs.push_back(baked.png);
+        observation.resolution = first->bake.atlas.resolutionTexels;
+        observation.gutter = first->bake.atlas.gutterTexels;
+        observation.retainedLayout = first->bake.storage
+            && !first->bake.storage->layout.charts.empty()
+            && first->bake.storage->layout.chartMembers.size()
+                == first->bake.storage->layout.charts.size()
+            && first->bake.storage->layout.chartFaces.size()
+                == first->bake.storage->layout.charts.size();
+        observation.layoutChartCount = first->bake.storage
+            ? first->bake.storage->layout.charts.size() : 0;
+        observation.exactFaceCorrespondence = true;
+        for (const auto& source : group.productionSources) {
+            if (source.faceIndex == std::numeric_limits<std::size_t>::max())
+                continue;
+            observation.exactFaceCorrespondence =
+                observation.exactFaceCorrespondence
+                && source.memberIndex < definitions.size()
+                && source.faceIndex < std::size_t(
+                    definitions[source.memberIndex].faces.Extent());
+        }
+        bool completeCorners = observation.assignmentCornerCounts.size()
+            == observation.finalCornerCounts.size();
+        for (std::size_t index = 0;
+             completeCorners && index < observation.finalCornerCounts.size();
+             ++index)
+            completeCorners = observation.assignmentCornerCounts[index]
+                == observation.finalCornerCounts[index];
+        observation.complete = observation.fullSavedMembership
+            && observation.exactFaceCorrespondence
+            && observation.planeInput && observation.cylinderInput
+            && observation.changedCylinderInput
+            && observation.retainedLayout
+            && observation.sharedResultIdentity
+            && observation.assignmentCount == group.measured.size()
+            && observation.outputCount == 5
+            && observation.resolution == 2048
+            && observation.gutter == 4
+            && completeCorners;
+        if (observation.complete) observation.failureStage.clear();
+        return observation.complete;
+    } catch (const std::exception& error) {
+        observation.failureStage += "-exception-";
+        observation.failureStage += error.what();
+        return false;
+    } catch (...) {
+        observation.failureStage += "-exception";
         return false;
     }
 }
