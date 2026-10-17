@@ -2372,6 +2372,7 @@ bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
                      const std::optional<Quantity_NameOfColor>& theColorOverride,
                      const std::optional<WholeObjectPBRMaterial>& thePbrOverride,
                      const bool theClosed,
+                     const bool theUsesImportedTextureBindings,
                      MaterialSnapshot& theResult,
                      Handle(Image_Texture)& theBaseColorTexture,
                      Handle(Image_Texture)& theEmissiveTexture,
@@ -2503,8 +2504,11 @@ bool ResolveMaterial(const RWMesh_FaceIterator& theFace,
             const XCAFDoc_VisMaterialPBR& aPbr =
                 aVisualMaterial->PbrMaterial();
             // Tangent-space normal maps remain unsupported until their
-            // explicitly versioned tangent stream is implemented.
-            if (!aPbr.NormalTexture.IsNull()) {
+            // explicitly versioned tangent stream is implemented. A current
+            // painted derivative replaces all imported texture bindings with
+            // its validated final-UV role resources below.
+            if (theUsesImportedTextureBindings
+                && !aPbr.NormalTexture.IsNull()) {
                 return false;
             }
             theEmissiveTexture = aPbr.EmissiveTexture;
@@ -18579,6 +18583,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                                      aColorOverride,
                                      aPbrOverride,
                                      aDefinition.closed,
+                                     !hasPaintedDerivative,
                                      aMaterial,
                                      aBaseColorTexture,
                                      anEmissiveTexture,
