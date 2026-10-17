@@ -507,6 +507,94 @@ NSDictionary *RotationCountedProbe(int32_t scenario) {
 }
 @end
 
+@interface Core3DAuthoredParameterRecoveryResult ()
+- (instancetype)initWithOutcome:(Core3DAuthoredParameterRecoveryOutcome)outcome
+    refusalCode:(NSString *)refusalCode measuredUndoDelta:(NSNumber *)measuredUndoDelta
+    recoveryPhase:(Core3DAuthoredParameterRecoveryPhase)recoveryPhase;
+#if DEBUG
+- (void)recordDebugCountersReconcileCalls:(NSUInteger)reconcileCalls
+    observationCalls:(NSUInteger)observationCalls
+    observationFaultHits:(NSUInteger)observationFaultHits
+    publicationCalls:(NSUInteger)publicationCalls
+    recoveryCommandCalls:(NSUInteger)recoveryCommandCalls;
+#endif
+@end
+
+@implementation Core3DAuthoredParameterRecoveryResult
+- (instancetype)initWithOutcome:(Core3DAuthoredParameterRecoveryOutcome)outcome
+    refusalCode:(NSString *)refusalCode measuredUndoDelta:(NSNumber *)measuredUndoDelta
+    recoveryPhase:(Core3DAuthoredParameterRecoveryPhase)recoveryPhase {
+    self = [super init];
+    if (self) {
+        _outcome = outcome;
+        _refusalCode = [refusalCode copy];
+        _measuredUndoDelta = [measuredUndoDelta copy];
+        _recoveryPhase = recoveryPhase;
+#if DEBUG
+        _reconcileCalls = 0;
+        _observationCalls = 0;
+        _observationFaultHits = 0;
+        _publicationCalls = 0;
+        _recoveryCommandCalls = 0;
+#endif
+    }
+    return self;
+}
+#if DEBUG
+- (void)recordDebugCountersReconcileCalls:(NSUInteger)reconcileCalls
+    observationCalls:(NSUInteger)observationCalls
+    observationFaultHits:(NSUInteger)observationFaultHits
+    publicationCalls:(NSUInteger)publicationCalls
+    recoveryCommandCalls:(NSUInteger)recoveryCommandCalls {
+    _reconcileCalls = reconcileCalls;
+    _observationCalls = observationCalls;
+    _observationFaultHits = observationFaultHits;
+    _publicationCalls = publicationCalls;
+    _recoveryCommandCalls = recoveryCommandCalls;
+}
+#endif
+@end
+
+//! A2-N3 host-retained native recovery issuer. The host keeps the exact
+//! authored-parameter owner that produced an outcome-unknown Boolean apply so
+//! the production continuation can settle the document-owned recovery record
+//! after every client-held opening/operation wrapper has been released. The
+//! owner holds no reference back to the host or the opening wrapper.
+@interface Core3DAuthoredParameterRecoveryIssuer : NSObject {
+@public
+    std::shared_ptr<NativeOwner> _owner;
+    const void *_ocafDocument;
+    const void *_ocafData;
+}
+- (instancetype)initWithOwner:(std::shared_ptr<NativeOwner>)owner
+    ocafDocument:(const void *)ocafDocument ocafData:(const void *)ocafData;
+@end
+
+@implementation Core3DAuthoredParameterRecoveryIssuer
+- (instancetype)initWithOwner:(std::shared_ptr<NativeOwner>)owner
+    ocafDocument:(const void *)ocafDocument ocafData:(const void *)ocafData {
+    self = [super init];
+    if (self) {
+        _owner = std::move(owner);
+        _ocafDocument = ocafDocument;
+        _ocafData = ocafData;
+    }
+    return self;
+}
+@end
+
+//! Per-host issuer registry: weak host keys, strong issuer values, touched
+//! only on the main thread by the opening/apply/recovery paths below.
+static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer *>
+    *Core3DAuthoredParameterRecoveryIssuers() {
+    static NSMapTable *issuers;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        issuers = [NSMapTable weakToStrongObjectsMapTable];
+    });
+    return issuers;
+}
+
 #if DEBUG
 @interface Core3DDebugAuthoredBooleanFaultReceipt ()
 - (instancetype)initWithSite:(Core3DDebugAuthoredBooleanFaultSite)site
@@ -646,6 +734,86 @@ NSDictionary *RotationCountedProbe(int32_t scenario) {
 @end
 
 @implementation Core3DViewController (AuthoredParameterOpening)
+- (Core3DAuthoredParameterRecoveryResult *)recoverAuthoredBooleanParameter {
+    Core3DAuthoredParameterRecoveryOutcome outcome =
+        Core3DAuthoredParameterRecoveryOutcomeNotOwner;
+    NSString *code = @"authored.recovery-not-owner";
+    NSNumber *delta = nil;
+    Core3DAuthoredParameterRecoveryPhase phase =
+        Core3DAuthoredParameterRecoveryPhaseNone;
+#if DEBUG
+    NSUInteger reconcileCalls = 0, observationCalls = 0, observationFaultHits = 0;
+    NSUInteger publicationCalls = 0, recoveryCommandCalls = 0;
+#endif
+    if ([NSThread isMainThread]) {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) document = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        Core3DAuthoredParameterRecoveryIssuer *issuer =
+            [Core3DAuthoredParameterRecoveryIssuers() objectForKey:self];
+        // A2-N3: only the retained issuer of the one outstanding transaction
+        // may continue, and only while it still belongs to this host's exact
+        // current native document, data and generation. A foreign or replaced
+        // host/document, a missing issuer and a superseded authority all fail
+        // closed as not-owner without observing or mutating the document.
+        const Handle(TDocStd_Document) ocafDocument =
+            document.IsNull() ? Handle(TDocStd_Document)() : document->Document();
+        const void *ocafData = ocafDocument.IsNull()
+            ? nullptr : ocafDocument->GetData().get();
+        if (!document.IsNull() && !ocafDocument.IsNull() && issuer && issuer->_owner
+            && issuer->_ocafDocument == ocafDocument.get()
+            && issuer->_ocafData == ocafData
+            && issuer->_owner->belongsTo(document)) {
+            const auto result = issuer->_owner->reconcileBoolean();
+            using RecoveryOutcome = core3d::authored_parameter::BooleanRecoveryOutcome;
+            switch (result.outcome) {
+                case RecoveryOutcome::Committed:
+                    outcome = Core3DAuthoredParameterRecoveryOutcomeCommitted;
+                    phase = Core3DAuthoredParameterRecoveryPhaseCompanionSettled;
+                    break;
+                case RecoveryOutcome::PriorRestored:
+                    outcome = Core3DAuthoredParameterRecoveryOutcomePriorRestored;
+                    phase = Core3DAuthoredParameterRecoveryPhaseCompanionSettled;
+                    break;
+                case RecoveryOutcome::RecoveryRequired:
+                    // The retained record is still pending native
+                    // classification; the lock stays and no delta is exposed.
+                    outcome = Core3DAuthoredParameterRecoveryOutcomeRecoveryRequired;
+                    phase = Core3DAuthoredParameterRecoveryPhasePending;
+                    break;
+                case RecoveryOutcome::NotOwner:
+                    outcome = Core3DAuthoredParameterRecoveryOutcomeNotOwner;
+                    phase = Core3DAuthoredParameterRecoveryPhaseNone;
+                    break;
+            }
+            code = [NSString stringWithUTF8String:result.code.c_str()];
+            if (result.measuredUndoDelta
+                && (outcome == Core3DAuthoredParameterRecoveryOutcomeCommitted
+                    || outcome == Core3DAuthoredParameterRecoveryOutcomePriorRestored))
+                delta = @(*result.measuredUndoDelta);
+#if DEBUG
+            reconcileCalls = result.reconcileCalls;
+            observationCalls = result.observationCalls;
+            observationFaultHits = result.observationFaultHits;
+            publicationCalls = result.publicationCalls;
+            recoveryCommandCalls = result.recoveryCommandCalls;
+#endif
+        }
+    }
+    Core3DAuthoredParameterRecoveryResult *receipt =
+        [[Core3DAuthoredParameterRecoveryResult alloc]
+            initWithOutcome:outcome refusalCode:code measuredUndoDelta:delta
+            recoveryPhase:phase];
+#if DEBUG
+    [receipt recordDebugCountersReconcileCalls:reconcileCalls
+        observationCalls:observationCalls observationFaultHits:observationFaultHits
+        publicationCalls:publicationCalls recoveryCommandCalls:recoveryCommandCalls];
+#endif
+    return receipt;
+}
+
 - (Core3DAuthoredParameterOpening *)openAuthoredParameterForEntityIdentifier:
     (NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected {
     if (![NSThread isMainThread] || ![entityIdentifier isKindOfClass:NSString.class]
@@ -671,8 +839,14 @@ NSDictionary *RotationCountedProbe(int32_t scenario) {
         auto capture = document->CaptureAuthoredParameterAuthority(ownerLabel, *context);
         auto owner = NativeOwner::Open(document, std::move(context), std::move(capture),
                                        width, height);
-        return owner ? [[Core3DAuthoredParameterOpening alloc]
-            initWithNativeOwner:std::move(owner)] : nil;
+        if (!owner) return nil;
+        // A2-N3: a genuinely fresh native opening is only possible once no
+        // recovery lock is pending, so any host-retained recovery issuer is
+        // superseded here; a late duplicate continuation must never settle or
+        // cancel the newer operation that follows this opening.
+        [Core3DAuthoredParameterRecoveryIssuers() removeObjectForKey:self];
+        return [[Core3DAuthoredParameterOpening alloc]
+            initWithNativeOwner:std::move(owner)];
     } catch (...) { return nil; }
 }
 
@@ -978,6 +1152,23 @@ NSDictionary *RotationCountedProbe(int32_t scenario) {
         inputIndex, requested);
     Core3DAuthoredParameterApplyOutcome outcome;
     using NativeOutcome = core3d::authored_parameter::ApplyOutcome;
+    if (result.outcome == NativeOutcome::OutcomeUnknown) {
+        // A2-N3: the transaction's terminal state is unproven and the
+        // document-owned recovery record is pending. Retain this exact
+        // issuing owner on the host, bound to the exact native document and
+        // data identities, so the production continuation can settle the
+        // retained native record after the opening wrapper is released; the
+        // issuer is superseded by the next fresh opening and cannot act on a
+        // replaced document with matching textual identifiers.
+        const Handle(TDocStd_Document) ocafDocument = document->Document();
+        [Core3DAuthoredParameterRecoveryIssuers() setObject:
+            [[Core3DAuthoredParameterRecoveryIssuer alloc]
+                initWithOwner:opening->_nativeOwner
+                ocafDocument:ocafDocument.IsNull() ? nullptr : ocafDocument.get()
+                ocafData:ocafDocument.IsNull() ? nullptr
+                    : ocafDocument->GetData().get()]
+            forKey:self];
+    }
     switch (result.outcome) {
         case NativeOutcome::Committed:
             outcome = Core3DAuthoredParameterApplyOutcomeCommitted; break;

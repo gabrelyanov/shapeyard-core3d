@@ -61,6 +61,38 @@ __attribute__((objc_subclassing_restricted))
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+typedef NS_ENUM(NSInteger, Core3DAuthoredParameterRecoveryOutcome) {
+    Core3DAuthoredParameterRecoveryOutcomeCommitted = 0,
+    Core3DAuthoredParameterRecoveryOutcomePriorRestored,
+    Core3DAuthoredParameterRecoveryOutcomeRecoveryRequired,
+    Core3DAuthoredParameterRecoveryOutcomeNotOwner,
+};
+
+typedef NS_ENUM(NSInteger, Core3DAuthoredParameterRecoveryPhase) {
+    Core3DAuthoredParameterRecoveryPhaseNone = 0,
+    Core3DAuthoredParameterRecoveryPhasePending,
+    Core3DAuthoredParameterRecoveryPhaseCompanionSettled,
+};
+
+//! Typed receipt for the single outstanding document-owned authored-Boolean
+//! recovery. Recovery-required and not-owner receipts never carry a delta.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DAuthoredParameterRecoveryResult : NSObject
+@property(nonatomic,readonly) Core3DAuthoredParameterRecoveryOutcome outcome;
+@property(nonatomic,copy,readonly) NSString *refusalCode;
+@property(nonatomic,copy,readonly,nullable) NSNumber *measuredUndoDelta;
+@property(nonatomic,readonly) Core3DAuthoredParameterRecoveryPhase recoveryPhase;
+#if DEBUG
+@property(nonatomic,readonly) NSUInteger reconcileCalls;
+@property(nonatomic,readonly) NSUInteger observationCalls;
+@property(nonatomic,readonly) NSUInteger observationFaultHits;
+@property(nonatomic,readonly) NSUInteger publicationCalls;
+@property(nonatomic,readonly) NSUInteger recoveryCommandCalls;
+#endif
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 __attribute__((objc_subclassing_restricted))
 @interface Core3DAuthoredParameterOperation : NSObject
 - (instancetype)init NS_UNAVAILABLE;
@@ -197,6 +229,10 @@ __attribute__((objc_subclassing_restricted))
     expected:(Core3DSceneSnapshot *)expected
     completion:(void(^)(Core3DAuthoredParameterApplyResult *result))completion
     NS_SWIFT_NAME(applyAuthoredBooleanParameter(_:mutationKind:inputIndex:values:expected:completion:));
+//! Continue the one outstanding authored-Boolean recovery owned by this host's
+//! current native document. This does not capture a scene or create an opening.
+- (Core3DAuthoredParameterRecoveryResult *)recoverAuthoredBooleanParameter
+    NS_SWIFT_NAME(recoverAuthoredBooleanParameter());
 #if DEBUG
 //! Arms the existing close-unproven hook through this host's exact current
 //! authored opening. No transaction, outcome or recovery state is fabricated.
