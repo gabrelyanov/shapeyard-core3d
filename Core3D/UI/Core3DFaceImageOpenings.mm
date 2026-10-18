@@ -78,6 +78,11 @@
 namespace core3d::scene {
 bool DebugMeshSavedGroupPrivateSurfaces(
     const TopoDS_Shape& shape) noexcept;
+NSDictionary<NSString *, id> *DebugProduceSavedCompleteAssembly(
+    const Handle(OcctDocument)& privateDocument,
+    const SceneSnapshot& wholeCommittedScene,
+    const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
+    const std::function<bool()>& cancelled) noexcept;
 std::array<std::size_t, 23>
 DebugExerciseE4BRepCensusCopyPrediction() noexcept;
 std::array<std::size_t, 51>
@@ -3208,6 +3213,14 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
 } // namespace
 #endif
 
+@interface Core3DViewController (E4SavedProducerPrivate)
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4SavedProducerBatchForWholeCommittedScene:
+        (Core3DSceneSnapshot *)wholeCommittedScene
+        privateAssetData:(nullable NSData *)privateAssetData
+        privateMode:(NSInteger)privateMode;
+@end
+
 @implementation Core3DViewController (FaceImageOpenings)
 - (Core3DFaceImageOpening *)openFaceImageEditor {
     ControllerFaceImageInput input;
@@ -4266,8 +4279,30 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
 - (NSDictionary<NSString *,id> *)
     debugE4SavedProducerBatchForWholeCommittedScene:
         (Core3DSceneSnapshot *)wholeCommittedScene {
-    namespace scene = core3d::scene;
-    if (!NSThread.isMainThread || !wholeCommittedScene) return nil;
+    return [self debugE4SavedProducerBatchForWholeCommittedScene:
+        wholeCommittedScene privateAssetData:nil privateMode:0];
+}
+
+- (NSDictionary<NSString *,id> *)
+    debugE4SavedAllMemberProducerForPrivateAssetData:
+        (NSData *)privateAssetData
+    wholeCommittedScene:(Core3DSceneSnapshot *)wholeCommittedScene {
+    return [self debugE4SavedProducerBatchForWholeCommittedScene:
+        wholeCommittedScene privateAssetData:privateAssetData
+        privateMode:1];
+}
+
+- (NSDictionary<NSString *,id> *)
+    debugE4SavedAssemblyRefusalForPrivateAssetData:
+        (NSData *)privateAssetData
+    wholeCommittedScene:(Core3DSceneSnapshot *)wholeCommittedScene {
+    return [self debugE4SavedProducerBatchForWholeCommittedScene:
+        wholeCommittedScene privateAssetData:privateAssetData
+        privateMode:2];
+}
+
+- (NSNumber *)debugPositionE4SavedProducerOwners {
+    if (!NSThread.isMainThread) return @NO;
     @try {
         GLViewController *gl = [self.glController
             isKindOfClass:GLViewController.class]
@@ -4276,7 +4311,170 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
             gl ? gl.viewer : nullptr;
         const Handle(OcctDocument) wrapper = viewer
             ? viewer->getDocument() : Handle(OcctDocument)();
-        if (!viewer || wrapper.IsNull()) return nil;
+        const Handle(TDocStd_Document) document = wrapper.IsNull()
+            ? Handle(TDocStd_Document)() : wrapper->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return @NO;
+        Standard_Real metersPerUnit = 0.0;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(document, metersPerUnit)
+            || !(metersPerUnit > 0.0)) return @NO;
+        const std::array<std::pair<const char *, double>, 3> placements{{
+            {"01002222-2222-2222-2222-222222222222", 0.020},
+            {"01002121-2121-2121-2121-212121212121", 0.065},
+            {"01002323-2323-2323-2323-232323232323", -0.030},
+        }};
+        const Handle(XCAFDoc_ShapeTool) shapeTool =
+            XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        TDF_LabelSequence freeShapes;
+        if (shapeTool.IsNull()) return @NO;
+        shapeTool->GetFreeShapes(freeShapes);
+        std::array<TDF_Label, 3> labels;
+        for (Standard_Integer index = 1;
+             index <= freeShapes.Length(); ++index) {
+            const std::string identifier = wrapper->EntityIdentifierForLabel(
+                freeShapes.Value(index));
+            for (std::size_t placement = 0;
+                 placement < placements.size(); ++placement)
+                if (identifier == placements[placement].first)
+                    labels[placement] = freeShapes.Value(index);
+        }
+        for (const auto& label : labels)
+            if (label.IsNull()) return @NO;
+        document->NewCommand();
+        bool staged = true;
+        for (std::size_t index = 0; index < labels.size(); ++index)
+            staged = staged && wrapper->SetObjectPositionComponentForLabel(
+                labels[index], 0, placements[index].second / metersPerUnit);
+        if (!staged || !document->CommitCommand()) {
+            if (document->HasOpenCommand()) document->AbortCommand();
+            return @NO;
+        }
+        const Handle(AIS_InteractiveContext) context = viewer->AisContext();
+        if (context.IsNull()) return @NO;
+        AIS_ListOfInteractive displayed;
+        context->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+        std::size_t synchronized = 0;
+        for (AIS_ListIteratorOfListOfInteractive iterator(displayed);
+             iterator.More(); iterator.Next()) {
+            const Handle(AIS_Shape) presentation =
+                Handle(AIS_Shape)::DownCast(iterator.Value());
+            if (presentation.IsNull()) continue;
+            const TDF_Label label = wrapper->ShapeLabel(presentation);
+            if (label.IsNull()) continue;
+            bool expected = false;
+            for (const auto& candidate : labels)
+                expected = expected || label.IsEqual(candidate);
+            if (!expected) continue;
+            gp_Trsf transform;
+            if (!wrapper->TryObjectTransformForLabel(label, transform))
+                return @NO;
+            presentation->SetLocalTransformation(transform);
+            context->Redisplay(presentation, Standard_False);
+            ++synchronized;
+        }
+        if (synchronized != labels.size()) return @NO;
+        context->UpdateCurrentViewer();
+        wrapper->NotifyChanges();
+        return @YES;
+    } @catch (...) { return @NO; }
+}
+
+- (NSDictionary<NSString *,id> *)
+    debugE4SavedProducerBatchForWholeCommittedScene:
+        (Core3DSceneSnapshot *)wholeCommittedScene
+        privateAssetData:(NSData *)privateAssetData
+        privateMode:(NSInteger)privateMode {
+    namespace scene = core3d::scene;
+    if (!NSThread.isMainThread || !wholeCommittedScene) return nil;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            gl ? gl.viewer : nullptr;
+        Handle(OcctDocument) privateWrapper;
+        std::string privatePath;
+        const auto bridgeFailure = [](NSString *stage) {
+            return (NSDictionary<NSString *,id> *)@{
+                @"bridgeFailureStage": stage ?: @"unknown",
+                @"batchReady": @NO,
+                @"occurrenceVariantReady": @NO,
+            };
+        };
+        if (privateMode != 0) {
+            if (!privateAssetData.length)
+                return bridgeFailure(@"private-bytes");
+            NSString *path = [NSTemporaryDirectory()
+                stringByAppendingPathComponent:[NSString stringWithFormat:
+                    @"%@.e4-saved-occurrence.xbf", NSUUID.UUID.UUIDString]];
+            if (![privateAssetData writeToFile:path atomically:YES])
+                return bridgeFailure(@"private-write");
+            privatePath = path.UTF8String ? path.UTF8String : "";
+            privateWrapper = new OcctDocument();
+            if (privatePath.empty()
+                || !privateWrapper->OpenPrivateExportSnapshot(
+                    privatePath.c_str(), Message_ProgressRange())) {
+                std::remove(privatePath.c_str());
+                return bridgeFailure(@"private-open");
+            }
+        }
+        struct PrivateLease final {
+            Handle(OcctDocument)& document;
+            std::string& path;
+            ~PrivateLease() {
+                if (!document.IsNull())
+                    document->ClosePrivateExportSnapshot();
+                if (!path.empty()) std::remove(path.c_str());
+            }
+        } lease{privateWrapper, privatePath};
+        const Handle(OcctDocument) wrapper = privateMode != 0
+            ? privateWrapper
+            : (viewer ? viewer->getDocument() : Handle(OcctDocument)());
+        if ((!viewer && privateMode == 0) || wrapper.IsNull())
+            return bridgeFailure(@"private-wrapper");
+        if (privateMode == 2) {
+            const Handle(TDocStd_Document)& document = wrapper->Document();
+            const Handle(XCAFDoc_ShapeTool) shapeTool = document.IsNull()
+                ? Handle(XCAFDoc_ShapeTool)()
+                : XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            TDF_LabelSequence freeShapes;
+            if (shapeTool.IsNull()) return bridgeFailure(@"shape-tool");
+            shapeTool->GetFreeShapes(freeShapes);
+            TDF_Label member;
+            for (Standard_Integer index = 1;
+                 index <= freeShapes.Length(); ++index)
+                if (wrapper->EntityIdentifierForLabel(freeShapes.Value(index))
+                        == "01002222-2222-2222-2222-222222222222")
+                    member = freeShapes.Value(index);
+            if (member.IsNull()) return bridgeFailure(@"member-label");
+            const TDF_Label assembly = shapeTool->NewShape();
+            gp_Trsf firstTransform, secondTransform;
+            Standard_Real metersPerUnit = 0.0;
+            if (assembly.IsNull()
+                || !XCAFDoc_DocumentTool::GetLengthUnit(
+                    document, metersPerUnit)
+                || !(metersPerUnit > 0.0)) {
+                return bridgeFailure(@"assembly-unit");
+            }
+            firstTransform.SetTranslation(gp_Vec(0.020 / metersPerUnit,
+                0.0, 0.0));
+            secondTransform.SetTranslation(gp_Vec(0.065 / metersPerUnit,
+                0.0, 0.0));
+            const TDF_Label first = shapeTool->AddComponent(assembly, member,
+                TopLoc_Location(firstTransform));
+            const TDF_Label second = shapeTool->AddComponent(assembly, member,
+                TopLoc_Location(secondTransform));
+            const Standard_GUID entityIdentifier(
+                "0074F7C2-9EAA-4F89-B2DE-8716E155FF62");
+            if (first.IsNull() || second.IsNull()) {
+                return bridgeFailure(@"assembly-components");
+            }
+            TDataStd_AsciiString::Set(assembly, entityIdentifier,
+                "01009090-9090-9090-9090-909090909090");
+            TDataStd_AsciiString::Set(first, entityIdentifier,
+                "01009191-9191-9191-9191-919191919191");
+            TDataStd_AsciiString::Set(second, entityIdentifier,
+                "01009292-9292-9292-9292-929292929292");
+        }
         scene::SceneSnapshot scope;
         scope.meshes.reserve(wholeCommittedScene.meshes.count);
         for (Core3DSceneMeshSnapshot *mesh in wholeCommittedScene.meshes) {
@@ -4303,15 +4501,20 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         }
         scene::DebugSavedProducerBatchObservation observation;
         std::atomic_bool cancelled{false};
+        const auto mesh = [](const TopoDS_Shape& shape) {
+            if (!scene::DebugMeshSavedGroupPrivateSurfaces(shape))
+                throw std::runtime_error(
+                    "saved-producer native mesher refused");
+        };
+        const auto isCancelled = [&cancelled]() noexcept {
+            return cancelled.load(std::memory_order_acquire);
+        };
+        if (privateMode != 0)
+            return scene::DebugProduceSavedCompleteAssembly(wrapper, scope,
+                mesh, isCancelled);
         const bool completed = scene::OcctSceneSnapshotBuilder::
             DebugProduceSavedProducerBatch(wrapper, scope,
-                [](const TopoDS_Shape& shape) {
-                    if (!scene::DebugMeshSavedGroupPrivateSurfaces(shape))
-                        throw std::runtime_error(
-                            "saved-producer native mesher refused");
-                }, [&cancelled]() noexcept {
-                    return cancelled.load(std::memory_order_acquire);
-                }, observation);
+                mesh, isCancelled, observation);
         const auto numbers = [](const auto& values) {
             NSMutableArray<NSNumber *> *result = [NSMutableArray array];
             for (const auto value : values)

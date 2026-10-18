@@ -716,6 +716,23 @@ __attribute__((objc_subclassing_restricted))
     debugE4SavedProducerBatchForWholeCommittedScene:
         (Core3DSceneSnapshot *)wholeCommittedScene
     NS_SWIFT_NAME(debugE4SavedProducerBatch(wholeCommittedScene:));
+
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4SavedAllMemberProducerForPrivateAssetData:
+        (NSData *)privateAssetData
+    wholeCommittedScene:(Core3DSceneSnapshot *)wholeCommittedScene
+    NS_SWIFT_NAME(debugE4SavedAllMemberProducer(privateAssetData:wholeCommittedScene:));
+//! Applies the ruled ordinary X placements to the three admitted free owners
+//! through one normally owned document command.
+- (NSNumber *)debugPositionE4SavedProducerOwners
+    NS_SWIFT_NAME(debugPositionE4SavedProducerOwners());
+//! Constructs the intentionally inadmissible two-component graph on a
+//! disposable private reopen and observes strict entry-read refusal.
+- (nullable NSDictionary<NSString *,id> *)
+    debugE4SavedAssemblyRefusalForPrivateAssetData:
+        (NSData *)privateAssetData
+    wholeCommittedScene:(Core3DSceneSnapshot *)wholeCommittedScene
+    NS_SWIFT_NAME(debugE4SavedAssemblyRefusal(privateAssetData:wholeCommittedScene:));
 //! Runs the five-role 2048 kernel with its inherited operation, observes the
 //! retained output after return, and denies encoder admission before allocation.
 - (nullable NSDictionary<NSString *,id> *)

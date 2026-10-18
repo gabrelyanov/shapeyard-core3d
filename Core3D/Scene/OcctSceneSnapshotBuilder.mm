@@ -12078,6 +12078,34 @@ const SavedGroupFinalResult* LookupSavedGroupFinalResult(
         ? group.result.get() : nullptr;
 }
 
+//! Exact extraction of the pre-P2 ordinary final-assignment boundary.  The
+//! ordinary caller supplies one transient member, so this deliberately keeps
+//! its one-assignment rule while the complete saved producer exercises the
+//! same validation with its real all-member ExportBake.
+bool ValidateCurrentFinalAssignments(
+    const painted_atlas_bake::owner::ExportBake& baked,
+    const std::size_t expectedFinalCorners) noexcept {
+    return !baked.outputs.empty() && !baked.atlas.charts.empty()
+        && baked.assignments.size() == 1
+        && baked.assignments.front().corners.size() == expectedFinalCorners;
+}
+
+//! P2-only value state. Keeping it in this implementation preserves the
+//! existing public P1 observation and entry point.
+struct DebugSavedCompleteAssemblyObservation final {
+    std::vector<std::string> occurrenceIdentifiers;
+    std::vector<std::string> definitionIdentifiers;
+    std::vector<std::array<double, 16>> occurrenceTransforms;
+    std::vector<std::string> selectedOccurrenceIdentifiers;
+    std::array<std::uint64_t, 10> entries{};
+    bool observationWired = false;
+    bool batchReady = false;
+    bool occurrenceVariantReady = false;
+    bool candidateReady = false;
+    bool operationComplete = false;
+    bool currentAssemblyAccepted = false;
+};
+
 } // namespace
 
 struct PrivateDecalCapture::Impl final {
@@ -12681,13 +12709,19 @@ bool OcctSceneSnapshotBuilder::DebugProduceSavedGroupFinalResult(
     }
 }
 
-bool OcctSceneSnapshotBuilder::DebugProduceSavedProducerBatch(
+bool ProduceSavedProducerBatchImpl(
     const Handle(OcctDocument)& privateDocument,
     const SceneSnapshot& wholeCommittedScene,
     const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
     const std::function<bool()>& cancelled,
-    DebugSavedProducerBatchObservation& observation) noexcept {
+    DebugSavedProducerBatchObservation& observation,
+    DebugSavedCompleteAssemblyObservation* completeAssembly) noexcept {
     observation = {};
+    if (completeAssembly) {
+        *completeAssembly = {};
+        completeAssembly->observationWired = true;
+        ++completeAssembly->entries[0];
+    }
     using Outcome = painted_atlas_bake::owner::Outcome;
     try {
         observation.failureStage = "entry";
@@ -12706,6 +12740,7 @@ bool OcctSceneSnapshotBuilder::DebugProduceSavedProducerBatch(
             observation.failureStage = "entry-document-state";
             return false;
         }
+        if (completeAssembly) ++completeAssembly->entries[1];
         if (!asset_atlas::persistence::ReadAll(document, records)) {
             observation.failureStage = "entry-record-read";
             return false;
@@ -12726,6 +12761,7 @@ bool OcctSceneSnapshotBuilder::DebugProduceSavedProducerBatch(
         });
 
         OperationLedger operation;
+        if (completeAssembly) ++completeAssembly->entries[2];
         std::array<SavedGroupOwner, 2> groups;
         retained_edge_treatment::ReplayBudget batchBudget;
         observation.failureStage = "batch-topology";
@@ -12745,6 +12781,7 @@ bool OcctSceneSnapshotBuilder::DebugProduceSavedProducerBatch(
                     != Outcome::Prepared
                 || capture.operationView().context
                     != operation.view().context) return false;
+            if (completeAssembly) ++completeAssembly->entries[3];
             std::string diagnosis;
             observation.failureStage = "group-preparation-" +
                 std::to_string(index);
@@ -12757,6 +12794,8 @@ bool OcctSceneSnapshotBuilder::DebugProduceSavedProducerBatch(
             observation.memberCounts.push_back(
                 groups[index].measured.size());
             observation.measuredCopyCount += groups[index].measured.size();
+            if (completeAssembly)
+                completeAssembly->entries[4] += groups[index].measured.size();
             for (const auto& witness : groups[index].capture.sources.rawSlots) {
                 ++observation.rawSlotCount;
                 if (witness.present) ++observation.presentSlotCount;
@@ -12793,6 +12832,7 @@ bool OcctSceneSnapshotBuilder::DebugProduceSavedProducerBatch(
             for (const auto& member : group.measured)
                 compoundBuilder.Add(compound, member.detached);
         meshPrivateSurfaces(compound);
+        if (completeAssembly) ++completeAssembly->entries[5];
         if (SavedGroupCancelled(cancelled)) return false;
 
         std::array<std::vector<DefinitionData>, 2> definitions;
@@ -12817,20 +12857,137 @@ bool OcctSceneSnapshotBuilder::DebugProduceSavedProducerBatch(
                         0, definition)) return false;
                 definitions[groupIndex].push_back(std::move(definition));
             }
-            for (std::size_t instanceIndex = 0;
-                 instanceIndex < wholeCommittedScene.instances.size();
-                 ++instanceIndex) {
-                const auto& instance =
-                    wholeCommittedScene.instances[instanceIndex];
-                if (instance.meshIndex >= wholeCommittedScene.meshes.size())
-                    continue;
-                const auto& definition = wholeCommittedScene.meshes[
-                    instance.meshIndex].definitionIdentifier;
-                for (const auto& member : groups[groupIndex].measured)
-                    if (member.definitionIdentifier == definition)
-                        occurrences[groupIndex].entries.push_back({
-                            instance.entityIdentifier, definition,
-                            instanceIndex, instance.worldFromObject});
+            if (!completeAssembly) {
+                for (std::size_t instanceIndex = 0;
+                     instanceIndex < wholeCommittedScene.instances.size();
+                     ++instanceIndex) {
+                    const auto& instance =
+                        wholeCommittedScene.instances[instanceIndex];
+                    if (instance.meshIndex >= wholeCommittedScene.meshes.size())
+                        continue;
+                    const auto& definition = wholeCommittedScene.meshes[
+                        instance.meshIndex].definitionIdentifier;
+                    for (const auto& member : groups[groupIndex].measured)
+                        if (member.definitionIdentifier == definition)
+                            occurrences[groupIndex].entries.push_back({
+                                instance.entityIdentifier, definition,
+                                instanceIndex, instance.worldFromObject});
+                }
+            }
+        }
+
+        if (completeAssembly) {
+            const std::string documentIdentifier =
+                privateDocument->DocumentIdentifier();
+            XCAFPrs_DocumentExplorer explorer(document,
+                XCAFPrs_DocumentExplorerFlags_OnlyLeafNodes,
+                XCAFPrs_Style());
+            std::size_t sourceInstanceIndex = 0;
+            for (; explorer.More(); explorer.Next(), ++sourceInstanceIndex) {
+                const auto& node = explorer.Current();
+                const TDF_Label definitionLabel = node.RefLabel.IsNull()
+                    ? node.Label : node.RefLabel;
+                const std::string definition =
+                    privateDocument->DefinitionIdentifierForLabel(
+                        definitionLabel);
+                std::size_t groupIndex = groups.size();
+                const DefinitionData* definitionData = nullptr;
+                for (std::size_t candidate = 0;
+                     candidate < groups.size(); ++candidate) {
+                    for (std::size_t memberIndex = 0;
+                         memberIndex < groups[candidate].measured.size();
+                         ++memberIndex) {
+                        if (groups[candidate].measured[memberIndex]
+                                .definitionIdentifier == definition) {
+                            if (definitionData) return false;
+                            groupIndex = candidate;
+                            definitionData = &definitions[candidate][memberIndex];
+                        }
+                    }
+                }
+                if (groupIndex == groups.size()) continue;
+                if (explorer.CurrentDepth() < 0
+                    || explorer.CurrentDepth() >= kMaxOccurrenceDepth)
+                    return false;
+                std::vector<std::string> path;
+                for (Standard_Integer depth = 0;
+                     depth <= explorer.CurrentDepth(); ++depth) {
+                    const std::string identifier =
+                        privateDocument->EntityIdentifierForLabel(
+                            explorer.Current(depth).Label);
+                    if (identifier.empty()) return false;
+                    path.push_back(identifier);
+                }
+                const std::string occurrence = DeriveOccurrenceIdentifier(
+                    documentIdentifier, path);
+                gp_Trsf objectTransform;
+                if (!definitionData
+                    || !privateDocument->TryObjectTransformForLabel(
+                        definitionLabel, objectTransform)) return false;
+                gp_Trsf worldTransform = objectTransform.Multiplied(
+                    node.Location.Transformation());
+                gp_Trsf meshOrigin;
+                meshOrigin.SetTranslation(gp_Vec(
+                    definitionData->sourceOrigin.x,
+                    definitionData->sourceOrigin.y,
+                    definitionData->sourceOrigin.z));
+                worldTransform.Multiply(meshOrigin);
+                Matrix4d transform;
+                if (occurrence.empty()
+                    || !MatrixFromTransform(worldTransform, transform))
+                    return false;
+                occurrences[groupIndex].entries.push_back({occurrence,
+                    definition, sourceInstanceIndex, transform});
+                completeAssembly->occurrenceIdentifiers.push_back(occurrence);
+                completeAssembly->definitionIdentifiers.push_back(definition);
+                completeAssembly->occurrenceTransforms.push_back(
+                    transform.values);
+            }
+            std::set<std::string> selectedEntities;
+            for (const auto& instance : wholeCommittedScene.instances)
+                if (instance.selected)
+                    selectedEntities.insert(instance.entityIdentifier);
+            for (const auto& occurrence :
+                 completeAssembly->occurrenceIdentifiers)
+                if (selectedEntities.count(occurrence) != 0)
+                    completeAssembly->selectedOccurrenceIdentifiers.push_back(
+                        occurrence);
+            bool distinctTransform = false;
+            for (std::size_t first = 0;
+                 first < completeAssembly->occurrenceTransforms.size(); ++first)
+                for (std::size_t second = first + 1;
+                     second < completeAssembly->occurrenceTransforms.size();
+                     ++second)
+                    distinctTransform = distinctTransform
+                        || completeAssembly->occurrenceTransforms[first]
+                            != completeAssembly->occurrenceTransforms[second];
+            const std::set<std::string> expectedOccurrences{
+                "01002222-2222-2222-2222-222222222222",
+                "01002121-2121-2121-2121-212121212121",
+                "01002323-2323-2323-2323-232323232323",
+            };
+            const std::set<std::string> expectedDefinitions{
+                "02002222-2222-2222-2222-222222222222",
+                "02002121-2121-2121-2121-212121212121",
+                "02002323-2323-2323-2323-232323232323",
+            };
+            completeAssembly->occurrenceVariantReady =
+                completeAssembly->occurrenceIdentifiers.size() == 3
+                && std::set<std::string>(
+                    completeAssembly->occurrenceIdentifiers.begin(),
+                    completeAssembly->occurrenceIdentifiers.end())
+                    == expectedOccurrences
+                && std::set<std::string>(
+                    completeAssembly->definitionIdentifiers.begin(),
+                    completeAssembly->definitionIdentifiers.end())
+                    == expectedDefinitions
+                && completeAssembly->selectedOccurrenceIdentifiers
+                    == std::vector<std::string>({
+                        "01002121-2121-2121-2121-212121212121"})
+                && distinctTransform;
+            if (!completeAssembly->occurrenceVariantReady) {
+                observation.failureStage = "occurrence-variant-setup";
+                return false;
             }
         }
 
@@ -12869,6 +13026,10 @@ bool OcctSceneSnapshotBuilder::DebugProduceSavedProducerBatch(
                 observation.failureStage += "-" + diagnosis;
                 return false;
             }
+            if (completeAssembly) {
+                ++completeAssembly->entries[6];
+                ++completeAssembly->entries[7];
+            }
             observation.assignmentCounts.push_back(
                 results[index]->bake.assignments.size());
             observation.outputCounts.push_back(
@@ -12888,6 +13049,7 @@ bool OcctSceneSnapshotBuilder::DebugProduceSavedProducerBatch(
                 records[0].value->definition.key) == results[0].get()
             && LookupSavedGroupFinalResult(groups[1],
                 records[1].value->definition.key) == results[1].get();
+        if (completeAssembly) completeAssembly->entries[8] = 3;
         observation.complete = observation.disjointMembership
             && observation.rawAuthorityRetained
             && observation.descriptorDifferenceDetected
@@ -12905,7 +13067,22 @@ bool OcctSceneSnapshotBuilder::DebugProduceSavedProducerBatch(
             && observation.outputCounts.size() == 2
             && observation.outputCounts[0] == 5
             && observation.outputCounts[1] == 1;
+        if (completeAssembly) {
+            completeAssembly->batchReady = observation.complete;
+            observation.failureStage = "complete-current-assignment-validation-"
+                + std::to_string(results[0]->bake.assignments.size());
+            completeAssembly->currentAssemblyAccepted =
+                !results[0]->finalCornerCounts.empty()
+                && ValidateCurrentFinalAssignments(results[0]->bake,
+                    results[0]->finalCornerCounts.front());
+            if (!completeAssembly->currentAssemblyAccepted) return false;
+            completeAssembly->candidateReady = true;
+        }
         if (observation.complete) observation.failureStage.clear();
+        if (completeAssembly) {
+            completeAssembly->operationComplete = true;
+            ++completeAssembly->entries[9];
+        }
         return observation.complete;
     } catch (const std::exception& error) {
         observation.failureStage += "-exception-";
@@ -12915,6 +13092,82 @@ bool OcctSceneSnapshotBuilder::DebugProduceSavedProducerBatch(
         observation.failureStage += "-exception";
         return false;
     }
+}
+
+bool OcctSceneSnapshotBuilder::DebugProduceSavedProducerBatch(
+    const Handle(OcctDocument)& privateDocument,
+    const SceneSnapshot& wholeCommittedScene,
+    const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
+    const std::function<bool()>& cancelled,
+    DebugSavedProducerBatchObservation& observation) noexcept {
+    return ProduceSavedProducerBatchImpl(privateDocument, wholeCommittedScene,
+        meshPrivateSurfaces, cancelled, observation, nullptr);
+}
+
+NSDictionary<NSString *, id> *DebugProduceSavedCompleteAssembly(
+    const Handle(OcctDocument)& privateDocument,
+    const SceneSnapshot& wholeCommittedScene,
+    const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
+    const std::function<bool()>& cancelled) noexcept {
+    DebugSavedProducerBatchObservation batch;
+    DebugSavedCompleteAssemblyObservation assembly;
+    const bool completed = ProduceSavedProducerBatchImpl(privateDocument,
+        wholeCommittedScene, meshPrivateSurfaces, cancelled, batch, &assembly);
+    const auto numbers = [](const auto& values) {
+        NSMutableArray<NSNumber *> *result = [NSMutableArray array];
+        for (const auto value : values)
+            [result addObject:@(static_cast<unsigned long long>(value))];
+        return result;
+    };
+    const auto doubles = [](const auto& values) {
+        NSMutableArray<NSNumber *> *result = [NSMutableArray array];
+        for (const auto value : values)
+            [result addObject:[NSNumber numberWithDouble:value]];
+        return result;
+    };
+    const auto strings = [](const auto& values) {
+        NSMutableArray<NSString *> *result = [NSMutableArray array];
+        for (const auto& value : values)
+            [result addObject:[NSString stringWithUTF8String:value.c_str()]
+                ?: @""];
+        return result;
+    };
+    NSMutableArray<NSArray<NSNumber *> *> *transforms =
+        [NSMutableArray array];
+    for (const auto& matrix : assembly.occurrenceTransforms)
+        [transforms addObject:doubles(matrix)];
+    return @{
+        @"complete": @(completed),
+        @"failureStage": [NSString stringWithUTF8String:
+            batch.failureStage.c_str()] ?: @"invalid-stage",
+        @"strictKeys": strings(batch.strictKeys),
+        @"memberCounts": numbers(batch.memberCounts),
+        @"assignmentCounts": numbers(batch.assignmentCounts),
+        @"outputCounts": numbers(batch.outputCounts),
+        @"work": numbers(batch.work),
+        @"rawSlotCount": @(batch.rawSlotCount),
+        @"presentSlotCount": @(batch.presentSlotCount),
+        @"absentSlotCount": @(batch.absentSlotCount),
+        @"shadowedByteCount": @(batch.shadowedByteCount),
+        @"measuredCopyCount": @(batch.measuredCopyCount),
+        @"layoutCount": @(batch.layoutCount),
+        @"observationWired": @(assembly.observationWired),
+        @"entryWork": numbers(assembly.entries),
+        @"batchReady": @(assembly.batchReady),
+        @"occurrenceIdentifiers": strings(
+            assembly.occurrenceIdentifiers),
+        @"definitionIdentifiers": strings(
+            assembly.definitionIdentifiers),
+        @"occurrenceTransforms": transforms,
+        @"selectedOccurrenceIdentifiers": strings(
+            assembly.selectedOccurrenceIdentifiers),
+        @"occurrenceVariantReady": @(assembly.occurrenceVariantReady),
+        @"candidateReady": @(assembly.candidateReady),
+        @"operationComplete": @(assembly.operationComplete),
+        @"currentAssemblyAccepted": @(
+            assembly.currentAssemblyAccepted),
+        @"productPresent": @(assembly.candidateReady),
+    };
 }
 #endif
 
@@ -16484,10 +16737,8 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                         expectedFinalCorners,
                         decal_layer::bake::accounting::FailureSite::
                             CheckedProduct)
-                    || baked.outputs.empty() || baked.atlas.charts.empty()
-                    || baked.assignments.size() != 1
-                    || baked.assignments.front().corners.size()
-                        != expectedFinalCorners) {
+                    || !ValidateCurrentFinalAssignments(
+                        baked, expectedFinalCorners)) {
 #ifdef DEBUG
                     if (debugObservation)
                         debugObservation->failureStage =
