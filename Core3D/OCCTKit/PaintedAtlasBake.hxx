@@ -272,14 +272,24 @@ inline std::array<double, 4> Bilinear(const Image& image, double u, double v) no
 inline std::array<std::uint8_t, 4> Quantize(const std::array<double, 4>& sample,
                                             Role role,
                                             double& normalError,
-                                            std::array<double, 4>& aimed) noexcept {
+                                            std::array<double, 4>& aimed
+#ifdef DEBUG
+                                            , DebugQuantizeObservation* observation = nullptr
+#endif
+                                            ) noexcept {
     aimed = sample;
     if (role == Role::Normal) {
         double x = sample[0] / 127.5 - 1.0;
         double y = sample[1] / 127.5 - 1.0;
         double z = sample[2] / 127.5 - 1.0;
         const double length = std::sqrt(x * x + y * y + z * z);
+#ifdef DEBUG
+        if (observation) observation->preNormalizationLength = length;
+#endif
         if (length > 1.e-12 && std::isfinite(length)) {
+#ifdef DEBUG
+            if (observation) observation->normalizationApplied = true;
+#endif
             x /= length; y /= length; z /= length;
             normalError = std::max(normalError,
                 std::abs(std::sqrt(x * x + y * y + z * z) - 1.0));
@@ -608,9 +618,6 @@ inline bool Bake(const asset_atlas::Definition& atlas,
     outputVectorTicket.reset();
     evidenceTicket.reset();
     evidence = {};
-#ifdef DEBUG
-    (void)observer;
-#endif
     try {
         if (!operation.valid()
             || atlas.resolutionTexels <= 0 || atlas.resolutionTexels > kMaximumBakedDimension
@@ -861,6 +868,10 @@ inline bool Bake(const asset_atlas::Definition& atlas,
         double interiorErrorSum = 0;
         std::uint64_t interiorErrorCount = 0;
         for (Role role : roles) {
+#ifdef DEBUG
+            if (observer && observer->beginRole)
+                observer->beginRole(observer->context, role, size, size);
+#endif
             aggregate += std::uint64_t(size) * size * 4;
             if (aggregate > kMaximumDecodedImageBytes) return false;
             Output output;
@@ -922,7 +933,10 @@ inline bool Bake(const asset_atlas::Definition& atlas,
             // and every chart index fit exactly in int16 without changing any
             // comparison or raster arithmetic.
             std::vector<std::int16_t> owner(pixels, -1);
-            for (const auto& placed : layout.packed.triangles) {
+            for (std::size_t packedTriangleIndex = 0;
+                 packedTriangleIndex < layout.packed.triangles.size();
+                 ++packedTriangleIndex) {
+                const auto& placed = layout.packed.triangles[packedTriangleIndex];
                 if (placed.chartIndex < 0
                     || std::size_t(placed.chartIndex) >= layout.chartMembers.size()
                     || placed.triangleIndex < 0
@@ -1072,8 +1086,22 @@ inline bool Bake(const asset_atlas::Definition& atlas,
                     if (!sampled) continue;
                     composed[3] = accumulatedAlpha * 255.0;
                     double normalError = 0; std::array<double, 4> aimed;
+#ifdef DEBUG
+                    DebugQuantizeObservation quantizeObservation;
+#endif
                     const auto quantized = Quantize(
-                        composed, role, normalError, aimed);
+                        composed, role, normalError, aimed
+#ifdef DEBUG
+                        , observer ? &quantizeObservation : nullptr
+#endif
+                        );
+#ifdef DEBUG
+                    if (observer && observer->quantized)
+                        observer->quantized(observer->context, role,
+                            packedTriangleIndex, std::uint32_t(px),
+                            std::uint32_t(py), aimed, quantizeObservation,
+                            normalError);
+#endif
                     evidence.maximumNormalLengthError =
                         std::max(evidence.maximumNormalLengthError, normalError);
                     // Measured interior error: quantized emission against the
@@ -1106,6 +1134,13 @@ inline bool Bake(const asset_atlas::Definition& atlas,
                         entry.sourceU = evidenceU; entry.sourceV = evidenceV;
                         entry.emitted = quantized;
                         evidence.samples.push_back(entry);
+#ifdef DEBUG
+                        if (observer && observer->sample)
+                            observer->sample(observer->context,
+                                evidence.samples.size() - 1, role,
+                                packedTriangleIndex, aimed,
+                                quantizeObservation, normalError);
+#endif
                     }
                 }
                 const double outputDet = (placed.uv[1].x - placed.uv[0].x)
@@ -1189,6 +1224,8 @@ inline bool Bake(const asset_atlas::Definition& atlas,
 #ifdef DEBUG
             extern void DebugKernelOutputTransferred(std::size_t) noexcept;
             DebugKernelOutputTransferred(outputs.back().png.size());
+            if (observer && observer->finishRole)
+                observer->finishRole(observer->context, role);
 #endif
         }
         if (interiorErrorCount > 0)

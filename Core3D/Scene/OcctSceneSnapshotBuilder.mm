@@ -12211,6 +12211,21 @@ struct DebugP2bLayoutContext final {
     bool countHooks = true;
 };
 
+struct DebugP2bBakeContext final {
+    DebugP2bGroupDirectory* directory = nullptr;
+    DebugP2bSampleExtra* samples = nullptr;
+    DebugP2bNormalDomainHeader* normal = nullptr;
+    std::uint8_t* normalMask = nullptr;
+    void* failureContext = nullptr;
+    void (*failure)(void*, std::uint32_t) noexcept = nullptr;
+    std::uint64_t sampleCapacity = 12;
+    std::uint64_t maskCapacity = 2'097'152;
+    std::uint64_t pendingNormalOrdinal = 0;
+    std::uint64_t pendingPackedTriangle = 0;
+    bool pendingNormal = false;
+    bool countHooks = true;
+};
+
 void DebugP2bContextFailure(DebugP2bLayoutContext& context,
     const std::uint32_t reason) noexcept {
     if (!context.directory || context.directory->states[7] != 0) return;
@@ -12365,6 +12380,217 @@ bool DebugP2bVerifyBoundRefusal() noexcept {
         && record.memberChartOrdinal == 8 && record.chartIndex == 9
         && record.chartLocalTriangleIndex == 10
         && record.subChartIndex == 11 && record.finalTriangleIndex == 12;
+}
+
+void DebugP2bBakeFailure(DebugP2bBakeContext& context,
+    const std::uint32_t reason) noexcept {
+    if (!context.directory || context.directory->states[7] != 0) return;
+    context.directory->states[7] = reason;
+    context.directory->states[3] = 0;
+    context.directory->states[4] = 0;
+    if (context.failure) context.failure(context.failureContext, reason);
+}
+
+void DebugP2bBeginRoleCallback(void* opaque,
+    const painted_atlas_bake::Role role, const std::uint32_t width,
+    const std::uint32_t height) noexcept {
+    auto* context = static_cast<DebugP2bBakeContext*>(opaque);
+    if (!context || !context->directory) return;
+    if (context->countHooks)
+        gDebugP2bHookCalls.fetch_add(1, std::memory_order_relaxed);
+    ++context->directory->counters[5];
+    if (role != painted_atlas_bake::Role::Normal
+        || context->directory->states[7] != 0) return;
+    if (!context->normal || !context->normalMask
+        || context->normal->available != 0 || width == 0 || height == 0
+        || width > 4096 || height > 4096) {
+        DebugP2bBakeFailure(*context, 11);
+        return;
+    }
+    const std::uint64_t texels = std::uint64_t(width) * height;
+    const std::uint64_t maskBytes = (texels + 7) / 8;
+    if (maskBytes > context->maskCapacity) {
+        DebugP2bBakeFailure(*context, 12);
+        return;
+    }
+    context->normal->available = 1;
+    context->normal->role = std::uint8_t(role);
+    context->normal->width = width;
+    context->normal->height = height;
+    context->directory->lengths[7] = maskBytes;
+    context->directory->states[2] = 1;
+}
+
+void DebugP2bQuantizedCallback(void* opaque,
+    const painted_atlas_bake::Role role,
+    const std::uint64_t packedTriangleIndex, const std::uint32_t x,
+    const std::uint32_t y, const std::array<double, 4>&,
+    const painted_atlas_bake::kernel::DebugQuantizeObservation& observation,
+    const double actualInvocationError) noexcept {
+    auto* context = static_cast<DebugP2bBakeContext*>(opaque);
+    if (!context || !context->directory) return;
+    if (context->countHooks)
+        gDebugP2bHookCalls.fetch_add(1, std::memory_order_relaxed);
+    if (role != painted_atlas_bake::Role::Normal) return;
+    ++context->directory->counters[3];
+    if (context->directory->states[7] != 0) return;
+    if (!context->normal || !context->normalMask
+        || context->normal->available == 0 || context->normal->complete != 0
+        || x >= context->normal->width || y >= context->normal->height) {
+        DebugP2bBakeFailure(*context, 13);
+        return;
+    }
+    const std::uint64_t bit = std::uint64_t(y) * context->normal->width + x;
+    const std::uint64_t byte = bit / 8;
+    const std::uint8_t value = std::uint8_t(1U << (bit % 8));
+    if (byte >= context->directory->lengths[7]
+        || byte >= context->maskCapacity) {
+        DebugP2bBakeFailure(*context, 12);
+        return;
+    }
+    const std::uint64_t ordinal = context->normal->sampleCount++;
+    if ((context->normalMask[byte] & value) != 0)
+        ++context->normal->duplicateInvocationCount;
+    else {
+        context->normalMask[byte] |= value;
+        ++context->normal->uniqueTexelCount;
+    }
+    if (observation.normalizationApplied
+        && std::isfinite(observation.preNormalizationLength)
+        && observation.preNormalizationLength > 1.e-12)
+        ++context->normal->validNormalizationCount;
+    else
+        ++context->normal->invalidNormalizationCount;
+    context->normal->measuredMaximumLengthError = std::max(
+        context->normal->measuredMaximumLengthError, actualInvocationError);
+    context->pendingNormalOrdinal = ordinal;
+    context->pendingPackedTriangle = packedTriangleIndex;
+    context->pendingNormal = true;
+}
+
+void DebugP2bSampleCallback(void* opaque,
+    const std::uint64_t productSampleIndex,
+    const painted_atlas_bake::Role role,
+    const std::uint64_t packedTriangleIndex,
+    const std::array<double, 4>& aimed,
+    const painted_atlas_bake::kernel::DebugQuantizeObservation& observation,
+    const double actualInvocationError) noexcept {
+    auto* context = static_cast<DebugP2bBakeContext*>(opaque);
+    if (!context || !context->directory) return;
+    if (context->countHooks)
+        gDebugP2bHookCalls.fetch_add(1, std::memory_order_relaxed);
+    ++context->directory->counters[4];
+    if (context->directory->states[7] != 0) return;
+    const std::uint64_t retained = context->directory->lengths[6];
+    if (!context->samples || retained >= context->sampleCapacity
+        || productSampleIndex != retained
+        || (role != painted_atlas_bake::Role::BaseColor
+            && role != painted_atlas_bake::Role::Normal)
+        || (role == painted_atlas_bake::Role::Normal
+            && (!context->pendingNormal
+                || context->pendingPackedTriangle != packedTriangleIndex))) {
+        DebugP2bBakeFailure(*context, 12);
+        return;
+    }
+    auto& record = context->samples[retained];
+    std::copy(aimed.begin(), aimed.end(), record.aimed);
+    record.preNormalizationLength = observation.preNormalizationLength;
+    record.preQuantizationLengthError = actualInvocationError;
+    record.normalInvocationOrdinal = role == painted_atlas_bake::Role::Normal
+        ? context->pendingNormalOrdinal : 0;
+    record.packedTriangleIndex = packedTriangleIndex;
+    record.sampleIndex = productSampleIndex;
+    record.normalizationApplied = observation.normalizationApplied ? 1 : 0;
+    record.applicability = role == painted_atlas_bake::Role::Normal ? 1 : 0;
+    context->directory->lengths[6] = retained + 1;
+}
+
+void DebugP2bFinishRoleCallback(void* opaque,
+    const painted_atlas_bake::Role role) noexcept {
+    auto* context = static_cast<DebugP2bBakeContext*>(opaque);
+    if (!context || !context->directory) return;
+    if (context->countHooks)
+        gDebugP2bHookCalls.fetch_add(1, std::memory_order_relaxed);
+    ++context->directory->counters[6];
+    if (role != painted_atlas_bake::Role::Normal
+        || context->directory->states[7] != 0) return;
+    if (!context->normal || context->normal->available == 0
+        || context->normal->complete != 0
+        || context->normal->sampleCount == 0
+        || context->normal->validNormalizationCount
+                + context->normal->invalidNormalizationCount
+            != context->normal->sampleCount) {
+        DebugP2bBakeFailure(*context, 13);
+        return;
+    }
+    context->normal->complete = 1;
+    context->directory->states[3] = 1;
+}
+
+bool DebugP2bVerifyS2Callbacks() noexcept {
+    DebugP2bGroupDirectory directory;
+    DebugP2bSampleExtra samples[12]{};
+    DebugP2bNormalDomainHeader normal;
+    std::uint8_t mask[2]{};
+    DebugP2bBakeContext context;
+    context.directory = &directory;
+    context.samples = samples;
+    context.normal = &normal;
+    context.normalMask = mask;
+    context.maskCapacity = 2;
+    context.countHooks = false;
+    painted_atlas_bake::kernel::DebugBakeObserver observer{&context,
+        DebugP2bBeginRoleCallback, DebugP2bQuantizedCallback,
+        DebugP2bSampleCallback, DebugP2bFinishRoleCallback};
+    painted_atlas_bake::kernel::DebugQuantizeObservation valid{2, true};
+    painted_atlas_bake::kernel::DebugQuantizeObservation invalid{0, false};
+    const std::array<double, 4> aimed{{1, 2, 3, 4}};
+    observer.beginRole(observer.context, painted_atlas_bake::Role::Normal, 3, 3);
+    observer.quantized(observer.context, painted_atlas_bake::Role::Normal,
+        4, 0, 0, aimed, valid, 0.125);
+    observer.quantized(observer.context, painted_atlas_bake::Role::Normal,
+        5, 0, 0, aimed, invalid, 0.25);
+    observer.quantized(observer.context, painted_atlas_bake::Role::Normal,
+        6, 2, 2, aimed, valid, 0.0625);
+    observer.sample(observer.context, 0, painted_atlas_bake::Role::Normal,
+        6, aimed, valid, 0.0625);
+    observer.sample(observer.context, 1, painted_atlas_bake::Role::BaseColor,
+        7, aimed, {}, 0);
+    observer.finishRole(observer.context, painted_atlas_bake::Role::Normal);
+    return directory.states[7] == 0 && directory.states[3] == 1
+        && directory.lengths[7] == 2 && mask[0] == 1 && mask[1] == 1
+        && normal.complete == 1 && normal.sampleCount == 3
+        && normal.uniqueTexelCount == 2
+        && normal.duplicateInvocationCount == 1
+        && normal.validNormalizationCount == 2
+        && normal.invalidNormalizationCount == 1
+        && normal.measuredMaximumLengthError == 0.25
+        && directory.lengths[6] == 2
+        && samples[0].normalInvocationOrdinal == 2
+        && samples[0].sampleIndex == 0 && samples[0].applicability == 1
+        && samples[1].sampleIndex == 1 && samples[1].applicability == 0
+        && samples[1].normalizationApplied == 0;
+}
+
+bool DebugP2bVerifyS2BoundRefusal() noexcept {
+    DebugP2bGroupDirectory directory;
+    DebugP2bSampleExtra sample;
+    DebugP2bNormalDomainHeader normal;
+    std::uint8_t mask = 0;
+    DebugP2bBakeContext context;
+    context.directory = &directory;
+    context.samples = &sample;
+    context.normal = &normal;
+    context.normalMask = &mask;
+    context.sampleCapacity = 1;
+    context.maskCapacity = 1;
+    context.countHooks = false;
+    DebugP2bBeginRoleCallback(&context, painted_atlas_bake::Role::Normal, 4, 3);
+    const std::uint32_t firstReason = directory.states[7];
+    DebugP2bBeginRoleCallback(&context, painted_atlas_bake::Role::Normal, 1, 1);
+    return firstReason == 12 && directory.states[7] == firstReason
+        && normal.available == 0 && normal.complete == 0
+        && directory.lengths[6] == 0 && mask == 0;
 }
 
 struct DebugP2bFrozenSampleEvidence final {
@@ -12554,6 +12780,21 @@ struct DebugP2bS1DiagnosticSlot final {
     DebugP2bAdjacency lastAdjacency{};
 };
 
+struct DebugP2bS2DiagnosticSlot final {
+    DebugP2bNormalDomainHeader normal{};
+    std::array<DebugP2bSampleExtra, 12> samples{};
+    std::uint64_t retainedSampleCount = 0;
+    std::uint64_t maskBytes = 0;
+    std::uint32_t quantizedAttempts = 0;
+    std::uint32_t sampleAttempts = 0;
+    std::uint32_t beginRoleAttempts = 0;
+    std::uint32_t finishRoleAttempts = 0;
+    bool sealed = false;
+    bool committed = false;
+    bool noNormal = false;
+    std::uint32_t firstFailure = 0;
+};
+
 struct DebugP2bObservationDiagnostic final {
     bool enabled = false;
     bool started = false;
@@ -12576,7 +12817,10 @@ struct DebugP2bObservationDiagnostic final {
     std::uint64_t hookCallsBefore = 0;
     std::uint64_t hookCallsAfter = 0;
     bool s1BoundRefusalVerified = false;
+    bool s2CallbacksVerified = false;
+    bool s2BoundRefusalVerified = false;
     std::array<DebugP2bS1DiagnosticSlot, 2> s1Slots{};
+    std::array<DebugP2bS2DiagnosticSlot, 2> s2Slots{};
 };
 
 class DebugP2bObservationArena final {
@@ -12622,6 +12866,7 @@ public:
             return nullptr;
         }
         auto& context = contexts_[slot];
+        auto& bakeContext = bakeContexts_[slot];
         if (context.directory && context.directory->states[0] != 0) {
             fail(11);
             return nullptr;
@@ -12655,14 +12900,19 @@ public:
             take(262'143, sizeof(DebugP2bAdjacency)));
         context.islands = reinterpret_cast<DebugP2bPackedIslandRecord*>(
             take(512, sizeof(DebugP2bPackedIslandRecord)));
-        (void)take(12, sizeof(DebugP2bSampleExtra));
-        (void)take(1, sizeof(DebugP2bNormalDomainHeader));
-        (void)take(2'097'152, sizeof(std::uint8_t));
+        bakeContext.samples = reinterpret_cast<DebugP2bSampleExtra*>(
+            take(12, sizeof(DebugP2bSampleExtra)));
+        bakeContext.normal = reinterpret_cast<DebugP2bNormalDomainHeader*>(
+            take(1, sizeof(DebugP2bNormalDomainHeader)));
+        bakeContext.normalMask = reinterpret_cast<std::uint8_t*>(
+            take(2'097'152, sizeof(std::uint8_t)));
         const std::uint8_t* expected = static_cast<std::uint8_t*>(mapping_)
             + 4096 + (slot + 1) * std::size_t(kDebugP2bSlotBytes);
         if (!context.directory || !context.memberOffsets
             || !context.chartOffsets || !context.finalTriangleMap
             || !context.lineage || !context.adjacency || !context.islands
+            || !bakeContext.samples || !bakeContext.normal
+            || !bakeContext.normalMask
             || cursor != expected) {
             fail(12);
             return nullptr;
@@ -12674,9 +12924,45 @@ public:
         context.failure = [](void* opaque, const std::uint32_t reason) noexcept {
             static_cast<DebugP2bObservationArena*>(opaque)->fail(reason);
         };
+        bakeContext.directory = context.directory;
+        bakeContext.failureContext = this;
+        bakeContext.failure = [](void* opaque,
+                const std::uint32_t reason) noexcept {
+            static_cast<DebugP2bObservationArena*>(opaque)->fail(reason);
+        };
         observers_[slot] = {&context, DebugP2bLineageCallback,
             DebugP2bIslandCallback, DebugP2bFinishLayoutCallback};
+        bakeObservers_[slot] = {&bakeContext, DebugP2bBeginRoleCallback,
+            DebugP2bQuantizedCallback, DebugP2bSampleCallback,
+            DebugP2bFinishRoleCallback};
         return &observers_[slot];
+    }
+    const painted_atlas_bake::kernel::DebugBakeObserver* bakeObserver(
+        const std::size_t slot) noexcept {
+        if (!mapping_ || slot >= bakeContexts_.size()
+            || !bakeContexts_[slot].directory) {
+            fail(10);
+            return nullptr;
+        }
+        return &bakeObservers_[slot];
+    }
+    void commitS2(const std::size_t slot) noexcept {
+        if (!mapping_ || slot >= bakeContexts_.size()) {
+            fail(10);
+            return;
+        }
+        auto& context = bakeContexts_[slot];
+        if (!context.directory || context.directory->states[7] != 0) return;
+        if (context.normal && context.normal->available != 0) {
+            if (context.normal->complete == 0
+                || context.normal->sampleCount == 0) {
+                DebugP2bBakeFailure(context, 13);
+                return;
+            }
+        } else {
+            context.directory->states[5] = 1;
+        }
+        context.directory->states[4] = 1;
     }
     void copyDiagnostic(DebugP2bObservationDiagnostic& diagnostic) const noexcept {
         for (std::size_t index = 0; index < contexts_.size(); ++index) {
@@ -12702,6 +12988,24 @@ public:
                 output.firstAdjacency = context.adjacency[0];
                 output.lastAdjacency = context.adjacency[output.lengths[4] - 1];
             }
+            const auto& bakeContext = bakeContexts_[index];
+            auto& s2 = diagnostic.s2Slots[index];
+            if (!bakeContext.directory) continue;
+            if (bakeContext.normal) s2.normal = *bakeContext.normal;
+            s2.retainedSampleCount = std::min<std::uint64_t>(
+                bakeContext.directory->lengths[6], s2.samples.size());
+            if (bakeContext.samples)
+                std::copy_n(bakeContext.samples, s2.retainedSampleCount,
+                    s2.samples.begin());
+            s2.maskBytes = bakeContext.directory->lengths[7];
+            s2.quantizedAttempts = bakeContext.directory->counters[3];
+            s2.sampleAttempts = bakeContext.directory->counters[4];
+            s2.beginRoleAttempts = bakeContext.directory->counters[5];
+            s2.finishRoleAttempts = bakeContext.directory->counters[6];
+            s2.sealed = bakeContext.directory->states[3] != 0;
+            s2.committed = bakeContext.directory->states[4] != 0;
+            s2.noNormal = bakeContext.directory->states[5] != 0;
+            s2.firstFailure = bakeContext.directory->states[7];
         }
     }
     void close() noexcept {
@@ -12726,7 +13030,10 @@ private:
     void* mapping_ = nullptr;
     std::uint32_t failureCode_ = 0;
     std::array<DebugP2bLayoutContext, 2> contexts_{};
+    std::array<DebugP2bBakeContext, 2> bakeContexts_{};
     std::array<asset_atlas::build::DebugLayoutObserver, 2> observers_{};
+    std::array<painted_atlas_bake::kernel::DebugBakeObserver, 2>
+        bakeObservers_{};
 };
 
 class DebugP2bObserverSession final {
@@ -12754,6 +13061,14 @@ public:
         const std::size_t slot, const asset_atlas::Key& key) noexcept {
         return arena_ && arena_->valid()
             ? arena_->layoutObserver(slot, key) : nullptr;
+    }
+    const painted_atlas_bake::kernel::DebugBakeObserver* bakeObserver(
+        const std::size_t slot) noexcept {
+        return arena_ && arena_->valid()
+            ? arena_->bakeObserver(slot) : nullptr;
+    }
+    void commitS2(const std::size_t slot) noexcept {
+        if (arena_ && arena_->valid()) arena_->commitS2(slot);
     }
     ~DebugP2bObserverSession() {
         if (!diagnostic_) return;
@@ -12801,6 +13116,8 @@ DebugP2bObservationDiagnostic DebugP2bBeginDiagnostic(
     value.hookCallsBefore =
         gDebugP2bHookCalls.load(std::memory_order_relaxed);
     value.s1BoundRefusalVerified = DebugP2bVerifyBoundRefusal();
+    value.s2CallbacksVerified = DebugP2bVerifyS2Callbacks();
+    value.s2BoundRefusalVerified = DebugP2bVerifyS2BoundRefusal();
     std::uint64_t ignored = 0;
     value.arithmeticRefused = !DebugP2bCheckedAlign64(
         std::numeric_limits<std::uint64_t>::max(), ignored);
@@ -12836,6 +13153,14 @@ NSDictionary<NSString*, id>* DebugP2bDiagnosticDictionary(
                 @(row.values[3]), @(row.values[4]), @(row.values[5]),
                 @(row.values[6]), @(row.kernelSeam != 0)];
         };
+        const auto sample = [](const DebugP2bSampleExtra& row) {
+            return @[@(row.aimed[0]), @(row.aimed[1]), @(row.aimed[2]),
+                @(row.aimed[3]), @(row.preNormalizationLength),
+                @(row.preQuantizationLengthError),
+                @(row.normalInvocationOrdinal), @(row.packedTriangleIndex),
+                @(row.sampleIndex), @(row.normalizationApplied != 0),
+                @(row.applicability != 0)];
+        };
         NSMutableArray<NSDictionary<NSString*, id>*>* slots =
             [NSMutableArray arrayWithCapacity:value.s1Slots.size()];
         for (const auto& slot : value.s1Slots) {
@@ -12858,6 +13183,40 @@ NSDictionary<NSString*, id>* DebugP2bDiagnosticDictionary(
                 @"lastIsland": island(slot.lastIsland),
                 @"firstAdjacency": edge(slot.firstAdjacency),
                 @"lastAdjacency": edge(slot.lastAdjacency),
+            }];
+        }
+        NSMutableArray<NSDictionary<NSString*, id>*>* s2Slots =
+            [NSMutableArray arrayWithCapacity:value.s2Slots.size()];
+        for (const auto& slot : value.s2Slots) {
+            NSMutableArray<NSArray*>* samples = [NSMutableArray array];
+            for (std::uint64_t index = 0;
+                 index < slot.retainedSampleCount; ++index)
+                [samples addObject:sample(slot.samples[index])];
+            [s2Slots addObject:@{
+                @"available": @(slot.normal.available != 0),
+                @"sealed": @(slot.sealed),
+                @"committed": @(slot.committed),
+                @"noNormal": @(slot.noNormal),
+                @"firstFailure": @(slot.firstFailure),
+                @"role": @(slot.normal.role),
+                @"width": @(slot.normal.width),
+                @"height": @(slot.normal.height),
+                @"sampleCount": @(slot.normal.sampleCount),
+                @"uniqueTexelCount": @(slot.normal.uniqueTexelCount),
+                @"duplicateInvocationCount": @(
+                    slot.normal.duplicateInvocationCount),
+                @"validNormalizationCount": @(
+                    slot.normal.validNormalizationCount),
+                @"invalidNormalizationCount": @(
+                    slot.normal.invalidNormalizationCount),
+                @"measuredMaximumLengthError": @(
+                    slot.normal.measuredMaximumLengthError),
+                @"maskBytes": @(slot.maskBytes),
+                @"quantizedAttempts": @(slot.quantizedAttempts),
+                @"sampleAttempts": @(slot.sampleAttempts),
+                @"beginRoleAttempts": @(slot.beginRoleAttempts),
+                @"finishRoleAttempts": @(slot.finishRoleAttempts),
+                @"samples": samples,
             }];
         }
         return @{
@@ -12902,6 +13261,9 @@ NSDictionary<NSString*, id>* DebugP2bDiagnosticDictionary(
                 value.hookCallsAfter - value.hookCallsBefore),
             @"s1BoundRefusalVerified": @(value.s1BoundRefusalVerified),
             @"s1Slots": slots,
+            @"s2CallbacksVerified": @(value.s2CallbacksVerified),
+            @"s2BoundRefusalVerified": @(value.s2BoundRefusalVerified),
+            @"s2Slots": s2Slots,
             @"arithmeticOverflowRefused": @(value.arithmeticRefused),
             @"entryRejectionMappingDelta": @0,
             @"assetAtlasBuildSourceSHA256":
@@ -13365,6 +13727,7 @@ bool DebugProduceSavedGroupFinalResultImpl(
             records.front().value->definition.key;
         const auto* layoutObserver =
             arenaSession.layoutObserver(0, strictKey);
+        const auto* bakeObserver = arenaSession.bakeObserver(0);
         observation.strictKey = retained_solid::UUIDText(strictKey.document)
             + "/" + retained_solid::UUIDText(strictKey.atlas);
 
@@ -13465,12 +13828,13 @@ bool DebugProduceSavedGroupFinalResultImpl(
         std::shared_ptr<const SavedGroupFinalResult> result;
         const auto outcome = BuildSavedGroupForExport(group, definitions,
             occurrenceScope, cancelled, result, diagnosis,
-            layoutObserver, nullptr);
+            layoutObserver, bakeObserver);
         if (outcome != painted_atlas_bake::owner::Outcome::Prepared) {
             observation.failureStage += "-"
                 + std::to_string(std::uint8_t(outcome)) + "-" + diagnosis;
             return false;
         }
+        arenaSession.commitS2(0);
         const SavedGroupFinalResult* first =
             LookupSavedGroupFinalResult(group, strictKey);
         const SavedGroupFinalResult* second =
@@ -13625,9 +13989,13 @@ bool ProduceSavedProducerBatchImpl(
         });
         std::array<const asset_atlas::build::DebugLayoutObserver*, 2>
             layoutObservers{};
+        std::array<const painted_atlas_bake::kernel::DebugBakeObserver*, 2>
+            bakeObservers{};
         for (std::size_t index = 0; index < layoutObservers.size(); ++index)
             layoutObservers[index] = arenaSession.layoutObserver(
                 index, records[index].value->definition.key);
+        for (std::size_t index = 0; index < bakeObservers.size(); ++index)
+            bakeObservers[index] = arenaSession.bakeObserver(index);
 
         OperationLedger operation;
         if (completeAssembly) ++completeAssembly->entries[2];
@@ -13891,11 +14259,12 @@ bool ProduceSavedProducerBatchImpl(
                 std::to_string(index);
             const auto outcome = ExecuteSavedGroupForBatch(groups[index],
                 aggregate, cancelled, results[index], diagnosis, true,
-                nullptr);
+                bakeObservers[index]);
             if (outcome != Outcome::Prepared || !results[index]) {
                 observation.failureStage += "-" + diagnosis;
                 return false;
             }
+            arenaSession.commitS2(index);
             if (completeAssembly) {
                 ++completeAssembly->entries[6];
                 ++completeAssembly->entries[7];
