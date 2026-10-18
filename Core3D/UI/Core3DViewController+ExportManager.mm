@@ -14,12 +14,17 @@
 
 #include "GLViewController+Trick.h"
 #include "../OCCTKit/DecalLayerPersistence.hxx"
+#include <PCDM_ReadWriter.hxx>
 #include <Prs3d_Drawer.hxx>
+#include <Storage_Data.hxx>
+#include <Storage_HeaderData.hxx>
+#include <TDocStd_FormatVersion.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <sstream>
 #import "../Viewport/Core3DSceneSnapshotFactory.hpp"
 
 namespace {
@@ -51,6 +56,17 @@ bool CanCaptureCommittedExport(
         && !shapeInteractor->hasActiveBevel()
         && !shapeInteractor->hasActiveShell()
         && !shapeInteractor->hasUnresolvedShell();
+}
+
+bool SameCommittedPublication(Core3DSceneSnapshot *expected,
+                              Core3DSceneSnapshot *current) {
+    return expected != nil
+        && current != nil
+        && [expected.publicationSourceIdentifier
+            isEqualToString:current.publicationSourceIdentifier]
+        && expected.revisions.documentGeneration
+            == current.revisions.documentGeneration
+        && expected.revisions.modelRevision == current.revisions.modelRevision;
 }
 
 // Derive scope from one committed publication, before creating any private
@@ -101,6 +117,115 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
 } // namespace
 
 @implementation Core3DViewController (ExportManager)
+
+- (BOOL)requestNativeStorageVersion:(NSInteger)version
+                           expected:(Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread]
+        || (version != TDocStd_FormatVersion_VERSION_11
+            && version != TDocStd_FormatVersion_CURRENT)
+        || expected == nil
+        || GLController == nil) {
+        return NO;
+    }
+    try {
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            GLController.viewer;
+        const Handle(OcctDocument) document = viewer == nullptr
+            ? Handle(OcctDocument)()
+            : viewer->getDocument();
+        if (!CanCaptureCommittedExport(viewer)
+            || !viewer->canBeginCommittedEdit()
+            || document.IsNull()) {
+            return NO;
+        }
+        Core3DSceneSnapshot *current = [self captureSceneSnapshot];
+        if (!SameCommittedPublication(expected, current)) {
+            return NO;
+        }
+        const Handle(TDocStd_Document)& transaction = document->Document();
+        if (transaction.IsNull() || transaction->HasOpenCommand()) {
+            return NO;
+        }
+        const TDocStd_FormatVersion previous =
+            transaction->StorageFormatVersion();
+        if (previous != TDocStd_FormatVersion_VERSION_11
+            && previous != TDocStd_FormatVersion_CURRENT) {
+            return NO;
+        }
+        const TDocStd_FormatVersion requested =
+            static_cast<TDocStd_FormatVersion>(version);
+        if (previous == requested) {
+            return YES;
+        }
+        transaction->ChangeStorageFormatVersion(requested);
+        if (transaction->StorageFormatVersion() == requested) {
+            return YES;
+        }
+        transaction->ChangeStorageFormatVersion(previous);
+        return NO;
+    } catch (...) {
+        return NO;
+    }
+}
+
+- (NSNumber *)nativeStorageVersionForExpectedScene:
+    (Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread] || expected == nil || GLController == nil) {
+        return nil;
+    }
+    try {
+        const std::shared_ptr<core3d::Core3DViewer> viewer =
+            GLController.viewer;
+        const Handle(OcctDocument) document = viewer == nullptr
+            ? Handle(OcctDocument)()
+            : viewer->getDocument();
+        if (!CanCaptureCommittedExport(viewer) || document.IsNull()) {
+            return nil;
+        }
+        Core3DSceneSnapshot *current = [self captureSceneSnapshot];
+        if (!SameCommittedPublication(expected, current)) {
+            return nil;
+        }
+        const Handle(TDocStd_Document)& transaction = document->Document();
+        if (transaction.IsNull()) {
+            return nil;
+        }
+        return @(static_cast<NSInteger>(transaction->StorageFormatVersion()));
+    } catch (...) {
+        return nil;
+    }
+}
+
++ (NSNumber *)nativeStorageVersionOfAssetData:(NSData *)data {
+    constexpr NSUInteger maximumBytes = 256ull * 1024ull * 1024ull;
+    if (data.length == 0 || data.length > maximumBytes || data.bytes == nullptr) {
+        return nil;
+    }
+    try {
+        const std::string bytes(static_cast<const char *>(data.bytes), data.length);
+        std::istringstream stream(bytes, std::ios::in | std::ios::binary);
+        Handle(Storage_Data) stored;
+        const TCollection_ExtendedString format =
+            PCDM_ReadWriter::FileFormat(stream, stored);
+        if (!stream || !format.IsEqual(TCollection_ExtendedString("BinXCAF"))
+            || stored.IsNull() || stored->HeaderData().IsNull()) {
+            return nil;
+        }
+        const TCollection_AsciiString version =
+            stored->HeaderData()->StorageVersion();
+        if (!version.IsIntegerValue()) {
+            return nil;
+        }
+        const Standard_Integer value = version.IntegerValue();
+        if (value != TDocStd_FormatVersion_VERSION_11
+            && value != TDocStd_FormatVersion_CURRENT) {
+            return nil;
+        }
+        return @(value);
+    } catch (...) {
+        return nil;
+    }
+}
 
 - (NSURL *)exportWithType:(ExportType)exportType {
     if (![self canExportType:exportType]) {
