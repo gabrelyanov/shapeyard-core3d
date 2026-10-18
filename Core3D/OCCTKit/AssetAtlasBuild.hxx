@@ -90,6 +90,21 @@ struct FinalMemberInput final {
     std::vector<shapeyard::uv::curved::FaceInput> faces;
 };
 
+#ifdef DEBUG
+//! Borrowed passive observation hooks. The opaque context is owned by the
+//! caller and cannot influence product control flow or accounting.
+struct DebugLayoutObserver final {
+    void* context = nullptr;
+    void (*lineage)(void*, std::uint64_t, std::uint64_t, std::uint64_t,
+        std::int32_t, std::int32_t, std::int32_t, std::int32_t) noexcept = nullptr;
+    void (*island)(void*, std::int32_t, std::int32_t, std::uint64_t,
+        std::uint64_t, std::uint64_t, const UUID&) noexcept = nullptr;
+    void (*finish)(void*,
+        const std::vector<std::vector<std::vector<int>>>&,
+        const std::vector<curveduv::SharedEdge>&) noexcept = nullptr;
+};
+#endif
+
 // The legacy entry points always use Reject. Preserve is consumed only by
 // the separately named E2b opt-in bake after it captures both XCAF material
 // slots and every SYFI binding/resource fence.
@@ -537,7 +552,11 @@ inline Status BuildFinalAtlas(const Key& atlas,
                               std::vector<MemberUVAssignment>& assignments,
                               std::string& diagnosis,
                               LayoutEvidence* layout = nullptr,
-                              FinalAtlasAccounting* accounting = nullptr) noexcept {
+                              FinalAtlasAccounting* accounting = nullptr
+#ifdef DEBUG
+                              , const DebugLayoutObserver* observer = nullptr
+#endif
+                              ) noexcept {
     candidate = {}; assignments.clear(); diagnosis.clear();
     if (layout) *layout = {};
     if (accounting) {
@@ -854,6 +873,9 @@ inline Status BuildFinalAtlas(const Key& atlas,
             double hiU = -INFINITY, hiV = -INFINITY;
         };
         std::map<std::pair<int, int>, ChartAccum> groups;
+#ifdef DEBUG
+        std::uint64_t observationOrdinal = 0;
+#endif
         for (const auto& placed : packed.triangles) {
             if (placed.chartIndex < 0
                 || std::size_t(placed.chartIndex) >= chartMembers.size()
@@ -873,6 +895,16 @@ inline Status BuildFinalAtlas(const Key& atlas,
             for (int corner = 0; corner < 3; ++corner)
                 target[corner] = {
                     placed.uv[corner].x, placed.uv[corner].y};
+#ifdef DEBUG
+            if (observer && observer->lineage)
+                observer->lineage(observer->context, observationOrdinal,
+                    std::uint64_t(memberIndex), ordinal,
+                    std::int32_t(placed.chartIndex),
+                    std::int32_t(placed.triangleIndex),
+                    std::int32_t(placed.subChartIndex),
+                    std::int32_t(original));
+            ++observationOrdinal;
+#endif
             auto& accum = groups[{placed.chartIndex, placed.subChartIndex}];
             ++accum.triangles;
             if (std::size_t(placed.triangleIndex)
@@ -915,6 +947,13 @@ inline Status BuildFinalAtlas(const Key& atlas,
             chart.rectUV = {
                 accum.loU, accum.loV, accum.hiU, accum.hiV};
             candidate.charts.push_back(chart);
+#ifdef DEBUG
+            if (observer && observer->island)
+                observer->island(observer->context,
+                    std::int32_t(group.first), std::int32_t(group.second),
+                    ordinal, rank->second,
+                    std::uint64_t(candidate.charts.size() - 1), chart.chart);
+#endif
         }
         if (!BindLayoutProof(candidate, assignments))
             return Status::Malformed;
@@ -936,6 +975,11 @@ inline Status BuildFinalAtlas(const Key& atlas,
             layout->chartMembers = chartMembers;
             layout->chartFaces = chartFaces;
         }
+#ifdef DEBUG
+        if (observer && observer->finish)
+            observer->finish(observer->context, memberCharts,
+                packer.adjacency);
+#endif
         accountingReset.committed = true;
         return Status::Built;
     } catch (...) {

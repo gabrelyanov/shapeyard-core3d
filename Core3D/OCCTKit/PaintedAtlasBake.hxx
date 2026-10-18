@@ -42,6 +42,21 @@ enum class MaterialSlot : std::uint8_t {
 };
 
 #ifdef DEBUG
+struct DebugQuantizeObservation final {
+    double preNormalizationLength = 0;
+    bool normalizationApplied = false;
+};
+struct DebugBakeObserver final {
+    void* context = nullptr;
+    void (*beginRole)(void*, Role, std::uint32_t, std::uint32_t) noexcept = nullptr;
+    void (*quantized)(void*, Role, std::uint64_t, std::uint32_t,
+        std::uint32_t, const std::array<double, 4>&,
+        const DebugQuantizeObservation&, double) noexcept = nullptr;
+    void (*sample)(void*, std::uint64_t, Role, std::uint64_t,
+        const std::array<double, 4>&, const DebugQuantizeObservation&,
+        double) noexcept = nullptr;
+    void (*finishRole)(void*, Role) noexcept = nullptr;
+};
 struct DebugOperationStorage final {
     std::size_t privateLive = 0;
     std::size_t privateRetained = 0;
@@ -583,12 +598,19 @@ inline bool Bake(const asset_atlas::Definition& atlas,
                  decal_layer::bake::accounting::Ticket& evidenceTicket,
                  const decal_layer::bake::accounting::View& operation,
                  bool atlasJobAlreadySealed = false,
-                 const WorkMeasurement* admittedWork = nullptr) noexcept {
+                 const WorkMeasurement* admittedWork = nullptr
+#ifdef DEBUG
+                 , const DebugBakeObserver* observer = nullptr
+#endif
+                 ) noexcept {
     using namespace decal_layer::bake::accounting;
     std::vector<Output>().swap(outputs);
     outputVectorTicket.reset();
     evidenceTicket.reset();
     evidence = {};
+#ifdef DEBUG
+    (void)observer;
+#endif
     try {
         if (!operation.valid()
             || atlas.resolutionTexels <= 0 || atlas.resolutionTexels > kMaximumBakedDimension
@@ -1912,7 +1934,11 @@ Outcome BakeForExport(const ExportCapture& capture,
                       asset_atlas::build::LayoutEvidence&& layout,
                       std::shared_ptr<ExportBakeStorage> storage,
                       const kernel::WorkMeasurement* admittedWork,
-                      ExportBake& output) noexcept;
+                      ExportBake& output
+#ifdef DEBUG
+                      , const kernel::DebugBakeObserver* observer = nullptr
+#endif
+                      ) noexcept;
 Outcome BuildAndBakeForExport(
     const ExportCapture& capture,
     const std::vector<asset_atlas::build::FinalMemberInput>& finalMembers,
@@ -1925,7 +1951,11 @@ Outcome PrepareBakeForExport(
     const std::vector<asset_atlas::build::FinalMemberInput>& finalMembers,
     const asset_atlas::build::Settings& settings,
     ExportBakePlan& plan,
-    std::string& diagnosis) noexcept;
+    std::string& diagnosis
+#ifdef DEBUG
+    , const asset_atlas::build::DebugLayoutObserver* observer = nullptr
+#endif
+    ) noexcept;
 bool AdmitBakePlan(AggregateBakePlan& aggregate,
                    ExportBakePlan& item) noexcept;
 bool SealBakePlan(AggregateBakePlan& aggregate) noexcept;
@@ -1935,7 +1965,11 @@ Outcome ExecuteBakeForExport(
     const AggregateBakePlan& aggregate,
     ExportBakePlan& plan,
     ExportBake& output,
-    std::string& diagnosis) noexcept;
+    std::string& diagnosis
+#ifdef DEBUG
+    , const kernel::DebugBakeObserver* observer = nullptr
+#endif
+    ) noexcept;
 Outcome BuildAndBakeForExport(
     const ExportCapture& capture,
     const CapturedSourceStorage& productionSources,

@@ -3206,7 +3206,11 @@ Outcome BakeForExport(const ExportCapture& capture,
                       aa::build::LayoutEvidence&& layout,
                       std::shared_ptr<ExportBakeStorage> storage,
                       const kernel::WorkMeasurement* admittedWork,
-                      ExportBake& output) noexcept {
+                      ExportBake& output
+#ifdef DEBUG
+                      , const kernel::DebugBakeObserver* observer
+#endif
+                      ) noexcept {
     output = {};
     try {
         const auto operation = capture.operationView();
@@ -3241,7 +3245,11 @@ Outcome BakeForExport(const ExportCapture& capture,
                 output.outputs, output.evidence,
                 output.storage->outputVectorStorage,
                 output.storage->evidenceStorage,
-                operation, false, admittedWork)) {
+                operation, false, admittedWork
+#ifdef DEBUG
+                , observer
+#endif
+                )) {
             const bool budget = !operation.Recheck(
                 decal_layer::bake::accounting::FailureSite::ExportBakeStorage);
             output = {};
@@ -3281,7 +3289,11 @@ Outcome PrepareBakeForExport(
     const std::vector<aa::build::FinalMemberInput>& finalMembers,
     const aa::build::Settings& settings,
     ExportBakePlan& plan,
-    std::string& diagnosis) noexcept {
+    std::string& diagnosis
+#ifdef DEBUG
+    , const aa::build::DebugLayoutObserver* observer
+#endif
+    ) noexcept {
     plan = {};
     diagnosis.clear();
     try {
@@ -3295,7 +3307,11 @@ Outcome PrepareBakeForExport(
         aa::build::LayoutEvidence layout;
         const auto built = aa::build::BuildFinalAtlas(
             capture.savedAtlas.key, finalMembers, settings, atlas,
-            assignments, diagnosis, &layout, &accounting);
+            assignments, diagnosis, &layout, &accounting
+#ifdef DEBUG
+            , observer
+#endif
+            );
         if (built != aa::build::Status::Built) {
             if (diagnosis.empty())
                 diagnosis = "build-status-"
@@ -3400,7 +3416,11 @@ Outcome ExecuteBakeForExport(
     const AggregateBakePlan& aggregate,
     ExportBakePlan& plan,
     ExportBake& output,
-    std::string& diagnosis) noexcept {
+    std::string& diagnosis
+#ifdef DEBUG
+    , const kernel::DebugBakeObserver* observer
+#endif
+    ) noexcept {
     output = {};
     if (!aggregate.sealed || !plan.admitted || plan.executed
         || !plan.storage || aggregate.operation.context
@@ -3410,7 +3430,11 @@ Outcome ExecuteBakeForExport(
     }
     const auto outcome = BakeForExport(capture, productionSources,
         std::move(plan.atlas), std::move(plan.assignments),
-        std::move(plan.layout), std::move(plan.storage), &plan.work, output);
+        std::move(plan.layout), std::move(plan.storage), &plan.work, output
+#ifdef DEBUG
+        , observer
+#endif
+        );
     if (outcome == Outcome::Prepared) plan.executed = true;
     else if (diagnosis.empty()) diagnosis = "plan-execute";
     return outcome;

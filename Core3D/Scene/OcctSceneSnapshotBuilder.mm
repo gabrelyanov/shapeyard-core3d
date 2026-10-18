@@ -11861,7 +11861,11 @@ painted_atlas_bake::owner::Outcome PrepareSavedGroupForBatch(
     const SavedGroupOccurrenceScope& expectedOccurrences,
     const std::function<bool()>& cancelled,
     painted_atlas_bake::owner::AggregateBakePlan& aggregate,
-    std::string& diagnosis) noexcept {
+    std::string& diagnosis
+#ifdef DEBUG
+    , const asset_atlas::build::DebugLayoutObserver* layoutObserver = nullptr
+#endif
+    ) noexcept {
     using Outcome = painted_atlas_bake::owner::Outcome;
     group.result.reset();
     group.pendingPlan = {};
@@ -11973,7 +11977,11 @@ painted_atlas_bake::owner::Outcome PrepareSavedGroupForBatch(
             group.capture.savedAtlas.gutterTexels};
         const auto outcome = painted_atlas_bake::owner::PrepareBakeForExport(
             group.capture, group.productionSources, inputs, settings,
-            group.pendingPlan, diagnosis);
+            group.pendingPlan, diagnosis
+#ifdef DEBUG
+            , layoutObserver
+#endif
+            );
         if (outcome != Outcome::Prepared
             || !painted_atlas_bake::owner::AdmitBakePlan(
                 aggregate, group.pendingPlan)) return outcome == Outcome::Prepared
@@ -12000,7 +12008,11 @@ painted_atlas_bake::owner::Outcome ExecuteSavedGroupForBatch(
     const std::function<bool()>& cancelled,
     std::shared_ptr<const SavedGroupFinalResult>& output,
     std::string& diagnosis,
-    const bool releaseEncodedRaster = false) noexcept {
+    const bool releaseEncodedRaster = false
+#ifdef DEBUG
+    , const painted_atlas_bake::kernel::DebugBakeObserver* bakeObserver = nullptr
+#endif
+    ) noexcept {
     using Outcome = painted_atlas_bake::owner::Outcome;
     output.reset();
     try {
@@ -12011,7 +12023,11 @@ painted_atlas_bake::owner::Outcome ExecuteSavedGroupForBatch(
         painted_atlas_bake::owner::ExportBake baked;
         const auto outcome = painted_atlas_bake::owner::ExecuteBakeForExport(
             group.capture, group.productionSources, aggregate,
-            group.pendingPlan, baked, diagnosis);
+            group.pendingPlan, baked, diagnosis
+#ifdef DEBUG
+            , bakeObserver
+#endif
+            );
         if (outcome != Outcome::Prepared) return outcome;
         if (!baked.storage || baked.storage->layout.charts.empty()
             || baked.assignments.size()
@@ -12062,10 +12078,19 @@ painted_atlas_bake::owner::Outcome BuildSavedGroupForExport(
     const SavedGroupOccurrenceScope& expectedOccurrences,
     const std::function<bool()>& cancelled,
     std::shared_ptr<const SavedGroupFinalResult>& output,
-    std::string& diagnosis) noexcept {
+    std::string& diagnosis
+#ifdef DEBUG
+    , const asset_atlas::build::DebugLayoutObserver* layoutObserver = nullptr,
+    const painted_atlas_bake::kernel::DebugBakeObserver* bakeObserver = nullptr
+#endif
+    ) noexcept {
     painted_atlas_bake::owner::AggregateBakePlan aggregate;
     auto outcome = PrepareSavedGroupForBatch(group, actualFinalDefinitions,
-        expectedOccurrences, cancelled, aggregate, diagnosis);
+        expectedOccurrences, cancelled, aggregate, diagnosis
+#ifdef DEBUG
+        , layoutObserver
+#endif
+        );
     if (outcome != painted_atlas_bake::owner::Outcome::Prepared)
         return outcome;
     if (!painted_atlas_bake::owner::SealBakePlan(aggregate)) {
@@ -12073,7 +12098,11 @@ painted_atlas_bake::owner::Outcome BuildSavedGroupForExport(
         return painted_atlas_bake::owner::Outcome::OverBudget;
     }
     return ExecuteSavedGroupForBatch(group, aggregate, cancelled,
-        output, diagnosis);
+        output, diagnosis, false
+#ifdef DEBUG
+        , bakeObserver
+#endif
+        );
 }
 
 const SavedGroupFinalResult* LookupSavedGroupFinalResult(
@@ -12163,6 +12192,180 @@ struct DebugP2bNormalDomainHeader final {
     double measuredMaximumLengthError = 0;
     std::uint8_t reserved[64]{};
 };
+
+extern std::atomic<std::uint64_t> gDebugP2bHookCalls;
+
+struct DebugP2bLayoutContext final {
+    DebugP2bGroupDirectory* directory = nullptr;
+    std::uint64_t* memberOffsets = nullptr;
+    std::uint64_t* chartOffsets = nullptr;
+    std::int32_t* finalTriangleMap = nullptr;
+    DebugP2bEmittedTriangleLineage* lineage = nullptr;
+    DebugP2bAdjacency* adjacency = nullptr;
+    DebugP2bPackedIslandRecord* islands = nullptr;
+    void* failureContext = nullptr;
+    void (*failure)(void*, std::uint32_t) noexcept = nullptr;
+    std::uint64_t lineageCapacity = 174'762;
+    std::uint64_t adjacencyCapacity = 262'143;
+    std::uint64_t islandCapacity = 512;
+    bool countHooks = true;
+};
+
+void DebugP2bContextFailure(DebugP2bLayoutContext& context,
+    const std::uint32_t reason) noexcept {
+    if (!context.directory || context.directory->states[7] != 0) return;
+    context.directory->states[7] = reason;
+    context.directory->states[1] = 0;
+    if (context.failure) context.failure(context.failureContext, reason);
+}
+
+void DebugP2bLineageCallback(void* opaque, const std::uint64_t packedIndex,
+    const std::uint64_t memberIndex, const std::uint64_t memberChartOrdinal,
+    const std::int32_t chartIndex, const std::int32_t chartLocalTriangleIndex,
+    const std::int32_t subChartIndex,
+    const std::int32_t finalTriangleIndex) noexcept {
+    auto* context = static_cast<DebugP2bLayoutContext*>(opaque);
+    if (!context || !context->directory) return;
+    if (context->countHooks)
+        gDebugP2bHookCalls.fetch_add(1, std::memory_order_relaxed);
+    ++context->directory->counters[0];
+    if (context->directory->states[7] != 0) return;
+    const std::uint64_t retained = context->directory->lengths[3];
+    if (packedIndex != retained) {
+        DebugP2bContextFailure(*context, 13);
+        return;
+    }
+    if (!context->lineage || retained >= context->lineageCapacity) {
+        DebugP2bContextFailure(*context, 12);
+        return;
+    }
+    context->lineage[retained] = {packedIndex, memberIndex,
+        memberChartOrdinal, chartIndex, chartLocalTriangleIndex,
+        subChartIndex, finalTriangleIndex};
+    context->directory->lengths[3] = retained + 1;
+}
+
+void DebugP2bIslandCallback(void* opaque, const std::int32_t chartIndex,
+    const std::int32_t subChartIndex,
+    const std::uint64_t memberChartOrdinal,
+    const std::uint64_t segmentRank, const std::uint64_t atlasChartIndex,
+    const asset_atlas::UUID& uuid) noexcept {
+    auto* context = static_cast<DebugP2bLayoutContext*>(opaque);
+    if (!context || !context->directory) return;
+    if (context->countHooks)
+        gDebugP2bHookCalls.fetch_add(1, std::memory_order_relaxed);
+    ++context->directory->counters[1];
+    if (context->directory->states[7] != 0) return;
+    const std::uint64_t retained = context->directory->lengths[5];
+    if (!context->islands || retained >= context->islandCapacity) {
+        DebugP2bContextFailure(*context, 12);
+        return;
+    }
+    auto& record = context->islands[retained];
+    record.chartIndex = chartIndex;
+    record.subChartIndex = subChartIndex;
+    record.memberChartOrdinal = memberChartOrdinal;
+    record.segmentRank = segmentRank;
+    record.atlasChartIndex = atlasChartIndex;
+    std::memcpy(record.uuid, uuid.data(), sizeof(record.uuid));
+    context->directory->lengths[5] = retained + 1;
+}
+
+void DebugP2bFinishLayoutCallback(void* opaque,
+    const std::vector<std::vector<std::vector<int>>>& memberCharts,
+    const std::vector<curveduv::SharedEdge>& adjacency) noexcept {
+    auto* context = static_cast<DebugP2bLayoutContext*>(opaque);
+    if (!context || !context->directory) return;
+    if (context->countHooks)
+        gDebugP2bHookCalls.fetch_add(1, std::memory_order_relaxed);
+    ++context->directory->counters[2];
+    if (context->directory->states[7] != 0) return;
+    if (context->directory->states[1] != 0) {
+        DebugP2bContextFailure(*context, 11);
+        return;
+    }
+    std::uint64_t chartCount = 0;
+    std::uint64_t valueCount = 0;
+    if (!context->memberOffsets || !context->chartOffsets
+        || !context->finalTriangleMap || !context->adjacency
+        || memberCharts.size() > 8 || adjacency.size() > 262'143) {
+        DebugP2bContextFailure(*context, 12);
+        return;
+    }
+    for (const auto& member : memberCharts) {
+        if (member.size() > 64 - chartCount) {
+            DebugP2bContextFailure(*context, 12);
+            return;
+        }
+        chartCount += member.size();
+        for (const auto& chart : member) {
+            if (chart.size() > 174'762 - valueCount) {
+                DebugP2bContextFailure(*context, 12);
+                return;
+            }
+            valueCount += chart.size();
+        }
+    }
+    if (valueCount != context->directory->lengths[3]
+        || context->directory->lengths[5] == 0) {
+        DebugP2bContextFailure(*context, 13);
+        return;
+    }
+    std::uint64_t memberOffset = 0;
+    std::uint64_t chartOffset = 0;
+    std::uint64_t valueOffset = 0;
+    context->memberOffsets[0] = 0;
+    context->chartOffsets[0] = 0;
+    for (const auto& member : memberCharts) {
+        for (const auto& chart : member) {
+            for (const int value : chart)
+                context->finalTriangleMap[valueOffset++] =
+                    std::int32_t(value);
+            context->chartOffsets[++chartOffset] = valueOffset;
+        }
+        context->memberOffsets[++memberOffset] = chartOffset;
+    }
+    for (std::size_t index = 0; index < adjacency.size(); ++index) {
+        const auto& source = adjacency[index];
+        auto& target = context->adjacency[index];
+        target.values[0] = std::int32_t(source.faceId);
+        target.values[1] = std::int32_t(source.triA);
+        target.values[2] = std::int32_t(source.cornerA0);
+        target.values[3] = std::int32_t(source.cornerA1);
+        target.values[4] = std::int32_t(source.triB);
+        target.values[5] = std::int32_t(source.cornerB0);
+        target.values[6] = std::int32_t(source.cornerB1);
+        target.kernelSeam = source.kernelSeam ? 1 : 0;
+    }
+    context->directory->lengths[0] = memberOffset + 1;
+    context->directory->lengths[1] = chartOffset + 1;
+    context->directory->lengths[2] = valueOffset;
+    context->directory->lengths[4] = adjacency.size();
+    context->directory->states[1] = 1;
+}
+
+bool DebugP2bVerifyBoundRefusal() noexcept {
+    DebugP2bGroupDirectory directory;
+    DebugP2bEmittedTriangleLineage record;
+    DebugP2bLayoutContext context;
+    context.directory = &directory;
+    context.lineage = &record;
+    context.lineageCapacity = 1;
+    context.countHooks = false;
+    asset_atlas::build::DebugLayoutObserver observer{&context,
+        DebugP2bLineageCallback, DebugP2bIslandCallback,
+        DebugP2bFinishLayoutCallback};
+    observer.lineage(observer.context, 0, 7, 8, 9, 10, 11, 12);
+    observer.lineage(observer.context, 1, 70, 80, 90, 100, 110, 120);
+    const std::uint32_t firstReason = directory.states[7];
+    observer.lineage(observer.context, 7, 1, 2, 3, 4, 5, 6);
+    return directory.lengths[3] == 1 && directory.counters[0] == 3
+        && firstReason == 12 && directory.states[7] == firstReason
+        && record.packedTriangleIndex == 0 && record.memberIndex == 7
+        && record.memberChartOrdinal == 8 && record.chartIndex == 9
+        && record.chartLocalTriangleIndex == 10
+        && record.subChartIndex == 11 && record.finalTriangleIndex == 12;
+}
 
 struct DebugP2bFrozenSampleEvidence final {
     bool available = false;
@@ -12336,6 +12539,21 @@ struct DebugP2bObserverAccount final {
     ~DebugP2bObserverAccount() { release(); }
 };
 
+struct DebugP2bS1DiagnosticSlot final {
+    std::uint64_t key[4]{};
+    std::uint64_t lengths[6]{};
+    std::uint32_t attempted[3]{};
+    bool prepared = false;
+    bool sealed = false;
+    std::uint32_t firstFailure = 0;
+    DebugP2bEmittedTriangleLineage firstLineage{};
+    DebugP2bEmittedTriangleLineage lastLineage{};
+    DebugP2bPackedIslandRecord firstIsland{};
+    DebugP2bPackedIslandRecord lastIsland{};
+    DebugP2bAdjacency firstAdjacency{};
+    DebugP2bAdjacency lastAdjacency{};
+};
+
 struct DebugP2bObservationDiagnostic final {
     bool enabled = false;
     bool started = false;
@@ -12357,6 +12575,8 @@ struct DebugP2bObservationDiagnostic final {
     std::uint64_t unmapsAfter = 0;
     std::uint64_t hookCallsBefore = 0;
     std::uint64_t hookCallsAfter = 0;
+    bool s1BoundRefusalVerified = false;
+    std::array<DebugP2bS1DiagnosticSlot, 2> s1Slots{};
 };
 
 class DebugP2bObservationArena final {
@@ -12395,6 +12615,95 @@ public:
     ~DebugP2bObservationArena() { close(); }
     bool valid() const noexcept { return mapping_ != nullptr; }
     std::uint32_t failureCode() const noexcept { return failureCode_; }
+    const asset_atlas::build::DebugLayoutObserver* layoutObserver(
+        const std::size_t slot, const asset_atlas::Key& key) noexcept {
+        if (!mapping_ || slot >= contexts_.size()) {
+            fail(10);
+            return nullptr;
+        }
+        auto& context = contexts_[slot];
+        if (context.directory && context.directory->states[0] != 0) {
+            fail(11);
+            return nullptr;
+        }
+        std::uint8_t* cursor = static_cast<std::uint8_t*>(mapping_) + 4096
+            + slot * std::size_t(kDebugP2bSlotBytes);
+        const auto take = [&](const std::uint64_t count,
+                const std::uint64_t stride) noexcept {
+            std::uint8_t* result = cursor;
+            std::uint64_t bytes = 0;
+            std::uint64_t aligned = 0;
+            if (!DebugP2bCheckedProduct(count, stride, bytes)
+                || !DebugP2bCheckedAlign64(bytes, aligned)) {
+                fail(12);
+                return static_cast<std::uint8_t*>(nullptr);
+            }
+            cursor += std::size_t(aligned);
+            return result;
+        };
+        context.directory = reinterpret_cast<DebugP2bGroupDirectory*>(
+            take(1, sizeof(DebugP2bGroupDirectory)));
+        context.memberOffsets = reinterpret_cast<std::uint64_t*>(
+            take(9, sizeof(std::uint64_t)));
+        context.chartOffsets = reinterpret_cast<std::uint64_t*>(
+            take(65, sizeof(std::uint64_t)));
+        context.finalTriangleMap = reinterpret_cast<std::int32_t*>(
+            take(174'762, sizeof(std::int32_t)));
+        context.lineage = reinterpret_cast<DebugP2bEmittedTriangleLineage*>(
+            take(174'762, sizeof(DebugP2bEmittedTriangleLineage)));
+        context.adjacency = reinterpret_cast<DebugP2bAdjacency*>(
+            take(262'143, sizeof(DebugP2bAdjacency)));
+        context.islands = reinterpret_cast<DebugP2bPackedIslandRecord*>(
+            take(512, sizeof(DebugP2bPackedIslandRecord)));
+        (void)take(12, sizeof(DebugP2bSampleExtra));
+        (void)take(1, sizeof(DebugP2bNormalDomainHeader));
+        (void)take(2'097'152, sizeof(std::uint8_t));
+        const std::uint8_t* expected = static_cast<std::uint8_t*>(mapping_)
+            + 4096 + (slot + 1) * std::size_t(kDebugP2bSlotBytes);
+        if (!context.directory || !context.memberOffsets
+            || !context.chartOffsets || !context.finalTriangleMap
+            || !context.lineage || !context.adjacency || !context.islands
+            || cursor != expected) {
+            fail(12);
+            return nullptr;
+        }
+        std::memcpy(context.directory->key, key.document.data(), 16);
+        std::memcpy(context.directory->key + 2, key.atlas.data(), 16);
+        context.directory->states[0] = 1;
+        context.failureContext = this;
+        context.failure = [](void* opaque, const std::uint32_t reason) noexcept {
+            static_cast<DebugP2bObservationArena*>(opaque)->fail(reason);
+        };
+        observers_[slot] = {&context, DebugP2bLineageCallback,
+            DebugP2bIslandCallback, DebugP2bFinishLayoutCallback};
+        return &observers_[slot];
+    }
+    void copyDiagnostic(DebugP2bObservationDiagnostic& diagnostic) const noexcept {
+        for (std::size_t index = 0; index < contexts_.size(); ++index) {
+            const auto& context = contexts_[index];
+            auto& output = diagnostic.s1Slots[index];
+            if (!context.directory) continue;
+            std::copy(std::begin(context.directory->key),
+                std::end(context.directory->key), std::begin(output.key));
+            std::copy_n(context.directory->lengths, 6, output.lengths);
+            std::copy_n(context.directory->counters, 3, output.attempted);
+            output.prepared = context.directory->states[0] != 0;
+            output.sealed = context.directory->states[1] != 0;
+            output.firstFailure = context.directory->states[7];
+            if (output.lengths[3] != 0) {
+                output.firstLineage = context.lineage[0];
+                output.lastLineage = context.lineage[output.lengths[3] - 1];
+            }
+            if (output.lengths[5] != 0) {
+                output.firstIsland = context.islands[0];
+                output.lastIsland = context.islands[output.lengths[5] - 1];
+            }
+            if (output.lengths[4] != 0) {
+                output.firstAdjacency = context.adjacency[0];
+                output.lastAdjacency = context.adjacency[output.lengths[4] - 1];
+            }
+        }
+    }
     void close() noexcept {
         if (mapping_) {
             static_cast<DebugP2bMappedControl*>(mapping_)
@@ -12407,9 +12716,17 @@ public:
         account_.release();
     }
 private:
+    void fail(const std::uint32_t reason) noexcept {
+        if (failureCode_ == 0) failureCode_ = reason;
+        if (mapping_)
+            static_cast<DebugP2bMappedControl*>(mapping_)->state =
+                DebugP2bObservationState::Incomplete;
+    }
     DebugP2bObserverAccount account_;
     void* mapping_ = nullptr;
     std::uint32_t failureCode_ = 0;
+    std::array<DebugP2bLayoutContext, 2> contexts_{};
+    std::array<asset_atlas::build::DebugLayoutObserver, 2> observers_{};
 };
 
 class DebugP2bObserverSession final {
@@ -12433,10 +12750,19 @@ public:
             DebugP2bObservationState::Recording;
         return arena_->valid();
     }
+    const asset_atlas::build::DebugLayoutObserver* layoutObserver(
+        const std::size_t slot, const asset_atlas::Key& key) noexcept {
+        return arena_ && arena_->valid()
+            ? arena_->layoutObserver(slot, key) : nullptr;
+    }
     ~DebugP2bObserverSession() {
         if (!diagnostic_) return;
         if (diagnostic_->enabled)
             diagnostic_->state = DebugP2bObservationState::Incomplete;
+        if (arena_) {
+            arena_->copyDiagnostic(*diagnostic_);
+            diagnostic_->failureCode = arena_->failureCode();
+        }
         arena_.reset();
         diagnostic_->activeBytesAfter =
             gDebugP2bActiveBytes.load(std::memory_order_relaxed);
@@ -12474,6 +12800,7 @@ DebugP2bObservationDiagnostic DebugP2bBeginDiagnostic(
     value.unmapsBefore = gDebugP2bTotalUnmaps.load(std::memory_order_relaxed);
     value.hookCallsBefore =
         gDebugP2bHookCalls.load(std::memory_order_relaxed);
+    value.s1BoundRefusalVerified = DebugP2bVerifyBoundRefusal();
     std::uint64_t ignored = 0;
     value.arithmeticRefused = !DebugP2bCheckedAlign64(
         std::numeric_limits<std::uint64_t>::max(), ignored);
@@ -12492,6 +12819,47 @@ NSString* DebugP2bStateText(const DebugP2bObservationState state) noexcept {
 NSDictionary<NSString*, id>* DebugP2bDiagnosticDictionary(
     const DebugP2bObservationDiagnostic& value) noexcept {
     @try {
+        const auto lineage = [](const DebugP2bEmittedTriangleLineage& row) {
+            return @[@(row.packedTriangleIndex), @(row.memberIndex),
+                @(row.memberChartOrdinal), @(row.chartIndex),
+                @(row.chartLocalTriangleIndex), @(row.subChartIndex),
+                @(row.finalTriangleIndex)];
+        };
+        const auto island = [](const DebugP2bPackedIslandRecord& row) {
+            return @[@(row.chartIndex), @(row.subChartIndex),
+                @(row.memberChartOrdinal), @(row.segmentRank),
+                @(row.atlasChartIndex),
+                [NSData dataWithBytes:row.uuid length:sizeof(row.uuid)]];
+        };
+        const auto edge = [](const DebugP2bAdjacency& row) {
+            return @[@(row.values[0]), @(row.values[1]), @(row.values[2]),
+                @(row.values[3]), @(row.values[4]), @(row.values[5]),
+                @(row.values[6]), @(row.kernelSeam != 0)];
+        };
+        NSMutableArray<NSDictionary<NSString*, id>*>* slots =
+            [NSMutableArray arrayWithCapacity:value.s1Slots.size()];
+        for (const auto& slot : value.s1Slots) {
+            NSMutableArray<NSNumber*>* lengths = [NSMutableArray array];
+            NSMutableArray<NSNumber*>* attempted = [NSMutableArray array];
+            for (const auto length : slot.lengths)
+                [lengths addObject:@(length)];
+            for (const auto count : slot.attempted)
+                [attempted addObject:@(count)];
+            [slots addObject:@{
+                @"key": [NSData dataWithBytes:slot.key length:sizeof(slot.key)],
+                @"prepared": @(slot.prepared),
+                @"sealed": @(slot.sealed),
+                @"firstFailure": @(slot.firstFailure),
+                @"lengths": lengths,
+                @"attempted": attempted,
+                @"firstLineage": lineage(slot.firstLineage),
+                @"lastLineage": lineage(slot.lastLineage),
+                @"firstIsland": island(slot.firstIsland),
+                @"lastIsland": island(slot.lastIsland),
+                @"firstAdjacency": edge(slot.firstAdjacency),
+                @"lastAdjacency": edge(slot.lastAdjacency),
+            }];
+        }
         return @{
             @"schema": @"shapeyard.p2b-arena-diagnostic.v1",
             @"account": [NSString stringWithUTF8String:
@@ -12532,12 +12900,14 @@ NSDictionary<NSString*, id>* DebugP2bDiagnosticDictionary(
             @"unmapDelta": @(value.unmapsAfter - value.unmapsBefore),
             @"hookCallDelta": @(
                 value.hookCallsAfter - value.hookCallsBefore),
+            @"s1BoundRefusalVerified": @(value.s1BoundRefusalVerified),
+            @"s1Slots": slots,
             @"arithmeticOverflowRefused": @(value.arithmeticRefused),
             @"entryRejectionMappingDelta": @0,
             @"assetAtlasBuildSourceSHA256":
-                @"1aef4b429da1cae44dedc138b6e74de08fe9d74cd9229ba28296ed338b571ac3",
+                @"d4d855cdaf0864244f8c620fd2070c7b11a74766c8e0aa3e9e0e7d3651383b8d",
             @"paintedAtlasBakeSourceSHA256":
-                @"e501707da12d65fd40b9b710829bdb772a4873910d7232f420b4600329e35beb",
+                @"ae3b05ed978a1ca2cd9483e3a6eb78b0c8b78bf8db8893e697283372b22f4757",
         };
     } @catch (...) {
         return nil;
@@ -12993,6 +13363,8 @@ bool DebugProduceSavedGroupFinalResultImpl(
         arenaSession.start();
         const asset_atlas::Key strictKey =
             records.front().value->definition.key;
+        const auto* layoutObserver =
+            arenaSession.layoutObserver(0, strictKey);
         observation.strictKey = retained_solid::UUIDText(strictKey.document)
             + "/" + retained_solid::UUIDText(strictKey.atlas);
 
@@ -13092,7 +13464,8 @@ bool DebugProduceSavedGroupFinalResultImpl(
         observation.failureStage = "saved-group-build";
         std::shared_ptr<const SavedGroupFinalResult> result;
         const auto outcome = BuildSavedGroupForExport(group, definitions,
-            occurrenceScope, cancelled, result, diagnosis);
+            occurrenceScope, cancelled, result, diagnosis,
+            layoutObserver, nullptr);
         if (outcome != painted_atlas_bake::owner::Outcome::Prepared) {
             observation.failureStage += "-"
                 + std::to_string(std::uint8_t(outcome)) + "-" + diagnosis;
@@ -13250,6 +13623,11 @@ bool ProduceSavedProducerBatchImpl(
             return first.value->definition.key.atlas
                 < second.value->definition.key.atlas;
         });
+        std::array<const asset_atlas::build::DebugLayoutObserver*, 2>
+            layoutObservers{};
+        for (std::size_t index = 0; index < layoutObservers.size(); ++index)
+            layoutObservers[index] = arenaSession.layoutObserver(
+                index, records[index].value->definition.key);
 
         OperationLedger operation;
         if (completeAssembly) ++completeAssembly->entries[2];
@@ -13489,7 +13867,7 @@ bool ProduceSavedProducerBatchImpl(
                 std::to_string(index);
             const auto outcome = PrepareSavedGroupForBatch(groups[index],
                 definitions[index], occurrences[index], cancelled,
-                aggregate, diagnosis);
+                aggregate, diagnosis, layoutObservers[index]);
             if (outcome != Outcome::Prepared) {
                 observation.failureStage += "-" + diagnosis;
                 return false;
@@ -13512,7 +13890,8 @@ bool ProduceSavedProducerBatchImpl(
             observation.failureStage = "plan-execute-" +
                 std::to_string(index);
             const auto outcome = ExecuteSavedGroupForBatch(groups[index],
-                aggregate, cancelled, results[index], diagnosis, true);
+                aggregate, cancelled, results[index], diagnosis, true,
+                nullptr);
             if (outcome != Outcome::Prepared || !results[index]) {
                 observation.failureStage += "-" + diagnosis;
                 return false;
