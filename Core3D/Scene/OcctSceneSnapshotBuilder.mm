@@ -12696,6 +12696,62 @@ struct DebugP2bWireRecord final {
 static_assert(sizeof(DebugP2bWireHeader) == 48);
 static_assert(sizeof(DebugP2bWireRecord) == 48);
 
+struct DebugP2bP5Spec final {
+    char key[64]{};
+    std::uint16_t kind = 0, width = 0;
+    std::uint64_t count = 0;
+    const void* bytes = nullptr;
+    std::uint64_t flags = 0;
+};
+struct DebugP2bP5AssignmentRow final {
+    std::uint8_t member[16]{};
+    std::uint32_t triangleCount = 0, reserved = 0;
+    std::uint64_t cornerOffset = 0;
+};
+struct DebugP2bP5LayoutChartRow final {
+    std::int32_t faceID = 0, kernel = 0;
+    std::uint64_t memberIndex = 0, memberChartOrdinal = 0;
+    double rectMin[2]{}, rectMax[2]{};
+    std::uint64_t triangleOffset = 0, triangleCount = 0;
+    std::uint64_t memberFaceIndex = 0;
+};
+struct DebugP2bP5MeshRow final {
+    std::uint64_t vertexOffset = 0, vertexCount = 0;
+    std::uint64_t indexOffset = 0, indexCount = 0;
+    std::uint64_t tangentOffset = 0, tangentCount = 0;
+    std::uint64_t primitiveOffset = 0, primitiveCount = 0;
+    std::uint64_t geometryRevision = 0, tangentBasis = 0;
+    double sourceOrigin[3]{};
+    std::uint8_t reserved[24]{};
+};
+struct DebugP2bP5PrimitiveRow final {
+    std::uint32_t firstIndex = 0, indexCount = 0, faceIndex = 0, flags = 0;
+    std::int32_t surfaceType = 0;
+    std::uint32_t parameterCount = 0;
+    std::uint64_t parameterOffset = 0;
+    char digest[64]{};
+    std::uint8_t reserved[32]{};
+};
+struct DebugP2bP5FaceLineageRow final {
+    std::uint32_t memberIndex = 0, originalFaceIndex = 0;
+    std::uint32_t copiedFaceIndex = 0, finalPrimitiveIndex = 0;
+    std::int32_t surfaceType = 0;
+    std::uint32_t flags = 0, parameterCount = 0, reserved0 = 0;
+    std::uint64_t parameterOffset = 0;
+    char digest[64]{};
+    std::uint8_t reserved[24]{};
+};
+struct DebugP2bP5OccurrenceRow final {
+    std::uint64_t groupIndex = 0, sourceInstanceIndex = 0;
+    double worldFromObject[16]{}, objectTransform[16]{};
+    double explorerTransform[16]{}, meshOriginTransform[16]{};
+};
+static_assert(sizeof(DebugP2bP5AssignmentRow) == 32);
+static_assert(sizeof(DebugP2bP5LayoutChartRow) == 80);
+static_assert(sizeof(DebugP2bP5MeshRow) == 128);
+static_assert(sizeof(DebugP2bP5PrimitiveRow) == 128);
+static_assert(sizeof(DebugP2bP5FaceLineageRow) == 128);
+
 std::atomic<std::uint64_t> gDebugP2bActiveBytes{0};
 std::atomic<std::uint64_t> gDebugP2bActiveMappings{0};
 std::atomic<std::uint64_t> gDebugP2bTotalReservations{0};
@@ -13000,6 +13056,230 @@ public:
         }
         context.directory->states[4] = 1;
     }
+    void retainOccurrence(const std::size_t groupIndex,
+        const std::size_t sourceInstanceIndex, const Matrix4d& world,
+        const Matrix4d& object, const Matrix4d& explorer,
+        const Matrix4d& origin) noexcept {
+        DebugP2bP5OccurrenceRow row;
+        row.groupIndex = groupIndex;
+        row.sourceInstanceIndex = sourceInstanceIndex;
+        std::copy(world.values.begin(), world.values.end(), row.worldFromObject);
+        std::copy(object.values.begin(), object.values.end(), row.objectTransform);
+        std::copy(explorer.values.begin(), explorer.values.end(), row.explorerTransform);
+        std::copy(origin.values.begin(), origin.values.end(), row.meshOriginTransform);
+        char key[64]{};
+        std::snprintf(key, sizeof(key), "p5.occurrences.%zu", occurrenceCount_++);
+        addP5Spec(key, 2, 1, sizeof(row), &row);
+    }
+    void retainSelectedOccurrences(
+        const std::vector<std::string>& identifiers) noexcept {
+        std::uint64_t bytes = 0;
+        for (const auto& value : identifiers)
+            if (!DebugP2bCheckedAdd(bytes, value.size() + 1, bytes)) {
+                fail(14); return;
+            }
+        auto* target = static_cast<char*>(stage(bytes));
+        if (bytes != 0 && !target) return;
+        std::uint64_t cursor = 0;
+        for (const auto& value : identifiers) {
+            std::memcpy(target + cursor, value.c_str(), value.size() + 1);
+            cursor += value.size() + 1;
+        }
+        addP5Spec("p5.selectedOccurrenceIdentifiers", 1, 1, bytes,
+            target, true);
+    }
+    void retainP5Group(const std::size_t slot,
+        const SavedGroupOwner& group,
+        const std::vector<DefinitionData>& definitions,
+        const SavedGroupFinalResult& result) noexcept {
+        if (slot >= 2 || definitions.size() != group.measured.size()
+            || result.bake.atlas.members.size() != group.measured.size()
+            || !result.bake.storage) { fail(16); return; }
+        char key[64]{};
+        const auto addNamed = [&](const char* suffix, std::uint16_t kind,
+                std::uint16_t width, std::uint64_t count,
+                const void* bytes) noexcept {
+            std::snprintf(key, sizeof(key), "p5.%zu.%s", slot, suffix);
+            addP5Spec(key, kind, width, count, bytes);
+        };
+        std::uint64_t summary[16]{};
+        std::memcpy(summary, result.bake.atlas.key.document.data(), 16);
+        std::memcpy(summary + 2, result.bake.atlas.key.atlas.data(), 16);
+        summary[4] = std::uint32_t(group.capture.savedAtlas.resolutionTexels)
+            | std::uint64_t(std::uint32_t(group.capture.savedAtlas.gutterTexels)) << 32;
+        summary[5] = std::uint32_t(result.bake.atlas.resolutionTexels)
+            | std::uint64_t(std::uint32_t(result.bake.atlas.gutterTexels)) << 32;
+        std::memcpy(summary + 6, &result.bake.atlas.globalTexelsPerMM, 8);
+        std::memcpy(summary + 7, result.bake.atlas.layoutProof.data(), 32);
+        summary[11] = result.bake.atlas.members.size();
+        summary[12] = result.bake.atlas.charts.size();
+        summary[13] = result.bake.assignments.size();
+        summary[14] = result.bake.storage->layout.charts.size();
+        summary[15] = result.bake.storage->layout.packed.triangles.size();
+        addNamed("group", 6, 128, 1, summary);
+        addNamed("savedMembers", 2, 1,
+            group.capture.savedAtlas.members.size() * sizeof(asset_atlas::Member),
+            group.capture.savedAtlas.members.data());
+        addNamed("finalMembers", 2, 1,
+            result.bake.atlas.members.size() * sizeof(asset_atlas::Member),
+            result.bake.atlas.members.data());
+        addNamed("charts", 2, 1,
+            result.bake.atlas.charts.size() * sizeof(asset_atlas::Chart),
+            result.bake.atlas.charts.data());
+
+        auto* assignments = static_cast<DebugP2bP5AssignmentRow*>(stage(
+            result.bake.assignments.size() * sizeof(DebugP2bP5AssignmentRow)));
+        std::uint64_t cornerCount = 0;
+        for (std::size_t i = 0; i < result.bake.assignments.size(); ++i) {
+            const auto& source = result.bake.assignments[i];
+            std::memcpy(assignments[i].member, source.member.data(), 16);
+            assignments[i].triangleCount = source.triangleCount;
+            assignments[i].cornerOffset = cornerCount;
+            cornerCount += source.corners.size();
+        }
+        addNamed("assignments", 6, 32, result.bake.assignments.size(), assignments);
+        auto* corners = static_cast<std::array<double, 2>*>(stage(
+            cornerCount * sizeof(std::array<double, 2>)));
+        std::uint64_t cornerCursor = 0;
+        for (const auto& assignment : result.bake.assignments) {
+            std::copy(assignment.corners.begin(), assignment.corners.end(),
+                corners + cornerCursor);
+            cornerCursor += assignment.corners.size();
+        }
+        addNamed("assignmentCorners", 2, 1,
+            cornerCount * sizeof(std::array<double, 2>), corners);
+
+        const auto& layout = result.bake.storage->layout;
+        if (layout.chartMembers.size() != layout.charts.size()
+            || layout.chartFaces.size() != layout.charts.size()) { fail(16); return; }
+        auto* layoutRows = static_cast<DebugP2bP5LayoutChartRow*>(stage(
+            layout.charts.size() * sizeof(DebugP2bP5LayoutChartRow)));
+        std::uint64_t developedCount = 0;
+        for (std::size_t i = 0; i < layout.charts.size(); ++i) {
+            const auto& source = layout.charts[i];
+            auto& row = layoutRows[i];
+            row.faceID = source.faceId; row.kernel = std::int32_t(source.kernel);
+            row.memberIndex = layout.chartMembers[i].first;
+            row.memberChartOrdinal = layout.chartMembers[i].second;
+            row.memberFaceIndex = layout.chartFaces[i];
+            row.rectMin[0] = source.rectMin.x; row.rectMin[1] = source.rectMin.y;
+            row.rectMax[0] = source.rectMax.x; row.rectMax[1] = source.rectMax.y;
+            row.triangleOffset = developedCount;
+            row.triangleCount = source.triangles.size();
+            developedCount += source.triangles.size();
+        }
+        addNamed("layoutCharts", 6, 80, layout.charts.size(), layoutRows);
+        auto* developed = static_cast<curveduv::ChartTriangle*>(stage(
+            developedCount * sizeof(curveduv::ChartTriangle)));
+        std::uint64_t developedCursor = 0;
+        for (const auto& chart : layout.charts) {
+            std::copy(chart.triangles.begin(), chart.triangles.end(),
+                developed + developedCursor);
+            developedCursor += chart.triangles.size();
+        }
+        addNamed("developedTriangles", 6, 48, developedCount, developed);
+        addNamed("packedTriangles", 2, 1,
+            layout.packed.triangles.size() * sizeof(curveduv::TriangleUV),
+            layout.packed.triangles.data());
+
+        std::uint64_t vertexCount = 0, indexCount = 0, tangentCount = 0;
+        std::uint64_t primitiveCount = 0, parameterCount = 0, faceCount = 0;
+        for (const auto& definition : definitions) {
+            vertexCount += definition.mesh.vertices.size();
+            indexCount += definition.mesh.indices.size();
+            tangentCount += definition.mesh.cornerTangents.size();
+            primitiveCount += definition.mesh.primitives.size();
+            faceCount += definition.faces.Extent();
+            for (const auto& primitive : definition.mesh.primitives)
+                parameterCount += primitive.analyticSourceFace.params.size();
+        }
+        // Original analytic parameters are appended after final parameters.
+        parameterCount += faceCount * 11;
+        auto* meshRows = static_cast<DebugP2bP5MeshRow*>(stage(
+            definitions.size() * sizeof(DebugP2bP5MeshRow)));
+        auto* vertices = static_cast<Vertex*>(stage(vertexCount * sizeof(Vertex)));
+        auto* indices = static_cast<std::uint32_t*>(stage(
+            indexCount * sizeof(std::uint32_t)));
+        auto* tangents = static_cast<Float4*>(stage(tangentCount * sizeof(Float4)));
+        auto* primitives = static_cast<DebugP2bP5PrimitiveRow*>(stage(
+            primitiveCount * sizeof(DebugP2bP5PrimitiveRow)));
+        auto* parameters = static_cast<double*>(stage(parameterCount * sizeof(double)));
+        auto* lineage = static_cast<DebugP2bP5FaceLineageRow*>(stage(
+            faceCount * sizeof(DebugP2bP5FaceLineageRow)));
+        if ((vertexCount && !vertices) || (indexCount && !indices)
+            || (primitiveCount && !primitives) || (faceCount && !lineage)) return;
+        std::uint64_t vo = 0, io = 0, to = 0, po = 0, ao = 0, fo = 0;
+        for (std::size_t member = 0; member < definitions.size(); ++member) {
+            const auto& definition = definitions[member];
+            auto& mesh = meshRows[member];
+            mesh.vertexOffset = vo; mesh.vertexCount = definition.mesh.vertices.size();
+            mesh.indexOffset = io; mesh.indexCount = definition.mesh.indices.size();
+            mesh.tangentOffset = to; mesh.tangentCount = definition.mesh.cornerTangents.size();
+            mesh.primitiveOffset = po; mesh.primitiveCount = definition.mesh.primitives.size();
+            mesh.geometryRevision = definition.mesh.geometryRevision;
+            mesh.tangentBasis = std::uint64_t(definition.mesh.tangentBasis);
+            mesh.sourceOrigin[0] = definition.sourceOrigin.x;
+            mesh.sourceOrigin[1] = definition.sourceOrigin.y;
+            mesh.sourceOrigin[2] = definition.sourceOrigin.z;
+            std::copy(definition.mesh.vertices.begin(), definition.mesh.vertices.end(), vertices + vo);
+            std::copy(definition.mesh.indices.begin(), definition.mesh.indices.end(), indices + io);
+            std::copy(definition.mesh.cornerTangents.begin(), definition.mesh.cornerTangents.end(), tangents + to);
+            vo += mesh.vertexCount; io += mesh.indexCount; to += mesh.tangentCount;
+            for (const auto& source : definition.mesh.primitives) {
+                auto& row = primitives[po++];
+                row.firstIndex = source.firstIndex; row.indexCount = source.indexCount;
+                row.faceIndex = source.faceIndex;
+                row.flags = (source.hasTextureCoordinates ? 1U : 0U)
+                    | (source.analyticSourceFace.available ? 2U : 0U)
+                    | (source.analyticSourceFace.reversed ? 4U : 0U);
+                row.surfaceType = source.analyticSourceFace.surfaceType;
+                row.parameterOffset = ao;
+                row.parameterCount = std::uint32_t(source.analyticSourceFace.params.size());
+                std::memcpy(row.digest, source.analyticSourceFace.digest.data(),
+                    std::min<std::size_t>(64, source.analyticSourceFace.digest.size()));
+                std::copy(source.analyticSourceFace.params.begin(),
+                    source.analyticSourceFace.params.end(), parameters + ao);
+                ao += source.analyticSourceFace.params.size();
+            }
+            for (Standard_Integer original = 1;
+                 original <= group.measured[member].originalFaces.Extent(); ++original) {
+                const TopoDS_Face originalFace = TopoDS::Face(
+                    group.measured[member].originalFaces.FindKey(original));
+                const TopoDS_Shape copied = group.measured[member].copier->ModifiedShape(originalFace);
+                const Standard_Integer copiedIndex = group.measured[member].detachedFaces.FindIndex(copied);
+                std::size_t primitiveIndex = definition.mesh.primitives.size();
+                for (std::size_t candidate = 0; candidate < definition.mesh.primitives.size(); ++candidate)
+                    if (definition.mesh.primitives[candidate].faceIndex == std::uint32_t(copiedIndex - 1)) {
+                        primitiveIndex = candidate; break;
+                    }
+                AnalyticSourceFaceWitness witness;
+                if (copiedIndex <= 0 || primitiveIndex == definition.mesh.primitives.size()
+                    || !CaptureAnalyticSourceFaceWitness(originalFace,
+                        definition.mesh.primitives[primitiveIndex].firstIndex,
+                        definition.mesh.primitives[primitiveIndex].indexCount,
+                        witness) || !witness.available) { fail(16); return; }
+                auto& row = lineage[fo++];
+                row.memberIndex = std::uint32_t(member);
+                row.originalFaceIndex = std::uint32_t(original - 1);
+                row.copiedFaceIndex = std::uint32_t(copiedIndex - 1);
+                row.finalPrimitiveIndex = std::uint32_t(primitiveIndex);
+                row.surfaceType = witness.surfaceType;
+                row.flags = 1U | (witness.reversed ? 2U : 0U);
+                row.parameterOffset = ao;
+                row.parameterCount = std::uint32_t(witness.params.size());
+                std::memcpy(row.digest, witness.digest.data(), 64);
+                std::copy(witness.params.begin(), witness.params.end(), parameters + ao);
+                ao += witness.params.size();
+            }
+        }
+        addNamed("meshes", 6, 128, definitions.size(), meshRows);
+        addNamed("vertices", 6, 32, vertexCount, vertices);
+        addNamed("indices", 4, 4, indexCount, indices);
+        addNamed("cornerTangents", 2, 1, tangentCount * sizeof(Float4), tangents);
+        addNamed("primitives", 6, 128, primitiveCount, primitives);
+        addNamed("analyticParameters", 5, 8, ao, parameters);
+        addNamed("faceLineage", 6, 128, faceCount, lineage);
+    }
     NSData* serialize(const double metersPerUnit) noexcept {
         if (!mapping_ || wireLength_ != 0 || !std::isfinite(metersPerUnit)
             || !(metersPerUnit > 0)) {
@@ -13014,13 +13294,16 @@ public:
             const void* bytes;
             std::uint64_t flags;
         };
-        std::array<Spec, 24> specs{};
+        std::array<Spec, 64> specs{};
         std::size_t next = 0;
         const auto add = [&](const char* key, const std::uint16_t kind,
                 const std::uint16_t width, const std::uint64_t count,
                 const void* bytes, const std::uint64_t flags = 0) noexcept {
-            if (next < specs.size())
-                specs[next++] = {key, kind, width, count, bytes, flags};
+            if (next >= specs.size()) {
+                fail(14);
+                return;
+            }
+            specs[next++] = {key, kind, width, count, bytes, flags};
         };
         static constexpr char schema[] = "shapeyard.p2b-observation.v1";
         static constexpr char stage[] =
@@ -13064,20 +13347,26 @@ public:
             add(keys[slot][9], 2, 1, present ? c.directory->lengths[7] : 0,
                 b.normalMask);
         }
-        if (next != specs.size()) {
+        for (std::size_t index = 0; index < p5SpecCount_; ++index) {
+            const auto& spec = p5Specs_[index];
+            add(spec.key, spec.kind, spec.width, spec.count, spec.bytes,
+                spec.flags);
+        }
+        if (next != 24 + p5SpecCount_) {
             fail(14);
             return nil;
         }
         std::uint64_t keysOffset = sizeof(DebugP2bWireHeader);
         std::uint64_t tableBytes = 0;
-        if (!DebugP2bCheckedProduct(specs.size(),
+        if (!DebugP2bCheckedProduct(next,
                 sizeof(DebugP2bWireRecord), tableBytes)
             || !DebugP2bCheckedAdd(keysOffset, tableBytes, keysOffset)) {
             fail(14);
             return nil;
         }
         std::uint64_t payloadOffset = keysOffset;
-        for (const auto& spec : specs) {
+        for (std::size_t index = 0; index < next; ++index) {
+            const auto& spec = specs[index];
             const std::size_t keyLength = std::strlen(spec.key);
             if (keyLength > std::numeric_limits<std::uint32_t>::max()
                 || !DebugP2bCheckedAdd(payloadOffset, keyLength,
@@ -13087,12 +13376,13 @@ public:
             }
         }
         std::uint64_t total = payloadOffset;
-        for (const auto& spec : specs) {
+        for (std::size_t index = 0; index < next; ++index) {
+            const auto& spec = specs[index];
             std::uint64_t length = 0;
             if (!DebugP2bCheckedProduct(spec.count, spec.width, length)
                 || (length != 0 && !spec.bytes)
                 || !DebugP2bCheckedAdd(total, length, total)
-                || total > kDebugP2bWireBytes) {
+                || total > stagingCursor_) {
                 fail(14);
                 return nil;
             }
@@ -13100,14 +13390,14 @@ public:
         auto* const base = static_cast<std::uint8_t*>(mapping_)
             + std::size_t(kDebugP2bNativeBytes);
         DebugP2bWireHeader header;
-        header.recordCount = std::uint16_t(specs.size());
+        header.recordCount = std::uint16_t(next);
         header.keysOffset = keysOffset;
         header.payloadOffset = payloadOffset;
         header.totalLength = total;
         std::memcpy(base, &header, sizeof(header));
         std::uint64_t keyCursor = keysOffset;
         std::uint64_t valueCursor = payloadOffset;
-        for (std::size_t index = 0; index < specs.size(); ++index) {
+        for (std::size_t index = 0; index < next; ++index) {
             const auto& spec = specs[index];
             const std::uint32_t keyLength = std::uint32_t(
                 std::strlen(spec.key));
@@ -13122,7 +13412,8 @@ public:
             valueCursor += valueLength;
         }
         valueCursor = payloadOffset;
-        for (const auto& spec : specs) {
+        for (std::size_t index = 0; index < next; ++index) {
+            const auto& spec = specs[index];
             const std::uint64_t length = spec.count * spec.width;
             if (length != 0)
                 std::memcpy(base + valueCursor, spec.bytes,
@@ -13198,6 +13489,36 @@ public:
         account_.release();
     }
 private:
+    void* stage(const std::uint64_t bytes) noexcept {
+        if (bytes == 0) return nullptr;
+        if (!mapping_ || bytes > stagingCursor_) { fail(14); return nullptr; }
+        const std::uint64_t start = (stagingCursor_ - bytes) & ~std::uint64_t(63);
+        if (start >= stagingCursor_ || start < 64 * 1024) {
+            fail(14); return nullptr;
+        }
+        stagingCursor_ = start;
+        return static_cast<std::uint8_t*>(mapping_)
+            + std::size_t(kDebugP2bNativeBytes + start);
+    }
+    void addP5Spec(const char* key, const std::uint16_t kind,
+        const std::uint16_t width, const std::uint64_t count,
+        const void* bytes, const bool alreadyStaged = false) noexcept {
+        if (!key || p5SpecCount_ >= p5Specs_.size()) { fail(14); return; }
+        std::uint64_t length = 0;
+        if (!DebugP2bCheckedProduct(count, width, length)
+            || (length != 0 && !bytes)) { fail(14); return; }
+        void* retained = const_cast<void*>(bytes);
+        if (length != 0 && !alreadyStaged) {
+            retained = stage(length);
+            if (!retained) return;
+            std::memcpy(retained, bytes, std::size_t(length));
+        }
+        if (std::strlen(key) >= sizeof(p5Specs_[0].key)) { fail(14); return; }
+        auto& spec = p5Specs_[p5SpecCount_++];
+        std::strcpy(spec.key, key);
+        spec.kind = kind; spec.width = width; spec.count = count;
+        spec.bytes = retained;
+    }
     void fail(const std::uint32_t reason) noexcept {
         if (failureCode_ == 0) failureCode_ = reason;
         if (mapping_)
@@ -13209,6 +13530,9 @@ private:
     void* mapping_ = nullptr;
     std::uint32_t failureCode_ = 0;
     std::uint64_t wireLength_ = 0;
+    std::uint64_t stagingCursor_ = kDebugP2bWireBytes;
+    std::size_t p5SpecCount_ = 0, occurrenceCount_ = 0;
+    std::array<DebugP2bP5Spec, 40> p5Specs_{};
     std::array<DebugP2bLayoutContext, 2> contexts_{};
     std::array<DebugP2bBakeContext, 2> bakeContexts_{};
     std::array<asset_atlas::build::DebugLayoutObserver, 2> observers_{};
@@ -13249,6 +13573,24 @@ public:
     }
     void commitS2(const std::size_t slot) noexcept {
         if (arena_ && arena_->valid()) arena_->commitS2(slot);
+    }
+    void retainOccurrence(const std::size_t groupIndex,
+        const std::size_t sourceInstanceIndex, const Matrix4d& world,
+        const Matrix4d& object, const Matrix4d& explorer,
+        const Matrix4d& origin) noexcept {
+        if (arena_ && arena_->valid()) arena_->retainOccurrence(groupIndex,
+            sourceInstanceIndex, world, object, explorer, origin);
+    }
+    void retainSelectedOccurrences(
+        const std::vector<std::string>& identifiers) noexcept {
+        if (arena_ && arena_->valid())
+            arena_->retainSelectedOccurrences(identifiers);
+    }
+    void retainP5Group(const std::size_t slot, const SavedGroupOwner& group,
+        const std::vector<DefinitionData>& definitions,
+        const SavedGroupFinalResult& result) noexcept {
+        if (arena_ && arena_->valid())
+            arena_->retainP5Group(slot, group, definitions, result);
     }
     void projectWire(const double metersPerUnit) noexcept {
         if (!diagnostic_) return;
@@ -14112,6 +14454,7 @@ bool DebugProduceSavedGroupFinalResultImpl(
             && observation.resolution == 2048
             && observation.gutter == 4
             && completeCorners;
+        arenaSession.retainP5Group(0, group, definitions, *result);
         arenaSession.projectWire(observationUnit);
         if (observation.complete) observation.failureStage.clear();
         return observation.complete;
@@ -14396,6 +14739,14 @@ bool ProduceSavedProducerBatchImpl(
                 if (occurrence.empty()
                     || !MatrixFromTransform(worldTransform, transform))
                     return false;
+                Matrix4d objectMatrix, explorerMatrix, originMatrix;
+                if (MatrixFromTransform(objectTransform, objectMatrix)
+                    && MatrixFromTransform(node.Location.Transformation(),
+                        explorerMatrix)
+                    && MatrixFromTransform(meshOrigin, originMatrix))
+                    arenaSession.retainOccurrence(groupIndex,
+                        sourceInstanceIndex, transform, objectMatrix,
+                        explorerMatrix, originMatrix);
                 occurrences[groupIndex].entries.push_back({occurrence,
                     definition, sourceInstanceIndex, transform});
                 completeAssembly->occurrenceIdentifiers.push_back(occurrence);
@@ -14412,6 +14763,8 @@ bool ProduceSavedProducerBatchImpl(
                 if (selectedEntities.count(occurrence) != 0)
                     completeAssembly->selectedOccurrenceIdentifiers.push_back(
                         occurrence);
+            arenaSession.retainSelectedOccurrences(
+                completeAssembly->selectedOccurrenceIdentifiers);
             bool distinctTransform = false;
             for (std::size_t first = 0;
                  first < completeAssembly->occurrenceTransforms.size(); ++first)
@@ -14529,6 +14882,9 @@ bool ProduceSavedProducerBatchImpl(
             && observation.outputCounts.size() == 2
             && observation.outputCounts[0] == 5
             && observation.outputCounts[1] == 1;
+        for (std::size_t index = 0; index < groups.size(); ++index)
+            arenaSession.retainP5Group(index, groups[index],
+                definitions[index], *results[index]);
         arenaSession.projectWire(observationUnit);
         if (completeAssembly) {
             completeAssembly->batchReady = observation.complete;
