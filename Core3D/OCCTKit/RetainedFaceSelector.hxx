@@ -27,6 +27,7 @@
 #include <atomic>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <set>
 
 namespace core3d::retained_face_selector {
@@ -90,6 +91,182 @@ struct BoundaryUse {
 };
 
 struct Resolution;
+class SourceStageProofIssuer;
+
+namespace detail {
+struct Affine final {
+    // Row-major linear transform plus a millimetre translation. This is a
+    // derived value only: persisted frame and BRep values are never rewritten.
+    std::array<double, 9> linear{{1, 0, 0, 0, 1, 0, 0, 0, 1}};
+    std::array<double, 3> translationMM{};
+};
+
+inline double Determinant(const Affine& value) noexcept {
+    const auto& a = value.linear;
+    return a[0] * (a[4] * a[8] - a[5] * a[7])
+        - a[1] * (a[3] * a[8] - a[5] * a[6])
+        + a[2] * (a[3] * a[7] - a[4] * a[6]);
+}
+inline bool Similarity(const Affine& value, double& absoluteScale) noexcept {
+    for (double component : value.linear) if (!std::isfinite(component)) return false;
+    for (double component : value.translationMM) if (!std::isfinite(component)) return false;
+    const auto& a = value.linear;
+    const auto dotColumn = [&](int first, int second) {
+        return a[first] * a[second] + a[3 + first] * a[3 + second]
+            + a[6 + first] * a[6 + second];
+    };
+    const double squared = dotColumn(0, 0);
+    if (!std::isfinite(squared) || squared < 1e-12) return false;
+    const double tolerance = 1e-10 * std::max(1.0, squared);
+    if (std::abs(dotColumn(1, 1) - squared) > tolerance
+        || std::abs(dotColumn(2, 2) - squared) > tolerance
+        || std::abs(dotColumn(0, 1)) > tolerance
+        || std::abs(dotColumn(0, 2)) > tolerance
+        || std::abs(dotColumn(1, 2)) > tolerance
+        || std::abs(Determinant(value)) < 1e-12) return false;
+    absoluteScale = std::sqrt(squared);
+    return std::isfinite(absoluteScale) && absoluteScale > 0;
+}
+inline bool Inverse(const Affine& value, Affine& output) noexcept {
+    double ignored = 0;
+    if (!Similarity(value, ignored)) return false;
+    const auto& a = value.linear;
+    const double determinant = Determinant(value);
+    Affine result;
+    result.linear = {{
+        (a[4] * a[8] - a[5] * a[7]) / determinant,
+        (a[2] * a[7] - a[1] * a[8]) / determinant,
+        (a[1] * a[5] - a[2] * a[4]) / determinant,
+        (a[5] * a[6] - a[3] * a[8]) / determinant,
+        (a[0] * a[8] - a[2] * a[6]) / determinant,
+        (a[2] * a[3] - a[0] * a[5]) / determinant,
+        (a[3] * a[7] - a[4] * a[6]) / determinant,
+        (a[1] * a[6] - a[0] * a[7]) / determinant,
+        (a[0] * a[4] - a[1] * a[3]) / determinant,
+    }};
+    for (int row = 0; row < 3; ++row)
+        result.translationMM[row] = -(result.linear[3 * row] * value.translationMM[0]
+            + result.linear[3 * row + 1] * value.translationMM[1]
+            + result.linear[3 * row + 2] * value.translationMM[2]);
+    output = result;
+    return true;
+}
+inline Affine Compose(const Affine& first, const Affine& second) noexcept {
+    Affine result;
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column) {
+            result.linear[3 * row + column] = 0;
+            for (int inner = 0; inner < 3; ++inner)
+                result.linear[3 * row + column] += first.linear[3 * row + inner]
+                    * second.linear[3 * inner + column];
+        }
+        result.translationMM[row] = first.translationMM[row];
+        for (int inner = 0; inner < 3; ++inner)
+            result.translationMM[row] += first.linear[3 * row + inner]
+                * second.translationMM[inner];
+    }
+    return result;
+}
+inline std::array<double, 3> Point(const Affine& value,
+    const std::array<double, 3>& point) noexcept {
+    std::array<double, 3> result{};
+    for (int row = 0; row < 3; ++row) {
+        result[row] = value.translationMM[row];
+        for (int column = 0; column < 3; ++column)
+            result[row] += value.linear[3 * row + column] * point[column];
+    }
+    return result;
+}
+inline bool UnitVector(const std::array<double, 3>& value,
+    std::array<double, 3>& output) noexcept {
+    const double length = std::hypot(std::hypot(value[0], value[1]), value[2]);
+    if (!std::isfinite(length) || length < 1e-12) return false;
+    output = {value[0] / length, value[1] / length, value[2] / length};
+    return true;
+}
+inline bool Tangent(const Affine& value, const std::array<double, 3>& tangent,
+    std::array<double, 3>& output) noexcept {
+    std::array<double, 3> raw{};
+    for (int row = 0; row < 3; ++row)
+        for (int column = 0; column < 3; ++column)
+            raw[row] += value.linear[3 * row + column] * tangent[column];
+    return UnitVector(raw, output);
+}
+inline bool Normal(const Affine& value, const std::array<double, 3>& normal,
+    std::array<double, 3>& output) noexcept {
+    Affine inverse;
+    if (!Inverse(value, inverse)) return false;
+    std::array<double, 3> raw{};
+    for (int row = 0; row < 3; ++row)
+        for (int column = 0; column < 3; ++column)
+            raw[row] += inverse.linear[3 * column + row] * normal[column];
+    return UnitVector(raw, output);
+}
+inline bool ProfileAffine(const profile::Parameters& parameters, Affine& output) noexcept {
+    if (!std::isfinite(parameters.metersPerUnit) || parameters.metersPerUnit <= 0
+        || parameters.definition.plane < 0 || parameters.definition.plane > 2) return false;
+    try {
+        Affine plane;
+        if (parameters.definition.plane == 1)
+            plane.linear = {{1, 0, 0, 0, 0, 1, 0, 1, 0}};
+        else if (parameters.definition.plane == 2)
+            plane.linear = {{0, 0, 1, 1, 0, 0, 0, 1, 0}};
+        Affine frame;
+        if (parameters.constructionFrame) {
+            gp_Trsf transform;
+            if (!parameters.constructionFrame->Transform(transform)) return false;
+            for (int row = 0; row < 3; ++row)
+                for (int column = 0; column < 3; ++column)
+                    frame.linear[3 * row + column] = transform.Value(row + 1, column + 1);
+            const double millimetresPerUnit = 1000.0 * parameters.metersPerUnit;
+            for (int row = 0; row < 3; ++row)
+                frame.translationMM[row] = transform.Value(row + 1, 4) * millimetresPerUnit;
+        }
+        const Affine result = Compose(frame, plane);
+        double scale = 0;
+        if (!Similarity(result, scale)) return false;
+        output = result;
+        return true;
+    } catch (...) { return false; }
+}
+} // namespace detail
+
+class SourceStageProof final {
+public:
+#if DEBUG
+    // Geometry fixtures can exercise the kernel, but this adapter is absent
+    // from Release and cannot issue persisted or production authority.
+    static std::optional<SourceStageProof> DebugFixture(const SourceRelativeV1& binding,
+        const std::vector<double>& currentProfileValues) noexcept {
+        try {
+            if (!ValidCaptureProfile(binding)) return std::nullopt;
+            std::vector<double> captureValues(binding.captureProfileScalarBits.size());
+            for (std::size_t index = 0; index < captureValues.size(); ++index)
+                std::memcpy(&captureValues[index], &binding.captureProfileScalarBits[index], sizeof(double));
+            profile::Parameters capture, current;
+            std::vector<double> canonical;
+            detail::Affine captureTransform, currentTransform;
+            if (!profile::Decode(captureValues, capture)
+                || !profile::Decode(currentProfileValues, current)
+                || current.definition.revolve || !current.shells.empty()
+                || !profile::Encode(current, canonical) || canonical != currentProfileValues
+                || capture.metersPerUnit != current.metersPerUnit
+                || !detail::ProfileAffine(capture, captureTransform)
+                || !detail::ProfileAffine(current, currentTransform)) return std::nullopt;
+            return SourceStageProof(binding, captureTransform, currentTransform);
+        } catch (...) { return std::nullopt; }
+    }
+#endif
+private:
+    SourceRelativeV1 binding_;
+    detail::Affine capture_, current_;
+    SourceStageProof(const SourceRelativeV1& binding, const detail::Affine& capture,
+        const detail::Affine& current) : binding_(binding), capture_(capture), current_(current) {}
+    friend class SourceStageProofIssuer;
+    friend Refusal ResolveImpl(const TopoDS_Shape&, const SelectorIntent&,
+        const SourceStageProof*, double, et::ReplayBudget&, const std::atomic_bool&,
+        Resolution&) noexcept;
+};
 
 class FaceMembershipProof final {
 public:
@@ -103,6 +280,10 @@ public:
     std::uint32_t selectedEdgeCount() const noexcept { return selectedEdgeCount_; }
     bool discoveryComplete() const noexcept { return true; }
     Coverage coverage() const noexcept { return coverage_; }
+#if DEBUG
+    const LegacyIntent& debugEvaluatedIntent() const noexcept { return evaluatedIntent_; }
+    const std::array<double, 2>& debugScopeBoundsMM() const noexcept { return scopeBoundsMM_; }
+#endif
 private:
     FaceMembershipProof() = default;
     SelectorIntent intent_;
@@ -111,8 +292,11 @@ private:
     std::vector<BoundaryUse> boundaryUses_;
     std::uint32_t wireCount_ = 0, uniqueEdgeCount_ = 0, selectedEdgeCount_ = 0;
     Coverage coverage_ = Coverage::EntireBoundary;
-    friend Refusal Resolve(const TopoDS_Shape&, const SelectorIntent&, double,
-        et::ReplayBudget&, const std::atomic_bool&, Resolution&) noexcept;
+    LegacyIntent evaluatedIntent_;
+    std::array<double, 2> scopeBoundsMM_{};
+    friend Refusal ResolveImpl(const TopoDS_Shape&, const SelectorIntent&,
+        const SourceStageProof*, double, et::ReplayBudget&, const std::atomic_bool&,
+        Resolution&) noexcept;
 };
 
 struct Resolution {
@@ -146,6 +330,60 @@ inline bool ScopeOf(const SelectorIntent& intent, PlanarFaceScope& output) {
     if (const auto* line = std::get_if<Line>(&intent)) { output = line->face; return true; }
     return false;
 }
+struct OrientedScope final {
+    Side side = Side::Min;
+    std::array<double, 3> originMM{};
+    std::array<double, 3> axisDirection{};
+    std::array<double, 3> outwardNormal{};
+};
+inline std::array<double, 3> AxisVector(Axis axis, double sign = 1) noexcept {
+    if (axis == Axis::X) return {sign, 0, 0};
+    if (axis == Axis::Y) return {0, sign, 0};
+    return {0, 0, sign};
+}
+inline bool TransformRelative(const SourceRelativeV1& source,
+    const Affine& capture, const Affine& current, LegacyIntent& output,
+    std::optional<OrientedScope>& scope, Affine& effective) noexcept {
+    try {
+        if (source.coordinateSpace == CoordinateSpace::SourceChart) effective = current;
+        else {
+            Affine inverseCapture;
+            if (!Inverse(capture, inverseCapture)) return false;
+            effective = Compose(current, inverseCapture);
+        }
+        double radiusScale = 0;
+        if (!Similarity(effective, radiusScale)) return false;
+        return std::visit([&](const auto& inner) {
+            using T = std::decay_t<decltype(inner)>;
+            if constexpr (std::is_same_v<T, CircleRim>) {
+                CircleRim transformed = inner;
+                transformed.centerMM = Point(effective, inner.centerMM);
+                if (!Normal(effective, inner.normal, transformed.normal)) return false;
+                transformed.radiusMM *= radiusScale;
+                if (!std::isfinite(transformed.radiusMM)) return false;
+                output = transformed;
+                return true;
+            } else {
+                OrientedScope oriented;
+                oriented.side = inner.face.side;
+                oriented.originMM = Point(effective, {0, 0, 0});
+                const auto axis = AxisVector(inner.face.axis);
+                const double sideSign = inner.face.side == Side::Max ? 1.0 : -1.0;
+                if (!Tangent(effective, axis, oriented.axisDirection)
+                    || !Normal(effective, AxisVector(inner.face.axis, sideSign),
+                        oriented.outwardNormal)) return false;
+                scope = oriented;
+                if constexpr (std::is_same_v<T, Line>) {
+                    Line transformed = inner;
+                    transformed.locationMM = Point(effective, inner.locationMM);
+                    if (!Tangent(effective, inner.direction, transformed.direction)) return false;
+                    output = transformed;
+                } else output = inner;
+                return true;
+            }
+        }, source.inner);
+    } catch (...) { return false; }
+}
 inline Refusal MapWalk(tb::WalkStatus status) noexcept {
     // A cancelled walk reports cancellation; only a genuine denial or a
     // failed traversal maps to the budget/native refusals.
@@ -162,9 +400,9 @@ inline bool FacePlane(const TopoDS_Face& face, gp_Pln& plane) {
 }
 } // namespace detail
 
-inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& intent,
-    double metersPerLocalUnit, et::ReplayBudget& budget, const std::atomic_bool& cancelled,
-    Resolution& output) noexcept {
+inline Refusal ResolveImpl(const TopoDS_Shape& inputStage, const SelectorIntent& intent,
+    const SourceStageProof* sourceProof, double metersPerLocalUnit,
+    et::ReplayBudget& budget, const std::atomic_bool& cancelled, Resolution& output) noexcept {
     output = {};
     try {
         if (!ValidIntent(intent, true) || !std::isfinite(metersPerLocalUnit) || metersPerLocalUnit <= 0) {
@@ -173,6 +411,31 @@ inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& int
         if (std::holds_alternative<ReservedSplineEdge>(intent)) {
             output.refusal = Refusal::SplineIdentityUnavailable; return output.refusal;
         }
+        // A source-relative predicate is meaningful only after the R2 caller
+        // proves and supplies its source/stage context. The legacy entry point
+        // must fail closed; it never unwraps or interprets the inner intent in
+        // the capture frame.
+        LegacyIntent evaluated;
+        std::optional<detail::OrientedScope> orientedScope;
+        detail::Affine effective;
+        if (const auto* relative = std::get_if<SourceRelativeV1>(&intent)) {
+            if (!sourceProof) {
+                output.refusal = Refusal::UnsupportedCarrier; return output.refusal;
+            }
+            if (!(sourceProof->binding_ == *relative)) {
+                output.refusal = Refusal::StaleSource; return output.refusal;
+            }
+            if (!detail::TransformRelative(*relative, sourceProof->capture_, sourceProof->current_,
+                    evaluated, orientedScope, effective)) {
+                output.refusal = Refusal::UnsupportedTransform; return output.refusal;
+            }
+        } else if (const auto* planar = std::get_if<PlanarFaceBoundary>(&intent)) evaluated = *planar;
+        else if (const auto* line = std::get_if<Line>(&intent)) evaluated = *line;
+        else if (const auto* circle = std::get_if<CircleRim>(&intent)) evaluated = *circle;
+        else { output.refusal = Refusal::SplineIdentityUnavailable; return output.refusal; }
+        const SelectorIntent evaluatedIntent = std::visit([](const auto& value) -> SelectorIntent {
+            return value;
+        }, evaluated);
         if (inputStage.IsNull()) { output.refusal = Refusal::FaceMissing; return output.refusal; }
         if (cancelled.load()) { output.refusal = Refusal::Cancelled; return output.refusal; }
         const double localTolerance = 1e-4 / (1000.0 * metersPerLocalUnit);
@@ -190,7 +453,46 @@ inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& int
         const TopTools_IndexedMapOfShape& faceMap = census.faces;
         std::vector<TopoDS_Face> candidates;
         PlanarFaceScope scope;
-        if (detail::ScopeOf(intent, scope)) {
+        std::array<double, 2> projectionBoundsMM{};
+        if (orientedScope) {
+            const double millimetresPerLocalUnit = 1000.0 * metersPerLocalUnit;
+            const gp_Pnt origin(orientedScope->originMM[0] / millimetresPerLocalUnit,
+                orientedScope->originMM[1] / millimetresPerLocalUnit,
+                orientedScope->originMM[2] / millimetresPerLocalUnit);
+            const gp_Dir axis(orientedScope->axisDirection[0], orientedScope->axisDirection[1],
+                orientedScope->axisDirection[2]);
+            const gp_Dir requested(orientedScope->outwardNormal[0], orientedScope->outwardNormal[1],
+                orientedScope->outwardNormal[2]);
+            double minimum = std::numeric_limits<double>::infinity();
+            double maximum = -std::numeric_limits<double>::infinity();
+            for (int index = 1; index <= faceMap.Extent(); ++index) {
+                if (!budget.visit(1, tb::Site::C02FacePasses)) {
+                    output.refusal = Refusal::Budget; return output.refusal;
+                }
+                gp_Pln plane;
+                if (!detail::FacePlane(TopoDS::Face(faceMap(index)), plane)
+                    || !plane.Axis().Direction().IsParallel(requested, 1e-8)) continue;
+                const double projection = gp_Vec(origin, plane.Location()).Dot(gp_Vec(axis));
+                minimum = std::min(minimum, projection);
+                maximum = std::max(maximum, projection);
+            }
+            if (!std::isfinite(minimum) || !std::isfinite(maximum)) {
+                output.refusal = Refusal::FaceMissing; return output.refusal;
+            }
+            const double extreme = orientedScope->side == Side::Max ? maximum : minimum;
+            projectionBoundsMM = {minimum * millimetresPerLocalUnit,
+                                  maximum * millimetresPerLocalUnit};
+            for (int index = 1; index <= faceMap.Extent(); ++index) {
+                if (!budget.visit(1, tb::Site::C02FacePasses)) {
+                    output.refusal = Refusal::Budget; return output.refusal;
+                }
+                gp_Pln plane; const TopoDS_Face face = TopoDS::Face(faceMap(index));
+                if (!detail::FacePlane(face, plane)
+                    || !plane.Axis().Direction().IsParallel(requested, 1e-8)) continue;
+                const double projection = gp_Vec(origin, plane.Location()).Dot(gp_Vec(axis));
+                if (std::abs(projection - extreme) <= localTolerance) candidates.push_back(face);
+            }
+        } else if (detail::ScopeOf(evaluatedIntent, scope)) {
             double extreme = scope.side == Side::Max
                 ? -std::numeric_limits<double>::infinity() : std::numeric_limits<double>::infinity();
             for (int index = 1; index <= faceMap.Extent(); ++index) {
@@ -217,7 +519,7 @@ inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& int
                     candidates.push_back(face);
             }
         } else {
-            const auto& circle = std::get<CircleRim>(intent);
+            const auto& circle = std::get<CircleRim>(evaluatedIntent);
             const gp_Pnt center(circle.centerMM[0] / (1000.0 * metersPerLocalUnit),
                 circle.centerMM[1] / (1000.0 * metersPerLocalUnit),
                 circle.centerMM[2] / (1000.0 * metersPerLocalUnit));
@@ -236,7 +538,8 @@ inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& int
         if (candidates.size() > 1) { output.refusal = Refusal::FaceAmbiguous; return output.refusal; }
 
         auto proof = std::shared_ptr<FaceMembershipProof>(new FaceMembershipProof);
-        proof->intent_ = intent; proof->face_ = candidates.front();
+        proof->intent_ = intent; proof->evaluatedIntent_ = evaluated;
+        proof->scopeBoundsMM_ = projectionBoundsMM; proof->face_ = candidates.front();
         // C02: the selected-face plane read is charged like every other face
         // inspection.
         if (!budget.visit(1, tb::Site::C02FacePasses)) {
@@ -369,7 +672,7 @@ inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& int
             output.refusal = Refusal::InvalidFaceUse; return output.refusal;
         }
 
-        if (const auto* line = std::get_if<Line>(&intent)) {
+        if (const auto* line = std::get_if<Line>(&evaluatedIntent)) {
             proof->coverage_ = Coverage::SelectedLine;
             const gp_Pnt witness(line->locationMM[0] / (1000.0 * metersPerLocalUnit),
                 line->locationMM[1] / (1000.0 * metersPerLocalUnit),
@@ -388,7 +691,7 @@ inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& int
             }
             if (proof->selectedEdgeCount_ == 0) { output.refusal = Refusal::FaceMissing; return output.refusal; }
             if (proof->selectedEdgeCount_ > 1) { output.refusal = Refusal::SplitEdge; return output.refusal; }
-        } else if (const auto* circle = std::get_if<CircleRim>(&intent)) {
+        } else if (const auto* circle = std::get_if<CircleRim>(&evaluatedIntent)) {
             proof->coverage_ = Coverage::EntireBoundary;
             if (proof->wireCount_ != 1 || proof->boundaryUses_.size() != 1) {
                 output.refusal = Refusal::PartialCircle; return output.refusal;
@@ -426,6 +729,18 @@ inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& int
         }
         output.proof = std::move(proof); output.refusal = Refusal::None; return output.refusal;
     } catch (...) { output = {}; output.refusal = Refusal::NativeFailure; return output.refusal; }
+}
+
+inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& intent,
+    double metersPerLocalUnit, et::ReplayBudget& budget, const std::atomic_bool& cancelled,
+    Resolution& output) noexcept {
+    return ResolveImpl(inputStage, intent, nullptr, metersPerLocalUnit, budget, cancelled, output);
+}
+
+inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& intent,
+    const SourceStageProof& sourceProof, double metersPerLocalUnit, et::ReplayBudget& budget,
+    const std::atomic_bool& cancelled, Resolution& output) noexcept {
+    return ResolveImpl(inputStage, intent, &sourceProof, metersPerLocalUnit, budget, cancelled, output);
 }
 
 inline Refusal VerifyReceipt(const FaceMembershipProof& proof, const et::Step& step,

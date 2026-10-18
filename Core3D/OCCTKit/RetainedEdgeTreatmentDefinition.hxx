@@ -125,7 +125,7 @@ inline bool unit(const std::array<double, 3>& value) {
     return std::isfinite(squared) && std::abs(squared - 1.0) <= 1e-12;
 }
 inline bool valid(const Definition& definition, Refusal& refusal) {
-    if (definition.schema != 1 && definition.schema != 2 && definition.schema != 3) { refusal = Refusal::UnsupportedVersion; return false; }
+    if (definition.schema < 1 || definition.schema > 4) { refusal = Refusal::UnsupportedVersion; return false; }
     if (!retained_recipe::Valid(definition.owner) || !retained_recipe::Valid(definition.base.source)
         || !retained_recipe::Nonzero(definition.base.sourceNode)
         || !retained_recipe::Nonzero(definition.base.sourceRecipeDigest)
@@ -184,7 +184,17 @@ inline bool valid(const Definition& definition, Refusal& refusal) {
             const bool schemaTwo = definition.schema == 2 && step.kind == Kind::ConstantFillet;
             const bool schemaThree = definition.schema == 3
                 && (step.kind == Kind::Chamfer || step.kind == Kind::ConstantFillet);
-            if ((!schemaTwo && !schemaThree)
+            const bool schemaFour = definition.schema == 4
+                && (step.kind == Kind::Chamfer || step.kind == Kind::ConstantFillet);
+            const bool proofOne = step.selector->proofVersion == 1
+                && !std::holds_alternative<retained_face_selector::SourceRelativeV1>(
+                    step.selector->intent);
+            const bool proofTwo = step.selector->proofVersion == 2
+                && std::holds_alternative<retained_face_selector::SourceRelativeV1>(
+                    step.selector->intent);
+            if ((!schemaTwo && !schemaThree && !schemaFour)
+                || (definition.schema < 4 && !proofOne)
+                || (definition.schema == 4 && !proofOne && !proofTwo)
                 || !retained_face_selector::ValidReceipt(*step.selector)
                 || step.selector->entries.size() != step.anchors.size()) {
                 refusal = Refusal::MalformedCarrier; return false;
@@ -263,7 +273,7 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes, std::optional<Definit
         }
         detail::Reader reader{bytes, bytes.size() - 32};
         char magic[4]; std::uint64_t value = 0, count = 0; Definition definition;
-        if (!reader.raw(magic, 4) || !reader.u(4, value) || (value != 1 && value != 2 && value != 3)) {
+        if (!reader.raw(magic, 4) || !reader.u(4, value) || value < 1 || value > 4) {
             refusal = Refusal::UnsupportedVersion; return false;
         }
         definition.schema = std::uint32_t(value);

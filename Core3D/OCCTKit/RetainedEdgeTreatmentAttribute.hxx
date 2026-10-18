@@ -31,7 +31,40 @@ private: friend class BinaryDriver; std::shared_ptr<const Payload> value_;std::s
 using Attribute=Core3D_RetainedEdgeTreatment;
 struct Record { TDF_Label label,owner;std::shared_ptr<const Payload> value;TopoDS_Shape current;bool IsCurrent(const Handle(TDocStd_Document)& document,const TDF_Label& expected) const noexcept{return !document.IsNull()&&!label.IsNull()&&!owner.IsNull()&&owner.IsEqual(expected)&&owner.Data()==document->GetData()&&label.Father().IsEqual(owner)&&value&&!current.IsNull()&&current.IsEqual(XCAFDoc_ShapeTool::GetShape(owner));} };
 struct RecordR2 { TDF_Label label,owner;std::shared_ptr<const PayloadR2> value;TopoDS_Shape current;bool IsCurrent(const Handle(TDocStd_Document)& document,const TDF_Label& expected) const noexcept{return !document.IsNull()&&!label.IsNull()&&!owner.IsNull()&&owner.IsEqual(expected)&&owner.Data()==document->GetData()&&label.Father().IsEqual(owner)&&value&&!current.IsNull()&&current.IsEqual(XCAFDoc_ShapeTool::GetShape(owner));} };
-inline bool Read(const Handle(TDocStd_Document)& document,const TDF_Label& owner,std::optional<Record>& output,Refusal& refusal) noexcept {output.reset();try{if(document.IsNull()||owner.IsNull()||owner.Data()!=document->GetData()){refusal=Refusal::IdentityMismatch;return false;}Handle(Attribute) found;TDF_Label foundLabel;std::size_t count=0;for(TDF_ChildIterator it(owner);it.More();it.Next()){Handle(Attribute)a;if(it.Value().FindAttribute(AttributeID(),a)){found=a;foundLabel=it.Value();++count;}}if(count==0){refusal=Refusal::None;return true;}if(count!=1||found.IsNull()||!found->value()||foundLabel.Father()!=owner){refusal=Refusal::MalformedCarrier;return false;}std::optional<Definition> decoded;if(!Decode(found->value()->bytes,decoded,refusal)||!decoded||!(decoded->owner==found->value()->definition.owner)){refusal=Refusal::MalformedCarrier;return false;}Handle(TNaming_NamedShape) named;if(!foundLabel.FindAttribute(TNaming_NamedShape::GetID(),named)){refusal=Refusal::MalformedCarrier;return false;}Record record{foundLabel,owner,found->value(),TNaming_Tool::GetShape(named)};if(!record.IsCurrent(document,owner)){refusal=Refusal::NoncurrentSource;return false;}output=std::move(record);refusal=Refusal::None;return true;}catch(...){output.reset();refusal=Refusal::MalformedCarrier;return false;}}
+inline bool Read(const Handle(TDocStd_Document)& document,const TDF_Label& owner,
+    std::optional<Record>& output,Refusal& refusal) noexcept {
+    output.reset();
+    try {
+        if(document.IsNull()||owner.IsNull()||owner.Data()!=document->GetData()){
+            refusal=Refusal::IdentityMismatch;return false;
+        }
+        Handle(Attribute) found;TDF_Label foundLabel;std::size_t count=0;
+        for(TDF_ChildIterator it(owner);it.More();it.Next()){
+            Handle(Attribute)a;
+            if(it.Value().FindAttribute(AttributeID(),a)){found=a;foundLabel=it.Value();++count;}
+        }
+        if(count==0){refusal=Refusal::None;return true;}
+        if(count!=1||found.IsNull()||!found->value()||foundLabel.Father()!=owner){
+            refusal=Refusal::MalformedCarrier;return false;
+        }
+        std::optional<Definition> decoded;
+        // Schema 4 is a pure-value shadow for the R2 lane. It may use the
+        // ordinary codec, but it is never admitted on the ordinary OCAF arm.
+        if(!Decode(found->value()->bytes,decoded,refusal)||!decoded||decoded->schema==4
+            ||!(decoded->owner==found->value()->definition.owner)){
+            refusal=Refusal::MalformedCarrier;return false;
+        }
+        Handle(TNaming_NamedShape) named;
+        if(!foundLabel.FindAttribute(TNaming_NamedShape::GetID(),named)){
+            refusal=Refusal::MalformedCarrier;return false;
+        }
+        Record record{foundLabel,owner,found->value(),TNaming_Tool::GetShape(named)};
+        if(!record.IsCurrent(document,owner)){refusal=Refusal::NoncurrentSource;return false;}
+        output=std::move(record);refusal=Refusal::None;return true;
+    } catch(...) {
+        output.reset();refusal=Refusal::MalformedCarrier;return false;
+    }
+}
 inline bool ReadAll(const Handle(TDocStd_Document)& document,std::size_t priorBytes,std::vector<Record>& output,Refusal& refusal) noexcept {output.clear();try{if(document.IsNull()){refusal=Refusal::MalformedCarrier;return false;}std::size_t total=priorBytes;for(TDF_ChildIterator it(document->Main(),Standard_True);it.More();it.Next()){Handle(Attribute)a;if(!it.Value().FindAttribute(AttributeID(),a))continue;if(it.Value().Father().IsNull()||!a->value()){refusal=Refusal::MalformedCarrier;return false;}std::optional<Record> one;if(!Read(document,it.Value().Father(),one,refusal)||!one)return false;if(one->label!=it.Value()){refusal=Refusal::MultipleOwners;return false;}if(one->value->bytes.size()>8388608-total){refusal=Refusal::Budget;return false;}total+=one->value->bytes.size();output.push_back(*one);}refusal=Refusal::None;return true;}catch(...){output.clear();refusal=Refusal::MalformedCarrier;return false;}}
 
 inline bool ReadR2(const Handle(TDocStd_Document)& document,const TDF_Label& owner,

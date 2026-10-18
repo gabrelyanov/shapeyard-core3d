@@ -223,8 +223,10 @@ inline bool Valid(const Definition& value, et::Refusal& refusal) noexcept {
         return et::detail::valid(lifted, refusal);
     }
     const auto* boolean = std::get_if<BooleanBaseBinding>(&value.base);
-    if ((value.schema != 2 && value.schema != 3) || !rr::Valid(value.owner) || !boolean || !Valid(*boolean)
+    if ((value.schema != 2 && value.schema != 3 && value.schema != 4)
+        || !rr::Valid(value.owner) || !boolean || !Valid(*boolean)
         || (boolean->format == PrefixFormat::A1RecipeComposite && value.schema != 3)
+        || (value.schema == 4 && boolean->format != PrefixFormat::SYRS)
         || boolean->source.document != value.owner.document || boolean->source.entity != value.owner.entity
         || boolean->source.definition != value.owner.definition || !rr::Valid(value.issuance)
         || value.steps.size() > et::MaximumSteps) { refusal = et::Refusal::MalformedCarrier; return false; }
@@ -237,6 +239,35 @@ inline bool Valid(const Definition& value, et::Refusal& refusal) noexcept {
     shadow.metersPerLocalUnit = boolean->metersPerLocalUnit;
     et::Definition checked{value.schema, value.owner, shadow, value.issuance, value.outputNode, value.steps};
     if (!et::detail::valid(checked, refusal)) return false;
+    if (value.schema == 4) {
+        try {
+            const auto* prefix = std::get_if<LegacyPrefixBinding>(&boolean->prefix);
+            if (!prefix || boolean->sourceSchema < 1 || boolean->sourceSchema > 4) {
+                refusal = et::Refusal::UnsupportedVersion; return false;
+            }
+            for (const auto& step : value.steps) {
+                if (!step.selector || step.selector->proofVersion != 2) continue;
+                const auto* relative = std::get_if<fs::SourceRelativeV1>(&step.selector->intent);
+                if (!relative || relative->sourceOwnerDocument != boolean->source.document
+                    || relative->sourceOwnerEntity != boolean->source.entity
+                    || relative->sourceOwnerDefinition != boolean->source.definition
+                    || relative->inputRootNode != prefix->rootNode
+                    || relative->sourceFeature != boolean->source.sourceFeature) {
+                    refusal = et::Refusal::IdentityMismatch; return false;
+                }
+                std::vector<double> capture(relative->captureProfileScalarBits.size());
+                for (std::size_t index = 0; index < capture.size(); ++index)
+                    std::memcpy(&capture[index], &relative->captureProfileScalarBits[index], sizeof(double));
+                profile::Parameters captured;
+                if (!profile::Decode(capture, captured)
+                    || captured.metersPerUnit != boolean->metersPerLocalUnit) {
+                    refusal = et::Refusal::UnitMismatch; return false;
+                }
+            }
+        } catch (...) {
+            refusal = et::Refusal::MalformedCarrier; return false;
+        }
+    }
     refusal = et::Refusal::None;
     return true;
 }
@@ -357,13 +388,14 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes, std::optional<Definit
         // families stay with the ordinary decoder; family 3 is exclusively
         // the R2 layout and is admitted only at schema 2 or 3.
         if (!IsR2Carrier(bytes) && (schema == 1
-            || ((schema == 2 || schema == 3) && bytes.size() > 60 && bytes[60] != 3))) {
+            || ((schema == 2 || schema == 3 || schema == 4)
+                && bytes.size() > 60 && bytes[60] != 3))) {
             std::optional<et::Definition> old;
             if (!et::Decode(bytes, old, refusal) || !old) return false;
             output = Definition{old->schema, old->owner, old->base, old->issuance, old->outputNode, old->steps};
             return true;
         }
-        if ((schema != 2 && schema != 3)
+        if ((schema != 2 && schema != 3 && schema != 4)
             || bytes.size() > et::MaximumEnvelopeBytes || bytes.size() < 32) {
             refusal = et::Refusal::UnsupportedVersion; return false;
         }

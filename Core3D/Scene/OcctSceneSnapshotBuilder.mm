@@ -12672,6 +12672,30 @@ struct DebugP2bMappedControl final {
 };
 static_assert(sizeof(DebugP2bMappedControl) <= 4096);
 
+struct DebugP2bWireHeader final {
+    char magic[8]{'S', 'Y', 'P', '2', 'B', 'W', '1', 0};
+    std::uint16_t version = 1;
+    std::uint16_t headerWidth = 48;
+    std::uint16_t recordWidth = 48;
+    std::uint16_t recordCount = 0;
+    std::uint64_t recordsOffset = 48;
+    std::uint64_t keysOffset = 0;
+    std::uint64_t payloadOffset = 0;
+    std::uint64_t totalLength = 0;
+};
+struct DebugP2bWireRecord final {
+    std::uint64_t keyOffset = 0;
+    std::uint32_t keyLength = 0;
+    std::uint16_t kind = 0;
+    std::uint16_t width = 0;
+    std::uint64_t count = 0;
+    std::uint64_t valueOffset = 0;
+    std::uint64_t valueLength = 0;
+    std::uint64_t flags = 0;
+};
+static_assert(sizeof(DebugP2bWireHeader) == 48);
+static_assert(sizeof(DebugP2bWireRecord) == 48);
+
 std::atomic<std::uint64_t> gDebugP2bActiveBytes{0};
 std::atomic<std::uint64_t> gDebugP2bActiveMappings{0};
 std::atomic<std::uint64_t> gDebugP2bTotalReservations{0};
@@ -12819,6 +12843,10 @@ struct DebugP2bObservationDiagnostic final {
     bool s1BoundRefusalVerified = false;
     bool s2CallbacksVerified = false;
     bool s2BoundRefusalVerified = false;
+    double metersPerUnit = 0;
+    std::uint64_t wireLength = 0;
+    std::uint64_t wireLeaseCountAfterReturn = 0;
+    NSData* __strong wire = nil;
     std::array<DebugP2bS1DiagnosticSlot, 2> s1Slots{};
     std::array<DebugP2bS2DiagnosticSlot, 2> s2Slots{};
 };
@@ -12857,6 +12885,14 @@ public:
     DebugP2bObservationArena& operator=(
         const DebugP2bObservationArena&) = delete;
     ~DebugP2bObservationArena() { close(); }
+    void retain() noexcept { references_.fetch_add(1, std::memory_order_relaxed); }
+    void release() noexcept {
+        if (references_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+            delete this;
+    }
+    std::uint64_t leaseCount() const noexcept {
+        return references_.load(std::memory_order_acquire);
+    }
     bool valid() const noexcept { return mapping_ != nullptr; }
     std::uint32_t failureCode() const noexcept { return failureCode_; }
     const asset_atlas::build::DebugLayoutObserver* layoutObserver(
@@ -12964,6 +13000,148 @@ public:
         }
         context.directory->states[4] = 1;
     }
+    NSData* serialize(const double metersPerUnit) noexcept {
+        if (!mapping_ || wireLength_ != 0 || !std::isfinite(metersPerUnit)
+            || !(metersPerUnit > 0)) {
+            fail(14);
+            return nil;
+        }
+        struct Spec final {
+            const char* key;
+            std::uint16_t kind;
+            std::uint16_t width;
+            std::uint64_t count;
+            const void* bytes;
+            std::uint64_t flags;
+        };
+        std::array<Spec, 24> specs{};
+        std::size_t next = 0;
+        const auto add = [&](const char* key, const std::uint16_t kind,
+                const std::uint16_t width, const std::uint64_t count,
+                const void* bytes, const std::uint64_t flags = 0) noexcept {
+            if (next < specs.size())
+                specs[next++] = {key, kind, width, count, bytes, flags};
+        };
+        static constexpr char schema[] = "shapeyard.p2b-observation.v1";
+        static constexpr char stage[] =
+            "saved-batch-before-current-validation";
+        static constexpr char status[] = "INCOMPLETE";
+        add("schema", 1, 1, sizeof(schema) - 1, schema);
+        add("captureStage", 1, 1, sizeof(stage) - 1, stage);
+        add("metersPerUnit", 5, 8, 1, &metersPerUnit);
+        add("captureStatus", 1, 1, sizeof(status) - 1, status);
+        static constexpr const char* keys[2][10] = {
+            {"s1.0.key", "s1.0.memberOffsets", "s1.0.chartOffsets",
+             "s1.0.finalTriangleMap", "s1.0.lineage", "s1.0.adjacency",
+             "s1.0.islands", "s2.0.samples", "s2.0.normal",
+             "s2.0.normalMask"},
+            {"s1.1.key", "s1.1.memberOffsets", "s1.1.chartOffsets",
+             "s1.1.finalTriangleMap", "s1.1.lineage", "s1.1.adjacency",
+             "s1.1.islands", "s2.1.samples", "s2.1.normal",
+             "s2.1.normalMask"},
+        };
+        for (std::size_t slot = 0; slot < contexts_.size(); ++slot) {
+            const auto& c = contexts_[slot];
+            const auto& b = bakeContexts_[slot];
+            const bool present = c.directory != nullptr;
+            add(keys[slot][0], 2, 1, present ? 32 : 0,
+                present ? c.directory->key : nullptr);
+            add(keys[slot][1], 3, 8, present ? c.directory->lengths[0] : 0,
+                c.memberOffsets);
+            add(keys[slot][2], 3, 8, present ? c.directory->lengths[1] : 0,
+                c.chartOffsets);
+            add(keys[slot][3], 4, 4, present ? c.directory->lengths[2] : 0,
+                c.finalTriangleMap, 1);
+            add(keys[slot][4], 6, 40, present ? c.directory->lengths[3] : 0,
+                c.lineage);
+            add(keys[slot][5], 6, 32, present ? c.directory->lengths[4] : 0,
+                c.adjacency);
+            add(keys[slot][6], 6, 48, present ? c.directory->lengths[5] : 0,
+                c.islands);
+            add(keys[slot][7], 6, 80, present ? c.directory->lengths[6] : 0,
+                b.samples);
+            add(keys[slot][8], 6, 128, present ? 1 : 0, b.normal);
+            add(keys[slot][9], 2, 1, present ? c.directory->lengths[7] : 0,
+                b.normalMask);
+        }
+        if (next != specs.size()) {
+            fail(14);
+            return nil;
+        }
+        std::uint64_t keysOffset = sizeof(DebugP2bWireHeader);
+        std::uint64_t tableBytes = 0;
+        if (!DebugP2bCheckedProduct(specs.size(),
+                sizeof(DebugP2bWireRecord), tableBytes)
+            || !DebugP2bCheckedAdd(keysOffset, tableBytes, keysOffset)) {
+            fail(14);
+            return nil;
+        }
+        std::uint64_t payloadOffset = keysOffset;
+        for (const auto& spec : specs) {
+            const std::size_t keyLength = std::strlen(spec.key);
+            if (keyLength > std::numeric_limits<std::uint32_t>::max()
+                || !DebugP2bCheckedAdd(payloadOffset, keyLength,
+                    payloadOffset)) {
+                fail(14);
+                return nil;
+            }
+        }
+        std::uint64_t total = payloadOffset;
+        for (const auto& spec : specs) {
+            std::uint64_t length = 0;
+            if (!DebugP2bCheckedProduct(spec.count, spec.width, length)
+                || (length != 0 && !spec.bytes)
+                || !DebugP2bCheckedAdd(total, length, total)
+                || total > kDebugP2bWireBytes) {
+                fail(14);
+                return nil;
+            }
+        }
+        auto* const base = static_cast<std::uint8_t*>(mapping_)
+            + std::size_t(kDebugP2bNativeBytes);
+        DebugP2bWireHeader header;
+        header.recordCount = std::uint16_t(specs.size());
+        header.keysOffset = keysOffset;
+        header.payloadOffset = payloadOffset;
+        header.totalLength = total;
+        std::memcpy(base, &header, sizeof(header));
+        std::uint64_t keyCursor = keysOffset;
+        std::uint64_t valueCursor = payloadOffset;
+        for (std::size_t index = 0; index < specs.size(); ++index) {
+            const auto& spec = specs[index];
+            const std::uint32_t keyLength = std::uint32_t(
+                std::strlen(spec.key));
+            const std::uint64_t valueLength = spec.count * spec.width;
+            const DebugP2bWireRecord record{keyCursor, keyLength,
+                spec.kind, spec.width, spec.count, valueCursor,
+                valueLength, spec.flags};
+            std::memcpy(base + sizeof(header) + index * sizeof(record),
+                &record, sizeof(record));
+            std::memcpy(base + keyCursor, spec.key, keyLength);
+            keyCursor += keyLength;
+            valueCursor += valueLength;
+        }
+        valueCursor = payloadOffset;
+        for (const auto& spec : specs) {
+            const std::uint64_t length = spec.count * spec.width;
+            if (length != 0)
+                std::memcpy(base + valueCursor, spec.bytes,
+                    std::size_t(length));
+            valueCursor += length;
+        }
+        wireLength_ = total;
+        retain();
+        DebugP2bObservationArena* const lease = this;
+        @try {
+            NSData* result = [[NSData alloc] initWithBytesNoCopy:base
+                length:std::size_t(total)
+                deallocator:^(void*, NSUInteger) { lease->release(); }];
+            if (result) return result;
+        } @catch (...) {}
+        release();
+        fail(15);
+        return nil;
+    }
     void copyDiagnostic(DebugP2bObservationDiagnostic& diagnostic) const noexcept {
         for (std::size_t index = 0; index < contexts_.size(); ++index) {
             const auto& context = contexts_[index];
@@ -13027,8 +13205,10 @@ private:
                 DebugP2bObservationState::Incomplete;
     }
     DebugP2bObserverAccount account_;
+    std::atomic<std::uint64_t> references_{1};
     void* mapping_ = nullptr;
     std::uint32_t failureCode_ = 0;
+    std::uint64_t wireLength_ = 0;
     std::array<DebugP2bLayoutContext, 2> contexts_{};
     std::array<DebugP2bBakeContext, 2> bakeContexts_{};
     std::array<asset_atlas::build::DebugLayoutObserver, 2> observers_{};
@@ -13050,12 +13230,12 @@ public:
         if (!diagnostic_ || !diagnostic_->enabled || diagnostic_->started)
             return false;
         diagnostic_->started = true;
-        arena_.emplace();
-        diagnostic_->mapped = arena_->valid();
-        diagnostic_->failureCode = arena_->failureCode();
-        if (arena_->valid()) diagnostic_->state =
+        arena_ = new (std::nothrow) DebugP2bObservationArena();
+        diagnostic_->mapped = arena_ && arena_->valid();
+        diagnostic_->failureCode = arena_ ? arena_->failureCode() : 5;
+        if (diagnostic_->mapped) diagnostic_->state =
             DebugP2bObservationState::Recording;
-        return arena_->valid();
+        return diagnostic_->mapped;
     }
     const asset_atlas::build::DebugLayoutObserver* layoutObserver(
         const std::size_t slot, const asset_atlas::Key& key) noexcept {
@@ -13070,6 +13250,16 @@ public:
     void commitS2(const std::size_t slot) noexcept {
         if (arena_ && arena_->valid()) arena_->commitS2(slot);
     }
+    void projectWire(const double metersPerUnit) noexcept {
+        if (!diagnostic_) return;
+        diagnostic_->metersPerUnit = metersPerUnit;
+        if (!arena_ || !arena_->valid() || diagnostic_->wire) return;
+        diagnostic_->wire = arena_->serialize(metersPerUnit);
+        diagnostic_->wireLength = diagnostic_->wire.length;
+        diagnostic_->wireLeaseCountAfterReturn = diagnostic_->wire
+            ? arena_->leaseCount() - 1 : 0;
+        diagnostic_->failureCode = arena_->failureCode();
+    }
     ~DebugP2bObserverSession() {
         if (!diagnostic_) return;
         if (diagnostic_->enabled)
@@ -13078,25 +13268,30 @@ public:
             arena_->copyDiagnostic(*diagnostic_);
             diagnostic_->failureCode = arena_->failureCode();
         }
-        arena_.reset();
-        diagnostic_->activeBytesAfter =
+        const bool retainedView = diagnostic_->wire != nil;
+        if (arena_) arena_->release();
+        arena_ = nullptr;
+        diagnostic_->activeBytesAfter = retainedView ? 0 :
             gDebugP2bActiveBytes.load(std::memory_order_relaxed);
-        diagnostic_->activeMappingsAfter =
+        diagnostic_->activeMappingsAfter = retainedView ? 0 :
             gDebugP2bActiveMappings.load(std::memory_order_relaxed);
-        diagnostic_->reservationsAfter =
-            gDebugP2bTotalReservations.load(std::memory_order_relaxed);
-        diagnostic_->releasesAfter =
-            gDebugP2bTotalReleases.load(std::memory_order_relaxed);
+        diagnostic_->reservationsAfter = retainedView
+            ? diagnostic_->reservationsBefore + 1
+            : gDebugP2bTotalReservations.load(std::memory_order_relaxed);
+        diagnostic_->releasesAfter = retainedView
+            ? diagnostic_->releasesBefore + 1
+            : gDebugP2bTotalReleases.load(std::memory_order_relaxed);
         diagnostic_->mapsAfter =
             gDebugP2bTotalMappings.load(std::memory_order_relaxed);
-        diagnostic_->unmapsAfter =
-            gDebugP2bTotalUnmaps.load(std::memory_order_relaxed);
+        diagnostic_->unmapsAfter = retainedView
+            ? diagnostic_->unmapsBefore + 1
+            : gDebugP2bTotalUnmaps.load(std::memory_order_relaxed);
         diagnostic_->hookCallsAfter =
             gDebugP2bHookCalls.load(std::memory_order_relaxed);
     }
 private:
     DebugP2bObservationDiagnostic* diagnostic_ = nullptr;
-    std::optional<DebugP2bObservationArena> arena_;
+    DebugP2bObservationArena* arena_ = nullptr;
 };
 
 DebugP2bObservationDiagnostic DebugP2bBeginDiagnostic(
@@ -13131,6 +13326,25 @@ NSString* DebugP2bStateText(const DebugP2bObservationState state) noexcept {
         case DebugP2bObservationState::Incomplete: return @"INCOMPLETE";
     }
     return @"INCOMPLETE";
+}
+
+NSDictionary<NSString*, id>* DebugP2bRawDictionary(
+    const DebugP2bObservationDiagnostic& value) noexcept {
+    @try {
+        return @{
+            @"schema": @"shapeyard.p2b-observation.v1",
+            @"captureStage": @"saved-batch-before-current-validation",
+            @"metersPerUnit": @(value.metersPerUnit),
+            @"captureStatus": DebugP2bStateText(value.state),
+            @"complete": @NO,
+            @"wire": value.wire ?: NSNull.null,
+            @"wireLength": @(value.wireLength),
+            @"wireLeaseCountAfterReturn": @(
+                value.wireLeaseCountAfterReturn),
+        };
+    } @catch (...) {
+        return nil;
+    }
 }
 
 NSDictionary<NSString*, id>* DebugP2bDiagnosticDictionary(
@@ -13264,7 +13478,11 @@ NSDictionary<NSString*, id>* DebugP2bDiagnosticDictionary(
             @"s2CallbacksVerified": @(value.s2CallbacksVerified),
             @"s2BoundRefusalVerified": @(value.s2BoundRefusalVerified),
             @"s2Slots": s2Slots,
+            @"p2bRaw": DebugP2bRawDictionary(value) ?: @{},
             @"arithmeticOverflowRefused": @(value.arithmeticRefused),
+            @"wireLength": @(value.wireLength),
+            @"wireLeaseCountAfterReturn": @(
+                value.wireLeaseCountAfterReturn),
             @"entryRejectionMappingDelta": @0,
             @"assetAtlasBuildSourceSHA256":
                 @"d4d855cdaf0864244f8c620fd2070c7b11a74766c8e0aa3e9e0e7d3651383b8d",
@@ -13718,6 +13936,8 @@ bool DebugProduceSavedGroupFinalResultImpl(
             || !cancelled || SavedGroupCancelled(cancelled)) return false;
         const Handle(TDocStd_Document)& document = privateDocument->Document();
         if (document.IsNull() || document->HasOpenCommand()) return false;
+        Standard_Real observationUnit = 0;
+        XCAFDoc_DocumentTool::GetLengthUnit(document, observationUnit);
 
         std::vector<asset_atlas::persistence::Record> records;
         if (!asset_atlas::persistence::ReadAll(document, records)
@@ -13892,6 +14112,7 @@ bool DebugProduceSavedGroupFinalResultImpl(
             && observation.resolution == 2048
             && observation.gutter == 4
             && completeCorners;
+        arenaSession.projectWire(observationUnit);
         if (observation.complete) observation.failureStage.clear();
         return observation.complete;
     } catch (const std::exception& error) {
@@ -13962,6 +14183,8 @@ bool ProduceSavedProducerBatchImpl(
             return false;
         }
         const Handle(TDocStd_Document)& document = privateDocument->Document();
+        Standard_Real observationUnit = 0;
+        XCAFDoc_DocumentTool::GetLengthUnit(document, observationUnit);
         std::vector<asset_atlas::persistence::Record> records;
         if (document.IsNull() || document->HasOpenCommand()) {
             observation.failureStage = "entry-document-state";
@@ -14306,6 +14529,7 @@ bool ProduceSavedProducerBatchImpl(
             && observation.outputCounts.size() == 2
             && observation.outputCounts[0] == 5
             && observation.outputCounts[1] == 1;
+        arenaSession.projectWire(observationUnit);
         if (completeAssembly) {
             completeAssembly->batchReady = observation.complete;
             observation.failureStage = "complete-current-assignment-validation-"
@@ -14410,6 +14634,7 @@ NSDictionary<NSString *, id> *DebugProduceSavedCompleteAssembly(
             assembly.currentAssemblyAccepted),
         @"productPresent": @(assembly.candidateReady),
         @"p2bArena": DebugP2bDiagnosticDictionary(arenaDiagnostic) ?: @{},
+        @"p2bRaw": DebugP2bRawDictionary(arenaDiagnostic) ?: @{},
     };
 }
 #endif

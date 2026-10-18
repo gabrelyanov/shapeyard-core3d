@@ -4591,6 +4591,13 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
 }
 }
 
+@interface Core3DViewController (B2SourceRelativeCodecPrivate)
++ (NSDictionary<NSString *,NSNumber *> *)debugB2SourceRelativeSelectorCodec:
+    (double)metersPerLocalUnit;
++ (NSDictionary<NSString *,id> *)debugB2SourceRelativeOrientedPredicateKernel:
+    (double)metersPerLocalUnit;
+@end
+
 @implementation Core3DViewController {
     __weak dispatch_cancelable_block_t _uiStateChangingBlock;
     UIStateChanging _sendingState;
@@ -21961,10 +21968,478 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     definition.base=base;definition.outputNode=base.sourceNode;std::vector<std::uint8_t> bytes;et::Refusal refusal;std::optional<r2::Definition> decoded;
     const bool encoded=r2::Encode(definition,bytes,refusal);const bool roundTrip=encoded&&r2::Decode(bytes,decoded,refusal)&&decoded.has_value();
     const std::array<std::uint8_t,4> tag{{'M','3','R','B'}};const auto m3=std::search(bytes.begin(),bytes.end(),tag.begin(),tag.end());
-    return @{@"schema":@2,@"sourceTag":@3,@"contractRevision":@2,@"prefixVersion":@1,
+    NSMutableDictionary<NSString *,id> *result=[@{@"schema":@2,@"sourceTag":@3,@"contractRevision":@2,@"prefixVersion":@1,
         @"hasM3RB":@(m3!=bytes.end()),@"roundTrip":@(roundTrip),@"metersPerLocalUnit":@(metersPerLocalUnit),
         @"r1Schema1Unchanged":@YES,@"oldMinor1To4Unchanged":@YES,@"malformedMapsRefuseWholeValue":@YES,
-        @"faultTableCallbackOnce":@YES,@"unknownOutcomeRequiresRecovery":@YES};
+        @"faultTableCallbackOnce":@YES,@"unknownOutcomeRequiresRecovery":@YES} mutableCopy];
+    [result addEntriesFromDictionary:[self debugB2SourceRelativeSelectorCodec:metersPerLocalUnit]];
+    [result addEntriesFromDictionary:[self debugB2SourceRelativeOrientedPredicateKernel:metersPerLocalUnit]];
+    return [result copy];
+}
+
++ (NSDictionary<NSString *,NSNumber *> *)debugB2SourceRelativeSelectorCodec:(double)metersPerLocalUnit {
+    namespace et=core3d::retained_edge_treatment;
+    namespace fs=core3d::retained_face_selector;
+    namespace r2=core3d::retained_edge_treatment::r2;
+    if(!std::isfinite(metersPerLocalUnit)||metersPerLocalUnit<=0)return @{};
+    auto id=[next=std::uint8_t(1)]()mutable{r2::UUID value{};value.fill(next++);return value;};
+    auto make=[](auto value){std::uint64_t bits=0;std::memcpy(&bits,&value,sizeof(bits));return bits;};
+    std::vector<double> profileValues={0,30,0,0,4,0,metersPerLocalUnit,
+        0,0,60,0,60,40,0,40};
+    core3d::profile::Parameters profile;
+    if(!core3d::profile::Decode(profileValues,profile))return @{};
+
+    r2::Definition definition;definition.schema=4;definition.owner={id(),id(),id()};
+    r2::BooleanBaseBinding base;
+    base.source={definition.owner.document,definition.owner.entity,definition.owner.definition,id()};
+    base.sourceNode=id();base.sourceSchema=1;base.sourceWireMajor=1;base.sourceWireMinor=1;
+    base.metersPerLocalUnit=metersPerLocalUnit;base.sourceRecipeDigest.fill(71);
+    r2::LegacyPrefixBinding prefix;prefix.rootNode=id();r2::LegacyLink link;
+    link.operandID=1;link.node=base.sourceNode;link.feature=id();link.toolNode=id();
+    link.toolFeature=id();link.leftNode=prefix.rootNode;link.rightNode=link.toolNode;
+    prefix.links.push_back(link);base.prefix=prefix;
+    r2::MigrationM3Provenance migration;migration.originalRecipeDigest.fill(72);
+    migration.nextOperandID=2;migration.nextFilletStepID=1;migration.nextFilletEdgeID=1;
+    base.migration=migration;definition.base=base;definition.issuance.nextLocalID=2;
+    et::Step step;step.node=id();step.feature=id();step.localID=1;
+    step.kind=et::Kind::ConstantFillet;step.amountMM=0.5;
+    et::Anchor anchor;anchor.key=id();anchor.curve=et::CurveKind::Line;
+    anchor.tangent={1,0,0};anchor.normalA={0,1,0};anchor.normalB={0,0,1};
+    step.anchors.push_back(anchor);
+    fs::SourceRelativeV1 relative;relative.coordinateSpace=fs::CoordinateSpace::SourceChart;
+    relative.sourceOwnerDocument=base.source.document;relative.sourceOwnerEntity=base.source.entity;
+    relative.sourceOwnerDefinition=base.source.definition;relative.inputRootNode=prefix.rootNode;
+    relative.sourceFeature=base.source.sourceFeature;relative.captureProfileSchema=1;
+    for(double value:profileValues)relative.captureProfileScalarBits.push_back(make(value));
+    relative.inner=fs::Line{{fs::Axis::Z,fs::Side::Max},{0,0,30},{1,0,0},1};
+    fs::SelectorReceipt receipt;receipt.proofVersion=2;receipt.intent=relative;
+    receipt.face={{0,0,1},30};receipt.coverage=fs::Coverage::SelectedLine;
+    receipt.wireCount=1;receipt.boundaryUseCount=1;receipt.boundaryUniqueEdgeCount=1;
+    receipt.entries.push_back({anchor.key,fs::FaceUseDirection::Forward});step.selector=receipt;
+    definition.steps.push_back(step);definition.outputNode=step.node;
+
+    et::Refusal refusal=et::Refusal::None;std::vector<std::uint8_t> bytes,reencoded;
+    std::optional<r2::Definition> decoded;
+    const bool encoded=r2::Encode(definition,bytes,refusal);
+    const bool decodedOK=encoded&&r2::Decode(bytes,decoded,refusal)&&decoded;
+    const bool canonical=decodedOK&&r2::Encode(*decoded,reencoded,refusal)&&reencoded==bytes;
+    const auto* decodedRelative=decodedOK&&decoded->steps.size()==1&&decoded->steps[0].selector
+        ?std::get_if<fs::SourceRelativeV1>(&decoded->steps[0].selector->intent):nullptr;
+    const bool exact=decodedRelative&&decodedRelative->captureProfileScalarBits
+        ==relative.captureProfileScalarBits&&decodedRelative->inner==relative.inner;
+    const bool dispatchClosed=encoded&&!r2::IsR2Carrier(bytes);
+    std::optional<et::Definition> ordinaryDecoded;
+    et::Refusal ordinaryRefusal=et::Refusal::None;
+    const bool ordinaryFamily3Refused=encoded
+        &&!et::Decode(bytes,ordinaryDecoded,ordinaryRefusal)&&!ordinaryDecoded
+        &&ordinaryRefusal==et::Refusal::UnsupportedBase;
+    auto intentExact=[](const fs::SelectorIntent& intent){
+        et::detail::Writer first;fs::WriteIntent(first,intent);
+        if(!first.ok)return false;
+        et::detail::Reader reader{first.b,first.b.size()};fs::SelectorIntent decodedIntent;
+        et::detail::Writer second;
+        return fs::ReadIntent(reader,decodedIntent)&&reader.pos==reader.end
+            &&fs::WriteIntent(second,decodedIntent)&&second.ok&&second.b==first.b
+            &&decodedIntent==intent;
+    };
+    auto withInner=[&](fs::LegacyIntent inner){
+        auto value=relative;value.inner=std::move(inner);
+        return intentExact(fs::SelectorIntent{std::move(value)});
+    };
+    const fs::PlanarFaceBoundary boundary{{fs::Axis::Z,fs::Side::Max},
+        fs::BoundaryCurve::Line,4};
+    const fs::Line lineIntent{{fs::Axis::Z,fs::Side::Max},{0,0,30},{1,0,0},1};
+    const fs::CircleRim circle{{30,20,30},{0,0,1},10,1};
+    const bool boundaryInnerExact=withInner(boundary);
+    const bool lineInnerExact=withInner(lineIntent);
+    const bool circleInnerExact=withInner(circle);
+    const bool legacyIntentBytesExact=intentExact(fs::SelectorIntent{boundary})
+        &&intentExact(fs::SelectorIntent{lineIntent})
+        &&intentExact(fs::SelectorIntent{circle});
+    auto refused=[&](r2::Definition value,et::Refusal expected){
+        std::vector<std::uint8_t> output;et::Refusal why=et::Refusal::None;
+        return !r2::Encode(value,output,why)&&output.empty()&&why==expected;
+    };
+    auto changedRelative=[&](auto change,et::Refusal expected){
+        auto value=definition;auto& selector=*value.steps[0].selector;
+        change(std::get<fs::SourceRelativeV1>(selector.intent),selector,
+            std::get<r2::BooleanBaseBinding>(value.base));
+        return refused(std::move(value),expected);
+    };
+    const bool proofPairRefused=changedRelative([](auto&,auto& selector,auto&){selector.proofVersion=1;},et::Refusal::MalformedCarrier);
+    const bool versionRefused=changedRelative([](auto& value,auto&,auto&){value.bindingVersion=2;},et::Refusal::MalformedCarrier);
+    const bool spaceRefused=changedRelative([](auto& value,auto&,auto&){value.coordinateSpace=fs::CoordinateSpace(2);},et::Refusal::MalformedCarrier);
+    const bool domainRefused=changedRelative([](auto& value,auto&,auto&){value.sourceDomain=fs::SourceDomain(2);},et::Refusal::MalformedCarrier);
+    const bool locatorRefused=changedRelative([](auto& value,auto&,auto&){value.sourceFeature.fill(0);},et::Refusal::MalformedCarrier);
+    const bool captureRefused=changedRelative([](auto& value,auto&,auto&){value.captureProfileScalarBits.pop_back();},et::Refusal::MalformedCarrier);
+    const bool locatorMismatchRefused=changedRelative([](auto& value,auto&,auto&){value.sourceFeature.fill(99);},et::Refusal::IdentityMismatch);
+    const bool unitsRefused=changedRelative([&](auto& value,auto&,auto&){
+        const double other=metersPerLocalUnit==1.0?0.001:1.0;
+        value.captureProfileScalarBits[6]=make(other);
+    },et::Refusal::UnitMismatch);
+    auto revolvedProfile=profile;revolvedProfile.definition.revolve=true;
+    std::vector<double> revolvedValues;
+    const bool revolvedCaptureRefused=core3d::profile::Encode(revolvedProfile,revolvedValues)
+        &&changedRelative([&](auto& value,auto&,auto&){
+            value.captureProfileSchema=std::uint32_t(core3d::profile::SchemaFor(revolvedProfile));
+            value.captureProfileScalarBits.clear();
+            for(double scalar:revolvedValues)value.captureProfileScalarBits.push_back(make(scalar));
+        },et::Refusal::MalformedCarrier);
+    auto shelledProfile=profile;core3d::profile::ShellStep shell;
+    shell.thickness=1;shell.metersPerLocalUnit=metersPerLocalUnit;shell.openings={5};
+    shelledProfile.shells.push_back(shell);std::vector<double> shelledValues;
+    const bool shelledCaptureRefused=core3d::profile::Encode(shelledProfile,shelledValues)
+        &&changedRelative([&](auto& value,auto&,auto&){
+            value.captureProfileSchema=std::uint32_t(core3d::profile::SchemaFor(shelledProfile));
+            value.captureProfileScalarBits.clear();
+            for(double scalar:shelledValues)value.captureProfileScalarBits.push_back(make(scalar));
+        },et::Refusal::MalformedCarrier);
+    auto unsupported=definition;auto& unsupportedBase=std::get<r2::BooleanBaseBinding>(unsupported.base);
+    unsupportedBase.format=r2::PrefixFormat::A1Composite;unsupportedBase.sourceWireMinor=0;
+    unsupportedBase.migration.reset();r2::CompositePrefixBinding composite;
+    composite.links.push_back({unsupportedBase.sourceNode,id(),id(),id()});unsupportedBase.prefix=composite;
+    const bool unsupportedDomain=refused(std::move(unsupported),et::Refusal::MalformedCarrier);
+
+    et::detail::Writer intentWriter;fs::WriteIntent(intentWriter,fs::SelectorIntent{relative});
+    const std::size_t innerOffset=1+4+1+1+5*16+4+4
+        +relative.captureProfileScalarBits.size()*8;
+    bool nestedRefused=false,reservedRefused=false,unknownCaptureSchemaRefused=false;
+    bool scalarCountLimitRefused=false,remainingBytesRefused=false,envelopeLimitRefused=false;
+    const std::size_t captureSchemaOffset=1+4+1+1+5*16;
+    const std::size_t countOffset=captureSchemaOffset+4;
+    auto set32=[](std::vector<std::uint8_t>& value,std::size_t offset,std::uint32_t number){
+        if(offset>value.size()||4>value.size()-offset)return false;
+        for(unsigned index=0;index<4;++index)value[offset+index]=std::uint8_t(number>>(8*index));
+        return true;
+    };
+    if(intentWriter.ok&&innerOffset<intentWriter.b.size()){
+        auto nested=intentWriter.b;nested[innerOffset]=std::uint8_t(fs::Kind::SourceRelativeV1);
+        et::detail::Reader nestedReader{nested,nested.size()};fs::SelectorIntent output;
+        nestedRefused=!fs::ReadIntent(nestedReader,output);
+        auto reserved=intentWriter.b;reserved[innerOffset]=std::uint8_t(fs::Kind::SplineEdge);
+        et::detail::Reader reservedReader{reserved,reserved.size()};
+        reservedRefused=!fs::ReadIntent(reservedReader,output);
+        auto unknownSchema=intentWriter.b;set32(unknownSchema,captureSchemaOffset,5);
+        et::detail::Reader unknownSchemaReader{unknownSchema,unknownSchema.size()};
+        unknownCaptureSchemaRefused=!fs::ReadIntent(unknownSchemaReader,output);
+        auto overCount=intentWriter.b;set32(overCount,countOffset,
+            std::uint32_t(core3d::profile::ScalarLimitForSchema(1)+1));
+        et::detail::Reader overCountReader{overCount,overCount.size()};
+        scalarCountLimitRefused=!fs::ReadIntent(overCountReader,output);
+        auto missingScalars=intentWriter.b;set32(missingScalars,countOffset,
+            std::uint32_t(relative.captureProfileScalarBits.size()+1));
+        et::detail::Reader missingScalarsReader{missingScalars,missingScalars.size()};
+        remainingBytesRefused=!fs::ReadIntent(missingScalarsReader,output);
+        const std::size_t start=65'536-(countOffset+4)-8;
+        std::vector<std::uint8_t> oversized(start,0);
+        oversized.insert(oversized.end(),intentWriter.b.begin(),intentWriter.b.end());
+        et::detail::Reader oversizedReader{oversized,oversized.size(),start,true};
+        envelopeLimitRefused=!fs::ReadIntent(oversizedReader,output);
+    }
+    auto old=definition;old.schema=2;old.steps.clear();old.outputNode=base.sourceNode;
+    old.issuance.nextLocalID=1;std::vector<std::uint8_t> oldBytes,oldReencoded;
+    std::optional<r2::Definition> oldDecoded;
+    const bool oldExact=r2::Encode(old,oldBytes,refusal)&&r2::Decode(oldBytes,oldDecoded,refusal)
+        &&oldDecoded&&r2::Encode(*oldDecoded,oldReencoded,refusal)&&oldBytes==oldReencoded;
+    auto oldSchema3=old;oldSchema3.schema=3;std::vector<std::uint8_t> old3Bytes,old3Reencoded;
+    std::optional<r2::Definition> old3Decoded;
+    const bool oldSchema3Exact=r2::Encode(oldSchema3,old3Bytes,refusal)
+        &&r2::Decode(old3Bytes,old3Decoded,refusal)&&old3Decoded
+        &&r2::Encode(*old3Decoded,old3Reencoded,refusal)&&old3Bytes==old3Reencoded;
+    auto legacyProof=definition;legacyProof.steps[0].selector->proofVersion=1;
+    legacyProof.steps[0].selector->intent=lineIntent;
+    std::vector<std::uint8_t> legacyProofBytes,legacyProofReencoded;
+    std::optional<r2::Definition> legacyProofDecoded;
+    const bool schema4LegacyProofExact=r2::Encode(legacyProof,legacyProofBytes,refusal)
+        &&r2::Decode(legacyProofBytes,legacyProofDecoded,refusal)&&legacyProofDecoded
+        &&legacyProofDecoded->schema==4&&legacyProofDecoded->steps.size()==1
+        &&legacyProofDecoded->steps[0].selector
+        &&legacyProofDecoded->steps[0].selector->proofVersion==1
+        &&std::holds_alternative<fs::Line>(legacyProofDecoded->steps[0].selector->intent)
+        &&r2::Encode(*legacyProofDecoded,legacyProofReencoded,refusal)
+        &&legacyProofReencoded==legacyProofBytes;
+    et::BaseBinding ordinaryBase;ordinaryBase.family=et::SourceFamily::Profile;
+    ordinaryBase.source=base.source;ordinaryBase.sourceNode=base.sourceNode;
+    ordinaryBase.sourceSchema=base.sourceSchema;ordinaryBase.sourceRecipeDigest=base.sourceRecipeDigest;
+    ordinaryBase.metersPerLocalUnit=metersPerLocalUnit;
+    et::Definition ordinary{1,definition.owner,ordinaryBase,{},ordinaryBase.sourceNode,{}};
+    ordinary.issuance.nextLocalID=1;std::vector<std::uint8_t> ordinaryBytes,ordinaryReencoded;
+    std::optional<et::Definition> ordinaryRoundTrip;
+    const bool ordinarySchema1Exact=et::Encode(ordinary,ordinaryBytes,refusal)
+        &&et::Decode(ordinaryBytes,ordinaryRoundTrip,refusal)&&ordinaryRoundTrip
+        &&et::Encode(*ordinaryRoundTrip,ordinaryReencoded,refusal)
+        &&ordinaryReencoded==ordinaryBytes;
+    et::ReplayBudget resolveBudget;std::atomic_bool neverCancelled{false};fs::Resolution resolution;
+    const bool contextFreeResolveRefused=fs::Resolve(TopoDS_Shape{},fs::SelectorIntent{relative},
+        metersPerLocalUnit,resolveBudget,neverCancelled,resolution)==fs::Refusal::UnsupportedCarrier;
+    bool ordinaryOCAFSchema4Refused=false;
+    try{
+        Handle(OcctDocument) wrapper=new OcctDocument();wrapper->InitDoc();
+        const Handle(TDocStd_Document) document=wrapper->Document();
+        const auto shapes=XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        const TopoDS_Shape shape=BRepPrimAPI_MakeBox(6,5,4).Shape();
+        const TDF_Label owner=shapes->AddShape(shape,Standard_False);
+        const TDF_Label carrier=owner.FindChild(97,Standard_True);shapes->SetShape(carrier,shape);
+        auto readOrdinary=[&](std::uint32_t schema,bool expectSuccess){
+            auto candidate=ordinary;candidate.schema=schema;std::vector<std::uint8_t> candidateBytes;
+            et::Refusal why=et::Refusal::None;
+            if(!et::Encode(candidate,candidateBytes,why))return false;
+            auto payload=std::make_shared<et::Payload>();payload->definition=candidate;
+            payload->bytes=candidateBytes;payload->base=shape;et::Attribute::Set(carrier,payload);
+            std::optional<et::Record> record;const bool read=et::Read(document,owner,record,why);
+            return expectSuccess?(read&&record.has_value()):(!read&&!record&&why==et::Refusal::MalformedCarrier);
+        };
+        document->NewCommand();
+        ordinaryOCAFSchema4Refused=readOrdinary(3,true)&&readOrdinary(4,false);
+        document->AbortCommand();
+    }catch(...){ordinaryOCAFSchema4Refused=false;}
+    return @{ @"schema4":@(encoded&&bytes.size()>60&&bytes[4]==4&&bytes[60]==3),
+        @"kind5":@(decodedRelative!=nullptr),@"proof2":@(decodedOK&&decoded->steps[0].selector->proofVersion==2),
+        @"canonicalRoundTrip":@(canonical),@"captureAndInnerExact":@(exact),
+        @"encodedByteCount":@(bytes.size()),@"reencodedByteCount":@(reencoded.size()),
+        @"r2DiskDispatchClosed":@(dispatchClosed),@"ordinaryFamily3DecodeRefused":@(ordinaryFamily3Refused),
+        @"ordinaryOCAFSchema4Refused":@(ordinaryOCAFSchema4Refused),
+        @"boundaryInnerExact":@(boundaryInnerExact),@"lineInnerExact":@(lineInnerExact),
+        @"circleInnerExact":@(circleInnerExact),@"legacyIntentBytesExact":@(legacyIntentBytesExact),
+        @"proofPairRefused":@(proofPairRefused),@"unknownVersionRefused":@(versionRefused),
+        @"unknownSpaceRefused":@(spaceRefused),@"wrongDomainRefused":@(domainRefused),
+        @"wrongLocatorRefused":@(locatorRefused),@"locatorMismatchRefused":@(locatorMismatchRefused),
+        @"malformedCaptureRefused":@(captureRefused),@"revolvedCaptureRefused":@(revolvedCaptureRefused),
+        @"shelledCaptureRefused":@(shelledCaptureRefused),
+        @"wrongUnitsRefused":@(unitsRefused),@"unsupportedR2DomainRefused":@(unsupportedDomain),
+        @"nestedRefused":@(nestedRefused),@"reservedInnerRefused":@(reservedRefused),
+        @"unknownCaptureSchemaRefused":@(unknownCaptureSchemaRefused),
+        @"scalarCountLimitRefused":@(scalarCountLimitRefused),
+        @"remainingBytesRefusedBeforeResize":@(remainingBytesRefused),
+        @"envelopeLimitRefusedBeforeResize":@(envelopeLimitRefused),
+        @"oldSchema2Exact":@(oldExact),@"oldSchema3Exact":@(oldSchema3Exact),
+        @"ordinarySchema1Exact":@(ordinarySchema1Exact),
+        @"schema4LegacyProof1Exact":@(schema4LegacyProofExact),
+        @"contextFreeResolveRefused":@(contextFreeResolveRefused) };
+}
+
++ (NSDictionary<NSString *,id> *)debugB2SourceRelativeOrientedPredicateKernel:
+    (double)metersPerLocalUnit {
+    namespace fs=core3d::retained_face_selector;
+    namespace et=core3d::retained_edge_treatment;
+    if(!std::isfinite(metersPerLocalUnit)||metersPerLocalUnit<=0)return @{};
+    const double mmPerUnit=1000.0*metersPerLocalUnit;
+    auto numbers=[](const auto& values){
+        NSMutableArray<NSNumber*> *result=[NSMutableArray arrayWithCapacity:values.size()];
+        for(const auto value:values)[result addObject:@(value)];
+        return [result copy];
+    };
+    auto matrix=[&](const fs::detail::Affine& value){
+        std::array<double,12> rows{};
+        for(int row=0;row<3;++row){
+            for(int column=0;column<3;++column)
+                rows[4*row+column]=value.linear[3*row+column];
+            rows[4*row+3]=value.translationMM[row];
+        }
+        return numbers(rows);
+    };
+    auto quaternion=[](std::array<double,3> axis,double angle){
+        const double length=std::hypot(std::hypot(axis[0],axis[1]),axis[2]);
+        const double sine=std::sin(angle*.5)/length;
+        return std::array<double,4>{axis[0]*sine,axis[1]*sine,axis[2]*sine,
+            std::cos(angle*.5)};
+    };
+    auto profileValues=[&](int plane,const std::array<double,8>& frame){
+        const double width=20.0/mmPerUnit,height=12.0/mmPerUnit,depth=8.0/mmPerUnit;
+        std::vector<double> result={double(plane),depth,0,0,4,0,metersPerLocalUnit,
+            0,0,width,0,width,height,0,height};
+        result.insert(result.end(),frame.begin(),frame.end());
+        return result;
+    };
+    auto bits=[](const std::vector<double>& values){
+        std::vector<std::uint64_t> result(values.size());
+        for(std::size_t index=0;index<values.size();++index)
+            std::memcpy(&result[index],&values[index],sizeof(double));
+        return result;
+    };
+    auto point=[](const fs::detail::Affine& transform,std::array<double,3> value){
+        return fs::detail::Point(transform,value);
+    };
+    auto localPoint=[&](const fs::detail::Affine& transform,std::array<double,3> value){
+        const auto p=point(transform,value);
+        return gp_Pnt(p[0]/mmPerUnit,p[1]/mmPerUnit,p[2]/mmPerUnit);
+    };
+    auto makePrism=[&](const fs::detail::Affine& transform,bool split){
+        BRepBuilderAPI_MakePolygon polygon;
+        polygon.Add(localPoint(transform,{0,0,0}));
+        if(split)polygon.Add(localPoint(transform,{10,0,0}));
+        polygon.Add(localPoint(transform,{20,0,0}));
+        polygon.Add(localPoint(transform,{20,12,0}));
+        polygon.Add(localPoint(transform,{0,12,0}));polygon.Close();
+        const TopoDS_Face face=BRepBuilderAPI_MakeFace(polygon.Wire());
+        const gp_Pnt bottom=localPoint(transform,{0,0,0});
+        const gp_Pnt top=localPoint(transform,{0,0,8});
+        return BRepPrimAPI_MakePrism(face,gp_Vec(bottom,top)).Shape();
+    };
+    auto makeCylinder=[&](const fs::detail::Affine& transform,std::array<double,3> center,
+        double radius){
+        std::array<double,3> axis{},xAxis{};double absoluteScale=0;
+        if(!fs::detail::Tangent(transform,{0,0,1},axis)
+            ||!fs::detail::Tangent(transform,{1,0,0},xAxis)
+            ||!fs::detail::Similarity(transform,absoluteScale))return TopoDS_Shape{};
+        const gp_Pnt bottom=localPoint(transform,{center[0],center[1],0});
+        const gp_Ax2 placement(bottom,gp_Dir(axis[0],axis[1],axis[2]),
+            gp_Dir(xAxis[0],xAxis[1],xAxis[2]));
+        return BRepPrimAPI_MakeCylinder(placement,radius*absoluteScale/mmPerUnit,
+            8*absoluteScale/mmPerUnit).Shape();
+    };
+    auto receiptProof=[](const fs::SelectorIntent& original,const fs::FaceMembershipProof& proof){
+        et::Step step;et::Anchor anchor;anchor.key.fill(91);step.anchors.push_back(anchor);
+        fs::SelectorReceipt receipt;receipt.proofVersion=2;receipt.intent=original;
+        receipt.face=proof.plane();receipt.coverage=proof.coverage();
+        receipt.wireCount=proof.wireCount();receipt.boundaryUseCount=proof.boundaryUses().size();
+        receipt.boundaryUniqueEdgeCount=proof.uniqueEdgeCount();
+        receipt.entries.push_back({anchor.key,proof.boundaryUses().front().direction});step.selector=receipt;
+        et::ReplayBudget budget;
+        const bool originalAccepted=fs::VerifyReceipt(proof,step,0,budget)==fs::Refusal::None;
+        step.selector->proofVersion=1;
+        step.selector->intent=std::visit([](const auto& value)->fs::SelectorIntent{return value;},
+            proof.debugEvaluatedIntent());
+        et::ReplayBudget rewrittenBudget;
+        const bool rewrittenRefused=fs::VerifyReceipt(proof,step,0,rewrittenBudget)
+            ==fs::Refusal::ReplayMismatch;
+        return originalAccepted&&rewrittenRefused;
+    };
+    NSMutableArray<NSDictionary<NSString*,id>*> *records=[NSMutableArray arrayWithCapacity:6];
+    std::uint8_t identityByte=1;
+    bool everyBareResolveRefused=true;
+    for(int plane=0;plane<3;++plane){
+        for(int spaceIndex=0;spaceIndex<2;++spaceIndex){
+            const bool sourceChart=spaceIndex==1;
+            const auto captureQ=quaternion({1,2,3},.43);
+            const auto currentQ=quaternion({-2,1,.5},-.71+.09*plane);
+            const double captureScale=1.2;
+            const double currentScale=((plane+spaceIndex)%2==0)?1.35:-.8;
+            const std::array<double,8> captureFrame{{4/mmPerUnit,-3/mmPerUnit,2/mmPerUnit,
+                captureQ[0],captureQ[1],captureQ[2],captureQ[3],captureScale}};
+            const std::array<double,8> currentFrame{{7/mmPerUnit,5/mmPerUnit,-6/mmPerUnit,
+                currentQ[0],currentQ[1],currentQ[2],currentQ[3],currentScale}};
+            const auto captureValues=profileValues(plane,captureFrame);
+            const auto currentValues=profileValues(plane,currentFrame);
+            core3d::profile::Parameters captureProfile,currentProfile;
+            fs::detail::Affine captureTransform,currentTransform,inverseCapture,effective;
+            if(!core3d::profile::Decode(captureValues,captureProfile)
+                ||!core3d::profile::Decode(currentValues,currentProfile)
+                ||!fs::detail::ProfileAffine(captureProfile,captureTransform)
+                ||!fs::detail::ProfileAffine(currentProfile,currentTransform))return @{};
+            if(sourceChart)effective=currentTransform;
+            else{
+                if(!fs::detail::Inverse(captureTransform,inverseCapture))return @{};
+                effective=fs::detail::Compose(currentTransform,inverseCapture);
+            }
+            fs::SourceRelativeV1 relative;relative.coordinateSpace=sourceChart
+                ?fs::CoordinateSpace::SourceChart:fs::CoordinateSpace::WorldAtCapture;
+            relative.sourceOwnerDocument.fill(identityByte++);relative.sourceOwnerEntity.fill(identityByte++);
+            relative.sourceOwnerDefinition.fill(identityByte++);relative.inputRootNode.fill(identityByte++);
+            relative.sourceFeature.fill(identityByte++);relative.captureProfileSchema=2;
+            relative.captureProfileScalarBits=bits(captureValues);
+            const std::array<double,3> canonicalPoint{{10,0,8}},canonicalDirection{{1,0,0}};
+            const std::array<double,3> canonicalCenter{{10,6,8}},canonicalNormal{{0,0,1}};
+            fs::Line line{{fs::Axis::Z,fs::Side::Max},canonicalPoint,canonicalDirection,1};
+            fs::CircleRim circle{canonicalCenter,canonicalNormal,3,1};
+            relative.inner=line;
+            const auto proof=fs::SourceStageProof::DebugFixture(relative,currentValues);
+            if(!proof)return @{};
+            const TopoDS_Shape prism=makePrism(sourceChart?currentTransform:effective,false);
+            std::atomic_bool cancelled{false};et::ReplayBudget lineBudget;fs::Resolution lineResolution;
+            const bool lineResolved=fs::Resolve(prism,fs::SelectorIntent{relative},*proof,
+                metersPerLocalUnit,lineBudget,cancelled,lineResolution)==fs::Refusal::None
+                &&lineResolution.proof;
+            et::ReplayBudget bareBudget;fs::Resolution bareResolution;
+            const bool bareRefused=fs::Resolve(prism,fs::SelectorIntent{relative},
+                metersPerLocalUnit,bareBudget,cancelled,bareResolution)==fs::Refusal::UnsupportedCarrier;
+            everyBareResolveRefused=everyBareResolveRefused&&bareRefused;
+            auto wrongBinding=relative;wrongBinding.sourceFeature.fill(250);
+            et::ReplayBudget wrongBindingBudget;fs::Resolution wrongBindingResolution;
+            const bool wrongProofBindingRefused=fs::Resolve(prism,fs::SelectorIntent{wrongBinding},
+                *proof,metersPerLocalUnit,wrongBindingBudget,cancelled,wrongBindingResolution)
+                ==fs::Refusal::StaleSource;
+            auto boundaryRelative=relative;
+            boundaryRelative.inner=fs::PlanarFaceBoundary{{fs::Axis::Z,fs::Side::Max},
+                fs::BoundaryCurve::Line,4};
+            const auto boundaryProof=fs::SourceStageProof::DebugFixture(boundaryRelative,currentValues);
+            et::ReplayBudget boundaryBudget;fs::Resolution boundaryResolution;
+            const bool boundaryResolved=boundaryProof&&fs::Resolve(prism,
+                fs::SelectorIntent{boundaryRelative},*boundaryProof,metersPerLocalUnit,boundaryBudget,
+                cancelled,boundaryResolution)==fs::Refusal::None&&boundaryResolution.proof;
+            auto circleRelative=relative;circleRelative.inner=circle;
+            const auto circleProof=fs::SourceStageProof::DebugFixture(circleRelative,currentValues);
+            const TopoDS_Shape cylinder=makeCylinder(sourceChart?currentTransform:effective,{10,6,0},3);
+            et::ReplayBudget circleBudget;fs::Resolution circleResolution;
+            const bool circleResolved=circleProof&&!cylinder.IsNull()&&fs::Resolve(cylinder,
+                fs::SelectorIntent{circleRelative},*circleProof,metersPerLocalUnit,circleBudget,
+                cancelled,circleResolution)==fs::Refusal::None&&circleResolution.proof;
+
+            const TopoDS_Shape splitPrism=makePrism(sourceChart?currentTransform:effective,true);
+            et::ReplayBudget splitBudget;fs::Resolution splitResolution;
+            const bool collinearRefused=fs::Resolve(splitPrism,fs::SelectorIntent{relative},*proof,
+                metersPerLocalUnit,splitBudget,cancelled,splitResolution)==fs::Refusal::SplitEdge;
+            TopoDS_Compound equalRadiusCompound;BRep_Builder builder;builder.MakeCompound(equalRadiusCompound);
+            builder.Add(equalRadiusCompound,cylinder);
+            builder.Add(equalRadiusCompound,makeCylinder(sourceChart?currentTransform:effective,{35,6,0},3));
+            et::ReplayBudget equalBudget;fs::Resolution equalResolution;
+            const bool equalRadiusRefused=circleProof&&fs::Resolve(equalRadiusCompound,
+                fs::SelectorIntent{circleRelative},*circleProof,metersPerLocalUnit,equalBudget,cancelled,
+                equalResolution)==fs::Refusal::FaceAmbiguous;
+            const TopoDS_Shape innerCylinder=makeCylinder(sourceChart?currentTransform:effective,{10,6,0},1);
+            const TopoDS_Shape annulus=BRepAlgoAPI_Cut(cylinder,innerCylinder).Shape();
+            et::ReplayBudget annulusBudget;fs::Resolution annulusResolution;
+            const bool annulusRefused=circleProof&&fs::Resolve(annulus,
+                fs::SelectorIntent{circleRelative},*circleProof,metersPerLocalUnit,annulusBudget,
+                cancelled,annulusResolution)==fs::Refusal::PartialCircle;
+            const auto* evaluatedLine=lineResolved
+                ?std::get_if<fs::Line>(&lineResolution.proof->debugEvaluatedIntent()):nullptr;
+            const auto* evaluatedCircle=circleResolved
+                ?std::get_if<fs::CircleRim>(&circleResolution.proof->debugEvaluatedIntent()):nullptr;
+            std::array<double,3> zero3{};const auto linePoint=evaluatedLine?evaluatedLine->locationMM:zero3;
+            const auto lineDirection=evaluatedLine?evaluatedLine->direction:zero3;
+            const auto circleNormal=evaluatedCircle?evaluatedCircle->normal:zero3;
+            const double circleRadius=evaluatedCircle?evaluatedCircle->radiusMM:0;
+            const auto scopeBounds=lineResolved?lineResolution.proof->debugScopeBoundsMM()
+                :std::array<double,2>{};
+            double effectiveScale=0;fs::detail::Similarity(effective,effectiveScale);
+            const std::array<double,2> expectedBounds{{0,8*effectiveScale}};
+            const bool expectedForward=fs::detail::Determinant(effective)>0;
+            bool directedUsesMatch=boundaryResolved;
+            std::vector<int> directedUses;
+            if(boundaryResolved)for(const auto& use:boundaryResolution.proof->boundaryUses())
+            {
+                directedUses.push_back(int(use.direction));
+                directedUsesMatch=directedUsesMatch
+                    &&((use.direction==fs::FaceUseDirection::Forward)==expectedForward);
+            }
+            const bool complete=lineResolved&&boundaryResolved
+                &&lineResolution.proof->wireCount()==1&&lineResolution.proof->uniqueEdgeCount()==4
+                &&lineResolution.proof->boundaryUses().size()==4
+                &&lineResolution.proof->selectedEdgeCount()==1
+                &&boundaryResolution.proof->selectedEdgeCount()==4;
+            const bool immutable=lineResolved&&lineResolution.proof->intent()==fs::SelectorIntent{relative};
+            const bool receiptOriginal=lineResolved&&receiptProof(fs::SelectorIntent{relative},
+                *lineResolution.proof);
+            [records addObject:@{@"captureTransform":matrix(captureTransform),
+                @"currentTransform":matrix(currentTransform),@"sourceChart":@(sourceChart),
+                @"innerPointMM":numbers(line.locationMM),@"innerDirection":numbers(line.direction),
+                @"innerNormal":numbers(circle.normal),@"innerRadiusMM":@(circle.radiusMM),
+                @"evaluatedPointMM":numbers(linePoint),@"evaluatedDirection":numbers(lineDirection),
+                @"evaluatedNormal":numbers(circleNormal),@"evaluatedRadiusMM":@(circleRadius),
+                @"scopeBoundsMM":numbers(scopeBounds),@"expectedScopeBoundsMM":numbers(expectedBounds),
+                @"directedUses":numbers(directedUses),
+                @"lineResolved":@(lineResolved),@"boundaryResolved":@(boundaryResolved),
+                @"circleResolved":@(circleResolved),@"completeCensus":@(complete),
+                @"immutableIntent":@(immutable),@"receiptUsesOriginalIntent":@(receiptOriginal),
+                @"directedUsesMatchParity":@(directedUsesMatch),
+                @"collinearDecoyRefused":@(collinearRefused),
+                @"equalRadiusDecoyRefused":@(equalRadiusRefused),@"annulusRefused":@(annulusRefused),
+                @"wrongProofBindingRefused":@(wrongProofBindingRefused)}];
+        }
+    }
+    return @{@"orientedPredicateKernelRecords":[records copy],
+        @"fixtureProofCannotIssueProductionAuthority":@(everyBareResolveRefused)};
 }
 
 + (NSDictionary<NSString *,id> *)debugA1RecipeR2BindingCodec:(double)metersPerLocalUnit {
