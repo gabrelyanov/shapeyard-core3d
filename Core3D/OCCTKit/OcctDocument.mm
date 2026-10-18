@@ -7312,7 +7312,7 @@ void Core3DDefineSafeBinXCAFFormat(
     // that already omitted triangulation still reads back without it and
     // keeps reporting Stale.
     Handle(BinDrivers_DocumentStorageDriver) ocafStorage =
-        new core3d::receipt::v3::StorageDriver<core3d::loft_correspondence::persistence::StorageDriver<core3d::painted_atlas_bake::persistence::StorageDriver<core3d::face_image::persistence::resources::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinDrivers_DocumentStorageDriver>>>>>>>>>>>>>>();
+        new core3d::receipt::v3::StorageDriver<core3d::loft_correspondence::persistence::StorageDriver<core3d::painted_atlas_bake::persistence::StorageDriver<core3d::face_image::persistence::resources::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<core3d::retained_edge_treatment::StorageDriver<BinDrivers_DocumentStorageDriver>>>>>>>>>>>>>>();
     ocafStorage->SetWithTriangles(application->MessageDriver(), Standard_True);
     application->DefineFormat(
         TCollection_AsciiString("BinOcaf"),
@@ -7321,7 +7321,7 @@ void Core3DDefineSafeBinXCAFFormat(
         new Core3DBoundedBinXCAFRetrievalDriver(),
         ocafStorage);
     Handle(BinDrivers_DocumentStorageDriver) xcafStorage =
-        new core3d::receipt::v3::StorageDriver<core3d::loft_correspondence::persistence::StorageDriver<core3d::painted_atlas_bake::persistence::StorageDriver<core3d::face_image::persistence::resources::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::retained_edge_treatment::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>>>>>>>>>>>();
+        new core3d::receipt::v3::StorageDriver<core3d::loft_correspondence::persistence::StorageDriver<core3d::painted_atlas_bake::persistence::StorageDriver<core3d::face_image::persistence::resources::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<core3d::retained_edge_treatment::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>>>>>>>>>>>();
     xcafStorage->SetWithTriangles(application->MessageDriver(), Standard_True);
     application->DefineFormat(
         TCollection_AsciiString("BinXCAF"),
@@ -21127,6 +21127,15 @@ std::string OcctDocument::save(
     }
 
     try {
+        // Build an isolated writer view only after the ordinary save boundary
+        // has admitted the complete live document. The view owns fresh replay
+        // topology and private TNaming attributes; cancellation or any writer
+        // failure drops it without touching OCAF state or command history.
+        const auto treatmentSaveView =
+            core3d::retained_edge_treatment::save_view::View::Build(myOcafDoc);
+        if (!treatmentSaveView) return {};
+        core3d::retained_edge_treatment::save_view::Scope treatmentSaveScope(
+            treatmentSaveView);
 #if DEBUG
         // R179/D249 passive census immediately before SaveAs. Diagnostics
         // only; failures here must not affect the save.
