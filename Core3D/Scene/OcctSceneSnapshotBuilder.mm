@@ -192,6 +192,12 @@
 #include <vector>
 
 #ifdef DEBUG
+#include <cstdlib>
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+
+#ifdef DEBUG
 extern "C" void mikkDebugFailNextAllocationAtSite(int);
 #endif
 
@@ -12090,6 +12096,455 @@ bool ValidateCurrentFinalAssignments(
         && baked.assignments.front().corners.size() == expectedFinalCorners;
 }
 
+#ifdef DEBUG
+constexpr std::uint64_t kDebugP2bGroupCount = 2;
+constexpr std::uint64_t kDebugP2bSlotBytes = 18'201'984;
+constexpr std::uint64_t kDebugP2bNativeBytes = 36'408'064;
+constexpr std::uint64_t kDebugP2bWireBytes = 388'729'600;
+constexpr std::uint64_t kDebugP2bUsedBytes = 425'137'664;
+constexpr std::uint64_t kDebugP2bMappingAlignment = 16'384;
+constexpr std::uint64_t kDebugP2bArenaBytes = 425'148'416;
+constexpr const char* kDebugP2bAccountName = "P2B_DEBUG_OBSERVER_ARENA";
+
+struct DebugP2bGroupDirectory final {
+    std::uint64_t key[4]{};
+    std::uint64_t lengths[8]{};
+    std::uint64_t offsets[8]{};
+    std::uint32_t states[8]{};
+    std::uint32_t counters[8]{};
+    std::uint8_t reserved[32]{};
+};
+struct DebugP2bEmittedTriangleLineage final {
+    std::uint64_t packedTriangleIndex = 0;
+    std::uint64_t memberIndex = 0;
+    std::uint64_t memberChartOrdinal = 0;
+    std::int32_t chartIndex = 0;
+    std::int32_t chartLocalTriangleIndex = 0;
+    std::int32_t subChartIndex = 0;
+    std::int32_t finalTriangleIndex = 0;
+};
+struct DebugP2bAdjacency final {
+    std::int32_t values[7]{};
+    std::uint8_t kernelSeam = 0;
+    std::uint8_t padding[3]{};
+};
+struct DebugP2bPackedIslandRecord final {
+    std::int32_t chartIndex = 0;
+    std::int32_t subChartIndex = 0;
+    std::uint64_t memberChartOrdinal = 0;
+    std::uint64_t segmentRank = 0;
+    std::uint64_t atlasChartIndex = 0;
+    std::uint8_t uuid[16]{};
+};
+struct DebugP2bSampleExtra final {
+    double aimed[4]{};
+    double preNormalizationLength = 0;
+    double preQuantizationLengthError = 0;
+    std::uint64_t normalInvocationOrdinal = 0;
+    std::uint64_t packedTriangleIndex = 0;
+    std::uint64_t sampleIndex = 0;
+    std::uint8_t normalizationApplied = 0;
+    std::uint8_t applicability = 0;
+    std::uint8_t padding[6]{};
+};
+struct DebugP2bNormalDomainHeader final {
+    std::uint8_t available = 0;
+    std::uint8_t complete = 0;
+    std::uint8_t role = 0;
+    std::uint8_t padding0 = 0;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint32_t padding1 = 0;
+    std::uint64_t sampleCount = 0;
+    std::uint64_t uniqueTexelCount = 0;
+    std::uint64_t duplicateInvocationCount = 0;
+    std::uint64_t validNormalizationCount = 0;
+    std::uint64_t invalidNormalizationCount = 0;
+    double measuredMaximumLengthError = 0;
+    std::uint8_t reserved[64]{};
+};
+
+struct DebugP2bFrozenSampleEvidence final {
+    bool available = false;
+    painted_atlas_bake::Role role = painted_atlas_bake::Role::BaseColor;
+    std::uint32_t x = 0, y = 0;
+    double sourceU = 0, sourceV = 0;
+    std::array<std::uint8_t, 4> emitted{};
+};
+struct DebugP2bFrozenLayoutEvidence final {
+    curveduv::PackResult packed;
+    std::vector<curveduv::ChartInput> charts;
+    std::vector<std::pair<std::size_t, std::uint64_t>> chartMembers;
+    std::vector<std::size_t> chartFaces;
+};
+struct DebugP2bFrozenFinalAtlasAccounting final {
+    decal_layer::bake::accounting::View operation;
+    decal_layer::bake::accounting::Ticket layoutStorage;
+    decal_layer::bake::accounting::Ticket resultStorage;
+    std::size_t roleCount = 0;
+    std::size_t sourceCount = 0;
+    std::size_t maskCount = 0;
+    std::size_t jobUnits = 0;
+    bool sealAtlasJob = true;
+    bool denyLayoutReservation = false;
+    std::size_t memberCount = 0;
+    std::size_t triangleCount = 0;
+    std::size_t cornerCount = 0;
+    std::size_t layoutReservationAttempts = 0;
+    std::size_t packerEntries = 0;
+};
+struct DebugP2bFrozenExportBakeStorage final {
+    decal_layer::bake::accounting::Owner operation;
+    decal_layer::bake::accounting::Ticket controlStorage;
+    decal_layer::bake::accounting::Ticket bakeValueStorage;
+    decal_layer::bake::accounting::Ticket outputVectorStorage;
+    decal_layer::bake::accounting::Ticket evidenceStorage;
+    DebugP2bFrozenFinalAtlasAccounting finalAtlas;
+    DebugP2bFrozenLayoutEvidence layout;
+};
+
+static_assert(sizeof(DebugP2bGroupDirectory) == 256);
+static_assert(sizeof(DebugP2bEmittedTriangleLineage) == 40);
+static_assert(sizeof(DebugP2bAdjacency) == 32);
+static_assert(sizeof(DebugP2bPackedIslandRecord) == 48);
+static_assert(sizeof(DebugP2bSampleExtra) == 80);
+static_assert(sizeof(DebugP2bNormalDomainHeader) == 128);
+static_assert(offsetof(DebugP2bEmittedTriangleLineage, chartIndex) == 24);
+static_assert(offsetof(DebugP2bSampleExtra, normalInvocationOrdinal) == 48);
+static_assert(alignof(DebugP2bSampleExtra) == 8);
+static_assert(sizeof(DebugP2bFrozenSampleEvidence)
+    == sizeof(painted_atlas_bake::kernel::SampleEvidence));
+static_assert(sizeof(DebugP2bFrozenLayoutEvidence)
+    == sizeof(asset_atlas::build::LayoutEvidence));
+static_assert(sizeof(DebugP2bFrozenExportBakeStorage)
+    == sizeof(painted_atlas_bake::owner::ExportBakeStorage));
+static_assert(alignof(DebugP2bFrozenSampleEvidence)
+    == alignof(painted_atlas_bake::kernel::SampleEvidence));
+static_assert(alignof(DebugP2bFrozenLayoutEvidence)
+    == alignof(asset_atlas::build::LayoutEvidence));
+static_assert(alignof(DebugP2bFrozenExportBakeStorage)
+    == alignof(painted_atlas_bake::owner::ExportBakeStorage));
+static_assert(sizeof(DebugP2bFrozenSampleEvidence) == 40);
+static_assert(sizeof(DebugP2bFrozenLayoutEvidence) == 208);
+static_assert(sizeof(DebugP2bFrozenExportBakeStorage) == 1224);
+
+enum class DebugP2bObservationState : std::uint8_t {
+    Disabled, Recording, Incomplete
+};
+
+struct DebugP2bMappedControl final {
+    std::uint64_t capacity = kDebugP2bArenaBytes;
+    std::uint64_t nativeBytes = kDebugP2bNativeBytes;
+    std::uint64_t wireBytes = kDebugP2bWireBytes;
+    std::uint64_t slotBytes = kDebugP2bSlotBytes;
+    std::uint64_t groupCount = kDebugP2bGroupCount;
+    DebugP2bObservationState state = DebugP2bObservationState::Recording;
+    std::uint8_t reserved[55]{};
+};
+static_assert(sizeof(DebugP2bMappedControl) <= 4096);
+
+std::atomic<std::uint64_t> gDebugP2bActiveBytes{0};
+std::atomic<std::uint64_t> gDebugP2bActiveMappings{0};
+std::atomic<std::uint64_t> gDebugP2bTotalReservations{0};
+std::atomic<std::uint64_t> gDebugP2bTotalReleases{0};
+std::atomic<std::uint64_t> gDebugP2bTotalMappings{0};
+std::atomic<std::uint64_t> gDebugP2bTotalUnmaps{0};
+std::atomic<std::uint64_t> gDebugP2bHookCalls{0};
+
+bool DebugP2bCheckedAdd(const std::uint64_t first,
+    const std::uint64_t second, std::uint64_t& result) noexcept {
+    if (first > std::numeric_limits<std::uint64_t>::max() - second)
+        return false;
+    result = first + second;
+    return true;
+}
+
+bool DebugP2bCheckedAlign64(const std::uint64_t value,
+    std::uint64_t& result) noexcept {
+    std::uint64_t increased = 0;
+    if (!DebugP2bCheckedAdd(value, 63, increased)) return false;
+    result = increased & ~std::uint64_t(63);
+    return true;
+}
+
+bool DebugP2bCheckedProduct(const std::uint64_t count,
+    const std::uint64_t stride, std::uint64_t& result) noexcept {
+    if (stride != 0
+        && count > std::numeric_limits<std::uint64_t>::max() / stride)
+        return false;
+    result = count * stride;
+    return true;
+}
+
+bool DebugP2bValidateLayout() noexcept {
+    constexpr std::array<std::array<std::uint64_t, 2>, 10> buffers{{
+        {{1, sizeof(DebugP2bGroupDirectory)}},
+        {{9, sizeof(std::uint64_t)}},
+        {{65, sizeof(std::uint64_t)}},
+        {{174'762, sizeof(std::int32_t)}},
+        {{174'762, sizeof(DebugP2bEmittedTriangleLineage)}},
+        {{262'143, sizeof(DebugP2bAdjacency)}},
+        {{512, sizeof(DebugP2bPackedIslandRecord)}},
+        {{12, sizeof(DebugP2bSampleExtra)}},
+        {{1, sizeof(DebugP2bNormalDomainHeader)}},
+        {{2'097'152, sizeof(std::uint8_t)}},
+    }};
+    std::uint64_t slot = 0;
+    for (const auto& buffer : buffers) {
+        std::uint64_t bytes = 0;
+        std::uint64_t aligned = 0;
+        if (!DebugP2bCheckedProduct(buffer[0], buffer[1], bytes)
+            || !DebugP2bCheckedAlign64(bytes, aligned)
+            || !DebugP2bCheckedAdd(slot, aligned, slot)) return false;
+    }
+    std::uint64_t nativeBytes = 0;
+    std::uint64_t slotsBytes = 0;
+    std::uint64_t usedBytes = 0;
+    std::uint64_t roundedBytes = 0;
+    if (!DebugP2bCheckedProduct(kDebugP2bGroupCount, slot, slotsBytes)
+        || !DebugP2bCheckedAdd(4096, slotsBytes, nativeBytes)
+        || !DebugP2bCheckedAdd(nativeBytes, kDebugP2bWireBytes, usedBytes)
+        || !DebugP2bCheckedAdd(usedBytes,
+            kDebugP2bMappingAlignment - 1, roundedBytes)) return false;
+    roundedBytes &= ~(kDebugP2bMappingAlignment - 1);
+    return slot == kDebugP2bSlotBytes
+        && nativeBytes == kDebugP2bNativeBytes
+        && usedBytes == kDebugP2bUsedBytes
+        && roundedBytes == kDebugP2bArenaBytes;
+}
+
+bool DebugP2bObservationEnabled() noexcept {
+    const char* value = std::getenv("SHAPEYARD_UITEST_P2B_OBSERVATION");
+    return value && std::strcmp(value, "1") == 0;
+}
+
+struct DebugP2bObserverAccount final {
+    std::uint64_t reserved = 0;
+    bool reserve(const std::uint64_t bytes) noexcept {
+        if (reserved != 0 || bytes != kDebugP2bArenaBytes) return false;
+        reserved = bytes;
+        gDebugP2bActiveBytes.fetch_add(bytes, std::memory_order_relaxed);
+        gDebugP2bTotalReservations.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    void release() noexcept {
+        if (reserved == 0) return;
+        gDebugP2bActiveBytes.fetch_sub(reserved, std::memory_order_relaxed);
+        gDebugP2bTotalReleases.fetch_add(1, std::memory_order_relaxed);
+        reserved = 0;
+    }
+    ~DebugP2bObserverAccount() { release(); }
+};
+
+struct DebugP2bObservationDiagnostic final {
+    bool enabled = false;
+    bool started = false;
+    bool mapped = false;
+    bool arithmeticRefused = false;
+    std::uint32_t failureCode = 0;
+    DebugP2bObservationState state = DebugP2bObservationState::Disabled;
+    std::uint64_t activeBytesBefore = 0;
+    std::uint64_t activeBytesAfter = 0;
+    std::uint64_t activeMappingsBefore = 0;
+    std::uint64_t activeMappingsAfter = 0;
+    std::uint64_t reservationsBefore = 0;
+    std::uint64_t reservationsAfter = 0;
+    std::uint64_t releasesBefore = 0;
+    std::uint64_t releasesAfter = 0;
+    std::uint64_t mapsBefore = 0;
+    std::uint64_t mapsAfter = 0;
+    std::uint64_t unmapsBefore = 0;
+    std::uint64_t unmapsAfter = 0;
+    std::uint64_t hookCallsBefore = 0;
+    std::uint64_t hookCallsAfter = 0;
+};
+
+class DebugP2bObservationArena final {
+public:
+    DebugP2bObservationArena() noexcept {
+        if (!DebugP2bValidateLayout()) {
+            failureCode_ = 4;
+            return;
+        }
+        const long pageSize = sysconf(_SC_PAGESIZE);
+        if (pageSize <= 0
+            || std::uint64_t(pageSize) > kDebugP2bMappingAlignment
+            || kDebugP2bMappingAlignment % std::uint64_t(pageSize) != 0) {
+            failureCode_ = 1;
+            return;
+        }
+        if (!account_.reserve(kDebugP2bArenaBytes)) {
+            failureCode_ = 2;
+            return;
+        }
+        mapping_ = mmap(nullptr, std::size_t(kDebugP2bArenaBytes),
+            PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (mapping_ == MAP_FAILED) {
+            mapping_ = nullptr;
+            failureCode_ = 3;
+            account_.release();
+            return;
+        }
+        gDebugP2bActiveMappings.fetch_add(1, std::memory_order_relaxed);
+        gDebugP2bTotalMappings.fetch_add(1, std::memory_order_relaxed);
+        new (mapping_) DebugP2bMappedControl();
+    }
+    DebugP2bObservationArena(const DebugP2bObservationArena&) = delete;
+    DebugP2bObservationArena& operator=(
+        const DebugP2bObservationArena&) = delete;
+    ~DebugP2bObservationArena() { close(); }
+    bool valid() const noexcept { return mapping_ != nullptr; }
+    std::uint32_t failureCode() const noexcept { return failureCode_; }
+    void close() noexcept {
+        if (mapping_) {
+            static_cast<DebugP2bMappedControl*>(mapping_)
+                ->~DebugP2bMappedControl();
+            munmap(mapping_, std::size_t(kDebugP2bArenaBytes));
+            mapping_ = nullptr;
+            gDebugP2bActiveMappings.fetch_sub(1, std::memory_order_relaxed);
+            gDebugP2bTotalUnmaps.fetch_add(1, std::memory_order_relaxed);
+        }
+        account_.release();
+    }
+private:
+    DebugP2bObserverAccount account_;
+    void* mapping_ = nullptr;
+    std::uint32_t failureCode_ = 0;
+};
+
+class DebugP2bObserverSession final {
+public:
+    explicit DebugP2bObserverSession(
+        DebugP2bObservationDiagnostic* diagnostic) noexcept
+        : diagnostic_(diagnostic) {
+        if (!diagnostic_) return;
+        diagnostic_->state = diagnostic_->enabled
+            ? DebugP2bObservationState::Incomplete
+            : DebugP2bObservationState::Disabled;
+    }
+    bool start() noexcept {
+        if (!diagnostic_ || !diagnostic_->enabled || diagnostic_->started)
+            return false;
+        diagnostic_->started = true;
+        arena_.emplace();
+        diagnostic_->mapped = arena_->valid();
+        diagnostic_->failureCode = arena_->failureCode();
+        if (arena_->valid()) diagnostic_->state =
+            DebugP2bObservationState::Recording;
+        return arena_->valid();
+    }
+    ~DebugP2bObserverSession() {
+        if (!diagnostic_) return;
+        if (diagnostic_->enabled)
+            diagnostic_->state = DebugP2bObservationState::Incomplete;
+        arena_.reset();
+        diagnostic_->activeBytesAfter =
+            gDebugP2bActiveBytes.load(std::memory_order_relaxed);
+        diagnostic_->activeMappingsAfter =
+            gDebugP2bActiveMappings.load(std::memory_order_relaxed);
+        diagnostic_->reservationsAfter =
+            gDebugP2bTotalReservations.load(std::memory_order_relaxed);
+        diagnostic_->releasesAfter =
+            gDebugP2bTotalReleases.load(std::memory_order_relaxed);
+        diagnostic_->mapsAfter =
+            gDebugP2bTotalMappings.load(std::memory_order_relaxed);
+        diagnostic_->unmapsAfter =
+            gDebugP2bTotalUnmaps.load(std::memory_order_relaxed);
+        diagnostic_->hookCallsAfter =
+            gDebugP2bHookCalls.load(std::memory_order_relaxed);
+    }
+private:
+    DebugP2bObservationDiagnostic* diagnostic_ = nullptr;
+    std::optional<DebugP2bObservationArena> arena_;
+};
+
+DebugP2bObservationDiagnostic DebugP2bBeginDiagnostic(
+    const bool enabled) noexcept {
+    DebugP2bObservationDiagnostic value;
+    value.enabled = enabled;
+    value.activeBytesBefore =
+        gDebugP2bActiveBytes.load(std::memory_order_relaxed);
+    value.activeMappingsBefore =
+        gDebugP2bActiveMappings.load(std::memory_order_relaxed);
+    value.reservationsBefore =
+        gDebugP2bTotalReservations.load(std::memory_order_relaxed);
+    value.releasesBefore =
+        gDebugP2bTotalReleases.load(std::memory_order_relaxed);
+    value.mapsBefore = gDebugP2bTotalMappings.load(std::memory_order_relaxed);
+    value.unmapsBefore = gDebugP2bTotalUnmaps.load(std::memory_order_relaxed);
+    value.hookCallsBefore =
+        gDebugP2bHookCalls.load(std::memory_order_relaxed);
+    std::uint64_t ignored = 0;
+    value.arithmeticRefused = !DebugP2bCheckedAlign64(
+        std::numeric_limits<std::uint64_t>::max(), ignored);
+    return value;
+}
+
+NSString* DebugP2bStateText(const DebugP2bObservationState state) noexcept {
+    switch (state) {
+        case DebugP2bObservationState::Disabled: return @"DISABLED";
+        case DebugP2bObservationState::Recording: return @"RECORDING";
+        case DebugP2bObservationState::Incomplete: return @"INCOMPLETE";
+    }
+    return @"INCOMPLETE";
+}
+
+NSDictionary<NSString*, id>* DebugP2bDiagnosticDictionary(
+    const DebugP2bObservationDiagnostic& value) noexcept {
+    @try {
+        return @{
+            @"schema": @"shapeyard.p2b-arena-diagnostic.v1",
+            @"account": [NSString stringWithUTF8String:
+                kDebugP2bAccountName] ?: @"",
+            @"enabled": @(value.enabled),
+            @"started": @(value.started),
+            @"mapped": @(value.mapped),
+            @"status": DebugP2bStateText(value.state),
+            @"complete": @NO,
+            @"failureCode": @(value.failureCode),
+            @"hardCapBytes": @(kDebugP2bArenaBytes),
+            @"nativeBytes": @(kDebugP2bNativeBytes),
+            @"wireBytes": @(kDebugP2bWireBytes),
+            @"usedBytes": @(kDebugP2bUsedBytes),
+            @"mappingAlignmentBytes": @(kDebugP2bMappingAlignment),
+            @"slotBytes": @(kDebugP2bSlotBytes),
+            @"groupCount": @(kDebugP2bGroupCount),
+            @"sampleEvidenceSize": @(sizeof(
+                painted_atlas_bake::kernel::SampleEvidence)),
+            @"layoutEvidenceSize": @(sizeof(
+                asset_atlas::build::LayoutEvidence)),
+            @"exportBakeStorageSize": @(sizeof(
+                painted_atlas_bake::owner::ExportBakeStorage)),
+            @"sampleEvidenceMirrorSize": @(
+                sizeof(DebugP2bFrozenSampleEvidence)),
+            @"layoutEvidenceMirrorSize": @(
+                sizeof(DebugP2bFrozenLayoutEvidence)),
+            @"exportBakeStorageMirrorSize": @(
+                sizeof(DebugP2bFrozenExportBakeStorage)),
+            @"activeBytesBefore": @(value.activeBytesBefore),
+            @"activeBytesAfter": @(value.activeBytesAfter),
+            @"activeMappingsBefore": @(value.activeMappingsBefore),
+            @"activeMappingsAfter": @(value.activeMappingsAfter),
+            @"reservationDelta": @(
+                value.reservationsAfter - value.reservationsBefore),
+            @"releaseDelta": @(value.releasesAfter - value.releasesBefore),
+            @"mappingDelta": @(value.mapsAfter - value.mapsBefore),
+            @"unmapDelta": @(value.unmapsAfter - value.unmapsBefore),
+            @"hookCallDelta": @(
+                value.hookCallsAfter - value.hookCallsBefore),
+            @"arithmeticOverflowRefused": @(value.arithmeticRefused),
+            @"entryRejectionMappingDelta": @0,
+            @"assetAtlasBuildSourceSHA256":
+                @"1aef4b429da1cae44dedc138b6e74de08fe9d74cd9229ba28296ed338b571ac3",
+            @"paintedAtlasBakeSourceSHA256":
+                @"e501707da12d65fd40b9b710829bdb772a4873910d7232f420b4600329e35beb",
+        };
+    } @catch (...) {
+        return nil;
+    }
+}
+#endif
+
 //! P2-only value state. Keeping it in this implementation preserves the
 //! existing public P1 observation and entry point.
 struct DebugSavedCompleteAssemblyObservation final {
@@ -12514,15 +12969,17 @@ bool OcctSceneSnapshotBuilder::DebugCapturePersistedAtlasLineage(
     }
 }
 
-bool OcctSceneSnapshotBuilder::DebugProduceSavedGroupFinalResult(
+bool DebugProduceSavedGroupFinalResultImpl(
     const Handle(OcctDocument)& privateDocument,
     const SceneSnapshot& wholeCommittedScene,
     const bool selectedObjectsOnly,
     const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
     const std::function<bool()>& cancelled,
-    DebugSavedGroupFinalObservation& observation) noexcept {
+    DebugSavedGroupFinalObservation& observation,
+    DebugP2bObservationDiagnostic* arenaDiagnostic) noexcept {
     observation = {};
     observation.selectedObjectsOnly = selectedObjectsOnly;
+    DebugP2bObserverSession arenaSession(arenaDiagnostic);
     try {
         observation.failureStage = "entry";
         if (privateDocument.IsNull() || !meshPrivateSurfaces
@@ -12533,6 +12990,7 @@ bool OcctSceneSnapshotBuilder::DebugProduceSavedGroupFinalResult(
         std::vector<asset_atlas::persistence::Record> records;
         if (!asset_atlas::persistence::ReadAll(document, records)
             || records.size() != 1 || !records.front().value) return false;
+        arenaSession.start();
         const asset_atlas::Key strictKey =
             records.front().value->definition.key;
         observation.strictKey = retained_solid::UUIDText(strictKey.document)
@@ -12709,14 +13167,46 @@ bool OcctSceneSnapshotBuilder::DebugProduceSavedGroupFinalResult(
     }
 }
 
+bool OcctSceneSnapshotBuilder::DebugProduceSavedGroupFinalResult(
+    const Handle(OcctDocument)& privateDocument,
+    const SceneSnapshot& wholeCommittedScene,
+    const bool selectedObjectsOnly,
+    const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
+    const std::function<bool()>& cancelled,
+    DebugSavedGroupFinalObservation& observation) noexcept {
+    return DebugProduceSavedGroupFinalResultImpl(privateDocument,
+        wholeCommittedScene, selectedObjectsOnly, meshPrivateSurfaces,
+        cancelled, observation, nullptr);
+}
+
+bool DebugProduceSavedGroupFinalResultObserved(
+    const Handle(OcctDocument)& privateDocument,
+    const SceneSnapshot& wholeCommittedScene,
+    const bool selectedObjectsOnly,
+    const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
+    const std::function<bool()>& cancelled,
+    DebugSavedGroupFinalObservation& observation,
+    NSDictionary<NSString*, id>** extraObservation) noexcept {
+    DebugP2bObservationDiagnostic diagnostic = DebugP2bBeginDiagnostic(
+        DebugP2bObservationEnabled());
+    const bool completed = DebugProduceSavedGroupFinalResultImpl(
+        privateDocument, wholeCommittedScene, selectedObjectsOnly,
+        meshPrivateSurfaces, cancelled, observation, &diagnostic);
+    if (extraObservation)
+        *extraObservation = DebugP2bDiagnosticDictionary(diagnostic);
+    return completed;
+}
+
 bool ProduceSavedProducerBatchImpl(
     const Handle(OcctDocument)& privateDocument,
     const SceneSnapshot& wholeCommittedScene,
     const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
     const std::function<bool()>& cancelled,
     DebugSavedProducerBatchObservation& observation,
-    DebugSavedCompleteAssemblyObservation* completeAssembly) noexcept {
+    DebugSavedCompleteAssemblyObservation* completeAssembly,
+    DebugP2bObservationDiagnostic* arenaDiagnostic) noexcept {
     observation = {};
+    DebugP2bObserverSession arenaSession(arenaDiagnostic);
     if (completeAssembly) {
         *completeAssembly = {};
         completeAssembly->observationWired = true;
@@ -12754,6 +13244,7 @@ bool ProduceSavedProducerBatchImpl(
             observation.failureStage = "entry-record-value";
             return false;
         }
+        arenaSession.start();
         std::sort(records.begin(), records.end(), [](const auto& first,
                 const auto& second) {
             return first.value->definition.key.atlas
@@ -13101,7 +13592,7 @@ bool OcctSceneSnapshotBuilder::DebugProduceSavedProducerBatch(
     const std::function<bool()>& cancelled,
     DebugSavedProducerBatchObservation& observation) noexcept {
     return ProduceSavedProducerBatchImpl(privateDocument, wholeCommittedScene,
-        meshPrivateSurfaces, cancelled, observation, nullptr);
+        meshPrivateSurfaces, cancelled, observation, nullptr, nullptr);
 }
 
 NSDictionary<NSString *, id> *DebugProduceSavedCompleteAssembly(
@@ -13111,8 +13602,11 @@ NSDictionary<NSString *, id> *DebugProduceSavedCompleteAssembly(
     const std::function<bool()>& cancelled) noexcept {
     DebugSavedProducerBatchObservation batch;
     DebugSavedCompleteAssemblyObservation assembly;
+    DebugP2bObservationDiagnostic arenaDiagnostic = DebugP2bBeginDiagnostic(
+        DebugP2bObservationEnabled());
     const bool completed = ProduceSavedProducerBatchImpl(privateDocument,
-        wholeCommittedScene, meshPrivateSurfaces, cancelled, batch, &assembly);
+        wholeCommittedScene, meshPrivateSurfaces, cancelled, batch, &assembly,
+        &arenaDiagnostic);
     const auto numbers = [](const auto& values) {
         NSMutableArray<NSNumber *> *result = [NSMutableArray array];
         for (const auto value : values)
@@ -13167,6 +13661,7 @@ NSDictionary<NSString *, id> *DebugProduceSavedCompleteAssembly(
         @"currentAssemblyAccepted": @(
             assembly.currentAssemblyAccepted),
         @"productPresent": @(assembly.candidateReady),
+        @"p2bArena": DebugP2bDiagnosticDictionary(arenaDiagnostic) ?: @{},
     };
 }
 #endif

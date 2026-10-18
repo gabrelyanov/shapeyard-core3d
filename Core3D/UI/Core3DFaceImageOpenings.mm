@@ -83,6 +83,13 @@ NSDictionary<NSString *, id> *DebugProduceSavedCompleteAssembly(
     const SceneSnapshot& wholeCommittedScene,
     const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
     const std::function<bool()>& cancelled) noexcept;
+bool DebugProduceSavedGroupFinalResultObserved(
+    const Handle(OcctDocument)& privateDocument,
+    const SceneSnapshot& wholeCommittedScene, bool selectedObjectsOnly,
+    const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
+    const std::function<bool()>& cancelled,
+    DebugSavedGroupFinalObservation& originalObservation,
+    NSDictionary<NSString*, id>** extraObservation) noexcept;
 std::array<std::size_t, 23>
 DebugExerciseE4BRepCensusCopyPrediction() noexcept;
 std::array<std::size_t, 51>
@@ -4205,9 +4212,10 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         }
 
         scene::DebugSavedGroupFinalObservation observation;
+        NSDictionary<NSString*, id> *extraObservation = nil;
         std::atomic_bool cancelled{false};
-        const bool completed = scene::OcctSceneSnapshotBuilder::
-            DebugProduceSavedGroupFinalResult(wrapper, scope,
+        const bool completed = scene::
+            DebugProduceSavedGroupFinalResultObserved(wrapper, scope,
                 selectedObjectsOnly,
                 [](const TopoDS_Shape& shape) {
                     if (!scene::DebugMeshSavedGroupPrivateSurfaces(shape))
@@ -4216,7 +4224,7 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
                 },
                 [&cancelled]() noexcept {
                     return cancelled.load(std::memory_order_acquire);
-                }, observation);
+                }, observation, &extraObservation);
 
         const auto strings = [](const std::vector<std::string>& values) {
             NSMutableArray<NSString *> *result = [NSMutableArray array];
@@ -4240,7 +4248,7 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
             observation.failureStage.c_str()] ?: @"invalid-stage";
         NSString *key = [NSString stringWithUTF8String:
             observation.strictKey.c_str()] ?: @"";
-        return @{
+        NSMutableDictionary<NSString*, id> *result = [@{
             @"fixture": @"E4SavedGroupFinalResult2048",
             @"complete": @(completed && observation.complete),
             @"failureStage": stage,
@@ -4269,7 +4277,9 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
             @"changedCylinderInput": @(observation.changedCylinderInput),
             @"retainedLayout": @(observation.retainedLayout),
             @"sharedResultIdentity": @(observation.sharedResultIdentity),
-        };
+        } mutableCopy];
+        result[@"p2bArena"] = extraObservation ?: @{};
+        return result;
     } @catch (...) {
         return @{@"failureStage": @"bridge-exception",
             @"complete": @NO};
