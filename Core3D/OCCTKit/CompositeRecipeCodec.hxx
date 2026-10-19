@@ -21,6 +21,7 @@ inline constexpr std::uint32_t PartBooleanFeatureKind = part_boolean::FeatureKin
 inline constexpr std::uint32_t PartBooleanFeatureCodec = part_boolean::LegacyCodecVersion;
 inline constexpr std::uint32_t PartBooleanShellFeatureCodec = part_boolean::ShellCodecVersion;
 inline constexpr std::uint32_t PartBooleanRecipeFeatureCodec = part_boolean::RecipeCodecVersion;
+inline constexpr std::uint32_t PartBooleanOriginalsFeatureCodec = part_boolean::OriginalsCodecVersion;
 inline constexpr std::uint32_t SpatialCircleSweepFeatureKind = spatial_sweep::SpatialCircleSweepFeatureKind;
 inline constexpr std::uint32_t SpatialCircleSweepFeatureCodec = spatial_sweep::SpatialCircleSweepFeatureCodec;
 inline constexpr std::uint32_t RetainedProgramSuffixFeatureKind = retained_program_suffix::FeatureKind;
@@ -348,6 +349,50 @@ inline bool CanonicalRecipeFeature(const FeatureNode& feature,
     } catch (...) { return false; }
 }
 
+inline bool CanonicalOriginalsFeature(const FeatureNode& feature,
+                                      const std::vector<Node>& priorNodes) noexcept {
+    try {
+        if (feature.kind != PartBooleanFeatureKind
+            || feature.codecVersion != PartBooleanOriginalsFeatureCodec
+            || feature.inputs.size() != 2 || feature.inputs[0] == feature.inputs[1]) return false;
+        part_boolean::OriginalsDefinition payload;
+        std::vector<std::uint8_t> exact;
+        if (!part_boolean::DecodeOriginals(feature.parameters, payload)
+            || !part_boolean::EncodeOriginals(payload, exact) || exact != feature.parameters
+            || payload.booleanNode != feature.node || payload.feature != feature.feature) return false;
+        for (std::size_t index = 0; index < 2; ++index) {
+            const auto& original = payload.originals.inputs[index];
+            const auto& effective = payload.effective.inputs[index];
+            if (original.sourceNode != feature.inputs[index]
+                || effective.sourceNode != feature.inputs[index]) return false;
+            const auto found = std::find_if(priorNodes.begin(), priorNodes.end(),
+                [&](const Node& node) { return NodeID(node) == feature.inputs[index]; });
+            if (found == priorNodes.end()) return false;
+            const auto* source = std::get_if<SourceNode>(&found->value);
+            if (!source || source->localID != original.sourceLocalID
+                || source->shapeSlot != original.shapeSlot
+                || !(source->original == original.original)
+                || std::uint8_t(source->recipe.kind) != std::uint8_t(original.recipeKind)
+                || source->recipe.schema != original.recipeSchema
+                || source->recipe.bytes != original.recipeBytes
+                || source->commitments.geometry != original.commitments.geometry
+                || source->commitments.recipe != original.commitments.recipe
+                || source->commitments.placement != original.commitments.placement
+                || source->commitments.material != original.commitments.material
+                || source->commitments.groups != original.commitments.groups
+                || std::memcmp(&source->inputToCarrier.sourceMetersPerUnit,
+                               &original.sourceMetersPerUnit, sizeof(double)) != 0
+                || std::memcmp(&source->inputToCarrier.carrierMetersPerUnit,
+                               &original.carrierMetersPerUnit, sizeof(double)) != 0) return false;
+            for (std::size_t scalar = 0; scalar < original.sourceRootToCarrier.size(); ++scalar)
+                if (std::memcmp(&source->inputToCarrier.matrix[scalar],
+                                &original.sourceRootToCarrier[scalar], sizeof(double)) != 0)
+                    return false;
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
 // A3/P2 is a normal SYCR/3 registry feature. Its payload is canonical and its
 // single ordered input must be an earlier PartBoolean feature. No SYCR/1 or
 // SYCR/2 validation branch is widened.
@@ -470,6 +515,16 @@ inline V3Validation ValidateV3(const Definition& definition,
                 && feature.codecVersion == PartBooleanRecipeFeatureCodec) {
                 part_boolean::RecipeDefinition payload;
                 if (!part_boolean::DecodeRecipe(feature.parameters, payload)
+                    || !(payload.owner == definition.owner)) {
+                    result.refusal = V3Refusal::Payload;
+                    result.reason = "noncanonical-feature-payload";
+                    return result;
+                }
+            }
+            if (feature.kind == PartBooleanFeatureKind
+                && feature.codecVersion == PartBooleanOriginalsFeatureCodec) {
+                part_boolean::OriginalsDefinition payload;
+                if (!part_boolean::DecodeOriginals(feature.parameters, payload)
                     || !(payload.owner == definition.owner)) {
                     result.refusal = V3Refusal::Payload;
                     result.reason = "noncanonical-feature-payload";
@@ -770,7 +825,7 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes, Definition& output) n
 namespace core3d::retained_feature {
 inline const RegistryView& ProductionRegistry() noexcept {
     using namespace composite_recipe;
-    static const std::array<Entry, 4> entries{{
+    static const std::array<Entry, 5> entries{{
         {{{PartBooleanFeatureKind, PartBooleanFeatureCodec}, 3, MaximumFeaturePayloadBytes,
           {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 2,
           ShapeKind::Solid, CanonicalAnalyticFeature}, {}},
@@ -780,6 +835,11 @@ inline const RegistryView& ProductionRegistry() noexcept {
         {{{PartBooleanFeatureKind, PartBooleanRecipeFeatureCodec}, 3, MaximumFeaturePayloadBytes,
           {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 2,
           ShapeKind::Solid, CanonicalRecipeFeature}, {}},
+        // Readable and canonical is not executable authority. N-CAP/N-COM
+        // install the owner routes only after their independent proofs land.
+        {{{PartBooleanFeatureKind, PartBooleanOriginalsFeatureCodec}, 3, MaximumFeaturePayloadBytes,
+          {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 2,
+          ShapeKind::Solid, CanonicalOriginalsFeature}, {}},
         {{{RetainedProgramSuffixFeatureKind, RetainedProgramSuffixFeatureCodec}, 3,
           retained_program_suffix::MaximumPayloadBytes,
           {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 1,

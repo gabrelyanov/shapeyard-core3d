@@ -40,3 +40,5 @@ FOUNDATION_EXPORT const unsigned char Core3DVersionString[];
 #import <Core3D/Core3DPublishCapture.h>
 #import <Core3D/Core3DDecimationOpening.h>
 #import <Core3D/Core3DAttachmentRigOpening.h>
+#import <Core3D/Core3DVariableFilletOpening.h>
+#import <Core3D/Core3DDraftFacesOpening.h>

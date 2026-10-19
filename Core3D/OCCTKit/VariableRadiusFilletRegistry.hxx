@@ -22,27 +22,66 @@ inline bool readShape(const std::vector<std::uint8_t>& bytes, TopoDS_Shape& shap
     return stream.good() && !shape.IsNull();
 }
 
-inline bool buildDetached(const composite_recipe::FeatureNode& feature,
+// B3-S1: the detached build core threads a real caller-owned Stop token and
+// the shared replay budget into the deterministic builder and reports the
+// exact native refusal/evidence to the issuing opening. The prototype
+// registry entries below keep their original four-argument shape.
+inline bool buildDetachedObserved(const composite_recipe::FeatureNode& feature,
                           const std::vector<retained_feature::ReplayValue>& inputs,
                           retained_feature::ReplayBudget& budget,
-                          retained_feature::ReplayValue& output) noexcept {
+                          retained_feature::ReplayValue& output,
+                          const std::atomic_bool& cancelled,
+                          Refusal* refusalOut,
+                          BuildEvidence* evidenceOut) noexcept {
     output = {};
+    if (refusalOut) *refusalOut = Refusal::KernelFailure;
+    if (evidenceOut) *evidenceOut = {};
     try {
-        if (inputs.size() != 1 || inputs[0].shape != retained_feature::ShapeKind::Solid
-            || !budget.consume(1, feature.inputs.size() + 2, feature.parameters.size())) return false;
+        if (cancelled.load()) {
+            if (refusalOut) *refusalOut = Refusal::Cancelled; return false;
+        }
+        if (inputs.size() != 1 || inputs[0].shape != retained_feature::ShapeKind::Solid) return false;
+        if (!budget.consume(1, feature.inputs.size() + 2, feature.parameters.size())) {
+            if (refusalOut) *refusalOut = Refusal::Budget; return false;
+        }
         Definition definition; TopoDS_Shape source;
-        if (!Decode(feature.parameters, definition) || !readShape(inputs[0].detachedShape, source)) return false;
-        const std::atomic_bool cancelled{false};
+        if (!Decode(feature.parameters, definition)) {
+            if (refusalOut) *refusalOut = Refusal::MalformedPayload; return false;
+        }
+        if (!readShape(inputs[0].detachedShape, source)) return false;
         BuildResult built = BuildDeterministically(source, definition, cancelled);
-        if (!built.built() || !exactShapeBytes(built.solid, output.detachedShape)
+        if (!built.built()) {
+            if (refusalOut) *refusalOut = built.refusal;
+            if (evidenceOut) *evidenceOut = built.evidence;
+            return false;
+        }
+        // A Stop that arrives during the uninterruptible kernel call still
+        // prevents delivery; owned work is drained without a candidate.
+        if (cancelled.load()) {
+            if (refusalOut) *refusalOut = Refusal::Cancelled; return false;
+        }
+        if (!exactShapeBytes(built.solid, output.detachedShape)
             || !composite_recipe::Hash(output.detachedShape, output.geometry)) return false;
         std::vector<std::uint8_t> proof;
         proof.reserve(feature.parameters.size() + output.detachedShape.size());
         proof.insert(proof.end(), feature.parameters.begin(), feature.parameters.end());
         proof.insert(proof.end(), output.geometry.begin(), output.geometry.end());
         if (!composite_recipe::Hash(proof, output.familyProof)) return false;
+        if (refusalOut) *refusalOut = Refusal::None;
+        if (evidenceOut) *evidenceOut = built.evidence;
         output.shape = retained_feature::ShapeKind::Solid; return output.valid();
     } catch (...) { output = {}; return false; }
+}
+
+inline bool buildDetached(const composite_recipe::FeatureNode& feature,
+                          const std::vector<retained_feature::ReplayValue>& inputs,
+                          retained_feature::ReplayBudget& budget,
+                          retained_feature::ReplayValue& output) noexcept {
+    // Prototype replay entry: never installed, so it runs with a
+    // never-cancelled token exactly as before B3-S1.
+    const std::atomic_bool cancelled{false};
+    return buildDetachedObserved(feature, inputs, budget, output, cancelled,
+                                 nullptr, nullptr);
 }
 
 inline bool proveFamily(const composite_recipe::FeatureNode& feature,
@@ -89,28 +128,62 @@ inline retained_feature::Entry DraftRegistryEntry() noexcept {
 // ===== descriptor and changes no stage-1 admission or install flags.     =====
 
 namespace detail {
-inline bool buildDetachedMultiStation(
+inline bool buildDetachedMultiStationObserved(
     const composite_recipe::FeatureNode& feature,
     const std::vector<retained_feature::ReplayValue>& inputs,
     retained_feature::ReplayBudget& budget,
-    retained_feature::ReplayValue& output) noexcept {
+    retained_feature::ReplayValue& output,
+    const std::atomic_bool& cancelled,
+    Refusal* refusalOut,
+    BuildEvidence* evidenceOut) noexcept {
     output = {};
+    if (refusalOut) *refusalOut = Refusal::KernelFailure;
+    if (evidenceOut) *evidenceOut = {};
     try {
-        if (inputs.size() != 1 || inputs[0].shape != retained_feature::ShapeKind::Solid
-            || !budget.consume(1, feature.inputs.size() + 2, feature.parameters.size())) return false;
+        if (cancelled.load()) {
+            if (refusalOut) *refusalOut = Refusal::Cancelled; return false;
+        }
+        if (inputs.size() != 1 || inputs[0].shape != retained_feature::ShapeKind::Solid) return false;
+        if (!budget.consume(1, feature.inputs.size() + 2, feature.parameters.size())) {
+            if (refusalOut) *refusalOut = Refusal::Budget; return false;
+        }
         MultiStationDefinition definition; TopoDS_Shape source;
-        if (!Decode(feature.parameters, definition) || !readShape(inputs[0].detachedShape, source)) return false;
-        const std::atomic_bool cancelled{false};
+        if (!Decode(feature.parameters, definition)) {
+            if (refusalOut) *refusalOut = Refusal::MalformedPayload; return false;
+        }
+        if (!readShape(inputs[0].detachedShape, source)) return false;
         BuildResult built = BuildMultiStationDeterministically(source, definition, cancelled);
-        if (!built.built() || !exactShapeBytes(built.solid, output.detachedShape)
+        if (!built.built()) {
+            if (refusalOut) *refusalOut = built.refusal;
+            if (evidenceOut) *evidenceOut = built.evidence;
+            return false;
+        }
+        if (cancelled.load()) {
+            if (refusalOut) *refusalOut = Refusal::Cancelled; return false;
+        }
+        if (!exactShapeBytes(built.solid, output.detachedShape)
             || !composite_recipe::Hash(output.detachedShape, output.geometry)) return false;
         std::vector<std::uint8_t> proof;
         proof.reserve(feature.parameters.size() + output.detachedShape.size());
         proof.insert(proof.end(), feature.parameters.begin(), feature.parameters.end());
         proof.insert(proof.end(), output.geometry.begin(), output.geometry.end());
         if (!composite_recipe::Hash(proof, output.familyProof)) return false;
+        if (refusalOut) *refusalOut = Refusal::None;
+        if (evidenceOut) *evidenceOut = built.evidence;
         output.shape = retained_feature::ShapeKind::Solid; return output.valid();
     } catch (...) { output = {}; return false; }
+}
+
+inline bool buildDetachedMultiStation(
+    const composite_recipe::FeatureNode& feature,
+    const std::vector<retained_feature::ReplayValue>& inputs,
+    retained_feature::ReplayBudget& budget,
+    retained_feature::ReplayValue& output) noexcept {
+    // Prototype replay entry: never installed, so it runs with a
+    // never-cancelled token exactly as before B3-S1.
+    const std::atomic_bool cancelled{false};
+    return buildDetachedMultiStationObserved(feature, inputs, budget, output,
+                                             cancelled, nullptr, nullptr);
 }
 
 inline bool proveFamilyMultiStation(

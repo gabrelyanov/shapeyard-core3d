@@ -30,6 +30,7 @@
 #include "../OCCTKit/ReceiptRecord.hxx"
 #include "../OCCTKit/RetainedFinishingAttribute.hxx"
 #include "../OCCTKit/RetainedEdgeTreatmentBuild.hxx"
+#include "../OCCTKit/RetainedEdgeTreatmentSaveView.hxx"
 #include "../OCCTKit/RetainedProfileProducer.hxx"
 #if DEBUG
 // R179/D249 diagnostic-only include. Never compiled into Release.
@@ -121,6 +122,10 @@
 #include <utility>
 #include <vector>
 
+#if DEBUG
+void Core3DDebugRunColdOpenCandidateProbe();
+#endif
+
 #if TARGET_OS_OSX
 #import <AppKit/NSOpenGL.h>
 #include "../OCCTKit/Core3DMacImageExport.hxx"
@@ -137,6 +142,46 @@
 #endif
 
 namespace core3d {
+
+#if DEBUG
+extern "C" void Core3DDebugColdOpenOwnerEvent(
+    int owner, int stage, const void *session,
+    const void *document, const void *data);
+
+namespace {
+enum class ColdOpenOwner : int { Validate = 1, Import = 2 };
+enum class ColdOpenStage : int {
+    Begin = 1, Candidate = 3, Validated = 4, End = 5
+};
+
+void ObserveColdOpen(ColdOpenOwner owner, ColdOpenStage stage,
+    const retained_edge_treatment::save_view::ValidationSession *session,
+    const Handle(TDocStd_Document)& document = {}) noexcept {
+    Core3DDebugColdOpenOwnerEvent(static_cast<int>(owner),
+        static_cast<int>(stage), session,
+        document.IsNull() ? nullptr : document.get(),
+        document.IsNull() || document->GetData().IsNull()
+            ? nullptr : document->GetData().get());
+}
+
+class ColdOpenTrace final {
+public:
+    ColdOpenTrace(ColdOpenOwner owner,
+        const retained_edge_treatment::save_view::ValidationSession *session)
+        : owner_(owner), session_(session) {
+        ObserveColdOpen(owner_, ColdOpenStage::Begin, session_);
+    }
+    ~ColdOpenTrace() noexcept {
+        ObserveColdOpen(owner_, ColdOpenStage::End, session_);
+    }
+    ColdOpenTrace(const ColdOpenTrace&) = delete;
+    ColdOpenTrace& operator=(const ColdOpenTrace&) = delete;
+private:
+    ColdOpenOwner owner_;
+    const retained_edge_treatment::save_view::ValidationSession *session_;
+};
+} // namespace
+#endif
 
 struct RawR2PreviewPresentation {
     std::shared_ptr<retained_edge_treatment::r2::RawPreviewSession> session;
@@ -10939,6 +10984,12 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string& theFilename,
 	AIS_ListOfInteractive previousPresentations;
 	myContext->DisplayedObjects(AIS_KOI_Shape, -1, previousPresentations);
 
+    retained_edge_treatment::save_view::ValidationSession coldOpenSession;
+    retained_edge_treatment::save_view::Scope coldOpenScope(
+        {}, &coldOpenSession);
+#if DEBUG
+    ColdOpenTrace coldOpenTrace(ColdOpenOwner::Import, &coldOpenSession);
+#endif
     Handle(TDocStd_Document) candidate;
     try {
         OCC_CATCH_SIGNALS
@@ -10979,6 +11030,10 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string& theFilename,
 	try {
 		OCC_CATCH_SIGNALS
 		TDF_LabelMap candidateDefinitions;
+#if DEBUG
+        ObserveColdOpen(ColdOpenOwner::Import, ColdOpenStage::Candidate,
+            &coldOpenSession, candidate);
+#endif
 		if (!HasValidOptionalLengthUnit(candidate)
 			|| !ValidateShapeTree(
                 candidate,
@@ -10989,6 +11044,11 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string& theFilename,
 			CloseDocumentNoThrow(app, candidate);
 			return AssetImportResult::InvalidData;
 		}
+#if DEBUG
+        Core3DDebugRunColdOpenCandidateProbe();
+        ObserveColdOpen(ColdOpenOwner::Import, ColdOpenStage::Validated,
+            &coldOpenSession, candidate);
+#endif
 		// CBF files created before persistent scene identity need a one-time
 		// migration. Do this while the candidate is isolated, before it becomes
 		// the editable document and before normal undo history is enabled.
@@ -11119,6 +11179,12 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
 
     Handle(TDocStd_Application) validationApplication;
     Handle(TDocStd_Document) candidate;
+    retained_edge_treatment::save_view::ValidationSession coldOpenSession;
+    retained_edge_treatment::save_view::Scope coldOpenScope(
+        {}, &coldOpenSession);
+#if DEBUG
+    ColdOpenTrace coldOpenTrace(ColdOpenOwner::Validate, &coldOpenSession);
+#endif
     try {
         OCC_CATCH_SIGNALS
         validationApplication = new TDocStd_Application();
@@ -11152,6 +11218,10 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
         } catch (...) {}
 #endif
         TDF_LabelMap activeDefinitionLabels;
+#if DEBUG
+        ObserveColdOpen(ColdOpenOwner::Validate, ColdOpenStage::Candidate,
+            &coldOpenSession, candidate);
+#endif
         const bool isValid = HasValidOptionalLengthUnit(candidate)
             && ValidateShapeTree(
                 candidate,
@@ -11160,6 +11230,11 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
             && ValidateVisualMaterials(
                 candidate, activeDefinitionLabels)
             && myDoc->ValidateGeometryRepresentations(candidate);
+#if DEBUG
+        Core3DDebugRunColdOpenCandidateProbe();
+        ObserveColdOpen(ColdOpenOwner::Validate, ColdOpenStage::Validated,
+            &coldOpenSession, candidate);
+#endif
         CloseDocumentNoThrow(validationApplication, candidate);
         return isValid
             ? AssetImportResult::Success

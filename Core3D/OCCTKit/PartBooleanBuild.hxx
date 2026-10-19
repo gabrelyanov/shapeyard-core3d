@@ -206,6 +206,32 @@ inline TopoDS_Shape BuildAnalyticPrism(const AnalyticPrismInput& input,
     } catch (...) { return {}; }
 }
 
+// SYPB/4 replay consumes only the mutable effective geometry.  There is no
+// overload taking OriginalAnalyticProjection: frozen provenance cannot become
+// an accidental edit/build input through structural type compatibility.
+inline TopoDS_Shape BuildEffectiveAnalyticPrism(
+    const EffectiveAnalyticGeometry& geometry, double sourceMetersPerUnit,
+    double carrierMetersPerUnit) noexcept {
+    try {
+        if (!ValidGeometry(geometry) || !std::isfinite(sourceMetersPerUnit)
+            || sourceMetersPerUnit <= 0 || !std::isfinite(carrierMetersPerUnit)
+            || carrierMetersPerUnit <= 0) return {};
+        const double scale = sourceMetersPerUnit / carrierMetersPerUnit;
+        const gp_Quaternion rotation(geometry.rotationXYZW[0], geometry.rotationXYZW[1],
+                                     geometry.rotationXYZW[2], geometry.rotationXYZW[3]);
+        gp_Trsf placement; placement.SetRotation(rotation);
+        placement.SetTranslationPart(gp_Vec(geometry.translation[0] * scale,
+                                            geometry.translation[1] * scale,
+                                            geometry.translation[2] * scale));
+        TopoDS_Shape source = BRepPrimAPI_MakeBox(
+            geometry.dimensions[0] * scale, geometry.dimensions[1] * scale,
+            geometry.dimensions[2] * scale).Shape();
+        if (source.IsNull()) return {};
+        source = BRepBuilderAPI_Transform(source, placement, Standard_True).Shape();
+        return retained_part_boolean::IsOneValidForwardSolid(source) ? source : TopoDS_Shape();
+    } catch (...) { return {}; }
+}
+
 inline TopoDS_Shape AnalyticResultSolid(const TopoDS_Shape& value) noexcept {
     try {
         if (retained_part_boolean::IsOneValidForwardSolid(value)) return value;

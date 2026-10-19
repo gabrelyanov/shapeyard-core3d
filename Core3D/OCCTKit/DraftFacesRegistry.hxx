@@ -45,6 +45,48 @@ inline bool buildDetached(const composite_recipe::FeatureNode& feature,
     } catch (...) { output = {}; return false; }
 }
 
+inline bool buildDetachedObserved(const composite_recipe::FeatureNode& feature,
+                          const std::vector<retained_feature::ReplayValue>& inputs,
+                          retained_topology_budget::Counter& topologyBudget,
+                          const std::atomic_bool& cancelled,
+                          retained_feature::ReplayValue& output,
+                          Refusal *refusalOut = nullptr,
+                          BuildEvidence *evidenceOut = nullptr) noexcept {
+    output = {};
+    Refusal refusal = Refusal::MalformedPayload;
+    try {
+        if (cancelled.load()) refusal = Refusal::Cancelled;
+        else if (inputs.size() != 1 || inputs[0].shape != retained_feature::ShapeKind::Solid)
+            refusal = Refusal::InvalidCandidate;
+        else {
+            Definition definition; TopoDS_Shape source;
+            if (!Decode(feature.parameters, definition)) refusal = Refusal::MalformedPayload;
+            else if (!readShape(inputs[0].detachedShape, source)) refusal = Refusal::InvalidCandidate;
+            else {
+                BuildResult built = BuildDeterministically(source, definition,
+                                                            cancelled, topologyBudget);
+                refusal = built.refusal;
+                if (evidenceOut) *evidenceOut = built.evidence;
+                if (built.built() && exactShapeBytes(built.solid, output.detachedShape)
+                    && composite_recipe::Hash(output.detachedShape, output.geometry)) {
+                    std::vector<std::uint8_t> proof;
+                    proof.reserve(feature.parameters.size() + output.geometry.size());
+                    proof.insert(proof.end(), feature.parameters.begin(), feature.parameters.end());
+                    proof.insert(proof.end(), output.geometry.begin(), output.geometry.end());
+                    if (composite_recipe::Hash(proof, output.familyProof)) {
+                        output.shape = retained_feature::ShapeKind::Solid;
+                        if (output.valid()) refusal = Refusal::None;
+                    }
+                }
+                if (built.built() && refusal != Refusal::None) refusal = Refusal::InvalidCandidate;
+            }
+        }
+    } catch (...) { output = {}; refusal = Refusal::BuildFailure; }
+    if (cancelled.load()) { output = {}; refusal = Refusal::Cancelled; }
+    if (refusalOut) *refusalOut = refusal;
+    return refusal == Refusal::None && output.valid();
+}
+
 inline bool proveFamily(const composite_recipe::FeatureNode& feature,
                         const std::vector<retained_feature::ReplayValue>& inputs,
                         const retained_feature::ReplayValue& output,

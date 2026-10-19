@@ -7,6 +7,8 @@
 #include "Core3DViewer.h"
 #if DEBUG
 #include "../OCCTKit/PartBooleanAnalyticPlacementProof.hxx"
+#include "../OCCTKit/PartBooleanCorrespondence.hxx"
+#include "../OCCTKit/CompositeRecipeCodec.hxx"
 #include <cstring>
 #endif
 
@@ -1242,5 +1244,213 @@ extern "C" void *Core3DDebugA2AuthoredBooleanRecoveryProbe(
     if (result.measuredUndoDelta)
         answer[@"measuredUndoDelta"] = @(*result.measuredUndoDelta);
     return (__bridge_retained void *)answer;
+}
+
+namespace {
+core3d::retained_recipe::UUID I16UUID(std::uint8_t seed) {
+    core3d::retained_recipe::UUID value{};
+    for (std::size_t index = 0; index < value.size(); ++index)
+        value[index] = std::uint8_t(seed + index);
+    return value;
+}
+
+core3d::retained_recipe::Digest I16Digest(std::uint8_t seed) {
+    core3d::retained_recipe::Digest value{};
+    for (std::size_t index = 0; index < value.size(); ++index)
+        value[index] = std::uint8_t(seed + index);
+    return value;
+}
+
+core3d::part_boolean::SignatureCommitments I16Commitments(std::uint8_t seed) {
+    using core3d::part_boolean::SignatureCommitments;
+    return SignatureCommitments{I16Digest(seed), I16Digest(std::uint8_t(seed + 1)),
+        I16Digest(std::uint8_t(seed + 2)), I16Digest(std::uint8_t(seed + 3)),
+        I16Digest(std::uint8_t(seed + 4))};
+}
+
+core3d::part_boolean::OriginalsDefinition I16Fixture(double unit) {
+    namespace pb = core3d::part_boolean;
+    pb::OriginalsDefinition value;
+    value.operation = pb::Operation::Subtract;
+    value.originals.creationOperation = value.operation;
+    value.owner = {I16UUID(1), I16UUID(21), I16UUID(41)};
+    value.booleanNode = I16UUID(61); value.feature = I16UUID(81);
+    value.carrierMetersPerUnit = unit;
+
+    pb::ScalarMaterialRow material;
+    material.labelEntry = "0:1:4"; material.faceCulling = 2;
+    material.alphaMode = 1; material.alphaCutoff = 0.5;
+    material.pbrDefined = true; material.commonDefined = true;
+    material.pbr = {{1, 0.25, 0.5, 1, 0.1, 0.2, 0.3, 0.4, 0.6, 1.45}};
+    material.common = {{0.1,0.1,0.1, 0.5,0.4,0.3, 0.8,0.8,0.8,
+                        0.2,0.1,0.0, 0.75,0.125}};
+    pb::GroupRow group; group.identifier = "group-stable-1";
+    group.name.attributePresent = true; group.name.codeUnits = {'G','r','o','u','p'};
+    group.originPresent = true; group.origin = {{1, 2, 3}};
+    group.members.push_back({value.owner.document, I16UUID(101), I16UUID(121)});
+    pb::LayerRow layer; layer.labelEntry = "0:2:7";
+    layer.name.attributePresent = true; layer.name.codeUnits = {'L','a','y','e','r'};
+    layer.invisibleAttributePresent = true;
+    value.originals.materials = {material}; value.originals.groups = {group};
+    value.originals.layers = {layer};
+    value.effective.materials = {material}; value.effective.groups = {group};
+    value.effective.layers = {layer};
+
+    for (std::size_t index = 0; index < 2; ++index) {
+        auto& original = value.originals.inputs[index];
+        auto& effective = value.effective.inputs[index];
+        original.role = effective.role = index == 0
+            ? pb::RecipeInputRole::Left : pb::RecipeInputRole::Right;
+        original.sourceNode = effective.sourceNode = I16UUID(std::uint8_t(141 + index * 20));
+        original.sourceLocalID = index + 1; original.shapeSlot = std::uint32_t(index);
+        original.original = {value.owner.document, I16UUID(std::uint8_t(181 + index * 20)),
+            I16UUID(std::uint8_t(201 + index * 20)), I16UUID(std::uint8_t(221 + index * 20))};
+        original.recipeKind = pb::RecipeInputFamily::Profile;
+        original.recipeSchema = 4; original.recipeBytes = {0x53,0x59,0x4c,0x56,1,std::uint8_t(index)};
+        original.sourceMetersPerUnit = unit; original.carrierMetersPerUnit = unit;
+        original.projection.dimensions = {{40 + double(index), 30, 20}};
+        original.projection.translation = {{index == 0 ? -0.0 : 12.0, 2, 3}};
+        original.commitments = effective.commitments = I16Commitments(std::uint8_t(11 + index * 10));
+        effective.originalSourceFeature = original.original.sourceFeature;
+        effective.geometry.dimensions = original.projection.dimensions;
+        effective.geometry.translation = original.projection.translation;
+        effective.geometry.rotationXYZW = original.projection.rotationXYZW;
+        effective.sourceMetersPerUnit = unit;
+        auto configureMetadata = [index](pb::CompleteMetadata& metadata) {
+            metadata.name.attributePresent = index != 0;
+            metadata.name.codeUnits = {};
+            metadata.occurrence.presenceMask = index == 0 ? 0 : 0xff;
+            if (index != 0) {
+                metadata.occurrence.values = {{-0.0, 0, 0, -0.0, 0, 0, 1, 1}};
+            }
+            metadata.appearance.legacyMaterialPresent = true;
+            metadata.appearance.legacyMaterial = 7;
+            metadata.appearance.localPBRMarkerPresent = true;
+            metadata.appearance.material = 0;
+            metadata.groups = {0}; metadata.invisibleAttributePresent = index != 0;
+            metadata.layerLinkPresent = true; metadata.layers = {0};
+        };
+        configureMetadata(original.metadata); configureMetadata(effective.metadata);
+    }
+    return value;
+}
+} // namespace
+
+extern "C" void *Core3DDebugI16OriginalsCodecProbe(double unit) {
+    namespace pb = core3d::part_boolean;
+    namespace cr = core3d::composite_recipe;
+    NSMutableDictionary<NSString *, NSNumber *> *checks = [NSMutableDictionary dictionary];
+    const auto put = [&](NSString *key, bool value) { checks[key] = @(value); };
+    try {
+        const pb::OriginalsDefinition fixture = I16Fixture(unit);
+        std::vector<std::uint8_t> bytes, exact;
+        pb::OriginalsDefinition decoded;
+        const bool encoded = pb::EncodeOriginals(fixture, bytes);
+        const bool decodedOK = encoded && pb::DecodeOriginals(bytes, decoded)
+            && pb::EncodeOriginals(decoded, exact) && exact == bytes;
+        put(@"canonical-roundtrip", decodedOK);
+        put(@"bounded-16384", encoded && bytes.size() <= pb::MaximumPayloadBytes);
+        put(@"both-unit-carrier-bits", decodedOK
+            && pb::SameDoubleBits(decoded.carrierMetersPerUnit, unit));
+        put(@"signed-zero-preserved", decodedOK
+            && std::signbit(decoded.originals.inputs[0].projection.translation[0])
+            && std::signbit(decoded.originals.inputs[1].metadata.occurrence.values[0]));
+        put(@"absent-versus-present-empty-name", decodedOK
+            && !decoded.originals.inputs[0].metadata.name.attributePresent
+            && decoded.originals.inputs[1].metadata.name.attributePresent
+            && decoded.originals.inputs[1].metadata.name.codeUnits.empty());
+        put(@"material-sharing-groups-layers", decodedOK
+            && decoded.originals.materials.size() == 1
+            && decoded.originals.inputs[0].metadata.appearance.material == 0
+            && decoded.originals.inputs[1].metadata.appearance.material == 0
+            && decoded.originals.groups.size() == 1 && decoded.originals.layers.size() == 1);
+        put(@"typed-original-effective-separation", decodedOK
+            && pb::correspondence::EffectiveMatchesOriginalAtCreation(
+                decoded.originals.inputs[0].projection, decoded.effective.inputs[0].geometry));
+
+        std::vector<std::uint8_t> originalsBefore, originalsAfter;
+        pb::EncodeOriginalStateBlock(decoded.originals, originalsBefore);
+        decoded.effective.inputs[0].geometry.dimensions[0] += 1;
+        pb::EncodeOriginalStateBlock(decoded.originals, originalsAfter);
+        put(@"effective-edit-keeps-frozen-block", originalsBefore == originalsAfter);
+
+        auto malformed = bytes; if (malformed.size() > 4) malformed[4] = 9;
+        pb::OriginalsDefinition refused;
+        put(@"unknown-version-refused", !pb::DecodeOriginals(malformed, refused));
+        malformed = bytes; if (!malformed.empty()) malformed.pop_back();
+        put(@"truncation-refused", !pb::DecodeOriginals(malformed, refused));
+        malformed = bytes; malformed.push_back(0);
+        put(@"extra-byte-refused", !pb::DecodeOriginals(malformed, refused));
+        malformed = bytes; if (!malformed.empty()) malformed.back() ^= 1;
+        put(@"bad-digest-refused", !pb::DecodeOriginals(malformed, refused));
+        malformed.assign(pb::MaximumPayloadBytes + 1, 0);
+        put(@"aggregate-overflow-refused", !pb::DecodeOriginals(malformed, refused));
+
+        auto invalid = fixture; invalid.originals.schema = 2;
+        put(@"unknown-schema-refused", !pb::EncodeOriginals(invalid, exact));
+        invalid = fixture; invalid.effective.inputs[0].family = pb::InputFamily::ShellProfile;
+        put(@"unknown-family-tag-refused", !pb::EncodeOriginals(invalid, exact));
+        invalid = fixture; invalid.originals.inputs[0].recipeBytes.assign(
+            pb::MaximumRecipeBytes + 1, 1);
+        put(@"oversized-length-refused", !pb::EncodeOriginals(invalid, exact));
+        invalid = fixture; invalid.originals.inputs[0].metadata.groups = {0, 0};
+        put(@"duplicate-reference-refused", !pb::EncodeOriginals(invalid, exact));
+        invalid = fixture; invalid.originals.inputs[0].metadata.layers = {7};
+        put(@"dangling-reference-refused", !pb::EncodeOriginals(invalid, exact));
+        invalid = fixture; invalid.originals.inputs[0].original.document = I16UUID(250);
+        put(@"owner-binding-refused", !pb::EncodeOriginals(invalid, exact));
+        invalid = fixture; invalid.originals.inputs[0].shapeSlot = 1;
+        put(@"duplicate-slot-refused", !pb::EncodeOriginals(invalid, exact));
+        invalid = fixture; invalid.effective.inputs[0].role = pb::RecipeInputRole::Right;
+        put(@"role-binding-refused", !pb::EncodeOriginals(invalid, exact));
+        invalid = fixture; invalid.originals.materials.push_back(invalid.originals.materials[0]);
+        invalid.originals.materials.back().ordinal = 1;
+        put(@"duplicate-table-provenance-refused", !pb::EncodeOriginals(invalid, exact));
+
+        const auto& registry = core3d::retained_feature::ProductionRegistry();
+        const auto* descriptor = registry.find({cr::PartBooleanFeatureKind,
+                                                cr::PartBooleanOriginalsFeatureCodec});
+        put(@"production-descriptor-readable", descriptor != nullptr && registry.valid());
+        put(@"execution-callbacks-empty", descriptor && !descriptor->execution.installed()
+            && !descriptor->execution.buildDetached && !descriptor->execution.proveFamily
+            && !descriptor->execution.verifyFixedPoint
+            && !descriptor->execution.editorRouteInstalled
+            && !descriptor->execution.dependencyRouteInstalled);
+        put(@"unknown-registry-key-refused", registry.find(
+            {cr::PartBooleanFeatureKind, UINT32_MAX}) == nullptr);
+        put(@"legacy-availability-not-recorded",
+            pb::AvailabilityForCodec(pb::LegacyCodecVersion)
+                == pb::OriginalsAvailability::LegacyNotRecorded);
+        put(@"v4-availability-complete",
+            pb::AvailabilityForCodec(pb::OriginalsCodecVersion)
+                == pb::OriginalsAvailability::Complete);
+
+        cr::FeatureNode feature;
+        feature.node = fixture.booleanNode; feature.feature = fixture.feature;
+        feature.kind = cr::PartBooleanFeatureKind;
+        feature.codecVersion = cr::PartBooleanOriginalsFeatureCodec;
+        feature.parameters = bytes;
+        std::vector<cr::Node> sources;
+        for (std::size_t index = 0; index < 2; ++index) {
+            const auto& original = fixture.originals.inputs[index];
+            cr::SourceNode source; source.node = original.sourceNode;
+            source.localID = original.sourceLocalID; source.original = original.original;
+            source.recipe.kind = cr::RecipeKind(std::uint8_t(original.recipeKind));
+            source.recipe.schema = original.recipeSchema; source.recipe.bytes = original.recipeBytes;
+            source.inputToCarrier.sourceMetersPerUnit = original.sourceMetersPerUnit;
+            source.inputToCarrier.carrierMetersPerUnit = original.carrierMetersPerUnit;
+            source.inputToCarrier.matrix = original.sourceRootToCarrier;
+            source.commitments = {original.commitments.geometry, original.commitments.recipe,
+                original.commitments.placement, original.commitments.material,
+                original.commitments.groups};
+            source.shapeSlot = original.shapeSlot; sources.push_back({source});
+            feature.inputs.push_back(source.node);
+        }
+        put(@"canonical-production-binding", cr::CanonicalOriginalsFeature(feature, sources));
+        std::get<cr::SourceNode>(sources[0].value).shapeSlot = 1;
+        put(@"mismatched-source-binding-refused",
+            !cr::CanonicalOriginalsFeature(feature, sources));
+    } catch (...) { checks[@"probe-exception-free"] = @NO; }
+    return (__bridge_retained void *)[checks copy];
 }
 #endif

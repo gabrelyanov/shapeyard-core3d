@@ -7,6 +7,8 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -19,9 +21,11 @@ inline constexpr std::uint32_t FeatureKind = 1;
 inline constexpr std::uint32_t LegacyCodecVersion = 1; // opaque transport remains unchanged
 inline constexpr std::uint32_t ShellCodecVersion = 2;
 inline constexpr std::uint32_t RecipeCodecVersion = 3;
+inline constexpr std::uint32_t OriginalsCodecVersion = 4;
 inline constexpr std::uint32_t PayloadVersion = 2;
 inline constexpr std::uint32_t AnalyticPayloadVersion = 1;
 inline constexpr std::uint32_t RecipePayloadVersion = 3;
+inline constexpr std::uint32_t OriginalsPayloadVersion = 4;
 inline constexpr char AnalyticOwner[] = "part_boolean::analytic_owner_v1";
 inline constexpr std::size_t MaximumPayloadBytes = 16 * 1024;
 inline constexpr std::size_t MaximumMaterials = 64;
@@ -30,6 +34,9 @@ inline constexpr std::size_t MaximumSelectors = 128;
 inline constexpr std::size_t MaximumGroupsPerInput = 16;
 inline constexpr std::size_t MaximumAliases = 8;
 inline constexpr std::size_t MaximumTextBytes = 128;
+inline constexpr std::size_t MaximumUTF16CodeUnits = 128;
+inline constexpr std::size_t MaximumMetadataRows = 128;
+inline constexpr std::size_t MaximumRecipeBytes = 4096;
 
 enum class Operation : std::uint8_t { Union = 1, Subtract = 2, Intersect = 3 };
 enum class InputFamily : std::uint8_t {
@@ -177,6 +184,156 @@ struct RecipeDefinition final {
     UUID feature{};
     std::array<RecipeInput, 2> inputs;
     bool nativeAdmissionEnabled = false;
+};
+
+// SYPB/4 is an immutable-originals persistence record. These types are kept
+// separate from AnalyticDefinition so an effective edit cannot rewrite an
+// original projection merely because both contain prism scalars.
+enum class OriginalsAvailability : std::uint8_t {
+    LegacyNotRecorded = 0,
+    Complete = 1,
+};
+
+inline constexpr OriginalsAvailability AvailabilityForCodec(
+    std::uint32_t codecVersion) noexcept {
+    return codecVersion == OriginalsCodecVersion
+        ? OriginalsAvailability::Complete
+        : OriginalsAvailability::LegacyNotRecorded;
+}
+
+struct UTF16Name final {
+    bool attributePresent = false;
+    std::vector<std::uint16_t> codeUnits;
+};
+
+struct OccurrenceState final {
+    std::uint8_t encoding = 1;
+    std::uint8_t presenceMask = 0;
+    // translation XYZ, quaternion XYZW, scale. Absent slots are zero.
+    std::array<double, 8> values{{0, 0, 0, 0, 0, 0, 0, 0}};
+    std::array<double, 16> derivedMatrix{{
+        1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+    }};
+};
+
+struct ScalarMaterialRow final {
+    std::uint16_t ordinal = 0;
+    std::string labelEntry;
+    std::int32_t faceCulling = 0;
+    std::int32_t alphaMode = 0;
+    double alphaCutoff = 0;
+    bool pbrDefined = false;
+    bool commonDefined = false;
+    // PBR: base RGBA, emissive RGB, metallic, roughness, refraction index.
+    std::array<double, 10> pbr{{}};
+    // Common: ambient/diffuse/specular/emissive RGB, shininess, transparency.
+    std::array<double, 14> common{{}};
+};
+
+struct AppearanceState final {
+    bool legacyMaterialPresent = false;
+    std::int32_t legacyMaterial = 0;
+    bool legacyColorPresent = false;
+    std::int32_t legacyColor = 0;
+    bool localPBRMarkerPresent = false;
+    std::optional<std::uint16_t> material;
+};
+
+struct GroupRow final {
+    std::uint16_t ordinal = 0;
+    std::string identifier;
+    UTF16Name name;
+    bool originPresent = false;
+    std::array<double, 3> origin{{0, 0, 0}};
+    std::vector<retained_recipe::OwnerKey> members;
+};
+
+struct LayerRow final {
+    std::uint16_t ordinal = 0;
+    std::string labelEntry;
+    UTF16Name name;
+    bool invisibleAttributePresent = false;
+};
+
+struct CompleteMetadata final {
+    UTF16Name name;
+    OccurrenceState occurrence;
+    AppearanceState appearance;
+    std::vector<std::uint16_t> groups;
+    bool invisibleAttributePresent = false;
+    bool layerLinkPresent = false;
+    std::vector<std::uint16_t> layers;
+};
+
+struct OriginalAnalyticProjection final {
+    std::array<double, 3> dimensions{{0, 0, 0}};
+    std::array<double, 3> translation{{0, 0, 0}};
+    std::array<double, 4> rotationXYZW{{0, 0, 0, 1}};
+};
+
+struct EffectiveAnalyticGeometry final {
+    std::array<double, 3> dimensions{{0, 0, 0}};
+    std::array<double, 3> translation{{0, 0, 0}};
+    std::array<double, 4> rotationXYZW{{0, 0, 0, 1}};
+};
+
+struct OriginalInput final {
+    RecipeInputRole role = RecipeInputRole::Left;
+    UUID sourceNode{};
+    std::uint64_t sourceLocalID = 0;
+    std::uint32_t shapeSlot = 0;
+    retained_recipe::SourceIdentity original;
+    RecipeInputFamily recipeKind = RecipeInputFamily::Profile;
+    std::uint32_t recipeSchema = 0;
+    std::vector<std::uint8_t> recipeBytes;
+    double sourceMetersPerUnit = 0;
+    double carrierMetersPerUnit = 0;
+    std::array<double, 16> sourceRootToCarrier{{
+        1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+    }};
+    OriginalAnalyticProjection projection;
+    SignatureCommitments commitments;
+    CompleteMetadata metadata;
+};
+
+struct OriginalStateBlock final {
+    std::uint16_t schema = 1;
+    Operation creationOperation = Operation::Union;
+    std::array<OriginalInput, 2> inputs;
+    std::vector<ScalarMaterialRow> materials;
+    std::vector<GroupRow> groups;
+    std::vector<LayerRow> layers;
+};
+
+struct EffectiveInput final {
+    RecipeInputRole role = RecipeInputRole::Left;
+    InputFamily family = InputFamily::AnalyticRectangularPrism;
+    UUID sourceNode{};
+    UUID originalSourceFeature{};
+    SignatureCommitments commitments;
+    EffectiveAnalyticGeometry geometry;
+    double sourceMetersPerUnit = 0;
+    CompleteMetadata metadata;
+};
+
+struct EffectiveStateBlock final {
+    std::uint16_t metadataSchema = 1;
+    std::array<EffectiveInput, 2> inputs;
+    std::vector<ScalarMaterialRow> materials;
+    std::vector<GroupRow> groups;
+    std::vector<LayerRow> layers;
+};
+
+struct OriginalsDefinition final {
+    Operation operation = Operation::Union;
+    MaterialPolicy materialPolicy = MaterialPolicy::RejectConflictingMerges;
+    CodecVersions versions;
+    retained_recipe::OwnerKey owner;
+    UUID booleanNode{};
+    UUID feature{};
+    double carrierMetersPerUnit = 0;
+    OriginalStateBlock originals;
+    EffectiveStateBlock effective;
 };
 
 inline bool Zero(const UUID& value) noexcept {
@@ -369,5 +526,207 @@ inline bool Valid(const RecipeDefinition& value) noexcept {
         && !(value.inputs[0].original == value.inputs[1].original)
         && value.inputs[0].shapeSlot != value.inputs[1].shapeSlot
         && value.inputs[0].shapeSlot <= 1 && value.inputs[1].shapeSlot <= 1;
+}
+
+inline bool Valid(const UTF16Name& value) noexcept {
+    if (!value.attributePresent) return value.codeUnits.empty();
+    if (value.codeUnits.size() > MaximumUTF16CodeUnits) return false;
+    for (std::size_t index = 0; index < value.codeUnits.size(); ++index) {
+        const std::uint16_t unit = value.codeUnits[index];
+        if (unit == 0 || unit < 0x20 || unit == 0x7f) return false;
+        if (unit >= 0xd800 && unit <= 0xdbff) {
+            if (++index >= value.codeUnits.size()
+                || value.codeUnits[index] < 0xdc00
+                || value.codeUnits[index] > 0xdfff) return false;
+        } else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+    }
+    return true;
+}
+
+inline bool SameDoubleBits(double left, double right) noexcept {
+    return std::memcmp(&left, &right, sizeof(double)) == 0;
+}
+
+inline bool ValidFiniteScalars(const double* values, std::size_t count) noexcept {
+    for (std::size_t index = 0; index < count; ++index)
+        if (!std::isfinite(values[index])) return false;
+    return true;
+}
+
+inline bool Valid(const OccurrenceState& value) noexcept {
+    if (value.encoding != 1 || !ValidFiniteScalars(value.values.data(), value.values.size())
+        || !ValidFiniteScalars(value.derivedMatrix.data(), value.derivedMatrix.size())) return false;
+    for (std::size_t index = 0; index < value.values.size(); ++index)
+        if (!(value.presenceMask & (1U << index)) && !SameDoubleBits(value.values[index], 0.0))
+            return false;
+    const double tx = value.presenceMask & 1 ? value.values[0] : 0;
+    const double ty = value.presenceMask & 2 ? value.values[1] : 0;
+    const double tz = value.presenceMask & 4 ? value.values[2] : 0;
+    const double qx = value.presenceMask & 8 ? value.values[3] : 0;
+    const double qy = value.presenceMask & 16 ? value.values[4] : 0;
+    const double qz = value.presenceMask & 32 ? value.values[5] : 0;
+    const double qw = value.presenceMask & 64 ? value.values[6] : 1;
+    const double scale = value.presenceMask & 128 ? value.values[7] : 1;
+    const double norm = qx*qx + qy*qy + qz*qz + qw*qw;
+    if (!std::isfinite(norm) || std::abs(norm - 1.0) > 1e-12
+        || !std::isfinite(scale) || scale == 0) return false;
+    const std::array<double, 16> expected{{
+        scale * (1 - 2*(qy*qy + qz*qz)), scale * 2*(qx*qy - qz*qw),
+        scale * 2*(qx*qz + qy*qw), tx,
+        scale * 2*(qx*qy + qz*qw), scale * (1 - 2*(qx*qx + qz*qz)),
+        scale * 2*(qy*qz - qx*qw), ty,
+        scale * 2*(qx*qz - qy*qw), scale * 2*(qy*qz + qx*qw),
+        scale * (1 - 2*(qx*qx + qy*qy)), tz,
+        0, 0, 0, 1,
+    }};
+    for (std::size_t index = 0; index < expected.size(); ++index)
+        if (std::abs(value.derivedMatrix[index] - expected[index]) > 1e-12) return false;
+    return true;
+}
+
+inline bool ValidArchiveText(const std::string& value, bool allowEmpty = false) noexcept {
+    if ((!allowEmpty && value.empty()) || value.size() > MaximumTextBytes) return false;
+    for (unsigned char byte : value)
+        if (byte == 0 || byte < 0x20 || byte == 0x7f || byte >= 0x80) return false;
+    return true;
+}
+
+inline bool Valid(const ScalarMaterialRow& value, std::uint16_t ordinal) noexcept {
+    return value.ordinal == ordinal && ValidArchiveText(value.labelEntry)
+        && std::isfinite(value.alphaCutoff)
+        && ValidFiniteScalars(value.pbr.data(), value.pbr.size())
+        && ValidFiniteScalars(value.common.data(), value.common.size());
+}
+
+inline bool Valid(const GroupRow& value, std::uint16_t ordinal) noexcept {
+    if (value.ordinal != ordinal || !ValidArchiveText(value.identifier)
+        || !Valid(value.name) || value.members.empty()
+        || value.members.size() > MaximumMetadataRows
+        || !ValidFiniteScalars(value.origin.data(), value.origin.size())) return false;
+    if (!value.originPresent)
+        for (double coordinate : value.origin) if (!SameDoubleBits(coordinate, 0.0)) return false;
+    for (std::size_t index = 0; index < value.members.size(); ++index) {
+        if (!retained_recipe::Valid(value.members[index])) return false;
+        for (std::size_t prior = 0; prior < index; ++prior)
+            if (value.members[index] == value.members[prior]) return false;
+    }
+    return true;
+}
+
+inline bool Valid(const LayerRow& value, std::uint16_t ordinal) noexcept {
+    return value.ordinal == ordinal && ValidArchiveText(value.labelEntry)
+        && Valid(value.name);
+}
+
+inline bool ValidReferences(const std::vector<std::uint16_t>& references,
+                            std::size_t count) noexcept {
+    if (references.size() > MaximumMetadataRows) return false;
+    std::set<std::uint16_t> seen;
+    for (std::uint16_t reference : references)
+        if (reference >= count || !seen.insert(reference).second) return false;
+    return true;
+}
+
+inline bool Valid(const CompleteMetadata& value, std::size_t materials,
+                  std::size_t groups, std::size_t layers) noexcept {
+    if (!Valid(value.name) || !Valid(value.occurrence)
+        || (value.appearance.material && *value.appearance.material >= materials)
+        || (!value.appearance.legacyMaterialPresent && value.appearance.legacyMaterial != 0)
+        || (!value.appearance.legacyColorPresent && value.appearance.legacyColor != 0)
+        || !ValidReferences(value.groups, groups)
+        || !ValidReferences(value.layers, layers)) return false;
+    return value.layerLinkPresent || value.layers.empty();
+}
+
+inline bool ValidTables(const std::vector<ScalarMaterialRow>& materials,
+                        const std::vector<GroupRow>& groups,
+                        const std::vector<LayerRow>& layers) noexcept {
+    if (materials.size() > MaximumMetadataRows || groups.size() > MaximumMetadataRows
+        || layers.size() > MaximumMetadataRows) return false;
+    std::set<std::string> materialProvenance, groupIDs, layerProvenance;
+    for (std::size_t index = 0; index < materials.size(); ++index)
+        if (!Valid(materials[index], std::uint16_t(index))
+            || !materialProvenance.insert(materials[index].labelEntry).second) return false;
+    for (std::size_t index = 0; index < groups.size(); ++index)
+        if (!Valid(groups[index], std::uint16_t(index))
+            || !groupIDs.insert(groups[index].identifier).second) return false;
+    for (std::size_t index = 0; index < layers.size(); ++index)
+        if (!Valid(layers[index], std::uint16_t(index))
+            || !layerProvenance.insert(layers[index].labelEntry).second) return false;
+    return true;
+}
+
+inline bool ValidProjection(const OriginalAnalyticProjection& value) noexcept {
+    if (!ValidFiniteScalars(value.dimensions.data(), value.dimensions.size())
+        || !ValidFiniteScalars(value.translation.data(), value.translation.size())
+        || !ValidFiniteScalars(value.rotationXYZW.data(), value.rotationXYZW.size())) return false;
+    for (double dimension : value.dimensions) if (dimension <= 0) return false;
+    double norm = 0; for (double q : value.rotationXYZW) norm += q*q;
+    return std::abs(norm - 1.0) <= 1e-12;
+}
+
+inline bool ValidGeometry(const EffectiveAnalyticGeometry& value) noexcept {
+    OriginalAnalyticProjection projection;
+    projection.dimensions = value.dimensions;
+    projection.translation = value.translation;
+    projection.rotationXYZW = value.rotationXYZW;
+    return ValidProjection(projection);
+}
+
+inline bool Valid(const OriginalsDefinition& value) noexcept {
+    try {
+        if (!retained_recipe::Valid(value.owner)
+            || !retained_recipe::Nonzero(value.booleanNode)
+            || !retained_recipe::Nonzero(value.feature)
+            || !std::isfinite(value.carrierMetersPerUnit) || value.carrierMetersPerUnit <= 0
+            || value.materialPolicy != MaterialPolicy::RejectConflictingMerges
+            || (value.operation != Operation::Union && value.operation != Operation::Subtract
+                && value.operation != Operation::Intersect)
+            || value.versions.serializer != 1 || value.versions.build != 1
+            || value.versions.proof != 1 || value.versions.selector != 1
+            || value.versions.material != 1 || value.originals.schema != 1
+            || value.effective.metadataSchema != 1
+            || value.originals.creationOperation != value.operation
+            || !ValidTables(value.originals.materials, value.originals.groups, value.originals.layers)
+            || !ValidTables(value.effective.materials, value.effective.groups, value.effective.layers))
+            return false;
+        std::set<UUID> nodes, features;
+        std::set<std::uint64_t> localIDs;
+        std::set<std::uint32_t> slots;
+        for (std::size_t index = 0; index < 2; ++index) {
+            const OriginalInput& original = value.originals.inputs[index];
+            const EffectiveInput& effective = value.effective.inputs[index];
+            const RecipeInputRole role = index == 0 ? RecipeInputRole::Left : RecipeInputRole::Right;
+            if (original.role != role || effective.role != role
+                || effective.family != InputFamily::AnalyticRectangularPrism
+                || !retained_recipe::Nonzero(original.sourceNode)
+                || original.sourceNode != effective.sourceNode
+                || !nodes.insert(original.sourceNode).second
+                || original.sourceLocalID == 0 || !localIDs.insert(original.sourceLocalID).second
+                || original.shapeSlot > 1 || !slots.insert(original.shapeSlot).second
+                || !retained_recipe::Valid(original.original)
+                || original.original.document != value.owner.document
+                || !features.insert(original.original.sourceFeature).second
+                || effective.originalSourceFeature != original.original.sourceFeature
+                || (original.recipeKind != RecipeInputFamily::Profile
+                    && original.recipeKind != RecipeInputFamily::Enclosure
+                    && original.recipeKind != RecipeInputFamily::RectangularLoft)
+                || original.recipeSchema == 0 || original.recipeBytes.empty()
+                || original.recipeBytes.size() > MaximumRecipeBytes
+                || !std::isfinite(original.sourceMetersPerUnit)
+                || original.sourceMetersPerUnit <= 0
+                || !SameDoubleBits(original.carrierMetersPerUnit, value.carrierMetersPerUnit)
+                || !ValidFiniteScalars(original.sourceRootToCarrier.data(), 16)
+                || !ValidProjection(original.projection) || !Valid(original.commitments)
+                || !ValidGeometry(effective.geometry) || !Valid(effective.commitments)
+                || !std::isfinite(effective.sourceMetersPerUnit)
+                || effective.sourceMetersPerUnit <= 0
+                || !Valid(original.metadata, value.originals.materials.size(),
+                    value.originals.groups.size(), value.originals.layers.size())
+                || !Valid(effective.metadata, value.effective.materials.size(),
+                    value.effective.groups.size(), value.effective.layers.size())) return false;
+        }
+        return slots.count(0) == 1 && slots.count(1) == 1;
+    } catch (...) { return false; }
 }
 } // namespace core3d::part_boolean

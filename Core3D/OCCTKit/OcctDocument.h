@@ -1444,6 +1444,11 @@ public:
         core3d::retained_edge_treatment::Refusal&) const noexcept;
     Standard_EXPORT Standard_Boolean ValidateRetainedEdgeTreatmentsR2(
         core3d::retained_edge_treatment::Refusal&) const noexcept;
+    //! Typed command continuation. The caller supplies its already-charged
+    //! operation budget; this overload never resolves or creates save authority.
+    Standard_EXPORT Standard_Boolean ValidateRetainedEdgeTreatmentsR2(
+        core3d::retained_edge_treatment::Refusal&,
+        core3d::retained_edge_treatment::ReplayBudget&) const noexcept;
     //! N0 authored-parameter authority: capture the complete supported source
     //! plus suffix without opening a command. Unsupported carriers refuse;
     //! no record is projected away into a weaker DTO.
@@ -1481,6 +1486,19 @@ public:
         const core3d::retained_edge_treatment::Snapshot&,
         std::vector<std::uint8_t>& source,
         std::vector<std::uint8_t>& syet) const noexcept;
+    //! DEBUG fixture staging only; production validation and save paths remain
+    //! unchanged and must independently admit the resulting carrier.
+    Standard_EXPORT Standard_Boolean DebugInstallR2SaveFixture(
+        const core3d::retained_boolean::Recipe& source,
+        const std::vector<std::uint8_t>& sourceBytes,
+        const TopoDS_Shape& sourceBase,
+        const std::shared_ptr<const core3d::retained_edge_treatment::PayloadR2>& treatment,
+        const TopoDS_Shape& current,
+        const std::array<std::uint8_t,16>& documentID,
+        const std::array<std::uint8_t,16>& entityID,
+        const std::array<std::uint8_t,16>& definitionID,
+        double metersPerUnit,
+        TDF_Label& owner) noexcept;
 #endif
     //! Prepare one independent retained Profile treatment copy without
     //! mutating the document. The returned root is produced by replay from the

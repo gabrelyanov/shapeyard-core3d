@@ -43,6 +43,19 @@ struct ShellProductionProof final {
     }
 };
 
+inline bool EffectiveMatchesOriginalAtCreation(
+    const OriginalAnalyticProjection& original,
+    const EffectiveAnalyticGeometry& effective) noexcept {
+    if (!ValidProjection(original) || !ValidGeometry(effective)) return false;
+    for (std::size_t index = 0; index < original.dimensions.size(); ++index)
+        if (!SameDoubleBits(original.dimensions[index], effective.dimensions[index])) return false;
+    for (std::size_t index = 0; index < original.translation.size(); ++index)
+        if (!SameDoubleBits(original.translation[index], effective.translation[index])) return false;
+    for (std::size_t index = 0; index < original.rotationXYZW.size(); ++index)
+        if (!SameDoubleBits(original.rotationXYZW[index], effective.rotationXYZW[index])) return false;
+    return true;
+}
+
 inline ShellProductionProof ProveShellComposite(
     const build::ShellCompositeRequest& request,
     const build::ShellCompositeBuild& built) noexcept {
