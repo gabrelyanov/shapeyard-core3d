@@ -10,6 +10,11 @@
 // the closed v4 validator below; never added to either production registry.
 #include "PlainProfileCutPersistence.hxx"
 #include "RetainedProgramSuffix.hxx"
+// B4-S2 (D785): the SYDF/1 payload codec joins the closed production feature
+// table below as a readable, canonical-only descriptor. Its execution stays
+// empty exactly like the A1 suffix entry; the closed call-bound owner
+// execution registry lives in DraftFacesRegistry.hxx/DraftFacesNativeOwner.hxx.
+#include "DraftFacesDefinition.hxx"
 #include <CommonCrypto/CommonDigest.h>
 #include <algorithm>
 #include <cstring>
@@ -825,7 +830,7 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes, Definition& output) n
 namespace core3d::retained_feature {
 inline const RegistryView& ProductionRegistry() noexcept {
     using namespace composite_recipe;
-    static const std::array<Entry, 5> entries{{
+    static const std::array<Entry, 6> entries{{
         {{{PartBooleanFeatureKind, PartBooleanFeatureCodec}, 3, MaximumFeaturePayloadBytes,
           {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 2,
           ShapeKind::Solid, CanonicalAnalyticFeature}, {}},
@@ -844,6 +849,15 @@ inline const RegistryView& ProductionRegistry() noexcept {
           retained_program_suffix::MaximumPayloadBytes,
           {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 1,
           ShapeKind::Solid, CanonicalRetainedProgramSuffixFeature}, {}},
+        // B4-S2 (D785): readable Draft Faces SYDF/1 codec. Readable and
+        // canonical is not executable authority: the execution descriptor
+        // stays empty, the public DraftRegistryEntry remains disabled, and
+        // the S2 native owner replays only through its closed, call-bound
+        // owner execution registry with real owner callbacks.
+        {{{draft_faces::FeatureKind, draft_faces::CodecVersion}, 3,
+          draft_faces::MaximumPayloadBytes,
+          {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 1,
+          ShapeKind::Solid, draft_faces::CanonicalPayload}, {}},
     }};
     static const RegistryView registry(entries.data(), entries.size());
     return registry;

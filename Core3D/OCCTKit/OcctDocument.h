@@ -98,6 +98,7 @@ enum class Refusal : std::uint8_t;
 }
 namespace core3d::variable_radius_fillet::owner { struct Capture; }
 namespace core3d::part_boolean::owner { class PartBooleanOwner; }
+namespace core3d::draft_faces::owner { class NativeOwner; }
 namespace core3d::retained_feature { class OcafOwnerService; }
 namespace core3d::composite_recipe { struct Payload; }
 namespace core3d::retained_program_suffix { struct Probe; }
@@ -1924,6 +1925,9 @@ private:
   // composite/R2 pair under its document-issued capture and command lease.
   friend class core3d::authored_parameter::Owner;
   friend class core3d::retained_feature::OcafOwnerService;
+  // B4-S2: only the Draft Faces native owner may stage its sealed SYDF/1
+  // composite payload under its document-issued capture and command lease.
+  friend class core3d::draft_faces::owner::NativeOwner;
   // A3/P2 DEBUG probe: save/reopen byte evidence for the retained program
   // suffix. No production staging authority is granted by this friendship.
   friend struct core3d::retained_program_suffix::Probe;
