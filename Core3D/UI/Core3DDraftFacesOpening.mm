@@ -7,6 +7,7 @@
 #import "../Viewport/Core3DSceneSnapshot.h"
 
 #include "../OCCTKit/DraftFacesRegistry.hxx"
+#include "../OCCTKit/DraftFacesNativeOwner.hxx"
 #include "../OCCTKit/NativeOpeningContext.hxx"
 #include "../OCCTKit/OcctDocument.h"
 #include "Core3DViewer.h"
@@ -17,7 +18,10 @@
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCone.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepBndLib.hxx>
 #include <BRep_Tool.hxx>
+#include <Bnd_Box.hxx>
+#include <gp_Pnt2d.hxx>
 #include <TDF_LabelSequence.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -28,6 +32,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
@@ -591,6 +596,20 @@ NSDictionary *BuildProbe(int32_t scenario, double unit, double angle,
 }
 - (Core3DDraftFacesApplyResult)apply { return Core3DDraftFacesApplyResultUnavailable; }
 + (BOOL)isPubliclyAvailable { return NO; }
+
+// Internal B4-S2 owner-probe bridge: hands the production native owner the
+// exact document, issuing context, entity and viewport this opening captured.
+// It changes no state and grants no mutation authority of its own.
+- (BOOL)s2OwnerDocument:(Handle(OcctDocument)&)document
+                context:(std::shared_ptr<OpeningContext>&)context
+                 entity:(std::string&)entity
+                  width:(std::uint32_t&)width
+                 height:(std::uint32_t&)height {
+    if (_document.IsNull() || !_context || _issued.entity.empty()) return NO;
+    document = _document; context = _context; entity = _issued.entity;
+    width = _viewportWidth; height = _viewportHeight;
+    return YES;
+}
 @end
 
 #if DEBUG
@@ -637,6 +656,474 @@ extern "C" void *Core3DDebugB4DraftFacesUnavailableProbe(void) {
             @"applyRaw": @([opening apply]), @"prepared": @(prepared != nil),
             @"prepareError": @(error.code),
             @"registryInstalled": @(df::DraftRegistryEntry().execution.installed()) };
+    }
+}
+
+// B4-S2 retained native owner probes. These drive the production
+// draft_faces::owner::NativeOwner in DraftFacesNativeOwner.hxx through real
+// documents, the real S1 opening/candidate and the production composite
+// codec; they never install a debug registry, fabricate a receipt or preset a
+// result. Every evidence value below is read back from the actual document.
+namespace {
+namespace dfo = core3d::draft_faces::owner;
+
+bool S2ProbeViewer(Core3DViewController *controller, Handle(OcctDocument)& document,
+                   std::shared_ptr<core3d::Core3DViewer>& viewer) {
+    document = Handle(OcctDocument)(); viewer.reset();
+    if (!NSThread.isMainThread || !controller) return false;
+    GLViewController *gl = [controller.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)controller.glController : nil;
+    if (!gl) return false;
+    viewer = gl.viewer;
+    if (!viewer) { viewer.reset(); return false; }
+    document = viewer->getDocument();
+    return !document.IsNull() && !document->Document().IsNull()
+        && !document->Document()->GetData().IsNull();
+}
+
+std::shared_ptr<dfo::NativeOwner> S2OwnerFor(OcctDocument *document) {
+    // The owner is a per-document service; S3 binds the long-lived production
+    // instance. This probe-side map only preserves identity across probe
+    // calls on the same live document.
+    static std::map<void *, std::shared_ptr<dfo::NativeOwner>> owners;
+    const auto found = owners.find(document);
+    if (found != owners.end()) return found->second;
+    auto created = std::make_shared<dfo::NativeOwner>(*document);
+    owners.emplace(document, created);
+    return created;
+}
+
+core3d::profile::Parameters S2BoxProfile(double unit, double widthMM,
+                                         double heightMM, double depthMM) {
+    const double scale = 0.001 / unit;
+    core3d::profile::Parameters parameters;
+    parameters.metersPerUnit = unit;
+    parameters.definition.plane = 0;
+    parameters.definition.depth = depthMM * scale;
+    parameters.definition.revolve = false;
+    parameters.definition.points = {
+        gp_Pnt2d(0, 0), gp_Pnt2d(widthMM * scale, 0),
+        gp_Pnt2d(widthMM * scale, heightMM * scale), gp_Pnt2d(0, heightMM * scale)};
+    return parameters;
+}
+
+std::vector<std::uint8_t> S2Bytes(NSData *data) {
+    std::vector<std::uint8_t> bytes(data.length);
+    if (data.length) std::memcpy(bytes.data(), data.bytes, data.length);
+    return bytes;
+}
+
+void S2ReceiptEvidence(NSMutableDictionary *result, const dfo::Receipt& receipt) {
+    result[@"outcome"] = @(int(receipt.outcome));
+    result[@"reason"] = [NSString stringWithUTF8String:receipt.reason.c_str()];
+    result[@"session"] = @(double(receipt.session));
+    result[@"delta"] = @(receipt.measuredHistoryDelta);
+    result[@"settled"] = @(receipt.settled);
+}
+
+bool S2Viewport(Core3DViewController *controller, std::uint32_t& width, std::uint32_t& height) {
+    const CGSize drawable = controller.viewportDrawableSize;
+    if (!std::isfinite(drawable.width) || !std::isfinite(drawable.height)
+        || drawable.width < 1 || drawable.height < 1
+        || drawable.width > UINT32_MAX || drawable.height > UINT32_MAX) return false;
+    width = std::uint32_t(drawable.width); height = std::uint32_t(drawable.height);
+    return true;
+}
+} // namespace
+
+extern "C" void *Core3DDebugB4DraftFacesSourceFixtureProbe(
+    void *controllerRaw, double unit, double widthMM, double heightMM, double depthMM) {
+    @autoreleasepool {
+        NSMutableDictionary *result = [NSMutableDictionary dictionary];
+        result[@"ok"] = @NO;
+        @try {
+            Core3DViewController *controller = (__bridge Core3DViewController *)controllerRaw;
+            Handle(OcctDocument) document; std::shared_ptr<core3d::Core3DViewer> viewer;
+            if (!S2ProbeViewer(controller, document, viewer)
+                || (unit != 0.001 && unit != 1.0)
+                || !(widthMM > 0) || !(heightMM > 0) || !(depthMM > 0))
+                return (__bridge_retained void *)result;
+            const auto native = document->Document();
+            const auto shapes = XCAFDoc_DocumentTool::ShapeTool(native->Main());
+            TDF_LabelSequence roots; shapes->GetFreeShapes(roots);
+            if (native->HasOpenCommand() || roots.Length() != 0
+                || native->GetAvailableUndos() != 0 || native->GetAvailableRedos() != 0)
+                return (__bridge_retained void *)result;
+            const auto parameters = S2BoxProfile(unit, widthMM, heightMM, depthMM);
+            const TopoDS_Shape solid =
+                core3d::part_boolean::build::BuildProfileSource(parameters, false);
+            if (solid.IsNull()) return (__bridge_retained void *)result;
+            XCAFDoc_DocumentTool::SetLengthUnit(native, unit);
+            const TDF_Label label = shapes->AddShape(solid, Standard_False, Standard_False);
+            if (label.IsNull() || !document->MigrateLegacyIdentifiers())
+                return (__bridge_retained void *)result;
+            native->ClearUndos();
+            native->SetUndoLimit(OcctDocument::kNativeSessionUndoLimit);
+            document->NotifyChanges();
+            // Direct OCAF fixture insertion does not itself guarantee an AIS
+            // presentation in this hosted viewer. Reuse the notification-
+            // synchronized presentation when present; otherwise install one
+            // exact presentation for the real label so the ordinary face-
+            // selection path (and its label/identity checks) remains in use.
+            const Handle(AIS_InteractiveContext) context = viewer->AisContext();
+            if (context.IsNull()) return (__bridge_retained void *)result;
+            AIS_ListOfInteractive displayed;
+            context->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+            Handle(AIS_Shape) presentation;
+            for (AIS_ListIteratorOfListOfInteractive iterator(displayed);
+                 iterator.More(); iterator.Next()) {
+                const Handle(AIS_Shape) candidate =
+                    Handle(AIS_Shape)::DownCast(iterator.Value());
+                if (candidate.IsNull()
+                    || !document->ShapeLabel(candidate).IsEqual(label)) continue;
+                if (!presentation.IsNull()) return (__bridge_retained void *)result;
+                presentation = candidate;
+            }
+            if (presentation.IsNull()) {
+                presentation = new AIS_Shape(solid);
+                context->Display(presentation, AIS_Shaded, 0, Standard_False);
+                document->LoadObjectMeterial(label, presentation);
+            }
+            context->UpdateCurrentViewer();
+            result[@"entity"] = [NSString stringWithUTF8String:
+                document->EntityIdentifierForLabel(label).c_str()];
+            result[@"unit"] = @(unit);
+            result[@"ok"] = @YES;
+        } @catch (__unused NSException *exception) { result[@"ok"] = @NO; }
+        return (__bridge_retained void *)result;
+    }
+}
+
+extern "C" void *Core3DDebugB4DraftFacesRecordProbe(void *controllerRaw, void *entityRaw) {
+    @autoreleasepool {
+        NSMutableDictionary *result = [NSMutableDictionary dictionary];
+        result[@"ok"] = @NO; result[@"hasRecord"] = @NO;
+        @try {
+            Core3DViewController *controller = (__bridge Core3DViewController *)controllerRaw;
+            NSString *entity = (__bridge NSString *)entityRaw;
+            Handle(OcctDocument) document; std::shared_ptr<core3d::Core3DViewer> viewer;
+            TDF_Label label;
+            if (!S2ProbeViewer(controller, document, viewer)
+                || !RootForEntity(document, entity, label))
+                return (__bridge_retained void *)result;
+            const auto native = document->Document();
+            result[@"ok"] = @YES;
+            result[@"entity"] = entity;
+            result[@"undoDepth"] = @(native->GetAvailableUndos());
+            result[@"registryInstalled"] = @(df::DraftRegistryEntry().execution.installed());
+            result[@"debugRegistryActive"] =
+                @(core3d::retained_feature::DebugRegistryOverride() != nullptr);
+            const TopoDS_Shape current = XCAFDoc_ShapeTool::GetShape(label);
+            std::vector<std::uint8_t> carrierBytes;
+            if (!current.IsNull() && df::detail::exactShapeBytes(current, carrierBytes)) {
+                result[@"carrierBytes"] = DFData(carrierBytes);
+                Bnd_Box bounds; BRepBndLib::Add(current, bounds);
+                Standard_Real unit = 0;
+                if (!bounds.IsVoid()
+                    && XCAFDoc_DocumentTool::GetLengthUnit(native, unit) && unit > 0)
+                    result[@"zmaxMM"] = @(bounds.CornerMax().Z() * 1000 * unit);
+            }
+            cr::Record record;
+            if (!cr::Read(native, label, record)) { result[@"ok"] = @NO; return (__bridge_retained void *)result; }
+            if (!record.value) return (__bridge_retained void *)result;
+            result[@"hasRecord"] = @YES;
+            result[@"graphBytes"] = DFData(record.value->bytes);
+            const auto& definition = record.value->definition;
+            result[@"nodeCount"] = @(definition.nodes.size());
+            result[@"ownerEntity"] = DFData(definition.owner.entity);
+            if (const auto* lastFeature =
+                    std::get_if<cr::FeatureNode>(&definition.nodes.back().value)) {
+                result[@"kind"] = @(lastFeature->kind);
+                result[@"codecVersion"] = @(lastFeature->codecVersion);
+                result[@"params"] = DFData(lastFeature->parameters);
+                result[@"nodeUUID"] = DFData(lastFeature->node);
+                result[@"featureUUID"] = DFData(lastFeature->feature);
+                result[@"nodeLocalID"] = @(lastFeature->localID);
+            }
+            // B4 draft grammar detail: exactly one source plus one SYDF
+            // feature. Old files of other families report only the generic
+            // fields above, so their preserved meaning is observable too.
+            if (definition.nodes.size() == 2
+                && std::get_if<cr::SourceNode>(&definition.nodes[0].value)
+                && std::get_if<cr::FeatureNode>(&definition.nodes[1].value)
+                && std::get<cr::FeatureNode>(definition.nodes[1].value).kind
+                    == df::FeatureKind) {
+                const auto& source = std::get<cr::SourceNode>(definition.nodes[0].value);
+                const auto& feature = std::get<cr::FeatureNode>(definition.nodes[1].value);
+                result[@"draftGrammar"] = @YES;
+                result[@"sourceUUID"] = DFData(source.node);
+                result[@"sourceLocalID"] = @(source.localID);
+                result[@"sourceRecipeBytes"] = DFData(source.recipe.bytes);
+                result[@"sourceGeometryCommitment"] = DFData(source.commitments.geometry);
+                result[@"sourceFeatureUUID"] = DFData(source.original.sourceFeature);
+                df::Definition parameters;
+                if (df::Decode(feature.parameters, parameters)) {
+                    NSMutableArray *faceIDs = [NSMutableArray array];
+                    for (const auto& face : parameters.faces)
+                        [faceIDs addObject:DFData(face.identifier)];
+                    result[@"faceIDs"] = faceIDs;
+                    result[@"faceCount"] = @(parameters.faces.size());
+                }
+            }
+        } @catch (__unused NSException *exception) { result[@"ok"] = @NO; }
+        return (__bridge_retained void *)result;
+    }
+}
+
+extern "C" void *Core3DDebugB4DraftFacesOwnerCreateProbe(
+    void *controllerRaw, void *openingRaw, void *candidateRaw,
+    double widthMM, double heightMM, double depthMM, int32_t fault) {
+    @autoreleasepool {
+        NSMutableDictionary *result = [NSMutableDictionary dictionary];
+        result[@"ok"] = @NO; result[@"minted"] = @NO;
+        @try {
+            Core3DViewController *controller = (__bridge Core3DViewController *)controllerRaw;
+            Core3DDraftFacesOpening *opening = (__bridge Core3DDraftFacesOpening *)openingRaw;
+            Core3DDraftFacesCandidate *candidate = (__bridge Core3DDraftFacesCandidate *)candidateRaw;
+            Handle(OcctDocument) document; std::shared_ptr<core3d::Core3DViewer> viewer;
+            Handle(OcctDocument) openingDocument;
+            std::shared_ptr<OpeningContext> openingContext;
+            std::string openingEntity; std::uint32_t openingWidth = 0, openingHeight = 0;
+            TDF_Label label;
+            if (!S2ProbeViewer(controller, document, viewer) || !opening || !candidate
+                || ![opening s2OwnerDocument:openingDocument context:openingContext
+                                     entity:openingEntity
+                                      width:openingWidth height:openingHeight]
+                || document != openingDocument
+                || !RootForEntity(document, opening.issuedFaces.firstObject.entityIdentifier, label))
+                return (__bridge_retained void *)result;
+            const auto parameters = S2BoxProfile(opening.metersPerUnit,
+                                                 widthMM, heightMM, depthMM);
+            auto capture = dfo::NativeOwner::MintCreateCapture(
+                *document, openingContext, label, openingEntity,
+                parameters, openingWidth, openingHeight);
+            if (!capture) {
+                const auto native = document->Document();
+                const TopoDS_Shape source = XCAFDoc_ShapeTool::GetShape(label);
+                std::vector<std::uint8_t> sourceBytes;
+                core3d::composite_recipe::SourceRecipe sourceRecipe;
+                core3d::retained_recipe::OwnerKey ownerKey{};
+                result[@"capture.mainThread"] = @(pthread_main_np() != 0);
+                result[@"capture.document"] = @(!native.IsNull());
+                result[@"capture.commandClosed"] =
+                    @(!native.IsNull() && !native->HasOpenCommand());
+                result[@"capture.fenceDocument"] =
+                    @(openingContext->openingFence().document() == native);
+                result[@"capture.current"] =
+                    @(openingContext->isCurrent(openingWidth, openingHeight));
+                result[@"capture.free"] = @(XCAFDoc_ShapeTool::IsFree(label));
+                result[@"capture.simple"] = @(XCAFDoc_ShapeTool::IsSimpleShape(label));
+                result[@"capture.entity"] =
+                    @(document->EntityIdentifierForLabel(label) == openingEntity);
+                result[@"capture.noRecord"] = @(!cr::HasRecord(label));
+                result[@"capture.unit"] =
+                    @(openingContext->openingFence().metersPerUnit() == parameters.metersPerUnit);
+                result[@"capture.source"] =
+                    @(!source.IsNull() && source.ShapeType() == TopAbs_SOLID
+                      && source.Orientation() == TopAbs_FORWARD
+                      && df::detail::exactShapeBytes(source, sourceBytes));
+                result[@"capture.receipt"] = @(dfo::detail::ProveSourceReceipt(
+                    parameters, sourceBytes, sourceRecipe));
+                result[@"capture.ownerKey"] =
+                    @(dfo::detail::ReadOwnerKey(*document, label, ownerKey));
+                // A failed source receipt never becomes owner authority. Drive
+                // that absent capability through the real owner so the
+                // negative remains a typed, atomic product refusal.
+                const Standard_Integer undoBefore = native->GetAvailableUndos();
+                const Standard_Integer redoBefore = native->GetAvailableRedos();
+                const std::atomic_bool neverStopped{false};
+                const auto receipt = S2OwnerFor(document.get())->create(
+                    capture, S2Bytes(candidate.canonicalDefinitionBytes),
+                    S2Bytes(candidate.candidateBRepBytes), neverStopped,
+                    dfo::FaultPoint(fault));
+                const TopoDS_Shape afterSource = XCAFDoc_ShapeTool::GetShape(label);
+                std::vector<std::uint8_t> afterBytes;
+                result[@"capture.atomic"] = @(
+                    !afterSource.IsNull()
+                    && df::detail::exactShapeBytes(afterSource, afterBytes)
+                    && afterBytes == sourceBytes && !cr::HasRecord(label)
+                    && native->GetAvailableUndos() == undoBefore
+                    && native->GetAvailableRedos() == redoBefore
+                    && !native->HasOpenCommand());
+                result[@"ok"] = @YES;
+                S2ReceiptEvidence(result, receipt);
+                return (__bridge_retained void *)result;
+            }
+            result[@"minted"] = @YES;
+            std::atomic_bool stop{fault == int32_t(dfo::FaultPoint::StopBeforeLease)};
+            const auto receipt = S2OwnerFor(document.get())->create(
+                capture, S2Bytes(candidate.canonicalDefinitionBytes),
+                S2Bytes(candidate.candidateBRepBytes), stop, dfo::FaultPoint(fault));
+            result[@"ok"] = @YES;
+            S2ReceiptEvidence(result, receipt);
+        } @catch (__unused NSException *exception) { result[@"ok"] = @NO; }
+        return (__bridge_retained void *)result;
+    }
+}
+
+extern "C" void *Core3DDebugB4DraftFacesOwnerEditProbe(
+    void *controllerRaw, void *entityRaw, void *paramsRaw, int32_t fault) {
+    @autoreleasepool {
+        NSMutableDictionary *result = [NSMutableDictionary dictionary];
+        result[@"ok"] = @NO; result[@"minted"] = @NO;
+        @try {
+            Core3DViewController *controller = (__bridge Core3DViewController *)controllerRaw;
+            NSString *entity = (__bridge NSString *)entityRaw;
+            NSData *params = (__bridge NSData *)paramsRaw;
+            Handle(OcctDocument) document; std::shared_ptr<core3d::Core3DViewer> viewer;
+            TDF_Label label; std::uint32_t width = 0, height = 0;
+            if (!S2ProbeViewer(controller, document, viewer)
+                || !RootForEntity(document, entity, label)
+                || !S2Viewport(controller, width, height))
+                return (__bridge_retained void *)result;
+            const std::string entityText = entity.UTF8String ?: "";
+            auto context = viewer->captureNativeOpeningContext(width, height, {entityText});
+            if (!context) return (__bridge_retained void *)result;
+            auto capture = dfo::NativeOwner::MintEditCapture(
+                *document, context, label, entityText, width, height);
+            if (!capture) return (__bridge_retained void *)result;
+            result[@"minted"] = @YES;
+            std::atomic_bool stop{fault == int32_t(dfo::FaultPoint::StopBeforeLease)};
+            const auto receipt = S2OwnerFor(document.get())->editParameters(
+                capture, S2Bytes(params), stop, dfo::FaultPoint(fault));
+            result[@"ok"] = @YES;
+            S2ReceiptEvidence(result, receipt);
+        } @catch (__unused NSException *exception) { result[@"ok"] = @NO; }
+        return (__bridge_retained void *)result;
+    }
+}
+
+extern "C" void *Core3DDebugB4DraftFacesOwnerSourceEditProbe(
+    void *controllerRaw, void *entityRaw,
+    double widthMM, double heightMM, double depthMM, int32_t fault) {
+    @autoreleasepool {
+        NSMutableDictionary *result = [NSMutableDictionary dictionary];
+        result[@"ok"] = @NO; result[@"minted"] = @NO;
+        @try {
+            Core3DViewController *controller = (__bridge Core3DViewController *)controllerRaw;
+            NSString *entity = (__bridge NSString *)entityRaw;
+            Handle(OcctDocument) document; std::shared_ptr<core3d::Core3DViewer> viewer;
+            TDF_Label label; std::uint32_t width = 0, height = 0;
+            if (!S2ProbeViewer(controller, document, viewer)
+                || !RootForEntity(document, entity, label)
+                || !S2Viewport(controller, width, height))
+                return (__bridge_retained void *)result;
+            const std::string entityText = entity.UTF8String ?: "";
+            auto context = viewer->captureNativeOpeningContext(width, height, {entityText});
+            if (!context) return (__bridge_retained void *)result;
+            const double unit = context->openingFence().metersPerUnit();
+            std::vector<double> values;
+            if (!core3d::profile::Encode(
+                    S2BoxProfile(unit, widthMM, heightMM, depthMM), values))
+                return (__bridge_retained void *)result;
+            auto capture = dfo::NativeOwner::MintEditCapture(
+                *document, context, label, entityText, width, height);
+            if (!capture) return (__bridge_retained void *)result;
+            result[@"minted"] = @YES;
+            std::atomic_bool stop{fault == int32_t(dfo::FaultPoint::StopBeforeLease)};
+            const auto receipt = S2OwnerFor(document.get())->editSource(
+                capture, values, stop, dfo::FaultPoint(fault));
+            result[@"ok"] = @YES;
+            S2ReceiptEvidence(result, receipt);
+        } @catch (__unused NSException *exception) { result[@"ok"] = @NO; }
+        return (__bridge_retained void *)result;
+    }
+}
+
+extern "C" void *Core3DDebugB4DraftFacesOwnerReconcileProbe(
+    void *controllerRaw, double session) {
+    @autoreleasepool {
+        NSMutableDictionary *result = [NSMutableDictionary dictionary];
+        result[@"ok"] = @NO;
+        @try {
+            Core3DViewController *controller = (__bridge Core3DViewController *)controllerRaw;
+            Handle(OcctDocument) document; std::shared_ptr<core3d::Core3DViewer> viewer;
+            if (!S2ProbeViewer(controller, document, viewer) || session < 1)
+                return (__bridge_retained void *)result;
+            const auto receipt = S2OwnerFor(document.get())->reconcile(std::uint64_t(session));
+            result[@"ok"] = @YES;
+            S2ReceiptEvidence(result, receipt);
+        } @catch (__unused NSException *exception) { result[@"ok"] = @NO; }
+        return (__bridge_retained void *)result;
+    }
+}
+
+extern "C" void *Core3DDebugB4DraftFacesCorruptProbe(
+    void *fileRaw, void *graphRaw, int32_t mode) {
+    @autoreleasepool {
+        NSMutableDictionary *result = [NSMutableDictionary dictionary];
+        result[@"ok"] = @NO;
+        @try {
+            NSData *file = (__bridge NSData *)fileRaw;
+            NSData *graph = (__bridge NSData *)graphRaw;
+            std::vector<std::uint8_t> fileBytes = S2Bytes(file);
+            const std::vector<std::uint8_t> graphBytes = S2Bytes(graph);
+            if (graphBytes.size() < 100 || fileBytes.size() < graphBytes.size())
+                return (__bridge_retained void *)result;
+            std::size_t offset = 0, occurrences = 0;
+            for (std::size_t cursor = 0; cursor + graphBytes.size() <= fileBytes.size(); ++cursor)
+                if (std::memcmp(fileBytes.data() + cursor, graphBytes.data(),
+                                graphBytes.size()) == 0) { offset = cursor; ++occurrences; }
+            if (occurrences != 1) return (__bridge_retained void *)result;
+            std::vector<std::uint8_t> corrupted = graphBytes;
+            bool fixHash = true;
+            const auto sydf = [&]() -> std::size_t {
+                for (std::size_t cursor = 0; cursor + 4 <= corrupted.size(); ++cursor)
+                    if (std::memcmp(corrupted.data() + cursor, "SYDF", 4) == 0) return cursor;
+                return std::string::npos;
+            };
+            const auto sylv = [&]() -> std::size_t {
+                for (std::size_t cursor = 0; cursor + 6 <= corrupted.size(); ++cursor)
+                    if (std::memcmp(corrupted.data() + cursor, "SYLV", 4) == 0) return cursor;
+                return std::string::npos;
+            };
+            const std::size_t payload = sydf();
+            switch (mode) {
+                case 1: if (payload == std::string::npos) return (__bridge_retained void *)result;
+                    corrupted[payload + 4] = 2; break;          // future SYDF schema
+                case 2: if (payload == std::string::npos) return (__bridge_retained void *)result;
+                    corrupted[payload + 5] = 9; break;          // unknown selector key
+                case 3: if (payload == std::string::npos) return (__bridge_retained void *)result;
+                    {   // nonfinite angle
+                        const std::uint8_t nanBytes[8] = {0, 0, 0, 0, 0, 0, 0xF8, 0x7F};
+                        std::memcpy(corrupted.data() + payload + 88, nanBytes, 8);
+                    } break;
+                case 4: corrupted[24] ^= 0xFF; break;           // foreign owner entity
+                case 5: corrupted[4] = 99; break;               // future envelope version
+                case 6: if (payload == std::string::npos) return (__bridge_retained void *)result;
+                    corrupted[payload + 6] = 9; break;          // unknown proof key
+                case 7: if (payload == std::string::npos) return (__bridge_retained void *)result;
+                    corrupted[payload + 20] ^= 0xFF; fixHash = false; break; // digest mismatch
+                case 8: { const std::size_t recipe = sylv();
+                    if (recipe == std::string::npos) return (__bridge_retained void *)result;
+                    corrupted[recipe + 5] = 0x7E; } break;      // bad source input kind
+                default: return (__bridge_retained void *)result;
+            }
+            if (fixHash) {
+                df::Digest digest{};
+                std::vector<std::uint8_t> body(corrupted.begin(), corrupted.end() - 32);
+                if (!cr::Hash(body, digest)) return (__bridge_retained void *)result;
+                std::copy(digest.begin(), digest.end(), corrupted.end() - 32);
+            }
+            std::memcpy(fileBytes.data() + offset, corrupted.data(), corrupted.size());
+            result[@"corrupted"] = DFData(fileBytes);
+            result[@"offset"] = @(offset);
+            result[@"ok"] = @YES;
+        } @catch (__unused NSException *exception) { result[@"ok"] = @NO; }
+        return (__bridge_retained void *)result;
+    }
+}
+
+extern "C" void *Core3DDebugB4DraftFacesCompositeDecodeProbe(void *dataRaw) {
+    @autoreleasepool {
+        NSData *data = (__bridge NSData *)dataRaw;
+        std::vector<std::uint8_t> bytes = S2Bytes(data);
+        cr::Definition definition;
+        const bool accepted = cr::Decode(bytes, definition);
+        return (__bridge_retained void *)@{
+            @"accepted": @(accepted),
+            @"schemaVersion": @(accepted ? definition.schemaVersion : 0),
+            @"nodeCount": @(accepted ? definition.nodes.size() : 0) };
     }
 }
 #endif
