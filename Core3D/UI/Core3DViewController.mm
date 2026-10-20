@@ -17560,6 +17560,42 @@ static bool Core3DDoubleBitsEqual(const double first, const double second) noexc
     return std::memcmp(&first, &second, sizeof(double)) == 0;
 }
 
+//! Detached-edit camera admission compares values, not revisions: a camera
+//! revision that advanced only through a revision-only or floating-residue
+//! update leaves pose and projection semantically unchanged and must not
+//! refuse the edit. A real mid-edit camera move exceeds this bound by orders
+//! of magnitude and is still refused as camera-revision.mismatch.
+static bool Core3DSpatialCameraValueNear(const double first, const double second) noexcept {
+    if (!std::isfinite(first) || !std::isfinite(second)) return false;
+    const double scale = std::max(1.0, std::max(std::fabs(first), std::fabs(second)));
+    return std::fabs(first - second) <= 1.0e-6 * scale;
+}
+
+static bool Core3DSpatialCameraSemanticallyStable(Core3DSceneCameraSnapshot *current,
+                                                  Core3DSceneCameraSnapshot *authority) {
+    if (![current isKindOfClass:Core3DSceneCameraSnapshot.class]
+        || ![authority isKindOfClass:Core3DSceneCameraSnapshot.class]
+        || current.projection != authority.projection
+        || current.viewportSizePixels.x != authority.viewportSizePixels.x
+        || current.viewportSizePixels.y != authority.viewportSizePixels.y) return false;
+    return Core3DSpatialCameraValueNear(current.eye.x, authority.eye.x)
+        && Core3DSpatialCameraValueNear(current.eye.y, authority.eye.y)
+        && Core3DSpatialCameraValueNear(current.eye.z, authority.eye.z)
+        && Core3DSpatialCameraValueNear(current.center.x, authority.center.x)
+        && Core3DSpatialCameraValueNear(current.center.y, authority.center.y)
+        && Core3DSpatialCameraValueNear(current.center.z, authority.center.z)
+        && Core3DSpatialCameraValueNear(current.up.x, authority.up.x)
+        && Core3DSpatialCameraValueNear(current.up.y, authority.up.y)
+        && Core3DSpatialCameraValueNear(current.up.z, authority.up.z)
+        && Core3DSpatialCameraValueNear(current.verticalFieldOfViewRadians,
+            authority.verticalFieldOfViewRadians)
+        && Core3DSpatialCameraValueNear(current.orthographicHeight,
+            authority.orthographicHeight)
+        && Core3DSpatialCameraValueNear(current.nearPlane, authority.nearPlane)
+        && Core3DSpatialCameraValueNear(current.farPlane, authority.farPlane)
+        && Core3DSpatialCameraValueNear(current.aspectRatio, authority.aspectRatio);
+}
+
 static bool Core3DSpatialSceneAuthorityMatches(Core3DSceneSnapshot *current,
                                                 Core3DSceneSnapshot *authority) {
     if (![current isKindOfClass:Core3DSceneSnapshot.class]
@@ -17577,7 +17613,8 @@ static bool Core3DSpatialSceneAuthorityMatches(Core3DSceneSnapshot *current,
         || current.revisions.documentGeneration != authority.revisions.documentGeneration
         || current.revisions.modelRevision != authority.revisions.modelRevision
         || current.revisions.presentationRevision != authority.revisions.presentationRevision
-        || current.revisions.cameraRevision != authority.revisions.cameraRevision
+        || (current.revisions.cameraRevision != authority.revisions.cameraRevision
+            && !Core3DSpatialCameraSemanticallyStable(current.camera, authority.camera))
         || !Core3DDoubleBitsEqual(current.metersPerUnit, authority.metersPerUnit)
         || current.selectionMode != Core3DSceneElementKindObject
         || authority.selectionMode != Core3DSceneElementKindObject
@@ -17687,7 +17724,8 @@ static NSString *Core3DSpatialSceneAuthorityMismatch(Core3DSceneSnapshot *curren
         reason = @"model-revision.mismatch";
     else if (current.revisions.presentationRevision != authority.revisions.presentationRevision)
         reason = @"presentation-revision.mismatch";
-    else if (current.revisions.cameraRevision != authority.revisions.cameraRevision)
+    else if (current.revisions.cameraRevision != authority.revisions.cameraRevision
+        && !Core3DSpatialCameraSemanticallyStable(current.camera, authority.camera))
         reason = @"camera-revision.mismatch";
     else if (!Core3DDoubleBitsEqual(current.metersPerUnit, authority.metersPerUnit))
         reason = @"meters-per-unit-bits.mismatch";

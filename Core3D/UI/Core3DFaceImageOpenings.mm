@@ -4280,6 +4280,7 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         } mutableCopy];
         result[@"p2bArena"] = extraObservation ?: @{};
         result[@"p2bRaw"] = extraObservation[@"p2bRaw"] ?: @{};
+        result[@"p2bAdmission"] = extraObservation[@"admission"] ?: @{};
         return result;
     } @catch (...) {
         return @{@"failureStage": @"bridge-exception",
