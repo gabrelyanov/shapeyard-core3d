@@ -9,6 +9,8 @@
 /* Begin PBXBuildFile section */
 		F2E100000000000000000001 /* Core3DDecimationOpening.h in Headers */ = {isa = PBXBuildFile; fileRef = F2E200000000000000000001 /* Core3DDecimationOpening.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		F2E100000000000000000002 /* Core3DDecimationOpening.mm in Sources */ = {isa = PBXBuildFile; fileRef = F2E200000000000000000002 /* Core3DDecimationOpening.mm */; };
+		F3D100000000000000000001 /* Core3DLODSetOpening.h in Headers */ = {isa = PBXBuildFile; fileRef = F3D200000000000000000001 /* Core3DLODSetOpening.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		F3D100000000000000000002 /* Core3DLODSetOpening.mm in Sources */ = {isa = PBXBuildFile; fileRef = F3D200000000000000000002 /* Core3DLODSetOpening.mm */; };
 		1C0C01000000000000000001 /* LoftCorrespondenceAdapter.hxx in Headers */ = {isa = PBXBuildFile; fileRef = 1C0C00000000000000000001 /* LoftCorrespondenceAdapter.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		1C0C01000000000000000002 /* LoftCorrespondenceProof.hxx in Headers */ = {isa = PBXBuildFile; fileRef = 1C0C00000000000000000002 /* LoftCorrespondenceProof.hxx */; settings = {ATTRIBUTES = (Private, ); }; };
 		1C0C01000000000000000003 /* Core3DLoftCorrespondenceOpening.h in Headers */ = {isa = PBXBuildFile; fileRef = 1C0C00000000000000000003 /* Core3DLoftCorrespondenceOpening.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -333,6 +335,8 @@
 /* Begin PBXFileReference section */
 		F2E200000000000000000001 /* Core3DDecimationOpening.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DDecimationOpening.h; sourceTree = "<group>"; };
 		F2E200000000000000000002 /* Core3DDecimationOpening.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DDecimationOpening.mm; sourceTree = "<group>"; };
+		F3D200000000000000000001 /* Core3DLODSetOpening.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Core3DLODSetOpening.h; sourceTree = "<group>"; };
+		F3D200000000000000000002 /* Core3DLODSetOpening.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Core3DLODSetOpening.mm; sourceTree = "<group>"; };
 		F2E200000000000000000003 /* ExportMeshDecimator.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = ExportMeshDecimator.hxx; sourceTree = "<group>"; };
 		1C0C00000000000000000001 /* LoftCorrespondenceAdapter.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = LoftCorrespondenceAdapter.hxx; sourceTree = "<group>"; };
 		1C0C00000000000000000002 /* LoftCorrespondenceProof.hxx */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = LoftCorrespondenceProof.hxx; sourceTree = "<group>"; };
@@ -1043,6 +1047,8 @@
 			children = (
 				F2E200000000000000000001 /* Core3DDecimationOpening.h */,
 				F2E200000000000000000002 /* Core3DDecimationOpening.mm */,
+				F3D200000000000000000001 /* Core3DLODSetOpening.h */,
+				F3D200000000000000000002 /* Core3DLODSetOpening.mm */,
 				1C0C00000000000000000003 /* Core3DLoftCorrespondenceOpening.h */,
 				1C0C00000000000000000004 /* Core3DLoftCorrespondenceOpening.mm */,
 				A1A000020000000000000003 /* Core3DAuthoredParameterOpening.h */,
@@ -1238,6 +1244,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				F2E100000000000000000001 /* Core3DDecimationOpening.h in Headers */,
+				F3D100000000000000000001 /* Core3DLODSetOpening.h in Headers */,
 				1C0C01000000000000000001 /* LoftCorrespondenceAdapter.hxx in Headers */,
 				1C0C01000000000000000002 /* LoftCorrespondenceProof.hxx in Headers */,
 				1C0C01000000000000000003 /* Core3DLoftCorrespondenceOpening.h in Headers */,
@@ -1506,6 +1513,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				F2E100000000000000000002 /* Core3DDecimationOpening.mm in Sources */,
+				F3D100000000000000000002 /* Core3DLODSetOpening.mm in Sources */,
 				1C0C01000000000000000004 /* Core3DLoftCorrespondenceOpening.mm in Sources */,
 				A1A000010000000000000002 /* AuthoredParameterNativeOwner.mm in Sources */,
 				A1A000010000000000000004 /* Core3DAuthoredParameterOpening.mm in Sources */,

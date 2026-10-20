@@ -2370,10 +2370,17 @@ NSDictionary *FaceImageScenarioZeroProbe(double unit) {
             committed = edited;
         }
         // bit 4: every role binds with its frozen color-space coupling, and a
-        // wrong coupling refuses without history.
+        // wrong coupling refuses without history. The four added roles share
+        // the first binding's durable face, so this bit also measures the Nb
+        // same-face re-proof: a geometric capture after the first added
+        // Emissive role, a current BuildObserved fence for a subsequent edit,
+        // one ordinary source command replaying every same-face row with
+        // exact record/history/resource preservation, and an isolated min-Y
+        // subcase mirroring the UI left-standard-view pick.
         scenarioZeroBit4:
         {
             bool ok = true;
+            NSString *bitFourStage = @"role commits and coupling";
             const fi::Role roles[4] = {fi::Role::Emissive, fi::Role::MetallicRoughness,
                 fi::Role::Occlusion, fi::Role::Normal};
             const fi::ColorSpace spaces[4] = {fi::ColorSpace::SRGB, fi::ColorSpace::Linear,
@@ -2397,6 +2404,44 @@ NSDictionary *FaceImageScenarioZeroProbe(double unit) {
                         && back == next;
                     committed = next;
                 }
+                if (ok && index == 0) {
+                    // Nb: after the first added Emissive role the two committed
+                    // rows share one durable face and one exact proof; capture
+                    // re-proves the committed record with aligned per-binding
+                    // outputs and leaves record/history/resources untouched.
+                    bitFourStage = @"capture after the first added Emissive role";
+                    NSData *twoRoleBytes = ProbeRecordBytes(owner, fiKey);
+                    const auto undosBeforeCapture = owner.Document()->GetAvailableUndos();
+                    std::vector<fi::ResourceFence> manifestBefore;
+                    dr::FaceImageAttachment twoRole;
+                    const auto twoRoleStatus =
+                        dr::CaptureFaceImageAttachment(owner, fiKey, twoRole);
+                    std::vector<fi::ResourceFence> manifestAfter;
+                    ok = twoRoleStatus == dr::FaceImageReplayStatus::Captured
+                        && twoRoleBytes
+                        && owner.FaceImageResourceManifest(manifestBefore)
+                        && owner.FaceImageResourceManifest(manifestAfter)
+                        && manifestBefore == manifestAfter
+                        && twoRole.committed == committed
+                        && [twoRoleBytes isEqualToData:
+                                [NSData dataWithBytes:twoRole.canonicalBytes.data()
+                                               length:twoRole.canonicalBytes.size()]]
+                        && twoRole.faces.size() == committed.bindings.size()
+                        && twoRole.observed.faces.size() == committed.bindings.size()
+                        && owner.Document()->GetAvailableUndos() == undosBeforeCapture
+                        && [(ProbeRecordBytes(owner, fiKey) ?: [NSData data])
+                                isEqualToData:twoRoleBytes];
+                    for (std::size_t row = 0; ok && row < committed.bindings.size(); ++row)
+                        ok = twoRole.faces[row].face == committed.bindings[row].face
+                            && twoRole.faces[row].proof
+                                   == committed.bindings[row].selectorProof;
+                    ok = ok && committed.bindings.size() == 2
+                        && committed.bindings[0].face == committed.bindings[1].face
+                        && committed.bindings[0].selectorProof
+                               == committed.bindings[1].selectorProof
+                        && !(committed.bindings[0].binding == committed.bindings[1].binding)
+                        && committed.bindings[0].role != committed.bindings[1].role;
+                }
             }
             // Wrong coupling: BaseColor with Linear must refuse with no delta.
             if (committed.bindings.empty()) ok = false;
@@ -2411,7 +2456,166 @@ NSDictionary *FaceImageScenarioZeroProbe(double unit) {
                 && owner.ReadFaceImageBindings(fiKey, back, nullptr)
                         == fi::persistence::bindings::ReadState::Present
                 && back == committed;
-            ProbeRecordBit(bits, mask, 4, ok, @"five roles with coupling plus wrong-coupling refusal");
+            // Nb full-record positive: the committed record now carries five
+            // role rows on one durable face. Capture re-proves it, the
+            // BuildObserved fence for a subsequent edit stays current without
+            // inventing captured fences, and prepare on the unchanged shape is
+            // a proven NoChange.
+            dr::FaceImageAttachment nbAttachment;
+            if (ok) {
+                bitFourStage = @"full same-face record capture";
+                ok = dr::CaptureFaceImageAttachment(owner, fiKey, nbAttachment)
+                        == dr::FaceImageReplayStatus::Captured
+                    && nbAttachment.committed == committed
+                    && nbAttachment.faces.size() == committed.bindings.size()
+                    && nbAttachment.observed.faces.size() == committed.bindings.size();
+            }
+            if (ok) {
+                bitFourStage = @"BuildObserved for a subsequent edit";
+                fi::Definition edited = committed;
+                edited.bindings[1].transform.rotationDegrees = 45;
+                fi::Observed observed;
+                dr::FaceImageReplayStatus observedStatus =
+                    dr::FaceImageReplayStatus::Malformed;
+                const dr::FaceImageFaceState noCapturedFace{};
+                ok = fi::BindBindingProof(edited)
+                    && BuildObserved(session.Document(), fiKey, true, edited,
+                                     false, noCapturedFace, observed, observedStatus)
+                    && observedStatus == dr::FaceImageReplayStatus::Captured
+                    && observed.faces.size() == nbAttachment.observed.faces.size();
+            }
+            if (ok) {
+                bitFourStage = @"replay NoChange on the unchanged shape";
+                const TopoDS_Shape currentShape = XCAFDoc_ShapeTool::GetShape(ownerLabel);
+                dr::FaceImageReplay noChange;
+                ok = !currentShape.IsNull()
+                    && noChange.prepare(owner, nbAttachment, dr::Mutation::Replace,
+                                        fiKey.entity, currentShape)
+                           == dr::FaceImageReplayStatus::NoChange;
+            }
+            // Nb: an admitted changed source shape prepares, stages and reads
+            // back with every same-face role row preserved as one ordinary
+            // source command; capture after Undo/Redo re-proves every row.
+            if (ok) {
+                bitFourStage = @"changed source shape prepare/stage/read";
+                NSData *beforeEditBytes = ProbeRecordBytes(owner, fiKey);
+                const Handle(TDocStd_Document) doc = owner.Document();
+                const auto undosBeforeEdit = doc->GetAvailableUndos();
+                const TopoDS_Shape widened = ProbeBuildBoxWithCut(unit, 44, 12, 3);
+                dr::FaceImageReplay replay;
+                ok = !widened.IsNull() && beforeEditBytes
+                    && replay.prepare(owner, nbAttachment, dr::Mutation::Replace,
+                                      fiKey.entity, widened)
+                           == dr::FaceImageReplayStatus::Prepared;
+                if (ok) {
+                    doc->NewCommand();
+                    XCAFDoc_DocumentTool::ShapeTool(doc->Main())->SetShape(
+                        ownerLabel, widened);
+                    const auto staged = replay.stage(owner);
+                    const bool committedEdit =
+                        staged == dr::FaceImageReplayStatus::Prepared
+                        && doc->CommitCommand();
+                    if (!committedEdit && doc->HasOpenCommand()) doc->AbortCommand();
+                    fi::Definition replayed;
+                    ok = committedEdit
+                        && doc->GetAvailableUndos() == undosBeforeEdit + 1
+                        && replay.read(owner)
+                        && owner.ReadFaceImageBindings(fiKey, replayed, nullptr)
+                               == fi::persistence::bindings::ReadState::Present
+                        && replayed == replay.refreshed()
+                        && replayed.bindings.size() == committed.bindings.size();
+                    for (std::size_t row = 0; ok && row < replayed.bindings.size(); ++row)
+                        ok = replayed.bindings[row].binding
+                                 == committed.bindings[row].binding
+                            && replayed.bindings[row].face == committed.bindings[row].face
+                            && replayed.bindings[row].role == committed.bindings[row].role
+                            && replayed.bindings[row].resource
+                                   == committed.bindings[row].resource;
+                    if (ok) {
+                        bitFourStage = @"capture after Undo and Redo";
+                        dr::FaceImageAttachment afterUndo;
+                        ok = owner.undo()
+                            && dr::CaptureFaceImageAttachment(owner, fiKey, afterUndo)
+                                   == dr::FaceImageReplayStatus::Captured
+                            && [(ProbeRecordBytes(owner, fiKey) ?: [NSData data])
+                                    isEqualToData:beforeEditBytes]
+                            && owner.redo();
+                        dr::FaceImageAttachment afterRedo;
+                        ok = ok
+                            && dr::CaptureFaceImageAttachment(owner, fiKey, afterRedo)
+                                   == dr::FaceImageReplayStatus::Captured
+                            && afterRedo.committed == replayed;
+                    }
+                    if (ok) {
+                        // Probe hygiene: the widened stage was staged without
+                        // a retained-program source edit (this bit measures
+                        // the face-image replay correspondence only), so it is
+                        // undone again to leave the document exactly at its
+                        // pre-edit state for the save/reopen admission below.
+                        bitFourStage = @"restore the pre-edit stage";
+                        ok = owner.undo()
+                            && [(ProbeRecordBytes(owner, fiKey) ?: [NSData data])
+                                    isEqualToData:beforeEditBytes];
+                    }
+                }
+            }
+            // Nb isolated subcase mirroring the UI left-standard-view pick:
+            // the original max-X BaseColor binding stays untouched while the
+            // plain min-Y face is derived through the real B2 resolver, bound
+            // with BaseColor then Emissive on that one durable face, and
+            // re-proven before the next operation.
+            if (ok) {
+                bitFourStage = @"isolated min-Y same-face bindings";
+                const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(ownerLabel);
+                dr::FaceImageGeometricReceipt minY;
+                fi::Binding minYBase;
+                minYBase.binding = FixtureIndexedUUID(0x55, 1);
+                minYBase.face = FixtureIndexedUUID(0x55, 2);
+                minYBase.resource = envelope.resource;
+                minYBase.role = fi::Role::BaseColor;
+                minYBase.colorSpace = fi::ColorSpace::SRGB;
+                minYBase.transform = fi::UVTransform{};
+                fi::Definition next = committed;
+                ok = !shape.IsNull()
+                    && FixtureCapturePlanarFace(shape, unit,
+                        core3d::retained_face_selector::Axis::Y,
+                        core3d::retained_face_selector::Side::Min, minY)
+                    && dr::FaceImageReceiptProof(minY, minYBase.selectorProof);
+                next.bindings.push_back(minYBase);
+                ok = ok && fi::BindBindingProof(next)
+                    && ProbeCommitBindings(owner, next, delta)
+                           == fi::owner::Outcome::Committed && delta == 1;
+                fi::Binding minYEmissive = minYBase;
+                minYEmissive.binding = FixtureIndexedUUID(0x55, 3);
+                minYEmissive.role = fi::Role::Emissive;
+                fi::Definition both = next;
+                both.bindings.push_back(minYEmissive);
+                if (ok) {
+                    ok = fi::BindBindingProof(both)
+                        && ProbeCommitBindings(owner, both, delta)
+                               == fi::owner::Outcome::Committed && delta == 1;
+                }
+                if (ok) {
+                    bitFourStage = @"min-Y same-face re-proof";
+                    dr::FaceImageAttachment reproof;
+                    const std::size_t last = both.bindings.size();
+                    ok = dr::CaptureFaceImageAttachment(owner, fiKey, reproof)
+                             == dr::FaceImageReplayStatus::Captured
+                        && reproof.committed == both
+                        && reproof.faces.size() == last && last >= 2
+                        && reproof.faces[last - 2].face == minYBase.face
+                        && reproof.faces[last - 1].face == minYBase.face
+                        && reproof.faces[last - 2].proof == minYBase.selectorProof
+                        && reproof.faces[last - 1].proof == minYBase.selectorProof
+                        && !(both.bindings[last - 2].binding
+                                 == both.bindings[last - 1].binding)
+                        && both.bindings[last - 2].role != both.bindings[last - 1].role;
+                }
+                if (ok) committed = both;
+            }
+            ProbeRecordBit(bits, mask, 4, ok, [NSString stringWithFormat:
+                @"five roles with coupling, wrong-coupling refusal, same-face re-proof (%@)",
+                bitFourStage]);
         }
         // bit 5: all three wrap modes round-trip exactly.
         {
@@ -2438,6 +2642,10 @@ NSDictionary *FaceImageScenarioZeroProbe(double unit) {
         // every UUID and both byte arrays survive.
         {
             bool ok = false;
+            bool resourceOK = false, stateOK = false, definitionOK = false;
+            bool bytesOK = false, docOK = false, validOK = false, captureOK = false;
+            int reopenCaptureStatus = -1;
+            long reopenFaces = -1;
             NSData *beforeBytes = ProbeRecordBytes(owner, fiKey);
             const Handle(TDocStd_Application) application =
                 Handle(TDocStd_Application)::DownCast(owner.Document()->Application());
@@ -2450,24 +2658,38 @@ NSDictionary *FaceImageScenarioZeroProbe(double unit) {
                     fi::ResourceEnvelope backResource;
                     fi::Definition backDefinition;
                     std::vector<std::uint8_t> reopenedBytes;
-                    const bool resourceOK = reopened->ReadFaceImageResource(
+                    resourceOK = reopened->ReadFaceImageResource(
                         envelope.resource, backResource) && backResource == envelope;
                     const auto reopenedState = reopened->ReadFaceImageBindings(
                         fiKey, backDefinition, &reopenedBytes);
-                    const bool bytesOK = [[NSData dataWithBytes:reopenedBytes.data()
+                    stateOK = reopenedState == fi::persistence::bindings::ReadState::Present;
+                    bytesOK = [[NSData dataWithBytes:reopenedBytes.data()
                                                          length:reopenedBytes.size()]
                         isEqualToData:beforeBytes];
-                    const bool docOK = reopened->DocumentIdentifier()
+                    docOK = reopened->DocumentIdentifier()
                         == owner.DocumentIdentifier();
-                    const bool validOK = Core3DValidateFaceImageDocument(reopened->Document());
-                    ok = resourceOK
-                        && reopenedState == fi::persistence::bindings::ReadState::Present
-                        && backDefinition == committed
-                        && bytesOK && docOK && validOK;
+                    validOK = Core3DValidateFaceImageDocument(reopened->Document());
+                    definitionOK = backDefinition == committed;
+                    // Nb: the cold native reopen re-proves every same-face
+                    // role row geometrically; the stored record and both
+                    // resource payloads still match the independent reads.
+                    dr::FaceImageAttachment reopenedAttachment;
+                    const auto reopenCapture = dr::CaptureFaceImageAttachment(
+                        *reopened, fiKey, reopenedAttachment);
+                    reopenCaptureStatus = int(reopenCapture);
+                    reopenFaces = long(reopenedAttachment.faces.size());
+                    captureOK = reopenCapture == dr::FaceImageReplayStatus::Captured
+                        && reopenedAttachment.committed == committed
+                        && reopenedAttachment.faces.size() == committed.bindings.size();
+                    ok = resourceOK && stateOK && definitionOK
+                        && bytesOK && docOK && validOK && captureOK;
                     reopened->ClosePrivateExportSnapshot();
                 }
             }
-            ProbeRecordBit(bits, mask, 6, ok, @"save, destroy, cold reopen, exact identities");
+            ProbeRecordBit(bits, mask, 6, ok, [NSString stringWithFormat:
+                @"save, destroy, cold reopen, exact identities (resource=%d state=%d definition=%d bytes=%d document=%d valid=%d capture=%d status=%d faces=%ld)",
+                resourceOK, stateOK, definitionOK, bytesOK, docOK, validOK, captureOK,
+                reopenCaptureStatus, reopenFaces]);
         }
         // bit 7: typed resource removal refuses while bound (no history), the
         // unbind+removal commits as one command and Undo restores both.
@@ -2587,9 +2809,15 @@ NSDictionary *FaceImageScenarioOneProbe(double unit) {
     } catch (...) { ProbeRecordBit(bits, mask, 0, false, @"c++ exception"); }
     } @catch (...) { ProbeRecordBit(bits, mask, 0, false, @"exception"); }
     // bit 1: a stored proof matching two current coplanar faces is
-    // AmbiguousFaceRemap; the record/history are untouched.
+    // AmbiguousFaceRemap; the record/history are untouched. Nb controls
+    // measure the same refusal for two distinct durable face UUIDs claiming
+    // the one unique geometric face (even with different roles), and for one
+    // durable face UUID carrying inconsistent proofs that resolve to two
+    // different faces; the unchanged codec still refuses a duplicate
+    // (face, role) pair and a duplicate binding identity.
     @try {
         try {
+        NSString *bitOneStage = @"split-side coplanar pair";
         core3d::NativeDocumentSession session;
         OcctDocument& owner = *session.Document();
         OwnerKey key;
@@ -2632,7 +2860,146 @@ NSDictionary *FaceImageScenarioOneProbe(double unit) {
                 && [(ProbeRecordBytes(owner, fiKey) ?: [NSData data]) isEqualToData:beforeBytes]
                 && owner.Document()->GetAvailableUndos() == undosBefore;
         }
-        ProbeRecordBit(bits, mask, 1, ok, @"ambiguous remap refusal preserves bytes and history");
+        // Nb control A: two distinct durable face UUIDs, even with different
+        // roles, claiming the same unique geometric face still refuse
+        // AmbiguousFaceRemap with exact bytes and zero history.
+        if (ok) {
+            bitOneStage = @"control A setup";
+            core3d::NativeDocumentSession controlSession;
+            OcctDocument& controlOwner = *controlSession.Document();
+            OwnerKey controlKey;
+            TDF_Label controlLabel;
+            fi::ResourceEnvelope controlEnvelope;
+            ok = ProbeStageBase(controlOwner, unit, controlKey, controlLabel, 40, 12, 3)
+                && ProbeEnvelope(ProbeRasterImage(YES), ProbeRasterImage(NO),
+                                 controlEnvelope);
+            const fi::OwnerKey controlFiKey{controlKey.document, controlKey.entity,
+                controlKey.definition};
+            if (ok) ok = ProbeBindBaseColor(controlOwner, controlFiKey, controlLabel,
+                                            unit, controlEnvelope);
+            fi::Definition controlCommitted;
+            ok = ok && controlOwner.ReadFaceImageBindings(controlFiKey,
+                        controlCommitted, nullptr)
+                    == fi::persistence::bindings::ReadState::Present
+                && controlCommitted.bindings.size() == 1;
+            if (ok) bitOneStage = @"control A collision commit";
+            if (ok) {
+                fi::Definition collision = controlCommitted;
+                fi::Binding added = controlCommitted.bindings[0];
+                added.binding = FixtureIndexedUUID(0x56, 1);
+                added.face = FixtureIndexedUUID(0x56, 2);
+                added.role = fi::Role::Emissive;
+                collision.bindings.push_back(added);
+                int delta = 0;
+                ok = fi::BindBindingProof(collision)
+                    && ProbeCommitBindings(controlOwner, collision, delta)
+                           == fi::owner::Outcome::Committed && delta == 1;
+                NSData *controlBytes =
+                    ok ? ProbeRecordBytes(controlOwner, controlFiKey) : nil;
+                const auto undosAfterCommit =
+                    controlOwner.Document()->GetAvailableUndos();
+                ok = ok && controlBytes;
+                if (ok) bitOneStage = @"control A capture refusal";
+                dr::FaceImageAttachment attachment;
+                const auto controlStatus = ok
+                    ? dr::CaptureFaceImageAttachment(controlOwner, controlFiKey, attachment)
+                    : dr::FaceImageReplayStatus::Malformed;
+                ok = ok && controlStatus == dr::FaceImageReplayStatus::AmbiguousFaceRemap
+                    && [(ProbeRecordBytes(controlOwner, controlFiKey) ?: [NSData data])
+                            isEqualToData:controlBytes]
+                    && controlOwner.Document()->GetAvailableUndos() == undosAfterCommit;
+                if (!ok) bitOneStage = [NSString stringWithFormat:
+                    @"%@ (captureStatus=%d)", bitOneStage, int(controlStatus)];
+            }
+        }
+        // Nb control B: one durable face UUID carrying inconsistent proofs
+        // that resolve to two different current faces refuses; capture never
+        // takes the first proof or silently rewrites the UUID. The record is
+        // codec-valid (distinct binding identities and (face, role) pairs) but
+        // geometrically inconsistent, so it is staged through the whole-record
+        // commit seam inside one ordinary command; capture must refuse it with
+        // exact bytes and no further history. The unchanged codec still
+        // refuses a duplicate (face, role) pair and a duplicate binding
+        // identity.
+        if (ok) {
+            bitOneStage = @"control B setup";
+            core3d::NativeDocumentSession controlSession;
+            OcctDocument& controlOwner = *controlSession.Document();
+            OwnerKey controlKey;
+            TDF_Label controlLabel;
+            fi::ResourceEnvelope controlEnvelope;
+            ok = ProbeStageBase(controlOwner, unit, controlKey, controlLabel, 40, 12, 3)
+                && ProbeEnvelope(ProbeRasterImage(YES), ProbeRasterImage(NO),
+                                 controlEnvelope);
+            const fi::OwnerKey controlFiKey{controlKey.document, controlKey.entity,
+                controlKey.definition};
+            if (ok) ok = ProbeBindBaseColor(controlOwner, controlFiKey, controlLabel,
+                                            unit, controlEnvelope);
+            fi::Definition controlCommitted;
+            ok = ok && controlOwner.ReadFaceImageBindings(controlFiKey,
+                        controlCommitted, nullptr)
+                    == fi::persistence::bindings::ReadState::Present
+                && controlCommitted.bindings.size() == 1;
+            if (ok) bitOneStage = @"control B inconsistent record staging";
+            if (ok) {
+                const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(controlLabel);
+                dr::FaceImageGeometricReceipt minY;
+                fi::Definition inconsistent = controlCommitted;
+                fi::Binding added = controlCommitted.bindings[0];
+                added.binding = FixtureIndexedUUID(0x57, 1);
+                added.role = fi::Role::Emissive;
+                ok = !shape.IsNull()
+                    && FixtureCapturePlanarFace(shape, unit,
+                        core3d::retained_face_selector::Axis::Y,
+                        core3d::retained_face_selector::Side::Min, minY)
+                    && dr::FaceImageReceiptProof(minY, added.selectorProof)
+                    && !(added.selectorProof
+                             == controlCommitted.bindings[0].selectorProof);
+                inconsistent.bindings.push_back(added);
+                std::vector<std::uint8_t> canonical;
+                const Handle(TDocStd_Document) controlDoc = controlOwner.Document();
+                const auto undosBeforeControl = controlDoc->GetAvailableUndos();
+                ok = ok && fi::BindBindingProof(inconsistent)
+                    && fi::Encode(inconsistent, canonical);
+                if (ok) {
+                    controlDoc->NewCommand();
+                    const bool stagedRecord = fi::persistence::bindings::StageCommitted(
+                        controlDoc, controlLabel, inconsistent, canonical)
+                        && controlDoc->CommitCommand();
+                    if (!stagedRecord && controlDoc->HasOpenCommand())
+                        controlDoc->AbortCommand();
+                    ok = stagedRecord
+                        && controlDoc->GetAvailableUndos() == undosBeforeControl + 1;
+                }
+                if (ok) bitOneStage = @"control B capture refusal";
+                NSData *controlBytes =
+                    ok ? ProbeRecordBytes(controlOwner, controlFiKey) : nil;
+                const auto undosAfterStage = controlDoc->GetAvailableUndos();
+                dr::FaceImageAttachment attachment;
+                const auto controlStatus = ok
+                    ? dr::CaptureFaceImageAttachment(controlOwner, controlFiKey, attachment)
+                    : dr::FaceImageReplayStatus::Malformed;
+                ok = ok && controlStatus == dr::FaceImageReplayStatus::AmbiguousFaceRemap
+                    && [(ProbeRecordBytes(controlOwner, controlFiKey) ?: [NSData data])
+                            isEqualToData:controlBytes]
+                    && controlDoc->GetAvailableUndos() == undosAfterStage;
+                if (ok) bitOneStage = @"control B codec duplicate refusals";
+                fi::Binding duplicatePair = added;
+                duplicatePair.binding = FixtureIndexedUUID(0x57, 2);
+                fi::Definition duplicateRow = inconsistent;
+                duplicateRow.bindings.push_back(duplicatePair);
+                fi::Definition duplicateIdentity = inconsistent;
+                duplicateIdentity.bindings[1].binding =
+                    inconsistent.bindings[0].binding;
+                fi::Refusal validation = fi::Refusal::None;
+                ok = ok && !fi::Valid(duplicateRow, validation)
+                    && !fi::Valid(duplicateIdentity, validation);
+                if (!ok) bitOneStage = [NSString stringWithFormat:
+                    @"%@ (captureStatus=%d)", bitOneStage, int(controlStatus)];
+            }
+        }
+        ProbeRecordBit(bits, mask, 1, ok, [NSString stringWithFormat:
+            @"ambiguous remap refusal preserves bytes and history (%@)", bitOneStage]);
     } catch (...) { ProbeRecordBit(bits, mask, 1, false, @"c++ exception"); }
     } @catch (...) { ProbeRecordBit(bits, mask, 1, false, @"exception"); }
     // bit 2: a drifted resource fence refuses StaleResource without history.

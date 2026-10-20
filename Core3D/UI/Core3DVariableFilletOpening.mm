@@ -2,16 +2,16 @@
 //  Core3DVariableFilletOpening.mm
 //  Core3D
 //
-//  B3-S1 detached variable-radius fillet opening. A controller/viewer-issued
+//  B3 retained variable-radius fillet opening. A controller/viewer-issued
 //  opening bound to one document, one native source entity and one issued
 //  oriented-edge selection. It copies the actual source solid without
 //  mutating it, runs the existing native deterministic builders through
 //  VariableRadiusFilletRegistry.hxx, and returns either a detached candidate
 //  (consumed edge set, realised law pins, detached BRep bytes + digest and
-//  independent section observations) or an exact typed refusal. No retained
-//  owner, no document transaction, no CommandLease, no publication and no
-//  history entry. Apply/prepare/read entrances are reserved for S2 and stay
-//  unavailable here.
+//  independent section observations) or an exact typed refusal. S2 binds an
+//  accepted detached candidate to the persisted owner and the complete
+//  D2/D3/D4 closure before opening one lease, then stages, reads, closes and
+//  publishes exactly once.
 //
 
 #import "Core3DVariableFilletOpening.h"
@@ -22,6 +22,7 @@
 
 #include "../OCCTKit/NativeOpeningContext.hxx"
 #include "../OCCTKit/OcctDocument.h"
+#include "../OCCTKit/VariableRadiusFilletNativeOwner.hxx"
 #include "../OCCTKit/VariableRadiusFilletRegistry.hxx"
 #include "Core3DViewer.h"
 
@@ -56,6 +57,7 @@ NSString *const Core3DVariableFilletRefusalRawValueKey = @"b3.refusalRaw";
 namespace {
 
 namespace vrf = core3d::variable_radius_fillet;
+namespace vro = core3d::variable_radius_fillet::owner;
 namespace rf = core3d::retained_feature;
 namespace cr = core3d::composite_recipe;
 using OpeningContext = core3d::native_opening::Context;
@@ -82,6 +84,11 @@ NSData *VRData(const void *bytes, std::size_t count) {
 }
 NSData *VRData(const std::vector<std::uint8_t>& bytes) {
     return VRData(bytes.data(), bytes.size());
+}
+std::vector<std::uint8_t> VRBytes(NSData *data) {
+    if (![data isKindOfClass:NSData.class] || data.length == 0) return {};
+    const auto *first = static_cast<const std::uint8_t *>(data.bytes);
+    return {first, first + data.length};
 }
 template <std::size_t N>
 NSData *VRData(const std::array<std::uint8_t, N>& bytes) {
@@ -247,6 +254,26 @@ IssuedAnchor IssueAnchor(const TopoDS_Shape& shape, const std::string& entity,
         issued.code = Core3DVariableFilletErrorUnavailable;
         return issued;
     }
+}
+
+bool RestoreRetainedAnchor(const vro::Capture& capture,
+                           const std::string& entity,
+                           IssuedAnchor& issued) noexcept {
+    issued = {};
+    try {
+        vrf::Definition linear;
+        vrf::MultiStationDefinition stations;
+        if (vrf::Decode(capture.lawBytes, linear) && linear.edges.size() == 1)
+            issued.anchor = linear.edges.front();
+        else if (vrf::Decode(capture.lawBytes, stations)
+                 && stations.edges.size() == 1)
+            issued.anchor = stations.edges.front();
+        else return false;
+        issued.entity = entity;
+        issued.topologyIndex = capture.topologyIndex;
+        issued.sourceBytes = capture.baseBytes;
+        return !issued.sourceBytes.empty();
+    } catch (...) { issued = {}; return false; }
 }
 
 // ----- Independent section observation of the emitted detached candidate ---
@@ -546,6 +573,8 @@ struct OpeningBuild final {
 @property(nonatomic, copy, readwrite) NSString *contextIdentifier;
 @property(nonatomic, assign, readwrite) double metersPerUnit;
 @property(nonatomic, assign, readwrite) NSInteger historyDepth;
+@property(nonatomic, assign, readwrite) NSInteger dependentReplayCount;
+@property(nonatomic, assign, readwrite) NSInteger measuredHistoryDelta;
 @end
 
 @implementation Core3DVariableFilletOpening {
@@ -553,8 +582,11 @@ struct OpeningBuild final {
     Handle(OcctDocument) _document;
     std::shared_ptr<OpeningContext> _context;
     IssuedAnchor _issued;
+    vro::Capture _retained;
+    std::shared_ptr<vro::Prepared> _prepared;
     std::shared_ptr<std::atomic_bool> _cancelled;
     std::uint32_t _viewportWidth, _viewportHeight;
+    std::uint32_t _selectionTopologyIndex;
 #if DEBUG
     std::shared_ptr<std::atomic_int> _debugCancelAfterBuild;
 #endif
@@ -629,7 +661,22 @@ struct OpeningBuild final {
                                         @"selected native source has no shape");
             return nil;
         }
-        IssuedAnchor issued = IssueAnchor(shape, entity, element.topologyIndex);
+        vro::Capture retained;
+        if (!document->CaptureVariableRadiusFilletOwner(label, retained)) {
+            if (error) *error = VRError(Core3DVariableFilletErrorUnavailable,
+                                        @"retained owner capture failed");
+            return nil;
+        }
+        IssuedAnchor issued;
+        if (retained.present) {
+            if (!RestoreRetainedAnchor(retained, entity, issued)) {
+                if (error) *error = VRError(Core3DVariableFilletErrorUnavailable,
+                                            @"retained owner law is invalid");
+                return nil;
+            }
+        } else {
+            issued = IssueAnchor(shape, entity, element.topologyIndex);
+        }
         if (!issued.refusal.empty()) {
             if (error) {
                 *error = [NSError errorWithDomain:Core3DVariableFilletErrorDomain
@@ -641,8 +688,9 @@ struct OpeningBuild final {
             }
             return nil;
         }
-        issued.anchor.selectorProof = SelectorProof(document->DocumentIdentifier(), entity,
-                                                    element.topologyIndex, issued.anchor);
+        if (!retained.present)
+            issued.anchor.selectorProof = SelectorProof(document->DocumentIdentifier(), entity,
+                                                        element.topologyIndex, issued.anchor);
         Core3DVariableFilletIssuedEdge *edge = [[Core3DVariableFilletIssuedEdge alloc] initPrivate];
         edge.identifier = VRData(issued.anchor.identifier);
         edge.entityIdentifier = element.entityIdentifier;
@@ -658,9 +706,11 @@ struct OpeningBuild final {
         opening->_document = document;
         opening->_context = std::move(context);
         opening->_issued = std::move(issued);
+        opening->_retained = std::move(retained);
         opening->_cancelled = std::make_shared<std::atomic_bool>(false);
         opening->_viewportWidth = width;
         opening->_viewportHeight = height;
+        opening->_selectionTopologyIndex = element.topologyIndex;
 #if DEBUG
         opening->_debugCancelAfterBuild = std::make_shared<std::atomic_int>(0);
 #endif
@@ -669,6 +719,8 @@ struct OpeningBuild final {
         opening.contextIdentifier = NSUUID.UUID.UUIDString;
         opening.metersPerUnit = metersPerUnit;
         opening.historyDepth = controller.documentUndoCount;
+        opening.dependentReplayCount = 0;
+        opening.measuredHistoryDelta = 0;
         return opening;
     } @catch (__unused NSException *exception) {
         if (error) *error = VRError(Core3DVariableFilletErrorUnavailable,
@@ -702,7 +754,7 @@ struct OpeningBuild final {
     }
     Core3DSceneElementIdentifier *element = scene.selection.selectedElements.firstObject;
     if (element.kind != Core3DSceneElementKindEdge
-        || element.topologyIndex != _issued.topologyIndex
+        || element.topologyIndex != _selectionTopologyIndex
         || _issued.entity != (element.entityIdentifier.UTF8String ?: "")
         || _controller.documentUndoCount != self.historyDepth) {
         if (error) *error = VRError(Core3DVariableFilletErrorStale,
@@ -1065,23 +1117,175 @@ struct OpeningBuild final {
 }
 
 - (Core3DVariableFilletLawObservation *)readRetainedLawWithError:(NSError **)error {
-    if (error) *error = VRError(Core3DVariableFilletErrorApplyUnavailable,
-                                @"retained law readback is unavailable in S1");
-    return nil;
+    if (error) *error = nil;
+    if (![self isCurrent:error]) return nil;
+    try {
+        TDF_Label label;
+        if (!RootForEntity(_document, self.issuedEdge.entityIdentifier, label)) {
+            if (error) *error = VRError(Core3DVariableFilletErrorStale,
+                                        @"retained owner entity is unavailable");
+            return nil;
+        }
+        vro::Capture capture;
+        if (!_document->CaptureVariableRadiusFilletOwner(label, capture)
+            || !capture.present) {
+            if (error) *error = VRError(Core3DVariableFilletErrorApplyUnavailable,
+                                        @"retained variable fillet owner is absent");
+            return nil;
+        }
+        Core3DVariableFilletLawObservation *observation =
+            [[Core3DVariableFilletLawObservation alloc] initPrivate];
+        NSMutableArray<NSNumber *> *parameters = [NSMutableArray array];
+        NSMutableArray<NSNumber *> *radii = [NSMutableArray array];
+        const double mmPerLocal = capture.present ? 1000.0 * self.metersPerUnit : 0;
+        vrf::Definition linear;
+        vrf::MultiStationDefinition stations;
+        if (vrf::Decode(capture.lawBytes, linear)) {
+            for (const auto& station : linear.stations) {
+                [parameters addObject:@(station.parameter)];
+                [radii addObject:@(station.radiusLocal * mmPerLocal)];
+            }
+        } else if (vrf::Decode(capture.lawBytes, stations)) {
+            for (const auto& station : stations.stations) {
+                [parameters addObject:@(station.parameter)];
+                [radii addObject:@(station.radiusLocal * mmPerLocal)];
+            }
+        } else {
+            if (error) *error = VRError(Core3DVariableFilletErrorUnavailable,
+                                        @"retained variable fillet law is malformed");
+            return nil;
+        }
+        observation.attempted = YES;
+        observation.supported = YES;
+        observation.c1OnPhysicalInterval = YES;
+        observation.nonnegativeDerivative = YES;
+        observation.stationParameters = parameters;
+        observation.stationRadiiMM = radii;
+        observation.pins = @[];
+        return observation;
+    } catch (...) {
+        if (error) *error = VRError(Core3DVariableFilletErrorUnavailable,
+                                    @"retained law readback exception");
+        return nil;
+    }
+}
+
+- (Core3DVariableFilletOpening *)prepareCandidate:(Core3DVariableFilletCandidate *)candidate
+                                             fault:(vro::FaultPoint)fault
+                                             error:(NSError **)error {
+    if (error) *error = nil;
+    if (![candidate isKindOfClass:Core3DVariableFilletCandidate.class]
+        || candidate.candidateBRepBytes.length == 0
+        || candidate.canonicalDefinitionBytes.length == 0
+        || candidate.consumedEdgeIdentifiers.count != 1
+        || ![candidate.consumedEdgeIdentifiers.firstObject isEqual:self.issuedEdge.identifier]
+        || candidate.metersPerUnit != self.metersPerUnit) {
+        if (error) *error = VRError(Core3DVariableFilletErrorInvalidArgument,
+                                    @"candidate does not belong to this issued edge");
+        return nil;
+    }
+    if (![self isCurrent:error]) return nil;
+    try {
+        TDF_Label label;
+        if (!RootForEntity(_document, self.issuedEdge.entityIdentifier, label)) {
+            if (error) *error = VRError(Core3DVariableFilletErrorStale,
+                                        @"candidate source entity is unavailable");
+            return nil;
+        }
+        auto prepared = std::make_shared<vro::Prepared>();
+        if (!vro::Prepare(*_document, label, _context,
+                _viewportWidth, _viewportHeight, _issued.topologyIndex,
+                VRBytes(candidate.candidateBRepBytes),
+                VRBytes(candidate.canonicalDefinitionBytes), *prepared, fault)) {
+            if (error) *error = VRError(Core3DVariableFilletErrorBuildRefused,
+                                        @"dependent replay preparation refused");
+            return nil;
+        }
+        Core3DVariableFilletOpening *opening = [[Core3DVariableFilletOpening alloc] initPrivate];
+        opening->_controller = _controller;
+        opening->_document = _document;
+        opening->_context = _context;
+        opening->_issued = _issued;
+        opening->_retained = prepared->before;
+        opening->_prepared = std::move(prepared);
+        opening->_cancelled = std::make_shared<std::atomic_bool>(false);
+        opening->_viewportWidth = _viewportWidth;
+        opening->_viewportHeight = _viewportHeight;
+        opening->_selectionTopologyIndex = _selectionTopologyIndex;
+#if DEBUG
+        opening->_debugCancelAfterBuild = std::make_shared<std::atomic_int>(0);
+#endif
+        opening.issuedEdge = self.issuedEdge;
+        opening.documentIdentifier = self.documentIdentifier;
+        opening.contextIdentifier = self.contextIdentifier;
+        opening.metersPerUnit = self.metersPerUnit;
+        opening.historyDepth = self.historyDepth;
+        opening.dependentReplayCount = NSInteger(opening->_prepared->replay->dependencies().size());
+        opening.measuredHistoryDelta = 0;
+        return opening;
+    } catch (...) {
+        if (error) *error = VRError(Core3DVariableFilletErrorUnavailable,
+                                    @"candidate preparation exception");
+        return nil;
+    }
 }
 
 - (Core3DVariableFilletOpening *)openingByPreparingCandidate:(Core3DVariableFilletCandidate *)candidate
                                                        error:(NSError **)error {
-    if (error) *error = VRError(Core3DVariableFilletErrorApplyUnavailable,
-                                @"candidate prepare is unavailable in S1");
-    return nil;
+    return [self prepareCandidate:candidate fault:vro::FaultPoint::None error:error];
 }
 
-- (Core3DVariableFilletApplyResult)apply { return Core3DVariableFilletApplyResultUnavailable; }
+- (Core3DVariableFilletApplyResult)apply {
+    if (!_prepared || _cancelled == nullptr)
+        return Core3DVariableFilletApplyResultUnavailable;
+    const vro::Result result = vro::Apply(*_document, *_prepared, *_cancelled);
+    self.measuredHistoryDelta = result.measuredHistoryDelta;
+    switch (result.outcome) {
+        case vro::Outcome::Refused: return Core3DVariableFilletApplyResultRefused;
+        case vro::Outcome::Cancelled: return Core3DVariableFilletApplyResultCancelled;
+        case vro::Outcome::Committed:
+            _retained = _prepared->expected;
+            return Core3DVariableFilletApplyResultCommitted;
+        case vro::Outcome::OutcomeUnknown:
+            return Core3DVariableFilletApplyResultOutcomeUnknown;
+        case vro::Outcome::RecoveryRequired:
+            return Core3DVariableFilletApplyResultRecoveryRequired;
+    }
+    return Core3DVariableFilletApplyResultRecoveryRequired;
+}
+
+- (Core3DVariableFilletApplyResult)reconcile {
+    if (!_prepared) return Core3DVariableFilletApplyResultUnavailable;
+    switch (vro::Reconcile(*_document, *_prepared)) {
+        case vro::Outcome::Refused: return Core3DVariableFilletApplyResultRefused;
+        case vro::Outcome::Cancelled: return Core3DVariableFilletApplyResultCancelled;
+        case vro::Outcome::Committed: return Core3DVariableFilletApplyResultCommitted;
+        case vro::Outcome::OutcomeUnknown: return Core3DVariableFilletApplyResultOutcomeUnknown;
+        case vro::Outcome::RecoveryRequired:
+            return Core3DVariableFilletApplyResultRecoveryRequired;
+    }
+    return Core3DVariableFilletApplyResultRecoveryRequired;
+}
 
 #if DEBUG
 - (void)b3DebugArmCancelAfterBuild {
     if (_debugCancelAfterBuild) _debugCancelAfterBuild->store(1);
+}
+- (NSDictionary *)b3DebugOwnerEvidence {
+    if (!_prepared) return @{};
+    vro::UUID feature{};
+    std::uint32_t topology = 0;
+    std::vector<std::uint8_t> law, base;
+    if (!vro::DecodeOwner(_prepared->ownerBytes, feature, topology, law, base))
+        return @{};
+    return @{
+        @"dependentCount": @(self.dependentReplayCount),
+        @"priorOwner": VRData(_prepared->before.ownerBytes),
+        @"expectedOwner": VRData(_prepared->ownerBytes),
+        @"law": VRData(_prepared->lawBytes),
+        @"base": VRData(base),
+        @"feature": VRData(feature),
+    };
 }
 #endif
 
@@ -1092,6 +1296,37 @@ struct OpeningBuild final {
 // exercise the same detached build path with explicit shared-budget limits
 // and an armed post-build Stop checkpoint. It mutates nothing and mints no
 // authority; production decisions never read it.
+extern "C" void *Core3DDebugB3VariableFilletOwnerProbe(
+    void *openingRaw, void *candidateRaw, int32_t faultRaw,
+    int32_t cancelBeforeApply) {
+    @autoreleasepool {
+        Core3DVariableFilletOpening *opening =
+            (__bridge Core3DVariableFilletOpening *)openingRaw;
+        Core3DVariableFilletCandidate *candidate =
+            (__bridge Core3DVariableFilletCandidate *)candidateRaw;
+        NSMutableDictionary *result = [NSMutableDictionary dictionary];
+        result[@"prepared"] = @NO;
+        if (!opening || !candidate || ![NSThread isMainThread]
+            || faultRaw < 0 || faultRaw > int32_t(vro::FaultPoint::Publication))
+            return (__bridge_retained void *)result;
+        NSError *error = nil;
+        Core3DVariableFilletOpening *prepared =
+            [opening prepareCandidate:candidate
+                                fault:vro::FaultPoint(faultRaw)
+                                error:&error];
+        result[@"error"] = error.localizedDescription ?: @"";
+        if (!prepared) return (__bridge_retained void *)result;
+        result[@"prepared"] = @YES;
+        [result addEntriesFromDictionary:[prepared b3DebugOwnerEvidence]];
+        result[@"opening"] = prepared;
+        if (cancelBeforeApply == 1) [prepared cancel];
+        const Core3DVariableFilletApplyResult applied = [prepared apply];
+        result[@"applyRaw"] = @(applied);
+        result[@"historyDelta"] = @(prepared.measuredHistoryDelta);
+        return (__bridge_retained void *)result;
+    }
+}
+
 extern "C" void *Core3DDebugB3VariableFilletOpeningProbe(
     void *openingRaw, int32_t scenario, double workRemaining,
     double identitiesRemaining, double topologyRemaining,

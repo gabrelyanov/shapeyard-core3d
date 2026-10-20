@@ -46,6 +46,9 @@
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
 #include <AIS_DisplayMode.hxx>
+#include <SelectMgr_Selection.hxx>
+#include <SelectMgr_SensitiveEntity.hxx>
+#include <Select3D_SensitiveEntity.hxx>
 #include <StdSelect_BRepOwner.hxx>
 #include <Aspect_DisplayConnection.hxx>
 #include <Aspect_NeutralWindow.hxx>
@@ -2833,8 +2836,18 @@ void Context::retainUnprovenEdit(
         const auto state = state_.lock();
         if (!state || state->contexts.count(identifier_) != 1
             || state->activeContext != identifier_
-            || state->recoveryMarker == 0 || state->recoveryContext != identifier_
-            || state->pendingPublication) return;
+            || state->activeMarker != 0 || state->pendingPublication) return;
+        if (state->recoveryMarker == 0) {
+            // A real close may be proven while its publication remains
+            // unproven. Arm this exact issuer at the closed lease marker;
+            // close-unknown paths arrive with the same recovery slot already
+            // armed and take the branch below unchanged.
+            if (state->recoveryContext != 0 || state->nextMarker == 0) return;
+            state->recoveryMarker = state->nextMarker;
+            state->recoveryContext = identifier_;
+        } else if (state->recoveryContext != identifier_) {
+            return;
+        }
         state->pendingPublication =
             std::make_shared<const CommittedEditPublication>(publication);
         state->publicationContext = identifier_;
@@ -2863,8 +2876,9 @@ bool Context::armRecoveryAfterAbortedClose() noexcept {
 void Context::debugReportNextCloseUnproven() noexcept {
     const auto state = state_.lock();
     if (!state || state->contexts.count(identifier_) != 1
-        || state->activeContext != 0
-        || state->activeMarker != 0 || state->recoveryMarker != 0) return;
+        || state->activeContext != identifier_
+        || state->activeMarker == 0 || state->recoveryMarker != 0
+        || state->debugUnprovenCloseResults == UINT32_MAX) return;
     ++state->debugUnprovenCloseResults;
 }
 #endif
@@ -3018,6 +3032,65 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
                 (void)traceRefusal("displayed-identity", true); return false;
             }
         }
+        // Reconcile one newly created committed presentation to the selection
+        // authority the ShapeInteractor retains. Display(presentation,
+        // AIS_Shaded, 0, ...) activates only the shape mode, which is exact
+        // solely for a retained WholeShape mode; a retained subshape mode
+        // needs the same per-presentation transition the mode owner performs
+        // for every other displayed presentation. This never forces Shape
+        // mode and never clears, fabricates, or rewrites selection; the
+        // unchanged exact authority check inside captureSceneSnapshot remains
+        // the only proof gate below.
+        const auto reconcileCreatedSelectionAuthority =
+            [&](const Handle(AIS_Shape)& presentation,
+                const TDF_Label& label) {
+            if (_shapeInteractor == nullptr) return false;
+            const ShapeSelectionMode retainedMode =
+                _shapeInteractor->getSelectionMode();
+            TopAbs_ShapeEnum retainedTopology = TopAbs_SHAPE;
+            switch (retainedMode) {
+                case ShapeSelectionMode::WholeShape:
+                    retainedTopology = TopAbs_SHAPE; break;
+                case ShapeSelectionMode::Face:
+                    retainedTopology = TopAbs_FACE; break;
+                case ShapeSelectionMode::Edge:
+                    retainedTopology = TopAbs_EDGE; break;
+                case ShapeSelectionMode::Vertex:
+                    retainedTopology = TopAbs_VERTEX; break;
+                case ShapeSelectionMode::Wire:
+                    retainedTopology = TopAbs_WIRE; break;
+            }
+            if (!myDoc->IsPresentationEditable(presentation)) {
+                myContext->Deactivate(presentation);
+                return true;
+            }
+            const OcctGeometryRepresentation representation =
+                myDoc->GeometryRepresentationForLabel(label);
+            if (representation == OcctGeometryRepresentation::Invalid) {
+                myContext->Deactivate(presentation);
+                return true;
+            }
+            myContext->Deactivate(presentation);
+            if (representation == OcctGeometryRepresentation::TriangleMesh) {
+                // Mesh imports expose no editable BRep subshape topology.
+                if (retainedMode == ShapeSelectionMode::WholeShape) {
+                    myContext->SetSelectionModeActive(
+                        presentation,
+                        AIS_Shape::SelectionMode(TopAbs_SHAPE),
+                        Standard_True,
+                        AIS_SelectionModesConcurrency_Single,
+                        Standard_True);
+                }
+                return true;
+            }
+            myContext->SetSelectionModeActive(
+                presentation,
+                AIS_Shape::SelectionMode(retainedTopology),
+                Standard_True,
+                AIS_SelectionModesConcurrency_Single,
+                Standard_True);
+            return true;
+        };
         const auto reconcileItem = [&](
                 const native_opening::CommittedEditItem& item) {
             const auto liveLabel = live.find(item.entityIdentifier);
@@ -3035,15 +3108,17 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
                 Handle(AIS_Shape) presentation;
                 if (!created) {
                     presentation = current->second;
-                    const bool wasSelected = myContext->IsSelected(presentation);
+                    const bool wasGloballySelected =
+                        myContext->IsSelected(presentation);
                     // Redisplay/RecomputeSelectionOnly rebuild the selection
                     // primitives, so an owner selected now is stale afterwards
                     // but remains held by the context selection. Remove this
                     // presentation's selected owner(s) while they are still
-                    // valid, recompute, then select the new global owner
-                    // exactly once iff the presentation was selected.
+                    // valid, recompute, then bind the exact replacement owner
+                    // in the ShapeInteractor-retained selection mode.
                     std::size_t selectedBefore = 0;
                     std::vector<Handle(SelectMgr_EntityOwner)> staleOwners;
+                    std::vector<Handle(SelectMgr_EntityOwner)> retainedOwners;
                     for (myContext->InitSelected(); myContext->MoreSelected();
                          myContext->NextSelected()) {
                         if (selectedBefore >= 50000) {
@@ -3055,6 +3130,58 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
                         if (!selectedOwner.IsNull()
                             && selectedOwner->Selectable() == presentation) {
                             staleOwners.push_back(selectedOwner);
+                        } else {
+                            retainedOwners.push_back(selectedOwner);
+                        }
+                    }
+                    std::vector<Standard_Integer> retainedTopologyIndices;
+                    TopAbs_ShapeEnum retainedTopology = TopAbs_SHAPE;
+                    if (!staleOwners.empty() && !wasGloballySelected) {
+                        if (_shapeInteractor == nullptr) {
+                            (void)traceRefusal("selection-owner", true);
+                            return false;
+                        }
+                        switch (_shapeInteractor->getSelectionMode()) {
+                            case ShapeSelectionMode::WholeShape:
+                                retainedTopology = TopAbs_SHAPE; break;
+                            case ShapeSelectionMode::Face:
+                                retainedTopology = TopAbs_FACE; break;
+                            case ShapeSelectionMode::Edge:
+                                retainedTopology = TopAbs_EDGE; break;
+                            case ShapeSelectionMode::Vertex:
+                                retainedTopology = TopAbs_VERTEX; break;
+                            case ShapeSelectionMode::Wire:
+                                retainedTopology = TopAbs_WIRE; break;
+                        }
+                        if (retainedTopology == TopAbs_SHAPE) {
+                            (void)traceRefusal("selection-owner", true);
+                            return false;
+                        }
+                        TopTools_IndexedMapOfShape previousTopology;
+                        TopExp::MapShapes(
+                            presentation->Shape(), retainedTopology,
+                            previousTopology);
+                        std::set<Standard_Integer> uniqueIndices;
+                        for (const auto& staleOwner : staleOwners) {
+                            const auto brepOwner =
+                                Handle(StdSelect_BRepOwner)::DownCast(
+                                    staleOwner);
+                            const Standard_Integer topologyIndex =
+                                brepOwner.IsNull() || !brepOwner->HasShape()
+                                || brepOwner->Shape().ShapeType()
+                                    != retainedTopology
+                                    ? 0
+                                    : previousTopology.FindIndex(
+                                        brepOwner->Shape());
+                            if (topologyIndex <= 0
+                                || !previousTopology.FindKey(topologyIndex)
+                                    .IsEqual(brepOwner->Shape())
+                                || !uniqueIndices.insert(
+                                    topologyIndex).second) {
+                                (void)traceRefusal("selection-owner", true);
+                                return false;
+                            }
+                            retainedTopologyIndices.push_back(topologyIndex);
                         }
                     }
                     for (const auto& staleOwner : staleOwners) {
@@ -3064,7 +3191,8 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
                     presentation->SetLocalTransformation(state.transform);
                     myContext->Redisplay(presentation, Standard_False);
                     myContext->RecomputeSelectionOnly(presentation);
-                    if (wasSelected) {
+                    std::vector<Handle(SelectMgr_EntityOwner)> replacementOwners;
+                    if (wasGloballySelected) {
                         const auto owner = presentation->GlobalSelOwner();
                         if (owner.IsNull() || owner->Selectable() != presentation) {
                             (void)traceRefusal("selection-owner", true);
@@ -3073,12 +3201,78 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
                         if (!myContext->IsSelected(owner)) {
                             myContext->AddOrRemoveSelected(owner, Standard_False);
                         }
+                        replacementOwners.push_back(owner);
+                    } else if (!retainedTopologyIndices.empty()) {
+                        TopTools_IndexedMapOfShape currentTopology;
+                        TopExp::MapShapes(shape, retainedTopology,
+                            currentTopology);
+                        const Handle(SelectMgr_Selection)& selection =
+                            presentation->Selection(
+                                AIS_Shape::SelectionMode(retainedTopology));
+                        if (selection.IsNull()) {
+                            (void)traceRefusal("selection-owner", true);
+                            return false;
+                        }
+                        std::set<const SelectMgr_EntityOwner*> uniqueOwners;
+                        for (const Standard_Integer topologyIndex :
+                             retainedTopologyIndices) {
+                            if (topologyIndex > currentTopology.Extent()) {
+                                (void)traceRefusal("selection-owner", true);
+                                return false;
+                            }
+                            Handle(SelectMgr_EntityOwner) replacementOwner;
+                            for (const auto& sensitive :
+                                 selection->Entities()) {
+                                if (sensitive.IsNull()
+                                    || sensitive->BaseSensitive().IsNull()) {
+                                    continue;
+                                }
+                                const auto owner =
+                                    sensitive->BaseSensitive()->OwnerId();
+                                const auto brepOwner =
+                                    Handle(StdSelect_BRepOwner)::DownCast(
+                                        owner);
+                                if (owner.IsNull()
+                                    || owner->Selectable() != presentation
+                                    || brepOwner.IsNull()
+                                    || !brepOwner->HasShape()
+                                    || !brepOwner->Shape().IsEqual(
+                                        currentTopology.FindKey(
+                                            topologyIndex))) {
+                                    continue;
+                                }
+                                if (replacementOwner.IsNull()) {
+                                    replacementOwner = owner;
+                                } else if (replacementOwner != owner) {
+                                    (void)traceRefusal(
+                                        "selection-owner", true);
+                                    return false;
+                                }
+                            }
+                            if (replacementOwner.IsNull()
+                                || !uniqueOwners.insert(
+                                    replacementOwner.get()).second) {
+                                (void)traceRefusal("selection-owner", true);
+                                return false;
+                            }
+                            if (!myContext->IsSelected(replacementOwner)) {
+                                myContext->AddOrRemoveSelected(
+                                    replacementOwner, Standard_False);
+                            }
+                            replacementOwners.push_back(replacementOwner);
+                        }
                     }
-                    // Postcondition: the same number of selected owners as
-                    // before, exactly one of them for this presentation iff it
-                    // was selected, and IsSelected agreeing with wasSelected.
+                    // Postcondition: every unaffected owner remains selected,
+                    // every stale owner has exactly one replacement for this
+                    // presentation, and the total selected count is unchanged.
                     std::size_t selectedAfter = 0;
                     std::size_t ownersForPresentation = 0;
+                    std::set<const SelectMgr_EntityOwner*> unmatchedRetained;
+                    std::set<const SelectMgr_EntityOwner*> unmatchedReplacement;
+                    for (const auto& retainedOwner : retainedOwners)
+                        unmatchedRetained.insert(retainedOwner.get());
+                    for (const auto& replacementOwner : replacementOwners)
+                        unmatchedReplacement.insert(replacementOwner.get());
                     for (myContext->InitSelected(); myContext->MoreSelected();
                          myContext->NextSelected()) {
                         if (selectedAfter >= 50000) {
@@ -3091,12 +3285,26 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
                                 && selectedOwner->Selectable() == presentation)
                             || myContext->SelectedInteractive() == presentation) {
                             ++ownersForPresentation;
+                            if (selectedOwner.IsNull()
+                                || unmatchedReplacement.erase(
+                                    selectedOwner.get()) != 1) {
+                                (void)traceRefusal("selection-owner", true);
+                                return false;
+                            }
+                        } else if (selectedOwner.IsNull()
+                            || unmatchedRetained.erase(
+                                selectedOwner.get()) != 1) {
+                            (void)traceRefusal("selection-owner", true);
+                            return false;
                         }
                     }
                     if (selectedAfter != selectedBefore
                         || ownersForPresentation
-                            != (wasSelected ? std::size_t(1) : std::size_t(0))
-                        || myContext->IsSelected(presentation) != wasSelected) {
+                            != replacementOwners.size()
+                        || !unmatchedRetained.empty()
+                        || !unmatchedReplacement.empty()
+                        || myContext->IsSelected(presentation)
+                            != wasGloballySelected) {
                         (void)traceRefusal("selection-owner", true);
                         return false;
                     }
@@ -3157,6 +3365,11 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
                             (void)traceRefusal("select-replacement", true);
                             return false;
                         }
+                    }
+                    if (!reconcileCreatedSelectionAuthority(
+                            presentation, label)) {
+                        (void)traceRefusal("selection-authority", true);
+                        return false;
                     }
                     displayed.emplace(item.entityIdentifier, presentation);
                 }

@@ -96,6 +96,7 @@ struct Limits;
 enum class Mutation : std::uint8_t;
 enum class Refusal : std::uint8_t;
 }
+namespace core3d::variable_radius_fillet::owner { struct Capture; }
 namespace core3d::part_boolean::owner { class PartBooleanOwner; }
 namespace core3d::retained_feature { class OcafOwnerService; }
 namespace core3d::composite_recipe { struct Payload; }
@@ -158,6 +159,10 @@ struct Companion {
     std::vector<FlagState> flagsBefore;
     Standard_Integer undoDepthBefore = -1;
     bool afterCaptured = false;
+    //! B3-S2 persisted-owner companion: the owner label carries no B1/R2
+    //! recipe records, so the measured side state is the subtree naming plus
+    //! the exact named-owner bytes instead of the treatment carriers.
+    bool namedOwnerCarrier = false;
     Handle(TDF_Delta) delta;
 };
 } // namespace core3d::treatment_history
@@ -1351,6 +1356,26 @@ public:
     //! must reread its record, recipe, labels, and stable child/member IDs.
     Standard_EXPORT core3d::dependent_replay::Refusal ReadDependentReplayPlan(
         const core3d::dependent_replay::Plan& plan) const noexcept;
+    //! B3-S2's narrow persisted-owner port. The carrier is the standard XCAF
+    //! named-properties attribute on the existing free source label; no new
+    //! TDF GUID or child tag is introduced. Source geometry, exact SYVF law
+    //! bytes and identity are staged only through the caller's one lease.
+    Standard_EXPORT Standard_Boolean CaptureVariableRadiusFilletOwner(
+        const TDF_Label& label,
+        core3d::variable_radius_fillet::owner::Capture& capture) const noexcept;
+    Standard_EXPORT Standard_Boolean StageVariableRadiusFilletOwner(
+        core3d::native_opening::CommandLease& lease,
+        const core3d::variable_radius_fillet::owner::Capture& before,
+        const TopoDS_Shape& candidate,
+        const std::vector<std::uint8_t>& ownerBytes,
+        core3d::variable_radius_fillet::owner::Capture& capture) noexcept;
+    Standard_EXPORT Standard_Boolean ReadVariableRadiusFilletOwner(
+        const core3d::variable_radius_fillet::owner::Capture& expected,
+        core3d::variable_radius_fillet::owner::Capture& capture) const noexcept;
+    //! Narrow B3-S2 settlement ports. They add no companion and only delegate
+    //! to the existing document-owned treatment-history settlement paths.
+    Standard_EXPORT Standard_Boolean FinalizeVariableRadiusFilletHistory() noexcept;
+    Standard_EXPORT Standard_Boolean SettleVariableRadiusFilletHistoryOnPrior() noexcept;
     //! Capture requires a viewer-issued context for this exact document. The
     //! reader below intentionally remains usable inside an owned command.
     Standard_EXPORT Standard_Boolean CaptureBoundedCurveExact(

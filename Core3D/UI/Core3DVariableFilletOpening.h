@@ -41,9 +41,16 @@ typedef NS_ENUM(NSInteger, Core3DVariableFilletEdgeOrientation) {
     Core3DVariableFilletEdgeOrientationReversed = 2,
 };
 
-//! Reserved S2/S3 apply outcome. S1 always reports Unavailable.
+//! Retained-owner apply outcome. OutcomeUnknown/RecoveryRequired retain the
+//! native authority and candidate evidence; callers must reconcile and must
+//! never retry the edit as a fresh command.
 typedef NS_ENUM(NSInteger, Core3DVariableFilletApplyResult) {
     Core3DVariableFilletApplyResultUnavailable = 0,
+    Core3DVariableFilletApplyResultRefused,
+    Core3DVariableFilletApplyResultCancelled,
+    Core3DVariableFilletApplyResultCommitted,
+    Core3DVariableFilletApplyResultOutcomeUnknown,
+    Core3DVariableFilletApplyResultRecoveryRequired,
 };
 
 //! One caller-authored interior-or-endpoint law station. The identifier is
@@ -165,6 +172,10 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic, copy, readonly) NSString *contextIdentifier;
 @property(nonatomic, assign, readonly) double metersPerUnit;
 @property(nonatomic, assign, readonly) NSInteger historyDepth;
+//! Number of real D2/D3/D4 descendants in the prepared document-owned plan.
+@property(nonatomic, assign, readonly) NSInteger dependentReplayCount;
+//! Measured native history delta of the last apply (one only on commit).
+@property(nonatomic, assign, readonly) NSInteger measuredHistoryDelta;
 
 //! Captures an opening from the controller's current single-edge selection.
 //! The selected edge must be a real open straight native edge with exactly
@@ -197,17 +208,20 @@ __attribute__((objc_subclassing_restricted))
 //! issues no candidate and never mutates its source.
 - (void)cancel;
 
-//! Reserved S2 readback entrance. S1 always fails with
-//! Core3DVariableFilletErrorApplyUnavailable and changes no state.
+//! Reads the canonical retained law from the native owner. The station arrays
+//! include every endpoint/interior parameter and physical-mm radius.
 - (nullable Core3DVariableFilletLawObservation *)readRetainedLawWithError:(NSError * _Nullable * _Nullable)error;
-//! Reserved S2 prepare entrance: binds a detached candidate to a future
-//! document transaction. S1 always fails with
-//! Core3DVariableFilletErrorApplyUnavailable and changes no state.
+//! Binds a detached candidate to the exact source and prepares the complete
+//! dependent closure before any document command exists.
 - (nullable Core3DVariableFilletOpening *)openingByPreparingCandidate:(Core3DVariableFilletCandidate *)candidate
                                                                 error:(NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(preparing(candidate:));
-//! Reserved S2/S3 commit entrance. S1 always returns Unavailable.
+//! Stages source, law and prepared descendants under one native lease, reads
+//! the whole candidate, closes once and publishes through the same context.
 - (Core3DVariableFilletApplyResult)apply;
+//! Explicit recovery for an uncertain close/publication. This observes the
+//! actual native state as exact prior or exact candidate; it never retries.
+- (Core3DVariableFilletApplyResult)reconcile;
 
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;

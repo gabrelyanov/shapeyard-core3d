@@ -4,6 +4,7 @@
 #include "ExportMeshDecimationDefinition.hxx"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <set>
 #include <string>
@@ -72,7 +73,27 @@ struct Manifest {
     std::vector<ArtifactMember> levels;
 };
 
-inline bool IsSHA256(const std::string& value) noexcept { return value.size() == 64; }
+inline bool IsSHA256(const std::string& value) noexcept {
+    if (value.size() != 64) return false;
+    return std::all_of(value.begin(), value.end(), [](unsigned char byte) {
+        return (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f');
+    });
+}
+
+inline bool HasValidQuality(const export_decimation::QualitySettings& value) noexcept {
+    return std::isfinite(value.maximumSymmetricSurfaceDistanceMM)
+        && value.maximumSymmetricSurfaceDistanceMM > 0
+        && std::isfinite(value.maximumSilhouettePixelDeviation)
+        && value.maximumSilhouettePixelDeviation >= 0
+        && std::isfinite(value.hardEdgeAngleDegrees)
+        && value.hardEdgeAngleDegrees > 0 && value.hardEdgeAngleDegrees < 180
+        && std::isfinite(value.contactClearanceMM) && value.contactClearanceMM >= 0
+        && value.measurementSamplesPerMesh > 0
+        && value.measurementSamplesPerMesh <= export_decimation::kMaximumMeasurementSamples
+        && value.silhouetteResolution > 0
+        && value.silhouetteResolution <= export_decimation::kMaximumSilhouetteResolution
+        && IsSHA256(value.silhouetteCameraSetSHA256);
+}
 
 inline bool HasCanonicalAttachmentParity(const Definition& value, const Level& level) noexcept {
     if (level.attachments.size() != value.expectedAttachmentsInCanonicalOrder.size()) return false;
@@ -82,6 +103,48 @@ inline bool HasCanonicalAttachmentParity(const Definition& value, const Level& l
             || level.attachments[index].canonicalMetreFrameSHA256 != expected.canonicalMetreFrameSHA256
             || !IsSHA256(level.attachments[index].canonicalMetreFrameSHA256)) return false;
     }
+    return true;
+}
+
+//! Strict detached-intent validator. Artifact/currentness fields are purposely
+//! not admitted here: S1 validates a draft but cannot mint an F2 receipt.
+inline bool ValidateDetachedDraft(const Definition& value, Refusal& refusal) noexcept {
+    refusal = Refusal::InvalidDefinition;
+    if (value.schemaVersion != kSchemaVersion || value.lodSetID.empty()
+        || !publish::IsStrictlySortedOwners(value.source)
+        || !IsSHA256(value.boundSourceRevisionSHA256)
+        || value.boundSourceRevisionSHA256 != value.observedSourceRevisionSHA256
+        || !IsSHA256(value.attachmentMetadataSHA256)
+        || value.expectedAttachmentsInCanonicalOrder.size() > attachment_rig::kMaxAttachments
+        || value.levels.size() < 2 || value.levels.size() > kMaximumLevels) {
+        if (value.boundSourceRevisionSHA256 != value.observedSourceRevisionSHA256)
+            refusal = Refusal::StaleSource;
+        return false;
+    }
+    for (std::size_t index = 0; index < value.expectedAttachmentsInCanonicalOrder.size(); ++index) {
+        const AttachmentEvidence& expected = value.expectedAttachmentsInCanonicalOrder[index];
+        if (expected.attachmentID.empty() || !IsSHA256(expected.canonicalMetreFrameSHA256)
+            || (index != 0 && value.expectedAttachmentsInCanonicalOrder[index - 1].attachmentID
+                >= expected.attachmentID)) return false;
+    }
+    std::set<std::string> ids, names;
+    std::uint32_t previousBudget = 0;
+    for (std::size_t index = 0; index < value.levels.size(); ++index) {
+        const Level& level = value.levels[index];
+        if (level.levelID.empty() || !ids.insert(level.levelID).second
+            || level.displayName.empty() || !names.insert(level.displayName).second
+            || level.triangleBudget < export_decimation::kMinimumClosedMeshTriangles
+            || level.triangleBudget > export_decimation::kMaximumTriangleTarget
+            || (index != 0 && level.triangleBudget >= previousBudget)
+            || !IsSHA256(level.settingsSHA256) || !HasValidQuality(level.quality)
+            || !HasCanonicalAttachmentParity(value, level)) {
+            if (!HasCanonicalAttachmentParity(value, level))
+                refusal = Refusal::AttachmentParityFailure;
+            return false;
+        }
+        previousBudget = level.triangleBudget;
+    }
+    refusal = Refusal::None;
     return true;
 }
 
@@ -107,7 +170,6 @@ inline bool ValidateForExport(const Definition& value, Refusal& refusal) noexcep
         || !IsSHA256(value.boundSourceRevisionSHA256)
         || value.boundSourceRevisionSHA256 != value.observedSourceRevisionSHA256
         || !IsSHA256(value.attachmentMetadataSHA256)
-        || value.expectedAttachmentsInCanonicalOrder.empty()
         || value.expectedAttachmentsInCanonicalOrder.size() > attachment_rig::kMaxAttachments
         || value.levels.size() < 2 || value.levels.size() > kMaximumLevels) {
         if (value.boundSourceRevisionSHA256 != value.observedSourceRevisionSHA256) refusal = Refusal::StaleSource;
@@ -126,7 +188,8 @@ inline bool ValidateForExport(const Definition& value, Refusal& refusal) noexcep
         if (level.levelID.empty() || !ids.insert(level.levelID).second || level.displayName.empty()
             || level.triangleBudget < export_decimation::kMinimumClosedMeshTriangles
             || level.triangleBudget > export_decimation::kMaximumTriangleTarget
-            || !IsSHA256(level.settingsSHA256) || !HasSafeGLBName(level.artifactName)
+            || !IsSHA256(level.settingsSHA256) || !HasValidQuality(level.quality)
+            || !HasSafeGLBName(level.artifactName)
             || !names.insert(level.artifactName).second || !IsSHA256(level.artifactSHA256)
             || !hashes.insert(level.artifactSHA256).second) return false;
         if (level.state != LevelState::Current
@@ -183,6 +246,33 @@ inline bool InstallAtomicRebuild(Definition& value, std::vector<Level> candidate
     Definition candidate = value;
     candidate.levels = std::move(candidateLevels);
     if (!ValidateForExport(candidate, refusal)) return false;
+    value = std::move(candidate);
+    return true;
+}
+
+//! S1 detached rebind: build and validate the complete replacement first, then
+//! swap once. A stale/partial/foreign candidate therefore cannot damage the
+//! caller's prior detached value.
+inline bool RebindDetachedDraft(Definition& value,
+                                publish::PublishSourceBinding recapturedSource,
+                                std::string recapturedSourceRevisionSHA256,
+                                std::string recapturedAttachmentMetadataSHA256,
+                                std::vector<Level> candidateLevels,
+                                Refusal& refusal) noexcept {
+    if (candidateLevels.size() != value.levels.size()) {
+        refusal = Refusal::PartialSet; return false;
+    }
+    for (std::size_t index = 0; index < candidateLevels.size(); ++index)
+        if (candidateLevels[index].levelID != value.levels[index].levelID) {
+            refusal = Refusal::InvalidDefinition; return false;
+        }
+    Definition candidate = value;
+    candidate.source = std::move(recapturedSource);
+    candidate.boundSourceRevisionSHA256 = recapturedSourceRevisionSHA256;
+    candidate.observedSourceRevisionSHA256 = recapturedSourceRevisionSHA256;
+    candidate.attachmentMetadataSHA256 = recapturedAttachmentMetadataSHA256;
+    candidate.levels = std::move(candidateLevels);
+    if (!ValidateDetachedDraft(candidate, refusal)) return false;
     value = std::move(candidate);
     return true;
 }

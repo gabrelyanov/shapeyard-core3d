@@ -577,7 +577,17 @@ inline FaceImageReplayStatus CaptureFaceImageAttachment(OcctDocument& owner,
         output.committed = definition;
         output.canonicalBytes = std::move(bytes);
         output.faces.resize(definition.bindings.size());
+        // Correspondence ownership is keyed by the durable saved face, not by
+        // the anonymous binding row: every stored proof must still match
+        // exactly one geometric candidate, distinct saved faces must claim
+        // distinct candidates, and the role rows of one saved face re-claim
+        // that face's single candidate through the same exact proof and the
+        // independent per-row B2 re-proof below. One saved face claiming two
+        // candidates, or two saved faces claiming one, is AmbiguousFaceRemap.
         std::vector<bool> claimed(candidates.size(), false);
+        std::vector<face_image::UUID> claimant(candidates.size());
+        std::vector<face_image::UUID> claimedFaces;
+        std::vector<std::size_t> claimedFaceCandidate;
         for (std::size_t binding = 0; binding < definition.bindings.size(); ++binding) {
             const auto& stored = definition.bindings[binding];
             int matched = -1; unsigned matches = 0;
@@ -589,10 +599,23 @@ inline FaceImageReplayStatus CaptureFaceImageAttachment(OcctDocument& owner,
             }
             if (matches == 0) { output = FaceImageAttachment{}; return FaceImageReplayStatus::StaleFace; }
             if (matches > 1) { output = FaceImageAttachment{}; return FaceImageReplayStatus::AmbiguousFaceRemap; }
-            if (claimed[std::size_t(matched)]) {
+            const std::size_t target = std::size_t(matched);
+            if (claimed[target] && !(claimant[target] == stored.face)) {
                 output = FaceImageAttachment{}; return FaceImageReplayStatus::AmbiguousFaceRemap;
             }
-            claimed[std::size_t(matched)] = true;
+            bool splitFace = false;
+            for (std::size_t prior = 0; prior < claimedFaces.size(); ++prior)
+                if (claimedFaces[prior] == stored.face
+                    && claimedFaceCandidate[prior] != target) splitFace = true;
+            if (splitFace) {
+                output = FaceImageAttachment{}; return FaceImageReplayStatus::AmbiguousFaceRemap;
+            }
+            if (!claimed[target]) {
+                claimed[target] = true;
+                claimant[target] = stored.face;
+                claimedFaces.push_back(stored.face);
+                claimedFaceCandidate.push_back(target);
+            }
             // Re-prove the matched face through the full B2 membership census;
             // the derived receipt and the resolver receipt must agree exactly.
             FaceImageGeometricReceipt resolved; TopoDS_Face resolvedFace;
@@ -675,6 +698,7 @@ public:
             retained_edge_treatment::ReplayBudget budget;
             face_image::Definition refreshed = attachment.committed;
             std::vector<TopoDS_Face> remapped(attachment.committed.bindings.size());
+            std::vector<face_image::Digest> remappedProofs(attachment.committed.bindings.size());
             for (std::size_t binding = 0; binding < attachment.committed.bindings.size(); ++binding) {
                 FaceImageGeometricReceipt resolved;
                 const fs::Refusal refusal = detail::ResolveFaceImageReceipt(prospectiveStage,
@@ -684,16 +708,27 @@ public:
                     status_ = detail::MapFaceImageResolveRefusal(refusal);
                     return status_;
                 }
-                for (std::size_t other = 0; other < binding; ++other)
-                    if (remapped[other].IsSame(remapped[binding])) {
-                        status_ = FaceImageReplayStatus::AmbiguousFaceRemap;
-                        return status_;
-                    }
                 face_image::Digest proof{};
                 if (!FaceImageReceiptProof(resolved, proof)) {
                     status_ = FaceImageReplayStatus::Malformed;
                     return status_;
                 }
+                // The prospective bijection is between distinct durable saved
+                // faces and current candidates: the role rows of one saved
+                // face reattach to that face's single candidate only with an
+                // identical recovered proof; a merged or split saved face is
+                // still AmbiguousFaceRemap.
+                for (std::size_t other = 0; other < binding; ++other) {
+                    const bool sameSavedFace =
+                        refreshed.bindings[other].face == refreshed.bindings[binding].face;
+                    const bool sameTarget = remapped[other].IsSame(remapped[binding]);
+                    if (sameTarget != sameSavedFace
+                        || (sameTarget && !(remappedProofs[other] == proof))) {
+                        status_ = FaceImageReplayStatus::AmbiguousFaceRemap;
+                        return status_;
+                    }
+                }
+                remappedProofs[binding] = proof;
                 refreshed.bindings[binding].selectorProof = proof;
             }
             if (!face_image::BindBindingProof(refreshed)) {
@@ -751,6 +786,7 @@ public:
             }
             retained_edge_treatment::ReplayBudget budget;
             face_image::Observed observed;
+            std::vector<TopoDS_Face> stagedFaces(refreshed_.bindings.size());
             for (std::size_t binding = 0; binding < refreshed_.bindings.size(); ++binding) {
                 FaceImageGeometricReceipt resolved; TopoDS_Face matched;
                 const fs::Refusal refusal = detail::ResolveFaceImageReceipt(stagedShape,
@@ -767,6 +803,21 @@ public:
                     status_ = FaceImageReplayStatus::StaleSource;
                     return status_;
                 }
+                // The actual stage must reproduce the prepared durable-face
+                // correspondence exactly: a merged or split saved face means
+                // the staged geometry is not the accepted candidate.
+                bool correspondenceBroken = false;
+                for (std::size_t other = 0; other < binding; ++other) {
+                    const bool sameSavedFace =
+                        refreshed_.bindings[other].face == refreshed_.bindings[binding].face;
+                    if (sameSavedFace != stagedFaces[other].IsSame(matched))
+                        correspondenceBroken = true;
+                }
+                if (correspondenceBroken) {
+                    status_ = FaceImageReplayStatus::StaleSource;
+                    return status_;
+                }
+                stagedFaces[binding] = matched;
                 observed.faces.push_back({refreshed_.bindings[binding].face, proof});
             }
             std::vector<face_image::ResourceFence> manifest;

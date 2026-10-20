@@ -62,6 +62,7 @@ struct Cut475Scope {
 #endif
 #import <Foundation/Foundation.h>
 #include "OcctDocument.h"
+#include "VariableRadiusFilletNativeOwner.hxx"
 #include "RetainedEdgeTreatmentBuild.hxx"
 #include "RetainedEdgeTreatmentR2Build.hxx"
 #include "RetainedEdgeTreatmentSaveView.hxx"
@@ -73,6 +74,8 @@ struct Cut475Scope {
 #endif
 
 #include <XCAFDoc_DocumentTool.hxx>
+#include <TDataStd_NamedData.hxx>
+#include <TColStd_HArray1OfInteger.hxx>
 #include <cstring>
 
 namespace {
@@ -1540,6 +1543,56 @@ bool CaptureTreatmentCarrierBytesR2(const Handle(TDocStd_Document)& document, co
         }
         return true;
     } catch (...) { present = false; bytes.clear(); return false; }
+}
+
+// B3-S2 arm of the measured companion side: a plain editable source carries
+// no B1/R2 recipe records, so its measured side state is the subtree naming
+// plus the exact persisted-owner bytes under the already-authored B3 key
+// (empty before the first edit). A recipe-bearing owner belongs to its own
+// measured arm and refuses here; a present-but-malformed carrier fails
+// closed.
+bool CaptureNamedOwnerCompanionSide(const Handle(TDocStd_Document)& document, const TDF_Label& owner,
+    std::vector<treatment_history::NamingState>& naming, std::vector<std::uint8_t>& ownerBytes,
+    bool& syetPresent, std::vector<std::uint8_t>& syetBytes) noexcept {
+    namespace vro = core3d::variable_radius_fillet::owner;
+    syetPresent = false; syetBytes.clear(); ownerBytes.clear();
+    try {
+        core3d::profile::Record profile;
+        core3d::enclosure::Record enclosure;
+        core3d::loft_persistence::Record loft;
+        if (!core3d::profile::Read(document, owner, profile)
+            || !core3d::enclosure::Read(document, owner, enclosure)
+            || !core3d::loft_persistence::Read(document, owner, loft)
+            || !profile.label.IsNull() || !enclosure.label.IsNull()
+            || !loft.label.IsNull()
+            || core3d::retained_solid::HasRecord(owner)) return false;
+        for (TDF_ChildIterator it(owner, Standard_False); it.More(); it.Next()) {
+            Handle(TDF_Attribute) attribute;
+            if (it.Value().FindAttribute(
+                    core3d::composite_recipe::AttributeID(), attribute))
+                return false;
+        }
+        if (!CaptureTreatmentSubtreeNaming(owner, naming)) return false;
+        Handle(TDataStd_NamedData) properties;
+        if (!owner.FindAttribute(TDataStd_NamedData::GetID(), properties))
+            return true;
+        if (properties.IsNull()) return false;
+        const TCollection_ExtendedString key(vro::PropertyKey);
+        if (!properties->HasArrayOfIntegers(key)) return false;
+        const Handle(TColStd_HArray1OfInteger)& stored =
+            properties->GetArrayOfIntegers(key);
+        if (stored.IsNull() || stored->Lower() != 0 || stored->Length() <= 0
+            || std::size_t(stored->Length()) > vro::MaximumOwnerBytes)
+            return false;
+        ownerBytes.reserve(std::size_t(stored->Length()));
+        for (Standard_Integer index = stored->Lower();
+             index <= stored->Upper(); ++index) {
+            const Standard_Integer value = stored->Value(index);
+            if (value < 0 || value > 255) return false;
+            ownerBytes.push_back(std::uint8_t(value));
+        }
+        return true;
+    } catch (...) { ownerBytes.clear(); return false; }
 }
 
 // One measured side (before staging or after coherent staging) of a
@@ -4316,6 +4369,153 @@ public:
     }
 };
 
+// Bounded retrieval adapter for the B3-S2 persisted-owner carrier. The stock
+// BinMDataStd_NamedDataDriver trusts attacker-controlled map and element
+// counts before any bound, so this adapter never delegates to it. It admits
+// exactly the already-authored carrier: one integer array under the exact
+// shapeyard.variable-radius-fillet.owner.v1 key, with every other NamedData
+// map/section empty, one-based single-entry map bounds, a zero-based array,
+// byte-range values, and a payload that decodes as canonical SYVO/1 owner
+// semantics (nonzero identity, canonical SYVF/1-2 law, readable bounded base)
+// before any allocation or kernel work beyond those exact bounds. Any other
+// key, map, or form rejects the whole read.
+class Core3DBoundedNamedOwnerDriver final : public BinMDF_ADriver
+{
+public:
+    Core3DBoundedNamedOwnerDriver(
+        const Handle(Message_Messenger)& theMessageDriver,
+        const std::shared_ptr<Standard_Size>& theAggregateOwnerBytes)
+    : BinMDF_ADriver(
+          theMessageDriver, STANDARD_TYPE(TDataStd_NamedData)->Name()),
+      myAggregateOwnerBytes(theAggregateOwnerBytes)
+    {
+    }
+
+    Handle(TDF_Attribute) NewEmpty() const override
+    {
+        return new TDataStd_NamedData();
+    }
+
+    void Paste(
+        const Handle(TDF_Attribute)& theSource,
+        BinObjMgt_Persistent& theTarget,
+        BinObjMgt_SRelocationTable& theRelocationTable) const override
+    {
+        // Retrieval-only adapter: the bounded safe-read table never writes.
+        (void)theSource; (void)theTarget; (void)theRelocationTable;
+        RejectSafeBinaryRead();
+    }
+
+    Standard_Boolean Paste(
+        const BinObjMgt_Persistent& theSource,
+        const Handle(TDF_Attribute)& theTarget,
+        BinObjMgt_RRelocationTable& theRelocationTable) const override
+    {
+        namespace owner = core3d::variable_radius_fillet::owner;
+        (void)theRelocationTable;
+        try {
+            OCC_CATCH_SIGNALS
+            const auto refuse = []() {
+                RejectSafeBinaryRead();
+                return Standard_False;
+            };
+            const Standard_Integer aStart = theSource.Position();
+            Standard_Integer aRecordEnd = 0;
+            if (!TryPersistentRecordEnd(theSource, aRecordEnd)
+                || aStart < kPersistentRecordHeaderBytes
+                || aStart > aRecordEnd) {
+                return refuse();
+            }
+            const Handle(TDataStd_NamedData) aNamedData =
+                Handle(TDataStd_NamedData)::DownCast(theTarget);
+            if (aNamedData.IsNull()) {
+                return refuse();
+            }
+            // Integer, real, string and byte maps are not part of the
+            // admitted carrier and must be empty (0, 0) sections.
+            for (unsigned aSection = 0; aSection < 4; ++aSection) {
+                Standard_Integer aLower = 0, anUpper = 0;
+                if (!(theSource >> aLower >> anUpper)
+                    || aLower != 0 || anUpper != 0) {
+                    return refuse();
+                }
+            }
+            // Exactly one array-of-integers entry under the exact owner key.
+            Standard_Integer aLower = 0, anUpper = 0;
+            if (!(theSource >> aLower >> anUpper)
+                || aLower != 1 || anUpper != 1
+                || !PreflightBoundedPersistentExtendedString(theSource)) {
+                return refuse();
+            }
+            TCollection_ExtendedString aKey;
+            if (!(theSource >> aKey)
+                || !aKey.IsEqual(
+                    TCollection_ExtendedString(owner::PropertyKey))) {
+                return refuse();
+            }
+            Standard_Integer aArrayLower = 0, anArrayUpper = 0;
+            if (!(theSource >> aArrayLower >> anArrayUpper)
+                || aArrayLower != 0 || anArrayUpper < 0) {
+                return refuse();
+            }
+            const Standard_Size aLength =
+                static_cast<Standard_Size>(anArrayUpper) + 1;
+            const Standard_Size aCharged = myAggregateOwnerBytes == nullptr
+                ? 0 : *myAggregateOwnerBytes;
+            if (aLength > owner::MaximumOwnerBytes
+                || aLength > owner::MaximumOwnerBytes
+                    - std::min(aCharged, owner::MaximumOwnerBytes)) {
+                return refuse();
+            }
+            Handle(TColStd_HArray1OfInteger) aValues =
+                new TColStd_HArray1OfInteger(0, anArrayUpper);
+            if (!theSource.GetIntArray(
+                    &(aValues->ChangeArray1())(0), anArrayUpper + 1)) {
+                return refuse();
+            }
+            // Arrays of reals are not part of the admitted carrier either,
+            // and the record must be consumed exactly.
+            if (!(theSource >> aLower >> anUpper)
+                || aLower != 0 || anUpper != 0
+                || theSource.Position() != aRecordEnd) {
+                return refuse();
+            }
+            std::vector<std::uint8_t> aBytes;
+            aBytes.reserve(aLength);
+            for (Standard_Integer anIndex = 0;
+                 anIndex <= anArrayUpper; ++anIndex) {
+                const Standard_Integer aValue = aValues->Value(anIndex);
+                if (aValue < 0 || aValue > 255) {
+                    return refuse();
+                }
+                aBytes.push_back(static_cast<std::uint8_t>(aValue));
+            }
+            owner::UUID aFeature{};
+            std::uint32_t aTopologyIndex = 0;
+            std::vector<std::uint8_t> aLaw, aBase;
+            if (!owner::DecodeOwner(
+                    aBytes, aFeature, aTopologyIndex, aLaw, aBase)) {
+                return refuse();
+            }
+            TDataStd_DataMapOfStringHArray1OfInteger aArrays;
+            if (!aArrays.Bind(aKey, aValues)) {
+                return refuse();
+            }
+            aNamedData->ChangeArraysOfIntegers(aArrays);
+            if (myAggregateOwnerBytes != nullptr) {
+                *myAggregateOwnerBytes = aCharged + aLength;
+            }
+            return Standard_True;
+        } catch (...) {
+            RejectSafeBinaryRead();
+            return Standard_False;
+        }
+    }
+
+private:
+    std::shared_ptr<Standard_Size> myAggregateOwnerBytes;
+};
+
 class Core3DBoundedVisMaterialDriver final : public BinMDF_ADriver
 {
 public:
@@ -5277,6 +5477,7 @@ class Core3DBoundedBinXCAFRetrievalDriver final
 public:
     Core3DBoundedBinXCAFRetrievalDriver()
     : myAggregateTextureBytes(std::make_shared<Standard_Size>(0)),
+      myAggregateNamedOwnerBytes(std::make_shared<Standard_Size>(0)),
       myFrameBudget(std::make_shared<core3d::persistence::AuthoredFrameReadBudget>()),
       myPatternBudget(std::make_shared<Core3DProjectByteArrayReadBudget>()),
       myLayerGraphBudget(std::make_shared<Core3DLayerGraphReadBudget>())
@@ -5625,6 +5826,11 @@ public:
                 theMessageDriver));
         aTable->AddDriver(
             new Core3DBoundedExtendedStringDriver(theMessageDriver));
+        // The B3-S2 persisted-owner carrier is admitted only through the
+        // bounded adapter above; the stock unrestricted named-data reader is
+        // deliberately never installed.
+        aTable->AddDriver(new Core3DBoundedNamedOwnerDriver(
+            theMessageDriver, myAggregateNamedOwnerBytes));
         aTable->AddDriver(
             new Core3DBoundedAsciiStringDriver(theMessageDriver));
         aTable->AddDriver(
@@ -5934,9 +6140,13 @@ private:
         if (myAggregateTextureBytes != nullptr) {
             *myAggregateTextureBytes = 0;
         }
+        if (myAggregateNamedOwnerBytes != nullptr) {
+            *myAggregateNamedOwnerBytes = 0;
+        }
     }
 
     std::shared_ptr<Standard_Size> myAggregateTextureBytes;
+    std::shared_ptr<Standard_Size> myAggregateNamedOwnerBytes;
     std::shared_ptr<core3d::persistence::AuthoredFrameReadBudget> myFrameBudget;
     std::shared_ptr<Core3DProjectByteArrayReadBudget> myPatternBudget;
     std::shared_ptr<Core3DLayerGraphReadBudget> myLayerGraphBudget;
@@ -18441,6 +18651,191 @@ core3d::dependent_replay::Refusal OcctDocument::ReadDependentReplayPlan(
     } catch (...) { return Refusal::ReadbackFailed; }
 }
 
+Standard_Boolean OcctDocument::CaptureVariableRadiusFilletOwner(
+    const TDF_Label& label,
+    core3d::variable_radius_fillet::owner::Capture& capture) const noexcept {
+    namespace owner = core3d::variable_radius_fillet::owner;
+    namespace vrf = core3d::variable_radius_fillet;
+    capture = {};
+    try {
+        OCC_CATCH_SIGNALS
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || label.IsNull() || label.Data() != myOcafDoc->GetData()
+            || !CaptureExactFreeLabel(label, capture.exact)) return Standard_False;
+        capture.current = XCAFDoc_ShapeTool::GetShape(label);
+        if (capture.current.IsNull()
+            || !owner::ExactShapeBytes(capture.current, capture.currentBytes))
+            return Standard_False;
+
+        Handle(TDataStd_NamedData) properties;
+        if (!label.FindAttribute(TDataStd_NamedData::GetID(), properties)) {
+            capture.present = false;
+            return capture.valid();
+        }
+        if (properties.IsNull()) return Standard_False;
+        const TCollection_ExtendedString key(owner::PropertyKey);
+        if (!properties->HasArrayOfIntegers(key)) {
+            capture.present = false;
+            return capture.valid();
+        }
+        const Handle(TColStd_HArray1OfInteger)& stored =
+            properties->GetArrayOfIntegers(key);
+        if (stored.IsNull() || stored->Lower() != 0 || stored->Length() <= 0
+            || std::size_t(stored->Length()) > owner::MaximumOwnerBytes)
+            return Standard_False;
+        capture.ownerBytes.reserve(std::size_t(stored->Length()));
+        for (Standard_Integer index = stored->Lower(); index <= stored->Upper(); ++index) {
+            const Standard_Integer value = stored->Value(index);
+            if (value < 0 || value > 255) return Standard_False;
+            capture.ownerBytes.push_back(std::uint8_t(value));
+        }
+        if (!owner::DecodeOwner(capture.ownerBytes, capture.feature,
+                capture.topologyIndex, capture.lawBytes, capture.baseBytes)
+            || !owner::ReadShape(capture.baseBytes, capture.base))
+            return Standard_False;
+
+        const std::atomic_bool cancelled{false};
+        vrf::BuildResult rebuilt;
+        vrf::Definition linear;
+        vrf::MultiStationDefinition stations;
+        if (vrf::Decode(capture.lawBytes, linear))
+            rebuilt = vrf::BuildDeterministically(capture.base, linear, cancelled);
+        else if (vrf::Decode(capture.lawBytes, stations))
+            rebuilt = vrf::BuildMultiStationDeterministically(
+                capture.base, stations, cancelled);
+        else return Standard_False;
+        std::vector<std::uint8_t> rebuiltBytes;
+        if (!rebuilt.built()
+            || !owner::ExactShapeBytes(rebuilt.solid, rebuiltBytes)
+            || rebuiltBytes != capture.currentBytes) return Standard_False;
+        capture.present = true;
+        return capture.valid();
+    } catch (...) { capture = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::StageVariableRadiusFilletOwner(
+    core3d::native_opening::CommandLease& lease,
+    const core3d::variable_radius_fillet::owner::Capture& before,
+    const TopoDS_Shape& candidate,
+    const std::vector<std::uint8_t>& ownerBytes,
+    core3d::variable_radius_fillet::owner::Capture& capture) noexcept {
+    namespace owner = core3d::variable_radius_fillet::owner;
+    capture = {};
+    // The measured history companion follows the existing document-owned
+    // treatment-history settlement contract exactly: the before/after sides
+    // are captured around the real staging, a refused stage parks the pending
+    // companion for SettleVariableRadiusFilletHistoryOnPrior, and a committed
+    // one is bound to the real delta by FinalizeVariableRadiusFilletHistory,
+    // so undo/redo restore the serialized naming-version scalars and the
+    // transient topology bookkeeping to the measured values.
+    std::unique_ptr<core3d::treatment_history::Companion> companion;
+    bool beforeCaptured = false;
+    const auto fail = [this, &capture, &companion, &beforeCaptured]() noexcept {
+        capture = {};
+        if (beforeCaptured && companion && !myPendingTreatmentCompanion) {
+            companion->afterCaptured = false;
+            myPendingTreatmentCompanion = std::move(companion);
+        }
+        return Standard_False;
+    };
+    try {
+        OCC_CATCH_SIGNALS
+        owner::UUID feature{};
+        std::uint32_t topologyIndex = 0;
+        std::vector<std::uint8_t> law, base;
+        if (![NSThread isMainThread] || !before.valid() || candidate.IsNull()
+            || myPendingTreatmentCompanion
+            || !owner::DecodeOwner(ownerBytes, feature, topologyIndex, law, base))
+            return Standard_False;
+        const auto stager = [&](const TDF_Label& label) -> Standard_Boolean {
+            try {
+                const Handle(TDataStd_NamedData) properties =
+                    TDataStd_NamedData::Set(label);
+                if (properties.IsNull() || ownerBytes.empty()
+                    || ownerBytes.size() > owner::MaximumOwnerBytes)
+                    return Standard_False;
+                Handle(TColStd_HArray1OfInteger) stored =
+                    new TColStd_HArray1OfInteger(0,
+                        Standard_Integer(ownerBytes.size()) - 1);
+                for (std::size_t index = 0; index < ownerBytes.size(); ++index)
+                    stored->SetValue(Standard_Integer(index), ownerBytes[index]);
+                properties->SetArrayOfIntegers(
+                    TCollection_ExtendedString(owner::PropertyKey), stored);
+#if DEBUG
+                std::fprintf(stderr, "B3_OWNER_STAGE property=1 bytes=%zu\n",
+                    ownerBytes.size());
+#endif
+                return Standard_True;
+            } catch (...) {
+#if DEBUG
+                std::fprintf(stderr, "B3_OWNER_STAGE property-exception=1\n");
+#endif
+                return Standard_False;
+            }
+        };
+        const TDF_Label& ownerLabel =
+            before.exact.visibility.object.object.label;
+        companion = std::make_unique<core3d::treatment_history::Companion>();
+        companion->namedOwnerCarrier = true;
+        companion->data = myOcafDoc->GetData();
+        companion->ownerLabel = ownerLabel;
+        TCollection_AsciiString ownerEntry;
+        TDF_Tool::Entry(ownerLabel, ownerEntry);
+        companion->ownerEntry = ownerEntry.ToCString();
+        companion->undoDepthBefore = myOcafDoc->GetAvailableUndos();
+        companion->ownerShapeBefore = before.current;
+        if (!CaptureNamedOwnerCompanionSide(myOcafDoc, ownerLabel,
+                companion->before, companion->sourceBytesBefore,
+                companion->syetBefore, companion->syetBytesBefore)
+            || !CaptureTreatmentTransientFlags(
+                before.current, companion->flagsBefore))
+            return fail();
+        beforeCaptured = true;
+        OcctPreparedLabelClone clone;
+        clone.source = before.exact;
+        clone.detachedShape = candidate;
+        clone.representation =
+            before.exact.visibility.object.object.resolvedRepresentation;
+        OcctExactLabelReceipt staged;
+        if (!StageReplaceExactFreeLabel(lease, before.exact, clone, staged, stager)
+            || !CaptureVariableRadiusFilletOwner(ownerLabel, capture)
+            || !capture.present || capture.ownerBytes != ownerBytes)
+            return fail();
+        companion->ownerShapeAfter = candidate;
+        if (!CaptureNamedOwnerCompanionSide(myOcafDoc, ownerLabel,
+                companion->after, companion->sourceBytesAfter,
+                companion->syetAfter, companion->syetBytesAfter))
+            return fail();
+        companion->afterCaptured = true;
+        myPendingTreatmentCompanion = std::move(companion);
+        return Standard_True;
+    } catch (...) { return fail(); }
+}
+
+Standard_Boolean OcctDocument::ReadVariableRadiusFilletOwner(
+    const core3d::variable_radius_fillet::owner::Capture& expected,
+    core3d::variable_radius_fillet::owner::Capture& capture) const noexcept {
+    capture = {};
+    try {
+        if (!expected.valid()
+            || !CaptureVariableRadiusFilletOwner(
+                expected.exact.visibility.object.object.label, capture)
+            || !core3d::variable_radius_fillet::owner::SameCapture(
+                expected, capture)) {
+            capture = {}; return Standard_False;
+        }
+        return Standard_True;
+    } catch (...) { capture = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::FinalizeVariableRadiusFilletHistory() noexcept {
+    return FinalizeTreatmentHistoryCompanion();
+}
+
+Standard_Boolean OcctDocument::SettleVariableRadiusFilletHistoryOnPrior() noexcept {
+    return SettleTreatmentHistoryCompanionOnPrior();
+}
+
 Standard_Boolean OcctDocument::StageFeaturePatternPair(
     core3d::native_opening::CommandLease& lease,
     const TDF_Label& host, const TDF_Label& baselineRecipe,
@@ -21234,8 +21629,11 @@ Standard_Boolean OcctDocument::SettleTreatmentHistoryCompanionOnPrior() noexcept
         std::vector<core3d::treatment_history::NamingState> now;
         std::vector<std::uint8_t> sourceNow, syetBytesNow;
         bool syetNow = false;
-        if (!CaptureTreatmentCompanionSide(myOcafDoc, companion.ownerLabel, now,
-                sourceNow, syetNow, syetBytesNow)
+        if (!(companion.namedOwnerCarrier
+                ? CaptureNamedOwnerCompanionSide(myOcafDoc, companion.ownerLabel,
+                    now, sourceNow, syetNow, syetBytesNow)
+                : CaptureTreatmentCompanionSide(myOcafDoc, companion.ownerLabel,
+                    now, sourceNow, syetNow, syetBytesNow))
             || !SameTreatmentNamingSet(companion.before, now, false)
             || sourceNow != companion.sourceBytesBefore
             || syetNow != companion.syetBefore || syetBytesNow != companion.syetBytesBefore
@@ -21550,8 +21948,11 @@ Standard_Boolean OcctDocument::ApplyTreatmentHistoryAfterHistoryChange(
         std::vector<core3d::treatment_history::NamingState> now;
         std::vector<std::uint8_t> sourceNow, syetBytesNow;
         bool syetNow = false;
-        if (!CaptureTreatmentCompanionSide(myOcafDoc, companion->ownerLabel, now,
-                sourceNow, syetNow, syetBytesNow)
+        if (!(companion->namedOwnerCarrier
+                ? CaptureNamedOwnerCompanionSide(myOcafDoc, companion->ownerLabel,
+                    now, sourceNow, syetNow, syetBytesNow)
+                : CaptureTreatmentCompanionSide(myOcafDoc, companion->ownerLabel,
+                    now, sourceNow, syetNow, syetBytesNow))
             || !SameTreatmentNamingSet(side, now, false)
             || sourceNow != sideSource
             || syetNow != sideSyet || syetBytesNow != sideSyetBytes

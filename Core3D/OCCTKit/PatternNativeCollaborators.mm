@@ -198,7 +198,14 @@ public:
                 || (context_ && (context_->openingFence().document() != owner_.Document()
                 || context_->openingFence().data() != owner_.Document()->GetData())))
                 return false;
-            if (borrowed_) return borrowed_->ownsOpenCommand();
+            if (borrowed_) {
+                // An admitted borrowed lease owns no new command, but it must
+                // still bind the exact prepared mutation before returning so
+                // stageAll can prove mutation identity against it.
+                if (!borrowed_->ownsOpenCommand()) return false;
+                mutation_ = prepared.native;
+                return true;
+            }
             mutation_ = prepared.native;
             lease_ = context_->beginCommandLease(context_->openingFence(),
                                                  kFenceWidth, kFenceHeight);
@@ -496,7 +503,8 @@ public:
             stager_ = std::make_unique<OcafPatternStager>(owner, lease);
             stager_->setPreparedSource(source_);
             pattern::Record staged;
-            return stager_->begin(opening_, prepared_)
+            return rebindPreparedSourceReceipts(owner)
+                && stager_->begin(opening_, prepared_)
                 && stager_->stageAll(opening_, prepared_)
                 && pattern::Stage(owner.Document(), prepared_.candidate, staged)
                 && staged.definition.feature == prepared_.candidate.feature
@@ -507,10 +515,55 @@ public:
         return stager_ && stager_->readBackAll(
             prepared_.candidate, ReadPhase::AfterCommit);
     }
+    // The mandatory shared replay coordinator stages the source mutation
+    // before this dependent under the caller's one lease, so the prepared
+    // clones hold a pre-staging source receipt the exact-label reads can no
+    // longer admit. Recapture the source label here, inside the same borrowed
+    // command, and accept the recapture only as the exact prospective source
+    // authority admitted at preparation: unchanged durable identity, and the
+    // shape the source mutation was prepared to stage. Any other state
+    // refuses; no receipt is blindly recaptured and no read is skipped.
+    bool rebindPreparedSourceReceipts(OcctDocument& owner) const noexcept {
+        try {
+            if (!prepared_.native || !opening_.allLabels) return false;
+            const OcctExactLabelReceipt& before = opening_.allLabels->source;
+            const TDF_Label& label = before.visibility.object.object.label;
+            if (label.IsNull()) return false;
+            OcctExactLabelReceipt current;
+            if (!owner.CaptureExactFreeLabel(label, current)) return false;
+            const auto& beforeObject = before.visibility.object.object;
+            const auto& currentObject = current.visibility.object.object;
+            if (current.documentData != before.documentData
+                || current.documentIdentifier != before.documentIdentifier
+                || !currentObject.label.IsEqual(label)
+                || currentObject.entityIdentifier
+                    != beforeObject.entityIdentifier
+                || currentObject.definitionIdentifier
+                    != beforeObject.definitionIdentifier
+                || currentObject.shape.IsNull() || source_.ownerShape.IsNull()
+                || !currentObject.shape.IsEqual(source_.ownerShape))
+                return false;
+            auto rebound =
+                std::make_shared<AllLabelMutation>(*prepared_.native);
+            const auto rebind = [&](OcctPreparedLabelClone& clone) {
+                if (!clone.source.visibility.object.object.label.IsEqual(label))
+                    return false;
+                clone.source = current;
+                return true;
+            };
+            for (auto& item : rebound->labels.replacements)
+                if (!rebind(item.clone)) return false;
+            for (auto& item : rebound->labels.creates)
+                if (!rebind(item.clone)) return false;
+            prepared_.native = std::move(rebound);
+            return true;
+        } catch (...) { return false; }
+    }
+
 private:
     dependent_replay::Dependency dependency_;
     Snapshot opening_;
-    PreparedEdit prepared_;
+    mutable PreparedEdit prepared_;
     pattern_recipe_clone::Source source_;
     mutable std::unique_ptr<OcafPatternStager> stager_;
 };
