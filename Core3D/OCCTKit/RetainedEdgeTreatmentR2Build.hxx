@@ -10,6 +10,7 @@
 #include "SavedCutSourceEdit.hxx"
 #include "RectangularLoftPersistence.hxx"
 #include "ProfilePersistence.hxx"
+#include "ProfileSourceCorrespondence.hxx"
 #include "EnclosurePersistence.hxx"
 #include "RetainedSolidEnvelope.hxx"
 #include <BRepCheck_Analyzer.hxx>
@@ -156,12 +157,13 @@ inline bool ValidateCompletePrefix(const RetainedBooleanBase& source,
 
 // Geometry builders consume copied shapes and values only.  The document,
 // labels, AIS objects and proof handles remain on the main-owned Work object.
-inline bool ReplayTreatmentSuffix(const TopoDS_Shape& postBoolean,
+inline bool ReplayTreatmentSuffixImpl(const TopoDS_Shape& postBoolean,
                                   const Definition& definition,
                                   TopoDS_Shape& output,
                                   et::ReplayBudget& budget,
                                   et::Refusal& refusal,
-                                  const std::atomic_bool& stop) noexcept {
+                                  const std::atomic_bool& stop,
+                                  const et::SourceStageContext* sourceContext) noexcept {
     if (postBoolean.IsNull()) {
         refusal = et::Refusal::UnsupportedBase; return false;
     }
@@ -188,7 +190,39 @@ inline bool ReplayTreatmentSuffix(const TopoDS_Shape& postBoolean,
     et::Definition suffix{definition.schema, definition.owner, shadow, definition.issuance,
                           definition.outputNode, definition.steps};
     std::vector<et::StepProof> proofs;
-    return et::Replay(postBoolean, suffix, output, proofs, budget, refusal, stop);
+    return sourceContext
+        ? et::Replay(postBoolean, suffix, output, proofs, budget, refusal,
+            *sourceContext, stop)
+        : et::Replay(postBoolean, suffix, output, proofs, budget, refusal, stop);
+}
+inline bool ReplayTreatmentSuffix(const TopoDS_Shape& postBoolean,
+                                  const Definition& definition,
+                                  TopoDS_Shape& output,
+                                  et::ReplayBudget& budget,
+                                  et::Refusal& refusal,
+                                  const et::SourceStageContext& sourceContext,
+                                  const std::atomic_bool& stop) noexcept {
+    return ReplayTreatmentSuffixImpl(postBoolean, definition, output, budget,
+        refusal, stop, &sourceContext);
+}
+inline bool ReplayTreatmentSuffix(const TopoDS_Shape& postBoolean,
+                                  const Definition& definition,
+                                  TopoDS_Shape& output,
+                                  et::ReplayBudget& budget,
+                                  et::Refusal& refusal,
+                                  const std::atomic_bool& stop) noexcept {
+    return ReplayTreatmentSuffixImpl(postBoolean, definition, output, budget,
+        refusal, stop, nullptr);
+}
+inline bool ReplayTreatmentSuffix(const TopoDS_Shape& postBoolean,
+                                  const Definition& definition,
+                                  TopoDS_Shape& output,
+                                  et::ReplayBudget& budget,
+                                  et::Refusal& refusal,
+                                  const et::SourceStageContext& sourceContext) noexcept {
+    const std::atomic_bool neverCancelled{false};
+    return ReplayTreatmentSuffix(postBoolean, definition, output, budget,
+        refusal, sourceContext, neverCancelled);
 }
 inline bool ReplayTreatmentSuffix(const TopoDS_Shape& postBoolean,
                                   const Definition& definition,
@@ -431,6 +465,153 @@ inline bool PrepareMigrationStages(const retained_boolean::Recipe& recipe,
         return true;
     } catch (...) { stages = {}; refusal = et::Refusal::BuildFailed; return false; }
 }
+
+} // namespace core3d::retained_edge_treatment::r2
+
+namespace core3d::retained_face_selector {
+
+// The only production issuer for source-relative selector authority. It binds
+// immutable capture bytes to the exact native Profile source, the unchanged
+// SYRS analytic prefix and the saved untreated post-Boolean treatment base.
+// Callers receive only ephemeral per-feature proofs; no authority is persisted.
+class SourceStageProofIssuer final {
+public:
+    static bool Issue(
+        const retained_edge_treatment::r2::RetainedBooleanBase& source,
+        const retained_edge_treatment::r2::Definition& definition,
+        const TopoDS_Shape& sourceBase, const TopoDS_Shape& savedTreatmentBase,
+        bool initialIssuance, retained_edge_treatment::ReplayBudget& budget,
+        const std::atomic_bool& stop,
+        retained_edge_treatment::SourceStageContext& output,
+        retained_edge_treatment::Refusal& refusal) noexcept {
+        namespace et = retained_edge_treatment;
+        namespace r2 = retained_edge_treatment::r2;
+        output = {};
+        try {
+            if (stop.load()) { refusal = et::Refusal::Cancelled; return false; }
+            const auto* bound = std::get_if<r2::BooleanBaseBinding>(&definition.base);
+            const auto* legacy = std::get_if<r2::LegacyBooleanBase>(&source.source);
+            const auto* program = legacy
+                ? std::get_if<retained_boolean::Program>(&legacy->prefix) : nullptr;
+            const auto* prefix = bound
+                ? std::get_if<r2::LegacyPrefixBinding>(&bound->prefix) : nullptr;
+            if (!bound || !legacy || !program || !prefix
+                || !(source.binding == *bound)
+                || definition.schema != 4
+                || bound->sourceContractRevision != r2::SourceContractRevision
+                || bound->format != r2::PrefixFormat::SYRS
+                || !r2::detail::Valid(*bound)
+                || !retained_boolean::Valid(*program)
+                || program->source.family != 1
+                || !program->filletSteps.empty()
+                || sourceBase.IsNull() || savedTreatmentBase.IsNull()) {
+                refusal = et::Refusal::UnsupportedDependency; return false;
+            }
+            if (!r2::ValidateCompletePrefix(source, *bound, refusal)) return false;
+            if (bound->source.document != program->source.document
+                || bound->source.entity != program->source.entity
+                || bound->source.definition != program->source.definition
+                || bound->source.sourceFeature != program->source.sourceFeature
+                || bound->sourceNode != program->source.derivedFeature
+                || bound->sourceSchema != program->source.schema
+                || retained_solid::Bits(bound->metersPerLocalUnit)
+                    != retained_solid::Bits(program->source.metersPerUnit)) {
+                refusal = et::Refusal::IdentityMismatch; return false;
+            }
+
+            profile::Parameters currentProfile;
+            std::vector<double> currentCanonical;
+            if (!profile::Decode(program->source.values, currentProfile)
+                || currentProfile.definition.revolve
+                || !currentProfile.shells.empty()
+                || !profile::Encode(currentProfile, currentCanonical)
+                || currentCanonical.size() != program->source.values.size()) {
+                refusal = et::Refusal::UnsupportedBase; return false;
+            }
+            for (std::size_t index = 0; index < currentCanonical.size(); ++index) {
+                if (retained_solid::Bits(currentCanonical[index])
+                    != retained_solid::Bits(program->source.values[index])) {
+                    refusal = et::Refusal::NoncurrentSource; return false;
+                }
+            }
+            ProfileProducerAccounting accounting(budget, stop);
+            const auto inspected = complete_profile_source::InspectCompleteProfileBase(
+                sourceBase, currentProfile, accounting);
+            if (!inspected) {
+                refusal = stop.load() ? et::Refusal::Cancelled
+                    : budget.exhausted ? et::Refusal::Budget
+                    : et::Refusal::NoncurrentSource;
+                return false;
+            }
+            r2::MigrationStages stages;
+            if (!r2::PrepareMigrationStages(legacy->prefix, sourceBase, stop,
+                    budget, stages, refusal)) return false;
+            if (!et::EquivalentReplayGeometry(savedTreatmentBase,
+                    stages.postBoolean, budget, refusal)) return false;
+
+            et::SourceStageContext pending;
+            for (const et::Step& step : definition.steps) {
+                if (!step.selector) continue;
+                const auto* relative = std::get_if<SourceRelativeV1>(
+                    &step.selector->intent);
+                if (!relative) continue;
+                if (!ValidCaptureProfile(*relative)
+                    || relative->sourceOwnerDocument != program->source.document
+                    || relative->sourceOwnerEntity != program->source.entity
+                    || relative->sourceOwnerDefinition != program->source.definition
+                    || relative->inputRootNode != prefix->rootNode
+                    || relative->sourceFeature != program->source.sourceFeature
+                    || relative->captureProfileSchema != program->source.schema) {
+                    refusal = et::Refusal::IdentityMismatch; return false;
+                }
+                std::vector<double> captureValues(
+                    relative->captureProfileScalarBits.size());
+                for (std::size_t index = 0; index < captureValues.size(); ++index)
+                    std::memcpy(&captureValues[index],
+                        &relative->captureProfileScalarBits[index], sizeof(double));
+                profile::Parameters captureProfile;
+                detail::Affine captureTransform, currentTransform;
+                if (!profile::Decode(captureValues, captureProfile)
+                    || retained_solid::Bits(captureProfile.metersPerUnit)
+                        != retained_solid::Bits(currentProfile.metersPerUnit)
+                    || !detail::ProfileAffine(captureProfile, captureTransform)
+                    || !detail::ProfileAffine(currentProfile, currentTransform)) {
+                    refusal = et::Refusal::UnitMismatch; return false;
+                }
+                if (initialIssuance) {
+                    if (captureValues.size() != program->source.values.size()) {
+                        refusal = et::Refusal::StaleSnapshot; return false;
+                    }
+                    for (std::size_t index = 0; index < captureValues.size(); ++index) {
+                        if (relative->captureProfileScalarBits[index]
+                            != retained_solid::Bits(program->source.values[index])) {
+                            refusal = et::Refusal::StaleSnapshot; return false;
+                        }
+                    }
+                }
+                auto proof = std::shared_ptr<const SourceStageProof>(
+                    new SourceStageProof(*relative, captureTransform,
+                        currentTransform));
+                pending.steps.push_back({step.feature, std::move(proof)});
+            }
+            if (pending.steps.empty()) {
+                refusal = et::Refusal::UnsupportedDependency; return false;
+            }
+            output = std::move(pending);
+            refusal = et::Refusal::None;
+            return true;
+        } catch (...) {
+            output = {};
+            refusal = stop.load() ? et::Refusal::Cancelled
+                : et::Refusal::UnsupportedDependency;
+            return false;
+        }
+    }
+};
+
+} // namespace core3d::retained_face_selector
+
+namespace core3d::retained_edge_treatment::r2 {
 
 // Detached source-base rebuild for an admitted Boolean-input recipe edit.
 // The envelope carries the proven edited recipe values and the legacy first
@@ -735,13 +916,14 @@ inline bool RebuildEditedPrefix(const RetainedBooleanBase& original,
 // digest is not touched here: the caller re-digests it against the exact
 // edited prefix bytes. Missing or ambiguous correspondence refuses; nothing
 // is defaulted.
-inline bool ApplySourceRebindR2(const et::SourceRebindRoles& roles,
+inline bool ApplySourceRebindR2Impl(const et::SourceRebindRoles& roles,
                                 const TopoDS_Shape& newStage,
                                 Definition& candidate,
                                 TopoDS_Shape& treated,
                                 et::ReplayBudget& budget,
                                 et::Refusal& refusal,
-                                const std::atomic_bool& stop) noexcept {
+                                const std::atomic_bool& stop,
+                                const et::SourceStageContext* sourceContext) noexcept {
     treated.Nullify();
     try {
         if (newStage.IsNull()) { refusal = et::Refusal::ReplayMismatch; return false; }
@@ -786,10 +968,18 @@ inline bool ApplySourceRebindR2(const et::SourceRebindRoles& roles,
                 }
                 const auto& oldRoles = roles.selectorSteps[selectorIndex].second;
                 ++selectorIndex;
+                const auto* sourceProof = et::RequireSourceStageProof(
+                    step, sourceContext, refusal);
+                if (et::NeedsSourceStageContext(step) && !sourceProof)
+                    return false;
                 retained_face_selector::Resolution resolution;
-                const auto selectorRefusal = retained_face_selector::Resolve(current,
-                    step.selector->intent, 0.001, budget,
-                    stop, resolution);
+                const auto selectorRefusal = sourceProof
+                    ? retained_face_selector::Resolve(current,
+                        step.selector->intent, *sourceProof, 0.001, budget,
+                        stop, resolution)
+                    : retained_face_selector::Resolve(current,
+                        step.selector->intent, 0.001, budget,
+                        stop, resolution);
                 if (selectorRefusal != retained_face_selector::Refusal::None || !resolution.proof) {
                     refusal = retained_face_selector::MapToB1(selectorRefusal); return false;
                 }
@@ -878,7 +1068,7 @@ inline bool ApplySourceRebindR2(const et::SourceRebindRoles& roles,
             }
             et::StepProof proof;
             if (!et::detail::BuildWorkingStage(shadowBase, step, sequence,
-                    proof, budget, refusal, stop)) return false;
+                    proof, budget, refusal, stop, sourceContext)) return false;
             rebound.steps[index] = step;
         }
         if (selectorIndex != roles.selectorSteps.size()) {
@@ -897,10 +1087,45 @@ inline bool ApplySourceRebindR2(const et::SourceRebindRoles& roles,
                                 Definition& candidate,
                                 TopoDS_Shape& treated,
                                 et::ReplayBudget& budget,
-                                et::Refusal& refusal) noexcept {
+                                et::Refusal& refusal,
+                                const et::SourceStageContext& sourceContext,
+                                const std::atomic_bool& stop) noexcept {
+    return ApplySourceRebindR2Impl(roles, newStage, candidate, treated, budget,
+        refusal, stop, &sourceContext);
+}
+
+inline bool ApplySourceRebindR2(const et::SourceRebindRoles& roles,
+                                const TopoDS_Shape& newStage,
+                                Definition& candidate,
+                                TopoDS_Shape& treated,
+                                et::ReplayBudget& budget,
+                                et::Refusal& refusal,
+                                const std::atomic_bool& stop) noexcept {
+    return ApplySourceRebindR2Impl(roles, newStage, candidate, treated, budget,
+        refusal, stop, nullptr);
+}
+
+inline bool ApplySourceRebindR2(const et::SourceRebindRoles& roles,
+                                const TopoDS_Shape& newStage,
+                                Definition& candidate,
+                                TopoDS_Shape& treated,
+                                et::ReplayBudget& budget,
+                                et::Refusal& refusal,
+                                const et::SourceStageContext& sourceContext) noexcept {
     const std::atomic_bool neverCancelled{false};
     return ApplySourceRebindR2(roles, newStage, candidate, treated, budget,
-        refusal, neverCancelled);
+        refusal, sourceContext, neverCancelled);
+}
+
+inline bool ApplySourceRebindR2(const et::SourceRebindRoles& roles,
+                                const TopoDS_Shape& newStage,
+                                Definition& candidate,
+                                TopoDS_Shape& treated,
+                                et::ReplayBudget& budget,
+                                et::Refusal& refusal) noexcept {
+    const std::atomic_bool neverCancelled{false};
+    return ApplySourceRebindR2Impl(roles, newStage, candidate, treated, budget,
+        refusal, neverCancelled, nullptr);
 }
 
 // Compatibility signature: a fresh budget for independent callers outside a

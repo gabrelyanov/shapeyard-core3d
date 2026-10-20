@@ -107,6 +107,10 @@ inline RecipeRefusal Validate(const ReliefRecipe& value) noexcept {
         return RecipeRefusal::ContourLimit;
     std::vector<std::size_t> perComponent;
     for (const LoopRecord& loop : value.loops) {
+        // Bound the untrusted component index before allocation: an outer
+        // count cap alone does not bound perComponent.resize(component + 1).
+        if (loop.component >= MaximumComponents)
+            return RecipeRefusal::ComponentContourLimit;
         if (loop.component >= perComponent.size()) perComponent.resize(loop.component + 1);
         if (++perComponent[loop.component] > MaximumContoursPerComponent)
             return RecipeRefusal::ComponentContourLimit;

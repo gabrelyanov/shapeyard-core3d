@@ -2,6 +2,7 @@
 
 #include "RetainedEdgeTreatmentAttribute.hxx"
 #include "RetainedEdgeTreatmentBuild.hxx"
+#include "RetainedSolidAttribute.hxx"
 #include <BinMDF_ADriverTable.hxx>
 #include <BinMNaming_NamedShapeDriver.hxx>
 #include <BinMXCAFDoc_LocationDriver.hxx>
@@ -12,8 +13,14 @@
 #include <TNaming_Tool.hxx>
 #include <XCAFDoc_Location.hxx>
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <vector>
+
+Standard_Boolean Core3DValidateRetainedEdgeTreatmentDocument(
+    const Handle(TDocStd_Document)&);
+Standard_Boolean Core3DValidateRetainedEdgeTreatmentDocumentForPrepare(
+    const Handle(TDocStd_Document)&);
 
 // Writer-only, bounded serialization view for an already-admitted B1 owner.
 // It never modifies the live TDF_Data: the private attributes below exist on
@@ -22,6 +29,75 @@ namespace core3d::retained_edge_treatment::save_view {
 inline constexpr std::size_t MaximumViewRecords = 256;
 inline constexpr std::size_t MaximumViewLabels = 4096;
 inline constexpr std::size_t MaximumNamingPairs = 4096;
+
+// One operation-owned authority for the complete synchronous persistence
+// stack. Validators may only borrow the live pointer below; they never make
+// a session or a fresh counter. Proof implementation stays in OcctDocument.mm
+// so this transport cannot become a second validator.
+enum class ValidationRoute : std::uint8_t {
+    Geometry, ViewBuild, EdgePrepare, RetainedSolid, Composite, TypedCommand
+};
+
+#if DEBUG
+struct ValidationObservation final {
+    std::array<std::size_t, 6> routeHits{};
+    std::size_t visits = 0, stages = 0, proofs = 0;
+    std::uint64_t identity = 0;
+    bool bound = false, denied = false;
+};
+inline thread_local ValidationObservation LastValidationObservation;
+inline thread_local std::uint64_t NextValidationIdentity = 0;
+#endif
+
+struct ValidationBinding final {
+    TDF_Label owner, treatmentLabel, sourceLabel;
+    std::shared_ptr<const PayloadR2> treatment;
+    std::shared_ptr<const retained_solid::Payload> source;
+    TopoDS_Shape current, treatmentBase, sourceBase;
+    retained_recipe::Digest digest{};
+};
+
+class ValidationSession final {
+public:
+    ValidationSession() noexcept {
+#if DEBUG
+        identity_ = ++NextValidationIdentity;
+#endif
+    }
+    ~ValidationSession() noexcept;
+    ValidationSession(const ValidationSession&) = delete;
+    ValidationSession& operator=(const ValidationSession&) = delete;
+
+    bool Validate(const Handle(TDocStd_Document)& document,
+        const std::vector<RecordR2>& records, Refusal& refusal,
+        ValidationRoute route) noexcept;
+    bool IsBound() const noexcept { return bound_; }
+    bool IsDenied() const noexcept { return denied_ || budget_.exhausted; }
+#if DEBUG
+    std::size_t DebugRouteHits(ValidationRoute route) const noexcept {
+        return routeHits_[static_cast<std::size_t>(route)];
+    }
+    const ReplayBudget& DebugBudget() const noexcept { return budget_; }
+    void DebugExhaust() noexcept {
+        budget_.visit(core3d::retained_topology_budget::MaximumTopologyVisits,
+            core3d::retained_topology_budget::Site::C19R2Prefix);
+    }
+#endif
+private:
+    Handle(TDocStd_Document) document_;
+    Handle(TDF_Data) data_;
+    std::vector<ValidationBinding> bindings_;
+    ReplayBudget budget_;
+    bool bound_ = false;
+    bool denied_ = false;
+#if DEBUG
+    std::array<std::size_t, 6> routeHits_{};
+    std::size_t proofs_ = 0;
+    std::uint64_t identity_ = 0;
+#endif
+};
+
+inline thread_local ValidationSession* ActiveValidationSession = nullptr;
 
 struct NamingPair final {
     TopoDS_Shape oldShape;
@@ -259,13 +335,22 @@ inline thread_local std::shared_ptr<const View> ActiveView;
 
 class Scope final {
 public:
-    explicit Scope(std::shared_ptr<const View> view)
-        : previous_(std::move(ActiveView)) { ActiveView = std::move(view); }
-    ~Scope() noexcept { ActiveView = std::move(previous_); }
+    explicit Scope(std::shared_ptr<const View> view,
+                   ValidationSession* session = ActiveValidationSession)
+        : previous_(std::move(ActiveView)),
+          previousSession_(ActiveValidationSession) {
+        ActiveView = std::move(view);
+        ActiveValidationSession = session;
+    }
+    ~Scope() noexcept {
+        ActiveValidationSession = previousSession_;
+        ActiveView = std::move(previous_);
+    }
     Scope(const Scope&) = delete;
     Scope& operator=(const Scope&) = delete;
 private:
     std::shared_ptr<const View> previous_;
+    ValidationSession* previousSession_ = nullptr;
 };
 
 class NamedShapeDriver final : public BinMNaming_NamedShapeDriver {

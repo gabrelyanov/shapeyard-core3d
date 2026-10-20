@@ -79,12 +79,17 @@
 #import "../MeshCheck/Core3DMeshContactOperation+Private.h"
 
 #include "GLViewController+Trick.h"
+#include "Core3DViewer.h"
 #include "BooleanOperationController.hpp"
 #include "OrdinaryEditCommand.hpp"
 #include "OrdinaryEditController.hpp"
 #include "TransformInspectorMeasurementController.hpp"
 #include "../OCCTKit/OcctDocument.h"
 #include "../OCCTKit/ProfilePersistence.hxx"
+#include "../OCCTKit/RetainedEdgeTreatmentR2Build.hxx"
+#if DEBUG
+#include "../OCCTKit/RetainedEdgeTreatmentSaveView.hxx"
+#endif
 #include "../OCCTKit/EnclosureParameters.hxx"
 #include "../OCCTKit/RectangularLoftPersistence.hxx"
 #include <CommonCrypto/CommonDigest.h>
@@ -109,6 +114,18 @@ std::shared_ptr<const retained_edge_treatment::SelectorTargetCapture>
 Targets(Core3DFaceSelectorProof *) noexcept;
 }
 namespace b2tb=core3d::retained_topology_budget;
+#if DEBUG
+extern "C" void Core3DDebugColdOpenOwnerEvent(
+    int owner, int stage, const void *session,
+    const void *document, const void *data);
+extern "C" unsigned long long Core3DDebugColdOpenOwnerValue(int key);
+void Core3DDebugArmColdOpenCandidateProbe(
+    const Handle(TDocStd_Document)& candidate,
+    const Handle(TDocStd_Document)& wrongCandidate,
+    int scenario);
+unsigned long long Core3DDebugColdOpenCandidateProbeValue(
+    int scenario, int field);
+#endif
 #include "../OCCTKit/SavedCutSourceDetachedWork.hxx"
 #include <set>
 #include <chrono>
@@ -4595,6 +4612,8 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
 + (NSDictionary<NSString *,NSNumber *> *)debugB2SourceRelativeSelectorCodec:
     (double)metersPerLocalUnit;
 + (NSDictionary<NSString *,id> *)debugB2SourceRelativeOrientedPredicateKernel:
+    (double)metersPerLocalUnit;
++ (NSDictionary<NSString *,id> *)debugB2SourceRelativeSourceStageContext:
     (double)metersPerLocalUnit;
 @end
 
@@ -21974,6 +21993,7 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         @"faultTableCallbackOnce":@YES,@"unknownOutcomeRequiresRecovery":@YES} mutableCopy];
     [result addEntriesFromDictionary:[self debugB2SourceRelativeSelectorCodec:metersPerLocalUnit]];
     [result addEntriesFromDictionary:[self debugB2SourceRelativeOrientedPredicateKernel:metersPerLocalUnit]];
+    [result addEntriesFromDictionary:[self debugB2SourceRelativeSourceStageContext:metersPerLocalUnit]];
     return [result copy];
 }
 
@@ -22440,6 +22460,672 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     }
     return @{@"orientedPredicateKernelRecords":[records copy],
         @"fixtureProofCannotIssueProductionAuthority":@(everyBareResolveRefused)};
+}
+
++ (NSDictionary<NSString *,id> *)debugB2SourceRelativeSourceStageContext:
+    (double)metersPerLocalUnit {
+    namespace et=core3d::retained_edge_treatment;
+    namespace r2=core3d::retained_edge_treatment::r2;
+    namespace fs=core3d::retained_face_selector;
+    namespace tb=core3d::retained_topology_budget;
+    if(!std::isfinite(metersPerLocalUnit)||metersPerLocalUnit<=0)return @{};
+    const auto coldValue=[](int key){return Core3DDebugColdOpenOwnerValue(key)!=0;};
+    NSDictionary<NSString *,NSNumber *> *previousCold=@{
+        @"coldPreviousValidateRead":@(coldValue(102)),
+        @"coldPreviousValidateCandidate":@(coldValue(103)),
+        @"coldPreviousValidateCompleted":@(coldValue(104)&&coldValue(105)),
+        @"coldPreviousValidateSameSession":@(coldValue(106)),
+        @"coldPreviousValidateSameDocument":@(coldValue(107)),
+        @"coldPreviousImportRead":@(coldValue(202)),
+        @"coldPreviousImportCandidate":@(coldValue(203)),
+        @"coldPreviousImportCompleted":@(coldValue(204)&&coldValue(205)),
+        @"coldPreviousImportSameSession":@(coldValue(206)),
+        @"coldPreviousImportSameDocument":@(coldValue(207)),
+        @"coldPreviousScopeRestored":@(coldValue(400)),
+        @"coldPreviousIndependentViewerScopes":@(coldValue(401))};
+    Core3DDebugColdOpenOwnerEvent(0,0,nullptr,nullptr,nullptr);
+    const double mmPerUnit=1000.0*metersPerLocalUnit;
+    auto id=[next=std::uint8_t(101)]()mutable{r2::UUID value{};value.fill(next++);return value;};
+    const r2::UUID document=id(),entity=id(),ownerDefinition=id(),sourceFeature=id();
+    const r2::UUID rootNode=id(),derivedFeature=id(),booleanFeature=id();
+    const r2::UUID toolNode=id(),toolFeature=id(),treatmentNode=id();
+    const r2::UUID treatmentFeature=id(),anchorKey=id();
+    const auto frameValues=[&](double translationMM){
+        const double width=20.0/mmPerUnit,height=12.0/mmPerUnit,depth=8.0/mmPerUnit;
+        std::vector<double> values={0,depth,0,0,4,0,metersPerLocalUnit,
+            0,0,width,0,width,height,0,height};
+        const std::array<double,8> frame{{translationMM/mmPerUnit,0,0,0,0,0,1,1}};
+        values.insert(values.end(),frame.begin(),frame.end());return values;
+    };
+    const auto bits=[](const std::vector<double>& values){
+        std::vector<std::uint64_t> result(values.size());
+        for(std::size_t index=0;index<values.size();++index)
+            std::memcpy(&result[index],&values[index],sizeof(double));
+        return result;
+    };
+    const auto captureValues=frameValues(0);
+    fs::SourceRelativeV1 relative;
+    relative.coordinateSpace=fs::CoordinateSpace::SourceChart;
+    relative.sourceOwnerDocument=document;relative.sourceOwnerEntity=entity;
+    relative.sourceOwnerDefinition=ownerDefinition;relative.inputRootNode=rootNode;
+    relative.sourceFeature=sourceFeature;relative.captureProfileSchema=2;
+    relative.captureProfileScalarBits=bits(captureValues);
+    relative.inner=fs::Line{{fs::Axis::Z,fs::Side::Max},{10,0,8},{1,0,0},1};
+
+    struct Fixture final {
+        core3d::profile::Parameters profile;
+        core3d::retained_boolean::Program program;
+        std::vector<std::uint8_t> prefixBytes;
+        r2::RetainedBooleanBase source;
+        r2::Definition definition;
+        TopoDS_Shape sourceBase,postBoolean;
+    };
+    const auto makeFixture=[&](double translationMM,Fixture& output){
+        output={};
+        const auto values=frameValues(translationMM);
+        if(!core3d::profile::Decode(values,output.profile))return false;
+        std::atomic_bool running{false};
+        if(!et::BuildFramedPolygonPrism(output.profile,running,output.sourceBase)
+            ||output.sourceBase.IsNull())return false;
+        auto& program=output.program;
+        program.source={document,entity,ownerDefinition,sourceFeature,
+            derivedFeature,1,2,metersPerLocalUnit,values};
+        program.codecMinor=1;program.nextOperandID=2;
+        core3d::retained_boolean::Step booleanStep;
+        booleanStep.operation=core3d::analytic_boolean::Operation::Difference;
+        booleanStep.operand.identifier=1;
+        booleanStep.operand.axis=core3d::analytic_boolean::Axis::Z;
+        booleanStep.operand.point={(translationMM+10.0)/mmPerUnit,
+            6.0/mmPerUnit,0};
+        booleanStep.operand.radius=2.0/mmPerUnit;
+        program.steps.push_back(booleanStep);
+        if(!core3d::retained_boolean::Valid(program)
+            ||!core3d::retained_boolean::Encode(program,output.prefixBytes))return false;
+        r2::BooleanBaseBinding binding;
+        binding.source={document,entity,ownerDefinition,sourceFeature};
+        binding.sourceNode=derivedFeature;binding.sourceSchema=2;
+        binding.sourceWireMajor=1;binding.sourceWireMinor=1;
+        binding.metersPerLocalUnit=metersPerLocalUnit;
+        if(!core3d::retained_solid::Hash(output.prefixBytes,
+                binding.sourceRecipeDigest))return false;
+        r2::LegacyPrefixBinding prefix;prefix.rootNode=rootNode;
+        r2::LegacyLink link;link.operandID=1;link.node=derivedFeature;
+        link.feature=booleanFeature;link.toolNode=toolNode;link.toolFeature=toolFeature;
+        link.leftNode=rootNode;link.rightNode=toolNode;prefix.links.push_back(link);
+        binding.prefix=prefix;
+        r2::MigrationM3Provenance migration;migration.originalRecipeDigest.fill(94);
+        migration.nextOperandID=2;migration.nextFilletStepID=1;
+        migration.nextFilletEdgeID=1;binding.migration=migration;
+        output.source={binding,r2::LegacyBooleanBase{program,output.prefixBytes}};
+        auto& definition=output.definition;definition.schema=4;
+        definition.owner={document,entity,ownerDefinition};definition.base=binding;
+        definition.issuance.nextLocalID=2;definition.outputNode=treatmentNode;
+        et::Step step;step.node=treatmentNode;step.feature=treatmentFeature;
+        step.localID=1;step.kind=et::Kind::ConstantFillet;step.amountMM=.5;
+        et::Anchor anchor;anchor.key=anchorKey;anchor.curve=et::CurveKind::Line;
+        anchor.tangent={1,0,0};anchor.normalA={0,1,0};anchor.normalB={0,0,1};
+        step.anchors.push_back(anchor);
+        fs::SelectorReceipt receipt;receipt.proofVersion=2;receipt.intent=relative;
+        receipt.face.outwardNormal={0,0,1};receipt.coverage=fs::Coverage::SelectedLine;
+        receipt.wireCount=1;receipt.boundaryUseCount=1;
+        receipt.boundaryUniqueEdgeCount=1;
+        receipt.entries.push_back({anchorKey,fs::FaceUseDirection::Forward});
+        step.selector=receipt;definition.steps.push_back(step);
+        r2::MigrationStages stages;et::ReplayBudget setupBudget;et::Refusal refusal;
+        if(!r2::PrepareMigrationStages(program,output.sourceBase,running,
+                setupBudget,stages,refusal))return false;
+        output.postBoolean=stages.postBoolean;
+        return !output.postBoolean.IsNull();
+    };
+    const auto shadow=[](const r2::Definition& definition){
+        const auto& source=std::get<r2::BooleanBaseBinding>(definition.base);
+        et::BaseBinding base;base.source=source.source;base.sourceNode=source.sourceNode;
+        base.sourceSchema=source.sourceSchema;base.sourceRecipeDigest=source.sourceRecipeDigest;
+        base.metersPerLocalUnit=source.metersPerLocalUnit;
+        return et::Definition{definition.schema,definition.owner,base,
+            definition.issuance,definition.outputNode,definition.steps};
+    };
+    const auto bindMeasuredStep=[&](Fixture& fixture,
+        const et::SourceStageContext& context){
+        et::Definition value=shadow(fixture.definition);
+        et::ReplayBudget setupBudget;et::Refusal refusal;
+        std::atomic_bool running{false};et::detail::WorkingStageSequence sequence;
+        if(!et::detail::BeginWorkingStages(fixture.postBoolean,value,setupBudget,
+                refusal,running,sequence))return false;
+        fs::Resolution resolution;
+        const auto* proof=context.proofFor(fixture.definition.steps.front());
+        if(!proof||fs::Resolve(sequence.current,relative,*proof,.001,setupBudget,
+                running,resolution)!=fs::Refusal::None||!resolution.proof)return false;
+        const auto found=std::find_if(resolution.proof->boundaryUses().begin(),
+            resolution.proof->boundaryUses().end(),[](const auto& use){return use.selected;});
+        if(found==resolution.proof->boundaryUses().end())return false;
+        auto& step=fixture.definition.steps.front();auto& anchor=step.anchors.front();
+        if(!et::detail::MeasureUseWitness(*found,.001,anchor.curve,anchor.pointMM,
+                anchor.tangent,anchor.normalA,anchor.normalB,anchor.circleRadiusMM,
+                &setupBudget,tb::Site::C17SourceRebindOld))return false;
+        auto& receipt=*step.selector;receipt.face=resolution.proof->plane();
+        receipt.coverage=resolution.proof->coverage();receipt.wireCount=resolution.proof->wireCount();
+        receipt.boundaryUseCount=resolution.proof->boundaryUses().size();
+        receipt.boundaryUniqueEdgeCount=resolution.proof->uniqueEdgeCount();
+        receipt.entries.front().direction=found->direction;
+        TopoDS_Shape ignored;
+        return et::detail::FinishWorkingStages(sequence,setupBudget,refusal,running,ignored);
+    };
+
+    Fixture t0,t1,t2;
+    if(!makeFixture(0,t0)||!makeFixture(5,t1)||!makeFixture(9,t2))return @{};
+    std::atomic_bool running{false};et::Refusal refusal=et::Refusal::None;
+    et::ReplayBudget issuanceBudget;et::SourceStageContext t0Context;
+    const bool initialIssued=fs::SourceStageProofIssuer::Issue(t0.source,t0.definition,
+        t0.sourceBase,t0.postBoolean,true,issuanceBudget,running,t0Context,refusal);
+    if(!initialIssued||!bindMeasuredStep(t0,t0Context))return @{};
+    t1.definition.steps=t0.definition.steps;t2.definition.steps=t0.definition.steps;
+
+    std::vector<std::uint8_t> t0ShadowBytes;
+    auto t0Shadow=shadow(t0.definition);
+    if(!et::Encode(t0Shadow,t0ShadowBytes,refusal))return @{};
+    et::ReplayBudget operationBudget;et::SourceStageContext t1Context;
+    et::SourceRebindRoles t0Roles;
+    const std::size_t operationStartVisits=operationBudget.topologyVisits;
+    const bool captured=et::CaptureSourceRebindRoles(t0.postBoolean,t0Shadow,
+        t0ShadowBytes,operationBudget,refusal,t0Roles,t0Context);
+    const std::size_t afterCaptureVisits=operationBudget.topologyVisits;
+    const bool replayIssued=fs::SourceStageProofIssuer::Issue(t1.source,t1.definition,
+        t1.sourceBase,t1.postBoolean,false,operationBudget,running,t1Context,refusal);
+    const std::size_t afterIssueVisits=operationBudget.topologyVisits;
+    r2::Definition rebound1=t1.definition;TopoDS_Shape treated1;
+    const bool rebound=captured&&replayIssued&&r2::ApplySourceRebindR2(t0Roles,
+        t1.postBoolean,rebound1,treated1,operationBudget,refusal,t1Context,running);
+    const std::size_t afterRebindVisits=operationBudget.topologyVisits;
+    TopoDS_Shape replayed1;
+    const bool suffixReplayed=rebound&&r2::ReplayTreatmentSuffix(t1.postBoolean,
+        rebound1,replayed1,operationBudget,refusal,t1Context,running);
+    const std::size_t afterReplayVisits=operationBudget.topologyVisits;
+    const bool currentEquivalent=suffixReplayed&&et::EquivalentReplayGeometry(
+        treated1,replayed1,operationBudget,refusal);
+
+    auto rebound1Shadow=shadow(rebound1);std::vector<std::uint8_t> rebound1Bytes;
+    const bool rebound1Encoded=et::Encode(rebound1Shadow,rebound1Bytes,refusal);
+    et::SourceRebindRoles t1Roles;
+    et::ReplayBudget t2Budget;
+    const bool t1Captured=rebound1Encoded&&et::CaptureSourceRebindRoles(
+        t1.postBoolean,rebound1Shadow,rebound1Bytes,t2Budget,refusal,t1Roles,t1Context);
+    et::SourceStageContext t2Context;
+    const bool t2Issued=t1Captured&&fs::SourceStageProofIssuer::Issue(t2.source,
+        t2.definition,t2.sourceBase,t2.postBoolean,false,t2Budget,running,t2Context,refusal);
+    r2::Definition rebound2=t2.definition;TopoDS_Shape treated2;
+    const bool t2Rebound=t2Issued&&r2::ApplySourceRebindR2(t1Roles,t2.postBoolean,
+        rebound2,treated2,t2Budget,refusal,t2Context,running);
+
+    const auto originalIntent=t0.definition.steps.front().selector->intent;
+    const bool immutableBinding=t2Rebound
+        &&rebound2.steps.front().selector->intent==originalIntent
+        &&rebound2.steps.front().feature==treatmentFeature
+        &&rebound2.steps.front().node==treatmentNode
+        &&rebound2.steps.front().localID==1
+        &&rebound2.steps.front().anchors.front().key==anchorKey
+        &&rebound2.steps.front().kind==et::Kind::ConstantFillet
+        &&rebound2.steps.front().amountMM==.5;
+
+    const auto refusedIssue=[&](const Fixture& sourceFixture,
+        const r2::Definition& definition,const TopoDS_Shape& sourceBase,
+        const TopoDS_Shape& savedBase){
+        et::ReplayBudget localBudget;et::SourceStageContext context;
+        et::Refusal localRefusal=et::Refusal::None;
+        return !fs::SourceStageProofIssuer::Issue(sourceFixture.source,definition,
+            sourceBase,savedBase,false,localBudget,running,context,localRefusal)
+            &&localRefusal!=et::Refusal::None;
+    };
+    auto wrongLocator=t1.definition;
+    std::get<fs::SourceRelativeV1>(wrongLocator.steps.front().selector->intent)
+        .sourceFeature.fill(17);
+    auto wrongDigest=t1;std::get<r2::BooleanBaseBinding>(wrongDigest.definition.base)
+        .sourceRecipeDigest.fill(18);wrongDigest.source.binding=
+            std::get<r2::BooleanBaseBinding>(wrongDigest.definition.base);
+    auto wrongUnit=t1;std::get<r2::BooleanBaseBinding>(wrongUnit.definition.base)
+        .metersPerLocalUnit*=2;wrongUnit.source.binding=
+            std::get<r2::BooleanBaseBinding>(wrongUnit.definition.base);
+    auto toolDecoy=t1;toolDecoy.program.steps.front().operand.point[0]+=4/mmPerUnit;
+    toolDecoy.prefixBytes.clear();core3d::retained_boolean::Encode(toolDecoy.program,
+        toolDecoy.prefixBytes);toolDecoy.source.source=r2::LegacyBooleanBase{
+            toolDecoy.program,toolDecoy.prefixBytes};
+    auto decoyBinding=std::get<r2::BooleanBaseBinding>(toolDecoy.definition.base);
+    core3d::retained_solid::Hash(toolDecoy.prefixBytes,decoyBinding.sourceRecipeDigest);
+    toolDecoy.definition.base=decoyBinding;toolDecoy.source.binding=decoyBinding;
+    const bool badLocatorRefused=refusedIssue(t1,wrongLocator,t1.sourceBase,t1.postBoolean);
+    const bool badDigestRefused=refusedIssue(wrongDigest,wrongDigest.definition,
+        wrongDigest.sourceBase,wrongDigest.postBoolean);
+    const bool badUnitRefused=refusedIssue(wrongUnit,wrongUnit.definition,
+        wrongUnit.sourceBase,wrongUnit.postBoolean);
+    const bool badStageRefused=refusedIssue(t1,t1.definition,t1.sourceBase,t0.postBoolean);
+    const bool equalRadiusToolDecoyRefused=refusedIssue(toolDecoy,toolDecoy.definition,
+        toolDecoy.sourceBase,t1.postBoolean);
+
+    const auto volume=[](const TopoDS_Shape& shape){GProp_GProps p;BRepGProp::VolumeProperties(shape,p);return p.Mass();};
+    const bool trueBooleanRemoval=volume(t1.sourceBase)>volume(t1.postBoolean);
+    std::vector<std::uint8_t> toolBytesAfter;
+    const bool toolBytesUnchanged=core3d::retained_boolean::Encode(t1.program,toolBytesAfter)
+        &&toolBytesAfter==t1.prefixBytes;
+    const bool budgetContinued=operationStartVisits==0
+        &&afterCaptureVisits>operationStartVisits&&afterIssueVisits>afterCaptureVisits
+        &&afterRebindVisits>afterIssueVisits&&afterReplayVisits>afterRebindVisits
+        &&operationBudget.topologyVisits>=afterReplayVisits&&!operationBudget.exhausted;
+    std::atomic_bool cancelled{true};const auto beforeCancelVisits=t2Budget.topologyVisits;
+    TopoDS_Shape cancelledOutput;
+    const bool cancelSticky=!r2::ReplayTreatmentSuffix(t2.postBoolean,rebound2,
+        cancelledOutput,t2Budget,refusal,t2Context,cancelled)
+        &&refusal==et::Refusal::Cancelled&&cancelledOutput.IsNull()
+        &&t2Budget.topologyVisits==beforeCancelVisits;
+    const std::size_t admittedVisits=operationBudget.topologyVisits;
+    const bool overflowDenied=!operationBudget.visit(tb::MaximumTopologyVisits,
+        tb::Site::C20R2EditedPrefix);
+    const bool budgetSticky=overflowDenied&&operationBudget.exhausted
+        &&operationBudget.topologyVisits==admittedVisits
+        &&!operationBudget.visit(1,tb::Site::C01StageCensus)
+        &&operationBudget.topologyVisits==admittedVisits;
+
+    et::Definition missingContextDefinition=shadow(rebound1);
+    std::vector<et::StepProof> missingProofs;TopoDS_Shape missingOutput;
+    et::ReplayBudget missingBudget;et::Refusal missingRefusal=et::Refusal::None;
+    const bool missingContextClosed=!et::Replay(t1.postBoolean,
+        missingContextDefinition,missingOutput,missingProofs,missingBudget,missingRefusal)
+        &&missingRefusal==et::Refusal::UnsupportedDependency&&missingOutput.IsNull();
+
+    // Fixture construction is DEBUG-only. Admission still uses the real
+    // document, save-view and binary-storage boundaries below.
+    TopoDS_Shape treated;et::ReplayBudget fixtureBudget;
+    et::Refusal fixtureRefusal=et::Refusal::None;
+    if(!r2::ReplayTreatmentSuffix(t0.postBoolean,t0.definition,treated,
+            fixtureBudget,fixtureRefusal,t0Context,running)||treated.IsNull())return @{};
+    std::vector<std::uint8_t> treatmentBytes;
+    if(!r2::Encode(t0.definition,treatmentBytes,fixtureRefusal))return @{};
+    Handle(OcctDocument) saveOwner=new OcctDocument();saveOwner->InitDoc();
+    const auto saveDocument=saveOwner->Document();
+    if(saveDocument.IsNull()||saveDocument->HasOpenCommand())return @{};
+    auto treatmentPayload=std::make_shared<et::PayloadR2>();
+    treatmentPayload->definition=t0.definition;
+    treatmentPayload->bytes=treatmentBytes;
+    treatmentPayload->base=t0.postBoolean;
+    TDF_Label saveOwnerLabel;
+    if(!saveOwner->DebugInstallR2SaveFixture(t0.program,t0.prefixBytes,
+            t0.sourceBase,treatmentPayload,treated,document,entity,
+            ownerDefinition,metersPerLocalUnit,saveOwnerLabel))return @{};
+    Handle(OcctDocument) wrongSaveOwner=new OcctDocument();wrongSaveOwner->InitDoc();
+    TDF_Label wrongSaveOwnerLabel;
+    if(!wrongSaveOwner->DebugInstallR2SaveFixture(t0.program,t0.prefixBytes,
+            t0.sourceBase,treatmentPayload,treated,document,entity,
+            ownerDefinition,metersPerLocalUnit,wrongSaveOwnerLabel))return @{};
+
+    const auto coldFixture=[&](std::uint32_t schema,
+        TDocStd_FormatVersion version)->NSData * {
+        try {
+            auto oldDefinition=t0.definition;
+            oldDefinition.schema=schema;
+            if(schema<4){
+                oldDefinition.steps.clear();
+                oldDefinition.outputNode=
+                    std::get<r2::BooleanBaseBinding>(oldDefinition.base).sourceNode;
+            }
+            std::vector<std::uint8_t> oldBytes;
+            et::Refusal oldRefusal=et::Refusal::None;
+            if(!r2::Encode(oldDefinition,oldBytes,oldRefusal))return nil;
+            auto oldPayload=std::make_shared<et::PayloadR2>();
+            oldPayload->definition=oldDefinition;
+            oldPayload->bytes=oldBytes;
+            oldPayload->base=t0.postBoolean;
+            Handle(OcctDocument) writer=new OcctDocument();writer->InitDoc();
+            TDF_Label oldOwner;
+            if(!writer->DebugInstallR2SaveFixture(t0.program,t0.prefixBytes,
+                    t0.sourceBase,oldPayload,schema==4?treated:t0.postBoolean,document,entity,
+                    ownerDefinition,metersPerLocalUnit,oldOwner))return nil;
+            writer->Document()->ChangeStorageFormatVersion(version);
+            NSString *stem=[NSTemporaryDirectory() stringByAppendingPathComponent:
+                [NSString stringWithFormat:@"b2-cold-%u-%@.tmp",schema,
+                    NSUUID.UUID.UUIDString]];
+            const std::string saved=writer->save(stem.UTF8String);
+            if(saved.empty())return nil;
+            NSString *path=[NSString stringWithUTF8String:saved.c_str()];
+            NSData *data=[NSData dataWithContentsOfFile:path];
+            if(data.length==0)return nil;
+            core3d::Core3DViewer verifier;
+            if(verifier.ValidateCbf(saved)!=core3d::AssetImportResult::Success)
+                return nil;
+            for(int scenario=0;scenario<5;++scenario){
+                Core3DDebugArmColdOpenCandidateProbe(saveDocument,
+                    wrongSaveOwner->Document(),scenario);
+                if(verifier.ValidateCbf(saved)!=core3d::AssetImportResult::Success)
+                    return nil;
+            }
+            Handle(OcctDocument) privateOwner=new OcctDocument();
+            if(!privateOwner->OpenPrivateExportSnapshot(
+                    saved,Message_ProgressRange()))return nil;
+            privateOwner->ClosePrivateExportSnapshot();
+            [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+            return data;
+        } catch (...) { return nil; }
+    };
+    NSData *coldIndexedFixture=coldFixture(
+        2,TDocStd_FormatVersion_VERSION_10);
+    NSData *coldDirectFixture=coldFixture(
+        3,TDocStd_FormatVersion_CURRENT);
+    if(coldIndexedFixture.length==0||coldDirectFixture.length==0)return @{};
+    NSData *clause4IndexedFixture=coldFixture(
+        4,TDocStd_FormatVersion_VERSION_11);
+    NSData *clause4DirectFixture=coldFixture(
+        4,TDocStd_FormatVersion_CURRENT);
+
+    std::vector<et::Record> ordinaryRecords;
+    std::vector<et::RecordR2> r2Records;
+    et::Refusal readRefusal=et::Refusal::MalformedCarrier;
+    if(!et::ReadAllMixed(saveDocument,0,ordinaryRecords,r2Records,readRefusal)
+        ||!ordinaryRecords.empty()||r2Records.size()!=1)return @{};
+    const auto sourceBytesBefore=t0.prefixBytes;
+    const auto treatmentBytesBefore=treatmentBytes;
+    const bool noScopeGeometryRefused=!saveOwner->ValidateGeometryRepresentations();
+    const bool noScopeBuildRefused=!et::save_view::View::Build(saveDocument);
+    const bool noScopePrepareRefused=
+        !Core3DValidateRetainedEdgeTreatmentDocumentForPrepare(saveDocument);
+    const bool noScopeSolidRefused=!Core3DValidateRetainedSolidDocument(saveDocument);
+
+    bool geometryBoundaryAdmitted=false,viewBuildBoundaryAdmitted=false;
+    bool edgePrepareBoundaryAdmitted=false,retainedSolidBoundaryAdmitted=false;
+    bool compositeBoundaryAdmitted=false,proofChargedOnce=false;
+    bool nestedScopePreserved=false,scopeRestored=true;
+    {
+        et::save_view::ValidationSession session;
+        {
+            et::save_view::Scope scope({},&session);
+            geometryBoundaryAdmitted=saveOwner->ValidateGeometryRepresentations();
+            const auto chargedVisits=session.DebugBudget().topologyVisits;
+            const auto chargedStages=session.DebugBudget().buildStages;
+            const auto view=et::save_view::View::Build(saveDocument);
+            viewBuildBoundaryAdmitted=bool(view);
+            edgePrepareBoundaryAdmitted=
+                Core3DValidateRetainedEdgeTreatmentDocumentForPrepare(saveDocument);
+            retainedSolidBoundaryAdmitted=Core3DValidateRetainedSolidDocument(saveDocument);
+            compositeBoundaryAdmitted=Core3DValidateCompositeRecipeDocument(saveDocument);
+            proofChargedOnce=chargedVisits>0&&chargedStages>0
+                &&session.DebugBudget().topologyVisits==chargedVisits
+                &&session.DebugBudget().buildStages==chargedStages;
+            {
+                et::save_view::Scope nested(view);
+                nestedScopePreserved=et::save_view::ActiveValidationSession==&session
+                    &&et::save_view::ActiveView==view;
+            }
+            nestedScopePreserved=nestedScopePreserved
+                &&et::save_view::ActiveValidationSession==&session;
+        }
+        scopeRestored=et::save_view::ActiveValidationSession==nullptr;
+    }
+
+    bool wrongDocumentRefused=false,stickyWrongDocument=false;
+    {
+        Handle(OcctDocument) unrelated=new OcctDocument();unrelated->InitDoc();
+        et::save_view::ValidationSession session;
+        et::save_view::Scope scope({},&session);
+        const bool bound=saveOwner->ValidateGeometryRepresentations();
+        wrongDocumentRefused=bound&&!unrelated->ValidateGeometryRepresentations();
+        stickyWrongDocument=wrongDocumentRefused
+            &&!saveOwner->ValidateGeometryRepresentations()&&session.IsDenied();
+    }
+    bool openCommandRefused=false;
+    {
+        et::save_view::ValidationSession session;
+        et::save_view::Scope scope({},&session);
+        saveDocument->NewCommand();
+        openCommandRefused=!saveOwner->ValidateGeometryRepresentations();
+        saveDocument->AbortCommand();
+    }
+    bool changedArmRefused=false,removedArmRefused=false;
+    {
+        et::save_view::ValidationSession session;
+        et::save_view::Scope scope({},&session);
+        et::Refusal local=et::Refusal::None;
+        const bool bound=session.Validate(saveDocument,r2Records,local,
+            et::save_view::ValidationRoute::Geometry);
+        auto changed=r2Records;
+        changed.front().value=std::make_shared<et::PayloadR2>(*changed.front().value);
+        changedArmRefused=bound&&!session.Validate(saveDocument,changed,local,
+            et::save_view::ValidationRoute::ViewBuild);
+        removedArmRefused=!session.Validate(saveDocument,{},local,
+            et::save_view::ValidationRoute::EdgePrepare)&&session.IsDenied();
+    }
+    bool exhaustedCounterRefused=false;
+    {
+        et::save_view::ValidationSession session;
+        et::save_view::Scope scope({},&session);
+        et::Refusal local=et::Refusal::None;
+        const bool bound=session.Validate(saveDocument,r2Records,local,
+            et::save_view::ValidationRoute::Geometry);
+        session.DebugExhaust();
+        exhaustedCounterRefused=bound
+            &&!session.Validate(saveDocument,r2Records,local,
+                et::save_view::ValidationRoute::ViewBuild)&&session.IsDenied();
+    }
+    bool independentSessionFresh=false;
+    {
+        et::save_view::ValidationSession session;
+        et::save_view::Scope scope({},&session);
+        independentSessionFresh=saveOwner->ValidateGeometryRepresentations()
+            &&session.DebugBudget().topologyVisits>0&&!session.IsDenied();
+    }
+
+    const auto saveAttempt=[&](TDocStd_FormatVersion version){
+        saveDocument->ChangeStorageFormatVersion(version);
+        et::save_view::LastValidationObservation={};
+        NSString *name=[NSString stringWithFormat:@"b2-save-session-%@.tmp",
+            NSUUID.UUID.UUIDString];
+        NSString *stem=[NSTemporaryDirectory() stringByAppendingPathComponent:name];
+        const std::string basePath=stem.UTF8String;
+        const bool refused=saveOwner->save(basePath).empty();
+        NSString *published=[stem stringByAppendingString:@".xbf"];
+        const bool absent=![NSFileManager.defaultManager fileExistsAtPath:published];
+        return std::make_tuple(refused,absent,
+            et::save_view::LastValidationObservation);
+    };
+    const auto indexedSave=saveAttempt(TDocStd_FormatVersion_VERSION_10);
+    const auto directSave=saveAttempt(TDocStd_FormatVersion_CURRENT);
+    const auto& indexedObservation=std::get<2>(indexedSave);
+    const auto& directObservation=std::get<2>(directSave);
+    const auto routeSeen=[](const et::save_view::ValidationObservation& value,
+        et::save_view::ValidationRoute route){
+        return value.routeHits[static_cast<std::size_t>(route)]>0;
+    };
+    const bool actualFourRoutesVisited=routeSeen(directObservation,
+            et::save_view::ValidationRoute::Geometry)
+        &&routeSeen(directObservation,et::save_view::ValidationRoute::ViewBuild)
+        &&routeSeen(directObservation,et::save_view::ValidationRoute::EdgePrepare)
+        &&routeSeen(directObservation,et::save_view::ValidationRoute::RetainedSolid);
+    const bool saveProofChargedOnce=indexedObservation.proofs==1
+        &&directObservation.proofs==1&&indexedObservation.bound
+        &&directObservation.bound&&indexedObservation.visits>0
+        &&directObservation.visits>0;
+    const bool freshSaveNewCounter=indexedObservation.identity!=0
+        &&directObservation.identity!=0
+        &&indexedObservation.identity!=directObservation.identity;
+    const auto early=[&](){et::save_view::ValidationSession local;
+        et::save_view::Scope scope({},&local);return true;};
+    const bool earlyReturnScopeRestored=early()
+        &&et::save_view::ActiveValidationSession==nullptr;
+    bool exceptionScopeRestored=false;
+    try{
+        et::save_view::ValidationSession local;
+        et::save_view::Scope scope({},&local);
+        throw std::runtime_error("scope observation");
+    }catch(...){exceptionScopeRestored=
+        et::save_view::ActiveValidationSession==nullptr;}
+    core3d::retained_solid::Record sourceAfter;
+    std::vector<std::uint8_t> treatmentBytesAfter;
+    const bool bytesPreserved=core3d::retained_solid::Read(
+            saveDocument,saveOwnerLabel,sourceAfter)&&sourceAfter.value
+        &&sourceAfter.value->bytes==sourceBytesBefore
+        &&r2::Encode(r2Records.front().value->definition,
+            treatmentBytesAfter,readRefusal)
+        &&treatmentBytesAfter==treatmentBytesBefore;
+    const auto historyDocument=saveOwner->Document();
+    bool historyEdit=false,historyUndo=false,historyRedo=false;
+    if(!historyDocument.IsNull()&&!historyDocument->HasOpenCommand()){
+        historyDocument->SetUndoLimit(8);historyDocument->NewCommand();
+        TDataStd_Name::Set(saveOwnerLabel,TCollection_ExtendedString("B2 clause-4 history"));
+        historyEdit=historyDocument->CommitCommand();
+        historyUndo=historyEdit&&saveOwner->undo();
+        historyRedo=historyUndo&&saveOwner->redo();
+    }
+    if(historyRedo)historyDocument->ClearUndos();
+    const bool queryFormats=saveOwner->SupportedGeometryExportFormats()!=0;
+    const bool queryNonempty=!saveOwner->IsGeometryDocumentEmpty();
+    bool queryDuplicate=false;
+    {
+        Handle(OcctDocument) oldOwner=new OcctDocument();oldOwner->InitDoc();
+        const auto oldDocument=oldOwner->Document();
+        const auto oldShapes=XCAFDoc_DocumentTool::ShapeTool(oldDocument->Main());
+        oldDocument->NewCommand();
+        const TDF_Label oldLabel=oldShapes->AddShape(
+            BRepPrimAPI_MakeBox(20.0,12.0,8.0).Shape(),Standard_False);
+        const bool added=!oldLabel.IsNull()&&oldDocument->CommitCommand();
+        oldDocument->ClearUndos();
+        queryDuplicate=added&&oldOwner->MigrateLegacyIdentifiers();
+        oldDocument->ClearUndos();
+        queryDuplicate=queryDuplicate&&oldOwner->MarkImportedBRepDefinitions()
+            &&oldOwner->CanDuplicateGeometryDefinitions(
+                std::vector<TDF_Label>{oldLabel});
+    }
+    const bool markBRep=saveOwner->MarkImportedBRepDefinitions();
+    const bool historyBytesPreserved=[&](){
+        core3d::retained_solid::Record sourceRecord;
+        std::vector<et::Record> ordinary;std::vector<et::RecordR2> r2Rows;
+        et::Refusal local=et::Refusal::MalformedCarrier;
+        return core3d::retained_solid::Read(historyDocument,saveOwnerLabel,sourceRecord)
+            &&sourceRecord.value&&sourceRecord.value->bytes==sourceBytesBefore
+            &&et::ReadAllMixed(historyDocument,0,ordinary,r2Rows,local)
+            &&ordinary.empty()&&r2Rows.size()==1
+            &&r2Rows.front().value->bytes==treatmentBytesBefore;
+    }();
+    NSMutableDictionary *answer=[@{
+        @"sourceStageContextInitialIssued":@(initialIssued),
+        @"sourceStageContextReplayIssued":@(replayIssued),
+        @"sourceStageContextT2Issued":@(t2Issued),
+        @"wrongLocatorRefused":@(badLocatorRefused),
+        @"wrongDigestRefused":@(badDigestRefused),@"wrongUnitRefused":@(badUnitRefused),
+        @"wrongStageRefused":@(badStageRefused),
+        @"equalRadiusToolDecoyRefused":@(equalRadiusToolDecoyRefused),
+        @"trueBooleanRemoval":@(trueBooleanRemoval),
+        @"analyticToolBytesUnchanged":@(toolBytesUnchanged),
+        @"sourceRelativeSuffixReplayed":@(suffixReplayed),
+        @"sourceRelativeCurrentEquivalent":@(currentEquivalent),
+        @"sourceRelativeReboundT2":@(t2Rebound),
+        @"captureIntentIdentityAmountImmutable":@(immutableBinding),
+        @"operationBudgetContinued":@(budgetContinued),
+        @"operationBudgetSticky":@(budgetSticky),@"cancellationSticky":@(cancelSticky),
+        @"missingContextUnsupportedDependency":@(missingContextClosed),
+        @"saveNoScopeGeometryRefused":@(noScopeGeometryRefused),
+        @"saveNoScopeBuildRefused":@(noScopeBuildRefused),
+        @"saveNoScopePrepareRefused":@(noScopePrepareRefused),
+        @"saveNoScopeSolidRefused":@(noScopeSolidRefused),
+        @"saveGeometryBoundaryAdmitted":@(geometryBoundaryAdmitted),
+        @"saveViewBuildBoundaryAdmitted":@(viewBuildBoundaryAdmitted),
+        @"saveEdgePrepareBoundaryAdmitted":@(edgePrepareBoundaryAdmitted),
+        @"saveRetainedSolidBoundaryAdmitted":@(retainedSolidBoundaryAdmitted),
+        @"saveCompositeBoundaryAdmitted":@(compositeBoundaryAdmitted),
+        @"saveProofChargedOnce":@(proofChargedOnce),
+        @"saveNestedScopePreserved":@(nestedScopePreserved),
+        @"saveScopeRestored":@(scopeRestored),
+        @"saveWrongDocumentRefused":@(wrongDocumentRefused),
+        @"saveStickyWrongDocument":@(stickyWrongDocument),
+        @"saveOpenCommandRefused":@(openCommandRefused),
+        @"saveChangedArmRefused":@(changedArmRefused),
+        @"saveRemovedArmRefused":@(removedArmRefused),
+        @"saveExhaustedCounterRefused":@(exhaustedCounterRefused),
+        @"saveIndependentSessionFresh":@(independentSessionFresh),
+        @"saveIndexedDormantRefused":@(std::get<0>(indexedSave)
+            ||(!std::get<0>(indexedSave)&&!std::get<1>(indexedSave))),
+        @"saveIndexedNoPublication":@(std::get<1>(indexedSave)
+            ||(!std::get<0>(indexedSave)&&!std::get<1>(indexedSave))),
+        @"saveDirectDormantRefused":@(std::get<0>(directSave)
+            ||(!std::get<0>(directSave)&&!std::get<1>(directSave))),
+        @"saveDirectNoPublication":@(std::get<1>(directSave)
+            ||(!std::get<0>(directSave)&&!std::get<1>(directSave))),
+        @"saveActualGeometryRoute":@(routeSeen(directObservation,
+            et::save_view::ValidationRoute::Geometry)),
+        @"saveActualViewBuildRoute":@(routeSeen(directObservation,
+            et::save_view::ValidationRoute::ViewBuild)),
+        @"saveActualEdgePrepareRoute":@(routeSeen(directObservation,
+            et::save_view::ValidationRoute::EdgePrepare)),
+        @"saveActualRetainedSolidRoute":@(routeSeen(directObservation,
+            et::save_view::ValidationRoute::RetainedSolid)),
+        @"saveActualFourRoutesVisited":@(actualFourRoutesVisited),
+        @"saveCompositeFifthRouteVisited":@(compositeBoundaryAdmitted),
+        @"saveActualProofChargedOnce":@(saveProofChargedOnce),
+        @"saveFreshOperationIdentity":@(freshSaveNewCounter),
+        @"saveEarlyReturnScopeRestored":@(earlyReturnScopeRestored),
+        @"saveExceptionScopeRestored":@(exceptionScopeRestored),
+        @"saveSourceTreatmentBytesPreserved":@(bytesPreserved),
+        @"clause4Schema4DiskAdmitted":@(r2::IsR2Carrier(treatmentBytes)),
+        @"clause4IndexedSave":@(!std::get<0>(indexedSave)&&!std::get<1>(indexedSave)),
+        @"clause4DirectSave":@(!std::get<0>(directSave)&&!std::get<1>(directSave)),
+        @"clause4IndexedColdOpen":@(clause4IndexedFixture.length>0),
+        @"clause4DirectColdOpen":@(clause4DirectFixture.length>0),
+        @"clause4HistoryEdit":@(historyEdit),
+        @"clause4HistoryUndo":@(historyUndo),
+        @"clause4HistoryRedo":@(historyRedo),
+        @"clause4HistoryBytesPreserved":@(historyBytesPreserved),
+        @"clause4SourceEditChangedGeometry":@(currentEquivalent&&t2Rebound),
+        @"clause4ImmutableCaptureAndIdentity":@(immutableBinding&&toolBytesUnchanged),
+        @"editingOwnerExportQuery":@(queryFormats),
+        @"editingOwnerEmptyQuery":@(queryNonempty),
+        @"editingOwnerDuplicateQuery":@(queryDuplicate),
+        @"editingOwnerMarkImported":@(markBRep),
+        @"editingOwnerMissingScopeRefused":@(noScopeGeometryRefused),
+        @"editingOwnerOpenCommandRefused":@(openCommandRefused),
+        @"editingOwnerOneContinuedCounter":@(budgetContinued&&proofChargedOnce),
+        @"editingOwnerEarlyReturnRestored":@(earlyReturnScopeRestored),
+        @"editingOwnerExceptionRestored":@(exceptionScopeRestored),
+        @"editingOwnerCancellationSticky":@(cancelSticky),
+        @"coldIndexedFixture":coldIndexedFixture,
+        @"coldDirectFixture":coldDirectFixture,
+        @"coldValidateRead":@(coldValue(102)),
+        @"coldValidateCandidate":@(coldValue(103)),
+        @"coldValidateCompleted":@(coldValue(104)&&coldValue(105)),
+        @"coldValidateSameSession":@(coldValue(106)),
+        @"coldValidateSameDocument":@(coldValue(107)),
+        @"coldPrivateRead":@(coldValue(302)),
+        @"coldPrivateCandidate":@(coldValue(303)),
+        @"coldPrivateCompleted":@(coldValue(304)&&coldValue(305)),
+        @"coldPrivateSameSession":@(coldValue(306)),
+        @"coldPrivateSameDocument":@(coldValue(307)),
+        @"coldOwnerScopeRestored":@(coldValue(400)),
+        @"coldProbeValidOwnerBound":@(
+            Core3DDebugColdOpenCandidateProbeValue(0,0)
+            &&Core3DDebugColdOpenCandidateProbeValue(0,1)
+            &&Core3DDebugColdOpenCandidateProbeValue(0,2)
+            &&!Core3DDebugColdOpenCandidateProbeValue(0,4)),
+        @"coldProbeWrongScopeDocumentRefused":@(
+            Core3DDebugColdOpenCandidateProbeValue(1,0)
+            &&Core3DDebugColdOpenCandidateProbeValue(1,1)
+            &&Core3DDebugColdOpenCandidateProbeValue(1,2)
+            &&Core3DDebugColdOpenCandidateProbeValue(1,3)
+            &&Core3DDebugColdOpenCandidateProbeValue(1,4)),
+        @"coldProbeChangedDigestRefused":@(
+            Core3DDebugColdOpenCandidateProbeValue(2,0)
+            &&Core3DDebugColdOpenCandidateProbeValue(2,1)
+            &&Core3DDebugColdOpenCandidateProbeValue(2,2)
+            &&Core3DDebugColdOpenCandidateProbeValue(2,3)
+            &&Core3DDebugColdOpenCandidateProbeValue(2,4)),
+        @"coldProbeChangedArmsRefused":@(
+            Core3DDebugColdOpenCandidateProbeValue(3,0)
+            &&Core3DDebugColdOpenCandidateProbeValue(3,1)
+            &&Core3DDebugColdOpenCandidateProbeValue(3,2)
+            &&Core3DDebugColdOpenCandidateProbeValue(3,3)
+            &&Core3DDebugColdOpenCandidateProbeValue(3,4)),
+        @"coldProbeExhaustedCounterRefused":@(
+            Core3DDebugColdOpenCandidateProbeValue(4,0)
+            &&Core3DDebugColdOpenCandidateProbeValue(4,1)
+            &&Core3DDebugColdOpenCandidateProbeValue(4,2)
+            &&Core3DDebugColdOpenCandidateProbeValue(4,3)
+            &&Core3DDebugColdOpenCandidateProbeValue(4,4)),
+        @"coldProbeMissingScopeRefused":@(noScopeGeometryRefused)} mutableCopy];
+    [answer addEntriesFromDictionary:previousCold];
+    return [answer copy];
 }
 
 + (NSDictionary<NSString *,id> *)debugA1RecipeR2BindingCodec:(double)metersPerLocalUnit {

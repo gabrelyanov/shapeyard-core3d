@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <istream>
 #include <locale>
+#include <memory>
 #include <ostream>
 #include <streambuf>
 #include <utility>
@@ -43,6 +44,7 @@
 namespace core3d::retained_edge_treatment {
 namespace tb = core3d::retained_topology_budget;
 namespace wf = core3d::native_physical_working_frame;
+struct SourceStageContext;
 inline bool ResolveAnchors(const TopoDS_Shape& source, const std::vector<Anchor>& anchors,
     double metersPerLocalUnit, std::vector<TopoDS_Edge>& edges,
     ReplayBudget& budget, Refusal& refusal) noexcept;
@@ -51,8 +53,53 @@ inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoD
 inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoDS_Shape& output,
     std::vector<StepProof>& proofs, ReplayBudget& budget, Refusal& refusal,
     const std::atomic_bool& stop) noexcept;
+inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoDS_Shape& output,
+    std::vector<StepProof>& proofs, ReplayBudget& budget, Refusal& refusal,
+    const SourceStageContext& sourceContext, const std::atomic_bool& stop) noexcept;
+inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoDS_Shape& output,
+    std::vector<StepProof>& proofs, ReplayBudget& budget, Refusal& refusal,
+    const SourceStageContext& sourceContext) noexcept;
 inline bool EquivalentReplayGeometry(const TopoDS_Shape& actual, const TopoDS_Shape& expectation,
     ReplayBudget& budget, Refusal& refusal) noexcept;
+
+// Ephemeral operation authority for schema-4 source-relative selectors. The
+// R2 issuer owns construction of these proofs; this value merely transports
+// one already-proved binding per persistent treatment feature through the
+// existing replay/capture/rebind machinery. It is never encoded or cached.
+struct SourceStageContext final {
+    std::vector<std::pair<UUID,
+        std::shared_ptr<const retained_face_selector::SourceStageProof>>> steps;
+
+    const retained_face_selector::SourceStageProof* proofFor(
+        const Step& step) const noexcept {
+        if (!step.selector
+            || !std::holds_alternative<retained_face_selector::SourceRelativeV1>(
+                step.selector->intent)) return nullptr;
+        const retained_face_selector::SourceStageProof* result = nullptr;
+        for (const auto& entry : steps) {
+            if (entry.first != step.feature) continue;
+            if (result || !entry.second) return nullptr;
+            result = entry.second.get();
+        }
+        return result;
+    }
+};
+
+inline bool NeedsSourceStageContext(const Step& step) noexcept {
+    return step.selector
+        && std::holds_alternative<retained_face_selector::SourceRelativeV1>(
+            step.selector->intent);
+}
+
+inline const retained_face_selector::SourceStageProof* RequireSourceStageProof(
+    const Step& step, const SourceStageContext* context,
+    Refusal& refusal) noexcept {
+    if (!NeedsSourceStageContext(step)) return nullptr;
+    if (!context) { refusal = Refusal::UnsupportedDependency; return nullptr; }
+    const auto* proof = context->proofFor(step);
+    if (!proof) refusal = Refusal::UnsupportedDependency;
+    return proof;
+}
 
 #if DEBUG
 namespace working_scale_debug {
@@ -363,9 +410,10 @@ inline bool EquivalentReplayGeometry(const TopoDS_Shape& actual, const TopoDS_Sh
 // through the whole actual/expectation/readback verification; the analyzer
 // input pass is charged first, and a budget failure survives error mapping
 // instead of being rewritten to ReplayMismatch.
-inline bool VerifyCurrent(const TopoDS_Shape& base, const TopoDS_Shape& current,
+inline bool VerifyCurrentImpl(const TopoDS_Shape& base, const TopoDS_Shape& current,
     const Definition& definition, const std::vector<StepProof>& proofs,
-    ReplayBudget& budget, Refusal& refusal) noexcept {
+    ReplayBudget& budget, Refusal& refusal,
+    const SourceStageContext* sourceContext) noexcept {
     try {
         if (base.IsNull() || current.IsNull()) { refusal = Refusal::ReplayMismatch; return false; }
         const std::atomic_bool neverCancelled{false};
@@ -374,8 +422,14 @@ inline bool VerifyCurrent(const TopoDS_Shape& base, const TopoDS_Shape& current,
         if (!BRepCheck_Analyzer(current).IsValid()
             || proofs.size() != definition.steps.size()) { refusal = Refusal::ReplayMismatch; return false; }
         TopoDS_Shape replayed; std::vector<StepProof> fresh;
-        if (!Replay(base, definition, replayed, fresh, budget, refusal) || fresh.size() != proofs.size()) {
-            if (refusal != Refusal::Budget) refusal = Refusal::ReplayMismatch;
+        const bool replayedOK = sourceContext
+            ? Replay(base, definition, replayed, fresh, budget, refusal,
+                *sourceContext)
+            : Replay(base, definition, replayed, fresh, budget, refusal);
+        if (!replayedOK || fresh.size() != proofs.size()) {
+            if (refusal != Refusal::Budget
+                && refusal != Refusal::UnsupportedDependency)
+                refusal = Refusal::ReplayMismatch;
             return false;
         }
         if (!EquivalentReplayGeometry(current, replayed, budget, refusal)) return false;
@@ -387,6 +441,19 @@ inline bool VerifyCurrent(const TopoDS_Shape& base, const TopoDS_Shape& current,
         }
         refusal = Refusal::None; return true;
     } catch (...) { refusal = Refusal::ReplayMismatch; return false; }
+}
+inline bool VerifyCurrent(const TopoDS_Shape& base, const TopoDS_Shape& current,
+    const Definition& definition, const std::vector<StepProof>& proofs,
+    ReplayBudget& budget, Refusal& refusal,
+    const SourceStageContext& sourceContext) noexcept {
+    return VerifyCurrentImpl(base, current, definition, proofs, budget, refusal,
+        &sourceContext);
+}
+inline bool VerifyCurrent(const TopoDS_Shape& base, const TopoDS_Shape& current,
+    const Definition& definition, const std::vector<StepProof>& proofs,
+    ReplayBudget& budget, Refusal& refusal) noexcept {
+    return VerifyCurrentImpl(base, current, definition, proofs, budget, refusal,
+        nullptr);
 }
 // Compatibility signature for independent calls outside an operation; B2
 // operation-internal callers must use the budgeted overload above.
@@ -634,7 +701,8 @@ inline bool BeginWorkingStages(const TopoDS_Shape& base,
 
 inline bool BuildWorkingStage(const Definition& definition, const Step& step,
     WorkingStageSequence& sequence, StepProof& proof, ReplayBudget& budget,
-    Refusal& refusal, const std::atomic_bool& stop) noexcept {
+    Refusal& refusal, const std::atomic_bool& stop,
+    const SourceStageContext* sourceContext = nullptr) noexcept {
     try {
     proof = {};
     TopoDS_Shape& current = sequence.current;
@@ -642,9 +710,15 @@ inline bool BuildWorkingStage(const Definition& definition, const Step& step,
     PlanarLineSubset planarSubset;
     bool usedPlanarSubset = false;
     if (step.selector) {
+        const auto* sourceProof = RequireSourceStageProof(
+            step, sourceContext, refusal);
+        if (NeedsSourceStageContext(step) && !sourceProof) return false;
         retained_face_selector::Resolution resolution;
-        const auto selectorRefusal = retained_face_selector::Resolve(current,
-            step.selector->intent, 0.001, budget, stop, resolution);
+        const auto selectorRefusal = sourceProof
+            ? retained_face_selector::Resolve(current, step.selector->intent,
+                *sourceProof, 0.001, budget, stop, resolution)
+            : retained_face_selector::Resolve(current, step.selector->intent,
+                0.001, budget, stop, resolution);
         if (selectorRefusal != retained_face_selector::Refusal::None
             || !resolution.proof) {
             const bool mixedPlanarBoundary =
@@ -819,9 +893,9 @@ inline bool FinishWorkingStages(WorkingStageSequence& sequence,
 }
 } // namespace detail
 
-inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoDS_Shape& output,
+inline bool ReplayImpl(const TopoDS_Shape& base, const Definition& definition, TopoDS_Shape& output,
     std::vector<StepProof>& proofs, ReplayBudget& budget, Refusal& refusal,
-    const std::atomic_bool& stop) noexcept {
+    const std::atomic_bool& stop, const SourceStageContext* sourceContext) noexcept {
     output.Nullify(); proofs.clear();
     try {
         detail::WorkingStageSequence sequence;
@@ -834,13 +908,35 @@ inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoD
         for (const Step& step : definition.steps) {
             StepProof proof;
             if (!detail::BuildWorkingStage(definition, step, sequence, proof,
-                    budget, refusal, stop)) return false;
+                    budget, refusal, stop, sourceContext)) return false;
             pending.push_back(std::move(proof));
         }
         if (!detail::FinishWorkingStages(sequence, budget, refusal, stop, output))
             return false;
         proofs = std::move(pending); refusal = Refusal::None; return true;
     } catch (...) { output.Nullify(); proofs.clear(); refusal = Refusal::BuildFailed; return false; }
+}
+
+inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoDS_Shape& output,
+    std::vector<StepProof>& proofs, ReplayBudget& budget, Refusal& refusal,
+    const SourceStageContext& sourceContext, const std::atomic_bool& stop) noexcept {
+    return ReplayImpl(base, definition, output, proofs, budget, refusal,
+        stop, &sourceContext);
+}
+
+inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoDS_Shape& output,
+    std::vector<StepProof>& proofs, ReplayBudget& budget, Refusal& refusal,
+    const std::atomic_bool& stop) noexcept {
+    return ReplayImpl(base, definition, output, proofs, budget, refusal,
+        stop, nullptr);
+}
+
+inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoDS_Shape& output,
+    std::vector<StepProof>& proofs, ReplayBudget& budget, Refusal& refusal,
+    const SourceStageContext& sourceContext) noexcept {
+    const std::atomic_bool neverCancelled{false};
+    return Replay(base, definition, output, proofs, budget, refusal,
+        sourceContext, neverCancelled);
 }
 
 inline bool Replay(const TopoDS_Shape& base, const Definition& definition, TopoDS_Shape& output,
@@ -1259,9 +1355,10 @@ inline bool RebindPlanarLineSubset(const TopoDS_Shape& stage,
 // old selected-use roles as pure value data. Every step is strictly replayed
 // on its correct old input stage, which both proves the stored witnesses
 // against the old native geometry and yields that stage for selector steps.
-inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
+inline bool CaptureSourceRebindRolesImpl(const TopoDS_Shape& oldStage,
     const Definition& original, const std::vector<std::uint8_t>& originalBytes,
-    ReplayBudget& budget, Refusal& refusal, SourceRebindRoles& output) noexcept {
+    ReplayBudget& budget, Refusal& refusal, SourceRebindRoles& output,
+    const SourceStageContext* sourceContext) noexcept {
     output = {};
     try {
         std::vector<std::uint8_t> canonical;
@@ -1291,10 +1388,17 @@ inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
         for (const Step& step : original.steps) {
             const TopoDS_Shape& current = sequence.current;
             if (step.selector) {
+                const auto* sourceProof = RequireSourceStageProof(
+                    step, sourceContext, refusal);
+                if (NeedsSourceStageContext(step) && !sourceProof) return false;
                 retained_face_selector::Resolution resolution;
-                const auto selectorRefusal = retained_face_selector::Resolve(current,
-                    step.selector->intent, 0.001, budget,
-                    neverCancelled, resolution);
+                const auto selectorRefusal = sourceProof
+                    ? retained_face_selector::Resolve(current,
+                        step.selector->intent, *sourceProof, 0.001, budget,
+                        neverCancelled, resolution)
+                    : retained_face_selector::Resolve(current,
+                        step.selector->intent, 0.001, budget,
+                        neverCancelled, resolution);
                 PlanarLineSubset planarSubset;
                 bool usedPlanarSubset = false;
                 retained_face_selector::Refusal receiptRefusal =
@@ -1424,7 +1528,7 @@ inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
             }
             StepProof proof;
             if (!detail::BuildWorkingStage(original, step, sequence, proof,
-                    budget, refusal, neverCancelled)) return false;
+                    budget, refusal, neverCancelled, sourceContext)) return false;
         }
         TopoDS_Shape verified;
         if (!detail::FinishWorkingStages(sequence, budget, refusal,
@@ -1435,15 +1539,31 @@ inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
     } catch (...) { output = {}; refusal = Refusal::ReplayMismatch; return false; }
 }
 
+inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
+    const Definition& original, const std::vector<std::uint8_t>& originalBytes,
+    ReplayBudget& budget, Refusal& refusal, SourceRebindRoles& output,
+    const SourceStageContext& sourceContext) noexcept {
+    return CaptureSourceRebindRolesImpl(oldStage, original, originalBytes,
+        budget, refusal, output, &sourceContext);
+}
+
+inline bool CaptureSourceRebindRoles(const TopoDS_Shape& oldStage,
+    const Definition& original, const std::vector<std::uint8_t>& originalBytes,
+    ReplayBudget& budget, Refusal& refusal, SourceRebindRoles& output) noexcept {
+    return CaptureSourceRebindRolesImpl(oldStage, original, originalBytes,
+        budget, refusal, output, nullptr);
+}
+
 // Phase two, usable from the detached build: resolve the unchanged selector
 // intent against the actually rebuilt source stage, rebind the verified
 // witnesses through the unique role correspondence, update the canonical
 // source binding with the exact requested typed recipe/schema/digest, and
 // strictly replay every suffix step on its correct newly rebuilt input stage.
-inline bool ApplySourceRebind(const SourceRebindRoles& roles,
+inline bool ApplySourceRebindImpl(const SourceRebindRoles& roles,
     const BaseRecipe& requested, const TopoDS_Shape& newStage, ReplayBudget& budget,
     Refusal& refusal, SourceRebindResult& output,
-    bool requireSameWitnessPoint = false) noexcept {
+    bool requireSameWitnessPoint,
+    const SourceStageContext* sourceContext) noexcept {
     output = {};
     try {
         // C18: the new-stage census is debited before the analyzer, and the
@@ -1531,10 +1651,17 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
                             0.001, oldRoles, budget,
                             step, refusal)) return false;
                 } else {
+                const auto* sourceProof = RequireSourceStageProof(
+                    step, sourceContext, refusal);
+                if (NeedsSourceStageContext(step) && !sourceProof) return false;
                 retained_face_selector::Resolution resolution;
-                const auto selectorRefusal = retained_face_selector::Resolve(current,
-                    step.selector->intent, 0.001, budget,
-                    neverCancelled, resolution);
+                const auto selectorRefusal = sourceProof
+                    ? retained_face_selector::Resolve(current,
+                        step.selector->intent, *sourceProof, 0.001, budget,
+                        neverCancelled, resolution)
+                    : retained_face_selector::Resolve(current,
+                        step.selector->intent, 0.001, budget,
+                        neverCancelled, resolution);
                 if (selectorRefusal != retained_face_selector::Refusal::None || !resolution.proof) {
                     refusal = retained_face_selector::MapToB1(selectorRefusal); return false;
                 }
@@ -1642,7 +1769,7 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
             }
             StepProof proof;
             if (!detail::BuildWorkingStage(rebound, step, sequence, proof,
-                    budget, refusal, neverCancelled)) return false;
+                    budget, refusal, neverCancelled, sourceContext)) return false;
             rebound.steps[index] = step;
             pendingProofs.push_back(std::move(proof));
         }
@@ -1659,5 +1786,22 @@ inline bool ApplySourceRebind(const SourceRebindRoles& roles,
         output.proofs = std::move(pendingProofs);
         refusal = Refusal::None; return true;
     } catch (...) { output = {}; refusal = Refusal::BuildFailed; return false; }
+}
+
+inline bool ApplySourceRebind(const SourceRebindRoles& roles,
+    const BaseRecipe& requested, const TopoDS_Shape& newStage, ReplayBudget& budget,
+    Refusal& refusal, SourceRebindResult& output,
+    const SourceStageContext& sourceContext,
+    bool requireSameWitnessPoint = false) noexcept {
+    return ApplySourceRebindImpl(roles, requested, newStage, budget, refusal,
+        output, requireSameWitnessPoint, &sourceContext);
+}
+
+inline bool ApplySourceRebind(const SourceRebindRoles& roles,
+    const BaseRecipe& requested, const TopoDS_Shape& newStage, ReplayBudget& budget,
+    Refusal& refusal, SourceRebindResult& output,
+    bool requireSameWitnessPoint = false) noexcept {
+    return ApplySourceRebindImpl(roles, requested, newStage, budget, refusal,
+        output, requireSameWitnessPoint, nullptr);
 }
 } // namespace core3d::retained_edge_treatment

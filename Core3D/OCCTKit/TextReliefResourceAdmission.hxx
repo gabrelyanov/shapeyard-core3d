@@ -22,6 +22,10 @@ inline constexpr std::size_t MaximumContours = 256;
 inline constexpr std::size_t MaximumContoursPerComponent = 32;
 inline constexpr std::size_t MaximumCurves = 128;
 inline constexpr std::uint32_t MaximumItems = 65'535;
+// One component per admitted glyph/emblem: component indices are always below
+// this bound, which also caps component-indexed allocations (E5-S1 fix; the
+// same bound is enforced in TextReliefDefinition.hxx and TextReliefBuild.hxx).
+inline constexpr std::uint32_t MaximumComponents = 64;
 inline constexpr const char* ResolverVersion = "shapeyard-syto-1";
 
 enum class ResourceKind : std::uint8_t { FontOutline = 1, EmblemVector = 2 };
@@ -33,6 +37,31 @@ enum class Refusal : std::uint8_t {
     ComponentContourLimit, CurveLimit, InvalidContour, InvalidLayout,
     IdentityCollision, C1Refused
 };
+
+// Stable typed refusal strings for the E5 opening boundary.
+inline const char* Reason(Refusal refusal) noexcept {
+    switch (refusal) {
+        case Refusal::None: return "e5.none";
+        case Refusal::ResourceUnavailable: return "e5.resource-unavailable";
+        case Refusal::ResourceTooLarge: return "e5.resource-too-large";
+        case Refusal::ResourceHashMismatch: return "e5.resource-hash-mismatch";
+        case Refusal::UnsupportedVersion: return "e5.unsupported-version";
+        case Refusal::UnsupportedKind: return "e5.unsupported-kind";
+        case Refusal::MalformedResource: return "e5.malformed-resource";
+        case Refusal::ResourceNotCanonical: return "e5.resource-not-canonical";
+        case Refusal::InvalidText: return "e5.invalid-text";
+        case Refusal::GlyphLimit: return "e5.glyph-limit";
+        case Refusal::GlyphUnsupported: return "e5.glyph-unsupported";
+        case Refusal::ContourLimit: return "e5.contour-limit";
+        case Refusal::ComponentContourLimit: return "e5.component-contour-limit";
+        case Refusal::CurveLimit: return "e5.curve-limit";
+        case Refusal::InvalidContour: return "e5.invalid-contour";
+        case Refusal::InvalidLayout: return "e5.invalid-layout";
+        case Refusal::IdentityCollision: return "e5.identity-collision";
+        case Refusal::C1Refused: return "e5.c1-refused";
+    }
+    return "e5.unknown";
+}
 
 struct Point { std::int32_t x = 0, y = 0; };
 inline bool operator==(const Point& a, const Point& b) noexcept {

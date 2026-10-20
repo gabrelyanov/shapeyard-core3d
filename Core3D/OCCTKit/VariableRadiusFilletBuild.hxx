@@ -20,6 +20,7 @@
 #include <Law_Constant.hxx>
 #include <Law_Function.hxx>
 #include <Law_Linear.hxx>
+#include <Standard_Failure.hxx>
 #include <TColStd_Array1OfInteger.hxx>
 #include <TColStd_Array1OfReal.hxx>
 #include <TopExp.hxx>
@@ -29,6 +30,7 @@
 #include <TopoDS.hxx>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <locale>
 #include <set>
 #include <sstream>
@@ -912,6 +914,15 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
 
         BRepFilletAPI_MakeFillet fillet(input);
         std::set<int> contours;
+        // A flat law (bit-equal station radii) is built through the
+        // constant-radius kernel overload Add(R, E) - the overload the B1/B2
+        // product fillet already uses (RetainedFilletBuild.hxx:278,
+        // RetainedEdgeTreatmentBuild.hxx:803). Only the internal kernel
+        // construction changes: the persisted two-station record, every
+        // admission check and every post-Build proof are unchanged, and the
+        // routing is a deterministic function of the persisted stations.
+        const bool flatLaw = workingDefinition.stations[0].radiusLocal
+            == workingDefinition.stations[1].radiusLocal;
         for (std::size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex) {
             const auto& edge = edges[edgeIndex];
             const auto& mapping = mappings[edgeIndex];
@@ -923,13 +934,23 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
 #if DEBUG
             if (debugBuildObservation) ++debugBuildObservation->filletEntryCount;
 #endif
-            fillet.Add(nativeRadii[0], nativeRadii[1], edge);
+            if (flatLaw) fillet.Add(nativeRadii[0], edge);
+            else fillet.Add(nativeRadii[0], nativeRadii[1], edge);
             const int contour = fillet.Contour(edge);
             if (contour <= 0 || fillet.NbEdges(contour) != 1 || !contours.insert(contour).second)
                 return decline(Refusal::ContourExpansion);
         }
         if (fillet.NbContours() != int(edges.size())) return decline(Refusal::ContourExpansion);
         fillet.Build();
+#if DEBUG
+        std::fprintf(stderr,
+                     "B3FLAT s1 post-build IsDone=%d null=%d r0=%.17g r1=%.17g\n",
+                     int(fillet.IsDone()), int(fillet.Shape().IsNull()),
+                     workingDefinition.stations[0].radiusLocal,
+                     workingDefinition.stations[1].radiusLocal);
+        if (!fillet.IsDone() || fillet.Shape().IsNull())
+            std::fprintf(stderr, "B3FLAT s1 refuse=build-not-done\n");
+#endif
         if (!fillet.IsDone() || fillet.Shape().IsNull()) return decline(Refusal::KernelFailure);
         for (std::size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex) {
             const auto& edge = edges[edgeIndex];
@@ -940,13 +961,45 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
                 workingDefinition.stations[authoredStartsAtNativeFirst ? 0 : 1].radiusLocal,
                 workingDefinition.stations[authoredStartsAtNativeFirst ? 1 : 0].radiusLocal}};
             const int contour = fillet.Contour(edge); Standard_Real first = 0, last = 0;
-            const Handle(Law_Function) law = fillet.GetLaw(contour, edge);
-            if (law.IsNull() || !fillet.GetBounds(contour, edge, first, last)
-                || std::abs(law->Value(mapping.authoredFirst)
-                    - workingDefinition.stations[0].radiusLocal) > tolerance
-                || std::abs(law->Value(mapping.authoredLast)
-                    - workingDefinition.stations[1].radiusLocal) > tolerance)
-                return decline(Refusal::EndpointMismatch);
+            Handle(Law_Function) law;
+            if (flatLaw) {
+                // A constant spine carries no law object: GetLaw and GetBounds
+                // both throw Standard_DomainError ("ChFiDS_FilSpine::ChangeLaw
+                // : no law on constant edges"; OCCT 7.8.0 ChFi3d_FilBuilder).
+                // Measure the constant law through the kernel's designated
+                // constant-spine readers instead: IsConstant(IC, E) must hold
+                // and Radius(IC, E) - the realized radius at both authored
+                // endpoints of a flat law - must equal the authored constant
+                // radius within tolerance. The law handle is a synthesized
+                // Law_Constant of the kernel-realized radius over the edge's
+                // own parameter range, so the DEBUG observer and the endpoint
+                // pins below still read back what the kernel built.
+                const BRepAdaptor_Curve flatSpine(edge);
+                first = flatSpine.FirstParameter();
+                last = flatSpine.LastParameter();
+                if (!fillet.IsConstant(contour, edge)
+                    || !std::isfinite(first) || !std::isfinite(last)
+                    || !(last > first)
+                    || std::abs(fillet.Radius(contour, edge)
+                        - workingDefinition.stations[0].radiusLocal) > tolerance)
+                    return decline(Refusal::EndpointMismatch);
+                Handle(Law_Constant) realized = new Law_Constant();
+                realized->Set(fillet.Radius(contour, edge), first, last);
+                law = realized;
+                if (std::abs(law->Value(mapping.authoredFirst)
+                        - workingDefinition.stations[0].radiusLocal) > tolerance
+                    || std::abs(law->Value(mapping.authoredLast)
+                        - workingDefinition.stations[1].radiusLocal) > tolerance)
+                    return decline(Refusal::EndpointMismatch);
+            } else {
+                law = fillet.GetLaw(contour, edge);
+                if (law.IsNull() || !fillet.GetBounds(contour, edge, first, last)
+                    || std::abs(law->Value(mapping.authoredFirst)
+                        - workingDefinition.stations[0].radiusLocal) > tolerance
+                    || std::abs(law->Value(mapping.authoredLast)
+                        - workingDefinition.stations[1].radiusLocal) > tolerance)
+                    return decline(Refusal::EndpointMismatch);
+            }
 #if DEBUG
             if (debugBuildObservation) {
                 DebugRealizedLawObservation observed;
@@ -960,6 +1013,10 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
 #if DEBUG
         if (debugBuildObservation)
             workingScale.toleranceMM[1] = detail::maximumTolerance(candidate);
+#endif
+#if DEBUG
+        if (!BRepCheck_Analyzer(candidate).IsValid())
+            std::fprintf(stderr, "B3FLAT s1 refuse=brep-check-invalid\n");
 #endif
         if (!BRepCheck_Analyzer(candidate).IsValid()) return decline(Refusal::KernelFailure);
         if (!detail::selfIntersectionFree(candidate)) return decline(Refusal::SelfIntersection);
@@ -1033,7 +1090,19 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
         output.evidence.minimumClearanceLocal = clearanceDocument;
         output.evidence.removedVolumeLocal3 = removedDocument;
         return output;
+#if DEBUG
+    } catch (const Standard_Failure& failure) {
+        std::fprintf(stderr, "B3FLAT s1 exception type=%s message=%s\n",
+                     failure.DynamicType() ? failure.DynamicType()->Name() : "?",
+                     failure.GetMessageString() ? failure.GetMessageString() : "");
+        return decline(Refusal::KernelFailure);
+    } catch (...) {
+        std::fprintf(stderr, "B3FLAT s1 exception type=non-occt\n");
+        return decline(Refusal::KernelFailure);
+    }
+#else
     } catch (...) { return decline(Refusal::KernelFailure); }
+#endif
 }
 
 inline BuildResult BuildDeterministically(const TopoDS_Shape& source,
@@ -1146,6 +1215,17 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
 
         BRepFilletAPI_MakeFillet fillet(input);
         std::set<int> contours;
+        // A flat law (every station radius bit-equal to the first) is built
+        // through the constant-radius kernel overload Add(R, E), exactly as
+        // the two-station route does; an equal-ordinate interpolating point
+        // set leaves constant spines without a law object. Only the internal
+        // kernel construction changes: the persisted multi-station record,
+        // every admission check and every post-Build proof are unchanged, and
+        // the routing is a deterministic function of the persisted stations.
+        bool flatLaw = !workingDefinition.stations.empty();
+        for (const auto& station : workingDefinition.stations)
+            flatLaw = flatLaw
+                && station.radiusLocal == workingDefinition.stations[0].radiusLocal;
         struct NativeStation final {
             Station station;
             double normalized = 0;
@@ -1171,7 +1251,8 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
                 lawPoints.SetValue(Standard_Integer(index) + 1,
                     gp_Pnt2d(nativeStations[index].normalized,
                              nativeStations[index].station.radiusLocal));
-            fillet.Add(lawPoints, edge);
+            if (flatLaw) fillet.Add(workingDefinition.stations[0].radiusLocal, edge);
+            else fillet.Add(lawPoints, edge);
             nativeStationsByEdge.push_back(std::move(nativeStations));
             const int contour = fillet.Contour(edge);
             if (contour <= 0 || fillet.NbEdges(contour) != 1 || !contours.insert(contour).second)
@@ -1179,17 +1260,44 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
         }
         if (fillet.NbContours() != int(edges.size())) return decline(Refusal::ContourExpansion);
         fillet.Build();
+#if DEBUG
+        std::fprintf(stderr,
+                     "B3FLAT s2 post-build IsDone=%d null=%d stations=%llu r0=%.17g\n",
+                     int(fillet.IsDone()), int(fillet.Shape().IsNull()),
+                     (unsigned long long)workingDefinition.stations.size(),
+                     workingDefinition.stations.empty()
+                         ? 0.0 : workingDefinition.stations[0].radiusLocal);
+        if (!fillet.IsDone() || fillet.Shape().IsNull())
+            std::fprintf(stderr, "B3FLAT s2 refuse=build-not-done\n");
+#endif
         if (!fillet.IsDone() || fillet.Shape().IsNull()) return decline(Refusal::KernelFailure);
         for (std::size_t edgeIndex = 0; edgeIndex < edges.size(); ++edgeIndex) {
             const auto& edge = edges[edgeIndex];
             const auto& mapping = mappings[edgeIndex];
             const int contour = fillet.Contour(edge);
-            const Handle(Law_Function) law = fillet.GetLaw(contour, edge);
-            if (law.IsNull()) return decline(Refusal::EndpointMismatch);
             BRepAdaptor_Curve spine(edge);
             const double first = spine.FirstParameter(), last = spine.LastParameter();
             if (!std::isfinite(first) || !std::isfinite(last) || !(last > first))
                 return decline(Refusal::EndpointMismatch);
+            Handle(Law_Function) law;
+            if (flatLaw) {
+                // Constant spines carry no law object (GetLaw throws
+                // Standard_DomainError); measure the realized constant radius
+                // through the kernel's constant-radius readback and observe a
+                // synthesized Law_Constant of the realized radius. The shared
+                // station-pinning loop below still pins every authored station
+                // against the observed law.
+                if (!fillet.IsConstant(contour, edge)
+                    || std::abs(fillet.Radius(contour, edge)
+                        - workingDefinition.stations[0].radiusLocal) > tolerance)
+                    return decline(Refusal::EndpointMismatch);
+                Handle(Law_Constant) realized = new Law_Constant();
+                realized->Set(fillet.Radius(contour, edge), first, last);
+                law = realized;
+            } else {
+                law = fillet.GetLaw(contour, edge);
+            }
+            if (law.IsNull()) return decline(Refusal::EndpointMismatch);
             const auto lawAt = [&](double authoredParameter) {
                 return law->Value(mapping.parameter(authoredParameter));
             };
@@ -1253,6 +1361,10 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
 #if DEBUG
         if (debugBuildObservation)
             workingScale.toleranceMM[1] = detail::maximumTolerance(candidate);
+#endif
+#if DEBUG
+        if (!BRepCheck_Analyzer(candidate).IsValid())
+            std::fprintf(stderr, "B3FLAT s2 refuse=brep-check-invalid\n");
 #endif
         if (!BRepCheck_Analyzer(candidate).IsValid()) return decline(Refusal::KernelFailure);
         if (!detail::selfIntersectionFree(candidate)) return decline(Refusal::SelfIntersection);
@@ -1333,7 +1445,19 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
         output.evidence.minimumClearanceLocal = clearanceDocument;
         output.evidence.removedVolumeLocal3 = removedDocument;
         return output;
+#if DEBUG
+    } catch (const Standard_Failure& failure) {
+        std::fprintf(stderr, "B3FLAT s2 exception type=%s message=%s\n",
+                     failure.DynamicType() ? failure.DynamicType()->Name() : "?",
+                     failure.GetMessageString() ? failure.GetMessageString() : "");
+        return decline(Refusal::KernelFailure);
+    } catch (...) {
+        std::fprintf(stderr, "B3FLAT s2 exception type=non-occt\n");
+        return decline(Refusal::KernelFailure);
+    }
+#else
     } catch (...) { return decline(Refusal::KernelFailure); }
+#endif
 }
 
 inline BuildResult BuildMultiStationDeterministically(

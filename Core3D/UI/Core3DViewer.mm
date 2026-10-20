@@ -30,6 +30,7 @@
 #include "../OCCTKit/ReceiptRecord.hxx"
 #include "../OCCTKit/RetainedFinishingAttribute.hxx"
 #include "../OCCTKit/RetainedEdgeTreatmentBuild.hxx"
+#include "../OCCTKit/RetainedEdgeTreatmentSaveView.hxx"
 #include "../OCCTKit/RetainedProfileProducer.hxx"
 #if DEBUG
 // R179/D249 diagnostic-only include. Never compiled into Release.
@@ -89,6 +90,28 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepLProp_SLProps.hxx>
+
+namespace {
+class RetainedValidationOperationScope final {
+public:
+    RetainedValidationOperationScope()
+        : session_(core3d::retained_edge_treatment::save_view::
+              ActiveValidationSession
+              ? core3d::retained_edge_treatment::save_view::
+                    ActiveValidationSession
+              : &owned_),
+          scope_(core3d::retained_edge_treatment::save_view::ActiveView,
+                 session_) {}
+    RetainedValidationOperationScope(
+        const RetainedValidationOperationScope&) = delete;
+    RetainedValidationOperationScope& operator=(
+        const RetainedValidationOperationScope&) = delete;
+private:
+    core3d::retained_edge_treatment::save_view::ValidationSession owned_;
+    core3d::retained_edge_treatment::save_view::ValidationSession* session_;
+    core3d::retained_edge_treatment::save_view::Scope scope_;
+};
+}
 #include <ShapeAnalysis_Surface.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <BRepBndLib.hxx>
@@ -121,6 +144,10 @@
 #include <utility>
 #include <vector>
 
+#if DEBUG
+void Core3DDebugRunColdOpenCandidateProbe();
+#endif
+
 #if TARGET_OS_OSX
 #import <AppKit/NSOpenGL.h>
 #include "../OCCTKit/Core3DMacImageExport.hxx"
@@ -137,6 +164,46 @@
 #endif
 
 namespace core3d {
+
+#if DEBUG
+extern "C" void Core3DDebugColdOpenOwnerEvent(
+    int owner, int stage, const void *session,
+    const void *document, const void *data);
+
+namespace {
+enum class ColdOpenOwner : int { Validate = 1, Import = 2 };
+enum class ColdOpenStage : int {
+    Begin = 1, Candidate = 3, Validated = 4, End = 5
+};
+
+void ObserveColdOpen(ColdOpenOwner owner, ColdOpenStage stage,
+    const retained_edge_treatment::save_view::ValidationSession *session,
+    const Handle(TDocStd_Document)& document = {}) noexcept {
+    Core3DDebugColdOpenOwnerEvent(static_cast<int>(owner),
+        static_cast<int>(stage), session,
+        document.IsNull() ? nullptr : document.get(),
+        document.IsNull() || document->GetData().IsNull()
+            ? nullptr : document->GetData().get());
+}
+
+class ColdOpenTrace final {
+public:
+    ColdOpenTrace(ColdOpenOwner owner,
+        const retained_edge_treatment::save_view::ValidationSession *session)
+        : owner_(owner), session_(session) {
+        ObserveColdOpen(owner_, ColdOpenStage::Begin, session_);
+    }
+    ~ColdOpenTrace() noexcept {
+        ObserveColdOpen(owner_, ColdOpenStage::End, session_);
+    }
+    ColdOpenTrace(const ColdOpenTrace&) = delete;
+    ColdOpenTrace& operator=(const ColdOpenTrace&) = delete;
+private:
+    ColdOpenOwner owner_;
+    const retained_edge_treatment::save_view::ValidationSession *session_;
+};
+} // namespace
+#endif
 
 struct RawR2PreviewPresentation {
     std::shared_ptr<retained_edge_treatment::r2::RawPreviewSession> session;
@@ -1203,6 +1270,7 @@ Core3DViewer::reviewRetainedBooleanEnrollmentR2(
 std::shared_ptr<const retained_edge_treatment::r2::Snapshot> Core3DViewer::captureEdgeTreatmentR2(
     const ObjectFrameIdentity& identity,std::uint64_t presentationRevision,
     std::uint32_t width,std::uint32_t height,retained_edge_treatment::Refusal& refusal) noexcept {
+    RetainedValidationOperationScope validationOperation;
     refusal=retained_edge_treatment::Refusal::StaleSnapshot;
     if(![NSThread isMainThread]||myDoc.IsNull()||myContext.IsNull()||!width||!height)return {};
     const auto scene=captureSceneSnapshot(width,height);if(!scene
@@ -1227,6 +1295,7 @@ std::shared_ptr<const retained_edge_treatment::r2::RawTargetCapture>
 Core3DViewer::captureEdgeTreatmentRawTargetsR2(const ObjectFrameIdentity& identity,
     std::uint64_t presentationRevision,std::uint32_t width,std::uint32_t height,
     retained_edge_treatment::Refusal& refusal) noexcept {
+    RetainedValidationOperationScope validationOperation;
     namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;
     refusal=et::Refusal::StaleSnapshot;
     if(![NSThread isMainThread]||!canBeginCommittedEdit()||myDoc.IsNull()
@@ -2282,7 +2351,8 @@ std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTrea
     const retained_edge_treatment::r2::Edit& edit,const ObjectFrameIdentity& identity,
     std::uint64_t presentationRevision,std::uint32_t width,std::uint32_t height,
     retained_edge_treatment::Refusal& refusal) noexcept {
-    namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;refusal=et::Refusal::StaleSnapshot;
+    namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;
+    namespace fs=retained_face_selector;refusal=et::Refusal::StaleSnapshot;
     if(![NSThread isMainThread]||!original||!canBeginCommittedEdit()||myDoc.IsNull()
         ||myContext.IsNull()||!width||!height||original->ownerLabel_.IsNull())return {};
     const auto scene=captureSceneSnapshot(width,height);
@@ -2351,7 +2421,16 @@ std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTrea
         if(!et::Encode(shadowDef,shadowBytes,refusal))return {};
         auto captured=std::make_shared<et::SourceRebindRoles>();
         et::ReplayBudget rebindBudget;CopyTopologyBudget(rebindBudget,original->chargedBudget_);
-        if(!et::CaptureSourceRebindRoles(original->base_,shadowDef,shadowBytes,rebindBudget,refusal,*captured)){
+        et::SourceStageContext sourceContext;const std::atomic_bool cancelled{false};
+        const bool capturedRoles=candidate.schema==4
+            ?fs::SourceStageProofIssuer::Issue(*source,original->definition_,
+                original->sourceBase_,original->base_,false,rebindBudget,cancelled,
+                sourceContext,refusal)
+                &&et::CaptureSourceRebindRoles(original->base_,shadowDef,shadowBytes,
+                    rebindBudget,refusal,*captured,sourceContext)
+            :et::CaptureSourceRebindRoles(original->base_,shadowDef,shadowBytes,
+                rebindBudget,refusal,*captured);
+        if(!capturedRoles){
 #if DEBUG
             tb::debug::RecordPhase("prepare-r2",original->chargedBudget_,rebindBudget);
 #endif
@@ -2415,6 +2494,7 @@ std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTrea
 
 std::shared_ptr<const retained_edge_treatment::r2::DetachedInput> Core3DViewer::edgeTreatmentGeometryR2(
     const std::shared_ptr<retained_edge_treatment::r2::Work>& work) noexcept {
+    RetainedValidationOperationScope validationOperation;
     namespace r2=retained_edge_treatment::r2;if(![NSThread isMainThread]||!work||work->state_!=r2::Work::State::Prepared)return {};
     auto input=std::shared_ptr<r2::DetachedInput>(new r2::DetachedInput);input->nonce_=work->nonce_;input->candidate_=work->candidate_;
     input->source_=work->source_;input->base_=work->base_;input->originalCurrent_=work->originalCurrent_;input->chargedBudget_=work->chargedBudget_;
@@ -2436,11 +2516,13 @@ static bool R2RebuildBooleanInputBase(const retained_solid::Envelope& envelope,
 std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer::buildEdgeTreatmentR2(
     const std::shared_ptr<const retained_edge_treatment::r2::DetachedInput>& input,
     retained_edge_treatment::Refusal& refusal) noexcept {
-    namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;refusal=et::Refusal::BuildFailed;
+    namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;
+    namespace fs=retained_face_selector;refusal=et::Refusal::BuildFailed;
     if(!input||!input->cancelled_||input->cancelled_->load()){refusal=et::Refusal::Cancelled;return {};}
     auto result=std::shared_ptr<r2::DetachedResult>(new r2::DetachedResult);result->nonce_=input->nonce_;result->definition_=input->candidate_;
     result->budget_=input->chargedBudget_;et::ReplayBudget budget;CopyTopologyBudget(budget,input->chargedBudget_);
     result->source_=input->source_;result->edit_=input->edit_;result->base_=input->base_;std::visit([&](const auto& source){if constexpr(std::is_same_v<std::decay_t<decltype(source)>,r2::RetainedBooleanBase>)result->prefixBytes_=std::visit([](const auto& arm){return arm.canonicalPrefixBytes;},source.source);},input->source_);
+    et::SourceStageContext sourceContext;bool hasSourceContext=false;
     if(input->edit_&&(std::holds_alternative<r2::RebuildBooleanInput>(*input->edit_)||std::holds_alternative<r2::RebuildAnalyticTool>(*input->edit_))){
         // Replay the complete changed prefix first; the preserved suffix is
         // replayed on its result below. The candidate binding is re-digested
@@ -2455,13 +2537,25 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
         result->source_=edited;result->prefixBytes_=editedBytes;result->base_=prefixResult;result->editedSourceBase_=editedBase;result->sourceChanged_=true;
         auto& binding=std::get<r2::BooleanBaseBinding>(result->definition_.base);
         if(!CC_SHA256(editedBytes.data(),CC_LONG(editedBytes.size()),binding.sourceRecipeDigest.data()))return {};
+        if(result->definition_.schema==4){
+            const auto* provedSource=std::get_if<r2::RetainedBooleanBase>(&result->source_);
+            if(!provedSource||!fs::SourceStageProofIssuer::Issue(*provedSource,
+                    result->definition_,result->editedSourceBase_,result->base_,false,
+                    budget,*input->cancelled_,sourceContext,refusal))return {};
+            hasSourceContext=true;
+        }
         if(input->rebindRoles_){
             // C18: rebind the witnesses the source edit moved through the
             // captured unique role correspondence and strictly replay the
             // complete suffix on its proper stages; the rebound steps keep
             // feature/node/local IDs, kind, amount and authored intent.
             r2::Definition rebound=result->definition_;TopoDS_Shape treated;
-            if(!r2::ApplySourceRebindR2(*input->rebindRoles_,result->base_,rebound,treated,budget,refusal,*input->cancelled_)){
+            const bool reboundOK=hasSourceContext
+                ?r2::ApplySourceRebindR2(*input->rebindRoles_,result->base_,
+                    rebound,treated,budget,refusal,sourceContext,*input->cancelled_)
+                :r2::ApplySourceRebindR2(*input->rebindRoles_,result->base_,
+                    rebound,treated,budget,refusal,*input->cancelled_);
+            if(!reboundOK){
 #if DEBUG
                 tb::debug::RecordPhase("build-r2",input->chargedBudget_,budget);
 #endif
@@ -2471,7 +2565,11 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
     }
     if(!r2::Encode(result->definition_,result->definitionBytes_,refusal))return {};
     if(result->result_.IsNull()
-        &&!r2::ReplayTreatmentSuffix(result->base_,result->definition_,result->result_,budget,refusal,*input->cancelled_)){
+        &&!(hasSourceContext
+            ?r2::ReplayTreatmentSuffix(result->base_,result->definition_,
+                result->result_,budget,refusal,sourceContext,*input->cancelled_)
+            :r2::ReplayTreatmentSuffix(result->base_,result->definition_,
+                result->result_,budget,refusal,*input->cancelled_))){
 #if DEBUG
         tb::debug::RecordPhase("build-r2",input->chargedBudget_,budget);
 #endif
@@ -2488,6 +2586,7 @@ bool Core3DViewer::cancelEdgeTreatmentR2(const std::shared_ptr<retained_edge_tre
 retained_edge_treatment::CommitResult Core3DViewer::commitEdgeTreatmentR2(
     const std::shared_ptr<retained_edge_treatment::r2::Work>& work,
     const std::shared_ptr<const retained_edge_treatment::r2::DetachedResult>& result) noexcept {
+    RetainedValidationOperationScope validationOperation;
     namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;et::CommitResult answer;
     if(![NSThread isMainThread]||!work||!result||result->nonce_!=work->nonce_){answer.refusal=et::Refusal::StaleSnapshot;
 #if DEBUG
@@ -6703,6 +6802,7 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareAssemblySolid(
 std::shared_ptr<NativeSolidWork> Core3DViewer::prepareLoftSolid(
     const rectangular_loft::Definition& definition,const ObjectFrameIdentity& identity,
     std::uint64_t presentationRevision,std::uint32_t width,std::uint32_t height) noexcept {
+    RetainedValidationOperationScope validationOperation;
     if (![NSThread isMainThread]) return {};
     try {
         rectangular_loft::Admission admission;
@@ -6721,6 +6821,7 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareLoftSolid(
 std::shared_ptr<NativeSolidWork> Core3DViewer::prepareSweepSolid(
     const planar_sweep::Definition& definition,const ObjectFrameIdentity& identity,
     std::uint64_t presentationRevision,std::uint32_t width,std::uint32_t height) noexcept {
+    RetainedValidationOperationScope validationOperation;
     if (![NSThread isMainThread]) return {};
     try {
         planar_sweep::Admission admission;
@@ -7394,6 +7495,7 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareStoredLoftStationRebuild(
 
 std::optional<CylindricalCutSnapshot> Core3DViewer::cylindricalCutSource(
     const ObjectFrameIdentity& identity,std::uint64_t presentation,std::uint32_t width,std::uint32_t height)noexcept {
+    RetainedValidationOperationScope validationOperation;
     if(!NSThread.isMainThread||!canBeginCommittedEdit()||myDoc.IsNull()||myContext.IsNull()||identity.entityIdentifier.empty()||!width||!height)CORE3D_CUT_REFUSE("capture.context", {});
     try {
         const auto stamp=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());const auto snapshot=captureSceneSnapshot(width,height);
@@ -7414,6 +7516,7 @@ std::optional<CylindricalCutSnapshot> Core3DViewer::cylindricalCutSource(
 std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCut(const CylindricalCutSnapshot& original,
     const std::optional<cylindrical_cut::CreateEdit>& create,const std::optional<cylindrical_cut::RadiusEdit>& radius,
     const ObjectFrameIdentity& identity,std::uint64_t presentation,std::uint32_t width,std::uint32_t height)noexcept {
+    RetainedValidationOperationScope validationOperation;
     if(!NSThread.isMainThread||bool(create)==bool(radius)||original.source.rebuilding!=bool(radius)
         ||identity.entityIdentifier!=original.identity.entityIdentifier||identity.publicationSourceIdentifier!=original.identity.publicationSourceIdentifier
         ||identity.documentGeneration!=original.identity.documentGeneration||identity.modelRevision!=original.identity.modelRevision)CORE3D_CUT_REFUSE("prepare.context-or-operation", {});
@@ -7498,6 +7601,7 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCut(const Cylin
 
 std::optional<CylindricalCutProgramSnapshot> Core3DViewer::cylindricalCutProgramSource(
     const ObjectFrameIdentity& identity,std::uint64_t presentation,std::uint32_t width,std::uint32_t height)noexcept {
+    RetainedValidationOperationScope validationOperation;
     if(!NSThread.isMainThread||!canBeginCommittedEdit()||myDoc.IsNull()||myContext.IsNull()||identity.entityIdentifier.empty()||!width||!height)CORE3D_CUT_REFUSE("program-capture.context", {});
     try {
         const auto stamp=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());const auto snapshot=captureSceneSnapshot(width,height);
@@ -7536,6 +7640,7 @@ retained_fillet::Candidates Core3DViewer::retainedFilletCandidates(const Cylindr
 std::shared_ptr<NativeSolidWork> Core3DViewer::prepareCylindricalCutProgramEdit(const CylindricalCutProgramSnapshot& original,
     const retained_boolean::ProgramEdit& edit,
     const ObjectFrameIdentity& identity,std::uint64_t presentation,std::uint32_t width,std::uint32_t height)noexcept {
+    RetainedValidationOperationScope validationOperation;
     if(!NSThread.isMainThread)CORE3D_CUT_REFUSE("program-prepare.thread", {});
     lastRetainedFilletAdmissionOutcome=retained_fillet::Outcome::Generic;
     if(identity.entityIdentifier!=original.identity.entityIdentifier||identity.publicationSourceIdentifier!=original.identity.publicationSourceIdentifier
@@ -10939,6 +11044,12 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string& theFilename,
 	AIS_ListOfInteractive previousPresentations;
 	myContext->DisplayedObjects(AIS_KOI_Shape, -1, previousPresentations);
 
+    retained_edge_treatment::save_view::ValidationSession coldOpenSession;
+    retained_edge_treatment::save_view::Scope coldOpenScope(
+        {}, &coldOpenSession);
+#if DEBUG
+    ColdOpenTrace coldOpenTrace(ColdOpenOwner::Import, &coldOpenSession);
+#endif
     Handle(TDocStd_Document) candidate;
     try {
         OCC_CATCH_SIGNALS
@@ -10979,6 +11090,10 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string& theFilename,
 	try {
 		OCC_CATCH_SIGNALS
 		TDF_LabelMap candidateDefinitions;
+#if DEBUG
+        ObserveColdOpen(ColdOpenOwner::Import, ColdOpenStage::Candidate,
+            &coldOpenSession, candidate);
+#endif
 		if (!HasValidOptionalLengthUnit(candidate)
 			|| !ValidateShapeTree(
                 candidate,
@@ -10989,6 +11104,11 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string& theFilename,
 			CloseDocumentNoThrow(app, candidate);
 			return AssetImportResult::InvalidData;
 		}
+#if DEBUG
+        Core3DDebugRunColdOpenCandidateProbe();
+        ObserveColdOpen(ColdOpenOwner::Import, ColdOpenStage::Validated,
+            &coldOpenSession, candidate);
+#endif
 		// CBF files created before persistent scene identity need a one-time
 		// migration. Do this while the candidate is isolated, before it becomes
 		// the editable document and before normal undo history is enabled.
@@ -11119,6 +11239,12 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
 
     Handle(TDocStd_Application) validationApplication;
     Handle(TDocStd_Document) candidate;
+    retained_edge_treatment::save_view::ValidationSession coldOpenSession;
+    retained_edge_treatment::save_view::Scope coldOpenScope(
+        {}, &coldOpenSession);
+#if DEBUG
+    ColdOpenTrace coldOpenTrace(ColdOpenOwner::Validate, &coldOpenSession);
+#endif
     try {
         OCC_CATCH_SIGNALS
         validationApplication = new TDocStd_Application();
@@ -11152,6 +11278,10 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
         } catch (...) {}
 #endif
         TDF_LabelMap activeDefinitionLabels;
+#if DEBUG
+        ObserveColdOpen(ColdOpenOwner::Validate, ColdOpenStage::Candidate,
+            &coldOpenSession, candidate);
+#endif
         const bool isValid = HasValidOptionalLengthUnit(candidate)
             && ValidateShapeTree(
                 candidate,
@@ -11160,6 +11290,11 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
             && ValidateVisualMaterials(
                 candidate, activeDefinitionLabels)
             && myDoc->ValidateGeometryRepresentations(candidate);
+#if DEBUG
+        Core3DDebugRunColdOpenCandidateProbe();
+        ObserveColdOpen(ColdOpenOwner::Validate, ColdOpenStage::Validated,
+            &coldOpenSession, candidate);
+#endif
         CloseDocumentNoThrow(validationApplication, candidate);
         return isValid
             ? AssetImportResult::Success

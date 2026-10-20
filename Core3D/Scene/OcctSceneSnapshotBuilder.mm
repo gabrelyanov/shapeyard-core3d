@@ -5132,6 +5132,24 @@ public:
         result.overflow = settlementOverflow_;
         return result;
     }
+    std::array<std::size_t, 6> debugStorageState(
+        StorageDimension dimension) const noexcept {
+        const std::size_t index = storageIndex(dimension);
+        if (index >= storage_.size()) return {};
+        const auto& state = storage_[index];
+        return {state.reserved, state.live, state.retained, state.peak,
+            storageLimits_[index], state.live <= storageLimits_[index]
+                ? storageLimits_[index] - state.live : 0};
+    }
+    std::array<std::size_t, 3> debugJobState(Job job) const noexcept {
+        const std::size_t index = jobIndex(job);
+        if (index >= jobs_.size()) return {};
+        const auto& state = jobs_[index];
+        return {state.admitted, state.consumed, state.sealed ? 1U : 0U};
+    }
+    std::size_t debugCumulativeAdmittedWork() const noexcept {
+        return cumulativeAdmittedWork_;
+    }
 #endif
 
 private:
@@ -8384,10 +8402,20 @@ bool CopyMeasuredBRep(
     TopoDS_Shape& detached,
     TopTools_IndexedMapOfShape& originalFaces,
     TopTools_IndexedMapOfShape& detachedFaces,
-    std::size_t& reservedBytes) noexcept {
+    std::size_t& reservedBytes
+#ifdef DEBUG
+    , const decal_layer::bake::accounting::View* accountingOverride = nullptr
+#endif
+    ) noexcept {
     using FailureSite = decal_layer::bake::accounting::FailureSite;
     using Retention = decal_layer::bake::accounting::Retention;
     using StorageDimension = decal_layer::bake::accounting::StorageDimension;
+#ifdef DEBUG
+    const auto accounting = accountingOverride
+        ? *accountingOverride : ledger.view();
+#else
+    const auto accounting = ledger.view();
+#endif
     reservedBytes = copyPrediction.total;
     if (!BRepCensusAdd(reservedBytes,
             copyPrediction.visibleDownstreamScratch)) return false;
@@ -8406,7 +8434,7 @@ bool CopyMeasuredBRep(
 #else
     (void)debugCensusMode;
 #endif
-    if (!retainedTicket.acquire(ledger.view(),
+    if (!retainedTicket.acquire(accounting,
             StorageDimension::PrivateStorage, reservedBytes,
             Retention::Retained, FailureSite::BRepCensusCopy)) {
 #ifdef DEBUG
@@ -8417,12 +8445,12 @@ bool CopyMeasuredBRep(
 #endif
         return false;
     }
-    if (!ledger.enterAllocation(FailureSite::BRepCensusCopy)) return false;
+    if (!accounting.EnterAllocation(FailureSite::BRepCensusCopy)) return false;
     try {
         copier = std::make_unique<BRepBuilderAPI_Copy>(
             shape, Standard_True, Standard_True);
     } catch (...) {
-        ledger.allocationFailure(FailureSite::BRepCensusCopy);
+        accounting.AllocationFailed(FailureSite::BRepCensusCopy);
         return false;
     }
     if (!copier || !copier->IsDone() || copier->Shape().IsNull())
@@ -11650,6 +11678,7 @@ bool SavedGroupCancelled(const std::function<bool()>& cancelled) noexcept {
 
 bool PrepareSavedGroupOwner(
     OperationLedger& operation,
+    const decal_layer::bake::accounting::View& accounting,
     painted_atlas_bake::owner::ExportCapture&& strictCapture,
     const Handle(OcctDocument)& privateDocument,
     const std::function<bool()>& cancelled,
@@ -11679,7 +11708,7 @@ bool PrepareSavedGroupOwner(
         retained_edge_treatment::ReplayBudget& activeBudget = batchBudget
             ? *batchBudget : group.budget;
         if (!ReserveProtectedVector(group.measured,
-                group.measuredVectorTicket, operation.view(),
+                group.measuredVectorTicket, accounting,
                 group.capture.members.members.size(),
                 decal_layer::bake::accounting::Retention::Retained,
                 decal_layer::bake::accounting::FailureSite::
@@ -11717,14 +11746,18 @@ bool PrepareSavedGroupOwner(
             BRepCensusPCurveLookup lookup;
             decal_layer::bake::accounting::Ticket scratch;
             if (!MeasureBRepRepresentation(value.original, activeBudget,
-                    operation.view(), census, scratch, &prediction, &lookup))
+                    accounting, census, scratch, &prediction, &lookup))
                 return fail("saved-group-member-census");
             scratch.reset();
             std::size_t retainedBytes = 0;
             if (!CopyMeasuredBRep(value.original, activeBudget, operation,
                     census, prediction, 0, value.storage, value.copier,
                     value.detached, value.originalFaces,
-                    value.detachedFaces, retainedBytes)
+                    value.detachedFaces, retainedBytes
+#ifdef DEBUG
+                    , &accounting
+#endif
+                    )
                 || value.detached.IsNull()
                 || value.detached.IsSame(value.original))
                 return fail("saved-group-member-copy");
@@ -11732,7 +11765,7 @@ bool PrepareSavedGroupOwner(
         }
 
         if (!ReserveProtectedVector(group.productionSources.values,
-                group.productionSources.vectorTicket, operation.view(),
+                group.productionSources.vectorTicket, accounting,
                 group.capture.sources.size(),
                 decal_layer::bake::accounting::Retention::Retained,
                 decal_layer::bake::accounting::FailureSite::
@@ -12126,6 +12159,150 @@ bool ValidateCurrentFinalAssignments(
 }
 
 #ifdef DEBUG
+enum class DebugP2bEventKind : std::uint16_t {
+    Reserve = 1, Release, Seal, Consume, Settle, Recheck, Cancel,
+    Allocation, AllocationFailure, Refuse, LayoutBegin, LayoutEnd,
+    BakeBegin, BakeEnd
+};
+
+struct DebugP2bAccountingEvent final {
+    std::uint64_t sequence = 0, operationID = 0, units = 0, bytes = 0;
+    std::uint32_t failureSite = 0;
+    std::uint16_t kind = 0;
+    std::uint8_t job = 0, dimension = 0, retention = 0, decision = 0;
+    std::uint8_t groupKey[32]{};
+    std::uint8_t reserved[5]{};
+};
+struct DebugP2bLifetimeEvent final {
+    std::uint64_t sequence = 0, operationID = 0, bufferBytes = 0;
+    std::uint64_t ticketBytes = 0, liveBytes = 0;
+    std::uint8_t groupKey[32]{};
+    std::uint8_t owner = 0, kind = 0, reserved[6]{};
+};
+static_assert(sizeof(DebugP2bAccountingEvent) == 80);
+static_assert(sizeof(DebugP2bLifetimeEvent) == 80);
+
+struct DebugP2bAccountingTrace final {
+    using Accounting = decal_layer::bake::accounting::View;
+    using Dimension = decal_layer::bake::accounting::StorageDimension;
+    using Retention = decal_layer::bake::accounting::Retention;
+    using Site = decal_layer::bake::accounting::FailureSite;
+    using Job = decal_layer::bake::accounting::Job;
+    using Settlement = decal_layer::bake::accounting::Settlement;
+    using Receiver = decal_layer::bake::accounting::Receiver;
+    using Context = decal_layer::bake::accounting::OperationContext;
+    Accounting base;
+    DebugP2bAccountingEvent* events = nullptr;
+    std::uint64_t capacity = 0, count = 0, attempted = 0, operationID = 0;
+    std::uint8_t groupKey[32]{};
+    void* failureContext = nullptr;
+    void (*failure)(void*, std::uint32_t) noexcept = nullptr;
+
+    void record(DebugP2bEventKind kind, bool decision, Job job = Job::Count,
+        std::uint64_t units = 0, Dimension dimension = Dimension::Count,
+        std::uint64_t bytes = 0, Retention retention = Retention::Scratch,
+        Site site = Site::None) noexcept {
+        const std::uint64_t sequence = attempted++;
+        if (!events || count >= capacity) {
+            if (failure) failure(failureContext, 18);
+            return;
+        }
+        auto& row = events[count++];
+        row.sequence = sequence; row.operationID = operationID;
+        row.units = units; row.bytes = bytes;
+        row.failureSite = std::uint32_t(site);
+        row.kind = std::uint16_t(kind); row.job = std::uint8_t(job);
+        row.dimension = std::uint8_t(dimension);
+        row.retention = std::uint8_t(retention);
+        row.decision = decision ? 1 : 0;
+        std::memcpy(row.groupKey, groupKey, sizeof(groupKey));
+    }
+    Accounting view() noexcept {
+        return {this, Reserve, Release, CheckedProduct, Seal, Consume,
+            Recheck, Cancel, EnterAllocation, AllocationFailure, Settle,
+            Refuse};
+    }
+    static bool Reserve(void* value, Dimension dimension, std::size_t bytes,
+        Retention retention, Site site) noexcept {
+        auto& self = *static_cast<DebugP2bAccountingTrace*>(value);
+        const bool result = self.base.Reserve(dimension, bytes, retention, site);
+        self.record(DebugP2bEventKind::Reserve, result, Job::Count, 0,
+            dimension, bytes, retention, site);
+        return result;
+    }
+    static void Release(void* value, Dimension dimension, std::size_t bytes,
+        Retention retention) noexcept {
+        auto& self = *static_cast<DebugP2bAccountingTrace*>(value);
+        self.base.Release(dimension, bytes, retention);
+        self.record(DebugP2bEventKind::Release, true, Job::Count, 0,
+            dimension, bytes, retention, Site::StorageRelease);
+    }
+    static bool CheckedProduct(void* value, std::size_t first,
+        std::size_t second, std::size_t third, std::size_t& product,
+        Site site) noexcept {
+        return static_cast<DebugP2bAccountingTrace*>(value)->base
+            .CheckedProduct(first, second, third, product, site);
+    }
+    static bool Seal(void* value, Job job, std::size_t units,
+        Site site) noexcept {
+        auto& self = *static_cast<DebugP2bAccountingTrace*>(value);
+        const bool result = self.base.SealJob(job, units, site);
+        self.record(DebugP2bEventKind::Seal, result, job, units,
+            Dimension::Count, 0, Retention::Scratch, site);
+        return result;
+    }
+    static bool Consume(void* value, Job job, std::size_t units,
+        Site site) noexcept {
+        auto& self = *static_cast<DebugP2bAccountingTrace*>(value);
+        const bool result = self.base.ConsumeJob(job, units, site);
+        self.record(DebugP2bEventKind::Consume, result, job, units,
+            Dimension::Count, 0, Retention::Scratch, site);
+        return result;
+    }
+    static bool Recheck(void* value, Site site) noexcept {
+        auto& self = *static_cast<DebugP2bAccountingTrace*>(value);
+        const bool result = self.base.Recheck(site);
+        self.record(DebugP2bEventKind::Recheck, result, Job::Count, 0,
+            Dimension::Count, 0, Retention::Scratch, site);
+        return result;
+    }
+    static void Cancel(void* value, Site site) noexcept {
+        auto& self = *static_cast<DebugP2bAccountingTrace*>(value);
+        self.base.Cancel(site);
+        self.record(DebugP2bEventKind::Cancel, false, Job::Count, 0,
+            Dimension::Count, 0, Retention::Scratch, site);
+    }
+    static bool EnterAllocation(void* value, Site site) noexcept {
+        auto& self = *static_cast<DebugP2bAccountingTrace*>(value);
+        const bool result = self.base.EnterAllocation(site);
+        self.record(DebugP2bEventKind::Allocation, result, Job::Count, 0,
+            Dimension::Count, 0, Retention::Scratch, site);
+        return result;
+    }
+    static void AllocationFailure(void* value, Site site) noexcept {
+        auto& self = *static_cast<DebugP2bAccountingTrace*>(value);
+        self.base.AllocationFailed(site);
+        self.record(DebugP2bEventKind::AllocationFailure, false, Job::Count,
+            0, Dimension::Count, 0, Retention::Scratch, site);
+    }
+    static void Settle(void* value, Dimension dimension, std::size_t bytes,
+        Settlement settlement, Receiver receiver, Context context,
+        Site site) noexcept {
+        auto& self = *static_cast<DebugP2bAccountingTrace*>(value);
+        self.base.Settle(dimension, bytes, settlement, receiver, context, site);
+        self.record(DebugP2bEventKind::Settle, true, Job::Count,
+            std::uint64_t(receiver), dimension, bytes,
+            settlement == Settlement::Transfer
+                ? Retention::Retained : Retention::Scratch, site);
+    }
+    static void Refuse(void* value, Site site) noexcept {
+        auto& self = *static_cast<DebugP2bAccountingTrace*>(value);
+        self.base.Refuse(site);
+        self.record(DebugP2bEventKind::Refuse, false, Job::Count, 0,
+            Dimension::Count, 0, Retention::Scratch, site);
+    }
+};
+
 constexpr std::uint64_t kDebugP2bGroupCount = 2;
 constexpr std::uint64_t kDebugP2bSlotBytes = 18'201'984;
 constexpr std::uint64_t kDebugP2bNativeBytes = 36'408'064;
@@ -12658,7 +12835,7 @@ static_assert(sizeof(DebugP2bFrozenLayoutEvidence) == 208);
 static_assert(sizeof(DebugP2bFrozenExportBakeStorage) == 1224);
 
 enum class DebugP2bObservationState : std::uint8_t {
-    Disabled, Recording, Incomplete
+    Disabled, Recording, Complete, Incomplete
 };
 
 struct DebugP2bMappedControl final {
@@ -12751,6 +12928,127 @@ static_assert(sizeof(DebugP2bP5LayoutChartRow) == 80);
 static_assert(sizeof(DebugP2bP5MeshRow) == 128);
 static_assert(sizeof(DebugP2bP5PrimitiveRow) == 128);
 static_assert(sizeof(DebugP2bP5FaceLineageRow) == 128);
+
+//! P6 uses one canonical byte writer for every retained native type. A null
+//! target is the checked sizing pass; the second pass copies exact values
+//! while their product owners are still alive.
+struct DebugP2bP6Writer final {
+    std::uint8_t* target = nullptr;
+    std::uint64_t capacity = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t cursor = 0;
+    bool valid = true;
+
+    void bytes(const void* value, const std::uint64_t count) noexcept {
+        if (!valid || (count != 0 && !value)
+            || count > capacity - cursor) {
+            valid = false;
+            return;
+        }
+        if (target && count != 0)
+            std::memcpy(target + cursor, value, std::size_t(count));
+        cursor += count;
+    }
+    template <typename T> void scalar(const T& value) noexcept {
+        static_assert(std::is_trivially_copyable_v<T>);
+        bytes(&value, sizeof(value));
+    }
+    template <typename T, std::size_t N>
+    void fixed(const std::array<T, N>& value) noexcept {
+        static_assert(std::is_trivially_copyable_v<T>);
+        bytes(value.data(), sizeof(T) * N);
+    }
+    template <typename T> void enumeration(const T value) noexcept {
+        using Raw = std::underlying_type_t<T>;
+        scalar(static_cast<Raw>(value));
+    }
+    void count(const std::size_t value) noexcept {
+        scalar(std::uint64_t(value));
+    }
+    void vector(const std::vector<std::uint8_t>& value) noexcept {
+        count(value.size());
+        bytes(value.data(), value.size());
+    }
+};
+
+void DebugP2bP6Owner(DebugP2bP6Writer& out,
+    const retained_recipe::OwnerKey& value) noexcept {
+    out.fixed(value.document); out.fixed(value.entity);
+    out.fixed(value.definition);
+}
+
+void DebugP2bP6Transform(DebugP2bP6Writer& out,
+    const face_image::UVTransform& value) noexcept {
+    out.fixed(value.scale); out.fixed(value.offset);
+    out.scalar(value.rotationDegrees);
+    out.enumeration(value.wrapU); out.enumeration(value.wrapV);
+}
+
+void DebugP2bP6Fence(DebugP2bP6Writer& out,
+    const painted_atlas_bake::BindingFence& value) noexcept {
+    DebugP2bP6Owner(out, value.owner);
+    out.fixed(value.binding); out.fixed(value.resource);
+    out.fixed(value.selectorProof); out.fixed(value.bindingProof);
+    out.fixed(value.originalContent); out.fixed(value.workingContent);
+    out.enumeration(value.role); out.enumeration(value.colorSpace);
+    DebugP2bP6Transform(out, value.transform);
+}
+
+void DebugP2bP6Envelope(DebugP2bP6Writer& out,
+    const face_image::ResourceEnvelope& value) noexcept {
+    out.fixed(value.resource); out.fixed(value.originalContent);
+    out.fixed(value.workingContent); out.enumeration(value.originalFormat);
+    out.enumeration(value.workingFormat); out.enumeration(value.alpha);
+    out.scalar(value.originalWidthTexels);
+    out.scalar(value.originalHeightTexels);
+    out.scalar(value.workingWidthTexels);
+    out.scalar(value.workingHeightTexels);
+    out.fixed(value.provenance);
+    out.vector(value.originalBytes); out.vector(value.workingBytes);
+}
+
+void DebugP2bP6Source(DebugP2bP6Writer& out,
+    const painted_atlas_bake::owner::CapturedSource& value) noexcept {
+    DebugP2bP6Fence(out, value.fence);
+    out.enumeration(value.origin); out.enumeration(value.materialSlot);
+    out.fixed(value.faceIdentifier); out.count(value.memberIndex);
+    out.count(value.faceIndex); out.count(value.order);
+    out.scalar(std::uint8_t(value.boundedLayer));
+    out.scalar(value.centerU); out.scalar(value.centerV);
+    out.scalar(value.width); out.scalar(value.height);
+    out.scalar(value.angle); out.scalar(value.opacity);
+    out.scalar(std::uint8_t(value.maskPresent));
+    DebugP2bP6Envelope(out, value.envelope);
+    DebugP2bP6Envelope(out, value.maskEnvelope);
+    out.scalar(std::uint8_t(value.maskUsesLuminance));
+    out.scalar(std::uint8_t(value.maskInverted));
+    DebugP2bP6Transform(out, value.maskTransform);
+}
+
+void DebugP2bP6RawSlot(DebugP2bP6Writer& out,
+    const painted_atlas_bake::owner::RawSlotWitness& value) noexcept {
+    DebugP2bP6Owner(out, value.owner); out.count(value.memberIndex);
+    out.enumeration(value.slot); out.scalar(std::uint8_t(value.present));
+    out.fixed(value.materialIdentity);
+    for (const double scalar : value.materialScalars) {
+        std::uint64_t bits = 0;
+        std::memcpy(&bits, &scalar, sizeof(bits));
+        out.scalar(bits);
+    }
+    out.fixed(value.materialModes); DebugP2bP6Fence(out, value.fence);
+    out.count(value.originalBytes); out.count(value.workingBytes);
+    out.count(value.effectiveSourceIndex);
+    out.scalar(std::uint8_t(value.effectiveSourceIndex
+        == std::numeric_limits<std::size_t>::max()));
+    DebugP2bP6Source(out, value.shadowedSource);
+}
+
+void DebugP2bP6BakedResource(DebugP2bP6Writer& out,
+    const painted_atlas_bake::BakedResource& value) noexcept {
+    out.enumeration(value.role); out.enumeration(value.colorSpace);
+    out.fixed(value.identity); out.fixed(value.content);
+    out.scalar(value.widthTexels); out.scalar(value.heightTexels);
+    out.enumeration(value.wrapU); out.enumeration(value.wrapV);
+}
 
 std::atomic<std::uint64_t> gDebugP2bActiveBytes{0};
 std::atomic<std::uint64_t> gDebugP2bActiveMappings{0};
@@ -12951,6 +13249,47 @@ public:
     }
     bool valid() const noexcept { return mapping_ != nullptr; }
     std::uint32_t failureCode() const noexcept { return failureCode_; }
+    decal_layer::bake::accounting::View accountingView(
+        const decal_layer::bake::accounting::View& base,
+        const std::uint64_t operationID) noexcept {
+        if (!mapping_ || !base.valid() || trace_.events) {
+            fail(18); return base;
+        }
+        trace_.events = static_cast<DebugP2bAccountingEvent*>(stage(
+            4096 * sizeof(DebugP2bAccountingEvent)));
+        lifetimeEvents_ = static_cast<DebugP2bLifetimeEvent*>(stage(
+            16 * sizeof(DebugP2bLifetimeEvent)));
+        if (!trace_.events || !lifetimeEvents_) return base;
+        trace_.base = base; trace_.capacity = 4096;
+        trace_.operationID = operationID;
+        trace_.failureContext = this;
+        trace_.failure = [](void* value, std::uint32_t reason) noexcept {
+            static_cast<DebugP2bObservationArena*>(value)->fail(reason);
+        };
+        return trace_.view();
+    }
+    void accountingGroup(const asset_atlas::Key* key) noexcept {
+        std::memset(trace_.groupKey, 0, sizeof(trace_.groupKey));
+        if (key) {
+            std::memcpy(trace_.groupKey, key->document.data(), 16);
+            std::memcpy(trace_.groupKey + 16, key->atlas.data(), 16);
+        }
+    }
+    void boundary(const DebugP2bEventKind kind, const bool decision) noexcept {
+        trace_.record(kind, decision);
+    }
+    void lifetime(const std::uint8_t owner, const std::uint8_t kind,
+        const std::uint64_t bufferBytes, const std::uint64_t ticketBytes,
+        const std::uint64_t liveBytes) noexcept {
+        if (!lifetimeEvents_ || lifetimeCount_ >= 16) { fail(18); return; }
+        auto& row = lifetimeEvents_[lifetimeCount_++];
+        row.sequence = trace_.attempted + lifetimeCount_ - 1;
+        row.operationID = trace_.operationID;
+        row.bufferBytes = bufferBytes; row.ticketBytes = ticketBytes;
+        row.liveBytes = liveBytes; row.owner = owner; row.kind = kind;
+        std::memcpy(row.groupKey, trace_.groupKey,
+            sizeof(row.groupKey));
+    }
     const asset_atlas::build::DebugLayoutObserver* layoutObserver(
         const std::size_t slot, const asset_atlas::Key& key) noexcept {
         if (!mapping_ || slot >= contexts_.size()) {
@@ -13280,6 +13619,198 @@ public:
         addNamed("analyticParameters", 5, 8, ao, parameters);
         addNamed("faceLineage", 6, 128, faceCount, lineage);
     }
+    void retainP6Group(const std::size_t slot,
+        const SavedGroupOwner& group,
+        const SavedGroupFinalResult& result) noexcept {
+        if (slot >= 2 || !result.bake.storage) { fail(17); return; }
+        const auto& sources = group.capture.sources.values;
+        const painted_atlas_bake::owner::CapturedSource* first = nullptr;
+        const painted_atlas_bake::owner::CapturedSource* second = nullptr;
+        if (slot == 0) {
+            for (std::size_t left = 0; left < sources.size() && !second; ++left)
+                for (std::size_t right = left + 1;
+                     right < sources.size(); ++right)
+                    if (!(sources[left].fence == sources[right].fence)) {
+                        first = &sources[left]; second = &sources[right];
+                        break;
+                    }
+            if (!first || !second) { fail(17); return; }
+        }
+        const auto encodeGroup = [&](DebugP2bP6Writer& output) noexcept {
+            static constexpr std::array<std::uint8_t, 8> magic{
+                'S', 'Y', 'P', '2', 'B', 'P', '6', 0};
+            output.fixed(magic); output.scalar(std::uint16_t(1));
+            output.scalar(std::uint16_t(slot == 0 ? 12 : 11));
+            const auto section = [&](const std::uint16_t identifier,
+                    const auto& encode) noexcept {
+                DebugP2bP6Writer measure;
+                encode(measure);
+                if (!measure.valid) { output.valid = false; return; }
+                output.scalar(identifier); output.scalar(measure.cursor);
+                encode(output);
+            };
+            section(1, [&](DebugP2bP6Writer& out) noexcept {
+                out.count(result.bake.atlas.resources.size());
+                for (const auto& value : result.bake.atlas.resources) {
+                    out.fixed(value.identity); out.fixed(value.content);
+                }
+            });
+            section(2, [&](DebugP2bP6Writer& out) noexcept {
+                out.count(result.bake.outputs.size());
+                for (const auto& value : result.bake.outputs) {
+                    DebugP2bP6BakedResource(out, value.descriptor);
+                    out.vector(value.png);
+                }
+            });
+            section(3, [&](DebugP2bP6Writer& out) noexcept {
+                out.fixed(result.bake.bake.layoutProof);
+            });
+            section(4, [&](DebugP2bP6Writer& out) noexcept {
+                out.count(result.bake.bake.resources.size());
+                for (const auto& value : result.bake.bake.resources)
+                    DebugP2bP6BakedResource(out, value);
+            });
+            section(5, [&](DebugP2bP6Writer& out) noexcept {
+                out.count(result.bake.bake.bindings.size());
+                for (const auto& value : result.bake.bake.bindings)
+                    DebugP2bP6Fence(out, value);
+            });
+            section(6, [&](DebugP2bP6Writer& out) noexcept {
+                out.count(group.capture.sources.rawSlots.size());
+                for (const auto& value : group.capture.sources.rawSlots)
+                    DebugP2bP6RawSlot(out, value);
+            });
+            section(7, [&](DebugP2bP6Writer& out) noexcept {
+                out.count(group.capture.sources.values.size());
+                for (const auto& value : group.capture.sources.values)
+                    DebugP2bP6Source(out, value);
+            });
+            section(8, [&](DebugP2bP6Writer& out) noexcept {
+                out.count(group.productionSources.values.size());
+                for (const auto& value : group.productionSources.values)
+                    DebugP2bP6Source(out, value);
+            });
+            section(9, [&](DebugP2bP6Writer& out) noexcept {
+                out.vector(group.capture.canonicalAtlasBytes);
+            });
+            section(10, [&](DebugP2bP6Writer& out) noexcept {
+                out.vector(group.capture.canonicalBakeBytes);
+            });
+            section(11, [&](DebugP2bP6Writer& out) noexcept {
+                out.count(group.capture.sources.canonicalBindings.size());
+                for (const auto& value : group.capture.sources.canonicalBindings) {
+                    DebugP2bP6Owner(out, value.owner); out.vector(value.bytes);
+                }
+            });
+            if (slot == 0) section(12,
+                [&](DebugP2bP6Writer& out) noexcept {
+                    DebugP2bP6Source(out, *first);
+                    DebugP2bP6Source(out, *second);
+                });
+        };
+        DebugP2bP6Writer measure;
+        encodeGroup(measure);
+        if (!measure.valid || measure.cursor == 0) { fail(17); return; }
+        auto* retained = static_cast<std::uint8_t*>(stage(measure.cursor));
+        if (!retained) return;
+        DebugP2bP6Writer writer{retained, measure.cursor};
+        encodeGroup(writer);
+        if (!writer.valid || writer.cursor != measure.cursor) {
+            fail(17); return;
+        }
+        char key[64]{};
+        std::snprintf(key, sizeof(key), "p6.%zu.raw", slot);
+        addP5Spec(key, 2, 1, writer.cursor, retained, true);
+    }
+    void retainP7(const OperationLedger& operation,
+        const painted_atlas_bake::owner::AggregateBakePlan& aggregate,
+        const std::array<SavedGroupOwner, 2>& groups) noexcept {
+        using Dimension = decal_layer::bake::accounting::StorageDimension;
+        using Job = decal_layer::bake::accounting::Job;
+        using Site = decal_layer::bake::accounting::FailureSite;
+        static constexpr char magic[8] = {'S','Y','P','2','B','P','7',0};
+        static constexpr char inventorySHA[] =
+            "1f90d433567f688af08ea653ae9251924ad9590ecd40d713a742a45be4b9301d";
+        const auto settlement = operation.debugSettlementObservation();
+        const auto encode = [&](DebugP2bP6Writer& out) noexcept {
+            out.bytes(magic, sizeof(magic));
+            out.scalar(std::uint64_t(1));
+            out.scalar(std::uint64_t(488));
+            out.bytes(inventorySHA, sizeof(inventorySHA) - 1);
+            out.scalar(trace_.operationID);
+            out.scalar(trace_.count); out.scalar(lifetimeCount_);
+            out.scalar(std::uint64_t(Dimension::Count));
+            out.scalar(std::uint64_t(Job::Count));
+            out.scalar(std::uint64_t(Site::Count));
+            out.scalar(std::uint64_t(groups.size()));
+            out.scalar(std::uint64_t(aggregate.admittedWork.atlasRoles));
+            out.scalar(std::uint64_t(aggregate.admittedWork.sourcePixels));
+            out.scalar(std::uint64_t(aggregate.admittedWork.maskPixels));
+            out.scalar(std::uint64_t(aggregate.admittedWork.gutter));
+            out.scalar(std::uint64_t(aggregate.admittedWork.encoder));
+            out.scalar(std::uint64_t(aggregate.admittedItems));
+            out.scalar(std::uint64_t(aggregate.sealed));
+            out.scalar(std::uint64_t(operation.debugCumulativeAdmittedWork()));
+            out.scalar(std::uint64_t(operation.cumulativeWork()));
+            out.scalar(std::uint64_t(operation.firstFailureSite()));
+            out.scalar(std::uint64_t(settlement.faceImageTransfers));
+            out.scalar(std::uint64_t(settlement.paintedBakeTransfers));
+            out.scalar(std::uint64_t(settlement.destructions));
+            out.scalar(std::uint64_t(settlement.faceImageBytes));
+            out.scalar(std::uint64_t(settlement.paintedBakeBytes));
+            out.scalar(std::uint64_t(settlement.destroyedBytes));
+            out.scalar(std::uint64_t(settlement.finalLiveBytes));
+            out.scalar(std::uint64_t(settlement.overflow));
+            for (const auto& group : groups) {
+                out.bytes(group.capture.savedAtlas.key.document.data(), 16);
+                out.bytes(group.capture.savedAtlas.key.atlas.data(), 16);
+                out.scalar(std::uint64_t(group.pendingPlan.admitted));
+                out.scalar(std::uint64_t(group.pendingPlan.executed));
+                out.scalar(std::uint64_t(group.pendingPlan.work.atlasRoles));
+                out.scalar(std::uint64_t(group.pendingPlan.work.sourcePixels));
+                out.scalar(std::uint64_t(group.pendingPlan.work.maskPixels));
+                out.scalar(std::uint64_t(group.pendingPlan.work.gutter));
+                out.scalar(std::uint64_t(group.pendingPlan.work.encoder));
+            }
+            for (std::size_t index = 0;
+                 index < std::size_t(Dimension::Count); ++index) {
+                const auto state = operation.debugStorageState(
+                    Dimension(index));
+                for (const auto value : state)
+                    out.scalar(std::uint64_t(value));
+            }
+            for (std::size_t index = 0;
+                 index < std::size_t(Job::Count); ++index) {
+                const auto state = operation.debugJobState(Job(index));
+                for (const auto value : state)
+                    out.scalar(std::uint64_t(value));
+            }
+            for (std::size_t index = 0;
+                 index < std::size_t(Site::Count); ++index)
+                out.scalar(std::uint64_t(operation.allocationEntries(
+                    Site(index))));
+            out.bytes(trace_.events,
+                trace_.count * sizeof(DebugP2bAccountingEvent));
+            out.bytes(lifetimeEvents_,
+                lifetimeCount_ * sizeof(DebugP2bLifetimeEvent));
+        };
+        DebugP2bP6Writer measure; encode(measure);
+        if (!measure.valid || measure.cursor == 0 || trace_.count == 0
+            || trace_.count != trace_.attempted || lifetimeCount_ < 5
+            || !aggregate.sealed || aggregate.admittedItems != groups.size()
+            || std::any_of(groups.begin(), groups.end(), [](const auto& value) {
+                return !value.pendingPlan.admitted
+                    || !value.pendingPlan.executed;
+            })) { fail(18); return; }
+        auto* bytes = static_cast<std::uint8_t*>(stage(measure.cursor));
+        if (!bytes) return;
+        DebugP2bP6Writer writer{bytes, measure.cursor}; encode(writer);
+        if (!writer.valid || writer.cursor != measure.cursor) {
+            fail(18); return;
+        }
+        addP5Spec("p7.raw", 2, 1, writer.cursor, bytes, true);
+        p7Ready_ = true;
+    }
     NSData* serialize(const double metersPerUnit) noexcept {
         if (!mapping_ || wireLength_ != 0 || !std::isfinite(metersPerUnit)
             || !(metersPerUnit > 0)) {
@@ -13308,11 +13839,30 @@ public:
         static constexpr char schema[] = "shapeyard.p2b-observation.v1";
         static constexpr char stage[] =
             "saved-batch-before-current-validation";
-        static constexpr char status[] = "INCOMPLETE";
+        const bool complete = p7Ready_ && failureCode_ == 0
+            && occurrenceCount_ == 3
+            && std::all_of(contexts_.begin(), contexts_.end(),
+                [](const auto& value) {
+                    return value.directory
+                        && value.directory->states[1] != 0
+                        && value.directory->states[4] != 0
+                        && value.directory->states[7] == 0;
+                });
+        if (complete)
+            static_cast<DebugP2bMappedControl*>(mapping_)->state =
+                DebugP2bObservationState::Complete;
+        else fail(18);
+        static constexpr char completeStatus[] = "COMPLETE";
+        static constexpr char incompleteStatus[] = "INCOMPLETE";
+        const char* status = complete ? completeStatus : incompleteStatus;
         add("schema", 1, 1, sizeof(schema) - 1, schema);
         add("captureStage", 1, 1, sizeof(stage) - 1, stage);
         add("metersPerUnit", 5, 8, 1, &metersPerUnit);
-        add("captureStatus", 1, 1, sizeof(status) - 1, status);
+        add("captureStatus", 1, 1, std::strlen(status), status);
+        static constexpr char rawComplete[] = "1";
+        static constexpr char rawIncomplete[] = "0";
+        add("rawFamiliesComplete", 1, 1, 1,
+            complete ? rawComplete : rawIncomplete);
         static constexpr const char* keys[2][10] = {
             {"s1.0.key", "s1.0.memberOffsets", "s1.0.chartOffsets",
              "s1.0.finalTriangleMap", "s1.0.lineage", "s1.0.adjacency",
@@ -13352,7 +13902,7 @@ public:
             add(spec.key, spec.kind, spec.width, spec.count, spec.bytes,
                 spec.flags);
         }
-        if (next != 24 + p5SpecCount_) {
+        if (next != 25 + p5SpecCount_) {
             fail(14);
             return nil;
         }
@@ -13434,6 +13984,9 @@ public:
         return nil;
     }
     void copyDiagnostic(DebugP2bObservationDiagnostic& diagnostic) const noexcept {
+        if (mapping_)
+            diagnostic.state = static_cast<const DebugP2bMappedControl*>(
+                mapping_)->state;
         for (std::size_t index = 0; index < contexts_.size(); ++index) {
             const auto& context = contexts_[index];
             auto& output = diagnostic.s1Slots[index];
@@ -13532,6 +14085,10 @@ private:
     std::uint64_t wireLength_ = 0;
     std::uint64_t stagingCursor_ = kDebugP2bWireBytes;
     std::size_t p5SpecCount_ = 0, occurrenceCount_ = 0;
+    bool p7Ready_ = false;
+    DebugP2bAccountingTrace trace_{};
+    DebugP2bLifetimeEvent* lifetimeEvents_ = nullptr;
+    std::uint64_t lifetimeCount_ = 0;
     std::array<DebugP2bP5Spec, 40> p5Specs_{};
     std::array<DebugP2bLayoutContext, 2> contexts_{};
     std::array<DebugP2bBakeContext, 2> bakeContexts_{};
@@ -13574,6 +14131,25 @@ public:
     void commitS2(const std::size_t slot) noexcept {
         if (arena_ && arena_->valid()) arena_->commitS2(slot);
     }
+    decal_layer::bake::accounting::View accountingView(
+        const decal_layer::bake::accounting::View& base,
+        const std::uint64_t operationID) noexcept {
+        return arena_ && arena_->valid()
+            ? arena_->accountingView(base, operationID) : base;
+    }
+    void accountingGroup(const asset_atlas::Key* key) noexcept {
+        if (arena_ && arena_->valid()) arena_->accountingGroup(key);
+    }
+    void boundary(const DebugP2bEventKind kind,
+        const bool decision = true) noexcept {
+        if (arena_ && arena_->valid()) arena_->boundary(kind, decision);
+    }
+    void lifetime(const std::uint8_t owner, const std::uint8_t kind,
+        const std::uint64_t bufferBytes, const std::uint64_t ticketBytes,
+        const std::uint64_t liveBytes) noexcept {
+        if (arena_ && arena_->valid()) arena_->lifetime(owner, kind,
+            bufferBytes, ticketBytes, liveBytes);
+    }
     void retainOccurrence(const std::size_t groupIndex,
         const std::size_t sourceInstanceIndex, const Matrix4d& world,
         const Matrix4d& object, const Matrix4d& explorer,
@@ -13591,6 +14167,17 @@ public:
         const SavedGroupFinalResult& result) noexcept {
         if (arena_ && arena_->valid())
             arena_->retainP5Group(slot, group, definitions, result);
+    }
+    void retainP6Group(const std::size_t slot, const SavedGroupOwner& group,
+        const SavedGroupFinalResult& result) noexcept {
+        if (arena_ && arena_->valid())
+            arena_->retainP6Group(slot, group, result);
+    }
+    void retainP7(const OperationLedger& operation,
+        const painted_atlas_bake::owner::AggregateBakePlan& aggregate,
+        const std::array<SavedGroupOwner, 2>& groups) noexcept {
+        if (arena_ && arena_->valid())
+            arena_->retainP7(operation, aggregate, groups);
     }
     void projectWire(const double metersPerUnit) noexcept {
         if (!diagnostic_) return;
@@ -13665,6 +14252,7 @@ NSString* DebugP2bStateText(const DebugP2bObservationState state) noexcept {
     switch (state) {
         case DebugP2bObservationState::Disabled: return @"DISABLED";
         case DebugP2bObservationState::Recording: return @"RECORDING";
+        case DebugP2bObservationState::Complete: return @"COMPLETE";
         case DebugP2bObservationState::Incomplete: return @"INCOMPLETE";
     }
     return @"INCOMPLETE";
@@ -13678,7 +14266,7 @@ NSDictionary<NSString*, id>* DebugP2bRawDictionary(
             @"captureStage": @"saved-batch-before-current-validation",
             @"metersPerUnit": @(value.metersPerUnit),
             @"captureStatus": DebugP2bStateText(value.state),
-            @"complete": @NO,
+            @"complete": @(value.state == DebugP2bObservationState::Complete),
             @"wire": value.wire ?: NSNull.null,
             @"wireLength": @(value.wireLength),
             @"wireLeaseCountAfterReturn": @(
@@ -13783,7 +14371,7 @@ NSDictionary<NSString*, id>* DebugP2bDiagnosticDictionary(
             @"started": @(value.started),
             @"mapped": @(value.mapped),
             @"status": DebugP2bStateText(value.state),
-            @"complete": @NO,
+            @"complete": @(value.state == DebugP2bObservationState::Complete),
             @"failureCode": @(value.failureCode),
             @"hardCapBytes": @(kDebugP2bArenaBytes),
             @"nativeBytes": @(kDebugP2bNativeBytes),
@@ -14296,6 +14884,7 @@ bool DebugProduceSavedGroupFinalResultImpl(
         // The concrete ledger dominates the group, result and every inherited
         // capture view for the whole transaction.
         OperationLedger operation;
+        const auto accounting = operation.view();
         SavedGroupOwner group;
         if (!operation.bindTopology(group.budget,
                 decal_layer::bake::accounting::FailureSite::ContextControl))
@@ -14303,15 +14892,15 @@ bool DebugProduceSavedGroupFinalResultImpl(
         painted_atlas_bake::owner::ExportCapture capture;
         observation.failureStage = "strict-capture";
         if (painted_atlas_bake::owner::CaptureForExport(
-                capture, document, strictKey, operation.view())
+                capture, document, strictKey, accounting)
                 != painted_atlas_bake::owner::Outcome::Prepared
             || capture.operation.valid()
-            || capture.operationView().context != operation.view().context)
+            || capture.operationView().context != accounting.context)
             return false;
 
         std::string diagnosis;
         observation.failureStage = "saved-group-preparation";
-        if (!PrepareSavedGroupOwner(operation, std::move(capture),
+        if (!PrepareSavedGroupOwner(operation, accounting, std::move(capture),
                 privateDocument, cancelled, group, diagnosis)) {
             observation.failureStage += "-" + diagnosis;
             return false;
@@ -14455,6 +15044,7 @@ bool DebugProduceSavedGroupFinalResultImpl(
             && observation.gutter == 4
             && completeCorners;
         arenaSession.retainP5Group(0, group, definitions, *result);
+        arenaSession.retainP6Group(0, group, *result);
         arenaSession.projectWire(observationUnit);
         if (observation.complete) observation.failureStage.clear();
         return observation.complete;
@@ -14564,6 +15154,9 @@ bool ProduceSavedProducerBatchImpl(
             bakeObservers[index] = arenaSession.bakeObserver(index);
 
         OperationLedger operation;
+        const auto accounting = arenaSession.accountingView(operation.view(),
+            std::uint64_t(reinterpret_cast<std::uintptr_t>(&operation)));
+        arenaSession.lifetime(1, 1, 0, 0, operation.totalLive());
         if (completeAssembly) ++completeAssembly->entries[2];
         std::array<SavedGroupOwner, 2> groups;
         retained_edge_treatment::ReplayBudget batchBudget;
@@ -14573,6 +15166,7 @@ bool ProduceSavedProducerBatchImpl(
             return false;
         for (std::size_t index = 0; index < groups.size(); ++index) {
             const auto& key = records[index].value->definition.key;
+            arenaSession.accountingGroup(&key);
             observation.strictKeys.push_back(
                 retained_solid::UUIDText(key.document) + "/"
                 + retained_solid::UUIDText(key.atlas));
@@ -14580,20 +15174,27 @@ bool ProduceSavedProducerBatchImpl(
             observation.failureStage = "strict-capture-" +
                 std::to_string(index);
             if (painted_atlas_bake::owner::CaptureForExport(
-                    capture, document, key, operation.view())
+                    capture, document, key, accounting)
                     != Outcome::Prepared
                 || capture.operationView().context
-                    != operation.view().context) return false;
+                    != accounting.context) return false;
             if (completeAssembly) ++completeAssembly->entries[3];
             std::string diagnosis;
             observation.failureStage = "group-preparation-" +
                 std::to_string(index);
-            if (!PrepareSavedGroupOwner(operation, std::move(capture),
+            if (!PrepareSavedGroupOwner(operation, accounting,
+                    std::move(capture),
                     privateDocument, cancelled, groups[index], diagnosis,
                     &batchBudget)) {
                 observation.failureStage += "-" + diagnosis;
                 return false;
             }
+            arenaSession.lifetime(2, 2,
+                groups[index].capture.canonicalAtlasBytes.size()
+                    + groups[index].capture.canonicalBakeBytes.size(),
+                groups[index].measuredVectorTicket.bytes
+                    + groups[index].productionSources.vectorTicket.bytes,
+                operation.totalLive());
             observation.memberCounts.push_back(
                 groups[index].measured.size());
             observation.measuredCopyCount += groups[index].measured.size();
@@ -14606,14 +15207,17 @@ bool ProduceSavedProducerBatchImpl(
                 observation.shadowedByteCount +=
                     witness.shadowedSource.envelope.originalBytes.size()
                     + witness.shadowedSource.envelope.workingBytes.size();
-                if (witness.present
-                    && !observation.descriptorDifferenceDetected) {
-                    auto changed = witness;
-                    changed.materialModes[0] ^= 1;
-                    observation.descriptorDifferenceDetected =
-                        !(changed == witness);
-                }
             }
+            const auto& captured = groups[index].capture.sources.values;
+            for (std::size_t left = 0;
+                 left < captured.size()
+                    && !observation.descriptorDifferenceDetected; ++left)
+                for (std::size_t right = left + 1;
+                     right < captured.size(); ++right)
+                    if (!(captured[left].fence == captured[right].fence)) {
+                        observation.descriptorDifferenceDetected = true;
+                        break;
+                    }
             auto moved = std::move(groups[index].capture.sources);
             groups[index].capture.sources = std::move(moved);
             observation.rawAuthorityRetained =
@@ -14809,9 +15413,14 @@ bool ProduceSavedProducerBatchImpl(
             std::string diagnosis;
             observation.failureStage = "plan-prepare-" +
                 std::to_string(index);
+            arenaSession.accountingGroup(
+                &groups[index].capture.savedAtlas.key);
+            arenaSession.boundary(DebugP2bEventKind::LayoutBegin);
             const auto outcome = PrepareSavedGroupForBatch(groups[index],
                 definitions[index], occurrences[index], cancelled,
                 aggregate, diagnosis, layoutObservers[index]);
+            arenaSession.boundary(DebugP2bEventKind::LayoutEnd,
+                outcome == Outcome::Prepared);
             if (outcome != Outcome::Prepared) {
                 observation.failureStage += "-" + diagnosis;
                 return false;
@@ -14824,6 +15433,7 @@ bool ProduceSavedProducerBatchImpl(
             aggregate.admittedWork.gutter,
             aggregate.admittedWork.encoder};
         observation.failureStage = "plan-seal";
+        arenaSession.accountingGroup(nullptr);
         if (!painted_atlas_bake::owner::SealBakePlan(aggregate)) return false;
         observation.oneAggregateSeal = aggregate.sealed
             && aggregate.admittedItems == groups.size();
@@ -14833,14 +15443,25 @@ bool ProduceSavedProducerBatchImpl(
             std::string diagnosis;
             observation.failureStage = "plan-execute-" +
                 std::to_string(index);
+            arenaSession.accountingGroup(
+                &groups[index].capture.savedAtlas.key);
+            arenaSession.boundary(DebugP2bEventKind::BakeBegin);
             const auto outcome = ExecuteSavedGroupForBatch(groups[index],
                 aggregate, cancelled, results[index], diagnosis, true,
                 bakeObservers[index]);
+            arenaSession.boundary(DebugP2bEventKind::BakeEnd,
+                outcome == Outcome::Prepared && results[index] != nullptr);
             if (outcome != Outcome::Prepared || !results[index]) {
                 observation.failureStage += "-" + diagnosis;
                 return false;
             }
             arenaSession.commitS2(index);
+            std::uint64_t outputBytes = 0;
+            for (const auto& value : results[index]->bake.outputs)
+                outputBytes += value.png.size();
+            arenaSession.lifetime(3, 3, outputBytes,
+                results[index]->bake.storage->bakeValueStorage.bytes,
+                operation.totalLive());
             if (completeAssembly) {
                 ++completeAssembly->entries[6];
                 ++completeAssembly->entries[7];
@@ -14885,6 +15506,11 @@ bool ProduceSavedProducerBatchImpl(
         for (std::size_t index = 0; index < groups.size(); ++index)
             arenaSession.retainP5Group(index, groups[index],
                 definitions[index], *results[index]);
+        for (std::size_t index = 0; index < groups.size(); ++index)
+            arenaSession.retainP6Group(index, groups[index], *results[index]);
+        arenaSession.accountingGroup(nullptr);
+        arenaSession.lifetime(4, 4, 0, 0, operation.totalLive());
+        arenaSession.retainP7(operation, aggregate, groups);
         arenaSession.projectWire(observationUnit);
         if (completeAssembly) {
             completeAssembly->batchReady = observation.complete;

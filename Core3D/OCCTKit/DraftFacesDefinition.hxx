@@ -87,7 +87,10 @@ enum class Refusal : std::uint8_t {
     SignedAngleMismatch,
     AnalyticSectionMismatch,
     ReplayMismatch,
-    Cancelled
+    Cancelled,
+    NoNeutralIntersection,
+    SelfIntersection,
+    TopologyBudgetExceeded
 };
 
 inline const char* Reason(Refusal value) noexcept {
@@ -121,6 +124,9 @@ inline const char* Reason(Refusal value) noexcept {
     case Refusal::AnalyticSectionMismatch: return "b4.analytic-section-mismatch";
     case Refusal::ReplayMismatch: return "b4.replay-mismatch";
     case Refusal::Cancelled: return "b4.cancelled";
+    case Refusal::NoNeutralIntersection: return "b4.no-neutral-intersection";
+    case Refusal::SelfIntersection: return "b4.self-intersection";
+    case Refusal::TopologyBudgetExceeded: return "b4.topology-budget-exceeded";
     }
     return "b4.unknown";
 }

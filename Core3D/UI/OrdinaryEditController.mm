@@ -27,6 +27,7 @@ struct Cut475Scope {
 #include "../OCCTKit/NativeMeshTopologyCapture.hxx"
 #include "../Common/Core3DMobileResourceLimits.h"
 #include "../OCCTKit/AuthoredFrameAttributeID.hxx"
+#include "../OCCTKit/RetainedEdgeTreatmentSaveView.hxx"
 #import <Foundation/Foundation.h>
 #include <gp_Quaternion.hxx>
 #include <Standard_Failure.hxx>
@@ -56,6 +57,23 @@ struct SweepRebuildGuard {
     OcctSavedGroupState groups;
 };
 namespace {
+
+class RetainedValidationOperationScope final {
+public:
+    RetainedValidationOperationScope()
+        : session_(retained_edge_treatment::save_view::ActiveValidationSession
+              ? retained_edge_treatment::save_view::ActiveValidationSession
+              : &owned_),
+          scope_(retained_edge_treatment::save_view::ActiveView, session_) {}
+    RetainedValidationOperationScope(
+        const RetainedValidationOperationScope&) = delete;
+    RetainedValidationOperationScope& operator=(
+        const RetainedValidationOperationScope&) = delete;
+private:
+    retained_edge_treatment::save_view::ValidationSession owned_;
+    retained_edge_treatment::save_view::ValidationSession* session_;
+    retained_edge_treatment::save_view::Scope scope_;
+};
 
 std::string CreationLabelKey(const TDF_Label& label) {
     TCollection_AsciiString entry;
@@ -373,6 +391,7 @@ void OrdinaryEditController::debugCancelRetainedEdgeTreatmentStageFault(
 #endif
 
 std::shared_ptr<const SweepRebuildGuard> OrdinaryEditController::captureSavedSweepRebuildSource() const noexcept {
+    RetainedValidationOperationScope validationOperation;
     if (!NSThread.isMainThread || blocksNormalWork() || _document.IsNull()
         || _document->Document().IsNull() || _document->Document()->HasOpenCommand()) return {};
     try {
@@ -383,6 +402,7 @@ std::shared_ptr<const SweepRebuildGuard> OrdinaryEditController::captureSavedSwe
 }
 bool OrdinaryEditController::savedSweepRebuildSourceIsCurrent(
     const std::shared_ptr<const SweepRebuildGuard>& source) const noexcept {
+    RetainedValidationOperationScope validationOperation;
     if(!NSThread.isMainThread || !source || !source->candidate.empty())return false;
     try {
         SweepRebuildGuard::Catalog current;OcctSavedGroupState groups;
@@ -447,6 +467,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
     std::shared_ptr<const dependent_replay::PreparedReplay>
         profileD4Replay) noexcept
 {
+    RetainedValidationOperationScope validationOperation;
     const auto reject = [&](OrdinaryEditResult reason) {
         if (failure) { *failure = reason; }
         return OrdinaryEditLease();
@@ -1074,6 +1095,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
 OrdinaryEditLease OrdinaryEditController::beginMeshCopy(
     const Handle(AIS_Shape)& source, const TCollection_ExtendedString& name,
     OrdinaryEditResult* failure) noexcept {
+    RetainedValidationOperationScope validationOperation;
     const auto reject=[&](OrdinaryEditResult result) {
         if (failure) *failure=result;
         return OrdinaryEditLease();
@@ -1403,6 +1425,7 @@ bool OrdinaryEditController::creationMatches(const OrdinaryCreationLedger& ledge
 }
 
 OrdinaryEditResult OrdinaryEditController::stageCreationAndCommit(std::uint64_t token) noexcept {
+    RetainedValidationOperationScope validationOperation;
     try {
         auto& ledger = std::get<OrdinaryCreationLedger>(*_pending);
         if (!creationMatches(ledger, false)) { return cancel(token); }
@@ -2399,6 +2422,7 @@ bool OrdinaryEditController::stageDependentSource(OrdinaryTransformLedger& ledge
 }
 
 OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) noexcept {
+    RetainedValidationOperationScope validationOperation;
     if (![NSThread isMainThread]) { return OrdinaryEditResult::Invalid; }
     if (_entering || _reconciling || _state != OrdinaryEditState::OpenOwned
         || !_pending || token == 0 || token != _activeToken) { return OrdinaryEditResult::Busy; }
@@ -3011,6 +3035,7 @@ void OrdinaryEditController::clearResolved() noexcept {
 }
 
 OrdinaryEditResult OrdinaryEditController::reconcile() noexcept {
+    RetainedValidationOperationScope validationOperation;
     if (![NSThread isMainThread]) { return OrdinaryEditResult::Invalid; }
     if (_entering || _reconciling || _state == OrdinaryEditState::Publishing) { return OrdinaryEditResult::Busy; }
     if (!_pending) { return _command.isRetained() ? OrdinaryEditResult::OutcomeUnknown : OrdinaryEditResult::NoChange; }
@@ -3028,6 +3053,7 @@ OrdinaryEditResult OrdinaryEditController::reconcile() noexcept {
 }
 
 OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
+    RetainedValidationOperationScope validationOperation;
     if (std::holds_alternative<OrdinaryAppearanceLedger>(*_pending)) { return reconcileAppearanceImpl(); }
     if (std::holds_alternative<OrdinaryCreationLedger>(*_pending)) { return reconcileCreationImpl(); }
     if (std::holds_alternative<OrdinaryGroupingLedger>(*_pending)) { return reconcileGroupingImpl(); }

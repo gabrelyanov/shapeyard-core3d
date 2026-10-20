@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DraftFacesDefinition.hxx"
+#include "RetainedTopologyBudget.hxx"
 #include <BOPAlgo_ArgumentAnalyzer.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Section.hxx>
@@ -16,6 +17,8 @@
 #include <GProp_GProps.hxx>
 #include <Precision.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <atomic>
@@ -187,6 +190,57 @@ inline bool selfIntersectionFree(const TopoDS_Shape& shape) {
     return !analyzer.HasErrors() && !analyzer.HasWarnings() && !analyzer.HasFaulty();
 }
 
+inline std::size_t topologyCount(const TopoDS_Shape& shape) {
+    TopTools_IndexedMapOfShape values;
+    TopExp::MapShapes(shape, values);
+    return std::size_t(values.Extent());
+}
+
+inline bool chargeShape(retained_topology_budget::Counter& budget,
+                        const TopoDS_Shape& shape,
+                        retained_topology_budget::Site site) noexcept {
+    return budget.chargeStage(topologyCount(shape), site);
+}
+
+// Detect the F04 opposing-face crossing from the actual resolved source
+// planes and their actual pull-direction extents. This runs before the OCCT
+// draft call because DraftAngle may reject the same collision at Add/Build
+// time without preserving a distinguishable self-intersection status.
+inline bool selectedFacesCross(const std::vector<TopoDS_Face>& selected,
+                               const Definition& definition,
+                               double tolerance) {
+    if (definition.signedAngleRadians <= 0 || selected.size() < 2) return false;
+    const double slope = std::tan(definition.signedAngleRadians);
+    if (!std::isfinite(slope) || slope <= tolerance) return false;
+    const gp_Dir pull = direction(definition.pullDirectionLocal);
+    const gp_Pnt neutral = point(definition.neutralOriginLocal);
+    for (std::size_t a = 0; a < selected.size(); ++a) {
+        BRepAdaptor_Surface surfaceA(selected[a]);
+        if (surfaceA.GetType() != GeomAbs_Plane) continue;
+        const gp_Dir normalA = outwardPlaneNormal(selected[a], surfaceA);
+        double reachA = 0;
+        for (TopExp_Explorer vertex(selected[a], TopAbs_VERTEX); vertex.More(); vertex.Next())
+            reachA = std::max(reachA, gp_Vec(neutral,
+                BRep_Tool::Pnt(TopoDS::Vertex(vertex.Current()))).Dot(gp_Vec(pull)));
+        for (std::size_t b = a + 1; b < selected.size(); ++b) {
+            BRepAdaptor_Surface surfaceB(selected[b]);
+            if (surfaceB.GetType() != GeomAbs_Plane) continue;
+            const gp_Dir normalB = outwardPlaneNormal(selected[b], surfaceB);
+            if (normalA.Dot(normalB) > -1.0 + 1e-10) continue;
+            const double separation = std::abs(gp_Vec(surfaceA.Plane().Location(),
+                surfaceB.Plane().Location()).Dot(gp_Vec(normalA)));
+            double reachB = 0;
+            for (TopExp_Explorer vertex(selected[b], TopAbs_VERTEX); vertex.More(); vertex.Next())
+                reachB = std::max(reachB, gp_Vec(neutral,
+                    BRep_Tool::Pnt(TopoDS::Vertex(vertex.Current()))).Dot(gp_Vec(pull)));
+            const double crossingOffset = separation / (2.0 * slope);
+            if (separation > tolerance && crossingOffset > tolerance
+                && crossingOffset < std::min(reachA, reachB) - tolerance) return true;
+        }
+    }
+    return false;
+}
+
 inline bool candidateFace(const TopoDS_Shape& candidate, const FaceIntent& intent,
                           const Definition& definition, double tolerance,
                           TopoDS_Face& output, gp_Dir& outputNormal) {
@@ -254,7 +308,8 @@ inline bool analyticSections(const TopoDS_Face& face, const gp_Dir& candidateNor
 } // namespace detail
 
 inline BuildResult Build(const TopoDS_Shape& source, const Definition& definition,
-                         const std::atomic_bool& cancelled) noexcept {
+                         const std::atomic_bool& cancelled,
+                         retained_topology_budget::Counter& budget) noexcept {
     BuildResult output;
     const auto decline = [&](Refusal value) {
         BuildResult result; result.refusal = cancelled.load() ? Refusal::Cancelled : value;
@@ -265,16 +320,27 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
         Refusal refusal;
         if (source.IsNull()) return decline(Refusal::InvalidCandidate);
         if (!Validate(definition, refusal)) return decline(refusal);
+        if (!detail::chargeShape(budget, source,
+                retained_topology_budget::Site::C11GeometryCensus))
+            return decline(Refusal::TopologyBudgetExceeded);
+        if (cancelled.load()) return decline(Refusal::Cancelled);
         const double tolerance = std::max(Precision::Confusion() * 32,
                                           1e-7 / definition.metersPerLocalUnit);
         std::vector<std::uint8_t> sourceBefore, sourceAfter, candidateBytes;
         if (!detail::exactShapeBytes(source, sourceBefore)) return decline(Refusal::InvalidCandidate);
 
+        if (!budget.beginStage(retained_topology_budget::Site::C12Detachment))
+            return decline(Refusal::TopologyBudgetExceeded);
         BRepBuilderAPI_Copy copy(source, Standard_True, Standard_False);
         if (!copy.IsDone() || copy.Shape().IsNull()) return decline(Refusal::InvalidCandidate);
         const TopoDS_Shape detached = copy.Shape();
         std::vector<TopoDS_Face> selected; selected.reserve(definition.faces.size());
         for (const auto& intent : definition.faces) {
+            if (cancelled.load()) return decline(Refusal::Cancelled);
+            if (!budget.beginStage(retained_topology_budget::Site::C14AnchorResolve)
+                || !budget.visit(detail::topologyCount(detached),
+                    retained_topology_budget::Site::C14AnchorResolve))
+                return decline(Refusal::TopologyBudgetExceeded);
             TopoDS_Face face;
             if (!detail::resolve(detached, intent, tolerance, face, refusal)) return decline(refusal);
             if (intent.surface == SurfaceKind::Cylindrical)
@@ -289,11 +355,15 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
                              detail::direction(definition.neutralNormalLocal));
         detail::SectionWitness sourceSection;
         if (!detail::sectionWitness(detached, neutral, tolerance, sourceSection))
-            return decline(Refusal::NeutralPlaneChanged);
+            return decline(Refusal::NoNeutralIntersection);
+        if (detail::selectedFacesCross(selected, definition, tolerance))
+            return decline(Refusal::SelfIntersection);
 
         BRepOffsetAPI_DraftAngle draft(detached);
         for (std::size_t index = 0; index < selected.size(); ++index) {
             if (cancelled.load()) return decline(Refusal::Cancelled);
+            if (!budget.beginStage(retained_topology_budget::Site::C16KernelBuild))
+                return decline(Refusal::TopologyBudgetExceeded);
             AddObservation observation; observation.face = definition.faces[index].identifier;
             try {
                 draft.Add(selected[index], detail::direction(definition.pullDirectionLocal),
@@ -309,14 +379,20 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
                 return decline(Refusal::AddDoneFailure);
             }
         }
+        if (cancelled.load()) return decline(Refusal::Cancelled);
+        if (!budget.beginStage(retained_topology_budget::Site::C16KernelBuild))
+            return decline(Refusal::TopologyBudgetExceeded);
         try { draft.Build(); } catch (...) { return decline(Refusal::BuildFailure); }
         if (!draft.IsDone() || draft.Shape().IsNull()) return decline(Refusal::BuildFailure);
         for (const auto& face : selected)
             if (draft.ConnectedFaces(face).Size() != 1)
                 return decline(Refusal::PropagatedUnselectedFace);
         const TopoDS_Shape candidate = draft.Shape();
-        if (!BRepCheck_Analyzer(candidate).IsValid() || !detail::selfIntersectionFree(candidate))
-            return decline(Refusal::InvalidCandidate);
+        if (!BRepCheck_Analyzer(candidate).IsValid()) return decline(Refusal::InvalidCandidate);
+        if (!detail::selfIntersectionFree(candidate)) return decline(Refusal::SelfIntersection);
+        if (!detail::chargeShape(budget, candidate,
+                retained_topology_budget::Site::C11GeometryCensus))
+            return decline(Refusal::TopologyBudgetExceeded);
 
         for (TopExp_Explorer explorer(candidate, TopAbs_SOLID); explorer.More(); explorer.Next())
             ++output.evidence.connectedSolids;
@@ -348,16 +424,26 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
         if (!detail::exactShapeBytes(candidate, candidateBytes) || candidateBytes == sourceBefore
             || candidate.IsSame(source)) return decline(Refusal::CandidateNotSeparated);
         output.evidence.candidateBytesDistinct = true;
+        if (!budget.beginStage(retained_topology_budget::Site::C08ReceiptVerify))
+            return decline(Refusal::TopologyBudgetExceeded);
+        if (cancelled.load()) return decline(Refusal::Cancelled);
         output.refusal = Refusal::None; output.solid = candidate; return output;
     } catch (...) { return decline(Refusal::BuildFailure); }
 }
 
+inline BuildResult Build(const TopoDS_Shape& source, const Definition& definition,
+                         const std::atomic_bool& cancelled) noexcept {
+    retained_topology_budget::Counter budget;
+    return Build(source, definition, cancelled, budget);
+}
+
 inline BuildResult BuildDeterministically(const TopoDS_Shape& source,
                                           const Definition& definition,
-                                          const std::atomic_bool& cancelled) noexcept {
-    BuildResult first = Build(source, definition, cancelled);
+                                          const std::atomic_bool& cancelled,
+                                          retained_topology_budget::Counter& budget) noexcept {
+    BuildResult first = Build(source, definition, cancelled, budget);
     if (!first.built()) return first;
-    BuildResult second = Build(source, definition, cancelled);
+    BuildResult second = Build(source, definition, cancelled, budget);
     if (!second.built()) return second;
     std::vector<std::uint8_t> a, b;
     if (!detail::exactShapeBytes(first.solid, a) || !detail::exactShapeBytes(second.solid, b)
@@ -379,6 +465,13 @@ inline BuildResult BuildDeterministically(const TopoDS_Shape& source,
         }
     }
     return first;
+}
+
+inline BuildResult BuildDeterministically(const TopoDS_Shape& source,
+                                          const Definition& definition,
+                                          const std::atomic_bool& cancelled) noexcept {
+    retained_topology_budget::Counter budget;
+    return BuildDeterministically(source, definition, cancelled, budget);
 }
 
 } // namespace core3d::draft_faces

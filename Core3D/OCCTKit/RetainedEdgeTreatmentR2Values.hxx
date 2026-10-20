@@ -26,7 +26,8 @@ inline constexpr std::size_t MaximumMigrationAnchors = 16;
 
 inline bool IsR2Carrier(const std::vector<std::uint8_t>& bytes) noexcept {
     return bytes.size() > 60 && std::memcmp(bytes.data(), "SYET", 4) == 0
-        && (bytes[4] == 2 || bytes[4] == 3) && bytes[5] == 0 && bytes[6] == 0
+        && (bytes[4] == 2 || bytes[4] == 3 || bytes[4] == 4)
+        && bytes[5] == 0 && bytes[6] == 0
         && bytes[7] == 0 && bytes[60] == 3;
 }
 
