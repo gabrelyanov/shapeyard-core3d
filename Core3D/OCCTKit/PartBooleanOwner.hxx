@@ -105,6 +105,51 @@ struct Receipt final {
     bool blocksOtherWork = false;
 };
 
+// F4-S3 (D1024, option 2): closed correspondence classification minted by the
+// owner for one prepared Boolean change. F4 maps every non-one-to-one class to
+// NeedsReview; nothing here is caller-supplied or serialisable.
+enum class CorrespondenceClassification : std::uint8_t {
+    OneToOne = 0,
+    ManyToOne,
+    Conflicting,
+    Missing,
+    UnsupportedFamily,
+};
+
+struct SourceCorrespondence final {
+    retained_recipe::OwnerKey inputOwner;
+    retained_recipe::UUID recipeNode{};
+    retained_recipe::UUID sourceFeature{};
+    retained_recipe::SourceIdentity originalLineage;
+};
+
+// Typed, read-only, owner-minted evidence for one prepared Boolean change.
+// The values are copied only from the guarded capture/prepare state; callers
+// cannot construct a receipt or supply correspondence authority.
+class SourceCorrespondenceReceipt final {
+public:
+    CorrespondenceClassification classification() const noexcept {
+        return classification_;
+    }
+    const std::vector<SourceCorrespondence>& inputs() const noexcept {
+        return inputs_;
+    }
+    const retained_recipe::OwnerKey& resultOwner() const noexcept {
+        return resultOwner_;
+    }
+    const retained_recipe::UUID& resultNode() const noexcept {
+        return resultNode_;
+    }
+private:
+    friend class PartBooleanOwner;
+    SourceCorrespondenceReceipt() = default;
+    CorrespondenceClassification classification_
+        = CorrespondenceClassification::Missing;
+    std::vector<SourceCorrespondence> inputs_;
+    retained_recipe::OwnerKey resultOwner_;
+    retained_recipe::UUID resultNode_{};
+};
+
 class Capture final {
     friend class PartBooleanOwner;
     friend class InternalBooleanOperationSession;
@@ -235,6 +280,14 @@ private:
     bool buildPrepared(const Capture&, const ShellEditDefinition&,
                        PreparedBooleanDocumentChange&) const noexcept;
     bool stagePrepared(const PreparedBooleanDocumentChange&) noexcept;
+    // F4-S3 (D1024): the ABR1 in-command participant. Called only from apply()
+    // after the staged readback and before the one CommitCommand. Mints the
+    // correspondence receipt; on one-to-one remaps/stages the stored ABR1
+    // under the same open command with an independent readback; on every other
+    // class leaves the stored bytes byte-identical. A part without a canonical
+    // ABR1 record is byte-for-byte the live behaviour. False aborts the whole
+    // command (zero delta, original metadata/IDs/frames intact).
+    bool participateAttachmentRig(const PreparedBooleanDocumentChange&) noexcept;
     bool exactlyOneOwnedDelta(const HistoryWitness&, HistoryWitness&) const noexcept;
     bool abortRestored(const PreparedBooleanDocumentChange&) const noexcept;
 #if DEBUG

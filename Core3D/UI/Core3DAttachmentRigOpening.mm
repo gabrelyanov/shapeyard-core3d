@@ -10,6 +10,8 @@
 #include "../OCCTKit/CylindricalCutDefinition.hxx"
 #include "../OCCTKit/NativeOpeningContext.hxx"
 #include "../OCCTKit/OcctDocument.h"
+#include "../OCCTKit/PartBooleanOwner.hxx"
+#include "../OCCTKit/PartBooleanPersistence.hxx"
 #include "../OCCTKit/RetainedBooleanProgram.hxx"
 #include "Core3DViewer.h"
 
@@ -210,7 +212,6 @@ bool Validate(const Metadata& metadata, std::string& refusal) noexcept {
             if (attachment.surface) {
                 if (attachment.surface->faceSelector.empty() || attachment.surface->faceSelector.size() > kMaxReceiptBytes
                     || !RigidFrame(attachment.surface->localFrameMM)) return Fail(refusal, "invalid semantic surface receipt");
-                return Fail(refusal, "surface binding requires S3 admission");
             }
         }
         for (const auto& role : required)
@@ -242,8 +243,17 @@ std::vector<ReattachReceipt> ReattachSurfaceBindings(const Metadata& metadata, s
     if (!Validate(metadata, refusal)) return receipts;
     try {
         receipts.reserve(metadata.attachments.size());
-        for (const auto& attachment : metadata.attachments)
-            receipts.push_back({attachment.attachmentID, ReattachOutcome::Current, "rigid binding remains current"});
+        for (const auto& attachment : metadata.attachments) {
+            if (attachment.rigid)
+                receipts.push_back({attachment.attachmentID,
+                    ReattachOutcome::Current, "rigid binding remains current"});
+            else
+                // A surface binding is structurally valid but stays
+                // NeedsReview until a proved B2 source-stage receipt exists.
+                receipts.push_back({attachment.attachmentID,
+                    ReattachOutcome::NeedsReview,
+                    "missing-current-source-stage-proof"});
+        }
     } catch (...) { receipts.clear(); Fail(refusal, "reattach allocation exception"); }
     return receipts;
 }
@@ -471,6 +481,9 @@ struct NativeOwner final {
     std::string entityIdentifier;
     TopoDS_Shape shape;
     gp_Trsf placement;
+    // F4-S3: closed correspondence class re-derived from the committed
+    // composite Boolean recipe; empty for non-Boolean owners.
+    std::string booleanCorrespondence;
     Core3DAttachmentRigOwnerObservation *observation = nil;
 };
 struct NativeObservation final {
@@ -506,13 +519,188 @@ bool PositiveUniform(const gp_Trsf& transform, double& scale, std::array<double,
     return std::isfinite(det)&&std::abs(det-1)<=1e-9;
 }
 
+std::string OwnerBytes(const core3d::retained_recipe::OwnerKey& owner) {
+    std::string value(reinterpret_cast<const char*>(owner.document.data()),
+                      owner.document.size());
+    value.append(reinterpret_cast<const char*>(owner.entity.data()),
+                 owner.entity.size());
+    value.append(reinterpret_cast<const char*>(owner.definition.data()),
+                 owner.definition.size());
+    return value;
+}
+
+// F4-S3: the same bit-exact proof profile as
+// part_boolean::correspondence::EffectiveMatchesOriginalAtCreation
+// (PartBooleanCorrespondence.hxx:46), spelled on the definition-header
+// primitives so this consumer does not re-include the shell proof bundle.
+bool SameProjectionBits(
+    const core3d::part_boolean::OriginalAnalyticProjection& original,
+    const core3d::part_boolean::EffectiveAnalyticGeometry& effective) noexcept {
+    namespace pb = core3d::part_boolean;
+    if (!pb::ValidProjection(original) || !pb::ValidGeometry(effective)) return false;
+    for (std::size_t index = 0; index < original.dimensions.size(); ++index)
+        if (!pb::SameDoubleBits(original.dimensions[index], effective.dimensions[index])) return false;
+    for (std::size_t index = 0; index < original.translation.size(); ++index)
+        if (!pb::SameDoubleBits(original.translation[index], effective.translation[index])) return false;
+    for (std::size_t index = 0; index < original.rotationXYZW.size(); ++index)
+        if (!pb::SameDoubleBits(original.rotationXYZW[index], effective.rotationXYZW[index])) return false;
+    return true;
+}
+
+// F4-S3: re-derive the closed correspondence classification of the committed
+// composite Boolean recipe — each retained source's original-at-creation
+// projection (scalar recipe plus input placement) against the effective
+// analytic parameters of the base PartBoolean feature. This mirrors the
+// owner-side receipt classification in PartBooleanOwner::participateAttachmentRig.
+std::string BooleanCorrespondenceClass(
+    const core3d::composite_recipe::Definition& graph) noexcept {
+    namespace pb = core3d::part_boolean;
+    try {
+        const core3d::composite_recipe::FeatureNode* feature = nullptr;
+        for (const auto& node : graph.nodes) {
+            if (const auto* candidate =
+                    std::get_if<core3d::composite_recipe::FeatureNode>(&node.value)) {
+                if (candidate->node == graph.outputNode) { feature = candidate; break; }
+            }
+        }
+        if (!feature
+            || feature->kind != core3d::composite_recipe::PartBooleanFeatureKind
+            || feature->inputs.size() != 2) return "missing";
+        if (feature->codecVersion != core3d::composite_recipe::PartBooleanFeatureCodec)
+            return "unsupported-family";
+        pb::AnalyticDefinition analytic;
+        if (!pb::DecodeAnalytic(feature->parameters, analytic)) return "missing";
+        bool exact = true;
+        std::vector<core3d::retained_recipe::OwnerKey> owners;
+        for (std::size_t index = 0; index < 2; ++index) {
+            const core3d::composite_recipe::SourceNode* source = nullptr;
+            for (const auto& node : graph.nodes) {
+                if (const auto* candidate =
+                        std::get_if<core3d::composite_recipe::SourceNode>(&node.value)) {
+                    if (candidate->node == feature->inputs[index]) { source = candidate; break; }
+                }
+            }
+            if (!source) return "missing";
+            std::vector<double> scalars;
+            core3d::profile::Parameters parameters;
+            if (source->recipe.kind != core3d::composite_recipe::RecipeKind::Profile
+                || !core3d::composite_recipe::DecodeScalarRecipe(source->recipe, scalars)
+                || !core3d::profile::Decode(scalars, parameters)
+                || parameters.definition.points.size() != 4)
+                return "missing";
+            pb::OriginalAnalyticProjection original;
+            original.dimensions = {{
+                parameters.definition.points[1].X() - parameters.definition.points[0].X(),
+                parameters.definition.points[3].Y() - parameters.definition.points[0].Y(),
+                parameters.definition.depth}};
+            const auto& matrix = source->inputToCarrier.matrix;
+            original.translation = {{matrix[3], matrix[7], matrix[11]}};
+            // The admitted analytic domain is axis-aligned; a rotated retained
+            // placement is never silently matched to an unrotated original.
+            const bool identityRotation =
+                pb::SameDoubleBits(matrix[0], 1.0) && pb::SameDoubleBits(matrix[1], 0.0)
+                && pb::SameDoubleBits(matrix[2], 0.0) && pb::SameDoubleBits(matrix[4], 0.0)
+                && pb::SameDoubleBits(matrix[5], 1.0) && pb::SameDoubleBits(matrix[6], 0.0)
+                && pb::SameDoubleBits(matrix[8], 0.0) && pb::SameDoubleBits(matrix[9], 0.0)
+                && pb::SameDoubleBits(matrix[10], 1.0);
+            pb::EffectiveAnalyticGeometry effective;
+            effective.dimensions = analytic.inputs[index].dimensions;
+            effective.translation = analytic.inputs[index].translation;
+            effective.rotationXYZW = analytic.inputs[index].rotationXYZW;
+            exact = exact && identityRotation
+                && pb::SameDoubleBits(source->inputToCarrier.sourceMetersPerUnit,
+                                      source->inputToCarrier.carrierMetersPerUnit)
+                && SameProjectionBits(original, effective);
+            owners.push_back({source->original.document, source->original.entity,
+                              source->original.definition});
+        }
+        const bool distinctOwners = owners.size() == 2 && !(owners[0] == owners[1]);
+        if (!distinctOwners) return "many-to-one";
+        return exact ? "one-to-one" : "conflicting";
+    } catch (...) { return "missing"; }
+}
+
+// F4-S3 admission: a composite PartBoolean owner is a real retained native
+// owner. The complete graph, identities, operands and placement are captured
+// with the same witness discipline as the retained-cut owners.
+bool CaptureCompositeBooleanOwner(const Handle(OcctDocument)& document,
+                                  const TDF_Label& label, NSString *entity,
+                                  NativeOwner& output) {
+    core3d::composite_recipe::Record composite;
+    OcctObjectTransformState state;
+    if (!core3d::composite_recipe::Read(document->Document(), label, composite)
+        || !composite.value || composite.value->definition.nodes.size() < 3
+        || !document->CaptureObjectTransformStateForLabel(label, state))
+        return false;
+    const auto& graph = composite.value->definition;
+    const auto* feature = std::get_if<core3d::composite_recipe::FeatureNode>(
+        &graph.nodes.back().value);
+    if (!feature || feature->kind != core3d::composite_recipe::PartBooleanFeatureKind
+        || !core3d::retained_recipe::Valid(graph.owner)
+        || !core3d::retained_recipe::Nonzero(feature->feature))
+        return false;
+    const auto& identities = graph.owner;
+    if (entity.UTF8String == nullptr
+        || document->DocumentIdentifier() != core3d::retained_solid::UUIDText(identities.document)
+        || std::string(entity.UTF8String) != core3d::retained_solid::UUIDText(identities.entity)
+        || document->DefinitionIdentifierForLabel(label)
+            != core3d::retained_solid::UUIDText(identities.definition))
+        return false;
+    std::array<double,9> rotation{}; double scale = 0;
+    if (!PositiveUniform(state.transform, scale, rotation)) return false;
+    std::string tuple = OwnerBytes(identities);
+    Evidence recipeEvidence; recipeEvidence.text("shapeyard.f4.a1.recipe.v1");
+    recipeEvidence.raw(tuple.data(), tuple.size());
+    recipeEvidence.raw(feature->feature.data(), feature->feature.size());
+    recipeEvidence.field(composite.value->bytes.data(), composite.value->bytes.size());
+    Evidence operand; operand.text("shapeyard.f4.a1.operands.v1");
+    Evidence dependent; dependent.text("shapeyard.f4.a1.dependents.v1");
+    for (const auto& node : graph.nodes) {
+        if (const auto* source = std::get_if<core3d::composite_recipe::SourceNode>(&node.value)) {
+            operand.raw(source->original.document.data(), source->original.document.size());
+            operand.raw(source->original.entity.data(), source->original.entity.size());
+            operand.raw(source->original.definition.data(), source->original.definition.size());
+            operand.raw(source->original.sourceFeature.data(), source->original.sourceFeature.size());
+            operand.field(source->recipe.bytes.data(), source->recipe.bytes.size());
+        } else if (const auto* value = std::get_if<core3d::composite_recipe::FeatureNode>(&node.value)) {
+            dependent.raw(value->node.data(), value->node.size());
+            dependent.raw(value->feature.data(), value->feature.size());
+            dependent.field(value->parameters.data(), value->parameters.size());
+        }
+    }
+    NSData *recipeData = recipeEvidence.finish(), *operandData = operand.finish(),
+        *dependentData = dependent.finish();
+    if (!recipeData || !operandData || !dependentData) return false;
+    Core3DAttachmentRigOwnerKey *key = [[Core3DAttachmentRigOwnerKey alloc] initPrivate];
+    key.documentID = Data(identities.document); key.entityID = Data(identities.entity);
+    key.definitionID = Data(identities.definition);
+    Core3DAttachmentRigOwnerObservation *observation =
+        [[Core3DAttachmentRigOwnerObservation alloc] initPrivate];
+    observation.ownerKey = key; observation.entityIdentifier = [entity copy];
+    observation.sourceFeatureID = Data(feature->feature);
+    observation.recipeWitnessBytes = recipeData; observation.operandWitnessBytes = operandData;
+    observation.dependentWitnessBytes = dependentData;
+    NSMutableArray<NSNumber*> *placement = [NSMutableArray arrayWithCapacity:12];
+    const gp_Mat matrix = state.transform.VectorialPart();
+    for (unsigned c=1;c<=3;++c) for (unsigned r=1;r<=3;++r)
+        [placement addObject:@(matrix.Value(r,c))];
+    const gp_XYZ t = state.transform.TranslationPart();
+    [placement addObjectsFromArray:@[@(t.X()),@(t.Y()),@(t.Z())]];
+    observation.placementTransformDocument = placement;
+    observation.positiveUniformScale = scale;
+    output.tuple = std::move(tuple); output.entityIdentifier = entity.UTF8String ?: "";
+    output.shape = state.shape; output.placement = state.transform;
+    output.booleanCorrespondence = BooleanCorrespondenceClass(graph);
+    output.observation = observation; return !output.shape.IsNull();
+}
+
 bool CaptureOwner(const Handle(OcctDocument)& document, NSString *entity, NativeOwner& output) {
     TDF_Label label; if(!RootForEntity(document,entity,label)) return false;
     OcctCylindricalCutProgramSource program; OcctCylindricalCutSource single;
     core3d::retained_boolean::Recipe recipe; std::vector<std::uint8_t> recipeBytes; OcctObjectTransformState state;
     if(document->CaptureCylindricalCutProgramSource(label,program)){recipe=program.recipe;recipeBytes=program.recipeBytes;state=program.original;}
     else if(document->CaptureCylindricalCutSource(label,single)&&single.envelope.sourceFamily==2){recipe=single.envelope;state=single.original;if(!core3d::retained_boolean::Encode(recipe,recipeBytes))return false;}
-    else return false;
+    else return CaptureCompositeBooleanOwner(document,label,entity,output);
     const auto identities=core3d::retained_boolean::Identities(recipe);
     if(entity.UTF8String==nullptr || document->DocumentIdentifier()!=core3d::retained_solid::UUIDText(identities.document)
        || std::string(entity.UTF8String)!=core3d::retained_solid::UUIDText(identities.entity)
@@ -616,6 +804,16 @@ Core3DAttachmentRigApplyResult ApplyResult(
     fault:(core3d::attachment_rig::owner::FaultPoint)fault
     context:(const std::shared_ptr<core3d::native_opening::Context>&)context
     candidateOverride:(NSData *)candidateOverride;
+// F4-S3 observation path (D1024): reads the committed ABR1 carrier on a bound,
+// current opening and classifies every attachment against the live native
+// owners of the captured document — Current under a one-to-one correspondence
+// receipt, NeedsReview for many-to-one/conflicting/missing/unsupported-family
+// with the original bytes retained, Stale when the owner was consumed with no
+// receipt. Read-only; nothing is erased and nothing is marked current here.
+- (NSDictionary *)s3CommittedReattachmentObservation;
+#if DEBUG
+- (NSDictionary *)debugS3BooleanEditConflicting:(BOOL)conflicting;
+#endif
 @end
 
 @implementation Core3DAttachmentRigOpening {
@@ -652,6 +850,12 @@ Core3DAttachmentRigApplyResult ApplyResult(
     std::vector<std::uint8_t> input(bytes.length);if(bytes.length)std::memcpy(input.data(),bytes.bytes,bytes.length);Metadata metadata;std::string refusal;core3d::attachment_rig::DecodeRefusalClass refusalClass;if(!core3d::attachment_rig::DecodeABR1Classified(input,metadata,refusal,refusalClass)){if(error)*error=RigError(ErrorForDecodeRefusal(refusalClass,refusal),Text(refusal));return nil;}
     const auto& profile=metadata.targetProfile;if(profile.profileID!="local.validation.policy"||profile.profileVersion!="v1"||profile.externallyVerified||profile.requiredRoles.size()!=2||profile.requiredRoles[0]!="socket.primary"||profile.requiredRoles[1]!="socket.secondary"){
         if(error)*error=RigError(Core3DAttachmentRigErrorInvalidMetadata,@"native local validation policy mismatch");return nil;}
+    // S3 admits surface bindings only as observed NeedsReview evidence; the
+    // source-proof commit entrance does not install them.
+    if(std::any_of(metadata.attachments.begin(),metadata.attachments.end(),
+        [](const auto& attachment){return attachment.surface.has_value();})){
+        if(error)*error=RigError(Core3DAttachmentRigErrorUnsupportedSurface,
+            @"surface binding requires the S3 source-proof entrance");return nil;}
     std::vector<std::uint8_t> canonical;if(!core3d::attachment_rig::EncodeABR1(metadata,canonical,refusal)){if(error)*error=RigError(ErrorForRefusal(refusal),Text(refusal));return nil;}
     NSMutableArray *attachments=[NSMutableArray arrayWithCapacity:metadata.attachments.size()];
     for(const auto& attachment:metadata.attachments){const std::string& tuple=attachment.rigid->owner;auto owner=std::find_if(_nativeOwners.begin(),_nativeOwners.end(),[&](const NativeOwner&v){return v.tuple==tuple;});if(owner==_nativeOwners.end()){if(error)*error=RigError(Core3DAttachmentRigErrorForeignOwner,@"attachment owner is foreign to captured document");return nil;}Core3DAttachmentRigFrameObservation *record=[[Core3DAttachmentRigFrameObservation alloc] initPrivate];record.attachmentID=Data(attachment.attachmentID);record.ownerKey=owner->observation.ownerKey;record.displayName=Text(attachment.displayName);record.role=Text(attachment.role);record.localFrameMM=FrameArray(attachment.frameMM);record.worldFrameMM=FrameArray(OwnerWorld(*owner,self.metersPerUnit,attachment.frameMM));[attachments addObject:record];}
@@ -741,6 +945,120 @@ Core3DAttachmentRigApplyResult ApplyResult(
         fault:core3d::attachment_rig::owner::FaultPoint::None
         context:_context candidateOverride:nil];
 }
+
+- (NSDictionary *)s3CommittedReattachmentObservation {
+    namespace rig = core3d::attachment_rig;
+    NSMutableDictionary *report = [NSMutableDictionary dictionary];
+    report[@"state"] = @(0);
+    report[@"stored"] = [NSData data];
+    if (!NSThread.isMainThread || _document.IsNull()) {
+        report[@"refusal"] = @"observation-unavailable"; return report;
+    }
+    rig::StoredRecord stored;
+    if (!_document->ReadAttachmentRigMetadata(stored)) {
+        report[@"refusal"] = @"stored-metadata-read-unavailable"; return report;
+    }
+    report[@"state"] = @(static_cast<int>(stored.state));
+    report[@"refusal"] = Text(stored.refusal);
+    NSMutableArray *attachmentIDs = [NSMutableArray array];
+    NSMutableArray *jointIDs = [NSMutableArray array];
+    NSMutableArray *outcomes = [NSMutableArray array];
+    NSMutableArray *reasons = [NSMutableArray array];
+    NSMutableArray *owners = [NSMutableArray array];
+    NSMutableArray *lineage = [NSMutableArray array];
+    if (stored.state == rig::StoredReadState::Present) {
+        report[@"stored"] = Data(stored.bytes.data(), stored.bytes.size());
+        rig::Metadata metadata; std::string refusal;
+        // A Present record is canonical by construction; a decode failure here
+        // is an observation failure, never an empty rig.
+        if (!rig::DecodeABR1(stored.bytes, metadata, refusal)) {
+            report[@"refusal"] = Text(refusal); return report;
+        }
+        std::string structuralRefusal;
+        const auto structural = rig::ReattachSurfaceBindings(metadata, structuralRefusal);
+        if (structural.size() != metadata.attachments.size()) {
+            report[@"refusal"] = Text(structuralRefusal); return report;
+        }
+        NSError *currentError = nil;
+        report[@"openingCurrent"] = @([self isCurrent:&currentError]);
+        std::set<std::string> lineageSeen;
+        const auto outcomeText = [](rig::ReattachOutcome outcome) {
+            switch (outcome) {
+                case rig::ReattachOutcome::Current: return @"current";
+                case rig::ReattachOutcome::Reattached: return @"reattached";
+                case rig::ReattachOutcome::NeedsReview: return @"needsReview";
+                case rig::ReattachOutcome::Refused: return @"refused";
+                case rig::ReattachOutcome::Stale: return @"stale";
+            }
+            return @"refused";
+        };
+        for (std::size_t index = 0; index < metadata.attachments.size(); ++index) {
+            const auto& attachment = metadata.attachments[index];
+            rig::ReattachReceipt receipt = structural[index];
+            const std::string& tuple = attachment.rigid
+                ? attachment.rigid->owner : attachment.surface->owner;
+            [attachmentIDs addObject:Data(attachment.attachmentID)];
+            [owners addObject:Data(tuple)];
+            NSString *entity = nil;
+            if (tuple.size() == 48) {
+                UUID entityID{};
+                std::memcpy(entityID.data(), tuple.data() + 16, 16);
+                entity = UUIDText(entityID);
+            }
+            TDF_Label root; NativeOwner fresh;
+            if (!entity || !RootForEntity(_document, entity, root)
+                || !CaptureOwner(_document, entity, fresh) || fresh.tuple != tuple) {
+                // The owner is no longer addressable and no receipt remapped
+                // the binding: retained as stale evidence, never erased.
+                receipt.outcome = rig::ReattachOutcome::Stale;
+                receipt.reason = "owner-consumed-without-receipt";
+            } else if (receipt.outcome == rig::ReattachOutcome::Current
+                       && !fresh.booleanCorrespondence.empty()) {
+                if (fresh.booleanCorrespondence == "one-to-one") {
+                    receipt.reason = "one-to-one correspondence retained";
+                } else {
+                    // The receipt's classification is retained; the original
+                    // bytes, last proved frames and IDs are untouched.
+                    receipt.outcome = rig::ReattachOutcome::NeedsReview;
+                    receipt.reason = "source-correspondence-" + fresh.booleanCorrespondence;
+                }
+                if (lineageSeen.insert(fresh.tuple).second) {
+                    core3d::composite_recipe::Record composite;
+                    if (core3d::composite_recipe::Read(_document->Document(), root, composite)
+                        && composite.value) {
+                        for (const auto& node : composite.value->definition.nodes) {
+                            if (const auto* source =
+                                    std::get_if<core3d::composite_recipe::SourceNode>(&node.value)) {
+                                std::string original(
+                                    reinterpret_cast<const char*>(source->original.document.data()),
+                                    source->original.document.size());
+                                original.append(reinterpret_cast<const char*>(source->original.entity.data()),
+                                                source->original.entity.size());
+                                original.append(reinterpret_cast<const char*>(source->original.definition.data()),
+                                                source->original.definition.size());
+                                original.append(reinterpret_cast<const char*>(source->original.sourceFeature.data()),
+                                                source->original.sourceFeature.size());
+                                [lineage addObject:Data(original)];
+                            }
+                        }
+                    }
+                }
+            }
+            [outcomes addObject:outcomeText(receipt.outcome)];
+            [reasons addObject:Text(receipt.reason)];
+        }
+        for (const auto& joint : metadata.joints)
+            [jointIDs addObject:Data(joint.jointID)];
+    }
+    report[@"attachmentIDs"] = attachmentIDs;
+    report[@"jointIDs"] = jointIDs;
+    report[@"outcomes"] = outcomes;
+    report[@"reasons"] = reasons;
+    report[@"owners"] = owners;
+    report[@"lineage"] = lineage;
+    return report;
+}
+
 #if DEBUG
 - (NSDictionary *)debugApplyWithFault:(std::int32_t)fault
     cancelBeforeApply:(BOOL)cancelBeforeApply
@@ -766,6 +1084,55 @@ Core3DAttachmentRigApplyResult ApplyResult(
         @"readback":Data(_lastOwnerResult.readback.data(),
                           _lastOwnerResult.readback.size())};
 }
+
+- (NSDictionary *)debugS3BooleanEditConflicting:(BOOL)conflicting {
+    // Drives the REAL PartBooleanOwner capture -> prepare -> apply on this
+    // opening's carrier. The DEBUG seam only invokes and observes; every
+    // admission, correspondence, staging and history decision is the
+    // production owner's (D1024: A1 is the single owner of its command).
+    namespace pb = core3d::part_boolean;
+    NSMutableDictionary *report = [NSMutableDictionary dictionary];
+    report[@"applyRaw"] = @(-1);
+    auto *owner = _document.IsNull() ? nullptr : _document->PartBooleanOwnerService();
+    TDF_Label carrier;
+    NSString *entity = self.selectedEntityIdentifiers.firstObject;
+    if (!NSThread.isMainThread || !owner || !entity
+        || !RootForEntity(_document, entity, carrier)) {
+        report[@"reason"] = @"carrier-unavailable"; return report;
+    }
+    const auto captured = owner->capture(carrier);
+    if (!captured.handle) {
+        report[@"reason"] = Text(captured.receipt.reason); return report;
+    }
+    auto request = captured.handle->editorAnalytic();
+    if (conflicting) {
+        // A genuine input-geometry edit: the effective projection no longer
+        // matches the retained original at creation, so the correspondence
+        // receipt classifies conflicting and the stored ABR1 stays untouched.
+        request.inputs[0].dimensions[0] -= 5.0;
+    } else {
+        request.operation = request.operation == pb::Operation::Union
+            ? pb::Operation::Subtract : pb::Operation::Union;
+    }
+    const auto prepared = owner->prepare(captured.handle, request);
+    if (!prepared.handle) {
+        report[@"reason"] = Text(prepared.receipt.reason);
+        owner->cancel(captured.handle->editorSession());
+        return report;
+    }
+    const auto receipt = owner->apply(prepared.handle);
+    report[@"applyRaw"] = @(static_cast<int>(receipt.outcome));
+    report[@"historyDelta"] = @(receipt.measuredHistoryDelta);
+    report[@"commandClosed"] = @(receipt.commandClosed);
+    report[@"blocksOtherWork"] = @(receipt.blocksOtherWork);
+    report[@"reason"] = Text(receipt.reason);
+    // A terminal apply consumes the prepared handle and session: a replay
+    // must refuse rather than commit a second time.
+    const auto replayed = owner->apply(prepared.handle);
+    report[@"replayRefused"] =
+        @(replayed.outcome != pb::owner::Outcome::Committed);
+    return report;
+}
 #endif
 @end
 
@@ -782,6 +1149,27 @@ extern "C" void *Core3DDebugF4AttachmentRigOwnerProbe(
             candidateOverride:(__bridge NSData *)candidatePointer
             foreignOpening:(__bridge Core3DAttachmentRigOpening *)foreignOpeningPointer
             holdBusyLease:holdBusyLease!=0];
+        return (__bridge_retained void *)value;
+    }
+}
+
+extern "C" void *Core3DDebugF4S3BooleanEditProbe(
+    void *openingPointer, std::int32_t conflicting) {
+    @autoreleasepool {
+        Core3DAttachmentRigOpening *opening=
+            (__bridge Core3DAttachmentRigOpening *)openingPointer;
+        NSDictionary *value=opening
+            ?[opening debugS3BooleanEditConflicting:conflicting!=0]:@{};
+        return (__bridge_retained void *)value;
+    }
+}
+
+extern "C" void *Core3DDebugF4S3ReattachmentProbe(void *openingPointer) {
+    @autoreleasepool {
+        Core3DAttachmentRigOpening *opening=
+            (__bridge Core3DAttachmentRigOpening *)openingPointer;
+        NSDictionary *value=opening
+            ?[opening s3CommittedReattachmentObservation]:@{};
         return (__bridge_retained void *)value;
     }
 }

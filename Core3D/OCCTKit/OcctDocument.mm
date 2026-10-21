@@ -25439,6 +25439,165 @@ bool PartBooleanOwner::abortRestored(
         && SameGraphCurrentness(reminted, prepared.capture->graphCurrentness);
 }
 
+// F4-S3 (D1024, option 2): ABR1 in-command participant. Runs inside apply()'s
+// single open command after the staged readback, before the one CommitCommand.
+bool PartBooleanOwner::participateAttachmentRig(
+    const PreparedBooleanDocumentChange& prepared) noexcept {
+    namespace rig = core3d::attachment_rig;
+    try {
+        rig::StoredRecord before;
+        // The absent/corrupt/present distinction is unchanged: only a
+        // canonical present record engages the participant. With no record the
+        // behaviour is byte-for-byte the live apply(); attachments never block
+        // the closed A1 tool.
+        if (!ReadAttachmentRigStoredRecord(document_, before)
+            || before.state != rig::StoredReadState::Present)
+            return true;
+
+        // Mint the typed, read-only, non-serialisable correspondence receipt
+        // from the prepared change: exact input owner tuples (document,
+        // entity, definition), recipe node/source feature, result tuple,
+        // retained original lineage and the closed classification.
+        auto receipt = std::shared_ptr<SourceCorrespondenceReceipt>(
+            new SourceCorrespondenceReceipt());
+        receipt->resultOwner_ = prepared.capture->snapshot.owner;
+        receipt->resultNode_ = prepared.capture->snapshot.outputNode;
+        if (prepared.shell || prepared.capture->snapshot.sources.size() != 2
+            || prepared.capture->analytic.inputs.size() != 2
+            || prepared.analytic.inputs.size() != 2) {
+            receipt->classification_ = CorrespondenceClassification::UnsupportedFamily;
+        } else {
+            std::set<retained_recipe::OwnerKey, bool(*)(
+                const retained_recipe::OwnerKey&, const retained_recipe::OwnerKey&)>
+                inputOwners([](const retained_recipe::OwnerKey& left,
+                               const retained_recipe::OwnerKey& right) {
+                    if (left.document != right.document)
+                        return left.document < right.document;
+                    if (left.entity != right.entity) return left.entity < right.entity;
+                    return left.definition < right.definition;
+                });
+            std::set<retained_recipe::UUID> nodes, features;
+            bool exact = true;
+            for (std::size_t index = 0; index < 2; ++index) {
+                const auto& source = prepared.capture->snapshot.sources[index];
+                const auto& originalAnalytic = prepared.capture->analytic.inputs[index];
+                const auto& effectiveAnalytic = prepared.analytic.inputs[index];
+                OriginalAnalyticProjection original;
+                original.dimensions = originalAnalytic.dimensions;
+                original.translation = originalAnalytic.translation;
+                original.rotationXYZW = originalAnalytic.rotationXYZW;
+                EffectiveAnalyticGeometry effective;
+                effective.dimensions = effectiveAnalytic.dimensions;
+                effective.translation = effectiveAnalytic.translation;
+                effective.rotationXYZW = effectiveAnalytic.rotationXYZW;
+                retained_recipe::OwnerKey inputOwner{source.original.document,
+                    source.original.entity, source.original.definition};
+                exact = exact
+                    && correspondence::EffectiveMatchesOriginalAtCreation(
+                        original, effective)
+                    && source.locator.node == originalAnalytic.rootNode
+                    && source.locator.sourceFeature
+                        == originalAnalytic.originalSourceFeature
+                    && inputOwners.insert(inputOwner).second
+                    && nodes.insert(source.locator.node).second
+                    && features.insert(source.locator.sourceFeature).second;
+                receipt->inputs_.push_back({inputOwner, source.locator.node,
+                    source.locator.sourceFeature, source.original});
+            }
+            receipt->classification_ = exact
+                ? CorrespondenceClassification::OneToOne
+                : inputOwners.size() < 2
+                    ? CorrespondenceClassification::ManyToOne
+                    : CorrespondenceClassification::Conflicting;
+        }
+
+        rig::Metadata stored;
+        std::string refusal;
+        if (!rig::DecodeABR1(before.bytes, stored, refusal)) return false;
+        const auto ownerBytes = [](const retained_recipe::OwnerKey& owner) {
+            std::string value(reinterpret_cast<const char*>(owner.document.data()),
+                              owner.document.size());
+            value.append(reinterpret_cast<const char*>(owner.entity.data()),
+                         owner.entity.size());
+            value.append(reinterpret_cast<const char*>(owner.definition.data()),
+                         owner.definition.size());
+            return value;
+        };
+        const std::string resultTuple = ownerBytes(receipt->resultOwner());
+        bool concerns = false;
+        for (const auto& attachment : stored.attachments) {
+            const std::string& owner = attachment.rigid
+                ? attachment.rigid->owner : attachment.surface->owner;
+            if (owner == resultTuple) { concerns = true; break; }
+            for (const auto& input : receipt->inputs()) {
+                if (owner == ownerBytes(input.inputOwner)) { concerns = true; break; }
+            }
+            if (concerns) break;
+        }
+        // A record that does not reference this Boolean is not its business.
+        if (!concerns) return true;
+        // Every non-one-to-one class: the Boolean still commits unchanged and
+        // the original ABR1 bytes stay byte-identical; the F4 opening reports
+        // NeedsReview with the receipt's classification on its next
+        // observation. Nothing is erased and nothing is marked current.
+        if (receipt->classification() != CorrespondenceClassification::OneToOne)
+            return true;
+
+        // One-to-one: derive the remapped ABR1. Attachment and joint IDs are
+        // unchanged and the original lineage is retained; only the owner tuple
+        // of an attachment bound to a consumed input is rewritten to the
+        // result owner tuple. A surface binding keeps the exact persisted B2
+        // receipt, never an ordinal or a nearest face.
+        rig::Metadata remapped = stored;
+        for (auto& attachment : remapped.attachments) {
+            std::string& owner = attachment.rigid
+                ? attachment.rigid->owner : attachment.surface->owner;
+            if (owner == resultTuple) continue;
+            const auto match = std::find_if(receipt->inputs().begin(),
+                receipt->inputs().end(), [&](const SourceCorrespondence& value) {
+                    return owner == ownerBytes(value.inputOwner);
+                });
+            if (match != receipt->inputs().end()) owner = resultTuple;
+        }
+        std::vector<std::uint8_t> candidate;
+        if (!rig::EncodeABR1(remapped, candidate, refusal)
+            || candidate.empty() || candidate.size() > rig::kMaxStoredABR1Bytes)
+            return false;
+        // The attachment and joint identity domains are exactly preserved.
+        {
+            rig::Metadata verify;
+            if (!rig::DecodeABR1(candidate, verify, refusal)) return false;
+            std::set<std::string> beforeAttachments, afterAttachments;
+            std::set<std::string> beforeJoints, afterJoints;
+            for (const auto& value : stored.attachments)
+                beforeAttachments.insert(value.attachmentID);
+            for (const auto& value : verify.attachments)
+                afterAttachments.insert(value.attachmentID);
+            for (const auto& value : stored.joints)
+                beforeJoints.insert(value.jointID);
+            for (const auto& value : verify.joints)
+                afterJoints.insert(value.jointID);
+            if (beforeAttachments != afterAttachments || beforeJoints != afterJoints)
+                return false;
+        }
+        // Stage under the same open command through the internal staging the
+        // S2 commit path uses, then independently read the staged bytes back
+        // before the commit. Any failure aborts the whole command: zero delta,
+        // document, history, original ABR1, IDs and frames intact.
+        const Handle(TDataStd_ByteArray) attribute =
+            TDataStd_ByteArray::Set(document_->Main(),
+                rig::AttachmentRigAttributeID(), 0,
+                Standard_Integer(candidate.size()) - 1, Standard_False);
+        if (attribute.IsNull()) return false;
+        for (std::size_t index = 0; index < candidate.size(); ++index)
+            attribute->SetValue(Standard_Integer(index), candidate[index]);
+        rig::StoredRecord staged;
+        return ReadAttachmentRigStoredRecord(document_, staged)
+            && staged.state == rig::StoredReadState::Present
+            && staged.bytes == candidate;
+    } catch (...) { return false; }
+}
+
 Receipt PartBooleanOwner::apply(
     const std::shared_ptr<const PreparedBooleanDocumentChange>& prepared) noexcept {
     if (!prepared || !prepared->capture || prepared->capture->ownerNonce != nonce_
@@ -25491,6 +25650,10 @@ Receipt PartBooleanOwner::apply(
                 throw std::runtime_error("graph-currentness-readback");
         }
         if (prepared->fault == FaultPoint::F7BeforeClose) throw std::runtime_error("F7");
+        // F4-S3 (D1024): the ABR1 participant rides inside this same command;
+        // a participant failure aborts the whole command with zero delta.
+        if (!participateAttachmentRig(*prepared))
+            throw std::runtime_error("attachment-rig-participant");
         const Standard_Boolean added = document_->CommitCommand();
         recoveryBaseline_ = prepared->capture->baseline;
         recoveryExpected_ = staged;

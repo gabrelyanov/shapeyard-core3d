@@ -64,13 +64,22 @@ struct Metadata {
     TargetRoleProfile targetProfile;
 };
 
-enum class ReattachOutcome : std::uint8_t { Current, Reattached, NeedsReview, Refused };
+// S3 currentness. Current: the committed binding resolves on its live owner
+// under a one-to-one receipt. Reattached: reserved. NeedsReview: the source
+// correspondence was many-to-one/conflicting/missing/unsupported-family and
+// the original bytes/frames/IDs are retained for review. Stale: the owner was
+// consumed with no receipt; the record is kept as evidence, never erased.
+enum class ReattachOutcome : std::uint8_t { Current, Reattached, NeedsReview, Refused, Stale };
 struct ReattachReceipt { std::string attachmentID; ReattachOutcome outcome; std::string reason; };
 
 // Pure admission: finite right-handed orthonormal frames; unique stable IDs;
 // exactly one binding; role/profile cardinality; ownership/remap and cycle
 // fences.  It never produces vertex weights or silently updates a surface.
 bool Validate(const Metadata&, std::string& refusal) noexcept;
+// Structural per-attachment classification of a decoded candidate: rigid
+// bindings are structurally current; surface bindings remain NeedsReview
+// until a proved source-stage receipt exists. Document owner resolution and
+// correspondence-derived currentness are layered on by the native consumer.
 std::vector<ReattachReceipt> ReattachSurfaceBindings(const Metadata&, std::string& refusal) noexcept;
 
 } // namespace core3d::attachment_rig
