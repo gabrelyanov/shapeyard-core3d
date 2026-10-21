@@ -6,6 +6,7 @@
 #import "Core3DViewer.h"
 
 #include "../OCCTKit/ExportMeshDecimationNativeOwner.hxx"
+#include "../OCCTKit/ExportMeshAttributeDecimator.hxx"
 #include "../OCCTKit/ExportMeshDecimator.hxx"
 #include "../OCCTKit/OcctDocument.h"
 #include <algorithm>
@@ -39,6 +40,27 @@ Core3DDecimationError PublicError(NativeError value) {
         case NativeError::UnreachableTriangleBudget:
             return Core3DDecimationErrorUnreachableTriangleBudget;
         case NativeError::None: return Core3DDecimationErrorMalformedRequest;
+    }
+}
+
+using AttributeNativeError = core3d::export_mesh_attribute_decimator::Error;
+
+// Attribute-kernel refusals map onto the declared public codes: provenance
+// and domain-ambiguity refusals are evidence failures, never silent output.
+Core3DDecimationError PublicAttributeError(AttributeNativeError value) {
+    switch (value) {
+        case AttributeNativeError::TargetBelowClosedMeshMinimum:
+            return Core3DDecimationErrorTargetBelowClosedMeshMinimum;
+        case AttributeNativeError::InvalidTopology: return Core3DDecimationErrorInvalidTopology;
+        case AttributeNativeError::NonFiniteInput: return Core3DDecimationErrorNonFiniteInput;
+        case AttributeNativeError::ResourceLimit: return Core3DDecimationErrorResourceLimit;
+        case AttributeNativeError::Cancelled: return Core3DDecimationErrorCancelled;
+        case AttributeNativeError::UnreachableTriangleBudget:
+            return Core3DDecimationErrorUnreachableTriangleBudget;
+        case AttributeNativeError::ProvenanceUnprovable:
+        case AttributeNativeError::AttributeDomainAmbiguous:
+            return Core3DDecimationErrorMissingArtifactEvidence;
+        case AttributeNativeError::None: return Core3DDecimationErrorMalformedRequest;
     }
 }
 
@@ -145,6 +167,16 @@ bool F2EvidenceEqual(Core3DPublishArtifactEvidence *left, Core3DPublishArtifactE
 @property(nonatomic, copy, readwrite) NSString *settingsSHA256;
 @property(nonatomic, assign, readwrite) NSUInteger targetTriangleCount;
 @property(nonatomic, assign, readwrite) double metersPerUnit;
+// F2-S3 attribute payload (all-or-none; nil on every field selects the v1
+// flat path). Declared in this implementation file because the public header
+// is outside this step's allocation; tests bind them through key-value
+// coding. Values are immutable request-owned copies: one world Z-up normal
+// (3) and one UV (2) per stored source vertex, one material id and one
+// 64-lower-hex source-face anchor per face.
+@property(nonatomic, copy, readwrite, nullable) NSArray<NSNumber *> *f2AttributeWedgeNormals;
+@property(nonatomic, copy, readwrite, nullable) NSArray<NSNumber *> *f2AttributeWedgeUVs;
+@property(nonatomic, copy, readwrite, nullable) NSArray<NSNumber *> *f2AttributeFaceMaterials;
+@property(nonatomic, copy, readwrite, nullable) NSArray<NSString *> *f2AttributeFaceAnchors;
 @end
 
 @implementation Core3DDecimationRequest
@@ -199,6 +231,9 @@ bool F2EvidenceEqual(Core3DPublishArtifactEvidence *left, Core3DPublishArtifactE
 @interface Core3DDecimationResult ()
 - (instancetype)initWithNative:(const core3d::export_mesh_decimator::Output&)native
                  materialBytes:(NSData *)materialBytes;
+- (instancetype)initWithAttributeNative:
+    (const core3d::export_mesh_attribute_decimator::Output&)native
+                 materialBytes:(NSData *)materialBytes;
 @property(nonatomic, copy, readwrite) NSData *positionFloat32Data;
 @property(nonatomic, copy, readwrite) NSData *normalFloat32Data;
 @property(nonatomic, copy, readwrite) NSData *indexUInt32Data;
@@ -208,6 +243,19 @@ bool F2EvidenceEqual(Core3DPublishArtifactEvidence *left, Core3DPublishArtifactE
 @property(nonatomic, copy, readwrite) NSString *appearanceLimitation;
 @property(nonatomic, assign, readwrite) NSUInteger triangleCount;
 @property(nonatomic, assign, readwrite) NSUInteger acceptedCollapseCount;
+//! F2-S3 attribute derivative evidence (attribute path only; nil on flat
+//! results). Same KVC-bound implementation-file seam as the request payload:
+//! carried wedge UVs (2 Float32 per corner), one material id and one
+//! source-face anchor per emitted triangle, and each emitted triangle's
+//! content digest recomputed from the actual emitted Float32 position bytes
+//! (never a pre-decimation face digest reused after reordering).
+@property(nonatomic, copy, readwrite, nullable) NSData *f2AttributeUVFloat32Data;
+@property(nonatomic, copy, readwrite, nullable) NSArray<NSNumber *> *f2AttributeMaterialIDs;
+@property(nonatomic, copy, readwrite, nullable) NSArray<NSString *> *f2AttributeSourceFaceAnchors;
+@property(nonatomic, copy, readwrite, nullable) NSArray<NSString *> *f2AttributeTriangleContentSHA256;
+//! Accepted (keep, remove) welded-vertex rank pairs, flattened in acceptance
+//! order, for independent collapse replay by the contract verifier.
+@property(nonatomic, copy, readwrite, nullable) NSArray<NSNumber *> *f2AttributeCollapseKeepRemove;
 //! Nonserializable F2 producer seal. Set only by decimateRequest: when the
 //! opening's capture carried bound artifact evidence; lives only on the live
 //! result object and never persists.
@@ -240,6 +288,48 @@ bool F2EvidenceEqual(Core3DPublishArtifactEvidence *left, Core3DPublishArtifactE
         _appearanceLimitation = @"Flat per-corner normals preserve hard creases; curved regions remain faceted until S3 smooth-normal transfer.";
         _triangleCount = native.indices.size() / 3;
         _acceptedCollapseCount = native.acceptedCollapses;
+    }
+    return self;
+}
+- (instancetype)initWithAttributeNative:
+    (const core3d::export_mesh_attribute_decimator::Output&)native
+                 materialBytes:(NSData *)materialBytes {
+    if ((self = [super init])) {
+        _positionFloat32Data = [NSData dataWithBytes:native.positionsMM.data()
+            length:native.positionsMM.size() * sizeof(float)];
+        _normalFloat32Data = [NSData dataWithBytes:native.normals.data()
+            length:native.normals.size() * sizeof(float)];
+        _indexUInt32Data = [NSData dataWithBytes:native.indices.data()
+            length:native.indices.size() * sizeof(std::uint32_t)];
+        _materialBytes = [materialBytes copy];
+        NSMutableArray *groups = [NSMutableArray arrayWithCapacity:native.contributionTokens.size()];
+        for (const auto& group : native.contributionTokens) {
+            NSMutableArray *tokens = [NSMutableArray arrayWithCapacity:group.size()];
+            for (const auto& token : group) {
+                NSString *value = [[NSString alloc] initWithBytes:token.data()
+                    length:token.size() encoding:NSUTF8StringEncoding];
+                if (value) [tokens addObject:value];
+            }
+            [groups addObject:[tokens copy]];
+        }
+        _sourceContributionTokens = [groups copy];
+        _normalPolicy = @(core3d::export_decimation::kAttributeNormalPolicy);
+        _appearanceLimitation = @(core3d::export_decimation::kAttributeAppearanceLimitation);
+        _triangleCount = native.indices.size() / 3;
+        _acceptedCollapseCount = native.acceptedCollapses;
+        _f2AttributeUVFloat32Data = [NSData dataWithBytes:native.uvs.data()
+            length:native.uvs.size() * sizeof(float)];
+        NSMutableArray *materials = [NSMutableArray arrayWithCapacity:native.faceMaterials.size()];
+        for (const std::uint32_t material : native.faceMaterials)
+            [materials addObject:@(material)];
+        _f2AttributeMaterialIDs = [materials copy];
+        NSMutableArray *collapses =
+            [NSMutableArray arrayWithCapacity:2 * native.collapseKeepRemove.size()];
+        for (const auto& collapse : native.collapseKeepRemove) {
+            [collapses addObject:@(collapse.first)];
+            [collapses addObject:@(collapse.second)];
+        }
+        _f2AttributeCollapseKeepRemove = [collapses copy];
     }
     return self;
 }
@@ -484,6 +574,174 @@ F2WriteOutcome F2WriteStoreAtomically(const Handle(OcctDocument)& document,
     } catch (...) { return F2WriteOutcome::Recovery; }
 }
 
+// F2-S3 independent output verification: re-derives the attribute domains
+// from the request payload (canonical weld, protected graph, union-find
+// domains, unique domain wedges) and requires every emitted corner to carry
+// exactly the recomputed surviving-wedge values and every emitted triangle
+// its origin face's material, anchor and contribution tokens. Any
+// disagreement refuses the whole derivative; there is no partial admission.
+bool F2VerifyAttributeOutput(
+    const core3d::export_mesh_attribute_decimator::Input& input,
+    const core3d::export_mesh_attribute_decimator::Output& output) {
+    namespace attr = core3d::export_mesh_attribute_decimator;
+    namespace v1 = core3d::export_mesh_decimator;
+    try {
+        const std::size_t faceCount = input.indices.size() / 3;
+        const std::size_t emitted = output.faceMaterials.size();
+        if (faceCount == 0 || emitted < 4
+            || output.sourceFaceOrdinals.size() != emitted
+            || output.indices.size() != 3 * emitted
+            || output.positionsMM.size() != 9 * emitted
+            || output.normals.size() != 9 * emitted
+            || output.uvs.size() != 6 * emitted
+            || output.contributionTokens.size() != emitted)
+            return false;
+        std::vector<v1::Point> canonical = input.positionsMM;
+        for (v1::Point& p : canonical) {
+            if (!v1::Finite(p)) return false;
+            if (p.x == 0) p.x = 0; if (p.y == 0) p.y = 0; if (p.z == 0) p.z = 0;
+        }
+        std::sort(canonical.begin(), canonical.end());
+        canonical.erase(std::unique(canonical.begin(), canonical.end()), canonical.end());
+        std::vector<std::array<std::size_t, 3>> faces;
+        std::vector<std::array<std::size_t, 3>> stored;
+        faces.reserve(faceCount);
+        stored.reserve(faceCount);
+        for (std::size_t f = 0; f < faceCount; ++f) {
+            std::array<std::size_t, 3> welded{}, storedTriple{};
+            for (std::size_t c = 0; c < 3; ++c) {
+                const std::uint32_t source = input.indices[3 * f + c];
+                if (source >= input.positionsMM.size()) return false;
+                storedTriple[c] = source;
+                const v1::Point p = input.positionsMM[source];
+                auto found = std::lower_bound(canonical.begin(), canonical.end(), p);
+                if (found == canonical.end() || !(*found == p)) return false;
+                welded[c] = static_cast<std::size_t>(found - canonical.begin());
+            }
+            faces.push_back(welded);
+            stored.push_back(storedTriple);
+        }
+        std::map<v1::detail::Edge, std::vector<std::size_t>> incidents;
+        for (std::size_t f = 0; f < faceCount; ++f) {
+            incidents[v1::detail::MakeEdge(faces[f][0], faces[f][1])].push_back(f);
+            incidents[v1::detail::MakeEdge(faces[f][1], faces[f][2])].push_back(f);
+            incidents[v1::detail::MakeEdge(faces[f][2], faces[f][0])].push_back(f);
+        }
+        auto faceNormal = [&](std::size_t f) {
+            const v1::Point& a = canonical[faces[f][0]];
+            return v1::Cross(canonical[faces[f][1]] - a, canonical[faces[f][2]] - a);
+        };
+        std::set<v1::detail::Edge> protectedEdges;
+        const double cosineThreshold = std::cos(45.0 * std::acos(-1.0) / 180.0);
+        for (const auto& item : incidents) {
+            if (item.second.size() != 2) return false;
+            const std::size_t first = item.second[0], second = item.second[1];
+            const v1::Point a = faceNormal(first), b = faceNormal(second);
+            const double divisor = std::sqrt(v1::Dot(a, a) * v1::Dot(b, b));
+            if (!(std::isfinite(divisor) && divisor > 0)) return false;
+            const double cosine = v1::Dot(a, b) / divisor;
+            if (!std::isfinite(cosine)) return false;
+            bool attributeBoundary = input.faceMaterials[first] != input.faceMaterials[second];
+            for (std::size_t corner = 0; corner < 3 && !attributeBoundary; ++corner) {
+                const std::size_t welded = faces[first][corner];
+                if (welded != item.first.first && welded != item.first.second) continue;
+                const auto other = std::find(faces[second].begin(), faces[second].end(), welded);
+                if (other == faces[second].end()) return false;
+                const std::size_t otherCorner =
+                    static_cast<std::size_t>(other - faces[second].begin());
+                if (!(input.wedges[stored[first][corner]] == input.wedges[stored[second][otherCorner]]))
+                    attributeBoundary = true;
+            }
+            if (cosine <= cosineThreshold || attributeBoundary) protectedEdges.insert(item.first);
+        }
+        std::set<std::size_t> lockedVertices;
+        for (const auto& edge : protectedEdges) {
+            lockedVertices.insert(edge.first);
+            lockedVertices.insert(edge.second);
+        }
+        auto encode = [](double value) {
+            const float encoded = static_cast<float>(value);
+            return encoded == 0 ? 0.0f : encoded;
+        };
+        std::map<std::array<float, 3>, std::size_t> rankByPosition;
+        for (std::size_t rank = 0; rank < canonical.size(); ++rank) {
+            const std::array<float, 3> key{encode(canonical[rank].x),
+                encode(canonical[rank].y), encode(canonical[rank].z)};
+            if (!rankByPosition.emplace(key, rank).second) return false;
+        }
+        // Replay the emitted collapse sequence: every accepted collapse must
+        // be an unprotected current edge with an unlocked removed endpoint,
+        // must kill exactly its two incident faces and must carry one
+        // identical surviving wedge into every rewritten slot.
+        if (output.collapseKeepRemove.size() != output.acceptedCollapses) return false;
+        std::vector<std::array<std::size_t, 3>> replayFaces = faces;
+        std::vector<std::array<attr::Wedge, 3>> replayWedges(faceCount);
+        for (std::size_t f = 0; f < faceCount; ++f)
+            for (std::size_t c = 0; c < 3; ++c)
+                replayWedges[f][c] = input.wedges[stored[f][c]];
+        std::vector<bool> alive(faceCount, true);
+        std::size_t aliveCount = faceCount;
+        for (const auto& collapse : output.collapseKeepRemove) {
+            const std::size_t keep = collapse.first, remove = collapse.second;
+            if (keep >= canonical.size() || remove >= canonical.size() || keep == remove)
+                return false;
+            if (protectedEdges.count(v1::detail::MakeEdge(keep, remove))) return false;
+            if (lockedVertices.count(remove)) return false;
+            std::vector<std::pair<std::size_t, std::size_t>> deadKeepSlots;
+            std::vector<std::pair<std::size_t, std::size_t>> rewrites;
+            for (std::size_t f = 0; f < faceCount; ++f) {
+                if (!alive[f]) continue;
+                bool hasKeep = false, hasRemove = false;
+                std::size_t keepSlot = 0;
+                for (std::size_t c = 0; c < 3; ++c) {
+                    if (replayFaces[f][c] == keep) { hasKeep = true; keepSlot = c; }
+                    if (replayFaces[f][c] == remove) hasRemove = true;
+                }
+                if (hasKeep && hasRemove) {
+                    deadKeepSlots.push_back({f, keepSlot});
+                } else if (hasRemove) {
+                    for (std::size_t c = 0; c < 3; ++c)
+                        if (replayFaces[f][c] == remove) rewrites.push_back({f, c});
+                }
+            }
+            if (deadKeepSlots.size() != 2) return false;
+            const attr::Wedge carried =
+                replayWedges[deadKeepSlots[0].first][deadKeepSlots[0].second];
+            if (!(carried == replayWedges[deadKeepSlots[1].first][deadKeepSlots[1].second]))
+                return false;
+            for (const auto& dead : deadKeepSlots) { alive[dead.first] = false; --aliveCount; }
+            for (const auto& slot : rewrites) {
+                replayFaces[slot.first][slot.second] = keep;
+                replayWedges[slot.first][slot.second] = carried;
+            }
+        }
+        if (aliveCount != emitted) return false;
+        for (std::size_t t = 0; t < emitted; ++t) {
+            const std::uint32_t ordinal = output.sourceFaceOrdinals[t];
+            if (ordinal >= faceCount || !alive[ordinal]) return false;
+            if (output.faceMaterials[t] != input.faceMaterials[ordinal]) return false;
+            if (output.contributionTokens[t].empty()) return false;
+            for (std::size_t c = 0; c < 3; ++c) {
+                const std::size_t corner = 3 * t + c;
+                if (output.indices[corner] != corner) return false;
+                const std::array<float, 3> key{output.positionsMM[3 * corner],
+                    output.positionsMM[3 * corner + 1], output.positionsMM[3 * corner + 2]};
+                const auto rank = rankByPosition.find(key);
+                if (rank == rankByPosition.end()) return false;
+                if (replayFaces[ordinal][c] != rank->second) return false;
+                const attr::Wedge& wedge = replayWedges[ordinal][c];
+                if (output.normals[3 * corner] != encode(wedge.nx)
+                    || output.normals[3 * corner + 1] != encode(wedge.ny)
+                    || output.normals[3 * corner + 2] != encode(wedge.nz)
+                    || output.uvs[2 * corner] != encode(wedge.u)
+                    || output.uvs[2 * corner + 1] != encode(wedge.v))
+                    return false;
+            }
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
 } // namespace
 
 @interface Core3DDecimationOpening () {
@@ -523,6 +781,9 @@ F2WriteOutcome F2WriteStoreAtomically(const Handle(OcctDocument)& document,
     if (self.capture && ![self.capture isCurrent:error]) {
         SetError(error, Core3DDecimationErrorStaleSource, @"F2 source capture is stale."); return nil;
     }
+    if (request.f2AttributeWedgeNormals || request.f2AttributeWedgeUVs
+        || request.f2AttributeFaceMaterials || request.f2AttributeFaceAnchors)
+        return [self f2DecimateAttributeRequest:request error:error];
     core3d::export_mesh_decimator::Input native;
     native.targetTriangles = request.targetTriangleCount;
     native.positionsMM.reserve(request.positionsMM.count / 3);
@@ -564,6 +825,136 @@ F2WriteOutcome F2WriteStoreAtomically(const Handle(OcctDocument)& document,
         if (F2CanonicalRequestBytes(request, canonical))
             result.f2ProducerSeal = [[Core3DF2ProducerSeal alloc] initWithCapture:self.capture
                 evidence:evidence canonicalRequestBytes:F2Data(canonical)];
+    }
+    return result;
+}
+
+//! F2-S3 attribute-aware path. Same ownership, fences and Stop stickiness as
+//! the flat path; the attribute payload is validated all-or-none, the kernel
+//! runs with the v1 work/Stop accounting, and the candidate is admitted only
+//! after the independent domain re-derivation proves every carried wedge and
+//! every per-triangle material/anchor. No producer seal is attached:
+//! attribute derivatives are not persistable in this slice (the F2DR record
+//! and its codec are unchanged), so a failed or unprovable attempt can never
+//! leave a partial artifact or a Current claim behind.
+- (Core3DDecimationResult *)f2DecimateAttributeRequest:(Core3DDecimationRequest *)request
+                                                 error:(NSError **)error {
+    namespace attr = core3d::export_mesh_attribute_decimator;
+    NSArray<NSNumber *> *normals = request.f2AttributeWedgeNormals;
+    NSArray<NSNumber *> *uvs = request.f2AttributeWedgeUVs;
+    NSArray<NSNumber *> *materials = request.f2AttributeFaceMaterials;
+    NSArray<NSString *> *anchors = request.f2AttributeFaceAnchors;
+    const NSUInteger storedCount = request.positionsMM.count / 3;
+    const NSUInteger faceCount = request.indices.count / 3;
+    if (![normals isKindOfClass:NSArray.class] || ![uvs isKindOfClass:NSArray.class]
+        || ![materials isKindOfClass:NSArray.class] || ![anchors isKindOfClass:NSArray.class]
+        || normals.count != request.positionsMM.count
+        || uvs.count != 2 * storedCount
+        || materials.count != faceCount
+        || anchors.count != request.sourceContributionTokens.count) {
+        SetError(error, Core3DDecimationErrorMalformedRequest,
+            @"F2 attribute payload is incomplete or misaligned.");
+        return nil;
+    }
+    for (NSString *anchor in anchors) {
+        if (![anchor isKindOfClass:NSString.class] || !LowerHexDigest(anchor)) {
+            SetError(error, Core3DDecimationErrorMissingArtifactEvidence,
+                @"F2 attribute provenance anchor is not a 64-lower-hex digest.");
+            return nil;
+        }
+    }
+    attr::Input native;
+    native.targetTriangles = request.targetTriangleCount;
+    @try {
+        native.positionsMM.reserve(storedCount);
+        for (NSUInteger i = 0; i < request.positionsMM.count; i += 3)
+            native.positionsMM.push_back({request.positionsMM[i].doubleValue,
+                request.positionsMM[i + 1].doubleValue, request.positionsMM[i + 2].doubleValue});
+        native.indices.reserve(request.indices.count);
+        for (NSNumber *number in request.indices) {
+            const unsigned long long value = number.unsignedLongLongValue;
+            if (value > std::numeric_limits<std::uint32_t>::max()) {
+                SetError(error, Core3DDecimationErrorMalformedRequest, @"Index is out of range.");
+                return nil;
+            }
+            native.indices.push_back(static_cast<std::uint32_t>(value));
+        }
+        native.wedges.reserve(storedCount);
+        for (NSUInteger i = 0; i < storedCount; ++i) {
+            attr::Wedge wedge;
+            wedge.nx = normals[3 * i].doubleValue;
+            wedge.ny = normals[3 * i + 1].doubleValue;
+            wedge.nz = normals[3 * i + 2].doubleValue;
+            wedge.u = uvs[2 * i].doubleValue;
+            wedge.v = uvs[2 * i + 1].doubleValue;
+            native.wedges.push_back(wedge);
+        }
+        native.faceMaterials.reserve(faceCount);
+        for (NSNumber *number in materials) {
+            const unsigned long long value = number.unsignedLongLongValue;
+            if (value > std::numeric_limits<std::uint32_t>::max()) {
+                SetError(error, Core3DDecimationErrorMalformedRequest,
+                    @"F2 attribute material id is out of range.");
+                return nil;
+            }
+            native.faceMaterials.push_back(static_cast<std::uint32_t>(value));
+        }
+        for (NSString *token in request.sourceContributionTokens)
+            native.contributionTokens.emplace_back(token.UTF8String ?: "");
+        for (NSString *anchor in anchors)
+            native.sourceFaceAnchors.emplace_back(anchor.UTF8String ?: "");
+    } @catch (__unused NSException *exception) {
+        SetError(error, Core3DDecimationErrorMalformedRequest, @"Malformed F2 attribute request.");
+        return nil;
+    }
+    attr::Output candidate;
+    const AttributeNativeError status = attr::Decimate(native, candidate, _stop.get());
+    if (status != AttributeNativeError::None) {
+        SetError(error, PublicAttributeError(status),
+            @"F2 attribute decimation refused without output.");
+        return nil;
+    }
+    if (_stop->load(std::memory_order_relaxed)) {
+        SetError(error, Core3DDecimationErrorCancelled, @"F2 request was cancelled.");
+        return nil;
+    }
+    if (!F2VerifyAttributeOutput(native, candidate)) {
+        SetError(error, Core3DDecimationErrorMissingArtifactEvidence,
+            @"F2 attribute output failed independent domain verification.");
+        return nil;
+    }
+    if (self.capture && ![self.capture isCurrent:error]) {
+        SetError(error, Core3DDecimationErrorStaleSource, @"F2 source changed during work.");
+        return nil;
+    }
+    Core3DDecimationResult *result = [[Core3DDecimationResult alloc]
+        initWithAttributeNative:candidate materialBytes:request.materialBytes];
+    @try {
+        NSMutableArray *outAnchors =
+            [NSMutableArray arrayWithCapacity:candidate.sourceFaceOrdinals.size()];
+        for (const std::uint32_t ordinal : candidate.sourceFaceOrdinals)
+            [outAnchors addObject:anchors[ordinal]];
+        result.f2AttributeSourceFaceAnchors = [outAnchors copy];
+        // Per-triangle content digests recomputed from the actual emitted
+        // Float32 position bytes in emitted order (the F2-S2 rule); split
+        // corners are sequential, so each triangle is 36 consecutive bytes.
+        NSData *positions = result.positionFloat32Data;
+        if (positions.length != result.triangleCount * 36) {
+            SetError(error, Core3DDecimationErrorMissingArtifactEvidence,
+                @"F2 attribute output byte layout is inconsistent.");
+            return nil;
+        }
+        const auto *positionBytes = static_cast<const std::uint8_t *>(positions.bytes);
+        NSMutableArray *contents = [NSMutableArray arrayWithCapacity:result.triangleCount];
+        for (std::size_t t = 0; t < result.triangleCount; ++t) {
+            const f2::F2Digest digest = f2::OutputTriangleContentSHA256(positionBytes + 36 * t);
+            [contents addObject:F2String(f2::HexFromDigest(digest))];
+        }
+        result.f2AttributeTriangleContentSHA256 = [contents copy];
+    } @catch (__unused NSException *exception) {
+        SetError(error, Core3DDecimationErrorMissingArtifactEvidence,
+            @"F2 attribute receipt assembly failed.");
+        return nil;
     }
     return result;
 }

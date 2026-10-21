@@ -17,17 +17,28 @@
 #include "NativeOpeningContext.hxx"
 #include "PartBooleanBuild.hxx"
 #include "ProfilePersistence.hxx"
+#include "RetainedProfileProducer.hxx"
 #include "OcctDocument.h"
 
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepGProp.hxx>
+#include <BRepLib.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
+#include <GProp_GProps.hxx>
 #include <Standard_GUID.hxx>
 #include <TDF_Label.hxx>
 #include <TDocStd_Document.hxx>
 #include <TNaming_Builder.hxx>
+#include <TopoDS.hxx>
 #include <TopoDS_Iterator.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -148,6 +159,77 @@ inline bool CanonicalSourceBytes(const std::vector<std::uint8_t>& exactBytes,
     }
 }
 
+//! Owner-local mirror of the production createProfile polygon-prism producer
+//! in Core3DViewer.mm:5619-5729 and :5761-5793. Keep this recipe path byte-
+//! exact with production; callers must never substitute geometric tolerance.
+inline TopoDS_Shape BuildProductionProfileSource(
+    const profile::Parameters& parameters) noexcept {
+    try {
+        if (!part_boolean::build::IsRectangularP1BaseRecipe(parameters, false))
+            return {};
+        const ProfileDefinition& definition = parameters.definition;
+        double signedArea = 0, expected = 0;
+        if (!ProfileDefinitionExpectedVolume(definition, signedArea, expected)) return {};
+
+        auto points = definition.points;
+        if (signedArea < 0) std::reverse(points.begin(), points.end());
+        BRepBuilderAPI_MakePolygon polygon;
+        for (const gp_Pnt2d& point : points)
+            polygon.Add(ProfilePointInPlane(point, definition.plane));
+        polygon.Close();
+        if (!polygon.IsDone()) return {};
+        BRepBuilderAPI_MakeFace face(polygon.Wire(), Standard_True);
+        if (!face.IsDone()
+            || !BRepCheck_Analyzer(face.Face(), Standard_True).IsValid()) return {};
+
+        const gp_Vec direction = definition.plane == 0
+            ? gp_Vec(0, 0, definition.depth)
+            : definition.plane == 1
+                ? gp_Vec(0, definition.depth, 0)
+                : gp_Vec(definition.depth, 0, 0);
+        BRepPrimAPI_MakePrism prism(
+            face.Face(), direction, Standard_True, Standard_True);
+        if (!prism.IsDone() || prism.Shape().IsNull()
+            || prism.Shape().ShapeType() != TopAbs_SOLID) return {};
+        TopoDS_Shape result = prism.Shape();
+
+        const std::atomic_bool cancelled{false};
+        if (parameters.constructionFrame) {
+            expected *= parameters.constructionFrame->AbsoluteVolumeScale();
+            if (!std::isfinite(expected) || expected <= 0
+                || !retained_edge_treatment::BuildFramedPolygonPrism(
+                    parameters, cancelled, result)) return {};
+        }
+        if (result.IsNull() || result.ShapeType() != TopAbs_SOLID) return {};
+        TopoDS_Solid solid = TopoDS::Solid(result);
+        if (!BRepLib::OrientClosedSolid(solid)
+            || !BRepCheck_Analyzer(solid, Standard_True).IsValid()) return {};
+        GProp_GProps properties;
+        BRepGProp::VolumeProperties(solid, properties);
+        if (!std::isfinite(properties.Mass()) || properties.Mass() <= 0
+            || std::abs(properties.Mass() - expected)
+                > std::max(1e-8, expected * 1e-8)) return {};
+
+        if (retained_profile_producer::EligiblePrivateProfileSource(
+                definition.revolve, false, bool(definition.circle),
+                bool(definition.curves), bool(parameters.constructionFrame))) {
+            retained_edge_treatment::ReplayBudget producerBudget;
+            TopoDS_Shape fixedPoint;
+            const auto status = retained_profile_producer::
+                MaterializePrivateProfileProducerFixedPoint(
+                    solid, cancelled, producerBudget, fixedPoint);
+            if (status == retained_profile_producer::FixedPointStatus::Cancelled
+                || status == retained_profile_producer::
+                    FixedPointStatus::BudgetExceeded) return {};
+            if (status == retained_profile_producer::FixedPointStatus::Adopted)
+                solid = TopoDS::Solid(fixedPoint);
+        }
+        return solid;
+    } catch (...) {
+        return {};
+    }
+}
+
 //! Rebuilds the declared rectangular-profile source through the production
 //! profile source builder and requires byte-exact equality of the canonical
 //! forms with the actual retained source. This is the create-time receipt: a
@@ -167,7 +249,7 @@ inline bool ProveSourceReceipt(const profile::Parameters& parameters,
         return false;
     recipe.kind = cr::RecipeKind::Profile;
     recipe.schema = std::uint32_t(profile::SchemaFor(parameters));
-    const TopoDS_Shape rebuilt = part_boolean::build::BuildProfileSource(parameters, false);
+    const TopoDS_Shape rebuilt = BuildProductionProfileSource(parameters);
     std::vector<std::uint8_t> rebuiltBytes, canonicalRebuilt, canonicalSource;
     return !rebuilt.IsNull()
         && draft_faces::detail::exactShapeBytes(rebuilt, rebuiltBytes)
@@ -360,7 +442,20 @@ public:
             source.original.document = capture->ownerKey.document;
             source.original.entity = capture->ownerKey.entity;
             source.original.definition = capture->ownerKey.definition;
+            // Production promotion retires the standalone profile attribute
+            // because the composite becomes the carrier's sole recipe owner.
+            // Preserve its feature identity as the composite source lineage;
+            // the lower-level owner fixture without a stored profile retains
+            // its historical minted identity path.
             source.original.sourceFeature = detail::MintUUID();
+            profile::Record sourceProfile;
+            if (!profile::Read(capture->document, capture->carrier, sourceProfile))
+                return refuse("b4.stale-capture");
+            if (!sourceProfile.label.IsNull()
+                && (!sourceProfile.IsCurrent(capture->document, capture->carrier)
+                    || !receipt::ParseUUID(sourceProfile.identifier,
+                                           source.original.sourceFeature)))
+                return refuse("b4.stale-capture");
             source.recipe = capture->sourceRecipe;
             source.inputToCarrier.sourceMetersPerUnit = capture->metersPerUnit;
             source.inputToCarrier.carrierMetersPerUnit = capture->metersPerUnit;
@@ -445,7 +540,7 @@ public:
                 || !cr::EncodeScalarRecipe(recipe.kind, recipe.schema, encoded, recipe.bytes))
                 return refuse("b4.invalid-source-edit");
             const TopoDS_Shape newSource =
-                part_boolean::build::BuildProfileSource(updated, false);
+                detail::BuildProductionProfileSource(updated);
             std::vector<std::uint8_t> newSourceBytes;
             if (newSource.IsNull()
                 || !draft_faces::detail::exactShapeBytes(newSource, newSourceBytes))

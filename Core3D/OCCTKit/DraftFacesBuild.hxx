@@ -173,8 +173,17 @@ inline bool sameSection(const SectionWitness& a, const SectionWitness& b,
         || std::abs(a.length - b.length) > tolerance * std::max<std::size_t>(1, a.edges)) {
         return false;
     }
-    for (std::size_t index = 0; index < a.vertices.size(); ++index)
-        if (a.vertices[index].Distance(b.vertices[index]) > tolerance) return false;
+    std::vector<bool> matched(b.vertices.size(), false);
+    for (const gp_Pnt& source : a.vertices) {
+        std::size_t match = b.vertices.size(), count = 0;
+        for (std::size_t index = 0; index < b.vertices.size(); ++index) {
+            if (source.Distance(b.vertices[index]) <= tolerance) {
+                match = index; ++count;
+            }
+        }
+        if (count != 1 || matched[match]) return false;
+        matched[match] = true;
+    }
     return true;
 }
 

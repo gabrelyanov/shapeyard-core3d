@@ -22693,25 +22693,40 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         const et::SourceStageContext& context){
         et::Definition value=shadow(fixture.definition);
         et::ReplayBudget setupBudget;et::Refusal refusal;
-        std::atomic_bool running{false};et::detail::WorkingStageSequence sequence;
+        std::atomic_bool running{false};
+        const auto* proof=context.proofFor(fixture.definition.steps.front());
+        const auto& binding=std::get<r2::BooleanBaseBinding>(fixture.definition.base);
+        fs::Resolution sourceResolution;
+        if(!proof||fs::Resolve(fixture.sourceBase,relative,*proof,
+                binding.metersPerLocalUnit,setupBudget,running,
+                sourceResolution)!=fs::Refusal::None||!sourceResolution.proof)return false;
+        const auto sourceFound=std::find_if(sourceResolution.proof->boundaryUses().begin(),
+            sourceResolution.proof->boundaryUses().end(),
+            [](const auto& use){return use.selected;});
+        if(sourceFound==sourceResolution.proof->boundaryUses().end())return false;
+        et::detail::WorkingStageSequence sequence;
         if(!et::detail::BeginWorkingStages(fixture.postBoolean,value,setupBudget,
                 refusal,running,sequence))return false;
-        fs::Resolution resolution;
-        const auto* proof=context.proofFor(fixture.definition.steps.front());
-        if(!proof||fs::Resolve(sequence.current,relative,*proof,.001,setupBudget,
-                running,resolution)!=fs::Refusal::None||!resolution.proof)return false;
-        const auto found=std::find_if(resolution.proof->boundaryUses().begin(),
-            resolution.proof->boundaryUses().end(),[](const auto& use){return use.selected;});
-        if(found==resolution.proof->boundaryUses().end())return false;
+        fs::Resolution treatmentResolution;
+        if(fs::Resolve(sequence.current,relative,*proof,.001,
+                setupBudget,running,treatmentResolution)!=fs::Refusal::None
+                ||!treatmentResolution.proof)return false;
+        const auto treatmentFound=std::find_if(
+            treatmentResolution.proof->boundaryUses().begin(),
+            treatmentResolution.proof->boundaryUses().end(),
+            [](const auto& use){return use.selected;});
+        if(treatmentFound==treatmentResolution.proof->boundaryUses().end())return false;
         auto& step=fixture.definition.steps.front();auto& anchor=step.anchors.front();
-        if(!et::detail::MeasureUseWitness(*found,.001,anchor.curve,anchor.pointMM,
+        if(!et::detail::MeasureUseWitness(*treatmentFound,.001,anchor.curve,
+                anchor.pointMM,
                 anchor.tangent,anchor.normalA,anchor.normalB,anchor.circleRadiusMM,
                 &setupBudget,tb::Site::C17SourceRebindOld))return false;
-        auto& receipt=*step.selector;receipt.face=resolution.proof->plane();
-        receipt.coverage=resolution.proof->coverage();receipt.wireCount=resolution.proof->wireCount();
-        receipt.boundaryUseCount=resolution.proof->boundaryUses().size();
-        receipt.boundaryUniqueEdgeCount=resolution.proof->uniqueEdgeCount();
-        receipt.entries.front().direction=found->direction;
+        auto& receipt=*step.selector;receipt.face=sourceResolution.proof->plane();
+        receipt.coverage=sourceResolution.proof->coverage();
+        receipt.wireCount=sourceResolution.proof->wireCount();
+        receipt.boundaryUseCount=sourceResolution.proof->boundaryUses().size();
+        receipt.boundaryUniqueEdgeCount=sourceResolution.proof->uniqueEdgeCount();
+        receipt.entries.front().direction=sourceFound->direction;
         TopoDS_Shape ignored;
         return et::detail::FinishWorkingStages(sequence,setupBudget,refusal,running,ignored);
     };
@@ -22731,19 +22746,21 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     et::ReplayBudget operationBudget;et::SourceStageContext t1Context;
     et::SourceRebindRoles t0Roles;
     const std::size_t operationStartVisits=operationBudget.topologyVisits;
-    const bool captured=et::CaptureSourceRebindRoles(t0.postBoolean,t0Shadow,
-        t0ShadowBytes,operationBudget,refusal,t0Roles,t0Context);
+    const bool captured=r2::CaptureSourceRebindRolesR2(t0.sourceBase,
+        t0.postBoolean,t0Shadow,t0ShadowBytes,operationBudget,refusal,t0Roles,
+        t0Context);
     const std::size_t afterCaptureVisits=operationBudget.topologyVisits;
     const bool replayIssued=fs::SourceStageProofIssuer::Issue(t1.source,t1.definition,
         t1.sourceBase,t1.postBoolean,false,operationBudget,running,t1Context,refusal);
     const std::size_t afterIssueVisits=operationBudget.topologyVisits;
     r2::Definition rebound1=t1.definition;TopoDS_Shape treated1;
     const bool rebound=captured&&replayIssued&&r2::ApplySourceRebindR2(t0Roles,
-        t1.postBoolean,rebound1,treated1,operationBudget,refusal,t1Context,running);
+        t1.sourceBase,t1.postBoolean,rebound1,treated1,operationBudget,refusal,
+        t1Context,running);
     const std::size_t afterRebindVisits=operationBudget.topologyVisits;
     TopoDS_Shape replayed1;
-    const bool suffixReplayed=rebound&&r2::ReplayTreatmentSuffix(t1.postBoolean,
-        rebound1,replayed1,operationBudget,refusal,t1Context,running);
+    const bool suffixReplayed=rebound&&r2::ReplayTreatmentSuffix(t1.sourceBase,
+        t1.postBoolean,rebound1,replayed1,operationBudget,refusal,t1Context,running);
     const std::size_t afterReplayVisits=operationBudget.topologyVisits;
     const bool currentEquivalent=suffixReplayed&&et::EquivalentReplayGeometry(
         treated1,replayed1,operationBudget,refusal);
@@ -22752,14 +22769,15 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     const bool rebound1Encoded=et::Encode(rebound1Shadow,rebound1Bytes,refusal);
     et::SourceRebindRoles t1Roles;
     et::ReplayBudget t2Budget;
-    const bool t1Captured=rebound1Encoded&&et::CaptureSourceRebindRoles(
-        t1.postBoolean,rebound1Shadow,rebound1Bytes,t2Budget,refusal,t1Roles,t1Context);
+    const bool t1Captured=rebound1Encoded&&r2::CaptureSourceRebindRolesR2(
+        t1.sourceBase,t1.postBoolean,rebound1Shadow,rebound1Bytes,t2Budget,
+        refusal,t1Roles,t1Context);
     et::SourceStageContext t2Context;
     const bool t2Issued=t1Captured&&fs::SourceStageProofIssuer::Issue(t2.source,
         t2.definition,t2.sourceBase,t2.postBoolean,false,t2Budget,running,t2Context,refusal);
     r2::Definition rebound2=t2.definition;TopoDS_Shape treated2;
-    const bool t2Rebound=t2Issued&&r2::ApplySourceRebindR2(t1Roles,t2.postBoolean,
-        rebound2,treated2,t2Budget,refusal,t2Context,running);
+    const bool t2Rebound=t2Issued&&r2::ApplySourceRebindR2(t1Roles,t2.sourceBase,
+        t2.postBoolean,rebound2,treated2,t2Budget,refusal,t2Context,running);
 
     const auto originalIntent=t0.definition.steps.front().selector->intent;
     const bool immutableBinding=t2Rebound
@@ -22816,8 +22834,8 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         &&operationBudget.topologyVisits>=afterReplayVisits&&!operationBudget.exhausted;
     std::atomic_bool cancelled{true};const auto beforeCancelVisits=t2Budget.topologyVisits;
     TopoDS_Shape cancelledOutput;
-    const bool cancelSticky=!r2::ReplayTreatmentSuffix(t2.postBoolean,rebound2,
-        cancelledOutput,t2Budget,refusal,t2Context,cancelled)
+    const bool cancelSticky=!r2::ReplayTreatmentSuffix(t2.sourceBase,t2.postBoolean,
+        rebound2,cancelledOutput,t2Budget,refusal,t2Context,cancelled)
         &&refusal==et::Refusal::Cancelled&&cancelledOutput.IsNull()
         &&t2Budget.topologyVisits==beforeCancelVisits;
     const std::size_t admittedVisits=operationBudget.topologyVisits;
@@ -22879,8 +22897,8 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         t1.sourceBase,t1.postBoolean,102);
     et::ReplayBudget sharedBudget;TopoDS_Shape sharedVerified;
     const bool boundSharedCommit=boundConsumed
-        &&r2::ReplayTreatmentSuffix(t1.postBoolean,rebound1,sharedVerified,
-            sharedBudget,refusal,sealedContext,running)
+        &&r2::ReplayTreatmentSuffix(t1.sourceBase,t1.postBoolean,rebound1,
+            sharedVerified,sharedBudget,refusal,sealedContext,running)
         &&et::EquivalentReplayGeometry(treated1,sharedVerified,sharedBudget,refusal);
     const std::size_t boundSharedStages=sharedBudget.buildStages;
     et::ReplayBudget reissuedBudget;et::SourceStageContext reissuedContext;
@@ -22888,8 +22906,8 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     const bool boundReissuedCommit=boundIssued
         &&fs::SourceStageProofIssuer::Issue(t1.source,rebound1,t1.sourceBase,
             t1.postBoolean,false,reissuedBudget,running,reissuedContext,refusal)
-        &&r2::ReplayTreatmentSuffix(t1.postBoolean,rebound1,reissuedVerified,
-            reissuedBudget,refusal,reissuedContext,running)
+        &&r2::ReplayTreatmentSuffix(t1.sourceBase,t1.postBoolean,rebound1,
+            reissuedVerified,reissuedBudget,refusal,reissuedContext,running)
         &&et::EquivalentReplayGeometry(treated1,reissuedVerified,reissuedBudget,refusal);
     const std::size_t boundReissuedStages=reissuedBudget.buildStages;
     // The measured F1 commit-entry debt is 50 stages on both units
@@ -22905,8 +22923,9 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     // document, save-view and binary-storage boundaries below.
     TopoDS_Shape treated;et::ReplayBudget fixtureBudget;
     et::Refusal fixtureRefusal=et::Refusal::None;
-    if(!r2::ReplayTreatmentSuffix(t0.postBoolean,t0.definition,treated,
-            fixtureBudget,fixtureRefusal,t0Context,running)||treated.IsNull())return @{};
+    if(!r2::ReplayTreatmentSuffix(t0.sourceBase,t0.postBoolean,t0.definition,
+            treated,fixtureBudget,fixtureRefusal,t0Context,running)
+            ||treated.IsNull())return @{};
     std::vector<std::uint8_t> treatmentBytes;
     if(!r2::Encode(t0.definition,treatmentBytes,fixtureRefusal))return @{};
     Handle(OcctDocument) saveOwner=new OcctDocument();saveOwner->InitDoc();
@@ -22960,7 +22979,7 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
             core3d::Core3DViewer verifier;
             if(verifier.ValidateCbf(saved)!=core3d::AssetImportResult::Success)
                 return nil;
-            for(int scenario=0;scenario<5;++scenario){
+            if(schema<4)for(int scenario=0;scenario<5;++scenario){
                 Core3DDebugArmColdOpenCandidateProbe(saveDocument,
                     wrongSaveOwner->Document(),scenario);
                 if(verifier.ValidateCbf(saved)!=core3d::AssetImportResult::Success)

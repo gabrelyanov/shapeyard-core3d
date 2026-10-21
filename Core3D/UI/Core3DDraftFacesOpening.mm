@@ -1320,7 +1320,7 @@ extern "C" void *Core3DDebugB4DraftFacesSourceFixtureProbe(
                 return (__bridge_retained void *)result;
             const auto parameters = S2BoxProfile(unit, widthMM, heightMM, depthMM);
             const TopoDS_Shape solid =
-                core3d::part_boolean::build::BuildProfileSource(parameters, false);
+                dfo::detail::BuildProductionProfileSource(parameters);
             if (solid.IsNull()) return (__bridge_retained void *)result;
             XCAFDoc_DocumentTool::SetLengthUnit(native, unit);
             const TDF_Label label = shapes->AddShape(solid, Standard_False, Standard_False);
@@ -1383,7 +1383,7 @@ extern "C" void *Core3DDebugB4DraftFacesRetainedSourceFixtureProbe(
                 return (__bridge_retained void *)result;
             const auto parameters = S2BoxProfile(unit, widthMM, heightMM, depthMM);
             const TopoDS_Shape solid =
-                core3d::part_boolean::build::BuildProfileSource(parameters, false);
+                dfo::detail::BuildProductionProfileSource(parameters);
             if (solid.IsNull()) return (__bridge_retained void *)result;
             XCAFDoc_DocumentTool::SetLengthUnit(native, unit);
             const TDF_Label label = shapes->AddShape(solid, Standard_False, Standard_False);

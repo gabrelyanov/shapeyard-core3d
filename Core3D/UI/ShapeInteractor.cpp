@@ -28,6 +28,9 @@
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <BRepTools.hxx>
+#include <BinTools.hxx>
+#include <BinTools_FormatVersion.hxx>
+#include <TopTools_FormatVersion.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
@@ -41,7 +44,11 @@
 #include <cmath>
 #include <cfloat>
 #include <cstdio>
+#include <istream>
+#include <locale>
+#include <ostream>
 #include <set>
+#include <streambuf>
 #include <unordered_set>
 #include <vector>
 
@@ -61,6 +68,8 @@ namespace core3d {
 		constexpr Standard_Size kMaximumExtrusionSourceSubshapes = 1024;
 		constexpr Standard_Size kMaximumExtrusionProfileEdges = 64;
 		constexpr Standard_Real kMaximumExtrusionDistance = 100.0;
+		constexpr std::size_t kMaximumExtrusionWorkingShapeBytes =
+			8U * 1024U * 1024U;
 		constexpr Standard_Integer kAdaptivePixelTolerance = -1;
 		constexpr Standard_Integer kExpandedTopologyPixelTolerance = 32;
 
@@ -241,6 +250,217 @@ namespace core3d {
 			return edgeCount > 0;
 		}
 
+		class ExtrusionGeometryBuffer final : public std::streambuf {
+			std::vector<char> _bytes;
+			std::size_t _extent = 0;
+
+		public:
+			ExtrusionGeometryBuffer()
+				: _bytes(kMaximumExtrusionWorkingShapeBytes) {
+				setp(_bytes.data(), _bytes.data() + _bytes.size());
+			}
+
+			std::size_t size() const noexcept {
+				return std::max(
+					_extent,
+					static_cast<std::size_t>(pptr() - pbase()));
+			}
+
+			const char* data() const noexcept { return _bytes.data(); }
+
+			void prepareToRead() noexcept {
+				_extent = size();
+				setg(_bytes.data(), _bytes.data(), _bytes.data() + _extent);
+			}
+
+		protected:
+			int_type overflow(int_type) override {
+				return traits_type::eof();
+			}
+
+			pos_type seekoff(
+				off_type offset,
+				std::ios_base::seekdir direction,
+				std::ios_base::openmode mode) override {
+				_extent = size();
+				const bool input = (mode & std::ios_base::in) != 0;
+				const bool output = (mode & std::ios_base::out) != 0;
+				if (!input && !output) {
+					return pos_type(off_type(-1));
+				}
+				const off_type current = input
+					? off_type(gptr() - eback())
+					: off_type(pptr() - pbase());
+				const off_type origin = direction == std::ios_base::beg
+					? 0
+					: direction == std::ios_base::cur
+						? current
+						: off_type(_extent);
+				const off_type position = origin + offset;
+				if (position < 0
+					|| position > off_type(input ? _extent : _bytes.size())) {
+					return pos_type(off_type(-1));
+				}
+				if (input) {
+					setg(eback(), eback() + position, eback() + _extent);
+				} else {
+					setp(_bytes.data(), _bytes.data() + _bytes.size());
+					pbump(static_cast<int>(position));
+				}
+				return pos_type(position);
+			}
+
+			pos_type seekpos(
+				pos_type position,
+				std::ios_base::openmode mode) override {
+				return seekoff(
+					off_type(position), std::ios_base::beg, mode);
+			}
+		};
+
+		Standard_Boolean WriteExtrusionGeometryCommitment(
+			const TopoDS_Shape& shape,
+			ExtrusionGeometryBuffer& buffer) {
+			if (shape.IsNull()) {
+				return Standard_False;
+			}
+			std::ostream stream(&buffer);
+			stream.imbue(std::locale::classic());
+			BRepTools::Write(
+				shape,
+				stream,
+				Standard_False,
+				Standard_False,
+				TopTools_FormatVersion_VERSION_3);
+			return stream.good() && buffer.size() > 0
+				&& buffer.size() < kMaximumExtrusionWorkingShapeBytes;
+		}
+
+		Standard_Boolean DetachExtrusionSource(
+			const TopoDS_Shape& source,
+			const TopoDS_Face& selectedFace,
+			TopoDS_Shape& workingSource,
+			TopoDS_Face& workingFace,
+			Standard_Integer& failureStage) {
+			workingSource.Nullify();
+			workingFace.Nullify();
+			try {
+				OCC_CATCH_SIGNALS
+				Standard_Size sourceCount = 0;
+				Standard_Size sourceSolidCount = 0;
+				if (!CountBoundedTopology(
+						source,
+						kMaximumExtrusionSourceSubshapes,
+						sourceCount,
+						sourceSolidCount)) {
+					failureStage = 11;
+					return Standard_False;
+				}
+				TopTools_IndexedMapOfShape sourceFaces;
+				TopExp::MapShapes(source, TopAbs_FACE, sourceFaces);
+				Standard_Integer selectedFaceIndex = 0;
+				for (Standard_Integer index = 1;
+					 index <= sourceFaces.Extent(); ++index) {
+					if (!sourceFaces.FindKey(index).IsEqual(selectedFace)) {
+						continue;
+					}
+					if (selectedFaceIndex != 0) {
+						failureStage = 12;
+						return Standard_False;
+					}
+					selectedFaceIndex = index;
+				}
+				if (selectedFaceIndex == 0) {
+					failureStage = 12;
+					return Standard_False;
+				}
+
+				ExtrusionGeometryBuffer transfer;
+				std::ostream writer(&transfer);
+				writer.imbue(std::locale::classic());
+				BinTools::Write(
+					source,
+					writer,
+					Standard_False,
+					Standard_False,
+					BinTools_FormatVersion_VERSION_4);
+				if (!writer.good() || transfer.size() == 0
+					|| transfer.size()
+						>= kMaximumExtrusionWorkingShapeBytes) {
+					failureStage = 11;
+					return Standard_False;
+				}
+				transfer.prepareToRead();
+				std::istream reader(&transfer);
+				reader.imbue(std::locale::classic());
+				BinTools::Read(workingSource, reader);
+				if (!reader.good() || workingSource.IsNull()
+					|| workingSource.IsSame(source)) {
+					workingSource.Nullify();
+					failureStage = 11;
+					return Standard_False;
+				}
+
+				Standard_Size workingCount = 0;
+				Standard_Size workingSolidCount = 0;
+				if (!CountBoundedTopology(
+						workingSource,
+						kMaximumExtrusionSourceSubshapes,
+						workingCount,
+						workingSolidCount)
+					|| workingCount != sourceCount
+					|| workingSolidCount != sourceSolidCount) {
+					workingSource.Nullify();
+					failureStage = 11;
+					return Standard_False;
+				}
+				TopTools_IndexedMapOfShape workingFaces;
+				TopExp::MapShapes(
+					workingSource, TopAbs_FACE, workingFaces);
+				if (workingFaces.Extent() != sourceFaces.Extent()
+					|| selectedFaceIndex > workingFaces.Extent()) {
+					workingSource.Nullify();
+					failureStage = 12;
+					return Standard_False;
+				}
+				workingFace = TopoDS::Face(
+					workingFaces.FindKey(selectedFaceIndex));
+				if (workingFace.IsNull() || workingFace.IsSame(selectedFace)
+					|| workingFace.Orientation()
+						!= selectedFace.Orientation()) {
+					workingSource.Nullify();
+					workingFace.Nullify();
+					failureStage = 12;
+					return Standard_False;
+				}
+
+				ExtrusionGeometryBuffer sourceCommitment;
+				ExtrusionGeometryBuffer workingCommitment;
+				if (!WriteExtrusionGeometryCommitment(
+						source, sourceCommitment)
+					|| !WriteExtrusionGeometryCommitment(
+						workingSource, workingCommitment)
+					|| sourceCommitment.size()
+						!= workingCommitment.size()
+					|| !std::equal(
+						sourceCommitment.data(),
+						sourceCommitment.data()
+							+ sourceCommitment.size(),
+						workingCommitment.data())) {
+					workingSource.Nullify();
+					workingFace.Nullify();
+					failureStage = 11;
+					return Standard_False;
+				}
+				return Standard_True;
+			} catch (...) {
+				workingSource.Nullify();
+				workingFace.Nullify();
+				failureStage = 11;
+				return Standard_False;
+			}
+		}
+
 		Standard_Boolean BuildExtrusionCandidate(
 			const TopoDS_Shape& source,
 			const TopoDS_Face& face,
@@ -277,15 +497,26 @@ namespace core3d {
 			}
 			try {
 				OCC_CATCH_SIGNALS
-				const BRepAdaptor_Surface surface(face, Standard_True);
+				TopoDS_Shape workingSource;
+				TopoDS_Face workingFace;
+				if (!DetachExtrusionSource(
+						source,
+						face,
+						workingSource,
+						workingFace,
+						failureStage)) {
+					return Standard_False;
+				}
+				const BRepAdaptor_Surface surface(
+					workingFace, Standard_True);
 				if (surface.GetType() != GeomAbs_Plane
-					|| (face.Orientation() != TopAbs_FORWARD
-						&& face.Orientation() != TopAbs_REVERSED)) {
+					|| (workingFace.Orientation() != TopAbs_FORWARD
+						&& workingFace.Orientation() != TopAbs_REVERSED)) {
 					failureStage = 2;
 					return Standard_False;
 				}
 				gp_Dir outward = surface.Plane().Axis().Direction();
-				if (face.Orientation() == TopAbs_REVERSED) {
+				if (workingFace.Orientation() == TopAbs_REVERSED) {
 					outward.Reverse();
 				}
 				const Standard_Boolean isProtrusion = distance > 0.0;
@@ -293,9 +524,9 @@ namespace core3d {
 					outward.Reverse();
 				}
 				BRepFeat_MakePrism feature(
-					source,
-					face,
-					face,
+					workingSource,
+					workingFace,
+					workingFace,
 					outward,
 					isProtrusion ? 1 : 0,
 					Standard_True);
@@ -372,11 +603,12 @@ namespace core3d {
 				// BRepFeat_Form reuses one mutable scratch list for both history
 				// accessors. Snapshot each answer before invoking the next one.
 				historyHasModified =
-					!feature.Modified(face).IsEmpty();
+					!feature.Modified(workingFace).IsEmpty();
 				historyHasGenerated =
-					!feature.Generated(face).IsEmpty();
-				historyFaceDeleted = feature.IsDeleted(face);
-				if (candidate.IsSame(source) || candidate.IsEqual(source)
+					!feature.Generated(workingFace).IsEmpty();
+				historyFaceDeleted = feature.IsDeleted(workingFace);
+				if (candidate.IsSame(workingSource)
+					|| candidate.IsEqual(workingSource)
 					|| (!historyHasModified && !historyHasGenerated
 						&& !historyFaceDeleted)) {
 					failureStage = 8;
@@ -1042,7 +1274,7 @@ namespace core3d {
 			}
 
 			// Every recompute starts from the exact committed source. The prior
-			// candidate command is aborted before any new feature work begins.
+			// empty preview command is aborted before any new feature work begins.
 			if (!discardExtrusionPreview(Standard_False)) {
 				return Standard_False;
 			}
@@ -1118,15 +1350,6 @@ namespace core3d {
 				return Standard_False;
 			}
 			_extrusion.candidatePresentation = candidate;
-			if (!myDoc->ReplaceShape(_extrusion.label, candidate)) {
-				throw Standard_Failure(
-					"Unable to replace extrusion preview geometry");
-			}
-			if (myDoc->GeometryRepresentationForLabel(_extrusion.label)
-				!= OcctGeometryRepresentation::BRep) {
-				throw Standard_Failure(
-					"Extrusion result is not persisted as BRep");
-			}
 
 			myContext->ClearSelected(Standard_False);
 			myContext->Display(
@@ -1194,14 +1417,9 @@ namespace core3d {
 				&& document->GetUndoLimit() != 0
 				&& document->HasOpenCommand()
 				&& _extrusion.label.Data() == document->GetData()
-				&& myDoc->GeometryRepresentationForLabel(
-					_extrusion.label) == OcctGeometryRepresentation::BRep
-				&& myDoc->IsPresentationEditable(
-					_extrusion.candidatePresentation)
-				&& myDoc->ShapeLabel(_extrusion.candidatePresentation)
-					.IsEqual(_extrusion.label)
+				&& IsBRepModelingLabel(myDoc, _extrusion.label)
 				&& XCAFDoc_ShapeTool::GetShape(_extrusion.label).IsEqual(
-					_extrusion.candidatePresentation->Shape());
+					_extrusion.originalShape);
 		} catch (...) {
 			return Standard_False;
 		}
@@ -1326,6 +1544,18 @@ namespace core3d {
 			const Handle(TDocStd_Document) document =
 				myDoc->ChangeDocument();
 			try {
+				// Preview commands remain empty so AbortCommand is byte-neutral.
+				// Publish the detached candidate only at the Apply boundary; the
+				// existing OCAF command still supplies exactly one undo delta.
+				if (!myDoc->ReplaceShape(_extrusion.label, candidate)) {
+					throw Standard_Failure(
+						"Unable to replace extrusion result geometry");
+				}
+				if (myDoc->GeometryRepresentationForLabel(_extrusion.label)
+					!= OcctGeometryRepresentation::BRep) {
+					throw Standard_Failure(
+						"Extrusion result is not persisted as BRep");
+				}
 				Standard_Boolean commitReported =
 					document->CommitCommand();
 #ifdef DEBUG

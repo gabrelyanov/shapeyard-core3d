@@ -11,6 +11,19 @@ namespace core3d::export_decimation {
 inline constexpr char kSchemaVersion[] = "shapeyard.export-mesh-decimation.v1";
 inline constexpr char kAlgorithmID[] = "qem-edge-collapse.fixed-order.v1";
 inline constexpr char kRemapSchemaVersion[] = "shapeyard.decimation-provenance-remap.v1";
+
+// F2-S3 attribute-aware derivative constants (additive; the v1 flat settings,
+// admission and receipt shapes below are unchanged). The attribute kernel
+// carries authored normals/UVs from surviving source wedges and keeps
+// per-triangle single-source-face provenance; it is a derivative, not a
+// shading-equivalence certification.
+inline constexpr char kAttributeSchemaVersion[] = "shapeyard.export-mesh-attribute-decimation.v1";
+inline constexpr char kAttributeInputPolicy[] = "f2-attribute-input.v1";
+inline constexpr char kAttributeNormalPolicy[] = "f2-attribute-carry.v1";
+inline constexpr char kAttributeAppearanceLimitation[] =
+    "normals and UVs are carried from surviving source wedges without "
+    "averaging; collapses never cross material, seam or hard-edge "
+    "boundaries; shading equivalence is not certified";
 inline constexpr std::uint32_t kMinimumClosedMeshTriangles = 4;
 inline constexpr std::uint32_t kMaximumTriangleTarget = 4U * 1024U * 1024U;
 inline constexpr std::uint32_t kMaximumMeasurementSamples = 4U * 1024U * 1024U;
