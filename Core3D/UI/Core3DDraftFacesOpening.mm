@@ -10,6 +10,7 @@
 #include "../OCCTKit/DraftFacesNativeOwner.hxx"
 #include "../OCCTKit/NativeOpeningContext.hxx"
 #include "../OCCTKit/OcctDocument.h"
+#include "../OCCTKit/ProfilePersistence.hxx"
 #include "Core3DViewer.h"
 
 #include <BRepAdaptor_Curve.hxx>
@@ -331,6 +332,10 @@ NSDictionary *BuildProbe(int32_t scenario, double unit, double angle,
 @property(nonatomic, copy, readwrite) NSArray<NSData *> *consumedFaceIdentifiers;
 @property(nonatomic, copy, readwrite) NSArray<Core3DDraftFacesSectionObservation *> *sectionObservations;
 @property(nonatomic, assign, readwrite) double metersPerUnit;
+@property(nonatomic, copy, readwrite) NSArray<NSNumber *> *neutralOriginMM;
+@property(nonatomic, copy, readwrite) NSArray<NSNumber *> *neutralNormal;
+@property(nonatomic, copy, readwrite) NSArray<NSNumber *> *pullDirection;
+@property(nonatomic, assign, readwrite) double signedAngleDegrees;
 @property(nonatomic, assign, readwrite) double measuredSignedAngleRadians;
 @property(nonatomic, assign, readwrite) double neutralSectionPerimeterMM;
 @property(nonatomic, assign, readwrite) NSUInteger neutralSectionEdgeCount;
@@ -356,6 +361,7 @@ NSDictionary *BuildProbe(int32_t scenario, double unit, double angle,
     IssuedSelection _issued;
     std::shared_ptr<std::atomic_bool> _cancelled;
     std::uint32_t _viewportWidth, _viewportHeight;
+    Core3DDraftFacesCandidate *_issuedCandidate;
 }
 - (instancetype)initPrivate { return [super init]; }
 
@@ -570,6 +576,14 @@ NSDictionary *BuildProbe(int32_t scenario, double unit, double angle,
     candidate.candidateBRepBytes = DFData(output.detachedShape);
     candidate.geometryDigest = DFData(output.geometry); candidate.familyProof = DFData(output.familyProof);
     candidate.canonicalDefinitionBytes = DFData(parameters); candidate.metersPerUnit = self.metersPerUnit;
+    const double mmScale = 1000 * self.metersPerUnit;
+    candidate.neutralOriginMM = @[
+        @(definition.neutralOriginLocal[0] * mmScale),
+        @(definition.neutralOriginLocal[1] * mmScale),
+        @(definition.neutralOriginLocal[2] * mmScale) ];
+    candidate.neutralNormal = DFVector(definition.neutralNormalLocal);
+    candidate.pullDirection = DFVector(definition.pullDirectionLocal);
+    candidate.signedAngleDegrees = definition.signedAngleRadians * 180 / M_PI;
     candidate.measuredSignedAngleRadians = evidence.measuredSignedAngleRadians;
     candidate.neutralSectionPerimeterMM = evidence.neutralSectionLengthLocal * 1000 * self.metersPerUnit;
     candidate.neutralSectionEdgeCount = evidence.neutralSectionEdges;
@@ -585,7 +599,9 @@ NSDictionary *BuildProbe(int32_t scenario, double unit, double angle,
         section.measuredNormalOffsetMM = value.measuredNormalOffsetLocal * 1000 * self.metersPerUnit;
         [sections addObject:section];
     }
-    candidate.sectionObservations = sections; return candidate;
+    candidate.sectionObservations = sections;
+    _issuedCandidate = candidate;
+    return candidate;
 }
 
 - (Core3DDraftFacesOpening *)openingByPreparingCandidate:(Core3DDraftFacesCandidate *)candidate
@@ -609,6 +625,16 @@ NSDictionary *BuildProbe(int32_t scenario, double unit, double angle,
     document = _document; context = _context; entity = _issued.entity;
     width = _viewportWidth; height = _viewportHeight;
     return YES;
+}
+
+- (BOOL)s4aValidateIssuedCandidate:(Core3DDraftFacesCandidate *)candidate
+                             error:(NSError **)error {
+    if (candidate == nil || candidate != _issuedCandidate) {
+        if (error) *error = DFError(Core3DDraftFacesErrorStale,
+                                    @"candidate was not issued by this opening");
+        return NO;
+    }
+    return [self isCurrent:error];
 }
 @end
 
@@ -646,6 +672,12 @@ NSString *DFSelectorDescription(const std::array<double, 3>& normal) {
 bool DFDataUUID(NSData *data, df::UUID& value) {
     if (![data isKindOfClass:NSData.class] || data.length != value.size()) return false;
     std::memcpy(value.data(), data.bytes, value.size()); return true;
+}
+
+std::vector<std::uint8_t> DFBytes(NSData *data) {
+    std::vector<std::uint8_t> bytes(data.length);
+    if (data.length) std::memcpy(bytes.data(), data.bytes, data.length);
+    return bytes;
 }
 
 bool DFReadEditingState(const Handle(OcctDocument)& document, NSString *entityIdentifier,
@@ -839,6 +871,9 @@ Core3DDraftFacesNativeSnapshot *DFPublicSnapshot(const DFEditingState& state) {
     NSData *_pendingRevision;
     std::map<std::string, df::UUID> _choiceIdentifiers;
     bool _recoveryPending;
+    bool _createMode;
+    std::vector<std::uint8_t> _pendingCandidateBytes;
+    std::shared_ptr<std::atomic_bool> _createStop;
 }
 
 - (instancetype)initPrivate { return [super init]; }
@@ -867,6 +902,83 @@ Core3DDraftFacesNativeSnapshot *DFPublicSnapshot(const DFEditingState& state) {
     DFEditingState state;
     if (!DFReadEditingState(document, entityIdentifier, bridge->_choiceIdentifiers, state, error))
         return nil;
+    return bridge;
+}
+
++ (instancetype)captureCreateController:(Core3DViewController *)controller
+                                 opening:(Core3DDraftFacesOpening *)opening
+                               candidate:(Core3DDraftFacesCandidate *)candidate
+                                   error:(NSError **)error {
+    if (error) *error = nil;
+    if (!NSThread.isMainThread || !controller || !opening || !candidate) {
+        if (error) *error = DFError(Core3DDraftFacesErrorInvalidArgument,
+                                    @"main-thread controller, opening, and candidate required");
+        return nil;
+    }
+    GLViewController *gl = [controller.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)controller.glController : nil;
+    auto viewer = gl ? gl.viewer : nullptr;
+    Handle(OcctDocument) document = viewer ? viewer->getDocument() : Handle(OcctDocument)();
+    Handle(OcctDocument) openingDocument;
+    std::shared_ptr<OpeningContext> openingContext;
+    std::string entity;
+    std::uint32_t width = 0, height = 0;
+    if (document.IsNull()
+        || ![opening s2OwnerDocument:openingDocument context:openingContext
+                              entity:entity width:width height:height]
+        || document != openingDocument) {
+        if (error) *error = DFError(Core3DDraftFacesErrorStale,
+                                    @"opening belongs to a different native document");
+        return nil;
+    }
+    NSString *entityIdentifier = [NSString stringWithUTF8String:entity.c_str()];
+    TDF_Label carrier;
+    if (!RootForEntity(document, entityIdentifier, carrier)) {
+        if (error) *error = DFError(Core3DDraftFacesErrorStale,
+                                    @"selected retained carrier changed");
+        return nil;
+    }
+    if (cr::HasRecord(carrier)) {
+        if (error) *error = DFError(Core3DDraftFacesErrorInvalidSelection,
+                                    @"b4.carrier-already-drafted");
+        return nil;
+    }
+    if (![opening s4aValidateIssuedCandidate:candidate error:error]) return nil;
+    core3d::profile::Record profileRecord;
+    const auto native = document->Document();
+    if (!core3d::profile::Read(native, carrier, profileRecord)) {
+        if (error) *error = DFError(Core3DDraftFacesErrorUnavailable,
+                                    @"b4.source-profile-malformed");
+        return nil;
+    }
+    if (profileRecord.label.IsNull()) {
+        if (error) *error = DFError(Core3DDraftFacesErrorUnavailable,
+                                    @"b4.source-profile-unretained");
+        return nil;
+    }
+    if (!profileRecord.IsCurrent(native, carrier)
+        || profileRecord.parameters.metersPerUnit != opening.metersPerUnit
+        || candidate.metersPerUnit != opening.metersPerUnit) {
+        if (error) *error = DFError(Core3DDraftFacesErrorStale,
+                                    @"b4.source-profile-stale");
+        return nil;
+    }
+    auto capture = dfo::NativeOwner::MintCreateCapture(
+        *document, openingContext, carrier, entity, profileRecord.parameters, width, height);
+    if (!capture) {
+        if (error) *error = DFError(Core3DDraftFacesErrorStale,
+                                    @"b4.create-capture-refused");
+        return nil;
+    }
+    Core3DDraftFacesNativeEditingBridge *bridge = [[self alloc] initPrivate];
+    bridge->_controller = controller; bridge->_document = document;
+    bridge->_entityIdentifier = [entityIdentifier copy];
+    bridge->_owner = DFProductionOwnerFor(document.get());
+    bridge->_pendingCapture = std::move(capture);
+    bridge->_pendingParameters = DFBytes(candidate.canonicalDefinitionBytes);
+    bridge->_pendingCandidateBytes = DFBytes(candidate.candidateBRepBytes);
+    bridge->_createStop = std::make_shared<std::atomic_bool>(false);
+    bridge->_createMode = true;
     return bridge;
 }
 
@@ -1022,15 +1134,50 @@ Core3DDraftFacesNativeSnapshot *DFPublicSnapshot(const DFEditingState& state) {
     return receipt;
 }
 
+- (Core3DDraftFacesNativeReceipt *)commitCreateWithError:(NSError **)error {
+    if (error) *error = nil;
+    if (!NSThread.isMainThread || !_createMode || !_pendingCapture
+        || _pendingParameters.empty() || _pendingCandidateBytes.empty() || !_createStop) {
+        if (error) *error = DFError(Core3DDraftFacesErrorStale,
+                                    @"no exact reviewed Draft Faces create candidate");
+        return nil;
+    }
+    const dfo::Receipt native = _owner->create(
+        _pendingCapture, _pendingParameters, _pendingCandidateBytes, *_createStop);
+    Core3DDraftFacesNativeReceipt *receipt = DFPublicReceipt(native);
+    _recoveryPending = native.outcome == dfo::Outcome::RecoveryRequired;
+    if (!_recoveryPending) { _createMode = false; [self cancelPrepared]; }
+    return receipt;
+}
+
+- (Core3DDraftFacesNativeReceipt *)cancelCreateWithError:(NSError **)error {
+    if (error) *error = nil;
+    if (!NSThread.isMainThread || !_createMode || !_pendingCapture || !_createStop) {
+        if (error) *error = DFError(Core3DDraftFacesErrorStale,
+                                    @"no pending Draft Faces create candidate");
+        return nil;
+    }
+    _createStop->store(true);
+    const dfo::Receipt native = _owner->create(
+        _pendingCapture, _pendingParameters, _pendingCandidateBytes, *_createStop);
+    Core3DDraftFacesNativeReceipt *receipt = DFPublicReceipt(native);
+    _recoveryPending = native.outcome == dfo::Outcome::RecoveryRequired;
+    if (!_recoveryPending) { _createMode = false; [self cancelPrepared]; }
+    return receipt;
+}
+
 - (void)cancelPrepared {
     if (_recoveryPending) return;
     _pendingCapture.reset(); _pendingParameters.clear(); _pendingFeature = {};
+    _pendingCandidateBytes.clear(); _createStop.reset();
     _pendingRevision = nil;
 }
 
 - (Core3DDraftFacesNativeReceipt *)reconcileRecoverySession:(uint64_t)session {
     const dfo::Receipt native = _owner->reconcile(session);
-    if (native.settled) { _recoveryPending = false; [self cancelPrepared]; }
+    if (native.settled) {
+        _recoveryPending = false; _createMode = false; [self cancelPrepared];
+    }
     return DFPublicReceipt(native);
 }
 
@@ -1216,6 +1363,78 @@ extern "C" void *Core3DDebugB4DraftFacesSourceFixtureProbe(
     }
 }
 
+extern "C" void *Core3DDebugB4DraftFacesRetainedSourceFixtureProbe(
+    void *controllerRaw, double unit, double widthMM, double heightMM, double depthMM) {
+    @autoreleasepool {
+        NSMutableDictionary *result = [NSMutableDictionary dictionary];
+        result[@"ok"] = @NO;
+        @try {
+            Core3DViewController *controller = (__bridge Core3DViewController *)controllerRaw;
+            Handle(OcctDocument) document; std::shared_ptr<core3d::Core3DViewer> viewer;
+            if (!S2ProbeViewer(controller, document, viewer)
+                || (unit != 0.001 && unit != 1.0)
+                || !(widthMM > 0) || !(heightMM > 0) || !(depthMM > 0))
+                return (__bridge_retained void *)result;
+            const auto native = document->Document();
+            const auto shapes = XCAFDoc_DocumentTool::ShapeTool(native->Main());
+            TDF_LabelSequence roots; shapes->GetFreeShapes(roots);
+            if (native->HasOpenCommand() || roots.Length() != 0
+                || native->GetAvailableUndos() != 0 || native->GetAvailableRedos() != 0)
+                return (__bridge_retained void *)result;
+            const auto parameters = S2BoxProfile(unit, widthMM, heightMM, depthMM);
+            const TopoDS_Shape solid =
+                core3d::part_boolean::build::BuildProfileSource(parameters, false);
+            if (solid.IsNull()) return (__bridge_retained void *)result;
+            XCAFDoc_DocumentTool::SetLengthUnit(native, unit);
+            const TDF_Label label = shapes->AddShape(solid, Standard_False, Standard_False);
+            if (label.IsNull() || !document->MigrateLegacyIdentifiers())
+                return (__bridge_retained void *)result;
+            native->NewCommand();
+            const std::string profileIdentifier = OcctDocument::NewProfileIdentifier();
+            if (profileIdentifier.empty()
+                || !core3d::profile::Stage(native, label, parameters, profileIdentifier)
+                || !native->CommitCommand()) {
+                if (native->HasOpenCommand()) native->AbortCommand();
+                return (__bridge_retained void *)result;
+            }
+            core3d::profile::Record retained;
+            if (!core3d::profile::Read(native, label, retained)
+                || !retained.IsCurrent(native, label))
+                return (__bridge_retained void *)result;
+            native->ClearUndos();
+            native->SetUndoLimit(OcctDocument::kNativeSessionUndoLimit);
+            document->NotifyChanges();
+            const Handle(AIS_InteractiveContext) context = viewer->AisContext();
+            if (context.IsNull()) return (__bridge_retained void *)result;
+            AIS_ListOfInteractive displayed;
+            context->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+            Handle(AIS_Shape) presentation;
+            for (AIS_ListIteratorOfListOfInteractive iterator(displayed);
+                 iterator.More(); iterator.Next()) {
+                const Handle(AIS_Shape) displayedShape =
+                    Handle(AIS_Shape)::DownCast(iterator.Value());
+                if (displayedShape.IsNull()
+                    || !document->ShapeLabel(displayedShape).IsEqual(label)) continue;
+                if (!presentation.IsNull()) return (__bridge_retained void *)result;
+                presentation = displayedShape;
+            }
+            if (presentation.IsNull()) {
+                presentation = new AIS_Shape(solid);
+                context->Display(presentation, AIS_Shaded, 0, Standard_False);
+                document->LoadObjectMeterial(label, presentation);
+            }
+            context->UpdateCurrentViewer();
+            result[@"entity"] = [NSString stringWithUTF8String:
+                document->EntityIdentifierForLabel(label).c_str()];
+            result[@"profileIdentifier"] = [NSString stringWithUTF8String:
+                retained.identifier.c_str()];
+            result[@"unit"] = @(unit);
+            result[@"ok"] = @YES;
+        } @catch (__unused NSException *exception) { result[@"ok"] = @NO; }
+        return (__bridge_retained void *)result;
+    }
+}
+
 extern "C" void *Core3DDebugB4DraftFacesRecordProbe(void *controllerRaw, void *entityRaw) {
     @autoreleasepool {
         NSMutableDictionary *result = [NSMutableDictionary dictionary];
@@ -1253,6 +1472,7 @@ extern "C" void *Core3DDebugB4DraftFacesRecordProbe(void *controllerRaw, void *e
             const auto& definition = record.value->definition;
             result[@"nodeCount"] = @(definition.nodes.size());
             result[@"ownerEntity"] = DFData(definition.owner.entity);
+            result[@"ownerDefinition"] = DFData(definition.owner.definition);
             if (const auto* lastFeature =
                     std::get_if<cr::FeatureNode>(&definition.nodes.back().value)) {
                 result[@"kind"] = @(lastFeature->kind);

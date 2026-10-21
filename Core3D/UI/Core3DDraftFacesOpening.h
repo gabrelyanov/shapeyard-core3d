@@ -3,6 +3,8 @@
 NS_ASSUME_NONNULL_BEGIN
 
 @class Core3DViewController;
+@class Core3DDraftFacesOpening;
+@class Core3DDraftFacesCandidate;
 
 FOUNDATION_EXPORT NSErrorDomain const Core3DDraftFacesErrorDomain;
 FOUNDATION_EXPORT NSString *const Core3DDraftFacesRefusalReasonKey;
@@ -97,6 +99,13 @@ __attribute__((objc_subclassing_restricted))
                           entityIdentifier:(NSString *)entityIdentifier
                                       error:(NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(capture(controller:entityIdentifier:));
+//! Captures create authority from one current S1 opening and the exact
+//! detached candidate it issued. No command is opened until `commitCreate`.
++ (nullable instancetype)captureCreateController:(Core3DViewController *)controller
+                                         opening:(Core3DDraftFacesOpening *)opening
+                                       candidate:(Core3DDraftFacesCandidate *)candidate
+                                           error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(captureCreate(controller:opening:candidate:));
 - (nullable Core3DDraftFacesNativeSnapshot *)readSnapshotWithError:
     (NSError * _Nullable * _Nullable)error NS_SWIFT_NAME(readSnapshot());
 - (nullable Core3DDraftFacesNativeSnapshot *)prepareFeatureIdentifier:(NSData *)featureIdentifier
@@ -112,6 +121,12 @@ __attribute__((objc_subclassing_restricted))
                                                    expectedRevision:(NSData *)expectedRevision
                                                               error:(NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(commit(featureIdentifier:expectedRevision:));
+//! Consumes the pending create capture with a live production Stop signal.
+- (nullable Core3DDraftFacesNativeReceipt *)commitCreateWithError:
+    (NSError * _Nullable * _Nullable)error NS_SWIFT_NAME(commitCreate());
+//! Settles a pending create as a native Cancelled outcome without history.
+- (nullable Core3DDraftFacesNativeReceipt *)cancelCreateWithError:
+    (NSError * _Nullable * _Nullable)error NS_SWIFT_NAME(cancelCreate());
 - (void)cancelPrepared;
 - (Core3DDraftFacesNativeReceipt *)reconcileRecoverySession:(uint64_t)session
     NS_SWIFT_NAME(reconcile(session:));
@@ -158,6 +173,10 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic, copy, readonly) NSArray<NSData *> *consumedFaceIdentifiers;
 @property(nonatomic, copy, readonly) NSArray<Core3DDraftFacesSectionObservation *> *sectionObservations;
 @property(nonatomic, assign, readonly) double metersPerUnit;
+@property(nonatomic, copy, readonly) NSArray<NSNumber *> *neutralOriginMM;
+@property(nonatomic, copy, readonly) NSArray<NSNumber *> *neutralNormal;
+@property(nonatomic, copy, readonly) NSArray<NSNumber *> *pullDirection;
+@property(nonatomic, assign, readonly) double signedAngleDegrees;
 @property(nonatomic, assign, readonly) double measuredSignedAngleRadians;
 @property(nonatomic, assign, readonly) double neutralSectionPerimeterMM;
 @property(nonatomic, assign, readonly) NSUInteger neutralSectionEdgeCount;

@@ -182,9 +182,12 @@ inline bool ProveSourceReceipt(const profile::Parameters& parameters,
 //! recovery fence instead of reporting a silent partial state.
 struct RecoverySnapshot final {
     bool create = false;
+    bool baselineProfilePresent = false;
     std::string entityIdentifier;
+    std::string baselineProfileIdentifier;
     TDF_Label carrier;
     std::shared_ptr<native_opening::Context> context;
+    std::vector<double> baselineProfileValues;
     std::vector<std::uint8_t> baselineGraphBytes, baselineShapeBytes;
     std::vector<std::uint8_t> expectedGraphBytes, expectedShapeBytes;
 };
@@ -521,7 +524,8 @@ public:
                 && graphBytes == recovery_.expectedGraphBytes
                 && shapeBytes == recovery_.expectedShapeBytes;
             const bool priorProven = recovery_.create
-                ? (!recordPresent && shapeBytes == recovery_.baselineShapeBytes)
+                ? (!recordPresent && shapeBytes == recovery_.baselineShapeBytes
+                   && profileBaselineEqual(native, recovery_.carrier, recovery_))
                 : (recordPresent && graphBytes == recovery_.baselineGraphBytes
                    && shapeBytes == recovery_.baselineShapeBytes);
             if (!expectedProven && !priorProven)
@@ -669,13 +673,59 @@ private:
         }
         const char* stageFailure = nullptr;
         const auto shapes = XCAFDoc_DocumentTool::ShapeTool(native->Main());
+        profile::Record sourceProfile;
+        if (!capture->forEdit) {
+            std::vector<double> capturedValues, storedValues;
+            if (!profile::Read(native, capture->carrier, sourceProfile)) {
+                stageFailure = "b4.stage-profile";
+            } else if (!sourceProfile.label.IsNull()) {
+                if (!profile::Encode(capture->sourceProfile, capturedValues)
+                    || !profile::Encode(sourceProfile.parameters, storedValues)
+                    || storedValues != capturedValues) {
+                    stageFailure = "b4.stage-profile-foreign";
+                } else if (!sourceProfile.IsCurrent(native, capture->carrier)) {
+                    stageFailure = "b4.stage-profile-stale";
+                } else {
+                    recovery_.baselineProfilePresent = true;
+                    recovery_.baselineProfileIdentifier = sourceProfile.identifier;
+                    recovery_.baselineProfileValues = std::move(storedValues);
+                }
+            }
+        }
+        if (!stageFailure && !capture->forEdit && !sourceProfile.label.IsNull()) {
+            sourceProfile.label.ForgetAllAttributes(Standard_True);
+            if (profile::HasAttribute(sourceProfile.label))
+                stageFailure = "b4.stage-profile-retire";
+        }
+        if (!stageFailure && !capture->forEdit) {
+            for (TDF_ChildIterator child(capture->carrier, Standard_False);
+                 child.More(); child.Next()) {
+                const TDF_Label label = child.Value();
+                if (profile::HasAttribute(label) || enclosure::HasAttribute(label)
+                    || sweep_persistence::HasAttribute(label)
+                    || loft_persistence::HasAttribute(label)
+                    || retained_solid::HasRecord(label)) {
+                    stageFailure = "b4.stage-recipe-owner";
+                    break;
+                }
+            }
+        }
+        TDF_Label record;
+        if (!stageFailure && !capture->forEdit) {
+            record = capture->carrier.FindChild(cr::MinimumRecordTag, Standard_True);
+            if (record.IsNull() || record.HasAttribute())
+                stageFailure = "b4.stage-record";
+        }
         if (!stageFailure) {
             shapes->SetShape(capture->carrier, drafted);
-            const TDF_Label record = capture->carrier.FindChild(
-                cr::MinimumRecordTag, Standard_True);
-            if (record.IsNull()) stageFailure = "b4.stage-record";
+            if (capture->forEdit) {
+                const TDF_Label ensured = capture->carrier.FindChild(
+                    cr::MinimumRecordTag, Standard_True);
+                if (ensured.IsNull()) stageFailure = "b4.stage-record";
+            }
         }
-        TDF_Label record = capture->carrier.FindChild(cr::MinimumRecordTag, Standard_False);
+        if (capture->forEdit)
+            record = capture->carrier.FindChild(cr::MinimumRecordTag, Standard_False);
         if (!stageFailure) {
             auto payload = std::make_shared<cr::Payload>();
             payload->definition = graph; payload->bytes = graphBytes;
@@ -719,7 +769,8 @@ private:
                     && (capture->forEdit
                         ? recordBytesEqual(native, capture->carrier,
                                            recovery_.baselineGraphBytes)
-                        : !cr::HasRecord(capture->carrier));
+                        : (!cr::HasRecord(capture->carrier)
+                           && profileBaselineEqual(native, capture->carrier, recovery_)));
             }
             if (priorProven) { recovery_ = {}; return refuse(stageFailure); }
             capture->context->armRecoveryAfterAbortedClose();
@@ -745,7 +796,8 @@ private:
                 && (capture->forEdit
                     ? recordBytesEqual(native, capture->carrier,
                                        recovery_.baselineGraphBytes)
-                    : !cr::HasRecord(capture->carrier));
+                    : (!cr::HasRecord(capture->carrier)
+                       && profileBaselineEqual(native, capture->carrier, recovery_)));
             if (priorProven) { recovery_ = {}; return cancel("b4.cancelled"); }
             capture->context->armRecoveryAfterAbortedClose();
             capture->context->retainUnprovenEdit(publication);
@@ -781,6 +833,20 @@ private:
         cr::Record record;
         return cr::Read(native, carrier, record) && record.value
             && record.value->bytes == expected;
+    }
+
+    static bool profileBaselineEqual(const Handle(TDocStd_Document)& native,
+                                     const TDF_Label& carrier,
+                                     const detail::RecoverySnapshot& expected) noexcept {
+        profile::Record actual;
+        if (!profile::Read(native, carrier, actual)) return false;
+        if (!expected.baselineProfilePresent) return actual.label.IsNull();
+        std::vector<double> values;
+        return !actual.label.IsNull()
+            && actual.identifier == expected.baselineProfileIdentifier
+            && profile::Encode(actual.parameters, values)
+            && values == expected.baselineProfileValues
+            && actual.IsCurrent(native, carrier);
     }
 
     // Recovery state is owner-held per document; S3 binds the long-lived
