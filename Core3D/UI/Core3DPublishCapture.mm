@@ -14,6 +14,7 @@
 #include "Core3DViewer.h"
 
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <Bnd_Box.hxx>
 #include <TDF_Tool.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
@@ -62,6 +63,35 @@ NSErrorDomain const Core3DPublishCaptureErrorDomain = @"Core3DPublishCaptureErro
 }
 @end
 
+@interface Core3DPublishArtifactEvidence ()
+@property(nonatomic, copy, readwrite) NSString *artifactSHA256;
+@property(nonatomic, copy, readwrite) NSArray<NSNumber *> *sourcePositionsMM;
+@property(nonatomic, copy, readwrite) NSArray<NSNumber *> *sourceIndices;
+@property(nonatomic, copy, readwrite) NSArray<NSString *> *faceEvidenceSHA256InEmittedOrder;
+@property(nonatomic, copy, readwrite) NSString *measurementReceiptSHA256;
+@property(nonatomic, assign, readwrite) uint64_t addressedTriangleCount;
+@end
+
+@implementation Core3DPublishArtifactEvidence
+- (instancetype)initWithArtifactSHA256:(NSString *)artifactSHA256
+                     sourcePositionsMM:(NSArray<NSNumber *> *)sourcePositionsMM
+                         sourceIndices:(NSArray<NSNumber *> *)sourceIndices
+      faceEvidenceSHA256InEmittedOrder:(NSArray<NSString *> *)faceEvidenceSHA256InEmittedOrder
+             measurementReceiptSHA256:(NSString *)measurementReceiptSHA256
+               addressedTriangleCount:(uint64_t)addressedTriangleCount {
+    self = [super init];
+    if (self) {
+        _artifactSHA256 = [artifactSHA256 copy];
+        _sourcePositionsMM = [sourcePositionsMM copy];
+        _sourceIndices = [sourceIndices copy];
+        _faceEvidenceSHA256InEmittedOrder = [faceEvidenceSHA256InEmittedOrder copy];
+        _measurementReceiptSHA256 = [measurementReceiptSHA256 copy];
+        _addressedTriangleCount = addressedTriangleCount;
+    }
+    return self;
+}
+@end
+
 namespace {
 using OpeningContext = core3d::native_opening::Context;
 using Recipe = core3d::retained_boolean::Recipe;
@@ -105,6 +135,8 @@ struct Bytes final {
 struct OwnerObservation final {
     NSString *entity = nil;
     NSString *definition = nil;
+    NSString *sourceFeature = nil;
+    NSString *terminalFeature = nil; // nil only when the family has none
     NSData *envelope = nil;
     NSData *operand = nil;
     Core3DPublishOwnerCommitments *commitments = nil;
@@ -119,6 +151,10 @@ struct Observation final {
     NSData *source = nil;
     NSArray<NSData *> *operands = nil;
     NSArray<Core3DPublishOwnerCommitments *> *commitments = nil;
+    NSString *sourceEntity = nil;
+    NSString *sourceDefinition = nil;
+    NSString *sourceFeature = nil;
+    NSString *terminalFeature = nil;
 };
 
 bool ValidCommitments(NSArray<Core3DPublishOwnerCommitments *> *records,
@@ -371,8 +407,18 @@ bool CaptureOwner(const Handle(OcctDocument)& owner, Core3DSceneSnapshot *scene,
     const bool retainedScalarAvailable = owner->CaptureScalarAppearanceForSavedCut(label, appearance);
     std::atomic_bool stop(false);
     core3d::saved_cut_source_edit::ShapeCommitment shapeCommitment, baseCommitment;
-    if (!core3d::saved_cut_source_edit::Commit(state.shape, stop, geometryBudget, shapeCommitment)
-        || !core3d::saved_cut_source_edit::Commit(base, stop, geometryBudget, baseCommitment)) {
+    // Commitments are taken over mesh-free copies so the witness is
+    // tessellation-independent: the live shape may carry renderer
+    // triangulation that a save/cold-reopen cycle does not restore
+    // identically, and the commitment must prove geometry, never the
+    // incidental mesh state of one in-memory instance. The copies leave
+    // the document's shapes untouched.
+    BRepBuilderAPI_Copy shapeCopy(state.shape, Standard_True, Standard_False);
+    BRepBuilderAPI_Copy baseCopy(base, Standard_True, Standard_False);
+    if (!shapeCopy.IsDone() || shapeCopy.Shape().IsNull()
+        || !baseCopy.IsDone() || baseCopy.Shape().IsNull()
+        || !core3d::saved_cut_source_edit::Commit(shapeCopy.Shape(), stop, geometryBudget, shapeCommitment)
+        || !core3d::saved_cut_source_edit::Commit(baseCopy.Shape(), stop, geometryBudget, baseCommitment)) {
         refusal = Core3DPublishCaptureErrorBudget; return false;
     }
     std::array<double, 6> bounds;
@@ -454,6 +500,12 @@ bool CaptureOwner(const Handle(OcctDocument)& owner, Core3DSceneSnapshot *scene,
         placement:placementDomain materialTexture:materialBytes];
 
     output.entity = [entity copy]; output.definition = [UUIDText(identities.definition) copy];
+    output.sourceFeature = [UUIDText(identities.sourceFeature) copy];
+    // The terminal retained feature uses the absent sentinel (all-zero UUID)
+    // only when the source family genuinely has none; both admitted recipe
+    // kinds currently require a nonzero derived feature.
+    output.terminalFeature = core3d::retained_solid::Nonzero(identities.derivedFeature)
+        ? [UUIDText(identities.derivedFeature) copy] : nil;
     output.envelope = envelope; output.operand = operandBytes; output.commitments = commitments; output.boundsMM = bounds;
     return true;
 }
@@ -519,9 +571,54 @@ bool CaptureObservation(Core3DViewController *controller, const Handle(OcctDocum
     output.scene = scene; output.document = [NSString stringWithUTF8String:owner->DocumentIdentifier().c_str()] ?: @"";
     output.selected = selected; output.bounds = bounds; output.source = sourceBytes; output.operands = operands;
     output.commitments = commitments;
+    // Durable source identities are exposed only for an unambiguous single
+    // owner; a multi-owner observation leaves them nil.
+    if (observations.size() == 1) {
+        output.sourceEntity = observations.front().entity;
+        output.sourceDefinition = observations.front().definition;
+        output.sourceFeature = observations.front().sourceFeature;
+        output.terminalFeature = observations.front().terminalFeature;
+    }
     return true;
 }
 } // namespace
+
+static bool F2LowerHexDigest(NSString *value) {
+    if (![value isKindOfClass:NSString.class] || value.length != 64) return false;
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"];
+    return [value rangeOfCharacterFromSet:allowed.invertedSet].location == NSNotFound;
+}
+
+// Evidence shape proof for the one-time production binding: digests are
+// 64-lower-hex, the identity index sequence addresses exactly
+// addressedTriangleCount triangles with 9 position doubles each, and the
+// face-evidence manifest covers every addressed triangle in emitted order.
+static bool F2ValidArtifactEvidence(Core3DPublishArtifactEvidence *evidence) {
+    if (![evidence isKindOfClass:Core3DPublishArtifactEvidence.class]
+        || !F2LowerHexDigest(evidence.artifactSHA256)
+        || !F2LowerHexDigest(evidence.measurementReceiptSHA256)
+        || evidence.addressedTriangleCount < 4
+        || evidence.addressedTriangleCount > 4096) return false;
+    NSArray<NSNumber *> *indices = evidence.sourceIndices;
+    NSArray<NSNumber *> *positions = evidence.sourcePositionsMM;
+    NSArray<NSString *> *faceEvidence = evidence.faceEvidenceSHA256InEmittedOrder;
+    if (![indices isKindOfClass:NSArray.class] || ![positions isKindOfClass:NSArray.class]
+        || ![faceEvidence isKindOfClass:NSArray.class]
+        || indices.count % 3 != 0
+        || indices.count != 3 * evidence.addressedTriangleCount
+        || positions.count != 3 * indices.count
+        || faceEvidence.count != evidence.addressedTriangleCount) return false;
+    for (NSUInteger index = 0; index < indices.count; ++index) {
+        if (![indices[index] isKindOfClass:NSNumber.class]
+            || indices[index].unsignedLongLongValue != index) return false;
+    }
+    for (NSNumber *position in positions) {
+        if (![position isKindOfClass:NSNumber.class]
+            || !std::isfinite(position.doubleValue)) return false;
+    }
+    for (NSString *digest in faceEvidence) if (!F2LowerHexDigest(digest)) return false;
+    return true;
+}
 
 @interface Core3DPublishCapture ()
 @property(nonatomic, strong, readwrite) Core3DSceneSnapshot *sceneSnapshot;
@@ -537,6 +634,11 @@ bool CaptureObservation(Core3DViewController *controller, const Handle(OcctDocum
 @property(nonatomic, assign, readwrite) uint64_t documentGeneration;
 @property(nonatomic, assign, readwrite) uint64_t modelRevision;
 @property(nonatomic, assign, readwrite) uint64_t presentationRevision;
+@property(nonatomic, copy, readwrite, nullable) NSString *sourceEntityIdentifier;
+@property(nonatomic, copy, readwrite, nullable) NSString *sourceDefinitionIdentifier;
+@property(nonatomic, copy, readwrite, nullable) NSString *sourceFeatureIdentifier;
+@property(nonatomic, copy, readwrite, nullable) NSString *retainedTerminalFeatureIdentifier;
+@property(nonatomic, strong, readwrite, nullable) Core3DPublishArtifactEvidence *artifactEvidence;
 @end
 
 @implementation Core3DPublishCapture {
@@ -586,6 +688,10 @@ bool CaptureObservation(Core3DViewController *controller, const Handle(OcctDocum
         capture.documentGeneration = observation.scene.revisions.documentGeneration;
         capture.modelRevision = observation.scene.revisions.modelRevision;
         capture.presentationRevision = observation.scene.revisions.presentationRevision;
+        capture.sourceEntityIdentifier = observation.sourceEntity;
+        capture.sourceDefinitionIdentifier = observation.sourceDefinition;
+        capture.sourceFeatureIdentifier = observation.sourceFeature;
+        capture.retainedTerminalFeatureIdentifier = observation.terminalFeature;
         return capture;
     } @catch (__unused NSException *exception) {
         if (error) *error = Refusal(Core3DPublishCaptureErrorUnsupportedOwner, @"native capture exception");
@@ -617,6 +723,28 @@ bool CaptureObservation(Core3DViewController *controller, const Handle(OcctDocum
         if (error) *error = Refusal(Core3DPublishCaptureErrorStale, @"captured owner commitments changed");
         return NO;
     }
+    return YES;
+}
+
+- (BOOL)bindArtifactEvidence:(Core3DPublishArtifactEvidence *)evidence
+                       error:(NSError **)error {
+    if (error) *error = nil;
+    if (!NSThread.isMainThread) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorInvalidThread, @"main-thread binding required");
+        return NO;
+    }
+    if (![self isCurrent:error]) return NO;
+    if (_artifactEvidence) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorDuplicateArtifactEvidence,
+                                    @"artifact evidence is already bound");
+        return NO;
+    }
+    if (!F2ValidArtifactEvidence(evidence)) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorBounds,
+                                    @"artifact evidence shape refused");
+        return NO;
+    }
+    _artifactEvidence = evidence;
     return YES;
 }
 

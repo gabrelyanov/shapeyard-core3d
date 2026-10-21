@@ -64,6 +64,7 @@ struct Cut475Scope {
 #include "OcctDocument.h"
 #include "VariableRadiusFilletNativeOwner.hxx"
 #include "AttachmentRigMetadataPersistence.hxx"
+#include "ExportMeshDecimationNativeOwner.hxx"
 #include "RetainedEdgeTreatmentBuild.hxx"
 #include "RetainedEdgeTreatmentR2Build.hxx"
 #include "RetainedEdgeTreatmentSaveView.hxx"
@@ -2769,6 +2770,17 @@ const Standard_GUID& core3d::attachment_rig::AttachmentRigAttributeID() noexcept
     return anID;
 }
 
+const Standard_GUID& core3d::export_decimation::F2DerivativeStoreAttributeID() noexcept
+{
+    // F2-S2-DERIVATIVE-STORE-OWNER: one application-owned byte-array role on
+    // the document main label, holding the checksum-framed F2DR derivative
+    // store. Collision-censused across OCCTKit and UI for S2; ABR1 and
+    // authored-frame IDs are never reused.
+    static const Standard_GUID anID(
+        "703214A8-4778-5F96-A905-6ACEC134535C");
+    return anID;
+}
+
 namespace {
 bool ReadAttachmentRigStoredRecord(
     const Handle(TDocStd_Document)& theDocument,
@@ -4952,6 +4964,11 @@ bool Core3DAttributeFreeSubtree(const TDF_Label& theSubtree) noexcept
     }
 }
 
+// Defined with the other persistent schema identifiers further below in this
+// anonymous namespace; the F2 admission proof needs the live document's
+// identifier to reject a foreign-document binding.
+const Standard_GUID& DocumentIdentifierAttributeID();
+
 bool CollectValidatedPatternByteArrayRoles(
     const Handle(TDocStd_Document)& theDocument,
     std::set<const TDF_Attribute*>& theAdmittedRecords) noexcept
@@ -5202,6 +5219,62 @@ bool CollectValidatedPatternByteArrayRoles(
                 return false;
             }
             theAdmittedRecords.insert(aRigArray.get());
+        }
+        // Reserved F2DR decimation-derivative store (F2-S2): the one
+        // document-main-label carrier is admitted only through its own typed
+        // proof on this same live document -- exact main label, exactly the
+        // reserved attribute role, TDataStd_ByteArray type, lower bound 0,
+        // upper bound within the 65,536-byte store envelope, delta mode
+        // false, a canonical checksum-framed F2DR v1 decode/re-encode
+        // round-trip and a document binding equal to this live document's
+        // identifier. The admitted pointer is the found attribute itself, so
+        // every subsequent census consumer checks the identical validated
+        // identity. A misplaced child-label or duplicate F2 byte array is
+        // never admitted here and stays rejected by the all-label census
+        // below.
+        Handle(TDF_Attribute) aF2Attribute;
+        if (theDocument->Main().FindAttribute(
+                core3d::export_decimation::F2DerivativeStoreAttributeID(),
+                aF2Attribute)) {
+            namespace f2 = core3d::export_decimation;
+            const Handle(TDataStd_ByteArray) aF2Array =
+                Handle(TDataStd_ByteArray)::DownCast(aF2Attribute);
+            if (aF2Array.IsNull()
+                || aF2Array->ID() != f2::F2DerivativeStoreAttributeID()
+                || aF2Array->Lower() != 0
+                || aF2Array->Upper() < 0
+                || static_cast<Standard_Size>(aF2Array->Upper()) + 1
+                    > f2::kMaxStoreBytes
+                || aF2Array->GetDelta()) {
+                return false;
+            }
+            std::vector<std::uint8_t> aF2Bytes;
+            aF2Bytes.reserve(
+                static_cast<Standard_Size>(aF2Array->Upper()) + 1);
+            for (Standard_Integer anIndex = 0;
+                 anIndex <= aF2Array->Upper(); ++anIndex) {
+                aF2Bytes.push_back(aF2Array->Value(anIndex));
+            }
+            f2::F2Store aF2Store;
+            std::vector<std::uint8_t> aF2Canonical;
+            if (!f2::DecodeStore(aF2Bytes, aF2Store)
+                || !f2::EncodeStore(aF2Store, aF2Canonical)
+                || aF2Canonical != aF2Bytes) {
+                return false;
+            }
+            Handle(TDataStd_AsciiString) aDocumentIdentifier;
+            f2::F2UUID aBoundDocument{};
+            if (!theDocument->Main().FindAttribute(
+                    DocumentIdentifierAttributeID(), aDocumentIdentifier)
+                || aDocumentIdentifier.IsNull()
+                || !f2::UUIDFromText(
+                    std::string(aDocumentIdentifier->Get().ToCString()
+                        ? aDocumentIdentifier->Get().ToCString() : ""),
+                    aBoundDocument)
+                || aBoundDocument != aF2Store.documentUUID) {
+                return false;
+            }
+            theAdmittedRecords.insert(aF2Array.get());
         }
         // Identity-based all-label placement: a byte array is admitted only as
         // an authored-frame identifier, an exact validated tag-71/73/72
@@ -5571,6 +5644,38 @@ public:
                     Handle(TDataStd_ByteArray)::DownCast(theTarget);
                 if (anAttribute.IsNull()
                     || anAttribute->ID() != rig::AttachmentRigAttributeID()
+                    || anAttribute->Lower() != 0
+                    || anAttribute->Upper() != anUpper
+                    || anAttribute->GetDelta()
+                    || theSource.Position() != anEnd) {
+                    return Reject();
+                }
+                return Standard_True;
+            }
+            if (anIdentifier
+                == core3d::export_decimation::F2DerivativeStoreAttributeID()) {
+                // F2-S2 F2DR derivative store. Mirrors the ABR1 branch
+                // exactly: the 65,536-byte cap and the canonical
+                // checksum-framed decode/re-encode byte-equality proof run
+                // before the delegate paste; no pattern budget is charged
+                // because the ABR1 branch charges none (the reserved ID is
+                // unique per document, so one-carrier-per-read holds by
+                // admission).
+                namespace f2 = core3d::export_decimation;
+                f2::F2Store aStore;
+                std::vector<std::uint8_t> aCanonical;
+                if (aCount > f2::kMaxStoreBytes
+                    || !f2::DecodeStore(someBytes, aStore)
+                    || !f2::EncodeStore(aStore, aCanonical)
+                    || aCanonical != someBytes
+                    || !BinMDataStd_ByteArrayDriver::Paste(
+                        theSource, theTarget, theRelocationTable)) {
+                    return Reject();
+                }
+                const Handle(TDataStd_ByteArray) anAttribute =
+                    Handle(TDataStd_ByteArray)::DownCast(theTarget);
+                if (anAttribute.IsNull()
+                    || anAttribute->ID() != f2::F2DerivativeStoreAttributeID()
                     || anAttribute->Lower() != 0
                     || anAttribute->Upper() != anUpper
                     || anAttribute->GetDelta()
@@ -19217,6 +19322,159 @@ Standard_Boolean OcctDocument::StageAttachmentRigMetadata(
 }
 
 Standard_Boolean OcctDocument::FinalizeAttachmentRigHistory() noexcept {
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || myOcafDoc->HasOpenCommand() || !myNativeAuthority)
+            return Standard_False;
+        myNativeAuthority->HistoryBoundary(myOcafDoc.get());
+        NotifyChanges();
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+namespace {
+// F2-S2 derivative-store role reader: a tri-state proof (absent / present
+// with exact bytes / corrupt), mirroring ReadAttachmentRigStoredRecord. The
+// carrier is the single reserved-ID TDataStd_ByteArray at Main with lower
+// bound 0, a size within the 65,536-byte envelope, delta mode false, a
+// canonical F2DR decode/re-encode round-trip and a document binding equal to
+// this live document's identifier. Corrupt is never reported as absence.
+bool ReadF2DerivativeStoredRecord(
+    const Handle(TDocStd_Document)& theDocument,
+    core3d::export_decimation::F2StoreRead& theRecord) noexcept
+{
+    namespace f2 = core3d::export_decimation;
+    theRecord = {};
+    try {
+        OCC_CATCH_SIGNALS
+        if (theDocument.IsNull() || theDocument->GetData().IsNull()) {
+            theRecord.occurrence = f2::F2StoreOccurrence::Corrupt;
+            theRecord.refusal = "closed document";
+            return false;
+        }
+        Handle(TDF_Attribute) anAttribute;
+        if (!theDocument->Main().FindAttribute(
+                f2::F2DerivativeStoreAttributeID(), anAttribute)) {
+            theRecord.occurrence = f2::F2StoreOccurrence::Absent;
+            return true;
+        }
+        const Handle(TDataStd_ByteArray) anArray =
+            Handle(TDataStd_ByteArray)::DownCast(anAttribute);
+        if (anArray.IsNull() || anArray->ID() != f2::F2DerivativeStoreAttributeID()
+            || anArray->Lower() != 0 || anArray->Upper() < 0
+            || anArray->GetDelta()) {
+            theRecord.occurrence = f2::F2StoreOccurrence::Corrupt;
+            theRecord.refusal = "invalid F2 derivative store role";
+            return true;
+        }
+        const std::size_t aCount = std::size_t(anArray->Upper()) + 1;
+        if (aCount == 0 || aCount > f2::kMaxStoreBytes) {
+            theRecord.occurrence = f2::F2StoreOccurrence::Corrupt;
+            theRecord.refusal = "stored F2DR exceeds 65536-byte envelope";
+            return true;
+        }
+        theRecord.bytes.reserve(aCount);
+        for (Standard_Integer anIndex = 0;
+             anIndex <= anArray->Upper(); ++anIndex) {
+            theRecord.bytes.push_back(anArray->Value(anIndex));
+        }
+        f2::F2Store aStore;
+        std::vector<std::uint8_t> aCanonical;
+        if (!f2::DecodeStore(theRecord.bytes, aStore)
+            || !f2::EncodeStore(aStore, aCanonical)
+            || aCanonical != theRecord.bytes) {
+            theRecord.bytes.clear();
+            theRecord.occurrence = f2::F2StoreOccurrence::Corrupt;
+            theRecord.refusal = "noncanonical F2DR store";
+            return true;
+        }
+        Handle(TDataStd_AsciiString) aDocumentIdentifier;
+        f2::F2UUID aBoundDocument{};
+        if (!theDocument->Main().FindAttribute(
+                DocumentIdentifierAttributeID(), aDocumentIdentifier)
+            || aDocumentIdentifier.IsNull()
+            || !f2::UUIDFromText(
+                std::string(aDocumentIdentifier->Get().ToCString()
+                    ? aDocumentIdentifier->Get().ToCString() : ""),
+                aBoundDocument)
+            || aBoundDocument != aStore.documentUUID) {
+            theRecord.bytes.clear();
+            theRecord.occurrence = f2::F2StoreOccurrence::Corrupt;
+            theRecord.refusal = "foreign F2DR document binding";
+            return true;
+        }
+        theRecord.occurrence = f2::F2StoreOccurrence::Present;
+        theRecord.refusal.clear();
+        return true;
+    } catch (...) {
+        theRecord = {};
+        theRecord.occurrence = f2::F2StoreOccurrence::Corrupt;
+        theRecord.refusal = "F2 derivative store read exception";
+        return false;
+    }
+}
+} // namespace
+
+Standard_Boolean OcctDocument::ReadF2DerivativeStore(
+    core3d::export_decimation::F2StoreRead& record) const noexcept {
+    record = {};
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()) return Standard_False;
+        return ReadF2DerivativeStoredRecord(myOcafDoc, record)
+            ? Standard_True : Standard_False;
+    } catch (...) { record = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::StageF2DerivativeStore(
+    const core3d::export_decimation::F2StoreRead& before,
+    const std::vector<std::uint8_t>& candidate,
+    Standard_Boolean remove,
+    core3d::export_decimation::F2StoreRead& record) noexcept {
+    namespace f2 = core3d::export_decimation;
+    record = {};
+    try {
+        OCC_CATCH_SIGNALS
+        // The caller owns the one open OCAF command; this port never opens or
+        // closes a command itself.
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || !myOcafDoc->HasOpenCommand() || !before.readable())
+            return Standard_False;
+        f2::F2StoreRead current;
+        if (!ReadF2DerivativeStoredRecord(myOcafDoc, current)
+            || current.occurrence != before.occurrence
+            || current.bytes != before.bytes)
+            return Standard_False;
+        if (remove) {
+            if (current.occurrence != f2::F2StoreOccurrence::Present
+                || !myOcafDoc->Main().ForgetAttribute(
+                    f2::F2DerivativeStoreAttributeID())) return Standard_False;
+        } else {
+            f2::F2Store value;
+            std::vector<std::uint8_t> canonical;
+            if (candidate.empty() || candidate.size() > f2::kMaxStoreBytes
+                || !f2::DecodeStore(candidate, value)
+                || !f2::EncodeStore(value, canonical)
+                || canonical != candidate) return Standard_False;
+            const Handle(TDataStd_ByteArray) attribute =
+                TDataStd_ByteArray::Set(myOcafDoc->Main(),
+                    f2::F2DerivativeStoreAttributeID(), 0,
+                    Standard_Integer(candidate.size()) - 1, Standard_False);
+            if (attribute.IsNull()) return Standard_False;
+            for (std::size_t index = 0; index < candidate.size(); ++index)
+                attribute->SetValue(Standard_Integer(index), candidate[index]);
+        }
+        if (!ReadF2DerivativeStoredRecord(myOcafDoc, record)
+            || (remove && record.occurrence != f2::F2StoreOccurrence::Absent)
+            || (!remove && (record.occurrence != f2::F2StoreOccurrence::Present
+                || record.bytes != candidate))) {
+            record = {};
+            return Standard_False;
+        }
+        return Standard_True;
+    } catch (...) { record = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::FinalizeF2DerivativeHistory() noexcept {
     try {
         if (![NSThread isMainThread] || myOcafDoc.IsNull()
             || myOcafDoc->HasOpenCommand() || !myNativeAuthority)

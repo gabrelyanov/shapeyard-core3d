@@ -98,6 +98,10 @@ enum class Refusal : std::uint8_t;
 }
 namespace core3d::variable_radius_fillet::owner { struct Capture; }
 namespace core3d::attachment_rig { struct StoredRecord; }
+namespace core3d::export_decimation {
+struct F2StoreRead;
+const Standard_GUID& F2DerivativeStoreAttributeID() noexcept;
+}
 namespace core3d::part_boolean::owner { class PartBooleanOwner; }
 namespace core3d::draft_faces::owner { class NativeOwner; }
 namespace core3d::retained_feature { class OcafOwnerService; }
@@ -1390,6 +1394,19 @@ public:
         Standard_Boolean remove,
         core3d::attachment_rig::StoredRecord& record) noexcept;
     Standard_EXPORT Standard_Boolean FinalizeAttachmentRigHistory() noexcept;
+    //! F2-S2's one authoritative document-main-label F2DR decimation
+    //! derivative store. These ports never open or close a command; the
+    //! caller owns the one OCAF command and proves exact readback before
+    //! close. Canonical encoding, checksums and record validation live in
+    //! ExportMeshDecimationNativeOwner.hxx.
+    Standard_EXPORT Standard_Boolean ReadF2DerivativeStore(
+        core3d::export_decimation::F2StoreRead& record) const noexcept;
+    Standard_EXPORT Standard_Boolean StageF2DerivativeStore(
+        const core3d::export_decimation::F2StoreRead& before,
+        const std::vector<std::uint8_t>& candidate,
+        Standard_Boolean remove,
+        core3d::export_decimation::F2StoreRead& record) noexcept;
+    Standard_EXPORT Standard_Boolean FinalizeF2DerivativeHistory() noexcept;
     //! Capture requires a viewer-issued context for this exact document. The
     //! reader below intentionally remains usable inside an owned command.
     Standard_EXPORT Standard_Boolean CaptureBoundedCurveExact(
