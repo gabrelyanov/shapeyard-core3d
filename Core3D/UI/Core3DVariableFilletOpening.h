@@ -95,6 +95,21 @@ __attribute__((objc_subclassing_restricted))
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+//! Passive immutable summary of one retained variable-radius fillet owned by
+//! a part. Values come directly from the persisted native owner and its law;
+//! callers cannot construct or mutate them.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DVariableFilletOwnerValues : NSObject
+@property(nonatomic, copy, readonly) NSData *featureIdentifier;
+@property(nonatomic, copy, readonly) NSString *entityIdentifier;
+@property(nonatomic, assign, readonly) uint32_t issuedEdgeTopologyIndex;
+@property(nonatomic, assign, readonly) NSInteger stationCount;
+@property(nonatomic, assign, readonly) double startRadiusMillimetres;
+@property(nonatomic, assign, readonly) double endRadiusMillimetres;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 //! Realised-law pin read back on the physical edge after the native build.
 //! Values are physical millimetres along the issued authored parameter.
 __attribute__((objc_subclassing_restricted))

@@ -24,6 +24,8 @@
 #import <Core3D/Core3DEdgeTreatmentR2Types.h>
 #import <Core3D/Core3DFaceSelectorTypes.h>
 
+@class Core3DVariableFilletOwnerValues;
+
 NS_ASSUME_NONNULL_BEGIN
 
 typedef NS_ENUM(NSInteger, Core3DShellOpeningAxis) {
@@ -226,6 +228,11 @@ __attribute__((objc_subclassing_restricted))
 //! Passive construction-input discovery for Objects. No capture/session/history.
 - (Core3DPartBooleanValues *_Nullable)partBooleanEditorValuesForEntityIdentifier:
     (NSString *)entityIdentifier NS_SWIFT_NAME(partBooleanEditorValues(entityIdentifier:));
+//! Passive retained variable-fillet discovery for Objects. Returns an empty
+//! array for every unavailable or absent case and never changes selection,
+//! history or document state.
+- (NSArray<Core3DVariableFilletOwnerValues *> *)variableFilletOwnerValuesForEntityIdentifier:
+    (NSString *)entityIdentifier NS_SWIFT_NAME(variableFilletOwnerValues(entityIdentifier:));
 
 //! Deep-copy the committed model and semantic camera into renderer-neutral,
 //! immutable values. Returns nil while a model transaction is open, while a
@@ -1389,6 +1396,11 @@ __attribute__((objc_subclassing_restricted))
 //! selection mode.
 - (Core3DSelectionTypeChangeResult)
     trySetSelectionType:(PrimitiveSelectionType)type;
+//! Select the exact edge issued by one retained variable-fillet feature. The
+//! topology index is read from the persisted owner, never supplied by callers.
+- (BOOL)selectVariableFilletIssuedEdgeForEntityIdentifier:(NSString *)entityIdentifier
+    featureIdentifier:(NSData *)featureIdentifier
+    NS_SWIFT_NAME(selectVariableFilletIssuedEdge(entityIdentifier:featureIdentifier:));
 - (void)setSelectionType:(PrimitiveSelectionType)type;
 - (void)setGizmoType:(PrimitiveGizmoType)type;
 

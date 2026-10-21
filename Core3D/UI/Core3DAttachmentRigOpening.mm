@@ -811,6 +811,7 @@ Core3DAttachmentRigApplyResult ApplyResult(
 // with the original bytes retained, Stale when the owner was consumed with no
 // receipt. Read-only; nothing is erased and nothing is marked current here.
 - (NSDictionary *)s3CommittedReattachmentObservation;
+- (NSDictionary *)s4ExportCaptureObservation;
 #if DEBUG
 - (NSDictionary *)debugS3BooleanEditConflicting:(BOOL)conflicting;
 #endif
@@ -1059,6 +1060,79 @@ Core3DAttachmentRigApplyResult ApplyResult(
     return report;
 }
 
+- (NSDictionary *)s4ExportCaptureObservation {
+    namespace rig = core3d::attachment_rig;
+    NSMutableDictionary *report = [NSMutableDictionary dictionary];
+    report[@"state"] = @"refused";
+    if (!NSThread.isMainThread || _document.IsNull()) {
+        report[@"refusal"] = @"native attachment capture unavailable";
+        return report;
+    }
+    NSError *currentError = nil;
+    if (![self isCurrent:&currentError]) {
+        report[@"refusal"] = currentError.localizedDescription
+            ?: @"captured dependency changed";
+        return report;
+    }
+    rig::StoredRecord stored;
+    if (!_document->ReadAttachmentRigMetadata(stored)
+        || stored.state != rig::StoredReadState::Present) {
+        report[@"refusal"] = stored.refusal.empty()
+            ? @"stored attachment metadata is unavailable" : Text(stored.refusal);
+        return report;
+    }
+    rig::Metadata metadata;
+    std::string refusal;
+    if (!rig::DecodeABR1(stored.bytes, metadata, refusal)) {
+        report[@"refusal"] = Text(refusal);
+        return report;
+    }
+
+    NSMutableArray *attachments =
+        [NSMutableArray arrayWithCapacity:metadata.attachments.size()];
+    for (const auto& attachment : metadata.attachments) {
+        const bool rigid = attachment.rigid.has_value();
+        const std::string& tuple = rigid
+            ? attachment.rigid->owner : attachment.surface->owner;
+        auto owner = std::find_if(
+            _nativeOwners.begin(), _nativeOwners.end(),
+            [&](const NativeOwner& value) { return value.tuple == tuple; });
+        if (owner == _nativeOwners.end()) {
+            report[@"refusal"] = @"attachment owner is foreign to captured document";
+            return report;
+        }
+        [attachments addObject:@{
+            @"attachmentID": Data(attachment.attachmentID),
+            @"displayName": Text(attachment.displayName),
+            @"role": Text(attachment.role),
+            @"owner": Data(tuple),
+            @"ownerEntityIdentifier": owner->observation.entityIdentifier,
+            @"binding": rigid ? @"rigid" : @"surface",
+            @"frameMM": FrameArray(attachment.frameMM),
+        }];
+    }
+    NSMutableArray *joints =
+        [NSMutableArray arrayWithCapacity:metadata.joints.size()];
+    for (const auto& joint : metadata.joints) {
+        NSMutableDictionary *row = [@{
+            @"jointID": Data(joint.jointID),
+            @"displayName": Text(joint.displayName),
+            @"bindFrameMM": FrameArray(joint.bindTransformMM),
+        } mutableCopy];
+        if (joint.parentJointID)
+            row[@"parentJointID"] = Data(*joint.parentJointID);
+        [joints addObject:row];
+    }
+    report[@"state"] = @"current";
+    report[@"refusal"] = @"";
+    report[@"documentGeneration"] = @(self.documentGeneration);
+    report[@"modelRevision"] = @(self.modelRevision);
+    report[@"metersPerUnit"] = @(self.metersPerUnit);
+    report[@"attachments"] = attachments;
+    report[@"joints"] = joints;
+    return report;
+}
+
 #if DEBUG
 - (NSDictionary *)debugApplyWithFault:(std::int32_t)fault
     cancelBeforeApply:(BOOL)cancelBeforeApply
@@ -1135,6 +1209,17 @@ Core3DAttachmentRigApplyResult ApplyResult(
 }
 #endif
 @end
+
+extern "C" void *Core3DF4AttachmentRigExportCapture(void *openingPointer) {
+    @autoreleasepool {
+        Core3DAttachmentRigOpening *opening =
+            (__bridge Core3DAttachmentRigOpening *)openingPointer;
+        NSDictionary *value = opening
+            ? [opening s4ExportCaptureObservation]
+            : @{ @"state": @"refused", @"refusal": @"native attachment capture unavailable" };
+        return (__bridge_retained void *)value;
+    }
+}
 
 #if DEBUG
 extern "C" void *Core3DDebugF4AttachmentRigOwnerProbe(

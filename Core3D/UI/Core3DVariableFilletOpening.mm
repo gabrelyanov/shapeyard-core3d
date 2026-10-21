@@ -508,6 +508,71 @@ struct OpeningBuild final {
 - (instancetype)initPrivate { return [super init]; }
 @end
 
+@interface Core3DVariableFilletOwnerValues ()
+@property(nonatomic, copy, readwrite) NSData *featureIdentifier;
+@property(nonatomic, copy, readwrite) NSString *entityIdentifier;
+@property(nonatomic, assign, readwrite) uint32_t issuedEdgeTopologyIndex;
+@property(nonatomic, assign, readwrite) NSInteger stationCount;
+@property(nonatomic, assign, readwrite) double startRadiusMillimetres;
+@property(nonatomic, assign, readwrite) double endRadiusMillimetres;
+- (instancetype)initPrivate;
+@end
+@implementation Core3DVariableFilletOwnerValues
+- (instancetype)initPrivate { return [super init]; }
+@end
+
+NSArray<Core3DVariableFilletOwnerValues *> *
+Core3DVariableFilletOwnerValuesForDocument(
+    const Handle(OcctDocument)& document, const TDF_Label& carrier,
+    NSString *entityIdentifier, double metersPerUnit) {
+    if (![NSThread isMainThread] || document.IsNull() || carrier.IsNull()
+        || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0 || !std::isfinite(metersPerUnit)
+        || metersPerUnit <= 0 || metersPerUnit > 1) return @[];
+    try {
+        vro::Capture capture;
+        if (!document->CaptureVariableRadiusFilletOwner(carrier, capture)
+            || !capture.present) return @[];
+
+        std::size_t stationCount = 0;
+        double startRadiusLocal = 0;
+        double endRadiusLocal = 0;
+        vrf::Definition linear;
+        vrf::MultiStationDefinition stations;
+        if (vrf::Decode(capture.lawBytes, linear)
+            && !linear.stations.empty()) {
+            stationCount = linear.stations.size();
+            startRadiusLocal = linear.stations.front().radiusLocal;
+            endRadiusLocal = linear.stations.back().radiusLocal;
+        } else if (vrf::Decode(capture.lawBytes, stations)
+                   && !stations.stations.empty()) {
+            stationCount = stations.stations.size();
+            startRadiusLocal = stations.stations.front().radiusLocal;
+            endRadiusLocal = stations.stations.back().radiusLocal;
+        } else {
+            return @[];
+        }
+        if (stationCount > NSIntegerMax) return @[];
+        const double millimetresPerLocal = 1000.0 * metersPerUnit;
+        const double startRadius = startRadiusLocal * millimetresPerLocal;
+        const double endRadius = endRadiusLocal * millimetresPerLocal;
+        if (!std::isfinite(startRadius) || !std::isfinite(endRadius)) return @[];
+
+        Core3DVariableFilletOwnerValues *values =
+            [[Core3DVariableFilletOwnerValues alloc] initPrivate];
+        if (!values) return @[];
+        values.featureIdentifier = VRData(capture.feature);
+        values.entityIdentifier = [entityIdentifier copy];
+        values.issuedEdgeTopologyIndex = capture.topologyIndex;
+        values.stationCount = static_cast<NSInteger>(stationCount);
+        values.startRadiusMillimetres = startRadius;
+        values.endRadiusMillimetres = endRadius;
+        return @[ values ];
+    } catch (...) {
+        return @[];
+    }
+}
+
 @interface Core3DVariableFilletLawPin ()
 @property(nonatomic, assign, readwrite) double parameter;
 @property(nonatomic, assign, readwrite) double positionMM;

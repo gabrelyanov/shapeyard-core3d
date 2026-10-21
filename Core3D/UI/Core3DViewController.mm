@@ -69,6 +69,7 @@
 #import "GLView.h"
 #import "Core3DViewController.h"
 #import "Core3DAuthoredParameterOpening.h"
+#import "Core3DVariableFilletOpening.h"
 #import <objc/runtime.h>
 #import "Core3DViewController+AvailabilityManager.h"
 #import "Core3DViewController+PrimitiveManager.h"
@@ -212,6 +213,12 @@ unsigned long long Core3DDebugColdOpenCandidateProbeValue(
 #include "TopLoc_Location.hxx"
 #include "TopExp_Explorer.hxx"
 #include "XCAFPrs_DocumentExplorer.hxx"
+#include <AIS_ListIteratorOfListOfInteractive.hxx>
+#include <AIS_ListOfInteractive.hxx>
+#include <AIS_Shape.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <Precision.hxx>
+#include <StdSelect_BRepOwner.hxx>
 
 #include <algorithm>
 #include <array>
@@ -226,6 +233,10 @@ unsigned long long Core3DDebugColdOpenCandidateProbeValue(
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+NSArray<Core3DVariableFilletOwnerValues *> *
+Core3DVariableFilletOwnerValuesForDocument(const Handle(OcctDocument)& document,
+    const TDF_Label& carrier, NSString *entityIdentifier, double metersPerUnit);
 
 namespace {
 
@@ -19800,6 +19811,43 @@ static bool Core3DPublishCommittedSpatialSweep(
     return released ? values : nil;
 }
 
+- (NSArray<Core3DVariableFilletOwnerValues *> *)
+    variableFilletOwnerValuesForEntityIdentifier:(NSString *)entityIdentifier {
+    if (![NSThread isMainThread] || !_isSetuped || _isLoading.load()
+        || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || !entityIdentifier.UTF8String || GLController == nil
+        || GLController.viewer == nullptr
+        || !GLController.viewer->canBeginCommittedEdit()) return @[];
+    try {
+        const Handle(OcctDocument) document = GLController.viewer->getDocument();
+        if (document.IsNull() || document->Document().IsNull()
+            || document->Document()->HasOpenCommand()) return @[];
+        const auto shapes =
+            XCAFDoc_DocumentTool::ShapeTool(document->Document()->Main());
+        if (shapes.IsNull()) return @[];
+        TDF_LabelSequence roots;
+        shapes->GetFreeShapes(roots);
+        TDF_Label carrier;
+        const std::string entity(entityIdentifier.UTF8String,
+            [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        for (Standard_Integer index = 1; index <= roots.Length(); ++index) {
+            if (document->EntityIdentifierForLabel(roots.Value(index)) == entity) {
+                if (!carrier.IsNull()) return @[];
+                carrier = roots.Value(index);
+            }
+        }
+        double metersPerUnit = 0;
+        if (carrier.IsNull()
+            || !XCAFDoc_DocumentTool::GetLengthUnit(
+                document->Document(), metersPerUnit)) return @[];
+        return Core3DVariableFilletOwnerValuesForDocument(
+            document, carrier, entityIdentifier, metersPerUnit);
+    } catch (...) {
+        return @[];
+    }
+}
+
 #if DEBUG
 - (Core3DPartBooleanValues *)debugPartBooleanEditorValuesForEntityIdentifier:
     (NSString *)entityIdentifier {
@@ -23789,6 +23837,156 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
                                  | UIStateChangingDelete
                                  | UIStateChangingDuplicate];
     return Core3DSelectionTypeChangeResultSucceeded;
+}
+
+- (BOOL)selectVariableFilletIssuedEdgeForEntityIdentifier:(NSString *)entityIdentifier
+    featureIdentifier:(NSData *)featureIdentifier {
+    if (![NSThread isMainThread] || !_isSetuped || _isLoading.load()
+        || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || !entityIdentifier.UTF8String
+        || ![featureIdentifier isKindOfClass:NSData.class]
+        || featureIdentifier.length != 16 || GLController == nil
+        || GLController.viewer == nullptr
+        || !GLController.viewer->canBeginCommittedEdit()) return NO;
+    try {
+        const auto viewer = GLController.viewer;
+        const Handle(OcctDocument) document = viewer->getDocument();
+        const Handle(TDocStd_Document) native =
+            document.IsNull() ? Handle(TDocStd_Document)() : document->Document();
+        if (document.IsNull() || native.IsNull() || native->HasOpenCommand()
+            || viewer->AisContext().IsNull()) return NO;
+
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(native->Main());
+        if (shapes.IsNull()) return NO;
+        TDF_LabelSequence roots;
+        shapes->GetFreeShapes(roots);
+        TDF_Label carrier;
+        const std::string entity(entityIdentifier.UTF8String,
+            [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        for (Standard_Integer index = 1; index <= roots.Length(); ++index) {
+            if (document->EntityIdentifierForLabel(roots.Value(index)) == entity) {
+                if (!carrier.IsNull()) return NO;
+                carrier = roots.Value(index);
+            }
+        }
+        double metersPerUnit = 0;
+        if (carrier.IsNull()
+            || !XCAFDoc_DocumentTool::GetLengthUnit(native, metersPerUnit))
+            return NO;
+        NSArray<Core3DVariableFilletOwnerValues *> *values =
+            Core3DVariableFilletOwnerValuesForDocument(
+                document, carrier, entityIdentifier, metersPerUnit);
+        Core3DVariableFilletOwnerValues *matched = nil;
+        for (Core3DVariableFilletOwnerValues *value in values) {
+            if ([value.featureIdentifier isEqualToData:featureIdentifier]) {
+                if (matched) return NO;
+                matched = value;
+            }
+        }
+        if (!matched) return NO;
+
+        Handle(AIS_Shape) presentation;
+        AIS_ListOfInteractive displayed;
+        viewer->AisContext()->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+        for (AIS_ListIteratorOfListOfInteractive item(displayed);
+             item.More(); item.Next()) {
+            const Handle(AIS_InteractiveObject)& object = item.Value();
+            const TDF_Label label = document->ShapeLabel(object);
+            if (label.IsNull() || !label.IsEqual(carrier)) continue;
+            const Handle(AIS_Shape) candidate = Handle(AIS_Shape)::DownCast(object);
+            const OcctGeometryRepresentation representation =
+                document->GeometryRepresentationForLabel(label);
+            if (!presentation.IsNull() || candidate.IsNull()
+                || candidate->Shape().IsNull()
+                || !document->IsPresentationEditable(candidate)
+                || (representation != OcctGeometryRepresentation::BRep
+                    && representation
+                        != OcctGeometryRepresentation::LegacyUnknown)) return NO;
+            presentation = candidate;
+        }
+        if (presentation.IsNull()) return NO;
+
+        TopTools_IndexedMapOfShape edges;
+        TopExp::MapShapes(presentation->Shape(), TopAbs_EDGE, edges);
+        const uint32_t topologyIndex = matched.issuedEdgeTopologyIndex;
+        if (topologyIndex >= static_cast<uint32_t>(edges.Extent())) return NO;
+        const TopoDS_Edge canonicalEdge =
+            TopoDS::Edge(edges.FindKey(Standard_Integer(topologyIndex) + 1));
+        if (canonicalEdge.IsNull() || canonicalEdge.Closed()
+            || BRep_Tool::Degenerated(canonicalEdge)) return NO;
+        BRepAdaptor_Curve curve(canonicalEdge);
+        if (curve.IsClosed() || curve.IsPeriodic()
+            || !std::isfinite(curve.FirstParameter())
+            || !std::isfinite(curve.LastParameter())
+            || curve.LastParameter() - curve.FirstParameter()
+                <= Precision::PConfusion()) return NO;
+
+        const Handle(AIS_InteractiveContext) selection = viewer->AisContext();
+        std::vector<Handle(SelectMgr_EntityOwner)> previousOwners;
+        for (selection->InitSelected(); selection->MoreSelected();
+             selection->NextSelected()) {
+            const Handle(SelectMgr_EntityOwner) owner = selection->SelectedOwner();
+            if (owner.IsNull()) return NO;
+            previousOwners.push_back(owner);
+        }
+        const PrimitiveSelectionType previousMode = _currentSelectionType;
+        if ([self trySetSelectionType:PrimitiveSelectionTypeEdge]
+                != Core3DSelectionTypeChangeResultSucceeded) return NO;
+
+        const auto restorePreviousSelection = [&]() noexcept {
+            try {
+                OCC_CATCH_SIGNALS
+                selection->ClearSelected(Standard_False);
+                if ([self trySetSelectionType:previousMode]
+                        == Core3DSelectionTypeChangeResultSucceeded) {
+                    for (const Handle(SelectMgr_EntityOwner)& owner : previousOwners)
+                        selection->AddOrRemoveSelected(owner, Standard_False);
+                }
+                [GLController refreshSelectionState];
+                [GLController requestRender];
+            } catch (...) {
+            }
+        };
+        const std::shared_ptr<core3d::ShapeInteractor> interactor =
+            viewer->getShapeInteractor();
+        if (!interactor
+            || interactor->getSelectionMode() != core3d::ShapeSelectionMode::Edge
+            || !interactor->selectionModeAuthorityIsExact()) {
+            restorePreviousSelection();
+            return NO;
+        }
+
+        selection->ClearDetected(Standard_False);
+        selection->ClearSelected(Standard_False);
+        const Handle(StdSelect_BRepOwner) owner =
+            new StdSelect_BRepOwner(
+                canonicalEdge, presentation, 0, Standard_True);
+        selection->AddOrRemoveSelected(owner, Standard_False);
+        if (!owner->IsSelected()) {
+            restorePreviousSelection();
+            return NO;
+        }
+        Standard_Size selectedCount = 0;
+        for (selection->InitSelected(); selection->MoreSelected();
+             selection->NextSelected()) {
+            ++selectedCount;
+            if (selection->SelectedOwner() != owner
+                || selection->SelectedInteractive() != presentation) {
+                restorePreviousSelection();
+                return NO;
+            }
+        }
+        if (selectedCount != 1) {
+            restorePreviousSelection();
+            return NO;
+        }
+        [GLController refreshSelectionState];
+        [GLController requestRender];
+        return YES;
+    } catch (...) {
+        return NO;
+    }
 }
 
 - (void)setSelectionType:(PrimitiveSelectionType)type {
