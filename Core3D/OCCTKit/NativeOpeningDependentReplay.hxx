@@ -51,7 +51,8 @@ using UUID = std::array<std::uint8_t, 16>;
 enum class Family : std::uint8_t {
     PatternD2 = 2,
     PathArrayD3 = 3,
-    FeaturePatternD4 = 4
+    FeaturePatternD4 = 4,
+    TextReliefE5 = 5
 };
 
 enum class Mutation : std::uint8_t { Replace = 1, Remove = 2 };
@@ -152,6 +153,9 @@ Refusal PreparePathArrayD3Replay(OcctDocument&, const Dependency&, Mutation,
 Refusal PrepareFeaturePatternD4Replay(OcctDocument&, const Dependency&, Mutation,
     const Candidate&, const std::shared_ptr<native_opening::Context>&,
     std::shared_ptr<const PreparedReplay>&) noexcept;
+Refusal PrepareTextReliefE5Replay(OcctDocument&, const Dependency&, Mutation,
+    const Candidate&, const std::shared_ptr<native_opening::Context>&,
+    std::shared_ptr<const PreparedReplay>&) noexcept;
 
 class ProductionPreparer final : public Preparer {
 public:
@@ -173,6 +177,9 @@ public:
                     candidate_, context_, output);
             case Family::FeaturePatternD4:
                 return PrepareFeaturePatternD4Replay(owner, dependency, mutation,
+                    candidate_, context_, output);
+            case Family::TextReliefE5:
+                return PrepareTextReliefE5Replay(owner, dependency, mutation,
                     candidate_, context_, output);
         }
         return Refusal::UnsupportedDescendant;

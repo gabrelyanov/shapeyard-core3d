@@ -1874,7 +1874,10 @@ Core3DViewer::captureEdgeTreatmentSelectorTargetsR2(
         }
         const auto* sourceProof=context.proofFor(authorization.steps.back());
         if(!sourceProof){refusal=fs::Refusal::UnsupportedCarrier;return {};}
-        refusal=fs::Resolve(original->current_,intent,*sourceProof,
+        // Source-relative intent is authored against the retained pre-Boolean
+        // Profile. Prove that literal source boundary here; the ordinary
+        // overload below continues to inspect the post-Boolean current result.
+        refusal=fs::Resolve(original->sourceBase_,intent,*sourceProof,
             original->dimensionMetersPerUnit(),budget,cancelled,resolution);
     }else refusal=fs::Resolve(original->current_,intent,
         original->dimensionMetersPerUnit(),budget,cancelled,resolution);
@@ -2478,8 +2481,8 @@ std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTrea
             ?fs::SourceStageProofIssuer::Issue(*source,original->definition_,
                 original->sourceBase_,original->base_,false,rebindBudget,cancelled,
                 sourceContext,refusal)
-                &&et::CaptureSourceRebindRoles(original->base_,shadowDef,shadowBytes,
-                    rebindBudget,refusal,*captured,sourceContext)
+                &&r2::CaptureSourceRebindRolesR2(original->sourceBase_,original->base_,
+                    shadowDef,shadowBytes,rebindBudget,refusal,*captured,sourceContext)
             :et::CaptureSourceRebindRoles(original->base_,shadowDef,shadowBytes,
                 rebindBudget,refusal,*captured);
         if(!capturedRoles){
@@ -2540,7 +2543,9 @@ std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTrea
             shadow.base.metersPerLocalUnit=boolean.metersPerLocalUnit;}
         shadow.issuance=candidate.issuance;shadow.outputNode=candidate.outputNode;shadow.steps=candidate.steps;
         if(!intentBudget){intentBudget.emplace();CopyTopologyBudget(*intentBudget,original->chargedBudget_);}
-        if(!B1PrepareSelectorIntentEdit(shadow,original->base_,original->dimensionMetersPerUnit(),
+        const TopoDS_Shape& selectorStage=sourceContextPtr
+            ?original->sourceBase_:original->base_;
+        if(!B1PrepareSelectorIntentEdit(shadow,selectorStage,original->dimensionMetersPerUnit(),
                 *intent,*intentBudget,refusal,sourceContextPtr))return {};
         candidate.steps=std::move(shadow.steps);
     }
@@ -2614,7 +2619,7 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
         // against the exact new prefix bytes, never copied forward.
         r2::RetainedBooleanBase edited;std::vector<std::uint8_t> editedBytes;TopoDS_Shape prefixResult,editedBase;
         const auto* booleanBase=std::get_if<r2::RetainedBooleanBase>(&input->source_);
-        if(!booleanBase||!r2::RebuildEditedPrefix(*booleanBase,*input->edit_,input->sourceBase_,*input->cancelled_,edited,editedBytes,prefixResult,editedBase,budget,refusal,R2RebuildBooleanInputBase)){
+        if(!booleanBase||!r2::RebuildEditedPrefix(*booleanBase,*input->edit_,input->sourceBase_,*input->cancelled_,edited,editedBytes,prefixResult,editedBase,budget,refusal,input->candidate_.schema==4,R2RebuildBooleanInputBase)){
 #if DEBUG
             tb::debug::RecordPhase("build-r2",input->chargedBudget_,budget);
 #endif
@@ -2683,6 +2688,7 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
                 if(!fs::detail::Similarity(delta,radiusScale)){
                     refusal=et::Refusal::UnsupportedTransform;return {};
                 }
+                const bool reversesFaceUse=fs::detail::Determinant(delta)<0;
                 for(auto& row:transportedRoles.selectorSteps){
                     const auto step=std::find_if(result->definition_.steps.begin(),
                         result->definition_.steps.end(),[&](const et::Step& value){
@@ -2700,6 +2706,12 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
                             ||!fs::detail::Normal(delta,role.normalB,normalB)){
                             refusal=et::Refusal::UnsupportedTransform;return {};
                         }
+                        // This tangent follows the oriented face boundary.
+                        // A handedness reversal reverses that use relative to
+                        // the transformed curve; outward normals still use
+                        // the inverse transpose computed above.
+                        if(reversesFaceUse)
+                            tangent={-tangent[0],-tangent[1],-tangent[2]};
                         role.tangent=tangent;role.normalA=normalA;role.normalB=normalB;
                         if(role.normalB<role.normalA)std::swap(role.normalA,role.normalB);
                         role.circleRadiusMM*=radiusScale;
@@ -2712,7 +2724,7 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
             // feature/node/local IDs, kind, amount and authored intent.
             r2::Definition rebound=result->definition_;TopoDS_Shape treated;
             const bool reboundOK=hasSourceContext
-                ?r2::ApplySourceRebindR2(transportedRoles,result->base_,
+                ?r2::ApplySourceRebindR2(transportedRoles,result->editedSourceBase_,result->base_,
                     rebound,treated,budget,refusal,sourceContext,*input->cancelled_)
                 :r2::ApplySourceRebindR2(transportedRoles,result->base_,
                     rebound,treated,budget,refusal,*input->cancelled_);
@@ -2737,7 +2749,8 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
     if(!r2::Encode(result->definition_,result->definitionBytes_,refusal))return {};
     if(result->result_.IsNull()
         &&!(hasSourceContext
-            ?r2::ReplayTreatmentSuffix(result->base_,result->definition_,
+            ?r2::ReplayTreatmentSuffix(result->sourceChanged_
+                    ?result->editedSourceBase_:input->sourceBase_,result->base_,result->definition_,
                 result->result_,budget,refusal,sourceContext,*input->cancelled_)
             :r2::ReplayTreatmentSuffix(result->base_,result->definition_,
                 result->result_,budget,refusal,*input->cancelled_))){
@@ -3220,7 +3233,12 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
             const TDF_Label label = myDoc->ShapeLabel(presentation);
             if (label.IsNull()) { stale.push_back(presentation); continue; }
             const std::string entity = myDoc->EntityIdentifierForLabel(label);
-            if (entity.empty() || !displayed.emplace(entity, presentation).second) {
+            // A presentation whose label died inside the committed command
+            // (E5 retires replaced C1 curve labels) resolves to no live
+            // identity: it is a stale candidate matched to removals by exact
+            // previous shape, never a displayed identity.
+            if (entity.empty()) { stale.push_back(presentation); continue; }
+            if (!displayed.emplace(entity, presentation).second) {
                 (void)traceRefusal("displayed-identity", true); return false;
             }
         }
@@ -3528,6 +3546,13 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
                     }
                     if (!myDoc->ShapeLabel(presentation).IsEqual(label)) {
                         (void)traceRefusal("created-label", true); return false;
+                    }
+                    // Display activates mode 0; a sub-shape mode (Face for
+                    // E5 text relief) needs the retained mode's activation.
+                    if (_shapeInteractor == nullptr
+                        || !_shapeInteractor->applyRetainedSelectionModeToPresentation(
+                            presentation)) {
+                        (void)traceRefusal("created-selection-mode", true); return false;
                     }
                     const auto owner = presentation->GlobalSelOwner();
                     if (wasSelected
@@ -6044,6 +6069,7 @@ static bool R2RebuildBooleanInputBase(const retained_solid::Envelope& envelope,
     try {
         if (stop.load()) return false;
         TopoDS_Shape base;
+        bool reflectedProfileProved = false;
         if (envelope.sourceFamily == 1) {
             profile::Parameters p;
             // C20: reserve the canonical scalar decode pass before Decode
@@ -6067,6 +6093,18 @@ static bool R2RebuildBooleanInputBase(const retained_solid::Envelope& envelope,
             geometry->operationBudget = &budget;
             if (stop.load() || !BuildProfileSolidGeometry(geometry) || stop.load()) return false;
             base = geometry->solid;
+            // The legacy saved-cut prism expectation predates signed Profile
+            // frames and rejects a negative scale before comparing geometry.
+            // This R2-only producer already has the complete decoded request,
+            // so retain the same bounded complete-Profile proof used for curve
+            // and circular sources instead of falling back to that old gate.
+            if (p.constructionFrame && p.constructionFrame->values[7] < 0) {
+                ProfileProducerAccounting accounting(budget, stop);
+                reflectedProfileProved = bool(
+                    complete_profile_source::InspectCompleteProfileBase(
+                        base, p, accounting));
+                if (!reflectedProfileProved || stop.load()) return false;
+            }
         } else if (envelope.sourceFamily == 2) {
             enclosure::Parameters p; EnclosureSolidResult built;
             if (!enclosure::Decode(int(envelope.sourceSchema), envelope.sourceValues, p) || stop.load()) return false;
@@ -6098,7 +6136,8 @@ static bool R2RebuildBooleanInputBase(const retained_solid::Envelope& envelope,
         // a Boolean step or treatment suffix can run. Legacy polygon and
         // non-Profile families retain their old exact gate.
         if (stop.load() || base.IsNull()
-            || !saved_boolean_build::InspectSourceBase(base, envelope, stop, budget)
+            || (!reflectedProfileProved
+                && !saved_boolean_build::InspectSourceBase(base, envelope, stop, budget))
             || stop.load()) return false;
         out = base;
         return true;

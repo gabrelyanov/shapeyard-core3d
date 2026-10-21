@@ -195,6 +195,11 @@ namespace core3d {
         //! read-only authority check; callers use false as a fail-closed poison
         //! state and may request the same mode again to repair it.
         Standard_Boolean selectionModeAuthorityIsExact() const noexcept;
+        //! Applies the retained accepted mode to one presentation that a
+        //! committed native publication has just displayed. False means its
+        //! activation does not match the exact authority (fail closed).
+        Standard_Boolean applyRetainedSelectionModeToPresentation(
+            const Handle(AIS_InteractiveObject)& thePresentation) noexcept;
         //! The same exact authority proof, except for a bounded set of
         //! operation-owned AIS preview presentations that the owning controller
         //! has already proven displayed and deliberately nonselectable. Every

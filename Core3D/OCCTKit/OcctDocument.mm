@@ -937,8 +937,13 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
             if(const auto* append=std::get_if<r2::SelectorAppend>(&*built.edit_)){
                 const auto* oldBase=std::get_if<r2::BooleanBaseBinding>(&original.definition_.base);
                 const auto* newBase=std::get_if<r2::BooleanBaseBinding>(&built.definition_.base);
+                const et::Step* appended=built.definition_.steps.empty()
+                    ?nullptr:&built.definition_.steps.back();
+                const bool sourceRelative=appended&&appended->selector
+                    &&std::holds_alternative<core3d::retained_face_selector::SourceRelativeV1>(
+                        appended->selector->intent);
                 const std::uint32_t expectedSchema=append->kind==et::Kind::Chamfer
-                    ?3:original.definition_.schema;
+                    ?3:sourceRelative?4:original.definition_.schema;
                 if(!oldBase||!newBase||!(*oldBase==*newBase)||built.sourceChanged()
                     ||built.definition_.schema!=expectedSchema
                     ||!(built.definition_.owner==original.definition_.owner)
@@ -949,7 +954,7 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
                         built.definition_.steps.begin())){
                     refusal=et::Refusal::IdentityMismatch;return Standard_False;
                 }
-                const auto& issued=built.definition_.steps.back();
+                const auto& issued=*appended;
                 if(issued.kind!=append->kind||issued.amountMM!=append->amountMM
                     ||!issued.selector||issued.localID!=original.definition_.issuance.nextLocalID
                     ||built.definition_.outputNode!=issued.node){
@@ -1002,7 +1007,7 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
             }
         }
         if(!(newForm
-                ?r2::ReplayTreatmentSuffix(built.base_,built.definition_,verified,
+                ?r2::ReplayTreatmentSuffix(sourceBase,built.base_,built.definition_,verified,
                     commitBudget,refusal,*commitContext,neverCancelled)
                 :r2::ReplayTreatmentSuffix(built.base_,built.definition_,verified,
                     commitBudget,refusal,neverCancelled))
@@ -1228,7 +1233,7 @@ Standard_Boolean OcctDocument::StageRetainedBooleanMigrationR2(
             *booleanBase,built.definition_,original.originalBase_,built.base_,
             false,commitBudget,neverCancelled,sourceContext,refusal)))return Standard_False;
     if(!(newForm
-            ?r2::ReplayTreatmentSuffix(built.base_,built.definition_,verified,
+            ?r2::ReplayTreatmentSuffix(original.originalBase_,built.base_,built.definition_,verified,
                 commitBudget,refusal,sourceContext,neverCancelled)
             :r2::ReplayTreatmentSuffix(built.base_,built.definition_,verified,
                 commitBudget,refusal,neverCancelled))
@@ -1477,6 +1482,71 @@ bool CaptureTreatmentSubtreeNaming(const TDF_Label& owner,
             if (childHas) {
                 if (states.size() >= kTreatmentHistoryMaxNamingLabels) { states.clear(); return false; }
                 states.push_back(std::move(child));
+            }
+        }
+        std::sort(states.begin(), states.end(), [](const treatment_history::NamingState& lhs,
+            const treatment_history::NamingState& rhs) { return lhs.labelEntry < rhs.labelEntry; });
+        return true;
+    } catch (...) { states.clear(); return false; }
+}
+
+// D1028 E5-only per-root flag verification: the captured TShape set of the
+// measured root shape must be exactly the live one, with the measured
+// Modified/Checked bits. Keyed by TShape identity (location-robust), never
+// mutating geometry.
+bool CheckMultiRootTransientFlags(const TopoDS_Shape& shape,
+    const std::vector<treatment_history::FlagState>& captured) noexcept {
+    try {
+        if (shape.IsNull()) return false;
+        TopTools_IndexedMapOfShape map;
+        TopExp::MapShapes(shape, map);
+        if (std::size_t(map.Extent()) != captured.size()) return false;
+        for (const auto& entry : captured) {
+            if (entry.tshape.IsNull()) return false;
+            bool found = false;
+            for (Standard_Integer index = 1; index <= map.Extent(); ++index) {
+                if (map(index).TShape().get() == entry.tshape.get()) { found = true; break; }
+            }
+            if (!found
+                || (entry.tshape->Modified() ? true : false) != entry.modified
+                || (entry.tshape->Checked() ? true : false) != entry.checked) return false;
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
+// Restores exactly the two measured bookkeeping bits on the measured TShapes,
+// Modified before Checked (setting Modified true clears Checked), then
+// verifies the complete flag state.
+bool RestoreMultiRootTransientFlags(const TopoDS_Shape& shape,
+    const std::vector<treatment_history::FlagState>& captured) noexcept {
+    try {
+        for (const auto& entry : captured) {
+            if (entry.tshape.IsNull()) return false;
+            entry.tshape->Modified(entry.modified ? Standard_True : Standard_False);
+            entry.tshape->Checked(entry.checked ? Standard_True : Standard_False);
+        }
+        return CheckMultiRootTransientFlags(shape, captured);
+    } catch (...) { return false; }
+}
+
+// D1028 E5-only multi-root arm: capture the union naming side over the
+// ordered removed free-label roots (relief owner + curve owners, each with
+// its SELECTED children), sorted across all roots so two captures compare
+// positionally as one set. Removed roots contribute no TNaming-bearing
+// labels, so the removed side is empty.
+bool CaptureMultiRootRemovalNaming(const std::vector<TDF_Label>& roots,
+    std::vector<treatment_history::NamingState>& states) noexcept {
+    states.clear();
+    try {
+        for (const auto& root : roots) {
+            std::vector<treatment_history::NamingState> sub;
+            if (!CaptureTreatmentSubtreeNaming(root, sub)) { states.clear(); return false; }
+            for (auto& state : sub) {
+                if (states.size() >= kTreatmentHistoryMaxNamingLabels) {
+                    states.clear(); return false;
+                }
+                states.push_back(std::move(state));
             }
         }
         std::sort(states.begin(), states.end(), [](const treatment_history::NamingState& lhs,
@@ -2336,7 +2406,7 @@ bool Core3DProveR2Record(const Handle(TDocStd_Document)& document,
                 treatment.value->base, false, budget, neverCancelled,
                 context, refusal)) return false;
         TopoDS_Shape replay;
-        if (!r2::ReplayTreatmentSuffix(treatment.value->base,
+        if (!r2::ReplayTreatmentSuffix(source.value->base,treatment.value->base,
                 treatment.value->definition, replay, budget, refusal,
                 context, neverCancelled)
             || !et_save::EquivalentReplayGeometry(treatment.current, replay,
@@ -2882,6 +2952,8 @@ bool ValidateAttachmentRigDocument(
 #include "FeaturePatternChildBinaryDriver.hxx"
 #include "FeaturePatternBaselineBinaryDriver.hxx"
 #include "LoftCorrespondencePersistence.hxx"
+#include "TextReliefPersistence.hxx"
+#include "TextReliefNativeOwner.hxx"
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <Precision.hxx>
@@ -6147,6 +6219,14 @@ public:
                             Handle(TDocStd_Document)::DownCast(theDocument), records)))
                     rejectTypes();
             }
+            if (myReaderStatus == PCDM_RS_OK && myTextReliefBudget) {
+                std::vector<core3d::text_relief::persistence::Record> records;
+                if (myTextReliefBudget->rejected
+                    || (myTextReliefBudget->records
+                        && !core3d::text_relief::persistence::ReadAll(
+                            Handle(TDocStd_Document)::DownCast(theDocument), records)))
+                    rejectTypes();
+            }
             if (myReaderStatus == PCDM_RS_OK && mySplineProfileBudget) {
                 std::vector<core3d::spline_profile::Record> records;
                 if (mySplineProfileBudget->rejected
@@ -6308,6 +6388,8 @@ public:
             aTable, theMessageDriver, myGeneralLoftBudget, RejectSafeBinaryRead);
         core3d::loft_correspondence::persistence::Register(
             aTable, theMessageDriver, myLoftCorrespondenceBudget, RejectSafeBinaryRead);
+        core3d::text_relief::persistence::Register(
+            aTable, theMessageDriver, myTextReliefBudget, RejectSafeBinaryRead);
         if (myAllowRetainedSolid) core3d::spline_profile::Register(
             aTable, theMessageDriver, mySplineProfileBudget, RejectSafeBinaryRead);
         if (myAllowRetainedSolid) core3d::retained_finishing::Register(
@@ -6557,6 +6639,7 @@ private:
         if (myBoundedCurveBudget) myBoundedCurveBudget->reset();
         if (myGeneralLoftBudget) myGeneralLoftBudget->reset();
         if (myLoftCorrespondenceBudget) myLoftCorrespondenceBudget->reset();
+        if (myTextReliefBudget) myTextReliefBudget->reset();
         myGeneralLoftRecords.clear();
         if (mySplineProfileBudget) mySplineProfileBudget->reset();
         if (myRetainedFinishingBudget) myRetainedFinishingBudget->reset();
@@ -6589,6 +6672,8 @@ private:
         std::make_shared<core3d::general_loft::persistence::ReadBudget>();
     std::shared_ptr<core3d::loft_correspondence::persistence::ReadBudget> myLoftCorrespondenceBudget=
         std::make_shared<core3d::loft_correspondence::persistence::ReadBudget>();
+    std::shared_ptr<core3d::text_relief::persistence::ReadBudget> myTextReliefBudget=
+        std::make_shared<core3d::text_relief::persistence::ReadBudget>();
     std::vector<core3d::general_loft::persistence::Record> myGeneralLoftRecords;
     std::shared_ptr<core3d::spline_profile::ReadBudget> mySplineProfileBudget=
         std::make_shared<core3d::spline_profile::ReadBudget>();
@@ -8441,7 +8526,7 @@ void Core3DDefineSafeBinXCAFFormat(
     // that already omitted triangulation still reads back without it and
     // keeps reporting Stale.
     Handle(BinDrivers_DocumentStorageDriver) ocafStorage =
-        new core3d::receipt::v3::StorageDriver<core3d::loft_correspondence::persistence::StorageDriver<core3d::painted_atlas_bake::persistence::StorageDriver<core3d::face_image::persistence::resources::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<core3d::retained_edge_treatment::StorageDriver<BinDrivers_DocumentStorageDriver>>>>>>>>>>>>>>();
+        new core3d::receipt::v3::StorageDriver<core3d::text_relief::persistence::StorageDriver<core3d::loft_correspondence::persistence::StorageDriver<core3d::painted_atlas_bake::persistence::StorageDriver<core3d::face_image::persistence::resources::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<core3d::retained_edge_treatment::StorageDriver<BinDrivers_DocumentStorageDriver>>>>>>>>>>>>>>>();
     ocafStorage->SetWithTriangles(application->MessageDriver(), Standard_True);
     application->DefineFormat(
         TCollection_AsciiString("BinOcaf"),
@@ -8450,7 +8535,7 @@ void Core3DDefineSafeBinXCAFFormat(
         new Core3DBoundedBinXCAFRetrievalDriver(),
         ocafStorage);
     Handle(BinDrivers_DocumentStorageDriver) xcafStorage =
-        new core3d::receipt::v3::StorageDriver<core3d::loft_correspondence::persistence::StorageDriver<core3d::painted_atlas_bake::persistence::StorageDriver<core3d::face_image::persistence::resources::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<core3d::retained_edge_treatment::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>>>>>>>>>>>();
+        new core3d::receipt::v3::StorageDriver<core3d::text_relief::persistence::StorageDriver<core3d::loft_correspondence::persistence::StorageDriver<core3d::painted_atlas_bake::persistence::StorageDriver<core3d::face_image::persistence::resources::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<core3d::retained_edge_treatment::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>>>>>>>>>>>>();
     xcafStorage->SetWithTriangles(application->MessageDriver(), Standard_True);
     application->DefineFormat(
         TCollection_AsciiString("BinXCAF"),
@@ -9028,6 +9113,9 @@ Standard_Boolean ValidateGeometryDocument(
                     >core3d::bounded_curve::MaximumDocumentAggregateBytes-curveBytes)return Standard_False;
             curveBytes+=record.value->definitionBytes.size();
         }
+        std::vector<core3d::text_relief::persistence::Record> textReliefs;
+        if (!core3d::text_relief::persistence::ReadAll(document, textReliefs))
+            return Standard_False;
         std::vector<core3d::composite_recipe::Record> composites;
         if(!core3d::composite_recipe::ReadAll(document,composites,retainedBytes,
             curveBytes,curves.size()))return Standard_False;
@@ -18096,7 +18184,41 @@ Standard_Boolean OcctDocument::CaptureExactFreeLabel(
         const auto& object = captured.visibility.object.object;
         const bool hasSweep = !object.sweep.label.IsNull();
         const bool hasLoft = !object.loft.label.IsNull();
-        if (hasSweep || hasLoft) {
+        bool hasTextRelief = false;
+        std::vector<core3d::text_relief::persistence::Record> textReliefs;
+        if (!core3d::text_relief::persistence::ReadAll(myOcafDoc, textReliefs))
+            return Standard_False;
+        for (const auto& textRelief : textReliefs)
+            if (textRelief.owner.IsEqual(label)) {
+                if (hasTextRelief) return Standard_False;
+                hasTextRelief = true;
+            }
+        bool hasBoundedCurve = false;
+        std::vector<core3d::bounded_curve::Record> curveRecords;
+        if (!core3d::bounded_curve::ReadAll(myOcafDoc, curveRecords))
+            return Standard_False;
+        for (const auto& curveRecord : curveRecords)
+            if (curveRecord.owner.IsEqual(label)) {
+                if (hasBoundedCurve) return Standard_False;
+                hasBoundedCurve = true;
+            }
+        if (hasTextRelief) {
+            // The SYTR child is durable owner metadata, not subshape styling.
+            // Its strict whole-document reader above already proved the child,
+            // current root binding and every referenced C1 record.
+            if (hasSweep || hasLoft || hasBoundedCurve || object.retained.value
+                || !CaptureWholeObjectScalarAppearance(
+                    myOcafDoc, label, captured.appearance))
+                return Standard_False;
+        } else if (hasBoundedCurve) {
+            // The C1 record child is durable owner metadata, not subshape
+            // styling; the strict whole-document reader above already proved
+            // the child and the current wire binding.
+            if (hasSweep || hasLoft || object.retained.value
+                || !CaptureWholeObjectScalarAppearance(
+                    myOcafDoc, label, captured.appearance))
+                return Standard_False;
+        } else if (hasSweep || hasLoft) {
             core3d::pattern_recipe_clone::Source source;
             if (hasSweep == hasLoft
                 || !core3d::pattern_recipe_clone::Capture(myOcafDoc, label, source)
@@ -18707,6 +18829,80 @@ Standard_Boolean OcctDocument::ReadFeaturePatternPair(
     } catch (...) { paired = {}; return Standard_False; }
 }
 
+namespace core3d::dependent_replay {
+namespace {
+class PreparedTextReliefRemoval final : public PreparedReplay {
+public:
+    PreparedTextReliefRemoval(OcctTextReliefCapture capture,
+        std::shared_ptr<native_opening::Context> context) noexcept
+        : capture_(std::move(capture)), context_(std::move(context)) {}
+    Family family() const noexcept override { return Family::TextReliefE5; }
+    UUID feature() const noexcept override {
+        return capture_.record.payload->value.feature;
+    }
+    UUID resultEntity() const noexcept override {
+        return capture_.record.payload->value.owner.entity;
+    }
+    std::size_t documentBytes() const noexcept override {
+        return capture_.record.payload->bytes.size();
+    }
+    std::size_t memoryBytes() const noexcept override {
+        std::size_t bytes = documentBytes();
+        for (const auto& curve : capture_.curves)
+            if (curve.record.value) bytes += curve.record.value->definitionBytes.size()
+                + curve.record.value->ownerBytes.size();
+        return bytes;
+    }
+    std::size_t topologyNodes() const noexcept override { return 0; }
+    bool openingCurrent(OcctDocument& owner) const noexcept override {
+        if (!context_ || context_->openingFence().document() != owner.Document()) return false;
+        OcctTextReliefCapture current;
+        return owner.ReadTextReliefExact(feature(), current)
+            && capture_.IsEqual(current);
+    }
+    bool stage(OcctDocument& owner,
+               native_opening::CommandLease& lease) const noexcept override {
+        return owner.StageTextReliefRemove(lease, capture_);
+    }
+    bool read(OcctDocument& owner) const noexcept override {
+        std::vector<text_relief::persistence::Record> records;
+        if (!text_relief::persistence::ReadAll(owner.Document(), records)) return false;
+        return std::none_of(records.begin(), records.end(), [&](const auto& record) {
+            return record.payload->value.feature == feature();
+        });
+    }
+private:
+    OcctTextReliefCapture capture_;
+    std::shared_ptr<native_opening::Context> context_;
+};
+} // namespace
+
+Refusal PrepareTextReliefE5Replay(OcctDocument& owner,
+    const Dependency& dependency, Mutation mutation, const Candidate&,
+    const std::shared_ptr<native_opening::Context>& context,
+    std::shared_ptr<const PreparedReplay>& output) noexcept {
+    output.reset();
+    try {
+        if (!context || dependency.family != Family::TextReliefE5
+            || !text_relief::owner::ValidateReplayDependency(
+                dependency.canonicalRecordBytes, dependency.feature,
+                dependency.resultEntity)) return Refusal::MissingRecipe;
+        OcctTextReliefCapture capture;
+        if (!owner.ReadTextReliefExact(dependency.feature, capture)
+            || !capture.record.label.IsEqual(dependency.recordLabel)
+            || capture.record.payload->bytes != dependency.canonicalRecordBytes)
+            return Refusal::StaleClosure;
+        // Raised host reattachment is intentionally supplied by S3-R2. S2
+        // admits the family and its real removal replay but refuses to replace
+        // with stale geometry or a guessed face.
+        if (mutation != Mutation::Remove) return Refusal::UnsupportedDescendant;
+        output = std::make_shared<PreparedTextReliefRemoval>(
+            std::move(capture), context);
+        return Refusal::None;
+    } catch (...) { output.reset(); return Refusal::MissingRecipe; }
+}
+} // namespace core3d::dependent_replay
+
 namespace {
 using R179DependentUUID = core3d::dependent_replay::UUID;
 using R179Dependent = core3d::dependent_replay::Dependency;
@@ -18744,9 +18940,11 @@ bool R179DiscoverDependentClosure(
         std::vector<core3d::pattern::Record> d2;
         std::vector<core3d::path_array::Record> d3;
         std::vector<core3d::feature_pattern::Record> d4;
+        std::vector<core3d::text_relief::persistence::Record> e5;
         if (!core3d::pattern::ReadAll(document, d2)
             || !core3d::path_array::ReadAll(document, d3)
-            || !core3d::feature_pattern::ReadAll(document, d4)) return false;
+            || !core3d::feature_pattern::ReadAll(document, d4)
+            || !core3d::text_relief::persistence::ReadAll(document, e5)) return false;
 
         std::deque<R179DependentFrontier> frontier;
         frontier.push_back({target, {target}});
@@ -18826,6 +19024,21 @@ bool R179DiscoverDependentClosure(
                 for (const auto& member : definition.distribution.members)
                     value.memberIdentities.push_back(member.identity);
                 if (!append(std::move(value), current, source)) return false;
+            }
+            for (const auto& record : e5) {
+                const auto& definition = record.payload->value;
+                const bool host = definition.host.entity == current.entity;
+                const bool self = definition.owner.entity == current.entity;
+                if (!host && !self) continue;
+                R179Dependent value; value.family = R179DependentFamily::TextReliefE5;
+                value.feature = definition.feature; value.inputEntity = current.entity;
+                value.resultEntity = definition.owner.entity; value.recordLabel = record.label;
+                value.canonicalRecordBytes = record.payload->bytes;
+                for (const auto& component : definition.components)
+                    value.memberIdentities.push_back(component.identifier);
+                for (const auto& curve : definition.curves)
+                    value.memberIdentities.push_back(curve.feature);
+                if (!append(std::move(value), current, host)) return false;
             }
         }
         authorized.assign(authorizedSet.begin(), authorizedSet.end());
@@ -19862,6 +20075,278 @@ Standard_Boolean OcctDocument::StageBoundedCurveReplacement(
             && capture.record.current.IsEqual(
                 XCAFDoc_ShapeTool::GetShape(opening.record.owner));
     } catch (...) { capture = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctTextReliefCapture::IsEqual(
+    const OcctTextReliefCapture& other) const noexcept {
+    try {
+        if (documentData.IsNull() || documentData != other.documentData
+            || documentIdentifier != other.documentIdentifier
+            || !ownerReceipt.IsEqual(other.ownerReceipt)
+            || record.label.IsNull() || other.record.label.IsNull()
+            || !record.label.IsEqual(other.record.label)
+            || !record.owner.IsEqual(other.record.owner)
+            || !record.payload || !other.record.payload
+            || record.payload->bytes != other.record.payload->bytes
+            || !record.shape.IsEqual(other.record.shape)
+            || curves.size() != other.curves.size()) return Standard_False;
+        for (std::size_t index = 0; index < curves.size(); ++index)
+            if (!curves[index].IsEqual(other.curves[index])) return Standard_False;
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+namespace {
+bool CompleteTextReliefCapture(
+    const Handle(TDocStd_Document)& document, const std::string& documentID,
+    const core3d::text_relief::persistence::Record& source,
+    const OcctDocument& owner, OcctTextReliefCapture& output) noexcept {
+    output = {};
+    try {
+        if (document.IsNull() || document->GetData().IsNull() || documentID.empty()
+            || documentID != owner.DocumentIdentifier() || !source.payload
+            || source.owner.IsNull() || source.label.IsNull()) {
+#if DEBUG
+            NSLog(@"E5_COMPLETE refused=input");
+#endif
+            return false;
+        }
+        std::vector<core3d::text_relief::persistence::Record> records;
+        if (!core3d::text_relief::persistence::ReadAll(document, records)) {
+#if DEBUG
+            NSLog(@"E5_COMPLETE refused=read-all");
+#endif
+            return false;
+        }
+        const core3d::text_relief::persistence::Record* exact = nullptr;
+        for (const auto& candidate : records)
+            if (candidate.payload->value.feature == source.payload->value.feature) {
+                if (exact) return false; exact = &candidate;
+            }
+        if (!exact || !exact->owner.IsEqual(source.owner)
+            || !exact->label.IsEqual(source.label)) {
+#if DEBUG
+            NSLog(@"E5_COMPLETE refused=exact");
+#endif
+            return false;
+        }
+        OcctExactLabelReceipt receipt;
+        if (!owner.CaptureExactFreeLabel(exact->owner, receipt)) {
+#if DEBUG
+            NSLog(@"E5_COMPLETE refused=root-receipt");
+#endif
+            return false;
+        }
+        std::vector<core3d::bounded_curve::Record> allCurves;
+        if (!core3d::bounded_curve::ReadAll(document, allCurves)) {
+#if DEBUG
+            NSLog(@"E5_COMPLETE refused=curve-read-all");
+#endif
+            return false;
+        }
+        std::vector<OcctBoundedCurveCapture> curves;
+        curves.reserve(exact->payload->value.curves.size());
+        for (const auto& reference : exact->payload->value.curves) {
+            const core3d::bounded_curve::Record* match = nullptr;
+            for (const auto& curve : allCurves)
+                if (curve.value->persisted.value.feature == reference.feature) {
+                    if (match) return false; match = &curve;
+                }
+            core3d::text_relief::Digest digest{};
+            OcctBoundedCurveCapture captured;
+            if (!match || !core3d::bounded_curve::Hash(match->value->definitionBytes,
+                    core3d::bounded_curve::MaximumDefinitionBytes, digest)
+                || digest != reference.digest
+                || !CompleteBoundedCurveCapture(document, documentID, *match,
+                                                owner, captured)) {
+#if DEBUG
+                NSLog(@"E5_COMPLETE refused=curve index=%zu match=%d", curves.size(), match != nullptr);
+#endif
+                return false;
+            }
+            curves.push_back(std::move(captured));
+        }
+        OcctTextReliefCapture result;
+        result.documentData = document->GetData(); result.documentIdentifier = documentID;
+        result.ownerReceipt = std::move(receipt); result.record = *exact;
+        result.curves = std::move(curves); output = std::move(result); return true;
+    } catch (...) { output = {}; return false; }
+}
+} // namespace
+
+Standard_Boolean OcctDocument::ReadTextReliefExact(
+    const core3d::text_relief::UUID& feature,
+    OcctTextReliefCapture& capture) const noexcept {
+    capture = {};
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || !core3d::bounded_curve::Nonzero(feature)) return Standard_False;
+        std::vector<core3d::text_relief::persistence::Record> records;
+        if (!core3d::text_relief::persistence::ReadAll(myOcafDoc, records))
+            return Standard_False;
+        const core3d::text_relief::persistence::Record* match = nullptr;
+        for (const auto& record : records)
+            if (record.payload->value.feature == feature) {
+                if (match) return Standard_False; match = &record;
+            }
+        return match && CompleteTextReliefCapture(myOcafDoc, DocumentIdentifier(),
+                                                  *match, *this, capture);
+    } catch (...) { capture = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::CaptureTextReliefExact(
+    const std::string& entityIdentifier,
+    const core3d::native_opening::Context& context,
+    OcctTextReliefCapture& capture) const noexcept {
+    capture = {};
+    try {
+        const auto& fence = context.openingFence();
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || !core3d::profile::IsIdentifier(entityIdentifier)
+            || fence.document() != myOcafDoc || fence.data() != myOcafDoc->GetData())
+            return Standard_False;
+        std::vector<core3d::text_relief::persistence::Record> records;
+        if (!core3d::text_relief::persistence::ReadAll(myOcafDoc, records))
+            return Standard_False;
+        const core3d::text_relief::persistence::Record* match = nullptr;
+        for (const auto& record : records)
+            if (EntityIdentifierForLabel(record.owner) == entityIdentifier) {
+                if (match) return Standard_False; match = &record;
+            }
+        return match && CompleteTextReliefCapture(myOcafDoc, DocumentIdentifier(),
+                                                  *match, *this, capture);
+    } catch (...) { capture = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::StageTextReliefCreate(
+    core3d::native_opening::CommandLease& lease,
+    const OcctIssuedLabelIdentity& identity, const OcctPreparedLabelClone& clone,
+    const core3d::text_relief::AuthoredRecord& record,
+    OcctTextReliefCapture& capture) noexcept {
+    capture = {};
+    try {
+        if (core3d::retained_solid::UUIDText(record.owner.entity)
+                != identity.EntityIdentifier()
+            || core3d::retained_solid::UUIDText(record.owner.definition)
+                != identity.DefinitionIdentifier()
+            || record.rootOutput != record.owner.entity) return Standard_False;
+        OcctExactLabelReceipt root;
+        if (!StageCreateExactFreeLabel(lease, identity, clone, root)) {
+#if DEBUG
+            NSLog(@"E5_STAGE_CREATE refused=exact-root");
+#endif
+            return Standard_False;
+        }
+        const TDF_Label owner = root.visibility.object.object.label;
+        const TopoDS_Shape ownedShape = XCAFDoc_ShapeTool::GetShape(owner);
+        const bool installed = core3d::text_relief::persistence::Install(
+            owner, record, ownedShape);
+        const bool read = installed && ReadTextReliefExact(record.feature, capture);
+        const bool ownerMatches = read && capture.record.owner.IsEqual(owner);
+#if DEBUG
+        if (!installed || !read || !ownerMatches)
+            NSLog(@"E5_STAGE_CREATE refused=post-root installed=%d read=%d owner=%d",
+                  installed, read, ownerMatches);
+#endif
+        if (!installed || !read || !ownerMatches) {
+            capture = {}; return Standard_False;
+        }
+        return Standard_True;
+    } catch (...) { capture = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::StageTextReliefReplacement(
+    core3d::native_opening::CommandLease& lease,
+    const OcctTextReliefCapture& opening, const OcctPreparedLabelClone& clone,
+    const core3d::text_relief::AuthoredRecord& record,
+    OcctTextReliefCapture& capture) noexcept {
+    capture = {};
+    try {
+        OcctTextReliefCapture current;
+        if (!ReadTextReliefExact(opening.record.payload->value.feature, current)
+            || !opening.IsEqual(current)
+            || record.owner != opening.record.payload->value.owner
+            || record.feature != opening.record.payload->value.feature
+            || record.rootOutput != opening.record.payload->value.rootOutput
+            || record.revision != opening.record.payload->value.revision + 1)
+            return Standard_False;
+        // E5 routes its own retained closure inside this one lease: the record
+        // is re-installed on the same owner label and the caller stages the
+        // surviving/new/removed curve set itself, so the owner entity is
+        // authorized for exactly this replacement and nothing else.
+        const std::string selfEntity =
+            opening.ownerReceipt.visibility.object.object.entityIdentifier;
+        struct AuthorizationScope {
+            std::unordered_set<std::string>& box;
+            std::string entity;
+            bool inserted = false;
+            ~AuthorizationScope() { if (inserted) box.erase(entity); }
+        } authorization{myDependentReplayAuthorization, selfEntity, false};
+        if (authorization.box.count(authorization.entity) == 0) {
+            authorization.box.insert(authorization.entity);
+            authorization.inserted = true;
+        }
+        OcctExactLabelReceipt root;
+        const auto stageRecord = [&](const TDF_Label& owner) -> Standard_Boolean {
+            return core3d::text_relief::persistence::Replace(
+                owner, record, XCAFDoc_ShapeTool::GetShape(owner))
+                ? Standard_True : Standard_False;
+        };
+        return StageReplaceExactFreeLabel(lease, opening.ownerReceipt, clone,
+                                          root, stageRecord)
+            && ReadTextReliefExact(record.feature, capture)
+            && capture.record.owner.IsEqual(opening.record.owner);
+    } catch (...) { capture = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::StageTextReliefRemove(
+    core3d::native_opening::CommandLease& lease,
+    const OcctTextReliefCapture& opening) noexcept {
+    try {
+        OcctTextReliefCapture current;
+        if (!opening.record.payload
+            || !ReadTextReliefExact(opening.record.payload->value.feature, current)
+            || !opening.IsEqual(current)) return Standard_False;
+        // The owner routes its own closure in this lease: the record label
+        // and every curve label leave the document together, so the owner
+        // entity is authorized for exactly this removal.
+        const std::string selfEntity =
+            current.ownerReceipt.visibility.object.object.entityIdentifier;
+        struct AuthorizationScope {
+            std::unordered_set<std::string>& box;
+            std::string entity;
+            bool inserted = false;
+            ~AuthorizationScope() { if (inserted) box.erase(entity); }
+        } authorization{myDependentReplayAuthorization, selfEntity, false};
+        if (authorization.box.count(authorization.entity) == 0) {
+            authorization.box.insert(authorization.entity);
+            authorization.inserted = true;
+        }
+        // Retire the reference-bearing root first. Every subsequent exact
+        // curve receipt must still pass the complete SYTR/C1 reader.
+        if (!StageRemoveExactFreeLabel(lease, current.ownerReceipt))
+            return Standard_False;
+        for (const auto& curve : current.curves)
+            if (!StageRemoveExactFreeLabel(lease, curve.ownerReceipt)) return Standard_False;
+        std::vector<core3d::text_relief::persistence::Record> remainingOwners;
+        std::vector<core3d::bounded_curve::Record> remainingCurves;
+        if (!core3d::text_relief::persistence::ReadAll(myOcafDoc, remainingOwners)
+            || !core3d::bounded_curve::ReadAll(myOcafDoc, remainingCurves))
+            return Standard_False;
+        for (const auto& record : remainingOwners) {
+            OcctTextReliefCapture complete;
+            if (!CompleteTextReliefCapture(myOcafDoc, DocumentIdentifier(),
+                                           record, *this, complete))
+                return Standard_False;
+        }
+        for (const auto& record : remainingCurves) {
+            OcctBoundedCurveCapture complete;
+            if (!CompleteBoundedCurveCapture(myOcafDoc, DocumentIdentifier(),
+                                             record, *this, complete))
+                return Standard_False;
+        }
+        return Standard_True;
+    } catch (...) { return Standard_False; }
 }
 
 Standard_Boolean OcctGeneralLoftCapture::IsEqual(
@@ -22247,7 +22732,14 @@ Standard_Boolean OcctDocument::FinalizeTreatmentHistoryCompanion() noexcept {
             if (attributeDelta.IsNull()) return Standard_False;
             TCollection_AsciiString entry;
             TDF_Tool::Entry(attributeDelta->Label(), entry);
-            if (pending.ownerEntry == entry.ToCString()) { touchesOwner = true; break; }
+            if (pending.multiRootRemoval) {
+                // D1028: the removal delta verifiably touches at least one of
+                // the ordered removed roots.
+                for (const auto& rootEntry : pending.removalRootEntries) {
+                    if (rootEntry == entry.ToCString()) { touchesOwner = true; break; }
+                }
+                if (touchesOwner) break;
+            } else if (pending.ownerEntry == entry.ToCString()) { touchesOwner = true; break; }
         }
         if (!touchesOwner) return Standard_False;
         pending.delta = committed;
@@ -22275,6 +22767,65 @@ Standard_Boolean OcctDocument::SettleTreatmentHistoryCompanionOnPrior() noexcept
         // builder advanced, are then restored to the measured values and the
         // complete state is verified. Only then is the uncommitted companion
         // discarded; never repair, never fabricate.
+        if (companion.multiRootRemoval) {
+            // D1028 E5-only settle: the captured union side spans the ordered
+            // removal roots; TDF abort restores the semantic state, the
+            // naming-version scalars the inverse-delta builder advanced are
+            // restored per root, and the complete state is verified before
+            // the uncommitted companion is discharged.
+            std::vector<core3d::treatment_history::NamingState> rootsNow;
+            if (companion.before.empty()
+                || companion.removalShapesBefore.size() != companion.removalRoots.size()
+                || companion.removalFlagsBefore.size() != companion.removalRoots.size()
+                || !CaptureMultiRootRemovalNaming(companion.removalRoots, rootsNow)
+                || !SameTreatmentNamingSet(companion.before, rootsNow, false)) {
+#if DEBUG
+                std::fprintf(stderr, "E5MR_SETTLE_FAIL gate=naming before=%zu now=%zu\n",
+                             companion.before.size(), rootsNow.size());
+#endif
+                return Standard_False;
+            }
+            for (std::size_t index = 0; index < companion.removalRoots.size(); ++index) {
+                if (!XCAFDoc_ShapeTool::GetShape(companion.removalRoots[index])
+                        .IsEqual(companion.removalShapesBefore[index])) {
+#if DEBUG
+                    std::fprintf(stderr, "E5MR_SETTLE_FAIL gate=shape index=%zu\n", index);
+#endif
+                    return Standard_False;
+                }
+                // The forget/restore cycle of a removal abort dirties the
+                // runtime bookkeeping bits on the restored TShapes; restore
+                // the measured bits (Modified before Checked) and verify the
+                // complete flag state, exactly the Undo-side treatment.
+                if (!RestoreMultiRootTransientFlags(companion.removalShapesBefore[index],
+                        companion.removalFlagsBefore[index])) {
+#if DEBUG
+                    std::fprintf(stderr, "E5MR_SETTLE_FAIL gate=flags index=%zu\n", index);
+#endif
+                    return Standard_False;
+                }
+            }
+            for (const auto& state : companion.before) {
+                Handle(TNaming_NamedShape) naming;
+                if (!state.label.FindAttribute(TNaming_NamedShape::GetID(), naming) || naming.IsNull()) {
+#if DEBUG
+                    std::fprintf(stderr, "E5MR_SETTLE_FAIL gate=namingattr\n");
+#endif
+                    return Standard_False;
+                }
+                naming->SetVersion(state.version);
+            }
+            std::vector<core3d::treatment_history::NamingState> verifiedRoots;
+            if (!CaptureMultiRootRemovalNaming(companion.removalRoots, verifiedRoots)
+                || !SameTreatmentNamingSet(companion.before, verifiedRoots, true)) {
+#if DEBUG
+                std::fprintf(stderr, "E5MR_SETTLE_FAIL gate=verify\n");
+#endif
+                return Standard_False;
+            }
+            myPendingTreatmentCompanion.reset();
+            return Standard_True;
+        }
         std::vector<core3d::treatment_history::NamingState> now;
         std::vector<std::uint8_t> sourceNow, syetBytesNow;
         bool syetNow = false;
@@ -22302,6 +22853,91 @@ Standard_Boolean OcctDocument::SettleTreatmentHistoryCompanionOnPrior() noexcept
         myPendingTreatmentCompanion.reset();
         return Standard_True;
     } catch (...) { return Standard_False; }
+}
+
+// D1028 E5 multi-root removal companion registration: the measured before
+// side is captured over the exact ordered removed free-label root list (the
+// re-read live relief owner, then every curve owner in capture order), the
+// same NamingState/flag capture the single-root path does, iterated per
+// root. A pending companion or a stale capture refuses with nothing parked.
+Standard_Boolean OcctDocument::CaptureTextReliefRemovalCompanionBefore(
+    const OcctTextReliefCapture& opening) noexcept {
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || myPendingTreatmentCompanion || !opening.record.payload)
+            return Standard_False;
+        OcctTextReliefCapture current;
+        if (!ReadTextReliefExact(opening.record.payload->value.feature, current)
+            || !opening.IsEqual(current)) return Standard_False;
+        std::vector<TDF_Label> roots;
+        roots.reserve(current.curves.size() + 1);
+        roots.push_back(current.ownerReceipt.visibility.object.object.label);
+        for (const auto& curve : current.curves)
+            roots.push_back(curve.ownerReceipt.visibility.object.object.label);
+        auto companion = std::make_unique<core3d::treatment_history::Companion>();
+        companion->multiRootRemoval = true;
+        companion->data = myOcafDoc->GetData();
+        companion->ownerLabel = roots.front();
+        TCollection_AsciiString ownerEntry;
+        TDF_Tool::Entry(roots.front(), ownerEntry);
+        companion->ownerEntry = ownerEntry.ToCString();
+        companion->undoDepthBefore = myOcafDoc->GetAvailableUndos();
+        for (const auto& root : roots) {
+            if (root.IsNull() || root.Data() != myOcafDoc->GetData())
+                return Standard_False;
+            TCollection_AsciiString entry;
+            TDF_Tool::Entry(root, entry);
+            companion->removalRootEntries.push_back(entry.ToCString());
+            const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(root);
+            if (shape.IsNull()) return Standard_False;
+            companion->removalShapesBefore.push_back(shape);
+            std::vector<core3d::treatment_history::FlagState> flags;
+            if (!CaptureTreatmentTransientFlags(shape, flags)) return Standard_False;
+            companion->removalFlagsBefore.push_back(std::move(flags));
+        }
+        // Unique roots only; a duplicate would double-count the union side.
+        std::vector<std::string> uniqueEntries = companion->removalRootEntries;
+        std::sort(uniqueEntries.begin(), uniqueEntries.end());
+        if (std::adjacent_find(uniqueEntries.begin(), uniqueEntries.end())
+                != uniqueEntries.end())
+            return Standard_False;
+        companion->removalRoots = roots;
+        if (!CaptureMultiRootRemovalNaming(roots, companion->before)
+            || companion->before.empty())
+            return Standard_False;
+        myPendingTreatmentCompanion = std::move(companion);
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+// D1028: the measured removed side, captured after coherent staging while
+// the command is still open. The staging gates have already proven the
+// absence; the capture records exactly what the redo direction must
+// reproduce.
+Standard_Boolean OcctDocument::CaptureTextReliefRemovalCompanionAfter() noexcept {
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || !myPendingTreatmentCompanion
+            || !myPendingTreatmentCompanion->multiRootRemoval
+            || myPendingTreatmentCompanion->afterCaptured)
+            return Standard_False;
+        auto& companion = *myPendingTreatmentCompanion;
+        if (!CaptureMultiRootRemovalNaming(companion.removalRoots, companion.after))
+            return Standard_False;
+        companion.removalShapesAfter.clear();
+        for (const auto& root : companion.removalRoots)
+            companion.removalShapesAfter.push_back(XCAFDoc_ShapeTool::GetShape(root));
+        companion.afterCaptured = true;
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::FinalizeTextReliefRemovalHistory() noexcept {
+    return FinalizeTreatmentHistoryCompanion();
+}
+
+Standard_Boolean OcctDocument::SettleTextReliefRemovalHistoryOnPrior() noexcept {
+    return SettleTreatmentHistoryCompanionOnPrior();
 }
 
 Standard_Boolean OcctDocument::RetainAuthoredBooleanRecovery(
@@ -22585,6 +23221,57 @@ Standard_Boolean OcctDocument::ApplyTreatmentHistoryAfterHistoryChange(
         }
         if (!companion || companion->data.IsNull()
             || companion->data.get() != myOcafDoc->GetData().get()) return Standard_False;
+        if (companion->multiRootRemoval) {
+            // D1028 E5-only engage: the side spans the ordered removal roots.
+            // Real OCAF history has already been applied; validate the
+            // captured semantic state per root, restore the captured
+            // naming-version scalars (and, on Undo, the measured transient
+            // bookkeeping) and verify the complete state before re-binding
+            // the companion to the resulting inverse delta below.
+            const std::vector<core3d::treatment_history::NamingState>& side =
+                undoDirection ? companion->before : companion->after;
+            const std::vector<TopoDS_Shape>& sideShapes =
+                undoDirection ? companion->removalShapesBefore : companion->removalShapesAfter;
+            std::vector<core3d::treatment_history::NamingState> rootsNow;
+            if (sideShapes.size() != companion->removalRoots.size()
+                || (undoDirection
+                    && companion->removalFlagsBefore.size() != companion->removalRoots.size())
+                || !CaptureMultiRootRemovalNaming(companion->removalRoots, rootsNow)
+                || !SameTreatmentNamingSet(side, rootsNow, false)) {
+#if DEBUG
+                std::fprintf(stderr, "E5MR_APPLY_FAIL gate=naming undo=%d side=%zu now=%zu\n",
+                             int(undoDirection), side.size(), rootsNow.size());
+#endif
+                return Standard_False;
+            }
+            for (std::size_t index = 0; index < companion->removalRoots.size(); ++index) {
+                if (!XCAFDoc_ShapeTool::GetShape(companion->removalRoots[index])
+                        .IsEqual(sideShapes[index])) {
+#if DEBUG
+                    std::fprintf(stderr, "E5MR_APPLY_FAIL gate=shape undo=%d index=%zu\n",
+                                 int(undoDirection), index);
+#endif
+                    return Standard_False;
+                }
+            }
+            for (const auto& state : side) {
+                Handle(TNaming_NamedShape) naming;
+                if (!state.label.FindAttribute(TNaming_NamedShape::GetID(), naming) || naming.IsNull())
+                    return Standard_False;
+                naming->SetVersion(state.version);
+            }
+            if (undoDirection) {
+                for (std::size_t index = 0; index < companion->removalRoots.size(); ++index) {
+                    if (!RestoreMultiRootTransientFlags(sideShapes[index],
+                            companion->removalFlagsBefore[index]))
+                        return Standard_False;
+                }
+            }
+            std::vector<core3d::treatment_history::NamingState> verifiedRoots;
+            if (!CaptureMultiRootRemovalNaming(companion->removalRoots, verifiedRoots)
+                || !SameTreatmentNamingSet(side, verifiedRoots, true))
+                return Standard_False;
+        } else {
         const std::vector<core3d::treatment_history::NamingState>& side =
             undoDirection ? companion->before : companion->after;
         const TopoDS_Shape& sideShape =
@@ -22619,6 +23306,7 @@ Standard_Boolean OcctDocument::ApplyTreatmentHistoryAfterHistoryChange(
         std::vector<core3d::treatment_history::NamingState> verified;
         if (!CaptureTreatmentSubtreeNaming(companion->ownerLabel, verified)
             || !SameTreatmentNamingSet(side, verified, true)) return Standard_False;
+        }
         // Associate the companion with the actual resulting inverse delta:
         // TDF_Data::Undo commits a fresh inverse delta during history
         // application; TDocStd_Document prepends it to the redo list on Undo
@@ -25439,6 +26127,165 @@ bool PartBooleanOwner::abortRestored(
         && SameGraphCurrentness(reminted, prepared.capture->graphCurrentness);
 }
 
+// F4-S3 (D1024, option 2): ABR1 in-command participant. Runs inside apply()'s
+// single open command after the staged readback, before the one CommitCommand.
+bool PartBooleanOwner::participateAttachmentRig(
+    const PreparedBooleanDocumentChange& prepared) noexcept {
+    namespace rig = core3d::attachment_rig;
+    try {
+        rig::StoredRecord before;
+        // The absent/corrupt/present distinction is unchanged: only a
+        // canonical present record engages the participant. With no record the
+        // behaviour is byte-for-byte the live apply(); attachments never block
+        // the closed A1 tool.
+        if (!ReadAttachmentRigStoredRecord(document_, before)
+            || before.state != rig::StoredReadState::Present)
+            return true;
+
+        // Mint the typed, read-only, non-serialisable correspondence receipt
+        // from the prepared change: exact input owner tuples (document,
+        // entity, definition), recipe node/source feature, result tuple,
+        // retained original lineage and the closed classification.
+        auto receipt = std::shared_ptr<SourceCorrespondenceReceipt>(
+            new SourceCorrespondenceReceipt());
+        receipt->resultOwner_ = prepared.capture->snapshot.owner;
+        receipt->resultNode_ = prepared.capture->snapshot.outputNode;
+        if (prepared.shell || prepared.capture->snapshot.sources.size() != 2
+            || prepared.capture->analytic.inputs.size() != 2
+            || prepared.analytic.inputs.size() != 2) {
+            receipt->classification_ = CorrespondenceClassification::UnsupportedFamily;
+        } else {
+            std::set<retained_recipe::OwnerKey, bool(*)(
+                const retained_recipe::OwnerKey&, const retained_recipe::OwnerKey&)>
+                inputOwners([](const retained_recipe::OwnerKey& left,
+                               const retained_recipe::OwnerKey& right) {
+                    if (left.document != right.document)
+                        return left.document < right.document;
+                    if (left.entity != right.entity) return left.entity < right.entity;
+                    return left.definition < right.definition;
+                });
+            std::set<retained_recipe::UUID> nodes, features;
+            bool exact = true;
+            for (std::size_t index = 0; index < 2; ++index) {
+                const auto& source = prepared.capture->snapshot.sources[index];
+                const auto& originalAnalytic = prepared.capture->analytic.inputs[index];
+                const auto& effectiveAnalytic = prepared.analytic.inputs[index];
+                OriginalAnalyticProjection original;
+                original.dimensions = originalAnalytic.dimensions;
+                original.translation = originalAnalytic.translation;
+                original.rotationXYZW = originalAnalytic.rotationXYZW;
+                EffectiveAnalyticGeometry effective;
+                effective.dimensions = effectiveAnalytic.dimensions;
+                effective.translation = effectiveAnalytic.translation;
+                effective.rotationXYZW = effectiveAnalytic.rotationXYZW;
+                retained_recipe::OwnerKey inputOwner{source.original.document,
+                    source.original.entity, source.original.definition};
+                exact = exact
+                    && correspondence::EffectiveMatchesOriginalAtCreation(
+                        original, effective)
+                    && source.locator.node == originalAnalytic.rootNode
+                    && source.locator.sourceFeature
+                        == originalAnalytic.originalSourceFeature
+                    && inputOwners.insert(inputOwner).second
+                    && nodes.insert(source.locator.node).second
+                    && features.insert(source.locator.sourceFeature).second;
+                receipt->inputs_.push_back({inputOwner, source.locator.node,
+                    source.locator.sourceFeature, source.original});
+            }
+            receipt->classification_ = exact
+                ? CorrespondenceClassification::OneToOne
+                : inputOwners.size() < 2
+                    ? CorrespondenceClassification::ManyToOne
+                    : CorrespondenceClassification::Conflicting;
+        }
+
+        rig::Metadata stored;
+        std::string refusal;
+        if (!rig::DecodeABR1(before.bytes, stored, refusal)) return false;
+        const auto ownerBytes = [](const retained_recipe::OwnerKey& owner) {
+            std::string value(reinterpret_cast<const char*>(owner.document.data()),
+                              owner.document.size());
+            value.append(reinterpret_cast<const char*>(owner.entity.data()),
+                         owner.entity.size());
+            value.append(reinterpret_cast<const char*>(owner.definition.data()),
+                         owner.definition.size());
+            return value;
+        };
+        const std::string resultTuple = ownerBytes(receipt->resultOwner());
+        bool concerns = false;
+        for (const auto& attachment : stored.attachments) {
+            const std::string& owner = attachment.rigid
+                ? attachment.rigid->owner : attachment.surface->owner;
+            if (owner == resultTuple) { concerns = true; break; }
+            for (const auto& input : receipt->inputs()) {
+                if (owner == ownerBytes(input.inputOwner)) { concerns = true; break; }
+            }
+            if (concerns) break;
+        }
+        // A record that does not reference this Boolean is not its business.
+        if (!concerns) return true;
+        // Every non-one-to-one class: the Boolean still commits unchanged and
+        // the original ABR1 bytes stay byte-identical; the F4 opening reports
+        // NeedsReview with the receipt's classification on its next
+        // observation. Nothing is erased and nothing is marked current.
+        if (receipt->classification() != CorrespondenceClassification::OneToOne)
+            return true;
+
+        // One-to-one: derive the remapped ABR1. Attachment and joint IDs are
+        // unchanged and the original lineage is retained; only the owner tuple
+        // of an attachment bound to a consumed input is rewritten to the
+        // result owner tuple. A surface binding keeps the exact persisted B2
+        // receipt, never an ordinal or a nearest face.
+        rig::Metadata remapped = stored;
+        for (auto& attachment : remapped.attachments) {
+            std::string& owner = attachment.rigid
+                ? attachment.rigid->owner : attachment.surface->owner;
+            if (owner == resultTuple) continue;
+            const auto match = std::find_if(receipt->inputs().begin(),
+                receipt->inputs().end(), [&](const SourceCorrespondence& value) {
+                    return owner == ownerBytes(value.inputOwner);
+                });
+            if (match != receipt->inputs().end()) owner = resultTuple;
+        }
+        std::vector<std::uint8_t> candidate;
+        if (!rig::EncodeABR1(remapped, candidate, refusal)
+            || candidate.empty() || candidate.size() > rig::kMaxStoredABR1Bytes)
+            return false;
+        // The attachment and joint identity domains are exactly preserved.
+        {
+            rig::Metadata verify;
+            if (!rig::DecodeABR1(candidate, verify, refusal)) return false;
+            std::set<std::string> beforeAttachments, afterAttachments;
+            std::set<std::string> beforeJoints, afterJoints;
+            for (const auto& value : stored.attachments)
+                beforeAttachments.insert(value.attachmentID);
+            for (const auto& value : verify.attachments)
+                afterAttachments.insert(value.attachmentID);
+            for (const auto& value : stored.joints)
+                beforeJoints.insert(value.jointID);
+            for (const auto& value : verify.joints)
+                afterJoints.insert(value.jointID);
+            if (beforeAttachments != afterAttachments || beforeJoints != afterJoints)
+                return false;
+        }
+        // Stage under the same open command through the internal staging the
+        // S2 commit path uses, then independently read the staged bytes back
+        // before the commit. Any failure aborts the whole command: zero delta,
+        // document, history, original ABR1, IDs and frames intact.
+        const Handle(TDataStd_ByteArray) attribute =
+            TDataStd_ByteArray::Set(document_->Main(),
+                rig::AttachmentRigAttributeID(), 0,
+                Standard_Integer(candidate.size()) - 1, Standard_False);
+        if (attribute.IsNull()) return false;
+        for (std::size_t index = 0; index < candidate.size(); ++index)
+            attribute->SetValue(Standard_Integer(index), candidate[index]);
+        rig::StoredRecord staged;
+        return ReadAttachmentRigStoredRecord(document_, staged)
+            && staged.state == rig::StoredReadState::Present
+            && staged.bytes == candidate;
+    } catch (...) { return false; }
+}
+
 Receipt PartBooleanOwner::apply(
     const std::shared_ptr<const PreparedBooleanDocumentChange>& prepared) noexcept {
     if (!prepared || !prepared->capture || prepared->capture->ownerNonce != nonce_
@@ -25491,6 +26338,10 @@ Receipt PartBooleanOwner::apply(
                 throw std::runtime_error("graph-currentness-readback");
         }
         if (prepared->fault == FaultPoint::F7BeforeClose) throw std::runtime_error("F7");
+        // F4-S3 (D1024): the ABR1 participant rides inside this same command;
+        // a participant failure aborts the whole command with zero delta.
+        if (!participateAttachmentRig(*prepared))
+            throw std::runtime_error("attachment-rig-participant");
         const Standard_Boolean added = document_->CommitCommand();
         recoveryBaseline_ = prepared->capture->baseline;
         recoveryExpected_ = staged;

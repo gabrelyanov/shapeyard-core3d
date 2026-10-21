@@ -2686,6 +2686,14 @@ namespace core3d {
     }
 
     Standard_Boolean
+    ShapeInteractor::applyRetainedSelectionModeToPresentation(
+        const Handle(AIS_InteractiveObject)& thePresentation) noexcept
+    {
+        return trySetInteractiveObjectSelectionMode(
+            thePresentation, _previousSelectionMode, _topAbsSelMode);
+    }
+
+    Standard_Boolean
     ShapeInteractor::selectionModeAuthorityIsExactIgnoring(
         const std::vector<Handle(AIS_Shape)>& theSuspendedPresentations)
         const noexcept

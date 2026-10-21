@@ -58,6 +58,9 @@ typedef NS_ENUM(NSInteger, Core3DTextReliefAlignment) {
 //! Reserved S2 apply outcome. S1 always reports Unavailable.
 typedef NS_ENUM(NSInteger, Core3DTextReliefApplyResult) {
     Core3DTextReliefApplyResultUnavailable = 0,
+    Core3DTextReliefApplyResultApplied = 1,
+    Core3DTextReliefApplyResultRefused = 2,
+    Core3DTextReliefApplyResultRecoveryRequired = 3,
 };
 
 //! Native-issued planar-face identity and placement frame for one selected
@@ -127,6 +130,10 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic, copy, readonly) NSString *contextIdentifier;
 @property(nonatomic, assign, readonly) double metersPerUnit;
 @property(nonatomic, assign, readonly) NSInteger historyDepth;
+//! Populated after a successful create/replace apply. These are observations
+//! of the natively issued durable owner and feature, never caller authority.
+@property(nonatomic, copy, readonly, nullable) NSData *appliedOwnerIdentifier;
+@property(nonatomic, copy, readonly, nullable) NSData *appliedFeatureIdentifier;
 
 //! Captures an opening from the controller's current single-face selection.
 //! The selected face must be one planar face of a retained native source;
@@ -135,6 +142,14 @@ __attribute__((objc_subclassing_restricted))
 + (nullable instancetype)captureController:(Core3DViewController *)controller
                                      error:(NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(capture(controller:));
+
+//! Captures an existing retained relief while the controller has its original
+//! host face selected. The feature identifier must be the 16-byte identifier
+//! previously observed from a successful apply or persisted record.
++ (nullable instancetype)captureController:(Core3DViewController *)controller
+                 existingFeatureIdentifier:(NSData *)featureIdentifier
+                                      error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(capture(controller:existingFeatureIdentifier:));
 
 //! Detached raised build against the issued face. The resource bytes are
 //! trusted catalog bytes pinned by expectedSHA256 (64 lowercase hex); text is
@@ -172,8 +187,21 @@ __attribute__((objc_subclassing_restricted))
 - (nullable Core3DTextReliefOpening *)openingByPreparingCandidate:(Core3DTextReliefCandidate *)candidate
                                                             error:(NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(preparing(candidate:));
-//! Reserved S2 commit entrance. S1 always returns Unavailable.
+//! S2 resource-bound prepare entrance. catalogHandle is the durable bundled
+//! catalog identity whose exact bytes produced candidate.
+- (nullable Core3DTextReliefOpening *)openingByPreparingCandidate:(Core3DTextReliefCandidate *)candidate
+                                                    catalogHandle:(NSString *)catalogHandle
+                                                            error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(preparing(candidate:catalogHandle:));
+//! Prepares removal of the existing retained relief captured by the receiver.
+- (nullable Core3DTextReliefOpening *)openingByPreparingRemovalWithError:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(preparingRemoval());
+//! Applies exactly one prepared create, replace or remove through one native
+//! command lease. The returned value distinguishes refusal from recovery.
 - (Core3DTextReliefApplyResult)apply;
+//! Settles one retained unknown close/publication after exact native readback.
+//! The issuing opening is terminal after a successful reconciliation.
+- (BOOL)reconcileRecovery;
 + (BOOL)isPubliclyAvailable;
 
 - (instancetype)init NS_UNAVAILABLE;

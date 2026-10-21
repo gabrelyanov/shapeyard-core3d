@@ -38,6 +38,7 @@
 #include "RetainedFinishingRecord.hxx"
 #include "FaceImageDefinition.hxx"
 #include "PaintedAtlasBakeDefinition.hxx"
+#include "TextReliefPersistence.hxx"
 namespace core3d::asset_atlas { struct Capture; struct Definition; struct Key; }
 namespace core3d::painted_atlas_bake::owner { struct CurrentnessResult; }
 namespace core3d::face_image::owner { enum class Outcome : std::uint8_t; struct Staging; }
@@ -169,6 +170,19 @@ struct Companion {
     //! recipe records, so the measured side state is the subtree naming plus
     //! the exact named-owner bytes instead of the treatment carriers.
     bool namedOwnerCarrier = false;
+    //! D1028 E5-only multi-root removal arm: the removal side spans the
+    //! ordered removed free-label roots (the relief owner, then every curve
+    //! owner in capture order), each with its SELECTED children. When
+    //! multiRootRemoval is false every path keeps the single-root behavior
+    //! byte-for-byte; when true, the E5-only Settle/Apply branches iterate
+    //! removalRoots and the source/SYET carriers stay unused. One pending
+    //! companion bound to one delta stays the invariant.
+    bool multiRootRemoval = false;
+    std::vector<TDF_Label> removalRoots;
+    std::vector<std::string> removalRootEntries;
+    std::vector<TopoDS_Shape> removalShapesBefore;
+    std::vector<TopoDS_Shape> removalShapesAfter;
+    std::vector<std::vector<FlagState>> removalFlagsBefore;
     Handle(TDF_Delta) delta;
 };
 } // namespace core3d::treatment_history
@@ -496,6 +510,18 @@ struct OcctBoundedCurveCapture {
     TopoDS_Wire wire;
     Standard_EXPORT Standard_Boolean IsEqual(
         const OcctBoundedCurveCapture& other) const noexcept;
+};
+
+//! Complete E5 owner authority: exact free relief root, canonical SYTR/2 and
+//! every separately persisted C1 record referenced by that owner.
+struct OcctTextReliefCapture {
+    Handle(TDF_Data) documentData;
+    std::string documentIdentifier;
+    OcctExactLabelReceipt ownerReceipt;
+    core3d::text_relief::persistence::Record record;
+    std::vector<OcctBoundedCurveCapture> curves;
+    Standard_EXPORT Standard_Boolean IsEqual(
+        const OcctTextReliefCapture& other) const noexcept;
 };
 
 //! Exact C3-N authority: one canonical SYGL record bound to one admitted solid.
@@ -1429,6 +1455,41 @@ public:
         const core3d::bounded_curve::PersistedValue& persisted,
         const core3d::bounded_curve::DetachedWire& detached,
         OcctBoundedCurveCapture& capture) noexcept;
+    Standard_EXPORT Standard_Boolean CaptureTextReliefExact(
+        const std::string& entityIdentifier,
+        const core3d::native_opening::Context& context,
+        OcctTextReliefCapture& capture) const noexcept;
+    Standard_EXPORT Standard_Boolean ReadTextReliefExact(
+        const core3d::text_relief::UUID& feature,
+        OcctTextReliefCapture& capture) const noexcept;
+    //! C1 records must already have been staged by this same caller lease;
+    //! complete readback below proves the exact referenced set before success.
+    Standard_EXPORT Standard_Boolean StageTextReliefCreate(
+        core3d::native_opening::CommandLease& lease,
+        const OcctIssuedLabelIdentity& identity,
+        const OcctPreparedLabelClone& clone,
+        const core3d::text_relief::AuthoredRecord& record,
+        OcctTextReliefCapture& capture) noexcept;
+    Standard_EXPORT Standard_Boolean StageTextReliefReplacement(
+        core3d::native_opening::CommandLease& lease,
+        const OcctTextReliefCapture& opening,
+        const OcctPreparedLabelClone& clone,
+        const core3d::text_relief::AuthoredRecord& record,
+        OcctTextReliefCapture& capture) noexcept;
+    Standard_EXPORT Standard_Boolean StageTextReliefRemove(
+        core3d::native_opening::CommandLease& lease,
+        const OcctTextReliefCapture& opening) noexcept;
+    //! D1028 E5 removal history companion lifecycle, owned by the document
+    //! and driven only by the E5 removal apply path: capture the measured
+    //! multi-root side before StageTextReliefRemove, capture the removed side
+    //! after coherent staging, settle on the verified prior state after an
+    //! abort, and bind the companion to the real committed delta after a
+    //! proven commit. No app/AI authority API.
+    Standard_EXPORT Standard_Boolean CaptureTextReliefRemovalCompanionBefore(
+        const OcctTextReliefCapture& opening) noexcept;
+    Standard_EXPORT Standard_Boolean CaptureTextReliefRemovalCompanionAfter() noexcept;
+    Standard_EXPORT Standard_Boolean FinalizeTextReliefRemovalHistory() noexcept;
+    Standard_EXPORT Standard_Boolean SettleTextReliefRemovalHistoryOnPrior() noexcept;
     Standard_EXPORT Standard_Boolean CaptureGeneralLoftExact(
         const std::string& entityIdentifier,
         const core3d::native_opening::Context& context,
