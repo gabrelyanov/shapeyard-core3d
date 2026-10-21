@@ -351,6 +351,10 @@ bool F2EvidenceEqual(Core3DPublishArtifactEvidence *left, Core3DPublishArtifactE
 @property(nonatomic, copy, readwrite) NSString *status;
 @property(nonatomic, assign, readwrite) BOOL historicalObservation;
 @property(nonatomic, assign, readwrite) NSUInteger emittedTriangleCount;
+@property(nonatomic, assign, readwrite) NSUInteger level;
+#if DEBUG
+@property(nonatomic, copy, readwrite) NSString *ownerSetKey;
+#endif
 @end
 
 @implementation Core3DPersistedDecimationDerivative
@@ -371,6 +375,10 @@ bool F2EvidenceEqual(Core3DPublishArtifactEvidence *left, Core3DPublishArtifactE
         _status = record.stale ? @"Stale" : @"Current";
         _historicalObservation = record.stale ? YES : NO;
         _emittedTriangleCount = record.emittedTriangleCount;
+        _level = record.level;
+#if DEBUG
+        _ownerSetKey = F2String(f2::HexFromDigest(record.ownerSetKey));
+#endif
     }
     return self;
 }
@@ -1448,4 +1456,151 @@ bool F2VerifyAttributeOutput(
     return [[Core3DPersistedDecimationDerivative alloc] initWithRecord:*row
         documentUUID:store.documentUUID];
 }
+#if DEBUG
++ (NSData *)f2DebugEncodeDerivativeStoreForController:(Core3DViewController *)controller
+    levels:(NSArray<NSNumber *> *)levels error:(NSError **)error {
+    if (error) *error = nil;
+    if (!NSThread.isMainThread || ![levels isKindOfClass:NSArray.class]) {
+        SetError(error, Core3DDecimationErrorMalformedRequest,
+            @"F2 store probe requires main-thread level input.");
+        return nil;
+    }
+    const Handle(OcctDocument) document = F2DocumentForController(controller);
+    if (document.IsNull()) {
+        SetError(error, Core3DDecimationErrorDerivativePersistenceUnavailable,
+            @"F2 store probe document is unavailable.");
+        return nil;
+    }
+    f2::F2StoreRead read;
+    if (!document->ReadF2DerivativeStore(read)
+        || read.occurrence != f2::F2StoreOccurrence::Present) {
+        SetError(error, Core3DDecimationErrorDerivativeNotPersisted,
+            @"F2 store probe requires a persisted level-0 row.");
+        return nil;
+    }
+    f2::F2Store stored;
+    if (!f2::DecodeStore(read.bytes, stored)) {
+        SetError(error, Core3DDecimationErrorDerivativePersistenceUnavailable,
+            @"F2 store probe refused the persisted store.");
+        return nil;
+    }
+    const F2Record *seed = nullptr;
+    for (const F2Record& record : stored.records) {
+        if (record.level != 0) continue;
+        if (seed) {
+            SetError(error, Core3DDecimationErrorMalformedRequest,
+                @"F2 store probe requires exactly one level-0 row.");
+            return nil;
+        }
+        seed = &record;
+    }
+    if (!seed) {
+        SetError(error, Core3DDecimationErrorDerivativeNotPersisted,
+            @"F2 store probe found no persisted level-0 row.");
+        return nil;
+    }
+
+    f2::F2Store candidate;
+    candidate.documentUUID = stored.documentUUID;
+    std::array<bool, f2::kMaxDerivativeLevel + 1> seen{};
+    for (NSNumber *number in levels) {
+        if (![number isKindOfClass:NSNumber.class]) {
+            SetError(error, Core3DDecimationErrorMalformedRequest,
+                @"F2 store probe level is not numeric.");
+            return nil;
+        }
+        const long long signedLevel = number.longLongValue;
+        if (signedLevel < 0
+            || signedLevel > static_cast<long long>(f2::kMaxDerivativeLevel)
+            || number.doubleValue != static_cast<double>(signedLevel)) {
+            SetError(error, Core3DDecimationErrorMalformedRequest,
+                @"F2 store probe level is outside 0...7.");
+            return nil;
+        }
+        const std::uint8_t level = static_cast<std::uint8_t>(signedLevel);
+        if (seen[level]) {
+            SetError(error, Core3DDecimationErrorMalformedRequest,
+                @"F2 store probe duplicate (key, level) pair.");
+            return nil;
+        }
+        seen[level] = true;
+        F2Record row = *seed;
+        row.level = level;
+        row.ownerSetKey = f2::OwnerSetKey(candidate.documentUUID,
+            row.entityUUID, row.definitionUUID, level);
+        row.derivativeIdentifier = f2::DerivativeIdentifier(candidate.documentUUID,
+            row.ownerSetKey, row.derivativeEntityUUID, row.derivativeDefinitionUUID,
+            row.derivativeFeatureUUID);
+        std::vector<std::uint8_t> encodedRecord;
+        if (!f2::IsValid(row, candidate.documentUUID)
+            || !f2::EncodeRecord(row, candidate.documentUUID, encodedRecord)) {
+            SetError(error, Core3DDecimationErrorMalformedRequest,
+                @"F2 store probe cloned row is invalid.");
+            return nil;
+        }
+        candidate.records.push_back(std::move(row));
+    }
+    std::sort(candidate.records.begin(), candidate.records.end(),
+        [](const F2Record& a, const F2Record& b) {
+            return a.ownerSetKey < b.ownerSetKey
+                || (a.ownerSetKey == b.ownerSetKey && a.level < b.level);
+        });
+    std::vector<std::uint8_t> encoded;
+    if (!f2::EncodeStore(candidate, encoded)) {
+        SetError(error, Core3DDecimationErrorResourceLimit,
+            @"F2 store probe encoder refused without output.");
+        return nil;
+    }
+    return F2Data(encoded);
+}
+
++ (NSArray<Core3DPersistedDecimationDerivative *> *)f2DebugDecodeDerivativeStoreBytes:(NSData *)bytes
+    error:(NSError **)error {
+    if (error) *error = nil;
+    if (![bytes isKindOfClass:NSData.class]) {
+        SetError(error, Core3DDecimationErrorMalformedRequest,
+            @"F2 store probe bytes are unavailable.");
+        return nil;
+    }
+    f2::F2Store decoded;
+    if (!f2::DecodeStore(F2Bytes(bytes), decoded)) {
+        SetError(error, Core3DDecimationErrorMalformedRequest,
+            @"F2 store probe decoder refused the bytes.");
+        return nil;
+    }
+    NSMutableArray<Core3DPersistedDecimationDerivative *> *rows =
+        [NSMutableArray arrayWithCapacity:decoded.records.size()];
+    for (const F2Record& record : decoded.records) {
+        Core3DPersistedDecimationDerivative *row =
+            [[Core3DPersistedDecimationDerivative alloc] initWithRecord:record
+                documentUUID:decoded.documentUUID];
+        if (!row) {
+            SetError(error, Core3DDecimationErrorMalformedRequest,
+                @"F2 store probe could not form a decoded row.");
+            return nil;
+        }
+        [rows addObject:row];
+    }
+    return [rows copy];
+}
+
++ (NSData *)f2DebugReencodeDerivativeStoreBytes:(NSData *)bytes
+    error:(NSError **)error {
+    if (error) *error = nil;
+    if (![bytes isKindOfClass:NSData.class]) {
+        SetError(error, Core3DDecimationErrorMalformedRequest,
+            @"F2 store probe bytes are unavailable.");
+        return nil;
+    }
+    f2::F2Store decoded;
+    std::vector<std::uint8_t> encoded;
+    if (!f2::DecodeStore(F2Bytes(bytes), decoded)
+        || !f2::EncodeStore(decoded, encoded)) {
+        SetError(error, Core3DDecimationErrorMalformedRequest,
+            @"F2 store probe re-encode refused without output.");
+        return nil;
+    }
+    return F2Data(encoded);
+}
+#endif
 @end

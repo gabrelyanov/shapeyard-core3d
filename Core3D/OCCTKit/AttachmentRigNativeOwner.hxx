@@ -46,6 +46,8 @@ struct Result final {
 };
 
 using Reobserve = std::function<bool()>;
+using PrepareCandidate = std::function<bool(
+    const StoredRecord&, std::vector<std::uint8_t>&)>;
 
 inline bool SameStoredRecord(const StoredRecord& first,
                              const StoredRecord& second) noexcept {
@@ -77,6 +79,38 @@ inline bool SameIdentityDomains(const std::vector<std::uint8_t>& before,
     } catch (...) { return false; }
 }
 
+// Creation is append-only. Existing identities and their owner multiplicity
+// must remain represented in the candidate; Validate/EncodeABR1 independently
+// reject collisions in the appended records.
+inline bool PreservesIdentityDomains(const std::vector<std::uint8_t>& before,
+                                     const std::vector<std::uint8_t>& after) noexcept {
+    try {
+        Metadata oldValue, newValue;
+        std::string refusal;
+        if (!DecodeABR1(before, oldValue, refusal)
+            || !DecodeABR1(after, newValue, refusal)) return false;
+        std::set<std::string> oldAttachments, newAttachments;
+        std::set<std::string> oldJoints, newJoints;
+        std::multiset<std::string> oldOwners, newOwners;
+        for (const auto& value : oldValue.attachments) {
+            oldAttachments.insert(value.attachmentID);
+            oldOwners.insert(value.rigid ? value.rigid->owner : value.surface->owner);
+        }
+        for (const auto& value : newValue.attachments) {
+            newAttachments.insert(value.attachmentID);
+            newOwners.insert(value.rigid ? value.rigid->owner : value.surface->owner);
+        }
+        for (const auto& value : oldValue.joints) oldJoints.insert(value.jointID);
+        for (const auto& value : newValue.joints) newJoints.insert(value.jointID);
+        return std::includes(newAttachments.begin(), newAttachments.end(),
+                             oldAttachments.begin(), oldAttachments.end())
+            && std::includes(newJoints.begin(), newJoints.end(),
+                             oldJoints.begin(), oldJoints.end())
+            && std::includes(newOwners.begin(), newOwners.end(),
+                             oldOwners.begin(), oldOwners.end());
+    } catch (...) { return false; }
+}
+
 inline bool CanonicalStoredCandidate(const std::vector<std::uint8_t>& bytes) noexcept {
     try {
         if (bytes.empty() || bytes.size() > kMaxStoredABR1Bytes) return false;
@@ -95,7 +129,8 @@ inline Result Apply(OcctDocument& document,
                     const Reobserve& reobserve,
                     const native_opening::CommittedEditPublication& publication,
                     const std::atomic_bool& cancelled,
-                    FaultPoint fault = FaultPoint::None) noexcept {
+                    FaultPoint fault = FaultPoint::None,
+                    const PrepareCandidate& prepareCandidate = {}) noexcept {
     Result result;
     try {
         StoredRecord before;
@@ -103,12 +138,14 @@ inline Result Apply(OcctDocument& document,
             || fault == FaultPoint::Prepare || !reobserve()
             || !document.ReadAttachmentRigMetadata(before) || !before.readable()
             || (remove && before.state != StoredReadState::Present)
-            || (!remove && !CanonicalStoredCandidate(candidate))) {
+            || (!remove && !prepareCandidate
+                && !CanonicalStoredCandidate(candidate))) {
             result.outcome = cancelled.load() || fault == FaultPoint::Prepare
                 ? Outcome::Cancelled : Outcome::Refused;
             return result;
         }
-        if (!remove && before.state == StoredReadState::Present) {
+        if (!remove && !prepareCandidate
+            && before.state == StoredReadState::Present) {
             if (before.bytes == candidate) {
                 result.outcome = Outcome::NoChange;
                 result.readback = before.bytes;
@@ -133,16 +170,35 @@ inline Result Apply(OcctDocument& document,
             return result;
         }
 
+        std::vector<std::uint8_t> preparedCandidate = candidate;
+        if (!remove && prepareCandidate
+            && (!prepareCandidate(before, preparedCandidate)
+                || !CanonicalStoredCandidate(preparedCandidate)
+                || (before.state == StoredReadState::Present
+                    && (before.bytes == preparedCandidate
+                        || !PreservesIdentityDomains(
+                            before.bytes, preparedCandidate))))) {
+            const bool aborted = lease->abort();
+            StoredRecord restored;
+            const bool exact = aborted
+                && document.ReadAttachmentRigMetadata(restored)
+                && SameStoredRecord(before, restored);
+            result.outcome = exact ? Outcome::Refused : Outcome::RecoveryRequired;
+            result.commandClosed = aborted;
+            result.blocksOtherWork = !exact;
+            return result;
+        }
+
         StoredRecord staged;
         const bool stagedOK = fault != FaultPoint::Stage
             && document.StageAttachmentRigMetadata(
-                *lease, before, candidate, remove, staged);
+                *lease, before, preparedCandidate, remove, staged);
         StoredRecord independent;
         const bool readbackOK = stagedOK && fault != FaultPoint::Readback
             && document.ReadAttachmentRigMetadata(independent)
             && SameStoredRecord(staged, independent)
             && (remove || (independent.state == StoredReadState::Present
-                && independent.bytes == candidate));
+                && independent.bytes == preparedCandidate));
         if (!readbackOK || cancelled.load() || fault == FaultPoint::BeforeCommit
             || !reobserve()) {
             const bool stopped = cancelled.load()

@@ -8,7 +8,9 @@
 // Kernel face/vertex ordinals are never persistent identity. The source
 // revision binds the capture's source witness bytes, which already carry the
 // document/generation/model/presentation revision epoch, so an edit-then-undo
-// stays stale.
+// stays stale. F2-S2b (D1057 (i)) folds a level ordinal (0...7) into the
+// store key, so one source-owner set holds up to 8 derivative rows; v1 rows
+// still decode as level 0 with their level-less v1 key accepted on read.
 
 #include "ExportMeshDecimationDefinition.hxx"
 
@@ -38,6 +40,9 @@ inline constexpr std::uint32_t kMaxContributionReferences = 262144;
 // S1 kernel caps (ExportMeshDecimator.hxx): 4096 triangles, 12288 corners.
 inline constexpr std::uint32_t kMaxRecordTriangles = 4096;
 inline constexpr std::uint32_t kMaxRecordPositions = 12288;
+// F2-S2b (D1057 (i)): level ordinal range; one source-owner set holds up to
+// 8 derivative rows, one per level.
+inline constexpr std::uint8_t kMaxDerivativeLevel = 7;
 
 using F2UUID = std::array<std::uint8_t, 16>;
 using F2Digest = std::array<std::uint8_t, 32>;
@@ -236,11 +241,30 @@ inline F2Digest TaggedDigest(const char* tag, const detail::Writer& fields) {
     return detail::SHA256(w.bytes);
 }
 
-// ownerSetKey = H(owner-set, documentUUID, U32(1), entityUUID, definitionUUID).
-// v1 admits exactly one source owner; feature history never renames it.
+// ownerSetKey = H(owner-set, documentUUID, U32(2), entityUUID,
+// definitionUUID, U8(level)). F2-S2b (D1057 (i)) folds the level ordinal into
+// the key, so one source owner set admits up to 8 derivative rows (levels
+// 0...7); feature history never renames the owner. Callers writing level 0
+// keep the 3-argument form.
 inline F2Digest OwnerSetKey(const F2UUID& documentUUID,
                             const F2UUID& entityUUID,
-                            const F2UUID& definitionUUID) {
+                            const F2UUID& definitionUUID,
+                            std::uint8_t level = 0) {
+    detail::Writer w;
+    w.UUID(documentUUID);
+    w.U32(2);
+    w.UUID(entityUUID);
+    w.UUID(definitionUUID);
+    w.U8(level);
+    return TaggedDigest("shapeyard.export-mesh-decimation.v1/owner-set", w);
+}
+
+// The level-less v1 key, H(owner-set, documentUUID, U32(1), entityUUID,
+// definitionUUID). Read compatibility only: a v1 store row keeps this key
+// (the derivative identifier binds it); nothing re-derives it on write.
+inline F2Digest OwnerSetKeyV1(const F2UUID& documentUUID,
+                              const F2UUID& entityUUID,
+                              const F2UUID& definitionUUID) {
     detail::Writer w;
     w.UUID(documentUUID);
     w.U32(1);
@@ -591,9 +615,11 @@ inline bool SettingsSHA256(const std::vector<std::uint8_t>& canonicalBytes, F2Di
 
 // Persisted derivative provenance record. Status is encoded as canonical
 // Current/0 or Stale/1 text-plus-observation pairs only, so a single boolean
-// carries the whole state.
+// carries the whole state. F2-S2b: the level ordinal (0...7) is part of the
+// row identity and folds into ownerSetKey; level defaults to 0.
 struct F2Record {
     F2Digest ownerSetKey{};
+    std::uint8_t level = 0; // F2-S2b level ordinal; commits into ownerSetKey
     F2UUID entityUUID{};
     F2UUID definitionUUID{};
     F2UUID sourceFeatureUUID{};
@@ -629,6 +655,7 @@ struct F2Record {
 // fixed 32-byte digests by construction.
 inline bool IsValid(const F2Record& value, const F2UUID& documentUUID) {
     try {
+        if (value.level > kMaxDerivativeLevel) return false; // F2-S2b: 0...7 only
         if (!Nonzero(documentUUID) || !Nonzero(value.entityUUID)
             || !Nonzero(value.definitionUUID) || !Nonzero(value.sourceFeatureUUID)
             || !Nonzero(value.derivativeEntityUUID) || !Nonzero(value.derivativeDefinitionUUID)
@@ -646,8 +673,16 @@ inline bool IsValid(const F2Record& value, const F2UUID& documentUUID) {
                 || value.derivativeDefinitionUUID == owned
                 || value.derivativeFeatureUUID == owned) return false;
         }
-        if (value.ownerSetKey
-                != OwnerSetKey(documentUUID, value.entityUUID, value.definitionUUID)
+        // F2-S2b: the key recomputes from the stored fields INCLUDING the
+        // level; a v1 row (always level 0) keeps its level-less v1 key, which
+        // the derivative identifier binds.
+        const bool keyMatches = value.ownerSetKey
+                == OwnerSetKey(documentUUID, value.entityUUID,
+                    value.definitionUUID, value.level)
+            || (value.level == 0 && value.ownerSetKey
+                == OwnerSetKeyV1(documentUUID, value.entityUUID,
+                    value.definitionUUID));
+        if (!keyMatches
             || value.derivativeIdentifier
                 != DerivativeIdentifier(documentUUID, value.ownerSetKey,
                     value.derivativeEntityUUID, value.derivativeDefinitionUUID,
@@ -682,6 +717,7 @@ inline bool EncodeRecord(const F2Record& value, const F2UUID& documentUUID,
         detail::Writer w;
         w.Digest(value.ownerSetKey);
         w.U32(1); // v1 owner count
+        w.U8(value.level); // F2-S2b level ordinal (v2 record layout)
         w.UUID(value.entityUUID);
         w.UUID(value.definitionUUID);
         w.UUID(value.sourceFeatureUUID);
@@ -718,8 +754,11 @@ inline bool EncodeRecord(const F2Record& value, const F2UUID& documentUUID,
     } catch (...) { out.clear(); return false; }
 }
 
+// F2-S2b: v1Layout reads the level-less v1 record layout (a v1 row is level
+// 0); v2 reads the level byte after the owner-count word.
 inline bool DecodeRecord(const std::vector<std::uint8_t>& bytes,
-                         const F2UUID& documentUUID, F2Record& value) {
+                         const F2UUID& documentUUID, F2Record& value,
+                         bool v1Layout = false) {
     value = {};
     try {
         if (bytes.empty() || bytes.size() > kMaxStoreBytes) return false;
@@ -727,8 +766,10 @@ inline bool DecodeRecord(const std::vector<std::uint8_t>& bytes,
         std::uint32_t ownerCount = 0;
         std::string evidenceClass, disclosure, status;
         std::uint8_t historical = 0;
+        std::uint8_t level = 0;
         if (!reader.Digest(value.ownerSetKey)
             || !reader.U32(ownerCount) || ownerCount != 1
+            || !(v1Layout || reader.U8(level))
             || !reader.UUID(value.entityUUID)
             || !reader.UUID(value.definitionUUID)
             || !reader.UUID(value.sourceFeatureUUID)
@@ -770,6 +811,21 @@ inline bool DecodeRecord(const std::vector<std::uint8_t>& bytes,
         if (status == "Current" && historical == 0) value.stale = false;
         else if (status == "Stale" && historical == 1) value.stale = true;
         else { value = {}; return false; }
+        value.level = v1Layout ? 0 : level;
+        if (v1Layout) {
+            // F2-S2b v1 read compatibility: the stored key must be the
+            // level-less v1 key; the row keeps it (the derivative identifier
+            // binds it) and IsValid admits the v1 formula at level 0.
+            // Re-encoding writes the v2 layout, so the byte-exact re-encode
+            // proof below applies only to v2 input.
+            if (value.ownerSetKey != OwnerSetKeyV1(documentUUID,
+                    value.entityUUID, value.definitionUUID)) {
+                value = {};
+                return false;
+            }
+            if (!IsValid(value, documentUUID)) { value = {}; return false; }
+            return true;
+        }
         if (!IsValid(value, documentUUID)) { value = {}; return false; }
         std::vector<std::uint8_t> exact;
         if (!EncodeRecord(value, documentUUID, exact) || exact != bytes) {
@@ -780,8 +836,9 @@ inline bool DecodeRecord(const std::vector<std::uint8_t>& bytes,
     } catch (...) { value = {}; return false; }
 }
 
-// The one physical carrier: a bounded table of logical records, one per
-// source-owner set, sorted ascending by ownerSetKey and unique.
+// The one physical carrier: a bounded table of logical records, up to 8 per
+// source-owner set (levels 0...7, F2-S2b), sorted ascending by
+// (ownerSetKey, level) and unique on the pair.
 struct F2Store {
     F2UUID documentUUID{};
     std::vector<F2Record> records;
@@ -796,18 +853,24 @@ inline bool EncodeStore(const F2Store& value, std::vector<std::uint8_t>& out) {
         payload.UUID(value.documentUUID);
         payload.U32(static_cast<std::uint32_t>(value.records.size()));
         F2Digest prior{};
+        std::uint8_t priorLevel = 0;
         bool havePrior = false;
         for (const F2Record& record : value.records) {
-            if (havePrior && !(prior < record.ownerSetKey)) return false;
+            // F2-S2b: strict (ownerSetKey, level) ascending, unique on the
+            // pair; duplicates and non-ascending input refuse without output.
+            if (havePrior && !(prior < record.ownerSetKey
+                || (prior == record.ownerSetKey && priorLevel < record.level)))
+                return false;
             std::vector<std::uint8_t> encoded;
             if (!EncodeRecord(record, value.documentUUID, encoded)) return false;
             payload.Blob(encoded);
             prior = record.ownerSetKey;
+            priorLevel = record.level;
             havePrior = true;
         }
         detail::Writer envelope;
         envelope.Raw("F2DR", 4);
-        envelope.U32(1); // schema
+        envelope.U32(2); // F2-S2b store schema: per-level derivative rows
         envelope.U32(static_cast<std::uint32_t>(payload.bytes.size()));
         envelope.Raw(payload.bytes.data(), payload.bytes.size());
         envelope.Digest(detail::SHA256(envelope.bytes)); // header || payload
@@ -820,6 +883,10 @@ inline bool EncodeStore(const F2Store& value, std::vector<std::uint8_t>& out) {
 // Fail-closed canonical decode: frame and checksum before any nested parse,
 // future schemas, bad counts and trailing bytes rejected, and a full
 // decode/validate/re-encode byte-equality round-trip before publishing.
+// F2-S2b: schema 1 (v1, level-less rows) still decodes -- every row is level
+// 0 and keeps its v1 key -- but ENCODE always writes v2, so a decoded v1
+// store re-encodes to different bytes and the byte-exact re-encode proof
+// applies only to v2 input.
 inline bool DecodeStore(const std::vector<std::uint8_t>& bytes, F2Store& value) {
     value = {};
     try {
@@ -827,7 +894,9 @@ inline bool DecodeStore(const std::vector<std::uint8_t>& bytes, F2Store& value) 
         if (std::memcmp(bytes.data(), "F2DR", 4) != 0) return false;
         detail::Reader header{bytes.data() + 4, 8};
         std::uint32_t schema = 0, payloadCount = 0;
-        if (!header.U32(schema) || schema != 1 || !header.U32(payloadCount)) return false;
+        if (!header.U32(schema) || (schema != 1 && schema != 2)
+            || !header.U32(payloadCount)) return false;
+        const bool v1Layout = schema == 1;
         const std::size_t expected = 12 + std::size_t(payloadCount) + 32;
         if (payloadCount == 0 || expected != bytes.size()) return false; // no trailing bytes
         F2Digest checksum{};
@@ -850,20 +919,27 @@ inline bool DecodeStore(const std::vector<std::uint8_t>& bytes, F2Store& value) 
                 return false;
             }
             F2Record record;
-            if (!DecodeRecord(blob, value.documentUUID, record)) {
+            if (!DecodeRecord(blob, value.documentUUID, record, v1Layout)) {
                 value = {};
                 return false;
             }
             value.records.push_back(std::move(record));
         }
         if (!payload.Done()) { value = {}; return false; }
+        // F2-S2b: strict (ownerSetKey, level) ascending, unique on the pair.
         for (std::size_t i = 1; i < value.records.size(); ++i)
-            if (!(value.records[i - 1].ownerSetKey < value.records[i].ownerSetKey)) {
+            if (!(value.records[i - 1].ownerSetKey < value.records[i].ownerSetKey
+                || (value.records[i - 1].ownerSetKey == value.records[i].ownerSetKey
+                    && value.records[i - 1].level < value.records[i].level))) {
                 value = {};
                 return false;
             }
-        std::vector<std::uint8_t> exact;
-        if (!EncodeStore(value, exact) || exact != bytes) { value = {}; return false; }
+        // The byte-exact re-encode proof applies only to v2 input: v1 rows
+        // re-encode in the v2 layout by design.
+        if (!v1Layout) {
+            std::vector<std::uint8_t> exact;
+            if (!EncodeStore(value, exact) || exact != bytes) { value = {}; return false; }
+        }
         return true;
     } catch (...) { value = {}; return false; }
 }

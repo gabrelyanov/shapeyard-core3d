@@ -25,6 +25,7 @@
 #import <Core3D/Core3DFaceSelectorTypes.h>
 
 @class Core3DVariableFilletOwnerValues;
+@class Core3DAttachmentRigOwnerObservationState;
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -34,6 +35,41 @@ typedef NS_ENUM(NSInteger, Core3DShellOpeningAxis) {
 typedef NS_ENUM(NSInteger, Core3DShellOpeningSide) {
     Core3DShellOpeningSideMinimum, Core3DShellOpeningSideMaximum,
 };
+
+typedef NS_ENUM(NSInteger, Core3DAttachmentRigCarrierState) {
+    Core3DAttachmentRigCarrierStateUnavailable = 0,
+    Core3DAttachmentRigCarrierStateAbsent,
+    Core3DAttachmentRigCarrierStatePresent,
+    Core3DAttachmentRigCarrierStateCorrupt,
+};
+
+typedef NS_ENUM(NSInteger, Core3DAttachmentRigReviewState) {
+    Core3DAttachmentRigReviewStateUnavailable = 0,
+    Core3DAttachmentRigReviewStateCurrent,
+    Core3DAttachmentRigReviewStateNeedsReview,
+    Core3DAttachmentRigReviewStateStale,
+    Core3DAttachmentRigReviewStateRefused,
+};
+
+//! Passive Release-safe F4 row projection. Counts are calculated from the
+//! complete document carrier: jointCount is document-level and
+//! carrierAttachmentCount includes every owner, so an editor for one owner can
+//! preserve all other owners' records. Reading never captures an opening,
+//! changes selection, starts a command, or rewrites carrier bytes.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DAttachmentRigOwnerObservationState : NSObject
+@property(nonatomic, copy, readonly) NSString *entityIdentifier;
+@property(nonatomic, assign, readonly) Core3DAttachmentRigCarrierState carrierState;
+@property(nonatomic, assign, readonly) Core3DAttachmentRigReviewState reviewState;
+@property(nonatomic, assign, readonly) NSUInteger attachmentCount;
+@property(nonatomic, assign, readonly) NSUInteger jointCount;
+@property(nonatomic, assign, readonly) NSUInteger carrierAttachmentCount;
+@property(nonatomic, assign, readonly) NSUInteger carrierJointCount;
+@property(nonatomic, copy, readonly) NSArray<NSString *> *reviewReasons;
+@property(nonatomic, assign, readonly) BOOL fullCarrierScope;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
 __attribute__((objc_subclassing_restricted))
 @interface Core3DShellOpeningSelector : NSObject
 @property(nonatomic,readonly) Core3DShellOpeningAxis axis;
@@ -228,6 +264,11 @@ __attribute__((objc_subclassing_restricted))
 //! Passive construction-input discovery for Objects. No capture/session/history.
 - (Core3DPartBooleanValues *_Nullable)partBooleanEditorValuesForEntityIdentifier:
     (NSString *)entityIdentifier NS_SWIFT_NAME(partBooleanEditorValues(entityIdentifier:));
+//! Passive per-owner F4 discovery with an explicit absent/corrupt distinction.
+//! The returned value is nonnull; invalid/unavailable owners report
+//! Core3DAttachmentRigCarrierStateUnavailable.
+- (Core3DAttachmentRigOwnerObservationState *)attachmentRigOwnerObservationForEntityIdentifier:
+    (NSString *)entityIdentifier NS_SWIFT_NAME(attachmentRigOwnerObservation(entityIdentifier:));
 //! Passive retained variable-fillet discovery for Objects. Returns an empty
 //! array for every unavailable or absent case and never changes selection,
 //! history or document state.

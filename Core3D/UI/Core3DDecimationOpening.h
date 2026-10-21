@@ -86,6 +86,11 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic, copy, readonly) NSString *status;                    // @"Current" or @"Stale"
 @property(nonatomic, assign, readonly) BOOL historicalObservation;
 @property(nonatomic, assign, readonly) NSUInteger emittedTriangleCount;
+@property(nonatomic, assign, readonly) NSUInteger level;                  // 0...7
+#if DEBUG
+//! Probe-only text form of the exact stored key; never used for persistence.
+@property(nonatomic, copy, readonly) NSString *ownerSetKey;               // 64-lower-hex
+#endif
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end
@@ -160,6 +165,22 @@ __attribute__((objc_subclassing_restricted))
 - (nullable Core3DPersistedDecimationDerivative *)f2PersistedDerivativeForController:(Core3DViewController *)controller
     error:(NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(f2PersistedDerivative(controller:));
+#if DEBUG
+//! Read-only codec probe. Clones the controller's sole persisted level-0 row
+//! at the requested levels, recomputes its key and derivative identity, and
+//! returns canonical F2DR bytes. It never writes the document or carrier.
++ (nullable NSData *)f2DebugEncodeDerivativeStoreForController:(Core3DViewController *)controller
+    levels:(NSArray<NSNumber *> *)levels error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(f2DebugEncodeDerivativeStore(controller:levels:));
+//! Decodes schema-1 or schema-2 F2DR bytes through the production codec.
++ (nullable NSArray<Core3DPersistedDecimationDerivative *> *)f2DebugDecodeDerivativeStoreBytes:(NSData *)bytes
+    error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(f2DebugDecodeDerivativeStore(_:));
+//! Decodes then canonically re-encodes F2DR bytes through the production codec.
++ (nullable NSData *)f2DebugReencodeDerivativeStoreBytes:(NSData *)bytes
+    error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(f2DebugReencodeDerivativeStore(_:));
+#endif
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end

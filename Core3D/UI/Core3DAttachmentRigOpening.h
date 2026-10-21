@@ -100,6 +100,60 @@ __attribute__((objc_subclassing_restricted))
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+//! One native-identity-free rigid attachment draft. attachmentID is always
+//! empty: only the native owner may issue its durable 16-byte identity.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DAttachmentRigCreationAttachment : NSObject
+@property(nonatomic, copy, readonly) NSData *attachmentID;
+@property(nonatomic, strong, readonly) Core3DAttachmentRigOwnerKey *ownerKey;
+@property(nonatomic, copy, readonly) NSString *displayName;
+@property(nonatomic, copy, readonly) NSString *role;
+@property(nonatomic, copy, readonly) NSArray<NSNumber *> *localFrameMM;
+- (nullable instancetype)initWithOwnerKey:(Core3DAttachmentRigOwnerKey *)ownerKey
+                              displayName:(NSString *)displayName
+                                     role:(NSString *)role
+                             localFrameMM:(NSArray<NSNumber *> *)localFrameMM
+    NS_SWIFT_NAME(init(ownerKey:displayName:role:localFrameMM:));
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+//! One native-identity-free joint draft. A parent is either an already-issued
+//! 16-byte joint identity or another row's draftIdentifier, never both.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DAttachmentRigCreationJoint : NSObject
+@property(nonatomic, copy, readonly) NSData *jointID;
+@property(nonatomic, copy, readonly) NSString *draftIdentifier;
+@property(nonatomic, copy, readonly, nullable) NSData *parentIssuedID;
+@property(nonatomic, copy, readonly, nullable) NSString *parentDraftIdentifier;
+@property(nonatomic, copy, readonly) NSString *displayName;
+@property(nonatomic, copy, readonly) NSArray<NSNumber *> *bindFrameMM;
+- (nullable instancetype)initWithDraftIdentifier:(NSString *)draftIdentifier
+                                  parentIssuedID:(nullable NSData *)parentIssuedID
+                           parentDraftIdentifier:(nullable NSString *)parentDraftIdentifier
+                                     displayName:(NSString *)displayName
+                                     bindFrameMM:(NSArray<NSNumber *> *)bindFrameMM
+    NS_SWIFT_NAME(init(draftIdentifier:parentIssuedID:parentDraftIdentifier:displayName:bindFrameMM:));
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+//! Detached append intent. Every persistent identity in its rows is empty.
+//! Binding consumes it exactly once; Cancel never binds or issues identities.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DAttachmentRigCreationIntent : NSObject
+@property(nonatomic, copy, readonly)
+    NSArray<Core3DAttachmentRigCreationAttachment *> *attachments;
+@property(nonatomic, copy, readonly)
+    NSArray<Core3DAttachmentRigCreationJoint *> *joints;
+- (nullable instancetype)initWithAttachments:
+    (NSArray<Core3DAttachmentRigCreationAttachment *> *)attachments
+    joints:(NSArray<Core3DAttachmentRigCreationJoint *> *)joints
+    NS_SWIFT_NAME(init(attachments:joints:));
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 //! Opaque S1 opening. Capture and proposal binding are read-only. The opening
 //! retains its native document and nonserializable currentness fence.
 __attribute__((objc_subclassing_restricted))
@@ -127,6 +181,14 @@ __attribute__((objc_subclassing_restricted))
 - (nullable Core3DAttachmentRigOpening *)openingByBindingMetadataProposal:(NSData *)bytes
                                                                     error:(NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(binding(metadataProposal:));
+
+//! Consumes an identity-free append intent. Durable identities are issued only
+//! after the existing native owner's single command is open, then the complete
+//! full-carrier ABR1 value is staged and committed by that same command.
+- (nullable Core3DAttachmentRigOpening *)openingByBindingCreationIntent:
+    (Core3DAttachmentRigCreationIntent *)intent
+    error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(binding(creationIntent:));
 
 //! Pure bounded ABR1 validation/canonicalization without document authority.
 + (nullable NSData *)canonicalABR1ByValidatingBytes:(NSData *)bytes

@@ -17,6 +17,7 @@
 
 #include <CommonCrypto/CommonDigest.h>
 #include <TDF_Tool.hxx>
+#include <TDataStd_ByteArray.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 
@@ -446,6 +447,135 @@ bool DecodeABR1(const std::vector<std::uint8_t>& bytes, Metadata& output, std::s
 - (instancetype)initPrivate { return [super init]; }
 @end
 
+@interface Core3DAttachmentRigCreationAttachment ()
+@property(nonatomic, copy, readwrite) NSData *attachmentID;
+@property(nonatomic, strong, readwrite) Core3DAttachmentRigOwnerKey *ownerKey;
+@property(nonatomic, copy, readwrite) NSString *displayName;
+@property(nonatomic, copy, readwrite) NSString *role;
+@property(nonatomic, copy, readwrite) NSArray<NSNumber *> *localFrameMM;
+@end
+@implementation Core3DAttachmentRigCreationAttachment
+- (instancetype)initWithOwnerKey:(Core3DAttachmentRigOwnerKey *)ownerKey
+                      displayName:(NSString *)displayName
+                             role:(NSString *)role
+                     localFrameMM:(NSArray<NSNumber *> *)localFrameMM {
+    if (!ownerKey || ![displayName isKindOfClass:NSString.class]
+        || ![role isKindOfClass:NSString.class] || role.length == 0
+        || ![localFrameMM isKindOfClass:NSArray.class]
+        || localFrameMM.count != 12) return nil;
+    for (id value in localFrameMM)
+        if (![value isKindOfClass:NSNumber.class]
+            || !std::isfinite([value doubleValue])) return nil;
+    self = [super init];
+    if (self) {
+        _attachmentID = [NSData data];
+        _ownerKey = ownerKey;
+        _displayName = [displayName copy];
+        _role = [role copy];
+        _localFrameMM = [localFrameMM copy];
+    }
+    return self;
+}
+@end
+
+@interface Core3DAttachmentRigCreationJoint ()
+@property(nonatomic, copy, readwrite) NSData *jointID;
+@property(nonatomic, copy, readwrite) NSString *draftIdentifier;
+@property(nonatomic, copy, readwrite, nullable) NSData *parentIssuedID;
+@property(nonatomic, copy, readwrite, nullable) NSString *parentDraftIdentifier;
+@property(nonatomic, copy, readwrite) NSString *displayName;
+@property(nonatomic, copy, readwrite) NSArray<NSNumber *> *bindFrameMM;
+@end
+@implementation Core3DAttachmentRigCreationJoint
+- (instancetype)initWithDraftIdentifier:(NSString *)draftIdentifier
+                          parentIssuedID:(NSData *)parentIssuedID
+                   parentDraftIdentifier:(NSString *)parentDraftIdentifier
+                             displayName:(NSString *)displayName
+                             bindFrameMM:(NSArray<NSNumber *> *)bindFrameMM {
+    if (![draftIdentifier isKindOfClass:NSString.class]
+        || draftIdentifier.length == 0
+        || ![displayName isKindOfClass:NSString.class]
+        || ![bindFrameMM isKindOfClass:NSArray.class]
+        || bindFrameMM.count != 12
+        || (parentIssuedID && parentDraftIdentifier)
+        || (parentIssuedID && parentIssuedID.length != 16)
+        || (parentDraftIdentifier
+            && (![parentDraftIdentifier isKindOfClass:NSString.class]
+                || parentDraftIdentifier.length == 0))) return nil;
+    for (id value in bindFrameMM)
+        if (![value isKindOfClass:NSNumber.class]
+            || !std::isfinite([value doubleValue])) return nil;
+    self = [super init];
+    if (self) {
+        _jointID = [NSData data];
+        _draftIdentifier = [draftIdentifier copy];
+        _parentIssuedID = [parentIssuedID copy];
+        _parentDraftIdentifier = [parentDraftIdentifier copy];
+        _displayName = [displayName copy];
+        _bindFrameMM = [bindFrameMM copy];
+    }
+    return self;
+}
+@end
+
+@interface Core3DAttachmentRigCreationIntent ()
+@property(nonatomic, copy, readwrite)
+    NSArray<Core3DAttachmentRigCreationAttachment *> *attachments;
+@property(nonatomic, copy, readwrite)
+    NSArray<Core3DAttachmentRigCreationJoint *> *joints;
+- (BOOL)consumeForNativeBinding;
+@end
+@implementation Core3DAttachmentRigCreationIntent {
+    std::shared_ptr<std::atomic_bool> _consumed;
+}
+- (instancetype)initWithAttachments:
+    (NSArray<Core3DAttachmentRigCreationAttachment *> *)attachments
+    joints:(NSArray<Core3DAttachmentRigCreationJoint *> *)joints {
+    if (![attachments isKindOfClass:NSArray.class]
+        || ![joints isKindOfClass:NSArray.class]
+        || (attachments.count == 0 && joints.count == 0)
+        || attachments.count > core3d::attachment_rig::kMaxAttachments
+        || joints.count > core3d::attachment_rig::kMaxJoints) return nil;
+    NSMutableSet<NSString *> *drafts = [NSMutableSet set];
+    for (id value in attachments)
+        if (![value isKindOfClass:Core3DAttachmentRigCreationAttachment.class]) return nil;
+    for (id value in joints) {
+        if (![value isKindOfClass:Core3DAttachmentRigCreationJoint.class]) return nil;
+        Core3DAttachmentRigCreationJoint *joint = value;
+        if ([drafts containsObject:joint.draftIdentifier]) return nil;
+        [drafts addObject:joint.draftIdentifier];
+    }
+    self = [super init];
+    if (self) {
+        _attachments = [attachments copy];
+        _joints = [joints copy];
+        _consumed = std::make_shared<std::atomic_bool>(false);
+    }
+    return self;
+}
+- (BOOL)consumeForNativeBinding {
+    bool expected = false;
+    return _consumed
+        && _consumed->compare_exchange_strong(expected, true);
+}
+@end
+
+@interface Core3DAttachmentRigOwnerObservationState ()
+@property(nonatomic, copy, readwrite) NSString *entityIdentifier;
+@property(nonatomic, assign, readwrite) Core3DAttachmentRigCarrierState carrierState;
+@property(nonatomic, assign, readwrite) Core3DAttachmentRigReviewState reviewState;
+@property(nonatomic, assign, readwrite) NSUInteger attachmentCount;
+@property(nonatomic, assign, readwrite) NSUInteger jointCount;
+@property(nonatomic, assign, readwrite) NSUInteger carrierAttachmentCount;
+@property(nonatomic, assign, readwrite) NSUInteger carrierJointCount;
+@property(nonatomic, copy, readwrite) NSArray<NSString *> *reviewReasons;
+@property(nonatomic, assign, readwrite) BOOL fullCarrierScope;
+- (instancetype)initPrivate;
+@end
+@implementation Core3DAttachmentRigOwnerObservationState
+- (instancetype)initPrivate { return [super init]; }
+@end
+
 namespace {
 using Metadata = core3d::attachment_rig::Metadata;
 using Frame = core3d::attachment_rig::FrameMM;
@@ -766,6 +896,128 @@ bool Observe(Core3DViewController *controller,const Handle(OcctDocument)& docume
 }
 
 NSArray<NSNumber*> *FrameArray(const Frame& frame){NSMutableArray *a=[NSMutableArray arrayWithCapacity:12];for(double v:frame.originMM)[a addObject:@(v)];for(double v:frame.x)[a addObject:@(v)];for(double v:frame.y)[a addObject:@(v)];for(double v:frame.z)[a addObject:@(v)];return a;}
+bool FrameValue(NSArray<NSNumber *> *values, Frame& frame) noexcept {
+    @try {
+        if (![values isKindOfClass:NSArray.class] || values.count != 12) return false;
+        double *groups[] = {frame.originMM.data(), frame.x.data(),
+                            frame.y.data(), frame.z.data()};
+        NSUInteger index = 0;
+        for (double *group : groups)
+            for (unsigned component = 0; component < 3; ++component) {
+                id value = values[index++];
+                if (![value isKindOfClass:NSNumber.class]) return false;
+                group[component] = [value doubleValue];
+            }
+        return true;
+    } @catch (__unused NSException *exception) { return false; }
+}
+std::string OwnerTuple(Core3DAttachmentRigOwnerKey *key) {
+    std::string result;
+    @try {
+        if (key.documentID.length != 16 || key.entityID.length != 16
+            || key.definitionID.length != 16) return result;
+        result.assign(static_cast<const char *>(key.documentID.bytes), 16);
+        result.append(static_cast<const char *>(key.entityID.bytes), 16);
+        result.append(static_cast<const char *>(key.definitionID.bytes), 16);
+    } @catch (__unused NSException *exception) { result.clear(); }
+    return result;
+}
+bool MintAttachmentRigIdentity(std::string& output) noexcept {
+    output.clear();
+    try {
+        for (unsigned attempt = 0; attempt < 16; ++attempt) {
+            const std::string text = OcctDocument::NewProfileIdentifier();
+            NSString *value = Text(text);
+            NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:value];
+            if (!uuid) continue;
+            uuid_t bytes{};
+            [uuid getUUIDBytes:bytes];
+            output.assign(reinterpret_cast<const char *>(bytes), sizeof(bytes));
+            if (std::any_of(output.begin(), output.end(),
+                [](unsigned char byte) { return byte != 0; })) return true;
+        }
+    } catch (...) {}
+    output.clear(); return false;
+}
+bool AppendCreationIntent(Core3DAttachmentRigCreationIntent *intent,
+                          const core3d::attachment_rig::StoredRecord& before,
+                          std::vector<std::uint8_t>& candidate) noexcept {
+    namespace rig = core3d::attachment_rig;
+    try {
+        if (!intent || before.state == rig::StoredReadState::Corrupt) return false;
+        Metadata metadata;
+        std::string refusal;
+        if (before.state == rig::StoredReadState::Present) {
+            if (!rig::DecodeABR1(before.bytes, metadata, refusal)) return false;
+        } else if (before.state == rig::StoredReadState::Absent) {
+            metadata.schemaVersion = rig::kSchemaVersion;
+            metadata.targetProfile.schemaVersion = rig::kSchemaVersion;
+            metadata.targetProfile.profileID = "local.validation.policy";
+            metadata.targetProfile.profileVersion = "v1";
+            metadata.targetProfile.requiredRoles = {
+                "socket.primary", "socket.secondary"};
+            metadata.targetProfile.externallyVerified = false;
+        } else return false;
+        if (intent.attachments.count > rig::kMaxAttachments - metadata.attachments.size()
+            || intent.joints.count > rig::kMaxJoints - metadata.joints.size()) return false;
+
+        std::set<std::string> issued;
+        for (const auto& attachment : metadata.attachments)
+            issued.insert(attachment.attachmentID);
+        for (const auto& joint : metadata.joints) issued.insert(joint.jointID);
+        std::map<std::string, std::string> draftJointIDs;
+        for (Core3DAttachmentRigCreationJoint *draft in intent.joints) {
+            std::string identity;
+            do {
+                if (!MintAttachmentRigIdentity(identity)) return false;
+            } while (!issued.insert(identity).second);
+            const std::string key(draft.draftIdentifier.UTF8String ?: "",
+                [draft.draftIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+            if (key.empty() || !draftJointIDs.emplace(key, identity).second) return false;
+        }
+        for (Core3DAttachmentRigCreationAttachment *draft in intent.attachments) {
+            rig::Attachment attachment;
+            do {
+                if (!MintAttachmentRigIdentity(attachment.attachmentID)) return false;
+            } while (!issued.insert(attachment.attachmentID).second);
+            attachment.displayName = draft.displayName.UTF8String ?: "";
+            attachment.role = draft.role.UTF8String ?: "";
+            if (!FrameValue(draft.localFrameMM, attachment.frameMM)) return false;
+            const std::string owner = OwnerTuple(draft.ownerKey);
+            if (owner.size() != 48) return false;
+            attachment.rigid = rig::RigidOwnerBinding{owner};
+            metadata.attachments.push_back(std::move(attachment));
+        }
+        std::set<std::string> existingJoints;
+        for (const auto& joint : metadata.joints) existingJoints.insert(joint.jointID);
+        for (Core3DAttachmentRigCreationJoint *draft in intent.joints) {
+            rig::Joint joint;
+            const std::string key(draft.draftIdentifier.UTF8String ?: "",
+                [draft.draftIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+            const auto issuedJoint = draftJointIDs.find(key);
+            if (issuedJoint == draftJointIDs.end()) return false;
+            joint.jointID = issuedJoint->second;
+            joint.displayName = draft.displayName.UTF8String ?: "";
+            if (!FrameValue(draft.bindFrameMM, joint.bindTransformMM)) return false;
+            if (draft.parentIssuedID) {
+                std::string parent(static_cast<const char *>(draft.parentIssuedID.bytes),
+                                   draft.parentIssuedID.length);
+                if (!existingJoints.count(parent)) return false;
+                joint.parentJointID = std::move(parent);
+            } else if (draft.parentDraftIdentifier) {
+                const std::string parentKey(
+                    draft.parentDraftIdentifier.UTF8String ?: "",
+                    [draft.parentDraftIdentifier
+                        lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+                const auto parent = draftJointIDs.find(parentKey);
+                if (parent == draftJointIDs.end()) return false;
+                joint.parentJointID = parent->second;
+            }
+            metadata.joints.push_back(std::move(joint));
+        }
+        return rig::EncodeABR1(metadata, candidate, refusal);
+    } catch (...) { candidate.clear(); return false; }
+}
 Frame Compose(const Frame& parent,const Frame& local){Frame r;for(unsigned i=0;i<3;++i)r.originMM[i]=parent.originMM[i]+parent.x[i]*local.originMM[0]+parent.y[i]*local.originMM[1]+parent.z[i]*local.originMM[2];auto axis=[&](const std::array<double,3>&v){std::array<double,3>o{};for(unsigned i=0;i<3;++i)o[i]=parent.x[i]*v[0]+parent.y[i]*v[1]+parent.z[i]*v[2];return o;};r.x=axis(local.x);r.y=axis(local.y);r.z=axis(local.z);return r;}
 Frame OwnerWorld(const NativeOwner& owner,double metersPerUnit,const Frame& local){Frame r;std::array<double,9> rotation{};double scale=0;PositiveUniform(owner.placement,scale,rotation);const gp_XYZ t=owner.placement.TranslationPart();const double c=1000.0*metersPerUnit;const double origin[3]={local.originMM[0],local.originMM[1],local.originMM[2]};for(unsigned row=0;row<3;++row)r.originMM[row]=c*(row==0?t.X():(row==1?t.Y():t.Z()))+scale*(rotation[row]*origin[0]+rotation[3+row]*origin[1]+rotation[6+row]*origin[2]);auto axis=[&](const std::array<double,3>&v){std::array<double,3>o{};for(unsigned row=0;row<3;++row)o[row]=rotation[row]*v[0]+rotation[3+row]*v[1]+rotation[6+row]*v[2];return o;};r.x=axis(local.x);r.y=axis(local.y);r.z=axis(local.z);return r;}
 Core3DAttachmentRigError ErrorForRefusal(const std::string& refusal){if(refusal.find("surface")!=std::string::npos)return Core3DAttachmentRigErrorUnsupportedSurface;if(refusal.find("ABR1")!=std::string::npos||refusal.find("schema")!=std::string::npos||refusal.find("truncated")!=std::string::npos||refusal.find("trailing")!=std::string::npos||refusal.find("checksum")!=std::string::npos||refusal.find("canonical")!=std::string::npos)return Core3DAttachmentRigErrorInvalidEncoding;return Core3DAttachmentRigErrorInvalidMetadata;}
@@ -814,6 +1066,7 @@ Core3DAttachmentRigApplyResult ApplyResult(
 - (NSDictionary *)s4ExportCaptureObservation;
 #if DEBUG
 - (NSDictionary *)debugS3BooleanEditConflicting:(BOOL)conflicting;
+- (BOOL)debugInstallCorruptCarrierBytes:(NSData *)bytes;
 #endif
 @end
 
@@ -824,6 +1077,8 @@ Core3DAttachmentRigApplyResult ApplyResult(
     std::vector<NativeOwner> _nativeOwners;
     std::shared_ptr<std::atomic_bool> _cancelled;
     std::shared_ptr<std::atomic_bool> _bindingConsumed;
+    Core3DAttachmentRigCreationIntent *_creationIntent;
+    std::shared_ptr<std::atomic_bool> _creationCommitConsumed;
     bool _canBind;
     core3d::attachment_rig::owner::Result _lastOwnerResult;
 }
@@ -836,7 +1091,7 @@ Core3DAttachmentRigApplyResult ApplyResult(
         NativeObservation observation;if(!Observe(controller,document,nil,observation)){if(error)*error=RigError(Core3DAttachmentRigErrorUnavailable,@"retained native owner observation refused");return nil;}
         const CGSize drawable=controller.viewportDrawableSize;if(!std::isfinite(drawable.width)||!std::isfinite(drawable.height)||drawable.width<1||drawable.height<1||drawable.width>UINT32_MAX||drawable.height>UINT32_MAX){if(error)*error=RigError(Core3DAttachmentRigErrorUnavailable,@"viewport unavailable");return nil;}
         std::vector<std::string> receipts;for(NSString *entity in observation.selected)receipts.emplace_back(entity.UTF8String?:"");auto context=viewer->captureNativeOpeningContext(std::uint32_t(drawable.width),std::uint32_t(drawable.height),receipts);if(!context||!context->isCurrent(64,64)){if(error)*error=RigError(Core3DAttachmentRigErrorStale,@"native opening fence changed");return nil;}
-        Core3DAttachmentRigOpening *opening=[[self alloc]initPrivate];opening->_controller=controller;opening->_document=document;opening->_context=std::move(context);opening->_nativeOwners=std::move(observation.nativeOwners);opening->_cancelled=std::make_shared<std::atomic_bool>(false);opening->_bindingConsumed=std::make_shared<std::atomic_bool>(false);opening->_canBind=true;
+        Core3DAttachmentRigOpening *opening=[[self alloc]initPrivate];opening->_controller=controller;opening->_document=document;opening->_context=std::move(context);opening->_nativeOwners=std::move(observation.nativeOwners);opening->_cancelled=std::make_shared<std::atomic_bool>(false);opening->_bindingConsumed=std::make_shared<std::atomic_bool>(false);opening->_creationCommitConsumed=std::make_shared<std::atomic_bool>(false);opening->_canBind=true;
         opening.owners=observation.owners;opening.selectedEntityIdentifiers=observation.selected;opening.sourceWitnessBytes=observation.source;opening.documentIdentifier=observation.document;opening.contextIdentifier=NSUUID.UUID.UUIDString;opening.metersPerUnit=observation.scene.metersPerUnit;opening.documentGeneration=observation.scene.revisions.documentGeneration;opening.modelRevision=observation.scene.revisions.modelRevision;opening.presentationRevision=observation.scene.revisions.presentationRevision;opening.historyDepth=observation.history;return opening;
     }@catch(__unused NSException *exception){if(error)*error=RigError(Core3DAttachmentRigErrorUnavailable,@"native capture exception");return nil;}
 }
@@ -867,6 +1122,71 @@ Core3DAttachmentRigApplyResult ApplyResult(
     Core3DAttachmentRigOpening *bound=[[Core3DAttachmentRigOpening alloc]initPrivate];bound->_controller=_controller;bound->_document=_document;bound->_context=_context;bound->_nativeOwners=_nativeOwners;bound->_cancelled=_cancelled;bound->_bindingConsumed=_bindingConsumed;bound->_canBind=false;bound.owners=self.owners;bound.selectedEntityIdentifiers=self.selectedEntityIdentifiers;bound.sourceWitnessBytes=self.sourceWitnessBytes;bound.metadataProposalBytes=[bytes copy];bound.validation=validation;bound.documentIdentifier=self.documentIdentifier;bound.contextIdentifier=self.contextIdentifier;bound.metersPerUnit=self.metersPerUnit;bound.documentGeneration=self.documentGeneration;bound.modelRevision=self.modelRevision;bound.presentationRevision=self.presentationRevision;bound.historyDepth=self.historyDepth;return bound;
 }
 
+- (Core3DAttachmentRigOpening *)openingByBindingCreationIntent:
+    (Core3DAttachmentRigCreationIntent *)intent error:(NSError **)error {
+    if (error) *error = nil;
+    if (!NSThread.isMainThread) {
+        if (error) *error = RigError(Core3DAttachmentRigErrorInvalidThread,
+                                    @"main-thread opening required");
+        return nil;
+    }
+    if (!_canBind || _bindingConsumed->load()) {
+        if (error) *error = RigError(Core3DAttachmentRigErrorReplayed,
+                                    @"opening already used");
+        return nil;
+    }
+    if (_cancelled->load()) {
+        if (error) *error = RigError(Core3DAttachmentRigErrorCancelled,
+                                    @"opening cancelled");
+        return nil;
+    }
+    if (![intent isKindOfClass:Core3DAttachmentRigCreationIntent.class]) {
+        if (error) *error = RigError(Core3DAttachmentRigErrorInvalidArgument,
+                                    @"identity-free creation intent required");
+        return nil;
+    }
+    if (![self isCurrent:error]) return nil;
+    for (Core3DAttachmentRigCreationAttachment *attachment in intent.attachments) {
+        const std::string tuple = OwnerTuple(attachment.ownerKey);
+        const auto owner = std::find_if(_nativeOwners.begin(), _nativeOwners.end(),
+            [&](const NativeOwner& value) { return value.tuple == tuple; });
+        if (owner == _nativeOwners.end()) {
+            if (error) *error = RigError(Core3DAttachmentRigErrorForeignOwner,
+                                        @"attachment owner is foreign to captured document");
+            return nil;
+        }
+    }
+    if (![intent consumeForNativeBinding]) {
+        if (error) *error = RigError(Core3DAttachmentRigErrorReplayed,
+                                    @"creation intent already consumed");
+        return nil;
+    }
+    bool expected = false;
+    if (!_bindingConsumed->compare_exchange_strong(expected, true)) {
+        if (error) *error = RigError(Core3DAttachmentRigErrorReplayed,
+                                    @"opening already used");
+        return nil;
+    }
+    Core3DAttachmentRigOpening *bound = [[Core3DAttachmentRigOpening alloc] initPrivate];
+    bound->_controller = _controller; bound->_document = _document;
+    bound->_context = _context; bound->_nativeOwners = _nativeOwners;
+    bound->_cancelled = _cancelled; bound->_bindingConsumed = _bindingConsumed;
+    bound->_creationIntent = intent;
+    bound->_creationCommitConsumed = std::make_shared<std::atomic_bool>(false);
+    bound->_canBind = false;
+    bound.owners = self.owners;
+    bound.selectedEntityIdentifiers = self.selectedEntityIdentifiers;
+    bound.sourceWitnessBytes = self.sourceWitnessBytes;
+    bound.documentIdentifier = self.documentIdentifier;
+    bound.contextIdentifier = self.contextIdentifier;
+    bound.metersPerUnit = self.metersPerUnit;
+    bound.documentGeneration = self.documentGeneration;
+    bound.modelRevision = self.modelRevision;
+    bound.presentationRevision = self.presentationRevision;
+    bound.historyDepth = self.historyDepth;
+    return bound;
+}
+
 - (BOOL)isCurrent:(NSError **)error {if(error)*error=nil;if(!NSThread.isMainThread||!_controller){if(error)*error=RigError(Core3DAttachmentRigErrorInvalidThread,@"main-thread live controller required");return NO;}if(_cancelled->load()){if(error)*error=RigError(Core3DAttachmentRigErrorCancelled,@"opening cancelled");return NO;}if(!_context||!_context->isCurrent(64,64)){if(error)*error=RigError(Core3DAttachmentRigErrorStale,@"native opening fence changed");return NO;}NativeObservation fresh;if(!Observe(_controller,_document,self.selectedEntityIdentifiers,fresh)||![fresh.document isEqualToString:self.documentIdentifier]||![fresh.source isEqualToData:self.sourceWitnessBytes]||fresh.history!=self.historyDepth){if(error)*error=RigError(Core3DAttachmentRigErrorStale,@"captured dependency changed");return NO;}return YES;}
 - (void)cancel {if(_cancelled)_cancelled->store(true);}
 - (NSData *)storedMetadataBytesWithError:(NSError **)error {
@@ -895,16 +1215,23 @@ Core3DAttachmentRigApplyResult ApplyResult(
     _lastOwnerResult={};
     if(!NSThread.isMainThread||_document.IsNull()||!context||!_cancelled)
         return Core3DAttachmentRigApplyResultUnavailable;
+    const bool creation = !remove && _creationIntent != nil;
     if(remove ? (!_canBind||self.validation!=nil)
-              : (_canBind||self.validation==nil))
+              : (_canBind||(!creation&&self.validation==nil)))
         return Core3DAttachmentRigApplyResultUnavailable;
+    if (creation) {
+        bool expected = false;
+        if (!_creationCommitConsumed
+            || !_creationCommitConsumed->compare_exchange_strong(expected, true))
+            return Core3DAttachmentRigApplyResultRefused;
+    }
     NSError *currentError=nil;
     if(![self isCurrent:&currentError])
         return currentError.code==Core3DAttachmentRigErrorCancelled
             ? Core3DAttachmentRigApplyResultCancelled
             : Core3DAttachmentRigApplyResultRefused;
     std::vector<std::uint8_t> candidate;
-    if(!remove){NSData *bytes=candidateOverride?:self.validation.canonicalMetadataBytes;
+    if(!remove&&!creation){NSData *bytes=candidateOverride?:self.validation.canonicalMetadataBytes;
         candidate.resize(bytes.length);if(bytes.length)std::memcpy(candidate.data(),bytes.bytes,bytes.length);}
     // The carrier edit commits no geometry. Publish the actual native-captured
     // bound owners as reconciliation items through the same native context:
@@ -928,8 +1255,20 @@ Core3DAttachmentRigApplyResult ApplyResult(
         }
         return true;
     };
+    const auto prepare = creation
+        ? core3d::attachment_rig::owner::PrepareCandidate(
+            [intent = _creationIntent](const auto& before, auto& output) noexcept {
+                return AppendCreationIntent(intent, before, output);
+            })
+        : core3d::attachment_rig::owner::PrepareCandidate();
     _lastOwnerResult=core3d::attachment_rig::owner::Apply(
-        *_document,context,candidate,remove,reobserve,publication,*_cancelled,fault);
+        *_document,context,candidate,remove,reobserve,publication,*_cancelled,fault,prepare);
+    if (creation && (_lastOwnerResult.outcome
+            == core3d::attachment_rig::owner::Outcome::Created
+        || _lastOwnerResult.outcome
+            == core3d::attachment_rig::owner::Outcome::Committed))
+        self.metadataProposalBytes = Data(_lastOwnerResult.readback.data(),
+                                          _lastOwnerResult.readback.size());
     return ApplyResult(_lastOwnerResult.outcome);
 }
 
@@ -1134,6 +1473,33 @@ Core3DAttachmentRigApplyResult ApplyResult(
 }
 
 #if DEBUG
+- (BOOL)debugInstallCorruptCarrierBytes:(NSData *)bytes {
+    if (!NSThread.isMainThread || _document.IsNull() || !_context
+        || bytes.length == 0
+        || bytes.length > core3d::attachment_rig::kMaxStoredABR1Bytes)
+        return NO;
+    auto lease = _context->beginCommandLease(_context->openingFence(), 64, 64);
+    if (!lease || !lease->ownsOpenCommand()) return NO;
+    @try {
+        const Handle(TDataStd_ByteArray) attribute = TDataStd_ByteArray::Set(
+            _document->Document()->Main(),
+            core3d::attachment_rig::AttachmentRigAttributeID(), 0,
+            Standard_Integer(bytes.length) - 1, Standard_False);
+        if (attribute.IsNull()) { lease->abort(); return NO; }
+        const auto *raw = static_cast<const std::uint8_t *>(bytes.bytes);
+        for (NSUInteger index = 0; index < bytes.length; ++index)
+            attribute->SetValue(Standard_Integer(index), raw[index]);
+        if (!lease->commit()) return NO;
+        core3d::attachment_rig::StoredRecord stored;
+        return _document->FinalizeAttachmentRigHistory()
+            && _document->ReadAttachmentRigMetadata(stored)
+            && stored.state == core3d::attachment_rig::StoredReadState::Corrupt;
+    } @catch (__unused NSException *exception) {
+        if (lease->ownsOpenCommand()) lease->abort();
+        return NO;
+    }
+}
+
 - (NSDictionary *)debugApplyWithFault:(std::int32_t)fault
     cancelBeforeApply:(BOOL)cancelBeforeApply
     candidateOverride:(NSData *)candidateOverride
@@ -1210,6 +1576,107 @@ Core3DAttachmentRigApplyResult ApplyResult(
 #endif
 @end
 
+@implementation Core3DViewController (AttachmentRigPassiveObservation)
+- (Core3DAttachmentRigOwnerObservationState *)
+    attachmentRigOwnerObservationForEntityIdentifier:(NSString *)entityIdentifier {
+    Core3DAttachmentRigOwnerObservationState *result =
+        [[Core3DAttachmentRigOwnerObservationState alloc] initPrivate];
+    result.entityIdentifier = [entityIdentifier isKindOfClass:NSString.class]
+        ? [entityIdentifier copy] : @"";
+    result.carrierState = Core3DAttachmentRigCarrierStateUnavailable;
+    result.reviewState = Core3DAttachmentRigReviewStateUnavailable;
+    result.reviewReasons = @[];
+    result.fullCarrierScope = YES;
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128 || !entityIdentifier.UTF8String) return result;
+    @try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        auto viewer = gl ? gl.viewer : nullptr;
+        Handle(OcctDocument) document = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        if (!viewer || document.IsNull() || document->Document().IsNull()
+            || document->Document()->HasOpenCommand()) return result;
+        NativeOwner requested;
+        if (!CaptureOwner(document, entityIdentifier, requested)) return result;
+        core3d::attachment_rig::StoredRecord stored;
+        if (!document->ReadAttachmentRigMetadata(stored)) return result;
+        if (stored.state == core3d::attachment_rig::StoredReadState::Absent) {
+            result.carrierState = Core3DAttachmentRigCarrierStateAbsent;
+            return result;
+        }
+        if (stored.state == core3d::attachment_rig::StoredReadState::Corrupt) {
+            result.carrierState = Core3DAttachmentRigCarrierStateCorrupt;
+            result.reviewState = Core3DAttachmentRigReviewStateRefused;
+            result.reviewReasons = stored.refusal.empty()
+                ? @[@"corrupt-stored-metadata"] : @[Text(stored.refusal)];
+            return result;
+        }
+        core3d::attachment_rig::Metadata metadata;
+        std::string refusal;
+        if (!core3d::attachment_rig::DecodeABR1(stored.bytes, metadata, refusal)) {
+            result.carrierState = Core3DAttachmentRigCarrierStateCorrupt;
+            result.reviewState = Core3DAttachmentRigReviewStateRefused;
+            result.reviewReasons = @[Text(refusal)];
+            return result;
+        }
+        const auto receipts =
+            core3d::attachment_rig::ReattachSurfaceBindings(metadata, refusal);
+        if (receipts.size() != metadata.attachments.size()) {
+            result.carrierState = Core3DAttachmentRigCarrierStatePresent;
+            result.reviewState = Core3DAttachmentRigReviewStateRefused;
+            result.reviewReasons = @[Text(refusal)];
+            return result;
+        }
+        result.carrierState = Core3DAttachmentRigCarrierStatePresent;
+        result.carrierAttachmentCount = metadata.attachments.size();
+        result.carrierJointCount = metadata.joints.size();
+        result.jointCount = metadata.joints.size();
+        Core3DAttachmentRigReviewState aggregate =
+            Core3DAttachmentRigReviewStateCurrent;
+        NSMutableArray<NSString *> *reasons = [NSMutableArray array];
+        for (std::size_t index = 0; index < metadata.attachments.size(); ++index) {
+            const auto& attachment = metadata.attachments[index];
+            const std::string& tuple = attachment.rigid
+                ? attachment.rigid->owner : attachment.surface->owner;
+            if (tuple != requested.tuple) continue;
+            ++result.attachmentCount;
+            auto receipt = receipts[index];
+            if (receipt.outcome == core3d::attachment_rig::ReattachOutcome::Current
+                && !requested.booleanCorrespondence.empty()) {
+                if (requested.booleanCorrespondence == "one-to-one")
+                    receipt.reason = "one-to-one correspondence retained";
+                else {
+                    receipt.outcome =
+                        core3d::attachment_rig::ReattachOutcome::NeedsReview;
+                    receipt.reason = "source-correspondence-"
+                        + requested.booleanCorrespondence;
+                }
+            }
+            switch (receipt.outcome) {
+                case core3d::attachment_rig::ReattachOutcome::Current:
+                case core3d::attachment_rig::ReattachOutcome::Reattached:
+                    break;
+                case core3d::attachment_rig::ReattachOutcome::NeedsReview:
+                    if (aggregate == Core3DAttachmentRigReviewStateCurrent)
+                        aggregate = Core3DAttachmentRigReviewStateNeedsReview;
+                    break;
+                case core3d::attachment_rig::ReattachOutcome::Stale:
+                    aggregate = Core3DAttachmentRigReviewStateStale;
+                    break;
+                case core3d::attachment_rig::ReattachOutcome::Refused:
+                    aggregate = Core3DAttachmentRigReviewStateRefused;
+                    break;
+            }
+            [reasons addObject:Text(receipt.reason)];
+        }
+        result.reviewState = aggregate;
+        result.reviewReasons = reasons;
+        return result;
+    } @catch (__unused NSException *exception) { return result; }
+}
+@end
+
 extern "C" void *Core3DF4AttachmentRigExportCapture(void *openingPointer) {
     @autoreleasepool {
         Core3DAttachmentRigOpening *opening =
@@ -1256,6 +1723,16 @@ extern "C" void *Core3DDebugF4S3ReattachmentProbe(void *openingPointer) {
         NSDictionary *value=opening
             ?[opening s3CommittedReattachmentObservation]:@{};
         return (__bridge_retained void *)value;
+    }
+}
+
+extern "C" std::int32_t Core3DDebugF4InstallCorruptCarrierProbe(
+    void *openingPointer, const void *bytesPointer) {
+    @autoreleasepool {
+        Core3DAttachmentRigOpening *opening =
+            (__bridge Core3DAttachmentRigOpening *)openingPointer;
+        NSData *bytes = (__bridge NSData *)bytesPointer;
+        return opening && [opening debugInstallCorruptCarrierBytes:bytes] ? 1 : 0;
     }
 }
 #endif

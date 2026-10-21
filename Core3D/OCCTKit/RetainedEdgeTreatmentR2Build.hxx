@@ -598,8 +598,19 @@ public:
             if (stop.load()) { refusal = et::Refusal::Cancelled; return false; }
             const auto* bound = std::get_if<r2::BooleanBaseBinding>(&definition.base);
             const auto* legacy = std::get_if<r2::LegacyBooleanBase>(&source.source);
-            const auto* program = legacy
-                ? std::get_if<retained_boolean::Program>(&legacy->prefix) : nullptr;
+            // A prefix stored in the v1 Legacy SYRS encoding is in lane: promote
+            // it for this proof only, exactly as PrepareMigrationStages does.
+            // The stored prefix bytes, the binding and ValidateCompletePrefix
+            // stay byte-identical; an unpromotable Legacy still refuses below.
+            retained_boolean::Program promoted;
+            const retained_boolean::Program* program = nullptr;
+            if (legacy) {
+                if (const auto* stored = std::get_if<retained_boolean::Program>(&legacy->prefix)) {
+                    program = stored;
+                } else if (const auto* v1 = std::get_if<retained_boolean::Legacy>(&legacy->prefix)) {
+                    if (retained_boolean::Promote(*v1, promoted)) program = &promoted;
+                }
+            }
             const auto* prefix = bound
                 ? std::get_if<r2::LegacyPrefixBinding>(&bound->prefix) : nullptr;
             if (!bound || !legacy || !program || !prefix
@@ -766,8 +777,17 @@ public:
         try {
             const auto* bound = std::get_if<r2::BooleanBaseBinding>(&definition.base);
             const auto* legacy = std::get_if<r2::LegacyBooleanBase>(&source.source);
-            const auto* program = legacy
-                ? std::get_if<retained_boolean::Program>(&legacy->prefix) : nullptr;
+            // Same proof-only v1 promotion as Issue above: the sealed
+            // certificate keeps binding the exact stored bytes unchanged.
+            retained_boolean::Program promoted;
+            const retained_boolean::Program* program = nullptr;
+            if (legacy) {
+                if (const auto* stored = std::get_if<retained_boolean::Program>(&legacy->prefix)) {
+                    program = stored;
+                } else if (const auto* v1 = std::get_if<retained_boolean::Legacy>(&legacy->prefix)) {
+                    if (retained_boolean::Promote(*v1, promoted)) program = &promoted;
+                }
+            }
             const auto* prefix = bound
                 ? std::get_if<r2::LegacyPrefixBinding>(&bound->prefix) : nullptr;
             if (!bound || !legacy || !program || !prefix
