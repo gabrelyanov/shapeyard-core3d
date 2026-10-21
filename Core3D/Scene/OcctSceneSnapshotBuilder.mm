@@ -180,6 +180,7 @@
 #include <functional>
 #include <iomanip>
 #include <limits>
+#include <memory>
 #include <new>
 #include <numeric>
 #include <optional>
@@ -1477,6 +1478,244 @@ bool IntersectRayTriangle(const Double3& theOrigin,
     theDistance = distance; return true;
 }
 
+// Outward-rounded intervals enclose the *existing floating-point* ray test
+// over an origin box. In particular, its dimensionless barycentric tolerance
+// is not mistaken for a world-space AABB padding. Uncertain/nonfinite bounds
+// retain the triangle; only a proved rejection can remove it from a layer.
+struct DecalRayInterval final {
+    double lower = 0.0, upper = 0.0;
+    bool finite() const {
+        return IsFinite(lower) && IsFinite(upper) && lower <= upper;
+    }
+};
+
+DecalRayInterval RayIntervalBounds(double lower, double upper)
+{
+    return {std::nextafter(lower, -std::numeric_limits<double>::infinity()),
+            std::nextafter(upper, std::numeric_limits<double>::infinity())};
+}
+DecalRayInterval RayIntervalAdd(DecalRayInterval a, DecalRayInterval b)
+{
+    return RayIntervalBounds(a.lower + b.lower, a.upper + b.upper);
+}
+DecalRayInterval RayIntervalSubtract(DecalRayInterval a, DecalRayInterval b)
+{
+    return RayIntervalBounds(a.lower - b.upper, a.upper - b.lower);
+}
+DecalRayInterval RayIntervalScale(DecalRayInterval a, double scale)
+{
+    return scale >= 0.0
+        ? RayIntervalBounds(a.lower * scale, a.upper * scale)
+        : RayIntervalBounds(a.upper * scale, a.lower * scale);
+}
+using DecalRayInterval3 = std::array<DecalRayInterval, 3>;
+
+DecalRayInterval RayIntervalDot(const DecalRayInterval3& a, const Double3& b)
+{
+    return RayIntervalAdd(RayIntervalAdd(RayIntervalScale(a[0], b.x),
+        RayIntervalScale(a[1], b.y)), RayIntervalScale(a[2], b.z));
+}
+
+DecalRayInterval RayIntervalProduct(DecalRayInterval a, DecalRayInterval b)
+{
+    if (!a.finite() || !b.finite())
+        return {-std::numeric_limits<double>::infinity(),
+                 std::numeric_limits<double>::infinity()};
+    const std::array<double, 4> products{{a.lower * b.lower, a.lower * b.upper,
+        a.upper * b.lower, a.upper * b.upper}};
+    return RayIntervalBounds(*std::min_element(products.begin(), products.end()),
+        *std::max_element(products.begin(), products.end()));
+}
+
+// Preserve the correlation between origin coordinates through the linear
+// ray equations. Coefficients enclose real arithmetic; the constant term
+// additionally encloses each floating operation's rounding error. This lets
+// a spatial exclusion remain valid even for ill-conditioned triangles.
+struct DecalRayAffine final {
+    std::array<DecalRayInterval, 4> coefficients{};
+};
+DecalRayAffine RayAffineConstant(double value)
+{
+    DecalRayAffine result;
+    result.coefficients[3] = {value, value};
+    return result;
+}
+DecalRayInterval RayAffineRange(const DecalRayAffine& value,
+                               const DecalRayInterval3& domain)
+{
+    auto result = value.coefficients[3];
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        result = RayIntervalAdd(result,
+            RayIntervalProduct(value.coefficients[axis], domain[axis]));
+    return result;
+}
+void RayAffineRound(DecalRayAffine& value, const DecalRayInterval3& domain)
+{
+    const auto range = RayAffineRange(value, domain);
+    double error = std::numeric_limits<double>::infinity();
+    if (range.finite()) {
+        const double magnitude = std::max(std::abs(range.lower), std::abs(range.upper));
+        error = RayIntervalAdd(RayIntervalScale({magnitude, magnitude},
+            std::numeric_limits<double>::epsilon()),
+            {std::numeric_limits<double>::denorm_min(),
+             std::numeric_limits<double>::denorm_min()}).upper;
+    }
+    value.coefficients[3] = RayIntervalAdd(value.coefficients[3], {-error, error});
+}
+DecalRayAffine RayAffineAdd(const DecalRayAffine& a, const DecalRayAffine& b,
+                            const DecalRayInterval3& domain, bool subtract = false)
+{
+    DecalRayAffine result;
+    for (std::size_t i = 0; i < result.coefficients.size(); ++i)
+        result.coefficients[i] = subtract
+            ? RayIntervalSubtract(a.coefficients[i], b.coefficients[i])
+            : RayIntervalAdd(a.coefficients[i], b.coefficients[i]);
+    RayAffineRound(result, domain);
+    return result;
+}
+DecalRayAffine RayAffineScale(const DecalRayAffine& a, double scale,
+                              const DecalRayInterval3& domain)
+{
+    DecalRayAffine result;
+    for (std::size_t i = 0; i < result.coefficients.size(); ++i)
+        result.coefficients[i] = RayIntervalScale(a.coefficients[i], scale);
+    RayAffineRound(result, domain);
+    return result;
+}
+using DecalRayAffine3 = std::array<DecalRayAffine, 3>;
+DecalRayAffine RayAffineDot(const DecalRayAffine3& a, const Double3& b,
+                            const DecalRayInterval3& domain)
+{
+    return RayAffineAdd(RayAffineAdd(RayAffineScale(a[0], b.x, domain),
+        RayAffineScale(a[1], b.y, domain), domain),
+        RayAffineScale(a[2], b.z, domain), domain);
+}
+
+bool RayDomainSpatiallySeparated(const Bounds3d& origins,
+                                 const Double3& direction,
+                                 double maximumDistance, const Double3& p,
+                                 const Double3& edge1, const Double3& edge2,
+                                 const Double3& cross, double inverse)
+{
+    const DecalRayInterval3 domain{{
+        {origins.minimum.x, origins.maximum.x},
+        {origins.minimum.y, origins.maximum.y},
+        {origins.minimum.z, origins.maximum.z}}};
+    const std::array<double, 3> point{{p.x, p.y, p.z}};
+    const std::array<double, 3> first{{edge1.x, edge1.y, edge1.z}};
+    const std::array<double, 3> second{{edge2.x, edge2.y, edge2.z}};
+    const std::array<double, 3> ray{{direction.x, direction.y, direction.z}};
+    DecalRayAffine3 origin, offset;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        origin[axis].coefficients[axis] = {1.0, 1.0};
+        offset[axis] = RayAffineAdd(origin[axis], RayAffineConstant(point[axis]),
+            domain, true);
+    }
+    const auto u = RayAffineScale(RayAffineDot(offset, cross, domain), inverse, domain);
+    const DecalRayAffine3 q{{
+        RayAffineAdd(RayAffineScale(offset[1], edge1.z, domain),
+            RayAffineScale(offset[2], edge1.y, domain), domain, true),
+        RayAffineAdd(RayAffineScale(offset[2], edge1.x, domain),
+            RayAffineScale(offset[0], edge1.z, domain), domain, true),
+        RayAffineAdd(RayAffineScale(offset[0], edge1.y, domain),
+            RayAffineScale(offset[1], edge1.x, domain), domain, true)}};
+    const auto v = RayAffineScale(RayAffineDot(q, direction, domain), inverse, domain);
+    const auto distance = RayAffineScale(RayAffineDot(q, edge2, domain), inverse, domain);
+    // The accepted rounded u+v may exceed its rounded comparison constant
+    // in real arithmetic. Enclose that next float too, without changing the
+    // exact predicate's tolerance. Each barycentric weight is then >= -pad.
+    constexpr double tolerance = 1.0e-12;
+    const double barycentricPad = std::max(tolerance,
+        std::nextafter(1.0 + tolerance,
+            std::numeric_limits<double>::infinity()) - 1.0);
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        const auto rayPoint = RayAffineAdd(origin[axis],
+            RayAffineScale(distance, ray[axis], domain), domain);
+        const auto trianglePoint = RayAffineAdd(RayAffineConstant(point[axis]),
+            RayAffineAdd(RayAffineScale(u, first[axis], domain),
+                RayAffineScale(v, second[axis], domain), domain), domain);
+        const auto residual = RayAffineRange(
+            RayAffineAdd(rayPoint, trianglePoint, domain, true), domain);
+        if (!residual.finite()) continue;
+        const auto vertex1 = RayIntervalAdd({point[axis], point[axis]},
+            {first[axis], first[axis]});
+        const auto vertex2 = RayIntervalAdd({point[axis], point[axis]},
+            {second[axis], second[axis]});
+        const auto margin = RayIntervalScale(RayIntervalScale(RayIntervalAdd(
+            {std::abs(first[axis]), std::abs(first[axis])},
+            {std::abs(second[axis]), std::abs(second[axis])}), barycentricPad), 3.0);
+        auto triangleRange = RayIntervalAdd({
+            std::min({point[axis], vertex1.lower, vertex2.lower}),
+            std::max({point[axis], vertex1.upper, vertex2.upper})},
+            {-margin.upper, margin.upper});
+        // O + direction*t = P + edge1*u + edge2*v + residual.
+        triangleRange = RayIntervalAdd(triangleRange, residual);
+        const auto rayRange = RayIntervalAdd(domain[axis],
+            RayIntervalScale({-tolerance, maximumDistance}, ray[axis]));
+        if (triangleRange.finite() && rayRange.finite()
+            && (triangleRange.upper < rayRange.lower
+                || rayRange.upper < triangleRange.lower))
+            return true;
+    }
+    return false;
+}
+
+bool RayDomainMayIntersect(const Bounds3d& origins,
+                           const Double3& direction,
+                           double maximumDistance,
+                           const DecalWorldTriangle& triangle)
+{
+    if (!origins.valid || !IsFinite(maximumDistance)) return true;
+    // Keep the same scalar operations, tolerances and finite-distance test as
+    // IntersectRayTriangle and its caller. Interval operations then enclose
+    // every possible origin in the box, including boundary/tie hits.
+    constexpr double tolerance = 1.0e-12;
+    const Double3 edge1 = Subtract(triangle.points[1], triangle.points[0]);
+    const Double3 edge2 = Subtract(triangle.points[2], triangle.points[0]);
+    const Double3 cross = Cross(direction, edge2);
+    const double determinant = Dot(edge1, cross);
+    if (!IsFinite(determinant) || std::abs(determinant) <= tolerance)
+        return false;
+    const double inverse = 1.0 / determinant;
+    const Double3& p = triangle.points[0];
+    const DecalRayInterval3 offset{{
+        RayIntervalSubtract({origins.minimum.x, origins.maximum.x}, {p.x, p.x}),
+        RayIntervalSubtract({origins.minimum.y, origins.maximum.y}, {p.y, p.y}),
+        RayIntervalSubtract({origins.minimum.z, origins.maximum.z}, {p.z, p.z})}};
+    const DecalRayInterval u = RayIntervalScale(
+        RayIntervalDot(offset, cross), inverse);
+    const DecalRayInterval3 q{{
+        RayIntervalSubtract(RayIntervalScale(offset[1], edge1.z),
+            RayIntervalScale(offset[2], edge1.y)),
+        RayIntervalSubtract(RayIntervalScale(offset[2], edge1.x),
+            RayIntervalScale(offset[0], edge1.z)),
+        RayIntervalSubtract(RayIntervalScale(offset[0], edge1.y),
+            RayIntervalScale(offset[1], edge1.x))}};
+    const DecalRayInterval v = RayIntervalScale(
+        RayIntervalDot(q, direction), inverse);
+    const DecalRayInterval uv = RayIntervalAdd(u, v);
+    const DecalRayInterval distance = RayIntervalScale(
+        RayIntervalDot(q, edge2), inverse);
+    if (!u.finite() || !v.finite() || !uv.finite() || !distance.finite())
+        return true;
+    if (u.upper < -tolerance || u.lower > 1.0 + tolerance
+        || v.upper < -tolerance || uv.lower > 1.0 + tolerance
+        || distance.upper < -tolerance || distance.lower > maximumDistance)
+        return false;
+    return !RayDomainSpatiallySeparated(origins, direction, maximumDistance,
+        p, edge1, edge2, cross, inverse);
+}
+
+bool RayDomainContains(const Bounds3d& origins, const Double3& origin,
+                        double maximumDistance, double distance)
+{
+    return origins.valid && IsFinite(maximumDistance)
+        && distance <= maximumDistance
+        && origin.x >= origins.minimum.x && origin.x <= origins.maximum.x
+        && origin.y >= origins.minimum.y && origin.y <= origins.maximum.y
+        && origin.z >= origins.minimum.z && origin.z <= origins.maximum.z;
+}
+
 } // namespace decal_math
 
 struct OrdinaryDecalFaceInputs final {
@@ -1854,6 +2093,97 @@ bool PrepareOrdinaryDecalFace(
             || theInputs.primitive.indexCount % 3 != 0) return false;
         const std::size_t aTriangleCount =
             theInputs.primitive.indexCount / 3;
+
+        // Bound the actual ray origins using this receiver's world-space
+        // vertices and this layer's unchanged distance law. A per-sample
+        // containment check below covers interpolation roundoff and falls
+        // back to the complete census whenever this box is insufficient.
+        const double aRayTolerance = 1.0e-7 / theInputs.metersPerUnit;
+        const double aMaximumExpectedDistance = anIntent.placement.kind
+                == dl::PlacementKind::Face
+            ? theInputs.occluderSpan + aRayTolerance * 4.0
+            : aFarLocal - aNearLocal;
+        const double aMaximumHitDistance =
+            aMaximumExpectedDistance + aRayTolerance;
+        Bounds3d aRayOrigins;
+        bool aFiniteDomain = IsFinite(aMaximumHitDistance);
+        if (!theInputs.budget.visit(theInputs.primitive.indexCount,
+                core3d::retained_topology_budget::Site::C05OwnerScan))
+            return false;
+        for (std::size_t corner = 0;
+             corner < theInputs.primitive.indexCount; ++corner) {
+            const auto index = theInputs.indices[
+                theInputs.primitive.firstIndex + corner];
+            if (index >= theInputs.vertices.size()) return false;
+            const Vertex& vertex = theInputs.vertices[index];
+            const Double3 local{vertex.positionX, vertex.positionY,
+                                vertex.positionZ};
+            Double3 world;
+            if (!TransformPoint(theInputs.worldFromObject, local, world))
+                return false;
+            const double distance = anIntent.placement.kind
+                    == dl::PlacementKind::Face
+                ? aMaximumExpectedDistance
+                : Dot(Subtract(Add(local, theInputs.sourceOrigin), anOrigin),
+                    aRayLocal) - aNearLocal;
+            const Double3 origin = Subtract(world, Scale(aRayWorld, distance));
+            if (!IsFinite(origin.x) || !IsFinite(origin.y)
+                || !IsFinite(origin.z)) {
+                aFiniteDomain = false;
+                continue;
+            }
+            if (!aRayOrigins.valid) {
+                aRayOrigins.minimum = aRayOrigins.maximum = origin;
+                aRayOrigins.valid = true;
+            } else {
+                aRayOrigins.minimum.x = std::min(aRayOrigins.minimum.x, origin.x);
+                aRayOrigins.minimum.y = std::min(aRayOrigins.minimum.y, origin.y);
+                aRayOrigins.minimum.z = std::min(aRayOrigins.minimum.z, origin.z);
+                aRayOrigins.maximum.x = std::max(aRayOrigins.maximum.x, origin.x);
+                aRayOrigins.maximum.y = std::max(aRayOrigins.maximum.y, origin.y);
+                aRayOrigins.maximum.z = std::max(aRayOrigins.maximum.z, origin.z);
+            }
+        }
+        aRayOrigins.valid = aRayOrigins.valid && aFiniteDomain;
+        if (aRayOrigins.valid) {
+            // Padding only broadens the query; it changes no hit tolerance.
+            const auto pad = [](double& lower, double& upper) {
+                const double margin = 64.0 * std::numeric_limits<double>::epsilon()
+                    * std::max({1.0, std::abs(lower), std::abs(upper)});
+                const auto interval = RayIntervalBounds(lower - margin, upper + margin);
+                lower = interval.lower; upper = interval.upper;
+            };
+            pad(aRayOrigins.minimum.x, aRayOrigins.maximum.x);
+            pad(aRayOrigins.minimum.y, aRayOrigins.maximum.y);
+            pad(aRayOrigins.minimum.z, aRayOrigins.maximum.z);
+        }
+
+        // The complete committed vector/proof remains authoritative. Reserve
+        // the actual worst-case index capacity before allocation, and debit
+        // every construction visit on the SAME budget used by both layers.
+        // The ticket outlives the array, including on all early returns.
+        dl::bake::accounting::Ticket aRayCandidateTicket;
+        std::size_t aRayCandidateBytes = 0;
+        if (!theInputs.budget.visit(theInputs.occluders.size(),
+                core3d::retained_topology_budget::Site::C05OwnerScan)
+            || !theInputs.operation.CheckedProduct(theInputs.occluders.size(),
+                sizeof(std::size_t), 1, aRayCandidateBytes,
+                dl::bake::accounting::FailureSite::ReceiverTriangleStorage)
+            || !aRayCandidateTicket.acquire(theInputs.operation,
+                dl::bake::accounting::StorageDimension::PrivateStorage,
+                aRayCandidateBytes, dl::bake::accounting::Retention::Scratch,
+                dl::bake::accounting::FailureSite::ReceiverTriangleStorage)
+            || !theInputs.operation.EnterAllocation(
+                dl::bake::accounting::FailureSite::ReceiverTriangleStorage))
+            return false;
+        const std::unique_ptr<std::size_t[]> aRayCandidates(
+            new std::size_t[theInputs.occluders.size()]);
+        std::size_t aRayCandidateCount = 0;
+        for (std::size_t index = 0; index < theInputs.occluders.size(); ++index)
+            if (RayDomainMayIntersect(aRayOrigins, aRayWorld,
+                    aMaximumHitDistance, theInputs.occluders[index]))
+                aRayCandidates[aRayCandidateCount++] = index;
+
         std::size_t aTriangleBytes = 0;
         if (!theInputs.operation.CheckedProduct(aTriangleCount,
                 sizeof(dl::bake::Triangle), 1, aTriangleBytes,
@@ -2017,12 +2347,22 @@ bool PrepareOrdinaryDecalFace(
                     double aNearest = std::numeric_limits<double>::max();
                     std::size_t aNearestInstance = 0;
                     std::uint32_t aNearestFace = 0;
-                    for (const DecalWorldTriangle& anOccluder :
-                         theInputs.occluders) {
+                    if (!theInputs.budget.visit(1,
+                            core3d::retained_topology_budget::Site::C06DirectCensus))
+                        return false;
+                    const bool aBoundedRay = RayDomainContains(aRayOrigins,
+                        aRayOrigin, aMaximumHitDistance,
+                        anExpectedDistance + aTolerance);
+                    const std::size_t aVisitCount = aBoundedRay
+                        ? aRayCandidateCount : theInputs.occluders.size();
+                    for (std::size_t index = 0; index < aVisitCount; ++index) {
                         if (!theInputs.budget.visit(1,
                                 core3d::retained_topology_budget::
                                     Site::C06DirectCensus))
                             return false;
+                        const DecalWorldTriangle& anOccluder =
+                            theInputs.occluders[aBoundedRay
+                                ? aRayCandidates[index] : index];
                         double aDistance = 0.0;
                         if (!IntersectRayTriangle(aRayOrigin,
                                 aRayWorld, anOccluder,
