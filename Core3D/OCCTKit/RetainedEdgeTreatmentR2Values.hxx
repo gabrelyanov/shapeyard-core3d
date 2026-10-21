@@ -150,10 +150,18 @@ struct LegacySelectorBinding {
     fs::SelectorIntent intent;
 };
 struct SelectorAppendIntent { fs::SelectorIntent intent; double amountMM = 0; };
+struct ClosedRimAppendRequest {
+    std::uint32_t requestVersion = 1;
+    fs::CapRole capRole = fs::CapRole::Lower;
+    fs::RimRole rimRole = fs::RimRole::OuterCircle;
+    std::uint32_t expectedCount = 1;
+    double amountMM = 0;
+};
 struct MigrationM3 {
     std::uint32_t version = MigrationVersion;
     std::vector<LegacySelectorBinding> selectors;
     std::optional<SelectorAppendIntent> append;
+    std::optional<ClosedRimAppendRequest> closedRimAppend;
 };
 
 namespace detail {
@@ -249,13 +257,23 @@ inline bool Valid(const Definition& value, et::Refusal& refusal) noexcept {
             for (const auto& step : value.steps) {
                 if (!step.selector || step.selector->proofVersion != 2) continue;
                 const auto* relative = std::get_if<fs::SourceRelativeV1>(&step.selector->intent);
-                if (!relative || relative->sourceOwnerDocument != boolean->source.document
+                const auto* closedRim = std::get_if<fs::SourceOwnedClosedRimV1>(
+                    &step.selector->intent);
+                if ((!relative && !closedRim)
+                    || (relative && (relative->sourceOwnerDocument != boolean->source.document
                     || relative->sourceOwnerEntity != boolean->source.entity
                     || relative->sourceOwnerDefinition != boolean->source.definition
                     || relative->inputRootNode != prefix->rootNode
-                    || relative->sourceFeature != boolean->source.sourceFeature) {
+                    || relative->sourceFeature != boolean->source.sourceFeature))
+                    || (closedRim
+                        && (closedRim->sourceOwnerDocument != boolean->source.document
+                            || closedRim->sourceOwnerEntity != boolean->source.entity
+                            || closedRim->sourceOwnerDefinition != boolean->source.definition
+                            || closedRim->inputRootNode != prefix->rootNode
+                            || closedRim->sourceFeature != boolean->source.sourceFeature))) {
                     refusal = et::Refusal::IdentityMismatch; return false;
                 }
+                if (closedRim) continue;
                 std::vector<double> capture(relative->captureProfileScalarBits.size());
                 for (std::size_t index = 0; index < capture.size(); ++index)
                     std::memcpy(&capture[index], &relative->captureProfileScalarBits[index], sizeof(double));

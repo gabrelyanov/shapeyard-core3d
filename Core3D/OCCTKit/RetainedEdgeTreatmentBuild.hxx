@@ -69,6 +69,8 @@ inline bool EquivalentReplayGeometry(const TopoDS_Shape& actual, const TopoDS_Sh
 struct SourceStageContext final {
     std::vector<std::pair<UUID,
         std::shared_ptr<const retained_face_selector::SourceStageProof>>> steps;
+    std::vector<std::pair<UUID,
+        std::shared_ptr<const retained_face_selector::ClosedRimRoleProof>>> closedRims;
 
     const retained_face_selector::SourceStageProof* proofFor(
         const Step& step) const noexcept {
@@ -83,20 +85,49 @@ struct SourceStageContext final {
         }
         return result;
     }
+    const retained_face_selector::ClosedRimRoleProof* closedRimProofFor(
+        const Step& step) const noexcept {
+        if (!step.selector
+            || !std::holds_alternative<retained_face_selector::SourceOwnedClosedRimV1>(
+                step.selector->intent)) return nullptr;
+        const retained_face_selector::ClosedRimRoleProof* result = nullptr;
+        for (const auto& entry : closedRims) {
+            if (entry.first != step.feature) continue;
+            if (result || !entry.second) return nullptr;
+            result = entry.second.get();
+        }
+        return result;
+    }
 };
 
 inline bool NeedsSourceStageContext(const Step& step) noexcept {
     return step.selector
-        && std::holds_alternative<retained_face_selector::SourceRelativeV1>(
-            step.selector->intent);
+        && (std::holds_alternative<retained_face_selector::SourceRelativeV1>(
+                step.selector->intent)
+            || std::holds_alternative<retained_face_selector::SourceOwnedClosedRimV1>(
+                step.selector->intent));
 }
 
 inline const retained_face_selector::SourceStageProof* RequireSourceStageProof(
     const Step& step, const SourceStageContext* context,
     Refusal& refusal) noexcept {
-    if (!NeedsSourceStageContext(step)) return nullptr;
+    if (!step.selector
+        || !std::holds_alternative<retained_face_selector::SourceRelativeV1>(
+            step.selector->intent)) return nullptr;
     if (!context) { refusal = Refusal::UnsupportedDependency; return nullptr; }
     const auto* proof = context->proofFor(step);
+    if (!proof) refusal = Refusal::UnsupportedDependency;
+    return proof;
+}
+
+inline const retained_face_selector::ClosedRimRoleProof* RequireClosedRimRoleProof(
+    const Step& step, const SourceStageContext* context,
+    Refusal& refusal) noexcept {
+    if (!step.selector
+        || !std::holds_alternative<retained_face_selector::SourceOwnedClosedRimV1>(
+            step.selector->intent)) return nullptr;
+    if (!context) { refusal = Refusal::UnsupportedDependency; return nullptr; }
+    const auto* proof = context->closedRimProofFor(step);
     if (!proof) refusal = Refusal::UnsupportedDependency;
     return proof;
 }
@@ -709,14 +740,20 @@ inline bool BuildWorkingStage(const Definition& definition, const Step& step,
     if (stop.load()) { refusal = Refusal::Cancelled; return false; }
     PlanarLineSubset planarSubset;
     bool usedPlanarSubset = false;
+    std::shared_ptr<const retained_face_selector::FaceMembershipProof> membershipProof;
     if (step.selector) {
         const auto* sourceProof = RequireSourceStageProof(
             step, sourceContext, refusal);
-        if (NeedsSourceStageContext(step) && !sourceProof) return false;
+        const auto* closedRimProof = RequireClosedRimRoleProof(
+            step, sourceContext, refusal);
+        if (NeedsSourceStageContext(step) && !sourceProof && !closedRimProof) return false;
         retained_face_selector::Resolution resolution;
         const auto selectorRefusal = sourceProof
             ? retained_face_selector::Resolve(current, step.selector->intent,
                 *sourceProof, 0.001, budget, stop, resolution)
+            : closedRimProof
+            ? retained_face_selector::Resolve(current, step.selector->intent,
+                *closedRimProof, 0.001, budget, stop, resolution)
             : retained_face_selector::Resolve(current, step.selector->intent,
                 0.001, budget, stop, resolution);
         if (selectorRefusal != retained_face_selector::Refusal::None
@@ -736,11 +773,25 @@ inline bool BuildWorkingStage(const Definition& definition, const Step& step,
                 refusal = retained_face_selector::MapToB1(receiptRefusal);
                 return false;
             }
+            membershipProof = resolution.proof;
         }
     }
     std::vector<TopoDS_Edge> edges;
     if (!ResolveAnchors(current, step.anchors, 0.001,
             edges, budget, refusal)) return false;
+    if (step.selector && std::holds_alternative<
+            retained_face_selector::SourceOwnedClosedRimV1>(step.selector->intent)) {
+        if (!membershipProof || edges.size() != 1) {
+            refusal = Refusal::ReplayMismatch; return false;
+        }
+        const auto selected = std::find_if(membershipProof->boundaryUses().begin(),
+            membershipProof->boundaryUses().end(),
+            [](const auto& use) { return use.selected; });
+        if (selected == membershipProof->boundaryUses().end()
+            || !edges.front().IsSame(selected->edge)) {
+            refusal = Refusal::ReplayMismatch; return false;
+        }
+    }
     if (usedPlanarSubset) {
         std::set<int> consumed;
         for (std::size_t anchorIndex = 0; anchorIndex < edges.size();
@@ -1390,11 +1441,17 @@ inline bool CaptureSourceRebindRolesImpl(const TopoDS_Shape& oldStage,
             if (step.selector) {
                 const auto* sourceProof = RequireSourceStageProof(
                     step, sourceContext, refusal);
-                if (NeedsSourceStageContext(step) && !sourceProof) return false;
+                const auto* closedRimProof = RequireClosedRimRoleProof(
+                    step, sourceContext, refusal);
+                if (NeedsSourceStageContext(step) && !sourceProof && !closedRimProof) return false;
                 retained_face_selector::Resolution resolution;
                 const auto selectorRefusal = sourceProof
                     ? retained_face_selector::Resolve(current,
                         step.selector->intent, *sourceProof, 0.001, budget,
+                        neverCancelled, resolution)
+                    : closedRimProof
+                    ? retained_face_selector::Resolve(current,
+                        step.selector->intent, *closedRimProof, 0.001, budget,
                         neverCancelled, resolution)
                     : retained_face_selector::Resolve(current,
                         step.selector->intent, 0.001, budget,
@@ -1653,11 +1710,17 @@ inline bool ApplySourceRebindImpl(const SourceRebindRoles& roles,
                 } else {
                 const auto* sourceProof = RequireSourceStageProof(
                     step, sourceContext, refusal);
-                if (NeedsSourceStageContext(step) && !sourceProof) return false;
+                const auto* closedRimProof = RequireClosedRimRoleProof(
+                    step, sourceContext, refusal);
+                if (NeedsSourceStageContext(step) && !sourceProof && !closedRimProof) return false;
                 retained_face_selector::Resolution resolution;
                 const auto selectorRefusal = sourceProof
                     ? retained_face_selector::Resolve(current,
                         step.selector->intent, *sourceProof, 0.001, budget,
+                        neverCancelled, resolution)
+                    : closedRimProof
+                    ? retained_face_selector::Resolve(current,
+                        step.selector->intent, *closedRimProof, 0.001, budget,
                         neverCancelled, resolution)
                     : retained_face_selector::Resolve(current,
                         step.selector->intent, 0.001, budget,

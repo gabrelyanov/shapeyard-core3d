@@ -3,11 +3,13 @@
 #include "RetainedEdgeTreatmentSnapshot.hxx"
 #include "RetainedFaceSelectorValues.hxx"
 #include "RetainedTopologyBudget.hxx"
+#include "ProfileSourceBoundaryExpectation.hxx"
 
 #include <BRepAdaptor_Curve.hxx>
 #include <ElCLib.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepTools_WireExplorer.hxx>
+#include <BRepTools.hxx>
 #include <BRep_Tool.hxx>
 #include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
@@ -21,10 +23,12 @@
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Wire.hxx>
 #include <gp_Dir.hxx>
+#include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 
 #include <atomic>
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -92,6 +96,7 @@ struct BoundaryUse {
 
 struct Resolution;
 class SourceStageProofIssuer;
+class ClosedRimRoleProof;
 
 namespace detail {
 struct Affine final {
@@ -264,8 +269,82 @@ private:
         const detail::Affine& current) : binding_(binding), capture_(capture), current_(current) {}
     friend class SourceStageProofIssuer;
     friend Refusal ResolveImpl(const TopoDS_Shape&, const SelectorIntent&,
-        const SourceStageProof*, double, et::ReplayBudget&, const std::atomic_bool&,
-        Resolution&) noexcept;
+        const SourceStageProof*, const ClosedRimRoleProof*, double,
+        et::ReplayBudget&, const std::atomic_bool&, Resolution&) noexcept;
+};
+
+class ClosedRimRoleProof final {
+public:
+#if DEBUG
+    // This fixture adapter can only prove values for a native geometry test.
+    // Production source authority remains exclusively issuer-owned.
+    static std::optional<ClosedRimRoleProof> DebugFixture(
+        const SourceOwnedClosedRimV1& binding,
+        const std::vector<double>& currentProfileValues,
+        et::ReplayBudget& budget, const std::atomic_bool& cancelled) noexcept {
+        try {
+            if (!ValidSourceOwnedClosedRim(binding)) return std::nullopt;
+            profile::Parameters current;
+            std::vector<double> canonical;
+            complete_profile_source::ExtrusionExpectation expectation;
+            ProfileProducerAccounting accounting(budget, cancelled);
+            detail::Affine transform;
+            if (!profile::Decode(currentProfileValues, current)
+                || current.definition.revolve || !current.shells.empty()
+                || !current.definition.circle
+                || !profile::Encode(current, canonical)
+                || canonical != currentProfileValues
+                || !complete_profile_source::ConstructExtrusionExpectation(
+                    current, accounting, expectation)
+                || !detail::ProfileAffine(current, transform)
+                || expectation.loops.empty()
+                || expectation.loops.front().representation
+                    != complete_profile_source::LoopRepresentation::PeriodicCircle
+                || expectation.loops.front().inner) return std::nullopt;
+            const double millimetresPerUnit = 1000.0 * current.metersPerUnit;
+            const auto& circle = *current.definition.circle;
+            const std::array<double, 3> lowerChart{{circle.center.X() * millimetresPerUnit,
+                circle.center.Y() * millimetresPerUnit, 0}};
+            const std::array<double, 3> upperChart{{circle.center.X() * millimetresPerUnit,
+                circle.center.Y() * millimetresPerUnit,
+                current.definition.depth * millimetresPerUnit}};
+            std::array<double, 3> lowerNormal{}, upperNormal{};
+            double scale = 0;
+            if (!detail::Normal(transform, {0, 0, -1}, lowerNormal)
+                || !detail::Normal(transform, {0, 0, 1}, upperNormal)
+                || !detail::Similarity(transform, scale)) return std::nullopt;
+            return ClosedRimRoleProof(binding, std::move(expectation),
+                detail::Point(transform, lowerChart), detail::Point(transform, upperChart),
+                lowerNormal, upperNormal, circle.outerRadius * millimetresPerUnit * scale);
+        } catch (...) { return std::nullopt; }
+    }
+#endif
+private:
+    SourceOwnedClosedRimV1 binding_;
+    complete_profile_source::ExtrusionExpectation expectation_;
+    std::array<double, 3> lowerCenterMM_{}, upperCenterMM_{};
+    std::array<double, 3> lowerNormal_{}, upperNormal_{};
+    double outerRadiusMM_ = 0;
+    ClosedRimRoleProof(const SourceOwnedClosedRimV1& binding,
+        complete_profile_source::ExtrusionExpectation expectation,
+        std::array<double, 3> lowerCenter, std::array<double, 3> upperCenter,
+        std::array<double, 3> lowerNormal, std::array<double, 3> upperNormal,
+        double radius)
+        : binding_(binding), expectation_(std::move(expectation)),
+          lowerCenterMM_(lowerCenter), upperCenterMM_(upperCenter),
+          lowerNormal_(lowerNormal), upperNormal_(upperNormal), outerRadiusMM_(radius) {}
+    friend class SourceStageProofIssuer;
+    friend class ClosedRimRoleReview;
+    friend Refusal ResolveImpl(const TopoDS_Shape&, const SelectorIntent&,
+        const SourceStageProof*, const ClosedRimRoleProof*, double,
+        et::ReplayBudget&, const std::atomic_bool&, Resolution&) noexcept;
+};
+
+class ClosedRimRoleReview final {
+    std::shared_ptr<const ClosedRimRoleProof> proof_;
+    explicit ClosedRimRoleReview(std::shared_ptr<const ClosedRimRoleProof> proof)
+        : proof_(std::move(proof)) {}
+    friend class SourceStageProofIssuer;
 };
 
 class FaceMembershipProof final {
@@ -295,8 +374,8 @@ private:
     LegacyIntent evaluatedIntent_;
     std::array<double, 2> scopeBoundsMM_{};
     friend Refusal ResolveImpl(const TopoDS_Shape&, const SelectorIntent&,
-        const SourceStageProof*, double, et::ReplayBudget&, const std::atomic_bool&,
-        Resolution&) noexcept;
+        const SourceStageProof*, const ClosedRimRoleProof*, double,
+        et::ReplayBudget&, const std::atomic_bool&, Resolution&) noexcept;
 };
 
 struct Resolution {
@@ -401,7 +480,8 @@ inline bool FacePlane(const TopoDS_Face& face, gp_Pln& plane) {
 } // namespace detail
 
 inline Refusal ResolveImpl(const TopoDS_Shape& inputStage, const SelectorIntent& intent,
-    const SourceStageProof* sourceProof, double metersPerLocalUnit,
+    const SourceStageProof* sourceProof, const ClosedRimRoleProof* closedRimProof,
+    double metersPerLocalUnit,
     et::ReplayBudget& budget, const std::atomic_bool& cancelled, Resolution& output) noexcept {
     output = {};
     try {
@@ -418,6 +498,7 @@ inline Refusal ResolveImpl(const TopoDS_Shape& inputStage, const SelectorIntent&
         LegacyIntent evaluated;
         std::optional<detail::OrientedScope> orientedScope;
         detail::Affine effective;
+        const auto* closedRim = std::get_if<SourceOwnedClosedRimV1>(&intent);
         if (const auto* relative = std::get_if<SourceRelativeV1>(&intent)) {
             if (!sourceProof) {
                 output.refusal = Refusal::UnsupportedCarrier; return output.refusal;
@@ -429,6 +510,26 @@ inline Refusal ResolveImpl(const TopoDS_Shape& inputStage, const SelectorIntent&
                     evaluated, orientedScope, effective)) {
                 output.refusal = Refusal::UnsupportedTransform; return output.refusal;
             }
+        } else if (closedRim) {
+            if (!closedRimProof) {
+                output.refusal = Refusal::UnsupportedCarrier; return output.refusal;
+            }
+            if (!(closedRimProof->binding_ == *closedRim)
+                || closedRimProof->expectation_.loops.empty()
+                || closedRimProof->expectation_.loops.front().representation
+                    != complete_profile_source::LoopRepresentation::PeriodicCircle
+                || !std::isfinite(closedRimProof->outerRadiusMM_)
+                || closedRimProof->outerRadiusMM_ <= 0) {
+                output.refusal = Refusal::StaleSource; return output.refusal;
+            }
+            CircleRim role;
+            role.centerMM = closedRim->capRole == CapRole::Upper
+                ? closedRimProof->upperCenterMM_ : closedRimProof->lowerCenterMM_;
+            role.normal = closedRim->capRole == CapRole::Upper
+                ? closedRimProof->upperNormal_ : closedRimProof->lowerNormal_;
+            role.radiusMM = closedRimProof->outerRadiusMM_;
+            role.expectedCount = 1;
+            evaluated = role;
         } else if (const auto* planar = std::get_if<PlanarFaceBoundary>(&intent)) evaluated = *planar;
         else if (const auto* line = std::get_if<Line>(&intent)) evaluated = *line;
         else if (const auto* circle = std::get_if<CircleRim>(&intent)) evaluated = *circle;
@@ -575,11 +676,13 @@ inline Refusal ResolveImpl(const TopoDS_Shape& inputStage, const SelectorIntent&
             // A budget denial here takes precedence over any later ownership
             // or malformed-wire diagnosis.
             std::size_t direct = 0;
+            TopTools_IndexedMapOfShape directEdges;
             for (TopExp_Explorer directExplorer(wire, TopAbs_EDGE); directExplorer.More(); directExplorer.Next()) {
                 if (!budget.visit(1, tb::Site::C06DirectCensus)) {
                     output.refusal = Refusal::Budget; return output.refusal;
                 }
                 ++direct;
+                directEdges.Add(directExplorer.Current());
             }
             // C04: BRepTools_WireExplorer traverses during construction;
             // reserve that pass (measured: the wire's edge-use count) before
@@ -588,6 +691,7 @@ inline Refusal ResolveImpl(const TopoDS_Shape& inputStage, const SelectorIntent&
                 output.refusal = Refusal::Budget; return output.refusal;
             }
             std::size_t explored = 0;
+            TopTools_IndexedMapOfShape orderedEdges;
             for (BRepTools_WireExplorer edgeExplorer(wire, proof->face_); edgeExplorer.More(); edgeExplorer.Next()) {
                 // C04: every raw ordered edge use is charged, preserving raw
                 // orientations and holes exactly.
@@ -596,6 +700,7 @@ inline Refusal ResolveImpl(const TopoDS_Shape& inputStage, const SelectorIntent&
                 }
                 ++explored;
                 const TopoDS_Edge edge = edgeExplorer.Current();
+                orderedEdges.Add(edge);
                 const TopAbs_Orientation orientation = edge.Orientation();
                 if (orientation != TopAbs_FORWARD && orientation != TopAbs_REVERSED) {
                     output.refusal = Refusal::InvalidFaceUse; return output.refusal;
@@ -646,6 +751,17 @@ inline Refusal ResolveImpl(const TopoDS_Shape& inputStage, const SelectorIntent&
                 if (repeatedOwnerOccurrence || use.ownerFaces.size() != 2 || !selectedOwner) {
                     output.refusal = Refusal::OwnershipMismatch; return output.refusal;
                 }
+                if (closedRim) {
+                    Standard_Real first = 0, last = 0;
+                    const Handle(Geom2d_Curve) pcurve = BRep_Tool::CurveOnSurface(
+                        edge, proof->face_, first, last);
+                    BRepAdaptor_Curve curve(edge);
+                    if (pcurve.IsNull() || !std::isfinite(first) || !std::isfinite(last)
+                        || !std::isfinite(curve.FirstParameter())
+                        || !std::isfinite(curve.LastParameter())) {
+                        output.refusal = Refusal::IncompleteBoundary; return output.refusal;
+                    }
+                }
                 // C05: the unique-edge/use insertion is charged.
                 if (!budget.visit(1, tb::Site::C05OwnerScan)) {
                     output.refusal = Refusal::Budget; return output.refusal;
@@ -657,7 +773,13 @@ inline Refusal ResolveImpl(const TopoDS_Shape& inputStage, const SelectorIntent&
             if (!budget.visit(1, tb::Site::C06DirectCensus)) {
                 output.refusal = Refusal::Budget; return output.refusal;
             }
-            if (explored == 0 || explored != direct) { output.refusal = Refusal::IncompleteBoundary; return output.refusal; }
+            bool sameMembership = directEdges.Extent() == orderedEdges.Extent();
+            for (int index = 1; closedRim && sameMembership
+                && index <= directEdges.Extent(); ++index)
+                sameMembership = orderedEdges.Contains(directEdges(index));
+            if (explored == 0 || explored != direct || (closedRim && !sameMembership)) {
+                output.refusal = Refusal::IncompleteBoundary; return output.refusal;
+            }
         }
         if (proof->wireCount_ == 0 || proof->wireCount_ > 64 || proof->boundaryUses_.size() > 64) {
             output.refusal = proof->boundaryUses_.size() > 64 ? Refusal::TruncatedDiscovery : Refusal::IncompleteBoundary;
@@ -691,6 +813,57 @@ inline Refusal ResolveImpl(const TopoDS_Shape& inputStage, const SelectorIntent&
             }
             if (proof->selectedEdgeCount_ == 0) { output.refusal = Refusal::FaceMissing; return output.refusal; }
             if (proof->selectedEdgeCount_ > 1) { output.refusal = Refusal::SplitEdge; return output.refusal; }
+        } else if (closedRim) {
+            proof->coverage_ = Coverage::SelectedClosedRim;
+            const auto& circle = std::get<CircleRim>(evaluatedIntent);
+            const double millimetresPerLocalUnit = 1000.0 * metersPerLocalUnit;
+            const gp_Pnt expectedCenter(circle.centerMM[0] / millimetresPerLocalUnit,
+                circle.centerMM[1] / millimetresPerLocalUnit,
+                circle.centerMM[2] / millimetresPerLocalUnit);
+            const gp_Dir expectedAxis(circle.normal[0], circle.normal[1], circle.normal[2]);
+            const TopoDS_Wire outerWire = BRepTools::OuterWire(proof->face_);
+            std::size_t partial = 0, matching = 0;
+            for (auto& use : proof->boundaryUses_) {
+                if (!budget.visit(1, tb::Site::C07CurveClassification)) {
+                    output.refusal = Refusal::Budget; return output.refusal;
+                }
+                BRepAdaptor_Curve curve(use.edge);
+                if (curve.GetType() != GeomAbs_Circle) continue;
+                const bool sameSupport = curve.Circle().Location().Distance(expectedCenter)
+                        <= localTolerance
+                    && curve.Circle().Axis().Direction().IsParallel(expectedAxis, 1e-8)
+                    && std::abs(curve.Circle().Radius() * millimetresPerLocalUnit
+                        - circle.radiusMM) <= 1e-4;
+                if (!sameSupport) continue;
+                const bool complete = curve.IsClosed()
+                    && std::abs((curve.LastParameter() - curve.FirstParameter())
+                        - 2.0 * M_PI) <= 1e-8;
+                if (!complete) { ++partial; continue; }
+                if (outerWire.IsNull() || !use.wire.IsSame(outerWire)) continue;
+                bool outerWall = false;
+                for (const auto& owner : use.ownerFaces) {
+                    if (owner.IsSame(proof->face_)) continue;
+                    BRepAdaptor_Surface surface(owner, true);
+                    if (surface.GetType() != GeomAbs_Cylinder) continue;
+                    const auto cylinder = surface.Cylinder();
+                    const gp_Lin axis(cylinder.Axis());
+                    if (cylinder.Axis().Direction().IsParallel(expectedAxis, 1e-8)
+                        && axis.Distance(expectedCenter) <= localTolerance
+                        && std::abs(cylinder.Radius() * millimetresPerLocalUnit
+                            - circle.radiusMM) <= 1e-4) outerWall = true;
+                }
+                if (!outerWall) continue;
+                use.selected = true; ++matching;
+            }
+            if (matching > 1) {
+                output.refusal = Refusal::FaceAmbiguous; return output.refusal;
+            }
+            if (matching == 0) {
+                output.refusal = partial > 1 ? Refusal::SplitEdge
+                    : partial == 1 ? Refusal::PartialCircle : Refusal::FaceMissing;
+                return output.refusal;
+            }
+            proof->selectedEdgeCount_ = 1;
         } else if (const auto* circle = std::get_if<CircleRim>(&evaluatedIntent)) {
             proof->coverage_ = Coverage::EntireBoundary;
             if (proof->wireCount_ != 1 || proof->boundaryUses_.size() != 1) {
@@ -734,13 +907,23 @@ inline Refusal ResolveImpl(const TopoDS_Shape& inputStage, const SelectorIntent&
 inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& intent,
     double metersPerLocalUnit, et::ReplayBudget& budget, const std::atomic_bool& cancelled,
     Resolution& output) noexcept {
-    return ResolveImpl(inputStage, intent, nullptr, metersPerLocalUnit, budget, cancelled, output);
+    return ResolveImpl(inputStage, intent, nullptr, nullptr, metersPerLocalUnit,
+        budget, cancelled, output);
 }
 
 inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& intent,
     const SourceStageProof& sourceProof, double metersPerLocalUnit, et::ReplayBudget& budget,
     const std::atomic_bool& cancelled, Resolution& output) noexcept {
-    return ResolveImpl(inputStage, intent, &sourceProof, metersPerLocalUnit, budget, cancelled, output);
+    return ResolveImpl(inputStage, intent, &sourceProof, nullptr, metersPerLocalUnit,
+        budget, cancelled, output);
+}
+
+inline Refusal Resolve(const TopoDS_Shape& inputStage, const SelectorIntent& intent,
+    const ClosedRimRoleProof& roleProof, double metersPerLocalUnit,
+    et::ReplayBudget& budget, const std::atomic_bool& cancelled,
+    Resolution& output) noexcept {
+    return ResolveImpl(inputStage, intent, nullptr, &roleProof, metersPerLocalUnit,
+        budget, cancelled, output);
 }
 
 inline Refusal VerifyReceipt(const FaceMembershipProof& proof, const et::Step& step,
@@ -759,6 +942,13 @@ inline Refusal VerifyReceipt(const FaceMembershipProof& proof, const et::Step& s
     for (std::size_t index = 0; index < step.anchors.size(); ++index) {
         if (!budget.visit(1, tb::Site::C08ReceiptVerify)) return Refusal::Budget;
         if (receipt.entries[index].anchorKey != step.anchors[index].key) return Refusal::ReplayMismatch;
+    }
+    if (std::holds_alternative<SourceOwnedClosedRimV1>(receipt.intent)) {
+        const auto selected = std::find_if(proof.boundaryUses().begin(),
+            proof.boundaryUses().end(), [](const BoundaryUse& use) { return use.selected; });
+        if (selected == proof.boundaryUses().end() || receipt.entries.size() != 1
+            || receipt.entries.front().direction != selected->direction)
+            return Refusal::ReplayMismatch;
     }
     return Refusal::None;
 }

@@ -118,6 +118,9 @@ class MigrationReview final {
     // is resolved on the post-existing-treatment stage.
     std::vector<std::shared_ptr<const fs::FaceMembershipProof>> proofs_;
     std::shared_ptr<const fs::FaceMembershipProof> appendProof_;
+    // A role review is transient and unbound: it carries no saved locator or
+    // receipt and cannot be consumed by the ordinary selector append path.
+    std::shared_ptr<const fs::ClosedRimRoleReview> pendingClosedRimReview_;
     // Reviewed stage values (copied shapes only, no document authority): the
     // true untreated post-Boolean base — never originalCurrent_ when the
     // recipe carries a legacy tail — and the post-existing-treatment stage.
@@ -126,6 +129,9 @@ public:
     const Digest& requestDigest() const noexcept { return requestDigest_; }
     const std::vector<std::shared_ptr<const fs::FaceMembershipProof>>& proofs() const noexcept { return proofs_; }
     const std::shared_ptr<const fs::FaceMembershipProof>& appendProof() const noexcept { return appendProof_; }
+    const std::shared_ptr<const fs::ClosedRimRoleReview>& pendingClosedRimReview() const noexcept {
+        return pendingClosedRimReview_;
+    }
 };
 // A1 first enrollment: the read-only capture of an A1-composite RetainedBoolean
 // owner that holds no R2 record yet, and the reviewed first append (selector

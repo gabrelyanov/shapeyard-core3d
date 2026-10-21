@@ -188,10 +188,14 @@ inline bool valid(const Definition& definition, Refusal& refusal) {
                 && (step.kind == Kind::Chamfer || step.kind == Kind::ConstantFillet);
             const bool proofOne = step.selector->proofVersion == 1
                 && !std::holds_alternative<retained_face_selector::SourceRelativeV1>(
+                    step.selector->intent)
+                && !std::holds_alternative<retained_face_selector::SourceOwnedClosedRimV1>(
                     step.selector->intent);
             const bool proofTwo = step.selector->proofVersion == 2
-                && std::holds_alternative<retained_face_selector::SourceRelativeV1>(
-                    step.selector->intent);
+                && (std::holds_alternative<retained_face_selector::SourceRelativeV1>(
+                        step.selector->intent)
+                    || std::holds_alternative<retained_face_selector::SourceOwnedClosedRimV1>(
+                        step.selector->intent));
             if ((!schemaTwo && !schemaThree && !schemaFour)
                 || (definition.schema < 4 && !proofOne)
                 || (definition.schema == 4 && !proofOne && !proofTwo)

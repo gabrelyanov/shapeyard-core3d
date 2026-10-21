@@ -21,6 +21,7 @@ enum class Kind : std::uint8_t {
     CircleRim = 3,
     SplineEdge = 4,
     SourceRelativeV1 = 5,
+    SourceOwnedClosedRimV1 = 6,
 };
 enum class CoordinateSpace : std::uint8_t { WorldAtCapture = 0, SourceChart = 1 };
 enum class SourceDomain : std::uint8_t { R2SYRSProfile = 1 };
@@ -28,7 +29,13 @@ enum class Axis : std::uint8_t { X = 1, Y = 2, Z = 3 };
 enum class Side : std::uint8_t { Min = 1, Max = 2 };
 enum class BoundaryCurve : std::uint8_t { Line = 1 };
 enum class FaceUseDirection : std::uint8_t { Forward = 1, Reversed = 2 };
-enum class Coverage : std::uint8_t { EntireBoundary = 1, SelectedLine = 2 };
+enum class Coverage : std::uint8_t {
+    EntireBoundary = 1,
+    SelectedLine = 2,
+    SelectedClosedRim = 3,
+};
+enum class CapRole : std::uint8_t { Lower = 1, Upper = 2 };
+enum class RimRole : std::uint8_t { OuterCircle = 1 };
 
 struct PlanarFaceScope {
     Axis axis = Axis::X;
@@ -96,8 +103,31 @@ struct SourceRelativeV1 {
             && captureProfileScalarBits == other.captureProfileScalarBits && inner == other.inner;
     }
 };
+struct SourceOwnedClosedRimV1 {
+    std::uint32_t predicateVersion = 1;
+    std::uint32_t sourceBindingVersion = 1;
+    SourceDomain sourceDomain = SourceDomain::R2SYRSProfile;
+    UUID sourceOwnerDocument{}, sourceOwnerEntity{}, sourceOwnerDefinition{};
+    UUID inputRootNode{}, sourceFeature{};
+    CapRole capRole = CapRole::Lower;
+    RimRole rimRole = RimRole::OuterCircle;
+    std::uint32_t expectedCount = 1;
+    bool operator==(const SourceOwnedClosedRimV1& other) const noexcept {
+        return predicateVersion == other.predicateVersion
+            && sourceBindingVersion == other.sourceBindingVersion
+            && sourceDomain == other.sourceDomain
+            && sourceOwnerDocument == other.sourceOwnerDocument
+            && sourceOwnerEntity == other.sourceOwnerEntity
+            && sourceOwnerDefinition == other.sourceOwnerDefinition
+            && inputRootNode == other.inputRootNode
+            && sourceFeature == other.sourceFeature
+            && capRole == other.capRole && rimRole == other.rimRole
+            && expectedCount == other.expectedCount;
+    }
+};
 using SelectorIntent = std::variant<PlanarFaceBoundary, Line, CircleRim,
-                                    ReservedSplineEdge, SourceRelativeV1>;
+                                    ReservedSplineEdge, SourceRelativeV1,
+                                    SourceOwnedClosedRimV1>;
 
 struct PlaneWitness {
     std::array<double, 3> outwardNormal{};
@@ -154,7 +184,8 @@ inline Kind IntentKind(const SelectorIntent& intent) noexcept {
         if constexpr (std::is_same_v<T, Line>) return Kind::Line;
         if constexpr (std::is_same_v<T, CircleRim>) return Kind::CircleRim;
         if constexpr (std::is_same_v<T, ReservedSplineEdge>) return Kind::SplineEdge;
-        return Kind::SourceRelativeV1;
+        if constexpr (std::is_same_v<T, SourceRelativeV1>) return Kind::SourceRelativeV1;
+        return Kind::SourceOwnedClosedRimV1;
     }, intent);
 }
 inline bool ValidLegacyIntent(const LegacyIntent& intent) noexcept {
@@ -211,6 +242,17 @@ inline bool ValidCaptureProfile(const SourceRelativeV1& value) noexcept {
         return false;
     }
 }
+inline bool ValidSourceOwnedClosedRim(const SourceOwnedClosedRimV1& value) noexcept {
+    return value.predicateVersion == 1 && value.sourceBindingVersion == 1
+        && value.sourceDomain == SourceDomain::R2SYRSProfile
+        && retained_recipe::Nonzero(value.sourceOwnerDocument)
+        && retained_recipe::Nonzero(value.sourceOwnerEntity)
+        && retained_recipe::Nonzero(value.sourceOwnerDefinition)
+        && retained_recipe::Nonzero(value.inputRootNode)
+        && retained_recipe::Nonzero(value.sourceFeature)
+        && (value.capRole == CapRole::Lower || value.capRole == CapRole::Upper)
+        && value.rimRole == RimRole::OuterCircle && value.expectedCount == 1;
+}
 inline bool ValidIntent(const SelectorIntent& intent, bool allowReserved = false) noexcept {
     return std::visit([allowReserved](const auto& value) {
         using T = std::decay_t<decltype(value)>;
@@ -225,14 +267,15 @@ inline bool ValidIntent(const SelectorIntent& intent, bool allowReserved = false
             return allowReserved && value.expectedCount >= 1 && value.expectedCount <= 64
                 && retained_recipe::Nonzero(value.sourceFeatureID)
                 && retained_recipe::Nonzero(value.featureLocalEdgeKey);
-        } else {
+        } else if constexpr (std::is_same_v<T, SourceRelativeV1>) {
             return ValidCaptureProfile(value);
-        }
+        } else return ValidSourceOwnedClosedRim(value);
     }, intent);
 }
 inline bool ValidReceipt(const SelectorReceipt& value) noexcept {
     const bool relative = std::holds_alternative<SourceRelativeV1>(value.intent);
-    if ((relative ? value.proofVersion != 2 : value.proofVersion != 1)
+    const bool closedRim = std::holds_alternative<SourceOwnedClosedRimV1>(value.intent);
+    if (((relative || closedRim) ? value.proofVersion != 2 : value.proofVersion != 1)
         || !ValidIntent(value.intent) || !IsUnit(value.face.outwardNormal)
         || !std::isfinite(value.face.offsetMM) || value.entries.empty() || value.entries.size() > 64
         || value.entries.size() != ExpectedCount(value.intent) || value.wireCount < 1
@@ -241,7 +284,10 @@ inline bool ValidReceipt(const SelectorReceipt& value) noexcept {
     const bool line = std::holds_alternative<Line>(value.intent)
         || (relative && std::holds_alternative<Line>(
             std::get<SourceRelativeV1>(value.intent).inner));
-    if (line) {
+    if (closedRim) {
+        if (value.coverage != Coverage::SelectedClosedRim
+            || value.entries.size() != 1) return false;
+    } else if (line) {
         if (value.coverage != Coverage::SelectedLine || value.entries.size() != 1) return false;
     } else if (value.coverage != Coverage::EntireBoundary
         || value.entries.size() != value.boundaryUseCount) return false;
@@ -301,7 +347,7 @@ bool WriteIntent(Writer& writer, const SelectorIntent& intent) {
         } else if constexpr (std::is_same_v<T, ReservedSplineEdge>) {
             writer.raw(value.sourceFeatureID); writer.raw(value.featureLocalEdgeKey);
             writer.u(value.expectedCount, 4);
-        } else {
+        } else if constexpr (std::is_same_v<T, SourceRelativeV1>) {
             writer.u(value.bindingVersion, 4);
             writer.u(std::uint8_t(value.coordinateSpace), 1);
             writer.u(std::uint8_t(value.sourceDomain), 1);
@@ -311,6 +357,15 @@ bool WriteIntent(Writer& writer, const SelectorIntent& intent) {
             writer.u(value.captureProfileScalarBits.size(), 4);
             for (std::uint64_t bits : value.captureProfileScalarBits) writer.u(bits, 8);
             WriteLegacyIntent(writer, value.inner);
+        } else {
+            writer.u(value.predicateVersion, 4);
+            writer.u(value.sourceBindingVersion, 4);
+            writer.u(std::uint8_t(value.sourceDomain), 1);
+            writer.raw(value.sourceOwnerDocument); writer.raw(value.sourceOwnerEntity);
+            writer.raw(value.sourceOwnerDefinition); writer.raw(value.inputRootNode);
+            writer.raw(value.sourceFeature); writer.u(std::uint8_t(value.capRole), 1);
+            writer.u(std::uint8_t(value.rimRole), 1);
+            writer.u(value.expectedCount, 4);
         }
     }, intent);
     return writer.ok;
@@ -391,6 +446,23 @@ bool ReadIntent(Reader& reader, SelectorIntent& output) {
         for (auto& bits : intent.captureProfileScalarBits) if (!reader.u(8, bits)) return false;
         if (!ReadLegacyIntent(reader, intent.inner)) return false;
         output = std::move(intent);
+    } else if (tag == std::uint8_t(Kind::SourceOwnedClosedRimV1)) {
+        SourceOwnedClosedRimV1 intent;
+        if (!reader.u(4, value)) return false;
+        intent.predicateVersion = std::uint32_t(value);
+        if (!reader.u(4, value)) return false;
+        intent.sourceBindingVersion = std::uint32_t(value);
+        if (!reader.u(1, value)) return false;
+        intent.sourceDomain = SourceDomain(value);
+        if (!reader.raw(intent.sourceOwnerDocument) || !reader.raw(intent.sourceOwnerEntity)
+            || !reader.raw(intent.sourceOwnerDefinition) || !reader.raw(intent.inputRootNode)
+            || !reader.raw(intent.sourceFeature) || !reader.u(1, value)) return false;
+        intent.capRole = CapRole(value);
+        if (!reader.u(1, value)) return false;
+        intent.rimRole = RimRole(value);
+        if (!reader.u(4, value)) return false;
+        intent.expectedCount = std::uint32_t(value);
+        output = intent;
     } else {
         // Tag 4 is reserved and every unknown tag is malformed before publication.
         return false;
