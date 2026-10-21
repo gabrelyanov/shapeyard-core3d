@@ -84,6 +84,16 @@ enum class DebugPrivateExportDecalFault : std::uint8_t {
     FinalProduction = 2,
     Publication = 3,
     AggregateBudget = 4,
+    SavedAtlasCaptureCheckpoint = 5,
+    SavedAtlasCaptureDenyRead = 6,
+    SavedAtlasCaptureMissingBake = 7,
+    SavedAtlasCaptureMalformedBake = 8,
+    SavedAtlasCaptureStaleBinding = 9,
+    SavedAtlasCaptureMissingMember = 10,
+    SavedAtlasCaptureForeignMember = 11,
+    SavedAtlasCaptureDuplicateMember = 12,
+    SavedAtlasCaptureForeignRawSlot = 13,
+    SavedAtlasCaptureMalformedResource = 14,
 };
 
 //! Bounded values observed from the executed private GLB derivative path.
@@ -107,6 +117,31 @@ struct DebugPrivateExportDecalObservation final {
     std::vector<std::string> bakeSeals;
     std::vector<std::string> outputRoles;
     std::vector<std::uint64_t> outputRoleBytes;
+    std::vector<std::string> savedMemberDefinitions;
+    std::vector<std::string> savedMemberOwners;
+    std::vector<std::string> savedSourceOwners;
+    std::vector<std::string> savedSourceResources;
+    std::vector<std::uint64_t> savedSourceMemberIndices;
+    std::vector<std::uint64_t> savedSourceFaceIndices;
+    std::vector<std::uint64_t> savedSourceOrigins;
+    std::vector<std::uint64_t> savedCanonicalLengths;
+    std::uint64_t savedGroupCount = 0;
+    std::uint64_t savedMemberCount = 0;
+    std::uint64_t savedSourceCount = 0;
+    std::uint64_t savedRawSlotCount = 0;
+    std::uint64_t savedMeasuredCopyCount = 0;
+    std::uint64_t savedCorrespondenceCount = 0;
+    std::uint64_t savedOriginalOnlyCount = 0;
+    std::uint64_t savedNonMemberCount = 0;
+    std::uint64_t savedSelectedMemberCount = 0;
+    std::uint64_t savedAtlasReadEntries = 0;
+    std::uint64_t savedReceiverMeasuredCopyCount = 0;
+    std::uint64_t savedBorrowedOwnerCount = 0;
+    std::uint64_t savedBorrowedReceiverCount = 0;
+    std::uint64_t savedBorrowedReceiverCopyMatches = 0;
+    std::string captureRefusalCause;
+    std::string captureRefusalBoundary;
+    std::string captureRefusalField;
     std::uint64_t layoutResolution = 0;
     std::uint64_t layoutChartCount = 0;
     std::string failureStage;
@@ -114,6 +149,13 @@ struct DebugPrivateExportDecalObservation final {
     bool finalProductionReached = false;
     bool publicationReached = false;
     bool complete = false;
+    bool savedMeasuredStageComplete = false;
+    bool savedDetachedIdentitiesDistinct = false;
+    // Independently re-derived at the checkpoint: the committed document's
+    // export closure carries no SYDL record, so an empty borrowed
+    // owner/receiver census is the expected case rather than a missing one.
+    bool savedReceiverExpectationEmpty = false;
+    bool savedArtifactPresent = false;
 };
 
 enum class DebugPersistedAtlasCaptureMode : std::uint8_t {
@@ -289,7 +331,13 @@ public:
         const SceneSnapshot& wholeCommittedScene,
         bool selectedObjectsOnly,
         const std::function<bool()>& cancelled,
-        PrivateDecalCapturePointer& capture) noexcept;
+        PrivateDecalCapturePointer& capture
+#ifdef DEBUG
+        , DebugPrivateExportDecalFault debugFault =
+            DebugPrivateExportDecalFault::None
+        , DebugPrivateExportDecalObservation* debugObservation = nullptr
+#endif
+        ) noexcept;
 
     static bool FinalizePrivateExportDecals(
         PrivateDecalCapture& capture,

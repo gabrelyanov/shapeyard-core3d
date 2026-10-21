@@ -8,6 +8,14 @@ typedef NS_ENUM(NSInteger, Core3DFaceSelectorKind) {
     Core3DFaceSelectorKindLine = 2,
     Core3DFaceSelectorKindCircleRim = 3,
     Core3DFaceSelectorKindSplineEdge = 4,
+    Core3DFaceSelectorKindSourceRelativeV1 = 5,
+};
+typedef NS_ENUM(NSInteger, Core3DFaceSelectorCoordinateSpace) {
+    Core3DFaceSelectorCoordinateSpaceWorldAtCapture = 0,
+    Core3DFaceSelectorCoordinateSpaceSourceChart = 1,
+};
+typedef NS_ENUM(NSInteger, Core3DFaceSelectorSourceDomain) {
+    Core3DFaceSelectorSourceDomainR2SYRSProfile = 1,
 };
 typedef NS_ENUM(NSInteger, Core3DFaceSelectorAxis) {
     Core3DFaceSelectorAxisX = 1, Core3DFaceSelectorAxisY = 2, Core3DFaceSelectorAxisZ = 3,
@@ -101,6 +109,32 @@ __attribute__((objc_subclassing_restricted))
 - (instancetype)init NS_UNAVAILABLE;
 @end
 
+@class Core3DFaceSelectorIntent;
+__attribute__((objc_subclassing_restricted))
+@interface Core3DSourceRelativeSelectorIntentV1 : NSObject <NSCopying>
+@property(nonatomic, readonly) NSUInteger bindingVersion;
+@property(nonatomic, readonly) Core3DFaceSelectorCoordinateSpace coordinateSpace;
+@property(nonatomic, readonly) Core3DFaceSelectorSourceDomain sourceDomain;
+@property(nonatomic, copy, readonly) NSUUID *sourceOwnerDocumentIdentifier;
+@property(nonatomic, copy, readonly) NSUUID *sourceOwnerEntityIdentifier;
+@property(nonatomic, copy, readonly) NSUUID *sourceOwnerDefinitionIdentifier;
+@property(nonatomic, copy, readonly) NSUUID *inputRootNodeIdentifier;
+@property(nonatomic, copy, readonly) NSUUID *sourceFeatureIdentifier;
+@property(nonatomic, readonly) NSUInteger captureProfileSchema;
+@property(nonatomic, copy, readonly) NSData *captureProfileScalarBits;
+@property(nonatomic, strong, readonly) Core3DFaceSelectorIntent *innerIntent;
+- (nullable instancetype)initWithCoordinateSpace:(Core3DFaceSelectorCoordinateSpace)coordinateSpace
+    sourceOwnerDocumentIdentifier:(NSUUID *)sourceOwnerDocumentIdentifier
+    sourceOwnerEntityIdentifier:(NSUUID *)sourceOwnerEntityIdentifier
+    sourceOwnerDefinitionIdentifier:(NSUUID *)sourceOwnerDefinitionIdentifier
+    inputRootNodeIdentifier:(NSUUID *)inputRootNodeIdentifier
+    sourceFeatureIdentifier:(NSUUID *)sourceFeatureIdentifier
+    captureProfileSchema:(NSUInteger)captureProfileSchema
+    captureProfileScalarBits:(NSData *)captureProfileScalarBits
+    innerIntent:(Core3DFaceSelectorIntent *)innerIntent NS_DESIGNATED_INITIALIZER;
+- (instancetype)init NS_UNAVAILABLE;
+@end
+
 __attribute__((objc_subclassing_restricted))
 @interface Core3DFaceSelectorIntent : NSObject <NSCopying>
 @property(nonatomic, readonly) Core3DFaceSelectorKind kind;
@@ -108,10 +142,12 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic, strong, readonly, nullable) Core3DLineSelectorIntent *line;
 @property(nonatomic, strong, readonly, nullable) Core3DCircleRimIntent *circleRim;
 @property(nonatomic, strong, readonly, nullable) Core3DReservedSplineEdgeIntent *splineEdge;
+@property(nonatomic, strong, readonly, nullable) Core3DSourceRelativeSelectorIntentV1 *sourceRelativeV1;
 + (instancetype)planarFaceBoundary:(Core3DPlanarFaceBoundaryIntent *)value;
 + (instancetype)line:(Core3DLineSelectorIntent *)value;
 + (instancetype)circleRim:(Core3DCircleRimIntent *)value;
 + (instancetype)splineEdge:(Core3DReservedSplineEdgeIntent *)value;
++ (instancetype)sourceRelativeV1:(Core3DSourceRelativeSelectorIntentV1 *)value;
 - (instancetype)init NS_UNAVAILABLE;
 @end
 

@@ -71,6 +71,26 @@ typedef NS_ENUM(NSInteger, Core3DDebugE4ExportFault) {
     Core3DDebugE4ExportFaultFinalProduction,
     Core3DDebugE4ExportFaultPublication,
     Core3DDebugE4ExportFaultAggregateBudget,
+    //! Stops after the complete saved-atlas read set and measured native copies.
+    Core3DDebugE4ExportFaultSavedAtlasCaptureCheckpoint,
+    //! Refuses the saved-atlas preflight before its materializing allocation.
+    Core3DDebugE4ExportFaultSavedAtlasCaptureDenyRead,
+    //! Removes the operation-private saved SYEB record before capture.
+    Core3DDebugE4ExportFaultSavedAtlasCaptureMissingBake,
+    //! Corrupts the operation-private saved SYEB record version before capture.
+    Core3DDebugE4ExportFaultSavedAtlasCaptureMalformedBake,
+    //! Stales one saved SYEB binding fence before capture.
+    Core3DDebugE4ExportFaultSavedAtlasCaptureStaleBinding,
+    //! Erases one saved member's entity identity before capture.
+    Core3DDebugE4ExportFaultSavedAtlasCaptureMissingMember,
+    //! Rewrites one saved member's entity identity to a foreign value.
+    Core3DDebugE4ExportFaultSavedAtlasCaptureForeignMember,
+    //! Duplicates one saved member's identity onto the other member.
+    Core3DDebugE4ExportFaultSavedAtlasCaptureDuplicateMember,
+    //! Replaces one raw slot with a file-backed foreign texture.
+    Core3DDebugE4ExportFaultSavedAtlasCaptureForeignRawSlot,
+    //! Corrupts one saved image resource record before capture.
+    Core3DDebugE4ExportFaultSavedAtlasCaptureMalformedResource,
 };
 #endif
 

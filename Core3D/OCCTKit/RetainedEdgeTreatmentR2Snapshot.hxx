@@ -7,6 +7,8 @@
 #include <AIS_Shape.hxx>
 #include <TDF_Label.hxx>
 #include <TopoDS_Shape.hxx>
+#include <TopoDS_TShape.hxx>
+#include <TopLoc_Location.hxx>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -14,6 +16,42 @@
 
 class OcctDocument;
 namespace core3d { class Core3DViewer; class RawR2BevelPreviewAdapter; }
+
+namespace core3d::retained_face_selector {
+// NP6 operation-bound proof sharing: the sealed exact-input certificate the
+// source/stage proof issuer mints alongside its ephemeral context. It binds
+// the exact canonical source/prefix digest, source/root/owner identities,
+// schema and unit bits, the document-time nonce and the exact proved
+// detached source/base identity. Shape identity alone is not immutability:
+// transport also requires the private producer and one-use operation below.
+// It is a mathematical proof value, not document authority: private, nonpersistent, never encoded
+// and never staged on the document; no OCAF handle crosses the detached
+// boundary. The commit owner validates its native lease before consumption;
+// any changed input or staged binding refuses instead of reissuing.
+class SourceStageCertificate final {
+    friend class SourceStageProofIssuer;
+    SourceStageCertificate() = default;
+    // No caller can manufacture a seal, copy its mutable OCCT handles, or
+    // obtain a source/base alias from this mathematical proof value.
+    retained_edge_treatment::r2::BooleanBaseBinding binding;
+    std::vector<std::uint8_t> canonicalPrefixBytes, invariantBytes;
+    retained_edge_treatment::SourceStageContext issuedContext;
+    std::uint64_t nonce = 0;
+    bool initialIssuance = false;
+    retained_edge_treatment::r2::Digest prefixDigest{};
+    retained_edge_treatment::r2::UUID document, entity, definition, sourceFeature, sourceNode;
+    std::uint32_t sourceSchema = 0;
+    std::uint64_t unitBits = 0;
+    Handle(TopoDS_TShape) sourceBaseShape, savedBaseShape;
+    TopLoc_Location sourceBaseLocation, savedBaseLocation;
+    TopAbs_Orientation sourceBaseOrientation = TopAbs_EXTERNAL;
+    TopAbs_Orientation savedBaseOrientation = TopAbs_EXTERNAL;
+public:
+    ~SourceStageCertificate() = default;
+    SourceStageCertificate(const SourceStageCertificate&) = delete;
+    SourceStageCertificate& operator=(const SourceStageCertificate&) = delete;
+};
+} // namespace core3d::retained_face_selector
 
 namespace core3d::retained_edge_treatment::r2 {
 struct SelectorAppend { et::Kind kind = et::Kind::ConstantFillet; double amountMM = 0; };
@@ -198,8 +236,37 @@ public:
     }
 };
 
+// Private source-edit lease: one producer, one detached result and one
+// synchronous command consumption. Document time may legitimately be zero;
+// this native identity, not a nonzero timestamp, prevents operation reuse.
+// No document or OCAF object crosses the detached boundary.
+class SourceStageOperation final {
+    friend class core3d::Core3DViewer;
+    enum class State { Prepared, Building, Ready, Committing, Staging, Spent };
+    std::atomic<State> state_{State::Prepared};
+    std::shared_ptr<std::atomic_bool> cancelled_;
+    explicit SourceStageOperation(std::shared_ptr<std::atomic_bool> cancelled)
+        : cancelled_(std::move(cancelled)) {}
+    bool advance(State from, State to) noexcept {
+        return cancelled_ && !cancelled_->load()
+            && state_.compare_exchange_strong(from, to);
+    }
+public:
+    bool beginBuild() noexcept { return advance(State::Prepared, State::Building); }
+    bool finishBuild() noexcept { return advance(State::Building, State::Ready); }
+    bool beginCommit(const std::shared_ptr<std::atomic_bool>& cancelled) noexcept {
+        return cancelled == cancelled_ && advance(State::Ready, State::Committing);
+    }
+    bool beginStage() noexcept { return advance(State::Committing, State::Staging); }
+    bool activeForReadback() const noexcept {
+        return cancelled_ && !cancelled_->load() && state_.load() == State::Staging;
+    }
+    void expire() noexcept { state_.store(State::Spent); }
+};
+
 class DetachedInput final {
     friend class core3d::Core3DViewer;
+    std::shared_ptr<SourceStageOperation> sourceStageOperation_;
     std::uint64_t nonce_ = 0;
     Definition candidate_;
     BaseRecipe source_;
@@ -217,6 +284,10 @@ class DetachedInput final {
 };
 class DetachedResult final {
     friend class ::OcctDocument; friend class core3d::Core3DViewer;
+    DetachedResult() = default;
+    DetachedResult(const DetachedResult&) = delete;
+    DetachedResult& operator=(const DetachedResult&) = delete;
+    std::shared_ptr<SourceStageOperation> sourceStageOperation_;
     std::uint64_t nonce_ = 0;
     Definition definition_;
     BaseRecipe source_;
@@ -229,11 +300,24 @@ class DetachedResult final {
     bool sourceChanged_ = false;
     TopoDS_Shape base_, result_;
     ReplayBudget budget_;
+    // NP6: the sealed operation-bound source/stage proof, issued once by the
+    // detached build and handed to the matching commit stage for bound
+    // exact-input consumption. Private and nonpersistent: never encoded,
+    // never staged on the document, and no OCAF handle crosses the detached
+    // boundary. The commit owner validates the certificate's native lease
+    // (canonical bytes/digest, identities, schema/unit bits, per-feature
+    // intent binding, proved-shape ownership and the operation nonce) before
+    // reuse; any mismatch refuses instead of reissuing.
+    std::shared_ptr<const et::SourceStageContext> boundSourceContext_;
+    std::shared_ptr<const core3d::retained_face_selector::SourceStageCertificate>
+        boundSourceCertificate_;
+    // The proven edited source base is commit-stage authority under the
+    // existing friend boundary; it is no longer a public accessor.
+    const TopoDS_Shape& editedSourceBase() const noexcept { return editedSourceBase_; }
 public:
     const Definition& definition() const noexcept { return definition_; }
     const TopoDS_Shape& result() const noexcept { return result_; }
     const std::vector<std::uint8_t>& canonicalPrefixBytes() const noexcept { return prefixBytes_; }
-    const TopoDS_Shape& editedSourceBase() const noexcept { return editedSourceBase_; }
     bool sourceChanged() const noexcept { return sourceChanged_; }
 };
 class Work final {

@@ -36,6 +36,8 @@ enum class FaultPoint : std::uint8_t {
     None = 0, Capture, Prepare, Stage, Readback, Close, Publication
 };
 
+enum class EditIntent : std::uint8_t { Ordinary = 0, ReverseDirection };
+
 struct Capture final {
     OcctExactLabelReceipt exact;
     bool present = false;
@@ -168,7 +170,8 @@ inline bool DecodeOwner(const std::vector<std::uint8_t>& bytes,
 
 inline bool NormalizeIdentity(const Capture& before,
                               const std::vector<std::uint8_t>& requested,
-                              std::vector<std::uint8_t>& normalized) noexcept {
+                              std::vector<std::uint8_t>& normalized,
+                              EditIntent intent = EditIntent::Ordinary) noexcept {
     normalized.clear();
     try {
         if (!before.present) { normalized = requested; return CanonicalLaw(normalized); }
@@ -176,6 +179,27 @@ inline bool NormalizeIdentity(const Capture& before,
         if (Decode(before.lawBytes, oldLinear) && Decode(requested, nextLinear)) {
             if (oldLinear.edges.size() != 1 || nextLinear.edges.size() != 1)
                 return false;
+            if (intent == EditIntent::ReverseDirection) {
+                Definition expected = oldLinear;
+                auto& edge = expected.edges.front();
+                std::swap(edge.startLocal, edge.endLocal);
+                edge.orientation = edge.orientation == Orientation::Forward
+                    ? Orientation::Reversed : Orientation::Forward;
+                for (std::size_t index = 0; index < expected.stations.size(); ++index) {
+                    const auto& physical =
+                        oldLinear.stations[expected.stations.size() - 1 - index];
+                    expected.stations[index] = physical;
+                    expected.stations[index].parameter = 1.0 - physical.parameter;
+                    if (nextLinear.stations[index].parameter
+                            != expected.stations[index].parameter
+                        || nextLinear.stations[index].radiusLocal
+                            != expected.stations[index].radiusLocal)
+                        return false;
+                }
+                if (!(nextLinear.edges.front() == edge)) return false;
+                return Encode(expected, normalized);
+            }
+            if (!(nextLinear.edges.front() == oldLinear.edges.front())) return false;
             nextLinear.edges = oldLinear.edges;
             nextLinear.stations[0].identifier = oldLinear.stations[0].identifier;
             nextLinear.stations[1].identifier = oldLinear.stations[1].identifier;
@@ -186,6 +210,38 @@ inline bool NormalizeIdentity(const Capture& before,
             || !Decode(requested, nextStations)
             || oldStations.edges.size() != 1 || nextStations.edges.size() != 1
             || oldStations.stations.size() != nextStations.stations.size()) return false;
+        if (intent == EditIntent::ReverseDirection) {
+            MultiStationDefinition expected = oldStations;
+            auto& edge = expected.edges.front();
+            std::swap(edge.startLocal, edge.endLocal);
+            edge.orientation = edge.orientation == Orientation::Forward
+                ? Orientation::Reversed : Orientation::Forward;
+            for (std::size_t index = 0; index < expected.stations.size(); ++index) {
+                const auto& physical =
+                    oldStations.stations[expected.stations.size() - 1 - index];
+                expected.stations[index] = physical;
+                expected.stations[index].parameter = 1.0 - physical.parameter;
+                if (nextStations.stations[index].parameter
+                        != expected.stations[index].parameter
+                    || nextStations.stations[index].radiusLocal
+                        != expected.stations[index].radiusLocal)
+                    return false;
+            }
+            if (!(nextStations.edges.front() == edge)) return false;
+            return Encode(expected, normalized);
+        }
+        if (!(nextStations.edges.front() == oldStations.edges.front())) return false;
+        bool requestedUsesRetainedIdentities = true;
+        std::set<UUID> retainedIdentities;
+        for (const auto& station : oldStations.stations)
+            retainedIdentities.insert(station.identifier);
+        for (const auto& station : nextStations.stations)
+            requestedUsesRetainedIdentities = requestedUsesRetainedIdentities
+                && retainedIdentities.count(station.identifier) == 1;
+        if (requestedUsesRetainedIdentities)
+            for (std::size_t index = 0; index < nextStations.stations.size(); ++index)
+                if (nextStations.stations[index].identifier
+                    != oldStations.stations[index].identifier) return false;
         nextStations.edges = oldStations.edges;
         for (std::size_t index = 0; index < nextStations.stations.size(); ++index)
             nextStations.stations[index].identifier = oldStations.stations[index].identifier;
@@ -245,7 +301,8 @@ inline bool Prepare(OcctDocument& document, const TDF_Label& label,
                     const std::vector<std::uint8_t>& candidateShapeBytes,
                     const std::vector<std::uint8_t>& requestedLaw,
                     Prepared& prepared,
-                    FaultPoint fault = FaultPoint::None) noexcept {
+                    FaultPoint fault = FaultPoint::None,
+                    EditIntent intent = EditIntent::Ordinary) noexcept {
     prepared = {};
     try {
         if (!context || fault == FaultPoint::Capture
@@ -253,7 +310,7 @@ inline bool Prepare(OcctDocument& document, const TDF_Label& label,
             || !prepared.before.valid()
             || !ReadShape(candidateShapeBytes, prepared.candidate)
             || fault == FaultPoint::Prepare
-            || !NormalizeIdentity(prepared.before, requestedLaw, prepared.lawBytes))
+            || !NormalizeIdentity(prepared.before, requestedLaw, prepared.lawBytes, intent))
             return false;
         UUID feature = prepared.before.feature;
         std::vector<std::uint8_t> base = prepared.before.baseBytes;

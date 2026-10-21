@@ -667,6 +667,13 @@ __attribute__((objc_subclassing_restricted))
 - (NSNumber *)debugBakeE4PaintedAtlasForEntityIdentifier:
     (NSString *)entityIdentifier
     NS_SWIFT_NAME(debugBakeE4PaintedAtlas(entityIdentifier:));
+//! Installs the strict max-X two-layer/mask SYDL fixture on the saved atlas
+//! member's resolved max-X receiver; every physical layer corner is proved
+//! interior by the native classifier before the committed write, and the
+//! strict readback requires the actual two-layer count and mask presence.
+- (NSNumber *)debugInstallE4PaintedAtlasLayerForEntityIdentifier:
+    (NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugInstallE4PaintedAtlasLayer(entityIdentifier:));
 //! Installs one strict SYDL/1 layer after resolving the carrier's +Z face
 //! through production B2. Returns a boxed BOOL for selector-safe test use.
 - (NSNumber *)debugInstallE4RetainedCapLayerForEntityIdentifier:

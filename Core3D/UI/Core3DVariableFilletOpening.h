@@ -41,6 +41,13 @@ typedef NS_ENUM(NSInteger, Core3DVariableFilletEdgeOrientation) {
     Core3DVariableFilletEdgeOrientationReversed = 2,
 };
 
+//! Canonical retained-law encoding. These values name the persisted native
+//! codecs; they are not inferred from station count by the caller.
+typedef NS_ENUM(NSInteger, Core3DVariableFilletLawKind) {
+    Core3DVariableFilletLawKindLinearTwoStationV1 = 1,
+    Core3DVariableFilletLawKindMultiStationV2 = 2,
+};
+
 //! Retained-owner apply outcome. OutcomeUnknown/RecoveryRequired retain the
 //! native authority and candidate evidence; callers must reconcile and must
 //! never retry the edit as a fresh command.
@@ -111,6 +118,21 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic, assign, readonly) BOOL nonnegativeDerivative;
 @property(nonatomic, copy, readonly) NSArray<NSNumber *> *stationParameters;
 @property(nonatomic, copy, readonly) NSArray<NSNumber *> *stationRadiiMM;
+//! Ordered native stations. On retained readback these include the persisted
+//! 16-byte identifier, exact parameter and physical-mm radius of every station.
+@property(nonatomic, copy, readonly) NSArray<Core3DVariableFilletStation *> *stations
+    NS_SWIFT_NAME(stations);
+@property(nonatomic, assign, readonly) Core3DVariableFilletEdgeOrientation orientation
+    NS_SWIFT_NAME(orientation);
+@property(nonatomic, assign, readonly) Core3DVariableFilletLawKind lawKind
+    NS_SWIFT_NAME(lawKind);
+//! Persisted owner feature UUID. Nil for detached observations and when no
+//! retained owner exists (in which case readRetainedLawWithError: also fails).
+@property(nonatomic, copy, readonly, nullable) NSData *featureIdentifier
+    NS_SWIFT_NAME(featureIdentifier);
+//! Exact native owner-definition UUID from the captured receipt, when present.
+@property(nonatomic, copy, readonly, nullable) NSData *ownerDefinitionIdentifier
+    NS_SWIFT_NAME(ownerDefinitionIdentifier);
 @property(nonatomic, copy, readonly) NSArray<Core3DVariableFilletLawPin *> *pins;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
@@ -201,6 +223,13 @@ __attribute__((objc_subclassing_restricted))
                                                               orientation:(Core3DVariableFilletEdgeOrientation)orientation
                                                                     error:(NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(detachedCandidate(stations:orientation:));
+
+//! Builds the one admitted direction edit from the retained native law. The
+//! native owner toggles orientation, maps t -> 1-t, reverses order and keeps
+//! each persisted station identity/radius attached to its physical station.
+- (nullable Core3DVariableFilletCandidate *)detachedDirectionEditCandidateWithError:
+    (NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(detachedDirectionEditCandidate());
 
 //! Re-observes controller, document, context, selection, source and history.
 - (BOOL)isCurrent:(NSError * _Nullable * _Nullable)error;

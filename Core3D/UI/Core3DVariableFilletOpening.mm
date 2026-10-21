@@ -526,6 +526,11 @@ struct OpeningBuild final {
 @property(nonatomic, assign, readwrite) BOOL nonnegativeDerivative;
 @property(nonatomic, copy, readwrite) NSArray<NSNumber *> *stationParameters;
 @property(nonatomic, copy, readwrite) NSArray<NSNumber *> *stationRadiiMM;
+@property(nonatomic, copy, readwrite) NSArray<Core3DVariableFilletStation *> *stations;
+@property(nonatomic, assign, readwrite) Core3DVariableFilletEdgeOrientation orientation;
+@property(nonatomic, assign, readwrite) Core3DVariableFilletLawKind lawKind;
+@property(nonatomic, copy, readwrite, nullable) NSData *featureIdentifier;
+@property(nonatomic, copy, readwrite, nullable) NSData *ownerDefinitionIdentifier;
 @property(nonatomic, copy, readwrite) NSArray<Core3DVariableFilletLawPin *> *pins;
 - (instancetype)initPrivate;
 @end
@@ -561,6 +566,7 @@ struct OpeningBuild final {
 @property(nonatomic, assign, readwrite) double removedVolumeMM3;
 @property(nonatomic, copy, readwrite) NSArray<Core3DVariableFilletLawObservation *> *lawObservations;
 @property(nonatomic, copy, readwrite) NSArray<Core3DVariableFilletSectionObservation *> *sectionObservations;
+@property(nonatomic, assign, readwrite) BOOL explicitDirectionEdit;
 - (instancetype)initPrivate;
 @end
 @implementation Core3DVariableFilletCandidate
@@ -782,9 +788,11 @@ struct OpeningBuild final {
         definition.stations[0] = { MintUUID(), 0.0, startRadiusMM * scale };
         definition.stations[1] = { MintUUID(), 1.0, endRadiusMM * scale };
         definition.edges.push_back(_issued.anchor);
-        if (reversed) {
+        const vrf::Orientation requestedOrientation = reversed
+            ? vrf::Orientation::Reversed : vrf::Orientation::Forward;
+        if (definition.edges[0].orientation != requestedOrientation) {
             std::swap(definition.edges[0].startLocal, definition.edges[0].endLocal);
-            definition.edges[0].orientation = vrf::Orientation::Reversed;
+            definition.edges[0].orientation = requestedOrientation;
         }
         result.anchor = definition.edges[0];
         vrf::Refusal validity = vrf::Refusal::None;
@@ -868,9 +876,11 @@ struct OpeningBuild final {
             definition.stations.push_back(value);
         }
         definition.edges.push_back(_issued.anchor);
-        if (reversed) {
+        const vrf::Orientation requestedOrientation = reversed
+            ? vrf::Orientation::Reversed : vrf::Orientation::Forward;
+        if (definition.edges[0].orientation != requestedOrientation) {
             std::swap(definition.edges[0].startLocal, definition.edges[0].endLocal);
-            definition.edges[0].orientation = vrf::Orientation::Reversed;
+            definition.edges[0].orientation = requestedOrientation;
         }
         result.anchor = definition.edges[0];
         vrf::Refusal validity = vrf::Refusal::None;
@@ -995,6 +1005,11 @@ struct OpeningBuild final {
                                            @(law.stationParameters[1]) ];
         observation.stationRadiiMM = @[ @(law.stationRadii[0] * mmPerLocal),
                                         @(law.stationRadii[1] * mmPerLocal) ];
+        observation.stations = @[];
+        observation.orientation = build.anchor.orientation == vrf::Orientation::Forward
+            ? Core3DVariableFilletEdgeOrientationForward
+            : Core3DVariableFilletEdgeOrientationReversed;
+        observation.lawKind = Core3DVariableFilletLawKindLinearTwoStationV1;
         NSMutableArray<Core3DVariableFilletLawPin *> *pins = [NSMutableArray array];
         // The landed F01 r2 observation samples the law at the fixed authored
         // grid t = {0, .2, .5, .8, 1} (observeRealizedLaw's `samples`);
@@ -1028,6 +1043,11 @@ struct OpeningBuild final {
         }
         observation.stationParameters = parameters;
         observation.stationRadiiMM = radii;
+        observation.stations = @[];
+        observation.orientation = build.anchor.orientation == vrf::Orientation::Forward
+            ? Core3DVariableFilletEdgeOrientationForward
+            : Core3DVariableFilletEdgeOrientationReversed;
+        observation.lawKind = Core3DVariableFilletLawKindMultiStationV2;
         observation.pins = @[];
         [laws addObject:observation];
     }
@@ -1116,6 +1136,67 @@ struct OpeningBuild final {
     return [self deliverCandidate:build error:error];
 }
 
+- (Core3DVariableFilletCandidate *)detachedDirectionEditCandidateWithError:(NSError **)error {
+    if (error) *error = nil;
+    if (![self isCurrent:error]) return nil;
+    if (!_retained.present) {
+        if (error) *error = VRError(Core3DVariableFilletErrorApplyUnavailable,
+                                    @"retained variable fillet owner is absent");
+        return nil;
+    }
+    @try {
+        const double mmPerLocal = 1000.0 * self.metersPerUnit;
+        rf::ReplayBudget budget;
+        OpeningBuild build;
+        vrf::Definition linear;
+        vrf::MultiStationDefinition multi;
+        if (vrf::Decode(_retained.lawBytes, linear) && linear.edges.size() == 1) {
+            const BOOL reversed = linear.edges.front().orientation == vrf::Orientation::Forward;
+            build = [self buildLinear:linear.stations[1].radiusLocal * mmPerLocal
+                          endRadiusMM:linear.stations[0].radiusLocal * mmPerLocal
+                             reversed:reversed budget:budget];
+        } else if (vrf::Decode(_retained.lawBytes, multi) && multi.edges.size() == 1) {
+            NSMutableArray<Core3DVariableFilletStation *> *stations = [NSMutableArray array];
+            for (auto value = multi.stations.rbegin(); value != multi.stations.rend(); ++value) {
+                Core3DVariableFilletStation *station =
+                    [[Core3DVariableFilletStation alloc]
+                        initWithIdentifier:VRData(value->identifier)
+                                 parameter:1.0 - value->parameter
+                                  radiusMM:value->radiusLocal * mmPerLocal];
+                if (!station) {
+                    if (error) *error = VRError(Core3DVariableFilletErrorUnavailable,
+                                                @"retained station is malformed");
+                    return nil;
+                }
+                [stations addObject:station];
+            }
+            const BOOL reversed = multi.edges.front().orientation == vrf::Orientation::Forward;
+            build = [self buildMultiStation:stations reversed:reversed budget:budget];
+        } else {
+            if (error) *error = VRError(Core3DVariableFilletErrorUnavailable,
+                                        @"retained variable fillet law is malformed");
+            return nil;
+        }
+        if (!build.built) {
+            if (error) *error = VRRefusal(
+                build.refusal == vrf::Refusal::Cancelled
+                    ? Core3DVariableFilletErrorCancelled
+                    : build.refusal == vrf::Refusal::Budget
+                        ? Core3DVariableFilletErrorBudget
+                        : Core3DVariableFilletErrorBuildRefused,
+                build.refusal);
+            return nil;
+        }
+        Core3DVariableFilletCandidate *candidate = [self deliverCandidate:build error:error];
+        candidate.explicitDirectionEdit = candidate != nil;
+        return candidate;
+    } @catch (__unused NSException *exception) {
+        if (error) *error = VRError(Core3DVariableFilletErrorUnavailable,
+                                    @"direction edit candidate exception");
+        return nil;
+    }
+}
+
 - (Core3DVariableFilletLawObservation *)readRetainedLawWithError:(NSError **)error {
     if (error) *error = nil;
     if (![self isCurrent:error]) return nil;
@@ -1137,6 +1218,7 @@ struct OpeningBuild final {
             [[Core3DVariableFilletLawObservation alloc] initPrivate];
         NSMutableArray<NSNumber *> *parameters = [NSMutableArray array];
         NSMutableArray<NSNumber *> *radii = [NSMutableArray array];
+        NSMutableArray<Core3DVariableFilletStation *> *readStations = [NSMutableArray array];
         const double mmPerLocal = capture.present ? 1000.0 * self.metersPerUnit : 0;
         vrf::Definition linear;
         vrf::MultiStationDefinition stations;
@@ -1144,12 +1226,34 @@ struct OpeningBuild final {
             for (const auto& station : linear.stations) {
                 [parameters addObject:@(station.parameter)];
                 [radii addObject:@(station.radiusLocal * mmPerLocal)];
+                Core3DVariableFilletStation *value = [[Core3DVariableFilletStation alloc]
+                    initWithIdentifier:VRData(station.identifier)
+                             parameter:station.parameter
+                              radiusMM:station.radiusLocal * mmPerLocal];
+                if (!value) return nil;
+                [readStations addObject:value];
             }
+            observation.orientation = linear.edges.front().orientation
+                == vrf::Orientation::Forward
+                ? Core3DVariableFilletEdgeOrientationForward
+                : Core3DVariableFilletEdgeOrientationReversed;
+            observation.lawKind = Core3DVariableFilletLawKindLinearTwoStationV1;
         } else if (vrf::Decode(capture.lawBytes, stations)) {
             for (const auto& station : stations.stations) {
                 [parameters addObject:@(station.parameter)];
                 [radii addObject:@(station.radiusLocal * mmPerLocal)];
+                Core3DVariableFilletStation *value = [[Core3DVariableFilletStation alloc]
+                    initWithIdentifier:VRData(station.identifier)
+                             parameter:station.parameter
+                              radiusMM:station.radiusLocal * mmPerLocal];
+                if (!value) return nil;
+                [readStations addObject:value];
             }
+            observation.orientation = stations.edges.front().orientation
+                == vrf::Orientation::Forward
+                ? Core3DVariableFilletEdgeOrientationForward
+                : Core3DVariableFilletEdgeOrientationReversed;
+            observation.lawKind = Core3DVariableFilletLawKindMultiStationV2;
         } else {
             if (error) *error = VRError(Core3DVariableFilletErrorUnavailable,
                                         @"retained variable fillet law is malformed");
@@ -1161,6 +1265,14 @@ struct OpeningBuild final {
         observation.nonnegativeDerivative = YES;
         observation.stationParameters = parameters;
         observation.stationRadiiMM = radii;
+        observation.stations = readStations;
+        observation.featureIdentifier = VRData(capture.feature);
+        vro::UUID ownerDefinition{};
+        if (core3d::receipt::ParseUUID(
+                capture.exact.visibility.object.object.definitionIdentifier,
+                ownerDefinition)
+            && core3d::retained_recipe::Nonzero(ownerDefinition))
+            observation.ownerDefinitionIdentifier = VRData(ownerDefinition);
         observation.pins = @[];
         return observation;
     } catch (...) {
@@ -1196,7 +1308,9 @@ struct OpeningBuild final {
         if (!vro::Prepare(*_document, label, _context,
                 _viewportWidth, _viewportHeight, _issued.topologyIndex,
                 VRBytes(candidate.candidateBRepBytes),
-                VRBytes(candidate.canonicalDefinitionBytes), *prepared, fault)) {
+                VRBytes(candidate.canonicalDefinitionBytes), *prepared, fault,
+                candidate.explicitDirectionEdit
+                    ? vro::EditIntent::ReverseDirection : vro::EditIntent::Ordinary)) {
             if (error) *error = VRError(Core3DVariableFilletErrorBuildRefused,
                                         @"dependent replay preparation refused");
             return nil;

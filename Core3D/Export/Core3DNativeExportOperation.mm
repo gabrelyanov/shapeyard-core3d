@@ -419,6 +419,14 @@ NSArray<NSString *> *DebugE4Strings(
     return result;
 }
 
+NSArray<NSNumber *> *DebugE4Numbers(
+    const std::vector<std::uint64_t>& values) {
+    NSMutableArray<NSNumber *> *result =
+        [NSMutableArray arrayWithCapacity:values.size()];
+    for (const std::uint64_t value : values) [result addObject:@(value)];
+    return result;
+}
+
 NSDictionary<NSString *, id> *DebugE4CacheDictionary(
     const core3d::decal_layer::bake::publication::DebugCacheInventory& value) {
     return @{
@@ -470,6 +478,38 @@ NSDictionary<NSString *, id> *DebugE4ObservationDictionary(
         @"inputKeys": DebugE4Strings(value.inputKeys),
         @"bakeSeals": DebugE4Strings(value.bakeSeals),
         @"outputRoleBytes": roleBytes,
+        @"savedMemberDefinitions":
+            DebugE4Strings(value.savedMemberDefinitions),
+        @"savedMemberOwners": DebugE4Strings(value.savedMemberOwners),
+        @"savedSourceOwners": DebugE4Strings(value.savedSourceOwners),
+        @"savedSourceResources": DebugE4Strings(value.savedSourceResources),
+        @"savedSourceMemberIndices":
+            DebugE4Numbers(value.savedSourceMemberIndices),
+        @"savedSourceFaceIndices":
+            DebugE4Numbers(value.savedSourceFaceIndices),
+        @"savedSourceOrigins": DebugE4Numbers(value.savedSourceOrigins),
+        @"savedCanonicalLengths":
+            DebugE4Numbers(value.savedCanonicalLengths),
+        @"savedGroupCount": @(value.savedGroupCount),
+        @"savedMemberCount": @(value.savedMemberCount),
+        @"savedSourceCount": @(value.savedSourceCount),
+        @"savedRawSlotCount": @(value.savedRawSlotCount),
+        @"savedMeasuredCopyCount": @(value.savedMeasuredCopyCount),
+        @"savedCorrespondenceCount": @(value.savedCorrespondenceCount),
+        @"savedOriginalOnlyCount": @(value.savedOriginalOnlyCount),
+        @"savedNonMemberCount": @(value.savedNonMemberCount),
+        @"savedSelectedMemberCount": @(value.savedSelectedMemberCount),
+        @"savedAtlasReadEntries": @(value.savedAtlasReadEntries),
+        @"savedReceiverMeasuredCopyCount":
+            @(value.savedReceiverMeasuredCopyCount),
+        @"savedBorrowedOwnerCount": @(value.savedBorrowedOwnerCount),
+        @"savedBorrowedReceiverCount":
+            @(value.savedBorrowedReceiverCount),
+        @"savedBorrowedReceiverCopyMatches":
+            @(value.savedBorrowedReceiverCopyMatches),
+        @"captureRefusalCause": DebugE4String(value.captureRefusalCause),
+        @"captureRefusalBoundary": DebugE4String(value.captureRefusalBoundary),
+        @"captureRefusalField": DebugE4String(value.captureRefusalField),
         @"layoutResolution": @(value.layoutResolution),
         @"layoutChartCount": @(value.layoutChartCount),
         @"failureStage": DebugE4String(value.failureStage),
@@ -477,6 +517,12 @@ NSDictionary<NSString *, id> *DebugE4ObservationDictionary(
         @"finalProductionReached": @(value.finalProductionReached),
         @"publicationReached": @(value.publicationReached),
         @"complete": @(value.complete),
+        @"savedMeasuredStageComplete": @(value.savedMeasuredStageComplete),
+        @"savedReceiverExpectationEmpty":
+            @(value.savedReceiverExpectationEmpty),
+        @"savedDetachedIdentitiesDistinct": @(
+            value.savedDetachedIdentitiesDistinct),
+        @"savedArtifactPresent": @(value.savedArtifactPresent),
         @"cacheBefore": DebugE4CacheDictionary(before),
         @"cacheAfter": DebugE4CacheDictionary(after),
     };
@@ -2621,7 +2667,8 @@ bool DebugMeshSavedGroupPrivateSurfaces(
     const std::shared_ptr<NativeExportState> state = _state;
     if (state == nullptr
         || fault < Core3DDebugE4ExportFaultNone
-        || fault > Core3DDebugE4ExportFaultAggregateBudget) return NO;
+        || fault > Core3DDebugE4ExportFaultSavedAtlasCaptureMalformedResource)
+        return NO;
     std::lock_guard<std::mutex> lock(state->lifecycleMutex);
     if (state->started || state->finished
         || state->cancelled.load(std::memory_order_acquire)

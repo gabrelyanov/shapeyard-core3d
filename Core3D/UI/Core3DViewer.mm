@@ -32,6 +32,7 @@
 #include "../OCCTKit/RetainedEdgeTreatmentBuild.hxx"
 #include "../OCCTKit/RetainedEdgeTreatmentSaveView.hxx"
 #include "../OCCTKit/RetainedProfileProducer.hxx"
+#include "../OCCTKit/VariableRadiusFilletNativeOwner.hxx"
 #if DEBUG
 // R179/D249 diagnostic-only include. Never compiled into Release.
 #include "../OCCTKit/GeneralLoftPersistence.hxx"
@@ -72,6 +73,7 @@
 #include <XCAFDoc_VisMaterialTool.hxx>
 #include <TDataStd_Integer.hxx>
 #include <TDataStd_Name.hxx>
+#include <TDataStd_NamedData.hxx>
 #include <TDF_ChildIterator.hxx>
 #include <TDF_LabelSequence.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
@@ -366,7 +368,9 @@ bool IssueSelectorStep(const retained_face_selector::FaceMembershipProof& proof,
     step = et::Step();
     step.node = MintEdgeTreatmentUUID(); step.feature = MintEdgeTreatmentUUID();
     step.localID = localID; step.kind = kind; step.amountMM = amountMM;
-    fs::SelectorReceipt receipt; receipt.intent = proof.intent(); receipt.face = proof.plane();
+    fs::SelectorReceipt receipt;
+    receipt.proofVersion = std::holds_alternative<fs::SourceRelativeV1>(proof.intent()) ? 2 : 1;
+    receipt.intent = proof.intent(); receipt.face = proof.plane();
     receipt.coverage = proof.coverage(); receipt.wireCount = proof.wireCount();
     receipt.boundaryUseCount = std::uint32_t(proof.boundaryUses().size());
     receipt.boundaryUniqueEdgeCount = proof.uniqueEdgeCount();
@@ -432,7 +436,8 @@ bool B1PrepareSelectorIntentEdit(retained_edge_treatment::Definition& candidate,
     const TopoDS_Shape& storedBase, double metersPerLocalUnit,
     const retained_edge_treatment::SetSelectorIntent& edit,
     retained_edge_treatment::ReplayBudget& budget,
-    retained_edge_treatment::Refusal& refusal) {
+    retained_edge_treatment::Refusal& refusal,
+    const retained_edge_treatment::SourceStageContext* sourceContext = nullptr) {
     namespace et = retained_edge_treatment; namespace fs = retained_face_selector;
     auto step = std::find_if(candidate.steps.begin(), candidate.steps.end(),
         [&](const et::Step& value) { return value.feature == edit.feature; });
@@ -443,10 +448,20 @@ bool B1PrepareSelectorIntentEdit(retained_edge_treatment::Definition& candidate,
     prefix.steps.resize(std::size_t(step - candidate.steps.begin()));
     prefix.outputNode = prefix.steps.empty() ? candidate.base.sourceNode : prefix.steps.back().node;
     TopoDS_Shape preStep; std::vector<et::StepProof> proofs;
-    if (!et::Replay(storedBase, prefix, preStep, proofs, budget, refusal)) return false;
-    const std::atomic_bool cancelled{false}; fs::Resolution resolution;
-    const fs::Refusal selectorRefusal = fs::Resolve(preStep, edit.requested,
-        metersPerLocalUnit, budget, cancelled, resolution);
+    const std::atomic_bool cancelled{false};
+    if (!(sourceContext
+            ? et::Replay(storedBase, prefix, preStep, proofs, budget, refusal,
+                *sourceContext, cancelled)
+            : et::Replay(storedBase, prefix, preStep, proofs, budget, refusal,
+                cancelled))) return false;
+    fs::Resolution resolution;
+    const auto* sourceProof = et::RequireSourceStageProof(*step, sourceContext, refusal);
+    if (et::NeedsSourceStageContext(*step) && !sourceProof) return false;
+    const fs::Refusal selectorRefusal = sourceProof
+        ? fs::Resolve(preStep, edit.requested, *sourceProof,
+            metersPerLocalUnit, budget, cancelled, resolution)
+        : fs::Resolve(preStep, edit.requested,
+            metersPerLocalUnit, budget, cancelled, resolution);
     if (selectorRefusal != fs::Refusal::None || !resolution.proof) {
         refusal = fs::MapToB1(selectorRefusal); return false;
     }
@@ -1693,7 +1708,8 @@ Core3DViewer::prepareRetainedBooleanMigrationR2(
         r2::UUID left=links.rootNode;
         for(std::size_t index=0;index<operationCount;++index){r2::LegacyLink link;
             link.operandID=std::visit([&](const auto& value)->std::uint32_t{if constexpr(std::is_same_v<std::decay_t<decltype(value)>,retained_boolean::Legacy>)return value.operandID;else return value.steps[index].operand.identifier;},prefix);
-            link.node=MintEdgeTreatmentUUID();link.feature=index+1==operationCount?identityValue.derivedFeature:MintEdgeTreatmentUUID();
+            link.node=index+1==operationCount?identityValue.derivedFeature:MintEdgeTreatmentUUID();
+            link.feature=MintEdgeTreatmentUUID();
             link.toolNode=MintEdgeTreatmentUUID();link.toolFeature=MintEdgeTreatmentUUID();link.leftNode=left;link.rightNode=link.toolNode;
             left=link.node;links.links.push_back(link);
         }
@@ -1829,7 +1845,39 @@ Core3DViewer::captureEdgeTreatmentSelectorTargetsR2(
     refusal=fs::Refusal::StaleSource;if(![NSThread isMainThread]||!original||!original->current())return {};
     et::ReplayBudget budget;CopyTopologyBudget(budget,original->chargedBudget_);
     fs::Resolution resolution;const std::atomic_bool cancelled{false};
-    refusal=fs::Resolve(original->current_,intent,original->dimensionMetersPerUnit(),budget,cancelled,resolution);
+    const auto* relative=std::get_if<fs::SourceRelativeV1>(&intent);
+    if(relative){
+        const auto* source=std::get_if<r2::RetainedBooleanBase>(&original->source_);
+        if(!source){refusal=fs::Refusal::UnsupportedCarrier;return {};}
+        r2::Definition authorization=original->definition_;authorization.schema=4;
+        et::Step probe;probe.feature=relative->sourceFeature;
+        fs::SelectorReceipt receipt;receipt.proofVersion=2;receipt.intent=intent;
+        probe.selector=std::move(receipt);authorization.steps.push_back(probe);
+        et::SourceStageContext context;et::Refusal nativeRefusal=et::Refusal::None;
+        if(!fs::SourceStageProofIssuer::Issue(*source,authorization,
+                original->sourceBase_,original->base_,true,budget,cancelled,
+                context,nativeRefusal)){
+            refusal=nativeRefusal==et::Refusal::Budget?fs::Refusal::Budget
+                :nativeRefusal==et::Refusal::Cancelled?fs::Refusal::Cancelled
+                :nativeRefusal==et::Refusal::IdentityMismatch?fs::Refusal::OwnershipMismatch
+                :nativeRefusal==et::Refusal::UnitMismatch?fs::Refusal::UnsupportedTransform
+                :nativeRefusal==et::Refusal::NoncurrentSource
+                    ||nativeRefusal==et::Refusal::StaleSnapshot?fs::Refusal::StaleSource
+                :nativeRefusal==et::Refusal::ReplayMismatch?fs::Refusal::ReplayMismatch
+                :nativeRefusal==et::Refusal::UnsupportedDependency
+                    ?fs::Refusal::AdmissionUnavailable
+                :nativeRefusal==et::Refusal::UnsupportedBase
+                    ?fs::Refusal::UnsupportedCarrier
+                :nativeRefusal==et::Refusal::MalformedCarrier?fs::Refusal::InvalidIntent
+                :fs::Refusal::UnsupportedCarrier;
+            return {};
+        }
+        const auto* sourceProof=context.proofFor(authorization.steps.back());
+        if(!sourceProof){refusal=fs::Refusal::UnsupportedCarrier;return {};}
+        refusal=fs::Resolve(original->current_,intent,*sourceProof,
+            original->dimensionMetersPerUnit(),budget,cancelled,resolution);
+    }else refusal=fs::Resolve(original->current_,intent,
+        original->dimensionMetersPerUnit(),budget,cancelled,resolution);
 #if DEBUG
     tb::debug::RecordPhase("capture-r2",original->chargedBudget_,budget);
 #endif
@@ -1870,9 +1918,10 @@ Core3DViewer::prepareEdgeTreatmentSelectorAppendR2(
         tb::debug::RecordPhase("prepare-r2",targets->chargedBudget_,budget);
 #endif
         return {};}
-    if(kind==et::Kind::Chamfer)candidate.schema=3;
+    if(std::holds_alternative<fs::SourceRelativeV1>(targets->proof_->intent()))candidate.schema=4;
+    else if(kind==et::Kind::Chamfer)candidate.schema=3;
     candidate.steps.push_back(step);candidate.outputNode=step.node;std::vector<std::uint8_t> bytes;if(!r2::Encode(candidate,bytes,refusal))return {};
-    auto work=std::make_shared<r2::Work>();work->snapshot_=original;work->mutation_=r2::Edit(r2::SelectorAppend{kind,amountMM});work->candidate_=candidate;work->source_=original->source_;
+    auto work=std::make_shared<r2::Work>();work->snapshot_=original;work->mutation_=r2::Edit(r2::SelectorAppend{kind,amountMM});work->candidate_=candidate;work->source_=original->source_;work->sourceBase_=original->sourceBase_;
     work->base_=original->base_;work->originalCurrent_=original->current_;work->nonce_=original->nonce_;work->label_=original->ownerLabel_;
     work->chargedBudget_=targets->chargedBudget_;CopyTopologyBudget(work->chargedBudget_,budget);
 #if DEBUG
@@ -2465,6 +2514,23 @@ std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTrea
         // and replace only anchors/receipt. The Boolean prefix is untouched,
         // so the suffix replay in buildEdgeTreatmentR2 re-resolves the new
         // receipt exactly like any other candidate step.
+        et::SourceStageContext sourceContext;const et::SourceStageContext* sourceContextPtr=nullptr;
+        if(std::holds_alternative<fs::SourceRelativeV1>(intent->requested)){
+            const auto* source=std::get_if<r2::RetainedBooleanBase>(&original->source_);
+            auto target=std::find_if(candidate.steps.begin(),candidate.steps.end(),
+                [&](const et::Step& step){return step.feature==intent->feature;});
+            if(!source||target==candidate.steps.end()||!target->selector){
+                refusal=et::Refusal::UnsupportedDependency;return {};
+            }
+            candidate.schema=4;target->selector->proofVersion=2;
+            target->selector->intent=intent->requested;
+            intentBudget.emplace();CopyTopologyBudget(*intentBudget,original->chargedBudget_);
+            const std::atomic_bool cancelled{false};
+            if(!fs::SourceStageProofIssuer::Issue(*source,candidate,
+                    original->sourceBase_,original->base_,true,*intentBudget,
+                    cancelled,sourceContext,refusal))return {};
+            sourceContextPtr=&sourceContext;
+        }
         et::Definition shadow;shadow.schema=candidate.schema;shadow.owner=candidate.owner;
         if(const auto* old=std::get_if<et::BaseBinding>(&candidate.base))shadow.base=*old;
         else{const auto& boolean=std::get<r2::BooleanBaseBinding>(candidate.base);
@@ -2473,8 +2539,9 @@ std::shared_ptr<retained_edge_treatment::r2::Work> Core3DViewer::prepareEdgeTrea
             shadow.base.sourceRecipeDigest=boolean.sourceRecipeDigest;
             shadow.base.metersPerLocalUnit=boolean.metersPerLocalUnit;}
         shadow.issuance=candidate.issuance;shadow.outputNode=candidate.outputNode;shadow.steps=candidate.steps;
-        intentBudget.emplace();CopyTopologyBudget(*intentBudget,original->chargedBudget_);
-        if(!B1PrepareSelectorIntentEdit(shadow,original->base_,original->dimensionMetersPerUnit(),*intent,*intentBudget,refusal))return {};
+        if(!intentBudget){intentBudget.emplace();CopyTopologyBudget(*intentBudget,original->chargedBudget_);}
+        if(!B1PrepareSelectorIntentEdit(shadow,original->base_,original->dimensionMetersPerUnit(),
+                *intent,*intentBudget,refusal,sourceContextPtr))return {};
         candidate.steps=std::move(shadow.steps);
     }
     else if(std::holds_alternative<r2::SetBooleanOperation>(edit)||std::holds_alternative<r2::SetInputPlacement>(edit)){
@@ -2503,6 +2570,10 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedInput> Core3DViewer::
     input->source_=work->source_;input->base_=work->base_;input->originalCurrent_=work->originalCurrent_;input->chargedBudget_=work->chargedBudget_;
     input->sourceBase_=work->sourceBase_;input->rebindRoles_=work->rebindRoles_;
     if(const auto* edit=std::get_if<r2::Edit>(&work->mutation_))input->edit_=*edit;
+    if(input->candidate_.schema==4&&input->edit_
+        &&std::holds_alternative<r2::RebuildBooleanInput>(*input->edit_))
+        input->sourceStageOperation_=std::shared_ptr<r2::SourceStageOperation>(
+            new r2::SourceStageOperation(work->cancelled_));
 #if DEBUG
     tb::debug::RecordPhase("detach-r2",work->chargedBudget_,input->chargedBudget_);
 #endif
@@ -2522,10 +2593,21 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
     namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;
     namespace fs=retained_face_selector;refusal=et::Refusal::BuildFailed;
     if(!input||!input->cancelled_||input->cancelled_->load()){refusal=et::Refusal::Cancelled;return {};}
+    const auto sourceOperation=input->sourceStageOperation_;
+    if(sourceOperation&&!sourceOperation->beginBuild()){
+        refusal=input->cancelled_->load()?et::Refusal::Cancelled:et::Refusal::StaleSnapshot;return {};
+    }
+    struct SourceBuildScope final {
+        std::shared_ptr<r2::SourceStageOperation> operation;
+        bool completed=false;
+        ~SourceBuildScope(){if(operation&&!completed)operation->expire();}
+    } sourceBuildScope{sourceOperation};
     auto result=std::shared_ptr<r2::DetachedResult>(new r2::DetachedResult);result->nonce_=input->nonce_;result->definition_=input->candidate_;
     result->budget_=input->chargedBudget_;et::ReplayBudget budget;CopyTopologyBudget(budget,input->chargedBudget_);
     result->source_=input->source_;result->edit_=input->edit_;result->base_=input->base_;std::visit([&](const auto& source){if constexpr(std::is_same_v<std::decay_t<decltype(source)>,r2::RetainedBooleanBase>)result->prefixBytes_=std::visit([](const auto& arm){return arm.canonicalPrefixBytes;},source.source);},input->source_);
     et::SourceStageContext sourceContext;bool hasSourceContext=false;
+    bool privatelyProducedSource=false;
+    std::shared_ptr<const fs::SourceStageCertificate> sourceCertificate;
     if(input->edit_&&(std::holds_alternative<r2::RebuildBooleanInput>(*input->edit_)||std::holds_alternative<r2::RebuildAnalyticTool>(*input->edit_))){
         // Replay the complete changed prefix first; the preserved suffix is
         // replayed on its result below. The candidate binding is re-digested
@@ -2538,25 +2620,101 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
 #endif
             return {};}
         result->source_=edited;result->prefixBytes_=editedBytes;result->base_=prefixResult;result->editedSourceBase_=editedBase;result->sourceChanged_=true;
+        // Only the Boolean-input producer owns both fresh bases. Analytic-tool
+        // edits retain the borrowed source base and must re-earn their proof.
+        // The producer's locals die here; subsequent rebind/replay uses the
+        // existing charged binary detachment, never these proved handles.
+        privatelyProducedSource=sourceOperation
+            &&std::holds_alternative<r2::RebuildBooleanInput>(*input->edit_)
+            &&!editedBase.IsNull()&&!prefixResult.IsNull()
+            &&!editedBase.IsPartner(input->sourceBase_)
+            &&!prefixResult.IsPartner(input->base_);
+        if(sourceOperation&&!privatelyProducedSource){
+            refusal=et::Refusal::NoncurrentSource;return {};
+        }
         auto& binding=std::get<r2::BooleanBaseBinding>(result->definition_.base);
-        if(!CC_SHA256(editedBytes.data(),CC_LONG(editedBytes.size()),binding.sourceRecipeDigest.data()))return {};
+        auto* editedSource=std::get_if<r2::RetainedBooleanBase>(&result->source_);
+        auto* editedLegacy=editedSource
+            ?std::get_if<r2::LegacyBooleanBase>(&editedSource->source):nullptr;
+        const auto* editedProgram=editedLegacy
+            ?std::get_if<retained_boolean::Program>(&editedLegacy->prefix):nullptr;
+        if(!editedProgram){refusal=et::Refusal::MalformedCarrier;return {};}
+        binding.sourceSchema=editedProgram->source.schema;
+        if(!CC_SHA256(editedBytes.data(),CC_LONG(editedBytes.size()),
+                binding.sourceRecipeDigest.data()))return {};
+        editedSource->binding=binding;
         if(result->definition_.schema==4){
             const auto* provedSource=std::get_if<r2::RetainedBooleanBase>(&result->source_);
             if(!provedSource||!fs::SourceStageProofIssuer::Issue(*provedSource,
                     result->definition_,result->editedSourceBase_,result->base_,false,
-                    budget,*input->cancelled_,sourceContext,refusal))return {};
+                    budget,*input->cancelled_,sourceContext,refusal,
+                    privatelyProducedSource?&sourceCertificate:nullptr,input->nonce_))return {};
             hasSourceContext=true;
         }
         if(input->rebindRoles_){
+            et::SourceRebindRoles transportedRoles=*input->rebindRoles_;
+            const bool hasRelativeRoles=std::any_of(result->definition_.steps.begin(),
+                result->definition_.steps.end(),[](const et::Step& step){
+                    return step.selector&&std::holds_alternative<fs::SourceRelativeV1>(
+                        step.selector->intent);
+                });
+            if(hasRelativeRoles){
+                const auto decodeProfile=[](const r2::BaseRecipe& recipe,
+                        profile::Parameters& decoded){
+                    const auto* retained=std::get_if<r2::RetainedBooleanBase>(&recipe);
+                    const auto* legacy=retained
+                        ?std::get_if<r2::LegacyBooleanBase>(&retained->source):nullptr;
+                    const auto* program=legacy
+                        ?std::get_if<retained_boolean::Program>(&legacy->prefix):nullptr;
+                    return program&&program->source.family==1
+                        &&profile::Decode(program->source.values,decoded);
+                };
+                profile::Parameters oldProfile,newProfile;
+                fs::detail::Affine oldFrame,newFrame,inverseOld,delta;
+                double radiusScale=0;
+                if(!decodeProfile(input->source_,oldProfile)
+                    ||!decodeProfile(result->source_,newProfile)
+                    ||!fs::detail::ProfileAffine(oldProfile,oldFrame)
+                    ||!fs::detail::ProfileAffine(newProfile,newFrame)
+                    ||!fs::detail::Inverse(oldFrame,inverseOld)){
+                    refusal=et::Refusal::UnsupportedTransform;return {};
+                }
+                delta=fs::detail::Compose(newFrame,inverseOld);
+                if(!fs::detail::Similarity(delta,radiusScale)){
+                    refusal=et::Refusal::UnsupportedTransform;return {};
+                }
+                for(auto& row:transportedRoles.selectorSteps){
+                    const auto step=std::find_if(result->definition_.steps.begin(),
+                        result->definition_.steps.end(),[&](const et::Step& value){
+                            return value.feature==row.first;
+                        });
+                    if(step==result->definition_.steps.end()||!step->selector){
+                        refusal=et::Refusal::ReplayMismatch;return {};
+                    }
+                    if(!std::holds_alternative<fs::SourceRelativeV1>(
+                            step->selector->intent))continue;
+                    for(auto& role:row.second){
+                        std::array<double,3> tangent,normalA,normalB;
+                        if(!fs::detail::Tangent(delta,role.tangent,tangent)
+                            ||!fs::detail::Normal(delta,role.normalA,normalA)
+                            ||!fs::detail::Normal(delta,role.normalB,normalB)){
+                            refusal=et::Refusal::UnsupportedTransform;return {};
+                        }
+                        role.tangent=tangent;role.normalA=normalA;role.normalB=normalB;
+                        if(role.normalB<role.normalA)std::swap(role.normalA,role.normalB);
+                        role.circleRadiusMM*=radiusScale;
+                    }
+                }
+            }
             // C18: rebind the witnesses the source edit moved through the
             // captured unique role correspondence and strictly replay the
             // complete suffix on its proper stages; the rebound steps keep
             // feature/node/local IDs, kind, amount and authored intent.
             r2::Definition rebound=result->definition_;TopoDS_Shape treated;
             const bool reboundOK=hasSourceContext
-                ?r2::ApplySourceRebindR2(*input->rebindRoles_,result->base_,
+                ?r2::ApplySourceRebindR2(transportedRoles,result->base_,
                     rebound,treated,budget,refusal,sourceContext,*input->cancelled_)
-                :r2::ApplySourceRebindR2(*input->rebindRoles_,result->base_,
+                :r2::ApplySourceRebindR2(transportedRoles,result->base_,
                     rebound,treated,budget,refusal,*input->cancelled_);
             if(!reboundOK){
 #if DEBUG
@@ -2565,6 +2723,16 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
                 return {};}
             result->definition_=std::move(rebound);result->result_=treated;
         }
+    }
+    if(result->definition_.schema==4&&!hasSourceContext){
+        const auto* provedSource=std::get_if<r2::RetainedBooleanBase>(&result->source_);
+        if(!provedSource||input->sourceBase_.IsNull()
+            ||!fs::SourceStageProofIssuer::Issue(*provedSource,result->definition_,
+                input->sourceBase_,result->base_,false,budget,*input->cancelled_,
+                sourceContext,refusal))return {};
+        // This branch proves an ordinary edit over borrowed document bases;
+        // it has no source-edit authority to transport to commit/readback.
+        hasSourceContext=true;
     }
     if(!r2::Encode(result->definition_,result->definitionBytes_,refusal))return {};
     if(result->result_.IsNull()
@@ -2579,6 +2747,23 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
         return {};}
     if(input->cancelled_->load()){refusal=et::Refusal::Cancelled;return {};}
     CopyTopologyBudget(result->budget_,budget);
+    if(privatelyProducedSource&&hasSourceContext&&sourceCertificate){
+        if(!sourceOperation->finishBuild()){
+            refusal=input->cancelled_->load()?et::Refusal::Cancelled:et::Refusal::StaleSnapshot;
+            return {};
+        }
+        result->sourceStageOperation_=sourceOperation;
+        // NP6: transfer the sealed Issue context into this operation's
+        // DetachedResult with the existing nonce and continued debt. The
+        // context keeps covering the rebound steps: the rebind carried every
+        // feature/node ID and authored intent forward verbatim, and the final
+        // rebound receipts remain bound to the completed suffix by the commit
+        // stage's independent replay and equivalence proof.
+        result->boundSourceContext_=std::shared_ptr<const et::SourceStageContext>(
+            new et::SourceStageContext(std::move(sourceContext)));
+        result->boundSourceCertificate_=std::move(sourceCertificate);
+        sourceBuildScope.completed=true;
+    }
 #if DEBUG
     tb::debug::RecordPhase("build-r2",input->chargedBudget_,budget);
 #endif
@@ -2591,7 +2776,14 @@ retained_edge_treatment::CommitResult Core3DViewer::commitEdgeTreatmentR2(
     const std::shared_ptr<const retained_edge_treatment::r2::DetachedResult>& result) noexcept {
     RetainedValidationOperationScope validationOperation;
     namespace et=retained_edge_treatment;namespace r2=retained_edge_treatment::r2;et::CommitResult answer;
-    if(![NSThread isMainThread]||!work||!result||result->nonce_!=work->nonce_){answer.refusal=et::Refusal::StaleSnapshot;
+    const auto sourceOperation=result?result->sourceStageOperation_:nullptr;
+    struct SourceCommitScope final {
+        std::shared_ptr<r2::SourceStageOperation> operation;
+        ~SourceCommitScope(){if(operation)operation->expire();}
+    } sourceCommitScope{sourceOperation};
+    if(![NSThread isMainThread]||!work||!result||result->nonce_!=work->nonce_
+        ||(sourceOperation&&(work->state_!=r2::Work::State::Building
+            ||!sourceOperation->beginCommit(work->cancelled_)))){answer.refusal=et::Refusal::StaleSnapshot;
 #if DEBUG
         tb::debug::RecordCommit(int(answer.outcome),et::RefusalCode(answer.refusal),false);
 #endif
@@ -11388,6 +11580,69 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string& theFilename,
         return AssetImportResult::InternalFailure;
     }
 
+    // B3 retained variable-radius-fillet owners carry their recipe as a
+    // NamedData property on the owner label. The pre-adoption traversal below
+    // tessellates and sets face Checked bits on the incoming candidate, and
+    // those bits belong to the exact persisted BRep stream. Snapshot the
+    // actual incoming values now and restore them synchronously on every
+    // exit, before any later observation or save of the adopted document.
+    struct ColdLoadShapeFlags final {
+        std::vector<std::pair<Handle(TopoDS_TShape),Standard_Boolean>> carrierFaceChecked;
+        ~ColdLoadShapeFlags() {
+            for (auto& entry:carrierFaceChecked)
+                if (!entry.first.IsNull()) entry.first->Checked(entry.second);
+        }
+    } preservedFlags;
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(XCAFDoc_ShapeTool) candidateShapes =
+            XCAFDoc_DocumentTool::ShapeTool(candidate->Main());
+        if (candidateShapes.IsNull()) {
+            (void)restoreDocumentReplacement(true);
+            return AssetImportResult::InternalFailure;
+        }
+        TDF_LabelSequence candidateRoots;
+        candidateShapes->GetFreeShapes(candidateRoots);
+        const TCollection_ExtendedString b3OwnerKey(
+            core3d::variable_radius_fillet::owner::PropertyKey);
+        constexpr std::size_t maximumAnalyticCarrierFaces=1024;
+        std::unordered_set<const TopoDS_TShape*> retainedFaceIdentities;
+        for (int i=1;i<=candidateRoots.Length();++i) {
+            Handle(TDataStd_NamedData) properties;
+            if (!candidateRoots.Value(i).FindAttribute(TDataStd_NamedData::GetID(),properties)
+                || properties.IsNull()
+                || !properties->HasArrayOfIntegers(b3OwnerKey)) continue;
+            const TopoDS_Shape carrier=XCAFDoc_ShapeTool::GetShape(candidateRoots.Value(i));
+            if (carrier.IsNull()) {
+                (void)restoreDocumentReplacement(true);
+                return AssetImportResult::InternalFailure;
+            }
+            std::unordered_set<const TopoDS_TShape*> distinctCarrierFaces;
+            std::size_t faceCount=0;
+            for (TopExp_Explorer face(carrier,TopAbs_FACE);face.More();face.Next()) {
+                const Handle(TopoDS_TShape)& tshape=face.Current().TShape();
+                if (tshape.IsNull()) {
+                    (void)restoreDocumentReplacement(true);
+                    return AssetImportResult::InternalFailure;
+                }
+                if (!distinctCarrierFaces.insert(tshape.get()).second) continue;
+                if (++faceCount>maximumAnalyticCarrierFaces) {
+                    (void)restoreDocumentReplacement(true);
+                    return AssetImportResult::InternalFailure;
+                }
+                if (retainedFaceIdentities.insert(tshape.get()).second)
+                    preservedFlags.carrierFaceChecked.emplace_back(tshape,tshape->Checked());
+            }
+            if (faceCount==0) {
+                (void)restoreDocumentReplacement(true);
+                return AssetImportResult::InternalFailure;
+            }
+        }
+    } catch (...) {
+        (void)restoreDocumentReplacement(true);
+        return AssetImportResult::InternalFailure;
+    }
+
     try {
         OCC_CATCH_SIGNALS
 
@@ -11598,6 +11853,34 @@ bool Core3DViewer::redrawDocument() noexcept {
             std::unordered_set<const TopoDS_TShape*> distinctCarrierFaces;
             std::size_t faceCount=0;
             for (TopExp_Explorer face(record.current,TopAbs_FACE);face.More();face.Next()) {
+                const Handle(TopoDS_TShape)& tshape=face.Current().TShape();
+                if (tshape.IsNull()) return false;
+                if (!distinctCarrierFaces.insert(tshape.get()).second) continue;
+                if (++faceCount>maximumAnalyticCarrierFaces) return false;
+                if (retainedFaceIdentities.insert(tshape.get()).second)
+                    preservedFlags.carrierFaceChecked.emplace_back(tshape,tshape->Checked());
+            }
+            if (faceCount==0) return false;
+        }
+
+        // B3 retained variable-radius-fillet owners carry their recipe as a
+        // NamedData property on the owner label, not as a composite recipe
+        // record, so the loop above never reaches their faces. The same
+        // shaded-publication Checked mutation applies to them; preserve the
+        // actual incoming values here with the same bounds and fail-closed
+        // exits, restored by preservedFlags on every path below.
+        const TCollection_ExtendedString b3OwnerKey(
+            core3d::variable_radius_fillet::owner::PropertyKey);
+        for (int i=1;i<=roots.Length();++i) {
+            Handle(TDataStd_NamedData) properties;
+            if (!roots.Value(i).FindAttribute(TDataStd_NamedData::GetID(),properties)
+                || properties.IsNull()
+                || !properties->HasArrayOfIntegers(b3OwnerKey)) continue;
+            const TopoDS_Shape carrier=XCAFDoc_ShapeTool::GetShape(roots.Value(i));
+            if (carrier.IsNull()) return false;
+            std::unordered_set<const TopoDS_TShape*> distinctCarrierFaces;
+            std::size_t faceCount=0;
+            for (TopExp_Explorer face(carrier,TopAbs_FACE);face.More();face.Next()) {
                 const Handle(TopoDS_TShape)& tshape=face.Current().TShape();
                 if (tshape.IsNull()) return false;
                 if (!distinctCarrierFaces.insert(tshape.get()).second) continue;

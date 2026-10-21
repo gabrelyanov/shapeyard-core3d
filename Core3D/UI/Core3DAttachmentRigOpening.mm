@@ -6,6 +6,7 @@
 #import "../Viewport/Core3DSceneSnapshot.h"
 
 #include "../OCCTKit/AttachmentRigMetadataPersistence.hxx"
+#include "../OCCTKit/AttachmentRigNativeOwner.hxx"
 #include "../OCCTKit/CylindricalCutDefinition.hxx"
 #include "../OCCTKit/NativeOpeningContext.hxx"
 #include "../OCCTKit/OcctDocument.h"
@@ -467,6 +468,8 @@ struct Evidence final {
 
 struct NativeOwner final {
     std::string tuple;
+    std::string entityIdentifier;
+    TopoDS_Shape shape;
     gp_Trsf placement;
     Core3DAttachmentRigOwnerObservation *observation = nil;
 };
@@ -537,7 +540,26 @@ bool CaptureOwner(const Handle(OcctDocument)& document, NSString *entity, Native
     for(unsigned c=1;c<=3;++c)for(unsigned r=1;r<=3;++r)[placement addObject:@(matrix.Value(r,c))];
     const gp_XYZ t=state.transform.TranslationPart();[placement addObjectsFromArray:@[@(t.X()),@(t.Y()),@(t.Z())]];
     observation.placementTransformDocument=placement;observation.positiveUniformScale=scale;
-    output.tuple=std::move(tuple);output.placement=state.transform;output.observation=observation;return true;
+    output.tuple=std::move(tuple);output.entityIdentifier=entity.UTF8String?:"";
+    output.shape=state.shape;output.placement=state.transform;
+    output.observation=observation;return !output.shape.IsNull();
+}
+
+bool SameNativeOwner(const NativeOwner& expected,
+                     const NativeOwner& actual) noexcept {
+    @try {
+        return expected.tuple==actual.tuple
+            && expected.entityIdentifier==actual.entityIdentifier
+            && expected.shape.IsEqual(actual.shape)
+            && [expected.observation.recipeWitnessBytes
+                isEqualToData:actual.observation.recipeWitnessBytes]
+            && [expected.observation.operandWitnessBytes
+                isEqualToData:actual.observation.operandWitnessBytes]
+            && [expected.observation.dependentWitnessBytes
+                isEqualToData:actual.observation.dependentWitnessBytes]
+            && [expected.observation.placementTransformDocument
+                isEqualToArray:actual.observation.placementTransformDocument];
+    } @catch (__unused NSException *exception) { return false; }
 }
 
 bool Observe(Core3DViewController *controller,const Handle(OcctDocument)& document,NSArray<NSString*> *expected,NativeObservation& output){
@@ -560,6 +582,21 @@ Frame Compose(const Frame& parent,const Frame& local){Frame r;for(unsigned i=0;i
 Frame OwnerWorld(const NativeOwner& owner,double metersPerUnit,const Frame& local){Frame r;std::array<double,9> rotation{};double scale=0;PositiveUniform(owner.placement,scale,rotation);const gp_XYZ t=owner.placement.TranslationPart();const double c=1000.0*metersPerUnit;const double origin[3]={local.originMM[0],local.originMM[1],local.originMM[2]};for(unsigned row=0;row<3;++row)r.originMM[row]=c*(row==0?t.X():(row==1?t.Y():t.Z()))+scale*(rotation[row]*origin[0]+rotation[3+row]*origin[1]+rotation[6+row]*origin[2]);auto axis=[&](const std::array<double,3>&v){std::array<double,3>o{};for(unsigned row=0;row<3;++row)o[row]=rotation[row]*v[0]+rotation[3+row]*v[1]+rotation[6+row]*v[2];return o;};r.x=axis(local.x);r.y=axis(local.y);r.z=axis(local.z);return r;}
 Core3DAttachmentRigError ErrorForRefusal(const std::string& refusal){if(refusal.find("surface")!=std::string::npos)return Core3DAttachmentRigErrorUnsupportedSurface;if(refusal.find("ABR1")!=std::string::npos||refusal.find("schema")!=std::string::npos||refusal.find("truncated")!=std::string::npos||refusal.find("trailing")!=std::string::npos||refusal.find("checksum")!=std::string::npos||refusal.find("canonical")!=std::string::npos)return Core3DAttachmentRigErrorInvalidEncoding;return Core3DAttachmentRigErrorInvalidMetadata;}
 Core3DAttachmentRigError ErrorForDecodeRefusal(core3d::attachment_rig::DecodeRefusalClass refusalClass,const std::string& refusal){return refusalClass==core3d::attachment_rig::DecodeRefusalClass::Encoding?Core3DAttachmentRigErrorInvalidEncoding:ErrorForRefusal(refusal);}
+Core3DAttachmentRigApplyResult ApplyResult(
+    core3d::attachment_rig::owner::Outcome outcome) {
+    using Outcome = core3d::attachment_rig::owner::Outcome;
+    switch (outcome) {
+        case Outcome::Refused: return Core3DAttachmentRigApplyResultRefused;
+        case Outcome::Cancelled: return Core3DAttachmentRigApplyResultCancelled;
+        case Outcome::Committed: return Core3DAttachmentRigApplyResultCommitted;
+        case Outcome::Created: return Core3DAttachmentRigApplyResultCreated;
+        case Outcome::Removed: return Core3DAttachmentRigApplyResultRemoved;
+        case Outcome::NoChange: return Core3DAttachmentRigApplyResultNoChange;
+        case Outcome::OutcomeUnknown: return Core3DAttachmentRigApplyResultOutcomeUnknown;
+        case Outcome::RecoveryRequired: return Core3DAttachmentRigApplyResultRecoveryRequired;
+    }
+    return Core3DAttachmentRigApplyResultRecoveryRequired;
+}
 } // namespace
 
 @interface Core3DAttachmentRigOpening ()
@@ -575,6 +612,10 @@ Core3DAttachmentRigError ErrorForDecodeRefusal(core3d::attachment_rig::DecodeRef
 @property(nonatomic, assign, readwrite) uint64_t modelRevision;
 @property(nonatomic, assign, readwrite) uint64_t presentationRevision;
 @property(nonatomic, assign, readwrite) NSInteger historyDepth;
+- (Core3DAttachmentRigApplyResult)applyRemoving:(BOOL)remove
+    fault:(core3d::attachment_rig::owner::FaultPoint)fault
+    context:(const std::shared_ptr<core3d::native_opening::Context>&)context
+    candidateOverride:(NSData *)candidateOverride;
 @end
 
 @implementation Core3DAttachmentRigOpening {
@@ -585,6 +626,7 @@ Core3DAttachmentRigError ErrorForDecodeRefusal(core3d::attachment_rig::DecodeRef
     std::shared_ptr<std::atomic_bool> _cancelled;
     std::shared_ptr<std::atomic_bool> _bindingConsumed;
     bool _canBind;
+    core3d::attachment_rig::owner::Result _lastOwnerResult;
 }
 
 - (instancetype)initPrivate { return [super init]; }
@@ -622,5 +664,125 @@ Core3DAttachmentRigError ErrorForDecodeRefusal(core3d::attachment_rig::DecodeRef
 
 - (BOOL)isCurrent:(NSError **)error {if(error)*error=nil;if(!NSThread.isMainThread||!_controller){if(error)*error=RigError(Core3DAttachmentRigErrorInvalidThread,@"main-thread live controller required");return NO;}if(_cancelled->load()){if(error)*error=RigError(Core3DAttachmentRigErrorCancelled,@"opening cancelled");return NO;}if(!_context||!_context->isCurrent(64,64)){if(error)*error=RigError(Core3DAttachmentRigErrorStale,@"native opening fence changed");return NO;}NativeObservation fresh;if(!Observe(_controller,_document,self.selectedEntityIdentifiers,fresh)||![fresh.document isEqualToString:self.documentIdentifier]||![fresh.source isEqualToData:self.sourceWitnessBytes]||fresh.history!=self.historyDepth){if(error)*error=RigError(Core3DAttachmentRigErrorStale,@"captured dependency changed");return NO;}return YES;}
 - (void)cancel {if(_cancelled)_cancelled->store(true);}
-- (Core3DAttachmentRigApplyResult)apply { return Core3DAttachmentRigApplyResultUnavailable; }
+- (NSData *)storedMetadataBytesWithError:(NSError **)error {
+    if(error)*error=nil;
+    if(!NSThread.isMainThread||_document.IsNull()){
+        if(error)*error=RigError(Core3DAttachmentRigErrorInvalidThread,@"main-thread live document required");
+        return nil;
+    }
+    core3d::attachment_rig::StoredRecord record;
+    if(!_document->ReadAttachmentRigMetadata(record)){
+        if(error)*error=RigError(Core3DAttachmentRigErrorUnavailable,@"stored metadata read unavailable");
+        return nil;
+    }
+    if(record.state==core3d::attachment_rig::StoredReadState::Corrupt){
+        if(error)*error=RigError(Core3DAttachmentRigErrorCorruptStoredMetadata,Text(record.refusal));
+        return nil;
+    }
+    return record.state==core3d::attachment_rig::StoredReadState::Present
+        ? Data(record.bytes.data(),record.bytes.size()) : nil;
+}
+
+- (Core3DAttachmentRigApplyResult)applyRemoving:(BOOL)remove
+    fault:(core3d::attachment_rig::owner::FaultPoint)fault
+    context:(const std::shared_ptr<core3d::native_opening::Context>&)context
+    candidateOverride:(NSData *)candidateOverride {
+    _lastOwnerResult={};
+    if(!NSThread.isMainThread||_document.IsNull()||!context||!_cancelled)
+        return Core3DAttachmentRigApplyResultUnavailable;
+    if(remove ? (!_canBind||self.validation!=nil)
+              : (_canBind||self.validation==nil))
+        return Core3DAttachmentRigApplyResultUnavailable;
+    NSError *currentError=nil;
+    if(![self isCurrent:&currentError])
+        return currentError.code==Core3DAttachmentRigErrorCancelled
+            ? Core3DAttachmentRigApplyResultCancelled
+            : Core3DAttachmentRigApplyResultRefused;
+    std::vector<std::uint8_t> candidate;
+    if(!remove){NSData *bytes=candidateOverride?:self.validation.canonicalMetadataBytes;
+        candidate.resize(bytes.length);if(bytes.length)std::memcpy(candidate.data(),bytes.bytes,bytes.length);}
+    // The carrier edit commits no geometry. Publish the actual native-captured
+    // bound owners as reconciliation items through the same native context:
+    // each item names its real owner identity and carries that owner's actual
+    // committed shape as the presentation witness, so the viewer's
+    // committed-state proof and presentation reconciliation observe the true
+    // document state. No BRep is replaced and no second command is opened.
+    core3d::native_opening::CommittedEditPublication publication;
+    for(const auto& nativeOwner:_nativeOwners)
+        publication.replaced.push_back({nativeOwner.entityIdentifier,nativeOwner.shape});
+    const auto reobserve=[&]() noexcept {
+        if(!_controller||_document.IsNull()
+            || _document->DocumentIdentifier()!=self.documentIdentifier.UTF8String
+            || _controller.documentUndoCount!=self.historyDepth
+            || _nativeOwners.size()!=self.selectedEntityIdentifiers.count)return false;
+        for(std::size_t index=0;index<_nativeOwners.size();++index){
+            NativeOwner fresh;
+            NSString *entity=self.selectedEntityIdentifiers[index];
+            if(!CaptureOwner(_document,entity,fresh)
+                || !SameNativeOwner(_nativeOwners[index],fresh))return false;
+        }
+        return true;
+    };
+    _lastOwnerResult=core3d::attachment_rig::owner::Apply(
+        *_document,context,candidate,remove,reobserve,publication,*_cancelled,fault);
+    return ApplyResult(_lastOwnerResult.outcome);
+}
+
+- (Core3DAttachmentRigApplyResult)apply {
+    return Core3DAttachmentRigApplyResultUnavailable;
+}
+- (Core3DAttachmentRigApplyResult)commitStoredMetadata {
+    return [self applyRemoving:NO
+        fault:core3d::attachment_rig::owner::FaultPoint::None
+        context:_context candidateOverride:nil];
+}
+- (Core3DAttachmentRigApplyResult)removeStoredMetadata {
+    return [self applyRemoving:YES
+        fault:core3d::attachment_rig::owner::FaultPoint::None
+        context:_context candidateOverride:nil];
+}
+#if DEBUG
+- (NSDictionary *)debugApplyWithFault:(std::int32_t)fault
+    cancelBeforeApply:(BOOL)cancelBeforeApply
+    candidateOverride:(NSData *)candidateOverride
+    foreignOpening:(Core3DAttachmentRigOpening *)foreignOpening
+    holdBusyLease:(BOOL)holdBusyLease {
+    if(cancelBeforeApply)[self cancel];
+    using Fault=core3d::attachment_rig::owner::FaultPoint;
+    const Fault selected=fault>=0&&fault<=std::int32_t(Fault::Publication)
+        ? Fault(fault):Fault::Prepare;
+    const auto& selectedContext=foreignOpening?foreignOpening->_context:_context;
+    auto busyLease=holdBusyLease&&selectedContext
+        ? selectedContext->beginCommandLease(selectedContext->openingFence(),64,64)
+        : std::shared_ptr<core3d::native_opening::CommandLease>();
+    const Core3DAttachmentRigApplyResult result=
+        [self applyRemoving:NO fault:selected context:selectedContext
+            candidateOverride:candidateOverride];
+    if(busyLease)busyLease->abort();
+    return @{@"applyRaw":@(result),
+        @"historyDelta":@(_lastOwnerResult.measuredHistoryDelta),
+        @"commandClosed":@(_lastOwnerResult.commandClosed),
+        @"blocksOtherWork":@(_lastOwnerResult.blocksOtherWork),
+        @"readback":Data(_lastOwnerResult.readback.data(),
+                          _lastOwnerResult.readback.size())};
+}
+#endif
 @end
+
+#if DEBUG
+extern "C" void *Core3DDebugF4AttachmentRigOwnerProbe(
+    void *openingPointer, std::int32_t fault, std::int32_t cancelBeforeApply,
+    const void *candidatePointer, void *foreignOpeningPointer,
+    std::int32_t holdBusyLease) {
+    @autoreleasepool {
+        Core3DAttachmentRigOpening *opening=(__bridge Core3DAttachmentRigOpening *)openingPointer;
+        if(!opening)return (__bridge_retained void *)@{};
+        NSDictionary *value=[opening debugApplyWithFault:fault
+            cancelBeforeApply:cancelBeforeApply!=0
+            candidateOverride:(__bridge NSData *)candidatePointer
+            foreignOpening:(__bridge Core3DAttachmentRigOpening *)foreignOpeningPointer
+            holdBusyLease:holdBusyLease!=0];
+        return (__bridge_retained void *)value;
+    }
+}
+#endif

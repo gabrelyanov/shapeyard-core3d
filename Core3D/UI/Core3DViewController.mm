@@ -4053,6 +4053,24 @@ Core3DFaceSelectorIntent *B1SelectorIntent(const core3d::retained_face_selector:
         auto rim=[[Core3DCircleRimIntent alloc]initWithCenterMM:center normal:normal radiusMM:value->radiusMM expectedCount:value->expectedCount];
         return rim?[Core3DFaceSelectorIntent circleRim:rim]:nil;
     }
+    if(const auto*value=std::get_if<fs::SourceRelativeV1>(&intent)){
+        Core3DFaceSelectorIntent *inner=std::visit([](const auto&innerValue){
+            return B1SelectorIntent(fs::SelectorIntent{innerValue});
+        },value->inner);
+        if(!inner)return nil;
+        auto binding=[[Core3DSourceRelativeSelectorIntentV1 alloc]
+            initWithCoordinateSpace:Core3DFaceSelectorCoordinateSpace(value->coordinateSpace)
+            sourceOwnerDocumentIdentifier:[[NSUUID alloc]initWithUUIDBytes:value->sourceOwnerDocument.data()]
+            sourceOwnerEntityIdentifier:[[NSUUID alloc]initWithUUIDBytes:value->sourceOwnerEntity.data()]
+            sourceOwnerDefinitionIdentifier:[[NSUUID alloc]initWithUUIDBytes:value->sourceOwnerDefinition.data()]
+            inputRootNodeIdentifier:[[NSUUID alloc]initWithUUIDBytes:value->inputRootNode.data()]
+            sourceFeatureIdentifier:[[NSUUID alloc]initWithUUIDBytes:value->sourceFeature.data()]
+            captureProfileSchema:value->captureProfileSchema
+            captureProfileScalarBits:[NSData dataWithBytes:value->captureProfileScalarBits.data()
+                length:value->captureProfileScalarBits.size()*sizeof(std::uint64_t)]
+            innerIntent:inner];
+        return binding?[Core3DFaceSelectorIntent sourceRelativeV1:binding]:nil;
+    }
     return nil;
 }
 Core3DEdgeTreatmentNativeSnapshot *B1Snapshot(const std::shared_ptr<const core3d::retained_edge_treatment::Snapshot>&native){if(!native)return nil;auto value=B1Object<Core3DEdgeTreatmentNativeSnapshot>(Core3DEdgeTreatmentNativeSnapshot.class);value->native=native;const auto&d=native->effectiveDefinition();[value setValue:B1ID(d.owner.document) forKey:@"documentIdentifier"];[value setValue:B1ID(d.owner.entity) forKey:@"entityIdentifier"];[value setValue:B1ID(d.owner.definition) forKey:@"definitionIdentifier"];[value setValue:B1ID(d.base.source.sourceFeature) forKey:@"sourceFeatureIdentifier"];[value setValue:B1ID(d.base.sourceNode) forKey:@"baseNodeIdentifier"];[value setValue:B1ID(d.outputNode) forKey:@"outputNodeIdentifier"];[value setValue:@(NSInteger(d.base.family)) forKey:@"sourceKind"];NSMutableArray*steps=[NSMutableArray array];for(const auto&s:d.steps){auto step=B1Object<Core3DEdgeTreatmentStep>(Core3DEdgeTreatmentStep.class);[step setValue:B1ID(s.node) forKey:@"nodeIdentifier"];[step setValue:B1ID(s.feature) forKey:@"featureIdentifier"];[step setValue:@(s.localID) forKey:@"localID"];[step setValue:@(NSInteger(s.kind)) forKey:@"kind"];[step setValue:@(s.amountMM) forKey:@"amountMM"];NSMutableArray*anchors=[NSMutableArray array];for(const auto&a:s.anchors)[anchors addObject:B1Anchor(a)];[step setValue:anchors forKey:@"anchors"];[step setValue:(s.selector?B1SelectorIntent(s.selector->intent):nil) forKey:@"selectorIntent"];[steps addObject:step];}[value setValue:steps forKey:@"steps"];[value setValue:@0 forKey:@"prefixOperandCount"];[value setValue:[NSData dataWithBytes:native->canonicalBytes().data() length:native->canonicalBytes().size()] forKey:@"canonicalRecipeBytes"];[value setValue:@(native->current()) forKey:@"current"];[value setValue:@(native->dimensionMetersPerUnit()) forKey:@"dimensionMetersPerUnit"];if(const auto*p=std::get_if<core3d::profile::Parameters>(&native->source())){auto source=B1Object<Core3DEdgeTreatmentProfileSource>(Core3DEdgeTreatmentProfileSource.class);[source setValue:[[Core3DProfileDefinition alloc]initWithNativeParameters:*p] forKey:@"definition"];[source setValue:source.definition.shells forKey:@"shells"];[source setValue:NSData.data forKey:@"canonicalSourceBytes"];[value setValue:source forKey:@"profileSource"];}else if(const auto*e=std::get_if<core3d::enclosure::Parameters>(&native->source())){auto source=B1Object<Core3DEdgeTreatmentEnclosureSource>(Core3DEdgeTreatmentEnclosureSource.class);[source setValue:[[Core3DEnclosureDefinition alloc]initWithNativeParameters:*e] forKey:@"definition"];[source setValue:NSData.data forKey:@"canonicalSourceBytes"];[value setValue:source forKey:@"enclosureSource"];}else if(const auto*l=std::get_if<core3d::rectangular_loft::Definition>(&native->source())){auto source=B1Object<Core3DEdgeTreatmentLoftSource>(Core3DEdgeTreatmentLoftSource.class);[source setValue:[[Core3DRectangularLoftDefinition alloc]initWithNativeDefinition:*l] forKey:@"definition"];[source setValue:NSData.data forKey:@"canonicalSourceBytes"];[value setValue:source forKey:@"loftSource"];}else return nil;return value;}
@@ -22769,6 +22787,72 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         missingContextDefinition,missingOutput,missingProofs,missingBudget,missingRefusal)
         &&missingRefusal==et::Refusal::UnsupportedDependency&&missingOutput.IsNull();
 
+    // NP6 bound-proof transport probe: the sealed exact-input certificate is
+    // issued once with the operation nonce, consumed with unchanged inputs,
+    // and refuses changed source bytes, a changed or aliased base, a changed
+    // capture/intent and a stale nonce — never reissuing after a mismatch.
+    // The measured shared-commit segment (binding validation plus the
+    // retained independent suffix replay and exact equivalence) is compared
+    // against re-earning the same proof on the same fixture.
+    et::SourceStageContext sealedContext;
+    std::shared_ptr<const fs::SourceStageCertificate> sealedCertificate;
+    et::ReplayBudget sealIssueBudget;
+    const bool boundIssued=fs::SourceStageProofIssuer::Issue(t1.source,rebound1,
+        t1.sourceBase,t1.postBoolean,false,sealIssueBudget,running,sealedContext,
+        refusal,&sealedCertificate,101)&&bool(sealedCertificate);
+    et::Refusal boundConsumeRefusal=et::Refusal::None;
+    const bool boundConsumed=boundIssued
+        &&fs::SourceStageProofIssuer::ValidateBound(*sealedCertificate,
+            sealedContext,t1.source,rebound1,t1.sourceBase,t1.postBoolean,
+            101,boundConsumeRefusal)&&boundConsumeRefusal==et::Refusal::None;
+    const auto boundRefused=[&](const r2::RetainedBooleanBase& source,
+        const r2::Definition& definition,const TopoDS_Shape& sourceBase,
+        const TopoDS_Shape& savedBase,std::uint64_t nonce){
+        if(!boundIssued)return false;
+        et::Refusal why=et::Refusal::None;
+        return !fs::SourceStageProofIssuer::ValidateBound(*sealedCertificate,
+            sealedContext,source,definition,sourceBase,savedBase,nonce,why)
+            &&why!=et::Refusal::None;
+    };
+    const bool boundChangedSourceRefused=boundRefused(toolDecoy.source,
+        toolDecoy.definition,toolDecoy.sourceBase,t1.postBoolean,101);
+    const bool boundChangedBaseRefused=boundRefused(t1.source,rebound1,
+        t1.sourceBase,t0.postBoolean,101);
+    const TopoDS_Shape aliasedBase=BRepBuilderAPI_Copy(t1.postBoolean).Shape();
+    const bool boundAliasedBaseRefused=!aliasedBase.IsNull()
+        &&aliasedBase.TShape()!=t1.postBoolean.TShape()
+        &&boundRefused(t1.source,rebound1,t1.sourceBase,aliasedBase,101);
+    auto changedCapture=rebound1;
+    std::get<fs::SourceRelativeV1>(changedCapture.steps.front().selector->intent)
+        .captureProfileScalarBits.front()^=1;
+    const bool boundChangedCaptureRefused=boundRefused(t1.source,changedCapture,
+        t1.sourceBase,t1.postBoolean,101);
+    const bool boundStaleNonceRefused=boundRefused(t1.source,rebound1,
+        t1.sourceBase,t1.postBoolean,102);
+    et::ReplayBudget sharedBudget;TopoDS_Shape sharedVerified;
+    const bool boundSharedCommit=boundConsumed
+        &&r2::ReplayTreatmentSuffix(t1.postBoolean,rebound1,sharedVerified,
+            sharedBudget,refusal,sealedContext,running)
+        &&et::EquivalentReplayGeometry(treated1,sharedVerified,sharedBudget,refusal);
+    const std::size_t boundSharedStages=sharedBudget.buildStages;
+    et::ReplayBudget reissuedBudget;et::SourceStageContext reissuedContext;
+    TopoDS_Shape reissuedVerified;
+    const bool boundReissuedCommit=boundIssued
+        &&fs::SourceStageProofIssuer::Issue(t1.source,rebound1,t1.sourceBase,
+            t1.postBoolean,false,reissuedBudget,running,reissuedContext,refusal)
+        &&r2::ReplayTreatmentSuffix(t1.postBoolean,rebound1,reissuedVerified,
+            reissuedBudget,refusal,reissuedContext,running)
+        &&et::EquivalentReplayGeometry(treated1,reissuedVerified,reissuedBudget,refusal);
+    const std::size_t boundReissuedStages=reissuedBudget.buildStages;
+    // The measured F1 commit-entry debt is 50 stages on both units
+    // (diagnosis r4-tb-b5-np6-transport-r2-diagnosis-astra); the shared
+    // commit segment must keep the operation within the frozen 64 with the
+    // conservative two-stage fallback margin intact.
+    const bool boundProofSharingSavesStages=boundSharedCommit&&boundReissuedCommit
+        &&boundSharedStages<boundReissuedStages;
+    const bool boundProofF1StageBoundKept=boundSharedCommit
+        &&50+boundSharedStages+2<=64;
+
     // Fixture construction is DEBUG-only. Admission still uses the real
     // document, save-view and binary-storage boundaries below.
     TopoDS_Shape treated;et::ReplayBudget fixtureBudget;
@@ -23056,6 +23140,18 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         @"operationBudgetContinued":@(budgetContinued),
         @"operationBudgetSticky":@(budgetSticky),@"cancellationSticky":@(cancelSticky),
         @"missingContextUnsupportedDependency":@(missingContextClosed),
+        @"boundProofIssued":@(boundIssued),
+        @"boundProofExactInputConsumed":@(boundConsumed),
+        @"boundProofChangedSourceRefused":@(boundChangedSourceRefused),
+        @"boundProofChangedBaseRefused":@(boundChangedBaseRefused),
+        @"boundProofAliasedBaseRefused":@(boundAliasedBaseRefused),
+        @"boundProofChangedCaptureRefused":@(boundChangedCaptureRefused),
+        @"boundProofStaleNonceRefused":@(boundStaleNonceRefused),
+        @"boundProofSharedCommit":@(boundSharedCommit),
+        @"boundProofSharedStages":@(boundSharedStages),
+        @"boundProofReissuedStages":@(boundReissuedStages),
+        @"boundProofSharingSavesStages":@(boundProofSharingSavesStages),
+        @"boundProofF1StageBoundKept":@(boundProofF1StageBoundKept),
         @"saveNoScopeGeometryRefused":@(noScopeGeometryRefused),
         @"saveNoScopeBuildRefused":@(noScopeBuildRefused),
         @"saveNoScopePrepareRefused":@(noScopePrepareRefused),

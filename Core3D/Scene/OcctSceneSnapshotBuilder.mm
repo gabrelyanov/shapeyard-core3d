@@ -14670,6 +14670,11 @@ struct PrivateDecalCapture::Impl final {
         decal_layer::bake::accounting::Ticket brepCensusTicket;
         TopoDS_Shape detachedAuthorityShape;
         std::unique_ptr<BRepBuilderAPI_Copy> copier;
+        // Non-null when this owner borrows the saved group's one admitted
+        // measured copy instead of owning a second one. Non-owning: the
+        // saved-group measured ticket dominates every receiver handle (the
+        // saved groups are declared before owners in Impl below).
+        const SavedGroupMeasuredMember* borrowedMeasured = nullptr;
         std::vector<Receiver> receivers;
         asset_atlas::build::FinalMemberInput savedMember;
         asset_atlas::Key transientAtlas;
@@ -14699,11 +14704,19 @@ struct PrivateDecalCapture::Impl final {
     decal_layer::bake::accounting::Ticket wholeSceneEncodedTicket;
     decal_layer::bake::accounting::Ticket wholeScenePrivateTicket;
     SceneSnapshot wholeCommittedScene;
-    std::vector<Owner> owners;
-    // Admitted operation-owned saved-group slots. H1 has only the explicit
-    // DEBUG transaction caller; normal dispatch does not populate this yet.
+    // The strict atlas read admission dominates both the materialized census
+    // and the operation-owned immutable saved-group captures. The saved-group
+    // measured tickets in turn dominate every borrowed receiver handle inside
+    // owners: the groups are declared before owners and destroyed after them.
+    painted_atlas_bake::owner::AtlasReadAdmission savedAtlasReadAdmission;
     decal_layer::bake::accounting::Ticket savedGroupsTicket;
     std::vector<std::unique_ptr<SavedGroupOwner>> savedGroups;
+#ifdef DEBUG
+    // Counts any receiver-pass measured copy made for a saved member; the
+    // borrowed one-copy contract keeps this zero.
+    std::uint64_t debugSavedMemberReceiverCopies = 0;
+#endif
+    std::vector<Owner> owners;
     mutable retained_edge_treatment::ReplayBudget budget;
     decal_layer::bake::publication::PrivateDestination destination;
     std::string documentIdentifier;
@@ -15854,10 +15867,14 @@ bool PrivateDecalCapture::Impl::recheckProtected(
             operationLedger.cancel(FailureSite::Cancellation);
             return false;
         }
+        // Early currentness prerequisite: the captured union of standalone
+        // SYDL owners and complete saved-atlas groups must be nonempty. An
+        // admitted no-SYDL saved group therefore reaches the unchanged
+        // nonempty-atlas refusal below instead of being stopped here.
         if (!operationLedger.recheck(boundary)
             || privateDocument.IsNull()
             || !IsValidSceneSnapshot(wholeCommittedScene)
-            || owners.empty()) return false;
+            || (owners.empty() && savedGroups.empty())) return false;
         const Handle(TDocStd_Document)& document = privateDocument->Document();
         if (document.IsNull() || document->HasOpenCommand()
             || privateDocument->DocumentIdentifier() != documentIdentifier)
@@ -16086,12 +16103,318 @@ struct ReturnedPrivateExportOwner final {
           artifact(std::move(protectedArtifact)) {}
 };
 
+#ifdef DEBUG
+//! Typed text for the inherited capture outcome; the enum stays the
+//! authority and this only names the same values for the bounded diagnostic.
+const char* SavedAtlasCaptureOutcomeText(
+    const painted_atlas_bake::owner::Outcome outcome) noexcept {
+    using Outcome = painted_atlas_bake::owner::Outcome;
+    switch (outcome) {
+        case Outcome::Prepared: return "prepared";
+        case Outcome::Committed: return "committed";
+        case Outcome::Refused: return "refused";
+        case Outcome::StaleSource: return "stale-source";
+        case Outcome::StaleBinding: return "stale-binding";
+        case Outcome::MissingResource: return "missing-resource";
+        case Outcome::ForeignResource: return "foreign-resource";
+        case Outcome::OverBudget: return "over-budget";
+        case Outcome::UnsupportedSurface: return "unsupported-surface";
+        case Outcome::OwnerMismatch: return "owner-mismatch";
+        case Outcome::Busy: return "busy";
+        case Outcome::Malformed: return "malformed";
+        case Outcome::PersistenceFailure: return "persistence-failure";
+        case Outcome::Absent: return "absent";
+    }
+    return "unknown";
+}
+
+bool DebugSavedAtlasCaptureFaultApplies(
+    const DebugPrivateExportDecalFault fault) noexcept {
+    switch (fault) {
+        case DebugPrivateExportDecalFault::SavedAtlasCaptureMissingBake:
+        case DebugPrivateExportDecalFault::SavedAtlasCaptureMalformedBake:
+        case DebugPrivateExportDecalFault::SavedAtlasCaptureStaleBinding:
+        case DebugPrivateExportDecalFault::SavedAtlasCaptureMissingMember:
+        case DebugPrivateExportDecalFault::SavedAtlasCaptureForeignMember:
+        case DebugPrivateExportDecalFault::SavedAtlasCaptureDuplicateMember:
+        case DebugPrivateExportDecalFault::SavedAtlasCaptureForeignRawSlot:
+        case DebugPrivateExportDecalFault::SavedAtlasCaptureMalformedResource:
+            return true;
+        default:
+            return false;
+    }
+}
+
+//! Bounded field token for a named saved-atlas capture corruption fault, or
+//! nullptr when no such fault is armed.
+const char* DebugSavedAtlasCaptureFaultField(
+    const DebugPrivateExportDecalFault fault) noexcept {
+    switch (fault) {
+        case DebugPrivateExportDecalFault::SavedAtlasCaptureMissingBake:
+        case DebugPrivateExportDecalFault::SavedAtlasCaptureMalformedBake:
+            return "SYEB";
+        case DebugPrivateExportDecalFault::SavedAtlasCaptureStaleBinding:
+            return "SYEB.binding";
+        case DebugPrivateExportDecalFault::SavedAtlasCaptureForeignRawSlot:
+            return "SYFI";
+        case DebugPrivateExportDecalFault::SavedAtlasCaptureMalformedResource:
+            return "SYFR";
+        default:
+            return nullptr;
+    }
+}
+
+//! Named DEBUG-only fault adapters for the saved-atlas pre-capture boundary.
+//! Each alters only this operation's private document input inside one
+//! committed command; the live document and frozen resources are never
+//! touched. cause/field describe the corruption actually applied; the typed
+//! refusal itself comes from the real census/capture checkers downstream.
+bool DebugCorruptSavedAtlasCaptureInput(
+    const Handle(TDocStd_Document)& document,
+    const DebugPrivateExportDecalFault fault,
+    std::string& cause, std::string& field) noexcept {
+    cause.clear();
+    field.clear();
+    if (!DebugSavedAtlasCaptureFaultApplies(fault)) return false;
+    const char* stage = "entry";
+    Standard_Integer savedUndoLimit = 0;
+    bool undoLimitRaised = false;
+    try {
+        if (document.IsNull() || document->HasOpenCommand()) return false;
+        std::vector<asset_atlas::persistence::Record> records;
+        if (!asset_atlas::persistence::ReadAll(document, records)
+            || records.size() != 1 || !records.front().value
+            || records.front().memberOwners.empty()) {
+            field = "adapter-census";
+            return false;
+        }
+        const asset_atlas::Key& key = records.front().value->definition.key;
+        const auto& memberOwners = records.front().memberOwners;
+        const Standard_GUID entityAttribute(
+            "0074F7C2-9EAA-4F89-B2DE-8716E155FF62");
+        const Standard_GUID definitionAttribute(
+            "3611F2B2-C694-4E12-AED8-A2A97A3D283B");
+        // The cold-open operation-private document carries undo disabled, and
+        // StageCommitted requires a genuinely open command. Preserve the
+        // document's undo setting, enable one bounded command, prove it
+        // opened, and restore the setting on every exit below.
+        savedUndoLimit = document->GetUndoLimit();
+        if (savedUndoLimit < 1) {
+            document->SetUndoLimit(1);
+            undoLimitRaised = true;
+        }
+        document->NewCommand();
+        if (!document->HasOpenCommand()) {
+            if (undoLimitRaised) document->SetUndoLimit(savedUndoLimit);
+            field = "adapter-command";
+            return false;
+        }
+        bool applied = false;
+        painted_atlas_bake::Definition stagedStale;
+        switch (fault) {
+            case DebugPrivateExportDecalFault::SavedAtlasCaptureMissingBake: {
+                painted_atlas_bake::persistence::Record bake;
+                if (painted_atlas_bake::persistence::Read(document, key, bake)
+                        == painted_atlas_bake::persistence::ReadState::Present
+                    && !bake.label.IsNull()) {
+                    bake.label.ForgetAllAttributes(Standard_True);
+                    applied = true;
+                }
+                cause = "missing-bake";
+                field = "SYEB";
+                break;
+            }
+            case DebugPrivateExportDecalFault::SavedAtlasCaptureMalformedBake: {
+                painted_atlas_bake::persistence::Record bake;
+                if (painted_atlas_bake::persistence::Read(document, key, bake)
+                        == painted_atlas_bake::persistence::ReadState::Present
+                    && !bake.label.IsNull()) {
+                    TDataStd_Integer::Set(bake.label,
+                        painted_atlas_bake::persistence::VersionID(), 2);
+                    applied = true;
+                }
+                cause = "malformed-bake";
+                field = "SYEB";
+                break;
+            }
+            case DebugPrivateExportDecalFault::SavedAtlasCaptureStaleBinding: {
+                painted_atlas_bake::persistence::Record bake;
+                painted_atlas_bake::Definition modified;
+                painted_atlas_bake::Refusal refusal;
+                stage = "bake-read";
+                if (painted_atlas_bake::persistence::Read(document, key, bake)
+                        == painted_atlas_bake::persistence::ReadState::Present
+                    && !bake.label.IsNull()) {
+                    stage = "bake-decode";
+                    if (painted_atlas_bake::Decode(bake.bytes, modified,
+                            refusal)
+                        && !modified.bindings.empty()) {
+                        modified.bindings.front().originalContent[0] ^= 0x5A;
+                        stage = "bake-stage";
+                        applied = painted_atlas_bake::persistence::
+                            StageCommitted(document, modified);
+                        if (applied) stagedStale = modified;
+                    }
+                }
+                cause = "stale-binding";
+                field = "SYEB.binding";
+                break;
+            }
+            case DebugPrivateExportDecalFault::SavedAtlasCaptureMissingMember: {
+                retained_solid::UUID entity{};
+                if (retained_solid::ReadUUID(memberOwners.front(),
+                        entityAttribute, entity)) {
+                    field = retained_solid::UUIDText(entity);
+                    memberOwners.front().ForgetAttribute(entityAttribute);
+                    applied = true;
+                }
+                cause = "missing-member-identity";
+                break;
+            }
+            case DebugPrivateExportDecalFault::SavedAtlasCaptureForeignMember: {
+                retained_solid::UUID entity{};
+                if (retained_solid::ReadUUID(memberOwners.front(),
+                        entityAttribute, entity)) {
+                    field = retained_solid::UUIDText(entity);
+                    entity[0] ^= 0x5A;
+                    TDataStd_AsciiString::Set(memberOwners.front(),
+                        entityAttribute, TCollection_AsciiString(
+                            retained_solid::UUIDText(entity).c_str()));
+                    applied = true;
+                }
+                cause = "foreign-member-identity";
+                break;
+            }
+            case DebugPrivateExportDecalFault::
+                SavedAtlasCaptureDuplicateMember: {
+                retained_solid::UUID entity{};
+                retained_solid::UUID definition{};
+                if (memberOwners.size() >= 2
+                    && retained_solid::ReadUUID(memberOwners[0],
+                        entityAttribute, entity)
+                    && retained_solid::ReadUUID(memberOwners[0],
+                        definitionAttribute, definition)) {
+                    field = retained_solid::UUIDText(entity);
+                    TDataStd_AsciiString::Set(memberOwners[1],
+                        entityAttribute, TCollection_AsciiString(
+                            retained_solid::UUIDText(entity).c_str()));
+                    TDataStd_AsciiString::Set(memberOwners[1],
+                        definitionAttribute, TCollection_AsciiString(
+                            retained_solid::UUIDText(definition).c_str()));
+                    applied = true;
+                }
+                cause = "duplicate-member-identity";
+                break;
+            }
+            case DebugPrivateExportDecalFault::
+                SavedAtlasCaptureForeignRawSlot: {
+                const Handle(XCAFDoc_VisMaterialTool) materials =
+                    XCAFDoc_DocumentTool::VisMaterialTool(document->Main());
+                const Handle(XCAFDoc_VisMaterial) material = materials.IsNull()
+                    ? Handle(XCAFDoc_VisMaterial)()
+                    : XCAFDoc_VisMaterialTool::GetShapeMaterial(
+                        memberOwners.front());
+                if (!material.IsNull() && material->HasPbrMaterial()) {
+                    Handle(XCAFDoc_VisMaterial) modified =
+                        new XCAFDoc_VisMaterial();
+                    XCAFDoc_VisMaterialPBR pbr = material->PbrMaterial();
+                    // Capture must classify the descriptor from FilePath and
+                    // refuse before attempting to open it. The path need not
+                    // and must not exist.
+                    pbr.BaseColorTexture = new Image_Texture(
+                        TCollection_AsciiString(
+                            "/nonexistent/shapeyard-xcaf-foreign.png"));
+                    modified->SetPbrMaterial(pbr);
+                    modified->SetCommonMaterial(material->CommonMaterial());
+                    const TDF_Label materialLabel = materials->AddMaterial(
+                        modified, TCollection_AsciiString(
+                            "E4 saved capture foreign raw slot"));
+                    if (!materialLabel.IsNull()) {
+                        materials->SetShapeMaterial(memberOwners.front(),
+                            materialLabel);
+                        applied = true;
+                    }
+                }
+                cause = "foreign-raw-slot";
+                field = "SYFI";
+                break;
+            }
+            case DebugPrivateExportDecalFault::
+                SavedAtlasCaptureMalformedResource: {
+                const TDF_Label root = document->Main().FindChild(
+                    face_image::persistence::resources::RootTag,
+                    Standard_False);
+                if (!root.IsNull()) {
+                    for (TDF_ChildIterator child(root, Standard_False);
+                         child.More(); child.Next()) {
+                        if (!child.Value().IsAttribute(
+                                face_image::persistence::resources::
+                                    AttributeID())) continue;
+                        TDataStd_Integer::Set(child.Value(),
+                            Standard_GUID(
+                                "E278C2B6-2F4A-4D3B-9C4E-7A1F0B5D8E40"), 1);
+                        applied = true;
+                        break;
+                    }
+                }
+                cause = "malformed-resource";
+                field = "SYFR";
+                break;
+            }
+            default:
+                break;
+        }
+        bool committed = false;
+        if (applied) {
+            committed = document->CommitCommand();
+        } else {
+            document->AbortCommand();
+            field = std::string("adapter-") + stage;
+        }
+        if (undoLimitRaised) document->SetUndoLimit(savedUndoLimit);
+        if (!applied) return false;
+        if (!committed) {
+            field = "adapter-commit";
+            return false;
+        }
+        if (fault
+            == DebugPrivateExportDecalFault::SavedAtlasCaptureStaleBinding) {
+            // Strict post-commit readback: the committed record must still
+            // decode to exactly the staged stale definition.
+            painted_atlas_bake::persistence::Record readback;
+            painted_atlas_bake::Definition decoded;
+            painted_atlas_bake::Refusal readbackRefusal;
+            if (painted_atlas_bake::persistence::Read(document, key, readback)
+                    != painted_atlas_bake::persistence::ReadState::Present
+                || !painted_atlas_bake::Decode(readback.bytes, decoded,
+                        readbackRefusal)
+                || !(decoded == stagedStale)) {
+                field = "adapter-readback";
+                return false;
+            }
+        }
+        return true;
+    } catch (...) {
+        if (!document.IsNull()) {
+            if (document->HasOpenCommand()) document->AbortCommand();
+            if (undoLimitRaised) document->SetUndoLimit(savedUndoLimit);
+        }
+        return false;
+    }
+}
+#endif
+
 bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
     const Handle(OcctDocument)& privateDocument,
     const SceneSnapshot& wholeCommittedScene,
     bool selectedObjectsOnly,
     const std::function<bool()>& cancelled,
-    PrivateDecalCapturePointer& capture) noexcept {
+    PrivateDecalCapturePointer& capture
+#ifdef DEBUG
+    , const DebugPrivateExportDecalFault debugFault
+    , DebugPrivateExportDecalObservation* const debugObservation
+#endif
+    ) noexcept {
     capture.reset();
     if (privateDocument.IsNull() || !cancelled || cancelled()
         || !IsValidSceneSnapshot(wholeCommittedScene)) return false;
@@ -16173,9 +16496,9 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
                 decal_layer::bake::accounting::FailureSite::ContextControl))
             return false;
 
-        // P1 admits only proven standalone owners. A valid saved atlas is a
-        // transitive multi-member authority and remains a deliberate refusal
-        // until P2 can rebuild its complete membership in one transaction.
+        // Materialize the strict atlas census once, under this operation. Each
+        // nonempty record is then captured through the inherited all-member
+        // producer; no member or source authority is reconstructed here.
         std::vector<asset_atlas::persistence::Record> savedAtlases;
         painted_atlas_bake::owner::AtlasReadAdmission atlasRead;
 #ifdef DEBUG
@@ -16195,16 +16518,117 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
             return false;
         }
 #endif
+#ifdef DEBUG
+        if (debugFault
+                == DebugPrivateExportDecalFault::SavedAtlasCaptureDenyRead) {
+            impl.operationLedger.refuse(
+                decal_layer::bake::accounting::FailureSite::ProtectedAtlasRead);
+            if (debugObservation) {
+                debugObservation->failureStage =
+                    "saved-atlas-capture-refused";
+                debugObservation->captureRefusalCause = "over-budget";
+                debugObservation->captureRefusalBoundary =
+                    "preflight-atlas-read";
+                debugObservation->captureRefusalField = "SYEA";
+                debugObservation->savedAtlasReadEntries =
+                    impl.operationLedger.allocationEntries(
+                        decal_layer::bake::accounting::FailureSite::
+                            ProtectedAtlasRead);
+            }
+            return false;
+        }
+#endif
         if (painted_atlas_bake::owner::PreflightAtlasRead(
                 document, impl.operationLedger.view(), atlasRead,
                 decal_layer::bake::accounting::FailureSite::ProtectedAtlasRead)
                 != painted_atlas_bake::owner::Outcome::Prepared
             || !impl.operationLedger.enterAllocation(
-                decal_layer::bake::accounting::FailureSite::ProtectedAtlasRead))
+                decal_layer::bake::accounting::FailureSite::ProtectedAtlasRead)) {
+#ifdef DEBUG
+            if (debugObservation) {
+                const char* faultField =
+                    DebugSavedAtlasCaptureFaultField(debugFault);
+                debugObservation->failureStage = "saved-atlas-capture-refused";
+                debugObservation->captureRefusalCause = "refused";
+                debugObservation->captureRefusalBoundary =
+                    "preflight-atlas-read";
+                debugObservation->captureRefusalField =
+                    faultField != nullptr ? faultField : "SYEA";
+            }
+#endif
             return false;
-        if (!asset_atlas::persistence::ReadAll(document, savedAtlases)
-            || !savedAtlases.empty()) return false;
-        atlasRead.reset();
+        }
+        if (!asset_atlas::persistence::ReadAll(document, savedAtlases)) {
+#ifdef DEBUG
+            if (debugObservation) {
+                debugObservation->failureStage = "saved-atlas-capture-refused";
+                debugObservation->captureRefusalCause = "malformed";
+                debugObservation->captureRefusalBoundary = "atlas-read";
+                debugObservation->captureRefusalField = "SYEA";
+            }
+#endif
+            return false;
+        }
+        impl.savedAtlasReadAdmission = std::move(atlasRead);
+        if (!ReserveProtectedVector(impl.savedGroups, impl.savedGroupsTicket,
+                impl.operationLedger.view(), savedAtlases.size(),
+                decal_layer::bake::accounting::Retention::Retained,
+                decal_layer::bake::accounting::FailureSite::
+                    ProtectedOwnerStorage)) return false;
+        for (std::size_t index = 0; index < savedAtlases.size(); ++index) {
+            if (!savedAtlases[index].value) {
+#ifdef DEBUG
+                if (debugObservation) {
+                    debugObservation->captureRefusalCause = "malformed";
+                    debugObservation->captureRefusalBoundary =
+                        "saved-atlas-census";
+                    debugObservation->captureRefusalField = "SYEA.record";
+                }
+#endif
+                return false;
+            }
+            painted_atlas_bake::owner::ExportCapture savedCapture;
+            const auto& key = savedAtlases[index].value->definition.key;
+            const auto savedOutcome =
+                painted_atlas_bake::owner::CaptureForExport(savedCapture,
+                    document, key, impl.operationLedger.view());
+            if (savedOutcome != painted_atlas_bake::owner::Outcome::Prepared) {
+#ifdef DEBUG
+                if (debugObservation) {
+                    const char* faultField =
+                        DebugSavedAtlasCaptureFaultField(debugFault);
+                    debugObservation->failureStage =
+                        "saved-atlas-capture-refused";
+                    debugObservation->captureRefusalCause =
+                        SavedAtlasCaptureOutcomeText(savedOutcome);
+                    debugObservation->captureRefusalBoundary =
+                        "capture-for-export";
+                    debugObservation->captureRefusalField =
+                        faultField != nullptr ? faultField
+                            : retained_solid::UUIDText(key.atlas);
+                }
+#endif
+                return false;
+            }
+            auto group = std::make_unique<SavedGroupOwner>();
+            std::string diagnosis;
+            if (!group || !PrepareSavedGroupOwner(impl.operationLedger,
+                    impl.operationLedger.view(), std::move(savedCapture),
+                    privateDocument, cancelled, *group, diagnosis,
+                    &impl.budget)) {
+#ifdef DEBUG
+                if (debugObservation) {
+                    debugObservation->captureRefusalCause = diagnosis;
+                    debugObservation->captureRefusalBoundary =
+                        "saved-group-preparation";
+                    debugObservation->captureRefusalField =
+                        retained_solid::UUIDText(key.atlas);
+                }
+#endif
+                return false;
+            }
+            impl.savedGroups.push_back(std::move(group));
+        }
 
         std::vector<const InstanceSnapshot*> occurrences;
         decal_layer::bake::accounting::Ticket occurrencesTicket;
@@ -16409,25 +16833,73 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
             value.canonicalBytesTicket =
                 std::move(definitionAdmission.canonical);
             value.owner = owner;
-            BRepRepresentationCensus preCopyCensus;
-            BRepRepresentationCensus copyPrediction;
-            decal_layer::bake::accounting::Ticket censusScratch;
             int debugCensusMode = 0;
 #ifdef DEBUG
             debugCensusMode = gDebugBRepCensusMode.exchange(
                 0, std::memory_order_acq_rel);
 #endif
-            if (!MeasureBRepRepresentation(shape, impl.budget,
-                    impl.operationLedger.view(), preCopyCensus,
-                    censusScratch, &copyPrediction)) return false;
-            censusScratch.reset();
-            std::size_t retainedMeasuredBytes = 0;
-            TopTools_IndexedMapOfShape originalFaces, disposableFaces;
-            if (!CopyMeasuredBRep(shape, impl.budget,
-                    impl.operationLedger, preCopyCensus, copyPrediction,
-                    debugCensusMode, value.brepCensusTicket, value.copier,
-                    value.detachedAuthorityShape, originalFaces,
-                    disposableFaces, retainedMeasuredBytes)) return false;
+            // A saved-atlas member borrows the group's one admitted measured
+            // copy (detached shape, copier and face maps) instead of paying a
+            // second measured copy of the same native definition. The match
+            // is the exact owner identity, never a count or a first-face
+            // fallback; ambiguity or owner mismatch fails closed.
+            const SavedGroupMeasuredMember* borrowedMember = nullptr;
+            for (const auto& groupPointer : impl.savedGroups) {
+                if (!groupPointer) return false;
+                const auto& group = *groupPointer;
+                for (std::size_t memberIndex = 0;
+                     memberIndex < group.measured.size(); ++memberIndex) {
+                    const auto& candidate = group.measured[memberIndex];
+                    if (candidate.definitionIdentifier != definitionIdentifier)
+                        continue;
+                    if (borrowedMember != nullptr
+                        || memberIndex
+                            >= group.capture.savedAtlas.members.size()
+                        || !(group.capture.savedAtlas.members[memberIndex].owner
+                            == owner)) return false;
+                    borrowedMember = &candidate;
+                }
+            }
+            TopTools_IndexedMapOfShape ownedOriginalFaces, ownedDisposableFaces;
+            if (borrowedMember != nullptr) {
+                value.borrowedMeasured = borrowedMember;
+                value.detachedAuthorityShape = borrowedMember->detached;
+            } else {
+                BRepRepresentationCensus preCopyCensus;
+                BRepRepresentationCensus copyPrediction;
+                decal_layer::bake::accounting::Ticket censusScratch;
+                if (!MeasureBRepRepresentation(shape, impl.budget,
+                        impl.operationLedger.view(), preCopyCensus,
+                        censusScratch, &copyPrediction)) return false;
+                censusScratch.reset();
+                std::size_t retainedMeasuredBytes = 0;
+                if (!CopyMeasuredBRep(shape, impl.budget,
+                        impl.operationLedger, preCopyCensus, copyPrediction,
+                        debugCensusMode, value.brepCensusTicket, value.copier,
+                        value.detachedAuthorityShape, ownedOriginalFaces,
+                        ownedDisposableFaces, retainedMeasuredBytes))
+                    return false;
+#ifdef DEBUG
+                for (const auto& groupPointer : impl.savedGroups) {
+                    if (!groupPointer) return false;
+                    for (const auto& measured : groupPointer->measured)
+                        if (measured.definitionIdentifier
+                            == definitionIdentifier)
+                            ++impl.debugSavedMemberReceiverCopies;
+                }
+#endif
+            }
+            const TopTools_IndexedMapOfShape& originalFaces =
+                borrowedMember != nullptr ? borrowedMember->originalFaces
+                    : ownedOriginalFaces;
+            const TopTools_IndexedMapOfShape& disposableFaces =
+                borrowedMember != nullptr ? borrowedMember->detachedFaces
+                    : ownedDisposableFaces;
+            const BRepBuilderAPI_Copy* const activeCopier =
+                borrowedMember != nullptr ? borrowedMember->copier.get()
+                    : value.copier.get();
+            if (activeCopier == nullptr
+                || value.detachedAuthorityShape.IsNull()) return false;
 
             Bnd_Box stageBox;
             BRepBndLib::AddOptimal(
@@ -16499,7 +16971,7 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
                     || !(resolved == matchedReceipt)
                     || !resolvedFace.IsSame(originalFace)) return false;
                 const TopoDS_Shape copied =
-                    value.copier->ModifiedShape(originalFace);
+                    activeCopier->ModifiedShape(originalFace);
                 const Standard_Integer originalIndex =
                     originalFaces.FindIndex(originalFace);
                 const Standard_Integer disposableIndex =
@@ -16666,8 +17138,165 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
         if (!decal_math::CaptureDecalOccluders(impl.wholeCommittedScene,
                 protectedOccluders, protectedOccluderBounds,
                 impl.occluderProof, impl.operationLedger.view(),
-                protectedOccluderTicket)
-            || !impl.recheckProtected(cancelled,
+                protectedOccluderTicket)) return false;
+#ifdef DEBUG
+        if (debugFault
+                == DebugPrivateExportDecalFault::SavedAtlasCaptureCheckpoint) {
+            if (!debugObservation || impl.savedGroups.empty()) return false;
+            auto& observed = *debugObservation;
+            observed.failureStage = "saved-atlas-capture-checkpoint";
+            observed.captureReached = true;
+            observed.savedGroupCount = impl.savedGroups.size();
+            observed.ownerCount = impl.owners.size();
+            observed.savedAtlasReadEntries =
+                impl.operationLedger.allocationEntries(
+                    decal_layer::bake::accounting::FailureSite::
+                        ProtectedAtlasRead);
+            observed.occluderDigest = DecalDigestText(impl.occluderProof);
+            observed.savedDetachedIdentitiesDistinct = true;
+            std::set<std::string> measuredDefinitions;
+            std::set<std::string> sourcedDefinitions;
+            std::set<std::string> selectedDefinitions;
+            for (const auto& instance : impl.wholeCommittedScene.instances) {
+                if (instance.role != RenderRole::Model || !instance.selected
+                    || instance.meshIndex >= impl.wholeCommittedScene.meshes.size())
+                    continue;
+                const auto& mesh =
+                    impl.wholeCommittedScene.meshes[instance.meshIndex];
+                selectedDefinitions.insert(
+                    mesh.paintedAtlasMasterDefinitionIdentifier.empty()
+                    ? mesh.definitionIdentifier
+                    : mesh.paintedAtlasMasterDefinitionIdentifier);
+            }
+            for (const auto& groupPointer : impl.savedGroups) {
+                if (!groupPointer) return false;
+                const auto& group = *groupPointer;
+                observed.savedCanonicalLengths.push_back(
+                    group.capture.canonicalAtlasBytes.size());
+                observed.savedCanonicalLengths.push_back(
+                    group.capture.canonicalBakeBytes.size());
+                observed.savedRawSlotCount +=
+                    group.capture.sources.rawSlots.size();
+                observed.savedMemberCount += group.measured.size();
+                observed.savedMeasuredCopyCount += group.measured.size();
+                for (std::size_t memberIndex = 0;
+                     memberIndex < group.measured.size(); ++memberIndex) {
+                    const auto& measured = group.measured[memberIndex];
+                    const auto& member =
+                        group.capture.members.members[memberIndex].slot.owner;
+                    observed.savedMemberDefinitions.push_back(
+                        measured.definitionIdentifier);
+                    observed.savedMemberOwners.push_back(
+                        retained_solid::UUIDText(member.document) + "/"
+                        + retained_solid::UUIDText(member.entity) + "/"
+                        + retained_solid::UUIDText(member.definition));
+                    measuredDefinitions.insert(measured.definitionIdentifier);
+                    if (selectedDefinitions.count(measured.definitionIdentifier))
+                        ++observed.savedSelectedMemberCount;
+                    for (std::size_t prior = 0; prior < memberIndex; ++prior)
+                        if (measured.detached.IsSame(
+                                group.measured[prior].detached))
+                            observed.savedDetachedIdentitiesDistinct = false;
+                }
+                observed.savedSourceCount += group.productionSources.size();
+                for (const auto& source : group.productionSources) {
+                    observed.savedSourceOwners.push_back(
+                        retained_solid::UUIDText(source.fence.owner.document)
+                        + "/"
+                        + retained_solid::UUIDText(source.fence.owner.entity)
+                        + "/"
+                        + retained_solid::UUIDText(source.fence.owner.definition));
+                    observed.savedSourceResources.push_back(
+                        retained_solid::UUIDText(source.fence.resource));
+                    observed.savedSourceMemberIndices.push_back(
+                        source.memberIndex);
+                    observed.savedSourceFaceIndices.push_back(source.faceIndex);
+                    observed.savedSourceOrigins.push_back(
+                        std::uint8_t(source.origin));
+                    if (source.memberIndex < group.measured.size()) {
+                        if (source.origin
+                                != painted_atlas_bake::kernel::SourceOrigin::
+                                    OwnerMaterialSlot)
+                        sourcedDefinitions.insert(
+                            group.measured[source.memberIndex]
+                                .definitionIdentifier);
+                        if (source.faceIndex
+                                != std::numeric_limits<std::size_t>::max())
+                            ++observed.savedCorrespondenceCount;
+                    }
+                }
+            }
+            for (const auto& definition : measuredDefinitions)
+                if (sourcedDefinitions.count(definition) == 0)
+                    ++observed.savedOriginalOnlyCount;
+            observed.savedReceiverMeasuredCopyCount =
+                impl.debugSavedMemberReceiverCopies;
+            for (const auto& owner : impl.owners) {
+                const SavedGroupMeasuredMember* const borrowed =
+                    owner.borrowedMeasured;
+                if (borrowed == nullptr) continue;
+                ++observed.savedBorrowedOwnerCount;
+                if (!owner.detachedAuthorityShape.IsSame(borrowed->detached))
+                    return false;
+                for (const auto& receiver : owner.receivers) {
+                    ++observed.savedBorrowedReceiverCount;
+                    const Standard_Integer detachedIndex =
+                        borrowed->detachedFaces.FindIndex(
+                            receiver.disposableFace);
+                    if (detachedIndex > 0
+                        && std::uint32_t(detachedIndex - 1)
+                            == receiver.disposableFaceIndex
+                        && receiver.disposableFace.IsSame(
+                            borrowed->detachedFaces.FindKey(detachedIndex)))
+                        ++observed.savedBorrowedReceiverCopyMatches;
+                }
+            }
+            const Handle(XCAFDoc_ShapeTool) checkpointShapeTool =
+                XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            TDF_LabelSequence checkpointRoots;
+            if (checkpointShapeTool.IsNull()) return false;
+            checkpointShapeTool->GetFreeShapes(checkpointRoots);
+            if (checkpointRoots.Length()
+                    < Standard_Integer(observed.savedMemberCount)) return false;
+            observed.savedNonMemberCount = std::size_t(
+                checkpointRoots.Length()) - observed.savedMemberCount;
+            // Independently re-derive the committed document's export closure
+            // before treating a zero borrowed owner/receiver census as the
+            // expected case: only a genuinely record-free document (the
+            // explicit no-SYDL fixture) relaxes the nonzero receiver-bearing
+            // requirement. An unproven or cancelled closure fails closed.
+            if (observed.savedBorrowedOwnerCount == 0
+                && observed.savedBorrowedReceiverCount == 0) {
+                const auto closure =
+                    decal_layer::persistence::ReadExportClosure(
+                        document, checkpointRoots, cancelled);
+                if (closure == decal_layer::persistence::ExportClosureState::
+                        Unproven
+                    || closure == decal_layer::persistence::
+                        ExportClosureState::Cancelled) return false;
+                observed.savedReceiverExpectationEmpty = closure
+                    == decal_layer::persistence::ExportClosureState::Absent;
+            }
+            observed.savedMeasuredStageComplete =
+                observed.savedMeasuredCopyCount == observed.savedMemberCount
+                && observed.savedReceiverMeasuredCopyCount == 0
+                && (observed.savedReceiverExpectationEmpty
+                    ? observed.savedBorrowedOwnerCount == 0
+                    : observed.savedBorrowedOwnerCount != 0)
+                && (observed.savedReceiverExpectationEmpty
+                    ? observed.savedBorrowedReceiverCount == 0
+                    : observed.savedBorrowedReceiverCount != 0)
+                && observed.savedBorrowedReceiverCopyMatches
+                    == observed.savedBorrowedReceiverCount
+                && observed.savedSourceCount != 0
+                && observed.savedCanonicalLengths.size()
+                    == 2U * observed.savedGroupCount
+                && observed.savedDetachedIdentitiesDistinct;
+            observed.savedArtifactPresent = false;
+            return false;
+        }
+#endif
+        if (!impl.recheckProtected(cancelled,
                 decal_layer::bake::accounting::FailureSite::
                     ProtectedRecheckStorage))
             return false;
@@ -18914,13 +19543,47 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         if (shapeTool.IsNull()) return {};
         TDF_LabelSequence roots;
         shapeTool->GetFreeShapes(roots);
+#ifdef DEBUG
+        std::string debugFaultCause;
+        std::string debugFaultField;
+        if (DebugSavedAtlasCaptureFaultApplies(debugFault)) {
+            if (!DebugCorruptSavedAtlasCaptureInput(ocaf, debugFault,
+                    debugFaultCause, debugFaultField)) {
+                if (debugObservation) {
+                    debugObservation->failureStage =
+                        "saved-atlas-capture-refused";
+                    debugObservation->captureRefusalCause =
+                        "fault-injection-failed";
+                    debugObservation->captureRefusalBoundary =
+                        "pre-capture-fault";
+                    debugObservation->captureRefusalField =
+                        debugFaultField.empty() ? "adapter"
+                            : debugFaultField;
+                }
+                return {};
+            }
+        }
+#endif
         const auto closure = decal_layer::persistence::ReadExportClosure(
             ocaf, roots, cancelled);
         if (closure == decal_layer::persistence::ExportClosureState::Cancelled
             || closure == decal_layer::persistence::ExportClosureState::Unproven)
             return {};
+        std::vector<asset_atlas::persistence::Record> savedAtlasDispatch;
+        if (!asset_atlas::persistence::ReadAll(ocaf, savedAtlasDispatch)) {
+#ifdef DEBUG
+            if (debugObservation && !debugFaultCause.empty()) {
+                debugObservation->failureStage = "saved-atlas-capture-refused";
+                debugObservation->captureRefusalCause = debugFaultCause;
+                debugObservation->captureRefusalBoundary = "atlas-read";
+                debugObservation->captureRefusalField = debugFaultField;
+            }
+#endif
+            return {};
+        }
         const bool needsDecalCapture = closure
-            == decal_layer::persistence::ExportClosureState::ContainsRecord;
+                == decal_layer::persistence::ExportClosureState::ContainsRecord
+            || !savedAtlasDispatch.empty();
 #ifdef DEBUG
         if (needsDecalCapture
             && debugFault == DebugPrivateExportDecalFault::Capture) {
@@ -18932,9 +19595,14 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         PrivateDecalCapturePointer decalCapture;
         if (needsDecalCapture
             && (!CapturePrivateExportDecals(document, source,
-                    selectedObjectsOnly, cancelled, decalCapture)
+                    selectedObjectsOnly, cancelled, decalCapture
+#ifdef DEBUG
+                    , debugFault, debugObservation
+#endif
+                    )
                 || !decalCapture || !decalCapture->impl_
-                || decalCapture->impl_->owners.empty())) return {};
+                || (decalCapture->impl_->owners.empty()
+                    && decalCapture->impl_->savedGroups.empty()))) return {};
 #ifdef DEBUG
         if (debugObservation && decalCapture && decalCapture->impl_) {
             auto& observed = *debugObservation;

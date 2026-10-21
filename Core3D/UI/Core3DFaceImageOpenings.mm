@@ -52,6 +52,7 @@
 #include "../OCCTKit/PatternPersistence.hxx"
 #include "../OCCTKit/ProfilePersistence.hxx"
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepClass_FaceClassifier.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBndLib.hxx>
@@ -68,6 +69,8 @@
 #include <TDocStd_Application.hxx>
 #include <PCDM_StoreStatus.hxx>
 #include <Standard_Failure.hxx>
+#include <gp_Pnt.hxx>
+#include <gp_Vec.hxx>
 #include <functional>
 #include <array>
 #include <limits>
@@ -3839,6 +3842,191 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
                 == OcctPaintedAtlasBakeCurrentness::Current
             && definition.resources.size() == 5
             && core3d::painted_atlas_bake::Nonzero(definition.bakeProof));
+    } @catch (...) { return @NO; }
+}
+
+- (NSNumber *)debugInstallE4PaintedAtlasLayerForEntityIdentifier:
+    (NSString *)entityIdentifier {
+    if (!NSThread.isMainThread || entityIdentifier.length == 0
+        || entityIdentifier.length > 128) return @NO;
+    @try {
+        GLViewController *gl = [self.glController
+            isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const std::shared_ptr<core3d::Core3DViewer> viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        OwnerKey key; TDF_Label owner;
+        const char *raw = entityIdentifier.UTF8String;
+        if (wrapper.IsNull()
+            || !LabelForSelected(wrapper, raw ? raw : "", key, owner)) return @NO;
+        const Handle(TDocStd_Document)& document = wrapper->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return @NO;
+
+        core3d::retained_edge_treatment::ReplayBudget sourceBudget;
+        core3d::decal_layer::source::Witness witness;
+        if (!core3d::decal_layer::source::CaptureSource(
+                wrapper, key, sourceBudget, [] { return false; }, witness))
+            return @NO;
+        const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(owner);
+        Standard_Real unit = 0.0;
+        dr::FaceImageGeometricReceipt receipt;
+        if (shape.IsNull()
+            || !XCAFDoc_DocumentTool::GetLengthUnit(document, unit)
+            || !FixtureCapturePlanarFace(shape, unit,
+                core3d::retained_face_selector::Axis::X,
+                core3d::retained_face_selector::Side::Max, receipt)) return @NO;
+        core3d::decal_layer::Digest selectorProof{};
+        if (!dr::FaceImageReceiptProof(receipt, selectorProof)) return @NO;
+
+        // Re-resolve the native receiver and independently run the physical
+        // frame classifier over every layer corner. For this 40 x [0,30] x
+        // [0,20] mm max-X face, U is +Y and V is +Z.
+        core3d::retained_edge_treatment::ReplayBudget resolveBudget;
+        dr::FaceImageGeometricReceipt resolved;
+        TopoDS_Face receiver;
+        if (dr::detail::ResolveFaceImageReceipt(shape, receipt.intent, unit,
+                resolveBudget, resolved, receiver)
+                != core3d::retained_face_selector::Refusal::None
+            || !(resolved == receipt) || receiver.IsNull()) return @NO;
+        const double anchorU = 0.015, anchorV = 0.010;
+        const double width = 0.010, height = 0.008;
+        const auto& n = receipt.plane.outwardNormal;
+        const int axis = std::abs(n[0]) >= std::abs(n[1])
+                && std::abs(n[0]) >= std::abs(n[2]) ? 0
+            : std::abs(n[1]) >= std::abs(n[2]) ? 1 : 2;
+        gp_Vec normal(n[0], n[1], n[2]);
+        gp_Vec reference = axis == 0 ? gp_Vec(0, 1, 0)
+            : axis == 1 ? gp_Vec(0, 0, 1) : gp_Vec(1, 0, 0);
+        gp_Vec faceU = reference - normal.Multiplied(reference.Dot(normal));
+        if (faceU.Magnitude() <= 0.0) return @NO;
+        faceU.Normalize();
+        gp_Vec faceV = normal.Crossed(faceU);
+        if (faceV.Magnitude() <= 0.0) return @NO;
+        faceV.Normalize();
+        const gp_Pnt planeOrigin(
+            normal.X() * receipt.plane.offsetMM / (1000.0 * unit),
+            normal.Y() * receipt.plane.offsetMM / (1000.0 * unit),
+            normal.Z() * receipt.plane.offsetMM / (1000.0 * unit));
+        const gp_Pnt origin = planeOrigin.Translated(
+            faceU.Multiplied(anchorU / unit)
+                + faceV.Multiplied(anchorV / unit));
+        for (double u : {-0.5, 0.5}) for (double v : {-0.5, 0.5}) {
+            const gp_Pnt corner = origin.Translated(
+                faceU.Multiplied(u * width / unit)
+                    + faceV.Multiplied(v * height / unit));
+            BRepClass_FaceClassifier classifier(
+                receiver, corner, 1.0e-7 / unit);
+            if (classifier.State() != TopAbs_IN) return @NO;
+        }
+
+        fi::ResourceEnvelope envelope;
+        if (!fi::owner::ReadResource(
+                document, FixtureIndexedUUID(0x73, 1), envelope)) return @NO;
+        fi::ResourceEnvelope orderedEnvelope;
+        if (!fi::owner::ReadResource(document,
+                FixtureIndexedUUID(0x73, 2), orderedEnvelope)) return @NO;
+        core3d::decal_layer::Definition definition;
+        definition.owner = key;
+        definition.sourceRecipe = witness.sourceRecipe;
+        definition.sourceRevision = witness.sourceRevision;
+        definition.geometryRevision = witness.geometryRevision;
+        definition.placementRevision = witness.placementRevision;
+        definition.sourceProof = witness.sourceProof;
+        core3d::decal_layer::Layer layer;
+        layer.identifier = FixtureIndexedUUID(0x7A, 1);
+        layer.image.resource = envelope.resource;
+        layer.image.normalizedContent = envelope.workingContent;
+        layer.image.originalContent = envelope.originalContent;
+        layer.image.provenance = envelope.provenance;
+        layer.image.producerVersion =
+            core3d::decal_layer::image_contract::kProducerVersion;
+        layer.image.mediaType = envelope.workingFormat;
+        layer.image.widthTexels = envelope.workingWidthTexels;
+        layer.image.heightTexels = envelope.workingHeightTexels;
+        layer.image.role = fi::Role::BaseColor;
+        layer.image.colorSpace = fi::ColorSpace::SRGB;
+        layer.image.alpha = envelope.alpha;
+        layer.placement.kind = core3d::decal_layer::PlacementKind::Face;
+        layer.placement.edgePolicy =
+            core3d::decal_layer::EdgePolicy::RejectCrossing;
+        layer.placement.expectedCardinality = 1;
+        layer.placement.face.receiver.face = FixtureIndexedUUID(0x7A, 2);
+        layer.placement.face.receiver.selectorProof = selectorProof;
+        layer.placement.face.anchorMeters = {{anchorU, anchorV}};
+        layer.widthMeters = width;
+        layer.heightMeters = height;
+        layer.opacity = 1.0;
+        layer.mask.present = true;
+        layer.mask.image.resource = orderedEnvelope.resource;
+        layer.mask.image.normalizedContent = orderedEnvelope.workingContent;
+        layer.mask.image.originalContent = orderedEnvelope.originalContent;
+        layer.mask.image.provenance = orderedEnvelope.provenance;
+        layer.mask.image.producerVersion =
+            core3d::decal_layer::image_contract::kProducerVersion;
+        layer.mask.image.mediaType = orderedEnvelope.workingFormat;
+        layer.mask.image.widthTexels = orderedEnvelope.workingWidthTexels;
+        layer.mask.image.heightTexels = orderedEnvelope.workingHeightTexels;
+        layer.mask.image.role = fi::Role::Occlusion;
+        layer.mask.image.colorSpace = fi::ColorSpace::Linear;
+        layer.mask.image.alpha = orderedEnvelope.alpha;
+        layer.mask.channel = core3d::decal_layer::MaskChannel::LinearLuminance;
+        layer.mask.transform.scale = {0.75, 1.25};
+        layer.mask.transform.offset = {-0.125, 0.25};
+        layer.mask.transform.wrapU = fi::Wrap::Repeat;
+        layer.mask.transform.wrapV = fi::Wrap::MirroredRepeat;
+        definition.layers.push_back(std::move(layer));
+        core3d::decal_layer::Layer orderedLayer;
+        orderedLayer.identifier = FixtureIndexedUUID(0x7A, 3);
+        orderedLayer.image.resource = orderedEnvelope.resource;
+        orderedLayer.image.normalizedContent = orderedEnvelope.workingContent;
+        orderedLayer.image.originalContent = orderedEnvelope.originalContent;
+        orderedLayer.image.provenance = orderedEnvelope.provenance;
+        orderedLayer.image.producerVersion =
+            core3d::decal_layer::image_contract::kProducerVersion;
+        orderedLayer.image.mediaType = orderedEnvelope.workingFormat;
+        orderedLayer.image.widthTexels = orderedEnvelope.workingWidthTexels;
+        orderedLayer.image.heightTexels = orderedEnvelope.workingHeightTexels;
+        orderedLayer.image.role = fi::Role::BaseColor;
+        orderedLayer.image.colorSpace = fi::ColorSpace::SRGB;
+        orderedLayer.image.alpha = orderedEnvelope.alpha;
+        orderedLayer.placement.kind = core3d::decal_layer::PlacementKind::Face;
+        orderedLayer.placement.edgePolicy =
+            core3d::decal_layer::EdgePolicy::RejectCrossing;
+        orderedLayer.placement.expectedCardinality = 1;
+        orderedLayer.placement.face.receiver.face =
+            FixtureIndexedUUID(0x7A, 2);
+        orderedLayer.placement.face.receiver.selectorProof = selectorProof;
+        orderedLayer.placement.face.anchorMeters = {{anchorU, anchorV}};
+        orderedLayer.widthMeters = width;
+        orderedLayer.heightMeters = height;
+        orderedLayer.opacity = 0.5;
+        definition.layers.push_back(std::move(orderedLayer));
+        std::vector<std::uint8_t> bytes;
+        std::string hex, digest;
+        if (!core3d::decal_layer::BindLayerProof(definition)
+            || !core3d::decal_layer::Encode(definition, bytes)
+            || !core3d::decal_layer::persistence::EncodeHex(bytes, hex)
+            || !core3d::decal_layer::persistence::DigestHex(bytes, digest))
+            return @NO;
+        document->NewCommand();
+        const TDF_Label record = owner.FindChild(
+            core3d::decal_layer::persistence::RecordTag, Standard_True);
+        if (!core3d::decal_layer::persistence::WriteChunks(
+                record, hex, Standard_Integer(definition.layers.size()),
+                digest)
+            || !document->CommitCommand()) {
+            document->AbortCommand(); return @NO;
+        }
+        core3d::decal_layer::Definition strict;
+        std::vector<std::uint8_t> strictBytes;
+        return @(core3d::decal_layer::persistence::Read(
+                document, owner, strict, &strictBytes, nullptr)
+                == core3d::decal_layer::persistence::ReadState::Present
+            && strict.layers.size() == 2
+            && strict.layers[0].mask.present
+            && strictBytes == bytes
+            && core3d::decal_layer::source::ExactMatch(strict, witness));
     } @catch (...) { return @NO; }
 }
 

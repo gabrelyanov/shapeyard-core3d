@@ -475,6 +475,43 @@ namespace core3d::retained_face_selector {
 // SYRS analytic prefix and the saved untreated post-Boolean treatment base.
 // Callers receive only ephemeral per-feature proofs; no authority is persisted.
 class SourceStageProofIssuer final {
+    // Only authored identities and values are invariant across source rebind.
+    // Witness coordinates, normals and receipt geometry are proved separately
+    // by the independent commit suffix. This bounded value encoding performs
+    // no topology traversal and preserves floating-point intent/amount bits.
+    static bool InvariantBytes(const retained_edge_treatment::r2::Definition& definition,
+        std::vector<std::uint8_t>& output) {
+        namespace et = retained_edge_treatment;
+        output.clear();
+        if (definition.steps.size() > et::MaximumSteps
+            || definition.issuance.retiredLocalIDs.size() > et::MaximumEnvelopeBytes / sizeof(std::uint64_t)) return false;
+        et::detail::Writer writer;
+        writer.u(definition.schema, 4);
+        writer.raw(definition.owner.document); writer.raw(definition.owner.entity);
+        writer.raw(definition.owner.definition); writer.raw(definition.outputNode);
+        writer.u(definition.issuance.nextLocalID, 8);
+        writer.u(definition.issuance.retiredLocalIDs.size(), 4);
+        for (const auto retired : definition.issuance.retiredLocalIDs) writer.u(retired, 8);
+        writer.u(definition.steps.size(), 4);
+        for (const auto& step : definition.steps) {
+            if (step.anchors.size() > et::MaximumAnchorsPerStep) return false;
+            writer.raw(step.node); writer.raw(step.feature); writer.u(step.localID, 8);
+            writer.u(std::uint8_t(step.kind), 1); writer.d(step.amountMM);
+            writer.u(step.anchors.size(), 4);
+            for (const auto& anchor : step.anchors) {
+                writer.raw(anchor.key); writer.u(std::uint8_t(anchor.curve), 1);
+            }
+            writer.u(step.selector.has_value(), 1);
+            if (step.selector) {
+                writer.u(step.selector->proofVersion, 4);
+                writer.u(std::uint8_t(step.selector->coverage), 1);
+                if (!WriteIntent(writer, step.selector->intent)) return false;
+            }
+        }
+        if (!writer.ok) return false;
+        output = std::move(writer.b);
+        return true;
+    }
 public:
     static bool Issue(
         const retained_edge_treatment::r2::RetainedBooleanBase& source,
@@ -483,10 +520,13 @@ public:
         bool initialIssuance, retained_edge_treatment::ReplayBudget& budget,
         const std::atomic_bool& stop,
         retained_edge_treatment::SourceStageContext& output,
-        retained_edge_treatment::Refusal& refusal) noexcept {
+        retained_edge_treatment::Refusal& refusal,
+        std::shared_ptr<const SourceStageCertificate>* certificate = nullptr,
+        std::uint64_t operationNonce = 0) noexcept {
         namespace et = retained_edge_treatment;
         namespace r2 = retained_edge_treatment::r2;
         output = {};
+        if (certificate) certificate->reset();
         try {
             if (stop.load()) { refusal = et::Refusal::Cancelled; return false; }
             const auto* bound = std::get_if<r2::BooleanBaseBinding>(&definition.base);
@@ -598,6 +638,35 @@ public:
                 refusal = et::Refusal::UnsupportedDependency; return false;
             }
             output = std::move(pending);
+            if (certificate) {
+                // Seal the exact mathematical inputs only after all existing
+                // issuance proofs succeed. Private production and one-use
+                // command ownership are additionally required for transport.
+                auto seal = std::shared_ptr<SourceStageCertificate>(new SourceStageCertificate);
+                seal->binding = *bound;
+                seal->canonicalPrefixBytes = legacy->canonicalPrefixBytes;
+                seal->issuedContext = output;
+                if (!InvariantBytes(definition, seal->invariantBytes)) {
+                    output = {}; refusal = et::Refusal::MalformedCarrier; return false;
+                }
+                seal->nonce = operationNonce;
+                seal->initialIssuance = initialIssuance;
+                seal->prefixDigest = bound->sourceRecipeDigest;
+                seal->document = bound->source.document;
+                seal->entity = bound->source.entity;
+                seal->definition = bound->source.definition;
+                seal->sourceFeature = bound->source.sourceFeature;
+                seal->sourceNode = bound->sourceNode;
+                seal->sourceSchema = bound->sourceSchema;
+                seal->unitBits = retained_solid::Bits(bound->metersPerLocalUnit);
+                seal->sourceBaseShape = sourceBase.TShape();
+                seal->sourceBaseLocation = sourceBase.Location();
+                seal->sourceBaseOrientation = sourceBase.Orientation();
+                seal->savedBaseShape = savedTreatmentBase.TShape();
+                seal->savedBaseLocation = savedTreatmentBase.Location();
+                seal->savedBaseOrientation = savedTreatmentBase.Orientation();
+                *certificate = std::move(seal);
+            }
             refusal = et::Refusal::None;
             return true;
         } catch (...) {
@@ -605,6 +674,127 @@ public:
             refusal = stop.load() ? et::Refusal::Cancelled
                 : et::Refusal::UnsupportedDependency;
             return false;
+        }
+    }
+
+    // NP6: zero-stage exact-input binding validation of a sealed certificate
+    // issued by Issue above. Revalidates the complete structural carrier
+    // gates, the exact canonical source/prefix bytes and committed digest,
+    // the source/root/owner identities, schema and unit bits, the
+    // per-feature immutable intent/capture binding of every proof in the
+    // context, the native owned identity of the exact proved source base and
+    // post-Boolean base, and the operation nonce. No topology pass runs and
+    // no stage is charged. Any changed input or staged binding refuses
+    // typed; there is no reissue after a mismatch.
+    static bool ValidateBound(
+        const SourceStageCertificate& certificate,
+        const retained_edge_treatment::SourceStageContext& context,
+        const retained_edge_treatment::r2::RetainedBooleanBase& source,
+        const retained_edge_treatment::r2::Definition& definition,
+        const TopoDS_Shape& sourceBase, const TopoDS_Shape& savedTreatmentBase,
+        std::uint64_t operationNonce,
+        retained_edge_treatment::Refusal& refusal) noexcept {
+        namespace et = retained_edge_treatment;
+        namespace r2 = retained_edge_treatment::r2;
+        try {
+            const auto* bound = std::get_if<r2::BooleanBaseBinding>(&definition.base);
+            const auto* legacy = std::get_if<r2::LegacyBooleanBase>(&source.source);
+            const auto* program = legacy
+                ? std::get_if<retained_boolean::Program>(&legacy->prefix) : nullptr;
+            const auto* prefix = bound
+                ? std::get_if<r2::LegacyPrefixBinding>(&bound->prefix) : nullptr;
+            if (!bound || !legacy || !program || !prefix
+                || !(source.binding == *bound)
+                || definition.schema != 4
+                || bound->sourceContractRevision != r2::SourceContractRevision
+                || bound->format != r2::PrefixFormat::SYRS
+                || !r2::detail::Valid(*bound)
+                || !retained_boolean::Valid(*program)
+                || program->source.family != 1
+                || !program->filletSteps.empty()
+                || sourceBase.IsNull() || savedTreatmentBase.IsNull()) {
+                refusal = et::Refusal::UnsupportedDependency; return false;
+            }
+            // OCAF document time is zero on a legitimate cold-open capture.
+            // Equality is the freshness value check; the private operation
+            // lease at staging supplies one-command ownership and expiry.
+            if (certificate.nonce != operationNonce) {
+                refusal = et::Refusal::StaleSnapshot; return false;
+            }
+            // Exact canonical source/prefix bytes and the committed digest.
+            if (!r2::ValidateCompletePrefix(source, *bound, refusal)) return false;
+            if (!(certificate.prefixDigest == bound->sourceRecipeDigest)
+                || certificate.canonicalPrefixBytes != legacy->canonicalPrefixBytes) {
+                refusal = et::Refusal::NoncurrentSource; return false;
+            }
+            std::vector<std::uint8_t> invariantBytes;
+            if (!(certificate.binding == *bound)
+                || !InvariantBytes(definition, invariantBytes)
+                || invariantBytes != certificate.invariantBytes
+                || context.steps != certificate.issuedContext.steps) {
+                refusal = et::Refusal::IdentityMismatch; return false;
+            }
+            // Source/root/owner identities, schema and unit bits.
+            if (certificate.document != bound->source.document
+                || certificate.entity != bound->source.entity
+                || certificate.definition != bound->source.definition
+                || certificate.sourceFeature != bound->source.sourceFeature
+                || certificate.sourceNode != bound->sourceNode
+                || certificate.sourceSchema != bound->sourceSchema
+                || certificate.unitBits
+                    != retained_solid::Bits(bound->metersPerLocalUnit)
+                || bound->source.document != program->source.document
+                || bound->source.entity != program->source.entity
+                || bound->source.definition != program->source.definition
+                || bound->source.sourceFeature != program->source.sourceFeature
+                || bound->sourceNode != program->source.derivedFeature
+                || bound->sourceSchema != program->source.schema
+                || retained_solid::Bits(bound->metersPerLocalUnit)
+                    != retained_solid::Bits(program->source.metersPerUnit)) {
+                refusal = et::Refusal::IdentityMismatch; return false;
+            }
+            // Exact proved shape binding within the private producer's lease.
+            // This identity check does not freeze a borrowed mutable TShape;
+            // borrowed bases are ineligible for transport in Viewer/staging.
+            if (sourceBase.TShape() != certificate.sourceBaseShape
+                || !sourceBase.Location().IsEqual(certificate.sourceBaseLocation)
+                || sourceBase.Orientation() != certificate.sourceBaseOrientation
+                || savedTreatmentBase.TShape() != certificate.savedBaseShape
+                || !savedTreatmentBase.Location().IsEqual(certificate.savedBaseLocation)
+                || savedTreatmentBase.Orientation() != certificate.savedBaseOrientation) {
+                refusal = et::Refusal::NoncurrentSource; return false;
+            }
+            // Per-feature immutable intent/capture binding against the
+            // certificate-issuing proofs and the current source identities.
+            std::size_t boundSteps = 0;
+            for (const et::Step& step : definition.steps) {
+                if (!et::NeedsSourceStageContext(step)) continue;
+                ++boundSteps;
+                const auto* proof = context.proofFor(step);
+                if (!proof || !step.selector) {
+                    refusal = et::Refusal::UnsupportedDependency; return false;
+                }
+                if (!(proof->binding_
+                        == std::get<SourceRelativeV1>(step.selector->intent))) {
+                    refusal = et::Refusal::IdentityMismatch; return false;
+                }
+                if (!ValidCaptureProfile(proof->binding_)
+                    || proof->binding_.sourceOwnerDocument != program->source.document
+                    || proof->binding_.sourceOwnerEntity != program->source.entity
+                    || proof->binding_.sourceOwnerDefinition != program->source.definition
+                    || proof->binding_.inputRootNode != prefix->rootNode
+                    || proof->binding_.sourceFeature != program->source.sourceFeature
+                    || proof->binding_.captureProfileSchema != program->source.schema) {
+                    refusal = et::Refusal::IdentityMismatch; return false;
+                }
+            }
+            if (!boundSteps || boundSteps != context.steps.size()) {
+                refusal = et::Refusal::UnsupportedDependency; return false;
+            }
+            refusal = et::Refusal::None;
+            return true;
+        } catch (...) {
+            refusal = et::Refusal::MalformedCarrier; return false;
         }
     }
 };

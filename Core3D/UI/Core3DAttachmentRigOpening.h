@@ -18,10 +18,20 @@ typedef NS_ERROR_ENUM(Core3DAttachmentRigErrorDomain, Core3DAttachmentRigError) 
     Core3DAttachmentRigErrorCancelled,
     Core3DAttachmentRigErrorReplayed,
     Core3DAttachmentRigErrorApplyUnavailable,
+    Core3DAttachmentRigErrorCorruptStoredMetadata,
+    Core3DAttachmentRigErrorRecoveryRequired,
 };
 
 typedef NS_ENUM(NSInteger, Core3DAttachmentRigApplyResult) {
     Core3DAttachmentRigApplyResultUnavailable = 0,
+    Core3DAttachmentRigApplyResultRefused,
+    Core3DAttachmentRigApplyResultCancelled,
+    Core3DAttachmentRigApplyResultCommitted,
+    Core3DAttachmentRigApplyResultCreated,
+    Core3DAttachmentRigApplyResultRemoved,
+    Core3DAttachmentRigApplyResultNoChange,
+    Core3DAttachmentRigApplyResultOutcomeUnknown,
+    Core3DAttachmentRigApplyResultRecoveryRequired,
 };
 
 //! Typed G0 owner identity. Each component is exactly 16 native UUID bytes.
@@ -128,8 +138,27 @@ __attribute__((objc_subclassing_restricted))
 - (BOOL)isCurrent:(NSError * _Nullable * _Nullable)error;
 - (void)cancel;
 
-//! Reserved S2 entrance. S1 always returns Unavailable and changes no state.
+//! Frozen S1 entrance; remains unavailable so S1 callers do not silently gain
+//! durable mutation semantics.
 - (Core3DAttachmentRigApplyResult)apply;
+
+//! Additive S2 entrance. Applies the bound complete ABR1 value through the
+//! one native owner, with exact persisted readback before the single close.
+- (Core3DAttachmentRigApplyResult)commitStoredMetadata;
+
+//! Exact bytes read from the authoritative native carrier. A missing carrier
+//! returns nil without error; malformed/unsupported bytes return a typed error.
+//! The nonnull_error convention is required for that contract: without it the
+//! Swift bridge treats a nil success (absent carrier) as an unreported failure
+//! and throws its generic nilError instead of returning nil.
+- (nullable NSData *)storedMetadataBytesWithError:
+    (NSError * _Nullable * _Nullable)error
+    __attribute__((swift_error(nonnull_error)))
+    NS_SWIFT_NAME(storedMetadataBytes());
+
+//! Explicit retirement is distinct from an ordinary edit and never silently
+//! follows an empty proposal. The receiver must be a current unbound opening.
+- (Core3DAttachmentRigApplyResult)removeStoredMetadata;
 
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;

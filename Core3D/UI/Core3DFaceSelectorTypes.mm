@@ -10,6 +10,11 @@ static BOOL B2FiniteVector(Core3DFaceSelectorVector3 *value, BOOL unit) {
     const double squared = value.x * value.x + value.y * value.y + value.z * value.z;
     return fabs(squared - 1.0) <= 1e-12;
 }
+static BOOL B2NonzeroUUID(NSUUID *value) {
+    if (!value) return NO;
+    uuid_t bytes, zero = {}; [value getUUIDBytes:bytes];
+    return memcmp(bytes, zero, sizeof(bytes)) != 0;
+}
 
 @implementation Core3DFaceSelectorVector3
 - (instancetype)initWithX:(double)x y:(double)y z:(double)z {
@@ -75,6 +80,60 @@ static BOOL B2FiniteVector(Core3DFaceSelectorVector3 *value, BOOL unit) {
 - (id)copyWithZone:(NSZone *)zone { return self; }
 @end
 
+@implementation Core3DSourceRelativeSelectorIntentV1
+- (instancetype)initWithCoordinateSpace:(Core3DFaceSelectorCoordinateSpace)coordinateSpace
+    sourceOwnerDocumentIdentifier:(NSUUID *)sourceOwnerDocumentIdentifier
+    sourceOwnerEntityIdentifier:(NSUUID *)sourceOwnerEntityIdentifier
+    sourceOwnerDefinitionIdentifier:(NSUUID *)sourceOwnerDefinitionIdentifier
+    inputRootNodeIdentifier:(NSUUID *)inputRootNodeIdentifier
+    sourceFeatureIdentifier:(NSUUID *)sourceFeatureIdentifier
+    captureProfileSchema:(NSUInteger)captureProfileSchema
+    captureProfileScalarBits:(NSData *)captureProfileScalarBits
+    innerIntent:(Core3DFaceSelectorIntent *)innerIntent {
+    const int scalarLimit = captureProfileSchema <= NSIntegerMax
+        ? core3d::profile::ScalarLimitForSchema(int(captureProfileSchema)) : 0;
+    if ((coordinateSpace != Core3DFaceSelectorCoordinateSpaceWorldAtCapture
+            && coordinateSpace != Core3DFaceSelectorCoordinateSpaceSourceChart)
+        || !B2NonzeroUUID(sourceOwnerDocumentIdentifier)
+        || !B2NonzeroUUID(sourceOwnerEntityIdentifier)
+        || !B2NonzeroUUID(sourceOwnerDefinitionIdentifier)
+        || !B2NonzeroUUID(inputRootNodeIdentifier) || !B2NonzeroUUID(sourceFeatureIdentifier)
+        || !scalarLimit || captureProfileScalarBits.length < 7 * sizeof(uint64_t)
+        || captureProfileScalarBits.length % sizeof(uint64_t) != 0
+        || captureProfileScalarBits.length / sizeof(uint64_t) > std::size_t(scalarLimit)
+        || !innerIntent || innerIntent.kind < Core3DFaceSelectorKindPlanarFaceBoundary
+        || innerIntent.kind > Core3DFaceSelectorKindCircleRim) return nil;
+    try {
+        std::vector<double> values(captureProfileScalarBits.length / sizeof(uint64_t));
+        memcpy(values.data(), captureProfileScalarBits.bytes, captureProfileScalarBits.length);
+        core3d::profile::Parameters decoded;
+        std::vector<double> canonical;
+        if (!core3d::profile::Decode(values, decoded)
+            || core3d::profile::SchemaFor(decoded) != NSInteger(captureProfileSchema)
+            || decoded.definition.revolve || !decoded.shells.empty()
+            || !core3d::profile::Encode(decoded, canonical)
+            || canonical.size() != values.size()) return nil;
+        for (std::size_t index = 0; index < values.size(); ++index)
+            if (core3d::retained_solid::Bits(canonical[index])
+                != core3d::retained_solid::Bits(values[index])) return nil;
+    } catch (...) { return nil; }
+    if ((self = [super init])) {
+        _bindingVersion = 1; _coordinateSpace = coordinateSpace;
+        _sourceDomain = Core3DFaceSelectorSourceDomainR2SYRSProfile;
+        _sourceOwnerDocumentIdentifier = [sourceOwnerDocumentIdentifier copy];
+        _sourceOwnerEntityIdentifier = [sourceOwnerEntityIdentifier copy];
+        _sourceOwnerDefinitionIdentifier = [sourceOwnerDefinitionIdentifier copy];
+        _inputRootNodeIdentifier = [inputRootNodeIdentifier copy];
+        _sourceFeatureIdentifier = [sourceFeatureIdentifier copy];
+        _captureProfileSchema = captureProfileSchema;
+        _captureProfileScalarBits = [captureProfileScalarBits copy];
+        _innerIntent = innerIntent;
+    }
+    return self;
+}
+- (id)copyWithZone:(NSZone *)zone { return self; }
+@end
+
 @interface Core3DFaceSelectorIntent ()
 - (instancetype)initWithB2Kind:(Core3DFaceSelectorKind)kind payload:(id)payload;
 @end
@@ -85,7 +144,8 @@ static BOOL B2FiniteVector(Core3DFaceSelectorVector3 *value, BOOL unit) {
         if (kind == Core3DFaceSelectorKindPlanarFaceBoundary) _planarFaceBoundary = payload;
         else if (kind == Core3DFaceSelectorKindLine) _line = payload;
         else if (kind == Core3DFaceSelectorKindCircleRim) _circleRim = payload;
-        else _splineEdge = payload;
+        else if (kind == Core3DFaceSelectorKindSplineEdge) _splineEdge = payload;
+        else _sourceRelativeV1 = payload;
     }
     return self;
 }
@@ -93,6 +153,7 @@ static BOOL B2FiniteVector(Core3DFaceSelectorVector3 *value, BOOL unit) {
 + (instancetype)line:(Core3DLineSelectorIntent *)value { return [[self alloc] initWithB2Kind:Core3DFaceSelectorKindLine payload:value]; }
 + (instancetype)circleRim:(Core3DCircleRimIntent *)value { return [[self alloc] initWithB2Kind:Core3DFaceSelectorKindCircleRim payload:value]; }
 + (instancetype)splineEdge:(Core3DReservedSplineEdgeIntent *)value { return [[self alloc] initWithB2Kind:Core3DFaceSelectorKindSplineEdge payload:value]; }
++ (instancetype)sourceRelativeV1:(Core3DSourceRelativeSelectorIntentV1 *)value { return [[self alloc] initWithB2Kind:Core3DFaceSelectorKindSourceRelativeV1 payload:value]; }
 - (id)copyWithZone:(NSZone *)zone { return self; }
 @end
 
@@ -152,6 +213,38 @@ bool Intent(Core3DFaceSelectorIntent *source, SelectorIntent& output) {
         std::copy_n(sourceBytes, 16, value.sourceFeatureID.begin());
         std::copy_n(keyBytes, 16, value.featureLocalEdgeKey.begin());
         value.expectedCount = std::uint32_t(source.splineEdge.expectedCount); output = value; break;
+    }
+    case Core3DFaceSelectorKindSourceRelativeV1: {
+        const auto* value = source.sourceRelativeV1;
+        if (!value || value.bindingVersion != 1
+            || value.sourceDomain != Core3DFaceSelectorSourceDomainR2SYRSProfile) return false;
+        SelectorIntent bridgedInner;
+        if (!Intent(value.innerIntent, bridgedInner)) return false;
+        SourceRelativeV1 relative;
+        if (const auto* inner = std::get_if<PlanarFaceBoundary>(&bridgedInner)) relative.inner = *inner;
+        else if (const auto* inner = std::get_if<Line>(&bridgedInner)) relative.inner = *inner;
+        else if (const auto* inner = std::get_if<CircleRim>(&bridgedInner)) relative.inner = *inner;
+        else return false;
+        relative.bindingVersion = 1;
+        relative.coordinateSpace = CoordinateSpace(value.coordinateSpace);
+        relative.sourceDomain = SourceDomain::R2SYRSProfile;
+        const auto copyUUID = [](NSUUID *sourceUUID, UUID& destination) {
+            uuid_t bytes; [sourceUUID getUUIDBytes:bytes];
+            std::copy_n(bytes, destination.size(), destination.begin());
+        };
+        copyUUID(value.sourceOwnerDocumentIdentifier, relative.sourceOwnerDocument);
+        copyUUID(value.sourceOwnerEntityIdentifier, relative.sourceOwnerEntity);
+        copyUUID(value.sourceOwnerDefinitionIdentifier, relative.sourceOwnerDefinition);
+        copyUUID(value.inputRootNodeIdentifier, relative.inputRootNode);
+        copyUUID(value.sourceFeatureIdentifier, relative.sourceFeature);
+        relative.captureProfileSchema = std::uint32_t(value.captureProfileSchema);
+        try {
+            relative.captureProfileScalarBits.resize(
+                value.captureProfileScalarBits.length / sizeof(uint64_t));
+        } catch (...) { return false; }
+        memcpy(relative.captureProfileScalarBits.data(), value.captureProfileScalarBits.bytes,
+               value.captureProfileScalarBits.length);
+        output = std::move(relative); break;
     }
     default: return false;
     }

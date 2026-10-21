@@ -97,6 +97,7 @@ enum class Mutation : std::uint8_t;
 enum class Refusal : std::uint8_t;
 }
 namespace core3d::variable_radius_fillet::owner { struct Capture; }
+namespace core3d::attachment_rig { struct StoredRecord; }
 namespace core3d::part_boolean::owner { class PartBooleanOwner; }
 namespace core3d::draft_faces::owner { class NativeOwner; }
 namespace core3d::retained_feature { class OcafOwnerService; }
@@ -1377,6 +1378,18 @@ public:
     //! to the existing document-owned treatment-history settlement paths.
     Standard_EXPORT Standard_Boolean FinalizeVariableRadiusFilletHistory() noexcept;
     Standard_EXPORT Standard_Boolean SettleVariableRadiusFilletHistoryOnPrior() noexcept;
+    //! F4-S2's one authoritative document-main-label ABR1 carrier. These
+    //! ports never open or close a command; the caller supplies the one
+    //! NativeOpeningContext lease and proves exact readback before close.
+    Standard_EXPORT Standard_Boolean ReadAttachmentRigMetadata(
+        core3d::attachment_rig::StoredRecord& record) const noexcept;
+    Standard_EXPORT Standard_Boolean StageAttachmentRigMetadata(
+        core3d::native_opening::CommandLease& lease,
+        const core3d::attachment_rig::StoredRecord& before,
+        const std::vector<std::uint8_t>& candidate,
+        Standard_Boolean remove,
+        core3d::attachment_rig::StoredRecord& record) noexcept;
+    Standard_EXPORT Standard_Boolean FinalizeAttachmentRigHistory() noexcept;
     //! Capture requires a viewer-issued context for this exact document. The
     //! reader below intentionally remains usable inside an owned command.
     Standard_EXPORT Standard_Boolean CaptureBoundedCurveExact(

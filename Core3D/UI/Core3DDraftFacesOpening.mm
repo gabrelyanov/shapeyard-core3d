@@ -612,6 +612,436 @@ NSDictionary *BuildProbe(int32_t scenario, double unit, double angle,
 }
 @end
 
+// B4-S3 production editing bridge. This block is deliberately outside DEBUG:
+// shipping manual editors use the same retained owner as the S2 lifecycle.
+namespace {
+namespace dfo = core3d::draft_faces::owner;
+
+struct DFEditingState final {
+    cr::Record record;
+    df::Definition definition;
+    TopoDS_Shape source;
+    std::vector<IssuedFaceValue> available;
+    df::UUID ownerEntity{}, ownerDefinition{}, baseFeature{}, feature{};
+    double unit = 0;
+};
+
+std::shared_ptr<dfo::NativeOwner> DFProductionOwnerFor(OcctDocument *document) {
+    static std::map<void *, std::shared_ptr<dfo::NativeOwner>> owners;
+    const auto found = owners.find(document);
+    if (found != owners.end()) return found->second;
+    auto created = std::make_shared<dfo::NativeOwner>(*document);
+    owners.emplace(document, created);
+    return created;
+}
+
+NSString *DFSelectorDescription(const std::array<double, 3>& normal) {
+    const char *axis = "Z"; double value = normal[2];
+    if (std::abs(normal[0]) >= std::abs(normal[1])
+        && std::abs(normal[0]) >= std::abs(normal[2])) { axis = "X"; value = normal[0]; }
+    else if (std::abs(normal[1]) >= std::abs(normal[2])) { axis = "Y"; value = normal[1]; }
+    return [NSString stringWithFormat:@"Planar face %s%@", axis, value < 0 ? @"−" : @"+"];
+}
+
+bool DFDataUUID(NSData *data, df::UUID& value) {
+    if (![data isKindOfClass:NSData.class] || data.length != value.size()) return false;
+    std::memcpy(value.data(), data.bytes, value.size()); return true;
+}
+
+bool DFReadEditingState(const Handle(OcctDocument)& document, NSString *entityIdentifier,
+                        std::map<std::string, df::UUID>& choiceIdentifiers,
+                        DFEditingState& state, NSError **error) {
+    state = {};
+    if (error) *error = nil;
+    TDF_Label carrier;
+    if (document.IsNull() || !RootForEntity(document, entityIdentifier, carrier)) {
+        if (error) *error = DFError(Core3DDraftFacesErrorUnavailable,
+                                    @"retained Draft Faces carrier unavailable");
+        return false;
+    }
+    const auto native = document->Document();
+    if (native.IsNull() || native->HasOpenCommand()
+        || !cr::Read(native, carrier, state.record) || !state.record.value
+        || state.record.value->definition.schemaVersion != 3
+        || state.record.value->definition.nodes.size() != 2) {
+        if (error) *error = DFError(Core3DDraftFacesErrorUnavailable,
+                                    @"retained Draft Faces record unavailable");
+        return false;
+    }
+    const auto *source = std::get_if<cr::SourceNode>(
+        &state.record.value->definition.nodes[0].value);
+    const auto *feature = std::get_if<cr::FeatureNode>(
+        &state.record.value->definition.nodes[1].value);
+    if (!source || !feature || feature->kind != df::FeatureKind
+        || feature->codecVersion != df::CodecVersion || feature->inputs.size() != 1
+        || feature->inputs[0] != source->node
+        || state.record.value->definition.outputNode != feature->node
+        || source->shapeSlot >= state.record.value->sourceShapes.size()
+        || !df::Decode(feature->parameters, state.definition)) {
+        if (error) *error = DFError(Core3DDraftFacesErrorUnavailable,
+                                    @"retained Draft Faces grammar unavailable");
+        return false;
+    }
+    state.source = state.record.value->sourceShapes[source->shapeSlot];
+    state.ownerEntity = state.record.value->definition.owner.entity;
+    state.ownerDefinition = state.record.value->definition.owner.definition;
+    state.baseFeature = source->original.sourceFeature; state.feature = feature->feature;
+    state.unit = state.definition.metersPerLocalUnit;
+    if (state.source.IsNull() || !std::isfinite(state.unit) || state.unit <= 0 || state.unit > 1) {
+        if (error) *error = DFError(Core3DDraftFacesErrorUnavailable,
+                                    @"retained Draft Faces source unavailable");
+        return false;
+    }
+    const std::string entity = entityIdentifier.UTF8String ?: "";
+    state.available.clear();
+    const gp_Pln plane(df::detail::point(state.definition.neutralOriginLocal),
+                       df::detail::direction(state.definition.neutralNormalLocal));
+    const double tolerance = std::max(Precision::Confusion() * 32, 1e-7 / state.unit);
+    TopTools_IndexedMapOfShape faces; TopExp::MapShapes(state.source, TopAbs_FACE, faces);
+    for (Standard_Integer index = 1; index <= faces.Extent(); ++index) {
+        IssuedFaceValue issued;
+        if (!IssueFace(state.source, entity, std::uint32_t(index - 1), issued)
+            || issued.intent.surface != df::SurfaceKind::Planar) continue;
+        issued.intent.selectorProof = SelectorProof(document->DocumentIdentifier(), entity,
+            issued.topologyIndex, issued.intent.surface, issued.intent.outwardNormalLocal);
+        if (!NeutralSample(TopoDS::Face(faces.FindKey(index)), plane, tolerance,
+                           issued.intent.sampleOnNeutralLocal)) continue;
+        const auto stored = std::find_if(state.definition.faces.begin(), state.definition.faces.end(),
+            [&](const df::FaceIntent& value) { return value.selectorProof == issued.intent.selectorProof; });
+        const std::string proof(reinterpret_cast<const char *>(issued.intent.selectorProof.data()),
+                                issued.intent.selectorProof.size());
+        if (stored != state.definition.faces.end()) issued.intent = *stored;
+        else {
+            const auto found = choiceIdentifiers.find(proof);
+            if (found != choiceIdentifiers.end()) issued.intent.identifier = found->second;
+            else choiceIdentifiers.emplace(proof, issued.intent.identifier);
+        }
+        choiceIdentifiers[proof] = issued.intent.identifier;
+        state.available.push_back(std::move(issued));
+    }
+    if (state.available.empty()) {
+        if (error) *error = DFError(Core3DDraftFacesErrorUnavailable,
+                                    @"no editable planar faces remain");
+        return false;
+    }
+    return true;
+}
+} // namespace
+
+@interface Core3DDraftFacesNativeReceipt ()
+@property(nonatomic, assign, readwrite) Core3DDraftFacesNativeOutcome outcome;
+@property(nonatomic, copy, readwrite) NSString *reason;
+@property(nonatomic, assign, readwrite) uint64_t recoverySession;
+@property(nonatomic, assign, readwrite) NSInteger measuredHistoryDelta;
+@property(nonatomic, assign, readwrite, getter=isSettled) BOOL settled;
+- (instancetype)initPrivate;
+@end
+@implementation Core3DDraftFacesNativeReceipt
+- (instancetype)initPrivate { return [super init]; }
+@end
+
+@interface Core3DDraftFacesNativeFaceSnapshot ()
+@property(nonatomic, copy, readwrite) NSData *identifier;
+@property(nonatomic, copy, readwrite) NSString *selectorDescription;
+@property(nonatomic, assign, readwrite) Core3DDraftFacesSurfaceKind surfaceKind;
+@property(nonatomic, copy, readwrite) NSArray<NSNumber *> *sampleOnNeutralMM;
+@property(nonatomic, copy, readwrite) NSArray<NSNumber *> *outwardNormal;
+@property(nonatomic, assign, readwrite, getter=isSelected) BOOL selected;
+- (instancetype)initPrivate;
+@end
+@implementation Core3DDraftFacesNativeFaceSnapshot
+- (instancetype)initPrivate { return [super init]; }
+@end
+
+@interface Core3DDraftFacesNativeSnapshot ()
+@property(nonatomic, copy, readwrite) NSData *ownerEntityIdentifier;
+@property(nonatomic, copy, readwrite) NSData *ownerDefinitionIdentifier;
+@property(nonatomic, copy, readwrite) NSData *baseFeatureIdentifier;
+@property(nonatomic, copy, readwrite) NSData *featureIdentifier;
+@property(nonatomic, copy, readwrite) NSArray<Core3DDraftFacesNativeFaceSnapshot *> *faces;
+@property(nonatomic, copy, readwrite) NSArray<Core3DDraftFacesNativeFaceSnapshot *> *availableFaces;
+@property(nonatomic, copy, readwrite) NSArray<NSNumber *> *neutralOriginMM;
+@property(nonatomic, copy, readwrite) NSArray<NSNumber *> *neutralNormal;
+@property(nonatomic, copy, readwrite) NSArray<NSNumber *> *pullDirection;
+@property(nonatomic, assign, readwrite) double signedAngleDegrees;
+@property(nonatomic, copy, readwrite) NSArray<NSData *> *orderedDownstreamTreatmentIdentifiers;
+@property(nonatomic, assign, readwrite) double metersPerUnit;
+@property(nonatomic, copy, readwrite) NSData *revision;
+- (instancetype)initPrivate;
+@end
+@implementation Core3DDraftFacesNativeSnapshot
+- (instancetype)initPrivate { return [super init]; }
+@end
+
+namespace {
+Core3DDraftFacesNativeReceipt *DFPublicReceipt(const dfo::Receipt& value) {
+    Core3DDraftFacesNativeReceipt *receipt = [[Core3DDraftFacesNativeReceipt alloc] initPrivate];
+    receipt.outcome = Core3DDraftFacesNativeOutcome(std::uint8_t(value.outcome));
+    receipt.reason = [NSString stringWithUTF8String:value.reason.c_str()];
+    receipt.recoverySession = value.session;
+    receipt.measuredHistoryDelta = value.measuredHistoryDelta;
+    receipt.settled = value.settled;
+    return receipt;
+}
+
+Core3DDraftFacesNativeFaceSnapshot *DFPublicFace(const df::FaceIntent& face,
+                                                 bool selected, double unit) {
+    Core3DDraftFacesNativeFaceSnapshot *value =
+        [[Core3DDraftFacesNativeFaceSnapshot alloc] initPrivate];
+    value.identifier = DFData(face.identifier);
+    value.selectorDescription = DFSelectorDescription(face.outwardNormalLocal);
+    value.surfaceKind = Core3DDraftFacesSurfaceKind(std::uint8_t(face.surface));
+    value.sampleOnNeutralMM = @[ @(face.sampleOnNeutralLocal[0] * 1000 * unit),
+        @(face.sampleOnNeutralLocal[1] * 1000 * unit),
+        @(face.sampleOnNeutralLocal[2] * 1000 * unit) ];
+    value.outwardNormal = DFVector(face.outwardNormalLocal); value.selected = selected;
+    return value;
+}
+
+Core3DDraftFacesNativeSnapshot *DFPublicSnapshot(const DFEditingState& state) {
+    Core3DDraftFacesNativeSnapshot *value = [[Core3DDraftFacesNativeSnapshot alloc] initPrivate];
+    value.ownerEntityIdentifier = DFData(state.ownerEntity);
+    value.ownerDefinitionIdentifier = DFData(state.ownerDefinition);
+    value.baseFeatureIdentifier = DFData(state.baseFeature);
+    value.featureIdentifier = DFData(state.feature);
+    NSMutableArray *selected = [NSMutableArray array];
+    for (const auto& face : state.definition.faces)
+        [selected addObject:DFPublicFace(face, true, state.unit)];
+    NSMutableArray *available = [NSMutableArray array];
+    for (const auto& issued : state.available) {
+        const bool isSelected = std::any_of(state.definition.faces.begin(), state.definition.faces.end(),
+            [&](const df::FaceIntent& face) { return face.identifier == issued.intent.identifier; });
+        [available addObject:DFPublicFace(issued.intent, isSelected, state.unit)];
+    }
+    value.faces = selected; value.availableFaces = available;
+    const double scale = 1000 * state.unit;
+    value.neutralOriginMM = @[ @(state.definition.neutralOriginLocal[0] * scale),
+        @(state.definition.neutralOriginLocal[1] * scale),
+        @(state.definition.neutralOriginLocal[2] * scale) ];
+    value.neutralNormal = DFVector(state.definition.neutralNormalLocal);
+    value.pullDirection = DFVector(state.definition.pullDirectionLocal);
+    value.signedAngleDegrees = state.definition.signedAngleRadians * 180 / M_PI;
+    value.orderedDownstreamTreatmentIdentifiers = @[];
+    value.metersPerUnit = state.unit;
+    value.revision = DFData(state.record.value->bytes);
+    return value;
+}
+} // namespace
+
+@implementation Core3DDraftFacesNativeEditingBridge {
+    __weak Core3DViewController *_controller;
+    Handle(OcctDocument) _document;
+    NSString *_entityIdentifier;
+    std::shared_ptr<dfo::NativeOwner> _owner;
+    std::shared_ptr<const dfo::Capture> _pendingCapture;
+    std::vector<std::uint8_t> _pendingParameters;
+    df::UUID _pendingFeature;
+    NSData *_pendingRevision;
+    std::map<std::string, df::UUID> _choiceIdentifiers;
+    bool _recoveryPending;
+}
+
+- (instancetype)initPrivate { return [super init]; }
+
++ (instancetype)captureController:(Core3DViewController *)controller
+                 entityIdentifier:(NSString *)entityIdentifier error:(NSError **)error {
+    if (error) *error = nil;
+    if (!NSThread.isMainThread || !controller || entityIdentifier.length == 0) {
+        if (error) *error = DFError(Core3DDraftFacesErrorInvalidArgument,
+                                    @"main-thread controller and entity required");
+        return nil;
+    }
+    GLViewController *gl = [controller.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)controller.glController : nil;
+    auto viewer = gl ? gl.viewer : nullptr;
+    Handle(OcctDocument) document = viewer ? viewer->getDocument() : Handle(OcctDocument)();
+    if (document.IsNull() || document->Document().IsNull()) {
+        if (error) *error = DFError(Core3DDraftFacesErrorUnavailable,
+                                    @"native document unavailable");
+        return nil;
+    }
+    Core3DDraftFacesNativeEditingBridge *bridge = [[self alloc] initPrivate];
+    bridge->_controller = controller; bridge->_document = document;
+    bridge->_entityIdentifier = [entityIdentifier copy];
+    bridge->_owner = DFProductionOwnerFor(document.get());
+    DFEditingState state;
+    if (!DFReadEditingState(document, entityIdentifier, bridge->_choiceIdentifiers, state, error))
+        return nil;
+    return bridge;
+}
+
+- (BOOL)mintCapture:(std::shared_ptr<const dfo::Capture>&)capture error:(NSError **)error {
+    Core3DViewController *controller = _controller;
+    GLViewController *gl = [controller.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)controller.glController : nil;
+    auto viewer = gl ? gl.viewer : nullptr;
+    const CGSize drawable = controller.viewportDrawableSize;
+    if (!controller || !viewer || !std::isfinite(drawable.width) || !std::isfinite(drawable.height)
+        || drawable.width < 1 || drawable.height < 1 || drawable.width > UINT32_MAX
+        || drawable.height > UINT32_MAX) {
+        if (error) *error = DFError(Core3DDraftFacesErrorStale, @"native editor fence changed");
+        return NO;
+    }
+    const std::uint32_t width = std::uint32_t(drawable.width), height = std::uint32_t(drawable.height);
+    const std::string entity = _entityIdentifier.UTF8String ?: "";
+    auto context = viewer->captureNativeOpeningContext(width, height, {entity});
+    TDF_Label carrier;
+    if (!context || !RootForEntity(_document, _entityIdentifier, carrier)) {
+        if (error) *error = DFError(Core3DDraftFacesErrorStale, @"native editor fence changed");
+        return NO;
+    }
+    capture = dfo::NativeOwner::MintEditCapture(*_document, context, carrier, entity, width, height);
+    if (!capture) {
+        if (error) *error = DFError(Core3DDraftFacesErrorStale, @"native edit capture refused");
+        return NO;
+    }
+    return YES;
+}
+
+- (Core3DDraftFacesNativeSnapshot *)readSnapshotWithError:(NSError **)error {
+    if (error) *error = nil;
+    if (!NSThread.isMainThread || !_controller) {
+        if (error) *error = DFError(Core3DDraftFacesErrorInvalidThread,
+                                    @"main-thread live controller required");
+        return nil;
+    }
+    DFEditingState state;
+    if (!DFReadEditingState(_document, _entityIdentifier, _choiceIdentifiers, state, error)) return nil;
+    std::shared_ptr<const dfo::Capture> capture;
+    if (![self mintCapture:capture error:error]) return nil;
+    return DFPublicSnapshot(state);
+}
+
+- (Core3DDraftFacesNativeSnapshot *)prepareFeatureIdentifier:(NSData *)featureIdentifier
+                                            expectedRevision:(NSData *)expectedRevision
+                                      selectedFaceIdentifiers:(NSArray<NSData *> *)selectedFaceIdentifiers
+                                              neutralOriginMM:(NSArray<NSNumber *> *)neutralOriginMM
+                                                neutralNormal:(NSArray<NSNumber *> *)neutralNormal
+                                                pullDirection:(NSArray<NSNumber *> *)pullDirection
+                                           signedAngleDegrees:(double)signedAngleDegrees
+                                                        error:(NSError **)error {
+    if (error) *error = nil;
+    [self cancelPrepared];
+    if (!NSThread.isMainThread || _recoveryPending) {
+        if (error) *error = DFError(Core3DDraftFacesErrorUnavailable,
+                                    @"native owner recovery is pending"); return nil;
+    }
+    DFEditingState state;
+    if (!DFReadEditingState(_document, _entityIdentifier, _choiceIdentifiers, state, error)) return nil;
+    if (![expectedRevision isEqualToData:DFData(state.record.value->bytes)]
+        || ![featureIdentifier isEqualToData:DFData(state.feature)]) {
+        if (error) *error = DFError(Core3DDraftFacesErrorStale,
+                                    @"Draft Faces revision changed"); return nil;
+    }
+    df::Definition edited = state.definition;
+    edited.faces.clear();
+    if (selectedFaceIdentifiers.count < 1 || selectedFaceIdentifiers.count > df::MaximumFaces) {
+        if (error) *error = DFError(Core3DDraftFacesErrorInvalidSelection,
+                                    @"one to sixteen faces required"); return nil;
+    }
+    std::set<df::UUID> unique;
+    for (NSData *identifier in selectedFaceIdentifiers) {
+        df::UUID nativeID{};
+        if (!DFDataUUID(identifier, nativeID) || !unique.insert(nativeID).second) {
+            if (error) *error = DFError(Core3DDraftFacesErrorInvalidSelection,
+                                        @"duplicate or malformed face identity"); return nil;
+        }
+        const auto found = std::find_if(state.available.begin(), state.available.end(),
+            [&](const IssuedFaceValue& value) { return value.intent.identifier == nativeID; });
+        if (found == state.available.end()) {
+            if (error) *error = DFError(Core3DDraftFacesErrorInvalidSelection,
+                                        @"face identity is stale"); return nil;
+        }
+        edited.faces.push_back(found->intent);
+    }
+    std::array<double, 3> originMM{}, normal{}, pull{};
+    if (!Vector3(neutralOriginMM, originMM) || !Vector3(neutralNormal, normal)
+        || !Vector3(pullDirection, pull) || !std::isfinite(signedAngleDegrees)) {
+        if (error) *error = DFError(Core3DDraftFacesErrorInvalidArgument,
+                                    @"finite plane, pull, and angle required"); return nil;
+    }
+    const double localPerMM = 0.001 / state.unit;
+    for (unsigned index = 0; index < 3; ++index)
+        edited.neutralOriginLocal[index] = originMM[index] * localPerMM;
+    edited.neutralNormalLocal = normal; edited.pullDirectionLocal = pull;
+    edited.signedAngleRadians = signedAngleDegrees * M_PI / 180;
+    const gp_Pln plane(df::detail::point(edited.neutralOriginLocal),
+                       df::detail::direction(edited.neutralNormalLocal));
+    const double tolerance = std::max(Precision::Confusion() * 32, 1e-7 / state.unit);
+    TopTools_IndexedMapOfShape topology; TopExp::MapShapes(state.source, TopAbs_FACE, topology);
+    for (auto& face : edited.faces) {
+        const auto found = std::find_if(state.available.begin(), state.available.end(),
+            [&](const IssuedFaceValue& value) { return value.intent.identifier == face.identifier; });
+        if (found == state.available.end()
+            || !NeutralSample(TopoDS::Face(topology.FindKey(Standard_Integer(found->topologyIndex) + 1)),
+                              plane, tolerance, face.sampleOnNeutralLocal)) {
+            if (error) *error = DFRefusal(Core3DDraftFacesErrorBuildRefused,
+                                          df::Refusal::NoNeutralIntersection); return nil;
+        }
+    }
+    df::Refusal refusal;
+    std::vector<std::uint8_t> parameters;
+    if (!df::Validate(edited, refusal) || !df::Encode(edited, parameters)) {
+        if (error) *error = DFRefusal(Core3DDraftFacesErrorBuildRefused, refusal); return nil;
+    }
+    auto graph = state.record.value->definition;
+    auto& feature = std::get<cr::FeatureNode>(graph.nodes[1].value);
+    feature.parameters = parameters;
+    rf::ReplayValue input; input.shape = rf::ShapeKind::Solid;
+    if (!df::detail::exactShapeBytes(state.source, input.detachedShape)) {
+        if (error) *error = DFError(Core3DDraftFacesErrorUnavailable, @"native source unreadable");
+        return nil;
+    }
+    rf::ReplayValue output; tb::Counter budget; const std::atomic_bool stop{false};
+    if (!df::detail::buildDetachedObserved(feature, {input}, budget, stop, output, &refusal, nullptr)) {
+        if (error) *error = DFRefusal(Core3DDraftFacesErrorBuildRefused, refusal); return nil;
+    }
+    std::shared_ptr<const dfo::Capture> capture;
+    if (![self mintCapture:capture error:error]) return nil;
+    _pendingCapture = std::move(capture); _pendingParameters = parameters;
+    _pendingFeature = state.feature; _pendingRevision = [expectedRevision copy];
+    state.definition = edited;
+    return DFPublicSnapshot(state);
+}
+
+- (Core3DDraftFacesNativeReceipt *)commitFeatureIdentifier:(NSData *)featureIdentifier
+                                          expectedRevision:(NSData *)expectedRevision
+                                                     error:(NSError **)error {
+    if (error) *error = nil;
+    if (!NSThread.isMainThread || !_pendingCapture || _pendingParameters.empty()
+        || !_pendingRevision || ![expectedRevision isEqualToData:_pendingRevision]
+        || ![featureIdentifier isEqualToData:DFData(_pendingFeature)]) {
+        if (error) *error = DFError(Core3DDraftFacesErrorStale,
+                                    @"no exact reviewed Draft Faces revision"); return nil;
+    }
+    const std::atomic_bool stop{false};
+    const dfo::Receipt native = _owner->editParameters(_pendingCapture, _pendingParameters, stop);
+    Core3DDraftFacesNativeReceipt *receipt = DFPublicReceipt(native);
+    _recoveryPending = native.outcome == dfo::Outcome::RecoveryRequired;
+    if (!_recoveryPending) [self cancelPrepared];
+    return receipt;
+}
+
+- (void)cancelPrepared {
+    if (_recoveryPending) return;
+    _pendingCapture.reset(); _pendingParameters.clear(); _pendingFeature = {};
+    _pendingRevision = nil;
+}
+
+- (Core3DDraftFacesNativeReceipt *)reconcileRecoverySession:(uint64_t)session {
+    const dfo::Receipt native = _owner->reconcile(session);
+    if (native.settled) { _recoveryPending = false; [self cancelPrepared]; }
+    return DFPublicReceipt(native);
+}
+
+- (BOOL)blocksOtherWork { return _owner && _owner->blocksOtherWork(); }
+- (double)metersPerUnit {
+    DFEditingState state; NSError *error = nil;
+    return DFReadEditingState(_document, _entityIdentifier, _choiceIdentifiers, state, &error)
+        ? state.unit : 0;
+}
+@end
+
 #if DEBUG
 extern "C" void *Core3DDebugB4DraftFacesBuildProbe(
     int32_t scenario, double unit, double angle, double stageAllowance,
@@ -682,15 +1112,7 @@ bool S2ProbeViewer(Core3DViewController *controller, Handle(OcctDocument)& docum
 }
 
 std::shared_ptr<dfo::NativeOwner> S2OwnerFor(OcctDocument *document) {
-    // The owner is a per-document service; S3 binds the long-lived production
-    // instance. This probe-side map only preserves identity across probe
-    // calls on the same live document.
-    static std::map<void *, std::shared_ptr<dfo::NativeOwner>> owners;
-    const auto found = owners.find(document);
-    if (found != owners.end()) return found->second;
-    auto created = std::make_shared<dfo::NativeOwner>(*document);
-    owners.emplace(document, created);
-    return created;
+    return DFProductionOwnerFor(document);
 }
 
 core3d::profile::Parameters S2BoxProfile(double unit, double widthMM,

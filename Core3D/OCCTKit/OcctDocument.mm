@@ -63,6 +63,7 @@ struct Cut475Scope {
 #import <Foundation/Foundation.h>
 #include "OcctDocument.h"
 #include "VariableRadiusFilletNativeOwner.hxx"
+#include "AttachmentRigMetadataPersistence.hxx"
 #include "RetainedEdgeTreatmentBuild.hxx"
 #include "RetainedEdgeTreatmentR2Build.hxx"
 #include "RetainedEdgeTreatmentSaveView.hxx"
@@ -263,6 +264,36 @@ bool Core3DValidateR2Records(const Handle(TDocStd_Document)& document,
     core3d::retained_edge_treatment::ReplayBudget* continued,
     core3d::retained_edge_treatment::save_view::ValidationRoute route,
     core3d::retained_edge_treatment::Refusal& refusal) noexcept;
+} // namespace
+namespace {
+// NP6: private command-bound continuation for the continued readback
+// validator. StageRetainedEdgeTreatmentR2 installs it only inside the live
+// commit scope (main thread, open command) after the independent publication
+// suffix replay and exact equivalence have completed; the RAII scope destroys
+// the authority at settlement, cancellation or refusal. It is never
+// persisted, never put on the document, and covers exactly this operation's
+// owner — another new-form owner in the document keeps its full independent
+// proof. The save_view::ValidationSession `no open command` rule is
+// untouched: this is not a validation-session authority.
+struct CommandBoundR2Proof final {
+    TDF_Label owner, treatmentLabel, sourceLabel;
+    std::shared_ptr<const core3d::retained_edge_treatment::r2::SourceStageOperation> operation;
+    std::shared_ptr<const core3d::retained_edge_treatment::SourceStageContext> context;
+    std::shared_ptr<const core3d::retained_face_selector::SourceStageCertificate> certificate;
+    std::vector<std::uint8_t> sourceBytes;
+    std::vector<std::uint8_t> definitionBytes;
+    TopoDS_Shape base, result;
+    std::uint64_t nonce = 0;
+};
+const CommandBoundR2Proof* CommandBoundR2ProofActive = nullptr;
+struct CommandBoundR2ProofScope final {
+    const CommandBoundR2Proof* previous;
+    explicit CommandBoundR2ProofScope(const CommandBoundR2Proof* value) noexcept
+        : previous(CommandBoundR2ProofActive) { CommandBoundR2ProofActive = value; }
+    ~CommandBoundR2ProofScope() noexcept { CommandBoundR2ProofActive = previous; }
+    CommandBoundR2ProofScope(const CommandBoundR2ProofScope&) = delete;
+    CommandBoundR2ProofScope& operator=(const CommandBoundR2ProofScope&) = delete;
+};
 } // namespace
 // OcctDocument member definitions must sit at global scope: inside the
 // anonymous namespace they do not bind to ::OcctDocument, so the Snapshot
@@ -857,6 +888,10 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
     bool debugFailAtReadback) noexcept {
     namespace et=core3d::retained_edge_treatment;namespace r2=core3d::retained_edge_treatment::r2;
     readback={};refusal=et::Refusal::StageFailed;
+    struct SourceStageScope final {
+        std::shared_ptr<r2::SourceStageOperation> operation;
+        ~SourceStageScope(){if(operation)operation->expire();}
+    } sourceStageScope{built.sourceStageOperation_};
 #if !DEBUG
     (void)debugFailAfterShape;
     (void)debugFailAtReadback;
@@ -878,6 +913,17 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
     try{
         if(![NSThread isMainThread]||myOcafDoc.IsNull()||!myOcafDoc->HasOpenCommand()
             ||original.ownerLabel_.IsNull()||built.nonce_!=original.nonce_||built.result_.IsNull())return Standard_False;
+        if(built.sourceStageOperation_
+            &&(built.definition_.schema!=4||!built.sourceChanged_||!built.edit_
+                ||!std::holds_alternative<r2::RebuildBooleanInput>(*built.edit_)
+                ||!(built.definition_.owner==original.definition_.owner)
+                ||built.editedSourceBase_.IsNull()||built.base_.IsNull()
+                ||built.editedSourceBase_.IsPartner(original.sourceBase_)
+                ||built.base_.IsPartner(original.base_)
+                ||!built.boundSourceContext_||!built.boundSourceCertificate_
+                ||!built.sourceStageOperation_->beginStage())){
+            refusal=et::Refusal::StaleSnapshot;return Standard_False;
+        }
         std::optional<et::RecordR2> live;if(!et::ReadR2(myOcafDoc,original.ownerLabel_,live,refusal)||!live
             ||live->value->bytes!=original.definitionBytes_)return Standard_False;
         std::vector<std::uint8_t> exact;if(!r2::Encode(built.definition_,exact,refusal)||exact!=built.definitionBytes_)return Standard_False;
@@ -922,17 +968,41 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
 #endif
         TopoDS_Shape verified;const std::atomic_bool neverCancelled{false};
         et::SourceStageContext sourceContext;
+        const et::SourceStageContext* commitContext=nullptr;
         const bool newForm=built.definition_.schema==4;
         const auto* source=std::get_if<r2::RetainedBooleanBase>(&built.source_);
         const TopoDS_Shape& sourceBase=built.sourceChanged_
             ?built.editedSourceBase_:original.sourceBase_;
-        if(newForm&&(!source
-            ||!core3d::retained_face_selector::SourceStageProofIssuer::Issue(
-                *source,built.definition_,sourceBase,built.base_,false,
-                commitBudget,neverCancelled,sourceContext,refusal)))return Standard_False;
+        if(newForm){
+            if(!source)return Standard_False;
+            if(built.boundSourceContext_||built.boundSourceCertificate_){
+                if(!built.boundSourceContext_||!built.boundSourceCertificate_
+                    ||!built.sourceStageOperation_
+                    ||!built.sourceStageOperation_->activeForReadback()){
+                    refusal=et::Refusal::StaleSnapshot;return Standard_False;
+                }
+                // NP6 operation-bound proof sharing: consume the detached
+                // build's sealed certificate after exact-input binding
+                // validation — canonical bytes/digest, identities, schema and
+                // unit bits, per-feature intent binding, proved-shape
+                // ownership and the operation nonce. The shared proof result
+                // replaces re-earning the identical issuance; a changed input
+                // or staged binding refuses typed and atomic, never reissues.
+                if(!core3d::retained_face_selector::SourceStageProofIssuer::ValidateBound(
+                        *built.boundSourceCertificate_,*built.boundSourceContext_,*source,
+                        built.definition_,sourceBase,built.base_,built.nonce_,refusal))
+                    return Standard_False;
+                commitContext=built.boundSourceContext_.get();
+            }else{
+                if(!core3d::retained_face_selector::SourceStageProofIssuer::Issue(
+                        *source,built.definition_,sourceBase,built.base_,false,
+                        commitBudget,neverCancelled,sourceContext,refusal))return Standard_False;
+                commitContext=&sourceContext;
+            }
+        }
         if(!(newForm
                 ?r2::ReplayTreatmentSuffix(built.base_,built.definition_,verified,
-                    commitBudget,refusal,sourceContext,neverCancelled)
+                    commitBudget,refusal,*commitContext,neverCancelled)
                 :r2::ReplayTreatmentSuffix(built.base_,built.definition_,verified,
                     commitBudget,refusal,neverCancelled))
             ||!et::EquivalentReplayGeometry(built.result_,verified,commitBudget,refusal)
@@ -1020,6 +1090,26 @@ Standard_Boolean OcctDocument::StageRetainedEdgeTreatmentR2(
         TNaming_Builder(original.sourceLabel_).Select(built.result_,built.result_);
         if(!retainedSourceLabel.IsNull()&&!retainedSourceLabel.IsEqual(original.sourceLabel_))
             TNaming_Builder(retainedSourceLabel).Select(built.result_,built.result_);
+        // NP6: share this operation's completed independent publication proof
+        // (the sealed build proof consumed above plus the suffix replay and
+        // exact equivalence just completed) with the readback validator for
+        // this owner only, inside the live commit scope. The validator still
+        // reads the real stored records and checks the actual carrier, source
+        // and geometry binding against that completed proof; any changed
+        // input or staged binding refuses and follows the verified rollback.
+        // The RAII scope destroys the authority on every exit below.
+        std::optional<CommandBoundR2Proof> commandBoundProof;
+        std::optional<CommandBoundR2ProofScope> commandBoundScope;
+        if(commitContext&&built.boundSourceContext_&&built.boundSourceCertificate_
+            &&commitContext==built.boundSourceContext_.get()){
+            commandBoundProof=CommandBoundR2Proof{original.ownerLabel_,
+                original.sourceLabel_,retainedSourceLabel,built.sourceStageOperation_,
+                built.boundSourceContext_,built.boundSourceCertificate_,
+                built.sourceChanged_?built.canonicalPrefixBytes():original.sourceBytes_,
+                built.definitionBytes_,built.base_,built.result_,
+                built.nonce_};
+            commandBoundScope.emplace(&*commandBoundProof);
+        }
         if(!ValidateRetainedEdgeTreatmentsR2(refusal,commitBudget)){publishBeforeOnlyTreatmentCompanion();return Standard_False;}
 #if DEBUG
         if(debugFailAtReadback)throw Standard_Failure("Retained treatment readback fault");
@@ -2270,6 +2360,57 @@ bool Core3DProveR2Record(const Handle(TDocStd_Document)& document,
     }
 }
 
+// NP6: the command-bound readback share for the one owner whose commit just
+// completed its independent publication proof. The actual staged carrier,
+// retained source record and current naming binding are read back from the
+// document and bound to that completed proof: exact carrier and source bytes,
+// the proved source/base shapes under native immutable ownership, the
+// per-feature intent/capture binding and the operation nonce. Any changed
+// input or staged binding refuses; the identical expectation is never
+// reconstructed. Structural carrier validation, the mixed-arm census and the
+// owner/digest gates run unchanged in the caller.
+bool Core3DVerifyBoundR2Record(const Handle(TDocStd_Document)& document,
+    const et_save::RecordR2& treatment, const CommandBoundR2Proof& proof,
+    et_save::Refusal& refusal) noexcept {
+    namespace r2 = core3d::retained_edge_treatment::r2;
+    namespace fs = core3d::retained_face_selector;
+    try {
+        if (![NSThread isMainThread] || document.IsNull() || !document->HasOpenCommand()
+            || proof.owner.IsNull() || proof.owner.Data() != document->GetData()
+            || !proof.operation || !proof.operation->activeForReadback()
+            || !proof.context || !proof.certificate) {
+            refusal = et_save::Refusal::UnsupportedDependency;
+            return false;
+        }
+        core3d::retained_solid::Record source;
+        if (!Core3DReadR2Source(document, treatment, source, refusal)) return false;
+        const auto* base = std::get_if<r2::BooleanBaseBinding>(
+            &treatment.value->definition.base);
+        if (!base) { refusal = et_save::Refusal::MalformedCarrier; return false; }
+        if (!treatment.owner.IsEqual(proof.owner)
+            || !treatment.label.IsEqual(proof.treatmentLabel)
+            || !source.label.IsEqual(proof.sourceLabel)
+            || treatment.value->bytes != proof.definitionBytes
+            || source.value->bytes != proof.sourceBytes
+            || !treatment.value->base.IsEqual(proof.base)
+            || !treatment.current.IsEqual(proof.result)) {
+            refusal = et_save::Refusal::StaleSnapshot;
+            return false;
+        }
+        r2::RetainedBooleanBase authority{*base,
+            r2::LegacyBooleanBase{source.value->envelope, source.value->bytes}};
+        if (!fs::SourceStageProofIssuer::ValidateBound(*proof.certificate,
+                *proof.context, authority, treatment.value->definition,
+                source.value->base, treatment.value->base, proof.nonce,
+                refusal)) return false;
+        refusal = et_save::Refusal::None;
+        return true;
+    } catch (...) {
+        refusal = et_save::Refusal::MalformedCarrier;
+        return false;
+    }
+}
+
 bool Core3DVerifyR2Binding(const Handle(TDocStd_Document)& document,
     const et_save::RecordR2& treatment,
     const save_view::ValidationBinding& binding,
@@ -2320,6 +2461,16 @@ bool Core3DValidateR2Records(const Handle(TDocStd_Document)& document,
                 || !Core3DValidateRetainedEdgeTreatmentR2Carrier(
                     record.label, carrier, refusal)) return false;
             if (continued && Core3DIsNewFormR2(record)) {
+                if (CommandBoundR2ProofActive
+                    && record.owner.IsEqual(CommandBoundR2ProofActive->owner)) {
+                    // NP6: this operation's owner validates the actual stored
+                    // binding against the just-completed commit proof instead
+                    // of re-earning an identical expectation. Any other
+                    // new-form owner keeps its full independent proof.
+                    if (!Core3DVerifyBoundR2Record(document, record,
+                            *CommandBoundR2ProofActive, refusal)) return false;
+                    continue;
+                }
                 save_view::ValidationBinding binding;
                 if (!Core3DProveR2Record(document, record, *continued,
                         binding, refusal)) return false;
@@ -2608,6 +2759,98 @@ Standard_Boolean Core3DValidateRetainedEdgeTreatmentDocumentForPrepare(
 #include <TDataStd_ByteArray.hxx>
 #include <TDF_AttributeIterator.hxx>
 #include "Core3DBoundedAuthoredFrameDriver.hxx"
+
+const Standard_GUID& core3d::attachment_rig::AttachmentRigAttributeID() noexcept
+{
+    // F4-ABR1-STORAGE-OWNER: one application-owned byte-array role on the
+    // document main label. Collision-censused across OCCTKit and UI for S2.
+    static const Standard_GUID anID(
+        "4B4E90D5-9F6E-4A22-A8B7-36D4E3F2C1A0");
+    return anID;
+}
+
+namespace {
+bool ReadAttachmentRigStoredRecord(
+    const Handle(TDocStd_Document)& theDocument,
+    core3d::attachment_rig::StoredRecord& theRecord) noexcept
+{
+    namespace rig = core3d::attachment_rig;
+    theRecord = {};
+    try {
+        OCC_CATCH_SIGNALS
+        if (theDocument.IsNull() || theDocument->GetData().IsNull()) {
+            theRecord.state = rig::StoredReadState::Corrupt;
+            theRecord.refusal = "closed document";
+            return false;
+        }
+        Handle(TDF_Attribute) anAttribute;
+        if (!theDocument->Main().FindAttribute(
+                rig::AttachmentRigAttributeID(), anAttribute)) {
+            theRecord.state = rig::StoredReadState::Absent;
+            return true;
+        }
+        const Handle(TDataStd_ByteArray) anArray =
+            Handle(TDataStd_ByteArray)::DownCast(anAttribute);
+        if (anArray.IsNull() || anArray->ID() != rig::AttachmentRigAttributeID()
+            || anArray->Lower() != 0 || anArray->Upper() < 0) {
+            theRecord.state = rig::StoredReadState::Corrupt;
+            theRecord.refusal = "invalid ABR1 attribute role";
+            return true;
+        }
+        const std::size_t aCount = std::size_t(anArray->Upper()) + 1;
+        if (aCount == 0 || aCount > rig::kMaxStoredABR1Bytes) {
+            theRecord.state = rig::StoredReadState::Corrupt;
+            theRecord.refusal = "stored ABR1 exceeds 65536-byte envelope";
+            return true;
+        }
+        theRecord.bytes.reserve(aCount);
+        for (Standard_Integer anIndex = 0;
+             anIndex <= anArray->Upper(); ++anIndex) {
+            theRecord.bytes.push_back(anArray->Value(anIndex));
+        }
+        rig::Metadata aValue;
+        std::vector<std::uint8_t> aCanonical;
+        if (!rig::DecodeABR1(theRecord.bytes, aValue, theRecord.refusal)
+            || !rig::EncodeABR1(aValue, aCanonical, theRecord.refusal)
+            || aCanonical != theRecord.bytes) {
+            theRecord.bytes.clear();
+            theRecord.state = rig::StoredReadState::Corrupt;
+            return true;
+        }
+        theRecord.state = rig::StoredReadState::Present;
+        theRecord.refusal.clear();
+        return true;
+    } catch (...) {
+        theRecord = {};
+        theRecord.state = rig::StoredReadState::Corrupt;
+        theRecord.refusal = "ABR1 attribute read exception";
+        return false;
+    }
+}
+
+bool ValidateAttachmentRigDocument(
+    const Handle(TDocStd_Document)& theDocument) noexcept
+{
+    namespace rig = core3d::attachment_rig;
+    try {
+        if (theDocument.IsNull() || theDocument->GetData().IsNull()) return false;
+        std::size_t aCount = 0;
+        Handle(TDF_Attribute) anAttribute;
+        if (theDocument->Main().FindAttribute(
+                rig::AttachmentRigAttributeID(), anAttribute)) ++aCount;
+        for (TDF_ChildIterator anIterator(theDocument->Main(), Standard_True);
+             anIterator.More(); anIterator.Next()) {
+            Handle(TDF_Attribute) aChildAttribute;
+            if (anIterator.Value().FindAttribute(
+                    rig::AttachmentRigAttributeID(), aChildAttribute)) ++aCount;
+        }
+        if (aCount > 1) return false;
+        rig::StoredRecord aRecord;
+        return ReadAttachmentRigStoredRecord(theDocument, aRecord)
+            && aRecord.state != rig::StoredReadState::Corrupt;
+    } catch (...) { return false; }
+}
+} // namespace
 #include "ReceiptFramedTraversal.hxx"
 #include "ReceiptCatalogBinaryDriver.hxx"
 #include "RetainedSolidBinaryDriver.hxx"
@@ -4915,9 +5158,55 @@ bool CollectValidatedPatternByteArrayRoles(
                 theAdmittedRecords.insert(anAttribute.get());
             }
         }
+        // Reserved ABR1 attachment-rig carrier (F4-S2): the one
+        // document-main-label record is admitted only through its own typed
+        // proof on this same live document -- exact main label, exactly the
+        // reserved attribute role, TDataStd_ByteArray type, lower bound 0,
+        // upper bound within the 65,536-byte store envelope, delta mode false
+        // and a canonical checksum-framed ABR1 v1 decode/re-encode round-trip.
+        // The admitted pointer is the found attribute itself, so every
+        // subsequent census consumer checks the identical validated identity.
+        // A misplaced child-label or duplicate ABR1 byte array is never
+        // admitted here and stays rejected by the all-label census below.
+        Handle(TDF_Attribute) aRigAttribute;
+        if (theDocument->Main().FindAttribute(
+                core3d::attachment_rig::AttachmentRigAttributeID(),
+                aRigAttribute)) {
+            const Handle(TDataStd_ByteArray) aRigArray =
+                Handle(TDataStd_ByteArray)::DownCast(aRigAttribute);
+            if (aRigArray.IsNull()
+                || aRigArray->ID()
+                    != core3d::attachment_rig::AttachmentRigAttributeID()
+                || aRigArray->Lower() != 0
+                || aRigArray->Upper() < 0
+                || static_cast<Standard_Size>(aRigArray->Upper()) + 1
+                    > core3d::attachment_rig::kMaxStoredABR1Bytes
+                || aRigArray->GetDelta()) {
+                return false;
+            }
+            std::vector<std::uint8_t> aRigBytes;
+            aRigBytes.reserve(
+                static_cast<Standard_Size>(aRigArray->Upper()) + 1);
+            for (Standard_Integer anIndex = 0;
+                 anIndex <= aRigArray->Upper(); ++anIndex) {
+                aRigBytes.push_back(aRigArray->Value(anIndex));
+            }
+            core3d::attachment_rig::Metadata aRigValue;
+            std::vector<std::uint8_t> aRigCanonical;
+            std::string aRigRefusal;
+            if (!core3d::attachment_rig::DecodeABR1(
+                    aRigBytes, aRigValue, aRigRefusal)
+                || !core3d::attachment_rig::EncodeABR1(
+                    aRigValue, aRigCanonical, aRigRefusal)
+                || aRigCanonical != aRigBytes) {
+                return false;
+            }
+            theAdmittedRecords.insert(aRigArray.get());
+        }
         // Identity-based all-label placement: a byte array is admitted only as
-        // an authored-frame identifier or an exact validated tag-71/73/72
-        // pattern record. This scan runs in every registration, including the
+        // an authored-frame identifier, an exact validated tag-71/73/72
+        // pattern record, or the proved main-label ABR1 carrier above. This
+        // scan runs in every registration, including the
         // DEBUG custom-frame reader, independent of myValidateFrameOwners.
         for (const TDF_Label& aLabel : someLabels) {
             for (TDF_AttributeIterator anAttributeIterator(aLabel);
@@ -5262,9 +5551,36 @@ public:
             if (!(theSource >> anIdentifier)
                 || theSource.Position() != anEnd
                 || anIdentifier == TDataStd_ByteArray::GetID()
-                || anIdentifier
-                    != core3d::persistence::AuthoredFrameAttributeID()
                 || !theSource.SetPosition(aStart)) {
+                return Reject();
+            }
+            if (anIdentifier == core3d::attachment_rig::AttachmentRigAttributeID()) {
+                namespace rig = core3d::attachment_rig;
+                rig::Metadata aValue;
+                std::string aRefusal;
+                std::vector<std::uint8_t> aCanonical;
+                if (aCount > rig::kMaxStoredABR1Bytes
+                    || !rig::DecodeABR1(someBytes, aValue, aRefusal)
+                    || !rig::EncodeABR1(aValue, aCanonical, aRefusal)
+                    || aCanonical != someBytes
+                    || !BinMDataStd_ByteArrayDriver::Paste(
+                        theSource, theTarget, theRelocationTable)) {
+                    return Reject();
+                }
+                const Handle(TDataStd_ByteArray) anAttribute =
+                    Handle(TDataStd_ByteArray)::DownCast(theTarget);
+                if (anAttribute.IsNull()
+                    || anAttribute->ID() != rig::AttachmentRigAttributeID()
+                    || anAttribute->Lower() != 0
+                    || anAttribute->Upper() != anUpper
+                    || anAttribute->GetDelta()
+                    || theSource.Position() != anEnd) {
+                    return Reject();
+                }
+                return Standard_True;
+            }
+            if (anIdentifier
+                != core3d::persistence::AuthoredFrameAttributeID()) {
                 return Reject();
             }
             return myFrameDriver->Paste(
@@ -5754,6 +6070,12 @@ public:
             if(myReaderStatus==PCDM_RS_OK
                 &&!Core3DValidatePaintedAtlasBakeDocument(
                     Handle(TDocStd_Document)::DownCast(theDocument)))rejectTypes();
+            // F4 ABR1 uses an admitted standard byte-array carrier, so its
+            // exact main-label role and canonical payload are checked on
+            // every safe open, including documents where the record is absent.
+            if (myReaderStatus == PCDM_RS_OK
+                && !ValidateAttachmentRigDocument(
+                    Handle(TDocStd_Document)::DownCast(theDocument))) rejectTypes();
             if (myReaderStatus == PCDM_RS_OK) {
                 std::vector<core3d::feature_pattern_child::PairedRecord> pairs;
                 if (core3d::feature_pattern_child::ReadPairs(
@@ -18836,6 +19158,75 @@ Standard_Boolean OcctDocument::SettleVariableRadiusFilletHistoryOnPrior() noexce
     return SettleTreatmentHistoryCompanionOnPrior();
 }
 
+Standard_Boolean OcctDocument::ReadAttachmentRigMetadata(
+    core3d::attachment_rig::StoredRecord& record) const noexcept {
+    record = {};
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()) return Standard_False;
+        return ReadAttachmentRigStoredRecord(myOcafDoc, record)
+            ? Standard_True : Standard_False;
+    } catch (...) { record = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::StageAttachmentRigMetadata(
+    core3d::native_opening::CommandLease& lease,
+    const core3d::attachment_rig::StoredRecord& before,
+    const std::vector<std::uint8_t>& candidate,
+    Standard_Boolean remove,
+    core3d::attachment_rig::StoredRecord& record) noexcept {
+    namespace rig = core3d::attachment_rig;
+    record = {};
+    try {
+        OCC_CATCH_SIGNALS
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || !ExactLeaseOwns(myOcafDoc, lease) || !before.readable())
+            return Standard_False;
+        rig::StoredRecord current;
+        if (!ReadAttachmentRigStoredRecord(myOcafDoc, current)
+            || current.state != before.state || current.bytes != before.bytes)
+            return Standard_False;
+        if (remove) {
+            if (current.state != rig::StoredReadState::Present
+                || !myOcafDoc->Main().ForgetAttribute(
+                    rig::AttachmentRigAttributeID())) return Standard_False;
+        } else {
+            rig::Metadata value;
+            std::string refusal;
+            std::vector<std::uint8_t> canonical;
+            if (candidate.empty() || candidate.size() > rig::kMaxStoredABR1Bytes
+                || !rig::DecodeABR1(candidate, value, refusal)
+                || !rig::EncodeABR1(value, canonical, refusal)
+                || canonical != candidate) return Standard_False;
+            const Handle(TDataStd_ByteArray) attribute =
+                TDataStd_ByteArray::Set(myOcafDoc->Main(),
+                    rig::AttachmentRigAttributeID(), 0,
+                    Standard_Integer(candidate.size()) - 1, Standard_False);
+            if (attribute.IsNull()) return Standard_False;
+            for (std::size_t index = 0; index < candidate.size(); ++index)
+                attribute->SetValue(Standard_Integer(index), candidate[index]);
+        }
+        if (!ReadAttachmentRigStoredRecord(myOcafDoc, record)
+            || (remove && record.state != rig::StoredReadState::Absent)
+            || (!remove && (record.state != rig::StoredReadState::Present
+                || record.bytes != candidate))) {
+            record = {};
+            return Standard_False;
+        }
+        return Standard_True;
+    } catch (...) { record = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::FinalizeAttachmentRigHistory() noexcept {
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || myOcafDoc->HasOpenCommand() || !myNativeAuthority)
+            return Standard_False;
+        myNativeAuthority->HistoryBoundary(myOcafDoc.get());
+        NotifyChanges();
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
 Standard_Boolean OcctDocument::StageFeaturePatternPair(
     core3d::native_opening::CommandLease& lease,
     const TDF_Label& host, const TDF_Label& baselineRecipe,
@@ -22112,6 +22503,7 @@ std::string OcctDocument::save(
         || !ValidateLayerGraphRoles(myOcafDoc)
         || !Core3DValidateFaceImageDocument(myOcafDoc)
         || !Core3DValidatePaintedAtlasBakeDocument(myOcafDoc)
+        || !ValidateAttachmentRigDocument(myOcafDoc)
         || !Core3DValidateOwnedFrameUsage(myOcafDoc,frameBytes)) {
         return {};
     }
