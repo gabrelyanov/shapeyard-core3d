@@ -65,6 +65,7 @@ struct Cut475Scope {
 #include "VariableRadiusFilletNativeOwner.hxx"
 #include "AttachmentRigMetadataPersistence.hxx"
 #include "ExportMeshDecimationNativeOwner.hxx"
+#include "LODSetPersistence.hxx"
 #include "RetainedEdgeTreatmentBuild.hxx"
 #include "RetainedEdgeTreatmentR2Build.hxx"
 #include "RetainedEdgeTreatmentSaveView.hxx"
@@ -1632,6 +1633,99 @@ bool RestoreTreatmentTransientFlags(const TopoDS_Shape& shape,
     } catch (...) { return false; }
 }
 
+// E5 replay measures complete semantic captures and the exact union of
+// owner/C1 naming roots. It extends a source companion; removal semantics
+// and the source's existing single-root before/after evidence are untouched.
+bool CaptureTextReliefReplaySide(const OcctDocument& owner,
+    const std::vector<core3d::text_relief::UUID>& features,
+    std::vector<TDF_Label>& roots,
+    treatment_history::TextReliefReplaySide& output) noexcept {
+    roots.clear(); output = {};
+    try {
+        if (features.empty() || features.size() > core3d::text_relief::persistence::MaximumRecords)
+            return false;
+        treatment_history::TextReliefReplaySide side;
+        std::set<std::string> entries;
+        const auto appendRoot = [&](const TDF_Label& root) -> bool {
+            if (root.IsNull() || root.Data() != owner.Document()->GetData()) return false;
+            TCollection_AsciiString entry; TDF_Tool::Entry(root, entry);
+            if (!entries.insert(entry.ToCString()).second
+                || roots.size() >= kTreatmentHistoryMaxNamingLabels) return false;
+            roots.push_back(root); return true;
+        };
+        for (const auto& feature : features) {
+            OcctTextReliefCapture capture;
+            if (!owner.ReadTextReliefExact(feature, capture)
+                || !appendRoot(capture.record.owner)) return false;
+            for (const auto& curve : capture.curves)
+                if (!appendRoot(curve.record.owner)) return false;
+            side.owners.push_back(std::move(capture));
+        }
+        if (!CaptureMultiRootRemovalNaming(roots, side.naming)
+            || side.naming.empty()) return false;
+        std::size_t totalFlags = 0;
+        for (const auto& root : roots) {
+            const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(root);
+            std::vector<treatment_history::FlagState> flags;
+            if (!CaptureTreatmentTransientFlags(shape, flags)
+                || flags.size() > kTreatmentHistoryMaxFlagShapes - totalFlags) return false;
+            totalFlags += flags.size();
+            side.shapes.push_back(shape); side.flags.push_back(std::move(flags));
+        }
+        output = std::move(side); return true;
+    } catch (...) { roots.clear(); output = {}; return false; }
+}
+
+bool ProveTextReliefReplaySide(const OcctDocument& owner,
+    const treatment_history::TextReliefReplayMembers& members,
+    const treatment_history::TextReliefReplaySide& expected,
+    bool namingScalarsAndFlags) noexcept {
+    try {
+        std::vector<core3d::text_relief::UUID> features;
+        for (const auto& capture : expected.owners) {
+            if (!capture.record.payload) return false;
+            features.push_back(capture.record.payload->value.feature);
+        }
+        treatment_history::TextReliefReplaySide actual;
+        std::vector<TDF_Label> roots;
+        if (!CaptureTextReliefReplaySide(owner, features, roots, actual)
+            || roots.size() != members.roots.size()
+            || expected.owners.size() != actual.owners.size()
+            || expected.shapes.size() != roots.size()
+            || expected.flags.size() != roots.size()
+            || !SameTreatmentNamingSet(expected.naming, actual.naming,
+                                        namingScalarsAndFlags)) return false;
+        for (std::size_t index = 0; index < roots.size(); ++index)
+            if (!roots[index].IsEqual(members.roots[index])
+                || !actual.shapes[index].IsEqual(expected.shapes[index])
+                || (namingScalarsAndFlags
+                    && !CheckMultiRootTransientFlags(actual.shapes[index],
+                                                     expected.flags[index]))) return false;
+        for (std::size_t index = 0; index < expected.owners.size(); ++index)
+            if (!expected.owners[index].IsEqual(actual.owners[index])) return false;
+        return true;
+    } catch (...) { return false; }
+}
+
+bool RestoreTextReliefReplayScalars(const OcctDocument& owner,
+    const treatment_history::TextReliefReplayMembers& members,
+    const treatment_history::TextReliefReplaySide& side) noexcept {
+    try {
+        // Caller has proved the source and every member's semantic state
+        // after the real OCAF abort/Undo/Redo, before changing any scalar.
+        for (const auto& state : side.naming) {
+            Handle(TNaming_NamedShape) naming;
+            if (!state.label.FindAttribute(TNaming_NamedShape::GetID(), naming)
+                || naming.IsNull()) return false;
+            naming->SetVersion(state.version);
+        }
+        for (std::size_t index = 0; index < members.roots.size(); ++index)
+            if (!RestoreMultiRootTransientFlags(side.shapes[index], side.flags[index]))
+                return false;
+        return ProveTextReliefReplaySide(owner, members, side, true);
+    } catch (...) { return false; }
+}
+
 bool CaptureTreatmentSourceBytes(const Handle(TDocStd_Document)& document, const TDF_Label& owner,
     std::vector<std::uint8_t>& bytes) noexcept {
     bytes.clear();
@@ -2851,6 +2945,14 @@ const Standard_GUID& core3d::export_decimation::F2DerivativeStoreAttributeID() n
     return anID;
 }
 
+const Standard_GUID& core3d::lod_set_persistence::LODSetStoreAttributeID() noexcept
+{
+    // F3-S2-SYLS-OWNER: one collision-censused document-main byte-array role.
+    static const Standard_GUID anID(
+        "F3A99275-8327-4F34-97CB-4067409303A1");
+    return anID;
+}
+
 namespace {
 bool ReadAttachmentRigStoredRecord(
     const Handle(TDocStd_Document)& theDocument,
@@ -2954,6 +3056,7 @@ bool ValidateAttachmentRigDocument(
 #include "LoftCorrespondencePersistence.hxx"
 #include "TextReliefPersistence.hxx"
 #include "TextReliefNativeOwner.hxx"
+#include "TextReliefBuild.hxx"
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <Precision.hxx>
@@ -5348,6 +5451,37 @@ bool CollectValidatedPatternByteArrayRoles(
             }
             theAdmittedRecords.insert(aF2Array.get());
         }
+        // Reserved SYLS/1 retained-LOD-set carrier. Admission is fail-closed:
+        // main label, exact role, bounded bytes, canonical decode/re-encode and
+        // the live document UUID must all agree before the pointer is admitted.
+        Handle(TDF_Attribute) aLODAttribute;
+        if (theDocument->Main().FindAttribute(
+                core3d::lod_set_persistence::LODSetStoreAttributeID(),
+                aLODAttribute)) {
+            namespace syls = core3d::lod_set_persistence;
+            const Handle(TDataStd_ByteArray) anArray =
+                Handle(TDataStd_ByteArray)::DownCast(aLODAttribute);
+            if (anArray.IsNull() || anArray->ID() != syls::LODSetStoreAttributeID()
+                || anArray->Lower() != 0 || anArray->Upper() < 0
+                || static_cast<Standard_Size>(anArray->Upper()) + 1
+                    > syls::kMaximumRecordBytes || anArray->GetDelta()) return false;
+            std::vector<std::uint8_t> bytes;
+            bytes.reserve(static_cast<Standard_Size>(anArray->Upper()) + 1);
+            for (Standard_Integer index = 0; index <= anArray->Upper(); ++index)
+                bytes.push_back(anArray->Value(index));
+            syls::Store store; std::vector<std::uint8_t> canonical;
+            Handle(TDataStd_AsciiString) documentIdentifier;
+            syls::UUID bound{};
+            if (!syls::DecodeStore(bytes, store) || !syls::EncodeStore(store, canonical)
+                || canonical != bytes || !theDocument->Main().FindAttribute(
+                    DocumentIdentifierAttributeID(), documentIdentifier)
+                || documentIdentifier.IsNull()
+                || !core3d::export_decimation::UUIDFromText(
+                    std::string(documentIdentifier->Get().ToCString()
+                        ? documentIdentifier->Get().ToCString() : ""), bound)
+                || bound != store.documentIdentifier) return false;
+            theAdmittedRecords.insert(anArray.get());
+        }
         // Identity-based all-label placement: a byte array is admitted only as
         // an authored-frame identifier, an exact validated tag-71/73/72
         // pattern record, or the proved main-label ABR1 carrier above. This
@@ -5754,6 +5888,23 @@ public:
                     || theSource.Position() != anEnd) {
                     return Reject();
                 }
+                return Standard_True;
+            }
+            if (anIdentifier
+                == core3d::lod_set_persistence::LODSetStoreAttributeID()) {
+                namespace syls = core3d::lod_set_persistence;
+                syls::Store store; std::vector<std::uint8_t> canonical;
+                if (aCount > syls::kMaximumRecordBytes
+                    || !syls::DecodeStore(someBytes, store)
+                    || !syls::EncodeStore(store, canonical) || canonical != someBytes
+                    || !BinMDataStd_ByteArrayDriver::Paste(
+                        theSource, theTarget, theRelocationTable)) return Reject();
+                const Handle(TDataStd_ByteArray) attribute =
+                    Handle(TDataStd_ByteArray)::DownCast(theTarget);
+                if (attribute.IsNull() || attribute->ID() != syls::LODSetStoreAttributeID()
+                    || attribute->Lower() != 0 || attribute->Upper() != anUpper
+                    || attribute->GetDelta() || theSource.Position() != anEnd)
+                    return Reject();
                 return Standard_True;
             }
             if (anIdentifier
@@ -18831,6 +18982,134 @@ Standard_Boolean OcctDocument::ReadFeaturePatternPair(
 
 namespace core3d::dependent_replay {
 namespace {
+using E5Frame = bounded_curve::Frame;
+
+bool E5CanonicalFaceFrame(const TopoDS_Face& face, const UUID& identifier,
+                          std::uint64_t revision, E5Frame& frame) noexcept {
+    frame = {};
+    try {
+        BRepAdaptor_Surface surface(face);
+        if (surface.GetType() != GeomAbs_Plane) return false;
+        gp_Dir outward = surface.Plane().Axis().Direction();
+        if (face.Orientation() == TopAbs_REVERSED) outward.Reverse();
+        GProp_GProps properties;
+        BRepGProp::SurfaceProperties(face, properties);
+        const gp_Pnt centre = properties.CentreOfMass();
+        const double nx = outward.X(), ny = outward.Y(), nz = outward.Z();
+        const double axes[3][3] = {{1,0,0},{0,1,0},{0,0,1}};
+        int chosen = 0; double least = 2;
+        for (int index = 0; index < 3; ++index) {
+            const double parallel = std::abs(axes[index][0] * nx
+                + axes[index][1] * ny + axes[index][2] * nz);
+            if (parallel < least) { least = parallel; chosen = index; }
+        }
+        const double along = axes[chosen][0] * nx + axes[chosen][1] * ny
+            + axes[chosen][2] * nz;
+        double xx = axes[chosen][0] - nx * along;
+        double xy = axes[chosen][1] - ny * along;
+        double xz = axes[chosen][2] - nz * along;
+        const double norm = std::sqrt(xx * xx + xy * xy + xz * xz);
+        if (!std::isfinite(norm) || norm < 1e-9) return false;
+        xx /= norm; xy /= norm; xz /= norm;
+        frame.identifier = identifier; frame.revision = revision;
+        frame.origin = {{centre.X(), centre.Y(), centre.Z()}};
+        frame.xAxis = {{xx, xy, xz}};
+        frame.yAxis = {{ny * xz - nz * xy, nz * xx - nx * xz,
+                        nx * xy - ny * xx}};
+        frame.zAxis = {{nx, ny, nz}};
+        return bounded_curve::ValidateFrame(frame) == bounded_curve::Refusal::None;
+    } catch (...) { frame = {}; return false; }
+}
+
+text_relief::Digest E5SelectorProof(const std::string& document,
+    const std::string& entity, std::uint32_t topologyIndex,
+    const E5Frame& frame) noexcept {
+    text_relief::Digest digest{};
+    try {
+        CC_SHA256_CTX sha; CC_SHA256_Init(&sha);
+        CC_SHA256_Update(&sha, document.data(), CC_LONG(document.size()));
+        CC_SHA256_Update(&sha, entity.data(), CC_LONG(entity.size()));
+        CC_SHA256_Update(&sha, &topologyIndex, CC_LONG(sizeof(topologyIndex)));
+        CC_SHA256_Update(&sha, frame.identifier.data(),
+                         CC_LONG(frame.identifier.size()));
+        CC_SHA256_Update(&sha, &frame.revision, CC_LONG(sizeof(frame.revision)));
+        for (const auto& axis : {frame.origin, frame.xAxis, frame.yAxis, frame.zAxis})
+            for (double component : axis) {
+                std::uint64_t bits = 0; std::memcpy(&bits, &component, sizeof(bits));
+                CC_SHA256_Update(&sha, &bits, CC_LONG(sizeof(bits)));
+            }
+        CC_SHA256_Final(digest.data(), &sha);
+        if (!retained_recipe::Nonzero(digest)) digest[0] = 1;
+    } catch (...) { digest = {}; }
+    return digest;
+}
+
+std::size_t E5SubshapeCount(const TopoDS_Shape& shape) noexcept {
+    try {
+        TopTools_IndexedMapOfShape map; TopExp::MapShapes(shape, map);
+        return std::size_t(map.Extent());
+    } catch (...) { return 0; }
+}
+
+bool E5ShapeDigest(const TopoDS_Shape& shape, text_relief::Digest& digest,
+                   std::vector<std::uint8_t>* bytes = nullptr) noexcept {
+    digest = {};
+    try {
+        const TopoDS_Solid normalized = text_relief::detail::RaisedHostSolid(shape);
+        if (normalized.IsNull()) return false;
+        std::string exact;
+        if (!retained_part_boolean::ExactShapeBytes(normalized, exact) || exact.empty())
+            return false;
+        std::vector<std::uint8_t> value(exact.begin(), exact.end());
+        if (!bounded_curve::Hash(value, 64 * text_relief::MaximumRecipeBytes,
+                                 digest)) return false;
+        if (bytes) *bytes = std::move(value);
+        return true;
+    } catch (...) { digest = {}; return false; }
+}
+
+bool E5HostShape(OcctDocument& owner, const UUID& entity,
+                 TopoDS_Shape& shape) noexcept {
+    shape.Nullify();
+    try {
+        const auto document = owner.Document();
+        if (document.IsNull()) return false;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        TDF_LabelSequence roots; shapes->GetFreeShapes(roots);
+        const std::string expected = retained_solid::UUIDText(entity);
+        unsigned matches = 0;
+        for (Standard_Integer index = 1; index <= roots.Length(); ++index)
+            if (owner.EntityIdentifierForLabel(roots.Value(index)) == expected) {
+                shape = XCAFDoc_ShapeTool::GetShape(roots.Value(index)); ++matches;
+            }
+        return matches == 1 && !shape.IsNull();
+    } catch (...) { shape.Nullify(); return false; }
+}
+
+std::size_t E5BoundaryEdges(const TopoDS_Face& face) noexcept {
+    std::size_t count = 0;
+    try {
+        for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) ++count;
+    } catch (...) { return 0; }
+    return count;
+}
+
+std::size_t E5BoundaryWires(const TopoDS_Face& face) noexcept {
+    std::size_t count = 0;
+    try {
+        for (TopExp_Explorer it(face, TopAbs_WIRE); it.More(); it.Next()) ++count;
+    } catch (...) { return 0; }
+    return count;
+}
+
+bool E5SameVector(const std::array<double, 3>& left,
+                  const std::array<double, 3>& right,
+                  double tolerance = 1e-9) noexcept {
+    for (unsigned index = 0; index < 3; ++index)
+        if (std::abs(left[index] - right[index]) > tolerance) return false;
+    return true;
+}
+
 class PreparedTextReliefRemoval final : public PreparedReplay {
 public:
     PreparedTextReliefRemoval(OcctTextReliefCapture capture,
@@ -18878,7 +19157,7 @@ private:
 } // namespace
 
 Refusal PrepareTextReliefE5Replay(OcctDocument& owner,
-    const Dependency& dependency, Mutation mutation, const Candidate&,
+    const Dependency& dependency, Mutation mutation, const Candidate& candidate,
     const std::shared_ptr<native_opening::Context>& context,
     std::shared_ptr<const PreparedReplay>& output) noexcept {
     output.reset();
@@ -18892,12 +19171,188 @@ Refusal PrepareTextReliefE5Replay(OcctDocument& owner,
             || !capture.record.label.IsEqual(dependency.recordLabel)
             || capture.record.payload->bytes != dependency.canonicalRecordBytes)
             return Refusal::StaleClosure;
-        // Raised host reattachment is intentionally supplied by S3-R2. S2
-        // admits the family and its real removal replay but refuses to replace
-        // with stale geometry or a guessed face.
-        if (mutation != Mutation::Remove) return Refusal::UnsupportedDescendant;
-        output = std::make_shared<PreparedTextReliefRemoval>(
-            std::move(capture), context);
+        if (mutation == Mutation::Remove) {
+            output = std::make_shared<PreparedTextReliefRemoval>(
+                std::move(capture), context);
+            return Refusal::None;
+        }
+        if (mutation != Mutation::Replace || candidate.resultShape.IsNull()
+            || owner.Document()->HasOpenCommand()
+            || !owner.TextReliefReplayMembersExclusive(capture))
+            return Refusal::UnsupportedDescendant;
+
+        namespace tr = text_relief;
+        namespace bc = bounded_curve;
+        const tr::AuthoredRecord& prior = capture.record.payload->value;
+        TopoDS_Shape committedHost;
+        tr::Digest committedDigest{};
+        if (prior.mode != tr::AuthoredMode::Raised
+            || dependency.inputEntity != prior.host.entity
+            || !E5HostShape(owner, prior.host.entity, committedHost)
+            || !E5ShapeDigest(committedHost, committedDigest)
+            || committedDigest != prior.host.shapeDigest)
+            return Refusal::StaleClosure;
+
+        E5Frame stored;
+        stored.identifier = prior.host.frame;
+        stored.revision = prior.host.frameRevision;
+        stored.origin = prior.host.origin; stored.xAxis = prior.host.xAxis;
+        stored.yAxis = prior.host.yAxis; stored.zAxis = prior.host.zAxis;
+        if (bc::ValidateFrame(stored) != bc::Refusal::None
+            || prior.host.selectorProof.size() != tr::Digest{}.size())
+            return Refusal::MissingRecipe;
+
+        // Recover the committed topology index only by reproducing its
+        // persisted selector proof, then independently re-prove that face's
+        // canonical plane/frame. An index alone is never accepted.
+        TopTools_IndexedMapOfShape oldFaces;
+        TopExp::MapShapes(committedHost, TopAbs_FACE, oldFaces);
+        TopoDS_Face oldFace; std::uint32_t oldIndex = 0; unsigned oldMatches = 0;
+        for (Standard_Integer index = 1; index <= oldFaces.Extent(); ++index) {
+            const auto proof = E5SelectorProof(owner.DocumentIdentifier(),
+                retained_solid::UUIDText(prior.host.entity),
+                std::uint32_t(index - 1), stored);
+            if (!std::equal(proof.begin(), proof.end(),
+                            prior.host.selectorProof.begin())) continue;
+            E5Frame canonical;
+            if (!E5CanonicalFaceFrame(TopoDS::Face(oldFaces.FindKey(index)),
+                    stored.identifier, stored.revision, canonical)
+                || !E5SameVector(canonical.origin, stored.origin, 1e-7)
+                || !E5SameVector(canonical.xAxis, stored.xAxis)
+                || !E5SameVector(canonical.yAxis, stored.yAxis)
+                || !E5SameVector(canonical.zAxis, stored.zAxis)) continue;
+            oldFace = TopoDS::Face(oldFaces.FindKey(index));
+            oldIndex = std::uint32_t(index - 1); ++oldMatches;
+        }
+        if (oldMatches != 1 || oldFace.IsNull()) return Refusal::StaleClosure;
+
+        const std::size_t oldEdges = E5BoundaryEdges(oldFace);
+        const std::size_t oldWires = E5BoundaryWires(oldFace);
+        if (oldEdges < 3 || oldEdges > 64 || oldWires == 0) return Refusal::MissingRecipe;
+        TopTools_IndexedMapOfShape nextFaces;
+        TopExp::MapShapes(candidate.resultShape, TopAbs_FACE, nextFaces);
+        TopoDS_Face nextFace; E5Frame nextFrame; std::uint32_t nextIndex = 0;
+        unsigned nextMatches = 0;
+        if (stored.revision == UINT64_MAX) return Refusal::MissingRecipe;
+        for (Standard_Integer index = 1; index <= nextFaces.Extent(); ++index) {
+            const TopoDS_Face face = TopoDS::Face(nextFaces.FindKey(index));
+            E5Frame frame;
+            if (E5BoundaryEdges(face) != oldEdges
+                || E5BoundaryWires(face) != oldWires
+                || !E5CanonicalFaceFrame(face, stored.identifier,
+                                          stored.revision + 1, frame)
+                || !E5SameVector(frame.zAxis, stored.zAxis)) continue;
+            nextFace = face; nextFrame = frame;
+            nextIndex = std::uint32_t(index - 1); ++nextMatches;
+        }
+        // Zero is a lost face; more than one is ambiguous. Neither may fall
+        // back to proximity, area rank, or a surviving topology ordinal.
+        if (nextMatches != 1 || nextFace.IsNull())
+            return nextMatches ? Refusal::UnsupportedDescendant
+                               : Refusal::StaleClosure;
+
+        tr::Digest nextHostDigest{};
+        std::vector<std::uint8_t> nextHostBytes;
+        if (!E5ShapeDigest(candidate.resultShape, nextHostDigest, &nextHostBytes))
+            return Refusal::MissingRecipe;
+
+        std::vector<bc::PersistedValue> persisted;
+        std::vector<bc::DetachedWire> detached;
+        std::vector<tr::CurveRecord> buildCurves;
+        persisted.reserve(capture.curves.size());
+        detached.reserve(capture.curves.size());
+        buildCurves.reserve(capture.curves.size());
+        tr::AuthoredRecord refreshed = prior;
+        refreshed.revision += 1;
+        refreshed.host.frameRevision = nextFrame.revision;
+        refreshed.host.origin = nextFrame.origin;
+        refreshed.host.xAxis = nextFrame.xAxis;
+        refreshed.host.yAxis = nextFrame.yAxis;
+        refreshed.host.zAxis = nextFrame.zAxis;
+        refreshed.host.shapeDigest = nextHostDigest;
+        const auto proof = E5SelectorProof(owner.DocumentIdentifier(),
+            retained_solid::UUIDText(prior.host.entity), nextIndex, nextFrame);
+        refreshed.host.selectorProof.assign(proof.begin(), proof.end());
+        const char *domains[] = {"source", "geometry", "placement", "material", "group"};
+        tr::Digest *commitments[] = {&refreshed.host.sourceCommitment,
+            &refreshed.host.geometryCommitment, &refreshed.host.placementCommitment,
+            &refreshed.host.materialCommitment, &refreshed.host.groupCommitment};
+        for (unsigned domain = 0; domain < 5; ++domain) {
+            std::vector<std::uint8_t> material(nextHostBytes);
+            material.insert(material.end(), domains[domain],
+                            domains[domain] + std::strlen(domains[domain]));
+            if (!bc::Hash(material, 64 * tr::MaximumRecipeBytes,
+                          *commitments[domain])) return Refusal::MissingRecipe;
+        }
+        refreshed.curves.clear();
+        for (std::size_t index = 0; index < capture.curves.size(); ++index) {
+            bc::PersistedValue value = capture.curves[index].persisted;
+            if (value.ownerState.definitionRevision == UINT64_MAX)
+                return Refusal::MissingRecipe;
+            value.value.definition.frame = nextFrame;
+            ++value.ownerState.definitionRevision;
+            std::vector<std::uint8_t> bytes;
+            tr::Digest digest{};
+            if (!bc::Encode(value.value, bytes)
+                || !bc::Hash(bytes, bc::MaximumDefinitionBytes, digest))
+                return Refusal::MissingRecipe;
+            value.ownerState.canonicalDefinitionDigest = digest;
+            bc::DetachedWire wire;
+            if (bc::BuildWire(value, wire) != bc::BuildRefusal::None)
+                return Refusal::MissingRecipe;
+            refreshed.curves.push_back({value.value.feature, digest});
+            buildCurves.push_back({prior.loops.empty() ? 0 : prior.loops.front().component,
+                0, index, value.value, bytes});
+            persisted.push_back(std::move(value));
+            detached.push_back(std::move(wire));
+        }
+        std::vector<tr::ContourRecord> contours;
+        contours.reserve(prior.loops.size());
+        for (const auto& loop : prior.loops)
+            contours.push_back({loop.component, loop.contour,
+                                loop.firstCurve, loop.curveCount});
+        // Restore exact component/contour/segment metadata for the builder.
+        for (const auto& loop : prior.loops)
+            for (std::size_t offset = 0; offset < loop.curveCount; ++offset) {
+                auto& curve = buildCurves[loop.firstCurve + offset];
+                curve.component = loop.component; curve.contour = loop.contour;
+                curve.segment = offset;
+            }
+        tr::RaisedBuildRequest request;
+        request.identitySeed = prior.constructionSeed;
+        request.frame = nextFrame; request.hostSolid = candidate.resultShape;
+        request.hostFace = nextFace;
+        request.host = {prior.host.entity, prior.host.faceFeature, prior.host.frame,
+                        nextFrame.revision, nextHostDigest};
+        request.curves = std::move(buildCurves);
+        request.contours = std::move(contours);
+        request.resourceSHA256 = prior.resourceSHA256;
+        request.depthMM = prior.depthMM;
+        request.metersPerLocalUnit = prior.metersPerLocalUnit;
+        retained_topology_budget::Counter budget;
+        std::atomic_bool cancelled{false};
+        tr::RaisedBuildResult built = tr::BuildDetachedRaisedRelief(
+            request, budget, cancelled);
+        if (built.refusal != tr::BuildRefusal::None || built.compound.IsNull())
+            return Refusal::MissingRecipe;
+        std::map<std::uint32_t, tr::UUID> identities;
+        for (const auto& component : prior.components)
+            identities.emplace(component.key, component.identifier);
+        refreshed.components.clear();
+        for (const auto& component : built.components) {
+            const auto identity = identities.find(component.component);
+            if (identity == identities.end()) return Refusal::MissingRecipe;
+            refreshed.components.push_back({identity->second, component.component});
+        }
+        if (refreshed.components.size() != prior.components.size()
+            || tr::Validate(refreshed) != tr::AuthoredRefusal::None)
+            return Refusal::MissingRecipe;
+        tr::owner::PreparedHostPair pair;
+        if (!tr::owner::PrepareHostPair(capture, persisted, std::move(detached),
+                std::move(refreshed), built.compound, pair))
+            return Refusal::MissingRecipe;
+        output = std::make_shared<tr::owner::PreparedHostReplay>(
+            std::move(capture), std::move(pair), context);
         return Refusal::None;
     } catch (...) { output.reset(); return Refusal::MissingRecipe; }
 }
@@ -19136,6 +19591,7 @@ core3d::dependent_replay::Refusal OcctDocument::PrepareDependentReplayPlan(
 
         std::size_t documentBytes = 0, memoryBytes = 0, topologyNodes = 0;
         plan->prepared_.reserve(plan->dependencies_.size());
+        plan->publicationDependencies_.reserve(plan->dependencies_.size());
         for (const Dependency& dependency : plan->dependencies_) {
             std::shared_ptr<const PreparedReplay> prepared;
             const Refusal refusal = preparer.prepare(*this, dependency, mutation, prepared);
@@ -19158,6 +19614,14 @@ core3d::dependent_replay::Refusal OcctDocument::PrepareDependentReplayPlan(
             if (!charge(prepared->topologyNodes(), limits.topologyNodes,
                         topologyNodes)) return Refusal::TopologyBudget;
             if (!prepared->openingCurrent(*this)) return Refusal::MissingRecipe;
+            DependencyPublication publication{dependency.family, dependency.feature,
+                dependency.resultEntity, dependency.memberIdentities};
+            if (!prepared->appendPublicationMembers(publication.memberIdentities))
+                return Refusal::UnsupportedDescendant;
+            if (!charge(sizeof(DependencyPublication)
+                    + publication.memberIdentities.size() * sizeof(UUID),
+                    limits.memoryBytes, memoryBytes)) return Refusal::MemoryBudget;
+            plan->publicationDependencies_.push_back(std::move(publication));
             plan->prepared_.push_back(std::move(prepared));
         }
         // E3 face-image attachment of the edited owner (278b portion 4b):
@@ -19233,8 +19697,42 @@ core3d::dependent_replay::Refusal OcctDocument::StageDependentReplayPlan(
             plan.authorizedEntityIdentifiers_.begin(),
             plan.authorizedEntityIdentifiers_.end());
         const auto clear = [&]() noexcept { myDependentReplayAuthorization.clear(); };
+        std::vector<core3d::text_relief::UUID> e5Features;
+        if (plan.mutation_ == Mutation::Replace)
+            for (const auto& dependency : plan.dependencies_)
+                if (dependency.family == Family::TextReliefE5)
+                    e5Features.push_back(dependency.feature);
+        std::shared_ptr<core3d::treatment_history::TextReliefReplayMembers> members;
+        if (!e5Features.empty()) {
+            members = std::make_shared<core3d::treatment_history::TextReliefReplayMembers>();
+            for (const auto& prepared : plan.prepared_) {
+                if (prepared->family() != Family::TextReliefE5) continue;
+                const auto* e5 = dynamic_cast<const core3d::text_relief::owner::PreparedHostReplay*>(
+                    prepared.get());
+                if (!e5 || !e5->sourceContext()
+                    || (members->recoveryContext
+                        && members->recoveryContext != e5->sourceContext())) {
+                    clear(); return Refusal::StaleClosure;
+                }
+                members->recoveryContext = e5->sourceContext();
+            }
+            if (!CaptureTextReliefReplaySide(*this, e5Features,
+                                            members->roots, members->before)) {
+                clear(); return Refusal::StaleClosure;
+            }
+        }
         if (!sourceMutation.stage(*this, lease)) {
             clear(); return Refusal::SourceStageFailed;
+        }
+        if (members) {
+            if (!myPendingTreatmentCompanion || myPendingTreatmentCompanion->multiRootRemoval
+                || myPendingTreatmentCompanion->textReliefReplay) {
+                clear(); return Refusal::DependentStageFailed;
+            }
+            myPendingTreatmentCompanion->textReliefReplay = members;
+            if (!ProveTextReliefReplaySide(*this, *members, members->before, true)) {
+                clear(); return Refusal::StaleClosure;
+            }
         }
         for (const auto& prepared : plan.prepared_) {
             if (!prepared->stage(*this, lease)) {
@@ -19254,6 +19752,20 @@ core3d::dependent_replay::Refusal OcctDocument::StageDependentReplayPlan(
                 plan.faceImageReplay_->cancel();
                 clear(); return Refusal::DependentStageFailed;
             }
+        }
+        if (members) {
+            std::vector<TDF_Label> afterRoots;
+            if (ReadDependentReplayPlan(plan) != Refusal::None
+                || !CaptureTextReliefReplaySide(*this, e5Features,
+                                               afterRoots, members->after)
+                || afterRoots.size() != members->roots.size()) {
+                clear(); return Refusal::ReadbackFailed;
+            }
+            for (std::size_t index = 0; index < afterRoots.size(); ++index)
+                if (!afterRoots[index].IsEqual(members->roots[index])) {
+                    clear(); return Refusal::ReadbackFailed;
+                }
+            members->afterCaptured = true;
         }
         clear(); return Refusal::None;
     } catch (...) {
@@ -19462,6 +19974,12 @@ Standard_Boolean OcctDocument::ReadVariableRadiusFilletOwner(
                 expected.exact.visibility.object.object.label, capture)
             || !core3d::variable_radius_fillet::owner::SameCapture(
                 expected, capture)) {
+            if (myPendingTreatmentCompanion
+                && myPendingTreatmentCompanion->textReliefReplay
+                && !myOcafDoc.IsNull() && !myOcafDoc->HasOpenCommand()) {
+                const auto& context = myPendingTreatmentCompanion->textReliefReplay->recoveryContext;
+                if (context) context->armRecoveryAfterAbortedClose();
+            }
             capture = {}; return Standard_False;
         }
         return Standard_True;
@@ -19473,7 +19991,12 @@ Standard_Boolean OcctDocument::FinalizeVariableRadiusFilletHistory() noexcept {
 }
 
 Standard_Boolean OcctDocument::SettleVariableRadiusFilletHistoryOnPrior() noexcept {
-    return SettleTreatmentHistoryCompanionOnPrior();
+    const auto members = myPendingTreatmentCompanion
+        ? myPendingTreatmentCompanion->textReliefReplay : nullptr;
+    const bool settled = SettleTreatmentHistoryCompanionOnPrior();
+    if (!settled && members && members->recoveryContext)
+        members->recoveryContext->armRecoveryAfterAbortedClose();
+    return settled;
 }
 
 Standard_Boolean OcctDocument::ReadAttachmentRigMetadata(
@@ -19694,6 +20217,119 @@ Standard_Boolean OcctDocument::FinalizeF2DerivativeHistory() noexcept {
             return Standard_False;
         myNativeAuthority->HistoryBoundary(myOcafDoc.get());
         NotifyChanges();
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+namespace {
+bool ReadLODSetStoredRecord(
+    const Handle(TDocStd_Document)& document,
+    core3d::lod_set_persistence::StoreRead& record) noexcept {
+    namespace syls = core3d::lod_set_persistence;
+    record = {};
+    try {
+        OCC_CATCH_SIGNALS
+        if (document.IsNull() || document->GetData().IsNull()) {
+            record.occurrence = syls::StoreOccurrence::Corrupt;
+            record.refusal = "closed document"; return false;
+        }
+        Handle(TDF_Attribute) raw;
+        if (!document->Main().FindAttribute(syls::LODSetStoreAttributeID(), raw)) {
+            record.occurrence = syls::StoreOccurrence::Absent; return true;
+        }
+        const Handle(TDataStd_ByteArray) array = Handle(TDataStd_ByteArray)::DownCast(raw);
+        if (array.IsNull() || array->ID() != syls::LODSetStoreAttributeID()
+            || array->Lower() != 0 || array->Upper() < 0 || array->GetDelta()) {
+            record.occurrence = syls::StoreOccurrence::Corrupt;
+            record.refusal = "invalid SYLS role"; return true;
+        }
+        const std::size_t count = std::size_t(array->Upper()) + 1;
+        if (count == 0 || count > syls::kMaximumRecordBytes) {
+            record.occurrence = syls::StoreOccurrence::Corrupt;
+            record.refusal = "SYLS exceeds 65536-byte bound"; return true;
+        }
+        record.bytes.reserve(count);
+        for (Standard_Integer index = 0; index <= array->Upper(); ++index)
+            record.bytes.push_back(array->Value(index));
+        syls::Store store; std::vector<std::uint8_t> canonical;
+        if (!syls::DecodeStore(record.bytes, store)
+            || !syls::EncodeStore(store, canonical) || canonical != record.bytes) {
+            record.bytes.clear(); record.occurrence = syls::StoreOccurrence::Corrupt;
+            record.refusal = "noncanonical SYLS/1"; return true;
+        }
+        Handle(TDataStd_AsciiString) identifier; syls::UUID bound{};
+        if (!document->Main().FindAttribute(DocumentIdentifierAttributeID(), identifier)
+            || identifier.IsNull() || !core3d::export_decimation::UUIDFromText(
+                std::string(identifier->Get().ToCString()
+                    ? identifier->Get().ToCString() : ""), bound)
+            || bound != store.documentIdentifier) {
+            record.bytes.clear(); record.occurrence = syls::StoreOccurrence::Corrupt;
+            record.refusal = "foreign SYLS document binding"; return true;
+        }
+        record.occurrence = syls::StoreOccurrence::Present;
+        return true;
+    } catch (...) {
+        record = {}; record.occurrence = syls::StoreOccurrence::Corrupt;
+        record.refusal = "SYLS read exception"; return false;
+    }
+}
+} // namespace
+
+Standard_Boolean OcctDocument::ReadLODSetStore(
+    core3d::lod_set_persistence::StoreRead& record) const noexcept {
+    record = {};
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()) return Standard_False;
+        return ReadLODSetStoredRecord(myOcafDoc, record) ? Standard_True : Standard_False;
+    } catch (...) { record = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::StageLODSetStore(
+    const core3d::lod_set_persistence::StoreRead& before,
+    const std::vector<std::uint8_t>& candidate,
+    Standard_Boolean remove,
+    core3d::lod_set_persistence::StoreRead& record) noexcept {
+    namespace syls = core3d::lod_set_persistence;
+    record = {};
+    try {
+        OCC_CATCH_SIGNALS
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || !myOcafDoc->HasOpenCommand() || !before.readable()) return Standard_False;
+        syls::StoreRead current;
+        if (!ReadLODSetStoredRecord(myOcafDoc, current)
+            || !syls::SameStore(before, current)) return Standard_False;
+        if (remove) {
+            if (current.occurrence != syls::StoreOccurrence::Present
+                || !myOcafDoc->Main().ForgetAttribute(syls::LODSetStoreAttributeID()))
+                return Standard_False;
+        } else {
+            syls::Store store; std::vector<std::uint8_t> canonical;
+            if (candidate.empty() || candidate.size() > syls::kMaximumRecordBytes
+                || !syls::DecodeStore(candidate, store)
+                || !syls::EncodeStore(store, canonical) || canonical != candidate)
+                return Standard_False;
+            const Handle(TDataStd_ByteArray) attribute = TDataStd_ByteArray::Set(
+                myOcafDoc->Main(), syls::LODSetStoreAttributeID(), 0,
+                Standard_Integer(candidate.size()) - 1, Standard_False);
+            if (attribute.IsNull()) return Standard_False;
+            for (std::size_t index = 0; index < candidate.size(); ++index)
+                attribute->SetValue(Standard_Integer(index), candidate[index]);
+        }
+        if (!ReadLODSetStoredRecord(myOcafDoc, record)
+            || (remove && record.occurrence != syls::StoreOccurrence::Absent)
+            || (!remove && (record.occurrence != syls::StoreOccurrence::Present
+                || record.bytes != candidate))) {
+            record = {}; return Standard_False;
+        }
+        return Standard_True;
+    } catch (...) { record = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::FinalizeLODSetHistory() noexcept {
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || myOcafDoc->HasOpenCommand() || !myNativeAuthority) return Standard_False;
+        myNativeAuthority->HistoryBoundary(myOcafDoc.get()); NotifyChanges();
         return Standard_True;
     } catch (...) { return Standard_False; }
 }
@@ -20296,6 +20932,134 @@ Standard_Boolean OcctDocument::StageTextReliefReplacement(
                                           root, stageRecord)
             && ReadTextReliefExact(record.feature, capture)
             && capture.record.owner.IsEqual(opening.record.owner);
+    } catch (...) { capture = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::TextReliefReplayMembersExclusive(
+    const OcctTextReliefCapture& opening) const noexcept {
+    try {
+        if (myOcafDoc.IsNull() || !opening.record.payload
+            || opening.documentData != myOcafDoc->GetData()
+            || opening.curves.empty()) return Standard_False;
+        std::vector<core3d::text_relief::persistence::Record> owners;
+        if (!core3d::text_relief::persistence::ReadAll(myOcafDoc, owners))
+            return Standard_False;
+        std::set<core3d::text_relief::UUID> features, entities;
+        for (const auto& curve : opening.curves) {
+            const auto& value = curve.persisted;
+            if (value.ownerState.owner.document != opening.record.payload->value.owner.document
+                || !features.insert(value.value.feature).second
+                || !entities.insert(value.ownerState.owner.entity).second
+                || R179HasRetainedDependent(myOcafDoc,
+                    core3d::retained_solid::UUIDText(value.ownerState.owner.entity)))
+                return Standard_False;
+            std::size_t consumers = 0;
+            for (const auto& owner : owners)
+                for (const auto& reference : owner.payload->value.curves)
+                    if (reference.feature == value.value.feature) {
+                        if (owner.payload->value.feature != opening.record.payload->value.feature)
+                            return Standard_False;
+                        ++consumers;
+                    }
+            if (consumers != 1) return Standard_False;
+        }
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+#if DEBUG
+Standard_Boolean OcctDocument::DebugArmTextReliefReplayPairFault(
+    const core3d::text_relief::UUID& feature) noexcept {
+    OcctTextReliefCapture capture;
+    if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+        || myTextReliefReplayPairFault || !ReadTextReliefExact(feature, capture))
+        return Standard_False;
+    myTextReliefReplayPairFault = std::make_pair(myOcafDoc->GetData(), feature);
+    return Standard_True;
+}
+
+Standard_Boolean OcctDocument::DebugCaptureTextReliefReplaySide(
+    const core3d::text_relief::UUID& feature,
+    core3d::treatment_history::TextReliefReplaySide& side) const noexcept {
+    std::vector<TDF_Label> roots;
+    return CaptureTextReliefReplaySide(*this, {feature}, roots, side);
+}
+#endif
+
+Standard_Boolean OcctDocument::StageTextReliefHostReplay(
+    core3d::native_opening::CommandLease& lease,
+    const OcctTextReliefCapture& opening,
+    const core3d::text_relief::owner::PreparedHostPair& pair,
+    OcctTextReliefCapture& capture) noexcept {
+    capture = {};
+    try {
+        namespace bc = core3d::bounded_curve;
+        namespace tr = core3d::text_relief;
+        OcctTextReliefCapture current;
+        if (!ExactLeaseOwns(myOcafDoc, lease) || !opening.record.payload
+            || !ReadTextReliefExact(opening.record.payload->value.feature, current)
+            || !opening.IsEqual(current)
+            || !TextReliefReplayMembersExclusive(current)
+            || !myPendingTreatmentCompanion
+            || !myPendingTreatmentCompanion->textReliefReplay
+            || pair.curves.size() != current.curves.size()
+            || pair.wires.size() != pair.curves.size()
+            || !pair.root.source.IsEqual(opening.ownerReceipt))
+            return Standard_False;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        Handle(tr::persistence::Attribute) recordAttribute;
+        if (shapes.IsNull() || !current.record.label.FindAttribute(
+                tr::persistence::AttributeID(), recordAttribute)
+            || recordAttribute.IsNull()
+            || recordAttribute->payload() != current.record.payload)
+            return Standard_False;
+        std::vector<Handle(bc::Attribute)> attributes;
+        attributes.reserve(current.curves.size());
+        for (std::size_t index = 0; index < current.curves.size(); ++index) {
+            const auto& curve = current.curves[index];
+            OcctBoundedCurveCapture exact;
+            Handle(bc::Attribute) attribute;
+            if (!pair.curves[index]
+                || !ReadBoundedCurveExact(curve.persisted.ownerState.owner, exact)
+                || !opening.curves[index].IsEqual(exact)
+                || !curve.record.label.FindAttribute(bc::AttributeID(), attribute)
+                || attribute.IsNull() || attribute->value() != curve.record.value
+                || !bc::MatchesPersistedValue(pair.wires[index],
+                                               pair.curves[index]->persisted))
+                return Standard_False;
+            attributes.push_back(attribute);
+        }
+        // All original receipts and destinations have been resolved while
+        // the old C1/SYTR pair is coherent. The unchanged strict owner stage
+        // reaches this callback only after validating the original receipt.
+        const auto installPair = [&](const TDF_Label& owner) -> Standard_Boolean {
+            if (!owner.IsEqual(current.record.owner)) return Standard_False;
+            for (std::size_t index = 0; index < attributes.size(); ++index) {
+                attributes[index]->Backup();
+                attributes[index]->value_ = pair.curves[index];
+                shapes->SetShape(current.curves[index].record.owner,
+                                 pair.wires[index].wire);
+                TNaming_Builder(current.curves[index].record.label).Select(
+                    pair.wires[index].wire, pair.wires[index].wire);
+            }
+#if DEBUG
+            if (myTextReliefReplayPairFault
+                && myTextReliefReplayPairFault->first == myOcafDoc->GetData()
+                && myTextReliefReplayPairFault->second == pair.record.feature) {
+                myTextReliefReplayPairFault.reset();
+                return Standard_False;
+            }
+#endif
+            // No reader is called between the first C1 write and this SYTR
+            // replacement. Encode/Replace validates only the prepared value.
+            return tr::persistence::Replace(current.record.label, pair.record,
+                                            pair.root.detachedShape);
+        };
+        OcctExactLabelReceipt root;
+        return StageReplaceExactFreeLabel(lease, opening.ownerReceipt, pair.root,
+                                          root, installPair)
+            && ReadTextReliefExact(pair.record.feature, capture)
+            && tr::owner::ReadHostPair(pair, opening, capture);
     } catch (...) { capture = {}; return Standard_False; }
 }
 
@@ -22712,6 +23476,11 @@ Standard_Boolean OcctDocument::FinalizeTreatmentHistoryCompanion() noexcept {
             || pending.data.get() != myOcafDoc->GetData().get()
             || pending.undoDepthBefore < 0)
             return Standard_False;
+        if (pending.textReliefReplay
+            && (!pending.textReliefReplay->afterCaptured
+                || !ProveTextReliefReplaySide(*this, *pending.textReliefReplay,
+                                              pending.textReliefReplay->after, true)))
+            return Standard_False;
         // Exactly one delta for this transaction; a full history trims the
         // oldest delta instead of growing (pruned companions cover that).
         const Standard_Integer depth = myOcafDoc->GetAvailableUndos();
@@ -22840,6 +23609,10 @@ Standard_Boolean OcctDocument::SettleTreatmentHistoryCompanionOnPrior() noexcept
             || !XCAFDoc_ShapeTool::GetShape(companion.ownerLabel).IsEqual(companion.ownerShapeBefore)
             || !CheckTreatmentTransientFlags(companion.ownerShapeBefore, companion.flagsBefore))
             return Standard_False;
+        if (companion.textReliefReplay
+            && !ProveTextReliefReplaySide(*this, *companion.textReliefReplay,
+                                          companion.textReliefReplay->before, false))
+            return Standard_False;
         for (const auto& state : companion.before) {
             Handle(TNaming_NamedShape) naming;
             if (!state.label.FindAttribute(TNaming_NamedShape::GetID(), naming) || naming.IsNull())
@@ -22849,6 +23622,10 @@ Standard_Boolean OcctDocument::SettleTreatmentHistoryCompanionOnPrior() noexcept
         std::vector<core3d::treatment_history::NamingState> verified;
         if (!CaptureTreatmentSubtreeNaming(companion.ownerLabel, verified)
             || !SameTreatmentNamingSet(companion.before, verified, true)) return Standard_False;
+        if (companion.textReliefReplay
+            && !RestoreTextReliefReplayScalars(*this, *companion.textReliefReplay,
+                                               companion.textReliefReplay->before))
+            return Standard_False;
         // Consume the recovery evidence only after every prior-state proof.
         myPendingTreatmentCompanion.reset();
         return Standard_True;
@@ -23294,6 +24071,12 @@ Standard_Boolean OcctDocument::ApplyTreatmentHistoryAfterHistoryChange(
             || syetNow != sideSyet || syetBytesNow != sideSyetBytes
             || !XCAFDoc_ShapeTool::GetShape(companion->ownerLabel).IsEqual(sideShape))
             return Standard_False;
+        if (companion->textReliefReplay
+            && (!companion->textReliefReplay->afterCaptured
+                || !ProveTextReliefReplaySide(*this, *companion->textReliefReplay,
+                    undoDirection ? companion->textReliefReplay->before
+                                  : companion->textReliefReplay->after, false)))
+            return Standard_False;
         for (const auto& state : side) {
             Handle(TNaming_NamedShape) naming;
             if (!state.label.FindAttribute(TNaming_NamedShape::GetID(), naming) || naming.IsNull())
@@ -23306,6 +24089,11 @@ Standard_Boolean OcctDocument::ApplyTreatmentHistoryAfterHistoryChange(
         std::vector<core3d::treatment_history::NamingState> verified;
         if (!CaptureTreatmentSubtreeNaming(companion->ownerLabel, verified)
             || !SameTreatmentNamingSet(side, verified, true)) return Standard_False;
+        if (companion->textReliefReplay
+            && !RestoreTextReliefReplayScalars(*this, *companion->textReliefReplay,
+                undoDirection ? companion->textReliefReplay->before
+                              : companion->textReliefReplay->after))
+            return Standard_False;
         }
         // Associate the companion with the actual resulting inverse delta:
         // TDF_Data::Undo commits a fresh inverse delta during history

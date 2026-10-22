@@ -1,10 +1,14 @@
 #pragma once
 
 #include "TextReliefDefinition.hxx"
+#include "BoundedCurveBuild.hxx"
+#include "NativeOpeningContext.hxx"
+#include "NativeOpeningDependentReplay.hxx"
 
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <utility>
 
 namespace core3d::text_relief::owner {
@@ -77,6 +81,187 @@ inline bool ValidateReplayDependency(const std::vector<std::uint8_t>& bytes,
     return DecodeAuthored(bytes, value) && value.feature == feature
         && value.owner.entity == resultEntity;
 }
+
+//! Detached, immutable installation material for one identity-preserving
+//! host replay. All geometry, canonical bytes and C1 payload allocations are
+//! completed before the source command. The original capture remains the
+//! expected receipt; it is never recaptured after mutation.
+struct PreparedHostPair final {
+    OcctPreparedLabelClone root;
+    AuthoredRecord record;
+    std::vector<std::uint8_t> canonicalRecord;
+    std::vector<bounded_curve::DetachedWire> wires;
+    std::vector<std::shared_ptr<const bounded_curve::Payload>> curves;
+};
+
+inline bool PrepareHostPair(const OcctTextReliefCapture& opening,
+    const std::vector<bounded_curve::PersistedValue>& curves,
+    std::vector<bounded_curve::DetachedWire> wires,
+    AuthoredRecord record, const TopoDS_Shape& result,
+    PreparedHostPair& output) noexcept {
+    output = {};
+    try {
+        if (!opening.record.payload || result.IsNull()
+            || curves.empty() || curves.size() > MaximumCurves
+            || curves.size() != opening.curves.size()
+            || wires.size() != curves.size()
+            || record.curves.size() != curves.size()) return false;
+        const auto& prior = opening.record.payload->value;
+        if (prior.revision == UINT64_MAX || record.revision != prior.revision + 1
+            || record.owner != prior.owner || record.feature != prior.feature
+            || record.rootOutput != prior.rootOutput
+            || record.constructionSeed != prior.constructionSeed
+            || record.components.size() != prior.components.size()) return false;
+        for (std::size_t index = 0; index < record.components.size(); ++index)
+            if (record.components[index].key != prior.components[index].key
+                || record.components[index].identifier
+                    != prior.components[index].identifier) return false;
+        PreparedHostPair pair;
+        if (!EncodeAuthored(record, pair.canonicalRecord)) return false;
+        std::set<UUID> features, entities;
+        for (std::size_t index = 0; index < curves.size(); ++index) {
+            const auto& next = curves[index];
+            const auto& old = opening.curves[index].persisted;
+            std::vector<std::uint8_t> definition, owner;
+            if (old.ownerState.definitionRevision == UINT64_MAX
+                || next.ownerState.definitionRevision
+                    != old.ownerState.definitionRevision + 1
+                || next.ownerState.owner != old.ownerState.owner
+                || next.ownerState.owner.document != record.owner.document
+                || next.value.feature != old.value.feature
+                || next.value.feature != prior.curves[index].feature
+                || next.value.feature != record.curves[index].feature
+                || !features.insert(next.value.feature).second
+                || !entities.insert(next.ownerState.owner.entity).second
+                || !bounded_curve::ValidatePersisted(next, &definition, &owner)
+                || !bounded_curve::MatchesPersistedValue(wires[index], next)
+                || wires[index].canonicalDefinitionBytes != definition
+                || wires[index].canonicalOwnerBytes != owner
+                || wires[index].definitionDigest != record.curves[index].digest)
+                return false;
+            auto payload = std::make_shared<bounded_curve::Payload>();
+            payload->persisted = next;
+            payload->definitionBytes = std::move(definition);
+            payload->ownerBytes = std::move(owner);
+            pair.curves.push_back(std::move(payload));
+        }
+        pair.root.source = opening.ownerReceipt;
+        pair.root.detachedShape = result;
+        pair.root.representation = OcctGeometryRepresentation::BRep;
+        pair.record = std::move(record);
+        pair.wires = std::move(wires);
+        output = std::move(pair);
+        return true;
+    } catch (...) { output = {}; return false; }
+}
+
+inline bool ReadHostPair(const PreparedHostPair& pair,
+    const OcctTextReliefCapture& opening,
+    const OcctTextReliefCapture& current) noexcept {
+    try {
+        if (!current.record.payload || !opening.record.payload
+            || current.record.payload->bytes != pair.canonicalRecord
+            || !current.record.owner.IsEqual(opening.record.owner)
+            || !current.record.label.IsEqual(opening.record.label)
+            || !current.record.shape.IsEqual(pair.root.detachedShape)
+            || current.curves.size() != pair.curves.size()) return false;
+        for (std::size_t index = 0; index < current.curves.size(); ++index) {
+            const auto& curve = current.curves[index];
+            if (!curve.record.value
+                || !curve.record.owner.IsEqual(opening.curves[index].record.owner)
+                || !curve.record.label.IsEqual(opening.curves[index].record.label)
+                || curve.record.value->definitionBytes != pair.curves[index]->definitionBytes
+                || curve.record.value->ownerBytes != pair.curves[index]->ownerBytes
+                || !curve.wire.IsEqual(pair.wires[index].wire)) return false;
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
+class PreparedHostReplay final : public dependent_replay::PreparedReplay {
+public:
+    PreparedHostReplay(OcctTextReliefCapture capture, PreparedHostPair pair,
+        std::shared_ptr<native_opening::Context> context) noexcept
+        : capture_(std::move(capture)), pair_(std::move(pair)),
+          context_(std::move(context)) {}
+    dependent_replay::Family family() const noexcept override {
+        return dependent_replay::Family::TextReliefE5;
+    }
+    UUID feature() const noexcept override { return pair_.record.feature; }
+    UUID resultEntity() const noexcept override { return pair_.record.owner.entity; }
+    std::size_t documentBytes() const noexcept override {
+        std::size_t bytes = pair_.canonicalRecord.size();
+        for (const auto& curve : pair_.curves)
+            bytes += curve->definitionBytes.size() + curve->ownerBytes.size();
+        return bytes;
+    }
+    std::size_t memoryBytes() const noexcept override {
+        std::size_t bytes = documentBytes() + capture_.record.payload->bytes.size();
+        for (const auto& curve : capture_.curves)
+            bytes += curve.record.value->definitionBytes.size()
+                + curve.record.value->ownerBytes.size();
+        for (const auto& wire : pair_.wires)
+            bytes += wire.canonicalDefinitionBytes.size() + wire.canonicalOwnerBytes.size();
+        return bytes;
+    }
+    std::size_t topologyNodes() const noexcept override {
+        try {
+            TopTools_IndexedMapOfShape map;
+            TopExp::MapShapes(pair_.root.detachedShape, map);
+            for (const auto& wire : pair_.wires) TopExp::MapShapes(wire.wire, map);
+            return std::size_t(map.Extent());
+        } catch (...) { return SIZE_MAX; }
+    }
+    TopoDS_Shape prospectiveResultShape() const noexcept override {
+        return pair_.root.detachedShape;
+    }
+    bool appendPublicationMembers(std::vector<UUID>& members) const noexcept override {
+        try {
+            // Component and C1 feature identities describe the closure, but
+            // the viewer resolves free-owner entities. Prepare the complete
+            // affected owner set once for both commit and settled recovery.
+            // Pair preparation proves these owners survive with the same IDs.
+            if (!capture_.record.payload
+                || pair_.curves.size() != capture_.curves.size()
+                || pair_.record.owner != capture_.record.payload->value.owner)
+                return false;
+            std::set<UUID> entities(members.begin(), members.end());
+            entities.insert(pair_.record.owner.entity);
+            for (std::size_t index = 0; index < pair_.curves.size(); ++index) {
+                const auto& curve = pair_.curves[index];
+                if (!curve || curve->persisted.ownerState.owner
+                        != capture_.curves[index].persisted.ownerState.owner)
+                    return false;
+                entities.insert(curve->persisted.ownerState.owner.entity);
+            }
+            members.assign(entities.begin(), entities.end());
+            return true;
+        } catch (...) { return false; }
+    }
+    const std::shared_ptr<native_opening::Context>& sourceContext() const noexcept {
+        return context_;
+    }
+    bool openingCurrent(OcctDocument& document) const noexcept override {
+        OcctTextReliefCapture current;
+        return context_ && context_->openingFence().document() == document.Document()
+            && document.ReadTextReliefExact(feature(), current)
+            && capture_.IsEqual(current);
+    }
+    bool stage(OcctDocument& document,
+        native_opening::CommandLease& lease) const noexcept override {
+        OcctTextReliefCapture staged;
+        return document.StageTextReliefHostReplay(lease, capture_, pair_, staged);
+    }
+    bool read(OcctDocument& document) const noexcept override {
+        OcctTextReliefCapture current;
+        return document.ReadTextReliefExact(feature(), current)
+            && ReadHostPair(pair_, capture_, current);
+    }
+private:
+    OcctTextReliefCapture capture_;
+    PreparedHostPair pair_;
+    std::shared_ptr<native_opening::Context> context_;
+};
 
 struct Plan final {
     Mutation mutation = Mutation::Create;

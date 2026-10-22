@@ -43,6 +43,7 @@ namespace core3d::asset_atlas { struct Capture; struct Definition; struct Key; }
 namespace core3d::painted_atlas_bake::owner { struct CurrentnessResult; }
 namespace core3d::face_image::owner { enum class Outcome : std::uint8_t; struct Staging; }
 namespace core3d::face_image::persistence::bindings { enum class ReadState : int; }
+namespace core3d::text_relief::owner { struct PreparedHostPair; }
 
 #include <XCAFApp_Application.hxx>
 #include <TDocStd_Document.hxx>
@@ -103,6 +104,10 @@ namespace core3d::export_decimation {
 struct F2StoreRead;
 const Standard_GUID& F2DerivativeStoreAttributeID() noexcept;
 }
+namespace core3d::lod_set_persistence {
+struct StoreRead;
+const Standard_GUID& LODSetStoreAttributeID() noexcept;
+}
 namespace core3d::part_boolean::owner { class PartBooleanOwner; }
 namespace core3d::draft_faces::owner { class NativeOwner; }
 namespace core3d::retained_feature { class OcafOwnerService; }
@@ -136,6 +141,7 @@ struct AuthoredBooleanObservation;
 // archive bytes, never app/AI authority — and is released with the native
 // document session.
 namespace core3d::treatment_history {
+struct TextReliefReplayMembers;
 struct NamingState {
     TDF_Label label;
     std::string labelEntry;
@@ -164,6 +170,9 @@ struct Companion {
     std::vector<std::uint8_t> syetBytesBefore;
     std::vector<std::uint8_t> syetBytesAfter;
     std::vector<FlagState> flagsBefore;
+    //! E5 host replay extends the source companion, never replaces it. The
+    //! exact member roots and both measured sides share this one real delta.
+    std::shared_ptr<TextReliefReplayMembers> textReliefReplay;
     Standard_Integer undoDepthBefore = -1;
     bool afterCaptured = false;
     //! B3-S2 persisted-owner companion: the owner label carries no B1/R2
@@ -523,6 +532,21 @@ struct OcctTextReliefCapture {
     Standard_EXPORT Standard_Boolean IsEqual(
         const OcctTextReliefCapture& other) const noexcept;
 };
+
+namespace core3d::treatment_history {
+struct TextReliefReplaySide {
+    std::vector<OcctTextReliefCapture> owners;
+    std::vector<NamingState> naming;
+    std::vector<TopoDS_Shape> shapes;
+    std::vector<std::vector<FlagState>> flags;
+};
+struct TextReliefReplayMembers {
+    std::vector<TDF_Label> roots;
+    TextReliefReplaySide before, after;
+    std::shared_ptr<core3d::native_opening::Context> recoveryContext;
+    bool afterCaptured = false;
+};
+} // namespace core3d::treatment_history
 
 //! Exact C3-N authority: one canonical SYGL record bound to one admitted solid.
 //! The labels are in-process receipts and cannot be reconstructed from Swift.
@@ -1433,6 +1457,16 @@ public:
         Standard_Boolean remove,
         core3d::export_decimation::F2StoreRead& record) noexcept;
     Standard_EXPORT Standard_Boolean FinalizeF2DerivativeHistory() noexcept;
+    //! F3-S2's reserved SYLS/1 carrier. Like the F2 port, staging borrows an
+    //! already-open command and proves exact readback without closing it.
+    Standard_EXPORT Standard_Boolean ReadLODSetStore(
+        core3d::lod_set_persistence::StoreRead& record) const noexcept;
+    Standard_EXPORT Standard_Boolean StageLODSetStore(
+        const core3d::lod_set_persistence::StoreRead& before,
+        const std::vector<std::uint8_t>& candidate,
+        Standard_Boolean remove,
+        core3d::lod_set_persistence::StoreRead& record) noexcept;
+    Standard_EXPORT Standard_Boolean FinalizeLODSetHistory() noexcept;
     //! Capture requires a viewer-issued context for this exact document. The
     //! reader below intentionally remains usable inside an owned command.
     Standard_EXPORT Standard_Boolean CaptureBoundedCurveExact(
@@ -1476,6 +1510,24 @@ public:
         const OcctPreparedLabelClone& clone,
         const core3d::text_relief::AuthoredRecord& record,
         OcctTextReliefCapture& capture) noexcept;
+    //! Atomic S3-R2 frame/host replay. Every refreshed C1 wire and the SYTR/2
+    //! owner are prepared before the source command and staged under its lease.
+    Standard_EXPORT Standard_Boolean TextReliefReplayMembersExclusive(
+        const OcctTextReliefCapture& opening) const noexcept;
+    Standard_EXPORT Standard_Boolean StageTextReliefHostReplay(
+        core3d::native_opening::CommandLease& lease,
+        const OcctTextReliefCapture& opening,
+        const core3d::text_relief::owner::PreparedHostPair& pair,
+        OcctTextReliefCapture& capture) noexcept;
+#if DEBUG
+    //! One-shot fault, bound to a measured feature in this document. It fires
+    //! after C1 installation in the real owner callback, before SYTR writes.
+    Standard_EXPORT Standard_Boolean DebugArmTextReliefReplayPairFault(
+        const core3d::text_relief::UUID& feature) noexcept;
+    Standard_EXPORT Standard_Boolean DebugCaptureTextReliefReplaySide(
+        const core3d::text_relief::UUID& feature,
+        core3d::treatment_history::TextReliefReplaySide& side) const noexcept;
+#endif
     Standard_EXPORT Standard_Boolean StageTextReliefRemove(
         core3d::native_opening::CommandLease& lease,
         const OcctTextReliefCapture& opening) noexcept;
@@ -2167,6 +2219,10 @@ private:
   // D253: the unfinalized measured companion of an in-flight treatment
   // transaction, and the bounded set of companions bound to live TDF deltas.
   std::unique_ptr<core3d::treatment_history::Companion> myPendingTreatmentCompanion;
+#if DEBUG
+  std::optional<std::pair<Handle(TDF_Data), core3d::text_relief::UUID>>
+      myTextReliefReplayPairFault;
+#endif
   std::deque<std::unique_ptr<core3d::treatment_history::Companion>> myTreatmentHistoryCompanions;
   // A2-N2: the single document-owned authored-Boolean recovery authority,
   // nonpersisted and released with this native document session.

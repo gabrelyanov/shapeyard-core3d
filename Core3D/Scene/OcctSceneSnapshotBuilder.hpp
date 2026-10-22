@@ -11,6 +11,7 @@
 
 #include "SceneSnapshot.hpp"
 #include "../OCCTKit/NativeContactSource.hpp"
+#include "../OCCTKit/PaintedAtlasBake.hxx"
 
 #include <Standard_Handle.hxx>
 #include <TDF_Label.hxx>
@@ -50,11 +51,57 @@ struct PrivateExportFinalMesh final {
     InstanceSnapshot instance;
 };
 
+//! Immutable operation-owned value produced from the saved all-member layout
+//! path before any raster bake. Every vector is retained by the returned
+//! private-export owner and is readable only through its exact scene alias.
+// Shared native fine-profile mesher used by the layout-only producer and the
+// existing DEBUG final-result oracle. It never bakes or publishes an atlas.
+bool MeshSavedGroupLayoutPrivateSurfaces(const TopoDS_Shape& shape) noexcept;
+
+struct SavedGroupAllMemberLayout final {
+    std::vector<std::string> memberDefinitions;
+    asset_atlas::Definition atlas;
+    std::vector<asset_atlas::MemberUVAssignment> assignments;
+    asset_atlas::build::LayoutEvidence layout;
+    painted_atlas_bake::kernel::WorkMeasurement work;
+};
+
+struct SavedGroupAllMemberLayoutRecord final {
+    decal_layer::bake::accounting::Ticket recordStorage;
+    painted_atlas_bake::owner::AggregateBakePlan aggregate;
+    std::vector<std::shared_ptr<
+        const painted_atlas_bake::owner::ExportBakeStorage>> planStorage;
+    std::vector<SavedGroupAllMemberLayout> groups;
+    std::uint64_t layoutNanoseconds = 0;
+    std::uint64_t preparationNanoseconds = 0;
+    std::size_t retainedBytes = 0;
+};
+
+enum class SavedGroupAllMemberLayoutReason : std::uint8_t {
+    Present = 0,
+    Unavailable = 1,
+    Overflow = 2,
+    Malformed = 3,
+    StaleSource = 4,
+    StaleBinding = 5,
+    UnsupportedSurface = 6,
+    Refused = 7,
+};
+
+struct SavedGroupAllMemberLayoutRead final {
+    std::shared_ptr<const SavedGroupAllMemberLayoutRecord> record;
+    SavedGroupAllMemberLayoutReason reason =
+        SavedGroupAllMemberLayoutReason::Unavailable;
+};
+
 struct PrivateExportDecalArtifact final {
     std::shared_ptr<const SceneSnapshot> scene;
     std::vector<PrivateExportFaceCorrespondence> correspondence;
     std::vector<std::string> inputKeys;
     std::vector<std::string> bakeSeals;
+    std::shared_ptr<const SavedGroupAllMemberLayoutRecord> savedGroupLayout;
+    SavedGroupAllMemberLayoutReason savedGroupLayoutReason =
+        SavedGroupAllMemberLayoutReason::Unavailable;
 };
 
 //! Opaque move-only authority captured before any disposable export command
@@ -100,6 +147,22 @@ enum class DebugPrivateExportDecalFault : std::uint8_t {
 //! Digests and numeric streams are copied; labels, handles and authority
 //! tokens remain native and never escape this seam.
 struct DebugPrivateExportDecalObservation final {
+    std::string savedGroupLayoutRecordState = "absent";
+    std::string savedGroupLayoutRecordReason = "unavailable";
+    std::vector<std::string> savedGroupLayoutMemberDefinitions;
+    std::vector<std::uint64_t> savedGroupLayoutAssignmentCornerCounts;
+    std::uint64_t savedGroupLayoutMemberCount = 0;
+    std::uint64_t savedGroupLayoutAssignmentCount = 0;
+    std::uint64_t savedGroupLayoutResolution = 0;
+    std::uint64_t savedGroupLayoutGutter = 0;
+    std::uint64_t savedGroupLayoutChartCount = 0;
+    std::uint64_t savedGroupLayoutNanoseconds = 0;
+    std::uint64_t savedGroupLayoutPreparationNanoseconds = 0;
+    std::uint64_t savedGroupLayoutRetainedBytes = 0;
+    std::uint64_t savedGroupLayoutOperationBytes = 0;
+    std::vector<std::uint64_t> savedGroupLayoutStoragePeakBytes;
+    std::vector<std::uint64_t> savedGroupLayoutStorageLimitBytes;
+    bool savedGroupLayoutBakeJobsUnsealed = false;
     std::uint64_t ownerCount = 0;
     std::uint64_t requiredReceiverCount = 0;
     std::uint64_t producedReceiverCount = 0;
@@ -276,6 +339,12 @@ class OcctSceneSnapshotBuilder final {
 public:
     using SnapshotPointer = std::shared_ptr<const SceneSnapshot>;
     using OverlayPointer = std::shared_ptr<const PresentationOverlaySnapshot>;
+
+    //! Passive lookup sealed to the exact returned-scene alias/control block.
+    //! A copied scene is unavailable. The native wrapper also checks the
+    //! originating operation identity before exposing this value.
+    static SavedGroupAllMemberLayoutRead SavedGroupAllMemberLayoutForReturnedScene(
+        const SnapshotPointer& returnedScene) noexcept;
 
     OcctSceneSnapshotBuilder();
     ~OcctSceneSnapshotBuilder();

@@ -9198,16 +9198,20 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
         const auto* suffix = registry.find({
             c::RetainedProgramSuffixFeatureKind,
             c::RetainedProgramSuffixFeatureCodec});
-        controls["production-registry-has-four-closed-codecs"] =
-            registry.size() == 4
+        controls["production-registry-has-exact-closed-codecs"] =
+            registry.size() == 6
             && registry.find({c::PartBooleanFeatureKind,
                               c::PartBooleanFeatureCodec}) != nullptr
             && registry.find({c::PartBooleanFeatureKind,
                               c::PartBooleanShellFeatureCodec}) != nullptr
             && registry.find({c::PartBooleanFeatureKind,
                               c::PartBooleanRecipeFeatureCodec}) != nullptr
+            && registry.find({c::PartBooleanFeatureKind,
+                              c::PartBooleanOriginalsFeatureCodec}) != nullptr
             && registry.find({c::RetainedProgramSuffixFeatureKind,
-                              c::RetainedProgramSuffixFeatureCodec}) != nullptr;
+                              c::RetainedProgramSuffixFeatureCodec}) != nullptr
+            && registry.find({core3d::draft_faces::FeatureKind,
+                              core3d::draft_faces::CodecVersion}) != nullptr;
         controls["a3p2-codec-present-execution-disabled"] =
             suffix != nullptr && !suffix->execution.installed();
         controls["plain-profile-cut-key-not-in-production-registry"] = registry.find({

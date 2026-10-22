@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -105,6 +106,18 @@ struct Dependency final {
     }
 };
 
+//! Presentation work for one dependency, separate from its canonical closure
+//! identity. The source owner consumes these rows when preparing its one
+//! publication, including the retained plan used after an uncertain close.
+//! memberIdentities is the source publisher's existing field spelling; here
+//! it includes any additional free owners supplied by the family collaborator.
+struct DependencyPublication final {
+    Family family = Family::PatternD2;
+    UUID feature{};
+    UUID resultEntity{};
+    std::vector<UUID> memberIdentities;
+};
+
 //! Family-specific detached work. prepare() is called before any command.
 //! stage() may only use the supplied caller lease; it must neither commit nor
 //! begin nested work. read() proves the staged/committed identity and recipe.
@@ -120,6 +133,12 @@ public:
     virtual bool openingCurrent(OcctDocument&) const noexcept = 0;
     virtual bool stage(OcctDocument&, native_opening::CommandLease&) const noexcept = 0;
     virtual bool read(OcctDocument&) const noexcept = 0;
+    // A replacement may itself be the host of a later dependency. Only
+    // collaborators that can prove their detached post-edit result expose it.
+    virtual TopoDS_Shape prospectiveResultShape() const noexcept { return {}; }
+    virtual bool appendPublicationMembers(std::vector<UUID>&) const noexcept {
+        return true;
+    }
 };
 
 class Preparer {
@@ -168,25 +187,38 @@ public:
         output.reset();
         if (!context_ || candidate_.targetEntityIdentifier.empty()
             || candidate_.resultShape.IsNull()) return Refusal::MissingRecipe;
+        Candidate candidate = candidate_;
+        if (prospective_.empty()) prospective_.emplace(dependency.inputEntity,
+                                                        candidate_.resultShape);
+        const auto host = prospective_.find(dependency.inputEntity);
+        if (host == prospective_.end() || host->second.IsNull())
+            return Refusal::UnsupportedDescendant;
+        candidate.resultShape = host->second;
+        Refusal refusal = Refusal::UnsupportedDescendant;
         switch (dependency.family) {
             case Family::PatternD2:
-                return PreparePatternD2Replay(owner, dependency, mutation,
-                                              candidate_, output);
+                refusal = PreparePatternD2Replay(owner, dependency, mutation,
+                                                 candidate, output); break;
             case Family::PathArrayD3:
-                return PreparePathArrayD3Replay(owner, dependency, mutation,
-                    candidate_, context_, output);
+                refusal = PreparePathArrayD3Replay(owner, dependency, mutation,
+                    candidate, context_, output); break;
             case Family::FeaturePatternD4:
-                return PrepareFeaturePatternD4Replay(owner, dependency, mutation,
-                    candidate_, context_, output);
+                refusal = PrepareFeaturePatternD4Replay(owner, dependency, mutation,
+                    candidate, context_, output); break;
             case Family::TextReliefE5:
-                return PrepareTextReliefE5Replay(owner, dependency, mutation,
-                    candidate_, context_, output);
+                refusal = PrepareTextReliefE5Replay(owner, dependency, mutation,
+                    candidate, context_, output); break;
         }
-        return Refusal::UnsupportedDescendant;
+        if (refusal == Refusal::None && output) {
+            const TopoDS_Shape result = output->prospectiveResultShape();
+            if (!result.IsNull()) prospective_[dependency.resultEntity] = result;
+        }
+        return refusal;
     }
 private:
     Candidate candidate_;
     std::shared_ptr<native_opening::Context> context_;
+    std::map<UUID, TopoDS_Shape> prospective_;
 };
 
 //! The source/host mutation is injected so OcctDocument can keep its narrow
@@ -203,7 +235,10 @@ public:
     Plan(const Plan&) = delete;
     Plan& operator=(const Plan&) = delete;
 
-    const std::vector<Dependency>& dependencies() const noexcept {
+    const std::vector<DependencyPublication>& dependencies() const noexcept {
+        return publicationDependencies_;
+    }
+    const std::vector<Dependency>& closureDependencies() const noexcept {
         return dependencies_;
     }
     Mutation mutation() const noexcept { return mutation_; }
@@ -225,6 +260,7 @@ private:
     Standard_Integer documentTime_ = 0;
     Limits limits_;
     std::vector<Dependency> dependencies_;
+    std::vector<DependencyPublication> publicationDependencies_;
     std::vector<std::shared_ptr<const PreparedReplay>> prepared_;
     std::vector<std::string> authorizedEntityIdentifiers_;
     // E3 face-image attachment replay of the edited owner itself (278b

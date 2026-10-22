@@ -3,6 +3,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 @class Core3DPublishCapture;
+@class Core3DViewController;
 
 FOUNDATION_EXPORT NSErrorDomain const Core3DLODSetErrorDomain;
 
@@ -15,11 +16,68 @@ typedef NS_ERROR_ENUM(Core3DLODSetErrorDomain, Core3DLODSetError) {
     Core3DLODSetErrorStopped,
     Core3DLODSetErrorWorkBudget,
     Core3DLODSetErrorAttachmentParity,
+    Core3DLODSetErrorPersistenceUnavailable,
+    Core3DLODSetErrorCorruptRecord,
+    Core3DLODSetErrorNotFound,
+    Core3DLODSetErrorRecoveryRequired,
 };
 
 typedef NS_ENUM(NSInteger, Core3DLODSetCommitResult) {
     Core3DLODSetCommitResultUnavailable = 0,
+    Core3DLODSetCommitResultCommitted,
+    Core3DLODSetCommitResultRemoved,
+    Core3DLODSetCommitResultRegenerateUnavailable,
+    Core3DLODSetCommitResultRecoveryRequired,
 };
+
+typedef NS_ENUM(NSInteger, Core3DLODSetDurableState) {
+    Core3DLODSetDurableStateUnbuilt = 0,
+    Core3DLODSetDurableStateCurrent,
+    Core3DLODSetDurableStateStale,
+};
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DLODLevelRecord : NSObject
+@property(nonatomic, copy, readonly) NSString *identifier;
+@property(nonatomic, copy, readonly) NSString *displayName;
+@property(nonatomic, assign, readonly) NSUInteger ordinal;
+@property(nonatomic, assign, readonly) NSUInteger targetTriangleCount;
+@property(nonatomic, assign, readonly) Core3DLODSetDurableState state;
+@property(nonatomic, copy, readonly) NSString *reason;
+@property(nonatomic, assign, readonly) double maximumSurfaceDistanceMM;
+@property(nonatomic, assign, readonly) double maximumSilhouetteDeviationPixels;
+@property(nonatomic, assign, readonly) double hardEdgeAngleDegrees;
+@property(nonatomic, assign, readonly) double contactClearanceMM;
+@property(nonatomic, assign, readonly) NSUInteger measurementSampleCount;
+@property(nonatomic, assign, readonly) NSUInteger silhouetteResolution;
+@property(nonatomic, copy, readonly) NSString *silhouetteCameraSetSHA256;
+@property(nonatomic, assign, readonly) double maximumUVStretch;
+@property(nonatomic, assign, readonly) double maximumNormalDeviationDegrees;
+@property(nonatomic, assign, readonly) NSUInteger uvMethodVersion;
+@property(nonatomic, assign, readonly) NSUInteger normalMethodVersion;
+@property(nonatomic, assign, readonly) NSUInteger overlapMethodVersion;
+@property(nonatomic, copy, readonly, nullable) NSString *f2DerivativeIdentifier;
+@property(nonatomic, copy, readonly, nullable) NSString *f2SettingsSHA256;
+@property(nonatomic, assign, readonly) NSUInteger measuredTriangleCount;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DLODSetRecord : NSObject
+@property(nonatomic, copy, readonly) NSString *identifier;
+@property(nonatomic, copy, readonly) NSString *documentIdentifier;
+@property(nonatomic, assign, readonly) NSUInteger revision;
+@property(nonatomic, assign, readonly) double metersPerUnit;
+@property(nonatomic, assign, readonly) Core3DLODSetDurableState state;
+@property(nonatomic, copy, readonly) NSString *reason;
+@property(nonatomic, copy, readonly) NSString *observedSourceSHA256;
+@property(nonatomic, copy, readonly, nullable) NSString *lastBuiltSourceSHA256;
+@property(nonatomic, copy, readonly) NSArray<Core3DLODLevelRecord *> *levels;
+@property(nonatomic, copy, readonly) NSData *canonicalSYLSRecord;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
 
 //! Opaque identities minted by a native opening. Neither type has a public
 //! constructor, so caller data cannot become an LOD-set or level identity.
@@ -130,6 +188,37 @@ __attribute__((objc_subclassing_restricted))
 //! command, persistence, manifest creation or Current-set installation.
 - (Core3DLODSetCommitResult)commitDraft:(Core3DLODSetDraft *)draft
     NS_SWIFT_NAME(commit(_:));
+
+//! Controller-bound durable owner. The detached overload above remains the S1
+//! guard and always answers Unavailable.
++ (nullable instancetype)openingWithCapture:(Core3DPublishCapture *)capture
+                                 controller:(Core3DViewController *)controller
+                      existingSetIdentifier:(nullable NSString *)existingSetIdentifier
+                                      error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(init(capture:controller:existingSetIdentifier:));
+- (Core3DLODSetCommitResult)commitDraft:(Core3DLODSetDraft *)draft
+                              controller:(Core3DViewController *)controller
+                                   error:(NSError * _Nullable * _Nullable)error
+    __attribute__((swift_error(nonnull_error)))
+    NS_SWIFT_NAME(commit(_:controller:));
++ (nullable NSArray<Core3DLODSetRecord *> *)persistedSetsForController:
+    (Core3DViewController *)controller error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(persistedSets(controller:));
+- (Core3DLODSetCommitResult)removeFromController:(Core3DViewController *)controller
+                                           error:(NSError * _Nullable * _Nullable)error
+    __attribute__((swift_error(nonnull_error)))
+    NS_SWIFT_NAME(remove(controller:));
+- (Core3DLODSetCommitResult)regenerateForController:(Core3DViewController *)controller
+                                               error:(NSError * _Nullable * _Nullable)error
+    __attribute__((swift_error(nonnull_error)))
+    NS_SWIFT_NAME(regenerate(controller:));
+
+//! Production codec surface used by F05. Validation and re-encoding execute
+//! the same strict SYLS/1 decoder used by ordinary document reads.
++ (nullable NSData *)reencodeSYLSRecord:(NSData *)record
+                                   error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(reencodeSYLS(_:));
++ (NSUInteger)maximumSYLSRecordBytes;
 
 #if DEBUG
 //! Called from the real bounded validation loop. Tests can synchronously Stop

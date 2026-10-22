@@ -113,6 +113,13 @@ NS_SWIFT_SENDABLE
 - (void)startSceneSnapshotWithCompletion:(Core3DExportSceneCompletion)completion
     NS_SWIFT_NAME(startSceneSnapshot(completion:));
 - (void)cancel;
+//! Returns the immutable saved-group all-member layout read for this
+//! operation's exact returned-scene object. Any copied, prior, or foreign
+//! scene returns nil. A valid alias can return a typed absent state.
+- (nullable NSDictionary<NSString *, id> *)
+    savedGroupAllMemberLayoutRecordForReturnedScene:
+        (Core3DSceneSnapshot *)returnedScene
+    NS_SWIFT_NAME(savedGroupAllMemberLayoutRecord(returnedScene:));
 
 #ifdef DEBUG
 //! Arms one operation-local E4 fault before the worker starts.

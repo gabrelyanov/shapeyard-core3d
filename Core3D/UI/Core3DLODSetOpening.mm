@@ -3,7 +3,13 @@
 
 #import "Core3DLODSetOpening.h"
 #import "Core3DPublishCapture.h"
+#import "Core3DViewController.h"
 
+#import "../OCCTKit/GLViewController.h"
+#import "Core3DViewer.h"
+
+#include "../OCCTKit/LODSetNativeOwner.hxx"
+#include "../OCCTKit/OcctDocument.h"
 #include "../OCCTKit/RetainedLODSet.hxx"
 #include <CommonCrypto/CommonDigest.h>
 #include <atomic>
@@ -16,6 +22,8 @@ NSErrorDomain const Core3DLODSetErrorDomain = @"Core3DLODSetErrorDomain";
 namespace {
 namespace lod = core3d::retained_lod;
 namespace decimation = core3d::export_decimation;
+namespace syls = core3d::lod_set_persistence;
+namespace lod_owner = core3d::lod_set_owner;
 
 NSError *LODError(Core3DLODSetError code, NSString *reason) {
     return [NSError errorWithDomain:Core3DLODSetErrorDomain code:code
@@ -34,6 +42,60 @@ std::string Text(NSString *value) {
 NSString *Text(const std::string& value) {
     return [[NSString alloc] initWithBytes:value.data() length:value.size()
                                   encoding:NSUTF8StringEncoding] ?: @"";
+}
+
+std::vector<std::uint8_t> Bytes(NSData *data) {
+    if (!data.length) return {};
+    const auto *first = static_cast<const std::uint8_t *>(data.bytes);
+    return {first, first + data.length};
+}
+
+NSData *Data(const std::vector<std::uint8_t>& bytes) {
+    return bytes.empty() ? [NSData data]
+        : [NSData dataWithBytes:bytes.data() length:bytes.size()];
+}
+
+Handle(OcctDocument) LODDocument(Core3DViewController *controller) {
+    if (!controller) return Handle(OcctDocument)();
+    GLViewController *gl = [controller.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)controller.glController : nil;
+    const std::shared_ptr<core3d::Core3DViewer> viewer = gl ? gl.viewer : nullptr;
+    return viewer ? viewer->getDocument() : Handle(OcctDocument)();
+}
+
+NSString *UUIDText(const syls::UUID& value) {
+    return Text(decimation::UUIDText(value));
+}
+
+NSString *DigestText(const syls::Digest& value) {
+    return Text(decimation::HexFromDigest(value));
+}
+
+bool UUID(NSString *value, syls::UUID& out) {
+    return value && decimation::UUIDFromText(value.UTF8String ?: "", out)
+        && decimation::Nonzero(out);
+}
+
+bool DigestValue(NSString *value, syls::Digest& out) {
+    return value && decimation::DigestFromHex(value.UTF8String ?: "", out);
+}
+
+NSString *ReasonText(syls::Reason reason) {
+    switch (reason) {
+        case syls::Reason::None: return @"none";
+        case syls::Reason::SourceChanged: return @"sourceChanged";
+        case syls::Reason::SettingsChanged: return @"settingsChanged";
+        case syls::Reason::MissingArtifact: return @"missingArtifact";
+        case syls::Reason::ProvenanceInvalid: return @"provenanceInvalid";
+    }
+}
+
+Core3DLODSetDurableState PublicState(syls::State state) {
+    switch (state) {
+        case syls::State::Current: return Core3DLODSetDurableStateCurrent;
+        case syls::State::Stale: return Core3DLODSetDurableStateStale;
+        case syls::State::Unbuilt: return Core3DLODSetDurableStateUnbuilt;
+    }
 }
 
 NSString *Digest(NSData *data) {
@@ -79,6 +141,94 @@ Core3DLODSetError PublicRefusal(lod::Refusal refusal) {
     }
 }
 }
+
+@interface Core3DLODLevelRecord ()
+@property(nonatomic, copy, readwrite) NSString *identifier;
+@property(nonatomic, copy, readwrite) NSString *displayName;
+@property(nonatomic, assign, readwrite) NSUInteger ordinal;
+@property(nonatomic, assign, readwrite) NSUInteger targetTriangleCount;
+@property(nonatomic, assign, readwrite) Core3DLODSetDurableState state;
+@property(nonatomic, copy, readwrite) NSString *reason;
+@property(nonatomic, assign, readwrite) double maximumSurfaceDistanceMM;
+@property(nonatomic, assign, readwrite) double maximumSilhouetteDeviationPixels;
+@property(nonatomic, assign, readwrite) double hardEdgeAngleDegrees;
+@property(nonatomic, assign, readwrite) double contactClearanceMM;
+@property(nonatomic, assign, readwrite) NSUInteger measurementSampleCount;
+@property(nonatomic, assign, readwrite) NSUInteger silhouetteResolution;
+@property(nonatomic, copy, readwrite) NSString *silhouetteCameraSetSHA256;
+@property(nonatomic, assign, readwrite) double maximumUVStretch;
+@property(nonatomic, assign, readwrite) double maximumNormalDeviationDegrees;
+@property(nonatomic, assign, readwrite) NSUInteger uvMethodVersion;
+@property(nonatomic, assign, readwrite) NSUInteger normalMethodVersion;
+@property(nonatomic, assign, readwrite) NSUInteger overlapMethodVersion;
+@property(nonatomic, copy, readwrite, nullable) NSString *f2DerivativeIdentifier;
+@property(nonatomic, copy, readwrite, nullable) NSString *f2SettingsSHA256;
+@property(nonatomic, assign, readwrite) NSUInteger measuredTriangleCount;
+- (instancetype)initWithLevel:(const syls::Level&)level ordinal:(NSUInteger)ordinal;
+@end
+
+@implementation Core3DLODLevelRecord
+- (instancetype)initWithLevel:(const syls::Level&)level ordinal:(NSUInteger)ordinal {
+    if ((self = [super init])) {
+        _identifier = UUIDText(level.identifier); _displayName = Text(level.name);
+        _ordinal = ordinal; _targetTriangleCount = level.targetTriangleCount;
+        _state = PublicState(level.state); _reason = ReasonText(level.reason);
+        _maximumSurfaceDistanceMM = level.quality.maximumSurfaceDistanceMM;
+        _maximumSilhouetteDeviationPixels = level.quality.maximumSilhouetteDeviationPixels;
+        _hardEdgeAngleDegrees = level.quality.hardEdgeAngleDegrees;
+        _contactClearanceMM = level.quality.contactClearanceMM;
+        _measurementSampleCount = level.quality.measurementSampleCount;
+        _silhouetteResolution = level.quality.silhouetteResolution;
+        _silhouetteCameraSetSHA256 = DigestText(level.quality.silhouetteCameraSetSHA256);
+        _maximumUVStretch = level.quality.maximumUVStretch;
+        _maximumNormalDeviationDegrees = level.quality.maximumNormalDeviationDegrees;
+        _uvMethodVersion = level.quality.uvMethodVersion;
+        _normalMethodVersion = level.quality.normalMethodVersion;
+        _overlapMethodVersion = level.quality.overlapMethodVersion;
+        if (level.hasF2Reference) {
+            _f2DerivativeIdentifier = DigestText(level.f2.derivativeIdentifier);
+            _f2SettingsSHA256 = DigestText(level.f2.settingsSHA256);
+            _measuredTriangleCount = level.f2.measuredTriangleCount;
+        }
+    }
+    return self;
+}
+@end
+
+@interface Core3DLODSetRecord ()
+@property(nonatomic, copy, readwrite) NSString *identifier;
+@property(nonatomic, copy, readwrite) NSString *documentIdentifier;
+@property(nonatomic, assign, readwrite) NSUInteger revision;
+@property(nonatomic, assign, readwrite) double metersPerUnit;
+@property(nonatomic, assign, readwrite) Core3DLODSetDurableState state;
+@property(nonatomic, copy, readwrite) NSString *reason;
+@property(nonatomic, copy, readwrite) NSString *observedSourceSHA256;
+@property(nonatomic, copy, readwrite, nullable) NSString *lastBuiltSourceSHA256;
+@property(nonatomic, copy, readwrite) NSArray<Core3DLODLevelRecord *> *levels;
+@property(nonatomic, copy, readwrite) NSData *canonicalSYLSRecord;
+- (instancetype)initWithRecord:(const syls::Record&)record bytes:(NSData *)bytes;
+@end
+
+@implementation Core3DLODSetRecord
+- (instancetype)initWithRecord:(const syls::Record&)record bytes:(NSData *)bytes {
+    if ((self = [super init])) {
+        _identifier = UUIDText(record.setIdentifier);
+        _documentIdentifier = UUIDText(record.documentIdentifier);
+        _revision = static_cast<NSUInteger>(record.revision);
+        _metersPerUnit = record.metersPerUnit; _state = PublicState(record.state);
+        _reason = ReasonText(record.reason);
+        _observedSourceSHA256 = DigestText(record.observedSourceSHA256);
+        _lastBuiltSourceSHA256 = record.hasLastBuiltSource
+            ? DigestText(record.lastBuiltSourceSHA256) : nil;
+        NSMutableArray *levels = [NSMutableArray arrayWithCapacity:record.levels.size()];
+        for (std::size_t index = 0; index < record.levels.size(); ++index)
+            [levels addObject:[[Core3DLODLevelRecord alloc]
+                initWithLevel:record.levels[index] ordinal:index]];
+        _levels = [levels copy]; _canonicalSYLSRecord = [bytes copy];
+    }
+    return self;
+}
+@end
 
 @interface Core3DLODSetHandle ()
 @property(nonatomic, copy, readwrite) NSString *identifier;
@@ -212,8 +362,94 @@ maximumSilhouetteDeviationPixels:(double)maximumSilhouetteDeviationPixels
 @property(nonatomic, copy, readwrite) NSArray<Core3DLODLevelHandle *> *levelHandles;
 @property(nonatomic, copy, readwrite) NSString *sourceRevisionSHA256;
 @property(nonatomic, copy) NSString *issuerIdentifier;
+@property(nonatomic, copy, nullable) NSString *existingSetIdentifier;
 - (instancetype)initPrivateWithCapture:(Core3DPublishCapture *)capture;
 @end
+
+namespace {
+enum class LODWriteOutcome { Committed, Refused, Stale, Recovery };
+
+LODWriteOutcome WriteLODStore(const Handle(OcctDocument)& document,
+                              Core3DPublishCapture *capture,
+                              const syls::StoreRead& before,
+                              const std::vector<std::uint8_t>& candidate,
+                              bool remove) noexcept {
+    try {
+        const Handle(TDocStd_Document) ocaf = document.IsNull()
+            ? Handle(TDocStd_Document)() : document->Document();
+        if (ocaf.IsNull() || ocaf->HasOpenCommand() || !before.readable()
+            || (!remove && (candidate.empty()
+                || candidate.size() > syls::kMaximumRecordBytes)))
+            return LODWriteOutcome::Refused;
+        NSError *currentError = nil;
+        if (![capture isCurrent:&currentError]) return LODWriteOutcome::Stale;
+        const Standard_Integer undoBefore = ocaf->GetAvailableUndos();
+        try { ocaf->NewCommand(); } catch (...) { return LODWriteOutcome::Refused; }
+        if (!ocaf->HasOpenCommand()) return LODWriteOutcome::Refused;
+        auto abortAndVerify = [&]() -> bool {
+            try { if (ocaf->HasOpenCommand()) ocaf->AbortCommand(); }
+            catch (...) { return false; }
+            syls::StoreRead restored;
+            return !ocaf->HasOpenCommand() && document->ReadLODSetStore(restored)
+                && syls::SameStore(before, restored);
+        };
+        syls::StoreRead staged;
+        if (!document->StageLODSetStore(before, candidate,
+                remove ? Standard_True : Standard_False, staged)
+            || (remove && staged.occurrence != syls::StoreOccurrence::Absent)
+            || (!remove && (staged.occurrence != syls::StoreOccurrence::Present
+                || staged.bytes != candidate)))
+            return abortAndVerify() ? LODWriteOutcome::Refused : LODWriteOutcome::Recovery;
+        bool committed = false;
+        try { committed = ocaf->CommitCommand() && !ocaf->HasOpenCommand(); }
+        catch (...) { committed = false; }
+        if (!committed) return LODWriteOutcome::Recovery;
+        syls::StoreRead readback;
+        if (!document->ReadLODSetStore(readback)
+            || (remove && readback.occurrence != syls::StoreOccurrence::Absent)
+            || (!remove && (readback.occurrence != syls::StoreOccurrence::Present
+                || readback.bytes != candidate))
+            || ocaf->GetAvailableUndos() - undoBefore != 1
+            || !document->FinalizeLODSetHistory()) return LODWriteOutcome::Recovery;
+        return LODWriteOutcome::Committed;
+    } catch (...) { return LODWriteOutcome::Recovery; }
+}
+
+bool DecodeStores(const Handle(OcctDocument)& document,
+                  syls::StoreRead& read, syls::Store& store,
+                  decimation::F2Store& f2Store, bool& hasF2,
+                  NSError **error) {
+    hasF2 = false; read = {}; store = {}; f2Store = {};
+    if (document.IsNull() || !document->ReadLODSetStore(read)) {
+        SetError(error, Core3DLODSetErrorPersistenceUnavailable,
+            @"LOD-set store read is unavailable."); return false;
+    }
+    if (read.occurrence == syls::StoreOccurrence::Corrupt) {
+        SetError(error, Core3DLODSetErrorCorruptRecord,
+            [NSString stringWithFormat:@"Corrupt SYLS/1 record: %s", read.refusal.c_str()]);
+        return false;
+    }
+    if (read.occurrence == syls::StoreOccurrence::Present
+        && !syls::DecodeStore(read.bytes, store)) {
+        SetError(error, Core3DLODSetErrorCorruptRecord, @"Noncanonical SYLS/1 record.");
+        return false;
+    }
+    decimation::F2StoreRead f2Read;
+    if (!document->ReadF2DerivativeStore(f2Read)
+        || f2Read.occurrence == decimation::F2StoreOccurrence::Corrupt) {
+        SetError(error, Core3DLODSetErrorCorruptRecord, @"F2 reference store is corrupt.");
+        return false;
+    }
+    if (f2Read.occurrence == decimation::F2StoreOccurrence::Present) {
+        if (!decimation::DecodeStore(f2Read.bytes, f2Store)) {
+            SetError(error, Core3DLODSetErrorCorruptRecord, @"F2 reference store is noncanonical.");
+            return false;
+        }
+        hasF2 = true;
+    }
+    return true;
+}
+} // namespace
 
 @implementation Core3DLODSetOpening
 
@@ -249,6 +485,50 @@ maximumSilhouetteDeviationPixels:(double)maximumSilhouetteDeviationPixels
         _sourceRevisionSHA256 = Digest(capture.sourceWitnessBytes);
     }
     return self;
+}
+
++ (instancetype)openingWithCapture:(Core3DPublishCapture *)capture
+                         controller:(Core3DViewController *)controller
+              existingSetIdentifier:(NSString *)existingSetIdentifier
+                              error:(NSError **)error {
+    if (error) *error = nil;
+    Core3DLODSetOpening *opening = [self openingWithCapture:capture error:error];
+    if (!opening) return nil;
+    const Handle(OcctDocument) document = LODDocument(controller);
+    if (document.IsNull()
+        || document->DocumentIdentifier() != (capture.documentIdentifier.UTF8String ?: "")) {
+        SetError(error, Core3DLODSetErrorPersistenceUnavailable,
+            @"The controller does not own this captured document."); return nil;
+    }
+    if (!existingSetIdentifier) return opening;
+    syls::UUID identifier{};
+    if (!UUID(existingSetIdentifier, identifier)) {
+        SetError(error, Core3DLODSetErrorNotFound, @"LOD-set identifier is invalid."); return nil;
+    }
+    syls::StoreRead read; syls::Store store; decimation::F2Store f2Store; bool hasF2 = false;
+    if (!DecodeStores(document, read, store, f2Store, hasF2, error)) return nil;
+    const syls::Record *record = lod_owner::Find(store, identifier);
+    lod_owner::Refusal refusal;
+    if (!record || !lod_owner::ValidateReferences(*record, hasF2 ? &f2Store : nullptr, refusal)) {
+        SetError(error, record ? Core3DLODSetErrorCorruptRecord : Core3DLODSetErrorNotFound,
+            record ? @"LOD-set references do not exactly match F2 readback."
+                   : @"LOD set was not found.");
+        return nil;
+    }
+    opening.setHandle = [[Core3DLODSetHandle alloc]
+        initPrivateWithIdentifier:UUIDText(record->setIdentifier).lowercaseString];
+    NSMutableArray *handles = [NSMutableArray arrayWithCapacity:lod::kMaximumLevels];
+    for (std::size_t index = 0; index < record->levels.size(); ++index)
+        [handles addObject:[[Core3DLODLevelHandle alloc]
+            initPrivateWithIdentifier:UUIDText(record->levels[index].identifier).lowercaseString
+            ordinal:index]];
+    while (handles.count < lod::kMaximumLevels)
+        [handles addObject:[[Core3DLODLevelHandle alloc]
+            initPrivateWithIdentifier:NSUUID.UUID.UUIDString.lowercaseString
+            ordinal:handles.count]];
+    opening.levelHandles = [handles copy];
+    opening.existingSetIdentifier = existingSetIdentifier.lowercaseString;
+    return opening;
 }
 
 - (NSUInteger)completedWorkUnits { return _completedWorkUnits.load(); }
@@ -416,5 +696,199 @@ maximumSilhouetteDeviationPixels:(double)maximumSilhouetteDeviationPixels
     (void)draft;
     return Core3DLODSetCommitResultUnavailable;
 }
+
+- (Core3DLODSetCommitResult)commitDraft:(Core3DLODSetDraft *)draft
+                              controller:(Core3DViewController *)controller
+                                   error:(NSError **)error {
+    if (error) *error = nil;
+    if (!NSThread.isMainThread || ![draft isKindOfClass:Core3DLODSetDraft.class]
+        || draft.setHandle != self.setHandle
+        || ![draft.issuerIdentifier isEqualToString:self.issuerIdentifier]) {
+        SetError(error, Core3DLODSetErrorForeignIdentity, @"Foreign durable LOD draft.");
+        return Core3DLODSetCommitResultUnavailable;
+    }
+    if (![self isCurrent:error]) return Core3DLODSetCommitResultUnavailable;
+    const Handle(OcctDocument) document = LODDocument(controller);
+    if (document.IsNull()
+        || document->DocumentIdentifier() != (self.capture.documentIdentifier.UTF8String ?: "")) {
+        SetError(error, Core3DLODSetErrorPersistenceUnavailable,
+            @"LOD persistence is unavailable for this controller.");
+        return Core3DLODSetCommitResultUnavailable;
+    }
+    syls::StoreRead before; syls::Store stored; decimation::F2Store f2Store;
+    bool hasF2 = false;
+    if (!DecodeStores(document, before, stored, f2Store, hasF2, error))
+        return Core3DLODSetCommitResultUnavailable;
+
+    syls::Record candidate;
+    if (!UUID(self.capture.documentIdentifier, candidate.documentIdentifier)
+        || !UUID(draft.setHandle.identifier, candidate.setIdentifier)
+        || !UUID(self.capture.sourceEntityIdentifier, candidate.sourceEntityIdentifier)
+        || !UUID(self.capture.sourceDefinitionIdentifier, candidate.sourceDefinitionIdentifier)
+        || !UUID(self.capture.sourceFeatureIdentifier, candidate.sourceFeatureIdentifier)
+        || !DigestValue(draft.observedSourceRevisionSHA256, candidate.observedSourceSHA256)
+        || !DigestValue(draft.attachmentMetadataSHA256, candidate.attachmentMetadataSHA256)) {
+        SetError(error, Core3DLODSetErrorMissingProvenance,
+            @"The durable source binding is incomplete.");
+        return Core3DLODSetCommitResultUnavailable;
+    }
+    candidate.metersPerUnit = self.capture.metersPerUnit;
+    candidate.nativeEditRevision = self.capture.modelRevision;
+    candidate.state = syls::State::Unbuilt; candidate.reason = syls::Reason::None;
+    const syls::Record *prior = lod_owner::Find(stored, candidate.setIdentifier);
+    if ((self.existingSetIdentifier && !prior) || (!self.existingSetIdentifier && prior)) {
+        SetError(error, Core3DLODSetErrorForeignIdentity,
+            @"Create/edit identity does not match the durable owner.");
+        return Core3DLODSetCommitResultUnavailable;
+    }
+    candidate.revision = prior ? prior->revision + 1 : 1;
+    candidate.settingsRevision = prior ? prior->settingsRevision + 1 : 1;
+    candidate.levels.reserve(draft.levels.count);
+    for (Core3DLODLevelRequest *request in draft.levels) {
+        syls::Level level;
+        if (!UUID(request.handle.identifier, level.identifier)
+            || !DigestValue(request.silhouetteCameraSetSHA256,
+                level.quality.silhouetteCameraSetSHA256)
+            || !DigestValue(request.settingsSHA256, level.intentSHA256)
+            || request.targetTriangleCount > std::numeric_limits<std::uint32_t>::max()
+            || request.measurementSampleCount > std::numeric_limits<std::uint32_t>::max()
+            || request.silhouetteResolution > std::numeric_limits<std::uint32_t>::max()) {
+            SetError(error, Core3DLODSetErrorInvalidDefinition,
+                @"LOD level cannot be represented canonically.");
+            return Core3DLODSetCommitResultUnavailable;
+        }
+        level.name = Text(request.displayName);
+        level.targetTriangleCount = static_cast<std::uint32_t>(request.targetTriangleCount);
+        level.quality.maximumSurfaceDistanceMM = request.maximumSurfaceDistanceMM;
+        level.quality.maximumSilhouetteDeviationPixels =
+            request.maximumSilhouetteDeviationPixels;
+        level.quality.hardEdgeAngleDegrees = request.hardEdgeAngleDegrees;
+        level.quality.contactClearanceMM = request.contactClearanceMM;
+        level.quality.measurementSampleCount =
+            static_cast<std::uint32_t>(request.measurementSampleCount);
+        level.quality.silhouetteResolution =
+            static_cast<std::uint32_t>(request.silhouetteResolution);
+        // S2 retains the three still-fixed methods and the two currently
+        // unsupported quality dimensions explicitly instead of dropping them.
+        level.quality.maximumUVStretch = 0;
+        level.quality.maximumNormalDeviationDegrees = 0;
+        level.quality.uvMethodVersion = 1;
+        level.quality.normalMethodVersion = 1;
+        level.quality.overlapMethodVersion = 1;
+        level.state = syls::State::Unbuilt; level.reason = syls::Reason::None;
+        candidate.levels.push_back(std::move(level));
+    }
+    lod_owner::Refusal refusal; syls::Store result;
+    const syls::Store *beforeStore = before.occurrence == syls::StoreOccurrence::Present
+        ? &stored : nullptr;
+    if (!lod_owner::Upsert(beforeStore, std::move(candidate),
+            hasF2 ? &f2Store : nullptr, result, refusal)) {
+        SetError(error, Core3DLODSetErrorInvalidDefinition,
+            @"The canonical durable LOD candidate was refused.");
+        return Core3DLODSetCommitResultUnavailable;
+    }
+    std::vector<std::uint8_t> encoded;
+    if (!syls::EncodeStore(result, encoded)) {
+        SetError(error, Core3DLODSetErrorPersistenceUnavailable,
+            @"SYLS/1 exceeds its bounded carrier.");
+        return Core3DLODSetCommitResultUnavailable;
+    }
+    switch (WriteLODStore(document, self.capture, before, encoded, false)) {
+        case LODWriteOutcome::Committed:
+            self.existingSetIdentifier = self.setHandle.identifier;
+            return Core3DLODSetCommitResultCommitted;
+        case LODWriteOutcome::Stale:
+            SetError(error, Core3DLODSetErrorStaleSource, @"Source changed before commit.");
+            return Core3DLODSetCommitResultUnavailable;
+        case LODWriteOutcome::Refused:
+            SetError(error, Core3DLODSetErrorPersistenceUnavailable,
+                @"SYLS/1 staging failed; the prior record is preserved.");
+            return Core3DLODSetCommitResultUnavailable;
+        case LODWriteOutcome::Recovery:
+            SetError(error, Core3DLODSetErrorRecoveryRequired,
+                @"LOD command closure is uncertain; recovery is required.");
+            return Core3DLODSetCommitResultRecoveryRequired;
+    }
+}
+
++ (NSArray<Core3DLODSetRecord *> *)persistedSetsForController:
+    (Core3DViewController *)controller error:(NSError **)error {
+    if (error) *error = nil;
+    if (!NSThread.isMainThread) {
+        SetError(error, Core3DLODSetErrorPersistenceUnavailable, @"Main thread required.");
+        return nil;
+    }
+    const Handle(OcctDocument) document = LODDocument(controller);
+    syls::StoreRead read; syls::Store store; decimation::F2Store f2Store; bool hasF2 = false;
+    if (!DecodeStores(document, read, store, f2Store, hasF2, error)) return nil;
+    if (read.occurrence == syls::StoreOccurrence::Absent) return @[];
+    NSMutableArray *records = [NSMutableArray arrayWithCapacity:store.records.size()];
+    for (const syls::Record& record : store.records) {
+        lod_owner::Refusal refusal;
+        if (!lod_owner::ValidateReferences(record, hasF2 ? &f2Store : nullptr, refusal)) {
+            SetError(error, Core3DLODSetErrorCorruptRecord,
+                @"SYLS/1 contains a missing or mismatched F2 reference."); return nil;
+        }
+        [records addObject:[[Core3DLODSetRecord alloc]
+            initWithRecord:record bytes:Data(read.bytes)]];
+    }
+    return [records copy];
+}
+
+- (Core3DLODSetCommitResult)removeFromController:(Core3DViewController *)controller
+                                           error:(NSError **)error {
+    if (error) *error = nil;
+    if (!self.existingSetIdentifier || ![self isCurrent:error]) {
+        if (!self.existingSetIdentifier)
+            SetError(error, Core3DLODSetErrorNotFound, @"No durable LOD set is bound.");
+        return Core3DLODSetCommitResultUnavailable;
+    }
+    const Handle(OcctDocument) document = LODDocument(controller);
+    syls::StoreRead before; syls::Store store; decimation::F2Store f2Store; bool hasF2 = false;
+    if (!DecodeStores(document, before, store, f2Store, hasF2, error))
+        return Core3DLODSetCommitResultUnavailable;
+    syls::UUID identifier{}; syls::Store result; lod_owner::Refusal refusal;
+    if (!UUID(self.existingSetIdentifier, identifier)
+        || !lod_owner::Remove(store, identifier, result, refusal)) {
+        SetError(error, Core3DLODSetErrorNotFound, @"Durable LOD set was not found.");
+        return Core3DLODSetCommitResultUnavailable;
+    }
+    const bool removeCarrier = result.records.empty(); std::vector<std::uint8_t> encoded;
+    if (!removeCarrier && !syls::EncodeStore(result, encoded)) {
+        SetError(error, Core3DLODSetErrorPersistenceUnavailable, @"SYLS/1 encode failed.");
+        return Core3DLODSetCommitResultUnavailable;
+    }
+    const LODWriteOutcome outcome = WriteLODStore(
+        document, self.capture, before, encoded, removeCarrier);
+    if (outcome == LODWriteOutcome::Committed) return Core3DLODSetCommitResultRemoved;
+    if (outcome == LODWriteOutcome::Recovery) {
+        SetError(error, Core3DLODSetErrorRecoveryRequired, @"Removal closure is uncertain.");
+        return Core3DLODSetCommitResultRecoveryRequired;
+    }
+    SetError(error, outcome == LODWriteOutcome::Stale ? Core3DLODSetErrorStaleSource
+        : Core3DLODSetErrorPersistenceUnavailable, @"LOD removal was refused.");
+    return Core3DLODSetCommitResultUnavailable;
+}
+
+- (Core3DLODSetCommitResult)regenerateForController:(Core3DViewController *)controller
+                                               error:(NSError **)error {
+    (void)controller;
+    if (error) *error = LODError(Core3DLODSetErrorUnavailable,
+        @"Regeneration is held by D1057(iii), item 29.");
+    return Core3DLODSetCommitResultRegenerateUnavailable;
+}
+
++ (NSData *)reencodeSYLSRecord:(NSData *)record error:(NSError **)error {
+    if (error) *error = nil;
+    syls::Store store; std::vector<std::uint8_t> encoded;
+    if (![record isKindOfClass:NSData.class] || record.length > syls::kMaximumRecordBytes
+        || !syls::DecodeStore(Bytes(record), store) || !syls::EncodeStore(store, encoded)) {
+        SetError(error, Core3DLODSetErrorCorruptRecord, @"Strict SYLS/1 decode refused.");
+        return nil;
+    }
+    return Data(encoded);
+}
+
++ (NSUInteger)maximumSYLSRecordBytes { return syls::kMaximumRecordBytes; }
 
 @end

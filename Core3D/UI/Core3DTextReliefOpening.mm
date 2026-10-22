@@ -18,6 +18,11 @@
 #include "../OCCTKit/TextReliefNativeOwner.hxx"
 #include "../OCCTKit/TextReliefPersistence.hxx"
 #include "Core3DViewer.h"
+#if DEBUG
+#include "../OCCTKit/VariableRadiusFilletNativeOwner.hxx"
+#include <BRepBuilderAPI_Copy.hxx>
+#include <TopoDS_Shell.hxx>
+#endif
 
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepGProp.hxx>
@@ -207,6 +212,7 @@ struct IssuedSelection final {
     std::string entity;
     std::uint32_t topologyIndex = 0;
     std::vector<std::uint8_t> sourceBytes;
+    TopoDS_Shape sourceShape;                    // in-process issued authority
     core3d::bounded_curve::Frame frame;        // origin on the face plane, zAxis outward
     tr::HostReceipt host;
     std::uint16_t boundaryEdges = 0;
@@ -403,11 +409,15 @@ struct E5Build final {
             return nil;
         }
         const TopoDS_Shape source = XCAFDoc_ShapeTool::GetShape(label);
+        const TopoDS_Solid admittedHost = tr::detail::RaisedHostSolid(source);
+        const TopoDS_Shape selectionSource = admittedHost.IsNull()
+            ? source : TopoDS_Shape(admittedHost);
         IssuedSelection issued; issued.entity = entity;
         issued.topologyIndex = element.topologyIndex;
+        issued.sourceShape = selectionSource;
         std::string exactBytes;
-        if (source.IsNull()
-            || !core3d::retained_part_boolean::ExactShapeBytes(source, exactBytes)
+        if (selectionSource.IsNull()
+            || !core3d::retained_part_boolean::ExactShapeBytes(selectionSource, exactBytes)
             || exactBytes.empty()) {
             if (error) *error = E5Error(Core3DTextReliefErrorUnavailable,
                                         @"selected native source unavailable");
@@ -415,7 +425,7 @@ struct E5Build final {
         }
         issued.sourceBytes.assign(exactBytes.begin(), exactBytes.end());
         TopTools_IndexedMapOfShape faces;
-        TopExp::MapShapes(source, TopAbs_FACE, faces);
+        TopExp::MapShapes(selectionSource, TopAbs_FACE, faces);
         if (issued.topologyIndex >= std::uint32_t(faces.Extent())) {
             if (error) *error = E5Error(Core3DTextReliefErrorInvalidSelection,
                                         @"selected face is not in the native source");
@@ -707,8 +717,8 @@ struct E5Build final {
             out.built = true;
             return out;
         }
-        TopoDS_Shape host;
-        if (!ReadShape(_issued.sourceBytes, host)) {
+        const TopoDS_Shape host = _issued.sourceShape;
+        if (host.IsNull()) {
             out.refusal = tr::BuildRefusal::InvalidHost; return out;
         }
         TopTools_IndexedMapOfShape faces;
@@ -1382,6 +1392,147 @@ struct E5Build final {
 
 - (void)e5DebugArmApplyFault:(int)fault { _debugApplyFault = fault; }
 
+- (BOOL)e5DebugArmReplayPairFault {
+    return _existing && _existing->record.payload && !_document.IsNull()
+        && _document->DebugArmTextReliefReplayPairFault(
+            _existing->record.payload->value.feature);
+}
+
+- (NSDictionary *)e5DebugReplayObservation {
+    if (!_existing || !_existing->record.payload || _document.IsNull())
+        return @{@"ok": @NO};
+    core3d::treatment_history::TextReliefReplaySide side;
+    if (!_document->DebugCaptureTextReliefReplaySide(
+            _existing->record.payload->value.feature, side)
+        || side.owners.size() != 1) return @{@"ok": @NO};
+    const auto& capture = side.owners.front();
+    const auto shapeData = [](const TopoDS_Shape& shape) -> NSData * {
+        if (shape.IsNull()) return [NSData data];
+        std::string bytes;
+        if (!core3d::retained_part_boolean::ExactShapeBytes(shape, bytes)) return nil;
+        return E5Data(bytes.data(), bytes.size());
+    };
+    NSMutableArray *naming = [NSMutableArray array], *flags = [NSMutableArray array];
+    for (const auto& state : side.naming) {
+        NSMutableArray *pairs = [NSMutableArray array];
+        for (const auto& pair : state.shapePairs) {
+            NSData *old = shapeData(pair.first), *next = shapeData(pair.second);
+            if (!old || !next) return @{@"ok": @NO};
+            [pairs addObject:@[old, next]];
+        }
+        NSData *binding = shapeData(state.currentBinding);
+        if (!binding) return @{@"ok": @NO};
+        [naming addObject:@{ @"label": @(state.labelEntry.c_str()),
+            @"version": @(state.version), @"evolution": @(int(state.evolution)),
+            @"pairs": pairs, @"binding": binding }];
+    }
+    for (const auto& root : side.flags) {
+        NSMutableArray *values = [NSMutableArray array];
+        for (const auto& flag : root)
+            [values addObject:@[@(flag.modified), @(flag.checked)]];
+        [flags addObject:values];
+    }
+    NSMutableArray *features = [NSMutableArray array], *definitions = [NSMutableArray array];
+    NSMutableArray *owners = [NSMutableArray array], *wires = [NSMutableArray array];
+    NSMutableArray *curveNaming = [NSMutableArray array];
+    for (const auto& curve : capture.curves) {
+        NSData *shape = shapeData(curve.wire);
+        if (!shape) return @{@"ok": @NO};
+        [features addObject:E5Data(curve.persisted.value.feature)];
+        [definitions addObject:E5Data(curve.record.value->definitionBytes)];
+        [owners addObject:E5Data(curve.record.value->ownerBytes)];
+        [wires addObject:shape];
+        std::optional<Standard_Integer> ownerVersion, recordVersion;
+        for (const auto& state : side.naming) {
+            if (state.label.IsEqual(curve.record.owner)) ownerVersion = state.version;
+            if (state.label.IsEqual(curve.record.label)) recordVersion = state.version;
+        }
+        if (!ownerVersion || !recordVersion) return @{@"ok": @NO};
+        [curveNaming addObject:@[@(*ownerVersion), @(*recordVersion)]];
+    }
+    NSData *shape = shapeData(capture.record.shape);
+    if (!shape) return @{@"ok": @NO};
+    NSMutableDictionary *result = [@{ @"ok": @YES,
+        @"recordBytes": E5Data(capture.record.payload->bytes), @"shapeBytes": shape,
+        @"curveFeatures": features, @"curveDefinitionBytes": definitions,
+        @"curveOwnerBytes": owners, @"curveShapeBytes": wires,
+        @"curveNaming": curveNaming, @"memberNaming": naming, @"memberFlags": flags } mutableCopy];
+    const auto native = _document->Document();
+    const auto shapes = XCAFDoc_DocumentTool::ShapeTool(native->Main());
+    TDF_LabelSequence roots; shapes->GetFreeShapes(roots);
+    const auto host = core3d::retained_solid::UUIDText(capture.record.payload->value.host.entity);
+    for (Standard_Integer index = 1; index <= roots.Length(); ++index)
+        if (_document->EntityIdentifierForLabel(roots.Value(index)) == host) {
+            core3d::variable_radius_fillet::owner::Capture source;
+            if (!_document->CaptureVariableRadiusFilletOwner(roots.Value(index), source))
+                return @{@"ok": @NO};
+            result[@"sourceOwnerBytes"] = E5Data(source.ownerBytes);
+            result[@"sourceLawBytes"] = E5Data(source.lawBytes);
+            result[@"sourceBaseBytes"] = E5Data(source.baseBytes);
+            result[@"sourceShapeBytes"] = E5Data(source.currentBytes);
+        }
+    return result;
+}
+
+// Negative proposals use copied native source topology and the production
+// source replay preparer. They never install topology or fabricate a record.
+- (NSDictionary *)e5DebugReplayRefusal:(int)scenario {
+    if (!_existing || !_existing->record.payload || _document.IsNull()
+        || !_context || scenario < 1 || scenario > 3) return @{@"ok": @NO};
+    namespace dr = core3d::dependent_replay;
+    const auto native = _document->Document();
+    const auto shapes = XCAFDoc_DocumentTool::ShapeTool(native->Main());
+    TDF_LabelSequence roots; shapes->GetFreeShapes(roots);
+    const auto& record = _existing->record.payload->value;
+    const auto host = core3d::retained_solid::UUIDText(record.host.entity);
+    TDF_Label source;
+    for (Standard_Integer index = 1; index <= roots.Length(); ++index)
+        if (_document->EntityIdentifierForLabel(roots.Value(index)) == host)
+            source = roots.Value(index);
+    OcctExactLabelReceipt receipt;
+    if (source.IsNull() || native->HasOpenCommand()
+        || !_document->CaptureExactFreeLabel(source, receipt)) return @{@"ok": @NO};
+    // BRep_Builder::Add changes topology bookkeeping on its child. Negative
+    // proposals must own copied topology before assembling any container.
+    BRepBuilderAPI_Copy detachedSource(XCAFDoc_ShapeTool::GetShape(source));
+    if (!detachedSource.IsDone()) return @{@"ok": @NO};
+    const TopoDS_Shape original = detachedSource.Shape();
+    BRep_Builder builder;
+    TopoDS_Compound compound; builder.MakeCompound(compound);
+    if (scenario == 2) {
+        builder.Add(compound, original);
+        BRepBuilderAPI_Copy copy(original);
+        if (!copy.IsDone()) return @{@"ok": @NO};
+        builder.Add(compound, copy.Shape());
+    } else {
+        for (TopExp_Explorer face(original, TopAbs_FACE); face.More(); face.Next()) {
+            const TopoDS_Face value = TopoDS::Face(face.Current());
+            BRepAdaptor_Surface surface(value);
+            bool isHostNormal = false;
+            if (surface.GetType() == GeomAbs_Plane) {
+                gp_Dir normal = surface.Plane().Axis().Direction();
+                if (value.Orientation() == TopAbs_REVERSED) normal.Reverse();
+                isHostNormal = std::abs(normal.X() - record.host.zAxis[0]) < 1e-9
+                    && std::abs(normal.Y() - record.host.zAxis[1]) < 1e-9
+                    && std::abs(normal.Z() - record.host.zAxis[2]) < 1e-9;
+            }
+            if (scenario != 1 || !isHostNormal) builder.Add(compound, value);
+        }
+    }
+    dr::Candidate candidate; candidate.targetEntityIdentifier = host;
+    candidate.resultShape = compound;
+    dr::ProductionPreparer preparer(std::move(candidate), _context);
+    std::shared_ptr<const dr::Plan> plan;
+    const int before = native->GetAvailableUndos();
+    const auto refusal = _document->PrepareDependentReplayPlan(receipt,
+        dr::Mutation::Replace, dr::Limits{}, preparer, compound, plan);
+    OcctExactLabelReceipt after;
+    const bool sourceEqual = _document->ReadExactFreeLabel(receipt, after);
+    return @{ @"ok": @YES, @"refusalRaw": @(int(refusal)), @"prepared": @(bool(plan)),
+        @"sourceEqual": @(sourceEqual), @"openCommand": @(native->HasOpenCommand()),
+        @"historyBefore": @(before), @"historyAfter": @(native->GetAvailableUndos()) };
+}
+
 - (NSDictionary *)e5DebugObservation {
     NSMutableDictionary *result = [NSMutableDictionary dictionaryWithObject:@NO forKey:@"ok"];
     if (!_existing || !_existing->record.payload) return result;
@@ -1598,6 +1749,27 @@ extern "C" void Core3DDebugE5TextReliefArmApplyFault(
     Core3DTextReliefOpening *opening =
         (__bridge Core3DTextReliefOpening *)openingRaw;
     if (opening && fault >= 0 && fault <= 6) [opening e5DebugArmApplyFault:fault];
+}
+
+extern "C" int32_t Core3DDebugE5TextReliefArmReplayPairFault(void *openingRaw) {
+    Core3DTextReliefOpening *opening = (__bridge Core3DTextReliefOpening *)openingRaw;
+    return opening && [opening e5DebugArmReplayPairFault] ? 1 : 0;
+}
+
+extern "C" void *Core3DDebugE5TextReliefReplayObservation(void *openingRaw) {
+    @autoreleasepool {
+        Core3DTextReliefOpening *opening = (__bridge Core3DTextReliefOpening *)openingRaw;
+        return (__bridge_retained void *)(opening ? [opening e5DebugReplayObservation]
+                                                   : @{@"ok": @NO});
+    }
+}
+
+extern "C" void *Core3DDebugE5TextReliefReplayRefusal(void *openingRaw, int32_t scenario) {
+    @autoreleasepool {
+        Core3DTextReliefOpening *opening = (__bridge Core3DTextReliefOpening *)openingRaw;
+        return (__bridge_retained void *)(opening ? [opening e5DebugReplayRefusal:scenario]
+                                                   : @{@"ok": @NO});
+    }
 }
 
 // Transitional link compatibility for older test bundles. The former body

@@ -596,6 +596,24 @@ inline std::size_t RaisedTopologyCount(const TopoDS_Shape& shape) noexcept {
         return std::size_t(map.Extent());
     } catch (...) { return 0; }
 }
+
+inline TopoDS_Solid RaisedHostSolid(const TopoDS_Shape& shape) noexcept {
+    try {
+        if (shape.ShapeType() == TopAbs_SOLID
+            && retained_part_boolean::IsOneValidForwardSolid(shape))
+            return TopoDS::Solid(shape);
+        TopoDS_Solid result;
+        std::size_t count = 0;
+        for (TopExp_Explorer it(shape, TopAbs_SOLID); it.More(); it.Next()) {
+            if (++count > 1) return {};
+            result = TopoDS::Solid(it.Current());
+        }
+        if (count != 1 || result.IsNull()) return {};
+        result.Orientation(TopAbs_FORWARD);
+        return retained_part_boolean::IsOneValidForwardSolid(result) ? result
+                                                                      : TopoDS_Solid();
+    } catch (...) { return {}; }
+}
 } // namespace detail
 
 inline RaisedBuildResult BuildDetachedRaisedRelief(
@@ -730,12 +748,13 @@ inline RaisedBuildResult BuildDetachedRaisedRelief(
         const double alignment = outward.Dot(gp_Dir(frameZ));
         if (alignment < 1 - 1e-9 || hostPlane.Distance(frameOrigin) > 1e-7)
             return refuse(BuildRefusal::HostPlaneMismatch);
-        if (!retained_part_boolean::IsOneValidForwardSolid(request.hostSolid))
+        const TopoDS_Solid admittedHost = detail::RaisedHostSolid(request.hostSolid);
+        if (admittedHost.IsNull())
             return refuse(BuildRefusal::InvalidHost);
         {
             std::string exactBytes;
             Digest actual{};
-            if (!retained_part_boolean::ExactShapeBytes(request.hostSolid, exactBytes)
+            if (!retained_part_boolean::ExactShapeBytes(admittedHost, exactBytes)
                 || exactBytes.empty())
                 return refuse(BuildRefusal::InvalidHost);
             const std::vector<std::uint8_t> bytes(exactBytes.begin(), exactBytes.end());

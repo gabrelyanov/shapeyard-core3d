@@ -92,6 +92,7 @@
 #include <sys/stat.h>
 #include <utility>
 #include <vector>
+#import <objc/runtime.h>
 
 NSErrorDomain const Core3DNativeExportErrorDomain =
     @"Core3DNativeExportErrorDomain";
@@ -490,6 +491,31 @@ NSDictionary<NSString *, id> *DebugE4ObservationDictionary(
         @"savedSourceOrigins": DebugE4Numbers(value.savedSourceOrigins),
         @"savedCanonicalLengths":
             DebugE4Numbers(value.savedCanonicalLengths),
+        @"savedGroupLayoutRecordState":
+            DebugE4String(value.savedGroupLayoutRecordState),
+        @"savedGroupLayoutRecordReason":
+            DebugE4String(value.savedGroupLayoutRecordReason),
+        @"savedGroupLayoutMemberDefinitions":
+            DebugE4Strings(value.savedGroupLayoutMemberDefinitions),
+        @"savedGroupLayoutAssignmentCornerCounts":
+            DebugE4Numbers(value.savedGroupLayoutAssignmentCornerCounts),
+        @"savedGroupLayoutMemberCount": @(value.savedGroupLayoutMemberCount),
+        @"savedGroupLayoutAssignmentCount":
+            @(value.savedGroupLayoutAssignmentCount),
+        @"savedGroupLayoutResolution": @(value.savedGroupLayoutResolution),
+        @"savedGroupLayoutGutter": @(value.savedGroupLayoutGutter),
+        @"savedGroupLayoutChartCount": @(value.savedGroupLayoutChartCount),
+        @"savedGroupLayoutNanoseconds": @(value.savedGroupLayoutNanoseconds),
+        @"savedGroupLayoutPreparationNanoseconds":
+            @(value.savedGroupLayoutPreparationNanoseconds),
+        @"savedGroupLayoutRetainedBytes": @(value.savedGroupLayoutRetainedBytes),
+        @"savedGroupLayoutOperationBytes": @(value.savedGroupLayoutOperationBytes),
+        @"savedGroupLayoutStoragePeakBytes":
+            DebugE4Numbers(value.savedGroupLayoutStoragePeakBytes),
+        @"savedGroupLayoutStorageLimitBytes":
+            DebugE4Numbers(value.savedGroupLayoutStorageLimitBytes),
+        @"savedGroupLayoutBakeJobsUnsealed":
+            @(value.savedGroupLayoutBakeJobsUnsealed),
         @"savedGroupCount": @(value.savedGroupCount),
         @"savedMemberCount": @(value.savedMemberCount),
         @"savedSourceCount": @(value.savedSourceCount),
@@ -2339,9 +2365,111 @@ std::string DebugExportAnalyticGeometry(const TopoDS_Face& face) {
 
 } // namespace
 
-#ifdef DEBUG
+namespace {
+char kSavedGroupLayoutAliasOwnerKey;
+}
+
+@interface Core3DSavedGroupLayoutAliasOwner : NSObject {
+@public
+    core3d::scene::OcctSceneSnapshotBuilder::SnapshotPointer sceneAlias;
+    std::weak_ptr<NativeExportState> operationIdentity;
+}
+- (instancetype)initWithSceneAlias:
+        (core3d::scene::OcctSceneSnapshotBuilder::SnapshotPointer)scene
+    operationIdentity:(const std::shared_ptr<NativeExportState>&)identity;
+@end
+
+@implementation Core3DSavedGroupLayoutAliasOwner
+- (instancetype)initWithSceneAlias:
+        (core3d::scene::OcctSceneSnapshotBuilder::SnapshotPointer)scene
+    operationIdentity:(const std::shared_ptr<NativeExportState>&)identity {
+    self = [super init];
+    if (self) {
+        sceneAlias = std::move(scene);
+        operationIdentity = identity;
+    }
+    return self;
+}
+@end
+
+namespace {
+NSString *SavedGroupLayoutString(const std::string& value) {
+    NSString *result = [[NSString alloc]
+        initWithBytes:value.data()
+        length:value.size()
+        encoding:NSUTF8StringEncoding];
+    return result ?: @"";
+}
+
+NSString *SavedGroupLayoutReasonText(
+    const core3d::scene::SavedGroupAllMemberLayoutReason reason) {
+    using Reason = core3d::scene::SavedGroupAllMemberLayoutReason;
+    switch (reason) {
+        case Reason::Present: return @"present";
+        case Reason::Unavailable: return @"unavailable";
+        case Reason::Overflow: return @"overflow";
+        case Reason::Malformed: return @"malformed";
+        case Reason::StaleSource: return @"stale-source";
+        case Reason::StaleBinding: return @"stale-binding";
+        case Reason::UnsupportedSurface: return @"unsupported-surface";
+        case Reason::Refused: return @"refused";
+    }
+    return @"unavailable";
+}
+
+NSDictionary<NSString *, id> *SavedGroupLayoutDictionary(
+    const core3d::scene::SavedGroupAllMemberLayoutRead& read) {
+    if (!read.record) return @{
+        @"schema": @"shapeyard.e4-saved-group-layout.v1",
+        @"state": @"absent",
+        @"reason": SavedGroupLayoutReasonText(read.reason),
+        @"groupCount": @0,
+    };
+    NSMutableArray<NSDictionary<NSString *, id> *> *groups =
+        [NSMutableArray arrayWithCapacity:read.record->groups.size()];
+    for (const auto& group : read.record->groups) {
+        NSMutableArray<NSString *> *definitions =
+            [NSMutableArray arrayWithCapacity:group.memberDefinitions.size()];
+        for (const auto& definition : group.memberDefinitions)
+            [definitions addObject:SavedGroupLayoutString(definition)];
+        NSMutableArray<NSNumber *> *cornerCounts =
+            [NSMutableArray arrayWithCapacity:group.assignments.size()];
+        for (const auto& assignment : group.assignments)
+            [cornerCounts addObject:@(assignment.corners.size())];
+        [groups addObject:@{
+            @"memberDefinitions": definitions,
+            @"memberCount": @(group.memberDefinitions.size()),
+            @"assignmentCount": @(group.assignments.size()),
+            @"assignmentCornerCounts": cornerCounts,
+            @"resolution": @(group.atlas.resolutionTexels),
+            @"gutter": @(group.atlas.gutterTexels),
+            @"chartCount": @(group.layout.charts.size()),
+            @"chartMembersCount": @(group.layout.chartMembers.size()),
+            @"chartFacesCount": @(group.layout.chartFaces.size()),
+            @"work": @{
+                @"atlasRoles": @(group.work.atlasRoles),
+                @"sourcePixels": @(group.work.sourcePixels),
+                @"maskPixels": @(group.work.maskPixels),
+                @"gutter": @(group.work.gutter),
+                @"encoder": @(group.work.encoder),
+            },
+        }];
+    }
+    return @{
+        @"schema": @"shapeyard.e4-saved-group-layout.v1",
+        @"state": @"present",
+        @"reason": @"",
+        @"groupCount": @(groups.count),
+        @"groups": groups,
+        @"layoutNanoseconds": @(read.record->layoutNanoseconds),
+        @"preparationNanoseconds": @(read.record->preparationNanoseconds),
+        @"retainedBytes": @(read.record->retainedBytes),
+    };
+}
+}
+
 namespace core3d::scene {
-bool DebugMeshSavedGroupPrivateSurfaces(
+bool MeshSavedGroupLayoutPrivateSurfaces(
     const TopoDS_Shape& shape) noexcept {
     try {
         if (shape.IsNull()) return false;
@@ -2358,8 +2486,12 @@ bool DebugMeshSavedGroupPrivateSurfaces(
         return false;
     }
 }
+#ifdef DEBUG
+bool DebugMeshSavedGroupPrivateSurfaces(const TopoDS_Shape& shape) noexcept {
+    return MeshSavedGroupLayoutPrivateSurfaces(shape);
 }
 #endif
+}
 
 @interface Core3DNativeExportArtifact ()
 
@@ -2609,6 +2741,15 @@ bool DebugMeshSavedGroupPrivateSurfaces(
                     return;
                 }
                 Core3DSceneSnapshot *snapshot = Core3DCreateSceneSnapshotDTO(*result.scene);
+                if (snapshot) {
+                    Core3DSavedGroupLayoutAliasOwner *aliasOwner =
+                        [[Core3DSavedGroupLayoutAliasOwner alloc]
+                            initWithSceneAlias:result.scene
+                            operationIdentity:state];
+                    objc_setAssociatedObject(snapshot,
+                        &kSavedGroupLayoutAliasOwnerKey, aliasOwner,
+                        OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                }
                 snapshotCompletion(snapshot, snapshot ? nil : [NSError errorWithDomain:Core3DNativeExportErrorDomain
                     code:Core3DNativeExportErrorInvalidArtifact userInfo:nil]);
                 return;
@@ -2660,6 +2801,22 @@ bool DebugMeshSavedGroupPrivateSurfaces(
 #ifdef DEBUG
     gDebugWorkerPauseCondition.notify_all();
 #endif
+}
+
+- (NSDictionary<NSString *, id> *)
+    savedGroupAllMemberLayoutRecordForReturnedScene:
+        (Core3DSceneSnapshot *)returnedScene {
+    const std::shared_ptr<NativeExportState> state = _state;
+    if (!returnedScene || !state) return nil;
+    Core3DSavedGroupLayoutAliasOwner *aliasOwner = objc_getAssociatedObject(
+        returnedScene, &kSavedGroupLayoutAliasOwnerKey);
+    if (![aliasOwner isKindOfClass:
+            [Core3DSavedGroupLayoutAliasOwner class]]
+        || aliasOwner->operationIdentity.lock() != state
+        || !aliasOwner->sceneAlias) return nil;
+    return SavedGroupLayoutDictionary(core3d::scene::
+        OcctSceneSnapshotBuilder::SavedGroupAllMemberLayoutForReturnedScene(
+            aliasOwner->sceneAlias));
 }
 
 #ifdef DEBUG
