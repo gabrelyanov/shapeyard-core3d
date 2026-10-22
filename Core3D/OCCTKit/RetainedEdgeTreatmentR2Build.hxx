@@ -4,6 +4,7 @@
 #include "RetainedEdgeTreatmentBuild.hxx"
 #include "RetainedProfileProducer.hxx"
 #include "RetainedTopologyBudget.hxx"
+#include "AnalyticFrameCanonical.hxx" // D1054 canonical V4-fixed-point frames
 #include "CompositeRecipeCodec.hxx"
 #include "AnalyticBooleanSolid.hxx"
 #include "SavedBooleanResultCorrespondence.hxx" // saved-program wedge expectation contract
@@ -400,6 +401,7 @@ inline bool PrepareMigrationStages(const retained_boolean::Recipe& recipe,
             }
             current = stepResult.solid;
         }
+        bool fixedPointAdopted = false;
         if (IsConstructionFramedLoft(program)) {
             TopoDS_Shape fixedPoint;
             const auto status = MaterializePrivateFramedLoftFixedPoint(
@@ -414,6 +416,7 @@ inline bool PrepareMigrationStages(const retained_boolean::Recipe& recipe,
                 refusal = et::Refusal::ReplayMismatch; return false;
             }
             current = fixedPoint;
+            fixedPointAdopted = true;
         } else if (program.source.family == 1 && program.source.values.size() > 2
             && program.source.values[2] == 1.0) {
             TopoDS_Shape fixedPoint;
@@ -428,6 +431,19 @@ inline bool PrepareMigrationStages(const retained_boolean::Recipe& recipe,
             }
             if (status == retained_profile_producer::FixedPointStatus::Adopted) {
                 current = fixedPoint;
+                fixedPointAdopted = true;
+            }
+        }
+        // D1054: canonicalise the newly owned analytic-prefix result before
+        // publication and before the D981 certificate is issued.
+        if (!fixedPointAdopted && !current.IsNull()) {
+            const auto canonStatus = core3d::analytic_frame_canonical::
+                CanonicalisePrivateAnalyticPrefixFrames(current, stop, budget);
+            if (canonStatus == core3d::analytic_frame_canonical::Status::Cancelled) {
+                refusal = et::Refusal::Cancelled; return false;
+            }
+            if (canonStatus == core3d::analytic_frame_canonical::Status::BudgetExceeded) {
+                refusal = et::Refusal::Budget; return false;
             }
         }
         if (stop.load() || current.IsNull()) {

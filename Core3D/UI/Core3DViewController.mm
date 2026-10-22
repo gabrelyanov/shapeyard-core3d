@@ -23032,6 +23032,150 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     Fixture t0,t1,t2;
     if(!makeFixture(0,t0)||!makeFixture(5,t1)||!makeFixture(9,t2))return @{};
     std::atomic_bool running{false};et::Refusal refusal=et::Refusal::None;
+
+    // D1087/NP10 DEBUG observation: reproduce the LaterSourceMove framed
+    // polygon with private shapes only, then compare the complete V3 byte
+    // strings for P*, R(P*), R2(P*), producer/cold prefixes, both prefix
+    // readbacks, and a second independent producer. Hashes and byte counts
+    // are returned as evidence, never as substitutes for byte equality.
+    bool np10SourceFixedPointBytesEqual=false;
+    bool np10PrefixProducerColdBytesEqual=false;
+    bool np10PrefixReadbacksBytesEqual=false;
+    bool np10IndependentProducerBytesEqual=false;
+    bool np10SourceCanonicalAdopted=false;
+    bool np10SourceValid=false;
+    bool np10SourcePrismAdmitted=false;
+    bool np10SourceCompleteProfileAdmitted=false;
+    bool np10CompletedCounterWithinBound=false;
+    std::size_t np10SourceByteCount=0,np10PrefixByteCount=0;
+    std::size_t np10CompletedStages=0,np10CompletedVisits=0;
+    NSString *np10SourceSHA256=@"",*np10PrefixSHA256=@"";
+    try {
+        const double localPerMM=.001/metersPerLocalUnit;
+        const double q=std::acos(-1.0)/9.0;
+        std::vector<double> values={0,30.0*localPerMM,0,0,4,0,
+            metersPerLocalUnit,0,0,60.0*localPerMM,0,
+            60.0*localPerMM,40.0*localPerMM,0,40.0*localPerMM,
+            3.0*localPerMM,-2.0*localPerMM,1.0*localPerMM,
+            std::sin(q)/std::sqrt(6.0),2.0*std::sin(q)/std::sqrt(6.0),
+            std::sin(q)/std::sqrt(6.0),std::cos(q),.8};
+        core3d::profile::Parameters parameters;
+        core3d::retained_boolean::Program program;
+        TopoDS_Shape source;
+        if(core3d::profile::Decode(values,parameters)
+            &&et::BuildFramedPolygonPrism(parameters,running,source)
+            &&!source.IsNull()){
+            program.source={document,entity,ownerDefinition,sourceFeature,
+                derivedFeature,1,2,metersPerLocalUnit,values};
+            program.codecMinor=1;program.nextOperandID=2;
+            core3d::retained_boolean::Step booleanStep;
+            booleanStep.operation=core3d::analytic_boolean::Operation::Difference;
+            booleanStep.operand.identifier=1;
+            booleanStep.operand.axis=core3d::analytic_boolean::Axis::Z;
+            booleanStep.operand.point={30.0*localPerMM,20.0*localPerMM,0};
+            booleanStep.operand.radius=5.0*localPerMM;
+            program.steps.push_back(booleanStep);
+            et::ReplayBudget carriedBudget;
+            const auto canonStatus=core3d::analytic_frame_canonical::
+                CanonicalisePrivateAnalyticPrefixFrames(source,running,carriedBudget);
+            TopoDS_Shape materialized;
+            const auto materializedStatus=core3d::retained_profile_producer::
+                MaterializePrivateProfileProducerFixedPoint(
+                    source,running,carriedBudget,materialized);
+            np10SourceCanonicalAdopted=
+                canonStatus!=core3d::analytic_frame_canonical::Status::Cancelled
+                &&canonStatus!=core3d::analytic_frame_canonical::Status::BudgetExceeded
+                &&materializedStatus==core3d::retained_profile_producer::
+                    FixedPointStatus::Adopted;
+            if(np10SourceCanonicalAdopted){
+                source=materialized;
+                np10SourceValid=BRepCheck_Analyzer(source,Standard_True).IsValid();
+                core3d::saved_cut_prism_prototype::Inspection prismReport;
+                np10SourcePrismAdmitted=core3d::saved_cut_prism_prototype::InspectPrism(
+                    source,parameters.definition,parameters.constructionFrame,
+                    metersPerLocalUnit,running,prismReport)
+                    ==core3d::saved_cut_prism_prototype::Classification::MatchedBoundary;
+                et::ReplayBudget completeBudget;
+                core3d::ProfileProducerAccounting completeAccounting(
+                    completeBudget,running);
+                np10SourceCompleteProfileAdmitted=bool(core3d::complete_profile_source::
+                    InspectCompleteProfileBase(source,parameters,completeAccounting));
+                auto v3=[](const TopoDS_Shape& shape){
+                    std::ostringstream stream;stream.imbue(std::locale::classic());
+                    BRepTools::Write(shape,stream,Standard_False,Standard_False,
+                        TopTools_FormatVersion_VERSION_3);return stream.str();};
+                TopoDS_Shape sourceRead1,sourceRead2;
+                et::ReplayBudget readBudget;
+                const bool sourceRead=et::detail::ReadbackGeometry(
+                        source,readBudget,sourceRead1)
+                    &&et::detail::ReadbackGeometry(sourceRead1,readBudget,sourceRead2);
+                const auto sourceBytes=v3(source);
+                np10SourceFixedPointBytesEqual=sourceRead
+                    &&sourceBytes==v3(sourceRead1)&&sourceBytes==v3(sourceRead2);
+                np10SourceByteCount=sourceBytes.size();
+                np10SourceSHA256=B1SHA256([NSData dataWithBytes:sourceBytes.data()
+                    length:sourceBytes.size()]);
+                r2::MigrationStages producer,cold,independent;
+                et::Refusal producerRefusal=et::Refusal::None;
+                et::Refusal coldRefusal=et::Refusal::None;
+                et::Refusal independentRefusal=et::Refusal::None;
+                const bool produced=r2::PrepareMigrationStages(
+                    core3d::retained_boolean::Recipe{program},source,running,
+                    carriedBudget,producer,producerRefusal);
+                et::ReplayBudget coldBudget;
+                const bool replayed=sourceRead&&r2::PrepareMigrationStages(
+                    core3d::retained_boolean::Recipe{program},sourceRead1,running,
+                    coldBudget,cold,coldRefusal);
+                TopoDS_Shape prefixRead1,prefixRead2;
+                et::ReplayBudget prefixReadBudget;
+                const bool prefixRead=produced&&et::detail::ReadbackGeometry(
+                        producer.postBoolean,prefixReadBudget,prefixRead1)
+                    &&et::detail::ReadbackGeometry(
+                        prefixRead1,prefixReadBudget,prefixRead2);
+                if(produced){
+                    const auto prefixBytes=v3(producer.postBoolean);
+                    np10PrefixByteCount=prefixBytes.size();
+                    np10PrefixSHA256=B1SHA256([NSData dataWithBytes:prefixBytes.data()
+                        length:prefixBytes.size()]);
+                    np10PrefixProducerColdBytesEqual=replayed
+                        &&prefixBytes==v3(cold.postBoolean);
+                    np10PrefixReadbacksBytesEqual=prefixRead
+                        &&prefixBytes==v3(prefixRead1)&&prefixBytes==v3(prefixRead2);
+                    TopoDS_Shape independentSource;
+                    et::ReplayBudget independentBudget;
+                    if(et::BuildFramedPolygonPrism(parameters,running,independentSource)){
+                        const auto independentCanon=core3d::analytic_frame_canonical::
+                            CanonicalisePrivateAnalyticPrefixFrames(
+                                independentSource,running,independentBudget);
+                        TopoDS_Shape independentMaterialized;
+                        const auto independentMaterializedStatus=
+                            core3d::retained_profile_producer::
+                                MaterializePrivateProfileProducerFixedPoint(
+                                    independentSource,running,independentBudget,
+                                    independentMaterialized);
+                        if(independentCanon!=core3d::analytic_frame_canonical::
+                                Status::Cancelled
+                            &&independentCanon!=core3d::analytic_frame_canonical::
+                                Status::BudgetExceeded
+                            &&independentMaterializedStatus==core3d::
+                                retained_profile_producer::FixedPointStatus::Adopted
+                            &&r2::PrepareMigrationStages(
+                                core3d::retained_boolean::Recipe{program},
+                                independentMaterialized,running,independentBudget,
+                                independent,independentRefusal)){
+                            np10IndependentProducerBytesEqual=
+                                prefixBytes==v3(independent.postBoolean);
+                        }
+                    }
+                }
+                np10CompletedStages=carriedBudget.buildStages;
+                np10CompletedVisits=carriedBudget.topologyVisits;
+                np10CompletedCounterWithinBound=produced&&!carriedBudget.exhausted
+                    &&np10CompletedStages<=tb::MaximumBuildStages
+                    &&np10CompletedVisits<=tb::MaximumTopologyVisits;
+            }
+        }
+    } catch (...) {}
     et::ReplayBudget issuanceBudget;et::SourceStageContext t0Context;
     const bool initialIssued=fs::SourceStageProofIssuer::Issue(t0.source,t0.definition,
         t0.sourceBase,t0.postBoolean,true,issuanceBudget,running,t0Context,refusal);
@@ -23495,6 +23639,21 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         @"wrongLocatorRefused":@(badLocatorRefused),
         @"wrongDigestRefused":@(badDigestRefused),@"wrongUnitRefused":@(badUnitRefused),
         @"wrongStageRefused":@(badStageRefused),
+        @"np10SourceCanonicalAdopted":@(np10SourceCanonicalAdopted),
+        @"np10SourceValid":@(np10SourceValid),
+        @"np10SourcePrismAdmitted":@(np10SourcePrismAdmitted),
+        @"np10SourceCompleteProfileAdmitted":@(np10SourceCompleteProfileAdmitted),
+        @"np10SourceFixedPointBytesEqual":@(np10SourceFixedPointBytesEqual),
+        @"np10PrefixProducerColdBytesEqual":@(np10PrefixProducerColdBytesEqual),
+        @"np10PrefixReadbacksBytesEqual":@(np10PrefixReadbacksBytesEqual),
+        @"np10IndependentProducerBytesEqual":@(np10IndependentProducerBytesEqual),
+        @"np10CompletedCounterWithinBound":@(np10CompletedCounterWithinBound),
+        @"np10SourceByteCount":@(np10SourceByteCount),
+        @"np10SourceSHA256":np10SourceSHA256,
+        @"np10PrefixByteCount":@(np10PrefixByteCount),
+        @"np10PrefixSHA256":np10PrefixSHA256,
+        @"np10CompletedStages":@(np10CompletedStages),
+        @"np10CompletedVisits":@(np10CompletedVisits),
         @"equalRadiusToolDecoyRefused":@(equalRadiusToolDecoyRefused),
         @"trueBooleanRemoval":@(trueBooleanRemoval),
         @"analyticToolBytesUnchanged":@(toolBytesUnchanged),

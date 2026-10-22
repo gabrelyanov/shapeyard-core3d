@@ -15,6 +15,7 @@
 #include "../OCCTKit/FeaturePatternProfileContinuation.hxx"
 #include "../OCCTKit/SavedCutWholeResultCorrespondence.hxx"
 #include "../OCCTKit/AnalyticBooleanSolid.hxx"
+#include "../OCCTKit/AnalyticFrameCanonical.hxx"
 #include "../OCCTKit/CompositeRecipeAttribute.hxx"
 #include "../OCCTKit/CutDisplayPreparation.hxx"
 #include "../OCCTKit/SavedBooleanProgramBuild.hxx"
@@ -1853,9 +1854,35 @@ Core3DViewer::captureEdgeTreatmentSelectorTargetsR2(
         et::Step probe;probe.feature=relative->sourceFeature;
         fs::SelectorReceipt receipt;receipt.proofVersion=2;receipt.intent=intent;
         probe.selector=std::move(receipt);authorization.steps.push_back(probe);
+        // A query made at the current source is an initial issuance and keeps
+        // the exact current-profile capture fence. After a source edit, accept
+        // replay issuance only for a capture epoch already authorised by a
+        // stored source-relative step. The inner predicate may differ (for
+        // example line versus the same face boundary), but no arbitrary stale
+        // capture can cross this lifecycle fence.
+        const auto sameCaptureEpoch=[&](const fs::SourceRelativeV1& existing){
+            return existing.bindingVersion==relative->bindingVersion
+                &&existing.coordinateSpace==relative->coordinateSpace
+                &&existing.sourceDomain==relative->sourceDomain
+                &&existing.sourceOwnerDocument==relative->sourceOwnerDocument
+                &&existing.sourceOwnerEntity==relative->sourceOwnerEntity
+                &&existing.sourceOwnerDefinition==relative->sourceOwnerDefinition
+                &&existing.inputRootNode==relative->inputRootNode
+                &&existing.sourceFeature==relative->sourceFeature
+                &&existing.captureProfileSchema==relative->captureProfileSchema
+                &&existing.captureProfileScalarBits==relative->captureProfileScalarBits;
+        };
+        const bool authorisedReplayEpoch=std::any_of(
+            original->definition_.steps.begin(),original->definition_.steps.end(),
+            [&](const et::Step& step){
+                const auto* existing=step.selector
+                    ?std::get_if<fs::SourceRelativeV1>(&step.selector->intent):nullptr;
+                return existing&&sameCaptureEpoch(*existing);
+            });
         et::SourceStageContext context;et::Refusal nativeRefusal=et::Refusal::None;
         if(!fs::SourceStageProofIssuer::Issue(*source,authorization,
-                original->sourceBase_,original->base_,true,budget,cancelled,
+                original->sourceBase_,original->base_,!authorisedReplayEpoch,
+                budget,cancelled,
                 context,nativeRefusal)){
             refusal=nativeRefusal==et::Refusal::Budget?fs::Refusal::Budget
                 :nativeRefusal==et::Refusal::Cancelled?fs::Refusal::Cancelled
@@ -5793,6 +5820,23 @@ bool BuildProfileSolidGeometry(const std::shared_ptr<ProfileSolidGeometry>& geom
                 geometry->operationBudget ? *geometry->operationBudget :
                 geometry->treatmentRebind && geometry->treatmentRebuildSource
                     ? geometry->treatmentBudget : producerBudget;
+            // D1087: the detached R2 Boolean-input rebuild is the only caller
+            // carrying operationBudget. Canonicalise only its newly owned
+            // framed-polygon source, using the same operation counter, before
+            // the one existing finite materializer selects P*=M(N(P)).
+            const bool r2FramedPolygonSource = geometry->operationBudget
+                && geometry->constructionFrame && !geometry->revolve
+                && !geometry->spline && !geometry->curves && !geometry->circle
+                && geometry->holes.empty() && geometry->shells.empty();
+            if (r2FramedPolygonSource) {
+                const auto canonStatus = core3d::analytic_frame_canonical::
+                    CanonicalisePrivateAnalyticPrefixFrames(
+                        solid, geometry->cancelled, budget);
+                if (canonStatus == core3d::analytic_frame_canonical::Status::Cancelled
+                    || canonStatus == core3d::analytic_frame_canonical::Status::BudgetExceeded) {
+                    return false;
+                }
+            }
             TopoDS_Shape fixedPoint;
             const auto status = retained_profile_producer::
                 MaterializePrivateProfileProducerFixedPoint(
