@@ -2169,6 +2169,12 @@ private:
   Standard_Boolean StageCylindricalCutReplacement(const OcctObjectTransformState& previous,
       const TopoDS_Shape& candidate,const std::shared_ptr<const core3d::retained_solid::Payload>& payload,
       const std::optional<core3d::retained_boolean::ProgramEdit>& edit,bool debugFailAfterShape=false)noexcept;
+  //! Borrow the source owner's already-open command. Every matching SYLS set
+  //! and level, plus each referenced F2 row, is staged stale with exact
+  //! readback. False makes the source owner abort its whole command.
+  Standard_Boolean StageLODSetSourceInvalidation(
+      const std::string& entityIdentifier,
+      const std::string& definitionIdentifier) noexcept;
   // Only this same ordinary owner may update retained source, base and result.
   Standard_Boolean StageSavedCutSourceReplacement(const OcctObjectTransformState& previous,
       const core3d::saved_cut_source_edit::Patch& patch,

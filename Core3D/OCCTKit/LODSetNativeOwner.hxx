@@ -3,6 +3,7 @@
 #include "LODSetPersistence.hxx"
 
 #include <algorithm>
+#include <atomic>
 
 namespace core3d::lod_set_owner {
 
@@ -13,6 +14,13 @@ enum class Refusal : std::uint8_t {
     None, InvalidRecord, ForeignDocument, CorruptStore,
     MissingF2Reference, F2ReferenceMismatch, StoreFull, NotFound
 };
+
+#if DEBUG
+enum class Fault : std::uint8_t {
+    None, BeforeStage, AfterF2Stage, AfterSYLSStage, AfterReadback, UnknownClose
+};
+inline std::atomic<Fault> debugFault{Fault::None};
+#endif
 
 inline const persistence::Record *Find(const persistence::Store& store,
                                        const persistence::UUID& identifier) noexcept {
@@ -61,6 +69,97 @@ inline bool ValidateReferences(const persistence::Record& record,
         }
     }
     refusal = Refusal::None; return true;
+}
+
+inline bool AttachCurrentReference(persistence::Record& record,
+                                   std::size_t levelIndex,
+                                   const f2::F2Store& f2Store,
+                                   const std::string& artifactName,
+                                   Refusal& refusal) noexcept {
+    refusal = Refusal::InvalidRecord;
+    if (levelIndex >= record.levels.size()
+        || f2Store.documentUUID != record.documentIdentifier
+        || !persistence::SafeName(artifactName)) return false;
+    const f2::F2Record* match = nullptr;
+    for (const auto& candidate : f2Store.records) {
+        if (candidate.entityUUID == record.sourceEntityIdentifier
+            && candidate.definitionUUID == record.sourceDefinitionIdentifier
+            && candidate.level == levelIndex) {
+            if (match) { refusal = Refusal::F2ReferenceMismatch; return false; }
+            match = &candidate;
+        }
+    }
+    if (!match || match->stale) {
+        refusal = Refusal::MissingF2Reference; return false;
+    }
+    auto& level = record.levels[levelIndex];
+    level.hasF2Reference = true;
+    level.state = persistence::State::Current;
+    level.reason = persistence::Reason::None;
+    level.f2.derivativeIdentifier = match->derivativeIdentifier;
+    level.f2.settingsSHA256 = match->settingsSHA256;
+    level.f2.sourceArtifactSHA256 = match->sourceArtifactSHA256;
+    level.f2.sourceGeometrySHA256 = match->sourceGeometrySHA256;
+    level.f2.outputArtifactSHA256 = match->outputArtifactSHA256;
+    level.f2.outputGeometrySHA256 = match->outputGeometrySHA256;
+    level.f2.remapReceiptSHA256 = match->remapReceiptSHA256;
+    level.f2.independentMeasurementSHA256 = match->independentMeasurementSHA256;
+    level.f2.algorithmBuildSHA256 = match->algorithmBuildSHA256;
+    level.f2.measuredTriangleCount = match->emittedTriangleCount;
+    level.f2.artifactName = artifactName;
+    record.hasLastBuiltSource = true;
+    record.lastBuiltSourceSHA256 = match->sourceRevisionSHA256;
+    const bool allCurrent = std::all_of(record.levels.begin(), record.levels.end(),
+        [](const auto& candidate) { return candidate.state == persistence::State::Current; });
+    record.state = allCurrent ? persistence::State::Current : persistence::State::Stale;
+    record.reason = allCurrent ? persistence::Reason::None : persistence::Reason::SettingsChanged;
+    if (!persistence::ValidRecord(record)
+        || !ValidateReferences(record, &f2Store, refusal)) return false;
+    refusal = Refusal::None; return true;
+}
+
+// Called only by a source owner while its ordinary command is open. It mutates
+// the in-memory candidates as one unit; the document seam stages/readbacks both
+// carriers or returns false so the source owner aborts the whole command.
+inline bool MarkSourceStale(persistence::Store& store,
+                            const persistence::UUID& entity,
+                            const persistence::UUID& definition,
+                            f2::F2Store* f2Store,
+                            bool& changed,
+                            Refusal& refusal) noexcept {
+    changed = false; refusal = Refusal::None;
+    try {
+        for (auto& record : store.records) {
+            if (record.sourceEntityIdentifier != entity
+                || record.sourceDefinitionIdentifier != definition) continue;
+            ++record.revision;
+            ++record.nativeEditRevision;
+            record.state = persistence::State::Stale;
+            record.reason = persistence::Reason::SourceChanged;
+            for (auto& level : record.levels) {
+                level.state = persistence::State::Stale;
+                level.reason = persistence::Reason::SourceChanged;
+                if (!level.hasF2Reference) continue;
+                if (!f2Store) { refusal = Refusal::MissingF2Reference; return false; }
+                f2::F2Record* match = nullptr;
+                for (auto& row : f2Store->records)
+                    if (row.derivativeIdentifier == level.f2.derivativeIdentifier) {
+                        match = &row; break;
+                    }
+                if (!match || !ExactReference(level.f2, *match)) {
+                    refusal = match ? Refusal::F2ReferenceMismatch
+                                    : Refusal::MissingF2Reference;
+                    return false;
+                }
+                f2::MarkStale(*match);
+            }
+            if (!persistence::ValidRecord(record)) {
+                refusal = Refusal::InvalidRecord; return false;
+            }
+            changed = true;
+        }
+        return true;
+    } catch (...) { refusal = Refusal::StoreFull; return false; }
 }
 
 inline bool Upsert(const persistence::Store* before,

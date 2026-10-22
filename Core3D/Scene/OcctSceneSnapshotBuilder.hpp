@@ -94,6 +94,37 @@ struct SavedGroupAllMemberLayoutRead final {
         SavedGroupAllMemberLayoutReason::Unavailable;
 };
 
+//! Immutable passive evidence from the exact production operation. Typed
+//! source authority is borrowed from capture values owned by the same
+//! returned-scene owner; bounded final witnesses are copied once under that
+//! operation's retained accounting. No field grants bake or publication
+//! authority.
+struct PrivateExportRawEvidenceRecord final {
+    decal_layer::bake::accounting::Ticket recordStorage;
+    std::vector<const painted_atlas_bake::owner::ExportCapture*>
+        savedCaptures;
+    std::vector<const std::vector<
+        painted_atlas_bake::owner::CapturedSource>*> transientSources;
+    std::shared_ptr<const SavedGroupAllMemberLayoutRecord> savedGroupLayout;
+    std::vector<PrivateExportFaceCorrespondence> correspondence;
+    std::vector<std::string> inputKeys;
+    std::vector<std::string> bakeSeals;
+    std::vector<std::string> outputRoles;
+    std::vector<std::uint64_t> outputRoleBytes;
+    const SceneSnapshot* returnedSceneAlias = nullptr;
+    std::uint64_t memberCount = 0;
+    std::uint64_t layoutCount = 0;
+    std::uint64_t finalTriangleCount = 0;
+    std::uint64_t finalCornerCount = 0;
+    std::uint64_t layoutResolution = 0;
+    std::uint64_t layoutChartCount = 0;
+    bool complete = false;
+};
+
+struct PrivateExportRawEvidenceRead final {
+    std::shared_ptr<const PrivateExportRawEvidenceRecord> record;
+};
+
 struct PrivateExportDecalArtifact final {
     std::shared_ptr<const SceneSnapshot> scene;
     std::vector<PrivateExportFaceCorrespondence> correspondence;
@@ -102,6 +133,7 @@ struct PrivateExportDecalArtifact final {
     std::shared_ptr<const SavedGroupAllMemberLayoutRecord> savedGroupLayout;
     SavedGroupAllMemberLayoutReason savedGroupLayoutReason =
         SavedGroupAllMemberLayoutReason::Unavailable;
+    std::shared_ptr<const PrivateExportRawEvidenceRecord> rawEvidence;
 };
 
 //! Opaque move-only authority captured before any disposable export command
@@ -180,6 +212,8 @@ struct DebugPrivateExportDecalObservation final {
     std::vector<std::string> bakeSeals;
     std::vector<std::string> outputRoles;
     std::vector<std::uint64_t> outputRoleBytes;
+    std::vector<std::vector<std::uint8_t>>
+        rawEvidenceCanonicalBindingBytes;
     std::vector<std::string> savedMemberDefinitions;
     std::vector<std::string> savedMemberOwners;
     std::vector<std::string> savedSourceOwners;
@@ -345,6 +379,9 @@ public:
     //! originating operation identity before exposing this value.
     static SavedGroupAllMemberLayoutRead SavedGroupAllMemberLayoutForReturnedScene(
         const SnapshotPointer& returnedScene) noexcept;
+    static PrivateExportRawEvidenceRead
+        OperationOwnedRawEvidenceForReturnedScene(
+            const SnapshotPointer& returnedScene) noexcept;
 
     OcctSceneSnapshotBuilder();
     ~OcctSceneSnapshotBuilder();

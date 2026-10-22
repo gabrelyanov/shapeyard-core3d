@@ -15291,6 +15291,7 @@ struct PrivateDecalCapture::Impl final {
     decal_layer::bake::accounting::Ticket savedGroupsTicket;
     std::vector<std::unique_ptr<SavedGroupOwner>> savedGroups;
     decal_layer::bake::accounting::Ticket savedGroupLayoutControlTicket;
+    decal_layer::bake::accounting::Ticket rawEvidenceControlTicket;
     std::shared_ptr<const SavedGroupAllMemberLayoutRecord> savedGroupLayout;
     SavedGroupAllMemberLayoutReason savedGroupLayoutReason =
         SavedGroupAllMemberLayoutReason::Unavailable;
@@ -16709,6 +16710,28 @@ SavedGroupAllMemberLayoutForReturnedScene(
             result.record = std::shared_ptr<const SavedGroupAllMemberLayoutRecord>(
                 returnedScene, record);
         result.reason = deleter->owner->artifact.savedGroupLayoutReason;
+        return result;
+    } catch (...) {
+        return {};
+    }
+}
+
+PrivateExportRawEvidenceRead OcctSceneSnapshotBuilder::
+OperationOwnedRawEvidenceForReturnedScene(
+    const SnapshotPointer& returnedScene) noexcept {
+    PrivateExportRawEvidenceRead result;
+    try {
+        const auto* deleter = std::get_deleter<
+            ReturnedPrivateExportOwnerDeleter>(returnedScene);
+        if (!deleter || !deleter->owner
+            || returnedScene.get() != deleter->owner->artifact.scene.get())
+            return result;
+        const auto* record = deleter->owner->artifact.rawEvidence.get();
+        if (!record || !record->complete
+            || record->returnedSceneAlias != returnedScene.get())
+            return result;
+        result.record = std::shared_ptr<const PrivateExportRawEvidenceRecord>(
+            returnedScene, record);
         return result;
     } catch (...) {
         return {};
@@ -22029,6 +22052,112 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         artifact.savedGroupLayout = decalCapture->impl_->savedGroupLayout;
         artifact.savedGroupLayoutReason =
             decalCapture->impl_->savedGroupLayoutReason;
+        // Seal one passive evidence value to the exact returned scene. The
+        // typed capture values remain owned by terminalImpl; this record only
+        // borrows const pointers whose lifetime is dominated by the returned
+        // owner and copies the bounded terminal witnesses once.
+        std::size_t rawEvidenceBytes = sizeof(PrivateExportRawEvidenceRecord);
+        std::size_t rawVectorBytes = 0;
+        const auto addRawVector = [&](const std::size_t count,
+                const std::size_t elementBytes) {
+            return terminalOperation.CheckedProduct(count, elementBytes, 1U,
+                    rawVectorBytes, TerminalSite::ProtectedEvidenceStorage)
+                && AddProtectedBytes(rawEvidenceBytes, rawVectorBytes);
+        };
+        if (!addRawVector(terminalImpl.savedGroups.size(), sizeof(
+                const painted_atlas_bake::owner::ExportCapture*))
+            || !addRawVector(terminalImpl.owners.size(), sizeof(
+                const std::vector<
+                    painted_atlas_bake::owner::CapturedSource>*))
+            || !addRawVector(artifact.correspondence.size(),
+                sizeof(PrivateExportFaceCorrespondence))
+            || !addRawVector(artifact.inputKeys.size(), sizeof(std::string))
+            || !addRawVector(artifact.bakeSeals.size(), sizeof(std::string))
+            || !addRawVector(finalOutputRoles.size(), sizeof(std::string))
+            || !addRawVector(finalOutputRoleBytes.size(),
+                sizeof(std::uint64_t))) return {};
+        for (const auto& value : artifact.correspondence)
+            if (!AddProtectedBytes(rawEvidenceBytes,
+                    value.ownerDefinitionIdentifier.capacity() + 1U))
+                return {};
+        for (const auto* values : {&artifact.inputKeys, &artifact.bakeSeals,
+                &finalOutputRoles})
+            for (const auto& value : *values)
+                if (!DeepStringStorageBytes(value, rawEvidenceBytes))
+                    return {};
+        decal_layer::bake::accounting::Ticket rawEvidenceStorage;
+        constexpr std::size_t maximumRawEvidenceControlBytes = 4096U;
+        if (!AcquireProtectedStorage(rawEvidenceStorage, terminalOperation,
+                TerminalDimension::PrivateStorage, rawEvidenceBytes,
+                TerminalRetention::Retained,
+                TerminalSite::ProtectedEvidenceStorage)
+            || !terminalImpl.rawEvidenceControlTicket.acquire(
+                terminalOperation, TerminalDimension::PrivateStorage,
+                maximumRawEvidenceControlBytes, TerminalRetention::Retained,
+                TerminalSite::ProtectedTerminalControl)
+            || !terminalOperation.EnterAllocation(
+                TerminalSite::ProtectedEvidenceStorage)) return {};
+        try {
+            auto rawEvidence =
+                std::make_unique<PrivateExportRawEvidenceRecord>();
+            std::shared_ptr<PrivateExportRawEvidenceRecord> record(
+                rawEvidence.release(),
+                std::default_delete<PrivateExportRawEvidenceRecord>(),
+                ProtectedControlAllocator<PrivateExportRawEvidenceRecord>(
+                    terminalOperation, terminalImpl.rawEvidenceControlTicket,
+                    TerminalSite::ProtectedTerminalControl));
+            if (!terminalOperation.EnterAllocation(
+                    TerminalSite::ProtectedEvidenceStorage)) return {};
+            record->savedCaptures.reserve(terminalImpl.savedGroups.size());
+            for (const auto& group : terminalImpl.savedGroups) {
+                if (!group) return {};
+                record->savedCaptures.push_back(&group->capture);
+            }
+            if (!terminalOperation.EnterAllocation(
+                    TerminalSite::ProtectedEvidenceStorage)) return {};
+            record->transientSources.reserve(terminalImpl.owners.size());
+            for (const auto& owner : terminalImpl.owners)
+                record->transientSources.push_back(&owner.paintedSources);
+            if (!terminalOperation.EnterAllocation(
+                    TerminalSite::ProtectedEvidenceStorage)) return {};
+            record->correspondence = artifact.correspondence;
+            if (!terminalOperation.EnterAllocation(
+                    TerminalSite::ProtectedEvidenceStorage)) return {};
+            record->inputKeys = artifact.inputKeys;
+            if (!terminalOperation.EnterAllocation(
+                    TerminalSite::ProtectedEvidenceStorage)) return {};
+            record->bakeSeals = artifact.bakeSeals;
+            if (!terminalOperation.EnterAllocation(
+                    TerminalSite::ProtectedEvidenceStorage)) return {};
+            record->outputRoles = finalOutputRoles;
+            if (!terminalOperation.EnterAllocation(
+                    TerminalSite::ProtectedEvidenceStorage)) return {};
+            record->outputRoleBytes = finalOutputRoleBytes;
+            record->savedGroupLayout = artifact.savedGroupLayout;
+            record->returnedSceneAlias = artifact.scene.get();
+            record->memberCount = artifact.correspondence.size();
+            record->layoutCount = artifact.savedGroupLayout
+                ? std::accumulate(artifact.savedGroupLayout->groups.begin(),
+                    artifact.savedGroupLayout->groups.end(), std::size_t(0),
+                    [](const std::size_t total, const auto& group) {
+                        return total + group.assignments.size();
+                    })
+                : artifact.correspondence.size();
+            record->finalTriangleCount = finalTriangleCount;
+            record->finalCornerCount = finalCornerCount;
+            record->layoutResolution = finalLayoutResolution;
+            record->layoutChartCount = finalLayoutChartCount;
+            record->recordStorage = std::move(rawEvidenceStorage);
+            record->complete = !record->correspondence.empty()
+                && record->memberCount != 0 && record->layoutCount != 0
+                && record->finalTriangleCount != 0
+                && record->finalCornerCount != 0
+                && record->returnedSceneAlias != nullptr;
+            if (!record->complete) return {};
+            artifact.rawEvidence = std::move(record);
+        } catch (...) {
+            return {};
+        }
 #ifdef DEBUG
         if (debugObservation) {
             debugObservation->producedReceiverCount =
@@ -22045,6 +22174,13 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             debugObservation->outputRoleBytes = finalOutputRoleBytes;
             debugObservation->layoutResolution = finalLayoutResolution;
             debugObservation->layoutChartCount = finalLayoutChartCount;
+            debugObservation->rawEvidenceCanonicalBindingBytes.clear();
+            for (const auto* capture : artifact.rawEvidence->savedCaptures)
+                if (capture)
+                    for (const auto& binding :
+                            capture->sources.canonicalBindings)
+                        debugObservation->rawEvidenceCanonicalBindingBytes
+                            .push_back(binding.bytes);
             debugObservation->finalProductionReached = true;
             debugObservation->publicationReached = true;
             debugObservation->complete = true;

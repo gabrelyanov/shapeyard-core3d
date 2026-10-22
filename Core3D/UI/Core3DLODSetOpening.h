@@ -36,6 +36,17 @@ typedef NS_ENUM(NSInteger, Core3DLODSetDurableState) {
     Core3DLODSetDurableStateStale,
 };
 
+#if DEBUG
+typedef NS_ENUM(NSInteger, Core3DLODSetDebugFault) {
+    Core3DLODSetDebugFaultNone = 0,
+    Core3DLODSetDebugFaultBeforeStage,
+    Core3DLODSetDebugFaultAfterF2Stage,
+    Core3DLODSetDebugFaultAfterSYLSStage,
+    Core3DLODSetDebugFaultAfterReadback,
+    Core3DLODSetDebugFaultUnknownClose,
+};
+#endif
+
 __attribute__((objc_subclassing_restricted))
 @interface Core3DLODLevelRecord : NSObject
 @property(nonatomic, copy, readonly) NSString *identifier;
@@ -212,6 +223,14 @@ __attribute__((objc_subclassing_restricted))
                                                error:(NSError * _Nullable * _Nullable)error
     __attribute__((swift_error(nonnull_error)))
     NS_SWIFT_NAME(regenerate(controller:));
+//! Binds one already-persisted Current F2 row by exact production readback.
+//! This does not generate an artifact; rows for other levels remain Unbuilt.
+- (Core3DLODSetCommitResult)referencePersistedF2Level:(NSUInteger)level
+                                             artifactName:(NSString *)artifactName
+                                               controller:(Core3DViewController *)controller
+                                                    error:(NSError * _Nullable * _Nullable)error
+    __attribute__((swift_error(nonnull_error)))
+    NS_SWIFT_NAME(referencePersistedF2(level:artifactName:controller:));
 
 //! Production codec surface used by F05. Validation and re-encoding execute
 //! the same strict SYLS/1 decoder used by ordinary document reads.
@@ -224,6 +243,10 @@ __attribute__((objc_subclassing_restricted))
 //! Called from the real bounded validation loop. Tests can synchronously Stop
 //! at a work boundary; Release contains neither this hook nor its branch.
 @property(nonatomic, copy, nullable) void (^debugWorkBoundaryHandler)(NSUInteger completedWorkUnits);
++ (void)setDebugFault:(Core3DLODSetDebugFault)fault NS_SWIFT_NAME(setDebugFault(_:));
++ (BOOL)debugRemoveF2StoreForController:(Core3DViewController *)controller
+                                  error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(debugRemoveF2Store(controller:));
 #endif
 
 - (instancetype)init NS_UNAVAILABLE;

@@ -428,6 +428,16 @@ NSArray<NSNumber *> *DebugE4Numbers(
     return result;
 }
 
+NSArray<NSData *> *DebugE4ByteVectors(
+    const std::vector<std::vector<std::uint8_t>>& values) {
+    NSMutableArray<NSData *> *result =
+        [NSMutableArray arrayWithCapacity:values.size()];
+    for (const auto& value : values)
+        [result addObject:[NSData dataWithBytes:value.data()
+            length:value.size()]];
+    return result;
+}
+
 NSDictionary<NSString *, id> *DebugE4CacheDictionary(
     const core3d::decal_layer::bake::publication::DebugCacheInventory& value) {
     return @{
@@ -479,6 +489,8 @@ NSDictionary<NSString *, id> *DebugE4ObservationDictionary(
         @"inputKeys": DebugE4Strings(value.inputKeys),
         @"bakeSeals": DebugE4Strings(value.bakeSeals),
         @"outputRoleBytes": roleBytes,
+        @"rawEvidenceCanonicalBindingBytes":
+            DebugE4ByteVectors(value.rawEvidenceCanonicalBindingBytes),
         @"savedMemberDefinitions":
             DebugE4Strings(value.savedMemberDefinitions),
         @"savedMemberOwners": DebugE4Strings(value.savedMemberOwners),
@@ -2466,6 +2478,121 @@ NSDictionary<NSString *, id> *SavedGroupLayoutDictionary(
         @"retainedBytes": @(read.record->retainedBytes),
     };
 }
+
+NSData *RawEvidenceData(const std::vector<std::uint8_t>& bytes) {
+    return [NSData dataWithBytes:bytes.data() length:bytes.size()];
+}
+
+NSDictionary<NSString *, id> *RawEvidenceDictionary(
+    const core3d::scene::PrivateExportRawEvidenceRead& read) {
+    if (!read.record || !read.record->complete) return nil;
+    const auto& record = *read.record;
+    NSMutableArray<NSDictionary<NSString *, id> *> *correspondence =
+        [NSMutableArray arrayWithCapacity:record.correspondence.size()];
+    for (const auto& item : record.correspondence) {
+        [correspondence addObject:@{
+            @"ownerDefinitionIdentifier":
+                SavedGroupLayoutString(item.ownerDefinitionIdentifier),
+            @"originalFaceIndex": @(item.originalFaceIndex),
+            @"disposableFaceIndex": @(item.disposableFaceIndex),
+            @"emittedPrimitiveIndex": @(item.emittedPrimitiveIndex),
+            @"materialIndex": @(item.materialIndex),
+        }];
+    }
+    NSMutableArray<NSDictionary<NSString *, id> *> *sources =
+        [NSMutableArray array];
+    NSMutableArray<NSDictionary<NSString *, id> *> *rawSlots =
+        [NSMutableArray array];
+    NSMutableArray<NSData *> *canonicalBindings =
+        [NSMutableArray array];
+    NSMutableArray<NSData *> *canonicalAtlases =
+        [NSMutableArray array];
+    NSMutableArray<NSData *> *canonicalBakes =
+        [NSMutableArray array];
+    const auto appendSource = [&](
+            const core3d::painted_atlas_bake::owner::CapturedSource& source) {
+        [sources addObject:@{
+            @"origin": @(static_cast<std::uint8_t>(source.origin)),
+            @"materialSlot": @(
+                static_cast<std::uint8_t>(source.materialSlot)),
+            @"memberIndex": @(source.memberIndex),
+            @"faceIndex": @(source.faceIndex),
+            @"order": @(source.order),
+            @"boundedLayer": @(source.boundedLayer),
+            @"maskPresent": @(source.maskPresent),
+            @"originalBytes": @(source.envelope.originalBytes.size()),
+            @"workingBytes": @(source.envelope.workingBytes.size()),
+        }];
+    };
+    for (const auto* capture : record.savedCaptures) {
+        if (!capture) return nil;
+        [canonicalAtlases addObject:RawEvidenceData(
+            capture->canonicalAtlasBytes)];
+        [canonicalBakes addObject:RawEvidenceData(
+            capture->canonicalBakeBytes)];
+        for (const auto& source : capture->sources.values)
+            appendSource(source);
+        for (const auto& slot : capture->sources.rawSlots) {
+            [rawSlots addObject:@{
+                @"memberIndex": @(slot.memberIndex),
+                @"slot": @(static_cast<std::uint8_t>(slot.slot)),
+                @"present": @(slot.present),
+                @"absent": @(!slot.present),
+                @"originalBytes": @(slot.originalBytes),
+                @"workingBytes": @(slot.workingBytes),
+                @"effectiveSourceIndex": @(slot.effectiveSourceIndex),
+            }];
+        }
+        for (const auto& binding : capture->sources.canonicalBindings)
+            [canonicalBindings addObject:RawEvidenceData(binding.bytes)];
+    }
+    for (const auto* transient : record.transientSources) {
+        if (!transient) return nil;
+        for (const auto& source : *transient) appendSource(source);
+    }
+    NSMutableArray<NSString *> *inputKeys =
+        [NSMutableArray arrayWithCapacity:record.inputKeys.size()];
+    for (const auto& value : record.inputKeys)
+        [inputKeys addObject:SavedGroupLayoutString(value)];
+    NSMutableArray<NSString *> *bakeSeals =
+        [NSMutableArray arrayWithCapacity:record.bakeSeals.size()];
+    for (const auto& value : record.bakeSeals)
+        [bakeSeals addObject:SavedGroupLayoutString(value)];
+    NSMutableArray<NSDictionary<NSString *, id> *> *roles =
+        [NSMutableArray arrayWithCapacity:record.outputRoles.size()];
+    if (record.outputRoles.size() != record.outputRoleBytes.size()) return nil;
+    for (std::size_t index = 0; index < record.outputRoles.size(); ++index)
+        [roles addObject:@{
+            @"role": SavedGroupLayoutString(record.outputRoles[index]),
+            @"pngBytes": @(record.outputRoleBytes[index]),
+        }];
+    return @{
+        @"schema": @"shapeyard.e4-operation-raw-evidence.v1",
+        @"state": @"present",
+        @"complete": @YES,
+        @"memberCount": @(record.memberCount),
+        @"layoutCount": @(record.layoutCount),
+        @"savedGroupLayoutState":
+            record.savedGroupLayout ? @"present" : @"absent",
+        @"savedGroupLayoutGroupCount": @(
+            record.savedGroupLayout ? record.savedGroupLayout->groups.size() : 0),
+        @"sources": sources,
+        @"rawSlots": rawSlots,
+        @"canonicalBindingBytes": canonicalBindings,
+        @"canonicalAtlasBytes": canonicalAtlases,
+        @"canonicalBakeBytes": canonicalBakes,
+        @"correspondence": correspondence,
+        @"inputKeys": inputKeys,
+        @"bakeSeals": bakeSeals,
+        @"roleContentWitnesses": roles,
+        @"finalNumericProvenance": @{
+            @"triangleCount": @(record.finalTriangleCount),
+            @"cornerCount": @(record.finalCornerCount),
+            @"resolution": @(record.layoutResolution),
+            @"chartCount": @(record.layoutChartCount),
+        },
+    };
+}
 }
 
 namespace core3d::scene {
@@ -2816,6 +2943,22 @@ bool DebugMeshSavedGroupPrivateSurfaces(const TopoDS_Shape& shape) noexcept {
         || !aliasOwner->sceneAlias) return nil;
     return SavedGroupLayoutDictionary(core3d::scene::
         OcctSceneSnapshotBuilder::SavedGroupAllMemberLayoutForReturnedScene(
+            aliasOwner->sceneAlias));
+}
+
+- (NSDictionary<NSString *, id> *)
+    operationOwnedRawEvidenceRecordForReturnedScene:
+        (Core3DSceneSnapshot *)returnedScene {
+    const std::shared_ptr<NativeExportState> state = _state;
+    if (!returnedScene || !state) return nil;
+    Core3DSavedGroupLayoutAliasOwner *aliasOwner = objc_getAssociatedObject(
+        returnedScene, &kSavedGroupLayoutAliasOwnerKey);
+    if (![aliasOwner isKindOfClass:
+            [Core3DSavedGroupLayoutAliasOwner class]]
+        || aliasOwner->operationIdentity.lock() != state
+        || !aliasOwner->sceneAlias) return nil;
+    return RawEvidenceDictionary(core3d::scene::
+        OcctSceneSnapshotBuilder::OperationOwnedRawEvidenceForReturnedScene(
             aliasOwner->sceneAlias));
 }
 

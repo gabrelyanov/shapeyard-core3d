@@ -65,6 +65,7 @@ struct Cut475Scope {
 #include "VariableRadiusFilletNativeOwner.hxx"
 #include "AttachmentRigMetadataPersistence.hxx"
 #include "ExportMeshDecimationNativeOwner.hxx"
+#include "LODSetNativeOwner.hxx"
 #include "LODSetPersistence.hxx"
 #include "RetainedEdgeTreatmentBuild.hxx"
 #include "RetainedEdgeTreatmentR2Build.hxx"
@@ -15051,6 +15052,76 @@ core3d::retained_fillet::Candidates OcctDocument::RetainedFilletCandidates(const
     return core3d::retained_fillet::DiscoverCandidates(source.original.shape,source.recipe,source.base);
 }
 
+Standard_Boolean OcctDocument::StageLODSetSourceInvalidation(
+    const std::string& entityIdentifier,
+    const std::string& definitionIdentifier) noexcept {
+    namespace owner = core3d::lod_set_owner;
+    namespace syls = core3d::lod_set_persistence;
+    namespace f2 = core3d::export_decimation;
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || !myOcafDoc->HasOpenCommand()) return Standard_False;
+        syls::StoreRead sylsBefore;
+        if (!ReadLODSetStore(sylsBefore) || !sylsBefore.readable()) return Standard_False;
+        if (sylsBefore.occurrence == syls::StoreOccurrence::Absent) return Standard_True;
+        syls::Store sylsCandidate;
+        syls::UUID entity{}, definition{};
+        if (!syls::DecodeStore(sylsBefore.bytes, sylsCandidate)
+            || !f2::UUIDFromText(entityIdentifier, entity)
+            || !f2::UUIDFromText(definitionIdentifier, definition)) return Standard_False;
+
+        f2::F2StoreRead f2Before;
+        if (!ReadF2DerivativeStore(f2Before) || !f2Before.readable()) return Standard_False;
+        f2::F2Store f2Candidate;
+        f2::F2Store* f2Pointer = nullptr;
+        if (f2Before.occurrence == f2::F2StoreOccurrence::Present) {
+            if (!f2::DecodeStore(f2Before.bytes, f2Candidate)) return Standard_False;
+            f2Pointer = &f2Candidate;
+        }
+        bool changed = false; owner::Refusal refusal;
+        if (!owner::MarkSourceStale(sylsCandidate, entity, definition,
+                f2Pointer, changed, refusal)) return Standard_False;
+        if (!changed) return Standard_True;
+        std::vector<std::uint8_t> sylsBytes;
+        if (!syls::EncodeStore(sylsCandidate, sylsBytes)) return Standard_False;
+        std::vector<std::uint8_t> f2Bytes;
+        const bool f2Changed = f2Pointer && f2::EncodeStore(f2Candidate, f2Bytes)
+            && f2Bytes != f2Before.bytes;
+#if DEBUG
+        const owner::Fault fault = owner::debugFault.load();
+        if (fault == owner::Fault::BeforeStage) return Standard_False;
+#endif
+        if (f2Changed) {
+            f2::F2StoreRead staged;
+            if (!StageF2DerivativeStore(f2Before, f2Bytes, Standard_False, staged)
+                || staged.occurrence != f2::F2StoreOccurrence::Present
+                || staged.bytes != f2Bytes) return Standard_False;
+        }
+#if DEBUG
+        if (fault == owner::Fault::AfterF2Stage) return Standard_False;
+#endif
+        syls::StoreRead staged;
+        if (!StageLODSetStore(sylsBefore, sylsBytes, Standard_False, staged)
+            || staged.occurrence != syls::StoreOccurrence::Present
+            || staged.bytes != sylsBytes) return Standard_False;
+#if DEBUG
+        if (fault == owner::Fault::AfterSYLSStage) return Standard_False;
+#endif
+        syls::StoreRead sylsReadback;
+        f2::F2StoreRead f2Readback;
+        if (!ReadLODSetStore(sylsReadback)
+            || sylsReadback.occurrence != syls::StoreOccurrence::Present
+            || sylsReadback.bytes != sylsBytes
+            || (f2Changed && (!ReadF2DerivativeStore(f2Readback)
+                || f2Readback.occurrence != f2::F2StoreOccurrence::Present
+                || f2Readback.bytes != f2Bytes))) return Standard_False;
+#if DEBUG
+        if (fault == owner::Fault::AfterReadback) return Standard_False;
+#endif
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
 Standard_Boolean OcctDocument::StageCylindricalCutReplacement(
     const OcctObjectTransformState& previous,const TopoDS_Shape& candidate,
     const std::shared_ptr<const core3d::retained_solid::Payload>& payload,
@@ -15145,6 +15216,9 @@ Standard_Boolean OcctDocument::StageCylindricalCutReplacement(
             ||!CaptureScalarAppearanceForSavedCut(previous.label,after)||!appearance.IsEqual(after)
             ||!core3d::sweep_rebuild::SameRawScalars(appearance.visualValues,after.visualValues)
             ||!ValidateGeometryRepresentations())CORE3D_CUT_REFUSE("staging.readback", Standard_False);
+        if (!StageLODSetSourceInvalidation(previous.entityIdentifier,
+                previous.definitionIdentifier))
+            CORE3D_CUT_REFUSE("staging.lod-invalidation", Standard_False);
 
 #if DEBUG // Cut475 phase diagnostics only
         cut475.phase=nullptr;Cut475Trace("stage.success");
@@ -16061,6 +16135,8 @@ Standard_Boolean OcctDocument::StageSavedCutSourceReplacement(
         if(!e::Commit(actual.retained.value->base,checking,aggregate,readBase)
             ||!e::Commit(actual.shape,checking,aggregate,readResult)
             ||!(readBase==built->generatedBase)||!(readResult==built->generatedResult))return Standard_False;
+        if (!StageLODSetSourceInvalidation(previous.entityIdentifier,
+                previous.definitionIdentifier)) return Standard_False;
         staged=std::move(value);return Standard_True;
     }catch(...){return Standard_False;}
 }
@@ -16222,6 +16298,8 @@ Standard_Boolean OcctDocument::StageSavedProgramSourceReplacement(
         if(!e::Commit(actual.retained.value->base,checking,aggregate,readBase)
             ||!e::Commit(actual.shape,checking,aggregate,readResult)
             ||!(readBase==built->generatedBase)||!(readResult==built->generatedResult))return Standard_False;
+        if (!StageLODSetSourceInvalidation(previous.entityIdentifier,
+                previous.definitionIdentifier)) return Standard_False;
         staged=std::move(value);return Standard_True;
     }catch(...){return Standard_False;}
 }

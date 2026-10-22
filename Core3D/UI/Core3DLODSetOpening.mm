@@ -393,6 +393,11 @@ LODWriteOutcome WriteLODStore(const Handle(OcctDocument)& document,
             return !ocaf->HasOpenCommand() && document->ReadLODSetStore(restored)
                 && syls::SameStore(before, restored);
         };
+#if DEBUG
+        const lod_owner::Fault fault = lod_owner::debugFault.load();
+        if (fault == lod_owner::Fault::BeforeStage)
+            return abortAndVerify() ? LODWriteOutcome::Refused : LODWriteOutcome::Recovery;
+#endif
         syls::StoreRead staged;
         if (!document->StageLODSetStore(before, candidate,
                 remove ? Standard_True : Standard_False, staged)
@@ -400,10 +405,18 @@ LODWriteOutcome WriteLODStore(const Handle(OcctDocument)& document,
             || (!remove && (staged.occurrence != syls::StoreOccurrence::Present
                 || staged.bytes != candidate)))
             return abortAndVerify() ? LODWriteOutcome::Refused : LODWriteOutcome::Recovery;
+#if DEBUG
+        if (fault == lod_owner::Fault::AfterSYLSStage
+            || fault == lod_owner::Fault::AfterReadback)
+            return abortAndVerify() ? LODWriteOutcome::Refused : LODWriteOutcome::Recovery;
+#endif
         bool committed = false;
         try { committed = ocaf->CommitCommand() && !ocaf->HasOpenCommand(); }
         catch (...) { committed = false; }
         if (!committed) return LODWriteOutcome::Recovery;
+#if DEBUG
+        if (fault == lod_owner::Fault::UnknownClose) return LODWriteOutcome::Recovery;
+#endif
         syls::StoreRead readback;
         if (!document->ReadLODSetStore(readback)
             || (remove && readback.occurrence != syls::StoreOccurrence::Absent)
@@ -878,6 +891,64 @@ bool DecodeStores(const Handle(OcctDocument)& document,
     return Core3DLODSetCommitResultRegenerateUnavailable;
 }
 
+- (Core3DLODSetCommitResult)referencePersistedF2Level:(NSUInteger)level
+                                             artifactName:(NSString *)artifactName
+                                               controller:(Core3DViewController *)controller
+                                                    error:(NSError **)error {
+    if (error) *error = nil;
+    if (!self.existingSetIdentifier || ![self isCurrent:error]) {
+        if (!self.existingSetIdentifier)
+            SetError(error, Core3DLODSetErrorNotFound, @"No durable LOD set is bound.");
+        return Core3DLODSetCommitResultUnavailable;
+    }
+    const Handle(OcctDocument) document = LODDocument(controller);
+    syls::StoreRead before; syls::Store store; decimation::F2Store f2Store;
+    bool hasF2 = false;
+    if (!DecodeStores(document, before, store, f2Store, hasF2, error)
+        || !hasF2 || level > std::numeric_limits<std::uint8_t>::max()) {
+        if (error && !*error) SetError(error, Core3DLODSetErrorMissingProvenance,
+            @"A persisted F2 row is required.");
+        return Core3DLODSetCommitResultUnavailable;
+    }
+    syls::UUID identifier{};
+    const syls::Record *prior = nullptr;
+    if (UUID(self.existingSetIdentifier, identifier)) prior = lod_owner::Find(store, identifier);
+    if (!prior) {
+        SetError(error, Core3DLODSetErrorNotFound, @"Durable LOD set was not found.");
+        return Core3DLODSetCommitResultUnavailable;
+    }
+    syls::Record candidate = *prior;
+    ++candidate.revision;
+    lod_owner::Refusal refusal;
+    if (!lod_owner::AttachCurrentReference(candidate, level, f2Store,
+            Text(artifactName), refusal)) {
+        SetError(error, Core3DLODSetErrorMissingProvenance,
+            @"The F2 row did not exactly match this set and level.");
+        return Core3DLODSetCommitResultUnavailable;
+    }
+    syls::Store result;
+    if (!lod_owner::Upsert(&store, std::move(candidate), &f2Store, result, refusal)) {
+        SetError(error, Core3DLODSetErrorCorruptRecord,
+            @"The exact F2 reference could not be adopted.");
+        return Core3DLODSetCommitResultUnavailable;
+    }
+    std::vector<std::uint8_t> encoded;
+    if (!syls::EncodeStore(result, encoded)) {
+        SetError(error, Core3DLODSetErrorPersistenceUnavailable, @"SYLS/1 encode failed.");
+        return Core3DLODSetCommitResultUnavailable;
+    }
+    const LODWriteOutcome outcome = WriteLODStore(document, self.capture, before, encoded, false);
+    if (outcome == LODWriteOutcome::Committed) return Core3DLODSetCommitResultCommitted;
+    if (outcome == LODWriteOutcome::Recovery) {
+        SetError(error, Core3DLODSetErrorRecoveryRequired,
+            @"F2-reference closure is uncertain; recovery is required.");
+        return Core3DLODSetCommitResultRecoveryRequired;
+    }
+    SetError(error, outcome == LODWriteOutcome::Stale ? Core3DLODSetErrorStaleSource
+        : Core3DLODSetErrorPersistenceUnavailable, @"F2-reference staging was refused.");
+    return Core3DLODSetCommitResultUnavailable;
+}
+
 + (NSData *)reencodeSYLSRecord:(NSData *)record error:(NSError **)error {
     if (error) *error = nil;
     syls::Store store; std::vector<std::uint8_t> encoded;
@@ -890,5 +961,49 @@ bool DecodeStores(const Handle(OcctDocument)& document,
 }
 
 + (NSUInteger)maximumSYLSRecordBytes { return syls::kMaximumRecordBytes; }
+
+#if DEBUG
++ (void)setDebugFault:(Core3DLODSetDebugFault)fault {
+    lod_owner::Fault value = lod_owner::Fault::None;
+    switch (fault) {
+        case Core3DLODSetDebugFaultBeforeStage: value = lod_owner::Fault::BeforeStage; break;
+        case Core3DLODSetDebugFaultAfterF2Stage: value = lod_owner::Fault::AfterF2Stage; break;
+        case Core3DLODSetDebugFaultAfterSYLSStage: value = lod_owner::Fault::AfterSYLSStage; break;
+        case Core3DLODSetDebugFaultAfterReadback: value = lod_owner::Fault::AfterReadback; break;
+        case Core3DLODSetDebugFaultUnknownClose: value = lod_owner::Fault::UnknownClose; break;
+        case Core3DLODSetDebugFaultNone: break;
+    }
+    lod_owner::debugFault.store(value);
+}
+
++ (BOOL)debugRemoveF2StoreForController:(Core3DViewController *)controller
+                                  error:(NSError **)error {
+    if (error) *error = nil;
+    const Handle(OcctDocument) document = LODDocument(controller);
+    const Handle(TDocStd_Document) ocaf = document.IsNull()
+        ? Handle(TDocStd_Document)() : document->Document();
+    decimation::F2StoreRead before;
+    if (ocaf.IsNull() || ocaf->HasOpenCommand()
+        || !document->ReadF2DerivativeStore(before)
+        || before.occurrence != decimation::F2StoreOccurrence::Present) {
+        SetError(error, Core3DLODSetErrorPersistenceUnavailable,
+            @"A readable F2 store is required."); return NO;
+    }
+    try { ocaf->NewCommand(); } catch (...) { return NO; }
+    decimation::F2StoreRead staged;
+    if (!document->StageF2DerivativeStore(before, {}, Standard_True, staged)
+        || staged.occurrence != decimation::F2StoreOccurrence::Absent) {
+        if (ocaf->HasOpenCommand()) ocaf->AbortCommand();
+        SetError(error, Core3DLODSetErrorPersistenceUnavailable,
+            @"F2 removal staging failed."); return NO;
+    }
+    if (!ocaf->CommitCommand() || ocaf->HasOpenCommand()
+        || !document->FinalizeF2DerivativeHistory()) {
+        SetError(error, Core3DLODSetErrorRecoveryRequired, @"F2 removal closure is uncertain.");
+        return NO;
+    }
+    return YES;
+}
+#endif
 
 @end

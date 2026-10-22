@@ -120,6 +120,13 @@ NS_SWIFT_SENDABLE
     savedGroupAllMemberLayoutRecordForReturnedScene:
         (Core3DSceneSnapshot *)returnedScene
     NS_SWIFT_NAME(savedGroupAllMemberLayoutRecord(returnedScene:));
+//! Returns the immutable operation-owned raw evidence only for this
+//! operation's exact returned-scene alias. Foreign, copied, and prior aliases
+//! return nil; the read is passive and never mutates or republishes evidence.
+- (nullable NSDictionary<NSString *, id> *)
+    operationOwnedRawEvidenceRecordForReturnedScene:
+        (Core3DSceneSnapshot *)returnedScene
+    NS_SWIFT_NAME(operationOwnedRawEvidenceRecord(returnedScene:));
 
 #ifdef DEBUG
 //! Arms one operation-local E4 fault before the worker starts.

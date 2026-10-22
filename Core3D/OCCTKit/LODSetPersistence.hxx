@@ -147,7 +147,11 @@ inline bool ValidLevel(const Level& level) noexcept {
         || !ValidState(level.state) || !ValidReason(level.reason)) return false;
     if (level.state == State::Unbuilt)
         return level.reason == Reason::None && !level.hasF2Reference;
-    if (!level.hasF2Reference) return false;
+    // A source edit can stale intent that has never produced an artifact. Such
+    // a level has no F2 row to retain; Current is the only state that requires
+    // a reference. Stale levels that do have historical output keep it exact.
+    if (!level.hasF2Reference)
+        return level.state == State::Stale && level.reason != Reason::None;
     return NonzeroDigest(level.f2.derivativeIdentifier)
         && NonzeroDigest(level.f2.settingsSHA256)
         && NonzeroDigest(level.f2.sourceArtifactSHA256)
@@ -176,7 +180,8 @@ inline bool ValidRecord(const Record& value) noexcept {
         || !NonzeroDigest(value.attachmentMetadataSHA256)
         || value.levels.size() < 2 || value.levels.size() > kMaximumLevels)
         return false;
-    if (value.hasLastBuiltSource != (value.state != State::Unbuilt)) return false;
+    if (value.state == State::Current && !value.hasLastBuiltSource) return false;
+    if (value.state == State::Unbuilt && value.hasLastBuiltSource) return false;
     if (value.hasLastBuiltSource && !NonzeroDigest(value.lastBuiltSourceSHA256)) return false;
     if (value.state == State::Unbuilt && value.reason != Reason::None) return false;
     std::set<UUID> identifiers;
