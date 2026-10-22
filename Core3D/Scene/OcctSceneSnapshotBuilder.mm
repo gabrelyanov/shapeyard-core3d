@@ -20532,6 +20532,8 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         std::vector<std::string> finalBakeSeals;
         std::vector<std::string> finalOutputRoles;
         std::vector<std::uint64_t> finalOutputRoleBytes;
+        std::vector<PrivateExportRawEvidenceRecord::RoleContentWitness>
+            finalRoleContentWitnesses;
         std::size_t finalTriangleCount = 0;
         std::size_t finalCornerCount = 0;
         std::size_t finalResidentBytes = 0;
@@ -20553,6 +20555,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             std::size_t receiverCount = 0;
             std::size_t sourceCount = 0;
             std::size_t correspondenceBytes = 0;
+            std::size_t roleWitnessOwnerBytes = 0;
             for (const auto& owner : decalCapture->impl_->owners) {
                 if (!AddProtectedBytes(receiverCount, owner.receivers.size())
                     || !AddProtectedBytes(sourceCount,
@@ -20564,6 +20567,12 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                         PrivateSite::ProtectedCorrespondenceStorage)
                     || !AddProtectedBytes(
                         correspondenceBytes, ownerStrings)) return {};
+                if (!operation.CheckedProduct(owner.paintedSources.size(),
+                        owner.definitionIdentifier.capacity() + 1U, 1U,
+                        ownerStrings,
+                        PrivateSite::ProtectedEvidenceStorage)
+                    || !AddProtectedBytes(
+                        roleWitnessOwnerBytes, ownerStrings)) return {};
             }
             std::size_t correspondenceVectorBytes = 0;
             std::size_t evidenceBytes = 0;
@@ -20577,11 +20586,15 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                     2U * sizeof(std::string) + 130U, 1U, evidenceBytes,
                     PrivateSite::ProtectedEvidenceStorage)
                 || !operation.CheckedProduct(sourceCount,
-                    sizeof(std::string) + 32U + sizeof(std::uint64_t), 1U,
+                    sizeof(std::string) + 32U + sizeof(std::uint64_t)
+                        + sizeof(PrivateExportRawEvidenceRecord::
+                            RoleContentWitness), 1U,
                     correspondenceVectorBytes,
                     PrivateSite::ProtectedEvidenceStorage)
                 || !AddProtectedBytes(evidenceBytes,
                     correspondenceVectorBytes)
+                || !AddProtectedBytes(evidenceBytes,
+                    roleWitnessOwnerBytes)
                 || !AcquireProtectedStorage(finalCorrespondenceStorage,
                     operation, PrivateDimension::PrivateStorage,
                     correspondenceBytes, PrivateRetention::Retained,
@@ -20596,6 +20609,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             finalBakeSeals.reserve(occurrences.size());
             finalOutputRoles.reserve(sourceCount);
             finalOutputRoleBytes.reserve(sourceCount);
+            finalRoleContentWitnesses.reserve(sourceCount);
 #ifdef DEBUG
             if (debugObservation)
                 debugObservation->failureStage = "building-final-atlas";
@@ -20872,6 +20886,9 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                     finalOutputRoles.emplace_back(
                         PrivatePaintedRoleText(output.descriptor.role));
                     finalOutputRoleBytes.push_back(output.png.size());
+                    finalRoleContentWitnesses.push_back({
+                        owner.definitionIdentifier, output.descriptor.role,
+                        {}, -1});
                     std::size_t resident = 0;
                     if (!CheckedAdd(output.png.size(), output.rgba.size(),
                             resident)
@@ -21128,6 +21145,16 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                         output.descriptor.widthTexels,
                         output.descriptor.heightTexels, true,
                         indices[role])) return {};
+                const auto witness = std::find_if(
+                    finalRoleContentWitnesses.begin(),
+                    finalRoleContentWitnesses.end(), [&](const auto& value) {
+                        return value.ownerDefinitionIdentifier == entry.first
+                            && value.role == output.descriptor.role;
+                    });
+                if (witness == finalRoleContentWitnesses.end()
+                    || witness->returnedTextureIndex >= 0) return {};
+                witness->contentDigest = output.descriptor.content;
+                witness->returnedTextureIndex = indices[role];
             }
             if (expectedRoles.empty() || installedRoles != expectedRoles
                 || !roleTextures.emplace(entry.first, indices).second)
@@ -21810,6 +21837,8 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             for (auto& appearance : instance.decalDerivedAppearances)
                 if (!remapTexture(appearance.baseColorTextureIndex)) return {};
         }
+        for (auto& witness : finalRoleContentWitnesses)
+            if (!remapTexture(witness.returnedTextureIndex)) return {};
         result->textures = std::move(compactTextures);
 #ifdef DEBUG
         if (debugObservation && decalCapture)
@@ -21955,6 +21984,14 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                         ProtectedEvidenceStorage)
                 || !AddProtectedBytes(evidenceBytes, outputByteVector))
                 return {};
+            if (!protectedOperation.CheckedProduct(
+                    finalRoleContentWitnesses.capacity(),
+                    sizeof(PrivateExportRawEvidenceRecord::RoleContentWitness),
+                    1U, outputByteVector,
+                    decal_layer::bake::accounting::FailureSite::
+                        ProtectedEvidenceStorage)
+                || !AddProtectedBytes(evidenceBytes, outputByteVector))
+                return {};
             for (const auto& value : finalCorrespondence)
                 if (!AddProtectedBytes(correspondenceBytes,
                         value.ownerDefinitionIdentifier.capacity() + 1U))
@@ -21964,6 +22001,10 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 for (const auto& value : *values)
                     if (!DeepStringStorageBytes(value, evidenceBytes))
                         return {};
+            for (const auto& witness : finalRoleContentWitnesses)
+                if (!DeepStringStorageBytes(
+                        witness.ownerDefinitionIdentifier, evidenceBytes))
+                    return {};
             if (correspondenceBytes > finalCorrespondenceStorage.bytes
                 || evidenceBytes > finalEvidenceStorage.bytes)
                 return {};
@@ -22075,7 +22116,10 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             || !addRawVector(artifact.bakeSeals.size(), sizeof(std::string))
             || !addRawVector(finalOutputRoles.size(), sizeof(std::string))
             || !addRawVector(finalOutputRoleBytes.size(),
-                sizeof(std::uint64_t))) return {};
+                sizeof(std::uint64_t))
+            || !addRawVector(finalRoleContentWitnesses.size(), sizeof(
+                PrivateExportRawEvidenceRecord::RoleContentWitness)))
+            return {};
         for (const auto& value : artifact.correspondence)
             if (!AddProtectedBytes(rawEvidenceBytes,
                     value.ownerDefinitionIdentifier.capacity() + 1U))
@@ -22085,6 +22129,10 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             for (const auto& value : *values)
                 if (!DeepStringStorageBytes(value, rawEvidenceBytes))
                     return {};
+        for (const auto& witness : finalRoleContentWitnesses)
+            if (!DeepStringStorageBytes(
+                    witness.ownerDefinitionIdentifier, rawEvidenceBytes))
+                return {};
         decal_layer::bake::accounting::Ticket rawEvidenceStorage;
         constexpr std::size_t maximumRawEvidenceControlBytes = 4096U;
         if (!AcquireProtectedStorage(rawEvidenceStorage, terminalOperation,
@@ -22133,6 +22181,9 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             if (!terminalOperation.EnterAllocation(
                     TerminalSite::ProtectedEvidenceStorage)) return {};
             record->outputRoleBytes = finalOutputRoleBytes;
+            if (!terminalOperation.EnterAllocation(
+                    TerminalSite::ProtectedEvidenceStorage)) return {};
+            record->roleContentWitnesses = finalRoleContentWitnesses;
             record->savedGroupLayout = artifact.savedGroupLayout;
             record->returnedSceneAlias = artifact.scene.get();
             record->memberCount = artifact.correspondence.size();
@@ -22148,11 +22199,43 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             record->layoutResolution = finalLayoutResolution;
             record->layoutChartCount = finalLayoutChartCount;
             record->recordStorage = std::move(rawEvidenceStorage);
+            bool roleContentComplete = record->roleContentWitnesses.size()
+                    == record->outputRoles.size()
+                && record->outputRoles.size()
+                    == record->outputRoleBytes.size();
+            for (std::size_t index = 0;
+                 roleContentComplete
+                    && index < record->roleContentWitnesses.size(); ++index) {
+                const auto& witness = record->roleContentWitnesses[index];
+                const bool ownerPresent = std::any_of(
+                    record->correspondence.begin(),
+                    record->correspondence.end(), [&](const auto& item) {
+                        return item.ownerDefinitionIdentifier
+                            == witness.ownerDefinitionIdentifier;
+                    });
+                if (!ownerPresent || witness.returnedTextureIndex < 0
+                    || std::size_t(witness.returnedTextureIndex)
+                        >= artifact.scene->textures.size()
+                    || record->outputRoles[index]
+                        != PrivatePaintedRoleText(witness.role)) {
+                    roleContentComplete = false;
+                    break;
+                }
+                const auto& texture = artifact.scene->textures[
+                    std::size_t(witness.returnedTextureIndex)];
+                if (!texture.paintedAtlasDerivative
+                    || texture.encodedBytes.size()
+                        != record->outputRoleBytes[index]
+                    || texture.identifier != "texture-sha256-"
+                        + PaintedAtlasDigestText(witness.contentDigest))
+                    roleContentComplete = false;
+            }
             record->complete = !record->correspondence.empty()
                 && record->memberCount != 0 && record->layoutCount != 0
                 && record->finalTriangleCount != 0
                 && record->finalCornerCount != 0
-                && record->returnedSceneAlias != nullptr;
+                && record->returnedSceneAlias != nullptr
+                && roleContentComplete;
             if (!record->complete) return {};
             artifact.rawEvidence = std::move(record);
         } catch (...) {

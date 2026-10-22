@@ -111,6 +111,13 @@ struct PrivateExportRawEvidenceRecord final {
     std::vector<std::string> bakeSeals;
     std::vector<std::string> outputRoles;
     std::vector<std::uint64_t> outputRoleBytes;
+    struct RoleContentWitness final {
+        std::string ownerDefinitionIdentifier;
+        face_image::Role role = face_image::Role::BaseColor;
+        face_image::Digest contentDigest{};
+        std::int32_t returnedTextureIndex = -1;
+    };
+    std::vector<RoleContentWitness> roleContentWitnesses;
     const SceneSnapshot* returnedSceneAlias = nullptr;
     std::uint64_t memberCount = 0;
     std::uint64_t layoutCount = 0;

@@ -2483,6 +2483,17 @@ NSData *RawEvidenceData(const std::vector<std::uint8_t>& bytes) {
     return [NSData dataWithBytes:bytes.data() length:bytes.size()];
 }
 
+NSString *RawEvidenceDigestText(const core3d::face_image::Digest& digest) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string text;
+    text.reserve(digest.size() * 2U);
+    for (const std::uint8_t byte : digest) {
+        text.push_back(digits[byte >> 4U]);
+        text.push_back(digits[byte & 0x0fU]);
+    }
+    return SavedGroupLayoutString(text);
+}
+
 NSDictionary<NSString *, id> *RawEvidenceDictionary(
     const core3d::scene::PrivateExportRawEvidenceRead& read) {
     if (!read.record || !read.record->complete) return nil;
@@ -2559,13 +2570,30 @@ NSDictionary<NSString *, id> *RawEvidenceDictionary(
     for (const auto& value : record.bakeSeals)
         [bakeSeals addObject:SavedGroupLayoutString(value)];
     NSMutableArray<NSDictionary<NSString *, id> *> *roles =
-        [NSMutableArray arrayWithCapacity:record.outputRoles.size()];
-    if (record.outputRoles.size() != record.outputRoleBytes.size()) return nil;
-    for (std::size_t index = 0; index < record.outputRoles.size(); ++index)
+        [NSMutableArray arrayWithCapacity:record.roleContentWitnesses.size()];
+    if (record.outputRoles.size() != record.outputRoleBytes.size()
+        || record.outputRoles.size()
+            != record.roleContentWitnesses.size()
+        || !record.returnedSceneAlias) return nil;
+    for (std::size_t index = 0; index < record.outputRoles.size(); ++index) {
+        const auto& witness = record.roleContentWitnesses[index];
+        if (witness.returnedTextureIndex < 0
+            || std::size_t(witness.returnedTextureIndex)
+                >= record.returnedSceneAlias->textures.size()) return nil;
+        const auto& texture = record.returnedSceneAlias->textures[
+            std::size_t(witness.returnedTextureIndex)];
         [roles addObject:@{
+            @"ownerDefinitionIdentifier":
+                SavedGroupLayoutString(witness.ownerDefinitionIdentifier),
             @"role": SavedGroupLayoutString(record.outputRoles[index]),
             @"pngBytes": @(record.outputRoleBytes[index]),
+            @"contentDigest": RawEvidenceDigestText(
+                witness.contentDigest),
+            @"returnedTextureIndex": @(witness.returnedTextureIndex),
+            @"returnedContentIdentifier":
+                SavedGroupLayoutString(texture.identifier),
         }];
+    }
     return @{
         @"schema": @"shapeyard.e4-operation-raw-evidence.v1",
         @"state": @"present",
