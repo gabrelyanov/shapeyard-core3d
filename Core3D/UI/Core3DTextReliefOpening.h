@@ -63,6 +63,31 @@ typedef NS_ENUM(NSInteger, Core3DTextReliefApplyResult) {
     Core3DTextReliefApplyResultRecoveryRequired = 3,
 };
 
+//! Immutable projection of the authored values retained by one existing native
+//! text/emblem relief owner. This is available only on an opening captured with
+//! an existing feature identifier; a new-owner opening has no authored intent.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DTextReliefAuthoredIntent : NSObject
+@property(nonatomic, copy, readonly) NSData *ownerIdentifier;
+@property(nonatomic, copy, readonly) NSData *featureIdentifier;
+@property(nonatomic, assign, readonly) uint64_t revision;
+@property(nonatomic, assign, readonly) Core3DTextReliefResourceKind resourceKind;
+@property(nonatomic, copy, readonly) NSString *catalogHandle;
+@property(nonatomic, copy, readonly) NSString *text;
+@property(nonatomic, copy, readonly) NSString *emblemIdentifier;
+@property(nonatomic, assign, readonly) double heightMM;
+@property(nonatomic, assign, readonly) double depthMM;
+@property(nonatomic, assign, readonly) double trackingMM;
+@property(nonatomic, assign, readonly) Core3DTextReliefAlignment alignment;
+@property(nonatomic, assign, readonly) Core3DTextReliefMode mode;
+@property(nonatomic, assign, readonly) double offsetUMM;
+@property(nonatomic, assign, readonly) double offsetVMM;
+@property(nonatomic, assign, readonly) double rotationRadians;
+@property(nonatomic, assign, readonly) double metersPerUnit;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 //! Native-issued planar-face identity and placement frame for one selected
 //! host face. The frame origin lies on the face plane, frameZ is the outward
 //! normal (reversed faces handled natively) and frameX/frameY are a
@@ -130,6 +155,9 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic, copy, readonly) NSString *contextIdentifier;
 @property(nonatomic, assign, readonly) double metersPerUnit;
 @property(nonatomic, assign, readonly) NSInteger historyDepth;
+//! Exact retained authored values for an existing-owner capture; nil for a new
+//! opening. The value is a snapshot of the same native record held by opening.
+@property(nonatomic, strong, readonly, nullable) Core3DTextReliefAuthoredIntent *authoredIntent;
 //! Populated after a successful create/replace apply. These are observations
 //! of the natively issued durable owner and feature, never caller authority.
 @property(nonatomic, copy, readonly, nullable) NSData *appliedOwnerIdentifier;

@@ -316,12 +316,36 @@ struct E5Build final {
 - (instancetype)initPrivate { return [super init]; }
 @end
 
+@interface Core3DTextReliefAuthoredIntent ()
+@property(nonatomic, copy, readwrite) NSData *ownerIdentifier;
+@property(nonatomic, copy, readwrite) NSData *featureIdentifier;
+@property(nonatomic, assign, readwrite) uint64_t revision;
+@property(nonatomic, assign, readwrite) Core3DTextReliefResourceKind resourceKind;
+@property(nonatomic, copy, readwrite) NSString *catalogHandle;
+@property(nonatomic, copy, readwrite) NSString *text;
+@property(nonatomic, copy, readwrite) NSString *emblemIdentifier;
+@property(nonatomic, assign, readwrite) double heightMM;
+@property(nonatomic, assign, readwrite) double depthMM;
+@property(nonatomic, assign, readwrite) double trackingMM;
+@property(nonatomic, assign, readwrite) Core3DTextReliefAlignment alignment;
+@property(nonatomic, assign, readwrite) Core3DTextReliefMode mode;
+@property(nonatomic, assign, readwrite) double offsetUMM;
+@property(nonatomic, assign, readwrite) double offsetVMM;
+@property(nonatomic, assign, readwrite) double rotationRadians;
+@property(nonatomic, assign, readwrite) double metersPerUnit;
+- (instancetype)initPrivate;
+@end
+@implementation Core3DTextReliefAuthoredIntent
+- (instancetype)initPrivate { return [super init]; }
+@end
+
 @interface Core3DTextReliefOpening ()
 @property(nonatomic, strong, readwrite) Core3DTextReliefIssuedFace *issuedFace;
 @property(nonatomic, copy, readwrite) NSString *documentIdentifier;
 @property(nonatomic, copy, readwrite) NSString *contextIdentifier;
 @property(nonatomic, assign, readwrite) double metersPerUnit;
 @property(nonatomic, assign, readwrite) NSInteger historyDepth;
+@property(nonatomic, strong, readwrite, nullable) Core3DTextReliefAuthoredIntent *authoredIntent;
 @property(nonatomic, copy, readwrite, nullable) NSData *appliedOwnerIdentifier;
 @property(nonatomic, copy, readwrite, nullable) NSData *appliedFeatureIdentifier;
 @end
@@ -557,8 +581,34 @@ struct E5Build final {
         return nil;
     }
     opening->_existing = std::move(capture);
+    const auto& record = opening->_existing->record.payload->value;
+    Core3DTextReliefAuthoredIntent *intent =
+        [[Core3DTextReliefAuthoredIntent alloc] initPrivate];
+    intent.ownerIdentifier = E5Data(record.owner.entity);
+    intent.featureIdentifier = E5Data(record.feature);
+    intent.revision = record.revision;
+    intent.resourceKind = record.kind == tr::AuthoredKind::Font
+        ? Core3DTextReliefResourceKindFontOutline
+        : Core3DTextReliefResourceKindEmblemVector;
+    intent.catalogHandle =
+        [NSString stringWithUTF8String:record.catalogHandle.c_str()];
+    intent.text = [NSString stringWithUTF8String:record.textUTF8.c_str()];
+    intent.emblemIdentifier =
+        [NSString stringWithUTF8String:record.emblemRoot.c_str()];
+    intent.heightMM = record.heightMM;
+    intent.depthMM = record.depthMM;
+    intent.trackingMM = record.trackingMM;
+    intent.alignment = static_cast<Core3DTextReliefAlignment>(
+        static_cast<NSInteger>(record.alignment));
+    intent.mode = static_cast<Core3DTextReliefMode>(
+        static_cast<NSInteger>(record.mode));
+    intent.offsetUMM = record.offsetUMM;
+    intent.offsetVMM = record.offsetVMM;
+    intent.rotationRadians = record.rotationRadians;
+    intent.metersPerUnit = record.metersPerLocalUnit;
+    opening.authoredIntent = intent;
     opening.appliedOwnerIdentifier = E5Data(
-        opening->_existing->record.payload->value.owner.entity);
+        record.owner.entity);
     opening.appliedFeatureIdentifier = featureIdentifier;
     return opening;
 }
