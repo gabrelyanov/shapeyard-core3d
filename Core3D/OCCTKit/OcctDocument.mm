@@ -26667,61 +26667,178 @@ std::map<std::string, bool> Probe(OriginalsDefinition fixture) noexcept {
             retained_feature::ProductionRegistry(), retained_source::ProductionRegistry()).valid()
             && cr::CanonicalOriginalsFeature(feature, graph.nodes);
 
-        std::vector<std::uint8_t> frozenBefore, frozenAfter;
-        pb::EncodeOriginalStateBlock(fixture.originals, frozenBefore);
+        std::vector<std::uint8_t> frozenBefore, effectiveBefore, graphBefore;
+        if (!pb::EncodeOriginalStateBlock(fixture.originals, frozenBefore)
+            || !pb::EncodeEffectiveStateBlock(fixture.effective, effectiveBefore)
+            || !cr::Encode(graph, graphBefore)) return {{"fixture-baseline", false}};
         const auto programsBefore = std::array<std::vector<std::uint8_t>, 2>{
             fixture.originals.inputs[0].recipeBytes,
             fixture.originals.inputs[1].recipeBytes};
-        retained_feature::ReplayBudget budget;
         const std::atomic_bool running(false);
-        TopoDS_Shape before, after;
-        const bool builtBefore = ReplayOriginalsDetached(fixture, budget, running, before);
-        fixture.effective.inputs[0].geometry.dimensions[1] += 3;
-        const TopoDS_Shape editedSource = pb::build::PersistenceMaterializeDetached(
-            pb::build::BuildEffectiveAnalyticPrism(
-                fixture.effective.inputs[0].geometry,
-                fixture.effective.inputs[0].sourceMetersPerUnit,
-                fixture.carrierMetersPerUnit));
-        std::string editedSourceBytes;
-        retained_recipe::Digest editedSourceDigest;
-        if (editedSource.IsNull()
-            || !retained_part_boolean::ExactShapeBytes(editedSource, editedSourceBytes)
-            || !HashBytes(Bytes(editedSourceBytes), editedSourceDigest))
-            return {{"edited-source", false}};
-        fixture.effective.inputs[0].commitments.geometry = editedSourceDigest;
-        std::string beforeBytes, afterBytes;
-        const bool builtAfter = ReplayOriginalsDetached(fixture, budget, running, after);
-        rows["effective-replay-built"] = builtBefore && builtAfter;
-        rows["effective-edit-changes-result"] = builtBefore && builtAfter
-            && retained_part_boolean::ExactShapeBytes(before, beforeBytes)
-            && retained_part_boolean::ExactShapeBytes(after, afterBytes)
-            && beforeBytes != afterBytes;
-        pb::EncodeOriginalStateBlock(fixture.originals, frozenAfter);
-        rows["replay-keeps-frozen-originals"] = frozenBefore == frozenAfter;
-        rows["replay-keeps-source-programs"] = programsBefore[0]
-                == fixture.originals.inputs[0].recipeBytes
-            && programsBefore[1] == fixture.originals.inputs[1].recipeBytes;
-        // TESTS.md N-READ requires operation edits without rewriting creation
-        // history. Keep this positive assertion: the landed codec currently
-        // refuses it in PartBooleanDefinition.hxx::Valid(OriginalsDefinition).
-        auto operationEdit = fixture;
-        operationEdit.operation = pb::Operation::Union;
-        std::vector<std::uint8_t> operationPayload, operationOriginals;
-        const bool operationEncoded = pb::EncodeOriginals(operationEdit, operationPayload);
-        const bool operationFrozen = pb::EncodeOriginalStateBlock(
-            operationEdit.originals, operationOriginals) && operationOriginals == frozenBefore;
+        retained_feature::ReplayBudget baselineBudget;
+        TopoDS_Shape before;
+        std::string beforeBytes;
+        const bool builtBefore = ReplayOriginalsDetached(
+                fixture, baselineBudget, running, before)
+            && retained_part_boolean::ExactShapeBytes(before, beforeBytes);
+
+        const auto bindEffectiveGeometry = [&](pb::OriginalsDefinition& edited,
+                                               std::size_t input) {
+            const TopoDS_Shape source = pb::build::PersistenceMaterializeDetached(
+                pb::build::BuildEffectiveAnalyticPrism(
+                    edited.effective.inputs[input].geometry,
+                    edited.effective.inputs[input].sourceMetersPerUnit,
+                    edited.carrierMetersPerUnit));
+            std::string bytes;
+            retained_recipe::Digest digest;
+            if (source.IsNull()
+                || !retained_part_boolean::ExactShapeBytes(source, bytes)
+                || !HashBytes(Bytes(bytes), digest)) return false;
+            edited.effective.inputs[input].commitments.geometry = digest;
+            return true;
+        };
+        struct EditObservation final {
+            bool built = false;
+            bool changedState = false;
+            bool changedGeometry = false;
+            bool preserved = false;
+            cr::Definition graph;
+            TopoDS_Shape result;
+            std::string resultBytes;
+        };
+        const auto observeEdit = [&](const pb::OriginalsDefinition& edited,
+                                     int geometryInput) {
+            EditObservation observation;
+            std::vector<std::uint8_t> originals, effective, normalizedEffective, payload;
+            const bool frozen = pb::EncodeOriginalStateBlock(edited.originals, originals)
+                && originals == frozenBefore;
+            const bool programs = programsBefore[0] == edited.originals.inputs[0].recipeBytes
+                && programsBefore[1] == edited.originals.inputs[1].recipeBytes;
+            pb::OriginalsDefinition normalized = edited;
+            if (geometryInput >= 0) {
+                normalized.effective.inputs[std::size_t(geometryInput)].geometry =
+                    fixture.effective.inputs[std::size_t(geometryInput)].geometry;
+                normalized.effective.inputs[std::size_t(geometryInput)].commitments.geometry =
+                    fixture.effective.inputs[std::size_t(geometryInput)].commitments.geometry;
+            }
+            const bool siblingFields = pb::EncodeEffectiveStateBlock(edited.effective, effective)
+                && pb::EncodeEffectiveStateBlock(
+                    normalized.effective, normalizedEffective)
+                && normalizedEffective == effectiveBefore;
+            observation.changedState = geometryInput >= 0
+                ? effective != effectiveBefore
+                : edited.operation != fixture.operation && effective == effectiveBefore;
+            if (!pb::Valid(edited) || !pb::EncodeOriginals(edited, payload)) return observation;
+            observation.graph = graph;
+            auto& editedFeature = std::get<cr::FeatureNode>(observation.graph.nodes.back().value);
+            editedFeature.parameters = payload;
+            const bool canonical = cr::ValidateV3(observation.graph,
+                retained_feature::ProductionRegistry(), retained_source::ProductionRegistry()).valid()
+                && cr::CanonicalOriginalsFeature(editedFeature, observation.graph.nodes);
+            auto identityGraph = observation.graph;
+            std::get<cr::FeatureNode>(identityGraph.nodes.back().value).parameters = feature.parameters;
+            std::vector<std::uint8_t> identityBytes;
+            const bool featureAndIssuance = cr::Encode(identityGraph, identityBytes)
+                && identityBytes == graphBefore;
+            bool bindings = editedFeature.node == fixture.booleanNode
+                && editedFeature.feature == fixture.feature
+                && editedFeature.localID == 3 && editedFeature.inputs.size() == 2
+                && observation.graph.issuance.nextLocalID == 4;
+            for (std::size_t index = 0; bindings && index < 2; ++index) {
+                const auto& original = edited.originals.inputs[index];
+                const auto& current = edited.effective.inputs[index];
+                const auto& source = std::get<cr::SourceNode>(
+                    observation.graph.nodes[index].value);
+                const pb::RecipeInputRole role = index == 0
+                    ? pb::RecipeInputRole::Left : pb::RecipeInputRole::Right;
+                bindings = original.role == role && current.role == role
+                    && original.shapeSlot == index && source.shapeSlot == index
+                    && original.sourceNode == current.sourceNode
+                    && source.node == original.sourceNode
+                    && editedFeature.inputs[index] == original.sourceNode;
+            }
+            retained_feature::ReplayBudget editBudget;
+            observation.built = ReplayOriginalsDetached(
+                    edited, editBudget, running, observation.result)
+                && retained_part_boolean::ExactShapeBytes(
+                    observation.result, observation.resultBytes);
+            observation.changedGeometry = builtBefore && observation.built
+                && observation.resultBytes != beforeBytes;
+            observation.preserved = frozen && programs && siblingFields
+                && canonical && featureAndIssuance && bindings;
+            return observation;
+        };
+
+        auto dimensionLeftDefinition = fixture;
+        dimensionLeftDefinition.effective.inputs[0].geometry.dimensions[1] += 3;
+        const bool dimensionLeftBound = bindEffectiveGeometry(dimensionLeftDefinition, 0);
+        const auto dimensionLeft = observeEdit(dimensionLeftDefinition, 0);
+        auto dimensionRightDefinition = fixture;
+        dimensionRightDefinition.effective.inputs[1].geometry.dimensions[1] -= 5;
+        const bool dimensionRightBound = bindEffectiveGeometry(dimensionRightDefinition, 1);
+        const auto dimensionRight = observeEdit(dimensionRightDefinition, 1);
+
+        const auto rotateAboutOwnCenter = [](pb::OriginalsDefinition& value,
+                                             std::size_t input, double angle) {
+            auto& geometry = value.effective.inputs[input].geometry;
+            const double sine = std::sin(angle), cosine = std::cos(angle);
+            const double halfX = geometry.dimensions[0] * 0.5;
+            const double halfY = geometry.dimensions[1] * 0.5;
+            const double centerX = geometry.translation[0] + halfX;
+            const double centerY = geometry.translation[1] + halfY;
+            geometry.translation[0] = centerX - (cosine * halfX - sine * halfY);
+            geometry.translation[1] = centerY - (sine * halfX + cosine * halfY);
+            geometry.rotationXYZW = {{0, 0, std::sin(angle * 0.5),
+                                      std::cos(angle * 0.5)}};
+        };
+        auto placementLeftDefinition = fixture;
+        placementLeftDefinition.operation = pb::Operation::Union;
+        rotateAboutOwnCenter(placementLeftDefinition, 0, std::acos(-1.0) / 12);
+        const bool placementLeftBound = bindEffectiveGeometry(placementLeftDefinition, 0);
+        const auto placementLeft = observeEdit(placementLeftDefinition, 0);
+        auto placementRightDefinition = fixture;
+        placementRightDefinition.operation = pb::Operation::Union;
+        rotateAboutOwnCenter(placementRightDefinition, 1, -std::acos(-1.0) / 9);
+        const bool placementRightBound = bindEffectiveGeometry(placementRightDefinition, 1);
+        const auto placementRight = observeEdit(placementRightDefinition, 1);
+
+        auto operationDefinition = fixture;
+        operationDefinition.operation = pb::Operation::Union;
+        const auto operationEdit = observeEdit(operationDefinition, -1);
+        const bool placementLeftChangedGeometry = placementLeft.built
+            && operationEdit.built
+            && placementLeft.resultBytes != operationEdit.resultBytes;
+        const bool placementRightChangedGeometry = placementRight.built
+            && operationEdit.built
+            && placementRight.resultBytes != operationEdit.resultBytes;
+        const bool everyBuilt = builtBefore && dimensionLeftBound && dimensionRightBound
+            && placementLeftBound && placementRightBound
+            && dimensionLeft.built && dimensionRight.built
+            && placementLeft.built && placementRight.built && operationEdit.built;
+        const bool everyPreserved = dimensionLeft.preserved && dimensionRight.preserved
+            && placementLeft.preserved && placementRight.preserved && operationEdit.preserved;
+        rows["effective-replay-built"] = everyBuilt;
+        rows["effective-edit-changes-result"] = dimensionLeft.changedState
+            && dimensionLeft.changedGeometry && dimensionRight.changedState
+            && dimensionRight.changedGeometry;
+        rows["effective-dimension-edits-change-state-and-geometry-both-roles"] =
+            dimensionLeft.changedState && dimensionLeft.changedGeometry
+            && dimensionRight.changedState && dimensionRight.changedGeometry;
+        rows["effective-placement-left-changes-state-and-geometry"] =
+            placementLeft.changedState && placementLeftChangedGeometry;
+        rows["effective-placement-right-changes-state-and-geometry"] =
+            placementRight.changedState && placementRightChangedGeometry;
+        rows["effective-operation-edit-changes-state-and-geometry"] =
+            operationEdit.changedState && operationEdit.changedGeometry;
+        rows["each-edit-keeps-feature-issuance-roles-slots-and-siblings"] = everyPreserved;
+        rows["replay-keeps-frozen-originals"] = everyPreserved;
+        rows["replay-keeps-source-programs"] = everyPreserved;
         rows["operation-baseline-valid"] = pb::Valid(fixture);
-        rows["operation-edit-encodable"] = operationEncoded;
-        rows["operation-edit-originals-unchanged"] = operationFrozen;
-        TopoDS_Shape operationResult;
-        retained_feature::ReplayBudget operationBudget;
-        rows["effective-operation-edit-preserves-frozen-originals"] = operationEncoded
-            && operationFrozen
-            && ReplayOriginalsDetached(operationEdit, operationBudget, running, operationResult);
-        pb::Operation operation = pb::Operation::Union;
-        rows["suffix-reads-v4-operation"] =
-            retained_program_suffix::build::detail::OperationOf(graph, operation)
-            && operation == fixture.operation;
+        rows["operation-edit-encodable"] = operationEdit.built;
+        rows["operation-edit-originals-unchanged"] = operationEdit.preserved;
+        rows["effective-operation-edit-preserves-frozen-originals"] =
+            operationEdit.built && operationEdit.preserved
+            && operationEdit.changedState && operationEdit.changedGeometry;
 
         // Corrupt complete persisted records and recompute both block and
         // envelope digests, so ordinary BinXCAF read must reject the semantics.
@@ -26748,20 +26865,35 @@ std::map<std::string, bool> Probe(OriginalsDefinition fixture) noexcept {
         const std::vector<TopoDS_Shape> sourceVector(sourceShapes.begin(), sourceShapes.end());
         ColdReaderEvidence(graph, sourceVector, before, malformedPayloads, rows);
 
-        auto program = retained_program_suffix::Probe::Program(graph.outputNode,
-            {retained_program_suffix::Probe::Bore(1, 5, 8, 1)});
+        auto suffixDefinition = placementLeftDefinition;
+        suffixDefinition.operation = pb::Operation::Union;
+        const auto suffixBase = observeEdit(suffixDefinition, 0);
+        const auto ring = retained_program_suffix::Probe::Ring(1, 20, 17, 3, 1, 4);
+        auto program = retained_program_suffix::Probe::Program(
+            suffixBase.graph.outputNode, {ring});
         program.carrierMetersPerUnit = fixture.carrierMetersPerUnit;
-        const auto suffixed = retained_program_suffix::Probe::Suffixed(graph, program, 90);
+        const bool effectiveCertificate = suffixBase.built && suffixBase.preserved
+            && retained_program_suffix::build::LigamentCertificate(
+                suffixBase.graph, ring, fixture.carrierMetersPerUnit)
+                == retained_program_suffix::build::Ligament::Clear;
+        const auto suffixed = retained_program_suffix::Probe::Suffixed(
+            suffixBase.graph, program, 90);
         retained_feature::ReplayBudget suffixBudget;
         TopoDS_Shape suffixSolid;
         const bool suffixBuilt = cr::ValidateV3(suffixed,
             retained_feature::ProductionRegistry(), retained_source::ProductionRegistry()).valid()
             && ReplayOriginalsGraphDetached(suffixed, sourceVector, suffixBudget, running, suffixSolid);
         std::string suffixBytes;
-        rows["suffix-reads-v4-operation"] = rows["suffix-reads-v4-operation"]
+        pb::Operation suffixOperation = pb::Operation::Union;
+        const bool readsEffectiveOperation = retained_program_suffix::build::detail::OperationOf(
+                suffixBase.graph, suffixOperation)
+            && suffixOperation == suffixDefinition.operation;
+        rows["suffix-qualifies-effective-edited-geometry"] = effectiveCertificate
             && !program.steps.empty() && suffixBuilt
             && retained_part_boolean::ExactShapeBytes(suffixSolid, suffixBytes)
-            && suffixBytes != beforeBytes;
+            && suffixBytes != suffixBase.resultBytes;
+        rows["suffix-reads-v4-operation"] = readsEffectiveOperation
+            && rows["suffix-qualifies-effective-edited-geometry"];
 
         const std::atomic_bool stopped(true);
         retained_feature::ReplayBudget stopBudget;

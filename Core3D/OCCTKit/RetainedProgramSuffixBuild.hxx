@@ -124,6 +124,51 @@ inline bool SourceRect(const composite_recipe::SourceNode& source, unsigned axis
     } catch (...) { return false; }
 }
 
+// Conservative guaranteed rectangle for a SYPB/4 effective analytic input.
+// Only a rotation about the suffix axis is admitted here.  The returned
+// inner form is an axis-aligned square inscribed in the rotated input; the
+// enclosing form is its AABB and is used only to prove clearance from a
+// subtracting input.  Neither treats an AABB as guaranteed material.
+inline bool EffectiveSourceRect(const part_boolean::EffectiveInput& source,
+                                unsigned axis, double carrierMetersPerUnit,
+                                bool enclosing, Rect& out) noexcept {
+    try {
+        if (axis > 2 || !part_boolean::ValidGeometry(source.geometry)
+            || !std::isfinite(source.sourceMetersPerUnit)
+            || source.sourceMetersPerUnit <= 0
+            || !std::isfinite(carrierMetersPerUnit)
+            || carrierMetersPerUnit <= 0) return false;
+        const unsigned u = (axis + 1) % 3, v = (axis + 2) % 3;
+        const auto& q = source.geometry.rotationXYZW;
+        for (unsigned component = 0; component < 3; ++component)
+            if (component != axis && q[component] != 0) return false;
+        const double cosine = 1 - 2 * q[axis] * q[axis];
+        const double sine = 2 * q[axis] * q[3];
+        const double denominator = std::abs(cosine) + std::abs(sine);
+        const double mm = source.sourceMetersPerUnit * 1000;
+        const double halfU = source.geometry.dimensions[u] * mm * 0.5;
+        const double halfV = source.geometry.dimensions[v] * mm * 0.5;
+        const double centerU = (cosine * source.geometry.dimensions[u] * 0.5
+            - sine * source.geometry.dimensions[v] * 0.5
+            + source.geometry.translation[u]) * mm;
+        const double centerV = (sine * source.geometry.dimensions[u] * 0.5
+            + cosine * source.geometry.dimensions[v] * 0.5
+            + source.geometry.translation[v]) * mm;
+        const double extentU = enclosing
+            ? std::abs(cosine) * halfU + std::abs(sine) * halfV
+            : std::min(halfU, halfV) / denominator;
+        const double extentV = enclosing
+            ? std::abs(sine) * halfU + std::abs(cosine) * halfV
+            : extentU;
+        if (!std::isfinite(centerU) || !std::isfinite(centerV)
+            || !std::isfinite(extentU) || !std::isfinite(extentV)
+            || extentU <= 0 || extentV <= 0) return false;
+        out = {centerU - extentU, centerU + extentU,
+               centerV - extentV, centerV + extentV};
+        return out.lowU < out.highU && out.lowV < out.highV;
+    } catch (...) { return false; }
+}
+
 inline bool OperationOf(const composite_recipe::Definition& graph,
                         part_boolean::Operation& operation) noexcept {
     try {
@@ -173,10 +218,11 @@ inline bool OperationOf(const composite_recipe::Definition& graph,
 
 } // namespace detail
 
-// Conservative guaranteed-material certificate for one ring step, computed
-// solely from the authored source recipes and the persisted operation. The
-// bolt annulus (outer edge + 0.002 mm ligament, matching the retained ring
-// admission margin) must lie strictly inside guaranteed material.
+// Conservative guaranteed-material certificate for one ring step. Legacy
+// features use their authored source recipes; SYPB/4 uses its typed effective
+// analytic geometry. The bolt annulus (outer edge + 0.002 mm ligament,
+// matching the retained ring admission margin) must lie strictly inside
+// guaranteed material under the persisted operation.
 inline Ligament LigamentCertificate(const composite_recipe::Definition& graph,
                                     const analytic_boolean::Operand& ring,
                                     double carrierMetersPerUnit) noexcept {
@@ -188,10 +234,19 @@ inline Ligament LigamentCertificate(const composite_recipe::Definition& graph,
         if (!detail::OperationOf(graph, operation)) return Ligament::HostExtentUnproven;
         const auto& feature = std::get<composite_recipe::FeatureNode>(graph.nodes.back().value);
         if (feature.inputs.size() != 2) return Ligament::HostExtentUnproven;
+        part_boolean::OriginalsDefinition originals;
+        const bool effectiveV4 = feature.codecVersion
+            == composite_recipe::PartBooleanOriginalsFeatureCodec;
+        if (effectiveV4
+            && (!part_boolean::DecodeOriginals(feature.parameters, originals)
+                || retained_solid::Bits(originals.carrierMetersPerUnit)
+                    != retained_solid::Bits(carrierMetersPerUnit)))
+            return Ligament::HostExtentUnproven;
         // Rects follow the persisted left/right INPUT binding order, never the
         // node listing order.
         std::vector<detail::Rect> rects;
-        for (const retained_solid::UUID& input : feature.inputs) {
+        for (std::size_t inputIndex = 0; inputIndex < feature.inputs.size(); ++inputIndex) {
+            const retained_solid::UUID& input = feature.inputs[inputIndex];
             const auto found = std::find_if(graph.nodes.begin(), graph.nodes.end(),
                 [&](const composite_recipe::Node& node) {
                     return composite_recipe::NodeID(node) == input;
@@ -201,7 +256,17 @@ inline Ligament LigamentCertificate(const composite_recipe::Definition& graph,
             if (!source) return Ligament::HostExtentUnproven;
             detail::Rect rect;
             bool shell = false;
-            if (!detail::SourceRect(*source, axis, carrierMetersPerUnit, shell, rect))
+            const bool proven = effectiveV4
+                ? inputIndex < originals.effective.inputs.size()
+                    && originals.effective.inputs[inputIndex].sourceNode == source->node
+                    && detail::EffectiveSourceRect(
+                        originals.effective.inputs[inputIndex], axis,
+                        carrierMetersPerUnit,
+                        operation == part_boolean::Operation::Subtract
+                            && inputIndex == 1,
+                        rect)
+                : detail::SourceRect(*source, axis, carrierMetersPerUnit, shell, rect);
+            if (!proven)
                 return Ligament::HostExtentUnproven;
             rects.push_back(rect);
         }
