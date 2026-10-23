@@ -121,6 +121,12 @@ __attribute__((objc_subclassing_restricted))
                                                    expectedRevision:(NSData *)expectedRevision
                                                               error:(NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(commit(featureIdentifier:expectedRevision:));
+#if DEBUG
+//! Arms the next edit commit on this exact bridge to exercise the native
+//! close-unproven recovery path. No command or receipt is fabricated here.
+- (BOOL)debugReportNextDraftFacesCloseUnproven
+    NS_SWIFT_NAME(debugReportNextDraftFacesCloseUnproven());
+#endif
 //! Consumes the pending create capture with a live production Stop signal.
 - (nullable Core3DDraftFacesNativeReceipt *)commitCreateWithError:
     (NSError * _Nullable * _Nullable)error NS_SWIFT_NAME(commitCreate());

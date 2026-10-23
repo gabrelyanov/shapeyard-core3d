@@ -754,8 +754,10 @@ private:
         recovery_.context = capture->context;
         recovery_.baselineGraphBytes = baselineGraphBytes;
         recovery_.expectedGraphBytes = graphBytes;
-        recovery_.expectedShapeBytes = outputBytes;
-        if (!draft_faces::detail::exactShapeBytes(previous, recovery_.baselineShapeBytes)) {
+        // Snapshot the decoded shape that SetShape will publish. Raw replay
+        // bytes can differ after OCCT reads them; reconcile uses this serializer.
+        if (!draft_faces::detail::exactShapeBytes(drafted, recovery_.expectedShapeBytes)
+            || !draft_faces::detail::exactShapeBytes(previous, recovery_.baselineShapeBytes)) {
             recovery_ = {}; return refuse("b4.commitment-failure");
         }
         native_opening::CommittedEditPublication publication;

@@ -874,6 +874,9 @@ Core3DDraftFacesNativeSnapshot *DFPublicSnapshot(const DFEditingState& state) {
     bool _createMode;
     std::vector<std::uint8_t> _pendingCandidateBytes;
     std::shared_ptr<std::atomic_bool> _createStop;
+#if DEBUG
+    bool _debugCloseUnprovenArmed;
+#endif
 }
 
 - (instancetype)initPrivate { return [super init]; }
@@ -1019,6 +1022,11 @@ Core3DDraftFacesNativeSnapshot *DFPublicSnapshot(const DFEditingState& state) {
     }
     DFEditingState state;
     if (!DFReadEditingState(_document, _entityIdentifier, _choiceIdentifiers, state, error)) return nil;
+#if DEBUG
+    // Observe the real committed record while recovery owns the editor. This
+    // read neither mints a fresh edit capture nor settles the pending session.
+    if (_recoveryPending) return DFPublicSnapshot(state);
+#endif
     std::shared_ptr<const dfo::Capture> capture;
     if (![self mintCapture:capture error:error]) return nil;
     return DFPublicSnapshot(state);
@@ -1127,12 +1135,35 @@ Core3DDraftFacesNativeSnapshot *DFPublicSnapshot(const DFEditingState& state) {
                                     @"no exact reviewed Draft Faces revision"); return nil;
     }
     const std::atomic_bool stop{false};
+#if DEBUG
+    const dfo::FaultPoint fault = _debugCloseUnprovenArmed
+        ? dfo::FaultPoint::UnprovenClose : dfo::FaultPoint::None;
+    _debugCloseUnprovenArmed = false;
+    const dfo::Receipt native = _owner->editParameters(
+        _pendingCapture, _pendingParameters, stop, fault);
+#else
     const dfo::Receipt native = _owner->editParameters(_pendingCapture, _pendingParameters, stop);
+#endif
     Core3DDraftFacesNativeReceipt *receipt = DFPublicReceipt(native);
     _recoveryPending = native.outcome == dfo::Outcome::RecoveryRequired;
     if (!_recoveryPending) [self cancelPrepared];
     return receipt;
 }
+
+#if DEBUG
+- (BOOL)debugReportNextDraftFacesCloseUnproven {
+    if (!NSThread.isMainThread || !_controller || !_owner || _createMode
+        || _recoveryPending || _pendingCapture || _debugCloseUnprovenArmed) return NO;
+    for (NSString *key in NSProcessInfo.processInfo.environment) {
+        if ([key hasPrefix:@"SHAPEYARD_UITEST_B4_DRAFT_FACES_"]
+            && ![key isEqualToString:@"SHAPEYARD_UITEST_B4_DRAFT_FACES_SOURCE"]
+            && ![key isEqualToString:@"SHAPEYARD_UITEST_B4_DRAFT_FACES_UNKNOWN_CLOSE"])
+            return NO;
+    }
+    _debugCloseUnprovenArmed = true;
+    return YES;
+}
+#endif
 
 - (Core3DDraftFacesNativeReceipt *)commitCreateWithError:(NSError **)error {
     if (error) *error = nil;
