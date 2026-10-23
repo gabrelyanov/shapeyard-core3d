@@ -16,6 +16,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <utility>
 #include <vector>
 
 NSErrorDomain const Core3DDecimationErrorDomain = @"Core3DDecimationErrorDomain";
@@ -173,9 +174,7 @@ bool F2EvidenceEqual(Core3DPublishArtifactEvidence *left, Core3DPublishArtifactE
 @property(nonatomic, assign, readwrite) NSUInteger targetTriangleCount;
 @property(nonatomic, assign, readwrite) double metersPerUnit;
 // F2-S3 attribute payload (all-or-none; nil on every field selects the v1
-// flat path). Declared in this implementation file because the public header
-// is outside this step's allocation; tests bind them through key-value
-// coding. Values are immutable request-owned copies: one world Z-up normal
+// flat path). Values are immutable request-owned copies: one world Z-up normal
 // (3) and one UV (2) per stored source vertex, one material id and one
 // 64-lower-hex source-face anchor per face.
 @property(nonatomic, copy, readwrite, nullable) NSArray<NSNumber *> *f2AttributeWedgeNormals;
@@ -200,6 +199,39 @@ bool F2EvidenceEqual(Core3DPublishArtifactEvidence *left, Core3DPublishArtifactE
         _sourceArtifactSHA256 = [sourceArtifactSHA256 copy];
         _settingsSHA256 = [settingsSHA256 copy];
         _targetTriangleCount = targetTriangleCount; _metersPerUnit = metersPerUnit;
+    }
+    return self;
+}
+- (instancetype)initWithPositionsMM:(NSArray<NSNumber *> *)positionsMM
+                             indices:(NSArray<NSNumber *> *)indices
+            sourceContributionTokens:(NSArray<NSString *> *)sourceContributionTokens
+                       materialBytes:(NSData *)materialBytes
+                sourceArtifactSHA256:(NSString *)sourceArtifactSHA256
+                      settingsSHA256:(NSString *)settingsSHA256
+                 targetTriangleCount:(NSUInteger)targetTriangleCount
+                       metersPerUnit:(double)metersPerUnit
+               attributeWedgeNormals:(NSArray<NSNumber *> *)attributeWedgeNormals
+                   attributeWedgeUVs:(NSArray<NSNumber *> *)attributeWedgeUVs
+              attributeFaceMaterials:(NSArray<NSNumber *> *)attributeFaceMaterials
+                attributeFaceAnchors:(NSArray<NSString *> *)attributeFaceAnchors {
+    const NSUInteger storedCount = positionsMM.count / 3;
+    const NSUInteger faceCount = indices.count / 3;
+    if (positionsMM.count == 0 || positionsMM.count % 3 != 0
+        || indices.count == 0 || indices.count % 3 != 0
+        || attributeWedgeNormals.count != positionsMM.count
+        || attributeWedgeUVs.count != 2 * storedCount
+        || attributeFaceMaterials.count != faceCount
+        || attributeFaceAnchors.count != faceCount
+        || sourceContributionTokens.count != faceCount) return nil;
+    self = [self initWithPositionsMM:positionsMM indices:indices
+        sourceContributionTokens:sourceContributionTokens materialBytes:materialBytes
+        sourceArtifactSHA256:sourceArtifactSHA256 settingsSHA256:settingsSHA256
+        targetTriangleCount:targetTriangleCount metersPerUnit:metersPerUnit];
+    if (self) {
+        _f2AttributeWedgeNormals = [attributeWedgeNormals copy];
+        _f2AttributeWedgeUVs = [attributeWedgeUVs copy];
+        _f2AttributeFaceMaterials = [attributeFaceMaterials copy];
+        _f2AttributeFaceAnchors = [attributeFaceAnchors copy];
     }
     return self;
 }
@@ -249,7 +281,7 @@ bool F2EvidenceEqual(Core3DPublishArtifactEvidence *left, Core3DPublishArtifactE
 @property(nonatomic, assign, readwrite) NSUInteger triangleCount;
 @property(nonatomic, assign, readwrite) NSUInteger acceptedCollapseCount;
 //! F2-S3 attribute derivative evidence (attribute path only; nil on flat
-//! results). Same KVC-bound implementation-file seam as the request payload:
+//! results). The public surface is typed and read-only:
 //! carried wedge UVs (2 Float32 per corner), one material id and one
 //! source-face anchor per emitted triangle, and each emitted triangle's
 //! content digest recomputed from the actual emitted Float32 position bytes
@@ -335,6 +367,72 @@ bool F2EvidenceEqual(Core3DPublishArtifactEvidence *left, Core3DPublishArtifactE
             [collapses addObject:@(collapse.second)];
         }
         _f2AttributeCollapseKeepRemove = [collapses copy];
+    }
+    return self;
+}
+@end
+
+@interface Core3DDecimationSettingsReadback ()
+- (instancetype)initWithSettings:(const core3d::export_decimation::CanonicalSettings&)settings
+                  canonicalBytes:(NSData *)canonicalBytes
+                   settingsDigest:(const core3d::export_decimation::F2Digest&)settingsDigest;
+@property(nonatomic, copy, readwrite) NSData *canonicalBytes;
+@property(nonatomic, copy, readwrite) NSString *settingsSHA256;
+@property(nonatomic, assign, readwrite) NSUInteger targetTriangleCount;
+@property(nonatomic, assign, readwrite) double maximumSymmetricSurfaceDistanceMM;
+@property(nonatomic, assign, readwrite) double maximumSilhouettePixelDeviation;
+@property(nonatomic, assign, readwrite) double hardEdgeAngleDegrees;
+@property(nonatomic, assign, readwrite) double contactClearanceMM;
+@property(nonatomic, assign, readwrite) NSUInteger measurementSamplesPerMesh;
+@property(nonatomic, assign, readwrite) NSUInteger silhouetteResolution;
+@property(nonatomic, copy, readwrite) NSString *silhouetteCameraSetSHA256;
+@property(nonatomic, assign, readwrite) double metersPerUnit;
+@property(nonatomic, copy, readwrite) NSString *schemaVersion;
+@property(nonatomic, copy, readwrite) NSString *algorithmIdentifier;
+@property(nonatomic, copy, readwrite) NSString *inputPolicy;
+@property(nonatomic, copy, readwrite) NSString *coordinateFramePolicy;
+@property(nonatomic, copy, readwrite) NSString *normalPolicy;
+@property(nonatomic, copy, readwrite) NSString *arithmeticPolicy;
+@property(nonatomic, copy, readwrite) NSString *qualityProfileIdentifier;
+@property(nonatomic, copy, readwrite) NSString *surfaceDistanceMethod;
+@property(nonatomic, copy, readwrite) NSString *silhouetteMethod;
+@property(nonatomic, copy, readwrite) NSString *contactMethod;
+@property(nonatomic, copy, readwrite) NSString *hardEdgeMethod;
+@property(nonatomic, copy, readwrite) NSString *cameraMethod;
+@property(nonatomic, copy, readwrite) NSString *algorithmBuildSHA256;
+@end
+
+@implementation Core3DDecimationSettingsReadback
+- (instancetype)initWithSettings:(const core3d::export_decimation::CanonicalSettings&)settings
+                  canonicalBytes:(NSData *)canonicalBytes
+                   settingsDigest:(const core3d::export_decimation::F2Digest&)settingsDigest {
+    namespace f2 = core3d::export_decimation;
+    if ((self = [super init])) {
+        _canonicalBytes = [canonicalBytes copy];
+        _settingsSHA256 = F2String(f2::HexFromDigest(settingsDigest));
+        _targetTriangleCount = settings.targetTriangleCount;
+        _maximumSymmetricSurfaceDistanceMM = settings.maximumSymmetricSurfaceDistanceMM;
+        _maximumSilhouettePixelDeviation = settings.maximumSilhouettePixelDeviation;
+        _hardEdgeAngleDegrees = settings.hardEdgeAngleDegrees;
+        _contactClearanceMM = settings.contactClearanceMM;
+        _measurementSamplesPerMesh = settings.measurementSamplesPerMesh;
+        _silhouetteResolution = settings.silhouetteResolution;
+        _silhouetteCameraSetSHA256 =
+            F2String(f2::HexFromDigest(settings.silhouetteCameraSetSHA256));
+        _metersPerUnit = settings.metersPerUnit;
+        _schemaVersion = @(f2::kSchemaVersion);
+        _algorithmIdentifier = @(f2::kAlgorithmID);
+        _inputPolicy = @"position-only-untextured-static.v1";
+        _coordinateFramePolicy = @"native-rh-z-up_to_gltf-rh-y-up.v1";
+        _normalPolicy = @"f2-normal-regen.v1";
+        _arithmeticPolicy = @"f2-arithmetic.binary64-rne.no-fast-math.v1";
+        _qualityProfileIdentifier = @"shapeyard.f2-quality-profile.v1";
+        _surfaceDistanceMethod = @"f2-surface-distance.v1";
+        _silhouetteMethod = @"f2-silhouette.v1";
+        _contactMethod = @"f2-contact.v1";
+        _hardEdgeMethod = @"f2-hard-edge.v1";
+        _cameraMethod = @"f2-cameras.v1";
+        _algorithmBuildSHA256 = F2String(f2::HexFromDigest(f2::AlgorithmBuildSHA256()));
     }
     return self;
 }
@@ -759,25 +857,55 @@ bool F2VerifyAttributeOutput(
 
 @interface Core3DDecimationOpening () {
     std::shared_ptr<std::atomic_bool> _stop;
+    BOOL _asyncInFlight;
 }
 @property(nonatomic, strong, nullable) Core3DPublishCapture *capture;
+- (void)f2ContinueAtAsyncBoundary:(NSUInteger)boundary
+                     continuation:(dispatch_block_t)continuation;
 @end
 
 @implementation Core3DDecimationOpening
 + (instancetype)openingWithCapture:(Core3DPublishCapture *)capture error:(NSError **)error {
+    if (capture && !NSThread.isMainThread) {
+        SetError(error, Core3DDecimationErrorMalformedRequest,
+            @"F2 capture currentness is main-thread only."); return nil;
+    }
     if (capture && ![capture isCurrent:error]) return nil;
     Core3DDecimationOpening *opening = [[self alloc] initPrivate];
     opening.capture = capture;
     return opening;
 }
 - (instancetype)initPrivate {
-    if ((self = [super init])) _stop = std::make_shared<std::atomic_bool>(false);
+    if ((self = [super init])) {
+        _stop = std::make_shared<std::atomic_bool>(false);
+        _asyncInFlight = NO;
+    }
     return self;
 }
 - (BOOL)cancel { return !_stop->exchange(true, std::memory_order_relaxed); }
 
+- (void)f2ContinueAtAsyncBoundary:(NSUInteger)boundary
+                     continuation:(dispatch_block_t)continuation {
+    NSAssert(NSThread.isMainThread, @"F2 async boundaries are main-thread only");
+#if DEBUG
+    void (^handler)(Core3DDecimationAsyncBoundary, dispatch_block_t) =
+        self.f2DebugAsyncBoundaryHandler;
+    if (handler) {
+        handler((Core3DDecimationAsyncBoundary)boundary, [continuation copy]);
+        return;
+    }
+#else
+    (void)boundary;
+#endif
+    continuation();
+}
+
 - (Core3DDecimationResult *)decimateRequest:(Core3DDecimationRequest *)request
                                        error:(NSError **)error {
+    if (self.capture && !NSThread.isMainThread) {
+        SetError(error, Core3DDecimationErrorMalformedRequest,
+            @"F2 captured execution is main-thread only."); return nil;
+    }
     if (![request isKindOfClass:Core3DDecimationRequest.class]
         || request.positionsMM.count == 0 || request.positionsMM.count % 3 != 0
         || request.indices.count == 0 || request.indices.count % 3 != 0
@@ -840,6 +968,150 @@ bool F2VerifyAttributeOutput(
                 evidence:evidence canonicalRequestBytes:F2Data(canonical)];
     }
     return result;
+}
+
+- (void)decimateCapturedRequest:(Core3DDecimationRequest *)request
+                     completion:(void (^)(Core3DDecimationResult *, NSError *))completion {
+    if (!completion) return;
+    void (^finish)(Core3DDecimationResult *, NSError *) = [completion copy];
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            finish(nil, [NSError errorWithDomain:Core3DDecimationErrorDomain
+                code:Core3DDecimationErrorMalformedRequest
+                userInfo:@{NSLocalizedDescriptionKey:
+                    @"F2 captured execution must start on main."}]);
+        });
+        return;
+    }
+    Core3DPublishCapture *capture = self.capture;
+    Core3DPublishArtifactEvidence *evidence = capture.artifactEvidence;
+    if (!capture || !evidence || _asyncInFlight
+        || ![request isKindOfClass:Core3DDecimationRequest.class]
+        || request.positionsMM.count == 0 || request.positionsMM.count % 3 != 0
+        || request.indices.count == 0 || request.indices.count % 3 != 0
+        || request.sourceContributionTokens.count != request.indices.count / 3
+        || !LowerHexDigest(request.sourceArtifactSHA256)
+        || !LowerHexDigest(request.settingsSHA256)
+        || (request.metersPerUnit != 0.001 && request.metersPerUnit != 1.0)
+        || request.f2AttributeWedgeNormals || request.f2AttributeWedgeUVs
+        || request.f2AttributeFaceMaterials || request.f2AttributeFaceAnchors) {
+        finish(nil, [NSError errorWithDomain:Core3DDecimationErrorDomain
+            code:(capture && !evidence ? Core3DDecimationErrorMissingArtifactEvidence
+                                       : Core3DDecimationErrorMalformedRequest)
+            userInfo:@{NSLocalizedDescriptionKey:
+                @"Malformed or unbound F2 captured request."}]);
+        return;
+    }
+    NSError *fenceError = nil;
+    if (![capture isCurrent:&fenceError]) {
+        finish(nil, fenceError ?: [NSError errorWithDomain:Core3DDecimationErrorDomain
+            code:Core3DDecimationErrorStaleSource
+            userInfo:@{NSLocalizedDescriptionKey:@"F2 source capture is stale."}]);
+        return;
+    }
+    std::vector<std::uint8_t> canonicalRequest;
+    if (!F2CanonicalRequestBytes(request, canonicalRequest)) {
+        finish(nil, [NSError errorWithDomain:Core3DDecimationErrorDomain
+            code:Core3DDecimationErrorMalformedRequest
+            userInfo:@{NSLocalizedDescriptionKey:@"Malformed F2 canonical request."}]);
+        return;
+    }
+    auto native = std::make_shared<core3d::export_mesh_decimator::Input>();
+    native->targetTriangles = request.targetTriangleCount;
+    native->positionsMM.reserve(request.positionsMM.count / 3);
+    for (NSUInteger index = 0; index < request.positionsMM.count; index += 3) {
+        native->positionsMM.push_back({request.positionsMM[index].doubleValue,
+            request.positionsMM[index + 1].doubleValue,
+            request.positionsMM[index + 2].doubleValue});
+    }
+    native->indices.reserve(request.indices.count);
+    for (NSNumber *number in request.indices) {
+        const unsigned long long value = number.unsignedLongLongValue;
+        if (value > std::numeric_limits<std::uint32_t>::max()) {
+            finish(nil, [NSError errorWithDomain:Core3DDecimationErrorDomain
+                code:Core3DDecimationErrorMalformedRequest
+                userInfo:@{NSLocalizedDescriptionKey:@"Index is out of range."}]);
+            return;
+        }
+        native->indices.push_back(static_cast<std::uint32_t>(value));
+    }
+    for (NSString *token in request.sourceContributionTokens) {
+        if (![token isKindOfClass:NSString.class] || token.length == 0) {
+            finish(nil, [NSError errorWithDomain:Core3DDecimationErrorDomain
+                code:Core3DDecimationErrorMalformedRequest
+                userInfo:@{NSLocalizedDescriptionKey:@"Missing provenance token."}]);
+            return;
+        }
+        native->contributionTokens.emplace_back(token.UTF8String ?: "");
+    }
+    NSData *materialBytes = [request.materialBytes copy];
+    NSData *canonicalBytes = F2Data(canonicalRequest);
+    std::shared_ptr<std::atomic_bool> stop = _stop;
+    auto output = std::make_shared<core3d::export_mesh_decimator::Output>();
+    auto status = std::make_shared<NativeError>(NativeError::None);
+    _asyncInFlight = YES;
+    __weak Core3DDecimationOpening *weakSelf = self;
+    [self f2ContinueAtAsyncBoundary:1 continuation:^{
+        dispatch_queue_attr_t attributes = dispatch_queue_attr_make_with_qos_class(
+            DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0);
+        dispatch_queue_t queue = dispatch_queue_create(
+            "com.shapeyard.f2-decimation.request", attributes);
+        dispatch_async(queue, ^{
+            *status = core3d::export_mesh_decimator::Decimate(*native, *output, stop.get());
+            dispatch_async(dispatch_get_main_queue(), ^{
+                Core3DDecimationOpening *opening = weakSelf;
+                if (!opening) {
+                    finish(nil, [NSError errorWithDomain:Core3DDecimationErrorDomain
+                        code:Core3DDecimationErrorCancelled
+                        userInfo:@{NSLocalizedDescriptionKey:@"F2 request owner was released."}]);
+                    return;
+                }
+                [opening f2ContinueAtAsyncBoundary:2 continuation:^{
+                    [opening f2ContinueAtAsyncBoundary:3 continuation:^{
+                        opening->_asyncInFlight = NO;
+                        if (stop->load(std::memory_order_relaxed)
+                            || *status == NativeError::Cancelled) {
+                            finish(nil, [NSError errorWithDomain:Core3DDecimationErrorDomain
+                                code:Core3DDecimationErrorCancelled
+                                userInfo:@{NSLocalizedDescriptionKey:
+                                    @"F2 request was cancelled and drained."}]);
+                            return;
+                        }
+                        if (*status != NativeError::None) {
+                            finish(nil, [NSError errorWithDomain:Core3DDecimationErrorDomain
+                                code:PublicError(*status)
+                                userInfo:@{NSLocalizedDescriptionKey:
+                                    @"F2 native decimation refused without output."}]);
+                            return;
+                        }
+                        NSError *finalError = nil;
+                        if (![capture isCurrent:&finalError]) {
+                            finish(nil, finalError ?: [NSError errorWithDomain:
+                                Core3DDecimationErrorDomain code:Core3DDecimationErrorStaleSource
+                                userInfo:@{NSLocalizedDescriptionKey:
+                                    @"F2 source changed during work."}]);
+                            return;
+                        }
+                        Core3DPublishArtifactEvidence *currentEvidence = capture.artifactEvidence;
+                        if (!F2EvidenceEqual(evidence, currentEvidence)) {
+                            finish(nil, [NSError errorWithDomain:Core3DDecimationErrorDomain
+                                code:Core3DDecimationErrorMissingArtifactEvidence
+                                userInfo:@{NSLocalizedDescriptionKey:
+                                    @"F2 artifact evidence changed during work."}]);
+                            return;
+                        }
+                        Core3DDecimationResult *result =
+                            [[Core3DDecimationResult alloc] initWithNative:*output
+                                materialBytes:materialBytes];
+                        result.f2ProducerSeal = [[Core3DF2ProducerSeal alloc]
+                            initWithCapture:capture evidence:evidence
+                            canonicalRequestBytes:canonicalBytes];
+                        finish(result, nil);
+                    }];
+                }];
+            });
+        });
+    }];
 }
 
 //! F2-S3 attribute-aware path. Same ownership, fences and Stop stickiness as
@@ -1011,6 +1283,26 @@ bool F2VerifyAttributeOutput(
     F2Digest digest;
     if (!f2::SettingsSHA256(F2Bytes(bytes), digest)) return nil;
     return F2String(f2::HexFromDigest(digest));
+}
+
++ (Core3DDecimationSettingsReadback *)f2SettingsReadbackForCanonicalBytes:(NSData *)bytes
+    error:(NSError **)error {
+    if (error) *error = nil;
+    if (![bytes isKindOfClass:NSData.class]) {
+        SetError(error, Core3DDecimationErrorMalformedRequest,
+            @"F2 canonical settings bytes are unavailable.");
+        return nil;
+    }
+    f2::CanonicalSettings settings;
+    F2Digest digest;
+    if (!f2::DecodeSettings(F2Bytes(bytes), settings)
+        || !f2::SettingsSHA256(F2Bytes(bytes), digest)) {
+        SetError(error, Core3DDecimationErrorMalformedRequest,
+            @"F2 canonical settings bytes are malformed.");
+        return nil;
+    }
+    return [[Core3DDecimationSettingsReadback alloc] initWithSettings:settings
+        canonicalBytes:bytes settingsDigest:digest];
 }
 
 - (Core3DPersistedDecimationDerivative *)f2PersistDerivativeForController:(Core3DViewController *)controller

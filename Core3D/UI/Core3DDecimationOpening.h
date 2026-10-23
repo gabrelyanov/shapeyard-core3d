@@ -4,6 +4,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 @class Core3DPublishCapture;
 @class Core3DViewController;
+@class Core3DDecimationResult;
+@class Core3DDecimationSettingsReadback;
 
 FOUNDATION_EXPORT NSErrorDomain const Core3DDecimationErrorDomain;
 
@@ -36,6 +38,13 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic, copy, readonly) NSString *settingsSHA256;
 @property(nonatomic, assign, readonly) NSUInteger targetTriangleCount;
 @property(nonatomic, assign, readonly) double metersPerUnit;
+//! Optional F2 attribute payload. These four properties are either all nil
+//! (the original flat-normal path) or all nonnil and aligned to the request.
+//! The designated attribute initializer below is the only public writer.
+@property(nonatomic, copy, readonly, nullable) NSArray<NSNumber *> *f2AttributeWedgeNormals;
+@property(nonatomic, copy, readonly, nullable) NSArray<NSNumber *> *f2AttributeWedgeUVs;
+@property(nonatomic, copy, readonly, nullable) NSArray<NSNumber *> *f2AttributeFaceMaterials;
+@property(nonatomic, copy, readonly, nullable) NSArray<NSString *> *f2AttributeFaceAnchors;
 - (instancetype)initWithPositionsMM:(NSArray<NSNumber *> *)positionsMM
                              indices:(NSArray<NSNumber *> *)indices
             sourceContributionTokens:(NSArray<NSString *> *)sourceContributionTokens
@@ -44,6 +53,21 @@ __attribute__((objc_subclassing_restricted))
                       settingsSHA256:(NSString *)settingsSHA256
                  targetTriangleCount:(NSUInteger)targetTriangleCount
                        metersPerUnit:(double)metersPerUnit NS_DESIGNATED_INITIALIZER;
+//! Typed all-or-none form of the retained F2-S3 request seam. It returns nil
+//! unless every attribute array is present and has the exact source-domain
+//! cardinality; decimateRequest: still performs its complete validation.
+- (nullable instancetype)initWithPositionsMM:(NSArray<NSNumber *> *)positionsMM
+                                      indices:(NSArray<NSNumber *> *)indices
+                     sourceContributionTokens:(NSArray<NSString *> *)sourceContributionTokens
+                                materialBytes:(NSData *)materialBytes
+                         sourceArtifactSHA256:(NSString *)sourceArtifactSHA256
+                               settingsSHA256:(NSString *)settingsSHA256
+                          targetTriangleCount:(NSUInteger)targetTriangleCount
+                                metersPerUnit:(double)metersPerUnit
+                        attributeWedgeNormals:(NSArray<NSNumber *> *)attributeWedgeNormals
+                            attributeWedgeUVs:(NSArray<NSNumber *> *)attributeWedgeUVs
+                       attributeFaceMaterials:(NSArray<NSNumber *> *)attributeFaceMaterials
+                         attributeFaceAnchors:(NSArray<NSString *> *)attributeFaceAnchors;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end
@@ -62,6 +86,46 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic, copy, readonly) NSString *appearanceLimitation;
 @property(nonatomic, assign, readonly) NSUInteger triangleCount;
 @property(nonatomic, assign, readonly) NSUInteger acceptedCollapseCount;
+//! Typed read-only output of the F2-S3 attribute path. All six values are nil
+//! on the original flat path and nonnil together on an attribute result.
+@property(nonatomic, copy, readonly, nullable) NSData *f2AttributeUVFloat32Data;
+@property(nonatomic, copy, readonly, nullable) NSArray<NSNumber *> *f2AttributeMaterialIDs;
+@property(nonatomic, copy, readonly, nullable) NSArray<NSString *> *f2AttributeSourceFaceAnchors;
+@property(nonatomic, copy, readonly, nullable) NSArray<NSString *> *f2AttributeTriangleContentSHA256;
+@property(nonatomic, copy, readonly, nullable) NSArray<NSNumber *> *f2AttributeCollapseKeepRemove;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+//! Immutable native decode of the complete canonical settings payload. Fixed
+//! identities are exposed with the variable values so callers never infer
+//! policy from defaults or duplicate the native codec.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DDecimationSettingsReadback : NSObject
+@property(nonatomic, copy, readonly) NSData *canonicalBytes;
+@property(nonatomic, copy, readonly) NSString *settingsSHA256;
+@property(nonatomic, assign, readonly) NSUInteger targetTriangleCount;
+@property(nonatomic, assign, readonly) double maximumSymmetricSurfaceDistanceMM;
+@property(nonatomic, assign, readonly) double maximumSilhouettePixelDeviation;
+@property(nonatomic, assign, readonly) double hardEdgeAngleDegrees;
+@property(nonatomic, assign, readonly) double contactClearanceMM;
+@property(nonatomic, assign, readonly) NSUInteger measurementSamplesPerMesh;
+@property(nonatomic, assign, readonly) NSUInteger silhouetteResolution;
+@property(nonatomic, copy, readonly) NSString *silhouetteCameraSetSHA256;
+@property(nonatomic, assign, readonly) double metersPerUnit;
+@property(nonatomic, copy, readonly) NSString *schemaVersion;
+@property(nonatomic, copy, readonly) NSString *algorithmIdentifier;
+@property(nonatomic, copy, readonly) NSString *inputPolicy;
+@property(nonatomic, copy, readonly) NSString *coordinateFramePolicy;
+@property(nonatomic, copy, readonly) NSString *normalPolicy;
+@property(nonatomic, copy, readonly) NSString *arithmeticPolicy;
+@property(nonatomic, copy, readonly) NSString *qualityProfileIdentifier;
+@property(nonatomic, copy, readonly) NSString *surfaceDistanceMethod;
+@property(nonatomic, copy, readonly) NSString *silhouetteMethod;
+@property(nonatomic, copy, readonly) NSString *contactMethod;
+@property(nonatomic, copy, readonly) NSString *hardEdgeMethod;
+@property(nonatomic, copy, readonly) NSString *cameraMethod;
+@property(nonatomic, copy, readonly) NSString *algorithmBuildSHA256;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end
@@ -108,7 +172,27 @@ __attribute__((objc_subclassing_restricted))
                                                 error:(NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(decimate(_:));
 //! Sticky for this opening and never affects another request.
+//! For asynchronous execution this only signals Stop; the completion is the
+//! join and is delivered exactly once on main after numerical work has exited.
 - (BOOL)cancel;
+//! Capture-bound asynchronous execution. The immutable producer tuple and
+//! native input are copied and fenced on main, only numerical mesh work runs
+//! off-main, and the final currentness/evidence fence plus private seal happen
+//! on main. A nil-capture opening cannot use this entry point.
+- (void)decimateCapturedRequest:(Core3DDecimationRequest *)request
+    completion:(void (^)(Core3DDecimationResult * _Nullable result,
+                         NSError * _Nullable error))completion
+    NS_SWIFT_NAME(decimateCaptured(_:completion:));
+#if DEBUG
+typedef NS_ENUM(NSUInteger, Core3DDecimationAsyncBoundary) {
+    Core3DDecimationAsyncBoundaryBeforeNumericalWork = 1,
+    Core3DDecimationAsyncBoundaryAfterNumericalWork = 2,
+    Core3DDecimationAsyncBoundaryBeforeFinalFence = 3,
+};
+//! Scheduling observation only. The handler must invoke resume exactly once.
+@property(nonatomic, copy, nullable) void (^f2DebugAsyncBoundaryHandler)(
+    Core3DDecimationAsyncBoundary boundary, dispatch_block_t resume);
+#endif
 
 //! F2-S2 canonical complete settings bytes: target, input policy, quality
 //! values, method/profile/camera identities, unit/frame and algorithm/build
@@ -127,6 +211,12 @@ __attribute__((objc_subclassing_restricted))
 //! Recomputes the canonical settings digest from bytes; nil on malformed bytes.
 + (nullable NSString *)f2SettingsSHA256ForCanonicalBytes:(NSData *)bytes
     NS_SWIFT_NAME(f2SettingsSHA256(forCanonicalBytes:));
+
+//! Decodes canonical bytes through the production native codec. Malformed,
+//! trailing, non-finite or noncanonical settings refuse without a partial DTO.
++ (nullable Core3DDecimationSettingsReadback *)f2SettingsReadbackForCanonicalBytes:(NSData *)bytes
+    error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(f2SettingsReadback(forCanonicalBytes:));
 
 //! Persists the derivative record for the opening's owner set. Persistence
 //! replays only a result this opening sealed under the same source witness:
