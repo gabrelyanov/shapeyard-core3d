@@ -162,8 +162,16 @@ Core3DLODSetError PublicRefusal(lod::Refusal refusal) {
 @property(nonatomic, assign, readwrite) NSUInteger uvMethodVersion;
 @property(nonatomic, assign, readwrite) NSUInteger normalMethodVersion;
 @property(nonatomic, assign, readwrite) NSUInteger overlapMethodVersion;
+@property(nonatomic, copy, readwrite) NSString *intentSHA256;
 @property(nonatomic, copy, readwrite, nullable) NSString *f2DerivativeIdentifier;
 @property(nonatomic, copy, readwrite, nullable) NSString *f2SettingsSHA256;
+@property(nonatomic, copy, readwrite, nullable) NSString *f2SourceArtifactSHA256;
+@property(nonatomic, copy, readwrite, nullable) NSString *f2OutputArtifactSHA256;
+@property(nonatomic, copy, readwrite, nullable) NSString *f2OutputGeometrySHA256;
+@property(nonatomic, copy, readwrite, nullable) NSString *f2RemapReceiptSHA256;
+@property(nonatomic, copy, readwrite, nullable) NSString *f2IndependentMeasurementSHA256;
+@property(nonatomic, copy, readwrite, nullable) NSString *f2AlgorithmBuildSHA256;
+@property(nonatomic, copy, readwrite, nullable) NSString *f2ArtifactName;
 @property(nonatomic, assign, readwrite) NSUInteger measuredTriangleCount;
 - (instancetype)initWithLevel:(const syls::Level&)level ordinal:(NSUInteger)ordinal;
 @end
@@ -186,9 +194,18 @@ Core3DLODSetError PublicRefusal(lod::Refusal refusal) {
         _uvMethodVersion = level.quality.uvMethodVersion;
         _normalMethodVersion = level.quality.normalMethodVersion;
         _overlapMethodVersion = level.quality.overlapMethodVersion;
+        _intentSHA256 = DigestText(level.intentSHA256);
         if (level.hasF2Reference) {
             _f2DerivativeIdentifier = DigestText(level.f2.derivativeIdentifier);
             _f2SettingsSHA256 = DigestText(level.f2.settingsSHA256);
+            _f2SourceArtifactSHA256 = DigestText(level.f2.sourceArtifactSHA256);
+            _f2OutputArtifactSHA256 = DigestText(level.f2.outputArtifactSHA256);
+            _f2OutputGeometrySHA256 = DigestText(level.f2.outputGeometrySHA256);
+            _f2RemapReceiptSHA256 = DigestText(level.f2.remapReceiptSHA256);
+            _f2IndependentMeasurementSHA256 =
+                DigestText(level.f2.independentMeasurementSHA256);
+            _f2AlgorithmBuildSHA256 = DigestText(level.f2.algorithmBuildSHA256);
+            _f2ArtifactName = Text(level.f2.artifactName);
             _measuredTriangleCount = level.f2.measuredTriangleCount;
         }
     }
@@ -200,11 +217,14 @@ Core3DLODSetError PublicRefusal(lod::Refusal refusal) {
 @property(nonatomic, copy, readwrite) NSString *identifier;
 @property(nonatomic, copy, readwrite) NSString *documentIdentifier;
 @property(nonatomic, assign, readwrite) NSUInteger revision;
+@property(nonatomic, assign, readwrite) NSUInteger nativeEditRevision;
+@property(nonatomic, assign, readwrite) NSUInteger settingsRevision;
 @property(nonatomic, assign, readwrite) double metersPerUnit;
 @property(nonatomic, assign, readwrite) Core3DLODSetDurableState state;
 @property(nonatomic, copy, readwrite) NSString *reason;
 @property(nonatomic, copy, readwrite) NSString *observedSourceSHA256;
 @property(nonatomic, copy, readwrite, nullable) NSString *lastBuiltSourceSHA256;
+@property(nonatomic, copy, readwrite) NSString *attachmentMetadataSHA256;
 @property(nonatomic, copy, readwrite) NSArray<Core3DLODLevelRecord *> *levels;
 @property(nonatomic, copy, readwrite) NSData *canonicalSYLSRecord;
 - (instancetype)initWithRecord:(const syls::Record&)record bytes:(NSData *)bytes;
@@ -216,11 +236,14 @@ Core3DLODSetError PublicRefusal(lod::Refusal refusal) {
         _identifier = UUIDText(record.setIdentifier);
         _documentIdentifier = UUIDText(record.documentIdentifier);
         _revision = static_cast<NSUInteger>(record.revision);
+        _nativeEditRevision = static_cast<NSUInteger>(record.nativeEditRevision);
+        _settingsRevision = static_cast<NSUInteger>(record.settingsRevision);
         _metersPerUnit = record.metersPerUnit; _state = PublicState(record.state);
         _reason = ReasonText(record.reason);
         _observedSourceSHA256 = DigestText(record.observedSourceSHA256);
         _lastBuiltSourceSHA256 = record.hasLastBuiltSource
             ? DigestText(record.lastBuiltSourceSHA256) : nil;
+        _attachmentMetadataSHA256 = DigestText(record.attachmentMetadataSHA256);
         NSMutableArray *levels = [NSMutableArray arrayWithCapacity:record.levels.size()];
         for (std::size_t index = 0; index < record.levels.size(); ++index)
             [levels addObject:[[Core3DLODLevelRecord alloc]
@@ -1260,6 +1283,33 @@ bool DecodeStores(const Handle(OcctDocument)& document,
 }
 
 + (NSUInteger)maximumSYLSRecordBytes { return syls::kMaximumRecordBytes; }
+
++ (NSData *)f2CanonicalSettingsBytesForLevel:(Core3DLODLevelRecord *)level
+                                metersPerUnit:(double)metersPerUnit
+                                         error:(NSError **)error {
+    if (error) *error = nil;
+    if (![level isKindOfClass:Core3DLODLevelRecord.class]) {
+        SetError(error, Core3DLODSetErrorInvalidDefinition,
+            @"A native persisted LOD level is required.");
+        return nil;
+    }
+    NSData *bytes = [Core3DDecimationOpening
+        f2CanonicalSettingsBytesWithTargetTriangleCount:level.targetTriangleCount
+        maximumSymmetricSurfaceDistanceMM:level.maximumSurfaceDistanceMM
+        maximumSilhouettePixelDeviation:level.maximumSilhouetteDeviationPixels
+        hardEdgeAngleDegrees:level.hardEdgeAngleDegrees
+        contactClearanceMM:level.contactClearanceMM
+        measurementSamplesPerMesh:level.measurementSampleCount
+        silhouetteResolution:level.silhouetteResolution
+        silhouetteCameraSetSHA256:level.silhouetteCameraSetSHA256
+        metersPerUnit:metersPerUnit];
+    if (!bytes) {
+        SetError(error, Core3DLODSetErrorInvalidDefinition,
+            @"Persisted LOD intent cannot be represented as canonical F2 settings.");
+        return nil;
+    }
+    return bytes;
+}
 
 #if DEBUG
 - (NSArray<Core3DDecimationResult *> *)debugCandidatesForLevels:

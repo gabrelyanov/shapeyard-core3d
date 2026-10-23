@@ -68,8 +68,18 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic, assign, readonly) NSUInteger uvMethodVersion;
 @property(nonatomic, assign, readonly) NSUInteger normalMethodVersion;
 @property(nonatomic, assign, readonly) NSUInteger overlapMethodVersion;
+//! Legacy SYLS intent witness. This is deliberately distinct from the native
+//! F2 canonical-settings digest below.
+@property(nonatomic, copy, readonly) NSString *intentSHA256;
 @property(nonatomic, copy, readonly, nullable) NSString *f2DerivativeIdentifier;
 @property(nonatomic, copy, readonly, nullable) NSString *f2SettingsSHA256;
+@property(nonatomic, copy, readonly, nullable) NSString *f2SourceArtifactSHA256;
+@property(nonatomic, copy, readonly, nullable) NSString *f2OutputArtifactSHA256;
+@property(nonatomic, copy, readonly, nullable) NSString *f2OutputGeometrySHA256;
+@property(nonatomic, copy, readonly, nullable) NSString *f2RemapReceiptSHA256;
+@property(nonatomic, copy, readonly, nullable) NSString *f2IndependentMeasurementSHA256;
+@property(nonatomic, copy, readonly, nullable) NSString *f2AlgorithmBuildSHA256;
+@property(nonatomic, copy, readonly, nullable) NSString *f2ArtifactName;
 @property(nonatomic, assign, readonly) NSUInteger measuredTriangleCount;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
@@ -80,11 +90,14 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic, copy, readonly) NSString *identifier;
 @property(nonatomic, copy, readonly) NSString *documentIdentifier;
 @property(nonatomic, assign, readonly) NSUInteger revision;
+@property(nonatomic, assign, readonly) NSUInteger nativeEditRevision;
+@property(nonatomic, assign, readonly) NSUInteger settingsRevision;
 @property(nonatomic, assign, readonly) double metersPerUnit;
 @property(nonatomic, assign, readonly) Core3DLODSetDurableState state;
 @property(nonatomic, copy, readonly) NSString *reason;
 @property(nonatomic, copy, readonly) NSString *observedSourceSHA256;
 @property(nonatomic, copy, readonly, nullable) NSString *lastBuiltSourceSHA256;
+@property(nonatomic, copy, readonly) NSString *attachmentMetadataSHA256;
 @property(nonatomic, copy, readonly) NSArray<Core3DLODLevelRecord *> *levels;
 @property(nonatomic, copy, readonly) NSData *canonicalSYLSRecord;
 - (instancetype)init NS_UNAVAILABLE;
@@ -239,6 +252,13 @@ __attribute__((objc_subclassing_restricted))
                                    error:(NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(reencodeSYLS(_:));
 + (NSUInteger)maximumSYLSRecordBytes;
+//! Reconstructs the canonical native F2 settings bytes from persisted intent.
+//! Callers must use Core3DDecimationOpening to digest these bytes; the legacy
+//! SYLS intentSHA256 is not an F2 settings receipt.
++ (nullable NSData *)f2CanonicalSettingsBytesForLevel:(Core3DLODLevelRecord *)level
+                                         metersPerUnit:(double)metersPerUnit
+                                                  error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(f2CanonicalSettingsBytes(level:metersPerUnit:));
 
 #if DEBUG
 //! Called from the real bounded validation loop. Tests can synchronously Stop

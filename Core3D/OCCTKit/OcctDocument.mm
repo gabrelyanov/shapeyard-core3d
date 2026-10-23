@@ -26003,6 +26003,10 @@ enum class OwnerOperationPhase : std::uint8_t {
     SuffixReplay, SuffixFamilyProof, SuffixFixedPoint, Count,
 };
 
+enum class OwnerReadbackPhase : std::uint8_t {
+    Replay = 0, Proof, Publish, Count,
+};
+
 #if DEBUG
 struct OwnerOperationProbe final {
     static constexpr std::size_t PhaseCount =
@@ -26011,10 +26015,16 @@ struct OwnerOperationProbe final {
     std::array<std::size_t, PhaseCount> featureTopologyAtEntry{};
     std::array<std::size_t, PhaseCount> topologyVisitsAtEntry{};
     std::array<std::size_t, PhaseCount> suffixStepsAtEntry{};
+    static constexpr std::size_t ReadbackPhaseCount =
+        static_cast<std::size_t>(OwnerReadbackPhase::Count);
+    std::array<bool, ReadbackPhaseCount> readbackHit{};
+    std::array<std::size_t, ReadbackPhaseCount> readbackTopologyAtEntry{};
     OwnerOperationPhase stopBefore = OwnerOperationPhase::Count;
     OwnerOperationPhase exhaustFeatureBefore = OwnerOperationPhase::Count;
     OwnerOperationPhase exhaustTopologyBefore = OwnerOperationPhase::Count;
     OwnerOperationPhase exhaustSuffixBefore = OwnerOperationPhase::Count;
+    OwnerReadbackPhase stopBeforeReadback = OwnerReadbackPhase::Count;
+    OwnerReadbackPhase exhaustFeatureBeforeReadback = OwnerReadbackPhase::Count;
     std::atomic_bool* mutableStop = nullptr;
 };
 #endif
@@ -26025,6 +26035,8 @@ struct OwnerOperationSettings final {
     retained_feature::ReplayBudget* featureBudget = nullptr;
     mutable retained_program_suffix::build::Budget suffixBudget;
     mutable retained_topology_budget::Counter topologyBudget;
+    retained_feature::ReplayResult completedReplay;
+    bool replayReady = false;
     mutable bool refused = false;
 #if DEBUG
     OwnerOperationProbe* probe = nullptr;
@@ -26053,6 +26065,24 @@ struct OwnerOperationSettings final {
             if (probe->exhaustSuffixBefore == phase)
                 suffixBudget.booleanSteps =
                     retained_program_suffix::build::Budget::MaximumSteps;
+        }
+#endif
+        return !stop->load() && !budget.exhausted && !topologyBudget.exhausted;
+    }
+
+    bool enterReadback(OwnerReadbackPhase phase,
+                       retained_feature::ReplayBudget& budget) const noexcept {
+        if (refused || !display || !stop || featureBudget != &budget
+            || stop->load() || budget.exhausted || topologyBudget.exhausted) return false;
+#if DEBUG
+        if (probe) {
+            const std::size_t index = static_cast<std::size_t>(phase);
+            probe->readbackHit[index] = true;
+            probe->readbackTopologyAtEntry[index] = budget.topologyRemaining;
+            if (probe->stopBeforeReadback == phase && probe->mutableStop)
+                probe->mutableStop->store(true);
+            if (probe->exhaustFeatureBeforeReadback == phase)
+                budget.consume(0, 0, budget.topologyRemaining + 1);
         }
 #endif
         return !stop->load() && !budget.exhausted && !topologyBudget.exhausted;
@@ -26201,14 +26231,17 @@ bool OwnerOriginalsBuild(const retained_feature::OwnerExecutionContext& context,
                 return false;
         }
         TopoDS_Shape solid;
+        retained_feature::ReplayValue staged;
         if (!ReplayOriginalsDetached(definition, budget, *operation->stop, solid)
             || !operation->charge(solid,
                 retained_topology_budget::Site::C15ReplaySteps)
-            || !ShapeBytes(solid, output.detachedShape)
-            || !HashBytes(output.detachedShape, output.geometry)) return false;
-        output.shape = retained_feature::ShapeKind::Solid;
-        return OwnerFeatureProof(feature, inputs, output, output.familyProof)
-            && output.valid();
+            || !ShapeBytes(solid, staged.detachedShape)
+            || !HashBytes(staged.detachedShape, staged.geometry)) return false;
+        staged.shape = retained_feature::ShapeKind::Solid;
+        if (!OwnerFeatureProof(feature, inputs, staged, staged.familyProof)
+            || !staged.valid()) return false;
+        output = std::move(staged);
+        return true;
     } catch (...) { output = {}; return false; }
 }
 
@@ -26477,6 +26510,10 @@ bool ReplayOwnerGraphDetached(
             retained_source::ProductionRegistry(), sources, context,
             *operation.featureBudget);
         if (!replay.replayed()) operation.refused = true;
+        else {
+            operation.completedReplay = replay;
+            operation.replayReady = true;
+        }
         return replay.replayed();
     } catch (...) { replay = {}; operation.refused = true; return false; }
 }
@@ -26616,10 +26653,15 @@ bool ReplayOriginalsGraphDetached(const composite_recipe::Definition& graph,
     } catch (...) { output.Nullify(); return false; }
 }
 
-bool ValidateOriginalsRecord(const Handle(TDocStd_Document)& document,
-                             const composite_recipe::Record& record) noexcept {
+bool ValidateOriginalsRecordContinued(
+    const Handle(TDocStd_Document)& document,
+    const composite_recipe::Record& record,
+    OwnerOperationSettings& operation,
+    TopoDS_Shape& output) noexcept {
+    output.Nullify();
     try {
-        if (document.IsNull() || !record.value || record.current.IsNull()) return false;
+        if (document.IsNull() || !record.value || record.current.IsNull()
+            || !operation.featureBudget) return false;
         const auto& graph = record.value->definition;
         if (graph.nodes.size() < 3) return false;
         const auto* base = std::get_if<composite_recipe::FeatureNode>(&graph.nodes[2].value);
@@ -26628,12 +26670,57 @@ bool ValidateOriginalsRecord(const Handle(TDocStd_Document)& document,
             || !XCAFDoc_DocumentTool::GetLengthUnit(document, unit)
             || std::memcmp(&unit, &definition.carrierMetersPerUnit, sizeof(double)) != 0)
             return false;
+        if (!operation.replayReady
+            || !operation.enterReadback(
+                OwnerReadbackPhase::Replay, *operation.featureBudget)
+            || !operation.featureBudget->consume(
+                1, 1, record.value->bytes.size())) return false;
+        const auto& replay = operation.completedReplay;
+        TopoDS_Shape candidate;
+        if (!replay.replayed()
+            || !ReadReplayShape(replay.output.detachedShape, candidate))
+            return operation.deny();
+
+        // Keep the rebuilt candidate operation-local. A proof refusal after
+        // construction must not leak a shape or partially published evidence.
+        if (!operation.enterReadback(
+                OwnerReadbackPhase::Proof, *operation.featureBudget)) return false;
+        std::vector<std::uint8_t> canonical, actual;
+        if (!composite_recipe::Encode(graph, canonical)
+            || canonical != record.value->bytes
+            || record.value->sourceShapes.size() != 2
+            || !ShapeBytes(record.current, actual)
+            || replay.output.detachedShape != actual)
+            return operation.deny();
+        if (!operation.enterReadback(
+                OwnerReadbackPhase::Publish, *operation.featureBudget)) return false;
+        output = candidate;
+        return true;
+    } catch (...) { output.Nullify(); operation.refused = true; return false; }
+}
+
+bool ValidateOriginalsRecord(const Handle(TDocStd_Document)& document,
+                             const composite_recipe::Record& record) noexcept {
+    try {
+        // An ordinary cold read begins one bounded operation. Callers already
+        // inside replay/proof use ValidateOriginalsRecordContinued instead and
+        // carry their existing debt and Stop state through readback.
+        cut_display::Settings display;
         retained_feature::ReplayBudget budget;
-        const std::atomic_bool stop(false); TopoDS_Shape rebuilt;
-        std::vector<std::uint8_t> expected, actual;
-        return ReplayOriginalsGraphDetached(graph, record.value->sourceShapes, budget, stop, rebuilt)
-            && ShapeBytes(rebuilt, expected) && ShapeBytes(record.current, actual)
-            && expected == actual;
+        const std::atomic_bool stop(false);
+        OwnerOperationSettings operation;
+        operation.display = &display;
+        operation.stop = &stop;
+        operation.featureBudget = &budget;
+        retained_feature::ReplayResult replay;
+        TopoDS_Shape output;
+        return CanonicalSuffixDisplay(display)
+            && record.value
+            && ReplayOwnerGraphDetached(record.value->definition,
+                record.value->sourceShapes, operation, replay)
+            && ValidateOriginalsRecordContinued(
+                document, record, operation, output)
+            && !output.IsNull();
     } catch (...) { return false; }
 }
 
@@ -27249,6 +27336,156 @@ std::map<std::string, bool> Probe(OriginalsDefinition fixture) noexcept {
             everyBudgetRefusalEmpty && everyStopRefusalEmpty
             && rows["replay-proof-topology-debt-sticky"]
             && rows["replay-proof-suffix-debt-sticky"];
+
+        // Continue the successful owner operation into the ordinary record
+        // readback seam. The record and document are observation-only, while
+        // candidate publication remains staged until the final boundary.
+        NativeDocumentSession readbackSession;
+        const Handle(OcctDocument) readbackWrapper = readbackSession.Document();
+        const auto readbackDocument = readbackWrapper.IsNull()
+            ? Handle(TDocStd_Document)() : readbackWrapper->Document();
+        auto readbackPayload = std::make_shared<cr::Payload>();
+        readbackPayload->definition = suffixed;
+        readbackPayload->sourceShapes = sourceVector;
+        const bool readbackFixtureReady = !readbackDocument.IsNull()
+            && cr::Encode(suffixed, readbackPayload->bytes);
+        if (readbackFixtureReady)
+            XCAFDoc_DocumentTool::SetLengthUnit(
+                readbackDocument, fixture.carrierMetersPerUnit);
+        cr::Record readbackRecord;
+        readbackRecord.value = readbackPayload;
+        readbackRecord.current = suffixSolid;
+        std::array<std::vector<std::uint8_t>, 2> readbackSourceBytes;
+        std::vector<std::uint8_t> readbackCurrentBytes;
+        const bool readbackShapesReady = readbackFixtureReady
+            && ShapeBytes(sourceVector[0], readbackSourceBytes[0])
+            && ShapeBytes(sourceVector[1], readbackSourceBytes[1])
+            && ShapeBytes(suffixSolid, readbackCurrentBytes);
+        const auto readbackOwner = suffixed.owner;
+        const auto readbackOutputNode = suffixed.outputNode;
+        const auto readbackPayloadBytes = readbackPayload->bytes;
+        const HistoryWitness readbackHistory = readbackFixtureReady
+            ? ObserveHistory(readbackDocument, 0) : HistoryWitness{};
+        const auto readbackStateUnchanged = [&]() {
+            std::array<std::vector<std::uint8_t>, 2> sourcesAfter;
+            std::vector<std::uint8_t> currentAfter, graphAfter;
+            return readbackShapesReady
+                && cr::Encode(readbackRecord.value->definition, graphAfter)
+                && ShapeBytes(readbackRecord.value->sourceShapes[0], sourcesAfter[0])
+                && ShapeBytes(readbackRecord.value->sourceShapes[1], sourcesAfter[1])
+                && ShapeBytes(readbackRecord.current, currentAfter)
+                && graphAfter == readbackPayloadBytes
+                && readbackRecord.value->bytes == readbackPayloadBytes
+                && sourcesAfter == readbackSourceBytes
+                && currentAfter == readbackCurrentBytes
+                && readbackRecord.value->definition.owner == readbackOwner
+                && readbackRecord.value->definition.outputNode == readbackOutputNode
+                && ObserveHistory(readbackDocument, 1) == readbackHistory;
+        };
+        const auto featureWorkBeforeReadback = ownerBudget.workRemaining;
+        const auto featureIdentitiesBeforeReadback = ownerBudget.identitiesRemaining;
+        const auto featureTopologyBeforeReadback = ownerBudget.topologyRemaining;
+        TopoDS_Shape readbackOutput;
+        const bool continuedReadback = ownerBuilt && readbackShapesReady
+            && ValidateOriginalsRecordContinued(
+                readbackDocument, readbackRecord, ownerOperation, readbackOutput);
+        const bool everyReadbackPhase = std::all_of(
+            ownerProbe.readbackHit.begin(), ownerProbe.readbackHit.end(),
+            [](bool value) { return value; });
+        rows["readback-shares-operation-continuation"] = continuedReadback
+            && !readbackOutput.IsNull()
+            && ownerBudget.workRemaining < featureWorkBeforeReadback
+            && ownerBudget.identitiesRemaining < featureIdentitiesBeforeReadback
+            && ownerBudget.topologyRemaining < featureTopologyBeforeReadback;
+        rows["readback-hits-all-phases"] = everyReadbackPhase;
+        rows["readback-preserves-source-document-payload-identity-history"] =
+            continuedReadback && readbackStateUnchanged();
+
+        bool everyReadbackBudgetRefused = true;
+        bool everyReadbackStopRefused = true;
+        bool everyReadbackRefusalEmpty = true;
+        bool everyReadbackRefusalPreserved = true;
+        for (std::size_t phaseIndex = 0;
+             phaseIndex < OwnerOperationProbe::ReadbackPhaseCount; ++phaseIndex) {
+            const auto phase = static_cast<OwnerReadbackPhase>(phaseIndex);
+            cut_display::Settings debtDisplay;
+            retained_feature::ReplayBudget debtBudget;
+            std::atomic_bool debtRunning(false);
+            OwnerOperationProbe debtProbe;
+            debtProbe.mutableStop = &debtRunning;
+            OwnerOperationSettings debtOperation;
+            debtOperation.display = &debtDisplay;
+            debtOperation.stop = &debtRunning;
+            debtOperation.featureBudget = &debtBudget;
+            debtOperation.probe = &debtProbe;
+            retained_feature::ReplayResult debtReplay;
+            const bool priorDebt = CanonicalSuffixDisplay(debtDisplay)
+                && ReplayOwnerGraphDetached(
+                    suffixed, sourceVector, debtOperation, debtReplay)
+                && debtBudget.topologyRemaining
+                    < retained_feature::ReplayBudget{}.topologyRemaining;
+            debtProbe.exhaustFeatureBeforeReadback = phase;
+            TopoDS_Shape deniedReadback, deniedAgain;
+            const bool firstDenied = priorDebt
+                && !ValidateOriginalsRecordContinued(
+                    readbackDocument, readbackRecord, debtOperation, deniedReadback)
+                && debtProbe.readbackHit[phaseIndex] && debtBudget.exhausted;
+            const auto debtAfter = debtBudget;
+            const bool laterDenied = !ValidateOriginalsRecordContinued(
+                    readbackDocument, readbackRecord, debtOperation, deniedAgain)
+                && debtBudget.workRemaining == debtAfter.workRemaining
+                && debtBudget.identitiesRemaining == debtAfter.identitiesRemaining
+                && debtBudget.topologyRemaining == debtAfter.topologyRemaining;
+            everyReadbackBudgetRefused = everyReadbackBudgetRefused
+                && firstDenied && laterDenied;
+            everyReadbackRefusalEmpty = everyReadbackRefusalEmpty
+                && deniedReadback.IsNull() && deniedAgain.IsNull();
+            everyReadbackRefusalPreserved = everyReadbackRefusalPreserved
+                && readbackStateUnchanged();
+
+            cut_display::Settings stopDisplay;
+            retained_feature::ReplayBudget stopBudget;
+            std::atomic_bool readbackStop(false);
+            OwnerOperationProbe stopProbe;
+            stopProbe.mutableStop = &readbackStop;
+            OwnerOperationSettings stopOperation;
+            stopOperation.display = &stopDisplay;
+            stopOperation.stop = &readbackStop;
+            stopOperation.featureBudget = &stopBudget;
+            stopOperation.probe = &stopProbe;
+            retained_feature::ReplayResult stopReplay;
+            const bool stopPriorDebt = CanonicalSuffixDisplay(stopDisplay)
+                && ReplayOwnerGraphDetached(
+                    suffixed, sourceVector, stopOperation, stopReplay)
+                && stopBudget.topologyRemaining
+                    < retained_feature::ReplayBudget{}.topologyRemaining;
+            stopProbe.stopBeforeReadback = phase;
+            TopoDS_Shape stoppedReadback, stoppedReadbackAgain;
+            const bool firstStopped = stopPriorDebt
+                && !ValidateOriginalsRecordContinued(
+                    readbackDocument, readbackRecord, stopOperation, stoppedReadback)
+                && readbackStop.load() && stopProbe.readbackHit[phaseIndex];
+            const auto stopBudgetAfter = stopBudget;
+            const bool laterStopped = !ValidateOriginalsRecordContinued(
+                    readbackDocument, readbackRecord, stopOperation,
+                    stoppedReadbackAgain)
+                && stopBudget.workRemaining == stopBudgetAfter.workRemaining
+                && stopBudget.identitiesRemaining
+                    == stopBudgetAfter.identitiesRemaining
+                && stopBudget.topologyRemaining
+                    == stopBudgetAfter.topologyRemaining;
+            everyReadbackStopRefused = everyReadbackStopRefused
+                && firstStopped && laterStopped;
+            everyReadbackRefusalEmpty = everyReadbackRefusalEmpty
+                && stoppedReadback.IsNull() && stoppedReadbackAgain.IsNull();
+            everyReadbackRefusalPreserved = everyReadbackRefusalPreserved
+                && readbackStateUnchanged();
+        }
+        rows["readback-budget-refuses-each-phase"] = everyReadbackBudgetRefused;
+        rows["readback-stop-refuses-each-phase"] = everyReadbackStopRefused;
+        rows["readback-refusal-no-partial-output"] = everyReadbackRefusalEmpty;
+        rows["readback-refusal-preserves-source-document-payload-identity-history"] =
+            everyReadbackRefusalPreserved;
 
         const std::atomic_bool stopped(true);
         retained_feature::ReplayBudget stopBudget;
