@@ -755,6 +755,12 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(debugE4PersistedAtlasCaptureLineage(entityIdentifier:));
 //! Executes one saved-group helper transaction over real native-remeshed
 //! detached members and returns only bounded value evidence.
+- (NSDictionary<NSString *, id> *_Nullable)
+    debugE4SavedOriginalPaintForPrivateAssetData:(NSData *)privateAssetData
+    selectedObjectsOnly:(BOOL)selectedObjectsOnly
+    meshQuality:(Core3DExportMeshQuality)meshQuality
+    fault:(NSString *)fault
+    NS_SWIFT_NAME(debugE4SavedOriginalPaint(privateAssetData:selectedObjectsOnly:meshQuality:fault:));
 - (nullable NSDictionary<NSString *,id> *)
     debugE4SavedGroupFinalResultForWholeCommittedScene:
         (Core3DSceneSnapshot *)wholeCommittedScene

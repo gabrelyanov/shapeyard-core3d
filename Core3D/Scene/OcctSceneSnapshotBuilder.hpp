@@ -329,6 +329,37 @@ struct DebugSavedGroupFinalObservation final {
     bool complete = false;
 };
 
+//! Nb's passive, separately owned test result. No P1/P2b ABI extension.
+struct DebugSavedOriginalPaintObservation final {
+    DebugSavedGroupFinalObservation group;
+    std::string failureStage;
+    std::vector<std::uint8_t> receiverPNG;
+    std::uint64_t protectedCornerCount = 0;
+    std::uint64_t receiverFace = 0;
+    bool receiverCountRefused = false;
+    bool completeOriginalPaintBinding = false;
+    struct Source final {
+        std::size_t member = 0;
+        std::string origin, workingContent;
+        std::vector<std::uint8_t> png;
+        bool effective = false, ownerMatched = false;
+        bool faceMatched = false, fenceMatched = false;
+    };
+    std::vector<Source> sources;
+    std::vector<std::array<double, 19>> corners;
+    std::vector<std::array<double, 18>> charts;
+    std::array<double, 4> baseTint{};
+    std::array<std::uint64_t, 4> accounting{};
+    std::array<std::uint64_t, 2> frozenSizes{};
+    std::string fault;
+    bool usedReleaseAdapter = false, canonicalUnchanged = false;
+    bool proofsUnchanged = false, oneBuild = false, sameOperation = false;
+    bool lifetimeVerified = false, mutatedDetachedInput = false;
+    bool productPresent = false, stickyFailure = false;
+    std::uint64_t allocationsAfterRefusal = 0, retainedBytesAfterRelease = 0;
+
+};
+
 struct DebugSavedProducerBatchObservation final {
     std::vector<std::string> strictKeys;
     std::vector<std::uint64_t> memberCounts;
@@ -474,6 +505,14 @@ public:
         const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
         const std::function<bool()>& cancelled,
         DebugSavedGroupFinalObservation& observation) noexcept;
+    static bool DebugProduceSavedOriginalPaint(
+        const Handle(OcctDocument)& exclusivelyOwnedPrivateDocument,
+        const SceneSnapshot& wholeCommittedScene,
+        bool selectedObjectsOnly,
+        const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
+        const std::function<bool()>& cancelled,
+        const std::string& fault,
+        DebugSavedOriginalPaintObservation& observation) noexcept;
     static bool DebugProduceSavedProducerBatch(
         const Handle(OcctDocument)& exclusivelyOwnedPrivateDocument,
         const SceneSnapshot& wholeCommittedScene,

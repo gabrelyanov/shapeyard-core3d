@@ -54,6 +54,9 @@
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <BRepTools.hxx>
+#include <Prs3d_Drawer.hxx>
+#include <StdPrs_ToolTriangulatedShape.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBndLib.hxx>
 #include <BRep_Tool.hxx>
@@ -4725,6 +4728,140 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
             && XCAFDoc_VisMaterialTool::GetShapeMaterial(memberLabel)
                 == materialTool->GetMaterial(materialLabel));
     } @catch (...) { return @NO; }
+}
+
+- (NSDictionary<NSString *, id> *)debugE4SavedOriginalPaintForPrivateAssetData:
+    (NSData *)privateAssetData selectedObjectsOnly:(BOOL)selectedObjectsOnly
+    meshQuality:(Core3DExportMeshQuality)meshQuality fault:(NSString *)fault {
+    namespace scene = core3d::scene;
+    if (!NSThread.isMainThread || !privateAssetData.length
+        || (meshQuality != Core3DExportMeshQualityCoarse
+            && meshQuality != Core3DExportMeshQualityFine)) return nil;
+    @try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const auto committed = viewer ? viewer->captureSceneSnapshot(1, 1) : nullptr;
+        if (!committed) return @{ @"setupComplete": @NO, @"failureStage": @"committed-capture" };
+        NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"%@.e4-nb.xbf", NSUUID.UUID.UUIDString]];
+        if (![privateAssetData writeToFile:path atomically:YES]) return nil;
+        Handle(OcctDocument) detached = new OcctDocument();
+        const std::string nativePath = path.UTF8String ? path.UTF8String : "";
+        struct PrivateLease final {
+            Handle(OcctDocument)& document;
+            const std::string& path;
+            ~PrivateLease() {
+                if (!document.IsNull()) document->ClosePrivateExportSnapshot();
+                if (!path.empty()) std::remove(path.c_str());
+            }
+        } lease{detached, nativePath};
+        if (nativePath.empty() || !detached->OpenPrivateExportSnapshot(
+                nativePath.c_str(), Message_ProgressRange()))
+            return @{ @"setupComplete": @NO, @"failureStage": @"detached-open" };
+        scene::DebugSavedOriginalPaintObservation observation;
+        const bool complete = scene::OcctSceneSnapshotBuilder::DebugProduceSavedOriginalPaint(
+            detached, *committed, selectedObjectsOnly,
+            [meshQuality](const TopoDS_Shape& shape) {
+                if (meshQuality == Core3DExportMeshQualityFine) {
+                    if (!scene::DebugMeshSavedGroupPrivateSurfaces(shape))
+                        throw std::runtime_error("Nb fine mesher refused");
+                    return;
+                }
+                // Coarse fixture uses native OCCT and the shipping coarse
+                // coefficient/angle and unchanged four refinement factors.
+                Handle(Prs3d_Drawer) drawer = new Prs3d_Drawer();
+                drawer->SetTypeOfDeflection(Aspect_TOD_RELATIVE);
+                drawer->SetDeviationCoefficient(0.01);
+                drawer->SetDeviationAngle(30.0 * M_PI / 180.0);
+                drawer->SetMaximalChordialDeviation(0.0001);
+                const double deflection = StdPrs_ToolTriangulatedShape::GetDeflection(shape, drawer);
+                if (!(deflection > 0) || !std::isfinite(deflection))
+                    throw std::runtime_error("Nb coarse deflection refused");
+                for (int attempt = 0; attempt < 4; ++attempt) {
+                    BRepTools::Clean(shape);
+                    const double factors[4] = {1.0, 0.25, 0.125, 0.0625};
+                    const double target = attempt == 0 ? deflection
+                        : std::max(Precision::Confusion(), deflection * factors[attempt]);
+                    BRepMesh_IncrementalMesh mesher;
+                    mesher.SetShape(shape);
+                    mesher.ChangeParameters().Deflection = target;
+                    mesher.ChangeParameters().Angle = 30.0 * M_PI / 180.0;
+                    mesher.ChangeParameters().InParallel = Standard_True;
+                    if (attempt > 0) {
+                        mesher.ChangeParameters().DeflectionInterior = target;
+                        mesher.ChangeParameters().AngleInterior = 30.0 * M_PI / 180.0;
+                        mesher.ChangeParameters().EnableControlSurfaceDeflectionAllSurfaces = Standard_True;
+                    }
+                    mesher.Perform();
+                    if (mesher.IsDone() && BRepTools::Triangulation(shape, deflection)) return;
+                }
+                throw std::runtime_error("Nb coarse native mesher refused");
+            }, [] { return false; }, fault.UTF8String ? fault.UTF8String : "",
+            observation);
+        const auto numbers = [](const auto& values) {
+            NSMutableArray<NSNumber *> *result = [NSMutableArray array];
+            for (const auto value : values) [result addObject:@(value)];
+            return result;
+        };
+        const auto rows = [&numbers](const auto& values) {
+            NSMutableArray *result = [NSMutableArray array];
+            for (const auto& row : values) [result addObject:numbers(row)];
+            return result;
+        };
+        NSMutableArray *sources = [NSMutableArray array];
+        for (const auto& source : observation.sources) {
+            [sources addObject:@{
+                @"member": @(source.member),
+                @"origin": [NSString stringWithUTF8String:source.origin.c_str()],
+                @"workingContent": [NSString stringWithUTF8String:source.workingContent.c_str()],
+                @"png": [NSData dataWithBytes:source.png.data() length:source.png.size()],
+                @"effective": @(source.effective), @"ownerMatched": @(source.ownerMatched),
+                @"faceMatched": @(source.faceMatched), @"fenceMatched": @(source.fenceMatched),
+            }];
+        }
+        const auto& group = observation.group;
+        NSString *stage = [NSString stringWithUTF8String:
+            (group.complete ? observation.failureStage : group.failureStage).c_str()] ?: @"invalid-stage";
+        NSLog(@"[E4NbOriginalPaint] setup=%d binding=%d countRefused=%d protected=%llu final=%llu stage=%@",
+            complete, observation.completeOriginalPaintBinding,
+            observation.receiverCountRefused,
+            (unsigned long long)observation.protectedCornerCount,
+            (unsigned long long)(group.finalCornerCounts.empty() ? 0 : group.finalCornerCounts[0]), stage);
+        return @{
+            @"usedReleaseAdapter": @(observation.usedReleaseAdapter),
+            @"frozenSizes": numbers(observation.frozenSizes),
+            @"canonicalUnchanged": @(observation.canonicalUnchanged),
+            @"proofsUnchanged": @(observation.proofsUnchanged),
+            @"oneBuild": @(observation.oneBuild),
+            @"sameOperation": @(observation.sameOperation),
+            @"lifetimeVerified": @(observation.lifetimeVerified),
+            @"accounting": numbers(observation.accounting),
+            @"corners": rows(observation.corners),
+            @"charts": rows(observation.charts),
+            @"sources": sources,
+            @"baseTint": numbers(observation.baseTint),
+            @"fault": [NSString stringWithUTF8String:observation.fault.c_str()],
+            @"mutatedDetachedInput": @(observation.mutatedDetachedInput),
+            @"productPresent": @(observation.productPresent),
+            @"stickyFailure": @(observation.stickyFailure),
+            @"allocationsAfterRefusal": @(observation.allocationsAfterRefusal),
+            @"retainedBytesAfterRelease": @(observation.retainedBytesAfterRelease),
+            @"setupComplete": @(complete && group.complete),
+            @"failureStage": stage,
+            @"completeOriginalPaintBinding": @(observation.completeOriginalPaintBinding),
+            @"receiverCountRefused": @(observation.receiverCountRefused),
+            @"protectedCornerCount": @(observation.protectedCornerCount),
+            @"savedTriangleCounts": numbers(group.savedTriangleCounts),
+            @"finalTriangleCounts": numbers(group.finalTriangleCounts),
+            @"assignmentCornerCounts": numbers(group.assignmentCornerCounts),
+            @"occurrenceCount": @(group.occurrenceCount),
+            @"fullSavedMembership": @(group.fullSavedMembership),
+            @"receiverFace": @(observation.receiverFace),
+            @"receiverPNG": [NSData dataWithBytes:observation.receiverPNG.data()
+                length:observation.receiverPNG.size()],
+        };
+    } @catch (...) { return @{ @"setupComplete": @NO, @"failureStage": @"bridge-exception" }; }
 }
 
 - (NSDictionary<NSString *,id> *)

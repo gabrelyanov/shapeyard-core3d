@@ -20908,6 +20908,60 @@ Standard_Boolean OcctDocument::ReadTextReliefExact(
     } catch (...) { capture = {}; return Standard_False; }
 }
 
+OcctTextReliefGeometryLookup OcctDocument::ReadTextReliefForGeometryEntity(
+    const std::string& entityIdentifier,
+    OcctTextReliefCapture& capture) const noexcept {
+    capture = {};
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || !core3d::profile::IsIdentifier(entityIdentifier))
+            return OcctTextReliefGeometryLookup::Invalid;
+        std::vector<core3d::text_relief::persistence::Record> records;
+        std::vector<core3d::bounded_curve::Record> curves;
+        if (!core3d::text_relief::persistence::ReadAll(myOcafDoc, records)
+            || !core3d::bounded_curve::ReadAll(myOcafDoc, curves))
+            return OcctTextReliefGeometryLookup::Invalid;
+
+        std::set<core3d::text_relief::UUID> selectedCurveFeatures;
+        bool selectedCurveOwner = false;
+        for (const auto& curve : curves) {
+            if (EntityIdentifierForLabel(curve.owner) != entityIdentifier) continue;
+            selectedCurveOwner = true;
+            if (!curve.value
+                || !selectedCurveFeatures.insert(
+                    curve.value->persisted.value.feature).second)
+                return OcctTextReliefGeometryLookup::Invalid;
+        }
+
+        const core3d::text_relief::persistence::Record* match = nullptr;
+        for (const auto& record : records) {
+            if (!record.payload) return OcctTextReliefGeometryLookup::Invalid;
+            bool belongs = EntityIdentifierForLabel(record.owner) == entityIdentifier;
+            if (!belongs && selectedCurveOwner) {
+                for (const auto& reference : record.payload->value.curves)
+                    if (selectedCurveFeatures.count(reference.feature) != 0) {
+                        belongs = true; break;
+                    }
+            }
+            if (!belongs) continue;
+            if (match) return OcctTextReliefGeometryLookup::Ambiguous;
+            match = &record;
+        }
+        if (!match) return selectedCurveOwner
+            ? OcctTextReliefGeometryLookup::Missing
+            : OcctTextReliefGeometryLookup::NotReliefGeometry;
+        if (!CompleteTextReliefCapture(myOcafDoc, DocumentIdentifier(),
+                                       *match, *this, capture)) {
+            capture = {};
+            return OcctTextReliefGeometryLookup::Invalid;
+        }
+        return OcctTextReliefGeometryLookup::Found;
+    } catch (...) {
+        capture = {};
+        return OcctTextReliefGeometryLookup::Invalid;
+    }
+}
+
 Standard_Boolean OcctDocument::CaptureTextReliefExact(
     const std::string& entityIdentifier,
     const core3d::native_opening::Context& context,

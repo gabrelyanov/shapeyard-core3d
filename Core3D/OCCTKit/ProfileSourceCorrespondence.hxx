@@ -27,6 +27,47 @@
 
 namespace core3d::complete_profile_source {
 
+// Map values measured in an old Profile plane/frame into the requested
+// Profile plane/frame. This is a pure value transform: neither persisted
+// frame nor observed topology is normalized or moved.
+inline bool OldToRequestedPlaneFrame(const profile::Parameters& oldParameters,
+    const profile::Parameters& requestedParameters, gp_Trsf& result) noexcept {
+    result = gp_Trsf();
+    try {
+        if (oldParameters.metersPerUnit != requestedParameters.metersPerUnit)
+            return false;
+        const auto planeTransform = [](int plane, gp_Trsf& transform) {
+            transform = gp_Trsf();
+            if (plane == 0) return true;
+            if (plane == 1) {
+                transform.SetValues(1, 0, 0, 0,
+                                    0, 0, 1, 0,
+                                    0, 1, 0, 0);
+                return true;
+            }
+            if (plane == 2) {
+                transform.SetValues(0, 0, 1, 0,
+                                    1, 0, 0, 0,
+                                    0, 1, 0, 0);
+                return true;
+            }
+            return false;
+        };
+        gp_Trsf oldPlane, requestedPlane, oldFrame, requestedFrame;
+        if (!planeTransform(oldParameters.definition.plane, oldPlane)
+            || !planeTransform(requestedParameters.definition.plane, requestedPlane)
+            || (oldParameters.constructionFrame
+                && !oldParameters.constructionFrame->Transform(oldFrame))
+            || (requestedParameters.constructionFrame
+                && !requestedParameters.constructionFrame->Transform(requestedFrame)))
+            return false;
+        result = requestedFrame * requestedPlane
+            * (oldFrame * oldPlane).Inverted();
+        return std::isfinite(result.ScaleFactor())
+            && std::abs(result.ScaleFactor()) > 0;
+    } catch (...) { result = gp_Trsf(); return false; }
+}
+
 struct SourceBinding {
     std::vector<std::uint8_t> canonicalSourceBytes;
     std::array<std::uint8_t, 32> canonicalSourceDigest{};

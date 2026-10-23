@@ -1992,7 +1992,7 @@ Outcome PrepareBakeForExport(
 #ifdef DEBUG
     , const asset_atlas::build::DebugLayoutObserver* observer = nullptr
 #endif
-    ) noexcept;
+    , asset_atlas::build::FinalTriangleLineage* lineage = nullptr) noexcept;
 bool AdmitBakePlan(AggregateBakePlan& aggregate,
                    ExportBakePlan& item) noexcept;
 bool SealBakePlan(AggregateBakePlan& aggregate) noexcept;

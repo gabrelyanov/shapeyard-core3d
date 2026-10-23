@@ -219,6 +219,135 @@ struct IssuedSelection final {
     tr::Digest selectorProof{};
 };
 
+enum class PersistedHostResolution { Found, Missing, NotCurrent };
+
+bool CanonicalHostFrame(const TopoDS_Face& face, const tr::UUID& identifier,
+                        std::uint64_t revision,
+                        core3d::bounded_curve::Frame& frame) noexcept {
+    frame = {};
+    try {
+        BRepAdaptor_Surface surface(face);
+        if (surface.GetType() != GeomAbs_Plane) return false;
+        gp_Dir outward = surface.Plane().Axis().Direction();
+        if (face.Orientation() == TopAbs_REVERSED) outward.Reverse();
+        const double nx = outward.X(), ny = outward.Y(), nz = outward.Z();
+        GProp_GProps properties;
+        BRepGProp::SurfaceProperties(face, properties);
+        const gp_Pnt centre = properties.CentreOfMass();
+        const double axes[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+        int chosen = 0;
+        double least = 2;
+        for (int index = 0; index < 3; ++index) {
+            const double parallel = std::abs(axes[index][0] * nx
+                + axes[index][1] * ny + axes[index][2] * nz);
+            if (parallel < least) { least = parallel; chosen = index; }
+        }
+        const double along = axes[chosen][0] * nx + axes[chosen][1] * ny
+            + axes[chosen][2] * nz;
+        double xx = axes[chosen][0] - nx * along;
+        double xy = axes[chosen][1] - ny * along;
+        double xz = axes[chosen][2] - nz * along;
+        const double norm = std::sqrt(xx * xx + xy * xy + xz * xz);
+        if (norm < 1e-9) return false;
+        xx /= norm; xy /= norm; xz /= norm;
+        frame.identifier = identifier;
+        frame.revision = revision;
+        frame.origin = {{centre.X(), centre.Y(), centre.Z()}};
+        frame.xAxis = {{xx, xy, xz}};
+        frame.yAxis = {{ny * xz - nz * xy, nz * xx - nx * xz,
+                        nx * xy - ny * xx}};
+        frame.zAxis = {{nx, ny, nz}};
+        return core3d::bounded_curve::ValidateFrame(frame)
+            == core3d::bounded_curve::Refusal::None;
+    } catch (...) { frame = {}; return false; }
+}
+
+PersistedHostResolution ResolvePersistedHost(
+    const Handle(OcctDocument)& document, const tr::AuthoredRecord& record,
+    IssuedSelection& issued) noexcept {
+    issued = {};
+    try {
+        const std::string hostEntity =
+            core3d::retained_solid::UUIDText(record.host.entity);
+        NSString *hostText = [NSString stringWithUTF8String:hostEntity.c_str()];
+        TDF_Label label;
+        if (!hostText || !RootForEntity(document, hostText, label))
+            return PersistedHostResolution::Missing;
+        if (!XCAFDoc_ShapeTool::IsFree(label)
+            || !XCAFDoc_ShapeTool::IsSimpleShape(label))
+            return PersistedHostResolution::NotCurrent;
+
+        const TopoDS_Shape source = XCAFDoc_ShapeTool::GetShape(label);
+        const TopoDS_Solid admittedHost = tr::detail::RaisedHostSolid(source);
+        const TopoDS_Shape selectionSource = admittedHost.IsNull()
+            ? source : TopoDS_Shape(admittedHost);
+        std::string exactBytes;
+        if (selectionSource.IsNull()
+            || !core3d::retained_part_boolean::ExactShapeBytes(
+                selectionSource, exactBytes) || exactBytes.empty())
+            return PersistedHostResolution::NotCurrent;
+        const tr::Digest digest = SHA256(exactBytes.data(), exactBytes.size());
+        if (digest != record.host.shapeDigest
+            || record.host.selectorProof.size() != tr::Digest{}.size())
+            return PersistedHostResolution::NotCurrent;
+
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(selectionSource, TopAbs_FACE, faces);
+        std::optional<std::uint32_t> topologyIndex;
+        core3d::bounded_curve::Frame frame;
+        for (Standard_Integer index = 1; index <= faces.Extent(); ++index) {
+            core3d::bounded_curve::Frame candidate;
+            if (!CanonicalHostFrame(TopoDS::Face(faces.FindKey(index)),
+                    record.host.frame, record.host.frameRevision, candidate))
+                continue;
+            const tr::Digest proof = SelectorProof(document->DocumentIdentifier(),
+                hostEntity, std::uint32_t(index - 1), candidate);
+            if (std::equal(proof.begin(), proof.end(),
+                           record.host.selectorProof.begin())) {
+                if (topologyIndex) return PersistedHostResolution::NotCurrent;
+                topologyIndex = std::uint32_t(index - 1);
+                frame = candidate;
+            }
+        }
+        if (!topologyIndex) return PersistedHostResolution::NotCurrent;
+        const TopoDS_Face face = TopoDS::Face(
+            faces.FindKey(Standard_Integer(*topologyIndex) + 1));
+        BRepAdaptor_Surface surface(face);
+        if (surface.GetType() != GeomAbs_Plane)
+            return PersistedHostResolution::NotCurrent;
+        const double tolerance = 1e-9;
+        const gp_Pnt authoredOrigin(record.host.origin[0],
+                                    record.host.origin[1],
+                                    record.host.origin[2]);
+        if (std::abs(frame.zAxis[0] - record.host.zAxis[0]) > tolerance
+            || std::abs(frame.zAxis[1] - record.host.zAxis[1]) > tolerance
+            || std::abs(frame.zAxis[2] - record.host.zAxis[2]) > tolerance
+            || surface.Plane().Distance(authoredOrigin) > tolerance)
+            return PersistedHostResolution::NotCurrent;
+        const std::size_t boundary = BoundaryEdges(face);
+        if (boundary < 3 || boundary > 64)
+            return PersistedHostResolution::NotCurrent;
+
+        issued.entity = hostEntity;
+        issued.topologyIndex = *topologyIndex;
+        issued.sourceBytes.assign(exactBytes.begin(), exactBytes.end());
+        issued.sourceShape = selectionSource;
+        issued.frame = frame;
+        issued.host.entity = record.host.entity;
+        issued.host.faceFeature = record.host.faceFeature;
+        issued.host.frame = record.host.frame;
+        issued.host.frameRevision = record.host.frameRevision;
+        issued.host.shapeDigest = record.host.shapeDigest;
+        issued.boundaryEdges = std::uint16_t(boundary);
+        std::copy(record.host.selectorProof.begin(),
+                  record.host.selectorProof.end(), issued.selectorProof.begin());
+        return PersistedHostResolution::Found;
+    } catch (...) {
+        issued = {};
+        return PersistedHostResolution::NotCurrent;
+    }
+}
+
 // One detached raised build request: the public API fills the caller fields;
 // the DEBUG probe may additionally pin the identity seed and arm the
 // foreign/inward/off-face failure legs.
@@ -357,6 +486,9 @@ struct E5Build final {
     IssuedSelection _issued;
     std::shared_ptr<std::atomic_bool> _cancelled;
     std::uint32_t _viewportWidth, _viewportHeight;
+    NSArray<Core3DSceneElementIdentifier *> *_capturedSelection;
+    Core3DSceneElementKind _capturedSelectionMode;
+    bool _selectedReliefCapture;
     std::optional<OcctTextReliefCapture> _existing;
     Core3DTextReliefCandidate *_preparedCandidate;
     NSString *_preparedCatalogHandle;
@@ -541,6 +673,8 @@ struct E5Build final {
         opening->_cancelled = std::make_shared<std::atomic_bool>(false);
         opening->_viewportWidth = width;
         opening->_viewportHeight = height;
+        opening->_capturedSelection = [scene.selection.selectedElements copy];
+        opening->_capturedSelectionMode = scene.selectionMode;
 #if DEBUG
         opening->_debugCancelAfterBuild = std::make_shared<std::atomic_int>(0);
 #endif
@@ -558,30 +692,9 @@ struct E5Build final {
     }
 }
 
-+ (instancetype)captureController:(Core3DViewController *)controller
-         existingFeatureIdentifier:(NSData *)featureIdentifier
-                              error:(NSError **)error {
-    if (error) *error = nil;
-    if (![featureIdentifier isKindOfClass:NSData.class]
-        || featureIdentifier.length != 16) {
-        if (error) *error = E5Error(Core3DTextReliefErrorInvalidArgument,
-                                    @"16-byte relief feature identifier required");
-        return nil;
-    }
-    Core3DTextReliefOpening *opening = [self captureController:controller error:error];
-    if (!opening) return nil;
-    tr::UUID feature{};
-    std::memcpy(feature.data(), featureIdentifier.bytes, feature.size());
-    OcctTextReliefCapture capture;
-    if (!opening->_document->ReadTextReliefExact(feature, capture)
-        || !capture.record.payload
-        || capture.record.payload->value.host.entity != opening->_issued.host.entity) {
-        if (error) *error = E5Error(Core3DTextReliefErrorStale,
-                                    @"retained relief is not owned by selected host");
-        return nil;
-    }
-    opening->_existing = std::move(capture);
-    const auto& record = opening->_existing->record.payload->value;
+- (void)e5InstallExistingCapture:(const OcctTextReliefCapture&)capture {
+    _existing = capture;
+    const auto& record = _existing->record.payload->value;
     Core3DTextReliefAuthoredIntent *intent =
         [[Core3DTextReliefAuthoredIntent alloc] initPrivate];
     intent.ownerIdentifier = E5Data(record.owner.entity);
@@ -606,11 +719,207 @@ struct E5Build final {
     intent.offsetVMM = record.offsetVMM;
     intent.rotationRadians = record.rotationRadians;
     intent.metersPerUnit = record.metersPerLocalUnit;
-    opening.authoredIntent = intent;
-    opening.appliedOwnerIdentifier = E5Data(
-        record.owner.entity);
-    opening.appliedFeatureIdentifier = featureIdentifier;
+    self.authoredIntent = intent;
+    self.appliedOwnerIdentifier = E5Data(record.owner.entity);
+    self.appliedFeatureIdentifier = E5Data(record.feature);
+}
+
++ (instancetype)captureController:(Core3DViewController *)controller
+         existingFeatureIdentifier:(NSData *)featureIdentifier
+                              error:(NSError **)error {
+    if (error) *error = nil;
+    if (![featureIdentifier isKindOfClass:NSData.class]
+        || featureIdentifier.length != 16) {
+        if (error) *error = E5Error(Core3DTextReliefErrorInvalidArgument,
+                                    @"16-byte relief feature identifier required");
+        return nil;
+    }
+    Core3DTextReliefOpening *opening = [self captureController:controller error:error];
+    if (!opening) return nil;
+    tr::UUID feature{};
+    std::memcpy(feature.data(), featureIdentifier.bytes, feature.size());
+    OcctTextReliefCapture capture;
+    if (!opening->_document->ReadTextReliefExact(feature, capture)
+        || !capture.record.payload
+        || capture.record.payload->value.host.entity != opening->_issued.host.entity) {
+        if (error) *error = E5Error(Core3DTextReliefErrorStale,
+                                    @"retained relief is not owned by selected host");
+        return nil;
+    }
+    [opening e5InstallExistingCapture:capture];
     return opening;
+}
+
++ (instancetype)captureController:(Core3DViewController *)controller
+               selectedReliefError:(NSError **)error {
+    if (error) *error = nil;
+    if (!NSThread.isMainThread || !controller) {
+        if (error) *error = E5Error(Core3DTextReliefErrorInvalidThread,
+                                    @"main-thread controller required");
+        return nil;
+    }
+    @try {
+        Core3DSceneSnapshot *scene = [controller captureSceneSnapshot];
+        NSArray<Core3DSceneElementIdentifier *> *selected =
+            scene.selection.selectedElements;
+        if (!scene || scene.selectionMode == Core3DSceneElementKindNone
+            || selected.count == 0 || selected.count > 1024) {
+            if (error) *error = E5Refusal(
+                Core3DTextReliefErrorInvalidSelection,
+                "e5.selection-not-relief-geometry", 0);
+            return nil;
+        }
+        GLViewController *gl = [controller.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)controller.glController : nil;
+        auto viewer = gl ? gl.viewer : nullptr;
+        Handle(OcctDocument) document = viewer ? viewer->getDocument()
+            : Handle(OcctDocument)();
+        const CGSize drawable = controller.viewportDrawableSize;
+        if (!viewer || document.IsNull() || !std::isfinite(drawable.width)
+            || !std::isfinite(drawable.height) || drawable.width < 1
+            || drawable.height < 1 || drawable.width > UINT32_MAX
+            || drawable.height > UINT32_MAX) {
+            if (error) *error = E5Error(Core3DTextReliefErrorUnavailable,
+                                        @"native document unavailable");
+            return nil;
+        }
+        const auto native = document->Document();
+        if (native.IsNull() || native->GetData().IsNull()
+            || native->HasOpenCommand()) {
+            if (error) *error = E5Refusal(Core3DTextReliefErrorStale,
+                                          "e5.document-revision-stale", 0);
+            return nil;
+        }
+        const NSInteger history = controller.documentUndoCount;
+        std::optional<OcctTextReliefCapture> resolved;
+        bool sawNonRelief = false, sawMissing = false;
+        std::vector<std::string> receipts;
+        receipts.reserve(selected.count + 1);
+        for (Core3DSceneElementIdentifier *element in selected) {
+            const std::string entity = element.entityIdentifier.UTF8String ?: "";
+            if (element.kind == Core3DSceneElementKindNone || entity.empty()
+                || entity.size() > 128) {
+                sawNonRelief = true; continue;
+            }
+            if (std::find(receipts.begin(), receipts.end(), entity) == receipts.end())
+                receipts.push_back(entity);
+            OcctTextReliefCapture candidate;
+            const auto lookup = document->ReadTextReliefForGeometryEntity(
+                entity, candidate);
+            if (lookup == OcctTextReliefGeometryLookup::Ambiguous) {
+                if (error) *error = E5Refusal(
+                    Core3DTextReliefErrorInvalidSelection,
+                    "e5.retained-record-ambiguous", 0);
+                return nil;
+            }
+            if (lookup == OcctTextReliefGeometryLookup::Invalid) {
+                if (error) *error = E5Refusal(Core3DTextReliefErrorUnavailable,
+                                              "e5.retained-record-missing", 0);
+                return nil;
+            }
+            if (lookup == OcctTextReliefGeometryLookup::Missing) {
+                sawMissing = true; continue;
+            }
+            if (lookup == OcctTextReliefGeometryLookup::NotReliefGeometry) {
+                sawNonRelief = true; continue;
+            }
+            if (!candidate.record.payload) {
+                sawMissing = true; continue;
+            }
+            if (resolved
+                && resolved->record.payload->value.feature
+                    != candidate.record.payload->value.feature) {
+                if (error) *error = E5Refusal(
+                    Core3DTextReliefErrorInvalidSelection,
+                    "e5.retained-record-ambiguous", 0);
+                return nil;
+            }
+            resolved = std::move(candidate);
+        }
+        if (!resolved || sawNonRelief || sawMissing) {
+            const bool missing = sawMissing && !sawNonRelief;
+            if (error) *error = E5Refusal(
+                missing ? Core3DTextReliefErrorUnavailable
+                        : Core3DTextReliefErrorInvalidSelection,
+                missing ? "e5.retained-record-missing"
+                        : "e5.selection-not-relief-geometry", 0);
+            return nil;
+        }
+        const auto& record = resolved->record.payload->value;
+        if (record.owner.entity == record.feature) {
+            if (error) *error = E5Refusal(Core3DTextReliefErrorUnavailable,
+                                          "e5.retained-record-missing", 0);
+            return nil;
+        }
+        IssuedSelection issued;
+        const PersistedHostResolution host =
+            ResolvePersistedHost(document, record, issued);
+        if (host != PersistedHostResolution::Found) {
+            if (error) *error = E5Refusal(Core3DTextReliefErrorStale,
+                host == PersistedHostResolution::Missing
+                    ? "e5.host-face-missing" : "e5.host-face-not-current", 0);
+            return nil;
+        }
+        if (std::find(receipts.begin(), receipts.end(), issued.entity)
+            == receipts.end()) receipts.push_back(issued.entity);
+        const std::uint32_t width = std::uint32_t(drawable.width);
+        const std::uint32_t height = std::uint32_t(drawable.height);
+        auto context = viewer->captureNativeOpeningContext(width, height, receipts);
+        if (!context || context->openingFence().document() != native
+            || context->openingFence().data() != native->GetData()
+            || context->openingFence().documentGeneration()
+                != scene.revisions.documentGeneration
+            || context->openingFence().modelRevision()
+                != scene.revisions.modelRevision
+            || !context->isCurrent(width, height)
+            || controller.documentUndoCount != history
+            || context->openingFence().metersPerUnit()
+                != record.metersPerLocalUnit) {
+            if (error) *error = E5Refusal(Core3DTextReliefErrorStale,
+                                          "e5.document-revision-stale", 0);
+            return nil;
+        }
+
+        Core3DTextReliefIssuedFace *publicFace =
+            [[Core3DTextReliefIssuedFace alloc] initPrivate];
+        publicFace.identifier = E5Data(MintUUID());
+        publicFace.selectorProof = E5Data(issued.selectorProof);
+        publicFace.entityIdentifier =
+            [NSString stringWithUTF8String:issued.entity.c_str()];
+        publicFace.topologyIndex = issued.topologyIndex;
+        publicFace.boundaryEdgeCount = issued.boundaryEdges;
+        publicFace.frameOriginLocal = E5Vector(issued.frame.origin);
+        publicFace.frameXAxis = E5Vector(issued.frame.xAxis);
+        publicFace.frameYAxis = E5Vector(issued.frame.yAxis);
+        publicFace.frameZAxis = E5Vector(issued.frame.zAxis);
+
+        Core3DTextReliefOpening *opening = [[self alloc] initPrivate];
+        opening->_controller = controller;
+        opening->_document = document;
+        opening->_context = std::move(context);
+        opening->_issued = std::move(issued);
+        opening->_cancelled = std::make_shared<std::atomic_bool>(false);
+        opening->_viewportWidth = width;
+        opening->_viewportHeight = height;
+        opening->_capturedSelection = [selected copy];
+        opening->_capturedSelectionMode = scene.selectionMode;
+        opening->_selectedReliefCapture = true;
+#if DEBUG
+        opening->_debugCancelAfterBuild = std::make_shared<std::atomic_int>(0);
+#endif
+        opening.issuedFace = publicFace;
+        opening.documentIdentifier =
+            [NSString stringWithUTF8String:document->DocumentIdentifier().c_str()];
+        opening.contextIdentifier = NSUUID.UUID.UUIDString;
+        opening.metersPerUnit = record.metersPerLocalUnit;
+        opening.historyDepth = history;
+        [opening e5InstallExistingCapture:*resolved];
+        return opening;
+    } @catch (__unused NSException *exception) {
+        if (error) *error = E5Error(Core3DTextReliefErrorUnavailable,
+                                    @"selected relief capture exception");
+        return nil;
+    }
 }
 
 - (BOOL)isCurrent:(NSError **)error {
@@ -626,22 +935,33 @@ struct E5Build final {
         return NO;
     }
     if (!_context || !_context->isCurrent(_viewportWidth, _viewportHeight)) {
-        if (error) *error = E5Error(Core3DTextReliefErrorStale,
-                                    @"native opening fence changed");
+        if (error) *error = _selectedReliefCapture
+            ? E5Refusal(Core3DTextReliefErrorStale,
+                        "e5.document-revision-stale", 0)
+            : E5Error(Core3DTextReliefErrorStale,
+                      @"native opening fence changed");
         return NO;
     }
     Core3DSceneSnapshot *scene = [_controller captureSceneSnapshot];
-    if (!scene || scene.selectionMode != Core3DSceneElementKindFace
-        || scene.selection.selectedElements.count != 1) {
+    if (!scene || scene.selectionMode != _capturedSelectionMode
+        || scene.selection.selectedElements.count != _capturedSelection.count) {
         if (error) *error = E5Error(Core3DTextReliefErrorStale,
-                                    @"native face selection changed");
+                                    @"native geometry selection changed");
         return NO;
     }
-    Core3DSceneElementIdentifier *element = scene.selection.selectedElements.firstObject;
-    if (element.kind != Core3DSceneElementKindFace
-        || element.topologyIndex != _issued.topologyIndex
-        || _issued.entity != (element.entityIdentifier.UTF8String ?: "")
-        || _controller.documentUndoCount != self.historyDepth) {
+    for (NSUInteger index = 0; index < _capturedSelection.count; ++index) {
+        Core3DSceneElementIdentifier *before = _capturedSelection[index];
+        Core3DSceneElementIdentifier *after = scene.selection.selectedElements[index];
+        if (before.kind != after.kind
+            || before.topologyIndex != after.topologyIndex
+            || before.geometryRevision != after.geometryRevision
+            || ![before.entityIdentifier isEqualToString:after.entityIdentifier]) {
+            if (error) *error = E5Error(Core3DTextReliefErrorStale,
+                                        @"captured geometry selection changed");
+            return NO;
+        }
+    }
+    if (_controller.documentUndoCount != self.historyDepth) {
         if (error) *error = E5Error(Core3DTextReliefErrorStale,
                                     @"captured dependency changed");
         return NO;
@@ -1032,6 +1352,9 @@ struct E5Build final {
     prepared->_context = _context; prepared->_issued = _issued;
     prepared->_cancelled = _cancelled; prepared->_viewportWidth = _viewportWidth;
     prepared->_viewportHeight = _viewportHeight; prepared->_existing = _existing;
+    prepared->_capturedSelection = _capturedSelection;
+    prepared->_capturedSelectionMode = _capturedSelectionMode;
+    prepared->_selectedReliefCapture = _selectedReliefCapture;
 #if DEBUG
     prepared->_debugCancelAfterBuild = _debugCancelAfterBuild;
     prepared->_debugApplyFault = _debugApplyFault;
@@ -1060,6 +1383,9 @@ struct E5Build final {
     prepared->_context = _context; prepared->_issued = _issued;
     prepared->_cancelled = _cancelled; prepared->_viewportWidth = _viewportWidth;
     prepared->_viewportHeight = _viewportHeight; prepared->_existing = _existing;
+    prepared->_capturedSelection = _capturedSelection;
+    prepared->_capturedSelectionMode = _capturedSelectionMode;
+    prepared->_selectedReliefCapture = _selectedReliefCapture;
 #if DEBUG
     prepared->_debugCancelAfterBuild = _debugCancelAfterBuild;
     prepared->_debugApplyFault = _debugApplyFault;

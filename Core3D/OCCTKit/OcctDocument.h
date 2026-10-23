@@ -533,6 +533,17 @@ struct OcctTextReliefCapture {
         const OcctTextReliefCapture& other) const noexcept;
 };
 
+//! Read-only result for resolving selected saved relief geometry. "Missing"
+//! distinguishes an ordinary retained C1 owner which is not referenced by an
+//! SYTR/2 record from geometry which is not part of this family at all.
+enum class OcctTextReliefGeometryLookup : std::uint8_t {
+    Found = 0,
+    NotReliefGeometry,
+    Missing,
+    Ambiguous,
+    Invalid,
+};
+
 namespace core3d::treatment_history {
 struct TextReliefReplaySide {
     std::vector<OcctTextReliefCapture> owners;
@@ -1495,6 +1506,11 @@ public:
         OcctTextReliefCapture& capture) const noexcept;
     Standard_EXPORT Standard_Boolean ReadTextReliefExact(
         const core3d::text_relief::UUID& feature,
+        OcctTextReliefCapture& capture) const noexcept;
+    //! Enumerates only ordinary saved SYTR/2 and C1 records. No registry,
+    //! launch cache or caller feature identity participates in this lookup.
+    Standard_EXPORT OcctTextReliefGeometryLookup ReadTextReliefForGeometryEntity(
+        const std::string& entityIdentifier,
         OcctTextReliefCapture& capture) const noexcept;
     //! C1 records must already have been staged by this same caller lease;
     //! complete readback below proves the exact referenced set before success.

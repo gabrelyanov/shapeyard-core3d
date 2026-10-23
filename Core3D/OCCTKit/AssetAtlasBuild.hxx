@@ -56,6 +56,40 @@ struct LayoutEvidence final {           // optional BuildAtlas out-param
     std::vector<std::size_t> chartFaces;
 };
 
+//! Optional, operation-local final-corner provenance. Never encoded or hashed.
+//! The ticket precedes the allocation so backing storage dies first.
+struct FinalTriangleLineage final {
+    decal_layer::bake::accounting::Ticket storage;
+    std::vector<std::uint32_t> memberTriangleByPackedTriangle;
+    Key atlas;
+    const LayoutEvidence* layout = nullptr;
+
+    FinalTriangleLineage() = default;
+    FinalTriangleLineage(const FinalTriangleLineage&) = delete;
+    FinalTriangleLineage& operator=(const FinalTriangleLineage&) = delete;
+    FinalTriangleLineage(FinalTriangleLineage&& other) noexcept {
+        *this = std::move(other);
+    }
+    FinalTriangleLineage& operator=(FinalTriangleLineage&& other) noexcept {
+        if (this != &other) {
+            reset();
+            storage = std::move(other.storage);
+            memberTriangleByPackedTriangle =
+                std::move(other.memberTriangleByPackedTriangle);
+            atlas = other.atlas;
+            layout = other.layout;
+            other.layout = nullptr;
+        }
+        return *this;
+    }
+    void reset() noexcept {
+        std::vector<std::uint32_t>().swap(memberTriangleByPackedTriangle);
+        storage.reset();
+        atlas = {};
+        layout = nullptr;
+    }
+};
+
 //! Required accounting state for private final-atlas production. The caller
 //! supplies the one operation view and retains the layout/result tickets for
 //! as long as the corresponding vectors are physically live. The chart and
@@ -556,7 +590,9 @@ inline Status BuildFinalAtlas(const Key& atlas,
 #ifdef DEBUG
                               , const DebugLayoutObserver* observer = nullptr
 #endif
-                              ) noexcept {
+                              , FinalTriangleLineage* lineage = nullptr) noexcept {
+    if (lineage) lineage->reset();
+    FinalTriangleLineage pendingLineage;
     candidate = {}; assignments.clear(); diagnosis.clear();
     if (layout) *layout = {};
     if (accounting) {
@@ -821,6 +857,23 @@ inline Status BuildFinalAtlas(const Key& atlas,
                 return Status::OverBudget;
         }
 
+        if (lineage) {
+            if (!accounting || !layout
+                || !pendingLineage.storage.acquireProduct(accounting->operation,
+                    StorageDimension::PrivateStorage, totalTriangles,
+                    sizeof(std::uint32_t), 1U, Retention::Retained,
+                    FailureSite::ExportAtlasStorage)
+                || !accounting->operation.EnterAllocation(
+                    FailureSite::ExportAtlasStorage)) return Status::OverBudget;
+            pendingLineage.memberTriangleByPackedTriangle.reserve(totalTriangles);
+            if (pendingLineage.memberTriangleByPackedTriangle.capacity()
+                    * sizeof(std::uint32_t) > pendingLineage.storage.bytes) {
+                accounting->operation.AllocationFailed(FailureSite::ExportAtlasStorage);
+                return Status::OverBudget;
+            }
+            pendingLineage.atlas = atlas;
+        }
+
         std::vector<retained_finishing::MaterialResource> resources;
         std::vector<UUID> memberMaterial(count);
         for (std::size_t index = 0; index < count; ++index) {
@@ -889,6 +942,9 @@ inline Status BuildFinalAtlas(const Key& atlas,
             if (original < 0
                 || std::size_t(original) >= memberTriangles[memberIndex])
                 return Status::Malformed;
+            if (lineage)
+                pendingLineage.memberTriangleByPackedTriangle.push_back(
+                    std::uint32_t(original));
             auto& slot = assignments[memberIndex].corners[
                 3 * std::size_t(original)];
             std::array<double, 2>* target = &slot;
@@ -980,6 +1036,10 @@ inline Status BuildFinalAtlas(const Key& atlas,
             observer->finish(observer->context, memberCharts,
                 packer.adjacency);
 #endif
+        if (lineage) {
+            pendingLineage.layout = layout;
+            *lineage = std::move(pendingLineage);
+        }
         accountingReset.committed = true;
         return Status::Built;
     } catch (...) {

@@ -179,6 +179,15 @@ __attribute__((objc_subclassing_restricted))
                                       error:(NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(capture(controller:existingFeatureIdentifier:));
 
+//! Resolves exactly one retained relief from the controller's current geometry
+//! selection, then recovers its original current host face from the ordinary
+//! persisted record. The selection may name the relief owner or one of its
+//! retained C1 component owners; callers supply neither a feature identifier
+//! nor a host face. Refusal never changes selection, history or geometry.
++ (nullable instancetype)captureController:(Core3DViewController *)controller
+                       selectedReliefError:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(capture(selectedReliefOf:));
+
 //! Detached raised build against the issued face. The resource bytes are
 //! trusted catalog bytes pinned by expectedSHA256 (64 lowercase hex); text is
 //! the UTF-8 glyph string for fonts and must be empty for emblems; heightMM,

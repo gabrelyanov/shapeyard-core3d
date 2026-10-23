@@ -1719,6 +1719,20 @@ bool RayDomainContains(const Bounds3d& origins, const Double3& origin,
 
 } // namespace decal_math
 
+#ifdef DEBUG
+// Dump-only causal marker at the unchanged Release receiver count refusal.
+thread_local bool gDebugNbReceiverCountRefused = false;
+thread_local const char* gDebugNbReceiverPhase = "entry";
+#endif
+
+// Borrowed only while the immutable saved capture and exact final result live.
+// Role indices keep the existing E4AP field order; no lineage enters a digest.
+struct SavedOriginalPaintView final {
+    std::array<const core3d::painted_atlas_bake::owner::CapturedSource*, 5> roles{};
+    const core3d::painted_atlas_bake::owner::RawSlotWitness* material = nullptr;
+    std::array<float, 11> scalars{};
+};
+
 struct OrdinaryDecalFaceInputs final {
     const Handle(OcctDocument)& document;
     const TopoDS_Face& nativeFace;
@@ -1751,6 +1765,7 @@ struct OrdinaryDecalFaceInputs final {
     double metersPerUnit;
     core3d::decal_layer::bake::accounting::View operation;
     core3d::retained_edge_treatment::ReplayBudget& budget;
+    const SavedOriginalPaintView* originalPaint = nullptr;
 };
 
 // Build the ordinary receiver input from explicit borrowed authority. Keeping
@@ -1766,6 +1781,31 @@ bool PrepareOrdinaryDecalFace(
     (void)theInputs.reversesWinding;
     if (!theInputs.operation.valid() || theInputs.layerIndices.empty())
         return false;
+    std::array<float, 11> appearanceScalars{
+        theInputs.material.baseColor.x, theInputs.material.baseColor.y,
+        theInputs.material.baseColor.z, theInputs.material.baseColor.w,
+        theInputs.material.emission.x, theInputs.material.emission.y,
+        theInputs.material.emission.z, theInputs.material.metallic,
+        theInputs.material.roughness, theInputs.material.indexOfRefraction,
+        theInputs.material.alphaCutoff};
+    std::array<std::int32_t, 5> appearanceSlots{
+        theInputs.material.baseColorTextureIndex,
+        theInputs.material.emissiveTextureIndex,
+        theInputs.material.metallicRoughnessTextureIndex,
+        theInputs.material.occlusionTextureIndex,
+        theInputs.material.normalTextureIndex};
+    if (theInputs.originalPaint) {
+        if (!theInputs.originalPaint->material) return false;
+        appearanceScalars = theInputs.originalPaint->scalars;
+        for (std::size_t role = 0; role < appearanceSlots.size(); ++role) {
+            const auto* original = theInputs.originalPaint->roles[role];
+            if (original && original->order > std::size_t(INT32_MAX)) return false;
+            appearanceSlots[role] = original ? std::int32_t(original->order) : -1;
+        }
+    }
+#ifdef DEBUG
+    gDebugNbReceiverPhase = "layer-reservation";
+#endif
     dl::bake::Input anInput;
     anInput.operationLedger = theInputs.operation;
     std::size_t aLayerStorageBytes = 0;
@@ -1803,6 +1843,9 @@ bool PrepareOrdinaryDecalFace(
     std::vector<dl::bake::ResolvedLayer> aResolvedLayers;
     aResolvedLayers.reserve(theInputs.layerIndices.size());
     std::uint32_t anOutputWidth = 1, anOutputHeight = 1;
+#ifdef DEBUG
+    gDebugNbReceiverPhase = "layer-resolution";
+#endif
     for (const std::size_t aLayerIndex : theInputs.layerIndices) {
         const dl::Layer& anIntent =
             theInputs.definition.layers[aLayerIndex];
@@ -1841,6 +1884,9 @@ bool PrepareOrdinaryDecalFace(
             anOutputHeight, 64);
     }
 
+#ifdef DEBUG
+    gDebugNbReceiverPhase = "base-reservation";
+#endif
     std::size_t aBaseBytes = 0;
     if (!theInputs.operation.CheckedProduct(anOutputWidth, anOutputHeight, 4,
             aBaseBytes,
@@ -1865,7 +1911,7 @@ bool PrepareOrdinaryDecalFace(
         theInputs.material.baseColorTextureIndex;
     bool aBaseSRGB = true;
     core3d::face_image::UVTransform aBaseTransform;
-    for (const FaceImageBindingSnapshot& aBinding :
+    if (!theInputs.originalPaint) for (const FaceImageBindingSnapshot& aBinding :
          theInputs.faceImageBindings) {
         if (aBinding.faceIndex != theInputs.faceIndex
             || aBinding.role != FaceImageRole::BaseColor)
@@ -1888,14 +1934,28 @@ bool PrepareOrdinaryDecalFace(
         aBaseTransform.wrapV = static_cast<core3d::face_image::Wrap>(
             aBinding.transform.wrapV);
     }
+    const auto* originalBase = theInputs.originalPaint
+        ? theInputs.originalPaint->roles[0] : nullptr;
+    if (theInputs.originalPaint) {
+        aBaseTextureIndex = appearanceSlots[0];
+        if (originalBase) {
+            aBaseSRGB = originalBase->fence.colorSpace
+                == core3d::face_image::ColorSpace::SRGB;
+            aBaseTransform = originalBase->fence.transform;
+        }
+    }
+#ifdef DEBUG
+    gDebugNbReceiverPhase = "original-image-decode";
+#endif
     dl::bake::accounting::Ticket aBaseSourceTicket;
     std::optional<dl::bake::Raster> aBaseSource;
     if (aBaseTextureIndex >= 0) {
-        if (std::size_t(aBaseTextureIndex)
+        if (!originalBase && std::size_t(aBaseTextureIndex)
             >= theInputs.textures.size()) return false;
         core3d::painted_atlas_bake::kernel::Image aDecoded;
         if (!core3d::painted_atlas_bake::kernel::DecodeImage(
-                theInputs.textures[aBaseTextureIndex].encodedBytes,
+                originalBase ? originalBase->envelope.workingBytes
+                    : theInputs.textures[aBaseTextureIndex].encodedBytes,
                 aDecoded, theInputs.operation)) return false;
         dl::bake::Raster aRaster;
         aRaster.width = aDecoded.width;
@@ -1905,6 +1965,9 @@ bool PrepareOrdinaryDecalFace(
         if (!dl::bake::Valid(aRaster)) return false;
         aBaseSource = std::move(aRaster);
     }
+#ifdef DEBUG
+    gDebugNbReceiverPhase = "base-sampling";
+#endif
     for (std::uint32_t y = 0; y < anOutputHeight; ++y) {
         for (std::uint32_t x = 0; x < anOutputWidth; ++x) {
             const dl::bake::UV anOutputUV{
@@ -1919,8 +1982,13 @@ bool PrepareOrdinaryDecalFace(
                     || theInputs.primitive.indexCount
                         > theInputs.indices.size()
                             - theInputs.primitive.firstIndex
-                    || theInputs.primitive.indexCount % 3 != 0)
+                    || theInputs.primitive.indexCount % 3 != 0) {
+#ifdef DEBUG
+                    gDebugNbReceiverCountRefused =
+                        aCornerUVs.size() != theInputs.indices.size();
+#endif
                     return false;
+                }
                 bool aFound = false;
                 for (std::size_t anOffset = 0;
                      anOffset < theInputs.primitive.indexCount;
@@ -1974,16 +2042,19 @@ bool PrepareOrdinaryDecalFace(
             const std::size_t anOffset =
                 (std::size_t(y) * anOutputWidth + x) * 4;
             aBase.rgba[anOffset] = dl::bake::LinearToSRGB(
-                aSample[0] * theInputs.material.baseColor.x);
+                aSample[0] * appearanceScalars[0]);
             aBase.rgba[anOffset + 1] = dl::bake::LinearToSRGB(
-                aSample[1] * theInputs.material.baseColor.y);
+                aSample[1] * appearanceScalars[1]);
             aBase.rgba[anOffset + 2] = dl::bake::LinearToSRGB(
-                aSample[2] * theInputs.material.baseColor.z);
+                aSample[2] * appearanceScalars[2]);
             aBase.rgba[anOffset + 3] = dl::bake::LinearByte(
-                aSample[3] * theInputs.material.baseColor.w);
+                aSample[3] * appearanceScalars[3]);
         }
     }
 
+#ifdef DEBUG
+    gDebugNbReceiverPhase = "receiver-frame";
+#endif
     const Double3 aNormal{
         theInputs.faceReceipt.plane.outwardNormal[0],
         theInputs.faceReceipt.plane.outwardNormal[1],
@@ -2012,6 +2083,9 @@ bool PrepareOrdinaryDecalFace(
             Scale(Cross(qv, Cross(qv, v)), 2.0)));
     };
 
+#ifdef DEBUG
+    gDebugNbReceiverPhase = "layer-geometry-visibility";
+#endif
     for (dl::bake::ResolvedLayer& aLayer : aResolvedLayers) {
         const dl::Layer& anIntent = aLayer.intent;
         Double3 anOrigin, aLayerU, aLayerV, aRayLocal;
@@ -2440,11 +2514,7 @@ bool PrepareOrdinaryDecalFace(
             theInputs.worldFromObject.values.size(), 8, 1, aPart,
             dl::bake::accounting::FailureSite::ReceiverProofStorage)
         || !checkedAdd(aProofBytes[4], aPart, aProofBytes[4])) return false;
-    for (std::int32_t aTexture : {theInputs.material.baseColorTextureIndex,
-             theInputs.material.emissiveTextureIndex,
-             theInputs.material.metallicRoughnessTextureIndex,
-             theInputs.material.occlusionTextureIndex,
-             theInputs.material.normalTextureIndex})
+    for (std::int32_t aTexture : appearanceSlots)
         if (aTexture >= 0
             && !checkedAdd(aProofBytes[2], dl::Digest{}.size(),
                 aProofBytes[2])) return false;
@@ -2458,6 +2528,9 @@ bool PrepareOrdinaryDecalFace(
             || !theInputs.operation.EnterAllocation(
                 dl::bake::accounting::FailureSite::ReceiverProofStorage))
             return false;
+#ifdef DEBUG
+    gDebugNbReceiverPhase = "receiver-proofs";
+#endif
     core3d::face_image::detail::Writer aGeometryWriter;
     core3d::face_image::detail::Writer aTangentWriter;
     core3d::face_image::detail::Writer anAppearanceWriter;
@@ -2499,25 +2572,20 @@ bool PrepareOrdinaryDecalFace(
         aTangentWriter.real(aValue.x); aTangentWriter.real(aValue.y);
         aTangentWriter.real(aValue.z); aTangentWriter.real(aValue.w);
     }
-    for (float aValue : {theInputs.material.baseColor.x, theInputs.material.baseColor.y,
-             theInputs.material.baseColor.z, theInputs.material.baseColor.w,
-             theInputs.material.emission.x, theInputs.material.emission.y,
-             theInputs.material.emission.z, theInputs.material.metallic,
-             theInputs.material.roughness, theInputs.material.indexOfRefraction,
-             theInputs.material.alphaCutoff})
+    for (float aValue : appearanceScalars)
         anAppearanceWriter.real(aValue);
-    for (std::int32_t aTexture : {theInputs.material.baseColorTextureIndex,
-             theInputs.material.emissiveTextureIndex,
-             theInputs.material.metallicRoughnessTextureIndex,
-             theInputs.material.occlusionTextureIndex,
-             theInputs.material.normalTextureIndex}) {
+    for (std::size_t role = 0; role < appearanceSlots.size(); ++role) {
+        const std::int32_t aTexture = appearanceSlots[role];
         anAppearanceWriter.integer(std::uint32_t(aTexture), 4);
         if (aTexture >= 0) {
-            if (std::size_t(aTexture) >= theInputs.textures.size())
+            const auto* original = theInputs.originalPaint
+                ? theInputs.originalPaint->roles[role] : nullptr;
+            if (!original && std::size_t(aTexture) >= theInputs.textures.size())
                 return false;
             dl::Digest aTextureDigest{};
-            if (!core3d::face_image::HashFaceImageBytes(
-                    theInputs.textures[aTexture].encodedBytes,
+            if (!core3d::face_image::HashFaceImageBytes(original
+                    ? original->envelope.workingBytes
+                    : theInputs.textures[aTexture].encodedBytes,
                     aTextureDigest)) return false;
             anAppearanceWriter.raw(aTextureDigest);
         }
@@ -5232,6 +5300,15 @@ public:
     OperationLedger(std::size_t snapshotLimit, std::size_t encodedLimit,
                     std::size_t privateLimit) noexcept
         : storageLimits_({snapshotLimit, encodedLimit, privateLimit}) {}
+    std::size_t debugAllocationsAfterFailure() const noexcept {
+        std::size_t total = 0;
+        for (const auto count : allocationEntries_) total += count;
+        return failed_ ? total - allocationsAtFirstFailure_ : 0;
+    }
+    void debugDenyFurtherPrivateStorage() noexcept {
+        storageLimits_[storageIndex(StorageDimension::PrivateStorage)] =
+            live(StorageDimension::PrivateStorage);
+    }
 #endif
 
     View view() noexcept {
@@ -5540,6 +5617,9 @@ private:
         if (!failed_) {
             failed_ = true;
             firstFailure_ = {site, reason, requested, admitted};
+#ifdef DEBUG
+            for (const auto count : allocationEntries_) allocationsAtFirstFailure_ += count;
+#endif
         }
         return false;
     }
@@ -5606,6 +5686,7 @@ private:
     std::size_t cumulativeWork_ = 0;
     bool failed_ = false;
 #ifdef DEBUG
+    std::size_t allocationsAtFirstFailure_ = 0;
     std::size_t faceImageTransfers_ = 0;
     std::size_t paintedBakeTransfers_ = 0;
     std::size_t destructions_ = 0;
@@ -11983,6 +12064,7 @@ struct SavedGroupOccurrenceScope final {
 };
 
 struct SavedGroupFinalResult final {
+    asset_atlas::build::FinalTriangleLineage originalPaintLineage;
     painted_atlas_bake::owner::ExportBake bake;
     SavedGroupOccurrenceScope occurrences;
     std::vector<std::string> memberDefinitions;
@@ -12000,6 +12082,8 @@ struct SavedGroupOwner final {
     std::vector<SavedGroupMeasuredMember> measured;
     painted_atlas_bake::owner::CapturedSourceStorage productionSources;
     painted_atlas_bake::owner::ExportBakePlan pendingPlan;
+    asset_atlas::build::FinalTriangleLineage pendingOriginalPaintLineage;
+    bool retainOriginalPaintLineage = false;
     SavedGroupOccurrenceScope pendingOccurrences;
     std::vector<std::string> pendingDefinitionOrder;
     std::vector<std::size_t> pendingTriangleCounts;
@@ -12229,6 +12313,272 @@ bool SavedGroupExactFinalTriangles(
     }
 }
 
+//! Separately accounted original-paint input. It borrows the result/capture;
+//! callers must keep both owners through receiver sampling/publication.
+struct SavedOriginalPaintReceiverInputs final {
+    decal_layer::bake::accounting::Ticket uvStorage;
+    decal_layer::bake::accounting::Ticket viewStorage;
+    std::vector<decal_layer::bake::UV> baseUVByCorner;
+    SavedOriginalPaintView originalPaint;
+    const char* stage = "original-paint-entry";
+    SavedOriginalPaintReceiverInputs() = default;
+    SavedOriginalPaintReceiverInputs(const SavedOriginalPaintReceiverInputs&) = delete;
+    SavedOriginalPaintReceiverInputs& operator=(const SavedOriginalPaintReceiverInputs&) = delete;
+    SavedOriginalPaintReceiverInputs(SavedOriginalPaintReceiverInputs&& other) noexcept {
+        *this = std::move(other);
+    }
+    SavedOriginalPaintReceiverInputs& operator=(SavedOriginalPaintReceiverInputs&& other) noexcept {
+        if (this != &other) {
+            reset();
+            uvStorage = std::move(other.uvStorage);
+            viewStorage = std::move(other.viewStorage);
+            baseUVByCorner = std::move(other.baseUVByCorner);
+            originalPaint = other.originalPaint;
+            stage = other.stage;
+            other.originalPaint = {};
+        }
+        return *this;
+    }
+    void reset() noexcept {
+        std::vector<decal_layer::bake::UV>().swap(baseUVByCorner);
+        originalPaint = {};
+        viewStorage.reset();
+        uvStorage.reset();
+        stage = "original-paint-entry";
+    }
+
+};
+
+bool PrepareSavedOriginalPaintReceiverInputs(
+    const SavedGroupOwner& group, const SavedGroupFinalResult& result,
+    const std::vector<DefinitionData>& definitions, std::size_t selectedMember,
+    std::size_t selectedFace, const MeshSnapshot& installedMesh,
+    SavedOriginalPaintReceiverInputs& output) noexcept {
+    using namespace decal_layer::bake::accounting;
+    using Origin = painted_atlas_bake::kernel::SourceOrigin;
+    const auto operation = group.capture.operationView();
+    const auto memberCount = group.measured.size();
+    const auto fail = [&]() {
+        operation.Refuse(FailureSite::ReceiverProofStorage);
+        return false;
+    };
+    output.reset();
+    try {
+        if (!operation.Recheck(FailureSite::ReceiverProofStorage)) return false;
+        if (!result.bake.storage || group.result.get() != &result
+            || !(result.bake.atlas.key == group.capture.savedAtlas.key)
+            || !(result.originalPaintLineage.atlas == result.bake.atlas.key)
+            || result.originalPaintLineage.layout != &result.bake.storage->layout
+            || result.originalPaintLineage.storage.view.context != operation.context
+            || result.bake.storage->finalAtlas.operation.context != operation.context
+            || memberCount == 0 || memberCount > asset_atlas::kMaximumMembers
+            || definitions.size() < memberCount
+            || result.bake.assignments.size() != memberCount
+            || result.bake.atlas.members.size() != memberCount
+            || group.capture.savedAtlas.members.size() != memberCount
+            || result.memberDefinitions.size() != memberCount
+            || result.finalTriangleCounts.size() != memberCount
+            || result.finalCornerCounts.size() != memberCount
+            || selectedMember >= memberCount) return fail();
+        const auto& layout = result.bake.storage->layout;
+        const auto& lineage = result.originalPaintLineage.memberTriangleByPackedTriangle;
+        if (layout.chartMembers.size() != layout.charts.size()
+            || layout.chartFaces.size() != layout.charts.size()
+            || lineage.size() != layout.packed.triangles.size()
+            || memberCount > asset_atlas::kMaximumMembers) return fail();
+        output.stage = "original-paint-counts";
+        std::array<const DefinitionData*, asset_atlas::kMaximumMembers> members{};
+        for (std::size_t member = 0; member < memberCount; ++member) {
+            for (const auto& definition : definitions) {
+                if (definition.mesh.definitionIdentifier != result.memberDefinitions[member]) continue;
+                if (members[member]) return fail();
+                members[member] = &definition;
+            }
+            if (!members[member]) return fail();
+        }
+        std::array<std::size_t, asset_atlas::kMaximumMembers + 1> offsets{};
+        for (std::size_t member = 0; member < memberCount; ++member) {
+            const auto& definition = *members[member];
+            const auto& assignment = result.bake.assignments[member];
+            if (!definition.shape.IsSame(group.measured[member].detached)
+                || definition.mesh.definitionIdentifier != result.memberDefinitions[member]
+                || result.memberDefinitions[member] != group.measured[member].definitionIdentifier
+                || assignment.member != result.bake.atlas.members[member].member
+                || !(result.bake.atlas.members[member].owner
+                    == group.capture.savedAtlas.members[member].owner)
+                || result.finalTriangleCounts[member] != assignment.triangleCount
+                || result.finalCornerCounts[member] != 3U * std::size_t(assignment.triangleCount)
+                || definition.mesh.indices.size() != result.finalCornerCounts[member]
+                || assignment.corners.size() != result.finalCornerCounts[member]
+                || offsets[member] > lineage.size()
+                || assignment.triangleCount > lineage.size() - offsets[member]) return fail();
+            if (definition.faces.Extent() != group.measured[member].detachedFaces.Extent()) return fail();
+            for (Standard_Integer face = 1; face <= definition.faces.Extent(); ++face)
+                if (!definition.faces.FindKey(face).IsSame(
+                        group.measured[member].detachedFaces.FindKey(face))) return fail();
+            // Recheck the native oriented stream and its exact float publication.
+            // This is accounted validation scratch, never a second atlas build.
+            Ticket geometryStorage;
+            std::vector<shapeyard::uv::Triangle> native;
+            if (!ReserveProtectedVector(native, geometryStorage, operation,
+                    assignment.triangleCount, Retention::Scratch,
+                    FailureSite::ReceiverProofStorage)
+                || !SavedGroupExactFinalTriangles(definition, native)) return fail();
+            for (std::size_t triangle = 0; triangle < native.size(); ++triangle)
+                for (std::size_t corner = 0; corner < 3; ++corner) {
+                    const auto vertexIndex = definition.mesh.indices[3U * triangle + corner];
+                    if (vertexIndex >= definition.mesh.vertices.size()) return fail();
+                    const auto& vertex = definition.mesh.vertices[vertexIndex];
+                    const auto& point = native[triangle].points[corner];
+                    if (vertex.positionX != float(point[0] - definition.sourceOrigin.x)
+                        || vertex.positionY != float(point[1] - definition.sourceOrigin.y)
+                        || vertex.positionZ != float(point[2] - definition.sourceOrigin.z)) return fail();
+                }
+            offsets[member + 1] = offsets[member] + assignment.triangleCount;
+        }
+        if (offsets[memberCount] != lineage.size()
+            || installedMesh.indices.size() != result.finalCornerCounts[selectedMember]
+            || selectedFace >= std::size_t(members[selectedMember]->faces.Extent()))
+            return fail();
+        output.stage = "original-paint-reservation";
+        Ticket visitedStorage;
+        std::vector<std::uint8_t> visited;
+        if (!ReserveProtectedVector(visited, visitedStorage, operation,
+                lineage.size(), Retention::Scratch, FailureSite::ReceiverProofStorage)
+            || !ReserveProtectedVector(output.baseUVByCorner, output.uvStorage,
+                operation, installedMesh.indices.size(), Retention::Retained,
+                FailureSite::ReceiverProofStorage)
+            || !output.viewStorage.acquire(operation, StorageDimension::PrivateStorage,
+                sizeof(SavedOriginalPaintView), Retention::Retained,
+                FailureSite::ReceiverProofStorage)) return false;
+        visited.resize(lineage.size());
+        output.baseUVByCorner.resize(installedMesh.indices.size());
+        output.stage = "original-paint-bijection";
+        for (std::size_t p = 0; p < lineage.size(); ++p) {
+            const auto& packed = layout.packed.triangles[p];
+            if (packed.chartIndex < 0 || std::size_t(packed.chartIndex) >= layout.charts.size())
+                return fail();
+            const std::size_t chartIndex = std::size_t(packed.chartIndex);
+            const auto& chart = layout.charts[chartIndex];
+            const auto member = layout.chartMembers[chartIndex].first;
+            const auto face = layout.chartFaces[chartIndex];
+            const auto triangle = std::size_t(lineage[p]);
+            if (member >= memberCount
+                || triangle >= result.finalTriangleCounts[member]
+                || packed.triangleIndex < 0
+                || std::size_t(packed.triangleIndex) >= chart.triangles.size()
+                || face >= members[member]->mesh.primitives.size()) return fail();
+            const auto& primitive = members[member]->mesh.primitives[face];
+            if (primitive.faceIndex != face || primitive.firstIndex % 3U
+                || primitive.indexCount % 3U
+                || triangle < primitive.firstIndex / 3U
+                || triangle - primitive.firstIndex / 3U >= primitive.indexCount / 3U
+                || visited[offsets[member] + triangle]++) return fail();
+            const double width = chart.rectMax.x - chart.rectMin.x;
+            const double height = chart.rectMax.y - chart.rectMin.y;
+            if (!(width > 0) || !(height > 0)
+                || !std::isfinite(width) || !std::isfinite(height)) return fail();
+            const auto& developed = chart.triangles[std::size_t(packed.triangleIndex)];
+            for (std::size_t corner = 0; corner < 3; ++corner) {
+                const auto& assigned = result.bake.assignments[member].corners[3U * triangle + corner];
+                if (assigned[0] != packed.uv[corner].x || assigned[1] != packed.uv[corner].y)
+                    return fail();
+                const decal_layer::bake::UV uv{
+                    (developed.corner[corner].x - chart.rectMin.x) / width,
+                    (developed.corner[corner].y - chart.rectMin.y) / height};
+                if (!std::isfinite(uv.u) || !std::isfinite(uv.v)) return fail();
+                if (member == selectedMember) {
+                    const auto installed = installedMesh.indices[3U * triangle + corner];
+                    if (installed >= installedMesh.vertices.size()
+                        || installedMesh.vertices[installed].textureU != float(assigned[0])
+                        || installedMesh.vertices[installed].textureV != float(assigned[1])) return fail();
+                    const auto sourceIndex = members[member]->mesh.indices[3U * triangle + corner];
+                    const auto& sourceVertex = members[member]->mesh.vertices[sourceIndex];
+                    const auto& targetVertex = installedMesh.vertices[installed];
+                    if (sourceVertex.positionX != targetVertex.positionX
+                        || sourceVertex.positionY != targetVertex.positionY
+                        || sourceVertex.positionZ != targetVertex.positionZ
+                        || sourceVertex.normalX != targetVertex.normalX
+                        || sourceVertex.normalY != targetVertex.normalY
+                        || sourceVertex.normalZ != targetVertex.normalZ) return fail();
+                    output.baseUVByCorner[3U * triangle + corner] = uv;
+                }
+            }
+        }
+        if (std::find(visited.begin(), visited.end(), std::uint8_t(0)) != visited.end())
+            return fail();
+        output.stage = "original-paint-source-fences";
+        if (group.productionSources.size() != group.capture.sources.size()) return fail();
+        for (std::size_t index = 0; index < group.productionSources.size(); ++index) {
+            const auto& source = group.productionSources[index];
+            const auto& captured = group.capture.sources[index];
+            if (!(source.fence == captured.fence) || !(source.envelope == captured.envelope)
+                || source.origin != captured.origin || source.materialSlot != captured.materialSlot
+                || source.memberIndex != captured.memberIndex || source.order != index
+                || source.memberIndex >= group.measured.size()
+                || !(source.fence.owner == group.capture.savedAtlas.members[source.memberIndex].owner))
+                return fail();
+            if (source.origin == Origin::OrderedLayer) continue;
+            if (source.origin == Origin::FaceBinding) {
+                const auto& measured = group.measured[source.memberIndex];
+                if (captured.faceIndex >= std::size_t(measured.originalFaces.Extent())) return fail();
+                const auto copied = measured.copier->ModifiedShape(
+                    measured.originalFaces.FindKey(Standard_Integer(captured.faceIndex + 1U)));
+                if (measured.detachedFaces.FindIndex(copied) != Standard_Integer(source.faceIndex + 1U))
+                    return fail();
+            } else if (source.origin != Origin::OwnerMaterialSlot
+                || source.faceIndex != std::numeric_limits<std::size_t>::max()) return fail();
+            if (source.memberIndex != selectedMember
+                || (source.origin == Origin::FaceBinding && source.faceIndex != selectedFace)) continue;
+            const auto role = std::size_t(source.fence.role);
+            if (role >= output.originalPaint.roles.size()
+                || output.originalPaint.roles[role]) return fail();
+            output.originalPaint.roles[role] = &source;
+        }
+        output.stage = "original-paint-raw-slots";
+        std::array<bool, 7> slots{};
+        for (const auto& witness : group.capture.sources.rawSlots) {
+            if (witness.memberIndex != selectedMember) continue;
+            const auto slot = std::size_t(witness.slot);
+            if (slot == 0 || slot >= slots.size() || slots[slot]
+                || !(witness.owner == group.capture.savedAtlas.members[selectedMember].owner)) return fail();
+            slots[slot] = true;
+            if (!witness.present) {
+                if (witness.effectiveSourceIndex != std::numeric_limits<std::size_t>::max()
+                    || !witness.shadowedSource.envelope.workingBytes.empty()) return fail();
+            } else if (witness.shadowedSource.envelope.workingBytes.empty()) {
+                if (witness.effectiveSourceIndex >= group.capture.sources.size()) return fail();
+                const auto& effective = group.capture.sources[witness.effectiveSourceIndex];
+                if (!(effective.fence == witness.fence) || effective.materialSlot != witness.slot
+                    || effective.origin != Origin::OwnerMaterialSlot) return fail();
+            }
+            if (!output.originalPaint.material) output.originalPaint.material = &witness;
+            else if (output.originalPaint.material->materialScalars != witness.materialScalars
+                || output.originalPaint.material->materialModes != witness.materialModes) return fail();
+        }
+        if (std::find(slots.begin() + 1, slots.end(), false) != slots.end()
+            || !output.originalPaint.material) return fail();
+        output.stage = "original-paint-scalars";
+        const auto& material = *output.originalPaint.material;
+        const auto& m = material.materialScalars;
+        auto& v = output.originalPaint.scalars;
+        if (material.materialModes[1]) {
+            v = {float(m[0]), float(m[1]), float(m[2]), float(m[3]),
+                float(m[4]), float(m[5]), float(m[6]), float(m[7]),
+                float(m[8]), float(m[9]), float(m[16])};
+        } else if (material.materialModes[0]) {
+            v = {float(m[0]), float(m[1]), float(m[2]), float(1.0 - m[3]),
+                float(m[10]), float(m[11]), float(m[12]), 0, 1, 1.5f, float(m[16])};
+        } else return fail();
+        for (float value : v) if (!std::isfinite(value)) return fail();
+        output.stage = "original-paint-ready";
+        return operation.Recheck(FailureSite::ReceiverProofStorage);
+    } catch (const std::bad_alloc&) {
+        operation.AllocationFailed(FailureSite::ReceiverProofStorage);
+        return false;
+    } catch (...) { return fail(); }
+}
+
 painted_atlas_bake::owner::Outcome PrepareSavedGroupForBatch(
     SavedGroupOwner& group,
     const std::vector<DefinitionData>& actualFinalDefinitions,
@@ -12243,6 +12593,7 @@ painted_atlas_bake::owner::Outcome PrepareSavedGroupForBatch(
     using Outcome = painted_atlas_bake::owner::Outcome;
     group.result.reset();
     group.pendingPlan = {};
+    group.pendingOriginalPaintLineage.reset();
     group.pendingOccurrences = {};
     group.pendingDefinitionOrder.clear();
     group.pendingTriangleCounts.clear();
@@ -12355,7 +12706,8 @@ painted_atlas_bake::owner::Outcome PrepareSavedGroupForBatch(
 #ifdef DEBUG
             , layoutObserver
 #endif
-            );
+            , group.retainOriginalPaintLineage
+                ? &group.pendingOriginalPaintLineage : nullptr);
         if (outcome != Outcome::Prepared
             || !painted_atlas_bake::owner::AdmitBakePlan(
                 aggregate, group.pendingPlan)) return outcome == Outcome::Prepared
@@ -12428,6 +12780,9 @@ painted_atlas_bake::owner::Outcome ExecuteSavedGroupForBatch(
         }
         auto result = std::make_shared<SavedGroupFinalResult>();
         result->bake = std::move(baked);
+        result->originalPaintLineage = std::move(group.pendingOriginalPaintLineage);
+        if (group.retainOriginalPaintLineage)
+            result->originalPaintLineage.layout = &result->bake.storage->layout;
         result->occurrences = std::move(group.pendingOccurrences);
         result->memberDefinitions = std::move(group.pendingDefinitionOrder);
         result->finalTriangleCounts = std::move(group.pendingTriangleCounts);
@@ -15854,6 +16209,554 @@ bool DebugProduceSavedGroupFinalResultImpl(
         admission.retainComparison(group, *result);
         admission.markProductComplete(observation.complete);
         arenaSession.projectWire(observationUnit);
+        if (observation.complete) observation.failureStage.clear();
+        return observation.complete;
+    } catch (const std::exception& error) {
+        observation.failureStage += "-exception-";
+        observation.failureStage += error.what();
+        return false;
+    } catch (...) {
+        observation.failureStage += "-exception";
+        return false;
+    }
+}
+
+// A separate bounded observation, never part of the frozen P2b wire/arena.
+bool DebugObserveSavedOriginalPaintReceiver(
+    OperationLedger& operation, SavedGroupOwner& group,
+    const std::vector<DefinitionData>& definitions,
+    const SavedGroupFinalResult& result,
+    const Handle(OcctDocument)& privateDocument,
+    const SceneSnapshot& source, double unit,
+    DebugSavedOriginalPaintObservation& observation) {
+    namespace dl = decal_layer;
+    using namespace dl::bake::accounting;
+    observation.failureStage = "receiver-owner";
+    if (group.measured.size() != 2 || definitions.size() != 2) return false;
+    const std::size_t member = 0;
+    const auto& measured = group.measured[member];
+    std::size_t instanceIndex = source.instances.size();
+    for (std::size_t index = 0; index < source.instances.size(); ++index) {
+        const auto& item = source.instances[index];
+        if (item.meshIndex >= source.meshes.size()) continue;
+        const auto& mesh = source.meshes[item.meshIndex];
+        const auto& master = mesh.paintedAtlasMasterDefinitionIdentifier.empty()
+            ? mesh.definitionIdentifier : mesh.paintedAtlasMasterDefinitionIdentifier;
+        if (master == measured.definitionIdentifier) {
+            if (instanceIndex != source.instances.size()) return false;
+            instanceIndex = index;
+        }
+    }
+    if (instanceIndex == source.instances.size()) return false;
+    const auto& item = source.instances[instanceIndex];
+    const auto& protectedMesh = source.meshes[item.meshIndex];
+    observation.protectedCornerCount = protectedMesh.indices.size();
+    dl::Definition layers;
+    std::vector<std::uint8_t> canonical;
+    observation.failureStage = "receiver-layers";
+    if (dl::persistence::Read(privateDocument->Document(),
+            group.capture.members.members[member].ownerLabel,
+            layers, &canonical, nullptr) != dl::persistence::ReadState::Present
+        || layers.layers.size() != 2) return false;
+    dl::source::Witness witness;
+    if (!dl::source::CaptureSource(privateDocument, layers.owner,
+            group.budget, [] { return false; }, witness)
+        || !dl::source::ExactMatch(layers, witness)) return false;
+    observation.failureStage = "receiver-native-correspondence";
+    Bnd_Box bounds;
+    BRepBndLib::AddOptimal(measured.original, bounds, Standard_False, Standard_False);
+    dependent_replay::FaceImageGeometricReceipt receipt;
+    TopoDS_Face originalFace;
+    std::size_t originalIndex = 0, finalIndex = 0, matches = 0;
+    const auto receiver = dl::bake::IntentReceipt(layers.layers.front());
+    for (Standard_Integer index = 1; index <= measured.originalFaces.Extent(); ++index) {
+        const auto face = TopoDS::Face(measured.originalFaces.FindKey(index));
+        dependent_replay::FaceImageGeometricReceipt derived;
+        if (dependent_replay::detail::DeriveFaceImageReceipt(bounds, face, unit,
+                group.budget, derived) != dependent_replay::detail::FaceImageDeriveStatus::Derived)
+            continue;
+        dl::Digest proof{};
+        if (!dependent_replay::FaceImageReceiptProof(derived, proof)) return false;
+        if (proof != receiver.selectorProof) continue;
+        ++matches; receipt = derived; originalFace = face; originalIndex = std::size_t(index - 1);
+    }
+    if (matches != 1 || originalFace.IsNull()) return false;
+    const auto copied = measured.copier->ModifiedShape(originalFace);
+    const int copiedIndex = measured.detachedFaces.FindIndex(copied);
+    if (copiedIndex <= 0) return false;
+    finalIndex = std::size_t(copiedIndex - 1);
+    observation.receiverFace = finalIndex;
+    OcctPaintedAtlasDerivative derivative;
+    derivative.bake = result.bake.bake;
+    derivative.assignment = result.bake.assignments[member];
+    MeshSnapshot finalMesh;
+    observation.failureStage = "receiver-final-install";
+    if (!ApplyPaintedAtlasDerivative(definitions[member].mesh, derivative, finalMesh)) return false;
+    const auto primitive = std::find_if(finalMesh.primitives.begin(), finalMesh.primitives.end(),
+        [finalIndex](const auto& value) { return value.faceIndex == finalIndex; });
+    const auto protectedPrimitive = std::find_if(protectedMesh.primitives.begin(), protectedMesh.primitives.end(),
+        [originalIndex](const auto& value) { return value.faceIndex == originalIndex; });
+    if (primitive == finalMesh.primitives.end() || protectedPrimitive == protectedMesh.primitives.end()) return false;
+    const std::size_t primitiveIndex = std::size_t(protectedPrimitive - protectedMesh.primitives.begin());
+    if (primitiveIndex >= item.primitiveBindings.size()) return false;
+    const auto materialIndex = item.primitiveBindings[primitiveIndex].materialIndex;
+    if (materialIndex >= source.materials.size()) return false;
+    observation.failureStage = "receiver-original-corners";
+    SavedOriginalPaintReceiverInputs original;
+    observation.usedReleaseAdapter = PrepareSavedOriginalPaintReceiverInputs(
+        group, result, definitions, member, finalIndex, finalMesh, original);
+    if (!observation.usedReleaseAdapter) {
+        observation.failureStage = original.stage;
+        return false;
+    }
+    observation.accounting = {
+        result.originalPaintLineage.memberTriangleByPackedTriangle.size() * sizeof(std::uint32_t),
+        result.originalPaintLineage.storage.bytes,
+        original.baseUVByCorner.size() * sizeof(dl::bake::UV), original.uvStorage.bytes};
+    observation.sameOperation = result.originalPaintLineage.storage.view.context
+            == operation.view().context
+        && original.uvStorage.view.context == operation.view().context
+        && original.viewStorage.view.context == operation.view().context
+        && group.capture.operationView().context == operation.view().context;
+    observation.lifetimeVerified = original.uvStorage.bytes
+            >= original.baseUVByCorner.capacity() * sizeof(dl::bake::UV)
+        && result.originalPaintLineage.storage.bytes
+            >= result.originalPaintLineage.memberTriangleByPackedTriangle.capacity() * sizeof(std::uint32_t)
+        && operation.retained(StorageDimension::PrivateStorage)
+            >= original.uvStorage.bytes + original.viewStorage.bytes
+                + result.originalPaintLineage.storage.bytes;
+    for (std::size_t c = 0; c < 4; ++c)
+        observation.baseTint[c] = original.originalPaint.scalars[c];
+    const auto& layout = result.bake.storage->layout;
+    if (layout.packed.triangles.size() > asset_atlas::kMaximumFinalCorners / 3U
+        || layout.charts.size() > asset_atlas::kMaximumCharts) return false;
+    // Passive copy of the Release projection; no DEBUG lineage callback.
+    observation.corners.reserve(layout.packed.triangles.size() * 3U);
+    for (std::size_t m = 0; m < definitions.size(); ++m) {
+        OcctPaintedAtlasDerivative d;
+        d.bake = result.bake.bake;
+        d.assignment = result.bake.assignments[m];
+        MeshSnapshot installed;
+        if (!ApplyPaintedAtlasDerivative(definitions[m].mesh, d, installed)) return false;
+        SavedOriginalPaintReceiverInputs projected;
+        const auto face = m == member ? finalIndex : installed.primitives.front().faceIndex;
+        if (!PrepareSavedOriginalPaintReceiverInputs(group, result, definitions,
+                m, face, installed, projected)) return false;
+        std::vector<shapeyard::uv::Triangle> native;
+        if (!SavedGroupExactFinalTriangles(definitions[m], native)) return false;
+        for (std::size_t packed = 0; packed < layout.packed.triangles.size(); ++packed) {
+            const auto& placed = layout.packed.triangles[packed];
+            const std::size_t chart = std::size_t(placed.chartIndex);
+            if (layout.chartMembers[chart].first != m) continue;
+            const auto faceIndex = layout.chartFaces[chart];
+            const auto& primitive = definitions[m].mesh.primitives[faceIndex];
+            const auto triangle = result.originalPaintLineage.memberTriangleByPackedTriangle[packed];
+            for (std::size_t corner = 0; corner < 3; ++corner) {
+                const auto& point = native[triangle].points[corner];
+                const auto& vertex = installed.vertices[installed.indices[3U * triangle + corner]];
+                const auto& uv = projected.baseUVByCorner[3U * triangle + corner];
+                observation.corners.push_back({double(packed), double(m), double(faceIndex),
+                    double(chart), double(triangle), double(corner),
+                    point[0], point[1], point[2], uv.u, uv.v,
+                    double(vertex.textureU), double(vertex.textureV), double(placed.triangleIndex),
+                    double(primitive.firstIndex / 3U), double(primitive.indexCount / 3U),
+                    double(vertex.positionX) + definitions[m].sourceOrigin.x,
+                    double(vertex.positionY) + definitions[m].sourceOrigin.y,
+                    double(vertex.positionZ) + definitions[m].sourceOrigin.z});
+            }
+        }
+    }
+    for (std::size_t chart = 0; chart < layout.charts.size(); ++chart) {
+        const auto m = layout.chartMembers[chart].first;
+        const auto face = layout.chartFaces[chart];
+        const auto& value = layout.charts[chart];
+        const auto& analytic = definitions[m].mesh.primitives[face].analyticSourceFace;
+        std::array<double, 18> row{double(m), double(face), double(chart),
+            double(analytic.surfaceType), value.rectMin.x, value.rectMin.y,
+            value.rectMax.x, value.rectMax.y};
+        for (std::size_t i = 0; i < analytic.params.size() && i < 10; ++i)
+            row[8 + i] = analytic.params[i];
+        observation.charts.push_back(row);
+    }
+    for (std::size_t i = 0; i < group.productionSources.size(); ++i) {
+        const auto& value = group.productionSources[i];
+        const auto& captured = group.capture.sources[i];
+        using Origin = painted_atlas_bake::kernel::SourceOrigin;
+        if (value.origin == Origin::OrderedLayer) continue;
+        DebugSavedOriginalPaintObservation::Source row;
+        row.member = value.memberIndex;
+        row.origin = value.origin == Origin::FaceBinding ? "FaceBinding" : "OwnerMaterialSlot";
+        row.workingContent = PaintedAtlasDigestText(value.fence.workingContent);
+        row.png = value.envelope.workingBytes;
+        row.ownerMatched = value.fence.owner == group.capture.savedAtlas.members[value.memberIndex].owner;
+        row.fenceMatched = value.fence == captured.fence;
+        const auto& sourceMember = group.measured[value.memberIndex];
+        row.faceMatched = value.origin == Origin::OwnerMaterialSlot
+            ? value.faceIndex == std::numeric_limits<std::size_t>::max()
+            : sourceMember.detachedFaces.FindIndex(sourceMember.copier->ModifiedShape(
+                sourceMember.originalFaces.FindKey(Standard_Integer(captured.faceIndex + 1U))))
+                == Standard_Integer(value.faceIndex + 1U);
+        row.effective = value.origin == Origin::FaceBinding
+            && captured.origin == Origin::FaceBinding && row.fenceMatched;
+        if (value.origin == Origin::OwnerMaterialSlot)
+            for (const auto& witness : group.capture.sources.rawSlots)
+                row.effective = row.effective || (witness.present
+                    && witness.effectiveSourceIndex == i && witness.fence == value.fence);
+        observation.sources.push_back(std::move(row));
+    }
+    // Use the existing complete committed census. The measured original and
+    // final analytic surfaces coincide; the actual receiver owns visibility.
+    Ticket occluderTicket;
+    std::vector<decal_math::DecalWorldTriangle> occluders;
+    Bounds3d occluderBounds;
+    dl::Digest occluderProof{};
+    if (!decal_math::CaptureDecalOccluders(source, occluders, occluderBounds,
+            occluderProof, operation.view(), occluderTicket)) return false;
+    const auto span = decal_math::Subtract(occluderBounds.maximum, occluderBounds.minimum);
+    const double occluderSpan = std::sqrt(decal_math::Dot(span, span));
+    const std::vector<std::size_t> layerIndices{0, 1};
+    const OrdinaryDecalFaceInputs inputs{
+        privateDocument, originalFace, receipt,
+        finalMesh.vertices, finalMesh.indices, finalMesh.primitives, *primitive,
+        &original.baseUVByCorner, finalMesh.tangentBasis, finalMesh.cornerTangents,
+        definitions[member].sourceOrigin, item.worldFromObject, item.reversesWinding,
+        instanceIndex, originalIndex, source.materials[materialIndex],
+        item.faceImageBindings, source.textures, layers, layerIndices,
+        occluders, occluderSpan, occluderProof, canonical, witness.sourceProof,
+        unit, operation.view(), group.budget, &original.originalPaint,
+    };
+    dl::bake::Input input;
+    dl::ReceiverReceipt observedReceiver;
+    gDebugNbReceiverCountRefused = false;
+    gDebugNbReceiverPhase = "entry";
+    observation.failureStage = "receiver-ordinary-prepare";
+    const bool prepared = PrepareOrdinaryDecalFace(inputs, input, observedReceiver);
+    observation.receiverCountRefused = gDebugNbReceiverCountRefused;
+    if (!prepared) {
+        observation.failureStage += "-";
+        observation.failureStage += gDebugNbReceiverPhase;
+        observation.failureStage += "-ledger-"
+            + std::to_string(std::size_t(operation.firstFailureSite()));
+        if (observation.receiverCountRefused)
+            observation.failureStage = "receiver-base-uv-authority";
+        return false;
+    }
+    observation.failureStage = "receiver-job-admission";
+    if (!operation.view().SealJob(Job::Coverage, dl::bake::kMaximumPixels,
+            FailureSite::ReceiverCoverageStorage)
+        || !operation.view().SealJob(Job::Occlusion, dl::bake::kMaximumPixels,
+            FailureSite::ReceiverCoverageStorage)
+        || !operation.view().SealJob(Job::ReceiverEncoder,
+            kMaxAggregateDecodedTextureBytes, FailureSite::ReceiverEncoderPNG))
+        return false;
+    dl::bake::FaceProduct product;
+    const auto produced = dl::bake::ProduceFace(input, observedReceiver, product);
+    if (produced != dl::bake::Status::Baked) {
+        observation.failureStage = "receiver-produce-face-"
+            + std::to_string(std::uint8_t(produced));
+        return false;
+    }
+    observation.productPresent = !product.face.png.empty();
+    observation.receiverPNG = product.face.png;
+    dl::Definition afterLayers;
+    std::vector<std::uint8_t> afterCanonical;
+    observation.canonicalUnchanged = dl::persistence::Read(privateDocument->Document(),
+        group.capture.members.members[member].ownerLabel, afterLayers,
+        &afterCanonical, nullptr) == dl::persistence::ReadState::Present
+        && afterCanonical == canonical;
+    observation.completeOriginalPaintBinding = true;
+    observation.failureStage.clear();
+    return true;
+}
+
+bool OcctSceneSnapshotBuilder::DebugProduceSavedOriginalPaint(
+    const Handle(OcctDocument)& privateDocument,
+    const SceneSnapshot& wholeCommittedScene,
+    const bool selectedObjectsOnly,
+    const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
+    const std::function<bool()>& cancelled,
+    const std::string& fault,
+    DebugSavedOriginalPaintObservation& nb) noexcept {
+    nb = {};
+    auto& observation = nb.group;
+    nb.fault = fault;
+    OperationLedger operation;
+    struct Lifetime final {
+        OperationLedger& ledger;
+        DebugSavedOriginalPaintObservation& observed;
+        ~Lifetime() {
+            observed.retainedBytesAfterRelease = ledger.totalLive();
+            observed.lifetimeVerified = observed.lifetimeVerified
+                && observed.retainedBytesAfterRelease == 0;
+        }
+    } lifetime{operation, nb};
+    observation.selectedObjectsOnly = selectedObjectsOnly;
+    try {
+        observation.failureStage = "entry";
+        if (privateDocument.IsNull() || !meshPrivateSurfaces
+            || !cancelled || SavedGroupCancelled(cancelled)) return false;
+        const Handle(TDocStd_Document)& document = privateDocument->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return false;
+        Standard_Real observationUnit = 0;
+        XCAFDoc_DocumentTool::GetLengthUnit(document, observationUnit);
+
+        std::vector<asset_atlas::persistence::Record> records;
+        if (!asset_atlas::persistence::ReadAll(document, records)
+            || records.size() != 1 || !records.front().value) return false;
+        const asset_atlas::Key strictKey =
+            records.front().value->definition.key;
+        observation.strictKey = retained_solid::UUIDText(strictKey.document)
+            + "/" + retained_solid::UUIDText(strictKey.atlas);
+
+        // The concrete ledger dominates the group, result and every inherited
+        // capture view for the whole transaction.
+        const auto accounting = operation.view();
+        SavedGroupOwner group;
+        group.retainOriginalPaintLineage = true;
+        if (!operation.bindTopology(group.budget,
+                decal_layer::bake::accounting::FailureSite::ContextControl))
+            return false;
+        painted_atlas_bake::owner::ExportCapture capture;
+        observation.failureStage = "strict-capture";
+        if (painted_atlas_bake::owner::CaptureForExport(
+                capture, document, strictKey, accounting)
+                != painted_atlas_bake::owner::Outcome::Prepared
+            || capture.operation.valid()
+            || capture.operationView().context != accounting.context)
+            return false;
+
+        std::string diagnosis;
+        observation.failureStage = "saved-group-preparation";
+        if (!PrepareSavedGroupOwner(operation, accounting, std::move(capture),
+                privateDocument, cancelled, group, diagnosis)) {
+            observation.failureStage += "-" + diagnosis;
+            return false;
+        }
+        observation.measuredCopyCount = group.measured.size();
+        for (const auto& member : group.measured) {
+            observation.memberDefinitions.push_back(
+                member.definitionIdentifier);
+            observation.savedTriangleCounts.push_back(
+                member.savedTriangleCount);
+        }
+        for (const auto& source : group.productionSources)
+            observation.sourceOrigins.push_back(
+                std::uint8_t(source.origin));
+
+        observation.failureStage = "native-final-mesh";
+        BRep_Builder compoundBuilder;
+        TopoDS_Compound compound;
+        compoundBuilder.MakeCompound(compound);
+        for (const auto& member : group.measured)
+            compoundBuilder.Add(compound, member.detached);
+        meshPrivateSurfaces(compound);
+        if (SavedGroupCancelled(cancelled)) return false;
+
+        observation.failureStage = "final-definition-extraction";
+        std::vector<DefinitionData> definitions;
+        definitions.reserve(group.measured.size());
+        for (std::size_t index = 0; index < group.measured.size(); ++index) {
+            DefinitionData definition;
+            definition.label = group.capture.members.members[index].ownerLabel;
+            definition.shape = group.measured[index].detached;
+            definition.representation =
+                privateDocument->GeometryRepresentationForLabel(
+                    definition.label);
+            if (definition.representation
+                    == OcctGeometryRepresentation::Invalid
+                || !ExtractDefinitionGeometry(definition.label,
+                    group.measured[index].definitionIdentifier, 0,
+                    definition)) return false;
+            observation.finalTriangleCounts.push_back(
+                definition.mesh.indices.size() / 3U);
+            observation.finalCornerCounts.push_back(
+                definition.mesh.indices.size());
+            for (const auto& primitive : definition.mesh.primitives) {
+                observation.planeInput = observation.planeInput
+                    || primitive.analyticSourceFace.surfaceType
+                        == provenance::kSurfaceTypePlane;
+                observation.cylinderInput = observation.cylinderInput
+                    || primitive.analyticSourceFace.surfaceType
+                        == provenance::kSurfaceTypeCylinder;
+            }
+            if (observation.cylinderInput
+                && observation.finalTriangleCounts.back()
+                    != observation.savedTriangleCounts[index])
+                observation.changedCylinderInput = true;
+            definitions.push_back(std::move(definition));
+        }
+
+        SavedGroupOccurrenceScope occurrenceScope;
+        for (std::size_t index = 0;
+             index < wholeCommittedScene.instances.size(); ++index) {
+            const auto& instance = wholeCommittedScene.instances[index];
+            if (instance.meshIndex >= wholeCommittedScene.meshes.size()
+                || (selectedObjectsOnly && !instance.selected)) continue;
+            const auto& mesh = wholeCommittedScene.meshes[instance.meshIndex];
+            const auto& definition = mesh.paintedAtlasMasterDefinitionIdentifier.empty()
+                ? mesh.definitionIdentifier : mesh.paintedAtlasMasterDefinitionIdentifier;
+            if (std::find(observation.memberDefinitions.begin(),
+                    observation.memberDefinitions.end(), definition)
+                    == observation.memberDefinitions.end()) continue;
+            occurrenceScope.entries.push_back({instance.entityIdentifier,
+                definition, index, instance.worldFromObject});
+        }
+        observation.occurrenceCount = occurrenceScope.entries.size();
+
+        observation.failureStage = "saved-group-build";
+        std::shared_ptr<const SavedGroupFinalResult> result;
+        const auto outcome = BuildSavedGroupForExport(group, definitions,
+            occurrenceScope, cancelled, result, diagnosis);
+        if (outcome != painted_atlas_bake::owner::Outcome::Prepared) {
+            observation.failureStage += "-"
+                + std::to_string(std::uint8_t(outcome)) + "-" + diagnosis;
+            return false;
+        }
+        const SavedGroupFinalResult* first =
+            LookupSavedGroupFinalResult(group, strictKey);
+        const SavedGroupFinalResult* second =
+            LookupSavedGroupFinalResult(group, strictKey);
+        if (!first || first != second || first != result.get()) {
+            observation.failureStage = "strict-key-lookup";
+            return false;
+        }
+        observation.sharedResultIdentity = true;
+        observation.fullSavedMembership =
+            first->memberDefinitions == observation.memberDefinitions
+            && first->bake.atlas.members.size() == group.measured.size();
+        observation.assignmentCount = first->bake.assignments.size();
+        for (const auto& assignment : first->bake.assignments)
+            observation.assignmentCornerCounts.push_back(
+                assignment.corners.size());
+        observation.outputCount = first->bake.outputs.size();
+        for (const auto& baked : first->bake.outputs)
+            observation.outputPNGs.push_back(baked.png);
+        observation.resolution = first->bake.atlas.resolutionTexels;
+        observation.gutter = first->bake.atlas.gutterTexels;
+        observation.retainedLayout = first->bake.storage
+            && !first->bake.storage->layout.charts.empty()
+            && first->bake.storage->layout.chartMembers.size()
+                == first->bake.storage->layout.charts.size()
+            && first->bake.storage->layout.chartFaces.size()
+                == first->bake.storage->layout.charts.size();
+        observation.layoutChartCount = first->bake.storage
+            ? first->bake.storage->layout.charts.size() : 0;
+        observation.exactFaceCorrespondence = true;
+        for (const auto& source : group.productionSources) {
+            if (source.faceIndex == std::numeric_limits<std::size_t>::max())
+                continue;
+            observation.exactFaceCorrespondence =
+                observation.exactFaceCorrespondence
+                && source.memberIndex < definitions.size()
+                && source.faceIndex < std::size_t(
+                    definitions[source.memberIndex].faces.Extent());
+        }
+        bool completeCorners = observation.assignmentCornerCounts.size()
+            == observation.finalCornerCounts.size();
+        for (std::size_t index = 0;
+             completeCorners && index < observation.finalCornerCounts.size();
+             ++index)
+            completeCorners = observation.assignmentCornerCounts[index]
+                == observation.finalCornerCounts[index];
+        observation.complete = observation.fullSavedMembership
+            && observation.exactFaceCorrespondence
+            && observation.planeInput && observation.cylinderInput
+            && observation.changedCylinderInput
+            && observation.retainedLayout
+            && observation.sharedResultIdentity
+            && observation.assignmentCount == group.measured.size()
+            && observation.outputCount == 5
+            && observation.resolution == 2048
+            && observation.gutter == 4
+            && completeCorners;
+        nb.frozenSizes = {sizeof(asset_atlas::build::LayoutEvidence),
+            sizeof(painted_atlas_bake::owner::ExportBakeStorage)};
+        nb.oneBuild = result->bake.storage->finalAtlas.packerEntries == 1;
+        const auto layoutProof = result->bake.atlas.layoutProof;
+        const auto bakeProof = result->bake.bake.bakeProof;
+        // Mutate only this entry's detached, exclusively owned receiver input.
+        if (observation.complete && fault != "none") {
+            auto mutableResult = std::const_pointer_cast<SavedGroupFinalResult>(result);
+            auto& ordinals = mutableResult->originalPaintLineage.memberTriangleByPackedTriangle;
+            auto& layout = mutableResult->bake.storage->layout;
+            if (fault == "missing" && !ordinals.empty()) {
+                const auto before = ordinals.size(); ordinals.pop_back();
+                nb.mutatedDetachedInput = ordinals.size() != before;
+            } else if (fault == "duplicate" && ordinals.size() > 1) {
+                for (std::size_t second = 1; second < ordinals.size()
+                     && !nb.mutatedDetachedInput; ++second)
+                    for (std::size_t firstIndex = 0; firstIndex < second; ++firstIndex) {
+                        const auto firstChart = layout.packed.triangles[firstIndex].chartIndex;
+                        const auto secondChart = layout.packed.triangles[second].chartIndex;
+                        if (layout.chartMembers[firstChart].first
+                                != layout.chartMembers[secondChart].first
+                            || ordinals[firstIndex] == ordinals[second]) continue;
+                        const auto before = ordinals[second];
+                        ordinals[second] = ordinals[firstIndex];
+                        nb.mutatedDetachedInput = ordinals[second] != before;
+                        break;
+                    }
+            } else if (fault == "out-of-range" && !ordinals.empty()) {
+                const auto before = ordinals[0]; ordinals[0] = UINT32_MAX;
+                nb.mutatedDetachedInput = ordinals[0] != before;
+            } else if (fault == "foreign-member" && !layout.chartMembers.empty()) {
+                const auto before = layout.chartMembers[0].first;
+                layout.chartMembers[0].first = definitions.size();
+                nb.mutatedDetachedInput = layout.chartMembers[0].first != before;
+            } else if (fault == "count-mismatch") {
+                const auto before = mutableResult->finalCornerCounts[0];
+                --mutableResult->finalCornerCounts[0];
+                nb.mutatedDetachedInput = mutableResult->finalCornerCounts[0] != before;
+            } else if (fault == "wrong-owner" && !group.productionSources.empty()) {
+                auto& owner = group.productionSources[0].fence.owner.entity;
+                const auto before = owner; owner[0] ^= 1;
+                nb.mutatedDetachedInput = owner != before;
+            } else if (fault == "wrong-face") {
+                for (auto& source : group.productionSources.values)
+                    if (source.origin == painted_atlas_bake::kernel::SourceOrigin::FaceBinding) {
+                        const auto before = source.faceIndex;
+                        source.faceIndex = definitions[source.memberIndex].faces.Extent();
+                        nb.mutatedDetachedInput = source.faceIndex != before; break;
+                    }
+            } else if (fault == "source-substitution" && !group.productionSources.empty()) {
+                auto& bytes = group.productionSources[0].envelope.workingBytes;
+                if (!bytes.empty()) {
+                    const auto before = bytes[0]; bytes[0] ^= 1;
+                    nb.mutatedDetachedInput = bytes[0] != before;
+                }
+            } else if (fault == "explicit-source-absence") {
+                for (auto& witness : group.capture.sources.rawSlots)
+                    if (witness.memberIndex == 0 && witness.present) {
+                        const bool before = witness.present; witness.present = false;
+                        nb.mutatedDetachedInput = witness.present != before; break;
+                    }
+            } else if (fault == "reservation-denial") {
+                const auto before = operation.remaining(OperationLedger::StorageDimension::PrivateStorage);
+                operation.debugDenyFurtherPrivateStorage();
+                nb.mutatedDetachedInput = operation.remaining(OperationLedger::StorageDimension::PrivateStorage) != before;
+            }
+        }
+        if (observation.complete) {
+            DebugObserveSavedOriginalPaintReceiver(operation, group, definitions,
+                *result, privateDocument, wholeCommittedScene, observationUnit, nb);
+            using Site = decal_layer::bake::accounting::FailureSite;
+            if (!nb.completeOriginalPaintBinding) {
+                operation.refuse(Site::ReceiverProofStorage);
+                const auto firstFailure = operation.firstFailureSite();
+                nb.stickyFailure = !operation.view().Recheck(Site::ReceiverProofStorage)
+                    && operation.firstFailureSite() == firstFailure
+                    && firstFailure != Site::None;
+                nb.allocationsAfterRefusal = operation.debugAllocationsAfterFailure();
+            } else {
+                std::vector<std::uint8_t> atlasBytes, bakeBytes;
+                nb.canonicalUnchanged = nb.canonicalUnchanged && asset_atlas::Encode(group.capture.savedAtlas, atlasBytes)
+                    && painted_atlas_bake::Encode(group.capture.savedBake, bakeBytes)
+                    && atlasBytes == group.capture.canonicalAtlasBytes
+                    && bakeBytes == group.capture.canonicalBakeBytes;
+                nb.proofsUnchanged = layoutProof == result->bake.atlas.layoutProof
+                    && bakeProof == result->bake.bake.bakeProof;
+            }
+        }
         if (observation.complete) observation.failureStage.clear();
         return observation.complete;
     } catch (const std::exception& error) {

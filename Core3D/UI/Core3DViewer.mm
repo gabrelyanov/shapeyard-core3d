@@ -31,6 +31,7 @@
 #include "../OCCTKit/ReceiptRecord.hxx"
 #include "../OCCTKit/RetainedFinishingAttribute.hxx"
 #include "../OCCTKit/RetainedEdgeTreatmentBuild.hxx"
+#include "../OCCTKit/ProfileSourceCorrespondence.hxx"
 #include "../OCCTKit/RetainedEdgeTreatmentSaveView.hxx"
 #include "../OCCTKit/RetainedProfileProducer.hxx"
 #include "../OCCTKit/VariableRadiusFilletNativeOwner.hxx"
@@ -2696,27 +2697,34 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
                     const auto* retained=std::get_if<r2::RetainedBooleanBase>(&recipe);
                     const auto* legacy=retained
                         ?std::get_if<r2::LegacyBooleanBase>(&retained->source):nullptr;
-                    const auto* program=legacy
-                        ?std::get_if<retained_boolean::Program>(&legacy->prefix):nullptr;
+                    retained_boolean::Program promoted;
+                    const retained_boolean::Program* program=nullptr;
+                    if(legacy){
+                        if(const auto* stored=std::get_if<retained_boolean::Program>(
+                                &legacy->prefix))program=stored;
+                        else if(const auto* v1=std::get_if<retained_boolean::Legacy>(
+                                &legacy->prefix);v1&&retained_boolean::Promote(*v1,promoted))
+                            program=&promoted;
+                    }
                     return program&&program->source.family==1
                         &&profile::Decode(program->source.values,decoded);
                 };
-                profile::Parameters oldProfile,newProfile;
-                fs::detail::Affine oldFrame,newFrame,inverseOld,delta;
-                double radiusScale=0;
+                profile::Parameters oldProfile,newProfile;gp_Trsf oldToRequested;
                 if(!decodeProfile(input->source_,oldProfile)
                     ||!decodeProfile(result->source_,newProfile)
-                    ||!fs::detail::ProfileAffine(oldProfile,oldFrame)
-                    ||!fs::detail::ProfileAffine(newProfile,newFrame)
-                    ||!fs::detail::Inverse(oldFrame,inverseOld)){
+                    ||!complete_profile_source::OldToRequestedPlaneFrame(
+                        oldProfile,newProfile,oldToRequested)){
                     refusal=et::Refusal::UnsupportedTransform;return {};
                 }
-                delta=fs::detail::Compose(newFrame,inverseOld);
-                if(!fs::detail::Similarity(delta,radiusScale)){
-                    refusal=et::Refusal::UnsupportedTransform;return {};
-                }
-                const bool reversesFaceUse=fs::detail::Determinant(delta)<0;
-                for(auto& row:transportedRoles.selectorSteps){
+                // Transform only roles whose persistent selector proves this
+                // Profile source binding. Raw and ordinary selector roles may
+                // belong to the unchanged Boolean/tool stage and stay fixed.
+                et::SourceRebindRoles sourceOwned=*input->rebindRoles_;
+                sourceOwned.selectorSteps.clear();sourceOwned.rawSteps.clear();
+                std::vector<std::size_t> sourceRows;
+                for(std::size_t rowIndex=0;
+                        rowIndex<input->rebindRoles_->selectorSteps.size();++rowIndex){
+                    const auto& row=input->rebindRoles_->selectorSteps[rowIndex];
                     const auto step=std::find_if(result->definition_.steps.begin(),
                         result->definition_.steps.end(),[&](const et::Step& value){
                             return value.feature==row.first;
@@ -2726,24 +2734,18 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
                     }
                     if(!std::holds_alternative<fs::SourceRelativeV1>(
                             step->selector->intent))continue;
-                    for(auto& role:row.second){
-                        std::array<double,3> tangent,normalA,normalB;
-                        if(!fs::detail::Tangent(delta,role.tangent,tangent)
-                            ||!fs::detail::Normal(delta,role.normalA,normalA)
-                            ||!fs::detail::Normal(delta,role.normalB,normalB)){
-                            refusal=et::Refusal::UnsupportedTransform;return {};
-                        }
-                        // This tangent follows the oriented face boundary.
-                        // A handedness reversal reverses that use relative to
-                        // the transformed curve; outward normals still use
-                        // the inverse transpose computed above.
-                        if(reversesFaceUse)
-                            tangent={-tangent[0],-tangent[1],-tangent[2]};
-                        role.tangent=tangent;role.normalA=normalA;role.normalB=normalB;
-                        if(role.normalB<role.normalA)std::swap(role.normalA,role.normalB);
-                        role.circleRadiusMM*=radiusScale;
-                    }
+                    sourceOwned.selectorSteps.push_back(row);
+                    sourceRows.push_back(rowIndex);
                 }
+                et::SourceRebindRoles transformed;
+                if(!et::TransformSourceRebindRoles(sourceOwned,oldToRequested,
+                        oldProfile.metersPerUnit,transformed)
+                    ||transformed.selectorSteps.size()!=sourceRows.size()){
+                    refusal=et::Refusal::UnsupportedTransform;return {};
+                }
+                for(std::size_t index=0;index<sourceRows.size();++index)
+                    transportedRoles.selectorSteps[sourceRows[index]]=
+                        std::move(transformed.selectorSteps[index]);
             }
             // C18: rebind the witnesses the source edit moved through the
             // captured unique role correspondence and strictly replay the

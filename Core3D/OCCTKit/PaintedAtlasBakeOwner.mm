@@ -3293,7 +3293,7 @@ Outcome PrepareBakeForExport(
 #ifdef DEBUG
     , const aa::build::DebugLayoutObserver* observer
 #endif
-    ) noexcept {
+    , aa::build::FinalTriangleLineage* lineage) noexcept {
     plan = {};
     diagnosis.clear();
     try {
@@ -3311,7 +3311,7 @@ Outcome PrepareBakeForExport(
 #ifdef DEBUG
             , observer
 #endif
-            );
+            , lineage);
         if (built != aa::build::Status::Built) {
             if (diagnosis.empty())
                 diagnosis = "build-status-"
