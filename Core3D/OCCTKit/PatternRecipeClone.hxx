@@ -257,8 +257,9 @@ inline bool IssueMapped(const UUID& oldValue, const IssueUUID& issue,
 
 // Rebind graph-local owner/node/feature authority for an independent SYPB/4
 // clone while retaining the archived SourceIdentity values, source programs,
-// and metadata provenance.  This is value-only preparation: staging remains
-// the caller's separately owned OCAF operation.
+// and metadata provenance. The only admitted dependent graph is its one
+// canonical retained-program suffix. This is value-only preparation: staging
+// remains the caller's separately owned OCAF operation.
 inline bool PrepareOriginalsRecordClone(
     const composite_recipe::Definition& source,
     const retained_recipe::OwnerKey& destinationOwner,
@@ -268,61 +269,99 @@ inline bool PrepareOriginalsRecordClone(
     output = {}; identities = {};
     try {
         if (!composite_recipe::Valid(source) || source.schemaVersion != 3
-            || source.nodes.size() != 3 || !retained_recipe::Valid(destinationOwner)
+            || (source.nodes.size() != 3 && source.nodes.size() != 4)
+            || !retained_recipe::Valid(destinationOwner)
             || destinationOwner.document != source.owner.document) return false;
         const auto* sourceFeature = std::get_if<composite_recipe::FeatureNode>(
-            &source.nodes.back().value);
+            &source.nodes[2].value);
         part_boolean::OriginalsDefinition originals;
         if (!sourceFeature
+            || sourceFeature->kind != composite_recipe::PartBooleanFeatureKind
             || sourceFeature->codecVersion
                 != composite_recipe::PartBooleanOriginalsFeatureCodec
             || !part_boolean::DecodeOriginals(sourceFeature->parameters, originals)) return false;
+        retained_program_suffix::Definition suffix;
+        if (source.nodes.size() == 4) {
+            const auto* suffixFeature = std::get_if<composite_recipe::FeatureNode>(
+                &source.nodes[3].value);
+            if (!suffixFeature
+                || suffixFeature->kind
+                    != composite_recipe::RetainedProgramSuffixFeatureKind
+                || suffixFeature->codecVersion
+                    != composite_recipe::RetainedProgramSuffixFeatureCodec
+                || suffixFeature->inputs.size() != 1
+                || suffixFeature->inputs[0] != sourceFeature->node
+                || !retained_program_suffix::Decode(
+                    suffixFeature->parameters, suffix)
+                || suffix.baseFeature != sourceFeature->node) return false;
+        }
 
-        output = source;
+        composite_recipe::Definition candidate = source;
+        IdentityMap mapped;
         std::set<UUID> occupied;
-        for (const auto& node : output.nodes) {
+        for (const auto& node : candidate.nodes) {
             occupied.insert(composite_recipe::NodeID(node));
             if (const auto* feature = std::get_if<composite_recipe::FeatureNode>(&node.value))
                 occupied.insert(feature->feature);
         }
-        identities.global.emplace(output.owner.entity, destinationOwner.entity);
-        identities.global.emplace(output.owner.definition, destinationOwner.definition);
-        output.owner = destinationOwner;
-        for (auto& node : output.nodes) {
+        if (!mapped.global.emplace(candidate.owner.entity,
+                                   destinationOwner.entity).second
+            || !mapped.global.emplace(candidate.owner.definition,
+                                       destinationOwner.definition).second)
+            return false;
+        candidate.owner = destinationOwner;
+        for (auto& node : candidate.nodes) {
             if (auto* graphSource = std::get_if<composite_recipe::SourceNode>(&node.value)) {
                 // Source node IDs are archived inside the immutable originals
                 // block. The destination owner qualifies their new locators.
-                identities.global.emplace(graphSource->node, graphSource->node);
+                if (!mapped.global.emplace(graphSource->node,
+                                           graphSource->node).second) return false;
             } else {
                 auto& feature = std::get<composite_recipe::FeatureNode>(node.value);
-                if (!IssueMapped(feature.node, issue, occupied, identities, feature.node)
-                    || !IssueMapped(feature.feature, issue, occupied, identities,
+                if (!IssueMapped(feature.node, issue, occupied, mapped, feature.node)
+                    || !IssueMapped(feature.feature, issue, occupied, mapped,
                                     feature.feature)) return false;
                 for (UUID& input : feature.inputs) {
-                    const auto found = identities.global.find(input);
-                    if (found == identities.global.end()) return false;
+                    const auto found = mapped.global.find(input);
+                    if (found == mapped.global.end()) return false;
                     input = found->second;
                 }
             }
         }
-        const auto reboundOutput = identities.global.find(output.outputNode);
-        if (reboundOutput == identities.global.end()) return false;
-        output.outputNode = reboundOutput->second;
+        const auto reboundOutput = mapped.global.find(candidate.outputNode);
+        if (reboundOutput == mapped.global.end()) return false;
+        candidate.outputNode = reboundOutput->second;
         auto* feature = std::get_if<composite_recipe::FeatureNode>(
-            &output.nodes.back().value);
-        if (!feature) return false;
+            &candidate.nodes[2].value);
+        if (!feature || feature->inputs.size() != 2) return false;
         originals.owner = destinationOwner;
         originals.booleanNode = feature->node;
         originals.feature = feature->feature;
         for (std::size_t index = 0; index < 2; ++index) {
-            const auto rebound = identities.global.find(
+            const auto rebound = mapped.global.find(
                 originals.originals.inputs[index].sourceNode);
-            if (rebound == identities.global.end()) return false;
+            if (rebound == mapped.global.end()) return false;
             if (originals.originals.inputs[index].sourceNode != rebound->second
-                || originals.effective.inputs[index].sourceNode != rebound->second) return false;
+                || originals.effective.inputs[index].sourceNode != rebound->second
+                || feature->inputs[index] != rebound->second) return false;
         }
-        if (!part_boolean::EncodeOriginals(originals, feature->parameters)
-            || !composite_recipe::Valid(output)) return false;
+        if (!part_boolean::EncodeOriginals(originals, feature->parameters)) return false;
+        if (candidate.nodes.size() == 4) {
+            auto* suffixFeature = std::get_if<composite_recipe::FeatureNode>(
+                &candidate.nodes[3].value);
+            UUID reboundDerived{};
+            if (!suffixFeature || suffixFeature->inputs.size() != 1
+                || suffixFeature->inputs[0] != feature->node
+                || !IssueMapped(suffix.derivedFeature, issue, occupied,
+                                mapped, reboundDerived)) return false;
+            suffix.baseFeature = feature->node;
+            suffix.derivedFeature = reboundDerived;
+            if (!retained_program_suffix::Encode(
+                    suffix, suffixFeature->parameters)) return false;
+        }
+        if (!composite_recipe::Valid(candidate)) return false;
+        output = std::move(candidate);
+        identities = std::move(mapped);
         return true;
     } catch (...) { output = {}; identities = {}; return false; }
 }

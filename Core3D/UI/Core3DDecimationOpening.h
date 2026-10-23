@@ -36,6 +36,13 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic, copy, readonly) NSString *settingsSHA256;
 @property(nonatomic, assign, readonly) NSUInteger targetTriangleCount;
 @property(nonatomic, assign, readonly) double metersPerUnit;
+//! Optional F2 attribute payload. These four properties are either all nil
+//! (the original flat-normal path) or all nonnil and aligned to the request.
+//! The designated attribute initializer below is the only public writer.
+@property(nonatomic, copy, readonly, nullable) NSArray<NSNumber *> *f2AttributeWedgeNormals;
+@property(nonatomic, copy, readonly, nullable) NSArray<NSNumber *> *f2AttributeWedgeUVs;
+@property(nonatomic, copy, readonly, nullable) NSArray<NSNumber *> *f2AttributeFaceMaterials;
+@property(nonatomic, copy, readonly, nullable) NSArray<NSString *> *f2AttributeFaceAnchors;
 - (instancetype)initWithPositionsMM:(NSArray<NSNumber *> *)positionsMM
                              indices:(NSArray<NSNumber *> *)indices
             sourceContributionTokens:(NSArray<NSString *> *)sourceContributionTokens
@@ -44,6 +51,21 @@ __attribute__((objc_subclassing_restricted))
                       settingsSHA256:(NSString *)settingsSHA256
                  targetTriangleCount:(NSUInteger)targetTriangleCount
                        metersPerUnit:(double)metersPerUnit NS_DESIGNATED_INITIALIZER;
+//! Typed all-or-none form of the retained F2-S3 request seam. It returns nil
+//! unless every attribute array is present and has the exact source-domain
+//! cardinality; decimateRequest: still performs its complete validation.
+- (nullable instancetype)initWithPositionsMM:(NSArray<NSNumber *> *)positionsMM
+                                      indices:(NSArray<NSNumber *> *)indices
+                     sourceContributionTokens:(NSArray<NSString *> *)sourceContributionTokens
+                                materialBytes:(NSData *)materialBytes
+                         sourceArtifactSHA256:(NSString *)sourceArtifactSHA256
+                               settingsSHA256:(NSString *)settingsSHA256
+                          targetTriangleCount:(NSUInteger)targetTriangleCount
+                                metersPerUnit:(double)metersPerUnit
+                        attributeWedgeNormals:(NSArray<NSNumber *> *)attributeWedgeNormals
+                            attributeWedgeUVs:(NSArray<NSNumber *> *)attributeWedgeUVs
+                       attributeFaceMaterials:(NSArray<NSNumber *> *)attributeFaceMaterials
+                         attributeFaceAnchors:(NSArray<NSString *> *)attributeFaceAnchors;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end
@@ -62,6 +84,13 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic, copy, readonly) NSString *appearanceLimitation;
 @property(nonatomic, assign, readonly) NSUInteger triangleCount;
 @property(nonatomic, assign, readonly) NSUInteger acceptedCollapseCount;
+//! Typed read-only output of the F2-S3 attribute path. All six values are nil
+//! on the original flat path and nonnil together on an attribute result.
+@property(nonatomic, copy, readonly, nullable) NSData *f2AttributeUVFloat32Data;
+@property(nonatomic, copy, readonly, nullable) NSArray<NSNumber *> *f2AttributeMaterialIDs;
+@property(nonatomic, copy, readonly, nullable) NSArray<NSString *> *f2AttributeSourceFaceAnchors;
+@property(nonatomic, copy, readonly, nullable) NSArray<NSString *> *f2AttributeTriangleContentSHA256;
+@property(nonatomic, copy, readonly, nullable) NSArray<NSNumber *> *f2AttributeCollapseKeepRemove;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end

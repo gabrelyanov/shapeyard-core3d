@@ -26856,6 +26856,127 @@ bool ColdReaderEvidence(const composite_recipe::Definition& graph,
     return true;
 }
 
+bool NativeViewerV4Evidence(const composite_recipe::Definition& graph,
+                            const std::vector<TopoDS_Shape>& sources,
+                            const TopoDS_Shape& solid,
+                            double metersPerUnit,
+                            std::map<std::string, bool>& rows) {
+    namespace cr = composite_recipe;
+    rows["native-viewer-v4-redraw-adopts-originals"] = false;
+    rows["native-viewer-v4-preserves-shape-flags"] = false;
+    rows["native-viewer-v4-preserves-currentness"] = false;
+#if !TARGET_OS_IOS
+    (void)graph; (void)sources; (void)solid; (void)metersPerUnit;
+    return false;
+#else
+    ExactLabelProbeFixture native;
+    if (!native.initialize()) return false;
+    __block bool staged = false;
+    __block bool validBefore = false;
+    __block bool redrawn = false;
+    __block bool flagsUnchanged = false;
+    __block bool bytesUnchanged = false;
+    __block bool validAfter = false;
+    const cr::Definition* graphPointer = &graph;
+    const std::vector<TopoDS_Shape>* sourcePointer = &sources;
+    const TopoDS_Shape* solidPointer = &solid;
+    ExactLabelProbeFixture* nativePointer = &native;
+    const bool performed = native.perform(^{
+        try {
+            const Handle(OcctDocument) owner = nativePointer->owner;
+            const Handle(TDocStd_Document) document = owner.IsNull()
+                ? Handle(TDocStd_Document)() : owner->Document();
+            const Handle(XCAFDoc_ShapeTool) shapes = document.IsNull()
+                ? Handle(XCAFDoc_ShapeTool)()
+                : XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            if (document.IsNull() || shapes.IsNull() || document->HasOpenCommand()
+                || solidPointer->IsNull() || sourcePointer->size() != 2) return;
+            auto payload = std::make_shared<cr::Payload>();
+            payload->definition = *graphPointer;
+            payload->sourceShapes = *sourcePointer;
+            if (!cr::Encode(payload->definition, payload->bytes)) return;
+            XCAFDoc_DocumentTool::SetLengthUnit(document, metersPerUnit);
+            document->NewCommand();
+            shapes->SetShape(nativePointer->sourceLabel, *solidPointer);
+            const auto setID = [](const TDF_Label& label,
+                                  const Standard_GUID& attribute,
+                                  const retained_recipe::UUID& value) {
+                TDataStd_AsciiString::Set(label, attribute,
+                    TCollection_AsciiString(retained_solid::UUIDText(value).c_str()));
+            };
+            setID(document->Main(), DocumentIdentifierAttributeID(),
+                  graphPointer->owner.document);
+            setID(nativePointer->sourceLabel, EntityIdentifierAttributeID(),
+                  graphPointer->owner.entity);
+            setID(nativePointer->sourceLabel, DefinitionIdentifierAttributeID(),
+                  graphPointer->owner.definition);
+            if (!cr::Attribute::StageIndependentClone(
+                    document, nativePointer->sourceLabel, *solidPointer, payload)
+                || !document->CommitCommand()) {
+                if (document->HasOpenCommand()) document->AbortCommand();
+                return;
+            }
+            staged = true;
+            document->ClearUndos();
+            owner->NotifyChanges();
+
+            std::vector<cr::Record> beforeRecords;
+            if (!cr::ReadAll(document, beforeRecords)
+                || beforeRecords.size() != 1 || !beforeRecords.front().value)
+                return;
+            validBefore = ValidateOriginalsRecord(document, beforeRecords.front());
+            std::string beforeBytes;
+            if (!validBefore || !retained_part_boolean::ExactShapeBytes(
+                    beforeRecords.front().current, beforeBytes)) return;
+            const Standard_Boolean rootFree = beforeRecords.front().current.Free();
+            std::vector<std::pair<const TopoDS_TShape*, Standard_Boolean>> faceFlags;
+            std::unordered_set<const TopoDS_TShape*> seen;
+            for (TopExp_Explorer face(beforeRecords.front().current, TopAbs_FACE);
+                 face.More(); face.Next()) {
+                const Handle(TopoDS_TShape)& tshape = face.Current().TShape();
+                if (tshape.IsNull()) return;
+                if (seen.insert(tshape.get()).second)
+                    faceFlags.emplace_back(tshape.get(), tshape->Checked());
+            }
+            if (faceFlags.empty()) return;
+
+            redrawn = nativePointer->viewer.redrawDocument();
+            std::vector<cr::Record> afterRecords;
+            if (!redrawn || !cr::ReadAll(document, afterRecords)
+                || afterRecords.size() != 1 || !afterRecords.front().value)
+                return;
+            flagsUnchanged = afterRecords.front().current.Free() == rootFree;
+            std::size_t faceIndex = 0;
+            seen.clear();
+            for (TopExp_Explorer face(afterRecords.front().current, TopAbs_FACE);
+                 flagsUnchanged && face.More(); face.Next()) {
+                const Handle(TopoDS_TShape)& tshape = face.Current().TShape();
+                if (tshape.IsNull()) { flagsUnchanged = false; break; }
+                if (!seen.insert(tshape.get()).second) continue;
+                flagsUnchanged = faceIndex < faceFlags.size()
+                    && faceFlags[faceIndex].first == tshape.get()
+                    && faceFlags[faceIndex].second == tshape->Checked();
+                ++faceIndex;
+            }
+            flagsUnchanged = flagsUnchanged && faceIndex == faceFlags.size();
+            std::string afterBytes;
+            bytesUnchanged = retained_part_boolean::ExactShapeBytes(
+                afterRecords.front().current, afterBytes) && afterBytes == beforeBytes;
+            validAfter = ValidateOriginalsRecord(document, afterRecords.front());
+        } catch (...) {}
+    });
+    rows["native-viewer-v4-redraw-adopts-originals"] =
+        performed && staged && validBefore && redrawn;
+    rows["native-viewer-v4-preserves-shape-flags"] =
+        performed && redrawn && flagsUnchanged;
+    rows["native-viewer-v4-preserves-currentness"] =
+        performed && validBefore && redrawn && bytesUnchanged && validAfter;
+    return rows["native-viewer-v4-redraw-adopts-originals"]
+        && rows["native-viewer-v4-preserves-shape-flags"]
+        && rows["native-viewer-v4-preserves-currentness"];
+#endif
+}
+
 std::map<std::string, bool> Probe(OriginalsDefinition fixture) noexcept {
     namespace pb = ::core3d::part_boolean;
     namespace cr = composite_recipe;
@@ -27120,6 +27241,8 @@ std::map<std::string, bool> Probe(OriginalsDefinition fixture) noexcept {
         addMalformed("reader-checks-layer-binding", malformed);
         const std::vector<TopoDS_Shape> sourceVector(sourceShapes.begin(), sourceShapes.end());
         ColdReaderEvidence(graph, sourceVector, before, malformedPayloads, rows);
+        NativeViewerV4Evidence(
+            graph, sourceVector, before, fixture.carrierMetersPerUnit, rows);
 
         auto suffixDefinition = placementLeftDefinition;
         suffixDefinition.operation = pb::Operation::Union;
@@ -27510,12 +27633,22 @@ std::map<std::string, bool> Probe(OriginalsDefinition fixture) noexcept {
         };
         cr::Definition clone; pattern_recipe_clone::IdentityMap identities;
         const bool cloneReady = pattern_recipe_clone::PrepareOriginalsRecordClone(
-            graph, destination, issue, clone, identities);
+            suffixed, destination, issue, clone, identities);
         pb::OriginalsDefinition clonedPayload;
-        const auto* cloneFeature = clone.nodes.empty() ? nullptr
-            : std::get_if<cr::FeatureNode>(&clone.nodes.back().value);
-        const bool decodedClone = cloneReady && cloneFeature
-            && pb::DecodeOriginals(cloneFeature->parameters, clonedPayload);
+        retained_program_suffix::Definition clonedSuffix;
+        const auto* sourceBase = std::get_if<cr::FeatureNode>(
+            &suffixed.nodes[2].value);
+        const auto* sourceSuffix = std::get_if<cr::FeatureNode>(
+            &suffixed.nodes[3].value);
+        const auto* cloneFeature = clone.nodes.size() == 4
+            ? std::get_if<cr::FeatureNode>(&clone.nodes[2].value) : nullptr;
+        const auto* cloneSuffix = clone.nodes.size() == 4
+            ? std::get_if<cr::FeatureNode>(&clone.nodes[3].value) : nullptr;
+        const bool decodedClone = cloneReady && sourceBase && sourceSuffix
+            && cloneFeature && cloneSuffix
+            && pb::DecodeOriginals(cloneFeature->parameters, clonedPayload)
+            && retained_program_suffix::Decode(
+                cloneSuffix->parameters, clonedSuffix);
         rows["clone-rebinds-owner"] = decodedClone
             && clone.owner == destination && clonedPayload.owner == destination;
         rows["clone-preserves-provenance"] = decodedClone
@@ -27527,15 +27660,282 @@ std::map<std::string, bool> Probe(OriginalsDefinition fixture) noexcept {
         const bool cloneFrozen = decodedClone
             && pb::EncodeOriginalStateBlock(clonedPayload.originals, clonedFrozen)
             && clonedFrozen == frozenBefore;
-        rows["clone-preserves-provenance"] = rows["clone-preserves-provenance"] && cloneFrozen;
+        rows["clone-preserves-provenance"] =
+            rows["clone-preserves-provenance"] && cloneFrozen;
         rows["clone-preserves-original-programs"] = decodedClone
             && clonedPayload.originals.inputs[0].recipeBytes == programsBefore[0]
             && clonedPayload.originals.inputs[1].recipeBytes == programsBefore[1];
 
-        rows["old-r2-rejects-v4"] = cr::PartBooleanOriginalsFeatureCodec != 1
-            && cr::PartBooleanOriginalsFeatureCodec != 3;
-        rows["old-r2-wire1-frozen"] = cr::PartBooleanFeatureCodec == 1;
-        rows["old-r2-wire3-frozen"] = cr::PartBooleanRecipeFeatureCodec == 3;
+        bool sourceArchiveExact = decodedClone;
+        for (std::size_t index = 0; sourceArchiveExact && index < 2; ++index) {
+            const auto* beforeSource = std::get_if<cr::SourceNode>(
+                &suffixed.nodes[index].value);
+            const auto* afterSource = std::get_if<cr::SourceNode>(
+                &clone.nodes[index].value);
+            sourceArchiveExact = beforeSource && afterSource
+                && beforeSource->node == afterSource->node
+                && beforeSource->localID == afterSource->localID
+                && beforeSource->original == afterSource->original
+                && beforeSource->recipe.kind == afterSource->recipe.kind
+                && beforeSource->recipe.schema == afterSource->recipe.schema
+                && beforeSource->recipe.bytes == afterSource->recipe.bytes
+                && beforeSource->inputToCarrier.matrix
+                    == afterSource->inputToCarrier.matrix
+                && beforeSource->inputToCarrier.sourceMetersPerUnit
+                    == afterSource->inputToCarrier.sourceMetersPerUnit
+                && beforeSource->inputToCarrier.carrierMetersPerUnit
+                    == afterSource->inputToCarrier.carrierMetersPerUnit
+                && beforeSource->commitments.geometry
+                    == afterSource->commitments.geometry
+                && beforeSource->commitments.recipe
+                    == afterSource->commitments.recipe
+                && beforeSource->commitments.placement
+                    == afterSource->commitments.placement
+                && beforeSource->commitments.material
+                    == afterSource->commitments.material
+                && beforeSource->commitments.groups
+                    == afterSource->commitments.groups
+                && beforeSource->shapeSlot == afterSource->shapeSlot;
+        }
+        bool localIssuanceExact = decodedClone
+            && clone.issuance.nextLocalID == suffixed.issuance.nextLocalID
+            && clone.issuance.retiredLocalIDs == suffixed.issuance.retiredLocalIDs;
+        for (std::size_t index = 0; localIssuanceExact
+             && index < suffixed.nodes.size(); ++index)
+            localIssuanceExact = cr::LocalID(clone.nodes[index])
+                == cr::LocalID(suffixed.nodes[index]);
+        rows["clone-preserves-original-block-metadata-and-local-issuance"] =
+            cloneFrozen && sourceArchiveExact && localIssuanceExact;
+
+        const auto mappedBaseNode = sourceBase
+            ? identities.global.find(sourceBase->node) : identities.global.end();
+        const auto mappedBaseFeature = sourceBase
+            ? identities.global.find(sourceBase->feature) : identities.global.end();
+        const auto mappedSuffixNode = sourceSuffix
+            ? identities.global.find(sourceSuffix->node) : identities.global.end();
+        const auto mappedSuffixFeature = sourceSuffix
+            ? identities.global.find(sourceSuffix->feature) : identities.global.end();
+        const auto mappedDerived = identities.global.find(program.derivedFeature);
+        rows["clone-rebinds-boolean-and-suffix-authority"] = decodedClone
+            && cloneFeature->node != sourceBase->node
+            && cloneFeature->feature != sourceBase->feature
+            && cloneSuffix->node != sourceSuffix->node
+            && cloneSuffix->feature != sourceSuffix->feature
+            && clonedSuffix.derivedFeature != program.derivedFeature;
+        rows["clone-rebinds-suffix-links-through-one-map"] = decodedClone
+            && mappedBaseNode != identities.global.end()
+            && mappedBaseFeature != identities.global.end()
+            && mappedSuffixNode != identities.global.end()
+            && mappedSuffixFeature != identities.global.end()
+            && mappedDerived != identities.global.end()
+            && mappedBaseNode->second == cloneFeature->node
+            && mappedBaseFeature->second == cloneFeature->feature
+            && mappedSuffixNode->second == cloneSuffix->node
+            && mappedSuffixFeature->second == cloneSuffix->feature
+            && mappedDerived->second == clonedSuffix.derivedFeature
+            && cloneSuffix->inputs.size() == 1
+            && cloneSuffix->inputs[0] == cloneFeature->node
+            && clonedSuffix.baseFeature == cloneFeature->node
+            && clone.outputNode == cloneSuffix->node;
+        rows["clone-archived-provenance-is-not-live-authority"] = decodedClone
+            && destination.entity != fixture.originals.inputs[0].original.entity
+            && destination.entity != fixture.originals.inputs[1].original.entity
+            && identities.global.count(
+                fixture.originals.inputs[0].original.entity) == 0
+            && identities.global.count(
+                fixture.originals.inputs[0].original.definition) == 0
+            && identities.global.count(
+                fixture.originals.inputs[0].original.sourceFeature) == 0
+            && identities.global.count(
+                fixture.originals.inputs[1].original.entity) == 0
+            && identities.global.count(
+                fixture.originals.inputs[1].original.definition) == 0
+            && identities.global.count(
+                fixture.originals.inputs[1].original.sourceFeature) == 0;
+
+        retained_feature::ReplayBudget cloneReplayBudget;
+        TopoDS_Shape cloneSolid;
+        std::string cloneSolidBytes;
+        const bool cloneReplayed = decodedClone
+            && cr::ValidateV3(clone, retained_feature::ProductionRegistry(),
+                retained_source::ProductionRegistry()).valid()
+            && ReplayOriginalsGraphDetached(
+                clone, sourceVector, cloneReplayBudget, running, cloneSolid)
+            && retained_part_boolean::ExactShapeBytes(
+                cloneSolid, cloneSolidBytes)
+            && cloneSolidBytes == suffixBytes;
+        std::map<std::string, bool> cloneColdRows;
+        const bool cloneColdRead = cloneReplayed
+            && ColdReaderEvidence(
+                clone, sourceVector, cloneSolid, {}, cloneColdRows)
+            && cloneColdRows["cold-save-produced-path"]
+            && cloneColdRows["cold-open-status-ok"]
+            && cloneColdRows["cold-open-not-rejected"]
+            && cloneColdRows["cold-open-has-document"]
+            && cloneColdRows["cold-read-valid"]
+            && cloneColdRows["cold-read-single-record"]
+            && cloneColdRows["cold-read-bytes-unchanged"]
+            && cloneColdRows["cold-file-contains-graph"]
+            && cloneColdRows["cold-graph-contains-feature"];
+        rows["clone-production-valid-replays-and-cold-reads"] = cloneColdRead;
+
+        NativeDocumentSession cloneReadbackSession;
+        const Handle(OcctDocument) cloneReadbackWrapper =
+            cloneReadbackSession.Document();
+        const auto cloneReadbackDocument = cloneReadbackWrapper.IsNull()
+            ? Handle(TDocStd_Document)() : cloneReadbackWrapper->Document();
+        auto clonePayload = std::make_shared<cr::Payload>();
+        clonePayload->definition = clone;
+        clonePayload->sourceShapes = sourceVector;
+        const bool cloneRecordReady = cloneReplayed
+            && !cloneReadbackDocument.IsNull()
+            && cr::Encode(clone, clonePayload->bytes);
+        if (cloneRecordReady)
+            XCAFDoc_DocumentTool::SetLengthUnit(
+                cloneReadbackDocument, fixture.carrierMetersPerUnit);
+        cr::Record cloneRecord;
+        cloneRecord.value = clonePayload;
+        cloneRecord.current = cloneSolid;
+        const bool cloneReadbackValid = cloneRecordReady
+            && ValidateOriginalsRecord(cloneReadbackDocument, cloneRecord);
+        cloneRecord.current = suffixBase.result;
+        rows["clone-stale-readback-mismatch-refused"] = cloneReadbackValid
+            && !ValidateOriginalsRecord(cloneReadbackDocument, cloneRecord);
+
+        cr::Definition malformedClone;
+        pattern_recipe_clone::IdentityMap malformedMap;
+        const pattern_recipe_clone::IssueUUID malformedIssue =
+            [](retained_recipe::UUID& value) { value = {}; return true; };
+        const bool malformedRefused =
+            !pattern_recipe_clone::PrepareOriginalsRecordClone(
+                suffixed, destination, malformedIssue,
+                malformedClone, malformedMap)
+            && malformedClone.nodes.empty() && malformedMap.global.empty();
+        retained_recipe::UUID duplicateIdentity{};
+        duplicateIdentity[0] = 0xE0; duplicateIdentity[15] = 1;
+        const pattern_recipe_clone::IssueUUID duplicateIssue =
+            [&](retained_recipe::UUID& value) {
+                value = duplicateIdentity; return true;
+            };
+        cr::Definition duplicateClone;
+        pattern_recipe_clone::IdentityMap duplicateMap;
+        const bool duplicateRefused =
+            !pattern_recipe_clone::PrepareOriginalsRecordClone(
+                suffixed, destination, duplicateIssue,
+                duplicateClone, duplicateMap)
+            && duplicateClone.nodes.empty() && duplicateMap.global.empty();
+        rows["clone-refuses-malformed-and-duplicate-mappings-without-output"] =
+            malformedRefused && duplicateRefused;
+
+        const std::atomic_bool cloneStopped(true);
+        retained_feature::ReplayBudget cloneStopBudget;
+        TopoDS_Shape cloneStoppedOutput;
+        const bool cloneStopRefused = cloneReady
+            && !ReplayOriginalsGraphDetached(
+                clone, sourceVector, cloneStopBudget,
+                cloneStopped, cloneStoppedOutput)
+            && cloneStoppedOutput.IsNull();
+        retained_feature::ReplayBudget cloneDeniedBudget;
+        cloneDeniedBudget.topologyRemaining = 0;
+        TopoDS_Shape cloneDeniedOutput;
+        const bool cloneBudgetRefused = cloneReady
+            && !ReplayOriginalsGraphDetached(
+                clone, sourceVector, cloneDeniedBudget,
+                running, cloneDeniedOutput)
+            && cloneDeniedBudget.exhausted && cloneDeniedOutput.IsNull();
+        rows["clone-stop-and-budget-refuse-without-partial-output"] =
+            cloneStopRefused && cloneBudgetRefused;
+
+        namespace r2 = retained_edge_treatment::r2;
+        namespace et = retained_edge_treatment;
+        const auto oldBinding = [&](r2::PrefixFormat format) {
+            r2::BooleanBaseBinding binding;
+            binding.sourceContractRevision = format == r2::PrefixFormat::A1Composite
+                ? r2::SourceContractRevision : r2::RecipeSourceContractRevision;
+            binding.format = format;
+            binding.sourceWireMajor = format == r2::PrefixFormat::A1Composite ? 1 : 3;
+            binding.sourceWireMinor = 0;
+            binding.source = {fixture.owner.document, fixture.owner.entity,
+                fixture.owner.definition, fixture.feature};
+            binding.sourceNode = fixture.booleanNode;
+            binding.sourceSchema = format == r2::PrefixFormat::A1Composite ? 1 : 3;
+            binding.sourceRecipeDigest = fixture.originals.inputs[0].commitments.recipe;
+            binding.metersPerLocalUnit = fixture.carrierMetersPerUnit;
+            r2::CompositePrefixBinding prefix;
+            prefix.links.push_back({fixture.booleanNode, fixture.feature,
+                fixture.originals.inputs[0].sourceNode,
+                fixture.originals.inputs[1].sourceNode});
+            binding.prefix = prefix;
+            return binding;
+        };
+        const auto oldDefinition = [&](const r2::BooleanBaseBinding& binding,
+                                       std::uint32_t schema) {
+            r2::Definition definition;
+            definition.schema = schema;
+            definition.owner = fixture.owner;
+            definition.base = binding;
+            definition.outputNode = binding.sourceNode;
+            return definition;
+        };
+        const r2::BooleanBaseBinding wireOne = oldBinding(
+            r2::PrefixFormat::A1Composite);
+        const r2::BooleanBaseBinding wireThree = oldBinding(
+            r2::PrefixFormat::A1RecipeComposite);
+        const r2::Definition oldA1 = oldDefinition(wireOne, 2);
+        const r2::Definition oldRecipe = oldDefinition(wireThree, 3);
+        et::Refusal oldA1Refusal = et::Refusal::MalformedCarrier;
+        et::Refusal oldRecipeRefusal = et::Refusal::MalformedCarrier;
+        const bool oldA1Valid = r2::detail::Valid(wireOne)
+            && r2::detail::Valid(oldA1, oldA1Refusal)
+            && oldA1Refusal == et::Refusal::None;
+        const bool oldRecipeValid = r2::detail::Valid(wireThree)
+            && r2::detail::Valid(oldRecipe, oldRecipeRefusal)
+            && oldRecipeRefusal == et::Refusal::None;
+
+        auto wireOneV4 = wireOne;
+        wireOneV4.sourceWireMajor = 4;
+        wireOneV4.sourceSchema = 4;
+        auto wireThreeV4 = wireThree;
+        wireThreeV4.sourceWireMajor = 4;
+        wireThreeV4.sourceSchema = 4;
+        auto a1SchemaV4 = oldA1;
+        a1SchemaV4.schema = 4;
+        auto recipeSchemaV4 = oldRecipe;
+        recipeSchemaV4.schema = 4;
+        et::Refusal a1V4Refusal = et::Refusal::None;
+        et::Refusal recipeV4Refusal = et::Refusal::None;
+        const bool v4BindingsRefused = !r2::detail::Valid(wireOneV4)
+            && !r2::detail::Valid(wireThreeV4);
+        const bool v4SchemasRefused = !r2::detail::Valid(a1SchemaV4, a1V4Refusal)
+            && !r2::detail::Valid(recipeSchemaV4, recipeV4Refusal);
+        rows["old-r2-rejects-v4"] = v4BindingsRefused && v4SchemasRefused;
+        rows["old-r2-wire1-frozen"] = cr::PartBooleanFeatureCodec == 1
+            && wireOne.sourceWireMajor == 1 && wireOne.sourceWireMinor == 0
+            && oldA1Valid;
+        rows["old-r2-wire3-frozen"] = cr::PartBooleanRecipeFeatureCodec == 3
+            && wireThree.sourceWireMajor == 3 && wireThree.sourceWireMinor == 0
+            && oldRecipeValid;
+        rows["old-r2-a1-wire1-valid-predicate"] = oldA1Valid;
+        rows["old-r2-recipe-wire3-valid-predicate"] = oldRecipeValid;
+        rows["old-r2-a1-v4-binding-rejected"] =
+            !r2::detail::Valid(wireOneV4);
+        rows["old-r2-recipe-v4-binding-rejected"] =
+            !r2::detail::Valid(wireThreeV4);
+        rows["old-r2-v4-schema-promotion-rejected"] = v4SchemasRefused;
+        rows["old-r2-v4-no-fallback-base-route"] =
+            std::holds_alternative<r2::BooleanBaseBinding>(a1SchemaV4.base)
+            && std::holds_alternative<r2::BooleanBaseBinding>(recipeSchemaV4.base)
+            && std::get_if<et::BaseBinding>(&a1SchemaV4.base) == nullptr
+            && std::get_if<et::BaseBinding>(&recipeSchemaV4.base) == nullptr
+            && a1V4Refusal != et::Refusal::None
+            && recipeV4Refusal != et::Refusal::None;
+        et::Refusal oldA1StillRefusal = et::Refusal::MalformedCarrier;
+        et::Refusal oldRecipeStillRefusal = et::Refusal::MalformedCarrier;
+        rows["old-r2-old-behavior-unchanged"] =
+            r2::detail::Valid(oldA1, oldA1StillRefusal)
+            && r2::detail::Valid(oldRecipe, oldRecipeStillRefusal)
+            && oldA1StillRefusal == et::Refusal::None
+            && oldRecipeStillRefusal == et::Refusal::None;
         const auto* descriptor = retained_feature::ProductionRegistry().find(
             {cr::PartBooleanFeatureKind, cr::PartBooleanOriginalsFeatureCodec});
         rows["v4-reader-does-not-grant-owner"] = descriptor

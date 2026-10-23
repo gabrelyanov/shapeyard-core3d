@@ -173,9 +173,7 @@ bool F2EvidenceEqual(Core3DPublishArtifactEvidence *left, Core3DPublishArtifactE
 @property(nonatomic, assign, readwrite) NSUInteger targetTriangleCount;
 @property(nonatomic, assign, readwrite) double metersPerUnit;
 // F2-S3 attribute payload (all-or-none; nil on every field selects the v1
-// flat path). Declared in this implementation file because the public header
-// is outside this step's allocation; tests bind them through key-value
-// coding. Values are immutable request-owned copies: one world Z-up normal
+// flat path). Values are immutable request-owned copies: one world Z-up normal
 // (3) and one UV (2) per stored source vertex, one material id and one
 // 64-lower-hex source-face anchor per face.
 @property(nonatomic, copy, readwrite, nullable) NSArray<NSNumber *> *f2AttributeWedgeNormals;
@@ -200,6 +198,39 @@ bool F2EvidenceEqual(Core3DPublishArtifactEvidence *left, Core3DPublishArtifactE
         _sourceArtifactSHA256 = [sourceArtifactSHA256 copy];
         _settingsSHA256 = [settingsSHA256 copy];
         _targetTriangleCount = targetTriangleCount; _metersPerUnit = metersPerUnit;
+    }
+    return self;
+}
+- (instancetype)initWithPositionsMM:(NSArray<NSNumber *> *)positionsMM
+                             indices:(NSArray<NSNumber *> *)indices
+            sourceContributionTokens:(NSArray<NSString *> *)sourceContributionTokens
+                       materialBytes:(NSData *)materialBytes
+                sourceArtifactSHA256:(NSString *)sourceArtifactSHA256
+                      settingsSHA256:(NSString *)settingsSHA256
+                 targetTriangleCount:(NSUInteger)targetTriangleCount
+                       metersPerUnit:(double)metersPerUnit
+               attributeWedgeNormals:(NSArray<NSNumber *> *)attributeWedgeNormals
+                   attributeWedgeUVs:(NSArray<NSNumber *> *)attributeWedgeUVs
+              attributeFaceMaterials:(NSArray<NSNumber *> *)attributeFaceMaterials
+                attributeFaceAnchors:(NSArray<NSString *> *)attributeFaceAnchors {
+    const NSUInteger storedCount = positionsMM.count / 3;
+    const NSUInteger faceCount = indices.count / 3;
+    if (positionsMM.count == 0 || positionsMM.count % 3 != 0
+        || indices.count == 0 || indices.count % 3 != 0
+        || attributeWedgeNormals.count != positionsMM.count
+        || attributeWedgeUVs.count != 2 * storedCount
+        || attributeFaceMaterials.count != faceCount
+        || attributeFaceAnchors.count != faceCount
+        || sourceContributionTokens.count != faceCount) return nil;
+    self = [self initWithPositionsMM:positionsMM indices:indices
+        sourceContributionTokens:sourceContributionTokens materialBytes:materialBytes
+        sourceArtifactSHA256:sourceArtifactSHA256 settingsSHA256:settingsSHA256
+        targetTriangleCount:targetTriangleCount metersPerUnit:metersPerUnit];
+    if (self) {
+        _f2AttributeWedgeNormals = [attributeWedgeNormals copy];
+        _f2AttributeWedgeUVs = [attributeWedgeUVs copy];
+        _f2AttributeFaceMaterials = [attributeFaceMaterials copy];
+        _f2AttributeFaceAnchors = [attributeFaceAnchors copy];
     }
     return self;
 }
@@ -249,7 +280,7 @@ bool F2EvidenceEqual(Core3DPublishArtifactEvidence *left, Core3DPublishArtifactE
 @property(nonatomic, assign, readwrite) NSUInteger triangleCount;
 @property(nonatomic, assign, readwrite) NSUInteger acceptedCollapseCount;
 //! F2-S3 attribute derivative evidence (attribute path only; nil on flat
-//! results). Same KVC-bound implementation-file seam as the request payload:
+//! results). The public surface is typed and read-only:
 //! carried wedge UVs (2 Float32 per corner), one material id and one
 //! source-face anchor per emitted triangle, and each emitted triangle's
 //! content digest recomputed from the actual emitted Float32 position bytes
