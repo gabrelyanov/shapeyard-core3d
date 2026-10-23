@@ -4,6 +4,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @class Core3DPublishCapture;
 @class Core3DViewController;
+@class Core3DDecimationResult;
 
 FOUNDATION_EXPORT NSErrorDomain const Core3DLODSetErrorDomain;
 
@@ -243,6 +244,19 @@ __attribute__((objc_subclassing_restricted))
 //! Called from the real bounded validation loop. Tests can synchronously Stop
 //! at a work boundary; Release contains neither this hook nor its branch.
 @property(nonatomic, copy, nullable) void (^debugWorkBoundaryHandler)(NSUInteger completedWorkUnits);
+//! Volatile observation of the same private all-level candidate helper used by
+//! regenerate. It accepts one immutable synthetic source and returns detached
+//! results only; it has no controller, command, F2DR or SYLS write surface.
+- (nullable NSArray<Core3DDecimationResult *> *)debugCandidatesForLevels:
+    (NSArray<Core3DLODLevelRequest *> *)levels
+    positionsMM:(NSArray<NSNumber *> *)positionsMM
+    indices:(NSArray<NSNumber *> *)indices
+    sourceContributionTokens:(NSArray<NSString *> *)sourceContributionTokens
+    materialBytes:(NSData *)materialBytes
+    sourceArtifactSHA256:(NSString *)sourceArtifactSHA256
+    metersPerUnit:(double)metersPerUnit
+    error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(debugCandidates(levels:positionsMM:indices:sourceContributionTokens:materialBytes:sourceArtifactSHA256:metersPerUnit:));
 + (void)setDebugFault:(Core3DLODSetDebugFault)fault NS_SWIFT_NAME(setDebugFault(_:));
 + (BOOL)debugRemoveF2StoreForController:(Core3DViewController *)controller
                                   error:(NSError * _Nullable * _Nullable)error

@@ -2,6 +2,7 @@
 // no OcctDocument, command-lease, persistence, manifest or F2-owner access.
 
 #import "Core3DLODSetOpening.h"
+#import "Core3DDecimationOpening.h"
 #import "Core3DPublishCapture.h"
 #import "Core3DViewController.h"
 
@@ -364,6 +365,18 @@ maximumSilhouetteDeviationPixels:(double)maximumSilhouetteDeviationPixels
 @property(nonatomic, copy) NSString *issuerIdentifier;
 @property(nonatomic, copy, nullable) NSString *existingSetIdentifier;
 - (instancetype)initPrivateWithCapture:(Core3DPublishCapture *)capture;
+- (BOOL)buildAllLevelCandidates:(const std::vector<syls::Level>&)levels
+                      f2Opening:(Core3DDecimationOpening *)f2Opening
+                     positions:(NSArray<NSNumber *> *)positions
+                        indices:(NSArray<NSNumber *> *)indices
+                         tokens:(NSArray<NSString *> *)tokens
+                       material:(NSData *)material
+                 sourceArtifact:(NSString *)sourceArtifact
+                  metersPerUnit:(double)metersPerUnit
+                  settingsBytes:(NSArray<NSData *> * _Nullable * _Nonnull)settingsBytes
+                       requests:(NSArray<Core3DDecimationRequest *> * _Nullable * _Nonnull)requests
+                        results:(NSArray<Core3DDecimationResult *> * _Nullable * _Nonnull)results
+                          error:(NSError **)error;
 @end
 
 namespace {
@@ -563,6 +576,97 @@ bool DecodeStores(const Handle(OcctDocument)& document,
     if (_stopped.load()) {
         SetError(error, Core3DLODSetErrorStopped, @"LOD opening was stopped."); return NO;
     }
+    return YES;
+}
+
+- (BOOL)buildAllLevelCandidates:(const std::vector<syls::Level>&)levels
+                      f2Opening:(Core3DDecimationOpening *)f2Opening
+                     positions:(NSArray<NSNumber *> *)positions
+                        indices:(NSArray<NSNumber *> *)indices
+                         tokens:(NSArray<NSString *> *)tokens
+                       material:(NSData *)material
+                 sourceArtifact:(NSString *)sourceArtifact
+                  metersPerUnit:(double)metersPerUnit
+                  settingsBytes:(NSArray<NSData *> **)settingsBytes
+                       requests:(NSArray<Core3DDecimationRequest *> **)requests
+                        results:(NSArray<Core3DDecimationResult *> **)results
+                          error:(NSError **)error {
+    *settingsBytes = nil; *requests = nil; *results = nil;
+    if (!f2Opening || levels.empty() || !positions || !indices || !tokens
+        || !material.length || !sourceArtifact.length) {
+        SetError(error, Core3DLODSetErrorMissingProvenance,
+            @"Candidate generation requires one complete immutable source.");
+        return NO;
+    }
+    NSMutableArray<NSData *> *allSettings = [NSMutableArray arrayWithCapacity:levels.size()];
+    NSMutableArray<Core3DDecimationRequest *> *allRequests =
+        [NSMutableArray arrayWithCapacity:levels.size()];
+    NSMutableArray<Core3DDecimationResult *> *allResults =
+        [NSMutableArray arrayWithCapacity:levels.size()];
+    NSUInteger previousCount = NSUIntegerMax;
+    for (std::size_t index = 0; index < levels.size(); ++index) {
+        if (![self consumeWork:error]) return NO;
+        const syls::Level& level = levels[index];
+        NSData *settings = [Core3DDecimationOpening
+            f2CanonicalSettingsBytesWithTargetTriangleCount:level.targetTriangleCount
+            maximumSymmetricSurfaceDistanceMM:level.quality.maximumSurfaceDistanceMM
+            maximumSilhouettePixelDeviation:level.quality.maximumSilhouetteDeviationPixels
+            hardEdgeAngleDegrees:level.quality.hardEdgeAngleDegrees
+            contactClearanceMM:level.quality.contactClearanceMM
+            measurementSamplesPerMesh:level.quality.measurementSampleCount
+            silhouetteResolution:level.quality.silhouetteResolution
+            silhouetteCameraSetSHA256:DigestText(level.quality.silhouetteCameraSetSHA256)
+            metersPerUnit:metersPerUnit];
+        NSString *settingsDigest = settings
+            ? [Core3DDecimationOpening f2SettingsSHA256ForCanonicalBytes:settings] : nil;
+        if (!settings || !settingsDigest) {
+            SetError(error, Core3DLODSetErrorInvalidDefinition,
+                @"A level does not contain canonical F2 settings.");
+            return NO;
+        }
+        Core3DDecimationRequest *request = [[Core3DDecimationRequest alloc]
+            initWithPositionsMM:positions indices:indices
+            sourceContributionTokens:tokens materialBytes:material
+            sourceArtifactSHA256:sourceArtifact settingsSHA256:settingsDigest
+            targetTriangleCount:level.targetTriangleCount metersPerUnit:metersPerUnit];
+        NSError *f2Error = nil;
+        Core3DDecimationResult *result = [f2Opening decimateRequest:request error:&f2Error];
+        const BOOL nonReducingResult = result
+            && (result.triangleCount != level.targetTriangleCount
+                || result.triangleCount >= previousCount);
+        const BOOL unreachableRefusal = !result
+            && [f2Error.domain isEqualToString:Core3DDecimationErrorDomain]
+            && f2Error.code == Core3DDecimationErrorUnreachableTriangleBudget;
+        if (!result || result.triangleCount != level.targetTriangleCount
+            || result.triangleCount >= previousCount) {
+            NSString *reason = (unreachableRefusal || nonReducingResult)
+                ? @"F2 source is not reducible to every strictly decreasing target."
+                : (f2Error.localizedDescription
+                    ?: @"F2 native decimation refused without output.");
+            if (error) {
+                NSDictionary *userInfo = f2Error
+                    ? @{NSLocalizedDescriptionKey: reason, NSUnderlyingErrorKey: f2Error}
+                    : @{NSLocalizedDescriptionKey: reason};
+                *error = [NSError errorWithDomain:Core3DLODSetErrorDomain
+                    code:Core3DLODSetErrorInvalidDefinition userInfo:userInfo];
+            }
+            return NO;
+        }
+        previousCount = result.triangleCount;
+        [allSettings addObject:settings];
+        [allRequests addObject:request];
+        [allResults addObject:result];
+#if DEBUG
+        if (index == 0 && lod_owner::debugFault.load() == lod_owner::Fault::BeforeStage) {
+            SetError(error, Core3DLODSetErrorPersistenceUnavailable,
+                @"Injected all-level candidate refusal.");
+            return NO;
+        }
+#endif
+    }
+    *settingsBytes = [allSettings copy];
+    *requests = [allRequests copy];
+    *results = [allResults copy];
     return YES;
 }
 
@@ -885,10 +989,205 @@ bool DecodeStores(const Handle(OcctDocument)& document,
 
 - (Core3DLODSetCommitResult)regenerateForController:(Core3DViewController *)controller
                                                error:(NSError **)error {
-    (void)controller;
-    if (error) *error = LODError(Core3DLODSetErrorUnavailable,
-        @"Regeneration is held by D1057(iii), item 29.");
-    return Core3DLODSetCommitResultRegenerateUnavailable;
+    if (error) *error = nil;
+    if (!NSThread.isMainThread || !self.existingSetIdentifier) {
+        SetError(error, self.existingSetIdentifier ? Core3DLODSetErrorUnavailable
+            : Core3DLODSetErrorNotFound, @"A durable LOD set is required.");
+        return Core3DLODSetCommitResultRegenerateUnavailable;
+    }
+    if (![self isCurrent:error]) return Core3DLODSetCommitResultRegenerateUnavailable;
+    const Handle(OcctDocument) document = LODDocument(controller);
+    const Handle(TDocStd_Document) ocaf = document.IsNull()
+        ? Handle(TDocStd_Document)() : document->Document();
+    if (ocaf.IsNull() || ocaf->HasOpenCommand()
+        || document->DocumentIdentifier() != (self.capture.documentIdentifier.UTF8String ?: "")) {
+        SetError(error, Core3DLODSetErrorPersistenceUnavailable,
+            @"LOD regeneration requires an idle captured document.");
+        return Core3DLODSetCommitResultRegenerateUnavailable;
+    }
+    syls::StoreRead sylsBefore; syls::Store store; decimation::F2Store ignoredF2;
+    bool ignoredHasF2 = false;
+    if (!DecodeStores(document, sylsBefore, store, ignoredF2, ignoredHasF2, error))
+        return Core3DLODSetCommitResultRegenerateUnavailable;
+    syls::UUID setIdentifier{};
+    const syls::Record *prior = nullptr;
+    if (UUID(self.existingSetIdentifier, setIdentifier))
+        prior = lod_owner::Find(store, setIdentifier);
+    Core3DPublishArtifactEvidence *evidence = self.capture.artifactEvidence;
+    Core3DPublishOwnerCommitments *owner = self.capture.ownerCommitments.firstObject;
+    if (!prior || !evidence || !owner || prior->levels.empty()
+        || evidence.sourcePositionsMM.count != evidence.addressedTriangleCount * 9
+        || evidence.sourceIndices.count != evidence.addressedTriangleCount * 3
+        || evidence.faceEvidenceSHA256InEmittedOrder.count != evidence.addressedTriangleCount
+        || owner.materialTextureWitnessBytes.length == 0) {
+        SetError(error, prior ? Core3DLODSetErrorMissingProvenance
+            : Core3DLODSetErrorNotFound,
+            @"Regeneration requires the durable set and one completed source artifact observation.");
+        return Core3DLODSetCommitResultRegenerateUnavailable;
+    }
+
+    NSError *f2Error = nil;
+    Core3DDecimationOpening *f2Opening =
+        [Core3DDecimationOpening openingWithCapture:self.capture error:&f2Error];
+    if (!f2Opening) {
+        SetError(error, Core3DLODSetErrorMissingProvenance,
+            f2Error.localizedDescription ?: @"F2 opening refused the captured source.");
+        return Core3DLODSetCommitResultRegenerateUnavailable;
+    }
+    NSArray<NSData *> *settingsBytes = nil;
+    NSArray<Core3DDecimationRequest *> *requests = nil;
+    NSArray<Core3DDecimationResult *> *results = nil;
+    if (![self buildAllLevelCandidates:prior->levels f2Opening:f2Opening
+            positions:evidence.sourcePositionsMM indices:evidence.sourceIndices
+            tokens:evidence.faceEvidenceSHA256InEmittedOrder
+            material:owner.materialTextureWitnessBytes
+            sourceArtifact:evidence.artifactSHA256 metersPerUnit:prior->metersPerUnit
+            settingsBytes:&settingsBytes requests:&requests results:&results error:error])
+        return Core3DLODSetCommitResultRegenerateUnavailable;
+    if (![self isCurrent:error]) return Core3DLODSetCommitResultRegenerateUnavailable;
+
+    decimation::F2StoreRead f2Before;
+    if (!document->ReadF2DerivativeStore(f2Before) || !f2Before.readable()) {
+        SetError(error, Core3DLODSetErrorPersistenceUnavailable,
+            @"F2 store read failed before regeneration.");
+        return Core3DLODSetCommitResultRegenerateUnavailable;
+    }
+    const Standard_Integer undoBefore = ocaf->GetAvailableUndos();
+    try { ocaf->NewCommand(); } catch (...) {
+        SetError(error, Core3DLODSetErrorPersistenceUnavailable,
+            @"LOD regeneration command could not open.");
+        return Core3DLODSetCommitResultRegenerateUnavailable;
+    }
+    auto abortAndVerify = [&]() -> bool {
+        try { if (ocaf->HasOpenCommand()) ocaf->AbortCommand(); }
+        catch (...) { return false; }
+        syls::StoreRead restoredSYLS; decimation::F2StoreRead restoredF2;
+        return !ocaf->HasOpenCommand()
+            && document->ReadLODSetStore(restoredSYLS)
+            && document->ReadF2DerivativeStore(restoredF2)
+            && syls::SameStore(sylsBefore, restoredSYLS)
+            && decimation::SameStore(f2Before, restoredF2);
+    };
+#if DEBUG
+    const lod_owner::Fault fault = lod_owner::debugFault.load();
+    if (fault == lod_owner::Fault::BeforeStage) {
+        const bool restored = abortAndVerify();
+        SetError(error, restored ? Core3DLODSetErrorPersistenceUnavailable
+                                 : Core3DLODSetErrorRecoveryRequired,
+            @"Injected regeneration refusal before staging.");
+        return restored ? Core3DLODSetCommitResultRegenerateUnavailable
+                        : Core3DLODSetCommitResultRecoveryRequired;
+    }
+#endif
+    for (NSUInteger index = 0; index < results.count; ++index) {
+        f2Error = nil;
+        if (![f2Opening f2StageDerivativeForController:controller level:index
+                request:requests[index] result:results[index]
+                settingsCanonicalBytes:settingsBytes[index] error:&f2Error]) {
+            const bool restored = abortAndVerify();
+            SetError(error, restored ? Core3DLODSetErrorPersistenceUnavailable
+                                     : Core3DLODSetErrorRecoveryRequired,
+                f2Error.localizedDescription ?: @"F2 regeneration staging failed.");
+            return restored ? Core3DLODSetCommitResultRegenerateUnavailable
+                            : Core3DLODSetCommitResultRecoveryRequired;
+        }
+#if DEBUG
+        if (fault == lod_owner::Fault::AfterF2Stage) {
+            const bool restored = abortAndVerify();
+            SetError(error, restored ? Core3DLODSetErrorPersistenceUnavailable
+                                     : Core3DLODSetErrorRecoveryRequired,
+                @"Injected regeneration refusal after F2 staging.");
+            return restored ? Core3DLODSetCommitResultRegenerateUnavailable
+                            : Core3DLODSetCommitResultRecoveryRequired;
+        }
+#endif
+    }
+    decimation::F2StoreRead stagedF2Read; decimation::F2Store stagedF2;
+    if (!document->ReadF2DerivativeStore(stagedF2Read)
+        || stagedF2Read.occurrence != decimation::F2StoreOccurrence::Present
+        || !decimation::DecodeStore(stagedF2Read.bytes, stagedF2)) {
+        const bool restored = abortAndVerify();
+        SetError(error, restored ? Core3DLODSetErrorPersistenceUnavailable
+                                 : Core3DLODSetErrorRecoveryRequired,
+            @"Staged F2 readback was invalid.");
+        return restored ? Core3DLODSetCommitResultRegenerateUnavailable
+                        : Core3DLODSetCommitResultRecoveryRequired;
+    }
+    syls::Record candidate = *prior; ++candidate.revision;
+    lod_owner::Refusal refusal = lod_owner::Refusal::None;
+    for (std::size_t index = 0; index < candidate.levels.size(); ++index) {
+        NSString *artifact = [NSString stringWithFormat:@"lod-level-%zu.glb", index];
+        if (!lod_owner::AttachCurrentReference(
+                candidate, index, stagedF2, Text(artifact), refusal)) {
+            const bool restored = abortAndVerify();
+            SetError(error, restored ? Core3DLODSetErrorMissingProvenance
+                                     : Core3DLODSetErrorRecoveryRequired,
+                @"A staged F2 row did not exactly bind its LOD level.");
+            return restored ? Core3DLODSetCommitResultRegenerateUnavailable
+                            : Core3DLODSetCommitResultRecoveryRequired;
+        }
+    }
+    syls::Store candidateStore;
+    if (!lod_owner::Upsert(&store, std::move(candidate), &stagedF2,
+            candidateStore, refusal)) {
+        const bool restored = abortAndVerify();
+        SetError(error, restored ? Core3DLODSetErrorCorruptRecord
+                                 : Core3DLODSetErrorRecoveryRequired,
+            @"The complete regenerated set was refused.");
+        return restored ? Core3DLODSetCommitResultRegenerateUnavailable
+                        : Core3DLODSetCommitResultRecoveryRequired;
+    }
+    std::vector<std::uint8_t> sylsBytes; syls::StoreRead stagedSYLS;
+    if (!syls::EncodeStore(candidateStore, sylsBytes)
+        || !document->StageLODSetStore(
+            sylsBefore, sylsBytes, Standard_False, stagedSYLS)
+        || stagedSYLS.occurrence != syls::StoreOccurrence::Present
+        || stagedSYLS.bytes != sylsBytes) {
+        const bool restored = abortAndVerify();
+        SetError(error, restored ? Core3DLODSetErrorPersistenceUnavailable
+                                 : Core3DLODSetErrorRecoveryRequired,
+            @"Complete SYLS regeneration staging failed.");
+        return restored ? Core3DLODSetCommitResultRegenerateUnavailable
+                        : Core3DLODSetCommitResultRecoveryRequired;
+    }
+#if DEBUG
+    if (fault == lod_owner::Fault::AfterSYLSStage
+        || fault == lod_owner::Fault::AfterReadback) {
+        const bool restored = abortAndVerify();
+        SetError(error, restored ? Core3DLODSetErrorPersistenceUnavailable
+                                 : Core3DLODSetErrorRecoveryRequired,
+            @"Injected regeneration refusal after SYLS staging.");
+        return restored ? Core3DLODSetCommitResultRegenerateUnavailable
+                        : Core3DLODSetCommitResultRecoveryRequired;
+    }
+#endif
+    bool committed = false;
+    try { committed = ocaf->CommitCommand() && !ocaf->HasOpenCommand(); }
+    catch (...) { committed = false; }
+    if (!committed) {
+        SetError(error, Core3DLODSetErrorRecoveryRequired,
+            @"Regeneration command closure is uncertain.");
+        return Core3DLODSetCommitResultRecoveryRequired;
+    }
+#if DEBUG
+    if (fault == lod_owner::Fault::UnknownClose) {
+        SetError(error, Core3DLODSetErrorRecoveryRequired,
+            @"Injected unknown regeneration closure.");
+        return Core3DLODSetCommitResultRecoveryRequired;
+    }
+#endif
+    syls::StoreRead finalSYLS; decimation::F2StoreRead finalF2;
+    if (!document->ReadLODSetStore(finalSYLS) || finalSYLS.bytes != sylsBytes
+        || !document->ReadF2DerivativeStore(finalF2)
+        || finalF2.bytes != stagedF2Read.bytes
+        || ocaf->GetAvailableUndos() - undoBefore != 1
+        || !document->FinalizeF2DerivativeHistory()
+        || !document->FinalizeLODSetHistory()) {
+        SetError(error, Core3DLODSetErrorRecoveryRequired,
+            @"Regeneration readback or history finalization failed.");
+        return Core3DLODSetCommitResultRecoveryRequired;
+    }
+    return Core3DLODSetCommitResultCommitted;
 }
 
 - (Core3DLODSetCommitResult)referencePersistedF2Level:(NSUInteger)level
@@ -963,6 +1262,66 @@ bool DecodeStores(const Handle(OcctDocument)& document,
 + (NSUInteger)maximumSYLSRecordBytes { return syls::kMaximumRecordBytes; }
 
 #if DEBUG
+- (NSArray<Core3DDecimationResult *> *)debugCandidatesForLevels:
+    (NSArray<Core3DLODLevelRequest *> *)levels
+    positionsMM:(NSArray<NSNumber *> *)positionsMM
+    indices:(NSArray<NSNumber *> *)indices
+    sourceContributionTokens:(NSArray<NSString *> *)sourceContributionTokens
+    materialBytes:(NSData *)materialBytes
+    sourceArtifactSHA256:(NSString *)sourceArtifactSHA256
+    metersPerUnit:(double)metersPerUnit
+    error:(NSError **)error {
+    if (error) *error = nil;
+    if (levels.count < 2 || levels.count > lod::kMaximumLevels) {
+        SetError(error, Core3DLODSetErrorInvalidDefinition,
+            @"Synthetic candidate observation requires two to eight levels.");
+        return nil;
+    }
+    std::vector<syls::Level> nativeLevels;
+    nativeLevels.reserve(levels.count);
+    for (Core3DLODLevelRequest *request in levels) {
+        syls::Level level;
+        if (![self ownsRequest:request]
+            || request.targetTriangleCount > std::numeric_limits<std::uint32_t>::max()
+            || request.measurementSampleCount > std::numeric_limits<std::uint32_t>::max()
+            || request.silhouetteResolution > std::numeric_limits<std::uint32_t>::max()
+            || !DigestValue(request.silhouetteCameraSetSHA256,
+                            level.quality.silhouetteCameraSetSHA256)) {
+            SetError(error, Core3DLODSetErrorInvalidDefinition,
+                @"Synthetic candidate level definition is invalid.");
+            return nil;
+        }
+        level.targetTriangleCount = static_cast<std::uint32_t>(request.targetTriangleCount);
+        level.quality.maximumSurfaceDistanceMM = request.maximumSurfaceDistanceMM;
+        level.quality.maximumSilhouetteDeviationPixels =
+            request.maximumSilhouetteDeviationPixels;
+        level.quality.hardEdgeAngleDegrees = request.hardEdgeAngleDegrees;
+        level.quality.contactClearanceMM = request.contactClearanceMM;
+        level.quality.measurementSampleCount =
+            static_cast<std::uint32_t>(request.measurementSampleCount);
+        level.quality.silhouetteResolution =
+            static_cast<std::uint32_t>(request.silhouetteResolution);
+        nativeLevels.push_back(std::move(level));
+    }
+    NSError *f2Error = nil;
+    Core3DDecimationOpening *f2Opening =
+        [Core3DDecimationOpening openingWithCapture:nil error:&f2Error];
+    if (!f2Opening) {
+        SetError(error, Core3DLODSetErrorMissingProvenance,
+            f2Error.localizedDescription ?: @"Synthetic F2 opening is unavailable.");
+        return nil;
+    }
+    NSArray<NSData *> *settings = nil;
+    NSArray<Core3DDecimationRequest *> *requests = nil;
+    NSArray<Core3DDecimationResult *> *results = nil;
+    if (![self buildAllLevelCandidates:nativeLevels f2Opening:f2Opening
+            positions:positionsMM indices:indices tokens:sourceContributionTokens
+            material:materialBytes sourceArtifact:sourceArtifactSHA256
+            metersPerUnit:metersPerUnit settingsBytes:&settings
+            requests:&requests results:&results error:error]) return nil;
+    return results;
+}
+
 + (void)setDebugFault:(Core3DLODSetDebugFault)fault {
     lod_owner::Fault value = lod_owner::Fault::None;
     switch (fault) {

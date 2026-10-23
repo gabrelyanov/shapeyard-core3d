@@ -399,8 +399,8 @@ inline bool CanonicalOriginalsFeature(const FeatureNode& feature,
 }
 
 // A3/P2 is a normal SYCR/3 registry feature. Its payload is canonical and its
-// single ordered input must be an earlier PartBoolean feature. No SYCR/1 or
-// SYCR/2 validation branch is widened.
+// single ordered input must be an earlier PartBoolean feature using codec 1,
+// 2, or 4. No SYCR/1 or SYCR/2 validation branch is widened.
 inline bool CanonicalRetainedProgramSuffixFeature(
     const FeatureNode& feature, const std::vector<Node>& priorNodes) noexcept {
     try {
@@ -419,7 +419,8 @@ inline bool CanonicalRetainedProgramSuffixFeature(
         const auto* base = std::get_if<FeatureNode>(&found->value);
         return base && base->kind == PartBooleanFeatureKind
             && (base->codecVersion == PartBooleanFeatureCodec
-                || base->codecVersion == PartBooleanShellFeatureCodec);
+                || base->codecVersion == PartBooleanShellFeatureCodec
+                || base->codecVersion == PartBooleanOriginalsFeatureCodec);
     } catch (...) { return false; }
 }
 

@@ -9204,6 +9204,11 @@ Standard_Boolean OcctDocument::ValidateGeometryRepresentations() const
     return ValidateGeometryRepresentations(myOcafDoc);
 }
 
+namespace core3d::part_boolean::owner {
+bool ValidateOriginalsRecord(const Handle(TDocStd_Document)& document,
+                             const composite_recipe::Record& record) noexcept;
+}
+
 namespace {
 
 struct GeometryDocumentUsage
@@ -9486,6 +9491,14 @@ Standard_Boolean ValidateGeometryDocument(
                     ||!validCompositeSolid(source))return Standard_False;
             }
             const auto& definition = record.value->definition;
+            const bool hasOriginals = std::any_of(definition.nodes.begin(), definition.nodes.end(),
+                [](const core3d::composite_recipe::Node& node) {
+                    const auto* feature = std::get_if<core3d::composite_recipe::FeatureNode>(&node.value);
+                    return feature && feature->kind == core3d::composite_recipe::PartBooleanFeatureKind
+                        && feature->codecVersion == core3d::composite_recipe::PartBooleanOriginalsFeatureCodec;
+                });
+            if (hasOriginals && !core3d::part_boolean::owner::ValidateOriginalsRecord(document, record))
+                return Standard_False;
             const bool isPlainProfileCut = definition.schemaVersion
                 == core3d::plain_profile_cut::GraphVersion
                 || std::any_of(definition.nodes.begin(), definition.nodes.end(),
@@ -25922,7 +25935,9 @@ bool ResolveAnalyticFeatureChain(const composite_recipe::Definition& graph,
         chain.base = std::get_if<composite_recipe::FeatureNode>(&graph.nodes[2].value);
         chain.hasSuffix = chain.base
             && chain.base->kind == composite_recipe::PartBooleanFeatureKind
-            && chain.base->codecVersion == composite_recipe::PartBooleanFeatureCodec
+            && (chain.base->codecVersion == composite_recipe::PartBooleanFeatureCodec
+                || chain.base->codecVersion
+                    == composite_recipe::PartBooleanOriginalsFeatureCodec)
             && chain.output->inputs.front() == chain.base->node
             && chain.suffix.baseFeature == chain.base->node;
         return chain.hasSuffix;
@@ -26029,6 +26044,82 @@ bool OwnerAnalyticBuild(const retained_feature::OwnerExecutionContext& context,
     } catch (...) { output = {}; return false; }
 }
 
+bool ReplayOriginalsDetached(const OriginalsDefinition& definition,
+                             retained_feature::ReplayBudget& budget,
+                             const std::atomic_bool& cancelled,
+                             TopoDS_Shape& output) noexcept {
+    output.Nullify();
+    try {
+        std::vector<std::uint8_t> payload;
+        if (cancelled.load() || budget.exhausted || !EncodeOriginals(definition, payload)
+            || !budget.consume(1, 4, payload.size())) return false;
+        std::array<TopoDS_Shape, 2> sources;
+        retained_part_boolean::OperandReadSet reads;
+        for (std::size_t index = 0; index < sources.size(); ++index) {
+            const auto& input = definition.effective.inputs[index];
+            sources[index] = build::PersistenceMaterializeDetached(
+                build::BuildEffectiveAnalyticPrism(
+                    input.geometry, input.sourceMetersPerUnit,
+                    definition.carrierMetersPerUnit));
+            std::string bytes;
+            retained_recipe::Digest digest;
+            if (cancelled.load() || sources[index].IsNull()
+                || !retained_part_boolean::ExactShapeBytes(sources[index], bytes)
+                || !HashBytes(Bytes(bytes), digest)
+                || digest != input.commitments.geometry) return false;
+            retained_recipe::DependencyRead read{
+                {definition.owner, input.sourceNode, input.originalSourceFeature},
+                input.commitments.geometry, input.commitments.recipe,
+                input.commitments.placement, input.commitments.material,
+                input.commitments.groups};
+            (index == 0 ? reads.leftSource : reads.rightSource) = read;
+        }
+        if (cancelled.load()) return false;
+        retained_part_boolean::CandidateEvidence evidence;
+        auto candidate = retained_part_boolean::BuildDetachedCandidate(
+            build::NativeOperation(definition.operation),
+            sources[0], sources[1], Precision::Confusion(), reads, reads, &evidence);
+        const TopoDS_Shape solid = build::PersistenceMaterializeDetached(
+            build::AnalyticResultSolid(candidate.solid));
+        std::string bytes;
+        if (cancelled.load() || !candidate.admitted() || solid.IsNull()
+            || !retained_part_boolean::ExactShapeBytes(solid, bytes)
+            || !budget.consume(0, 0, bytes.size())) return false;
+        output = solid;
+        return true;
+    } catch (...) { output.Nullify(); return false; }
+}
+
+bool OwnerOriginalsBuild(const retained_feature::OwnerExecutionContext& context,
+                         const composite_recipe::FeatureNode& feature,
+                         const std::vector<retained_feature::ReplayValue>& inputs,
+                         retained_feature::ReplayBudget& budget,
+                         retained_feature::ReplayValue& output) noexcept {
+    output = {};
+    try {
+        const auto* graph = context.graph;
+        OriginalsDefinition definition;
+        if (!graph || inputs.size() != 2 || feature.inputs.size() != 2
+            || !composite_recipe::CanonicalOriginalsFeature(feature, graph->nodes)
+            || !DecodeOriginals(feature.parameters, definition)
+            || !(definition.owner == graph->owner)) return false;
+        for (std::size_t index = 0; index < inputs.size(); ++index) {
+            retained_recipe::Digest geometry;
+            if (!HashBytes(inputs[index].detachedShape, geometry)
+                || geometry != definition.originals.inputs[index].commitments.geometry)
+                return false;
+        }
+        const std::atomic_bool cancelled(false);
+        TopoDS_Shape solid;
+        if (!ReplayOriginalsDetached(definition, budget, cancelled, solid)
+            || !ShapeBytes(solid, output.detachedShape)
+            || !HashBytes(output.detachedShape, output.geometry)) return false;
+        output.shape = retained_feature::ShapeKind::Solid;
+        return OwnerFeatureProof(feature, inputs, output, output.familyProof)
+            && output.valid();
+    } catch (...) { output = {}; return false; }
+}
+
 bool OwnerSuffixBuild(const retained_feature::OwnerExecutionContext& context,
                       const composite_recipe::FeatureNode& feature,
                       const std::vector<retained_feature::ReplayValue>& inputs,
@@ -26092,9 +26183,9 @@ bool OwnerContextRequiredProof(const composite_recipe::FeatureNode&,
 }
 
 struct OwnerAnalyticRegistry final {
-    std::array<retained_feature::Entry, 2> validationEntries;
+    std::array<retained_feature::Entry, 3> validationEntries;
     retained_feature::RegistryView validation;
-    std::array<retained_feature::OwnerExecutionEntry, 2> executionEntries;
+    std::array<retained_feature::OwnerExecutionEntry, 3> executionEntries;
     retained_feature::OwnerExecutionRegistryView execution;
 
     OwnerAnalyticRegistry() noexcept
@@ -26106,6 +26197,15 @@ struct OwnerAnalyticRegistry final {
                retained_feature::ShapeKind::Solid, retained_feature::ShapeKind::Solid},
               2, retained_feature::ShapeKind::Solid,
               composite_recipe::CanonicalAnalyticFeature},
+             {OwnerContextRequiredBuild, OwnerContextRequiredProof,
+              OwnerContextRequiredProof, true, true}},
+            {{{composite_recipe::PartBooleanFeatureKind,
+               composite_recipe::PartBooleanOriginalsFeatureCodec}, 3,
+              part_boolean::MaximumPayloadBytes,
+              {retained_feature::ShapeKind::Solid, retained_feature::ShapeKind::Solid,
+               retained_feature::ShapeKind::Solid, retained_feature::ShapeKind::Solid},
+              2, retained_feature::ShapeKind::Solid,
+              composite_recipe::CanonicalOriginalsFeature},
              {OwnerContextRequiredBuild, OwnerContextRequiredProof,
               OwnerContextRequiredProof, true, true}},
             {{{composite_recipe::RetainedProgramSuffixFeatureKind,
@@ -26125,9 +26225,14 @@ struct OwnerAnalyticRegistry final {
              {&validationEntries[0].execution, OwnerAnalyticBuild,
               OwnerFeatureProve<OwnerAnalyticBuild>,
               OwnerFeatureProve<OwnerAnalyticBuild>}},
+            {{composite_recipe::PartBooleanFeatureKind,
+              composite_recipe::PartBooleanOriginalsFeatureCodec},
+             {&validationEntries[1].execution, OwnerOriginalsBuild,
+              OwnerFeatureProve<OwnerOriginalsBuild>,
+              OwnerFeatureProve<OwnerOriginalsBuild>}},
             {{composite_recipe::RetainedProgramSuffixFeatureKind,
               composite_recipe::RetainedProgramSuffixFeatureCodec},
-             {&validationEntries[1].execution, OwnerSuffixBuild,
+             {&validationEntries[2].execution, OwnerSuffixBuild,
               OwnerFeatureProve<OwnerSuffixBuild>,
               OwnerFeatureProve<OwnerSuffixBuild>}},
           }},
@@ -26292,6 +26397,432 @@ bool BuildRecordGraphCurrentness(
             ownerNonce, facts);
 }
 } // namespace
+
+// Detached graph replay is a read/proof seam. Production registry execution
+// remains empty; no caller receives capture, mutation or commit authority.
+bool ReplayOriginalsGraphDetached(const composite_recipe::Definition& graph,
+                                  const std::vector<TopoDS_Shape>& sources,
+                                  retained_feature::ReplayBudget& budget,
+                                  const std::atomic_bool& stop,
+                                  TopoDS_Shape& output) noexcept {
+    output.Nullify();
+    try {
+        if (stop.load() || budget.exhausted || graph.nodes.size() < 3
+            || graph.nodes.size() > 4 || sources.size() != 2
+            || !composite_recipe::ValidateV3(graph,
+                retained_feature::ProductionRegistry(),
+                retained_source::ProductionRegistry()).valid()) return false;
+        const auto* base = std::get_if<composite_recipe::FeatureNode>(&graph.nodes[2].value);
+        OriginalsDefinition definition;
+        if (!base || base->kind != composite_recipe::PartBooleanFeatureKind
+            || base->codecVersion != composite_recipe::PartBooleanOriginalsFeatureCodec
+            || !DecodeOriginals(base->parameters, definition)) return false;
+        for (std::size_t index = 0; index < 2; ++index) {
+            const auto* source = std::get_if<composite_recipe::SourceNode>(&graph.nodes[index].value);
+            std::vector<std::uint8_t> bytes; retained_recipe::Digest digest;
+            if (!source || source->shapeSlot >= sources.size() || stop.load()
+                || !ShapeBytes(sources[source->shapeSlot], bytes)
+                || !budget.consume(1, 1, bytes.size())
+                || !HashBytes(bytes, digest) || digest != source->commitments.geometry) return false;
+        }
+        TopoDS_Shape baseSolid;
+        if (!ReplayOriginalsDetached(definition, budget, stop, baseSolid)) return false;
+        if (graph.nodes.size() == 3) {
+            if (stop.load()) return false;
+            output = baseSolid; return true;
+        }
+        AnalyticFeatureChain chain;
+        composite_recipe::Definition prefix;
+        cut_display::Settings display;
+        if (!ResolveAnalyticFeatureChain(graph, chain) || !chain.hasSuffix
+            || !PrefixGraph(graph, prefix) || !CanonicalSuffixDisplay(display)
+            || stop.load() || !budget.consume(1, 3, chain.output->parameters.size())) return false;
+        const auto built = retained_program_suffix::build::Build(
+            baseSolid, prefix, chain.suffix, display, stop);
+        std::vector<std::uint8_t> bytes;
+        if (stop.load() || built.status != retained_program_suffix::build::Status::Built
+            || !ShapeBytes(built.solid, bytes)
+            || !budget.consume(0, 0, bytes.size())) return false;
+        output = built.solid; return true;
+    } catch (...) { output.Nullify(); return false; }
+}
+
+bool ValidateOriginalsRecord(const Handle(TDocStd_Document)& document,
+                             const composite_recipe::Record& record) noexcept {
+    try {
+        if (document.IsNull() || !record.value || record.current.IsNull()) return false;
+        const auto& graph = record.value->definition;
+        if (graph.nodes.size() < 3) return false;
+        const auto* base = std::get_if<composite_recipe::FeatureNode>(&graph.nodes[2].value);
+        OriginalsDefinition definition; double unit = 0;
+        if (!base || !DecodeOriginals(base->parameters, definition)
+            || !XCAFDoc_DocumentTool::GetLengthUnit(document, unit)
+            || std::memcmp(&unit, &definition.carrierMetersPerUnit, sizeof(double)) != 0)
+            return false;
+        retained_feature::ReplayBudget budget;
+        const std::atomic_bool stop(false); TopoDS_Shape rebuilt;
+        std::vector<std::uint8_t> expected, actual;
+        return ReplayOriginalsGraphDetached(graph, record.value->sourceShapes, budget, stop, rebuilt)
+            && ShapeBytes(rebuilt, expected) && ShapeBytes(record.current, actual)
+            && expected == actual;
+    } catch (...) { return false; }
+}
+
+#if DEBUG
+namespace i16_n_read {
+// Valid digests on deliberately invalid semantic records. This uses the landed
+// block writers, which encode values; acceptance is measured by the reader.
+std::vector<std::uint8_t> RehashedPayload(const OriginalsDefinition& baseline,
+                                         const OriginalsDefinition& malformed) {
+    std::vector<std::uint8_t> header, originals, effective;
+    if (!EncodeOriginals(baseline, header) || header.size() < 120
+        || !EncodeOriginalStateBlock(malformed.originals, originals)
+        || !EncodeEffectiveStateBlock(malformed.effective, effective)) return {};
+    header.resize(120);
+    std::copy(malformed.owner.entity.begin(), malformed.owner.entity.end(), header.begin() + 48);
+    Writer writer; writer.bytes = std::move(header);
+    WriteSized(writer, originals); WriteSized(writer, effective);
+    retained_recipe::Digest digest;
+    if (!writer.valid || !HashBytes(writer.bytes, digest)) return {};
+    writer.raw(digest); return writer.bytes;
+}
+
+bool ColdReaderEvidence(const composite_recipe::Definition& graph,
+                        const std::vector<TopoDS_Shape>& sources,
+                        const TopoDS_Shape& solid,
+                        const std::map<std::string, std::vector<std::uint8_t>>& malformations,
+                        std::map<std::string, bool>& rows) {
+    namespace cr = composite_recipe;
+    NativeDocumentSession session;
+    const Handle(OcctDocument) wrapper = session.Document();
+    if (wrapper.IsNull()) return false;
+    const auto document = wrapper->Document();
+    if (document.IsNull()) return false;
+    std::vector<TopoDS_Shape> persistedSources;
+    persistedSources.reserve(sources.size());
+    for (const TopoDS_Shape& source : sources) {
+        const TopoDS_Shape persisted = build::PersistenceMaterializeDetached(source);
+        if (persisted.IsNull()) return false;
+        persistedSources.push_back(persisted);
+    }
+    const TopoDS_Shape persistedSolid = build::PersistenceMaterializeDetached(solid);
+    if (persistedSolid.IsNull()) return false;
+    OriginalsDefinition definition;
+    const auto& feature = std::get<cr::FeatureNode>(graph.nodes[2].value);
+    if (!DecodeOriginals(feature.parameters, definition)) return false;
+    XCAFDoc_DocumentTool::SetLengthUnit(document, definition.carrierMetersPerUnit);
+    document->NewCommand();
+    const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+    const TDF_Label carrier = shapes->AddShape(
+        persistedSolid, Standard_False, Standard_False);
+    const auto setID = [](const TDF_Label& label, const Standard_GUID& attribute,
+                          const retained_recipe::UUID& value) {
+        TDataStd_AsciiString::Set(label, attribute,
+            TCollection_AsciiString(retained_solid::UUIDText(value).c_str()));
+    };
+    setID(document->Main(), DocumentIdentifierAttributeID(), graph.owner.document);
+    setID(carrier, EntityIdentifierAttributeID(), graph.owner.entity);
+    setID(carrier, DefinitionIdentifierAttributeID(), graph.owner.definition);
+    auto payload = std::make_shared<cr::Payload>();
+    payload->definition = graph; payload->sourceShapes = persistedSources;
+    if (!cr::Encode(graph, payload->bytes)
+        || !cr::Attribute::StageIndependentClone(
+            document, carrier, persistedSolid, payload)) return false;
+    document->CommitCommand();
+    NSString* stem = [NSTemporaryDirectory() stringByAppendingPathComponent:
+        [NSString stringWithFormat:@"i16-n-read-%@", NSUUID.UUID.UUIDString]];
+    const std::string saved = wrapper->save(std::string(stem.UTF8String) + ".fixture");
+    rows["cold-save-produced-path"] = !saved.empty();
+    if (saved.empty()) return false;
+    const auto read = [&rows](const std::string& path,
+                              std::vector<cr::Record>& records,
+                              bool recordOpenEvidence) {
+        Handle(TDocStd_Application) app = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(app);
+        Handle(TDocStd_Document) candidate;
+        Core3DBeginSafeBinaryRead();
+        const auto status = app->Open(TCollection_ExtendedString(path.c_str(), Standard_True), candidate);
+        const bool notRejected = !Core3DSafeBinaryReadWasRejected();
+        const bool hasDocument = !candidate.IsNull();
+        if (recordOpenEvidence) {
+            rows["cold-open-status-ok"] = status == PCDM_RS_OK;
+            rows["cold-open-not-rejected"] = notRejected;
+            rows["cold-open-has-document"] = hasDocument;
+        }
+        const bool okay = notRejected && status == PCDM_RS_OK
+            && hasDocument && cr::ReadAll(candidate, records)
+            && records.size() == 1 && ValidateOriginalsRecord(candidate, records.front());
+        if (!candidate.IsNull()) app->Close(candidate);
+        return okay;
+    };
+    std::vector<cr::Record> reopened;
+    rows["cold-read-valid"] = read(saved, reopened, true);
+    rows["cold-read-single-record"] = reopened.size() == 1;
+    if (!rows["cold-read-valid"] || !reopened.front().value) return false;
+    rows["cold-read-bytes-unchanged"] = reopened.front().value->bytes == payload->bytes;
+    if (!rows["cold-read-bytes-unchanged"]) return false;
+    NSData* file = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:saved.c_str()]];
+    if (!file) return false;
+    const auto* first = static_cast<const std::uint8_t*>(file.bytes);
+    const std::vector<std::uint8_t> nativeBytes(first, first + file.length);
+    const auto graphAt = std::search(nativeBytes.begin(), nativeBytes.end(),
+                                    payload->bytes.begin(), payload->bytes.end());
+    const auto featureAt = std::search(payload->bytes.begin(), payload->bytes.end(),
+                                      feature.parameters.begin(), feature.parameters.end());
+    rows["cold-file-contains-graph"] = graphAt != nativeBytes.end();
+    rows["cold-graph-contains-feature"] = featureAt != payload->bytes.end();
+    if (graphAt == nativeBytes.end() || featureAt == payload->bytes.end()) return false;
+    bool allRefused = true;
+    for (const auto& mutation : malformations) {
+        bool refused = false;
+        if (mutation.second.size() == feature.parameters.size()) {
+            auto graphBytes = payload->bytes;
+            std::copy(mutation.second.begin(), mutation.second.end(),
+                      graphBytes.begin() + std::distance(payload->bytes.begin(), featureAt));
+            graphBytes.resize(graphBytes.size() - 32);
+            retained_recipe::Digest digest;
+            if (!HashBytes(graphBytes, digest)) return false;
+            graphBytes.insert(graphBytes.end(), digest.begin(), digest.end());
+            auto native = nativeBytes;
+            std::copy(graphBytes.begin(), graphBytes.end(),
+                      native.begin() + std::distance(nativeBytes.begin(), graphAt));
+            const std::string path = std::string(stem.UTF8String) + "-" + mutation.first + ".xbf";
+            NSData* corrupted = [NSData dataWithBytes:native.data() length:native.size()];
+            if (![corrupted writeToFile:[NSString stringWithUTF8String:path.c_str()] atomically:YES])
+                return false;
+            std::vector<cr::Record> rejected;
+            refused = !read(path, rejected, false);
+        }
+        rows[mutation.first] = refused;
+        allRefused = allRefused && refused;
+    }
+    rows["semantic-malformation-rehashed"] = allRefused;
+    return true;
+}
+
+std::map<std::string, bool> Probe(OriginalsDefinition fixture) noexcept {
+    namespace pb = ::core3d::part_boolean;
+    namespace cr = composite_recipe;
+    std::map<std::string, bool> rows;
+    try {
+        std::array<TopoDS_Shape, 2> sourceShapes;
+        for (std::size_t index = 0; index < sourceShapes.size(); ++index) {
+            auto& original = fixture.originals.inputs[index];
+            auto& effective = fixture.effective.inputs[index];
+            sourceShapes[index] = pb::build::PersistenceMaterializeDetached(
+                pb::build::BuildEffectiveAnalyticPrism(
+                    effective.geometry, effective.sourceMetersPerUnit,
+                    fixture.carrierMetersPerUnit));
+            std::string bytes;
+            retained_recipe::Digest digest;
+            if (sourceShapes[index].IsNull()
+                || !retained_part_boolean::ExactShapeBytes(sourceShapes[index], bytes)
+                || !HashBytes(Bytes(bytes), digest)) return {{"fixture-shapes", false}};
+            original.commitments.geometry = effective.commitments.geometry = digest;
+            profile::Parameters recipe; recipe.metersPerUnit = original.sourceMetersPerUnit;
+            recipe.definition.depth = original.projection.dimensions[2];
+            recipe.definition.points = {gp_Pnt2d(0, 0),
+                gp_Pnt2d(original.projection.dimensions[0], 0),
+                gp_Pnt2d(original.projection.dimensions[0], original.projection.dimensions[1]),
+                gp_Pnt2d(0, original.projection.dimensions[1])};
+            std::vector<double> scalars;
+            original.recipeSchema = std::uint32_t(profile::SchemaFor(recipe));
+            if (!profile::Encode(recipe, scalars)
+                || !cr::EncodeScalarRecipe(cr::RecipeKind::Profile,
+                    original.recipeSchema, scalars, original.recipeBytes)
+                || !cr::Hash(original.recipeBytes, digest)) return {{"fixture-recipe", false}};
+            original.commitments.recipe = effective.commitments.recipe = digest;
+            original.sourceRootToCarrier[3] = original.projection.translation[0];
+            original.sourceRootToCarrier[7] = original.projection.translation[1];
+            original.sourceRootToCarrier[11] = original.projection.translation[2];
+        }
+        std::vector<std::uint8_t> payloadBytes;
+        if (!pb::EncodeOriginals(fixture, payloadBytes)) return {{"fixture-codec", false}};
+
+        cr::Definition graph; graph.schemaVersion = 3; graph.owner = fixture.owner;
+        graph.outputNode = fixture.booleanNode; graph.issuance.nextLocalID = 4;
+        cr::FeatureNode feature; feature.node = fixture.booleanNode;
+        feature.feature = fixture.feature; feature.localID = 3;
+        feature.kind = cr::PartBooleanFeatureKind;
+        feature.codecVersion = cr::PartBooleanOriginalsFeatureCodec;
+        feature.parameters = payloadBytes;
+        for (std::size_t index = 0; index < 2; ++index) {
+            const auto& original = fixture.originals.inputs[index];
+            cr::SourceNode source; source.node = original.sourceNode;
+            source.localID = original.sourceLocalID; source.original = original.original;
+            source.recipe.kind = cr::RecipeKind(std::uint8_t(original.recipeKind));
+            source.recipe.schema = original.recipeSchema;
+            source.recipe.bytes = original.recipeBytes;
+            source.inputToCarrier.sourceMetersPerUnit = original.sourceMetersPerUnit;
+            source.inputToCarrier.carrierMetersPerUnit = original.carrierMetersPerUnit;
+            source.inputToCarrier.matrix = original.sourceRootToCarrier;
+            source.commitments = {original.commitments.geometry,
+                original.commitments.recipe, original.commitments.placement,
+                original.commitments.material, original.commitments.groups};
+            source.shapeSlot = original.shapeSlot;
+            graph.nodes.push_back({source}); feature.inputs.push_back(source.node);
+        }
+        graph.nodes.push_back({feature});
+        rows["graph-reader-canonical"] = cr::ValidateV3(graph,
+            retained_feature::ProductionRegistry(), retained_source::ProductionRegistry()).valid()
+            && cr::CanonicalOriginalsFeature(feature, graph.nodes);
+
+        std::vector<std::uint8_t> frozenBefore, frozenAfter;
+        pb::EncodeOriginalStateBlock(fixture.originals, frozenBefore);
+        const auto programsBefore = std::array<std::vector<std::uint8_t>, 2>{
+            fixture.originals.inputs[0].recipeBytes,
+            fixture.originals.inputs[1].recipeBytes};
+        retained_feature::ReplayBudget budget;
+        const std::atomic_bool running(false);
+        TopoDS_Shape before, after;
+        const bool builtBefore = ReplayOriginalsDetached(fixture, budget, running, before);
+        fixture.effective.inputs[0].geometry.dimensions[1] += 3;
+        const TopoDS_Shape editedSource = pb::build::PersistenceMaterializeDetached(
+            pb::build::BuildEffectiveAnalyticPrism(
+                fixture.effective.inputs[0].geometry,
+                fixture.effective.inputs[0].sourceMetersPerUnit,
+                fixture.carrierMetersPerUnit));
+        std::string editedSourceBytes;
+        retained_recipe::Digest editedSourceDigest;
+        if (editedSource.IsNull()
+            || !retained_part_boolean::ExactShapeBytes(editedSource, editedSourceBytes)
+            || !HashBytes(Bytes(editedSourceBytes), editedSourceDigest))
+            return {{"edited-source", false}};
+        fixture.effective.inputs[0].commitments.geometry = editedSourceDigest;
+        std::string beforeBytes, afterBytes;
+        const bool builtAfter = ReplayOriginalsDetached(fixture, budget, running, after);
+        rows["effective-replay-built"] = builtBefore && builtAfter;
+        rows["effective-edit-changes-result"] = builtBefore && builtAfter
+            && retained_part_boolean::ExactShapeBytes(before, beforeBytes)
+            && retained_part_boolean::ExactShapeBytes(after, afterBytes)
+            && beforeBytes != afterBytes;
+        pb::EncodeOriginalStateBlock(fixture.originals, frozenAfter);
+        rows["replay-keeps-frozen-originals"] = frozenBefore == frozenAfter;
+        rows["replay-keeps-source-programs"] = programsBefore[0]
+                == fixture.originals.inputs[0].recipeBytes
+            && programsBefore[1] == fixture.originals.inputs[1].recipeBytes;
+        // TESTS.md N-READ requires operation edits without rewriting creation
+        // history. Keep this positive assertion: the landed codec currently
+        // refuses it in PartBooleanDefinition.hxx::Valid(OriginalsDefinition).
+        auto operationEdit = fixture;
+        operationEdit.operation = pb::Operation::Union;
+        std::vector<std::uint8_t> operationPayload, operationOriginals;
+        const bool operationEncoded = pb::EncodeOriginals(operationEdit, operationPayload);
+        const bool operationFrozen = pb::EncodeOriginalStateBlock(
+            operationEdit.originals, operationOriginals) && operationOriginals == frozenBefore;
+        rows["operation-baseline-valid"] = pb::Valid(fixture);
+        rows["operation-edit-encodable"] = operationEncoded;
+        rows["operation-edit-originals-unchanged"] = operationFrozen;
+        TopoDS_Shape operationResult;
+        retained_feature::ReplayBudget operationBudget;
+        rows["effective-operation-edit-preserves-frozen-originals"] = operationEncoded
+            && operationFrozen
+            && ReplayOriginalsDetached(operationEdit, operationBudget, running, operationResult);
+        pb::Operation operation = pb::Operation::Union;
+        rows["suffix-reads-v4-operation"] =
+            retained_program_suffix::build::detail::OperationOf(graph, operation)
+            && operation == fixture.operation;
+
+        // Corrupt complete persisted records and recompute both block and
+        // envelope digests, so ordinary BinXCAF read must reject the semantics.
+        pb::OriginalsDefinition originalFixture;
+        pb::DecodeOriginals(feature.parameters, originalFixture);
+        std::map<std::string, std::vector<std::uint8_t>> malformedPayloads;
+        const auto addMalformed = [&](const char* key, const pb::OriginalsDefinition& value) {
+            malformedPayloads[key] = RehashedPayload(originalFixture, value);
+        };
+        auto malformed = originalFixture; malformed.owner.entity[0] ^= 1;
+        addMalformed("reader-checks-owner", malformed);
+        malformed = originalFixture; malformed.effective.inputs[0].sourceNode[0] ^= 1;
+        addMalformed("reader-checks-source-node", malformed);
+        malformed = originalFixture; malformed.originals.inputs[0].shapeSlot = 1;
+        addMalformed("reader-checks-role-slot", malformed);
+        malformed = originalFixture; malformed.originals.inputs[0].carrierMetersPerUnit *= 2;
+        addMalformed("reader-checks-units", malformed);
+        malformed = originalFixture; malformed.originals.inputs[0].metadata.appearance.material = 7;
+        addMalformed("reader-checks-material-binding", malformed);
+        malformed = originalFixture; malformed.originals.inputs[0].metadata.groups = {7};
+        addMalformed("reader-checks-group-binding", malformed);
+        malformed = originalFixture; malformed.originals.inputs[0].metadata.layers = {7};
+        addMalformed("reader-checks-layer-binding", malformed);
+        const std::vector<TopoDS_Shape> sourceVector(sourceShapes.begin(), sourceShapes.end());
+        ColdReaderEvidence(graph, sourceVector, before, malformedPayloads, rows);
+
+        auto program = retained_program_suffix::Probe::Program(graph.outputNode,
+            {retained_program_suffix::Probe::Bore(1, 5, 8, 1)});
+        program.carrierMetersPerUnit = fixture.carrierMetersPerUnit;
+        const auto suffixed = retained_program_suffix::Probe::Suffixed(graph, program, 90);
+        retained_feature::ReplayBudget suffixBudget;
+        TopoDS_Shape suffixSolid;
+        const bool suffixBuilt = cr::ValidateV3(suffixed,
+            retained_feature::ProductionRegistry(), retained_source::ProductionRegistry()).valid()
+            && ReplayOriginalsGraphDetached(suffixed, sourceVector, suffixBudget, running, suffixSolid);
+        std::string suffixBytes;
+        rows["suffix-reads-v4-operation"] = rows["suffix-reads-v4-operation"]
+            && !program.steps.empty() && suffixBuilt
+            && retained_part_boolean::ExactShapeBytes(suffixSolid, suffixBytes)
+            && suffixBytes != beforeBytes;
+
+        const std::atomic_bool stopped(true);
+        retained_feature::ReplayBudget stopBudget;
+        TopoDS_Shape refused, refusedAgain;
+        rows["replay-stop-sticky"] = !ReplayOriginalsDetached(
+                fixture, stopBudget, stopped, refused)
+            && !ReplayOriginalsDetached(fixture, stopBudget, stopped, refusedAgain)
+            && refused.IsNull() && refusedAgain.IsNull();
+        retained_feature::ReplayBudget denied; denied.topologyRemaining = 0;
+        TopoDS_Shape deniedOutput;
+        const bool firstDenied = !ReplayOriginalsDetached(
+            fixture, denied, running, deniedOutput);
+        rows["replay-budget-sticky"] = firstDenied && denied.exhausted
+            && !ReplayOriginalsDetached(fixture, denied, running, deniedOutput);
+        rows["replay-refusal-no-partial-output"] = deniedOutput.IsNull();
+
+        retained_recipe::OwnerKey destination = fixture.owner;
+        destination.entity[0] ^= 0x55; destination.definition[0] ^= 0x33;
+        std::uint8_t issued = 9;
+        pattern_recipe_clone::IssueUUID issue = [&](retained_recipe::UUID& value) {
+            value = {}; value[0] = issued++; value[15] = 1; return true;
+        };
+        cr::Definition clone; pattern_recipe_clone::IdentityMap identities;
+        const bool cloneReady = pattern_recipe_clone::PrepareOriginalsRecordClone(
+            graph, destination, issue, clone, identities);
+        pb::OriginalsDefinition clonedPayload;
+        const auto* cloneFeature = clone.nodes.empty() ? nullptr
+            : std::get_if<cr::FeatureNode>(&clone.nodes.back().value);
+        const bool decodedClone = cloneReady && cloneFeature
+            && pb::DecodeOriginals(cloneFeature->parameters, clonedPayload);
+        rows["clone-rebinds-owner"] = decodedClone
+            && clone.owner == destination && clonedPayload.owner == destination;
+        rows["clone-preserves-provenance"] = decodedClone
+            && clonedPayload.originals.inputs[0].original
+                == fixture.originals.inputs[0].original
+            && clonedPayload.originals.inputs[1].original
+                == fixture.originals.inputs[1].original;
+        std::vector<std::uint8_t> clonedFrozen;
+        const bool cloneFrozen = decodedClone
+            && pb::EncodeOriginalStateBlock(clonedPayload.originals, clonedFrozen)
+            && clonedFrozen == frozenBefore;
+        rows["clone-preserves-provenance"] = rows["clone-preserves-provenance"] && cloneFrozen;
+        rows["clone-preserves-original-programs"] = decodedClone
+            && clonedPayload.originals.inputs[0].recipeBytes == programsBefore[0]
+            && clonedPayload.originals.inputs[1].recipeBytes == programsBefore[1];
+
+        rows["old-r2-rejects-v4"] = cr::PartBooleanOriginalsFeatureCodec != 1
+            && cr::PartBooleanOriginalsFeatureCodec != 3;
+        rows["old-r2-wire1-frozen"] = cr::PartBooleanFeatureCodec == 1;
+        rows["old-r2-wire3-frozen"] = cr::PartBooleanRecipeFeatureCodec == 3;
+        const auto* descriptor = retained_feature::ProductionRegistry().find(
+            {cr::PartBooleanFeatureKind, cr::PartBooleanOriginalsFeatureCodec});
+        rows["v4-reader-does-not-grant-owner"] = descriptor
+            && retained_recipe::ReadablePartBooleanFeature(
+                cr::PartBooleanFeatureKind, cr::PartBooleanOriginalsFeatureCodec)
+            && !descriptor->execution.installed();
+        return rows;
+    } catch (...) { return {{"probe-exception-free", false}}; }
+}
+} // namespace i16_n_read
+#endif
 
 PartBooleanOwner::PartBooleanOwner(OcctDocument& owner) noexcept
     : owner_(owner), document_(owner.Document()),

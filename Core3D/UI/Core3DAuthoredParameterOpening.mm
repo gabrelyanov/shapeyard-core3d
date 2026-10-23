@@ -1336,6 +1336,11 @@ core3d::part_boolean::OriginalsDefinition I16Fixture(double unit) {
 }
 } // namespace
 
+namespace core3d::part_boolean::owner::i16_n_read {
+std::map<std::string, bool> Probe(
+    ::core3d::part_boolean::OriginalsDefinition fixture) noexcept;
+}
+
 extern "C" void *Core3DDebugI16OriginalsCodecProbe(double unit) {
     namespace pb = core3d::part_boolean;
     namespace cr = core3d::composite_recipe;
@@ -1451,6 +1456,14 @@ extern "C" void *Core3DDebugI16OriginalsCodecProbe(double unit) {
         put(@"mismatched-source-binding-refused",
             !cr::CanonicalOriginalsFeature(feature, sources));
     } catch (...) { checks[@"probe-exception-free"] = @NO; }
+    return (__bridge_retained void *)[checks copy];
+}
+
+extern "C" void *Core3DDebugI16NReadProbe(double unit) {
+    NSMutableDictionary<NSString *, NSNumber *> *checks = [NSMutableDictionary dictionary];
+    for (const auto& row : core3d::part_boolean::owner::i16_n_read::Probe(
+             I16Fixture(unit)))
+        checks[[NSString stringWithUTF8String:row.first.c_str()]] = @(row.second);
     return (__bridge_retained void *)[checks copy];
 }
 #endif

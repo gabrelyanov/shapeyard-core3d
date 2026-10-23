@@ -160,6 +160,13 @@ inline bool OperationOf(const composite_recipe::Definition& graph,
             operation = shell.operation;
             return true;
         }
+        if (feature->codecVersion == composite_recipe::PartBooleanOriginalsFeatureCodec) {
+            part_boolean::OriginalsDefinition originals;
+            if (!composite_recipe::CanonicalOriginalsFeature(*feature, graph.nodes)
+                || !part_boolean::DecodeOriginals(feature->parameters, originals)) return false;
+            operation = originals.operation;
+            return true;
+        }
         return false;
     } catch (...) { return false; }
 }

@@ -38,7 +38,7 @@ struct Decision final {
 };
 
 // The base must be the owner's current output PartBoolean feature in SYCR/3,
-// using analytic codec 1 or shell codec 2. An owner whose output is
+// using analytic codec 1, shell codec 2, or readable originals codec 4. An owner whose output is
 // already a suffix is an EDIT of that suffix, not an append, and refuses here.
 inline bool BaseFeatureIsPartBoolean(const composite_recipe::Definition& graph) noexcept {
     try {
@@ -48,7 +48,8 @@ inline bool BaseFeatureIsPartBoolean(const composite_recipe::Definition& graph) 
             || feature->kind != composite_recipe::PartBooleanFeatureKind) return false;
         return graph.schemaVersion == 3
             && (feature->codecVersion == composite_recipe::PartBooleanFeatureCodec
-                || feature->codecVersion == composite_recipe::PartBooleanShellFeatureCodec);
+                || feature->codecVersion == composite_recipe::PartBooleanShellFeatureCodec
+                || feature->codecVersion == composite_recipe::PartBooleanOriginalsFeatureCodec);
     } catch (...) { return false; }
 }
 

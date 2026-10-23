@@ -142,6 +142,17 @@ __attribute__((objc_subclassing_restricted))
     request:(Core3DDecimationRequest *)request result:(Core3DDecimationResult *)result
     settingsCanonicalBytes:(NSData *)settingsCanonicalBytes error:(NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(f2PersistDerivative(controller:request:result:settingsCanonicalBytes:));
+//! Validates the same sealed F2 producer tuple as the ordinary persist path,
+//! derives the requested level key (0...7), and stages the exact F2DR store
+//! inside the caller's already-open native command. It never opens, commits,
+//! aborts, or finalizes history. The caller must have fenced the capture
+//! immediately before opening its command and must abort the whole command on
+//! nil. Existing level-zero persistence and restore APIs are unchanged.
+- (nullable Core3DPersistedDecimationDerivative *)f2StageDerivativeForController:(Core3DViewController *)controller
+    level:(NSUInteger)level request:(Core3DDecimationRequest *)request
+    result:(Core3DDecimationResult *)result settingsCanonicalBytes:(NSData *)settingsCanonicalBytes
+    error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(f2StageDerivative(controller:level:request:result:settingsCanonicalBytes:));
 //! Read-only restore predicate: the stored row exists, is Current/0, and its
 //! source-revision and settings witnesses recompute equal against the current
 //! capture and the supplied canonical settings bytes. Never writes; any

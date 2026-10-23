@@ -23,6 +23,11 @@ NSErrorDomain const Core3DDecimationErrorDomain = @"Core3DDecimationErrorDomain"
 namespace {
 using NativeError = core3d::export_mesh_decimator::Error;
 
+// Set only for the duration of the public borrowed-command staging call.
+// Ordinary F2 entry points always observe -1 and retain their level-zero,
+// command-owning behavior byte-for-byte.
+thread_local NSInteger F2BorrowedStageLevel = -1;
+
 bool LowerHexDigest(NSString *value) {
     if (value.length != 64) return false;
     NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"];
@@ -1025,7 +1030,9 @@ bool F2VerifyAttributeOutput(
             @"F2 persist requires a capture-bound opening with the sealed producer request and result.");
         return nil;
     }
-    if (![capture isCurrent:error]) {
+    const NSInteger borrowedStageLevel = F2BorrowedStageLevel;
+    const bool borrowedStage = borrowedStageLevel >= 0 && borrowedStageLevel <= 7;
+    if (!borrowedStage && ![capture isCurrent:error]) {
         SetError(error, Core3DDecimationErrorStaleSource, @"F2 source capture is stale.");
         return nil;
     }
@@ -1170,12 +1177,15 @@ bool F2VerifyAttributeOutput(
             @"F2 derivative store binding mismatch.");
         return nil;
     }
-    const F2Digest key = f2::OwnerSetKey(documentUUID, entityUUID, definitionUUID);
+    const std::uint8_t level = borrowedStage
+        ? static_cast<std::uint8_t>(borrowedStageLevel) : 0;
+    const F2Digest key = f2::OwnerSetKey(documentUUID, entityUUID, definitionUUID, level);
     const F2Record *existing = F2FindRow(store, key);
     // Build the candidate record: reuse the derivative identity tuple of an
     // existing row; mint one natively on first creation.
     F2Record candidate;
     candidate.ownerSetKey = key;
+    candidate.level = level;
     candidate.entityUUID = entityUUID;
     candidate.definitionUUID = definitionUUID;
     candidate.sourceFeatureUUID = sourceFeatureUUID;
@@ -1247,6 +1257,19 @@ bool F2VerifyAttributeOutput(
         && before.bytes == candidateBytes)
         return [[Core3DPersistedDecimationDerivative alloc] initWithRecord:candidate
             documentUUID:documentUUID];
+    if (borrowedStage) {
+        f2::F2StoreRead staged;
+        if (!document->StageF2DerivativeStore(
+                before, candidateBytes, Standard_False, staged)
+            || staged.occurrence != f2::F2StoreOccurrence::Present
+            || staged.bytes != candidateBytes) {
+            SetError(error, Core3DDecimationErrorDerivativePersistenceUnavailable,
+                @"F2 borrowed-command staging failed; the caller must abort.");
+            return nil;
+        }
+        return [[Core3DPersistedDecimationDerivative alloc] initWithRecord:candidate
+            documentUUID:documentUUID];
+    }
     switch (F2WriteStoreAtomically(document, capture, before, candidateBytes)) {
         case F2WriteOutcome::Committed: break;
         case F2WriteOutcome::Stale:
@@ -1264,6 +1287,31 @@ bool F2VerifyAttributeOutput(
     }
     return [[Core3DPersistedDecimationDerivative alloc] initWithRecord:candidate
         documentUUID:documentUUID];
+}
+
+- (Core3DPersistedDecimationDerivative *)f2StageDerivativeForController:(Core3DViewController *)controller
+    level:(NSUInteger)level request:(Core3DDecimationRequest *)request
+    result:(Core3DDecimationResult *)result settingsCanonicalBytes:(NSData *)settingsCanonicalBytes
+    error:(NSError **)error {
+    if (error) *error = nil;
+    const Handle(OcctDocument) document = F2DocumentForController(controller);
+    const Handle(TDocStd_Document) ocaf = document.IsNull()
+        ? Handle(TDocStd_Document)() : document->Document();
+    if (!NSThread.isMainThread || level > 7 || ocaf.IsNull()
+        || !ocaf->HasOpenCommand() || F2BorrowedStageLevel != -1) {
+        SetError(error, Core3DDecimationErrorDerivativePersistenceUnavailable,
+            @"F2 borrowed staging requires level 0...7 and one caller-owned open command.");
+        return nil;
+    }
+    F2BorrowedStageLevel = static_cast<NSInteger>(level);
+    Core3DPersistedDecimationDerivative *value = nil;
+    @try {
+        value = [self f2PersistDerivativeForController:controller request:request
+            result:result settingsCanonicalBytes:settingsCanonicalBytes error:error];
+    } @finally {
+        F2BorrowedStageLevel = -1;
+    }
+    return value;
 }
 
 - (BOOL)f2CanRestorePersistedDerivativeForController:(Core3DViewController *)controller

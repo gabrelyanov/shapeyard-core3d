@@ -33,6 +33,16 @@ struct AdmissionDecision {
     bool admitted() const noexcept { return refusal == Refusal::None; }
 };
 
+// Readability classification only.  In particular this helper is not used by
+// Evaluate to confer mutation or owner authority on SYPB/4.
+inline bool ReadablePartBooleanFeature(std::uint32_t kind,
+                                       std::uint32_t codecVersion) noexcept {
+    return kind == composite_recipe::PartBooleanFeatureKind
+        && (codecVersion == composite_recipe::PartBooleanFeatureCodec
+            || codecVersion == composite_recipe::PartBooleanShellFeatureCodec
+            || codecVersion == composite_recipe::PartBooleanOriginalsFeatureCodec);
+}
+
 inline AdmissionDecision Evaluate(const OwnerSnapshot& snapshot,
                                   const AdmissionRule& rule) noexcept {
     AdmissionDecision result;

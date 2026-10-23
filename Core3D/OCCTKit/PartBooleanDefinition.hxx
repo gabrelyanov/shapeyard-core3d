@@ -686,7 +686,9 @@ inline bool Valid(const OriginalsDefinition& value) noexcept {
             || value.versions.proof != 1 || value.versions.selector != 1
             || value.versions.material != 1 || value.originals.schema != 1
             || value.effective.metadataSchema != 1
-            || value.originals.creationOperation != value.operation
+            || (value.originals.creationOperation != Operation::Union
+                && value.originals.creationOperation != Operation::Subtract
+                && value.originals.creationOperation != Operation::Intersect)
             || !ValidTables(value.originals.materials, value.originals.groups, value.originals.layers)
             || !ValidTables(value.effective.materials, value.effective.groups, value.effective.layers))
             return false;

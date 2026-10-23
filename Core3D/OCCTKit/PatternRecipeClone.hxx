@@ -255,6 +255,78 @@ inline bool IssueMapped(const UUID& oldValue, const IssueUUID& issue,
     } catch (...) { return false; }
 }
 
+// Rebind graph-local owner/node/feature authority for an independent SYPB/4
+// clone while retaining the archived SourceIdentity values, source programs,
+// and metadata provenance.  This is value-only preparation: staging remains
+// the caller's separately owned OCAF operation.
+inline bool PrepareOriginalsRecordClone(
+    const composite_recipe::Definition& source,
+    const retained_recipe::OwnerKey& destinationOwner,
+    const IssueUUID& issue,
+    composite_recipe::Definition& output,
+    IdentityMap& identities) noexcept {
+    output = {}; identities = {};
+    try {
+        if (!composite_recipe::Valid(source) || source.schemaVersion != 3
+            || source.nodes.size() != 3 || !retained_recipe::Valid(destinationOwner)
+            || destinationOwner.document != source.owner.document) return false;
+        const auto* sourceFeature = std::get_if<composite_recipe::FeatureNode>(
+            &source.nodes.back().value);
+        part_boolean::OriginalsDefinition originals;
+        if (!sourceFeature
+            || sourceFeature->codecVersion
+                != composite_recipe::PartBooleanOriginalsFeatureCodec
+            || !part_boolean::DecodeOriginals(sourceFeature->parameters, originals)) return false;
+
+        output = source;
+        std::set<UUID> occupied;
+        for (const auto& node : output.nodes) {
+            occupied.insert(composite_recipe::NodeID(node));
+            if (const auto* feature = std::get_if<composite_recipe::FeatureNode>(&node.value))
+                occupied.insert(feature->feature);
+        }
+        identities.global.emplace(output.owner.entity, destinationOwner.entity);
+        identities.global.emplace(output.owner.definition, destinationOwner.definition);
+        output.owner = destinationOwner;
+        for (auto& node : output.nodes) {
+            if (auto* graphSource = std::get_if<composite_recipe::SourceNode>(&node.value)) {
+                // Source node IDs are archived inside the immutable originals
+                // block. The destination owner qualifies their new locators.
+                identities.global.emplace(graphSource->node, graphSource->node);
+            } else {
+                auto& feature = std::get<composite_recipe::FeatureNode>(node.value);
+                if (!IssueMapped(feature.node, issue, occupied, identities, feature.node)
+                    || !IssueMapped(feature.feature, issue, occupied, identities,
+                                    feature.feature)) return false;
+                for (UUID& input : feature.inputs) {
+                    const auto found = identities.global.find(input);
+                    if (found == identities.global.end()) return false;
+                    input = found->second;
+                }
+            }
+        }
+        const auto reboundOutput = identities.global.find(output.outputNode);
+        if (reboundOutput == identities.global.end()) return false;
+        output.outputNode = reboundOutput->second;
+        auto* feature = std::get_if<composite_recipe::FeatureNode>(
+            &output.nodes.back().value);
+        if (!feature) return false;
+        originals.owner = destinationOwner;
+        originals.booleanNode = feature->node;
+        originals.feature = feature->feature;
+        for (std::size_t index = 0; index < 2; ++index) {
+            const auto rebound = identities.global.find(
+                originals.originals.inputs[index].sourceNode);
+            if (rebound == identities.global.end()) return false;
+            if (originals.originals.inputs[index].sourceNode != rebound->second
+                || originals.effective.inputs[index].sourceNode != rebound->second) return false;
+        }
+        if (!part_boolean::EncodeOriginals(originals, feature->parameters)
+            || !composite_recipe::Valid(output)) return false;
+        return true;
+    } catch (...) { output = {}; identities = {}; return false; }
+}
+
 // D1-C is deliberately a separate typed path. It reissues every durable global
 // graph/source/feature/material identity while retaining owner-local localIDs
 // and the complete issuance/nonreuse state byte-for-byte.
