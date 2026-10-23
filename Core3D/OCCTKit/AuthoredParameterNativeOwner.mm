@@ -206,6 +206,10 @@ ApplyResult Owner::applyBoolean(Capability capability, std::size_t inputIndex,
             return refuse("authored.stale-opening");
         }
 #if DEBUG
+        if (state_->debugCloseUnprovenArmed)
+            state_->context->debugReportNextCloseUnproven();
+#endif
+#if DEBUG
         if (!state_->document->StageAuthoredBooleanPair(*state_->capture, candidate,
                 state_->debugStageFault.get())) {
 #else
@@ -384,7 +388,6 @@ bool Owner::debugReportNextCloseUnproven() noexcept {
     if (![NSThread isMainThread] || !state_ || state_->prepared
         || state_->debugCloseUnprovenArmed
         || currentness() != Currentness::Current || !state_->context) return false;
-    state_->context->debugReportNextCloseUnproven();
     state_->debugCloseUnprovenArmed = true;
     return true;
 }
