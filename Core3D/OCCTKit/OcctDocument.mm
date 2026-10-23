@@ -25995,6 +25995,93 @@ retained_recipe::DependencyRead OwnerRead(
         input.commitments.groups};
 }
 
+// One owner replay owns every continuation used by its detached native work.
+// The persisted graph never carries these process-local references, and the
+// production registry remains deliberately non-executable.
+enum class OwnerOperationPhase : std::uint8_t {
+    SourceProof = 0, BaseReplay, BaseFamilyProof, BaseFixedPoint,
+    SuffixReplay, SuffixFamilyProof, SuffixFixedPoint, Count,
+};
+
+#if DEBUG
+struct OwnerOperationProbe final {
+    static constexpr std::size_t PhaseCount =
+        static_cast<std::size_t>(OwnerOperationPhase::Count);
+    std::array<bool, PhaseCount> hit{};
+    std::array<std::size_t, PhaseCount> featureTopologyAtEntry{};
+    std::array<std::size_t, PhaseCount> topologyVisitsAtEntry{};
+    std::array<std::size_t, PhaseCount> suffixStepsAtEntry{};
+    OwnerOperationPhase stopBefore = OwnerOperationPhase::Count;
+    OwnerOperationPhase exhaustFeatureBefore = OwnerOperationPhase::Count;
+    OwnerOperationPhase exhaustTopologyBefore = OwnerOperationPhase::Count;
+    OwnerOperationPhase exhaustSuffixBefore = OwnerOperationPhase::Count;
+    std::atomic_bool* mutableStop = nullptr;
+};
+#endif
+
+struct OwnerOperationSettings final {
+    const cut_display::Settings* display = nullptr;
+    const std::atomic_bool* stop = nullptr;
+    retained_feature::ReplayBudget* featureBudget = nullptr;
+    mutable retained_program_suffix::build::Budget suffixBudget;
+    mutable retained_topology_budget::Counter topologyBudget;
+    mutable bool refused = false;
+#if DEBUG
+    OwnerOperationProbe* probe = nullptr;
+#endif
+
+    bool enter(OwnerOperationPhase phase,
+               retained_feature::ReplayBudget& budget) const noexcept {
+        if (refused || !display || !stop || featureBudget != &budget
+            || stop->load() || budget.exhausted || topologyBudget.exhausted) return false;
+#if DEBUG
+        if (probe) {
+            const std::size_t index = static_cast<std::size_t>(phase);
+            probe->hit[index] = true;
+            probe->featureTopologyAtEntry[index] = budget.topologyRemaining;
+            probe->topologyVisitsAtEntry[index] = topologyBudget.topologyVisits;
+            probe->suffixStepsAtEntry[index] = suffixBudget.booleanSteps;
+            if (probe->stopBefore == phase && probe->mutableStop)
+                probe->mutableStop->store(true);
+            if (probe->exhaustFeatureBefore == phase)
+                budget.consume(0, 0, budget.topologyRemaining);
+            if (probe->exhaustTopologyBefore == phase)
+                topologyBudget.visit(
+                    retained_topology_budget::MaximumTopologyVisits
+                        - topologyBudget.topologyVisits,
+                    retained_topology_budget::Site::None);
+            if (probe->exhaustSuffixBefore == phase)
+                suffixBudget.booleanSteps =
+                    retained_program_suffix::build::Budget::MaximumSteps;
+        }
+#endif
+        return !stop->load() && !budget.exhausted && !topologyBudget.exhausted;
+    }
+
+    bool charge(const TopoDS_Shape& shape,
+                retained_topology_budget::Site site) const noexcept {
+        if (refused || !stop || stop->load() || topologyBudget.exhausted
+            || !topologyBudget.beginStage(site)
+            || retained_topology_budget::ChargeTraversal(
+                shape, topologyBudget, *stop, site)
+                != retained_topology_budget::WalkStatus::Completed) {
+            refused = true;
+            return false;
+        }
+        return true;
+    }
+
+    bool deny() const noexcept { refused = true; return false; }
+};
+
+const OwnerOperationSettings* OwnerOperation(
+    const retained_feature::OwnerExecutionContext& context,
+    retained_feature::ReplayBudget& budget) noexcept {
+    const auto* operation =
+        static_cast<const OwnerOperationSettings*>(context.settings);
+    return operation && operation->featureBudget == &budget ? operation : nullptr;
+}
+
 bool OwnerAnalyticBuild(const retained_feature::OwnerExecutionContext& context,
                         const composite_recipe::FeatureNode& feature,
                         const std::vector<retained_feature::ReplayValue>& inputs,
@@ -26002,8 +26089,9 @@ bool OwnerAnalyticBuild(const retained_feature::OwnerExecutionContext& context,
                         retained_feature::ReplayValue& output) noexcept {
     output = {};
     try {
+        const auto* operation = OwnerOperation(context, budget);
         const auto* graph = context.graph;
-        if (!graph || inputs.size() != 2
+        if (!operation || operation->stop->load() || !graph || inputs.size() != 2
             || feature.inputs.size() != 2
             || !budget.consume(1, 4, feature.parameters.size())) return false;
         AnalyticDefinition definition;
@@ -26035,7 +26123,9 @@ bool OwnerAnalyticBuild(const retained_feature::OwnerExecutionContext& context,
                 || Bytes(built.sourceBytes[index]) != inputs[index].detachedShape)
                 return false;
         }
-        if (!ShapeBytes(built.candidate.solid, output.detachedShape)
+        if (!operation->charge(built.candidate.solid,
+                retained_topology_budget::Site::C16KernelBuild)
+            || !ShapeBytes(built.candidate.solid, output.detachedShape)
             || !budget.consume(0, 0, output.detachedShape.size())
             || !HashBytes(output.detachedShape, output.geometry)) return false;
         output.shape = retained_feature::ShapeKind::Solid;
@@ -26097,9 +26187,10 @@ bool OwnerOriginalsBuild(const retained_feature::OwnerExecutionContext& context,
                          retained_feature::ReplayValue& output) noexcept {
     output = {};
     try {
+        const auto* operation = OwnerOperation(context, budget);
         const auto* graph = context.graph;
         OriginalsDefinition definition;
-        if (!graph || inputs.size() != 2 || feature.inputs.size() != 2
+        if (!operation || !graph || inputs.size() != 2 || feature.inputs.size() != 2
             || !composite_recipe::CanonicalOriginalsFeature(feature, graph->nodes)
             || !DecodeOriginals(feature.parameters, definition)
             || !(definition.owner == graph->owner)) return false;
@@ -26109,9 +26200,10 @@ bool OwnerOriginalsBuild(const retained_feature::OwnerExecutionContext& context,
                 || geometry != definition.originals.inputs[index].commitments.geometry)
                 return false;
         }
-        const std::atomic_bool cancelled(false);
         TopoDS_Shape solid;
-        if (!ReplayOriginalsDetached(definition, budget, cancelled, solid)
+        if (!ReplayOriginalsDetached(definition, budget, *operation->stop, solid)
+            || !operation->charge(solid,
+                retained_topology_budget::Site::C15ReplaySteps)
             || !ShapeBytes(solid, output.detachedShape)
             || !HashBytes(output.detachedShape, output.geometry)) return false;
         output.shape = retained_feature::ShapeKind::Solid;
@@ -26127,9 +26219,9 @@ bool OwnerSuffixBuild(const retained_feature::OwnerExecutionContext& context,
                       retained_feature::ReplayValue& output) noexcept {
     output = {};
     try {
+        const auto* operation = OwnerOperation(context, budget);
         const auto* graph = context.graph;
-        const auto* display = static_cast<const cut_display::Settings*>(context.settings);
-        if (!graph || !display || inputs.size() != 1
+        if (!operation || !graph || inputs.size() != 1
             || feature.inputs.size() != 1
             || !budget.consume(1, 3, feature.parameters.size())) return false;
         retained_program_suffix::Definition program;
@@ -26139,13 +26231,15 @@ bool OwnerSuffixBuild(const retained_feature::OwnerExecutionContext& context,
             || !PrefixGraph(*graph, prefix)
             || feature.inputs.front() != prefix.outputNode
             || !ReadReplayShape(inputs.front().detachedShape, base)) return false;
-        const std::atomic_bool stop(false);
         const auto built = retained_program_suffix::build::Build(
-            base, prefix, program, *display, stop);
+            base, prefix, program, *operation->display, *operation->stop,
+            operation->suffixBudget);
         if (built.status != retained_program_suffix::build::Status::Built
+            || !operation->charge(built.solid,
+                retained_topology_budget::Site::C16KernelBuild)
             || !ShapeBytes(built.solid, output.detachedShape)
             || !budget.consume(0, 0, output.detachedShape.size())
-            || !HashBytes(output.detachedShape, output.geometry)) return false;
+            || !HashBytes(output.detachedShape, output.geometry)) return operation->deny();
         output.shape = retained_feature::ShapeKind::Solid;
         return OwnerFeatureProof(feature, inputs, output, output.familyProof)
             && output.valid();
@@ -26167,6 +26261,38 @@ bool OwnerFeatureProve(const retained_feature::OwnerExecutionContext& context,
         && independent.detachedShape == output.detachedShape
         && independent.geometry == output.geometry
         && independent.familyProof == output.familyProof;
+}
+
+template <bool (*Build)(const retained_feature::OwnerExecutionContext&,
+                        const composite_recipe::FeatureNode&,
+                        const std::vector<retained_feature::ReplayValue>&,
+                        retained_feature::ReplayBudget&,
+                        retained_feature::ReplayValue&) noexcept,
+          OwnerOperationPhase Phase>
+bool OwnerFeatureBuildPhase(const retained_feature::OwnerExecutionContext& context,
+                            const composite_recipe::FeatureNode& feature,
+                            const std::vector<retained_feature::ReplayValue>& inputs,
+                            retained_feature::ReplayBudget& budget,
+                            retained_feature::ReplayValue& output) noexcept {
+    const auto* operation = OwnerOperation(context, budget);
+    return operation && operation->enter(Phase, budget)
+        && Build(context, feature, inputs, budget, output);
+}
+
+template <bool (*Build)(const retained_feature::OwnerExecutionContext&,
+                        const composite_recipe::FeatureNode&,
+                        const std::vector<retained_feature::ReplayValue>&,
+                        retained_feature::ReplayBudget&,
+                        retained_feature::ReplayValue&) noexcept,
+          OwnerOperationPhase Phase>
+bool OwnerFeatureProvePhase(const retained_feature::OwnerExecutionContext& context,
+                            const composite_recipe::FeatureNode& feature,
+                            const std::vector<retained_feature::ReplayValue>& inputs,
+                            const retained_feature::ReplayValue& output,
+                            retained_feature::ReplayBudget& budget) noexcept {
+    const auto* operation = OwnerOperation(context, budget);
+    return operation && operation->enter(Phase, budget)
+        && OwnerFeatureProve<Build>(context, feature, inputs, output, budget);
 }
 
 bool OwnerContextRequiredBuild(const composite_recipe::FeatureNode&,
@@ -26227,14 +26353,22 @@ struct OwnerAnalyticRegistry final {
               OwnerFeatureProve<OwnerAnalyticBuild>}},
             {{composite_recipe::PartBooleanFeatureKind,
               composite_recipe::PartBooleanOriginalsFeatureCodec},
-             {&validationEntries[1].execution, OwnerOriginalsBuild,
-              OwnerFeatureProve<OwnerOriginalsBuild>,
-              OwnerFeatureProve<OwnerOriginalsBuild>}},
+             {&validationEntries[1].execution,
+              OwnerFeatureBuildPhase<OwnerOriginalsBuild,
+                  OwnerOperationPhase::BaseReplay>,
+              OwnerFeatureProvePhase<OwnerOriginalsBuild,
+                  OwnerOperationPhase::BaseFamilyProof>,
+              OwnerFeatureProvePhase<OwnerOriginalsBuild,
+                  OwnerOperationPhase::BaseFixedPoint>}},
             {{composite_recipe::RetainedProgramSuffixFeatureKind,
               composite_recipe::RetainedProgramSuffixFeatureCodec},
-             {&validationEntries[2].execution, OwnerSuffixBuild,
-              OwnerFeatureProve<OwnerSuffixBuild>,
-              OwnerFeatureProve<OwnerSuffixBuild>}},
+             {&validationEntries[2].execution,
+              OwnerFeatureBuildPhase<OwnerSuffixBuild,
+                  OwnerOperationPhase::SuffixReplay>,
+              OwnerFeatureProvePhase<OwnerSuffixBuild,
+                  OwnerOperationPhase::SuffixFamilyProof>,
+              OwnerFeatureProvePhase<OwnerSuffixBuild,
+                  OwnerOperationPhase::SuffixFixedPoint>}},
           }},
           execution(executionEntries.data(), executionEntries.size()) {}
 };
@@ -26300,6 +26434,53 @@ bool ValidOwnerFacts(const retained_recipe::GraphCurrentnessFacts& facts,
     return retained_recipe::Valid(facts, graph, registry.validation);
 }
 
+bool ReplayOwnerGraphDetached(
+    const composite_recipe::Definition& graph,
+    const std::vector<TopoDS_Shape>& sourceShapes,
+    OwnerOperationSettings& operation,
+    retained_feature::ReplayResult& replay) noexcept {
+    replay = {};
+    try {
+        if (!operation.featureBudget
+            || !operation.enter(OwnerOperationPhase::SourceProof,
+                *operation.featureBudget)) return false;
+        std::vector<retained_feature::SourceValue> sources;
+        std::size_t sourceIndex = 0;
+        for (const auto& node : graph.nodes) {
+            const auto* source = std::get_if<composite_recipe::SourceNode>(&node.value);
+            if (!source) continue;
+            if (sourceIndex >= sourceShapes.size()) return operation.deny();
+            retained_feature::SourceValue value;
+            value.node = source->node;
+            const TopoDS_Shape& shape = sourceShapes[sourceIndex++];
+            if (!ShapeBytes(shape, value.value.detachedShape)
+                || !operation.featureBudget->consume(
+                    1, 1, value.value.detachedShape.size())
+                || !operation.charge(shape,
+                    retained_topology_budget::Site::C15ReplaySteps)
+                || !HashBytes(value.value.detachedShape, value.value.geometry)
+                || value.value.geometry != source->commitments.geometry)
+                return operation.deny();
+            std::vector<std::uint8_t> sourceProof = source->recipe.bytes;
+            sourceProof.insert(sourceProof.end(), value.value.geometry.begin(),
+                               value.value.geometry.end());
+            if (!HashBytes(sourceProof, value.value.familyProof))
+                return operation.deny();
+            value.value.shape = retained_feature::ShapeKind::Solid;
+            sources.push_back(std::move(value));
+        }
+        if (sourceIndex != sourceShapes.size()) return operation.deny();
+        OwnerAnalyticRegistry registry;
+        const retained_feature::OwnerExecutionContext context{&graph, &operation};
+        replay = retained_feature::ReplayOwnerDetached(
+            graph, registry.validation, registry.execution,
+            retained_source::ProductionRegistry(), sources, context,
+            *operation.featureBudget);
+        if (!replay.replayed()) operation.refused = true;
+        return replay.replayed();
+    } catch (...) { replay = {}; operation.refused = true; return false; }
+}
+
 bool BuildOwnerGraphCurrentness(
     const composite_recipe::Definition& graph,
     const std::vector<TopoDS_Shape>& sourceShapes,
@@ -26312,33 +26493,17 @@ bool BuildOwnerGraphCurrentness(
     try {
         if (graph.schemaVersion != 3 || sourceShapes.size() != 2
             || native.scopes.size() < 6 || ownerNonce == 0) return false;
-        std::vector<retained_feature::SourceValue> sources;
-        std::size_t sourceIndex = 0;
-        for (const auto& node : graph.nodes) {
-            const auto* source = std::get_if<composite_recipe::SourceNode>(&node.value);
-            if (!source) continue;
-            if (sourceIndex >= sourceShapes.size()) return false;
-            retained_feature::SourceValue value;
-            value.node = source->node;
-            if (!ShapeBytes(sourceShapes[sourceIndex++], value.value.detachedShape)
-                || !HashBytes(value.value.detachedShape, value.value.geometry)
-                || value.value.geometry != source->commitments.geometry) return false;
-            std::vector<std::uint8_t> sourceProof = source->recipe.bytes;
-            sourceProof.insert(sourceProof.end(), value.value.geometry.begin(),
-                               value.value.geometry.end());
-            if (!HashBytes(sourceProof, value.value.familyProof)) return false;
-            value.value.shape = retained_feature::ShapeKind::Solid;
-            sources.push_back(std::move(value));
-        }
-        if (sourceIndex != sourceShapes.size()) return false;
         cut_display::Settings display;
         if (!CanonicalSuffixDisplay(display)) return false;
-        OwnerAnalyticRegistry registry;
-        const retained_feature::OwnerExecutionContext context{&graph, &display};
         retained_feature::ReplayBudget budget;
-        const auto replay = retained_feature::ReplayOwnerDetached(
-            graph, registry.validation, registry.execution,
-            retained_source::ProductionRegistry(), sources, context, budget);
+        const std::atomic_bool stop(false);
+        OwnerOperationSettings operation;
+        operation.display = &display;
+        operation.stop = &stop;
+        operation.featureBudget = &budget;
+        retained_feature::ReplayResult replay;
+        if (!ReplayOwnerGraphDetached(
+                graph, sourceShapes, operation, replay)) return false;
         std::vector<std::uint8_t> outputBytes;
         if (!replay.replayed() || !ShapeBytes(storedOutput, outputBytes)
             || replay.output.detachedShape != outputBytes) return false;
@@ -26379,7 +26544,7 @@ bool BuildOwnerGraphCurrentness(
             facts.orderedNodes.push_back({observed.node, observed.feature,
                 observed.key.kind, observed.key.codecVersion, observed.inputs,
                 observed.payload, observed.output, observed.proof});
-        return retained_recipe::Valid(facts, graph, registry.validation);
+        return ValidOwnerFacts(facts, graph);
     } catch (...) { facts = {}; return false; }
 }
 
@@ -26407,6 +26572,10 @@ bool ReplayOriginalsGraphDetached(const composite_recipe::Definition& graph,
                                   TopoDS_Shape& output) noexcept {
     output.Nullify();
     try {
+        // This suffix budget starts with the detached graph operation and is
+        // carried into its only suffix replay; never select the fresh-budget
+        // convenience overload from inside an already-running replay.
+        retained_program_suffix::build::Budget suffixBudget;
         if (stop.load() || budget.exhausted || graph.nodes.size() < 3
             || graph.nodes.size() > 4 || sources.size() != 2
             || !composite_recipe::ValidateV3(graph,
@@ -26438,7 +26607,7 @@ bool ReplayOriginalsGraphDetached(const composite_recipe::Definition& graph,
             || !PrefixGraph(graph, prefix) || !CanonicalSuffixDisplay(display)
             || stop.load() || !budget.consume(1, 3, chain.output->parameters.size())) return false;
         const auto built = retained_program_suffix::build::Build(
-            baseSolid, prefix, chain.suffix, display, stop);
+            baseSolid, prefix, chain.suffix, display, stop, suffixBudget);
         std::vector<std::uint8_t> bytes;
         if (stop.load() || built.status != retained_program_suffix::build::Status::Built
             || !ShapeBytes(built.solid, bytes)
@@ -26894,6 +27063,192 @@ std::map<std::string, bool> Probe(OriginalsDefinition fixture) noexcept {
             && suffixBytes != suffixBase.resultBytes;
         rows["suffix-reads-v4-operation"] = readsEffectiveOperation
             && rows["suffix-qualifies-effective-edited-geometry"];
+
+        // Run the complete owner path. Source proof, base replay, independent
+        // family proof, fixed-point verification and all three suffix phases
+        // share the exact continuation object and real Stop state.
+        cut_display::Settings ownerDisplay;
+        retained_feature::ReplayBudget ownerBudget;
+        std::atomic_bool ownerRunning(false);
+        OwnerOperationProbe ownerProbe;
+        ownerProbe.mutableStop = &ownerRunning;
+        OwnerOperationSettings ownerOperation;
+        ownerOperation.display = &ownerDisplay;
+        ownerOperation.stop = &ownerRunning;
+        ownerOperation.featureBudget = &ownerBudget;
+        ownerOperation.probe = &ownerProbe;
+        retained_feature::ReplayResult ownerReplay;
+        const bool ownerBuilt = CanonicalSuffixDisplay(ownerDisplay)
+            && ReplayOwnerGraphDetached(
+                suffixed, sourceVector, ownerOperation, ownerReplay);
+        const bool everyPhase = std::all_of(
+            ownerProbe.hit.begin(), ownerProbe.hit.end(), [](bool value) { return value; });
+        bool phaseDebtContinues = everyPhase;
+        for (std::size_t index = 1; index < OwnerOperationProbe::PhaseCount; ++index) {
+            phaseDebtContinues = phaseDebtContinues
+                && ownerProbe.featureTopologyAtEntry[index]
+                    < ownerProbe.featureTopologyAtEntry[index - 1]
+                && ownerProbe.topologyVisitsAtEntry[index]
+                    > ownerProbe.topologyVisitsAtEntry[index - 1];
+        }
+        phaseDebtContinues = phaseDebtContinues
+            && ownerProbe.suffixStepsAtEntry[static_cast<std::size_t>(
+                OwnerOperationPhase::SuffixFamilyProof)]
+                > ownerProbe.suffixStepsAtEntry[static_cast<std::size_t>(
+                    OwnerOperationPhase::SuffixReplay)]
+            && ownerProbe.suffixStepsAtEntry[static_cast<std::size_t>(
+                OwnerOperationPhase::SuffixFixedPoint)]
+                > ownerProbe.suffixStepsAtEntry[static_cast<std::size_t>(
+                    OwnerOperationPhase::SuffixFamilyProof)];
+        rows["replay-proof-shares-operation-continuation"] = ownerBuilt
+            && ownerReplay.output.detachedShape == Bytes(suffixBytes)
+            && ownerBudget.workRemaining < composite_recipe::MaximumNodes
+            && ownerOperation.topologyBudget.topologyVisits > 0
+            && ownerOperation.suffixBudget.booleanSteps > 0;
+        rows["replay-proof-hits-all-phases"] = everyPhase;
+        rows["replay-proof-debits-every-phase"] = phaseDebtContinues;
+
+        bool everyBudgetPhaseRefused = true;
+        bool everyBudgetRefusalEmpty = true;
+        bool everyStopPhaseRefused = true;
+        bool everyStopRefusalEmpty = true;
+        for (std::size_t phaseIndex = 0;
+             phaseIndex < OwnerOperationProbe::PhaseCount; ++phaseIndex) {
+            const auto phase = static_cast<OwnerOperationPhase>(phaseIndex);
+            cut_display::Settings debtDisplay;
+            retained_feature::ReplayBudget debtBudget;
+            std::atomic_bool debtRunning(false);
+            OwnerOperationProbe debtProbe;
+            debtProbe.exhaustFeatureBefore = phase;
+            debtProbe.mutableStop = &debtRunning;
+            OwnerOperationSettings debtOperation;
+            debtOperation.display = &debtDisplay;
+            debtOperation.stop = &debtRunning;
+            debtOperation.featureBudget = &debtBudget;
+            debtOperation.probe = &debtProbe;
+            retained_feature::ReplayResult denied, deniedAgain;
+            const bool firstDenied = CanonicalSuffixDisplay(debtDisplay)
+                && !ReplayOwnerGraphDetached(
+                    suffixed, sourceVector, debtOperation, denied)
+                && debtBudget.exhausted && debtProbe.hit[phaseIndex];
+            const auto debtAfter = debtBudget;
+            const auto topologyAfter = debtOperation.topologyBudget;
+            const auto suffixAfter = debtOperation.suffixBudget;
+            const bool laterDenied = !ReplayOwnerGraphDetached(
+                    suffixed, sourceVector, debtOperation, deniedAgain)
+                && debtBudget.workRemaining == debtAfter.workRemaining
+                && debtBudget.identitiesRemaining == debtAfter.identitiesRemaining
+                && debtBudget.topologyRemaining == debtAfter.topologyRemaining
+                && debtOperation.topologyBudget.topologyVisits
+                    == topologyAfter.topologyVisits
+                && debtOperation.suffixBudget.booleanSteps
+                    == suffixAfter.booleanSteps;
+            everyBudgetPhaseRefused = everyBudgetPhaseRefused
+                && firstDenied && laterDenied;
+            everyBudgetRefusalEmpty = everyBudgetRefusalEmpty
+                && denied.output.detachedShape.empty()
+                && deniedAgain.output.detachedShape.empty();
+
+            cut_display::Settings stopDisplay;
+            retained_feature::ReplayBudget stopOwnerBudget;
+            std::atomic_bool phaseStop(false);
+            OwnerOperationProbe stopProbe;
+            stopProbe.stopBefore = phase;
+            stopProbe.mutableStop = &phaseStop;
+            OwnerOperationSettings stopOperation;
+            stopOperation.display = &stopDisplay;
+            stopOperation.stop = &phaseStop;
+            stopOperation.featureBudget = &stopOwnerBudget;
+            stopOperation.probe = &stopProbe;
+            retained_feature::ReplayResult stoppedOutput, stoppedAgain;
+            const bool firstStopped = CanonicalSuffixDisplay(stopDisplay)
+                && !ReplayOwnerGraphDetached(
+                    suffixed, sourceVector, stopOperation, stoppedOutput)
+                && phaseStop.load() && stopProbe.hit[phaseIndex];
+            const auto stopBudgetAfter = stopOwnerBudget;
+            const auto stopTopologyAfter = stopOperation.topologyBudget;
+            const auto stopSuffixAfter = stopOperation.suffixBudget;
+            const bool laterStopped = !ReplayOwnerGraphDetached(
+                    suffixed, sourceVector, stopOperation, stoppedAgain)
+                && stopOwnerBudget.workRemaining == stopBudgetAfter.workRemaining
+                && stopOwnerBudget.identitiesRemaining
+                    == stopBudgetAfter.identitiesRemaining
+                && stopOwnerBudget.topologyRemaining
+                    == stopBudgetAfter.topologyRemaining
+                && stopOperation.topologyBudget.topologyVisits
+                    == stopTopologyAfter.topologyVisits
+                && stopOperation.suffixBudget.booleanSteps
+                    == stopSuffixAfter.booleanSteps;
+            everyStopPhaseRefused = everyStopPhaseRefused
+                && firstStopped && laterStopped;
+            everyStopRefusalEmpty = everyStopRefusalEmpty
+                && stoppedOutput.output.detachedShape.empty()
+                && stoppedAgain.output.detachedShape.empty();
+        }
+        rows["replay-proof-budget-refuses-each-phase"] = everyBudgetPhaseRefused;
+        rows["replay-proof-stop-refuses-each-phase"] = everyStopPhaseRefused;
+
+        cut_display::Settings topologyDisplay;
+        retained_feature::ReplayBudget topologyFeatureBudget;
+        std::atomic_bool topologyRunning(false);
+        OwnerOperationProbe topologyProbe;
+        topologyProbe.exhaustTopologyBefore = OwnerOperationPhase::BaseReplay;
+        topologyProbe.mutableStop = &topologyRunning;
+        OwnerOperationSettings topologyOperation;
+        topologyOperation.display = &topologyDisplay;
+        topologyOperation.stop = &topologyRunning;
+        topologyOperation.featureBudget = &topologyFeatureBudget;
+        topologyOperation.probe = &topologyProbe;
+        retained_feature::ReplayResult topologyDenied, topologyDeniedAgain;
+        const bool topologyFirstDenied = CanonicalSuffixDisplay(topologyDisplay)
+            && !ReplayOwnerGraphDetached(
+                suffixed, sourceVector, topologyOperation, topologyDenied)
+            && topologyOperation.topologyBudget.exhausted;
+        const auto topologyStickyBudget = topologyFeatureBudget;
+        const auto topologyStickyVisits = topologyOperation.topologyBudget.topologyVisits;
+        const bool topologyLaterDenied = !ReplayOwnerGraphDetached(
+                suffixed, sourceVector, topologyOperation, topologyDeniedAgain)
+            && topologyFeatureBudget.workRemaining == topologyStickyBudget.workRemaining
+            && topologyFeatureBudget.topologyRemaining
+                == topologyStickyBudget.topologyRemaining
+            && topologyOperation.topologyBudget.topologyVisits == topologyStickyVisits;
+        rows["replay-proof-topology-debt-sticky"] = topologyFirstDenied
+            && topologyLaterDenied && topologyDenied.output.detachedShape.empty()
+            && topologyDeniedAgain.output.detachedShape.empty();
+
+        cut_display::Settings suffixDebtDisplay;
+        retained_feature::ReplayBudget suffixFeatureBudget;
+        std::atomic_bool suffixDebtRunning(false);
+        OwnerOperationProbe suffixDebtProbe;
+        suffixDebtProbe.exhaustSuffixBefore = OwnerOperationPhase::SuffixReplay;
+        suffixDebtProbe.mutableStop = &suffixDebtRunning;
+        OwnerOperationSettings suffixDebtOperation;
+        suffixDebtOperation.display = &suffixDebtDisplay;
+        suffixDebtOperation.stop = &suffixDebtRunning;
+        suffixDebtOperation.featureBudget = &suffixFeatureBudget;
+        suffixDebtOperation.probe = &suffixDebtProbe;
+        retained_feature::ReplayResult suffixDenied, suffixDeniedAgain;
+        const bool suffixFirstDenied = CanonicalSuffixDisplay(suffixDebtDisplay)
+            && !ReplayOwnerGraphDetached(
+                suffixed, sourceVector, suffixDebtOperation, suffixDenied)
+            && suffixDebtOperation.refused
+            && suffixDebtOperation.suffixBudget.booleanSteps
+                == retained_program_suffix::build::Budget::MaximumSteps;
+        const auto suffixStickyBudget = suffixFeatureBudget;
+        const auto suffixStickyVisits = suffixDebtOperation.topologyBudget.topologyVisits;
+        const bool suffixLaterDenied = !ReplayOwnerGraphDetached(
+                suffixed, sourceVector, suffixDebtOperation, suffixDeniedAgain)
+            && suffixFeatureBudget.workRemaining == suffixStickyBudget.workRemaining
+            && suffixFeatureBudget.topologyRemaining
+                == suffixStickyBudget.topologyRemaining
+            && suffixDebtOperation.topologyBudget.topologyVisits == suffixStickyVisits;
+        rows["replay-proof-suffix-debt-sticky"] = suffixFirstDenied
+            && suffixLaterDenied && suffixDenied.output.detachedShape.empty()
+            && suffixDeniedAgain.output.detachedShape.empty();
+        rows["replay-proof-refusal-no-partial-output"] =
+            everyBudgetRefusalEmpty && everyStopRefusalEmpty
+            && rows["replay-proof-topology-debt-sticky"]
+            && rows["replay-proof-suffix-debt-sticky"];
 
         const std::atomic_bool stopped(true);
         retained_feature::ReplayBudget stopBudget;
