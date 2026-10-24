@@ -10,6 +10,7 @@
 #include <TDF_Label.hxx>
 
 #include <cstdint>
+#include <array>
 #include <memory>
 #include <optional>
 #include <string>
@@ -257,6 +258,88 @@ private:
     struct State;
     explicit Owner(std::unique_ptr<State>) noexcept;
     std::unique_ptr<State> state_;
+};
+
+//! Closed result vocabulary for the A2 two-live-source capture lane. These
+//! values are native authority, not serialized status supplied by Swift.
+enum class PairStatus : std::uint8_t { Captured = 0, Prepared, Refused, Cancelled };
+
+enum class PairRefusal : std::uint8_t {
+    None = 0,
+    WrongThread,
+    ForeignDocument,
+    SameSource,
+    AliasSource,
+    UnsupportedSource,
+    StaleSource,
+    InvalidOperation,
+    UnprovedCorrespondence,
+    InvalidResult,
+    BadEncoding,
+    Budget,
+    Cancelled,
+};
+
+struct PairObservation final {
+    part_boolean::Operation operation = part_boolean::Operation::Union;
+    double metersPerUnit = 0;
+    std::array<std::string, 2> entityIdentifiers;
+    std::array<std::string, 2> sourceFeatureIdentifiers;
+    std::array<std::vector<std::uint8_t>, 2> recipeBytes;
+    std::vector<std::uint8_t> originalsBytes;
+    std::array<double, 2> sourceVolumes{{0, 0}};
+    double resultVolume = 0;
+    std::array<double, 6> resultBounds{{0, 0, 0, 0, 0, 0}};
+    std::uint32_t resultClosedLoops = 0;
+    std::array<std::uint32_t, 2> resultMembership{{0, 0}};
+    int undoDepth = 0;
+    int redoDepth = 0;
+};
+
+//! Native-issued immutable paired capture. State is deliberately opaque so
+//! callers cannot manufacture labels, receipts, geometry, or currentness.
+class PairCapture final {
+public:
+    struct State;
+    ~PairCapture();
+    PairCapture(const PairCapture&) = delete;
+    PairCapture& operator=(const PairCapture&) = delete;
+private:
+    friend class ::OcctDocument;
+    explicit PairCapture(std::shared_ptr<State>) noexcept;
+    std::shared_ptr<State> state_;
+};
+
+//! Detached O1 conversion plus O4 proof. It contains no command lease and
+//! cannot install, retire, consume, commit, or create an owner.
+class PairPrepared final {
+public:
+    struct State;
+    ~PairPrepared();
+    PairPrepared(const PairPrepared&) = delete;
+    PairPrepared& operator=(const PairPrepared&) = delete;
+private:
+    friend class ::OcctDocument;
+    explicit PairPrepared(std::shared_ptr<State>) noexcept;
+    std::shared_ptr<State> state_;
+};
+
+struct PairCaptureReply final {
+    PairStatus status = PairStatus::Refused;
+    PairRefusal refusal = PairRefusal::UnsupportedSource;
+    std::shared_ptr<const PairCapture> capture;
+};
+
+struct PairPrepareReply final {
+    PairStatus status = PairStatus::Refused;
+    PairRefusal refusal = PairRefusal::UnsupportedSource;
+    std::shared_ptr<const PairPrepared> prepared;
+};
+
+struct PairObservationReply final {
+    PairStatus status = PairStatus::Refused;
+    PairRefusal refusal = PairRefusal::UnsupportedSource;
+    std::optional<PairObservation> observation;
 };
 
 const char* RefusalCode(Refusal) noexcept;

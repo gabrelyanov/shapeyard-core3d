@@ -11041,6 +11041,667 @@ Standard_Boolean OcctDocument::PlainProfileOperationSourceCurrent(
     }
 }
 
+// MARK: - A2 two-live-source detached capture and proof
+
+struct core3d::authored_parameter::PairCapture::State final {
+    const OcctDocument* owner = nullptr;
+    Handle(TDocStd_Document) document;
+    Handle(TDF_Data) data;
+    std::shared_ptr<core3d::native_opening::Context> context;
+    std::array<OcctPlainProfileOperationCapture, 2> sources;
+    std::array<OcctExactLabelReceipt, 2> exact;
+    OcctSavedGroupState groups;
+    core3d::part_boolean::Operation operation =
+        core3d::part_boolean::Operation::Union;
+    core3d::retained_recipe::UUID booleanNode{};
+    core3d::retained_recipe::UUID feature{};
+    std::array<core3d::retained_recipe::UUID, 2> sourceNodes{};
+    double metersPerUnit = 0;
+    int undoDepth = 0;
+    int redoDepth = 0;
+};
+
+struct core3d::authored_parameter::PairPrepared::State final {
+    std::shared_ptr<const core3d::authored_parameter::PairCapture> capture;
+    core3d::part_boolean::OriginalsDefinition definition;
+    TopoDS_Shape independentResult;
+    TopoDS_Shape analyticResult;
+    core3d::authored_parameter::PairObservation observation;
+};
+
+core3d::authored_parameter::PairCapture::PairCapture(
+    std::shared_ptr<State> state) noexcept : state_(std::move(state)) {}
+core3d::authored_parameter::PairCapture::~PairCapture() = default;
+core3d::authored_parameter::PairPrepared::PairPrepared(
+    std::shared_ptr<State> state) noexcept : state_(std::move(state)) {}
+core3d::authored_parameter::PairPrepared::~PairPrepared() = default;
+
+namespace {
+namespace ap = core3d::authored_parameter;
+namespace pb = core3d::part_boolean;
+
+ap::PairCaptureReply PairCaptureRefused(ap::PairRefusal refusal) noexcept {
+    ap::PairCaptureReply reply;
+    reply.refusal = refusal;
+    return reply;
+}
+
+ap::PairPrepareReply PairPrepareRefused(ap::PairRefusal refusal) noexcept {
+    ap::PairPrepareReply reply;
+    reply.refusal = refusal;
+    return reply;
+}
+
+ap::PairPrepareReply PairPrepareCancelled() noexcept {
+    ap::PairPrepareReply reply;
+    reply.status = ap::PairStatus::Cancelled;
+    reply.refusal = ap::PairRefusal::Cancelled;
+    return reply;
+}
+
+ap::PairObservationReply PairObserveRefused(ap::PairRefusal refusal) noexcept {
+    ap::PairObservationReply reply;
+    reply.refusal = refusal;
+    return reply;
+}
+
+bool PairUUID(const std::string& text, core3d::retained_recipe::UUID& value) noexcept {
+    return core3d::receipt::ParseUUID(text, value)
+        && core3d::retained_recipe::Nonzero(value);
+}
+
+bool PairHash(const void* bytes, std::size_t size,
+              core3d::retained_recipe::Digest& digest) noexcept {
+    try {
+        if (bytes == nullptr || size == 0) return false;
+        const auto first = static_cast<const std::uint8_t*>(bytes);
+        return core3d::composite_recipe::Hash(
+            std::vector<std::uint8_t>(first, first + size), digest);
+    } catch (...) { return false; }
+}
+
+bool PairExtendedName(const TCollection_ExtendedString& source,
+                      pb::UTF16Name& value) noexcept {
+    value = {};
+    try {
+        value.attributePresent = true;
+        if (source.Length() > Standard_Integer(pb::MaximumUTF16CodeUnits)) return false;
+        value.codeUnits.reserve(source.Length());
+        for (Standard_Integer index = 1; index <= source.Length(); ++index)
+            value.codeUnits.push_back(std::uint16_t(source.Value(index)));
+        return true;
+    } catch (...) { value = {}; return false; }
+}
+
+std::string PairLabelEntry(const TDF_Label& label) {
+    if (label.IsNull()) return {};
+    TCollection_AsciiString entry;
+    TDF_Tool::Entry(label, entry);
+    return entry.ToCString();
+}
+
+bool PairMatrix(const gp_Trsf& transform, std::array<double, 16>& value) noexcept {
+    value = {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}};
+    try {
+        for (int row = 0; row < 3; ++row)
+            for (int column = 0; column < 4; ++column) {
+                const double scalar = transform.Value(row + 1, column + 1);
+                if (!std::isfinite(scalar)) return false;
+                value[std::size_t(row * 4 + column)] = scalar;
+            }
+        return true;
+    } catch (...) { return false; }
+}
+
+bool PairProjection(const OcctPlainProfileOperationCapture& source,
+                    const gp_Trsf& carrier,
+                    pb::OriginalAnalyticProjection& projection,
+                    std::array<double, 16>& sourceRootToCarrier,
+                    TopoDS_Shape& observedRoot,
+                    TopoDS_Shape& analyticRoot) noexcept {
+    observedRoot.Nullify(); analyticRoot.Nullify(); projection = {};
+    try {
+        core3d::profile::Parameters recipe;
+        if (!core3d::profile::Decode(source.recipeValues, recipe)
+            || !pb::build::IsRectangularP1BaseRecipe(recipe, false)) return false;
+        const auto& points = recipe.definition.points;
+        gp_Trsf pointRecipe;
+        pointRecipe.SetTranslationPart(gp_Vec(points[0].X(), points[0].Y(), 0));
+        gp_Trsf frame;
+        if (recipe.constructionFrame
+            && !recipe.constructionFrame->Transform(frame)) return false;
+        gp_Trsf mapping = carrier.Inverted();
+        mapping.Multiply(source.placement);
+        gp_Trsf sourcePlacement = mapping;
+        if (recipe.constructionFrame) mapping.Multiply(frame);
+        mapping.Multiply(pointRecipe);
+        const double scale = mapping.ScaleFactor();
+        if (!std::isfinite(scale) || scale <= 0) return false;
+        const gp_Quaternion rotation = mapping.GetRotation();
+        const gp_XYZ translation = mapping.TranslationPart();
+        projection.dimensions = {{
+            (points[1].X() - points[0].X()) * scale,
+            (points[3].Y() - points[0].Y()) * scale,
+            recipe.definition.depth * scale}};
+        projection.translation = {{translation.X(), translation.Y(), translation.Z()}};
+        projection.rotationXYZW = {{rotation.X(), rotation.Y(), rotation.Z(), rotation.W()}};
+        if (!pb::ValidProjection(projection)
+            || !PairMatrix(sourcePlacement, sourceRootToCarrier)) return false;
+        BRepBuilderAPI_Transform observer(
+            source.boundRoot, sourcePlacement, Standard_True, Standard_False);
+        if (!observer.IsDone()) return false;
+        observedRoot = observer.Shape();
+        pb::EffectiveAnalyticGeometry geometry;
+        geometry.dimensions = projection.dimensions;
+        geometry.translation = projection.translation;
+        geometry.rotationXYZW = projection.rotationXYZW;
+        analyticRoot = pb::build::BuildEffectiveAnalyticPrism(
+            geometry, source.metersPerUnit, source.metersPerUnit);
+        return !observedRoot.IsNull() && !analyticRoot.IsNull()
+            && PlainProfileRebuildCorresponds(observedRoot, analyticRoot);
+    } catch (...) { observedRoot.Nullify(); analyticRoot.Nullify(); return false; }
+}
+
+TopoDS_Shape PairBoolean(pb::Operation operation, const TopoDS_Shape& left,
+                         const TopoDS_Shape& right) noexcept {
+    try {
+        TopTools_ListOfShape arguments, tools;
+        arguments.Append(left); tools.Append(right);
+        TopoDS_Shape result;
+        if (operation == pb::Operation::Union) {
+            BRepAlgoAPI_Fuse algorithm;
+            algorithm.SetArguments(arguments); algorithm.SetTools(tools);
+            algorithm.SetRunParallel(Standard_False);
+            algorithm.SetNonDestructive(Standard_True);
+            algorithm.SetFuzzyValue(Precision::Confusion());
+            algorithm.SetUseOBB(Standard_True); algorithm.SetCheckInverted(Standard_True);
+            algorithm.Build(); if (!algorithm.IsDone() || algorithm.HasErrors()) return {};
+            result = algorithm.Shape();
+        } else if (operation == pb::Operation::Subtract) {
+            BRepAlgoAPI_Cut algorithm;
+            algorithm.SetArguments(arguments); algorithm.SetTools(tools);
+            algorithm.SetRunParallel(Standard_False);
+            algorithm.SetNonDestructive(Standard_True);
+            algorithm.SetFuzzyValue(Precision::Confusion());
+            algorithm.SetUseOBB(Standard_True); algorithm.SetCheckInverted(Standard_True);
+            algorithm.Build(); if (!algorithm.IsDone() || algorithm.HasErrors()) return {};
+            result = algorithm.Shape();
+        } else if (operation == pb::Operation::Intersect) {
+            BRepAlgoAPI_Common algorithm;
+            algorithm.SetArguments(arguments); algorithm.SetTools(tools);
+            algorithm.SetRunParallel(Standard_False);
+            algorithm.SetNonDestructive(Standard_True);
+            algorithm.SetFuzzyValue(Precision::Confusion());
+            algorithm.SetUseOBB(Standard_True); algorithm.SetCheckInverted(Standard_True);
+            algorithm.Build(); if (!algorithm.IsDone() || algorithm.HasErrors()) return {};
+            result = algorithm.Shape();
+        } else return {};
+        return pb::build::AnalyticResultSolid(result);
+    } catch (...) { return {}; }
+}
+
+bool PairMeasure(const TopoDS_Shape& shape, double& volume,
+                 std::array<double, 6>& bounds, std::uint32_t& loops) noexcept {
+    volume = 0; bounds = {{0, 0, 0, 0, 0, 0}}; loops = 0;
+    try {
+        if (shape.IsNull() || shape.ShapeType() != TopAbs_SOLID
+            || !BRepCheck_Analyzer(shape, Standard_True).IsValid()) return false;
+        GProp_GProps properties;
+        BRepGProp::VolumeProperties(shape, properties);
+        volume = properties.Mass();
+        Bnd_Box box; BRepBndLib::AddOptimal(shape, box, Standard_False, Standard_False);
+        box.Get(bounds[0], bounds[1], bounds[2], bounds[3], bounds[4], bounds[5]);
+        for (TopExp_Explorer wire(shape, TopAbs_WIRE); wire.More(); wire.Next()) {
+            if (loops == UINT32_MAX) return false;
+            ++loops;
+        }
+        return std::isfinite(volume) && volume > 0 && !box.IsOpen()
+            && !box.IsVoid() && loops > 0;
+    } catch (...) { return false; }
+}
+
+bool PairCurrent(const OcctDocument& document,
+                 const ap::PairCapture::State& state) noexcept {
+    try {
+        if (![NSThread isMainThread] || state.owner != &document
+            || document.Document().IsNull() || state.document != document.Document()
+            || state.data != document.Document()->GetData()
+            || document.Document()->HasOpenCommand()
+            || document.Document()->GetAvailableUndos() != state.undoDepth
+            || document.Document()->GetAvailableRedos() != state.redoDepth) return false;
+        double unit = 0;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(document.Document(), unit)
+            || unit != state.metersPerUnit) return false;
+        OcctSavedGroupState groups;
+        if (!document.CaptureSavedGroups(groups) || !groups.IsEqual(state.groups)) return false;
+        for (std::size_t index = 0; index < 2; ++index) {
+            OcctExactLabelReceipt exact;
+            if (!document.PlainProfileOperationSourceCurrent(state.sources[index])
+                || !document.ReadExactFreeLabel(state.exact[index], exact)
+                || !exact.IsEqual(state.exact[index])) return false;
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
+bool PairMetadata(const OcctExactLabelReceipt& exact,
+                  pb::CompleteMetadata& metadata) noexcept {
+    metadata = {};
+    try {
+        const auto& visibility = exact.visibility;
+        if (visibility.object.namePresent
+            && !PairExtendedName(visibility.object.name, metadata.name)) return false;
+        metadata.occurrence.encoding = 1;
+        gp_Trsf derived = visibility.object.object.transform;
+        if (!PairMatrix(derived, metadata.occurrence.derivedMatrix)) return false;
+        for (std::size_t index = 0; index < 8; ++index) {
+            if (visibility.object.object.present[index])
+                metadata.occurrence.presenceMask |= std::uint8_t(1U << index);
+            metadata.occurrence.values[index] = visibility.object.object.scalars[index];
+        }
+        metadata.appearance.legacyMaterialPresent = exact.appearance.legacyPresent[0];
+        metadata.appearance.legacyMaterial = exact.appearance.legacyValues[0];
+        metadata.appearance.legacyColorPresent = exact.appearance.legacyPresent[1];
+        metadata.appearance.legacyColor = exact.appearance.legacyValues[1];
+        metadata.appearance.localPBRMarkerPresent = exact.appearance.localPBR;
+        metadata.invisibleAttributePresent = visibility.invisibleAttributePresent;
+        metadata.layerLinkPresent = visibility.layerLinkPresent;
+        return true;
+    } catch (...) { metadata = {}; return false; }
+}
+
+bool PairDefinition(const ap::PairCapture::State& state,
+                    const std::array<pb::OriginalAnalyticProjection, 2>& projections,
+                    const std::array<std::array<double, 16>, 2>& matrices,
+                    pb::OriginalsDefinition& definition,
+                    std::array<std::vector<std::uint8_t>, 2>& recipes) noexcept {
+    definition = {}; recipes = {};
+    try {
+        definition.operation = state.operation;
+        definition.originals.creationOperation = state.operation;
+        definition.carrierMetersPerUnit = state.metersPerUnit;
+        if (!PairUUID(state.owner->DocumentIdentifier(), definition.owner.document)
+            || !PairUUID(state.sources[0].entityIdentifier, definition.owner.entity)
+            || !PairUUID(state.sources[0].definitionIdentifier, definition.owner.definition))
+            return false;
+        definition.booleanNode = state.booleanNode;
+        definition.feature = state.feature;
+
+        // Project every scalar material referenced by either source. The
+        // exact receipt has already rejected textures and unregistered links;
+        // visualValues is the fixed complete 5 + 10 + 14 scalar census.
+        for (std::size_t sourceIndex = 0; sourceIndex < 2; ++sourceIndex) {
+            const auto& appearance = state.exact[sourceIndex].appearance;
+            if (appearance.materialLabel.IsNull()) {
+                if (!appearance.visualValues.empty() || appearance.localPBR) return false;
+                continue;
+            }
+            const std::string entry = PairLabelEntry(appearance.materialLabel);
+            if (entry.empty() || appearance.visualValues.size() != 29) return false;
+            auto found = std::find_if(definition.originals.materials.begin(),
+                definition.originals.materials.end(), [&](const auto& row) {
+                    return row.labelEntry == entry;
+                });
+            std::size_t ordinal = std::size_t(std::distance(
+                definition.originals.materials.begin(), found));
+            if (found == definition.originals.materials.end()) {
+                if (definition.originals.materials.size() >= pb::MaximumMetadataRows)
+                    return false;
+                const auto& values = appearance.visualValues;
+                pb::ScalarMaterialRow row;
+                row.ordinal = std::uint16_t(ordinal); row.labelEntry = entry;
+                row.faceCulling = std::int32_t(values[0]);
+                row.alphaMode = std::int32_t(values[1]);
+                row.alphaCutoff = values[2];
+                if ((values[3] != 0 && values[3] != 1)
+                    || (values[4] != 0 && values[4] != 1)) return false;
+                row.pbrDefined = values[3] == 1;
+                row.commonDefined = values[4] == 1;
+                std::copy_n(values.begin() + 5, row.pbr.size(), row.pbr.begin());
+                std::copy_n(values.begin() + 15, row.common.size(), row.common.begin());
+                definition.originals.materials.push_back(std::move(row));
+            } else if (found->pbr != std::array<double, 10>{{
+                    appearance.visualValues[5], appearance.visualValues[6],
+                    appearance.visualValues[7], appearance.visualValues[8],
+                    appearance.visualValues[9], appearance.visualValues[10],
+                    appearance.visualValues[11], appearance.visualValues[12],
+                    appearance.visualValues[13], appearance.visualValues[14]}}) {
+                return false;
+            }
+        }
+
+        // Preserve complete impacted groups, including non-source members.
+        // Membership references on each input are table ordinals, while every
+        // row retains the exact document/entity/definition owner identities.
+        for (const auto& captured : state.groups.groups) {
+            bool impacted = false;
+            for (const auto& member : captured.members)
+                impacted = impacted || member.IsEqual(state.sources[0].label)
+                    || member.IsEqual(state.sources[1].label);
+            if (!impacted) continue;
+            if (definition.originals.groups.size() >= pb::MaximumMetadataRows)
+                return false;
+            pb::GroupRow row;
+            row.ordinal = std::uint16_t(definition.originals.groups.size());
+            row.identifier = captured.identifier;
+            if (!PairExtendedName(captured.name, row.name)) return false;
+            row.originPresent = captured.originPresent;
+            if (row.originPresent)
+                row.origin = {{captured.origin.X(), captured.origin.Y(), captured.origin.Z()}};
+            for (const auto& member : captured.members) {
+                core3d::retained_recipe::OwnerKey key;
+                if (!PairUUID(state.owner->DocumentIdentifier(), key.document)
+                    || !PairUUID(state.owner->EntityIdentifierForLabel(member), key.entity)
+                    || !PairUUID(state.owner->DefinitionIdentifierForLabel(member), key.definition))
+                    return false;
+                row.members.push_back(key);
+            }
+            definition.originals.groups.push_back(std::move(row));
+        }
+
+        // Layer rows are deduplicated by exact label provenance. Capture has
+        // already validated each graph and aligned the hidden-state vector.
+        for (std::size_t sourceIndex = 0; sourceIndex < 2; ++sourceIndex) {
+            const auto& visibility = state.exact[sourceIndex].visibility;
+            if (visibility.layers.size() != visibility.layerInvisibleAttributePresent.size())
+                return false;
+            for (std::size_t layerIndex = 0; layerIndex < visibility.layers.size(); ++layerIndex) {
+                const auto& label = visibility.layers[layerIndex];
+                const std::string entry = PairLabelEntry(label);
+                if (entry.empty()) return false;
+                const auto found = std::find_if(definition.originals.layers.begin(),
+                    definition.originals.layers.end(), [&](const auto& row) {
+                        return row.labelEntry == entry;
+                    });
+                if (found != definition.originals.layers.end()) {
+                    if (found->invisibleAttributePresent
+                        != visibility.layerInvisibleAttributePresent[layerIndex]) return false;
+                    continue;
+                }
+                if (definition.originals.layers.size() >= pb::MaximumMetadataRows)
+                    return false;
+                Handle(TDataStd_Name) name;
+                if (!label.FindAttribute(TDataStd_Name::GetID(), name) || name.IsNull())
+                    return false;
+                pb::LayerRow row;
+                row.ordinal = std::uint16_t(definition.originals.layers.size());
+                row.labelEntry = entry;
+                if (!PairExtendedName(name->Get(), row.name)) return false;
+                row.invisibleAttributePresent =
+                    visibility.layerInvisibleAttributePresent[layerIndex];
+                definition.originals.layers.push_back(std::move(row));
+            }
+        }
+        definition.effective.materials = definition.originals.materials;
+        definition.effective.groups = definition.originals.groups;
+        definition.effective.layers = definition.originals.layers;
+
+        for (std::size_t index = 0; index < 2; ++index) {
+            const auto& source = state.sources[index];
+            auto& original = definition.originals.inputs[index];
+            auto& effective = definition.effective.inputs[index];
+            original.role = index == 0 ? pb::RecipeInputRole::Left
+                                       : pb::RecipeInputRole::Right;
+            effective.role = original.role;
+            original.sourceNode = state.sourceNodes[index];
+            effective.sourceNode = original.sourceNode;
+            original.sourceLocalID = index + 1;
+            original.shapeSlot = std::uint32_t(index);
+            if (!PairUUID(state.owner->DocumentIdentifier(), original.original.document)
+                || !PairUUID(source.entityIdentifier, original.original.entity)
+                || !PairUUID(source.definitionIdentifier, original.original.definition)
+                || !PairUUID(source.featureIdentifier, original.original.sourceFeature))
+                return false;
+            effective.originalSourceFeature = original.original.sourceFeature;
+            core3d::profile::Parameters parameters;
+            if (!core3d::profile::Decode(source.recipeValues, parameters)) return false;
+            original.recipeSchema = std::uint32_t(core3d::profile::SchemaFor(parameters));
+            if (!core3d::composite_recipe::EncodeScalarRecipe(
+                    core3d::composite_recipe::RecipeKind::Profile,
+                    original.recipeSchema, source.recipeValues, recipes[index])) return false;
+            original.recipeBytes = recipes[index];
+            original.sourceMetersPerUnit = source.metersPerUnit;
+            original.carrierMetersPerUnit = state.metersPerUnit;
+            original.sourceRootToCarrier = matrices[index];
+            original.projection = projections[index];
+            effective.geometry.dimensions = projections[index].dimensions;
+            effective.geometry.translation = projections[index].translation;
+            effective.geometry.rotationXYZW = projections[index].rotationXYZW;
+            effective.sourceMetersPerUnit = source.metersPerUnit;
+            if (!PairMetadata(state.exact[index], original.metadata)) return false;
+            if (!state.exact[index].appearance.materialLabel.IsNull()) {
+                const std::string entry = PairLabelEntry(
+                    state.exact[index].appearance.materialLabel);
+                const auto material = std::find_if(definition.originals.materials.begin(),
+                    definition.originals.materials.end(), [&](const auto& row) {
+                        return row.labelEntry == entry;
+                    });
+                if (material == definition.originals.materials.end()) return false;
+                original.metadata.appearance.material = std::uint16_t(
+                    std::distance(definition.originals.materials.begin(), material));
+            }
+            for (const auto& captured : state.groups.groups) {
+                const auto group = std::find_if(definition.originals.groups.begin(),
+                    definition.originals.groups.end(), [&](const auto& row) {
+                        return row.identifier == captured.identifier;
+                    });
+                if (group == definition.originals.groups.end()) continue;
+                for (const auto& member : captured.members)
+                    if (member.IsEqual(source.label)) {
+                        original.metadata.groups.push_back(std::uint16_t(
+                            std::distance(definition.originals.groups.begin(), group)));
+                        break;
+                    }
+            }
+            for (const auto& layer : state.exact[index].visibility.layers) {
+                const std::string entry = PairLabelEntry(layer);
+                const auto found = std::find_if(definition.originals.layers.begin(),
+                    definition.originals.layers.end(), [&](const auto& row) {
+                        return row.labelEntry == entry;
+                    });
+                if (found == definition.originals.layers.end()) return false;
+                original.metadata.layers.push_back(std::uint16_t(
+                    std::distance(definition.originals.layers.begin(), found)));
+            }
+            effective.metadata = original.metadata;
+            core3d::retained_recipe::Digest geometry{}, recipe{}, placement{};
+            if (!core3d::receipt::GeometryDigestForPolicy(
+                    source.boundRoot, geometry, false)
+                || !core3d::composite_recipe::Hash(recipes[index], recipe)
+                || !PairHash(matrices[index].data(), sizeof(matrices[index]), placement))
+                return false;
+            original.commitments.geometry = geometry;
+            original.commitments.recipe = recipe;
+            original.commitments.placement = placement;
+            original.commitments.material = recipe;
+            original.commitments.groups = geometry;
+            effective.commitments = original.commitments;
+        }
+        return pb::Valid(definition);
+    } catch (...) { definition = {}; recipes = {}; return false; }
+}
+} // namespace
+
+core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources(
+    const std::shared_ptr<core3d::native_opening::Context>& context,
+    const TDF_Label& target, const TDF_Label& tool,
+    core3d::part_boolean::Operation operation) noexcept {
+    using namespace core3d::authored_parameter;
+    try {
+        if (![NSThread isMainThread]) return PairCaptureRefused(PairRefusal::WrongThread);
+        if (myOcafDoc.IsNull() || !context || target.IsNull() || tool.IsNull()
+            || target.Data() != myOcafDoc->GetData() || tool.Data() != myOcafDoc->GetData()
+            || context->openingFence().document() != myOcafDoc
+            || context->openingFence().data() != myOcafDoc->GetData())
+            return PairCaptureRefused(PairRefusal::ForeignDocument);
+        if (target.IsEqual(tool)) return PairCaptureRefused(PairRefusal::SameSource);
+        if (operation != pb::Operation::Union && operation != pb::Operation::Subtract
+            && operation != pb::Operation::Intersect)
+            return PairCaptureRefused(PairRefusal::InvalidOperation);
+        auto state = std::make_shared<PairCapture::State>();
+        state->owner = this; state->document = myOcafDoc;
+        state->data = myOcafDoc->GetData(); state->context = context;
+        state->operation = operation;
+        state->booleanNode = NewPlainProfileCutUUID();
+        state->feature = NewPlainProfileCutUUID();
+        state->sourceNodes = {{NewPlainProfileCutUUID(), NewPlainProfileCutUUID()}};
+        if (!core3d::retained_recipe::Nonzero(state->booleanNode)
+            || !core3d::retained_recipe::Nonzero(state->feature)
+            || !core3d::retained_recipe::Nonzero(state->sourceNodes[0])
+            || !core3d::retained_recipe::Nonzero(state->sourceNodes[1])
+            || state->sourceNodes[0] == state->sourceNodes[1])
+            return PairCaptureRefused(PairRefusal::BadEncoding);
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(myOcafDoc, state->metersPerUnit)
+            || !std::isfinite(state->metersPerUnit) || state->metersPerUnit <= 0)
+            return PairCaptureRefused(PairRefusal::BadEncoding);
+        const std::array<TDF_Label, 2> labels{{target, tool}};
+        for (std::size_t index = 0; index < 2; ++index) {
+            if (!CapturePlainProfileOperationSource(labels[index], state->sources[index])
+                || !CaptureExactFreeLabel(labels[index], state->exact[index]))
+                return PairCaptureRefused(PairRefusal::UnsupportedSource);
+            core3d::profile::Parameters recipe;
+            if (!core3d::profile::Decode(state->sources[index].recipeValues, recipe)
+                || !pb::build::IsRectangularP1BaseRecipe(recipe, false))
+                return PairCaptureRefused(PairRefusal::UnsupportedSource);
+        }
+        if (state->sources[0].entityIdentifier == state->sources[1].entityIdentifier
+            || state->sources[0].definitionIdentifier == state->sources[1].definitionIdentifier
+            || state->sources[0].featureIdentifier == state->sources[1].featureIdentifier)
+            return PairCaptureRefused(PairRefusal::AliasSource);
+        if (!CaptureSavedGroups(state->groups))
+            return PairCaptureRefused(PairRefusal::BadEncoding);
+        state->undoDepth = myOcafDoc->GetAvailableUndos();
+        state->redoDepth = myOcafDoc->GetAvailableRedos();
+        PairCaptureReply reply;
+        reply.status = PairStatus::Captured; reply.refusal = PairRefusal::None;
+        reply.capture = std::shared_ptr<const PairCapture>(new PairCapture(std::move(state)));
+        return reply;
+    } catch (...) { return PairCaptureRefused(PairRefusal::BadEncoding); }
+}
+
+core3d::authored_parameter::PairPrepareReply OcctDocument::PrepareBooleanSources(
+    const std::shared_ptr<const core3d::authored_parameter::PairCapture>& capture,
+    const std::atomic_bool& cancelled) noexcept {
+    using namespace core3d::authored_parameter;
+    try {
+        if (![NSThread isMainThread]) return PairPrepareRefused(PairRefusal::WrongThread);
+        if (cancelled.load()) return PairPrepareCancelled();
+        if (!capture || !capture->state_ || capture->state_->owner != this)
+            return PairPrepareRefused(PairRefusal::ForeignDocument);
+        if (!PairCurrent(*this, *capture->state_))
+            return PairPrepareRefused(PairRefusal::StaleSource);
+        std::array<pb::OriginalAnalyticProjection, 2> projections;
+        std::array<std::array<double, 16>, 2> matrices;
+        std::array<TopoDS_Shape, 2> observed, analytic;
+        core3d::retained_topology_budget::Counter budget;
+        const auto charge = [&](const TopoDS_Shape& shape,
+                                core3d::retained_topology_budget::Site site)
+            -> std::optional<PairPrepareReply> {
+            namespace tb = core3d::retained_topology_budget;
+            const auto status = core3d::retained_part_boolean::ChargeAnalyticPass(
+                shape, budget, cancelled, site);
+            if (status == tb::WalkStatus::Completed) return std::nullopt;
+            if (status == tb::WalkStatus::Cancelled) return PairPrepareCancelled();
+            if (status == tb::WalkStatus::BudgetDenied) {
+                const auto visits = budget.topologyVisits;
+                const auto stages = budget.buildStages;
+                const bool laterCharge = budget.visit(1, site);
+                if (!budget.exhausted || laterCharge
+                    || budget.topologyVisits != visits || budget.buildStages != stages)
+                    return PairPrepareRefused(PairRefusal::BadEncoding);
+                return PairPrepareRefused(PairRefusal::Budget);
+            }
+            return PairPrepareRefused(PairRefusal::UnprovedCorrespondence);
+        };
+        const gp_Trsf carrier = capture->state_->sources[0].placement;
+        for (std::size_t index = 0; index < 2; ++index) {
+            if (cancelled.load()) return PairPrepareCancelled();
+            if (!PairProjection(capture->state_->sources[index], carrier,
+                    projections[index], matrices[index], observed[index], analytic[index]))
+                return PairPrepareRefused(PairRefusal::UnprovedCorrespondence);
+            if (const auto refused = charge(observed[index],
+                    core3d::retained_topology_budget::Site::C25AnalyticInput))
+                return *refused;
+            if (const auto refused = charge(analytic[index],
+                    core3d::retained_topology_budget::Site::C25AnalyticInput))
+                return *refused;
+        }
+        const TopoDS_Shape independent = PairBoolean(
+            capture->state_->operation, observed[0], observed[1]);
+        const TopoDS_Shape candidate = PairBoolean(
+            capture->state_->operation, analytic[0], analytic[1]);
+        if (independent.IsNull() || candidate.IsNull())
+            return PairPrepareRefused(PairRefusal::InvalidResult);
+        if (const auto refused = charge(independent,
+                core3d::retained_topology_budget::Site::C26AnalyticBoolean))
+            return *refused;
+        if (const auto refused = charge(candidate,
+                core3d::retained_topology_budget::Site::C26AnalyticBoolean))
+            return *refused;
+        if (!PlainProfileRebuildCorresponds(independent, candidate))
+            return PairPrepareRefused(PairRefusal::UnprovedCorrespondence);
+        auto prepared = std::make_shared<PairPrepared::State>();
+        prepared->capture = capture;
+        std::array<std::vector<std::uint8_t>, 2> recipes;
+        if (!PairDefinition(*capture->state_, projections, matrices,
+                prepared->definition, recipes))
+            return PairPrepareRefused(PairRefusal::BadEncoding);
+        if (!pb::EncodeOriginals(prepared->definition,
+                prepared->observation.originalsBytes))
+            return PairPrepareRefused(PairRefusal::BadEncoding);
+        prepared->independentResult = independent;
+        prepared->analyticResult = candidate;
+        auto& observation = prepared->observation;
+        observation.operation = capture->state_->operation;
+        observation.metersPerUnit = capture->state_->metersPerUnit;
+        observation.recipeBytes = std::move(recipes);
+        observation.undoDepth = capture->state_->undoDepth;
+        observation.redoDepth = capture->state_->redoDepth;
+        for (std::size_t index = 0; index < 2; ++index) {
+            observation.entityIdentifiers[index] =
+                capture->state_->sources[index].entityIdentifier;
+            observation.sourceFeatureIdentifiers[index] =
+                capture->state_->sources[index].featureIdentifier;
+            std::array<double, 6> ignoredBounds; std::uint32_t ignoredLoops = 0;
+            if (!PairMeasure(observed[index], observation.sourceVolumes[index],
+                    ignoredBounds, ignoredLoops))
+                return PairPrepareRefused(PairRefusal::UnprovedCorrespondence);
+        }
+        if (!PairMeasure(independent, observation.resultVolume,
+                observation.resultBounds, observation.resultClosedLoops))
+            return PairPrepareRefused(PairRefusal::InvalidResult);
+        observation.resultMembership = {{1, 1}};
+        PairPrepareReply reply;
+        reply.status = PairStatus::Prepared; reply.refusal = PairRefusal::None;
+        reply.prepared = std::shared_ptr<const PairPrepared>(
+            new PairPrepared(std::move(prepared)));
+        return reply;
+    } catch (...) { return PairPrepareRefused(PairRefusal::BadEncoding); }
+}
+
+core3d::authored_parameter::PairObservationReply OcctDocument::ObserveBooleanSources(
+    const std::shared_ptr<const core3d::authored_parameter::PairCapture>& capture)
+    const noexcept {
+    using namespace core3d::authored_parameter;
+    try {
+        if (![NSThread isMainThread]) return PairObserveRefused(PairRefusal::WrongThread);
+        if (!capture || !capture->state_ || capture->state_->owner != this)
+            return PairObserveRefused(PairRefusal::ForeignDocument);
+        if (!PairCurrent(*this, *capture->state_))
+            return PairObserveRefused(PairRefusal::StaleSource);
+        const std::atomic_bool running{false};
+        const auto prepared = const_cast<OcctDocument*>(this)->PrepareBooleanSources(
+            capture, running);
+        if (prepared.status != PairStatus::Prepared || !prepared.prepared
+            || !prepared.prepared->state_)
+            return PairObserveRefused(prepared.refusal);
+        PairObservationReply reply;
+        reply.status = PairStatus::Prepared; reply.refusal = PairRefusal::None;
+        reply.observation = prepared.prepared->state_->observation;
+        return reply;
+    } catch (...) { return PairObserveRefused(PairRefusal::BadEncoding); }
+}
+
 Standard_Boolean OcctDocument::VerifyPlainProfileOperationReplacement(
     const OcctPlainProfileOperationCapture& capture,
     const TopoDS_Shape& newRoot) const noexcept

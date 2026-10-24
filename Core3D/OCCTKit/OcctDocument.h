@@ -76,6 +76,7 @@ namespace core3d::text_relief::owner { struct PreparedHostPair; }
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_TShape.hxx>
 #include <array>
+#include <atomic>
 #include <deque>
 #include <functional>
 #include <string>
@@ -119,7 +120,15 @@ namespace core3d::draft_faces::owner { class NativeOwner; }
 namespace core3d::retained_feature { class OcafOwnerService; }
 namespace core3d::composite_recipe { struct Payload; }
 namespace core3d::retained_program_suffix { struct Probe; }
-namespace core3d::authored_parameter { class Capture; class Owner; }
+namespace core3d::authored_parameter {
+class Capture;
+class Owner;
+class PairCapture;
+class PairPrepared;
+struct PairCaptureReply;
+struct PairPrepareReply;
+struct PairObservationReply;
+}
 namespace core3d::authored_boolean { struct Candidate; }
 #if DEBUG
 namespace core3d::debug { class RetainedEdgeTreatmentStageFault; }
@@ -1676,6 +1685,27 @@ public:
         core3d::native_opening::Context& context,
         std::uint32_t viewportWidth, std::uint32_t viewportHeight,
         std::shared_ptr<core3d::native_opening::CommandLease>& lease) noexcept;
+    //! A2 N-CAP: issue one immutable authority over two distinct ordinary
+    //! Profile sources in target-left/tool-right order. This reads exact
+    //! recipes, receipts, scalar appearance, groups, layers and units and
+    //! opens no OCAF command.
+    Standard_EXPORT core3d::authored_parameter::PairCaptureReply
+    CaptureBooleanSources(
+        const std::shared_ptr<core3d::native_opening::Context>& context,
+        const TDF_Label& target, const TDF_Label& tool,
+        core3d::part_boolean::Operation operation) noexcept;
+    //! Detached O1 conversion/O4 proof. Every currentness check happens before
+    //! kernel work and no command or persistent label is created.
+    Standard_EXPORT core3d::authored_parameter::PairPrepareReply
+    PrepareBooleanSources(
+        const std::shared_ptr<const core3d::authored_parameter::PairCapture>& capture,
+        const std::atomic_bool& cancelled) noexcept;
+    //! Independent live-source observation for a capture. Prepared candidate
+    //! bytes are never accepted as this observer's oracle.
+    Standard_EXPORT core3d::authored_parameter::PairObservationReply
+    ObserveBooleanSources(
+        const std::shared_ptr<const core3d::authored_parameter::PairCapture>& capture)
+        const noexcept;
     //! True while a measured treatment-history companion has not been bound
     //! to its own committed delta or discharged by verified prior settlement.
     Standard_EXPORT Standard_Boolean HasUnresolvedTreatmentHistoryCompanion() const noexcept;

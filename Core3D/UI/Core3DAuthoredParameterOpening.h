@@ -117,6 +117,83 @@ __attribute__((objc_subclassing_restricted))
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+typedef NS_ENUM(NSInteger, Core3DBooleanPairStatus) {
+    Core3DBooleanPairStatusCaptured = 0,
+    Core3DBooleanPairStatusPrepared,
+    Core3DBooleanPairStatusRefused,
+    Core3DBooleanPairStatusCancelled,
+};
+
+typedef NS_ENUM(NSInteger, Core3DBooleanPairRefusal) {
+    Core3DBooleanPairRefusalNone = 0,
+    Core3DBooleanPairRefusalWrongThread,
+    Core3DBooleanPairRefusalForeignDocument,
+    Core3DBooleanPairRefusalSameSource,
+    Core3DBooleanPairRefusalAliasSource,
+    Core3DBooleanPairRefusalUnsupportedSource,
+    Core3DBooleanPairRefusalStaleSource,
+    Core3DBooleanPairRefusalInvalidOperation,
+    Core3DBooleanPairRefusalUnprovedCorrespondence,
+    Core3DBooleanPairRefusalInvalidResult,
+    Core3DBooleanPairRefusalBadEncoding,
+    Core3DBooleanPairRefusalBudget,
+    Core3DBooleanPairRefusalCancelled,
+};
+
+//! Opaque native-issued paired authority. It exposes no labels, initializer,
+//! command lease, apply operation, or serializable mutation authority.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DBooleanPairOpening : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DBooleanPairPrepared : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DBooleanPairCaptureResult : NSObject
+@property(nonatomic,readonly) Core3DBooleanPairStatus status;
+@property(nonatomic,readonly) Core3DBooleanPairRefusal refusal;
+@property(nonatomic,strong,readonly,nullable) Core3DBooleanPairOpening *opening;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DBooleanPairPrepareResult : NSObject
+@property(nonatomic,readonly) Core3DBooleanPairStatus status;
+@property(nonatomic,readonly) Core3DBooleanPairRefusal refusal;
+@property(nonatomic,strong,readonly,nullable) Core3DBooleanPairPrepared *prepared;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+//! Value-only O4 observation. All geometry values are read from the independent
+//! ordinary-root replay and never from a caller candidate.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DBooleanPairObservationResult : NSObject
+@property(nonatomic,readonly) Core3DBooleanPairStatus status;
+@property(nonatomic,readonly) Core3DBooleanPairRefusal refusal;
+@property(nonatomic,copy,readonly) NSArray<NSString *> *entityIdentifiers;
+@property(nonatomic,copy,readonly) NSArray<NSString *> *sourceFeatureIdentifiers;
+@property(nonatomic,copy,readonly) NSArray<NSData *> *sourceRecipeBytes;
+@property(nonatomic,copy,readonly) NSData *originalsCanonicalBytes;
+@property(nonatomic,copy,readonly) NSArray<NSNumber *> *sourceVolumes;
+@property(nonatomic,readonly) double resultVolume;
+@property(nonatomic,copy,readonly) NSArray<NSNumber *> *resultBounds;
+@property(nonatomic,readonly) NSUInteger resultClosedLoopCount;
+@property(nonatomic,copy,readonly) NSArray<NSNumber *> *resultMembership;
+@property(nonatomic,readonly) double metersPerUnit;
+@property(nonatomic,readonly) NSInteger undoDepth;
+@property(nonatomic,readonly) NSInteger redoDepth;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 #if DEBUG
 //! SAB-N1 fixed post-write fault sites for the authored-Boolean stage. The
 //! values mirror the native core3d::authored_parameter::debug site enum and
@@ -186,6 +263,29 @@ __attribute__((objc_subclassing_restricted))
 #endif
 
 @interface Core3DViewController (AuthoredParameterOpening)
+//! Capture both current ordinary Profile roots at once in target-left/tool-
+//! right order. This and prepare are read-only; creator apply is intentionally
+//! absent until N-COM.
+- (Core3DBooleanPairCaptureResult *)openBooleanSourcesWithTargetEntityIdentifier:
+    (NSString *)targetEntityIdentifier toolEntityIdentifier:(NSString *)toolEntityIdentifier
+    operation:(Core3DPartBooleanOperation)operation expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(openBooleanSources(targetEntityIdentifier:toolEntityIdentifier:operation:expected:));
+- (Core3DBooleanPairPrepareResult *)prepareBooleanSources:
+    (Core3DBooleanPairOpening *)opening expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(prepareBooleanSources(_:expected:));
+//! Externally driven Stop for detached preparation. Once stopped, this exact
+//! opening can never prepare again and cannot affect a later opening.
+- (BOOL)cancelBooleanSources:(Core3DBooleanPairOpening *)opening
+    NS_SWIFT_NAME(cancelBooleanSources(_:));
+- (Core3DBooleanPairObservationResult *)observeBooleanSources:
+    (Core3DBooleanPairOpening *)opening
+    NS_SWIFT_NAME(observeBooleanSources(_:));
+#if DEBUG
+//! Test-only metadata producer applied after an ordinary Profile is created.
+//! This never installs a Boolean/composite fixture.
+- (BOOL)debugInstallBooleanSourceHiddenLayer:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugInstallBooleanSourceHiddenLayer(entityIdentifier:));
+#endif
 //! Capture requires the exact selected object and caller-observed scene. It is
 //! read-only and refuses every unsupported carrier rather than dropping data.
 - (Core3DAuthoredParameterOpening *_Nullable)openAuthoredParameterForEntityIdentifier:
