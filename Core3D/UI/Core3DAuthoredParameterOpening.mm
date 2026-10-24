@@ -15,6 +15,7 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_LayerTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
+#include <TDF_Tool.hxx>
 #include <cmath>
 #include <memory>
 
@@ -739,6 +740,8 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
 @interface Core3DBooleanPairOpening () {
 @public
     std::shared_ptr<const core3d::authored_parameter::PairCapture> _capture;
+    std::shared_ptr<const core3d::authored_parameter::BooleanOriginalsCapture>
+        _originalsCapture;
     std::shared_ptr<std::atomic_bool> _cancelled;
     NSString *_targetEntityIdentifier;
     NSString *_toolEntityIdentifier;
@@ -746,6 +749,9 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
 - (instancetype)initWithCapture:
     (std::shared_ptr<const core3d::authored_parameter::PairCapture>)capture
     target:(NSString *)target tool:(NSString *)tool;
+- (instancetype)initWithOriginalsCapture:
+    (std::shared_ptr<const core3d::authored_parameter::BooleanOriginalsCapture>)capture
+    target:(NSString *)target;
 @end
 
 @implementation Core3DBooleanPairOpening
@@ -760,6 +766,17 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
     _toolEntityIdentifier = [tool copy];
     return self;
 }
+- (instancetype)initWithOriginalsCapture:
+    (std::shared_ptr<const core3d::authored_parameter::BooleanOriginalsCapture>)capture
+    target:(NSString *)target {
+    self = [super init];
+    if (!self || !capture || !target) return nil;
+    _originalsCapture = std::move(capture);
+    _cancelled = std::make_shared<std::atomic_bool>(false);
+    _targetEntityIdentifier = [target copy];
+    _toolEntityIdentifier = @"";
+    return self;
+}
 - (void)dealloc {
     if (_cancelled) _cancelled->store(true);
 }
@@ -768,17 +785,69 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
 @interface Core3DBooleanPairPrepared () {
 @public
     std::shared_ptr<const core3d::authored_parameter::PairPrepared> _prepared;
+    std::shared_ptr<const core3d::authored_parameter::BooleanOriginalsPrepared>
+        _originalsPrepared;
+    NSString *_targetEntityIdentifier;
 }
 - (instancetype)initWithPrepared:
-    (std::shared_ptr<const core3d::authored_parameter::PairPrepared>)prepared;
+    (std::shared_ptr<const core3d::authored_parameter::PairPrepared>)prepared
+    target:(NSString *)target;
+- (instancetype)initWithOriginalsPrepared:
+    (std::shared_ptr<const core3d::authored_parameter::BooleanOriginalsPrepared>)prepared
+    target:(NSString *)target;
 @end
 
 @implementation Core3DBooleanPairPrepared
 - (instancetype)initWithPrepared:
-    (std::shared_ptr<const core3d::authored_parameter::PairPrepared>)prepared {
+    (std::shared_ptr<const core3d::authored_parameter::PairPrepared>)prepared
+    target:(NSString *)target {
     self = [super init];
-    if (!self || !prepared) return nil;
+    if (!self || !prepared || !target) return nil;
     _prepared = std::move(prepared);
+    _targetEntityIdentifier = [target copy];
+    return self;
+}
+- (instancetype)initWithOriginalsPrepared:
+    (std::shared_ptr<const core3d::authored_parameter::BooleanOriginalsPrepared>)prepared
+    target:(NSString *)target {
+    self = [super init];
+    if (!self || !prepared || !target) return nil;
+    _originalsPrepared = std::move(prepared);
+    _targetEntityIdentifier = [target copy];
+    return self;
+}
+@end
+
+@interface Core3DBooleanOriginalsEdit () {
+@public
+    core3d::authored_parameter::BooleanOriginalsEdit _nativeEdit;
+}
+@end
+
+@implementation Core3DBooleanOriginalsEdit
+- (nullable instancetype)initWithKind:(Core3DBooleanOriginalsEditKind)kind
+    role:(Core3DBooleanOriginalRole)role values:(NSArray<NSNumber *> *)values
+    operation:(Core3DPartBooleanOperation)operation flag:(BOOL)flag {
+    self = [super init];
+    if (!self || ![values isKindOfClass:NSArray.class]
+        || (role != Core3DBooleanOriginalRoleLeft
+            && role != Core3DBooleanOriginalRoleRight)
+        || kind < Core3DBooleanOriginalsEditKindOperation
+        || kind > Core3DBooleanOriginalsEditKindVisibility) return nil;
+    const NSUInteger expected = kind == Core3DBooleanOriginalsEditKindDimensions ? 3
+        : kind == Core3DBooleanOriginalsEditKindPlacement ? 7
+        : kind == Core3DBooleanOriginalsEditKindScalarMaterial ? 6 : 0;
+    if (values.count != expected) return nil;
+    _nativeEdit.kind = static_cast<
+        core3d::authored_parameter::BooleanOriginalsEditKind>(kind);
+    _nativeEdit.role = static_cast<core3d::part_boolean::RecipeInputRole>(role);
+    _nativeEdit.operation = static_cast<core3d::part_boolean::Operation>(operation);
+    _nativeEdit.flag = flag;
+    for (NSUInteger index = 0; index < values.count; ++index) {
+        if (![values[index] isKindOfClass:NSNumber.class]
+            || !std::isfinite(values[index].doubleValue)) return nil;
+        _nativeEdit.values[index] = values[index].doubleValue;
+    }
     return self;
 }
 @end
@@ -833,6 +902,12 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
     NSMutableArray *volumes = [NSMutableArray arrayWithCapacity:2];
     NSMutableArray *bounds = [NSMutableArray arrayWithCapacity:6];
     NSMutableArray *membership = [NSMutableArray arrayWithCapacity:2];
+    NSMutableArray *dimensions = [NSMutableArray arrayWithCapacity:2];
+    NSMutableArray *placements = [NSMutableArray arrayWithCapacity:2];
+    NSMutableArray *materials = [NSMutableArray arrayWithCapacity:2];
+    NSMutableArray *materialPresence = [NSMutableArray arrayWithCapacity:2];
+    NSMutableArray *groupMembership = [NSMutableArray arrayWithCapacity:2];
+    NSMutableArray *visibility = [NSMutableArray arrayWithCapacity:2];
     if (reply.observation) {
         const auto& value = *reply.observation;
         for (std::size_t index = 0; index < 2; ++index) {
@@ -844,6 +919,20 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
                 length:value.recipeBytes[index].size()]];
             [volumes addObject:@(value.sourceVolumes[index])];
             [membership addObject:@(value.resultMembership[index])];
+            NSMutableArray *dimension = [NSMutableArray arrayWithCapacity:3];
+            NSMutableArray *placement = [NSMutableArray arrayWithCapacity:7];
+            NSMutableArray *material = [NSMutableArray arrayWithCapacity:6];
+            for (double scalar : value.effectiveDimensions[index])
+                [dimension addObject:@(scalar)];
+            for (double scalar : value.effectivePlacements[index])
+                [placement addObject:@(scalar)];
+            for (double scalar : value.effectiveMaterials[index])
+                [material addObject:@(scalar)];
+            [dimensions addObject:dimension]; [placements addObject:placement];
+            [materials addObject:material];
+            [materialPresence addObject:@(value.effectiveMaterialPresent[index])];
+            [groupMembership addObject:@(value.effectiveGroupMembership[index])];
+            [visibility addObject:@(value.effectiveVisibility[index])];
         }
         for (double scalar : value.resultBounds) [bounds addObject:@(scalar)];
         _originalsCanonicalBytes = [NSData dataWithBytes:value.originalsBytes.data()
@@ -852,12 +941,71 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
         _resultClosedLoopCount = value.resultClosedLoops;
         _metersPerUnit = value.metersPerUnit;
         _undoDepth = value.undoDepth; _redoDepth = value.redoDepth;
+        _originalsDigest = [NSData dataWithBytes:value.originalsDigest.data()
+            length:value.originalsDigest.size()];
+        _effectiveDigest = [NSData dataWithBytes:value.effectiveDigest.data()
+            length:value.effectiveDigest.size()];
+        _identityDigest = [NSData dataWithBytes:value.identityDigest.data()
+            length:value.identityDigest.size()];
+        _resultDigest = [NSData dataWithBytes:value.resultDigest.data()
+            length:value.resultDigest.size()];
+        _resultVisible = value.resultVisible;
+        _operation = static_cast<Core3DPartBooleanOperation>(value.operation);
+        _graphNodeCount = value.graphNodeCount;
+        _retainedSuffixCanonicalBytes = [NSData dataWithBytes:value.suffixBytes.data()
+            length:value.suffixBytes.size()];
     } else {
         _originalsCanonicalBytes = [NSData data];
+        _retainedSuffixCanonicalBytes = [NSData data];
+        _originalsDigest = [NSData data]; _effectiveDigest = [NSData data];
+        _identityDigest = [NSData data]; _resultDigest = [NSData data];
     }
     _entityIdentifiers = entities; _sourceFeatureIdentifiers = features;
     _sourceRecipeBytes = recipes; _sourceVolumes = volumes;
     _resultBounds = bounds; _resultMembership = membership;
+    _effectiveDimensions = dimensions; _effectivePlacements = placements;
+    _effectiveMaterials = materials;
+    _effectiveMaterialPresent = materialPresence;
+    _effectiveGroupMembership = groupMembership;
+    _effectiveVisibility = visibility;
+    return self;
+}
+@end
+
+@interface Core3DBooleanPairConsumptionReceipt ()
+- (instancetype)initWithNative:
+    (const core3d::authored_parameter::PairConsumptionReceipt&)receipt;
+@end
+
+@implementation Core3DBooleanPairConsumptionReceipt
+- (instancetype)initWithNative:
+    (const core3d::authored_parameter::PairConsumptionReceipt&)receipt {
+    self = [super init];
+    if (!self) return nil;
+    _targetEntityIdentifier = [[NSString alloc]
+        initWithUTF8String:receipt.targetEntityIdentifier.c_str()] ?: @"";
+    _toolEntityIdentifier = [[NSString alloc]
+        initWithUTF8String:receipt.toolEntityIdentifier.c_str()] ?: @"";
+    _undoDelta = receipt.undoDelta;
+    return self;
+}
+@end
+
+@interface Core3DBooleanPairApplyResult ()
+- (instancetype)initWithNative:
+    (const core3d::authored_parameter::PairApplyReply&)reply;
+@end
+
+
+@implementation Core3DBooleanPairApplyResult
+- (instancetype)initWithNative:
+    (const core3d::authored_parameter::PairApplyReply&)reply {
+    self = [super init];
+    if (!self) return nil;
+    _status = static_cast<Core3DBooleanPairApplyStatus>(reply.status);
+    _refusal = static_cast<Core3DBooleanPairRefusal>(reply.refusal);
+    if (reply.receipt) _receipt = [[Core3DBooleanPairConsumptionReceipt alloc]
+        initWithNative:*reply.receipt];
     return self;
 }
 @end
@@ -938,7 +1086,8 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
         const auto reply = viewer->getDocument()->PrepareBooleanSources(
             opening->_capture, *opening->_cancelled);
         Core3DBooleanPairPrepared *prepared = reply.prepared
-            ? [[Core3DBooleanPairPrepared alloc] initWithPrepared:reply.prepared] : nil;
+            ? [[Core3DBooleanPairPrepared alloc] initWithPrepared:reply.prepared
+                target:opening->_targetEntityIdentifier] : nil;
         return [[Core3DBooleanPairPrepareResult alloc]
             initWithStatus:static_cast<Core3DBooleanPairStatus>(reply.status)
             refusal:static_cast<Core3DBooleanPairRefusal>(reply.refusal)
@@ -978,7 +1127,233 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
     }
     return [[Core3DBooleanPairObservationResult alloc] initWithReply:reply];
 }
+
+- (Core3DBooleanPairApplyResult *)applyBooleanSources:
+    (Core3DBooleanPairPrepared *)prepared expected:(Core3DSceneSnapshot *)expected {
+    using namespace core3d::authored_parameter;
+    PairApplyReply reply;
+    const auto refused = [&](PairRefusal refusal) {
+        reply.status = PairApplyStatus::Refused;
+        reply.refusal = refusal;
+        return [[Core3DBooleanPairApplyResult alloc] initWithNative:reply];
+    };
+    if (![NSThread isMainThread]
+        || ![prepared isKindOfClass:Core3DBooleanPairPrepared.class]
+        || !prepared->_prepared || !prepared->_targetEntityIdentifier
+        || ![expected isKindOfClass:Core3DSceneSnapshot.class])
+        return refused(PairRefusal::BadEncoding);
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const CGSize size = self.viewportDrawableSize;
+        Core3DSceneSnapshot *current = [self captureSceneSnapshot];
+        if (!viewer || !SameExpectedScene(expected, current,
+                prepared->_targetEntityIdentifier)
+            || !std::isfinite(size.width) || !std::isfinite(size.height)
+            || size.width < 1 || size.height < 1
+            || size.width > UINT32_MAX || size.height > UINT32_MAX)
+            return refused(PairRefusal::StaleSource);
+        reply = viewer->getDocument()->ApplyBooleanSources(prepared->_prepared,
+            std::uint32_t(size.width), std::uint32_t(size.height));
+        return [[Core3DBooleanPairApplyResult alloc] initWithNative:reply];
+    } catch (...) { return refused(PairRefusal::BadEncoding); }
+}
+
+- (Core3DBooleanPairCaptureResult *)openBooleanOriginalsEditorForEntityIdentifier:
+    (NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected {
+    using namespace core3d::authored_parameter;
+    const auto refused = ^Core3DBooleanPairCaptureResult *(PairRefusal reason) {
+        return [[Core3DBooleanPairCaptureResult alloc]
+            initWithStatus:Core3DBooleanPairStatusRefused
+            refusal:static_cast<Core3DBooleanPairRefusal>(reason) opening:nil];
+    };
+    if (![NSThread isMainThread]
+        || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || ![expected isKindOfClass:Core3DSceneSnapshot.class])
+        return refused(PairRefusal::BadEncoding);
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const CGSize size = self.viewportDrawableSize;
+        Core3DSceneSnapshot *current = [self captureSceneSnapshot];
+        if (!viewer || !SameExpectedScene(expected, current, entityIdentifier)
+            || !std::isfinite(size.width) || !std::isfinite(size.height)
+            || size.width < 1 || size.height < 1
+            || size.width > UINT32_MAX || size.height > UINT32_MAX)
+            return refused(PairRefusal::StaleSource);
+        const Handle(OcctDocument) document = viewer->getDocument();
+        const std::string entity = entityIdentifier.UTF8String ?: "";
+        const TDF_Label owner = ExactRoot(document, entity);
+        if (owner.IsNull()) return refused(PairRefusal::UnsupportedSource);
+        auto context = viewer->captureNativeOpeningContext(
+            std::uint32_t(size.width), std::uint32_t(size.height), {entity});
+        const auto reply = document->CaptureBooleanOriginals(context, owner);
+        Core3DBooleanPairOpening *opening = reply.capture
+            ? [[Core3DBooleanPairOpening alloc]
+                initWithOriginalsCapture:reply.capture target:entityIdentifier] : nil;
+        return [[Core3DBooleanPairCaptureResult alloc]
+            initWithStatus:static_cast<Core3DBooleanPairStatus>(reply.status)
+            refusal:static_cast<Core3DBooleanPairRefusal>(reply.refusal)
+            opening:opening];
+    } catch (...) { return refused(PairRefusal::BadEncoding); }
+}
+
+- (Core3DBooleanPairPrepareResult *)prepareBooleanOriginalsEdit:
+    (Core3DBooleanPairOpening *)opening edit:(Core3DBooleanOriginalsEdit *)edit
+    expected:(Core3DSceneSnapshot *)expected {
+    using namespace core3d::authored_parameter;
+    const auto refused = ^Core3DBooleanPairPrepareResult *(PairRefusal reason) {
+        return [[Core3DBooleanPairPrepareResult alloc]
+            initWithStatus:Core3DBooleanPairStatusRefused
+            refusal:static_cast<Core3DBooleanPairRefusal>(reason) prepared:nil];
+    };
+    if (![NSThread isMainThread]
+        || ![opening isKindOfClass:Core3DBooleanPairOpening.class]
+        || !opening->_originalsCapture || !opening->_cancelled
+        || ![edit isKindOfClass:Core3DBooleanOriginalsEdit.class]
+        || ![expected isKindOfClass:Core3DSceneSnapshot.class])
+        return refused(PairRefusal::BadEncoding);
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        Core3DSceneSnapshot *current = [self captureSceneSnapshot];
+        if (!viewer || !SameExpectedScene(
+                expected, current, opening->_targetEntityIdentifier))
+            return refused(PairRefusal::StaleSource);
+        const auto reply = viewer->getDocument()->PrepareBooleanOriginalsEdit(
+            opening->_originalsCapture, edit->_nativeEdit, *opening->_cancelled);
+        Core3DBooleanPairPrepared *prepared = reply.prepared
+            ? [[Core3DBooleanPairPrepared alloc]
+                initWithOriginalsPrepared:reply.prepared
+                target:opening->_targetEntityIdentifier] : nil;
+        return [[Core3DBooleanPairPrepareResult alloc]
+            initWithStatus:static_cast<Core3DBooleanPairStatus>(reply.status)
+            refusal:static_cast<Core3DBooleanPairRefusal>(reply.refusal)
+            prepared:prepared];
+    } catch (...) { return refused(PairRefusal::BadEncoding); }
+}
+
+- (Core3DBooleanPairObservationResult *)observeBooleanOriginals:
+    (Core3DBooleanPairOpening *)opening {
+    core3d::authored_parameter::PairObservationReply reply;
+    if (![NSThread isMainThread]
+        || ![opening isKindOfClass:Core3DBooleanPairOpening.class]
+        || !opening->_originalsCapture) {
+        reply.refusal = core3d::authored_parameter::PairRefusal::BadEncoding;
+        return [[Core3DBooleanPairObservationResult alloc] initWithReply:reply];
+    }
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        reply = viewer ? viewer->getDocument()->ObserveBooleanOriginals(
+            opening->_originalsCapture) : reply;
+        if (!viewer) reply.refusal =
+            core3d::authored_parameter::PairRefusal::ForeignDocument;
+    } catch (...) {
+        reply.refusal = core3d::authored_parameter::PairRefusal::BadEncoding;
+    }
+    return [[Core3DBooleanPairObservationResult alloc] initWithReply:reply];
+}
+
+- (Core3DBooleanPairObservationResult *)captureBooleanOriginalsObservationForEntityIdentifier:
+    (NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected {
+    using namespace core3d::authored_parameter;
+    PairObservationReply reply;
+    const auto refused = [&](PairRefusal reason) {
+        reply.refusal = reason;
+        return [[Core3DBooleanPairObservationResult alloc] initWithReply:reply];
+    };
+    if (![NSThread isMainThread]
+        || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || ![expected isKindOfClass:Core3DSceneSnapshot.class])
+        return refused(PairRefusal::BadEncoding);
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        Core3DSceneSnapshot *current = [self captureSceneSnapshot];
+        // This checks observation freshness only. SameExpectedScene and every
+        // selection-dependent editor gate above remain unchanged.
+        if (!viewer || !current || expected.publicationSourceIdentifier.length == 0
+            || ![expected.publicationSourceIdentifier isEqualToString:
+                 current.publicationSourceIdentifier]
+            || expected.revisions.documentGeneration != current.revisions.documentGeneration
+            || expected.revisions.modelRevision != current.revisions.modelRevision
+            || expected.revisions.presentationRevision != current.revisions.presentationRevision)
+            return refused(PairRefusal::StaleSource);
+        const Handle(OcctDocument) document = viewer->getDocument();
+        const TDF_Label owner = ExactRoot(document, entityIdentifier.UTF8String ?: "");
+        if (owner.IsNull()) return refused(PairRefusal::UnsupportedSource);
+        const auto captured = document->CaptureBooleanOriginalsObservation(owner);
+        reply.status = captured.status;
+        reply.refusal = captured.refusal;
+        if (captured.observation) reply.observation = captured.observation->value();
+        return [[Core3DBooleanPairObservationResult alloc] initWithReply:reply];
+    } catch (...) { return refused(PairRefusal::BadEncoding); }
+}
+
+- (Core3DBooleanPairApplyResult *)applyBooleanOriginalsEdit:
+    (Core3DBooleanPairPrepared *)prepared expected:(Core3DSceneSnapshot *)expected {
+    using namespace core3d::authored_parameter;
+    PairApplyReply reply;
+    const auto refused = [&](PairRefusal reason) {
+        reply.status = PairApplyStatus::Refused; reply.refusal = reason;
+        return [[Core3DBooleanPairApplyResult alloc] initWithNative:reply];
+    };
+    if (![NSThread isMainThread]
+        || ![prepared isKindOfClass:Core3DBooleanPairPrepared.class]
+        || !prepared->_originalsPrepared || !prepared->_targetEntityIdentifier
+        || ![expected isKindOfClass:Core3DSceneSnapshot.class])
+        return refused(PairRefusal::BadEncoding);
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const CGSize size = self.viewportDrawableSize;
+        Core3DSceneSnapshot *current = [self captureSceneSnapshot];
+        if (!viewer || !SameExpectedScene(expected, current,
+                prepared->_targetEntityIdentifier)
+            || !std::isfinite(size.width) || !std::isfinite(size.height)
+            || size.width < 1 || size.height < 1
+            || size.width > UINT32_MAX || size.height > UINT32_MAX)
+            return refused(PairRefusal::StaleSource);
+        reply = viewer->getDocument()->ApplyBooleanOriginalsEdit(
+            prepared->_originalsPrepared, std::uint32_t(size.width),
+            std::uint32_t(size.height));
+        return [[Core3DBooleanPairApplyResult alloc] initWithNative:reply];
+    } catch (...) { return refused(PairRefusal::BadEncoding); }
+}
 #if DEBUG
+- (NSInteger)debugAppendBooleanOriginalsSuffix:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread]) return 1;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const CGSize size = self.viewportDrawableSize;
+        Core3DSceneSnapshot *current = [self captureSceneSnapshot];
+        if (!viewer || !SameExpectedScene(expected, current, entityIdentifier)
+            || !std::isfinite(size.width) || !std::isfinite(size.height)
+            || size.width < 1 || size.height < 1
+            || size.width > UINT32_MAX || size.height > UINT32_MAX) return 1;
+        const auto document = viewer->getDocument();
+        const std::string entity = entityIdentifier.UTF8String ?: "";
+        const TDF_Label owner = ExactRoot(document, entity);
+        if (owner.IsNull()) return 1;
+        auto context = viewer->captureNativeOpeningContext(
+            std::uint32_t(size.width), std::uint32_t(size.height), {entity});
+        return document->DebugAppendBooleanOriginalsSuffix(context, owner,
+            std::uint32_t(size.width), std::uint32_t(size.height));
+    } catch (...) { return 1; }
+}
+
 - (BOOL)debugInstallBooleanSourceHiddenLayer:(NSString *)entityIdentifier {
     if (![NSThread isMainThread]
         || ![entityIdentifier isKindOfClass:NSString.class]
@@ -1007,6 +1382,109 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
         [gl requestRender];
         return YES;
     } catch (...) { return NO; }
+}
+
+- (BOOL)debugInstallBooleanSourceOccurrenceEncoding:(NSString *)entityIdentifier
+    absentTags:(NSArray<NSNumber *> *)absentTags
+    negativeZeroTags:(NSArray<NSNumber *> *)negativeZeroTags {
+    if (![NSThread isMainThread]
+        || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || ![absentTags isKindOfClass:NSArray.class]
+        || ![negativeZeroTags isKindOfClass:NSArray.class]) return NO;
+    try {
+        std::uint8_t absent = 0, negative = 0;
+        const auto decode = [](NSArray<NSNumber *> *values,
+                               std::uint8_t& mask) noexcept {
+            for (id value in values) {
+                if (![value isKindOfClass:NSNumber.class]) return false;
+                const NSInteger tag = [value integerValue];
+                if (tag < 1 || tag > 8) return false;
+                const auto bit = std::uint8_t(1U << (tag - 1));
+                if (mask & bit) return false;
+                mask |= bit;
+            }
+            return true;
+        };
+        if (!decode(absentTags, absent) || !decode(negativeZeroTags, negative)
+            || (absent & negative) != 0) return NO;
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) owner = viewer ? viewer->getDocument()
+                                                   : Handle(OcctDocument)();
+        const TDF_Label source = ExactRoot(owner,
+            entityIdentifier.UTF8String ?: "");
+        if (source.IsNull()
+            || !owner->DebugRewriteDefaultObjectTransformEncoding(
+                source, absent, negative)) return NO;
+        viewer->redrawDocument();
+        [gl requestRender];
+        return YES;
+    } catch (...) { return NO; }
+}
+
+- (NSDictionary<NSString *, id> *)debugBooleanSourceMetadata:
+    (NSArray<NSString *> *)entityIdentifiers {
+    if (![NSThread isMainThread]
+        || ![entityIdentifiers isKindOfClass:NSArray.class]
+        || entityIdentifiers.count == 0 || entityIdentifiers.count > 2) return nil;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) owner = viewer ? viewer->getDocument()
+                                                   : Handle(OcctDocument)();
+        if (owner.IsNull() || owner->Document().IsNull()
+            || owner->Document()->HasOpenCommand()) return nil;
+        NSMutableArray<NSNumber *> *presence = [NSMutableArray array];
+        NSMutableArray<NSArray<NSNumber *> *> *scalarBits = [NSMutableArray array];
+        NSMutableArray *materialEntries = [NSMutableArray array];
+        NSMutableArray<NSNumber *> *legacyMaterial = [NSMutableArray array];
+        NSMutableArray<NSNumber *> *legacyColor = [NSMutableArray array];
+        NSMutableArray<NSNumber *> *localPBR = [NSMutableArray array];
+        NSMutableArray<NSData *> *materialValues = [NSMutableArray array];
+        std::vector<TDF_Label> labels;
+        for (id raw in entityIdentifiers) {
+            if (![raw isKindOfClass:NSString.class]) return nil;
+            NSString *entity = (NSString *)raw;
+            if (entity.length == 0 || entity.length > 128) return nil;
+            const TDF_Label label = ExactRoot(owner, entity.UTF8String ?: "");
+            OcctExactLabelReceipt exact;
+            if (label.IsNull() || !owner->CaptureExactFreeLabel(label, exact)) return nil;
+            std::uint8_t mask = 0;
+            NSMutableArray<NSNumber *> *bits = [NSMutableArray array];
+            for (std::size_t index = 0; index < 8; ++index) {
+                if (exact.visibility.object.object.present[index])
+                    mask |= std::uint8_t(1U << index);
+                std::uint64_t word = 0;
+                const double value = exact.visibility.object.object.scalars[index];
+                std::memcpy(&word, &value, sizeof(word));
+                [bits addObject:@(word)];
+            }
+            [presence addObject:@(mask)];
+            [scalarBits addObject:bits];
+            if (exact.appearance.materialLabel.IsNull()) {
+                [materialEntries addObject:NSNull.null];
+            } else {
+                TCollection_AsciiString entry;
+                TDF_Tool::Entry(exact.appearance.materialLabel, entry);
+                [materialEntries addObject:[NSString stringWithUTF8String:entry.ToCString()]];
+            }
+            labels.push_back(exact.appearance.materialLabel);
+            [legacyMaterial addObject:@(exact.appearance.legacyPresent[0])];
+            [legacyColor addObject:@(exact.appearance.legacyPresent[1])];
+            [localPBR addObject:@(exact.appearance.localPBR)];
+            [materialValues addObject:[NSData dataWithBytes:exact.appearance.visualValues.data()
+                length:exact.appearance.visualValues.size() * sizeof(double)]];
+        }
+        const BOOL sameMaterial = labels.size() == 2 && !labels[0].IsNull()
+            && !labels[1].IsNull() && labels[0].IsEqual(labels[1]);
+        return @{ @"presenceMasks": presence, @"scalarBits": scalarBits,
+            @"materialEntries": materialEntries, @"legacyMaterialPresent": legacyMaterial,
+            @"legacyColorPresent": legacyColor, @"localPBRMarkerPresent": localPBR,
+            @"materialValues": materialValues, @"sameMaterialLabel": @(sameMaterial) };
+    } catch (...) { return nil; }
 }
 #endif
 - (Core3DAuthoredParameterRecoveryResult *)recoverAuthoredBooleanParameter {

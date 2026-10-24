@@ -125,9 +125,16 @@ class Capture;
 class Owner;
 class PairCapture;
 class PairPrepared;
+class BooleanOriginalsCapture;
+class BooleanOriginalsPrepared;
+struct BooleanOriginalsEdit;
 struct PairCaptureReply;
 struct PairPrepareReply;
 struct PairObservationReply;
+struct BooleanOriginalsObservationReply;
+struct PairApplyReply;
+struct BooleanOriginalsCaptureReply;
+struct BooleanOriginalsPrepareReply;
 }
 namespace core3d::authored_boolean { struct Candidate; }
 #if DEBUG
@@ -1267,6 +1274,14 @@ public:
   Standard_EXPORT Standard_Integer DebugCorruptCopySourceFaceProvenance(
       const TDF_Label& label, Standard_Integer& corruptedState) noexcept;
 #endif
+#if DEBUG
+  //! Test-only encoding producer for an exact ordinary Profile root. Requested
+  //! identity-default occurrence components become absent or explicit -0.0;
+  //! every numeric transform and all unrelated document state stay unchanged.
+  Standard_EXPORT Standard_Boolean DebugRewriteDefaultObjectTransformEncoding(
+      const TDF_Label& label, std::uint8_t absentMask,
+      std::uint8_t negativeZeroMask) noexcept;
+#endif
   //! Stamp every unmarked analytic definition produced by a fresh STEP
   //! transfer. This isolated-import schema operation requires zero user
   //! history, creates no retained undo entry, and is never called for legacy
@@ -1706,6 +1721,51 @@ public:
     ObserveBooleanSources(
         const std::shared_ptr<const core3d::authored_parameter::PairCapture>& capture)
         const noexcept;
+    //! N-COM sole creation mutation boundary. The detached prepared authority
+    //! is revalidated before one Context-owned command is acquired. Target
+    //! replacement, sole-owner installation, tool retirement, group repair
+    //! and readback either settle together or abort together.
+    Standard_EXPORT core3d::authored_parameter::PairApplyReply
+    ApplyBooleanSources(
+        const std::shared_ptr<const core3d::authored_parameter::PairPrepared>& prepared,
+        std::uint32_t viewportWidth, std::uint32_t viewportHeight) noexcept;
+    //! Capture one current SYPB/4 owner without projecting mutation authority
+    //! through its descriptive bytes.
+    Standard_EXPORT core3d::authored_parameter::BooleanOriginalsCaptureReply
+    CaptureBooleanOriginals(
+        const std::shared_ptr<core3d::native_opening::Context>& context,
+        const TDF_Label& owner) noexcept;
+    //! Prepare exactly one closed effective edit and replay the complete graph
+    //! (including a qualified suffix) without opening a command.
+    Standard_EXPORT core3d::authored_parameter::BooleanOriginalsPrepareReply
+    PrepareBooleanOriginalsEdit(
+        const std::shared_ptr<const core3d::authored_parameter::BooleanOriginalsCapture>& capture,
+        const core3d::authored_parameter::BooleanOriginalsEdit& edit,
+        const std::atomic_bool& cancelled) noexcept;
+    //! Independently reread one current retained owner for stable-original and
+    //! changed-effective proof.
+    Standard_EXPORT core3d::authored_parameter::PairObservationReply
+    ObserveBooleanOriginals(
+        const std::shared_ptr<const core3d::authored_parameter::BooleanOriginalsCapture>& capture)
+        const noexcept;
+    //! Read one exact current owner, including a hidden owner, without an
+    //! editor opening, Context or command lease. The result is observation only.
+    Standard_EXPORT core3d::authored_parameter::BooleanOriginalsObservationReply
+    CaptureBooleanOriginalsObservation(const TDF_Label& owner) const noexcept;
+    //! Revalidate the opaque prepared authority, acquire one Context command,
+    //! stage graph/shape/metadata, read back, commit and publish atomically.
+    Standard_EXPORT core3d::authored_parameter::PairApplyReply
+    ApplyBooleanOriginalsEdit(
+        const std::shared_ptr<const core3d::authored_parameter::BooleanOriginalsPrepared>& prepared,
+        std::uint32_t viewportWidth, std::uint32_t viewportHeight) noexcept;
+#if DEBUG
+    //! Test-only suffix on an existing production-created pair. Zero means
+    //! staged, validated, committed and published through one Context lease.
+    Standard_EXPORT Standard_Integer DebugAppendBooleanOriginalsSuffix(
+        const std::shared_ptr<core3d::native_opening::Context>& context,
+        const TDF_Label& owner, std::uint32_t viewportWidth,
+        std::uint32_t viewportHeight) noexcept;
+#endif
     //! True while a measured treatment-history companion has not been bound
     //! to its own committed delta or discharged by verified prior settlement.
     Standard_EXPORT Standard_Boolean HasUnresolvedTreatmentHistoryCompanion() const noexcept;
@@ -2279,7 +2339,8 @@ private:
   Standard_Boolean HasNativeNormalTextureGeometry(const TDF_Label& label) const noexcept;
     std::shared_ptr<const OcctPBRScalarState> CapturePBRScalarState(const TDF_Label&) const noexcept;
     Standard_Boolean SaveObjectPBRMaterialsImpl(const std::vector<OcctPBRMaterialUpdate>&,
-        const Handle(XCAFDoc_VisMaterial)& scalarMaterial);
+        const Handle(XCAFDoc_VisMaterial)& scalarMaterial,
+        bool retainPreviousMaterial = false);
     Standard_Boolean CanSaveObjectPBRMaterials(
         const std::vector<OcctPBRMaterialUpdate>& updates,
         std::vector<TDF_Label>* reclaimMaterialLabels,

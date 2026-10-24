@@ -140,6 +140,34 @@ typedef NS_ENUM(NSInteger, Core3DBooleanPairRefusal) {
     Core3DBooleanPairRefusalCancelled,
 };
 
+typedef NS_ENUM(NSInteger, Core3DBooleanOriginalsEditKind) {
+    Core3DBooleanOriginalsEditKindOperation = 0,
+    Core3DBooleanOriginalsEditKindDimensions,
+    Core3DBooleanOriginalsEditKindPlacement,
+    Core3DBooleanOriginalsEditKindScalarMaterial,
+    Core3DBooleanOriginalsEditKindGroupMembership,
+    Core3DBooleanOriginalsEditKindVisibility,
+};
+
+typedef NS_ENUM(NSInteger, Core3DBooleanOriginalRole) {
+    Core3DBooleanOriginalRoleLeft = 1,
+    Core3DBooleanOriginalRoleRight = 2,
+};
+
+//! Closed value edit. `values` is empty for operation/group/visibility, has
+//! three dimensions, seven placement scalars (translation + quaternion), or
+//! six scalar-material values (RGBA + metallic + roughness). No persisted
+//! originals bytes, identities, labels or role map can be supplied.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DBooleanOriginalsEdit : NSObject
+- (nullable instancetype)initWithKind:(Core3DBooleanOriginalsEditKind)kind
+    role:(Core3DBooleanOriginalRole)role values:(NSArray<NSNumber *> *)values
+    operation:(Core3DPartBooleanOperation)operation flag:(BOOL)flag
+    NS_SWIFT_NAME(init(kind:role:values:operation:flag:));
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 //! Opaque native-issued paired authority. It exposes no labels, initializer,
 //! command lease, apply operation, or serializable mutation authority.
 __attribute__((objc_subclassing_restricted))
@@ -190,6 +218,47 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,readonly) double metersPerUnit;
 @property(nonatomic,readonly) NSInteger undoDepth;
 @property(nonatomic,readonly) NSInteger redoDepth;
+@property(nonatomic,copy,readonly) NSData *retainedSuffixCanonicalBytes;
+@property(nonatomic,copy,readonly) NSData *originalsDigest;
+@property(nonatomic,copy,readonly) NSData *effectiveDigest;
+@property(nonatomic,copy,readonly) NSData *identityDigest;
+@property(nonatomic,copy,readonly) NSData *resultDigest;
+@property(nonatomic,copy,readonly) NSArray<NSArray<NSNumber *> *> *effectiveDimensions;
+@property(nonatomic,copy,readonly) NSArray<NSArray<NSNumber *> *> *effectivePlacements;
+@property(nonatomic,copy,readonly) NSArray<NSArray<NSNumber *> *> *effectiveMaterials;
+@property(nonatomic,copy,readonly) NSArray<NSNumber *> *effectiveMaterialPresent;
+@property(nonatomic,copy,readonly) NSArray<NSNumber *> *effectiveGroupMembership;
+@property(nonatomic,copy,readonly) NSArray<NSNumber *> *effectiveVisibility;
+@property(nonatomic,readonly) BOOL resultVisible;
+@property(nonatomic,readonly) Core3DPartBooleanOperation operation;
+@property(nonatomic,readonly) NSUInteger graphNodeCount;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+typedef NS_ENUM(NSInteger, Core3DBooleanPairApplyStatus) {
+    Core3DBooleanPairApplyStatusCommitted = 0,
+    Core3DBooleanPairApplyStatusRefused,
+    Core3DBooleanPairApplyStatusCancelled,
+    Core3DBooleanPairApplyStatusOutcomeUnknown,
+};
+
+//! Immutable proof that one native pair command is known committed. It is
+//! deliberately absent for refusal, cancellation and unknown settlement.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DBooleanPairConsumptionReceipt : NSObject
+@property(nonatomic,copy,readonly) NSString *targetEntityIdentifier;
+@property(nonatomic,copy,readonly) NSString *toolEntityIdentifier;
+@property(nonatomic,readonly) NSUInteger undoDelta;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DBooleanPairApplyResult : NSObject
+@property(nonatomic,readonly) Core3DBooleanPairApplyStatus status;
+@property(nonatomic,readonly) Core3DBooleanPairRefusal refusal;
+@property(nonatomic,strong,readonly,nullable) Core3DBooleanPairConsumptionReceipt *receipt;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 @end
@@ -280,11 +349,51 @@ __attribute__((objc_subclassing_restricted))
 - (Core3DBooleanPairObservationResult *)observeBooleanSources:
     (Core3DBooleanPairOpening *)opening
     NS_SWIFT_NAME(observeBooleanSources(_:));
+//! Consume only a native PairPrepared authority. The bridge supplies current
+//! viewport fencing but no labels, recipe bytes or replacement originals.
+- (Core3DBooleanPairApplyResult *)applyBooleanSources:
+    (Core3DBooleanPairPrepared *)prepared expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(applyBooleanSources(_:expected:));
+//! Open, prepare and apply one retained-v4 effective edit. The two opaque
+//! wrappers are native-issued and cannot be reconstructed from observations.
+- (Core3DBooleanPairCaptureResult *)openBooleanOriginalsEditorForEntityIdentifier:
+    (NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(openBooleanOriginalsEditor(entityIdentifier:expected:));
+- (Core3DBooleanPairPrepareResult *)prepareBooleanOriginalsEdit:
+    (Core3DBooleanPairOpening *)opening edit:(Core3DBooleanOriginalsEdit *)edit
+    expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(prepareBooleanOriginalsEdit(_:edit:expected:));
+- (Core3DBooleanPairObservationResult *)observeBooleanOriginals:
+    (Core3DBooleanPairOpening *)opening
+    NS_SWIFT_NAME(observeBooleanOriginals(_:));
+//! A native read-only capture of the current original/effective record. This
+//! neither selects the owner nor issues an opening/prepared edit authority.
+- (Core3DBooleanPairObservationResult *)captureBooleanOriginalsObservationForEntityIdentifier:
+    (NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(captureBooleanOriginalsObservation(entityIdentifier:expected:));
+- (Core3DBooleanPairApplyResult *)applyBooleanOriginalsEdit:
+    (Core3DBooleanPairPrepared *)prepared expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(applyBooleanOriginalsEdit(_:expected:));
 #if DEBUG
 //! Test-only metadata producer applied after an ordinary Profile is created.
 //! This never installs a Boolean/composite fixture.
+//! Attach only a suffix to an already production-created v4 pair for replay
+//! evidence. It never creates or substitutes a Boolean base or its originals.
+- (NSInteger)debugAppendBooleanOriginalsSuffix:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(debugAppendBooleanOriginalsSuffix(entityIdentifier:expected:));
 - (BOOL)debugInstallBooleanSourceHiddenLayer:(NSString *)entityIdentifier
     NS_SWIFT_NAME(debugInstallBooleanSourceHiddenLayer(entityIdentifier:));
+//! Test-only occurrence encoding producer applied to one exact ordinary
+//! Profile before pair capture. Tags are one-based transform scalar tags.
+- (BOOL)debugInstallBooleanSourceOccurrenceEncoding:(NSString *)entityIdentifier
+    absentTags:(NSArray<NSNumber *> *)absentTags
+    negativeZeroTags:(NSArray<NSNumber *> *)negativeZeroTags
+    NS_SWIFT_NAME(debugInstallBooleanSourceOccurrenceEncoding(entityIdentifier:absentTags:negativeZeroTags:));
+//! Read-only exact source metadata used to prove admission and label aliasing.
+- (NSDictionary<NSString *, id> *_Nullable)debugBooleanSourceMetadata:
+    (NSArray<NSString *> *)entityIdentifiers
+    NS_SWIFT_NAME(debugBooleanSourceMetadata(entityIdentifiers:));
 #endif
 //! Capture requires the exact selected object and caller-observed scene. It is
 //! read-only and refuses every unsupported carrier rather than dropping data.

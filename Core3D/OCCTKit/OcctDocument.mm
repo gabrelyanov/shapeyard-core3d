@@ -11067,6 +11067,60 @@ struct core3d::authored_parameter::PairPrepared::State final {
     TopoDS_Shape independentResult;
     TopoDS_Shape analyticResult;
     core3d::authored_parameter::PairObservation observation;
+    mutable std::atomic_bool committed{false};
+};
+
+struct core3d::authored_parameter::BooleanOriginalsCapture::State final {
+    const OcctDocument* owner = nullptr;
+    Handle(TDocStd_Document) document;
+    Handle(TDF_Data) data;
+    std::shared_ptr<core3d::native_opening::Context> context;
+    TDF_Label label;
+    TDF_Label recordLabel;
+    std::shared_ptr<const core3d::composite_recipe::Payload> payload;
+    std::vector<std::uint8_t> resultBytes;
+    std::vector<std::uint8_t> originalsBytes;
+    std::string entityIdentifier;
+    double metersPerUnit = 0;
+    int undoDepth = 0;
+    int redoDepth = 0;
+    OcctSavedGroupState groups;
+    OcctObjectVisibilityState visibility;
+    OcctScalarAppearanceState appearance;
+};
+
+struct core3d::authored_parameter::BooleanOriginalsObservation::State final {
+    const OcctDocument* owner = nullptr;
+    Handle(TDocStd_Document) document;
+    Handle(TDF_Data) data;
+    TDF_Label label;
+    TDF_Label recordLabel;
+    std::string entityIdentifier;
+    Standard_Integer dataTime = 0;
+    Standard_Integer transaction = 0;
+    std::vector<std::uint8_t> recordBytes;
+    std::string resultBytes;
+    OcctSavedGroupState groups;
+    OcctObjectVisibilityState visibility;
+    OcctScalarAppearanceState appearance;
+    core3d::authored_parameter::PairObservation observation;
+};
+
+struct core3d::authored_parameter::BooleanOriginalsPrepared::State final {
+    std::shared_ptr<const core3d::authored_parameter::BooleanOriginalsCapture> capture;
+    std::shared_ptr<const core3d::composite_recipe::Payload> payload;
+    TopoDS_Shape result;
+    core3d::authored_parameter::PairObservation observation;
+    std::vector<OcctSavedGroup> groups;
+    Handle(XCAFDoc_VisMaterial) resultMaterial;
+    std::vector<double> resultVisualValues;
+    std::array<double, 6> materialValues{};
+    std::size_t materialInput = 0;
+    bool stageMaterial = false;
+    bool stageGroups = false;
+    bool stageVisibility = false;
+    bool visible = true;
+    mutable std::atomic_bool committed{false};
 };
 
 core3d::authored_parameter::PairCapture::PairCapture(
@@ -11075,6 +11129,19 @@ core3d::authored_parameter::PairCapture::~PairCapture() = default;
 core3d::authored_parameter::PairPrepared::PairPrepared(
     std::shared_ptr<State> state) noexcept : state_(std::move(state)) {}
 core3d::authored_parameter::PairPrepared::~PairPrepared() = default;
+core3d::authored_parameter::BooleanOriginalsCapture::BooleanOriginalsCapture(
+    std::shared_ptr<State> state) noexcept : state_(std::move(state)) {}
+core3d::authored_parameter::BooleanOriginalsCapture::~BooleanOriginalsCapture() = default;
+core3d::authored_parameter::BooleanOriginalsObservation::BooleanOriginalsObservation(
+    std::shared_ptr<const State> state) noexcept : state_(std::move(state)) {}
+core3d::authored_parameter::BooleanOriginalsObservation::~BooleanOriginalsObservation() = default;
+const core3d::authored_parameter::PairObservation&
+core3d::authored_parameter::BooleanOriginalsObservation::value() const noexcept {
+    return state_->observation;
+}
+core3d::authored_parameter::BooleanOriginalsPrepared::BooleanOriginalsPrepared(
+    std::shared_ptr<State> state) noexcept : state_(std::move(state)) {}
+core3d::authored_parameter::BooleanOriginalsPrepared::~BooleanOriginalsPrepared() = default;
 
 namespace {
 namespace ap = core3d::authored_parameter;
@@ -11138,6 +11205,78 @@ std::string PairLabelEntry(const TDF_Label& label) {
     TCollection_AsciiString entry;
     TDF_Tool::Entry(label, entry);
     return entry.ToCString();
+}
+
+Handle(XCAFDoc_VisMaterial) CreatePersistedPBRMaterial(
+    const XCAFDoc_VisMaterialPBR&,
+    const Handle(XCAFDoc_VisMaterial)&);
+
+Handle(XCAFDoc_VisMaterial) PairMaterial(
+    const pb::ScalarMaterialRow* row,
+    const std::array<double, 6>& edit) noexcept {
+    try {
+        XCAFDoc_VisMaterialPBR pbr;
+        if (row) {
+            pbr.IsDefined = row->pbrDefined;
+            pbr.BaseColor = Quantity_ColorRGBA(Quantity_Color(
+                row->pbr[0], row->pbr[1], row->pbr[2], Quantity_TOC_RGB),
+                Standard_ShortReal(row->pbr[3]));
+            pbr.EmissiveFactor = Graphic3d_Vec3(
+                Standard_ShortReal(row->pbr[4]), Standard_ShortReal(row->pbr[5]),
+                Standard_ShortReal(row->pbr[6]));
+            pbr.Metallic = Standard_ShortReal(row->pbr[7]);
+            pbr.Roughness = Standard_ShortReal(row->pbr[8]);
+            pbr.RefractionIndex = Standard_ShortReal(row->pbr[9]);
+        }
+        pbr.IsDefined = true;
+        pbr.BaseColor = Quantity_ColorRGBA(Quantity_Color(
+            edit[0], edit[1], edit[2], Quantity_TOC_RGB),
+            Standard_ShortReal(edit[3]));
+        pbr.Metallic = Standard_ShortReal(edit[4]);
+        pbr.Roughness = Standard_ShortReal(edit[5]);
+        Handle(XCAFDoc_VisMaterial) material = CreatePersistedPBRMaterial(
+            pbr, Handle(XCAFDoc_VisMaterial)());
+        if (material.IsNull()) return {};
+        if (row) {
+            XCAFDoc_VisMaterialCommon common;
+            common.IsDefined = row->commonDefined;
+            common.AmbientColor.SetValues(
+                row->common[0], row->common[1], row->common[2], Quantity_TOC_RGB);
+            common.DiffuseColor.SetValues(
+                row->common[3], row->common[4], row->common[5], Quantity_TOC_RGB);
+            common.SpecularColor.SetValues(
+                row->common[6], row->common[7], row->common[8], Quantity_TOC_RGB);
+            common.EmissiveColor.SetValues(
+                row->common[9], row->common[10], row->common[11], Quantity_TOC_RGB);
+            common.Shininess = Standard_ShortReal(row->common[12]);
+            common.Transparency = Standard_ShortReal(row->common[13]);
+            material->SetCommonMaterial(common);
+            material->SetAlphaMode(Graphic3d_AlphaMode(row->alphaMode),
+                Standard_ShortReal(row->alphaCutoff));
+            material->SetFaceCulling(
+                Graphic3d_TypeOfBackfacingModel(row->faceCulling));
+        }
+        return material;
+    } catch (...) { return {}; }
+}
+
+bool PairMaterialRow(const std::string& entry, const std::vector<double>& values,
+                     pb::ScalarMaterialRow& row) noexcept {
+    try {
+        if (entry.empty() || values.size() != 29
+            || (values[3] != 0 && values[3] != 1)
+            || (values[4] != 0 && values[4] != 1)) return false;
+        row = {};
+        row.labelEntry = entry;
+        row.faceCulling = std::int32_t(values[0]);
+        row.alphaMode = std::int32_t(values[1]);
+        row.alphaCutoff = values[2];
+        row.pbrDefined = values[3] == 1;
+        row.commonDefined = values[4] == 1;
+        std::copy_n(values.begin() + 5, row.pbr.size(), row.pbr.begin());
+        std::copy_n(values.begin() + 15, row.common.size(), row.common.begin());
+        return true;
+    } catch (...) { row = {}; return false; }
 }
 
 bool PairMatrix(const gp_Trsf& transform, std::array<double, 16>& value) noexcept {
@@ -11284,6 +11423,214 @@ bool PairCurrent(const OcctDocument& document,
     } catch (...) { return false; }
 }
 
+bool PairMeasureDetached(const TopoDS_Shape& source, double& volume,
+                         std::array<double, 6>& bounds,
+                         std::uint32_t& loops) noexcept {
+    try {
+        if (source.IsNull()) return false;
+        BRepBuilderAPI_Copy copy(source, Standard_True, Standard_False);
+        return copy.IsDone() && !copy.Shape().IsNull()
+            && PairMeasure(copy.Shape(), volume, bounds, loops);
+    } catch (...) { return false; }
+}
+
+const core3d::composite_recipe::FeatureNode* OriginalsFeature(
+    const core3d::composite_recipe::Definition& graph) noexcept {
+    if (graph.nodes.size() < 3) return nullptr;
+    const auto* feature = std::get_if<core3d::composite_recipe::FeatureNode>(
+        &graph.nodes[2].value);
+    return feature && feature->kind == core3d::composite_recipe::PartBooleanFeatureKind
+        && feature->codecVersion
+            == core3d::composite_recipe::PartBooleanOriginalsFeatureCodec
+        ? feature : nullptr;
+}
+
+Standard_Boolean CaptureWholeObjectScalarAppearance(
+    const Handle(TDocStd_Document)& document, const TDF_Label& label,
+    OcctScalarAppearanceState& output) noexcept;
+
+bool PairCaptureOriginalsAppearance(const OcctDocument& wrapper,
+    const TDF_Label& label, OcctScalarAppearanceState& output) noexcept {
+    output = {};
+    try {
+        const auto document = wrapper.Document();
+        core3d::composite_recipe::Record record;
+        if (document.IsNull() || label.IsNull() || label.Data() != document->GetData()
+            || !wrapper.IsEditableFreeSimpleDefinitionLabel(label)
+            || !core3d::composite_recipe::Read(document, label, record)
+            || !record.value || !OriginalsFeature(record.value->definition)) return false;
+        // This owner has its own SYCR/3 record. Never route it through the
+        // legacy saved-cut/R2 carrier-child gate or accept styled subshapes.
+        TDF_LabelSequence children;
+        XCAFDoc_ShapeTool::GetSubShapes(label, children);
+        if (children.Length() > core3d::profile::MaximumLabels) return false;
+        for (int index = 1; index <= children.Length(); ++index) {
+            if (!children.Value(index).IsEqual(record.label)) {
+                std::fprintf(stderr, "NCOM_A2_CAPTURE stage=foreign-subshape index=%d\n", index);
+                return false;
+            }
+        }
+        const bool captured = CaptureWholeObjectScalarAppearance(document, label, output);
+        if (!captured) std::fprintf(stderr, "NCOM_A2_CAPTURE stage=scalar-appearance\n");
+        return captured;
+    } catch (...) { output = {}; return false; }
+}
+
+bool OriginalsCurrent(const OcctDocument& document,
+                      const ap::BooleanOriginalsCapture::State& state,
+                      core3d::composite_recipe::Record& record) noexcept {
+    record = {};
+    try {
+        if (![NSThread isMainThread] || state.owner != &document
+            || document.Document().IsNull() || state.document != document.Document()
+            || state.data != document.Document()->GetData()
+            || state.label.IsNull() || state.label.Data() != state.data
+            || document.Document()->HasOpenCommand()
+            || document.Document()->GetAvailableUndos() != state.undoDepth
+            || document.Document()->GetAvailableRedos() != state.redoDepth)
+            return false;
+        double unit = 0;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(document.Document(), unit)
+            || std::memcmp(&unit, &state.metersPerUnit, sizeof(double)) != 0)
+            return false;
+        OcctSavedGroupState groups;
+        OcctObjectVisibilityState visibility;
+        OcctScalarAppearanceState appearance;
+        std::string resultBytes;
+        if (!document.CaptureSavedGroups(groups) || !groups.IsEqual(state.groups)
+            || !document.CaptureObjectVisibilityStateForLabel(state.label, visibility)
+            || !visibility.IsEqual(state.visibility)
+            || !PairCaptureOriginalsAppearance(document, state.label, appearance)
+            || !appearance.IsEqual(state.appearance)
+            || !core3d::composite_recipe::Read(document.Document(), state.label, record)
+            || !record.value || record.value->bytes != state.payload->bytes
+            || !record.label.IsEqual(state.recordLabel)
+            || !record.owner.IsEqual(state.label)
+            || !core3d::retained_part_boolean::ExactShapeBytes(
+                record.current, resultBytes)
+            || std::vector<std::uint8_t>(resultBytes.begin(), resultBytes.end())
+                != state.resultBytes) return false;
+        return true;
+    } catch (...) { record = {}; return false; }
+}
+
+bool ObserveOriginalsRecord(const OcctDocument& document,
+                            const core3d::composite_recipe::Record& record,
+                            ap::PairObservation& observation) noexcept {
+    namespace cr = core3d::composite_recipe;
+    observation = {};
+    try {
+        if (!record.value || record.current.IsNull()) return false;
+        const auto* feature = OriginalsFeature(record.value->definition);
+        pb::OriginalsDefinition definition;
+        std::vector<std::uint8_t> originals, effective, identity, resultBytes;
+        std::string resultText;
+        if (!feature || !pb::DecodeOriginals(feature->parameters, definition)
+            || !pb::EncodeOriginalStateBlock(definition.originals, originals)
+            || !pb::EncodeEffectiveStateBlock(definition.effective, effective)
+            || !cr::Hash(originals, observation.originalsDigest)
+            || !core3d::retained_part_boolean::ExactShapeBytes(
+                record.current, resultText)) return false;
+        // The operation is effective state stored in the SYPB header, outside
+        // the effective-input block. Commit it in the observation digest too;
+        // no persisted bytes or frozen-original commitments are rewritten.
+        effective.insert(effective.begin(), std::uint8_t(definition.operation));
+        if (!cr::Hash(effective, observation.effectiveDigest)) return false;
+        resultBytes.assign(resultText.begin(), resultText.end());
+        if (!cr::Hash(resultBytes, observation.resultDigest)) return false;
+
+        const auto append = [&](const auto& value) {
+            const auto* bytes = reinterpret_cast<const std::uint8_t*>(&value);
+            identity.insert(identity.end(), bytes, bytes + sizeof(value));
+        };
+        identity.insert(identity.end(), definition.owner.document.begin(),
+            definition.owner.document.end());
+        identity.insert(identity.end(), definition.owner.entity.begin(),
+            definition.owner.entity.end());
+        identity.insert(identity.end(), definition.owner.definition.begin(),
+            definition.owner.definition.end());
+        identity.insert(identity.end(), definition.booleanNode.begin(),
+            definition.booleanNode.end());
+        identity.insert(identity.end(), definition.feature.begin(),
+            definition.feature.end());
+        for (const auto& node : record.value->definition.nodes) {
+            const auto nodeID = cr::NodeID(node);
+            const auto localID = cr::LocalID(node);
+            identity.insert(identity.end(), nodeID.begin(), nodeID.end());
+            append(localID);
+            if (const auto* current = std::get_if<cr::FeatureNode>(&node.value)) {
+                identity.insert(identity.end(), current->feature.begin(),
+                    current->feature.end());
+                append(current->kind); append(current->codecVersion);
+                for (const auto& input : current->inputs)
+                    identity.insert(identity.end(), input.begin(), input.end());
+            }
+        }
+        if (!cr::Hash(identity, observation.identityDigest)) return false;
+
+        observation.operation = definition.operation;
+        observation.metersPerUnit = definition.carrierMetersPerUnit;
+        observation.originalsBytes = std::move(originals);
+        observation.undoDepth = document.Document()->GetAvailableUndos();
+        observation.redoDepth = document.Document()->GetAvailableRedos();
+        observation.graphNodeCount = std::uint32_t(record.value->definition.nodes.size());
+        if (record.value->definition.nodes.size() == 4) {
+            const auto* suffix = std::get_if<cr::FeatureNode>(
+                &record.value->definition.nodes[3].value);
+            if (!suffix || suffix->kind != cr::RetainedProgramSuffixFeatureKind
+                || suffix->codecVersion != cr::RetainedProgramSuffixFeatureCodec)
+                return false;
+            observation.suffixBytes = suffix->parameters;
+        }
+        observation.resultMembership = {{1, 1}};
+        for (std::size_t index = 0; index < 2; ++index) {
+            const auto& original = definition.originals.inputs[index];
+            const auto& current = definition.effective.inputs[index];
+            observation.entityIdentifiers[index] =
+                core3d::retained_solid::UUIDText(original.original.entity);
+            observation.sourceFeatureIdentifiers[index] =
+                core3d::retained_solid::UUIDText(original.original.sourceFeature);
+            observation.recipeBytes[index] = original.recipeBytes;
+            observation.effectiveDimensions[index] = current.geometry.dimensions;
+            observation.effectivePlacements[index] = {{
+                current.geometry.translation[0], current.geometry.translation[1],
+                current.geometry.translation[2], current.geometry.rotationXYZW[0],
+                current.geometry.rotationXYZW[1], current.geometry.rotationXYZW[2],
+                current.geometry.rotationXYZW[3]}};
+            if (current.metadata.appearance.material) {
+                if (*current.metadata.appearance.material
+                    >= definition.effective.materials.size()) return false;
+                const auto& material = definition.effective.materials[
+                    *current.metadata.appearance.material];
+                observation.effectiveMaterials[index] = {{material.pbr[0], material.pbr[1],
+                    material.pbr[2], material.pbr[3], material.pbr[7], material.pbr[8]}};
+                observation.effectiveMaterialPresent[index] = true;
+            }
+            observation.effectiveGroupMembership[index] =
+                !current.metadata.groups.empty();
+            bool visible = !current.metadata.invisibleAttributePresent;
+            for (const auto layer : current.metadata.layers) {
+                if (layer >= definition.effective.layers.size()) return false;
+                visible = visible
+                    && !definition.effective.layers[layer].invisibleAttributePresent;
+            }
+            observation.effectiveVisibility[index] = visible;
+            std::array<double, 6> ignoredBounds;
+            std::uint32_t ignoredLoops = 0;
+            if (original.shapeSlot >= record.value->sourceShapes.size()
+                || !PairMeasureDetached(record.value->sourceShapes[original.shapeSlot],
+                    observation.sourceVolumes[index], ignoredBounds, ignoredLoops))
+                return false;
+        }
+        OcctObjectVisibilityState visibility;
+        if (!document.CaptureObjectVisibilityStateForLabel(record.owner, visibility)
+            || !PairMeasureDetached(record.current, observation.resultVolume,
+                observation.resultBounds, observation.resultClosedLoops)) return false;
+        observation.resultVisible = visibility.IsEffectivelyVisible();
+        return true;
+    } catch (...) { observation = {}; return false; }
+}
+
 bool PairMetadata(const OcctExactLabelReceipt& exact,
                   pb::CompleteMetadata& metadata) noexcept {
     metadata = {};
@@ -11295,9 +11642,14 @@ bool PairMetadata(const OcctExactLabelReceipt& exact,
         gp_Trsf derived = visibility.object.object.transform;
         if (!PairMatrix(derived, metadata.occurrence.derivedMatrix)) return false;
         for (std::size_t index = 0; index < 8; ++index) {
-            if (visibility.object.object.present[index])
+            if (visibility.object.object.present[index]) {
                 metadata.occurrence.presenceMask |= std::uint8_t(1U << index);
-            metadata.occurrence.values[index] = visibility.object.object.scalars[index];
+                metadata.occurrence.values[index] = visibility.object.object.scalars[index];
+            } else {
+                // The SYPB validator requires every absent scalar slot to carry
+                // canonical +0.0. Presence owns restoration of an absent child.
+                metadata.occurrence.values[index] = 0.0;
+            }
         }
         metadata.appearance.legacyMaterialPresent = exact.appearance.legacyPresent[0];
         metadata.appearance.legacyMaterial = exact.appearance.legacyValues[0];
@@ -11516,11 +11868,84 @@ bool PairDefinition(const ap::PairCapture::State& state,
             original.commitments.material = recipe;
             original.commitments.groups = geometry;
             effective.commitments = original.commitments;
+            const TopoDS_Shape effectiveShape = pb::build::PersistenceMaterializeDetached(
+                pb::build::BuildEffectiveAnalyticPrism(
+                    effective.geometry, effective.sourceMetersPerUnit,
+                    definition.carrierMetersPerUnit));
+            std::string effectiveBytes;
+            if (effectiveShape.IsNull()
+                || !core3d::retained_part_boolean::ExactShapeBytes(
+                    effectiveShape, effectiveBytes)
+                || !core3d::composite_recipe::Hash(
+                    std::vector<std::uint8_t>(
+                        effectiveBytes.begin(), effectiveBytes.end()),
+                    effective.commitments.geometry))
+                return false;
         }
         return pb::Valid(definition);
     } catch (...) { definition = {}; recipes = {}; return false; }
 }
+
+bool PairPersistenceSource(const TopoDS_Shape& source,
+                           const core3d::retained_recipe::Digest& expected,
+                           TopoDS_Shape& output) noexcept {
+    output.Nullify();
+    try {
+        if (source.IsNull()) return false;
+        // Validation may change OCCT bookkeeping flags. Touch only a deep
+        // copy; the caller's captured source remains byte-for-byte unchanged.
+        BRepBuilderAPI_Copy copied(source, Standard_True, Standard_False);
+        if (!copied.IsDone() || copied.Shape().IsNull()) return false;
+        output = copied.Shape();
+        if (!core3d::retained_part_boolean::IsOneValidForwardSolid(output)) {
+            output.Nullify();
+            return false;
+        }
+        std::vector<std::pair<TopoDS_Shape, unsigned>> pending{{output, 0}};
+        std::size_t nodes = 0;
+        while (!pending.empty()) {
+            auto current = std::move(pending.back());
+            pending.pop_back();
+            if (++nodes > 8192 || current.second > 64) {
+                output.Nullify();
+                return false;
+            }
+            current.first.Free(Standard_True);
+            current.first.Modified(Standard_False);
+            current.first.Checked(Standard_False);
+            for (TopoDS_Iterator child(current.first); child.More(); child.Next()) {
+                if (pending.size() >= 8192) {
+                    output.Nullify();
+                    return false;
+                }
+                pending.emplace_back(child.Value(), current.second + 1);
+            }
+        }
+        std::string bytes;
+        core3d::retained_recipe::Digest actual{};
+        if (!core3d::retained_part_boolean::ExactShapeBytes(output, bytes)
+            || !core3d::composite_recipe::Hash(
+                std::vector<std::uint8_t>(bytes.begin(), bytes.end()), actual)
+            || actual != expected) {
+            output.Nullify();
+            return false;
+        }
+        return true;
+    } catch (...) {
+        output.Nullify();
+        return false;
+    }
+}
 } // namespace
+
+namespace core3d::part_boolean::owner {
+bool ReplayOriginalsGraphDetached(
+    const composite_recipe::Definition& graph,
+    const std::vector<TopoDS_Shape>& sources,
+    retained_feature::ReplayBudget& budget,
+    const std::atomic_bool& stop,
+    TopoDS_Shape& output) noexcept;
+}
 
 core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources(
     const std::shared_ptr<core3d::native_opening::Context>& context,
@@ -11700,6 +12125,920 @@ core3d::authored_parameter::PairObservationReply OcctDocument::ObserveBooleanSou
         reply.observation = prepared.prepared->state_->observation;
         return reply;
     } catch (...) { return PairObserveRefused(PairRefusal::BadEncoding); }
+}
+
+core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
+    const std::shared_ptr<const core3d::authored_parameter::PairPrepared>& prepared,
+    std::uint32_t viewportWidth, std::uint32_t viewportHeight) noexcept {
+    namespace ap = core3d::authored_parameter;
+    namespace cr = core3d::composite_recipe;
+    namespace pb = core3d::part_boolean;
+    ap::PairApplyReply reply;
+    const auto refuse = [&](ap::PairRefusal reason) {
+        reply.status = ap::PairApplyStatus::Refused;
+        reply.refusal = reason;
+        return reply;
+    };
+    try {
+        if (![NSThread isMainThread]) return refuse(ap::PairRefusal::WrongThread);
+        if (!prepared || !prepared->state_ || prepared->state_->committed.load())
+            return refuse(ap::PairRefusal::StaleSource);
+        const auto& state = *prepared->state_;
+        if (!state.capture || !state.capture->state_
+            || state.capture->state_->owner != this)
+            return refuse(ap::PairRefusal::ForeignDocument);
+        const auto& capture = *state.capture->state_;
+        if (!PairCurrent(*this, capture))
+            return refuse(ap::PairRefusal::StaleSource);
+        if (!capture.context || viewportWidth == 0 || viewportHeight == 0)
+            return refuse(ap::PairRefusal::BadEncoding);
+
+        auto payload = std::make_shared<cr::Payload>();
+        payload->definition.schemaVersion = 3;
+        payload->definition.owner = state.definition.owner;
+        payload->definition.outputNode = state.definition.booleanNode;
+        payload->definition.issuance.nextLocalID = 4;
+        cr::FeatureNode feature;
+        feature.node = state.definition.booleanNode;
+        feature.feature = state.definition.feature;
+        feature.localID = 3;
+        feature.kind = cr::PartBooleanFeatureKind;
+        feature.codecVersion = cr::PartBooleanOriginalsFeatureCodec;
+        if (!pb::EncodeOriginals(state.definition, feature.parameters))
+            return refuse(ap::PairRefusal::BadEncoding);
+        for (std::size_t index = 0; index < 2; ++index) {
+            const auto& original = state.definition.originals.inputs[index];
+            cr::SourceNode source;
+            source.node = original.sourceNode;
+            source.localID = original.sourceLocalID;
+            source.original = original.original;
+            source.recipe.kind = cr::RecipeKind(std::uint8_t(original.recipeKind));
+            source.recipe.schema = original.recipeSchema;
+            source.recipe.bytes = original.recipeBytes;
+            source.inputToCarrier.sourceMetersPerUnit = original.sourceMetersPerUnit;
+            source.inputToCarrier.carrierMetersPerUnit = original.carrierMetersPerUnit;
+            source.inputToCarrier.matrix = original.sourceRootToCarrier;
+            source.commitments = {original.commitments.geometry,
+                original.commitments.recipe, original.commitments.placement,
+                original.commitments.material, original.commitments.groups};
+            source.shapeSlot = original.shapeSlot;
+            payload->definition.nodes.push_back({source});
+            feature.inputs.push_back(source.node);
+            TopoDS_Shape frozen;
+            if (!PairPersistenceSource(capture.sources[index].boundRoot,
+                    source.commitments.geometry, frozen))
+                return refuse(ap::PairRefusal::UnprovedCorrespondence);
+            payload->sourceShapes.push_back(frozen);
+        }
+        payload->definition.nodes.push_back({feature});
+        if (!cr::ValidateV3(payload->definition,
+                core3d::retained_feature::ProductionRegistry(),
+                core3d::retained_source::ProductionRegistry()).valid()
+            || !cr::Encode(payload->definition, payload->bytes))
+            return refuse(ap::PairRefusal::BadEncoding);
+        core3d::retained_feature::ReplayBudget replayBudget;
+        const std::atomic_bool replayStop(false);
+        TopoDS_Shape result;
+        if (!pb::owner::ReplayOriginalsGraphDetached(payload->definition,
+                payload->sourceShapes, replayBudget, replayStop, result)
+            || result.IsNull()) return refuse(ap::PairRefusal::InvalidResult);
+
+        const int beforeUndos = myOcafDoc->GetAvailableUndos();
+        const TopoDS_Shape previousTarget = XCAFDoc_ShapeTool::GetShape(
+            capture.sources[0].label);
+        const TopoDS_Shape previousTool = XCAFDoc_ShapeTool::GetShape(
+            capture.sources[1].label);
+        auto lease = capture.context->beginCommandLease(
+            capture.context->openingFence(), viewportWidth, viewportHeight);
+        if (!lease || !lease->ownsOpenCommand())
+            return refuse(ap::PairRefusal::StaleSource);
+        bool staged = false;
+        ap::PairRefusal stageFailure = ap::PairRefusal::BadEncoding;
+        try {
+            const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+            if (shapes.IsNull()) throw Standard_Failure("missing shape tool");
+            shapes->SetShape(capture.sources[0].label, result);
+            capture.sources[0].recordLabel.ForgetAllAttributes(Standard_True);
+            if (!cr::Attribute::StageIndependentClone(myOcafDoc,
+                    capture.sources[0].label, result, payload)) {
+                stageFailure = ap::PairRefusal::UnsupportedSource;
+                throw Standard_Failure("composite owner stage");
+            }
+
+            std::vector<OcctSavedGroup> groups = capture.groups.groups;
+            for (auto& group : groups) {
+                std::vector<TDF_Label> members;
+                for (const auto& member : group.members) {
+                    const TDF_Label replacement = member.IsEqual(capture.sources[1].label)
+                        ? capture.sources[0].label : member;
+                    if (std::none_of(members.begin(), members.end(), [&](const TDF_Label& value) {
+                            return value.IsEqual(replacement);
+                        })) members.push_back(replacement);
+                }
+                group.members = std::move(members);
+            }
+            if (!StageSavedGroups(groups)) {
+                stageFailure = ap::PairRefusal::AliasSource;
+                throw Standard_Failure("metadata stage");
+            }
+            if (!RemoveShape(capture.sources[1].label)) {
+                stageFailure = ap::PairRefusal::StaleSource;
+                throw Standard_Failure("metadata or tool retirement stage");
+            }
+            cr::Record readback;
+            if (!cr::Read(myOcafDoc, capture.sources[0].label, readback)
+                || !readback.value) {
+                stageFailure = ap::PairRefusal::InvalidResult;
+                throw Standard_Failure("composite record readback");
+            }
+            if (readback.value->bytes != payload->bytes) {
+                stageFailure = ap::PairRefusal::UnprovedCorrespondence;
+                throw Standard_Failure("composite bytes readback");
+            }
+            if (!readback.current.IsEqual(result)) {
+                stageFailure = ap::PairRefusal::InvalidResult;
+                throw Standard_Failure("composite shape readback");
+            }
+            if (!pb::owner::ValidateOriginalsRecord(myOcafDoc, readback)) {
+                stageFailure = ap::PairRefusal::BadEncoding;
+                throw Standard_Failure("composite semantic readback");
+            }
+            if (shapes->IsShape(capture.sources[1].label)
+                || !XCAFDoc_ShapeTool::GetShape(capture.sources[1].label).IsNull()) {
+                stageFailure = ap::PairRefusal::SameSource;
+                throw Standard_Failure("composite readback");
+            }
+            staged = true;
+        } catch (...) {
+            staged = false;
+        }
+        if (!staged) {
+            if (!lease->abort()) {
+                reply.status = ap::PairApplyStatus::OutcomeUnknown;
+                reply.refusal = ap::PairRefusal::BadEncoding;
+                return reply;
+            }
+            return refuse(stageFailure);
+        }
+        if (!lease->commit()) {
+            core3d::native_opening::CommittedEditPublication publication;
+            publication.replaced.push_back({capture.sources[0].entityIdentifier,
+                                            previousTarget});
+            publication.removed.push_back({capture.sources[1].entityIdentifier,
+                                           previousTool});
+            capture.context->retainUnprovenEdit(publication);
+            reply.status = ap::PairApplyStatus::OutcomeUnknown;
+            reply.refusal = ap::PairRefusal::None;
+            return reply;
+        }
+        cr::Record committed;
+        if (myOcafDoc->HasOpenCommand()
+            || myOcafDoc->GetAvailableUndos() != beforeUndos + 1
+            || !cr::Read(myOcafDoc, capture.sources[0].label, committed)
+            || !committed.value || committed.value->bytes != payload->bytes
+            || !pb::owner::ValidateOriginalsRecord(myOcafDoc, committed)) {
+            reply.status = ap::PairApplyStatus::OutcomeUnknown;
+            reply.refusal = ap::PairRefusal::None;
+            return reply;
+        }
+        core3d::native_opening::CommittedEditPublication publication;
+        publication.replaced.push_back({capture.sources[0].entityIdentifier,
+                                        previousTarget});
+        publication.removed.push_back({capture.sources[1].entityIdentifier,
+                                       previousTool});
+        if (!capture.context->publishCommittedEdit(publication)) {
+            capture.context->retainUnprovenEdit(publication);
+            reply.status = ap::PairApplyStatus::OutcomeUnknown;
+            reply.refusal = ap::PairRefusal::None;
+            return reply;
+        }
+        state.committed.store(true);
+        reply.status = ap::PairApplyStatus::Committed;
+        reply.refusal = ap::PairRefusal::None;
+        reply.receipt = ap::PairConsumptionReceipt{
+            capture.sources[0].entityIdentifier,
+            capture.sources[1].entityIdentifier, 1};
+        NotifyChanges();
+        return reply;
+    } catch (...) { return refuse(ap::PairRefusal::BadEncoding); }
+}
+
+#if DEBUG
+Standard_Integer OcctDocument::DebugAppendBooleanOriginalsSuffix(
+    const std::shared_ptr<core3d::native_opening::Context>& context,
+    const TDF_Label& owner, std::uint32_t viewportWidth,
+    std::uint32_t viewportHeight) noexcept {
+    namespace cr = core3d::composite_recipe;
+    namespace pb = core3d::part_boolean;
+    namespace suffix = core3d::retained_program_suffix;
+    std::shared_ptr<core3d::native_opening::CommandLease> lease;
+    int phase = 1;
+    try {
+        const auto capture = CaptureBooleanOriginals(context, owner);
+        if (!capture.capture || !context || !context->isCurrent(viewportWidth, viewportHeight))
+            return phase;
+        phase = 2;
+        cr::Record record;
+        if (!OriginalsCurrent(*this, *capture.capture->state_, record)
+            || record.value->definition.nodes.size() != 3) return phase;
+        auto payload = std::make_shared<cr::Payload>(*record.value);
+        phase = 3;
+        for (std::size_t index = 0; index < 2; ++index) {
+            const auto* source = std::get_if<cr::SourceNode>(
+                &payload->definition.nodes[index].value);
+            TopoDS_Shape normalized;
+            std::string sourceBefore, sourceAfter;
+            if (!source || source->shapeSlot >= payload->sourceShapes.size()
+                || !core3d::retained_part_boolean::ExactShapeBytes(
+                    payload->sourceShapes[source->shapeSlot], sourceBefore)
+                || !PairPersistenceSource(payload->sourceShapes[source->shapeSlot],
+                    source->commitments.geometry, normalized)) return phase;
+            // Negative control on a private source value from this actual
+            // production-created pair. Frozen commitments are never changed.
+            gp_Trsf moved;
+            moved.SetTranslation(gp_Vec(1.0, 0.0, 0.0));
+            const TopoDS_Shape mismatched = payload->sourceShapes[source->shapeSlot]
+                .Moved(TopLoc_Location(moved));
+            TopoDS_Shape rejected = normalized;
+            if (PairPersistenceSource(mismatched, source->commitments.geometry, rejected)
+                || !rejected.IsNull()
+                || !core3d::retained_part_boolean::ExactShapeBytes(
+                    payload->sourceShapes[source->shapeSlot], sourceAfter)
+                || sourceAfter != sourceBefore) return phase;
+            payload->sourceShapes[source->shapeSlot] = std::move(normalized);
+        }
+        suffix::Definition program;
+        program.baseFeature = payload->definition.outputNode;
+        program.derivedFeature = NewPlainProfileCutUUID();
+        program.carrierMetersPerUnit = capture.capture->state_->metersPerUnit;
+        program.nextOperandID = 2;
+        core3d::retained_boolean::Step step;
+        step.operation = core3d::analytic_boolean::Operation::Difference;
+        step.operand.identifier = 1;
+        step.operand.kind = core3d::analytic_boolean::OperandKind::Cylinder;
+        step.operand.extent = core3d::analytic_boolean::Extent::ThroughAll;
+        step.operand.axis = core3d::analytic_boolean::Axis::Z;
+        const double scale = 0.001 / program.carrierMetersPerUnit;
+        step.operand.point = {12 * scale, 12 * scale, 0};
+        step.operand.radius = scale;
+        program.steps.push_back(step);
+        cr::FeatureNode node;
+        node.node = NewPlainProfileCutUUID(); node.feature = NewPlainProfileCutUUID();
+        node.localID = payload->definition.issuance.nextLocalID++;
+        node.kind = cr::RetainedProgramSuffixFeatureKind;
+        node.codecVersion = cr::RetainedProgramSuffixFeatureCodec;
+        node.inputs = {payload->definition.outputNode};
+        phase = 4;
+        if (!suffix::Encode(program, node.parameters)) return phase;
+        payload->definition.outputNode = node.node;
+        payload->definition.nodes.push_back({std::move(node)});
+        if (!cr::Encode(payload->definition, payload->bytes)) return phase;
+        const std::atomic_bool running(false);
+        core3d::retained_feature::ReplayBudget budget;
+        TopoDS_Shape result;
+        phase = 5;
+        if (!pb::owner::ReplayOriginalsGraphDetached(payload->definition,
+                payload->sourceShapes, budget, running, result) || result.IsNull()) return phase;
+        phase = 6;
+        lease = context->beginCommandLease(context->openingFence(), viewportWidth, viewportHeight);
+        if (!lease || !lease->ownsOpenCommand()) return phase;
+        phase = 7;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (shapes.IsNull()) throw Standard_Failure("suffix shape tool");
+        shapes->SetShape(owner, result);
+        if (!StagePartBooleanPayload(record.label, payload))
+            throw Standard_Failure("suffix payload");
+        TNaming_Builder(record.label).Select(result, result);
+        phase = 8;
+        cr::Record readback;
+        if (!cr::Read(myOcafDoc, owner, readback) || !readback.value
+            || readback.value->bytes != payload->bytes
+            || !pb::owner::ValidateOriginalsRecord(myOcafDoc, readback))
+            throw Standard_Failure("suffix readback");
+        core3d::native_opening::CommittedEditPublication publication;
+        publication.replaced.push_back({capture.capture->state_->entityIdentifier, record.current});
+        phase = 9;
+        if (!lease->commit()) { context->retainUnprovenEdit(publication); return phase; }
+        phase = 10;
+        if (!context->publishCommittedEdit(publication)) {
+            context->retainUnprovenEdit(publication); return phase;
+        }
+        NotifyChanges();
+        return 0;
+    } catch (...) {
+        if (lease && lease->ownsOpenCommand()) lease->abort();
+        return phase;
+    }
+}
+#endif
+
+core3d::authored_parameter::BooleanOriginalsCaptureReply
+OcctDocument::CaptureBooleanOriginals(
+    const std::shared_ptr<core3d::native_opening::Context>& context,
+    const TDF_Label& owner) noexcept {
+    namespace ap = core3d::authored_parameter;
+    namespace cr = core3d::composite_recipe;
+    ap::BooleanOriginalsCaptureReply reply;
+    const auto refuse = [&](ap::PairRefusal reason) {
+        reply.status = ap::PairStatus::Refused; reply.refusal = reason; return reply;
+    };
+    try {
+        if (![NSThread isMainThread]) return refuse(ap::PairRefusal::WrongThread);
+        if (myOcafDoc.IsNull() || !context || owner.IsNull()
+            || owner.Data() != myOcafDoc->GetData()
+            || context->openingFence().document() != myOcafDoc
+            || context->openingFence().data() != myOcafDoc->GetData())
+            return refuse(ap::PairRefusal::ForeignDocument);
+        cr::Record record;
+        core3d::part_boolean::OriginalsDefinition definition;
+        const cr::FeatureNode* feature = nullptr;
+        auto state = std::make_shared<ap::BooleanOriginalsCapture::State>();
+        std::string resultBytes;
+        if (myOcafDoc->HasOpenCommand()
+            || !cr::Read(myOcafDoc, owner, record) || !record.value
+            || !(feature = OriginalsFeature(record.value->definition))
+            || !core3d::part_boolean::DecodeOriginals(
+                feature->parameters, definition)
+            || !core3d::part_boolean::EncodeOriginalStateBlock(
+                definition.originals, state->originalsBytes)
+            || !core3d::retained_part_boolean::ExactShapeBytes(
+                record.current, resultBytes)
+            || !XCAFDoc_DocumentTool::GetLengthUnit(
+                myOcafDoc, state->metersPerUnit)
+            || std::memcmp(&state->metersPerUnit,
+                &definition.carrierMetersPerUnit, sizeof(double)) != 0
+            || !CaptureSavedGroups(state->groups)
+            || !CaptureObjectVisibilityStateForLabel(owner, state->visibility)
+            || !PairCaptureOriginalsAppearance(*this, owner, state->appearance))
+            return refuse(ap::PairRefusal::UnsupportedSource);
+        state->owner = this; state->document = myOcafDoc;
+        state->data = myOcafDoc->GetData(); state->context = context;
+        state->label = owner; state->recordLabel = record.label;
+        state->payload = record.value;
+        state->resultBytes.assign(resultBytes.begin(), resultBytes.end());
+        state->entityIdentifier = EntityIdentifierForLabel(owner);
+        state->undoDepth = myOcafDoc->GetAvailableUndos();
+        state->redoDepth = myOcafDoc->GetAvailableRedos();
+        if (state->entityIdentifier.empty())
+            return refuse(ap::PairRefusal::BadEncoding);
+        reply.status = ap::PairStatus::Captured;
+        reply.refusal = ap::PairRefusal::None;
+        reply.capture = std::shared_ptr<const ap::BooleanOriginalsCapture>(
+            new ap::BooleanOriginalsCapture(std::move(state)));
+        return reply;
+    } catch (...) { return refuse(ap::PairRefusal::BadEncoding); }
+}
+
+core3d::authored_parameter::BooleanOriginalsPrepareReply
+OcctDocument::PrepareBooleanOriginalsEdit(
+    const std::shared_ptr<const core3d::authored_parameter::BooleanOriginalsCapture>& capture,
+    const core3d::authored_parameter::BooleanOriginalsEdit& edit,
+    const std::atomic_bool& cancelled) noexcept {
+    namespace ap = core3d::authored_parameter;
+    namespace cr = core3d::composite_recipe;
+    namespace pb = core3d::part_boolean;
+    ap::BooleanOriginalsPrepareReply reply;
+    const auto refuse = [&](ap::PairRefusal reason) {
+        reply.status = ap::PairStatus::Refused; reply.refusal = reason; return reply;
+    };
+    try {
+        if (![NSThread isMainThread]) return refuse(ap::PairRefusal::WrongThread);
+        if (cancelled.load()) {
+            reply.status = ap::PairStatus::Cancelled;
+            reply.refusal = ap::PairRefusal::Cancelled; return reply;
+        }
+        if (!capture || !capture->state_ || capture->state_->owner != this)
+            return refuse(ap::PairRefusal::ForeignDocument);
+        cr::Record record;
+        if (!OriginalsCurrent(*this, *capture->state_, record))
+            return refuse(ap::PairRefusal::StaleSource);
+        auto payload = std::make_shared<cr::Payload>(*record.value);
+        auto* feature = payload->definition.nodes.size() >= 3
+            ? std::get_if<cr::FeatureNode>(&payload->definition.nodes[2].value)
+            : nullptr;
+        pb::OriginalsDefinition definition;
+        if (!feature || !pb::DecodeOriginals(feature->parameters, definition))
+            return refuse(ap::PairRefusal::BadEncoding);
+        const std::size_t input = edit.role == pb::RecipeInputRole::Left ? 0
+            : edit.role == pb::RecipeInputRole::Right ? 1 : 2;
+        if (input > 1) return refuse(ap::PairRefusal::BadEncoding);
+        auto& effective = definition.effective.inputs[input];
+        const auto bindGeometry = [&]() {
+            const TopoDS_Shape source = pb::build::PersistenceMaterializeDetached(
+                pb::build::BuildEffectiveAnalyticPrism(effective.geometry,
+                    effective.sourceMetersPerUnit, definition.carrierMetersPerUnit));
+            std::string bytes;
+            return !source.IsNull()
+                && core3d::retained_part_boolean::ExactShapeBytes(source, bytes)
+                && cr::Hash(std::vector<std::uint8_t>(bytes.begin(), bytes.end()),
+                    effective.commitments.geometry);
+        };
+        bool changed = false;
+        if (edit.kind == ap::BooleanOriginalsEditKind::Operation) {
+            if (edit.operation != pb::Operation::Union
+                && edit.operation != pb::Operation::Subtract
+                && edit.operation != pb::Operation::Intersect)
+                return refuse(ap::PairRefusal::InvalidOperation);
+            changed = definition.operation != edit.operation;
+            definition.operation = edit.operation;
+        } else if (edit.kind == ap::BooleanOriginalsEditKind::Dimensions) {
+            std::array<double, 3> dimensions{{edit.values[0], edit.values[1],
+                                              edit.values[2]}};
+            for (double value : dimensions)
+                if (!std::isfinite(value) || value <= 0)
+                    return refuse(ap::PairRefusal::BadEncoding);
+            changed = effective.geometry.dimensions != dimensions;
+            effective.geometry.dimensions = dimensions;
+            if (!bindGeometry()) return refuse(ap::PairRefusal::InvalidResult);
+        } else if (edit.kind == ap::BooleanOriginalsEditKind::Placement) {
+            std::array<double, 3> translation{{edit.values[0], edit.values[1],
+                                               edit.values[2]}};
+            std::array<double, 4> rotation{{edit.values[3], edit.values[4],
+                                            edit.values[5], edit.values[6]}};
+            double norm = 0;
+            for (double value : edit.values) {
+                if (!std::isfinite(value)) return refuse(ap::PairRefusal::BadEncoding);
+            }
+            for (double value : rotation) norm += value * value;
+            if (std::abs(norm - 1.0) > 1e-12)
+                return refuse(ap::PairRefusal::BadEncoding);
+            changed = effective.geometry.translation != translation
+                || effective.geometry.rotationXYZW != rotation;
+            effective.geometry.translation = translation;
+            effective.geometry.rotationXYZW = rotation;
+            if (!PairHash(edit.values.data(), sizeof(edit.values),
+                    effective.commitments.placement)
+                || !bindGeometry()) return refuse(ap::PairRefusal::InvalidResult);
+        } else if (edit.kind == ap::BooleanOriginalsEditKind::ScalarMaterial) {
+            for (std::size_t index = 0; index < 6; ++index)
+                if (!std::isfinite(edit.values[index]) || edit.values[index] < 0
+                    || edit.values[index] > 1)
+                    return refuse(ap::PairRefusal::BadEncoding);
+            const std::array<double, 6> after{{edit.values[0], edit.values[1],
+                edit.values[2], edit.values[3], edit.values[4], edit.values[5]}};
+            const pb::ScalarMaterialRow* current = nullptr;
+            if (effective.metadata.appearance.material) {
+                if (*effective.metadata.appearance.material
+                    >= definition.effective.materials.size())
+                    return refuse(ap::PairRefusal::BadEncoding);
+                current = &definition.effective.materials[
+                    *effective.metadata.appearance.material];
+            }
+            const std::array<double, 6> before = current
+                ? std::array<double, 6>{{current->pbr[0], current->pbr[1],
+                    current->pbr[2], current->pbr[3], current->pbr[7], current->pbr[8]}}
+                : std::array<double, 6>{{0, 0, 0, 0, 0, 0}};
+            changed = current == nullptr || before != after;
+            // Preparation stays document-read-only. The actual material writer
+            // supplies the genuine native table label inside Apply's command;
+            // only then can the edited role be rebound without inventing one.
+        } else if (edit.kind == ap::BooleanOriginalsEditKind::GroupMembership) {
+            if (definition.effective.groups.empty())
+                return refuse(ap::PairRefusal::UnsupportedSource);
+            const bool before = !effective.metadata.groups.empty();
+            if (edit.flag) effective.metadata.groups = {0};
+            else effective.metadata.groups.clear();
+            changed = before != edit.flag;
+            const std::array<std::uint8_t, 2> value{{
+                std::uint8_t(input), std::uint8_t(edit.flag ? 1 : 0)}};
+            if (!PairHash(value.data(), value.size(),
+                    effective.commitments.groups))
+                return refuse(ap::PairRefusal::BadEncoding);
+        } else if (edit.kind == ap::BooleanOriginalsEditKind::Visibility) {
+            const auto visible = [&]() {
+                if (effective.metadata.invisibleAttributePresent) return false;
+                for (const auto layer : effective.metadata.layers)
+                    if (layer >= definition.effective.layers.size()
+                        || definition.effective.layers[layer].invisibleAttributePresent)
+                        return false;
+                return true;
+            }();
+            changed = visible != edit.flag;
+            effective.metadata.invisibleAttributePresent = !edit.flag;
+            if (edit.flag) {
+                effective.metadata.layers.clear();
+                effective.metadata.layerLinkPresent = false;
+            }
+            const std::array<std::uint8_t, 3> value{{
+                std::uint8_t(input), 0x56, std::uint8_t(edit.flag ? 1 : 0)}};
+            if (!PairHash(value.data(), value.size(),
+                    effective.commitments.groups))
+                return refuse(ap::PairRefusal::BadEncoding);
+        } else return refuse(ap::PairRefusal::BadEncoding);
+        if (!changed || cancelled.load())
+            return refuse(cancelled.load() ? ap::PairRefusal::Cancelled
+                                           : ap::PairRefusal::BadEncoding);
+
+        std::vector<std::uint8_t> frozen, parameters;
+        if (!pb::EncodeOriginalStateBlock(definition.originals, frozen)
+            || frozen != capture->state_->originalsBytes
+            || !pb::EncodeOriginals(definition, parameters))
+            return refuse(ap::PairRefusal::BadEncoding);
+        feature->parameters = std::move(parameters);
+        if (!cr::ValidateV3(payload->definition,
+                core3d::retained_feature::ProductionRegistry(),
+                core3d::retained_source::ProductionRegistry()).valid()
+            || !cr::Encode(payload->definition, payload->bytes))
+            return refuse(ap::PairRefusal::BadEncoding);
+        core3d::retained_feature::ReplayBudget budget;
+        TopoDS_Shape result;
+        if (payload->sourceShapes.size() != 2)
+            return refuse(ap::PairRefusal::BadEncoding);
+        for (std::size_t index = 0; index < 2; ++index) {
+            const auto* source = std::get_if<cr::SourceNode>(
+                &payload->definition.nodes[index].value);
+            TopoDS_Shape normalized;
+            if (!source || source->shapeSlot >= payload->sourceShapes.size()
+                || !PairPersistenceSource(payload->sourceShapes[source->shapeSlot],
+                    source->commitments.geometry, normalized))
+                return refuse(ap::PairRefusal::UnprovedCorrespondence);
+            // This operation-local copy must reproduce the already frozen
+            // source commitment. Neither the graph nor its originals change.
+            payload->sourceShapes[source->shapeSlot] = std::move(normalized);
+        }
+        if (!pb::owner::ReplayOriginalsGraphDetached(payload->definition,
+                payload->sourceShapes, budget, cancelled, result)
+            || result.IsNull())
+            return refuse(cancelled.load() ? ap::PairRefusal::Cancelled
+                                           : ap::PairRefusal::InvalidResult);
+
+        auto prepared = std::make_shared<ap::BooleanOriginalsPrepared::State>();
+        prepared->capture = capture; prepared->payload = payload;
+        prepared->result = result;
+        cr::Record candidate{record.label, record.owner, payload, result};
+        if (!ObserveOriginalsRecord(*this, candidate, prepared->observation)
+            || prepared->observation.originalsBytes != capture->state_->originalsBytes)
+            return refuse(ap::PairRefusal::BadEncoding);
+        if (edit.kind == ap::BooleanOriginalsEditKind::GroupMembership) {
+            prepared->groups = capture->state_->groups.groups;
+            for (std::size_t ordinal = 0;
+                 ordinal < definition.effective.groups.size(); ++ordinal) {
+                const auto& row = definition.effective.groups[ordinal];
+                auto group = std::find_if(prepared->groups.begin(), prepared->groups.end(),
+                    [&](const auto& value) { return value.identifier == row.identifier; });
+                if (group == prepared->groups.end())
+                    return refuse(ap::PairRefusal::BadEncoding);
+                const bool included = std::any_of(definition.effective.inputs.begin(),
+                    definition.effective.inputs.end(), [&](const auto& value) {
+                        return std::find(value.metadata.groups.begin(),
+                            value.metadata.groups.end(), std::uint16_t(ordinal))
+                            != value.metadata.groups.end();
+                    });
+                group->members.erase(std::remove_if(group->members.begin(),
+                    group->members.end(), [&](const TDF_Label& value) {
+                        return value.IsEqual(capture->state_->label);
+                    }), group->members.end());
+                if (included) group->members.push_back(capture->state_->label);
+            }
+            prepared->stageGroups = true;
+        }
+        if (edit.kind == ap::BooleanOriginalsEditKind::ScalarMaterial) {
+            const pb::ScalarMaterialRow* current = nullptr;
+            if (effective.metadata.appearance.material) {
+                if (*effective.metadata.appearance.material
+                    >= definition.effective.materials.size())
+                    return refuse(ap::PairRefusal::BadEncoding);
+                current = &definition.effective.materials[
+                    *effective.metadata.appearance.material];
+            }
+            prepared->materialValues = {{edit.values[0], edit.values[1], edit.values[2],
+                edit.values[3], edit.values[4], edit.values[5]}};
+            prepared->resultMaterial = PairMaterial(current, prepared->materialValues);
+            if (prepared->resultMaterial.IsNull())
+                return refuse(ap::PairRefusal::BadEncoding);
+            prepared->materialInput = input;
+            prepared->stageMaterial = true;
+        }
+        if (edit.kind == ap::BooleanOriginalsEditKind::Visibility && input == 0) {
+            prepared->stageVisibility = true; prepared->visible = edit.flag;
+        }
+        reply.status = ap::PairStatus::Prepared;
+        reply.refusal = ap::PairRefusal::None;
+        reply.prepared = std::shared_ptr<const ap::BooleanOriginalsPrepared>(
+            new ap::BooleanOriginalsPrepared(std::move(prepared)));
+        return reply;
+    } catch (...) { return refuse(ap::PairRefusal::BadEncoding); }
+}
+
+core3d::authored_parameter::PairObservationReply
+OcctDocument::ObserveBooleanOriginals(
+    const std::shared_ptr<const core3d::authored_parameter::BooleanOriginalsCapture>& capture)
+    const noexcept {
+    namespace ap = core3d::authored_parameter;
+    ap::PairObservationReply reply;
+    try {
+        if (![NSThread isMainThread]) {
+            reply.refusal = ap::PairRefusal::WrongThread; return reply;
+        }
+        if (!capture || !capture->state_ || capture->state_->owner != this) {
+            reply.refusal = ap::PairRefusal::ForeignDocument; return reply;
+        }
+        core3d::composite_recipe::Record record;
+        ap::PairObservation observation;
+        if (!OriginalsCurrent(*this, *capture->state_, record)) {
+            reply.refusal = ap::PairRefusal::StaleSource; return reply;
+        }
+        if (!ObserveOriginalsRecord(*this, record, observation)) {
+            reply.refusal = ap::PairRefusal::BadEncoding; return reply;
+        }
+        reply.status = ap::PairStatus::Prepared;
+        reply.refusal = ap::PairRefusal::None;
+        reply.observation = std::move(observation);
+        return reply;
+    } catch (...) { reply.refusal = ap::PairRefusal::BadEncoding; return reply; }
+}
+
+core3d::authored_parameter::BooleanOriginalsObservationReply
+OcctDocument::CaptureBooleanOriginalsObservation(const TDF_Label& owner) const noexcept {
+    namespace ap = core3d::authored_parameter;
+    namespace cr = core3d::composite_recipe;
+    ap::BooleanOriginalsObservationReply reply;
+    const auto refuse = [&](ap::PairRefusal reason) {
+        reply.refusal = reason;
+        return reply;
+    };
+    try {
+        if (![NSThread isMainThread]) return refuse(ap::PairRefusal::WrongThread);
+        if (myOcafDoc.IsNull() || myOcafDoc->GetData().IsNull()
+            || owner.IsNull() || owner.Data() != myOcafDoc->GetData())
+            return refuse(ap::PairRefusal::ForeignDocument);
+        if (myOcafDoc->HasOpenCommand()) return refuse(ap::PairRefusal::StaleSource);
+        auto state = std::make_shared<ap::BooleanOriginalsObservation::State>();
+        state->owner = this;
+        state->document = myOcafDoc;
+        state->data = myOcafDoc->GetData();
+        state->label = owner;
+        state->entityIdentifier = EntityIdentifierForLabel(owner);
+        state->dataTime = state->data->Time();
+        state->transaction = state->data->Transaction();
+        const int undo = myOcafDoc->GetAvailableUndos();
+        const int redo = myOcafDoc->GetAvailableRedos();
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (shapes.IsNull() || state->entityIdentifier.empty())
+            return refuse(ap::PairRefusal::UnsupportedSource);
+        TDF_LabelSequence roots;
+        shapes->GetFreeShapes(roots);
+        if (roots.Length() > 50000) return refuse(ap::PairRefusal::UnsupportedSource);
+        unsigned matches = 0;
+        for (int index = 1; index <= roots.Length(); ++index) {
+            if (EntityIdentifierForLabel(roots.Value(index)) == state->entityIdentifier) {
+                if (!roots.Value(index).IsEqual(owner))
+                    return refuse(ap::PairRefusal::UnsupportedSource);
+                ++matches;
+            }
+        }
+        cr::Record record;
+        if (matches != 1 || !cr::Read(myOcafDoc, owner, record)
+            || !record.value || !record.owner.IsEqual(owner)
+            || !OriginalsFeature(record.value->definition)
+            || !CaptureSavedGroups(state->groups)
+            || !CaptureObjectVisibilityStateForLabel(owner, state->visibility)
+            || !PairCaptureOriginalsAppearance(*this, owner, state->appearance)
+            || !core3d::retained_part_boolean::ExactShapeBytes(
+                record.current, state->resultBytes)
+            || !ObserveOriginalsRecord(*this, record, state->observation))
+            return refuse(ap::PairRefusal::UnsupportedSource);
+        state->recordLabel = record.label;
+        state->recordBytes = record.value->bytes;
+        // Bind the read to the exact current document/data, owner, revisions,
+        // history, canonical record, geometry and actual metadata. No Context
+        // is obtained and no command or edit handle is constructed.
+        cr::Record current;
+        OcctSavedGroupState groups;
+        OcctObjectVisibilityState visibility;
+        OcctScalarAppearanceState appearance;
+        std::string resultBytes;
+        double units = 0;
+        if (state->owner != this || myOcafDoc != state->document
+            || myOcafDoc->GetData() != state->data || owner.Data() != state->data
+            || myOcafDoc->HasOpenCommand()
+            || state->data->Time() != state->dataTime
+            || state->data->Transaction() != state->transaction
+            || myOcafDoc->GetAvailableUndos() != undo
+            || myOcafDoc->GetAvailableRedos() != redo
+            || state->observation.undoDepth != undo
+            || state->observation.redoDepth != redo
+            || EntityIdentifierForLabel(owner) != state->entityIdentifier
+            || !XCAFDoc_DocumentTool::GetLengthUnit(myOcafDoc, units)
+            || std::memcmp(&units, &state->observation.metersPerUnit, sizeof(double)) != 0
+            || !CaptureSavedGroups(groups) || !groups.IsEqual(state->groups)
+            || !CaptureObjectVisibilityStateForLabel(owner, visibility)
+            || !visibility.IsEqual(state->visibility)
+            || !PairCaptureOriginalsAppearance(*this, owner, appearance)
+            || !appearance.IsEqual(state->appearance)
+            || !cr::Read(myOcafDoc, owner, current) || !current.value
+            || current.value->bytes != state->recordBytes
+            || !current.label.IsEqual(state->recordLabel)
+            || !current.owner.IsEqual(state->label)
+            || !core3d::retained_part_boolean::ExactShapeBytes(current.current, resultBytes)
+            || resultBytes != state->resultBytes)
+            return refuse(ap::PairRefusal::StaleSource);
+        reply.status = ap::PairStatus::Prepared;
+        reply.refusal = ap::PairRefusal::None;
+        reply.observation = std::shared_ptr<const ap::BooleanOriginalsObservation>(
+            new ap::BooleanOriginalsObservation(std::move(state)));
+        return reply;
+    } catch (...) { return refuse(ap::PairRefusal::BadEncoding); }
+}
+
+core3d::authored_parameter::PairApplyReply
+OcctDocument::ApplyBooleanOriginalsEdit(
+    const std::shared_ptr<const core3d::authored_parameter::BooleanOriginalsPrepared>& prepared,
+    std::uint32_t viewportWidth, std::uint32_t viewportHeight) noexcept {
+    namespace ap = core3d::authored_parameter;
+    namespace cr = core3d::composite_recipe;
+    namespace pb = core3d::part_boolean;
+    ap::PairApplyReply reply;
+    const auto refuse = [&](ap::PairRefusal reason) {
+        reply.status = ap::PairApplyStatus::Refused; reply.refusal = reason; return reply;
+    };
+    try {
+        if (![NSThread isMainThread]) return refuse(ap::PairRefusal::WrongThread);
+        if (!prepared || !prepared->state_ || prepared->state_->committed.load())
+            return refuse(ap::PairRefusal::StaleSource);
+        const auto& state = *prepared->state_;
+        if (!state.capture || !state.capture->state_
+            || state.capture->state_->owner != this)
+            return refuse(ap::PairRefusal::ForeignDocument);
+        const auto& capture = *state.capture->state_;
+        cr::Record current;
+        if (!OriginalsCurrent(*this, capture, current))
+            return refuse(ap::PairRefusal::StaleSource);
+        if (!capture.context || !viewportWidth || !viewportHeight
+            || !capture.context->isCurrent(viewportWidth, viewportHeight))
+            return refuse(ap::PairRefusal::StaleSource);
+        const int beforeUndos = myOcafDoc->GetAvailableUndos();
+        const TopoDS_Shape previous = current.current;
+        std::shared_ptr<const cr::Payload> payload = state.payload;
+        TopoDS_Shape result = state.result;
+        auto lease = capture.context->beginCommandLease(
+            capture.context->openingFence(), viewportWidth, viewportHeight);
+        if (!lease || !lease->ownsOpenCommand())
+            return refuse(ap::PairRefusal::StaleSource);
+        bool staged = false;
+        try {
+            const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+            if (shapes.IsNull()) throw Standard_Failure("missing shape tool");
+            OcctScalarAppearanceState stagedMaterialAppearance;
+            if (state.stageMaterial) {
+                const auto materials = XCAFDoc_DocumentTool::VisMaterialTool(
+                    myOcafDoc->Main());
+                TDF_Label previousMaterialLabel;
+                XCAFDoc_VisMaterialTool::GetShapeMaterial(
+                    capture.label, previousMaterialLabel);
+                const auto& requested = state.resultMaterial->PbrMaterial();
+                if (materials.IsNull()
+                    || !SaveObjectPBRMaterialsImpl({{capture.label, requested,
+                            requested.BaseColorTexture, requested.EmissiveTexture}},
+                        state.resultMaterial, true))
+                    throw Standard_Failure("originals material stage");
+                TDF_Label materialLabel;
+                XCAFDoc_VisMaterialTool::GetShapeMaterial(capture.label, materialLabel);
+                const std::string entry = PairLabelEntry(materialLabel);
+                if (materialLabel.IsNull() || entry.empty()
+                    || !PairCaptureOriginalsAppearance(
+                        *this, capture.label, stagedMaterialAppearance))
+                    throw Standard_Failure("originals material readback");
+
+                auto mutablePayload = std::make_shared<cr::Payload>(*state.payload);
+                auto* mutableFeature = mutablePayload->definition.nodes.size() >= 3
+                    ? std::get_if<cr::FeatureNode>(
+                        &mutablePayload->definition.nodes[2].value) : nullptr;
+                pb::OriginalsDefinition definition;
+                if (!mutableFeature
+                    || !pb::DecodeOriginals(mutableFeature->parameters, definition)
+                    || state.materialInput >= definition.effective.inputs.size()
+                    || std::any_of(definition.effective.materials.begin(),
+                        definition.effective.materials.end(), [&](const auto& row) {
+                            return row.labelEntry == entry;
+                        }))
+                    throw Standard_Failure("originals material provenance");
+                pb::ScalarMaterialRow row;
+                if (!PairMaterialRow(entry, stagedMaterialAppearance.visualValues, row)
+                    || definition.effective.materials.size() >= pb::MaximumMetadataRows)
+                    throw Standard_Failure("originals material row");
+                row.ordinal = std::uint16_t(definition.effective.materials.size());
+                definition.effective.materials.push_back(row);
+                auto& edited = definition.effective.inputs[state.materialInput];
+                edited.metadata.appearance.material = row.ordinal;
+                if (!PairHash(state.materialValues.data(), sizeof(state.materialValues),
+                        edited.commitments.material)
+                    || !pb::EncodeOriginals(definition, mutableFeature->parameters)
+                    || !cr::ValidateV3(mutablePayload->definition,
+                        core3d::retained_feature::ProductionRegistry(),
+                        core3d::retained_source::ProductionRegistry()).valid()
+                    || !cr::Encode(mutablePayload->definition, mutablePayload->bytes))
+                    throw Standard_Failure("originals material encoding");
+                core3d::retained_feature::ReplayBudget budget;
+                const std::atomic_bool stop(false);
+                if (!pb::owner::ReplayOriginalsGraphDetached(
+                        mutablePayload->definition, mutablePayload->sourceShapes,
+                        budget, stop, result) || result.IsNull())
+                    throw Standard_Failure("originals material replay");
+                payload = std::move(mutablePayload);
+
+                if (state.materialInput == 1) {
+                    if (previousMaterialLabel.IsNull())
+                        materials->UnSetShapeMaterial(capture.label);
+                    else
+                        materials->SetShapeMaterial(capture.label, previousMaterialLabel);
+                    if (capture.appearance.localPBR)
+                        TDataStd_Integer::Set(
+                            capture.label, LocalPBRMaterialAttributeID(), 1);
+                    else
+                        capture.label.ForgetAttribute(LocalPBRMaterialAttributeID());
+                    for (int index = 0; index < 2; ++index) {
+                        const TDF_Label child = capture.label.FindChild(11 + index);
+                        if (capture.appearance.legacyPresent[index])
+                            TDataStd_Integer::Set(
+                                child, capture.appearance.legacyValues[index]);
+                        else
+                            child.ForgetAttribute(TDataStd_Integer::GetID());
+                    }
+                    OcctScalarAppearanceState restored;
+                    if (!PairCaptureOriginalsAppearance(*this, capture.label, restored)
+                        || !restored.IsEqual(capture.appearance)
+                        || XCAFDoc_VisMaterialTool::GetMaterial(materialLabel).IsNull())
+                        throw Standard_Failure("originals material restore");
+                }
+            }
+            shapes->SetShape(capture.label, result);
+            if (!StagePartBooleanPayload(capture.recordLabel, payload))
+                throw Standard_Failure("originals payload stage");
+            TNaming_Builder(capture.recordLabel).Select(result, result);
+            if (state.stageMaterial && state.materialInput == 0) {
+                OcctScalarAppearanceState appearance;
+                if (!PairCaptureOriginalsAppearance(*this, capture.label, appearance)
+                    || !appearance.IsEqual(stagedMaterialAppearance))
+                    throw Standard_Failure("originals material readback");
+            }
+            if (state.stageGroups && !StageSavedGroups(state.groups))
+                throw Standard_Failure("originals group stage");
+            if (state.stageVisibility
+                && !SetObjectVisibilityForLabel(capture.label, state.visible))
+                throw Standard_Failure("originals visibility stage");
+            cr::Record readback;
+            ap::PairObservation observation;
+            const bool read = cr::Read(myOcafDoc, capture.label, readback) && readback.value;
+            const bool bytes = read && readback.value->bytes == payload->bytes;
+            const bool shape = bytes && readback.current.IsEqual(result);
+            const bool semantic = shape && pb::owner::ValidateOriginalsRecord(myOcafDoc, readback);
+            const bool observed = semantic && ObserveOriginalsRecord(*this, readback, observation);
+            const bool originals = observed && observation.originalsDigest == state.observation.originalsDigest;
+            const bool effective = originals && (state.stageMaterial
+                ? observation.effectiveDigest != state.observation.effectiveDigest
+                : observation.effectiveDigest == state.observation.effectiveDigest);
+            const bool identity = effective && observation.identityDigest == state.observation.identityDigest;
+            const bool geometry = identity && observation.resultDigest == state.observation.resultDigest;
+            const bool visible = geometry && (!state.stageVisibility || observation.resultVisible == state.visible);
+            if (!visible) {
+                std::fprintf(stderr, "NCOM_A2_APPLY unit=%.17g read=%d bytes=%d shape=%d "
+                    "semantic=%d observed=%d originals=%d effective=%d identity=%d geometry=%d visible=%d\n",
+                    capture.metersPerUnit, int(read), int(bytes), int(shape), int(semantic),
+                    int(observed), int(originals), int(effective), int(identity), int(geometry), int(visible));
+                throw Standard_Failure("originals readback");
+            }
+            staged = true;
+        } catch (const Standard_Failure& failure) {
+            std::fprintf(stderr, "NCOM_A2_APPLY unit=%.17g stage=%s\n",
+                capture.metersPerUnit, failure.GetMessageString());
+            staged = false;
+        } catch (...) { staged = false; }
+        if (!staged) {
+            if (!lease->abort()) {
+                reply.status = ap::PairApplyStatus::OutcomeUnknown;
+                reply.refusal = ap::PairRefusal::BadEncoding; return reply;
+            }
+            return refuse(ap::PairRefusal::BadEncoding);
+        }
+        if (!lease->commit()) {
+            core3d::native_opening::CommittedEditPublication publication;
+            publication.replaced.push_back({capture.entityIdentifier, previous});
+            capture.context->retainUnprovenEdit(publication);
+            reply.status = ap::PairApplyStatus::OutcomeUnknown;
+            reply.refusal = ap::PairRefusal::None; return reply;
+        }
+        cr::Record committed;
+        if (myOcafDoc->HasOpenCommand()
+            || myOcafDoc->GetAvailableUndos() != beforeUndos + 1
+            || !cr::Read(myOcafDoc, capture.label, committed) || !committed.value
+            || committed.value->bytes != payload->bytes
+            || !pb::owner::ValidateOriginalsRecord(myOcafDoc, committed)) {
+            reply.status = ap::PairApplyStatus::OutcomeUnknown;
+            reply.refusal = ap::PairRefusal::None; return reply;
+        }
+        core3d::native_opening::CommittedEditPublication publication;
+        publication.replaced.push_back({capture.entityIdentifier, previous});
+        if (!capture.context->publishCommittedEdit(publication)) {
+            capture.context->retainUnprovenEdit(publication);
+            reply.status = ap::PairApplyStatus::OutcomeUnknown;
+            reply.refusal = ap::PairRefusal::None; return reply;
+        }
+        state.committed.store(true);
+        reply.status = ap::PairApplyStatus::Committed;
+        reply.refusal = ap::PairRefusal::None;
+        NotifyChanges(); return reply;
+    } catch (...) { return refuse(ap::PairRefusal::BadEncoding); }
 }
 
 Standard_Boolean OcctDocument::VerifyPlainProfileOperationReplacement(
@@ -15360,6 +16699,100 @@ Standard_Boolean OcctDocument::MarkTriangleUVAtlas(const TDF_Label& label, const
 }
 
 #ifdef DEBUG
+Standard_Boolean OcctDocument::DebugRewriteDefaultObjectTransformEncoding(
+    const TDF_Label& label, const std::uint8_t absentMask,
+    const std::uint8_t negativeZeroMask) noexcept {
+    if (![NSThread isMainThread]) return Standard_False;
+    const auto abort = [&]() noexcept {
+        try {
+            if (!myOcafDoc.IsNull() && myOcafDoc->HasOpenCommand())
+                myOcafDoc->AbortCommand();
+        } catch (...) {}
+        return Standard_False;
+    };
+    try {
+        if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+            || label.IsNull() || label.Data() != myOcafDoc->GetData()
+            || !IsEditableFreeSimpleDefinitionLabel(label)
+            || (absentMask & negativeZeroMask) != 0
+            || (negativeZeroMask & 0xc0U) != 0) return Standard_False;
+        OcctObjectTransformState before;
+        gp_Trsf derivedBefore;
+        if (!CaptureObjectTransformStateForLabel(label, before)
+            || before.profile.label.IsNull()
+            || !before.profile.IsCurrent(myOcafDoc, label)
+            || !before.enclosure.label.IsNull() || !before.sweep.label.IsNull()
+            || !before.loft.label.IsNull()
+            || !TryObjectTransformForLabel(label, derivedBefore))
+            return Standard_False;
+        const std::array<double, 8> defaults{{0, 0, 0, 0, 0, 0, 1, 1}};
+        const std::uint8_t requested = absentMask | negativeZeroMask;
+        for (std::size_t index = 0; index < defaults.size(); ++index) {
+            if (!(requested & std::uint8_t(1U << index))) continue;
+            if (!before.present[index]
+                || std::memcmp(&before.scalars[index], &defaults[index],
+                    sizeof(double)) != 0) return Standard_False;
+        }
+        myOcafDoc->NewCommand();
+        if (!myOcafDoc->HasOpenCommand()) return Standard_False;
+        for (std::size_t index = 0; index < defaults.size(); ++index) {
+            const auto bit = std::uint8_t(1U << index);
+            if (absentMask & bit) {
+                const TDF_Label child = label.FindChild(Standard_Integer(index + 1),
+                                                        Standard_False);
+                if (child.IsNull()
+                    || !child.ForgetAttribute(TDataStd_Real::GetID())) return abort();
+            } else if (negativeZeroMask & bit) {
+                const TDF_Label child = label.FindChild(Standard_Integer(index + 1));
+                // Set treats -0.0 as equal to an existing +0.0. Recreate the
+                // identity-default scalar so the raw sign bit reaches readback.
+                if (!child.ForgetAttribute(TDataStd_Real::GetID())) return abort();
+                TDataStd_Real::Set(child, -0.0);
+            }
+        }
+        OcctObjectTransformState staged;
+        gp_Trsf derivedStaged;
+        if (!CaptureObjectTransformStateForLabel(label, staged)
+            || !TryObjectTransformForLabel(label, derivedStaged)) return abort();
+        for (std::size_t index = 0; index < defaults.size(); ++index) {
+            const auto bit = std::uint8_t(1U << index);
+            const bool expectedPresent = !(absentMask & bit);
+            const double expected = negativeZeroMask & bit ? -0.0 : before.scalars[index];
+            if (bool(staged.present[index]) != expectedPresent
+                || (expectedPresent && std::memcmp(&staged.scalars[index], &expected,
+                    sizeof(double)) != 0)) return abort();
+        }
+        for (Standard_Integer row = 1; row <= 3; ++row)
+            for (Standard_Integer column = 1; column <= 4; ++column) {
+                const double a = derivedBefore.Value(row, column);
+                const double b = derivedStaged.Value(row, column);
+                if (!std::isfinite(a) || !std::isfinite(b) || a != b) return abort();
+            }
+        if (!myOcafDoc->CommitCommand() || myOcafDoc->HasOpenCommand())
+            return abort();
+        OcctObjectTransformState readback;
+        gp_Trsf derivedReadback;
+        if (!CaptureObjectTransformStateForLabel(label, readback)
+            || !TryObjectTransformForLabel(label, derivedReadback))
+            return Standard_False;
+        for (std::size_t index = 0; index < defaults.size(); ++index) {
+            const auto bit = std::uint8_t(1U << index);
+            const bool expectedPresent = !(absentMask & bit);
+            const double expected = negativeZeroMask & bit ? -0.0 : before.scalars[index];
+            if (bool(readback.present[index]) != expectedPresent
+                || (expectedPresent && std::memcmp(&readback.scalars[index], &expected,
+                    sizeof(double)) != 0)) return Standard_False;
+        }
+        for (Standard_Integer row = 1; row <= 3; ++row)
+            for (Standard_Integer column = 1; column <= 4; ++column) {
+                const double a = derivedBefore.Value(row, column);
+                const double b = derivedReadback.Value(row, column);
+                if (!std::isfinite(a) || !std::isfinite(b) || a != b) return Standard_False;
+            }
+        return Standard_True;
+    } catch (...) { return abort(); }
+}
+
 Standard_Boolean OcctDocument::DebugProbeMeshUVRepackRecipeMismatch(const TDF_Label& label) const noexcept {
     if(![NSThread isMainThread])return Standard_False;
     try {
@@ -17541,7 +18974,8 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterials(
 }
 Standard_Boolean OcctDocument::SaveObjectPBRMaterialsImpl(
     const std::vector<OcctPBRMaterialUpdate>& updates,
-    const Handle(XCAFDoc_VisMaterial)& scalarMaterial)
+    const Handle(XCAFDoc_VisMaterial)& scalarMaterial,
+    const bool retainPreviousMaterial)
 {
     if (!scalarMaterial.IsNull() && updates.size()!=1) return Standard_False;
     if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
@@ -17610,6 +19044,10 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterialsImpl(
             updates, &reclaimMaterialLabels, scalarMaterial)) {
         return Standard_False;
     }
+    // A retained pair definition references material-table provenance by exact
+    // native entry. Its role edit may move the only XCAF object binding, so keep
+    // the prior owned row alive until the same command has rebound the role.
+    if (retainPreviousMaterial) reclaimMaterialLabels.clear();
     const Handle(XCAFDoc_VisMaterialTool) aTool =
         XCAFDoc_DocumentTool::VisMaterialTool(myOcafDoc->Main());
     if (aTool.IsNull()) {
@@ -17727,9 +19165,11 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterialsImpl(
             }
         }
     }
-    for (const PreparedUpdate& update : preparedUpdates) {
-        RemoveUnreferencedOwnedMaterial(
-            aTool, update.previousMaterialLabel);
+    if (!retainPreviousMaterial) {
+        for (const PreparedUpdate& update : preparedUpdates) {
+            RemoveUnreferencedOwnedMaterial(
+                aTool, update.previousMaterialLabel);
+        }
     }
     return Standard_True;
 }

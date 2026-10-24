@@ -294,6 +294,19 @@ struct PairObservation final {
     std::array<std::uint32_t, 2> resultMembership{{0, 0}};
     int undoDepth = 0;
     int redoDepth = 0;
+    std::vector<std::uint8_t> suffixBytes;
+    retained_recipe::Digest originalsDigest{};
+    retained_recipe::Digest effectiveDigest{};
+    retained_recipe::Digest identityDigest{};
+    retained_recipe::Digest resultDigest{};
+    std::array<std::array<double, 3>, 2> effectiveDimensions{};
+    std::array<std::array<double, 7>, 2> effectivePlacements{};
+    std::array<std::array<double, 6>, 2> effectiveMaterials{};
+    std::array<bool, 2> effectiveMaterialPresent{{false, false}};
+    std::array<bool, 2> effectiveGroupMembership{{false, false}};
+    std::array<bool, 2> effectiveVisibility{{true, true}};
+    bool resultVisible = true;
+    std::uint32_t graphNodeCount = 0;
 };
 
 //! Native-issued immutable paired capture. State is deliberately opaque so
@@ -340,6 +353,107 @@ struct PairObservationReply final {
     PairStatus status = PairStatus::Refused;
     PairRefusal refusal = PairRefusal::UnsupportedSource;
     std::optional<PairObservation> observation;
+};
+
+//! Document-issued observation only. Its state contains no opening Context,
+//! command lease or edit authority, and cannot construct either edit handle.
+class BooleanOriginalsObservation final {
+public:
+    struct State;
+    ~BooleanOriginalsObservation();
+    BooleanOriginalsObservation(const BooleanOriginalsObservation&) = delete;
+    BooleanOriginalsObservation& operator=(const BooleanOriginalsObservation&) = delete;
+    const PairObservation& value() const noexcept;
+private:
+    friend class ::OcctDocument;
+    explicit BooleanOriginalsObservation(std::shared_ptr<const State>) noexcept;
+    std::shared_ptr<const State> state_;
+};
+
+struct BooleanOriginalsObservationReply final {
+    PairStatus status = PairStatus::Refused;
+    PairRefusal refusal = PairRefusal::UnsupportedSource;
+    std::shared_ptr<const BooleanOriginalsObservation> observation;
+};
+
+//! Closed settlement for the N-COM creator boundary. A receipt is populated
+//! only after the native command is known committed and independently read
+//! back; descriptive PairObservation bytes can never construct this value.
+enum class PairApplyStatus : std::uint8_t {
+    Committed = 0,
+    Refused,
+    Cancelled,
+    OutcomeUnknown,
+};
+
+struct PairConsumptionReceipt final {
+    std::string targetEntityIdentifier;
+    std::string toolEntityIdentifier;
+    std::uint32_t undoDelta = 0;
+};
+
+struct PairApplyReply final {
+    PairApplyStatus status = PairApplyStatus::Refused;
+    PairRefusal refusal = PairRefusal::UnsupportedSource;
+    std::optional<PairConsumptionReceipt> receipt;
+};
+
+//! Closed edit vocabulary for one retained SYPB/4 owner. Values never carry
+//! replacement source bytes, identities, role maps, labels, or a command
+//! lease. The selected arm is validated again during detached preparation.
+enum class BooleanOriginalsEditKind : std::uint8_t {
+    Operation = 0,
+    Dimensions,
+    Placement,
+    ScalarMaterial,
+    GroupMembership,
+    Visibility,
+};
+
+struct BooleanOriginalsEdit final {
+    BooleanOriginalsEditKind kind = BooleanOriginalsEditKind::Operation;
+    part_boolean::RecipeInputRole role = part_boolean::RecipeInputRole::Left;
+    part_boolean::Operation operation = part_boolean::Operation::Union;
+    std::array<double, 7> values{{0, 0, 0, 0, 0, 0, 1}};
+    bool flag = false;
+};
+
+//! Opaque authority over one current SYPB/4 owner. Capture and preparation
+//! are read-only; only a matching BooleanOriginalsPrepared can reach apply.
+class BooleanOriginalsCapture final {
+public:
+    struct State;
+    ~BooleanOriginalsCapture();
+    BooleanOriginalsCapture(const BooleanOriginalsCapture&) = delete;
+    BooleanOriginalsCapture& operator=(const BooleanOriginalsCapture&) = delete;
+private:
+    friend class ::OcctDocument;
+    explicit BooleanOriginalsCapture(std::shared_ptr<State>) noexcept;
+    std::shared_ptr<State> state_;
+};
+
+class BooleanOriginalsPrepared final {
+public:
+    struct State;
+    ~BooleanOriginalsPrepared();
+    BooleanOriginalsPrepared(const BooleanOriginalsPrepared&) = delete;
+    BooleanOriginalsPrepared& operator=(const BooleanOriginalsPrepared&) = delete;
+private:
+    friend class ::OcctDocument;
+    explicit BooleanOriginalsPrepared(std::shared_ptr<State>) noexcept;
+    std::shared_ptr<State> state_;
+};
+
+struct BooleanOriginalsCaptureReply final {
+    PairStatus status = PairStatus::Refused;
+    PairRefusal refusal = PairRefusal::UnsupportedSource;
+    std::shared_ptr<const BooleanOriginalsCapture> capture;
+};
+
+struct BooleanOriginalsPrepareReply final {
+    PairStatus status = PairStatus::Refused;
+    PairRefusal refusal = PairRefusal::UnsupportedSource;
+    std::shared_ptr<const BooleanOriginalsPrepared> prepared;
 };
 
 const char* RefusalCode(Refusal) noexcept;

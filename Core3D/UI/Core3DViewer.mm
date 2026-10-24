@@ -3343,6 +3343,98 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
                     || state.entityIdentifier != item.entityIdentifier) {
                     (void)traceRefusal("committed-state", true); return false;
                 }
+                OcctObjectVisibilityState visibility;
+                if (!myDoc->CaptureObjectVisibilityStateForLabel(label, visibility)) {
+                    (void)traceRefusal("committed-visibility", true); return false;
+                }
+                if (!visibility.IsEffectivelyVisible()) {
+                    // The document command already committed the visibility
+                    // attribute. Reconcile only its exact AIS object; no browser
+                    // command, new document edit or hidden selection is created.
+                    Handle(AIS_Shape) hidden;
+                    auto previous = stale.end();
+                    if (current != displayed.end()) hidden = current->second;
+                    if (!item.previousShape.IsNull()) {
+                        for (auto candidate = stale.begin(); candidate != stale.end(); ++candidate) {
+                            if (!(*candidate)->Shape().IsEqual(item.previousShape)) continue;
+                            if (!hidden.IsNull() || previous != stale.end()) {
+                                (void)traceRefusal("hidden-presentation-identity", true);
+                                return false;
+                            }
+                            previous = candidate;
+                        }
+                    }
+                    if (previous != stale.end()) hidden = *previous;
+                    std::vector<Handle(SelectMgr_EntityOwner)> removedOwners;
+                    std::vector<Handle(SelectMgr_EntityOwner)> survivors;
+                    for (myContext->InitSelected(); myContext->MoreSelected();
+                         myContext->NextSelected()) {
+                        if (removedOwners.size() + survivors.size() >= 50000) {
+                            (void)traceRefusal("hidden-selection-bounds", true); return false;
+                        }
+                        const auto owner = myContext->SelectedOwner();
+                        if (owner.IsNull()) {
+                            (void)traceRefusal("hidden-selection-owner", true); return false;
+                        }
+                        const auto selected = Handle(AIS_Shape)::DownCast(
+                            myContext->SelectedInteractive());
+                        if ((!hidden.IsNull() && owner->Selectable() == hidden)
+                            || (!selected.IsNull() && myDoc->ShapeLabel(selected).IsEqual(label))) {
+                            if (hidden.IsNull() || owner->Selectable() != hidden) {
+                                (void)traceRefusal("hidden-selection-identity", true); return false;
+                            }
+                            removedOwners.push_back(owner);
+                        } else {
+                            survivors.push_back(owner);
+                        }
+                    }
+                    if (!hidden.IsNull()) {
+                        if (_objectInteractor != nullptr
+                            && !_objectInteractor->_manipulator.IsNull()
+                            && _objectInteractor->_manipulatorSourceLabels.count(hidden.get()) != 0) {
+                            // Publication cannot cancel an unrelated active edit.
+                            if (_objectInteractor->_manipulatorGestureActive
+                                || _objectInteractor->_manipulator->HasActiveTransformation()) {
+                                (void)traceRefusal("hidden-active-manipulator", true); return false;
+                            }
+                            _objectInteractor->_manipulator->DeactivateCurrentMode();
+                            _objectInteractor->_manipulator->Detach();
+                            _objectInteractor->_manipulatorSourceLabels.clear();
+                        }
+                        for (const auto& owner : removedOwners)
+                            myContext->AddOrRemoveSelected(owner, Standard_False);
+                        // Even a visibility-only retained edit stages a newly
+                        // replayed root. Preserve the existing AIS geometry
+                        // refresh before removing it: the snapshot builder is
+                        // a read of triangulations, including hidden instances.
+                        // Standard_False defers the viewer update until removal.
+                        hidden->SetShape(shape);
+                        hidden->SetLocalTransformation(state.transform);
+                        myContext->Redisplay(hidden, Standard_False);
+                        myContext->RecomputeSelectionOnly(hidden);
+                        myContext->Remove(hidden, Standard_False);
+                        if (myContext->IsDisplayed(hidden) || myContext->IsSelected(hidden)) {
+                            (void)traceRefusal("hidden-presentation-removal", true); return false;
+                        }
+                        if (current != displayed.end()) displayed.erase(current);
+                        if (previous != stale.end()) stale.erase(previous);
+                    }
+                    // Exact survivor identity and order, including unrelated
+                    // subshape owners. No arbitrary selection loss is accepted.
+                    std::vector<Handle(SelectMgr_EntityOwner)> actual;
+                    for (myContext->InitSelected(); myContext->MoreSelected();
+                         myContext->NextSelected()) {
+                        if (actual.size() >= 50000) {
+                            (void)traceRefusal("hidden-selection-bounds", true); return false;
+                        }
+                        actual.push_back(myContext->SelectedOwner());
+                    }
+                    if (actual != survivors) {
+                        (void)traceRefusal("hidden-selection-survivors", true); return false;
+                    }
+                    myContext->ClearDetected(Standard_False);
+                    return true;
+                }
                 const bool created = current == displayed.end();
                 Handle(AIS_Shape) presentation;
                 if (!created) {
