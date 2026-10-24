@@ -1607,6 +1607,190 @@ NSData *CreateAssetAtlasDebugFixture(
     [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
     return result;
 }
+
+NSString *PaintedAtlasStageName(
+    OcctDebugPaintedAtlasBakeObservation::Stage value) {
+    using Stage = OcctDebugPaintedAtlasBakeObservation::Stage;
+    switch (value) {
+        case Stage::None: return @"None";
+        case Stage::Prepare: return @"Prepare";
+        case Stage::Commit: return @"Commit";
+    }
+}
+
+NSString *PaintedAtlasOwnerOutcomeName(
+    core3d::painted_atlas_bake::owner::Outcome value) {
+    using Outcome = core3d::painted_atlas_bake::owner::Outcome;
+#define CORE3D_OWNER_OUTCOME_NAME(name) case Outcome::name: return @#name
+    switch (value) {
+        CORE3D_OWNER_OUTCOME_NAME(Prepared);
+        CORE3D_OWNER_OUTCOME_NAME(Committed);
+        CORE3D_OWNER_OUTCOME_NAME(Refused);
+        CORE3D_OWNER_OUTCOME_NAME(StaleSource);
+        CORE3D_OWNER_OUTCOME_NAME(StaleBinding);
+        CORE3D_OWNER_OUTCOME_NAME(MissingResource);
+        CORE3D_OWNER_OUTCOME_NAME(ForeignResource);
+        CORE3D_OWNER_OUTCOME_NAME(OverBudget);
+        CORE3D_OWNER_OUTCOME_NAME(UnsupportedSurface);
+        CORE3D_OWNER_OUTCOME_NAME(OwnerMismatch);
+        CORE3D_OWNER_OUTCOME_NAME(Busy);
+        CORE3D_OWNER_OUTCOME_NAME(Malformed);
+        CORE3D_OWNER_OUTCOME_NAME(PersistenceFailure);
+        CORE3D_OWNER_OUTCOME_NAME(Absent);
+    }
+#undef CORE3D_OWNER_OUTCOME_NAME
+}
+
+NSString *PaintedAtlasDocumentOutcomeName(OcctPaintedAtlasBakeOutcome value) {
+    using Outcome = OcctPaintedAtlasBakeOutcome;
+#define CORE3D_DOCUMENT_OUTCOME_NAME(name) case Outcome::name: return @#name
+    switch (value) {
+        CORE3D_DOCUMENT_OUTCOME_NAME(Committed);
+        CORE3D_DOCUMENT_OUTCOME_NAME(Refused);
+        CORE3D_DOCUMENT_OUTCOME_NAME(StaleSource);
+        CORE3D_DOCUMENT_OUTCOME_NAME(StaleBinding);
+        CORE3D_DOCUMENT_OUTCOME_NAME(MissingResource);
+        CORE3D_DOCUMENT_OUTCOME_NAME(ForeignResource);
+        CORE3D_DOCUMENT_OUTCOME_NAME(OverBudget);
+        CORE3D_DOCUMENT_OUTCOME_NAME(UnsupportedSurface);
+        CORE3D_DOCUMENT_OUTCOME_NAME(OwnerMismatch);
+        CORE3D_DOCUMENT_OUTCOME_NAME(Busy);
+        CORE3D_DOCUMENT_OUTCOME_NAME(Malformed);
+        CORE3D_DOCUMENT_OUTCOME_NAME(PersistenceFailure);
+        CORE3D_DOCUMENT_OUTCOME_NAME(Absent);
+    }
+#undef CORE3D_DOCUMENT_OUTCOME_NAME
+}
+
+NSString *PaintedAtlasFailureSiteName(
+    core3d::decal_layer::bake::accounting::FailureSite value) {
+    using Site = core3d::decal_layer::bake::accounting::FailureSite;
+#define CORE3D_FAILURE_SITE_NAME(name) case Site::name: return @#name
+    switch (value) {
+        CORE3D_FAILURE_SITE_NAME(None);
+        CORE3D_FAILURE_SITE_NAME(ContextControl);
+        CORE3D_FAILURE_SITE_NAME(ProtectedSceneCopy);
+        CORE3D_FAILURE_SITE_NAME(StorageReserve);
+        CORE3D_FAILURE_SITE_NAME(StorageRelease);
+        CORE3D_FAILURE_SITE_NAME(CheckedProduct);
+        CORE3D_FAILURE_SITE_NAME(JobSeal);
+        CORE3D_FAILURE_SITE_NAME(JobConsume);
+        CORE3D_FAILURE_SITE_NAME(Cancellation);
+        CORE3D_FAILURE_SITE_NAME(ImageEncodedCopy);
+        CORE3D_FAILURE_SITE_NAME(ImageSourceMetadata);
+        CORE3D_FAILURE_SITE_NAME(ImageDecodedBacking);
+        CORE3D_FAILURE_SITE_NAME(ImageCreate);
+        CORE3D_FAILURE_SITE_NAME(ImageRGBA);
+        CORE3D_FAILURE_SITE_NAME(ImageBitmapContext);
+        CORE3D_FAILURE_SITE_NAME(SourceWorkingBytes);
+        CORE3D_FAILURE_SITE_NAME(SourceOriginalBytes);
+        CORE3D_FAILURE_SITE_NAME(SourceIdentityBytes);
+        CORE3D_FAILURE_SITE_NAME(SourceVectorStorage);
+        CORE3D_FAILURE_SITE_NAME(BindingReadScratch);
+        CORE3D_FAILURE_SITE_NAME(BindingReadMaterialize);
+        CORE3D_FAILURE_SITE_NAME(ResourceTableScratch);
+        CORE3D_FAILURE_SITE_NAME(ResourceSerializationScratch);
+        CORE3D_FAILURE_SITE_NAME(ResourceReadMaterialize);
+        CORE3D_FAILURE_SITE_NAME(CapturedSourceStorage);
+        CORE3D_FAILURE_SITE_NAME(AtlasReadScratch);
+        CORE3D_FAILURE_SITE_NAME(BakeReadScratch);
+        CORE3D_FAILURE_SITE_NAME(PriorAtlasBytes);
+        CORE3D_FAILURE_SITE_NAME(PriorBakeResources);
+        CORE3D_FAILURE_SITE_NAME(OrdinaryOwnerStorage);
+        CORE3D_FAILURE_SITE_NAME(OrdinaryMemberStorage);
+        CORE3D_FAILURE_SITE_NAME(OrdinaryCaptureStorage);
+        CORE3D_FAILURE_SITE_NAME(OrdinaryObservedStorage);
+        CORE3D_FAILURE_SITE_NAME(OrdinaryRoleStorage);
+        CORE3D_FAILURE_SITE_NAME(OrdinaryCanonicalEncoding);
+        CORE3D_FAILURE_SITE_NAME(OrdinaryRecordStorage);
+        CORE3D_FAILURE_SITE_NAME(ExportAtlasStorage);
+        CORE3D_FAILURE_SITE_NAME(ExportMemberStorage);
+        CORE3D_FAILURE_SITE_NAME(ExportCaptureStorage);
+        CORE3D_FAILURE_SITE_NAME(ExportObservedStorage);
+        CORE3D_FAILURE_SITE_NAME(ExportBakeStorage);
+        CORE3D_FAILURE_SITE_NAME(ExportCanonicalStorage);
+        CORE3D_FAILURE_SITE_NAME(CurrentObservedStorage);
+        CORE3D_FAILURE_SITE_NAME(CurrentOwnerStorage);
+        CORE3D_FAILURE_SITE_NAME(CurrentCaptureStorage);
+        CORE3D_FAILURE_SITE_NAME(CurrentResultBindings);
+        CORE3D_FAILURE_SITE_NAME(CurrentResultResources);
+        CORE3D_FAILURE_SITE_NAME(CurrentCloneBindings);
+        CORE3D_FAILURE_SITE_NAME(CurrentCloneResources);
+        CORE3D_FAILURE_SITE_NAME(CurrentnessLease);
+        CORE3D_FAILURE_SITE_NAME(PersistenceAggregateRead);
+        CORE3D_FAILURE_SITE_NAME(PersistenceAggregateLimit);
+        CORE3D_FAILURE_SITE_NAME(PersistenceResourceLocal);
+        CORE3D_FAILURE_SITE_NAME(PersistenceResourcePayload);
+        CORE3D_FAILURE_SITE_NAME(PersistenceCanonicalValidation);
+        CORE3D_FAILURE_SITE_NAME(PersistenceBakeCandidate);
+        CORE3D_FAILURE_SITE_NAME(PersistenceBakeTransients);
+        CORE3D_FAILURE_SITE_NAME(FaceImageValidationSource);
+        CORE3D_FAILURE_SITE_NAME(FaceImageValidationDecoded);
+        CORE3D_FAILURE_SITE_NAME(FaceImageValidationDecode);
+        CORE3D_FAILURE_SITE_NAME(BRepCensusMapScratch);
+        CORE3D_FAILURE_SITE_NAME(BRepCensusMeasure);
+        CORE3D_FAILURE_SITE_NAME(BRepCensusCopy);
+        CORE3D_FAILURE_SITE_NAME(ProtectedCaptureControl);
+        CORE3D_FAILURE_SITE_NAME(ProtectedAtlasRead);
+        CORE3D_FAILURE_SITE_NAME(ProtectedOccurrenceStorage);
+        CORE3D_FAILURE_SITE_NAME(ProtectedTraversalStorage);
+        CORE3D_FAILURE_SITE_NAME(ProtectedPathStorage);
+        CORE3D_FAILURE_SITE_NAME(ProtectedDefinitionStorage);
+        CORE3D_FAILURE_SITE_NAME(ProtectedReceiverStorage);
+        CORE3D_FAILURE_SITE_NAME(ProtectedFinishingStorage);
+        CORE3D_FAILURE_SITE_NAME(ProtectedSourceStorage);
+        CORE3D_FAILURE_SITE_NAME(ProtectedOwnerStorage);
+        CORE3D_FAILURE_SITE_NAME(ProtectedRecheckStorage);
+        CORE3D_FAILURE_SITE_NAME(ProtectedCorrespondenceStorage);
+        CORE3D_FAILURE_SITE_NAME(ProtectedEmittedStorage);
+        CORE3D_FAILURE_SITE_NAME(ProtectedEvidenceStorage);
+        CORE3D_FAILURE_SITE_NAME(ProtectedTerminalScene);
+        CORE3D_FAILURE_SITE_NAME(ProtectedTerminalControl);
+        CORE3D_FAILURE_SITE_NAME(ReceiverLayerStorage);
+        CORE3D_FAILURE_SITE_NAME(ReceiverBaseStorage);
+        CORE3D_FAILURE_SITE_NAME(ReceiverTriangleStorage);
+        CORE3D_FAILURE_SITE_NAME(ReceiverCoverageStorage);
+        CORE3D_FAILURE_SITE_NAME(ReceiverProofStorage);
+        CORE3D_FAILURE_SITE_NAME(ReceiverOutputStorage);
+        CORE3D_FAILURE_SITE_NAME(ReceiverPremultipliedStorage);
+        CORE3D_FAILURE_SITE_NAME(ReceiverClaimedStorage);
+        CORE3D_FAILURE_SITE_NAME(ReceiverEncoderScanlines);
+        CORE3D_FAILURE_SITE_NAME(ReceiverEncoderZlib);
+        CORE3D_FAILURE_SITE_NAME(ReceiverEncoderPNG);
+        CORE3D_FAILURE_SITE_NAME(ReceiverProductStorage);
+        CORE3D_FAILURE_SITE_NAME(PublicationAssembleWriter);
+        CORE3D_FAILURE_SITE_NAME(PublicationAssembleFaces);
+        CORE3D_FAILURE_SITE_NAME(PublicationValidationCopy);
+        CORE3D_FAILURE_SITE_NAME(PublicationValidationWriter);
+        CORE3D_FAILURE_SITE_NAME(PublicationPrivateVector);
+        CORE3D_FAILURE_SITE_NAME(PublicationPrivateStore);
+        CORE3D_FAILURE_SITE_NAME(PublicationPrivateLookup);
+        CORE3D_FAILURE_SITE_NAME(PublicationSharedKey);
+        CORE3D_FAILURE_SITE_NAME(PublicationSharedStore);
+        CORE3D_FAILURE_SITE_NAME(PublicationSharedLookup);
+        CORE3D_FAILURE_SITE_NAME(InstallIdentifier);
+        CORE3D_FAILURE_SITE_NAME(InstallTextureMap);
+        CORE3D_FAILURE_SITE_NAME(InstallTextureCopy);
+        CORE3D_FAILURE_SITE_NAME(InstallAppearance);
+        CORE3D_FAILURE_SITE_NAME(InstallCompaction);
+        CORE3D_FAILURE_SITE_NAME(TangentOutput);
+        CORE3D_FAILURE_SITE_NAME(TangentWorkspace);
+        CORE3D_FAILURE_SITE_NAME(DebugBRepCensusDebt);
+        CORE3D_FAILURE_SITE_NAME(DebugExactLimit);
+        CORE3D_FAILURE_SITE_NAME(DebugOneUnit);
+        CORE3D_FAILURE_SITE_NAME(DebugCheckedProduct);
+        CORE3D_FAILURE_SITE_NAME(DebugDuplicateJob);
+        CORE3D_FAILURE_SITE_NAME(DebugJobLimit);
+        CORE3D_FAILURE_SITE_NAME(DebugCopyOne);
+        CORE3D_FAILURE_SITE_NAME(DebugCopyTwo);
+        CORE3D_FAILURE_SITE_NAME(DebugShared);
+        CORE3D_FAILURE_SITE_NAME(DebugMove);
+        CORE3D_FAILURE_SITE_NAME(DebugScratch);
+        CORE3D_FAILURE_SITE_NAME(DebugWork);
+        CORE3D_FAILURE_SITE_NAME(Count);
+    }
+#undef CORE3D_FAILURE_SITE_NAME
+}
 } // namespace
 #endif
 
@@ -1618,6 +1802,30 @@ NSData *CreateAssetAtlasDebugFixture(
 }
 
 #if DEBUG
+- (NSDictionary<NSString *, NSString *> *)
+    debugLastE4PaintedAtlasBakeObservation {
+    GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)self.glController : nil;
+    const std::shared_ptr<core3d::Core3DViewer> viewer = gl ? gl.viewer : nullptr;
+    const Handle(OcctDocument) document = viewer
+        ? viewer->getDocument() : Handle(OcctDocument)();
+    if (document.IsNull()) return nil;
+    const auto observation = document->DebugLastPaintedAtlasBakeObservation();
+    if (!observation.observed) {
+        return @{@"status": @"no bake observed", @"stage": @"None",
+            @"ownerOutcome": @"None", @"documentOutcome": @"None",
+            @"failureSite": @"None"};
+    }
+    return @{@"status": @"bake observed",
+        @"stage": PaintedAtlasStageName(observation.stage),
+        @"ownerOutcome": observation.hasOwnerOutcome
+            ? PaintedAtlasOwnerOutcomeName(observation.ownerOutcome) : @"None",
+        @"documentOutcome": PaintedAtlasDocumentOutcomeName(
+            observation.documentOutcome),
+        @"failureSite": observation.observerBusy ? @"observerBusy"
+            : PaintedAtlasFailureSiteName(observation.failureSite)};
+}
+
 + (NSData *)debugAssetAtlasFixtureAssetData:(double)metersPerUnit {
     if (!NSThread.isMainThread || (metersPerUnit != 0.001 && metersPerUnit != 1.0))
         return nil;

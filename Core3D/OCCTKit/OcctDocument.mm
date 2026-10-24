@@ -30937,18 +30937,101 @@ OcctPaintedAtlasBakeOutcome E2bOutcome(
 }
 }
 
+#ifdef DEBUG
+namespace {
+thread_local bool gDebugPaintedAtlasCallerSettlementArmed = false;
+}
+
+extern "C" Standard_EXPORT bool
+Core3DDebugBeginPaintedAtlasCallerSettlementObservation() noexcept {
+    if (gDebugPaintedAtlasCallerSettlementArmed) return false;
+    gDebugPaintedAtlasCallerSettlementArmed = true;
+    core3d::decal_layer::bake::accounting::DebugBeginSettlementObservation();
+    return true;
+}
+
+extern "C" Standard_EXPORT bool
+Core3DDebugTakePaintedAtlasCallerSettlementObservationWasPreserved() noexcept {
+    if (!gDebugPaintedAtlasCallerSettlementArmed) return false;
+    gDebugPaintedAtlasCallerSettlementArmed = false;
+    const auto observation = core3d::decal_layer::bake::accounting::
+        DebugTakeSettlementObservation();
+    return observation.firstFailure == core3d::decal_layer::bake::accounting::
+            FailureSite::PersistenceResourceLocal
+        || observation.paintedBakeTransfers != 0;
+}
+#endif
+
 OcctPaintedAtlasBakeOutcome OcctDocument::BakePaintedAtlas(
     const core3d::asset_atlas::Key& atlas) noexcept {
     using namespace core3d::painted_atlas_bake;
-    if(![NSThread isMainThread]||myOcafDoc.IsNull())
+#ifdef DEBUG
+    myLastPaintedAtlasBakeObservation = {};
+    myLastPaintedAtlasBakeObservation.observed = true;
+    const auto recordWithoutOwner = [this](OcctPaintedAtlasBakeOutcome result) {
+        myLastPaintedAtlasBakeObservation.documentOutcome = result;
+        return result;
+    };
+#endif
+    if(![NSThread isMainThread]||myOcafDoc.IsNull()) {
+#ifdef DEBUG
+        return recordWithoutOwner(OcctPaintedAtlasBakeOutcome::Refused);
+#else
         return OcctPaintedAtlasBakeOutcome::Refused;
-    if(!myOcafDoc->HasOpenCommand())return OcctPaintedAtlasBakeOutcome::Busy;
+#endif
+    }
+    if(!myOcafDoc->HasOpenCommand()) {
+#ifdef DEBUG
+        return recordWithoutOwner(OcctPaintedAtlasBakeOutcome::Busy);
+#else
+        return OcctPaintedAtlasBakeOutcome::Busy;
+#endif
+    }
+#ifdef DEBUG
+    const bool observerBusy = gDebugPaintedAtlasCallerSettlementArmed;
+    if (!observerBusy)
+        core3d::decal_layer::bake::accounting::
+            DebugBeginSettlementObservation();
+    const auto record = [this, observerBusy](
+            OcctDebugPaintedAtlasBakeObservation::Stage stage,
+            owner::Outcome native) {
+        const auto result = E2bOutcome(native);
+        auto& observation = myLastPaintedAtlasBakeObservation;
+        observation.stage = stage;
+        observation.hasOwnerOutcome = true;
+        observation.observerBusy = observerBusy;
+        observation.ownerOutcome = native;
+        observation.documentOutcome = result;
+        if (!observerBusy)
+            observation.failureSite = core3d::decal_layer::bake::accounting::
+                DebugTakeSettlementObservation().firstFailure;
+        return result;
+    };
+#endif
     owner::Staging staging;
     auto outcome=owner::Prepare(staging,myOcafDoc,atlas);
-    if(outcome!=owner::Outcome::Prepared)return E2bOutcome(outcome);
+    if(outcome!=owner::Outcome::Prepared) {
+#ifdef DEBUG
+        return record(OcctDebugPaintedAtlasBakeObservation::Stage::Prepare,
+            outcome);
+#else
+        return E2bOutcome(outcome);
+#endif
+    }
     outcome=owner::Commit(staging,myOcafDoc);
+#ifdef DEBUG
+    return record(OcctDebugPaintedAtlasBakeObservation::Stage::Commit, outcome);
+#else
     return E2bOutcome(outcome);
+#endif
 }
+
+#ifdef DEBUG
+OcctDebugPaintedAtlasBakeObservation
+OcctDocument::DebugLastPaintedAtlasBakeObservation() const noexcept {
+    return myLastPaintedAtlasBakeObservation;
+}
+#endif
 
 struct OcctPaintedAtlasCurrentnessLease final {
     core3d::decal_layer::bake::accounting::Owner operation;

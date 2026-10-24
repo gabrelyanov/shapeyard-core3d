@@ -40,7 +40,13 @@
 #include "PaintedAtlasBakeDefinition.hxx"
 #include "TextReliefPersistence.hxx"
 namespace core3d::asset_atlas { struct Capture; struct Definition; struct Key; }
-namespace core3d::painted_atlas_bake::owner { struct CurrentnessResult; }
+namespace core3d::painted_atlas_bake::owner {
+enum class Outcome : std::uint8_t;
+struct CurrentnessResult;
+}
+namespace core3d::decal_layer::bake::accounting {
+enum class FailureSite : std::uint8_t;
+}
 namespace core3d::face_image::owner { enum class Outcome : std::uint8_t; struct Staging; }
 namespace core3d::face_image::persistence::bindings { enum class ReadState : int; }
 namespace core3d::text_relief::owner { struct PreparedHostPair; }
@@ -317,6 +323,24 @@ enum class OcctPaintedAtlasBakeOutcome : int {
 enum class OcctPaintedAtlasBakeCurrentness : int {
     Absent = 0, Current = 1, Stale = 2
 };
+
+#ifdef DEBUG
+//! Nonpersisted readback of the last ordinary painted-atlas bake call. This
+//! record preserves the native owner outcome before its staging is destroyed.
+struct OcctDebugPaintedAtlasBakeObservation final {
+    enum class Stage : std::uint8_t { None, Prepare, Commit };
+    bool observed = false;
+    bool hasOwnerOutcome = false;
+    bool observerBusy = false;
+    Stage stage = Stage::None;
+    core3d::painted_atlas_bake::owner::Outcome ownerOutcome =
+        static_cast<core3d::painted_atlas_bake::owner::Outcome>(0);
+    OcctPaintedAtlasBakeOutcome documentOutcome =
+        OcctPaintedAtlasBakeOutcome::Refused;
+    core3d::decal_layer::bake::accounting::FailureSite failureSite =
+        static_cast<core3d::decal_layer::bake::accounting::FailureSite>(0);
+};
+#endif
 
 struct OcctPaintedAtlasCurrentnessLease;
 
@@ -1862,6 +1886,10 @@ public:
         core3d::asset_atlas::Definition* record = nullptr) const noexcept;
     Standard_EXPORT OcctPaintedAtlasBakeOutcome BakePaintedAtlas(
         const core3d::asset_atlas::Key& atlas) noexcept;
+#ifdef DEBUG
+    Standard_EXPORT OcctDebugPaintedAtlasBakeObservation
+        DebugLastPaintedAtlasBakeObservation() const noexcept;
+#endif
     Standard_EXPORT OcctPaintedAtlasBakeCurrentness PaintedAtlasBakeCurrentness(
         const core3d::asset_atlas::Key& atlas,
         core3d::painted_atlas_bake::owner::CurrentnessResult* record = nullptr)
@@ -2231,6 +2259,7 @@ private:
   // Exact pointer created below and kept alive by myApp; no foreign downcast.
   core3d::debug::LiveObservedApplication* myObservedApplication = nullptr;
   std::shared_ptr<core3d::debug::LiveTransactionProbeState> myLiveProbe;
+  OcctDebugPaintedAtlasBakeObservation myLastPaintedAtlasBakeObservation;
 #endif
   std::shared_ptr<core3d::authority::NativeEditAuthority> myNativeAuthority;
   core3d::authority::NativeObservedApplication* myAuthorityApplication = nullptr;

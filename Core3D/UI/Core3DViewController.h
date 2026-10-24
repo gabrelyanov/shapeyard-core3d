@@ -715,6 +715,10 @@ __attribute__((objc_subclassing_restricted))
 - (NSNumber *)debugBakeE4PaintedAtlasForEntityIdentifier:
     (NSString *)entityIdentifier
     NS_SWIFT_NAME(debugBakeE4PaintedAtlas(entityIdentifier:));
+//! Read-only names from the last ordinary painted-atlas bake on this document.
+//! A fresh document reports status "no bake observed" and no synthetic bake.
+- (NSDictionary<NSString *, NSString *> *_Nullable)
+    debugLastE4PaintedAtlasBakeObservation;
 //! Installs the strict max-X two-layer/mask SYDL fixture on the saved atlas
 //! member's resolved max-X receiver; every physical layer corner is proved
 //! interior by the native classifier before the committed write, and the
