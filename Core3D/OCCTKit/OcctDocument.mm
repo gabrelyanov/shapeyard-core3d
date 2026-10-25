@@ -12241,7 +12241,9 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
                 stageFailure = ap::PairRefusal::AliasSource;
                 throw Standard_Failure("metadata stage");
             }
-            if (!RemoveShape(capture.sources[1].label)) {
+            // The captured Originals table now owns the tool material's
+            // provenance even after its last shape reference is consumed.
+            if (!RemoveShape(capture.sources[1].label, Standard_True)) {
                 stageFailure = ap::PairRefusal::StaleSource;
                 throw Standard_Failure("metadata or tool retirement stage");
             }
@@ -16848,6 +16850,11 @@ Standard_Boolean OcctDocument::IsEditableFreeSimpleDefinitionLabel(
 }
 
 Standard_Boolean OcctDocument::RemoveShape(const TDF_Label& label) {
+    return RemoveShape(label, Standard_False);
+}
+
+Standard_Boolean OcctDocument::RemoveShape(
+    const TDF_Label& label, const Standard_Boolean retainPreviousMaterial) {
     if (myOcafDoc.IsNull() || label.IsNull()
         || HasUnroutedRetainedDependent(label)) {
         return Standard_False;
@@ -16860,7 +16867,7 @@ Standard_Boolean OcctDocument::RemoveShape(const TDF_Label& label) {
     const Standard_Boolean didRemove =
         !shapeTool.IsNull()
         && shapeTool->RemoveShape(label, Standard_True);
-    if (didRemove && myOcafDoc->HasOpenCommand()
+    if (didRemove && !retainPreviousMaterial && myOcafDoc->HasOpenCommand()
         && !aPreviousMaterialLabel.IsNull()
         && XCAFDoc_DocumentTool::CheckVisMaterialTool(
             myOcafDoc->Main())) {
@@ -19256,6 +19263,234 @@ Standard_Boolean CaptureWholeObjectScalarAppearance(
     } catch (...) {output={};return Standard_False;}
 }
 } // namespace
+
+#if DEBUG
+namespace {
+std::vector<double> N05CMaterialWords(const Handle(XCAFDoc_VisMaterial)& material) {
+    if (material.IsNull()) return {};
+    const auto& p = material->PbrMaterial();
+    const auto& c = material->CommonMaterial();
+    std::vector<double> values{double(material->FaceCulling()),
+        double(material->AlphaMode()), material->AlphaCutOff(),
+        double(p.IsDefined), double(c.IsDefined)};
+    const auto rgb = [&](const Quantity_Color& color) {
+        values.push_back(color.Red()); values.push_back(color.Green());
+        values.push_back(color.Blue());
+    };
+    rgb(p.BaseColor.GetRGB()); values.push_back(p.BaseColor.Alpha());
+    for (int index = 0; index < 3; ++index) values.push_back(p.EmissiveFactor[index]);
+    values.push_back(p.Metallic); values.push_back(p.Roughness);
+    values.push_back(p.RefractionIndex);
+    rgb(c.AmbientColor); rgb(c.DiffuseColor); rgb(c.SpecularColor); rgb(c.EmissiveColor);
+    values.push_back(c.Shininess); values.push_back(c.Transparency);
+    return values;
+}
+
+bool N05CSameWords(const std::vector<double>& a, const std::vector<double>& b) {
+    return a.size() == b.size() && (a.empty()
+        || std::memcmp(a.data(), b.data(), a.size() * sizeof(double)) == 0);
+}
+}
+
+Standard_Integer OcctDocument::DebugInstallBooleanSourceMaterialCensus(
+    const TDF_Label& source, const TDF_Label& peer,
+    const Standard_Integer variant) noexcept {
+    if (![NSThread isMainThread]) return 0;
+    const auto abort = [&]() noexcept {
+        try { if (!myOcafDoc.IsNull() && myOcafDoc->HasOpenCommand())
+            myOcafDoc->AbortCommand(); } catch (...) {}
+        return 0;
+    };
+    try {
+        if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+            || source.IsNull() || peer.IsNull() || source.IsEqual(peer)
+            || source.Data() != myOcafDoc->GetData() || peer.Data() != myOcafDoc->GetData()
+            || !((variant >= 1 && variant <= 16) || (variant >= 100 && variant <= 103)))
+            return 0;
+        OcctPlainProfileOperationCapture ordinarySource, ordinaryPeer;
+        OcctExactLabelReceipt before, peerBefore;
+        if (!CapturePlainProfileOperationSource(source, ordinarySource)
+            || !CapturePlainProfileOperationSource(peer, ordinaryPeer)
+            || !CaptureExactFreeLabel(source, before)
+            || !CaptureExactFreeLabel(peer, peerBefore)
+            || before.appearance.materialLabel.IsNull()
+            || peerBefore.appearance.materialLabel.IsNull()
+            || !before.appearance.localPBR
+            || before.appearance.legacyPresent != std::array<bool, 2>{{false, false}}
+            || before.appearance.visualValues.size() != 29
+            || before.appearance.visualValues[3] != 1
+            || before.appearance.visualValues[4] != 1) return 0;
+        const bool shared = before.appearance.materialLabel.IsEqual(
+            peerBefore.appearance.materialLabel);
+        if ((variant == 1) != shared) return 0;
+        const auto scene = CapturePBRScalarState(source);
+        if (!scene) return 0;
+        const int undo = myOcafDoc->GetAvailableUndos();
+        const int redo = myOcafDoc->GetAvailableRedos();
+        const auto tool = XCAFDoc_DocumentTool::VisMaterialTool(myOcafDoc->Main());
+        const auto original = XCAFDoc_VisMaterialTool::GetShapeMaterial(source);
+        if (tool.IsNull() || original.IsNull()) return 0;
+        auto pbr = original->PbrMaterial();
+        auto common = original->CommonMaterial();
+        auto culling = original->FaceCulling();
+        auto alpha = original->AlphaMode();
+        auto cutoff = original->AlphaCutOff();
+        bool marker = true, reference = true;
+        switch (variant) {
+            case 1: break; // Only this branch may allocate one material label.
+            case 2: pbr.IsDefined = false; marker = false; break;
+            case 3: common.IsDefined = false; break;
+            case 4: marker = false; break;
+            case 5: culling = Graphic3d_TypeOfBackfacingModel_DoubleSided; break;
+            case 6: culling = Graphic3d_TypeOfBackfacingModel_BackCulled; break;
+            case 7: culling = Graphic3d_TypeOfBackfacingModel_FrontCulled; break;
+            case 8: alpha = Graphic3d_AlphaMode_BlendAuto; break;
+            case 9: alpha = Graphic3d_AlphaMode_Mask; break;
+            case 10: alpha = Graphic3d_AlphaMode_MaskBlend; break;
+            case 11: cutoff = 0.0f; break;
+            case 12: cutoff = 1.0f; break;
+            case 13: cutoff = 0.25f; break;
+            case 14: cutoff = 0.75f; break;
+            case 15:
+                pbr.EmissiveFactor = Graphic3d_Vec3(0.125f, 0.25f, 0.5f);
+                pbr.RefractionIndex = 1.75f;
+                common.AmbientColor.SetValues(0.125, 0.25, 0.5, Quantity_TOC_RGB);
+                common.DiffuseColor.SetValues(0.5, 0.125, 0.25, Quantity_TOC_RGB);
+                common.SpecularColor.SetValues(0.25, 0.5, 0.125, Quantity_TOC_RGB);
+                common.EmissiveColor.SetValues(0.0625, 0.125, 0.25, Quantity_TOC_RGB);
+                common.Shininess = 0.375f; common.Transparency = 0.625f;
+                break;
+            case 16: reference = false; marker = false; break;
+            case 100: pbr.IsDefined = false; common.IsDefined = false; marker = false; break;
+            case 101: reference = false; break;
+            case 102: pbr.IsDefined = false; break;
+            case 103: cutoff = std::numeric_limits<float>::quiet_NaN(); break;
+            default: return 0;
+        }
+        Handle(XCAFDoc_VisMaterial) requested = new XCAFDoc_VisMaterial();
+        requested->SetPbrMaterial(pbr); requested->SetCommonMaterial(common);
+        requested->SetFaceCulling(culling); requested->SetAlphaMode(alpha, cutoff);
+        const auto words = N05CMaterialWords(requested);
+        OcctScalarAppearanceState expectedAppearance = before.appearance;
+        expectedAppearance.localPBR = marker;
+        expectedAppearance.visualValues = reference ? words : std::vector<double>{};
+        if (!reference) expectedAppearance.materialLabel.Nullify();
+
+        myOcafDoc->NewCommand();
+        if (!myOcafDoc->HasOpenCommand()) return 0;
+        TDF_Label materialLabel = before.appearance.materialLabel;
+        if (variant == 1) {
+            materialLabel = tool->AddMaterial(requested, TCollection_AsciiString("Shapeyard PBR"));
+            if (materialLabel.IsNull() || materialLabel.IsEqual(before.appearance.materialLabel))
+                return abort();
+            TDataStd_Integer::Set(materialLabel, OwnedPBRMaterialDefinitionAttributeID(), 1);
+            tool->SetShapeMaterial(source, materialLabel);
+            expectedAppearance.materialLabel = materialLabel;
+        } else {
+            original->SetPbrMaterial(pbr); original->SetCommonMaterial(common);
+            original->SetFaceCulling(culling); original->SetAlphaMode(alpha, cutoff);
+            if (!reference) tool->UnSetShapeMaterial(source);
+            if (!marker && !source.ForgetAttribute(LocalPBRMaterialAttributeID())) return abort();
+        }
+        const auto stagedMaterial = tool->GetMaterial(materialLabel);
+        TDF_Label actualLink;
+        const bool linked = XCAFDoc_VisMaterialTool::GetShapeMaterial(source, actualLink);
+        Handle(TDataStd_Integer) actualMarker;
+        const bool marked = source.FindAttribute(LocalPBRMaterialAttributeID(), actualMarker);
+        if (!N05CSameWords(N05CMaterialWords(stagedMaterial), words)
+            || linked != reference || marked != marker
+            || (marked && (actualMarker.IsNull() || actualMarker->Get() != 1))
+            || (linked && !actualLink.IsEqual(materialLabel))) return abort();
+
+        if (variant >= 100) {
+            OcctScalarAppearanceState refusedAppearance;
+            OcctExactLabelReceipt refusedExact;
+            const bool refused = !CaptureWholeObjectScalarAppearance(
+                    myOcafDoc, source, refusedAppearance)
+                && !CaptureExactFreeLabel(source, refusedExact);
+            // This is the same exact-label admission called by production
+            // CaptureBooleanSources, not a codec-only negative fixture.
+            myOcafDoc->AbortCommand();
+            OcctExactLabelReceipt restored, restoredPeer;
+            const auto restoredScene = CapturePBRScalarState(source);
+            return refused && !myOcafDoc->HasOpenCommand()
+                && myOcafDoc->GetAvailableUndos() == undo
+                && myOcafDoc->GetAvailableRedos() == redo
+                && CaptureExactFreeLabel(source, restored) && before.IsEqual(restored)
+                && N05CSameWords(before.appearance.visualValues, restored.appearance.visualValues)
+                && CaptureExactFreeLabel(peer, restoredPeer) && peerBefore.IsEqual(restoredPeer)
+                && restoredScene && scene->equals(*restoredScene) ? 2 : 0;
+        }
+
+        OcctPBRScalarState expectedScene = *scene;
+        const auto sourceKey = PBRLabelKey(source);
+        const auto materialKey = PBRLabelKey(materialLabel);
+        std::size_t bytes = 0;
+        if (variant == 1) {
+            if (!expectedScene.materials.emplace(materialKey,
+                    scene->materials.at(PBRLabelKey(before.appearance.materialLabel))).second)
+                return abort();
+            expectedScene.links[sourceKey] = materialKey;
+        } else {
+            expectedScene.materials.at(materialKey).material = PBRMaterialBytes(requested, bytes);
+            if (!reference) expectedScene.links.erase(sourceKey);
+            PBRWriter attributes;
+            attributes.integer(marker); if (marker) attributes.integer(1);
+            attributes.integer(false); attributes.integer(false); // no texture markers
+            attributes.integer(false); attributes.integer(false); // no legacy tags
+            expectedScene.objectMaterialAttributes.at(sourceKey) = std::move(attributes.bytes);
+        }
+        const auto exactReadback = [&]() {
+            OcctExactLabelReceipt readback, readbackPeer;
+            if (!CaptureExactFreeLabel(source, readback)
+                || !CaptureExactFreeLabel(peer, readbackPeer)
+                || !peerBefore.IsEqual(readbackPeer)
+                || !N05CSameWords(peerBefore.appearance.visualValues,
+                    readbackPeer.appearance.visualValues)
+                || !expectedAppearance.IsEqual(readback.appearance)
+                || !N05CSameWords(expectedAppearance.visualValues, readback.appearance.visualValues))
+                return false;
+            readback.appearance = before.appearance;
+            const auto fullScene = CapturePBRScalarState(source);
+            return before.IsEqual(readback) && fullScene && expectedScene.equals(*fullScene);
+        };
+        // Two independent reads while the command is still abortable cover
+        // exact staged/read-back material words and every unrelated scene field.
+        if (!exactReadback() || !exactReadback()) return abort();
+        if (!myOcafDoc->CommitCommand() || myOcafDoc->HasOpenCommand()) return abort();
+        return myOcafDoc->GetAvailableUndos() == undo + 1 && exactReadback() ? 1 : 0;
+    } catch (...) { return abort(); }
+}
+
+Standard_Boolean OcctDocument::DebugReadBooleanOriginalsMaterials(
+    const TDF_Label& owner, core3d::part_boolean::OriginalsDefinition& definition,
+    std::vector<std::vector<double>>& nativeValues) const noexcept {
+    definition = {}; nativeValues.clear();
+    if (![NSThread isMainThread]) return Standard_False;
+    try {
+        core3d::composite_recipe::Record record;
+        if (myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+            || !core3d::composite_recipe::Read(myOcafDoc, owner, record) || !record.value)
+            return Standard_False;
+        const auto* feature = OriginalsFeature(record.value->definition);
+        if (!feature || !pb::DecodeOriginals(feature->parameters, definition)) return Standard_False;
+        for (const auto& row : definition.effective.materials) {
+            TDF_Label materialLabel;
+            TDF_Tool::Label(myOcafDoc->GetData(), row.labelEntry.c_str(), materialLabel, Standard_False);
+            const auto material = materialLabel.IsNull() ? Handle(XCAFDoc_VisMaterial)()
+                : XCAFDoc_VisMaterialTool::GetMaterial(materialLabel);
+            // Absence is descriptive evidence, not a successful match. Swift
+            // requires every native row to equal its complete 29-word table row.
+            if (material.IsNull()) std::fprintf(stderr,
+                "N05C_NATIVE_MATERIAL_MISSING ordinal=%u entry=%s frozenRows=%zu effectiveRows=%zu\n",
+                unsigned(row.ordinal), row.labelEntry.c_str(),
+                definition.originals.materials.size(), definition.effective.materials.size());
+            nativeValues.push_back(N05CMaterialWords(material));
+        }
+        return Standard_True;
+    } catch (...) { definition = {}; nativeValues.clear(); return Standard_False; }
+}
+#endif
 
 Standard_Boolean OcctDocument::CaptureScalarAppearanceForMeshCopy(
     const TDF_Label& label, OcctScalarAppearanceState& output) const noexcept {

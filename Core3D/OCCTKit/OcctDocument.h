@@ -116,6 +116,9 @@ struct StoreRead;
 const Standard_GUID& LODSetStoreAttributeID() noexcept;
 }
 namespace core3d::part_boolean::owner { class PartBooleanOwner; }
+#if DEBUG
+namespace core3d::part_boolean { struct OriginalsDefinition; }
+#endif
 namespace core3d::draft_faces::owner { class NativeOwner; }
 namespace core3d::retained_feature { class OcafOwnerService; }
 namespace core3d::composite_recipe { struct Payload; }
@@ -1281,6 +1284,14 @@ public:
   Standard_EXPORT Standard_Boolean DebugRewriteDefaultObjectTransformEncoding(
       const TDF_Label& label, std::uint8_t absentMask,
       std::uint8_t negativeZeroMask) noexcept;
+  //! D1248: material attributes only, on an ordinary pair before capture.
+  //! 1 = installed, 2 = capture refused and exact state restored, 0 = failure.
+  Standard_EXPORT Standard_Integer DebugInstallBooleanSourceMaterialCensus(
+      const TDF_Label& source, const TDF_Label& peer,
+      Standard_Integer variant) noexcept;
+  Standard_EXPORT Standard_Boolean DebugReadBooleanOriginalsMaterials(
+      const TDF_Label& owner, core3d::part_boolean::OriginalsDefinition& definition,
+      std::vector<std::vector<double>>& nativeValues) const noexcept;
 #endif
   //! Stamp every unmarked analytic definition produced by a fresh STEP
   //! transfer. This isolated-import schema operation requires zero user
@@ -2165,6 +2176,8 @@ public:
     void RemoveShape(Handle(AIS_Shape) object);
     void RemoveShape(Handle(AIS_InteractiveObject) object);
     Standard_Boolean RemoveShape(const TDF_Label& label);
+    Standard_Boolean RemoveShape(
+        const TDF_Label& label, Standard_Boolean retainPreviousMaterial);
     
     void ApplyTransforms();
     //! Bake app-owned object transforms into every free shape while observing

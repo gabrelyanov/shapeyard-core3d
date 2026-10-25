@@ -9,6 +9,7 @@
 #include "../OCCTKit/PartBooleanAnalyticPlacementProof.hxx"
 #include "../OCCTKit/PartBooleanCorrespondence.hxx"
 #include "../OCCTKit/CompositeRecipeCodec.hxx"
+#include "../OCCTKit/PartBooleanDefinition.hxx"
 #include <cstring>
 #endif
 
@@ -1424,6 +1425,71 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
     } catch (...) { return NO; }
 }
 
+- (NSInteger)debugInstallBooleanSourceMaterialCensus:(NSString *)entityIdentifier
+    peer:(NSString *)peer variant:(NSInteger)variant {
+    if (![NSThread isMainThread] || ![entityIdentifier isKindOfClass:NSString.class]
+        || ![peer isKindOfClass:NSString.class] || entityIdentifier.length == 0
+        || entityIdentifier.length > 128 || peer.length == 0 || peer.length > 128
+        || variant < 1 || variant > 103) return 0;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const auto owner = viewer ? viewer->getDocument() : Handle(OcctDocument)();
+        const TDF_Label source = ExactRoot(owner, entityIdentifier.UTF8String ?: "");
+        const TDF_Label other = ExactRoot(owner, peer.UTF8String ?: "");
+        if (source.IsNull() || other.IsNull()) return 0;
+        const auto result = owner->DebugInstallBooleanSourceMaterialCensus(
+            source, other, Standard_Integer(variant));
+        if (result == 1) { viewer->redrawDocument(); [gl requestRender]; }
+        return result;
+    } catch (...) { return 0; }
+}
+
+- (NSDictionary<NSString *, id> *)debugBooleanOriginalsMaterialMetadata:
+    (NSString *)entityIdentifier {
+    if (![NSThread isMainThread] || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128) return nil;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const auto owner = viewer ? viewer->getDocument() : Handle(OcctDocument)();
+        const TDF_Label label = ExactRoot(owner, entityIdentifier.UTF8String ?: "");
+        core3d::part_boolean::OriginalsDefinition definition;
+        std::vector<std::vector<double>> native;
+        if (label.IsNull() || !owner->DebugReadBooleanOriginalsMaterials(label, definition, native))
+            return nil;
+        const auto table = [](const auto& state) -> NSDictionary * {
+            NSMutableArray *entries = [NSMutableArray array];
+            NSMutableArray *rows = [NSMutableArray array];
+            NSMutableArray *references = [NSMutableArray array];
+            NSMutableArray *flags = [NSMutableArray array];
+            for (const auto& row : state.materials) {
+                [entries addObject:[NSString stringWithUTF8String:row.labelEntry.c_str()]];
+                std::vector<double> values{double(row.faceCulling), double(row.alphaMode),
+                    row.alphaCutoff, double(row.pbrDefined), double(row.commonDefined)};
+                values.insert(values.end(), row.pbr.begin(), row.pbr.end());
+                values.insert(values.end(), row.common.begin(), row.common.end());
+                [rows addObject:[NSData dataWithBytes:values.data() length:values.size() * sizeof(double)]];
+            }
+            for (const auto& input : state.inputs) {
+                const auto& a = input.metadata.appearance;
+                [references addObject:@(a.material ? int(*a.material) : -1)];
+                [flags addObject:@[@(a.legacyMaterialPresent), @(a.legacyColorPresent),
+                    @(a.localPBRMarkerPresent), @(a.legacyMaterial), @(a.legacyColor)]];
+            }
+            return @{ @"entries": entries, @"rows": rows,
+                @"references": references, @"flags": flags };
+        };
+        NSMutableArray *nativeRows = [NSMutableArray array];
+        for (const auto& values : native)
+            [nativeRows addObject:[NSData dataWithBytes:values.data() length:values.size() * sizeof(double)]];
+        return @{ @"original": table(definition.originals),
+            @"effective": table(definition.effective), @"nativeRows": nativeRows };
+    } catch (...) { return nil; }
+}
+
 - (NSDictionary<NSString *, id> *)debugBooleanSourceMetadata:
     (NSArray<NSString *> *)entityIdentifiers {
     if (![NSThread isMainThread]
@@ -1442,6 +1508,8 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
         NSMutableArray *materialEntries = [NSMutableArray array];
         NSMutableArray<NSNumber *> *legacyMaterial = [NSMutableArray array];
         NSMutableArray<NSNumber *> *legacyColor = [NSMutableArray array];
+        NSMutableArray<NSNumber *> *legacyMaterialValues = [NSMutableArray array];
+        NSMutableArray<NSNumber *> *legacyColorValues = [NSMutableArray array];
         NSMutableArray<NSNumber *> *localPBR = [NSMutableArray array];
         NSMutableArray<NSData *> *materialValues = [NSMutableArray array];
         std::vector<TDF_Label> labels;
@@ -1474,6 +1542,8 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
             labels.push_back(exact.appearance.materialLabel);
             [legacyMaterial addObject:@(exact.appearance.legacyPresent[0])];
             [legacyColor addObject:@(exact.appearance.legacyPresent[1])];
+            [legacyMaterialValues addObject:@(exact.appearance.legacyValues[0])];
+            [legacyColorValues addObject:@(exact.appearance.legacyValues[1])];
             [localPBR addObject:@(exact.appearance.localPBR)];
             [materialValues addObject:[NSData dataWithBytes:exact.appearance.visualValues.data()
                 length:exact.appearance.visualValues.size() * sizeof(double)]];
@@ -1483,6 +1553,7 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
         return @{ @"presenceMasks": presence, @"scalarBits": scalarBits,
             @"materialEntries": materialEntries, @"legacyMaterialPresent": legacyMaterial,
             @"legacyColorPresent": legacyColor, @"localPBRMarkerPresent": localPBR,
+            @"legacyMaterialValues": legacyMaterialValues, @"legacyColorValues": legacyColorValues,
             @"materialValues": materialValues, @"sameMaterialLabel": @(sameMaterial) };
     } catch (...) { return nil; }
 }

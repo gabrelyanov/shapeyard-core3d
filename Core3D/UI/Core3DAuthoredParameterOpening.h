@@ -394,6 +394,12 @@ __attribute__((objc_subclassing_restricted))
 - (NSDictionary<NSString *, id> *_Nullable)debugBooleanSourceMetadata:
     (NSArray<NSString *> *)entityIdentifiers
     NS_SWIFT_NAME(debugBooleanSourceMetadata(entityIdentifiers:));
+- (NSInteger)debugInstallBooleanSourceMaterialCensus:(NSString *)entityIdentifier
+    peer:(NSString *)peer variant:(NSInteger)variant
+    NS_SWIFT_NAME(debugInstallBooleanSourceMaterialCensus(entityIdentifier:peer:variant:));
+- (NSDictionary<NSString *, id> *_Nullable)debugBooleanOriginalsMaterialMetadata:
+    (NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugBooleanOriginalsMaterialMetadata(entityIdentifier:));
 #endif
 //! Capture requires the exact selected object and caller-observed scene. It is
 //! read-only and refuses every unsupported carrier rather than dropping data.
