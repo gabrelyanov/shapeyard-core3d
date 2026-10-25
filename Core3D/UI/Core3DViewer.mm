@@ -37,6 +37,7 @@
 #include "../OCCTKit/VariableRadiusFilletNativeOwner.hxx"
 #if DEBUG
 // R179/D249 diagnostic-only include. Never compiled into Release.
+#include "../OCCTKit/AuthoredParameterNativeOwner.hxx"
 #include "../OCCTKit/GeneralLoftPersistence.hxx"
 #endif
 
@@ -2866,6 +2867,18 @@ struct State final {
 #endif
 };
 } // namespace native_opening::detail
+
+#if DEBUG
+bool core3d::authored_parameter::debug::
+ConsumePairCreationPublicationOwnerFault(
+    const std::shared_ptr<PairCreationStageFault>& fault) noexcept {
+    // This is intentionally owned by the publisher translation unit. The
+    // caller reaches it only after all document readback checks and before
+    // closing the command, so a hit is still a known-abort outcome and can
+    // never enqueue or publish a late presentation plan.
+    return fault && fault->consumeAt(PairCreationFaultSite::PublicationOwner);
+}
+#endif
 
 namespace {
 bool SameElement(const scene::ElementIdentifier& a,

@@ -146,6 +146,8 @@ namespace core3d::debug { class RetainedEdgeTreatmentStageFault; }
 #if DEBUG
 namespace core3d::authored_parameter::debug {
 class AuthoredBooleanStageFault;
+class PairCreationStageFault;
+enum class PairCreationFaultSite : std::uint8_t;
 struct AuthoredBooleanObservation;
 }
 #endif
@@ -1740,6 +1742,13 @@ public:
     ApplyBooleanSources(
         const std::shared_ptr<const core3d::authored_parameter::PairPrepared>& prepared,
         std::uint32_t viewportWidth, std::uint32_t viewportHeight) noexcept;
+#if DEBUG
+    Standard_EXPORT std::shared_ptr<
+        core3d::authored_parameter::debug::PairCreationStageFault>
+    DebugArmBooleanPairCreationFault(
+        const std::shared_ptr<const core3d::authored_parameter::PairPrepared>& prepared,
+        core3d::authored_parameter::debug::PairCreationFaultSite site) noexcept;
+#endif
     //! Capture one current SYPB/4 owner without projecting mutation authority
     //! through its descriptive bytes.
     Standard_EXPORT core3d::authored_parameter::BooleanOriginalsCaptureReply

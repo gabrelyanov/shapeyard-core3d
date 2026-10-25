@@ -398,6 +398,51 @@ struct PairApplyReply final {
     std::optional<PairConsumptionReceipt> receipt;
 };
 
+#if DEBUG
+namespace debug {
+
+//! N06 creation-only one-shot sites. Unlike AuthoredBooleanFaultSite these
+//! belong to the two-live-source creation transaction and can never be armed
+//! for an existing-result edit.
+enum class PairCreationFaultSite : std::uint8_t {
+    AfterTargetShapeWrite = 0,
+    AfterCompositeRecordWrite = 1,
+    AfterSourceBindingsWrite = 2,
+    AfterMetadataWrite = 3,
+    AfterToolRemoval = 4,
+    AfterRecordReadback = 5,
+    AfterBytesReadback = 6,
+    AfterShapeReadback = 7,
+    AfterSemanticReadback = 8,
+    AfterToolRemovalReadback = 9,
+    PublicationOwner = 10,
+    HistorySaturation = 11,
+};
+
+class PairCreationStageFault final {
+public:
+    explicit PairCreationStageFault(PairCreationFaultSite site) noexcept
+        : site_(site) {}
+    PairCreationFaultSite site() const noexcept { return site_; }
+    std::uint32_t hits() const noexcept { return hits_.load(); }
+    bool consumeAt(PairCreationFaultSite site) noexcept {
+        if (site != site_) return false;
+        std::uint32_t expected = 0;
+        return hits_.compare_exchange_strong(expected, 1);
+    }
+private:
+    PairCreationFaultSite site_;
+    std::atomic<std::uint32_t> hits_{0};
+};
+
+//! Implemented by the publication owner in Core3DViewer.mm so N06 proves a
+//! distinct creation-publication site instead of relabelling a document site.
+bool ConsumePairCreationPublicationOwnerFault(
+    const std::shared_ptr<PairCreationStageFault>& fault) noexcept;
+
+} // namespace debug
+#endif
+
 //! Closed edit vocabulary for one retained SYPB/4 owner. Values never carry
 //! replacement source bytes, identities, role maps, labels, or a command
 //! lease. The selected arm is validated again during detached preparation.

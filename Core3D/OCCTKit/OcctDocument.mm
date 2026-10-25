@@ -11068,6 +11068,10 @@ struct core3d::authored_parameter::PairPrepared::State final {
     TopoDS_Shape analyticResult;
     core3d::authored_parameter::PairObservation observation;
     mutable std::atomic_bool committed{false};
+#if DEBUG
+    mutable std::shared_ptr<
+        core3d::authored_parameter::debug::PairCreationStageFault> debugFault;
+#endif
 };
 
 struct core3d::authored_parameter::BooleanOriginalsCapture::State final {
@@ -12127,6 +12131,34 @@ core3d::authored_parameter::PairObservationReply OcctDocument::ObserveBooleanSou
     } catch (...) { return PairObserveRefused(PairRefusal::BadEncoding); }
 }
 
+#if DEBUG
+std::shared_ptr<core3d::authored_parameter::debug::PairCreationStageFault>
+OcctDocument::DebugArmBooleanPairCreationFault(
+    const std::shared_ptr<const core3d::authored_parameter::PairPrepared>& prepared,
+    core3d::authored_parameter::debug::PairCreationFaultSite site) noexcept {
+    namespace debug = core3d::authored_parameter::debug;
+    try {
+        if (![NSThread isMainThread] || !prepared || !prepared->state_
+            || !prepared->state_->capture || !prepared->state_->capture->state_
+            || prepared->state_->capture->state_->owner != this
+            || prepared->state_->committed.load() || prepared->state_->debugFault
+            || std::uint8_t(site)
+                > std::uint8_t(debug::PairCreationFaultSite::HistorySaturation))
+            return {};
+        auto fault = std::make_shared<debug::PairCreationStageFault>(site);
+        if (site == debug::PairCreationFaultSite::HistorySaturation) {
+            const Standard_Integer undos = myOcafDoc->GetAvailableUndos();
+            if (undos <= 0) return {};
+            myOcafDoc->SetUndoLimit(undos);
+            if (myOcafDoc->GetUndoLimit() != undos
+                || myOcafDoc->GetAvailableUndos() != undos) return {};
+        }
+        prepared->state_->debugFault = fault;
+        return fault;
+    } catch (...) { return {}; }
+}
+#endif
+
 core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
     const std::shared_ptr<const core3d::authored_parameter::PairPrepared>& prepared,
     std::uint32_t viewportWidth, std::uint32_t viewportHeight) noexcept {
@@ -12152,6 +12184,18 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
             return refuse(ap::PairRefusal::StaleSource);
         if (!capture.context || viewportWidth == 0 || viewportHeight == 0)
             return refuse(ap::PairRefusal::BadEncoding);
+#if DEBUG
+        const auto debugFault = state.debugFault;
+        const auto debugFailAt = [&](ap::debug::PairCreationFaultSite site) {
+            return debugFault && debugFault->consumeAt(site);
+        };
+        if (debugFault
+            && debugFault->site() == ap::debug::PairCreationFaultSite::HistorySaturation
+            && myOcafDoc->GetUndoLimit() > 0
+            && myOcafDoc->GetAvailableUndos() >= myOcafDoc->GetUndoLimit()
+            && debugFailAt(ap::debug::PairCreationFaultSite::HistorySaturation))
+            return refuse(ap::PairRefusal::BadEncoding);
+#endif
 
         auto payload = std::make_shared<cr::Payload>();
         payload->definition.schemaVersion = 3;
@@ -12218,12 +12262,22 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
             const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
             if (shapes.IsNull()) throw Standard_Failure("missing shape tool");
             shapes->SetShape(capture.sources[0].label, result);
+#if DEBUG
+            if (debugFailAt(ap::debug::PairCreationFaultSite::AfterTargetShapeWrite))
+                throw Standard_Failure("debug pair target shape fault");
+#endif
             capture.sources[0].recordLabel.ForgetAllAttributes(Standard_True);
             if (!cr::Attribute::StageIndependentClone(myOcafDoc,
                     capture.sources[0].label, result, payload)) {
                 stageFailure = ap::PairRefusal::UnsupportedSource;
                 throw Standard_Failure("composite owner stage");
             }
+#if DEBUG
+            if (debugFailAt(ap::debug::PairCreationFaultSite::AfterCompositeRecordWrite))
+                throw Standard_Failure("debug pair composite record fault");
+            if (debugFailAt(ap::debug::PairCreationFaultSite::AfterSourceBindingsWrite))
+                throw Standard_Failure("debug pair source bindings fault");
+#endif
 
             std::vector<OcctSavedGroup> groups = capture.groups.groups;
             for (auto& group : groups) {
@@ -12241,35 +12295,66 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
                 stageFailure = ap::PairRefusal::AliasSource;
                 throw Standard_Failure("metadata stage");
             }
+#if DEBUG
+            if (debugFailAt(ap::debug::PairCreationFaultSite::AfterMetadataWrite))
+                throw Standard_Failure("debug pair metadata fault");
+#endif
             // The captured Originals table now owns the tool material's
             // provenance even after its last shape reference is consumed.
             if (!RemoveShape(capture.sources[1].label, Standard_True)) {
                 stageFailure = ap::PairRefusal::StaleSource;
                 throw Standard_Failure("metadata or tool retirement stage");
             }
+#if DEBUG
+            if (debugFailAt(ap::debug::PairCreationFaultSite::AfterToolRemoval))
+                throw Standard_Failure("debug pair tool removal fault");
+#endif
             cr::Record readback;
             if (!cr::Read(myOcafDoc, capture.sources[0].label, readback)
                 || !readback.value) {
                 stageFailure = ap::PairRefusal::InvalidResult;
                 throw Standard_Failure("composite record readback");
             }
+#if DEBUG
+            if (debugFailAt(ap::debug::PairCreationFaultSite::AfterRecordReadback))
+                throw Standard_Failure("debug pair record readback fault");
+#endif
             if (readback.value->bytes != payload->bytes) {
                 stageFailure = ap::PairRefusal::UnprovedCorrespondence;
                 throw Standard_Failure("composite bytes readback");
             }
+#if DEBUG
+            if (debugFailAt(ap::debug::PairCreationFaultSite::AfterBytesReadback))
+                throw Standard_Failure("debug pair bytes readback fault");
+#endif
             if (!readback.current.IsEqual(result)) {
                 stageFailure = ap::PairRefusal::InvalidResult;
                 throw Standard_Failure("composite shape readback");
             }
+#if DEBUG
+            if (debugFailAt(ap::debug::PairCreationFaultSite::AfterShapeReadback))
+                throw Standard_Failure("debug pair shape readback fault");
+#endif
             if (!pb::owner::ValidateOriginalsRecord(myOcafDoc, readback)) {
                 stageFailure = ap::PairRefusal::BadEncoding;
                 throw Standard_Failure("composite semantic readback");
             }
+#if DEBUG
+            if (debugFailAt(ap::debug::PairCreationFaultSite::AfterSemanticReadback))
+                throw Standard_Failure("debug pair semantic readback fault");
+#endif
             if (shapes->IsShape(capture.sources[1].label)
                 || !XCAFDoc_ShapeTool::GetShape(capture.sources[1].label).IsNull()) {
                 stageFailure = ap::PairRefusal::SameSource;
                 throw Standard_Failure("composite readback");
             }
+#if DEBUG
+            if (debugFailAt(ap::debug::PairCreationFaultSite::AfterToolRemovalReadback))
+                throw Standard_Failure("debug pair removal readback fault");
+            if (debugFault
+                && ap::debug::ConsumePairCreationPublicationOwnerFault(debugFault))
+                throw Standard_Failure("debug pair publication owner fault");
+#endif
             staged = true;
         } catch (...) {
             staged = false;

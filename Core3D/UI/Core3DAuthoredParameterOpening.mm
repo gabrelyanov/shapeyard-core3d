@@ -853,6 +853,32 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
 }
 @end
 
+#if DEBUG
+@interface Core3DDebugBooleanPairCreationFaultReceipt () {
+    std::shared_ptr<
+        core3d::authored_parameter::debug::PairCreationStageFault> _fault;
+}
+- (instancetype)initWithFault:(std::shared_ptr<
+    core3d::authored_parameter::debug::PairCreationStageFault>)fault;
+@end
+
+@implementation Core3DDebugBooleanPairCreationFaultReceipt
+- (instancetype)initWithFault:(std::shared_ptr<
+    core3d::authored_parameter::debug::PairCreationStageFault>)fault {
+    self = [super init];
+    if (!self || !fault) return nil;
+    _fault = std::move(fault);
+    return self;
+}
+- (Core3DDebugBooleanPairCreationFaultSite)site {
+    return _fault ? static_cast<Core3DDebugBooleanPairCreationFaultSite>(
+        _fault->site())
+        : Core3DDebugBooleanPairCreationFaultSiteAfterTargetShapeWrite;
+}
+- (NSUInteger)hitCount { return _fault ? _fault->hits() : 0; }
+@end
+#endif
+
 @interface Core3DBooleanPairCaptureResult ()
 - (instancetype)initWithStatus:(Core3DBooleanPairStatus)status
     refusal:(Core3DBooleanPairRefusal)refusal
@@ -1160,6 +1186,30 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
         return [[Core3DBooleanPairApplyResult alloc] initWithNative:reply];
     } catch (...) { return refused(PairRefusal::BadEncoding); }
 }
+
+#if DEBUG
+- (Core3DDebugBooleanPairCreationFaultReceipt *)
+    debugArmBooleanPairCreationFault:(Core3DBooleanPairPrepared *)prepared
+    site:(Core3DDebugBooleanPairCreationFaultSite)site {
+    if (![NSThread isMainThread]
+        || ![prepared isKindOfClass:Core3DBooleanPairPrepared.class]
+        || !prepared->_prepared
+        || site < Core3DDebugBooleanPairCreationFaultSiteAfterTargetShapeWrite
+        || site > Core3DDebugBooleanPairCreationFaultSiteHistorySaturation)
+        return nil;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        if (!viewer) return nil;
+        const auto fault = viewer->getDocument()->DebugArmBooleanPairCreationFault(
+            prepared->_prepared,
+            static_cast<core3d::authored_parameter::debug::PairCreationFaultSite>(site));
+        return fault ? [[Core3DDebugBooleanPairCreationFaultReceipt alloc]
+            initWithFault:fault] : nil;
+    } catch (...) { return nil; }
+}
+#endif
 
 - (Core3DBooleanPairCaptureResult *)openBooleanOriginalsEditorForEntityIdentifier:
     (NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected {

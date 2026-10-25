@@ -264,6 +264,31 @@ __attribute__((objc_subclassing_restricted))
 @end
 
 #if DEBUG
+//! N06 fixed creation-only fault sites. Values mirror the native enum and are
+//! stable test contract; they are not the existing-result SAB fault sites.
+typedef NS_ENUM(NSInteger, Core3DDebugBooleanPairCreationFaultSite) {
+    Core3DDebugBooleanPairCreationFaultSiteAfterTargetShapeWrite = 0,
+    Core3DDebugBooleanPairCreationFaultSiteAfterCompositeRecordWrite = 1,
+    Core3DDebugBooleanPairCreationFaultSiteAfterSourceBindingsWrite = 2,
+    Core3DDebugBooleanPairCreationFaultSiteAfterMetadataWrite = 3,
+    Core3DDebugBooleanPairCreationFaultSiteAfterToolRemoval = 4,
+    Core3DDebugBooleanPairCreationFaultSiteAfterRecordReadback = 5,
+    Core3DDebugBooleanPairCreationFaultSiteAfterBytesReadback = 6,
+    Core3DDebugBooleanPairCreationFaultSiteAfterShapeReadback = 7,
+    Core3DDebugBooleanPairCreationFaultSiteAfterSemanticReadback = 8,
+    Core3DDebugBooleanPairCreationFaultSiteAfterToolRemovalReadback = 9,
+    Core3DDebugBooleanPairCreationFaultSitePublicationOwner = 10,
+    Core3DDebugBooleanPairCreationFaultSiteHistorySaturation = 11,
+};
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DDebugBooleanPairCreationFaultReceipt : NSObject
+@property(nonatomic,readonly) Core3DDebugBooleanPairCreationFaultSite site;
+@property(nonatomic,readonly) NSUInteger hitCount;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 //! SAB-N1 fixed post-write fault sites for the authored-Boolean stage. The
 //! values mirror the native core3d::authored_parameter::debug site enum and
 //! are the test contract: never renumber or reuse them.
@@ -400,6 +425,12 @@ __attribute__((objc_subclassing_restricted))
 - (NSDictionary<NSString *, id> *_Nullable)debugBooleanOriginalsMaterialMetadata:
     (NSString *)entityIdentifier
     NS_SWIFT_NAME(debugBooleanOriginalsMaterialMetadata(entityIdentifier:));
+//! Arm one exact prepared creation authority. The receipt stays live across
+//! Apply so its hit count proves that the requested real site was reached.
+- (Core3DDebugBooleanPairCreationFaultReceipt *_Nullable)
+    debugArmBooleanPairCreationFault:(Core3DBooleanPairPrepared *)prepared
+    site:(Core3DDebugBooleanPairCreationFaultSite)site
+    NS_SWIFT_NAME(debugArmBooleanPairCreationFault(_:site:));
 #endif
 //! Capture requires the exact selected object and caller-observed scene. It is
 //! read-only and refuses every unsupported carrier rather than dropping data.
