@@ -128,6 +128,8 @@ class Capture;
 class Owner;
 class PairCapture;
 class PairPrepared;
+class PairRecovery;
+struct PairRecoveryState;
 class BooleanOriginalsCapture;
 class BooleanOriginalsPrepared;
 struct BooleanOriginalsEdit;
@@ -136,6 +138,7 @@ struct PairPrepareReply;
 struct PairObservationReply;
 struct BooleanOriginalsObservationReply;
 struct PairApplyReply;
+struct PairRecoveryReply;
 struct BooleanOriginalsCaptureReply;
 struct BooleanOriginalsPrepareReply;
 }
@@ -148,6 +151,8 @@ namespace core3d::authored_parameter::debug {
 class AuthoredBooleanStageFault;
 class PairCreationStageFault;
 enum class PairCreationFaultSite : std::uint8_t;
+class PairUnknownFault;
+enum class PairUnknownFaultSite : std::uint8_t;
 struct AuthoredBooleanObservation;
 }
 #endif
@@ -1742,12 +1747,30 @@ public:
     ApplyBooleanSources(
         const std::shared_ptr<const core3d::authored_parameter::PairPrepared>& prepared,
         std::uint32_t viewportWidth, std::uint32_t viewportHeight) noexcept;
+    //! Classify the actual live document as the exact pre-command two-source
+    //! state or the exact one-composite committed state. This never opens a
+    //! command, replays geometry, or invokes Undo/Redo. Ambiguity retains the
+    //! document recovery fence.
+    Standard_EXPORT core3d::authored_parameter::PairRecoveryReply
+    RecoverBooleanSources(
+        const std::shared_ptr<const core3d::authored_parameter::PairRecovery>& recovery)
+        noexcept;
 #if DEBUG
     Standard_EXPORT std::shared_ptr<
         core3d::authored_parameter::debug::PairCreationStageFault>
     DebugArmBooleanPairCreationFault(
         const std::shared_ptr<const core3d::authored_parameter::PairPrepared>& prepared,
         core3d::authored_parameter::debug::PairCreationFaultSite site) noexcept;
+    Standard_EXPORT std::shared_ptr<
+        core3d::authored_parameter::debug::PairUnknownFault>
+    DebugArmBooleanPairUnknownFault(
+        const std::shared_ptr<const core3d::authored_parameter::PairPrepared>& prepared,
+        core3d::authored_parameter::debug::PairUnknownFaultSite site) noexcept;
+    Standard_EXPORT std::shared_ptr<
+        core3d::authored_parameter::debug::PairUnknownFault>
+    DebugArmBooleanPairRecoveryCensusFailure(
+        const std::shared_ptr<const core3d::authored_parameter::PairRecovery>& recovery)
+        noexcept;
 #endif
     //! Capture one current SYPB/4 owner without projecting mutation authority
     //! through its descriptive bytes.
@@ -2391,6 +2414,10 @@ private:
   // A2-N2: the single document-owned authored-Boolean recovery authority,
   // nonpersisted and released with this native document session.
   std::unique_ptr<core3d::authored_recovery::Record> myAuthoredBooleanRecovery;
+  // N07: the single nonpersisted pair-creation recovery record. The public
+  // continuation is opaque and can identify only this exact shared state.
+  std::shared_ptr<core3d::authored_parameter::PairRecoveryState>
+      myBooleanPairRecovery;
   Standard_Size myMaximumSerializedTextureOccurrenceBytes;
   Standard_Size myMaximumDecodedTextureResourceBytes;
   Standard_Size myMaximumVisualMaterialDefinitions;

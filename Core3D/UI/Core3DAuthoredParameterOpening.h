@@ -263,6 +263,33 @@ __attribute__((objc_subclassing_restricted))
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+typedef NS_ENUM(NSInteger, Core3DBooleanPairRecoveryStatus) {
+    Core3DBooleanPairRecoveryStatusCommitted = 0,
+    Core3DBooleanPairRecoveryStatusPriorRestored,
+    Core3DBooleanPairRecoveryStatusRecoveryRequired,
+    Core3DBooleanPairRecoveryStatusNotOwner,
+};
+
+//! Host-owned continuation result for one unknown pair creation. A completed
+//! census reports the actual number of matching live composites (zero or one);
+//! ambiguity and foreign/replaced hosts retain no false terminal claim.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DBooleanPairRecoveryResult : NSObject
+@property(nonatomic,readonly) Core3DBooleanPairRecoveryStatus status;
+@property(nonatomic,readonly) Core3DBooleanPairRefusal refusal;
+@property(nonatomic,readonly) NSInteger liveCompositeCount;
+@property(nonatomic,strong,readonly,nullable) Core3DBooleanPairConsumptionReceipt *receipt;
+@property(nonatomic,readonly) BOOL recoveryLocked;
+#if DEBUG
+@property(nonatomic,readonly) NSUInteger censusReads;
+@property(nonatomic,readonly) NSUInteger censusFaultHits;
+@property(nonatomic,readonly) NSUInteger commandCalls;
+@property(nonatomic,readonly) NSUInteger replayCalls;
+#endif
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 #if DEBUG
 //! N06 fixed creation-only fault sites. Values mirror the native enum and are
 //! stable test contract; they are not the existing-result SAB fault sites.
@@ -284,6 +311,21 @@ typedef NS_ENUM(NSInteger, Core3DDebugBooleanPairCreationFaultSite) {
 __attribute__((objc_subclassing_restricted))
 @interface Core3DDebugBooleanPairCreationFaultReceipt : NSObject
 @property(nonatomic,readonly) Core3DDebugBooleanPairCreationFaultSite site;
+@property(nonatomic,readonly) NSUInteger hitCount;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+typedef NS_ENUM(NSInteger, Core3DDebugBooleanPairUnknownFaultSite) {
+    Core3DDebugBooleanPairUnknownFaultSitePostClose = 0,
+    Core3DDebugBooleanPairUnknownFaultSitePublication = 1,
+    Core3DDebugBooleanPairUnknownFaultSiteAbortClose = 2,
+    Core3DDebugBooleanPairUnknownFaultSiteRecoveryCensus = 3,
+};
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DDebugBooleanPairUnknownFaultReceipt : NSObject
+@property(nonatomic,readonly) Core3DDebugBooleanPairUnknownFaultSite site;
 @property(nonatomic,readonly) NSUInteger hitCount;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
@@ -379,6 +421,10 @@ __attribute__((objc_subclassing_restricted))
 - (Core3DBooleanPairApplyResult *)applyBooleanSources:
     (Core3DBooleanPairPrepared *)prepared expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(applyBooleanSources(_:expected:));
+//! Continue only the exact host-retained unknown creation. This performs a
+//! fresh document census and publication reconciliation, never another command.
+- (Core3DBooleanPairRecoveryResult *)recoverBooleanSources
+    NS_SWIFT_NAME(recoverBooleanSources());
 //! Open, prepare and apply one retained-v4 effective edit. The two opaque
 //! wrappers are native-issued and cannot be reconstructed from observations.
 - (Core3DBooleanPairCaptureResult *)openBooleanOriginalsEditorForEntityIdentifier:
@@ -431,6 +477,15 @@ __attribute__((objc_subclassing_restricted))
     debugArmBooleanPairCreationFault:(Core3DBooleanPairPrepared *)prepared
     site:(Core3DDebugBooleanPairCreationFaultSite)site
     NS_SWIFT_NAME(debugArmBooleanPairCreationFault(_:site:));
+//! N07: arm one genuine unknown boundary on this exact prepared authority.
+- (Core3DDebugBooleanPairUnknownFaultReceipt *_Nullable)
+    debugArmBooleanPairUnknownFault:(Core3DBooleanPairPrepared *)prepared
+    site:(NSNumber *)site
+    NS_SWIFT_NAME(debugArmBooleanPairUnknownFault(_:site:));
+//! Fail exactly one recovery only after its real live-document census ran.
+- (Core3DDebugBooleanPairUnknownFaultReceipt *_Nullable)
+    debugArmBooleanPairRecoveryCensusFailure
+    NS_SWIFT_NAME(debugArmBooleanPairRecoveryCensusFailure());
 #endif
 //! Capture requires the exact selected object and caller-observed scene. It is
 //! read-only and refuses every unsupported carrier rather than dropping data.

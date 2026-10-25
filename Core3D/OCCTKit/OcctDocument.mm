@@ -11071,6 +11071,29 @@ struct core3d::authored_parameter::PairPrepared::State final {
 #if DEBUG
     mutable std::shared_ptr<
         core3d::authored_parameter::debug::PairCreationStageFault> debugFault;
+    mutable std::shared_ptr<
+        core3d::authored_parameter::debug::PairUnknownFault> debugUnknownFault;
+#endif
+};
+
+struct core3d::authored_parameter::PairRecoveryState final {
+    OcctDocument* owner = nullptr;
+    Handle(TDocStd_Document) document;
+    Handle(TDF_Data) data;
+    std::shared_ptr<core3d::native_opening::Context> context;
+    std::shared_ptr<const core3d::authored_parameter::PairCapture> capture;
+    std::shared_ptr<core3d::authored_parameter::PairPrepared::State> prepared;
+    std::vector<std::uint8_t> expectedPayload;
+    TopoDS_Shape expectedResult;
+    OcctSavedGroupState expectedGroups;
+    std::string targetEntityIdentifier;
+    std::string toolEntityIdentifier;
+    core3d::retained_recipe::UUID feature{};
+    int undoDepthBefore = 0;
+    int redoDepthBefore = 0;
+#if DEBUG
+    std::shared_ptr<core3d::authored_parameter::debug::PairUnknownFault>
+        debugCensusFault;
 #endif
 };
 
@@ -11133,6 +11156,9 @@ core3d::authored_parameter::PairCapture::~PairCapture() = default;
 core3d::authored_parameter::PairPrepared::PairPrepared(
     std::shared_ptr<State> state) noexcept : state_(std::move(state)) {}
 core3d::authored_parameter::PairPrepared::~PairPrepared() = default;
+core3d::authored_parameter::PairRecovery::PairRecovery(
+    std::shared_ptr<PairRecoveryState> state) noexcept : state_(std::move(state)) {}
+core3d::authored_parameter::PairRecovery::~PairRecovery() = default;
 core3d::authored_parameter::BooleanOriginalsCapture::BooleanOriginalsCapture(
     std::shared_ptr<State> state) noexcept : state_(std::move(state)) {}
 core3d::authored_parameter::BooleanOriginalsCapture::~BooleanOriginalsCapture() = default;
@@ -12157,6 +12183,43 @@ OcctDocument::DebugArmBooleanPairCreationFault(
         return fault;
     } catch (...) { return {}; }
 }
+
+std::shared_ptr<core3d::authored_parameter::debug::PairUnknownFault>
+OcctDocument::DebugArmBooleanPairUnknownFault(
+    const std::shared_ptr<const core3d::authored_parameter::PairPrepared>& prepared,
+    core3d::authored_parameter::debug::PairUnknownFaultSite site) noexcept {
+    namespace debug = core3d::authored_parameter::debug;
+    try {
+        if (![NSThread isMainThread] || !prepared || !prepared->state_
+            || !prepared->state_->capture || !prepared->state_->capture->state_
+            || prepared->state_->capture->state_->owner != this
+            || prepared->state_->committed.load() || prepared->state_->debugFault
+            || prepared->state_->debugUnknownFault || myBooleanPairRecovery
+            || std::uint8_t(site)
+                > std::uint8_t(debug::PairUnknownFaultSite::AbortClose))
+            return {};
+        auto fault = std::make_shared<debug::PairUnknownFault>(site);
+        prepared->state_->debugUnknownFault = fault;
+        return fault;
+    } catch (...) { return {}; }
+}
+
+std::shared_ptr<core3d::authored_parameter::debug::PairUnknownFault>
+OcctDocument::DebugArmBooleanPairRecoveryCensusFailure(
+    const std::shared_ptr<const core3d::authored_parameter::PairRecovery>& recovery)
+    noexcept {
+    namespace debug = core3d::authored_parameter::debug;
+    try {
+        if (![NSThread isMainThread] || !recovery || !recovery->state_
+            || recovery->state_ != myBooleanPairRecovery
+            || recovery->state_->owner != this
+            || recovery->state_->debugCensusFault) return {};
+        auto fault = std::make_shared<debug::PairUnknownFault>(
+            debug::PairUnknownFaultSite::RecoveryCensus);
+        recovery->state_->debugCensusFault = fault;
+        return fault;
+    } catch (...) { return {}; }
+}
 #endif
 
 core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
@@ -12186,6 +12249,7 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
             return refuse(ap::PairRefusal::BadEncoding);
 #if DEBUG
         const auto debugFault = state.debugFault;
+        const auto debugUnknownFault = state.debugUnknownFault;
         const auto debugFailAt = [&](ap::debug::PairCreationFaultSite site) {
             return debugFault && debugFault->consumeAt(site);
         };
@@ -12247,6 +12311,57 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
                 payload->sourceShapes, replayBudget, replayStop, result)
             || result.IsNull()) return refuse(ap::PairRefusal::InvalidResult);
 
+        // Retain immutable before/candidate witnesses before the command is
+        // acquired. Recovery never trusts `committed`, the candidate replay, or
+        // a caller record as its classification: it rereads the live free-root
+        // document and compares that census to these two bounded witnesses.
+        if (myBooleanPairRecovery) return refuse(ap::PairRefusal::StaleSource);
+        auto recoveryState = std::make_shared<ap::PairRecoveryState>();
+        recoveryState->owner = this;
+        recoveryState->document = myOcafDoc;
+        recoveryState->data = myOcafDoc->GetData();
+        recoveryState->context = capture.context;
+        recoveryState->capture = state.capture;
+        recoveryState->prepared = prepared->state_;
+        recoveryState->expectedPayload = payload->bytes;
+        recoveryState->expectedResult = result;
+        recoveryState->expectedGroups = capture.groups;
+        recoveryState->targetEntityIdentifier =
+            capture.sources[0].entityIdentifier;
+        recoveryState->toolEntityIdentifier =
+            capture.sources[1].entityIdentifier;
+        recoveryState->feature = state.definition.feature;
+        recoveryState->undoDepthBefore = myOcafDoc->GetAvailableUndos();
+        recoveryState->redoDepthBefore = myOcafDoc->GetAvailableRedos();
+        for (auto& group : recoveryState->expectedGroups.groups) {
+            std::vector<TDF_Label> members;
+            for (const auto& member : group.members) {
+                const TDF_Label replacement = member.IsEqual(capture.sources[1].label)
+                    ? capture.sources[0].label : member;
+                if (std::none_of(members.begin(), members.end(),
+                        [&](const TDF_Label& value) {
+                            return value.IsEqual(replacement);
+                        })) members.push_back(replacement);
+            }
+            group.members = std::move(members);
+        }
+        myBooleanPairRecovery = recoveryState;
+        const auto retireRecovery = [&]() { myBooleanPairRecovery.reset(); };
+        const auto unknown = [&](std::uint8_t site) {
+            ap::PairApplyReply value;
+            value.status = ap::PairApplyStatus::OutcomeUnknown;
+            value.refusal = ap::PairRefusal::None;
+#if DEBUG
+            if (debugUnknownFault) (void)debugUnknownFault->consumeAt(
+                static_cast<ap::debug::PairUnknownFaultSite>(site));
+#else
+            (void)site;
+#endif
+            value.recovery = std::shared_ptr<const ap::PairRecovery>(
+                new ap::PairRecovery(recoveryState));
+            return value;
+        };
+
         const int beforeUndos = myOcafDoc->GetAvailableUndos();
         const TopoDS_Shape previousTarget = XCAFDoc_ShapeTool::GetShape(
             capture.sources[0].label);
@@ -12254,8 +12369,17 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
             capture.sources[1].label);
         auto lease = capture.context->beginCommandLease(
             capture.context->openingFence(), viewportWidth, viewportHeight);
-        if (!lease || !lease->ownsOpenCommand())
+        if (!lease || !lease->ownsOpenCommand()) {
+            retireRecovery();
             return refuse(ap::PairRefusal::StaleSource);
+        }
+#if DEBUG
+        if (debugUnknownFault
+            && (debugUnknownFault->site() == ap::debug::PairUnknownFaultSite::PostClose
+                || debugUnknownFault->site()
+                    == ap::debug::PairUnknownFaultSite::AbortClose))
+            capture.context->debugReportNextCloseUnproven();
+#endif
         bool staged = false;
         ap::PairRefusal stageFailure = ap::PairRefusal::BadEncoding;
         try {
@@ -12263,6 +12387,10 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
             if (shapes.IsNull()) throw Standard_Failure("missing shape tool");
             shapes->SetShape(capture.sources[0].label, result);
 #if DEBUG
+            if (debugUnknownFault
+                && debugUnknownFault->site()
+                    == ap::debug::PairUnknownFaultSite::AbortClose)
+                throw Standard_Failure("debug pair abort-close unknown fault");
             if (debugFailAt(ap::debug::PairCreationFaultSite::AfterTargetShapeWrite))
                 throw Standard_Failure("debug pair target shape fault");
 #endif
@@ -12361,10 +12489,18 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
         }
         if (!staged) {
             if (!lease->abort()) {
+#if DEBUG
+                if (debugUnknownFault
+                    && debugUnknownFault->site()
+                        == ap::debug::PairUnknownFaultSite::AbortClose)
+                    return unknown(2);
+#endif
+                retireRecovery();
                 reply.status = ap::PairApplyStatus::OutcomeUnknown;
                 reply.refusal = ap::PairRefusal::BadEncoding;
                 return reply;
             }
+            retireRecovery();
             return refuse(stageFailure);
         }
         if (!lease->commit()) {
@@ -12374,9 +12510,13 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
             publication.removed.push_back({capture.sources[1].entityIdentifier,
                                            previousTool});
             capture.context->retainUnprovenEdit(publication);
-            reply.status = ap::PairApplyStatus::OutcomeUnknown;
-            reply.refusal = ap::PairRefusal::None;
-            return reply;
+#if DEBUG
+            if (debugUnknownFault
+                && debugUnknownFault->site()
+                    == ap::debug::PairUnknownFaultSite::PostClose)
+                return unknown(0);
+#endif
+            return unknown(0);
         }
         cr::Record committed;
         if (myOcafDoc->HasOpenCommand()
@@ -12384,21 +12524,26 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
             || !cr::Read(myOcafDoc, capture.sources[0].label, committed)
             || !committed.value || committed.value->bytes != payload->bytes
             || !pb::owner::ValidateOriginalsRecord(myOcafDoc, committed)) {
-            reply.status = ap::PairApplyStatus::OutcomeUnknown;
-            reply.refusal = ap::PairRefusal::None;
-            return reply;
+            return unknown(0);
         }
         core3d::native_opening::CommittedEditPublication publication;
         publication.replaced.push_back({capture.sources[0].entityIdentifier,
                                         previousTarget});
         publication.removed.push_back({capture.sources[1].entityIdentifier,
                                        previousTool});
+#if DEBUG
+        if (debugUnknownFault
+            && debugUnknownFault->site()
+                == ap::debug::PairUnknownFaultSite::Publication) {
+            capture.context->retainUnprovenEdit(publication);
+            return unknown(1);
+        }
+#endif
         if (!capture.context->publishCommittedEdit(publication)) {
             capture.context->retainUnprovenEdit(publication);
-            reply.status = ap::PairApplyStatus::OutcomeUnknown;
-            reply.refusal = ap::PairRefusal::None;
-            return reply;
+            return unknown(1);
         }
+        retireRecovery();
         state.committed.store(true);
         reply.status = ap::PairApplyStatus::Committed;
         reply.refusal = ap::PairRefusal::None;
@@ -12407,7 +12552,152 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
             capture.sources[1].entityIdentifier, 1};
         NotifyChanges();
         return reply;
-    } catch (...) { return refuse(ap::PairRefusal::BadEncoding); }
+    } catch (...) {
+        myBooleanPairRecovery.reset();
+        return refuse(ap::PairRefusal::BadEncoding);
+    }
+}
+
+core3d::authored_parameter::PairRecoveryReply
+OcctDocument::RecoverBooleanSources(
+    const std::shared_ptr<const core3d::authored_parameter::PairRecovery>& recovery)
+    noexcept {
+    namespace ap = core3d::authored_parameter;
+    namespace cr = core3d::composite_recipe;
+    namespace pb = core3d::part_boolean;
+    ap::PairRecoveryReply reply;
+    try {
+        if (![NSThread isMainThread] || !recovery || !recovery->state_
+            || !myBooleanPairRecovery
+            || recovery->state_ != myBooleanPairRecovery
+            || recovery->state_->owner != this) return reply;
+        auto state = recovery->state_;
+        if (myOcafDoc.IsNull() || state->document != myOcafDoc
+            || state->data.IsNull() || state->data != myOcafDoc->GetData()
+            || myOcafDoc->HasOpenCommand() || !state->context || !state->capture
+            || !state->capture->state_ || state->capture->state_->owner != this) {
+            return reply;
+        }
+
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (shapes.IsNull()) {
+            reply.status = ap::PairRecoveryStatus::RecoveryRequired;
+            reply.refusal = ap::PairRefusal::BadEncoding;
+            return reply;
+        }
+        TDF_LabelSequence roots;
+        shapes->GetFreeShapes(roots);
+        if (roots.Length() < 0 || roots.Length() > 50000) {
+            reply.status = ap::PairRecoveryStatus::RecoveryRequired;
+            reply.refusal = ap::PairRefusal::Budget;
+            return reply;
+        }
+
+        // This is a new free-root census over the actual document. It does not
+        // consult PairPrepared::committed, an apply reply, or cached command
+        // readback. Duplicate identities and malformed candidate records are
+        // ambiguity, never absence or success.
+        TDF_Label target, tool;
+        Standard_Integer targetCount = 0, toolCount = 0, compositeCount = 0;
+        bool malformedCandidate = false;
+        for (Standard_Integer index = 1; index <= roots.Length(); ++index) {
+            const TDF_Label root = roots.Value(index);
+            if (root.IsNull() || root.Data() != myOcafDoc->GetData()) {
+                malformedCandidate = true; break;
+            }
+            const std::string entity = EntityIdentifierForLabel(root);
+            if (entity == state->targetEntityIdentifier) {
+                ++targetCount; target = root;
+            }
+            if (entity == state->toolEntityIdentifier) {
+                ++toolCount; tool = root;
+            }
+            cr::Record candidate;
+            if (cr::Read(myOcafDoc, root, candidate) && candidate.value) {
+                const auto* feature = OriginalsFeature(candidate.value->definition);
+                if (feature && feature->feature == state->feature) {
+                    ++compositeCount;
+                    if (candidate.value->bytes != state->expectedPayload
+                        || !pb::owner::ValidateOriginalsRecord(myOcafDoc, candidate))
+                        malformedCandidate = true;
+                }
+            }
+        }
+        reply.liveCompositeCount = compositeCount;
+#if DEBUG
+        reply.censusReads = 1;
+        if (state->debugCensusFault
+            && state->debugCensusFault->consumeAt(
+                ap::debug::PairUnknownFaultSite::RecoveryCensus)) {
+            reply.status = ap::PairRecoveryStatus::RecoveryRequired;
+            reply.refusal = ap::PairRefusal::UnprovedCorrespondence;
+            reply.censusFaultHits = 1;
+            return reply;
+        }
+#endif
+
+        const auto& capture = *state->capture->state_;
+        double unit = 0;
+        OcctSavedGroupState currentGroups;
+        const bool common = !malformedCandidate && targetCount == 1
+            && XCAFDoc_DocumentTool::GetLengthUnit(myOcafDoc, unit)
+            && unit == capture.metersPerUnit
+            && CaptureSavedGroups(currentGroups);
+        bool exactZero = false;
+        if (common && compositeCount == 0 && toolCount == 1
+            && target.IsEqual(capture.sources[0].label)
+            && tool.IsEqual(capture.sources[1].label)
+            && myOcafDoc->GetAvailableUndos() == state->undoDepthBefore
+            && myOcafDoc->GetAvailableRedos() == state->redoDepthBefore
+            && currentGroups.IsEqual(capture.groups)) {
+            OcctExactLabelReceipt targetExact, toolExact;
+            exactZero = PlainProfileOperationSourceCurrent(capture.sources[0])
+                && PlainProfileOperationSourceCurrent(capture.sources[1])
+                && ReadExactFreeLabel(capture.exact[0], targetExact)
+                && ReadExactFreeLabel(capture.exact[1], toolExact)
+                && targetExact.IsEqual(capture.exact[0])
+                && toolExact.IsEqual(capture.exact[1]);
+        }
+
+        bool exactOne = false;
+        if (common && compositeCount == 1 && toolCount == 0
+            && target.IsEqual(capture.sources[0].label)
+            && myOcafDoc->GetAvailableUndos() == state->undoDepthBefore + 1
+            && myOcafDoc->GetAvailableRedos() == 0
+            && currentGroups.IsEqual(state->expectedGroups)) {
+            cr::Record committed;
+            exactOne = cr::Read(myOcafDoc, target, committed)
+                && committed.value
+                && committed.value->bytes == state->expectedPayload
+                && !committed.current.IsNull()
+                && committed.current.IsEqual(state->expectedResult)
+                && pb::owner::ValidateOriginalsRecord(myOcafDoc, committed);
+        }
+        if (exactZero == exactOne || !state->context->reconcileRecovery(true)) {
+            reply.status = ap::PairRecoveryStatus::RecoveryRequired;
+            reply.refusal = ap::PairRefusal::UnprovedCorrespondence;
+            return reply;
+        }
+
+        state->prepared->committed.store(true);
+        reply.refusal = ap::PairRefusal::None;
+        if (exactOne) {
+            reply.status = ap::PairRecoveryStatus::Committed;
+            reply.receipt = ap::PairConsumptionReceipt{
+                state->targetEntityIdentifier, state->toolEntityIdentifier, 1};
+        } else {
+            reply.status = ap::PairRecoveryStatus::PriorRestored;
+            reply.receipt = ap::PairConsumptionReceipt{
+                state->targetEntityIdentifier, state->toolEntityIdentifier, 0};
+        }
+        myBooleanPairRecovery.reset();
+        NotifyChanges();
+        return reply;
+    } catch (...) {
+        reply.status = ap::PairRecoveryStatus::RecoveryRequired;
+        reply.refusal = ap::PairRefusal::BadEncoding;
+        return reply;
+    }
 }
 
 #if DEBUG
@@ -25763,6 +26053,7 @@ void OcctDocument::ReleaseTreatmentHistoryCompanions() noexcept {
         // A2-N2: the recovery record is bound to this session's live document
         // and never crosses a replacement or destruction.
         myAuthoredBooleanRecovery.reset();
+        myBooleanPairRecovery.reset();
     } catch (...) {}
 }
 

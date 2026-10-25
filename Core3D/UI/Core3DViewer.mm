@@ -2861,8 +2861,8 @@ struct State final {
     std::shared_ptr<const CommittedEditPublication> pendingPublication;
     std::uint64_t publicationContext = 0;
 #if DEBUG
-    // Row-265 lifecycle probe: real closes at this viewer's lease boundary
-    // that must be reported unproven after the real CommitCommand has run.
+    // Row-265/N07 lifecycle probe: real closes at this viewer's lease boundary
+    // that must be reported unproven after CommitCommand or AbortCommand ran.
     std::uint32_t debugUnprovenCloseResults = 0;
 #endif
 };
@@ -3195,6 +3195,18 @@ bool CommandLease::abort() noexcept {
     try {
         document_->AbortCommand();
         if (document_->HasOpenCommand()) { retainRecovery(); return false; }
+#if DEBUG
+        // N07 uses the same existing close-result boundary for a real abort:
+        // AbortCommand above has restored the document, then the lease reports
+        // that settlement unproven and retains this exact issuer's fence.
+        if (const auto state = context_ ? context_->state_.lock() : nullptr) {
+            if (state->debugUnprovenCloseResults > 0) {
+                --state->debugUnprovenCloseResults;
+                retainRecovery();
+                return false;
+            }
+        }
+#endif
         context_->finishMarker(marker_, false, false);
         settled_ = true;
         return true;

@@ -337,6 +337,22 @@ private:
     std::shared_ptr<State> state_;
 };
 
+//! Opaque continuation for the one pair-creation outcome whose close or
+//! publication is not yet proven. It carries no replay or command authority;
+//! only the issuing document may use it to identify its retained recovery
+//! record after all client capture/prepared wrappers have been released.
+struct PairRecoveryState;
+class PairRecovery final {
+public:
+    ~PairRecovery();
+    PairRecovery(const PairRecovery&) = delete;
+    PairRecovery& operator=(const PairRecovery&) = delete;
+private:
+    friend class ::OcctDocument;
+    explicit PairRecovery(std::shared_ptr<PairRecoveryState>) noexcept;
+    std::shared_ptr<PairRecoveryState> state_;
+};
+
 struct PairCaptureReply final {
     PairStatus status = PairStatus::Refused;
     PairRefusal refusal = PairRefusal::UnsupportedSource;
@@ -396,6 +412,30 @@ struct PairApplyReply final {
     PairApplyStatus status = PairApplyStatus::Refused;
     PairRefusal refusal = PairRefusal::UnsupportedSource;
     std::optional<PairConsumptionReceipt> receipt;
+    std::shared_ptr<const PairRecovery> recovery;
+};
+
+enum class PairRecoveryStatus : std::uint8_t {
+    Committed = 0,
+    PriorRestored,
+    RecoveryRequired,
+    NotOwner,
+};
+
+//! Result of a fresh live-document census. RecoveryRequired and NotOwner carry
+//! no receipt or delta. `liveCompositeCount` is -1 unless the independent
+//! free-root census completed; a terminal result is possible only for 0 or 1.
+struct PairRecoveryReply final {
+    PairRecoveryStatus status = PairRecoveryStatus::NotOwner;
+    PairRefusal refusal = PairRefusal::ForeignDocument;
+    Standard_Integer liveCompositeCount = -1;
+    std::optional<PairConsumptionReceipt> receipt;
+#if DEBUG
+    std::uint32_t censusReads = 0;
+    std::uint32_t censusFaultHits = 0;
+    std::uint32_t commandCalls = 0;
+    std::uint32_t replayCalls = 0;
+#endif
 };
 
 #if DEBUG
@@ -432,6 +472,30 @@ public:
     }
 private:
     PairCreationFaultSite site_;
+    std::atomic<std::uint32_t> hits_{0};
+};
+
+//! N07 one-shot faults are separate from N06's known-abort stage sites. Every
+//! site is consumed only after its real close/publication/census boundary ran.
+enum class PairUnknownFaultSite : std::uint8_t {
+    PostClose = 0,
+    Publication = 1,
+    AbortClose = 2,
+    RecoveryCensus = 3,
+};
+
+class PairUnknownFault final {
+public:
+    explicit PairUnknownFault(PairUnknownFaultSite site) noexcept : site_(site) {}
+    PairUnknownFaultSite site() const noexcept { return site_; }
+    std::uint32_t hits() const noexcept { return hits_.load(); }
+    bool consumeAt(PairUnknownFaultSite site) noexcept {
+        if (site != site_) return false;
+        std::uint32_t expected = 0;
+        return hits_.compare_exchange_strong(expected, 1);
+    }
+private:
+    PairUnknownFaultSite site_;
     std::atomic<std::uint32_t> hits_{0};
 };
 

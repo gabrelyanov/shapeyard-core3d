@@ -877,6 +877,28 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
 }
 - (NSUInteger)hitCount { return _fault ? _fault->hits() : 0; }
 @end
+
+@interface Core3DDebugBooleanPairUnknownFaultReceipt () {
+    std::shared_ptr<core3d::authored_parameter::debug::PairUnknownFault> _fault;
+}
+- (instancetype)initWithFault:(std::shared_ptr<
+    core3d::authored_parameter::debug::PairUnknownFault>)fault;
+@end
+
+@implementation Core3DDebugBooleanPairUnknownFaultReceipt
+- (instancetype)initWithFault:(std::shared_ptr<
+    core3d::authored_parameter::debug::PairUnknownFault>)fault {
+    self = [super init];
+    if (!self || !fault) return nil;
+    _fault = std::move(fault);
+    return self;
+}
+- (Core3DDebugBooleanPairUnknownFaultSite)site {
+    return _fault ? static_cast<Core3DDebugBooleanPairUnknownFaultSite>(
+        _fault->site()) : Core3DDebugBooleanPairUnknownFaultSitePostClose;
+}
+- (NSUInteger)hitCount { return _fault ? _fault->hits() : 0; }
+@end
 #endif
 
 @interface Core3DBooleanPairCaptureResult ()
@@ -1037,6 +1059,71 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
 }
 @end
 
+@interface Core3DBooleanPairRecoveryResult ()
+- (instancetype)initWithNative:
+    (const core3d::authored_parameter::PairRecoveryReply&)reply;
+@end
+
+@implementation Core3DBooleanPairRecoveryResult
+- (instancetype)initWithNative:
+    (const core3d::authored_parameter::PairRecoveryReply&)reply {
+    self = [super init];
+    if (!self) return nil;
+    _status = static_cast<Core3DBooleanPairRecoveryStatus>(reply.status);
+    _refusal = static_cast<Core3DBooleanPairRefusal>(reply.refusal);
+    _liveCompositeCount = reply.liveCompositeCount;
+    if (reply.receipt) _receipt = [[Core3DBooleanPairConsumptionReceipt alloc]
+        initWithNative:*reply.receipt];
+    _recoveryLocked = reply.status
+        == core3d::authored_parameter::PairRecoveryStatus::RecoveryRequired;
+#if DEBUG
+    _censusReads = reply.censusReads;
+    _censusFaultHits = reply.censusFaultHits;
+    _commandCalls = reply.commandCalls;
+    _replayCalls = reply.replayCalls;
+#endif
+    return self;
+}
+@end
+
+//! Weak-host/strong-continuation registry. The continuation owns no host and
+//! cannot move to a replacement document; exact native document/data identity
+//! is rechecked on every recovery call.
+@interface Core3DBooleanPairRecoveryIssuer : NSObject {
+@public
+    Handle(OcctDocument) _document;
+    std::shared_ptr<const core3d::authored_parameter::PairRecovery> _recovery;
+    const void *_ocafDocument;
+    const void *_ocafData;
+}
+- (instancetype)initWithDocument:(const Handle(OcctDocument)&)document
+    recovery:(std::shared_ptr<const core3d::authored_parameter::PairRecovery>)recovery;
+@end
+
+@implementation Core3DBooleanPairRecoveryIssuer
+- (instancetype)initWithDocument:(const Handle(OcctDocument)&)document
+    recovery:(std::shared_ptr<const core3d::authored_parameter::PairRecovery>)recovery {
+    self = [super init];
+    if (!self || document.IsNull() || !recovery) return nil;
+    _document = document;
+    _recovery = std::move(recovery);
+    const Handle(TDocStd_Document) ocaf = document->Document();
+    _ocafDocument = ocaf.IsNull() ? nullptr : ocaf.get();
+    _ocafData = ocaf.IsNull() ? nullptr : ocaf->GetData().get();
+    return self;
+}
+@end
+
+static NSMapTable<Core3DViewController *, Core3DBooleanPairRecoveryIssuer *>
+    *Core3DBooleanPairRecoveryIssuers() {
+    static NSMapTable *issuers;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        issuers = [NSMapTable weakToStrongObjectsMapTable];
+    });
+    return issuers;
+}
+
 @implementation Core3DViewController (AuthoredParameterOpening)
 
 - (Core3DBooleanPairCaptureResult *)openBooleanSourcesWithTargetEntityIdentifier:
@@ -1173,6 +1260,8 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
         GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
             ? (GLViewController *)self.glController : nil;
         const auto viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) document = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
         const CGSize size = self.viewportDrawableSize;
         Core3DSceneSnapshot *current = [self captureSceneSnapshot];
         if (!viewer || !SameExpectedScene(expected, current,
@@ -1181,10 +1270,48 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
             || size.width < 1 || size.height < 1
             || size.width > UINT32_MAX || size.height > UINT32_MAX)
             return refused(PairRefusal::StaleSource);
-        reply = viewer->getDocument()->ApplyBooleanSources(prepared->_prepared,
+        reply = document->ApplyBooleanSources(prepared->_prepared,
             std::uint32_t(size.width), std::uint32_t(size.height));
+        if (reply.status == PairApplyStatus::OutcomeUnknown && reply.recovery) {
+            Core3DBooleanPairRecoveryIssuer *issuer =
+                [[Core3DBooleanPairRecoveryIssuer alloc]
+                    initWithDocument:document recovery:reply.recovery];
+            if (issuer) [Core3DBooleanPairRecoveryIssuers()
+                setObject:issuer forKey:self];
+        }
         return [[Core3DBooleanPairApplyResult alloc] initWithNative:reply];
     } catch (...) { return refused(PairRefusal::BadEncoding); }
+}
+
+- (Core3DBooleanPairRecoveryResult *)recoverBooleanSources {
+    using namespace core3d::authored_parameter;
+    PairRecoveryReply reply;
+    if (![NSThread isMainThread])
+        return [[Core3DBooleanPairRecoveryResult alloc] initWithNative:reply];
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) document = viewer
+            ? viewer->getDocument() : Handle(OcctDocument)();
+        Core3DBooleanPairRecoveryIssuer *issuer =
+            [Core3DBooleanPairRecoveryIssuers() objectForKey:self];
+        const Handle(TDocStd_Document) ocaf = document.IsNull()
+            ? Handle(TDocStd_Document)() : document->Document();
+        if (!document.IsNull() && !ocaf.IsNull() && issuer
+            && issuer->_document == document && issuer->_recovery
+            && issuer->_ocafDocument == ocaf.get()
+            && issuer->_ocafData == ocaf->GetData().get()) {
+            reply = document->RecoverBooleanSources(issuer->_recovery);
+            if (reply.status == PairRecoveryStatus::Committed
+                || reply.status == PairRecoveryStatus::PriorRestored)
+                [Core3DBooleanPairRecoveryIssuers() removeObjectForKey:self];
+        }
+    } catch (...) {
+        reply.status = PairRecoveryStatus::RecoveryRequired;
+        reply.refusal = PairRefusal::BadEncoding;
+    }
+    return [[Core3DBooleanPairRecoveryResult alloc] initWithNative:reply];
 }
 
 #if DEBUG
@@ -1206,6 +1333,47 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
             prepared->_prepared,
             static_cast<core3d::authored_parameter::debug::PairCreationFaultSite>(site));
         return fault ? [[Core3DDebugBooleanPairCreationFaultReceipt alloc]
+            initWithFault:fault] : nil;
+    } catch (...) { return nil; }
+}
+
+- (Core3DDebugBooleanPairUnknownFaultReceipt *)
+    debugArmBooleanPairUnknownFault:(Core3DBooleanPairPrepared *)prepared
+    site:(NSNumber *)site {
+    if (![NSThread isMainThread]
+        || ![prepared isKindOfClass:Core3DBooleanPairPrepared.class]
+        || !prepared->_prepared
+        || ![site isKindOfClass:NSNumber.class]
+        || site.integerValue < Core3DDebugBooleanPairUnknownFaultSitePostClose
+        || site.integerValue > Core3DDebugBooleanPairUnknownFaultSiteAbortClose) return nil;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        if (!viewer) return nil;
+        const auto fault = viewer->getDocument()->DebugArmBooleanPairUnknownFault(
+            prepared->_prepared,
+            static_cast<core3d::authored_parameter::debug::PairUnknownFaultSite>(
+                site.integerValue));
+        return fault ? [[Core3DDebugBooleanPairUnknownFaultReceipt alloc]
+            initWithFault:fault] : nil;
+    } catch (...) { return nil; }
+}
+
+- (Core3DDebugBooleanPairUnknownFaultReceipt *)
+    debugArmBooleanPairRecoveryCensusFailure {
+    if (![NSThread isMainThread]) return nil;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        Core3DBooleanPairRecoveryIssuer *issuer =
+            [Core3DBooleanPairRecoveryIssuers() objectForKey:self];
+        if (!viewer || !issuer || !issuer->_recovery
+            || issuer->_document != viewer->getDocument()) return nil;
+        const auto fault = viewer->getDocument()
+            ->DebugArmBooleanPairRecoveryCensusFailure(issuer->_recovery);
+        return fault ? [[Core3DDebugBooleanPairUnknownFaultReceipt alloc]
             initWithFault:fault] : nil;
     } catch (...) { return nil; }
 }
