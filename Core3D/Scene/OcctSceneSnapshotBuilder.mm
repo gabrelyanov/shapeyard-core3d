@@ -5550,6 +5550,141 @@ public:
         result.overflow = settlementOverflow_;
         return result;
     }
+    // Dump-only oracle probe: existing ledger values, no read/admission replay.
+    const char* debugOracleFailureName() const noexcept {
+        static constexpr const char* names[] = {
+            "None",
+            "ContextControl",
+            "ProtectedSceneCopy",
+            "StorageReserve",
+            "StorageRelease",
+            "CheckedProduct",
+            "JobSeal",
+            "JobConsume",
+            "Cancellation",
+            "ImageEncodedCopy",
+            "ImageSourceMetadata",
+            "ImageDecodedBacking",
+            "ImageCreate",
+            "ImageRGBA",
+            "ImageBitmapContext",
+            "SourceWorkingBytes",
+            "SourceOriginalBytes",
+            "SourceIdentityBytes",
+            "SourceVectorStorage",
+            "BindingReadScratch",
+            "BindingReadMaterialize",
+            "ResourceTableScratch",
+            "ResourceSerializationScratch",
+            "ResourceReadMaterialize",
+            "CapturedSourceStorage",
+            "AtlasReadScratch",
+            "BakeReadScratch",
+            "PriorAtlasBytes",
+            "PriorBakeResources",
+            "OrdinaryOwnerStorage",
+            "OrdinaryMemberStorage",
+            "OrdinaryCaptureStorage",
+            "OrdinaryObservedStorage",
+            "OrdinaryRoleStorage",
+            "OrdinaryCanonicalEncoding",
+            "OrdinaryRecordStorage",
+            "ExportAtlasStorage",
+            "ExportMemberStorage",
+            "ExportCaptureStorage",
+            "ExportObservedStorage",
+            "ExportBakeStorage",
+            "ExportCanonicalStorage",
+            "CurrentObservedStorage",
+            "CurrentOwnerStorage",
+            "CurrentCaptureStorage",
+            "CurrentResultBindings",
+            "CurrentResultResources",
+            "CurrentCloneBindings",
+            "CurrentCloneResources",
+            "CurrentnessLease",
+            "PersistenceAggregateRead",
+            "PersistenceAggregateLimit",
+            "PersistenceResourceLocal",
+            "PersistenceResourcePayload",
+            "PersistenceCanonicalValidation",
+            "PersistenceBakeCandidate",
+            "PersistenceBakeTransients",
+            "FaceImageValidationSource",
+            "FaceImageValidationDecoded",
+            "FaceImageValidationDecode",
+            "BRepCensusMapScratch",
+            "BRepCensusMeasure",
+            "BRepCensusCopy",
+            "ProtectedCaptureControl",
+            "ProtectedAtlasRead",
+            "ProtectedOccurrenceStorage",
+            "ProtectedTraversalStorage",
+            "ProtectedPathStorage",
+            "ProtectedDefinitionStorage",
+            "ProtectedReceiverStorage",
+            "ProtectedFinishingStorage",
+            "ProtectedSourceStorage",
+            "ProtectedOwnerStorage",
+            "ProtectedRecheckStorage",
+            "ProtectedCorrespondenceStorage",
+            "ProtectedEmittedStorage",
+            "ProtectedEvidenceStorage",
+            "ProtectedTerminalScene",
+            "ProtectedTerminalControl",
+            "ReceiverLayerStorage",
+            "ReceiverBaseStorage",
+            "ReceiverTriangleStorage",
+            "ReceiverCoverageStorage",
+            "ReceiverProofStorage",
+            "ReceiverOutputStorage",
+            "ReceiverPremultipliedStorage",
+            "ReceiverClaimedStorage",
+            "ReceiverEncoderScanlines",
+            "ReceiverEncoderZlib",
+            "ReceiverEncoderPNG",
+            "ReceiverProductStorage",
+            "PublicationAssembleWriter",
+            "PublicationAssembleFaces",
+            "PublicationValidationCopy",
+            "PublicationValidationWriter",
+            "PublicationPrivateVector",
+            "PublicationPrivateStore",
+            "PublicationPrivateLookup",
+            "PublicationSharedKey",
+            "PublicationSharedStore",
+            "PublicationSharedLookup",
+            "InstallIdentifier",
+            "InstallTextureMap",
+            "InstallTextureCopy",
+            "InstallAppearance",
+            "InstallCompaction",
+            "TangentOutput",
+            "TangentWorkspace",
+            "DebugBRepCensusDebt",
+            "DebugExactLimit",
+            "DebugOneUnit",
+            "DebugCheckedProduct",
+            "DebugDuplicateJob",
+            "DebugJobLimit",
+            "DebugCopyOne",
+            "DebugCopyTwo",
+            "DebugShared",
+            "DebugMove",
+            "DebugScratch",
+            "DebugWork",
+            "Count",
+        };
+        const auto index = static_cast<std::size_t>(firstFailure_.site);
+        return index < sizeof(names) / sizeof(names[0]) ? names[index] : "Unknown";
+    }
+    void debugOracleDump(double unit, bool selected, const char* stage,
+                         std::size_t groups, std::size_t atlasReadDelta) const noexcept {
+        std::fprintf(stderr, "E4_ORACLE_CAPTURE unit=%.17g selected=%d stage=%s FailureSite=%s reason=%u requested=%zu admitted=%zu groups=%zu atlasReadDelta=%zu work=%zu live=%zu\n",
+            unit, selected, stage, debugOracleFailureName(),
+            static_cast<unsigned>(firstFailure_.reason), firstFailure_.requested,
+            firstFailure_.admitted, groups, atlasReadDelta, cumulativeWork_, totalLive());
+    }
     std::array<std::size_t, 6> debugStorageState(
         StorageDimension dimension) const noexcept {
         const std::size_t index = storageIndex(dimension);
@@ -6001,6 +6136,90 @@ DebugOperationStorage DebugObserveOperationStorage(
 }
 } // namespace core3d::painted_atlas_bake::kernel
 #endif
+
+namespace core3d::painted_atlas_bake::owner {
+
+//! Exact immutable-value comparison for operation-local currentness checks.
+//! Accounting owners and tickets are intentionally excluded: both captures
+//! borrow the same operation, while every document-derived authority value is
+//! compared bit-for-bit (including shadowed/absent slots and mask envelopes).
+inline bool ExactCapturedSource(const CapturedSource& left,
+                                const CapturedSource& right) noexcept {
+    const auto sameTransform = [](const UVTransform& a,
+                                  const UVTransform& b) noexcept {
+        return face_image::SameScalarBits(a.scale[0], b.scale[0])
+            && face_image::SameScalarBits(a.scale[1], b.scale[1])
+            && face_image::SameScalarBits(a.offset[0], b.offset[0])
+            && face_image::SameScalarBits(a.offset[1], b.offset[1])
+            && face_image::SameScalarBits(
+                a.rotationDegrees, b.rotationDegrees)
+            && a.wrapU == b.wrapU && a.wrapV == b.wrapV;
+    };
+    return left.fence == right.fence
+        && left.envelope == right.envelope
+        && left.origin == right.origin
+        && left.materialSlot == right.materialSlot
+        && left.faceIdentifier == right.faceIdentifier
+        && left.memberIndex == right.memberIndex
+        && left.faceIndex == right.faceIndex
+        && left.order == right.order
+        && left.boundedLayer == right.boundedLayer
+        && face_image::SameScalarBits(left.centerU, right.centerU)
+        && face_image::SameScalarBits(left.centerV, right.centerV)
+        && face_image::SameScalarBits(left.width, right.width)
+        && face_image::SameScalarBits(left.height, right.height)
+        && face_image::SameScalarBits(left.angle, right.angle)
+        && face_image::SameScalarBits(left.opacity, right.opacity)
+        && left.maskPresent == right.maskPresent
+        && left.maskEnvelope == right.maskEnvelope
+        && left.maskUsesLuminance == right.maskUsesLuminance
+        && left.maskInverted == right.maskInverted
+        && sameTransform(left.maskTransform, right.maskTransform);
+}
+
+inline bool ExactExportCapture(const ExportCapture& left,
+                               const ExportCapture& right) noexcept {
+    try {
+        if (left.canonicalAtlasBytes != right.canonicalAtlasBytes
+            || left.canonicalBakeBytes != right.canonicalBakeBytes
+            || !(left.savedBake == right.savedBake)
+            || left.observedMembers != right.observedMembers
+            || left.members.members.size() != right.members.members.size()
+            || left.sources.values.size() != right.sources.values.size()
+            || left.sources.rawSlots != right.sources.rawSlots
+            || left.sources.canonicalBindings
+                != right.sources.canonicalBindings)
+            return false;
+        for (std::size_t index = 0;
+             index < left.members.members.size(); ++index) {
+            const auto& a = left.members.members[index];
+            const auto& b = right.members.members[index];
+            if (!(a.slot == b.slot)
+                || !(a.capture.source == b.capture.source)
+                || a.capture.resourceManifest != b.capture.resourceManifest
+                || a.capture.resources.size() != b.capture.resources.size()
+                || a.painted != b.painted)
+                return false;
+            for (std::size_t resource = 0;
+                 resource < a.capture.resources.size(); ++resource)
+                if (a.capture.resources[resource].identity
+                        != b.capture.resources[resource].identity
+                    || a.capture.resources[resource].content
+                        != b.capture.resources[resource].content)
+                    return false;
+        }
+        for (std::size_t index = 0;
+             index < left.sources.values.size(); ++index)
+            if (!ExactCapturedSource(left.sources.values[index],
+                    right.sources.values[index]))
+                return false;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+} // namespace core3d::painted_atlas_bake::owner
 
 namespace core3d::scene {
 
@@ -12063,9 +12282,36 @@ struct SavedGroupOccurrenceScope final {
     std::vector<std::string> expectedReceiverIdentifiers;
 };
 
+bool SavedGroupOccurrenceStorageBytes(
+    const SavedGroupOccurrenceScope& scope,
+    std::size_t& bytes) noexcept {
+    bytes = 0;
+    std::size_t vectorBytes = 0;
+    if (!CheckedMultiply(scope.entries.size(),
+            sizeof(SavedGroupOccurrenceScope::Entry), vectorBytes)
+        || !AddProtectedBytes(bytes, vectorBytes)
+        || !CheckedMultiply(scope.expectedReceiverIdentifiers.size(),
+            sizeof(std::string), vectorBytes)
+        || !AddProtectedBytes(bytes, vectorBytes))
+        return false;
+    for (const auto& entry : scope.entries)
+        if (!AddProtectedBytes(bytes,
+                entry.occurrenceIdentifier.capacity() + 1U)
+            || !AddProtectedBytes(bytes,
+                entry.definitionIdentifier.capacity() + 1U))
+            return false;
+    for (const auto& identifier : scope.expectedReceiverIdentifiers)
+        if (!AddProtectedBytes(bytes, identifier.capacity() + 1U))
+            return false;
+    return true;
+}
+
 struct SavedGroupFinalResult final {
     asset_atlas::build::FinalTriangleLineage originalPaintLineage;
     painted_atlas_bake::owner::ExportBake bake;
+    // The ticket precedes the moved occurrence value so reverse destruction
+    // releases every copied entry/string before its retained charge.
+    decal_layer::bake::accounting::Ticket occurrenceStorage;
     SavedGroupOccurrenceScope occurrences;
     std::vector<std::string> memberDefinitions;
     std::vector<std::size_t> finalTriangleCounts;
@@ -12084,6 +12330,9 @@ struct SavedGroupOwner final {
     painted_atlas_bake::owner::ExportBakePlan pendingPlan;
     asset_atlas::build::FinalTriangleLineage pendingOriginalPaintLineage;
     bool retainOriginalPaintLineage = false;
+    // This charge is acquired before the pending occurrence copy and moves
+    // with that storage into SavedGroupFinalResult.
+    decal_layer::bake::accounting::Ticket pendingOccurrenceStorage;
     SavedGroupOccurrenceScope pendingOccurrences;
     std::vector<std::string> pendingDefinitionOrder;
     std::vector<std::size_t> pendingTriangleCounts;
@@ -12595,6 +12844,7 @@ painted_atlas_bake::owner::Outcome PrepareSavedGroupForBatch(
     group.pendingPlan = {};
     group.pendingOriginalPaintLineage.reset();
     group.pendingOccurrences = {};
+    group.pendingOccurrenceStorage.reset();
     group.pendingDefinitionOrder.clear();
     group.pendingTriangleCounts.clear();
     group.pendingCornerCounts.clear();
@@ -12712,6 +12962,22 @@ painted_atlas_bake::owner::Outcome PrepareSavedGroupForBatch(
             || !painted_atlas_bake::owner::AdmitBakePlan(
                 aggregate, group.pendingPlan)) return outcome == Outcome::Prepared
                     ? Outcome::OverBudget : outcome;
+        std::size_t occurrenceBytes = 0;
+        if (!SavedGroupOccurrenceStorageBytes(
+                expectedOccurrences, occurrenceBytes)
+            || (occurrenceBytes != 0
+                && !AcquireProtectedStorage(
+                    group.pendingOccurrenceStorage,
+                    group.capture.operationView(),
+                    decal_layer::bake::accounting::StorageDimension::
+                        PrivateStorage,
+                    occurrenceBytes,
+                    decal_layer::bake::accounting::Retention::Retained,
+                    decal_layer::bake::accounting::FailureSite::
+                        ExportBakeStorage))) {
+            diagnosis = "saved-group-occurrence-storage";
+            return Outcome::OverBudget;
+        }
         group.pendingOccurrences = expectedOccurrences;
         group.pendingDefinitionOrder = std::move(definitionOrder);
         group.pendingTriangleCounts = std::move(triangleCounts);
@@ -12783,6 +13049,8 @@ painted_atlas_bake::owner::Outcome ExecuteSavedGroupForBatch(
         result->originalPaintLineage = std::move(group.pendingOriginalPaintLineage);
         if (group.retainOriginalPaintLineage)
             result->originalPaintLineage.layout = &result->bake.storage->layout;
+        result->occurrenceStorage =
+            std::move(group.pendingOccurrenceStorage);
         result->occurrences = std::move(group.pendingOccurrences);
         result->memberDefinitions = std::move(group.pendingDefinitionOrder);
         result->finalTriangleCounts = std::move(group.pendingTriangleCounts);
@@ -13069,6 +13337,101 @@ SavedGroupAllMemberLayoutReason PrepareSavedGroupLayoutRecord(
         clearPending();
         controlTicket.reset();
         return Reason::Unavailable;
+    }
+}
+
+//! Transfer the layout and assignments from the exact requested-quality bake
+//! into the returned-scene record. The earlier capture-stage record is only a
+//! passive feasibility witness and must never be reported as this result.
+bool BindExecutedSavedGroupLayoutRecord(
+    std::vector<std::unique_ptr<SavedGroupOwner>>& groups,
+    const painted_atlas_bake::owner::AggregateBakePlan& aggregate,
+    decal_layer::bake::accounting::Ticket& controlTicket,
+    std::shared_ptr<const SavedGroupAllMemberLayoutRecord>& output) noexcept {
+    using Dimension = decal_layer::bake::accounting::StorageDimension;
+    using Retention = decal_layer::bake::accounting::Retention;
+    using FailureSite = decal_layer::bake::accounting::FailureSite;
+    if (groups.empty() || !aggregate.sealed) return false;
+    try {
+        const auto operation = groups.front()->capture.operationView();
+        std::size_t recordBytes = sizeof(SavedGroupAllMemberLayoutRecord);
+        std::size_t bytes = 0;
+        if (!operation.valid()
+            || !operation.CheckedProduct(groups.size(),
+                sizeof(SavedGroupAllMemberLayout), 1U, bytes,
+                FailureSite::ExportBakeStorage)
+            || !AddProtectedBytes(recordBytes, bytes)
+            || !operation.CheckedProduct(groups.size(),
+                sizeof(std::shared_ptr<const
+                    painted_atlas_bake::owner::ExportBakeStorage>),
+                1U, bytes, FailureSite::ExportBakeStorage)
+            || !AddProtectedBytes(recordBytes, bytes)) return false;
+        for (const auto& group : groups) {
+            if (!group || !group->result || !group->result->bake.storage
+                || group->result->memberDefinitions.empty()) return false;
+            if (!operation.CheckedProduct(
+                    group->result->memberDefinitions.size(),
+                    sizeof(std::string), 1U, bytes,
+                    FailureSite::ExportBakeStorage)
+                || !AddProtectedBytes(recordBytes, bytes)) return false;
+            for (const auto& value : group->result->memberDefinitions)
+                if (!AddProtectedBytes(recordBytes,
+                        value.capacity() + 1U)) return false;
+        }
+        decal_layer::bake::accounting::Ticket recordTicket;
+        if (!recordTicket.acquire(operation, Dimension::PrivateStorage,
+                recordBytes, Retention::Retained,
+                FailureSite::ExportBakeStorage)) return false;
+
+        // Destroy the passive record before reusing its control-block charge.
+        output.reset();
+        controlTicket.reset();
+        constexpr std::size_t maximumControlBytes = 4096U;
+        if (!controlTicket.acquire(operation, Dimension::PrivateStorage,
+                maximumControlBytes, Retention::Retained,
+                FailureSite::ExportBakeStorage)
+            || !operation.EnterAllocation(FailureSite::ExportBakeStorage))
+            return false;
+        auto* raw = new SavedGroupAllMemberLayoutRecord();
+        std::shared_ptr<SavedGroupAllMemberLayoutRecord> record(raw,
+            std::default_delete<SavedGroupAllMemberLayoutRecord>(),
+            ProtectedControlAllocator<SavedGroupAllMemberLayoutRecord>(
+                operation, controlTicket, FailureSite::ExportBakeStorage));
+        record->aggregate = aggregate;
+        record->retainedBytes = recordBytes;
+        if (!AddProtectedBytes(record->retainedBytes, controlTicket.bytes)
+            || !operation.EnterAllocation(FailureSite::ExportBakeStorage))
+            return false;
+        record->groups.reserve(groups.size());
+        if (!operation.EnterAllocation(FailureSite::ExportBakeStorage))
+            return false;
+        record->planStorage.reserve(groups.size());
+        for (auto& group : groups) {
+            auto mutableResult =
+                std::const_pointer_cast<SavedGroupFinalResult>(group->result);
+            if (!mutableResult || !mutableResult->bake.storage
+                || mutableResult->bake.assignments.size()
+                    != mutableResult->memberDefinitions.size()) return false;
+            SavedGroupAllMemberLayout value;
+            value.memberDefinitions =
+                std::move(mutableResult->memberDefinitions);
+            value.atlas = std::move(mutableResult->bake.atlas);
+            value.assignments = std::move(mutableResult->bake.assignments);
+            value.layout =
+                std::move(mutableResult->bake.storage->layout);
+            value.work = aggregate.admittedWork;
+            record->planStorage.push_back(mutableResult->bake.storage);
+            record->groups.push_back(std::move(value));
+            mutableResult->originalPaintLineage.layout =
+                &record->groups.back().layout;
+        }
+        record->recordStorage = std::move(recordTicket);
+        output = std::move(record);
+        return true;
+    } catch (...) {
+        output.reset();
+        controlTicket.reset();
+        return false;
     }
 }
 
@@ -17380,9 +17743,56 @@ bool PrivateDecalCapture::Impl::recheckProtected(
                 != painted_atlas_bake::owner::Outcome::Prepared
             || !operationLedger.enterAllocation(
                 FailureSite::ProtectedAtlasRead)
-            || !asset_atlas::persistence::ReadAll(document, atlases)
-            || !atlases.empty()) return false;
-        atlasAdmission.reset();
+            || !asset_atlas::persistence::ReadAll(document, atlases))
+            return false;
+        if (atlases.size() != savedGroups.size()) return false;
+        std::size_t matchedBytes = 0;
+        decal_layer::bake::accounting::Ticket matchedTicket;
+        if (!operationLedger.view().CheckedProduct(savedGroups.size(),
+                sizeof(bool), 1U, matchedBytes,
+                FailureSite::ProtectedRecheckStorage)
+            || (matchedBytes != 0
+                && !AddProtectedBytes(matchedBytes, sizeof(std::size_t)))
+            || !AcquireProtectedStorage(matchedTicket,
+                operationLedger.view(), StorageDimension::PrivateStorage,
+                matchedBytes, Retention::Scratch,
+                FailureSite::ProtectedRecheckStorage))
+            return false;
+        std::vector<bool> matched(savedGroups.size(), false);
+        const std::size_t matchedBitsPerByte =
+            std::numeric_limits<unsigned char>::digits;
+        const std::size_t matchedStorageBytes =
+            matched.capacity() / matchedBitsPerByte
+            + (matched.capacity() % matchedBitsPerByte != 0 ? 1U : 0U);
+        if (matchedStorageBytes > matchedTicket.bytes) {
+            operationLedger.allocationFailure(
+                FailureSite::ProtectedRecheckStorage);
+            return false;
+        }
+        for (const auto& atlas : atlases) {
+            if (!atlas.value) return false;
+            std::size_t match = savedGroups.size();
+            for (std::size_t index = 0; index < savedGroups.size(); ++index) {
+                if (!savedGroups[index]
+                    || !(savedGroups[index]->capture.savedAtlas.key
+                        == atlas.value->definition.key))
+                    continue;
+                if (match != savedGroups.size()) return false;
+                match = index;
+            }
+            if (match == savedGroups.size() || matched[match]) return false;
+            painted_atlas_bake::owner::ExportCapture observed;
+            const auto outcome = painted_atlas_bake::owner::CaptureForExport(
+                observed, document, atlas.value->definition.key,
+                operationLedger.view());
+            if (outcome != painted_atlas_bake::owner::Outcome::Prepared
+                || !painted_atlas_bake::owner::ExactExportCapture(
+                    savedGroups[match]->capture, observed))
+                return false;
+            matched[match] = true;
+        }
+        if (std::find(matched.begin(), matched.end(), false) != matched.end())
+            return false;
 
         for (const auto& owner : owners) {
             if (!operationLedger.recheck(boundary)) return false;
@@ -17597,6 +18007,33 @@ struct ReturnedPrivateExportOwnerDeleter final {
         delete value;
     }
 };
+
+#ifdef DEBUG
+std::array<double, 4> OcctSceneSnapshotBuilder::
+DebugSavedFinalQualityForReturnedScene(const SnapshotPointer& returnedScene) noexcept {
+    // The alias owns the capture and the exact retained final results for the
+    // duration of this read. Fixed scalars only; no admission, sampling or copy.
+    std::array<double, 4> value{{-1.0, 0.0, 0.0, 0.0}};
+    const auto* deleter = std::get_deleter<ReturnedPrivateExportOwnerDeleter>(returnedScene);
+    if (!deleter || !deleter->owner
+        || returnedScene.get() != deleter->owner->artifact.scene.get()
+        || !deleter->owner->capture || !deleter->owner->capture->impl_) return value;
+    const auto& groups = deleter->owner->capture->impl_->savedGroups;
+    value = {{0.0, 0.0, 1.0, 0.0}};
+    for (const auto& group : groups) {
+        if (!group || !group->result || !group->result->bake.storage)
+            return {{-1.0, 0.0, 0.0, 0.0}};
+        const auto& evidence = group->result->bake.evidence;
+        if (!std::isfinite(evidence.maximumNormalLengthError))
+            return {{-1.0, 0.0, 0.0, 0.0}};
+        value[0] += 1.0;
+        value[1] = std::max(value[1], evidence.maximumNormalLengthError);
+        value[2] = value[2] != 0.0 && evidence.tangentParity ? 1.0 : 0.0;
+        value[3] += static_cast<double>(evidence.coveredTexels);
+    }
+    return value;
+}
+#endif
 
 SavedGroupAllMemberLayoutRead OcctSceneSnapshotBuilder::
 SavedGroupAllMemberLayoutForReturnedScene(
@@ -17975,6 +18412,35 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
         auto candidate = std::make_unique<PrivateDecalCapture>();
         if (!candidate || !candidate->impl_) return false;
         auto& impl = *candidate->impl_;
+#ifdef DEBUG
+        // This observer never mutates the operation ledger, document, inputs or
+        // result. Its destructor runs before the referenced capture can die.
+        struct OracleCaptureDump final {
+            PrivateDecalCapture::Impl& value;
+            DebugPrivateExportDecalObservation* observation;
+            double unit;
+            bool selected;
+            const char* stage = "capture-before-currentness";
+            std::size_t readBefore = 0;
+            std::size_t readDelta = 0;
+            std::size_t savedCensus = 0;
+            ~OracleCaptureDump() noexcept {
+                value.operationLedger.debugOracleDump(unit, selected, stage,
+                    value.savedGroups.size(), readDelta);
+                if (observation && std::strcmp(stage, "capture-accepted") != 0) {
+                    if (observation->captureRefusalCause.empty()) {
+                        const auto* failure = value.operationLedger.debugOracleFailureName();
+                        observation->captureRefusalCause =
+                            std::strcmp(failure, "None") == 0 && readDelta == 3 && savedCensus > 0
+                            ? "atlas-read-or-nonempty" : failure;
+                    }
+                    if (observation->captureRefusalBoundary.empty())
+                        observation->captureRefusalBoundary = stage;
+                }
+            }
+        } oracleDump{impl, debugObservation, wholeCommittedScene.metersPerUnit,
+                     selectedObjectsOnly};
+#endif
         impl.operationLedger = captureAdmission;
         impl.controlStorageTicket.view = impl.operationLedger.view();
         impl.controlStorageTicket.dimension =
@@ -18923,11 +19389,27 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
             return false;
         }
 #endif
+#ifdef DEBUG
+        oracleDump.stage = "capture-currentness-return-false";
+        oracleDump.savedCensus = savedAtlases.size();
+        oracleDump.readBefore = impl.operationLedger.allocationEntries(
+            decal_layer::bake::accounting::FailureSite::ProtectedAtlasRead);
+#endif
         if (!impl.recheckProtected(cancelled,
                 decal_layer::bake::accounting::FailureSite::
-                    ProtectedRecheckStorage))
-            return false;
+                    ProtectedRecheckStorage)) {
 #ifdef DEBUG
+            oracleDump.readDelta = impl.operationLedger.allocationEntries(
+                decal_layer::bake::accounting::FailureSite::ProtectedAtlasRead)
+                - oracleDump.readBefore;
+#endif
+            return false;
+        }
+#ifdef DEBUG
+        oracleDump.stage = "capture-accepted";
+        oracleDump.readDelta = impl.operationLedger.allocationEntries(
+            decal_layer::bake::accounting::FailureSite::ProtectedAtlasRead)
+            - oracleDump.readBefore;
         if (debugProtectedCaptureMode == 1) {
             DebugProtectedCaptureObservation observation;
             observation.observed = true;
@@ -18963,6 +19445,8 @@ bool OcctSceneSnapshotBuilder::FinalizePrivateExportDecals(
     const SceneSnapshot& finalScene,
     const std::vector<PrivateExportFaceCorrespondence>& correspondence,
     const std::vector<PrivateExportFinalMesh>& emittedMeshes,
+    const std::vector<std::string>& inputKeys,
+    const std::vector<std::string>& bakeSeals,
     const std::function<bool()>& cancelled,
     PrivateExportDecalArtifact& artifact) noexcept {
     artifact = {};
@@ -18989,8 +19473,9 @@ bool OcctSceneSnapshotBuilder::FinalizePrivateExportDecals(
             || correspondence.size() > kMaxPrimitiveBindingsPerSnapshot
             || emittedMeshes.size() > kMaxLabelInstanceMappings)
             return false;
-        if (impl.owners.empty() || emittedMeshes.empty()
-            || impl.destination.values.size() != emittedMeshes.size()
+        if ((impl.owners.empty() && impl.savedGroups.empty())
+            || emittedMeshes.empty() || inputKeys.empty()
+            || inputKeys.size() != bakeSeals.size()
             || impl.privateDocument.IsNull()) return false;
         std::size_t correspondenceBytes = 0;
         if (!impl.operationLedger.checkedProduct(correspondence.size(),
@@ -19008,17 +19493,19 @@ bool OcctSceneSnapshotBuilder::FinalizePrivateExportDecals(
             return false;
 
         std::size_t evidenceBytes = 0;
-        if (!impl.operationLedger.checkedProduct(
-                impl.destination.values.size(),
+        if (!impl.operationLedger.checkedProduct(inputKeys.size(),
                 2U * sizeof(std::string) + 130U, 1U, evidenceBytes,
-                FailureSite::ProtectedEvidenceStorage)
-            || !AcquireProtectedStorage(impl.finalEvidenceTicket,
+                FailureSite::ProtectedEvidenceStorage)) return false;
+        for (const auto* values : {&inputKeys, &bakeSeals})
+            for (const auto& value : *values)
+                if (!AddProtectedBytes(evidenceBytes,
+                        value.capacity() + 1U)) return false;
+        if (!AcquireProtectedStorage(impl.finalEvidenceTicket,
                 impl.operationLedger.view(), Dimension::PrivateStorage,
                 evidenceBytes, Retention::Retained,
-                FailureSite::ProtectedEvidenceStorage))
-            return false;
-        artifact.inputKeys.reserve(impl.destination.values.size());
-        artifact.bakeSeals.reserve(impl.destination.values.size());
+                FailureSite::ProtectedEvidenceStorage)) return false;
+        artifact.inputKeys.reserve(inputKeys.size());
+        artifact.bakeSeals.reserve(bakeSeals.size());
         artifact.correspondence.reserve(correspondence.size());
 
         std::size_t matchedReceivers = 0;
@@ -19036,20 +19523,74 @@ bool OcctSceneSnapshotBuilder::FinalizePrivateExportDecals(
             }
         }
         if (matchedReceivers != correspondence.size()) return false;
+        // Bind membership to the exact executed record. Its vectors were
+        // moved out of SavedGroupFinalResult before this consumer runs.
+        if (!impl.savedGroups.empty()) {
+            if (!impl.savedGroupLayout
+                || impl.savedGroupLayoutReason != SavedGroupAllMemberLayoutReason::Present
+                || impl.savedGroupLayout->groups.size() != impl.savedGroups.size()
+                || impl.savedGroupLayout->planStorage.size() != impl.savedGroups.size())
+                return false;
+            for (std::size_t index = 0; index < impl.savedGroups.size(); ++index) {
+                const auto& group = impl.savedGroups[index];
+                const auto& executed = impl.savedGroupLayout->groups[index];
+                if (!group || !group->result || !group->result->bake.storage
+                    || impl.savedGroupLayout->planStorage[index] != group->result->bake.storage
+                    || !(executed.atlas.key == group->capture.savedAtlas.key)
+                    || group->result->originalPaintLineage.layout != &executed.layout
+                    || executed.memberDefinitions.size() != group->measured.size()
+                    || executed.memberDefinitions.size() != group->capture.savedAtlas.members.size()
+                    || executed.assignments.size() != executed.memberDefinitions.size())
+                    return false;
+                for (std::size_t member = 0; member < group->measured.size(); ++member)
+                    if (executed.memberDefinitions[member]
+                            != group->measured[member].definitionIdentifier
+                        || executed.assignments[member].member
+                            != group->capture.savedAtlas.members[member].member)
+                        return false;
+            }
+        }
+        std::size_t expectedPublications = 0;
+        std::set<std::pair<std::string, std::string>> emittedSavedOccurrences;
         for (const auto& emitted : emittedMeshes) {
             if (emitted.ownerDefinitionIdentifier.empty()
                 || emitted.mesh.definitionIdentifier.empty()
-                || emitted.instance.entityIdentifier.empty()
-                || emitted.instance.decalDerivedAppearances.empty())
+                || emitted.instance.entityIdentifier.empty())
                 return false;
             const auto owner = std::find_if(impl.owners.begin(),
                 impl.owners.end(), [&](const auto& value) {
                     return value.definitionIdentifier
                         == emitted.ownerDefinitionIdentifier;
                 });
-            if (owner == impl.owners.end()
-                || emitted.mesh.paintedAtlasMasterDefinitionIdentifier
-                    != owner->definitionIdentifier)
+            const bool hasOwner = owner != impl.owners.end();
+            bool savedMember = false;
+            for (std::size_t index = 0; index < impl.savedGroups.size(); ++index) {
+                const auto& group = impl.savedGroups[index];
+                const auto& members = impl.savedGroupLayout->groups[index].memberDefinitions;
+                if (std::find(members.begin(), members.end(),
+                        emitted.ownerDefinitionIdentifier) == members.end()) continue;
+                if (savedMember || std::count_if(group->result->occurrences.entries.begin(),
+                        group->result->occurrences.entries.end(), [&](const auto& occurrence) {
+                            return occurrence.definitionIdentifier == emitted.ownerDefinitionIdentifier
+                                && occurrence.occurrenceIdentifier == emitted.instance.entityIdentifier;
+                        }) != 1) return false;
+                savedMember = true;
+            }
+            if (!hasOwner && !savedMember) return false;
+            if (emitted.mesh.paintedAtlasMasterDefinitionIdentifier
+                    != emitted.ownerDefinitionIdentifier
+                || (hasOwner
+                    && emitted.ownerDefinitionIdentifier
+                        != owner->definitionIdentifier)
+                || (hasOwner
+                    && emitted.instance.decalDerivedAppearances.empty())
+                || (!hasOwner
+                    && !emitted.instance.decalDerivedAppearances.empty()))
+                return false;
+            if (hasOwner) ++expectedPublications;
+            if (savedMember && !emittedSavedOccurrences.emplace(
+                    emitted.instance.entityIdentifier,
+                    emitted.ownerDefinitionIdentifier).second)
                 return false;
             const auto finalInstance = std::find_if(finalScene.instances.begin(),
                 finalScene.instances.end(), [&](const auto& value) {
@@ -19082,21 +19623,34 @@ bool OcctSceneSnapshotBuilder::FinalizePrivateExportDecals(
                         emitted.mesh.cornerTangents.data(),
                         finalMesh.cornerTangents.size() * sizeof(Float4)) != 0))
                 return false;
-            for (const auto& appearance :
-                    emitted.instance.decalDerivedAppearances)
-                if (appearance.ownerDefinitionIdentifier
+            for (const auto& appearance : emitted.instance.decalDerivedAppearances)
+                if (!hasOwner || appearance.ownerDefinitionIdentifier
                         != owner->definitionIdentifier)
                     return false;
         }
+        if (impl.destination.values.size() != expectedPublications)
+            return false;
+        std::size_t expectedSavedOccurrences = 0;
+        for (const auto& group : impl.savedGroups) {
+            if (!group || !group->result) return false;
+            for (const auto& occurrence : group->result->occurrences.entries) {
+                if (!emittedSavedOccurrences.count({
+                        occurrence.occurrenceIdentifier,
+                        occurrence.definitionIdentifier})) return false;
+                ++expectedSavedOccurrences;
+            }
+        }
+        if (emittedSavedOccurrences.size() != expectedSavedOccurrences)
+            return false;
         for (const auto& value : impl.destination.values) {
             decal_layer::bake::PublishedDerivative reopened;
             if (!decal_layer::bake::publication::Valid(value)
                 || !decal_layer::bake::publication::Lookup(
                     impl.destination, value.owner, value.inputKey, reopened)
                 || reopened.bakeKey != value.bakeKey) return false;
-            artifact.inputKeys.push_back(DecalDigestText(value.inputKey));
-            artifact.bakeSeals.push_back(DecalDigestText(value.bakeKey));
         }
+        artifact.inputKeys = inputKeys;
+        artifact.bakeSeals = bakeSeals;
         if (!impl.recheckProtected(cancelled,
                 FailureSite::ProtectedRecheckStorage)) return false;
         SceneCopyStorage sceneBytes;
@@ -21317,6 +21871,10 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             OcctPaintedAtlasDerivative paintedDerivative;
             bool painted = false;
         };
+        using SavedMemberGroupMap =
+            std::unordered_map<std::string, SavedGroupOwner*>;
+        decal_layer::bake::accounting::Ticket savedBindingStorage;
+        SavedMemberGroupMap savedMemberGroups;
         std::vector<ExportOccurrence> occurrences;
         std::vector<DefinitionData> definitions;
         std::unordered_map<std::string, std::size_t> definitionIndices;
@@ -21331,6 +21889,106 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         TopoDS_Compound compound;
         BRep_Builder builder;
         builder.MakeCompound(compound);
+        // Complete strict membership, including selected-out members, supplies
+        // the saved-settings definitions. Occurrences below still select only
+        // the requested output instances. All r4-added map keys and definition
+        // vector storage are admitted before the first reserve/emplace.
+        if (decalCapture && decalCapture->impl_
+            && !decalCapture->impl_->savedGroups.empty()) {
+            using Dimension =
+                decal_layer::bake::accounting::StorageDimension;
+            using Retention = decal_layer::bake::accounting::Retention;
+            using Site = decal_layer::bake::accounting::FailureSite;
+            const auto operation =
+                decalCapture->impl_->operationLedger.view();
+            std::size_t savedMemberCount = 0;
+            std::size_t bindingBytes = 0;
+            for (const auto& group : decalCapture->impl_->savedGroups) {
+                if (!group || group->measured.size()
+                        != group->capture.members.members.size()
+                    || !AddProtectedBytes(
+                        savedMemberCount, group->measured.size()))
+                    return {};
+                for (const auto& member : group->measured)
+                    if (!AddProtectedBytes(bindingBytes,
+                            2U * (member.definitionIdentifier.capacity()
+                                + 1U)))
+                        return {};
+            }
+            std::size_t maximumDefinitionCount = 0;
+            if (!AddProtectedBytes(maximumDefinitionCount,
+                    source.meshes.size())
+                || !AddProtectedBytes(
+                    maximumDefinitionCount, savedMemberCount))
+                return {};
+            std::size_t fixedBytes = 0;
+            if (!operation.CheckedProduct(maximumDefinitionCount,
+                    sizeof(DefinitionData)
+                        + sizeof(decltype(definitionIndices)::value_type)
+                        + 2U * sizeof(void*),
+                    1U, fixedBytes, Site::ProtectedEvidenceStorage)
+                || !AddProtectedBytes(bindingBytes, fixedBytes)
+                || !operation.CheckedProduct(savedMemberCount,
+                    sizeof(SavedMemberGroupMap::value_type)
+                        + 2U * sizeof(void*),
+                    1U, fixedBytes, Site::ProtectedEvidenceStorage)
+                || !AddProtectedBytes(bindingBytes, fixedBytes)
+                || !AcquireProtectedStorage(savedBindingStorage, operation,
+                    Dimension::PrivateStorage, bindingBytes,
+                    Retention::Retained,
+                    Site::ProtectedEvidenceStorage))
+                return {};
+            try {
+                if (!operation.EnterAllocation(
+                        Site::ProtectedEvidenceStorage))
+                    return {};
+                savedMemberGroups.reserve(savedMemberCount);
+                if (!operation.EnterAllocation(
+                        Site::ProtectedEvidenceStorage))
+                    return {};
+                definitionIndices.reserve(maximumDefinitionCount);
+                if (!operation.EnterAllocation(
+                        Site::ProtectedEvidenceStorage))
+                    return {};
+                definitions.reserve(maximumDefinitionCount);
+                for (auto& group : decalCapture->impl_->savedGroups) {
+                    for (std::size_t index = 0;
+                         index < group->measured.size(); ++index) {
+                        const auto& member = group->measured[index];
+                        if (!operation.EnterAllocation(
+                                Site::ProtectedEvidenceStorage)
+                            || !savedMemberGroups.emplace(
+                                member.definitionIdentifier,
+                                group.get()).second)
+                            return {};
+                        DefinitionData definition;
+                        definition.label =
+                            group->capture.members.members[index].ownerLabel;
+                        definition.shape = member.detached;
+                        definition.representation =
+                            document->GeometryRepresentationForLabel(
+                                definition.label);
+                        if (definition.shape.IsNull()
+                            || definition.representation
+                                == OcctGeometryRepresentation::Invalid
+                            || definition.representation
+                                == OcctGeometryRepresentation::TriangleMesh
+                            || !operation.EnterAllocation(
+                                Site::ProtectedEvidenceStorage)
+                            || !definitionIndices.emplace(
+                                member.definitionIdentifier,
+                                definitions.size()).second)
+                            return {};
+                        builder.Add(compound, definition.shape);
+                        definitions.push_back(std::move(definition));
+                    }
+                }
+            } catch (const std::bad_alloc&) {
+                operation.AllocationFailed(
+                    Site::ProtectedEvidenceStorage);
+                return {};
+            }
+        }
         XCAFPrs_DocumentExplorer explorer(ocaf,
             XCAFPrs_DocumentExplorerFlags_OnlyLeafNodes, XCAFPrs_Style());
         for (; explorer.More(); explorer.Next()) {
@@ -21433,6 +22091,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         std::vector<PrivateExportFaceCorrespondence> finalCorrespondence;
         std::vector<std::string> finalInputKeys;
         std::vector<std::string> finalBakeSeals;
+        std::size_t savedProofCount = 0;
         std::vector<std::string> finalOutputRoles;
         std::vector<std::uint64_t> finalOutputRoleBytes;
         std::vector<PrivateExportRawEvidenceRecord::RoleContentWitness>
@@ -21442,11 +22101,13 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         std::size_t finalResidentBytes = 0;
         std::size_t finalLayoutResolution = 0;
         std::size_t finalLayoutChartCount = 0;
+        decal_layer::bake::accounting::Ticket savedDerivativeStorage;
         std::unordered_map<std::string, OcctPaintedAtlasDerivative>
             finalDerivatives;
         std::unordered_map<std::string,
             std::shared_ptr<const painted_atlas_bake::owner::ExportBake>>
             finalBakes;
+        painted_atlas_bake::owner::AggregateBakePlan savedAggregate;
         if (decalCapture && decalCapture->impl_) {
             using PrivateDimension =
                 decal_layer::bake::accounting::StorageDimension;
@@ -21458,7 +22119,6 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             std::size_t receiverCount = 0;
             std::size_t sourceCount = 0;
             std::size_t correspondenceBytes = 0;
-            std::size_t roleWitnessOwnerBytes = 0;
             for (const auto& owner : decalCapture->impl_->owners) {
                 if (!AddProtectedBytes(receiverCount, owner.receivers.size())
                     || !AddProtectedBytes(sourceCount,
@@ -21470,42 +22130,26 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                         PrivateSite::ProtectedCorrespondenceStorage)
                     || !AddProtectedBytes(
                         correspondenceBytes, ownerStrings)) return {};
-                if (!operation.CheckedProduct(owner.paintedSources.size(),
-                        owner.definitionIdentifier.capacity() + 1U, 1U,
-                        ownerStrings,
-                        PrivateSite::ProtectedEvidenceStorage)
-                    || !AddProtectedBytes(
-                        roleWitnessOwnerBytes, ownerStrings)) return {};
+            }
+            for (const auto& group : decalCapture->impl_->savedGroups) {
+                if (!group) return {};
+                for (std::size_t member = 0;
+                     member < group->measured.size(); ++member) {
+                    if (!AddProtectedBytes(sourceCount,
+                            group->productionSources.size())) return {};
+                }
             }
             std::size_t correspondenceVectorBytes = 0;
-            std::size_t evidenceBytes = 0;
             if (!operation.CheckedProduct(receiverCount,
                     sizeof(PrivateExportFaceCorrespondence), 1U,
                     correspondenceVectorBytes,
                     PrivateSite::ProtectedCorrespondenceStorage)
                 || !AddProtectedBytes(correspondenceBytes,
                     correspondenceVectorBytes)
-                || !operation.CheckedProduct(occurrences.size(),
-                    2U * sizeof(std::string) + 130U, 1U, evidenceBytes,
-                    PrivateSite::ProtectedEvidenceStorage)
-                || !operation.CheckedProduct(sourceCount,
-                    sizeof(std::string) + 32U + sizeof(std::uint64_t)
-                        + sizeof(PrivateExportRawEvidenceRecord::
-                            RoleContentWitness), 1U,
-                    correspondenceVectorBytes,
-                    PrivateSite::ProtectedEvidenceStorage)
-                || !AddProtectedBytes(evidenceBytes,
-                    correspondenceVectorBytes)
-                || !AddProtectedBytes(evidenceBytes,
-                    roleWitnessOwnerBytes)
                 || !AcquireProtectedStorage(finalCorrespondenceStorage,
                     operation, PrivateDimension::PrivateStorage,
                     correspondenceBytes, PrivateRetention::Retained,
-                    PrivateSite::ProtectedCorrespondenceStorage)
-                || !AcquireProtectedStorage(finalEvidenceStorage,
-                    operation, PrivateDimension::PrivateStorage,
-                    evidenceBytes, PrivateRetention::Retained,
-                    PrivateSite::ProtectedEvidenceStorage))
+                    PrivateSite::ProtectedCorrespondenceStorage))
                 return {};
             finalCorrespondence.reserve(receiverCount);
             finalInputKeys.reserve(occurrences.size());
@@ -21517,6 +22161,286 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             if (debugObservation)
                 debugObservation->failureStage = "building-final-atlas";
 #endif
+            // Account the r4 per-member derivative maps before their first
+            // bucket/node/vector allocation. The shared ExportBake stays an
+            // alias; only each copied bake value and UV assignment is charged.
+            std::size_t savedMemberCount = 0;
+            std::size_t derivativeBytes = 0;
+            for (const auto& group : decalCapture->impl_->savedGroups) {
+                if (!group) return {};
+                for (const auto& member : group->measured) {
+                    const auto found =
+                        definitionIndices.find(member.definitionIdentifier);
+                    if (found == definitionIndices.end()
+                        || !AddProtectedBytes(savedMemberCount, 1U)
+                        || !AddProtectedBytes(derivativeBytes,
+                            2U * (member.definitionIdentifier.capacity()
+                                + 1U)))
+                        return {};
+                    std::size_t copiedBytes = 0;
+                    if (!operation.CheckedProduct(
+                            group->capture.savedBake.bindings.size(),
+                            sizeof(painted_atlas_bake::BindingFence), 1U,
+                            copiedBytes,
+                            PrivateSite::ProtectedEvidenceStorage)
+                        || !AddProtectedBytes(
+                            derivativeBytes, copiedBytes)
+                        || !operation.CheckedProduct(
+                            group->capture.savedBake.resources.size(),
+                            sizeof(painted_atlas_bake::BakedResource), 1U,
+                            copiedBytes,
+                            PrivateSite::ProtectedEvidenceStorage)
+                        || !AddProtectedBytes(
+                            derivativeBytes, copiedBytes)
+                        || !operation.CheckedProduct(
+                            definitions[found->second].mesh.indices.size(),
+                            sizeof(std::array<double, 2>), 1U,
+                            copiedBytes,
+                            PrivateSite::ProtectedEvidenceStorage)
+                        || !AddProtectedBytes(
+                            derivativeBytes, copiedBytes))
+                        return {};
+                }
+            }
+            std::size_t maximumDerivativeCount = savedMemberCount;
+            if (!AddProtectedBytes(maximumDerivativeCount,
+                    decalCapture->impl_->owners.size()))
+                return {};
+            std::size_t mapBytes = 0;
+            if (!operation.CheckedProduct(maximumDerivativeCount,
+                    sizeof(decltype(finalDerivatives)::value_type)
+                        + sizeof(decltype(finalBakes)::value_type)
+                        + 4U * sizeof(void*),
+                    1U, mapBytes,
+                    PrivateSite::ProtectedEvidenceStorage)
+                || !AddProtectedBytes(derivativeBytes, mapBytes)
+                || !AcquireProtectedStorage(savedDerivativeStorage,
+                    operation, PrivateDimension::PrivateStorage,
+                    derivativeBytes, PrivateRetention::Retained,
+                    PrivateSite::ProtectedEvidenceStorage))
+                return {};
+            try {
+                if (!operation.EnterAllocation(
+                        PrivateSite::ProtectedEvidenceStorage))
+                    return {};
+                finalDerivatives.reserve(maximumDerivativeCount);
+                if (!operation.EnterAllocation(
+                        PrivateSite::ProtectedEvidenceStorage))
+                    return {};
+                finalBakes.reserve(maximumDerivativeCount);
+            } catch (const std::bad_alloc&) {
+                operation.AllocationFailed(
+                    PrivateSite::ProtectedEvidenceStorage);
+                return {};
+            }
+
+            // Prepare all saved jobs before sealing the saved aggregate. Each
+            // local occurrence copy has a scope ticket, and the helper obtains
+            // a second retained ticket before copying it into pending/result
+            // storage.
+            for (auto& group : decalCapture->impl_->savedGroups) {
+                // The public requested-quality plan, unlike the passive
+                // capture record, opts into Nb's typed final-triangle lineage.
+                group->retainOriginalPaintLineage = true;
+                std::size_t occurrenceCount = 0;
+                std::size_t occurrenceBytes = 0;
+                for (const auto& occurrence : occurrences) {
+                    const auto& definition =
+                        definitions[occurrence.definition];
+                    const auto member = savedMemberGroups.find(
+                        definition.mesh.definitionIdentifier);
+                    if (member == savedMemberGroups.end()
+                        || member->second != group.get())
+                        continue;
+                    const auto& instance =
+                        source.instances[occurrence.instance];
+                    if (!AddProtectedBytes(occurrenceCount, 1U)
+                        || !AddProtectedBytes(occurrenceBytes,
+                            instance.entityIdentifier.capacity() + 1U)
+                        || !AddProtectedBytes(occurrenceBytes,
+                            definition.mesh.definitionIdentifier.capacity()
+                                + 1U))
+                        return {};
+                }
+                std::size_t occurrenceVectorBytes = 0;
+                if (!operation.CheckedProduct(occurrenceCount,
+                        sizeof(SavedGroupOccurrenceScope::Entry), 1U,
+                        occurrenceVectorBytes,
+                        PrivateSite::ProtectedEvidenceStorage)
+                    || !AddProtectedBytes(
+                        occurrenceBytes, occurrenceVectorBytes))
+                    return {};
+                decal_layer::bake::accounting::Ticket occurrenceStorage;
+                SavedGroupOccurrenceScope scope;
+                if (!AcquireProtectedStorage(occurrenceStorage, operation,
+                        PrivateDimension::PrivateStorage, occurrenceBytes,
+                        PrivateRetention::Retained,
+                        PrivateSite::ProtectedEvidenceStorage))
+                    return {};
+                try {
+                    if (occurrenceCount != 0
+                        && !operation.EnterAllocation(
+                            PrivateSite::ProtectedEvidenceStorage))
+                        return {};
+                    scope.entries.reserve(occurrenceCount);
+                    for (const auto& occurrence : occurrences) {
+                        const auto& definition =
+                            definitions[occurrence.definition];
+                        const auto member = savedMemberGroups.find(
+                            definition.mesh.definitionIdentifier);
+                        if (member == savedMemberGroups.end()
+                            || member->second != group.get())
+                            continue;
+                        const auto& instance =
+                            source.instances[occurrence.instance];
+                        if (!operation.EnterAllocation(
+                                PrivateSite::ProtectedEvidenceStorage))
+                            return {};
+                        scope.entries.push_back({
+                            instance.entityIdentifier,
+                            definition.mesh.definitionIdentifier,
+                            occurrence.instance,
+                            instance.worldFromObject});
+                    }
+                } catch (const std::bad_alloc&) {
+                    operation.AllocationFailed(
+                        PrivateSite::ProtectedEvidenceStorage);
+                    return {};
+                }
+                std::string diagnosis;
+                const auto outcome = PrepareSavedGroupForBatch(*group,
+                    definitions, scope, protectedCancelled, savedAggregate,
+                    diagnosis);
+                if (outcome !=
+                        painted_atlas_bake::owner::Outcome::Prepared) {
+#ifdef DEBUG
+                    if (debugObservation)
+                        debugObservation->failureStage =
+                            "saved-group-prepare-" + diagnosis;
+#endif
+                    return {};
+                }
+            }
+            if (!decalCapture->impl_->savedGroups.empty()
+                && !painted_atlas_bake::owner::SealBakePlan(
+                    savedAggregate)) {
+#ifdef DEBUG
+                if (debugObservation)
+                    debugObservation->failureStage =
+                        "saved-group-aggregate-seal";
+#endif
+                return {};
+            }
+            for (auto& group : decalCapture->impl_->savedGroups) {
+                std::shared_ptr<const SavedGroupFinalResult> sharedResult;
+                std::string diagnosis;
+                const auto outcome = ExecuteSavedGroupForBatch(*group,
+                    savedAggregate, protectedCancelled, sharedResult,
+                    diagnosis);
+                if (outcome !=
+                        painted_atlas_bake::owner::Outcome::Prepared
+                    || !sharedResult) {
+#ifdef DEBUG
+                    if (debugObservation)
+                        debugObservation->failureStage =
+                            "saved-group-execute-" + diagnosis;
+#endif
+                    return {};
+                }
+                const auto& baked = sharedResult->bake;
+                if (LookupSavedGroupFinalResult(*group,
+                        group->capture.savedAtlas.key)
+                        != sharedResult.get()
+                    || baked.assignments.size() != group->measured.size()
+                    || sharedResult->memberDefinitions.size()
+                        != group->measured.size()
+                    || !asset_atlas::PlausibleUVAssignments(
+                        baked.atlas, baked.assignments))
+                    return {};
+                const std::shared_ptr<const
+                    painted_atlas_bake::owner::ExportBake> sharedBake(
+                        sharedResult, &sharedResult->bake);
+                for (std::size_t index = 0;
+                     index < group->measured.size(); ++index) {
+                    const auto& member = group->measured[index];
+                    const auto found =
+                        definitionIndices.find(member.definitionIdentifier);
+                    if (found == definitionIndices.end()
+                        || sharedResult->memberDefinitions[index]
+                            != member.definitionIdentifier)
+                        return {};
+                    const auto& mesh = definitions[found->second].mesh;
+                    const auto& assignment = baked.assignments[index];
+                    if (assignment.member
+                            != group->capture.savedAtlas.members[index].member
+                        || assignment.corners.size() != mesh.indices.size()
+                        || assignment.triangleCount
+                            != mesh.indices.size() / 3U)
+                        return {};
+                    OcctPaintedAtlasDerivative derivative;
+                    try {
+                        if (!operation.EnterAllocation(
+                                PrivateSite::ProtectedEvidenceStorage))
+                            return {};
+                        derivative.bake = baked.bake;
+                        if (!operation.EnterAllocation(
+                                PrivateSite::ProtectedEvidenceStorage))
+                            return {};
+                        derivative.assignment = assignment;
+                        if (!operation.EnterAllocation(
+                                PrivateSite::ProtectedEvidenceStorage)
+                            || !finalDerivatives.emplace(
+                                member.definitionIdentifier,
+                                std::move(derivative)).second
+                            || !operation.EnterAllocation(
+                                PrivateSite::ProtectedEvidenceStorage)
+                            || !finalBakes.emplace(
+                                member.definitionIdentifier,
+                                sharedBake).second)
+                            return {};
+                    } catch (const std::bad_alloc&) {
+                        operation.AllocationFailed(
+                            PrivateSite::ProtectedEvidenceStorage);
+                        return {};
+                    }
+                    for (const auto& output : baked.outputs) {
+                        if (output.png.empty()) return {};
+                        finalOutputRoles.emplace_back(
+                            PrivatePaintedRoleText(
+                                output.descriptor.role));
+                        finalOutputRoleBytes.push_back(output.png.size());
+                        finalRoleContentWitnesses.push_back({
+                            member.definitionIdentifier,
+                            output.descriptor.role, {}, -1});
+                    }
+                    if (!CheckedAdd(finalTriangleCount,
+                            mesh.indices.size() / 3U, finalTriangleCount)
+                        || !CheckedAdd(finalCornerCount,
+                            mesh.indices.size(), finalCornerCount))
+                        return {};
+                }
+                finalInputKeys.push_back(PaintedAtlasDigestText(
+                    baked.atlas.layoutProof));
+                finalBakeSeals.push_back(PaintedAtlasDigestText(
+                    baked.bake.bakeProof));
+                finalLayoutResolution = std::max<std::size_t>(
+                    finalLayoutResolution,
+                    baked.atlas.resolutionTexels);
+                if (!CheckedAdd(finalLayoutChartCount,
+                        baked.atlas.charts.size(),
+                        finalLayoutChartCount))
+                    return {};
+                for (const auto& output : baked.outputs) {
+                    std::size_t resident = 0;
+                    if (!CheckedAdd(output.png.size(),
+                            output.rgba.size(), resident)
+                        || !CheckedAdd(finalResidentBytes,
+                            resident, finalResidentBytes))
+                        return {};
+                }
+            }
+            savedProofCount = finalInputKeys.size();
+            if (finalBakeSeals.size() != savedProofCount) return {};
             for (auto& owner : decalCapture->impl_->owners) {
                 if (protectedCancelled()) return {};
                 const auto found = definitionIndices.find(
@@ -21535,6 +22459,8 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                     debugObservation->failureStage =
                         "constructing-final-member";
 #endif
+                if (savedMemberGroups.find(owner.definitionIdentifier)
+                        == savedMemberGroups.end()) {
                 if (definition.mesh.indices.empty()
                     || definition.mesh.indices.size() % 3 != 0
                     || definition.faces.IsEmpty()) return {};
@@ -21804,6 +22730,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                     || !CheckedAdd(finalCornerCount,
                         definition.mesh.indices.size(),
                         finalCornerCount)) return {};
+                }
                 for (const auto& receiver : owner.receivers) {
                     const Standard_Integer disposableIndex =
                         definition.faces.FindIndex(receiver.disposableFace);
@@ -21857,7 +22784,14 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
 #endif
             }
         }
-        if (decalCapture && (finalCorrespondence.empty()
+        std::size_t expectedReceiverCount = 0;
+        if (decalCapture && decalCapture->impl_)
+            for (const auto& owner : decalCapture->impl_->owners)
+                if (!AddProtectedBytes(
+                        expectedReceiverCount, owner.receivers.size()))
+                    return {};
+        if (decalCapture && (finalCorrespondence.size()
+                    != expectedReceiverCount
                 || finalTriangleCount == 0 || finalCornerCount == 0
                 || finalInputKeys.empty() || finalBakeSeals.empty()))
             return {};
@@ -22030,10 +22964,16 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             roleTextures;
         for (const auto& entry : finalBakes) {
             const auto captured = capturedOwners.find(entry.first);
-            if (captured == capturedOwners.end()) return {};
+            const auto saved = savedMemberGroups.find(entry.first);
             std::set<face_image::Role> expectedRoles;
-            for (const auto& source : captured->second->paintedSources)
-                expectedRoles.insert(source.fence.role);
+            if (saved != savedMemberGroups.end()) {
+                for (const auto& source : saved->second->productionSources)
+                    expectedRoles.insert(source.fence.role);
+            } else {
+                if (captured == capturedOwners.end()) return {};
+                for (const auto& source : captured->second->paintedSources)
+                    expectedRoles.insert(source.fence.role);
+            }
             std::set<face_image::Role> installedRoles;
             std::array<std::int32_t, 5> indices{-1, -1, -1, -1, -1};
             if (!entry.second) return {};
@@ -22203,9 +23143,16 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         if (debugObservation && decalCapture)
             debugObservation->failureStage = "private-occluders-captured";
 #endif
-        finalInputKeys.clear();
-        finalBakeSeals.clear();
+        finalInputKeys.resize(savedProofCount);
+        finalBakeSeals.resize(savedProofCount);
         std::size_t publishedOccurrences = 0;
+        std::size_t expectedPublishedOccurrences = 0;
+        for (const auto& occurrence : occurrences) {
+            const auto& definition = definitions[occurrence.definition];
+            if (capturedOwners.find(definition.mesh.definitionIdentifier)
+                    != capturedOwners.end())
+                ++expectedPublishedOccurrences;
+        }
         for (const auto& occurrence : occurrences) {
             const auto& definitionData = definitions[occurrence.definition];
             const auto captured = capturedOwners.find(
@@ -22297,43 +23244,61 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             if (protectedItem.meshIndex >= source.meshes.size()) return {};
             const auto& protectedMesh =
                 source.meshes[protectedItem.meshIndex];
-            if (protectedMesh.indices.size()
+            const auto savedBinding = savedMemberGroups.find(
+                definitionData.mesh.definitionIdentifier);
+            SavedGroupOwner* const savedGroup = savedBinding
+                    == savedMemberGroups.end() ? nullptr
+                        : savedBinding->second;
+            std::size_t savedMemberIndex = 0;
+            if (savedGroup) {
+                const auto member = std::find_if(savedGroup->measured.begin(),
+                    savedGroup->measured.end(), [&](const auto& value) {
+                        return value.definitionIdentifier
+                            == definitionData.mesh.definitionIdentifier;
+                    });
+                if (member == savedGroup->measured.end()
+                    || !savedGroup->result) return {};
+                savedMemberIndex = std::size_t(
+                    member - savedGroup->measured.begin());
+            } else if (protectedMesh.indices.size()
                     != finalMesh.indices.size()) return {};
 #ifdef DEBUG
             if (debugObservation)
                 debugObservation->failureStage = "receiver-base-uv-storage";
 #endif
             std::size_t baseUVBytes = 0;
-            if (!privateOperation.CheckedProduct(
+            if (!savedGroup && !privateOperation.CheckedProduct(
                     protectedMesh.indices.size(),
                     sizeof(decal_layer::bake::UV), 1, baseUVBytes,
                     PrivateSite::ReceiverProofStorage)) return {};
             decal_layer::bake::accounting::Ticket baseUVTicket;
-            if (!baseUVTicket.acquire(privateOperation,
+            if (!savedGroup && (!baseUVTicket.acquire(privateOperation,
                     PrivateDimension::PrivateStorage, baseUVBytes,
                     PrivateRetention::Scratch,
                     PrivateSite::ReceiverProofStorage)
                 || !privateOperation.EnterAllocation(
-                    PrivateSite::ReceiverProofStorage)) return {};
+                    PrivateSite::ReceiverProofStorage))) return {};
 #ifdef DEBUG
             if (debugObservation)
                 debugObservation->failureStage = "receiver-base-uv-values";
 #endif
             std::vector<decal_layer::bake::UV> baseUVByCorner;
-            baseUVByCorner.reserve(protectedMesh.indices.size());
-            for (const std::uint32_t vertexIndex :
-                 protectedMesh.indices) {
-                if (vertexIndex >= protectedMesh.vertices.size())
-                    return {};
-                const Vertex& vertex =
-                    protectedMesh.vertices[vertexIndex];
-                if (!IsFinite(vertex.textureU)
-                    || !IsFinite(vertex.textureV)
-                    || vertex.textureU < 0.0f || vertex.textureU > 1.0f
-                    || vertex.textureV < 0.0f || vertex.textureV > 1.0f)
-                    return {};
-                baseUVByCorner.push_back({vertex.textureU,
-                    vertex.textureV});
+            if (!savedGroup) {
+                baseUVByCorner.reserve(protectedMesh.indices.size());
+                for (const std::uint32_t vertexIndex :
+                     protectedMesh.indices) {
+                    if (vertexIndex >= protectedMesh.vertices.size())
+                        return {};
+                    const Vertex& vertex =
+                        protectedMesh.vertices[vertexIndex];
+                    if (!IsFinite(vertex.textureU)
+                        || !IsFinite(vertex.textureV)
+                        || vertex.textureU < 0.0f || vertex.textureU > 1.0f
+                        || vertex.textureV < 0.0f || vertex.textureV > 1.0f)
+                        return {};
+                    baseUVByCorner.push_back({vertex.textureU,
+                        vertex.textureV});
+                }
             }
 #ifdef DEBUG
             if (debugObservation)
@@ -22379,6 +23344,23 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                         layerIndices.push_back(layerIndex);
                 }
                 if (layerIndices.empty()) return {};
+                SavedOriginalPaintReceiverInputs savedOriginalPaint;
+                const std::vector<decal_layer::bake::UV>* receiverBaseUVs =
+                    &baseUVByCorner;
+                const SavedOriginalPaintView* originalPaint = nullptr;
+                if (savedGroup) {
+#ifdef DEBUG
+                    if (debugObservation)
+                        debugObservation->failureStage =
+                            "receiver-saved-original-paint";
+#endif
+                    if (!PrepareSavedOriginalPaintReceiverInputs(*savedGroup,
+                            *savedGroup->result, definitions,
+                            savedMemberIndex, receiver.disposableFaceIndex,
+                            finalMesh, savedOriginalPaint)) return {};
+                    receiverBaseUVs = &savedOriginalPaint.baseUVByCorner;
+                    originalPaint = &savedOriginalPaint.originalPaint;
+                }
                 decal_layer::bake::Input realInput;
                 decal_layer::ReceiverReceipt realReceiver;
                 const OrdinaryDecalFaceInputs ordinaryInputs{
@@ -22389,7 +23371,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                     finalMesh.indices,
                     finalMesh.primitives,
                     *primitive,
-                    &baseUVByCorner,
+                    receiverBaseUVs,
                     finalMesh.tangentBasis,
                     finalMesh.cornerTangents,
                     definitionData.sourceOrigin,
@@ -22410,6 +23392,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                     decalCapture->impl_->metersPerUnit,
                     privateOperation,
                     decalCapture->impl_->budget,
+                    originalPaint,
                 };
 #ifdef DEBUG
                 if (debugObservation)
@@ -22650,7 +23633,8 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         if (debugObservation && decalCapture)
             debugObservation->failureStage = "private-appearances-installed";
 #endif
-        if (decalCapture && (publishedOccurrences == 0
+        if (decalCapture && (publishedOccurrences
+                    != expectedPublishedOccurrences
                 || decalCapture->impl_->destination.values.size()
                     != publishedOccurrences)) return {};
 #ifdef DEBUG
@@ -22908,11 +23892,31 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 if (!DeepStringStorageBytes(
                         witness.ownerDefinitionIdentifier, evidenceBytes))
                     return {};
+            // The completed vectors and strings supply their actual storage
+            // capacities. Reserve that exact evidence charge before handing
+            // the evidence to the terminal binder and finalizer.
+            if (!AcquireProtectedStorage(finalEvidenceStorage,
+                    protectedOperation,
+                    decal_layer::bake::accounting::StorageDimension::
+                        PrivateStorage,
+                    evidenceBytes,
+                    decal_layer::bake::accounting::Retention::Retained,
+                    decal_layer::bake::accounting::FailureSite::
+                        ProtectedEvidenceStorage))
+                return {};
             if (correspondenceBytes > finalCorrespondenceStorage.bytes
-                || evidenceBytes > finalEvidenceStorage.bytes)
+                || evidenceBytes != finalEvidenceStorage.bytes)
                 return {};
         }
         if (!decalCapture) return result;
+        if (!decalCapture->impl_->savedGroups.empty()) {
+            if (!BindExecutedSavedGroupLayoutRecord(
+                    decalCapture->impl_->savedGroups, savedAggregate,
+                    decalCapture->impl_->savedGroupLayoutControlTicket,
+                    decalCapture->impl_->savedGroupLayout)) return {};
+            decalCapture->impl_->savedGroupLayoutReason =
+                SavedGroupAllMemberLayoutReason::Present;
+        }
         using TerminalDimension =
             decal_layer::bake::accounting::StorageDimension;
         using TerminalRetention =
@@ -22926,13 +23930,20 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         decal_layer::bake::accounting::Ticket emittedPrivateTicket;
         std::vector<PrivateExportFinalMesh> emittedMeshes;
         SceneCopyStorage emittedBytes;
-        if (!terminalOperation.CheckedProduct(publishedOccurrences,
+        std::size_t emittedOccurrenceCount = 0;
+        for (const auto& occurrence : occurrences) {
+            const auto& definition = definitions[occurrence.definition];
+            if (finalBakes.find(definition.mesh.definitionIdentifier)
+                    != finalBakes.end())
+                ++emittedOccurrenceCount;
+        }
+        if (!terminalOperation.CheckedProduct(emittedOccurrenceCount,
                 sizeof(PrivateExportFinalMesh), 1U, emittedBytes.privateBytes,
                 TerminalSite::ProtectedEmittedStorage)) return {};
         for (const auto& occurrence : occurrences) {
             const auto& definition = definitions[occurrence.definition];
-            if (capturedOwners.find(definition.mesh.definitionIdentifier)
-                    == capturedOwners.end()) continue;
+            if (finalBakes.find(definition.mesh.definitionIdentifier)
+                    == finalBakes.end()) continue;
             const auto& instance = result->instances[occurrence.instance];
             if (instance.meshIndex >= result->meshes.size()
                 || !DeepStringStorageBytes(
@@ -22945,7 +23956,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         }
         if (!AcquireProtectedStorage(emittedVectorTicket, terminalOperation,
                 TerminalDimension::PrivateStorage,
-                publishedOccurrences * sizeof(PrivateExportFinalMesh),
+                emittedOccurrenceCount * sizeof(PrivateExportFinalMesh),
                 TerminalRetention::Retained,
                 TerminalSite::ProtectedEmittedStorage)
             || !AcquireProtectedStorage(emittedNumericTicket,
@@ -22959,15 +23970,15 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             || !AcquireProtectedStorage(emittedPrivateTicket,
                 terminalOperation, TerminalDimension::PrivateStorage,
                 emittedBytes.privateBytes
-                    - publishedOccurrences * sizeof(PrivateExportFinalMesh),
+                    - emittedOccurrenceCount * sizeof(PrivateExportFinalMesh),
                 TerminalRetention::Retained,
                 TerminalSite::ProtectedEmittedStorage))
             return {};
-        emittedMeshes.reserve(publishedOccurrences);
+        emittedMeshes.reserve(emittedOccurrenceCount);
         for (const auto& occurrence : occurrences) {
             const auto& definition = definitions[occurrence.definition];
-            if (capturedOwners.find(definition.mesh.definitionIdentifier)
-                    == capturedOwners.end()) continue;
+            if (finalBakes.find(definition.mesh.definitionIdentifier)
+                    == finalBakes.end()) continue;
             const auto& instance = result->instances[occurrence.instance];
             if (instance.meshIndex >= result->meshes.size()) return {};
             emittedMeshes.push_back({definition.mesh.definitionIdentifier,
@@ -22991,7 +24002,8 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             return {};
         PrivateExportDecalArtifact artifact;
         if (!FinalizePrivateExportDecals(*decalCapture, *result,
-                finalCorrespondence, emittedMeshes, cancelled, artifact)
+                finalCorrespondence, emittedMeshes, finalInputKeys,
+                finalBakeSeals, cancelled, artifact)
             || !artifact.scene) return {};
         artifact.savedGroupLayout = decalCapture->impl_->savedGroupLayout;
         artifact.savedGroupLayoutReason =
@@ -23089,7 +24101,14 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             record->roleContentWitnesses = finalRoleContentWitnesses;
             record->savedGroupLayout = artifact.savedGroupLayout;
             record->returnedSceneAlias = artifact.scene.get();
-            record->memberCount = artifact.correspondence.size();
+            std::set<std::string> finalMembers;
+            for (const auto& value : artifact.correspondence)
+                finalMembers.insert(value.ownerDefinitionIdentifier);
+            if (artifact.savedGroupLayout)
+                for (const auto& group : artifact.savedGroupLayout->groups)
+                    finalMembers.insert(group.memberDefinitions.begin(),
+                        group.memberDefinitions.end());
+            record->memberCount = finalMembers.size();
             record->layoutCount = artifact.savedGroupLayout
                 ? std::accumulate(artifact.savedGroupLayout->groups.begin(),
                     artifact.savedGroupLayout->groups.end(), std::size_t(0),
@@ -23115,7 +24134,15 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                     record->correspondence.end(), [&](const auto& item) {
                         return item.ownerDefinitionIdentifier
                             == witness.ownerDefinitionIdentifier;
-                    });
+                    }) || (record->savedGroupLayout && std::any_of(
+                        record->savedGroupLayout->groups.begin(),
+                        record->savedGroupLayout->groups.end(),
+                        [&](const auto& group) {
+                            return std::find(group.memberDefinitions.begin(),
+                                group.memberDefinitions.end(),
+                                witness.ownerDefinitionIdentifier)
+                                    != group.memberDefinitions.end();
+                        }));
                 if (!ownerPresent || witness.returnedTextureIndex < 0
                     || std::size_t(witness.returnedTextureIndex)
                         >= artifact.scene->textures.size()
@@ -23133,8 +24160,8 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                         + PaintedAtlasDigestText(witness.contentDigest))
                     roleContentComplete = false;
             }
-            record->complete = !record->correspondence.empty()
-                && record->memberCount != 0 && record->layoutCount != 0
+            record->complete = record->memberCount != 0
+                && record->layoutCount != 0
                 && record->finalTriangleCount != 0
                 && record->finalCornerCount != 0
                 && record->returnedSceneAlias != nullptr

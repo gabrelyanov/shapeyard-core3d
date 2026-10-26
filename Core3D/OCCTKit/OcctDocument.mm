@@ -9411,8 +9411,44 @@ Standard_Boolean ValidateGeometryDocument(
         // Charge every retained composite source independently. The visible
         // carrier is charged by the ordinary definition traversal below.
         const auto validCompositeSolid = [&](const TopoDS_Shape& source) {
-            if(ClassifyDefinitionGeometry(source,&aBudget)!=DefinitionGeometryClass::BRep
-                ||!BRepCheck_Analyzer(source,Standard_True).IsValid())return false;
+            if(ClassifyDefinitionGeometry(source,&aBudget)!=DefinitionGeometryClass::BRep)
+                return false;
+            // The predicates below may change TShape bookkeeping (in particular
+            // Free). Retained sources are immutable and shared across Undo/Redo.
+            // Preserve their flags on every exit without changing proof inputs.
+            struct SourceFlags final {
+                struct Entry {
+                    Handle(TopoDS_TShape) shape;
+                    std::array<Standard_Boolean, 8> flags;
+                };
+                std::vector<Entry> entries;
+                ~SourceFlags() {
+                    for (const auto& entry : entries) {
+                        const auto& shape = entry.shape;
+                        shape->Free(entry.flags[0]);
+                        shape->Modified(entry.flags[1]);
+                        shape->Checked(entry.flags[2]); // Modified(true) clears Checked.
+                        shape->Orientable(entry.flags[3]);
+                        shape->Closed(entry.flags[4]);
+                        shape->Infinite(entry.flags[5]);
+                        shape->Convex(entry.flags[6]);
+                        shape->Locked(entry.flags[7]);
+                    }
+                }
+            } restore;
+            // Classification above has already bounded and charged this exact
+            // stored topology. Snapshot before the first mutating predicate.
+            TopTools_IndexedMapOfShape topology;
+            TopExp::MapShapes(source, topology);
+            topology.Add(source);
+            restore.entries.reserve(topology.Extent());
+            for (Standard_Integer index = 1; index <= topology.Extent(); ++index) {
+                const auto& shape = topology(index).TShape();
+                restore.entries.push_back({shape, {{shape->Free(), shape->Modified(),
+                    shape->Checked(), shape->Orientable(), shape->Closed(),
+                    shape->Infinite(), shape->Convex(), shape->Locked()}}});
+            }
+            if(!BRepCheck_Analyzer(source,Standard_True).IsValid())return false;
             unsigned shells=0;for(TopExp_Explorer shell(source,TopAbs_SHELL);shell.More();shell.Next()){
                 ++shells;if(!BRep_Tool::IsClosed(shell.Current()))return false;
             }
@@ -11692,6 +11728,10 @@ bool PairMetadata(const OcctExactLabelReceipt& exact,
     } catch (...) { metadata = {}; return false; }
 }
 
+bool PairPersistedSource(const TopoDS_Shape& source,
+                         const Handle(TDocStd_Document)& document,
+                         TopoDS_Shape& output) noexcept;
+
 bool PairDefinition(const ap::PairCapture::State& state,
                     const std::array<pb::OriginalAnalyticProjection, 2>& projections,
                     const std::array<std::array<double, 16>, 2>& matrices,
@@ -11887,8 +11927,15 @@ bool PairDefinition(const ap::PairCapture::State& state,
             }
             effective.metadata = original.metadata;
             core3d::retained_recipe::Digest geometry{}, recipe{}, placement{};
-            if (!core3d::receipt::GeometryDigestForPolicy(
-                    source.boundRoot, geometry, false)
+            TopoDS_Shape persistedSource;
+            std::string sourceBytes;
+            if (!PairPersistedSource(source.boundRoot,
+                    state.owner->Document(), persistedSource)
+                || !core3d::retained_part_boolean::ExactShapeBytes(
+                    persistedSource, sourceBytes)
+                || !core3d::composite_recipe::Hash(
+                    std::vector<std::uint8_t>(sourceBytes.begin(), sourceBytes.end()),
+                    geometry)
                 || !core3d::composite_recipe::Hash(recipes[index], recipe)
                 || !PairHash(matrices[index].data(), sizeof(matrices[index]), placement))
                 return false;
@@ -11916,22 +11963,24 @@ bool PairDefinition(const ap::PairCapture::State& state,
     } catch (...) { definition = {}; recipes = {}; return false; }
 }
 
-bool PairPersistenceSource(const TopoDS_Shape& source,
-                           const core3d::retained_recipe::Digest& expected,
-                           TopoDS_Shape& output) noexcept {
+bool PairPersistedSource(const TopoDS_Shape& source,
+                         const Handle(TDocStd_Document)& document,
+                         TopoDS_Shape& output) noexcept {
     output.Nullify();
     try {
-        if (source.IsNull()) return false;
+        if (source.IsNull() || document.IsNull()
+            || document->StorageFormatVersion() < TDocStd_FormatVersion_VERSION_10
+            || document->StorageFormatVersion() > TDocStd_FormatVersion_CURRENT)
+            return false;
         // Validation may change OCCT bookkeeping flags. Touch only a deep
         // copy; the caller's captured source remains byte-for-byte unchanged.
         BRepBuilderAPI_Copy copied(source, Standard_True, Standard_False);
         if (!copied.IsDone() || copied.Shape().IsNull()) return false;
-        output = copied.Shape();
-        if (!core3d::retained_part_boolean::IsOneValidForwardSolid(output)) {
-            output.Nullify();
+        TopoDS_Shape normalized = copied.Shape();
+        if (!core3d::retained_part_boolean::IsOneValidForwardSolid(normalized)) {
             return false;
         }
-        std::vector<std::pair<TopoDS_Shape, unsigned>> pending{{output, 0}};
+        std::vector<std::pair<TopoDS_Shape, unsigned>> pending{{normalized, 0}};
         std::size_t nodes = 0;
         while (!pending.empty()) {
             auto current = std::move(pending.back());
@@ -11951,6 +12000,60 @@ bool PairPersistenceSource(const TopoDS_Shape& source,
                 pending.emplace_back(child.Value(), current.second + 1);
             }
         }
+        // Commit and retain the document codec's form, including its exact
+        // bookkeeping bytes. Reading this form again is a measured fixed point.
+        // Version 12 uses the direct shape codec; older documents use a shape set.
+        const bool quick = document->StorageFormatVersion()
+            >= TDocStd_FormatVersion_VERSION_12;
+        std::ostringstream stream(std::ios::out | std::ios::binary);
+        stream.imbue(std::locale::classic());
+        Standard_Integer shapeID = 0, locationID = 0;
+        if (quick) {
+            BinTools_ShapeWriter writer;
+            writer.SetWithTriangles(Standard_True);
+            writer.Write(normalized, stream);
+        } else {
+            BinTools_ShapeSet writer;
+            writer.SetWithTriangles(Standard_True);
+            shapeID = writer.Add(normalized);
+            locationID = writer.Locations().Index(normalized.Location());
+            if (shapeID <= 0 || locationID < 0) return false;
+            writer.Write(stream);
+        }
+        if (!stream.good() || stream.str().empty()) return false;
+        std::istringstream input(stream.str(), std::ios::in | std::ios::binary);
+        input.imbue(std::locale::classic());
+        TopoDS_Shape persisted;
+        if (quick) {
+            BinTools_ShapeReader reader;
+            reader.Read(input, persisted);
+        } else {
+            BinTools_ShapeSet reader;
+            reader.Read(input);
+            if (!input || shapeID > reader.NbShapes()
+                || locationID > reader.Locations().NbLocations()) return false;
+            persisted = reader.Shape(shapeID);
+            persisted.Location(reader.Locations().Location(locationID), Standard_False);
+            persisted.Orientation(normalized.Orientation());
+        }
+        if (!input || persisted.IsNull()) return false;
+        input.peek();
+        if (!input.eof()) return false;
+        output = std::move(persisted);
+        return true;
+    } catch (...) {
+        output.Nullify();
+        return false;
+    }
+}
+
+bool PairPersistenceSource(const TopoDS_Shape& source,
+                           const Handle(TDocStd_Document)& document,
+                           const core3d::retained_recipe::Digest& expected,
+                           TopoDS_Shape& output) noexcept {
+    output.Nullify();
+    try {
+        if (!PairPersistedSource(source, document, output)) return false;
         std::string bytes;
         core3d::retained_recipe::Digest actual{};
         if (!core3d::retained_part_boolean::ExactShapeBytes(output, bytes)
@@ -12294,7 +12397,7 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
             feature.inputs.push_back(source.node);
             TopoDS_Shape frozen;
             if (!PairPersistenceSource(capture.sources[index].boundRoot,
-                    source.commitments.geometry, frozen))
+                    myOcafDoc, source.commitments.geometry, frozen))
                 return refuse(ap::PairRefusal::UnprovedCorrespondence);
             payload->sourceShapes.push_back(frozen);
         }
@@ -12729,7 +12832,7 @@ Standard_Integer OcctDocument::DebugAppendBooleanOriginalsSuffix(
                 || !core3d::retained_part_boolean::ExactShapeBytes(
                     payload->sourceShapes[source->shapeSlot], sourceBefore)
                 || !PairPersistenceSource(payload->sourceShapes[source->shapeSlot],
-                    source->commitments.geometry, normalized)) return phase;
+                    myOcafDoc, source->commitments.geometry, normalized)) return phase;
             // Negative control on a private source value from this actual
             // production-created pair. Frozen commitments are never changed.
             gp_Trsf moved;
@@ -12737,7 +12840,8 @@ Standard_Integer OcctDocument::DebugAppendBooleanOriginalsSuffix(
             const TopoDS_Shape mismatched = payload->sourceShapes[source->shapeSlot]
                 .Moved(TopLoc_Location(moved));
             TopoDS_Shape rejected = normalized;
-            if (PairPersistenceSource(mismatched, source->commitments.geometry, rejected)
+            if (PairPersistenceSource(mismatched, myOcafDoc,
+                    source->commitments.geometry, rejected)
                 || !rejected.IsNull()
                 || !core3d::retained_part_boolean::ExactShapeBytes(
                     payload->sourceShapes[source->shapeSlot], sourceAfter)
@@ -13027,7 +13131,7 @@ OcctDocument::PrepareBooleanOriginalsEdit(
             TopoDS_Shape normalized;
             if (!source || source->shapeSlot >= payload->sourceShapes.size()
                 || !PairPersistenceSource(payload->sourceShapes[source->shapeSlot],
-                    source->commitments.geometry, normalized))
+                    myOcafDoc, source->commitments.geometry, normalized))
                 return refuse(ap::PairRefusal::UnprovedCorrespondence);
             // This operation-local copy must reproduce the already frozen
             // source commitment. Neither the graph nor its originals change.

@@ -421,6 +421,12 @@ public:
         OperationOwnedRawEvidenceForReturnedScene(
             const SnapshotPointer& returnedScene) noexcept;
 
+#ifdef DEBUG
+    // Passive aggregate of the retained executed saved results, never a bake.
+    static std::array<double, 4> DebugSavedFinalQualityForReturnedScene(
+        const SnapshotPointer& returnedScene) noexcept;
+#endif
+
     OcctSceneSnapshotBuilder();
     ~OcctSceneSnapshotBuilder();
 
@@ -488,6 +494,8 @@ public:
         const SceneSnapshot& finalScene,
         const std::vector<PrivateExportFaceCorrespondence>& correspondence,
         const std::vector<PrivateExportFinalMesh>& emittedMeshes,
+        const std::vector<std::string>& inputKeys,
+        const std::vector<std::string>& bakeSeals,
         const std::function<bool()>& cancelled,
         PrivateExportDecalArtifact& artifact) noexcept;
 

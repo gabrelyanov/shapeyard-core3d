@@ -20,6 +20,11 @@
 #include <Geom_BSplineSurface.hxx>
 #include <algorithm>
 #ifdef DEBUG
+#import "../UI/Core3DViewController.h"
+#import "../OCCTKit/GLViewController.h"
+#include "../UI/Core3DViewer.h"
+#include <zlib.h>
+#include "../OCCTKit/NativeOpeningDependentReplay.hxx"
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepTools_ShapeSet.hxx>
 #include <TopoDS_Iterator.hxx>
@@ -2448,8 +2453,57 @@ NSDictionary<NSString *, id> *SavedGroupLayoutDictionary(
             [NSMutableArray arrayWithCapacity:group.assignments.size()];
         for (const auto& assignment : group.assignments)
             [cornerCounts addObject:@(assignment.corners.size())];
+#ifdef DEBUG
+        // Passive numeric values from the record already owned by this exact
+        // returned-scene alias. No layout, bake, or source recapture occurs.
+        if (group.layout.charts.size() > core3d::asset_atlas::kMaximumCharts
+            || group.layout.chartMembers.size() != group.layout.charts.size()
+            || group.layout.chartFaces.size() != group.layout.charts.size()
+            || group.layout.packed.triangles.size()
+                > core3d::asset_atlas::kMaximumFinalCorners / 3U)
+            return nil;
+        NSMutableArray *assignments = [NSMutableArray array];
+        for (const auto& assignment : group.assignments) {
+            if (assignment.corners.size() > core3d::asset_atlas::kMaximumFinalCorners)
+                return nil;
+            [assignments addObject:@{
+                @"triangleCount": @(assignment.triangleCount),
+                @"corners": [NSData dataWithBytes:assignment.corners.data()
+                    length:assignment.corners.size() * sizeof(std::array<double, 2>)],
+            }];
+        }
+        NSMutableArray *charts = [NSMutableArray array];
+        for (std::size_t index = 0; index < group.layout.charts.size(); ++index) {
+            const auto& chart = group.layout.charts[index];
+            NSMutableArray *triangles = [NSMutableArray array];
+            for (const auto& triangle : chart.triangles)
+                [triangles addObject:@[@(triangle.corner[0].x), @(triangle.corner[0].y),
+                    @(triangle.corner[1].x), @(triangle.corner[1].y),
+                    @(triangle.corner[2].x), @(triangle.corner[2].y)]];
+            [charts addObject:@{
+                @"member": @(group.layout.chartMembers[index].first),
+                @"face": @(group.layout.chartFaces[index]),
+                @"kernel": @(static_cast<int>(chart.kernel)),
+                @"bounds": @[@(chart.rectMin.x), @(chart.rectMin.y),
+                    @(chart.rectMax.x), @(chart.rectMax.y)],
+                @"triangles": triangles,
+            }];
+        }
+        NSMutableArray *placed = [NSMutableArray array];
+        for (const auto& triangle : group.layout.packed.triangles)
+            [placed addObject:@[@(triangle.chartIndex), @(triangle.triangleIndex),
+                @(triangle.subChartIndex), @(triangle.faceId),
+                @(triangle.uv[0].x), @(triangle.uv[0].y),
+                @(triangle.uv[1].x), @(triangle.uv[1].y),
+                @(triangle.uv[2].x), @(triangle.uv[2].y)]];
+#endif
         [groups addObject:@{
             @"memberDefinitions": definitions,
+#ifdef DEBUG
+            @"assignments": assignments,
+            @"charts": charts,
+            @"placed": placed,
+#endif
             @"memberCount": @(group.memberDefinitions.size()),
             @"assignmentCount": @(group.assignments.size()),
             @"assignmentCornerCounts": cornerCounts,
@@ -2524,6 +2578,29 @@ NSDictionary<NSString *, id> *RawEvidenceDictionary(
             const core3d::painted_atlas_bake::owner::CapturedSource& source) {
         [sources addObject:@{
             @"origin": @(static_cast<std::uint8_t>(source.origin)),
+#ifdef DEBUG
+            @"role": @(static_cast<std::uint8_t>(source.fence.role)),
+            @"colorSpace": @(static_cast<std::uint8_t>(source.fence.colorSpace)),
+            @"alpha": @(static_cast<unsigned>(source.envelope.alpha)),
+            @"maskAlpha": @(static_cast<unsigned>(source.maskEnvelope.alpha)),
+            @"workingPNG": RawEvidenceData(source.envelope.workingBytes),
+            @"originalPNG": RawEvidenceData(source.envelope.originalBytes),
+            @"transform": @[@(source.fence.transform.scale[0]),
+                @(source.fence.transform.scale[1]), @(source.fence.transform.offset[0]),
+                @(source.fence.transform.offset[1]), @(source.fence.transform.rotationDegrees),
+                @(static_cast<std::uint8_t>(source.fence.transform.wrapU)),
+                @(static_cast<std::uint8_t>(source.fence.transform.wrapV))],
+            @"placement": @[@(source.centerU), @(source.centerV), @(source.width),
+                @(source.height), @(source.angle), @(source.opacity)],
+            @"maskPNG": RawEvidenceData(source.maskEnvelope.workingBytes),
+            @"maskUsesLuminance": @(source.maskUsesLuminance),
+            @"maskInverted": @(source.maskInverted),
+            @"maskTransform": @[@(source.maskTransform.scale[0]),
+                @(source.maskTransform.scale[1]), @(source.maskTransform.offset[0]),
+                @(source.maskTransform.offset[1]), @(source.maskTransform.rotationDegrees),
+                @(static_cast<std::uint8_t>(source.maskTransform.wrapU)),
+                @(static_cast<std::uint8_t>(source.maskTransform.wrapV))],
+#endif
             @"materialSlot": @(
                 static_cast<std::uint8_t>(source.materialSlot)),
             @"memberIndex": @(source.memberIndex),
@@ -2544,7 +2621,18 @@ NSDictionary<NSString *, id> *RawEvidenceDictionary(
         for (const auto& source : capture->sources.values)
             appendSource(source);
         for (const auto& slot : capture->sources.rawSlots) {
+#ifdef DEBUG
+            NSMutableArray *scalars = [NSMutableArray array];
+            for (double value : slot.materialScalars) [scalars addObject:@(value)];
+            NSMutableArray *modes = [NSMutableArray array];
+            for (auto value : slot.materialModes) [modes addObject:@(value)];
+#endif
             [rawSlots addObject:@{
+#ifdef DEBUG
+                @"materialScalars": scalars, @"materialModes": modes,
+                @"shadowed": @(!slot.shadowedSource.envelope.workingBytes.empty()),
+                @"shadowedPNG": RawEvidenceData(slot.shadowedSource.envelope.workingBytes),
+#endif
                 @"memberIndex": @(slot.memberIndex),
                 @"slot": @(static_cast<std::uint8_t>(slot.slot)),
                 @"present": @(slot.present),
@@ -2557,6 +2645,9 @@ NSDictionary<NSString *, id> *RawEvidenceDictionary(
         for (const auto& binding : capture->sources.canonicalBindings)
             [canonicalBindings addObject:RawEvidenceData(binding.bytes)];
     }
+#ifdef DEBUG
+    const NSUInteger savedSourceCount = sources.count;
+#endif
     for (const auto* transient : record.transientSources) {
         if (!transient) return nil;
         for (const auto& source : *transient) appendSource(source);
@@ -2605,6 +2696,9 @@ NSDictionary<NSString *, id> *RawEvidenceDictionary(
         @"savedGroupLayoutGroupCount": @(
             record.savedGroupLayout ? record.savedGroupLayout->groups.size() : 0),
         @"sources": sources,
+#ifdef DEBUG
+        @"savedSourceCount": @(savedSourceCount),
+#endif
         @"rawSlots": rawSlots,
         @"canonicalBindingBytes": canonicalBindings,
         @"canonicalAtlasBytes": canonicalAtlases,
@@ -2958,6 +3052,23 @@ bool DebugMeshSavedGroupPrivateSurfaces(const TopoDS_Shape& shape) noexcept {
 #endif
 }
 
+#ifdef DEBUG
+- (NSArray<NSNumber *> *)debugSavedFinalQualityForReturnedScene:
+    (Core3DSceneSnapshot *)returnedScene {
+    const std::shared_ptr<NativeExportState> state = _state;
+    if (!returnedScene || !state) return nil;
+    Core3DSavedGroupLayoutAliasOwner *aliasOwner = objc_getAssociatedObject(
+        returnedScene, &kSavedGroupLayoutAliasOwnerKey);
+    if (![aliasOwner isKindOfClass:[Core3DSavedGroupLayoutAliasOwner class]]
+        || aliasOwner->operationIdentity.lock() != state
+        || !aliasOwner->sceneAlias) return nil;
+    const auto values = core3d::scene::OcctSceneSnapshotBuilder::
+        DebugSavedFinalQualityForReturnedScene(aliasOwner->sceneAlias);
+    if (values[0] < 0.0) return nil;
+    return @[@(values[0]), @(values[1]), @(values[2]), @(values[3])];
+}
+#endif
+
 - (NSDictionary<NSString *, id> *)
     savedGroupAllMemberLayoutRecordForReturnedScene:
         (Core3DSceneSnapshot *)returnedScene {
@@ -3250,3 +3361,281 @@ bool DebugMeshSavedGroupPrivateSurfaces(const TopoDS_Shape& shape) noexcept {
 #endif
 
 @end
+
+#ifdef DEBUG
+// Read-only oracle view of the committed document. This performs the existing
+// strict source read only; it does not mesh, bake, install, mutate, or publish.
+// Its scope is explicitly distinct from the export operation's returned data.
+@interface Core3DViewController (E4OracleAuthority)
+- (NSDictionary<NSString *, id> *)debugE4OracleSavedAuthority;
+- (NSDictionary<NSString *, id> *)debugE4OracleFaceAdmission:(NSString *)entity;
++ (NSDictionary<NSString *, id> *)debugE4OracleDecodePNG:(NSData *)encoded;
+@end
+
+@implementation Core3DViewController (E4OracleAuthority)
+// Independent RGBA8 scanline decode for oracle inputs and returned PNGs. No
+// image rendering, colour conversion, or premultiply/unpremultiply round trip.
++ (NSDictionary<NSString *, id> *)debugE4OracleDecodePNG:(NSData *)encoded {
+    if (encoded.length < 33 || encoded.length > 64U * 1024U * 1024U) return nil;
+    try {
+        const auto* bytes = static_cast<const std::uint8_t*>(encoded.bytes);
+        static constexpr std::uint8_t signature[8] = {137,80,78,71,13,10,26,10};
+        if (!std::equal(signature, signature + 8, bytes)) return nil;
+        const auto u32 = [&](std::size_t offset) -> std::uint32_t {
+            return std::uint32_t(bytes[offset]) << 24 | std::uint32_t(bytes[offset+1]) << 16
+                | std::uint32_t(bytes[offset+2]) << 8 | bytes[offset+3];
+        };
+        std::uint32_t width = 0, height = 0;
+        bool header = false, end = false;
+        std::vector<std::uint8_t> compressed;
+        std::size_t offset = 8;
+        while (offset < encoded.length) {
+            if (encoded.length - offset < 12) return nil;
+            const std::size_t length = u32(offset);
+            if (length > encoded.length - offset - 12) return nil;
+            const auto* type = bytes + offset + 4;
+            const auto* data = bytes + offset + 8;
+            if (std::uint32_t(crc32(0, type, uInt(length + 4))) != u32(offset + 8 + length)) return nil;
+            if (std::memcmp(type, "IHDR", 4) == 0) {
+                if (header || offset != 8 || length != 13) return nil;
+                width = u32(offset + 8); height = u32(offset + 12);
+                if (!width || !height || width > 8192 || height > 8192
+                    || std::uint64_t(width) * height > 16777216
+                    || data[8] != 8 || data[9] != 6 || data[10] || data[11] || data[12]) return nil;
+                header = true;
+            } else if (std::memcmp(type, "IDAT", 4) == 0) {
+                if (!header || end) return nil;
+                compressed.insert(compressed.end(), data, data + length);
+            } else if (std::memcmp(type, "IEND", 4) == 0) {
+                if (length || !header || compressed.empty()) return nil;
+                end = true;
+                offset += 12;
+                break;
+            } else if ((type[0] & 0x20U) == 0) return nil;
+            offset += length + 12;
+        }
+        if (!header || !end || offset != encoded.length) return nil;
+        const std::size_t row = std::size_t(width) * 4;
+        std::vector<std::uint8_t> scanlines((row + 1) * height);
+        uLongf decodedLength = scanlines.size();
+        if (uncompress(scanlines.data(), &decodedLength, compressed.data(), compressed.size()) != Z_OK
+            || decodedLength != scanlines.size()) return nil;
+        std::vector<std::uint8_t> rgba(row * height);
+        const auto paeth = [](int a, int b, int c) {
+            const int p = a + b - c;
+            const int da = std::abs(p-a), db = std::abs(p-b), dc = std::abs(p-c);
+            return da <= db && da <= dc ? a : db <= dc ? b : c;
+        };
+        for (std::size_t y = 0; y < height; ++y) {
+            const unsigned filter = scanlines[y * (row + 1)];
+            if (filter > 4) return nil;
+            for (std::size_t x = 0; x < row; ++x) {
+                const std::size_t at = y * row + x;
+                const int left = x >= 4 ? rgba[at-4] : 0;
+                const int above = y ? rgba[at-row] : 0;
+                const int diagonal = y && x >= 4 ? rgba[at-row-4] : 0;
+                const int predictor = filter == 0 ? 0 : filter == 1 ? left
+                    : filter == 2 ? above : filter == 3 ? (left+above)/2 : paeth(left,above,diagonal);
+                rgba[at] = std::uint8_t(scanlines[y*(row+1)+1+x] + predictor);
+            }
+        }
+        return @{@"width": @(width), @"height": @(height),
+            @"rgba": [NSData dataWithBytes:rgba.data() length:rgba.size()]};
+    } catch (...) { return nil; }
+}
+
+
+- (NSDictionary<NSString *, id> *)debugE4OracleFaceAdmission:(NSString *)entity {
+    if (!NSThread.isMainThread || !entity.length) return nil;
+    namespace dr = core3d::dependent_replay;
+    namespace fs = core3d::retained_face_selector;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer ? viewer->getDocument() : Handle(OcctDocument)();
+        if (wrapper.IsNull() || wrapper->Document().IsNull()
+            || wrapper->Document()->HasOpenCommand()) return nil;
+        const auto& document = wrapper->Document();
+        const auto undos = document->GetAvailableUndos(), redos = document->GetAvailableRedos();
+        TDF_LabelSequence roots;
+        XCAFDoc_DocumentTool::ShapeTool(document->Main())->GetFreeShapes(roots);
+        TDF_Label label;
+        for (Standard_Integer index = 1; index <= roots.Length(); ++index) {
+            if (wrapper->EntityIdentifierForLabel(roots.Value(index)) == std::string(entity.UTF8String)) {
+                if (!label.IsNull()) return nil;
+                label = roots.Value(index);
+            }
+        }
+        if (label.IsNull()) return nil;
+        const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
+        double unit = 0;
+        Bnd_Box bounds;
+        if (!dr::detail::FaceImageLengthUnit(*wrapper, unit)
+            || !dr::detail::FaceImageStageBounds(shape, bounds)) return nil;
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(shape, TopAbs_FACE, faces);
+        NSMutableArray *rows = [NSMutableArray array];
+        for (Standard_Integer index = 1; index <= faces.Extent(); ++index) {
+            const TopoDS_Face face = TopoDS::Face(faces.FindKey(index));
+            core3d::retained_edge_treatment::ReplayBudget budget;
+            dr::FaceImageGeometricReceipt derived;
+            const auto status = dr::detail::DeriveFaceImageReceipt(bounds, face, unit, budget, derived);
+            NSMutableDictionary *row = [@{
+                @"faceIndex": @(index - 1),
+                @"deriveStatus": @(static_cast<unsigned>(status)),
+                @"surfaceType": @(BRepAdaptor_Surface(face, true).GetType()),
+            } mutableCopy];
+            NSMutableArray *curves = [NSMutableArray array];
+            for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More(); edges.Next())
+                [curves addObject:@(BRepAdaptor_Curve(TopoDS::Edge(edges.Current())).GetType())];
+            row[@"boundaryCurveTypes"] = curves;
+            if (status == dr::detail::FaceImageDeriveStatus::Derived) {
+                dr::FaceImageGeometricReceipt resolved;
+                TopoDS_Face matched;
+                const auto refusal = dr::detail::ResolveFaceImageReceipt(shape, derived.intent,
+                    unit, budget, resolved, matched);
+                row[@"refusalCode"] = @(fs::RefusalCode(refusal));
+                row[@"refusalMessage"] = @(fs::RefusalMessage(refusal));
+                row[@"matchedSameFace"] = @(!matched.IsNull() && matched.IsSame(face));
+                row[@"wireCount"] = @(derived.wireCount);
+                row[@"boundaryUseCount"] = @(derived.boundaryUseCount);
+                row[@"boundaryUniqueEdgeCount"] = @(derived.boundaryUniqueEdgeCount);
+            }
+            [rows addObject:row];
+        }
+        if (document->HasOpenCommand() || document->GetAvailableUndos() != undos
+            || document->GetAvailableRedos() != redos) return nil;
+        return @{@"faces": rows, @"metersPerUnit": @(unit),
+            @"triangleMesh": @(wrapper->GeometryRepresentationForLabel(label)
+                == OcctGeometryRepresentation::TriangleMesh),
+            @"supportsNormal": @(wrapper->SupportsNormalTextureGeometryForLabel(label))};
+    } catch (...) { return nil; }
+}
+
+- (NSDictionary<NSString *, id> *)debugE4OracleSavedAuthority {
+    if (!NSThread.isMainThread) return nil;
+    @try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) wrapper = viewer ? viewer->getDocument() : Handle(OcctDocument)();
+        if (wrapper.IsNull() || wrapper->Document().IsNull()
+            || wrapper->Document()->HasOpenCommand()) return nil;
+        const auto& document = wrapper->Document();
+        const auto undos = document->GetAvailableUndos();
+        const auto redos = document->GetAvailableRedos();
+        std::vector<core3d::asset_atlas::persistence::Record> records;
+        if (!core3d::asset_atlas::persistence::ReadAll(document, records)) return nil;
+        NSMutableArray *groups = [NSMutableArray array];
+        for (const auto& record : records) {
+            if (!record.value) return nil;
+            core3d::painted_atlas_bake::owner::ExportCapture capture;
+            if (core3d::painted_atlas_bake::owner::CaptureForExport(capture,
+                    document, record.value->definition.key)
+                != core3d::painted_atlas_bake::owner::Outcome::Prepared) return nil;
+            NSMutableArray *sources = [NSMutableArray array];
+            for (const auto& source : capture.sources) {
+                [sources addObject:@{
+                    @"memberIndex": @(source.memberIndex),
+                    @"faceIndex": @(source.faceIndex),
+                    @"origin": @(static_cast<unsigned>(source.origin)),
+                    @"role": @(static_cast<unsigned>(source.fence.role)),
+                    @"materialSlot": @(static_cast<unsigned>(source.materialSlot)),
+                    @"resource": SavedGroupLayoutString(core3d::retained_solid::UUIDText(source.fence.resource)),
+                    @"workingPNG": RawEvidenceData(source.envelope.workingBytes),
+                    @"originalPNG": RawEvidenceData(source.envelope.originalBytes),
+                    @"colorSpace": @(static_cast<unsigned>(source.fence.colorSpace)),
+                    @"alpha": @(static_cast<unsigned>(source.envelope.alpha)),
+                    @"transform": @[@(source.fence.transform.scale[0]), @(source.fence.transform.scale[1]),
+                        @(source.fence.transform.offset[0]), @(source.fence.transform.offset[1]),
+                        @(source.fence.transform.rotationDegrees), @(static_cast<unsigned>(source.fence.transform.wrapU)),
+                        @(static_cast<unsigned>(source.fence.transform.wrapV))],
+                }];
+            }
+            NSMutableArray *slots = [NSMutableArray array];
+            for (const auto& slot : capture.sources.rawSlots) {
+                NSMutableArray *scalars = [NSMutableArray array];
+                for (double value : slot.materialScalars) [scalars addObject:@(value)];
+                NSMutableArray *modes = [NSMutableArray array];
+                for (auto value : slot.materialModes) [modes addObject:@(value)];
+                [slots addObject:@{
+                    @"memberIndex": @(slot.memberIndex),
+                    @"slot": @(static_cast<unsigned>(slot.slot)),
+                    @"present": @(slot.present), @"absent": @(!slot.present),
+                    @"effectiveSourceIndex": @(slot.effectiveSourceIndex),
+                    @"shadowed": @(!slot.shadowedSource.envelope.workingBytes.empty()),
+                    @"shadowedPNG": RawEvidenceData(slot.shadowedSource.envelope.workingBytes),
+                    @"materialScalars": scalars, @"materialModes": modes,
+                }];
+            }
+            NSMutableArray *bindings = [NSMutableArray array];
+            for (const auto& row : capture.sources.canonicalBindings)
+                [bindings addObject:RawEvidenceData(row.bytes)];
+            NSMutableArray *layerRows = [NSMutableArray array];
+            NSMutableArray *layerBytes = [NSMutableArray array];
+            TDF_LabelSequence roots;
+            XCAFDoc_DocumentTool::ShapeTool(document->Main())->GetFreeShapes(roots);
+            for (std::size_t member = 0; member < capture.savedAtlas.members.size(); ++member) {
+                const auto& key = capture.savedAtlas.members[member].owner;
+                const auto entity = core3d::retained_solid::UUIDText(key.entity);
+                TDF_Label label;
+                for (Standard_Integer index = 1; index <= roots.Length(); ++index) {
+                    if (wrapper->EntityIdentifierForLabel(roots.Value(index)) == entity) {
+                        if (!label.IsNull()) return nil;
+                        label = roots.Value(index);
+                    }
+                }
+                if (label.IsNull()) return nil;
+                core3d::decal_layer::Definition definition;
+                std::vector<std::uint8_t> canonical;
+                const auto state = core3d::decal_layer::persistence::Read(document, label, definition, &canonical);
+                if (state == core3d::decal_layer::persistence::ReadState::Malformed) return nil;
+                [layerBytes addObject:RawEvidenceData(canonical)];
+                for (std::size_t order = 0; order < definition.layers.size(); ++order) {
+                    const auto& layer = definition.layers[order];
+                    if (layer.placement.kind != core3d::decal_layer::PlacementKind::Face) return nil;
+                    core3d::face_image::ResourceEnvelope image, mask;
+                    if (!wrapper->ReadFaceImageResource(layer.image.resource, image)
+                        || (layer.mask.present && !wrapper->ReadFaceImageResource(layer.mask.image.resource, mask))) return nil;
+                    [layerRows addObject:@{
+                        @"memberIndex": @(member), @"order": @(order),
+                        @"faceIdentifier": SavedGroupLayoutString(core3d::retained_solid::UUIDText(layer.placement.face.receiver.face)),
+                        @"selectorProof": RawEvidenceDigestText(layer.placement.face.receiver.selectorProof),
+                        @"workingPNG": RawEvidenceData(image.workingBytes),
+                        @"colorSpace": @(static_cast<unsigned>(layer.image.colorSpace)),
+                        @"alpha": @(static_cast<unsigned>(layer.image.alpha)),
+                        @"placement": @[@(layer.placement.face.anchorMeters[0]), @(layer.placement.face.anchorMeters[1]),
+                            @(layer.widthMeters), @(layer.heightMeters), @(layer.placement.face.angleRadians), @(layer.opacity)],
+                        @"maskPresent": @(layer.mask.present),
+                        @"maskPNG": RawEvidenceData(mask.workingBytes),
+                        @"maskColorSpace": @(static_cast<unsigned>(layer.mask.image.colorSpace)),
+                        @"maskAlpha": @(static_cast<unsigned>(layer.mask.image.alpha)),
+                        @"maskUsesLuminance": @(layer.mask.channel == core3d::decal_layer::MaskChannel::LinearLuminance),
+                        @"maskInverted": @(layer.mask.inverted),
+                        @"maskTransform": @[@(layer.mask.transform.scale[0]), @(layer.mask.transform.scale[1]),
+                            @(layer.mask.transform.offset[0]), @(layer.mask.transform.offset[1]),
+                            @(layer.mask.transform.rotationDegrees), @(static_cast<unsigned>(layer.mask.transform.wrapU)),
+                            @(static_cast<unsigned>(layer.mask.transform.wrapV))],
+                    }];
+                }
+            }
+            [groups addObject:@{
+                @"resolution": @(capture.savedAtlas.resolutionTexels),
+                @"gutter": @(capture.savedAtlas.gutterTexels),
+                @"memberCount": @(capture.savedAtlas.members.size()),
+                @"sources": sources, @"rawSlots": slots,
+                @"layers": layerRows, @"canonicalLayers": layerBytes,
+                @"canonicalBindings": bindings,
+                @"canonicalAtlas": RawEvidenceData(capture.canonicalAtlasBytes),
+                @"canonicalBake": RawEvidenceData(capture.canonicalBakeBytes),
+            }];
+        }
+        if (document->HasOpenCommand() || document->GetAvailableUndos() != undos
+            || document->GetAvailableRedos() != redos) return nil;
+        return @{@"scope": @"pre-export-committed-document-strict-read",
+            @"groups": groups, @"undoCount": @(undos), @"redoCount": @(redos)};
+    } @catch (...) { return nil; }
+}
+@end
+#endif
