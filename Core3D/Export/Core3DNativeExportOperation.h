@@ -130,6 +130,10 @@ NS_SWIFT_SENDABLE
 
 #ifdef DEBUG
 //! Arms one operation-local E4 fault before the worker starts.
+//! Scalar reads from the actual operation-owned final saved bake evidence.
+- (nullable NSArray<NSNumber *> *)debugSavedFinalQualityForReturnedScene:
+    (Core3DSceneSnapshot *)returnedScene
+    NS_SWIFT_NAME(debugSavedFinalQuality(returnedScene:));
 - (BOOL)debugSetE4Fault:(Core3DDebugE4ExportFault)fault
     NS_SWIFT_NAME(debugSetE4Fault(_:));
 //! Returns bounded values captured by this operation's executed native path.
