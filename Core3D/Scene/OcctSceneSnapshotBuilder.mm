@@ -12818,7 +12818,14 @@ bool PrepareSavedOriginalPaintReceiverInputs(
         } else if (material.materialModes[0]) {
             v = {float(m[0]), float(m[1]), float(m[2]), float(1.0 - m[3]),
                 float(m[10]), float(m[11]), float(m[12]), 0, 1, 1.5f, float(m[16])};
-        } else return fail();
+        } else if (std::all_of(material.materialModes.begin(), material.materialModes.end(),
+            [](std::int32_t mode) { return mode == 0; })) {
+            v = {1.0f, 1.0f, 1.0f, 1.0f,
+                float(m[4]), float(m[5]), float(m[6]), float(m[7]),
+                float(m[8]), float(m[9]), float(m[16])};
+        } else {
+            return fail();
+        }
         for (float value : v) if (!std::isfinite(value)) return fail();
         output.stage = "original-paint-ready";
         return operation.Recheck(FailureSite::ReceiverProofStorage);
