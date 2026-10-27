@@ -650,6 +650,29 @@ struct ReplayResult final {
     }
 };
 
+// Detached P4 result.  The two replay records and placed inputs are retained
+// so correspondence can prove lineage from the complete programs rather than
+// from the outer Boolean's result alone.  This value grants no owner or OCAF
+// authority; the production family gate remains closed until P9.
+struct ProgramOperandBooleanResult final {
+    Refusal refusal = Refusal::BuildFailed;
+    const char* phase = "input";
+    std::array<ReplayResult, 2> replays;
+    std::array<TopoDS_Shape, 2> placedInputs;
+    TopoDS_Shape rawCandidate;
+    retained_part_boolean::Candidate candidate;
+    retained_part_boolean::CandidateEvidence booleanEvidence;
+    bool sharedContinuation = false;
+    bool built() const noexcept {
+        return refusal == Refusal::None
+            && replays[0].replayed() && replays[1].replayed()
+            && !placedInputs[0].IsNull() && !placedInputs[1].IsNull()
+            && !rawCandidate.IsNull()
+            && candidate.admitted() && !candidate.solid.IsNull()
+            && sharedContinuation;
+    }
+};
+
 namespace detail {
 
 inline bool ProgramOf(const retained_boolean::Recipe& recipe,
@@ -817,6 +840,119 @@ inline ReplayResult ReplayProgramOperand(const Value& value,
         output.solid = std::move(reopened);
         output.refusal = Refusal::None;
         output.phase = "replayed";
+        return output;
+    } catch (...) { return refuse(Refusal::BuildFailed, output.phase); }
+}
+
+namespace detail {
+
+inline bool ReadFor(const Value& value,
+                    retained_recipe::DependencyRead& output) noexcept {
+    try {
+        const retained_recipe::RecipeLocator expected{
+            value.identity.outerOwner, value.identity.sourceNode,
+            value.identity.original.sourceFeature};
+        bool found = false;
+        for (const auto& read : value.fence.revision.dependencies) {
+            if (!(read.locator == expected)) continue;
+            if (found) return false;
+            output = read;
+            found = true;
+        }
+        return found && retained_part_boolean::ValidOperandRead(output);
+    } catch (...) { return false; }
+}
+
+inline Refusal BooleanRefusal(retained_part_boolean::Refusal value) noexcept {
+    using Outer = retained_part_boolean::Refusal;
+    switch (value) {
+    case Outer::None: return Refusal::None;
+    case Outer::EmptyResult: return Refusal::EmptyResult;
+    case Outer::TangentOnly: return Refusal::TangentOnly;
+    case Outer::Disconnected: return Refusal::Disconnected;
+    case Outer::NoInteriorOverlap: return Refusal::NoInteriorOverlap;
+    case Outer::Budget: return Refusal::Budget;
+    case Outer::Cancelled: return Refusal::Cancelled;
+    case Outer::StaleLeftSource:
+    case Outer::StaleRightSource: return Refusal::StaleFence;
+    case Outer::Admission:
+    case Outer::InvalidInput: return Refusal::UnprovenBoundary;
+    case Outer::BuildFailed: return Refusal::BuildFailed;
+    }
+    return Refusal::BuildFailed;
+}
+
+} // namespace detail
+
+// Replay both complete programs under one caller-owned continuation, transform
+// their proven results into the carrier frame, and call the existing counted
+// Boolean gate.  No per-input counter, fallback BRep, or flag bypass exists.
+inline ProgramOperandBooleanResult BuildProgramOperandBoolean(
+    const Request& request, const cut_display::Settings& display,
+    const std::atomic_bool& cancelled, tb::Counter& budget,
+    double tolerance = Precision::Confusion()) noexcept {
+    ProgramOperandBooleanResult output;
+    const auto refuse = [&](Refusal refusal, const char* phase) {
+        ProgramOperandBooleanResult empty;
+        empty.refusal = detail::StopRefusal(cancelled, budget, refusal);
+        empty.phase = phase;
+        return empty;
+    };
+    if (cancelled.load()) return refuse(Refusal::Cancelled, "input");
+    try {
+        if (request.operands[0].role != Role::Left
+            || request.operands[1].role != Role::Right)
+            return refuse(Refusal::OwnerAmbiguous, "roles");
+        output.phase = "left-program";
+        output.replays[0] = ReplayProgramOperand(
+            request.operands[0], display, cancelled, budget);
+        if (!output.replays[0].replayed())
+            return refuse(output.replays[0].refusal, output.phase);
+        output.phase = "right-program";
+        output.replays[1] = ReplayProgramOperand(
+            request.operands[1], display, cancelled, budget);
+        if (!output.replays[1].replayed())
+            return refuse(output.replays[1].refusal, output.phase);
+
+        output.phase = "placement";
+        for (std::size_t index = 0; index < 2; ++index) {
+            if (cancelled.load()) return refuse(Refusal::Cancelled, output.phase);
+            if (!budget.beginStage(tb::Site::C25AnalyticInput))
+                return refuse(Refusal::Budget, output.phase);
+            output.placedInputs[index] = part_boolean::build::ApplyInputPlacement(
+                output.replays[index].solid, request.operands[index].sourceToCarrier);
+            if (output.placedInputs[index].IsNull())
+                return refuse(Refusal::UnsupportedPlacement, output.phase);
+            const tb::WalkStatus placed = tb::ChargeTraversal(
+                output.placedInputs[index], budget, cancelled,
+                tb::Site::C25AnalyticInput);
+            if (placed != tb::WalkStatus::Completed)
+                return refuse(Refusal::BuildFailed, output.phase);
+        }
+
+        retained_part_boolean::OperandReadSet reads;
+        if (!detail::ReadFor(request.operands[0], reads.leftSource)
+            || !detail::ReadFor(request.operands[1], reads.rightSource))
+            return refuse(Refusal::StaleFence, "read-set");
+        output.phase = "outer-boolean";
+        const auto operation = retained_part_boolean::Operation(
+            std::uint8_t(request.operation));
+        const tb::WalkStatus walk = retained_part_boolean::BuildDetachedCandidateCounted(
+            operation, output.placedInputs[0], output.placedInputs[1],
+            tolerance, reads, reads, budget, cancelled, output.candidate,
+            &output.booleanEvidence);
+        if (walk != tb::WalkStatus::Completed || !output.candidate.admitted())
+            return refuse(detail::BooleanRefusal(output.candidate.refusal), output.phase);
+        output.rawCandidate = output.candidate.solid;
+        TopoDS_Shape extracted;
+        const tb::WalkStatus extraction = part_boolean::build::AnalyticResultSolidCounted(
+            output.rawCandidate, budget, cancelled, extracted);
+        if (extraction != tb::WalkStatus::Completed || extracted.IsNull())
+            return refuse(Refusal::BuildFailed, output.phase);
+        output.candidate.solid = extracted;
+        output.sharedContinuation = !budget.exhausted;
+        output.refusal = Refusal::None;
+        output.phase = "built";
         return output;
     } catch (...) { return refuse(Refusal::BuildFailed, output.phase); }
 }

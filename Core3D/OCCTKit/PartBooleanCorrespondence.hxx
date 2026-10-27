@@ -5,6 +5,7 @@
 // Boolean history or from the candidate builder.
 #include "PartBooleanFamilyAdmission.hxx"
 #include "PartBooleanRebuild.hxx"
+#include "PartBooleanProgramOperandCodec.hxx"
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
@@ -664,6 +665,291 @@ inline tb::WalkStatus ProveAnalyticCounted(
             && proof.observedVolume > Precision::Confusion();
         return tb::WalkStatus::Completed;
     } catch (...) { proof = {}; return tb::WalkStatus::Failed; }
+}
+
+struct ProgramOperandFaceBinding final {
+    TopoDS_Face face;
+    std::string stableKey;
+    std::vector<retained_recipe::UUID> regionLineage;
+    std::vector<std::pair<std::uint8_t, retained_recipe::UUID>> sourceLineage;
+    std::uint8_t materialSource = 0;
+    std::uint16_t materialIndex = 0;
+};
+
+struct ProgramOperandProof final {
+    program_operand::Refusal refusal = program_operand::Refusal::UnprovenBoundary;
+    bool completeOrientedBoundary = false;
+    bool sourceProgramsBound = false;
+    bool pairedReplayExact = false;
+    bool materialLineageComplete = false;
+    bool selectorLineageComplete = false;
+    bool noUncoveredFinalFace = false;
+    bool historyCandidateExact = false;
+    std::vector<ProgramOperandFaceBinding> faces;
+    bool proven() const noexcept {
+        return refusal == program_operand::Refusal::None
+            && completeOrientedBoundary && sourceProgramsBound
+            && pairedReplayExact && materialLineageComplete
+            && selectorLineageComplete && noUncoveredFinalFace
+            && historyCandidateExact && !faces.empty();
+    }
+};
+
+namespace detail {
+
+inline bool SameMaterial(const ScalarMaterialRow& left,
+                         const ScalarMaterialRow& right) noexcept {
+    if (left.labelEntry != right.labelEntry
+        || left.faceCulling != right.faceCulling
+        || left.alphaMode != right.alphaMode
+        || !SameDoubleBits(left.alphaCutoff, right.alphaCutoff)
+        || left.pbrDefined != right.pbrDefined
+        || left.commonDefined != right.commonDefined) return false;
+    for (std::size_t i = 0; i < left.pbr.size(); ++i)
+        if (!SameDoubleBits(left.pbr[i], right.pbr[i])) return false;
+    for (std::size_t i = 0; i < left.common.size(); ++i)
+        if (!SameDoubleBits(left.common[i], right.common[i])) return false;
+    return true;
+}
+
+inline bool HasAmbiguousRoundAnchor(const program_operand::Value& value) noexcept {
+    try {
+        retained_boolean::Program program;
+        if (!program_operand::detail::ProgramOf(
+                value.recipe.effectiveDecoded, program)) return true;
+        std::set<std::uint64_t> stepIDs, anchorIDs;
+        for (const auto& step : program.filletSteps) {
+            if (step.stepIdentifier == 0
+                || !stepIDs.insert(step.stepIdentifier).second) return true;
+            for (const auto& anchor : step.anchors)
+                if (anchor.identifier == 0
+                    || !anchorIDs.insert(anchor.identifier).second) return true;
+        }
+        return false;
+    } catch (...) { return true; }
+}
+
+} // namespace detail
+
+// Re-run the deterministic Boolean only as a correspondence witness, compare
+// its exact result to the counted candidate, then require every final face to
+// have complete source, region, material and selector lineage.  Native history
+// supplies candidate relations; coverage is independently checked against the
+// complete oriented result boundary.
+inline ProgramOperandProof ProveProgramOperandCorrespondence(
+    const program_operand::Request& request,
+    const program_operand::ProgramOperandBooleanResult& built,
+    program_operand::CutSurfacePolicy cutSurfacePolicy,
+    tb::Counter& budget, const std::atomic_bool& cancelled) noexcept {
+    ProgramOperandProof proof;
+    const auto refuse = [&](program_operand::Refusal value) {
+        proof.refusal = cancelled.load() ? program_operand::Refusal::Cancelled
+            : budget.exhausted ? program_operand::Refusal::Budget : value;
+        proof.faces.clear();
+        return proof;
+    };
+    if (cancelled.load()) return refuse(program_operand::Refusal::Cancelled);
+    try {
+        if (!built.built()) return refuse(built.refusal);
+        if (detail::HasAmbiguousRoundAnchor(request.operands[0])
+            || detail::HasAmbiguousRoundAnchor(request.operands[1]))
+            return refuse(program_operand::Refusal::AmbiguousSelector);
+        proof.sourceProgramsBound = true;
+        proof.pairedReplayExact = true;
+        for (std::size_t input = 0; input < 2; ++input) {
+            proof.sourceProgramsBound = proof.sourceProgramsBound
+                && built.replays[input].replayed()
+                && built.replays[input].exactProgram
+                    == request.operands[input].recipe.effectiveBytes
+                && built.replays[input].baseCommitment.sha256
+                    == request.operands[input].fence.base
+                && built.replays[input].resultCommitment.sha256
+                    == request.operands[input].fence.result;
+            proof.pairedReplayExact = proof.pairedReplayExact
+                && built.replays[input].readbackStable
+                && built.replays[input].completeTailReplayed;
+        }
+        if (!proof.sourceProgramsBound || !proof.pairedReplayExact)
+            return refuse(program_operand::Refusal::UnprovenBoundary);
+        if (!budget.beginStage(tb::Site::C26AnalyticBoolean))
+            return refuse(program_operand::Refusal::Budget);
+        for (const auto& input : built.placedInputs) {
+            const tb::WalkStatus walk = tb::ChargeTraversal(input, budget,
+                cancelled, tb::Site::C26AnalyticBoolean);
+            if (walk != tb::WalkStatus::Completed)
+                return refuse(program_operand::Refusal::UnprovenBoundary);
+        }
+
+        std::vector<TopoDS_Face> finalFaces;
+        std::map<std::string, std::size_t> finalFaceKeys;
+        for (TopExp_Explorer it(built.candidate.solid, TopAbs_FACE);
+             it.More(); it.Next()) {
+            const TopoDS_Face face = TopoDS::Face(it.Current());
+            std::string key;
+            if (!retained_part_boolean::ExactShapeBytes(face, key)
+                || !finalFaceKeys.emplace(key, finalFaces.size()).second)
+                return refuse(program_operand::Refusal::UnprovenBoundary);
+            finalFaces.push_back(face);
+        }
+        if (finalFaces.empty()) return refuse(program_operand::Refusal::UnprovenBoundary);
+        std::vector<std::set<std::uint8_t>> relations(finalFaces.size());
+        TopTools_ListOfShape arguments, tools;
+        arguments.Append(built.placedInputs[0]);
+        tools.Append(built.placedInputs[1]);
+        const auto witness = [&](auto& boolean) -> bool {
+            boolean.SetArguments(arguments); boolean.SetTools(tools);
+            boolean.SetRunParallel(Standard_False);
+            boolean.SetNonDestructive(Standard_True);
+            boolean.SetFuzzyValue(Precision::Confusion());
+            boolean.SetUseOBB(Standard_True);
+            boolean.SetCheckInverted(Standard_True);
+            boolean.Build();
+            if (!boolean.IsDone() || boolean.HasErrors()) return false;
+            std::string expected, observed;
+            if (!retained_part_boolean::ExactShapeBytes(
+                    built.rawCandidate, expected)
+                || !retained_part_boolean::ExactShapeBytes(
+                    boolean.Shape(), observed) || expected != observed) return false;
+            const auto relate = [&](const TopoDS_Shape& shape,
+                                    std::uint8_t input) -> bool {
+                if (shape.IsNull() || shape.ShapeType() != TopAbs_FACE) return true;
+                std::string key;
+                if (!retained_part_boolean::ExactShapeBytes(shape, key)) return false;
+                auto final = finalFaceKeys.find(key);
+                if (final == finalFaceKeys.end()) {
+                    bool found = false;
+                    for (TopExp_Explorer it(boolean.Shape(), TopAbs_FACE);
+                         it.More(); it.Next()) {
+                        if (!it.Current().IsSame(shape)) continue;
+                        if (found) return false;
+                        found = true;
+                        if (!retained_part_boolean::ExactShapeBytes(
+                                it.Current(), key)) return false;
+                        final = finalFaceKeys.find(key);
+                        if (final == finalFaceKeys.end()) return false;
+                    }
+                    if (!found) return true;
+                }
+                relations[final->second].insert(input);
+                return true;
+            };
+            for (std::uint8_t input = 0; input < 2; ++input) {
+                for (TopExp_Explorer source(built.placedInputs[input], TopAbs_FACE);
+                     source.More(); source.Next()) {
+                    const TopoDS_Shape sourceFace = source.Current();
+                    if (!relate(sourceFace, input)) return false;
+                    const auto add = [&](const TopTools_ListOfShape& values) -> bool {
+                        for (TopTools_ListIteratorOfListOfShape mapped(values);
+                             mapped.More(); mapped.Next())
+                            if (!relate(mapped.Value(), input)) return false;
+                        return true;
+                    };
+                    if (!add(boolean.Modified(sourceFace))
+                        || !add(boolean.Generated(sourceFace))) return false;
+                }
+            }
+            return std::all_of(relations.begin(), relations.end(),
+                [](const auto& values) { return !values.empty(); });
+        };
+        bool witnessed = false;
+        if (request.operation == Operation::Union) {
+            BRepAlgoAPI_Fuse boolean; witnessed = witness(boolean);
+        } else if (request.operation == Operation::Subtract) {
+            BRepAlgoAPI_Cut boolean; witnessed = witness(boolean);
+        } else {
+            BRepAlgoAPI_Common boolean; witnessed = witness(boolean);
+        }
+        if (!witnessed) return refuse(program_operand::Refusal::UnprovenBoundary);
+        proof.historyCandidateExact = true;
+        const tb::WalkStatus candidateWalk = tb::ChargeTraversal(
+            built.candidate.solid, budget, cancelled,
+            tb::Site::C26AnalyticBoolean);
+        if (candidateWalk != tb::WalkStatus::Completed)
+            return refuse(program_operand::Refusal::UnprovenBoundary);
+        proof.completeOrientedBoundary =
+            retained_part_boolean::IsOneValidForwardSolid(built.candidate.solid)
+            && retained_part_boolean::Volume(built.candidate.solid)
+                > Precision::Confusion();
+        if (!proof.completeOrientedBoundary)
+            return refuse(program_operand::Refusal::UnprovenBoundary);
+
+        for (std::size_t f = 0; f < finalFaces.size(); ++f) {
+            if (relations[f].empty())
+                return refuse(program_operand::Refusal::UnprovenBoundary);
+            ProgramOperandFaceBinding face;
+            face.face = finalFaces[f];
+            if (!retained_part_boolean::ExactShapeBytes(face.face, face.stableKey)
+                || finalFaceKeys.find(face.stableKey) == finalFaceKeys.end())
+                return refuse(program_operand::Refusal::UnprovenBoundary);
+            std::vector<std::pair<std::uint8_t, std::uint16_t>> assignments;
+            for (std::uint8_t input : relations[f]) {
+                const auto& appearance = request.operands[input].appearance;
+                if (appearance.regions.size() != 1)
+                    return refuse(program_operand::Refusal::AmbiguousSelector);
+                const RegionBinding& region = appearance.regions.front();
+                if (region.sourceInput != input
+                    || region.materialIndex >= appearance.effectiveMaterials.size())
+                    return refuse(program_operand::Refusal::MissingMaterial);
+                const ScalarMaterialRow& material =
+                    appearance.effectiveMaterials[region.materialIndex];
+                if (!material.pbrDefined && !material.commonDefined)
+                    return refuse(program_operand::Refusal::MissingMaterial);
+                face.regionLineage.push_back(region.region);
+                face.sourceLineage.push_back({input,
+                    request.operands[input].identity.outputFeature});
+                assignments.push_back({input, region.materialIndex});
+            }
+            if (request.operation == Operation::Subtract
+                && relations[f].count(1) != 0) {
+                assignments = {{cutSurfacePolicy
+                        == program_operand::CutSurfacePolicy::TargetDefault ? 0 : 1,
+                    request.operands[cutSurfacePolicy
+                        == program_operand::CutSurfacePolicy::TargetDefault ? 0 : 1]
+                        .appearance.regions.front().materialIndex}};
+            }
+            const auto chosen = assignments.front();
+            const ScalarMaterialRow& chosenMaterial = request.operands[chosen.first]
+                .appearance.effectiveMaterials[chosen.second];
+            for (const auto assignment : assignments) {
+                const ScalarMaterialRow& material = request.operands[assignment.first]
+                    .appearance.effectiveMaterials[assignment.second];
+                if (!detail::SameMaterial(chosenMaterial, material))
+                    return refuse(program_operand::Refusal::MaterialConflict);
+            }
+            face.materialSource = chosen.first;
+            face.materialIndex = chosen.second;
+            proof.faces.push_back(std::move(face));
+        }
+        proof.noUncoveredFinalFace = proof.faces.size() == finalFaces.size();
+        proof.materialLineageComplete = proof.noUncoveredFinalFace;
+
+        proof.selectorLineageComplete = true;
+        for (std::uint8_t input = 0; input < 2; ++input) {
+            const auto& appearance = request.operands[input].appearance;
+            for (const SelectorBinding& selector : appearance.selectors) {
+                const auto region = std::find_if(appearance.regions.begin(),
+                    appearance.regions.end(), [&](const RegionBinding& value) {
+                        return value.region == selector.region;
+                    });
+                if (region == appearance.regions.end())
+                    return refuse(program_operand::Refusal::AmbiguousSelector);
+                const std::size_t descendants = std::count_if(
+                    proof.faces.begin(), proof.faces.end(),
+                    [&](const ProgramOperandFaceBinding& face) {
+                        return std::find(face.regionLineage.begin(),
+                            face.regionLineage.end(), selector.region)
+                            != face.regionLineage.end();
+                    });
+                const bool cardinality = descendants == selector.expectedCardinality;
+                const bool unique = selector.policy != SelectorPolicy::UniqueFace
+                    || descendants == 1;
+                if (!cardinality || !unique)
+                    return refuse(program_operand::Refusal::AmbiguousSelector);
+            }
+        }
+        proof.refusal = program_operand::Refusal::None;
+        return proof;
+    } catch (...) { return refuse(program_operand::Refusal::BuildFailed); }
 }
 
 } // namespace core3d::part_boolean::correspondence
