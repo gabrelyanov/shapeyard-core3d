@@ -21824,6 +21824,36 @@ OcctSceneSnapshotBuilder::PublishRadialArrayPreviewOverlay(
     }
 }
 
+namespace {
+thread_local bool gPrivateExportTextureInstallRefused = false;
+thread_local std::size_t gPrivateExportTextureInstallDecodedBytes = 0;
+thread_local std::size_t gPrivateExportTextureInstallDecodedLimitBytes = 0;
+
+void ResetPrivateExportTextureInstallRefusal() noexcept {
+    gPrivateExportTextureInstallRefused = false;
+    gPrivateExportTextureInstallDecodedBytes = 0;
+    gPrivateExportTextureInstallDecodedLimitBytes = 0;
+}
+
+void RecordPrivateExportTextureInstallRefusal(
+    const std::size_t decodedBytes,
+    const std::size_t decodedLimitBytes) noexcept {
+    gPrivateExportTextureInstallRefused = true;
+    gPrivateExportTextureInstallDecodedBytes = decodedBytes;
+    gPrivateExportTextureInstallDecodedLimitBytes = decodedLimitBytes;
+}
+} // namespace
+
+bool ConsumePrivateExportTextureInstallRefusal(
+    std::size_t& decodedBytes,
+    std::size_t& decodedLimitBytes) noexcept {
+    const bool refused = gPrivateExportTextureInstallRefused;
+    decodedBytes = gPrivateExportTextureInstallDecodedBytes;
+    decodedLimitBytes = gPrivateExportTextureInstallDecodedLimitBytes;
+    ResetPrivateExportTextureInstallRefusal();
+    return refused;
+}
+
 OcctSceneSnapshotBuilder::SnapshotPointer
 OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
     const Handle(OcctDocument)& document,
@@ -21837,6 +21867,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
 #endif
     ) noexcept
 {
+    ResetPrivateExportTextureInstallRefusal();
 #ifdef DEBUG
     if (debugObservation) {
         *debugObservation = {};
@@ -23032,10 +23063,27 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 || !CheckedAdd(aggregateEncodedBytes, png.size(),
                     aggregateEncodedBytes)
                 || !CheckedAdd(aggregateDecodedBytes, decoded,
-                    aggregateDecodedBytes)
-                || aggregateEncodedBytes > kMaxAggregateEncodedTextureBytes
-                || aggregateDecodedBytes > kMaxAggregateDecodedTextureBytes)
+                    aggregateDecodedBytes))
                 return false;
+            if (aggregateEncodedBytes > kMaxAggregateEncodedTextureBytes)
+                return false;
+            if (aggregateDecodedBytes > kMaxAggregateDecodedTextureBytes) {
+                RecordPrivateExportTextureInstallRefusal(
+                    aggregateDecodedBytes,
+                    kMaxAggregateDecodedTextureBytes);
+#ifdef DEBUG
+                if (debugObservation) {
+                    debugObservation->failureStage =
+                        "texture-install-decoded-budget";
+                    debugObservation->captureRefusalCause =
+                        "decoded-texture-budget-exceeded";
+                    debugObservation->captureRefusalBoundary = "installPNG";
+                    debugObservation->captureRefusalField =
+                        "aggregateDecodedTextureBytes";
+                }
+#endif
+                return false;
+            }
             if (!decalCapture || !decalCapture->impl_) return false;
             std::size_t installBytes = sizeof(TextureResourceSnapshot)
                 + sizeof(std::pair<const std::string, std::int32_t>);
@@ -23093,6 +23141,71 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             installTickets.push_back(std::move(installTicket));
             return true;
         };
+
+        // Measure the complete operation-owned role set before installing any
+        // new texture. A refusal reports the candidate's total decoded demand,
+        // while the existing install path remains the enforcing boundary.
+        std::size_t projectedEncodedBytes = aggregateEncodedBytes;
+        std::size_t projectedDecodedBytes = aggregateDecodedBytes;
+        auto projectedIdentifiers = textureIdentifiers;
+        bool projectedDemandValid = true;
+        for (const auto& entry : finalBakes) {
+            if (!entry.second) {
+                projectedDemandValid = false;
+                break;
+            }
+            std::set<face_image::Role> projectedRoles;
+            for (const auto& output : entry.second->outputs) {
+                const std::size_t role = std::size_t(output.descriptor.role);
+                face_image::Digest measured{};
+                std::size_t decoded = 0;
+                if (role >= 5
+                    || !projectedRoles.insert(output.descriptor.role).second
+                    || output.png.empty()
+                    || output.descriptor.widthTexels == 0
+                    || output.descriptor.heightTexels == 0
+                    || !face_image::HashFaceImageBytes(output.png, measured)
+                    || measured != output.descriptor.content
+                    || !CheckedMultiply(
+                        std::size_t(output.descriptor.widthTexels),
+                        std::size_t(output.descriptor.heightTexels), decoded)
+                    || !CheckedMultiply(decoded, std::size_t(4), decoded)) {
+                    projectedDemandValid = false;
+                    break;
+                }
+                const std::string identifier = "texture-sha256-"
+                    + PaintedAtlasDigestText(measured);
+                if (projectedIdentifiers.emplace(identifier, -1).second) {
+                    if (!CheckedAdd(projectedEncodedBytes, output.png.size(),
+                            projectedEncodedBytes)
+                        || !CheckedAdd(projectedDecodedBytes, decoded,
+                            projectedDecodedBytes)) {
+                        projectedDemandValid = false;
+                        break;
+                    }
+                }
+            }
+            if (!projectedDemandValid) break;
+        }
+        if (projectedDemandValid
+            && projectedIdentifiers.size() <= kMaxTexturesPerSnapshot
+            && projectedEncodedBytes <= kMaxAggregateEncodedTextureBytes
+            && projectedDecodedBytes > kMaxAggregateDecodedTextureBytes) {
+            RecordPrivateExportTextureInstallRefusal(
+                projectedDecodedBytes, kMaxAggregateDecodedTextureBytes);
+#ifdef DEBUG
+            if (debugObservation) {
+                debugObservation->failureStage =
+                    "texture-install-decoded-budget";
+                debugObservation->captureRefusalCause =
+                    "decoded-texture-budget-exceeded";
+                debugObservation->captureRefusalBoundary = "installPNG";
+                debugObservation->captureRefusalField =
+                    "aggregateDecodedTextureBytes";
+            }
+#endif
+            return {};
+        }
 
         std::unordered_map<std::string, std::array<std::int32_t, 5>>
             roleTextures;

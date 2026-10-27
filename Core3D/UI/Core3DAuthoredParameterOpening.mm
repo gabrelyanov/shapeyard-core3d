@@ -1086,6 +1086,18 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
 }
 @end
 
+@interface Core3DBooleanPairRecoveryObservation ()
+- (instancetype)initWithState:(Core3DBooleanPairRecoveryObservationState)state;
+@end
+
+@implementation Core3DBooleanPairRecoveryObservation
+- (instancetype)initWithState:(Core3DBooleanPairRecoveryObservationState)state {
+    self = [super init];
+    if (self) _state = state;
+    return self;
+}
+@end
+
 //! Weak-host/strong-continuation registry. The continuation owns no host and
 //! cannot move to a replacement document; exact native document/data identity
 //! is rechecked on every recovery call.
@@ -1281,6 +1293,35 @@ static NSMapTable<Core3DViewController *, Core3DBooleanPairRecoveryIssuer *>
         }
         return [[Core3DBooleanPairApplyResult alloc] initWithNative:reply];
     } catch (...) { return refused(PairRefusal::BadEncoding); }
+}
+
+- (Core3DBooleanPairRecoveryObservation *)observeBooleanPairRecovery {
+    Core3DBooleanPairRecoveryObservationState state =
+        Core3DBooleanPairRecoveryObservationStateNotOwner;
+    if (![NSThread isMainThread])
+        return [[Core3DBooleanPairRecoveryObservation alloc] initWithState:state];
+    try {
+        Core3DBooleanPairRecoveryIssuer *issuer =
+            [Core3DBooleanPairRecoveryIssuers() objectForKey:self];
+        if (!issuer) {
+            state = Core3DBooleanPairRecoveryObservationStateAbsent;
+        } else {
+            GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+                ? (GLViewController *)self.glController : nil;
+            const auto viewer = gl ? gl.viewer : nullptr;
+            const Handle(OcctDocument) document = viewer
+                ? viewer->getDocument() : Handle(OcctDocument)();
+            const Handle(TDocStd_Document) ocaf = document.IsNull()
+                ? Handle(TDocStd_Document)() : document->Document();
+            if (!document.IsNull() && !ocaf.IsNull()
+                && issuer->_document == document && issuer->_recovery
+                && issuer->_ocafDocument == ocaf.get()
+                && issuer->_ocafData == ocaf->GetData().get()
+                && document->HasBooleanPairRecovery(issuer->_recovery))
+                state = Core3DBooleanPairRecoveryObservationStateRequired;
+        }
+    } catch (...) {}
+    return [[Core3DBooleanPairRecoveryObservation alloc] initWithState:state];
 }
 
 - (Core3DBooleanPairRecoveryResult *)recoverBooleanSources {

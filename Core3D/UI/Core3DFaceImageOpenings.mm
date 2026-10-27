@@ -3691,6 +3691,15 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
 
 - (NSNumber *)debugInstallE4PaintedAtlasSourcesForEntityIdentifier:
     (NSString *)entityIdentifier resourceBytes:(NSArray<NSData *> *)resourceBytes {
+    return [self debugInstallE4PaintedAtlasSourcesForEntityIdentifier:
+        entityIdentifier resourceBytes:resourceBytes atlasResolution:2048];
+}
+
+- (NSNumber *)debugInstallE4PaintedAtlasSourcesForEntityIdentifier:
+    (NSString *)entityIdentifier resourceBytes:(NSArray<NSData *> *)resourceBytes
+    atlasResolution:(NSInteger)atlasResolution {
+    if (atlasResolution != 2048 && atlasResolution != 1024
+        && atlasResolution != 512) return @NO;
     if (!NSThread.isMainThread || entityIdentifier.length == 0
         || entityIdentifier.length > 128 || resourceBytes.count != 3) return @NO;
     @try {
@@ -3711,7 +3720,7 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         if (!core3d::asset_atlas::persistence::ReadAll(document, atlases)
             || atlases.size() != 1 || !atlases.front().value
             || atlases.front().value->definition.members.size() != 2
-            || atlases.front().value->definition.resolutionTexels != 2048
+            || atlases.front().value->definition.resolutionTexels != atlasResolution
             || atlases.front().value->definition.gutterTexels != 4) return @NO;
         bool member = false;
         for (const auto& value : atlases.front().value->definition.members)
@@ -3801,6 +3810,14 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
 
 - (NSNumber *)debugBakeE4PaintedAtlasForEntityIdentifier:
     (NSString *)entityIdentifier {
+    return [self debugBakeE4PaintedAtlasForEntityIdentifier:
+        entityIdentifier atlasResolution:2048];
+}
+
+- (NSNumber *)debugBakeE4PaintedAtlasForEntityIdentifier:
+    (NSString *)entityIdentifier atlasResolution:(NSInteger)atlasResolution {
+    if (atlasResolution != 2048 && atlasResolution != 1024
+        && atlasResolution != 512) return @NO;
     if (!NSThread.isMainThread || entityIdentifier.length == 0
         || entityIdentifier.length > 128) return @NO;
     @try {
@@ -3828,7 +3845,7 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
                     atlas = &record.value->definition;
                 }
         }
-        if (!atlas || atlas->resolutionTexels != 2048
+        if (!atlas || atlas->resolutionTexels != atlasResolution
             || atlas->gutterTexels != 4) return @NO;
         const auto atlasKey = atlas->key;
         document->NewCommand();

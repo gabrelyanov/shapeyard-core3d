@@ -12661,6 +12661,13 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
     }
 }
 
+Standard_Boolean OcctDocument::HasBooleanPairRecovery(
+    const std::shared_ptr<const core3d::authored_parameter::PairRecovery>& recovery)
+    const noexcept {
+    return recovery && recovery->state_
+        && recovery->state_ == myBooleanPairRecovery;
+}
+
 core3d::authored_parameter::PairRecoveryReply
 OcctDocument::RecoverBooleanSources(
     const std::shared_ptr<const core3d::authored_parameter::PairRecovery>& recovery)

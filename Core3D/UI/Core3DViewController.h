@@ -710,11 +710,20 @@ __attribute__((objc_subclassing_restricted))
 - (NSNumber *)debugInstallE4PaintedAtlasSourcesForEntityIdentifier:
     (NSString *)entityIdentifier resourceBytes:(NSArray<NSData *> *)resourceBytes
     NS_SWIFT_NAME(debugInstallE4PaintedAtlasSources(entityIdentifier:resourceBytes:));
+//! Same five sources at a test-chosen 2048, 1024 or 512 atlas size.
+- (NSNumber *)debugInstallE4PaintedAtlasSourcesForEntityIdentifier:
+    (NSString *)entityIdentifier resourceBytes:(NSArray<NSData *> *)resourceBytes
+    atlasResolution:(NSInteger)atlasResolution
+    NS_SWIFT_NAME(debugInstallE4PaintedAtlasSources(entityIdentifier:resourceBytes:atlasResolution:));
 //! Commits the production SYEB bake and returns YES only after a strict current
 //! persisted read observes all five role resources and a nonzero bake proof.
 - (NSNumber *)debugBakeE4PaintedAtlasForEntityIdentifier:
     (NSString *)entityIdentifier
     NS_SWIFT_NAME(debugBakeE4PaintedAtlas(entityIdentifier:));
+//! Same production bake, requiring the matching test-chosen fixture size.
+- (NSNumber *)debugBakeE4PaintedAtlasForEntityIdentifier:
+    (NSString *)entityIdentifier atlasResolution:(NSInteger)atlasResolution
+    NS_SWIFT_NAME(debugBakeE4PaintedAtlas(entityIdentifier:atlasResolution:));
 //! Read-only names from the last ordinary painted-atlas bake on this document.
 //! A fresh document reports status "no bake observed" and no synthetic bake.
 - (NSDictionary<NSString *, NSString *> *_Nullable)
@@ -936,6 +945,11 @@ __attribute__((objc_subclassing_restricted))
 //! open document.
 + (NSData *_Nullable)debugAssetAtlasFixtureAssetData:(double)metersPerUnit
     NS_SWIFT_NAME(debugAssetAtlasFixtureAssetData(metersPerUnit:));
+//! Test-chosen size; accepts exactly 2048, 1024 or 512. The existing overload
+//! retains its frozen 2048/4 default. Builds directly without a resize command.
++ (NSData *_Nullable)debugAssetAtlasFixtureAssetData:(double)metersPerUnit
+    atlasResolution:(NSInteger)atlasResolution
+    NS_SWIFT_NAME(debugAssetAtlasFixtureAssetData(metersPerUnit:atlasResolution:));
 //! Raw BRep_TEdge planar representation census for the three production-cut
 //! atlas objects, including mesh and V3 reopen observations. The loft/bore row
 //! also reports the first V3 line and edge representation changed by V4 reopen.

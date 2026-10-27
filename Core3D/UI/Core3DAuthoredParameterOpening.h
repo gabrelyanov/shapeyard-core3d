@@ -270,6 +270,20 @@ typedef NS_ENUM(NSInteger, Core3DBooleanPairRecoveryStatus) {
     Core3DBooleanPairRecoveryStatusNotOwner,
 };
 
+typedef NS_ENUM(NSInteger, Core3DBooleanPairRecoveryObservationState) {
+    Core3DBooleanPairRecoveryObservationStateAbsent = 0,
+    Core3DBooleanPairRecoveryObservationStateRequired,
+    Core3DBooleanPairRecoveryObservationStateNotOwner,
+};
+
+//! Non-consuming observation of this host's document-owned pair recovery.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DBooleanPairRecoveryObservation : NSObject
+@property(nonatomic,readonly) Core3DBooleanPairRecoveryObservationState state;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 //! Host-owned continuation result for one unknown pair creation. A completed
 //! census reports the actual number of matching live composites (zero or one);
 //! ambiguity and foreign/replaced hosts retain no false terminal claim.
@@ -421,6 +435,10 @@ __attribute__((objc_subclassing_restricted))
 - (Core3DBooleanPairApplyResult *)applyBooleanSources:
     (Core3DBooleanPairPrepared *)prepared expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(applyBooleanSources(_:expected:));
+//! Observe whether this exact host still owns a document recovery without
+//! consuming or settling it.
+- (Core3DBooleanPairRecoveryObservation *)observeBooleanPairRecovery
+    NS_SWIFT_NAME(observeBooleanPairRecovery());
 //! Continue only the exact host-retained unknown creation. This performs a
 //! fresh document census and publication reconciliation, never another command.
 - (Core3DBooleanPairRecoveryResult *)recoverBooleanSources

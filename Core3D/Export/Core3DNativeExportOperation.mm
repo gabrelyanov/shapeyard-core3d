@@ -102,6 +102,12 @@
 NSErrorDomain const Core3DNativeExportErrorDomain =
     @"Core3DNativeExportErrorDomain";
 
+namespace core3d::scene {
+bool ConsumePrivateExportTextureInstallRefusal(
+    std::size_t& decodedBytes,
+    std::size_t& decodedLimitBytes) noexcept;
+}
+
 namespace {
 
 constexpr std::int64_t kMaximumSTLNodes = 1'500'000;
@@ -143,6 +149,8 @@ struct NativeExportState {
         debugE4CacheBefore;
     core3d::decal_layer::bake::publication::DebugCacheInventory
         debugE4CacheAfter;
+    std::uint64_t debugTextureInstallDecodedBytes = 0;
+    std::uint64_t debugTextureInstallDecodedLimitBytes = 0;
 #endif
     std::mutex lifecycleMutex;
     bool started = false;
@@ -155,6 +163,10 @@ struct NativeExportResult {
     Core3DNativeExportErrorCode errorCode =
         Core3DNativeExportErrorInternalFailure;
     std::string message;
+    std::string failureStage;
+    std::string failureCause;
+    std::uint64_t decodedTextureBytes = 0;
+    std::uint64_t decodedTextureLimitBytes = 0;
 };
 
 class NativeExportFailure final : public std::runtime_error {
@@ -455,7 +467,9 @@ NSDictionary<NSString *, id> *DebugE4CacheDictionary(
 NSDictionary<NSString *, id> *DebugE4ObservationDictionary(
     const core3d::scene::DebugPrivateExportDecalObservation& value,
     const core3d::decal_layer::bake::publication::DebugCacheInventory& before,
-    const core3d::decal_layer::bake::publication::DebugCacheInventory& after) {
+    const core3d::decal_layer::bake::publication::DebugCacheInventory& after,
+    const std::uint64_t textureInstallDecodedBytes,
+    const std::uint64_t textureInstallDecodedLimitBytes) {
     NSMutableArray<NSDictionary<NSString *, id> *> *mapping =
         [NSMutableArray arrayWithCapacity:value.correspondence.size()];
     for (const auto& item : value.correspondence) {
@@ -556,6 +570,9 @@ NSDictionary<NSString *, id> *DebugE4ObservationDictionary(
         @"layoutResolution": @(value.layoutResolution),
         @"layoutChartCount": @(value.layoutChartCount),
         @"failureStage": DebugE4String(value.failureStage),
+        @"textureInstallDecodedBytes": @(textureInstallDecodedBytes),
+        @"textureInstallDecodedLimitBytes": @(
+            textureInstallDecodedLimitBytes),
         @"captureReached": @(value.captureReached),
         @"finalProductionReached": @(value.finalProductionReached),
         @"publicationReached": @(value.publicationReached),
@@ -2041,9 +2058,33 @@ NativeExportResult RunNativeExport(
                 state->debugE4CacheAfter = cacheAfter;
 #endif
             }
+            std::size_t decodedTextureBytes = 0;
+            std::size_t decodedTextureLimitBytes = 0;
+            const bool decodedTextureBudgetRefusal = !result.scene
+                && core3d::scene::ConsumePrivateExportTextureInstallRefusal(
+                    decodedTextureBytes, decodedTextureLimitBytes);
+#ifdef DEBUG
+            if (decodedTextureBudgetRefusal) {
+                std::lock_guard<std::mutex> debugLock(state->debugE4Mutex);
+                state->debugTextureInstallDecodedBytes = decodedTextureBytes;
+                state->debugTextureInstallDecodedLimitBytes =
+                    decodedTextureLimitBytes;
+            }
+#endif
             ThrowIfCancelled(state);
             if (!result.scene
                 || !core3d::scene::IsValidSceneSnapshot(*result.scene)) {
+                if (decodedTextureBudgetRefusal) {
+                    result.failureStage = "texture-install-decoded-budget";
+                    result.failureCause = "decoded-texture-budget-exceeded";
+                    result.decodedTextureBytes = decodedTextureBytes;
+                    result.decodedTextureLimitBytes = decodedTextureLimitBytes;
+                    throw NativeExportFailure(
+                        Core3DNativeExportErrorMeshingFailed,
+                        "This export exceeds the decoded texture safety limit. "
+                        "Reduce the saved atlas resolution or export fewer "
+                        "painted objects.");
+                }
                 throw NativeExportFailure(Core3DNativeExportErrorMeshingFailed,
                     "The private final-UV GLB appearance could not be prepared safely.");
             }
@@ -3024,12 +3065,24 @@ bool DebugMeshSavedGroupPrivateSurfaces(const TopoDS_Shape& shape) noexcept {
             NSLog(@"[NativeExport] Worker failed: code=%ld message=%@",
                   static_cast<long>(result.errorCode),
                   ErrorDescription(result));
+            NSMutableDictionary<NSString *, id> *userInfo =
+                [@{NSLocalizedDescriptionKey: ErrorDescription(result)}
+                    mutableCopy];
+            if (!result.failureStage.empty()) {
+                userInfo[@"Core3DNativeExportFailureStage"] =
+                    [NSString stringWithUTF8String:
+                        result.failureStage.c_str()] ?: @"";
+                userInfo[@"Core3DNativeExportFailureCause"] =
+                    [NSString stringWithUTF8String:
+                        result.failureCause.c_str()] ?: @"";
+                userInfo[@"Core3DNativeExportDecodedTextureBytes"] =
+                    @(result.decodedTextureBytes);
+                userInfo[@"Core3DNativeExportDecodedTextureLimitBytes"] =
+                    @(result.decodedTextureLimitBytes);
+            }
             NSError *error = [NSError
                 errorWithDomain:Core3DNativeExportErrorDomain
-                code:result.errorCode
-                userInfo:@{
-                    NSLocalizedDescriptionKey: ErrorDescription(result)
-                }];
+                code:result.errorCode userInfo:userInfo];
             completionCopy(nil, error);
         });
     });
@@ -3126,7 +3179,9 @@ bool DebugMeshSavedGroupPrivateSurfaces(const TopoDS_Shape& shape) noexcept {
     return DebugE4ObservationDictionary(
         state->debugE4Observation,
         state->debugE4CacheBefore,
-        state->debugE4CacheAfter);
+        state->debugE4CacheAfter,
+        state->debugTextureInstallDecodedBytes,
+        state->debugTextureInstallDecodedLimitBytes);
 }
 
 + (NSDictionary<NSString *, id> *)debugE4SharedCacheInventory {

@@ -1510,7 +1510,11 @@ void FixturePaintPart(const Handle(TDocStd_Document)& doc, const FixturePart& pa
 // The frozen row-278a fixture: the row-271 two-part box/cylinder atlas members
 // plus one painted non-member part, the atlas built over the two members with
 // the frozen 2048/4 settings in exactly one command.
-void StageAssetAtlasFixture(const Handle(TDocStd_Document)& doc, double unit) {
+void StageAssetAtlasFixture(const Handle(TDocStd_Document)& doc, double unit,
+    const int resolutionTexels = 2048) {
+    if (resolutionTexels != 2048 && resolutionTexels != 1024
+        && resolutionTexels != 512)
+        throw std::invalid_argument("atlas fixture resolution");
     using namespace core3d::asset_atlas;
     doc->ChangeStorageFormatVersion(TDocStd_FormatVersion(12));
     (void)XCAFDoc_DocumentTool::ShapeTool(doc->Main());
@@ -1534,7 +1538,7 @@ void StageAssetAtlasFixture(const Handle(TDocStd_Document)& doc, double unit) {
         throw std::invalid_argument("atlas fixture member capture");
     Definition candidate; std::vector<MemberUVAssignment> assignments;
     std::string diagnosis;
-    if (build::BuildAtlas(doc, atlas, capture, {2048, 4},
+    if (build::BuildAtlas(doc, atlas, capture, {resolutionTexels, 4},
             candidate, assignments, diagnosis) != build::Status::Built)
         throw std::invalid_argument("atlas fixture build");
     std::vector<Member> observed;
@@ -1833,6 +1837,18 @@ NSString *PaintedAtlasFailureSiteName(
         metersPerUnit == 0.001 ? @"e2-asset-atlas-mm" : @"e2-asset-atlas-m",
         [metersPerUnit](const Handle(TDocStd_Document)& document) {
             StageAssetAtlasFixture(document, metersPerUnit);
+        });
+}
+
++ (NSData *)debugAssetAtlasFixtureAssetData:(double)metersPerUnit
+    atlasResolution:(NSInteger)atlasResolution {
+    if (!NSThread.isMainThread || (metersPerUnit != 0.001 && metersPerUnit != 1.0)
+        || (atlasResolution != 2048 && atlasResolution != 1024
+            && atlasResolution != 512)) return nil;
+    return CreateAssetAtlasDebugFixture(
+        metersPerUnit == 0.001 ? @"e2-asset-atlas-mm" : @"e2-asset-atlas-m",
+        [metersPerUnit, atlasResolution](const Handle(TDocStd_Document)& document) {
+            StageAssetAtlasFixture(document, metersPerUnit, int(atlasResolution));
         });
 }
 

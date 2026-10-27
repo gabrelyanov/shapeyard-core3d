@@ -22,6 +22,9 @@ inline constexpr std::uint32_t LegacyCodecVersion = 1; // opaque transport remai
 inline constexpr std::uint32_t ShellCodecVersion = 2;
 inline constexpr std::uint32_t RecipeCodecVersion = 3;
 inline constexpr std::uint32_t OriginalsCodecVersion = 4;
+// SYPB/5 is readable retained-program operand state. It does not grant
+// execution authority and does not alter any codec-1 through codec-4 bytes.
+inline constexpr std::uint32_t ProgramOperandCodecVersion = 5;
 inline constexpr std::uint32_t PayloadVersion = 2;
 inline constexpr std::uint32_t AnalyticPayloadVersion = 1;
 inline constexpr std::uint32_t RecipePayloadVersion = 3;

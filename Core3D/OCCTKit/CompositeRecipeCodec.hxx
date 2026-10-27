@@ -2,6 +2,7 @@
 #include "CompositeRecipeDefinition.hxx"
 #include "BoundedCurveCodec.hxx"
 #include "PartBooleanPersistence.hxx"
+#include "PartBooleanProgramOperandCodec.hxx"
 #include "RetainedBooleanProgram.hxx"
 #include "RetainedFeatureRegistry.hxx"
 #include "RetainedSourceRegistry.hxx"
@@ -22,11 +23,14 @@
 #include <set>
 
 namespace core3d::composite_recipe {
+inline bool CanonicalProgramOperandFeature(const FeatureNode&,
+                                           const std::vector<Node>&) noexcept;
 inline constexpr std::uint32_t PartBooleanFeatureKind = part_boolean::FeatureKind;
 inline constexpr std::uint32_t PartBooleanFeatureCodec = part_boolean::LegacyCodecVersion;
 inline constexpr std::uint32_t PartBooleanShellFeatureCodec = part_boolean::ShellCodecVersion;
 inline constexpr std::uint32_t PartBooleanRecipeFeatureCodec = part_boolean::RecipeCodecVersion;
 inline constexpr std::uint32_t PartBooleanOriginalsFeatureCodec = part_boolean::OriginalsCodecVersion;
+inline constexpr std::uint32_t ProgramOperandFeatureCodec = part_boolean::ProgramOperandCodecVersion;
 inline constexpr std::uint32_t SpatialCircleSweepFeatureKind = spatial_sweep::SpatialCircleSweepFeatureKind;
 inline constexpr std::uint32_t SpatialCircleSweepFeatureCodec = spatial_sweep::SpatialCircleSweepFeatureCodec;
 inline constexpr std::uint32_t RetainedProgramSuffixFeatureKind = retained_program_suffix::FeatureKind;
@@ -393,6 +397,44 @@ inline bool CanonicalOriginalsFeature(const FeatureNode& feature,
                 if (std::memcmp(&source->inputToCarrier.matrix[scalar],
                                 &original.sourceRootToCarrier[scalar], sizeof(double)) != 0)
                     return false;
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
+inline bool CanonicalProgramOperandFeature(const FeatureNode& feature,
+                                           const std::vector<Node>& priorNodes) noexcept {
+    try {
+        if (feature.kind != PartBooleanFeatureKind
+            || feature.codecVersion != ProgramOperandFeatureCodec
+            || feature.inputs.size() != 2 || feature.inputs[0] == feature.inputs[1]) return false;
+        part_boolean::program_operand::Definition payload;
+        std::vector<std::uint8_t> exact;
+        if (!part_boolean::program_operand::DecodeProgramOperands(feature.parameters, payload)
+            || !part_boolean::program_operand::EncodeProgramOperands(payload, exact)
+            || exact != feature.parameters || payload.booleanNode != feature.node
+            || payload.feature != feature.feature) return false;
+        for (std::size_t index = 0; index < 2; ++index) {
+            const auto& input = payload.inputs[index];
+            if (input.sourceNode != feature.inputs[index]) return false;
+            const auto found = std::find_if(priorNodes.begin(), priorNodes.end(),
+                [&](const Node& node) { return NodeID(node) == feature.inputs[index]; });
+            if (found == priorNodes.end()) return false;
+            const auto* source = std::get_if<SourceNode>(&found->value);
+            if (!source || source->recipe.kind != RecipeKind::RetainedBoolean
+                || source->node != input.sourceNode || source->localID != input.sourceLocalID
+                || source->shapeSlot != input.shapeSlot || !(source->original == input.original)
+                || source->recipe.schema != 1
+                || source->commitments.geometry != input.effectiveCommitments.geometry
+                || source->commitments.recipe != input.effectiveCommitments.recipe
+                || source->commitments.placement != input.effectiveCommitments.placement
+                || source->commitments.material != input.effectiveCommitments.material
+                || source->commitments.groups != input.effectiveCommitments.groups
+                || !part_boolean::program_operand::codec_detail::SamePlacement(
+                    source->inputToCarrier, input.placement)) return false;
+            retained_recipe::Digest effectiveDigest{};
+            if (!Hash(source->recipe.bytes, effectiveDigest)
+                || effectiveDigest != input.effectiveDigest) return false;
         }
         return true;
     } catch (...) { return false; }
@@ -831,7 +873,7 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes, Definition& output) n
 namespace core3d::retained_feature {
 inline const RegistryView& ProductionRegistry() noexcept {
     using namespace composite_recipe;
-    static const std::array<Entry, 6> entries{{
+    static const std::array<Entry, 7> entries{{
         {{{PartBooleanFeatureKind, PartBooleanFeatureCodec}, 3, MaximumFeaturePayloadBytes,
           {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 2,
           ShapeKind::Solid, CanonicalAnalyticFeature}, {}},
@@ -846,6 +888,11 @@ inline const RegistryView& ProductionRegistry() noexcept {
         {{{PartBooleanFeatureKind, PartBooleanOriginalsFeatureCodec}, 3, MaximumFeaturePayloadBytes,
           {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 2,
           ShapeKind::Solid, CanonicalOriginalsFeature}, {}},
+        // Codec 5 is readable/canonical only. The empty execution descriptor
+        // keeps retained_recipe::Evaluate closed until the isolated P9 promotion.
+        {{{PartBooleanFeatureKind, ProgramOperandFeatureCodec}, 3, MaximumFeaturePayloadBytes,
+          {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 2,
+          ShapeKind::Solid, CanonicalProgramOperandFeature}, {}},
         {{{RetainedProgramSuffixFeatureKind, RetainedProgramSuffixFeatureCodec}, 3,
           retained_program_suffix::MaximumPayloadBytes,
           {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 1,

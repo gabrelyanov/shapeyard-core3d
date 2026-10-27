@@ -395,6 +395,162 @@ struct Probe final {
         return request;
     }
 
+    static part_boolean::program_operand::Value MaximalProgramOperandFixture(
+        double unit, part_boolean::program_operand::Role role, std::uint8_t seed) {
+        namespace po = part_boolean::program_operand;
+        po::Value value = ProgramOperandPrismFixture(unit, role, seed);
+        auto program = std::get<retained_boolean::Program>(value.recipe.originalDecoded);
+        program.codecMinor = 4;
+        const double localPerMM = 0.001 / unit;
+        for (std::uint32_t id = 2; id <= 4; ++id) {
+            retained_boolean::Step step;
+            step.operation = analytic_boolean::Operation::Difference;
+            step.operand = Bore(id, (5 + 8 * id) * localPerMM,
+                (5 + 4 * id) * localPerMM, 0.75 * localPerMM);
+            program.steps.push_back(step);
+        }
+        program.nextOperandID = 5;
+        program.nextFilletStepID = 9; program.nextFilletEdgeID = 17;
+        for (std::uint64_t stepID = 1; stepID <= 8; ++stepID) {
+            retained_fillet::Step round;
+            round.stepIdentifier = stepID;
+            round.radiusLocal = 0.25 * localPerMM;
+            for (std::uint64_t ordinal = 0; ordinal < 2; ++ordinal) {
+                retained_fillet::EdgeAnchor anchor;
+                anchor.identifier = (stepID - 1) * 2 + ordinal + 1;
+                anchor.curveKind = ordinal == 0
+                    ? retained_fillet::CurveKind::Line
+                    : retained_fillet::CurveKind::Circle;
+                anchor.anchorPoint = {double(stepID) * localPerMM,
+                    double(ordinal + 1) * localPerMM, 10 * localPerMM};
+                anchor.axis = {0, 0, 1};
+                anchor.circleRadius = ordinal == 0 ? 0 : 2 * localPerMM;
+                round.anchors.push_back(anchor);
+            }
+            program.filletSteps.push_back(std::move(round));
+        }
+        if (!retained_boolean::Valid(program) || !RefreshProgramOperand(value, program))
+            throw std::invalid_argument("maximal program operand");
+        return value;
+    }
+
+    static part_boolean::program_operand::Definition ProgramOperandCodecFixture(
+        double unit, bool maximal = false) {
+        namespace po = part_boolean::program_operand;
+        const po::Request request = ProgramOperandPairFixture(unit);
+        po::Definition value;
+        value.operation = request.operation; value.owner = request.outerOwner;
+        value.booleanNode = Identifier(0x70); value.feature = request.outputFeature;
+        value.ownerOutputCommitments.geometry = FixedDigest(0xE0);
+        value.ownerOutputCommitments.recipe = FixedDigest(0xE1);
+        value.ownerOutputCommitments.placement = FixedDigest(0xE2);
+        value.ownerOutputCommitments.material = FixedDigest(0xE3);
+        value.ownerOutputCommitments.groups = FixedDigest(0xE4);
+        std::array<po::Value, 2> captured = request.operands;
+        if (maximal) {
+            captured[0] = MaximalProgramOperandFixture(unit, po::Role::Left, 0x20);
+            captured[1] = MaximalProgramOperandFixture(unit, po::Role::Right, 0x40);
+            std::vector<retained_recipe::DependencyRead> reads;
+            for (const auto& input : captured)
+                reads.push_back(input.fence.revision.dependencies.front());
+            for (auto& input : captured) input.fence.revision.dependencies = reads;
+        }
+        for (std::size_t index = 0; index < 2; ++index) {
+            const po::Value& source = captured[index];
+            po::InputDefinition& input = value.inputs[index];
+            input.role = index == 0 ? part_boolean::RecipeInputRole::Left
+                                    : part_boolean::RecipeInputRole::Right;
+            input.baseFamily = part_boolean::RecipeInputFamily(std::uint8_t(source.recipe.baseFamily));
+            input.sourceNode = source.identity.sourceNode;
+            input.sourceLocalID = source.identity.sourceLocalID;
+            input.shapeSlot = source.identity.shapeSlot; input.original = source.identity.original;
+            input.derivedFeature = source.identity.derivedFeature;
+            input.outputFeature = source.identity.outputFeature;
+            input.nextLocalID = source.identity.nextLocalID;
+            const auto& program = std::get<retained_boolean::Program>(source.recipe.originalDecoded);
+            input.originalSchema = program.source.schema; input.originalMinor = program.codecMinor;
+            input.originalBytes = source.recipe.originalBytes;
+            input.originalDigest = source.recipe.originalDigest;
+            input.effectiveDigest = source.recipe.effectiveDigest;
+            input.originalBase = source.recipe.originalBaseCommitment;
+            input.originalResult = source.recipe.originalResultCommitment;
+            input.effectiveBase = source.recipe.effectiveBaseCommitment;
+            input.effectiveResult = source.recipe.effectiveResultCommitment;
+            input.placement = source.sourceToCarrier;
+            input.ownerMetersPerUnit = source.observedOwnerMetersPerUnit;
+            input.documentMetersPerUnit = source.observedDocumentMetersPerUnit;
+            input.originalCommitments = source.originalCommitments;
+            input.effectiveCommitments = source.effectiveCommitments;
+            input.appearance.original = source.appearance.original;
+            input.appearance.effective = source.appearance.effective;
+            input.appearance.originalMaterials = source.appearance.originalMaterials;
+            input.appearance.effectiveMaterials = source.appearance.effectiveMaterials;
+            input.appearance.originalGroups = source.appearance.originalGroups;
+            input.appearance.effectiveGroups = source.appearance.effectiveGroups;
+            input.appearance.originalLayers = source.appearance.originalLayers;
+            input.appearance.effectiveLayers = source.appearance.effectiveLayers;
+            input.appearance.regions = source.appearance.regions;
+            input.appearance.selectors = source.appearance.selectors;
+            input.appearance.materialPolicy = source.appearance.materialPolicy;
+            input.appearance.versions = source.appearance.versions;
+            input.appearance.originallyVisible = source.appearance.originallyVisible;
+            input.appearance.originallyConsumed = source.appearance.originallyConsumed;
+            input.fence.documentGeneration = source.fence.revision.documentGeneration;
+            input.fence.modelRevision = source.fence.revision.modelRevision;
+            input.fence.effectiveMetersPerUnit = source.fence.revision.effectiveMetersPerUnit;
+            input.fence.ownerShape = source.fence.revision.ownerShape;
+            input.fence.ownerRecipe = source.fence.revision.ownerRecipe;
+            input.fence.ownerPlacement = source.fence.revision.ownerPlacement;
+            input.fence.ownerMaterial = source.fence.revision.ownerMaterial;
+            for (const auto& read : source.fence.revision.dependencies)
+                input.fence.dependencies.push_back({read.locator, read.geometry, read.recipe,
+                    read.placement, read.material, read.groups});
+            input.fence.base = source.fence.base; input.fence.result = source.fence.result;
+            input.fence.units = source.fence.units; input.fence.selection = source.fence.selection;
+            input.fence.issuance = source.fence.issuance; input.fence.history = source.fence.history;
+        }
+        return value;
+    }
+
+    static composite_recipe::Definition ProgramOperandGraph(
+        const part_boolean::program_operand::Definition& payload,
+        const std::vector<std::uint8_t>& parameters) {
+        composite_recipe::Definition graph = composite_recipe::MakeV3Definition();
+        graph.owner = payload.owner; graph.outputNode = payload.booleanNode;
+        graph.issuance.nextLocalID = 4;
+        for (const auto& input : payload.inputs) {
+            composite_recipe::SourceNode source;
+            source.node = input.sourceNode;
+            source.localID = input.sourceLocalID;
+            source.original = input.original;
+            source.recipe.kind = composite_recipe::RecipeKind::RetainedBoolean;
+            source.recipe.schema = 1;
+            const retained_boolean::Program original = [&] {
+                retained_boolean::Program result;
+                if (!retained_boolean::Decode(input.originalBytes, result))
+                    throw std::invalid_argument("program graph decode");
+                return result;
+            }();
+            if (!retained_boolean::Encode(original, source.recipe.bytes))
+                throw std::invalid_argument("program graph encode");
+            source.inputToCarrier = input.placement;
+            source.commitments.geometry = input.effectiveCommitments.geometry;
+            source.commitments.recipe = input.effectiveCommitments.recipe;
+            source.commitments.placement = input.effectiveCommitments.placement;
+            source.commitments.material = input.effectiveCommitments.material;
+            source.commitments.groups = input.effectiveCommitments.groups;
+            source.shapeSlot = input.shapeSlot;
+            graph.nodes.push_back({source});
+        }
+        composite_recipe::FeatureNode feature;
+        feature.node = payload.booleanNode; feature.feature = payload.feature;
+        feature.localID = 3; feature.kind = part_boolean::FeatureKind;
+        feature.codecVersion = part_boolean::ProgramOperandCodecVersion;
+        feature.inputs = {payload.inputs[0].sourceNode, payload.inputs[1].sourceNode};
+        feature.parameters = parameters; graph.nodes.push_back({feature});
+        return graph;
+    }
+
     static cut_display::Settings Display() {
         cut_display::Settings display;
         Handle(Prs3d_Drawer) drawer = new Prs3d_Drawer();
@@ -1651,6 +1807,182 @@ struct Probe final {
         return checks;
     }
 
+    static Checks ProgramOperandCodecRoundTripEvidence() noexcept {
+        namespace po = part_boolean::program_operand;
+        Checks checks;
+        try {
+            for (double unit : {0.001, 1.0}) {
+                const std::string prefix = unit == 0.001 ? "mm-" : "m-";
+                po::Definition payload = ProgramOperandCodecFixture(unit);
+                std::vector<std::uint8_t> bytes, exact, envelope;
+                po::Refusal refusal = po::Refusal::ProgramMalformed;
+                const bool encoded = po::EncodeProgramOperands(payload, bytes, &refusal);
+                po::Definition decoded;
+                const bool decodedOK = encoded && po::DecodeProgramOperands(bytes, decoded)
+                    && po::EncodeProgramOperands(decoded, exact) && exact == bytes;
+                checks[prefix + "codec5-bit-exact-roundtrip"] = decodedOK
+                    && refusal == po::Refusal::None;
+                checks[prefix + "original-program-and-metadata-fixed"] = decodedOK
+                    && decoded.inputs[0].originalBytes == payload.inputs[0].originalBytes
+                    && decoded.inputs[1].originalBytes == payload.inputs[1].originalBytes
+                    && decoded.inputs[0].appearance.original.name.codeUnits
+                        == payload.inputs[0].appearance.original.name.codeUnits;
+                checks[prefix + "effective-state-commitment-not-bytes"] = decodedOK
+                    && decoded.inputs[0].effectiveDigest == payload.inputs[0].effectiveDigest
+                    && decoded.inputs[1].effectiveDigest == payload.inputs[1].effectiveDigest;
+                const auto graph = ProgramOperandGraph(payload, bytes);
+                const auto validation = composite_recipe::ValidateV3(graph,
+                    retained_feature::ProductionRegistry(),
+                    retained_source::ProductionRegistry());
+                checks[prefix + "feature-source-bindings-canonical"] =
+                    validation.valid()
+                    && composite_recipe::CanonicalProgramOperandFeature(
+                        std::get<composite_recipe::FeatureNode>(graph.nodes.back().value),
+                        {graph.nodes[0], graph.nodes[1]});
+                checks[prefix + "native-readability-only"] =
+                    retained_feature::ProductionRegistry().find(
+                        {part_boolean::FeatureKind,
+                         part_boolean::ProgramOperandCodecVersion}) != nullptr
+                    && !retained_feature::ProductionRegistry().find(
+                        {part_boolean::FeatureKind,
+                         part_boolean::ProgramOperandCodecVersion})->execution.installed();
+
+                po::Definition maximal = ProgramOperandCodecFixture(unit, true);
+                std::vector<std::uint8_t> maximalBytes, maximalEnvelope;
+                const bool maximalOK = po::EncodeProgramOperands(maximal, maximalBytes, &refusal)
+                    && composite_recipe::EncodeV3(
+                        ProgramOperandGraph(maximal, maximalBytes), maximalEnvelope);
+                checks[prefix + "maximal-record-fits-16k"] = maximalOK
+                    && maximalBytes.size() <= composite_recipe::MaximumFeaturePayloadBytes;
+                checks[prefix + "maximal-envelope-fits-64k"] = maximalOK
+                    && maximalEnvelope.size() <= composite_recipe::MaximumEnvelopeBytes;
+                std::fprintf(stderr, "PROGRAM_OPERAND_BUDGET %s record=%zu envelope=%zu\n",
+                    prefix.c_str(), maximalBytes.size(), maximalEnvelope.size());
+
+                po::Definition oversized = maximal;
+                for (auto& input : oversized.inputs) {
+                    for (std::uint16_t index = 1; index < 64; ++index) {
+                        auto row = input.appearance.originalMaterials.front();
+                        row.ordinal = index;
+                        row.labelEntry = "0:oversize:" + std::to_string(index);
+                        input.appearance.originalMaterials.push_back(row);
+                        input.appearance.effectiveMaterials.push_back(row);
+                    }
+                }
+                std::vector<std::uint8_t> refusedBytes;
+                refusal = po::Refusal::None;
+                checks[prefix + "oversized-record-refused-before-output"] =
+                    !po::EncodeProgramOperands(oversized, refusedBytes, &refusal)
+                    && refusal == po::Refusal::ProgramOversized && refusedBytes.empty();
+            }
+        } catch (...) { checks["setup-exception"] = false; }
+        return checks;
+    }
+
+    static Checks ProgramOperandCodecRefusalEvidence() noexcept {
+        namespace po = part_boolean::program_operand;
+        Checks checks;
+        try {
+            for (double unit : {0.001, 1.0}) {
+                const std::string prefix = unit == 0.001 ? "mm-" : "m-";
+                const po::Definition payload = ProgramOperandCodecFixture(unit);
+                std::vector<std::uint8_t> bytes;
+                if (!po::EncodeProgramOperands(payload, bytes)) throw std::invalid_argument("codec");
+                const auto graph = ProgramOperandGraph(payload, bytes);
+                auto typedPayloadRefusal = [&](const composite_recipe::Definition& candidate) {
+                    const auto result = composite_recipe::ValidateV3(candidate,
+                        retained_feature::ProductionRegistry(),
+                        retained_source::ProductionRegistry());
+                    return result.refusal == composite_recipe::V3Refusal::Payload
+                        && std::string(result.reason) == "noncanonical-feature-payload";
+                };
+                auto forged = graph;
+                std::get<composite_recipe::FeatureNode>(forged.nodes.back().value)
+                    .parameters[100] ^= 1;
+                checks[prefix + "bad-digest-typed-payload"] = typedPayloadRefusal(forged);
+                forged = graph;
+                std::get<composite_recipe::FeatureNode>(forged.nodes.back().value)
+                    .parameters.pop_back();
+                checks[prefix + "truncated-typed-payload"] = typedPayloadRefusal(forged);
+                forged = graph;
+                std::get<composite_recipe::FeatureNode>(forged.nodes.back().value)
+                    .parameters.push_back(0);
+                checks[prefix + "trailing-typed-payload"] = typedPayloadRefusal(forged);
+
+                po::Definition mismatch = payload;
+                mismatch.inputs[0].sourceNode = Identifier(0xF0);
+                std::vector<std::uint8_t> mismatchBytes;
+                if (!po::EncodeProgramOperands(mismatch, mismatchBytes))
+                    throw std::invalid_argument("binding mismatch fixture");
+                forged = graph;
+                std::get<composite_recipe::FeatureNode>(forged.nodes.back().value)
+                    .parameters = mismatchBytes;
+                checks[prefix + "node-role-substitution-typed-payload"] =
+                    typedPayloadRefusal(forged);
+
+                po::Definition duplicate = payload;
+                duplicate.inputs[1].sourceNode = duplicate.inputs[0].sourceNode;
+                std::vector<std::uint8_t> refused;
+                checks[prefix + "duplicate-identities-refused"] =
+                    !po::EncodeProgramOperands(duplicate, refused) && refused.empty();
+                auto unknownVersion = bytes; unknownVersion[4] = 6;
+                po::Definition ignored;
+                checks[prefix + "unknown-payload-version-refused"] =
+                    !po::DecodeProgramOperands(unknownVersion, ignored);
+                auto badKind = bytes; badKind[0] = 'X';
+                checks[prefix + "unknown-payload-kind-refused"] =
+                    !po::DecodeProgramOperands(badKind, ignored);
+
+                const auto legacy1 = composite_recipe::Probe::LegacyDefinition();
+                const auto legacy2 = composite_recipe::Probe::ShellDefinition();
+                std::vector<std::uint8_t> before1, before2, after1, after2;
+                const bool before = composite_recipe::Encode(legacy1, before1)
+                    && composite_recipe::Encode(legacy2, before2);
+                std::vector<std::uint8_t> throwaway;
+                po::EncodeProgramOperands(payload, throwaway);
+                const bool after = composite_recipe::Encode(legacy1, after1)
+                    && composite_recipe::Encode(legacy2, after2);
+                checks[prefix + "legacy-codec1-envelope-byte-identical"] =
+                    before && after && before1 == after1;
+                checks[prefix + "legacy-codec2-envelope-byte-identical"] =
+                    before && after && before2 == after2;
+                checks[prefix + "legacy-codec3-allocation-unchanged"] =
+                    part_boolean::RecipeCodecVersion == 3;
+                checks[prefix + "legacy-codec4-bytes-and-version-unchanged"] =
+                    part_boolean::OriginalsCodecVersion == 4
+                    && part_boolean::OriginalsPayloadVersion == 4;
+                composite_recipe::Definition cold;
+                checks[prefix + "frozen-pre-p3-envelope-cold-reads"] =
+                    composite_recipe::Decode(before2, cold)
+                    && composite_recipe::Encode(cold, throwaway) && throwaway == before2;
+            }
+        } catch (...) { checks["setup-exception"] = false; }
+        return checks;
+    }
+
+    static Checks ProgramOperandLegacyRegistryEvidence() noexcept {
+        namespace po = part_boolean::program_operand;
+        Checks checks;
+        try {
+            for (double unit : {0.001, 1.0}) {
+                const std::string prefix = unit == 0.001 ? "mm-" : "m-";
+                const po::Definition payload = ProgramOperandCodecFixture(unit);
+                std::vector<std::uint8_t> bytes;
+                if (!po::EncodeProgramOperands(payload, bytes)) throw std::invalid_argument("codec");
+                const auto graph = ProgramOperandGraph(payload, bytes);
+                const retained_feature::RegistryView legacy(nullptr, 0);
+                const auto refused = composite_recipe::ValidateV3(graph, legacy,
+                    retained_source::ProductionRegistry());
+                checks[prefix + "legacy-registry-feature-codec-refusal"] =
+                    refused.refusal == composite_recipe::V3Refusal::FeatureCodec;
+                checks[prefix + "legacy-registry-unknown-feature-codec-reason"] =
+                    std::string(refused.reason) == "unknown-feature-codec";
+                checks[prefix + "whole-envelope-refused-no-fallback"] = !refused.valid();
+            }
+        } catch (...) { checks["setup-exception"] = false; }
+        return checks;
+    }
+
     static Checks Run(int scenario) noexcept {
         if (scenario == 0) return CodecEvidence();
         if (scenario == 1) return AdmissionEvidence();
@@ -1661,6 +1993,9 @@ struct Probe final {
         if (scenario == 6) return ProgramOperandDisabledEvidence();
         if (scenario == 7) return ProgramOperandReplayEvidence();
         if (scenario == 8) return ProgramOperandReplayRefusalEvidence();
+        if (scenario == 9) return ProgramOperandCodecRoundTripEvidence();
+        if (scenario == 10) return ProgramOperandCodecRefusalEvidence();
+        if (scenario == 11) return ProgramOperandLegacyRegistryEvidence();
         return {{"valid-scenario", false}};
     }
 };

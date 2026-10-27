@@ -1747,6 +1747,10 @@ public:
     ApplyBooleanSources(
         const std::shared_ptr<const core3d::authored_parameter::PairPrepared>& prepared,
         std::uint32_t viewportWidth, std::uint32_t viewportHeight) noexcept;
+    //! True only while the exact recovery authority remains document-owned.
+    Standard_EXPORT Standard_Boolean HasBooleanPairRecovery(
+        const std::shared_ptr<const core3d::authored_parameter::PairRecovery>& recovery)
+        const noexcept;
     //! Classify the actual live document as the exact pre-command two-source
     //! state or the exact one-composite committed state. This never opens a
     //! command, replays geometry, or invokes Undo/Redo. Ambiguity retains the
