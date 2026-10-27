@@ -12835,6 +12835,124 @@ bool PrepareSavedOriginalPaintReceiverInputs(
     } catch (...) { return fail(); }
 }
 
+painted_atlas_bake::owner::Outcome CanonicalizeSavedGroupPackedCorners(
+    const std::vector<asset_atlas::build::FinalMemberInput>& inputs,
+    painted_atlas_bake::owner::ExportBakePlan& plan,
+    const asset_atlas::build::FinalTriangleLineage& lineage,
+    const decal_layer::bake::accounting::View& operation) noexcept {
+    using Outcome = painted_atlas_bake::owner::Outcome;
+    using namespace decal_layer::bake::accounting;
+    struct CornerReference final {
+        std::uint32_t packed = 0;
+        std::uint8_t corner = 0;
+    };
+    try {
+        auto& packed = plan.layout.packed.triangles;
+        if (packed.size() != lineage.memberTriangleByPackedTriangle.size()
+            || plan.layout.chartMembers.size() != plan.layout.charts.size())
+            return Outcome::Malformed;
+        std::size_t cornerCount = 0;
+        Ticket scratch;
+        if (!operation.CheckedProduct(packed.size(), 3U, 1U, cornerCount,
+                FailureSite::ExportAtlasStorage)
+            || !scratch.acquireProduct(operation,
+                StorageDimension::PrivateStorage, cornerCount,
+                sizeof(CornerReference), 1U, Retention::Scratch,
+                FailureSite::ExportAtlasStorage)
+            || !operation.EnterAllocation(FailureSite::ExportAtlasStorage))
+            return Outcome::OverBudget;
+        std::vector<CornerReference> corners;
+        corners.reserve(cornerCount);
+        if (corners.capacity() * sizeof(CornerReference) > scratch.bytes) {
+            operation.AllocationFailed(FailureSite::ExportAtlasStorage);
+            return Outcome::OverBudget;
+        }
+        for (std::size_t index = 0; index < packed.size(); ++index) {
+            const auto& placed = packed[index];
+            if (index > std::numeric_limits<std::uint32_t>::max()
+                || placed.chartIndex < 0
+                || std::size_t(placed.chartIndex)
+                    >= plan.layout.chartMembers.size())
+                return Outcome::Malformed;
+            const auto member = plan.layout.chartMembers[
+                std::size_t(placed.chartIndex)].first;
+            const auto triangle = lineage.memberTriangleByPackedTriangle[index];
+            if (member >= inputs.size()
+                || triangle >= inputs[member].triangles.size()
+                || member >= plan.assignments.size()
+                || 3U * std::size_t(triangle) + 2U
+                    >= plan.assignments[member].corners.size())
+                return Outcome::Malformed;
+            for (std::uint8_t corner = 0; corner < 3; ++corner)
+                corners.push_back({std::uint32_t(index), corner});
+        }
+        const auto point = [&](const CornerReference& reference)
+                -> const shapeyard::uv::Point& {
+            const auto& placed = packed[reference.packed];
+            const auto member = plan.layout.chartMembers[
+                std::size_t(placed.chartIndex)].first;
+            const auto triangle = lineage.memberTriangleByPackedTriangle[
+                reference.packed];
+            return inputs[member].triangles[triangle].points[reference.corner];
+        };
+        const auto branch = [&](const CornerReference& reference) {
+            const auto& uv = packed[reference.packed].uv[reference.corner];
+            return std::array<float, 2>{float(uv.x), float(uv.y)};
+        };
+        const auto sameValue = [&](const CornerReference& left,
+                const CornerReference& right) {
+            const auto& a = packed[left.packed];
+            const auto& b = packed[right.packed];
+            return a.chartIndex == b.chartIndex
+                && a.subChartIndex == b.subChartIndex
+                && point(left) == point(right)
+                && branch(left) == branch(right);
+        };
+        std::sort(corners.begin(), corners.end(),
+            [&](const CornerReference& left, const CornerReference& right) {
+                const auto& a = packed[left.packed];
+                const auto& b = packed[right.packed];
+                if (a.chartIndex != b.chartIndex)
+                    return a.chartIndex < b.chartIndex;
+                if (a.subChartIndex != b.subChartIndex)
+                    return a.subChartIndex < b.subChartIndex;
+                if (point(left) != point(right))
+                    return point(left) < point(right);
+                if (branch(left) != branch(right))
+                    return branch(left) < branch(right);
+                return left.packed != right.packed
+                    ? left.packed < right.packed : left.corner < right.corner;
+            });
+        for (std::size_t first = 0; first < corners.size();) {
+            std::size_t last = first + 1;
+            while (last < corners.size()
+                && sameValue(corners[first], corners[last])) ++last;
+            const auto canonical = packed[corners[first].packed]
+                .uv[corners[first].corner];
+            for (std::size_t index = first; index < last; ++index) {
+                const auto reference = corners[index];
+                auto& placed = packed[reference.packed];
+                placed.uv[reference.corner] = canonical;
+                const auto member = plan.layout.chartMembers[
+                    std::size_t(placed.chartIndex)].first;
+                const auto triangle = lineage.memberTriangleByPackedTriangle[
+                    reference.packed];
+                plan.assignments[member].corners[
+                    3U * std::size_t(triangle) + reference.corner] = {
+                        canonical.x, canonical.y};
+            }
+            first = last;
+        }
+        asset_atlas::Refusal refusal = asset_atlas::Refusal::None;
+        return asset_atlas::BindLayoutProof(plan.atlas, plan.assignments)
+                && asset_atlas::Valid(plan.atlas, refusal)
+            ? Outcome::Prepared : Outcome::Malformed;
+    } catch (const std::bad_alloc&) {
+        operation.AllocationFailed(FailureSite::ExportAtlasStorage);
+        return Outcome::OverBudget;
+    } catch (...) { return Outcome::Malformed; }
+}
+
 painted_atlas_bake::owner::Outcome PrepareSavedGroupForBatch(
     SavedGroupOwner& group,
     const std::vector<DefinitionData>& actualFinalDefinitions,
@@ -12965,6 +13083,15 @@ painted_atlas_bake::owner::Outcome PrepareSavedGroupForBatch(
 #endif
             , group.retainOriginalPaintLineage
                 ? &group.pendingOriginalPaintLineage : nullptr);
+        if (outcome == Outcome::Prepared && group.retainOriginalPaintLineage) {
+            const auto canonical = CanonicalizeSavedGroupPackedCorners(
+                inputs, group.pendingPlan, group.pendingOriginalPaintLineage,
+                group.capture.operationView());
+            if (canonical != Outcome::Prepared) {
+                diagnosis = "saved-group-packed-corner-canonicalization";
+                return canonical;
+            }
+        }
         if (outcome != Outcome::Prepared
             || !painted_atlas_bake::owner::AdmitBakePlan(
                 aggregate, group.pendingPlan)) return outcome == Outcome::Prepared
