@@ -306,6 +306,205 @@ inline Result Build(const TopoDS_Shape& retainedBase,const Program& program,
     const cut_display::Settings& display,const std::atomic_bool& stop) noexcept {
     Budget budget;return Build(retainedBase,program,display,stop,budget);
 }
+
+// P2 complete retained-program replay.  Unlike the legacy compatibility entry
+// above, every topology-bearing phase spends from the caller's one operation
+// counter.  A denied charge is sticky and no partially built solid is returned.
+inline retained_topology_budget::WalkStatus BuildProgramOperandCounted(
+    const TopoDS_Shape& retainedBase, const Program& program,
+    const cut_display::Settings& display, const std::atomic_bool& stop,
+    retained_topology_budget::Counter& shared, Result& output) noexcept {
+    namespace tb = retained_topology_budget;
+    output = {};
+    Result out;
+    Budget local;
+    const auto fail = [&](tb::WalkStatus status) {
+        Result failed;
+        failed.phase = out.phase;
+        failed.correspondence = out.correspondence;
+        failed.filletOutcome = out.filletOutcome;
+        output = std::move(failed);
+        return stop.load() ? tb::WalkStatus::Cancelled
+            : shared.exhausted ? tb::WalkStatus::BudgetDenied : status;
+    };
+    if (stop.load()) return tb::WalkStatus::Cancelled;
+    try {
+        if ((display.type != Aspect_TOD_RELATIVE && display.type != Aspect_TOD_ABSOLUTE)
+            || !display.automatic) return fail(tb::WalkStatus::Failed);
+        for (double value : display.values)
+            if (!std::isfinite(value)) return fail(tb::WalkStatus::Failed);
+        if (display.values[0] <= 0 || display.values[1] <= 0
+            || display.values[1] >= M_PI || display.values[2] <= 0
+            || (display.ownCoefficient
+                && std::abs(display.values[0] - display.values[3]) > Precision::Confusion())
+            || (display.ownAngle
+                && std::abs(display.values[1] - display.values[4]) > Precision::Angular()))
+            return fail(tb::WalkStatus::Failed);
+
+        out.phase = "source-and-program";
+        if (!shared.beginStage(tb::Site::C25AnalyticInput))
+            return fail(tb::WalkStatus::BudgetDenied);
+        const bool singleAxial = program.steps.size() == 1
+            && program.steps.front().operand.kind
+                == analytic_boolean::OperandKind::Cylinder
+            && saved_boolean_result::detail::ClearBore(
+                saved_boolean_result::detail::GeometryView(program, 0));
+        if (!retained_boolean::Encode(program, out.exactProgram)
+            || (!singleAxial && !AdmitProgram(program)) || retainedBase.IsNull())
+            return fail(tb::WalkStatus::Failed);
+        tb::Census baseCensus;
+        tb::WalkStatus walk = tb::CensusTopology(retainedBase, shared, stop,
+            baseCensus, tb::Site::C25AnalyticInput, false);
+        if (walk != tb::WalkStatus::Completed) return fail(walk);
+        // The private working copy and both exact base commitment streams are
+        // separate passes over the retained original.
+        for (unsigned pass = 0; pass < 3; ++pass)
+            if (!tb::ReserveTraversal(baseCensus, shared, tb::Site::C25AnalyticInput))
+                return fail(tb::WalkStatus::BudgetDenied);
+        if (!Charge(retainedBase, stop, local)
+            || !saved_cut_source_edit::Commit(retainedBase, stop,
+                local.streamBytes, out.retainedBase)) return fail(tb::WalkStatus::Failed);
+
+        std::vector<retained_boolean::Disk> sections;
+        if (!retained_boolean::ExpandedSections(program, sections))
+            return fail(tb::WalkStatus::Failed);
+        for (const auto& section : sections) {
+            const auto view = saved_boolean_result::detail::GeometryView(
+                program, section.operand);
+            if (!InspectSourceBase(retainedBase, view, stop, shared)
+                || (section.operand.kind != analytic_boolean::OperandKind::Wedge
+                    && !saved_boolean_result::detail::ClearBore(view)))
+                return fail(tb::WalkStatus::Failed);
+        }
+
+        TopoDS_Shape current = retainedBase;
+        if (program.source.family == 1) {
+            profile::Parameters source;
+            if (!profile::Decode(program.source.values, source))
+                return fail(tb::WalkStatus::Failed);
+            if (source.definition.revolve) {
+                if (!shared.beginStage(tb::Site::C25AnalyticInput))
+                    return fail(tb::WalkStatus::BudgetDenied);
+                current = RebuildRevolvedBase(
+                    saved_boolean_result::detail::GeometryView(program, 0), stop);
+                if (current.IsNull()) return fail(tb::WalkStatus::Failed);
+                walk = tb::ChargeTraversal(current, shared, stop,
+                    tb::Site::C25AnalyticInput);
+                if (walk != tb::WalkStatus::Completed) return fail(walk);
+            }
+        }
+        if (program.source.family == 3
+            && (!program.filletSteps.empty()
+                || saved_boolean_result::detail::TransverseProgram(program))) {
+            if (!shared.beginStage(tb::Site::C25AnalyticInput))
+                return fail(tb::WalkStatus::BudgetDenied);
+            const auto view = saved_boolean_result::detail::GeometryView(program, 0);
+            if (saved_cut_source_edit::RebuildLoftBase(view, stop, current)
+                    != saved_cut_source_edit::LoftBaseStatus::Built)
+                return fail(tb::WalkStatus::Failed);
+            walk = tb::ChargeTraversal(current, shared, stop,
+                tb::Site::C25AnalyticInput);
+            if (walk != tb::WalkStatus::Completed) return fail(walk);
+        }
+
+        for (const auto& step : program.steps) {
+            if (stop.load()) return fail(tb::WalkStatus::Cancelled);
+            if (local.booleanSteps >= Budget::MaximumSteps)
+                return fail(tb::WalkStatus::Failed);
+            ++local.booleanSteps;
+            out.phase = "sequential-boolean";
+            analytic_boolean::Recipe recipe;
+            recipe.metersPerUnit = program.source.metersPerUnit;
+            recipe.operation = step.operation;
+            recipe.tool = step.operand;
+            double wedgeVolume = 0;
+            if (step.operand.kind == analytic_boolean::OperandKind::Wedge) {
+                saved_cut_whole_result::Expected expected;
+                const auto view = saved_boolean_result::detail::GeometryView(
+                    program, step.operand);
+                if (!saved_cut_whole_result::ExpectedSource(view, expected))
+                    return fail(tb::WalkStatus::Failed);
+                const auto admitted = analytic_boolean_wedge::ExpectedBoundary(
+                    view, step.operand, expected);
+                if (admitted.status != analytic_boolean_wedge::Status::Clear)
+                    return fail(tb::WalkStatus::Failed);
+                wedgeVolume = admitted.removedVolume;
+            }
+            analytic_boolean::Result built;
+            const auto status = analytic_boolean::Build(current, recipe, stop,
+                built, wedgeVolume, shared);
+            if (status == analytic_boolean::Status::Cancelled)
+                return fail(tb::WalkStatus::Cancelled);
+            if (status == analytic_boolean::Status::BudgetExceeded)
+                return fail(tb::WalkStatus::BudgetDenied);
+            if (status != analytic_boolean::Status::Built)
+                return fail(tb::WalkStatus::Failed);
+            current = std::move(built.solid);
+        }
+
+        out.phase = "display-preparation";
+        if (!shared.beginStage(tb::Site::C13CommitVerify))
+            return fail(tb::WalkStatus::BudgetDenied);
+        walk = tb::ChargeTraversal(current, shared, stop,
+            tb::Site::C13CommitVerify);
+        if (walk != tb::WalkStatus::Completed) return fail(walk);
+        if (!cut_display::Prepare(current, display, stop))
+            return fail(tb::WalkStatus::Failed);
+
+        out.phase = "complete-program-correspondence";
+        walk = saved_boolean_result::InspectProgramOperandCounted(current,
+            program, stop, shared, out.correspondence);
+        if (walk != tb::WalkStatus::Completed) return fail(walk);
+        if (!program.filletSteps.empty()) {
+            out.phase = "retained-fillet";
+            if (program.filletSteps.size()
+                > 2 * retained_fillet::MaximumSteps - local.filletSteps)
+                return fail(tb::WalkStatus::Failed);
+            local.filletSteps += program.filletSteps.size();
+            const auto filleted = retained_fillet::Build(current, program, stop,
+                [&](const TopoDS_Shape& shape) {
+                    return Charge(shape, stop, local);
+                }, &local.streamBytes, &shared);
+            out.filletOutcome = filleted.outcome;
+            if (filleted.outcome == retained_fillet::Outcome::Cancelled)
+                return fail(tb::WalkStatus::Cancelled);
+            if (filleted.outcome == retained_fillet::Outcome::DeclinedBudget)
+                return fail(tb::WalkStatus::BudgetDenied);
+            if (filleted.outcome != retained_fillet::Outcome::Built)
+                return fail(tb::WalkStatus::Failed);
+            current = filleted.solid;
+            if (!shared.beginStage(tb::Site::C13CommitVerify))
+                return fail(tb::WalkStatus::BudgetDenied);
+            walk = tb::ChargeTraversal(current, shared, stop,
+                tb::Site::C13CommitVerify);
+            if (walk != tb::WalkStatus::Completed) return fail(walk);
+            if (!cut_display::Prepare(current, display, stop))
+                return fail(tb::WalkStatus::Failed);
+        }
+
+        out.phase = "base-preservation-and-final-commitment";
+        Commitment afterBase;
+        walk = tb::ChargeTraversal(retainedBase, shared, stop,
+            tb::Site::C13CommitVerify);
+        if (walk != tb::WalkStatus::Completed) return fail(walk);
+        walk = tb::ChargeTraversal(current, shared, stop,
+            tb::Site::C13CommitVerify);
+        if (walk != tb::WalkStatus::Completed) return fail(walk);
+        if (!saved_cut_source_edit::Commit(retainedBase, stop,
+                local.streamBytes, afterBase)
+            || !(afterBase == out.retainedBase)
+            || !saved_cut_source_edit::Commit(current, stop,
+                local.streamBytes, out.finalResult))
+            return fail(tb::WalkStatus::Failed);
+        if (stop.load()) return fail(tb::WalkStatus::Cancelled);
+        out.budget = local;
+        out.solid = std::move(current);
+        out.status = Status::Built;
+        out.phase = "built";
+        output = std::move(out);
+        return tb::WalkStatus::Completed;
+    } catch (...) { return fail(tb::WalkStatus::Failed); }
+}
 // Mesh-independent exact V3 stream is the retained-fillet determinism check.
 // This is deliberately separate from the content guard, which also binds meshes.
 inline bool GeometryCommit(const TopoDS_Shape& shape,const std::atomic_bool& stop,std::size_t& bytes,Commitment& out){

@@ -5,6 +5,7 @@
 #include "SavedCutWholeResultCorrespondence.hxx"
 #include "AnalyticBooleanSolid.hxx"
 #include "RectangularLoftSolid.hxx"
+#include "RetainedTopologyBudget.hxx"
 #include <BinTools.hxx>
 namespace core3d::saved_boolean_result {
 namespace old=core3d::saved_cut_whole_result;
@@ -524,6 +525,50 @@ inline Inspection Inspect(const TopoDS_Shape& result,const retained_boolean::Pro
         if(stop.load())return fail();report.vertices=vertices.Extent();report.edges=graph.edges.size();report.faces=graph.faces.size();report.vertexLinks=vertices.Extent();
         report.phase="matched-complete-program-boundary";report.classification=Classification::MatchedOrientedBoundary;return report;
     }catch(...){return fail();}
+}
+
+// Complete-program correspondence with operation-lifetime accounting.  The
+// census is measured before any proof allocation and each independent bulk
+// topology pass is reserved against that measured shape.  The legacy proof
+// remains the sole geometric predicate; this overload adds a sticky shared
+// continuation rather than a second, weaker correspondence rule.
+inline Inspection InspectAxialBore(const TopoDS_Shape& result,
+    const retained_solid::Envelope& before, const retained_solid::Envelope& after,
+    const std::atomic_bool& stop) noexcept;
+
+inline retained_topology_budget::WalkStatus InspectProgramOperandCounted(
+    const TopoDS_Shape& result, const retained_boolean::Program& program,
+    const std::atomic_bool& stop, retained_topology_budget::Counter& budget,
+    Inspection& output) noexcept {
+    namespace tb = retained_topology_budget;
+    output = {};
+    if (stop.load()) return tb::WalkStatus::Cancelled;
+    try {
+        if (!budget.beginStage(tb::Site::C13CommitVerify))
+            return tb::WalkStatus::BudgetDenied;
+        tb::Census census;
+        tb::WalkStatus walk = tb::CensusTopology(result, budget, stop, census,
+            tb::Site::C13CommitVerify, false);
+        if (walk != tb::WalkStatus::Completed) return walk;
+        // Collect, local bore observations, six cell maps, integral/validity,
+        // representation ownership and final commitment are distinct passes.
+        for (unsigned pass = 0; pass < 12; ++pass)
+            if (!tb::ReserveTraversal(census, budget, tb::Site::C13CommitVerify))
+                return tb::WalkStatus::BudgetDenied;
+        const bool singleAxial = program.steps.size() == 1
+            && program.steps.front().operand.kind
+                == analytic_boolean::OperandKind::Cylinder;
+        if (singleAxial) {
+            const auto view = detail::GeometryView(program, 0);
+            output = InspectAxialBore(result, view, view, stop);
+        } else {
+            output = Inspect(result, program, stop);
+        }
+        if (stop.load()) { output = {}; return tb::WalkStatus::Cancelled; }
+        if (budget.exhausted) { output = {}; return tb::WalkStatus::BudgetDenied; }
+        return output.classification == Classification::MatchedOrientedBoundary
+            ? tb::WalkStatus::Completed : tb::WalkStatus::Failed;
+    } catch (...) { output = {}; return tb::WalkStatus::Failed; }
 }
 // Single axial bore uses the same complete boundary matcher in the derived
 // cylindrical chart; fixed tool/identity checks still apply to both views.

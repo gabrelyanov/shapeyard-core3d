@@ -55,6 +55,8 @@ enum class Refusal : std::uint8_t {
     Disconnected,
     NoInteriorOverlap,
     BuildFailed,
+    Cancelled,
+    Budget,
 };
 
 struct IdentityValues final {

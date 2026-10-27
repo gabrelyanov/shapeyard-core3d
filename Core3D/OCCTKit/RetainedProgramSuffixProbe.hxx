@@ -4,6 +4,7 @@
 // owner. No edit authority, no live document mutation outside the one staged
 // fixture command, no production route. Public admission remains disabled.
 #include "RetainedProgramSuffixBuild.hxx"
+#include "PartBooleanRebuild.hxx"
 #include "PartBooleanCodecProbe.hxx"
 #include "PartBooleanOwner.hxx"
 #include "NativeDocumentSession.hxx"
@@ -400,6 +401,163 @@ struct Probe final {
         if (!cut_display::Capture(drawer, display))
             throw std::invalid_argument("display capture");
         return display;
+    }
+
+    static bool BindProgramOperandCommitments(
+        part_boolean::program_operand::Value& value,
+        const cut_display::Settings& display,
+        std::string* failure = nullptr) noexcept {
+        namespace po = part_boolean::program_operand;
+        try {
+            retained_boolean::Program program;
+            if (!po::detail::ProgramOf(value.recipe.effectiveDecoded, program)) {
+                if (failure) *failure = "program";
+                return false;
+            }
+            std::atomic_bool stop(false);
+            retained_topology_budget::Counter budget;
+            TopoDS_Shape base;
+            if (po::detail::RebuildOriginalBase(program, stop, budget, base)
+                    != retained_topology_budget::WalkStatus::Completed) {
+                if (failure) *failure = "base";
+                return false;
+            }
+            saved_boolean_build::Result replay;
+            if (saved_boolean_build::BuildProgramOperandCounted(base, program,
+                    display, stop, budget, replay)
+                    != retained_topology_budget::WalkStatus::Completed
+                || replay.status != saved_boolean_build::Status::Built) {
+                if (failure) *failure = std::string("build-") + replay.phase
+                    + "-" + replay.correspondence.phase;
+                return false;
+            }
+            saved_boolean_build::Budget readbackBudget = replay.budget;
+            TopoDS_Shape persisted;
+            saved_cut_source_edit::ShapeCommitment persistedCommitment;
+            if (!saved_boolean_build::ReadbackGeometry(replay.solid, stop,
+                    readbackBudget, persisted)
+                || !saved_cut_source_edit::Commit(persisted, stop,
+                    readbackBudget.streamBytes, persistedCommitment)) {
+                if (failure) *failure = "capture-readback";
+                return false;
+            }
+            value.recipe.originalBaseCommitment = replay.retainedBase.sha256;
+            value.recipe.effectiveBaseCommitment = replay.retainedBase.sha256;
+            value.recipe.originalResultCommitment = persistedCommitment.sha256;
+            value.recipe.effectiveResultCommitment = persistedCommitment.sha256;
+            value.fence.base = replay.retainedBase.sha256;
+            value.fence.result = persistedCommitment.sha256;
+            const auto inspected = InspectValues(value);
+            if (inspected != po::Refusal::None && failure)
+                *failure = "inspect-" + std::to_string(int(inspected));
+            return inspected == po::Refusal::None;
+        } catch (...) { if (failure) *failure = "exception"; return false; }
+    }
+
+    static std::vector<std::pair<std::string, part_boolean::program_operand::Value>>
+    ProgramOperandReplayFixtures(double unit, std::string* failure = nullptr) {
+        namespace po = part_boolean::program_operand;
+        po::Value prism = ProgramOperandPrismFixture(unit, po::Role::Left, 0x20);
+        const retained_boolean::Program base =
+            std::get<retained_boolean::Program>(prism.recipe.effectiveDecoded);
+        std::vector<std::pair<std::string, po::Value>> values;
+
+        po::Value legacy = prism;
+        retained_solid::Envelope oneCut;
+        oneCut.document = base.source.document;
+        oneCut.entity = base.source.entity;
+        oneCut.definition = base.source.definition;
+        oneCut.sourceFeature = base.source.sourceFeature;
+        oneCut.derivedFeature = base.source.derivedFeature;
+        oneCut.sourceFamily = base.source.family;
+        oneCut.sourceSchema = base.source.schema;
+        oneCut.metersPerUnit = unit;
+        oneCut.sourceValues = base.source.values;
+        oneCut.operandID = 1;
+        oneCut.axis = 2;
+        oneCut.point = base.steps.front().operand.point;
+        oneCut.radius = base.steps.front().operand.radius;
+        if (!RefreshProgramOperand(legacy, oneCut)) {
+            if (failure) *failure = "legacy";
+            return values;
+        }
+        values.emplace_back("legacy", std::move(legacy));
+        values.emplace_back("prism", prism);
+
+        po::Value ring = prism;
+        auto ringProgram = base;
+        ringProgram.codecMinor = 2;
+        retained_boolean::Step ringStep;
+        ringStep.operand = Ring(2, 27 * 0.001 / unit, 15 * 0.001 / unit,
+            4 * 0.001 / unit, 1 * 0.001 / unit, 4);
+        ringStep.operand.point[2] = 0;
+        ringProgram.steps.push_back(ringStep);
+        ringProgram.nextOperandID = 3;
+        if (!RefreshProgramOperand(ring, ringProgram)) {
+            if (failure) *failure = "ring";
+            return values;
+        }
+        values.emplace_back("ring", std::move(ring));
+
+        po::Value wedge = prism;
+        auto wedgeProgram = base;
+        wedgeProgram.codecMinor = 3;
+        retained_boolean::Step wedgeStep;
+        wedgeStep.operand = Wedge(2, 27 * 0.001 / unit, 15 * 0.001 / unit);
+        wedgeStep.operand.halfWidthApex *= 0.001 / unit;
+        wedgeStep.operand.halfWidthMouth *= 0.001 / unit;
+        wedgeStep.operand.length *= 0.001 / unit;
+        wedgeProgram.steps.push_back(wedgeStep);
+        wedgeProgram.nextOperandID = 3;
+        if (!RefreshProgramOperand(wedge, wedgeProgram)) {
+            if (failure) *failure = "wedge";
+            return values;
+        }
+        values.emplace_back("wedge", std::move(wedge));
+
+        po::Value rounded = prism;
+        retained_fillet::EdgeAnchor outerEdge;
+        outerEdge.curveKind = retained_fillet::CurveKind::Line;
+        outerEdge.anchorPoint = {0, 0, 10 * 0.001 / unit};
+        outerEdge.axis = {0, 0, 1};
+        const auto roundedChange = retained_boolean::Apply(base,
+            retained_boolean::AppendFilletStep{1, {outerEdge}}, unit * 1000);
+        if (!roundedChange) {
+            if (failure) *failure = "round-append";
+            return values;
+        }
+        const auto roundedProgram = std::get<retained_boolean::Program>(
+            roundedChange->recipe);
+        if (!RefreshProgramOperand(rounded, roundedProgram)) {
+            if (failure) *failure = "round-bytes";
+            return values;
+        }
+        values.emplace_back("rounded", std::move(rounded));
+
+        po::Value enclosureValue = prism;
+        auto enclosureProgram = base;
+        enclosure::Parameters enclosure;
+        enclosure.metersPerUnit = unit;
+        enclosure.definition.plane = 0;
+        enclosure.definition.dimensions = {100 * 0.001 / unit,
+            60 * 0.001 / unit, 30 * 0.001 / unit, 2 * 0.001 / unit,
+            2 * 0.001 / unit, 4 * 0.001 / unit};
+        enclosureProgram.source.family = 2;
+        enclosureProgram.source.schema = 1;
+        if (!enclosure::Encode(enclosure, enclosureProgram.source.values)) {
+            if (failure) *failure = "enclosure-encode";
+            return values;
+        }
+        enclosureProgram.steps.front().operand.point = {
+            50 * 0.001 / unit, 30 * 0.001 / unit, 0};
+        enclosureProgram.steps.front().operand.radius = 1 * 0.001 / unit;
+        enclosureValue.recipe.baseFamily = po::BaseFamily::Enclosure;
+        if (!RefreshProgramOperand(enclosureValue, enclosureProgram)) {
+            if (failure) *failure = "enclosure-bytes";
+            return values;
+        }
+        values.emplace_back("enclosure", std::move(enclosureValue));
+        return values;
     }
 
     // --- scenario 0: SYPS/1 codec and composite carrier ----------------------
@@ -1250,6 +1408,249 @@ struct Probe final {
         return checks;
     }
 
+    // --- scenarios 7-8: A3/S2 detached complete-program replay -------------
+    static Checks ProgramOperandReplayEvidence() noexcept {
+        namespace po = part_boolean::program_operand;
+        namespace rebuild = part_boolean::rebuild;
+        Checks checks;
+        try {
+            const auto display = Display();
+            for (double unit : {0.001, 1.0}) {
+                const std::string prefix = unit == 0.001 ? "mm-" : "m-";
+                std::string fixtureFailure;
+                auto fixtures = ProgramOperandReplayFixtures(unit, &fixtureFailure);
+                if (!fixtureFailure.empty()) {
+                    checks[prefix + "fixture-failure-" + fixtureFailure] = false;
+                    continue;
+                }
+                bool everyFixture = fixtures.size() == 6;
+                bool everyFixedPoint = true;
+                bool everyTail = true;
+                bool everyCommitment = true;
+                for (auto& row : fixtures) {
+                    po::Value& value = row.second;
+                    const bool bound = BindProgramOperandCommitments(value, display);
+                    retained_topology_budget::Counter fixedBudget;
+                    rebuild::ProgramOperandFixedPointEvidence fixed;
+                    const auto refusal = bound
+                        ? rebuild::CheckProgramOperandFixedPoint(value, display,
+                            std::atomic_bool(false), fixedBudget, fixed)
+                        : po::Refusal::BuildFailed;
+                    everyFixture = everyFixture && bound
+                        && refusal == po::Refusal::None && fixed.fixedPoint();
+                    everyFixedPoint = everyFixedPoint
+                        && fixed.completeRecipeBytesExact
+                        && fixed.originalBasesByteExact
+                        && fixed.completeResultsByteExact
+                        && fixed.bothCorrespondencesMatched
+                        && fixed.bothReadbacksStable;
+                    retained_boolean::Program program;
+                    const bool completeProgram = po::detail::ProgramOf(
+                        value.recipe.effectiveDecoded, program);
+                    everyTail = everyTail && fixed.completeTailReplayed
+                        && completeProgram
+                        && (program.filletSteps.empty()
+                            || row.first == "rounded");
+                    everyCommitment = everyCommitment
+                        && value.fence.base == value.recipe.effectiveBaseCommitment
+                        && value.fence.result == value.recipe.effectiveResultCommitment;
+                }
+                checks[prefix + "f0-f4-f8-complete-replay"] = everyFixture;
+                checks[prefix + "independent-two-pass-fixed-point"] = everyFixedPoint;
+                checks[prefix + "complete-round-tail-replayed"] = everyTail;
+                checks[prefix + "base-and-current-result-commitments"] = everyCommitment;
+
+                po::Value prism = ProgramOperandPrismFixture(unit, po::Role::Left, 0x20);
+                if (!BindProgramOperandCommitments(prism, display))
+                    throw std::invalid_argument("prism replay commitments");
+                std::atomic_bool stop(false);
+                retained_topology_budget::Counter replayBudget;
+                const po::ReplayResult replay = po::ReplayProgramOperand(
+                    prism, display, stop, replayBudget);
+                const double mm = unit * 1000;
+                const double volumeMM3 = retained_part_boolean::Volume(replay.solid)
+                    * mm * mm * mm;
+                checks[prefix + "independent-prism-volume"] = replay.replayed()
+                    && std::abs(volumeMM3 - (24000 - 80 * std::acos(-1.0)))
+                        <= std::abs(24000 - 80 * std::acos(-1.0)) * 1e-9;
+
+                po::Value uncut = prism;
+                uncut.recipe.effectiveResultCommitment =
+                    uncut.recipe.effectiveBaseCommitment;
+                uncut.fence.result = uncut.recipe.effectiveResultCommitment;
+                retained_topology_budget::Counter uncutBudget;
+                const auto uncutReplay = po::ReplayProgramOperand(
+                    uncut, display, stop, uncutBudget);
+                checks[prefix + "uncut-candidate-refused"] =
+                    uncutReplay.refusal == po::Refusal::ProgramReplayMismatch
+                    && uncutReplay.solid.IsNull();
+
+                po::Value recut = prism;
+                auto changed = std::get<retained_boolean::Program>(
+                    recut.recipe.effectiveDecoded);
+                changed.steps.front().operand.radius = 3 * 0.001 / unit;
+                std::vector<std::uint8_t> changedBytes;
+                retained_recipe::Digest changedDigest;
+                if (!retained_boolean::Encode(changed, changedBytes)
+                    || !composite_recipe::Hash(changedBytes, changedDigest))
+                    throw std::invalid_argument("recut replay bytes");
+                recut.recipe.effectiveDecoded = changed;
+                recut.recipe.effectiveBytes = changedBytes;
+                recut.recipe.effectiveDigest = changedDigest;
+                recut.effectiveCommitments.recipe = changedDigest;
+                for (auto& read : recut.fence.revision.dependencies)
+                    if (read.locator.node == recut.identity.sourceNode)
+                        read.recipe = changedDigest;
+                retained_topology_budget::Counter recutBudget;
+                const auto recutReplay = po::ReplayProgramOperand(
+                    recut, display, stop, recutBudget);
+                checks[prefix + "recut-candidate-refused"] =
+                    recutReplay.refusal == po::Refusal::ProgramReplayMismatch
+                    && recutReplay.solid.IsNull();
+
+                auto rounded = fixtures[4].second;
+                auto withoutTail = std::get<retained_boolean::Program>(
+                    rounded.recipe.effectiveDecoded);
+                withoutTail.filletSteps.clear();
+                withoutTail.nextFilletStepID = 1;
+                withoutTail.nextFilletEdgeID = 1;
+                std::vector<std::uint8_t> withoutTailBytes;
+                retained_recipe::Digest withoutTailDigest;
+                if (!retained_boolean::Encode(withoutTail, withoutTailBytes)
+                    || !composite_recipe::Hash(withoutTailBytes, withoutTailDigest))
+                    throw std::invalid_argument("tail omission bytes");
+                rounded.recipe.effectiveDecoded = withoutTail;
+                rounded.recipe.effectiveBytes = withoutTailBytes;
+                rounded.recipe.effectiveDigest = withoutTailDigest;
+                rounded.effectiveCommitments.recipe = withoutTailDigest;
+                for (auto& read : rounded.fence.revision.dependencies)
+                    if (read.locator.node == rounded.identity.sourceNode)
+                        read.recipe = withoutTailDigest;
+                retained_topology_budget::Counter tailBudget;
+                const auto omitted = po::ReplayProgramOperand(
+                    rounded, display, stop, tailBudget);
+                checks[prefix + "tail-omission-refused"] =
+                    omitted.refusal == po::Refusal::ProgramReplayMismatch
+                    && omitted.solid.IsNull();
+            }
+        } catch (...) { checks["setup-exception"] = false; }
+        return checks;
+    }
+
+    static Checks ProgramOperandReplayRefusalEvidence() noexcept {
+        namespace po = part_boolean::program_operand;
+        namespace tb = retained_topology_budget;
+        Checks checks;
+        try {
+            const auto display = Display();
+            for (double unit : {0.001, 1.0}) {
+                const std::string prefix = unit == 0.001 ? "mm-" : "m-";
+                po::Value value = ProgramOperandPrismFixture(
+                    unit, po::Role::Left, 0x20);
+                std::string bindFailure;
+                if (!BindProgramOperandCommitments(value, display, &bindFailure)) {
+                    checks[prefix + "bind-failure-" + bindFailure] = false;
+                    continue;
+                }
+
+                const std::atomic_bool cancelled(true);
+                tb::Counter cancelledBudget;
+                const auto cancelledReplay = po::ReplayProgramOperand(
+                    value, display, cancelled, cancelledBudget);
+                checks[prefix + "cancelled-is-distinct-and-empty"] =
+                    cancelledReplay.refusal == po::Refusal::Cancelled
+                    && po::Refusal::Cancelled != po::Refusal::Budget
+                    && cancelledReplay.solid.IsNull();
+
+                const std::atomic_bool running(false);
+                tb::Counter measured;
+                const auto measuredReplay = po::ReplayProgramOperand(
+                    value, display, running, measured);
+                if (!measuredReplay.replayed() || measured.topologyVisits == 0
+                    || measured.buildStages == 0) {
+                    checks[prefix + "measured-replay-failure-"
+                        + std::to_string(int(measuredReplay.refusal)) + "-"
+                        + measuredReplay.phase] = false;
+                    continue;
+                }
+                tb::Counter exact;
+                exact.topologyVisits = tb::MaximumTopologyVisits
+                    - measured.topologyVisits;
+                exact.buildStages = tb::MaximumBuildStages
+                    - measured.buildStages;
+                const auto exactReplay = po::ReplayProgramOperand(
+                    value, display, running, exact);
+                checks[prefix + "exact-boundary-replay-succeeds"] =
+                    exactReplay.replayed()
+                    && exact.topologyVisits == tb::MaximumTopologyVisits
+                    && exact.buildStages == tb::MaximumBuildStages;
+
+                tb::Counter onePast;
+                onePast.topologyVisits = tb::MaximumTopologyVisits
+                    - measured.topologyVisits + 1;
+                onePast.buildStages = tb::MaximumBuildStages
+                    - measured.buildStages;
+                const auto denied = po::ReplayProgramOperand(
+                    value, display, running, onePast);
+                const auto deniedAgain = po::ReplayProgramOperand(
+                    value, display, running, onePast);
+                checks[prefix + "one-past-budget-sticky-and-empty"] =
+                    denied.refusal == po::Refusal::Budget
+                    && deniedAgain.refusal == po::Refusal::Budget
+                    && denied.solid.IsNull() && deniedAgain.solid.IsNull()
+                    && onePast.exhausted;
+
+                po::Value changedBase = value;
+                auto baseProgram = std::get<retained_boolean::Program>(
+                    changedBase.recipe.effectiveDecoded);
+                profile::Parameters profile;
+                if (!profile::Decode(baseProgram.source.values, profile))
+                    throw std::invalid_argument("changed base profile");
+                profile.definition.depth = 21 * 0.001 / unit;
+                if (!profile::Encode(profile, baseProgram.source.values))
+                    throw std::invalid_argument("changed base encode");
+                std::vector<std::uint8_t> baseBytes;
+                retained_recipe::Digest baseDigest;
+                if (!retained_boolean::Encode(baseProgram, baseBytes)
+                    || !composite_recipe::Hash(baseBytes, baseDigest))
+                    throw std::invalid_argument("changed base bytes");
+                changedBase.recipe.effectiveDecoded = baseProgram;
+                changedBase.recipe.effectiveBytes = baseBytes;
+                changedBase.recipe.effectiveDigest = baseDigest;
+                changedBase.effectiveCommitments.recipe = baseDigest;
+                for (auto& read : changedBase.fence.revision.dependencies)
+                    if (read.locator.node == changedBase.identity.sourceNode)
+                        read.recipe = baseDigest;
+                tb::Counter baseBudget;
+                const auto baseRefusal = po::ReplayProgramOperand(
+                    changedBase, display, running, baseBudget);
+                checks[prefix + "changed-original-base-refused"] =
+                    baseRefusal.refusal == po::Refusal::BaseMismatch
+                    && baseRefusal.solid.IsNull();
+
+                po::Value missing = value;
+                missing.recipe.originalBytes.clear();
+                tb::Counter missingBudget;
+                const auto missingRefusal = po::ReplayProgramOperand(
+                    missing, display, running, missingBudget);
+                checks[prefix + "missing-original-refused"] =
+                    missingRefusal.refusal == po::Refusal::MissingSource
+                    && missingRefusal.solid.IsNull();
+
+                po::Value stale = value;
+                stale.recipe.effectiveResultCommitment = FixedDigest(0xEE);
+                stale.fence.result = stale.recipe.effectiveResultCommitment;
+                tb::Counter staleBudget;
+                const auto staleRefusal = po::ReplayProgramOperand(
+                    stale, display, running, staleBudget);
+                checks[prefix + "stale-current-result-refused"] =
+                    staleRefusal.refusal == po::Refusal::ProgramReplayMismatch
+                    && staleRefusal.solid.IsNull();
+            }
+        } catch (...) { checks["setup-exception"] = false; }
+        return checks;
+    }
+
     static Checks Run(int scenario) noexcept {
         if (scenario == 0) return CodecEvidence();
         if (scenario == 1) return AdmissionEvidence();
@@ -1258,6 +1659,8 @@ struct Probe final {
         if (scenario == 4) return ProgramOperandValueEvidence();
         if (scenario == 5) return ProgramOperandRefusalEvidence();
         if (scenario == 6) return ProgramOperandDisabledEvidence();
+        if (scenario == 7) return ProgramOperandReplayEvidence();
+        if (scenario == 8) return ProgramOperandReplayRefusalEvidence();
         return {{"valid-scenario", false}};
     }
 };

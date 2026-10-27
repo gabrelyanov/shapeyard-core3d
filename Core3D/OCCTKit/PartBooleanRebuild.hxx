@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PartBooleanBuild.hxx"
+#include "RetainedProgramSuffixBuild.hxx"
 #include <string>
 
 namespace core3d::part_boolean::rebuild {
@@ -140,6 +141,80 @@ inline tb::WalkStatus CheckAnalyticCounted(
             && reads.rightSource.locator.node == definition.inputs[1].rootNode;
         return tb::WalkStatus::Completed;
     } catch (...) { result = {}; return tb::WalkStatus::Failed; }
+}
+
+struct ProgramOperandFixedPointEvidence final {
+    bool completeRecipeBytesExact = false;
+    bool originalBasesByteExact = false;
+    bool completeResultsByteExact = false;
+    bool bothCorrespondencesMatched = false;
+    bool bothReadbacksStable = false;
+    bool completeTailReplayed = false;
+    bool fixedPoint() const noexcept {
+        return completeRecipeBytesExact && originalBasesByteExact
+            && completeResultsByteExact && bothCorrespondencesMatched
+            && bothReadbacksStable && completeTailReplayed;
+    }
+};
+
+// Two independent complete-program replays spend one caller-owned operation
+// continuation.  Neither result is exposed until both bases, full programs,
+// correspondence proofs and readbacks agree byte-for-byte.
+inline program_operand::Refusal CheckProgramOperandFixedPoint(
+    const program_operand::Value& value,
+    const cut_display::Settings& display, const std::atomic_bool& cancelled,
+    tb::Counter& budget, ProgramOperandFixedPointEvidence& evidence) noexcept {
+    evidence = {};
+    if (cancelled.load()) return program_operand::Refusal::Cancelled;
+    try {
+        const program_operand::ReplayResult first =
+            program_operand::ReplayProgramOperand(value, display, cancelled, budget);
+        if (first.refusal != program_operand::Refusal::None) return first.refusal;
+        const program_operand::ReplayResult second =
+            program_operand::ReplayProgramOperand(value, display, cancelled, budget);
+        if (second.refusal != program_operand::Refusal::None) return second.refusal;
+
+        evidence.completeRecipeBytesExact = !first.exactProgram.empty()
+            && first.exactProgram == second.exactProgram
+            && first.exactProgram == value.recipe.effectiveBytes;
+        evidence.bothCorrespondencesMatched =
+            first.correspondence.classification
+                == saved_boolean_result::Classification::MatchedOrientedBoundary
+            && second.correspondence.classification
+                == saved_boolean_result::Classification::MatchedOrientedBoundary;
+        evidence.bothReadbacksStable = first.readbackStable && second.readbackStable;
+        evidence.completeTailReplayed = first.completeTailReplayed
+            && second.completeTailReplayed;
+
+        std::string firstBase, secondBase, firstResult, secondResult;
+        tb::WalkStatus walk = retained_part_boolean::ExactShapeBytesCounted(
+            first.originalBase, firstBase, budget, cancelled, tb::Site::C13CommitVerify);
+        if (walk != tb::WalkStatus::Completed) return cancelled.load()
+            ? program_operand::Refusal::Cancelled : program_operand::Refusal::Budget;
+        walk = retained_part_boolean::ExactShapeBytesCounted(second.originalBase,
+            secondBase, budget, cancelled, tb::Site::C13CommitVerify);
+        if (walk != tb::WalkStatus::Completed) return cancelled.load()
+            ? program_operand::Refusal::Cancelled : program_operand::Refusal::Budget;
+        walk = retained_part_boolean::ExactShapeBytesCounted(first.solid,
+            firstResult, budget, cancelled, tb::Site::C13CommitVerify);
+        if (walk != tb::WalkStatus::Completed) return cancelled.load()
+            ? program_operand::Refusal::Cancelled : program_operand::Refusal::Budget;
+        walk = retained_part_boolean::ExactShapeBytesCounted(second.solid,
+            secondResult, budget, cancelled, tb::Site::C13CommitVerify);
+        if (walk != tb::WalkStatus::Completed) return cancelled.load()
+            ? program_operand::Refusal::Cancelled : program_operand::Refusal::Budget;
+        evidence.originalBasesByteExact = !firstBase.empty()
+            && firstBase == secondBase;
+        evidence.completeResultsByteExact = !firstResult.empty()
+            && firstResult == secondResult;
+        return evidence.fixedPoint() ? program_operand::Refusal::None
+                                     : program_operand::Refusal::ProgramReplayMismatch;
+    } catch (...) {
+        evidence = {};
+        return cancelled.load() ? program_operand::Refusal::Cancelled
+            : budget.exhausted ? program_operand::Refusal::Budget
+                               : program_operand::Refusal::BuildFailed;
+    }
 }
 
 //! Recipe-driven production replay. This is intentionally separate from the

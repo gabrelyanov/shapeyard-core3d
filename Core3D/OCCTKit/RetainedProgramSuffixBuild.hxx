@@ -25,6 +25,8 @@
 #include "RetainedFilletBuild.hxx"
 #include "RetainedPartBoolean.hxx"
 #include "PartBooleanPersistence.hxx"
+#include "PartBooleanBuild.hxx"
+#include "EnclosureGeometry.hxx"
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -623,3 +625,200 @@ inline FixedPointEvidence CheckFixedPoint(const TopoDS_Shape& provenPrefixA,
 }
 
 } // namespace core3d::retained_program_suffix::build
+
+namespace core3d::part_boolean::program_operand {
+
+namespace tb = core3d::retained_topology_budget;
+
+struct ReplayResult final {
+    Refusal refusal = Refusal::BuildFailed;
+    const char* phase = "input";
+    TopoDS_Shape originalBase;
+    TopoDS_Shape solid;
+    std::vector<std::uint8_t> exactProgram;
+    saved_cut_source_edit::ShapeCommitment baseCommitment;
+    saved_cut_source_edit::ShapeCommitment resultCommitment;
+    saved_boolean_result::Inspection correspondence;
+    bool originalBasePreserved = false;
+    bool currentResultMatched = false;
+    bool readbackStable = false;
+    bool completeTailReplayed = false;
+    bool replayed() const noexcept {
+        return refusal == Refusal::None && !originalBase.IsNull()
+            && !solid.IsNull() && originalBasePreserved
+            && currentResultMatched && readbackStable && completeTailReplayed;
+    }
+};
+
+namespace detail {
+
+inline bool ProgramOf(const retained_boolean::Recipe& recipe,
+                      retained_boolean::Program& program) noexcept {
+    try {
+        if (const auto* complete = std::get_if<retained_boolean::Program>(&recipe)) {
+            program = *complete;
+            return retained_boolean::Valid(program);
+        }
+        return retained_boolean::Promote(
+            std::get<retained_boolean::Legacy>(recipe), program);
+    } catch (...) { program = {}; return false; }
+}
+
+inline tb::WalkStatus RebuildOriginalBase(const retained_boolean::Program& program,
+    const std::atomic_bool& stop, tb::Counter& budget, TopoDS_Shape& output) noexcept {
+    output.Nullify();
+    if (stop.load()) return tb::WalkStatus::Cancelled;
+    try {
+        if (!budget.beginStage(tb::Site::C25AnalyticInput))
+            return tb::WalkStatus::BudgetDenied;
+        const auto view = saved_boolean_result::detail::GeometryView(program, 0);
+        switch (program.source.family) {
+        case 1: {
+            profile::Parameters parameters;
+            if (!profile::Decode(program.source.values, parameters)
+                || !parameters.shells.empty()) return tb::WalkStatus::Failed;
+            output = parameters.definition.revolve
+                ? saved_boolean_build::RebuildRevolvedBase(view, stop)
+                : part_boolean::build::BuildProfileSource(parameters, false);
+            break;
+        }
+        case 2: {
+            enclosure::Parameters parameters;
+            if (!enclosure::Decode(int(program.source.schema),
+                    program.source.values, parameters)) return tb::WalkStatus::Failed;
+            auto cancellation = std::shared_ptr<std::atomic_bool>(
+                const_cast<std::atomic_bool*>(&stop), [](std::atomic_bool*) {});
+            EnclosureSolidResult built;
+            if (!BuildEnclosureSolidGeometry(parameters.definition,
+                    cancellation, built)) return stop.load()
+                ? tb::WalkStatus::Cancelled : tb::WalkStatus::Failed;
+            output = std::move(built.solid);
+            break;
+        }
+        case 3:
+            if (saved_cut_source_edit::RebuildLoftBase(view, stop, output)
+                    != saved_cut_source_edit::LoftBaseStatus::Built)
+                return stop.load() ? tb::WalkStatus::Cancelled
+                                   : tb::WalkStatus::Failed;
+            break;
+        default:
+            return tb::WalkStatus::Failed;
+        }
+        if (output.IsNull()) return tb::WalkStatus::Failed;
+        tb::WalkStatus walk = tb::ChargeTraversal(output, budget, stop,
+            tb::Site::C25AnalyticInput);
+        if (walk != tb::WalkStatus::Completed) { output.Nullify(); return walk; }
+        if (!saved_boolean_build::InspectSourceBase(output, view, stop, budget)) {
+            output.Nullify();
+            return stop.load() ? tb::WalkStatus::Cancelled
+                : budget.exhausted ? tb::WalkStatus::BudgetDenied
+                                   : tb::WalkStatus::Failed;
+        }
+        return tb::WalkStatus::Completed;
+    } catch (...) { output.Nullify(); return tb::WalkStatus::Failed; }
+}
+
+inline Refusal StopRefusal(const std::atomic_bool& stop,
+                           const tb::Counter& budget,
+                           Refusal fallback) noexcept {
+    return stop.load() ? Refusal::Cancelled
+        : budget.exhausted ? Refusal::Budget : fallback;
+}
+
+} // namespace detail
+
+inline ReplayResult ReplayProgramOperand(const Value& value,
+    const cut_display::Settings& display, const std::atomic_bool& stop,
+    tb::Counter& budget) noexcept {
+    ReplayResult output;
+    const auto refuse = [&](Refusal refusal, const char* phase) {
+        ReplayResult empty;
+        empty.refusal = detail::StopRefusal(stop, budget, refusal);
+        empty.phase = phase;
+        return empty;
+    };
+    if (stop.load()) return refuse(Refusal::Cancelled, "input");
+    try {
+        const Refusal values = InspectValues(value);
+        if (values != Refusal::None) return refuse(values, "values");
+        retained_boolean::Program program;
+        if (!detail::ProgramOf(value.recipe.effectiveDecoded, program))
+            return refuse(Refusal::ProgramMalformed, "program");
+        std::vector<std::uint8_t> completeProgramBytes;
+        if (!retained_boolean::Encode(program, completeProgramBytes))
+            return refuse(Refusal::ProgramMalformed, "program-bytes");
+        output.phase = "original-base";
+        tb::WalkStatus walk = detail::RebuildOriginalBase(program, stop,
+            budget, output.originalBase);
+        if (walk != tb::WalkStatus::Completed)
+            return refuse(Refusal::BaseMismatch, output.phase);
+
+        saved_boolean_build::Result replay;
+        output.phase = "complete-program";
+        walk = saved_boolean_build::BuildProgramOperandCounted(
+            output.originalBase, program, display, stop, budget, replay);
+        if (walk != tb::WalkStatus::Completed)
+            return refuse(Refusal::ProgramReplayMismatch, output.phase);
+        if (replay.status != saved_boolean_build::Status::Built
+            || replay.solid.IsNull() || replay.exactProgram != completeProgramBytes)
+            return refuse(Refusal::ProgramReplayMismatch, "exact-program");
+        if (replay.retainedBase.sha256 != value.recipe.effectiveBaseCommitment
+            || replay.retainedBase.sha256 != value.fence.base)
+            return refuse(Refusal::BaseMismatch, "base-commitment");
+
+        output.phase = "readback";
+        if (!budget.beginStage(tb::Site::C13CommitVerify))
+            return refuse(Refusal::Budget, output.phase);
+        walk = tb::ChargeTraversal(replay.solid, budget, stop,
+            tb::Site::C13CommitVerify);
+        if (walk != tb::WalkStatus::Completed)
+            return refuse(Refusal::ProgramReplayMismatch, output.phase);
+        saved_boolean_build::Budget readbackBudget = replay.budget;
+        TopoDS_Shape reopened;
+        if (!saved_boolean_build::ReadbackGeometry(replay.solid, stop,
+                readbackBudget, reopened))
+            return refuse(Refusal::ProgramReplayMismatch, output.phase);
+        walk = tb::ChargeTraversal(reopened, budget, stop,
+            tb::Site::C13CommitVerify);
+        if (walk != tb::WalkStatus::Completed)
+            return refuse(Refusal::ProgramReplayMismatch, output.phase);
+        saved_cut_source_edit::ShapeCommitment reopenedCommitment;
+        if (!saved_cut_source_edit::Commit(reopened, stop,
+                readbackBudget.streamBytes, reopenedCommitment))
+            return refuse(Refusal::ProgramReplayMismatch, output.phase);
+        if (reopenedCommitment.sha256 != value.recipe.effectiveResultCommitment
+            || reopenedCommitment.sha256 != value.fence.result)
+            return refuse(Refusal::ProgramReplayMismatch, "result-commitment");
+        if (!budget.beginStage(tb::Site::C13CommitVerify))
+            return refuse(Refusal::Budget, output.phase);
+        TopoDS_Shape reopenedAgain;
+        if (!saved_boolean_build::ReadbackGeometry(reopened, stop,
+                readbackBudget, reopenedAgain))
+            return refuse(Refusal::ProgramReplayMismatch, output.phase);
+        walk = tb::ChargeTraversal(reopenedAgain, budget, stop,
+            tb::Site::C13CommitVerify);
+        if (walk != tb::WalkStatus::Completed)
+            return refuse(Refusal::ProgramReplayMismatch, output.phase);
+        saved_cut_source_edit::ShapeCommitment fixedCommitment;
+        if (!saved_cut_source_edit::Commit(reopenedAgain, stop,
+                readbackBudget.streamBytes, fixedCommitment)
+            || !(fixedCommitment == reopenedCommitment))
+            return refuse(Refusal::ProgramReplayMismatch, output.phase);
+
+        output.exactProgram = value.recipe.effectiveBytes;
+        output.baseCommitment = replay.retainedBase;
+        output.resultCommitment = reopenedCommitment;
+        output.correspondence = replay.correspondence;
+        output.originalBasePreserved = true;
+        output.currentResultMatched = true;
+        output.readbackStable = true;
+        output.completeTailReplayed = program.filletSteps.empty()
+            || replay.filletOutcome == retained_fillet::Outcome::Built;
+        output.solid = std::move(reopened);
+        output.refusal = Refusal::None;
+        output.phase = "replayed";
+        return output;
+    } catch (...) { return refuse(Refusal::BuildFailed, output.phase); }
+}
+
+} // namespace core3d::part_boolean::program_operand
