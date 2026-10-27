@@ -2060,11 +2060,13 @@ NativeExportResult RunNativeExport(
             }
             std::size_t decodedTextureBytes = 0;
             std::size_t decodedTextureLimitBytes = 0;
-            const bool decodedTextureBudgetRefusal = !result.scene
-                && core3d::scene::ConsumePrivateExportTextureInstallRefusal(
+            const bool decodedTextureMeasurement =
+                core3d::scene::ConsumePrivateExportTextureInstallRefusal(
                     decodedTextureBytes, decodedTextureLimitBytes);
+            const bool decodedTextureBudgetRefusal = !result.scene
+                && decodedTextureMeasurement;
 #ifdef DEBUG
-            if (decodedTextureBudgetRefusal) {
+            if (decodedTextureLimitBytes != 0) {
                 std::lock_guard<std::mutex> debugLock(state->debugE4Mutex);
                 state->debugTextureInstallDecodedBytes = decodedTextureBytes;
                 state->debugTextureInstallDecodedLimitBytes =

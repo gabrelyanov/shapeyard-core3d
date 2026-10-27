@@ -157,6 +157,21 @@ struct ProgramOperandFixedPointEvidence final {
     }
 };
 
+struct ProgramOperandBooleanFixedPointEvidence final {
+    bool completeProgramsExact = false;
+    bool originalBasesExact = false;
+    bool completeResultsExact = false;
+    bool placedInputsExact = false;
+    bool outerResultExact = false;
+    bool materialSelectorLineageExact = false;
+    bool bothBuildsAdmitted = false;
+    bool fixedPoint() const noexcept {
+        return completeProgramsExact && originalBasesExact
+            && completeResultsExact && placedInputsExact && outerResultExact
+            && materialSelectorLineageExact && bothBuildsAdmitted;
+    }
+};
+
 // Two independent complete-program replays spend one caller-owned operation
 // continuation.  Neither result is exposed until both bases, full programs,
 // correspondence proofs and readbacks agree byte-for-byte.
@@ -209,6 +224,85 @@ inline program_operand::Refusal CheckProgramOperandFixedPoint(
             && firstResult == secondResult;
         return evidence.fixedPoint() ? program_operand::Refusal::None
                                      : program_operand::Refusal::ProgramReplayMismatch;
+    } catch (...) {
+        evidence = {};
+        return cancelled.load() ? program_operand::Refusal::Cancelled
+            : budget.exhausted ? program_operand::Refusal::Budget
+                               : program_operand::Refusal::BuildFailed;
+    }
+}
+
+// P4 outer fixed point: repeat both complete operand replays and the counted
+// outer Boolean on the same continuation, then compare every shape boundary
+// and the appearance/selector lineage carried by the request.
+inline program_operand::Refusal CheckProgramOperandBooleanFixedPoint(
+    const program_operand::Request& request,
+    const cut_display::Settings& display, const std::atomic_bool& cancelled,
+    tb::Counter& budget,
+    ProgramOperandBooleanFixedPointEvidence& evidence) noexcept {
+    evidence = {};
+    if (cancelled.load()) return program_operand::Refusal::Cancelled;
+    try {
+        const auto first = program_operand::BuildProgramOperandBoolean(
+            request, display, cancelled, budget);
+        if (!first.built()) return first.refusal;
+        const auto second = program_operand::BuildProgramOperandBoolean(
+            request, display, cancelled, budget);
+        if (!second.built()) return second.refusal;
+        evidence.bothBuildsAdmitted = true;
+        evidence.completeProgramsExact = true;
+        evidence.materialSelectorLineageExact = true;
+        std::array<std::string, 2> firstBase, secondBase;
+        std::array<std::string, 2> firstResult, secondResult;
+        std::array<std::string, 2> firstPlaced, secondPlaced;
+        for (std::size_t index = 0; index < 2; ++index) {
+            evidence.completeProgramsExact = evidence.completeProgramsExact
+                && !first.replays[index].exactProgram.empty()
+                && first.replays[index].exactProgram
+                    == second.replays[index].exactProgram
+                && first.replays[index].exactProgram
+                    == request.operands[index].recipe.effectiveBytes;
+            const auto& appearance = request.operands[index].appearance;
+            evidence.materialSelectorLineageExact =
+                evidence.materialSelectorLineageExact
+                && !appearance.effectiveMaterials.empty()
+                && !appearance.regions.empty()
+                && appearance.versions.proof > 0
+                && appearance.versions.selector > 0
+                && appearance.versions.material > 0;
+            const auto exact = [&](const TopoDS_Shape& shape,
+                                   std::string& bytes) {
+                return retained_part_boolean::ExactShapeBytesCounted(
+                    shape, bytes, budget, cancelled,
+                    tb::Site::C13CommitVerify) == tb::WalkStatus::Completed;
+            };
+            if (!exact(first.replays[index].originalBase, firstBase[index])
+                || !exact(second.replays[index].originalBase, secondBase[index])
+                || !exact(first.replays[index].solid, firstResult[index])
+                || !exact(second.replays[index].solid, secondResult[index])
+                || !exact(first.placedInputs[index], firstPlaced[index])
+                || !exact(second.placedInputs[index], secondPlaced[index]))
+                return cancelled.load() ? program_operand::Refusal::Cancelled
+                    : program_operand::Refusal::Budget;
+        }
+        evidence.originalBasesExact = firstBase == secondBase;
+        evidence.completeResultsExact = firstResult == secondResult;
+        evidence.placedInputsExact = firstPlaced == secondPlaced;
+        std::string firstOuter, secondOuter;
+        const auto firstWalk = retained_part_boolean::ExactShapeBytesCounted(
+            first.candidate.solid, firstOuter, budget, cancelled,
+            tb::Site::C13CommitVerify);
+        const auto secondWalk = retained_part_boolean::ExactShapeBytesCounted(
+            second.candidate.solid, secondOuter, budget, cancelled,
+            tb::Site::C13CommitVerify);
+        if (firstWalk != tb::WalkStatus::Completed
+            || secondWalk != tb::WalkStatus::Completed)
+            return cancelled.load() ? program_operand::Refusal::Cancelled
+                : program_operand::Refusal::Budget;
+        evidence.outerResultExact = !firstOuter.empty()
+            && firstOuter == secondOuter;
+        return evidence.fixedPoint() ? program_operand::Refusal::None
+            : program_operand::Refusal::ProgramReplayMismatch;
     } catch (...) {
         evidence = {};
         return cancelled.load() ? program_operand::Refusal::Cancelled

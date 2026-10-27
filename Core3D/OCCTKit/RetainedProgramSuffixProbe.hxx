@@ -5,6 +5,7 @@
 // fixture command, no production route. Public admission remains disabled.
 #include "RetainedProgramSuffixBuild.hxx"
 #include "PartBooleanRebuild.hxx"
+#include "PartBooleanCorrespondence.hxx"
 #include "PartBooleanCodecProbe.hxx"
 #include "PartBooleanOwner.hxx"
 #include "NativeDocumentSession.hxx"
@@ -12,6 +13,9 @@
 #include <Prs3d_Drawer.hxx>
 #include <TNaming_Builder.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
+#include <BRepBndLib.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
+#include <Bnd_Box.hxx>
 #include <cstdio>
 #ifdef __OBJC__
 #import <Foundation/Foundation.h>
@@ -608,6 +612,114 @@ struct Probe final {
                 *failure = "inspect-" + std::to_string(int(inspected));
             return inspected == po::Refusal::None;
         } catch (...) { if (failure) *failure = "exception"; return false; }
+    }
+
+    static bool ShiftProgramOperand(
+        part_boolean::program_operand::Value& value,
+        double baseShiftMM, double boreShiftMM, double unit) noexcept {
+        try {
+            auto program = std::get<retained_boolean::Program>(
+                value.recipe.effectiveDecoded);
+            profile::Parameters parameters;
+            if (!profile::Decode(program.source.values, parameters)) return false;
+            const double localPerMM = 0.001 / unit;
+            for (auto& point : parameters.definition.points)
+                point.SetX(point.X() + baseShiftMM * localPerMM);
+            if (!profile::Encode(parameters, program.source.values)) return false;
+            for (auto& step : program.steps)
+                step.operand.point[0] += boreShiftMM * localPerMM;
+            return retained_boolean::Valid(program)
+                && RefreshProgramOperand(value, program);
+        } catch (...) { return false; }
+    }
+
+    static part_boolean::program_operand::Request ProgramOperandBoundaryPair(
+        double unit, double rightBaseShiftMM = 20,
+        double rightBoreShiftMM = 40) {
+        namespace po = part_boolean::program_operand;
+        po::Request request = ProgramOperandPairFixture(unit);
+        if (!ShiftProgramOperand(request.operands[1], rightBaseShiftMM,
+                rightBoreShiftMM, unit))
+            throw std::invalid_argument("program operand boundary shift");
+        const auto display = Display();
+        if (!BindProgramOperandCommitments(request.operands[0], display)
+            || !BindProgramOperandCommitments(request.operands[1], display))
+            throw std::invalid_argument("program operand boundary commitments");
+        return request;
+    }
+
+    static TopoDS_Shape IndependentProgramSolid(
+        double unit, double baseShiftMM, double boreShiftMM) {
+        const double localPerMM = 0.001 / unit;
+        const TopoDS_Shape base = BRepPrimAPI_MakeBox(
+            gp_Pnt(baseShiftMM * localPerMM, 0, 0),
+            40 * localPerMM, 30 * localPerMM, 20 * localPerMM).Shape();
+        const TopoDS_Shape bore = BRepPrimAPI_MakeCylinder(
+            gp_Ax2(gp_Pnt((10 + boreShiftMM) * localPerMM,
+                         15 * localPerMM, -1 * localPerMM), gp_Dir(0, 0, 1)),
+            2 * localPerMM, 22 * localPerMM).Shape();
+        BRepAlgoAPI_Cut cut(base, bore);
+        cut.SetRunParallel(Standard_False);
+        cut.SetNonDestructive(Standard_True);
+        cut.SetFuzzyValue(Precision::Confusion());
+        cut.SetUseOBB(Standard_True);
+        cut.SetCheckInverted(Standard_True);
+        cut.Build();
+        return cut.IsDone() && !cut.HasErrors()
+            ? part_boolean::build::AnalyticResultSolid(cut.Shape()) : TopoDS_Shape();
+    }
+
+    static TopoDS_Shape IndependentOuterBoolean(
+        part_boolean::Operation operation, const TopoDS_Shape& left,
+        const TopoDS_Shape& right) {
+        TopTools_ListOfShape arguments, tools;
+        arguments.Append(left); tools.Append(right);
+        const auto run = [&](auto& boolean) {
+            boolean.SetArguments(arguments); boolean.SetTools(tools);
+            boolean.SetRunParallel(Standard_False);
+            boolean.SetNonDestructive(Standard_True);
+            boolean.SetFuzzyValue(Precision::Confusion());
+            boolean.SetUseOBB(Standard_True);
+            boolean.SetCheckInverted(Standard_True);
+            boolean.Build();
+            return boolean.IsDone() && !boolean.HasErrors()
+                ? part_boolean::build::AnalyticResultSolid(boolean.Shape())
+                : TopoDS_Shape();
+        };
+        if (operation == part_boolean::Operation::Union) {
+            BRepAlgoAPI_Fuse boolean; return run(boolean);
+        }
+        if (operation == part_boolean::Operation::Subtract) {
+            BRepAlgoAPI_Cut boolean; return run(boolean);
+        }
+        BRepAlgoAPI_Common boolean; return run(boolean);
+    }
+
+    static bool IndependentMeasuresMatch(const TopoDS_Shape& candidate,
+                                         const TopoDS_Shape& oracle,
+                                         double unit) noexcept {
+        try {
+            if (!retained_part_boolean::IsOneValidForwardSolid(candidate)
+                || !retained_part_boolean::IsOneValidForwardSolid(oracle)) return false;
+            const double mm = unit * 1000;
+            GProp_GProps ca, oa, cv, ov;
+            BRepGProp::SurfaceProperties(candidate, ca);
+            BRepGProp::SurfaceProperties(oracle, oa);
+            BRepGProp::VolumeProperties(candidate, cv);
+            BRepGProp::VolumeProperties(oracle, ov);
+            if (std::abs(cv.Mass() * mm * mm * mm
+                         - ov.Mass() * mm * mm * mm) > 1e-6
+                || std::abs(ca.Mass() * mm * mm
+                            - oa.Mass() * mm * mm) > 1e-6) return false;
+            Bnd_Box cb, ob;
+            BRepBndLib::Add(candidate, cb); BRepBndLib::Add(oracle, ob);
+            Standard_Real c[6], o[6];
+            cb.Get(c[0], c[1], c[2], c[3], c[4], c[5]);
+            ob.Get(o[0], o[1], o[2], o[3], o[4], o[5]);
+            for (std::size_t i = 0; i < 6; ++i)
+                if (std::abs((c[i] - o[i]) * mm) > 1e-6) return false;
+            return true;
+        } catch (...) { return false; }
     }
 
     static std::vector<std::pair<std::string, part_boolean::program_operand::Value>>
@@ -1807,6 +1919,303 @@ struct Probe final {
         return checks;
     }
 
+    // --- scenarios 12-14: A3/S2 P4 Boolean and correspondence proof -------
+    static Checks ProgramOperandBooleanGeometryEvidence() noexcept {
+        namespace po = part_boolean::program_operand;
+        Checks checks;
+        try {
+            const auto display = Display();
+            for (double unit : {0.001, 1.0}) {
+                const std::string prefix = unit == 0.001 ? "mm-" : "m-";
+                bool allOperations = true, paired = true, boundary = true;
+                bool continuation = true;
+                std::size_t operationIndex = 0;
+                for (part_boolean::Operation operation : {
+                    part_boolean::Operation::Union,
+                    part_boolean::Operation::Subtract,
+                    part_boolean::Operation::Intersect}) {
+                    po::Request request = ProgramOperandBoundaryPair(unit);
+                    request.operation = operation;
+                    request.operands[0].appearance.selectors.clear();
+                    request.operands[1].appearance.selectors.clear();
+                    retained_topology_budget::Counter budget;
+                    std::atomic_bool stop(false);
+                    const auto built = po::BuildProgramOperandBoolean(
+                        request, display, stop, budget);
+                    const TopoDS_Shape independentLeft =
+                        IndependentProgramSolid(unit, 0, 0);
+                    const TopoDS_Shape independentRight =
+                        IndependentProgramSolid(unit, 20, 40);
+                    const TopoDS_Shape oracle = IndependentOuterBoolean(
+                        operation, independentLeft, independentRight);
+                    const std::string operationName = operationIndex++ == 0
+                        ? "union" : operationIndex == 2 ? "subtract" : "intersect";
+                    checks[prefix + operationName + "-built"] = built.built();
+                    checks[prefix + operationName + "-independent-measures"] =
+                        IndependentMeasuresMatch(built.candidate.solid, oracle, unit);
+                    checks[prefix + operationName + "-gate-evidence"] =
+                        built.booleanEvidence.historyObserved
+                        && built.booleanEvidence.inputBytesUnchanged;
+                    allOperations = allOperations && built.built()
+                        && IndependentMeasuresMatch(
+                            built.candidate.solid, oracle, unit);
+                    paired = paired && built.replays[0].replayed()
+                        && built.replays[1].replayed()
+                        && built.replays[0].exactProgram
+                            == request.operands[0].recipe.effectiveBytes
+                        && built.replays[1].exactProgram
+                            == request.operands[1].recipe.effectiveBytes;
+                    boundary = boundary && built.built()
+                        && retained_part_boolean::IsOneValidForwardSolid(
+                            built.candidate.solid)
+                        && built.booleanEvidence.historyObserved
+                        && built.booleanEvidence.inputBytesUnchanged;
+                    continuation = continuation && built.sharedContinuation
+                        && budget.buildStages > 0 && budget.topologyVisits > 0;
+                }
+                checks[prefix + "all-three-operations-independent-volume-area-bounds"] =
+                    allOperations;
+                checks[prefix + "program-left-right-paired-replay"] = paired;
+                checks[prefix + "complete-oriented-boundary"] = boundary;
+                checks[prefix + "shared-budget-no-reset"] = continuation;
+
+                po::Request empty = ProgramOperandBoundaryPair(unit, 80, 80);
+                empty.operation = part_boolean::Operation::Intersect;
+                retained_topology_budget::Counter emptyBudget;
+                const auto emptyResult = po::BuildProgramOperandBoolean(
+                    empty, display, std::atomic_bool(false), emptyBudget);
+                po::Request tangent = ProgramOperandBoundaryPair(unit, 40, 40);
+                tangent.operation = part_boolean::Operation::Union;
+                retained_topology_budget::Counter tangentBudget;
+                const auto tangentResult = po::BuildProgramOperandBoolean(
+                    tangent, display, std::atomic_bool(false), tangentBudget);
+                po::Request disconnected = ProgramOperandBoundaryPair(unit, 80, 80);
+                disconnected.operation = part_boolean::Operation::Union;
+                retained_topology_budget::Counter disconnectedBudget;
+                const auto disconnectedResult = po::BuildProgramOperandBoolean(
+                    disconnected, display, std::atomic_bool(false), disconnectedBudget);
+                checks[prefix + "empty-tangent-disconnected-typed"] =
+                    emptyResult.refusal == po::Refusal::EmptyResult
+                    && tangentResult.refusal == po::Refusal::TangentOnly
+                    && disconnectedResult.refusal == po::Refusal::Disconnected
+                    && emptyResult.candidate.solid.IsNull()
+                    && tangentResult.candidate.solid.IsNull()
+                    && disconnectedResult.candidate.solid.IsNull();
+            }
+            checks["family-and-ai-flags-unchanged"] =
+                !part_boolean::family_admission::ProgramOperandNativeAdmissionEnabled
+                && !part_boolean::family_admission::NativeAdmissionEnabled
+                && !part_boolean::family_admission::BooleanRouteInstalled
+                && !part_boolean::family_admission::AnalyticNativeAdmissionEnabled
+                && !part_boolean::family_admission::AnalyticBooleanRouteInstalled
+                && !part_boolean::family_admission::RetainedProgramSuffixInstalled
+                && !part_boolean::family_admission::RetainedProgramSuffixRouteInstalled;
+            checks["both-unit-systems"] = true;
+        } catch (...) { checks["setup-exception"] = false; }
+        return checks;
+    }
+
+    static Checks ProgramOperandMaterialSelectorEvidence() noexcept {
+        namespace po = part_boolean::program_operand;
+        namespace corr = part_boolean::correspondence;
+        Checks checks;
+        try {
+            const auto display = Display();
+            for (double unit : {0.001, 1.0}) {
+                const std::string prefix = unit == 0.001 ? "mm-" : "m-";
+                po::Request request = ProgramOperandBoundaryPair(unit);
+                request.operation = part_boolean::Operation::Subtract;
+                request.operands[0].appearance.selectors.clear();
+                request.operands[1].appearance.selectors.clear();
+                retained_topology_budget::Counter buildBudget;
+                std::atomic_bool stop(false);
+                const auto built = po::BuildProgramOperandBoolean(
+                    request, display, stop, buildBudget);
+                retained_topology_budget::Counter targetBudget;
+                const auto target = corr::ProveProgramOperandCorrespondence(
+                    request, built, po::CutSurfacePolicy::TargetDefault,
+                    targetBudget, stop);
+                retained_topology_budget::Counter toolBudget;
+                const auto tool = corr::ProveProgramOperandCorrespondence(
+                    request, built, po::CutSurfacePolicy::ToolRegion,
+                    toolBudget, stop);
+                const auto hasCutAssignment = [](const auto& proof,
+                                                  std::uint8_t materialSource) {
+                    return std::any_of(proof.faces.begin(), proof.faces.end(),
+                        [&](const auto& face) {
+                            const bool fromTool = std::any_of(
+                                face.sourceLineage.begin(),
+                                face.sourceLineage.end(), [](const auto& source) {
+                                    return source.first == 1;
+                                });
+                            return fromTool && face.materialSource == materialSource;
+                        });
+                };
+                checks[prefix + "target-default-cut-faces"] = target.proven()
+                    && hasCutAssignment(target, 0);
+                checks[prefix + "tool-region-cut-faces"] = tool.proven()
+                    && hasCutAssignment(tool, 1);
+                checks[prefix + "correspondence-build-admitted"] = built.built();
+                checks[prefix + "target-refusal-none"] =
+                    target.refusal == po::Refusal::None;
+                checks[prefix + "target-candidate-exact"] =
+                    target.historyCandidateExact;
+                checks[prefix + "target-source-bound"] =
+                    target.sourceProgramsBound && target.pairedReplayExact;
+                checks[prefix + "target-boundary-complete"] =
+                    target.completeOrientedBoundary;
+
+                po::Request selected = request;
+                const auto countRegion = [&](const retained_recipe::UUID& region) {
+                    return std::count_if(tool.faces.begin(), tool.faces.end(),
+                        [&](const auto& face) {
+                            return std::find(face.regionLineage.begin(),
+                                face.regionLineage.end(), region)
+                                != face.regionLineage.end();
+                        });
+                };
+                const auto leftRegion = selected.operands[0].appearance.regions.front().region;
+                const auto rightRegion = selected.operands[1].appearance.regions.front().region;
+                const std::size_t leftCount = countRegion(leftRegion);
+                const std::size_t rightCount = countRegion(rightRegion);
+                part_boolean::SelectorBinding whole;
+                whole.selector = Identifier(0xA0); whole.region = leftRegion;
+                whole.policy = part_boolean::SelectorPolicy::WholeRegion;
+                whole.expectedCardinality = std::uint16_t(leftCount);
+                selected.operands[0].appearance.selectors = {whole};
+                part_boolean::SelectorBinding unique;
+                unique.selector = Identifier(0xA1); unique.region = rightRegion;
+                unique.policy = part_boolean::SelectorPolicy::UniqueFace;
+                unique.expectedCardinality = 1;
+                selected.operands[1].appearance.selectors = {unique};
+                retained_topology_budget::Counter selectorBudget;
+                const auto selectors = corr::ProveProgramOperandCorrespondence(
+                    selected, built, po::CutSurfacePolicy::ToolRegion,
+                    selectorBudget, stop);
+                checks[prefix + "whole-region-all-descendants"] =
+                    selectors.proven() && leftCount > 1;
+                checks[prefix + "unique-face-remains-unique"] =
+                    selectors.proven() && rightCount == 1;
+                checks[prefix + "no-uncovered-final-face"] = selectors.proven()
+                    && selectors.noUncoveredFinalFace
+                    && selectors.faces.size() == tool.faces.size();
+                checks[prefix + "captured-material-lineage"] = selectors.proven()
+                    && selectors.materialLineageComplete
+                    && std::all_of(selectors.faces.begin(), selectors.faces.end(),
+                        [](const auto& face) {
+                            return !face.regionLineage.empty()
+                                && !face.sourceLineage.empty();
+                        });
+            }
+            checks["both-unit-systems"] = true;
+        } catch (...) { checks["setup-exception"] = false; }
+        return checks;
+    }
+
+    static Checks ProgramOperandAmbiguousCorrespondenceEvidence() noexcept {
+        namespace po = part_boolean::program_operand;
+        namespace corr = part_boolean::correspondence;
+        Checks checks;
+        try {
+            const auto display = Display();
+            for (double unit : {0.001, 1.0}) {
+                const std::string prefix = unit == 0.001 ? "mm-" : "m-";
+                po::Request request = ProgramOperandBoundaryPair(unit);
+                request.operation = part_boolean::Operation::Subtract;
+                request.operands[0].appearance.selectors.clear();
+                request.operands[1].appearance.selectors.clear();
+                retained_topology_budget::Counter buildBudget;
+                std::atomic_bool stop(false);
+                const auto built = po::BuildProgramOperandBoolean(
+                    request, display, stop, buildBudget);
+                retained_topology_budget::Counter seedBudget;
+                const auto seed = corr::ProveProgramOperandCorrespondence(
+                    request, built, po::CutSurfacePolicy::ToolRegion,
+                    seedBudget, stop);
+                const auto leftRegion = request.operands[0].appearance.regions.front().region;
+                const std::size_t leftCount = std::count_if(
+                    seed.faces.begin(), seed.faces.end(), [&](const auto& face) {
+                        return std::find(face.regionLineage.begin(),
+                            face.regionLineage.end(), leftRegion)
+                            != face.regionLineage.end();
+                    });
+                po::Request wrongCount = request;
+                part_boolean::SelectorBinding selector;
+                selector.selector = Identifier(0xB0); selector.region = leftRegion;
+                selector.policy = part_boolean::SelectorPolicy::WholeRegion;
+                selector.expectedCardinality = std::uint16_t(leftCount + 1);
+                wrongCount.operands[0].appearance.selectors = {selector};
+                retained_topology_budget::Counter wrongCountBudget;
+                const auto countRefusal = corr::ProveProgramOperandCorrespondence(
+                    wrongCount, built, po::CutSurfacePolicy::ToolRegion,
+                    wrongCountBudget, stop);
+                checks[prefix + "changed-cardinality-typed"] =
+                    countRefusal.refusal == po::Refusal::AmbiguousSelector
+                    && countRefusal.faces.empty();
+
+                po::Request deleted = wrongCount;
+                deleted.operands[0].appearance.selectors[0].region = Identifier(0xEE);
+                retained_topology_budget::Counter deletedBudget;
+                const auto deletedRefusal = corr::ProveProgramOperandCorrespondence(
+                    deleted, built, po::CutSurfacePolicy::ToolRegion,
+                    deletedBudget, stop);
+                checks[prefix + "deleted-reference-typed"] =
+                    deletedRefusal.refusal == po::Refusal::AmbiguousSelector
+                    && deletedRefusal.faces.empty();
+
+                po::Request conflict = ProgramOperandBoundaryPair(unit);
+                conflict.operation = part_boolean::Operation::Union;
+                conflict.operands[0].appearance.selectors.clear();
+                conflict.operands[1].appearance.selectors.clear();
+                retained_topology_budget::Counter conflictBuildBudget;
+                const auto conflictBuilt = po::BuildProgramOperandBoolean(
+                    conflict, display, stop, conflictBuildBudget);
+                retained_topology_budget::Counter conflictBudget;
+                const auto conflictRefusal = corr::ProveProgramOperandCorrespondence(
+                    conflict, conflictBuilt, po::CutSurfacePolicy::TargetDefault,
+                    conflictBudget, stop);
+                checks[prefix + "conflicting-merged-material-typed"] =
+                    conflictRefusal.refusal == po::Refusal::MaterialConflict
+                    && conflictRefusal.faces.empty();
+
+                po::Request missing = request;
+                missing.operands[1].appearance.effectiveMaterials.clear();
+                retained_topology_budget::Counter missingBudget;
+                const auto missingRefusal = corr::ProveProgramOperandCorrespondence(
+                    missing, built, po::CutSurfacePolicy::ToolRegion,
+                    missingBudget, stop);
+                checks[prefix + "missing-material-typed"] =
+                    missingRefusal.refusal == po::Refusal::MissingMaterial
+                    && missingRefusal.faces.empty();
+
+                po::Request ambiguousRound = request;
+                auto malformed = std::get<retained_boolean::Program>(
+                    ambiguousRound.operands[1].recipe.effectiveDecoded);
+                retained_fillet::Step round;
+                round.stepIdentifier = 1; round.radiusLocal = 0.1 * 0.001 / unit;
+                retained_fillet::EdgeAnchor a, b;
+                a.identifier = 1; a.curveKind = retained_fillet::CurveKind::Line;
+                a.anchorPoint = {0, 0, 0}; a.axis = {0, 0, 1};
+                b = a;
+                round.anchors = {a, b}; malformed.filletSteps = {round};
+                ambiguousRound.operands[1].recipe.effectiveDecoded = malformed;
+                retained_topology_budget::Counter roundBudget;
+                const auto roundRefusal = corr::ProveProgramOperandCorrespondence(
+                    ambiguousRound, built, po::CutSurfacePolicy::ToolRegion,
+                    roundBudget, stop);
+                checks[prefix + "ambiguous-round-anchor-typed"] =
+                    roundRefusal.refusal == po::Refusal::AmbiguousSelector
+                    && roundRefusal.faces.empty();
+                checks[prefix + "no-result-authority-on-refusal"] =
+                    countRefusal.faces.empty() && deletedRefusal.faces.empty()
+                    && conflictRefusal.faces.empty() && missingRefusal.faces.empty()
+                    && roundRefusal.faces.empty();
+            }
+            checks["both-unit-systems"] = true;
+        } catch (...) { checks["setup-exception"] = false; }
+        return checks;
+    }
+
     static Checks ProgramOperandCodecRoundTripEvidence() noexcept {
         namespace po = part_boolean::program_operand;
         Checks checks;
@@ -1996,6 +2405,9 @@ struct Probe final {
         if (scenario == 9) return ProgramOperandCodecRoundTripEvidence();
         if (scenario == 10) return ProgramOperandCodecRefusalEvidence();
         if (scenario == 11) return ProgramOperandLegacyRegistryEvidence();
+        if (scenario == 12) return ProgramOperandBooleanGeometryEvidence();
+        if (scenario == 13) return ProgramOperandMaterialSelectorEvidence();
+        if (scenario == 14) return ProgramOperandAmbiguousCorrespondenceEvidence();
         return {{"valid-scenario", false}};
     }
 };

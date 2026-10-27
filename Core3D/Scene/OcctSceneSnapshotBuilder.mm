@@ -21842,6 +21842,13 @@ void RecordPrivateExportTextureInstallRefusal(
     gPrivateExportTextureInstallDecodedBytes = decodedBytes;
     gPrivateExportTextureInstallDecodedLimitBytes = decodedLimitBytes;
 }
+
+void RecordPrivateExportTextureInstallDemand(
+    const std::size_t decodedBytes,
+    const std::size_t decodedLimitBytes) noexcept {
+    gPrivateExportTextureInstallDecodedBytes = decodedBytes;
+    gPrivateExportTextureInstallDecodedLimitBytes = decodedLimitBytes;
+}
 } // namespace
 
 bool ConsumePrivateExportTextureInstallRefusal(
@@ -23014,6 +23021,43 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         std::size_t aggregateEncodedBytes = 0;
         std::size_t aggregateDecodedBytes = 0;
         std::unordered_map<std::string, std::int32_t> textureIdentifiers;
+        std::unordered_set<std::string> chargedTextureIdentifiers;
+        std::vector<bool> sourceTextureDemand(
+            result->textures.size(), !selectedObjectsOnly);
+        if (selectedObjectsOnly) {
+            const auto markSourceTexture = [&](const std::int32_t index) {
+                if (index >= 0 && std::size_t(index) < sourceTextureDemand.size())
+                    sourceTextureDemand[std::size_t(index)] = true;
+            };
+            for (const auto& instance : result->instances) {
+                if (wanted.count(instance.entityIdentifier) == 0) continue;
+                if (instance.meshIndex >= result->meshes.size()) return {};
+                const auto& sourceMesh = result->meshes[instance.meshIndex];
+                const std::string& master = sourceMesh
+                        .paintedAtlasMasterDefinitionIdentifier.empty()
+                    ? sourceMesh.definitionIdentifier
+                    : sourceMesh.paintedAtlasMasterDefinitionIdentifier;
+                if (finalBakes.count(master) == 0) {
+                    for (const auto& binding : instance.primitiveBindings) {
+                        if (binding.materialIndex >= result->materials.size())
+                            return {};
+                        const auto& material = result->materials[
+                            binding.materialIndex];
+                        markSourceTexture(material.baseColorTextureIndex);
+                        markSourceTexture(material.emissiveTextureIndex);
+                        markSourceTexture(
+                            material.metallicRoughnessTextureIndex);
+                        markSourceTexture(material.occlusionTextureIndex);
+                        markSourceTexture(material.normalTextureIndex);
+                    }
+                    for (const auto& binding : instance.faceImageBindings)
+                        markSourceTexture(binding.textureIndex);
+                    for (const auto& appearance :
+                            instance.decalDerivedAppearances)
+                        markSourceTexture(appearance.baseColorTextureIndex);
+                }
+            }
+        }
         std::vector<decal_layer::bake::accounting::Ticket> installTickets;
         for (std::size_t index = 0; index < result->textures.size(); ++index) {
             const auto& texture = result->textures[index];
@@ -23024,11 +23068,17 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                         std::int32_t(index)).second
                 || !CheckedMultiply(std::size_t(texture.pixelWidth),
                     std::size_t(texture.pixelHeight), decoded)
-                || !CheckedMultiply(decoded, std::size_t(4), decoded)
-                || !CheckedAdd(aggregateEncodedBytes,
-                    texture.encodedBytes.size(), aggregateEncodedBytes)
-                || !CheckedAdd(aggregateDecodedBytes, decoded,
-                    aggregateDecodedBytes)) return {};
+                || !CheckedMultiply(decoded, std::size_t(4), decoded))
+                return {};
+            if (sourceTextureDemand[index]) {
+                if (!CheckedAdd(aggregateEncodedBytes,
+                        texture.encodedBytes.size(), aggregateEncodedBytes)
+                    || !CheckedAdd(aggregateDecodedBytes, decoded,
+                        aggregateDecodedBytes)
+                    || !chargedTextureIdentifiers.insert(
+                        texture.identifier).second)
+                    return {};
+            }
         }
         const auto installPNG = [&](const std::vector<std::uint8_t>& png,
                                     const std::uint32_t width,
@@ -23054,6 +23104,22 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                     || texture.pixelWidth != width
                     || texture.pixelHeight != height
                     || texture.encodedBytes != png) return false;
+                if (chargedTextureIdentifiers.insert(identifier).second) {
+                    if (!CheckedAdd(aggregateEncodedBytes, png.size(),
+                            aggregateEncodedBytes)
+                        || !CheckedAdd(aggregateDecodedBytes, decoded,
+                            aggregateDecodedBytes)
+                        || aggregateEncodedBytes
+                            > kMaxAggregateEncodedTextureBytes)
+                        return false;
+                    if (aggregateDecodedBytes
+                            > kMaxAggregateDecodedTextureBytes) {
+                        RecordPrivateExportTextureInstallRefusal(
+                            aggregateDecodedBytes,
+                            kMaxAggregateDecodedTextureBytes);
+                        return false;
+                    }
+                }
                 textureIndex = existing->second;
                 return true;
             }
@@ -23138,6 +23204,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             texture.paintedAtlasDerivative = painted;
             result->textures.push_back(std::move(texture));
             textureIdentifiers.emplace(identifier, textureIndex);
+            chargedTextureIdentifiers.insert(identifier);
             installTickets.push_back(std::move(installTicket));
             return true;
         };
@@ -23147,7 +23214,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         // while the existing install path remains the enforcing boundary.
         std::size_t projectedEncodedBytes = aggregateEncodedBytes;
         std::size_t projectedDecodedBytes = aggregateDecodedBytes;
-        auto projectedIdentifiers = textureIdentifiers;
+        auto projectedIdentifiers = chargedTextureIdentifiers;
         bool projectedDemandValid = true;
         for (const auto& entry : finalBakes) {
             if (!entry.second) {
@@ -23175,7 +23242,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 }
                 const std::string identifier = "texture-sha256-"
                     + PaintedAtlasDigestText(measured);
-                if (projectedIdentifiers.emplace(identifier, -1).second) {
+                if (projectedIdentifiers.insert(identifier).second) {
                     if (!CheckedAdd(projectedEncodedBytes, output.png.size(),
                             projectedEncodedBytes)
                         || !CheckedAdd(projectedDecodedBytes, decoded,
@@ -23206,6 +23273,9 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
 #endif
             return {};
         }
+        if (projectedDemandValid && selectedObjectsOnly)
+            RecordPrivateExportTextureInstallDemand(projectedDecodedBytes,
+                kMaxAggregateDecodedTextureBytes);
 
         std::unordered_map<std::string, std::array<std::int32_t, 5>>
             roleTextures;
@@ -23891,6 +23961,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         // Removing superseded face bindings can orphan their source images.
         // Compact once, after every painted role and private appearance is
         // installed, and remap all live references as one candidate update.
+        decal_layer::bake::accounting::Ticket outputRemapTicket;
         decal_layer::bake::accounting::Ticket referencedTextureTicket;
         decal_layer::bake::accounting::Ticket textureRemapTicket;
         decal_layer::bake::accounting::Ticket compactTextureTicket;
@@ -23898,12 +23969,23 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             const auto compactOperation =
                 decalCapture->impl_->operationLedger.view();
             const std::size_t count = result->textures.size();
+            const std::size_t outputCount = std::max(
+                result->materials.size(), result->pickTable.size());
+            std::size_t outputRemapBytes = 0;
             std::size_t remapBytes = 0, compactBytes = 0;
-            if (!compactOperation.CheckedProduct(count,
+            if (!compactOperation.CheckedProduct(outputCount,
+                    sizeof(std::uint32_t), 1, outputRemapBytes,
+                    decal_layer::bake::accounting::FailureSite::InstallCompaction)
+                || !compactOperation.CheckedProduct(count,
                     sizeof(std::int32_t), 1, remapBytes,
                     decal_layer::bake::accounting::FailureSite::InstallCompaction)
                 || !compactOperation.CheckedProduct(count,
                     sizeof(TextureResourceSnapshot), 1, compactBytes,
+                    decal_layer::bake::accounting::FailureSite::InstallCompaction)
+                || !outputRemapTicket.acquire(compactOperation,
+                    decal_layer::bake::accounting::StorageDimension::PrivateStorage,
+                    outputRemapBytes,
+                    decal_layer::bake::accounting::Retention::Scratch,
                     decal_layer::bake::accounting::FailureSite::InstallCompaction)
                 || !referencedTextureTicket.acquire(compactOperation,
                     decal_layer::bake::accounting::StorageDimension::PrivateStorage,
@@ -23920,6 +24002,104 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 || !compactOperation.EnterAllocation(
                     decal_layer::bake::accounting::FailureSite::InstallCompaction))
                 return {};
+        }
+        if (selectedObjectsOnly) {
+            auto& instances = result->instances;
+            instances.erase(std::remove_if(instances.begin(), instances.end(),
+                [&](const auto& instance) {
+                    return wanted.count(instance.entityIdentifier) == 0;
+                }), instances.end());
+        }
+        for (std::size_t index = 0; index < result->instances.size(); ++index) {
+            const auto found = wanted.find(
+                result->instances[index].entityIdentifier);
+            if (found != wanted.end()) found->second = index;
+        }
+        const auto absentOutputIndex =
+            std::numeric_limits<std::uint32_t>::max();
+        const std::size_t outputRemapCount = std::max(
+            result->materials.size(), result->pickTable.size());
+        std::vector<std::uint32_t> outputRemap(
+            outputRemapCount, absentOutputIndex);
+        for (const auto& instance : result->instances)
+            for (const auto& binding : instance.primitiveBindings) {
+                if (binding.materialIndex >= result->materials.size())
+                    return {};
+                outputRemap[binding.materialIndex] = 0;
+            }
+        std::size_t materialCount = 0;
+        for (std::size_t index = 0; index < result->materials.size(); ++index) {
+            if (outputRemap[index] == absentOutputIndex) continue;
+            if (!FitsUInt32(materialCount)) return {};
+            outputRemap[index] = std::uint32_t(materialCount);
+            if (materialCount != index)
+                result->materials[materialCount] =
+                    std::move(result->materials[index]);
+            ++materialCount;
+        }
+        result->materials.resize(materialCount);
+        for (auto& instance : result->instances)
+            for (auto& binding : instance.primitiveBindings)
+                binding.materialIndex = outputRemap[binding.materialIndex];
+        for (auto& correspondence : finalCorrespondence) {
+            bool foundBinding = false;
+            std::uint32_t materialIndex = 0;
+            for (const auto& occurrence : occurrences) {
+                if (definitions[occurrence.definition].mesh
+                        .definitionIdentifier
+                        != correspondence.ownerDefinitionIdentifier)
+                    continue;
+                const auto found = wanted.find(source.instances[
+                    occurrence.instance].entityIdentifier);
+                if (found == wanted.end()
+                    || found->second >= result->instances.size()) return {};
+                const auto& instance = result->instances[found->second];
+                if (correspondence.emittedPrimitiveIndex
+                        >= instance.primitiveBindings.size()) return {};
+                const auto candidate = instance.primitiveBindings[
+                    correspondence.emittedPrimitiveIndex].materialIndex;
+                if (foundBinding && candidate != materialIndex) return {};
+                materialIndex = candidate;
+                foundBinding = true;
+            }
+            if (!foundBinding) return {};
+            correspondence.materialIndex = materialIndex;
+        }
+        if (selectedObjectsOnly) {
+            std::fill(outputRemap.begin(), outputRemap.end(),
+                absentOutputIndex);
+            if (result->pickTable.empty()) return {};
+            outputRemap[0] = 0;
+            for (const auto& instance : result->instances)
+                for (const auto& binding : instance.primitiveBindings) {
+                    if (binding.pickToken >= result->pickTable.size())
+                        return {};
+                    outputRemap[binding.pickToken] = 0;
+                }
+            std::size_t pickCount = 1;
+            for (std::size_t index = 1; index < result->pickTable.size();
+                    ++index) {
+                if (outputRemap[index] == absentOutputIndex) continue;
+                if (!FitsUInt32(pickCount)) return {};
+                outputRemap[index] = std::uint32_t(pickCount);
+                if (pickCount != index)
+                    result->pickTable[pickCount] =
+                        std::move(result->pickTable[index]);
+                ++pickCount;
+            }
+            result->pickTable.resize(pickCount);
+            for (auto& instance : result->instances)
+                for (auto& binding : instance.primitiveBindings)
+                    binding.pickToken = outputRemap[binding.pickToken];
+            auto& selected = result->selection.selected;
+            selected.erase(std::remove_if(selected.begin(), selected.end(),
+                [&](const auto& element) {
+                    return wanted.count(element.entityIdentifier) == 0;
+                }), selected.end());
+            if (result->selection.hovered
+                && wanted.count(result->selection.hovered->entityIdentifier)
+                    == 0)
+                result->selection.hovered.reset();
         }
         std::vector<bool> referencedTextures(result->textures.size(), false);
         const auto markTexture = [&](const std::int32_t index) {
@@ -23974,6 +24154,19 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         for (auto& witness : finalRoleContentWitnesses)
             if (!remapTexture(witness.returnedTextureIndex)) return {};
         result->textures = std::move(compactTextures);
+        if (selectedObjectsOnly) {
+            std::size_t selectedDecodedBytes = 0;
+            for (const auto& texture : result->textures) {
+                std::size_t decoded = 0;
+                if (!CheckedMultiply(std::size_t(texture.pixelWidth),
+                        std::size_t(texture.pixelHeight), decoded)
+                    || !CheckedMultiply(decoded, std::size_t(4), decoded)
+                    || !CheckedAdd(selectedDecodedBytes, decoded,
+                        selectedDecodedBytes)) return {};
+            }
+            RecordPrivateExportTextureInstallDemand(selectedDecodedBytes,
+                kMaxAggregateDecodedTextureBytes);
+        }
 #ifdef DEBUG
         if (debugObservation && decalCapture)
             debugObservation->failureStage = "private-resources-compacted";
@@ -24191,7 +24384,11 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             const auto& definition = definitions[occurrence.definition];
             if (finalBakes.find(definition.mesh.definitionIdentifier)
                     == finalBakes.end()) continue;
-            const auto& instance = result->instances[occurrence.instance];
+            const auto output = wanted.find(source.instances[
+                occurrence.instance].entityIdentifier);
+            if (output == wanted.end()
+                || output->second >= result->instances.size()) return {};
+            const auto& instance = result->instances[output->second];
             if (instance.meshIndex >= result->meshes.size()
                 || !DeepStringStorageBytes(
                     definition.mesh.definitionIdentifier,
@@ -24226,7 +24423,11 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             const auto& definition = definitions[occurrence.definition];
             if (finalBakes.find(definition.mesh.definitionIdentifier)
                     == finalBakes.end()) continue;
-            const auto& instance = result->instances[occurrence.instance];
+            const auto output = wanted.find(source.instances[
+                occurrence.instance].entityIdentifier);
+            if (output == wanted.end()
+                || output->second >= result->instances.size()) return {};
+            const auto& instance = result->instances[output->second];
             if (instance.meshIndex >= result->meshes.size()) return {};
             emittedMeshes.push_back({definition.mesh.definitionIdentifier,
                 result->meshes[instance.meshIndex], instance});
