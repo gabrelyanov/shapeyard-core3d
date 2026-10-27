@@ -48,6 +48,11 @@ inline constexpr bool AnalyticBooleanRouteInstalled = false;
 inline constexpr bool RetainedProgramSuffixInstalled = false;
 inline constexpr bool RetainedProgramSuffixRouteInstalled = false;
 
+// A3/S2 complete retained-program operands are a different operation
+// direction from appending a suffix. P1 installs values and typed admission
+// only; P9 alone may promote this independent production gate.
+inline constexpr bool ProgramOperandNativeAdmissionEnabled = false;
+
 inline bool EvidenceOperationInstalled(Operation operation) noexcept {
     const std::uint8_t bit = operation == Operation::Union ? UnionMask
         : operation == Operation::Subtract ? SubtractMask

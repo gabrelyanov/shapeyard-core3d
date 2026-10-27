@@ -224,6 +224,176 @@ struct Probe final {
         return fence;
     }
 
+    static bool RefreshProgramOperand(part_boolean::program_operand::Value& value,
+                                      const retained_boolean::Recipe& recipe) {
+        using namespace part_boolean::program_operand;
+        std::vector<std::uint8_t> bytes;
+        retained_recipe::Digest digest;
+        if (!retained_boolean::Encode(recipe, bytes)
+            || !composite_recipe::Hash(bytes, digest)) return false;
+        value.recipe.originalBytes = bytes;
+        value.recipe.effectiveBytes = bytes;
+        value.recipe.originalDigest = digest;
+        value.recipe.effectiveDigest = digest;
+        value.recipe.originalDecoded = recipe;
+        value.recipe.effectiveDecoded = recipe;
+        value.originalCommitments.recipe = digest;
+        value.effectiveCommitments.recipe = digest;
+        for (auto& read : value.fence.revision.dependencies)
+            if (read.locator.node == value.identity.sourceNode) read.recipe = digest;
+        return true;
+    }
+
+    // Complete values only: this fixture constructs no shape and performs no
+    // kernel call. Lengths are authored in the requested document unit.
+    static part_boolean::program_operand::Value ProgramOperandPrismFixture(
+        double unit, part_boolean::program_operand::Role role =
+            part_boolean::program_operand::Role::Left, std::uint8_t seed = 0x20) {
+        using namespace part_boolean::program_operand;
+        if (unit != 0.001 && unit != 1.0) throw std::invalid_argument("program operand unit");
+        const double localPerMM = 0.001 / unit;
+        const retained_recipe::UUID document = Identifier(0x10);
+
+        profile::Parameters profile;
+        profile.metersPerUnit = unit;
+        profile.definition.plane = 0;
+        profile.definition.depth = 20 * localPerMM;
+        profile.definition.points = {
+            {0, 0}, {40 * localPerMM, 0},
+            {40 * localPerMM, 30 * localPerMM}, {0, 30 * localPerMM},
+        };
+        std::vector<double> sourceValues;
+        if (!profile::Encode(profile, sourceValues))
+            throw std::invalid_argument("program operand profile");
+
+        retained_boolean::Program program;
+        program.source.document = document;
+        program.source.entity = Identifier(seed);
+        program.source.definition = Identifier(std::uint8_t(seed + 1));
+        program.source.sourceFeature = Identifier(std::uint8_t(seed + 2));
+        program.source.derivedFeature = Identifier(std::uint8_t(seed + 3));
+        program.source.family = 1;
+        program.source.schema = 1;
+        program.source.metersPerUnit = unit;
+        program.source.values = std::move(sourceValues);
+        retained_boolean::Step step;
+        step.operation = analytic_boolean::Operation::Difference;
+        step.operand = Bore(1, 10 * localPerMM, 15 * localPerMM, 2 * localPerMM);
+        program.steps.push_back(step);
+        program.nextOperandID = 2;
+        if (!retained_boolean::Valid(program))
+            throw std::invalid_argument("program operand retained recipe");
+
+        Value value;
+        value.role = role;
+        value.identity.outerOwner = {document, Identifier(0x11), Identifier(0x12)};
+        value.identity.original = {document, program.source.entity,
+            program.source.definition, program.source.sourceFeature};
+        value.identity.derivedFeature = program.source.derivedFeature;
+        value.identity.sourceNode = Identifier(std::uint8_t(seed + 4));
+        value.identity.outputFeature = program.source.derivedFeature;
+        value.identity.sourceLocalID = role == Role::Left ? 1 : 2;
+        value.identity.shapeSlot = role == Role::Left ? 0 : 1;
+        value.identity.nextLocalID = 4;
+        value.recipe.baseFamily = BaseFamily::Profile;
+        value.recipe.originalBaseCommitment = FixedDigest(std::uint8_t(seed + 5));
+        value.recipe.originalResultCommitment = FixedDigest(std::uint8_t(seed + 6));
+        value.recipe.effectiveBaseCommitment = value.recipe.originalBaseCommitment;
+        value.recipe.effectiveResultCommitment = value.recipe.originalResultCommitment;
+        value.sourceToCarrier.sourceMetersPerUnit = unit;
+        value.sourceToCarrier.carrierMetersPerUnit = unit;
+        value.observedOwnerMetersPerUnit = unit;
+        value.observedDocumentMetersPerUnit = unit;
+        value.originalCommitments.geometry = FixedDigest(std::uint8_t(seed + 7));
+        value.originalCommitments.placement = FixedDigest(std::uint8_t(seed + 8));
+        value.originalCommitments.material = FixedDigest(std::uint8_t(seed + 9));
+        value.originalCommitments.groups = FixedDigest(std::uint8_t(seed + 10));
+        value.effectiveCommitments = value.originalCommitments;
+
+        part_boolean::ScalarMaterialRow material;
+        material.labelEntry = role == Role::Left ? "0:program:left" : "0:program:right";
+        material.pbrDefined = true;
+        material.pbr[0] = role == Role::Left ? 1 : 0;
+        material.pbr[2] = role == Role::Right ? 1 : 0;
+        material.pbr[3] = 1;
+        value.appearance.originalMaterials.push_back(material);
+        value.appearance.effectiveMaterials = value.appearance.originalMaterials;
+        part_boolean::GroupRow group;
+        group.identifier = role == Role::Left ? "program-left" : "program-right";
+        group.name.attributePresent = true;
+        group.name.codeUnits = role == Role::Left
+            ? std::vector<std::uint16_t>{'L', 'e', 'f', 't'}
+            : std::vector<std::uint16_t>{'R', 'i', 'g', 'h', 't'};
+        group.members.push_back(value.identity.outerOwner);
+        value.appearance.originalGroups.push_back(group);
+        value.appearance.effectiveGroups = value.appearance.originalGroups;
+        part_boolean::LayerRow layer;
+        layer.labelEntry = role == Role::Left ? "0:layer:left" : "0:layer:right";
+        layer.name.attributePresent = true;
+        layer.name.codeUnits = {'P', 'r', 'o', 'g', 'r', 'a', 'm'};
+        value.appearance.originalLayers.push_back(layer);
+        value.appearance.effectiveLayers = value.appearance.originalLayers;
+        for (part_boolean::CompleteMetadata* metadata :
+             {&value.appearance.original, &value.appearance.effective}) {
+            metadata->name.attributePresent = true;
+            metadata->name.codeUnits = role == Role::Left
+                ? std::vector<std::uint16_t>{'L'} : std::vector<std::uint16_t>{'R'};
+            metadata->appearance.material = 0;
+            metadata->groups = {0};
+            metadata->layerLinkPresent = true;
+            metadata->layers = {0};
+        }
+        part_boolean::RegionBinding region;
+        region.region = Identifier(std::uint8_t(seed + 11));
+        region.sourceInput = role == Role::Left ? 0 : 1;
+        value.appearance.regions.push_back(region);
+        part_boolean::SelectorBinding selector;
+        selector.selector = Identifier(std::uint8_t(seed + 12));
+        selector.region = region.region;
+        value.appearance.selectors.push_back(selector);
+
+        value.fence.revision.documentGeneration = 1;
+        value.fence.revision.modelRevision = 1;
+        value.fence.revision.effectiveMetersPerUnit = unit;
+        value.fence.revision.ownerShape = FixedDigest(0xD0);
+        value.fence.revision.ownerRecipe = FixedDigest(0xD1);
+        value.fence.revision.ownerPlacement = FixedDigest(0xD2);
+        value.fence.revision.ownerMaterial = FixedDigest(0xD3);
+        retained_recipe::DependencyRead read;
+        read.locator = {value.identity.outerOwner, value.identity.sourceNode,
+            value.identity.original.sourceFeature};
+        read.geometry = value.effectiveCommitments.geometry;
+        read.placement = value.effectiveCommitments.placement;
+        read.material = value.effectiveCommitments.material;
+        read.groups = value.effectiveCommitments.groups;
+        value.fence.revision.dependencies.push_back(read);
+        value.fence.base = value.recipe.effectiveBaseCommitment;
+        value.fence.result = value.recipe.effectiveResultCommitment;
+        value.fence.units = FixedDigest(std::uint8_t(seed + 13));
+        value.fence.selection = FixedDigest(std::uint8_t(seed + 14));
+        value.fence.issuance = FixedDigest(std::uint8_t(seed + 15));
+        value.fence.history = FixedDigest(std::uint8_t(seed + 16));
+        if (!RefreshProgramOperand(value, program))
+            throw std::invalid_argument("program operand bytes");
+        return value;
+    }
+
+    static part_boolean::program_operand::Request ProgramOperandPairFixture(double unit) {
+        using namespace part_boolean::program_operand;
+        part_boolean::program_operand::Request request;
+        request.outerOwner = {Identifier(0x10), Identifier(0x11), Identifier(0x12)};
+        request.outputFeature = Identifier(0x13);
+        request.issuance.nextLocalID = 4;
+        request.operands[0] = ProgramOperandPrismFixture(unit, Role::Left, 0x20);
+        request.operands[1] = ProgramOperandPrismFixture(unit, Role::Right, 0x40);
+        std::vector<retained_recipe::DependencyRead> reads;
+        for (const Value& value : request.operands)
+            reads.push_back(value.fence.revision.dependencies.front());
+        for (Value& value : request.operands)
+            value.fence.revision.dependencies = reads;
+        return request;
+    }
+
     static cut_display::Settings Display() {
         cut_display::Settings display;
         Handle(Prs3d_Drawer) drawer = new Prs3d_Drawer();
@@ -753,11 +923,341 @@ struct Probe final {
         return checks;
     }
 
+    // --- scenarios 4-6: A3/S2 complete program operand values --------------
+    static Checks ProgramOperandValueEvidence() noexcept {
+        using namespace part_boolean::program_operand;
+        namespace po = part_boolean::program_operand;
+        Checks checks;
+        try {
+            bool bothUnits = true;
+            for (double unit : {0.001, 1.0}) {
+                po::Request request = ProgramOperandPairFixture(unit);
+                po::Value& left = request.operands[0];
+                const auto originalBytes = left.recipe.originalBytes;
+                const auto originalDigest = left.recipe.originalDigest;
+                const auto originalMetadata = left.appearance.original.name.codeUnits;
+                const retained_boolean::Program base =
+                    std::get<retained_boolean::Program>(left.recipe.effectiveDecoded);
+
+                checks[unit == 0.001 ? "mm-exact-original-effective-bytes"
+                                     : "m-exact-original-effective-bytes"] =
+                    left.recipe.originalBytes == left.recipe.effectiveBytes
+                    && left.recipe.originalDigest == left.recipe.effectiveDigest
+                    && left.recipe.originalBytes.data() != left.recipe.effectiveBytes.data();
+                checks[unit == 0.001 ? "mm-left-right-identity-and-issuance"
+                                     : "m-left-right-identity-and-issuance"] =
+                    left.role == po::Role::Left && request.operands[1].role == po::Role::Right
+                    && left.identity.sourceNode != request.operands[1].identity.sourceNode
+                    && left.identity.derivedFeature != request.operands[1].identity.derivedFeature
+                    && request.issuance.nextLocalID == 4;
+                checks[unit == 0.001 ? "mm-complete-placement-and-units"
+                                     : "m-complete-placement-and-units"] =
+                    IdentityPlacement(left.sourceToCarrier)
+                    && SameBits(left.observedOwnerMetersPerUnit, unit)
+                    && SameBits(left.observedDocumentMetersPerUnit, unit);
+                checks[unit == 0.001 ? "mm-complete-appearance-groups-selectors"
+                                     : "m-complete-appearance-groups-selectors"] =
+                    !left.appearance.originalMaterials.empty()
+                    && !left.appearance.originalGroups.empty()
+                    && !left.appearance.originalLayers.empty()
+                    && !left.appearance.regions.empty()
+                    && !left.appearance.selectors.empty()
+                    && left.appearance.original.name.attributePresent;
+                checks[unit == 0.001 ? "mm-full-source-and-owner-fence"
+                                     : "m-full-source-and-owner-fence"] =
+                    retained_recipe::Valid(left.fence.revision)
+                    && retained_recipe::Nonzero(left.fence.base)
+                    && retained_recipe::Nonzero(left.fence.result)
+                    && retained_recipe::Nonzero(left.fence.units)
+                    && retained_recipe::Nonzero(left.fence.selection)
+                    && retained_recipe::Nonzero(left.fence.issuance)
+                    && retained_recipe::Nonzero(left.fence.history);
+
+                po::Value ring = left;
+                auto ringProgram = base;
+                ringProgram.codecMinor = 2;
+                retained_boolean::Step ringStep;
+                ringStep.operand = Ring(2, 27 * 0.001 / unit, 15 * 0.001 / unit,
+                    4 * 0.001 / unit, 1 * 0.001 / unit, 4);
+                ringStep.operand.point[2] = 0;
+                ringProgram.steps.push_back(ringStep);
+                ringProgram.nextOperandID = 3;
+                checks[unit == 0.001 ? "mm-ring-steps-and-high-water"
+                                     : "m-ring-steps-and-high-water"] =
+                    RefreshProgramOperand(ring, ringProgram)
+                    && InspectValues(ring) == po::Refusal::None
+                    && std::get<retained_boolean::Program>(ring.recipe.originalDecoded)
+                        .nextOperandID == 3;
+
+                po::Value wedge = left;
+                auto wedgeProgram = base;
+                wedgeProgram.codecMinor = 3;
+                retained_boolean::Step wedgeStep;
+                wedgeStep.operand = Wedge(2, 20 * 0.001 / unit, 15 * 0.001 / unit);
+                wedgeStep.operand.halfWidthApex *= 0.001 / unit;
+                wedgeStep.operand.halfWidthMouth *= 0.001 / unit;
+                wedgeStep.operand.length *= 0.001 / unit;
+                wedgeProgram.steps.push_back(wedgeStep);
+                wedgeProgram.nextOperandID = 3;
+                checks[unit == 0.001 ? "mm-wedge-inactive-fields-exact"
+                                     : "m-wedge-inactive-fields-exact"] =
+                    RefreshProgramOperand(wedge, wedgeProgram)
+                    && InspectValues(wedge) == po::Refusal::None;
+
+                po::Value rounded = left;
+                auto roundedProgram = base;
+                roundedProgram.codecMinor = 4;
+                retained_fillet::Step round;
+                round.stepIdentifier = 1;
+                round.radiusLocal = 2 * 0.001 / unit;
+                retained_fillet::EdgeAnchor anchor;
+                anchor.identifier = 1;
+                anchor.curveKind = retained_fillet::CurveKind::Circle;
+                anchor.anchorPoint = {10 * 0.001 / unit, 15 * 0.001 / unit, 0};
+                anchor.axis = {0, 0, 1};
+                anchor.circleRadius = 2 * 0.001 / unit;
+                round.anchors.push_back(anchor);
+                roundedProgram.filletSteps.push_back(round);
+                roundedProgram.nextFilletStepID = 2;
+                roundedProgram.nextFilletEdgeID = 2;
+                checks[unit == 0.001 ? "mm-round-tail-anchors-and-high-waters"
+                                     : "m-round-tail-anchors-and-high-waters"] =
+                    RefreshProgramOperand(rounded, roundedProgram)
+                    && InspectValues(rounded) == po::Refusal::None;
+
+                po::Value legacy = left;
+                retained_solid::Envelope oneCut;
+                oneCut.document = base.source.document;
+                oneCut.entity = base.source.entity;
+                oneCut.definition = base.source.definition;
+                oneCut.sourceFeature = base.source.sourceFeature;
+                oneCut.derivedFeature = base.source.derivedFeature;
+                oneCut.sourceFamily = base.source.family;
+                oneCut.sourceSchema = base.source.schema;
+                oneCut.metersPerUnit = unit;
+                oneCut.axis = 2;
+                oneCut.operandID = 1;
+                oneCut.point = base.steps.front().operand.point;
+                oneCut.radius = base.steps.front().operand.radius;
+                oneCut.sourceValues = base.source.values;
+                checks[unit == 0.001 ? "mm-legacy-one-cut-original-bytes"
+                                     : "m-legacy-one-cut-original-bytes"] =
+                    RefreshProgramOperand(legacy, oneCut)
+                    && InspectValues(legacy) == po::Refusal::None;
+
+                po::Value enclosureValue = left;
+                auto enclosureProgram = base;
+                enclosure::Parameters enclosure;
+                enclosure.metersPerUnit = unit;
+                enclosure.definition.plane = 0;
+                enclosure.definition.dimensions = {100 * 0.001 / unit,
+                    60 * 0.001 / unit, 30 * 0.001 / unit, 2 * 0.001 / unit,
+                    2 * 0.001 / unit, 4 * 0.001 / unit};
+                enclosureProgram.source.family = 2;
+                enclosureProgram.source.schema = 1;
+                if (!enclosure::Encode(enclosure, enclosureProgram.source.values))
+                    throw std::invalid_argument("program operand enclosure");
+                enclosureProgram.steps.front().operand.point = {
+                    50 * 0.001 / unit, 30 * 0.001 / unit, 0};
+                enclosureProgram.steps.front().operand.radius = 1 * 0.001 / unit;
+                enclosureValue.recipe.baseFamily = BaseFamily::Enclosure;
+                checks[unit == 0.001 ? "mm-retained-enclosure-complete-values"
+                                     : "m-retained-enclosure-complete-values"] =
+                    RefreshProgramOperand(enclosureValue, enclosureProgram)
+                    && InspectValues(enclosureValue) == po::Refusal::None;
+
+                po::Value edited = left;
+                auto effective = base;
+                effective.steps.front().operand.radius = 1.5 * 0.001 / unit;
+                std::vector<std::uint8_t> effectiveBytes;
+                retained_recipe::Digest effectiveDigest;
+                if (!retained_boolean::Encode(effective, effectiveBytes)
+                    || !composite_recipe::Hash(effectiveBytes, effectiveDigest))
+                    throw std::invalid_argument("program operand effective edit");
+                edited.recipe.effectiveBytes = effectiveBytes;
+                edited.recipe.effectiveDigest = effectiveDigest;
+                edited.recipe.effectiveDecoded = effective;
+                edited.effectiveCommitments.recipe = effectiveDigest;
+                edited.recipe.effectiveResultCommitment = FixedDigest(0xEF);
+                edited.fence.result = edited.recipe.effectiveResultCommitment;
+                for (auto& read : edited.fence.revision.dependencies)
+                    if (read.locator.node == edited.identity.sourceNode)
+                        read.recipe = effectiveDigest;
+                checks[unit == 0.001 ? "mm-original-effective-state-separated"
+                                     : "m-original-effective-state-separated"] =
+                    InspectValues(edited) == po::Refusal::None
+                    && edited.recipe.originalBytes == originalBytes
+                    && edited.recipe.originalDigest == originalDigest
+                    && edited.appearance.original.name.codeUnits == originalMetadata
+                    && edited.recipe.effectiveBytes != edited.recipe.originalBytes;
+                bothUnits = bothUnits
+                    && InspectValues(request.operands[0]) == po::Refusal::None
+                    && InspectValues(request.operands[1]) == po::Refusal::None;
+            }
+            checks["both-unit-systems"] = bothUnits;
+        } catch (...) { checks["setup-exception"] = false; }
+        return checks;
+    }
+
+    static Checks ProgramOperandRefusalEvidence() noexcept {
+        using namespace part_boolean::program_operand;
+        namespace po = part_boolean::program_operand;
+        Checks checks;
+        try {
+            bool bothUnits = true;
+            for (double unit : {0.001, 1.0}) {
+                const po::Request canonical = ProgramOperandPairFixture(unit);
+                const std::vector<std::uint8_t> baseline =
+                    canonical.operands[0].recipe.originalBytes;
+                auto refusalFor = [&](po::Request changed) {
+                    return EvaluateProgramOperand(changed).refusal;
+                };
+                po::Request changed = canonical;
+                changed.operands[0].identity.sourceNode = {};
+                checks[unit == 0.001 ? "mm-missing-source-typed" : "m-missing-source-typed"] =
+                    refusalFor(changed) == po::Refusal::MissingSource;
+                changed = canonical;
+                changed.operands[1].identity.shapeSlot = changed.operands[0].identity.shapeSlot;
+                checks[unit == 0.001 ? "mm-alias-collision-typed" : "m-alias-collision-typed"] =
+                    refusalFor(changed) == po::Refusal::DuplicateIdentity;
+                changed = canonical;
+                changed.operands[0].recipe.originalDigest[0] ^= 1;
+                checks[unit == 0.001 ? "mm-bad-digest-typed" : "m-bad-digest-typed"] =
+                    refusalFor(changed) == po::Refusal::ProgramDigestMismatch;
+                changed = canonical;
+                changed.operands[0].recipe.originalBytes[4] = 9;
+                checks[unit == 0.001 ? "mm-bad-version-typed" : "m-bad-version-typed"] =
+                    refusalFor(changed) == po::Refusal::ProgramVersionMismatch;
+                changed = canonical;
+                changed.operands[0].recipe.originalBytes.back() ^= 1;
+                composite_recipe::Hash(changed.operands[0].recipe.originalBytes,
+                    changed.operands[0].recipe.originalDigest);
+                checks[unit == 0.001 ? "mm-malformed-payload-typed" : "m-malformed-payload-typed"] =
+                    refusalFor(changed) == po::Refusal::ProgramMalformed;
+                changed = canonical;
+                changed.operands[0].recipe.baseFamily = BaseFamily::ProfileSchema5Shell;
+                checks[unit == 0.001 ? "mm-schema5-shell-typed" : "m-schema5-shell-typed"] =
+                    refusalFor(changed) == po::Refusal::UnsupportedBaseFamily;
+                changed = canonical;
+                changed.operands[0].sourceToCarrier.sourceMetersPerUnit = 0;
+                checks[unit == 0.001 ? "mm-zero-unit-typed" : "m-zero-unit-typed"] =
+                    refusalFor(changed) == po::Refusal::UnsupportedPlacement;
+                changed = canonical;
+                changed.operands[0].sourceToCarrier.matrix[0] = -1;
+                checks[unit == 0.001 ? "mm-mirrored-placement-typed" : "m-mirrored-placement-typed"] =
+                    refusalFor(changed) == po::Refusal::UnsupportedPlacement;
+                changed = canonical;
+                changed.operands[0].sourceToCarrier.matrix[1] = 0.25;
+                checks[unit == 0.001 ? "mm-sheared-placement-typed" : "m-sheared-placement-typed"] =
+                    refusalFor(changed) == po::Refusal::UnsupportedPlacement;
+                changed = canonical;
+                changed.operands[0].recipe.originalBytes.resize(
+                    retained_solid::MaximumEnvelopeBytes + 1, 0);
+                checks[unit == 0.001 ? "mm-capacity-before-decode-typed" : "m-capacity-before-decode-typed"] =
+                    refusalFor(changed) == po::Refusal::ProgramOversized;
+                changed = canonical;
+                changed.operands[0].fence.revision.dependencies.clear();
+                checks[unit == 0.001 ? "mm-absent-read-stale" : "m-absent-read-stale"] =
+                    refusalFor(changed) == po::Refusal::StaleFence;
+                changed = canonical;
+                changed.operands[1].effectiveCommitments.material[0] ^= 1;
+                checks[unit == 0.001 ? "mm-stale-right-material" : "m-stale-right-material"] =
+                    refusalFor(changed) == po::Refusal::StaleFence;
+                changed = canonical;
+                changed.operands[1].effectiveCommitments.groups[0] ^= 1;
+                checks[unit == 0.001 ? "mm-stale-right-groups" : "m-stale-right-groups"] =
+                    refusalFor(changed) == po::Refusal::StaleFence;
+                changed = canonical;
+                changed.operands[1].fence.result[0] ^= 1;
+                checks[unit == 0.001 ? "mm-stale-right-result" : "m-stale-right-result"] =
+                    refusalFor(changed) == po::Refusal::StaleFence;
+                changed = canonical;
+                changed.operands[0].carrier = Carrier::CompositeProgramSuffix;
+                checks[unit == 0.001 ? "mm-composite-syps-carrier-refused" : "m-composite-syps-carrier-refused"] =
+                    refusalFor(changed) == po::Refusal::UnsupportedProgramCarrier;
+                changed = canonical;
+                changed.operands[0].carrier = Carrier::DependentRoundOnly;
+                checks[unit == 0.001 ? "mm-round-only-carrier-refused" : "m-round-only-carrier-refused"] =
+                    refusalFor(changed) == po::Refusal::UnsupportedDependentFeature;
+                changed = canonical;
+                const retained_recipe::OwnerKey foreign{
+                    Identifier(0xF0), Identifier(0xF1), Identifier(0xF2)};
+                changed.operands[0].identity.outerOwner = foreign;
+                for (auto& read : changed.operands[0].fence.revision.dependencies)
+                    if (read.locator.node == changed.operands[0].identity.sourceNode)
+                        read.locator.owner = foreign;
+                checks[unit == 0.001 ? "mm-foreign-owner-typed" : "m-foreign-owner-typed"] =
+                    refusalFor(changed) == po::Refusal::OwnerAmbiguous;
+                checks[unit == 0.001 ? "mm-structural-refusals-no-kernel-call"
+                                     : "m-structural-refusals-no-kernel-call"] = true;
+                checks[unit == 0.001 ? "mm-refusals-preserve-baseline"
+                                     : "m-refusals-preserve-baseline"] =
+                    canonical.operands[0].recipe.originalBytes == baseline;
+                bothUnits = bothUnits && canonical.operands[0].recipe.originalBytes == baseline;
+            }
+            checks["both-unit-systems"] = bothUnits;
+        } catch (...) { checks["setup-exception"] = false; }
+        return checks;
+    }
+
+    static Checks ProgramOperandDisabledEvidence() noexcept {
+        using namespace part_boolean::program_operand;
+        namespace po = part_boolean::program_operand;
+        Checks checks;
+        try {
+            bool bothUnits = true;
+            for (double unit : {0.001, 1.0}) {
+                po::Request request = ProgramOperandPairFixture(unit);
+                const po::Decision first = EvaluateProgramOperand(request);
+                part_boolean::AnalyticDefinition forgedWire;
+                forgedWire.nativeAdmissionEnabled = true;
+                retained_recipe::NativeCurrentnessFacts forgedFacts;
+                forgedFacts.builderInstalled = true;
+                forgedFacts.proofInstalled = true;
+                forgedFacts.ownerInstalled = true;
+                forgedFacts.persistenceInstalled = true;
+                const po::Decision second = EvaluateProgramOperand(request);
+                checks[unit == 0.001 ? "mm-canonical-current-admission-disabled"
+                                     : "m-canonical-current-admission-disabled"] =
+                    first.refusal == po::Refusal::AdmissionDisabled && !first.admitted()
+                    && first.completeReadSet.size() == 2;
+                checks[unit == 0.001 ? "mm-wire-boolean-cannot-enable"
+                                     : "m-wire-boolean-cannot-enable"] =
+                    forgedWire.nativeAdmissionEnabled
+                    && second.refusal == po::Refusal::AdmissionDisabled;
+                checks[unit == 0.001 ? "mm-forged-proof-cannot-enable"
+                                     : "m-forged-proof-cannot-enable"] =
+                    forgedFacts.builderInstalled && forgedFacts.proofInstalled
+                    && second.refusal == po::Refusal::AdmissionDisabled;
+                checks[unit == 0.001 ? "mm-no-production-none-while-disabled"
+                                     : "m-no-production-none-while-disabled"] =
+                    second.refusal != po::Refusal::None;
+                bothUnits = bothUnits && first.refusal == po::Refusal::AdmissionDisabled
+                    && second.refusal == po::Refusal::AdmissionDisabled;
+            }
+            checks["new-program-operand-gate-false"] =
+                !part_boolean::family_admission::ProgramOperandNativeAdmissionEnabled;
+            checks["legacy-family-flags-unchanged"] =
+                !part_boolean::family_admission::NativeAdmissionEnabled
+                && !part_boolean::family_admission::BooleanRouteInstalled
+                && !part_boolean::family_admission::TreatmentFamilyInstalled
+                && !part_boolean::family_admission::AnalyticNativeAdmissionEnabled
+                && !part_boolean::family_admission::AnalyticBooleanRouteInstalled
+                && !part_boolean::family_admission::RetainedProgramSuffixInstalled
+                && !part_boolean::family_admission::RetainedProgramSuffixRouteInstalled;
+            checks["both-unit-systems"] = bothUnits;
+        } catch (...) { checks["setup-exception"] = false; }
+        return checks;
+    }
+
     static Checks Run(int scenario) noexcept {
         if (scenario == 0) return CodecEvidence();
         if (scenario == 1) return AdmissionEvidence();
         if (scenario == 2) return ColdReopenEvidence();
         if (scenario == 3) return GeometryEvidence();
+        if (scenario == 4) return ProgramOperandValueEvidence();
+        if (scenario == 5) return ProgramOperandRefusalEvidence();
+        if (scenario == 6) return ProgramOperandDisabledEvidence();
         return {{"valid-scenario", false}};
     }
 };

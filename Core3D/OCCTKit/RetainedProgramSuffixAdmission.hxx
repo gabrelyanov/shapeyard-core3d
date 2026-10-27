@@ -9,6 +9,7 @@
 #include "CompositeRecipeCodec.hxx"
 #include "RetainedRecipeSnapshot.hxx"
 #include "PartBooleanFamilyAdmission.hxx"
+#include "PartBooleanProgramOperand.hxx"
 
 namespace core3d::retained_program_suffix {
 
@@ -156,3 +157,232 @@ inline Decision Evaluate(const Request& request) noexcept {
     }
 }
 } // namespace core3d::retained_program_suffix
+
+namespace core3d::part_boolean::program_operand {
+
+inline bool SameBits(double left, double right) noexcept {
+    return std::memcmp(&left, &right, sizeof(double)) == 0;
+}
+
+inline bool IdentityPlacement(const composite_recipe::InputPlacement& value) noexcept {
+    static constexpr std::array<double, 16> identity{{
+        1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+    }};
+    return composite_recipe::ValidPlacement(value)
+        && value.matrix == identity
+        && SameBits(value.sourceMetersPerUnit, value.carrierMetersPerUnit);
+}
+
+inline std::uint8_t SourceFamily(const retained_boolean::Recipe& recipe) noexcept {
+    if (const auto* legacy = std::get_if<retained_boolean::Legacy>(&recipe))
+        return legacy->sourceFamily;
+    return std::get<retained_boolean::Program>(recipe).source.family;
+}
+
+inline std::uint32_t SourceSchema(const retained_boolean::Recipe& recipe) noexcept {
+    if (const auto* legacy = std::get_if<retained_boolean::Legacy>(&recipe))
+        return legacy->sourceSchema;
+    return std::get<retained_boolean::Program>(recipe).source.schema;
+}
+
+inline BaseFamily FamilyFor(const retained_boolean::Recipe& recipe) noexcept {
+    switch (SourceFamily(recipe)) {
+    case 1: return BaseFamily::Profile;
+    case 2: return BaseFamily::Enclosure;
+    case 3: return BaseFamily::RectangularLoft;
+    default: return BaseFamily::ProfileSchema5Shell;
+    }
+}
+
+inline bool ExactRecipe(const std::vector<std::uint8_t>& bytes,
+                        const retained_recipe::Digest& digest,
+                        const retained_boolean::Recipe& captured) noexcept {
+    try {
+        retained_recipe::Digest observed;
+        if (!composite_recipe::Hash(bytes, observed) || observed != digest) return false;
+        retained_boolean::Recipe decoded;
+        std::vector<std::uint8_t> decodedBytes, capturedBytes;
+        return retained_boolean::Decode(bytes, decoded)
+            && retained_boolean::Encode(decoded, decodedBytes) && decodedBytes == bytes
+            && retained_boolean::Encode(captured, capturedBytes) && capturedBytes == bytes;
+    } catch (...) { return false; }
+}
+
+inline Refusal InspectValues(const Value& value) noexcept {
+    try {
+        const IdentityValues& identity = value.identity;
+        if (!retained_recipe::Valid(identity.outerOwner)
+            || !retained_recipe::Valid(identity.original)
+            || !retained_recipe::Nonzero(identity.derivedFeature)
+            || !retained_recipe::Nonzero(identity.sourceNode)
+            || !retained_recipe::Nonzero(identity.outputFeature)
+            || identity.sourceLocalID == 0 || identity.nextLocalID <= identity.sourceLocalID
+            || value.recipe.originalBytes.empty() || value.recipe.effectiveBytes.empty())
+            return Refusal::MissingSource;
+
+        const auto oversized = [](const std::vector<std::uint8_t>& bytes) {
+            return bytes.size() > retained_solid::MaximumEnvelopeBytes;
+        };
+        if (oversized(value.recipe.originalBytes) || oversized(value.recipe.effectiveBytes)
+            || value.appearance.originalMaterials.size() > part_boolean::MaximumMetadataRows
+            || value.appearance.effectiveMaterials.size() > part_boolean::MaximumMetadataRows
+            || value.appearance.originalGroups.size() > part_boolean::MaximumMetadataRows
+            || value.appearance.effectiveGroups.size() > part_boolean::MaximumMetadataRows
+            || value.appearance.originalLayers.size() > part_boolean::MaximumMetadataRows
+            || value.appearance.effectiveLayers.size() > part_boolean::MaximumMetadataRows
+            || value.appearance.regions.size() > part_boolean::MaximumRegions
+            || value.appearance.selectors.size() > part_boolean::MaximumSelectors)
+            return Refusal::ProgramOversized;
+
+        const auto versioned = [](const std::vector<std::uint8_t>& bytes) {
+            return bytes.size() >= 8 && std::memcmp(bytes.data(), "SYRS", 4) == 0
+                && (bytes[4] == 1 || bytes[4] == 2);
+        };
+        if (!versioned(value.recipe.originalBytes) || !versioned(value.recipe.effectiveBytes))
+            return Refusal::ProgramVersionMismatch;
+
+        retained_recipe::Digest originalDigest, effectiveDigest;
+        if (!composite_recipe::Hash(value.recipe.originalBytes, originalDigest)
+            || !composite_recipe::Hash(value.recipe.effectiveBytes, effectiveDigest)
+            || originalDigest != value.recipe.originalDigest
+            || effectiveDigest != value.recipe.effectiveDigest)
+            return Refusal::ProgramDigestMismatch;
+        if (!ExactRecipe(value.recipe.originalBytes, value.recipe.originalDigest,
+                value.recipe.originalDecoded)
+            || !ExactRecipe(value.recipe.effectiveBytes, value.recipe.effectiveDigest,
+                value.recipe.effectiveDecoded))
+            return Refusal::ProgramMalformed;
+
+        if (value.carrier == Carrier::CompositeProgramSuffix)
+            return Refusal::UnsupportedProgramCarrier;
+        if (value.carrier == Carrier::DependentRoundOnly)
+            return Refusal::UnsupportedDependentFeature;
+        if (value.carrier != Carrier::CanonicalRetainedProgram)
+            return Refusal::UnsupportedProgramCarrier;
+        if (value.recipe.baseFamily == BaseFamily::ProfileSchema5Shell
+            || FamilyFor(value.recipe.originalDecoded) != value.recipe.baseFamily
+            || FamilyFor(value.recipe.effectiveDecoded) != value.recipe.baseFamily
+            || (SourceFamily(value.recipe.originalDecoded) == 1
+                && SourceSchema(value.recipe.originalDecoded) > 4))
+            return Refusal::UnsupportedBaseFamily;
+        if (!IdentityPlacement(value.sourceToCarrier)
+            || !SameBits(value.sourceToCarrier.sourceMetersPerUnit,
+                value.observedOwnerMetersPerUnit)
+            || !SameBits(value.observedOwnerMetersPerUnit,
+                value.observedDocumentMetersPerUnit))
+            return Refusal::UnsupportedPlacement;
+
+        const retained_boolean::Identity original =
+            retained_boolean::Identities(value.recipe.originalDecoded);
+        const retained_boolean::Identity effective =
+            retained_boolean::Identities(value.recipe.effectiveDecoded);
+        if (original.document != identity.original.document
+            || original.entity != identity.original.entity
+            || original.definition != identity.original.definition
+            || original.sourceFeature != identity.original.sourceFeature
+            || original.derivedFeature != identity.derivedFeature
+            || effective.document != identity.original.document
+            || effective.entity != identity.original.entity
+            || effective.definition != identity.original.definition
+            || effective.sourceFeature != identity.original.sourceFeature
+            || effective.derivedFeature != identity.derivedFeature)
+            return Refusal::BaseFeatureMismatch;
+        if (!SameBits(original.metersPerUnit, value.sourceToCarrier.sourceMetersPerUnit)
+            || !SameBits(effective.metersPerUnit, value.sourceToCarrier.sourceMetersPerUnit))
+            return Refusal::UnsupportedPlacement;
+
+        const AppearanceValues& appearance = value.appearance;
+        if (appearance.materialPolicy != part_boolean::MaterialPolicy::RejectConflictingMerges
+            || appearance.versions.serializer != 1 || appearance.versions.build != 1
+            || appearance.versions.proof != 1 || appearance.versions.selector != 1
+            || appearance.versions.material != 1
+            || !part_boolean::ValidTables(appearance.originalMaterials,
+                appearance.originalGroups, appearance.originalLayers)
+            || !part_boolean::ValidTables(appearance.effectiveMaterials,
+                appearance.effectiveGroups, appearance.effectiveLayers)
+            || !part_boolean::Valid(appearance.original,
+                appearance.originalMaterials.size(), appearance.originalGroups.size(),
+                appearance.originalLayers.size())
+            || !part_boolean::Valid(appearance.effective,
+                appearance.effectiveMaterials.size(), appearance.effectiveGroups.size(),
+                appearance.effectiveLayers.size())
+            || !part_boolean::Valid(value.originalCommitments)
+            || !part_boolean::Valid(value.effectiveCommitments))
+            return Refusal::ProgramMalformed;
+
+        const FenceValues& fence = value.fence;
+        if (!retained_recipe::Valid(fence.revision)
+            || !retained_recipe::Nonzero(fence.base)
+            || !retained_recipe::Nonzero(fence.result)
+            || !retained_recipe::Nonzero(fence.units)
+            || !retained_recipe::Nonzero(fence.selection)
+            || !retained_recipe::Nonzero(fence.issuance)
+            || !retained_recipe::Nonzero(fence.history))
+            return Refusal::StaleFence;
+        const retained_recipe::RecipeLocator locator{
+            identity.outerOwner, identity.sourceNode, identity.original.sourceFeature};
+        const auto read = std::find_if(fence.revision.dependencies.begin(),
+            fence.revision.dependencies.end(), [&](const retained_recipe::DependencyRead& item) {
+                return item.locator == locator;
+            });
+        if (read == fence.revision.dependencies.end()
+            || read->geometry != value.effectiveCommitments.geometry
+            || read->recipe != value.effectiveCommitments.recipe
+            || read->placement != value.effectiveCommitments.placement
+            || read->material != value.effectiveCommitments.material
+            || read->groups != value.effectiveCommitments.groups
+            || fence.base != value.recipe.effectiveBaseCommitment
+            || fence.result != value.recipe.effectiveResultCommitment)
+            return Refusal::StaleFence;
+        return Refusal::None;
+    } catch (...) { return Refusal::RuleNotInstalled; }
+}
+
+inline Decision EvaluateProgramOperand(const Request& request) noexcept {
+    Decision result;
+    try {
+        if (!retained_recipe::Valid(request.outerOwner)
+            || !retained_recipe::Nonzero(request.outputFeature)
+            || !retained_recipe::Valid(request.issuance)) {
+            result.refusal = Refusal::MissingSource; return result;
+        }
+        for (const Value& value : request.operands) {
+            const Refusal refusal = InspectValues(value);
+            if (refusal != Refusal::None) { result.refusal = refusal; return result; }
+        }
+        const Value& left = request.operands[0];
+        const Value& right = request.operands[1];
+        if (left.role != Role::Left || right.role != Role::Right
+            || left.identity.sourceNode == right.identity.sourceNode
+            || left.identity.sourceLocalID == right.identity.sourceLocalID
+            || left.identity.shapeSlot == right.identity.shapeSlot
+            || left.identity.original == right.identity.original
+            || left.identity.derivedFeature == right.identity.derivedFeature
+            || request.outputFeature == left.identity.outputFeature
+            || request.outputFeature == right.identity.outputFeature)
+            { result.refusal = Refusal::DuplicateIdentity; return result; }
+        for (const Value& value : request.operands) {
+            if (!(value.identity.outerOwner == request.outerOwner)
+                || value.identity.original.document != request.outerOwner.document) {
+                result.refusal = Refusal::OwnerAmbiguous; return result;
+            }
+            result.completeReadSet.push_back({value.identity.outerOwner,
+                value.identity.sourceNode, value.identity.original.sourceFeature});
+        }
+        if (!part_boolean::family_admission::ProgramOperandNativeAdmissionEnabled) {
+            result.refusal = Refusal::AdmissionDisabled; return result;
+        }
+        // P1 has no owner-minted execution receipt. This branch remains closed
+        // even after a future isolated flag flip until the later owner rule is
+        // installed in P9.
+        result.refusal = Refusal::RuleNotInstalled;
+        result.completeReadSet.clear();
+        return result;
+    } catch (...) {
+        result.refusal = Refusal::RuleNotInstalled;
+        result.completeReadSet.clear();
+        return result;
+    }
+}
+
+} // namespace core3d::part_boolean::program_operand
