@@ -1,4 +1,4 @@
-#import "Core3DModelingTypes.h"
+#import <Core3D/Core3DModelingTypes.h>
 #define CORE3D_PATH_ARRAY_NATIVE_SUPPORT 1
 #import "Core3DPathArrayCreationOpening.h"
 #undef CORE3D_PATH_ARRAY_NATIVE_SUPPORT
@@ -74,6 +74,22 @@
 #include <cmath>
 #include <limits>
 #include <set>
+
+#include "../OCCTKit/CompositeRecipeAttribute.hxx"
+#include "../OCCTKit/RetainedFinishingAttribute.hxx"
+#include "../OCCTKit/AssetAtlasPersistence.hxx"
+#include "../OCCTKit/FaceImagePersistence.hxx"
+#include "../OCCTKit/TextReliefPersistence.hxx"
+#include "../OCCTKit/PatternPersistence.hxx"
+#include "../OCCTKit/PathArrayPersistence.hxx"
+#include "../OCCTKit/FeaturePatternPersistence.hxx"
+#include <TDF_LabelIndexedMap.hxx>
+#include <BRepTools.hxx>
+#include <CommonCrypto/CommonDigest.h>
+#include <locale>
+#include <sstream>
+#include <stdexcept>
+#include <deque>
 
 namespace {
 using core3d::pattern::Axis;
@@ -7388,3 +7404,439 @@ bool C4ProbeScenario3(NSMutableDictionary<NSString *, NSNumber *> *checks,
 }
 @end
 #endif
+
+// E6 read-only DTO implementation. Construction stays inside the native UI
+// translation units; neither a wire value nor an app dictionary can mint it.
+@interface Core3DTexturingRecipeFence ()
+- (instancetype)initWithEpoch:(uint64_t)epoch bytes:(NSData *)bytes;
+@end
+@implementation Core3DTexturingRecipeFence
++ (BOOL)accessInstanceVariablesDirectly { return NO; }
+- (instancetype)initWithEpoch:(uint64_t)epoch bytes:(NSData *)bytes {
+    if ((self = [super init])) {
+        _epoch = epoch; _canonicalBytes = [bytes copy];
+        unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+        CC_SHA256(bytes.bytes, (CC_LONG)bytes.length, digest);
+        NSMutableString *hex = [NSMutableString stringWithCapacity:64];
+        for (unsigned char byte : digest) [hex appendFormat:@"%02x", byte];
+        _sha256 = [hex copy];
+    }
+    return self;
+}
+@end
+
+@interface Core3DTexturingRecipeRecord ()
+- (instancetype)initWithCodec:(NSString *)codec identity:(NSString *)identity
+                        bytes:(NSData *)bytes order:(NSUInteger)order;
+@end
+@implementation Core3DTexturingRecipeRecord
++ (BOOL)accessInstanceVariablesDirectly { return NO; }
+- (instancetype)initWithCodec:(NSString *)codec identity:(NSString *)identity
+                        bytes:(NSData *)bytes order:(NSUInteger)order {
+    if ((self = [super init])) {
+        _codec = [codec copy]; _identity = [identity copy];
+        _canonicalBytes = [bytes copy]; _documentOrder = order;
+    }
+    return self;
+}
+@end
+
+@interface Core3DTexturingRecipeEntry ()
+- (instancetype)initWithKind:(Core3DTexturingRecipeKind)kind
+                       owner:(NSString *)owner entity:(NSString *)entity
+                      hidden:(NSArray<NSString *> *)hidden
+                      replay:(NSArray<NSString *> *)replay
+                     program:(NSArray<Core3DTexturingRecipeRecord *> *)program
+                       order:(NSUInteger)order;
+@end
+@implementation Core3DTexturingRecipeEntry
++ (BOOL)accessInstanceVariablesDirectly { return NO; }
+- (instancetype)initWithKind:(Core3DTexturingRecipeKind)kind
+                       owner:(NSString *)owner entity:(NSString *)entity
+                      hidden:(NSArray<NSString *> *)hidden
+                      replay:(NSArray<NSString *> *)replay
+                     program:(NSArray<Core3DTexturingRecipeRecord *> *)program
+                       order:(NSUInteger)order {
+    if ((self = [super init])) {
+        _kind = kind; _ownerBoundIdentifier = [owner copy];
+        _entityIdentifier = [entity copy];
+        _stableAlias = [[@"part/" stringByAppendingString:entity] copy];
+        _hiddenOperandIdentifiers = [hidden copy];
+        _dependentReplayIdentities = [replay copy];
+        _program = [program copy]; _documentOrder = order;
+    }
+    return self;
+}
+@end
+
+@interface Core3DTexturingRecipeProjection ()
+- (instancetype)initWithEntries:(NSArray<Core3DTexturingRecipeEntry *> *)entries
+                        source:(NSData *)source resource:(NSData *)resource
+                     placement:(NSData *)placement
+                         stamp:(const core3d::authority::Stamp&)stamp;
+@end
+@implementation Core3DTexturingRecipeProjection
++ (BOOL)accessInstanceVariablesDirectly { return NO; }
+- (instancetype)initWithEntries:(NSArray<Core3DTexturingRecipeEntry *> *)entries
+                        source:(NSData *)source resource:(NSData *)resource
+                     placement:(NSData *)placement
+                         stamp:(const core3d::authority::Stamp&)stamp {
+    if ((self = [super init])) {
+        _entries = [entries copy];
+        _sourceFence = [[Core3DTexturingRecipeFence alloc] initWithEpoch:stamp.edit bytes:source];
+        _resourceFence = [[Core3DTexturingRecipeFence alloc] initWithEpoch:stamp.edit bytes:resource];
+        _placementFence = [[Core3DTexturingRecipeFence alloc] initWithEpoch:stamp.edit bytes:placement];
+        _isCurrentEpoch = stamp.edit; _openingEpoch = stamp.opening;
+        _selectionEpoch = stamp.selection;
+        _nativeInstanceIdentifier = [NSData dataWithBytes:stamp.instanceNonce.data()
+                                                 length:stamp.instanceNonce.size()];
+    }
+    return self;
+}
+@end
+
+namespace {
+namespace e6 {
+namespace rr = core3d::retained_recipe;
+namespace cr = core3d::composite_recipe;
+using Bytes = std::vector<std::uint8_t>;
+constexpr std::size_t MaximumProjectionBytes = 64 * 1024 * 1024;
+
+NSString *ID(const rr::UUID& value) {
+    return [NSString stringWithUTF8String:core3d::retained_solid::UUIDText(value).c_str()];
+}
+NSString *OwnerID(const rr::OwnerKey& value) {
+    return [NSString stringWithFormat:@"%@/%@/%@", ID(value.document), ID(value.entity), ID(value.definition)];
+}
+NSData *Data(const Bytes& bytes) {
+    return [NSData dataWithBytes:bytes.data() length:bytes.size()];
+}
+struct Writer {
+    Bytes bytes;
+    void u64(std::uint64_t value) {
+        if (bytes.size() > MaximumProjectionBytes - 8) throw std::length_error("projection budget");
+        core3d::retained_solid::U64(bytes, value);
+    }
+    void block(const void *data, std::size_t size) {
+        if (size > MaximumProjectionBytes - 8 || bytes.size() > MaximumProjectionBytes - size - 8)
+            throw std::length_error("projection budget");
+        u64(size);
+        if (size) {
+            const auto *first = static_cast<const std::uint8_t *>(data);
+            bytes.insert(bytes.end(), first, first + size);
+        }
+    }
+    void data(NSData *value) { block(value.bytes, value.length); }
+    void text(NSString *value) { data([value dataUsingEncoding:NSUTF8StringEncoding]); }
+    void record(Core3DTexturingRecipeRecord *value) {
+        text(value.codec); text(value.identity); data(value.canonicalBytes);
+    }
+};
+
+struct NativeRecord {
+    TDF_Label label;
+    NSString *codec;
+    NSString *identity;
+    Bytes bytes;
+};
+struct ReplayRecord {
+    NativeRecord record;
+    rr::UUID output;
+    std::vector<rr::UUID> inputs;
+};
+
+// Use the existing canonical family readers. Unknown/malformed present data
+// never becomes an empty source graph. Scalar sources retain their original
+// family/schema and complete scalar bytes using the existing native codec.
+bool Source(const Handle(TDocStd_Document)& document, const TDF_Label& label,
+            const rr::OwnerKey& key, NativeRecord& out, NSMutableArray<NSString *> *hidden) {
+    core3d::retained_solid::Record solid;
+    cr::Record composite;
+    if (!core3d::retained_solid::Read(document, label, solid)
+        || !cr::Read(document, label, composite)) return false;
+    if (solid.value && composite.value) return false;
+    NSString *owner = OwnerID(key);
+    if (composite.value) {
+        out = {composite.label, @"SYCR", owner, composite.value->bytes};
+        for (const auto& node : composite.value->definition.nodes) {
+            if (const auto *source = std::get_if<cr::SourceNode>(&node.value))
+                [hidden addObject:[NSString stringWithFormat:@"%@/node/%@", owner, ID(source->node)]];
+        }
+        return true;
+    }
+    if (solid.value) {
+        out = {solid.label, @"SYRS", owner, solid.value->bytes};
+        if (const auto *program = std::get_if<core3d::retained_boolean::Program>(&solid.value->envelope)) {
+            for (const auto& step : program->steps)
+                [hidden addObject:[NSString stringWithFormat:@"%@/operand/%u", owner, step.operand.identifier]];
+        } else {
+            const auto& legacy = std::get<core3d::retained_solid::Envelope>(solid.value->envelope);
+            [hidden addObject:[NSString stringWithFormat:@"%@/operand/%u", owner, legacy.operandID]];
+        }
+        return true;
+    }
+    core3d::loft_persistence::Record loft;
+    core3d::profile::Record profile;
+    core3d::enclosure::Record enclosure;
+    if (!core3d::loft_persistence::Read(document, label, loft)
+        || !core3d::profile::Read(document, label, profile)
+        || !core3d::enclosure::Read(document, label, enclosure)) return false;
+    Bytes bytes;
+    if (!loft.label.IsNull() && loft.IsCurrent(document, label)
+        && cr::EncodeScalarRecipe(cr::RecipeKind::RectangularLoft,
+            core3d::loft_persistence::Schema, loft.values, bytes)) {
+        out = {loft.label, @"RectangularLoft", owner, std::move(bytes)}; return true;
+    }
+    if (!profile.label.IsNull() && profile.IsCurrent(document, label)
+        && cr::EncodeScalarRecipe(cr::RecipeKind::Profile,
+            core3d::profile::SchemaFor(profile.parameters), profile.values, bytes)) {
+        out = {profile.label, @"Profile", owner, std::move(bytes)}; return true;
+    }
+    if (!enclosure.label.IsNull() && enclosure.IsCurrent(document, label)
+        && cr::EncodeScalarRecipe(cr::RecipeKind::Enclosure,
+            enclosure.parameters.definition.constructionFrame
+                ? core3d::enclosure::FramedSchemaVersion : core3d::enclosure::SchemaVersion,
+            enclosure.values, bytes)) {
+        out = {enclosure.label, @"Enclosure", owner, std::move(bytes)}; return true;
+    }
+    return false;
+}
+} // namespace e6
+} // namespace
+
+// Read-only shared helper for the four existing native hosts. It never starts
+// a lease, emits a receipt, changes a label, repairs metadata or saves a DTO.
+Core3DTexturingRecipeProjection *Core3DCaptureTexturingRecipeProjection(
+    OcctDocument& owner, const core3d::native_opening::Fence& fence,
+    const std::vector<core3d::retained_recipe::OwnerKey>& requested,
+    Core3DTexturingRecipeKind kind) {
+    using namespace e6;
+    try {
+        const auto document = owner.Document();
+        if (!NSThread.isMainThread || document.IsNull() || document->HasOpenCommand()
+            || document != fence.document() || document->GetData() != fence.data()
+            || requested.empty() || requested.size() > 128) return nil;
+        // Index native traversal once: lexicographic UUID/label-string ordering
+        // would put tag 10 before tag 2 and would violate document order.
+        TDF_LabelIndexedMap order;
+        for (TDF_ChildIterator it(document->GetData()->Root(), Standard_True); it.More(); it.Next()) {
+            if (order.Extent() >= core3d::profile::MaximumLabels) return nil;
+            order.Add(it.Value());
+        }
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (shapes.IsNull()) return nil;
+        TDF_LabelSequence roots; shapes->GetFreeShapes(roots);
+        struct Member { rr::OwnerKey key; TDF_Label label; };
+        std::vector<Member> members;
+        for (const auto& key : requested) {
+            if (!rr::Valid(key)) return nil;
+            for (const auto& prior : members) if (prior.key == key) return nil;
+            TDF_Label match;
+            for (Standard_Integer i = 1; i <= roots.Length(); ++i) {
+                const auto label = roots.Value(i); rr::OwnerKey actual;
+                if (!core3d::receipt::ParseUUID(owner.DocumentIdentifier(), actual.document)
+                    || !core3d::receipt::ParseUUID(owner.EntityIdentifierForLabel(label), actual.entity)
+                    || !core3d::receipt::ParseUUID(owner.DefinitionIdentifierForLabel(label), actual.definition)) continue;
+                if (!(actual == key)) continue;
+                if (!match.IsNull()) return nil;
+                match = label;
+            }
+            if (match.IsNull() || order.FindIndex(match) == 0) return nil;
+            members.push_back({key, match});
+        }
+        std::sort(members.begin(), members.end(), [&](const Member& a, const Member& b) {
+            return order.FindIndex(a.label) < order.FindIndex(b.label);
+        });
+        std::vector<core3d::pattern::Record> d2;
+        std::vector<core3d::path_array::Record> d3;
+        std::vector<core3d::feature_pattern::Record> d4;
+        std::vector<core3d::asset_atlas::persistence::Record> atlases;
+        std::vector<core3d::text_relief::persistence::Record> reliefs;
+        std::vector<core3d::bounded_curve::Record> curves;
+        if (!core3d::pattern::ReadAll(document, d2)
+            || !core3d::path_array::ReadAll(document, d3)
+            || !core3d::feature_pattern::ReadAll(document, d4)
+            || !core3d::asset_atlas::persistence::ReadAll(document, atlases)
+            || !core3d::text_relief::persistence::ReadAll(document, reliefs)
+            || !core3d::bounded_curve::ReadAll(document, curves)) return nil;
+        std::vector<ReplayRecord> replay;
+        for (const auto& r : d2) replay.push_back({{r.label, @"SYPT",
+            [OwnerID(r.definition.owner) stringByAppendingFormat:@"/feature/%@", ID(r.definition.feature)], r.bytes},
+            r.definition.owner.entity, {r.definition.source.entity}});
+        for (const auto& r : d3) replay.push_back({{r.label, @"SYPA",
+            [OwnerID(r.definition.owner) stringByAppendingFormat:@"/feature/%@", ID(r.definition.feature)], r.bytes},
+            r.definition.owner.entity, {r.definition.source.entity, r.definition.path.owner.entity}});
+        for (const auto& r : d4) replay.push_back({{r.label, @"SYFP",
+            [OwnerID(r.definition.host) stringByAppendingFormat:@"/feature/%@", ID(r.definition.feature)], r.bytes},
+            r.definition.host.entity, {r.definition.sourceCut.entity}});
+        for (const auto& r : reliefs) {
+            const auto& v = r.payload->value;
+            replay.push_back({{r.label, @"SYTR",
+                [OwnerID(v.owner) stringByAppendingFormat:@"/feature/%@", ID(v.feature)], r.payload->bytes},
+                v.owner.entity, {v.host.entity}});
+        }
+        if (replay.size() > 128) return nil;
+        std::sort(replay.begin(), replay.end(), [&](const ReplayRecord& a, const ReplayRecord& b) {
+            return order.FindIndex(a.record.label) < order.FindIndex(b.record.label);
+        });
+        Writer source, resource, placement;
+        source.text(@"Core3DTexturingRecipeProjection/source/1");
+        resource.text(@"Core3DTexturingRecipeProjection/resource/1");
+        placement.text(@"Core3DTexturingRecipeProjection/placement/1");
+        source.u64(kind); source.u64(members.size());
+        resource.u64(kind); resource.u64(members.size());
+        placement.u64(kind); placement.u64(members.size());
+        placement.u64(core3d::retained_solid::Bits(fence.metersPerUnit()));
+        NSMutableArray<Core3DTexturingRecipeEntry *> *entries = [NSMutableArray array];
+        for (const auto& member : members) {
+            NSString *ownerID = OwnerID(member.key);
+            source.text(ownerID); resource.text(ownerID); placement.text(ownerID);
+            NSMutableArray<NSString *> *hidden = [NSMutableArray array];
+            NSMutableArray<NSString *> *dependent = [NSMutableArray array];
+            std::vector<NativeRecord> records;
+            NativeRecord nativeSource;
+            if (!Source(document, member.label, member.key, nativeSource, hidden)) return nil;
+            records.push_back(std::move(nativeSource));
+            const auto shape = XCAFDoc_ShapeTool::GetShape(member.label);
+            if (shape.IsNull()) return nil;
+            std::ostringstream geometry; geometry.imbue(std::locale::classic());
+            BRepTools::Write(shape, geometry);
+            const auto bytes = geometry.str(); source.block(bytes.data(), bytes.size());
+            const gp_Trsf transform = shape.Location().Transformation();
+            for (int row = 1; row <= 3; ++row)
+                for (int column = 1; column <= 4; ++column)
+                    placement.u64(core3d::retained_solid::Bits(transform.Value(row, column)));
+            core3d::retained_finishing::Record finishing;
+            if (!core3d::retained_finishing::Read(document, member.label, finishing)) return nil;
+            if (finishing.value) {
+                records.push_back({finishing.label, @"SYEF", ownerID, finishing.value->bytes});
+                // Hash the manifest independently from chart/source settings.
+                resource.text(@"SYEF.resources");
+                resource.u64(finishing.value->definition.materials.size());
+                for (const auto& material : finishing.value->definition.materials) {
+                    resource.block(material.identity.data(), material.identity.size());
+                    resource.block(material.content.data(), material.content.size());
+                }
+            }
+            core3d::face_image::Definition faceImage;
+            Bytes faceBytes; TDF_Label faceLabel;
+            const auto faceState = core3d::face_image::persistence::bindings::Read(
+                document, member.label, faceImage, &faceBytes, &faceLabel);
+            if (faceState == core3d::face_image::persistence::bindings::ReadState::Malformed) return nil;
+            if (faceState == core3d::face_image::persistence::bindings::ReadState::Present) {
+                records.push_back({faceLabel, @"SYFI", ownerID, faceBytes});
+                placement.text(@"SYFI.transforms"); placement.u64(faceImage.bindings.size());
+                for (const auto& binding : faceImage.bindings) {
+                    placement.text(ID(binding.face));
+                    for (double value : binding.transform.scale)
+                        placement.u64(core3d::retained_solid::Bits(value));
+                    for (double value : binding.transform.offset)
+                        placement.u64(core3d::retained_solid::Bits(value));
+                    placement.u64(core3d::retained_solid::Bits(binding.transform.rotationDegrees));
+                    placement.u64(std::uint64_t(binding.transform.wrapU));
+                    placement.u64(std::uint64_t(binding.transform.wrapV));
+                }
+                resource.text(@"SYFI.resources"); resource.u64(faceImage.bindings.size());
+                for (const auto& binding : faceImage.bindings) {
+                    core3d::face_image::persistence::resources::Record image;
+                    if (!core3d::face_image::persistence::resources::Read(document, binding.resource, image)
+                        || !image.value) return nil;
+                    resource.text(ID(binding.resource)); resource.data(Data(image.value->bytes));
+                }
+            }
+            for (const auto& atlas : atlases) {
+                bool found = false;
+                for (const auto& slot : atlas.value->definition.members)
+                    if (slot.owner == member.key) found = true;
+                if (found) {
+                    records.push_back({atlas.label, @"SYEA", ID(atlas.value->definition.key.atlas), atlas.value->bytes});
+                    resource.text(@"SYEA.resources");
+                    resource.u64(atlas.value->definition.resources.size());
+                    for (const auto& material : atlas.value->definition.resources) {
+                        resource.block(material.identity.data(), material.identity.size());
+                        resource.block(material.content.data(), material.content.size());
+                    }
+                    placement.text(@"SYEA.charts");
+                    placement.u64(atlas.value->definition.charts.size());
+                    for (const auto& chart : atlas.value->definition.charts) {
+                        placement.text(ID(chart.chart));
+                        for (double value : chart.rectUV)
+                            placement.u64(core3d::retained_solid::Bits(value));
+                    }
+                }
+            }
+            // Mirror the native replay frontier, including cycle refusal,
+            // then emit in document order rather than discovery order.
+            struct Frontier { rr::UUID entity; std::vector<rr::UUID> ancestry; };
+            std::deque<Frontier> frontier{{member.key.entity, {member.key.entity}}};
+            std::set<rr::UUID> expanded;
+            std::set<rr::UUID> closure{member.key.entity};
+            std::set<std::size_t> selected;
+            while (!frontier.empty()) {
+                const Frontier current = frontier.front(); frontier.pop_front();
+                if (!expanded.insert(current.entity).second) continue;
+                for (std::size_t i = 0; i < replay.size(); ++i) {
+                    const auto& r = replay[i];
+                    const bool input = std::find(r.inputs.begin(), r.inputs.end(), current.entity) != r.inputs.end();
+                    if (!input && r.output != current.entity) continue;
+                    if (input && r.output != current.entity
+                        && std::find(current.ancestry.begin(), current.ancestry.end(), r.output)
+                            != current.ancestry.end()) return nil;
+                    if (!selected.insert(i).second) continue;
+                    closure.insert(r.output);
+                    if (input && r.output != current.entity) {
+                        Frontier next{r.output, current.ancestry};
+                        next.ancestry.push_back(r.output); frontier.push_back(std::move(next));
+                    }
+                }
+            }
+            for (const auto i : selected) {
+                records.push_back(replay[i].record);
+                [dependent addObject:replay[i].record.identity];
+            }
+            for (const auto& relief : reliefs) {
+                const auto& value = relief.payload->value;
+                if (!closure.count(value.owner.entity)) continue;
+                placement.text(@"SYTR.placement"); placement.text(ID(value.feature));
+                for (const auto& axis : {value.host.origin, value.host.xAxis, value.host.yAxis, value.host.zAxis})
+                    for (double scalar : axis) placement.u64(core3d::retained_solid::Bits(scalar));
+                for (double scalar : {value.offsetUMM, value.offsetVMM, value.rotationRadians})
+                    placement.u64(core3d::retained_solid::Bits(scalar));
+                resource.text(@"SYTR.resource");
+                resource.block(value.resourceSHA256.data(), value.resourceSHA256.size());
+                resource.u64(value.resourceByteCount);
+                resource.text([NSString stringWithUTF8String:value.catalogHandle.c_str()]);
+                for (const auto& curve : curves) {
+                    const auto& persisted = curve.value->persisted;
+                    bool referenced = false;
+                    for (const auto& reference : value.curves)
+                        if (reference.feature == persisted.value.feature) referenced = true;
+                    if (!referenced) continue;
+                    records.push_back({curve.label, @"SYCV", ID(persisted.value.feature), curve.value->definitionBytes});
+                    NSString *curveID = [OwnerID(persisted.ownerState.owner)
+                        stringByAppendingFormat:@"/curve/%@", ID(persisted.value.feature)];
+                    [hidden addObject:curveID];
+                    records.push_back({curve.label, @"SYCO", curveID, curve.value->ownerBytes});
+                }
+            }
+            std::stable_sort(records.begin(), records.end(), [&](const NativeRecord& a, const NativeRecord& b) {
+                return order.FindIndex(a.label) < order.FindIndex(b.label);
+            });
+            NSMutableArray<Core3DTexturingRecipeRecord *> *program = [NSMutableArray array];
+            source.u64(records.size());
+            for (const auto& record : records) {
+                if (record.bytes.empty() || order.FindIndex(record.label) == 0) return nil;
+                Core3DTexturingRecipeRecord *value = [[Core3DTexturingRecipeRecord alloc]
+                    initWithCodec:record.codec identity:record.identity bytes:Data(record.bytes)
+                    order:order.FindIndex(record.label)];
+                [program addObject:value]; source.record(value);
+            }
+            [entries addObject:[[Core3DTexturingRecipeEntry alloc] initWithKind:kind
+                owner:ownerID entity:ID(member.key.entity) hidden:hidden replay:dependent
+                program:program order:order.FindIndex(member.label)]];
+        }
+        return [[Core3DTexturingRecipeProjection alloc] initWithEntries:entries
+            source:Data(source.bytes) resource:Data(resource.bytes) placement:Data(placement.bytes)
+            stamp:fence.stamp()];
+    } catch (...) { return nil; }
+}

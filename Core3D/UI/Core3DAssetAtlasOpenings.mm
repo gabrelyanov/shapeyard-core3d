@@ -1,4 +1,4 @@
-#import "Core3DModelingTypes.h"
+#import <Core3D/Core3DModelingTypes.h>
 #import "Core3DViewController.h"
 #import "../OCCTKit/GLViewController.h"
 #import "../Viewport/Core3DSceneSnapshot.h"
@@ -81,6 +81,11 @@
 #include <sstream>
 #include <stdexcept>
 #endif
+
+// Internal read-only helper, implemented in Core3DNativeOpenings.mm.
+extern Core3DTexturingRecipeProjection *Core3DCaptureTexturingRecipeProjection(
+    OcctDocument&, const core3d::native_opening::Fence&,
+    const std::vector<core3d::retained_recipe::OwnerKey>&, Core3DTexturingRecipeKind);
 
 namespace {
 using AtlasDefinition = core3d::asset_atlas::Definition;
@@ -349,6 +354,7 @@ void DeliverMutation(void (^completion)(Core3DProfileConstructionResult, NSStrin
 @interface Core3DAssetAtlasOpening () {
 @package
     Handle(OcctDocument) _owner;
+    Core3DTexturingRecipeProjection *_recipeProjection;
     std::shared_ptr<OpeningContext> _context;
     AtlasKey _atlas;
     bool _hasAtlas;
@@ -378,6 +384,27 @@ void DeliverMutation(void (^completion)(Core3DProfileConstructionResult, NSStrin
     if (!NSThread.isMainThread || _owner.IsNull() || !_hasAtlas)
         return Core3DAssetAtlasCurrentnessAbsent;
     return PublicCurrentness(_owner->AssetAtlasCurrentness(_atlas));
+}
+
+- (Core3DTexturingRecipeProjection *)recipeProjection {
+    if (!NSThread.isMainThread || _owner.IsNull() || !_context
+        || !(_state.load() == AtlasOpeningState::Open || _state.load() == AtlasOpeningState::Prepared) || !_context->isCurrent(64, 64)) return nil;
+    if (_recipeProjection) return _recipeProjection;
+    try {
+        std::vector<OwnerKey> members = _captured;
+        if (_hasAtlas) {
+            AtlasDefinition atlas;
+            if (_owner->AssetAtlasCurrentness(_atlas, &atlas)
+                != OcctAssetAtlasCurrentness::Current) return nil;
+            members.clear();
+            for (const auto& member : atlas.members) members.push_back(member.owner);
+        }
+        Core3DTexturingRecipeProjection *value = Core3DCaptureTexturingRecipeProjection(
+            *_owner, _context->openingFence(), members, Core3DTexturingRecipeKindAssetAtlas);
+        if (!_context->isCurrent(64, 64)) return nil;
+        _recipeProjection = value;
+        return value;
+    } catch (...) { return nil; }
 }
 
 - (NSDictionary<NSString *, id> *)descriptor {

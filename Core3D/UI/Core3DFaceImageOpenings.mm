@@ -1,4 +1,4 @@
-#import "Core3DModelingTypes.h"
+#import <Core3D/Core3DModelingTypes.h>
 #import "Core3DViewController.h"
 #import "../OCCTKit/GLViewController.h"
 #import "../Viewport/Core3DSceneSnapshot.h"
@@ -133,6 +133,11 @@ void DebugDenyCaptureSourcesAtOrdinal(std::size_t ordinal) noexcept;
 void DebugClearCaptureSourcesDenial() noexcept;
 }
 #endif
+
+// Internal read-only helper, implemented in Core3DNativeOpenings.mm.
+extern Core3DTexturingRecipeProjection *Core3DCaptureTexturingRecipeProjection(
+    OcctDocument&, const core3d::native_opening::Fence&,
+    const std::vector<core3d::retained_recipe::OwnerKey>&, Core3DTexturingRecipeKind);
 
 namespace {
 using OwnerKey = core3d::retained_recipe::OwnerKey;
@@ -684,6 +689,7 @@ NSArray<NSDictionary<NSString *, id> *> *E4LayerSamples(
 @interface Core3DFaceImageOpening () {
 @package
     Handle(OcctDocument) _owner;
+    Core3DTexturingRecipeProjection *_recipeProjection;
     std::shared_ptr<OpeningContext> _context;
     OwnerKey _key;
     std::string _selected;
@@ -729,6 +735,23 @@ NSArray<NSDictionary<NSString *, id> *> *E4LayerSamples(
     return dr::CaptureFaceImageAttachment(*_owner, _key, attachment)
             == dr::FaceImageReplayStatus::Captured
         ? Core3DFaceImageCurrentnessCurrent : Core3DFaceImageCurrentnessStale;
+}
+
+- (Core3DTexturingRecipeProjection *)recipeProjection {
+    if (!NSThread.isMainThread || _owner.IsNull() || !_context
+        || !(_state.load() == FaceImageOpeningState::Open || _state.load() == FaceImageOpeningState::Prepared) || !_context->isCurrent(64, 64)) return nil;
+    if (_recipeProjection) return _recipeProjection;
+    try {
+        dr::FaceImageAttachment attachment;
+        const auto status = dr::CaptureFaceImageAttachment(*_owner, _key, attachment);
+        if (status != dr::FaceImageReplayStatus::Captured
+            && status != dr::FaceImageReplayStatus::Absent) return nil;
+        Core3DTexturingRecipeProjection *value = Core3DCaptureTexturingRecipeProjection(
+            *_owner, _context->openingFence(), {_key}, Core3DTexturingRecipeKindFaceImage);
+        if (!_context->isCurrent(64, 64)) return nil;
+        _recipeProjection = value;
+        return value;
+    } catch (...) { return nil; }
 }
 
 - (NSDictionary<NSString *, id> *)descriptor {
