@@ -30885,6 +30885,352 @@ bool PartBooleanOwner::captureNativeState(const TDF_Label& carrier,
     } catch (...) { output = {}; return false; }
 }
 
+bool PartBooleanOwner::captureProgramOperandState(
+    const std::array<TDF_Label, 2>& sources, DocumentSnapshot& output) const noexcept {
+    output = {};
+    try {
+        if (!boundTo(owner_.Document()) || sources[0].IsNull() || sources[1].IsNull()
+            || sources[0].IsEqual(sources[1])
+            || sources[0].Data() != document_->GetData()
+            || sources[1].Data() != document_->GetData()) return false;
+        std::vector<retained_solid::Record> retained;
+        if (!retained_solid::ReadAll(document_, retained)) return false;
+        const auto hasProgram = [&](const TDF_Label& label) {
+            return std::any_of(retained.begin(), retained.end(), [&](const auto& record) {
+                return record.owner.IsEqual(label) && record.value
+                    && std::holds_alternative<retained_boolean::Program>(record.value->envelope);
+            });
+        };
+        if (!hasProgram(sources[0]) || !hasProgram(sources[1])) return false;
+
+        Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(document_->Main());
+        if (shapes.IsNull()) return false;
+        TDF_LabelSequence roots; shapes->GetFreeShapes(roots);
+        std::vector<std::uint8_t> canonical;
+        for (Standard_Integer index = 1; index <= roots.Length(); ++index) {
+            const TDF_Label label = roots.Value(index);
+            OcctExactLabelReceipt exact;
+            std::vector<std::uint8_t> shape;
+            if (!owner_.CaptureExactFreeLabel(label, exact)
+                || !ShapeBytes(XCAFDoc_ShapeTool::GetShape(label), shape)) return false;
+            Append(canonical, PairLabelEntry(label));
+            canonical.insert(canonical.end(), shape.begin(), shape.end());
+            Append(canonical, exact.documentIdentifier);
+            Append(canonical, exact.visibility.object.object.entityIdentifier);
+            Append(canonical, exact.visibility.object.object.definitionIdentifier);
+            canonical.push_back(exact.visibility.object.namePresent ? 1 : 0);
+            for (Standard_Integer i = 1; i <= exact.visibility.object.name.Length(); ++i) {
+                const std::uint16_t unit = std::uint16_t(exact.visibility.object.name.Value(i));
+                canonical.push_back(std::uint8_t(unit));
+                canonical.push_back(std::uint8_t(unit >> 8));
+            }
+            for (std::size_t i = 0; i < exact.visibility.object.object.scalars.size(); ++i) {
+                canonical.push_back(exact.visibility.object.object.present[i] ? 1 : 0);
+                Append(canonical, exact.visibility.object.object.present[i]
+                    ? exact.visibility.object.object.scalars[i] : 0.0);
+            }
+            canonical.push_back(exact.visibility.invisibleAttributePresent ? 1 : 0);
+            canonical.push_back(exact.visibility.layerLinkPresent ? 1 : 0);
+            for (std::size_t i = 0; i < exact.visibility.layers.size(); ++i) {
+                Append(canonical, PairLabelEntry(exact.visibility.layers[i]));
+                canonical.push_back(exact.visibility.layerInvisibleAttributePresent[i] ? 1 : 0);
+            }
+            Append(canonical, PairLabelEntry(exact.appearance.materialLabel));
+            canonical.push_back(exact.appearance.localPBR ? 1 : 0);
+            for (std::size_t i = 0; i < exact.appearance.legacyPresent.size(); ++i) {
+                canonical.push_back(exact.appearance.legacyPresent[i] ? 1 : 0);
+                const auto bytes = Bytes(std::uint64_t(std::uint32_t(
+                    exact.appearance.legacyValues[i])));
+                canonical.insert(canonical.end(), bytes.begin(), bytes.end());
+            }
+            for (double value : exact.appearance.visualValues) Append(canonical, value);
+        }
+        for (const auto& record : retained) {
+            Append(canonical, PairLabelEntry(record.owner));
+            canonical.insert(canonical.end(), record.value->bytes.begin(), record.value->bytes.end());
+            std::vector<std::uint8_t> base, current;
+            if (!ShapeBytes(record.value->base, base) || !ShapeBytes(record.current, current))
+                return false;
+            canonical.insert(canonical.end(), base.begin(), base.end());
+            canonical.insert(canonical.end(), current.begin(), current.end());
+        }
+        OcctSavedGroupState groups;
+        if (!owner_.CaptureSavedGroups(groups)) return false;
+        for (const auto& group : groups.groups) {
+            Append(canonical, group.identifier);
+            for (Standard_Integer i = 1; i <= group.name.Length(); ++i) {
+                const std::uint16_t unit = std::uint16_t(group.name.Value(i));
+                canonical.push_back(std::uint8_t(unit));
+                canonical.push_back(std::uint8_t(unit >> 8));
+            }
+            canonical.push_back(group.originPresent ? 1 : 0);
+            if (group.originPresent) {
+                Append(canonical, group.origin.X()); Append(canonical, group.origin.Y());
+                Append(canonical, group.origin.Z());
+            }
+            for (const auto& member : group.members) Append(canonical, PairLabelEntry(member));
+        }
+        double unit = 0;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(document_, unit)) return false;
+        Append(canonical, unit);
+        output.scopes.push_back(std::move(canonical));
+        output.graphCensus = std::uint64_t(roots.Length()) + retained.size();
+        output.modelRevision = std::uint64_t(document_->GetData()->Time());
+        output.history = ObserveHistory(document_, commandObservationSerial_);
+        for (Standard_Integer index = 1; index <= roots.Length(); ++index) {
+            std::vector<std::uint8_t> exact, semantic;
+            std::size_t count = 0;
+            if (!CaptureFaceMaterialManifest(document_, roots.Value(index),
+                    exact, semantic, count)) return false;
+            output.faceMaterialLabels.insert(output.faceMaterialLabels.end(),
+                exact.begin(), exact.end());
+            output.faceMaterials.insert(output.faceMaterials.end(),
+                semantic.begin(), semantic.end());
+        }
+        return true;
+    } catch (...) { output = {}; return false; }
+}
+
+bool PartBooleanOwner::captureProgramOperandValue(
+    const TDF_Label& label, std::size_t index,
+    const retained_recipe::OwnerKey& outerOwner,
+    program_operand::Value& output) const noexcept {
+    output = {};
+    try {
+        OcctCylindricalCutProgramSource source;
+        OcctExactLabelReceipt exact;
+        OcctSavedGroupState savedGroups;
+        double unit = 0;
+        if (index > 1 || !owner_.CaptureCylindricalCutProgramSource(label, source)
+            || !owner_.CaptureExactFreeLabel(label, exact)
+            || !owner_.CaptureSavedGroups(savedGroups)
+            || !XCAFDoc_DocumentTool::GetLengthUnit(document_, unit)) return false;
+        const auto identity = retained_boolean::Identities(source.recipe);
+        output.role = index == 0 ? program_operand::Role::Left : program_operand::Role::Right;
+        output.identity.outerOwner = outerOwner;
+        output.identity.original = {identity.document, identity.entity,
+            identity.definition, identity.sourceFeature};
+        output.identity.derivedFeature = identity.derivedFeature;
+        output.identity.sourceNode = identity.sourceFeature;
+        output.identity.outputFeature = identity.derivedFeature;
+        output.identity.sourceLocalID = index + 1;
+        output.identity.shapeSlot = std::uint32_t(index);
+        output.identity.nextLocalID = 4;
+        output.recipe.baseFamily = program_operand::FamilyFor(source.recipe);
+        output.recipe.originalBytes = source.recipeBytes;
+        output.recipe.effectiveBytes = source.recipeBytes;
+        output.recipe.originalDecoded = source.recipe;
+        output.recipe.effectiveDecoded = source.recipe;
+        if (!HashBytes(source.recipeBytes, output.recipe.originalDigest)) return false;
+        output.recipe.effectiveDigest = output.recipe.originalDigest;
+        output.sourceToCarrier.sourceMetersPerUnit = identity.metersPerUnit;
+        output.sourceToCarrier.carrierMetersPerUnit = unit;
+        output.observedOwnerMetersPerUnit = unit;
+        output.observedDocumentMetersPerUnit = unit;
+
+        std::vector<std::uint8_t> base, result, placement, material, groups;
+        if (!ShapeBytes(source.base, base) || !ShapeBytes(source.original.shape, result)
+            || !HashBytes(base, output.recipe.originalBaseCommitment)
+            || !HashBytes(result, output.recipe.originalResultCommitment)) return false;
+        output.recipe.effectiveBaseCommitment = output.recipe.originalBaseCommitment;
+        output.recipe.effectiveResultCommitment = output.recipe.originalResultCommitment;
+        for (std::size_t i = 0; i < source.original.scalars.size(); ++i) {
+            placement.push_back(source.original.present[i] ? 1 : 0);
+            Append(placement, source.original.present[i] ? source.original.scalars[i] : 0.0);
+        }
+        Append(placement, unit);
+        Append(material, PairLabelEntry(exact.appearance.materialLabel));
+        material.push_back(exact.appearance.localPBR ? 1 : 0);
+        for (double value : exact.appearance.visualValues) Append(material, value);
+        for (const auto& group : savedGroups.groups) {
+            if (std::none_of(group.members.begin(), group.members.end(),
+                    [&](const TDF_Label& member) { return member.IsEqual(label); })) continue;
+            Append(groups, group.identifier);
+            for (const auto& member : group.members) Append(groups, PairLabelEntry(member));
+        }
+        if (!HashBytes(result, output.originalCommitments.geometry)
+            || !HashBytes(placement, output.originalCommitments.placement)
+            || !HashBytes(material.empty() ? Bytes(std::uint64_t(0)) : material,
+                output.originalCommitments.material)
+            || !HashBytes(groups.empty() ? Bytes(std::uint64_t(0)) : groups,
+                output.originalCommitments.groups)) return false;
+        output.originalCommitments.recipe = output.recipe.originalDigest;
+        output.effectiveCommitments = output.originalCommitments;
+
+        if (!PairMetadata(exact, output.appearance.original)) return false;
+        if (!exact.appearance.materialLabel.IsNull()) {
+            part_boolean::ScalarMaterialRow row;
+            if (!PairMaterialRow(PairLabelEntry(exact.appearance.materialLabel),
+                    exact.appearance.visualValues, row)) return false;
+            output.appearance.originalMaterials.push_back(row);
+            output.appearance.original.appearance.material = 0;
+        }
+        for (const auto& group : savedGroups.groups) {
+            if (std::none_of(group.members.begin(), group.members.end(),
+                    [&](const TDF_Label& member) { return member.IsEqual(label); })) continue;
+            part_boolean::GroupRow row;
+            row.ordinal = std::uint16_t(output.appearance.originalGroups.size());
+            row.identifier = group.identifier;
+            if (!PairExtendedName(group.name, row.name)) return false;
+            row.originPresent = group.originPresent;
+            if (row.originPresent) row.origin = {{group.origin.X(), group.origin.Y(), group.origin.Z()}};
+            for (const auto& member : group.members) {
+                retained_recipe::OwnerKey key;
+                if (!PairUUID(owner_.DocumentIdentifier(), key.document)
+                    || !PairUUID(owner_.EntityIdentifierForLabel(member), key.entity)
+                    || !PairUUID(owner_.DefinitionIdentifierForLabel(member), key.definition))
+                    return false;
+                row.members.push_back(key);
+            }
+            output.appearance.original.groups.push_back(row.ordinal);
+            output.appearance.originalGroups.push_back(std::move(row));
+        }
+        for (std::size_t layerIndex = 0; layerIndex < exact.visibility.layers.size(); ++layerIndex) {
+            Handle(TDataStd_Name) name;
+            if (!exact.visibility.layers[layerIndex].FindAttribute(TDataStd_Name::GetID(), name)
+                || name.IsNull()) return false;
+            part_boolean::LayerRow row;
+            row.ordinal = std::uint16_t(output.appearance.originalLayers.size());
+            row.labelEntry = PairLabelEntry(exact.visibility.layers[layerIndex]);
+            row.invisibleAttributePresent = exact.visibility.layerInvisibleAttributePresent[layerIndex];
+            if (!PairExtendedName(name->Get(), row.name)) return false;
+            output.appearance.original.layers.push_back(row.ordinal);
+            output.appearance.originalLayers.push_back(std::move(row));
+        }
+        output.appearance.effective = output.appearance.original;
+        output.appearance.effectiveMaterials = output.appearance.originalMaterials;
+        output.appearance.effectiveGroups = output.appearance.originalGroups;
+        output.appearance.effectiveLayers = output.appearance.originalLayers;
+        output.appearance.originallyVisible = exact.visibility.IsEffectivelyVisible();
+        output.appearance.originallyConsumed = false;
+        return true;
+    } catch (...) { output = {}; return false; }
+}
+
+ProgramOperandCaptureOutcome PartBooleanOwner::captureProgramOperands(
+    const std::array<TDF_Label, 2>& sources) noexcept {
+    ProgramOperandCaptureOutcome output;
+    try {
+        if (!boundTo(owner_.Document()) || blocksOtherWork() || document_->HasOpenCommand()
+            || sources[0].IsNull() || sources[1].IsNull() || sources[0].IsEqual(sources[1])) {
+            output.refusal = program_operand::Refusal::OwnerAmbiguous; return output;
+        }
+        const auto opening = owner_.CaptureNativePlanningStamp(true);
+        if (!opening) { output.refusal = program_operand::Refusal::OwnerAmbiguous; return output; }
+        DocumentSnapshot before, after;
+        if (!captureProgramOperandState(sources, before)) {
+            output.refusal = program_operand::Refusal::MissingSource; return output;
+        }
+        retained_recipe::OwnerKey outer;
+        if (!retained_solid::ReadUUID(document_->Main(), DocumentIdentifierAttributeID(), outer.document)
+            || !retained_solid::ReadUUID(sources[0], EntityIdentifierAttributeID(), outer.entity)
+            || !retained_solid::ReadUUID(sources[1], DefinitionIdentifierAttributeID(), outer.definition)) {
+            output.refusal = program_operand::Refusal::OwnerAmbiguous; return output;
+        }
+        program_operand::Request request;
+        request.outerOwner = outer; request.issuance.nextLocalID = 4;
+        if (!captureProgramOperandValue(sources[0], 0, outer, request.operands[0])
+            || !captureProgramOperandValue(sources[1], 1, outer, request.operands[1])) {
+            output.refusal = program_operand::Refusal::ProgramMalformed; return output;
+        }
+        for (std::size_t i = 0; i < request.outputFeature.size(); ++i)
+            request.outputFeature[i] = std::uint8_t(
+                request.operands[0].identity.derivedFeature[i]
+                ^ request.operands[1].identity.derivedFeature[i] ^ 0xA5);
+        if (!retained_recipe::Nonzero(request.outputFeature)) request.outputFeature[0] = 1;
+        std::vector<retained_recipe::DependencyRead> dependencies;
+        for (const auto& value : request.operands) dependencies.push_back({
+            {outer, value.identity.sourceNode, value.identity.original.sourceFeature},
+            value.effectiveCommitments.geometry, value.effectiveCommitments.recipe,
+            value.effectiveCommitments.placement, value.effectiveCommitments.material,
+            value.effectiveCommitments.groups});
+        retained_recipe::Digest units, selection, issuance, history;
+        std::vector<std::uint8_t> unitBytes, issuanceBytes, historyBytes;
+        double unit = 0;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(document_, unit)) {
+            output.refusal = program_operand::Refusal::StaleFence; return output;
+        }
+        Append(unitBytes, unit); Append(issuanceBytes, outer.document);
+        issuanceBytes.insert(issuanceBytes.end(), request.outputFeature.begin(), request.outputFeature.end());
+        historyBytes = before.scopes.front();
+        if (!HashBytes(unitBytes, units) || !HashBytes(before.scopes.front(), selection)
+            || !HashBytes(issuanceBytes, issuance) || !HashBytes(historyBytes, history)) {
+            output.refusal = program_operand::Refusal::StaleFence; return output;
+        }
+        for (auto& value : request.operands) {
+            value.fence.revision.documentGeneration = nonce_;
+            value.fence.revision.modelRevision = before.modelRevision ? before.modelRevision : 1;
+            value.fence.revision.effectiveMetersPerUnit = unit;
+            value.fence.revision.ownerShape = value.effectiveCommitments.geometry;
+            value.fence.revision.ownerRecipe = value.effectiveCommitments.recipe;
+            value.fence.revision.ownerPlacement = value.effectiveCommitments.placement;
+            value.fence.revision.ownerMaterial = value.effectiveCommitments.material;
+            value.fence.revision.dependencies = dependencies;
+            value.fence.base = value.recipe.effectiveBaseCommitment;
+            value.fence.result = value.recipe.effectiveResultCommitment;
+            value.fence.units = units; value.fence.selection = selection;
+            value.fence.issuance = issuance; value.fence.history = history;
+            const auto refusal = program_operand::InspectValues(value);
+            if (refusal != program_operand::Refusal::None) {
+                output.refusal = refusal; return output;
+            }
+        }
+        if (!captureProgramOperandState(sources, after) || !(before == after)) {
+            output.refusal = program_operand::Refusal::StaleFence; return output;
+        }
+        auto handle = std::shared_ptr<ProgramOperandCapture>(new ProgramOperandCapture());
+        handle->ownerNonce = nonce_; handle->session = ++nextSession_;
+        handle->documentIdentity = documentIdentity_; handle->opening = *opening;
+        handle->sourceOwners = sources; handle->request = std::move(request);
+        handle->baseline = std::move(before);
+        output.handle = std::move(handle); output.refusal = program_operand::Refusal::None;
+        return output;
+    } catch (...) { output.refusal = program_operand::Refusal::RuleNotInstalled; return output; }
+}
+
+program_operand::Refusal PartBooleanOwner::resolveProgramOperands(
+    const std::shared_ptr<const ProgramOperandCapture>& capture,
+    program_operand::Request& output) const noexcept {
+    output = {};
+    try {
+        if (!capture) return program_operand::Refusal::MissingSource;
+        if (capture->ownerNonce != nonce_ || capture->session == 0
+            || capture->documentIdentity != documentIdentity_ || !boundTo(owner_.Document())
+            || document_->HasOpenCommand() || !owner_.myNativeAuthority)
+            return program_operand::Refusal::OwnerAmbiguous;
+        DocumentSnapshot before, after;
+        if (!captureProgramOperandState(capture->sourceOwners, before)
+            || !(before == capture->baseline)) return program_operand::Refusal::StaleFence;
+        if (!owner_.myNativeAuthority->Matches(
+                capture->opening, documentIdentity_, true, false))
+            return program_operand::Refusal::OwnerAmbiguous;
+        program_operand::Request current;
+        current.operation = capture->request.operation;
+        current.outerOwner = capture->request.outerOwner;
+        current.outputFeature = capture->request.outputFeature;
+        current.issuance = capture->request.issuance;
+        if (!captureProgramOperandValue(capture->sourceOwners[0], 0,
+                current.outerOwner, current.operands[0])
+            || !captureProgramOperandValue(capture->sourceOwners[1], 1,
+                current.outerOwner, current.operands[1]))
+            return program_operand::Refusal::StaleFence;
+        for (std::size_t index = 0; index < 2; ++index) {
+            const auto& expected = capture->request.operands[index];
+            const auto& observed = current.operands[index];
+            if (observed.recipe.originalBytes != expected.recipe.originalBytes
+                || observed.originalCommitments.geometry != expected.originalCommitments.geometry
+                || observed.originalCommitments.placement != expected.originalCommitments.placement
+                || observed.originalCommitments.material != expected.originalCommitments.material
+                || observed.originalCommitments.groups != expected.originalCommitments.groups)
+                return program_operand::Refusal::StaleFence;
+        }
+        if (!captureProgramOperandState(capture->sourceOwners, after) || !(before == after))
+            return program_operand::Refusal::StaleFence;
+        output = capture->request;
+        return program_operand::Refusal::None;
+    } catch (...) { output = {}; return program_operand::Refusal::RuleNotInstalled; }
+}
+
 bool PartBooleanOwner::resolveAnalytic(
     const TDF_Label& carrier, composite_recipe::Record& record,
     retained_recipe::OwnerSnapshot& snapshot, AnalyticDefinition& analytic,
@@ -32135,6 +32481,227 @@ bool N1AnalyticResultSolidControls() noexcept {
     } catch (...) { return false; }
 }
 } // namespace
+
+bool PartBooleanOwner::installProgramOperandEvidenceFixture(
+    double unit, std::array<TDF_Label, 2>& sources, TDF_Label& sibling) noexcept {
+    sources = {}; sibling.Nullify();
+    try {
+        if (!boundTo(owner_.Document()) || document_->HasOpenCommand()
+            || document_->GetAvailableUndos() || document_->GetAvailableRedos()
+            || (unit != 0.001 && unit != 1.0)) return false;
+        auto fixture = retained_program_suffix::Probe::ProgramOperandNativeFixture(unit);
+        Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(document_->Main());
+        Handle(XCAFDoc_VisMaterialTool) materials =
+            XCAFDoc_DocumentTool::VisMaterialTool(document_->Main());
+        if (shapes.IsNull() || materials.IsNull()) return false;
+        const auto abort = [&]() {
+            try { if (document_->HasOpenCommand()) document_->AbortCommand(); } catch (...) {}
+            sources = {}; sibling.Nullify(); return false;
+        };
+        document_->NewCommand();
+        if (!document_->HasOpenCommand()) return abort();
+        for (std::size_t index = 0; index < 2; ++index) {
+            Handle(AIS_Shape) sourcePresentation =
+                new AIS_Shape(fixture.replays[index].originalBase);
+            sources[index] = owner_.AddShape(sourcePresentation);
+            if (sources[index].IsNull()) return abort();
+        }
+        Handle(AIS_Shape) siblingPresentation = new AIS_Shape(BRepPrimAPI_MakeBox(
+            gp_Pnt(-20 * 0.001 / unit, -20 * 0.001 / unit, 0),
+            5 * 0.001 / unit, 5 * 0.001 / unit, 5 * 0.001 / unit).Shape());
+        sibling = owner_.AddShape(siblingPresentation);
+        if (sibling.IsNull()) return abort();
+        retained_recipe::UUID documentID;
+        if (!retained_solid::ReadUUID(document_->Main(), DocumentIdentifierAttributeID(), documentID))
+            return abort();
+        const auto display = retained_program_suffix::Probe::Display();
+        for (std::size_t index = 0; index < 2; ++index) {
+            auto value = fixture.request.operands[index];
+            const auto fixtureProgram =
+                std::get<retained_boolean::Program>(value.recipe.originalDecoded);
+            profile::Parameters profile;
+            if (!profile::Decode(fixtureProgram.source.values, profile)
+                || !profile::Stage(document_, sources[index], profile,
+                    retained_solid::UUIDText(fixtureProgram.source.sourceFeature)))
+                return abort();
+
+            retained_boolean::Legacy legacy;
+            legacy.document = documentID;
+            if (!retained_solid::ReadUUID(sources[index], EntityIdentifierAttributeID(),
+                    legacy.entity)
+                || !retained_solid::ReadUUID(sources[index], DefinitionIdentifierAttributeID(),
+                    legacy.definition)) return abort();
+            legacy.sourceFeature = fixtureProgram.source.sourceFeature;
+            legacy.derivedFeature = fixtureProgram.source.derivedFeature;
+            legacy.sourceFamily = fixtureProgram.source.family;
+            legacy.sourceSchema = fixtureProgram.source.schema;
+            legacy.metersPerUnit = fixtureProgram.source.metersPerUnit;
+            legacy.sourceValues = fixtureProgram.source.values;
+            const auto& first = fixtureProgram.steps.front().operand;
+            legacy.operandID = first.identifier;
+            legacy.axis = std::uint8_t(first.axis);
+            legacy.point = first.point;
+            legacy.radius = first.radius;
+            auto firstPayload = std::make_shared<retained_solid::Payload>();
+            firstPayload->envelope = legacy;
+            firstPayload->base = fixture.replays[index].originalBase;
+            if (!retained_boolean::Encode(firstPayload->envelope, firstPayload->bytes))
+                return abort();
+
+            OcctObjectTransformState previous;
+            if (!owner_.CaptureObjectTransformStateForLabel(sources[index], previous)
+                || !owner_.StageCylindricalCutReplacement(previous,
+                    fixture.replays[index].solid, firstPayload, std::nullopt, false))
+                return abort();
+            cylindrical_cut::CreateEdit create;
+            create.axis = first.axis;
+            create.localCenter = first.point;
+            create.localCenter[0] += (index == 0 ? 20 : -20) * 0.001 / unit;
+            create.worldRadiusMM = 1;
+            retained_boolean::ProgramEdit edit = retained_boolean::AppendBore{create};
+            const auto changed = retained_boolean::Apply(
+                retained_boolean::Recipe{legacy}, edit, unit * 1000);
+            if (!changed || !changed->changed
+                || !std::holds_alternative<retained_boolean::Program>(changed->recipe))
+                return abort();
+            auto program = std::get<retained_boolean::Program>(changed->recipe);
+            value.identity.original = {program.source.document, program.source.entity,
+                program.source.definition, program.source.sourceFeature};
+            value.identity.derivedFeature = program.source.derivedFeature;
+            value.identity.outputFeature = program.source.derivedFeature;
+            if (!retained_program_suffix::Probe::RefreshProgramOperand(value, program))
+                return abort();
+            if (!retained_program_suffix::Probe::BindProgramOperandCommitments(
+                    value, display))
+                return abort();
+            std::atomic_bool stop(false); retained_topology_budget::Counter budget;
+            const auto replay = program_operand::ReplayProgramOperand(value, display, stop, budget);
+            if (!replay.replayed()) return abort();
+            if (!owner_.CaptureObjectTransformStateForLabel(sources[index], previous))
+                return abort();
+            auto programPayload = std::make_shared<retained_solid::Payload>();
+            programPayload->envelope = program;
+            programPayload->bytes = changed->newBytes;
+            programPayload->base = firstPayload->base;
+            if (!owner_.StageCylindricalCutReplacement(previous, replay.solid,
+                    programPayload, std::optional<retained_boolean::ProgramEdit>{edit}, false))
+                return abort();
+            TDataStd_Name::Set(sources[index], index == 0
+                ? TCollection_ExtendedString("Program source")
+                : TCollection_ExtendedString("Program tool"));
+            XCAFDoc_VisMaterialPBR pbr;
+            pbr.IsDefined = true;
+            pbr.BaseColor = Quantity_ColorRGBA(Quantity_Color(
+                index == 0 ? 1.0 : 0.0, 0.0, index == 0 ? 0.0 : 1.0,
+                Quantity_TOC_RGB), 1.0f);
+            pbr.Metallic = 0.0f; pbr.Roughness = 0.5f;
+            Handle(XCAFDoc_VisMaterial) material = new XCAFDoc_VisMaterial();
+            material->SetPbrMaterial(pbr);
+            const TDF_Label materialLabel = materials->AddMaterial(material,
+                TCollection_AsciiString(index == 0 ? "Program source red" : "Program tool blue"));
+            if (materialLabel.IsNull()) return abort();
+            materials->SetShapeMaterial(sources[index], materialLabel);
+            TDataStd_Integer::Set(sources[index], LocalPBRMaterialAttributeID(), 1);
+        }
+        TDataStd_Name::Set(sibling, TCollection_ExtendedString("Unrelated sibling"));
+        if (!document_->CommitCommand()) return abort();
+        document_->ClearUndos(); document_->SetUndoLimit(OcctDocument::kNativeSessionUndoLimit);
+        std::vector<retained_solid::Record> records;
+        return retained_solid::ReadAll(document_, records) && records.size() == 2;
+    } catch (...) {
+        try { if (!document_.IsNull() && document_->HasOpenCommand()) document_->AbortCommand(); }
+        catch (...) {}
+        sources = {}; sibling.Nullify(); return false;
+    }
+}
+
+bool PartBooleanOwner::mutateProgramOperandEvidenceFixture(
+    const TDF_Label& source, unsigned variant) noexcept {
+    try {
+        if (!boundTo(owner_.Document()) || source.IsNull()
+            || source.Data() != document_->GetData() || document_->HasOpenCommand()
+            || variant > 7) return false;
+        retained_solid::Record record;
+        if (!retained_solid::Read(document_, source, record) || !record.value) return false;
+        document_->NewCommand();
+        if (!document_->HasOpenCommand()) return false;
+        const auto abort = [&]() { try { document_->AbortCommand(); } catch (...) {} return false; };
+        if (variant == 0) {
+            auto program = std::get<retained_boolean::Program>(record.value->envelope);
+            double unit = 0;
+            if (!XCAFDoc_DocumentTool::GetLengthUnit(document_, unit)) return abort();
+            retained_boolean::ProgramEdit edit = retained_boolean::SetBoreRadius{
+                program.steps.front().operand.identifier,
+                program.steps.front().operand.radius * unit * 1000 * 0.9};
+            const auto changed = retained_boolean::Apply(
+                retained_boolean::Recipe{program}, edit, unit * 1000);
+            if (!changed || !changed->changed
+                || !std::holds_alternative<retained_boolean::Program>(changed->recipe))
+                return abort();
+            program = std::get<retained_boolean::Program>(changed->recipe);
+            auto fixture = retained_program_suffix::Probe::ProgramOperandNativeFixture(unit);
+            auto value = fixture.request.operands[1];
+            value.identity.original = {program.source.document, program.source.entity,
+                program.source.definition, program.source.sourceFeature};
+            value.identity.derivedFeature = program.source.derivedFeature;
+            value.identity.outputFeature = program.source.derivedFeature;
+            const auto display = retained_program_suffix::Probe::Display();
+            if (!retained_program_suffix::Probe::RefreshProgramOperand(value, program)
+                || !retained_program_suffix::Probe::BindProgramOperandCommitments(value, display))
+                return abort();
+            std::atomic_bool stop(false); retained_topology_budget::Counter budget;
+            const auto replay = program_operand::ReplayProgramOperand(value, display, stop, budget);
+            OcctObjectTransformState previous;
+            if (!replay.replayed()
+                || !owner_.CaptureObjectTransformStateForLabel(source, previous))
+                return abort();
+            auto payload = std::make_shared<retained_solid::Payload>();
+            payload->envelope = program;
+            payload->bytes = changed->newBytes;
+            payload->base = record.value->base;
+            if (!owner_.StageCylindricalCutReplacement(previous, replay.solid,
+                    payload, std::optional<retained_boolean::ProgramEdit>{edit}, false))
+                return abort();
+        } else if (variant == 1) {
+            auto program = std::get<retained_boolean::Program>(record.value->envelope);
+            TopoDS_Shape base = record.value->base;
+            gp_Trsf shift; shift.SetTranslation(gp_Vec(0.125, 0, 0));
+            base = BRepBuilderAPI_Transform(base, shift, Standard_True).Shape();
+            if (base.IsNull()) return abort();
+            if (!native_opening::debug::Core3DDebugInstallRetainedSolidSeedRecord(
+                    document_, source, program, record.current, base)) return abort();
+        } else if (variant == 2) {
+            gp_Trsf shift; shift.SetTranslation(gp_Vec(0, 0.125, 0));
+            const TopoDS_Shape changed = BRepBuilderAPI_Transform(
+                XCAFDoc_ShapeTool::GetShape(source), shift, Standard_True).Shape();
+            const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document_->Main());
+            if (changed.IsNull() || shapes.IsNull()) return abort();
+            shapes->SetShape(source, changed);
+        } else if (variant == 3) {
+            TDataStd_Integer::Set(source.FindChild(11), 37);
+        } else if (variant == 4) {
+            TDataStd_Name::Set(source, TCollection_ExtendedString("Changed group binding"));
+        } else if (variant == 5) {
+            TDataStd_Real::Set(source.FindChild(1), 0.25);
+        } else if (variant == 6) {
+            double unit = 0;
+            if (!XCAFDoc_DocumentTool::GetLengthUnit(document_, unit)) return abort();
+            TDataStd_Real::Set(source.FindChild(98), unit == 1.0 ? 0.001 : 1.0);
+        } else {
+            TDataStd_Integer::Set(document_->Main().FindChild(991), 1);
+        }
+        return document_->CommitCommand();
+    } catch (...) {
+        try { if (!document_.IsNull() && document_->HasOpenCommand()) document_->AbortCommand(); }
+        catch (...) {}
+        return false;
+    }
+}
+
+bool PartBooleanOwner::debugProgramOperandSnapshot(
+    const std::array<TDF_Label, 2>& sources, DocumentSnapshot& output) const noexcept {
+    return captureProgramOperandState(sources, output);
+}
 
 bool PartBooleanOwner::installEvidenceFixture(
     Operation operation, double metersPerUnit, TDF_Label& carrier) noexcept {

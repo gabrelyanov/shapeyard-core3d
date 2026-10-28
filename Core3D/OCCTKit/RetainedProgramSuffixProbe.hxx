@@ -648,6 +648,30 @@ struct Probe final {
         return request;
     }
 
+    struct ProgramOperandNativeFixtureValue final {
+        part_boolean::program_operand::Request request;
+        std::array<part_boolean::program_operand::ReplayResult, 2> replays;
+    };
+
+    // F7: detached construction data for installation as two real retained
+    // source owners. Installation belongs to the document owner; this helper
+    // never carries a label, document handle or native capability.
+    static ProgramOperandNativeFixtureValue ProgramOperandNativeFixture(double unit) {
+        namespace po = part_boolean::program_operand;
+        ProgramOperandNativeFixtureValue value;
+        value.request = ProgramOperandBoundaryPair(unit);
+        const auto display = Display();
+        const std::atomic_bool stop(false);
+        for (std::size_t index = 0; index < value.replays.size(); ++index) {
+            retained_topology_budget::Counter budget;
+            value.replays[index] = po::ReplayProgramOperand(
+                value.request.operands[index], display, stop, budget);
+            if (!value.replays[index].replayed())
+                throw std::invalid_argument("program operand native fixture replay");
+        }
+        return value;
+    }
+
     static TopoDS_Shape IndependentProgramSolid(
         double unit, double baseShiftMM, double boreShiftMM) {
         const double localPerMM = 0.001 / unit;
@@ -2392,6 +2416,126 @@ struct Probe final {
         return checks;
     }
 
+    static Checks ProgramOperandOwnerCaptureEvidence() noexcept {
+        namespace po = part_boolean::program_operand;
+        Checks checks;
+        try {
+            for (double unit : {0.001, 1.0}) {
+                const std::string prefix = unit == 0.001 ? "mm-" : "m-";
+                NativeDocumentSession native;
+                const Handle(OcctDocument) wrapper = native.Document();
+                if (wrapper.IsNull() || wrapper->Document().IsNull())
+                    throw std::invalid_argument("native document");
+                XCAFDoc_DocumentTool::SetLengthUnit(wrapper->Document(), unit);
+                auto* owner = wrapper->PartBooleanOwnerService();
+                std::array<TDF_Label, 2> sources; TDF_Label sibling;
+                if (!owner || !owner->installProgramOperandEvidenceFixture(
+                        unit, sources, sibling))
+                    throw std::invalid_argument("native program fixture");
+                part_boolean::owner::DocumentSnapshot before, afterCapture, afterResolve;
+                if (!owner->debugProgramOperandSnapshot(sources, before))
+                    throw std::invalid_argument("native program baseline");
+                const auto captured = owner->captureProgramOperands(sources);
+                checks[prefix + "capture-succeeded"] = captured.captured()
+                    && captured.handle && captured.handle->debugSession() != 0;
+                checks[prefix + "whole-document-canonical-unchanged"] =
+                    owner->debugProgramOperandSnapshot(sources, afterCapture)
+                    && before == afterCapture
+                    && captured.handle && captured.handle->debugBaseline() == before;
+                po::Request resolved;
+                const auto refusal = owner->resolveProgramOperands(captured.handle, resolved);
+                checks[prefix + "resolved-complete-values"] =
+                    refusal == po::Refusal::None
+                    && po::InspectValues(resolved.operands[0]) == po::Refusal::None
+                    && po::InspectValues(resolved.operands[1]) == po::Refusal::None;
+                checks[prefix + "both-source-recipes-and-base-result-bound"] =
+                    captured.handle
+                    && !resolved.operands[0].recipe.originalBytes.empty()
+                    && !resolved.operands[1].recipe.originalBytes.empty()
+                    && retained_recipe::Nonzero(resolved.operands[0].fence.base)
+                    && retained_recipe::Nonzero(resolved.operands[0].fence.result)
+                    && retained_recipe::Nonzero(resolved.operands[1].fence.base)
+                    && retained_recipe::Nonzero(resolved.operands[1].fence.result);
+                checks[prefix + "history-material-selection-sibling-fences"] =
+                    captured.handle
+                    && retained_recipe::Nonzero(resolved.operands[0].fence.history)
+                    && retained_recipe::Nonzero(resolved.operands[0].fence.selection)
+                    && retained_recipe::Nonzero(resolved.operands[0].fence.revision.ownerMaterial)
+                    && retained_recipe::Nonzero(resolved.operands[1].fence.revision.ownerMaterial)
+                    && !sibling.IsNull();
+                checks[prefix + "resolve-is-read-only"] =
+                    owner->debugProgramOperandSnapshot(sources, afterResolve)
+                    && before == afterResolve;
+
+                NativeDocumentSession foreignNative;
+                auto* foreign = foreignNative.Document()->PartBooleanOwnerService();
+                po::Request foreignOutput, fabricatedOutput;
+                checks[prefix + "session-bound-foreign-document-refused"] = foreign
+                    && foreign->resolveProgramOperands(captured.handle, foreignOutput)
+                        == po::Refusal::OwnerAmbiguous;
+                checks[prefix + "caller-fabricated-handle-refused"] =
+                    owner->resolveProgramOperands({}, fabricatedOutput)
+                        == po::Refusal::MissingSource;
+                checks[prefix + "native-flags-stay-false"] =
+                    !part_boolean::family_admission::ProgramOperandNativeAdmissionEnabled
+                    && !part_boolean::family_admission::AnalyticNativeAdmissionEnabled
+                    && !part_boolean::family_admission::NativeAdmissionEnabled;
+            }
+            checks["both-unit-systems"] = true;
+        } catch (...) { checks["setup-exception"] = false; }
+        return checks;
+    }
+
+    static Checks ProgramOperandOwnerChangedInputEvidence() noexcept {
+        namespace po = part_boolean::program_operand;
+        static const char* names[] = {
+            "right-recipe-stale", "right-base-stale", "right-result-stale",
+            "right-material-stale", "right-groups-stale", "right-placement-stale",
+            "right-units-stale", "right-revision-stale",
+        };
+        Checks checks;
+        try {
+            for (double unit : {0.001, 1.0}) {
+                const std::string prefix = unit == 0.001 ? "mm-" : "m-";
+                bool typed = true, unchanged = true, ownersRemain = true;
+                for (unsigned variant = 0; variant < 8; ++variant) {
+                    NativeDocumentSession native;
+                    const Handle(OcctDocument) wrapper = native.Document();
+                    XCAFDoc_DocumentTool::SetLengthUnit(wrapper->Document(), unit);
+                    auto* owner = wrapper->PartBooleanOwnerService();
+                    std::array<TDF_Label, 2> sources; TDF_Label sibling;
+                    if (!owner || !owner->installProgramOperandEvidenceFixture(
+                            unit, sources, sibling))
+                        throw std::invalid_argument("changed program fixture");
+                    const auto captured = owner->captureProgramOperands(sources);
+                    if (!captured.captured()
+                        || !owner->mutateProgramOperandEvidenceFixture(sources[1], variant))
+                        throw std::invalid_argument("changed program mutation");
+                    const auto document = wrapper->Document();
+                    const auto time = document->GetData()->Time();
+                    const auto undo = document->GetAvailableUndos();
+                    po::Request resolved;
+                    const auto refusal = owner->resolveProgramOperands(captured.handle, resolved);
+                    const bool refused = refusal == po::Refusal::StaleFence;
+                    checks[prefix + names[variant]] = refused;
+                    typed = typed && refused;
+                    unchanged = unchanged && document->GetData()->Time() == time
+                        && document->GetAvailableUndos() == undo && !document->HasOpenCommand();
+                    ownersRemain = ownersRemain
+                        && retained_solid::HasRecord(sources[0])
+                        && retained_solid::HasRecord(sources[1])
+                        && XCAFDoc_ShapeTool::IsFree(sources[0])
+                        && XCAFDoc_ShapeTool::IsFree(sources[1]);
+                }
+                checks[prefix + "every-refusal-typed"] = typed;
+                checks[prefix + "resolve-never-mutates-or-consumes"] = unchanged;
+                checks[prefix + "left-and-right-source-owners-remain"] = ownersRemain;
+            }
+            checks["both-unit-systems"] = true;
+        } catch (...) { checks["setup-exception"] = false; }
+        return checks;
+    }
+
     static Checks Run(int scenario) noexcept {
         if (scenario == 0) return CodecEvidence();
         if (scenario == 1) return AdmissionEvidence();
@@ -2408,6 +2552,8 @@ struct Probe final {
         if (scenario == 12) return ProgramOperandBooleanGeometryEvidence();
         if (scenario == 13) return ProgramOperandMaterialSelectorEvidence();
         if (scenario == 14) return ProgramOperandAmbiguousCorrespondenceEvidence();
+        if (scenario == 15) return ProgramOperandOwnerCaptureEvidence();
+        if (scenario == 16) return ProgramOperandOwnerChangedInputEvidence();
         return {{"valid-scenario", false}};
     }
 };

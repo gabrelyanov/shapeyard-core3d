@@ -5,6 +5,7 @@
 // supply typed edits; they never supply inspection, build, proof, staging, or
 // final-fence functions.
 #include "PartBooleanDefinition.hxx"
+#include "PartBooleanProgramOperand.hxx"
 #include "CompositeRecipeAttribute.hxx"
 #include "RetainedRecipeSnapshot.hxx"
 #include "NativeEditAuthority.hpp"
@@ -215,6 +216,35 @@ private:
 struct CaptureOutcome final { Receipt receipt; std::shared_ptr<const Capture> handle; };
 struct PrepareOutcome final { Receipt receipt; std::shared_ptr<const PreparedBooleanDocumentChange> handle; };
 
+// A P5 capability is deliberately not a value DTO. Only this owner can mint
+// one, and the labels, authority stamp and whole-document fence never enter a
+// persisted program-operand payload.
+class ProgramOperandCapture final {
+    friend class PartBooleanOwner;
+#if DEBUG
+public:
+    const program_operand::Request& debugRequest() const noexcept { return request; }
+    const DocumentSnapshot& debugBaseline() const noexcept { return baseline; }
+    std::uint64_t debugSession() const noexcept { return session; }
+private:
+#endif
+    ProgramOperandCapture() = default;
+    std::uint64_t ownerNonce = 0, session = 0;
+    const void* documentIdentity = nullptr;
+    authority::Stamp opening;
+    std::array<TDF_Label, 2> sourceOwners;
+    program_operand::Request request;
+    DocumentSnapshot baseline;
+};
+
+struct ProgramOperandCaptureOutcome final {
+    program_operand::Refusal refusal = program_operand::Refusal::RuleNotInstalled;
+    std::shared_ptr<const ProgramOperandCapture> handle;
+    bool captured() const noexcept {
+        return refusal == program_operand::Refusal::None && bool(handle);
+    }
+};
+
 #if DEBUG
 struct ColdLifecycleEvidence final {
     bool firstColdOpen = false;
@@ -239,6 +269,11 @@ public:
     PartBooleanOwner& operator=(const PartBooleanOwner&) = delete;
 
     CaptureOutcome capture(const TDF_Label& visibleCarrier) noexcept;
+    ProgramOperandCaptureOutcome captureProgramOperands(
+        const std::array<TDF_Label, 2>& sourceOwners) noexcept;
+    program_operand::Refusal resolveProgramOperands(
+        const std::shared_ptr<const ProgramOperandCapture>&,
+        program_operand::Request&) const noexcept;
     bool describe(const TDF_Label& visibleCarrier, AnalyticDefinition& output) const noexcept;
     bool describeShell(const TDF_Label& visibleCarrier, ShellEditDefinition& output) const noexcept;
     PrepareOutcome prepare(const std::shared_ptr<const Capture>&,
@@ -258,6 +293,11 @@ public:
 #if DEBUG
     bool installEvidenceFixture(Operation, double, TDF_Label&) noexcept;
     bool installShellEvidenceFixture(double, TDF_Label&) noexcept;
+    bool installProgramOperandEvidenceFixture(
+        double, std::array<TDF_Label, 2>&, TDF_Label&) noexcept;
+    bool mutateProgramOperandEvidenceFixture(const TDF_Label&, unsigned) noexcept;
+    bool debugProgramOperandSnapshot(
+        const std::array<TDF_Label, 2>&, DocumentSnapshot&) const noexcept;
     ColdLifecycleEvidence debugColdLifecycle(const TDF_Label&) noexcept;
 #endif
 
@@ -268,6 +308,11 @@ private:
     Receipt retire(Outcome, const char*, Standard_Integer = 0) noexcept;
     bool captureNativeState(const TDF_Label&, DocumentSnapshot&,
                             composite_recipe::Record* = nullptr) const noexcept;
+    bool captureProgramOperandState(const std::array<TDF_Label, 2>&,
+                                    DocumentSnapshot&) const noexcept;
+    bool captureProgramOperandValue(const TDF_Label&, std::size_t,
+                                    const retained_recipe::OwnerKey&,
+                                    program_operand::Value&) const noexcept;
     bool resolveAnalytic(const TDF_Label&, composite_recipe::Record&,
                          retained_recipe::OwnerSnapshot&, AnalyticDefinition&,
                          retained_recipe::NativeCurrentnessFacts&,
