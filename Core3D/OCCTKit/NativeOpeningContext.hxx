@@ -11,7 +11,9 @@
 #include <string>
 #include <vector>
 
+class OcctDocument;
 class TDF_Data;
+class TDF_Label;
 class TDocStd_Document;
 
 namespace core3d {
@@ -90,6 +92,7 @@ public:
 
 private:
     friend class Context;
+    friend class ::OcctDocument;
     CommandLease(std::shared_ptr<Context>, const Handle(TDocStd_Document)&,
                  const Handle(TDF_Data)&, int, std::uint64_t,
                  bool borrowed = false) noexcept;
@@ -158,6 +161,33 @@ public:
 private:
     friend class core3d::Core3DViewer;
     friend class CommandLease;
+    friend class ::OcctDocument;
+    // A2-only issuer proof. None of these methods is public, and only the
+    // document stager can bind a receipt to its exact session/command epoch.
+    std::shared_ptr<const scene::SceneSnapshot> captureBooleanEditorCheckpoint(
+        const std::string& entity, std::uint32_t width,
+        std::uint32_t height) const noexcept;
+    bool bindBooleanEditorCommit(const std::shared_ptr<CommandLease>&,
+        std::uint64_t serial, std::uint64_t epoch, const std::string& entity) noexcept;
+    // One preparation of the stager's prescribed result after canonical
+    // closed-record validation and before its final exact-byte seal.
+    bool prepareBooleanEditorCommit(std::uint64_t serial, std::uint64_t epoch,
+        const TDF_Label& owner, const TopoDS_Shape& expectedResult,
+        const TopoDS_Shape& previous) noexcept;
+    std::shared_ptr<Context> publishBooleanEditorCommit(
+        const CommittedEditPublication&, std::uint64_t serial, std::uint64_t epoch,
+        std::uint32_t width, std::uint32_t height) noexcept;
+    bool retainBooleanEditorCommit(const CommittedEditPublication&,
+        std::uint64_t serial, std::uint64_t epoch) noexcept;
+    bool finishBooleanEditorCommit(std::uint64_t serial, std::uint64_t epoch) noexcept;
+    std::uint64_t booleanSerial_ = 0, booleanEpoch_ = 0, booleanMarker_ = 0;
+    std::string booleanEntity_;
+    std::optional<authority::Stamp> booleanClosedStamp_;
+    bool booleanResultPrepared_ = false;
+#if DEBUG
+    int booleanFailure_ = 0;
+    int booleanFailureHit_ = 0;
+#endif
     Context(std::weak_ptr<detail::State>, std::uint64_t, Fence) noexcept;
     bool ownsMarker(std::uint64_t marker) const noexcept;
     void finishMarker(std::uint64_t marker, bool recovery,

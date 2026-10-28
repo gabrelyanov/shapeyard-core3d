@@ -168,6 +168,28 @@ __attribute__((objc_subclassing_restricted))
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+//! One explicitly opened A2 editor. Begin is visible/selected-only; only this
+//! opaque native handle can continue after its own proven hide publication.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DBooleanOriginalsEditorSession : NSObject
+@property(nonatomic,readonly) Core3DAuthoredParameterOpeningCurrentness currentness;
+#if DEBUG
+@property(nonatomic,readonly) NSInteger debugFailureSiteHit;
+@property(nonatomic,readonly) NSInteger debugHandoffStage;
+#endif
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DBooleanOriginalsSessionResult : NSObject
+@property(nonatomic,readonly) Core3DBooleanPairStatus status;
+@property(nonatomic,readonly) Core3DBooleanPairRefusal refusal;
+@property(nonatomic,strong,readonly,nullable) Core3DBooleanOriginalsEditorSession *session;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 //! Opaque native-issued paired authority. It exposes no labels, initializer,
 //! command lease, apply operation, or serializable mutation authority.
 __attribute__((objc_subclassing_restricted))
@@ -444,6 +466,29 @@ __attribute__((objc_subclassing_restricted))
 //! fresh document census and publication reconciliation, never another command.
 - (Core3DBooleanPairRecoveryResult *)recoverBooleanSources
     NS_SWIFT_NAME(recoverBooleanSources());
+- (Core3DBooleanOriginalsSessionResult *)beginBooleanOriginalsEditingSessionForEntityIdentifier:
+    (NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(beginBooleanOriginalsEditingSession(entityIdentifier:expected:));
+- (Core3DBooleanPairCaptureResult *)openBooleanOriginalsEditorWithSession:
+    (Core3DBooleanOriginalsEditorSession *)session expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(openBooleanOriginalsEditor(session:expected:));
+- (void)endBooleanOriginalsEditingSession:(Core3DBooleanOriginalsEditorSession *)session
+    NS_SWIFT_NAME(endBooleanOriginalsEditingSession(_:));
+- (BOOL)cancelBooleanOriginalsEdit:(Core3DBooleanPairOpening *)opening
+    NS_SWIFT_NAME(cancelBooleanOriginalsEdit(_:));
+#if DEBUG
+//! Failure-only probes at the real lease close (1), publication (2), and
+//! successor issuance (3). Never fabricate a successful result or authority.
+- (BOOL)debugArmBooleanOriginalsSessionFailure:(Core3DBooleanOriginalsEditorSession *)session
+    site:(NSInteger)site NS_SWIFT_NAME(debugArmBooleanOriginalsSessionFailure(_:site:));
+- (BOOL)debugSelectHiddenBooleanOwner:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugSelectHiddenBooleanOwner(entityIdentifier:));
+- (void)debugCloseBooleanOriginalsDocument NS_SWIFT_NAME(debugCloseBooleanOriginalsDocument());
+- (BOOL)debugBooleanOriginalsRecoveryIssuerProven NS_SWIFT_NAME(debugBooleanOriginalsRecoveryIssuerProven());
+- (NSDictionary<NSString *, NSNumber *> *)debugProbeBooleanOriginalsFences:
+    (Core3DBooleanOriginalsEditorSession *)session afterPrepare:(BOOL)afterPrepare mutation:(NSInteger)mutation
+    NS_SWIFT_NAME(debugProbeBooleanOriginalsFences(_:afterPrepare:mutation:));
+#endif
 //! Open, prepare and apply one retained-v4 effective edit. The two opaque
 //! wrappers are native-issued and cannot be reconstructed from observations.
 - (Core3DBooleanPairCaptureResult *)openBooleanOriginalsEditorForEntityIdentifier:

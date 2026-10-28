@@ -1039,6 +1039,9 @@ namespace core3d {
         void DebugSetTransformInspectorPositionPublicationFallbackMode(
             Standard_Integer mode) noexcept;
 #endif
+#if DEBUG
+        bool debugSelectHiddenBooleanOwner(const std::string& entity) noexcept;
+#endif
     private:
         friend class native_opening::Context;
         friend class native_opening::CommandLease;
@@ -1051,6 +1054,14 @@ namespace core3d {
                 std::uint64_t contextIdentifier,
                 std::uint32_t viewportWidth, std::uint32_t viewportHeight,
                 const native_opening::Fence& openingFence) noexcept;
+        bool prepareBooleanEditorExpectedResult(const std::string& entity,
+            const TDF_Label& owner, const TopoDS_Shape& expectedResult,
+            const TopoDS_Shape& previous) noexcept;
+        bool prepareBooleanEditorHiddenPublication(const std::string& entity) noexcept;
+        std::shared_ptr<const scene::SceneSnapshot> captureBooleanEditorCheckpoint(
+            std::uint64_t contextIdentifier, const native_opening::Fence&,
+            const std::string& entity, std::uint32_t width,
+            std::uint32_t height) noexcept;
         bool nativeOpeningReady(std::uint64_t contextIdentifier) const noexcept;
         //! Reconciles the affected real AIS presentations to a known committed
         //! native edit for the same live document/data as the issuing fence.

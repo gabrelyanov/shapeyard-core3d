@@ -415,6 +415,14 @@ struct SceneSnapshotCaptureFailure final {
     const char* stage = nullptr;
 };
 
+//! Failure from one private export derivative invocation. The optional status
+//! is populated only by the ordinary receiver's actual ProduceFace result and
+//! is reset on every entry. Stage points to a static string.
+struct PrivateExportDerivativeFailure final {
+    std::optional<decal_layer::bake::Status> decalCoverageStatus;
+    const char* stage = nullptr;
+};
+
 class OcctSceneSnapshotBuilder final {
 public:
     using SnapshotPointer = std::shared_ptr<const SceneSnapshot>;
@@ -485,7 +493,8 @@ public:
         const SceneSnapshot& source,
         bool selectedObjectsOnly,
         const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
-        const std::function<bool()>& cancelled
+        const std::function<bool()>& cancelled,
+        PrivateExportDerivativeFailure* failureOut = nullptr
 #ifdef DEBUG
         , DebugPrivateExportDecalFault debugFault =
             DebugPrivateExportDecalFault::None

@@ -528,6 +528,26 @@ struct BooleanOriginalsEdit final {
     bool flag = false;
 };
 
+//! Ephemeral, document-issued editor authority. It is never a selection token
+//! and is not persisted in the feature program or reconstructed from readback.
+class BooleanOriginalsEditorSession final {
+public:
+    struct State;
+    ~BooleanOriginalsEditorSession();
+    BooleanOriginalsEditorSession(const BooleanOriginalsEditorSession&) = delete;
+    BooleanOriginalsEditorSession& operator=(const BooleanOriginalsEditorSession&) = delete;
+private:
+    friend class ::OcctDocument;
+    explicit BooleanOriginalsEditorSession(std::shared_ptr<State>) noexcept;
+    std::shared_ptr<State> state_;
+};
+
+struct BooleanOriginalsSessionReply final {
+    PairStatus status = PairStatus::Refused;
+    PairRefusal refusal = PairRefusal::StaleSource;
+    std::shared_ptr<BooleanOriginalsEditorSession> session;
+};
+
 //! Opaque authority over one current SYPB/4 owner. Capture and preparation
 //! are read-only; only a matching BooleanOriginalsPrepared can reach apply.
 class BooleanOriginalsCapture final {

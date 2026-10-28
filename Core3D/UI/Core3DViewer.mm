@@ -94,6 +94,7 @@
 #include <GProp_GProps.hxx>
 #include <BRep_Tool.hxx>
 #include <Poly_Triangulation.hxx>
+#include <StdPrs_ToolTriangulatedShape.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -2963,12 +2964,139 @@ void Context::finishMarker(std::uint64_t marker, bool recovery,
     if (!state || state->activeContext != identifier_ || state->activeMarker != marker)
         return;
     state->activeMarker = 0;
+    if (!recovery && retainForPublication && booleanMarker_ == marker
+        && booleanSerial_ != 0 && state->owner) {
+        booleanClosedStamp_ = state->owner->getDocument()->CaptureNativePlanningStamp(true);
+    }
     if (recovery) {
         state->recoveryMarker = marker;
         state->recoveryContext = identifier_;
     } else if (!retainForPublication) {
         state->activeContext = 0;
     }
+}
+
+std::shared_ptr<const scene::SceneSnapshot> Context::captureBooleanEditorCheckpoint(
+    const std::string& entity, std::uint32_t width, std::uint32_t height) const noexcept {
+    const auto state = state_.lock();
+    if (!state || !state->owner || state->contexts.count(identifier_) != 1) return {};
+    return state->owner->captureBooleanEditorCheckpoint(
+        identifier_, openingFence_, entity, width, height);
+}
+
+bool Context::bindBooleanEditorCommit(const std::shared_ptr<CommandLease>& lease,
+    std::uint64_t serial, std::uint64_t epoch, const std::string& entity) noexcept {
+    if (!lease || lease->context_.get() != this || !lease->ownsOpenCommand()
+        || !serial || !epoch || entity.empty() || booleanMarker_ != 0) return false;
+    booleanSerial_ = serial; booleanEpoch_ = epoch;
+    booleanMarker_ = lease->marker_; booleanEntity_ = entity;
+    return true;
+}
+
+bool Context::prepareBooleanEditorCommit(std::uint64_t serial, std::uint64_t epoch,
+    const TDF_Label& label, const TopoDS_Shape& expectedResult,
+    const TopoDS_Shape& previous) noexcept {
+    try {
+        const auto state = state_.lock();
+        if (!state || !state->owner || state->contexts.count(identifier_) != 1
+            || !booleanClosedStamp_ || booleanSerial_ != serial || booleanEpoch_ != epoch
+            || !booleanMarker_ || state->nextMarker != booleanMarker_
+            || state->activeContext != identifier_ || state->activeMarker
+            || state->recoveryMarker || state->pendingPublication || booleanResultPrepared_)
+            return false;
+        const auto owner = state->owner->getDocument();
+        if (owner.IsNull() || owner->Document().IsNull()
+            || owner->Document() != openingFence_.document()
+            || owner->Document()->GetData() != openingFence_.data()
+            || owner->Document()->HasOpenCommand()) return false;
+        const auto before = owner->CaptureNativePlanningStamp(true);
+        if (!before || !(*before == *booleanClosedStamp_)
+            || !state->owner->prepareBooleanEditorExpectedResult(
+                booleanEntity_, label, expectedResult, previous)) return false;
+        const auto after = owner->CaptureNativePlanningStamp(true);
+        if (!after || !(*after == *booleanClosedStamp_)
+            || state->activeContext != identifier_ || state->activeMarker
+            || state->nextMarker != booleanMarker_ || state->recoveryMarker
+            || state->pendingPublication) return false;
+        booleanResultPrepared_ = true;
+        return true;
+    } catch (...) { return false; }
+}
+
+std::shared_ptr<Context> Context::publishBooleanEditorCommit(
+    const CommittedEditPublication& publication, std::uint64_t serial,
+    std::uint64_t epoch, std::uint32_t width, std::uint32_t height) noexcept {
+    try {
+        const auto state = state_.lock();
+        if (!state || !state->owner || state->contexts.count(identifier_) != 1
+            || !booleanClosedStamp_ || booleanSerial_ != serial || booleanEpoch_ != epoch
+            || !booleanMarker_ || state->nextMarker != booleanMarker_
+            || state->activeContext != identifier_ || state->activeMarker
+            || state->recoveryMarker || state->pendingPublication
+            || !booleanResultPrepared_
+            || !publication.created.empty() || !publication.removed.empty()
+            || publication.replaced.size() != 1
+            || publication.replaced.front().entityIdentifier != booleanEntity_) return {};
+        const auto owner = state->owner->getDocument();
+        if (owner.IsNull() || owner->Document() != openingFence_.document()
+            || owner->Document()->GetData() != openingFence_.data()) return {};
+        const auto stamp = owner->CaptureNativePlanningStamp(true);
+        if (!stamp || !(*stamp == *booleanClosedStamp_)) return {};
+#if DEBUG
+        if (booleanFailure_ == 2) { booleanFailureHit_ = 2; return {}; }
+#endif
+        if (openingFence_.selection().empty()
+            && !state->owner->prepareBooleanEditorHiddenPublication(booleanEntity_)) return {};
+        if (!publishCommittedEdit(publication)) return {};
+#if DEBUG
+        if (booleanFailure_ == 3) { booleanFailureHit_ = 3; return {}; }
+#endif
+        // Publication may change the real selection but must not absorb a
+        // semantic interaction or another transaction into the successor.
+        const auto after = owner->CaptureNativePlanningStamp(true);
+        if (!after || !(*after == *booleanClosedStamp_)
+            || state->nextMarker != booleanMarker_ || !state->owner->nativeOpeningReady(0))
+            return {};
+        auto successor = state->owner->captureNativeOpeningContext(
+            width, height, openingFence_.sourceReceipts());
+        if (!successor || !successor->captureBooleanEditorCheckpoint(booleanEntity_, width, height))
+            return {};
+        return successor;
+    } catch (...) { return {}; }
+}
+
+bool Context::retainBooleanEditorCommit(const CommittedEditPublication& publication,
+    std::uint64_t serial, std::uint64_t epoch) noexcept {
+    const auto state = state_.lock();
+    if (!state || !state->owner || state->contexts.count(identifier_) != 1
+        || !booleanMarker_ || booleanSerial_ != serial || booleanEpoch_ != epoch
+        || state->nextMarker != booleanMarker_ || state->activeMarker
+        || (state->activeContext && state->activeContext != identifier_)
+        || (state->recoveryContext && state->recoveryContext != identifier_)
+        || (state->publicationContext && state->publicationContext != identifier_)) return false;
+    const auto owner = state->owner->getDocument();
+    if (owner.IsNull() || owner->Document() != openingFence_.document()
+        || owner->Document().IsNull() || owner->Document()->HasOpenCommand()
+        || owner->Document()->GetData() != openingFence_.data()) return false;
+    // The exact committed marker survives successful publication. This is
+    // deliberately separate from the abort-only re-arm API.
+    state->activeContext = identifier_;
+    state->recoveryContext = identifier_;
+    state->recoveryMarker = booleanMarker_;
+    retainUnprovenEdit(publication);
+    return state->activeContext == identifier_ && state->recoveryContext == identifier_
+        && state->recoveryMarker == booleanMarker_ && state->pendingPublication
+        && state->publicationContext == identifier_;
+}
+
+bool Context::finishBooleanEditorCommit(std::uint64_t serial, std::uint64_t epoch) noexcept {
+    const auto state = state_.lock();
+    if (!state || booleanSerial_ != serial || booleanEpoch_ != epoch || !booleanMarker_
+        || state->nextMarker != booleanMarker_ || state->activeContext
+        || state->activeMarker || state->recoveryMarker || state->pendingPublication) return false;
+    state->contexts.erase(identifier_);
+    booleanMarker_ = 0; booleanClosedStamp_.reset();
+    return true;
 }
 
 std::shared_ptr<CommandLease> Context::beginCommandLease(
@@ -3178,6 +3306,7 @@ bool CommandLease::commit() noexcept {
         if (const auto state = context_ ? context_->state_.lock() : nullptr) {
             if (state->debugUnprovenCloseResults > 0) {
                 --state->debugUnprovenCloseResults;
+                if (context_->booleanFailure_ == 1) context_->booleanFailureHit_ = 1;
                 retainRecovery();
                 return false;
             }
@@ -5439,6 +5568,28 @@ Handle(OcctDocument) Core3DViewer::getDocument() {
     return myDoc;
 }
 
+#if DEBUG
+bool Core3DViewer::debugSelectHiddenBooleanOwner(const std::string& entity) noexcept {
+    try {
+        if (![NSThread isMainThread] || myDoc.IsNull() || myContext.IsNull()) return false;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myDoc->Document()->Main());
+        TDF_LabelSequence roots; shapes->GetFreeShapes(roots);
+        TDF_Label target;
+        for (int i = 1; i <= roots.Length(); ++i) {
+            if (myDoc->EntityIdentifierForLabel(roots.Value(i)) != entity) continue;
+            if (!target.IsNull()) return false; target = roots.Value(i);
+        }
+        OcctObjectVisibilityState visibility;
+        if (target.IsNull() || !myDoc->CaptureObjectVisibilityStateForLabel(target, visibility)
+            || visibility.IsEffectivelyVisible()) return false;
+        Handle(AIS_Shape) presentation = new AIS_Shape(XCAFDoc_ShapeTool::GetShape(target));
+        myContext->Display(presentation, Standard_False);
+        myContext->SetSelected(presentation, Standard_False);
+        return myContext->IsSelected(presentation);
+    } catch (...) { return false; }
+}
+#endif
+
 bool Core3DViewer::nativeOpeningReady(std::uint64_t contextIdentifier) const noexcept {
     try {
         if (_objectInteractor == nullptr || _shapeInteractor == nullptr
@@ -5553,6 +5704,138 @@ Core3DViewer::captureNativeOpeningContext(
     if (!fence) { _nativeOpeningState->contexts.erase(identifier); return {}; }
     return std::shared_ptr<native_opening::Context>(new native_opening::Context(
         _nativeOpeningState, identifier, *fence));
+}
+
+bool Core3DViewer::prepareBooleanEditorExpectedResult(const std::string& entity,
+    const TDF_Label& owner, const TopoDS_Shape& expectedResult,
+    const TopoDS_Shape& previous) noexcept {
+    try {
+        if (![NSThread isMainThread] || myDoc.IsNull() || myDoc->Document().IsNull()
+            || myContext.IsNull() || myDoc->Document()->HasOpenCommand()
+            || owner.IsNull() || owner.Data() != myDoc->Document()->GetData()
+            || entity.empty() || expectedResult.IsNull() || previous.IsNull()
+            || !myDoc->IsEditableFreeSimpleDefinitionLabel(owner)) return false;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myDoc->Document()->Main());
+        if (shapes.IsNull()) return false;
+        TDF_LabelSequence roots; shapes->GetFreeShapes(roots);
+        if (roots.Length() > 50000) return false;
+        unsigned matches = 0;
+        for (int index = 1; index <= roots.Length(); ++index) {
+            const auto label = roots.Value(index);
+            if (myDoc->EntityIdentifierForLabel(label) != entity) continue;
+            if (!label.IsEqual(owner) || ++matches != 1) return false;
+        }
+        const auto actual = XCAFDoc_ShapeTool::GetShape(owner);
+        OcctObjectVisibilityState visibility;
+        if (matches != 1 || actual.IsNull() || !actual.IsEqual(expectedResult)
+            || !myDoc->CaptureObjectVisibilityStateForLabel(owner, visibility)) return false;
+        if (visibility.IsEffectivelyVisible()) return true;
+
+        // First hide still has its exact AIS presentation. Later hidden
+        // replay has none. Resolve the same labeled/stale-previous object as
+        // ordinary publication, without changing that presentation or selection.
+        AIS_ListOfInteractive objects;
+        myContext->DisplayedObjects(AIS_KOI_Shape, -1, objects);
+        if (objects.Extent() > 50000) return false;
+        Handle(AIS_Shape) presentation;
+        for (AIS_ListIteratorOfListOfInteractive it(objects); it.More(); it.Next()) {
+            const auto candidate = Handle(AIS_Shape)::DownCast(it.Value());
+            if (candidate.IsNull()) continue;
+            const auto label = myDoc->ShapeLabel(candidate);
+            const auto identifier = label.IsNull() ? std::string()
+                : myDoc->EntityIdentifierForLabel(label);
+            if (identifier == entity) {
+                if (!label.IsEqual(owner)) return false;
+            } else if (!identifier.empty() || !candidate->Shape().IsEqual(previous)) {
+                continue;
+            }
+            if (!presentation.IsNull()) return false;
+            presentation = candidate;
+        }
+        Handle(Prs3d_Drawer) drawer;
+        if (presentation.IsNull()) {
+            if (myContext->DefaultDrawer().IsNull()) return false;
+            // No AIS owns a pending deflection change here. A fresh drawer
+            // inherits the effective context defaults, as a new presentation
+            // would; the defaults' own/previous bookkeeping is not an AIS
+            // ClearOnOwnDeflectionChange event. Leave the live drawer intact.
+            drawer = new Prs3d_Drawer();
+            drawer->SetLink(myContext->DefaultDrawer());
+        } else {
+            drawer = presentation->Attributes();
+        }
+        cut_display::Settings settings, after;
+        const std::atomic_bool stop(false);
+        // Existing AIS must have no pending own deflection change. Prepare
+        // uses these effective production settings in a private drawer and
+        // materializes only the prescribed expected result's derived caches.
+        const bool captured = cut_display::Capture(drawer, settings);
+        const bool prepared = captured && cut_display::Prepare(expectedResult, settings, stop);
+        const bool stable = prepared && cut_display::Capture(drawer, after) && after == settings
+            && XCAFDoc_ShapeTool::GetShape(owner).IsEqual(expectedResult);
+#if DEBUG
+        if (!stable && !drawer.IsNull()) {
+            std::fprintf(stderr, "NB_R3 expected-preparation ais=%d captured=%d prepared=%d stable=%d "
+                "auto=%d ownCoeff=%d ownAngle=%d coeff=%.17g previousCoeff=%.17g "
+                "angle=%.17g previousAngle=%.17g chord=%.17g\n",
+                int(!presentation.IsNull()), int(captured), int(prepared), int(stable),
+                int(drawer->IsAutoTriangulation()), int(drawer->HasOwnDeviationCoefficient()),
+                int(drawer->HasOwnDeviationAngle()), drawer->DeviationCoefficient(),
+                drawer->PreviousDeviationCoefficient(), drawer->DeviationAngle(),
+                drawer->PreviousDeviationAngle(), drawer->MaximalChordialDeviation());
+        }
+#endif
+        return stable;
+    } catch (...) { return false; }
+}
+
+bool Core3DViewer::prepareBooleanEditorHiddenPublication(const std::string& entity) noexcept {
+    try {
+        if (myDoc.IsNull() || myDoc->Document().IsNull() || myContext.IsNull()) return false;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myDoc->Document()->Main());
+        if (shapes.IsNull()) return false;
+        TDF_LabelSequence roots; shapes->GetFreeShapes(roots); TDF_Label label;
+        for (int i = 1; i <= roots.Length(); ++i) {
+            if (myDoc->EntityIdentifierForLabel(roots.Value(i)) != entity) continue;
+            if (!label.IsNull()) return false; label = roots.Value(i);
+        }
+        OcctObjectVisibilityState visibility;
+        if (label.IsNull() || !myDoc->CaptureObjectVisibilityStateForLabel(label, visibility)) return false;
+        if (visibility.IsEffectivelyVisible()) return true;
+        const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
+        if (shape.IsNull()) return false;
+        // A previous hide removed AIS. A later replay still needs the same
+        // derived tessellation that AIS normally produces, before the read-only
+        // snapshot builder can observe it. No display, selection, visibility
+        // attribute, extra command, or history step is introduced here.
+        StdPrs_ToolTriangulatedShape::Tessellate(shape, myContext->DefaultDrawer());
+        return StdPrs_ToolTriangulatedShape::IsTriangulated(shape);
+    } catch (...) { return false; }
+}
+
+std::shared_ptr<const scene::SceneSnapshot> Core3DViewer::captureBooleanEditorCheckpoint(
+    std::uint64_t identifier, const native_opening::Fence& fence,
+    const std::string& entity, std::uint32_t width, std::uint32_t height) noexcept {
+    try {
+        const auto current = recaptureNativeOpeningFence(identifier, width, height,
+            fence.sourceReceipts());
+        if (!current || !native_opening::SameFence(fence, *current)) return {};
+        const auto scene = captureSceneSnapshot(width, height);
+        if (!scene || scene->selectionMode != scene::ElementKind::Object
+            || scene->selection.selected.size() > 1) return {};
+        if (!scene->selection.selected.empty()) {
+            const auto& selected = scene->selection.selected.front();
+            if (selected.kind != scene::ElementKind::Object || selected.entityIdentifier != entity)
+                return {};
+        }
+        unsigned count = 0;
+        for (const auto& item : scene->instances) {
+            if (item.entityIdentifier != entity) continue;
+            if (item.role != scene::RenderRole::Model || item.meshIndex >= scene->meshes.size()) return {};
+            ++count;
+        }
+        return count == 1 ? scene : nullptr;
+    } catch (...) { return {}; }
 }
 
 std::shared_ptr<native_opening::Context>

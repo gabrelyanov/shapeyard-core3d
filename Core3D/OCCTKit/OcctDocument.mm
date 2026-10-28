@@ -8793,6 +8793,7 @@ void OcctDocument::CloseNativeSession() noexcept
 {
     if (myNativeSessionClosed) return;
     myNativeSessionClosed = true;
+    RetireBooleanOriginalsEditor(true);
     if (myRetainedFeatureOwner) myRetainedFeatureOwner->retireForDocumentReplacement();
     myRetainedFeatureOwner.reset();
     // D253: treatment history companions are bound to this session's live TDF
@@ -8922,7 +8923,8 @@ OcctDocument::PartBooleanOwnerService() noexcept { return myPartBooleanOwner.get
 const core3d::part_boolean::owner::PartBooleanOwner*
 OcctDocument::PartBooleanOwnerService() const noexcept { return myPartBooleanOwner.get(); }
 bool OcctDocument::NativeBooleanOwnerBlocksOtherWork() const noexcept {
-    return (myPartBooleanOwner && myPartBooleanOwner->blocksOtherWork())
+    return myBooleanOriginalsRecovery
+        || (myPartBooleanOwner && myPartBooleanOwner->blocksOtherWork())
         || (myRetainedFeatureOwner && myRetainedFeatureOwner->blocksOtherWork());
 }
 core3d::retained_feature::OcafOwnerService*
@@ -11133,8 +11135,28 @@ struct core3d::authored_parameter::PairRecoveryState final {
 #endif
 };
 
+struct core3d::authored_parameter::BooleanOriginalsEditorSession::State final {
+    enum class Phase { Idle, Captured, Prepared, Applying, Closed, Stale, Recovery };
+    OcctDocument* owner = nullptr;
+    std::uint64_t serial = 0, epoch = 0;
+    Phase phase = Phase::Idle;
+    bool notifying = false;
+    bool recoveryIssuerProven = false;
+    std::shared_ptr<core3d::native_opening::Context> recoveryIssuer;
+    std::uint32_t width = 0, height = 0;
+    std::shared_ptr<const core3d::authored_parameter::BooleanOriginalsCapture> baseline;
+    std::shared_ptr<const core3d::scene::SceneSnapshot> checkpoint;
+#if DEBUG
+    int failure = 0, failureHit = 0, handoffStage = 0;
+    unsigned preparationsStarted = 0, commandsStarted = 0;
+#endif
+};
+
 struct core3d::authored_parameter::BooleanOriginalsCapture::State final {
     const OcctDocument* owner = nullptr;
+    std::weak_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession> editorSession;
+    std::uint64_t commandEpoch = 0;
+    mutable bool commandConsumed = false;
     Handle(TDocStd_Document) document;
     Handle(TDF_Data) data;
     std::shared_ptr<core3d::native_opening::Context> context;
@@ -11195,6 +11217,9 @@ core3d::authored_parameter::PairPrepared::~PairPrepared() = default;
 core3d::authored_parameter::PairRecovery::PairRecovery(
     std::shared_ptr<PairRecoveryState> state) noexcept : state_(std::move(state)) {}
 core3d::authored_parameter::PairRecovery::~PairRecovery() = default;
+core3d::authored_parameter::BooleanOriginalsEditorSession::BooleanOriginalsEditorSession(
+    std::shared_ptr<State> state) noexcept : state_(std::move(state)) {}
+core3d::authored_parameter::BooleanOriginalsEditorSession::~BooleanOriginalsEditorSession() = default;
 core3d::authored_parameter::BooleanOriginalsCapture::BooleanOriginalsCapture(
     std::shared_ptr<State> state) noexcept : state_(std::move(state)) {}
 core3d::authored_parameter::BooleanOriginalsCapture::~BooleanOriginalsCapture() = default;
@@ -12921,8 +12946,325 @@ Standard_Integer OcctDocument::DebugAppendBooleanOriginalsSuffix(
 }
 #endif
 
+namespace {
+bool SameBooleanEditorCheckpoint(const core3d::scene::SceneSnapshot& a,
+    const core3d::scene::SceneSnapshot& b, const std::string& entity) noexcept {
+    if (a.publicationSourceIdentifier != b.publicationSourceIdentifier
+        || a.revisions.documentGeneration != b.revisions.documentGeneration
+        || a.revisions.model != b.revisions.model
+        || a.revisions.presentation != b.revisions.presentation
+        || a.metersPerUnit != b.metersPerUnit || a.selectionMode != b.selectionMode
+        || a.selection.selected.size() != b.selection.selected.size()) return false;
+    for (std::size_t i = 0; i < a.selection.selected.size(); ++i) {
+        const auto& x = a.selection.selected[i]; const auto& y = b.selection.selected[i];
+        if (x.entityIdentifier != y.entityIdentifier || x.kind != y.kind
+            || x.topologyIndex != y.topologyIndex || x.geometryRevision != y.geometryRevision)
+            return false;
+    }
+    const core3d::scene::InstanceSnapshot *x = nullptr, *y = nullptr;
+    for (const auto& item : a.instances) if (item.entityIdentifier == entity) {
+        if (x) return false; x = &item;
+    }
+    for (const auto& item : b.instances) if (item.entityIdentifier == entity) {
+        if (y) return false; y = &item;
+    }
+    return x && y && x->role == core3d::scene::RenderRole::Model && x->role == y->role
+        && x->meshIndex < a.meshes.size() && y->meshIndex < b.meshes.size()
+        && a.meshes[x->meshIndex].definitionIdentifier == b.meshes[y->meshIndex].definitionIdentifier
+        && a.meshes[x->meshIndex].geometryRevision == b.meshes[y->meshIndex].geometryRevision
+        && x->worldFromObject.values == y->worldFromObject.values
+        && x->visible == y->visible && x->selectable == y->selectable && x->selected == y->selected;
+}
+
+bool ExactBooleanEditorRoot(const OcctDocument& wrapper, const TDF_Label& label,
+    const std::string& entity) noexcept {
+    try {
+        const auto document = wrapper.Document();
+        if (document.IsNull() || label.IsNull() || label.Data() != document->GetData()) return false;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (shapes.IsNull()) return false;
+        TDF_LabelSequence roots; shapes->GetFreeShapes(roots); unsigned count = 0;
+        for (int i = 1; i <= roots.Length(); ++i) {
+            if (wrapper.EntityIdentifierForLabel(roots.Value(i)) != entity) continue;
+            if (!roots.Value(i).IsEqual(label)) return false;
+            ++count;
+        }
+        return count == 1;
+    } catch (...) { return false; }
+}
+}
+
+core3d::authored_parameter::BooleanOriginalsSessionReply
+OcctDocument::BeginBooleanOriginalsEditingSession(
+    const std::shared_ptr<core3d::native_opening::Context>& context,
+    const TDF_Label& owner, std::uint32_t width, std::uint32_t height) noexcept {
+    namespace ap = core3d::authored_parameter;
+    ap::BooleanOriginalsSessionReply reply;
+    try {
+        if (![NSThread isMainThread] || myBooleanOriginalsEditor || myBooleanOriginalsRecovery
+            || myNextBooleanOriginalsEditor == UINT64_MAX || !context || !width || !height)
+            return reply;
+        const auto captured = CaptureBooleanOriginals(context, owner);
+        if (!captured.capture) { reply.refusal = captured.refusal; return reply; }
+        const auto& source = *captured.capture->state_;
+        const auto checkpoint = context->captureBooleanEditorCheckpoint(source.entityIdentifier, width, height);
+        // Native issuance independently proves the actual visible sole owner.
+        if (!checkpoint || checkpoint->selection.selected.size() != 1
+            || checkpoint->selection.selected.front().entityIdentifier != source.entityIdentifier
+            || !source.visibility.IsEffectivelyVisible()
+            || !ExactBooleanEditorRoot(*this, owner, source.entityIdentifier)) return reply;
+        for (const auto& item : checkpoint->instances)
+            if (item.entityIdentifier == source.entityIdentifier && (!item.visible || !item.selectable))
+                return reply;
+        auto state = std::make_shared<ap::BooleanOriginalsEditorSession::State>();
+        state->owner = this; state->serial = ++myNextBooleanOriginalsEditor;
+        state->width = width; state->height = height;
+        state->baseline = captured.capture; state->checkpoint = checkpoint;
+        myBooleanOriginalsEditor = std::shared_ptr<ap::BooleanOriginalsEditorSession>(
+            new ap::BooleanOriginalsEditorSession(std::move(state)));
+        reply.status = ap::PairStatus::Captured; reply.refusal = ap::PairRefusal::None;
+        reply.session = myBooleanOriginalsEditor; return reply;
+    } catch (...) { return reply; }
+}
+
+bool OcctDocument::ValidateBooleanOriginalsEditingSession(
+    const std::shared_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession>& session,
+    std::uint32_t width, std::uint32_t height) noexcept {
+    using Phase = core3d::authored_parameter::BooleanOriginalsEditorSession::State::Phase;
+    if (![NSThread isMainThread] || !session || !session->state_
+        || session != myBooleanOriginalsEditor || session->state_->owner != this
+        || myBooleanOriginalsRecovery) return false;
+    auto& state = *session->state_;
+    if (state.phase != Phase::Idle && state.phase != Phase::Captured && state.phase != Phase::Prepared)
+        return false;
+    try {
+        if (state.baseline && state.baseline->state_ && state.checkpoint) {
+            const auto& source = *state.baseline->state_;
+            core3d::composite_recipe::Record record;
+            const auto current = source.context
+                ? source.context->captureBooleanEditorCheckpoint(source.entityIdentifier, width, height) : nullptr;
+            if (current && SameBooleanEditorCheckpoint(*state.checkpoint, *current, source.entityIdentifier)
+                && ExactBooleanEditorRoot(*this, source.label, source.entityIdentifier)
+                && OriginalsCurrent(*this, source, record)) return true;
+        }
+    } catch (...) {}
+    state.phase = Phase::Stale;
+    myBooleanOriginalsEditor.reset();
+    return false;
+}
+
+core3d::authored_parameter::Currentness OcctDocument::BooleanOriginalsSessionCurrentness(
+    const std::shared_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession>& session) noexcept {
+    using namespace core3d::authored_parameter;
+    if (!session || !session->state_ || session->state_->owner != this) return Currentness::Stale;
+    const auto& state = *session->state_;
+    if (state.phase == BooleanOriginalsEditorSession::State::Phase::Recovery) return Currentness::Recovery;
+    if (state.phase == BooleanOriginalsEditorSession::State::Phase::Closed) return Currentness::Cancelled;
+    return ValidateBooleanOriginalsEditingSession(session, state.width, state.height)
+        ? Currentness::Current : Currentness::Stale;
+}
+
+void OcctDocument::EndBooleanOriginalsEditingSession(
+    const std::shared_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession>& session) noexcept {
+    using Phase = core3d::authored_parameter::BooleanOriginalsEditorSession::State::Phase;
+    if (![NSThread isMainThread] || !session || !session->state_ || session->state_->owner != this) return;
+    // Closing a UI does not settle unknown native work or discard its issuer.
+    if (session->state_->phase == Phase::Recovery || session->state_->phase == Phase::Applying) return;
+    session->state_->phase = Phase::Closed;
+    if (myBooleanOriginalsEditor == session) myBooleanOriginalsEditor.reset();
+}
+
+void OcctDocument::RetireBooleanOriginalsEditor(bool closing) noexcept {
+    if (closing) {
+        if (myBooleanOriginalsEditor) myBooleanOriginalsEditor->state_->phase =
+            core3d::authored_parameter::BooleanOriginalsEditorSession::State::Phase::Closed;
+        myBooleanOriginalsEditor.reset(); myBooleanOriginalsRecovery = false;
+    } else EndBooleanOriginalsEditingSession(myBooleanOriginalsEditor);
+}
+
+core3d::authored_parameter::BooleanOriginalsCaptureReply
+OcctDocument::CaptureBooleanOriginalsForSession(
+    const std::shared_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession>& session,
+    std::uint32_t width, std::uint32_t height) noexcept {
+    using namespace core3d::authored_parameter;
+    BooleanOriginalsCaptureReply reply;
+    reply.refusal = PairRefusal::StaleSource;
+    if (!ValidateBooleanOriginalsEditingSession(session, width, height)) return reply;
+    auto& state = *session->state_;
+    if (state.phase != BooleanOriginalsEditorSession::State::Phase::Idle || state.notifying
+        || state.epoch == UINT64_MAX)
+        return reply;
+    try {
+        auto command = std::make_shared<BooleanOriginalsCapture::State>(*state.baseline->state_);
+        command->editorSession = session; command->commandEpoch = ++state.epoch;
+        command->commandConsumed = false;
+        reply.capture = std::shared_ptr<const BooleanOriginalsCapture>(new BooleanOriginalsCapture(command));
+        state.phase = BooleanOriginalsEditorSession::State::Phase::Captured;
+        reply.status = PairStatus::Captured; reply.refusal = PairRefusal::None;
+        return reply;
+    } catch (...) { EndBooleanOriginalsEditingSession(session); return reply; }
+}
+
+#if DEBUG
+void OcctDocument::DebugCloseBooleanOriginalsDocument() noexcept { CloseNativeSession(); }
+std::map<std::string, bool> OcctDocument::DebugProbeBooleanOriginalsFences(
+    const std::shared_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession>& editor,
+    bool afterPrepare, int mutation) noexcept {
+    namespace ap = core3d::authored_parameter;
+    namespace cr = core3d::composite_recipe;
+    std::map<std::string, bool> proof{{"captured", false}, {"prepared", false},
+        {"mutationObserved", false}, {"refused", false},
+        {"beforeGeometryAndCommand", false}, {"nativeStateUnchanged", false}};
+    try {
+        if (!editor || !editor->state_ || mutation < 0 || mutation > 4) return proof;
+        const auto captured = CaptureBooleanOriginalsForSession(editor, editor->state_->width, editor->state_->height);
+        if (!captured.capture) return proof;
+        proof["captured"] = true;
+        const auto& source = *captured.capture->state_;
+        ap::BooleanOriginalsEdit edit;
+        edit.kind = ap::BooleanOriginalsEditKind::Visibility; edit.flag = false;
+        const std::atomic_bool stop(false);
+        ap::BooleanOriginalsPrepareReply prepared;
+        if (afterPrepare) {
+            prepared = PrepareBooleanOriginalsEdit(captured.capture, edit, stop);
+            if (!prepared.prepared) return proof;
+        }
+        proof["prepared"] = !afterPrepare || bool(prepared.prepared);
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        Handle(cr::Attribute) attribute;
+        if (shapes.IsNull() || !source.recordLabel.FindAttribute(cr::AttributeID(), attribute)
+            || attribute.IsNull() || !attribute->value()) return proof;
+        const double k = 0.001 / source.metersPerUnit;
+        if (mutation == 0) {
+            XCAFDoc_DocumentTool::SetLengthUnit(myOcafDoc, source.metersPerUnit * 2.0);
+            double actual = 0;
+            proof["mutationObserved"] = XCAFDoc_DocumentTool::GetLengthUnit(myOcafDoc, actual)
+                && actual == source.metersPerUnit * 2.0;
+        } else if (mutation == 1) {
+            auto corrupt = std::make_shared<cr::Payload>(*attribute->value());
+            if (corrupt->bytes.empty()) return proof;
+            corrupt->bytes.back() ^= 1;
+            attribute->value_ = corrupt;
+            proof["mutationObserved"] = attribute->value()->bytes != source.payload->bytes;
+        } else if (mutation == 2) {
+            const TopoDS_Shape replacement = BRepPrimAPI_MakeBox(47 * k, 30 * k, 20 * k).Shape();
+            shapes->SetShape(source.label, replacement);
+            std::string bytes;
+            proof["mutationObserved"] = core3d::retained_part_boolean::ExactShapeBytes(
+                XCAFDoc_ShapeTool::GetShape(source.label), bytes)
+                && std::vector<std::uint8_t>(bytes.begin(), bytes.end()) != source.resultBytes;
+        } else if (mutation == 3) {
+            const TDF_Label duplicate = shapes->NewShape();
+            shapes->SetShape(duplicate, BRepPrimAPI_MakeBox(3 * k, 4 * k, 5 * k).Shape());
+            TDataStd_AsciiString::Set(duplicate, EntityIdentifierAttributeID(),
+                TCollection_AsciiString(source.entityIdentifier.c_str()));
+            TDataStd_AsciiString::Set(duplicate, DefinitionIdentifierAttributeID(),
+                TCollection_AsciiString(NSUUID.UUID.UUIDString.UTF8String));
+            TDF_LabelSequence roots; shapes->GetFreeShapes(roots); unsigned count = 0;
+            for (int i = 1; i <= roots.Length(); ++i)
+                if (EntityIdentifierForLabel(roots.Value(i)) == source.entityIdentifier) ++count;
+            proof["mutationObserved"] = count == 2;
+        } else {
+            TDataStd_AsciiString::Set(source.label, EntityIdentifierAttributeID(),
+                TCollection_AsciiString(NSUUID.UUID.UUIDString.UTF8String));
+            TDF_LabelSequence roots; shapes->GetFreeShapes(roots); unsigned count = 0;
+            for (int i = 1; i <= roots.Length(); ++i)
+                if (EntityIdentifierForLabel(roots.Value(i)) == source.entityIdentifier) ++count;
+            proof["mutationObserved"] = count == 0
+                && EntityIdentifierForLabel(source.label) != source.entityIdentifier;
+        }
+        // Independent raw census still works when the semantic record or
+        // identity is deliberately malformed. No validation fallback is used.
+        const auto census = [&]() {
+            std::vector<std::string> values;
+            double unit = 0; std::uint64_t bits = 0;
+            if (!XCAFDoc_DocumentTool::GetLengthUnit(myOcafDoc, unit)) return values;
+            std::memcpy(&bits, &unit, sizeof(bits));
+            values.push_back(std::to_string(bits));
+            values.push_back(std::to_string(myOcafDoc->GetAvailableUndos()));
+            values.push_back(std::to_string(myOcafDoc->GetAvailableRedos()));
+            values.push_back(std::to_string(myOcafDoc->GetData()->Time()));
+            values.push_back(std::to_string(myOcafDoc->GetData()->Transaction()));
+            values.emplace_back(attribute->value()->bytes.begin(), attribute->value()->bytes.end());
+            TDF_LabelSequence roots; shapes->GetFreeShapes(roots);
+            for (int i = 1; i <= roots.Length(); ++i) {
+                const auto root = roots.Value(i); std::string bytes;
+                if (!core3d::retained_part_boolean::ExactShapeBytes(XCAFDoc_ShapeTool::GetShape(root), bytes))
+                    return std::vector<std::string>();
+                values.push_back(PairLabelEntry(root)); values.push_back(EntityIdentifierForLabel(root));
+                values.push_back(DefinitionIdentifierForLabel(root)); values.push_back(bytes);
+            }
+            return values;
+        };
+        const auto before = census();
+        const auto preparations = editor->state_->preparationsStarted;
+        const auto commands = editor->state_->commandsStarted;
+        OcctObjectVisibilityState visibilityBefore, visibilityAfter;
+        OcctScalarAppearanceState appearanceBefore, appearanceAfter;
+        OcctSavedGroupState groupsBefore, groupsAfter;
+        const bool observed = CaptureObjectVisibilityStateForLabel(source.label, visibilityBefore)
+            && CaptureWholeObjectScalarAppearance(myOcafDoc, source.label, appearanceBefore)
+            && CaptureSavedGroups(groupsBefore);
+        if (afterPrepare) {
+            proof["refused"] = ApplyBooleanOriginalsEdit(prepared.prepared,
+                editor->state_->width, editor->state_->height).status == ap::PairApplyStatus::Refused;
+        } else {
+            proof["refused"] = PrepareBooleanOriginalsEdit(captured.capture, edit, stop).status == ap::PairStatus::Refused;
+        }
+        proof["beforeGeometryAndCommand"] = preparations == editor->state_->preparationsStarted
+            && commands == editor->state_->commandsStarted && !myOcafDoc->HasOpenCommand();
+        proof["nativeStateUnchanged"] = !before.empty() && before == census() && observed
+            && CaptureObjectVisibilityStateForLabel(source.label, visibilityAfter)
+            && visibilityBefore.IsEqual(visibilityAfter)
+            && CaptureWholeObjectScalarAppearance(myOcafDoc, source.label, appearanceAfter)
+            && appearanceBefore.IsEqual(appearanceAfter)
+            && CaptureSavedGroups(groupsAfter) && groupsBefore.IsEqual(groupsAfter);
+        return proof;
+    } catch (...) { return proof; }
+}
+
+int OcctDocument::DebugBooleanOriginalsHandoffStage(
+    const std::shared_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession>& session) const noexcept {
+    return session && session->state_ && session->state_->owner == this ? session->state_->handoffStage : 0;
+}
+int OcctDocument::DebugBooleanOriginalsSessionFailureHit(
+    const std::shared_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession>& session) const noexcept {
+    return session && session->state_ && session->state_->owner == this ? session->state_->failureHit : 0;
+}
+bool OcctDocument::DebugBooleanOriginalsRecoveryIssuerProven() const noexcept {
+    return myBooleanOriginalsRecovery && myBooleanOriginalsEditor
+        && myBooleanOriginalsEditor->state_->recoveryIssuerProven
+        && myBooleanOriginalsEditor->state_->recoveryIssuer;
+}
+bool OcctDocument::DebugArmBooleanOriginalsSessionFailure(
+    const std::shared_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession>& session,
+    int site) noexcept {
+    if (site < 1 || site > 3 || !session || !session->state_
+        || !ValidateBooleanOriginalsEditingSession(session, session->state_->width, session->state_->height)
+        || session->state_->failure) return false;
+    session->state_->failure = site; return true;
+}
+#endif
+
 core3d::authored_parameter::BooleanOriginalsCaptureReply
 OcctDocument::CaptureBooleanOriginals(
+    const std::shared_ptr<core3d::native_opening::Context>& context,
+    const TDF_Label& owner) noexcept {
+    core3d::authored_parameter::BooleanOriginalsCaptureReply refused;
+    refused.refusal = core3d::authored_parameter::PairRefusal::StaleSource;
+    if (!context || owner.IsNull()) return refused;
+    const auto entity = EntityIdentifierForLabel(owner);
+    const auto scene = context->captureBooleanEditorCheckpoint(entity, 64, 64);
+    if (!scene || scene->selection.selected.size() != 1
+        || scene->selection.selected.front().entityIdentifier != entity
+        || !ExactBooleanEditorRoot(*this, owner, entity)) return refused;
+    for (const auto& item : scene->instances)
+        if (item.entityIdentifier == entity && (!item.visible || !item.selectable)) return refused;
+    return CaptureBooleanOriginalsState(context, owner);
+}
+
+core3d::authored_parameter::BooleanOriginalsCaptureReply
+OcctDocument::CaptureBooleanOriginalsState(
     const std::shared_ptr<core3d::native_opening::Context>& context,
     const TDF_Label& owner) noexcept {
     namespace ap = core3d::authored_parameter;
@@ -12987,20 +13329,43 @@ OcctDocument::PrepareBooleanOriginalsEdit(
     namespace cr = core3d::composite_recipe;
     namespace pb = core3d::part_boolean;
     ap::BooleanOriginalsPrepareReply reply;
+    using Phase = ap::BooleanOriginalsEditorSession::State::Phase;
+    std::shared_ptr<ap::BooleanOriginalsEditorSession> editor;
+    const auto retireCommand = [&]() {
+        if (!editor) return;
+        capture->state_->commandConsumed = true;
+        if (editor->state_->phase == Phase::Captured
+            && editor->state_->epoch == capture->state_->commandEpoch) editor->state_->phase = Phase::Idle;
+    };
     const auto refuse = [&](ap::PairRefusal reason) {
+        retireCommand();
         reply.status = ap::PairStatus::Refused; reply.refusal = reason; return reply;
     };
     try {
         if (![NSThread isMainThread]) return refuse(ap::PairRefusal::WrongThread);
         if (cancelled.load()) {
+            if (capture && capture->state_) EndBooleanOriginalsEditingSession(capture->state_->editorSession.lock());
             reply.status = ap::PairStatus::Cancelled;
             reply.refusal = ap::PairRefusal::Cancelled; return reply;
         }
         if (!capture || !capture->state_ || capture->state_->owner != this)
             return refuse(ap::PairRefusal::ForeignDocument);
+        if (capture->state_->commandEpoch) {
+            const auto candidate = capture->state_->editorSession.lock();
+            if (!candidate || capture->state_->commandConsumed
+                || candidate->state_->epoch != capture->state_->commandEpoch)
+                return refuse(ap::PairRefusal::StaleSource);
+            editor = candidate;
+            if (editor->state_->phase != Phase::Captured
+                || !ValidateBooleanOriginalsEditingSession(editor, editor->state_->width, editor->state_->height))
+                return refuse(ap::PairRefusal::StaleSource);
+        }
         cr::Record record;
         if (!OriginalsCurrent(*this, *capture->state_, record))
             return refuse(ap::PairRefusal::StaleSource);
+#if DEBUG
+        if (editor) ++editor->state_->preparationsStarted;
+#endif
         auto payload = std::make_shared<cr::Payload>(*record.value);
         auto* feature = payload->definition.nodes.size() >= 3
             ? std::get_if<cr::FeatureNode>(&payload->definition.nodes[2].value)
@@ -13201,6 +13566,7 @@ OcctDocument::PrepareBooleanOriginalsEdit(
         if (edit.kind == ap::BooleanOriginalsEditKind::Visibility && input == 0) {
             prepared->stageVisibility = true; prepared->visible = edit.flag;
         }
+        if (editor) editor->state_->phase = Phase::Prepared;
         reply.status = ap::PairStatus::Prepared;
         reply.refusal = ap::PairRefusal::None;
         reply.prepared = std::shared_ptr<const ap::BooleanOriginalsPrepared>(
@@ -13338,7 +13704,34 @@ OcctDocument::ApplyBooleanOriginalsEdit(
     namespace cr = core3d::composite_recipe;
     namespace pb = core3d::part_boolean;
     ap::PairApplyReply reply;
+    using Phase = ap::BooleanOriginalsEditorSession::State::Phase;
+    std::shared_ptr<ap::BooleanOriginalsEditorSession> editor;
+    std::shared_ptr<core3d::native_opening::Context> issuer;
+    core3d::native_opening::CommittedEditPublication editorPublication;
+    bool commandStarted = false;
+    const auto unknown = [&]() {
+        if (editor) {
+            // Retain before enabling the document-wide fence (the issuer must
+            // still be allowed to verify its own exact committed marker).
+            const bool retained = issuer && issuer->retainBooleanEditorCommit(
+                editorPublication, editor->state_->serial, editor->state_->epoch);
+            editor->state_->recoveryIssuerProven = retained;
+            editor->state_->recoveryIssuer = issuer;
+#if DEBUG
+            editor->state_->failureHit = issuer ? issuer->booleanFailureHit_ : 0;
+#endif
+            editor->state_->phase = Phase::Recovery;
+            myBooleanOriginalsEditor = editor;
+            myBooleanOriginalsRecovery = true;
+        }
+        reply.status = ap::PairApplyStatus::OutcomeUnknown;
+        reply.refusal = ap::PairRefusal::None; return reply;
+    };
     const auto refuse = [&](ap::PairRefusal reason) {
+        if (editor) {
+            if (editor->state_->phase == Phase::Applying) editor->state_->phase = Phase::Prepared;
+            EndBooleanOriginalsEditingSession(editor);
+        }
         reply.status = ap::PairApplyStatus::Refused; reply.refusal = reason; return reply;
     };
     try {
@@ -13350,6 +13743,16 @@ OcctDocument::ApplyBooleanOriginalsEdit(
             || state.capture->state_->owner != this)
             return refuse(ap::PairRefusal::ForeignDocument);
         const auto& capture = *state.capture->state_;
+        if (capture.commandEpoch) {
+            const auto candidate = capture.editorSession.lock();
+            if (!candidate || capture.commandConsumed || candidate->state_->epoch != capture.commandEpoch)
+                return refuse(ap::PairRefusal::StaleSource);
+            editor = candidate;
+            if (editor->state_->phase != Phase::Prepared
+                || !ValidateBooleanOriginalsEditingSession(editor, viewportWidth, viewportHeight))
+                return refuse(ap::PairRefusal::StaleSource);
+            capture.commandConsumed = true;
+        }
         cr::Record current;
         if (!OriginalsCurrent(*this, capture, current))
             return refuse(ap::PairRefusal::StaleSource);
@@ -13360,10 +13763,30 @@ OcctDocument::ApplyBooleanOriginalsEdit(
         const TopoDS_Shape previous = current.current;
         std::shared_ptr<const cr::Payload> payload = state.payload;
         TopoDS_Shape result = state.result;
+        issuer = capture.context;
+        editorPublication.replaced.push_back({capture.entityIdentifier, previous});
+        if (editor) editor->state_->phase = Phase::Applying;
+#if DEBUG
+        if (editor) ++editor->state_->commandsStarted;
+#endif
         auto lease = capture.context->beginCommandLease(
             capture.context->openingFence(), viewportWidth, viewportHeight);
         if (!lease || !lease->ownsOpenCommand())
             return refuse(ap::PairRefusal::StaleSource);
+        commandStarted = true;
+        if (editor && !issuer->bindBooleanEditorCommit(lease, editor->state_->serial,
+                editor->state_->epoch, capture.entityIdentifier)) {
+            if (!lease->abort()) return unknown();
+            return refuse(ap::PairRefusal::StaleSource);
+        }
+#if DEBUG
+        if (editor) {
+            issuer->booleanFailure_ = editor->state_->failure;
+            if (editor->state_->failure == 1) issuer->debugReportNextCloseUnproven();
+            editor->state_->failure = 0;
+        }
+#endif
+        auto sealed = capture;
         bool staged = false;
         try {
             const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
@@ -13451,6 +13874,18 @@ OcctDocument::ApplyBooleanOriginalsEdit(
                         throw Standard_Failure("originals material restore");
                 }
             }
+            if (editor) {
+                // Replay still proves the edited feature program. When that
+                // replay is exactly the current geometry, keep its already
+                // published native shape and derived cache. No geometry
+                // mismatch is admitted, and metadata/recipe/history still
+                // stage and receive the same exact post-close proof below.
+                std::string rebuiltBytes;
+                if (!core3d::retained_part_boolean::ExactShapeBytes(result, rebuiltBytes))
+                    throw Standard_Failure("originals result identity proof");
+                if (std::vector<std::uint8_t>(rebuiltBytes.begin(), rebuiltBytes.end()) == capture.resultBytes)
+                    result = previous;
+            }
             shapes->SetShape(capture.label, result);
             if (!StagePartBooleanPayload(capture.recordLabel, payload))
                 throw Standard_Failure("originals payload stage");
@@ -13487,6 +13922,14 @@ OcctDocument::ApplyBooleanOriginalsEdit(
                     int(observed), int(originals), int(effective), int(identity), int(geometry), int(visible));
                 throw Standard_Failure("originals readback");
             }
+            if (editor) {
+                if (!CaptureSavedGroups(sealed.groups)
+                    || !CaptureObjectVisibilityStateForLabel(capture.label, sealed.visibility)
+                    || !PairCaptureOriginalsAppearance(*this, capture.label, sealed.appearance))
+                    throw Standard_Failure("originals successor read-set");
+                sealed.payload = payload;
+                sealed.undoDepth = beforeUndos + 1; sealed.redoDepth = 0;
+            }
             staged = true;
         } catch (const Standard_Failure& failure) {
             std::fprintf(stderr, "NCOM_A2_APPLY unit=%.17g stage=%s\n",
@@ -13495,39 +13938,137 @@ OcctDocument::ApplyBooleanOriginalsEdit(
         } catch (...) { staged = false; }
         if (!staged) {
             if (!lease->abort()) {
-                reply.status = ap::PairApplyStatus::OutcomeUnknown;
-                reply.refusal = ap::PairRefusal::BadEncoding; return reply;
+                return unknown();
             }
             return refuse(ap::PairRefusal::BadEncoding);
         }
+#if DEBUG
+        if (editor) editor->state_->handoffStage = 1;
+#endif
         if (!lease->commit()) {
             core3d::native_opening::CommittedEditPublication publication;
             publication.replaced.push_back({capture.entityIdentifier, previous});
             capture.context->retainUnprovenEdit(publication);
-            reply.status = ap::PairApplyStatus::OutcomeUnknown;
-            reply.refusal = ap::PairRefusal::None; return reply;
+            return unknown();
         }
+#if DEBUG
+        if (editor) editor->state_->handoffStage = 2;
+#endif
         cr::Record committed;
         if (myOcafDoc->HasOpenCommand()
             || myOcafDoc->GetAvailableUndos() != beforeUndos + 1
             || !cr::Read(myOcafDoc, capture.label, committed) || !committed.value
             || committed.value->bytes != payload->bytes
             || !pb::owner::ValidateOriginalsRecord(myOcafDoc, committed)) {
-            reply.status = ap::PairApplyStatus::OutcomeUnknown;
-            reply.refusal = ap::PairRefusal::None; return reply;
+            return unknown();
+        }
+        if (editor) {
+#if DEBUG
+            editor->state_->handoffStage = 21;
+#endif
+            // The bare-result canonical replay proof above must finish before
+            // derived publication work can change native Checked flags. Bind
+            // preparation to this exact closed command and stager result, then
+            // seal that result once; never adopt an observed mismatch or retry.
+            if (!committed.owner.IsEqual(capture.label)
+                || !committed.label.IsEqual(capture.recordLabel)
+                || !committed.current.IsEqual(result)) return unknown();
+#if DEBUG
+            editor->state_->handoffStage = 22;
+#endif
+            if (!issuer->prepareBooleanEditorCommit(editor->state_->serial,
+                    editor->state_->epoch, capture.label, result, previous)) return unknown();
+#if DEBUG
+            editor->state_->handoffStage = 23;
+#endif
+            std::string expectedResult;
+            if (!core3d::retained_part_boolean::ExactShapeBytes(result, expectedResult)) return unknown();
+            sealed.resultBytes.assign(expectedResult.begin(), expectedResult.end());
+            if (!OriginalsCurrent(*this, sealed, committed)) return unknown();
         }
         core3d::native_opening::CommittedEditPublication publication;
         publication.replaced.push_back({capture.entityIdentifier, previous});
-        if (!capture.context->publishCommittedEdit(publication)) {
+#if DEBUG
+        if (editor) editor->state_->handoffStage = 3;
+#endif
+        std::shared_ptr<core3d::native_opening::Context> successor;
+        if (editor) {
+            successor = issuer->publishBooleanEditorCommit(publication, editor->state_->serial,
+                editor->state_->epoch, viewportWidth, viewportHeight);
+            if (!successor) return unknown();
+#if DEBUG
+            editor->state_->handoffStage = 4;
+#endif
+            const auto checkpoint = successor->captureBooleanEditorCheckpoint(
+                capture.entityIdentifier, viewportWidth, viewportHeight);
+            const auto next = CaptureBooleanOriginalsState(successor, capture.label);
+#if DEBUG
+            editor->state_->handoffStage = 41;
+#endif
+            if (!checkpoint) return unknown();
+#if DEBUG
+            editor->state_->handoffStage = 42;
+#endif
+            if (!next.capture) return unknown();
+#if DEBUG
+            editor->state_->handoffStage = 43;
+#endif
+            if (!OriginalsCurrent(*this, sealed, committed)) {
+#if DEBUG
+                const auto& actual = *next.capture->state_;
+                if (actual.resultBytes != sealed.resultBytes) {
+                    const std::string before(sealed.resultBytes.begin(), sealed.resultBytes.end());
+                    const std::string after(actual.resultBytes.begin(), actual.resultBytes.end());
+                    std::size_t offset = 0, line = 1, start = 0;
+                    while (offset < before.size() && offset < after.size()
+                        && before[offset] == after[offset]) {
+                        if (before[offset++] == '\n') { ++line; start = offset; }
+                    }
+                    const auto oldLine = before.substr(start, before.find('\n', start) - start);
+                    const auto newLine = after.substr(start, after.find('\n', start) - start);
+                    std::fprintf(stderr, "NB_R3 proof=final-OriginalsCurrent unit=%.17g "
+                        "expectedLength=%zu actualLength=%zu line=%zu before=[%.120s] after=[%.120s]\n",
+                        capture.metersPerUnit, before.size(), after.size(), line,
+                        oldLine.c_str(), newLine.c_str());
+                }
+                editor->state_->handoffStage = 4300
+                    + (actual.groups.IsEqual(sealed.groups) ? 0 : 1)
+                    + (actual.visibility.IsEqual(sealed.visibility) ? 0 : 2)
+                    + (actual.appearance.IsEqual(sealed.appearance) ? 0 : 4)
+                    + (actual.resultBytes == sealed.resultBytes ? 0 : 8)
+                    + (actual.payload->bytes == sealed.payload->bytes ? 0 : 16)
+                    + (actual.undoDepth == sealed.undoDepth && actual.redoDepth == sealed.redoDepth ? 0 : 32);
+#endif
+                return unknown();
+            }
+#if DEBUG
+            editor->state_->handoffStage = 44;
+#endif
+            if (!issuer->finishBooleanEditorCommit(editor->state_->serial, editor->state_->epoch))
+                return unknown();
+#if DEBUG
+            editor->state_->handoffStage = 5;
+#endif
+            // Install before synchronous observers can run. Their work can
+            // invalidate this sealed stamp; it can never be silently rebased.
+            editor->state_->baseline = next.capture;
+            editor->state_->checkpoint = checkpoint;
+            editor->state_->phase = Phase::Idle;
+        } else if (!capture.context->publishCommittedEdit(publication)) {
             capture.context->retainUnprovenEdit(publication);
-            reply.status = ap::PairApplyStatus::OutcomeUnknown;
-            reply.refusal = ap::PairRefusal::None; return reply;
+            return unknown();
         }
         state.committed.store(true);
         reply.status = ap::PairApplyStatus::Committed;
         reply.refusal = ap::PairRefusal::None;
-        NotifyChanges(); return reply;
-    } catch (...) { return refuse(ap::PairRefusal::BadEncoding); }
+        if (editor) editor->state_->notifying = true;
+        NotifyChanges();
+        if (editor) editor->state_->notifying = false;
+        return reply;
+    } catch (...) {
+        if (editor && commandStarted) return unknown();
+        return refuse(ap::PairRefusal::BadEncoding);
+    }
 }
 
 Standard_Boolean OcctDocument::VerifyPlainProfileOperationReplacement(
@@ -26166,6 +26707,7 @@ void OcctDocument::ReleaseTreatmentHistoryCompanions() noexcept {
         // and never crosses a replacement or destruction.
         myAuthoredBooleanRecovery.reset();
         myBooleanPairRecovery.reset();
+        RetireBooleanOriginalsEditor(true);
     } catch (...) {}
 }
 
@@ -27078,6 +27620,7 @@ Standard_Boolean OcctDocument::ApplyTreatmentHistoryAfterHistoryChange(
 
 Standard_Boolean OcctDocument::undo() {
     RetainedValidationOperationScope validationOperation;
+    RetireBooleanOriginalsEditor();
     if (NativeBooleanOwnerBlocksOtherWork()) return Standard_False;
     if (myNativeAuthority && !myOcafDoc.IsNull()) myNativeAuthority->HistoryBoundary(myOcafDoc.get());
     if (!canUndo()) {
@@ -27129,6 +27672,7 @@ Standard_Boolean OcctDocument::undo() {
 }
 Standard_Boolean OcctDocument::redo() {
     RetainedValidationOperationScope validationOperation;
+    RetireBooleanOriginalsEditor();
     if (NativeBooleanOwnerBlocksOtherWork()) return Standard_False;
     if (myNativeAuthority && !myOcafDoc.IsNull()) myNativeAuthority->HistoryBoundary(myOcafDoc.get());
     if (!canRedo()) {

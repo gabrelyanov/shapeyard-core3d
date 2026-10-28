@@ -738,11 +738,99 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
 }
 @end
 
+@interface Core3DBooleanOriginalsEditorSession () {
+@public
+    std::shared_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession> _session;
+    Handle(OcctDocument) _document;
+    __weak Core3DViewController *_host;
+    NSString *_entity;
+}
+- (instancetype)initWithSession:
+    (std::shared_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession>)session
+    document:(Handle(OcctDocument))document host:(Core3DViewController *)host entity:(NSString *)entity;
+@end
+
+@implementation Core3DBooleanOriginalsEditorSession
+- (instancetype)initWithSession:
+    (std::shared_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession>)session
+    document:(Handle(OcctDocument))document host:(Core3DViewController *)host entity:(NSString *)entity {
+    self = [super init];
+    if (!self || !session || document.IsNull() || !host) return nil;
+    _session = std::move(session); _document = document; _host = host; _entity = [entity copy];
+    return self;
+}
+- (void)dealloc {
+    if (!_document.IsNull()) _document->EndBooleanOriginalsEditingSession(_session);
+}
+#if DEBUG
+- (NSInteger)debugHandoffStage {
+    return _document.IsNull() ? 0 : _document->DebugBooleanOriginalsHandoffStage(_session);
+}
+- (NSInteger)debugFailureSiteHit {
+    return _document.IsNull() ? 0 : _document->DebugBooleanOriginalsSessionFailureHit(_session);
+}
+#endif
+- (Core3DAuthoredParameterOpeningCurrentness)currentness {
+    return _document.IsNull() ? Core3DAuthoredParameterOpeningCurrentnessStale
+        : static_cast<Core3DAuthoredParameterOpeningCurrentness>(
+            _document->BooleanOriginalsSessionCurrentness(_session));
+}
+@end
+
+@interface Core3DBooleanOriginalsSessionResult ()
+- (instancetype)initWithReply:(const core3d::authored_parameter::BooleanOriginalsSessionReply&)reply
+    session:(Core3DBooleanOriginalsEditorSession *)session;
+@end
+@implementation Core3DBooleanOriginalsSessionResult
+- (instancetype)initWithReply:(const core3d::authored_parameter::BooleanOriginalsSessionReply&)reply
+    session:(Core3DBooleanOriginalsEditorSession *)session {
+    self = [super init];
+    if (self) {
+        _status = static_cast<Core3DBooleanPairStatus>(reply.status);
+        _refusal = static_cast<Core3DBooleanPairRefusal>(reply.refusal); _session = session;
+    }
+    return self;
+}
+@end
+
+namespace {
+bool SameBooleanEditorScene(Core3DSceneSnapshot *expected, Core3DSceneSnapshot *current) noexcept {
+    if (!expected || !current || expected.publicationSourceIdentifier.length == 0
+        || ![expected.publicationSourceIdentifier isEqualToString:current.publicationSourceIdentifier]
+        || expected.revisions.documentGeneration != current.revisions.documentGeneration
+        || expected.revisions.modelRevision != current.revisions.modelRevision
+        || expected.revisions.presentationRevision != current.revisions.presentationRevision
+        || expected.selectionMode != Core3DSceneElementKindObject
+        || current.selectionMode != Core3DSceneElementKindObject
+        || expected.metersPerUnit != current.metersPerUnit
+        || expected.selection.selectedElements.count != current.selection.selectedElements.count) return false;
+    for (NSUInteger index = 0; index < expected.selection.selectedElements.count; ++index) {
+        const auto x = expected.selection.selectedElements[index];
+        const auto y = current.selection.selectedElements[index];
+        if (![x.entityIdentifier isEqualToString:y.entityIdentifier] || x.kind != y.kind
+            || x.topologyIndex != y.topologyIndex || x.geometryRevision != y.geometryRevision) return false;
+    }
+    return true;
+}
+
+bool BooleanEditorAdmission(Core3DViewController *host, Core3DBooleanOriginalsEditorSession *session,
+    const Handle(OcctDocument)& document, Core3DSceneSnapshot *expected, Core3DSceneSnapshot *current) {
+    const CGSize size = host.viewportDrawableSize;
+    return session && session->_host == host && !document.IsNull() && session->_document == document
+        && SameBooleanEditorScene(expected, current)
+        && std::isfinite(size.width) && std::isfinite(size.height)
+        && size.width >= 1 && size.height >= 1 && size.width <= UINT32_MAX && size.height <= UINT32_MAX
+        && document->ValidateBooleanOriginalsEditingSession(session->_session,
+            std::uint32_t(size.width), std::uint32_t(size.height));
+}
+}
+
 @interface Core3DBooleanPairOpening () {
 @public
     std::shared_ptr<const core3d::authored_parameter::PairCapture> _capture;
     std::shared_ptr<const core3d::authored_parameter::BooleanOriginalsCapture>
         _originalsCapture;
+    Core3DBooleanOriginalsEditorSession *_editorSession;
     std::shared_ptr<std::atomic_bool> _cancelled;
     NSString *_targetEntityIdentifier;
     NSString *_toolEntityIdentifier;
@@ -788,6 +876,7 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
     std::shared_ptr<const core3d::authored_parameter::PairPrepared> _prepared;
     std::shared_ptr<const core3d::authored_parameter::BooleanOriginalsPrepared>
         _originalsPrepared;
+    Core3DBooleanOriginalsEditorSession *_editorSession;
     NSString *_targetEntityIdentifier;
 }
 - (instancetype)initWithPrepared:
@@ -1421,6 +1510,115 @@ static NSMapTable<Core3DViewController *, Core3DBooleanPairRecoveryIssuer *>
 }
 #endif
 
+- (Core3DBooleanOriginalsSessionResult *)beginBooleanOriginalsEditingSessionForEntityIdentifier:
+    (NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected {
+    using namespace core3d::authored_parameter;
+    BooleanOriginalsSessionReply reply;
+    Core3DBooleanOriginalsEditorSession *session = nil;
+    if (![NSThread isMainThread] || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || ![expected isKindOfClass:Core3DSceneSnapshot.class]) {
+        reply.refusal = PairRefusal::BadEncoding;
+        return [[Core3DBooleanOriginalsSessionResult alloc] initWithReply:reply session:nil];
+    }
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const CGSize size = self.viewportDrawableSize;
+        if (viewer && SameExpectedScene(expected, [self captureSceneSnapshot], entityIdentifier)
+            && std::isfinite(size.width) && std::isfinite(size.height)
+            && size.width >= 1 && size.height >= 1 && size.width <= UINT32_MAX && size.height <= UINT32_MAX) {
+            const auto document = viewer->getDocument();
+            const std::string entity = entityIdentifier.UTF8String ?: "";
+            const auto owner = ExactRoot(document, entity);
+            const auto context = viewer->captureNativeOpeningContext(
+                std::uint32_t(size.width), std::uint32_t(size.height), {entity});
+            reply = document->BeginBooleanOriginalsEditingSession(context, owner,
+                std::uint32_t(size.width), std::uint32_t(size.height));
+            if (reply.session) session = [[Core3DBooleanOriginalsEditorSession alloc]
+                initWithSession:reply.session document:document host:self entity:entityIdentifier];
+        }
+    } catch (...) { reply.refusal = PairRefusal::BadEncoding; }
+    return [[Core3DBooleanOriginalsSessionResult alloc] initWithReply:reply session:session];
+}
+
+- (Core3DBooleanPairCaptureResult *)openBooleanOriginalsEditorWithSession:
+    (Core3DBooleanOriginalsEditorSession *)session expected:(Core3DSceneSnapshot *)expected {
+    using namespace core3d::authored_parameter;
+    BooleanOriginalsCaptureReply reply; reply.refusal = PairRefusal::StaleSource;
+    Core3DBooleanPairOpening *opening = nil;
+    if (![NSThread isMainThread] || ![session isKindOfClass:Core3DBooleanOriginalsEditorSession.class]
+        || ![expected isKindOfClass:Core3DSceneSnapshot.class]) {
+        reply.refusal = PairRefusal::BadEncoding;
+    } else try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const CGSize size = self.viewportDrawableSize;
+        if (viewer && BooleanEditorAdmission(self, session, viewer->getDocument(), expected, [self captureSceneSnapshot])) {
+            reply = viewer->getDocument()->CaptureBooleanOriginalsForSession(session->_session,
+                std::uint32_t(size.width), std::uint32_t(size.height));
+            if (reply.capture) {
+                opening = [[Core3DBooleanPairOpening alloc] initWithOriginalsCapture:reply.capture target:session->_entity];
+                opening->_editorSession = session;
+            }
+        }
+    } catch (...) { reply.refusal = PairRefusal::BadEncoding; }
+    return [[Core3DBooleanPairCaptureResult alloc] initWithStatus:static_cast<Core3DBooleanPairStatus>(reply.status)
+        refusal:static_cast<Core3DBooleanPairRefusal>(reply.refusal) opening:opening];
+}
+
+- (void)endBooleanOriginalsEditingSession:(Core3DBooleanOriginalsEditorSession *)session {
+    if (![NSThread isMainThread] || ![session isKindOfClass:Core3DBooleanOriginalsEditorSession.class]
+        || session->_host != self || session->_document.IsNull()) return;
+    session->_document->EndBooleanOriginalsEditingSession(session->_session);
+}
+
+- (BOOL)cancelBooleanOriginalsEdit:(Core3DBooleanPairOpening *)opening {
+    if (![NSThread isMainThread] || ![opening isKindOfClass:Core3DBooleanPairOpening.class]
+        || !opening->_originalsCapture || !opening->_cancelled
+        || !opening->_editorSession || opening->_editorSession->_host != self) return NO;
+    opening->_cancelled->store(true);
+    [self endBooleanOriginalsEditingSession:opening->_editorSession];
+    return YES;
+}
+
+#if DEBUG
+- (BOOL)debugArmBooleanOriginalsSessionFailure:(Core3DBooleanOriginalsEditorSession *)session
+    site:(NSInteger)site {
+    if (![NSThread isMainThread] || ![session isKindOfClass:Core3DBooleanOriginalsEditorSession.class]
+        || session->_host != self || session->_document.IsNull()) return NO;
+    return session->_document->DebugArmBooleanOriginalsSessionFailure(session->_session, int(site));
+}
+- (BOOL)debugSelectHiddenBooleanOwner:(NSString *)entityIdentifier {
+    GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)self.glController : nil;
+    return [NSThread isMainThread] && gl && gl.viewer
+        && gl.viewer->debugSelectHiddenBooleanOwner(entityIdentifier.UTF8String ?: "");
+}
+- (NSDictionary<NSString *, NSNumber *> *)debugProbeBooleanOriginalsFences:
+    (Core3DBooleanOriginalsEditorSession *)session afterPrepare:(BOOL)afterPrepare mutation:(NSInteger)mutation {
+    if (![NSThread isMainThread] || ![session isKindOfClass:Core3DBooleanOriginalsEditorSession.class]
+        || session->_host != self || session->_document.IsNull()) return @{};
+    const auto proof = session->_document->DebugProbeBooleanOriginalsFences(session->_session, afterPrepare, int(mutation));
+    NSMutableDictionary<NSString *, NSNumber *> *result = [NSMutableDictionary dictionary];
+    for (const auto& item : proof) result[[NSString stringWithUTF8String:item.first.c_str()]] = @(item.second);
+    return result;
+}
+- (BOOL)debugBooleanOriginalsRecoveryIssuerProven {
+    GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)self.glController : nil;
+    return [NSThread isMainThread] && gl && gl.viewer
+        && gl.viewer->getDocument()->DebugBooleanOriginalsRecoveryIssuerProven();
+}
+- (void)debugCloseBooleanOriginalsDocument {
+    GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)self.glController : nil;
+    if ([NSThread isMainThread] && gl && gl.viewer) gl.viewer->getDocument()->DebugCloseBooleanOriginalsDocument();
+}
+#endif
+
 - (Core3DBooleanPairCaptureResult *)openBooleanOriginalsEditorForEntityIdentifier:
     (NSString *)entityIdentifier expected:(Core3DSceneSnapshot *)expected {
     using namespace core3d::authored_parameter;
@@ -1482,15 +1680,19 @@ static NSMapTable<Core3DViewController *, Core3DBooleanPairRecoveryIssuer *>
             ? (GLViewController *)self.glController : nil;
         const auto viewer = gl ? gl.viewer : nullptr;
         Core3DSceneSnapshot *current = [self captureSceneSnapshot];
-        if (!viewer || !SameExpectedScene(
-                expected, current, opening->_targetEntityIdentifier))
+        if (!viewer || (opening->_editorSession
+            ? !BooleanEditorAdmission(self, opening->_editorSession, viewer->getDocument(), expected, current)
+            : !SameExpectedScene(expected, current, opening->_targetEntityIdentifier))) {
+            if (opening->_editorSession) [self endBooleanOriginalsEditingSession:opening->_editorSession];
             return refused(PairRefusal::StaleSource);
+        }
         const auto reply = viewer->getDocument()->PrepareBooleanOriginalsEdit(
             opening->_originalsCapture, edit->_nativeEdit, *opening->_cancelled);
         Core3DBooleanPairPrepared *prepared = reply.prepared
             ? [[Core3DBooleanPairPrepared alloc]
                 initWithOriginalsPrepared:reply.prepared
                 target:opening->_targetEntityIdentifier] : nil;
+        if (prepared) prepared->_editorSession = opening->_editorSession;
         return [[Core3DBooleanPairPrepareResult alloc]
             initWithStatus:static_cast<Core3DBooleanPairStatus>(reply.status)
             refusal:static_cast<Core3DBooleanPairRefusal>(reply.refusal)
@@ -1578,12 +1780,15 @@ static NSMapTable<Core3DViewController *, Core3DBooleanPairRecoveryIssuer *>
         const auto viewer = gl ? gl.viewer : nullptr;
         const CGSize size = self.viewportDrawableSize;
         Core3DSceneSnapshot *current = [self captureSceneSnapshot];
-        if (!viewer || !SameExpectedScene(expected, current,
-                prepared->_targetEntityIdentifier)
+        if (!viewer || (prepared->_editorSession
+            ? !BooleanEditorAdmission(self, prepared->_editorSession, viewer->getDocument(), expected, current)
+            : !SameExpectedScene(expected, current, prepared->_targetEntityIdentifier))
             || !std::isfinite(size.width) || !std::isfinite(size.height)
             || size.width < 1 || size.height < 1
-            || size.width > UINT32_MAX || size.height > UINT32_MAX)
+            || size.width > UINT32_MAX || size.height > UINT32_MAX) {
+            if (prepared->_editorSession) [self endBooleanOriginalsEditingSession:prepared->_editorSession];
             return refused(PairRefusal::StaleSource);
+        }
         reply = viewer->getDocument()->ApplyBooleanOriginalsEdit(
             prepared->_originalsPrepared, std::uint32_t(size.width),
             std::uint32_t(size.height));

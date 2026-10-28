@@ -21867,7 +21867,8 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
     const SceneSnapshot& source,
     bool selectedObjectsOnly,
     const std::function<void(const TopoDS_Shape&)>& meshPrivateSurfaces,
-    const std::function<bool()>& cancelled
+    const std::function<bool()>& cancelled,
+    PrivateExportDerivativeFailure* const failureOut
 #ifdef DEBUG
     , const DebugPrivateExportDecalFault debugFault
     , DebugPrivateExportDecalObservation* const debugObservation
@@ -21875,6 +21876,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
     ) noexcept
 {
     ResetPrivateExportTextureInstallRefusal();
+    if (failureOut) *failureOut = {};
 #ifdef DEBUG
     if (debugObservation) {
         *debugObservation = {};
@@ -23724,9 +23726,15 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 if (debugObservation)
                     debugObservation->failureStage = "receiver-ordinary-produce";
 #endif
-                if (decal_layer::bake::ProduceFace(
-                        realInput, realReceiver, realProduct)
-                        != decal_layer::bake::Status::Baked) return {};
+                const auto status = decal_layer::bake::ProduceFace(
+                    realInput, realReceiver, realProduct);
+                if (status != decal_layer::bake::Status::Baked) {
+                    if (failureOut) {
+                        failureOut->decalCoverageStatus = status;
+                        failureOut->stage = "receiver-ordinary-produce";
+                    }
+                    return {};
+                }
                 products.push_back(std::move(realProduct));
                 continue;
                 std::vector<const decal_layer::Layer*> layers;

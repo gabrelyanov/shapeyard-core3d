@@ -169,6 +169,20 @@ struct NativeExportResult {
     std::uint64_t decodedTextureLimitBytes = 0;
 };
 
+const char* DecalCoverageFailureCause(
+    const core3d::decal_layer::bake::Status status) noexcept {
+    using Status = core3d::decal_layer::bake::Status;
+    switch (status) {
+        case Status::Unsupported: return "unsupported";
+        case Status::VisibilityInconclusive: return "visibility-inconclusive";
+        case Status::Malformed: return "malformed";
+        case Status::Stale: return "stale";
+        case Status::Budget: return "budget";
+        case Status::Baked: return nullptr;
+    }
+    return nullptr;
+}
+
 class NativeExportFailure final : public std::runtime_error {
 public:
     NativeExportFailure(
@@ -2021,6 +2035,7 @@ NativeExportResult RunNativeExport(
                     Core3DNativeExportErrorInvalidState,
                     "The committed appearance export derivative is invalid.");
             }
+            core3d::scene::PrivateExportDerivativeFailure derivativeFailure;
             if (state->meshQuality == Core3DExportMeshQualityViewport) {
                 result.scene = state->sourceScene;
 #ifdef DEBUG
@@ -2044,7 +2059,7 @@ NativeExportResult RunNativeExport(
                         }, [&] {
                             return state->cancelled.load(
                                 std::memory_order_acquire);
-                        }
+                        }, &derivativeFailure
 #ifdef DEBUG
                         , state->debugE4Fault, &observation
 #endif
@@ -2076,6 +2091,17 @@ NativeExportResult RunNativeExport(
             ThrowIfCancelled(state);
             if (!result.scene
                 || !core3d::scene::IsValidSceneSnapshot(*result.scene)) {
+                if (derivativeFailure.decalCoverageStatus.has_value()) {
+                    const char* const cause = DecalCoverageFailureCause(
+                        *derivativeFailure.decalCoverageStatus);
+                    if (cause != nullptr && derivativeFailure.stage != nullptr) {
+                        result.failureStage = derivativeFailure.stage;
+                        result.failureCause = cause;
+                        throw NativeExportFailure(
+                            Core3DNativeExportErrorDecalCoverageRefused,
+                            "Native decal coverage was refused.");
+                    }
+                }
                 if (decodedTextureBudgetRefusal) {
                     result.failureStage = "texture-install-decoded-budget";
                     result.failureCause = "decoded-texture-budget-exceeded";
@@ -3074,9 +3100,13 @@ bool DebugMeshSavedGroupPrivateSurfaces(const TopoDS_Shape& shape) noexcept {
                 userInfo[@"Core3DNativeExportFailureStage"] =
                     [NSString stringWithUTF8String:
                         result.failureStage.c_str()] ?: @"";
+            }
+            if (!result.failureCause.empty()) {
                 userInfo[@"Core3DNativeExportFailureCause"] =
                     [NSString stringWithUTF8String:
                         result.failureCause.c_str()] ?: @"";
+            }
+            if (result.decodedTextureLimitBytes != 0) {
                 userInfo[@"Core3DNativeExportDecodedTextureBytes"] =
                     @(result.decodedTextureBytes);
                 userInfo[@"Core3DNativeExportDecodedTextureLimitBytes"] =

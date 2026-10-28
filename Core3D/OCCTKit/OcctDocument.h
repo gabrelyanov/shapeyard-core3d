@@ -130,6 +130,9 @@ class PairCapture;
 class PairPrepared;
 class PairRecovery;
 struct PairRecoveryState;
+enum class Currentness : std::uint8_t;
+class BooleanOriginalsEditorSession;
+struct BooleanOriginalsSessionReply;
 class BooleanOriginalsCapture;
 class BooleanOriginalsPrepared;
 struct BooleanOriginalsEdit;
@@ -1776,6 +1779,35 @@ public:
         const std::shared_ptr<const core3d::authored_parameter::PairRecovery>& recovery)
         noexcept;
 #endif
+    Standard_EXPORT core3d::authored_parameter::BooleanOriginalsSessionReply
+    BeginBooleanOriginalsEditingSession(
+        const std::shared_ptr<core3d::native_opening::Context>&,
+        const TDF_Label&, std::uint32_t width, std::uint32_t height) noexcept;
+    Standard_EXPORT core3d::authored_parameter::BooleanOriginalsCaptureReply
+    CaptureBooleanOriginalsForSession(
+        const std::shared_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession>&,
+        std::uint32_t width, std::uint32_t height) noexcept;
+    Standard_EXPORT bool ValidateBooleanOriginalsEditingSession(
+        const std::shared_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession>&,
+        std::uint32_t width, std::uint32_t height) noexcept;
+    Standard_EXPORT void EndBooleanOriginalsEditingSession(
+        const std::shared_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession>&) noexcept;
+    Standard_EXPORT core3d::authored_parameter::Currentness BooleanOriginalsSessionCurrentness(
+        const std::shared_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession>&) noexcept;
+#if DEBUG
+    Standard_EXPORT void DebugCloseBooleanOriginalsDocument() noexcept;
+    Standard_EXPORT std::map<std::string, bool> DebugProbeBooleanOriginalsFences(
+        const std::shared_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession>&,
+        bool afterPrepare, int mutation) noexcept;
+    Standard_EXPORT int DebugBooleanOriginalsHandoffStage(
+        const std::shared_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession>&) const noexcept;
+    Standard_EXPORT int DebugBooleanOriginalsSessionFailureHit(
+        const std::shared_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession>&) const noexcept;
+    Standard_EXPORT bool DebugBooleanOriginalsRecoveryIssuerProven() const noexcept;
+    Standard_EXPORT bool DebugArmBooleanOriginalsSessionFailure(
+        const std::shared_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession>&,
+        int site) noexcept;
+#endif
     //! Capture one current SYPB/4 owner without projecting mutation authority
     //! through its descriptive bytes.
     Standard_EXPORT core3d::authored_parameter::BooleanOriginalsCaptureReply
@@ -2422,6 +2454,13 @@ private:
   // continuation is opaque and can identify only this exact shared state.
   std::shared_ptr<core3d::authored_parameter::PairRecoveryState>
       myBooleanPairRecovery;
+  core3d::authored_parameter::BooleanOriginalsCaptureReply CaptureBooleanOriginalsState(
+      const std::shared_ptr<core3d::native_opening::Context>&, const TDF_Label&) noexcept;
+  void RetireBooleanOriginalsEditor(bool closing = false) noexcept;
+  std::shared_ptr<core3d::authored_parameter::BooleanOriginalsEditorSession>
+      myBooleanOriginalsEditor;
+  std::uint64_t myNextBooleanOriginalsEditor = 0;
+  bool myBooleanOriginalsRecovery = false;
   Standard_Size myMaximumSerializedTextureOccurrenceBytes;
   Standard_Size myMaximumDecodedTextureResourceBytes;
   Standard_Size myMaximumVisualMaterialDefinitions;
