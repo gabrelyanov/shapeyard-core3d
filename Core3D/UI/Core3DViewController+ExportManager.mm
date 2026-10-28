@@ -29,6 +29,19 @@
 
 namespace {
 
+NSString *DecalCoverageFailureCause(core3d::decal_layer::bake::Status status) {
+    using Status = core3d::decal_layer::bake::Status;
+    switch (status) {
+        case Status::Unsupported: return @"unsupported";
+        case Status::VisibilityInconclusive: return @"visibility-inconclusive";
+        case Status::Malformed: return @"malformed";
+        case Status::Stale: return @"stale";
+        case Status::Budget: return @"budget";
+        case Status::Baked: return nil;
+    }
+    return nil;
+}
+
 bool CanCaptureCommittedExport(
     const std::shared_ptr<core3d::Core3DViewer>& viewer) {
     if (viewer == nullptr || viewer->hasUnresolvedOrdinaryEdit()) {
@@ -115,6 +128,15 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
 }
 
 } // namespace
+
+// Shared implementation keeps every legacy overload on the same path.
+@interface Core3DViewController (NativeExportPreparation)
+- (Core3DNativeExportOperation *)prepareNativeExportOperationWithType:
+    (ExportType)exportType selectedObjectsOnly:(BOOL)selectedObjectsOnly
+    meshQuality:(Core3DExportMeshQuality)meshQuality
+    objColorConvention:(Core3DOBJColorConvention)objColorConvention
+    error:(NSError **)error;
+@end
 
 @implementation Core3DViewController (ExportManager)
 
@@ -325,18 +347,52 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
 
 - (Core3DNativeExportOperation *)prepareNativeExportOperationWithType:
     (ExportType)exportType selectedObjectsOnly:(BOOL)selectedObjectsOnly
+    meshQuality:(Core3DExportMeshQuality)meshQuality error:(NSError **)error {
+    return [self prepareNativeExportOperationWithType:exportType
+                                 selectedObjectsOnly:selectedObjectsOnly
+                                         meshQuality:meshQuality
+                                  objColorConvention:Core3DOBJColorConventionCurrent
+                                               error:error];
+}
+
+- (Core3DNativeExportOperation *)prepareNativeExportOperationWithType:
+    (ExportType)exportType selectedObjectsOnly:(BOOL)selectedObjectsOnly
     meshQuality:(Core3DExportMeshQuality)meshQuality
     objColorConvention:(Core3DOBJColorConvention)objColorConvention {
+    return [self prepareNativeExportOperationWithType:exportType
+                                 selectedObjectsOnly:selectedObjectsOnly
+                                         meshQuality:meshQuality
+                                  objColorConvention:objColorConvention
+                                               error:nil];
+}
+
+- (Core3DNativeExportOperation *)prepareNativeExportOperationWithType:
+    (ExportType)exportType selectedObjectsOnly:(BOOL)selectedObjectsOnly
+    meshQuality:(Core3DExportMeshQuality)meshQuality
+    objColorConvention:(Core3DOBJColorConvention)objColorConvention
+    error:(NSError **)error {
+    if (error != nullptr) *error = nil;
+    const auto refuse = [error](NSString *stage) -> Core3DNativeExportOperation * {
+        if (error != nullptr) {
+            *error = [NSError errorWithDomain:Core3DNativeExportErrorDomain
+                code:Core3DNativeExportErrorInvalidState
+                userInfo:@{
+                    NSLocalizedDescriptionKey: @"Native export preparation failed.",
+                    @"Core3DNativeExportFailureStage": stage,
+                }];
+        }
+        return nil;
+    };
     if (objColorConvention < Core3DOBJColorConventionCurrent
         || objColorConvention > Core3DOBJColorConventionEncoded
         || (exportType != ExportTypeObj && objColorConvention != Core3DOBJColorConventionCurrent)) {
-        return nil;
+        return refuse(@"obj-color-convention");
     }
     if (meshQuality < Core3DExportMeshQualityViewport
         || meshQuality > Core3DExportMeshQualityFine
         || (meshQuality != Core3DExportMeshQualityViewport
             && exportType != ExportTypeObj && exportType != ExportTypeStl && exportType != ExportTypeGltf)) {
-        return nil;
+        return refuse(@"mesh-quality");
     }
     if ((selectedObjectsOnly && exportType != ExportTypeStl && exportType != ExportTypeObj && exportType != ExportTypeGltf)
         || ![NSThread isMainThread]
@@ -345,7 +401,7 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
             && exportType != ExportTypeStep
             && exportType != ExportTypeGltf)
         || GLController == nil) {
-        return nil;
+        return refuse(@"preparation-admission");
     }
 
     NSURL *inputRoot = nil;
@@ -360,7 +416,7 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
             || document.IsNull()
             || (![self canExportType:exportType]
                 && !document->IsGeometryDocumentEmpty())) {
-            return nil;
+            return refuse(@"committed-export-admission");
         }
 
         core3d::scene::OcctSceneSnapshotBuilder::SnapshotPointer sourceScene;
@@ -369,17 +425,33 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
             if (!std::isfinite(size.width) || !std::isfinite(size.height)
                 || size.width < 1 || size.height < 1
                 || size.width > std::numeric_limits<std::uint32_t>::max()
-                || size.height > std::numeric_limits<std::uint32_t>::max()) { return nil; }
+                || size.height > std::numeric_limits<std::uint32_t>::max()) { return refuse(@"drawable-size"); }
+            core3d::scene::SceneSnapshotCaptureFailure captureFailure;
             sourceScene = viewer->captureSceneSnapshot(
                 static_cast<std::uint32_t>(std::llround(size.width)),
-                static_cast<std::uint32_t>(std::llround(size.height)));
+                static_cast<std::uint32_t>(std::llround(size.height)),
+                &captureFailure);
+            if (captureFailure.decalCoverageStatus.has_value()) {
+                if (error != nullptr) {
+                    *error = [NSError errorWithDomain:Core3DNativeExportErrorDomain
+                        code:Core3DNativeExportErrorDecalCoverageRefused
+                        userInfo:@{
+                            NSLocalizedDescriptionKey: @"Native decal coverage was refused.",
+                            @"Core3DNativeExportFailureStage":
+                                [NSString stringWithUTF8String:captureFailure.stage],
+                            @"Core3DNativeExportFailureCause":
+                                DecalCoverageFailureCause(*captureFailure.decalCoverageStatus),
+                        }];
+                }
+                return nil;
+            }
             // Snapshot validation includes E4's owner/proof/face/texture
             // cardinality. A malformed, stale, unresolved or unbaked record
             // therefore refuses before the private snapshot or destination
             // staging directory is created.
             if (!sourceScene
                 || !core3d::scene::IsValidSceneSnapshot(*sourceScene)) {
-                return nil;
+                return refuse(@"scene-capture");
             }
         }
         NSArray<NSString *> *selectedIdentifiers = nil;
@@ -387,7 +459,7 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
             selectedIdentifiers = CaptureSelectedExportIdentifiers(
                 sourceScene ? Core3DCreateSceneSnapshotDTO(*sourceScene) : [self captureExportSceneSnapshot]);
             if (selectedIdentifiers == nil) {
-                return nil;
+                return refuse(@"selected-export-identifiers");
             }
         }
 
@@ -402,7 +474,7 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
                 ? Handle(Prs3d_Drawer)()
                 : context->DefaultDrawer();
             if (drawer.IsNull()) {
-                return nil;
+                return refuse(@"mesh-drawer");
             }
             deflectionType = drawer->TypeOfDeflection();
             deviationCoefficient = drawer->DeviationCoefficient();
@@ -422,7 +494,7 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
                       deviationCoefficient,
                       deviationAngle,
                       maximalChordialDeviation);
-                return nil;
+                return refuse(@"mesh-settings");
             }
         }
 
@@ -465,7 +537,7 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
                   directoryError.localizedDescription);
             [fileManager removeItemAtURL:inputRoot error:nil];
             [fileManager removeItemAtURL:cleanupRoot error:nil];
-            return nil;
+            return refuse(@"temporary-directory");
         }
 
         NSURL *snapshotBase = [inputRoot
@@ -477,7 +549,7 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
             NSLog(@"[NativeExport] Private document save failed");
             [fileManager removeItemAtURL:inputRoot error:nil];
             [fileManager removeItemAtURL:cleanupRoot error:nil];
-            return nil;
+            return refuse(@"private-document-save");
         }
         NSString *snapshotPathString = [NSString
             stringWithUTF8String:snapshotPath.c_str()];
@@ -485,7 +557,7 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
             NSLog(@"[NativeExport] Private document path was not UTF-8");
             [fileManager removeItemAtURL:inputRoot error:nil];
             [fileManager removeItemAtURL:cleanupRoot error:nil];
-            return nil;
+            return refuse(@"private-document-path");
         }
         NSURL *snapshotURL = [NSURL fileURLWithPath:snapshotPathString];
         NSString *inputPrefix = [inputRoot.path stringByAppendingString:@"/"];
@@ -504,7 +576,7 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
                   [snapshotURL.path hasPrefix:inputPrefix]);
             [fileManager removeItemAtURL:inputRoot error:nil];
             [fileManager removeItemAtURL:cleanupRoot error:nil];
-            return nil;
+            return refuse(@"private-document-postflight");
         }
 
         Core3DNativeExportOperation *operation =
@@ -526,6 +598,7 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
             NSLog(@"[NativeExport] Operation construction failed");
             [fileManager removeItemAtURL:inputRoot error:nil];
             [fileManager removeItemAtURL:cleanupRoot error:nil];
+            return refuse(@"operation-construction");
         }
         return operation;
     } catch (...) {
@@ -535,7 +608,7 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
         if (cleanupRoot != nil) {
             [NSFileManager.defaultManager removeItemAtURL:cleanupRoot error:nil];
         }
-        return nil;
+        return refuse(@"preparation-exception");
     }
 }
 

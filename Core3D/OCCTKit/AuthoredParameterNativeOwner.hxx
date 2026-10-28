@@ -304,6 +304,7 @@ struct PairObservation final {
     std::array<std::array<double, 6>, 2> effectiveMaterials{};
     std::array<bool, 2> effectiveMaterialPresent{{false, false}};
     std::array<bool, 2> effectiveGroupMembership{{false, false}};
+    bool hasCreationGroup = false;
     std::array<bool, 2> effectiveVisibility{{true, true}};
     bool resultVisible = true;
     std::uint32_t graphNodeCount = 0;

@@ -1328,6 +1328,18 @@ typedef struct {
                     selectedObjectsOnly:(BOOL)selectedObjectsOnly
                             meshQuality:(Core3DExportMeshQuality)meshQuality
     NS_SWIFT_NAME(prepareNativeExportOperation(with:selectedObjectsOnly:meshQuality:));
+//! Same preparation with a synchronous production error. A committed ordinary
+//! receiver bake refusal reports DecalCoverageRefused with stage/cause strings;
+//! other preparation failures report InvalidState with a stage string.
+//! Keep NSError explicit in Swift so the existing nil-returning overload is
+//! unambiguous and retains its behavior. Success clears the error output.
+- (Core3DNativeExportOperation *_Nullable)
+    prepareNativeExportOperationWithType:(ExportType)exportType
+                    selectedObjectsOnly:(BOOL)selectedObjectsOnly
+                            meshQuality:(Core3DExportMeshQuality)meshQuality
+                                  error:(NSError *_Nullable *_Nullable)error
+    __attribute__((swift_error(none)))
+    NS_SWIFT_NAME(prepareNativeExportOperation(with:selectedObjectsOnly:meshQuality:error:));
 //! Capture an explicit OBJ color convention. Other formats require Current;
 //! unsupported values reject before private files are created. Older overloads
 //! retain Current. This preference never changes authored model appearance.

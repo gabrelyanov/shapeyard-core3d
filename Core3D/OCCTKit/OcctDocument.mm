@@ -11649,6 +11649,7 @@ bool ObserveOriginalsRecord(const OcctDocument& document,
             observation.suffixBytes = suffix->parameters;
         }
         observation.resultMembership = {{1, 1}};
+        observation.hasCreationGroup = !definition.effective.groups.empty();
         for (std::size_t index = 0; index < 2; ++index) {
             const auto& original = definition.originals.inputs[index];
             const auto& current = definition.effective.inputs[index];

@@ -870,6 +870,11 @@ namespace core3d {
         scene::OcctSceneSnapshotBuilder::SnapshotPointer captureSceneSnapshot(
             std::uint32_t viewportWidth,
             std::uint32_t viewportHeight) noexcept;
+        //! Same edit/selection-authority gates, with per-call failure output.
+        scene::OcctSceneSnapshotBuilder::SnapshotPointer captureSceneSnapshot(
+            std::uint32_t viewportWidth,
+            std::uint32_t viewportHeight,
+            scene::SceneSnapshotCaptureFailure* failureOut) noexcept;
         //! True only when the active typed operation owns every deviation from
         //! the retained selection mode. Ordinary GL selection authority stays
         //! strict and OutcomeUnknown scene publication remains blocked.

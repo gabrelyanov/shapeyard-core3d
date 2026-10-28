@@ -24700,6 +24700,19 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
     const UInt2& theViewportPixels,
     const ElementKind theAcceptedSelectionKind) noexcept
 {
+    return Build(theDocument, theContext, theView, theViewportPixels,
+        theAcceptedSelectionKind, nullptr);
+}
+
+OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
+    const Handle(OcctDocument)& theDocument,
+    const Handle(AIS_InteractiveContext)& theContext,
+    const Handle(V3d_View)& theView,
+    const UInt2& theViewportPixels,
+    const ElementKind theAcceptedSelectionKind,
+    SceneSnapshotCaptureFailure* failureOut) noexcept
+{
+    if (failureOut != nullptr) *failureOut = {};
     if (![NSThread isMainThread]
         || theDocument.IsNull()
         || theContext.IsNull()
@@ -26011,9 +26024,15 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                     if (!PrepareOrdinaryDecalFace(
                             anOrdinaryInputs, anInput, aReceiver)) return {};
                     dl::bake::FaceProduct aProduct;
-                    if (dl::bake::ProduceFace(
-                            anInput, aReceiver, aProduct)
-                        != dl::bake::Status::Baked) return {};
+                    const auto status = dl::bake::ProduceFace(
+                        anInput, aReceiver, aProduct);
+                    if (status != dl::bake::Status::Baked) {
+                        if (failureOut != nullptr) {
+                            failureOut->decalCoverageStatus = status;
+                            failureOut->stage = "receiver-ordinary-produce";
+                        }
+                        return {};
+                    }
                     aProducts.push_back(std::move(aProduct));
                 }
 

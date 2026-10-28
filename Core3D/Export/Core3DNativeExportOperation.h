@@ -41,6 +41,7 @@ typedef NS_ERROR_ENUM(
     Core3DNativeExportErrorWriterFailed,
     Core3DNativeExportErrorInvalidArtifact,
     Core3DNativeExportErrorInternalFailure,
+    Core3DNativeExportErrorDecalCoverageRefused,
 };
 
 //! Immutable ownership record for one native export. `packageRootURL` contains

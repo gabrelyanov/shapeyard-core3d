@@ -228,6 +228,7 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,copy,readonly) NSArray<NSArray<NSNumber *> *> *effectiveMaterials;
 @property(nonatomic,copy,readonly) NSArray<NSNumber *> *effectiveMaterialPresent;
 @property(nonatomic,copy,readonly) NSArray<NSNumber *> *effectiveGroupMembership;
+@property(nonatomic,readonly) BOOL hasCreationGroup;
 @property(nonatomic,copy,readonly) NSArray<NSNumber *> *effectiveVisibility;
 @property(nonatomic,readonly) BOOL resultVisible;
 @property(nonatomic,readonly) Core3DPartBooleanOperation operation;

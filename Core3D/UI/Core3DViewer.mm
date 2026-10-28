@@ -12906,6 +12906,15 @@ scene::OcctSceneSnapshotBuilder::SnapshotPointer
 Core3DViewer::captureSceneSnapshot(
     const std::uint32_t viewportWidth,
     const std::uint32_t viewportHeight) noexcept {
+    return captureSceneSnapshot(viewportWidth, viewportHeight, nullptr);
+}
+
+scene::OcctSceneSnapshotBuilder::SnapshotPointer
+Core3DViewer::captureSceneSnapshot(
+    const std::uint32_t viewportWidth,
+    const std::uint32_t viewportHeight,
+    scene::SceneSnapshotCaptureFailure* failureOut) noexcept {
+    if (failureOut != nullptr) *failureOut = {};
     if (hasUnresolvedEdit()) {
         return {};
     }
@@ -13002,7 +13011,7 @@ Core3DViewer::captureSceneSnapshot(
         myContext,
         myView,
         scene::UInt2{viewportWidth, viewportHeight},
-        acceptedSelectionKind);
+        acceptedSelectionKind, failureOut);
 }
 
 std::optional<scene::FrameSnapshot>

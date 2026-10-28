@@ -407,6 +407,14 @@ bool DebugTakeBoundedCurvePublicationObservation(
 void DebugCancelBoundedCurvePublicationObservation() noexcept;
 #endif
 
+//! Failure from this synchronous capture only. The optional bake status is
+//! populated solely by the committed ordinary receiver's ProduceFace call.
+//! Stage points to a static string; no document or DEBUG state escapes capture.
+struct SceneSnapshotCaptureFailure final {
+    std::optional<decal_layer::bake::Status> decalCoverageStatus;
+    const char* stage = nullptr;
+};
+
 class OcctSceneSnapshotBuilder final {
 public:
     using SnapshotPointer = std::shared_ptr<const SceneSnapshot>;
@@ -447,6 +455,15 @@ public:
         const Handle(V3d_View)& theView,
         const UInt2& theViewportPixels,
         ElementKind theAcceptedSelectionKind) noexcept;
+
+    //! Same capture with an explicit, reset-on-entry production failure value.
+    SnapshotPointer Build(
+        const Handle(OcctDocument)& theDocument,
+        const Handle(AIS_InteractiveContext)& theContext,
+        const Handle(V3d_View)& theView,
+        const UInt2& theViewportPixels,
+        ElementKind theAcceptedSelectionKind,
+        SceneSnapshotCaptureFailure* failureOut) noexcept;
 
     //! Owner-thread read of a named occurrence from the last committed full
     //! publication. Does not require or modify selection. Caller must first

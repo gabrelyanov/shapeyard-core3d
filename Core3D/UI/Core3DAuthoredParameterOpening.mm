@@ -999,6 +999,7 @@ static NSMapTable<Core3DViewController *, Core3DAuthoredParameterRecoveryIssuer 
         _resultDigest = [NSData dataWithBytes:value.resultDigest.data()
             length:value.resultDigest.size()];
         _resultVisible = value.resultVisible;
+        _hasCreationGroup = value.hasCreationGroup;
         _operation = static_cast<Core3DPartBooleanOperation>(value.operation);
         _graphNodeCount = value.graphNodeCount;
         _retainedSuffixCanonicalBytes = [NSData dataWithBytes:value.suffixBytes.data()
