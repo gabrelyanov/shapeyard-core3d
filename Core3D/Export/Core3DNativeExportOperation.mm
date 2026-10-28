@@ -151,6 +151,14 @@ struct NativeExportState {
         debugE4CacheAfter;
     std::uint64_t debugTextureInstallDecodedBytes = 0;
     std::uint64_t debugTextureInstallDecodedLimitBytes = 0;
+    std::mutex debugE4PhaseMutex;
+    std::condition_variable debugE4PhaseCondition;
+    Core3DDebugE4ExportPhase debugE4PausePhase =
+        Core3DDebugE4ExportPhaseNone;
+    Core3DDebugE4ExportPhase debugE4ReachedPhase =
+        Core3DDebugE4ExportPhaseNone;
+    bool debugE4PhaseReleased = false;
+    Core3DDebugE4PhaseReached debugE4PhaseReached = nil;
 #endif
     std::mutex lifecycleMutex;
     bool started = false;
@@ -514,6 +522,29 @@ NSDictionary<NSString *, id> *DebugE4ObservationDictionary(
         @"finalCornerCount": @(value.finalCornerCount),
         @"operationWork": @(value.operationWork),
         @"operationResidentBytes": @(value.operationResidentBytes),
+        @"aggregateBeforeBytes": @(value.aggregateBeforeBytes),
+        @"aggregatePressureBytes": @(value.aggregatePressureBytes),
+        @"aggregateChargedBytes": @(value.aggregateChargedBytes),
+        @"aggregateLimitBytes": @(value.aggregateLimitBytes),
+        @"aggregateRetainedBytes": @(value.aggregateRetainedBytes),
+        @"aggregatePeakBytes": @(value.aggregatePeakBytes),
+        @"aggregateDeniedRequestBytes": @(
+            value.aggregateDeniedRequestBytes),
+        @"aggregateDeniedAvailableBytes": @(
+            value.aggregateDeniedAvailableBytes),
+        @"allocationsAfterAggregateDenial": @(
+            value.allocationsAfterAggregateDenial),
+        @"aggregateFirstDenialSite": DebugE4String(
+            value.aggregateFirstDenialSite),
+        @"aggregateFirstDenialReason": DebugE4String(
+            value.aggregateFirstDenialReason),
+        @"terminalSettlementObserved": @(value.terminalSettlementObserved),
+        @"terminalResidentBytes": @(value.terminalResidentBytes),
+        @"terminalDestructionCount": @(value.terminalDestructionCount),
+        @"terminalDestroyedBytes": @(value.terminalDestroyedBytes),
+        @"terminalSettlementOverflow": @(value.terminalSettlementOverflow),
+        @"terminalFirstFailureSite": DebugE4String(
+            value.terminalFirstFailureSite),
         @"canonicalReadDigests":
             DebugE4Strings(value.canonicalReadDigests),
         @"sourceReadDigests": DebugE4Strings(value.sourceReadDigests),
@@ -590,7 +621,14 @@ NSDictionary<NSString *, id> *DebugE4ObservationDictionary(
         @"captureReached": @(value.captureReached),
         @"finalProductionReached": @(value.finalProductionReached),
         @"publicationReached": @(value.publicationReached),
+        @"finalizationReached": @(value.finalizationReached),
+        @"capturePauseReached": @(value.capturePauseReached),
+        @"finalizationPauseReached": @(value.finalizationPauseReached),
+        @"aggregatePressureInjected": @(value.aggregatePressureInjected),
         @"complete": @(value.complete),
+        @"workerReturned": @(value.workerReturned),
+        @"privateFilesClean": @(value.privateFilesClean),
+        @"returnedScene": @(value.returnedScene),
         @"savedMeasuredStageComplete": @(value.savedMeasuredStageComplete),
         @"savedReceiverExpectationEmpty":
             @(value.savedReceiverExpectationEmpty),
@@ -607,6 +645,28 @@ void WaitForDebugWorkerBarrier(
     std::unique_lock<std::mutex> lock(gDebugWorkerPauseMutex);
     gDebugWorkerPauseCondition.wait(lock, [&] {
         return !gDebugWorkerPaused
+            || state->cancelled.load(std::memory_order_acquire);
+    });
+}
+
+void ReachDebugE4Phase(
+    const std::shared_ptr<NativeExportState>& state,
+    const core3d::scene::DebugPrivateExportPhase phase) {
+    const Core3DDebugE4ExportPhase requested = phase
+            == core3d::scene::DebugPrivateExportPhase::Capture
+        ? Core3DDebugE4ExportPhaseCapture
+        : Core3DDebugE4ExportPhaseFinalization;
+    Core3DDebugE4PhaseReached reached = nil;
+    {
+        std::lock_guard<std::mutex> lock(state->debugE4PhaseMutex);
+        if (state->debugE4PausePhase != requested) return;
+        state->debugE4ReachedPhase = requested;
+        reached = [state->debugE4PhaseReached copy];
+    }
+    if (reached) dispatch_async(dispatch_get_main_queue(), reached);
+    std::unique_lock<std::mutex> lock(state->debugE4PhaseMutex);
+    state->debugE4PhaseCondition.wait(lock, [&] {
+        return state->debugE4PhaseReleased
             || state->cancelled.load(std::memory_order_acquire);
     });
 }
@@ -2048,6 +2108,19 @@ NativeExportResult RunNativeExport(
                 core3d::scene::DebugPrivateExportDecalObservation observation;
                 const auto cacheBefore =
                     core3d::decal_layer::bake::publication::DebugInventory();
+                std::function<void(core3d::scene::DebugPrivateExportPhase)>
+                    phaseObserver;
+                {
+                    std::lock_guard<std::mutex> phaseLock(
+                        state->debugE4PhaseMutex);
+                    if (state->debugE4PausePhase
+                            != Core3DDebugE4ExportPhaseNone) {
+                        phaseObserver = [state](
+                            const core3d::scene::DebugPrivateExportPhase phase) {
+                            ReachDebugE4Phase(state, phase);
+                        };
+                    }
+                }
 #endif
                 result.scene = core3d::scene::OcctSceneSnapshotBuilder::
                     BuildPrivateExportDerivative(
@@ -2061,7 +2134,7 @@ NativeExportResult RunNativeExport(
                                 std::memory_order_acquire);
                         }, &derivativeFailure
 #ifdef DEBUG
-                        , state->debugE4Fault, &observation
+                        , state->debugE4Fault, &observation, phaseObserver
 #endif
                         );
 #ifdef DEBUG
@@ -2365,6 +2438,21 @@ NativeExportResult RunNativeExport(
     if (!result.succeeded || state->sourceScene) {
         RemoveTreeNoThrow(state->cleanupPath);
     }
+#ifdef DEBUG
+    {
+        std::error_code snapshotError;
+        std::error_code outputError;
+        const bool snapshotExists = std::filesystem::exists(
+            state->snapshotCleanupPath, snapshotError);
+        const bool outputExists = std::filesystem::exists(
+            state->cleanupPath, outputError);
+        std::lock_guard<std::mutex> debugLock(state->debugE4Mutex);
+        state->debugE4Observation.workerReturned = true;
+        state->debugE4Observation.privateFilesClean = !snapshotError
+            && !outputError && !snapshotExists && !outputExists;
+        state->debugE4Observation.returnedScene = result.scene != nullptr;
+    }
+#endif
     return result;
 }
 
@@ -3134,6 +3222,7 @@ bool DebugMeshSavedGroupPrivateSurfaces(const TopoDS_Shape& shape) noexcept {
     }
 #ifdef DEBUG
     gDebugWorkerPauseCondition.notify_all();
+    state->debugE4PhaseCondition.notify_all();
 #endif
 }
 
@@ -3214,6 +3303,36 @@ bool DebugMeshSavedGroupPrivateSurfaces(const TopoDS_Shape& shape) noexcept {
         state->debugE4CacheAfter,
         state->debugTextureInstallDecodedBytes,
         state->debugTextureInstallDecodedLimitBytes);
+}
+
+- (BOOL)debugPauseAtE4Phase:(Core3DDebugE4ExportPhase)phase
+                  onReached:(Core3DDebugE4PhaseReached)onReached {
+    const std::shared_ptr<NativeExportState> state = _state;
+    if (state == nullptr || onReached == nil
+        || (phase != Core3DDebugE4ExportPhaseCapture
+            && phase != Core3DDebugE4ExportPhaseFinalization)) return NO;
+    std::lock_guard<std::mutex> lifecycleLock(state->lifecycleMutex);
+    if (state->started || state->finished
+        || state->cancelled.load(std::memory_order_acquire)
+        || state->exportType != ExportTypeGltf
+        || state->meshQuality == Core3DExportMeshQualityViewport) return NO;
+    std::lock_guard<std::mutex> phaseLock(state->debugE4PhaseMutex);
+    if (state->debugE4PausePhase != Core3DDebugE4ExportPhaseNone) return NO;
+    state->debugE4PausePhase = phase;
+    state->debugE4ReachedPhase = Core3DDebugE4ExportPhaseNone;
+    state->debugE4PhaseReleased = false;
+    state->debugE4PhaseReached = [onReached copy];
+    return YES;
+}
+
+- (void)debugResumeE4Phase {
+    const std::shared_ptr<NativeExportState> state = _state;
+    if (state == nullptr) return;
+    {
+        std::lock_guard<std::mutex> lock(state->debugE4PhaseMutex);
+        state->debugE4PhaseReleased = true;
+    }
+    state->debugE4PhaseCondition.notify_all();
 }
 
 + (NSDictionary<NSString *, id> *)debugE4SharedCacheInventory {

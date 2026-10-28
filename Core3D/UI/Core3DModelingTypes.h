@@ -1396,6 +1396,73 @@ __attribute__((objc_subclassing_restricted))
 @end
 #endif
 
+//! Read-only native recipe projection. These values are observations, never
+//! edit receipts. No initializer, setter, persistence codec or mutation API is
+//! exposed. Canonical record bytes use the existing native family codecs.
+typedef NS_ENUM(NSInteger, Core3DTexturingRecipeKind) {
+    Core3DTexturingRecipeKindRetainedFinishing = 1,
+    Core3DTexturingRecipeKindAssetAtlas,
+    Core3DTexturingRecipeKindFaceImage,
+    Core3DTexturingRecipeKindTextRelief,
+};
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DTexturingRecipeFence : NSObject
+@property(nonatomic, readonly) uint64_t epoch;
+@property(nonatomic, copy, readonly) NSString *sha256;
+//! Domain-separated, length-framed bytes hashed by sha256; not a saved form.
+@property(nonatomic, copy, readonly) NSData *canonicalBytes;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DTexturingRecipeRecord : NSObject
+//! Native codec family (SYRS, SYCR, SYEF, SYEA, SYFI, SYTR, SYCV,
+//! SYPT, SYPA, SYFP, or the existing scalar source-recipe codec).
+@property(nonatomic, copy, readonly) NSString *codec;
+@property(nonatomic, copy, readonly) NSString *identity;
+@property(nonatomic, copy, readonly) NSData *canonicalBytes;
+@property(nonatomic, readonly) NSUInteger documentOrder;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DTexturingRecipeEntry : NSObject
+@property(nonatomic, readonly) Core3DTexturingRecipeKind kind;
+@property(nonatomic, copy, readonly) NSString *stableAlias;
+//! document UUID / entity UUID / definition UUID. Local operand identifiers
+//! and replay feature identifiers below are qualified by this native owner.
+@property(nonatomic, copy, readonly) NSString *ownerBoundIdentifier;
+@property(nonatomic, copy, readonly) NSString *entityIdentifier;
+@property(nonatomic, copy, readonly) NSArray<NSString *> *hiddenOperandIdentifiers;
+@property(nonatomic, copy, readonly) NSArray<NSString *> *dependentReplayIdentities;
+//! Complete source/attachment records and dependent replay records, ordered
+//! by native OCAF label traversal, never by selection order or UUID sorting.
+@property(nonatomic, copy, readonly) NSArray<Core3DTexturingRecipeRecord *> *program;
+@property(nonatomic, readonly) NSUInteger documentOrder;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+__attribute__((objc_subclassing_restricted))
+@interface Core3DTexturingRecipeProjection : NSObject
+@property(nonatomic, copy, readonly) NSArray<Core3DTexturingRecipeEntry *> *entries;
+@property(nonatomic, strong, readonly) Core3DTexturingRecipeFence *sourceFence;
+@property(nonatomic, strong, readonly) Core3DTexturingRecipeFence *resourceFence;
+@property(nonatomic, strong, readonly) Core3DTexturingRecipeFence *placementFence;
+//! Exact native edit epoch used by Context::isCurrent. Opening and selection
+//! epochs plus instance nonce retain the other components of that stamp;
+//! equality of these observations alone never grants native currentness.
+@property(nonatomic, readonly) uint64_t isCurrentEpoch;
+@property(nonatomic, readonly) uint64_t openingEpoch;
+@property(nonatomic, readonly) uint64_t selectionEpoch;
+@property(nonatomic, copy, readonly) NSData *nativeInstanceIdentifier;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 typedef NS_ENUM(NSInteger, Core3DRetainedFinishingPreparationResult) {
     Core3DRetainedFinishingPreparationResultPrepared = 0,
     Core3DRetainedFinishingPreparationResultUnchanged,
@@ -1414,6 +1481,8 @@ typedef NS_ENUM(NSInteger, Core3DRetainedFinishingCurrentness) {
 //! Descriptors are presentation data; only this opaque opening may mutate.
 __attribute__((objc_subclassing_restricted))
 @interface Core3DRetainedFinishingOpening : NSObject
+//! Nil when this opening is stale, cancelled, applying or terminal.
+@property(nonatomic, strong, readonly, nullable) Core3DTexturingRecipeProjection *recipeProjection;
 @property(nonatomic,copy,readonly) NSDictionary<NSString *, id> *descriptor;
 @property(nonatomic,readonly) Core3DRetainedFinishingCurrentness currentness;
 - (void)prepareCandidate:(NSDictionary<NSString *, id> *)candidate
@@ -1455,6 +1524,8 @@ typedef NS_ENUM(NSInteger, Core3DAssetAtlasCurrentness) {
 //! PaintedRebakeRequired; this opening never rebakes painted content.
 __attribute__((objc_subclassing_restricted))
 @interface Core3DAssetAtlasOpening : NSObject
+//! Nil when this opening is stale, cancelled, applying or terminal.
+@property(nonatomic, strong, readonly, nullable) Core3DTexturingRecipeProjection *recipeProjection;
 @property(nonatomic,copy,readonly) NSDictionary<NSString *, id> *descriptor;
 @property(nonatomic,readonly) Core3DAssetAtlasCurrentness currentness;
 - (void)prepareCandidate:(NSDictionary<NSString *, id> *)candidate
@@ -1506,6 +1577,8 @@ typedef NS_ENUM(NSInteger, Core3DFaceImageCurrentness) {
 //! candidate overrides.
 __attribute__((objc_subclassing_restricted))
 @interface Core3DFaceImageOpening : NSObject
+//! Nil when this opening is stale, cancelled, applying or terminal.
+@property(nonatomic, strong, readonly, nullable) Core3DTexturingRecipeProjection *recipeProjection;
 @property(nonatomic,copy,readonly) NSDictionary<NSString *, id> *descriptor;
 @property(nonatomic,readonly) Core3DFaceImageCurrentness currentness;
 - (void)prepareCandidate:(NSDictionary<NSString *, id> *)candidate

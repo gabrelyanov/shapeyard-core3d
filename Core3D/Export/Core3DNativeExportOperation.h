@@ -93,6 +93,17 @@ typedef NS_ENUM(NSInteger, Core3DDebugE4ExportFault) {
     //! Corrupts one saved image resource record before capture.
     Core3DDebugE4ExportFaultSavedAtlasCaptureMalformedResource,
 };
+
+//! Operation-local worker phases used only to coordinate deterministic tests.
+//! Reaching a phase never changes the native result; the worker resumes after
+//! explicit release or cancellation.
+typedef NS_ENUM(NSInteger, Core3DDebugE4ExportPhase) {
+    Core3DDebugE4ExportPhaseNone = 0,
+    Core3DDebugE4ExportPhaseCapture,
+    Core3DDebugE4ExportPhaseFinalization,
+};
+
+typedef void (NS_SWIFT_SENDABLE ^Core3DDebugE4PhaseReached)(void);
 #endif
 
 //! Thread-safe, exactly-once native export operation. OCCT work is serialized
@@ -141,6 +152,14 @@ NS_SWIFT_SENDABLE
 //! The result contains no OCAF labels, handles, or authority tokens.
 - (NSDictionary<NSString *, id> *)debugE4Observation
     NS_SWIFT_NAME(debugE4Observation());
+//! Arms one pause before the named phase's existing protected cancellation
+//! recheck. The callback is delivered on the main thread after the worker is
+//! waiting. Only one phase can be armed and it must be selected before start.
+- (BOOL)debugPauseAtE4Phase:(Core3DDebugE4ExportPhase)phase
+                  onReached:(Core3DDebugE4PhaseReached)onReached
+    NS_SWIFT_NAME(debugPause(atE4Phase:onReached:));
+//! Releases this operation's phase pause. Safe to call from timeout cleanup.
+- (void)debugResumeE4Phase NS_SWIFT_NAME(debugResumeE4Phase());
 //! Actual shared E4 cache keys and resident-byte count at the instant queried.
 + (NSDictionary<NSString *, id> *)debugE4SharedCacheInventory
     NS_SWIFT_NAME(debugE4SharedCacheInventory());

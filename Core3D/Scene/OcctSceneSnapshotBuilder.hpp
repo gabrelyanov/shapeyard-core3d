@@ -182,6 +182,11 @@ enum class DebugPrivateExportDecalFault : std::uint8_t {
     SavedAtlasCaptureMalformedResource = 14,
 };
 
+enum class DebugPrivateExportPhase : std::uint8_t {
+    Capture = 1,
+    Finalization = 2,
+};
+
 //! Bounded values observed from the executed private GLB derivative path.
 //! Digests and numeric streams are copied; labels, handles and authority
 //! tokens remain native and never escape this seam.
@@ -211,6 +216,18 @@ struct DebugPrivateExportDecalObservation final {
     std::uint64_t finalCornerCount = 0;
     std::uint64_t operationWork = 0;
     std::uint64_t operationResidentBytes = 0;
+    std::uint64_t aggregateBeforeBytes = 0;
+    std::uint64_t aggregatePressureBytes = 0;
+    std::uint64_t aggregateChargedBytes = 0;
+    std::uint64_t aggregateLimitBytes = 0;
+    std::uint64_t aggregateRetainedBytes = 0;
+    std::uint64_t aggregatePeakBytes = 0;
+    std::uint64_t aggregateDeniedRequestBytes = 0;
+    std::uint64_t aggregateDeniedAvailableBytes = 0;
+    std::uint64_t allocationsAfterAggregateDenial = 0;
+    std::uint64_t terminalResidentBytes = 0;
+    std::uint64_t terminalDestructionCount = 0;
+    std::uint64_t terminalDestroyedBytes = 0;
     std::vector<std::string> canonicalReadDigests;
     std::vector<std::string> sourceReadDigests;
     std::string occluderDigest;
@@ -246,12 +263,24 @@ struct DebugPrivateExportDecalObservation final {
     std::string captureRefusalCause;
     std::string captureRefusalBoundary;
     std::string captureRefusalField;
+    std::string aggregateFirstDenialSite;
+    std::string aggregateFirstDenialReason;
+    std::string terminalFirstFailureSite;
     std::uint64_t layoutResolution = 0;
     std::uint64_t layoutChartCount = 0;
     std::string failureStage;
     bool captureReached = false;
     bool finalProductionReached = false;
     bool publicationReached = false;
+    bool finalizationReached = false;
+    bool capturePauseReached = false;
+    bool finalizationPauseReached = false;
+    bool aggregatePressureInjected = false;
+    bool terminalSettlementObserved = false;
+    bool terminalSettlementOverflow = false;
+    bool workerReturned = false;
+    bool privateFilesClean = false;
+    bool returnedScene = false;
     bool complete = false;
     bool savedMeasuredStageComplete = false;
     bool savedDetachedIdentitiesDistinct = false;
@@ -499,6 +528,8 @@ public:
         , DebugPrivateExportDecalFault debugFault =
             DebugPrivateExportDecalFault::None
         , DebugPrivateExportDecalObservation* debugObservation = nullptr
+        , const std::function<void(DebugPrivateExportPhase)>&
+            debugPhaseObserver = {}
 #endif
         ) noexcept;
 
@@ -512,6 +543,8 @@ public:
         , DebugPrivateExportDecalFault debugFault =
             DebugPrivateExportDecalFault::None
         , DebugPrivateExportDecalObservation* debugObservation = nullptr
+        , const std::function<void(DebugPrivateExportPhase)>&
+            debugPhaseObserver = {}
 #endif
         ) noexcept;
 
@@ -523,7 +556,13 @@ public:
         const std::vector<std::string>& inputKeys,
         const std::vector<std::string>& bakeSeals,
         const std::function<bool()>& cancelled,
-        PrivateExportDecalArtifact& artifact) noexcept;
+        PrivateExportDecalArtifact& artifact
+#ifdef DEBUG
+        , DebugPrivateExportDecalObservation* debugObservation = nullptr
+        , const std::function<void(DebugPrivateExportPhase)>&
+            debugPhaseObserver = {}
+#endif
+        ) noexcept;
 
 #ifdef DEBUG
     static bool DebugCapturePersistedAtlasLineage(

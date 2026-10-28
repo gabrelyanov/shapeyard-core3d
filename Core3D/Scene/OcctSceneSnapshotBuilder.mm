@@ -5297,6 +5297,17 @@ public:
                           kMaxAggregateDecodedTextureBytes}) {}
 
 #ifdef DEBUG
+    ~OperationLedger() {
+        if (terminalObservation_ == nullptr) return;
+        const auto settlement = debugSettlementObservation();
+        terminalObservation_->terminalSettlementObserved = true;
+        terminalObservation_->terminalResidentBytes = settlement.finalLiveBytes;
+        terminalObservation_->terminalDestructionCount = settlement.destructions;
+        terminalObservation_->terminalDestroyedBytes = settlement.destroyedBytes;
+        terminalObservation_->terminalSettlementOverflow = settlement.overflow;
+        terminalObservation_->terminalFirstFailureSite =
+            debugOracleFailureName();
+    }
     OperationLedger(std::size_t snapshotLimit, std::size_t encodedLimit,
                     std::size_t privateLimit) noexcept
         : storageLimits_({snapshotLimit, encodedLimit, privateLimit}) {}
@@ -5308,6 +5319,29 @@ public:
     void debugDenyFurtherPrivateStorage() noexcept {
         storageLimits_[storageIndex(StorageDimension::PrivateStorage)] =
             live(StorageDimension::PrivateStorage);
+    }
+    void debugObserveTerminal(
+        DebugPrivateExportDecalObservation* observation) noexcept {
+        terminalObservation_ = observation;
+    }
+    void debugClearTerminalObservation() noexcept {
+        terminalObservation_ = nullptr;
+    }
+    std::array<std::size_t, 4> debugFirstFailureState() const noexcept {
+        return {std::size_t(firstFailure_.site),
+            std::size_t(firstFailure_.reason), firstFailure_.requested,
+            firstFailure_.admitted};
+    }
+    const char* debugFirstFailureReasonName() const noexcept {
+        static constexpr const char* names[] = {
+            "None", "InvalidDimension", "StorageLimit", "ReleaseMismatch",
+            "ArithmeticOverflow", "InvalidJob", "DuplicateJob",
+            "UnsealedJob", "JobLimit", "Topology", "Cancelled",
+            "AllocationFailure", "ExplicitRefusal", "Invariant",
+        };
+        const auto index = static_cast<std::size_t>(firstFailure_.reason);
+        return index < sizeof(names) / sizeof(names[0])
+            ? names[index] : "Unknown";
     }
 #endif
 
@@ -5821,6 +5855,7 @@ private:
     std::size_t cumulativeWork_ = 0;
     bool failed_ = false;
 #ifdef DEBUG
+    DebugPrivateExportDecalObservation* terminalObservation_ = nullptr;
     std::size_t allocationsAtFirstFailure_ = 0;
     std::size_t faceImageTransfers_ = 0;
     std::size_t paintedBakeTransfers_ = 0;
@@ -16119,6 +16154,12 @@ struct PrivateDecalCapture::Impl final {
     // already-admitted stack ledger here before any protected scene copy; the
     // existing ReplayBudget below remains its unchanged topology component.
     OperationLedger operationLedger;
+#ifdef DEBUG
+    // Optional test pressure is charged by the real operation ledger and dies
+    // before that ledger's terminal witness. It never changes a production
+    // ceiling or stands in for an allocation/result.
+    decal_layer::bake::accounting::Ticket debugAggregatePressureTicket;
+#endif
     decal_layer::bake::accounting::Ticket controlStorageTicket;
     decal_layer::bake::accounting::Ticket terminalSceneObjectTicket;
     decal_layer::bake::accounting::Ticket terminalSceneNumericTicket;
@@ -18522,6 +18563,7 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
 #ifdef DEBUG
     , const DebugPrivateExportDecalFault debugFault
     , DebugPrivateExportDecalObservation* const debugObservation
+    , const std::function<void(DebugPrivateExportPhase)>& debugPhaseObserver
 #endif
     ) noexcept {
     capture.reset();
@@ -18576,6 +18618,12 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
                      selectedObjectsOnly};
 #endif
         impl.operationLedger = captureAdmission;
+#ifdef DEBUG
+        if (debugObservation
+            && (debugFault != DebugPrivateExportDecalFault::None
+                || debugPhaseObserver))
+            impl.operationLedger.debugObserveTerminal(debugObservation);
+#endif
         impl.controlStorageTicket.view = impl.operationLedger.view();
         impl.controlStorageTicket.dimension =
             decal_layer::bake::accounting::StorageDimension::PrivateStorage;
@@ -19529,6 +19577,12 @@ bool OcctSceneSnapshotBuilder::CapturePrivateExportDecals(
         oracleDump.readBefore = impl.operationLedger.allocationEntries(
             decal_layer::bake::accounting::FailureSite::ProtectedAtlasRead);
 #endif
+#ifdef DEBUG
+        if (debugPhaseObserver) {
+            if (debugObservation) debugObservation->capturePauseReached = true;
+            debugPhaseObserver(DebugPrivateExportPhase::Capture);
+        }
+#endif
         if (!impl.recheckProtected(cancelled,
                 decal_layer::bake::accounting::FailureSite::
                     ProtectedRecheckStorage)) {
@@ -19582,7 +19636,12 @@ bool OcctSceneSnapshotBuilder::FinalizePrivateExportDecals(
     const std::vector<std::string>& inputKeys,
     const std::vector<std::string>& bakeSeals,
     const std::function<bool()>& cancelled,
-    PrivateExportDecalArtifact& artifact) noexcept {
+    PrivateExportDecalArtifact& artifact
+#ifdef DEBUG
+    , DebugPrivateExportDecalObservation* const debugObservation
+    , const std::function<void(DebugPrivateExportPhase)>& debugPhaseObserver
+#endif
+    ) noexcept {
     artifact = {};
     if (!capture.impl_ || !cancelled || !IsValidSceneSnapshot(finalScene))
         return false;
@@ -19601,6 +19660,14 @@ bool OcctSceneSnapshotBuilder::FinalizePrivateExportDecals(
                 impl.destination.clear();
             }
         } clearOnFailure{impl, artifact};
+#ifdef DEBUG
+        if (debugObservation) debugObservation->finalizationReached = true;
+        if (debugPhaseObserver) {
+            if (debugObservation)
+                debugObservation->finalizationPauseReached = true;
+            debugPhaseObserver(DebugPrivateExportPhase::Finalization);
+        }
+#endif
         if (!impl.recheckProtected(cancelled,
                 FailureSite::ProtectedRecheckStorage)) return false;
         if (finalScene.metersPerUnit != impl.metersPerUnit
@@ -21872,6 +21939,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
 #ifdef DEBUG
     , const DebugPrivateExportDecalFault debugFault
     , DebugPrivateExportDecalObservation* const debugObservation
+    , const std::function<void(DebugPrivateExportPhase)>& debugPhaseObserver
 #endif
     ) noexcept
 {
@@ -21952,7 +22020,7 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             && (!CapturePrivateExportDecals(document, source,
                     selectedObjectsOnly, cancelled, decalCapture
 #ifdef DEBUG
-                    , debugFault, debugObservation
+                    , debugFault, debugObservation, debugPhaseObserver
 #endif
                     )
                 || !decalCapture || !decalCapture->impl_
@@ -24456,11 +24524,65 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             || copiedEmittedBytes.privateBytes
                 > emittedVectorTicket.bytes + emittedPrivateTicket.bytes)
             return {};
+#ifdef DEBUG
+        if (debugObservation) {
+            debugObservation->finalProductionReached = true;
+            debugObservation->publicationReached = true;
+            debugObservation->failureStage = "private-publication-finalize";
+        }
+        if (debugFault == DebugPrivateExportDecalFault::AggregateBudget) {
+            const auto before = terminalImpl.operationLedger.debugStorageState(
+                TerminalDimension::PrivateStorage);
+            const std::size_t pressureBytes = before[5];
+            if (pressureBytes == 0
+                || !terminalImpl.debugAggregatePressureTicket.acquire(
+                    terminalOperation, TerminalDimension::PrivateStorage,
+                    pressureBytes, TerminalRetention::Retained,
+                    TerminalSite::DebugExactLimit)) {
+                if (debugObservation)
+                    debugObservation->failureStage =
+                        "aggregate-pressure-arm-failed";
+                return {};
+            }
+            const auto charged = terminalImpl.operationLedger.debugStorageState(
+                TerminalDimension::PrivateStorage);
+            if (debugObservation) {
+                debugObservation->aggregatePressureInjected = true;
+                debugObservation->aggregateBeforeBytes = before[1];
+                debugObservation->aggregatePressureBytes = pressureBytes;
+                debugObservation->aggregateChargedBytes = charged[1];
+                debugObservation->aggregateLimitBytes = charged[4];
+                debugObservation->aggregateRetainedBytes = charged[2];
+                debugObservation->aggregatePeakBytes = charged[3];
+            }
+        }
+#endif
         PrivateExportDecalArtifact artifact;
-        if (!FinalizePrivateExportDecals(*decalCapture, *result,
+        const bool finalized = FinalizePrivateExportDecals(
+                *decalCapture, *result,
                 finalCorrespondence, emittedMeshes, finalInputKeys,
-                finalBakeSeals, cancelled, artifact)
-            || !artifact.scene) return {};
+                finalBakeSeals, cancelled, artifact
+#ifdef DEBUG
+                , debugObservation, debugPhaseObserver
+#endif
+                );
+#ifdef DEBUG
+        if (!finalized && debugObservation
+            && debugFault == DebugPrivateExportDecalFault::AggregateBudget) {
+            const auto failure =
+                terminalImpl.operationLedger.debugFirstFailureState();
+            debugObservation->aggregateFirstDenialSite =
+                terminalImpl.operationLedger.debugOracleFailureName();
+            debugObservation->aggregateFirstDenialReason =
+                terminalImpl.operationLedger.debugFirstFailureReasonName();
+            debugObservation->aggregateDeniedRequestBytes = failure[2];
+            debugObservation->aggregateDeniedAvailableBytes = failure[3];
+            debugObservation->allocationsAfterAggregateDenial =
+                terminalImpl.operationLedger.debugAllocationsAfterFailure();
+            debugObservation->failureStage = "aggregate-budget-denied";
+        }
+#endif
+        if (!finalized || !artifact.scene) return {};
         artifact.savedGroupLayout = decalCapture->impl_->savedGroupLayout;
         artifact.savedGroupLayoutReason =
             decalCapture->impl_->savedGroupLayoutReason;
@@ -24696,6 +24818,13 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
             || !returnedOwner->capture->impl_->recheckProtected(cancelled,
                 TerminalSite::ProtectedRecheckStorage))
             return {};
+#ifdef DEBUG
+        // A successful returned owner can outlive the caller's stack observer.
+        // Terminal settlement is required only for the failure/cancellation
+        // paths that unwind here, so detach the pointer before returning it.
+        returnedOwner->capture->impl_->operationLedger
+            .debugClearTerminalObservation();
+#endif
         return SnapshotPointer(returnedOwner,
             returnedOwner->artifact.scene.get());
     } catch (...) { return {}; }

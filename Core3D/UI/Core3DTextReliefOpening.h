@@ -3,6 +3,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 @class Core3DViewController;
+@class Core3DTexturingRecipeProjection;
 
 //! E5-S1 text and emblem relief error domain. S1 issues a detached native
 //! raised candidate only; no retained owner, document transaction,
@@ -150,6 +151,8 @@ __attribute__((objc_subclassing_restricted))
 //! edit or any selection change makes it stale.
 __attribute__((objc_subclassing_restricted))
 @interface Core3DTextReliefOpening : NSObject
+//! Same native currentness gate as isCurrent; a read never opens a command.
+@property(nonatomic, strong, readonly, nullable) Core3DTexturingRecipeProjection *recipeProjection;
 @property(nonatomic, strong, readonly) Core3DTextReliefIssuedFace *issuedFace;
 @property(nonatomic, copy, readonly) NSString *documentIdentifier;
 @property(nonatomic, copy, readonly) NSString *contextIdentifier;

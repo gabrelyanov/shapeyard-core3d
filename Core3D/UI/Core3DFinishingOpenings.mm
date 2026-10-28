@@ -1,4 +1,4 @@
-#import "Core3DModelingTypes.h"
+#import <Core3D/Core3DModelingTypes.h>
 #import "Core3DViewController.h"
 #import "../OCCTKit/GLViewController.h"
 #import "../Viewport/Core3DSceneSnapshot.h"
@@ -24,6 +24,11 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+// Internal read-only helper, implemented in Core3DNativeOpenings.mm.
+extern Core3DTexturingRecipeProjection *Core3DCaptureTexturingRecipeProjection(
+    OcctDocument&, const core3d::native_opening::Fence&,
+    const std::vector<core3d::retained_recipe::OwnerKey>&, Core3DTexturingRecipeKind);
 
 namespace {
 using FinishingDefinition = core3d::retained_finishing::Definition;
@@ -407,6 +412,7 @@ void DeliverMutation(void (^completion)(Core3DProfileConstructionResult, NSStrin
 @interface Core3DRetainedFinishingOpening () {
 @package
     Handle(OcctDocument) _owner;
+    Core3DTexturingRecipeProjection *_recipeProjection;
     std::shared_ptr<OpeningContext> _context;
     OwnerKey _key;
     std::string _selected;
@@ -432,6 +438,21 @@ void DeliverMutation(void (^completion)(Core3DProfileConstructionResult, NSStrin
     if (!NSThread.isMainThread || _owner.IsNull())
         return Core3DRetainedFinishingCurrentnessStale;
     return PublicCurrentness(_owner->RetainedFinishingCurrentness(_key));
+}
+
+- (Core3DTexturingRecipeProjection *)recipeProjection {
+    if (!NSThread.isMainThread || _owner.IsNull() || !_context
+        || !(_state.load() == FinishingOpeningState::Open || _state.load() == FinishingOpeningState::Prepared) || !_context->isCurrent(64, 64)) return nil;
+    if (_recipeProjection) return _recipeProjection;
+    try {
+        if (_owner->RetainedFinishingCurrentness(_key)
+            == OcctRetainedFinishingCurrentness::Stale) return nil;
+        Core3DTexturingRecipeProjection *value = Core3DCaptureTexturingRecipeProjection(
+            *_owner, _context->openingFence(), {_key}, Core3DTexturingRecipeKindRetainedFinishing);
+        if (!_context->isCurrent(64, 64)) return nil;
+        _recipeProjection = value;
+        return value;
+    } catch (...) { return nil; }
 }
 
 - (NSDictionary<NSString *, id> *)descriptor {

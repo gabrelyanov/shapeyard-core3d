@@ -1,3 +1,4 @@
+#import <Core3D/Core3DModelingTypes.h>
 // E5-S1 detached Text and Emblem Relief opening. A controller/viewer-issued
 // opening bound to one document, one native source entity and one issued
 // planar-face selection. It admits trusted catalog-pinned SYTO/1 resources
@@ -12,6 +13,7 @@
 #import "../Viewport/Core3DSceneSnapshot.h"
 
 #include "../OCCTKit/NativeOpeningContext.hxx"
+#include "../OCCTKit/ReceiptRecord.hxx"
 #include "../OCCTKit/OcctDocument.h"
 #include "../OCCTKit/BoundedCurveBuild.hxx"
 #include "../OCCTKit/TextReliefBuild.hxx"
@@ -53,6 +55,11 @@
 NSErrorDomain const Core3DTextReliefErrorDomain = @"Core3DTextReliefErrorDomain";
 NSString *const Core3DTextReliefRefusalReasonKey = @"e5.refusal";
 NSString *const Core3DTextReliefRefusalRawValueKey = @"e5.refusalRaw";
+
+// Internal read-only helper, implemented in Core3DNativeOpenings.mm.
+extern Core3DTexturingRecipeProjection *Core3DCaptureTexturingRecipeProjection(
+    OcctDocument&, const core3d::native_opening::Fence&,
+    const std::vector<core3d::retained_recipe::OwnerKey>&, Core3DTexturingRecipeKind);
 
 namespace {
 
@@ -482,6 +489,7 @@ struct E5Build final {
 @implementation Core3DTextReliefOpening {
     __weak Core3DViewController *_controller;
     Handle(OcctDocument) _document;
+    Core3DTexturingRecipeProjection *_recipeProjection;
     std::shared_ptr<OpeningContext> _context;
     IssuedSelection _issued;
     std::shared_ptr<std::atomic_bool> _cancelled;
@@ -499,6 +507,33 @@ struct E5Build final {
     std::shared_ptr<std::atomic_int> _debugCancelAfterBuild;
     int _debugApplyFault;
 #endif
+}
+
+- (Core3DTexturingRecipeProjection *)recipeProjection {
+    if (!NSThread.isMainThread || _document.IsNull() || !_context
+        || ![self isCurrent:nullptr] || !_context->isCurrent(64, 64)) return nil;
+    if (_recipeProjection) return _recipeProjection;
+    try {
+        core3d::retained_recipe::OwnerKey key;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(_document->Document()->Main());
+        if (shapes.IsNull()) return nil;
+        TDF_LabelSequence roots; shapes->GetFreeShapes(roots);
+        unsigned matches = 0;
+        for (Standard_Integer i = 1; i <= roots.Length(); ++i) {
+            const auto label = roots.Value(i);
+            if (_document->EntityIdentifierForLabel(label) != _issued.entity) continue;
+            if (++matches != 1
+                || !core3d::receipt::ParseUUID(_document->DocumentIdentifier(), key.document)
+                || !core3d::receipt::ParseUUID(_issued.entity, key.entity)
+                || !core3d::receipt::ParseUUID(_document->DefinitionIdentifierForLabel(label), key.definition)) return nil;
+        }
+        if (matches != 1) return nil;
+        Core3DTexturingRecipeProjection *value = Core3DCaptureTexturingRecipeProjection(
+            *_document, _context->openingFence(), {key}, Core3DTexturingRecipeKindTextRelief);
+        if (!_context->isCurrent(64, 64)) return nil;
+        _recipeProjection = value;
+        return value;
+    } catch (...) { return nil; }
 }
 
 - (instancetype)initPrivate { return [super init]; }
