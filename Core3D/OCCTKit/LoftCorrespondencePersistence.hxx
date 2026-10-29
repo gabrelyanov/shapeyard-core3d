@@ -38,7 +38,7 @@ inline constexpr int MinimumRecordTag = 17;
 inline constexpr std::uint16_t Schema = 1;
 
 inline const Standard_GUID& AttributeID() {
-    static const Standard_GUID id("F49E75A9-CC8F-4AEC-9789-D66A150F4922"); return id;
+    static const Standard_GUID id("94FBE7DC-74FD-4C7F-A550-B241BB04A332"); return id;
 }
 
 struct Value {
@@ -188,7 +188,17 @@ struct Payload { Value value; std::vector<std::uint8_t> bytes; };
 class BinaryDriver;
 class Attribute final : public TDF_Attribute {
 public:
-    DEFINE_STANDARD_RTTI_INLINE(Attribute, TDF_Attribute)
+    typedef TDF_Attribute base_type;
+    static const char* get_type_name() {
+        return "Core3D_LoftCorrespondence";
+        OCCT_CHECK_BASE_CLASS(Attribute, TDF_Attribute)
+    }
+    static const Handle(Standard_Type)& get_type_descriptor() {
+        return Standard_Type::Instance<Attribute>();
+    }
+    const Handle(Standard_Type)& DynamicType() const override {
+        return get_type_descriptor();
+    }
     const Standard_GUID& ID() const override { return AttributeID(); }
     Handle(TDF_Attribute) NewEmpty() const override { return new Attribute(); }
     void Restore(const Handle(TDF_Attribute)& source) override {

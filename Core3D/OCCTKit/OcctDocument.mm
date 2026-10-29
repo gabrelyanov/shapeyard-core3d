@@ -6536,6 +6536,12 @@ public:
             aTable, theMessageDriver, myRetainedBudget, RejectSafeBinaryRead);
         if (myAllowRetainedSolid) core3d::bounded_curve::Register(
             aTable,theMessageDriver,myBoundedCurveBudget,RejectSafeBinaryRead);
+        if (core3d::general_loft::persistence::AttributeID()
+                == core3d::loft_correspondence::persistence::AttributeID()
+            || std::strcmp(
+                STANDARD_TYPE(core3d::general_loft::persistence::Attribute)->Name(),
+                STANDARD_TYPE(core3d::loft_correspondence::persistence::Attribute)->Name()) == 0)
+            Standard_Failure::Raise("Loft persistence attribute identity collision");
         core3d::general_loft::persistence::Register(
             aTable, theMessageDriver, myGeneralLoftBudget, RejectSafeBinaryRead);
         core3d::loft_correspondence::persistence::Register(
