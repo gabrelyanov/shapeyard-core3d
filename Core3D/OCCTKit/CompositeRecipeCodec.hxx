@@ -88,6 +88,70 @@ inline bool Hash(const std::vector<std::uint8_t>& bytes, Digest& output) noexcep
         && CC_SHA256(bytes.data(), CC_LONG(bytes.size()), output.data()) != nullptr;
 }
 
+inline bool EncodeOrdinarySourceRecipe(const OrdinarySourceRecipe& value,
+                                       std::vector<std::uint8_t>& output) noexcept {
+    output.clear();
+    try {
+        if (value.version != 1
+            || (value.shape != SourceShapeKind::Solid
+                && value.shape != SourceShapeKind::TriangleMesh)
+            || value.origin > OrdinarySourceOrigin::LegacyGeometry
+            || !retained_recipe::Nonzero(value.sourceAnchor)
+            || (value.hasOriginLink != retained_recipe::Valid(value.originLink))) return false;
+        Writer writer;
+        writer.raw(reinterpret_cast<const std::uint8_t*>("SYOS"), 4);
+        writer.integer(value.version, 1);
+        writer.integer(std::uint8_t(value.shape), 1);
+        writer.integer(std::uint8_t(value.origin), 1);
+        writer.integer(value.hasOriginLink ? 1 : 0, 1);
+        writer.raw(value.sourceAnchor);
+        if (value.hasOriginLink) {
+            writer.raw(value.originLink.document); writer.raw(value.originLink.entity);
+            writer.raw(value.originLink.definition); writer.raw(value.originLink.sourceFeature);
+        } else {
+            const UUID zero{};
+            writer.raw(zero); writer.raw(zero); writer.raw(zero); writer.raw(zero);
+        }
+        if (!writer.valid || writer.bytes.size() > MaximumOrdinarySourcePayloadBytes) return false;
+        output = std::move(writer.bytes); return true;
+    } catch (...) { output.clear(); return false; }
+}
+
+inline bool DecodeOrdinarySourceRecipe(const SourceRecipe& recipe,
+                                       OrdinarySourceRecipe& output) noexcept {
+    output = {};
+    try {
+        if (recipe.kind != RecipeKind::OrdinarySource || recipe.bytes.size() != 88
+            || std::memcmp(recipe.bytes.data(), "SYOS", 4) != 0) return false;
+        Reader reader(recipe.bytes, recipe.bytes.size());
+        std::array<std::uint8_t, 4> magic{};
+        std::uint64_t version = 0, shape = 0, origin = 0, flags = 0;
+        OrdinarySourceRecipe value;
+        if (!reader.raw(magic) || !reader.integer(1, version)
+            || !reader.integer(1, shape) || !reader.integer(1, origin)
+            || !reader.integer(1, flags) || flags > 1
+            || version != 1 || origin > std::uint8_t(OrdinarySourceOrigin::LegacyGeometry)
+            || (shape != std::uint8_t(SourceShapeKind::Solid)
+                && shape != std::uint8_t(SourceShapeKind::TriangleMesh))
+            || !reader.raw(value.sourceAnchor)
+            || !reader.raw(value.originLink.document) || !reader.raw(value.originLink.entity)
+            || !reader.raw(value.originLink.definition) || !reader.raw(value.originLink.sourceFeature)
+            || !reader.complete()) return false;
+        value.version = std::uint8_t(version);
+        value.shape = SourceShapeKind(shape);
+        value.origin = OrdinarySourceOrigin(origin);
+        value.hasOriginLink = flags == 1;
+        const SourceIdentity zero{};
+        if (!retained_recipe::Nonzero(value.sourceAnchor)
+            || (value.hasOriginLink ? !retained_recipe::Valid(value.originLink)
+                                    : !(value.originLink == zero))
+            || recipe.schema != (value.shape == SourceShapeKind::Solid ? 1u : 2u)) return false;
+        std::vector<std::uint8_t> canonical;
+        if (!EncodeOrdinarySourceRecipe(value, canonical) || canonical != recipe.bytes) return false;
+        output = value; return true;
+    } catch (...) { output = {}; return false; }
+}
+
 inline bool EncodeScalarRecipe(RecipeKind kind, std::uint32_t schema,
                                const std::vector<double>& values,
                                std::vector<std::uint8_t>& output) noexcept {
@@ -141,6 +205,10 @@ inline bool ValidRecipe(const SourceRecipe& recipe) noexcept {
             std::vector<std::uint8_t> exact;
             return recipe.schema == 1 && retained_boolean::Decode(recipe.bytes, decoded)
                 && retained_boolean::Encode(decoded, exact) && exact == recipe.bytes;
+        }
+        if (recipe.kind == RecipeKind::OrdinarySource) {
+            OrdinarySourceRecipe decoded;
+            return DecodeOrdinarySourceRecipe(recipe, decoded);
         }
         std::vector<double> values;
         if (!DecodeScalarRecipe(recipe, values)) return false;
@@ -633,6 +701,7 @@ inline bool ValidLegacy(const Definition& definition) noexcept {
                     || !sourceDefinitions.insert(source->original.definition).second
                     || !ValidRecipe(source->recipe) || !ValidPlacement(source->inputToCarrier)
                     || !Valid(source->commitments) || !shapeSlots.insert(source->shapeSlot).second
+                    || source->recipe.kind == RecipeKind::OrdinarySource
                     || (definition.schemaVersion == 1
                         && source->recipe.kind == RecipeKind::BoundedCurvePath)) return false;
                 Digest recipeDigest;
@@ -915,7 +984,7 @@ inline const RegistryView& ProductionRegistry() noexcept {
 namespace core3d::retained_source {
 inline const RegistryView& ProductionRegistry() noexcept {
     using namespace composite_recipe;
-    static const std::array<Descriptor, 10> entries{{
+    static const std::array<Descriptor, 12> entries{{
         {{std::uint8_t(RecipeKind::Profile), 1}, SourceShapeKind::Solid, MaximumEnvelopeBytes, CanonicalLegacySource},
         {{std::uint8_t(RecipeKind::Profile), 2}, SourceShapeKind::Solid, MaximumEnvelopeBytes, CanonicalLegacySource},
         {{std::uint8_t(RecipeKind::Profile), 3}, SourceShapeKind::Solid, MaximumEnvelopeBytes, CanonicalLegacySource},
@@ -927,6 +996,10 @@ inline const RegistryView& ProductionRegistry() noexcept {
         {{std::uint8_t(RecipeKind::RetainedBoolean), 1}, SourceShapeKind::Solid, MaximumEnvelopeBytes, CanonicalLegacySource},
         {{BoundedCurvePathKind, bounded_curve::Schema}, SourceShapeKind::Wire,
          bounded_curve::MaximumDefinitionBytes, CanonicalLegacySource},
+        {{std::uint8_t(RecipeKind::OrdinarySource), 1}, SourceShapeKind::Solid,
+         MaximumOrdinarySourcePayloadBytes, CanonicalLegacySource},
+        {{std::uint8_t(RecipeKind::OrdinarySource), 2}, SourceShapeKind::TriangleMesh,
+         MaximumOrdinarySourcePayloadBytes, CanonicalLegacySource},
     }};
     static const RegistryView registry(entries.data(), entries.size());
     return registry;

@@ -50,6 +50,7 @@ enum class FailureSite : std::uint8_t;
 namespace core3d::face_image::owner { enum class Outcome : std::uint8_t; struct Staging; }
 namespace core3d::face_image::persistence::bindings { enum class ReadState : int; }
 namespace core3d::text_relief::owner { struct PreparedHostPair; }
+namespace core3d::composite_recipe { struct Payload; }
 
 #include <XCAFApp_Application.hxx>
 #include <TDocStd_Document.hxx>
@@ -90,6 +91,7 @@ namespace core3d::text_relief::owner { struct PreparedHostPair; }
 #include "SourceFaceProvenanceRecord.hxx"
 #include "CurvedFaceUVUnwrap.hpp"
 class XCAFDoc_VisMaterial;
+class OcctDocument;
 
 class Message_ProgressRange;
 namespace core3d { class OrdinaryEditController; class Core3DViewer; class BevelOperationController; class SavedCutSourceDetachedResult; class SavedProgramSourceDetachedResult; }
@@ -525,6 +527,78 @@ struct OcctExactLabelReceipt {
     Standard_EXPORT Standard_Boolean IsEqual(
         const OcctExactLabelReceipt& other) const noexcept;
 };
+
+namespace core3d::ordinary_input {
+enum class Representation : std::uint8_t {
+    Invalid = 0, BRepSolid = 1, TriangleMesh = 2, Wire = 3, Compound = 4
+};
+enum class Origin : std::uint8_t {
+    Unknown = 0, AddPrimitive = 1, Import = 2, Duplicate = 3,
+    RetainedFeature = 4, LegacyGeometry = 5
+};
+enum class History : std::uint8_t { Absent = 0, Current = 1, Malformed = 2 };
+enum class Purpose : std::uint8_t {
+    Observe = 0, SolidModel = 1, MeshModel = 2, FeatureEdit = 3
+};
+enum class Refusal : std::uint8_t {
+    None = 0, NeedsSelection, ForeignDocument, UnsupportedRepresentation,
+    UnsupportedGeometry, MissingHistory, MalformedStoredSource, Busy, Stale,
+    OverBudget, RecoveryRequired
+};
+enum Capability : std::uint32_t {
+    ObserveCurrentGeometry = 1u << 0,
+    SolidOperand = 1u << 1,
+    TriangleMeshOperand = 1u << 2,
+    PersistSourceOnMutation = 1u << 3,
+    EditRecordedFeature = 1u << 4,
+};
+
+struct SnapshotState;
+class InputSnapshot final {
+public:
+    Representation representation() const noexcept;
+    Origin origin() const noexcept;
+    History history() const noexcept;
+    std::uint32_t capabilities() const noexcept;
+    const std::string& documentIdentifier() const noexcept;
+    const std::string& entityIdentifier() const noexcept;
+    const std::string& definitionIdentifier() const noexcept;
+    const std::array<std::uint8_t, 16>& sourceAnchor() const noexcept;
+    double metersPerUnit() const noexcept;
+private:
+    friend class ::OcctDocument;
+    explicit InputSnapshot(std::shared_ptr<const SnapshotState> state) noexcept;
+    std::shared_ptr<const SnapshotState> state_;
+};
+
+struct PromotionState;
+class PromotionPlan final {
+public:
+    const std::shared_ptr<const InputSnapshot>& snapshot() const noexcept;
+private:
+    friend class ::OcctDocument;
+    explicit PromotionPlan(std::shared_ptr<const PromotionState> state) noexcept;
+    std::shared_ptr<const PromotionState> state_;
+};
+
+struct CaptureResult final {
+    Refusal refusal = Refusal::NeedsSelection;
+    std::shared_ptr<const InputSnapshot> snapshot;
+    std::shared_ptr<const PromotionPlan> promotion;
+    bool ready() const noexcept { return refusal == Refusal::None && bool(snapshot); }
+};
+
+enum class CommitOutcome : std::uint8_t {
+    Committed = 0, Refused, Stale, Busy, MalformedPayload, PersistenceFailure
+};
+} // namespace core3d::ordinary_input
+
+#if DEBUG
+//! Evidence-only observer around the production AddShape/capture/commit/save
+//! routes. It issues no alternate admission or mutation authority.
+extern "C" Standard_EXPORT std::uint64_t Core3DDebugOrdinaryInputProbe(
+    std::int32_t scenario, double metersPerUnit) noexcept;
+#endif
 
 //! An identity reservation minted only by the owning OcctDocument. UUIDs are
 //! values to install, never caller assertions about existing OCAF state.
@@ -1057,6 +1131,22 @@ class OcctDocument : public Standard_Transient
   DEFINE_STANDARD_RTTIEXT(OcctDocument, Standard_Transient)
   
 public:
+  //! Shared, read-only current-geometry admission. Absence of history may
+  //! yield a detached promotion plan; malformed history never does. Capture,
+  //! menu queries, measurement, cancellation and rejected preparation never
+  //! open a command or allocate a persistent label.
+  Standard_EXPORT core3d::ordinary_input::CaptureResult CaptureToolInput(
+      const TDF_Label& label, core3d::ordinary_input::Purpose purpose) const noexcept;
+  Standard_EXPORT Standard_Boolean OrdinaryInputCurrent(
+      const std::shared_ptr<const core3d::ordinary_input::InputSnapshot>& snapshot)
+      const noexcept;
+  //! First-successful-mutation boundary. A family supplies its independently
+  //! canonical graph and detached candidate root. The source promotion and
+  //! root replacement commit as one command or are both absent.
+  Standard_EXPORT core3d::ordinary_input::CommitOutcome CommitToolInputPromotion(
+      const std::shared_ptr<const core3d::ordinary_input::PromotionPlan>& plan,
+      const TopoDS_Shape& candidateRoot,
+      const std::shared_ptr<const core3d::composite_recipe::Payload>& payload) noexcept;
   //! Never opens a command or repairs metadata. Call immediately before a
   //! destructive operation's NewCommand; callers must reject every result
   //! except the explicitly admitted route above.

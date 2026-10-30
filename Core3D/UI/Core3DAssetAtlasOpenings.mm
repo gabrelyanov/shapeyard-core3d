@@ -421,18 +421,20 @@ void DeliverMutation(void (^completion)(Core3DProfileConstructionResult, NSStrin
                 [members addObject:IdentifierText(member.owner.entity)];
             }
         } else {
-            for (const auto& key : _captured)
+            for (const auto& key : _captured) {
+                keys.push_back(key);
                 [members addObject:IdentifierText(key.entity)];
+            }
         }
         NSMutableArray<NSString *> *painted = [NSMutableArray array];
-        if (!keys.empty()) {
-            core3d::asset_atlas::Capture capture;
-            if (core3d::asset_atlas::build::CaptureMembers(
-                    _owner->Document(), keys, capture)) {
-                for (const auto& entry : capture.members)
-                    if (entry.painted)
-                        [painted addObject:IdentifierText(entry.slot.owner.entity)];
-            }
+        for (const auto& key : keys) {
+            TDF_Label label;
+            core3d::retained_solid::Record retained;
+            if (core3d::retained_finishing::producer::detail::Resolve(
+                    _owner->Document(), key, label, retained)
+                && core3d::asset_atlas::build::detail::Painted(
+                    _owner->Document(), label))
+                [painted addObject:IdentifierText(key.entity)];
         }
         double occupancy = 0;
         unsigned long long corners = 0;

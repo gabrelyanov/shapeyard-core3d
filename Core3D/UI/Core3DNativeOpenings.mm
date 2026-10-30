@@ -16,6 +16,7 @@
 #include "../OCCTKit/GeneralLoftOwner.hxx"
 #include "../OCCTKit/PathArrayOwnerBridge.hxx"
 #include "../OCCTKit/PatternOwnerBridge.hxx"
+#include "RadialArrayOperationController.hpp"
 #include <XCAFDoc_DocumentTool.hxx>
 #if DEBUG
 #include <cstdio>
@@ -259,7 +260,9 @@ NSDictionary *PatternDescriptor(const core3d::pattern_owner::Snapshot& opening,
 }
 
 bool PatternEdit(NSDictionary *value, const core3d::pattern_owner::Snapshot& opening,
-                 double metersPerUnit, core3d::pattern_owner::Edit& output) {
+                 double metersPerUnit, core3d::pattern_owner::Edit& output,
+                 bool& radialCountClamped) {
+    radialCountClamped = false;
     NSArray *keys = @[@"rowAxis", @"columnAxis", @"rowCount", @"columnCount",
         @"rowSpacingMM", @"columnSpacingMM", @"radialPivotMM", @"sweepDegrees",
         @"suppressedEntityIdentifiers"];
@@ -282,6 +285,12 @@ bool PatternEdit(NSDictionary *value, const core3d::pattern_owner::Snapshot& ope
         && SuppressedEntities(value[@"suppressedEntityIdentifiers"],
                               opening.members, output.suppressed);
     if (!valid) return false;
+    if (opening.record.definition.kind == core3d::pattern::Kind::Radial
+        && output.rows == 1
+        && output.columns > core3d::RadialArrayOperationController::kMaximumCount) {
+        output.columns = core3d::RadialArrayOperationController::kMaximumCount;
+        radialCountClamped = true;
+    }
     if (hasNewCoordinates) {
         id coordinates = value[@"suppressedNewMemberCoordinates"];
         if (![coordinates isKindOfClass:NSArray.class]
@@ -1040,6 +1049,13 @@ bool GeneralLoftCandidate(NSDictionary *projected, NSUUID *editedStation,
             || !ParseGeneralFrame(rawStation[@"frame"], before.frame, after.frame)
             || ![rawStation[@"junctions"] isKindOfClass:NSArray.class]
             || ![rawStation[@"segments"] isKindOfClass:NSArray.class]) return false;
+        // The submitted frame ID/revision fence the opening. Only native code
+        // issues the replacement revision, once after all frame values parse.
+        const bool frameChanged = !SameFrameBits(before.frame, after.frame);
+        if (frameChanged) {
+            if (before.frame.revision == UINT64_MAX) return false;
+            after.frame.revision = before.frame.revision + 1;
+        }
         after.twistFromPreviousRadians = twist * M_PI / 180;
         NSArray *junctions = rawStation[@"junctions"], *segments = rawStation[@"segments"];
         if (junctions.count != before.junctions.size() || segments.count != before.segments.size())
@@ -1099,6 +1115,13 @@ bool GeneralLoftCandidate(NSDictionary *projected, NSUUID *editedStation,
                     || !Integer(knot[@"multiplicity"], UINT8_MAX, multiplicity)) return false;
                 curve.knots[knotIndex] = {value, std::uint8_t(multiplicity)};
             }
+            if (frameChanged) {
+                curve.frame = after.frame;
+                target.curveState.authority.frame = after.frame.identifier;
+                target.curveState.authority.frameRevision = after.frame.revision;
+            }
+            // Hash the final curve (local edits and replacement frame together)
+            // and advance its definition revision exactly once if it changed.
             if (!core3d::bounded_curve::SameDefinition(
                     target.curveState.definition, source.curveState.definition)
                 && !CanonicalizeGeneralCurve(target.curveState)) return false;
@@ -1635,9 +1658,11 @@ bool BoundedCreationCandidate(NSDictionary *value, NSString *name,
         Deliver(completion, Core3DProfileConstructionResultRejected, @"Opening already consumed."); return;
     }
     core3d::pattern_owner::Edit edit;
+    bool radialCountClamped = false;
     if (_owner.IsNull() || !_context
         || !PatternEdit(candidate, _opening,
-                        _context->openingFence().metersPerUnit(), edit)) {
+                        _context->openingFence().metersPerUnit(), edit,
+                        radialCountClamped)) {
         _state.store(State::Settled); _context.reset();
         Deliver(completion, Core3DProfileConstructionResultRejected, @"Malformed retained-pattern values."); return;
     }
@@ -1658,7 +1683,8 @@ bool BoundedCreationCandidate(NSDictionary *value, NSString *name,
         ? State::Recovery : State::Settled);
     if (result != Core3DProfileConstructionResultRecoveryRequired) _context.reset();
     Deliver(completion, result, result == Core3DProfileConstructionResultCommitted
-        ? @"Retained pattern committed." : result == Core3DProfileConstructionResultRecoveryRequired
+        ? radialCountClamped ? @"Total: 16; added: 15" : @"Retained pattern committed."
+        : result == Core3DProfileConstructionResultRecoveryRequired
             ? @"Pattern close is unknown; native recovery ownership is retained."
             : @"Pattern edit refused without retry.");
 }

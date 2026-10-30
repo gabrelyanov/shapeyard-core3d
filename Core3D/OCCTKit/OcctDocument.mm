@@ -10076,6 +10076,349 @@ OcctRetainedRecipeCoverage OcctDocument::RetainedRecipeCoverageForLabel(
     }
 }
 
+namespace core3d::ordinary_input {
+struct SnapshotState final {
+    OcctDocument* owner = nullptr;
+    OcctExactLabelReceipt exact;
+    OcctSavedGroupState groups;
+    Representation representation = Representation::Invalid;
+    Origin origin = Origin::Unknown;
+    History history = History::Absent;
+    std::uint32_t capabilities = 0;
+    std::string documentIdentifier, entityIdentifier, definitionIdentifier;
+    retained_recipe::UUID sourceAnchor{};
+    double metersPerUnit = 0;
+    TopoDS_Shape detachedShape;
+    composite_recipe::SourceRecipe recipe;
+    composite_recipe::Commitments commitments;
+    Standard_Integer undoDepth = 0, redoDepth = 0;
+};
+struct PromotionState final {
+    std::shared_ptr<const InputSnapshot> snapshot;
+};
+
+InputSnapshot::InputSnapshot(std::shared_ptr<const SnapshotState> value) noexcept
+    : state_(std::move(value)) {}
+Representation InputSnapshot::representation() const noexcept {
+    return state_ ? state_->representation : Representation::Invalid;
+}
+Origin InputSnapshot::origin() const noexcept { return state_ ? state_->origin : Origin::Unknown; }
+History InputSnapshot::history() const noexcept { return state_ ? state_->history : History::Malformed; }
+std::uint32_t InputSnapshot::capabilities() const noexcept { return state_ ? state_->capabilities : 0; }
+const std::string& InputSnapshot::documentIdentifier() const noexcept {
+    static const std::string empty; return state_ ? state_->documentIdentifier : empty;
+}
+const std::string& InputSnapshot::entityIdentifier() const noexcept {
+    static const std::string empty; return state_ ? state_->entityIdentifier : empty;
+}
+const std::string& InputSnapshot::definitionIdentifier() const noexcept {
+    static const std::string empty; return state_ ? state_->definitionIdentifier : empty;
+}
+const std::array<std::uint8_t, 16>& InputSnapshot::sourceAnchor() const noexcept {
+    static const std::array<std::uint8_t, 16> empty{}; return state_ ? state_->sourceAnchor : empty;
+}
+double InputSnapshot::metersPerUnit() const noexcept { return state_ ? state_->metersPerUnit : 0; }
+PromotionPlan::PromotionPlan(std::shared_ptr<const PromotionState> value) noexcept
+    : state_(std::move(value)) {}
+const std::shared_ptr<const InputSnapshot>& PromotionPlan::snapshot() const noexcept {
+    static const std::shared_ptr<const InputSnapshot> empty; return state_ ? state_->snapshot : empty;
+}
+} // namespace core3d::ordinary_input
+
+namespace {
+bool OrdinaryInputHash(const std::vector<std::uint8_t>& bytes,
+                       core3d::retained_recipe::Digest& digest) noexcept {
+    return core3d::composite_recipe::Hash(bytes, digest);
+}
+
+template<class Value>
+void OrdinaryAppend(std::vector<std::uint8_t>& bytes, const Value& value) {
+    const auto* first = reinterpret_cast<const std::uint8_t*>(&value);
+    bytes.insert(bytes.end(), first, first + sizeof(value));
+}
+
+void OrdinaryAppendText(std::vector<std::uint8_t>& bytes, const std::string& value) {
+    bytes.insert(bytes.end(), value.begin(), value.end()); bytes.push_back(0);
+}
+
+bool OrdinaryAnchor(const std::string& document, const std::string& entity,
+                    const std::string& definition,
+                    core3d::retained_recipe::UUID& output) noexcept {
+    try {
+        std::vector<std::uint8_t> bytes;
+        OrdinaryAppendText(bytes, "ordinary-source-anchor-v1");
+        OrdinaryAppendText(bytes, document); OrdinaryAppendText(bytes, entity);
+        OrdinaryAppendText(bytes, definition);
+        core3d::retained_recipe::Digest digest{};
+        if (!OrdinaryInputHash(bytes, digest)) return false;
+        std::copy_n(digest.begin(), output.size(), output.begin());
+        output[6] = std::uint8_t((output[6] & 0x0f) | 0x50);
+        output[8] = std::uint8_t((output[8] & 0x3f) | 0x80);
+        return core3d::retained_recipe::Nonzero(output);
+    } catch (...) { output = {}; return false; }
+}
+
+bool OrdinaryCommitments(const OcctExactLabelReceipt& exact,
+                         const OcctSavedGroupState& groups,
+                         const TopoDS_Shape& detached, double unit,
+                         const core3d::composite_recipe::SourceRecipe& recipe,
+                         core3d::composite_recipe::Commitments& output) noexcept {
+    output = {};
+    try {
+        std::string shapeBytes;
+        if (!core3d::retained_part_boolean::ExactShapeBytes(detached, shapeBytes)) return false;
+        std::vector<std::uint8_t> geometry(shapeBytes.begin(), shapeBytes.end());
+        std::vector<std::uint8_t> placement, material, groupBytes;
+        OrdinaryAppendText(placement, "ordinary-placement-v1");
+        OrdinaryAppend(placement, unit);
+        const auto& object = exact.visibility.object.object;
+        for (const auto value : object.scalars) OrdinaryAppend(placement, value);
+        for (const auto value : object.present) OrdinaryAppend(placement, value);
+        OrdinaryAppendText(material, "ordinary-material-v1");
+        for (bool value : exact.appearance.legacyPresent) OrdinaryAppend(material, value);
+        for (auto value : exact.appearance.legacyValues) OrdinaryAppend(material, value);
+        OrdinaryAppend(material, exact.appearance.localPBR);
+        for (double value : exact.appearance.visualValues) OrdinaryAppend(material, value);
+        OrdinaryAppendText(groupBytes, "ordinary-groups-v1");
+        const TDF_Label owner = object.label;
+        for (const auto& group : groups.groups) {
+            bool member = false;
+            for (const auto& label : group.members) if (label.IsEqual(owner)) { member = true; break; }
+            if (member) OrdinaryAppendText(groupBytes, group.identifier);
+        }
+        return OrdinaryInputHash(geometry, output.geometry)
+            && OrdinaryInputHash(recipe.bytes, output.recipe)
+            && OrdinaryInputHash(placement, output.placement)
+            && OrdinaryInputHash(material, output.material)
+            && OrdinaryInputHash(groupBytes, output.groups);
+    } catch (...) { output = {}; return false; }
+}
+
+bool OrdinaryShapeBytesEqual(const TopoDS_Shape& a, const TopoDS_Shape& b) noexcept {
+    try {
+        std::string left, right;
+        return core3d::retained_part_boolean::ExactShapeBytes(a, left)
+            && core3d::retained_part_boolean::ExactShapeBytes(b, right) && left == right;
+    } catch (...) { return false; }
+}
+} // namespace
+
+core3d::ordinary_input::CaptureResult OcctDocument::CaptureToolInput(
+    const TDF_Label& label, core3d::ordinary_input::Purpose purpose) const noexcept {
+    namespace oi = core3d::ordinary_input;
+    namespace cr = core3d::composite_recipe;
+    oi::CaptureResult result;
+    try {
+        if (![NSThread isMainThread]) { result.refusal = oi::Refusal::Busy; return result; }
+        if (myOcafDoc.IsNull() || label.IsNull()) {
+            result.refusal = oi::Refusal::NeedsSelection; return result;
+        }
+        if (label.Data() != myOcafDoc->GetData()) {
+            result.refusal = oi::Refusal::ForeignDocument; return result;
+        }
+        if (myOcafDoc->HasOpenCommand()) { result.refusal = oi::Refusal::Busy; return result; }
+        const auto coverage = RetainedRecipeCoverageForLabel(label);
+        if (coverage == OcctRetainedRecipeCoverage::InvalidOrUnknown) {
+            result.refusal = oi::Refusal::MalformedStoredSource; return result;
+        }
+        OcctExactLabelReceipt exact; OcctSavedGroupState groups;
+        if (!CaptureExactFreeLabel(label, exact) || !CaptureSavedGroups(groups)) {
+            result.refusal = oi::Refusal::UnsupportedGeometry; return result;
+        }
+        const auto& object = exact.visibility.object.object;
+        oi::Representation representation = oi::Representation::Invalid;
+        if (object.resolvedRepresentation == OcctGeometryRepresentation::BRep
+            && object.shape.ShapeType() == TopAbs_SOLID)
+            representation = oi::Representation::BRepSolid;
+        else if (object.resolvedRepresentation == OcctGeometryRepresentation::TriangleMesh
+                 && object.shape.ShapeType() == TopAbs_FACE)
+            representation = oi::Representation::TriangleMesh;
+        else if (object.shape.ShapeType() == TopAbs_WIRE)
+            representation = oi::Representation::Wire;
+        else if (object.shape.ShapeType() == TopAbs_COMPOUND)
+            representation = oi::Representation::Compound;
+        if (representation == oi::Representation::Invalid
+            || object.shape.Orientation() != TopAbs_FORWARD) {
+            result.refusal = oi::Refusal::UnsupportedRepresentation; return result;
+        }
+        const oi::History history = coverage == OcctRetainedRecipeCoverage::Absent
+            ? oi::History::Absent : oi::History::Current;
+        if (purpose == oi::Purpose::SolidModel
+            && representation != oi::Representation::BRepSolid) {
+            result.refusal = oi::Refusal::UnsupportedRepresentation; return result;
+        }
+        if (purpose == oi::Purpose::MeshModel
+            && representation != oi::Representation::TriangleMesh) {
+            result.refusal = oi::Refusal::UnsupportedRepresentation; return result;
+        }
+        if (purpose == oi::Purpose::FeatureEdit && history == oi::History::Absent) {
+            result.refusal = oi::Refusal::MissingHistory; return result;
+        }
+        double unit = 0;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(myOcafDoc, unit)
+            || !std::isfinite(unit) || unit <= 0) {
+            result.refusal = oi::Refusal::UnsupportedGeometry; return result;
+        }
+        BRepBuilderAPI_Copy copy(object.shape, Standard_True, Standard_False);
+        if (!copy.IsDone() || copy.Shape().IsNull()) {
+            result.refusal = oi::Refusal::UnsupportedGeometry; return result;
+        }
+        auto state = std::make_shared<oi::SnapshotState>();
+        state->owner = const_cast<OcctDocument*>(this); state->exact = exact;
+        state->groups = groups; state->representation = representation;
+        state->origin = history == oi::History::Current
+            ? oi::Origin::RetainedFeature : oi::Origin::LegacyGeometry;
+        state->history = history; state->documentIdentifier = exact.documentIdentifier;
+        state->entityIdentifier = object.entityIdentifier;
+        state->definitionIdentifier = object.definitionIdentifier;
+        state->metersPerUnit = unit; state->detachedShape = copy.Shape();
+        state->undoDepth = myOcafDoc->GetAvailableUndos();
+        state->redoDepth = myOcafDoc->GetAvailableRedos();
+        if (!OrdinaryAnchor(state->documentIdentifier, state->entityIdentifier,
+                            state->definitionIdentifier, state->sourceAnchor)) {
+            result.refusal = oi::Refusal::RecoveryRequired; return result;
+        }
+        state->capabilities = oi::ObserveCurrentGeometry;
+        if (representation == oi::Representation::BRepSolid)
+            state->capabilities |= oi::SolidOperand;
+        if (representation == oi::Representation::TriangleMesh)
+            state->capabilities |= oi::TriangleMeshOperand;
+        if (history == oi::History::Absent)
+            state->capabilities |= oi::PersistSourceOnMutation;
+        else state->capabilities |= oi::EditRecordedFeature;
+        cr::OrdinarySourceRecipe ordinary;
+        ordinary.shape = representation == oi::Representation::BRepSolid
+            ? cr::SourceShapeKind::Solid : cr::SourceShapeKind::TriangleMesh;
+        ordinary.origin = history == oi::History::Current
+            ? cr::OrdinarySourceOrigin::RetainedFeature
+            : cr::OrdinarySourceOrigin::LegacyGeometry;
+        ordinary.sourceAnchor = state->sourceAnchor;
+        state->recipe.kind = cr::RecipeKind::OrdinarySource;
+        state->recipe.schema = ordinary.shape == cr::SourceShapeKind::Solid ? 1 : 2;
+        if (!cr::EncodeOrdinarySourceRecipe(ordinary, state->recipe.bytes)
+            || !OrdinaryCommitments(exact, groups, state->detachedShape, unit,
+                                    state->recipe, state->commitments)) {
+            result.refusal = oi::Refusal::RecoveryRequired; return result;
+        }
+        result.snapshot = std::shared_ptr<const oi::InputSnapshot>(new oi::InputSnapshot(state));
+        if (history == oi::History::Absent) {
+            auto promotion = std::make_shared<oi::PromotionState>();
+            promotion->snapshot = result.snapshot;
+            result.promotion = std::shared_ptr<const oi::PromotionPlan>(new oi::PromotionPlan(promotion));
+        }
+        result.refusal = oi::Refusal::None; return result;
+    } catch (...) { result = {}; result.refusal = oi::Refusal::RecoveryRequired; return result; }
+}
+
+Standard_Boolean OcctDocument::OrdinaryInputCurrent(
+    const std::shared_ptr<const core3d::ordinary_input::InputSnapshot>& snapshot) const noexcept {
+    namespace oi = core3d::ordinary_input;
+    try {
+        if (![NSThread isMainThread] || !snapshot || !snapshot->state_
+            || snapshot->state_->owner != this || myOcafDoc.IsNull()
+            || myOcafDoc->HasOpenCommand()
+            || myOcafDoc->GetAvailableUndos() != snapshot->state_->undoDepth
+            || myOcafDoc->GetAvailableRedos() != snapshot->state_->redoDepth) return Standard_False;
+        OcctExactLabelReceipt exact; OcctSavedGroupState groups;
+        double unit = 0;
+        return ReadExactFreeLabel(snapshot->state_->exact, exact)
+            && CaptureSavedGroups(groups) && groups.IsEqual(snapshot->state_->groups)
+            && XCAFDoc_DocumentTool::GetLengthUnit(myOcafDoc, unit)
+            && std::memcmp(&unit, &snapshot->state_->metersPerUnit, sizeof(double)) == 0
+            && ((snapshot->state_->history == oi::History::Absent
+                    && RetainedRecipeCoverageForLabel(exact.visibility.object.object.label)
+                        == OcctRetainedRecipeCoverage::Absent)
+                || (snapshot->state_->history == oi::History::Current
+                    && RetainedRecipeCoverageForLabel(exact.visibility.object.object.label)
+                        != OcctRetainedRecipeCoverage::Absent));
+    } catch (...) { return Standard_False; }
+}
+
+core3d::ordinary_input::CommitOutcome OcctDocument::CommitToolInputPromotion(
+    const std::shared_ptr<const core3d::ordinary_input::PromotionPlan>& plan,
+    const TopoDS_Shape& candidateRoot,
+    const std::shared_ptr<const core3d::composite_recipe::Payload>& payload) noexcept {
+    namespace oi = core3d::ordinary_input;
+    namespace cr = core3d::composite_recipe;
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand())
+            return oi::CommitOutcome::Busy;
+        if (!plan || !plan->state_ || !plan->state_->snapshot
+            || !plan->state_->snapshot->state_ || !payload || candidateRoot.IsNull())
+            return oi::CommitOutcome::Refused;
+        const auto& state = *plan->state_->snapshot->state_;
+        if (state.owner != this || state.history != oi::History::Absent
+            || !OrdinaryInputCurrent(plan->state_->snapshot)) return oi::CommitOutcome::Stale;
+        std::vector<std::uint8_t> canonical;
+        if (!cr::Encode(payload->definition, canonical) || canonical != payload->bytes
+            || payload->sourceShapes.empty()) return oi::CommitOutcome::MalformedPayload;
+        core3d::retained_recipe::UUID document{}, entity{}, definition{};
+        if (!core3d::receipt::ParseUUID(state.documentIdentifier, document)
+            || !core3d::receipt::ParseUUID(state.entityIdentifier, entity)
+            || !core3d::receipt::ParseUUID(state.definitionIdentifier, definition)
+            || payload->definition.owner.document != document
+            || payload->definition.owner.entity != entity
+            || payload->definition.owner.definition != definition)
+            return oi::CommitOutcome::MalformedPayload;
+        bool matched = false;
+        for (const auto& node : payload->definition.nodes) {
+            const auto* source = std::get_if<cr::SourceNode>(&node.value);
+            if (!source || source->recipe.kind != cr::RecipeKind::OrdinarySource) continue;
+            if (source->shapeSlot >= payload->sourceShapes.size()
+                || source->recipe.schema != state.recipe.schema
+                || source->recipe.bytes != state.recipe.bytes
+                || source->original.document != document
+                || source->original.entity != entity
+                || source->original.definition != definition
+                || source->original.sourceFeature != state.sourceAnchor
+                || source->commitments.geometry != state.commitments.geometry
+                || source->commitments.recipe != state.commitments.recipe
+                || source->commitments.placement != state.commitments.placement
+                || source->commitments.material != state.commitments.material
+                || source->commitments.groups != state.commitments.groups
+                || !OrdinaryShapeBytesEqual(
+                    payload->sourceShapes[source->shapeSlot], state.detachedShape))
+                return oi::CommitOutcome::MalformedPayload;
+            matched = true;
+        }
+        if (!matched) return oi::CommitOutcome::MalformedPayload;
+        const TDF_Label owner = state.exact.visibility.object.object.label;
+        const int undoBefore = myOcafDoc->GetAvailableUndos();
+        myOcafDoc->NewCommand();
+        bool staged = false;
+        try {
+            const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+            const TDF_Label record = owner.FindChild(cr::MinimumRecordTag, Standard_True);
+            if (!shapes.IsNull() && !record.IsNull() && !record.HasAttribute()
+                && !cr::HasRecord(owner)) {
+                shapes->SetShape(owner, candidateRoot);
+                Handle(cr::Attribute) attribute = new cr::Attribute();
+                record.AddAttribute(attribute); attribute->value_ = payload;
+                TNaming_Builder(record).Select(candidateRoot, candidateRoot);
+                cr::Record readback;
+                staged = cr::Read(myOcafDoc, owner, readback) && readback.value
+                    && readback.value->bytes == payload->bytes
+                    && readback.current.IsEqual(candidateRoot);
+            }
+        } catch (...) { staged = false; }
+        if (!staged) {
+            if (myOcafDoc->HasOpenCommand()) myOcafDoc->AbortCommand();
+            return oi::CommitOutcome::PersistenceFailure;
+        }
+        if (!myOcafDoc->CommitCommand()
+            || myOcafDoc->GetAvailableUndos() != undoBefore + 1)
+            return oi::CommitOutcome::PersistenceFailure;
+        cr::Record committed;
+        if (!cr::Read(myOcafDoc, owner, committed) || !committed.value
+            || committed.value->bytes != payload->bytes
+            || !committed.current.IsEqual(candidateRoot)) return oi::CommitOutcome::PersistenceFailure;
+        return oi::CommitOutcome::Committed;
+    } catch (...) {
+        if (!myOcafDoc.IsNull() && myOcafDoc->HasOpenCommand()) myOcafDoc->AbortCommand();
+        return oi::CommitOutcome::PersistenceFailure;
+    }
+}
+
 namespace {
 
 // Independent rebuild of a plain (shell-free, non-revolve) profile recipe
@@ -12146,6 +12489,13 @@ core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources
             return PairCaptureRefused(PairRefusal::BadEncoding);
         const std::array<TDF_Label, 2> labels{{target, tool}};
         for (std::size_t index = 0; index < 2; ++index) {
+            // Shared admission runs first. Package 1 deliberately leaves the
+            // rectangular family builder below closed; Package 3 consumes the
+            // detached ordinary promotion plan.
+            const auto admitted = CaptureToolInput(
+                labels[index], core3d::ordinary_input::Purpose::SolidModel);
+            if (!admitted.ready())
+                return PairCaptureRefused(PairRefusal::UnsupportedSource);
             if (!CapturePlainProfileOperationSource(labels[index], state->sources[index])
                 || !CaptureExactFreeLabel(labels[index], state->exact[index]))
                 return PairCaptureRefused(PairRefusal::UnsupportedSource);
@@ -18084,6 +18434,8 @@ Standard_Boolean OcctDocument::CaptureCylindricalCutSource(
     output={};if(!NSThread.isMainThread)CORE3D_CUT_REFUSE("document-capture.thread", Standard_False);
     try {
         OcctCylindricalCutSource result;OcctScalarAppearanceState appearance;
+        const auto admitted=CaptureToolInput(label,core3d::ordinary_input::Purpose::SolidModel);
+        if(!admitted.ready())CORE3D_CUT_REFUSE("document-capture.shared-admission", Standard_False);
         if(myOcafDoc.IsNull()||!ValidateGeometryRepresentations()
             ||!CaptureObjectTransformStateForLabel(label,result.original)
             ||result.original.resolvedRepresentation!=OcctGeometryRepresentation::BRep
@@ -18140,6 +18492,8 @@ Standard_Boolean OcctDocument::CaptureCylindricalCutProgramSource(
     output={};if(!NSThread.isMainThread)CORE3D_CUT_REFUSE("document-program-capture.thread", Standard_False);
     try {
         OcctCylindricalCutProgramSource result;OcctScalarAppearanceState appearance;
+        const auto admitted=CaptureToolInput(label,core3d::ordinary_input::Purpose::FeatureEdit);
+        if(!admitted.ready())CORE3D_CUT_REFUSE("document-program-capture.shared-admission", Standard_False);
         if(myOcafDoc.IsNull()||!ValidateGeometryRepresentations()
             ||!CaptureObjectTransformStateForLabel(label,result.original)
             ||result.original.resolvedRepresentation!=OcctGeometryRepresentation::BRep
@@ -28801,6 +29155,234 @@ Core3DDebugPatternLayerReadRecoveryProbe(Standard_Integer scenario) noexcept
     } catch (...) {
         return 0;
     }
+}
+#endif
+
+#if DEBUG
+namespace {
+struct OrdinaryProbeFixture final {
+    Handle(OcctDocument) owner;
+    TDF_Label label;
+    bool build(double unit) noexcept {
+        try {
+            owner = new OcctDocument(); owner->InitDoc();
+            auto document = owner->ChangeDocument();
+            XCAFDoc_DocumentTool::SetLengthUnit(document, unit);
+            document->ClearUndos(); document->NewCommand();
+            const TopoDS_Shape shape = BRepPrimAPI_MakeBox(10, 8, 6).Shape();
+            Handle(AIS_Shape) presentation = new AIS_Shape(shape);
+            label = owner->AddShape(presentation, OcctGeometryRepresentation::BRep);
+            return !label.IsNull() && document->CommitCommand();
+        } catch (...) { return false; }
+    }
+};
+
+core3d::retained_recipe::UUID OrdinaryProbeUUID(std::uint8_t seed) noexcept {
+    core3d::retained_recipe::UUID value{};
+    for (std::size_t index = 0; index < value.size(); ++index)
+        value[index] = std::uint8_t(seed + index);
+    return value;
+}
+
+std::shared_ptr<const core3d::composite_recipe::Payload> OrdinaryProbePayload(
+    OrdinaryProbeFixture& fixture,
+    const std::shared_ptr<const core3d::ordinary_input::InputSnapshot>& snapshot) noexcept {
+    namespace cr = core3d::composite_recipe;
+    namespace rr = core3d::retained_recipe;
+    try {
+        if (!snapshot) return {};
+        OcctExactLabelReceipt exact; OcctSavedGroupState groups;
+        if (!fixture.owner->CaptureExactFreeLabel(fixture.label, exact)
+            || !fixture.owner->CaptureSavedGroups(groups)) return {};
+        rr::OwnerKey owner;
+        if (!core3d::receipt::ParseUUID(snapshot->documentIdentifier(), owner.document)
+            || !core3d::receipt::ParseUUID(snapshot->entityIdentifier(), owner.entity)
+            || !core3d::receipt::ParseUUID(snapshot->definitionIdentifier(), owner.definition)) return {};
+        cr::OrdinarySourceRecipe metadata;
+        metadata.shape = cr::SourceShapeKind::Solid;
+        metadata.origin = cr::OrdinarySourceOrigin::LegacyGeometry;
+        metadata.sourceAnchor = snapshot->sourceAnchor();
+        cr::SourceNode source; source.node = OrdinaryProbeUUID(40); source.localID = 1;
+        source.original = {owner.document, owner.entity, owner.definition, metadata.sourceAnchor};
+        source.recipe.kind = cr::RecipeKind::OrdinarySource; source.recipe.schema = 1;
+        source.shapeSlot = 0; source.inputToCarrier.sourceMetersPerUnit = snapshot->metersPerUnit();
+        source.inputToCarrier.carrierMetersPerUnit = snapshot->metersPerUnit();
+        const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(fixture.label);
+        if (!cr::EncodeOrdinarySourceRecipe(metadata, source.recipe.bytes)
+            || !OrdinaryCommitments(exact, groups, shape, snapshot->metersPerUnit(),
+                                    source.recipe, source.commitments)) return {};
+        core3d::draft_faces::Definition draft;
+        draft.metersPerLocalUnit = snapshot->metersPerUnit();
+        draft.neutralNormalLocal = {{0, 0, 1}};
+        draft.pullDirectionLocal = {{0, 0, 1}};
+        draft.signedAngleRadians = 0.05;
+        core3d::draft_faces::FaceIntent face;
+        face.identifier = OrdinaryProbeUUID(90);
+        face.expectedBoundaryEdges = 4;
+        face.outwardNormalLocal = {{0, 0, 1}};
+        face.selectorProof.fill(0x5a); draft.faces.push_back(face);
+        cr::FeatureNode feature; feature.node = OrdinaryProbeUUID(60);
+        feature.feature = OrdinaryProbeUUID(70); feature.localID = 2;
+        feature.kind = core3d::draft_faces::FeatureKind;
+        feature.codecVersion = core3d::draft_faces::CodecVersion;
+        feature.inputs = {source.node};
+        if (!core3d::draft_faces::Encode(draft, feature.parameters)) return {};
+        auto payload = std::make_shared<cr::Payload>();
+        payload->definition = cr::MakeV3Definition(); payload->definition.owner = owner;
+        payload->definition.outputNode = feature.node;
+        payload->definition.issuance.nextLocalID = 3;
+        payload->definition.nodes = {{source}, {feature}};
+        payload->sourceShapes = {shape};
+        if (!cr::Encode(payload->definition, payload->bytes)) return {};
+        return payload;
+    } catch (...) { return {}; }
+}
+
+bool OrdinaryProbeColdRead(const std::string& path,
+                           std::vector<core3d::composite_recipe::Record>& records) noexcept {
+    records.clear();
+    try {
+        Handle(TDocStd_Application) app = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(app); Handle(TDocStd_Document) document;
+        Core3DBeginSafeBinaryRead();
+        const auto status = app->Open(TCollection_ExtendedString(path.c_str(), Standard_True), document);
+        const bool result = status == PCDM_RS_OK && !Core3DSafeBinaryReadWasRejected()
+            && !document.IsNull() && core3d::composite_recipe::ReadAll(document, records);
+        if (!document.IsNull()) app->Close(document);
+        return result;
+    } catch (...) { records.clear(); return false; }
+}
+} // namespace
+
+extern "C" std::uint64_t Core3DDebugOrdinaryInputProbe(
+    std::int32_t scenario, double metersPerUnit) noexcept {
+    namespace oi = core3d::ordinary_input;
+    namespace cr = core3d::composite_recipe;
+    try {
+        if (scenario < 0 || scenario > 5 || !std::isfinite(metersPerUnit)
+            || metersPerUnit <= 0) return 0;
+        OrdinaryProbeFixture fixture;
+        if (!fixture.build(metersPerUnit)) return 0;
+        const auto beforeShape = XCAFDoc_ShapeTool::GetShape(fixture.label);
+        const int beforeUndo = fixture.owner->Document()->GetAvailableUndos();
+        const auto first = fixture.owner->CaptureToolInput(fixture.label, oi::Purpose::Observe);
+        if (!first.ready()) return 0;
+        std::uint64_t result = 0;
+        if (scenario == 0) {
+            const auto second = fixture.owner->CaptureToolInput(fixture.label, oi::Purpose::Observe);
+            if (second.ready() && first.promotion && second.promotion) result |= 0x01;
+            if (first.snapshot->sourceAnchor() == second.snapshot->sourceAnchor()) result |= 0x02;
+            if (fixture.owner->OrdinaryInputCurrent(first.snapshot)
+                && fixture.owner->OrdinaryInputCurrent(second.snapshot)) result |= 0x04;
+            if (fixture.owner->Document()->GetAvailableUndos() == beforeUndo
+                && !fixture.owner->Document()->HasOpenCommand()) result |= 0x08;
+            if (first.snapshot->origin() != oi::Origin::AddPrimitive
+                && OrdinaryShapeBytesEqual(beforeShape,
+                    XCAFDoc_ShapeTool::GetShape(fixture.label))) result |= 0x10;
+            return result;
+        }
+        if (scenario == 1) {
+            const auto payload = OrdinaryProbePayload(fixture, first.snapshot);
+            const TopoDS_Shape candidate = BRepPrimAPI_MakeBox(11, 8, 6).Shape();
+            if (payload && fixture.owner->CommitToolInputPromotion(
+                    first.promotion, candidate, payload) == oi::CommitOutcome::Committed) result |= 0x01;
+            if (fixture.owner->Document()->GetAvailableUndos() == beforeUndo + 1) result |= 0x02;
+            if (fixture.owner->undo() && !cr::HasRecord(fixture.label)
+                && OrdinaryShapeBytesEqual(beforeShape,
+                    XCAFDoc_ShapeTool::GetShape(fixture.label))) result |= 0x04;
+            if (fixture.owner->redo() && cr::HasRecord(fixture.label)
+                && OrdinaryShapeBytesEqual(candidate,
+                    XCAFDoc_ShapeTool::GetShape(fixture.label))) result |= 0x08;
+            cr::Record record;
+            if (cr::Read(fixture.owner->Document(), fixture.label, record)
+                && record.value && record.value->bytes == payload->bytes) result |= 0x10;
+            return result;
+        }
+        if (scenario == 2) {
+            if (first.promotion && fixture.owner->Document()->GetAvailableUndos() == beforeUndo
+                && !cr::HasRecord(fixture.label)) result |= 0x01;
+            if (fixture.owner->CommitToolInputPromotion(first.promotion, beforeShape, {})
+                    == oi::CommitOutcome::Refused
+                && fixture.owner->Document()->GetAvailableUndos() == beforeUndo) result |= 0x02;
+            fixture.owner->Document()->NewCommand();
+            const TopoDS_Shape changed = BRepPrimAPI_MakeBox(10, 9, 6).Shape();
+            XCAFDoc_DocumentTool::ShapeTool(fixture.owner->Document()->Main())
+                ->SetShape(fixture.label, changed);
+            if (fixture.owner->Document()->CommitCommand()) result |= 0x04;
+            if (!fixture.owner->OrdinaryInputCurrent(first.snapshot)) result |= 0x08;
+            const auto payload = OrdinaryProbePayload(fixture, first.snapshot);
+            if (fixture.owner->CommitToolInputPromotion(first.promotion, changed, payload)
+                    == oi::CommitOutcome::Stale && !cr::HasRecord(fixture.label)) result |= 0x10;
+            return result;
+        }
+        if (scenario == 3) {
+            fixture.owner->Document()->NewCommand();
+            const TDF_Label record = fixture.label.FindChild(cr::MinimumRecordTag, Standard_True);
+            Handle(cr::Attribute) malformed = new cr::Attribute(); record.AddAttribute(malformed);
+            TNaming_Builder(record).Select(beforeShape, beforeShape);
+            if (fixture.owner->Document()->CommitCommand()) result |= 0x01;
+            const int malformedUndo = fixture.owner->Document()->GetAvailableUndos();
+            const auto capture = fixture.owner->CaptureToolInput(fixture.label, oi::Purpose::Observe);
+            if (!capture.ready() && capture.refusal == oi::Refusal::MalformedStoredSource) result |= 0x02;
+            if (!capture.promotion && !capture.snapshot) result |= 0x04;
+            if (fixture.owner->Document()->GetAvailableUndos() == malformedUndo
+                && !fixture.owner->Document()->HasOpenCommand()) result |= 0x08;
+            if (OrdinaryShapeBytesEqual(beforeShape,
+                    XCAFDoc_ShapeTool::GetShape(fixture.label))) result |= 0x10;
+            return result;
+        }
+        if (scenario == 4) {
+            if (first.snapshot->origin() != oi::Origin::AddPrimitive) result |= 0x01;
+            cr::OrdinarySourceRecipe metadata; metadata.shape = cr::SourceShapeKind::Solid;
+            metadata.origin = cr::OrdinarySourceOrigin::Unknown;
+            metadata.sourceAnchor = first.snapshot->sourceAnchor();
+            cr::SourceNode source; source.recipe.kind = cr::RecipeKind::OrdinarySource;
+            source.recipe.schema = 1; source.original.sourceFeature = metadata.sourceAnchor;
+            if (cr::EncodeOrdinarySourceRecipe(metadata, source.recipe.bytes)) result |= 0x02;
+            std::set<core3d::retained_recipe::UUID> occupied{metadata.sourceAnchor};
+            core3d::pattern_recipe_clone::IdentityMap identities;
+            std::uint8_t seed = 150;
+            const auto issue = [&](core3d::retained_recipe::UUID& value) {
+                value = OrdinaryProbeUUID(seed++); return true;
+            };
+            core3d::retained_recipe::UUID mapped{};
+            if (core3d::pattern_recipe_clone::IssueMapped(metadata.sourceAnchor,
+                    issue, occupied, identities, mapped)) {
+                source.original.sourceFeature = mapped;
+                core3d::retained_recipe::OwnerKey destination{
+                    OrdinaryProbeUUID(1), OrdinaryProbeUUID(2), OrdinaryProbeUUID(3)};
+                if (core3d::pattern_recipe_clone::RemapOrdinarySourceRecipe(
+                        source, destination, issue, occupied, identities)) result |= 0x04;
+            }
+            cr::OrdinarySourceRecipe remapped;
+            if (cr::DecodeOrdinarySourceRecipe(source.recipe, remapped)
+                && remapped.sourceAnchor != metadata.sourceAnchor
+                && remapped.origin == cr::OrdinarySourceOrigin::Unknown
+                && !remapped.hasOriginLink) result |= 0x08;
+            if (identities.global.size() == 1) result |= 0x10;
+            return result;
+        }
+        cr::OrdinarySourceRecipe metadata; metadata.shape = cr::SourceShapeKind::Solid;
+        metadata.origin = cr::OrdinarySourceOrigin::LegacyGeometry;
+        metadata.sourceAnchor = first.snapshot->sourceAnchor();
+        cr::SourceRecipe recipe; recipe.kind = cr::RecipeKind::OrdinarySource; recipe.schema = 1;
+        if (cr::EncodeOrdinarySourceRecipe(metadata, recipe.bytes)) result |= 0x01;
+        cr::OrdinarySourceRecipe decoded;
+        if (cr::DecodeOrdinarySourceRecipe(recipe, decoded)
+            && decoded.sourceAnchor == metadata.sourceAnchor) result |= 0x02;
+        auto contradictory = recipe; contradictory.schema = 2;
+        if (!cr::DecodeOrdinarySourceRecipe(contradictory, decoded)) result |= 0x04;
+        const auto payload = OrdinaryProbePayload(fixture, first.snapshot);
+        if (payload && fixture.owner->CommitToolInputPromotion(first.promotion,
+                BRepPrimAPI_MakeBox(11, 8, 6).Shape(), payload) == oi::CommitOutcome::Committed) result |= 0x08;
+        const std::string base = Core3DDebugTempPath(
+            "ordinary-source", ".p1-fixture");
+        const std::string saved = fixture.owner->save(base);
+        std::vector<cr::Record> records;
+        if (!saved.empty() && OrdinaryProbeColdRead(saved, records) && records.size() == 1
+            && records.front().value && records.front().value->bytes == payload->bytes) result |= 0x10;
+        return result;
+    } catch (...) { return 0; }
 }
 #endif
 

@@ -19,6 +19,7 @@ inline constexpr std::size_t MaximumDepth = 16;
 inline constexpr std::size_t MaximumEnvelopeBytes = 64 * 1024;
 inline constexpr std::size_t MaximumDocumentAggregateBytes = 8 * 1024 * 1024;
 inline constexpr std::size_t MaximumFeaturePayloadBytes = 16 * 1024;
+inline constexpr std::size_t MaximumOrdinarySourcePayloadBytes = 128;
 inline constexpr int MinimumRecordTag = 13;
 
 enum class RecipeKind : std::uint8_t {
@@ -29,12 +30,38 @@ enum class RecipeKind : std::uint8_t {
     // D65/D67 frozen source-kind block. Do not reuse the historical draft's
     // raw low-numbered kind 5.
     BoundedCurvePath = 0x11,
+    // R4-F3 truthful current-geometry snapshot. 0x10 remains reserved and
+    // old low-numbered recipe kinds retain their byte meaning.
+    OrdinarySource = 0x12,
     // Reserved wire value only. P1 deliberately does not install a codec,
     // source builder, editor, or family proof for it.
     ReservedPlanarSplineProfile = 0x10,
 };
 enum class NodeKind : std::uint8_t { Source = 1, Feature = 2 };
-enum class SourceShapeKind : std::uint8_t { Unknown = 0, Solid = 1, Face = 2, Wire = 3 };
+enum class SourceShapeKind : std::uint8_t {
+    Unknown = 0, Solid = 1, Face = 2, Wire = 3, TriangleMesh = 4
+};
+
+enum class OrdinarySourceOrigin : std::uint8_t {
+    Unknown = 0,
+    AddPrimitive = 1,
+    Import = 2,
+    Duplicate = 3,
+    RetainedFeature = 4,
+    LegacyGeometry = 5,
+};
+
+// The payload version is independent of the registry schema. Registry schema
+// 1 is a BRep solid and schema 2 is a triangulated face; both carry v1 bytes.
+// This keeps representation explicit without consuming a second recipe tag.
+struct OrdinarySourceRecipe final {
+    std::uint8_t version = 1;
+    SourceShapeKind shape = SourceShapeKind::Unknown;
+    OrdinarySourceOrigin origin = OrdinarySourceOrigin::Unknown;
+    UUID sourceAnchor{};
+    bool hasOriginLink = false;
+    SourceIdentity originLink{};
+};
 
 struct InputPlacement {
     // Row-major authored-source-to-carrier affine transform. Authored recipe
@@ -78,6 +105,10 @@ inline SourceShapeKind ExpectedSourceShapeKind(const SourceRecipe& recipe) noexc
         return SourceShapeKind::Solid;
     case RecipeKind::BoundedCurvePath:
         return SourceShapeKind::Wire;
+    case RecipeKind::OrdinarySource:
+        return recipe.schema == 1 ? SourceShapeKind::Solid
+            : recipe.schema == 2 ? SourceShapeKind::TriangleMesh
+                                 : SourceShapeKind::Unknown;
     default:
         return SourceShapeKind::Unknown;
     }

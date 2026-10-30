@@ -17,6 +17,7 @@
 
 #include "../OCCTKit/PatternOwnerBridge.hxx"
 #include "../OCCTKit/PatternAllLabelAuthority.hxx"
+#include "RadialArrayOperationController.hpp"
 
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
@@ -441,8 +442,10 @@ bool DetachedMemberShape(const TopoDS_Shape& source,
 // Admission + native identity issuance + detached preparation. Pure: no OCAF
 // write, no command. Every refusal here leaves the document untouched.
 bool PrepareCreation(const CreationCapture& capture, NSDictionary *candidate,
-                     CreationPrepared& output, NSString *__strong& refusal) {
+                     CreationPrepared& output, NSString *__strong& refusal,
+                     bool& radialCountClamped) {
     output = {};
+    radialCountClamped = false;
     refusal = @"Malformed retained-pattern creation values.";
     try {
         if (capture.owner.IsNull() || !capture.context || !CreationCurrent(capture)) {
@@ -453,6 +456,11 @@ bool PrepareCreation(const CreationCapture& capture, NSDictionary *candidate,
         OcctDocument& owner = *capture.owner;
         core3d::pattern::Definition definition;
         if (!ParseCandidate(candidate, capture.metersPerUnit, definition)) return false;
+        if (definition.kind == Kind::Radial && definition.rowCount == 1
+            && definition.columnCount > core3d::RadialArrayOperationController::kMaximumCount) {
+            definition.columnCount = core3d::RadialArrayOperationController::kMaximumCount;
+            radialCountClamped = true;
+        }
         UUID documentID{}, ownerEntity{}, ownerDefinition{}, feature{},
             sourceEntity{}, sourceDefinition{}, sourceFeature{};
         if (!core3d::pattern_owner::Parse(owner.DocumentIdentifier(), documentID)
@@ -825,8 +833,9 @@ CreateOutcome ApplyCreation(const CreationCapture& capture,
     }
     NSString *refusal = nil;
     CreationPrepared prepared;
+    bool radialCountClamped = false;
     if (![candidate isKindOfClass:NSDictionary.class]
-        || !PrepareCreation(_capture, candidate, prepared, refusal)) {
+        || !PrepareCreation(_capture, candidate, prepared, refusal, radialCountClamped)) {
         _prepared = {};
         _state.store(State::Open);
         DeliverPrepared(completion, Core3DBoundedCurvePreparationResultRejected,
@@ -836,7 +845,8 @@ CreateOutcome ApplyCreation(const CreationCapture& capture,
     _prepared = std::move(prepared);
     _state.store(State::Prepared);
     DeliverPrepared(completion, Core3DBoundedCurvePreparationResultPrepared,
-                    @"Retained pattern prepared; every identity is minted and every member is proved.");
+                    radialCountClamped ? @"Total: 16; added: 15"
+                        : @"Retained pattern prepared; every identity is minted and every member is proved.");
 }
 
 - (void)applyWithCompletion:

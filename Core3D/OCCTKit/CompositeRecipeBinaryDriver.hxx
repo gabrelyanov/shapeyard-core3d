@@ -61,6 +61,8 @@ public:
             Definition definition; if (!Decode(bytes, definition)) return Refuse();
             std::size_t expectedSources = 0;
             std::vector<TopAbs_ShapeEnum> expectedShapeTypes(std::size_t(shapeCount), TopAbs_SHAPE);
+            std::vector<SourceShapeKind> expectedShapeKinds(
+                std::size_t(shapeCount), SourceShapeKind::Unknown);
             for (const Node& node : definition.nodes)
                 if (const auto* sourceNode = std::get_if<SourceNode>(&node.value)) {
                     ++expectedSources;
@@ -69,6 +71,7 @@ public:
                     SourceShapeKind expected = SourceShapeKind::Unknown;
                     if (!ExpectedShapeKind(definition, sourceNode->recipe, expected)) return Refuse();
                     expectedShapeTypes[sourceNode->shapeSlot] = TopologyKind(expected);
+                    expectedShapeKinds[sourceNode->shapeSlot] = expected;
                     if (sourceNode->recipe.kind == RecipeKind::BoundedCurvePath) {
                         if (curveBudget_->limit > bounded_curve::MaximumDocumentAggregateBytes
                             || curveBudget_->definitionBytes > curveBudget_->limit
@@ -112,9 +115,8 @@ public:
                     shared->Read(*stream, shape);
                     const auto after=stream->tellg();
                     if (!*stream || after==std::streampos(-1) || after<=before || after>expected
-                        || shape.IsNull()
-                        || shape.ShapeType() != expectedShapeTypes[std::size_t(index)]
-                        || shape.Orientation() != TopAbs_FORWARD) return Refuse();
+                        || !MatchesShapeKind(shape,
+                            expectedShapeKinds[std::size_t(index)])) return Refuse();
                     sourceShapes.push_back(std::move(shape));
                 }
                 if (stream->tellg()!=expected) return Refuse();
@@ -129,9 +131,8 @@ public:
                     TopoDS_Shape shape = set->Shape(shapeID);
                     shape.Location(set->Locations().Location(locationID), Standard_False);
                     shape.Orientation(TopAbs_Orientation(orientation));
-                    if (shape.IsNull()
-                        || shape.ShapeType() != expectedShapeTypes[std::size_t(index)]
-                        || shape.Orientation() != TopAbs_FORWARD) return Refuse();
+                    if (!MatchesShapeKind(shape,
+                        expectedShapeKinds[std::size_t(index)])) return Refuse();
                     sourceShapes.push_back(std::move(shape));
                 }
                 if (source.Position() != end) return Refuse();
@@ -169,8 +170,14 @@ public:
             }
         for (std::size_t index = 0; index < value.sourceShapes.size(); ++index) {
             const TopoDS_Shape& shape = value.sourceShapes[index];
-            if (shape.IsNull() || shape.ShapeType() != expectedShapeTypes[index]
-                || shape.Orientation() != TopAbs_FORWARD)
+            SourceShapeKind kind = SourceShapeKind::Unknown;
+            for (const Node& node : value.definition.nodes) {
+                const auto* sourceNode = std::get_if<SourceNode>(&node.value);
+                if (sourceNode && sourceNode->shapeSlot == index
+                    && !ExpectedShapeKind(value.definition, sourceNode->recipe, kind))
+                    Standard_Failure::Raise("Composite recipe writer source kind");
+            }
+            if (!MatchesShapeKind(shape, kind))
                 Standard_Failure::Raise("Composite recipe writer shape");
         }
         target << Standard_Integer(1) << Standard_Integer(encoded.size())
@@ -215,6 +222,11 @@ inline void Register(const Handle(BinMDF_ADriverTable)& table,
     Handle(BinMDF_ADriver) found; table->GetDriver(STANDARD_TYPE(TNaming_NamedShape), found);
     const auto shapes = Handle(BinMNaming_NamedShapeDriver)::DownCast(found);
     if (shapes.IsNull()) Standard_Failure::Raise("Composite recipe shared driver missing");
+    Handle(BinMDF_ADriver) duplicate;
+    table->GetDriver(STANDARD_TYPE(Attribute), duplicate);
+    if (!duplicate.IsNull()
+        || std::strcmp(STANDARD_TYPE(Attribute)->Name(), STANDARD_TYPE(TNaming_NamedShape)->Name()) == 0)
+        Standard_Failure::Raise("Composite recipe binary carrier name collision");
     table->AddDriver(new BinaryDriver(messenger, shapes, budget, curveBudget, reject));
 }
 inline void Register(const Handle(BinMDF_ADriverTable)& table,

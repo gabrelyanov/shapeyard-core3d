@@ -10,6 +10,8 @@
 #include <TNaming_Builder.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
+#include <BRep_Tool.hxx>
+#include <TopoDS.hxx>
 #include <memory>
 
 class OcctDocument;
@@ -28,8 +30,9 @@ inline const Standard_GUID& AttributeID() {
 struct Payload final {
     Definition definition;
     std::vector<std::uint8_t> bytes;
-    // Indexed by SourceNode::shapeSlot. Immutable ownership is shared across
-    // Undo/Redo; geometry workers must deep-copy before mutation.
+    // Indexed by SourceNode::shapeSlot. Immutable ownership, including the
+    // ordinary-source origin encoded in the definition, is shared across
+    // Restore/Paste and Undo/Redo; workers deep-copy before mutation.
     std::vector<TopoDS_Shape> sourceShapes;
 };
 
@@ -93,9 +96,21 @@ struct Record {
 
 inline TopAbs_ShapeEnum TopologyKind(SourceShapeKind kind) noexcept {
     if (kind == SourceShapeKind::Solid) return TopAbs_SOLID;
-    if (kind == SourceShapeKind::Face) return TopAbs_FACE;
+    if (kind == SourceShapeKind::Face || kind == SourceShapeKind::TriangleMesh)
+        return TopAbs_FACE;
     if (kind == SourceShapeKind::Wire) return TopAbs_WIRE;
     return TopAbs_SHAPE;
+}
+
+inline bool MatchesShapeKind(const TopoDS_Shape& shape,
+                             SourceShapeKind expected) noexcept {
+    try {
+        if (shape.IsNull() || shape.Orientation() != TopAbs_FORWARD
+            || shape.ShapeType() != TopologyKind(expected)) return false;
+        if (expected != SourceShapeKind::TriangleMesh) return true;
+        TopLoc_Location location;
+        return !BRep_Tool::Triangulation(TopoDS::Face(shape), location).IsNull();
+    } catch (...) { return false; }
 }
 
 inline bool ExpectedShapeKind(const Definition& definition, const SourceRecipe& recipe,
@@ -175,8 +190,7 @@ inline bool ReadAll(const Handle(TDocStd_Document)& document, std::vector<Record
                 const TopoDS_Shape& shape = value->sourceShapes[source->shapeSlot];
                 SourceShapeKind expected = SourceShapeKind::Unknown;
                 if (!ExpectedShapeKind(value->definition, source->recipe, expected)
-                    || shape.IsNull() || shape.ShapeType() != TopologyKind(expected)
-                    || shape.Orientation() != TopAbs_FORWARD) return false;
+                    || !MatchesShapeKind(shape, expected)) return false;
             }
             if (sources != value->sourceShapes.size()) return false;
             for (TDF_AttributeIterator attributes(label); attributes.More(); attributes.Next())

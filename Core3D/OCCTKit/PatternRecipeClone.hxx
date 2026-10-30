@@ -255,6 +255,37 @@ inline bool IssueMapped(const UUID& oldValue, const IssueUUID& issue,
     } catch (...) { return false; }
 }
 
+// Ordinary-source anchors are durable identities, not historical cut IDs.
+// Independent copies reissue the anchor and every positive origin link while
+// preserving Unknown/LegacyGeometry as absence rather than inventing origin.
+inline bool RemapOrdinarySourceRecipe(
+    composite_recipe::SourceNode& source,
+    const retained_recipe::OwnerKey& destinationOwner,
+    const IssueUUID& issue, std::set<UUID>& occupied,
+    IdentityMap& identities) noexcept {
+    try {
+        if (source.recipe.kind != composite_recipe::RecipeKind::OrdinarySource)
+            return true;
+        composite_recipe::OrdinarySourceRecipe metadata;
+        if (!composite_recipe::DecodeOrdinarySourceRecipe(source.recipe, metadata)) return false;
+        UUID anchor{};
+        if (!IssueMapped(metadata.sourceAnchor, issue, occupied, identities, anchor)
+            || anchor != source.original.sourceFeature) return false;
+        metadata.sourceAnchor = anchor;
+        if (metadata.hasOriginLink) {
+            metadata.originLink.document = destinationOwner.document;
+            if (!IssueMapped(metadata.originLink.entity, issue, occupied, identities,
+                             metadata.originLink.entity)
+                || !IssueMapped(metadata.originLink.definition, issue, occupied, identities,
+                                metadata.originLink.definition)
+                || !IssueMapped(metadata.originLink.sourceFeature, issue, occupied, identities,
+                                metadata.originLink.sourceFeature)) return false;
+        }
+        return composite_recipe::EncodeOrdinarySourceRecipe(
+            metadata, source.recipe.bytes);
+    } catch (...) { return false; }
+}
+
 // Rebind graph-local owner/node/feature authority for an independent SYPB/4
 // clone while retaining the archived SourceIdentity values, source programs,
 // and metadata provenance. The only admitted dependent graph is its one
@@ -391,6 +422,14 @@ inline bool PrepareAnalyticBoolean(const Source& source,
                 occupied.insert(value->original.entity);
                 occupied.insert(value->original.definition);
                 occupied.insert(value->original.sourceFeature);
+                composite_recipe::OrdinarySourceRecipe ordinary;
+                if (value->recipe.kind == composite_recipe::RecipeKind::OrdinarySource
+                    && composite_recipe::DecodeOrdinarySourceRecipe(value->recipe, ordinary)
+                    && ordinary.hasOriginLink) {
+                    occupied.insert(ordinary.originLink.entity);
+                    occupied.insert(ordinary.originLink.definition);
+                    occupied.insert(ordinary.originLink.sourceFeature);
+                }
             } else occupied.insert(std::get<composite_recipe::FeatureNode>(node.value).feature);
         }
         IdentityMap identities;
@@ -405,6 +444,8 @@ inline bool PrepareAnalyticBoolean(const Source& source,
                     || !IssueMapped(sourceNode->original.sourceFeature, issue, occupied, identities,
                                     sourceNode->original.sourceFeature)) return false;
                 sourceNode->original.document = destinationOwner.document;
+                if (!RemapOrdinarySourceRecipe(*sourceNode, destinationOwner,
+                                               issue, occupied, identities)) return false;
             } else {
                 auto& featureNode = std::get<composite_recipe::FeatureNode>(node.value);
                 if (!IssueMapped(featureNode.node, issue, occupied, identities, featureNode.node)

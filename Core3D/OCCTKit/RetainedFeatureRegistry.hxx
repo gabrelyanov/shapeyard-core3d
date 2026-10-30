@@ -19,6 +19,8 @@ inline constexpr std::uint32_t ExistingChamferAdapterKind = 0x00002001;
 inline constexpr std::uint32_t ExistingConstantFilletAdapterKind = 0x00002002;
 inline constexpr std::uint32_t VariableRadiusFilletKind = 0x00002003;
 inline constexpr std::uint32_t DraftFacesKind = 0x00002004;
+// T3 P1 allocation only; production reading/execution is wired by F3/P2.
+inline constexpr std::uint32_t FacePushPullKind = 0x00002005;
 // D65 central allocation; reserved/disabled until the C4 integration.
 inline constexpr std::uint32_t SplineProfileRevolveKind = 0x00003004;
 

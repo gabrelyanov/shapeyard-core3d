@@ -165,8 +165,8 @@ bool DecodeImage(
                 || !number(kCGImagePropertyDepth, depth)
                 || !colorModelValue
                 || CFGetTypeID(colorModelValue) != CFStringGetTypeID()
-                || !alphaValue
-                || CFGetTypeID(alphaValue) != CFBooleanGetTypeID()) {
+                || (alphaValue
+                    && CFGetTypeID(alphaValue) != CFBooleanGetTypeID())) {
                 return false;
             }
             const auto colorModel = static_cast<CFStringRef>(colorModelValue);
@@ -180,7 +180,11 @@ bool DecodeImage(
             else {
                 return false;
             }
-            if (CFBooleanGetValue(static_cast<CFBooleanRef>(alphaValue)))
+            // Opaque working images (including imported JPEGs) can omit
+            // HasAlpha. Match face-image validation: absence means no alpha;
+            // a present value must still be a boolean, as checked above.
+            if (alphaValue
+                && CFBooleanGetValue(static_cast<CFBooleanRef>(alphaValue)))
                 ++components;
             properties.reset();
             if (width == 0 || height == 0
