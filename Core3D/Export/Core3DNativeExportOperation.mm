@@ -1771,7 +1771,7 @@ void WriteSTEP(
 // The standard Delaunay optimizer instead measures distance to a triangle plane
 // or link. A bilinear planar trapezoid can therefore remain at two triangles,
 // with a large *tangential* midpoint discrepancy, through every normal retry.
-// This final STL-only retry inserts interior nodes on the ORIGINAL surface. It
+// This final STL/OBJ/glTF retry inserts interior nodes on the ORIGINAL surface. It
 // does not alter surfaces, pcurves, boundary polygons, deflection metadata or BRep.
 using ExportParametricBase = BRepMesh_DelaunayDeflectionControlMeshAlgo<
     BRepMesh_NURBSRangeSplitter, BRepMesh_DelaunayBaseMeshAlgo>;
@@ -1928,9 +1928,12 @@ void MeshPrivateExportSurfaces(
         ? !BRepTools::Triangulation(compound, deflection) : hasGeometricFaces;
     if (needsMeshing) {
         const bool qualityPreset = state->meshQuality != Core3DExportMeshQualityViewport;
-        // Four existing attempts stay byte-for-byte in order. Only STL may
+        // Four existing attempts stay byte-for-byte in order. STL, OBJ and glTF may
         // make a fifth, bounded original-surface parameter refinement attempt.
-        const bool parametricRetry = qualityPreset && state->exportType == ExportTypeStl;
+        const bool parametricRetry = qualityPreset
+            && (state->exportType == ExportTypeStl
+                || state->exportType == ExportTypeObj
+                || state->exportType == ExportTypeGltf);
         const int maximumAttempts = qualityPreset ? (parametricRetry ? 5 : 4) : 1;
         Message_ProgressScope meshScope(whole.Next(4), "Refine export mesh", maximumAttempts);
         bool validMesh = false;
