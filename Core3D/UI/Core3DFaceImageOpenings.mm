@@ -956,6 +956,19 @@ NSArray<NSDictionary<NSString *, id> *> *E4LayerSamples(
                            @"The candidate bindings could not be proven.");
         return;
     }
+    // Preflight the same bounded owner contract used by the eventual write,
+    // save and cold read before staging any transaction/resource mutation.
+    OwnerKey currentKey;
+    TDF_Label ownerLabel;
+    if (!LabelForSelected(_owner, _selected, currentKey, ownerLabel)
+        || !(currentKey == next.owner)
+        || fi::persistence::bindings::AdmitOwner(
+            _owner->Document(), ownerLabel, next)
+            == fi::persistence::bindings::OwnerAdmission::Refused) {
+        DeliverPreparation(completion, Core3DFaceImagePreparationResultRejected,
+                           @"This identified native solid cannot carry a face image.");
+        return;
+    }
     fi::Observed observed;
     dr::FaceImageReplayStatus observedStatus = dr::FaceImageReplayStatus::Malformed;
     if (!BuildObserved(_owner, _key, hadRecord, next, addCapturedFace,
@@ -7588,6 +7601,16 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
         NSString *recordState = @"malformed";
         if (state == fi::persistence::bindings::ReadState::Present) recordState = @"present";
         else if (state == fi::persistence::bindings::ReadState::Absent) recordState = @"absent";
+        NSString *ownerAdmission = @"refused";
+        switch (fi::persistence::bindings::AdmitOwner(document, label, definition)) {
+            case fi::persistence::bindings::OwnerAdmission::Retained:
+                ownerAdmission = @"retained"; break;
+            case fi::persistence::bindings::OwnerAdmission::Composite:
+                ownerAdmission = @"composite"; break;
+            case fi::persistence::bindings::OwnerAdmission::Ordinary:
+                ownerAdmission = @"ordinary"; break;
+            default: break;
+        }
         return @{
             @"schema": @"shapeyard.face-image.observation.v1",
             @"documentIdentifier": [NSString stringWithUTF8String:
@@ -7596,6 +7619,7 @@ NSData *CreateFaceImageMalformedFixture(NSString *scenario, double unit) {
             @"definitionIdentifier": IdentifierText(key.definition),
             @"sourceFeatureIdentifier": sourceFeature,
             @"recordState": recordState,
+            @"ownerAdmission": ownerAdmission,
             @"recordBytes": bytes.empty()
                 ? [NSData data] : [NSData dataWithBytes:bytes.data() length:bytes.size()],
             @"currentness": currentness,

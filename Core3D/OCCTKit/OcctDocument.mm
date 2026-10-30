@@ -9919,8 +9919,8 @@ Standard_Boolean Core3DValidatePaintedAtlasBakeDocument(
 // identities, the single aggregate budget and closed neighborhoods). Every
 // free simple-shape owner then goes through the strict SYFI/1 binding reader:
 // a Malformed verdict refuses the document, and a Present record must be
-// identity-bound to this exact document/entity/definition and to an owner
-// that carries an admitted retained carrier. Finally the closed-placement
+// identity-bound to this exact document/entity/definition and admitted by the
+// shared retained/composite/ordinary-solid owner predicate. Finally the closed-placement
 // census admits the five binding schema GUIDs and the resource attribute GUID
 // on exactly the labels the readers validated and nowhere else; attribute-free
 // abort/undo remnant labels carry no schema GUID and pass untouched.
@@ -9940,8 +9940,6 @@ Standard_Boolean Core3DValidateFaceImageDocument(const Handle(TDocStd_Document)&
                 tool->GetFreeShapes(labels);
                 if(labels.Length()<0||labels.Length()>core3d::profile::MaximumLabels)
                     return Standard_False;
-                core3d::retained_recipe::UUID documentID{};
-                bool documentIDRead=false;
                 for(Standard_Integer index=1;index<=labels.Length();++index){
                     const TDF_Label owner=labels.Value(index);
                     fi::Definition definition;TDF_Label record;
@@ -9949,23 +9947,9 @@ Standard_Boolean Core3DValidateFaceImageDocument(const Handle(TDocStd_Document)&
                         fi::persistence::bindings::Read(document,owner,definition,nullptr,&record);
                     if(state==fi::persistence::bindings::ReadState::Malformed)return Standard_False;
                     if(state!=fi::persistence::bindings::ReadState::Present)continue;
-                    if(record.IsNull()||!XCAFDoc_ShapeTool::IsSimpleShape(owner)
-                        ||!XCAFDoc_ShapeTool::IsFree(owner)
-                        ||(!core3d::retained_solid::HasRecord(owner)
-                            &&!core3d::composite_recipe::HasRecord(owner)))
-                        return Standard_False;
-                    if(!documentIDRead){
-                        if(!core3d::retained_solid::ReadUUID(document->Main(),
-                                DocumentIdentifierAttributeID(),documentID))
-                            return Standard_False;
-                        documentIDRead=true;
-                    }
-                    core3d::retained_recipe::UUID entity{},definitionID{};
-                    if(!core3d::retained_solid::ReadUUID(owner,EntityIdentifierAttributeID(),entity)
-                        ||!core3d::retained_solid::ReadUUID(owner,DefinitionIdentifierAttributeID(),definitionID)
-                        ||!(definition.owner.document==documentID)
-                        ||!(definition.owner.entity==entity)
-                        ||!(definition.owner.definition==definitionID))
+                    if(record.IsNull()
+                        ||fi::persistence::bindings::AdmitOwner(document,owner,definition)
+                            ==fi::persistence::bindings::OwnerAdmission::Refused)
                         return Standard_False;
                     admittedBindingRecords.Add(record);
                 }
