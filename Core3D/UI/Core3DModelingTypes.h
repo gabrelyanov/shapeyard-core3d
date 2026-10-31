@@ -43,6 +43,7 @@ typedef NS_ENUM(NSInteger, Core3DProfileConstructionResult) {
     Core3DProfileConstructionResultFailed,
     Core3DProfileConstructionResultCancelled,
     Core3DProfileConstructionResultUnchanged,
+    Core3DProfileConstructionResultRefusedRestored,
 };
 
 typedef NS_ENUM(NSInteger, Core3DBoundedCurvePreparationResult) {
@@ -106,6 +107,8 @@ __attribute__((objc_subclassing_restricted))
 - (void)applyWithCompletion:
     (void (^)(Core3DProfileConstructionResult result, NSString *detail))completion
     NS_SWIFT_NAME(apply(completion:));
+- (nullable Core3DGeneralLoftEditingOpening *)freshOpening
+    NS_SWIFT_NAME(freshOpening());
 - (BOOL)cancel;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;

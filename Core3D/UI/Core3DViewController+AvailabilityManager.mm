@@ -84,6 +84,7 @@ Core3DModelCapability ExportCapabilityForType(
         case ExportTypeStl:
             return Core3DModelCapabilityExportSTL;
         case ExportTypeGltf:
+        case ExportTypeUsdz:
             return Core3DModelCapabilityExportGLB;
         case ExportTypeStep:
             return Core3DModelCapabilityExportSTEP;
@@ -517,12 +518,13 @@ Core3DModelCapability DocumentExportCapabilities(
             return @[];
         }
         NSMutableArray<NSNumber *> *available =
-            [NSMutableArray arrayWithCapacity:4];
+            [NSMutableArray arrayWithCapacity:5];
         const ExportType orderedTypes[] = {
             ExportTypeObj,
             ExportTypeStl,
             ExportTypeGltf,
             ExportTypeStep,
+            ExportTypeUsdz,
         };
         for (const ExportType exportType : orderedTypes) {
             const Core3DModelCapability required =

@@ -250,6 +250,11 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
 }
 
 - (NSURL *)exportWithType:(ExportType)exportType {
+    // USDZ is owned by the Swift snapshot writer. Never let the legacy
+    // GLController dispatch interpret the distinct destination value.
+    if (exportType == ExportTypeUsdz) {
+        return nil;
+    }
     if (![self canExportType:exportType]) {
         return nil;
     }

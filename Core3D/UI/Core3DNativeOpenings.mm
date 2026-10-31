@@ -92,6 +92,12 @@
 #include <stdexcept>
 #include <deque>
 
+namespace core3d::native_opening {
+general_loft::owner::Receipt ApplyGeneralLoftAtomically(
+    const std::shared_ptr<Context>&, general_loft::owner::OcafOwner&,
+    const std::shared_ptr<const general_loft::owner::Prepared>&) noexcept;
+}
+
 namespace {
 using core3d::pattern::Axis;
 using core3d::pattern::Coordinate;
@@ -1514,6 +1520,7 @@ bool BoundedCreationCandidate(NSDictionary *value, NSString *name,
     std::shared_ptr<const core3d::general_loft::owner::Opening> _opening;
     std::shared_ptr<const core3d::general_loft::owner::Prepared> _prepared;
     std::atomic<State> _state;
+    Core3DGeneralLoftEditingOpening *(^_reopen)(void);
 }
 - (instancetype)initWithOwner:(const Handle(OcctDocument)&)owner
     context:(std::shared_ptr<core3d::native_opening::Context>)context
@@ -1534,6 +1541,9 @@ bool BoundedCreationCandidate(NSDictionary *value, NSString *name,
 }
 - (NSDictionary *)descriptor { return _opening ? GeneralLoftDescriptor(*_opening) : @{}; }
 - (BOOL)isCreating { return _opening && _opening->creating; }
+- (Core3DGeneralLoftEditingOpening *)freshOpening {
+    return _reopen ? _reopen() : nil;
+}
 - (void)prepareCandidate:(NSDictionary *)candidate
     editedStationIdentifier:(NSUUID *)stationIdentifier
     completion:(void (^)(Core3DBoundedCurvePreparationResult, NSString *))completion {
@@ -1584,10 +1594,13 @@ bool BoundedCreationCandidate(NSDictionary *value, NSString *name,
         Deliver(completion, Core3DProfileConstructionResultRejected,
                 @"No current ruled-loft preparation."); return;
     }
-    const auto receipt = _service->apply(_prepared);
+    const auto receipt = core3d::native_opening::ApplyGeneralLoftAtomically(
+        _context, *_service, _prepared);
     Core3DProfileConstructionResult result = Core3DProfileConstructionResultRejected;
     if (receipt.outcome == core3d::general_loft::owner::Outcome::committed)
         result = Core3DProfileConstructionResultCommitted;
+    else if (receipt.reason == "publication-refused-restored")
+        result = Core3DProfileConstructionResultRefusedRestored;
     else if (receipt.outcome == core3d::general_loft::owner::Outcome::busy)
         result = Core3DProfileConstructionResultBusy;
     else if (receipt.outcome == core3d::general_loft::owner::Outcome::outcomeUnknown
@@ -1602,7 +1615,9 @@ bool BoundedCreationCandidate(NSDictionary *value, NSString *name,
         ? @"Ruled loft committed in one history command."
         : result == Core3DProfileConstructionResultRecoveryRequired
             ? @"The native close outcome is unknown; recovery ownership is retained."
-            : @"Ruled-loft apply was refused without partial replacement.";
+            : result == Core3DProfileConstructionResultRefusedRestored
+                ? @"Publication was refused; the exact previous loft and history were restored."
+                : @"Ruled-loft apply was refused without partial replacement.";
 #if DEBUG
     if (result != Core3DProfileConstructionResultCommitted) {
         std::fprintf(stderr, "R179_CURVE_RESULT stage=apply result=%d detail=%.96s\n",
@@ -2744,9 +2759,14 @@ Core3DSplineProfileEditingOpening *OpenSplineProfileEditorFromInput(ControllerOp
 }
 - (Core3DGeneralLoftEditingOpening *)openGeneralLoftEditor {
     ControllerOpeningInput input;
-    return CaptureControllerOpeningInput(self, input, true)
+    Core3DGeneralLoftEditingOpening *opening = CaptureControllerOpeningInput(self, input, true)
         ? core3d::native_opening::OpenGeneralLoft(
             input.owner, input.selected, input.context) : nil;
+    if (opening) {
+        __weak Core3DViewController *weakSelf = self;
+        opening->_reopen = ^{ return [weakSelf openGeneralLoftEditor]; };
+    }
+    return opening;
 }
 - (Core3DGeneralLoftEditingOpening *)beginGeneralLoftCreationWithStations:
     (NSArray<NSDictionary<NSString *,id> *> *)stations orderAxis:(NSArray<NSNumber *> *)orderAxis

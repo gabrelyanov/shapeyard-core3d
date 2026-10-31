@@ -35,10 +35,10 @@
 #include "../OCCTKit/RetainedEdgeTreatmentSaveView.hxx"
 #include "../OCCTKit/RetainedProfileProducer.hxx"
 #include "../OCCTKit/VariableRadiusFilletNativeOwner.hxx"
+#include "../OCCTKit/GeneralLoftPersistence.hxx"
 #if DEBUG
 // R179/D249 diagnostic-only include. Never compiled into Release.
 #include "../OCCTKit/AuthoredParameterNativeOwner.hxx"
-#include "../OCCTKit/GeneralLoftPersistence.hxx"
 #endif
 
 #include <BRepFilletAPI_MakeFillet.hxx>
@@ -142,6 +142,13 @@ private:
 #include <cstring>
 #include <cstdio>
 #include <exception>
+#include <functional>
+#include <TDF_Delta.hxx>
+#include <TDF_Tool.hxx>
+#include <TCollection_AsciiString.hxx>
+#include <TNaming_Iterator.hxx>
+#include <TNaming_NamedShape.hxx>
+#include "../OCCTKit/GeneralLoftOwner.hxx"
 #include <map>
 #include <new>
 #include <set>
@@ -2861,6 +2868,7 @@ struct State final {
     // same plan before the shared fence can clear.
     std::shared_ptr<const CommittedEditPublication> pendingPublication;
     std::uint64_t publicationContext = 0;
+    bool loftRollbackUnproven = false;
 #if DEBUG
     // Row-265/N07 lifecycle probe: real closes at this viewer's lease boundary
     // that must be reported unproven after CommitCommand or AbortCommand ran.
@@ -2891,6 +2899,193 @@ bool SameElement(const scene::ElementIdentifier& a,
 }
 
 namespace native_opening {
+namespace {
+// A loft edit writes only the owner and its SYGL child naming attributes.
+// Undo must reproduce their complete naming state before measured versions
+// can be restored; a matching current solid alone is insufficient.
+struct LoftNamingRecord final {
+    TDF_Label label;
+    std::string labelEntry;
+    bool hasAttribute = false;
+    Standard_Integer version = 0;
+    TNaming_Evolution evolution = TNaming_PRIMITIVE;
+    TopoDS_Shape currentBinding;
+    std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> shapePairs;
+};
+using LoftNamingCheckpoint = std::array<LoftNamingRecord, 2>;
+
+bool CaptureLoftNamingCheckpoint(const OcctGeneralLoftCapture& loft,
+    LoftNamingCheckpoint& output) noexcept {
+    try {
+        const auto& owner = loft.record.owner;
+        const auto& record = loft.record.label;
+        if (loft.documentData.IsNull() || owner.IsNull() || record.IsNull()
+            || owner.Data() != loft.documentData || record.Data() != loft.documentData
+            || !owner.FindChild(general_loft::persistence::RecordTag,
+                                Standard_False).IsEqual(record)) return false;
+        LoftNamingCheckpoint captured;
+        const std::array<TDF_Label, 2> labels = {owner, record};
+        constexpr std::size_t maximumShapePairs = 4096;
+        for (std::size_t index = 0; index < labels.size(); ++index) {
+            auto& value = captured[index];
+            value.label = labels[index];
+            TCollection_AsciiString entry;
+            TDF_Tool::Entry(value.label, entry);
+            value.labelEntry = entry.ToCString();
+            Handle(TNaming_NamedShape) naming;
+            value.hasAttribute = value.label.FindAttribute(TNaming_NamedShape::GetID(), naming);
+            if (!value.hasAttribute) continue;
+            if (naming.IsNull()) return false;
+            value.version = naming->Version();
+            value.evolution = naming->Evolution();
+            value.currentBinding = naming->Get();
+            for (TNaming_Iterator item(naming); item.More(); item.Next()) {
+                if (value.shapePairs.size() >= maximumShapePairs) return false;
+                value.shapePairs.emplace_back(item.OldShape(), item.NewShape());
+            }
+        }
+        output = std::move(captured);
+        return true;
+    } catch (...) { return false; }
+}
+
+bool SameLoftNamingCheckpoint(const LoftNamingCheckpoint& expected,
+    const LoftNamingCheckpoint& actual, bool compareVersions) noexcept {
+    try {
+        const auto sameShape = [](const TopoDS_Shape& a, const TopoDS_Shape& b) {
+            return a.IsNull() || b.IsNull()
+                ? a.IsNull() && b.IsNull() : a.IsEqual(b);
+        };
+        for (std::size_t index = 0; index < expected.size(); ++index) {
+            const auto& e = expected[index];
+            const auto& a = actual[index];
+            if (e.label.IsNull() || a.label.IsNull() || !e.label.IsEqual(a.label)
+                || e.labelEntry != a.labelEntry || e.hasAttribute != a.hasAttribute)
+                return false;
+            if (!e.hasAttribute) continue;
+            if (e.evolution != a.evolution
+                || (compareVersions && e.version != a.version)
+                || !sameShape(e.currentBinding, a.currentBinding)
+                || e.shapePairs.size() != a.shapePairs.size()) return false;
+            for (std::size_t pair = 0; pair < e.shapePairs.size(); ++pair) {
+                if (!sameShape(e.shapePairs[pair].first, a.shapePairs[pair].first)
+                    || !sameShape(e.shapePairs[pair].second, a.shapePairs[pair].second))
+                    return false;
+            }
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
+bool RestoreLoftNamingCheckpoint(const OcctGeneralLoftCapture& loft,
+    const LoftNamingCheckpoint& expected) noexcept {
+    try {
+        LoftNamingCheckpoint undone;
+        if (!CaptureLoftNamingCheckpoint(loft, undone)
+            || !SameLoftNamingCheckpoint(expected, undone, false)) return false;
+        std::array<Handle(TNaming_NamedShape), 2> naming;
+        for (std::size_t index = 0; index < expected.size(); ++index) {
+            if (!expected[index].hasAttribute
+                || !expected[index].label.FindAttribute(TNaming_NamedShape::GetID(), naming[index])
+                || naming[index].IsNull()) return false;
+        }
+        // Raw OCAF Undo rebuilds naming pairs and can advance the serialized
+        // version. Restore only the captured scalar after the structural proof.
+        for (std::size_t index = 0; index < expected.size(); ++index)
+            naming[index]->SetVersion(expected[index].version);
+        LoftNamingCheckpoint restored;
+        if (!CaptureLoftNamingCheckpoint(loft, restored)
+            || !SameLoftNamingCheckpoint(expected, restored, true)) return false;
+#if DEBUG
+        std::fprintf(stderr, "R4_C3_LOFT_NAMING_RESTORED owner=%s captured=%d undo=%d restored=%d "
+            "sygl=%s captured=%d undo=%d restored=%d\n",
+            expected[0].labelEntry.c_str(), expected[0].version, undone[0].version, restored[0].version,
+            expected[1].labelEntry.c_str(), expected[1].version, undone[1].version, restored[1].version);
+#endif
+        return true;
+    } catch (...) { return false; }
+}
+
+struct LoftTransientFlags final {
+    Handle(TopoDS_TShape) shape;
+    Standard_Boolean free, locked, modified, checked;
+    Standard_Boolean orientable, closed, infinite, convex;
+};
+struct LoftApplyCheckpoint final {
+    const Context* issuer = nullptr;
+    std::shared_ptr<detail::State> state;
+    Handle(TDF_Delta) committedDelta;
+    retained_recipe::OwnerKey previousOwner;
+    OcctGeneralLoftCapture previous;
+    LoftNamingCheckpoint previousNaming;
+    std::vector<LoftTransientFlags> previousFlags;
+    std::function<bool()> rollback;
+#if DEBUG
+    bool refusePublication = false;
+    bool failRollback = false;
+#endif
+};
+thread_local LoftApplyCheckpoint* currentLoftApply = nullptr;
+#if DEBUG
+thread_local bool refuseNextLoftPublication = false;
+thread_local bool loftPublicationRefusalConsumed = false;
+thread_local bool failNextLoftRollback = false;
+thread_local bool loftRollbackFailureConsumed = false;
+#endif
+} // namespace
+
+#if DEBUG
+extern "C" __attribute__((visibility("default")))
+bool Core3DDebugRefuseNextLoftPublication(bool refuse) {
+    const bool consumed = loftPublicationRefusalConsumed;
+    if (refuse) loftPublicationRefusalConsumed = false;
+    refuseNextLoftPublication = refuse;
+    return consumed;
+}
+extern "C" __attribute__((visibility("default")))
+bool Core3DDebugFailNextLoftRollback(bool fail) {
+    const bool consumed = loftRollbackFailureConsumed;
+    if (fail) loftRollbackFailureConsumed = false;
+    failNextLoftRollback = fail;
+    return consumed;
+}
+#endif
+
+general_loft::owner::Receipt ApplyGeneralLoftAtomically(
+    const std::shared_ptr<Context>& context,
+    general_loft::owner::OcafOwner& service,
+    const std::shared_ptr<const general_loft::owner::Prepared>& prepared) noexcept {
+    if (!prepared || prepared->opening.creating) return service.apply(prepared);
+    if (![NSThread isMainThread] || !context || currentLoftApply) return {};
+    LoftApplyCheckpoint checkpoint;
+    checkpoint.issuer = context.get();
+    checkpoint.previousOwner = prepared->opening.definition.owner;
+#if DEBUG
+    checkpoint.refusePublication = std::exchange(refuseNextLoftPublication, false);
+    checkpoint.failRollback = std::exchange(failNextLoftRollback, false);
+#endif
+    struct Scope final {
+        explicit Scope(LoftApplyCheckpoint& value) { currentLoftApply = &value; }
+        ~Scope() { currentLoftApply = nullptr; }
+    } scope(checkpoint);
+    auto receipt = service.apply(prepared);
+    if (receipt.reason == "publication-unproven") {
+        const bool restored = !checkpoint.committedDelta.IsNull()
+            && checkpoint.rollback && checkpoint.rollback();
+        if (checkpoint.state) checkpoint.state->loftRollbackUnproven = !restored;
+        if (restored) {
+            receipt.outcome = general_loft::owner::Outcome::refused;
+            receipt.reason = "publication-refused-restored";
+            receipt.historyDelta = 0;
+        } else {
+            receipt.outcome = general_loft::owner::Outcome::recoveryRequired;
+            receipt.reason = "rollback-unproven";
+            receipt.historyDelta = 0;
+        }
+    }
+    return receipt;
+}
+
 bool SameFence(const Fence& a, const Fence& b) noexcept {
     if (!(a.stamp() == b.stamp())
         || a.publicationSourceIdentifier() != b.publicationSourceIdentifier()
@@ -3113,7 +3308,163 @@ std::shared_ptr<CommandLease> Context::beginCommandLease(
     const auto data = expected.data();
     if (document.IsNull() || data.IsNull() || document->GetData() != data
         || document->HasOpenCommand()) return {};
-    const std::uint64_t marker = ++state->nextMarker;
+    const std::uint64_t marker = state->nextMarker + 1;
+    if (currentLoftApply && currentLoftApply->issuer == this) {
+        try {
+            if (!state->owner->getDocument()->ReadGeneralLoftExact(
+                    currentLoftApply->previousOwner, currentLoftApply->previous))
+                return {};
+            const TDF_DeltaList priorUndos = document->GetUndos();
+            const TDF_DeltaList priorRedos = document->GetRedos();
+            const auto priorTime = data->Time();
+            const auto priorSelection = openingFence_.selection();
+            auto* checkpoint = currentLoftApply;
+            if (!CaptureLoftNamingCheckpoint(checkpoint->previous, checkpoint->previousNaming)
+                || !checkpoint->previousNaming[0].hasAttribute
+                || !checkpoint->previousNaming[1].hasAttribute) return {};
+            checkpoint->state = state;
+            TopTools_IndexedMapOfShape previousShapes;
+            TopExp::MapShapes(checkpoint->previous.solid, previousShapes);
+            if (previousShapes.Extent() <= 0 || previousShapes.Extent() > 8192) return {};
+            for (Standard_Integer index = 1; index <= previousShapes.Extent(); ++index) {
+                const Handle(TopoDS_TShape)& shape = previousShapes(index).TShape();
+                if (shape.IsNull()) return {};
+                checkpoint->previousFlags.push_back({shape,
+                    shape->Free(), shape->Locked(), shape->Modified(), shape->Checked(),
+                    shape->Orientable(), shape->Closed(), shape->Infinite(), shape->Convex()});
+            }
+            const auto issuer = identifier_;
+            currentLoftApply->rollback =
+                [state, document, data, priorUndos, priorRedos, priorTime,
+                 priorSelection, checkpoint, issuer, marker]() noexcept {
+                try {
+                    if (!state->owner || state->activeContext != issuer
+                        || state->activeMarker != 0 || state->nextMarker != marker
+                        || state->owner->getDocument()->Document() != document
+                        || document->GetData() != data || document->HasOpenCommand()
+                        || checkpoint->committedDelta.IsNull()
+                        || document->GetUndos().IsEmpty()
+                        || document->GetUndos().Last() != checkpoint->committedDelta
+                        || checkpoint->committedDelta->BeginTime() != priorTime
+                        || checkpoint->committedDelta->EndTime() != data->Time()) return false;
+#if DEBUG
+                    const auto traceRollback = [](const char* stage) {
+                        std::fprintf(stderr, "R4_C3_ROLLBACK stage=%s\n", stage);
+                    };
+#else
+                    const auto traceRollback = [](const char*) {};
+#endif
+                    traceRollback("precondition-ok");
+                    if (!document->Undo() || data->Time() != priorTime) return false;
+#if DEBUG
+                    if (checkpoint->failRollback) {
+                        loftRollbackFailureConsumed = true;
+                        return false;
+                    }
+#endif
+                    traceRollback("undo-ok");
+                    const_cast<TDF_DeltaList&>(document->GetUndos()) = priorUndos;
+                    const_cast<TDF_DeltaList&>(document->GetRedos()) = priorRedos;
+                    OcctGeneralLoftCapture restored;
+                    if (!state->owner->getDocument()->ReadGeneralLoftExact(
+                            checkpoint->previousOwner, restored)) return false;
+                    traceRollback("read-ok");
+                    if (!checkpoint->previous.IsEqual(restored)) return false;
+                    traceRollback("exact-ok");
+                    if (!RestoreLoftNamingCheckpoint(restored, checkpoint->previousNaming))
+                        return false;
+                    if (!state->owner->redrawDocument()) return false;
+                    traceRollback("redraw-ok");
+                    if (priorSelection.size() == 1) {
+                        Handle(AIS_Shape) target;
+                        AIS_ListOfInteractive displayed;
+                        state->owner->myContext->DisplayedObjects(
+                            AIS_KOI_Shape, -1, displayed);
+                        for (AIS_ListIteratorOfListOfInteractive item(displayed);
+                             item.More(); item.Next()) {
+                            const auto candidate = Handle(AIS_Shape)::DownCast(item.Value());
+                            if (candidate.IsNull()) continue;
+                            const auto label = state->owner->myDoc->ShapeLabel(candidate);
+                            if (label.IsNull()
+                                || state->owner->myDoc->EntityIdentifierForLabel(label)
+                                    != priorSelection.front().entityIdentifier) continue;
+                            if (!target.IsNull()) return false;
+                            target = candidate;
+                        }
+                        if (target.IsNull() || !state->owner->_objectInteractor) return false;
+                        const auto owner = target->GlobalSelOwner();
+                        const auto brepOwner = Handle(StdSelect_BRepOwner)::DownCast(owner);
+                        if (owner.IsNull() || owner->Selectable() != target
+                            || brepOwner.IsNull() || !brepOwner->HasShape()
+                            || !brepOwner->Shape().IsEqual(target->Shape())) return false;
+                        state->owner->myContext->ClearSelected(Standard_False);
+                        state->owner->myContext->SetSelected(owner, Standard_False);
+                        state->owner->myContext->InitSelected();
+                        if (!state->owner->myContext->MoreSelected()
+                            || state->owner->myContext->SelectedOwner() != owner
+                            || state->owner->myContext->SelectedInteractive() != target)
+                            return false;
+                        state->owner->myContext->NextSelected();
+                        if (state->owner->myContext->MoreSelected()) return false;
+                        state->owner->_objectInteractor->attachManipulatorToSelection(false);
+                        traceRollback("selection-ok");
+                    }
+                    const auto snapshot = state->owner->captureSceneSnapshot(64, 64);
+                    if (!snapshot || snapshot->publicationSourceIdentifier.empty()
+                        || snapshot->selection.selected.size() != priorSelection.size())
+                        return false;
+                    traceRollback("snapshot-ok");
+                    for (std::size_t index = 0; index < priorSelection.size(); ++index) {
+                        const auto& actual = snapshot->selection.selected[index];
+                        const auto& expected = priorSelection[index];
+                        if (actual.entityIdentifier != expected.entityIdentifier
+                            || actual.kind != expected.kind
+                            || actual.topologyIndex != expected.topologyIndex) return false;
+                    }
+                    traceRollback("semantic-selection-ok");
+                    TopTools_IndexedMapOfShape restoredShapes;
+                    TopExp::MapShapes(restored.solid, restoredShapes);
+                    if (restoredShapes.Extent() != Standard_Integer(
+                            checkpoint->previousFlags.size())) return false;
+                    for (const auto& flags : checkpoint->previousFlags) {
+                        if (flags.shape.IsNull()) return false;
+                        TopoDS_Shape probe;
+                        probe.TShape(flags.shape);
+                        if (!restoredShapes.Contains(probe)) return false;
+                        flags.shape->Free(flags.free);
+                        flags.shape->Locked(flags.locked);
+                        flags.shape->Modified(flags.modified);
+                        flags.shape->Checked(flags.checked);
+                        flags.shape->Orientable(flags.orientable);
+                        flags.shape->Closed(flags.closed);
+                        flags.shape->Infinite(flags.infinite);
+                        flags.shape->Convex(flags.convex);
+                        if (flags.shape->Free() != flags.free
+                            || flags.shape->Locked() != flags.locked
+                            || flags.shape->Modified() != flags.modified
+                            || flags.shape->Checked() != flags.checked
+                            || flags.shape->Orientable() != flags.orientable
+                            || flags.shape->Closed() != flags.closed
+                            || flags.shape->Infinite() != flags.infinite
+                            || flags.shape->Convex() != flags.convex) return false;
+                    }
+                    traceRollback("flags-ok");
+                    LoftNamingCheckpoint finalNaming;
+                    if (!CaptureLoftNamingCheckpoint(restored, finalNaming)
+                        || !SameLoftNamingCheckpoint(checkpoint->previousNaming, finalNaming, true))
+                        return false;
+                    state->pendingPublication.reset();
+                    state->publicationContext = 0;
+                    state->recoveryMarker = 0;
+                    state->recoveryContext = 0;
+                    state->activeContext = 0;
+                    state->contexts.erase(issuer);
+                    return true;
+                } catch (...) { return false; }
+            };
+        } catch (...) { return {}; }
+    }
+    ++state->nextMarker;
     state->activeContext = identifier_;
     state->activeMarker = marker;
     try {
@@ -3187,7 +3538,15 @@ bool Context::publishCommittedEdit(
     if (!state || state->owner == nullptr || state->activeContext != identifier_
         || state->activeMarker != 0 || state->recoveryMarker != 0) return false;
     try {
-        if (state->owner->reconcileNativeOpeningEdit(openingFence_, publication)) {
+        bool published = state->owner->reconcileNativeOpeningEdit(openingFence_, publication);
+#if DEBUG
+        if (published && currentLoftApply && currentLoftApply->issuer == this
+            && currentLoftApply->refusePublication) {
+            loftPublicationRefusalConsumed = true;
+            published = false;
+        }
+#endif
+        if (published) {
             state->activeContext = 0;
             return true;
         }
@@ -3312,6 +3671,9 @@ bool CommandLease::commit() noexcept {
             }
         }
 #endif
+        if (currentLoftApply && currentLoftApply->issuer == context_.get()
+            && !document_->GetUndos().IsEmpty())
+            currentLoftApply->committedDelta = document_->GetUndos().Last();
         context_->finishMarker(marker_, false, true);
         settled_ = true;
         return true;
@@ -13235,7 +13597,8 @@ Core3DViewer::captureSceneSnapshot(
     const std::uint32_t viewportHeight,
     scene::SceneSnapshotCaptureFailure* failureOut) noexcept {
     if (failureOut != nullptr) *failureOut = {};
-    if (hasUnresolvedEdit()) {
+    if ((_nativeOpeningState && _nativeOpeningState->loftRollbackUnproven)
+        || hasUnresolvedEdit()) {
         return {};
     }
     if (_objectInteractor != nullptr
