@@ -134,13 +134,14 @@ bool CaptureInputs(OcctDocument& owner, const std::string& hostText,
             || !ScalarRecipe(profileRecord.parameters, scalarRecipe)
             || !owner.CaptureCylindricalCutProgramSource(s->second.label, program))
             return refuse("profile-or-program");
-        const auto* retained = std::get_if<retained_boolean::Program>(&program.recipe);
-        if (!retained || retained->steps.empty()
-            || retained->source.entity != s->second.entity
-            || retained->source.definition != s->second.definition
-            || retained->source.document != documentID
-            || retained->source.entity == h->second.entity
-            || program.recipeBytes.empty() || program.base.IsNull())
+        feature_pattern_native::SourceProgram normalized;
+        if (!feature_pattern_native::NormalizeSourceProgram(program.recipe,
+                program.recipeBytes, program.base, normalized)
+            || normalized.program.steps.empty()
+            || normalized.program.source.entity != s->second.entity
+            || normalized.program.source.definition != s->second.definition
+            || normalized.program.source.document != documentID
+            || normalized.program.source.entity == h->second.entity)
             return refuse("program-binding");
         host = h->second; source = s->second; return true;
     } catch (...) {
@@ -184,31 +185,41 @@ bool CreationReadback(OcctDocument& owner, const PreparedCreation& prepared,
         feature_pattern::Record patternRecord;
         std::shared_ptr<const feature_pattern_baseline::Payload> baseline;
         profile::Record profileRecord;
-        OcctCylindricalCutProgramSource program;
+        retained_solid::Record sourceRecord;
+        feature_pattern_native::SourceProgram normalizedSource;
         std::map<UUID, pattern_owner::LabelReceipt> labels;
-        if (!owner.ReadFeaturePatternPair(prepared.definition_.feature, pair)
-            || !feature_pattern::ReadFeature(owner.Document(),
+        if (!owner.ReadFeaturePatternPair(prepared.definition_.feature, pair))
+            return false;
+        if (!feature_pattern::ReadFeature(owner.Document(),
                 prepared.definition_.feature, patternRecord)
-            || patternRecord.definition.feature != prepared.definition_.feature
-            || !pair.host.IsEqual(capture.host_.label)
+            || patternRecord.definition.feature != prepared.definition_.feature)
+            return false;
+        if (!pair.host.IsEqual(capture.host_.label)
             || !pair.source.IsEqual(capture.source_.label)
             || !pair.baselineRecipe.IsEqual(baselineLabel)
-            || pair.children.size() != prepared.built_.childReceipts.size()
-            || !feature_pattern_baseline::Read(baselineLabel, baseline)
-            || !baseline
+            || pair.children.size() != prepared.built_.childReceipts.size())
+            return false;
+        if (!feature_pattern_baseline::Read(baselineLabel, baseline) || !baseline
             || baseline->envelope.exactRecipe != capture.scalarRecipe_
             || baseline->envelope.retainedRecipeFeature
                 != prepared.baseline_.retainedRecipeFeature
             || baseline->envelope.baselineRecipeIdentity
-                != prepared.baseline_.baselineRecipeIdentity
-            || !profile::Read(owner.Document(), capture.host_.label, profileRecord)
+                != prepared.baseline_.baselineRecipeIdentity)
+            return false;
+        if (!profile::Read(owner.Document(), capture.host_.label, profileRecord)
             || profileRecord.identifier != capture.profile_.identifier
             || profileRecord.values != capture.profile_.values
-            || !profileRecord.IsCurrent(owner.Document(), capture.host_.label)
-            || !owner.CaptureCylindricalCutProgramSource(
-                capture.source_.label, program)
-            || program.recipeBytes != capture.sourceProgram_.recipeBytes
-            || !feature_pattern_owner::LocateLabels(owner, owner.Document(), labels)
+            || !profileRecord.IsCurrent(owner.Document(), capture.host_.label))
+            return false;
+        if (!retained_solid::Read(owner.Document(), capture.source_.label,
+                                  sourceRecord)
+            || !sourceRecord.value
+            || sourceRecord.value->bytes != capture.sourceProgram_.recipeBytes
+            || !sourceRecord.current.IsEqual(capture.source_.shape)
+            || !feature_pattern_native::NormalizeSourceProgram(
+                sourceRecord.value->envelope, sourceRecord.value->bytes,
+                sourceRecord.value->base, normalizedSource)) return false;
+        if (!feature_pattern_owner::LocateLabels(owner, owner.Document(), labels)
             || labels.size() != capture.freeLabelCount_) return false;
         const auto host = labels.find(capture.host_.entity);
         const auto source = labels.find(capture.source_.entity);
@@ -245,20 +256,22 @@ std::shared_ptr<const PreparedCreation> PrepareCreation(
     const CreationEdit& edit, const std::atomic_bool& stop) noexcept {
     try {
         if (!capture || !capture->context_ || stop.load()) return {};
-        const auto* program = std::get_if<retained_boolean::Program>(
-            &capture->sourceProgram_.recipe);
-        if (!program) return {};
+        feature_pattern_native::SourceProgram source;
+        if (!feature_pattern_native::NormalizeSourceProgram(
+                capture->sourceProgram_.recipe, capture->sourceProgram_.recipeBytes,
+                capture->sourceProgram_.base, source)) return {};
+        const auto& program = source.program;
         const auto selected = edit.sourceCutStepID == 0
-            ? std::find_if(program->steps.begin(), program->steps.end(),
+            ? std::find_if(program.steps.begin(), program.steps.end(),
                 [](const auto& value) {
                     return value.operation == analytic_boolean::Operation::Difference;
                 })
-            : std::find_if(program->steps.begin(), program->steps.end(),
+            : std::find_if(program.steps.begin(), program.steps.end(),
                 [&](const auto& value) {
                     return value.operation == analytic_boolean::Operation::Difference
                         && value.operand.identifier == edit.sourceCutStepID;
                 });
-        if (selected == program->steps.end()) return {};
+        if (selected == program.steps.end()) return {};
 
         auto prepared = std::shared_ptr<PreparedCreation>(new PreparedCreation);
         prepared->capture_ = capture;
@@ -266,8 +279,8 @@ std::shared_ptr<const PreparedCreation> PrepareCreation(
         definition.host = {capture->document_, capture->host_.entity,
                            capture->host_.definition};
         if (!Issue(definition.feature)) return {};
-        definition.sourceCut = {program->source.document, program->source.entity,
-            program->source.definition, program->source.derivedFeature};
+        definition.sourceCut = {program.source.document, program.source.entity,
+            program.source.definition, program.source.derivedFeature};
         definition.sourceCutStepID = selected->operand.identifier;
         definition.metersPerUnit = capture->profile_.parameters.metersPerUnit;
         auto& distribution = definition.distribution;
@@ -305,9 +318,6 @@ std::shared_ptr<const PreparedCreation> PrepareCreation(
         baseline.solid = capture->host_.shape;
         baseline.retainedRecipeCurrent = true;
 
-        feature_pattern_native::SourceProgram source;
-        source.program = *program; source.exactProgram = capture->sourceProgram_.recipeBytes;
-        source.retainedBase = capture->sourceProgram_.base;
         feature_pattern::ExpansionBudget budget;
         budget.existingDocumentBytes = capture->featurePatternBytes_;
         budget.sourceRecipeBytes = source.exactProgram.size();
@@ -714,15 +724,12 @@ bool ObserveReceipts(OcctDocument& owner, const std::string& hostEntity,
             || payload->envelope.exactRecipe != baseline.exactRecipe)
             return false;
 
-        const auto* retained = std::get_if<retained_boolean::Program>(
-            &snapshot.sourceProgram.recipe);
-        if (!retained
+        feature_pattern_native::SourceProgram source;
+        if (!feature_pattern_native::NormalizeSourceProgram(
+                snapshot.sourceProgram.recipe, snapshot.sourceProgram.recipeBytes,
+                snapshot.sourceProgram.base, source)
             || snapshot.featurePatternDocumentBytes < snapshot.record.bytes.size())
             return false;
-        feature_pattern_native::SourceProgram source;
-        source.program = *retained;
-        source.exactProgram = snapshot.sourceProgram.recipeBytes;
-        source.retainedBase = snapshot.sourceProgram.base;
         feature_pattern::ExpansionBudget budget;
         budget.existingDocumentBytes = snapshot.featurePatternDocumentBytes
             - snapshot.record.bytes.size();

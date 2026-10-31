@@ -54,9 +54,41 @@ struct HostBaseline final {
 
 struct SourceProgram final {
     retained_boolean::Program program;
+    // Exact persisted source evidence. For a legacy v1 cut this deliberately
+    // differs from derivedProgram, which is the transient promoted v2 view.
     std::vector<std::uint8_t> exactProgram;
+    std::vector<std::uint8_t> derivedProgram;
     TopoDS_Shape retainedBase;
 };
+
+// D4 consumes both persisted legacy first cuts and retained Programs. Validate
+// the versioned source against its exact captured bytes before deriving the
+// transient Program used by geometry. This adapter never rewrites the source.
+inline bool NormalizeSourceProgram(const retained_boolean::Recipe& recipe,
+                                   const std::vector<std::uint8_t>& exactBytes,
+                                   const TopoDS_Shape& retainedBase,
+                                   SourceProgram& output) noexcept {
+    output = {};
+    try {
+        std::vector<std::uint8_t> persisted;
+        if (exactBytes.empty() || retainedBase.IsNull()
+            || !retained_boolean::Encode(recipe, persisted)
+            || persisted != exactBytes) return false;
+        SourceProgram value;
+        if (const auto* program = std::get_if<retained_boolean::Program>(&recipe)) {
+            value.program = *program;
+        } else if (!retained_boolean::Promote(
+                       std::get<retained_boolean::Legacy>(recipe), value.program)) {
+            return false;
+        }
+        if (!retained_boolean::Encode(value.program, value.derivedProgram))
+            return false;
+        value.exactProgram = exactBytes;
+        value.retainedBase = retainedBase;
+        output = std::move(value);
+        return true;
+    } catch (...) { output = {}; return false; }
+}
 
 struct SourceTool final {
     saved_boolean_build::DetachedStep detached;
@@ -291,8 +323,11 @@ inline Status BuildSourceTool(const SourceProgram& source,
     output = {};
     try {
         std::vector<std::uint8_t> canonical;
-        if (!retained_boolean::Encode(source.program, canonical)
-            || canonical != source.exactProgram)
+        const auto& derived = source.derivedProgram.empty()
+            ? source.exactProgram : source.derivedProgram;
+        if (source.exactProgram.empty()
+            || !retained_boolean::Encode(source.program, canonical)
+            || canonical != derived)
             return Status::ProgramBytesMismatch;
         saved_boolean_build::DetachedStep detached;
         const auto status = saved_boolean_build::BuildSelectedCylinderTool(

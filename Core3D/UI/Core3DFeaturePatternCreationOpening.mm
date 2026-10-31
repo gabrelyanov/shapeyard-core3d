@@ -146,10 +146,11 @@ bool CaptureOpening(Core3DViewController *controller,
             OcctCylindricalCutProgramSource source;
             if (!capture.owner->CaptureCylindricalCutProgramSource(
                     entry.second.label, source)) continue;
-            const auto *program = std::get_if<retained_boolean::Program>(&source.recipe);
-            if (!program || !retained_boolean::Valid(*program)
-                || !program->filletSteps.empty()) continue;
-            for (const auto& step : program->steps) {
+            feature_pattern_native::SourceProgram normalized;
+            if (!feature_pattern_native::NormalizeSourceProgram(source.recipe,
+                    source.recipeBytes, source.base, normalized)
+                || !normalized.program.filletSteps.empty()) continue;
+            for (const auto& step : normalized.program.steps) {
                 if (step.operation != analytic_boolean::Operation::Difference
                     || step.operand.kind != analytic_boolean::OperandKind::Cylinder)
                     continue;
@@ -157,7 +158,7 @@ bool CaptureOpening(Core3DViewController *controller,
                 const auto key = std::make_pair(sourceText,
                     std::uint64_t(step.operand.identifier));
                 if (!capture.admittedChoices.insert(key).second) return false;
-                const double mm = program->source.metersPerUnit * 1000.0;
+                const double mm = normalized.program.source.metersPerUnit * 1000.0;
                 [capture.choices addObject:@{
                     @"sourceEntityIdentifier": Text(sourceText),
                     @"sourceDefinitionIdentifier": UUIDText(entry.second.definition),

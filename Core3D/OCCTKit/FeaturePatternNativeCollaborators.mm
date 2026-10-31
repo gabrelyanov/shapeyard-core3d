@@ -199,14 +199,12 @@ public:
         RebuildProduct& output) noexcept override {
         output = {};
         try {
-            const auto* program = std::get_if<retained_boolean::Program>(
-                &opening.sourceProgram.recipe);
-            if (!program || step.operand.identifier != definition.sourceCutStepID)
-                return false;
             feature_pattern_native::SourceProgram source;
-            source.program = *program;
-            source.exactProgram = opening.sourceProgram.recipeBytes;
-            source.retainedBase = opening.sourceProgram.base;
+            if (!feature_pattern_native::NormalizeSourceProgram(
+                    opening.sourceProgram.recipe, opening.sourceProgram.recipeBytes,
+                    opening.sourceProgram.base, source)
+                || step.operand.identifier != definition.sourceCutStepID)
+                return false;
             feature_pattern::ExpansionBudget budget;
             std::atomic_bool stop{false};
             auto built = feature_pattern_native::BuildAttributedPattern(
@@ -303,10 +301,16 @@ public:
                 || !observer_.captureHostBase(value.host, pair.baselineRecipe,
                                               value.hostBase)
                 || !observer_.captureChildren(pair, value.children)) return false;
-            OcctCylindricalCutProgramSource source;
-            if (!owner_.CaptureCylindricalCutProgramSource(pair.source, source))
+            retained_solid::Record source;
+            feature_pattern_native::SourceProgram normalized;
+            if (!retained_solid::Read(owner_.Document(), pair.source, source)
+                || !source.value
+                || !source.current.IsEqual(value.sourceCarrier.shape)
+                || !feature_pattern_native::NormalizeSourceProgram(
+                    source.value->envelope, source.value->bytes,
+                    source.value->base, normalized))
                 return false;
-            value.sourceProgramBytes = source.recipeBytes;
+            value.sourceProgramBytes = source.value->bytes;
             value.paired = std::move(pair);
             if (profile_) {
                 profile::Record record;
@@ -425,23 +429,30 @@ bool CaptureD4InsideCommand(OcctDocument& owner, const Snapshot& opening,
                 opening.record.definition.feature, pair)) return false;
         OcafD4Observer observer(owner);
         Snapshot value; value.record = std::move(record); value.paired = pair;
+        retained_solid::Record sourceRecord;
         if (!pattern_owner::ReadReceipt(owner, pair.host, value.host)
             || !pattern_owner::ReadReceipt(owner, pair.source, value.sourceCarrier)
             || !observer.captureHostBase(value.host, pair.baselineRecipe,
                                          value.hostBase)
             || !observer.captureChildren(pair, value.children)
-            || !owner.CaptureCylindricalCutProgramSource(
-                pair.source, value.sourceProgram)) return false;
-        const auto* program = std::get_if<retained_boolean::Program>(
-            &value.sourceProgram.recipe);
-        if (!program) return false;
-        const auto step = std::find_if(program->steps.begin(), program->steps.end(),
+            || !retained_solid::Read(owner.Document(), pair.source, sourceRecord)
+            || !sourceRecord.value
+            || !sourceRecord.current.IsEqual(value.sourceCarrier.shape)) return false;
+        value.sourceProgram.recipe = sourceRecord.value->envelope;
+        value.sourceProgram.recipeBytes = sourceRecord.value->bytes;
+        value.sourceProgram.base = sourceRecord.value->base;
+        feature_pattern_native::SourceProgram normalized;
+        if (!feature_pattern_native::NormalizeSourceProgram(
+                value.sourceProgram.recipe, value.sourceProgram.recipeBytes,
+                value.sourceProgram.base, normalized)) return false;
+        const auto step = std::find_if(normalized.program.steps.begin(),
+            normalized.program.steps.end(),
             [&](const retained_boolean::Step& item) {
                 return item.operation == analytic_boolean::Operation::Difference
                     && item.operand.identifier
                         == value.record.definition.sourceCutStepID;
             });
-        if (step == program->steps.end()) return false;
+        if (step == normalized.program.steps.end()) return false;
         value.sourceStep = *step;
         output = std::move(value);
         return SameSnapshot(output, opening);
@@ -549,9 +560,11 @@ dependent_replay::Refusal PrepareFeaturePatternD4ReplayImpl(OcctDocument& owner,
         Snapshot prospective = opening;
         const auto& definition = opening.record.definition;
         if (dependency.inputEntity == definition.sourceCut.entity) {
+            feature_pattern_native::SourceProgram normalized;
             if (!candidate.hasRetainedRecipe
-                || !std::holds_alternative<retained_boolean::Program>(
-                    candidate.retainedRecipe))
+                || !feature_pattern_native::NormalizeSourceProgram(
+                    candidate.retainedRecipe, candidate.retainedRecipeBytes,
+                    candidate.retainedBase, normalized))
                 return dependent_replay::Refusal::MissingRecipe;
             prospective.sourceProgram.recipe = candidate.retainedRecipe;
             prospective.sourceProgram.recipeBytes = candidate.retainedRecipeBytes;

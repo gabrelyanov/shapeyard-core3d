@@ -225,14 +225,17 @@ inline Refusal Capture(OcctDocument& owner, const std::string& selectedEntity,
             || identities.definition != match->definition.sourceCut.definition
             || identities.derivedFeature != match->definition.sourceCut.sourceFeature)
             return Refusal::StaleSource;
-        const auto* retained = std::get_if<retained_boolean::Program>(&program.recipe);
-        if (!retained) return Refusal::MissingSourceCut;
-        const auto step = std::find_if(retained->steps.begin(), retained->steps.end(),
+        feature_pattern_native::SourceProgram normalized;
+        if (!feature_pattern_native::NormalizeSourceProgram(program.recipe,
+                program.recipeBytes, program.base, normalized))
+            return Refusal::MissingSourceCut;
+        const auto step = std::find_if(normalized.program.steps.begin(),
+            normalized.program.steps.end(),
             [&](const retained_boolean::Step& value) {
                 return value.operation == analytic_boolean::Operation::Difference
                     && value.operand.identifier == match->definition.sourceCutStepID;
             });
-        if (step == retained->steps.end()) return Refusal::MissingSourceCut;
+        if (step == normalized.program.steps.end()) return Refusal::MissingSourceCut;
 
         std::vector<ChildReceipt> children;
         if (!observer.captureChildren(paired, children))
@@ -349,17 +352,20 @@ inline PreparedEdit Prepare(const Snapshot& opening, const Edit& edit,
         }
         if (!feature_pattern::Valid(output.candidate)) return output;
 
-        const auto* program = std::get_if<retained_boolean::Program>(&opening.sourceProgram.recipe);
-        if (!program) {
+        feature_pattern_native::SourceProgram normalized;
+        if (!feature_pattern_native::NormalizeSourceProgram(
+                opening.sourceProgram.recipe, opening.sourceProgram.recipeBytes,
+                opening.sourceProgram.base, normalized)) {
             output.refusal = Refusal::MissingSourceCut;
             return output;
         }
-        const auto selected = std::find_if(program->steps.begin(), program->steps.end(),
+        const auto selected = std::find_if(normalized.program.steps.begin(),
+            normalized.program.steps.end(),
             [&](const retained_boolean::Step& value) {
                 return value.operation == analytic_boolean::Operation::Difference
                     && value.operand.identifier == edit.sourceCutStepID;
             });
-        if (selected == program->steps.end()) {
+        if (selected == normalized.program.steps.end()) {
             output.refusal = Refusal::MissingSourceCut;
             return output;
         }

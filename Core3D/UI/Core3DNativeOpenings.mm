@@ -590,6 +590,12 @@ NSDictionary *FeatureDescriptor(const core3d::feature_pattern_owner::Snapshot& o
                 // The retained source cut is the carrier's derived feature;
                 // this is the identity the native build validates.
                 @"featureIdentifier": UUIDText(program->source.derivedFeature)}];
+    else if (const auto *legacy = std::get_if<core3d::retained_boolean::Legacy>(
+                 &opening.sourceProgram.recipe))
+        [sources addObject:@{@"stepID": @(legacy->operandID),
+            @"title": [NSString stringWithFormat:@"Step %llu",
+                (unsigned long long)legacy->operandID],
+            @"featureIdentifier": UUIDText(legacy->derivedFeature)}];
     NSMutableArray *members = [NSMutableArray array];
     for (const auto& member : value.distribution.members)
         [members addObject:@{@"childFeatureIdentifier":
