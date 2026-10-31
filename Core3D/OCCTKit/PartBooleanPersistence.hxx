@@ -787,9 +787,11 @@ inline bool EncodeOriginalStateBlock(const OriginalStateBlock& value,
             writer.integer(input.recipeSchema, 4); WriteSized(writer, input.recipeBytes);
             writer.scalar(input.sourceMetersPerUnit); writer.scalar(input.carrierMetersPerUnit);
             for (double scalar : input.sourceRootToCarrier) writer.scalar(scalar);
-            for (double scalar : input.projection.dimensions) writer.scalar(scalar);
-            for (double scalar : input.projection.translation) writer.scalar(scalar);
-            for (double scalar : input.projection.rotationXYZW) writer.scalar(scalar);
+            if (input.recipeKind != RecipeInputFamily::OrdinarySource) {
+                for (double scalar : input.projection.dimensions) writer.scalar(scalar);
+                for (double scalar : input.projection.translation) writer.scalar(scalar);
+                for (double scalar : input.projection.rotationXYZW) writer.scalar(scalar);
+            }
             WriteCommitments(writer, input.commitments);
             std::vector<std::uint8_t> metadata;
             if (!WriteMetadata(input.metadata, metadata)) writer.valid = false;
@@ -826,16 +828,18 @@ inline bool DecodeOriginalStateBlock(const std::vector<std::uint8_t>& bytes,
                 || !reader.raw(input.original.definition) || !reader.raw(input.original.sourceFeature)
                 || !reader.integer(1, kind) || !reader.integer(3, reserved) || reserved != 0
                 || !reader.integer(4, recipeSchema) || recipeSchema > UINT32_MAX
-                || !ReadSized(reader, input.recipeBytes, MaximumRecipeBytes)
-                || !reader.scalar(input.sourceMetersPerUnit)
-                || !reader.scalar(input.carrierMetersPerUnit)) return false;
+                || !ReadSized(reader, input.recipeBytes, MaximumRecipeBytes)) return false;
             input.role = RecipeInputRole(role); input.sourceLocalID = localID;
             input.shapeSlot = std::uint32_t(slot); input.recipeKind = RecipeInputFamily(kind);
             input.recipeSchema = std::uint32_t(recipeSchema);
+            if (!reader.scalar(input.sourceMetersPerUnit)
+                || !reader.scalar(input.carrierMetersPerUnit)) return false;
             for (double& scalar : input.sourceRootToCarrier) if (!reader.scalar(scalar)) return false;
-            for (double& scalar : input.projection.dimensions) if (!reader.scalar(scalar)) return false;
-            for (double& scalar : input.projection.translation) if (!reader.scalar(scalar)) return false;
-            for (double& scalar : input.projection.rotationXYZW) if (!reader.scalar(scalar)) return false;
+            if (input.recipeKind != RecipeInputFamily::OrdinarySource) {
+                for (double& scalar : input.projection.dimensions) if (!reader.scalar(scalar)) return false;
+                for (double& scalar : input.projection.translation) if (!reader.scalar(scalar)) return false;
+                for (double& scalar : input.projection.rotationXYZW) if (!reader.scalar(scalar)) return false;
+            }
             std::vector<std::uint8_t> metadata;
             if (!ReadCommitments(reader, input.commitments) || !ReadSized(reader, metadata)
                 || !ReadMetadata(metadata, input.metadata)) return false;
@@ -855,9 +859,14 @@ inline bool EncodeEffectiveStateBlock(const EffectiveStateBlock& value,
             writer.integer(std::uint8_t(input.family), 1); writer.integer(0, 2);
             writer.raw(input.sourceNode); writer.raw(input.originalSourceFeature);
             WriteCommitments(writer, input.commitments);
-            for (double scalar : input.geometry.dimensions) writer.scalar(scalar);
-            for (double scalar : input.geometry.translation) writer.scalar(scalar);
-            for (double scalar : input.geometry.rotationXYZW) writer.scalar(scalar);
+            if (input.family == InputFamily::AnalyticRectangularPrism) {
+                for (double scalar : input.geometry.dimensions) writer.scalar(scalar);
+                for (double scalar : input.geometry.translation) writer.scalar(scalar);
+                for (double scalar : input.geometry.rotationXYZW) writer.scalar(scalar);
+            } else if (input.family == InputFamily::FrozenSolid) {
+                for (double scalar : input.frozenGeometry.sourceToCarrier)
+                    writer.scalar(scalar);
+            } else writer.valid = false;
             writer.scalar(input.sourceMetersPerUnit);
             std::vector<std::uint8_t> metadata;
             if (!WriteMetadata(input.metadata, metadata)) writer.valid = false;
@@ -884,9 +893,14 @@ inline bool DecodeEffectiveStateBlock(const std::vector<std::uint8_t>& bytes,
                 || !reader.raw(input.sourceNode) || !reader.raw(input.originalSourceFeature)
                 || !ReadCommitments(reader, input.commitments)) return false;
             input.role = RecipeInputRole(role); input.family = InputFamily(family);
-            for (double& scalar : input.geometry.dimensions) if (!reader.scalar(scalar)) return false;
-            for (double& scalar : input.geometry.translation) if (!reader.scalar(scalar)) return false;
-            for (double& scalar : input.geometry.rotationXYZW) if (!reader.scalar(scalar)) return false;
+            if (input.family == InputFamily::AnalyticRectangularPrism) {
+                for (double& scalar : input.geometry.dimensions) if (!reader.scalar(scalar)) return false;
+                for (double& scalar : input.geometry.translation) if (!reader.scalar(scalar)) return false;
+                for (double& scalar : input.geometry.rotationXYZW) if (!reader.scalar(scalar)) return false;
+            } else if (input.family == InputFamily::FrozenSolid) {
+                for (double& scalar : input.frozenGeometry.sourceToCarrier)
+                    if (!reader.scalar(scalar)) return false;
+            } else return false;
             std::vector<std::uint8_t> metadata;
             if (!reader.scalar(input.sourceMetersPerUnit) || !ReadSized(reader, metadata)
                 || !ReadMetadata(metadata, input.metadata)) return false;

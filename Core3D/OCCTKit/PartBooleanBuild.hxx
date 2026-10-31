@@ -232,6 +232,32 @@ inline TopoDS_Shape BuildEffectiveAnalyticPrism(
     } catch (...) { return {}; }
 }
 
+// Ordinary SYPB/4 replay starts from the exact archived object-local solid.
+// Only the effective affine/unit mapping is mutable; no primitive dimensions
+// are inferred from the shape or from its bounds.
+inline TopoDS_Shape BuildEffectiveFrozenSolid(
+    const TopoDS_Shape& archived,
+    const EffectiveFrozenSolidGeometry& geometry,
+    double sourceMetersPerUnit, double carrierMetersPerUnit) noexcept {
+    try {
+        if (!retained_part_boolean::IsOneValidForwardSolid(archived)
+            || !ValidGeometry(geometry) || !std::isfinite(sourceMetersPerUnit)
+            || sourceMetersPerUnit <= 0 || !std::isfinite(carrierMetersPerUnit)
+            || carrierMetersPerUnit <= 0) return {};
+        const double units = sourceMetersPerUnit / carrierMetersPerUnit;
+        const auto& m = geometry.sourceToCarrier;
+        gp_Trsf placement;
+        placement.SetValues(
+            m[0] * units, m[1] * units, m[2] * units, m[3] * units,
+            m[4] * units, m[5] * units, m[6] * units, m[7] * units,
+            m[8] * units, m[9] * units, m[10] * units, m[11] * units);
+        const TopoDS_Shape transformed = BRepBuilderAPI_Transform(
+            archived, placement, Standard_True).Shape();
+        return retained_part_boolean::IsOneValidForwardSolid(transformed)
+            ? transformed : TopoDS_Shape();
+    } catch (...) { return {}; }
+}
+
 inline TopoDS_Shape AnalyticResultSolid(const TopoDS_Shape& value) noexcept {
     try {
         if (retained_part_boolean::IsOneValidForwardSolid(value)) return value;

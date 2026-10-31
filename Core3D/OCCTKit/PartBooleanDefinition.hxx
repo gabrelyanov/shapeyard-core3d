@@ -45,12 +45,16 @@ enum class Operation : std::uint8_t { Union = 1, Subtract = 2, Intersect = 3 };
 enum class InputFamily : std::uint8_t {
     ShellProfile = 1,
     AnalyticRectangularPrism = 2,
+    FrozenSolid = 3,
 };
 enum class RecipeInputRole : std::uint8_t { Left = 1, Right = 2 };
 enum class RecipeInputFamily : std::uint8_t {
     Profile = 1,
     Enclosure = 2,
     RectangularLoft = 3,
+    // Match composite_recipe::RecipeKind::OrdinarySource on the shared wire.
+    // Existing values 1-3 retain their historical meanings.
+    OrdinarySource = 0x12,
 };
 enum class MaterialPolicy : std::uint8_t { RejectConflictingMerges = 1 };
 enum class MaterialKind : std::uint8_t { ResolvedScalars = 1, OwnedResource = 2 };
@@ -280,6 +284,14 @@ struct EffectiveAnalyticGeometry final {
     std::array<double, 4> rotationXYZW{{0, 0, 0, 1}};
 };
 
+// The archived solid remains immutable. Ordinary edits own only this affine
+// source-local-to-carrier placement, so replay never synthesizes dimensions.
+struct EffectiveFrozenSolidGeometry final {
+    std::array<double, 16> sourceToCarrier{{
+        1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+    }};
+};
+
 struct OriginalInput final {
     RecipeInputRole role = RecipeInputRole::Left;
     UUID sourceNode{};
@@ -315,6 +327,7 @@ struct EffectiveInput final {
     UUID originalSourceFeature{};
     SignatureCommitments commitments;
     EffectiveAnalyticGeometry geometry;
+    EffectiveFrozenSolidGeometry frozenGeometry;
     double sourceMetersPerUnit = 0;
     CompleteMetadata metadata;
 };
@@ -676,6 +689,19 @@ inline bool ValidGeometry(const EffectiveAnalyticGeometry& value) noexcept {
     return ValidProjection(projection);
 }
 
+inline bool ValidGeometry(const EffectiveFrozenSolidGeometry& value) noexcept {
+    if (!ValidFiniteScalars(value.sourceToCarrier.data(), value.sourceToCarrier.size())
+        || value.sourceToCarrier[12] != 0 || value.sourceToCarrier[13] != 0
+        || value.sourceToCarrier[14] != 0 || value.sourceToCarrier[15] != 1)
+        return false;
+    const auto& m = value.sourceToCarrier;
+    const double determinant =
+        m[0] * (m[5] * m[10] - m[6] * m[9])
+      - m[1] * (m[4] * m[10] - m[6] * m[8])
+      + m[2] * (m[4] * m[9] - m[5] * m[8]);
+    return std::isfinite(determinant) && determinant > 0;
+}
+
 inline bool Valid(const OriginalsDefinition& value) noexcept {
     try {
         if (!retained_recipe::Valid(value.owner)
@@ -702,8 +728,11 @@ inline bool Valid(const OriginalsDefinition& value) noexcept {
             const OriginalInput& original = value.originals.inputs[index];
             const EffectiveInput& effective = value.effective.inputs[index];
             const RecipeInputRole role = index == 0 ? RecipeInputRole::Left : RecipeInputRole::Right;
+            const bool analytic = effective.family
+                == InputFamily::AnalyticRectangularPrism;
+            const bool frozen = effective.family == InputFamily::FrozenSolid;
             if (original.role != role || effective.role != role
-                || effective.family != InputFamily::AnalyticRectangularPrism
+                || (!analytic && !frozen)
                 || !retained_recipe::Nonzero(original.sourceNode)
                 || original.sourceNode != effective.sourceNode
                 || !nodes.insert(original.sourceNode).second
@@ -713,17 +742,23 @@ inline bool Valid(const OriginalsDefinition& value) noexcept {
                 || original.original.document != value.owner.document
                 || !features.insert(original.original.sourceFeature).second
                 || effective.originalSourceFeature != original.original.sourceFeature
-                || (original.recipeKind != RecipeInputFamily::Profile
+                || (analytic && original.recipeKind != RecipeInputFamily::Profile
                     && original.recipeKind != RecipeInputFamily::Enclosure
                     && original.recipeKind != RecipeInputFamily::RectangularLoft)
+                || (frozen && original.recipeKind
+                    != RecipeInputFamily::OrdinarySource)
                 || original.recipeSchema == 0 || original.recipeBytes.empty()
                 || original.recipeBytes.size() > MaximumRecipeBytes
+                || (frozen && original.recipeSchema != 1)
                 || !std::isfinite(original.sourceMetersPerUnit)
                 || original.sourceMetersPerUnit <= 0
                 || !SameDoubleBits(original.carrierMetersPerUnit, value.carrierMetersPerUnit)
                 || !ValidFiniteScalars(original.sourceRootToCarrier.data(), 16)
-                || !ValidProjection(original.projection) || !Valid(original.commitments)
-                || !ValidGeometry(effective.geometry) || !Valid(effective.commitments)
+                || (analytic && !ValidProjection(original.projection))
+                || !Valid(original.commitments)
+                || (analytic && !ValidGeometry(effective.geometry))
+                || (frozen && !ValidGeometry(effective.frozenGeometry))
+                || !Valid(effective.commitments)
                 || !std::isfinite(effective.sourceMetersPerUnit)
                 || effective.sourceMetersPerUnit <= 0
                 || !Valid(original.metadata, value.originals.materials.size(),

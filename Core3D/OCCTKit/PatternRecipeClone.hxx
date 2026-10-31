@@ -328,11 +328,35 @@ inline bool PrepareOriginalsRecordClone(
         }
 
         composite_recipe::Definition candidate = source;
+        const bool hasOrdinary = std::any_of(originals.originals.inputs.begin(),
+            originals.originals.inputs.end(), [](const auto& input) {
+                return input.recipeKind
+                    == part_boolean::RecipeInputFamily::OrdinarySource;
+            });
         IdentityMap mapped;
         std::set<UUID> occupied;
         for (const auto& node : candidate.nodes) {
             occupied.insert(composite_recipe::NodeID(node));
-            if (const auto* feature = std::get_if<composite_recipe::FeatureNode>(&node.value))
+            if (const auto* graphSource =
+                    std::get_if<composite_recipe::SourceNode>(&node.value)) {
+                if (hasOrdinary
+                    && graphSource->recipe.kind
+                        == composite_recipe::RecipeKind::OrdinarySource) {
+                    occupied.insert(graphSource->original.entity);
+                    occupied.insert(graphSource->original.definition);
+                    occupied.insert(graphSource->original.sourceFeature);
+                    composite_recipe::OrdinarySourceRecipe ordinary;
+                    if (!composite_recipe::DecodeOrdinarySourceRecipe(
+                            graphSource->recipe, ordinary)) return false;
+                    occupied.insert(ordinary.sourceAnchor);
+                    if (ordinary.hasOriginLink) {
+                        occupied.insert(ordinary.originLink.entity);
+                        occupied.insert(ordinary.originLink.definition);
+                        occupied.insert(ordinary.originLink.sourceFeature);
+                    }
+                }
+            } else if (const auto* feature =
+                           std::get_if<composite_recipe::FeatureNode>(&node.value))
                 occupied.insert(feature->feature);
         }
         if (!mapped.global.emplace(candidate.owner.entity,
@@ -343,10 +367,33 @@ inline bool PrepareOriginalsRecordClone(
         candidate.owner = destinationOwner;
         for (auto& node : candidate.nodes) {
             if (auto* graphSource = std::get_if<composite_recipe::SourceNode>(&node.value)) {
-                // Source node IDs are archived inside the immutable originals
-                // block. The destination owner qualifies their new locators.
-                if (!mapped.global.emplace(graphSource->node,
-                                           graphSource->node).second) return false;
+                if (hasOrdinary && graphSource->recipe.kind
+                        == composite_recipe::RecipeKind::OrdinarySource) {
+                    if (!IssueMapped(graphSource->node, issue, occupied, mapped,
+                                     graphSource->node)
+                        || !IssueMapped(graphSource->original.entity, issue,
+                                        occupied, mapped,
+                                        graphSource->original.entity)
+                        || !IssueMapped(graphSource->original.definition, issue,
+                                        occupied, mapped,
+                                        graphSource->original.definition)
+                        || !IssueMapped(graphSource->original.sourceFeature,
+                                        issue, occupied, mapped,
+                                        graphSource->original.sourceFeature))
+                        return false;
+                    graphSource->original.document = destinationOwner.document;
+                    if (!RemapOrdinarySourceRecipe(*graphSource,
+                            destinationOwner, issue, occupied, mapped)) return false;
+                    if (!composite_recipe::Hash(graphSource->recipe.bytes,
+                                                graphSource->commitments.recipe))
+                        return false;
+                } else {
+                    // Legacy analytic SYPB/4 clone bytes and archived source
+                    // locators retain their historical behavior.
+                    if (!mapped.global.emplace(graphSource->node,
+                                               graphSource->node).second)
+                        return false;
+                }
             } else {
                 auto& feature = std::get<composite_recipe::FeatureNode>(node.value);
                 if (!IssueMapped(feature.node, issue, occupied, mapped, feature.node)
@@ -372,8 +419,24 @@ inline bool PrepareOriginalsRecordClone(
             const auto rebound = mapped.global.find(
                 originals.originals.inputs[index].sourceNode);
             if (rebound == mapped.global.end()) return false;
-            if (originals.originals.inputs[index].sourceNode != rebound->second
-                || originals.effective.inputs[index].sourceNode != rebound->second
+            auto& archived = originals.originals.inputs[index];
+            auto& effective = originals.effective.inputs[index];
+            if (archived.recipeKind
+                    == part_boolean::RecipeInputFamily::OrdinarySource) {
+                const auto* graphSource = std::get_if<composite_recipe::SourceNode>(
+                    &candidate.nodes[index].value);
+                if (!graphSource || graphSource->node != rebound->second
+                    || feature->inputs[index] != rebound->second) return false;
+                archived.sourceNode = rebound->second;
+                effective.sourceNode = rebound->second;
+                archived.original = graphSource->original;
+                effective.originalSourceFeature =
+                    graphSource->original.sourceFeature;
+                archived.recipeBytes = graphSource->recipe.bytes;
+                archived.commitments.recipe = graphSource->commitments.recipe;
+                effective.commitments.recipe = graphSource->commitments.recipe;
+            } else if (archived.sourceNode != rebound->second
+                || effective.sourceNode != rebound->second
                 || feature->inputs[index] != rebound->second) return false;
         }
         if (!part_boolean::EncodeOriginals(originals, feature->parameters)) return false;
