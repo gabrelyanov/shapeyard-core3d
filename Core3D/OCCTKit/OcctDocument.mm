@@ -9919,8 +9919,8 @@ Standard_Boolean Core3DValidatePaintedAtlasBakeDocument(
 // identities, the single aggregate budget and closed neighborhoods). Every
 // free simple-shape owner then goes through the strict SYFI/1 binding reader:
 // a Malformed verdict refuses the document, and a Present record must be
-// identity-bound to this exact document/entity/definition and to an owner
-// that carries an admitted retained carrier. Finally the closed-placement
+// identity-bound to this exact document/entity/definition and admitted by the
+// shared retained/composite/ordinary-solid owner predicate. Finally the closed-placement
 // census admits the five binding schema GUIDs and the resource attribute GUID
 // on exactly the labels the readers validated and nowhere else; attribute-free
 // abort/undo remnant labels carry no schema GUID and pass untouched.
@@ -9940,8 +9940,6 @@ Standard_Boolean Core3DValidateFaceImageDocument(const Handle(TDocStd_Document)&
                 tool->GetFreeShapes(labels);
                 if(labels.Length()<0||labels.Length()>core3d::profile::MaximumLabels)
                     return Standard_False;
-                core3d::retained_recipe::UUID documentID{};
-                bool documentIDRead=false;
                 for(Standard_Integer index=1;index<=labels.Length();++index){
                     const TDF_Label owner=labels.Value(index);
                     fi::Definition definition;TDF_Label record;
@@ -9949,23 +9947,9 @@ Standard_Boolean Core3DValidateFaceImageDocument(const Handle(TDocStd_Document)&
                         fi::persistence::bindings::Read(document,owner,definition,nullptr,&record);
                     if(state==fi::persistence::bindings::ReadState::Malformed)return Standard_False;
                     if(state!=fi::persistence::bindings::ReadState::Present)continue;
-                    if(record.IsNull()||!XCAFDoc_ShapeTool::IsSimpleShape(owner)
-                        ||!XCAFDoc_ShapeTool::IsFree(owner)
-                        ||(!core3d::retained_solid::HasRecord(owner)
-                            &&!core3d::composite_recipe::HasRecord(owner)))
-                        return Standard_False;
-                    if(!documentIDRead){
-                        if(!core3d::retained_solid::ReadUUID(document->Main(),
-                                DocumentIdentifierAttributeID(),documentID))
-                            return Standard_False;
-                        documentIDRead=true;
-                    }
-                    core3d::retained_recipe::UUID entity{},definitionID{};
-                    if(!core3d::retained_solid::ReadUUID(owner,EntityIdentifierAttributeID(),entity)
-                        ||!core3d::retained_solid::ReadUUID(owner,DefinitionIdentifierAttributeID(),definitionID)
-                        ||!(definition.owner.document==documentID)
-                        ||!(definition.owner.entity==entity)
-                        ||!(definition.owner.definition==definitionID))
+                    if(record.IsNull()
+                        ||fi::persistence::bindings::AdmitOwner(document,owner,definition)
+                            ==fi::persistence::bindings::OwnerAdmission::Refused)
                         return Standard_False;
                     admittedBindingRecords.Add(record);
                 }
@@ -18433,9 +18417,17 @@ Standard_Boolean OcctDocument::CaptureCylindricalCutSource(
     const TDF_Label& label,OcctCylindricalCutSource& output)const noexcept {
     output={};if(!NSThread.isMainThread)CORE3D_CUT_REFUSE("document-capture.thread", Standard_False);
     try {
-        OcctCylindricalCutSource result;OcctScalarAppearanceState appearance;
         const auto admitted=CaptureToolInput(label,core3d::ordinary_input::Purpose::SolidModel);
         if(!admitted.ready())CORE3D_CUT_REFUSE("document-capture.shared-admission", Standard_False);
+        return ValidateCylindricalCutSource(label,output);
+    }catch(...){output={};CORE3D_CUT_REFUSE("document-capture.exception", Standard_False);}
+}
+
+Standard_Boolean OcctDocument::ValidateCylindricalCutSource(
+    const TDF_Label& label,OcctCylindricalCutSource& output)const noexcept {
+    output={};if(!NSThread.isMainThread)CORE3D_CUT_REFUSE("document-capture.thread", Standard_False);
+    try {
+        OcctCylindricalCutSource result;OcctScalarAppearanceState appearance;
         if(myOcafDoc.IsNull()||!ValidateGeometryRepresentations()
             ||!CaptureObjectTransformStateForLabel(label,result.original)
             ||result.original.resolvedRepresentation!=OcctGeometryRepresentation::BRep
@@ -18491,9 +18483,17 @@ Standard_Boolean OcctDocument::CaptureCylindricalCutProgramSource(
     const TDF_Label& label,OcctCylindricalCutProgramSource& output)const noexcept {
     output={};if(!NSThread.isMainThread)CORE3D_CUT_REFUSE("document-program-capture.thread", Standard_False);
     try {
-        OcctCylindricalCutProgramSource result;OcctScalarAppearanceState appearance;
         const auto admitted=CaptureToolInput(label,core3d::ordinary_input::Purpose::FeatureEdit);
         if(!admitted.ready())CORE3D_CUT_REFUSE("document-program-capture.shared-admission", Standard_False);
+        return ValidateCylindricalCutProgramSource(label,output);
+    }catch(...){output={};CORE3D_CUT_REFUSE("document-program-capture.exception", Standard_False);}
+}
+
+Standard_Boolean OcctDocument::ValidateCylindricalCutProgramSource(
+    const TDF_Label& label,OcctCylindricalCutProgramSource& output)const noexcept {
+    output={};if(!NSThread.isMainThread)CORE3D_CUT_REFUSE("document-program-capture.thread", Standard_False);
+    try {
+        OcctCylindricalCutProgramSource result;OcctScalarAppearanceState appearance;
         if(myOcafDoc.IsNull()||!ValidateGeometryRepresentations()
             ||!CaptureObjectTransformStateForLabel(label,result.original)
             ||result.original.resolvedRepresentation!=OcctGeometryRepresentation::BRep
@@ -18650,7 +18650,7 @@ Standard_Boolean OcctDocument::StageCylindricalCutReplacement(
             // the next-ID advance; a ring radius/count edit changes only its
             // addressed field. A candidate shape or encoded payload is no permit.
             if(!std::holds_alternative<core3d::retained_boolean::Program>(payload->envelope)
-                ||!CaptureCylindricalCutProgramSource(previous.label,program)
+                ||!ValidateCylindricalCutProgramSource(previous.label,program)
                 ||!program.original.IsEqual(previous)
                 ||!core3d::sweep_rebuild::SameRawScalars(program.original.scalars,previous.scalars)
                 ||!payload->base.IsEqual(program.base)
@@ -18659,7 +18659,7 @@ Standard_Boolean OcctDocument::StageCylindricalCutReplacement(
             if(!expected||!expected->changed||expected->oldBytes!=program.recipeBytes
                 ||expected->newBytes!=payload->bytes||!expected->selectedOperandID)CORE3D_CUT_REFUSE("staging.program-transition", Standard_False);
         }else{
-            if(!CaptureCylindricalCutSource(previous.label,source)||!source.original.IsEqual(previous)
+            if(!ValidateCylindricalCutSource(previous.label,source)||!source.original.IsEqual(previous)
                 ||!core3d::sweep_rebuild::SameRawScalars(source.original.scalars,previous.scalars)
                 ||!core3d::retained_boolean::Encode(payload->envelope,bytes)||bytes!=payload->bytes)CORE3D_CUT_REFUSE("staging.source-capture-or-envelope", Standard_False);
             const auto* legacy=std::get_if<r::Envelope>(&payload->envelope);if(!legacy
@@ -19574,7 +19574,7 @@ Standard_Boolean OcctDocument::StageSavedCutSourceReplacement(
         namespace e=core3d::saved_cut_source_edit;
         OcctCylindricalCutSource source;
         if(myOcafDoc.IsNull()||!myOcafDoc->HasOpenCommand()||!built||built->noChange
-            ||!CaptureCylindricalCutSource(previous.label,source)||!source.rebuilding
+            ||!ValidateCylindricalCutSource(previous.label,source)||!source.rebuilding
             ||!source.original.IsEqual(previous)||!previous.retained.value
             ||!core3d::sweep_rebuild::SameRawScalars(source.original.scalars,previous.scalars)
             ||built->newBase.IsNull()||built->newResult.IsNull()
@@ -19728,7 +19728,7 @@ Standard_Boolean OcctDocument::StageSavedProgramSourceReplacement(
         namespace p=core3d::saved_program_source_edit;
         OcctCylindricalCutProgramSource source;
         if(myOcafDoc.IsNull()||!myOcafDoc->HasOpenCommand()||!built||built->noChange
-            ||!CaptureCylindricalCutProgramSource(previous.label,source)
+            ||!ValidateCylindricalCutProgramSource(previous.label,source)
             ||!source.original.IsEqual(previous)||!previous.retained.value
             ||!std::holds_alternative<core3d::retained_boolean::Program>(source.recipe)
             ||!core3d::sweep_rebuild::SameRawScalars(source.original.scalars,previous.scalars)

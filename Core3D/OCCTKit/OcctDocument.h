@@ -2366,6 +2366,12 @@ public:
     void NotifyChanges();
 
 private:
+  // Read-only capture validation for stages that already hold the ordinary
+  // command. Public capture still performs shared tool-input admission.
+  Standard_Boolean ValidateCylindricalCutSource(
+      const TDF_Label&, OcctCylindricalCutSource&) const noexcept;
+  Standard_Boolean ValidateCylindricalCutProgramSource(
+      const TDF_Label&, OcctCylindricalCutProgramSource&) const noexcept;
   friend class core3d::bounded_curve::owner::OcafOwner;
   friend class core3d::NativeDocumentSession;
   friend class core3d::part_boolean::owner::PartBooleanOwner;

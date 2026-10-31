@@ -45,7 +45,10 @@
 #include <BinObjMgt_Persistent.hxx>
 #include <Message_ProgressRange.hxx>
 #include <TDocStd_FormatVersion.hxx>
+#include <TopAbs_ShapeEnum.hxx>
+#include <TopoDS_Shape.hxx>
 #include <XCAFDoc_LengthUnit.hxx>
+#include "CompositeRecipeAttribute.hxx"
 #include <climits>
 #include <memory>
 #include <string>
@@ -136,6 +139,43 @@ inline constexpr Standard_Size ChunkCharacters = 256;
 inline constexpr Standard_Size MaximumChunks = 320;
 
 enum class ReadState : int { Absent = 0, Malformed = 1, Present = 2 };
+
+// One owner contract shared by write, whole-document save and safe cold read.
+// Retained and composite carriers remain distinguished for diagnosis, while a
+// plain owner is admitted only when it is the exact identified free/simple
+// native BRep solid named by a valid supported binding definition. This is an
+// attachment permission only; it never creates modeling-recipe authority.
+enum class OwnerAdmission : int { Refused = 0, Retained = 1, Composite = 2, Ordinary = 3 };
+
+inline OwnerAdmission AdmitOwner(const Handle(TDocStd_Document)& document,
+                                 const TDF_Label& owner,
+                                 const Definition& definition) noexcept {
+    try {
+        Refusal refusal = Refusal::Malformed;
+        if (document.IsNull() || document->GetData().IsNull() || owner.IsNull()
+            || owner.Data() != document->GetData()
+            || !XCAFDoc_ShapeTool::IsSimpleShape(owner)
+            || !XCAFDoc_ShapeTool::IsFree(owner)
+            || !Valid(definition, refusal)) return OwnerAdmission::Refused;
+        const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(owner);
+        if (shape.IsNull() || shape.ShapeType() != TopAbs_SOLID)
+            return OwnerAdmission::Refused;
+        UUID documentID{}, entity{}, definitionID{};
+        if (!retained_solid::ReadUUID(document->Main(),
+                Standard_GUID("74386E4E-F620-498F-8092-E6D883AF33A4"), documentID)
+            || !retained_solid::ReadUUID(owner,
+                Standard_GUID("0074F7C2-9EAA-4F89-B2DE-8716E155FF62"), entity)
+            || !retained_solid::ReadUUID(owner,
+                Standard_GUID("3611F2B2-C694-4E12-AED8-A2A97A3D283B"), definitionID)
+            || !(definition.owner.document == documentID)
+            || !(definition.owner.entity == entity)
+            || !(definition.owner.definition == definitionID))
+            return OwnerAdmission::Refused;
+        if (retained_solid::HasRecord(owner)) return OwnerAdmission::Retained;
+        if (composite_recipe::HasRecord(owner)) return OwnerAdmission::Composite;
+        return OwnerAdmission::Ordinary;
+    } catch (...) { return OwnerAdmission::Refused; }
+}
 
 inline bool HasSchemaAttribute(const TDF_Label& label) noexcept {
     try {
@@ -290,22 +330,11 @@ inline bool StageCommitted(const Handle(TDocStd_Document)& document,
                            const TDF_Label& owner, const Definition& candidate,
                            const std::vector<std::uint8_t>& canonical) noexcept {
     try {
-        if (document.IsNull() || !document->HasOpenCommand() || owner.IsNull()
-            || owner.Data() != document->GetData()
-            || !XCAFDoc_ShapeTool::IsSimpleShape(owner) || !XCAFDoc_ShapeTool::IsFree(owner))
+        if (document.IsNull() || !document->HasOpenCommand()
+            || AdmitOwner(document, owner, candidate) == OwnerAdmission::Refused)
             return false;
         std::vector<std::uint8_t> exact;
         if (!Encode(candidate, exact) || exact != canonical) return false;
-        UUID documentID{}, entity{}, definition{};
-        if (!retained_solid::ReadUUID(document->Main(),
-                Standard_GUID("74386E4E-F620-498F-8092-E6D883AF33A4"), documentID)
-            || !retained_solid::ReadUUID(owner,
-                Standard_GUID("0074F7C2-9EAA-4F89-B2DE-8716E155FF62"), entity)
-            || !retained_solid::ReadUUID(owner,
-                Standard_GUID("3611F2B2-C694-4E12-AED8-A2A97A3D283B"), definition)
-            || !(candidate.owner.document == documentID)
-            || !(candidate.owner.entity == entity)
-            || !(candidate.owner.definition == definition)) return false;
         std::string hex, digest;
         if (!EncodeHex(canonical, hex)
             || hex.size() > std::size_t(MaximumChunks) * std::size_t(ChunkCharacters)
