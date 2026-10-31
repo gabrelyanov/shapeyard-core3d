@@ -3352,6 +3352,9 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
 #if DEBUG
             if (failed) std::fprintf(
                 stderr, "R179_PUBLISH predicate=%s failed=1\n", predicate);
+            if (failed && std::strcmp(predicate, "selection-owner") == 0)
+                std::fprintf(stderr,
+                    "R179_C3_DIAG stage=owner-refusal site=reconcileNativeOpeningEdit\n");
 #else
             (void)predicate;
 #endif
@@ -3593,7 +3596,7 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
                 Handle(AIS_Shape) presentation;
                 if (!created) {
                     presentation = current->second;
-                    const bool wasGloballySelected =
+                    bool wasWholeShapeSelected =
                         myContext->IsSelected(presentation);
                     // Redisplay/RecomputeSelectionOnly rebuild the selection
                     // primitives, so an owner selected now is stale afterwards
@@ -3621,7 +3624,41 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
                     }
                     std::vector<Standard_Integer> retainedTopologyIndices;
                     TopAbs_ShapeEnum retainedTopology = TopAbs_SHAPE;
-                    if (!staleOwners.empty() && !wasGloballySelected) {
+                    if (!staleOwners.empty() && !wasWholeShapeSelected
+                        && _shapeInteractor != nullptr
+                        && _shapeInteractor->getSelectionMode() == ShapeSelectionMode::WholeShape) {
+                        // A reopened XCAFPrs viewport hit selects a BRep owner,
+                        // not necessarily GlobalSelOwner(). Its sensitive entity
+                        // may already have been rebuilt by the committed edit.
+                        // Prove the selected owner's exact previous shape and
+                        // captured object before using the whole-object rebind.
+                        const auto owner = staleOwners.front();
+                        const auto brepOwner = Handle(StdSelect_BRepOwner)::DownCast(owner);
+                        const bool capturedObject =
+                            fence.selectionMode() == scene::ElementKind::Object
+                            && fence.selection().size() == 1
+                            && fence.selection().front().kind == scene::ElementKind::Object
+                            && fence.selection().front().entityIdentifier == item.entityIdentifier;
+                        if (staleOwners.size() != 1 || !capturedObject
+                            || !_shapeInteractor->selectionModeAuthorityIsExact()
+                            || !myContext->IsSelected(owner)
+                            || brepOwner.IsNull() || !brepOwner->HasShape()
+                            || item.previousShape.IsNull()
+                            || !brepOwner->Shape().IsEqual(item.previousShape)
+                            || !presentation->Shape().IsEqual(item.previousShape)) {
+                            (void)traceRefusal("selection-owner", true);
+                            return false;
+                        }
+#if DEBUG
+                        std::fprintf(stderr,
+                            "R179_C3_DIAG stage=owner-admission site=r2e:publication-owner "
+                            "entity=%.128s ownerSelected=1 globalSelected=0 "
+                            "selectableMatches=1 previousShapeExact=1 capturedObject=1\n",
+                            item.entityIdentifier.c_str());
+#endif
+                        wasWholeShapeSelected = true;
+                    }
+                    if (!staleOwners.empty() && !wasWholeShapeSelected) {
                         if (_shapeInteractor == nullptr) {
                             (void)traceRefusal("selection-owner", true);
                             return false;
@@ -3677,7 +3714,7 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
                     myContext->Redisplay(presentation, Standard_False);
                     myContext->RecomputeSelectionOnly(presentation);
                     std::vector<Handle(SelectMgr_EntityOwner)> replacementOwners;
-                    if (wasGloballySelected) {
+                    if (wasWholeShapeSelected) {
                         const auto owner = presentation->GlobalSelOwner();
                         if (owner.IsNull() || owner->Selectable() != presentation) {
                             (void)traceRefusal("selection-owner", true);
@@ -3789,7 +3826,7 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
                         || !unmatchedRetained.empty()
                         || !unmatchedReplacement.empty()
                         || myContext->IsSelected(presentation)
-                            != wasGloballySelected) {
+                            != wasWholeShapeSelected) {
                         (void)traceRefusal("selection-owner", true);
                         return false;
                     }
