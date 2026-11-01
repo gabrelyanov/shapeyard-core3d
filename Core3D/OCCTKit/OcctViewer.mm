@@ -24,6 +24,7 @@
 #include "Core3DSTEPExchangeLock.h"
 #include "Core3DNativeTangentBuffers.hxx"
 #include "PatternAllLabelAuthority.hxx"
+#include "TextReliefPersistence.hxx"
 
 #import <TargetConditionals.h>
 #if defined(TARGET_OS_OSX) && TARGET_OS_OSX
@@ -52,6 +53,7 @@
 #include <TDF_Tool.hxx>
 #include <TDF_ChildIterator.hxx>
 #include <TDF_LabelMap.hxx>
+#include <TDF_MapIteratorOfLabelMap.hxx>
 #include <Transfer_TransientProcess.hxx>
 #include <XSControl_TransferReader.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
@@ -82,6 +84,45 @@
 namespace {
 
 constexpr Standard_Size kMaximumDisplayTraversalDepth = 128;
+
+bool CaptureTextReliefConstructionOwners(
+    const Handle(TDocStd_Document)& document,
+    TDF_LabelMap& owners) noexcept {
+    owners.Clear();
+    try {
+        std::vector<core3d::text_relief::persistence::Record> reliefs;
+        std::vector<core3d::bounded_curve::Record> curves;
+        if (!core3d::text_relief::persistence::ReadAll(document, reliefs)
+            || !core3d::bounded_curve::ReadAll(document, curves)) return false;
+        std::map<core3d::bounded_curve::UUID,
+            const core3d::bounded_curve::Record*> byFeature;
+        for (const auto& curve : curves) {
+            if (!curve.value
+                || !byFeature.emplace(
+                    curve.value->persisted.value.feature, &curve).second)
+                return false;
+        }
+        for (const auto& relief : reliefs) {
+            if (!relief.payload) return false;
+            for (const auto& reference : relief.payload->value.curves) {
+                const auto found = byFeature.find(reference.feature);
+                core3d::bounded_curve::Digest digest{};
+                if (found == byFeature.end() || found->second == nullptr
+                    || !found->second->value
+                    || !core3d::bounded_curve::Hash(
+                        found->second->value->definitionBytes,
+                        core3d::bounded_curve::MaximumDefinitionBytes, digest)
+                    || digest != reference.digest
+                    || found->second->owner.IsNull()) return false;
+                owners.Add(found->second->owner);
+            }
+        }
+        return true;
+    } catch (...) {
+        owners.Clear();
+        return false;
+    }
+}
 
 #if defined(TARGET_OS_OSX) && TARGET_OS_OSX
 bool HasCurrentNativeContext(const Handle(V3d_Viewer)& viewer) noexcept
@@ -673,6 +714,12 @@ bool OcctViewer::displayWithChildren (
         {
             return false;
         }
+        TDF_LabelMap aReliefConstructionOwners;
+        if (!CaptureTextReliefConstructionOwners(
+                theDocument, aReliefConstructionOwners))
+        {
+            return false;
+        }
 
         XCAFPrs_DocumentExplorer anExplorer;
         anExplorer.Init(theDocument,
@@ -727,6 +774,10 @@ bool OcctViewer::displayWithChildren (
                 || XCAFDoc_ShapeTool::IsAssembly(aDefinition))
             {
                 return false;
+            }
+            if (aReliefConstructionOwners.Contains(aDefinition))
+            {
+                continue;
             }
             if (++aLeafCount > myMaximumLeafPresentations)
             {

@@ -36,6 +36,7 @@
 #include "../OCCTKit/RetainedProfileProducer.hxx"
 #include "../OCCTKit/VariableRadiusFilletNativeOwner.hxx"
 #include "../OCCTKit/GeneralLoftPersistence.hxx"
+#include "../OCCTKit/TextReliefPersistence.hxx"
 #if DEBUG
 // R179/D249 diagnostic-only include. Never compiled into Release.
 #include "../OCCTKit/AuthoredParameterNativeOwner.hxx"
@@ -79,6 +80,8 @@
 #include <TDataStd_NamedData.hxx>
 #include <TDF_ChildIterator.hxx>
 #include <TDF_LabelSequence.hxx>
+#include <TDF_LabelMap.hxx>
+#include <TDF_MapIteratorOfLabelMap.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
@@ -159,6 +162,47 @@ private:
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+namespace {
+bool CaptureTextReliefConstructionOwners(
+    const Handle(TDocStd_Document)& document,
+    TDF_LabelMap& owners) noexcept {
+    owners.Clear();
+    try {
+        std::vector<core3d::text_relief::persistence::Record> reliefs;
+        std::vector<core3d::bounded_curve::Record> curves;
+        if (!core3d::text_relief::persistence::ReadAll(document, reliefs)
+            || !core3d::bounded_curve::ReadAll(document, curves)) return false;
+        std::map<core3d::bounded_curve::UUID,
+            const core3d::bounded_curve::Record*> byFeature;
+        for (const auto& curve : curves) {
+            if (!curve.value
+                || !byFeature.emplace(
+                    curve.value->persisted.value.feature, &curve).second)
+                return false;
+        }
+        for (const auto& relief : reliefs) {
+            if (!relief.payload) return false;
+            for (const auto& reference : relief.payload->value.curves) {
+                const auto found = byFeature.find(reference.feature);
+                core3d::bounded_curve::Digest digest{};
+                if (found == byFeature.end() || found->second == nullptr
+                    || !found->second->value
+                    || !core3d::bounded_curve::Hash(
+                        found->second->value->definitionBytes,
+                        core3d::bounded_curve::MaximumDefinitionBytes, digest)
+                    || digest != reference.digest
+                    || found->second->owner.IsNull()) return false;
+                owners.Add(found->second->owner);
+            }
+        }
+        return true;
+    } catch (...) {
+        owners.Clear();
+        return false;
+    }
+}
+}
 
 #if DEBUG
 void Core3DDebugRunColdOpenCandidateProbe();
@@ -3730,6 +3774,22 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
                 || fence.data().IsNull() || document->GetData() != fence.data())
             || traceRefusal("document.open-command", document->HasOpenCommand()))
             return false;
+        TDF_LabelMap constructionOwners;
+        if (traceRefusal("relief-construction-authority",
+                !CaptureTextReliefConstructionOwners(
+                    document, constructionOwners))) return false;
+        std::set<std::string> constructionEntities;
+        for (TDF_MapIteratorOfLabelMap owner(constructionOwners);
+             owner.More(); owner.Next()) {
+            const std::string entity =
+                myDoc->EntityIdentifierForLabel(owner.Key());
+            if (entity.empty()
+                || !constructionEntities.insert(entity).second) {
+                (void)traceRefusal(
+                    "relief-construction-identity", true);
+                return false;
+            }
+        }
         const std::size_t affected = publication.created.size()
             + publication.replaced.size() + publication.removed.size();
         if (traceRefusal("affected-bounds", affected == 0 || affected > 4096))
@@ -3853,6 +3913,41 @@ bool Core3DViewer::reconcileNativeOpeningEdit(
                 const native_opening::CommittedEditItem& item) {
             const auto liveLabel = live.find(item.entityIdentifier);
             const auto current = displayed.find(item.entityIdentifier);
+            if (constructionEntities.count(item.entityIdentifier) != 0) {
+                Handle(AIS_Shape) construction;
+                auto previous = stale.end();
+                if (current != displayed.end()) construction = current->second;
+                if (!item.previousShape.IsNull()) {
+                    for (auto candidate = stale.begin();
+                         candidate != stale.end(); ++candidate) {
+                        if (!(*candidate)->Shape().IsEqual(
+                                item.previousShape)) continue;
+                        if (!construction.IsNull() || previous != stale.end()) {
+                            (void)traceRefusal(
+                                "relief-construction-presentation", true);
+                            return false;
+                        }
+                        previous = candidate;
+                    }
+                }
+                if (previous != stale.end()) construction = *previous;
+                if (!construction.IsNull()) {
+                    if (myContext->IsSelected(construction))
+                        myContext->AddOrRemoveSelected(
+                            construction, Standard_False);
+                    myContext->Remove(construction, Standard_False);
+                    if (myContext->IsDisplayed(construction)
+                        || myContext->IsSelected(construction)) {
+                        (void)traceRefusal(
+                            "relief-construction-removal", true);
+                        return false;
+                    }
+                    if (current != displayed.end()) displayed.erase(current);
+                    if (previous != stale.end()) stale.erase(previous);
+                }
+                myContext->ClearDetected(Standard_False);
+                return true;
+            }
             if (liveLabel != live.end()) {
                 const TDF_Label label = liveLabel->second;
                 const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);

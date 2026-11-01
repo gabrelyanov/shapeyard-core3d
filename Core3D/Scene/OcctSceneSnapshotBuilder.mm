@@ -14,6 +14,8 @@
 #include "OcctSceneSnapshotBuilder.hpp"
 #include "../OCCTKit/NativeAuthoredFrameGeometry.hxx"
 #include "../OCCTKit/BoundedCurveEvaluation.hxx"
+#include "../OCCTKit/BoundedCurveAttribute.hxx"
+#include "../OCCTKit/BoundedCurveBuild.hxx"
 #include "../OCCTKit/NativeContactMeshCapture.hxx"
 #include "../OCCTKit/PatternAllLabelAuthority.hxx"
 #include "../OCCTKit/NativeOpeningDependentReplay.hxx"
@@ -22,6 +24,7 @@
 #include "../OCCTKit/FaceImageResourceValidation.hxx"
 #include "../OCCTKit/PaintedAtlasBake.hxx"
 #include "../OCCTKit/SourceFaceProvenanceRecord.hxx"
+#include "../OCCTKit/TextReliefPersistence.hxx"
 
 #include "../Common/Core3DMobileResourceLimits.h"
 #include "../OCCTKit/OcctDocument.h"
@@ -122,6 +125,7 @@
 #include <TDF_ChildIterator.hxx>
 #include <TDF_Data.hxx>
 #include <TDF_LabelSequence.hxx>
+#include <TDF_MapIteratorOfLabelMap.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -4184,6 +4188,62 @@ bool BuildBoundedCurveStroke(
     return true;
 }
 
+// Both capture routes use identical topology and stroke construction after
+// independently proving the persisted definition and its current owner wire.
+bool BuildBoundedCurveDefinitionGeometry(
+    const core3d::bounded_curve::PersistedValue& thePersisted,
+    const TopoDS_Wire& theWire,
+    const std::string& theDefinitionIdentifier,
+    DefinitionData& theDefinition
+#ifdef DEBUG
+    , DebugBoundedCurvePublicationObservation* theDebugObservation
+#endif
+    )
+{
+    theDefinition.faces.Clear();
+    theDefinition.edges.Clear();
+    theDefinition.vertices.Clear();
+    TopExp::MapShapes(theWire, TopAbs_EDGE, theDefinition.edges);
+    TopExp::MapShapes(theWire, TopAbs_VERTEX, theDefinition.vertices);
+    if (theDefinition.edges.IsEmpty() || theDefinition.vertices.IsEmpty()
+        || !FitsUInt32(theDefinition.edges.Extent())
+        || !FitsUInt32(theDefinition.vertices.Extent())) return false;
+#ifdef DEBUG
+    if (theDebugObservation != nullptr
+        && theDebugObservation->definitionIdentifier
+            == theDefinitionIdentifier) {
+        theDebugObservation->edgeCount =
+            static_cast<std::uint32_t>(theDefinition.edges.Extent());
+        theDebugObservation->vertexCount =
+            static_cast<std::uint32_t>(theDefinition.vertices.Extent());
+    }
+#endif
+
+    Bounds3d aBounds;
+    const auto& aFrame = thePersisted.value.definition.frame;
+    for (const auto& aPole : thePersisted.value.definition.controlPoints) {
+        const auto& p = aPole.local;
+        Extend(aBounds,
+            aFrame.origin[0] + aFrame.xAxis[0] * p[0] + aFrame.yAxis[0] * p[1] + aFrame.zAxis[0] * p[2],
+            aFrame.origin[1] + aFrame.xAxis[1] * p[0] + aFrame.yAxis[1] * p[1] + aFrame.zAxis[1] * p[2],
+            aFrame.origin[2] + aFrame.xAxis[2] * p[0] + aFrame.yAxis[2] * p[1] + aFrame.zAxis[2] * p[2]);
+    }
+    if (!IsValid(aBounds)) return false;
+    theDefinition.sourceOrigin = Center(aBounds);
+    MeshSnapshot aMesh;
+    aMesh.definitionIdentifier = theDefinitionIdentifier;
+    aMesh.topology.edgeCount = theDefinition.edges.Extent();
+    aMesh.topology.vertexCount = theDefinition.vertices.Extent();
+    if (!BuildBoundedCurveStroke(thePersisted.value.definition,
+                                 aBounds,
+                                 theDefinition.sourceOrigin,
+                                 aMesh)) return false;
+    theDefinition.mesh = std::move(aMesh);
+    theDefinition.boundedCurve = true;
+    theDefinition.fingerprint = DefinitionFingerprint(theDefinition);
+    return true;
+}
+
 bool ExtractBoundedCurveDefinition(
     const Handle(OcctDocument)& theDocument,
     const TDF_Label& theDefinitionLabel,
@@ -4228,48 +4288,112 @@ bool ExtractBoundedCurveDefinition(
     }
 #endif
 
-    theDefinition.faces.Clear();
-    theDefinition.edges.Clear();
-    theDefinition.vertices.Clear();
-    TopExp::MapShapes(aCapture.wire, TopAbs_EDGE, theDefinition.edges);
-    TopExp::MapShapes(aCapture.wire, TopAbs_VERTEX, theDefinition.vertices);
-    if (theDefinition.edges.IsEmpty() || theDefinition.vertices.IsEmpty()
-        || !FitsUInt32(theDefinition.edges.Extent())
-        || !FitsUInt32(theDefinition.vertices.Extent())) return false;
+    return BuildBoundedCurveDefinitionGeometry(
+        aCapture.persisted, aCapture.wire, theDefinitionIdentifier, theDefinition
 #ifdef DEBUG
-    if (theDebugObservation != nullptr
-        && theDebugObservation->definitionIdentifier
-            == theDefinitionIdentifier) {
-        theDebugObservation->edgeCount =
-            static_cast<std::uint32_t>(theDefinition.edges.Extent());
-        theDebugObservation->vertexCount =
-            static_cast<std::uint32_t>(theDefinition.vertices.Extent());
-    }
+        , theDebugObservation
 #endif
+        );
+}
 
-    Bounds3d aBounds;
-    const auto& aFrame = aCapture.persisted.value.definition.frame;
-    for (const auto& aPole : aCapture.persisted.value.definition.controlPoints) {
-        const auto& p = aPole.local;
-        Extend(aBounds,
-            aFrame.origin[0] + aFrame.xAxis[0] * p[0] + aFrame.yAxis[0] * p[1] + aFrame.zAxis[0] * p[2],
-            aFrame.origin[1] + aFrame.xAxis[1] * p[0] + aFrame.yAxis[1] * p[1] + aFrame.zAxis[1] * p[2],
-            aFrame.origin[2] + aFrame.xAxis[2] * p[0] + aFrame.yAxis[2] * p[1] + aFrame.zAxis[2] * p[2]);
+enum class PrivateBoundedCurveExtraction {
+    NotBoundedCurve,
+    Extracted,
+    Invalid
+};
+
+// The export worker owns this already-open private OCAF document. Read only
+// geometry authority here: the live exact-capture API also captures editor
+// visibility/appearance and deliberately requires the main thread.
+PrivateBoundedCurveExtraction ExtractPrivateBoundedCurveDefinition(
+    const Handle(OcctDocument)& theDocument,
+    const TDF_Label& theDefinitionLabel,
+    const std::string& theDefinitionIdentifier,
+    DefinitionData& theDefinition) noexcept
+{
+    using Result = PrivateBoundedCurveExtraction;
+    using namespace core3d::bounded_curve;
+    try {
+        if ([NSThread isMainThread] || theDocument.IsNull()) return Result::Invalid;
+        const auto& aDocument = theDocument->Document();
+        if (aDocument.IsNull() || aDocument->GetData().IsNull()
+            || aDocument->HasOpenCommand() || theDefinitionLabel.IsNull()
+            || theDefinitionLabel.Data() != aDocument->GetData()
+            || !theDefinition.label.IsEqual(theDefinitionLabel)
+            || theDefinitionIdentifier.empty()
+            || theDocument->DefinitionIdentifierForLabel(theDefinitionLabel)
+                != theDefinitionIdentifier) return Result::Invalid;
+
+        // A failed strict census is never absence. ReadAll verifies canonical
+        // bytes, record shape/type, and saved document/entity/definition UUIDs.
+        std::vector<Record> aRecords;
+        if (!ReadAll(aDocument, aRecords)) return Result::Invalid;
+        const Record* aRecord = nullptr;
+        for (const auto& aCandidate : aRecords) {
+            if (!aCandidate.owner.IsEqual(theDefinitionLabel)) continue;
+            if (aRecord != nullptr || !aCandidate.value) return Result::Invalid;
+            aRecord = &aCandidate;
+        }
+        if (aRecord == nullptr) {
+            return HasRecord(theDefinitionLabel)
+                ? Result::Invalid : Result::NotBoundedCurve;
+        }
+
+        core3d::retained_recipe::OwnerKey anOwner;
+        if (!core3d::receipt::ParseUUID(
+                theDocument->DocumentIdentifier(), anOwner.document)
+            || !core3d::receipt::ParseUUID(
+                theDocument->EntityIdentifierForLabel(theDefinitionLabel),
+                anOwner.entity)
+            || !core3d::receipt::ParseUUID(theDefinitionIdentifier, anOwner.definition)
+            || !core3d::retained_recipe::Valid(anOwner)
+            || !(aRecord->value->persisted.ownerState.owner == anOwner))
+            return Result::Invalid;
+        std::size_t anOwnerMembership = 0;
+        for (const auto& aCandidate : aRecords) {
+            if (!aCandidate.value) return Result::Invalid;
+            if (aCandidate.value->persisted.ownerState.owner == anOwner) {
+                if (!aCandidate.owner.IsEqual(theDefinitionLabel)
+                    || ++anOwnerMembership != 1) return Result::Invalid;
+            }
+        }
+        if (anOwnerMembership != 1 || aRecord->label.IsNull()
+            || aRecord->owner.Data() != aDocument->GetData()
+            || aRecord->label.Data() != aDocument->GetData()
+            || !aRecord->label.Father().IsEqual(aRecord->owner)
+            || !XCAFDoc_DocumentTool::CheckShapeTool(aDocument->Main()))
+            return Result::Invalid;
+
+        const auto aShapes = XCAFDoc_DocumentTool::ShapeTool(aDocument->Main());
+        if (aShapes.IsNull() || !aShapes->IsShape(aRecord->owner)
+            || !XCAFDoc_ShapeTool::IsFree(aRecord->owner)
+            || !XCAFDoc_ShapeTool::IsSimpleShape(aRecord->owner)
+            || XCAFDoc_ShapeTool::IsReference(aRecord->owner)
+            || XCAFDoc_ShapeTool::IsComponent(aRecord->owner)
+            || XCAFDoc_ShapeTool::IsAssembly(aRecord->owner)
+            || XCAFDoc_ShapeTool::IsSubShape(aRecord->owner))
+            return Result::Invalid;
+        TDF_LabelSequence aChildren;
+        XCAFDoc_ShapeTool::GetSubShapes(aRecord->owner, aChildren);
+        if (aChildren.Length() != 1
+            || !aChildren.Value(1).IsEqual(aRecord->label)) return Result::Invalid;
+        const TopoDS_Shape anOwnerShape = XCAFDoc_ShapeTool::GetShape(aRecord->owner);
+        if (anOwnerShape.IsNull() || aRecord->current.IsNull()
+            || aRecord->current.ShapeType() != TopAbs_WIRE
+            || !aRecord->current.IsEqual(anOwnerShape)
+            || !theDefinition.shape.IsEqual(anOwnerShape)) return Result::Invalid;
+        const TopoDS_Wire aWire = TopoDS::Wire(aRecord->current);
+        const auto& aPersisted = aRecord->value->persisted;
+        if (!WireMatchesDefinition(aPersisted, aWire)) return Result::Invalid;
+        return BuildBoundedCurveDefinitionGeometry(
+            aPersisted, aWire, theDefinitionIdentifier, theDefinition
+#ifdef DEBUG
+            , nullptr
+#endif
+            ) ? Result::Extracted : Result::Invalid;
+    } catch (...) {
+        return Result::Invalid;
     }
-    if (!IsValid(aBounds)) return false;
-    theDefinition.sourceOrigin = Center(aBounds);
-    MeshSnapshot aMesh;
-    aMesh.definitionIdentifier = theDefinitionIdentifier;
-    aMesh.topology.edgeCount = theDefinition.edges.Extent();
-    aMesh.topology.vertexCount = theDefinition.vertices.Extent();
-    if (!BuildBoundedCurveStroke(aCapture.persisted.value.definition,
-                                 aBounds,
-                                 theDefinition.sourceOrigin,
-                                 aMesh)) return false;
-    theDefinition.mesh = std::move(aMesh);
-    theDefinition.boundedCurve = true;
-    theDefinition.fingerprint = DefinitionFingerprint(theDefinition);
-    return true;
 }
 
 // Publish a supplied local basis only after proving that the ordinary mesh
@@ -21896,6 +22020,44 @@ thread_local bool gPrivateExportTextureInstallRefused = false;
 thread_local std::size_t gPrivateExportTextureInstallDecodedBytes = 0;
 thread_local std::size_t gPrivateExportTextureInstallDecodedLimitBytes = 0;
 
+bool CaptureTextReliefConstructionOwners(
+    const Handle(TDocStd_Document)& document,
+    TDF_LabelMap& owners) noexcept {
+    owners.Clear();
+    try {
+        std::vector<text_relief::persistence::Record> reliefs;
+        std::vector<bounded_curve::Record> curves;
+        if (!text_relief::persistence::ReadAll(document, reliefs)
+            || !bounded_curve::ReadAll(document, curves)) return false;
+        std::map<bounded_curve::UUID, const bounded_curve::Record*> byFeature;
+        for (const auto& curve : curves) {
+            if (!curve.value
+                || !byFeature.emplace(
+                    curve.value->persisted.value.feature, &curve).second)
+                return false;
+        }
+        for (const auto& relief : reliefs) {
+            if (!relief.payload) return false;
+            for (const auto& reference : relief.payload->value.curves) {
+                const auto found = byFeature.find(reference.feature);
+                bounded_curve::Digest digest{};
+                if (found == byFeature.end() || found->second == nullptr
+                    || !found->second->value
+                    || !bounded_curve::Hash(
+                        found->second->value->definitionBytes,
+                        bounded_curve::MaximumDefinitionBytes, digest)
+                    || digest != reference.digest
+                    || found->second->owner.IsNull()) return false;
+                owners.Add(found->second->owner);
+            }
+        }
+        return true;
+    } catch (...) {
+        owners.Clear();
+        return false;
+    }
+}
+
 void ResetPrivateExportTextureInstallRefusal() noexcept {
     gPrivateExportTextureInstallRefused = false;
     gPrivateExportTextureInstallDecodedBytes = 0;
@@ -22096,6 +22258,9 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
         XCAFDoc_DocumentTool::GetLengthUnit(ocaf, metersPerUnit);
         if (metersPerUnit != source.metersPerUnit) { return {}; }
         const auto documentIdentifier = document->DocumentIdentifier();
+        TDF_LabelMap reliefConstructionOwners;
+        if (!CaptureTextReliefConstructionOwners(
+                ocaf, reliefConstructionOwners)) return {};
         std::unordered_map<std::string, std::size_t> wanted;
         for (std::size_t i = 0; i < source.instances.size(); ++i) {
             const auto& item = source.instances[i];
@@ -22243,10 +22408,15 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
                 path.push_back(document->EntityIdentifierForLabel(explorer.Current(depth).Label));
             }
             const auto entity = DeriveOccurrenceIdentifier(documentIdentifier, path);
+            const auto label = node.RefLabel.IsNull()
+                ? node.Label : node.RefLabel;
+            if (reliefConstructionOwners.Contains(label)) {
+                wanted.erase(entity);
+                continue;
+            }
             const auto found = wanted.find(entity);
             if (found == wanted.end()) { continue; }
             if (!matched.insert(entity).second) { return {}; }
-            const auto label = node.RefLabel.IsNull() ? node.Label : node.RefLabel;
             const auto identifier = document->DefinitionIdentifierForLabel(label);
             const auto& item = source.instances[found->second];
             const auto& sourceMesh = source.meshes[item.meshIndex];
@@ -22321,12 +22491,17 @@ OcctSceneSnapshotBuilder::BuildPrivateExportDerivative(
 #endif
         for (const auto& entry : definitionIndices) {
             auto& definition = definitions[entry.second];
-            if (protectedCancelled()
-                || !ExtractDefinitionGeometry(definition.label, entry.first,
+            if (protectedCancelled()) return {};
+            const auto curve = ExtractPrivateBoundedCurveDefinition(
+                document, definition.label, entry.first, definition);
+            if (curve == PrivateBoundedCurveExtraction::Invalid) return {};
+            if (curve == PrivateBoundedCurveExtraction::NotBoundedCurve
+                && !ExtractDefinitionGeometry(
+                    definition.label, entry.first,
 #ifdef DEBUG
                     0,
 #endif
-                    definition)) { return {}; }
+                    definition)) return {};
         }
         decal_layer::bake::accounting::Ticket finalCorrespondenceStorage;
         decal_layer::bake::accounting::Ticket finalEvidenceStorage;
@@ -24920,6 +25095,9 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             XCAFDoc_DocumentTool::CheckLayerTool(aDocument->Main())
                 ? XCAFDoc_DocumentTool::LayerTool(aDocument->Main())
                 : Handle(XCAFDoc_LayerTool)();
+        TDF_LabelMap aReliefConstructionOwners;
+        if (!CaptureTextReliefConstructionOwners(
+                aDocument, aReliefConstructionOwners)) return {};
 
         XCAFPrs_DocumentExplorer anExplorer(
             aDocument,
@@ -24936,6 +25114,9 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 : aNode.RefLabel;
             if (aNode.Label.IsNull() || aDefinitionLabel.IsNull()) {
                 return {};
+            }
+            if (aReliefConstructionOwners.Contains(aDefinitionLabel)) {
+                continue;
             }
             OccurrenceData anOccurrence;
             anOccurrence.occurrenceLabel = aNode.Label;
