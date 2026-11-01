@@ -137,6 +137,7 @@ struct OwnerObservation final {
     NSString *definition = nil;
     NSString *sourceFeature = nil;
     NSString *terminalFeature = nil; // nil only when the family has none
+    Core3DPublishSourceKind sourceKind = Core3DPublishSourceKindUnavailable;
     NSData *envelope = nil;
     NSData *operand = nil;
     Core3DPublishOwnerCommitments *commitments = nil;
@@ -155,6 +156,7 @@ struct Observation final {
     NSString *sourceDefinition = nil;
     NSString *sourceFeature = nil;
     NSString *terminalFeature = nil;
+    Core3DPublishSourceKind sourceKind = Core3DPublishSourceKindUnavailable;
 };
 
 bool ValidCommitments(NSArray<Core3DPublishOwnerCommitments *> *records,
@@ -373,6 +375,116 @@ bool CaptureTexturedProgramSource(const Handle(OcctDocument)& owner, const TDF_L
     return true;
 }
 
+bool CaptureOrdinaryOwner(const Handle(OcctDocument)& owner, const TDF_Label& label,
+                          Core3DSceneSnapshot *scene, NSString *entity,
+                          std::size_t& geometryBudget, OwnerObservation& output,
+                          Core3DPublishCaptureError& refusal) {
+    namespace ordinary = core3d::ordinary_input;
+    refusal = Core3DPublishCaptureErrorUnsupportedOwner;
+    const ordinary::CaptureResult capture = owner->CaptureToolInput(
+        label, ordinary::Purpose::Observe);
+    if (!capture.ready() || !capture.snapshot) {
+        switch (capture.refusal) {
+        case ordinary::Refusal::Busy: refusal = Core3DPublishCaptureErrorBusy; break;
+        case ordinary::Refusal::MalformedStoredSource:
+        case ordinary::Refusal::MissingHistory:
+            refusal = Core3DPublishCaptureErrorMissingRecipe; break;
+        default: break;
+        }
+        return false;
+    }
+    const auto& snapshot = capture.snapshot;
+    if (snapshot->representation() != ordinary::Representation::BRepSolid
+        && snapshot->representation() != ordinary::Representation::TriangleMesh) return false;
+    if (snapshot->entityIdentifier() != (entity.UTF8String ?: "")
+        || snapshot->documentIdentifier() != owner->DocumentIdentifier()
+        || snapshot->definitionIdentifier() != owner->DefinitionIdentifierForLabel(label)
+        || !core3d::retained_solid::Nonzero(snapshot->sourceAnchor())) {
+        refusal = Core3DPublishCaptureErrorAmbiguousRecipe; return false;
+    }
+    OcctObjectTransformState state;
+    OcctScalarAppearanceState appearance;
+    if (!owner->CaptureObjectTransformStateForLabel(label, state)
+        || !owner->CaptureScalarAppearanceForMeshCopy(label, appearance)
+        || state.shape.IsNull()) return false;
+    BRepBuilderAPI_Copy shapeCopy(state.shape, Standard_True, Standard_False);
+    core3d::saved_cut_source_edit::ShapeCommitment shapeCommitment;
+    std::atomic_bool stop(false);
+    if (!shapeCopy.IsDone() || shapeCopy.Shape().IsNull()
+        || !core3d::saved_cut_source_edit::Commit(
+            shapeCopy.Shape(), stop, geometryBudget, shapeCommitment)) {
+        refusal = Core3DPublishCaptureErrorBudget; return false;
+    }
+    std::array<double, 6> bounds;
+    if (!NativeBounds(state, scene.metersPerUnit, bounds)) {
+        refusal = Core3DPublishCaptureErrorBounds; return false;
+    }
+    Bytes material;
+    if (!MaterialWitness(scene, entity, appearance, true, material)) {
+        refusal = Core3DPublishCaptureErrorUnsupportedAppearance; return false;
+    }
+    NSData *materialBytes = material.finish();
+    if (!materialBytes) { refusal = Core3DPublishCaptureErrorBudget; return false; }
+
+    NSString *anchor = UUIDText(snapshot->sourceAnchor());
+    Bytes recipe; recipe.text("shapeyard.publish-owner-recipe.v2");
+    recipe.text("ordinary-anchor"); recipe.text(snapshot->documentIdentifier());
+    recipe.text(snapshot->entityIdentifier()); recipe.text(snapshot->definitionIdentifier());
+    recipe.text(anchor); recipe.u64(std::uint64_t(snapshot->representation()));
+    recipe.u64(std::uint64_t(snapshot->origin()));
+    recipe.u64(std::uint64_t(snapshot->history()));
+    recipe.u64(snapshot->capabilities()); recipe.number(snapshot->metersPerUnit());
+
+    Bytes operand; operand.text("shapeyard.publish-operands.v2");
+    operand.text("ordinary-anchor"); operand.text(anchor); operand.u64(0);
+    NSData *operandBytes = operand.finish();
+    if (!operandBytes) { refusal = Core3DPublishCaptureErrorBudget; return false; }
+    recipe.data(operandBytes);
+
+    Bytes geometry; geometry.text("shapeyard.publish-owner-geometry.v2");
+    geometry.text("ordinary-anchor"); geometry.number(scene.metersPerUnit);
+    geometry.u64(shapeCommitment.bytes);
+    geometry.raw(shapeCommitment.sha256.data(), shapeCommitment.sha256.size());
+    for (double value : bounds) geometry.number(value);
+
+    const gp_Mat matrix = state.transform.VectorialPart();
+    const gp_XYZ translation = state.transform.TranslationPart();
+    Bytes placement; placement.text("shapeyard.publish-owner-placement.v2");
+    placement.text("ordinary-anchor");
+    for (double scalar : state.scalars) placement.number(scalar);
+    for (bool present : state.present) placement.u64(present);
+    for (unsigned row = 1; row <= 3; ++row)
+        for (unsigned column = 1; column <= 3; ++column)
+            placement.number(matrix.Value(row, column));
+    placement.number(translation.X()); placement.number(translation.Y());
+    placement.number(translation.Z());
+    if (!GroupWitness(owner, label, placement)) return false;
+
+    NSData *recipeBytes = recipe.finish();
+    NSData *geometryBytes = geometry.finish();
+    NSData *placementBytes = placement.finish();
+    if (!recipeBytes || !geometryBytes || !placementBytes) {
+        refusal = Core3DPublishCaptureErrorBudget; return false;
+    }
+    Bytes envelope; envelope.text("shapeyard.publish-owner-witness.v2");
+    envelope.text("ordinary-anchor"); envelope.data(recipeBytes);
+    envelope.data(geometryBytes); envelope.data(placementBytes);
+    envelope.data(materialBytes);
+    NSData *sourceBytes = envelope.finish();
+    if (!sourceBytes) { refusal = Core3DPublishCaptureErrorBudget; return false; }
+
+    output.entity = [entity copy];
+    output.definition = [NSString stringWithUTF8String:snapshot->definitionIdentifier().c_str()];
+    output.sourceFeature = [anchor copy]; output.terminalFeature = nil;
+    output.sourceKind = Core3DPublishSourceKindOrdinaryAnchor;
+    output.envelope = sourceBytes; output.operand = operandBytes;
+    output.commitments = [[Core3DPublishOwnerCommitments alloc]
+        initPrivateWithOwner:entity recipe:recipeBytes geometry:geometryBytes
+        placement:placementBytes materialTexture:materialBytes];
+    output.boundsMM = bounds;
+    return output.definition != nil && output.sourceFeature.length != 0;
+}
+
 bool CaptureOwner(const Handle(OcctDocument)& owner, Core3DSceneSnapshot *scene,
                   NSString *entity, std::size_t& geometryBudget,
                   OwnerObservation& output, Core3DPublishCaptureError& refusal) {
@@ -395,7 +507,10 @@ bool CaptureOwner(const Handle(OcctDocument)& owner, Core3DSceneSnapshot *scene,
         recipe = source.envelope;
         if (!core3d::retained_boolean::Encode(recipe, recipeBytes)) { refusal = Core3DPublishCaptureErrorMissingRecipe; return false; }
         state = source.original; base = source.base; effectiveMM = source.effectiveMM;
-    } else { refusal = Core3DPublishCaptureErrorMissingRecipe; return false; }
+    } else {
+        return CaptureOrdinaryOwner(owner, label, scene, entity, geometryBudget,
+                                    output, refusal);
+    }
 
     const auto identities = core3d::retained_boolean::Identities(recipe);
     if (![entity isEqualToString:UUIDText(identities.entity)]
@@ -449,7 +564,8 @@ bool CaptureOwner(const Handle(OcctDocument)& owner, Core3DSceneSnapshot *scene,
     NSData *envelope = witness.finish();
     if (!envelope) { refusal = Core3DPublishCaptureErrorBudget; return false; }
 
-    Bytes operands; operands.text("shapeyard.publish-operands.v1"); operands.field(recipeBytes.data(), recipeBytes.size());
+    Bytes operands; operands.text("shapeyard.publish-operands.v1");
+    operands.field(recipeBytes.data(), recipeBytes.size());
     if (const auto *legacy = std::get_if<core3d::retained_boolean::Legacy>(&recipe)) {
         operands.u64(1); operands.u64(legacy->operandID);
     } else {
@@ -506,37 +622,63 @@ bool CaptureOwner(const Handle(OcctDocument)& owner, Core3DSceneSnapshot *scene,
     // kinds currently require a nonzero derived feature.
     output.terminalFeature = core3d::retained_solid::Nonzero(identities.derivedFeature)
         ? [UUIDText(identities.derivedFeature) copy] : nil;
+    output.sourceKind = Core3DPublishSourceKindRetainedFeature;
     output.envelope = envelope; output.operand = operandBytes; output.commitments = commitments; output.boundsMM = bounds;
     return true;
 }
 
 bool CaptureObservation(Core3DViewController *controller, const Handle(OcctDocument)& owner,
-                        NSArray<NSString *> *expectedSelection, Observation& output,
+                        Core3DPublishCaptureScope scope, NSArray<NSString *> *expectedOwners,
+                        Observation& output,
                         Core3DPublishCaptureError& refusal) {
     output = {}; refusal = Core3DPublishCaptureErrorBusy;
     Core3DSceneSnapshot *scene = [controller captureExportSceneSnapshot];
     if (!scene) return false;
-    if (scene.selectionMode != Core3DSceneElementKindObject
-        || scene.selection.selectedElements.count == 0
-        || scene.selection.selectedElements.count > kMaximumOwners) {
-        refusal = Core3DPublishCaptureErrorSelection; return false;
-    }
-    for (Core3DSceneMeshSnapshot *mesh in scene.meshes)
-        if (mesh.geometryKind == Core3DSceneGeometryKindNativeC1Wire) {
-            refusal = Core3DPublishCaptureErrorNativeC1Wire; return false;
-        }
     NSMutableArray<NSString *> *selected = [NSMutableArray array];
     NSMutableSet<NSString *> *unique = [NSMutableSet set];
-    for (Core3DSceneElementIdentifier *element in scene.selection.selectedElements) {
-        if (element.kind != Core3DSceneElementKindObject || element.topologyIndex != 0
-            || !Identifier(element.entityIdentifier) || [unique containsObject:element.entityIdentifier]) {
+    if (scope == Core3DPublishCaptureScopeSelected) {
+        if (scene.selectionMode != Core3DSceneElementKindObject
+            || scene.selection.selectedElements.count == 0
+            || scene.selection.selectedElements.count > kMaximumOwners) {
             refusal = Core3DPublishCaptureErrorSelection; return false;
         }
-        [unique addObject:element.entityIdentifier]; [selected addObject:element.entityIdentifier];
+        for (Core3DSceneElementIdentifier *element in scene.selection.selectedElements) {
+            if (element.kind != Core3DSceneElementKindObject || element.topologyIndex != 0
+                || !Identifier(element.entityIdentifier)
+                || [unique containsObject:element.entityIdentifier]) {
+                refusal = Core3DPublishCaptureErrorSelection; return false;
+            }
+            [unique addObject:element.entityIdentifier]; [selected addObject:element.entityIdentifier];
+        }
+    } else if (scope == Core3DPublishCaptureScopeAllVisible) {
+        for (Core3DSceneRenderItemSnapshot *item in scene.renderItems) {
+            if (item.renderRole != Core3DSceneRenderRoleModel || !item.isVisible) continue;
+            if (!Identifier(item.entityIdentifier)) {
+                refusal = Core3DPublishCaptureErrorSelection; return false;
+            }
+            if (![unique containsObject:item.entityIdentifier]) {
+                [unique addObject:item.entityIdentifier]; [selected addObject:item.entityIdentifier];
+            }
+        }
+        if (selected.count == 0 || selected.count > kMaximumOwners) {
+            refusal = Core3DPublishCaptureErrorSelection; return false;
+        }
+    } else {
+        refusal = Core3DPublishCaptureErrorSelection; return false;
     }
     [selected sortUsingSelector:@selector(compare:)];
-    if (expectedSelection && ![selected isEqualToArray:expectedSelection]) {
+    if (expectedOwners && ![selected isEqualToArray:expectedOwners]) {
         refusal = Core3DPublishCaptureErrorStale; return false;
+    }
+    for (Core3DSceneRenderItemSnapshot *item in scene.renderItems) {
+        if (item.renderRole != Core3DSceneRenderRoleModel
+            || ![unique containsObject:item.entityIdentifier]) continue;
+        if (item.meshIndex >= scene.meshes.count) {
+            refusal = Core3DPublishCaptureErrorSelection; return false;
+        }
+        if (scene.meshes[item.meshIndex].geometryKind == Core3DSceneGeometryKindNativeC1Wire) {
+            refusal = Core3DPublishCaptureErrorNativeC1Wire; return false;
+        }
     }
     std::size_t geometryBudget = 0;
     std::vector<OwnerObservation> observations; observations.reserve(selected.count);
@@ -554,12 +696,15 @@ bool CaptureObservation(Core3DViewController *controller, const Handle(OcctDocum
     for (double value : unionBounds) [bounds addObject:@(value)];
     NSMutableArray<NSData *> *operands = [NSMutableArray arrayWithCapacity:observations.size()];
     NSMutableArray<Core3DPublishOwnerCommitments *> *commitments = [NSMutableArray arrayWithCapacity:observations.size()];
-    Bytes source; source.text("shapeyard.publish-source-witness.v1");
+    Bytes source; source.text("shapeyard.publish-source-witness.v2");
+    source.text(scope == Core3DPublishCaptureScopeSelected ? "selected" : "all-visible");
     source.text(owner->DocumentIdentifier()); source.text(scene.publicationSourceIdentifier);
     source.u64(scene.revisions.documentGeneration); source.u64(scene.revisions.modelRevision);
     source.u64(scene.revisions.presentationRevision); source.number(scene.metersPerUnit);
     source.text("native-rh-z-up_to_gltf-rh-y-up.v1"); source.u64(observations.size());
     for (const auto& observation : observations) {
+        source.text(observation.sourceKind == Core3DPublishSourceKindOrdinaryAnchor
+            ? "ordinary-anchor" : "retained-feature");
         source.data(observation.envelope); [operands addObject:observation.operand];
         if (!observation.commitments) { refusal = Core3DPublishCaptureErrorSelection; return false; }
         [commitments addObject:observation.commitments];
@@ -578,6 +723,7 @@ bool CaptureObservation(Core3DViewController *controller, const Handle(OcctDocum
         output.sourceDefinition = observations.front().definition;
         output.sourceFeature = observations.front().sourceFeature;
         output.terminalFeature = observations.front().terminalFeature;
+        output.sourceKind = observations.front().sourceKind;
     }
     return true;
 }
@@ -626,6 +772,7 @@ static bool F2ValidArtifactEvidence(Core3DPublishArtifactEvidence *evidence) {
 @property(nonatomic, copy, readwrite) NSArray<NSData *> *operandWitnessBytes;
 @property(nonatomic, copy, readwrite) NSArray<Core3DPublishOwnerCommitments *> *ownerCommitments;
 @property(nonatomic, copy, readwrite) NSArray<NSString *> *selectedEntityIdentifiers;
+@property(nonatomic, assign, readwrite) Core3DPublishCaptureScope scope;
 @property(nonatomic, copy, readwrite) NSArray<NSNumber *> *nativeBoundsMM;
 @property(nonatomic, copy, readwrite) NSString *documentIdentifier;
 @property(nonatomic, copy, readwrite) NSString *publicationSourceIdentifier;
@@ -637,6 +784,7 @@ static bool F2ValidArtifactEvidence(Core3DPublishArtifactEvidence *evidence) {
 @property(nonatomic, copy, readwrite, nullable) NSString *sourceEntityIdentifier;
 @property(nonatomic, copy, readwrite, nullable) NSString *sourceDefinitionIdentifier;
 @property(nonatomic, copy, readwrite, nullable) NSString *sourceFeatureIdentifier;
+@property(nonatomic, assign, readwrite) Core3DPublishSourceKind sourceKind;
 @property(nonatomic, copy, readwrite, nullable) NSString *retainedTerminalFeatureIdentifier;
 @property(nonatomic, strong, readwrite, nullable) Core3DPublishArtifactEvidence *artifactEvidence;
 @end
@@ -648,6 +796,14 @@ static bool F2ValidArtifactEvidence(Core3DPublishArtifactEvidence *evidence) {
 }
 
 + (instancetype)captureController:(Core3DViewController *)controller error:(NSError **)error {
+    return [self captureController:controller
+                             scope:Core3DPublishCaptureScopeSelected
+                             error:error];
+}
+
++ (instancetype)captureController:(Core3DViewController *)controller
+                             scope:(Core3DPublishCaptureScope)scope
+                             error:(NSError **)error {
     if (error) *error = nil;
     if (!NSThread.isMainThread || !controller) {
         if (error) *error = Refusal(Core3DPublishCaptureErrorInvalidThread, @"main-thread controller required");
@@ -662,7 +818,7 @@ static bool F2ValidArtifactEvidence(Core3DPublishArtifactEvidence *evidence) {
             if (error) *error = Refusal(Core3DPublishCaptureErrorBusy, @"native document unavailable"); return nil;
         }
         Observation observation; Core3DPublishCaptureError refusal;
-        if (!CaptureObservation(controller, owner, nil, observation, refusal)) {
+        if (!CaptureObservation(controller, owner, scope, nil, observation, refusal)) {
             if (error) *error = Refusal(refusal, @"native source observation refused"); return nil;
         }
         const CGSize drawable = controller.viewportDrawableSize;
@@ -681,6 +837,7 @@ static bool F2ValidArtifactEvidence(Core3DPublishArtifactEvidence *evidence) {
         capture.sceneSnapshot = observation.scene; capture.sourceWitnessBytes = observation.source;
         capture.operandWitnessBytes = observation.operands; capture.ownerCommitments = observation.commitments;
         capture.selectedEntityIdentifiers = observation.selected;
+        capture.scope = scope;
         capture.nativeBoundsMM = observation.bounds; capture.documentIdentifier = observation.document;
         capture.publicationSourceIdentifier = observation.scene.publicationSourceIdentifier;
         capture.frameConvention = @"native-rh-z-up_to_gltf-rh-y-up.v1";
@@ -691,6 +848,7 @@ static bool F2ValidArtifactEvidence(Core3DPublishArtifactEvidence *evidence) {
         capture.sourceEntityIdentifier = observation.sourceEntity;
         capture.sourceDefinitionIdentifier = observation.sourceDefinition;
         capture.sourceFeatureIdentifier = observation.sourceFeature;
+        capture.sourceKind = observation.sourceKind;
         capture.retainedTerminalFeatureIdentifier = observation.terminalFeature;
         return capture;
     } @catch (__unused NSException *exception) {
@@ -710,7 +868,8 @@ static bool F2ValidArtifactEvidence(Core3DPublishArtifactEvidence *evidence) {
         if (error) *error = Refusal(Core3DPublishCaptureErrorStale, @"opening fence changed"); return NO;
     }
     Observation fresh; Core3DPublishCaptureError refusal = Core3DPublishCaptureErrorStale;
-    if (!CaptureObservation(_controller, _owner, self.selectedEntityIdentifiers, fresh, refusal)
+    if (!CaptureObservation(_controller, _owner, self.scope,
+                            self.selectedEntityIdentifiers, fresh, refusal)
         || ![fresh.document isEqualToString:self.documentIdentifier]
         || ![fresh.source isEqualToData:self.sourceWitnessBytes]
         || ![fresh.operands isEqualToArray:self.operandWitnessBytes]

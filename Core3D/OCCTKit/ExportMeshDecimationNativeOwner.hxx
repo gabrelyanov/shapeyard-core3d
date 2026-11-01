@@ -622,6 +622,9 @@ struct F2Record {
     std::uint8_t level = 0; // F2-S2b level ordinal; commits into ownerSetKey
     F2UUID entityUUID{};
     F2UUID definitionUUID{};
+    // Opaque durable source key. Retained captures store their genuine source
+    // feature; ordinary captures store the nonzero ordinary source anchor.
+    // The source-witness digest binds that interpretation without a codec bump.
     F2UUID sourceFeatureUUID{};
     F2UUID terminalFeatureUUID{}; // sixteen zero bytes only when the family has none
     F2UUID derivativeEntityUUID{};
@@ -657,7 +660,8 @@ inline bool IsValid(const F2Record& value, const F2UUID& documentUUID) {
     try {
         if (value.level > kMaxDerivativeLevel) return false; // F2-S2b: 0...7 only
         if (!Nonzero(documentUUID) || !Nonzero(value.entityUUID)
-            || !Nonzero(value.definitionUUID) || !Nonzero(value.sourceFeatureUUID)
+            || !Nonzero(value.definitionUUID)
+            || !Nonzero(value.sourceFeatureUUID) // generic durable source key
             || !Nonzero(value.derivativeEntityUUID) || !Nonzero(value.derivativeDefinitionUUID)
             || !Nonzero(value.derivativeFeatureUUID) || !Nonzero(value.publicationSourceUUID))
             return false;
