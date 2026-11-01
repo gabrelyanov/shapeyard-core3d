@@ -823,6 +823,82 @@ bool OmitTextureReferencesForDebug(
 }
 #endif
 
+bool EnsureOBJMaterialLibrary(
+    const std::shared_ptr<NativeExportState>& state) {
+    ThrowIfCancelled(state);
+    const std::filesystem::path objectPath(state->primaryPath);
+    const std::filesystem::path materialPath =
+        std::filesystem::path(state->packageRootPath) / "model.mtl";
+    std::error_code error;
+    const bool materialExists = std::filesystem::exists(materialPath, error);
+    if (error) {
+        return false;
+    }
+    if (materialExists) {
+        if (!IsNonemptyRegularFile(materialPath.string())) {
+            return false;
+        }
+    } else {
+        std::ofstream materialFile(
+            materialPath, std::ios::binary | std::ios::trunc);
+        if (!materialFile.is_open()) {
+            return false;
+        }
+        materialFile << "# Shapeyard OBJ material library\n";
+        if (!materialFile.good()) {
+            return false;
+        }
+    }
+
+    std::ifstream objectFile(objectPath, std::ios::binary);
+    if (!objectFile.is_open()) {
+        return false;
+    }
+    bool referencesRequiredLibrary = false;
+    std::string line;
+    while (std::getline(objectFile, line)) {
+        ThrowIfCancelled(state);
+        const std::optional<std::string> reference =
+            DirectiveValue(line, "mtllib");
+        if (reference.has_value() && *reference == "model.mtl") {
+            referencesRequiredLibrary = true;
+        }
+    }
+    if (objectFile.bad()) {
+        return false;
+    }
+    if (referencesRequiredLibrary) {
+        return true;
+    }
+
+    ThrowIfCancelled(state);
+    objectFile.clear();
+    objectFile.seekg(0, std::ios::beg);
+    if (!objectFile.good()) {
+        return false;
+    }
+    const std::filesystem::path temporaryPath =
+        objectPath.string() + ".material.tmp";
+    std::ofstream output(
+        temporaryPath, std::ios::binary | std::ios::trunc);
+    if (!output.is_open()) {
+        return false;
+    }
+    output << "mtllib model.mtl\n" << objectFile.rdbuf();
+    if (!output.good()) {
+        return false;
+    }
+    output.close();
+    objectFile.close();
+    ThrowIfCancelled(state);
+    std::filesystem::rename(temporaryPath, objectPath, error);
+    if (error) {
+        std::filesystem::remove(temporaryPath, error);
+        return false;
+    }
+    return true;
+}
+
 bool ValidateOBJArtifact(
     const std::shared_ptr<NativeExportState>& state,
     const Standard_Integer expectedTextureCount) {
@@ -861,7 +937,7 @@ bool ValidateOBJArtifact(
     if (!objectFile.is_open()) {
         return false;
     }
-    std::vector<std::filesystem::path> materialFiles;
+    std::set<std::filesystem::path> materialFiles;
     std::string line;
     while (std::getline(objectFile, line)) {
         ThrowIfCancelled(state);
@@ -878,14 +954,19 @@ bool ValidateOBJArtifact(
                 materialPath)) {
             return false;
         }
-        materialFiles.push_back(materialPath);
+        materialFiles.insert(materialPath.lexically_normal());
     }
     if (objectFile.bad()) {
         return false;
     }
+    const std::filesystem::path requiredMaterialPath =
+        (packageRoot / "model.mtl").lexically_normal();
+    if (materialFiles.count(requiredMaterialPath) != 1) {
+        return false;
+    }
 
     std::set<std::filesystem::path> textureFiles;
-    for (const std::filesystem::path& materialPath : materialFiles) {
+    for (const auto& materialPath : materialFiles) {
         ThrowIfCancelled(state);
         std::ifstream materialFile(materialPath);
         if (!materialFile.is_open()) {
@@ -2381,6 +2462,12 @@ NativeExportResult RunNativeExport(
                     throw NativeExportFailure(
                         Core3DNativeExportErrorWriterFailed,
                         "The OBJ writer reported a failure.");
+                }
+                if (!EnsureOBJMaterialLibrary(state)) {
+                    throw NativeExportFailure(
+                        Core3DNativeExportErrorInvalidArtifact,
+                        "The OBJ writer did not produce the required "
+                        "material library.");
                 }
 #ifdef DEBUG
                 if (state->debugOmitTextureReferences.load(

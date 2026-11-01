@@ -22301,6 +22301,7 @@ Standard_Boolean OcctDocument::CaptureExactFreeLabel(
             return Standard_False;
         const auto& object = captured.visibility.object.object;
         const bool hasSweep = !object.sweep.label.IsNull();
+        const bool hasEnclosure = !object.enclosure.label.IsNull();
         const bool hasLoft = !object.loft.label.IsNull();
         bool hasTextRelief = false;
         std::vector<core3d::text_relief::persistence::Record> textReliefs;
@@ -22320,7 +22321,19 @@ Standard_Boolean OcctDocument::CaptureExactFreeLabel(
                 if (hasBoundedCurve) return Standard_False;
                 hasBoundedCurve = true;
             }
-        if (hasTextRelief) {
+        if (hasEnclosure) {
+            // An uncut enclosure owns one recipe child. It is durable owner
+            // metadata, not face styling, but no other source family may
+            // coexist with it. The visibility capture above supplied the
+            // exact record; recheck its live shape binding before admitting
+            // the same complete scalar appearance used by ordinary capture.
+            if (!object.profile.label.IsNull() || hasSweep || hasLoft
+                || hasTextRelief || hasBoundedCurve || object.retained.value
+                || !object.enclosure.IsCurrent(myOcafDoc, label)
+                || !core3d::enclosure::HasOnlyMetadataSubshapes(myOcafDoc, label)
+                || !CaptureWholeObjectScalarAppearance(
+                    myOcafDoc, label, captured.appearance)) return Standard_False;
+        } else if (hasTextRelief) {
             // The SYTR child is durable owner metadata, not subshape styling.
             // Its strict whole-document reader above already proved the child,
             // current root binding and every referenced C1 record.
