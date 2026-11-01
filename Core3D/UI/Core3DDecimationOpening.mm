@@ -500,8 +500,9 @@ const F2Record *F2FindRow(const f2::F2Store& store, const F2Digest& key) {
     return nullptr;
 }
 
-// Durable source identities carried by the capture; the terminal retained
-// feature keeps the all-zero absent sentinel when the family has none.
+// Durable source identities carried by the capture. sourceFeatureUUID is an
+// opaque key: a retained feature UUID or an ordinary source anchor, as tagged
+// by sourceKind. The F2 binary slot and its legacy meaning remain unchanged.
 bool F2OwnerIdentityFromCapture(Core3DPublishCapture *capture,
                                 F2UUID& documentUUID, F2UUID& entityUUID,
                                 F2UUID& definitionUUID, F2UUID& sourceFeatureUUID,
@@ -509,7 +510,10 @@ bool F2OwnerIdentityFromCapture(Core3DPublishCapture *capture,
     documentUUID = {}; entityUUID = {}; definitionUUID = {};
     sourceFeatureUUID = {}; terminalFeatureUUID = {};
     if (!capture.sourceEntityIdentifier || !capture.sourceDefinitionIdentifier
-        || !capture.sourceFeatureIdentifier) return false;
+        || !capture.sourceFeatureIdentifier
+        || capture.sourceKind == Core3DPublishSourceKindUnavailable
+        || (capture.sourceKind == Core3DPublishSourceKindOrdinaryAnchor
+            && capture.retainedTerminalFeatureIdentifier)) return false;
     return f2::UUIDFromText(capture.documentIdentifier.UTF8String ?: "", documentUUID)
         && f2::Nonzero(documentUUID)
         && f2::UUIDFromText(capture.sourceEntityIdentifier.UTF8String ?: "", entityUUID)
@@ -871,6 +875,18 @@ bool F2VerifyAttributeOutput(
             @"F2 capture currentness is main-thread only."); return nil;
     }
     if (capture && ![capture isCurrent:error]) return nil;
+    if (capture) {
+        F2UUID document, entity, definition, source, terminal;
+        if (capture.scope != Core3DPublishCaptureScopeSelected
+            || capture.selectedEntityIdentifiers.count != 1
+            || capture.ownerCommitments.count != 1
+            || !F2OwnerIdentityFromCapture(
+                capture, document, entity, definition, source, terminal)) {
+            SetError(error, Core3DDecimationErrorMissingArtifactEvidence,
+                @"F2 requires one explicitly tagged durable source key.");
+            return nil;
+        }
+    }
     Core3DDecimationOpening *opening = [[self alloc] initPrivate];
     opening.capture = capture;
     return opening;

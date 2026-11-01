@@ -22,6 +22,22 @@ typedef NS_ERROR_ENUM(Core3DPublishCaptureErrorDomain, Core3DPublishCaptureError
     Core3DPublishCaptureErrorDuplicateArtifactEvidence,
 };
 
+//! The owner set observed by a capture. Selected never changes the editor's
+//! selection; All Visible enumerates committed visible model owners directly.
+typedef NS_ENUM(NSInteger, Core3DPublishCaptureScope) {
+    Core3DPublishCaptureScopeSelected = 0,
+    Core3DPublishCaptureScopeAllVisible = 1,
+};
+
+//! Interpretation of sourceFeatureIdentifier for an unambiguous single owner.
+//! Both values are durable nonzero UUIDs; ordinary anchors do not manufacture a
+//! retained feature and therefore have no retainedTerminalFeatureIdentifier.
+typedef NS_ENUM(NSInteger, Core3DPublishSourceKind) {
+    Core3DPublishSourceKindUnavailable = 0,
+    Core3DPublishSourceKindRetainedFeature = 1,
+    Core3DPublishSourceKindOrdinaryAnchor = 2,
+};
+
 __attribute__((objc_subclassing_restricted))
 @interface Core3DPublishOwnerCommitments : NSObject
 @property(nonatomic, copy, readonly) NSString *ownerIdentifier;
@@ -55,8 +71,7 @@ __attribute__((objc_subclassing_restricted))
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
-//! Opaque, immutable read-only opening for the initial publish source family:
-//! editable free enclosures with zero or more retained cylindrical cuts.
+//! Opaque, immutable read-only opening for current editable free owners.
 //! Construction performs no export, OCAF command, history entry, or identity write.
 __attribute__((objc_subclassing_restricted))
 @interface Core3DPublishCapture : NSObject
@@ -65,7 +80,9 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic, copy, readonly) NSData *sourceWitnessBytes;
 @property(nonatomic, copy, readonly) NSArray<NSData *> *operandWitnessBytes;
 @property(nonatomic, copy, readonly) NSArray<Core3DPublishOwnerCommitments *> *ownerCommitments;
+//! Captured owner identifiers (selected owners or all visible owners by scope).
 @property(nonatomic, copy, readonly) NSArray<NSString *> *selectedEntityIdentifiers;
+@property(nonatomic, assign, readonly) Core3DPublishCaptureScope scope;
 @property(nonatomic, copy, readonly) NSArray<NSNumber *> *nativeBoundsMM;
 @property(nonatomic, copy, readonly) NSString *documentIdentifier;
 @property(nonatomic, copy, readonly) NSString *publicationSourceIdentifier;
@@ -80,6 +97,7 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic, copy, readonly, nullable) NSString *sourceEntityIdentifier;
 @property(nonatomic, copy, readonly, nullable) NSString *sourceDefinitionIdentifier;
 @property(nonatomic, copy, readonly, nullable) NSString *sourceFeatureIdentifier;
+@property(nonatomic, assign, readonly) Core3DPublishSourceKind sourceKind;
 //! nil when the family has no terminal retained feature.
 @property(nonatomic, copy, readonly, nullable) NSString *retainedTerminalFeatureIdentifier;
 @property(nonatomic, strong, readonly, nullable) Core3DPublishArtifactEvidence *artifactEvidence;
@@ -94,6 +112,11 @@ __attribute__((objc_subclassing_restricted))
 + (nullable instancetype)captureController:(Core3DViewController *)controller
                                       error:(NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(capture(controller:));
+
++ (nullable instancetype)captureController:(Core3DViewController *)controller
+                                      scope:(Core3DPublishCaptureScope)scope
+                                      error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(capture(controller:scope:));
 
 //! Re-observes every retained dependency and the exact selection/fence. A model
 //! revision match alone is never sufficient.

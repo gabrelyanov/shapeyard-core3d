@@ -510,8 +510,14 @@ bool DecodeStores(const Handle(OcctDocument)& document,
         return nil;
     }
     if (![capture isCurrent:error]) return nil;
-    if (capture.selectedEntityIdentifiers.count == 0
-        || capture.ownerCommitments.count != capture.selectedEntityIdentifiers.count
+    if (capture.scope != Core3DPublishCaptureScopeSelected
+        || capture.selectedEntityIdentifiers.count != 1
+        || capture.ownerCommitments.count != 1
+        || capture.sourceKind == Core3DPublishSourceKindUnavailable
+        || !capture.sourceEntityIdentifier || !capture.sourceDefinitionIdentifier
+        || !capture.sourceFeatureIdentifier
+        || (capture.sourceKind == Core3DPublishSourceKindOrdinaryAnchor
+            && capture.retainedTerminalFeatureIdentifier)
         || (capture.metersPerUnit != 0.001 && capture.metersPerUnit != 1.0)) {
         SetError(error, Core3DLODSetErrorMissingProvenance,
                  @"The capture has no complete native source binding.");
@@ -861,6 +867,9 @@ bool DecodeStores(const Handle(OcctDocument)& document,
         return Core3DLODSetCommitResultUnavailable;
 
     syls::Record candidate;
+    // SYLS keeps the established opaque UUID carrier: sourceKind is
+    // re-established by this current capture, while ordinaryAnchor supplies
+    // the durable source key and deliberately leaves terminal feature absent.
     if (!UUID(self.capture.documentIdentifier, candidate.documentIdentifier)
         || !UUID(draft.setHandle.identifier, candidate.setIdentifier)
         || !UUID(self.capture.sourceEntityIdentifier, candidate.sourceEntityIdentifier)
