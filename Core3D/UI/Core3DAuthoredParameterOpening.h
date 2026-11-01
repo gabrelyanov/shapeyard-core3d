@@ -443,6 +443,11 @@ __attribute__((objc_subclassing_restricted))
     (NSString *)targetEntityIdentifier toolEntityIdentifier:(NSString *)toolEntityIdentifier
     operation:(Core3DPartBooleanOperation)operation expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(openBooleanSources(targetEntityIdentifier:toolEntityIdentifier:operation:expected:));
+- (Core3DBooleanPairCaptureResult *)openBooleanSourcesWithTargetEntityIdentifier:
+    (NSString *)targetEntityIdentifier toolEntityIdentifier:(NSString *)toolEntityIdentifier
+    operation:(Core3DPartBooleanOperation)operation admitOrdinaryInputs:(BOOL)admitOrdinaryInputs
+    expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(openBooleanSources(targetEntityIdentifier:toolEntityIdentifier:operation:admitOrdinaryInputs:expected:));
 - (Core3DBooleanPairPrepareResult *)prepareBooleanSources:
     (Core3DBooleanPairOpening *)opening expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(prepareBooleanSources(_:expected:));

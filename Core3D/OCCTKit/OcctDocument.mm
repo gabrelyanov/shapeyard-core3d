@@ -11421,6 +11421,12 @@ struct core3d::authored_parameter::PairCapture::State final {
     Handle(TDF_Data) data;
     std::shared_ptr<core3d::native_opening::Context> context;
     std::array<OcctPlainProfileOperationCapture, 2> sources;
+    std::array<std::shared_ptr<const core3d::ordinary_input::InputSnapshot>, 2>
+        ordinarySources;
+    std::array<core3d::composite_recipe::SourceRecipe, 2> ordinaryRecipes;
+    std::array<core3d::composite_recipe::Commitments, 2> ordinaryCommitments;
+    std::array<core3d::retained_recipe::UUID, 2> ordinaryAnchors;
+    std::array<TopoDS_Shape, 2> ordinaryShapes;
     std::array<OcctExactLabelReceipt, 2> exact;
     OcctSavedGroupState groups;
     core3d::part_boolean::Operation operation =
@@ -11824,6 +11830,15 @@ bool PairMeasure(const TopoDS_Shape& shape, double& volume,
     } catch (...) { return false; }
 }
 
+bool PairSourceCurrent(const OcctDocument& document,
+                       const ap::PairCapture::State& state,
+                       std::size_t index) noexcept {
+    if (index >= state.sources.size()) return false;
+    return state.ordinarySources[index]
+        ? document.OrdinaryInputCurrent(state.ordinarySources[index])
+        : document.PlainProfileOperationSourceCurrent(state.sources[index]);
+}
+
 bool PairCurrent(const OcctDocument& document,
                  const ap::PairCapture::State& state) noexcept {
     try {
@@ -11840,7 +11855,7 @@ bool PairCurrent(const OcctDocument& document,
         if (!document.CaptureSavedGroups(groups) || !groups.IsEqual(state.groups)) return false;
         for (std::size_t index = 0; index < 2; ++index) {
             OcctExactLabelReceipt exact;
-            if (!document.PlainProfileOperationSourceCurrent(state.sources[index])
+            if (!PairSourceCurrent(document, state, index)
                 || !document.ReadExactFreeLabel(state.exact[index], exact)
                 || !exact.IsEqual(state.exact[index])) return false;
         }
@@ -12231,25 +12246,36 @@ bool PairDefinition(const ap::PairCapture::State& state,
             original.shapeSlot = std::uint32_t(index);
             if (!PairUUID(state.owner->DocumentIdentifier(), original.original.document)
                 || !PairUUID(source.entityIdentifier, original.original.entity)
-                || !PairUUID(source.definitionIdentifier, original.original.definition)
-                || !PairUUID(source.featureIdentifier, original.original.sourceFeature))
+                || !PairUUID(source.definitionIdentifier, original.original.definition))
                 return false;
-            effective.originalSourceFeature = original.original.sourceFeature;
-            core3d::profile::Parameters parameters;
-            if (!core3d::profile::Decode(source.recipeValues, parameters)) return false;
-            original.recipeSchema = std::uint32_t(core3d::profile::SchemaFor(parameters));
-            if (!core3d::composite_recipe::EncodeScalarRecipe(
-                    core3d::composite_recipe::RecipeKind::Profile,
-                    original.recipeSchema, source.recipeValues, recipes[index])) return false;
-            original.recipeBytes = recipes[index];
             original.sourceMetersPerUnit = source.metersPerUnit;
             original.carrierMetersPerUnit = state.metersPerUnit;
             original.sourceRootToCarrier = matrices[index];
-            original.projection = projections[index];
-            effective.geometry.dimensions = projections[index].dimensions;
-            effective.geometry.translation = projections[index].translation;
-            effective.geometry.rotationXYZW = projections[index].rotationXYZW;
             effective.sourceMetersPerUnit = source.metersPerUnit;
+            if (state.ordinarySources[index]) {
+                original.original.sourceFeature = state.ordinaryAnchors[index];
+                original.recipeKind = pb::RecipeInputFamily::OrdinarySource;
+                original.recipeSchema = state.ordinaryRecipes[index].schema;
+                original.recipeBytes = state.ordinaryRecipes[index].bytes;
+                recipes[index] = state.ordinaryRecipes[index].bytes;
+                effective.family = pb::InputFamily::FrozenSolid;
+                effective.frozenGeometry.sourceToCarrier = matrices[index];
+            } else {
+                if (!PairUUID(source.featureIdentifier, original.original.sourceFeature))
+                    return false;
+                core3d::profile::Parameters parameters;
+                if (!core3d::profile::Decode(source.recipeValues, parameters)) return false;
+                original.recipeSchema = std::uint32_t(core3d::profile::SchemaFor(parameters));
+                if (!core3d::composite_recipe::EncodeScalarRecipe(
+                        core3d::composite_recipe::RecipeKind::Profile,
+                        original.recipeSchema, source.recipeValues, recipes[index])) return false;
+                original.recipeBytes = recipes[index];
+                original.projection = projections[index];
+                effective.geometry.dimensions = projections[index].dimensions;
+                effective.geometry.translation = projections[index].translation;
+                effective.geometry.rotationXYZW = projections[index].rotationXYZW;
+            }
+            effective.originalSourceFeature = original.original.sourceFeature;
             if (!PairMetadata(state.exact[index], original.metadata)) return false;
             if (!state.exact[index].appearance.materialLabel.IsNull()) {
                 const std::string entry = PairLabelEntry(
@@ -12286,29 +12312,41 @@ bool PairDefinition(const ap::PairCapture::State& state,
                     std::distance(definition.originals.layers.begin(), found)));
             }
             effective.metadata = original.metadata;
-            core3d::retained_recipe::Digest geometry{}, recipe{}, placement{};
-            TopoDS_Shape persistedSource;
-            std::string sourceBytes;
-            if (!PairPersistedSource(source.boundRoot,
-                    state.owner->Document(), persistedSource)
-                || !core3d::retained_part_boolean::ExactShapeBytes(
-                    persistedSource, sourceBytes)
-                || !core3d::composite_recipe::Hash(
-                    std::vector<std::uint8_t>(sourceBytes.begin(), sourceBytes.end()),
-                    geometry)
-                || !core3d::composite_recipe::Hash(recipes[index], recipe)
-                || !PairHash(matrices[index].data(), sizeof(matrices[index]), placement))
-                return false;
-            original.commitments.geometry = geometry;
-            original.commitments.recipe = recipe;
-            original.commitments.placement = placement;
-            original.commitments.material = recipe;
-            original.commitments.groups = geometry;
+            if (state.ordinarySources[index]) {
+                original.commitments = {state.ordinaryCommitments[index].geometry,
+                    state.ordinaryCommitments[index].recipe,
+                    state.ordinaryCommitments[index].placement,
+                    state.ordinaryCommitments[index].material,
+                    state.ordinaryCommitments[index].groups};
+            } else {
+                core3d::retained_recipe::Digest geometry{}, recipe{}, placement{};
+                TopoDS_Shape persistedSource;
+                std::string sourceBytes;
+                if (!PairPersistedSource(source.boundRoot,
+                        state.owner->Document(), persistedSource)
+                    || !core3d::retained_part_boolean::ExactShapeBytes(
+                        persistedSource, sourceBytes)
+                    || !core3d::composite_recipe::Hash(
+                        std::vector<std::uint8_t>(sourceBytes.begin(), sourceBytes.end()),
+                        geometry)
+                    || !core3d::composite_recipe::Hash(recipes[index], recipe)
+                    || !PairHash(matrices[index].data(), sizeof(matrices[index]), placement))
+                    return false;
+                original.commitments.geometry = geometry;
+                original.commitments.recipe = recipe;
+                original.commitments.placement = placement;
+                original.commitments.material = recipe;
+                original.commitments.groups = geometry;
+            }
             effective.commitments = original.commitments;
             const TopoDS_Shape effectiveShape = pb::build::PersistenceMaterializeDetached(
-                pb::build::BuildEffectiveAnalyticPrism(
-                    effective.geometry, effective.sourceMetersPerUnit,
-                    definition.carrierMetersPerUnit));
+                state.ordinarySources[index]
+                    ? pb::build::BuildEffectiveFrozenSolid(source.boundRoot,
+                        effective.frozenGeometry, effective.sourceMetersPerUnit,
+                        definition.carrierMetersPerUnit)
+                    : pb::build::BuildEffectiveAnalyticPrism(
+                        effective.geometry, effective.sourceMetersPerUnit,
+                        definition.carrierMetersPerUnit));
             std::string effectiveBytes;
             if (effectiveShape.IsNull()
                 || !core3d::retained_part_boolean::ExactShapeBytes(
@@ -12443,7 +12481,7 @@ bool ReplayOriginalsGraphDetached(
 core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources(
     const std::shared_ptr<core3d::native_opening::Context>& context,
     const TDF_Label& target, const TDF_Label& tool,
-    core3d::part_boolean::Operation operation) noexcept {
+    core3d::part_boolean::Operation operation, bool admitOrdinaryInputs) noexcept {
     using namespace core3d::authored_parameter;
     try {
         if (![NSThread isMainThread]) return PairCaptureRefused(PairRefusal::WrongThread);
@@ -12474,13 +12512,47 @@ core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources
             return PairCaptureRefused(PairRefusal::BadEncoding);
         const std::array<TDF_Label, 2> labels{{target, tool}};
         for (std::size_t index = 0; index < 2; ++index) {
-            // Shared admission runs first. Package 1 deliberately leaves the
-            // rectangular family builder below closed; Package 3 consumes the
-            // detached ordinary promotion plan.
             const auto admitted = CaptureToolInput(
                 labels[index], core3d::ordinary_input::Purpose::SolidModel);
             if (!admitted.ready())
                 return PairCaptureRefused(PairRefusal::UnsupportedSource);
+            bool ordinary = false;
+            if (admitOrdinaryInputs
+                && admitted.snapshot->history() == core3d::ordinary_input::History::Absent
+                && admitted.snapshot->representation()
+                    == core3d::ordinary_input::Representation::BRepSolid) {
+                ordinary = true;
+                std::size_t faces = 0;
+                for (TopExp_Explorer explorer(admitted.snapshot->state_->detachedShape,
+                        TopAbs_FACE); explorer.More(); explorer.Next()) {
+                    ++faces;
+                    const BRepAdaptor_Surface surface(
+                        TopoDS::Face(explorer.Current()), Standard_True);
+                    if (surface.GetType() != GeomAbs_Plane) {
+                        ordinary = false;
+                        break;
+                    }
+                }
+                ordinary = ordinary && faces > 0;
+            }
+            if (ordinary) {
+                state->ordinarySources[index] = admitted.snapshot;
+                state->ordinaryRecipes[index] = admitted.snapshot->state_->recipe;
+                state->ordinaryCommitments[index] = admitted.snapshot->state_->commitments;
+                state->ordinaryAnchors[index] = admitted.snapshot->state_->sourceAnchor;
+                state->ordinaryShapes[index] = admitted.snapshot->state_->detachedShape;
+                auto& source = state->sources[index];
+                source.label = labels[index];
+                source.entityIdentifier = admitted.snapshot->entityIdentifier();
+                source.definitionIdentifier = admitted.snapshot->definitionIdentifier();
+                source.metersPerUnit = admitted.snapshot->metersPerUnit();
+                source.placement = admitted.snapshot->state_->exact.visibility
+                    .object.object.transform;
+                source.boundRoot = admitted.snapshot->state_->detachedShape;
+                if (!CaptureExactFreeLabel(labels[index], state->exact[index]))
+                    return PairCaptureRefused(PairRefusal::UnsupportedSource);
+                continue;
+            }
             if (!CapturePlainProfileOperationSource(labels[index], state->sources[index])
                 || !CaptureExactFreeLabel(labels[index], state->exact[index]))
                 return PairCaptureRefused(PairRefusal::UnsupportedSource);
@@ -12489,9 +12561,13 @@ core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources
                 || !pb::build::IsRectangularP1BaseRecipe(recipe, false))
                 return PairCaptureRefused(PairRefusal::UnsupportedSource);
         }
+        const bool sameFeature = state->ordinarySources[0] && state->ordinarySources[1]
+            ? state->ordinarySources[0]->sourceAnchor()
+                == state->ordinarySources[1]->sourceAnchor()
+            : state->sources[0].featureIdentifier == state->sources[1].featureIdentifier;
         if (state->sources[0].entityIdentifier == state->sources[1].entityIdentifier
             || state->sources[0].definitionIdentifier == state->sources[1].definitionIdentifier
-            || state->sources[0].featureIdentifier == state->sources[1].featureIdentifier)
+            || sameFeature)
             return PairCaptureRefused(PairRefusal::AliasSource);
         if (!CaptureSavedGroups(state->groups))
             return PairCaptureRefused(PairRefusal::BadEncoding);
@@ -12541,9 +12617,30 @@ core3d::authored_parameter::PairPrepareReply OcctDocument::PrepareBooleanSources
         const gp_Trsf carrier = capture->state_->sources[0].placement;
         for (std::size_t index = 0; index < 2; ++index) {
             if (cancelled.load()) return PairPrepareCancelled();
-            if (!PairProjection(capture->state_->sources[index], carrier,
-                    projections[index], matrices[index], observed[index], analytic[index]))
+            if (capture->state_->ordinarySources[index]) {
+                gp_Trsf mapping = carrier.Inverted();
+                mapping.Multiply(capture->state_->sources[index].placement);
+                if (!PairMatrix(mapping, matrices[index]))
+                    return PairPrepareRefused(PairRefusal::BadEncoding);
+                BRepBuilderAPI_Transform observer(
+                    capture->state_->ordinaryShapes[index],
+                    mapping, Standard_True, Standard_False);
+                if (!observer.IsDone())
+                    return PairPrepareRefused(PairRefusal::UnprovedCorrespondence);
+                observed[index] = observer.Shape();
+                pb::EffectiveFrozenSolidGeometry geometry;
+                geometry.sourceToCarrier = matrices[index];
+                analytic[index] = pb::build::BuildEffectiveFrozenSolid(
+                    capture->state_->ordinaryShapes[index],
+                    geometry, capture->state_->sources[index].metersPerUnit,
+                    capture->state_->metersPerUnit);
+                if (observed[index].IsNull() || analytic[index].IsNull()
+                    || !PlainProfileRebuildCorresponds(observed[index], analytic[index]))
+                    return PairPrepareRefused(PairRefusal::UnprovedCorrespondence);
+            } else if (!PairProjection(capture->state_->sources[index], carrier,
+                    projections[index], matrices[index], observed[index], analytic[index])) {
                 return PairPrepareRefused(PairRefusal::UnprovedCorrespondence);
+            }
             if (const auto refused = charge(observed[index],
                     core3d::retained_topology_budget::Site::C25AnalyticInput))
                 return *refused;
@@ -12763,9 +12860,23 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
             payload->definition.nodes.push_back({source});
             feature.inputs.push_back(source.node);
             TopoDS_Shape frozen;
-            if (!PairPersistenceSource(capture.sources[index].boundRoot,
-                    myOcafDoc, source.commitments.geometry, frozen))
+            if (capture.ordinarySources[index]) {
+                const auto& ordinary = *capture.ordinarySources[index]->state_;
+                frozen = ordinary.detachedShape;
+                if (source.recipe.kind != cr::RecipeKind::OrdinarySource
+                    || source.recipe.schema != ordinary.recipe.schema
+                    || source.recipe.bytes != ordinary.recipe.bytes
+                    || source.original.sourceFeature != ordinary.sourceAnchor
+                    || source.commitments.geometry != ordinary.commitments.geometry
+                    || source.commitments.recipe != ordinary.commitments.recipe
+                    || source.commitments.placement != ordinary.commitments.placement
+                    || source.commitments.material != ordinary.commitments.material
+                    || source.commitments.groups != ordinary.commitments.groups)
+                    return refuse(ap::PairRefusal::BadEncoding);
+            } else if (!PairPersistenceSource(capture.sources[index].boundRoot,
+                    myOcafDoc, source.commitments.geometry, frozen)) {
                 return refuse(ap::PairRefusal::UnprovedCorrespondence);
+            }
             payload->sourceShapes.push_back(frozen);
         }
         payload->definition.nodes.push_back({feature});
@@ -12864,7 +12975,8 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
             if (debugFailAt(ap::debug::PairCreationFaultSite::AfterTargetShapeWrite))
                 throw Standard_Failure("debug pair target shape fault");
 #endif
-            capture.sources[0].recordLabel.ForgetAllAttributes(Standard_True);
+            if (!capture.ordinarySources[0])
+                capture.sources[0].recordLabel.ForgetAllAttributes(Standard_True);
             if (!cr::Attribute::StageIndependentClone(myOcafDoc,
                     capture.sources[0].label, result, payload)) {
                 stageFailure = ap::PairRefusal::UnsupportedSource;
@@ -13128,8 +13240,8 @@ OcctDocument::RecoverBooleanSources(
             && myOcafDoc->GetAvailableRedos() == state->redoDepthBefore
             && currentGroups.IsEqual(capture.groups)) {
             OcctExactLabelReceipt targetExact, toolExact;
-            exactZero = PlainProfileOperationSourceCurrent(capture.sources[0])
-                && PlainProfileOperationSourceCurrent(capture.sources[1])
+            exactZero = PairSourceCurrent(*this, capture, 0)
+                && PairSourceCurrent(*this, capture, 1)
                 && ReadExactFreeLabel(capture.exact[0], targetExact)
                 && ReadExactFreeLabel(capture.exact[1], toolExact)
                 && targetExact.IsEqual(capture.exact[0])
@@ -13872,10 +13984,20 @@ OcctDocument::PrepareBooleanOriginalsEdit(
             const auto* source = std::get_if<cr::SourceNode>(
                 &payload->definition.nodes[index].value);
             TopoDS_Shape normalized;
-            if (!source || source->shapeSlot >= payload->sourceShapes.size()
-                || !PairPersistenceSource(payload->sourceShapes[source->shapeSlot],
-                    myOcafDoc, source->commitments.geometry, normalized))
+            if (!source || source->shapeSlot >= payload->sourceShapes.size())
                 return refuse(ap::PairRefusal::UnprovedCorrespondence);
+            if (source->recipe.kind == cr::RecipeKind::OrdinarySource) {
+                std::string bytes;
+                core3d::retained_recipe::Digest geometry{};
+                normalized = payload->sourceShapes[source->shapeSlot];
+                if (!core3d::retained_part_boolean::ExactShapeBytes(normalized, bytes)
+                    || !PairHash(bytes.data(), bytes.size(), geometry)
+                    || geometry != source->commitments.geometry)
+                    return refuse(ap::PairRefusal::UnprovedCorrespondence);
+            } else if (!PairPersistenceSource(payload->sourceShapes[source->shapeSlot],
+                    myOcafDoc, source->commitments.geometry, normalized)) {
+                return refuse(ap::PairRefusal::UnprovedCorrespondence);
+            }
             // This operation-local copy must reproduce the already frozen
             // source commitment. Neither the graph nor its originals change.
             payload->sourceShapes[source->shapeSlot] = std::move(normalized);

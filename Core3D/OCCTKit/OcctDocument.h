@@ -1819,7 +1819,8 @@ public:
     CaptureBooleanSources(
         const std::shared_ptr<core3d::native_opening::Context>& context,
         const TDF_Label& target, const TDF_Label& tool,
-        core3d::part_boolean::Operation operation) noexcept;
+        core3d::part_boolean::Operation operation,
+        bool admitOrdinaryInputs = false) noexcept;
     //! Detached O1 conversion/O4 proof. Every currentness check happens before
     //! kernel work and no command or persistent label is created.
     Standard_EXPORT core3d::authored_parameter::PairPrepareReply

@@ -1231,6 +1231,15 @@ static NSMapTable<Core3DViewController *, Core3DBooleanPairRecoveryIssuer *>
 - (Core3DBooleanPairCaptureResult *)openBooleanSourcesWithTargetEntityIdentifier:
     (NSString *)targetEntityIdentifier toolEntityIdentifier:(NSString *)toolEntityIdentifier
     operation:(Core3DPartBooleanOperation)operation expected:(Core3DSceneSnapshot *)expected {
+    return [self openBooleanSourcesWithTargetEntityIdentifier:targetEntityIdentifier
+        toolEntityIdentifier:toolEntityIdentifier operation:operation
+        admitOrdinaryInputs:NO expected:expected];
+}
+
+- (Core3DBooleanPairCaptureResult *)openBooleanSourcesWithTargetEntityIdentifier:
+    (NSString *)targetEntityIdentifier toolEntityIdentifier:(NSString *)toolEntityIdentifier
+    operation:(Core3DPartBooleanOperation)operation admitOrdinaryInputs:(BOOL)admitOrdinaryInputs
+    expected:(Core3DSceneSnapshot *)expected {
     using namespace core3d::authored_parameter;
     const auto refused = ^Core3DBooleanPairCaptureResult *(PairRefusal reason) {
         return [[Core3DBooleanPairCaptureResult alloc]
@@ -1266,7 +1275,8 @@ static NSMapTable<Core3DViewController *, Core3DBooleanPairRecoveryIssuer *>
             std::uint32_t(size.width), std::uint32_t(size.height),
             {targetText, toolText});
         const auto reply = document->CaptureBooleanSources(context, target, tool,
-            static_cast<core3d::part_boolean::Operation>(operation));
+            static_cast<core3d::part_boolean::Operation>(operation),
+            admitOrdinaryInputs == YES);
         Core3DBooleanPairOpening *opening = reply.capture
             ? [[Core3DBooleanPairOpening alloc] initWithCapture:reply.capture
                 target:targetEntityIdentifier tool:toolEntityIdentifier] : nil;
