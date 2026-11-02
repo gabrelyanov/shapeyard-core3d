@@ -3738,9 +3738,9 @@ bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
     theDefinition.faces.Clear();
     theDefinition.edges.Clear();
     theDefinition.vertices.Clear();
-    // The label-based RWMesh iterator below replaces the definition's outer
-    // placement with identity. Keep mesh face lookup in that same local space;
-    // DocumentExplorer supplies the outer placement to the instance matrix.
+    // Keep the explicit-shape RWMesh iterator and mesh face lookup in the same
+    // definition-local space. For triangle meshes, DocumentExplorer supplies
+    // the stripped outer placement to the instance matrix.
     TopoDS_Shape extractionShape = theDefinition.shape;
     if (theDefinition.representation == OcctGeometryRepresentation::TriangleMesh)
         extractionShape.Location(TopLoc_Location());
@@ -3777,11 +3777,11 @@ bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
     std::vector<bool> aVisited(static_cast<std::size_t>(theDefinition.faces.Extent()), false);
     Bounds3d aSourceBounds;
 
-    // Iterate the explicit shape retained by DefinitionData. Private export
-    // meshes a disposable shape and must not accidentally read the original
-    // label again after that operation. Ordinary publication preloads the same
-    // label shape, so its extraction semantics remain unchanged.
-    RWMesh_FaceIterator aFace(theDefinition.shape);
+    // Iterate the explicit definition-local extraction shape. Private export
+    // still meshes a disposable shape without reading the original label after
+    // that operation. Ordinary publication preloads the same retained shape,
+    // so its extraction semantics remain unchanged.
+    RWMesh_FaceIterator aFace(extractionShape);
     for (; aFace.More(); aFace.Next()) {
         Handle(Poly_Triangulation) aTriangulation = aFace.Triangulation();
 #ifdef DEBUG
