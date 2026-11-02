@@ -8,7 +8,35 @@ typedef NS_ENUM(NSInteger, Core3DNativeImportFormat) {
     Core3DNativeImportFormatSTEP NS_SWIFT_NAME(step) = 1,
     Core3DNativeImportFormatGLB NS_SWIFT_NAME(glb) = 2,
     Core3DNativeImportFormatSTL NS_SWIFT_NAME(stl) = 3,
+    Core3DNativeImportFormatOBJ NS_SWIFT_NAME(obj) = 4,
 };
+
+//! Immutable copied buffers supplied by the application OBJ decoder. Vertices
+//! use the Core3DSceneVertex ABI (eight Float32 values); indices are UInt32.
+NS_SWIFT_SENDABLE
+@interface Core3DNativeImportMesh : NSObject
+
+@property(nonatomic, readonly, copy) NSData *vertexData;
+@property(nonatomic, readonly, copy) NSData *indexData;
+@property(nonatomic, readonly) NSUInteger vertexCount;
+@property(nonatomic, readonly) NSUInteger indexCount;
+
+- (instancetype)initWithVertexData:(NSData *)vertexData
+                         indexData:(NSData *)indexData
+                       vertexCount:(NSUInteger)vertexCount
+                        indexCount:(NSUInteger)indexCount
+    NS_DESIGNATED_INITIALIZER
+    NS_SWIFT_NAME(init(vertexData:indexData:vertexCount:indexCount:));
+- (instancetype)init NS_UNAVAILABLE;
+
+@end
+
+typedef BOOL (NS_SWIFT_SENDABLE ^Core3DNativeImportCancellationProbe)(void);
+typedef Core3DNativeImportMesh *_Nullable
+    (NS_SWIFT_SENDABLE ^Core3DNativeImportMeshDecoder)(
+        NSData *stagedBytes,
+        Core3DNativeImportCancellationProbe cancellationProbe,
+        NSError *_Nullable *_Nullable error);
 
 //! STL has no embedded length units. The importer converts into millimeters.
 typedef NS_ENUM(NSInteger, Core3DNativeImportSTLUnit) {
@@ -76,6 +104,12 @@ NS_SWIFT_SENDABLE
 - (nullable instancetype)initWithSTLURL:(NSURL *)stlURL
                                   unit:(Core3DNativeImportSTLUnit)unit
     NS_SWIFT_NAME(init(stlURL:unit:));
+//! Geometry-only OBJ import. The operation owns source staging and invokes the
+//! decoder once on its worker using immutable bytes from the pinned descriptor.
+- (nullable instancetype)initWithOBJURL:(NSURL *)objURL
+                    millimetersPerUnit:(double)millimetersPerUnit
+                           meshDecoder:(Core3DNativeImportMeshDecoder)meshDecoder
+    NS_SWIFT_NAME(init(objURL:millimetersPerUnit:meshDecoder:));
 - (void)startWithCompletion:(Core3DNativeImportCompletion)completion
     NS_SWIFT_NAME(start(completion:));
 - (void)cancel;
