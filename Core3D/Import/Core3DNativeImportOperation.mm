@@ -110,6 +110,8 @@ struct NativeImportState {
     bool finished = false;
     std::size_t shapeCount = 0;
     double stlMillimetersPerUnit = 1.0;
+    double objMillimetersPerUnit = 1.0;
+    Core3DNativeImportMeshDecoder objMeshDecoder = nil;
 };
 
 struct NativeImportResult {
@@ -294,6 +296,8 @@ bool IsSupportedImportPath(
             return extension == ".glb";
         case Core3DNativeImportFormatSTL:
             return extension == ".stl";
+        case Core3DNativeImportFormatOBJ:
+            return extension == ".obj";
     }
     return false;
 }
@@ -2535,6 +2539,230 @@ void ImportSTL(
     state->shapeCount = 1;
 }
 
+constexpr std::size_t kOBJVertexStride = 8 * sizeof(float);
+constexpr std::size_t kOBJIndexStride = sizeof(std::uint32_t);
+constexpr std::size_t kMaximumOBJVertices = 600'000;
+constexpr std::size_t kMaximumOBJIndices = 600'000;
+
+Core3DNativeImportMesh *DecodeOBJ(
+    const std::shared_ptr<NativeImportState>& state,
+    const PinnedStagedFile& stagedFile) {
+    ValidatePinnedStagedFile(state, stagedFile, "before OBJ decoding");
+    std::vector<unsigned char> sourceBytes(
+        static_cast<std::size_t>(stagedFile.identity.size));
+    std::size_t offset = 0;
+    while (offset < sourceBytes.size()) {
+        ThrowIfCancelled(state);
+        const std::size_t request = std::min<std::size_t>(
+            64 * 1024, sourceBytes.size() - offset);
+        ssize_t count = 0;
+        do {
+            count = ::pread(
+                stagedFile.descriptor.Get(), sourceBytes.data() + offset,
+                request, static_cast<off_t>(offset));
+        } while (count < 0 && errno == EINTR);
+        if (count <= 0 || static_cast<std::size_t>(count) > request) {
+            throw NativeImportFailure(
+                Core3DNativeImportErrorReadFailed,
+                "The private OBJ staging file could not be read completely.");
+        }
+        offset += static_cast<std::size_t>(count);
+    }
+
+    NSData *immutableBytes = [NSData dataWithBytes:sourceBytes.data()
+                                             length:sourceBytes.size()];
+    Core3DNativeImportCancellationProbe cancellationProbe = [^BOOL{
+        return state->cancelled.load(std::memory_order_acquire);
+    } copy];
+    NSError *decoderError = nil;
+    Core3DNativeImportMesh *mesh = state->objMeshDecoder == nil
+        ? nil
+        : state->objMeshDecoder(
+            immutableBytes, cancellationProbe, &decoderError);
+    ValidatePinnedStagedFile(state, stagedFile, "during OBJ decoding");
+    if (mesh != nil) {
+        return mesh;
+    }
+
+    Core3DNativeImportErrorCode code = Core3DNativeImportErrorReadFailed;
+    if ([decoderError.domain isEqualToString:Core3DNativeImportErrorDomain]) {
+        switch (decoderError.code) {
+            case Core3DNativeImportErrorCancelled:
+            case Core3DNativeImportErrorReadFailed:
+            case Core3DNativeImportErrorNoGeometry:
+            case Core3DNativeImportErrorResourceLimit:
+            case Core3DNativeImportErrorUnsupportedEncoding:
+                code = static_cast<Core3DNativeImportErrorCode>(decoderError.code);
+                break;
+            default:
+                break;
+        }
+    }
+    NSString *description = decoderError.localizedDescription;
+    throw NativeImportFailure(
+        code,
+        description.length > 0
+            ? description.UTF8String
+            : "The OBJ geometry could not be decoded.");
+}
+
+void ImportOBJ(
+    const std::shared_ptr<NativeImportState>& state,
+    const Handle(OcctDocument)& document,
+    const PinnedStagedFile& stagedFile) {
+    Core3DNativeImportMesh *decoded = DecodeOBJ(state, stagedFile);
+    const std::size_t vertexCount = decoded.vertexCount;
+    const std::size_t indexCount = decoded.indexCount;
+    if (vertexCount == 0 || indexCount == 0) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorNoGeometry,
+            "The OBJ contains no triangle geometry.");
+    }
+    if (vertexCount > kMaximumOBJVertices || indexCount > kMaximumOBJIndices) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorResourceLimit,
+            "OBJ import supports up to 600,000 vertices and 200,000 triangles.");
+    }
+    if (indexCount % 3 != 0
+        || vertexCount > std::numeric_limits<std::size_t>::max() / kOBJVertexStride
+        || indexCount > std::numeric_limits<std::size_t>::max() / kOBJIndexStride
+        || decoded.vertexData.length != vertexCount * kOBJVertexStride
+        || decoded.indexData.length != indexCount * kOBJIndexStride) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorReadFailed,
+            "The OBJ decoder returned invalid mesh buffers.");
+    }
+
+    struct OBJVertex {
+        float position[3];
+        float normal[3];
+        float texture[2];
+    };
+    static_assert(sizeof(OBJVertex) == kOBJVertexStride);
+    std::vector<gp_Pnt> points(vertexCount);
+    std::vector<gp_Dir> normals;
+    normals.reserve(vertexCount);
+    const unsigned char *vertexBytes = static_cast<const unsigned char *>(
+        decoded.vertexData.bytes);
+    for (std::size_t vertex = 0; vertex < vertexCount; ++vertex) {
+        ThrowIfCancelled(state);
+        OBJVertex value = {};
+        std::memcpy(
+            &value, vertexBytes + vertex * kOBJVertexStride, sizeof(value));
+        const double x = static_cast<double>(value.position[0])
+            * state->objMillimetersPerUnit;
+        const double y = static_cast<double>(value.position[1])
+            * state->objMillimetersPerUnit;
+        const double z = static_cast<double>(value.position[2])
+            * state->objMillimetersPerUnit;
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)
+            || std::abs(x) > core3d::limits::kMaximumModelCoordinateMagnitude
+            || std::abs(y) > core3d::limits::kMaximumModelCoordinateMagnitude
+            || std::abs(z) > core3d::limits::kMaximumModelCoordinateMagnitude) {
+            throw NativeImportFailure(
+                Core3DNativeImportErrorResourceLimit,
+                "The OBJ coordinates exceed the model size limit in the chosen units.");
+        }
+        const double nx = value.normal[0], ny = value.normal[1], nz = value.normal[2];
+        const double normalMagnitude = nx * nx + ny * ny + nz * nz;
+        if (!std::isfinite(normalMagnitude) || normalMagnitude <= 0.0) {
+            throw NativeImportFailure(
+                Core3DNativeImportErrorReadFailed,
+                "The OBJ decoder returned an invalid vertex normal.");
+        }
+        points[vertex] = gp_Pnt(x, y, z);
+        normals.emplace_back(nx, ny, nz);
+    }
+
+    const unsigned char *indexBytes = static_cast<const unsigned char *>(
+        decoded.indexData.bytes);
+    std::vector<std::uint32_t> indices(indexCount);
+    for (std::size_t index = 0; index < indexCount; ++index) {
+        std::memcpy(
+            &indices[index], indexBytes + index * kOBJIndexStride,
+            sizeof(indices[index]));
+        if (indices[index] >= vertexCount) {
+            throw NativeImportFailure(
+                Core3DNativeImportErrorReadFailed,
+                "The OBJ decoder returned an out-of-range vertex index.");
+        }
+    }
+
+    document->InitDoc();
+    if (document->Document().IsNull() || document->Document()->HasOpenCommand()) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorInternalFailure,
+            "The private import document could not be created.");
+    }
+    Handle(Poly_Triangulation) mesh = new Poly_Triangulation(
+        static_cast<Standard_Integer>(vertexCount),
+        static_cast<Standard_Integer>(indexCount / 3),
+        Standard_False, Standard_True);
+    for (std::size_t vertex = 0; vertex < vertexCount; ++vertex) {
+        mesh->SetNode(static_cast<Standard_Integer>(vertex + 1), points[vertex]);
+        mesh->SetNormal(static_cast<Standard_Integer>(vertex + 1), normals[vertex]);
+    }
+    for (std::size_t triangle = 0; triangle < indexCount / 3; ++triangle) {
+        ThrowIfCancelled(state);
+        const std::uint32_t a = indices[triangle * 3];
+        const std::uint32_t b = indices[triangle * 3 + 1];
+        const std::uint32_t c = indices[triangle * 3 + 2];
+        if (a == b || b == c || a == c) {
+            throw NativeImportFailure(
+                Core3DNativeImportErrorReadFailed,
+                "The OBJ contains a collapsed or degenerate triangle.");
+        }
+        const gp_Vec cross = gp_Vec(points[a], points[b]).Crossed(
+            gp_Vec(points[a], points[c]));
+        if (!std::isfinite(cross.SquareMagnitude())
+            || cross.SquareMagnitude() <= 1.0e-24) {
+            throw NativeImportFailure(
+                Core3DNativeImportErrorReadFailed,
+                "The OBJ contains a collapsed or degenerate triangle.");
+        }
+        mesh->SetTriangle(
+            static_cast<Standard_Integer>(triangle + 1),
+            Poly_Triangle(
+                static_cast<Standard_Integer>(a + 1),
+                static_cast<Standard_Integer>(b + 1),
+                static_cast<Standard_Integer>(c + 1)));
+    }
+    mesh->UpdateCachedMinMax();
+    TopoDS_Face face;
+    BRep_Builder builder;
+    builder.MakeFace(face, mesh);
+    Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(
+        document->Document()->Main());
+    const TDF_Label label = shapes->AddShape(face, Standard_False);
+    if (label.IsNull() || !document->MarkImportedTriangleMeshDefinitions()) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorTransferFailed,
+            "The OBJ mesh could not be prepared for editing.");
+    }
+    TDataStd_Name::Set(label, "Imported OBJ");
+    std::size_t leafCount = 0;
+    if (ValidateImportedDocument(document, state, false, leafCount)
+            != ImportedDocumentValidation::Valid || leafCount != 1) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorTransferFailed,
+            "The imported OBJ project is structurally invalid.");
+    }
+    ThrowIfCancelled(state);
+    if (!document->MigrateLegacyIdentifiers()) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorMigrationFailed,
+            "The OBJ model could not be prepared for editing.");
+    }
+    std::size_t migratedCount = 0;
+    if (ValidateImportedDocument(document, state, true, migratedCount)
+            != ImportedDocumentValidation::Valid || migratedCount != 1) {
+        throw NativeImportFailure(
+            Core3DNativeImportErrorMigrationFailed,
+            "The imported OBJ failed editable-project validation.");
+    }
+    state->shapeCount = 1;
+}
+
 void SerializeAndValidate(
     const std::shared_ptr<NativeImportState>& state,
     const Handle(OcctDocument)& document,
@@ -2625,6 +2853,15 @@ NativeImportResult RunNativeImport(
                 SerializeAndValidate(state, document, progress->Start());
                 break;
             }
+            case Core3DNativeImportFormatOBJ: {
+                PinnedStagedFile stagedFile = CopySourceIntoPrivateStaging(state);
+                Handle(Message_ProgressIndicator) progress =
+                    new NativeImportProgress(&state->cancelled);
+                document = new OcctDocument();
+                ImportOBJ(state, document, stagedFile);
+                SerializeAndValidate(state, document, progress->Start());
+                break;
+            }
             case Core3DNativeImportFormatGLB: {
                 PinnedStagedFile stagedFile =
                     CopySourceIntoPrivateStaging(state);
@@ -2697,6 +2934,33 @@ NSString *ErrorDescription(const NativeImportResult& result) {
 
 } // namespace
 
+@interface Core3DNativeImportMesh ()
+
+@property(nonatomic, readwrite, copy) NSData *vertexData;
+@property(nonatomic, readwrite, copy) NSData *indexData;
+@property(nonatomic, readwrite) NSUInteger vertexCount;
+@property(nonatomic, readwrite) NSUInteger indexCount;
+
+@end
+
+@implementation Core3DNativeImportMesh
+
+- (instancetype)initWithVertexData:(NSData *)vertexData
+                         indexData:(NSData *)indexData
+                       vertexCount:(NSUInteger)vertexCount
+                        indexCount:(NSUInteger)indexCount {
+    self = [super init];
+    if (self) {
+        _vertexData = [vertexData copy];
+        _indexData = [indexData copy];
+        _vertexCount = vertexCount;
+        _indexCount = indexCount;
+    }
+    return self;
+}
+
+@end
+
 @interface Core3DNativeImportArtifact ()
 
 @property(nonatomic, readwrite, copy) NSURL *primaryURL;
@@ -2753,6 +3017,27 @@ NSString *ErrorDescription(const NativeImportResult& result) {
     return self;
 }
 
+- (instancetype)initWithOBJURL:(NSURL *)objURL
+            millimetersPerUnit:(double)millimetersPerUnit
+                   meshDecoder:(Core3DNativeImportMeshDecoder)meshDecoder {
+    if (!objURL.isFileURL || !std::isfinite(millimetersPerUnit)
+        || millimetersPerUnit <= 0.0 || meshDecoder == nil) {
+        return nil;
+    }
+    NSURL *temporaryRoot = [NSFileManager.defaultManager.temporaryDirectory
+        URLByAppendingPathComponent:[NSString stringWithFormat:
+            @"Core3DNativeImport-%@", NSUUID.UUID.UUIDString]
+        isDirectory:YES];
+    self = [self initWithSourceURL:objURL
+                           format:Core3DNativeImportFormatOBJ
+                    temporaryRoot:temporaryRoot];
+    if (self) {
+        _state->objMillimetersPerUnit = millimetersPerUnit;
+        _state->objMeshDecoder = [meshDecoder copy];
+    }
+    return self;
+}
+
 - (instancetype)initWithSTEPURL:(NSURL *)stepURL {
     return [self initWithSourceURL:stepURL
                            format:Core3DNativeImportFormatSTEP];
@@ -2760,6 +3045,11 @@ NSString *ErrorDescription(const NativeImportResult& result) {
 
 - (instancetype)initWithSourceURL:(NSURL *)sourceURL
                             format:(Core3DNativeImportFormat)format {
+    // OBJ requires an application decoder. Fail before allocating staging when
+    // callers use the generic initializer without that dependency.
+    if (format == Core3DNativeImportFormatOBJ) {
+        return nil;
+    }
     NSURL *temporaryRoot = [NSFileManager.defaultManager.temporaryDirectory
         URLByAppendingPathComponent:[NSString stringWithFormat:
             @"Core3DNativeImport-%@", NSUUID.UUID.UUIDString]
@@ -2776,7 +3066,8 @@ NSString *ErrorDescription(const NativeImportResult& result) {
     if (!self
         || (format != Core3DNativeImportFormatSTEP
             && format != Core3DNativeImportFormatGLB
-            && format != Core3DNativeImportFormatSTL)
+            && format != Core3DNativeImportFormatSTL
+            && format != Core3DNativeImportFormatOBJ)
         || !sourceURL.isFileURL
         || !temporaryRoot.isFileURL) {
         return nil;
@@ -2811,9 +3102,14 @@ NSString *ErrorDescription(const NativeImportResult& result) {
     _state->cleanupPath = cleanupPath;
     _state->stagingDirectoryPath =
         stagingDirectory.path.fileSystemRepresentation;
-    NSString *stagedFileName = format == Core3DNativeImportFormatGLB
-        ? @"model.glb"
-        : (format == Core3DNativeImportFormatSTL ? @"model.stl" : @"model.step");
+    NSString *stagedFileName = nil;
+    switch (format) {
+        case Core3DNativeImportFormatSTEP: stagedFileName = @"model.step"; break;
+        case Core3DNativeImportFormatGLB: stagedFileName = @"model.glb"; break;
+        case Core3DNativeImportFormatSTL: stagedFileName = @"model.stl"; break;
+        case Core3DNativeImportFormatOBJ: stagedFileName = @"model.obj"; break;
+        default: return nil;
+    }
     _state->stagedSourcePath =
         [stagingDirectory URLByAppendingPathComponent:stagedFileName]
             .path.fileSystemRepresentation;
