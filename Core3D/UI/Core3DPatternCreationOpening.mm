@@ -17,6 +17,7 @@
 
 #include "../OCCTKit/PatternOwnerBridge.hxx"
 #include "../OCCTKit/PatternAllLabelAuthority.hxx"
+#include "../OCCTKit/BoundedCurveAttribute.hxx"
 #include "RadialArrayOperationController.hpp"
 
 #include <BRepBuilderAPI_Copy.hxx>
@@ -309,6 +310,10 @@ bool CaptureCreationSource(Core3DViewController *controller,
         if (!core3d::pattern_owner::Parse(value.selected, selected)) return (gate = "selected-uuid", refused());
         core3d::pattern_owner::LabelReceipt receipt;
         if (!ResolveFreeLabel(*value.owner, selected, receipt)) return (gate = "source-label", refused());
+        // D2 has no bounded-curve clone arm. Keep generic exact-label capture
+        // intact, but refuse a selected C1 owner locally before preparation.
+        if (core3d::bounded_curve::HasRecord(receipt.label))
+            return (gate = "bounded-curve-owner", refused());
         // A label already retained by an existing D2/D3 record is an edit
         // target, never a creation source.
         std::vector<core3d::pattern::Record> records;
@@ -360,7 +365,8 @@ bool CreationCurrent(const CreationCapture& capture) noexcept {
         if (!core3d::pattern_owner::Parse(capture.selected, selected)) return false;
         core3d::pattern_owner::LabelReceipt receipt;
         if (!ResolveFreeLabel(*capture.owner, selected, receipt)
-            || !receipt.label.IsEqual(capture.sourceLabel)) return false;
+            || !receipt.label.IsEqual(capture.sourceLabel)
+            || core3d::bounded_curve::HasRecord(receipt.label)) return false;
         recipe::Source live;
         if (!recipe::Capture(document, receipt.label, live)
             || !recipe::IsEqual(live, capture.sourceRecipe)) return false;
@@ -662,7 +668,8 @@ bool ReadBackCreation(OcctDocument& owner, const CreationCapture& capture,
                 || !PreparedRecipeMatches(entry.prepared, actual)) return false;
         }
         recipe::Source source;
-        return recipe::Capture(document, capture.sourceLabel, source)
+        return !core3d::bounded_curve::HasRecord(capture.sourceLabel)
+            && recipe::Capture(document, capture.sourceLabel, source)
             && recipe::IsEqual(source, capture.sourceRecipe);
     } catch (...) { return false; }
 }
@@ -700,7 +707,8 @@ CreateOutcome ApplyCreation(const CreationCapture& capture,
                 }
             if (restored) {
                 recipe::Source source;
-                restored = recipe::Capture(document, capture.sourceLabel, source)
+                restored = !core3d::bounded_curve::HasRecord(capture.sourceLabel)
+                    && recipe::Capture(document, capture.sourceLabel, source)
                     && recipe::IsEqual(source, capture.sourceRecipe);
             }
             return restored ? CreateOutcome::Refused : CreateOutcome::OutcomeUnknown;

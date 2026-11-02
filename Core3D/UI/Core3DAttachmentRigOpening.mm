@@ -606,9 +606,18 @@ struct Evidence final {
     NSData *finish(){return good&& !bytes.empty() ? Data(bytes.data(),bytes.size()) : nil;}
 };
 
+enum class NativeOwnerBranch : std::uint8_t {
+    CutProgram,
+    CutSource,
+    CompositeBoolean,
+};
+
 struct NativeOwner final {
     std::string tuple;
     std::string entityIdentifier;
+    NativeOwnerBranch branch = NativeOwnerBranch::CutProgram;
+    TDF_Label root;
+    double metersPerUnit = 0;
     TopoDS_Shape shape;
     gp_Trsf placement;
     // F4-S3: closed correspondence class re-derived from the committed
@@ -753,14 +762,12 @@ std::string BooleanCorrespondenceClass(
 // F4-S3 admission: a composite PartBoolean owner is a real retained native
 // owner. The complete graph, identities, operands and placement are captured
 // with the same witness discipline as the retained-cut owners.
-bool CaptureCompositeBooleanOwner(const Handle(OcctDocument)& document,
-                                  const TDF_Label& label, NSString *entity,
-                                  NativeOwner& output) {
-    core3d::composite_recipe::Record composite;
-    OcctObjectTransformState state;
-    if (!core3d::composite_recipe::Read(document->Document(), label, composite)
-        || !composite.value || composite.value->definition.nodes.size() < 3
-        || !document->CaptureObjectTransformStateForLabel(label, state))
+bool BuildCompositeBooleanOwner(const Handle(OcctDocument)& document,
+                                const TDF_Label& label, NSString *entity,
+                                const core3d::composite_recipe::Record& composite,
+                                const OcctObjectTransformState& state,
+                                NativeOwner& output) {
+    if (!composite.value || composite.value->definition.nodes.size() < 3)
         return false;
     const auto& graph = composite.value->definition;
     const auto* feature = std::get_if<core3d::composite_recipe::FeatureNode>(
@@ -818,19 +825,35 @@ bool CaptureCompositeBooleanOwner(const Handle(OcctDocument)& document,
     [placement addObjectsFromArray:@[@(t.X()),@(t.Y()),@(t.Z())]];
     observation.placementTransformDocument = placement;
     observation.positiveUniformScale = scale;
+    double documentUnit = 0;
+    if (!XCAFDoc_DocumentTool::GetLengthUnit(document->Document(), documentUnit)
+        || !std::isfinite(documentUnit) || documentUnit <= 0) return false;
     output.tuple = std::move(tuple); output.entityIdentifier = entity.UTF8String ?: "";
+    output.branch = NativeOwnerBranch::CompositeBoolean; output.root = label;
+    output.metersPerUnit = documentUnit;
     output.shape = state.shape; output.placement = state.transform;
     output.booleanCorrespondence = BooleanCorrespondenceClass(graph);
     output.observation = observation; return !output.shape.IsNull();
 }
 
-bool CaptureOwner(const Handle(OcctDocument)& document, NSString *entity, NativeOwner& output) {
-    TDF_Label label; if(!RootForEntity(document,entity,label)) return false;
-    OcctCylindricalCutProgramSource program; OcctCylindricalCutSource single;
-    core3d::retained_boolean::Recipe recipe; std::vector<std::uint8_t> recipeBytes; OcctObjectTransformState state;
-    if(document->CaptureCylindricalCutProgramSource(label,program)){recipe=program.recipe;recipeBytes=program.recipeBytes;state=program.original;}
-    else if(document->CaptureCylindricalCutSource(label,single)&&single.envelope.sourceFamily==2){recipe=single.envelope;state=single.original;if(!core3d::retained_boolean::Encode(recipe,recipeBytes))return false;}
-    else return CaptureCompositeBooleanOwner(document,label,entity,output);
+bool CaptureCompositeBooleanOwner(const Handle(OcctDocument)& document,
+                                  const TDF_Label& label, NSString *entity,
+                                  NativeOwner& output) {
+    core3d::composite_recipe::Record composite;
+    OcctObjectTransformState state;
+    return core3d::composite_recipe::Read(document->Document(), label, composite)
+        && document->CaptureObjectTransformStateForLabel(label, state)
+        && BuildCompositeBooleanOwner(
+            document, label, entity, composite, state, output);
+}
+
+bool BuildCutOwner(const Handle(OcctDocument)& document,
+                   const TDF_Label& label, NSString *entity,
+                   NativeOwnerBranch branch,
+                   const core3d::retained_boolean::Recipe& recipe,
+                   const std::vector<std::uint8_t>& recipeBytes,
+                   const OcctObjectTransformState& state,
+                   NativeOwner& output) {
     const auto identities=core3d::retained_boolean::Identities(recipe);
     if(entity.UTF8String==nullptr || document->DocumentIdentifier()!=core3d::retained_solid::UUIDText(identities.document)
        || std::string(entity.UTF8String)!=core3d::retained_solid::UUIDText(identities.entity)
@@ -859,8 +882,62 @@ bool CaptureOwner(const Handle(OcctDocument)& document, NSString *entity, Native
     const gp_XYZ t=state.transform.TranslationPart();[placement addObjectsFromArray:@[@(t.X()),@(t.Y()),@(t.Z())]];
     observation.placementTransformDocument=placement;observation.positiveUniformScale=scale;
     output.tuple=std::move(tuple);output.entityIdentifier=entity.UTF8String?:"";
+    output.branch=branch;output.root=label;output.metersPerUnit=identities.metersPerUnit;
     output.shape=state.shape;output.placement=state.transform;
     output.observation=observation;return !output.shape.IsNull();
+}
+
+bool CaptureOwner(const Handle(OcctDocument)& document, NSString *entity,
+                  NativeOwner& output) {
+    TDF_Label label; if(!RootForEntity(document,entity,label)) return false;
+    OcctCylindricalCutProgramSource program; OcctCylindricalCutSource single;
+    if(document->CaptureCylindricalCutProgramSource(label,program))
+        return BuildCutOwner(document,label,entity,NativeOwnerBranch::CutProgram,
+                             program.recipe,program.recipeBytes,program.original,output);
+    if(document->CaptureCylindricalCutSource(label,single)&&single.envelope.sourceFamily==2){
+        core3d::retained_boolean::Recipe recipe=single.envelope;
+        std::vector<std::uint8_t> recipeBytes;
+        return core3d::retained_boolean::Encode(recipe,recipeBytes)
+            && BuildCutOwner(document,label,entity,NativeOwnerBranch::CutSource,
+                             recipe,recipeBytes,single.original,output);
+    }
+    return CaptureCompositeBooleanOwner(document,label,entity,output);
+}
+
+bool CaptureOwnerInCommand(
+    const Handle(OcctDocument)& document,
+    const core3d::native_opening::Context& context,
+    core3d::native_opening::CommandLease& lease,
+    const NativeOwner& expected, NSString *entity, NativeOwner& output) {
+    TDF_Label root;
+    if (!RootForEntity(document, entity, root)
+        || !root.IsEqual(expected.root)) return false;
+    if (expected.branch == NativeOwnerBranch::CutProgram) {
+        OcctCylindricalCutProgramSource source;
+        return document->ReadAttachmentRigCutProgramInCommand(
+                   lease, context, root, source)
+            && BuildCutOwner(document, root, entity, expected.branch,
+                             source.recipe, source.recipeBytes,
+                             source.original, output);
+    }
+    if (expected.branch == NativeOwnerBranch::CutSource) {
+        OcctCylindricalCutSource source;
+        core3d::retained_boolean::Recipe recipe;
+        std::vector<std::uint8_t> recipeBytes;
+        if (!document->ReadAttachmentRigCutSourceInCommand(
+                lease, context, root, source)
+            || source.envelope.sourceFamily != 2) return false;
+        recipe = source.envelope;
+        return core3d::retained_boolean::Encode(recipe, recipeBytes)
+            && BuildCutOwner(document, root, entity, expected.branch,
+                             recipe, recipeBytes, source.original, output);
+    }
+    core3d::composite_recipe::Record composite;
+    OcctObjectTransformState transform;
+    return document->ReadAttachmentRigCompositeInCommand(
+               lease, context, root, composite, transform)
+        && BuildCompositeBooleanOwner(
+            document, root, entity, composite, transform, output);
 }
 
 bool SameNativeOwner(const NativeOwner& expected,
@@ -868,7 +945,12 @@ bool SameNativeOwner(const NativeOwner& expected,
     @try {
         return expected.tuple==actual.tuple
             && expected.entityIdentifier==actual.entityIdentifier
+            && expected.branch==actual.branch
+            && expected.root.IsEqual(actual.root)
+            && core3d::retained_solid::Bits(expected.metersPerUnit)
+                == core3d::retained_solid::Bits(actual.metersPerUnit)
             && expected.shape.IsEqual(actual.shape)
+            && expected.booleanCorrespondence==actual.booleanCorrespondence
             && [expected.observation.recipeWitnessBytes
                 isEqualToData:actual.observation.recipeWitnessBytes]
             && [expected.observation.operandWitnessBytes
@@ -876,7 +958,11 @@ bool SameNativeOwner(const NativeOwner& expected,
             && [expected.observation.dependentWitnessBytes
                 isEqualToData:actual.observation.dependentWitnessBytes]
             && [expected.observation.placementTransformDocument
-                isEqualToArray:actual.observation.placementTransformDocument];
+                isEqualToArray:actual.observation.placementTransformDocument]
+            && core3d::retained_solid::Bits(
+                    expected.observation.positiveUniformScale)
+                == core3d::retained_solid::Bits(
+                    actual.observation.positiveUniformScale);
     } @catch (__unused NSException *exception) { return false; }
 }
 
@@ -890,7 +976,9 @@ bool Observe(Core3DViewController *controller,const Handle(OcctDocument)& docume
     std::vector<NativeOwner> native;native.reserve(selected.count);NSMutableArray *owners=[NSMutableArray arrayWithCapacity:selected.count];
     Evidence source;source.text("shapeyard.f4.capture.v1");source.text(document->DocumentIdentifier());source.number(scene.metersPerUnit);
     source.u64(scene.revisions.documentGeneration);source.u64(scene.revisions.modelRevision);source.u64(scene.revisions.presentationRevision);source.u64(controller.documentUndoCount);source.u64(selected.count);
-    for(NSString *entity in selected){NativeOwner owner;if(!CaptureOwner(document,entity,owner))return false;source.field(owner.observation.recipeWitnessBytes.bytes,owner.observation.recipeWitnessBytes.length);source.field(owner.observation.operandWitnessBytes.bytes,owner.observation.operandWitnessBytes.length);source.field(owner.observation.dependentWitnessBytes.bytes,owner.observation.dependentWitnessBytes.length);for(NSNumber *v in owner.observation.placementTransformDocument)source.number(v.doubleValue);[owners addObject:owner.observation];native.push_back(std::move(owner));}
+    for(NSString *entity in selected){NativeOwner owner;if(!CaptureOwner(document,entity,owner)
+        ||core3d::retained_solid::Bits(owner.metersPerUnit)
+            !=core3d::retained_solid::Bits(scene.metersPerUnit))return false;source.field(owner.observation.recipeWitnessBytes.bytes,owner.observation.recipeWitnessBytes.length);source.field(owner.observation.operandWitnessBytes.bytes,owner.observation.operandWitnessBytes.length);source.field(owner.observation.dependentWitnessBytes.bytes,owner.observation.dependentWitnessBytes.length);for(NSNumber *v in owner.observation.placementTransformDocument)source.number(v.doubleValue);[owners addObject:owner.observation];native.push_back(std::move(owner));}
     NSData *sourceData=source.finish();if(!sourceData)return false;
     output.scene=scene;output.document=Text(document->DocumentIdentifier());output.selected=selected;output.owners=owners;output.source=sourceData;output.history=controller.documentUndoCount;output.nativeOwners=std::move(native);return true;
 }
@@ -1215,6 +1303,10 @@ Core3DAttachmentRigApplyResult ApplyResult(
     _lastOwnerResult={};
     if(!NSThread.isMainThread||_document.IsNull()||!context||!_cancelled)
         return Core3DAttachmentRigApplyResultUnavailable;
+    if(context!=_context||_document->Document().IsNull()
+        ||context->openingFence().document()!=_document->Document()
+        ||context->openingFence().data()!=_document->Document()->GetData())
+        return Core3DAttachmentRigApplyResultRefused;
     const bool creation = !remove && _creationIntent != nil;
     if(remove ? (!_canBind||self.validation!=nil)
               : (_canBind||(!creation&&self.validation==nil)))
@@ -1242,7 +1334,7 @@ Core3DAttachmentRigApplyResult ApplyResult(
     core3d::native_opening::CommittedEditPublication publication;
     for(const auto& nativeOwner:_nativeOwners)
         publication.replaced.push_back({nativeOwner.entityIdentifier,nativeOwner.shape});
-    const auto reobserve=[&]() noexcept {
+    const auto preCommandObservation=[&]() noexcept {
         if(!_controller||_document.IsNull()
             || _document->DocumentIdentifier()!=self.documentIdentifier.UTF8String
             || _controller.documentUndoCount!=self.historyDepth
@@ -1255,6 +1347,22 @@ Core3DAttachmentRigApplyResult ApplyResult(
         }
         return true;
     };
+    const auto transactionObservation=[&](
+        core3d::native_opening::CommandLease& lease) noexcept {
+        if(!_controller||_document.IsNull()||!context
+            ||context!=_context
+            ||_document->DocumentIdentifier()!=self.documentIdentifier.UTF8String
+            ||_controller.documentUndoCount!=self.historyDepth
+            ||_nativeOwners.size()!=self.selectedEntityIdentifiers.count)return false;
+        for(std::size_t index=0;index<_nativeOwners.size();++index){
+            NativeOwner fresh;
+            NSString *entity=self.selectedEntityIdentifiers[index];
+            if(!CaptureOwnerInCommand(_document,*context,lease,
+                    _nativeOwners[index],entity,fresh)
+                ||!SameNativeOwner(_nativeOwners[index],fresh))return false;
+        }
+        return true;
+    };
     const auto prepare = creation
         ? core3d::attachment_rig::owner::PrepareCandidate(
             [intent = _creationIntent](const auto& before, auto& output) noexcept {
@@ -1262,7 +1370,8 @@ Core3DAttachmentRigApplyResult ApplyResult(
             })
         : core3d::attachment_rig::owner::PrepareCandidate();
     _lastOwnerResult=core3d::attachment_rig::owner::Apply(
-        *_document,context,candidate,remove,reobserve,publication,*_cancelled,fault,prepare);
+        *_document,context,candidate,remove,preCommandObservation,
+        transactionObservation,publication,*_cancelled,fault,prepare);
     if (creation && (_lastOwnerResult.outcome
             == core3d::attachment_rig::owner::Outcome::Created
         || _lastOwnerResult.outcome

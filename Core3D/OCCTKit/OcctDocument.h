@@ -50,7 +50,7 @@ enum class FailureSite : std::uint8_t;
 namespace core3d::face_image::owner { enum class Outcome : std::uint8_t; struct Staging; }
 namespace core3d::face_image::persistence::bindings { enum class ReadState : int; }
 namespace core3d::text_relief::owner { struct PreparedHostPair; }
-namespace core3d::composite_recipe { struct Payload; }
+namespace core3d::composite_recipe { struct Payload; struct Record; }
 
 #include <XCAFApp_Application.hxx>
 #include <TDocStd_Document.hxx>
@@ -1607,6 +1607,25 @@ public:
     //! NativeOpeningContext lease and proves exact readback before close.
     Standard_EXPORT Standard_Boolean ReadAttachmentRigMetadata(
         core3d::attachment_rig::StoredRecord& record) const noexcept;
+    //! F4 transaction-local owner readback. These readers require the exact
+    //! live lease issued by the opening context; they do not relax ordinary
+    //! tool-input admission or expose the private cut validators.
+    Standard_EXPORT Standard_Boolean ReadAttachmentRigCutProgramInCommand(
+        core3d::native_opening::CommandLease& lease,
+        const core3d::native_opening::Context& context,
+        const TDF_Label& root,
+        OcctCylindricalCutProgramSource& source) const noexcept;
+    Standard_EXPORT Standard_Boolean ReadAttachmentRigCutSourceInCommand(
+        core3d::native_opening::CommandLease& lease,
+        const core3d::native_opening::Context& context,
+        const TDF_Label& root,
+        OcctCylindricalCutSource& source) const noexcept;
+    Standard_EXPORT Standard_Boolean ReadAttachmentRigCompositeInCommand(
+        core3d::native_opening::CommandLease& lease,
+        const core3d::native_opening::Context& context,
+        const TDF_Label& root,
+        core3d::composite_recipe::Record& composite,
+        OcctObjectTransformState& transform) const noexcept;
     Standard_EXPORT Standard_Boolean StageAttachmentRigMetadata(
         core3d::native_opening::CommandLease& lease,
         const core3d::attachment_rig::StoredRecord& before,

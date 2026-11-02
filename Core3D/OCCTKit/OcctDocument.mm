@@ -18581,6 +18581,11 @@ Standard_Boolean OcctDocument::CaptureCylindricalCutSource(
     }catch(...){output={};CORE3D_CUT_REFUSE("document-capture.exception", Standard_False);}
 }
 
+namespace {
+bool ExactLeaseOwns(const Handle(TDocStd_Document)& document,
+                    core3d::native_opening::CommandLease& lease) noexcept;
+}
+
 Standard_Boolean OcctDocument::ValidateCylindricalCutSource(
     const TDF_Label& label,OcctCylindricalCutSource& output)const noexcept {
     output={};if(!NSThread.isMainThread)CORE3D_CUT_REFUSE("document-capture.thread", Standard_False);
@@ -18682,6 +18687,68 @@ Standard_Boolean OcctDocument::ValidateCylindricalCutProgramSource(
             &&!Core3DIsValidatedRetainedR2CarrierChild(myOcafDoc,label,children.Value(i),state.retained))CORE3D_CUT_REFUSE("document-program-capture.foreign-subshape", Standard_False);
         output=std::move(result);return Standard_True;
     }catch(...){output={};CORE3D_CUT_REFUSE("document-program-capture.exception", Standard_False);}
+}
+
+Standard_Boolean OcctDocument::ReadAttachmentRigCutProgramInCommand(
+    core3d::native_opening::CommandLease& lease,
+    const core3d::native_opening::Context& context,
+    const TDF_Label& root,
+    OcctCylindricalCutProgramSource& source) const noexcept {
+    source = {};
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || myOcafDoc->GetData().IsNull() || root.IsNull()
+            || root.Data() != myOcafDoc->GetData()
+            || context.openingFence().document() != myOcafDoc
+            || context.openingFence().data() != myOcafDoc->GetData()
+            || lease.context_.get() != &context
+            || lease.document_ != myOcafDoc || lease.settled_
+            || !ExactLeaseOwns(myOcafDoc, lease)) return Standard_False;
+        return ValidateCylindricalCutProgramSource(root, source);
+    } catch (...) { source = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::ReadAttachmentRigCutSourceInCommand(
+    core3d::native_opening::CommandLease& lease,
+    const core3d::native_opening::Context& context,
+    const TDF_Label& root,
+    OcctCylindricalCutSource& source) const noexcept {
+    source = {};
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || myOcafDoc->GetData().IsNull() || root.IsNull()
+            || root.Data() != myOcafDoc->GetData()
+            || context.openingFence().document() != myOcafDoc
+            || context.openingFence().data() != myOcafDoc->GetData()
+            || lease.context_.get() != &context
+            || lease.document_ != myOcafDoc || lease.settled_
+            || !ExactLeaseOwns(myOcafDoc, lease)) return Standard_False;
+        return ValidateCylindricalCutSource(root, source);
+    } catch (...) { source = {}; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::ReadAttachmentRigCompositeInCommand(
+    core3d::native_opening::CommandLease& lease,
+    const core3d::native_opening::Context& context,
+    const TDF_Label& root,
+    core3d::composite_recipe::Record& composite,
+    OcctObjectTransformState& transform) const noexcept {
+    composite = {}; transform = {};
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || myOcafDoc->GetData().IsNull() || root.IsNull()
+            || root.Data() != myOcafDoc->GetData()
+            || context.openingFence().document() != myOcafDoc
+            || context.openingFence().data() != myOcafDoc->GetData()
+            || lease.context_.get() != &context
+            || lease.document_ != myOcafDoc || lease.settled_
+            || !ExactLeaseOwns(myOcafDoc, lease)
+            || !core3d::composite_recipe::Read(myOcafDoc, root, composite)
+            || !CaptureObjectTransformStateForLabel(root, transform)) {
+            composite = {}; transform = {}; return Standard_False;
+        }
+        return Standard_True;
+    } catch (...) { composite = {}; transform = {}; return Standard_False; }
 }
 
 Standard_Boolean OcctDocument::CaptureRetainedFilletAnchors(const TDF_Label& label,

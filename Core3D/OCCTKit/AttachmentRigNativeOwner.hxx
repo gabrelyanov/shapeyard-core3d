@@ -45,7 +45,9 @@ struct Result final {
     bool blocksOtherWork = false;
 };
 
-using Reobserve = std::function<bool()>;
+using PreCommandObservation = std::function<bool()>;
+using TransactionObservation = std::function<bool(
+    native_opening::CommandLease&)>;
 using PrepareCandidate = std::function<bool(
     const StoredRecord&, std::vector<std::uint8_t>&)>;
 
@@ -126,7 +128,8 @@ inline Result Apply(OcctDocument& document,
                     const std::shared_ptr<native_opening::Context>& context,
                     const std::vector<std::uint8_t>& candidate,
                     bool remove,
-                    const Reobserve& reobserve,
+                    const PreCommandObservation& preCommandObservation,
+                    const TransactionObservation& transactionObservation,
                     const native_opening::CommittedEditPublication& publication,
                     const std::atomic_bool& cancelled,
                     FaultPoint fault = FaultPoint::None,
@@ -134,8 +137,13 @@ inline Result Apply(OcctDocument& document,
     Result result;
     try {
         StoredRecord before;
-        if (!context || !reobserve || cancelled.load()
-            || fault == FaultPoint::Prepare || !reobserve()
+        const Handle(TDocStd_Document) native = document.Document();
+        if (!context || !preCommandObservation || !transactionObservation
+            || native.IsNull() || native->GetData().IsNull()
+            || context->openingFence().document() != native
+            || context->openingFence().data() != native->GetData()
+            || cancelled.load()
+            || fault == FaultPoint::Prepare || !preCommandObservation()
             || !document.ReadAttachmentRigMetadata(before) || !before.readable()
             || (remove && before.state != StoredReadState::Present)
             || (!remove && !prepareCandidate
@@ -154,11 +162,11 @@ inline Result Apply(OcctDocument& document,
             if (!SameIdentityDomains(before.bytes, candidate)) return result;
         }
 
-        const Handle(TDocStd_Document) native = document.Document();
         const int undoBefore = native.IsNull() ? -1 : native->GetAvailableUndos();
         auto lease = context->beginCommandLease(context->openingFence(), 64, 64);
         if (!lease || !lease->ownsOpenCommand()) return result;
-        if (cancelled.load() || fault == FaultPoint::BeforeStage || !reobserve()) {
+        if (cancelled.load() || fault == FaultPoint::BeforeStage
+            || !transactionObservation(*lease)) {
             const bool stopped = cancelled.load()
                 || fault == FaultPoint::BeforeStage;
             const bool aborted = lease->abort();
@@ -200,7 +208,7 @@ inline Result Apply(OcctDocument& document,
             && (remove || (independent.state == StoredReadState::Present
                 && independent.bytes == preparedCandidate));
         if (!readbackOK || cancelled.load() || fault == FaultPoint::BeforeCommit
-            || !reobserve()) {
+            || !transactionObservation(*lease)) {
             const bool stopped = cancelled.load()
                 || fault == FaultPoint::BeforeCommit;
             const bool aborted = lease->abort();
