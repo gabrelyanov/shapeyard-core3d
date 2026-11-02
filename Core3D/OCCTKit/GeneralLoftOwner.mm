@@ -10,11 +10,19 @@
 #if DEBUG
 // R179/D249 diagnostic-only include. Never compiled into Release.
 #include <cstdio>
+#include <cstdlib>
 #endif
 
 namespace core3d::general_loft::owner {
 namespace {
 constexpr std::uint32_t FenceWidth = 64, FenceHeight = 64;
+
+#if DEBUG
+bool ShapeyardTraceEnabled() noexcept {
+    static const bool enabled = std::getenv("SHAPEYARD_TRACE") != nullptr;
+    return enabled;
+}
+#endif
 
 SceneFence SceneOf(const native_opening::Fence& fence) noexcept {
     return {fence.documentGeneration(), fence.modelRevision(), fence.metersPerUnit()};
@@ -372,12 +380,14 @@ Receipt OcafOwner::apply(const std::shared_ptr<const Prepared>& prepared) noexce
 #if DEBUG
         // R179/D249 passive census after successful readback/publication.
         // Diagnostics only: failures here must not affect the committed result.
-        try {
-            const std::string census = persistence::debug::Census(
-                state_->document->Document(), "");
-            std::fprintf(stderr, "R179_LOFT_CENSUS phase=loft-apply %s\n",
-                         census.c_str());
-        } catch (...) {}
+        if (ShapeyardTraceEnabled()) {
+            try {
+                const std::string census = persistence::debug::Census(
+                    state_->document->Document(), "");
+                std::fprintf(stderr, "R179_LOFT_CENSUS phase=loft-apply %s\n",
+                             census.c_str());
+            } catch (...) {}
+        }
 #endif
         Receipt receipt; receipt.outcome = Outcome::committed; receipt.reason = "committed";
         receipt.scene = scene; receipt.definition = prepared->candidate;

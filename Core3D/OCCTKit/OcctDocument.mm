@@ -35,8 +35,14 @@
 
 #if DEBUG // Cut475 phase diagnostics only
 #include <cstdio>
+#include <cstdlib>
 #include <atomic>
 namespace {
+bool ShapeyardTraceEnabled() noexcept {
+    static const bool enabled = std::getenv("SHAPEYARD_TRACE") != nullptr;
+    return enabled;
+}
+
 // Thread-safe bounded diagnostics; literals/integers, no document or user text.
 void Cut475Trace(const char* stage, int detail=-1) noexcept {
     static std::atomic<unsigned> emitted{0};
@@ -21988,26 +21994,26 @@ Standard_Boolean OcctDocument::CaptureObjectTransformStateForLabel(
             treatmentAttribute=Handle(core3d::retained_edge_treatment::Attribute)::DownCast(rawAttribute);
             if(treatmentAttribute.IsNull()){treatmentRefusal=core3d::retained_edge_treatment::Refusal::MalformedCarrier;
 #if DEBUG
-                std::fprintf(stderr,"B1B2_CAPTURE phase=carrier-dispatch arm=wrong-type refusal=%d\n",int(treatmentRefusal));
+                if (ShapeyardTraceEnabled()) std::fprintf(stderr,"B1B2_CAPTURE phase=carrier-dispatch arm=wrong-type refusal=%d\n",int(treatmentRefusal));
 #endif
                 return Standard_False;}
             ++treatmentAttributeCount;
         }
         if(treatmentAttributeCount>1){treatmentRefusal=core3d::retained_edge_treatment::Refusal::MalformedCarrier;
 #if DEBUG
-            std::fprintf(stderr,"B1B2_CAPTURE phase=carrier-dispatch arm=duplicate refusal=%d\n",int(treatmentRefusal));
+            if (ShapeyardTraceEnabled()) std::fprintf(stderr,"B1B2_CAPTURE phase=carrier-dispatch arm=duplicate refusal=%d\n",int(treatmentRefusal));
 #endif
             return Standard_False;}
         if(treatmentAttributeCount==0){
 #if DEBUG
-            std::fprintf(stderr,"B1B2_CAPTURE phase=carrier-dispatch arm=none refusal=%d\n",int(treatmentRefusal));
+            if (ShapeyardTraceEnabled()) std::fprintf(stderr,"B1B2_CAPTURE phase=carrier-dispatch arm=none refusal=%d\n",int(treatmentRefusal));
 #endif
         }
         else if(treatmentAttribute->value()&&!treatmentAttribute->valueR2()){
             const bool b1Read=core3d::retained_edge_treatment::Read(myOcafDoc,label,captured.edgeTreatment,treatmentRefusal)
                 &&captured.edgeTreatment.has_value();
 #if DEBUG
-            std::fprintf(stderr,"B1B2_CAPTURE phase=carrier-dispatch arm=b1 refusal=%d\n",int(treatmentRefusal));
+            if (ShapeyardTraceEnabled()) std::fprintf(stderr,"B1B2_CAPTURE phase=carrier-dispatch arm=b1 refusal=%d\n",int(treatmentRefusal));
 #endif
             if(!b1Read)return Standard_False;
         }
@@ -22016,7 +22022,7 @@ Standard_Boolean OcctDocument::CaptureObjectTransformStateForLabel(
             const bool r2Read=core3d::retained_edge_treatment::ReadR2(myOcafDoc,label,treatmentR2,treatmentRefusal)
                 &&treatmentR2.has_value();
 #if DEBUG
-            std::fprintf(stderr,"B1B2_CAPTURE phase=carrier-dispatch arm=r2 refusal=%d\n",int(treatmentRefusal));
+            if (ShapeyardTraceEnabled()) std::fprintf(stderr,"B1B2_CAPTURE phase=carrier-dispatch arm=r2 refusal=%d\n",int(treatmentRefusal));
 #endif
             if(!r2Read)return Standard_False;
             captured.edgeTreatmentR2=core3d::retained_edge_treatment::r2::Record{
@@ -22026,7 +22032,7 @@ Standard_Boolean OcctDocument::CaptureObjectTransformStateForLabel(
         }
         else{treatmentRefusal=core3d::retained_edge_treatment::Refusal::MalformedCarrier;
 #if DEBUG
-            std::fprintf(stderr,"B1B2_CAPTURE phase=carrier-dispatch arm=neither-or-both refusal=%d\n",int(treatmentRefusal));
+            if (ShapeyardTraceEnabled()) std::fprintf(stderr,"B1B2_CAPTURE phase=carrier-dispatch arm=neither-or-both refusal=%d\n",int(treatmentRefusal));
 #endif
             return Standard_False;}
         OcctAuthoredFrameRecord frames;
@@ -28180,12 +28186,14 @@ Standard_Boolean OcctDocument::undo() {
                 core3d::debug::LiveTransactionObservation::Kind::UndoCompleted, myOcafDoc);
             // R179/D249 passive census after a successful Undo. Diagnostics
             // only; failures here must not affect the history result.
-            try {
-                const std::string census =
-                    core3d::general_loft::persistence::debug::Census(myOcafDoc, "");
-                std::fprintf(stderr, "R179_LOFT_CENSUS phase=undo %s\n",
-                             census.c_str());
-            } catch (...) {}
+            if (ShapeyardTraceEnabled()) {
+                try {
+                    const std::string census =
+                        core3d::general_loft::persistence::debug::Census(myOcafDoc, "");
+                    std::fprintf(stderr, "R179_LOFT_CENSUS phase=undo %s\n",
+                                 census.c_str());
+                } catch (...) {}
+            }
 #endif
             NotifyChanges();
 			return Standard_True;
@@ -28233,12 +28241,14 @@ Standard_Boolean OcctDocument::redo() {
                 core3d::debug::LiveTransactionObservation::Kind::RedoCompleted, myOcafDoc);
             // R179/D249 passive census after a successful Redo. Diagnostics
             // only; failures here must not affect the history result.
-            try {
-                const std::string census =
-                    core3d::general_loft::persistence::debug::Census(myOcafDoc, "");
-                std::fprintf(stderr, "R179_LOFT_CENSUS phase=redo %s\n",
-                             census.c_str());
-            } catch (...) {}
+            if (ShapeyardTraceEnabled()) {
+                try {
+                    const std::string census =
+                        core3d::general_loft::persistence::debug::Census(myOcafDoc, "");
+                    std::fprintf(stderr, "R179_LOFT_CENSUS phase=redo %s\n",
+                                 census.c_str());
+                } catch (...) {}
+            }
 #endif
 			NotifyChanges();
 			return Standard_True;
@@ -28298,12 +28308,14 @@ std::string OcctDocument::save(
 #if DEBUG
         // R179/D249 passive census immediately before SaveAs. Diagnostics
         // only; failures here must not affect the save.
-        try {
-            const std::string census =
-                core3d::general_loft::persistence::debug::Census(myOcafDoc, "");
-            std::fprintf(stderr, "R179_LOFT_CENSUS phase=save %s\n",
-                         census.c_str());
-        } catch (...) {}
+        if (ShapeyardTraceEnabled()) {
+            try {
+                const std::string census =
+                    core3d::general_loft::persistence::debug::Census(myOcafDoc, "");
+                std::fprintf(stderr, "R179_LOFT_CENSUS phase=save %s\n",
+                             census.c_str());
+            } catch (...) {}
+        }
 #endif
         PCDM_StoreStatus status = app->SaveAs(
             myOcafDoc, path.c_str(), progress); // ".cbf"

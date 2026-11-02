@@ -144,6 +144,9 @@ private:
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#if DEBUG
+#include <cstdlib>
+#endif
 #include <exception>
 #include <functional>
 #include <TDF_Delta.hxx>
@@ -164,6 +167,13 @@ private:
 #include <vector>
 
 namespace {
+#if DEBUG
+bool ShapeyardTraceEnabled() noexcept {
+    static const bool enabled = std::getenv("SHAPEYARD_TRACE") != nullptr;
+    return enabled;
+}
+#endif
+
 bool CaptureTextReliefConstructionOwners(
     const Handle(TDocStd_Document)& document,
     TDF_LabelMap& owners) noexcept {
@@ -12499,13 +12509,15 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string& theFilename,
 #if DEBUG
 		// R179/D249 passive census of the isolated candidate, immediately
 		// before legacy migration. Diagnostics only.
-		try {
-			const std::string census =
-				core3d::general_loft::persistence::debug::Census(candidate, "");
-			std::fprintf(stderr,
-				"R179_LOFT_CENSUS phase=import-pre-migration %s\n",
-				census.c_str());
-		} catch (...) {}
+		if (ShapeyardTraceEnabled()) {
+			try {
+				const std::string census =
+					core3d::general_loft::persistence::debug::Census(candidate, "");
+				std::fprintf(stderr,
+					"R179_LOFT_CENSUS phase=import-pre-migration %s\n",
+					census.c_str());
+			} catch (...) {}
+		}
 #endif
 		if (!myDoc->MigrateLegacyIdentifiers(candidate)) {
 			CloseDocumentNoThrow(app, candidate);
@@ -12514,13 +12526,15 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string& theFilename,
 #if DEBUG
 		// R179/D249 passive census of the isolated candidate, immediately
 		// after legacy migration. Diagnostics only.
-		try {
-			const std::string census =
-				core3d::general_loft::persistence::debug::Census(candidate, "");
-			std::fprintf(stderr,
-				"R179_LOFT_CENSUS phase=import-post-migration %s\n",
-				census.c_str());
-		} catch (...) {}
+		if (ShapeyardTraceEnabled()) {
+			try {
+				const std::string census =
+					core3d::general_loft::persistence::debug::Census(candidate, "");
+				std::fprintf(stderr,
+					"R179_LOFT_CENSUS phase=import-post-migration %s\n",
+					census.c_str());
+			} catch (...) {}
+		}
 #endif
 		candidate->SetUndoLimit(OcctDocument::kNativeSessionUndoLimit);
 
@@ -12717,12 +12731,14 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
 #if DEBUG
         // R179/D249 passive census of the candidate after the isolated Open,
         // before it is closed. Diagnostics only.
-        try {
-            const std::string census =
-                core3d::general_loft::persistence::debug::Census(candidate, "");
-            std::fprintf(stderr, "R179_LOFT_CENSUS phase=validate-cbf %s\n",
-                         census.c_str());
-        } catch (...) {}
+        if (ShapeyardTraceEnabled()) {
+            try {
+                const std::string census =
+                    core3d::general_loft::persistence::debug::Census(candidate, "");
+                std::fprintf(stderr, "R179_LOFT_CENSUS phase=validate-cbf %s\n",
+                             census.c_str());
+            } catch (...) {}
+        }
 #endif
         TDF_LabelMap activeDefinitionLabels;
 #if DEBUG
