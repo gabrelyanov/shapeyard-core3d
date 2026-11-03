@@ -2806,6 +2806,16 @@ std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> Core3DViewer:
                     ||transformed.selectorSteps.size()!=sourceRows.size()){
                     refusal=et::Refusal::UnsupportedTransform;return {};
                 }
+                if(oldToRequested.IsNegative()){
+                    // These tangents follow oriented face boundaries. A
+                    // handedness reversal reverses each use relative to the
+                    // transformed curve; the generic transform has already
+                    // carried and ordered the outward normals.
+                    for(auto& row:transformed.selectorSteps)
+                        for(auto& role:row.second)
+                            role.tangent={-role.tangent[0],-role.tangent[1],
+                                -role.tangent[2]};
+                }
                 for(std::size_t index=0;index<sourceRows.size();++index)
                     transportedRoles.selectorSteps[sourceRows[index]]=
                         std::move(transformed.selectorSteps[index]);

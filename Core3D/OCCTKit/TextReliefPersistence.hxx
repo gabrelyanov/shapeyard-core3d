@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BoundedCurveAttribute.hxx"
+#include "ProfilePersistence.hxx"
 #include "RetainedSolidAttribute.hxx"
 #include "TextReliefDefinition.hxx"
 
@@ -117,7 +118,7 @@ inline bool ReadAll(const Handle(TDocStd_Document)& document,
         std::vector<Record> staged; std::set<UUID> features, roots;
         TDF_LabelMap owners, labels; std::size_t aggregate = 0, visited = 0;
         for (TDF_ChildIterator it(root, Standard_True); it.More(); it.Next()) {
-            if (++visited > 50'000) return false;
+            if (++visited > profile::MaximumLabels) return false;
             const TDF_Label label = it.Value();
             if (!label.IsAttribute(AttributeID())) continue;
             if (staged.size() >= MaximumRecords || !labels.Add(label)) return false;
