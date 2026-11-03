@@ -18,6 +18,7 @@ struct PayloadR2 final { r2::Definition definition; std::vector<std::uint8_t> by
 class BinaryDriver;
 class Core3D_RetainedEdgeTreatment final:public TDF_Attribute {
 public:
+    DEFINE_STANDARD_RTTI_INLINE(Core3D_RetainedEdgeTreatment, TDF_Attribute)
     const Standard_GUID& ID() const override{return AttributeID();}
     Handle(TDF_Attribute) NewEmpty() const override{return new Core3D_RetainedEdgeTreatment;}
     void Restore(const Handle(TDF_Attribute)& other) override{auto source=Handle(Core3D_RetainedEdgeTreatment)::DownCast(other);value_=source->value_;valueR2_=source->valueR2_;}
