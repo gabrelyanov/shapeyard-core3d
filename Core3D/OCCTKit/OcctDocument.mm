@@ -12527,19 +12527,22 @@ core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources
                 && admitted.snapshot->history() == core3d::ordinary_input::History::Absent
                 && admitted.snapshot->representation()
                     == core3d::ordinary_input::Representation::BRepSolid) {
-                ordinary = true;
-                std::size_t faces = 0;
-                for (TopExp_Explorer explorer(admitted.snapshot->state_->detachedShape,
-                        TopAbs_FACE); explorer.More(); explorer.Next()) {
-                    ++faces;
-                    const BRepAdaptor_Surface surface(
-                        TopoDS::Face(explorer.Current()), Standard_True);
-                    if (surface.GetType() != GeomAbs_Plane) {
-                        ordinary = false;
-                        break;
-                    }
+                BRepBuilderAPI_Copy validation(
+                    admitted.snapshot->state_->detachedShape,
+                    Standard_True, Standard_False);
+                TopoDS_Shape validated;
+                if (validation.IsDone()) validated = validation.Shape();
+                ordinary = !validated.IsNull()
+                    && validated.ShapeType() == TopAbs_SOLID
+                    && BRepCheck_Analyzer(
+                        validated, Standard_True).IsValid();
+                std::size_t shells = 0;
+                for (TopExp_Explorer explorer(validated, TopAbs_SHELL);
+                     ordinary && explorer.More(); explorer.Next()) {
+                    ++shells;
+                    ordinary = BRep_Tool::IsClosed(explorer.Current());
                 }
-                ordinary = ordinary && faces > 0;
+                ordinary = ordinary && shells > 0;
             }
             if (ordinary) {
                 state->ordinarySources[index] = admitted.snapshot;
