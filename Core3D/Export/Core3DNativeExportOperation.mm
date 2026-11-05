@@ -1106,6 +1106,29 @@ bool ApplyPrivateExportTransforms(
     return document->ApplyTransforms(phases.Next());
 }
 
+bool BinarySTLFacetHasZeroArea(
+    const std::array<float, 9>& vertices) noexcept {
+    const double firstToSecondX =
+        static_cast<double>(vertices[3]) - vertices[0];
+    const double firstToSecondY =
+        static_cast<double>(vertices[4]) - vertices[1];
+    const double firstToSecondZ =
+        static_cast<double>(vertices[5]) - vertices[2];
+    const double firstToThirdX =
+        static_cast<double>(vertices[6]) - vertices[0];
+    const double firstToThirdY =
+        static_cast<double>(vertices[7]) - vertices[1];
+    const double firstToThirdZ =
+        static_cast<double>(vertices[8]) - vertices[2];
+    const double crossX = firstToSecondY * firstToThirdZ
+        - firstToSecondZ * firstToThirdY;
+    const double crossY = firstToSecondZ * firstToThirdX
+        - firstToSecondX * firstToThirdZ;
+    const double crossZ = firstToSecondX * firstToThirdY
+        - firstToSecondY * firstToThirdX;
+    return crossX == 0.0 && crossY == 0.0 && crossZ == 0.0;
+}
+
 Handle(Poly_Triangulation) BuildBinarySTLMesh(
     const TopoDS_Shape& shape,
     const double millimetersPerUnit,
@@ -1204,14 +1227,24 @@ Handle(Poly_Triangulation) BuildBinarySTLMesh(
                                point.Y() * millimetersPerUnit,
                                point.Z() * millimetersPerUnit);
             }
-            if (!std::isfinite(point.X())
-                || !std::isfinite(point.Y())
-                || !std::isfinite(point.Z())) {
+            const std::array<float, 3> serializedPoint = {
+                static_cast<float>(point.X()),
+                static_cast<float>(point.Y()),
+                static_cast<float>(point.Z()),
+            };
+            if (!std::isfinite(serializedPoint[0])
+                || !std::isfinite(serializedPoint[1])
+                || !std::isfinite(serializedPoint[2])) {
                 throw NativeExportFailure(
                     Core3DNativeExportErrorMeshingFailed,
                     "The STL mesh contains a non-finite vertex.");
             }
-            mesh->SetNode(nodeOffset + nodeIndex, point);
+            mesh->SetNode(
+                nodeOffset + nodeIndex,
+                gp_Pnt(
+                    serializedPoint[0],
+                    serializedPoint[1],
+                    serializedPoint[2]));
         }
         for (Standard_Integer triangleIndex = 1;
              triangleIndex <= triangulation->NbTriangles();
@@ -1236,16 +1269,38 @@ Handle(Poly_Triangulation) BuildBinarySTLMesh(
             if (reversesWinding) {
                 std::swap(second, third);
             }
+            const gp_Pnt firstPoint = mesh->Node(nodeOffset + first);
+            const gp_Pnt secondPoint = mesh->Node(nodeOffset + second);
+            const gp_Pnt thirdPoint = mesh->Node(nodeOffset + third);
+            if (BinarySTLFacetHasZeroArea({
+                    static_cast<float>(firstPoint.X()),
+                    static_cast<float>(firstPoint.Y()),
+                    static_cast<float>(firstPoint.Z()),
+                    static_cast<float>(secondPoint.X()),
+                    static_cast<float>(secondPoint.Y()),
+                    static_cast<float>(secondPoint.Z()),
+                    static_cast<float>(thirdPoint.X()),
+                    static_cast<float>(thirdPoint.Y()),
+                    static_cast<float>(thirdPoint.Z()),
+                })) {
+                continue;
+            }
+            ++triangleOffset;
             mesh->SetTriangle(
-                triangleOffset + triangleIndex,
+                triangleOffset,
                 Poly_Triangle(
                     nodeOffset + first,
                     nodeOffset + second,
                     nodeOffset + third));
         }
         nodeOffset += triangulation->NbNodes();
-        triangleOffset += triangulation->NbTriangles();
     }
+    if (triangleOffset <= 0) {
+        throw NativeExportFailure(
+            Core3DNativeExportErrorNoGeometry,
+            "There are no non-degenerate triangles to export.");
+    }
+    mesh->ResizeTriangles(triangleOffset, Standard_True);
     buildScope.Next(1).Close();
     ThrowIfCancelled(state);
     return mesh;
@@ -1347,7 +1402,11 @@ bool ValidateBinarySTLArtifact(
             != static_cast<std::streamsize>(triangle.size())) {
             return false;
         }
-        for (std::size_t offset = 0; offset < 48; offset += 4) {
+        std::array<float, 12> components = {};
+        for (std::size_t componentIndex = 0;
+             componentIndex < components.size();
+             ++componentIndex) {
+            const std::size_t offset = componentIndex * sizeof(float);
             const std::uint32_t bits =
                 ReadUInt32LittleEndian(triangle.data() + offset);
             float value = 0.0f;
@@ -1355,6 +1414,14 @@ bool ValidateBinarySTLArtifact(
             if (!std::isfinite(value)) {
                 return false;
             }
+            components[componentIndex] = value;
+        }
+        if (BinarySTLFacetHasZeroArea({
+                components[3], components[4], components[5],
+                components[6], components[7], components[8],
+                components[9], components[10], components[11],
+            })) {
+            return false;
         }
     }
     return input.peek() == std::char_traits<char>::eof()
