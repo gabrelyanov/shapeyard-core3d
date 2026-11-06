@@ -18587,6 +18587,75 @@ Standard_Boolean OcctDocument::CaptureCylindricalCutSource(
 namespace {
 bool ExactLeaseOwns(const Handle(TDocStd_Document)& document,
                     core3d::native_opening::CommandLease& lease) noexcept;
+
+// Add Cube and Add Cylinder deliberately have no authored feature record. Keep
+// that absence durable, but capture their exact analytic primitive kind as the
+// already-supported profile source used by the retained-cut envelope.
+bool CaptureUntouchedCutPrimitive(const TopoDS_Shape& shape,double unit,
+    core3d::profile::Parameters& output) noexcept {
+    output={};
+    try {
+        if(shape.IsNull()||shape.ShapeType()!=TopAbs_SOLID
+            ||shape.Orientation()!=TopAbs_FORWARD||!std::isfinite(unit)||unit<=0
+            ||!BRepCheck_Analyzer(shape,Standard_True).IsValid())return false;
+        std::array<std::vector<double>,3> planes;std::optional<gp_Cylinder> cylinder;
+        int faces=0;
+        for(TopExp_Explorer it(shape,TopAbs_FACE);it.More();it.Next()){
+            ++faces;const auto face=TopoDS::Face(it.Current());
+            BRepAdaptor_Surface surface(face,Standard_True);
+            if(surface.GetType()==GeomAbs_Plane){
+                const auto plane=surface.Plane();const auto direction=plane.Axis().Direction();
+                const std::array<double,3> components={std::abs(direction.X()),std::abs(direction.Y()),std::abs(direction.Z())};
+                const auto found=std::max_element(components.begin(),components.end());
+                const int axis=int(std::distance(components.begin(),found));
+                if(*found<1-1e-12)return false;
+                const auto location=plane.Location();
+                planes[axis].push_back(axis==0?location.X():axis==1?location.Y():location.Z());
+            }else if(surface.GetType()==GeomAbs_Cylinder){
+                if(cylinder)return false;cylinder=surface.Cylinder();
+            }else return false;
+        }
+        TopTools_IndexedMapOfShape edges,vertices;TopExp::MapShapes(shape,TopAbs_EDGE,edges);
+        TopExp::MapShapes(shape,TopAbs_VERTEX,vertices);
+        core3d::profile::Parameters candidate;candidate.metersPerUnit=unit;
+        candidate.definition.plane=0;
+        if(faces==6&&!cylinder&&edges.Extent()==12&&vertices.Extent()==8){
+            for(auto& values:planes){
+                if(values.size()!=2)return false;std::sort(values.begin(),values.end());
+                if(!std::isfinite(values[0])||!std::isfinite(values[1])
+                    ||values[1]-values[0]<1e-3)return false;
+            }
+            // Product Add Cube is an XY extrusion from Z=0. Requiring that
+            // primitive frame prevents an arbitrary six-plane solid from being
+            // reinterpreted as authored history.
+            if(std::abs(planes[2][0])>Precision::Confusion())return false;
+            candidate.definition.depth=planes[2][1]-planes[2][0];
+            candidate.definition.points={{planes[0][0],planes[1][0]},
+                {planes[0][1],planes[1][0]},{planes[0][1],planes[1][1]},
+                {planes[0][0],planes[1][1]}};
+        }else if(faces==3&&cylinder&&edges.Extent()==3&&vertices.Extent()==2){
+            if(!planes[0].empty()||!planes[1].empty()||planes[2].size()!=2)return false;
+            std::sort(planes[2].begin(),planes[2].end());
+            const auto axis=cylinder->Axis();const auto direction=axis.Direction();
+            if(std::abs(direction.Z())<1-1e-12
+                ||std::abs(planes[2][0])>Precision::Confusion()
+                ||!std::isfinite(cylinder->Radius())||cylinder->Radius()<1e-3
+                ||planes[2][1]-planes[2][0]<1e-3)return false;
+            candidate.definition.depth=planes[2][1]-planes[2][0];
+            candidate.definition.circle=core3d::ProfileCircularSection{
+                gp_Pnt2d(axis.Location().X(),axis.Location().Y()),cylinder->Radius(),0};
+        }else return false;
+        std::vector<double> values;if(!core3d::profile::Encode(candidate,values))return false;
+        const TopoDS_Shape rebuilt=BuildPlainProfileOperationSolid(candidate);
+        if(rebuilt.IsNull()||!BRepCheck_Analyzer(rebuilt,Standard_True).IsValid())return false;
+        GProp_GProps actualMass,rebuiltMass;BRepGProp::VolumeProperties(shape,actualMass);
+        BRepGProp::VolumeProperties(rebuilt,rebuiltMass);
+        const double scale=std::max({1.0,std::abs(actualMass.Mass()),std::abs(rebuiltMass.Mass())});
+        if(!std::isfinite(actualMass.Mass())||!std::isfinite(rebuiltMass.Mass())
+            ||std::abs(actualMass.Mass()-rebuiltMass.Mass())>scale*1e-10)return false;
+        output=std::move(candidate);return true;
+    }catch(...){output={};return false;}
+}
 }
 
 Standard_Boolean OcctDocument::ValidateCylindricalCutSource(
@@ -18607,7 +18676,9 @@ Standard_Boolean OcctDocument::ValidateCylindricalCutSource(
         auto& e=result.envelope;
         const unsigned families=unsigned(!state.profile.label.IsNull())+unsigned(!state.enclosure.label.IsNull())
             +unsigned(!state.sweep.label.IsNull())+unsigned(!state.loft.label.IsNull())+unsigned(bool(state.retained.value));
-        if(families!=1)CORE3D_CUT_REFUSE("document-capture.family-census", Standard_False);
+        core3d::profile::Parameters primitive;
+        const bool untouchedPrimitive=families==0&&CaptureUntouchedCutPrimitive(state.shape,unit,primitive);
+        if(families!=1&&!untouchedPrimitive)CORE3D_CUT_REFUSE("document-capture.family-census", Standard_False);
         TDF_Label metadata;
         if(state.retained.value){
             const auto* legacy=std::get_if<core3d::retained_solid::Envelope>(&state.retained.value->envelope);
@@ -18620,7 +18691,12 @@ Standard_Boolean OcctDocument::ValidateCylindricalCutSource(
                 ||!core3d::retained_solid::ReadUUID(label,EntityIdentifierAttributeID(),e.entity)
                 ||!core3d::retained_solid::ReadUUID(label,DefinitionIdentifierAttributeID(),e.definition))CORE3D_CUT_REFUSE("document-capture.identities", Standard_False);
             std::string identifier;
-            if(!state.profile.label.IsNull()){
+            if(untouchedPrimitive){
+                e.sourceFamily=1;e.sourceSchema=core3d::profile::SchemaFor(primitive);
+                if(!core3d::profile::Encode(primitive,e.sourceValues)
+                    ||!core3d::receipt::ParseUUID(state.definitionIdentifier,e.sourceFeature))
+                    CORE3D_CUT_REFUSE("document-capture.primitive-profile", Standard_False);
+            }else if(!state.profile.label.IsNull()){
                 if(!state.profile.IsCurrent(myOcafDoc,label))CORE3D_CUT_REFUSE("document-capture.profile-current", Standard_False);
                 e.sourceFamily=1;e.sourceSchema=core3d::profile::SchemaFor(state.profile.parameters);
                 e.sourceValues=state.profile.values;metadata=state.profile.label;identifier=state.profile.identifier;
@@ -18633,7 +18709,7 @@ Standard_Boolean OcctDocument::ValidateCylindricalCutSource(
                 e.sourceFamily=3;e.sourceSchema=core3d::loft_persistence::Schema;
                 e.sourceValues=state.loft.values;metadata=state.loft.label;identifier=state.loft.identifier;
             }else CORE3D_CUT_REFUSE("document-capture.unsupported-family", Standard_False);
-            if(!core3d::receipt::ParseUUID(identifier,e.sourceFeature))CORE3D_CUT_REFUSE("document-capture.source-uuid", Standard_False);
+            if(!untouchedPrimitive&&!core3d::receipt::ParseUUID(identifier,e.sourceFeature))CORE3D_CUT_REFUSE("document-capture.source-uuid", Standard_False);
             result.base=state.shape;
         }
         if(core3d::retained_solid::Bits(e.metersPerUnit)!=core3d::retained_solid::Bits(unit)
@@ -18908,9 +18984,20 @@ Standard_Boolean OcctDocument::StageCylindricalCutReplacement(
         OcctScalarAppearanceState appearance;if(!CaptureScalarAppearanceForSavedCut(previous.label,appearance))CORE3D_CUT_REFUSE("staging.appearance-before", Standard_False);
         const auto shapes=XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());if(shapes.IsNull())CORE3D_CUT_REFUSE("staging.shape-tool", Standard_False);
         const auto rebuilding=wholeProgram||source.rebuilding;
-        const auto metadata=rebuilding?previous.retained.label:
+        auto metadata=rebuilding?previous.retained.label:
             !previous.profile.label.IsNull()?previous.profile.label:
             !previous.enclosure.label.IsNull()?previous.enclosure.label:previous.loft.label;
+        if(metadata.IsNull()&&!rebuilding){
+            // An untouched primitive has no source-recipe child to replace.
+            // Allocate only the existing retained-solid carrier location; the
+            // synthesized profile remains inside its established envelope.
+            int maximumTag=r::MinimumRecordTag-1;
+            for(TDF_ChildIterator it(previous.label,Standard_False);it.More();it.Next())
+                maximumTag=std::max(maximumTag,it.Value().Tag());
+            if(maximumTag==std::numeric_limits<int>::max())
+                CORE3D_CUT_REFUSE("staging.primitive-metadata-budget", Standard_False);
+            metadata=previous.label.FindChild(maximumTag+1,Standard_True);
+        }
         if(metadata.IsNull()||metadata.Tag()<r::MinimumRecordTag)CORE3D_CUT_REFUSE("staging.metadata", Standard_False);
         // Single ordinary-owned command: preserve original occurrence scalars,
         // material/name/identity labels and pair owner result with the carrier.
