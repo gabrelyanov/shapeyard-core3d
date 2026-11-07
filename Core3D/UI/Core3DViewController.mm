@@ -9199,7 +9199,7 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
             c::RetainedProgramSuffixFeatureKind,
             c::RetainedProgramSuffixFeatureCodec});
         controls["production-registry-has-exact-closed-codecs"] =
-            registry.size() == 7
+            registry.size() == 8
             && registry.find({c::PartBooleanFeatureKind,
                               c::PartBooleanFeatureCodec}) != nullptr
             && registry.find({c::PartBooleanFeatureKind,
@@ -9210,6 +9210,8 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
                               c::PartBooleanRecipeFeatureCodec}) != nullptr
             && registry.find({c::PartBooleanFeatureKind,
                               c::PartBooleanOriginalsFeatureCodec}) != nullptr
+            && registry.find({c::PartBooleanFeatureKind,
+                              c::PartBooleanResultSetFeatureCodec}) != nullptr
             && registry.find({c::RetainedProgramSuffixFeatureKind,
                               c::RetainedProgramSuffixFeatureCodec}) != nullptr
             && registry.find({core3d::draft_faces::FeatureKind,

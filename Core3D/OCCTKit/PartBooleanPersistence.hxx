@@ -971,4 +971,57 @@ inline bool DecodeOriginals(const std::vector<std::uint8_t>& bytes,
         output = std::move(value); return true;
     } catch (...) { output = {}; return false; }
 }
+
+// SYPB/6 reuses the exact SYPB/4 original/effective blocks, but explicitly
+// versions the result domain. The frozen codec-4 encoder/reader above remain
+// unchanged. Only ordinary operands may enter this bounded result family.
+inline bool HasOrdinaryOriginal(const OriginalsDefinition& value) noexcept {
+    return std::any_of(value.originals.inputs.begin(), value.originals.inputs.end(),
+        [](const auto& input) { return input.recipeKind == RecipeInputFamily::OrdinarySource; });
+}
+
+inline bool EncodeBooleanOriginals(const OriginalsDefinition& value,
+                                  std::vector<std::uint8_t>& output) noexcept {
+    output.clear();
+    try {
+        if (value.resultSet && !HasOrdinaryOriginal(value)) return false;
+        if (!EncodeOriginals(value, output)) return false;
+        if (!value.resultSet) return true;
+        output[4] = ResultSetCodecVersion;
+        std::vector<std::uint8_t> body(output.begin(), output.end() - 32);
+        Digest digest{};
+        if (!retained_solid::Hash(body, digest)) { output.clear(); return false; }
+        std::copy(digest.begin(), digest.end(), output.end() - 32);
+        return true;
+    } catch (...) { output.clear(); return false; }
+}
+
+inline bool DecodeBooleanOriginals(const std::vector<std::uint8_t>& bytes,
+                                  OriginalsDefinition& output) noexcept {
+    output = {};
+    try {
+        if (bytes.size() < 8 || bytes[4] != ResultSetCodecVersion)
+            return DecodeOriginals(bytes, output);
+        if (bytes.size() < 160 || bytes.size() > MaximumPayloadBytes
+            || std::memcmp(bytes.data(), "SYPB\6\0\0\0", 8) != 0) return false;
+        std::vector<std::uint8_t> body(bytes.begin(), bytes.end() - 32);
+        Digest expected{}, actual{};
+        if (!retained_solid::Hash(body, expected)) return false;
+        std::copy_n(bytes.end() - 32, 32, actual.begin());
+        if (expected != actual) return false;
+        auto legacy = bytes;
+        legacy[4] = OriginalsPayloadVersion;
+        body.assign(legacy.begin(), legacy.end() - 32);
+        if (!retained_solid::Hash(body, expected)) return false;
+        std::copy(expected.begin(), expected.end(), legacy.end() - 32);
+        OriginalsDefinition decoded;
+        if (!DecodeOriginals(legacy, decoded) || !HasOrdinaryOriginal(decoded)) return false;
+        decoded.resultSet = true;
+        std::vector<std::uint8_t> canonical;
+        if (!EncodeBooleanOriginals(decoded, canonical) || canonical != bytes) return false;
+        output = std::move(decoded);
+        return true;
+    } catch (...) { output = {}; return false; }
+}
+
 } // namespace core3d::part_boolean

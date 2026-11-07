@@ -174,6 +174,27 @@ inline TopoDS_Shape PersistenceMaterializeDetached(
     } catch (...) { return {}; }
 }
 
+// Explicit sibling for the SYPB/6 output; never broadens source families.
+inline TopoDS_Shape PersistenceMaterializeResultSetDetached(
+    const TopoDS_Shape& shape) noexcept {
+    try {
+        if (!result_set::Valid(shape)) return {};
+        PersistenceBuffer buffer;
+        std::ostream writer(&buffer);
+        BinTools::Write(shape, writer, Standard_False, Standard_False,
+                        BinTools_FormatVersion_VERSION_4);
+        if (!writer.good() || buffer.size() == 0) return {};
+        buffer.beginRead();
+        std::istream reader(&buffer);
+        TopoDS_Shape restored;
+        BinTools::Read(restored, reader);
+        if (!reader.good() || !buffer.exhausted()
+            || !result_set::Valid(restored)
+            || !SameTopologyCensus(shape, restored)) return {};
+        return restored;
+    } catch (...) { return {}; }
+}
+
 inline retained_part_boolean::Operation NativeOperation(Operation operation) noexcept {
     switch (operation) {
         case Operation::Union: return retained_part_boolean::Operation::Union;

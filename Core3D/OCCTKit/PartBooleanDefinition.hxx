@@ -25,6 +25,9 @@ inline constexpr std::uint32_t OriginalsCodecVersion = 4;
 // SYPB/5 is readable retained-program operand state. It does not grant
 // execution authority and does not alter any codec-1 through codec-4 bytes.
 inline constexpr std::uint32_t ProgramOperandCodecVersion = 5;
+// R4/D3151: audited unused (kind 1, codec 6), with explicit SolidSet output.
+// Codecs 1 through 5 retain their readers, payloads and execution policy.
+inline constexpr std::uint32_t ResultSetCodecVersion = 6;
 inline constexpr std::uint32_t PayloadVersion = 2;
 inline constexpr std::uint32_t AnalyticPayloadVersion = 1;
 inline constexpr std::uint32_t RecipePayloadVersion = 3;
@@ -350,6 +353,9 @@ struct OriginalsDefinition final {
     double carrierMetersPerUnit = 0;
     OriginalStateBlock originals;
     EffectiveStateBlock effective;
+    // Process-local discriminator decoded from the feature/payload version.
+    // It is never inserted into the immutable original-state block.
+    bool resultSet = false;
 };
 
 inline bool Zero(const UUID& value) noexcept {
