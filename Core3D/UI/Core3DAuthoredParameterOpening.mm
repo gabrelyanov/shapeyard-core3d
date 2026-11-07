@@ -1042,6 +1042,9 @@ bool BooleanEditorAdmission(Core3DViewController *host, Core3DBooleanOriginalsEd
     NSMutableArray *membership = [NSMutableArray arrayWithCapacity:2];
     NSMutableArray *dimensions = [NSMutableArray arrayWithCapacity:2];
     NSMutableArray *placements = [NSMutableArray arrayWithCapacity:2];
+    NSMutableArray *inputBounds = [NSMutableArray arrayWithCapacity:2];
+    NSMutableArray *dimensionEditing = [NSMutableArray arrayWithCapacity:2];
+    NSMutableArray *placementEditing = [NSMutableArray arrayWithCapacity:2];
     NSMutableArray *materials = [NSMutableArray arrayWithCapacity:2];
     NSMutableArray *materialPresence = [NSMutableArray arrayWithCapacity:2];
     NSMutableArray *groupMembership = [NSMutableArray arrayWithCapacity:2];
@@ -1067,6 +1070,11 @@ bool BooleanEditorAdmission(Core3DViewController *host, Core3DBooleanOriginalsEd
             for (double scalar : value.effectiveMaterials[index])
                 [material addObject:@(scalar)];
             [dimensions addObject:dimension]; [placements addObject:placement];
+            NSMutableArray *inputBound = [NSMutableArray arrayWithCapacity:6];
+            for (double scalar : value.effectiveBounds[index]) [inputBound addObject:@(scalar)];
+            [inputBounds addObject:inputBound];
+            [dimensionEditing addObject:@(value.effectiveDimensionsEditable[index])];
+            [placementEditing addObject:@(value.effectivePlacementsEditable[index])];
             [materials addObject:material];
             [materialPresence addObject:@(value.effectiveMaterialPresent[index])];
             [groupMembership addObject:@(value.effectiveGroupMembership[index])];
@@ -1103,6 +1111,9 @@ bool BooleanEditorAdmission(Core3DViewController *host, Core3DBooleanOriginalsEd
     _sourceRecipeBytes = recipes; _sourceVolumes = volumes;
     _resultBounds = bounds; _resultMembership = membership;
     _effectiveDimensions = dimensions; _effectivePlacements = placements;
+    _effectiveBounds = inputBounds;
+    _effectiveDimensionsEditable = dimensionEditing;
+    _effectivePlacementsEditable = placementEditing;
     _effectiveMaterials = materials;
     _effectiveMaterialPresent = materialPresence;
     _effectiveGroupMembership = groupMembership;

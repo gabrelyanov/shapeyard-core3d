@@ -1,5 +1,6 @@
 #pragma once
 #include "CompositeRecipeCodec.hxx"
+#include "PartBooleanResultSet.hxx"
 #include "RetainedSolidAttribute.hxx"
 #include "RetainedEdgeTreatmentStorageKey.hxx"
 #include <TDF_Attribute.hxx>
@@ -183,6 +184,11 @@ inline bool ReadAll(const Handle(TDocStd_Document)& document, std::vector<Record
             const TopoDS_Shape current = binding->Get();
             if (current.IsNull() || !current.IsEqual(XCAFDoc_ShapeTool::GetShape(owner))
                 || value->sourceShapes.empty() || value->sourceShapes.size() > MaximumSourceNodes) return false;
+            const auto* outputFeature = std::get_if<FeatureNode>(
+                &value->definition.nodes.back().value);
+            if (outputFeature && outputFeature->kind == PartBooleanFeatureKind
+                && outputFeature->codecVersion == PartBooleanResultSetFeatureCodec
+                && !part_boolean::result_set::Valid(current)) return false;
             std::size_t sources = 0;
             for (const Node& node : value->definition.nodes) if (const auto* source = std::get_if<SourceNode>(&node.value)) {
                 ++sources;

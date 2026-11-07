@@ -9546,7 +9546,8 @@ Standard_Boolean ValidateGeometryDocument(
                 [](const core3d::composite_recipe::Node& node) {
                     const auto* feature = std::get_if<core3d::composite_recipe::FeatureNode>(&node.value);
                     return feature && feature->kind == core3d::composite_recipe::PartBooleanFeatureKind
-                        && feature->codecVersion == core3d::composite_recipe::PartBooleanOriginalsFeatureCodec;
+                        && (feature->codecVersion == core3d::composite_recipe::PartBooleanOriginalsFeatureCodec
+                            || feature->codecVersion == core3d::composite_recipe::PartBooleanResultSetFeatureCodec);
                 });
             if (hasOriginals && !core3d::part_boolean::owner::ValidateOriginalsRecord(document, record))
                 return Standard_False;
@@ -11779,7 +11780,7 @@ bool PairProjection(const OcctPlainProfileOperationCapture& source,
 }
 
 TopoDS_Shape PairBoolean(pb::Operation operation, const TopoDS_Shape& left,
-                         const TopoDS_Shape& right) noexcept {
+                         const TopoDS_Shape& right, bool resultSet) noexcept {
     try {
         TopTools_ListOfShape arguments, tools;
         arguments.Append(left); tools.Append(right);
@@ -11812,16 +11813,19 @@ TopoDS_Shape PairBoolean(pb::Operation operation, const TopoDS_Shape& left,
             algorithm.Build(); if (!algorithm.IsDone() || algorithm.HasErrors()) return {};
             result = algorithm.Shape();
         } else return {};
-        return pb::build::AnalyticResultSolid(result);
+        return resultSet ? pb::result_set::Normalize(result)
+                         : pb::build::AnalyticResultSolid(result);
     } catch (...) { return {}; }
 }
 
 bool PairMeasure(const TopoDS_Shape& shape, double& volume,
-                 std::array<double, 6>& bounds, std::uint32_t& loops) noexcept {
+                 std::array<double, 6>& bounds, std::uint32_t& loops,
+                 bool resultSet = false) noexcept {
     volume = 0; bounds = {{0, 0, 0, 0, 0, 0}}; loops = 0;
     try {
-        if (shape.IsNull() || shape.ShapeType() != TopAbs_SOLID
-            || !BRepCheck_Analyzer(shape, Standard_True).IsValid()) return false;
+        if (resultSet ? !pb::result_set::Valid(shape)
+            : (shape.IsNull() || shape.ShapeType() != TopAbs_SOLID
+                || !BRepCheck_Analyzer(shape, Standard_True).IsValid())) return false;
         GProp_GProps properties;
         BRepGProp::VolumeProperties(shape, properties);
         volume = properties.Mass();
@@ -11871,12 +11875,12 @@ bool PairCurrent(const OcctDocument& document,
 
 bool PairMeasureDetached(const TopoDS_Shape& source, double& volume,
                          std::array<double, 6>& bounds,
-                         std::uint32_t& loops) noexcept {
+                         std::uint32_t& loops, bool resultSet = false) noexcept {
     try {
         if (source.IsNull()) return false;
         BRepBuilderAPI_Copy copy(source, Standard_True, Standard_False);
         return copy.IsDone() && !copy.Shape().IsNull()
-            && PairMeasure(copy.Shape(), volume, bounds, loops);
+            && PairMeasure(copy.Shape(), volume, bounds, loops, resultSet);
     } catch (...) { return false; }
 }
 
@@ -11886,8 +11890,8 @@ const core3d::composite_recipe::FeatureNode* OriginalsFeature(
     const auto* feature = std::get_if<core3d::composite_recipe::FeatureNode>(
         &graph.nodes[2].value);
     return feature && feature->kind == core3d::composite_recipe::PartBooleanFeatureKind
-        && feature->codecVersion
-            == core3d::composite_recipe::PartBooleanOriginalsFeatureCodec
+        && (feature->codecVersion == core3d::composite_recipe::PartBooleanOriginalsFeatureCodec
+            || feature->codecVersion == core3d::composite_recipe::PartBooleanResultSetFeatureCodec)
         ? feature : nullptr;
 }
 
@@ -11960,6 +11964,38 @@ bool OriginalsCurrent(const OcctDocument& document,
     } catch (...) { record = {}; return false; }
 }
 
+// sourceToCarrier starts as original.sourceRootToCarrier: it maps the exact
+// archived source-local frame into the saved Boolean's carrier. It already
+// includes the original occurrence relative to that carrier. Applying the
+// original matrix a second time would turn an absolute edit into a displacement.
+// gp_Trsf represents positive uniform scale + rigid placement. Check its round
+// trip explicitly so a shear/nonuniform matrix is never silently orthogonalized
+// into an apparently editable quaternion.
+bool PairFrozenPlacement(const pb::EffectiveInput& input, double carrierUnit,
+                         const gp_Trsf& carrier, gp_Trsf& placement) noexcept {
+    try {
+        const double units = input.sourceMetersPerUnit / carrierUnit;
+        const auto& m = input.frozenGeometry.sourceToCarrier;
+        if (!std::isfinite(units) || units <= 0
+            || !pb::ValidGeometry(input.frozenGeometry)) return false;
+        placement.SetValues(m[0] * units, m[1] * units, m[2] * units, m[3] * units,
+            m[4] * units, m[5] * units, m[6] * units, m[7] * units,
+            m[8] * units, m[9] * units, m[10] * units, m[11] * units);
+        if (!std::isfinite(placement.ScaleFactor()) || placement.ScaleFactor() <= 0)
+            return false;
+        for (int row = 0; row < 3; ++row)
+            for (int column = 0; column < 4; ++column) {
+                const double expected = m[std::size_t(row * 4 + column)] * units;
+                if (std::abs(placement.Value(row + 1, column + 1) - expected)
+                    > 1e-12 * std::max(1.0, std::abs(expected))) return false;
+            }
+        // The carrier itself can be translated, rotated or scaled. Public
+        // observation/edit coordinates are document coordinates, so include it.
+        placement.PreMultiply(carrier);
+        return std::isfinite(placement.ScaleFactor()) && placement.ScaleFactor() > 0;
+    } catch (...) { return false; }
+}
+
 bool ObserveOriginalsRecord(const OcctDocument& document,
                             const core3d::composite_recipe::Record& record,
                             ap::PairObservation& observation) noexcept {
@@ -11967,11 +12003,15 @@ bool ObserveOriginalsRecord(const OcctDocument& document,
     observation = {};
     try {
         if (!record.value || record.current.IsNull()) return false;
+        OcctObjectVisibilityState visibility;
+        if (!document.CaptureObjectVisibilityStateForLabel(record.owner, visibility)) return false;
+        const gp_Trsf carrier = visibility.object.object.transform;
+        if (!std::isfinite(carrier.ScaleFactor()) || carrier.ScaleFactor() <= 0) return false;
         const auto* feature = OriginalsFeature(record.value->definition);
         pb::OriginalsDefinition definition;
         std::vector<std::uint8_t> originals, effective, identity, resultBytes;
         std::string resultText;
-        if (!feature || !pb::DecodeOriginals(feature->parameters, definition)
+        if (!feature || !pb::DecodeBooleanOriginals(feature->parameters, definition)
             || !pb::EncodeOriginalStateBlock(definition.originals, originals)
             || !pb::EncodeEffectiveStateBlock(definition.effective, effective)
             || !cr::Hash(originals, observation.originalsDigest)
@@ -12038,12 +12078,50 @@ bool ObserveOriginalsRecord(const OcctDocument& document,
             observation.sourceFeatureIdentifiers[index] =
                 core3d::retained_solid::UUIDText(original.original.sourceFeature);
             observation.recipeBytes[index] = original.recipeBytes;
-            observation.effectiveDimensions[index] = current.geometry.dimensions;
-            observation.effectivePlacements[index] = {{
-                current.geometry.translation[0], current.geometry.translation[1],
-                current.geometry.translation[2], current.geometry.rotationXYZW[0],
-                current.geometry.rotationXYZW[1], current.geometry.rotationXYZW[2],
-                current.geometry.rotationXYZW[3]}};
+            if (original.shapeSlot >= record.value->sourceShapes.size()) return false;
+            const double units = current.sourceMetersPerUnit / definition.carrierMetersPerUnit;
+            TopoDS_Shape inputShape;
+            if (current.family == pb::InputFamily::FrozenSolid) {
+                gp_Trsf placement;
+                if (!PairFrozenPlacement(current, definition.carrierMetersPerUnit, carrier, placement))
+                    return false;
+                inputShape = pb::build::BuildEffectiveFrozenSolid(
+                    record.value->sourceShapes[original.shapeSlot], current.frozenGeometry,
+                    current.sourceMetersPerUnit, definition.carrierMetersPerUnit);
+                const auto position = placement.TranslationPart();
+                const auto rotation = placement.GetRotation();
+                observation.effectivePlacements[index] = {{position.X(), position.Y(), position.Z(),
+                    rotation.X(), rotation.Y(), rotation.Z(), rotation.W()}};
+                // Never populate current.geometry: there is no analytic recipe.
+            } else if (current.family == pb::InputFamily::AnalyticRectangularPrism) {
+                inputShape = pb::build::BuildEffectiveAnalyticPrism(current.geometry,
+                    current.sourceMetersPerUnit, definition.carrierMetersPerUnit);
+                for (std::size_t axis = 0; axis < 3; ++axis)
+                    observation.effectiveDimensions[index][axis] =
+                        current.geometry.dimensions[axis] * units * carrier.ScaleFactor();
+                gp_Trsf placement;
+                const auto& q = current.geometry.rotationXYZW;
+                const auto& p = current.geometry.translation;
+                placement.SetRotation(gp_Quaternion(q[0], q[1], q[2], q[3]));
+                placement.SetTranslationPart(gp_Vec(p[0] * units, p[1] * units, p[2] * units));
+                placement.PreMultiply(carrier);
+                const auto position = placement.TranslationPart();
+                const auto rotation = placement.GetRotation();
+                observation.effectivePlacements[index] = {{position.X(), position.Y(), position.Z(),
+                    rotation.X(), rotation.Y(), rotation.Z(), rotation.W()}};
+                observation.effectiveDimensionsEditable[index] = true;
+            } else return false;
+            double inputVolume = 0;
+            std::uint32_t inputLoops = 0;
+            const TopoDS_Shape documentInput = BRepBuilderAPI_Transform(
+                inputShape, carrier, Standard_True, Standard_False).Shape();
+            if (!PairMeasureDetached(documentInput, inputVolume,
+                    observation.effectiveBounds[index], inputLoops)) return false;
+            if (current.family == pb::InputFamily::FrozenSolid)
+                for (std::size_t axis = 0; axis < 3; ++axis)
+                    observation.effectiveDimensions[index][axis] =
+                        observation.effectiveBounds[index][axis + 3] - observation.effectiveBounds[index][axis];
+            observation.effectivePlacementsEditable[index] = true;
             if (current.metadata.appearance.material) {
                 if (*current.metadata.appearance.material
                     >= definition.effective.materials.size()) return false;
@@ -12069,10 +12147,11 @@ bool ObserveOriginalsRecord(const OcctDocument& document,
                     observation.sourceVolumes[index], ignoredBounds, ignoredLoops))
                 return false;
         }
-        OcctObjectVisibilityState visibility;
-        if (!document.CaptureObjectVisibilityStateForLabel(record.owner, visibility)
-            || !PairMeasureDetached(record.current, observation.resultVolume,
-                observation.resultBounds, observation.resultClosedLoops)) return false;
+        const TopoDS_Shape documentResult = BRepBuilderAPI_Transform(
+            record.current, carrier, Standard_True, Standard_False).Shape();
+        if (!PairMeasureDetached(documentResult, observation.resultVolume,
+                observation.resultBounds, observation.resultClosedLoops,
+                definition.resultSet)) return false;
         observation.resultVisible = visibility.IsEffectivelyVisible();
         return true;
     } catch (...) { observation = {}; return false; }
@@ -12121,6 +12200,7 @@ bool PairDefinition(const ap::PairCapture::State& state,
     definition = {}; recipes = {};
     try {
         definition.operation = state.operation;
+        definition.resultSet = bool(state.ordinarySources[0]) || bool(state.ordinarySources[1]);
         definition.originals.creationOperation = state.operation;
         definition.carrierMetersPerUnit = state.metersPerUnit;
         if (!PairUUID(state.owner->DocumentIdentifier(), definition.owner.document)
@@ -12657,10 +12737,12 @@ core3d::authored_parameter::PairPrepareReply OcctDocument::PrepareBooleanSources
                     core3d::retained_topology_budget::Site::C25AnalyticInput))
                 return *refused;
         }
+        const bool resultSet = bool(capture->state_->ordinarySources[0])
+            || bool(capture->state_->ordinarySources[1]);
         const TopoDS_Shape independent = PairBoolean(
-            capture->state_->operation, observed[0], observed[1]);
+            capture->state_->operation, observed[0], observed[1], resultSet);
         const TopoDS_Shape candidate = PairBoolean(
-            capture->state_->operation, analytic[0], analytic[1]);
+            capture->state_->operation, analytic[0], analytic[1], resultSet);
         if (independent.IsNull() || candidate.IsNull())
             return PairPrepareRefused(PairRefusal::InvalidResult);
         if (const auto refused = charge(independent,
@@ -12669,7 +12751,16 @@ core3d::authored_parameter::PairPrepareReply OcctDocument::PrepareBooleanSources
         if (const auto refused = charge(candidate,
                 core3d::retained_topology_budget::Site::C26AnalyticBoolean))
             return *refused;
-        if (!PlainProfileRebuildCorresponds(independent, candidate))
+        std::vector<TopoDS_Shape> independentBodies, candidateBodies;
+        if (resultSet) {
+            if (!pb::result_set::Bodies(independent, independentBodies)
+                || !pb::result_set::Bodies(candidate, candidateBodies)
+                || independentBodies.size() != candidateBodies.size())
+                return PairPrepareRefused(PairRefusal::UnprovedCorrespondence);
+            for (std::size_t body = 0; body < independentBodies.size(); ++body)
+                if (!PlainProfileRebuildCorresponds(independentBodies[body], candidateBodies[body]))
+                    return PairPrepareRefused(PairRefusal::UnprovedCorrespondence);
+        } else if (!PlainProfileRebuildCorresponds(independent, candidate))
             return PairPrepareRefused(PairRefusal::UnprovedCorrespondence);
         auto prepared = std::make_shared<PairPrepared::State>();
         prepared->capture = capture;
@@ -12677,7 +12768,7 @@ core3d::authored_parameter::PairPrepareReply OcctDocument::PrepareBooleanSources
         if (!PairDefinition(*capture->state_, projections, matrices,
                 prepared->definition, recipes))
             return PairPrepareRefused(PairRefusal::BadEncoding);
-        if (!pb::EncodeOriginals(prepared->definition,
+        if (!pb::EncodeBooleanOriginals(prepared->definition,
                 prepared->observation.originalsBytes))
             return PairPrepareRefused(PairRefusal::BadEncoding);
         prepared->independentResult = independent;
@@ -12699,7 +12790,7 @@ core3d::authored_parameter::PairPrepareReply OcctDocument::PrepareBooleanSources
                 return PairPrepareRefused(PairRefusal::UnprovedCorrespondence);
         }
         if (!PairMeasure(independent, observation.resultVolume,
-                observation.resultBounds, observation.resultClosedLoops))
+                observation.resultBounds, observation.resultClosedLoops, resultSet))
             return PairPrepareRefused(PairRefusal::InvalidResult);
         observation.resultMembership = {{1, 1}};
         PairPrepareReply reply;
@@ -12847,8 +12938,9 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
         feature.feature = state.definition.feature;
         feature.localID = 3;
         feature.kind = cr::PartBooleanFeatureKind;
-        feature.codecVersion = cr::PartBooleanOriginalsFeatureCodec;
-        if (!pb::EncodeOriginals(state.definition, feature.parameters))
+        feature.codecVersion = state.definition.resultSet
+            ? cr::PartBooleanResultSetFeatureCodec : cr::PartBooleanOriginalsFeatureCodec;
+        if (!pb::EncodeBooleanOriginals(state.definition, feature.parameters))
             return refuse(ap::PairRefusal::BadEncoding);
         for (std::size_t index = 0; index < 2; ++index) {
             const auto& original = state.definition.originals.inputs[index];
@@ -13750,7 +13842,7 @@ OcctDocument::CaptureBooleanOriginalsState(
         if (myOcafDoc->HasOpenCommand()
             || !cr::Read(myOcafDoc, owner, record) || !record.value
             || !(feature = OriginalsFeature(record.value->definition))
-            || !core3d::part_boolean::DecodeOriginals(
+            || !core3d::part_boolean::DecodeBooleanOriginals(
                 feature->parameters, definition)
             || !core3d::part_boolean::EncodeOriginalStateBlock(
                 definition.originals, state->originalsBytes)
@@ -13833,12 +13925,15 @@ OcctDocument::PrepareBooleanOriginalsEdit(
             ? std::get_if<cr::FeatureNode>(&payload->definition.nodes[2].value)
             : nullptr;
         pb::OriginalsDefinition definition;
-        if (!feature || !pb::DecodeOriginals(feature->parameters, definition))
+        if (!feature || !pb::DecodeBooleanOriginals(feature->parameters, definition))
             return refuse(ap::PairRefusal::BadEncoding);
         const std::size_t input = edit.role == pb::RecipeInputRole::Left ? 0
             : edit.role == pb::RecipeInputRole::Right ? 1 : 2;
         if (input > 1) return refuse(ap::PairRefusal::BadEncoding);
         auto& effective = definition.effective.inputs[input];
+        const gp_Trsf carrier = capture->state_->visibility.object.object.transform;
+        if (!std::isfinite(carrier.ScaleFactor()) || carrier.ScaleFactor() <= 0)
+            return refuse(ap::PairRefusal::UnsupportedSource);
         const auto bindGeometry = [&]() {
             TopoDS_Shape built;
             if (effective.family == pb::InputFamily::AnalyticRectangularPrism)
@@ -13876,9 +13971,11 @@ OcctDocument::PrepareBooleanOriginalsEdit(
                 return refuse(ap::PairRefusal::UnsupportedSource);
             std::array<double, 3> dimensions{{edit.values[0], edit.values[1],
                                               edit.values[2]}};
-            for (double value : dimensions)
+            for (double& value : dimensions) {
                 if (!std::isfinite(value) || value <= 0)
                     return refuse(ap::PairRefusal::BadEncoding);
+                value /= carrier.ScaleFactor();
+            }
             changed = effective.geometry.dimensions != dimensions;
             effective.geometry.dimensions = dimensions;
             if (!bindGeometry()) return refuse(ap::PairRefusal::InvalidResult);
@@ -13895,19 +13992,47 @@ OcctDocument::PrepareBooleanOriginalsEdit(
             if (std::abs(norm - 1.0) > 1e-12)
                 return refuse(ap::PairRefusal::BadEncoding);
             if (effective.family == pb::InputFamily::AnalyticRectangularPrism) {
+                // Map the absolute document pose back into the source/carrier
+                // frame used by the analytic recipe, without changing its axes.
+                gp_Trsf requested;
+                requested.SetRotation(gp_Quaternion(rotation[0], rotation[1], rotation[2], rotation[3]));
+                requested.SetTranslationPart(gp_Vec(translation[0], translation[1], translation[2]));
+                requested.PreMultiply(carrier.Inverted());
+                const auto position = requested.TranslationPart();
+                const auto orientation = requested.GetRotation();
+                const double units = definition.carrierMetersPerUnit / effective.sourceMetersPerUnit;
+                translation = {{position.X() * units, position.Y() * units, position.Z() * units}};
+                rotation = {{orientation.X(), orientation.Y(), orientation.Z(), orientation.W()}};
                 changed = effective.geometry.translation != translation
                     || effective.geometry.rotationXYZW != rotation;
                 effective.geometry.translation = translation;
                 effective.geometry.rotationXYZW = rotation;
             } else if (effective.family == pb::InputFamily::FrozenSolid) {
-                gp_Trsf placement;
-                placement.SetRotation(gp_Quaternion(
-                    rotation[0], rotation[1], rotation[2], rotation[3]));
-                placement.SetTranslationPart(gp_Vec(
-                    translation[0], translation[1], translation[2]));
-                std::array<double, 16> matrix;
-                if (!PairMatrix(placement, matrix))
-                    return refuse(ap::PairRefusal::BadEncoding);
+                gp_Trsf previous;
+                if (!PairFrozenPlacement(effective, definition.carrierMetersPerUnit, carrier, previous))
+                    return refuse(ap::PairRefusal::UnsupportedSource);
+                const auto priorRotation = previous.GetRotation();
+                const double dot = priorRotation.X() * rotation[0] + priorRotation.Y() * rotation[1]
+                    + priorRotation.Z() * rotation[2] + priorRotation.W() * rotation[3];
+                auto matrix = effective.frozenGeometry.sourceToCarrier;
+                const double units = effective.sourceMetersPerUnit / definition.carrierMetersPerUnit;
+                if (std::abs(std::abs(dot) - 1.0) > 1e-12) {
+                    gp_Trsf placement;
+                    placement.SetRotation(gp_Quaternion(rotation[0], rotation[1], rotation[2], rotation[3]));
+                    placement.SetScaleFactor(previous.ScaleFactor());
+                    placement.PreMultiply(carrier.Inverted());
+                    if (!PairMatrix(placement, matrix)) return refuse(ap::PairRefusal::BadEncoding);
+                    for (std::size_t row = 0; row < 3; ++row)
+                        for (std::size_t column = 0; column < 3; ++column)
+                            matrix[row * 4 + column] /= units;
+                }
+                // Translation-only edits preserve the archived affine basis bit for bit.
+                // Absolute orientation edits preserve its positive uniform scale.
+                gp_Pnt origin(translation[0], translation[1], translation[2]);
+                origin.Transform(carrier.Inverted());
+                matrix[3] = origin.X() / units;
+                matrix[7] = origin.Y() / units;
+                matrix[11] = origin.Z() / units;
                 changed = effective.frozenGeometry.sourceToCarrier != matrix;
                 effective.frozenGeometry.sourceToCarrier = matrix;
             } else return refuse(ap::PairRefusal::UnsupportedSource);
@@ -13974,10 +14099,16 @@ OcctDocument::PrepareBooleanOriginalsEdit(
             return refuse(cancelled.load() ? ap::PairRefusal::Cancelled
                                            : ap::PairRefusal::BadEncoding);
 
+        if (payload->definition.nodes.size() == 3 && pb::HasOrdinaryOriginal(definition)
+            && (edit.kind == ap::BooleanOriginalsEditKind::Operation
+                || edit.kind == ap::BooleanOriginalsEditKind::Placement)) {
+            definition.resultSet = true;
+            feature->codecVersion = cr::PartBooleanResultSetFeatureCodec;
+        }
         std::vector<std::uint8_t> frozen, parameters;
         if (!pb::EncodeOriginalStateBlock(definition.originals, frozen)
             || frozen != capture->state_->originalsBytes
-            || !pb::EncodeOriginals(definition, parameters))
+            || !pb::EncodeBooleanOriginals(definition, parameters))
             return refuse(ap::PairRefusal::BadEncoding);
         feature->parameters = std::move(parameters);
         if (!cr::ValidateV3(payload->definition,
@@ -14319,7 +14450,7 @@ OcctDocument::ApplyBooleanOriginalsEdit(
                         &mutablePayload->definition.nodes[2].value) : nullptr;
                 pb::OriginalsDefinition definition;
                 if (!mutableFeature
-                    || !pb::DecodeOriginals(mutableFeature->parameters, definition)
+                    || !pb::DecodeBooleanOriginals(mutableFeature->parameters, definition)
                     || state.materialInput >= definition.effective.inputs.size()
                     || std::any_of(definition.effective.materials.begin(),
                         definition.effective.materials.end(), [&](const auto& row) {
@@ -14336,7 +14467,7 @@ OcctDocument::ApplyBooleanOriginalsEdit(
                 edited.metadata.appearance.material = row.ordinal;
                 if (!PairHash(state.materialValues.data(), sizeof(state.materialValues),
                         edited.commitments.material)
-                    || !pb::EncodeOriginals(definition, mutableFeature->parameters)
+                    || !pb::EncodeBooleanOriginals(definition, mutableFeature->parameters)
                     || !cr::ValidateV3(mutablePayload->definition,
                         core3d::retained_feature::ProductionRegistry(),
                         core3d::retained_source::ProductionRegistry()).valid()
@@ -21176,7 +21307,7 @@ Standard_Boolean OcctDocument::DebugReadBooleanOriginalsMaterials(
             || !core3d::composite_recipe::Read(myOcafDoc, owner, record) || !record.value)
             return Standard_False;
         const auto* feature = OriginalsFeature(record.value->definition);
-        if (!feature || !pb::DecodeOriginals(feature->parameters, definition)) return Standard_False;
+        if (!feature || !pb::DecodeBooleanOriginals(feature->parameters, definition)) return Standard_False;
         for (const auto& row : definition.effective.materials) {
             TDF_Label materialLabel;
             TDF_Tool::Label(myOcafDoc->GetData(), row.labelEntry.c_str(), materialLabel, Standard_False);
@@ -30251,7 +30382,7 @@ bool PrefixGraph(const composite_recipe::Definition& graph,
 // paired owner callbacks below perform all real builds and proofs.
 
 bool ReadReplayShape(const std::vector<std::uint8_t>& bytes,
-                     TopoDS_Shape& shape) noexcept {
+                     TopoDS_Shape& shape, bool resultSet = false) noexcept {
     shape.Nullify();
     try {
         if (bytes.empty()) return false;
@@ -30259,7 +30390,8 @@ bool ReadReplayShape(const std::vector<std::uint8_t>& bytes,
         input.imbue(std::locale::classic());
         BRep_Builder builder;
         BRepTools::Read(shape, input, builder);
-        return !shape.IsNull() && retained_part_boolean::IsOneValidForwardSolid(shape);
+        return !shape.IsNull() && (resultSet ? result_set::Valid(shape)
+            : retained_part_boolean::IsOneValidForwardSolid(shape));
     } catch (...) { shape.Nullify(); return false; }
 }
 
@@ -30462,7 +30594,7 @@ bool ReplayOriginalsDetached(const OriginalsDefinition& definition,
     output.Nullify();
     try {
         std::vector<std::uint8_t> payload;
-        if (cancelled.load() || budget.exhausted || !EncodeOriginals(definition, payload)
+        if (cancelled.load() || budget.exhausted || !EncodeBooleanOriginals(definition, payload)
             || !budget.consume(1, 4, payload.size())) return false;
         std::array<TopoDS_Shape, 2> sources;
         retained_part_boolean::OperandReadSet reads;
@@ -30497,11 +30629,16 @@ bool ReplayOriginalsDetached(const OriginalsDefinition& definition,
         }
         if (cancelled.load()) return false;
         retained_part_boolean::CandidateEvidence evidence;
-        auto candidate = retained_part_boolean::BuildDetachedCandidate(
-            build::NativeOperation(definition.operation),
-            sources[0], sources[1], Precision::Confusion(), reads, reads, &evidence);
-        const TopoDS_Shape solid = build::PersistenceMaterializeDetached(
-            build::AnalyticResultSolid(candidate.solid));
+        auto candidate = definition.resultSet
+            ? retained_part_boolean::BuildDetachedResultSetCandidate(
+                build::NativeOperation(definition.operation),
+                sources[0], sources[1], Precision::Confusion(), reads, reads, &evidence)
+            : retained_part_boolean::BuildDetachedCandidate(
+                build::NativeOperation(definition.operation),
+                sources[0], sources[1], Precision::Confusion(), reads, reads, &evidence);
+        const TopoDS_Shape solid = definition.resultSet
+            ? build::PersistenceMaterializeResultSetDetached(candidate.solid)
+            : build::PersistenceMaterializeDetached(build::AnalyticResultSolid(candidate.solid));
         std::string bytes;
         if (cancelled.load() || !candidate.admitted() || solid.IsNull()
             || !retained_part_boolean::ExactShapeBytes(solid, bytes)
@@ -30522,8 +30659,10 @@ bool OwnerOriginalsBuild(const retained_feature::OwnerExecutionContext& context,
         const auto* graph = context.graph;
         OriginalsDefinition definition;
         if (!operation || !graph || inputs.size() != 2 || feature.inputs.size() != 2
-            || !composite_recipe::CanonicalOriginalsFeature(feature, graph->nodes)
-            || !DecodeOriginals(feature.parameters, definition)
+            || !(feature.codecVersion == composite_recipe::PartBooleanResultSetFeatureCodec
+                ? composite_recipe::CanonicalResultSetFeature(feature, graph->nodes)
+                : composite_recipe::CanonicalOriginalsFeature(feature, graph->nodes))
+            || !DecodeBooleanOriginals(feature.parameters, definition)
             || !(definition.owner == graph->owner)) return false;
         for (std::size_t index = 0; index < inputs.size(); ++index) {
             retained_recipe::Digest geometry;
@@ -30548,7 +30687,8 @@ bool OwnerOriginalsBuild(const retained_feature::OwnerExecutionContext& context,
                 retained_topology_budget::Site::C15ReplaySteps)
             || !ShapeBytes(solid, staged.detachedShape)
             || !HashBytes(staged.detachedShape, staged.geometry)) return false;
-        staged.shape = retained_feature::ShapeKind::Solid;
+        staged.shape = definition.resultSet ? retained_feature::ShapeKind::SolidSet
+                                            : retained_feature::ShapeKind::Solid;
         if (!OwnerFeatureProof(feature, inputs, staged, staged.familyProof)
             || !staged.valid()) return false;
         output = std::move(staged);
@@ -30653,9 +30793,9 @@ bool OwnerContextRequiredProof(const composite_recipe::FeatureNode&,
 }
 
 struct OwnerAnalyticRegistry final {
-    std::array<retained_feature::Entry, 3> validationEntries;
+    std::array<retained_feature::Entry, 4> validationEntries;
     retained_feature::RegistryView validation;
-    std::array<retained_feature::OwnerExecutionEntry, 3> executionEntries;
+    std::array<retained_feature::OwnerExecutionEntry, 4> executionEntries;
     retained_feature::OwnerExecutionRegistryView execution;
 
     OwnerAnalyticRegistry() noexcept
@@ -30687,6 +30827,15 @@ struct OwnerAnalyticRegistry final {
               composite_recipe::CanonicalRetainedProgramSuffixFeature},
              {OwnerContextRequiredBuild, OwnerContextRequiredProof,
               OwnerContextRequiredProof, true, true}},
+            {{{composite_recipe::PartBooleanFeatureKind,
+               composite_recipe::PartBooleanResultSetFeatureCodec}, 3,
+              part_boolean::MaximumPayloadBytes,
+              {retained_feature::ShapeKind::Solid, retained_feature::ShapeKind::Solid,
+               retained_feature::ShapeKind::Solid, retained_feature::ShapeKind::Solid},
+              2, retained_feature::ShapeKind::SolidSet,
+              composite_recipe::CanonicalResultSetFeature},
+             {OwnerContextRequiredBuild, OwnerContextRequiredProof,
+              OwnerContextRequiredProof, true, true}},
           }},
           validation(validationEntries.data(), validationEntries.size()),
           executionEntries{{
@@ -30713,6 +30862,12 @@ struct OwnerAnalyticRegistry final {
                   OwnerOperationPhase::SuffixFamilyProof>,
               OwnerFeatureProvePhase<OwnerSuffixBuild,
                   OwnerOperationPhase::SuffixFixedPoint>}},
+            {{composite_recipe::PartBooleanFeatureKind,
+              composite_recipe::PartBooleanResultSetFeatureCodec},
+             {&validationEntries[3].execution,
+              OwnerFeatureBuildPhase<OwnerOriginalsBuild, OwnerOperationPhase::BaseReplay>,
+              OwnerFeatureProvePhase<OwnerOriginalsBuild, OwnerOperationPhase::BaseFamilyProof>,
+              OwnerFeatureProvePhase<OwnerOriginalsBuild, OwnerOperationPhase::BaseFixedPoint>}},
           }},
           execution(executionEntries.data(), executionEntries.size()) {}
 };
@@ -30932,8 +31087,10 @@ bool ReplayOriginalsGraphDetached(const composite_recipe::Definition& graph,
         const auto* base = std::get_if<composite_recipe::FeatureNode>(&graph.nodes[2].value);
         OriginalsDefinition definition;
         if (!base || base->kind != composite_recipe::PartBooleanFeatureKind
-            || base->codecVersion != composite_recipe::PartBooleanOriginalsFeatureCodec
-            || !DecodeOriginals(base->parameters, definition)) return false;
+            || (base->codecVersion != composite_recipe::PartBooleanOriginalsFeatureCodec
+                && base->codecVersion != composite_recipe::PartBooleanResultSetFeatureCodec)
+            || !DecodeBooleanOriginals(base->parameters, definition)
+            || (definition.resultSet && graph.nodes.size() != 3)) return false;
         for (std::size_t index = 0; index < 2; ++index) {
             const auto* source = std::get_if<composite_recipe::SourceNode>(&graph.nodes[index].value);
             std::vector<std::uint8_t> bytes; retained_recipe::Digest digest;
@@ -30946,7 +31103,16 @@ bool ReplayOriginalsGraphDetached(const composite_recipe::Definition& graph,
         for (std::size_t index = 0; index < 2; ++index) {
             const auto slot = definition.originals.inputs[index].shapeSlot;
             if (slot >= sources.size()) return false;
-            frozenSources[index] = sources[slot];
+            if (definition.resultSet) {
+                // Creation and owner proof must build from the same detached
+                // ASCII source decode. At default tangency, otherwise identical
+                // source commitments can produce different vertex tolerances
+                // through the raw-shape and text-decoded paths. The archived
+                // original shape/bytes are never rewritten.
+                std::vector<std::uint8_t> canonicalSource;
+                if (!ShapeBytes(sources[slot], canonicalSource)
+                    || !ReadReplayShape(canonicalSource, frozenSources[index])) return false;
+            } else frozenSources[index] = sources[slot];
         }
         TopoDS_Shape baseSolid;
         if (!ReplayOriginalsDetached(
@@ -30984,7 +31150,7 @@ bool ValidateOriginalsRecordContinued(
         if (graph.nodes.size() < 3) return false;
         const auto* base = std::get_if<composite_recipe::FeatureNode>(&graph.nodes[2].value);
         OriginalsDefinition definition; double unit = 0;
-        if (!base || !DecodeOriginals(base->parameters, definition)
+        if (!base || !DecodeBooleanOriginals(base->parameters, definition)
             || !XCAFDoc_DocumentTool::GetLengthUnit(document, unit)
             || std::memcmp(&unit, &definition.carrierMetersPerUnit, sizeof(double)) != 0)
             return false;
@@ -30996,7 +31162,7 @@ bool ValidateOriginalsRecordContinued(
         const auto& replay = operation.completedReplay;
         TopoDS_Shape candidate;
         if (!replay.replayed()
-            || !ReadReplayShape(replay.output.detachedShape, candidate))
+            || !ReadReplayShape(replay.output.detachedShape, candidate, definition.resultSet))
             return operation.deny();
 
         // Keep the rebuilt candidate operation-local. A proof refusal after

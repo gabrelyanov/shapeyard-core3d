@@ -245,8 +245,16 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic,copy,readonly) NSData *effectiveDigest;
 @property(nonatomic,copy,readonly) NSData *identityDigest;
 @property(nonatomic,copy,readonly) NSData *resultDigest;
+//! Effective lengths/result bounds use metersPerUnit in the document frame,
+//! including the Boolean carrier transform. Placement is the absolute archived
+//! source-local origin/orientation, never an extra offset. Frozen dimensions
+//! are measured document-axis extents and are read-only;
+//! analytic dimensions retain their authored recipe-axis meaning.
 @property(nonatomic,copy,readonly) NSArray<NSArray<NSNumber *> *> *effectiveDimensions;
 @property(nonatomic,copy,readonly) NSArray<NSArray<NSNumber *> *> *effectivePlacements;
+@property(nonatomic,copy,readonly) NSArray<NSArray<NSNumber *> *> *effectiveBounds;
+@property(nonatomic,copy,readonly) NSArray<NSNumber *> *effectiveDimensionsEditable;
+@property(nonatomic,copy,readonly) NSArray<NSNumber *> *effectivePlacementsEditable;
 @property(nonatomic,copy,readonly) NSArray<NSArray<NSNumber *> *> *effectiveMaterials;
 @property(nonatomic,copy,readonly) NSArray<NSNumber *> *effectiveMaterialPresent;
 @property(nonatomic,copy,readonly) NSArray<NSNumber *> *effectiveGroupMembership;

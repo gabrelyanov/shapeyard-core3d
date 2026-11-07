@@ -299,8 +299,16 @@ struct PairObservation final {
     retained_recipe::Digest effectiveDigest{};
     retained_recipe::Digest identityDigest{};
     retained_recipe::Digest resultDigest{};
+    // All effective lengths and result bounds use document model units
+    // (metersPerUnit), including the carrier's occurrence transform. Placement
+    // is the absolute archived source-frame origin/orientation in the document,
+    // not a displacement from the immutable original. Frozen dimensions are
+    // measured document-axis extents; analytic dimensions remain recipe axes.
     std::array<std::array<double, 3>, 2> effectiveDimensions{};
     std::array<std::array<double, 7>, 2> effectivePlacements{};
+    std::array<std::array<double, 6>, 2> effectiveBounds{};
+    std::array<bool, 2> effectiveDimensionsEditable{{false, false}};
+    std::array<bool, 2> effectivePlacementsEditable{{false, false}};
     std::array<std::array<double, 6>, 2> effectiveMaterials{};
     std::array<bool, 2> effectiveMaterialPresent{{false, false}};
     std::array<bool, 2> effectiveGroupMembership{{false, false}};

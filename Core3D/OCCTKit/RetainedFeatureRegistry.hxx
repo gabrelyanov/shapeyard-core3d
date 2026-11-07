@@ -35,7 +35,9 @@ struct Key final {
     }
 };
 
-enum class ShapeKind : std::uint8_t { Solid = 1, Face = 2, Wire = 3 };
+// Value 4 is already used by SourceShapeKind::TriangleMesh when source
+// signatures are mapped into this domain. Keep result sets distinct.
+enum class ShapeKind : std::uint8_t { Solid = 1, Face = 2, Wire = 3, SolidSet = 5 };
 struct ReplayBudget;
 struct ReplayValue;
 

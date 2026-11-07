@@ -12848,12 +12848,18 @@ bool Core3DViewer::redrawDocument() noexcept {
             const auto* feature=std::get_if<composite_recipe::FeatureNode>(
                 &record.value->definition.nodes.back().value);
             if (!feature || feature->kind!=composite_recipe::PartBooleanFeatureKind) continue;
-            if (feature->codecVersion==composite_recipe::PartBooleanOriginalsFeatureCodec) {
+            if (feature->codecVersion==composite_recipe::PartBooleanOriginalsFeatureCodec
+                || feature->codecVersion==composite_recipe::PartBooleanResultSetFeatureCodec) {
                 part_boolean::OriginalsDefinition originals;
-                if (record.value->definition.nodes.size()!=3
-                    || !composite_recipe::CanonicalOriginalsFeature(
+                const bool canonical=feature->codecVersion
+                        ==composite_recipe::PartBooleanResultSetFeatureCodec
+                    ? composite_recipe::CanonicalResultSetFeature(
                         *feature,record.value->definition.nodes)
-                    || !part_boolean::DecodeOriginals(feature->parameters,originals)
+                    : composite_recipe::CanonicalOriginalsFeature(
+                        *feature,record.value->definition.nodes);
+                if (record.value->definition.nodes.size()!=3
+                    || !canonical
+                    || !part_boolean::DecodeBooleanOriginals(feature->parameters,originals)
                     || !(originals.owner==record.value->definition.owner)
                     || record.current.IsNull()) return false;
             } else if (feature->codecVersion!=composite_recipe::PartBooleanShellFeatureCodec) {

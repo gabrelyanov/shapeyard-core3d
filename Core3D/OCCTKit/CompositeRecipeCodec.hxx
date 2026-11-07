@@ -30,6 +30,7 @@ inline constexpr std::uint32_t PartBooleanFeatureCodec = part_boolean::LegacyCod
 inline constexpr std::uint32_t PartBooleanShellFeatureCodec = part_boolean::ShellCodecVersion;
 inline constexpr std::uint32_t PartBooleanRecipeFeatureCodec = part_boolean::RecipeCodecVersion;
 inline constexpr std::uint32_t PartBooleanOriginalsFeatureCodec = part_boolean::OriginalsCodecVersion;
+inline constexpr std::uint32_t PartBooleanResultSetFeatureCodec = part_boolean::ResultSetCodecVersion;
 inline constexpr std::uint32_t ProgramOperandFeatureCodec = part_boolean::ProgramOperandCodecVersion;
 inline constexpr std::uint32_t SpatialCircleSweepFeatureKind = spatial_sweep::SpatialCircleSweepFeatureKind;
 inline constexpr std::uint32_t SpatialCircleSweepFeatureCodec = spatial_sweep::SpatialCircleSweepFeatureCodec;
@@ -470,6 +471,21 @@ inline bool CanonicalOriginalsFeature(const FeatureNode& feature,
     } catch (...) { return false; }
 }
 
+inline bool CanonicalResultSetFeature(const FeatureNode& feature,
+                                     const std::vector<Node>& priorNodes) noexcept {
+    try {
+        if (feature.kind != PartBooleanFeatureKind
+            || feature.codecVersion != PartBooleanResultSetFeatureCodec) return false;
+        part_boolean::OriginalsDefinition payload;
+        if (!part_boolean::DecodeBooleanOriginals(feature.parameters, payload)
+            || !payload.resultSet) return false;
+        FeatureNode legacy = feature;
+        legacy.codecVersion = PartBooleanOriginalsFeatureCodec;
+        if (!part_boolean::EncodeOriginals(payload, legacy.parameters)) return false;
+        return CanonicalOriginalsFeature(legacy, priorNodes);
+    } catch (...) { return false; }
+}
+
 inline bool CanonicalProgramOperandFeature(const FeatureNode& feature,
                                            const std::vector<Node>& priorNodes) noexcept {
     try {
@@ -638,9 +654,10 @@ inline V3Validation ValidateV3(const Definition& definition,
                 }
             }
             if (feature.kind == PartBooleanFeatureKind
-                && feature.codecVersion == PartBooleanOriginalsFeatureCodec) {
+                && (feature.codecVersion == PartBooleanOriginalsFeatureCodec
+                    || feature.codecVersion == PartBooleanResultSetFeatureCodec)) {
                 part_boolean::OriginalsDefinition payload;
-                if (!part_boolean::DecodeOriginals(feature.parameters, payload)
+                if (!part_boolean::DecodeBooleanOriginals(feature.parameters, payload)
                     || !(payload.owner == definition.owner)) {
                     result.refusal = V3Refusal::Payload;
                     result.reason = "noncanonical-feature-payload";
@@ -942,7 +959,7 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes, Definition& output) n
 namespace core3d::retained_feature {
 inline const RegistryView& ProductionRegistry() noexcept {
     using namespace composite_recipe;
-    static const std::array<Entry, 7> entries{{
+    static const std::array<Entry, 8> entries{{
         {{{PartBooleanFeatureKind, PartBooleanFeatureCodec}, 3, MaximumFeaturePayloadBytes,
           {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 2,
           ShapeKind::Solid, CanonicalAnalyticFeature}, {}},
@@ -957,6 +974,10 @@ inline const RegistryView& ProductionRegistry() noexcept {
         {{{PartBooleanFeatureKind, PartBooleanOriginalsFeatureCodec}, 3, MaximumFeaturePayloadBytes,
           {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 2,
           ShapeKind::Solid, CanonicalOriginalsFeature}, {}},
+        // Result sets cannot flow into single-solid suffix/program adapters.
+        {{{PartBooleanFeatureKind, PartBooleanResultSetFeatureCodec}, 3, MaximumFeaturePayloadBytes,
+          {ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid, ShapeKind::Solid}, 2,
+          ShapeKind::SolidSet, CanonicalResultSetFeature}, {}},
         // Codec 5 is readable/canonical only. The empty execution descriptor
         // keeps retained_recipe::Evaluate closed until the isolated P9 promotion.
         {{{PartBooleanFeatureKind, ProgramOperandFeatureCodec}, 3, MaximumFeaturePayloadBytes,

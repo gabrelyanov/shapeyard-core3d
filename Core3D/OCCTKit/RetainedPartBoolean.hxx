@@ -7,9 +7,11 @@
 // Agentic routing remains closed until that retained owner is implemented.
 #include "RetainedRecipeAdmission.hxx"
 #include "RetainedTopologyBudget.hxx"
+#include "PartBooleanResultSet.hxx"
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
@@ -311,6 +313,166 @@ inline Candidate BuildDetachedCandidate(
                 ExactShapeBytes(leftSourceShape, leftAfter)
                 && ExactShapeBytes(rightSourceShape, rightAfter)
                 && leftBefore == leftAfter && rightBefore == rightAfter;
+        }
+        return result;
+    } catch (...) {
+        result = {};
+        result.refusal = Refusal::BuildFailed;
+        return result;
+    }
+}
+
+// Only SYPB/6 ordinary-output callers use this sibling. The historical
+// one-solid/no-interior-overlap policy above remains unchanged.
+inline Candidate BuildDetachedResultSetCandidate(
+    Operation operation,
+    const TopoDS_Shape& leftSourceShape,
+    const TopoDS_Shape& rightSourceShape,
+    double tolerance,
+    const OperandReadSet& capturedReads,
+    const OperandReadSet& currentReads,
+    CandidateEvidence* evidence = nullptr) noexcept {
+    Candidate result;
+    if (evidence != nullptr) *evidence = {};
+    try {
+        if (!ValidOperandRead(capturedReads.leftSource)
+            || !ValidOperandRead(capturedReads.rightSource)
+            || !ValidOperandRead(currentReads.leftSource)
+            || !ValidOperandRead(currentReads.rightSource)) {
+            result.refusal = Refusal::Admission;
+            return result;
+        }
+        if (!SameOperandRead(capturedReads.leftSource,
+                             currentReads.leftSource)) {
+            result.refusal = Refusal::StaleLeftSource;
+            return result;
+        }
+        if (!SameOperandRead(capturedReads.rightSource,
+                             currentReads.rightSource)) {
+            result.refusal = Refusal::StaleRightSource;
+            return result;
+        }
+        if (!std::isfinite(tolerance) || tolerance <= 0
+            || !IsOneValidForwardSolid(leftSourceShape)
+            || !IsOneValidForwardSolid(rightSourceShape)) {
+            result.refusal = Refusal::InvalidInput;
+            return result;
+        }
+
+        std::string leftBefore, rightBefore;
+        if (evidence != nullptr
+            && (!ExactShapeBytes(leftSourceShape, leftBefore)
+                || !ExactShapeBytes(rightSourceShape, rightBefore))) {
+            result.refusal = Refusal::BuildFailed;
+            return result;
+        }
+        // Even the non-destructive common pass clears an untouched input
+        // solid's shared TShape Free bit; later results may reuse that solid.
+        // Own both topology and geometry before any Boolean build; the exact
+        // evidence below continues to compare the caller's unmodified sources.
+        BRepBuilderAPI_Copy leftCopy(leftSourceShape, Standard_True, Standard_False);
+        BRepBuilderAPI_Copy rightCopy(rightSourceShape, Standard_True, Standard_False);
+        if (!leftCopy.IsDone() || leftCopy.Shape().IsNull()
+            || !rightCopy.IsDone() || rightCopy.Shape().IsNull()) {
+            result.refusal = Refusal::BuildFailed;
+            return result;
+        }
+        const TopoDS_Shape leftOperand = leftCopy.Shape();
+        const TopoDS_Shape rightOperand = rightCopy.Shape();
+        TopTools_ListOfShape arguments, tools;
+        arguments.Append(leftOperand);
+        tools.Append(rightOperand);
+        const auto configureAndBuild = [&](auto& builder) {
+            builder.SetArguments(arguments);
+            builder.SetTools(tools);
+            builder.SetRunParallel(Standard_False);
+            builder.SetNonDestructive(Standard_True);
+            builder.SetFuzzyValue(tolerance);
+            builder.SetUseOBB(Standard_True);
+            builder.SetCheckInverted(Standard_True);
+            builder.Build();
+            if (evidence != nullptr)
+                evidence->explicitDeterministicOptions = true;
+            return builder.IsDone() && !builder.HasErrors();
+        };
+        const auto observeHistory = [&](auto& builder) {
+            if (evidence == nullptr) return;
+            const auto charge = [&](const TopoDS_Shape& source) {
+                std::size_t count = 0;
+                for (TopExp_Explorer it(source, TopAbs_FACE); it.More(); it.Next()) {
+                    count += std::size_t(builder.Modified(it.Current()).Extent());
+                    count += std::size_t(builder.Generated(it.Current()).Extent());
+                    if (builder.IsDeleted(it.Current())) ++count;
+                }
+                return count;
+            };
+            evidence->leftHistoryRelations = charge(leftOperand);
+            evidence->rightHistoryRelations = charge(rightOperand);
+            evidence->historyObserved = true;
+        };
+
+        const double volumeTolerance = tolerance * tolerance * tolerance;
+        BRepAlgoAPI_Common common;
+        if (!configureAndBuild(common)) {
+            result.refusal = Refusal::BuildFailed;
+            return result;
+        }
+        const double commonVolume = common.Shape().IsNull()
+            ? 0 : Volume(common.Shape());
+        if (commonVolume < 0) {
+            result.refusal = Refusal::BuildFailed;
+            return result;
+        }
+        if (commonVolume <= volumeTolerance && operation == Operation::Intersect) {
+            result.refusal = Refusal::EmptyResult;
+            return result;
+        }
+
+        TopoDS_Shape built;
+        if (operation == Operation::Union) {
+            BRepAlgoAPI_Fuse boolean;
+            if (!configureAndBuild(boolean)) {
+                result.refusal = Refusal::BuildFailed;
+                return result;
+            }
+            built = boolean.Shape();
+            observeHistory(boolean);
+        } else if (operation == Operation::Subtract) {
+            BRepAlgoAPI_Cut boolean;
+            if (!configureAndBuild(boolean)) {
+                result.refusal = Refusal::BuildFailed;
+                return result;
+            }
+            built = boolean.Shape();
+            observeHistory(boolean);
+        } else {
+            built = common.Shape();
+            observeHistory(common);
+        }
+        if (built.IsNull() || Volume(built) <= volumeTolerance) {
+            result.refusal = Refusal::EmptyResult;
+            return result;
+        }
+        if (!BRepCheck_Analyzer(built).IsValid()) {
+            result.refusal = Refusal::BuildFailed;
+            return result;
+        }
+        if (!part_boolean::result_set::Valid(built)) {
+            result.refusal = Refusal::BuildFailed;
+            return result;
+        }
+        result.refusal = Refusal::None;
+        result.solid = part_boolean::result_set::Normalize(built);
+        if (evidence != nullptr) {
+            std::string leftAfter, rightAfter;
+            evidence->inputBytesUnchanged =
+                ExactShapeBytes(leftSourceShape, leftAfter)
+                && ExactShapeBytes(rightSourceShape, rightAfter)
+                && leftBefore == leftAfter && rightBefore == rightAfter;
+            if (!evidence->inputBytesUnchanged) {
+                result.solid.Nullify();
+                result.refusal = Refusal::InvalidInput;
+            }
         }
         return result;
     } catch (...) {
