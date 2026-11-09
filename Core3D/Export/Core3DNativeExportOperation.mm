@@ -823,6 +823,52 @@ bool OmitTextureReferencesForDebug(
 }
 #endif
 
+bool PlaceOBJMaterialLibraryReferenceFirst(
+    const std::shared_ptr<NativeExportState>& state) {
+    ThrowIfCancelled(state);
+    const std::string directive = "mtllib model.mtl\n";
+    std::ifstream input(state->primaryPath, std::ios::binary);
+    if (!input.is_open()) {
+        return false;
+    }
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    if (input.bad() || !buffer.good()) {
+        return false;
+    }
+    std::string contents = buffer.str();
+    if (contents.rfind(directive, 0) == 0) {
+        return true;
+    }
+    const std::size_t position = contents.find(directive);
+    if (position == std::string::npos
+        || (position > 0 && contents[position - 1] != '\n')
+        || contents.find(directive, position + directive.size())
+            != std::string::npos) {
+        return false;
+    }
+    contents.erase(position, directive.size());
+
+    const std::filesystem::path temporaryPath =
+        state->primaryPath + ".material-order.tmp";
+    std::ofstream output(
+        temporaryPath, std::ios::binary | std::ios::trunc);
+    if (!output.is_open()) {
+        return false;
+    }
+    output << directive << contents;
+    output.flush();
+    if (!output.good()) {
+        return false;
+    }
+    output.close();
+    input.close();
+    ThrowIfCancelled(state);
+    std::error_code error;
+    std::filesystem::rename(temporaryPath, state->primaryPath, error);
+    return !error;
+}
+
 bool EnsureOBJMaterialLibrary(
     const std::shared_ptr<NativeExportState>& state) {
     ThrowIfCancelled(state);
@@ -1706,17 +1752,19 @@ bool CorruptSTEPTerminatorForDebug(const std::string& path) {
 }
 #endif
 
-void BridgeLegacySTEPColors(
+bool BridgeLegacySurfaceColors(
     const Handle(OcctDocument)& document,
     const Handle(TDocStd_Document)& ocafDocument,
-    const TDF_LabelSequence& rootLabels) {
+    const TDF_LabelSequence& rootLabels,
+    const char* colorTableUnavailableMessage) {
     const Handle(XCAFDoc_ColorTool) colorTool =
         XCAFDoc_DocumentTool::ColorTool(ocafDocument->Main());
     if (colorTool.IsNull()) {
         throw NativeExportFailure(
             Core3DNativeExportErrorInvalidState,
-            "The STEP color table is unavailable.");
+            colorTableUnavailableMessage);
     }
+    bool bridgedColor = false;
     for (Standard_Integer index = 1;
          index <= rootLabels.Length();
          ++index) {
@@ -1729,8 +1777,10 @@ void BridgeLegacySTEPColors(
                 label,
                 Quantity_Color(legacyColor),
                 XCAFDoc_ColorSurf);
+            bridgedColor = true;
         }
     }
+    return bridgedColor;
 }
 
 bool HasSTEPColorExpectation(
@@ -1805,7 +1855,11 @@ void WriteSTEP(
     const TDF_LabelSequence& rootLabels,
     const Message_ProgressRange& progress) {
     ThrowIfCancelled(state);
-    BridgeLegacySTEPColors(document, ocafDocument, rootLabels);
+    BridgeLegacySurfaceColors(
+        document,
+        ocafDocument,
+        rootLabels,
+        "The STEP color table is unavailable.");
     const bool expectedColor =
         HasSTEPColorExpectation(ocafDocument, rootLabels);
     UnitsMethods_LengthUnit outputUnit =
@@ -2516,6 +2570,12 @@ NativeExportResult RunNativeExport(
                 // publishes the staged directory only after bundle validation.
                 TColStd_IndexedDataMapOfStringString fileInfo;
                 fileInfo.Add("Author", "Shapeyard 3D");
+                const bool bridgedLegacySurfaceColor =
+                    BridgeLegacySurfaceColors(
+                    document,
+                    ocafDocument,
+                    rootLabels,
+                    "The OBJ color table is unavailable.");
                 ValidatedOBJWriter writer(
                     TCollection_AsciiString(state->primaryPath.c_str()), state->objColorConvention);
                 const bool writerSucceeded = writer.Perform(
@@ -2535,6 +2595,13 @@ NativeExportResult RunNativeExport(
                         Core3DNativeExportErrorInvalidArtifact,
                         "The OBJ writer did not produce the required "
                         "material library.");
+                }
+                if (bridgedLegacySurfaceColor
+                    && !PlaceOBJMaterialLibraryReferenceFirst(state)) {
+                    throw NativeExportFailure(
+                        Core3DNativeExportErrorInvalidArtifact,
+                        "The OBJ material library reference could not be "
+                        "placed first.");
                 }
 #ifdef DEBUG
                 if (state->debugOmitTextureReferences.load(
