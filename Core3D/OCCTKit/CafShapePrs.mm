@@ -20,6 +20,7 @@
 #include <Graphic3d_ShaderProgram.hxx>
 #include "../UI/Core3DContext.hpp"
 #include <Prs3d_ShadingAspect.hxx>
+#include <XCAFDoc_ShapeTool.hxx>
 
 namespace {
 
@@ -184,6 +185,17 @@ CafShapePrs::CafShapePrs(const TDF_Label&                theDefinitionLabel,
 // =======================================================================
 void CafShapePrs::DispatchStyles(const Standard_Boolean theToSyncStyles)
 {
+  // Style grouping can place the persisted root into a temporary compound,
+  // clearing Free even when no geometry edit occurs. Dispatch can also be
+  // requested outside Compute/redrawDocument, so preserve at this boundary.
+  struct RootFreeFlag {
+    TopoDS_Shape shape;
+    Standard_Boolean wasFree;
+    ~RootFreeFlag() { if (!shape.IsNull()) shape.Free(wasFree); }
+  };
+  const TopoDS_Shape root = GetLabel().IsNull()
+      ? TopoDS_Shape() : XCAFDoc_ShapeTool::GetShape(GetLabel());
+  const RootFreeFlag restore{root, !root.IsNull() && root.Free()};
   XCAFPrs_AISObject::DispatchStyles(theToSyncStyles);
   // The parent recreates wrappers for default and imported sub-shape styles.
   // Normalize every own aspect after dispatch, before Compute consumes it.
