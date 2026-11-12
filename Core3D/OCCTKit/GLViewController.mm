@@ -1298,6 +1298,8 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 - (BOOL)core3d_cancelVisibleRawR2Bevel;
 - (Core3DModelingPreviewStatus)core3d_visibleRawR2BevelStatus;
 - (double)core3d_visibleRawR2BevelMetersPerUnit;
+- (Core3DRoundFailureObservation)
+    core3d_visibleRawR2RoundFailureObservation;
 @end
 
 static Core3DViewController *Core3DVisibleRawR2BevelOwner(
@@ -3781,6 +3783,10 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         0,
         Core3DRoundFailureKindNone,
     };
+    Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+    if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
+        return [rawOwner core3d_visibleRawR2RoundFailureObservation];
+    }
     if (_viewer == nullptr || [self getGizmoType] != PrimitiveGizmoTypeChamfer
         || _viewer->getShapeInteractor() == nullptr) {
         return result;

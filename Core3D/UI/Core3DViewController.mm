@@ -4114,6 +4114,13 @@ void B1SetRawPreviewSession(Core3DEdgeTreatmentRawPreviewSessionR2 *value,
     [value setValue:@(NSInteger(candidate?candidate->kind():
         core3d::retained_edge_treatment::Kind::ConstantFillet)) forKey:@"kind"];
     [value setValue:@(candidate?candidate->amountMM():0) forKey:@"amountMM"];
+    const Core3DEdgeTreatmentRawPreviewRefusalKindR2 refusalKind =
+        status != Core3DEdgeTreatmentRawPreviewStatusR2Refused
+            ? Core3DEdgeTreatmentRawPreviewRefusalKindR2None
+            : refusal == core3d::retained_edge_treatment::Refusal::Clearance
+                ? Core3DEdgeTreatmentRawPreviewRefusalKindR2RadiusRefused
+                : Core3DEdgeTreatmentRawPreviewRefusalKindR2Other;
+    [value setValue:@(refusalKind) forKey:@"refusalKind"];
     [value setValue:@(core3d::retained_edge_treatment::RefusalCode(refusal))
         forKey:@"refusalCode"];
     [value setValue:@(core3d::retained_edge_treatment::RefusalMessage(refusal))
@@ -4133,6 +4140,13 @@ Core3DEdgeTreatmentRawPreviewResultR2 *B1RawPreviewResult(
     [value setValue:@(NSInteger(candidate?candidate->kind():
         core3d::retained_edge_treatment::Kind::ConstantFillet)) forKey:@"kind"];
     [value setValue:@(candidate?candidate->amountMM():0) forKey:@"amountMM"];
+    const Core3DEdgeTreatmentRawPreviewRefusalKindR2 refusalKind =
+        status != Core3DEdgeTreatmentRawPreviewStatusR2Refused
+            ? Core3DEdgeTreatmentRawPreviewRefusalKindR2None
+            : refusal == core3d::retained_edge_treatment::Refusal::Clearance
+                ? Core3DEdgeTreatmentRawPreviewRefusalKindR2RadiusRefused
+                : Core3DEdgeTreatmentRawPreviewRefusalKindR2Other;
+    [value setValue:@(refusalKind) forKey:@"refusalKind"];
     [value setValue:@(core3d::retained_edge_treatment::RefusalCode(refusal))
         forKey:@"refusalCode"];
     [value setValue:@(core3d::retained_edge_treatment::RefusalMessage(refusal))
@@ -4676,6 +4690,8 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
     Core3DEdgeTreatmentOperation *_visibleRawR2BevelOperation;
     Core3DEdgeTreatmentRawPreviewStatusR2 _visibleRawR2BevelStatus;
     uint64_t _visibleRawR2BevelGeneration;
+    Core3DEdgeTreatmentRawPreviewRefusalKindR2
+        _visibleRawR2BevelRefusalKind;
     double _visibleRawR2BevelMetersPerUnit;
     NSNumber *_visibleRawR2BevelPendingValue;
     NSNumber *_visibleRawR2BevelLastRequestedValue;
@@ -4749,6 +4765,8 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
     _visibleRawR2BevelOperation = nil;
     _visibleRawR2BevelStatus = session.status;
     _visibleRawR2BevelGeneration = session.generation;
+    _visibleRawR2BevelRefusalKind =
+        Core3DEdgeTreatmentRawPreviewRefusalKindR2None;
     _visibleRawR2BevelMetersPerUnit = targets.snapshot.dimensionMetersPerUnit;
     _visibleRawR2BevelPendingValue = nil;
     _visibleRawR2BevelLastRequestedValue = nil;
@@ -4798,6 +4816,26 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
     return _visibleRawR2BevelActive ? _visibleRawR2BevelMetersPerUnit : 0.0;
 }
 
+- (Core3DRoundFailureObservation)
+core3d_visibleRawR2RoundFailureObservation {
+    Core3DRoundFailureObservation result = {
+        _visibleRawR2BevelGeneration,
+        Core3DRoundFailureKindNone,
+    };
+    if (!_visibleRawR2BevelActive) return result;
+    switch (_visibleRawR2BevelRefusalKind) {
+        case Core3DEdgeTreatmentRawPreviewRefusalKindR2None:
+            break;
+        case Core3DEdgeTreatmentRawPreviewRefusalKindR2RadiusRefused:
+            result.kind = Core3DRoundFailureKindRadiusRefused;
+            break;
+        case Core3DEdgeTreatmentRawPreviewRefusalKindR2Other:
+            result.kind = Core3DRoundFailureKindOther;
+            break;
+    }
+    return result;
+}
+
 - (void)core3d_publishVisibleRawR2BevelState {
     const Core3DModelingPreviewStatus status =
         [self core3d_visibleRawR2BevelStatus];
@@ -4812,6 +4850,8 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
     _visibleRawR2BevelPendingValue = nil;
     _visibleRawR2BevelUpdateInFlight = YES;
     _visibleRawR2BevelStatus = Core3DEdgeTreatmentRawPreviewStatusR2Building;
+    _visibleRawR2BevelRefusalKind =
+        Core3DEdgeTreatmentRawPreviewRefusalKindR2None;
     [self core3d_publishVisibleRawR2BevelState];
     const double amountMM = std::abs(localValue)
         * _visibleRawR2BevelMetersPerUnit * 1000.0;
@@ -4833,6 +4873,7 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
                 strongSelf->_visibleRawR2BevelUpdateInFlight = NO;
                 strongSelf->_visibleRawR2BevelStatus = result.status;
                 strongSelf->_visibleRawR2BevelGeneration = result.generation;
+                strongSelf->_visibleRawR2BevelRefusalKind = result.refusalKind;
                 if (result.status
                         == Core3DEdgeTreatmentRawPreviewStatusR2Cancelled
                     || result.status
