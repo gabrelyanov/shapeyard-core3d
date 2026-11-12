@@ -26639,8 +26639,15 @@ std::unordered_map<NSUInteger,B2BudgetSessionBox>& B2BudgetSessions(){
                     // native value synchronously: GLController publishes its
                     // selection callback immediately after redraw and asserts
                     // that these two authorities already agree.
+                    // A retained raw-R2 Bevel/Round session deliberately has
+                    // no ordinary ObjectInteractor manipulator. Its public
+                    // tool authority is still Chamfer until that session is
+                    // applied or cancelled; renderer-driven interactor
+                    // recreation must not publish a transient None over it.
                     strongSelf->_currentGizmoType =
-                        static_cast<PrimitiveGizmoType>(nativeType);
+                        [strongSelf core3d_hasVisibleRawR2Bevel]
+                            ? PrimitiveGizmoTypeChamfer
+                            : static_cast<PrimitiveGizmoType>(nativeType);
                     strongSelf.can_apply = NO;
                 });
         }
