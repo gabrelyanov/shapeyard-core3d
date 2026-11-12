@@ -20671,123 +20671,373 @@ static bool Core3DPublishCommittedSpatialSweep(
     }
 }
 
-- (NSDictionary<NSString *, NSNumber *> *)measureSelectedElementDistance {
-    if (![NSThread isMainThread]
-        || GLController == nil || GLController.viewer == nullptr) {
-        return nil;
+struct Core3DMeasureElement {
+    TopoDS_Shape world;
+    Handle(StdSelect_BRepOwner) owner;
+};
+
+static bool Core3DCollectMeasureElements(
+    const Handle(AIS_InteractiveContext)& context,
+    std::vector<Core3DMeasureElement>& elements) {
+    if (context.IsNull()) return false;
+    for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
+        const auto owner = Handle(StdSelect_BRepOwner)::DownCast(context->SelectedOwner());
+        if (owner.IsNull() || !owner->HasShape()) continue;
+        const TopoDS_Shape& local = owner->Shape();
+        const TopAbs_ShapeEnum type = local.ShapeType();
+        if (type != TopAbs_EDGE && type != TopAbs_FACE) continue;
+        TopoDS_Shape world = local;
+        const auto selectable = owner->Selectable();
+        if (!selectable.IsNull()) {
+            const gp_Trsf& transform = selectable->Transformation();
+            if (std::abs(std::abs(transform.ScaleFactor()) - 1.0)
+                    > TopLoc_Location::ScalePrec() || transform.IsNegative()) {
+                BRepBuilderAPI_Transform transformed(local, transform, Standard_True);
+                if (!transformed.IsDone() || transformed.Shape().IsNull()) return false;
+                world = transformed.Shape();
+            } else {
+                world = local.Moved(TopLoc_Location(transform));
+            }
+        }
+        elements.push_back(Core3DMeasureElement{world, owner});
     }
+    return true;
+}
+
+static bool Core3DMeasureFullCircle(const TopoDS_Shape& shape, gp_Circ& circle) {
+    if (shape.ShapeType() != TopAbs_EDGE) return false;
+    const TopoDS_Edge edge = TopoDS::Edge(shape);
+    if (BRep_Tool::Degenerated(edge)) return false;
+    BRepAdaptor_Curve curve(edge);
+    if (curve.GetType() != GeomAbs_Circle
+        || std::abs(curve.LastParameter() - curve.FirstParameter() - 2 * M_PI) >= 1e-7)
+        return false;
+    circle = curve.Circle();
+    return std::isfinite(circle.Radius()) && circle.Radius() > 0;
+}
+
+static double Core3DMeasureUnitsPerPixel(
+    const Handle(V3d_View)& view, const gp_Pnt& point) {
+    if (view.IsNull() || view->Window().IsNull() || view->Camera().IsNull()) return 0;
+    Standard_Integer width = 0, height = 0;
+    view->Window()->Size(width, height);
+    if (width <= 0 || height <= 0) return 0;
+    const auto camera = view->Camera();
+    const gp_Pnt projected = camera->Project(point);
+    double units = 0;
+    for (int axis = 0; axis < 2; ++axis) {
+        const double dx = axis == 0 ? 2.0 / width : 0;
+        const double dy = axis == 1 ? -2.0 / height : 0;
+        const gp_Pnt shifted = camera->UnProject(gp_Pnt(
+            projected.X() + dx, projected.Y() + dy, projected.Z()));
+        const double candidate = point.Distance(shifted);
+        if (std::isfinite(candidate)) units = std::max(units, candidate);
+    }
+    return units;
+}
+
+struct Core3DMeasureSnap {
+    gp_Pnt point;
+    int kind = 0;
+};
+
+static Core3DMeasureSnap Core3DMeasureSnapPoint(
+    const Handle(V3d_View)& view, const core3d::Core3DViewer::MeasurePick& pick) {
+    gp_Circ circle;
+    if (Core3DMeasureFullCircle(pick.worldEdge, circle))
+        return Core3DMeasureSnap{circle.Location(), 4};
+    gp_Pnt picked = pick.pickedPoint;
+    gp_Pnt endpoints[2];
+    bool straight = false;
+    if (!BRep_Tool::Degenerated(TopoDS::Edge(pick.worldEdge))) {
+        const BRepAdaptor_Curve curve(TopoDS::Edge(pick.worldEdge));
+        if (curve.GetType() == GeomAbs_Line) {
+            int count = 0;
+            for (TopExp_Explorer vertices(pick.worldEdge, TopAbs_VERTEX);
+                 vertices.More() && count < 2; vertices.Next())
+                endpoints[count++] = BRep_Tool::Pnt(TopoDS::Vertex(vertices.Current()));
+            straight = count == 2 && endpoints[0].SquareDistance(endpoints[1]) > Precision::SquareConfusion();
+        }
+    }
+    if (straight) {
+        const gp_Vec edge(endpoints[0], endpoints[1]);
+        const gp_Vec offset(endpoints[0], picked);
+        const double parameter = std::clamp(offset.Dot(edge) / edge.SquareMagnitude(), 0.0, 1.0);
+        picked = endpoints[0].Translated(edge.Multiplied(parameter));
+    } else {
+        BRepExtrema_DistShapeShape onEdge(BRepBuilderAPI_MakeVertex(picked).Vertex(), pick.worldEdge);
+        if (onEdge.IsDone() && onEdge.NbSolution() > 0)
+            picked = onEdge.PointOnShape2(1);
+    }
+    const double unitsPerPixel = Core3DMeasureUnitsPerPixel(view, picked);
+    if (unitsPerPixel > 0 && std::isfinite(unitsPerPixel) && pick.pixelTolerance > 0) {
+        const unsigned kinds = static_cast<unsigned>(core3d::GeometrySnapKind::Vertex)
+            | static_cast<unsigned>(core3d::GeometrySnapKind::EdgeMidpoint);
+        const auto snapped = core3d::SnapPointToGeometry(pick.worldEdge, picked,
+            unitsPerPixel * pick.pixelTolerance, kinds);
+        if (snapped) {
+            const int kind = snapped->kind == core3d::GeometrySnapKind::Vertex ? 1 : 2;
+            const gp_Pnt point = kind == 2 && straight
+                ? endpoints[0].Translated(gp_Vec(endpoints[0], endpoints[1]).Multiplied(0.5))
+                : snapped->point;
+            return Core3DMeasureSnap{point, kind};
+        }
+    }
+    return Core3DMeasureSnap{picked, 3};
+}
+
+static gp_Pnt Core3DMeasureAnchor(const Core3DMeasureElement& element) {
+    gp_XYZ sum(0, 0, 0);
+    int count = 0;
+    for (TopExp_Explorer vertices(element.world, TopAbs_VERTEX); vertices.More(); vertices.Next()) {
+        sum.Add(BRep_Tool::Pnt(TopoDS::Vertex(vertices.Current())).XYZ());
+        ++count;
+    }
+    if (count > 0) return gp_Pnt(sum.Divided(count));
+    if (element.world.ShapeType() == TopAbs_EDGE) {
+        BRepAdaptor_Curve curve(TopoDS::Edge(element.world));
+        return curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2);
+    }
+    return gp_Pnt();
+}
+
+static void Core3DMeasureProjection(
+    const Handle(V3d_View)& view, const std::vector<Core3DMeasureElement>& elements,
+    const gp_Pnt& a, const gp_Pnt& b, NSMutableDictionary<NSString *, NSNumber *> *result) {
+    if (view.IsNull() || view->Window().IsNull()) return;
+    Standard_Integer width = 0, height = 0;
+    view->Window()->Size(width, height);
+    if (width <= 0 || height <= 0) return;
+    std::vector<gp_Pnt> points;
+    for (const auto& element : elements) {
+        for (TopExp_Explorer vertices(element.world, TopAbs_VERTEX); vertices.More(); vertices.Next())
+            points.push_back(BRep_Tool::Pnt(TopoDS::Vertex(vertices.Current())));
+        for (TopExp_Explorer edges(element.world, TopAbs_EDGE); edges.More(); edges.Next()) {
+            gp_Circ circle;
+            if (!Core3DMeasureFullCircle(edges.Current(), circle)) continue;
+            const gp_Dir x = circle.Position().XDirection();
+            const gp_Dir y = circle.Position().YDirection();
+            const gp_Pnt centre = circle.Location();
+            for (int sample = 0; sample < 64; ++sample) {
+                const double angle = 2 * M_PI * sample / 64;
+                const double cx = std::cos(angle) * circle.Radius();
+                const double cy = std::sin(angle) * circle.Radius();
+                points.emplace_back(centre.X() + cx * x.X() + cy * y.X(),
+                    centre.Y() + cx * x.Y() + cy * y.Y(),
+                    centre.Z() + cx * x.Z() + cy * y.Z());
+            }
+        }
+    }
+    if (points.empty()) points = {a, b};
+    double minX = std::numeric_limits<double>::infinity();
+    double minY = std::numeric_limits<double>::infinity();
+    double maxX = -std::numeric_limits<double>::infinity();
+    double maxY = -std::numeric_limits<double>::infinity();
+    for (const auto& point : points) {
+        Standard_Integer x = 0, y = 0;
+        view->Convert(point.X(), point.Y(), point.Z(), x, y);
+        minX = std::min(minX, static_cast<double>(x));
+        minY = std::min(minY, static_cast<double>(y));
+        maxX = std::max(maxX, static_cast<double>(x));
+        maxY = std::max(maxY, static_cast<double>(y));
+    }
+    const gp_Pnt mid((a.XYZ() + b.XYZ()) / 2);
+    Standard_Integer px = 0, py = 0;
+    view->Convert(mid.X(), mid.Y(), mid.Z(), px, py);
+    result[@"midPixelX"] = @(std::clamp(static_cast<double>(px), 0.0, static_cast<double>(width)));
+    result[@"midPixelY"] = @(std::clamp(static_cast<double>(py), 0.0, static_cast<double>(height)));
+    result[@"drawableWidth"] = @(width);
+    result[@"drawableHeight"] = @(height);
+    result[@"avoidanceMinPixelX"] = @(minX);
+    result[@"avoidanceMinPixelY"] = @(minY);
+    result[@"avoidanceMaxPixelX"] = @(maxX);
+    result[@"avoidanceMaxPixelY"] = @(maxY);
+}
+
+static void Core3DMeasureAddDocumentUnit(
+    const std::shared_ptr<core3d::Core3DViewer>& viewer,
+    NSMutableDictionary<NSString *, NSNumber *> *result) {
+    const auto document = viewer->getDocument();
+    double metersPerUnit = 0;
+    if (!document.IsNull() && !document->Document().IsNull()
+        && XCAFDoc_DocumentTool::GetLengthUnit(document->Document(), metersPerUnit)
+        && std::isfinite(metersPerUnit) && metersPerUnit > 0)
+        result[@"metersPerUnit"] = @(metersPerUnit);
+}
+
+static std::optional<double> Core3DMeasureAngle(
+    const std::vector<Core3DMeasureElement>& elements) {
+    if (elements.size() != 2) return std::nullopt;
+    const TopAbs_ShapeEnum type = elements[0].world.ShapeType();
+    if (type != elements[1].world.ShapeType()
+        || (type != TopAbs_FACE && type != TopAbs_EDGE)) return std::nullopt;
+    gp_Vec directions[2];
+    for (int index = 0; index < 2; ++index) {
+        if (type == TopAbs_FACE) {
+            const BRepAdaptor_Surface surface(TopoDS::Face(elements[index].world), Standard_True);
+            if (surface.GetType() != GeomAbs_Plane) return std::nullopt;
+            directions[index] = gp_Vec(surface.Plane().Axis().Direction());
+        } else {
+            const TopoDS_Edge edge = TopoDS::Edge(elements[index].world);
+            if (BRep_Tool::Degenerated(edge)) return std::nullopt;
+            const BRepAdaptor_Curve curve(edge);
+            if (curve.GetType() != GeomAbs_Line
+                || !std::isfinite(curve.FirstParameter()) || !std::isfinite(curve.LastParameter())
+                || std::abs(curve.LastParameter() - curve.FirstParameter()) <= Precision::Confusion())
+                return std::nullopt;
+            directions[index] = gp_Vec(curve.Line().Direction());
+        }
+        if (directions[index].SquareMagnitude() <= Precision::SquareConfusion()) return std::nullopt;
+        directions[index].Normalize();
+    }
+    const double dot = std::clamp(std::abs(directions[0].Dot(directions[1])), 0.0, 1.0);
+    const double angle = std::acos(dot) * 180.0 / M_PI;
+    return std::isfinite(angle) && angle >= 0 && angle <= 90
+        ? std::optional<double>(angle) : std::nullopt;
+}
+
+#if DEBUG
+extern "C" double Core3DDebugMeasureAnglePairProbe(int pair) {
+    try {
+        std::vector<Core3DMeasureElement> elements(2);
+        if (pair == 1) {
+            const auto box = BRepPrimAPI_MakeBox(40, 30, 20).Shape();
+            TopExp_Explorer faces(box, TopAbs_FACE);
+            elements[0].world = faces.Current();
+            elements[1].world = BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 0), gp_Pnt(1, 0, 0)).Edge();
+        } else if (pair == 2) {
+            elements[0].world = BRepBuilderAPI_MakeEdge(
+                gp_Lin(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0)), 0, 0).Edge();
+            elements[1].world = BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 0), gp_Pnt(0, 1, 0)).Edge();
+        } else {
+            return -1;
+        }
+        return Core3DMeasureAngle(elements).value_or(-1);
+    } catch (...) {
+        return -1;
+    }
+}
+#endif
+
+- (NSDictionary<NSString *, NSNumber *> *)measureSelectedElementDistance {
+    if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr)
+        return nil;
     try {
         OCC_CATCH_SIGNALS
-        const Handle(AIS_InteractiveContext) context =
-            GLController.viewer->AisContext();
-        if (context.IsNull()) return nil;
+        const auto viewer = GLController.viewer;
+        const auto context = viewer->AisContext();
+        std::vector<Core3DMeasureElement> topology;
+        if (!Core3DCollectMeasureElements(context, topology)) return nil;
+        NSMutableDictionary<NSString *, NSNumber *> *result =
+            [@{ @"selectedCount": @(topology.size()) } mutableCopy];
+        Core3DMeasureAddDocumentUnit(viewer, result);
+        const Handle(V3d_View)& view = viewer->ActiveView();
+        const auto picks = viewer->measurePicksForCurrentSelection();
         std::vector<TopoDS_Shape> elements;
+        Core3DMeasureSnap snaps[2];
+        bool hasSnap[2] = {false, false};
         double circleDiameter = 0;
         gp_Pnt circleCentre;
         gp_Circ measuredCircle;
-        for (context->InitSelected(); context->MoreSelected();
-             context->NextSelected()) {
-            const Handle(StdSelect_BRepOwner) owner =
-                Handle(StdSelect_BRepOwner)::DownCast(context->SelectedOwner());
-            if (owner.IsNull() || !owner->HasShape()) continue;
-            const TopoDS_Shape& local = owner->Shape();
-            if (local.IsNull()) continue;
-            const TopAbs_ShapeEnum type = local.ShapeType();
-            if (type != TopAbs_EDGE && type != TopAbs_FACE) continue;
-            TopoDS_Shape world = local;
-            const Handle(SelectMgr_SelectableObject) selectable =
-                owner->Selectable();
-            if (!selectable.IsNull()) {
-                const gp_Trsf& transform = selectable->Transformation();
-                if (std::abs(std::abs(transform.ScaleFactor()) - 1.0) > TopLoc_Location::ScalePrec()
-                    || transform.IsNegative()) {
-                    // A scaled or mirrored TopoDS location is forbidden.
-                    // Measure a private transformed copy; selected topology,
-                    // the document and its history must remain untouched.
-                    BRepBuilderAPI_Transform transformed(local, transform, Standard_True);
-                    if (!transformed.IsDone() || transformed.Shape().IsNull()) return nil;
-                    world = transformed.Shape();
-                } else {
-                    world = local.Moved(TopLoc_Location(transform));
+        for (std::size_t index = 0; index < topology.size(); ++index) {
+            TopoDS_Shape world = topology[index].world;
+            if (world.ShapeType() == TopAbs_EDGE) {
+                const auto pick = std::find_if(picks.begin(), picks.end(),
+                    [&](const core3d::Core3DViewer::MeasurePick& candidate) {
+                        return candidate.owner == topology[index].owner;
+                    });
+                if (index < 2 && pick != picks.end()) {
+                    snaps[index] = Core3DMeasureSnapPoint(view, *pick);
+                    hasSnap[index] = snaps[index].kind > 0;
                 }
-            }
-            if (type == TopAbs_EDGE) {
-                // A full circle (a hole rim) is measured from its centre.
-                const TopoDS_Edge& edge = TopoDS::Edge(world);
-                if (!BRep_Tool::Degenerated(edge)) {
-                    BRepAdaptor_Curve curve(edge);
-                    if (curve.GetType() == GeomAbs_Circle
-                        && std::abs(curve.LastParameter() - curve.FirstParameter()
-                                    - 2 * M_PI) < 1e-7) {
-                        measuredCircle = curve.Circle();
-                        circleDiameter = 2 * measuredCircle.Radius();
-                        circleCentre = measuredCircle.Location();
-                        world = BRepBuilderAPI_MakeVertex(circleCentre).Vertex();
-                    }
+                gp_Circ circle;
+                if (Core3DMeasureFullCircle(world, circle)) {
+                    measuredCircle = circle;
+                    circleDiameter = 2 * circle.Radius();
+                    circleCentre = circle.Location();
+                    world = BRepBuilderAPI_MakeVertex(circleCentre).Vertex();
                 }
             }
             elements.push_back(world);
         }
-        NSMutableDictionary<NSString *, NSNumber *> *result =
-            [@{ @"selectedCount": @(elements.size()) } mutableCopy];
-        const auto document = GLController.viewer->getDocument();
-        double metersPerUnit = 0;
-        if (!document.IsNull() && !document->Document().IsNull()
-            && XCAFDoc_DocumentTool::GetLengthUnit(document->Document(), metersPerUnit)
-            && std::isfinite(metersPerUnit) && metersPerUnit > 0) {
-            result[@"metersPerUnit"] = @(metersPerUnit);
-        }
         gp_Pnt a, b;
-        if (elements.size() == 1 && std::isfinite(circleDiameter) && circleDiameter > 0) {
-            // Keep diameter separate: consumers of the two-element distance
-            // contract (including the mug lesson) must never accept one rim.
+        bool projected = false;
+        if (elements.size() == 1 && circleDiameter > 0) {
             result[@"diameter"] = @(circleDiameter);
             a = b = circleCentre;
-        } else {
-            if (elements.size() != 2) return result;
-            BRepExtrema_DistShapeShape extrema(elements[0], elements[1]);
-            if (!extrema.IsDone() || extrema.NbSolution() < 1) return result;
-            const double distance = extrema.Value();
-            a = extrema.PointOnShape1(1);
-            b = extrema.PointOnShape2(1);
+            projected = true;
+        } else if (elements.size() == 2) {
+            double distance = 0;
+            if (hasSnap[0] && hasSnap[1]) {
+                a = snaps[0].point;
+                b = snaps[1].point;
+                distance = a.Distance(b);
+            } else {
+                BRepExtrema_DistShapeShape extrema(elements[0], elements[1]);
+                if (!extrema.IsDone() || extrema.NbSolution() < 1) return result;
+                distance = extrema.Value();
+                a = extrema.PointOnShape1(1);
+                b = extrema.PointOnShape2(1);
+            }
             if (!std::isfinite(distance) || distance < 0) return result;
             result[@"distance"] = @(distance);
-            result[@"ax"] = @(a.X()); result[@"ay"] = @(a.Y()); result[@"az"] = @(a.Z());
-            result[@"bx"] = @(b.X()); result[@"by"] = @(b.Y()); result[@"bz"] = @(b.Z());
+            projected = true;
+        } else if (elements.size() == 1 && hasSnap[0]) {
+            a = b = snaps[0].point;
+            projected = true;
         }
-        // Where the label goes: the circle centre or pair midpoint, in drawable pixels.
-        const Handle(V3d_View)& view = GLController.viewer->ActiveView();
-        if (!view.IsNull() && !view->Window().IsNull()) {
+        if (!projected) return result;
+        result[@"ax"] = @(a.X()); result[@"ay"] = @(a.Y()); result[@"az"] = @(a.Z());
+        result[@"bx"] = @(b.X()); result[@"by"] = @(b.Y()); result[@"bz"] = @(b.Z());
+        if ((elements.size() == 1 && hasSnap[0]) || (elements.size() == 2 && hasSnap[0] && hasSnap[1])) {
+            result[@"snapKindA"] = @(snaps[0].kind);
+            if (elements.size() == 2) result[@"snapKindB"] = @(snaps[1].kind);
+        }
+        Core3DMeasureProjection(view, topology, a, b, result);
+        if (elements.size() == 1 && circleDiameter > 0 && !view.IsNull() && !view->Window().IsNull()) {
             Standard_Integer width = 0, height = 0, px = 0, py = 0;
             view->Window()->Size(width, height);
-            const gp_Pnt mid((a.XYZ() + b.XYZ()) / 2);
-            view->Convert(mid.X(), mid.Y(), mid.Z(), px, py);
-            if (width > 0 && height > 0) {
-                result[@"midPixelX"] = @(px); result[@"midPixelY"] = @(py);
-                result[@"drawableWidth"] = @(width); result[@"drawableHeight"] = @(height);
-                if (elements.size() == 1 && circleDiameter > 0) {
-                    double radiusPixels = 0;
-                    const gp_Dir xDirection = measuredCircle.Position().XDirection();
-                    const gp_Dir yDirection = measuredCircle.Position().YDirection();
-                    for (Standard_Integer sample = 0; sample < 64; ++sample) {
-                        const double angle = 2 * M_PI * sample / 64;
-                        const double x = std::cos(angle) * measuredCircle.Radius();
-                        const double y = std::sin(angle) * measuredCircle.Radius();
-                        const gp_Pnt rim(
-                            circleCentre.X() + x * xDirection.X() + y * yDirection.X(),
-                            circleCentre.Y() + x * xDirection.Y() + y * yDirection.Y(),
-                            circleCentre.Z() + x * xDirection.Z() + y * yDirection.Z());
-                        Standard_Integer rimX = 0, rimY = 0;
-                        view->Convert(rim.X(), rim.Y(), rim.Z(), rimX, rimY);
-                        radiusPixels = std::max(radiusPixels, std::hypot(
-                            static_cast<double>(rimX - px), static_cast<double>(rimY - py)));
-                    }
-                    if (std::isfinite(radiusPixels) && radiusPixels > 0) {
-                        result[@"circleRadiusPixels"] = @(radiusPixels);
-                    }
-                }
+            view->Convert(circleCentre.X(), circleCentre.Y(), circleCentre.Z(), px, py);
+            double radiusPixels = 0;
+            const gp_Dir xDirection = measuredCircle.Position().XDirection();
+            const gp_Dir yDirection = measuredCircle.Position().YDirection();
+            for (int sample = 0; sample < 64; ++sample) {
+                const double angle = 2 * M_PI * sample / 64;
+                const double x = std::cos(angle) * measuredCircle.Radius();
+                const double y = std::sin(angle) * measuredCircle.Radius();
+                const gp_Pnt rim(circleCentre.X() + x * xDirection.X() + y * yDirection.X(),
+                    circleCentre.Y() + x * xDirection.Y() + y * yDirection.Y(),
+                    circleCentre.Z() + x * xDirection.Z() + y * yDirection.Z());
+                Standard_Integer rimX = 0, rimY = 0;
+                view->Convert(rim.X(), rim.Y(), rim.Z(), rimX, rimY);
+                radiusPixels = std::max(radiusPixels, std::hypot(
+                    static_cast<double>(rimX - px), static_cast<double>(rimY - py)));
             }
+            if (std::isfinite(radiusPixels) && radiusPixels > 0)
+                result[@"circleRadiusPixels"] = @(radiusPixels);
         }
+        return result;
+    } catch (...) {
+        return nil;
+    }
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)measureSelectedElementAngle {
+    if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr)
+        return nil;
+    try {
+        OCC_CATCH_SIGNALS
+        const auto viewer = GLController.viewer;
+        std::vector<Core3DMeasureElement> elements;
+        if (!Core3DCollectMeasureElements(viewer->AisContext(), elements)) return nil;
+        NSMutableDictionary<NSString *, NSNumber *> *result =
+            [@{ @"selectedCount": @(elements.size()) } mutableCopy];
+        Core3DMeasureAddDocumentUnit(viewer, result);
+        const auto angle = Core3DMeasureAngle(elements);
+        if (!angle) return result;
+        result[@"angleDegrees"] = @(*angle);
+        Core3DMeasureProjection(viewer->ActiveView(), elements,
+            Core3DMeasureAnchor(elements[0]), Core3DMeasureAnchor(elements[1]), result);
         return result;
     } catch (...) {
         return nil;
