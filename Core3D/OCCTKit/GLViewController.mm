@@ -3607,6 +3607,15 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     if (_visibleRawR2BevelOwnsChamferTool)
         return PrimitiveGizmoTypeChamfer;
     if (_viewer == nullptr) { return PrimitiveGizmoTypeNone; }
+    // Ordinary Round owns the Chamfer control surface through its typed
+    // Bevel ledger. The ObjectInteractor can legitimately have no attached
+    // manipulator after renderer publication; that presentation detail must
+    // not retire Radius while the operation is still active.
+    const std::shared_ptr<ShapeInteractor> shapeInteractor =
+        _viewer->getShapeInteractor();
+    if (shapeInteractor != nullptr && shapeInteractor->hasActiveBevel()) {
+        return PrimitiveGizmoTypeChamfer;
+    }
     const auto interactor = _viewer->getObjectInteractor();
     if (interactor == nullptr) { return PrimitiveGizmoTypeNone; }
     PrimitiveGizmoType type = PrimitiveGizmoTypeNone;
