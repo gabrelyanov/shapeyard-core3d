@@ -1494,6 +1494,10 @@ __attribute__((objc_subclassing_restricted))
 //! translucent face wash. Does not change selected owners or authored material.
 - (void)setSelectedSurfaceAppearanceColor:(UIColor *)color widthPoints:(CGFloat)width faceWashOpacity:(CGFloat)opacity
     NS_SWIFT_NAME(setSelectedSurfaceAppearance(color:widthPoints:faceWashOpacity:));
+//! Limit the current editor's Move/Rotate handles to translation. Ordinary
+//! editors allow rotation by default; callers restore it when guided mode ends.
+- (void)setManipulatorRotationAllowed:(BOOL)allowed;
+
 - (void)setGizmoType:(PrimitiveGizmoType)type;
 
 #ifdef DEBUG
@@ -2294,6 +2298,9 @@ __attribute__((objc_subclassing_restricted))
 //! zero-based; -1 means no exact single topology identity. Representation uses
 //! -1 invalid, 0 legacy BRep, 1 BRep, and 2 TriangleMesh.
 - (NSDictionary<NSString *, id> *)debugTopologySelectionState;
+//! Read-only evidence for one exact selected cylindrical face. Uses the live
+//! OCCT owner, independently of full render-snapshot availability; never picks.
+- (NSDictionary<NSString *, id> *)debugMugLessonSelectedWallEvidence;
 - (NSArray<NSString *> *)debugNativeFaceTapTrace;
 //! Native picking diagnostic: projects a world-space point with the active
 //! OCCT camera, then uses ordinary XOR selection; never selects by topology ID.

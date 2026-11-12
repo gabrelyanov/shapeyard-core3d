@@ -4766,8 +4766,8 @@ bool ValidatePresentationOverlayPayload(
         case PresentationOverlayKind::None:
             return isEmpty && theSuppressedEntityIdentifiers.empty();
         case PresentationOverlayKind::MoveRotateGizmo:
-            if (isEmpty || theMeshes.size() != 7
-                || theInstances.size() != 7
+            if (isEmpty || (theMeshes.size() != 7 && theMeshes.size() != 4)
+                || theInstances.size() != theMeshes.size()
                 || theMaterials.size() != 4) {
                 return false;
             }

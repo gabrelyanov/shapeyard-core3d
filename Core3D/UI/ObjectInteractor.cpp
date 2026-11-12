@@ -2260,6 +2260,13 @@ namespace core3d {
 		myContext->SetMaterial(selected, mat, Standard_True);
 	}
 
+    void ObjectInteractor::setManipulatorRotationAllowed(bool allowed) {
+        if (_manipulatorRotationAllowed == allowed) return;
+        if (!_manipulator.IsNull() && _manipulator->HasActiveTransformation()) cancelInteraction();
+        _manipulatorRotationAllowed = allowed;
+        setManipulatorType(_manipulatorType);
+    }
+
 	void ObjectInteractor::setManipulatorType(PrimitiveManipulatorType type) {
 		if (hasUnresolvedEdit()) { return; }
 		const PrimitiveManipulatorType aPreviousType = _manipulatorType;
@@ -2348,7 +2355,7 @@ namespace core3d {
             _manipulator->SetPart (axis, AIS_ManipulatorMode::AIS_MM_Scaling, scale);
 			_manipulator->SetPart (axis, AIS_ManipulatorMode::AIS_MM_ScalingUniform, scale);
             _manipulator->SetPart (axis, AIS_ManipulatorMode::AIS_MM_Translation, movRot && !mirror);
-            _manipulator->SetPart (axis, AIS_ManipulatorMode::AIS_MM_Rotation, movRot && !mirror);
+            _manipulator->SetPart (axis, AIS_ManipulatorMode::AIS_MM_Rotation, movRot && !mirror && _manipulatorRotationAllowed);
             _manipulator->SetPart (axis, AIS_ManipulatorMode::AIS_MM_TranslationPlane, Standard_False);
 			_manipulator->SetPart (axis, AIS_ManipulatorMode::AIS_MM_MirroringPlanePos, mirror);
 			_manipulator->SetPart (axis, AIS_ManipulatorMode::AIS_MM_MirroringPlaneNeg, mirror);
@@ -2500,6 +2507,10 @@ namespace core3d {
 		}
         if(!_manipulator.IsNull() && _manipulator->IsAttached()) {
             if(_manipulator->HasActiveMode()) {
+                if (!_manipulatorRotationAllowed && _manipulator->ActiveMode() == AIS_MM_Rotation) {
+                    cancelInteraction();
+                    return false;
+                }
                 _manipulator->Transform(theX, theY, myView, myContext);
                 myContext->UpdateCurrentViewer();
                 return true;
@@ -2523,6 +2534,10 @@ namespace core3d {
             myContext->MoveTo(theX, theY, myView, Standard_False);
             myContext->UpdateCurrentViewer();
             if(_manipulator->HasActiveMode()) {
+                if (!_manipulatorRotationAllowed && _manipulator->ActiveMode() == AIS_MM_Rotation) {
+                    cancelInteraction();
+                    return false;
+                }
                 _manipulator->StartTransform(theX, theY, myView, myContext);
 				_manipulatorGestureActive = true;
                 return true;
@@ -2697,6 +2712,11 @@ namespace core3d {
 #endif
 
     void ObjectInteractor::finishInteraction() {
+        if (!_manipulatorRotationAllowed && !_manipulator.IsNull()
+            && _manipulator->ActiveMode() == AIS_MM_Rotation) {
+            cancelInteraction();
+            return;
+        }
 		if (hasUnresolvedEdit()) {
 			_manipulatorGestureActive = false;
 			return;
@@ -3337,7 +3357,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
             _manipulator->SetPart(axis,AIS_MM_Scaling,scale);
             _manipulator->SetPart(axis,AIS_MM_ScalingUniform,scale);
             _manipulator->SetPart(axis,AIS_MM_Translation,moveRotate);
-            _manipulator->SetPart(axis,AIS_MM_Rotation,moveRotate);
+            _manipulator->SetPart(axis,AIS_MM_Rotation,moveRotate && _manipulatorRotationAllowed);
             _manipulator->SetPart(axis,AIS_MM_TranslationPlane,Standard_False);
             _manipulator->SetPart(axis,AIS_MM_MirroringPlaneNeg,Standard_False);
             _manipulator->SetPart(axis,AIS_MM_MirroringPlanePos,Standard_False);
@@ -3494,7 +3514,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                     _manipulator->SetPart(axis, AIS_MM_Scaling, scale);
                     _manipulator->SetPart(axis, AIS_MM_ScalingUniform, scale);
                     _manipulator->SetPart(axis, AIS_MM_Translation, moveRotate);
-                    _manipulator->SetPart(axis, AIS_MM_Rotation, moveRotate);
+                    _manipulator->SetPart(axis, AIS_MM_Rotation, moveRotate && _manipulatorRotationAllowed);
                     _manipulator->SetPart(axis, AIS_MM_TranslationPlane, Standard_False);
                     _manipulator->SetPart(axis, AIS_MM_MirroringPlaneNeg, Standard_False);
                     _manipulator->SetPart(axis, AIS_MM_MirroringPlanePos, Standard_False);
@@ -3756,7 +3776,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                 _manipulator->SetPart(axis, AIS_ManipulatorMode::AIS_MM_Scaling, scale);
                 _manipulator->SetPart(axis, AIS_ManipulatorMode::AIS_MM_ScalingUniform, scale);
                 _manipulator->SetPart(axis, AIS_ManipulatorMode::AIS_MM_Translation, moveRotate);
-                _manipulator->SetPart(axis, AIS_ManipulatorMode::AIS_MM_Rotation, moveRotate);
+                _manipulator->SetPart(axis, AIS_ManipulatorMode::AIS_MM_Rotation, moveRotate && _manipulatorRotationAllowed);
                 _manipulator->SetPart(axis, AIS_ManipulatorMode::AIS_MM_TranslationPlane, Standard_False);
                 _manipulator->SetPart(axis, AIS_ManipulatorMode::AIS_MM_MirroringPlaneNeg, Standard_False);
                 _manipulator->SetPart(axis, AIS_ManipulatorMode::AIS_MM_MirroringPlanePos, Standard_False);
