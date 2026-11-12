@@ -74,8 +74,21 @@ std::optional<core3d::GeometrySnapResult> core3d::SnapPointToGeometry(
             if (!distance.IsDone()) throw Standard_Failure("Geometry snap distance failed");
             for (int solution = 1; solution <= distance.NbSolution(); ++solution)
                 consider(distance.PointOnShape2(solution),kind,index,topology);
-            if (!axis || tolerance == 0) return;
+            if (!axis || tolerance == 0 || distance.Value() > tolerance) return;
             const gp_Lin line(point,*axis);
+            // A search segment shorter than OCCT's modelling precision can
+            // be degenerate. Final candidate admission still uses the exact
+            // caller tolerance, including tiny positive values.
+            const double span = std::max(tolerance,2 * Precision::Confusion());
+            const auto segment = BRepBuilderAPI_MakeEdge(line,-span,span).Edge();
+            const auto intersectEdge = [&](const TopoDS_Shape& edge) {
+                BRepExtrema_DistShapeShape crossings(segment,edge);
+                if (!crossings.IsDone()) throw Standard_Failure("Geometry snap edge intersection failed");
+                if (crossings.Value() <= Precision::Confusion()) {
+                    for (int hit = 1; hit <= crossings.NbSolution(); ++hit)
+                        consider(crossings.PointOnShape2(hit),kind,index,topology);
+                }
+            };
             if (kind == GeometrySnapKind::Face) {
                 // A normal projection can be off the drag axis, especially
                 // on sloping and curved faces. Find all reachable crossings.
@@ -85,14 +98,19 @@ std::optional<core3d::GeometrySnapResult> core3d::SnapPointToGeometry(
                 if (!intersections.IsDone()) throw Standard_Failure("Geometry snap intersection failed");
                 for (int hit = 1; hit <= intersections.NbPnt(); ++hit)
                     consider(intersections.Pnt(hit),kind,index,topology);
-            } else {
-                const auto segment = BRepBuilderAPI_MakeEdge(line,-tolerance,tolerance).Edge();
-                BRepExtrema_DistShapeShape crossings(segment,topology);
-                if (!crossings.IsDone()) throw Standard_Failure("Geometry snap edge intersection failed");
-                if (crossings.Value() <= Precision::Confusion()) {
-                    for (int hit = 1; hit <= crossings.NbSolution(); ++hit)
-                        consider(crossings.PointOnShape2(hit),kind,index,topology);
+                if (intersections.NbPnt() == 0) {
+                    // A line in a planar face has no isolated surface
+                    // intersection. Its trim boundary, including hole wires,
+                    // supplies the nearest reachable entry into that face.
+                    TopTools_IndexedMapOfShape boundary;
+                    TopExp::MapShapes(topology,TopAbs_EDGE,boundary);
+                    for (int edge = 1; edge <= boundary.Extent(); ++edge) {
+                        if (!BRep_Tool::Degenerated(TopoDS::Edge(boundary(edge))))
+                            intersectEdge(boundary(edge));
+                    }
                 }
+            } else {
+                intersectEdge(topology);
             }
         };
         if (enabled(GeometrySnapKind::EdgeMidpoint) || enabled(GeometrySnapKind::Edge)) {
