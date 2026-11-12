@@ -1725,8 +1725,11 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                 if (aCopiedFace.IsNull() || aCopiedFace.ShapeType() != TopAbs_FACE
                     || aCopiedFace.IsPartner(finish.face)) return noChangeAt(__LINE__);
                 bool found = false;
+                // A face label and its occurrence in the solid may have
+                // opposite orientations. Material ownership follows the exact
+                // copied TShape and location; the solid keeps its own winding.
                 for (TopExp_Explorer faces(aCopy.Shape(), TopAbs_FACE); faces.More(); faces.Next())
-                    if (faces.Current().IsEqual(aCopiedFace)) { found = true; break; }
+                    if (faces.Current().IsSame(aCopiedFace)) { found = true; break; }
                 if (!found) return noChangeAt(__LINE__);
                 for (const auto& existing : aCopiedFinishes)
                     if (existing.face.IsSame(aCopiedFace)) return noChangeAt(__LINE__);
