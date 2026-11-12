@@ -1261,7 +1261,48 @@ Standard_Boolean BevelOperationController::beginRound(
     // begin() repeats the full bounded source proof immediately before it
     // creates or replaces the ledger. The explicit count keeps this entry
     // point from ever inheriting legacy Bevel's multi-body authority.
-    return theSelection.size() == 1 && begin(theSelection);
+    if (theSelection.size() != 1 || !begin(theSelection)) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        if (mySources.size() != 1 || myDoc.IsNull()) {
+            (void)cancel();
+            return Standard_False;
+        }
+        const Handle(TDocStd_Document) aDocument = myDoc->Document();
+        Standard_Real aDocumentMetersPerUnit = 0.001;
+        const Standard_Boolean hasUnit = !aDocument.IsNull()
+            && XCAFDoc_DocumentTool::GetLengthUnit(
+                aDocument, aDocumentMetersPerUnit);
+        const Standard_Real aScale =
+            std::abs(mySources.front().transform.ScaleFactor());
+        const Standard_Real anEffectiveMetersPerUnit =
+            aDocumentMetersPerUnit * aScale;
+        Standard_Real aMaximumRadiusMM = 20.0;
+        if (mySources.front().retainedCapture) {
+            aMaximumRadiusMM = std::min<Standard_Real>(
+                aMaximumRadiusMM, 20.0 * aScale);
+        }
+        if ((!hasUnit && aDocumentMetersPerUnit != 0.001)
+            || !std::isfinite(aDocumentMetersPerUnit)
+            || aDocumentMetersPerUnit <= 0.0
+            || !std::isfinite(aScale) || aScale <= 0.0
+            || !std::isfinite(anEffectiveMetersPerUnit)
+            || anEffectiveMetersPerUnit <= 0.0
+            || !std::isfinite(aMaximumRadiusMM)
+            || aMaximumRadiusMM <= 0.0) {
+            (void)cancel();
+            return Standard_False;
+        }
+        myRoundOwned = Standard_True;
+        myRoundMetersPerUnit = anEffectiveMetersPerUnit;
+        myRoundMaximumRadiusMM = aMaximumRadiusMM;
+        return Standard_True;
+    } catch (...) {
+        (void)cancel();
+        return Standard_False;
+    }
 }
 
 Standard_Boolean BevelOperationController::sourcesAreCurrent() const noexcept
@@ -1439,12 +1480,56 @@ Standard_Boolean BevelOperationController::enqueuePreviewRequest() noexcept
 Standard_Boolean BevelOperationController::setValue(
     const Standard_Real theSignedDistance) noexcept
 {
+    return setValueImpl(theSignedDistance, Standard_False);
+}
+
+Standard_Boolean BevelOperationController::setRoundRadius(
+    const Standard_Real theRadius) noexcept
+{
+    if (!myRoundOwned || !hasActiveOperation()
+        || !std::isfinite(theRadius) || theRadius <= 0.0
+        || !std::isfinite(myRoundMetersPerUnit)
+        || myRoundMetersPerUnit <= 0.0
+        || !std::isfinite(myRoundMaximumRadiusMM)
+        || myRoundMaximumRadiusMM <= 0.0) {
+        return Standard_False;
+    }
+    const Standard_Real aRadiusMM =
+        theRadius * myRoundMetersPerUnit * 1000.0;
+    if (!std::isfinite(aRadiusMM) || aRadiusMM <= 0.0
+        || aRadiusMM > myRoundMaximumRadiusMM) {
+        return Standard_False;
+    }
+    return setValueImpl(theRadius, Standard_True);
+}
+
+Standard_Real BevelOperationController::roundMetersPerUnit() const noexcept
+{
+    return myRoundOwned && hasActiveOperation()
+        ? myRoundMetersPerUnit : 0.0;
+}
+
+Standard_Real BevelOperationController::roundMaximumRadiusMM() const noexcept
+{
+    return myRoundOwned && hasActiveOperation()
+        ? myRoundMaximumRadiusMM : 0.0;
+}
+
+Standard_Boolean BevelOperationController::setValueImpl(
+    const Standard_Real theSignedDistance,
+    const Standard_Boolean theRefuseOutOfRange) noexcept
+{
     if (!hasActiveOperation() || !std::isfinite(theSignedDistance)) {
         return Standard_False;
     }
-    const Standard_Real aValue = std::max(
-        -kMaxDistance,
-        std::min(theSignedDistance, kMaxDistance));
+    if (theRefuseOutOfRange
+        && theSignedDistance <= 0.0) {
+        return Standard_False;
+    }
+    const Standard_Real aValue = theRefuseOutOfRange
+        ? theSignedDistance
+        : std::max(-kMaxDistance,
+            std::min(theSignedDistance, kMaxDistance));
     if (std::abs(aValue - myValue) < 1.0e-9
         && (myState == BevelPreviewState::Computing
             || myState == BevelPreviewState::Ready)) {
@@ -2165,6 +2250,9 @@ void BevelOperationController::clearState() noexcept
     mySelectionFrozen = Standard_False;
     myStateValid = Standard_True;
     myState = BevelPreviewState::Selecting;
+    myRoundOwned = Standard_False;
+    myRoundMetersPerUnit = 0.0;
+    myRoundMaximumRadiusMM = 0.0;
 }
 
 #ifdef DEBUG

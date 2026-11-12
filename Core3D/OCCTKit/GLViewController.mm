@@ -3744,18 +3744,36 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         [self requestRender];
         return YES;
     }
-    return NO;
+    if (_viewer == nullptr || [self getGizmoType] != PrimitiveGizmoTypeChamfer
+        || _viewer->getShapeInteractor() == nullptr) {
+        return NO;
+    }
+    const BOOL didSet = _viewer->getShapeInteractor()
+        ->setRoundRadiusForSelection(radius);
+    [self requestRender];
+    return didSet;
 }
 
 - (double)roundMetersPerUnit {
     Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
-    return [rawOwner core3d_hasVisibleRawR2Bevel]
-        ? [rawOwner core3d_visibleRawR2BevelMetersPerUnit] : 0.0;
+    if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
+        return [rawOwner core3d_visibleRawR2BevelMetersPerUnit];
+    }
+    if (_viewer == nullptr || [self getGizmoType] != PrimitiveGizmoTypeChamfer
+        || _viewer->getShapeInteractor() == nullptr) {
+        return 0.0;
+    }
+    return _viewer->getShapeInteractor()->roundMetersPerUnit();
 }
 
 - (double)roundMaximumRadiusMM {
     Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
-    return [rawOwner core3d_hasVisibleRawR2Bevel] ? 20.0 : 0.0;
+    if ([rawOwner core3d_hasVisibleRawR2Bevel]) return 20.0;
+    if (_viewer == nullptr || [self getGizmoType] != PrimitiveGizmoTypeChamfer
+        || _viewer->getShapeInteractor() == nullptr) {
+        return 0.0;
+    }
+    return _viewer->getShapeInteractor()->roundMaximumRadiusMM();
 }
 
 - (BOOL)applyChamfer {

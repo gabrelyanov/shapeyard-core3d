@@ -140,6 +140,9 @@ public:
 	//! preview or retained Computing/Ready/Failed operation.
 	Standard_Boolean retireIdleSelectingSelection() noexcept;
     Standard_Boolean setValue(Standard_Real signedDistance) noexcept;
+    Standard_Boolean setRoundRadius(Standard_Real radius) noexcept;
+    Standard_Real roundMetersPerUnit() const noexcept;
+    Standard_Real roundMaximumRadiusMM() const noexcept;
     BevelApplyResult apply() noexcept;
     Standard_Boolean cancel() noexcept;
 
@@ -197,6 +200,8 @@ private:
 	Standard_Boolean canAtomicallyReplaceSelectingSources() const noexcept;
 
     Standard_Boolean enqueuePreviewRequest() noexcept;
+    Standard_Boolean setValueImpl(
+        Standard_Real value, Standard_Boolean refuseOutOfRange) noexcept;
     void acceptWorkerResult(BevelPreviewWorkerResult result) noexcept;
     void cancelWorkerRequests() noexcept;
     Standard_Boolean installPreview(
@@ -225,6 +230,9 @@ private:
     Standard_Boolean myCanApply = Standard_False;
     Standard_Boolean mySelectionFrozen = Standard_False;
     Standard_Boolean myStateValid = Standard_True;
+    Standard_Boolean myRoundOwned = Standard_False;
+    Standard_Real myRoundMetersPerUnit = 0.0;
+    Standard_Real myRoundMaximumRadiusMM = 0.0;
 #ifdef DEBUG
     Standard_Boolean myDebugWorkerBlocked = Standard_False;
     Standard_Size myDebugMaximumCaptureTopologyNodes =

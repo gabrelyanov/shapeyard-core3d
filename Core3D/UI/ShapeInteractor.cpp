@@ -2593,6 +2593,22 @@ namespace core3d {
 		return Standard_True;
 	}
 
+	Standard_Boolean ShapeInteractor::setRoundRadiusForSelection(
+		const Standard_Real radius) noexcept {
+		return _bevelController != nullptr
+			&& _bevelController->setRoundRadius(radius);
+	}
+
+	Standard_Real ShapeInteractor::roundMetersPerUnit() const noexcept {
+		return _bevelController == nullptr
+			? 0.0 : _bevelController->roundMetersPerUnit();
+	}
+
+	Standard_Real ShapeInteractor::roundMaximumRadiusMM() const noexcept {
+		return _bevelController == nullptr
+			? 0.0 : _bevelController->roundMaximumRadiusMM();
+	}
+
 	Standard_Boolean
 	ShapeInteractor::beginBevelSelectionFromCurrentSelection() noexcept {
 		if (_bevelController == nullptr) {
