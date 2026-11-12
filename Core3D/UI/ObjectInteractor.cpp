@@ -2498,7 +2498,120 @@ namespace core3d {
         if (!std::isfinite(tolerance) || tolerance < 0 || tolerance > 1e6
             || isManipulatorGestureActive() || hasUnresolvedEdit()) return false;
         _geometrySnappingTolerance = tolerance;
+        _geometryMoveSnap.reset();
         return true;
+    }
+
+    void ObjectInteractor::applyGeometrySnapping() noexcept {
+        _geometryMoveSnap.reset();
+        if (_geometrySnappingTolerance <= 0 || _manipulator.IsNull()
+            || !_manipulator->HasActiveTransformation()
+            || _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
+            || _manipulator->ActiveMode() != AIS_MM_Translation) return;
+        try {
+            // Start geometry is immutable throughout the preview. Never use
+            // the previous snapped pose as the next sample's reference.
+            const auto objects = _manipulator->Objects();
+            if (objects.IsNull() || objects->Length() > 8) return;
+            std::unordered_set<const AIS_InteractiveObject*> moving;
+            std::unordered_set<std::string> movingIdentifiers;
+            std::vector<gp_Pnt> anchors;
+            int sourceIndex = 1;
+            for (Core3DManipulatorObjectSequence::Iterator it(*objects); it.More(); it.Next(), ++sourceIndex) {
+                const auto object = it.Value();
+                moving.insert(object.get());
+                const auto cached = _manipulator->cachedShapes().find(object);
+                const auto label = _manipulatorSourceLabels.find(object.get());
+                if (cached == _manipulator->cachedShapes().end()
+                    || label == _manipulatorSourceLabels.end()
+                    || !IsBRepModelingRepresentation(myDoc->GeometryRepresentationForLabel(label->second))
+                    || !XCAFDoc_ShapeTool::GetShape(label->second).IsEqual(cached->second)) return;
+                movingIdentifiers.insert(myDoc->EntityIdentifierForLabel(label->second));
+                gp_Trsf persisted;
+                const auto start = _manipulator->StartTransformation(sourceIndex);
+                const auto parent = object->CombinedParentTransformation();
+                if ((!parent.IsNull() && parent->Form() != gp_Identity)
+                    || !myDoc->TryObjectTransformForLabel(label->second,persisted)
+                    || TransformDiffers(persisted,start)) return;
+                TopTools_IndexedMapOfShape vertices;
+                TopExp::MapShapes(cached->second,TopAbs_VERTEX,vertices);
+                if (vertices.Extent() == 0 || anchors.size() + vertices.Extent() > 64) return;
+                for (int i = 1; i <= vertices.Extent(); ++i)
+                    anchors.push_back(BRep_Tool::Pnt(TopoDS::Vertex(vertices(i))).Transformed(start));
+            }
+            if (anchors.empty()) return;
+            struct Target { std::string identifier; TopoDS_Shape world; Bnd_Box nearby; };
+            std::vector<Target> targets;
+            AIS_ListOfInteractive displayed;
+            myContext->DisplayedObjects(AIS_KOI_Shape,-1,displayed);
+            std::size_t inspected = 0, nodes = 0;
+            for (AIS_ListIteratorOfListOfInteractive it(displayed); it.More(); it.Next()) {
+                if (++inspected > 64) return;
+                const auto object = Handle(AIS_Shape)::DownCast(it.Value());
+                if (object.IsNull() || moving.count(object.get())) continue;
+                const auto label = myDoc->ShapeLabel(object);
+                if (label.IsNull() || !myDoc->IsPresentationEditable(object)
+                    || !myDoc->IsEditableFreeSimpleDefinitionLabel(label)
+                    || !IsBRepModelingRepresentation(myDoc->GeometryRepresentationForLabel(label))) continue;
+                const auto identifier = myDoc->EntityIdentifierForLabel(label);
+                if (identifier.empty() || movingIdentifiers.count(identifier)) continue;
+                const auto shape = XCAFDoc_ShapeTool::GetShape(label);
+                gp_Trsf transform;
+                const auto parent = object->CombinedParentTransformation();
+                if (shape.IsNull() || !shape.IsEqual(object->Shape())
+                    || (!parent.IsNull() && parent->Form() != gp_Identity)
+                    || !myDoc->TryObjectTransformForLabel(label,transform)
+                    || TransformDiffers(transform,object->LocalTransformation())) return;
+                TopTools_IndexedMapOfShape topology;
+                TopExp::MapShapes(shape,topology);
+                nodes += topology.Extent();
+                if (nodes > 1024) return;
+                BRepBuilderAPI_Transform located(shape,transform,Standard_False);
+                if (!located.IsDone() || located.Shape().IsNull()) return;
+                Bnd_Box nearby;
+                BRepBndLib::Add(located.Shape(),nearby);
+                if (nearby.IsVoid() || nearby.IsOpen()) return;
+                nearby.Enlarge(_geometrySnappingTolerance);
+                targets.push_back({identifier,located.Shape(),nearby});
+            }
+            std::sort(targets.begin(),targets.end(),[](const Target& a,const Target& b) {
+                return a.identifier < b.identifier;
+            });
+            const auto frame = _manipulator->StartPosition();
+            const gp_Dir directions[] = {frame.XDirection(),frame.YDirection(),frame.Direction()};
+            const int axisIndex = _manipulator->ActiveAxisIndex();
+            if (axisIndex < 0 || axisIndex > 2) return;
+            const gp_Dir axis = directions[axisIndex];
+            const gp_Trsf raw = _manipulator->GestureTransformation();
+            if (raw.TranslationPart().Modulus() <= Precision::Confusion()) return;
+            gp_Vec correction;
+            for (const auto& target : targets) {
+                for (const auto& anchor : anchors) {
+                    const auto proposed = anchor.Transformed(raw);
+                    if (target.nearby.IsOut(proposed)) continue;
+                    const auto hit = SnapPointToGeometry(target.world,proposed,
+                        _geometrySnappingTolerance,AllGeometrySnapKinds,axis);
+                    if (!hit) continue;
+                    if (_geometryMoveSnap) {
+                        const auto& old = _geometryMoveSnap->hit;
+                        const double epsilon = 64 * std::numeric_limits<double>::epsilon()
+                            * std::max({1.0,hit->distance,old.distance});
+                        if (hit->distance > old.distance + epsilon) continue;
+                        if (std::abs(hit->distance - old.distance) <= epsilon
+                            && static_cast<unsigned>(hit->kind) >= static_cast<unsigned>(old.kind)) continue;
+                    }
+                    // Remove only intersection roundoff perpendicular to the
+                    // active handle. A Z drag must preserve X/Y bit-for-bit.
+                    correction = gp_Vec(axis) * gp_Vec(proposed,hit->point).Dot(gp_Vec(axis));
+                    _geometryMoveSnap = GeometryMoveSnap{*hit,target.identifier};
+                }
+            }
+            if (_geometryMoveSnap) {
+                gp_Trsf snapped = raw;
+                snapped.SetTranslationPart(raw.TranslationPart() + correction.XYZ());
+                _manipulator->Transform(snapped);
+            }
+        } catch (...) { _geometryMoveSnap.reset(); }
     }
 
     bool ObjectInteractor::transformManipulator(const int theX, const int theY) {
@@ -2518,7 +2631,13 @@ namespace core3d {
                     cancelInteraction();
                     return false;
                 }
-                _manipulator->Transform(theX, theY, myView, myContext);
+                gp_Trsf raw;
+                if (_manipulator->ObjectTransformation(theX,theY,myView,myContext,raw)) {
+                    _manipulator->Transform(raw);
+                    applyGeometrySnapping();
+                } else {
+                    _geometryMoveSnap.reset();
+                }
                 myContext->UpdateCurrentViewer();
                 return true;
             }
@@ -2527,6 +2646,7 @@ namespace core3d {
     }
 
     bool ObjectInteractor::startTransformManipulator(const int theX, const int theY) {
+        _geometryMoveSnap.reset();
 		if (hasUnresolvedEdit()) { return false; }
 		if (ManipulatorRequiresBRepModeling(_manipulatorType)
 			&& !ManipulatorObjectsSupportBRepModeling(
@@ -2648,6 +2768,8 @@ namespace core3d {
                 }
                 std::array<Standard_Real, 2> sample = {0.0, 0.0};
                 std::map<std::string, double> trace = _manipulator->DebugRotationTrace();
+                trace["geometrySnapKind"] = _geometryMoveSnap ? static_cast<unsigned>(_geometryMoveSnap->hit.kind) : 0;
+                trace["geometrySnapIndex"] = _geometryMoveSnap ? _geometryMoveSnap->hit.topologyIndex : 0;
                 trace["sample"] = static_cast<double>(index);
                 trace["mode"] = mode;
                 trace["axis"] = axis;
@@ -2719,6 +2841,7 @@ namespace core3d {
 #endif
 
     void ObjectInteractor::finishInteraction() {
+        _geometryMoveSnap.reset();
         if (!_manipulatorRotationAllowed && !_manipulator.IsNull()
             && _manipulator->ActiveMode() == AIS_MM_Rotation) {
             cancelInteraction();
@@ -2944,6 +3067,7 @@ namespace core3d {
     }
 
     void ObjectInteractor::cancelInteraction() {
+        _geometryMoveSnap.reset();
 		if (hasUnresolvedEdit()) {
 			_manipulatorGestureActive = false;
 			return;

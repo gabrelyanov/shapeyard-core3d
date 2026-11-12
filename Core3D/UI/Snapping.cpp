@@ -10,6 +10,9 @@
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <IntCurvesFace_ShapeIntersector.hxx>
+#include <gp_Lin.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRep_Tool.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
@@ -24,12 +27,13 @@
 
 std::optional<core3d::GeometrySnapResult> core3d::SnapPointToGeometry(
     const TopoDS_Shape& target, const gp_Pnt& point, double tolerance,
-    unsigned kinds) noexcept {
+    unsigned kinds, const std::optional<gp_Dir>& axis) noexcept {
     const auto finitePoint = [](const gp_Pnt& p) {
         return std::isfinite(p.X()) && std::isfinite(p.Y()) && std::isfinite(p.Z());
     };
     if (target.IsNull() || !finitePoint(point) || !std::isfinite(tolerance)
-        || tolerance < 0 || kinds == 0 || (kinds & ~AllGeometrySnapKinds) != 0)
+        || tolerance < 0 || kinds == 0 || (kinds & ~AllGeometrySnapKinds) != 0
+        || (axis && (!std::isfinite(axis->X()) || !std::isfinite(axis->Y()) || !std::isfinite(axis->Z()))))
         return std::nullopt;
     try {
         std::optional<GeometrySnapResult> best;
@@ -39,6 +43,7 @@ std::optional<core3d::GeometrySnapResult> core3d::SnapPointToGeometry(
         const auto consider = [&](const gp_Pnt& candidate, GeometrySnapKind kind,
                                   int index, const TopoDS_Shape& topology) {
             if (!finitePoint(candidate)) return;
+            if (axis && gp_Lin(point,*axis).Distance(candidate) > Precision::Confusion()) return;
             const double distance = point.Distance(candidate);
             if (!std::isfinite(distance) || distance > tolerance) return;
             if (best) {
@@ -69,6 +74,26 @@ std::optional<core3d::GeometrySnapResult> core3d::SnapPointToGeometry(
             if (!distance.IsDone()) throw Standard_Failure("Geometry snap distance failed");
             for (int solution = 1; solution <= distance.NbSolution(); ++solution)
                 consider(distance.PointOnShape2(solution),kind,index,topology);
+            if (!axis || tolerance == 0) return;
+            const gp_Lin line(point,*axis);
+            if (kind == GeometrySnapKind::Face) {
+                // A normal projection can be off the drag axis, especially
+                // on sloping and curved faces. Find all reachable crossings.
+                IntCurvesFace_ShapeIntersector intersections;
+                intersections.Load(topology,Precision::Confusion());
+                intersections.Perform(line,-tolerance,tolerance);
+                if (!intersections.IsDone()) throw Standard_Failure("Geometry snap intersection failed");
+                for (int hit = 1; hit <= intersections.NbPnt(); ++hit)
+                    consider(intersections.Pnt(hit),kind,index,topology);
+            } else {
+                const auto segment = BRepBuilderAPI_MakeEdge(line,-tolerance,tolerance).Edge();
+                BRepExtrema_DistShapeShape crossings(segment,topology);
+                if (!crossings.IsDone()) throw Standard_Failure("Geometry snap edge intersection failed");
+                if (crossings.Value() <= Precision::Confusion()) {
+                    for (int hit = 1; hit <= crossings.NbSolution(); ++hit)
+                        consider(crossings.PointOnShape2(hit),kind,index,topology);
+                }
+            }
         };
         if (enabled(GeometrySnapKind::EdgeMidpoint) || enabled(GeometrySnapKind::Edge)) {
             TopExp::MapShapes(target,TopAbs_EDGE,edges);

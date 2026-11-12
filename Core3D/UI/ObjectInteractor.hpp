@@ -9,6 +9,7 @@
 #define ObjectInteractor_hpp
 
 #include "Interactor.hpp"
+#include "Snapping.hpp"
 #include "Core3DManipulator.hpp"
 #include <AIS_Shape.hxx>
 #include "BooleanOperationController.hpp"
@@ -149,8 +150,17 @@ namespace core3d {
         //! Optional geometry snapping for the next translation gestures. Model
         //! units, zero disables. Settings are editor-local, never saved in OCAF.
         bool setGeometrySnappingTolerance(double tolerance) noexcept;
+        struct GeometryMoveSnap {
+            GeometrySnapResult hit;
+            std::string targetIdentifier;
+        };
+        const GeometryMoveSnap* geometrySnapFeedback() const noexcept {
+            return isManipulatorGestureActive() && _geometryMoveSnap ? &*_geometryMoveSnap : nullptr;
+        }
     private:
         double _geometrySnappingTolerance = 0;
+        std::optional<GeometryMoveSnap> _geometryMoveSnap;
+        void applyGeometrySnapping() noexcept;
     public:
         bool transformManipulator(int theX, int theY);
         bool startTransformManipulator(int theX, int theY);

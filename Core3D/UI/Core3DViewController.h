@@ -29,6 +29,26 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+typedef NS_ENUM(NSInteger, Core3DGeometrySnapKind) {
+    Core3DGeometrySnapKindVertex = 1,
+    Core3DGeometrySnapKindEdgeMidpoint = 2,
+    Core3DGeometrySnapKindEdge = 4,
+    Core3DGeometrySnapKindFace = 8,
+};
+
+//! Read-only, transient evidence for the current Move sample. Indices are
+//! one-based in the target's topology; never retain them across model edits.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DGeometrySnapFeedback : NSObject
+@property(nonatomic, readonly) Core3DGeometrySnapKind kind;
+@property(nonatomic, copy, readonly) NSString *targetIdentifier;
+@property(nonatomic, readonly) NSInteger topologyIndex;
+@property(nonatomic, readonly) simd_double3 point;
+@property(nonatomic, readonly) double distance;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 typedef NS_ENUM(NSInteger, Core3DShellOpeningAxis) {
     Core3DShellOpeningAxisX, Core3DShellOpeningAxisY, Core3DShellOpeningAxisZ,
 };
@@ -215,6 +235,8 @@ __attribute__((objc_subclassing_restricted))
 //! Opt-in geometry snapping for ordinary Move; model units, zero disables.
 //! Refuses changes during an active edit. Does not alter grid preferences.
 - (BOOL)setGeometrySnappingTolerance:(double)tolerance;
+//! Nil outside an active snapped translation, including finish/cancel.
+- (nullable Core3DGeometrySnapFeedback *)geometrySnapFeedback;
 
 
 //! Capture one fail-closed retained editor opening from the exact current

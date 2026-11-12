@@ -881,6 +881,23 @@ void Core3DAddDebugOrphanVisualMaterial(
 
 // Native DTO bridges remain declared here for controller call sites; their
 // implementations live with the detached value objects in Core3DModelingTypes.mm.
+@interface Core3DGeometrySnapFeedback ()
+- (instancetype)initWithNative:(const core3d::ObjectInteractor::GeometryMoveSnap&)value;
+@end
+@implementation Core3DGeometrySnapFeedback
+- (instancetype)initWithNative:(const core3d::ObjectInteractor::GeometryMoveSnap&)value {
+    self = [super init];
+    if (self) {
+        _kind = static_cast<Core3DGeometrySnapKind>(value.hit.kind);
+        _targetIdentifier = [NSString stringWithUTF8String:value.targetIdentifier.c_str()];
+        _topologyIndex = value.hit.topologyIndex;
+        _point = simd_make_double3(value.hit.point.X(),value.hit.point.Y(),value.hit.point.Z());
+        _distance = value.hit.distance;
+    }
+    return self;
+}
+@end
+
 @interface Core3DProfileCurveLoop ()
 - (core3d::ProfileCurveLoop)nativeLoop;
 @end
@@ -13746,9 +13763,16 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
             return stream.str();
         };
         const auto before = bytes();
+        std::optional<gp_Dir> direction;
+        if (axis.count == 3) {
+            const gp_Vec vector(axis[0].doubleValue,axis[1].doubleValue,axis[2].doubleValue);
+            if (!std::isfinite(vector.X()) || !std::isfinite(vector.Y()) || !std::isfinite(vector.Z())
+                || vector.SquareMagnitude() <= gp::Resolution()) return @{@"matched": @NO, @"unchanged": @YES};
+            direction = gp_Dir(vector);
+        }
         const auto hit = core3d::SnapPointToGeometry(shape,
             gp_Pnt(point[0].doubleValue,point[1].doubleValue,point[2].doubleValue),
-            tolerance,static_cast<unsigned>(kinds));
+            tolerance,static_cast<unsigned>(kinds),direction);
         NSMutableDictionary *result = [@{@"matched": @(bool(hit)),
             @"unchanged": @(before == bytes())} mutableCopy];
         if (hit) {
@@ -20238,6 +20262,13 @@ static bool Core3DPublishCommittedSpatialSweep(
             });
         });
     } catch (...) { completion(Core3DObjectAlignmentResultRejected); }
+}
+
+- (Core3DGeometrySnapFeedback *_Nullable)geometrySnapFeedback {
+    if (![NSThread isMainThread] || !_isSetuped || !GLController || !GLController.viewer) return nil;
+    const auto interactor = GLController.viewer->getObjectInteractor();
+    const auto feedback = interactor ? interactor->geometrySnapFeedback() : nullptr;
+    return feedback ? [[Core3DGeometrySnapFeedback alloc] initWithNative:*feedback] : nil;
 }
 
 - (BOOL)setGeometrySnappingTolerance:(double)tolerance {
