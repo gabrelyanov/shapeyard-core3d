@@ -164,6 +164,8 @@ namespace core3d {
         void setManipulatorType(PrimitiveManipulatorType type);
 		Handle(TopLoc_Datum3D) manipulatorTransform();
 		gp_XYZ manipulatorPosition();
+		//! The handles' configured side in view pixels (design system 7.2).
+		float manipulatorSide() const { return _manipulatorSide; }
         
         void SelectAndAttachManipulator(Handle(AIS_InteractiveObject) toObject);
         //! Caller proves committed Object-mode authority and a current identity

@@ -63,6 +63,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (Core3DSelectionTypeChangeResult)
     trySetSelectionType:(PrimitiveSelectionType)type;
 - (void)setSelectionType:(PrimitiveSelectionType)type;
+- (void)setSelectedEdgeAppearanceColor:(UIColor *)color widthPoints:(CGFloat)width;
+- (void)setSelectedSurfaceAppearanceColor:(UIColor *)color widthPoints:(CGFloat)width faceWashOpacity:(CGFloat)opacity;
 - (PrimitiveSelectionType)getSelectionType;
 - (void)setGizmoType:(PrimitiveGizmoType)type;
 - (PrimitiveGizmoType)getGizmoType;
@@ -107,6 +109,13 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)applyExtrusion;
 - (BOOL)cancelExtrusion;
 - (BOOL)canApplyExtrusion;
+//! Straight edges of the captured push/pull face in engine order, each
+//! @{@"side": @"+Y", @"length": model units}. Empty when no face is captured.
+- (NSArray<NSDictionary<NSString *, id> *> *)extrusionSplitEdges;
+//! Split mode: the extrusion value becomes the split line's offset from this
+//! edge. -1 returns to push/pull. Discards any open preview.
+- (BOOL)setExtrusionSplitReferenceEdge:(NSInteger)index;
+- (NSInteger)extrusionSplitReferenceEdge;
 - (Core3DShellParameters)getShellParameters;
 - (BOOL)setShellThickness:(CGFloat)thickness;
 - (BOOL)applyShell;
@@ -172,6 +181,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSUInteger)debugGeometricBRepValidationCount;
 - (NSInteger)debugSelectedShapeCount;
 - (NSDictionary<NSString *, id> *)debugTopologySelectionState;
+- (NSArray<NSString *> *)debugNativeFaceTapTrace;
 - (BOOL)debugDetectAnyDisplayedShape;
 - (BOOL)debugDetectReversedFaceTopologyIndexWithEntityIdentifier:
 			(NSString *)entityIdentifier

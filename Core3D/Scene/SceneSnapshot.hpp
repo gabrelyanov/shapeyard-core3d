@@ -315,6 +315,19 @@ struct TopologyCardinality {
     std::uint32_t vertexCount = 0;
 };
 
+//! Optional display geometry copied from cached BRep edge polygons, never
+//! triangle wireframe or surface isolines. Each segment belongs to one face;
+//! shared edges occur once per incident face so face visibility can be honored.
+//! Positions use the same recentered mesh-local space as Vertex. Edge and face
+//! indices address semantic topology, not triangle/index-buffer offsets.
+struct EdgeSegment {
+    float startX = 0, startY = 0, startZ = 0;
+    float endX = 0, endY = 0, endZ = 0;
+    std::uint32_t edgeIndex = 0;
+    std::uint32_t faceIndex = 0;
+};
+static_assert(sizeof(EdgeSegment) == 32, "Edge segment ABI must be 32 bytes");
+
 enum class GeometryKind : std::uint8_t {
     SurfaceTriangles = 0,
     NativeC1Wire = 1,
@@ -347,6 +360,9 @@ struct MeshSnapshot {
     std::vector<Vertex> vertices;
     std::vector<std::uint32_t> indices;
     std::vector<MeshPrimitive> primitives;
+    //! Additive optional display payload in schema 10. Existing triangle and
+    //! export consumers may ignore it. Empty for polygon meshes and C1 wires.
+    std::vector<EdgeSegment> edgeSegments;
     //! Optional unit tangent xyz / bitangent sign w, one float4 per INDEX
     //! CORNER. Never average mirrored/discontinuous frames into shared vertices.
     TangentBasis tangentBasis = TangentBasis::None;
@@ -397,6 +413,8 @@ struct InstanceSnapshot {
 };
 
 struct CameraSnapshot {
+    //! View-scoped presentation state, published with camera-only updates.
+    bool lessonLightingEnabled = false;
     Projection projection = Projection::Perspective;
     Double3 eye;
     Double3 center;

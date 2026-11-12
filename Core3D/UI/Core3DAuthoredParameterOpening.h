@@ -459,6 +459,49 @@ __attribute__((objc_subclassing_restricted))
 - (Core3DBooleanPairPrepareResult *)prepareBooleanSources:
     (Core3DBooleanPairOpening *)opening expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(prepareBooleanSources(_:expected:));
+//! Join / Cut / Overlap on the model: show the prepared result in place of
+//! its two parts. The document does not change. Clear before Apply or Cancel.
+- (BOOL)showBooleanPairPreview:(Core3DBooleanPairPrepared *)prepared
+    operation:(Core3DPartBooleanOperation)operation
+    NS_SWIFT_NAME(showBooleanPairPreview(_:operation:));
+- (BOOL)clearBooleanPairPreview NS_SWIFT_NAME(clearBooleanPairPreview());
+//! Join / Cut / Overlap without keeping the originals (one Undo step): used
+//! when the editable Boolean is refused at Apply. `refusal` gets the code.
+- (BOOL)applyBakedBooleanTarget:(NSString *)target tool:(NSString *)tool
+    operation:(Core3DPartBooleanOperation)operation
+    refusal:(NSString * _Nullable * _Nullable)refusal
+    NS_SWIFT_NAME(applyBakedBoolean(target:tool:operation:refusal:));
+//! The centre of face `faceIndex` (scene topology index) of the part and the
+//! direction into the part, world coordinates: [px, py, pz, dx, dy, dz].
+- (nullable NSArray<NSNumber *> *)holeAnchorForEntity:(NSString *)entity
+    faceIndex:(uint32_t)faceIndex NS_SWIFT_NAME(holeAnchor(entity:faceIndex:));
+//! True when the part is a Join, Cut or Overlap result that keeps its originals.
+- (BOOL)isBooleanResultEntity:(NSString *)entity NS_SWIFT_NAME(isBooleanResult(entity:));
+//! A world point and direction in the part's own coordinates (document units,
+//! before its placement): [px, py, pz, dx, dy, dz].
+- (nullable NSArray<NSNumber *> *)partLocalAnchorForEntity:(NSString *)entity
+    pointX:(double)px y:(double)py z:(double)pz
+    directionX:(double)dx y:(double)dy z:(double)dz
+    NS_SWIFT_NAME(partLocalAnchor(entity:pointX:y:z:directionX:y:z:));
+//! Show the drilled part in place of the part (clearBooleanPairPreview puts
+//! it back). Same inputs as applyThroughHole; nothing in the document changes.
+- (BOOL)showHolePreviewOnEntity:(NSString *)entity
+    pointX:(double)px y:(double)py z:(double)pz
+    directionX:(double)dx y:(double)dy z:(double)dz
+    radius:(double)radius depth:(double)depth
+    refusal:(NSString * _Nullable * _Nullable)refusal
+    NS_SWIFT_NAME(showHolePreview(entity:pointX:y:z:directionX:y:z:radius:depth:refusal:));
+//! Hole on any solid part (world coordinates, document units): a cylinder of
+//! `radius` from the point along the direction, through the part when
+//! `depth` <= 0, else `depth` deep. One Undo step. On refusal `refusal` gets
+//! the engine code (never shown to users).
+- (BOOL)applyThroughHoleOnEntity:(NSString *)entity
+    pointX:(double)px y:(double)py z:(double)pz
+    directionX:(double)dx y:(double)dy z:(double)dz
+    radius:(double)radius depth:(double)depth
+    refusal:(NSString * _Nullable * _Nullable)refusal
+    NS_SWIFT_NAME(applyThroughHole(entity:pointX:y:z:directionX:y:z:radius:depth:refusal:));
+- (BOOL)hasBooleanPairPreview NS_SWIFT_NAME(hasBooleanPairPreview());
 //! Externally driven Stop for detached preparation. Once stopped, this exact
 //! opening can never prepare again and cannot affect a later opening.
 - (BOOL)cancelBooleanSources:(Core3DBooleanPairOpening *)opening

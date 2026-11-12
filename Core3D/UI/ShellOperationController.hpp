@@ -11,12 +11,26 @@
 
 #include <AIS_Shape.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <TopoDS.hxx>
+#include <gp_Cylinder.hxx>
+#include <GProp_GProps.hxx>
+#include <BRepGProp.hxx>
+#include <Bnd_Box.hxx>
+#include <BRepBndLib.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <ShapeAnalysis_CanonicalRecognition.hxx>
+#include <TopLoc_Location.hxx>
+#include <gp_Pln.hxx>
+#include <BRep_Tool.hxx>
+#include <GeomLib_IsPlanarSurface.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
+#include <gp_Pln.hxx>
 
 #include <cstdint>
 #include <atomic>
@@ -50,6 +64,42 @@ Standard_Boolean ReplayProfileShells(
     const TopoDS_Shape& base, const profile::Parameters& parameters,
     std::atomic_bool& cancelled, TopoDS_Shape& result) noexcept;
 
+//! The face's plane when it is flat: an analytic plane, or a spline that is
+//! flat (an Add primitive resized with different Width/Depth/Height is stored
+//! as splines). The returned plane carries the face's own geometry.
+inline Standard_Boolean ShellFacePlane(
+    const TopoDS_Face& theFace, gp_Pln& thePlane) noexcept
+{
+    if (theFace.IsNull()) {
+        return Standard_False;
+    }
+    try {
+        BRepAdaptor_Surface aSurface(theFace, Standard_True);
+        if (aSurface.GetType() == GeomAbs_Plane) {
+            thePlane = aSurface.Plane();
+            return Standard_True;
+        }
+        if (aSurface.GetType() != GeomAbs_BSplineSurface
+            && aSurface.GetType() != GeomAbs_BezierSurface) {
+            return Standard_False;
+        }
+        TopLoc_Location aLocation;
+        const Handle(Geom_Surface) aGeometry =
+            BRep_Tool::Surface(theFace, aLocation);
+        if (aGeometry.IsNull()) {
+            return Standard_False;
+        }
+        GeomLib_IsPlanarSurface aPlanar(aGeometry, 1.0e-7);
+        if (!aPlanar.IsPlanar()) {
+            return Standard_False;
+        }
+        thePlane = aPlanar.Plan().Transformed(aLocation.Transformation());
+        return Standard_True;
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
 inline Standard_Boolean ShellFaceIsSinglePlanarOpening(
     const TopoDS_Face& theFace) noexcept
 {
@@ -57,8 +107,8 @@ inline Standard_Boolean ShellFaceIsSinglePlanarOpening(
         return Standard_False;
     }
     try {
-        BRepAdaptor_Surface aSurface(theFace, Standard_True);
-        if (aSurface.GetType() != GeomAbs_Plane) {
+        gp_Pln aPlane;
+        if (!ShellFacePlane(theFace, aPlane)) {
             return Standard_False;
         }
         TopTools_IndexedMapOfShape aWires;
@@ -103,6 +153,112 @@ inline Standard_Boolean ShellOpeningSetIsValid(
 }
 
 //! Shared kernel boundary; single-opening flags and insertion order are unchanged.
+//! Outward normal of a flat face (its plane axis, flipped for a reversed face).
+inline Standard_Boolean ShellFaceOutward(const TopoDS_Face& face, gp_Pln& plane,
+                                         gp_Dir& outward) noexcept
+{
+    if (!ShellFacePlane(face, plane)) return Standard_False;
+    outward = plane.Axis().Direction();
+    if (face.Orientation() == TopAbs_REVERSED) outward.Reverse();
+    return Standard_True;
+}
+
+//! An Add box or cylinder resized with different Width/Depth/Height is stored
+//! as splines, and the offset kernel cannot hollow a spline cylinder. When the
+//! source is exactly such a box (six flat faces facing the axes) or cylinder
+//! (two parallel flat caps and one cylindrical wall), rebuild it as the exact
+//! analytic primitive and map the opening faces onto it. Any doubt: no change.
+inline Standard_Boolean AnalyticPrimitiveForShell(
+    const TopoDS_Shape& source, const std::vector<TopoDS_Face>& openings,
+    TopoDS_Shape& rebuilt, std::vector<TopoDS_Face>& rebuiltOpenings) noexcept
+{
+    rebuilt.Nullify(); rebuiltOpenings.clear();
+    try {
+        if (source.IsNull() || source.ShapeType() != TopAbs_SOLID) return Standard_False;
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(source, TopAbs_FACE, faces);
+        Standard_Boolean anySpline = Standard_False;
+        std::vector<TopoDS_Face> flat; std::vector<gp_Pln> planes; TopoDS_Face wall;
+        for (Standard_Integer i = 1; i <= faces.Extent(); ++i) {
+            const TopoDS_Face face = TopoDS::Face(faces(i));
+            const BRepAdaptor_Surface surface(face, Standard_True);
+            if (surface.GetType() != GeomAbs_Plane && surface.GetType() != GeomAbs_Cylinder)
+                anySpline = Standard_True;
+            gp_Pln plane;
+            if (ShellFacePlane(face, plane)) { flat.push_back(face); planes.push_back(plane); }
+            else if (wall.IsNull()) wall = face;
+            else return Standard_False;
+        }
+        if (!anySpline) return Standard_False;
+        Bnd_Box box; BRepBndLib::AddOptimal(source, box, Standard_False, Standard_False);
+        if (box.IsVoid()) return Standard_False;
+        const Standard_Real tolerance = 1.0e-6 * std::max(1.0, std::sqrt(box.SquareExtent()));
+        TopoDS_Shape candidate;
+        if (faces.Extent() == 6 && flat.size() == 6 && wall.IsNull()) {
+            for (const auto& plane : planes) {
+                const gp_Dir n = plane.Axis().Direction();
+                if (std::abs(std::abs(n.X()) + std::abs(n.Y()) + std::abs(n.Z()) - 1.0) > 1.0e-9)
+                    return Standard_False;
+            }
+            Standard_Real x0, y0, z0, x1, y1, z1; box.Get(x0, y0, z0, x1, y1, z1);
+            candidate = BRepPrimAPI_MakeBox(gp_Pnt(x0, y0, z0), gp_Pnt(x1, y1, z1)).Shape();
+        } else if (faces.Extent() == 3 && flat.size() == 2 && !wall.IsNull()) {
+            // The resize approximates the circle; recognise it loosely and
+            // rebuild the cylinder the user typed (its bounding size).
+            ShapeAnalysis_CanonicalRecognition recognition(wall);
+            gp_Cylinder cylinder;
+            if (!recognition.IsCylinder(tolerance * 1000, cylinder)) return Standard_False;
+            const gp_Dir axis = cylinder.Axis().Direction();
+            if (!planes[0].Axis().Direction().IsParallel(axis, 1.0e-9)
+                || !planes[1].Axis().Direction().IsParallel(axis, 1.0e-9)) return Standard_False;
+            const gp_Pnt origin = cylinder.Axis().Location();
+            const gp_Vec along(axis);
+            const Standard_Real a = gp_Vec(origin, planes[0].Location()).Dot(along);
+            const Standard_Real b = gp_Vec(origin, planes[1].Location()).Dot(along);
+            const Standard_Real low = std::min(a, b), high = std::max(a, b);
+            if (high - low <= tolerance) return Standard_False;
+            Standard_Real x0, y0, z0, x1, y1, z1; box.Get(x0, y0, z0, x1, y1, z1);
+            const Standard_Real extents[3] = {x1 - x0, y1 - y0, z1 - z0};
+            Standard_Real radius = cylinder.Radius();
+            for (int k = 0; k < 3; ++k) {
+                const gp_Dir unit(k == 0, k == 1, k == 2);
+                if (std::abs(unit.Dot(axis)) < 1.0e-9) { radius = extents[k] / 2; break; }
+            }
+            if (std::abs(radius - cylinder.Radius()) > cylinder.Radius() * 0.02) return Standard_False;
+            candidate = BRepPrimAPI_MakeCylinder(
+                gp_Ax2(origin.Translated(along * low), axis), radius, high - low).Shape();
+        } else {
+            return Standard_False;
+        }
+        GProp_GProps before, after;
+        BRepGProp::VolumeProperties(source, before);
+        BRepGProp::VolumeProperties(candidate, after);
+        if (!(before.Mass() > 0)
+            || std::abs(after.Mass() - before.Mass()) > before.Mass() * 0.02) return Standard_False;
+        TopTools_IndexedMapOfShape candidateFaces;
+        TopExp::MapShapes(candidate, TopAbs_FACE, candidateFaces);
+        for (const auto& opening : openings) {
+            gp_Pln plane; gp_Dir outward;
+            if (!ShellFaceOutward(opening, plane, outward)) return Standard_False;
+            TopoDS_Face match;
+            for (Standard_Integer i = 1; i <= candidateFaces.Extent(); ++i) {
+                const TopoDS_Face face = TopoDS::Face(candidateFaces(i));
+                gp_Pln other; gp_Dir otherOutward;
+                if (!ShellFaceOutward(face, other, otherOutward)) continue;
+                if (otherOutward.IsEqual(outward, 1.0e-9)
+                    && other.Distance(plane.Location()) <= tolerance) {
+                    if (!match.IsNull()) return Standard_False;
+                    match = face;
+                }
+            }
+            if (match.IsNull()) return Standard_False;
+            rebuiltOpenings.push_back(match);
+        }
+        rebuilt = candidate;
+        return Standard_True;
+    } catch (...) { rebuilt.Nullify(); rebuiltOpenings.clear(); return Standard_False; }
+}
+
 inline void MakeInwardShell(
     BRepOffsetAPI_MakeThickSolid& builder,
     const TopoDS_Shape& source,
@@ -110,9 +266,12 @@ inline void MakeInwardShell(
     Standard_Real thickness, Standard_Real tolerance,
     const Message_ProgressRange& progress = Message_ProgressRange())
 {
+    TopoDS_Shape analytic; std::vector<TopoDS_Face> analyticFaces;
+    const Standard_Boolean rebuilt =
+        AnalyticPrimitiveForShell(source, faces, analytic, analyticFaces);
     TopTools_ListOfShape openings;
-    for (const auto& face : faces) openings.Append(face);
-    builder.MakeThickSolidByJoin(source, openings, -thickness, tolerance,
+    for (const auto& face : rebuilt ? analyticFaces : faces) openings.Append(face);
+    builder.MakeThickSolidByJoin(rebuilt ? analytic : source, openings, -thickness, tolerance,
         BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Arc,
         Standard_False, progress);
 }
@@ -152,6 +311,12 @@ struct FaceOperationSourceProof {
     std::string definitionIdentifier;
 };
 
+//! Read a plane without replacing the selected face. Affine dimension edits
+//! store flat faces as splines; every control pole must lie in the plane and
+//! the pole count is bounded before the adaptor copies any spline geometry.
+Standard_Boolean TryFaceOperationPlane(
+    const TopoDS_Face& face, gp_Pln& plane) noexcept;
+
 //! Produce the shared idle/begin admission proof for face-local solid tools.
 //! theSelectedFace must have the same TShape, location, and orientation as the
 //! canonical face embedded in the presentation; reversed and stale owners are
@@ -163,7 +328,9 @@ Standard_Boolean TryPrepareFaceOperationSource(
     const TopoDS_Face& selectedFace,
     Standard_Size maximumTopologyNodes,
     Standard_Size maximumStyledSubshapeLabels,
-    FaceOperationSourceProof& proof) noexcept;
+    FaceOperationSourceProof& proof,
+    Standard_Boolean allowPlanarSpline = Standard_False,
+    Standard_Boolean allowSavedCut = Standard_False) noexcept;
 
 //! Shell-only set capture; shares the bounded per-face admission with Extrude.
 Standard_Boolean TryPrepareShellOperationSource(
@@ -179,7 +346,8 @@ Standard_Boolean FaceOperationSourceProofIsCurrent(
     const Handle(AIS_InteractiveContext)& context,
     const Handle(OcctDocument)& document,
     const FaceOperationSourceProof& proof,
-    Standard_Size maximumStyledSubshapeLabels) noexcept;
+    Standard_Size maximumStyledSubshapeLabels,
+    Standard_Boolean allowSavedCut = Standard_False) noexcept;
 
 //! DEBUG/diagnostic index resolver that preserves TopExp's canonical unique
 //! face order but stops as soon as the requested face is known. Both the

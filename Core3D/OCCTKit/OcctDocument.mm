@@ -2889,6 +2889,7 @@ Standard_Boolean Core3DValidateRetainedEdgeTreatmentDocumentForPrepare(
 #import "GLView.h"
 #import "GLViewController.h"
 #include "../UI/ShellOperationController.hpp"
+#include <BRepPrimAPI_MakeTorus.hxx>
 #include <AIS_ListIteratorOfListOfInteractive.hxx>
 #include <Precision.hxx>
 #include <Standard_ErrorHandler.hxx>
@@ -3079,6 +3080,11 @@ bool ValidateAttachmentRigDocument(
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BinTools.hxx>
+#include <IntCurvesFace_ShapeIntersector.hxx>
+#include <gp_Lin.hxx>
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepLib.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -3745,7 +3751,8 @@ void ResetDrawerForLegacyMaterial(
 
 void ApplyVisualMaterialToPlainPresentation(
     const Handle(XCAFDoc_VisMaterial)& theMaterial,
-    const Handle(AIS_Shape)& thePresentation)
+    const Handle(AIS_Shape)& thePresentation,
+    const Standard_Boolean useScalarPBR = Standard_False)
 {
     if (theMaterial.IsNull() || thePresentation.IsNull()) {
         return;
@@ -3764,7 +3771,7 @@ void ApplyVisualMaterialToPlainPresentation(
         return;
     }
     theMaterial->FillAspect(aFillAspect);
-    Core3DPrepareRendererTextures(aFillAspect);
+    Core3DPrepareRendererTextures(aFillAspect, useScalarPBR);
     thePresentation->SynchronizeAspects();
 }
 
@@ -8503,12 +8510,20 @@ Standard_Boolean Core3DAccumulateEmbeddedTextureBudget(
 }
 
 void Core3DPrepareRendererTextures(
-    const Handle(Graphic3d_AspectFillArea3d)& aspect)
+    const Handle(Graphic3d_AspectFillArea3d)& aspect,
+    const Standard_Boolean useScalarPBR)
 {
     if (aspect.IsNull()) return;
     const bool ownsShader = IsCore3DDataMapShader(aspect->ShaderProgram());
     if (aspect->TextureSet().IsNull() || aspect->TextureSet()->IsEmpty()) {
-        if (ownsShader) aspect->SetShaderProgram({});
+        // Metallic and roughness must affect plain authored materials too.
+        // Removing the final map keeps the same BRDF with no texture samplers;
+        // legacy preset transitions explicitly clear our shader beforehand.
+        if ((useScalarPBR || ownsShader)
+            && (ownsShader || aspect->ShaderProgram().IsNull())
+            && (!ownsShader || aspect->ShaderProgram()->GetId() != "shapeyard-data-maps-v1-0")) {
+            aspect->SetShaderProgram(MakeCore3DDataMapShader(0));
+        }
         return;
     }
     const Handle(Graphic3d_TextureSet)& original = aspect->TextureSet();
@@ -8536,14 +8551,13 @@ void Core3DPrepareRendererTextures(
         }
     }
     const bool hasDataMaps = (bits & (Graphic3d_TextureSetBits_MetallicRoughness | Graphic3d_TextureSetBits_Occlusion | Graphic3d_TextureSetBits_Normal)) != 0;
-    if (hasDataMaps && (ownsShader || aspect->ShaderProgram().IsNull())) {
+    if ((hasDataMaps || useScalarPBR || ownsShader)
+        && (ownsShader || aspect->ShaderProgram().IsNull())) {
         const auto expectedID = TCollection_AsciiString((bits & Graphic3d_TextureSetBits_Normal)
             ? "shapeyard-data-maps-v1-normal-" : "shapeyard-data-maps-v1-") + bits;
         if (!ownsShader || aspect->ShaderProgram()->GetId() != expectedID) {
             aspect->SetShaderProgram(MakeCore3DDataMapShader(bits));
         }
-    } else if (ownsShader) {
-        aspect->SetShaderProgram({});
     }
 }
 
@@ -11422,6 +11436,20 @@ Standard_Boolean OcctDocument::PlainProfileOperationSourceCurrent(
 
 // MARK: - A2 two-live-source detached capture and proof
 
+// Main thread only. While set, the exact free-label capture also admits a
+// label whose only extra child is a Part Boolean record, so a previous
+// Boolean result can be read as a frozen Boolean operand. Other tools never
+// set it and keep refusing such labels.
+static bool gExactCaptureAdmitsBooleanRecord = false;
+struct BooleanRecordExactCaptureScope final {
+    explicit BooleanRecordExactCaptureScope(bool admit) noexcept
+        : previous(gExactCaptureAdmitsBooleanRecord) {
+        if (admit) gExactCaptureAdmitsBooleanRecord = true;
+    }
+    ~BooleanRecordExactCaptureScope() { gExactCaptureAdmitsBooleanRecord = previous; }
+    bool previous;
+};
+
 struct core3d::authored_parameter::PairCapture::State final {
     const OcctDocument* owner = nullptr;
     Handle(TDocStd_Document) document;
@@ -11434,6 +11462,8 @@ struct core3d::authored_parameter::PairCapture::State final {
     std::array<core3d::composite_recipe::Commitments, 2> ordinaryCommitments;
     std::array<core3d::retained_recipe::UUID, 2> ordinaryAnchors;
     std::array<TopoDS_Shape, 2> ordinaryShapes;
+    // Record label of a previous Boolean result entering as a frozen solid.
+    std::array<TDF_Label, 2> frozenRecords;
     std::array<OcctExactLabelReceipt, 2> exact;
     OcctSavedGroupState groups;
     core3d::part_boolean::Operation operation =
@@ -11844,6 +11874,7 @@ bool PairSourceCurrent(const OcctDocument& document,
                        const ap::PairCapture::State& state,
                        std::size_t index) noexcept {
     if (index >= state.sources.size()) return false;
+    const BooleanRecordExactCaptureScope scope(!state.frozenRecords[index].IsNull());
     return state.ordinarySources[index]
         ? document.OrdinaryInputCurrent(state.ordinarySources[index])
         : document.PlainProfileOperationSourceCurrent(state.sources[index]);
@@ -11865,6 +11896,7 @@ bool PairCurrent(const OcctDocument& document,
         if (!document.CaptureSavedGroups(groups) || !groups.IsEqual(state.groups)) return false;
         for (std::size_t index = 0; index < 2; ++index) {
             OcctExactLabelReceipt exact;
+            const BooleanRecordExactCaptureScope scope(!state.frozenRecords[index].IsNull());
             if (!PairSourceCurrent(document, state, index)
                 || !document.ReadExactFreeLabel(state.exact[index], exact)
                 || !exact.IsEqual(state.exact[index])) return false;
@@ -12425,9 +12457,23 @@ bool PairDefinition(const ap::PairCapture::State& state,
                 original.commitments.groups = geometry;
             }
             effective.commitments = original.commitments;
+            // Replay always reads a frozen source back from its exact text
+            // bytes before placing it; fingerprint the placed source made
+            // the same way, or a rotated/scaled placement never matches.
+            TopoDS_Shape frozenAsReplayed;
+            if (state.ordinarySources[index]) {
+                std::string frozenText;
+                if (!core3d::retained_part_boolean::ExactShapeBytes(source.boundRoot, frozenText))
+                    return false;
+                std::istringstream frozenStream(frozenText);
+                frozenStream.imbue(std::locale::classic());
+                BRep_Builder frozenBuilder;
+                BRepTools::Read(frozenAsReplayed, frozenStream, frozenBuilder);
+                if (frozenAsReplayed.IsNull()) return false;
+            }
             const TopoDS_Shape effectiveShape = pb::build::PersistenceMaterializeDetached(
                 state.ordinarySources[index]
-                    ? pb::build::BuildEffectiveFrozenSolid(source.boundRoot,
+                    ? pb::build::BuildEffectiveFrozenSolid(frozenAsReplayed,
                         effective.frozenGeometry, effective.sourceMetersPerUnit,
                         definition.carrierMetersPerUnit)
                     : pb::build::BuildEffectiveAnalyticPrism(
@@ -12564,6 +12610,37 @@ bool ReplayOriginalsGraphDetached(
     TopoDS_Shape& output) noexcept;
 }
 
+namespace {
+// The saved file keeps a Boolean's frozen inputs in the binary shape format,
+// and a reopened document re-proves each input by hashing its exact bytes.
+// Some surfaces (a torus axis, for example) come back from that format with
+// signed zeros, so the in-memory copy and the reopened copy differ in bytes.
+// Freeze the input exactly as the file will hold it: round trip until stable.
+bool FileStableShape(const TopoDS_Shape& shape, TopoDS_Shape& output) noexcept {
+    output.Nullify();
+    try {
+        TopoDS_Shape current = shape;
+        std::string currentBytes;
+        if (current.IsNull()
+            || !core3d::retained_part_boolean::ExactShapeBytes(current, currentBytes))
+            return false;
+        for (int pass = 0; pass < 3; ++pass) {
+            std::stringstream binary;
+            BinTools::Write(current, binary);
+            TopoDS_Shape back;
+            BinTools::Read(back, binary);
+            std::string backBytes;
+            if (back.IsNull()
+                || !core3d::retained_part_boolean::ExactShapeBytes(back, backBytes))
+                return false;
+            if (backBytes == currentBytes && pass > 0) { output = current; return true; }
+            current = back; currentBytes = std::move(backBytes);
+        }
+        return false;
+    } catch (...) { output.Nullify(); return false; }
+}
+}
+
 core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources(
     const std::shared_ptr<core3d::native_opening::Context>& context,
     const TDF_Label& target, const TDF_Label& tool,
@@ -12598,13 +12675,30 @@ core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources
             return PairCaptureRefused(PairRefusal::BadEncoding);
         const std::array<TDF_Label, 2> labels{{target, tool}};
         for (std::size_t index = 0; index < 2; ++index) {
+            const BooleanRecordExactCaptureScope scope(admitOrdinaryInputs);
             const auto admitted = CaptureToolInput(
                 labels[index], core3d::ordinary_input::Purpose::SolidModel);
             if (!admitted.ready())
                 return PairCaptureRefused(PairRefusal::UnsupportedSource);
             bool ordinary = false;
+            // A previous Boolean result (its only record is a Part Boolean
+            // composite) enters as a frozen solid, like an Add primitive, so
+            // Booleans chain. Its own record is replaced on apply; Undo
+            // restores it.
+            bool frozenBoolean = false;
             if (admitOrdinaryInputs
-                && admitted.snapshot->history() == core3d::ordinary_input::History::Absent
+                && admitted.snapshot->history() == core3d::ordinary_input::History::Current) {
+                core3d::composite_recipe::Record composite;
+                frozenBoolean = RetainedRecipeCoverageForLabel(labels[index])
+                        == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
+                    && core3d::composite_recipe::Read(myOcafDoc, labels[index], composite)
+                    && composite.value && OriginalsFeature(composite.value->definition)
+                    && !composite.label.IsNull();
+                if (frozenBoolean) state->frozenRecords[index] = composite.label;
+            }
+            if (admitOrdinaryInputs
+                && (admitted.snapshot->history() == core3d::ordinary_input::History::Absent
+                    || frozenBoolean)
                 && admitted.snapshot->representation()
                     == core3d::ordinary_input::Representation::BRepSolid) {
                 BRepBuilderAPI_Copy validation(
@@ -12624,12 +12718,21 @@ core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources
                 }
                 ordinary = ordinary && shells > 0;
             }
+            TopoDS_Shape frozen;
+            core3d::composite_recipe::Commitments frozenCommitments;
+            if (ordinary) {
+                const auto& snapshot = *admitted.snapshot->state_;
+                ordinary = FileStableShape(snapshot.detachedShape, frozen)
+                    && OrdinaryCommitments(snapshot.exact, snapshot.groups, frozen,
+                        snapshot.metersPerUnit, snapshot.recipe, frozenCommitments);
+                if (!ordinary) return PairCaptureRefused(PairRefusal::UnsupportedSource);
+            }
             if (ordinary) {
                 state->ordinarySources[index] = admitted.snapshot;
                 state->ordinaryRecipes[index] = admitted.snapshot->state_->recipe;
-                state->ordinaryCommitments[index] = admitted.snapshot->state_->commitments;
+                state->ordinaryCommitments[index] = frozenCommitments;
                 state->ordinaryAnchors[index] = admitted.snapshot->state_->sourceAnchor;
-                state->ordinaryShapes[index] = admitted.snapshot->state_->detachedShape;
+                state->ordinaryShapes[index] = frozen;
                 auto& source = state->sources[index];
                 source.label = labels[index];
                 source.entityIdentifier = admitted.snapshot->entityIdentifier();
@@ -12637,7 +12740,7 @@ core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources
                 source.metersPerUnit = admitted.snapshot->metersPerUnit();
                 source.placement = admitted.snapshot->state_->exact.visibility
                     .object.object.transform;
-                source.boundRoot = admitted.snapshot->state_->detachedShape;
+                source.boundRoot = frozen;
                 if (!CaptureExactFreeLabel(labels[index], state->exact[index]))
                     return PairCaptureRefused(PairRefusal::UnsupportedSource);
                 continue;
@@ -12667,6 +12770,374 @@ core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources
         reply.capture = std::shared_ptr<const PairCapture>(new PairCapture(std::move(state)));
         return reply;
     } catch (...) { return PairCaptureRefused(PairRefusal::BadEncoding); }
+}
+
+namespace {
+// v1.3: a Join, Cut or Overlap result is named by what it is ("Joined part 1"),
+// N one more than the largest "<Kind> n" in the document, like Create's names.
+TCollection_ExtendedString NextBooleanResultName(const Handle(TDocStd_Document)& document,
+                                                 int operation) noexcept {
+    const std::string prefix = operation == 0 ? "Joined part "
+        : operation == 1 ? "Cut part " : "Overlap part ";
+    long largest = 0;
+    try {
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        TDF_LabelSequence roots;
+        shapes->GetFreeShapes(roots);
+        for (int index = 1; index <= roots.Length(); ++index) {
+            Handle(TDataStd_Name) named;
+            if (!roots.Value(index).FindAttribute(TDataStd_Name::GetID(), named)
+                || named.IsNull() || !named->Get().IsAscii()) continue;
+            const std::string name(TCollection_AsciiString(named->Get()).ToCString());
+            if (name.size() <= prefix.size() || name.compare(0, prefix.size(), prefix) != 0) continue;
+            const std::string digits = name.substr(prefix.size());
+            if (digits.size() > 6 || digits.find_first_not_of("0123456789") != std::string::npos) continue;
+            largest = std::max(largest, std::stol(digits));
+        }
+    } catch (...) {}
+    return TCollection_ExtendedString((prefix + std::to_string(largest + 1)).c_str());
+}
+
+TopoDS_Shape DetachedCopy(const TopoDS_Shape& shape) noexcept {
+    try {
+        if (shape.IsNull()) return shape;
+        BRepBuilderAPI_Copy copy(shape, Standard_True, Standard_False);
+        return copy.IsDone() ? copy.Shape() : TopoDS_Shape();
+    } catch (...) { return TopoDS_Shape(); }
+}
+
+// A Join, Cut or Hole result is no longer an Inspector-resized primitive: drop
+// its resize record (child tag 13, the same tag a Join record takes) in the
+// same step, so Undo brings it back.
+// The Inspector stores a resized primitive as approximated (spline) faces; a Boolean
+// of those can leave a part that no longer meshes. Rebuild the exact box, cylinder or
+// ring the user typed (Astra 11 Nov 18:42: a resized ring joined to the cup).
+TopoDS_Shape ExactResizedPrimitive(const TopoDS_Shape& shape) noexcept {
+    try {
+        if (shape.IsNull() || shape.ShapeType() != TopAbs_SOLID) return shape;
+        TopoDS_Shape rebuilt; std::vector<TopoDS_Face> noOpenings, unused;
+        if (core3d::AnalyticPrimitiveForShell(shape, noOpenings, rebuilt, unused) && !rebuilt.IsNull())
+            return rebuilt;
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(shape, TopAbs_FACE, faces);
+        if (faces.Extent() != 1) return shape;
+        if (BRepAdaptor_Surface(TopoDS::Face(faces(1)), Standard_True).GetType() == GeomAbs_Torus)
+            return shape;
+        Bnd_Box box; BRepBndLib::AddOptimal(shape, box, Standard_False, Standard_False);
+        if (box.IsVoid()) return shape;
+        Standard_Real x0, y0, z0, x1, y1, z1; box.Get(x0, y0, z0, x1, y1, z1);
+        const Standard_Real size[3] = {x1 - x0, y1 - y0, z1 - z0};
+        const int k = size[0] <= size[1] && size[0] <= size[2] ? 0 : (size[1] <= size[2] ? 1 : 2);
+        const int i = (k + 1) % 3, j = (k + 2) % 3;
+        if (std::abs(size[i] - size[j]) > 1.0e-3 * std::max(size[i], size[j])) return shape;
+        const Standard_Real r = size[k] / 2, R = size[i] / 2 - r;
+        if (!(r > 0) || !(R > r)) return shape;
+        const gp_Pnt centre((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2);
+        const gp_Dir axis(k == 0 ? 1 : 0, k == 1 ? 1 : 0, k == 2 ? 1 : 0);
+        const TopoDS_Shape torus = BRepPrimAPI_MakeTorus(gp_Ax2(centre, axis), R, r).Shape();
+        GProp_GProps exact, typed;
+        BRepGProp::VolumeProperties(torus, exact); BRepGProp::VolumeProperties(shape, typed);
+        if (!(exact.Mass() > 0) || std::abs(exact.Mass() - typed.Mass()) > 0.03 * exact.Mass())
+            return shape;
+        return torus;
+    } catch (...) { return shape; }
+}
+
+void ForgetInspectorPrimitiveRecord(const TDF_Label& owner) noexcept {
+    try {
+        core3d::inspector_primitive::Record record;
+        if (core3d::inspector_primitive::Read(owner, record) && !record.label.IsNull())
+            record.label.ForgetAllAttributes(Standard_True);
+    } catch (...) {}
+}
+} // namespace
+
+Standard_Boolean OcctDocument::ForgetBooleanResultRecordForExport(const TDF_Label& label) noexcept {
+    try {
+        if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand() || !IsBooleanResultLabel(label))
+            return Standard_False;
+        core3d::composite_recipe::Record composite;
+        if (!core3d::composite_recipe::Read(myOcafDoc, label, composite) || composite.label.IsNull())
+            return Standard_False;
+        composite.label.ForgetAllAttributes(Standard_True);
+        ForgetInspectorPrimitiveRecord(label);
+        return RetainedRecipeCoverageForLabel(label) == OcctRetainedRecipeCoverage::Absent;
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::IsBooleanResultLabel(const TDF_Label& label) const noexcept {
+    try {
+        if (myOcafDoc.IsNull() || label.IsNull()
+            || RetainedRecipeCoverageForLabel(label) != OcctRetainedRecipeCoverage::PresentOutsideP4Coverage)
+            return Standard_False;
+        core3d::composite_recipe::Record composite;
+        return core3d::composite_recipe::Read(myOcafDoc, label, composite) && composite.value
+            && OriginalsFeature(composite.value->definition);
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::ApplyBakedBoolean(
+    const TDF_Label& target, const Handle(AIS_Shape)& targetPresentation,
+    const TDF_Label& tool, const Handle(AIS_Shape)& toolPresentation,
+    int operation, std::string& refusal) noexcept {
+    refusal = "unsupported-source";
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+            || target.IsNull() || tool.IsNull() || target.IsEqual(tool)
+            || targetPresentation.IsNull() || toolPresentation.IsNull()
+            || operation < 0 || operation > 2) return Standard_False;
+        // Plain parts and earlier Boolean results only (their record is dropped).
+        std::array<TDF_Label, 2> bakedRecords;
+        const std::array<TDF_Label, 2> labels{{target, tool}};
+        for (std::size_t index = 0; index < 2; ++index) {
+            const auto coverage = RetainedRecipeCoverageForLabel(labels[index]);
+            if (coverage == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage) {
+                core3d::composite_recipe::Record composite;
+                if (!core3d::composite_recipe::Read(myOcafDoc, labels[index], composite)
+                    || !composite.value || composite.label.IsNull()
+                    || !OriginalsFeature(composite.value->definition)) return Standard_False;
+                bakedRecords[index] = composite.label;
+            } else if (coverage != OcctRetainedRecipeCoverage::Absent) {
+                return Standard_False;
+            }
+        }
+        // Work on copies: the stored parts (and a Join record that Undo brings
+        // back) must stay byte-identical; building can touch tolerances.
+        const TopoDS_Shape targetShape = ExactResizedPrimitive(DetachedCopy(XCAFDoc_ShapeTool::GetShape(target)));
+        const TopoDS_Shape toolShape = ExactResizedPrimitive(DetachedCopy(XCAFDoc_ShapeTool::GetShape(tool)));
+        if (targetShape.IsNull() || toolShape.IsNull()
+            || targetShape.ShapeType() != TopAbs_SOLID || toolShape.ShapeType() != TopAbs_SOLID)
+            return Standard_False;
+        gp_Trsf toolToTarget = targetPresentation->LocalTransformation().Inverted();
+        toolToTarget.Multiply(toolPresentation->LocalTransformation());
+        BRepBuilderAPI_Transform moved(toolShape, toolToTarget, Standard_True, Standard_False);
+        if (!moved.IsDone()) { refusal = "invalid-result"; return Standard_False; }
+        TopTools_ListOfShape arguments, tools;
+        arguments.Append(targetShape); tools.Append(moved.Shape());
+        TopoDS_Shape result;
+        const auto run = [&](BRepAlgoAPI_BooleanOperation& algorithm) {
+            algorithm.SetArguments(arguments); algorithm.SetTools(tools);
+            algorithm.SetRunParallel(Standard_False); algorithm.SetNonDestructive(Standard_True);
+            algorithm.SetFuzzyValue(Precision::Confusion());
+            algorithm.Build();
+            if (algorithm.IsDone() && !algorithm.HasErrors()) result = algorithm.Shape();
+        };
+        if (operation == 0) { BRepAlgoAPI_Fuse a; run(a); }
+        else if (operation == 1) { BRepAlgoAPI_Cut a; run(a); }
+        else { BRepAlgoAPI_Common a; run(a); }
+        if (!result.IsNull() && result.ShapeType() != TopAbs_SOLID) {
+            TopoDS_Shape only; int solids = 0;
+            for (TopExp_Explorer it(result, TopAbs_SOLID); it.More(); it.Next()) { only = it.Current(); ++solids; }
+            result = solids == 1 ? only : TopoDS_Shape();
+        }
+        GProp_GProps mass;
+        if (!result.IsNull()) BRepGProp::VolumeProperties(result, mass);
+        if (result.IsNull() || !BRepCheck_Analyzer(result, Standard_True).IsValid()
+            || !(mass.Mass() > 0)) {
+            refusal = "invalid-result";
+            return Standard_False;
+        }
+        // A part that stays with a scale other than 1 (a ring scaled to 0.8): the
+        // result keeps that size in its own shape and the part's scale becomes 1,
+        // so taps, export and later tools all see the same part (Astra 11 Nov
+        // 21:56: the cup wall of such a mug could not be tapped).
+        gp_Trsf placement = targetPresentation->LocalTransformation();
+        const Standard_Real scale = placement.ScaleFactor();
+        if (std::abs(scale - 1.0) > 1.0e-12) {
+            gp_Trsf sizeUp; sizeUp.SetScale(gp_Pnt(0, 0, 0), scale);
+            BRepBuilderAPI_Transform sized(result, sizeUp, Standard_True, Standard_True);
+            if (!sized.IsDone() || sized.Shape().IsNull()) { refusal = "invalid-result"; return Standard_False; }
+            result = sized.Shape();
+            if (result.ShapeType() != TopAbs_SOLID
+                || !BRepCheck_Analyzer(result, Standard_True).IsValid()) {
+                refusal = "invalid-result";
+                return Standard_False;
+            }
+            placement.SetScaleFactor(1.0);
+        }
+        Handle(AIS_Shape) shown = new AIS_Shape(result);
+        shown->SetLocalTransformation(placement);
+        refusal = "stale-source";
+        myOcafDoc->NewCommand();
+        if (!myOcafDoc->HasOpenCommand()) return Standard_False;
+        for (const auto& record : bakedRecords)
+            if (!record.IsNull()) record.ForgetAllAttributes(Standard_True);
+        const TCollection_ExtendedString name = NextBooleanResultName(myOcafDoc, operation);
+        ForgetInspectorPrimitiveRecord(target);
+        if (!ReplaceShape(target, shown)
+            || !XCAFDoc_ShapeTool::GetShape(target).IsEqual(result)
+            || !RemoveShape(tool, Standard_True)
+            || !SetObjectNameForLabel(target, name)) {
+            myOcafDoc->AbortCommand();
+            return Standard_False;
+        }
+        myOcafDoc->CommitCommand();
+        NotifyChanges();
+        refusal.clear();
+        return Standard_True;
+    } catch (...) {
+        try { if (!myOcafDoc.IsNull() && myOcafDoc->HasOpenCommand()) myOcafDoc->AbortCommand(); }
+        catch (...) {}
+        refusal = "invalid-result";
+        return Standard_False;
+    }
+}
+
+Standard_Boolean OcctDocument::BuildThroughHole(
+    const TDF_Label& label, const gp_Pnt& start, const gp_Dir& direction,
+    double radius, double depth, TopoDS_Shape& output, std::string& refusal)
+    const noexcept {
+    output.Nullify();
+    refusal = "unsupported-source";
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || label.IsNull()
+            || label.Data() != myOcafDoc->GetData() || myOcafDoc->HasOpenCommand()
+            || !std::isfinite(radius) || radius <= 0 || !std::isfinite(depth))
+            return Standard_False;
+        const auto coverage = RetainedRecipeCoverageForLabel(label);
+        if (coverage == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage) {
+            core3d::composite_recipe::Record composite;
+            if (!core3d::composite_recipe::Read(myOcafDoc, label, composite)
+                || !composite.value || composite.label.IsNull()
+                || !OriginalsFeature(composite.value->definition)) return Standard_False;
+        } else if (coverage != OcctRetainedRecipeCoverage::Absent) {
+            return Standard_False;
+        }
+        // A copy: the stored part (and a Join record Undo brings back) must stay
+        // byte-identical; building the hole can touch tolerances.
+        const TopoDS_Shape source = DetachedCopy(XCAFDoc_ShapeTool::GetShape(label));
+        if (source.IsNull() || source.ShapeType() != TopAbs_SOLID
+            || !BRepCheck_Analyzer(source, Standard_True).IsValid()) return Standard_False;
+        Bnd_Box box; BRepBndLib::AddOptimal(source, box, Standard_False, Standard_False);
+        if (box.IsVoid()) return Standard_False;
+        const double reach = std::sqrt(box.SquareExtent()) + radius;
+        const gp_Vec along(direction);
+        const bool through = depth <= 0;
+        const double clearance = std::max(radius, reach * 1e-3);
+        gp_Pnt base = start.Translated(-along * (reach * 1e-3));
+        double length = through ? 2 * reach : depth + reach * 1e-3;
+        if (through) {
+            // "Through" means through the material the hole enters, stopping
+            // where it first comes out (a handle, not the cup behind it).
+            IntCurvesFace_ShapeIntersector crossings;
+            crossings.Load(source, Precision::Confusion());
+            crossings.Perform(gp_Lin(start, direction), -reach, reach);
+            const double eps = reach * 1e-6;
+            std::vector<std::pair<double, IntCurveSurface_TransitionOnCurve>> points;
+            for (Standard_Integer i = 1; i <= crossings.NbPnt(); ++i)
+                points.emplace_back(crossings.WParameter(i), crossings.Transition(i));
+            std::sort(points.begin(), points.end(),
+                      [](const auto& a, const auto& b) { return a.first < b.first; });
+            double exit = -1, next = -1, behind = 0;
+            for (const auto& point : points) {
+                if (point.first < -eps) { behind = point.first; continue; }
+                if (exit < 0 && point.first > eps && point.second == IntCurveSurface_Out) {
+                    exit = point.first;
+                } else if (exit >= 0 && point.first > exit + eps) {
+                    next = point.first;
+                    break;
+                }
+            }
+            if (exit > 0) {
+                const double forward = next > 0 ? std::min(clearance, (next - exit) / 2) : clearance;
+                const double backward = behind < 0 ? std::min(clearance, -behind / 2) : clearance;
+                base = start.Translated(-along * backward);
+                length = backward + exit + forward;
+            } else {
+                base = start.Translated(-along * reach);
+            }
+        }
+        BRepPrimAPI_MakeCylinder cylinder(gp_Ax2(base, direction), radius, length);
+        cylinder.Build();
+        if (!cylinder.IsDone()) { refusal = "invalid-result"; return Standard_False; }
+        TopTools_ListOfShape arguments, tools;
+        arguments.Append(source); tools.Append(cylinder.Shape());
+        BRepAlgoAPI_Cut cut;
+        cut.SetArguments(arguments); cut.SetTools(tools);
+        cut.SetRunParallel(Standard_False); cut.SetNonDestructive(Standard_True);
+        cut.SetFuzzyValue(Precision::Confusion());
+        cut.Build();
+        if (!cut.IsDone() || cut.HasErrors()) { refusal = "invalid-result"; return Standard_False; }
+        TopoDS_Shape result = cut.Shape();
+        if (result.ShapeType() == TopAbs_COMPOUND) {
+            TopoDS_Shape only; int solids = 0;
+            for (TopExp_Explorer it(result, TopAbs_SOLID); it.More(); it.Next()) { only = it.Current(); ++solids; }
+            if (solids != 1) { refusal = "invalid-result"; return Standard_False; }
+            result = only;
+        }
+        GProp_GProps before, after;
+        BRepGProp::VolumeProperties(source, before);
+        BRepGProp::VolumeProperties(result, after);
+        if (result.IsNull() || result.ShapeType() != TopAbs_SOLID
+            || !BRepCheck_Analyzer(result, Standard_True).IsValid()
+            || !(after.Mass() > 0) || !(after.Mass() < before.Mass() * (1 - 1e-9))) {
+            refusal = "empty-result";   // the hole misses the part
+            return Standard_False;
+        }
+        output = result;
+        refusal.clear();
+        return Standard_True;
+    } catch (...) { output.Nullify(); refusal = "invalid-result"; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::ApplyThroughHole(
+    const TDF_Label& label, const Handle(AIS_Shape)& presentation,
+    const gp_Pnt& start, const gp_Dir& direction, double radius, double depth,
+    std::string& refusal) noexcept {
+    try {
+        if (presentation.IsNull()) { refusal = "unsupported-source"; return Standard_False; }
+        TopoDS_Shape result;
+        if (!BuildThroughHole(label, start, direction, radius, depth, result, refusal))
+            return Standard_False;
+        // A previous Boolean result is baked: its record goes in the same step.
+        TDF_Label bakedRecord;
+        if (RetainedRecipeCoverageForLabel(label)
+                == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage) {
+            core3d::composite_recipe::Record composite;
+            if (!core3d::composite_recipe::Read(myOcafDoc, label, composite)
+                || composite.label.IsNull()) { refusal = "stale-source"; return Standard_False; }
+            bakedRecord = composite.label;
+        }
+        Handle(AIS_Shape) shown = new AIS_Shape(result);
+        shown->SetLocalTransformation(presentation->LocalTransformation());
+        refusal = "stale-source";
+        myOcafDoc->NewCommand();
+        if (!myOcafDoc->HasOpenCommand()) return Standard_False;
+        if (!bakedRecord.IsNull()) bakedRecord.ForgetAllAttributes(Standard_True);
+        ForgetInspectorPrimitiveRecord(label);
+        if (!ReplaceShape(label, shown)
+            || !XCAFDoc_ShapeTool::GetShape(label).IsEqual(result)) {
+            myOcafDoc->AbortCommand();
+            return Standard_False;
+        }
+        myOcafDoc->CommitCommand();
+        NotifyChanges();
+        refusal.clear();
+        return Standard_True;
+    } catch (...) {
+        try { if (!myOcafDoc.IsNull() && myOcafDoc->HasOpenCommand()) myOcafDoc->AbortCommand(); }
+        catch (...) {}
+        refusal = "invalid-result";
+        return Standard_False;
+    }
+}
+
+Standard_Boolean OcctDocument::BooleanPairPreparedPreview(
+    const std::shared_ptr<const core3d::authored_parameter::PairPrepared>& prepared,
+    TopoDS_Shape& result, std::string& targetEntity, std::string& toolEntity)
+    const noexcept {
+    result.Nullify(); targetEntity.clear(); toolEntity.clear();
+    try {
+        if (![NSThread isMainThread] || !prepared || !prepared->state_
+            || !prepared->state_->capture || !prepared->state_->capture->state_
+            || prepared->state_->capture->state_->owner != this
+            || prepared->state_->independentResult.IsNull()) return Standard_False;
+        const auto& capture = *prepared->state_->capture->state_;
+        result = prepared->state_->independentResult;
+        targetEntity = capture.sources[0].entityIdentifier;
+        toolEntity = capture.sources[1].entityIdentifier;
+        return !targetEntity.empty() && !toolEntity.empty();
+    } catch (...) { result.Nullify(); return Standard_False; }
 }
 
 core3d::authored_parameter::PairPrepareReply OcctDocument::PrepareBooleanSources(
@@ -12963,16 +13434,17 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
             TopoDS_Shape frozen;
             if (capture.ordinarySources[index]) {
                 const auto& ordinary = *capture.ordinarySources[index]->state_;
-                frozen = ordinary.detachedShape;
+                const auto& committed = capture.ordinaryCommitments[index];
+                frozen = capture.ordinaryShapes[index];
                 if (source.recipe.kind != cr::RecipeKind::OrdinarySource
                     || source.recipe.schema != ordinary.recipe.schema
                     || source.recipe.bytes != ordinary.recipe.bytes
                     || source.original.sourceFeature != ordinary.sourceAnchor
-                    || source.commitments.geometry != ordinary.commitments.geometry
-                    || source.commitments.recipe != ordinary.commitments.recipe
-                    || source.commitments.placement != ordinary.commitments.placement
-                    || source.commitments.material != ordinary.commitments.material
-                    || source.commitments.groups != ordinary.commitments.groups)
+                    || source.commitments.geometry != committed.geometry
+                    || source.commitments.recipe != committed.recipe
+                    || source.commitments.placement != committed.placement
+                    || source.commitments.material != committed.material
+                    || source.commitments.groups != committed.groups)
                     return refuse(ap::PairRefusal::BadEncoding);
             } else if (!PairPersistenceSource(capture.sources[index].boundRoot,
                     myOcafDoc, source.commitments.geometry, frozen)) {
@@ -13078,6 +13550,9 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
 #endif
             if (!capture.ordinarySources[0])
                 capture.sources[0].recordLabel.ForgetAllAttributes(Standard_True);
+            else if (!capture.frozenRecords[0].IsNull())
+                capture.frozenRecords[0].ForgetAllAttributes(Standard_True);
+            ForgetInspectorPrimitiveRecord(capture.sources[0].label);
             if (!cr::Attribute::StageIndependentClone(myOcafDoc,
                     capture.sources[0].label, result, payload)) {
                 stageFailure = ap::PairRefusal::UnsupportedSource;
@@ -13105,6 +13580,13 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
             if (!StageSavedGroups(groups)) {
                 stageFailure = ap::PairRefusal::AliasSource;
                 throw Standard_Failure("metadata stage");
+            }
+            // Named in the same step, so Undo brings back the old name too.
+            if (!SetObjectNameForLabel(capture.sources[0].label, NextBooleanResultName(myOcafDoc,
+                    capture.operation == pb::Operation::Union ? 0
+                    : capture.operation == pb::Operation::Subtract ? 1 : 2))) {
+                stageFailure = ap::PairRefusal::BadEncoding;
+                throw Standard_Failure("result name stage");
             }
 #if DEBUG
             if (debugFailAt(ap::debug::PairCreationFaultSite::AfterMetadataWrite))
@@ -13341,6 +13823,8 @@ OcctDocument::RecoverBooleanSources(
             && myOcafDoc->GetAvailableRedos() == state->redoDepthBefore
             && currentGroups.IsEqual(capture.groups)) {
             OcctExactLabelReceipt targetExact, toolExact;
+            const BooleanRecordExactCaptureScope scope(!capture.frozenRecords[0].IsNull()
+                || !capture.frozenRecords[1].IsNull());
             exactZero = PairSourceCurrent(*this, capture, 0)
                 && PairSourceCurrent(*this, capture, 1)
                 && ReadExactFreeLabel(capture.exact[0], targetExact)
@@ -15461,6 +15945,80 @@ Standard_Boolean OcctDocument::HasNoSavedSweepForTopology(const TDF_Label& label
     core3d::loft_persistence::Record loft;
     return core3d::sweep_persistence::Read(myOcafDoc,label,record) && record.label.IsNull()
         && core3d::loft_persistence::Read(myOcafDoc,label,loft) && loft.label.IsNull();
+}
+
+Standard_Boolean OcctDocument::CanBakeSavedCutForFaceEdit(
+    const TDF_Label& label) const noexcept {
+    try {
+        OCC_CATCH_SIGNALS
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || !IsEditableFreeSimpleDefinitionLabel(label)
+            || HasUnroutedRetainedDependent(label)
+            || core3d::composite_recipe::HasRecord(label)
+            || label.IsAttribute(core3d::retained_edge_treatment::AttributeID()))
+            return Standard_False;
+
+        // The existing capture validates the carrier, current shape, identities,
+        // units and immutable base. Only the legacy cut envelope is consumed;
+        // programs and companion treatments retain their own replay contracts.
+        OcctObjectTransformState state;
+        return CaptureObjectTransformStateForLabel(label, state)
+            && state.retained.value && !state.retained.label.IsNull()
+            && std::holds_alternative<core3d::retained_solid::Envelope>(
+                state.retained.value->envelope)
+            && state.profile.label.IsNull() && state.enclosure.label.IsNull()
+            && state.sweep.label.IsNull() && state.loft.label.IsNull()
+            && !state.edgeTreatment && !state.edgeTreatmentR2
+            && !state.authoredFramesPresent && state.meshUVAtlasVersion == 0
+            && state.meshRegionPartition.empty()
+            && state.resolvedRepresentation == OcctGeometryRepresentation::BRep;
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
+Standard_Boolean OcctDocument::PrepareBooleanResultForFaceEdit(
+    const TDF_Label& label) noexcept {
+    try {
+        OCC_CATCH_SIGNALS
+        if (![NSThread isMainThread] || myOcafDoc.IsNull()
+            || !myOcafDoc->HasOpenCommand()
+            || !IsEditableFreeSimpleDefinitionLabel(label)
+            || HasUnroutedRetainedDependent(label)) return Standard_False;
+        if (core3d::retained_solid::HasRecord(label)) {
+            core3d::retained_solid::Record cut;
+            if (!CanBakeSavedCutForFaceEdit(label)
+                || !core3d::retained_solid::Read(myOcafDoc, label, cut)
+                || !cut.value || cut.label.IsNull()) return Standard_False;
+            // Preview never removes this record. The Apply command owns both
+            // this removal and ReplaceShape, so Undo restores the exact cut.
+            cut.label.ForgetAllAttributes(Standard_True);
+            return !core3d::retained_solid::HasRecord(label);
+        }
+        core3d::composite_recipe::Record record;
+        if (!core3d::composite_recipe::Read(myOcafDoc, label, record))
+            return Standard_False;
+        if (!record.value) return Standard_True;
+
+        // Only the ordinary Boolean with its two frozen originals may be
+        // baked here. A paired edge treatment or a longer feature graph must
+        // keep its own replay contract; never silently discard either one.
+        OcctScalarAppearanceState appearance;
+        if (record.value->definition.nodes.size() != 3
+            || !OriginalsFeature(record.value->definition)
+            || record.label.IsNull()
+            || record.label.IsAttribute(core3d::retained_edge_treatment::AttributeID())
+            || !PairCaptureOriginalsAppearance(*this, label, appearance))
+            return Standard_False;
+
+        // The caller has already checked its original shape and owns this
+        // single OCAF command. Keeping the record after ReplaceShape would
+        // make saving fail because the frozen originals rebuild the old shape.
+        record.label.ForgetAllAttributes(Standard_True);
+        return !core3d::composite_recipe::HasRecord(label);
+    } catch (...) {
+        return Standard_False;
+    }
 }
 
 Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
@@ -18756,10 +19314,8 @@ bool CaptureUntouchedCutPrimitive(const TopoDS_Shape& shape,double unit,
                 if(!std::isfinite(values[0])||!std::isfinite(values[1])
                     ||values[1]-values[0]<1e-3)return false;
             }
-            // Product Add Cube is an XY extrusion from Z=0. Requiring that
-            // primitive frame prevents an arbitrary six-plane solid from being
-            // reinterpreted as authored history.
-            if(std::abs(planes[2][0])>Precision::Confusion())return false;
+            // Inspector height edits preserve the center, so an exact box
+            // need not start at Z=0. Capture its frame below instead of moving it.
             candidate.definition.depth=planes[2][1]-planes[2][0];
             candidate.definition.points={{planes[0][0],planes[1][0]},
                 {planes[0][1],planes[1][0]},{planes[0][1],planes[1][1]},
@@ -18769,13 +19325,17 @@ bool CaptureUntouchedCutPrimitive(const TopoDS_Shape& shape,double unit,
             std::sort(planes[2].begin(),planes[2].end());
             const auto axis=cylinder->Axis();const auto direction=axis.Direction();
             if(std::abs(direction.Z())<1-1e-12
-                ||std::abs(planes[2][0])>Precision::Confusion()
                 ||!std::isfinite(cylinder->Radius())||cylinder->Radius()<1e-3
                 ||planes[2][1]-planes[2][0]<1e-3)return false;
             candidate.definition.depth=planes[2][1]-planes[2][0];
             candidate.definition.circle=core3d::ProfileCircularSection{
                 gp_Pnt2d(axis.Location().X(),axis.Location().Y()),cylinder->Radius(),0};
         }else return false;
+        if (planes[2][0] != 0.0) {
+            core3d::profile::ConstructionFrame frame;
+            frame.values[2] = planes[2][0];
+            candidate.constructionFrame = frame;
+        }
         std::vector<double> values;if(!core3d::profile::Encode(candidate,values))return false;
         const TopoDS_Shape rebuilt=BuildPlainProfileOperationSolid(candidate);
         if(rebuilt.IsNull()||!BRepCheck_Analyzer(rebuilt,Standard_True).IsValid())return false;
@@ -21861,6 +22421,31 @@ OcctDocument::SetEmissiveTextureFactorAutoPromotedForLabel(
     return Standard_True;
 }
 
+void OcctDocument::LoadAuthoredFaceMaterials(
+    const TDF_Label& label, const Handle(AIS_Shape) presentation) {
+    const auto colored = Handle(AIS_ColoredShape)::DownCast(presentation);
+    if (colored.IsNull() || label.IsNull()) return;
+    TDF_LabelSequence children;
+    XCAFDoc_ShapeTool::GetSubShapes(label, children);
+    for (int index = 1; index <= children.Length(); ++index) {
+        const auto face = XCAFDoc_ShapeTool::GetShape(children.Value(index));
+        XCAFDoc_VisMaterialPBR pbr;
+        if (face.IsNull() || face.ShapeType() != TopAbs_FACE
+            || !TryPBRMaterialForLabel(children.Value(index), pbr)) continue;
+        const auto visual = XCAFDoc_VisMaterialTool::GetShapeMaterial(children.Value(index));
+        const auto drawer = colored->CustomAspects(face);
+        if (visual.IsNull() || drawer.IsNull()) continue;
+        const auto aspect = ClearDrawerTextureMapping(drawer);
+        if (aspect.IsNull()) continue;
+        drawer->SetOwnMaterial();
+        drawer->SetOwnColor(pbr.BaseColor.GetRGB());
+        visual->FillAspect(aspect);
+        drawer->ShadingAspect()->SetColor(pbr.BaseColor.GetRGB());
+        Core3DPrepareRendererTextures(drawer->ShadingAspect()->Aspect(), Standard_True);
+    }
+    colored->SynchronizeAspects();
+}
+
 void OcctDocument::LoadObjectMeterial(const TDF_Label& label, const Handle(AIS_Shape) anAis) {
     if (label.IsNull() || anAis.IsNull()) {
         return;
@@ -21890,8 +22475,9 @@ void OcctDocument::LoadObjectMeterial(const TDF_Label& label, const Handle(AIS_S
                     aVisualMaterial);
             } else {
                 ApplyVisualMaterialToPlainPresentation(
-                    aVisualMaterial, anAis);
+                    aVisualMaterial, anAis, Standard_True);
             }
+            LoadAuthoredFaceMaterials(label, anAis);
             return;
         }
         if (!aCafPresentation.IsNull()) {
@@ -21935,6 +22521,7 @@ void OcctDocument::LoadObjectMeterial(const TDF_Label& label, const Handle(AIS_S
         }
     }
 
+    LoadAuthoredFaceMaterials(label, anAis);
 }
 
 void OcctDocument::LoadObjectAuthoredMaterialOverrides(
@@ -21963,8 +22550,9 @@ void OcctDocument::LoadObjectAuthoredMaterialOverrides(
                     aVisualMaterial);
             } else {
                 ApplyVisualMaterialToPlainPresentation(
-                    aVisualMaterial, anAis);
+                    aVisualMaterial, anAis, Standard_True);
             }
+            LoadAuthoredFaceMaterials(label, anAis);
             return;
         }
     }
@@ -22004,6 +22592,7 @@ void OcctDocument::LoadObjectAuthoredMaterialOverrides(
             anAis->SynchronizeAspects();
         }
     }
+    LoadAuthoredFaceMaterials(label, anAis);
 }
 
 
@@ -22222,6 +22811,7 @@ Standard_Boolean OcctObjectTransformState::IsEqual(
             && meshRegionPartition == other.meshRegionPartition
             && authoredFramesPresent == other.authoredFramesPresent
             && authoredFramesIdentity == other.authoredFramesIdentity
+            && inspectorPrimitive.IsEqual(other.inspectorPrimitive)
             && profile.IsEqual(other.profile)
             && enclosure.IsEqual(other.enclosure)
             && sweep.IsEqual(other.sweep) && loft.IsEqual(other.loft) && retained.IsEqual(other.retained)
@@ -22264,7 +22854,8 @@ Standard_Boolean OcctDocument::CaptureObjectTransformStateForLabel(
         captured.definitionIdentifier = DefinitionIdentifierForLabel(label);
         captured.storedRepresentation = StoredGeometryRepresentationForLabel(label);
         captured.resolvedRepresentation = GeometryRepresentationForLabel(label);
-        if (!core3d::profile::Read(myOcafDoc, label, captured.profile)
+        if (!core3d::inspector_primitive::Read(label, captured.inspectorPrimitive)
+            || !core3d::profile::Read(myOcafDoc, label, captured.profile)
             || !core3d::enclosure::Read(myOcafDoc, label, captured.enclosure)
             || !core3d::sweep_persistence::Read(myOcafDoc, label, captured.sweep)
             || !core3d::loft_persistence::Read(myOcafDoc, label, captured.loft)
@@ -22671,7 +23262,21 @@ Standard_Boolean OcctDocument::CaptureExactFreeLabel(
             if (!CaptureScalarAppearanceForSavedCut(
                     label, captured.appearance)) return Standard_False;
         } else if (!CaptureScalarAppearanceForMeshCopy(
-                       label, captured.appearance)) return Standard_False;
+                       label, captured.appearance)) {
+            TDF_LabelSequence kids; XCAFDoc_ShapeTool::GetSubShapes(label, kids);
+            // A previous Boolean result: its Part Boolean record child is
+            // owner metadata, not subshape styling (see the scope above).
+            core3d::composite_recipe::Record composite;
+            bool booleanRecord = gExactCaptureAdmitsBooleanRecord
+                && object.profile.label.IsNull()
+                && core3d::composite_recipe::Read(myOcafDoc, label, composite)
+                && composite.value && !composite.label.IsNull()
+                && OriginalsFeature(composite.value->definition);
+            for (int i = 1; booleanRecord && i <= kids.Length(); ++i)
+                booleanRecord = kids.Value(i).IsEqual(composite.label);
+            if (!booleanRecord || !CaptureWholeObjectScalarAppearance(
+                    myOcafDoc, label, captured.appearance)) return Standard_False;
+        }
         captured.documentData = myOcafDoc->GetData();
         captured.documentIdentifier = DocumentIdentifier();
         if (captured.documentIdentifier.empty()) return Standard_False;

@@ -1186,6 +1186,11 @@ typedef struct {
     NS_SWIFT_NAME(tryCancelExtrusion());
 - (BOOL)applyExtrusion;
 - (BOOL)cancelExtrusion;
+//! Split face (push-pull owner): the captured face's straight edges and the
+//! reference edge; see GLViewController.h.
+- (NSArray<NSDictionary<NSString *, id> *> *)extrusionSplitEdges;
+- (BOOL)setExtrusionSplitReferenceEdge:(NSInteger)index;
+- (NSInteger)extrusionSplitReferenceEdge;
 - (Core3DShellParameters)getShellParameters;
 - (BOOL)setShellThickness:(CGFloat)thickness;
 - (Core3DModelingOperationResult)tryApplyShell

@@ -12,6 +12,7 @@
 #import <ImageIO/ImageIO.h>
 
 #include "OcctSceneSnapshotBuilder.hpp"
+#include "../UI/Core3DView.hpp"
 #include "../OCCTKit/NativeAuthoredFrameGeometry.hxx"
 #include "../OCCTKit/BoundedCurveEvaluation.hxx"
 #include "../OCCTKit/BoundedCurveAttribute.hxx"
@@ -103,6 +104,7 @@
 #include <Graphic3d_AspectFillArea3d.hxx>
 #include <Graphic3d_MaterialAspect.hxx>
 #include <Graphic3d_PBRMaterial.hxx>
+#include <Graphic3d_ShaderProgram.hxx>
 #include <Graphic3d_TextureSet.hxx>
 #include <Image_Texture.hxx>
 #include <Precision.hxx>
@@ -3103,6 +3105,12 @@ std::uint64_t MeshFingerprint(const MeshSnapshot& theMesh,
     for (const std::uint32_t anIndex : theMesh.indices) {
         aHash.AddInteger(anIndex);
     }
+    aHash.AddInteger<std::uint64_t>(theMesh.edgeSegments.size());
+    for (const EdgeSegment& edge : theMesh.edgeSegments) {
+        aHash.AddFloat(edge.startX); aHash.AddFloat(edge.startY); aHash.AddFloat(edge.startZ);
+        aHash.AddFloat(edge.endX); aHash.AddFloat(edge.endY); aHash.AddFloat(edge.endZ);
+        aHash.AddInteger(edge.edgeIndex); aHash.AddInteger(edge.faceIndex);
+    }
     aHash.AddInteger<std::uint64_t>(theMesh.primitives.size());
     for (const MeshPrimitive& aPrimitive : theMesh.primitives) {
         aHash.AddInteger(aPrimitive.firstIndex);
@@ -3585,7 +3593,11 @@ bool ExtractWorldPreviewItem(
         }
         const auto& anAspect =
             thePresentation->Attributes()->ShadingAspect()->Aspect();
-        if (!anAspect->ShaderProgram().IsNull()
+        // The app's sampler-free scalar PBR shader carries exactly these
+        // admitted material values. Keep foreign/custom shaders refused.
+        const bool hasForeignShader = !anAspect->ShaderProgram().IsNull()
+            && anAspect->ShaderProgram()->GetId() != "shapeyard-data-maps-v1-0";
+        if (hasForeignShader
             || (anAspect->AlphaMode() != Graphic3d_AlphaMode_Opaque
                 && anAspect->AlphaMode() != Graphic3d_AlphaMode_BlendAuto)) {
             return false;
@@ -3718,6 +3730,65 @@ bool CaptureAnalyticSourceFaceWitness(
         theOutput = {};
         return false;
     }
+}
+
+bool ExtractBoundarySegments(const DefinitionData& definition,
+                             const std::size_t availableBytes,
+                             MeshSnapshot& mesh)
+{
+    // Read the existing display tessellation only. In particular, do not infer
+    // edges from triangle indices: that loses coplanar Split boundaries and
+    // exposes triangulation diagonals. Do not filter adjacent coplanar faces.
+    const std::size_t maximum = availableBytes / sizeof(EdgeSegment);
+    for (Standard_Integer faceIndex = 1; faceIndex <= definition.faces.Extent(); ++faceIndex) {
+        const TopoDS_Face face = TopoDS::Face(definition.faces(faceIndex));
+        TopLoc_Location location;
+        const Handle(Poly_Triangulation) triangulation = BRep_Tool::Triangulation(face, location);
+        if (triangulation.IsNull()) continue;
+        TopTools_IndexedMapOfShape edges;
+        TopExp::MapShapes(face, TopAbs_EDGE, edges);
+        for (Standard_Integer index = 1; index <= edges.Extent(); ++index) {
+            const TopoDS_Edge edge = TopoDS::Edge(edges(index));
+            // A periodic parameter seam is not a model boundary. Shared edges
+            // between distinct faces, including planar splits, remain present.
+            if (BRep_Tool::Degenerated(edge) || BRep_Tool::IsClosed(edge, face)) continue;
+            const Handle(Poly_PolygonOnTriangulation)& polygon =
+                BRep_Tool::PolygonOnTriangulation(edge, triangulation, location);
+            if (polygon.IsNull() || polygon->NbNodes() < 2) continue;
+            const Standard_Integer edgeIndex = definition.edges.FindIndex(edge);
+            if (edgeIndex <= 0 || std::size_t(polygon->NbNodes() - 1)
+                > maximum - mesh.edgeSegments.size()) return false;
+            for (Standard_Integer node = 1; node < polygon->NbNodes(); ++node) {
+                const Standard_Integer first = polygon->Node(node), last = polygon->Node(node + 1);
+                if (first < 1 || last < 1 || first > triangulation->NbNodes()
+                    || last > triangulation->NbNodes()) return false;
+                const gp_Pnt a = triangulation->Node(first).Transformed(location.Transformation());
+                const gp_Pnt b = triangulation->Node(last).Transformed(location.Transformation());
+                const double values[] = {
+                    a.X() - definition.sourceOrigin.x, a.Y() - definition.sourceOrigin.y,
+                    a.Z() - definition.sourceOrigin.z, b.X() - definition.sourceOrigin.x,
+                    b.Y() - definition.sourceOrigin.y, b.Z() - definition.sourceOrigin.z,
+                };
+                for (const double value : values) if (!FitsFloat(value)) return false;
+                const EdgeSegment segment = {
+                    float(values[0]), float(values[1]), float(values[2]),
+                    float(values[3]), float(values[4]), float(values[5]),
+                    std::uint32_t(edgeIndex - 1), std::uint32_t(faceIndex - 1),
+                };
+                if (segment.startX == segment.endX && segment.startY == segment.endY
+                    && segment.startZ == segment.endZ) continue;
+                if (mesh.edgeSegments.size() == mesh.edgeSegments.capacity()) {
+                    // Keep allocated capacity, as well as payload size, inside
+                    // the mesh's remaining numeric budget.
+                    const std::size_t next = std::min(maximum,
+                        std::max(std::size_t(64), mesh.edgeSegments.capacity() * 2));
+                    mesh.edgeSegments.reserve(next);
+                }
+                mesh.edgeSegments.push_back(segment);
+            }
+        }
+    }
+    return true;
 }
 
 bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
@@ -4042,6 +4113,9 @@ bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
     if (!IsValid(aMesh.localBounds)) {
         return false;
     }
+    if (hasSemanticBRepTopology
+        && !ExtractBoundarySegments(theDefinition, kMaxMeshNumericBytes - aMeshBytes, aMesh))
+        return false;
     theDefinition.mesh = std::move(aMesh);
     // Geometry identity is derived from the immutable copied payload itself.
     // No desired quality is recomputed from attacker-controlled BRep geometry
@@ -4451,6 +4525,8 @@ bool BuildCamera(const Handle(V3d_View)& theView,
     if (aCamera.IsNull()) {
         return false;
     }
+    const auto* nativeView = dynamic_cast<const Core3DView*>(theView.get());
+    theCamera.lessonLightingEnabled = nativeView && nativeView->lessonLightingEnabled();
     const gp_Pnt anEye = aCamera->Eye();
     const gp_Pnt aCenter = aCamera->Center();
     const gp_Dir anUp = aCamera->OrthogonalizedUp();
@@ -4508,6 +4584,7 @@ bool BuildCamera(const Handle(V3d_View)& theView,
 std::uint64_t CameraFingerprint(const CameraSnapshot& theCamera)
 {
     Fingerprint aHash;
+    aHash.AddBool(theCamera.lessonLightingEnabled);
     aHash.AddInteger(static_cast<std::uint8_t>(theCamera.projection));
     for (const double aValue : {
              theCamera.eye.x, theCamera.eye.y, theCamera.eye.z,
@@ -5024,6 +5101,7 @@ bool ValidatePresentationOverlayPayload(
                     || isLinearArrayMesh || isRadialArrayMesh || isShellMesh)
                 && !IsCenteredLocalBounds(aMesh.localBounds))
             || aMesh.vertices.empty() || aMesh.indices.empty()
+            || !aMesh.edgeSegments.empty()
             || aMesh.primitives.empty()
             || (!isMirrorPreview && !isBooleanMesh && !isChamferMesh
                     && !isLinearArrayMesh && !isRadialArrayMesh && !isShellMesh
@@ -6479,6 +6557,8 @@ bool DeepMeshStorageBytes(const MeshSnapshot& mesh,
             sizeof(Vertex))
         || !DeepVectorStorageBytes(total.numeric, mesh.indices.capacity(),
             sizeof(std::uint32_t))
+        || !DeepVectorStorageBytes(total.numeric, mesh.edgeSegments.capacity(),
+            sizeof(EdgeSegment))
         || !DeepVectorStorageBytes(total.numeric, mesh.primitives.capacity(),
             sizeof(MeshPrimitive))
         || !DeepVectorStorageBytes(total.numeric,
@@ -25424,6 +25504,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
             std::size_t anIndexBytes = 0;
             std::size_t aPrimitiveBytes = 0;
             std::size_t aMeshBytes = 0;
+            std::size_t anEdgeBytes = 0;
             if (!CheckedMultiply(aDefinition.mesh.vertices.size(),
                                  sizeof(Vertex),
                                  aVertexBytes)
@@ -25435,6 +25516,9 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                                     aPrimitiveBytes)
                 || !CheckedAdd(aVertexBytes, anIndexBytes, aMeshBytes)
                 || !CheckedAdd(aMeshBytes, aPrimitiveBytes, aMeshBytes)
+                || !CheckedMultiply(aDefinition.mesh.edgeSegments.capacity(),
+                                    sizeof(EdgeSegment), anEdgeBytes)
+                || !CheckedAdd(aMeshBytes, anEdgeBytes, aMeshBytes)
                 || !CheckedAdd(aSnapshotNumericBytes,
                                aMeshBytes,
                                aSnapshotNumericBytes)
@@ -25651,6 +25735,7 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 std::size_t anIndexBytes = 0;
                 std::size_t aPrimitiveBytes = 0;
                 std::size_t aMeshBytes = 0;
+                std::size_t anEdgeBytes = 0;
                 if (!CheckedMultiply(aDerivativeMesh.vertices.size(), sizeof(Vertex),
                                      aVertexBytes)
                     || !CheckedMultiply(aDerivativeMesh.indices.size(),
@@ -25659,6 +25744,9 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                                         sizeof(MeshPrimitive), aPrimitiveBytes)
                     || !CheckedAdd(aVertexBytes, anIndexBytes, aMeshBytes)
                     || !CheckedAdd(aMeshBytes, aPrimitiveBytes, aMeshBytes)
+                    || !CheckedMultiply(aDerivativeMesh.edgeSegments.capacity(),
+                                        sizeof(EdgeSegment), anEdgeBytes)
+                    || !CheckedAdd(aMeshBytes, anEdgeBytes, aMeshBytes)
                     || !CheckedAdd(aSnapshotNumericBytes, aMeshBytes,
                                    aSnapshotNumericBytes)
                     || !CheckedAdd(aSnapshotVertexCount,
@@ -25796,10 +25884,24 @@ OcctSceneSnapshotBuilder::SnapshotPointer OcctSceneSnapshotBuilder::Build(
                 Handle(Image_Texture) aMetallicRoughnessTexture;
                 Handle(Image_Texture) anOcclusionTexture;
                 Handle(Image_Texture) aNormalTexture;
+                // Explicit app-authored face styles supersede the part base.
+                // Imported faces retain the existing whole-object edit contract.
+                auto effectivePbr = aPbrOverride;
+                TDF_Label authoredFaceLabel;
+                XCAFDoc_VisMaterialPBR authoredFacePbr;
+                const auto faceShapes = XCAFDoc_DocumentTool::ShapeTool(aDocument->Main());
+                if (!faceShapes.IsNull()
+                    && faceShapes->FindSubShape(anOccurrence.definitionLabel, aFace.Face(), authoredFaceLabel)
+                    && theDocument->TryPBRMaterialForLabel(authoredFaceLabel, authoredFacePbr)) {
+                    const auto visual = XCAFDoc_VisMaterialTool::GetShapeMaterial(authoredFaceLabel);
+                    if (visual.IsNull()) return {};
+                    effectivePbr = WholeObjectPBRMaterial{authoredFacePbr,
+                        visual->AlphaMode(), visual->AlphaCutOff(), visual->FaceCulling()};
+                }
                 if (!ResolveMaterial(aFace,
                                      aMaterialOverride,
                                      aColorOverride,
-                                     aPbrOverride,
+                                     effectivePbr,
                                      aDefinition.closed,
                                      !hasPaintedDerivative,
                                      aMaterial,

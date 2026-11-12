@@ -35,7 +35,18 @@ public:
                                 const Standard_Real X, const Standard_Real Y, const Standard_Real Z, const Standard_Boolean Start);
     
 
+    //! Presentation-only lesson lighting; never persisted with a document.
+    bool lessonLightingEnabled() const { return myLessonLightingEnabled; }
+    bool hasUsedLessonLighting() const { return myHasUsedLessonLighting; }
+    void setLessonLightingEnabled(bool enabled) {
+        myLessonLightingEnabled = enabled;
+        myHasUsedLessonLighting = myHasUsedLessonLighting || enabled;
+        InvalidateAndRequestFrame();
+    }
+
 private:
+    bool myLessonLightingEnabled = false;
+    bool myHasUsedLessonLighting = false;
     void InvalidateAndRequestFrame() const;
 
     Graphic3d_Vec2 myPointStart;

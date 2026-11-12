@@ -109,7 +109,8 @@ static_assert(sizeof(std::uint32_t) == 4,
                   nearPlane:(double)nearPlane
                    farPlane:(double)farPlane
                 aspectRatio:(double)aspectRatio
-         viewportSizePixels:(simd_uint2)viewportSizePixels;
+         viewportSizePixels:(simd_uint2)viewportSizePixels
+      lessonLightingEnabled:(BOOL)lessonLightingEnabled;
 @end
 
 @interface Core3DSceneTextureSnapshot ()
@@ -199,6 +200,7 @@ static_assert(sizeof(std::uint32_t) == 4,
                             tangentIdentifier:(NSString *)tangentIdentifier
                                    vertexData:(NSData *)vertexData
                                     indexData:(NSData *)indexData
+                              edgeSegmentData:(NSData *)edgeSegmentData
                                   vertexCount:(NSUInteger)vertexCount
                                    indexCount:(NSUInteger)indexCount
                                facePrimitives:(NSArray<Core3DSceneFacePrimitiveSnapshot *> *)facePrimitives;
@@ -1624,9 +1626,11 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
                   nearPlane:(double)nearPlane
                    farPlane:(double)farPlane
                 aspectRatio:(double)aspectRatio
-         viewportSizePixels:(simd_uint2)viewportSizePixels {
+         viewportSizePixels:(simd_uint2)viewportSizePixels
+      lessonLightingEnabled:(BOOL)lessonLightingEnabled {
     self = [super init];
     if (self) {
+        _lessonLightingEnabled = lessonLightingEnabled;
         _eye = eye;
         _center = center;
         _up = up;
@@ -1839,6 +1843,7 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
                             tangentIdentifier:(NSString *)tangentIdentifier
                                    vertexData:(NSData *)vertexData
                                     indexData:(NSData *)indexData
+                              edgeSegmentData:(NSData *)edgeSegmentData
                                   vertexCount:(NSUInteger)vertexCount
                                    indexCount:(NSUInteger)indexCount
                                facePrimitives:(NSArray<Core3DSceneFacePrimitiveSnapshot *> *)facePrimitives {
@@ -1868,6 +1873,13 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
         _cornerTangentData = [cornerTangentData copy];
         _tangentIdentifier = [tangentIdentifier copy];
         _hasCornerTangents = cornerTangentData.length != 0;
+        static_assert(sizeof(EdgeSegment) == sizeof(Core3DSceneEdgeSegment));
+        static_assert(offsetof(EdgeSegment, edgeIndex) == offsetof(Core3DSceneEdgeSegment, edgeIndex));
+        static_assert(offsetof(EdgeSegment, faceIndex) == offsetof(Core3DSceneEdgeSegment, faceIndex));
+        NSParameterAssert(edgeSegmentData.length % sizeof(Core3DSceneEdgeSegment) == 0);
+        _edgeSegmentData = [edgeSegmentData copy];
+        _edgeSegmentStride = sizeof(Core3DSceneEdgeSegment);
+        _edgeSegmentCount = edgeSegmentData.length / _edgeSegmentStride;
         _vertexData = [vertexData copy];
         _indexData = [indexData copy];
         _vertexCount = vertexCount;
@@ -2867,6 +2879,7 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
             && mesh.topology.vertexCount != 0
             && mesh.vertices.empty() && mesh.indices.empty()
             && mesh.primitives.empty() && mesh.cornerTangents.empty()
+            && mesh.edgeSegments.empty()
             && mesh.tangentBasis == TangentBasis::None;
         const bool validSurface = mesh.geometryKind == GeometryKind::SurfaceTriangles
             && !mesh.nativeC1Wire.has_value()
@@ -2897,6 +2910,7 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
         std::size_t vertexBytes = 0;
         std::size_t indexBytes = 0;
         std::size_t tangentBytes = 0;
+        std::size_t edgeBytes = 0;
         if (!CheckedMultiply(mesh.vertices.size(), sizeof(Vertex), vertexBytes)
             || !CheckedMultiply(mesh.indices.size(),
                                 sizeof(std::uint32_t),
@@ -2909,8 +2923,19 @@ bool IsValidSceneSnapshotImpl(const SceneSnapshot& snapshot) {
                            totalNumericBytes)
             || !CheckedMultiply(mesh.cornerTangents.size(), sizeof(Float4), tangentBytes)
             || !CheckedAdd(totalNumericBytes, tangentBytes, totalNumericBytes)
+            || !CheckedMultiply(mesh.edgeSegments.size(), sizeof(EdgeSegment), edgeBytes)
+            || !CheckedAdd(totalNumericBytes, edgeBytes, totalNumericBytes)
             || totalNumericBytes > kMaximumDTONumericBytes) {
             return false;
+        }
+
+        for (const EdgeSegment& edge : mesh.edgeSegments) {
+            if (edge.faceIndex >= mesh.topology.faceCount
+                || edge.edgeIndex >= mesh.topology.edgeCount
+                || !IsFinite(edge.startX) || !IsFinite(edge.startY) || !IsFinite(edge.startZ)
+                || !IsFinite(edge.endX) || !IsFinite(edge.endY) || !IsFinite(edge.endZ)
+                || (edge.startX == edge.endX && edge.startY == edge.endY && edge.startZ == edge.endZ))
+                return false;
         }
 
         for (const Vertex& vertex : mesh.vertices) {
@@ -3755,6 +3780,7 @@ bool IsValidPresentationOverlaySnapshotImpl(
             || mesh.vertices.empty() || mesh.indices.empty()
             || mesh.primitives.empty()
             || !mesh.cornerTangents.empty() || mesh.tangentBasis != TangentBasis::None
+            || !mesh.edgeSegments.empty()
             || (!isMirrorPreview && !isBooleanMesh && !isChamferMesh
                     && !isLinearArrayMesh && !isRadialArrayMesh && !isShellMesh
                 && mesh.primitives.size() != 1)
@@ -4297,7 +4323,8 @@ Core3DSceneCameraSnapshot *CameraFromScene(const CameraSnapshot& value) {
                   nearPlane:value.nearPlane
                    farPlane:value.farPlane
                 aspectRatio:value.aspect
-         viewportSizePixels:UInt2FromScene(value.viewportPixels)];
+         viewportSizePixels:UInt2FromScene(value.viewportPixels)
+      lessonLightingEnabled:value.lessonLightingEnabled];
 }
 
 Core3DSceneMaterialSnapshot *MaterialFromScene(const MaterialSnapshot& value) {
@@ -4466,6 +4493,9 @@ paintedAtlasMasterDefinitionIdentifier:StringFromUTF8(
                    tangentIdentifier:tangentIdentifier
                           vertexData:vertexData
                            indexData:indexData
+                     edgeSegmentData:(value.edgeSegments.empty() ? NSData.data :
+                         [NSData dataWithBytes:value.edgeSegments.data()
+                                        length:value.edgeSegments.size() * sizeof(EdgeSegment)])
                          vertexCount:value.vertices.size()
                           indexCount:value.indices.size()
                       facePrimitives:primitives];

@@ -18,6 +18,15 @@
 #include <Poly_Triangulation.hxx>
 #include <Precision.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
+#include <TopExp.hxx>
+#include <gp.hxx>
+#include <gp_Ax2.hxx>
+#include <gp_Cylinder.hxx>
+#include <gp_Pln.hxx>
 #include <gp_GTrsf.hxx>
 #include <Standard_ErrorHandler.hxx>
 #include <Standard_Failure.hxx>
@@ -58,6 +67,70 @@
 namespace core3d {
 
 namespace {
+
+// Recognize only complete, valid axis-aligned primitives. Face counts alone
+// must never turn a cut, split, bevel or arbitrary imported solid into a box.
+int InspectorAnalyticPrimitiveKind(const TopoDS_Shape& shape) {
+    if (shape.IsNull() || shape.ShapeType() != TopAbs_SOLID
+        || shape.Orientation() != TopAbs_FORWARD) return 0;
+    int faces = 0, cylinders = 0;
+    std::array<std::vector<double>, 3> planes;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        if (++faces > 6) return 0;
+        BRepAdaptor_Surface surface(TopoDS::Face(it.Current()), Standard_True);
+        if (surface.GetType() == GeomAbs_Plane) {
+            const auto plane = surface.Plane();
+            const auto normal = plane.Axis().Direction();
+            const std::array<double, 3> components = {
+                std::abs(normal.X()), std::abs(normal.Y()), std::abs(normal.Z())};
+            const auto largest = std::max_element(components.begin(), components.end());
+            if (*largest < 1 - 1e-12) return 0;
+            const int axis = int(largest - components.begin());
+            planes[axis].push_back(plane.Location().Coord(axis + 1));
+        } else if (surface.GetType() == GeomAbs_Cylinder) {
+            if (++cylinders != 1 || surface.Cylinder().Axis().Direction().Z() < 1 - 1e-12)
+                return 0;
+        } else return 0;
+    }
+    TopTools_IndexedMapOfShape edges, vertices;
+    TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+    TopExp::MapShapes(shape, TopAbs_VERTEX, vertices);
+    int kind = 0;
+    if (faces == 6 && cylinders == 0 && edges.Extent() == 12 && vertices.Extent() == 8) {
+        for (const auto& pair : planes)
+            if (pair.size() != 2 || std::abs(pair[0] - pair[1]) <= Precision::Confusion()) return 0;
+        kind = 1;
+    } else if (faces == 3 && cylinders == 1 && edges.Extent() == 3 && vertices.Extent() == 2
+               && planes[0].empty() && planes[1].empty() && planes[2].size() == 2
+               && std::abs(planes[2][0] - planes[2][1]) > Precision::Confusion()) {
+        kind = 2;
+    }
+    return kind != 0 && BRepCheck_Analyzer(shape, Standard_True).IsValid() ? kind : 0;
+}
+
+TopoDS_Shape ResizeInspectorPrimitive(int kind, const std::array<double, 6>& bounds,
+                                      int axis, double target) {
+    std::array<double, 3> size, center;
+    for (int i = 0; i < 3; ++i) {
+        size[i] = bounds[i + 3] - bounds[i];
+        center[i] = bounds[i] * 0.5 + bounds[i + 3] * 0.5;
+    }
+    size[axis] = target;
+    if (kind == 1) {
+        return BRepPrimAPI_MakeBox(gp_Pnt(center[0] - size[0] * 0.5,
+            center[1] - size[1] * 0.5, center[2] - size[2] * 0.5), size[0], size[1], size[2]).Shape();
+    }
+    const gp_Ax2 frame(gp_Pnt(center[0], center[1], center[2] - size[2] * 0.5), gp::DZ());
+    const TopoDS_Shape cylinder = BRepPrimAPI_MakeCylinder(frame, size[0] * 0.5, size[2]).Shape();
+    // Inspector dimensions are measured back from the BRep. Permit only the
+    // kernel's positional tolerance when deciding that the two diameters match.
+    if (std::abs(size[0] - size[1]) <= Precision::Confusion()) return cylinder;
+    const double ratio = size[1] / size[0];
+    const gp_GTrsf stretch(gp_Mat(1,0,0, 0,ratio,0, 0,0,1),
+                          gp_XYZ(0, center[1] * (1 - ratio), 0));
+    BRepBuilderAPI_GTransform oval(cylinder, stretch, Standard_True);
+    return oval.IsDone() ? oval.Shape() : TopoDS_Shape();
+}
 
 constexpr double kLegacyMetersPerUnit = 0.001;
 constexpr double kQuaternionHalfTurnZeroTolerance =
@@ -2016,6 +2089,7 @@ TransformInspectorMeasurementController::commitPosition(
     }
     std::optional<gp_GTrsf> dimensionTransform;
     TransformInspectorVector3 measuredDimensions;
+    std::array<double, 6> dimensionBounds{};
     if (theRequest.kind == TransformInspectorEditKind::Dimension) {
         // Use the private shape/document cache, never caller-supplied extents.
         // Validate correctable numeric errors before consuming the edit lease.
@@ -2032,6 +2106,7 @@ TransformInspectorMeasurementController::commitPosition(
             anOutcome.result = TransformInspectorPositionCommitResult::Unavailable;
             return anOutcome;
         }
+        dimensionBounds = bounds.bounds;
         const double scale = std::abs(captured.persistedTransform.uniformScale);
         const double extents[3] = {bounds.localDimensions.x, bounds.localDimensions.y,
                                    bounds.localDimensions.z};
@@ -2280,28 +2355,45 @@ TransformInspectorMeasurementController::commitPosition(
         // controller, preserving its Translate basis invariant.
         gp_Trsf aCandidateTransform = exactBaseline.transform;
         TopoDS_Shape candidateShape = aStoredShape;
+        int inspectorPrimitiveKind = 0;
         if(unchangedPlacement) {
             // Reserved no-op proceeds with the exact original transform to
             // ordinary source/catalog proof, without a receipt-only command.
         } else if (sizes) {
-            // Same affine BRep operation as axis scaling. Build from the exact
-            // captured definition around its measured local center; no extra
-            // synchronous exact-bounds sweep is needed for this diagonal map.
-            // OCCT 7.8 NURBS conversion can rebuild an already-spline face
-            // with bare triangulation when NewSurface returns false. Work on
-            // an independent geometry-only copy so repeated edits preserve
-            // analytic surfaces and never clean the live document's mesh.
-            BRepBuilderAPI_Copy geometryCopy(aStoredShape, Standard_True, Standard_False);
-            if (!geometryCopy.IsDone() || geometryCopy.Shape().IsNull()) {
+            const int kind = exactBaseline.inspectorPrimitive.IsCurrent(aStoredShape)
+                ? 2 : InspectorAnalyticPrimitiveKind(aStoredShape);
+            if (exactBaseline.inspectorPrimitive.IsCurrent(aStoredShape))
+                dimensionBounds = exactBaseline.inspectorPrimitive.bounds;
+            if (kind != 0) {
+                candidateShape = ResizeInspectorPrimitive(kind, dimensionBounds, int(anAxis),
+                    theRequest.value / std::abs(aCurrentTransform.uniformScale));
+                if (kind == 2) {
+                    double x = dimensionBounds[3] - dimensionBounds[0];
+                    double y = dimensionBounds[4] - dimensionBounds[1];
+                    const double target = theRequest.value / std::abs(aCurrentTransform.uniformScale);
+                    if (anAxis == 0) x = target;
+                    if (anAxis == 1) y = target;
+                    inspectorPrimitiveKind = std::abs(x - y) > Precision::Confusion() ? 2 : 0;
+                }
+            } else {
+                // Other solids keep the general deformation. Copy without a
+                // mesh: repeated NURBS edits must not clean the live document.
+                BRepBuilderAPI_Copy geometryCopy(aStoredShape, Standard_True, Standard_False);
+                if (!geometryCopy.IsDone() || geometryCopy.Shape().IsNull()) {
+                    anOutcome.result = TransformInspectorPositionCommitResult::InternalFailure;
+                    return anOutcome;
+                }
+                BRepBuilderAPI_GTransform builder(geometryCopy.Shape(), *dimensionTransform, Standard_True);
+                if (!builder.IsDone()) {
+                    anOutcome.result = TransformInspectorPositionCommitResult::InternalFailure;
+                    return anOutcome;
+                }
+                candidateShape = builder.Shape();
+            }
+            if (candidateShape.IsNull()) {
                 anOutcome.result = TransformInspectorPositionCommitResult::InternalFailure;
                 return anOutcome;
             }
-            BRepBuilderAPI_GTransform builder(geometryCopy.Shape(), *dimensionTransform, Standard_True);
-            if (!builder.IsDone() || builder.Shape().IsNull()) {
-                anOutcome.result = TransformInspectorPositionCommitResult::InternalFailure;
-                return anOutcome;
-            }
-            candidateShape = builder.Shape();
         } else if (scales) {
             // Absolute dimensionless factor; preserve the exact object origin,
             // orientation and definition-local geometry.
@@ -2336,6 +2428,14 @@ TransformInspectorMeasurementController::commitPosition(
         change.label = aDefinition;
         change.presentation = aPresentation;
         change.shape = candidateShape;
+        change.inspectorPrimitiveKind = inspectorPrimitiveKind;
+        if (inspectorPrimitiveKind != 0) {
+            const double center = (dimensionBounds[anAxis] + dimensionBounds[anAxis + 3]) * 0.5;
+            const double half = theRequest.value / std::abs(aCurrentTransform.uniformScale) * 0.5;
+            dimensionBounds[anAxis] = center - half;
+            dimensionBounds[anAxis + 3] = center + half;
+            change.inspectorPrimitiveBounds = dimensionBounds;
+        }
         change.transform = aCandidateTransform;
         change.operation = (scales || sizes) ? OrdinaryTransformOperation::Scale
             : rotates ? OrdinaryTransformOperation::Rotate : OrdinaryTransformOperation::Translate;

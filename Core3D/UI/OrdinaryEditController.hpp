@@ -266,6 +266,9 @@ struct OrdinaryTransformChange {
     // mutually exclusive with the snapshot and migration arms above.
     std::shared_ptr<const retained_edge_treatment::r2::EnrollmentCapture> edgeTreatmentEnrollmentR2;
     std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> edgeTreatmentResultR2;
+    // Inspector-only lineage, bound to the exact candidate in the same OCAF command.
+    int inspectorPrimitiveKind = 0;
+    std::array<double, 6> inspectorPrimitiveBounds{};
 };
 
 struct OrdinaryTransformRecord {

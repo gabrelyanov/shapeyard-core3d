@@ -1298,6 +1298,164 @@ static NSMapTable<Core3DViewController *, Core3DBooleanPairRecoveryIssuer *>
     } catch (...) { return refused(PairRefusal::BadEncoding); }
 }
 
+- (BOOL)showBooleanPairPreview:(Core3DBooleanPairPrepared *)prepared
+    operation:(Core3DPartBooleanOperation)operation {
+    if (![NSThread isMainThread] || ![prepared isKindOfClass:Core3DBooleanPairPrepared.class]
+        || !prepared->_prepared) return NO;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        if (!viewer) return NO;
+        TopoDS_Shape result; std::string target, tool;
+        if (!viewer->getDocument()->BooleanPairPreparedPreview(
+                prepared->_prepared, result, target, tool)) return NO;
+        const bool shown = viewer->showBooleanPairPreview(target, tool, result,
+            static_cast<int>(operation) - static_cast<int>(Core3DPartBooleanOperationUnion));
+        if (shown) [gl requestRender];
+        return shown ? YES : NO;
+    } catch (...) { return NO; }
+}
+
+- (BOOL)applyBakedBooleanTarget:(NSString *)target tool:(NSString *)tool
+    operation:(Core3DPartBooleanOperation)operation
+    refusal:(NSString * _Nullable * _Nullable)refusal {
+    if (refusal) *refusal = @"unsupported-source";
+    if (![NSThread isMainThread] || ![target isKindOfClass:NSString.class]
+        || ![tool isKindOfClass:NSString.class]) return NO;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        if (!viewer) return NO;
+        std::string code;
+        const bool applied = viewer->applyBakedBoolean(target.UTF8String ?: "",
+            tool.UTF8String ?: "",
+            static_cast<int>(operation) - static_cast<int>(Core3DPartBooleanOperationUnion), code);
+        if (refusal) *refusal = [NSString stringWithUTF8String:code.c_str()];
+        if (applied) {
+            const SEL checkSelections = NSSelectorFromString(@"checkSelections");
+            if ([gl respondsToSelector:checkSelections])
+                ((void (*)(id, SEL))[gl methodForSelector:checkSelections])(gl, checkSelections);
+            [gl requestRender];
+        }
+        return applied ? YES : NO;
+    } catch (...) { return NO; }
+}
+
+- (BOOL)isBooleanResultEntity:(NSString *)entity {
+    if (![NSThread isMainThread] || ![entity isKindOfClass:NSString.class]) return NO;
+    GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)self.glController : nil;
+    const auto viewer = gl ? gl.viewer : nullptr;
+    return viewer && viewer->isBooleanResult(entity.UTF8String ?: "") ? YES : NO;
+}
+
+- (nullable NSArray<NSNumber *> *)partLocalAnchorForEntity:(NSString *)entity
+    pointX:(double)px y:(double)py z:(double)pz
+    directionX:(double)dx y:(double)dy z:(double)dz {
+    if (![NSThread isMainThread] || ![entity isKindOfClass:NSString.class]) return nil;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const double length = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (!viewer || !std::isfinite(length) || length <= 0) return nil;
+        gp_Pnt point; gp_Dir direction;
+        if (!viewer->partLocalAnchor(entity.UTF8String ?: "", gp_Pnt(px, py, pz),
+                gp_Dir(dx / length, dy / length, dz / length), point, direction)) return nil;
+        return @[@(point.X()), @(point.Y()), @(point.Z()),
+                 @(direction.X()), @(direction.Y()), @(direction.Z())];
+    } catch (...) { return nil; }
+}
+
+- (nullable NSArray<NSNumber *> *)holeAnchorForEntity:(NSString *)entity
+    faceIndex:(uint32_t)faceIndex {
+    if (![NSThread isMainThread] || ![entity isKindOfClass:NSString.class]) return nil;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        gp_Pnt point; gp_Dir direction;
+        if (!viewer || !viewer->holeAnchor(entity.UTF8String ?: "", faceIndex, point, direction))
+            return nil;
+        return @[@(point.X()), @(point.Y()), @(point.Z()),
+                 @(direction.X()), @(direction.Y()), @(direction.Z())];
+    } catch (...) { return nil; }
+}
+
+- (BOOL)showHolePreviewOnEntity:(NSString *)entity
+    pointX:(double)px y:(double)py z:(double)pz
+    directionX:(double)dx y:(double)dy z:(double)dz
+    radius:(double)radius depth:(double)depth
+    refusal:(NSString * _Nullable * _Nullable)refusal {
+    if (refusal) *refusal = @"unsupported-source";
+    if (![NSThread isMainThread] || ![entity isKindOfClass:NSString.class] || entity.length == 0)
+        return NO;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const double length = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (!viewer || !std::isfinite(length) || length <= 0) return NO;
+        std::string code;
+        const bool shown = viewer->showHolePreview(entity.UTF8String ?: "",
+            gp_Pnt(px, py, pz), gp_Dir(dx / length, dy / length, dz / length),
+            radius, depth, code);
+        if (refusal) *refusal = [NSString stringWithUTF8String:code.c_str()];
+        // The OpenGL ES view presents only requested frames: without this the
+        // screen kept the previous picture (Astra 11 Nov 07:06 and 08:32).
+        if (shown) [gl requestRender];
+        return shown ? YES : NO;
+    } catch (...) { return NO; }
+}
+
+- (BOOL)applyThroughHoleOnEntity:(NSString *)entity
+    pointX:(double)px y:(double)py z:(double)pz
+    directionX:(double)dx y:(double)dy z:(double)dz
+    radius:(double)radius depth:(double)depth
+    refusal:(NSString * _Nullable * _Nullable)refusal {
+    if (refusal) *refusal = @"unsupported-source";
+    if (![NSThread isMainThread] || ![entity isKindOfClass:NSString.class] || entity.length == 0)
+        return NO;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const double length = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (!viewer || !std::isfinite(length) || length <= 0) return NO;
+        std::string code;
+        const bool applied = viewer->applyThroughHole(entity.UTF8String ?: "",
+            gp_Pnt(px, py, pz), gp_Dir(dx / length, dy / length, dz / length),
+            radius, depth, code);
+        if (refusal) *refusal = [NSString stringWithUTF8String:code.c_str()];
+        if (applied) {
+            const SEL checkSelections = NSSelectorFromString(@"checkSelections");
+            if ([gl respondsToSelector:checkSelections])
+                ((void (*)(id, SEL))[gl methodForSelector:checkSelections])(gl, checkSelections);
+            [gl requestRender];
+        }
+        return applied ? YES : NO;
+    } catch (...) { return NO; }
+}
+
+- (BOOL)clearBooleanPairPreview {
+    if (![NSThread isMainThread]) return NO;
+    GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)self.glController : nil;
+    const auto viewer = gl ? gl.viewer : nullptr;
+    const bool cleared = viewer && viewer->clearBooleanPairPreview();
+    if (cleared) [gl requestRender];
+    return cleared ? YES : NO;
+}
+
+- (BOOL)hasBooleanPairPreview {
+    GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)self.glController : nil;
+    const auto viewer = gl ? gl.viewer : nullptr;
+    return viewer && viewer->hasBooleanPairPreview() ? YES : NO;
+}
+
 - (Core3DBooleanPairPrepareResult *)prepareBooleanSources:
     (Core3DBooleanPairOpening *)opening expected:(Core3DSceneSnapshot *)expected {
     using namespace core3d::authored_parameter;

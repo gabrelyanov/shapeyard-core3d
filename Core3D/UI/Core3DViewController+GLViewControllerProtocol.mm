@@ -14,6 +14,10 @@
 #include "Core3DViewController+PrimitiveManager.h"
 
 #include <cmath>
+#include <StdSelect_BRepOwner.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_ShapeTool.hxx>
+#include <XCAFDoc_VisMaterialTool.hxx>
 
 namespace {
 
@@ -154,7 +158,15 @@ supportsNormalTextureEditing:supportsNormalTextureEditing];
             continue;
         }
         
-        const TDF_Label label = document->ShapeLabel(selected);
+        TDF_Label label = document->ShapeLabel(selected);
+        if (self.currentSelectionType == PrimitiveSelectionTypeFace && !label.IsNull()) {
+            const auto owner = Handle(StdSelect_BRepOwner)::DownCast(context->SelectedOwner());
+            const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Document()->Main());
+            TDF_Label faceLabel;
+            if (!owner.IsNull() && owner->HasShape() && !shapes.IsNull()
+                && shapes->FindSubShape(label, owner->Shape(), faceLabel)
+                && !XCAFDoc_VisMaterialTool::GetShapeMaterial(faceLabel).IsNull()) label = faceLabel;
+        }
         XCAFDoc_VisMaterialPBR nativePBR;
         if (!label.IsNull()
             && document->TryEffectivePBRMaterialForLabel(

@@ -1,3 +1,9 @@
+#if DEBUG
+#include "../OCCTKit/FaceSketch.hxx"
+#include <BRepPrimAPI_MakeTorus.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
+#include <StdSelect_ViewerSelector3d.hxx>
+#endif
 #include "../OCCTKit/PlanarSweepTangentArc.hxx"
 #include "../OCCTKit/PartBooleanOwner.hxx"
 #include "../OCCTKit/PartBooleanFamilyAdmission.hxx"
@@ -81,6 +87,8 @@
 
 #include "GLViewController+Trick.h"
 #include "Core3DViewer.h"
+#include "Snapping.hpp"
+#include <gp_Elips.hxx>
 #include "BooleanOperationController.hpp"
 #include "OrdinaryEditCommand.hpp"
 #include "OrdinaryEditController.hpp"
@@ -102,6 +110,9 @@
 #if DEBUG
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
+#if DEBUG
+#include <BRepFeat_SplitShape.hxx>
+#endif
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #endif
@@ -223,6 +234,8 @@ unsigned long long Core3DDebugColdOpenCandidateProbeValue(
 #include <AIS_ListOfInteractive.hxx>
 #include <AIS_Shape.hxx>
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <SelectMgr_SelectableObject.hxx>
 #include <Precision.hxx>
 #include <StdSelect_BRepOwner.hxx>
 
@@ -5031,7 +5044,100 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
         && GLController.viewer->canBeginCommittedEditHolding([opening core3d_nativeOpeningContext]);
 }
 
+// A face edit owns a subshape label, never the selected interactive's root.
+// Build the complete batch first; label creation and materials share one undo.
+-(void)core3d_updateSelectedFacesWithPBR:(Core3DPBRMaterial*)pbr
+                                preset:(Core3DMaterial*)preset
+                                 color:(Core3DColor*)color {
+    if (self.currentSelectionType != PrimitiveSelectionTypeFace
+        || ![self core3d_canBeginCommittedEdit]
+        || (self.selectedModelCapabilities & Core3DModelCapabilityMaterial) == 0) return;
+    const auto viewer = GLController.viewer;
+    const auto context = viewer->AisContext();
+    const auto doc = viewer->getDocument();
+    const auto transaction = doc->ChangeDocument();
+    if (transaction.IsNull() || transaction->HasOpenCommand()) return;
+    const auto shapes = XCAFDoc_DocumentTool::ShapeTool(transaction->Main());
+    if (shapes.IsNull()) return;
+    struct FaceStyle {
+        Handle(AIS_Shape) presentation;
+        TDF_Label root;
+        TopoDS_Shape face;
+        XCAFDoc_VisMaterialPBR material;
+    };
+    std::vector<FaceStyle> pending;
+    try {
+        for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
+            const auto presentation = Handle(AIS_Shape)::DownCast(context->SelectedInteractive());
+            const auto owner = Handle(StdSelect_BRepOwner)::DownCast(context->SelectedOwner());
+            const auto root = doc->ShapeLabel(presentation);
+            if (presentation.IsNull() || owner.IsNull() || !owner->HasShape()
+                || owner->Shape().ShapeType() != TopAbs_FACE || root.IsNull()
+                || !doc->IsPresentationEditable(presentation)
+                || !doc->IsEditableFreeSimpleDefinitionLabel(root)
+                || !shapes->IsSubShape(root, owner->Shape()) || pending.size() >= 64) return;
+            // Owner shape is definition-local; SelectedShape applies the instance
+            // transform and cannot safely identify a face on a scaled object.
+            const auto face = owner->Shape();
+            TDF_Label faceLabel;
+            shapes->FindSubShape(root, face, faceLabel);
+            const auto materialLabel = faceLabel.IsNull()
+                || XCAFDoc_VisMaterialTool::GetShapeMaterial(faceLabel).IsNull() ? root : faceLabel;
+            if (!doc->SupportsScalarPBRMaterialEditingForLabel(materialLabel)) return;
+            XCAFDoc_VisMaterialPBR material;
+            if (!doc->TryEffectivePBRMaterialForLabel(materialLabel, material))
+                material = Core3DLegacyPBRMaterial(doc->MaterialNameForLabel(materialLabel), doc->ColorNameForLabel(materialLabel));
+            if (pbr) {
+                if (!Core3DApplyNativePBRScalars(pbr, material)) return;
+            } else {
+                if (preset || !color) {
+                    const auto materialName = preset ? (Graphic3d_NameOfMaterial)preset.identity
+                        : Graphic3d_NameOfMaterial_ShinyPlastified;
+                    const Graphic3d_MaterialAspect aspect(materialName);
+                    material = Core3DLegacyPBRMaterial(materialName,
+                        color ? (Quantity_NameOfColor)color.identity : aspect.Color().Name());
+                } else {
+                    material.BaseColor = Quantity_ColorRGBA(Quantity_Color((Quantity_NameOfColor)color.identity), material.BaseColor.Alpha());
+                }
+            }
+            if (std::any_of(pending.begin(), pending.end(), [&](const auto& old) {
+                return old.root.IsEqual(root) && old.face.IsSame(face);
+            })) return;
+            pending.push_back({presentation, root, face, material});
+        }
+        if (pending.empty()) return;
+        transaction->NewCommand();
+        if (!transaction->HasOpenCommand()) return;
+        std::vector<OcctPBRMaterialUpdate> updates;
+        for (const auto& style : pending) {
+            const auto label = shapes->AddSubShape(style.root, style.face);
+            if (label.IsNull()) { Core3DAbortCommandNoThrow(transaction); return; }
+            updates.push_back({label, style.material, {}, {}});
+        }
+        if (!doc->SaveObjectPBRMaterials(updates) || !transaction->CommitCommand()) {
+            Core3DAbortCommandNoThrow(transaction); return;
+        }
+    } catch (...) { Core3DAbortCommandNoThrow(transaction); return; }
+    doc->NotifyChanges();
+    NSMutableArray<Core3DPBRMaterial*>* values = [NSMutableArray array];
+    for (const auto& style : pending) {
+        doc->LoadObjectMeterial(style.root, style.presentation);
+        context->Redisplay(style.presentation, Standard_False);
+        auto value = Core3DMakePBRMaterial(style.material, YES, NO, NO, NO, NO, NO);
+        if (value) [values addObject:value];
+    }
+    [self.materialController didChangeSelectionWithMaterials:@[] colors:@[]];
+    [self.materialController didChangeSelectionWithPBRMaterials:values];
+    context->UpdateCurrentViewer();
+    [self sendNotifyUIState:UIStateChangingApplyMaterial | UIStateChangingHistory];
+}
+
 -(void) updateSelectionWithMaterial:(Core3DMaterial*)material color:(Core3DColor*)color {
+    if (self.currentSelectionType == PrimitiveSelectionTypeFace) {
+        [self core3d_updateSelectedFacesWithPBR:nil preset:material color:color];
+        return;
+    }
+
     if ((self.selectedModelCapabilities
             & Core3DModelCapabilityMaterial) == 0
         || ![self core3d_canBeginCommittedEdit]) {
@@ -5565,6 +5671,12 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
 }
 
 -(void) updateSelectionWithPBRMaterial:(Core3DPBRMaterial*)material {
+    if (self.currentSelectionType == PrimitiveSelectionTypeFace) {
+        if (material && material.supportsScalarEditing)
+            [self core3d_updateSelectedFacesWithPBR:material preset:nil color:nil];
+        return;
+    }
+
     if (material == nil || !material.supportsScalarEditing) {
         return;
     }
@@ -7350,6 +7462,14 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
     if (!std::isfinite(position.X()) || !std::isfinite(position.Y())
         || !std::isfinite(position.Z())) { return nil; }
     return @[@(position.X()), @(position.Y()), @(position.Z())];
+}
+
+- (NSNumber *_Nullable)debugManipulatorSidePoints {
+    if (![NSThread isMainThread] || GLController == nil
+        || GLController.viewer == nullptr) { return nil; }
+    const auto interactor = GLController.viewer->getObjectInteractor();
+    if (interactor == nullptr) { return nil; }
+    return @(interactor->manipulatorSide() / UIScreen.mainScreen.scale);
 }
 
 - (void)debugSetSavedGroupPivotFailures:(NSInteger)count {
@@ -10582,6 +10702,53 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
         @"registryCount":@(Core3DReservationEntries.count)};
 }
 
+- (NSData *)debugSplitBoundaryBinXCAFFixtureData:(double)metersPerUnit {
+    if (!NSThread.isMainThread || (metersPerUnit != 0.001 && metersPerUnit != 1.0))
+        return nil;
+    Handle(TDocStd_Application) application;
+    Handle(TDocStd_Document) document;
+    NSURL *baseURL = [NSFileManager.defaultManager.temporaryDirectory
+        URLByAppendingPathComponent:[NSString stringWithFormat:@"%@.split-boundary", NSUUID.UUID.UUIDString]];
+    NSString *xbfPath = [baseURL.path stringByAppendingString:@".xbf"];
+    NSData *result = nil;
+    try {
+        const double s = 0.001 / metersPerUnit;
+        const TopoDS_Shape box = BRepPrimAPI_MakeBox(
+            gp_Pnt(-35*s, -35*s, 0), 70*s, 70*s, 10*s).Shape();
+        TopoDS_Face top;
+        for (TopExp_Explorer faces(box, TopAbs_FACE); faces.More(); faces.Next()) {
+            const auto face = TopoDS::Face(faces.Current());
+            BRepAdaptor_Surface surface(face);
+            if (surface.GetType() == GeomAbs_Plane
+                && std::abs(surface.Plane().Location().Z() - 10*s) < 1e-9) {
+                top = face; break;
+            }
+        }
+        if (top.IsNull()) throw Standard_Failure("Missing split fixture top");
+        BRepFeat_SplitShape split(box);
+        split.Add(BRepBuilderAPI_MakeEdge(
+            gp_Pnt(-35*s, 25*s, 10*s), gp_Pnt(35*s, 25*s, 10*s)).Edge(), top);
+        split.Build();
+        if (!split.IsDone() || split.Shape().IsNull())
+            throw Standard_Failure("Unable to split fixture top");
+        application = new TDocStd_Application();
+        Core3DDefineSafeBinXCAFFormat(application);
+        application->NewDocument(TCollection_ExtendedString("BinXCAF"), document);
+        XCAFDoc_DocumentTool::SetLengthUnit(document, metersPerUnit);
+        XCAFDoc_DocumentTool::ShapeTool(document->Main())->AddShape(
+            split.Shape(), Standard_False, Standard_True);
+        if (application->SaveAs(document, baseURL.path.UTF8String) != PCDM_SS_OK)
+            throw Standard_Failure("Unable to save split fixture");
+        result = [NSData dataWithContentsOfFile:xbfPath];
+    } catch (...) { result = nil; }
+    try {
+        if (!application.IsNull() && !document.IsNull()) application->Close(document);
+    } catch (...) {}
+    [NSFileManager.defaultManager removeItemAtURL:baseURL error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:xbfPath error:nil];
+    return result;
+}
+
 - (NSData *_Nullable)debugMeterLengthUnitBinXCAFFixtureData {
     Handle(TDocStd_Application) application;
     Handle(TDocStd_Document) document;
@@ -12476,6 +12643,35 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
     return YES;
 }
 
+- (BOOL)debugSetSelectedFaceVisible:(BOOL)visible {
+    if (!NSThread.isMainThread || !GLController.viewer
+        || !GLController.viewer->canBeginCommittedEdit()) return NO;
+    const auto context = GLController.viewer->AisContext();
+    const auto doc = GLController.viewer->getDocument();
+    if (context.IsNull() || doc.IsNull() || context->NbSelected() != 1) return NO;
+    context->InitSelected();
+    const auto presentation = Handle(AIS_Shape)::DownCast(context->SelectedInteractive());
+    const auto owner = Handle(StdSelect_BRepOwner)::DownCast(context->SelectedOwner());
+    const auto root = doc->ShapeLabel(presentation);
+    if (presentation.IsNull() || owner.IsNull() || !owner->HasShape()
+        || owner->Shape().ShapeType() != TopAbs_FACE || root.IsNull()) return NO;
+    const auto document = doc->Document();
+    if (document.IsNull() || document->HasOpenCommand()) return NO;
+    const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+    const auto colors = XCAFDoc_DocumentTool::ColorTool(document->Main());
+    if (shapes.IsNull() || colors.IsNull() || !shapes->IsSubShape(root, owner->Shape())) return NO;
+    const auto faceLabel = shapes->AddSubShape(root, owner->Shape());
+    if (faceLabel.IsNull()) return NO;
+    // Deliberately retain topology, owners and history: this exercises the
+    // document-notification invalidation instead of a new shape cache key.
+    colors->SetVisibility(faceLabel, visible);
+    presentation->SetToUpdate();
+    context->Redisplay(presentation, Standard_False);
+    doc->NotifyChanges();
+    [GLController requestRender];
+    return YES;
+}
+
 - (BOOL)debugSetNormalPresentationHidden:(BOOL)hidden {
     if (![NSThread isMainThread] || !GLController.viewer) return NO;
     const auto context = GLController.viewer->AisContext();
@@ -13415,6 +13611,152 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
         });
 }
 
++ (NSDictionary<NSString *, id> *)debugFaceSketchFixture:(NSInteger)fixture
+    cut:(BOOL)cut depth:(double)depth fault:(NSInteger)fault {
+    if (fixture < 0 || fixture > 5 || fault < 0 || fault > 10)
+        return @{@"error": @"fixture-input"};
+    try {
+        TopoDS_Shape source = BRepPrimAPI_MakeBox(10,20,30).Shape();
+        if (fixture == 4) {
+            source = BRepAlgoAPI_Cut(source,BRepPrimAPI_MakeCylinder(
+                gp_Ax2(gp_Pnt(5,6,0),gp_Dir(0,0,1)),1,30).Shape()).Shape();
+            TopExp_Explorer solid(source,TopAbs_SOLID);
+            if (!solid.More()) return @{@"error": @"fixture-solid"};
+            source = solid.Current();
+        } else if (fixture == 5) source = BRepPrimAPI_MakeCylinder(10,30).Shape();
+        TopoDS_Face face;
+        for (TopExp_Explorer it(source,TopAbs_FACE); it.More(); it.Next()) {
+            const auto candidate = TopoDS::Face(it.Current());
+            BRepAdaptor_Surface surface(candidate);
+            if (fixture == 5 && surface.GetType() == GeomAbs_Cylinder) { face = candidate; break; }
+            if (surface.GetType() != GeomAbs_Plane) continue;
+            const auto plane = surface.Plane();
+            const auto normal = plane.Axis().Direction();
+            if ((fixture == 2 && std::abs(normal.X()) > 0.99 && std::abs(plane.Location().X()-10) < 1e-8)
+                || (fixture != 2 && std::abs(normal.Z()) > 0.99
+                    && std::abs(plane.Location().Z()-(fixture == 1 ? 0 : 30)) < 1e-8)) {
+                face = candidate; break;
+            }
+        }
+        if (face.IsNull()) return @{@"error": @"fixture-face"};
+        const double z = fixture == 1 ? 0 : 30;
+        std::vector<gp_Pnt> points = fixture == 2
+            ? std::vector<gp_Pnt>{{10,3,2},{10,9,2},{10,9,8},{10,3,8},{10,3,2}}
+            : std::vector<gp_Pnt>{{2,3,z},{8,3,z},{8,9,z},{2,9,z},{2,3,z}};
+        if (fault == 1) points.pop_back();
+        if (fault == 2) std::swap(points[1],points[2]);
+        if (fault == 3) points[1].SetZ(points[1].Z()+0.1);
+        if (fault == 4) for (auto& point : points) point.SetX(point.X()+10);
+        if (fault == 5) {
+            const auto foreign = BRepPrimAPI_MakeBox(10,20,30).Shape();
+            TopExp_Explorer it(foreign,TopAbs_FACE); face = TopoDS::Face(it.Current());
+        }
+        if (fault == 7) points[1].SetX(std::numeric_limits<double>::quiet_NaN());
+        if (fault == 8) points[2] = points[1];
+        if (fixture == 3) {
+            gp_Trsf placement;
+            placement.SetRotation(gp_Ax1(gp_Pnt(0,0,0),gp_Dir(1,0,0)),M_PI/3);
+            placement.SetTranslationPart(gp_Vec(100,-40,7));
+            // A located member shares the source occurrence's datum chain;
+            // equal matrices in separately allocated locations are not IsSame.
+            const TopLoc_Location occurrence(placement);
+            source.Move(occurrence); face.Move(occurrence);
+            for (auto& point : points) point.Transform(placement);
+        }
+        if (fault == 10) source.Nullify();
+        auto bytes = [](const TopoDS_Shape& shape) {
+            if (shape.IsNull()) return std::string();
+            std::ostringstream stream;
+            BRepTools::Write(shape,stream,Standard_False,Standard_False,TopTools_FormatVersion_VERSION_3);
+            return stream.str();
+        };
+        const auto before = bytes(source), faceBefore = bytes(face);
+        std::atomic_bool cancelled{fault == 6};
+        const auto mode = fault == 9 ? static_cast<core3d::FaceSketchMode>(99)
+            : (cut ? core3d::FaceSketchMode::Cut : core3d::FaceSketchMode::Add);
+        const char* refusal = nullptr;
+        const auto result = core3d::BuildFaceSketch(source,face,points,depth,mode,cancelled,&refusal);
+        NSMutableDictionary *record = [@{@"built": @(bool(result)),
+            @"unchanged": @(before == bytes(source) && faceBefore == bytes(face))} mutableCopy];
+        if (refusal) record[@"refusal"] = @(refusal);
+        if (result) {
+            GProp_GProps properties; BRepGProp::VolumeProperties(result->solid,properties);
+            TopTools_IndexedMapOfShape solids,shells;
+            TopExp::MapShapes(result->solid,TopAbs_SOLID,solids);
+            TopExp::MapShapes(result->solid,TopAbs_SHELL,shells);
+            Bnd_Box bounds; BRepBndLib::AddOptimal(result->solid,bounds,Standard_False,Standard_False);
+            double x0,y0,z0,x1,y1,z1; bounds.Get(x0,y0,z0,x1,y1,z1);
+            record[@"volume"] = @(properties.Mass()); record[@"reportedVolume"] = @(result->volume);
+            record[@"solids"] = @(solids.Extent()); record[@"shells"] = @(shells.Extent());
+            record[@"valid"] = @(BRepCheck_Analyzer(result->solid).IsValid());
+            record[@"bounds"] = @[@(x0),@(y0),@(z0),@(x1),@(y1),@(z1)];
+            record[@"normal"] = @[@(result->outwardNormal.X()),@(result->outwardNormal.Y()),@(result->outwardNormal.Z())];
+        }
+        return record;
+    } catch (...) { return @{@"error": @"fixture-exception"}; }
+}
+
++ (NSDictionary<NSString *, id> *)debugGeometrySnapFixture:(NSInteger)fixture
+    point:(NSArray<NSNumber *> *)point tolerance:(double)tolerance kinds:(NSUInteger)kinds {
+    if (point.count != 3 || fixture < 0 || fixture > 6 || kinds > UINT_MAX)
+        return @{@"error": @"fixture-input"};
+    try {
+        TopoDS_Shape shape;
+        if (fixture == 0 || fixture == 1) {
+            shape = BRepPrimAPI_MakeBox(10,20,30).Shape();
+            if (fixture == 1) {
+                gp_Trsf transform;
+                transform.SetRotation(gp_Ax1(gp_Pnt(0,0,0),gp_Dir(0,0,1)),M_PI/2);
+                transform.SetTranslationPart(gp_Vec(100,-40,7));
+                shape.Location(TopLoc_Location(transform));
+            }
+        } else if (fixture == 2) {
+            shape = BRepPrimAPI_MakeCylinder(10,30).Shape();
+        } else if (fixture == 3) {
+            auto square = [](double low, double high) {
+                BRepBuilderAPI_MakePolygon wire;
+                wire.Add(gp_Pnt(low,low,0)); wire.Add(gp_Pnt(high,low,0));
+                wire.Add(gp_Pnt(high,high,0)); wire.Add(gp_Pnt(low,high,0));
+                wire.Close(); return wire.Wire();
+            };
+            BRepBuilderAPI_MakeFace face(square(0,10));
+            face.Add(TopoDS::Wire(square(4,6).Reversed()));
+            shape = face.Face();
+        } else if (fixture == 4) {
+            BRep_Builder builder; TopoDS_Compound compound; builder.MakeCompound(compound);
+            builder.Add(compound,BRepPrimAPI_MakeBox(10,20,30).Shape());
+            builder.Add(compound,BRepPrimAPI_MakeBox(gp_Pnt(40,0,0),10,20,30).Shape());
+            shape = compound;
+        } else if (fixture == 5) {
+            shape = BRepBuilderAPI_MakeEdge(
+                gp_Elips(gp_Ax2(gp_Pnt(0,0,0),gp_Dir(0,0,1)),10,4),0,M_PI/2).Edge();
+        }
+        auto bytes = [&]() {
+            if (shape.IsNull()) return std::string();
+            std::ostringstream stream;
+            BRepTools::Write(shape,stream,Standard_False,Standard_False,
+                            TopTools_FormatVersion_VERSION_3);
+            return stream.str();
+        };
+        const auto before = bytes();
+        const auto hit = core3d::SnapPointToGeometry(shape,
+            gp_Pnt(point[0].doubleValue,point[1].doubleValue,point[2].doubleValue),
+            tolerance,static_cast<unsigned>(kinds));
+        NSMutableDictionary *result = [@{@"matched": @(bool(hit)),
+            @"unchanged": @(before == bytes())} mutableCopy];
+        if (hit) {
+            result[@"kind"] = @(static_cast<unsigned>(hit->kind));
+            result[@"index"] = @(hit->topologyIndex);
+            result[@"point"] = @[@(hit->point.X()),@(hit->point.Y()),@(hit->point.Z())];
+            result[@"distance"] = @(hit->distance);
+            TopTools_IndexedMapOfShape members;
+            TopExp::MapShapes(shape,hit->topology.ShapeType(),members);
+            result[@"member"] = @(members.FindIndex(hit->topology) == hit->topologyIndex);
+        }
+        return result;
+    } catch (...) { return @{@"error": @"fixture-exception"}; }
+}
+
 - (NSData *_Nullable)debugLocatedFreeShapeBinXCAFFixtureData {
     return Core3DCreateDebugBinXCAFFixture(
         @"located-free-shape-fixture",
@@ -13601,6 +13943,178 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
 
 - (NSInteger)debugSelectedShapeCount {
     return [GLController debugSelectedShapeCount];
+}
+
+- (NSData *)debugJoinedHalfRingCupFixtureData {
+    return [self debugHalfRingCupFixtureDataRingOnly:NO];
+}
+
+- (NSData *)debugHalfRingHandleFixtureData {
+    return [self debugHalfRingCupFixtureDataRingOnly:YES];
+}
+
+- (NSData *)debugHalfRingCupFixtureDataRingOnly:(BOOL)ringOnly {
+    if (!NSThread.isMainThread) return nil;
+    Handle(TDocStd_Application) app;
+    Handle(TDocStd_Document) document;
+    NSURL *base = [NSFileManager.defaultManager.temporaryDirectory URLByAppendingPathComponent:
+        [NSString stringWithFormat:@"%@.wall-pick", NSUUID.UUID.UUIDString]];
+    NSString *path = [base.path stringByAppendingString:@".xbf"];
+    NSData *data = nil;
+    try {
+        const auto outer = BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(0,0,-17.5),gp_Dir(0,0,1)),35,85).Shape();
+        const auto inner = BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(0,0,-14.5),gp_Dir(0,0,1)),32,85).Shape();
+        BRepAlgoAPI_Cut hollow(outer,inner); hollow.Build();
+        if (!hollow.IsDone()) throw Standard_Failure("Invalid hollow mug fixture");
+        const auto handle = BRepPrimAPI_MakeTorus(
+            gp_Ax2(gp_Pnt(33,0,25),gp_Dir(0,-1,0),gp_Dir(0,0,-1)),22,4.5,M_PI).Shape();
+        BRepAlgoAPI_Fuse join(hollow.Shape(),handle); join.Build();
+        if (!join.IsDone() || join.Shape().IsNull() || !BRepCheck_Analyzer(join.Shape()).IsValid())
+            throw Standard_Failure("Invalid joined mug fixture");
+        TopTools_IndexedMapOfShape solids; TopExp::MapShapes(join.Shape(),TopAbs_SOLID,solids);
+        if (solids.Extent()!=1) throw Standard_Failure("Joined mug fixture must be one solid");
+        app = new TDocStd_Application(); Core3DDefineSafeBinXCAFFormat(app);
+        app->NewDocument(TCollection_ExtendedString("BinXCAF"),document);
+        XCAFDoc_DocumentTool::SetLengthUnit(document,0.001);
+        const auto localHandle = BRepPrimAPI_MakeTorus(22,4.5,M_PI).Shape();
+        const auto label = XCAFDoc_DocumentTool::ShapeTool(document->Main())->AddShape(
+            ringOnly ? localHandle : join.Shape(),Standard_False,Standard_True);
+        // Match the ordinary STEP importer: raw XCAF topology alone has no
+        // editing identity or explicit BRep representation and is not enough.
+        Handle(OcctDocument) imported = new OcctDocument(); imported->ChangeDocument() = document;
+        if (!imported->MigrateLegacyIdentifiers() || !imported->MarkImportedBRepDefinitions())
+            throw Standard_Failure("Unable to identify imported mug fixture");
+        if (app->SaveAs(document,base.path.UTF8String)!=PCDM_SS_OK)
+            throw Standard_Failure("Unable to save joined mug fixture");
+        data = [NSData dataWithContentsOfFile:path];
+    } catch (...) { data = nil; }
+    try { if (!app.IsNull() && !document.IsNull()) app->Close(document); } catch (...) {}
+    [NSFileManager.defaultManager removeItemAtURL:base error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+    return data;
+}
+
+- (BOOL)debugMoveCameraEyeX:(double)x y:(double)y z:(double)z {
+    if (!NSThread.isMainThread || !GLController.viewer
+        || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return NO;
+    const auto view = GLController.viewer->ActiveView();
+    GLView *renderView = [GLController.view isKindOfClass:GLView.class] ? (GLView *)GLController.view : nil;
+    if (view.IsNull() || !renderView) return NO;
+    __block BOOL moved = NO;
+    [renderView performWithRenderingContext:^{
+        try {
+            view->Camera()->MoveEyeTo(gp_Pnt(x,y,z));
+            view->ZFitAll(); view->Redraw(); moved = YES;
+        } catch (...) {}
+    }];
+    return moved;
+}
+
+- (NSDictionary<NSString *, id> *)debugSelectAtWorldPointX:(double)x y:(double)y z:(double)z {
+    return [self debugSelectAtWorldPointX:x y:y z:z nativeTouch:NO];
+}
+
+- (NSDictionary<NSString *, id> *)debugTapAtWorldPointX:(double)x y:(double)y z:(double)z {
+    return [self debugSelectAtWorldPointX:x y:y z:z nativeTouch:YES];
+}
+
+- (NSDictionary<NSString *, id> *)debugSelectAtWorldPointX:(double)x y:(double)y z:(double)z nativeTouch:(BOOL)nativeTouch {
+    if (!NSThread.isMainThread || !GLController.viewer
+        || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return @{@"error":@"Invalid pick"};
+    const auto viewer = GLController.viewer;
+    const auto context = viewer->AisContext(); const auto view = viewer->ActiveView();
+    GLView *renderView = [GLController.view isKindOfClass:GLView.class] ? (GLView *)GLController.view : nil;
+    if (context.IsNull() || view.IsNull() || !renderView) return @{@"error":@"No viewport"};
+    __block NSMutableDictionary *answer = [NSMutableDictionary dictionary];
+    const BOOL current = [renderView performWithRenderingContext:^{
+        try {
+            int px=0,py=0,width=0,height=0;
+            view->Convert(x,y,z,px,py); view->Window()->Size(width,height);
+            answer[@"x"]=@(px); answer[@"y"]=@(py);
+            answer[@"width"]=@(width); answer[@"height"]=@(height);
+            const gp_Pnt projected = view->Camera()->Project(gp_Pnt(x,y,z));
+            answer[@"continuousX"]=@((projected.X()+1)*0.5*width);
+            answer[@"continuousY"]=@((1-projected.Y())*0.5*height);
+            if (nativeTouch) {
+                px = (int)lround((projected.X()+1)*0.5*width);
+                py = (int)lround((1-projected.Y())*0.5*height);
+                answer[@"x"]=@(px); answer[@"y"]=@(py);
+            }
+            answer[@"before"]=@([GLController debugSelectedShapeCount]);
+            if (px<0 || py<0 || px>=width || py>=height) {
+                answer[@"error"]=@"Projected point outside viewport"; return;
+            }
+            if (nativeTouch) {
+                viewer->StartRotation(px,py);
+                viewer->CancelInteraction(px,py);
+            }
+            viewer->Select(px,py);
+            answer[@"after"]=@([GLController debugSelectedShapeCount]);
+            answer[@"hasDetected"]=@(context->HasDetected());
+            if (context->HasDetected()) {
+                const auto owner = Handle(StdSelect_BRepOwner)::DownCast(context->DetectedOwner());
+                const auto shape = Handle(AIS_Shape)::DownCast(context->DetectedInteractive());
+                if (!owner.IsNull() && owner->HasShape() && !shape.IsNull()) {
+                    TopTools_IndexedMapOfShape faces; TopExp::MapShapes(shape->Shape(),TopAbs_FACE,faces);
+                    answer[@"detectedFace"]=@(faces.FindIndex(owner->Shape())-1);
+                    answer[@"detectedSelected"]=@(owner->IsSelected());
+                    const auto selector = context->MainSelector();
+                    if (!selector.IsNull() && selector->NbPicked()>0) {
+                        NSMutableArray *candidates = [NSMutableArray array];
+                        for (int rank=1; rank<=selector->NbPicked() && rank<=8; ++rank) {
+                            const auto candidate = Handle(StdSelect_BRepOwner)::DownCast(selector->Picked(rank));
+                            if (candidate.IsNull() || !candidate->HasShape()) continue;
+                            const auto& hit = selector->PickedData(rank);
+                            const char *type = hit.Entity.IsNull() ? "none" : hit.Entity->DynamicType()->Name();
+                            [candidates addObject:[NSString stringWithFormat:
+                                @"f%d:%s d%.4f t%.4f p%d z%d m%.4f at(%.2f,%.2f,%.2f) n(%.2f,%.2f,%.2f)",
+                                faces.FindIndex(candidate->Shape())-1, type, hit.Depth, hit.Tolerance,
+                                hit.Priority, hit.ZLayerPosition, hit.MinDist,
+                                hit.Point.X(), hit.Point.Y(), hit.Point.Z(),
+                                hit.Normal.x(), hit.Normal.y(), hit.Normal.z()]];
+                        }
+                        answer[@"candidates"] = candidates;
+                        answer[@"closest"] = @(selector->ToPickClosest());
+                        answer[@"pixelTolerance"] = @(selector->PixelTolerance());
+                        answer[@"depthToleranceType"] = @(selector->DepthToleranceType());
+                        const auto ranked = Handle(StdSelect_BRepOwner)::DownCast(selector->Picked(1));
+                        if (!ranked.IsNull() && ranked->HasShape())
+                            answer[@"selectorFace"]=@(faces.FindIndex(ranked->Shape())-1);
+                    }
+                    // Independent exact BRep intersection, bounded to these
+                    // small diagnostic fixtures. It cannot change detection.
+                    if (faces.Extent()<=128) {
+                        double ox,oy,oz,dx,dy,dz;
+                        view->ConvertWithProj(px,py,ox,oy,oz,dx,dy,dz);
+                        // Intersect in the stored shape's frame: TopoDS::Moved
+                        // rejects authored scale, while an inverse ray preserves
+                        // face identity without modifying/copying the geometry.
+                        const gp_Trsf inverse = shape->Transformation().Inverted();
+                        IntCurvesFace_ShapeIntersector ray; ray.Load(shape->Shape(),1e-7);
+                        ray.Perform(gp_Lin(gp_Pnt(ox,oy,oz).Transformed(inverse),
+                                           gp_Dir(dx,dy,dz).Transformed(inverse)),0,1e6);
+                        if (ray.IsDone()) {
+                            double closest=1e6; int face=-1;
+                            for (int i=1;i<=ray.NbPnt();++i) {
+                                if (ray.WParameter(i)>=0 && ray.WParameter(i)<closest) {
+                                    closest=ray.WParameter(i); face=faces.FindIndex(ray.Face(i))-1;
+                                }
+                            }
+                            answer[@"rayFace"]=@(face);
+                            answer[@"rayDepth"]=@(closest*std::abs(shape->Transformation().ScaleFactor()));
+                        }
+                    }
+                }
+            }
+        } catch (...) { answer[@"error"]=@"Native pick exception"; }
+    }];
+    if (!current) answer[@"error"]=@"No rendering context";
+    [GLController refreshSelectionState];
+    return answer;
+}
+
+- (NSArray<NSString *> *)debugNativeFaceTapTrace {
+    return NSThread.isMainThread ? ([GLController debugNativeFaceTapTrace] ?: @[]) : @[];
 }
 
 - (NSDictionary<NSString *, id> *)debugTopologySelectionState {
@@ -14701,6 +15215,19 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
     [GLController.view.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:0.0].active = YES;
     [GLController.view.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:0.0].active = YES;
     [GLController didMoveToParentViewController:self];
+}
+
+- (BOOL)setLessonLightingEnabled:(BOOL)enabled {
+    if (!NSThread.isMainThread || !_isSetuped || !GLController.isViewLoaded) return NO;
+    const auto viewer = GLController.viewer;
+    if (!viewer || viewer->ActiveView().IsNull()) return NO;
+    auto* view = dynamic_cast<Core3DView*>(viewer->ActiveView().get());
+    if (!view) return NO;
+    if (view->lessonLightingEnabled() == static_cast<bool>(enabled)) return YES;
+    view->setLessonLightingEnabled(enabled);
+    [GLController requestRender];
+    [self viewDidInvalidateSceneSnapshot];
+    return YES;
 }
 
 #ifdef DEBUG
@@ -20100,6 +20627,129 @@ static bool Core3DPublishCommittedSpatialSweep(
     }
 }
 
+- (NSDictionary<NSString *, NSNumber *> *)measureSelectedElementDistance {
+    if (![NSThread isMainThread]
+        || GLController == nil || GLController.viewer == nullptr) {
+        return nil;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(AIS_InteractiveContext) context =
+            GLController.viewer->AisContext();
+        if (context.IsNull()) return nil;
+        std::vector<TopoDS_Shape> elements;
+        double circleDiameter = 0;
+        gp_Pnt circleCentre;
+        gp_Circ measuredCircle;
+        for (context->InitSelected(); context->MoreSelected();
+             context->NextSelected()) {
+            const Handle(StdSelect_BRepOwner) owner =
+                Handle(StdSelect_BRepOwner)::DownCast(context->SelectedOwner());
+            if (owner.IsNull() || !owner->HasShape()) continue;
+            const TopoDS_Shape& local = owner->Shape();
+            if (local.IsNull()) continue;
+            const TopAbs_ShapeEnum type = local.ShapeType();
+            if (type != TopAbs_EDGE && type != TopAbs_FACE) continue;
+            TopoDS_Shape world = local;
+            const Handle(SelectMgr_SelectableObject) selectable =
+                owner->Selectable();
+            if (!selectable.IsNull()) {
+                const gp_Trsf& transform = selectable->Transformation();
+                if (std::abs(std::abs(transform.ScaleFactor()) - 1.0) > TopLoc_Location::ScalePrec()
+                    || transform.IsNegative()) {
+                    // A scaled or mirrored TopoDS location is forbidden.
+                    // Measure a private transformed copy; selected topology,
+                    // the document and its history must remain untouched.
+                    BRepBuilderAPI_Transform transformed(local, transform, Standard_True);
+                    if (!transformed.IsDone() || transformed.Shape().IsNull()) return nil;
+                    world = transformed.Shape();
+                } else {
+                    world = local.Moved(TopLoc_Location(transform));
+                }
+            }
+            if (type == TopAbs_EDGE) {
+                // A full circle (a hole rim) is measured from its centre.
+                const TopoDS_Edge& edge = TopoDS::Edge(world);
+                if (!BRep_Tool::Degenerated(edge)) {
+                    BRepAdaptor_Curve curve(edge);
+                    if (curve.GetType() == GeomAbs_Circle
+                        && std::abs(curve.LastParameter() - curve.FirstParameter()
+                                    - 2 * M_PI) < 1e-7) {
+                        measuredCircle = curve.Circle();
+                        circleDiameter = 2 * measuredCircle.Radius();
+                        circleCentre = measuredCircle.Location();
+                        world = BRepBuilderAPI_MakeVertex(circleCentre).Vertex();
+                    }
+                }
+            }
+            elements.push_back(world);
+        }
+        NSMutableDictionary<NSString *, NSNumber *> *result =
+            [@{ @"selectedCount": @(elements.size()) } mutableCopy];
+        const auto document = GLController.viewer->getDocument();
+        double metersPerUnit = 0;
+        if (!document.IsNull() && !document->Document().IsNull()
+            && XCAFDoc_DocumentTool::GetLengthUnit(document->Document(), metersPerUnit)
+            && std::isfinite(metersPerUnit) && metersPerUnit > 0) {
+            result[@"metersPerUnit"] = @(metersPerUnit);
+        }
+        gp_Pnt a, b;
+        if (elements.size() == 1 && std::isfinite(circleDiameter) && circleDiameter > 0) {
+            // Keep diameter separate: consumers of the two-element distance
+            // contract (including the mug lesson) must never accept one rim.
+            result[@"diameter"] = @(circleDiameter);
+            a = b = circleCentre;
+        } else {
+            if (elements.size() != 2) return result;
+            BRepExtrema_DistShapeShape extrema(elements[0], elements[1]);
+            if (!extrema.IsDone() || extrema.NbSolution() < 1) return result;
+            const double distance = extrema.Value();
+            a = extrema.PointOnShape1(1);
+            b = extrema.PointOnShape2(1);
+            if (!std::isfinite(distance) || distance < 0) return result;
+            result[@"distance"] = @(distance);
+            result[@"ax"] = @(a.X()); result[@"ay"] = @(a.Y()); result[@"az"] = @(a.Z());
+            result[@"bx"] = @(b.X()); result[@"by"] = @(b.Y()); result[@"bz"] = @(b.Z());
+        }
+        // Where the label goes: the circle centre or pair midpoint, in drawable pixels.
+        const Handle(V3d_View)& view = GLController.viewer->ActiveView();
+        if (!view.IsNull() && !view->Window().IsNull()) {
+            Standard_Integer width = 0, height = 0, px = 0, py = 0;
+            view->Window()->Size(width, height);
+            const gp_Pnt mid((a.XYZ() + b.XYZ()) / 2);
+            view->Convert(mid.X(), mid.Y(), mid.Z(), px, py);
+            if (width > 0 && height > 0) {
+                result[@"midPixelX"] = @(px); result[@"midPixelY"] = @(py);
+                result[@"drawableWidth"] = @(width); result[@"drawableHeight"] = @(height);
+                if (elements.size() == 1 && circleDiameter > 0) {
+                    double radiusPixels = 0;
+                    const gp_Dir xDirection = measuredCircle.Position().XDirection();
+                    const gp_Dir yDirection = measuredCircle.Position().YDirection();
+                    for (Standard_Integer sample = 0; sample < 64; ++sample) {
+                        const double angle = 2 * M_PI * sample / 64;
+                        const double x = std::cos(angle) * measuredCircle.Radius();
+                        const double y = std::sin(angle) * measuredCircle.Radius();
+                        const gp_Pnt rim(
+                            circleCentre.X() + x * xDirection.X() + y * yDirection.X(),
+                            circleCentre.Y() + x * xDirection.Y() + y * yDirection.Y(),
+                            circleCentre.Z() + x * xDirection.Z() + y * yDirection.Z());
+                        Standard_Integer rimX = 0, rimY = 0;
+                        view->Convert(rim.X(), rim.Y(), rim.Z(), rimX, rimY);
+                        radiusPixels = std::max(radiusPixels, std::hypot(
+                            static_cast<double>(rimX - px), static_cast<double>(rimY - py)));
+                    }
+                    if (std::isfinite(radiusPixels) && radiusPixels > 0) {
+                        result[@"circleRadiusPixels"] = @(radiusPixels);
+                    }
+                }
+            }
+        }
+        return result;
+    } catch (...) {
+        return nil;
+    }
+}
+
 - (void)cancelTransformInspectorSnapshotRequest {
     if (![NSThread isMainThread]
         || GLController == nil || GLController.viewer == nullptr) {
@@ -20581,6 +21231,13 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         TopExp::MapShapes(world,TopAbs_SOLID,solids);TopExp::MapShapes(world,TopAbs_SHELL,shells);
         TopExp::MapShapes(world,TopAbs_FACE,faces);TopExp::MapShapes(world,TopAbs_EDGE,edges);
         TopExp::MapShapes(world,TopAbs_VERTEX,vertices);
+        int planeFaces = 0, cylinderFaces = 0, otherFaces = 0;
+        for (int i = 1; i <= faces.Extent(); ++i) {
+            BRepAdaptor_Surface surface(TopoDS::Face(faces(i)), Standard_True);
+            if (surface.GetType() == GeomAbs_Plane) ++planeFaces;
+            else if (surface.GetType() == GeomAbs_Cylinder) ++cylinderFaces;
+            else ++otherFaces;
+        }
         Bnd_Box box;BRepBndLib::AddOptimal(world,box,Standard_False,Standard_False);
         if(box.IsVoid()||box.IsOpen())return nil;
         double bounds[6];box.Get(bounds[0],bounds[1],bounds[2],bounds[3],bounds[4],bounds[5]);
@@ -20618,6 +21275,7 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
             @"namePresent":@(named.namePresent),@"nameUTF16":nameUnits,
             @"metersPerUnit":@(unit),
             @"solids":@(solids.Extent()),@"shells":@(shells.Extent()),@"faces":@(faces.Extent()),
+            @"planeFaces":@(planeFaces),@"cylinderFaces":@(cylinderFaces),@"otherFaces":@(otherFaces),
             @"edges":@(edges.Extent()),@"vertices":@(vertices.Extent()),@"topologyNodes":@(nodes),
             @"valid":@(BRepCheck_Analyzer(world,Standard_True).IsValid()?YES:NO),
             @"volumeMM3":@(volume),@"volumeIntegrationRelativeError":@(error),
@@ -24475,6 +25133,16 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
 
 - (void)setSelectionType:(PrimitiveSelectionType)type {
     (void)[self trySetSelectionType:type];
+}
+
+- (void)setSelectedEdgeAppearanceColor:(UIColor *)color widthPoints:(CGFloat)width {
+    if (![NSThread isMainThread]) return;
+    [GLController setSelectedEdgeAppearanceColor:color widthPoints:width];
+}
+
+- (void)setSelectedSurfaceAppearanceColor:(UIColor *)color widthPoints:(CGFloat)width faceWashOpacity:(CGFloat)opacity {
+    if (!NSThread.isMainThread) return;
+    [GLController setSelectedSurfaceAppearanceColor:color widthPoints:width faceWashOpacity:opacity];
 }
 
 - (void)setGizmoType:(PrimitiveGizmoType)type {

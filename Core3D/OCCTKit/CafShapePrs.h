@@ -122,6 +122,7 @@ protected:
 
   XCAFPrs_Style myDefStyle; //!< default style
   TDF_Label     myOccurrenceLabel; //!< leaf occurrence represented by this AIS
+  Standard_Boolean myUseScalarPBR = Standard_False; //!< authored finish survives style dispatch
 
 };
 

@@ -25,6 +25,71 @@
 #include "Core3DNativeTangentBuffers.hxx"
 #include "PatternAllLabelAuthority.hxx"
 #include "TextReliefPersistence.hxx"
+#include <AIS_ColoredShape.hxx>
+#include <AIS_ConnectedInteractive.hxx>
+#include <Graphic3d_ShaderVariable.hxx>
+#include <OpenGl_ShaderProgram.hxx>
+#include <OpenGl_Context.hxx>
+#include <Prs3d_ShadingAspect.hxx>
+
+namespace {
+// A proxy uniform is consumed by OCCT after use, so republish it at every
+// native draw boundary (including false). Never change the material, shader
+// identity, selectable owner or presentation lifetime to switch lesson light.
+void PrepareNativeLessonLighting(const Handle(AIS_InteractiveContext)& context,
+                                const Handle(OpenGl_Context)& gl, bool enabled) {
+    if (context.IsNull() || gl.IsNull()) return;
+    const auto prepareProgram = [&](const Handle(Graphic3d_ShaderProgram)& program) {
+        if (program.IsNull() || !program->GetId().StartsWith("shapeyard-data-maps-v1-")) return;
+        const Standard_ShortReal value = enabled ? 1.0f : 0.0f;
+        // A presentation may remain unrendered (occlusion/erasure). Update an
+        // existing pending value instead of growing its queue each frame.
+        for (const auto& variable : program->Variables()) {
+            if (!variable.IsNull() && variable->Name() == "syLessonLighting") {
+                auto* uniform = dynamic_cast<Graphic3d_UniformFloat*>(variable->Value());
+                if (uniform) uniform->Value = value;
+                return;
+            }
+        }
+        program->PushVariable("syLessonLighting", value);
+    };
+    const auto prepare = [&](const Handle(Prs3d_Drawer)& drawer) {
+        if (drawer.IsNull() || drawer->ShadingAspect().IsNull()) return;
+        const auto aspect = drawer->ShadingAspect()->Aspect();
+        if (aspect.IsNull() || aspect->ShaderProgram().IsNull()) return;
+        const auto program = aspect->ShaderProgram();
+        prepareProgram(program);
+        // OCCT reuses a GPU program by ID after a new material creates a
+        // new proxy. ApplyVariables reads the GPU program's retained first
+        // proxy, not necessarily this drawer's current one. Publish to both,
+        // without replacing/binding/releasing any native graphics resource.
+        Handle(OpenGl_ShaderProgram) cached;
+        if (gl->GetResource(program->GetId(), cached) && !cached.IsNull())
+            prepareProgram(cached->Proxy());
+    };
+    AIS_ListOfInteractive objects;
+    context->DisplayedObjects(AIS_KOI_Shape, -1, objects);
+    for (AIS_ListIteratorOfListOfInteractive it(objects); it.More(); it.Next()) {
+        Handle(AIS_InteractiveObject) object = it.Value();
+        // Connected duplicates share the source presentation and shader proxy.
+        // Follow that existing ownership, without changing/rebuilding it.
+        for (int depth = 0; depth < 8; ++depth) {
+            const auto connected = Handle(AIS_ConnectedInteractive)::DownCast(object);
+            if (connected.IsNull() || !connected->HasConnection()) break;
+            object = connected->ConnectedTo();
+        }
+        auto shape = Handle(AIS_Shape)::DownCast(object);
+        if (shape.IsNull()) continue;
+        prepare(shape->Attributes());
+        const auto coloured = Handle(AIS_ColoredShape)::DownCast(shape);
+        if (!coloured.IsNull()) {
+            for (AIS_DataMapOfShapeDrawer::Iterator face(coloured->CustomAspectsMap()); face.More(); face.Next())
+                prepare(face.Value());
+        }
+    }
+}
+} // namespace
+
 
 #import <TargetConditionals.h>
 #if defined(TARGET_OS_OSX) && TARGET_OS_OSX
@@ -430,6 +495,11 @@ bool OcctViewer::RenderFrame()
 #if DEBUG
         if (myDebugFrameObserver && !myDebugFrameObserver(false)) return false;
 #endif
+        // Ordinary views that never enter the lesson have no new traversal.
+        // Once used, keep publishing false after exit so newly redisplayed
+        // proxies cannot inherit an old cached GPU program's enabled value.
+        if (myView->hasUsedLessonLighting())
+            PrepareNativeLessonLighting(myContext, driver->GetSharedContext(true), myView->lessonLightingEnabled());
         myView->RenderFrame();
 #if DEBUG
         if (myDebugFrameObserver && !myDebugFrameObserver(true)) return false;

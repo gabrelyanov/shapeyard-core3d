@@ -515,6 +515,40 @@ namespace core3d {
         noexcept;
     bool cancelActiveRawR2BevelPreview() noexcept;
     bool hasActiveRawR2BevelPreview() const noexcept;
+    //! Join / Cut / Overlap on the model: show a prepared pair result in place
+    //! of its two parts (operation: 0 union, 1 subtract, 2 intersect). Nothing
+    //! in the document changes; clear puts both parts back.
+    bool showBooleanPairPreview(const std::string& targetEntity,
+        const std::string& toolEntity, const TopoDS_Shape& result,
+        int operation) noexcept;
+    bool clearBooleanPairPreview() noexcept;
+    bool hasBooleanPairPreview() const noexcept;
+    //! Hole through any solid part, in world coordinates and document units:
+    //! a cylinder of `radius` from `worldPoint` along `worldDirection`, through
+    //! the part (depth <= 0) or `depth` deep. One Undo step; redraws on success.
+    //! Where a hole on face `faceIndex` (scene topology index) starts: where the
+    //! last tap landed on that face (the face centre when the tap was close to it
+    //! or not on the face) and the direction into the part, in world coordinates.
+    bool holeAnchor(const std::string& entity, std::uint32_t faceIndex,
+        gp_Pnt& worldPoint, gp_Dir& worldDirection) noexcept;
+    //! True when the part is a Join, Cut or Overlap result keeping its originals.
+    bool isBooleanResult(const std::string& entity) noexcept;
+    //! The same point and direction in the part's own coordinates (document
+    //! units, before its placement), for the saved-hole command.
+    bool partLocalAnchor(const std::string& entity, const gp_Pnt& worldPoint,
+        const gp_Dir& worldDirection, gp_Pnt& localPoint, gp_Dir& localDirection) noexcept;
+    //! Show the drilled part in place of the part; clearBooleanPairPreview()
+    //! puts it back. Nothing in the document changes.
+    bool showHolePreview(const std::string& entity, const gp_Pnt& worldPoint,
+        const gp_Dir& worldDirection, double radius, double depth,
+        std::string& refusal) noexcept;
+    //! Baked Join / Cut / Overlap (0 union, 1 subtract, 2 intersect) of two
+    //! parts: one Undo step, no originals kept. Redraws on success.
+    bool applyBakedBoolean(const std::string& targetEntity, const std::string& toolEntity,
+        int operation, std::string& refusal) noexcept;
+    bool applyThroughHole(const std::string& entity, const gp_Pnt& worldPoint,
+        const gp_Dir& worldDirection, double radius, double depth,
+        std::string& refusal) noexcept;
     std::shared_ptr<retained_edge_treatment::r2::Work> prepareEdgeTreatmentEditR2(
         const std::shared_ptr<const retained_edge_treatment::r2::Snapshot>&,
         const retained_edge_treatment::r2::Edit&, const ObjectFrameIdentity&,
@@ -1106,6 +1140,12 @@ namespace core3d {
             noexcept;
         std::shared_ptr<RawR2BevelPreviewAdapter> _rawR2BevelPreviewAdapter;
         std::shared_ptr<RawR2PreviewPresentation> _rawR2PreviewPresentation;
+        struct BooleanPairPreview {
+            Handle(AIS_Shape) target, tool, preview;
+            TDF_Label targetLabel, toolLabel;
+            int operation = 0;
+        };
+        std::shared_ptr<BooleanPairPreview> _booleanPairPreview;
         std::shared_ptr<OrdinaryEditController> _ordinaryEditController;
         // Main-owned, single-use continuation sidecar for the legacy captured-
         // anchor API. Work itself lives in the frozen P1 header; this map lets

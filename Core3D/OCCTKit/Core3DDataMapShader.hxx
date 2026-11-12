@@ -58,6 +58,7 @@ void main() {
 }
 )GLSL";
     const char* fragment = R"GLSL(
+uniform float syLessonLighting;
 varying vec3 syWorldPosition;
 varying vec3 syWorldNormal;
 varying vec2 syUV;
@@ -101,7 +102,11 @@ void main() {
     n = normalize(mappedNormal.x * syWorldTangent + mappedNormal.y * syWorldBitangent + mappedNormal.z * syWorldNormal)
         * (gl_FrontFacing ? 1.0 : -1.0);
 #endif
-    vec3 light = normalize(vec3(0.35, 0.45, 0.82));
+    // The lesson key stays above/left of the camera. The ordinary editor
+    // retains its original world light; authored/exported PBR values do not move.
+    vec3 light = syLessonLighting > 0.5
+        ? normalize((occWorldViewMatrixInverse * vec4(-0.35, 0.45, 1.0, 0.0)).xyz)
+        : normalize(vec3(0.35, 0.45, 0.82));
     vec3 eye = (occWorldViewMatrixInverse * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
     vec3 view = normalize(eye - syWorldPosition);
     vec3 halfVector = normalize(light + view);

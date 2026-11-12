@@ -34,6 +34,13 @@ NS_ASSUME_NONNULL_BEGIN
     NS_SWIFT_NAME(tryCancelExtrusion());
 - (BOOL)applyExtrusion;
 - (BOOL)cancelExtrusion;
+//! Straight edges of the captured push/pull face in engine order, each
+//! @{@"side": @"+Y", @"length": model units}. Empty when no face is captured.
+- (NSArray<NSDictionary<NSString *, id> *> *)extrusionSplitEdges;
+//! Split mode: the extrusion value becomes the split line's offset from this
+//! edge. -1 returns to push/pull. Discards any open preview.
+- (BOOL)setExtrusionSplitReferenceEdge:(NSInteger)index;
+- (NSInteger)extrusionSplitReferenceEdge;
 - (Core3DShellParameters)getShellParameters;
 - (BOOL)setShellThickness:(CGFloat)thickness;
 - (Core3DModelingOperationResult)tryApplyShell

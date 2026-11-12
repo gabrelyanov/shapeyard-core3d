@@ -8,6 +8,101 @@
 
 #include "Snapping.hpp"
 
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <BRep_Tool.hxx>
+#include <GCPnts_AbscissaPoint.hxx>
+#include <TopExp.hxx>
+#include <Precision.hxx>
+#include <Standard_Failure.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS.hxx>
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
+std::optional<core3d::GeometrySnapResult> core3d::SnapPointToGeometry(
+    const TopoDS_Shape& target, const gp_Pnt& point, double tolerance,
+    unsigned kinds) noexcept {
+    const auto finitePoint = [](const gp_Pnt& p) {
+        return std::isfinite(p.X()) && std::isfinite(p.Y()) && std::isfinite(p.Z());
+    };
+    if (target.IsNull() || !finitePoint(point) || !std::isfinite(tolerance)
+        || tolerance < 0 || kinds == 0 || (kinds & ~AllGeometrySnapKinds) != 0)
+        return std::nullopt;
+    try {
+        std::optional<GeometrySnapResult> best;
+        const auto enabled = [kinds](GeometrySnapKind kind) {
+            return (kinds & static_cast<unsigned>(kind)) != 0;
+        };
+        const auto consider = [&](const gp_Pnt& candidate, GeometrySnapKind kind,
+                                  int index, const TopoDS_Shape& topology) {
+            if (!finitePoint(candidate)) return;
+            const double distance = point.Distance(candidate);
+            if (!std::isfinite(distance) || distance > tolerance) return;
+            if (best) {
+                // Only roundoff-sized ties: feature priority must never pull
+                // a point to a materially farther corner instead of a face.
+                const double epsilon = 64 * std::numeric_limits<double>::epsilon()
+                    * std::max({1.0, distance, best->distance});
+                if (distance > best->distance + epsilon) return;
+                if (std::abs(distance - best->distance) <= epsilon) {
+                    if (static_cast<unsigned>(kind) > static_cast<unsigned>(best->kind)) return;
+                    if (kind == best->kind && index >= best->topologyIndex) return;
+                }
+            }
+            best = GeometrySnapResult{candidate,distance,kind,index,topology};
+        };
+        TopTools_IndexedMapOfShape vertices, edges, faces;
+        if (enabled(GeometrySnapKind::Vertex)) {
+            TopExp::MapShapes(target,TopAbs_VERTEX,vertices);
+            for (int index = 1; index <= vertices.Extent(); ++index)
+                consider(BRep_Tool::Pnt(TopoDS::Vertex(vertices(index))),
+                         GeometrySnapKind::Vertex,index,vertices(index));
+        }
+        const auto probe = BRepBuilderAPI_MakeVertex(point).Vertex();
+        const auto closest = [&](const TopoDS_Shape& topology, GeometrySnapKind kind, int index) {
+            // Query individual trimmed edges/faces rather than the whole solid:
+            // a point inside a solid must not be returned as an interior zero.
+            BRepExtrema_DistShapeShape distance(probe,topology);
+            if (!distance.IsDone()) throw Standard_Failure("Geometry snap distance failed");
+            for (int solution = 1; solution <= distance.NbSolution(); ++solution)
+                consider(distance.PointOnShape2(solution),kind,index,topology);
+        };
+        if (enabled(GeometrySnapKind::EdgeMidpoint) || enabled(GeometrySnapKind::Edge)) {
+            TopExp::MapShapes(target,TopAbs_EDGE,edges);
+            for (int index = 1; index <= edges.Extent(); ++index) {
+                const auto edge = TopoDS::Edge(edges(index));
+                if (BRep_Tool::Degenerated(edge)) continue;
+                if (enabled(GeometrySnapKind::EdgeMidpoint)) {
+                    BRepAdaptor_Curve curve(edge);
+                    const double first = curve.FirstParameter(), last = curve.LastParameter();
+                    if (std::isfinite(first) && std::isfinite(last)
+                        && !Precision::IsInfinite(first) && !Precision::IsInfinite(last) && first < last) {
+                        const double length = GCPnts_AbscissaPoint::Length(curve,first,last,1e-9);
+                        if (std::isfinite(length) && length > 0) {
+                            GCPnts_AbscissaPoint middle(1e-9,curve,length/2,first);
+                            if (!middle.IsDone()) throw Standard_Failure("Geometry snap midpoint failed");
+                            consider(curve.Value(middle.Parameter()),GeometrySnapKind::EdgeMidpoint,index,edge);
+                        }
+                    }
+                }
+                if (enabled(GeometrySnapKind::Edge)) closest(edge,GeometrySnapKind::Edge,index);
+            }
+        }
+        if (enabled(GeometrySnapKind::Face)) {
+            TopExp::MapShapes(target,TopAbs_FACE,faces);
+            for (int index = 1; index <= faces.Extent(); ++index)
+                closest(faces(index),GeometrySnapKind::Face,index);
+        }
+        return best;
+    } catch (...) {
+        // Do not publish a partial nearest answer after a geometry failure.
+        return std::nullopt;
+    }
+}
+
 struct SnappingHolder {
     double linear = 0;
     double angular = 0;
@@ -66,5 +161,4 @@ void Snapping::setCurrentPosition(const gp_Pnt& val) {
 gp_Pnt Snapping::getCurrentPosition() const {
     return _impl->currentPosition;
 }
-
 

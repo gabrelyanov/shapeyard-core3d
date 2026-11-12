@@ -685,6 +685,10 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 }
             }
             const bool geometryChanges = !record.previous.shape.IsEqual(request.shape);
+            if (request.inspectorPrimitiveKind != 0
+                && (request.inspectorPrimitiveKind != 2 || !geometryChanges
+                    || request.operation != OrdinaryTransformOperation::Scale))
+                return reject(OrdinaryEditResult::Invalid);
             // Row-424 retained-treatment route: a fully bound B1/R2 treatment
             // travels its already-defined paired authority/staging path (staged
             // below inside this same command) instead of the generic
@@ -2706,7 +2710,16 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 || (!treatmentStaged && record.requested.operation == OrdinaryTransformOperation::EnclosureRebuild
                     && !enclosure::Stage(_document->Document(),record.previous.label,
                         *record.requested.enclosureRebuild,record.previous.enclosure.identifier))
+                || (!record.previous.shape.IsEqual(record.requested.shape)
+                    && !inspector_primitive::Stage(_document->Document(), record.previous.label,
+                        record.requested.inspectorPrimitiveKind, record.requested.inspectorPrimitiveBounds))
                 || !_document->CaptureObjectTransformStateForLabel(record.previous.label, record.candidate)
+                || (record.previous.shape.IsEqual(record.requested.shape)
+                    ? !record.candidate.inspectorPrimitive.IsEqual(record.previous.inspectorPrimitive)
+                    : (record.candidate.inspectorPrimitive.kind != record.requested.inspectorPrimitiveKind
+                        || (record.requested.inspectorPrimitiveKind != 0
+                            && (!record.candidate.inspectorPrimitive.IsCurrent(record.requested.shape)
+                                || record.candidate.inspectorPrimitive.bounds != record.requested.inspectorPrimitiveBounds))))
                 || !record.candidate.shape.IsEqual(record.requested.shape)
                 || record.candidate.entityIdentifier != record.previous.entityIdentifier
                 || record.candidate.definitionIdentifier != record.previous.definitionIdentifier

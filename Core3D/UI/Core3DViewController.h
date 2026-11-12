@@ -280,6 +280,10 @@ __attribute__((objc_subclassing_restricted))
 //! committed Shell result remains indeterminate, or before the native viewer
 //! has finished setup. Main-thread only.
 - (Core3DSceneSnapshot *_Nullable)captureSceneSnapshot;
+//! Main-thread, per-view lighting for the mug lesson's authored PBR glazes.
+//! No geometry/material/history writes. Disable when leaving the lesson.
+//! Both native and Metal consume this through the same camera publication.
+- (BOOL)setLessonLightingEnabled:(BOOL)enabled;
 //! Main-thread exact single selected source, one use; no AI receipt authority.
 - (Core3DPBRScalarPreparation *_Nullable)prepareScalarPBREdit:(Core3DPBRScalarEdit *)edit
     expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(prepareScalarPBR(edit:expected:));
@@ -1410,6 +1414,21 @@ __attribute__((objc_subclassing_restricted))
 - (void)cancelTransformInspectorSnapshotRequest
     NS_SWIFT_NAME(cancelTransformInspectorSnapshotRequest());
 
+//! Measure tool: the shortest distance between the selected edges or faces,
+//! in raw model units, world space. A full-circle edge (a hole rim) counts as
+//! its centre point. Main-thread only, read-only (no document, selection or
+//! history change). Nil when the viewer is unavailable. Otherwise keys:
+//! "selectedCount" (number of selected edges/faces; objects are not counted)
+//! and "metersPerUnit" (the document length unit) and, only when exactly two are selected and the distance is defined,
+//! "distance", "ax","ay","az" and "bx","by","bz" (the two closest points),
+//! plus "midPixelX","midPixelY" (their midpoint in drawable pixels, origin top
+//! left) and "drawableWidth","drawableHeight". For exactly one full-circle
+//! edge, "diameter" is its world-space diameter in model units, the pixel
+//! position is its centre and "circleRadiusPixels" is its projected radius.
+//! "distance" is absent for a single edge.
+- (nullable NSDictionary<NSString *, NSNumber *> *)measureSelectedElementDistance
+    NS_SWIFT_NAME(measureSelectedElementDistance());
+
 //! Atomically commit one Position component from an immutable inspector
 //! snapshot. `value` is in raw document model units. The expected snapshot is
 //! a compare-and-swap lease: Core3D independently rechecks document/geometry
@@ -1467,6 +1486,14 @@ __attribute__((objc_subclassing_restricted))
     featureIdentifier:(NSData *)featureIdentifier
     NS_SWIFT_NAME(selectVariableFilletIssuedEdge(entityIdentifier:featureIdentifier:));
 - (void)setSelectionType:(PrimitiveSelectionType)type;
+//! Presentation-only editor tokens. Width is in UIKit points; the native
+//! drawable converts it to pixels. No selection, geometry or history changes.
+- (void)setSelectedEdgeAppearanceColor:(UIColor *)color widthPoints:(CGFloat)width
+    NS_SWIFT_NAME(setSelectedEdgeAppearance(color:widthPoints:));
+//! Native Object/Face presentation: opaque point-sized boundary and a separate
+//! translucent face wash. Does not change selected owners or authored material.
+- (void)setSelectedSurfaceAppearanceColor:(UIColor *)color widthPoints:(CGFloat)width faceWashOpacity:(CGFloat)opacity
+    NS_SWIFT_NAME(setSelectedSurfaceAppearance(color:widthPoints:faceWashOpacity:));
 - (void)setGizmoType:(PrimitiveGizmoType)type;
 
 #ifdef DEBUG
@@ -1553,6 +1580,8 @@ __attribute__((objc_subclassing_restricted))
 //! Exact current attached manipulator location; nil when no gizmo is attached.
 //! Read-only DEBUG evidence for saved-group pivot attachment paths.
 - (NSArray<NSNumber *> *_Nullable)debugAttachedManipulatorPosition;
+//! The handles' side in screen points (design system 7.2: 96 iPad, 72 iPhone).
+- (NSNumber *_Nullable)debugManipulatorSidePoints;
 - (BOOL)debugConfigureOrdinaryNameFault:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryVisibilityFault:(NSInteger)mode;
 - (void)debugSetViewerOrdinaryVisibilityAfterRepairFailures:(NSInteger)count;
@@ -2164,6 +2193,8 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(debugSuppliedFrameBinXCAFFixture(_:normalPNG:mode:));
 - (NSArray<NSDictionary<NSString *, id> *> *_Nullable)debugNativeSuppliedFrameState;
 - (BOOL)debugSetNormalPresentationHidden:(BOOL)hidden;
+//! Test-only XCAF visibility edit retaining the selected face and its TShape.
+- (BOOL)debugSetSelectedFaceVisible:(BOOL)visible;
 //! Standalone malformed BinXCAF fixture used to prove that loading rejects
 //! external texture paths and preserves the active document on failure.
 - (NSData *_Nullable)debugExternalTextureBinXCAFFixtureData;
@@ -2189,6 +2220,13 @@ __attribute__((objc_subclassing_restricted))
 - (NSData *_Nullable)debugHiddenAssemblyVisibilityBinXCAFFixtureData;
 //! Standalone free located box used to verify TopoDS location ownership.
 - (NSData *_Nullable)debugLocatedFreeShapeBinXCAFFixtureData;
+//! Detached geometry query fixture; does not create or edit a document.
++ (NSDictionary<NSString *, id> *)debugGeometrySnapFixture:(NSInteger)fixture
+    point:(NSArray<NSNumber *> *)point tolerance:(double)tolerance kinds:(NSUInteger)kinds
+    NS_SWIFT_NAME(debugGeometrySnap(fixture:point:tolerance:kinds:));
++ (NSDictionary<NSString *, id> *)debugFaceSketchFixture:(NSInteger)fixture
+    cut:(BOOL)cut depth:(double)depth fault:(NSInteger)fault
+    NS_SWIFT_NAME(debugFaceSketch(fixture:cut:depth:fault:));
 //! Shared occurrences whose imported PBR definition also carries a legacy
 //! app-authored preset/color override for precedence testing.
 - (NSData *_Nullable)debugAuthoredLegacyAssemblyBinXCAFFixtureData;
@@ -2223,6 +2261,10 @@ __attribute__((objc_subclassing_restricted))
 //! prove it remains at zero independently from OpenGL presentation meshing.
 - (void)debugResetSceneSnapshotMesherInvocationCount;
 - (NSUInteger)debugSceneSnapshotMesherInvocationCount;
+//! Fixed 70 x 70 x 10 mm box with a coplanar top boundary 10 mm from the back.
+//! Creates independent test data; does not alter the live document or selection.
+- (nullable NSData *)debugSplitBoundaryBinXCAFFixtureData:(double)metersPerUnit
+    NS_SWIFT_NAME(debugSplitBoundaryBinXCAFFixtureData(metersPerUnit:));
 //! Last published identity for the current document; zero when unavailable.
 //! Safe during an owned preview and never publishes uncommitted geometry.
 - (uint64_t)debugPublishedDocumentGeneration;
@@ -2252,6 +2294,22 @@ __attribute__((objc_subclassing_restricted))
 //! zero-based; -1 means no exact single topology identity. Representation uses
 //! -1 invalid, 0 legacy BRep, 1 BRep, and 2 TriangleMesh.
 - (NSDictionary<NSString *, id> *)debugTopologySelectionState;
+- (NSArray<NSString *> *)debugNativeFaceTapTrace;
+//! Native picking diagnostic: projects a world-space point with the active
+//! OCCT camera, then uses ordinary XOR selection; never selects by topology ID.
+- (NSDictionary<NSString *, id> *)debugSelectAtWorldPointX:(double)x y:(double)y z:(double)z
+    NS_SWIFT_NAME(debugSelectAtWorldPoint(x:y:z:));
+//! Replay native touch begin/cancel/select with UIKit's rounded projected pixel.
+- (NSDictionary<NSString *, id> *)debugTapAtWorldPointX:(double)x y:(double)y z:(double)z
+    NS_SWIFT_NAME(debugTapAtWorldPoint(x:y:z:));
+//! Replay a reported camera eye without changing its direction or any model/selection state.
+- (BOOL)debugMoveCameraEyeX:(double)x y:(double)y z:(double)z
+    NS_SWIFT_NAME(debugMoveCameraEye(x:y:z:));
+//! Valid imported BRep fixture: Shell-3 cup with an upright R22/r4.5 half-ring.
+- (nullable NSData *)debugJoinedHalfRingCupFixtureData;
+- (nullable NSData *)debugHalfRingHandleFixtureData;
+
+
 //! Test-only OCCT detection seam. Boundedly probes the drawable for one
 //! committed presentation and leaves that owner as the current hover.
 - (BOOL)debugDetectAnyDisplayedShape;

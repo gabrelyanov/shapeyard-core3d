@@ -41,11 +41,28 @@
 #include <Image_SupportedFormats.hxx>
 #include <gp_Quaternion.hxx>
 #include <StdSelect_BRepOwner.hxx>
+#include <Prs3d_LineAspect.hxx>
+#include <Prs3d_ShadingAspect.hxx>
+#include <Graphic3d_ArrayOfTriangles.hxx>
+#include <Graphic3d_ArrayOfSegments.hxx>
+#include <TopLoc_Datum3D.hxx>
+#include <unordered_map>
+#include <map>
+#include <stdexcept>
+#include <Graphic3d_Group.hxx>
+#include <Graphic3d_Structure.hxx>
+#include <BRep_Tool.hxx>
+#include <Poly_Triangulation.hxx>
+#include <Poly_PolygonOnTriangulation.hxx>
 #include <TColStd_ListIteratorOfListOfInteger.hxx>
 #include <TColStd_ListOfInteger.hxx>
 #include <TopExp.hxx>
 #include <TopoDS.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#ifdef DEBUG
+#include <IntCurvesFace_ShapeIntersector.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#endif
 #include <XCAFPrs_Texture.hxx>
 #include <algorithm>
 #include <array>
@@ -72,6 +89,285 @@ void Core3DDebugSetRelocationReadThrowAfterNamedShapeBinding(int armed);
 using namespace core3d;
 
 namespace {
+
+void RemoveNativeSelectionStructure(Handle(Graphic3d_Structure)& structure)
+{
+    if (structure.IsNull()) return;
+    if (!structure->IsDeleted()) {
+        // Remove destroys the graphics structure; it does not unregister the
+        // displayed structure from the views. Erase while its layer and bounds
+        // are still alive, otherwise redraw and viewer teardown use freed data.
+        structure->Erase();
+        structure->Remove();
+    }
+    // Exception cleanup can hold another handle to an already removed overlay.
+    structure.Nullify();
+}
+
+// One depth step of GLView's supported ES2 16-bit fallback keeps coplanar
+// native edges visible. Two steps can expose a hidden edge in perspective
+// when the near plane is small compared with the model's camera distance.
+// This only resolves coincident lines: normal scene depth testing stays on,
+// widths/model coordinates stay unchanged, and occColor supplies each style.
+Handle(Graphic3d_ShaderProgram) NativeBoundaryLineShader(bool screenContour = false)
+{
+    Handle(Graphic3d_ShaderProgram) program = new Graphic3d_ShaderProgram();
+    program->SetId(screenContour ? "shapeyard-native-contour-depth-v2" : "shapeyard-native-boundary-depth-v3");
+    program->SetHeader("#version 100");
+    program->SetDefaultSampler(Standard_False);
+    program->SetNbLightsMax(0);
+    program->SetNbClipPlanesMax(8);
+    program->AttachShader(Graphic3d_ShaderObject::CreateFromSource(Graphic3d_TOS_VERTEX, screenContour ? R"GLSL(
+varying vec3 syBoundaryWorld;
+void main() {
+    vec4 world = occModelWorldMatrix * occVertex;
+    syBoundaryWorld = world.xyz / world.w;
+    gl_Position = occProjectionMatrix * occWorldViewMatrix * world;
+    // Offsets are normalized screen displacements, not material UVs. Expand
+    // with the final draw matrix; AutoZFit can update depth after preparation.
+    gl_Position.xy += occTexCoord.xy * gl_Position.w;
+    if (gl_Position.z >= -gl_Position.w)
+        gl_Position.z = max(-gl_Position.w, gl_Position.z - gl_Position.w * (2.0 / 65535.0));
+}
+)GLSL" : R"GLSL(
+varying vec3 syBoundaryWorld;
+void main() {
+    vec4 world = occModelWorldMatrix * occVertex;
+    syBoundaryWorld = world.xyz / world.w;
+    gl_Position = occProjectionMatrix * occWorldViewMatrix * world;
+    // OpenGL NDC spans [-1,1]: two NDC steps are one framebuffer step.
+    gl_Position.z -= gl_Position.w * (2.0 / 65535.0);
+}
+)GLSL"));
+    program->AttachShader(Graphic3d_ShaderObject::CreateFromSource(Graphic3d_TOS_FRAGMENT, R"GLSL(
+varying vec3 syBoundaryWorld;
+void main() {
+    if (occFragEarlyReturn()) return;
+    int nextPlane = 0;
+    for (int i = 0; i < 8; ++i) {
+        if (i >= nextPlane && i < occClipPlaneCount) {
+            if (dot(occClipPlaneEquations[i], vec4(syBoundaryWorld, 1.0)) < 0.0) {
+                if (occClipPlaneChains[i] <= 1) discard;
+                nextPlane = i + 1;
+            } else {
+                nextPlane = i + (occClipPlaneChains[i] > 1 ? occClipPlaneChains[i] : 1);
+            }
+        }
+    }
+    occSetFragColor(occColor);
+}
+)GLSL"));
+    return program;
+}
+
+// Optional selection geometry, built only from an already-published mesh.
+// These caps cover the entire selection, not each object independently.
+constexpr std::size_t kNativeContourVertexBudget = 500'000;
+constexpr std::size_t kNativeContourIndexBudget = 1'500'000;
+struct NativeContourGeometry {
+    struct Triangle { std::array<std::uint32_t,3> vertices; };
+    struct Edge {
+        std::uint32_t a, b;
+        std::array<std::uint32_t,2> triangles;
+        unsigned count = 0;
+    };
+    std::string entity;
+    std::vector<gp_Pnt> vertices;
+    std::vector<Triangle> triangles;
+    std::vector<Edge> edges;
+};
+
+NativeContourGeometry BuildNativeContourGeometry(const core3d::scene::MeshSnapshot& mesh,
+                                                 const core3d::scene::InstanceSnapshot& item,
+                                                 const std::unordered_set<std::uint32_t>* selectedFaces,
+                                                 std::size_t& vertexBudget,
+                                                 std::size_t& indexBudget)
+{
+    if (mesh.vertices.size() > kNativeContourVertexBudget-vertexBudget
+        || mesh.indices.size() > kNativeContourIndexBudget-indexBudget)
+        throw std::length_error("Native contour geometry budget");
+    vertexBudget += mesh.vertices.size(); indexBudget += mesh.indices.size();
+    NativeContourGeometry result; result.entity = item.entityIdentifier;
+    // Mesh vertices are float positions. Weld duplicate positions across UV and
+    // normal seams, without changing the source mesh or its topology. The grid
+    // is far below a drawable pixel and bounded to the float precision of this
+    // mesh. Adjacent cells are searched so a quantization boundary is not a seam.
+    double extent = 0;
+    for (const auto& v : mesh.vertices)
+        extent = std::max(extent, std::max({std::abs(double(v.positionX)),
+            std::abs(double(v.positionY)),std::abs(double(v.positionZ))}));
+    const double epsilon = std::max(1.0e-9,extent*2.0e-7);
+    using Cell = std::array<std::int64_t,3>;
+    std::map<Cell,std::vector<std::uint32_t>> cells;
+    std::vector<gp_Pnt> local;
+    std::vector<std::uint32_t> welded; welded.reserve(mesh.vertices.size());
+    const auto& m = item.worldFromObject.values;
+    for (const auto& v : mesh.vertices) {
+        const gp_Pnt point(v.positionX,v.positionY,v.positionZ);
+        if (!std::isfinite(point.X()) || !std::isfinite(point.Y()) || !std::isfinite(point.Z()))
+            throw std::runtime_error("Native contour finite vertex");
+        const Cell cell = {std::int64_t(std::floor(point.X()/epsilon)),
+            std::int64_t(std::floor(point.Y()/epsilon)),std::int64_t(std::floor(point.Z()/epsilon))};
+        std::uint32_t index = std::uint32_t(local.size());
+        for (int x=-1;x<=1;++x) for (int y=-1;y<=1;++y) for (int z=-1;z<=1;++z) {
+            const auto found = cells.find({cell[0]+x,cell[1]+y,cell[2]+z});
+            if (found == cells.end()) continue;
+            for (const auto candidate : found->second) {
+                if (point.SquareDistance(local[candidate]) <= epsilon*epsilon)
+                    index = std::min(index,candidate);
+            }
+        }
+        if (index == local.size()) {
+            local.push_back(point); cells[cell].push_back(index);
+            const double x=point.X(), y=point.Y(), z=point.Z();
+            result.vertices.emplace_back(m[0]*x+m[4]*y+m[8]*z+m[12],
+                m[1]*x+m[5]*y+m[9]*z+m[13],m[2]*x+m[6]*y+m[10]*z+m[14]);
+        }
+        welded.push_back(index);
+    }
+    std::map<std::pair<std::uint32_t,std::uint32_t>,std::size_t> edgeMap;
+    for (std::size_t p=0;p<mesh.primitives.size();++p) {
+        if (!item.primitiveBindings.at(p).visible) continue;
+        const auto& primitive = mesh.primitives[p];
+        if (selectedFaces && !selectedFaces->count(primitive.faceIndex)) continue;
+        if (primitive.indexCount%3 != 0 || std::size_t(primitive.firstIndex)+primitive.indexCount > mesh.indices.size())
+            throw std::runtime_error("Native contour triangle range");
+        for (std::size_t i=primitive.firstIndex;i<std::size_t(primitive.firstIndex)+primitive.indexCount;i+=3) {
+            NativeContourGeometry::Triangle triangle{{welded.at(mesh.indices[i]),
+                welded.at(mesh.indices[i+1]),welded.at(mesh.indices[i+2])}};
+            if (item.reversesWinding) std::swap(triangle.vertices[1],triangle.vertices[2]);
+            if (triangle.vertices[0] == triangle.vertices[1] || triangle.vertices[1] == triangle.vertices[2]
+                || triangle.vertices[2] == triangle.vertices[0]) continue;
+            const auto ti = std::uint32_t(result.triangles.size());
+            result.triangles.push_back(triangle);
+            for (int e=0;e<3;++e) {
+                const auto a=triangle.vertices[e], b=triangle.vertices[(e+1)%3];
+                const auto key=std::minmax(a,b);
+                const auto inserted=edgeMap.emplace(key,result.edges.size());
+                if (inserted.second) result.edges.push_back({a,b,{0,0},0});
+                auto& edge=result.edges[inserted.first->second];
+                if (edge.count < 2) edge.triangles[edge.count]=ti;
+                ++edge.count;
+            }
+        }
+    }
+    return result;
+}
+
+struct NativeContourVertex { gp_Pnt position; gp_Pnt2d offset; };
+struct NativeProjectedContour {
+    struct Segment { gp_Pnt a,b; double nx,ny; };
+    std::vector<Segment> segments;
+    std::vector<NativeContourVertex> triangles;
+    // Screen buckets bound semantic-edge matching to nearby silhouette pieces.
+    std::map<std::pair<int,int>,std::vector<std::size_t>> buckets;
+    std::size_t bucketEntries = 0;
+
+    bool containsBoundary(const gp_Pnt& a, const gp_Pnt& b) const {
+        const double x=(a.X()+b.X())*0.5, y=(a.Y()+b.Y())*0.5;
+        if (!std::isfinite(x) || !std::isfinite(y)
+            || std::abs(x/8) >= std::numeric_limits<int>::max()-1
+            || std::abs(y/8) >= std::numeric_limits<int>::max()-1) return false;
+        const auto bucket=buckets.find({int(std::floor(x/8)),int(std::floor(y/8))});
+        if (bucket == buckets.end()) return false;
+        const double ux=b.X()-a.X(), uy=b.Y()-a.Y(), ul=std::hypot(ux,uy);
+        if (ul < 1.0e-9) return true;
+        for (const auto i:bucket->second) {
+            const auto& segment=segments[i];
+            const double dx=segment.b.X()-segment.a.X(), dy=segment.b.Y()-segment.a.Y();
+            const double length2=dx*dx+dy*dy;
+            const double t=std::clamp(((x-segment.a.X())*dx+(y-segment.a.Y())*dy)/length2,0.0,1.0);
+            if (std::hypot(x-segment.a.X()-t*dx,y-segment.a.Y()-t*dy) <= 1.25
+                && std::abs(ux*dx+uy*dy) >= 0.95*ul*std::sqrt(length2)) return true;
+        }
+        return false;
+    }
+};
+
+NativeProjectedContour ProjectNativeContours(const NativeContourGeometry& geometry,
+                                             const Handle(Graphic3d_Camera)& camera,
+                                             double width, double height, double stroke)
+{
+    NativeProjectedContour result;
+    std::vector<gp_Pnt> projected; projected.reserve(geometry.vertices.size());
+    std::vector<bool> inFront; inFront.reserve(geometry.vertices.size());
+    for (const auto& point:geometry.vertices) {
+        inFront.push_back(camera->IsOrthographic()
+            || gp_Vec(camera->Eye(),point).Dot(gp_Vec(camera->Direction())) > 1.0e-9);
+        const auto p=camera->Project(point);
+        projected.emplace_back((p.X()+1)*width*0.5,(p.Y()+1)*height*0.5,p.Z());
+    }
+    std::vector<double> facing; facing.reserve(geometry.triangles.size());
+    for (const auto& triangle:geometry.triangles) {
+        const auto& a=projected[triangle.vertices[0]];
+        const auto& b=projected[triangle.vertices[1]];
+        const auto& c=projected[triangle.vertices[2]];
+        // Redraw can refit near/far after preparation. Only reject points
+        // behind the eye here; the final GPU matrix owns frustum clipping.
+        const bool behind = !inFront[triangle.vertices[0]] || !inFront[triangle.vertices[1]]
+            || !inFront[triangle.vertices[2]];
+        facing.push_back(behind ? 0 : (b.X()-a.X())*(c.Y()-a.Y())-(b.Y()-a.Y())*(c.X()-a.X()));
+    }
+    const auto vertex=[&](std::uint32_t index,double nx,double ny) -> NativeContourVertex {
+        return {geometry.vertices[index],gp_Pnt2d(2*nx*stroke/width,2*ny*stroke/height)};
+    };
+    std::map<std::uint32_t,std::vector<std::array<double,2>>> joins;
+    for (const auto& edge:geometry.edges) {
+        if (edge.count > 2 || edge.count == 0) continue;
+        const bool frontA=facing[edge.triangles[0]] > 1.0e-8;
+        const bool frontB=edge.count == 2 && facing[edge.triangles[1]] > 1.0e-8;
+        if (edge.count == 2 && frontA == frontB) continue;
+        const auto ti=edge.triangles[frontA || edge.count == 1 ? 0:1];
+        if (std::abs(facing[ti]) <= 1.0e-8) continue;
+        const auto& a=projected[edge.a]; const auto& b=projected[edge.b];
+        // The ordinary shader applies the final frustum and all user clip
+        // planes. A previous frame's near/far range cannot filter this mesh.
+        if (!std::isfinite(a.X()) || !std::isfinite(a.Y()) || !std::isfinite(b.X()) || !std::isfinite(b.Y())
+            || !inFront[edge.a] || !inFront[edge.b]) continue;
+        const double dx=b.X()-a.X(),dy=b.Y()-a.Y(),length=std::hypot(dx,dy);
+        if (length < 1.0e-6) continue;
+        std::uint32_t third=edge.a;
+        for (const auto v:geometry.triangles[ti].vertices) if (v != edge.a && v != edge.b) third=v;
+        const auto& c=projected[third];
+        const double sign=(dx*(c.Y()-a.Y())-dy*(c.X()-a.X())) > 0 ? 1:-1;
+        const double nx=sign*dy/length,ny=-sign*dx/length;
+        if (std::max(a.X(),b.X()) < -stroke || std::min(a.X(),b.X()) > width+stroke
+            || std::max(a.Y(),b.Y()) < -stroke || std::min(a.Y(),b.Y()) > height+stroke) continue;
+        const auto index=result.segments.size();
+        result.segments.push_back({a,b,nx,ny});
+        // The whole two-point stroke lies outside the projected surface. A
+        // centered GL line loses its inner half behind a curved surface, even
+        // with the small coplanar bias used for ordinary semantic edges.
+        const auto a0=vertex(edge.a,0,0),b0=vertex(edge.b,0,0);
+        const auto a1=vertex(edge.a,nx,ny),b1=vertex(edge.b,nx,ny);
+        result.triangles.insert(result.triangles.end(),{a0,b0,b1,a0,b1,a1});
+        joins[edge.a].push_back({nx,ny}); joins[edge.b].push_back({nx,ny});
+        if (result.triangles.size() > 1'500'000) throw std::length_error("Native contour stroke budget");
+        const int x0=int(std::floor(std::max(-8.0,std::min(a.X(),b.X())-2)/8));
+        const int x1=int(std::floor(std::min(width+8,std::max(a.X(),b.X())+2)/8));
+        const int y0=int(std::floor(std::max(-8.0,std::min(a.Y(),b.Y())-2)/8));
+        const int y1=int(std::floor(std::min(height+8,std::max(a.Y(),b.Y())+2)/8));
+        for (int x=x0;x<=x1;++x) for (int y=y0;y<=y1;++y) {
+            if (++result.bucketEntries > 1'500'000) throw std::length_error("Native contour lookup budget");
+            result.buckets[{x,y}].push_back(index);
+        }
+    }
+    // Round joins retain the full stroke radius at tessellation vertices.
+    // Bevel joins pinch a shallow curved silhouette at its exact equator.
+    for (const auto& join:joins) {
+        if (join.second.size() != 2) continue;
+        const auto& a=join.second[0]; const auto& b=join.second[1];
+        const double length=std::hypot(a[0]+b[0],a[1]+b[1]);
+        if (length < 1.0e-6) continue;
+        if (result.triangles.size() > 1'500'000-6) throw std::length_error("Native contour join budget");
+        const auto center=vertex(join.first,0,0);
+        const auto middle=vertex(join.first,(a[0]+b[0])/length,(a[1]+b[1])/length);
+        result.triangles.insert(result.triangles.end(),{
+            center,vertex(join.first,a[0],a[1]),middle,
+            center,middle,vertex(join.first,b[0],b[1])});
+    }
+    return result;
+}
 
 constexpr char kCbfMagic[] = "BINFILE";
 
@@ -971,6 +1267,12 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 - (void)endActiveRenderingInteractions;
 - (void)endRawPrimaryInteractionIfNeededCancelled:(BOOL)cancelled;
 - (void)checkSelections;
+- (void)updateSelectedEdgeAppearance;
+- (void)updateSelectedSurfaceAppearance;
+- (void)clearSelectedFaceWash;
+- (void)clearCommittedBoundaries;
+- (void)updateCommittedBoundaries;
+- (void)updateSplitBoundaries:(const Handle(AIS_Shape)&)presentation;
 - (void)performNativeHistoryDirection:(NativeHistoryDirection)direction;
 - (void)addCube:(UIBarButtonItem *)sender;
 - (BOOL)restoreBooleanActionForRetainedGizmoType:(PrimitiveGizmoType)type;
@@ -1020,9 +1322,35 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     void (^_debugResumeQueuedAdoption)(void);
     Core3DQueuedPrivateFile *_debugStagedPrivateFile;
     NSUInteger _debugQueuedCleanupFailures;
+    NSMutableArray<NSString *> *_debugNativeFaceTapTrace;
 #endif
     BOOL _cancelTouches;
     BOOL _didSetupViewer;
+    UIColor *_selectedEdgeColor;
+    CGFloat _selectedEdgeWidthPoints;
+    CGFloat _selectedEdgeWidthPixels;
+    BOOL _selectedEdgeAppearanceDirty;
+    Handle(Prs3d_Drawer) _ordinaryLocalSelectionStyle;
+    Handle(Prs3d_Drawer) _selectedEdgeStyle;
+    UIColor *_selectedSurfaceColor;
+    CGFloat _selectedSurfaceWidthPoints;
+    CGFloat _selectedSurfaceWidthPixels;
+    CGFloat _selectedFaceWashOpacity;
+    BOOL _selectedSurfaceAppearanceDirty;
+    BOOL _selectedSurfaceWasFace;
+    Handle(Graphic3d_Structure) _selectedFaceWash;
+    std::vector<TopoDS_Shape> _selectedWashFaces;
+    std::vector<NativeContourGeometry> _selectedContourGeometry;
+    Standard_Size _selectedContourViewState;
+    Standard_Size _selectedContourProjectionState;
+    CGSize _selectedContourDrawable;
+    const void *_selectedContourDocument;
+
+    std::vector<Handle(Graphic3d_Structure)> _committedBoundaries;
+    std::string _committedBoundaryDocument;
+    const void *_committedBoundaryDocumentOwner;
+    BOOL _committedBoundariesDirty;
+    Handle(AIS_Shape) _splitBoundaryPresentation;
     BOOL _rawTouchRendering;
     BOOL _rawTouchWasCancelled;
     NSMutableSet<UITouch *> *_rawViewportTouches;
@@ -1036,22 +1364,44 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    // The block shares this single handle so its final reference is released
+    // before the viewer destroys the structure manager and GL resources.
+    __block Handle(Graphic3d_Structure) selectedWash = _selectedFaceWash;
+    __block auto boundaries = std::move(_committedBoundaries);
+    _splitBoundaryPresentation.Nullify();
+    _selectedFaceWash.Nullify();
+    _selectedWashFaces.clear();
     if (_viewer != nullptr) {
         GLView *view = self.isViewLoaded ? [self viewportView] : nil;
         if (view != nil) {
             const std::shared_ptr<Core3DViewer> viewer = _viewer;
             const BOOL didRelease = [view performWithRenderingContext:^{
+                if (!selectedWash.IsNull()) {
+                    RemoveNativeSelectionStructure(selectedWash);
+                }
+                for (auto& structure : boundaries) RemoveNativeSelectionStructure(structure);
+                boundaries.clear();
                 viewer->release();
             }];
             if (!didRelease) {
                 NSLog(@"Core3D rendering context unavailable during teardown; using safe fallback.");
                 EAGLContext *previousContext = EAGLContext.currentContext;
                 [EAGLContext setCurrentContext:nil];
+                if (!selectedWash.IsNull()) {
+                    RemoveNativeSelectionStructure(selectedWash);
+                }
+                for (auto& structure : boundaries) RemoveNativeSelectionStructure(structure);
+                boundaries.clear();
                 viewer->release();
                 [EAGLContext setCurrentContext:previousContext];
             }
         } else {
             // No GL view means InitViewer never created graphics resources.
+            if (!selectedWash.IsNull()) {
+                RemoveNativeSelectionStructure(selectedWash);
+            }
+            for (auto& structure : boundaries) RemoveNativeSelectionStructure(structure);
+            boundaries.clear();
             _viewer->release();
         }
     }
@@ -1069,6 +1419,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 
     if (self) {
         _viewer = std::make_shared<Core3DViewer>();
+        _committedBoundariesDirty = YES;
         _assetDataQueue = dispatch_queue_create("com.shapeyard.sync", NULL);
 		_rawViewportTouches = [NSMutableSet set];
 		_isConstructorMode = false;
@@ -1164,6 +1515,10 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
             != _viewer->getDocument().get()) {
         return;
     }
+    // Face visibility and appearance can change without a new TShape or
+    // placement. Rebuild the optional overlay from the next committed scene.
+    _selectedSurfaceAppearanceDirty = YES;
+    _committedBoundariesDirty = YES;
     [self requestRender];
 }
 
@@ -1340,9 +1695,535 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 - (BOOL) Draw
 {
     if (_didSetupViewer && _viewer != nullptr) {
+        // Appearance is optional presentation work. An allocation/OCCT style
+        // failure must never suppress the model's normal native frame.
+        try { [self updateCommittedBoundaries]; } catch (...) {
+            try { [self clearCommittedBoundaries]; } catch (...) {}
+        }
+        try { [self updateSelectedSurfaceAppearance]; } catch (...) {
+            try {
+                [self clearSelectedFaceWash];
+                _selectedContourGeometry.clear();
+                const auto context = _viewer->AisContext();
+                if (!context.IsNull() && !_viewer->hasUnresolvedEdit())
+                    context->HilightSelected(Standard_False);
+            } catch (...) {}
+        }
         return _viewer->RenderFrame();
     }
     return NO;
+}
+
+- (void)setSelectedEdgeAppearanceColor:(UIColor *)color widthPoints:(CGFloat)width {
+    CGFloat r = 0, g = 0, b = 0, a = 0;
+    if (![NSThread isMainThread] || !std::isfinite(width) || width <= 0
+        || ![color getRed:&r green:&g blue:&b alpha:&a]
+        || !std::isfinite(r) || !std::isfinite(g) || !std::isfinite(b) || !std::isfinite(a)) return;
+    if ([_selectedEdgeColor isEqual:color] && _selectedEdgeWidthPoints == width) return;
+    _selectedEdgeColor = color;
+    _selectedEdgeWidthPoints = width;
+    _selectedEdgeAppearanceDirty = YES;
+    if (_didSetupViewer) [self requestRender];
+}
+
+- (void)setSelectedSurfaceAppearanceColor:(UIColor *)color widthPoints:(CGFloat)width faceWashOpacity:(CGFloat)opacity {
+    CGFloat r = 0, g = 0, b = 0, a = 0;
+    if (!NSThread.isMainThread || !std::isfinite(width) || width <= 0
+        || !std::isfinite(opacity) || opacity < 0 || opacity > 1
+        || ![color getRed:&r green:&g blue:&b alpha:&a]
+        || !std::isfinite(r) || !std::isfinite(g) || !std::isfinite(b) || !std::isfinite(a)) return;
+    if ([_selectedSurfaceColor isEqual:color] && _selectedSurfaceWidthPoints == width
+        && _selectedFaceWashOpacity == opacity) return;
+    _selectedSurfaceColor = color;
+    _selectedSurfaceWidthPoints = width;
+    _selectedFaceWashOpacity = opacity;
+    _selectedSurfaceAppearanceDirty = YES;
+    // The next Draw replaces the overlay with its rendering context current.
+    if (_didSetupViewer) [self requestRender];
+}
+
+- (void)clearCommittedBoundaries {
+    for (auto& structure : _committedBoundaries) RemoveNativeSelectionStructure(structure);
+    _committedBoundaries.clear();
+    _splitBoundaryPresentation.Nullify();
+    _committedBoundariesDirty = YES;
+}
+
+- (void)updateSplitBoundaries:(const Handle(AIS_Shape)&)presentation {
+    if (!_committedBoundariesDirty && _splitBoundaryPresentation == presentation) return;
+    std::vector<Handle(Graphic3d_Structure)> replacements;
+    try {
+        // Use the candidate's display tessellation, never triangle wireframe.
+        // Keep coplanar Split edges; exclude periodic seams and degenerate edges
+        // exactly as the committed scene extractor does. No document writes or
+        // remeshing are needed, including while the preview command is open.
+        std::vector<gp_Pnt> points;
+        TopTools_IndexedMapOfShape faces, drawnEdges;
+        TopExp::MapShapes(presentation->Shape(), TopAbs_FACE, faces);
+        const auto transform = presentation->LocalTransformation();
+        for (Standard_Integer index = 1; index <= faces.Extent(); ++index) {
+            const auto face = TopoDS::Face(faces(index));
+            TopLoc_Location location;
+            const auto triangulation = BRep_Tool::Triangulation(face, location);
+            if (triangulation.IsNull()) continue;
+            TopTools_IndexedMapOfShape edges;
+            TopExp::MapShapes(face, TopAbs_EDGE, edges);
+            for (Standard_Integer edgeIndex = 1; edgeIndex <= edges.Extent(); ++edgeIndex) {
+                const auto edge = TopoDS::Edge(edges(edgeIndex));
+                if (BRep_Tool::Degenerated(edge) || BRep_Tool::IsClosed(edge, face)
+                    || drawnEdges.Contains(edge)) continue;
+                const auto polygon = BRep_Tool::PolygonOnTriangulation(edge, triangulation, location);
+                if (polygon.IsNull() || polygon->NbNodes() < 2) continue;
+                drawnEdges.Add(edge);
+                for (Standard_Integer node = 1; node < polygon->NbNodes(); ++node) {
+                    const auto first = polygon->Node(node), last = polygon->Node(node + 1);
+                    if (first < 1 || last < 1 || first > triangulation->NbNodes()
+                        || last > triangulation->NbNodes())
+                        throw std::runtime_error("Split boundary triangulation index");
+                    if (points.size() > 1'500'000 - 2)
+                        throw std::length_error("Split boundary vertex budget");
+                    for (const auto vertex : {first, last}) {
+                        const auto point = triangulation->Node(vertex)
+                            .Transformed(location.Transformation()).Transformed(transform);
+                        if (!std::isfinite(point.X()) || !std::isfinite(point.Y()) || !std::isfinite(point.Z()))
+                            throw std::runtime_error("Nonfinite Split boundary vertex");
+                        points.push_back(point);
+                    }
+                }
+            }
+        }
+        if (!points.empty()) {
+            Handle(Graphic3d_Structure) boundaries = new Graphic3d_Structure(_viewer->V3dViewer()->StructureManager());
+            replacements.push_back(boundaries);
+            boundaries->SetZLayer(Graphic3d_ZLayerId_Default);
+            boundaries->SetDisplayPriority(Graphic3d_DisplayPriority_Above);
+            const gp_XYZ origin = points.front().XYZ();
+            gp_Trsf placement; placement.SetTranslation(gp_Vec(origin));
+            boundaries->SetTransformation(new TopLoc_Datum3D(placement));
+            Handle(Graphic3d_ArrayOfSegments) lines = new Graphic3d_ArrayOfSegments(int(points.size()));
+            for (const auto& point : points) lines->AddVertex(gp_Pnt(point.XYZ()-origin));
+            const auto group = boundaries->NewGroup();
+            const Handle(Prs3d_LineAspect) aspect = new Prs3d_LineAspect(Quantity_NOC_BLACK,Aspect_TOL_SOLID,1);
+            aspect->Aspect()->SetShaderProgram(NativeBoundaryLineShader());
+            group->SetGroupPrimitivesAspect(aspect->Aspect());
+            group->AddPrimitiveArray(lines);
+            boundaries->CalculateBoundBox();
+        }
+        [self clearCommittedBoundaries];
+        _committedBoundaries = std::move(replacements);
+        for (const auto& structure : _committedBoundaries) structure->Display();
+        _splitBoundaryPresentation = presentation;
+        _committedBoundariesDirty = NO;
+    } catch (...) {
+        for (auto& structure : replacements) RemoveNativeSelectionStructure(structure);
+        [self clearCommittedBoundaries];
+        throw;
+    }
+}
+
+- (void)updateCommittedBoundaries {
+    if (_viewer == nullptr) return;
+    const auto shapeInteractor = _viewer->getShapeInteractor();
+    const auto splitPresentation = shapeInteractor
+        ? shapeInteractor->splitBoundaryPresentation() : Handle(AIS_Shape)();
+    if (!splitPresentation.IsNull()) {
+        [self updateSplitBoundaries:splitPresentation];
+        return;
+    }
+    const auto interactor = _viewer->getObjectInteractor();
+    if (_viewer->hasUnresolvedEdit() || !_viewer->canBeginCommittedEdit()
+        || (interactor && interactor->isManipulatorGestureActive())) {
+        // Live operations own their source suppression and preview graphics.
+        [self clearCommittedBoundaries];
+        return;
+    }
+    const auto document = _viewer->getDocument();
+    if (document.IsNull()) { [self clearCommittedBoundaries]; return; }
+    const auto documentIdentifier = document->DocumentIdentifier();
+    if (!_committedBoundariesDirty && _splitBoundaryPresentation.IsNull()
+        && _committedBoundaryDocument == documentIdentifier
+        && _committedBoundaryDocumentOwner == document->Document().get()) return;
+    const CGSize drawable = self.drawableSize;
+    if (drawable.width <= 0 || drawable.height <= 0) { [self clearCommittedBoundaries]; return; }
+    const auto scene = _viewer->captureSceneSnapshot(drawable.width, drawable.height);
+    if (!scene) { [self clearCommittedBoundaries]; return; }
+    std::vector<Handle(Graphic3d_Structure)> replacements;
+    std::size_t totalPoints = 0;
+    try {
+        for (const auto& item : scene->instances) {
+            if (!item.visible) continue;
+            const auto& mesh = scene->meshes.at(item.meshIndex);
+            if (item.primitiveBindings.size() != mesh.primitives.size()) {
+                throw std::runtime_error("Native boundary primitive bindings");
+            }
+            std::unordered_set<std::uint32_t> visibleFaces;
+            for (std::size_t index = 0; index < mesh.primitives.size(); ++index) {
+                if (item.primitiveBindings[index].visible)
+                    visibleFaces.insert(mesh.primitives[index].faceIndex);
+            }
+            const auto& m = item.worldFromObject.values;
+            const auto world = [&](float x, float y, float z) {
+                return gp_Pnt(m[0]*x+m[4]*y+m[8]*z+m[12],
+                              m[1]*x+m[5]*y+m[9]*z+m[13],
+                              m[2]*x+m[6]*y+m[10]*z+m[14]);
+            };
+            std::vector<gp_Pnt> points;
+            std::unordered_map<std::uint32_t, std::uint32_t> incidentFace;
+            for (const auto& edge : mesh.edgeSegments) {
+                if (!visibleFaces.count(edge.faceIndex)) continue;
+                const auto inserted = incidentFace.emplace(edge.edgeIndex, edge.faceIndex);
+                if (!inserted.second && inserted.first->second != edge.faceIndex) continue;
+                // Match the selected-overlay cap. Never publish a partial scene.
+                if (totalPoints > 1'500'000 - 2) throw std::length_error("Native boundary vertex budget");
+                totalPoints += 2;
+                points.push_back(world(edge.startX,edge.startY,edge.startZ));
+                points.push_back(world(edge.endX,edge.endY,edge.endZ));
+            }
+            if (points.empty()) continue;
+            Handle(Graphic3d_Structure) boundaries = new Graphic3d_Structure(_viewer->V3dViewer()->StructureManager());
+            replacements.push_back(boundaries);
+            boundaries->SetZLayer(Graphic3d_ZLayerId_Default);
+            // Surface first, black boundaries next, white selection last; all use depth.
+            boundaries->SetDisplayPriority(Graphic3d_DisplayPriority_Above);
+            const gp_XYZ origin = points.front().XYZ();
+            gp_Trsf placement; placement.SetTranslation(gp_Vec(origin));
+            boundaries->SetTransformation(new TopLoc_Datum3D(placement));
+            Handle(Graphic3d_ArrayOfSegments) lines = new Graphic3d_ArrayOfSegments(int(points.size()));
+            for (const auto& point : points) lines->AddVertex(gp_Pnt(point.XYZ()-origin));
+            const auto group = boundaries->NewGroup();
+            // Existing committed-edge look shared with Metal: black, one drawable pixel.
+            const Handle(Prs3d_LineAspect) aspect = new Prs3d_LineAspect(Quantity_NOC_BLACK,Aspect_TOL_SOLID,1);
+            aspect->Aspect()->SetShaderProgram(NativeBoundaryLineShader());
+            group->SetGroupPrimitivesAspect(aspect->Aspect());
+            group->AddPrimitiveArray(lines);
+            boundaries->CalculateBoundBox();
+        }
+        [self clearCommittedBoundaries];
+        _committedBoundaries = std::move(replacements);
+        for (const auto& structure : _committedBoundaries) structure->Display();
+        _committedBoundaryDocument = documentIdentifier;
+        _committedBoundaryDocumentOwner = document->Document().get();
+        _committedBoundariesDirty = NO;
+    } catch (...) {
+        for (auto& structure : replacements) RemoveNativeSelectionStructure(structure);
+        [self clearCommittedBoundaries];
+        throw;
+    }
+}
+
+- (void)clearSelectedFaceWash {
+    RemoveNativeSelectionStructure(_selectedFaceWash);
+    _selectedWashFaces.clear();
+}
+
+- (void)updateSelectedSurfaceAppearance {
+    [self updateSelectedEdgeAppearance];
+    if (_viewer == nullptr || _selectedSurfaceColor == nil) return;
+    const auto context = _viewer->AisContext();
+    const auto interactor = _viewer->getShapeInteractor();
+    if (context.IsNull() || !interactor) return;
+    const auto mode = interactor->getSelectionMode();
+    const bool faceMode = mode == ShapeSelectionMode::Face;
+    if (mode != ShapeSelectionMode::WholeShape && !faceMode) {
+        [self clearSelectedFaceWash];
+        return;
+    }
+    // Restore ordinary highlights if the optional overlay cannot be built.
+    const auto fallback = [&] {
+        const bool hadOverlay = !_selectedFaceWash.IsNull();
+        [self clearSelectedFaceWash];
+        _selectedContourGeometry.clear();
+        if (hadOverlay) context->HilightSelected(Standard_False);
+    };
+    if (_viewer->hasUnresolvedEdit() || !_viewer->canBeginCommittedEdit()) {
+        // A live operation owns its highlighting; only retire our overlay.
+        [self clearSelectedFaceWash]; return;
+    }
+    const CGFloat pixels = _selectedSurfaceWidthPoints * [self drawableScale];
+    if (!std::isfinite(pixels) || pixels <= 0) { fallback(); return; }
+    std::vector<TopoDS_Shape> faces;
+    const auto document = _viewer->getDocument();
+    for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
+        if (document.IsNull() || faces.size() >= 50'000) {
+            fallback(); return;
+        }
+        const auto label = document->ShapeLabel(context->SelectedInteractive());
+        if (label.IsNull()) { fallback(); return; }
+        TopoDS_Shape shape;
+        if (context->HasSelectedShape()) shape = context->SelectedShape();
+        else if (!faceMode) {
+            const auto presentation = Handle(AIS_Shape)::DownCast(context->SelectedInteractive());
+            if (!presentation.IsNull()) shape = presentation->Shape();
+        }
+        if (shape.IsNull() || (faceMode && shape.ShapeType() != TopAbs_FACE)) { fallback(); return; }
+        faces.push_back(shape);
+    }
+    if (faces.empty()) { [self clearSelectedFaceWash]; _selectedContourGeometry.clear(); return; }
+    const auto camera = _viewer->ActiveView()->Camera();
+    const CGSize drawable = self.drawableSize;
+    const bool sameGeometry = !_selectedSurfaceAppearanceDirty
+        && _selectedContourDocument == document->Document().get()
+        && _selectedSurfaceWasFace == faceMode && faces.size() == _selectedWashFaces.size()
+        && std::equal(faces.begin(), faces.end(), _selectedWashFaces.begin(),
+            [](const TopoDS_Shape& a, const TopoDS_Shape& b) {
+                if (a.TShape() != b.TShape() || a.Orientation() != b.Orientation()) return false;
+                // Owner::Location creates fresh datum handles for transforms.
+                // Exact coefficients retain unchanged frames without hiding motion.
+                const auto& x = a.Location().Transformation();
+                const auto& y = b.Location().Transformation();
+                for (int row = 1; row <= 3; ++row)
+                    for (int column = 1; column <= 4; ++column)
+                        if (x.Value(row,column) != y.Value(row,column)) return false;
+                return true;
+            });
+    if (sameGeometry && _selectedSurfaceWidthPixels == pixels
+        && _selectedContourViewState == camera->WorldViewState()
+        && _selectedContourProjectionState == camera->ProjectionState()
+        && CGSizeEqualToSize(_selectedContourDrawable,drawable)) {
+        context->UnhilightSelected(Standard_False);
+        return;
+    }
+    if (drawable.width <= 0 || drawable.height <= 0) { fallback(); return; }
+    const auto scene = _viewer->captureSceneSnapshot(drawable.width, drawable.height);
+    if (!scene) { fallback(); return; }
+    struct SelectedFaces { bool object = false; std::unordered_set<std::uint32_t> faces; };
+    std::unordered_map<std::string, SelectedFaces> selected;
+    for (const auto& element : scene->selection.selected) {
+        auto& entry = selected[element.entityIdentifier];
+        if (element.kind == core3d::scene::ElementKind::Object) entry.object = true;
+        else if (element.kind == core3d::scene::ElementKind::Face) entry.faces.insert(element.topologyIndex);
+        else { fallback(); return; }
+    }
+    std::vector<gp_Pnt> points;
+    std::vector<NativeContourVertex> contourTriangles;
+    if (!sameGeometry) _selectedContourGeometry.clear();
+    std::size_t contourVertexBudget=0, contourIndexBudget=0;
+    for (const auto& item : scene->instances) {
+        const auto selection = selected.find(item.entityIdentifier);
+        if (selection == selected.end() || !item.visible) continue;
+        const auto& mesh = scene->meshes.at(item.meshIndex);
+        if (item.primitiveBindings.size() != mesh.primitives.size()) { fallback(); return; }
+        std::unordered_set<std::uint32_t> visibleFaces;
+        for (std::size_t index = 0; index < mesh.primitives.size(); ++index) {
+            if (item.primitiveBindings[index].visible)
+                visibleFaces.insert(mesh.primitives[index].faceIndex);
+        }
+        for (const auto face : selection->second.faces) {
+            if (!visibleFaces.count(face)) { fallback(); return; }
+        }
+        const auto& m = item.worldFromObject.values;
+        const auto world = [&](float x, float y, float z) {
+            return gp_Pnt(m[0]*x+m[4]*y+m[8]*z+m[12],
+                          m[1]*x+m[5]*y+m[9]*z+m[13],
+                          m[2]*x+m[6]*y+m[10]*z+m[14]);
+        };
+        // Planar BRep parts keep the qualified semantic-edge path. Smooth
+        // surfaces and polygon imports also need camera-dependent silhouettes.
+        // In Face mode build the silhouette from only the chosen surfaces.
+        // Including their unselected neighbours would outline the whole solid
+        // when a user selected one cap, and suppress the face's open boundary.
+        const auto* selectedFaces = faceMode ? &selection->second.faces : nullptr;
+        const bool needsContour = mesh.edgeSegments.empty()
+            || std::any_of(mesh.primitives.begin(),mesh.primitives.end(),[&](const auto& p) {
+                return visibleFaces.count(p.faceIndex)
+                    && (!selectedFaces || selectedFaces->count(p.faceIndex))
+                    && (!p.analyticSourceFace.available || p.analyticSourceFace.surfaceType != 0);
+            });
+        NativeProjectedContour contour;
+        if (needsContour) {
+            auto cached = std::find_if(_selectedContourGeometry.begin(),_selectedContourGeometry.end(),
+                [&](const auto& entry) { return entry.entity == item.entityIdentifier; });
+            if (cached == _selectedContourGeometry.end()) {
+                _selectedContourGeometry.push_back(BuildNativeContourGeometry(mesh,item,selectedFaces,
+                    contourVertexBudget,contourIndexBudget));
+                cached = std::prev(_selectedContourGeometry.end());
+
+            }
+            contour = ProjectNativeContours(*cached,camera,drawable.width,drawable.height,pixels);
+            if (contourTriangles.size()+contour.triangles.size() > 1'500'000) { fallback(); return; }
+            contourTriangles.insert(contourTriangles.end(),contour.triangles.begin(),contour.triangles.end());
+        }
+        const auto screen = [&](const gp_Pnt& point) {
+            const auto p = camera->Project(point);
+            return gp_Pnt((p.X()+1)*drawable.width*0.5,(p.Y()+1)*drawable.height*0.5,p.Z());
+        };
+        std::unordered_map<std::uint32_t, std::uint32_t> incidentFace;
+        const auto before = points.size();
+        for (const auto& edge : mesh.edgeSegments) {
+            if (!visibleFaces.count(edge.faceIndex)) continue;
+            if (!selection->second.object && !selection->second.faces.count(edge.faceIndex)) continue;
+            const auto inserted = incidentFace.emplace(edge.edgeIndex, edge.faceIndex);
+            // Keep every segment of a curved edge, but only one incident face.
+            if (!inserted.second && inserted.first->second != edge.faceIndex) continue;
+            if (points.size() > 1'500'000 - 2) { fallback(); return; }
+            const auto a=world(edge.startX,edge.startY,edge.startZ);
+            const auto b=world(edge.endX,edge.endY,edge.endZ);
+            // Do not stack a centered cap edge on its outward silhouette.
+            if (needsContour && contour.containsBoundary(screen(a),screen(b))) continue;
+            points.push_back(a); points.push_back(b);
+        }
+        if (points.size() == before && contour.triangles.empty()) { fallback(); return; }
+    }
+    if (points.empty() && contourTriangles.empty()) { fallback(); return; }
+    CGFloat r = 0, g = 0, b = 0, a = 0;
+    if (![_selectedSurfaceColor getRed:&r green:&g blue:&b alpha:&a]) { fallback(); return; }
+    const Quantity_Color color(r,g,b,Quantity_TOC_sRGB);
+    Handle(Graphic3d_Structure) wash = new Graphic3d_Structure(_viewer->V3dViewer()->StructureManager());
+    // Share the model depth buffer, including its transparent pass. The
+    // separate Top-layer transparent presentation can lose that occlusion.
+    wash->SetZLayer(Graphic3d_ZLayerId_Default);
+    // This is an ordinary scene structure with explicit line and translucent
+    // fill aspects, not OCCT's special wire-only highlight presentation.
+    wash->SetDisplayPriority(Graphic3d_DisplayPriority_Topmost);
+    // Keep GPU vertices close to the selection even for distant instances.
+    const gp_XYZ origin = (points.empty() ? contourTriangles.front().position : points.front()).XYZ();
+    gp_Trsf placement; placement.SetTranslation(gp_Vec(origin));
+    wash->SetTransformation(new TopLoc_Datum3D(placement));
+    try {
+        if (!points.empty()) {
+            Handle(Graphic3d_ArrayOfSegments) lines = new Graphic3d_ArrayOfSegments(int(points.size()));
+            for (const auto& point : points) lines->AddVertex(gp_Pnt(point.XYZ()-origin));
+            const auto lineGroup = wash->NewGroup();
+            const Handle(Prs3d_LineAspect) lineAspect = new Prs3d_LineAspect(color,Aspect_TOL_SOLID,pixels);
+            lineAspect->Aspect()->SetShaderProgram(NativeBoundaryLineShader());
+            lineGroup->SetGroupPrimitivesAspect(lineAspect->Aspect());
+            lineGroup->AddPrimitiveArray(lines);
+        }
+        if (!contourTriangles.empty()) {
+            Handle(Graphic3d_ArrayOfTriangles) triangles = new Graphic3d_ArrayOfTriangles(
+                int(contourTriangles.size()),0,Standard_False,Standard_False,Standard_True);
+            for (const auto& p : contourTriangles) triangles->AddVertex(gp_Pnt(p.position.XYZ()-origin),p.offset);
+            Handle(Prs3d_ShadingAspect) shading = new Prs3d_ShadingAspect();
+            shading->SetColor(color);
+            shading->Aspect()->SetShadingModel(Graphic3d_TypeOfShadingModel_Unlit);
+            shading->Aspect()->SetFaceCulling(Graphic3d_TypeOfBackfacingModel_DoubleSided);
+            shading->Aspect()->SetShaderProgram(NativeBoundaryLineShader(true));
+            const auto group = wash->NewGroup();
+            group->SetGroupPrimitivesAspect(shading->Aspect());
+            group->AddPrimitiveArray(triangles);
+        }
+        if (faceMode) {
+            Handle(Prs3d_ShadingAspect) shading = new Prs3d_ShadingAspect();
+            shading->SetColor(color);
+            shading->SetTransparency(1.0f-_selectedFaceWashOpacity);
+            const auto aspect = shading->Aspect();
+            aspect->SetShadingModel(Graphic3d_TypeOfShadingModel_Unlit);
+            aspect->SetAlphaMode(Graphic3d_AlphaMode_Blend);
+            aspect->SetPolygonOffsets(Aspect_POM_Fill,-1,-1);
+            std::size_t vertices = 0, indices = 0;
+            for (const auto& shape : faces) {
+                TopLoc_Location location;
+                const auto triangulation = BRep_Tool::Triangulation(TopoDS::Face(shape),location);
+                if (triangulation.IsNull() || triangulation->NbNodes() <= 0 || triangulation->NbTriangles() <= 0) {
+                    RemoveNativeSelectionStructure(wash); fallback(); return;
+                }
+                vertices += std::size_t(triangulation->NbNodes());
+                indices += std::size_t(triangulation->NbTriangles())*3;
+                if (vertices > 1'500'000 || indices > 4'500'000) { RemoveNativeSelectionStructure(wash); fallback(); return; }
+                Handle(Graphic3d_ArrayOfTriangles) triangles = new Graphic3d_ArrayOfTriangles(
+                    triangulation->NbNodes(),triangulation->NbTriangles()*3);
+                for (int index=1; index<=triangulation->NbNodes(); ++index) {
+                    const auto p = triangulation->Node(index).Transformed(location.Transformation());
+                    triangles->AddVertex(gp_Pnt(p.XYZ()-origin));
+                }
+                for (int index=1; index<=triangulation->NbTriangles(); ++index) {
+                    int a,b,c; triangulation->Triangle(index).Get(a,b,c);
+                    if (shape.Orientation() == TopAbs_REVERSED) std::swap(b,c);
+                    triangles->AddEdges(a,b,c);
+                }
+                const auto group = wash->NewGroup();
+                group->SetGroupPrimitivesAspect(aspect);
+                group->AddPrimitiveArray(triangles);
+            }
+        }
+        [self clearSelectedFaceWash];
+        _selectedFaceWash = wash;
+        _selectedWashFaces = std::move(faces);
+        _selectedSurfaceWidthPixels = pixels;
+        _selectedSurfaceWasFace = faceMode;
+        _selectedSurfaceAppearanceDirty = NO;
+        _selectedContourViewState = camera->WorldViewState();
+        _selectedContourProjectionState = camera->ProjectionState();
+        _selectedContourDrawable = drawable;
+        _selectedContourDocument = document->Document().get();
+        wash->CalculateBoundBox();
+        wash->Display();
+        // This does not change IsSelected or the authoritative owner set.
+        context->UnhilightSelected(Standard_False);
+    } catch (...) {
+        RemoveNativeSelectionStructure(wash); fallback(); throw;
+    }
+}
+
+- (void)updateSelectedEdgeAppearance {
+    // Operation previews own their presentation styles. Ordinary selection
+    // styling neither enters their lifecycle nor changes selected AIS owners.
+    if (_selectedEdgeColor == nil || _viewer == nullptr) return;
+    const auto interactor = _viewer->getShapeInteractor();
+    const auto context = _viewer->AisContext();
+    if (!interactor || context.IsNull()) return;
+    const bool edgeMode = interactor->getSelectionMode() == ShapeSelectionMode::Edge;
+    const auto current = context->HighlightStyle(Prs3d_TypeOfHighlight_LocalSelected);
+    const CGFloat pixels = _selectedEdgeWidthPoints * [self drawableScale];
+    // Unchanged frames do not enumerate presentation authority or regenerate
+    // highlights. The actual selection transition keeps its existing guards.
+    if (!edgeMode && (_selectedEdgeStyle.IsNull() || current != _selectedEdgeStyle)) return;
+    if (edgeMode && current == _selectedEdgeStyle && !_selectedEdgeAppearanceDirty
+        && _selectedEdgeWidthPixels == pixels) return;
+    if (_viewer->hasUnresolvedEdit() || !_viewer->canBeginCommittedEdit()) return;
+    if (edgeMode && [self getSelectionType] != PrimitiveSelectionTypeEdge) return;
+    if (_ordinaryLocalSelectionStyle.IsNull()
+        || (current != _ordinaryLocalSelectionStyle && current != _selectedEdgeStyle)) {
+        // A newly installed context or another presentation owner supplies a
+        // fresh default. Retain that exact drawer for Face/Object restoration.
+        _ordinaryLocalSelectionStyle = current;
+        _selectedEdgeStyle.Nullify();
+    }
+    if (!edgeMode) {
+        if (!_selectedEdgeStyle.IsNull() && current == _selectedEdgeStyle) {
+            context->SetHighlightStyle(Prs3d_TypeOfHighlight_LocalSelected, _ordinaryLocalSelectionStyle);
+            context->HilightSelected(Standard_False);
+        }
+        return;
+    }
+    if (!std::isfinite(pixels) || pixels <= 0) return;
+    if (_selectedEdgeStyle.IsNull()) {
+        _selectedEdgeStyle = new Prs3d_Drawer();
+        _selectedEdgeStyle->SetLink(_ordinaryLocalSelectionStyle);
+        _selectedEdgeStyle->SetDisplayMode(0);
+        // Top inherits the scene depth. Topmost would expose hidden edges.
+        _selectedEdgeStyle->SetZLayer(Graphic3d_ZLayerId_Top);
+        _selectedEdgeAppearanceDirty = YES;
+    }
+    BOOL changed = current != _selectedEdgeStyle;
+    if (_selectedEdgeAppearanceDirty || _selectedEdgeWidthPixels != pixels) {
+        CGFloat r = 0, g = 0, b = 0, a = 0;
+        if (![_selectedEdgeColor getRed:&r green:&g blue:&b alpha:&a]) return;
+        const Quantity_Color color(r, g, b, Quantity_TOC_sRGB);
+        _selectedEdgeStyle->SetColor(color);
+        _selectedEdgeStyle->SetTransparency(1.0f - a);
+        const Handle(Prs3d_LineAspect) line = new Prs3d_LineAspect(color, Aspect_TOL_SOLID, pixels);
+        line->Aspect()->SetShaderProgram(NativeBoundaryLineShader());
+        _selectedEdgeStyle->SetLineAspect(line);
+        _selectedEdgeStyle->SetWireAspect(line);
+        _selectedEdgeStyle->SetFreeBoundaryAspect(line);
+        _selectedEdgeStyle->SetUnFreeBoundaryAspect(line);
+        // Highlight overrides consume Graphic3d presentation attributes;
+        // drawer line width alone does not control the rendered highlight.
+        const Handle(Graphic3d_AspectFillArea3d) aspect = new Graphic3d_AspectFillArea3d();
+        aspect->SetInteriorColor(Quantity_ColorRGBA(color, a));
+        aspect->SetLineWidth(pixels);
+        aspect->SetShaderProgram(NativeBoundaryLineShader());
+        aspect->SetShadingModel(Graphic3d_TypeOfShadingModel_Unlit);
+        _selectedEdgeStyle->SetBasicFillAreaAspect(aspect);
+        _selectedEdgeWidthPixels = pixels;
+        _selectedEdgeAppearanceDirty = NO;
+        changed = YES;
+    }
+    if (changed) {
+        context->SetHighlightStyle(Prs3d_TypeOfHighlight_LocalSelected, _selectedEdgeStyle);
+        context->HilightSelected(Standard_False);
+    }
 }
 
 // =======================================================================
@@ -1571,6 +2452,9 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     UITouch *aTouch = [theTouches anyObject];
     if (aTouch != NULL) {
         const CGPoint point = [self drawablePointForPoint:[aTouch locationInView:self.view]];
+#ifdef DEBUG
+        [self debugTraceNativeFaceTap:point stage:@"touch-begin"];
+#endif
         if (didBeginPrimaryInteraction
             && _delegate
             && [_delegate respondsToSelector:
@@ -1581,6 +2465,9 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         }
         _tapRecognizer.cancelsTouchesInView = YES;
         _viewer->StartRotation((int)point.x, (int)point.y);
+#ifdef DEBUG
+        [self debugTraceNativeFaceTap:point stage:@"after-touch-begin"];
+#endif
         const std::shared_ptr<ObjectInteractor> anInteractor =
             _viewer->getObjectInteractor();
         _suppressTapSelectionForManipulatorInteraction =
@@ -1677,6 +2564,9 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     if (!_isPreviewMode && aTouch != NULL) {
         const CGPoint point = [self drawablePointForPoint:[aTouch locationInView:self.view]];
         _viewer->CancelInteraction((int)point.x, (int)point.y);
+#ifdef DEBUG
+        [self debugTraceNativeFaceTap:point stage:@"touch-cancel"];
+#endif
         [self requestRender];
 
 #ifdef DEBUG
@@ -1872,6 +2762,77 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 // function : tapHandler
 // purpose  :
 // =======================================================================
+#ifdef DEBUG
+// The lesson's raster hit token is not the native selection result. Retain
+// actual UIKit coordinates and native owners at each boundary without moving
+// detection, changing selection, or asking the full scene builder to publish.
+- (NSArray<NSString *> *)debugNativeFaceTapTrace {
+    return NSThread.isMainThread ? ([_debugNativeFaceTapTrace copy] ?: @[]) : @[];
+}
+
+- (void)debugTraceNativeFaceTap:(CGPoint)point stage:(NSString *)stage {
+    const auto environment = NSProcessInfo.processInfo.environment;
+    if (![environment[@"SHAPEYARD_NATIVE_FACE_TRACE"] isEqualToString:@"1"]
+        && ![environment[@"SHAPEYARD_MUG_LESSON_STL_ORACLE"] isEqualToString:@"1"]
+        && ![NSProcessInfo.processInfo.arguments containsObject:@"-ShapeyardMugLessonStart"]) return;
+    if (!_viewer || !_viewer->getShapeInteractor()
+        || _viewer->getShapeInteractor()->getSelectionMode() != ShapeSelectionMode::Face) return;
+    try {
+        const auto context = _viewer->AisContext(); const auto view = _viewer->ActiveView();
+        if (context.IsNull() || view.IsNull()) return;
+        int width=0,height=0; view->Window()->Size(width,height);
+        int detected=-1,nearest=-1; double radius=-1;
+        NSMutableArray<NSString *> *ranks = [NSMutableArray array];
+        const auto owner = Handle(StdSelect_BRepOwner)::DownCast(context->DetectedOwner());
+        const auto shape = owner.IsNull() ? Handle(AIS_Shape)() : Handle(AIS_Shape)::DownCast(owner->Selectable());
+        if (!shape.IsNull() && owner->HasShape()) {
+            TopTools_IndexedMapOfShape faces;
+            for (TopExp_Explorer face(shape->Shape(),TopAbs_FACE); face.More() && faces.Extent()<=128; face.Next())
+                faces.Add(face.Current());
+            if (faces.Extent()<=128) {
+                detected=faces.FindIndex(owner->Shape())-1;
+                if (owner->Shape().ShapeType()==TopAbs_FACE) {
+                    BRepAdaptor_Surface surface(TopoDS::Face(owner->Shape()),Standard_True);
+                    if (surface.GetType()==GeomAbs_Cylinder)
+                        radius=surface.Cylinder().Radius()*std::abs(shape->Transformation().ScaleFactor());
+                }
+                const auto selector=context->MainSelector();
+                for (int rank=1; !selector.IsNull() && rank<=selector->NbPicked() && rank<=8; ++rank) {
+                    const auto candidate=Handle(StdSelect_BRepOwner)::DownCast(selector->Picked(rank));
+                    if (!candidate.IsNull() && candidate->HasShape())
+                        [ranks addObject:[NSString stringWithFormat:@"%d:%.6f",faces.FindIndex(candidate->Shape())-1,
+                            selector->PickedData(rank).Depth]];
+                }
+                // Only intersect after the native pick. Earlier stages observe
+                // counts and the previous hover, never prime a detection probe.
+                if ([stage isEqualToString:@"after-select"]) {
+                    double x,y,z,dx,dy,dz;
+                    view->ConvertWithProj((int)point.x,(int)point.y,x,y,z,dx,dy,dz);
+                    const auto inverse=shape->Transformation().Inverted();
+                    IntCurvesFace_ShapeIntersector ray; ray.Load(shape->Shape(),1e-7);
+                    ray.Perform(gp_Lin(gp_Pnt(x,y,z).Transformed(inverse),gp_Dir(dx,dy,dz).Transformed(inverse)),0,1e6);
+                    double depth=1e6;
+                    if (ray.IsDone()) for (int hit=1;hit<=ray.NbPnt();++hit)
+                        if (ray.WParameter(hit)>=0 && ray.WParameter(hit)<depth) {
+                            depth=ray.WParameter(hit); nearest=faces.FindIndex(ray.Face(hit))-1;
+                        }
+                }
+            }
+        }
+        const auto eye=view->Camera()->Eye();
+        NSString *entry = [NSString stringWithFormat:@"stage=%@ xy=%.0f,%.0f viewport=%d,%d count=%d hit=%d face=%d radius=%.6f ray=%d ranks=%@ eye=%.6f,%.6f,%.6f clip=%.6f,%.6f",
+            stage,point.x,point.y,width,height,_viewer->selectedCount(),context->HasDetected(),detected,radius,nearest,
+            [ranks componentsJoinedByString:@","],eye.X(),eye.Y(),eye.Z(),view->Camera()->ZNear(),view->Camera()->ZFar()];
+        if (!_debugNativeFaceTapTrace) _debugNativeFaceTapTrace = [NSMutableArray array];
+        [_debugNativeFaceTapTrace addObject:entry];
+        if (_debugNativeFaceTapTrace.count > 32) [_debugNativeFaceTapTrace removeObjectAtIndex:0];
+        NSLog(@"SHAPEYARD_NATIVE_FACE_TAP %@", entry);
+    } catch (...) {
+        NSLog(@"SHAPEYARD_NATIVE_FACE_TAP stage=%@ unavailable",stage);
+    }
+}
+#endif
+
 - (void)tapHandler:(UITapGestureRecognizer *)tapRecognizer
 {
     if (_suppressTapSelectionForManipulatorInteraction) {
@@ -1903,6 +2864,9 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     const CGPoint aTapPoint =
         [self drawablePointForPoint:[tapRecognizer locationInView:self.view]];
 	if (!_isConstructorMode) {
+#ifdef DEBUG
+        [self debugTraceNativeFaceTap:aTapPoint stage:@"before-delegate"];
+#endif
 		if (_delegate
 			&& [_delegate respondsToSelector:
 				@selector(viewer:willSelectAtDrawablePoint:drawableSize:)]) {
@@ -1910,14 +2874,24 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 				willSelectAtDrawablePoint:aTapPoint
 				             drawableSize:self.drawableSize];
 		}
+#ifdef DEBUG
+        [self debugTraceNativeFaceTap:aTapPoint stage:@"before-select"];
+#endif
 		_viewer->Select((int)aTapPoint.x, (int)aTapPoint.y);
+#ifdef DEBUG
+        [self debugTraceNativeFaceTap:aTapPoint stage:@"after-select"];
+#endif
 	}
 
 	[self checkSelections];
+#ifdef DEBUG
+    [self debugTraceNativeFaceTap:aTapPoint stage:@"after-publication"];
+#endif
 	[self requestRender];
 }
 
 -(void) checkSelections {
+    _committedBoundariesDirty = YES;
     // Observe synchronously, before the debounced UI delegate. This also
     // catches a select/deselect round trip between two immutable scene reads.
     if (_viewer != nullptr) _viewer->observeNativePlanningInteraction();
@@ -2792,6 +3766,39 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         || _viewer->getShapeInteractor()->cancelExtrusion();
     [self requestRender];
     return cancelled;
+}
+
+- (NSArray<NSDictionary<NSString *, id> *> *)extrusionSplitEdges {
+    if (_viewer == nullptr || _viewer->getShapeInteractor() == nullptr) {
+        return @[];
+    }
+    NSMutableArray *result = [NSMutableArray array];
+    for (const auto &edge : _viewer->getShapeInteractor()->extrusionSplitEdges()) {
+        [result addObject:@{
+            @"side": [NSString stringWithUTF8String:edge.first.c_str()],
+            @"length": @(edge.second)
+        }];
+    }
+    return result;
+}
+
+- (BOOL)setExtrusionSplitReferenceEdge:(NSInteger)index {
+    if ([self getGizmoType] != PrimitiveGizmoTypeExtrude
+        || _viewer == nullptr
+        || _viewer->getShapeInteractor() == nullptr) {
+        return NO;
+    }
+    const BOOL result = _viewer->getShapeInteractor()
+        ->setExtrusionSplitReferenceEdge(static_cast<Standard_Integer>(index));
+    [self requestRender];
+    return result;
+}
+
+- (NSInteger)extrusionSplitReferenceEdge {
+    if (_viewer == nullptr || _viewer->getShapeInteractor() == nullptr) {
+        return -1;
+    }
+    return _viewer->getShapeInteractor()->extrusionSplitReferenceEdge();
 }
 
 - (BOOL)canApplyExtrusion {
@@ -5623,9 +6630,12 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         Standard_Integer customDataMapShaderCount = 0;
         Standard_Integer customNonDefaultAlphaCount = 0;
         Standard_Integer customNonAutoFaceCullingCount = 0;
-        if (!cafShape.IsNull()) {
-            for (CafDataMapOfShapeColor::Iterator anOverride(
-                     cafShape->ShapeColors());
+        // Live primitives and reloaded XCAF presentations both support face
+        // drawers. Inspect the shared base instead of hiding live overrides.
+        const auto coloredShape = Handle(AIS_ColoredShape)::DownCast(shape);
+        if (!coloredShape.IsNull()) {
+            for (AIS_DataMapOfShapeDrawer::Iterator anOverride(
+                     coloredShape->CustomAspectsMap());
                  anOverride.More(); anOverride.Next()) {
                 const Handle(AIS_ColoredDrawer)& drawer =
                     anOverride.Value();

@@ -17,9 +17,17 @@
 #import <Foundation/Foundation.h>
 
 #include <Graphic3d_TextureSet.hxx>
+#include <Graphic3d_ShaderProgram.hxx>
+#include "../UI/Core3DContext.hpp"
 #include <Prs3d_ShadingAspect.hxx>
 
 namespace {
+
+bool HasAuthoredPBRShader(const Handle(Graphic3d_AspectFillArea3d)& aspect)
+{
+  return !aspect.IsNull() && !aspect->ShaderProgram().IsNull()
+      && aspect->ShaderProgram()->GetId().StartsWith("shapeyard-data-maps-v1-");
+}
 
 Handle(Graphic3d_AspectFillArea3d) ClearDrawerTextureMapping(
     const Handle(Prs3d_Drawer)& theDrawer)
@@ -34,6 +42,12 @@ Handle(Graphic3d_AspectFillArea3d) ClearDrawerTextureMapping(
   if (aShading.IsNull() || aShading->Aspect().IsNull())
   {
     return {};
+  }
+  // Scalar PBR intentionally survives an empty texture set. A complete
+  // material replacement must therefore clear our shader explicitly.
+  if (HasAuthoredPBRShader(aShading->Aspect()))
+  {
+    aShading->Aspect()->SetShaderProgram({});
   }
   aShading->Aspect()->SetTextureMapOff();
   aShading->Aspect()->SetTextureSet(
@@ -87,8 +101,9 @@ void CopyDrawerTextureMapping(
     // renderer texture set produced for the authoritative root material.
     aDestinationAspect->SetTextureSet(aSourceAspect->TextureSet());
     aDestinationAspect->SetTextureMapOn();
-    Core3DPrepareRendererTextures(aDestinationAspect);
   }
+  Core3DPrepareRendererTextures(
+      aDestinationAspect, HasAuthoredPBRShader(aSourceAspect));
 }
 
 Handle(Graphic3d_TextureSet) TextureSetReplacingBaseColor(
@@ -172,18 +187,20 @@ void CafShapePrs::DispatchStyles(const Standard_Boolean theToSyncStyles)
   XCAFPrs_AISObject::DispatchStyles(theToSyncStyles);
   // The parent recreates wrappers for default and imported sub-shape styles.
   // Normalize every own aspect after dispatch, before Compute consumes it.
+  Core3DContext::DisableSurfaceIsolines(Attributes());
   if (!Attributes()->ShadingAspect().IsNull())
   {
-    Core3DPrepareRendererTextures(Attributes()->ShadingAspect()->Aspect());
+    Core3DPrepareRendererTextures(Attributes()->ShadingAspect()->Aspect(), myUseScalarPBR);
   }
   for (AIS_DataMapOfShapeDrawer::Iterator anOverride(myShapeColors);
        anOverride.More(); anOverride.Next())
   {
     const Handle(AIS_ColoredDrawer)& aDrawer = anOverride.Value();
+    Core3DContext::DisableSurfaceIsolines(aDrawer);
     if (!aDrawer.IsNull() && aDrawer->HasOwnShadingAspect()
         && !aDrawer->ShadingAspect().IsNull())
     {
-      Core3DPrepareRendererTextures(aDrawer->ShadingAspect()->Aspect());
+      Core3DPrepareRendererTextures(aDrawer->ShadingAspect()->Aspect(), myUseScalarPBR);
     }
   }
   if (!IsEditablePresentation() && !Shape().IsNull())
@@ -209,6 +226,7 @@ void CafShapePrs::ApplyAuthoredVisualMaterial(
   }
 
   const Quantity_ColorRGBA aBaseColor = theMaterial->BaseColor();
+  myUseScalarPBR = theMaterial->HasPbrMaterial();
   myDefStyle.SetMaterial(theMaterial);
   myDefStyle.SetColorSurf(aBaseColor);
   myDefStyle.SetColorCurv(aBaseColor.GetRGB());
@@ -232,7 +250,7 @@ void CafShapePrs::ApplyAuthoredVisualMaterial(
     return;
   }
   theMaterial->FillAspect(aRootAspect);
-  Core3DPrepareRendererTextures(aRootAspect);
+  Core3DPrepareRendererTextures(aRootAspect, myUseScalarPBR);
   for (AIS_DataMapOfShapeDrawer::Iterator anOverride(myShapeColors);
        anOverride.More(); anOverride.Next())
   {
@@ -264,6 +282,7 @@ void CafShapePrs::ApplyAuthoredLegacyAppearance(
   removeDefinitionRootCustomAspects();
   if (theHasMaterial)
   {
+    myUseScalarPBR = Standard_False;
     ResetDrawerForLegacyMaterial(Attributes());
     for (AIS_DataMapOfShapeDrawer::Iterator anOverride(myShapeColors);
          anOverride.More(); anOverride.Next())

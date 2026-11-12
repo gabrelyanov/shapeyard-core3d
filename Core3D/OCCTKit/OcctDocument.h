@@ -68,6 +68,7 @@ namespace core3d::composite_recipe { struct Payload; struct Record; }
 #include <gp_Vec.hxx>
 #include <cstdint>
 #include "ProfilePersistence.hxx"
+#include "InspectorPrimitiveResize.hxx"
 #include "EnclosurePersistence.hxx"
 
 #include <TDF_Data.hxx>
@@ -431,6 +432,7 @@ struct OcctObjectTransformState
     core3d::sweep_persistence::Record sweep;
     core3d::loft_persistence::Record loft;
     core3d::retained_solid::Record retained;
+    core3d::inspector_primitive::Record inspectorPrimitive;
     std::optional<core3d::retained_edge_treatment::Record> edgeTreatment;
     std::optional<core3d::retained_edge_treatment::r2::Record> edgeTreatmentR2;
     gp_Trsf transform;
@@ -796,9 +798,11 @@ Standard_EXPORT Standard_Boolean Core3DTexturesMatch(
 
 //! Replace XCAF renderer wrappers with role-aware, presentation-only wrappers.
 //! Persistent image IDs/bytes remain unchanged; GPU identity includes whether
-//! the binding carries color or numeric samples. Safe to call repeatedly.
+//! the binding carries color or numeric samples. Authored scalar PBR opts into
+//! the same lighting without creating a texture. Safe to call repeatedly.
 Standard_EXPORT void Core3DPrepareRendererTextures(
-    const Handle(Graphic3d_AspectFillArea3d)& aspect);
+    const Handle(Graphic3d_AspectFillArea3d)& aspect,
+    const Standard_Boolean useScalarPBR = Standard_False);
 
 //! Validate the bounded opaque 8-bit PNG numeric channel representation.
 //! This checks actual decoded samples/layout, not only the image's media type.
@@ -1150,6 +1154,11 @@ public:
   //! Never opens a command or repairs metadata. Call immediately before a
   //! destructive operation's NewCommand; callers must reject every result
   //! except the explicitly admitted route above.
+  //! True for a Join, Cut or Overlap result that still keeps its originals.
+  Standard_EXPORT Standard_Boolean IsBooleanResultLabel(const TDF_Label& label) const noexcept;
+    //! Private export copies only: a joined / cut / overlap part becomes a plain part
+    //! (its Join record is dropped) so a baked scale needs no record replay.
+  Standard_EXPORT Standard_Boolean ForgetBooleanResultRecordForExport(const TDF_Label& label) noexcept;
   Standard_EXPORT OcctRetainedRecipeCoverage RetainedRecipeCoverageForLabel(
       const TDF_Label& label) const noexcept;
   //! Read-only eligibility and capture for the plain-profile compatibility
@@ -1852,6 +1861,35 @@ public:
     ObserveBooleanSources(
         const std::shared_ptr<const core3d::authored_parameter::PairCapture>& capture)
         const noexcept;
+    //! Hole on any solid part: cut a cylinder of `radius` along `direction`
+    //! from `start` (the part's own frame, document units) through the whole
+    //! part (depth <= 0) or `depth` deep, as ONE undoable command. A previous
+    //! Boolean result is baked (its record dropped); other recorded parts are
+    //! refused. The new solid is handed back for display. Main thread only.
+    //! Join / Cut / Overlap without keeping the two originals: `tool` is moved
+    //! into `target`'s frame (both presentations' placements), combined, and
+    //! in ONE undoable command written to `target` while `tool` is removed.
+    //! Used when the editable Boolean cannot keep its originals. Main thread.
+    Standard_EXPORT Standard_Boolean ApplyBakedBoolean(
+        const TDF_Label& target, const Handle(AIS_Shape)& targetPresentation,
+        const TDF_Label& tool, const Handle(AIS_Shape)& toolPresentation,
+        int operation, std::string& refusal) noexcept;
+    //! The drilled solid ApplyThroughHole would write, without changing the
+    //! document (for the on-model preview). Same inputs and refusals.
+    Standard_EXPORT Standard_Boolean BuildThroughHole(
+        const TDF_Label& label, const gp_Pnt& start, const gp_Dir& direction,
+        double radius, double depth, TopoDS_Shape& result, std::string& refusal)
+        const noexcept;
+    Standard_EXPORT Standard_Boolean ApplyThroughHole(
+        const TDF_Label& label, const Handle(AIS_Shape)& presentation,
+        const gp_Pnt& start, const gp_Dir& direction, double radius, double depth,
+        std::string& refusal) noexcept;
+    //! The prepared result (in the target's own frame) and the two entity
+    //! identifiers, for an on-model preview before Apply. Read-only.
+    Standard_EXPORT Standard_Boolean BooleanPairPreparedPreview(
+        const std::shared_ptr<const core3d::authored_parameter::PairPrepared>& prepared,
+        TopoDS_Shape& result, std::string& targetEntity, std::string& toolEntity)
+        const noexcept;
     //! N-COM sole creation mutation boundary. The detached prepared authority
     //! is revalidated before one Context-owned command is acquired. Target
     //! replacement, sole-owner installation, tool retirement, group repair
@@ -2100,6 +2138,7 @@ public:
     Standard_Boolean CopyObjectAppearance(
         const TDF_Label& source,
         const TDF_Label& destination);
+    void LoadAuthoredFaceMaterials(const TDF_Label& label, const Handle(AIS_Shape) presentation);
     void LoadObjectMeterial(const TDF_Label& label, const Handle(AIS_Shape) anAis);
     // Bounded scalar-only metadata guard for the saved-sweep edit catalog.
     // Unsupported textures/imported color links are refused, never discarded.
@@ -2342,6 +2381,15 @@ public:
     //! appearance remain attached to the stable label.
     //! Topology-changing legacy tools must refuse saved sweeps and lofts before opening work.
     Standard_EXPORT Standard_Boolean HasNoSavedSweepForTopology(const TDF_Label& label) const noexcept;
+
+    //! Push-pull may bake a standalone older saved cut; other topology tools
+    //! retain HasNoSavedSweepForTopology's stricter admission.
+    Standard_Boolean CanBakeSavedCutForFaceEdit(const TDF_Label& label) const noexcept;
+
+    //! Bake a saved Join/Cut/Overlap or standalone older cut before a face edit.
+    //! Requires the face edit's open command: abort/undo restores the record.
+    //! Other saved feature families are never removed by this operation.
+    Standard_Boolean PrepareBooleanResultForFaceEdit(const TDF_Label& label) noexcept;
 
     Standard_Boolean ReplaceShape(
         const TDF_Label& label,

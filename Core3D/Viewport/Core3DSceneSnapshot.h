@@ -30,6 +30,15 @@ typedef struct NS_SWIFT_SENDABLE Core3DSceneVertex {
     float textureV;
 } Core3DSceneVertex;
 
+//! Packed independent line segment; no SIMD padding. Coordinates are in the
+//! same mesh-local space as Core3DSceneVertex. Apply the render item's transform.
+typedef struct NS_SWIFT_SENDABLE Core3DSceneEdgeSegment {
+    float startX, startY, startZ;
+    float endX, endY, endZ;
+    uint32_t edgeIndex;
+    uint32_t faceIndex;
+} Core3DSceneEdgeSegment;
+
 //! Private derivative: one packed float4 (tangent xyz, bitangent sign w) per
 //! triangle index corner. The eight-float scene vertex ABI is unchanged.
 //! This helper does not publish normal-map support or mutate a document.
@@ -238,6 +247,8 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @interface Core3DSceneCameraSnapshot : NSObject
 
+//! Per-view lesson lighting; no saved material or export changes.
+@property (nonatomic, assign, readonly) BOOL lessonLightingEnabled;
 @property (nonatomic, assign, readonly) simd_double3 eye;
 @property (nonatomic, assign, readonly) simd_double3 center;
 @property (nonatomic, assign, readonly) simd_double3 up;
@@ -426,6 +437,13 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, copy, readonly) NSData *vertexData;
 //! Owned uint32_t index bytes.
 @property (nonatomic, copy, readonly) NSData *indexData;
+//! Optional BRep boundary lines, never triangle diagonals or surface isolines.
+//! Shared edges occur per incident face; draw only visible face bindings.
+//! Periodic surface seams and degenerate edges are omitted. Empty for meshes
+//! without BRep edge polygons and native C1 wires. No GPU pick tokens are added.
+@property (nonatomic, copy, readonly) NSData *edgeSegmentData;
+@property (nonatomic, assign, readonly) NSUInteger edgeSegmentCount;
+@property (nonatomic, assign, readonly) NSUInteger edgeSegmentStride;
 //! Number of tessellated render vertices, not semantic topology vertices.
 @property (nonatomic, assign, readonly) NSUInteger vertexCount;
 @property (nonatomic, assign, readonly) NSUInteger indexCount;

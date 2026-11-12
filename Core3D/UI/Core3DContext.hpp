@@ -25,6 +25,13 @@ public:
                                   const Standard_Boolean               theToUpdateViewer,
                                   const PrsMgr_DisplayStatus           theDispStatus = PrsMgr_DisplayStatus_None);
     void ApplyDefaultMaterial(const Handle(AIS_InteractiveObject)& obj);
+    //! Keep selection wireframes on real edges, including resized spline faces.
+    Standard_EXPORT static void DisableSurfaceIsolines(const Handle(Prs3d_Drawer)& drawer);
+    using AIS_InteractiveContext::MoveTo;
+    //! Refine cylindrical face candidates without replacing selection owners.
+    Standard_EXPORT AIS_StatusOfDetection MoveTo(
+        Standard_Integer x, Standard_Integer y,
+        const Handle(V3d_View)& view, Standard_Boolean redraw);
 #ifdef DEBUG
     //! Deterministic test-only preselection publication. Production hover
     //! continues to be owned exclusively by AIS_InteractiveContext::MoveTo().

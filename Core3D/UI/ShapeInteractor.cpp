@@ -23,7 +23,12 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <GeomAdaptor_Curve.hxx>
+#include <Geom_BSplineCurve.hxx>
 #include <BRepFeat_MakePrism.hxx>
+#include <BRepFeat_SplitShape.hxx>
+#include <BRepAlgoAPI_Section.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <gp_Pln.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
@@ -134,12 +139,14 @@ namespace core3d {
 
 		Standard_Boolean IsBRepModelingLabel(
 			const Handle(OcctDocument)& document,
-			const TDF_Label& label) noexcept {
+			const TDF_Label& label,
+			const Standard_Boolean allowSavedCut = Standard_False) noexcept {
 			if (document.IsNull() || label.IsNull()) {
 				return Standard_False;
 			}
 			if (!document->IsEditableFreeSimpleDefinitionLabel(label)
-                || !document->HasNoSavedSweepForTopology(label)) {
+                || (!document->HasNoSavedSweepForTopology(label)
+                    && !(allowSavedCut && document->CanBakeSavedCutForFaceEdit(label)))) {
 				return Standard_False;
 			}
 			const OcctGeometryRepresentation representation =
@@ -461,6 +468,209 @@ namespace core3d {
 			}
 		}
 
+		Standard_Boolean StraightFaceEdgeDirection(
+			const TopoDS_Edge& edge, gp_Dir& direction) noexcept {
+			try {
+				const BRepAdaptor_Curve curve(edge);
+				if (curve.GetType() == GeomAbs_Line) {
+					direction = curve.Line().Direction();
+					return Standard_True;
+				}
+				// Dimension edits turn lines into splines too. Prove the entire
+				// bounded control polygon is straight, including trimmed edges.
+				if (curve.GetType() != GeomAbs_BSplineCurve
+					|| curve.NbPoles() < 2 || curve.NbPoles() > 64)
+					return Standard_False;
+				const gp_Pnt first = curve.Value(curve.FirstParameter());
+				const gp_Pnt last = curve.Value(curve.LastParameter());
+				if (first.Distance(last) <= Precision::Confusion())
+					return Standard_False;
+				const gp_Lin line(first, gp_Dir(gp_Vec(first, last)));
+				const Handle(Geom_BSplineCurve) spline = curve.BSpline();
+				if (spline.IsNull()) return Standard_False;
+				for (Standard_Integer i = 1; i <= spline->NbPoles(); ++i) {
+					const Standard_Real weight = spline->Weight(i);
+					const Standard_Real distance = line.Distance(spline->Pole(i));
+					if (!std::isfinite(weight) || weight <= 0.0
+						|| !std::isfinite(distance) || distance > Precision::Confusion())
+						return Standard_False;
+				}
+				direction = line.Direction();
+				return Standard_True;
+			} catch (...) {
+				return Standard_False;
+			}
+		}
+
+		//! Straight, non-degenerate boundary edges of a face, deduplicated, in
+		//! explorer order. A copy made by BRepBuilderAPI_Copy keeps this order.
+		std::vector<TopoDS_Edge> StraightFaceEdges(const TopoDS_Face& face) {
+			std::vector<TopoDS_Edge> result;
+			TopTools_IndexedMapOfShape seen;
+			for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+				const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+				if (seen.Contains(edge) || BRep_Tool::Degenerated(edge)) {
+					continue;
+				}
+				seen.Add(edge);
+				gp_Dir direction;
+				if (StraightFaceEdgeDirection(edge, direction)) {
+					result.push_back(edge);
+				}
+			}
+			return result;
+		}
+
+		gp_Pnt FaceCentroid(const TopoDS_Face& face) {
+			GProp_GProps properties;
+			BRepGProp::SurfaceProperties(face, properties);
+			return properties.CentreOfMass();
+		}
+
+		//! Split one planar face of a solid by a straight line parallel to one
+		//! of its straight edges, `offset` model units inside the face. The
+		//! result is the same solid with one more face; the volume is unchanged.
+		Standard_Boolean BuildFaceSplitCandidate(
+			const TopoDS_Shape& source,
+			const TopoDS_Face& face,
+			const Standard_Integer edgeIndex,
+			const Standard_Real offset,
+			TopoDS_Shape& candidate,
+			Standard_Size& candidateSubshapeCount,
+			Standard_Size& candidateSolidCount,
+			Standard_Integer& failureStage) {
+			candidate.Nullify();
+			candidateSubshapeCount = 0;
+			candidateSolidCount = 0;
+			failureStage = 0;
+			if (source.IsNull() || face.IsNull() || edgeIndex < 0
+				|| !std::isfinite(offset)
+				|| offset <= Precision::Confusion()
+				|| offset > kMaximumExtrusionDistance) {
+				failureStage = 21;
+				return Standard_False;
+			}
+			try {
+				OCC_CATCH_SIGNALS
+				TopoDS_Shape workingSource;
+				TopoDS_Face workingFace;
+				if (!DetachExtrusionSource(
+						source, face, workingSource, workingFace,
+						failureStage)) {
+					return Standard_False;
+				}
+				gp_Pln plane;
+				if (!TryFaceOperationPlane(workingFace, plane)) {
+					failureStage = 22;
+					return Standard_False;
+				}
+				const std::vector<TopoDS_Edge> edges =
+					StraightFaceEdges(workingFace);
+				if (static_cast<std::size_t>(edgeIndex) >= edges.size()) {
+					failureStage = 23;
+					return Standard_False;
+				}
+				const BRepAdaptor_Curve reference(edges[edgeIndex]);
+				gp_Dir along;
+				if (!StraightFaceEdgeDirection(edges[edgeIndex], along)) {
+					failureStage = 23;
+					return Standard_False;
+				}
+				const gp_Pnt middle = reference.Value(
+					0.5 * (reference.FirstParameter()
+						+ reference.LastParameter()));
+				gp_Vec inward = gp_Vec(plane.Axis().Direction())
+					.Crossed(gp_Vec(along));
+				if (inward.Magnitude() <= Precision::Confusion()) {
+					failureStage = 24;
+					return Standard_False;
+				}
+				inward.Normalize();
+				if (gp_Vec(middle, FaceCentroid(workingFace)).Dot(inward) < 0.0) {
+					inward.Reverse();
+				}
+				const gp_Pnt origin = middle.Translated(inward * offset);
+				BRepAlgoAPI_Section section(
+					workingFace, gp_Pln(origin, gp_Dir(inward)), Standard_False);
+				section.ComputePCurveOn1(Standard_True);
+				section.Approximation(Standard_False);
+				section.Build();
+				if (!section.IsDone() || section.Shape().IsNull()) {
+					failureStage = 25;
+					return Standard_False;
+				}
+				BRepFeat_SplitShape splitter(workingSource);
+				Standard_Integer sectionEdges = 0;
+				for (TopExp_Explorer it(section.Shape(), TopAbs_EDGE);
+					 it.More(); it.Next()) {
+					splitter.Add(TopoDS::Edge(it.Current()), workingFace);
+					++sectionEdges;
+				}
+				if (sectionEdges == 0) {
+					// The line misses the face: the offset is too large.
+					failureStage = 26;
+					return Standard_False;
+				}
+				splitter.Build();
+				if (!splitter.IsDone() || splitter.Shape().IsNull()) {
+					failureStage = 27;
+					return Standard_False;
+				}
+				TopoDS_Shape raw = splitter.Shape();
+				if (raw.ShapeType() == TopAbs_COMPOUND
+					|| raw.ShapeType() == TopAbs_COMPSOLID) {
+					Standard_Integer solids = 0;
+					for (TopExp_Explorer it(raw, TopAbs_SOLID); it.More(); it.Next()) {
+						if (++solids == 1) {
+							candidate = it.Current();
+						}
+					}
+					if (solids != 1) {
+						candidate.Nullify();
+						failureStage = 28;
+						return Standard_False;
+					}
+				} else if (raw.ShapeType() == TopAbs_SOLID) {
+					candidate = raw;
+				} else {
+					failureStage = 28;
+					return Standard_False;
+				}
+				TopTools_IndexedMapOfShape before, after;
+				TopExp::MapShapes(workingSource, TopAbs_FACE, before);
+				TopExp::MapShapes(candidate, TopAbs_FACE, after);
+				if (after.Extent() <= before.Extent()) {
+					// The line lies on the boundary: nothing was split.
+					candidate.Nullify();
+					failureStage = 29;
+					return Standard_False;
+				}
+				if (!CountBoundedTopology(
+						candidate,
+						kMaximumExtrusionSourceSubshapes,
+						candidateSubshapeCount,
+						candidateSolidCount)
+					|| candidateSolidCount != 1) {
+					candidate.Nullify();
+					failureStage = 30;
+					return Standard_False;
+				}
+				const BRepCheck_Analyzer topologyOnly(candidate, Standard_False);
+				if (!topologyOnly.IsValid()) {
+					candidate.Nullify();
+					failureStage = 31;
+					return Standard_False;
+				}
+				return Standard_True;
+			} catch (...) {
+				candidate.Nullify();
+				candidateSubshapeCount = 0;
+				candidateSolidCount = 0;
+				failureStage = 32;
+				return Standard_False;
+			}
+		}
+
 		Standard_Boolean BuildExtrusionCandidate(
 			const TopoDS_Shape& source,
 			const TopoDS_Face& face,
@@ -507,15 +717,14 @@ namespace core3d {
 						failureStage)) {
 					return Standard_False;
 				}
-				const BRepAdaptor_Surface surface(
-					workingFace, Standard_True);
-				if (surface.GetType() != GeomAbs_Plane
+				gp_Pln plane;
+				if (!TryFaceOperationPlane(workingFace, plane)
 					|| (workingFace.Orientation() != TopAbs_FORWARD
 						&& workingFace.Orientation() != TopAbs_REVERSED)) {
 					failureStage = 2;
 					return Standard_False;
 				}
-				gp_Dir outward = surface.Plane().Axis().Direction();
+				gp_Dir outward = plane.Axis().Direction();
 				if (workingFace.Orientation() == TopAbs_REVERSED) {
 					outward.Reverse();
 				}
@@ -738,7 +947,7 @@ namespace core3d {
 				ShellOperationController::kMaximumSourceTopologyNodes,
 				ShellOperationController::
 					kMaximumStyledSubshapeLabels,
-				theProof);
+				theProof, Standard_True, Standard_True);
 		} catch (...) {
 			theProof = FaceOperationSourceProof();
 			return Standard_False;
@@ -1063,7 +1272,7 @@ namespace core3d {
 					myDoc,
 					theProof,
 					ShellOperationController::
-						kMaximumStyledSubshapeLabels)
+						kMaximumStyledSubshapeLabels, Standard_True)
 				|| theProof.topologyNodeCount
 					> ShellOperationController::
 						kMaximumSourceTopologyNodes) {
@@ -1286,7 +1495,7 @@ namespace core3d {
 			if (document.IsNull() || document->HasOpenCommand()
 				|| document->GetUndoLimit() == 0
 				|| _extrusion.label.Data() != document->GetData()
-				|| !IsBRepModelingLabel(myDoc, _extrusion.label)
+				|| !IsBRepModelingLabel(myDoc, _extrusion.label, Standard_True)
 				|| currentLabel.IsNull()
 				|| !currentLabel.IsEqual(_extrusion.label)
 				|| !XCAFDoc_ShapeTool::GetShape(_extrusion.label)
@@ -1306,7 +1515,23 @@ namespace core3d {
 			Standard_Boolean historyHasModified = Standard_False;
 			Standard_Boolean historyHasGenerated = Standard_False;
 			Standard_Boolean historyFaceDeleted = Standard_False;
-			if (!BuildExtrusionCandidate(
+			const Standard_Boolean isSplit =
+				_extrusion.splitReferenceEdge >= 0;
+			if (isSplit && distance < 0.0) {
+				(void)discardExtrusionPreview(Standard_True);
+				return Standard_False;
+			}
+			if (isSplit
+				? !BuildFaceSplitCandidate(
+					_extrusion.originalShape,
+					_extrusion.selectedFace,
+					_extrusion.splitReferenceEdge,
+					distance,
+					candidateShape,
+					candidateSubshapeCount,
+					candidateSolidCount,
+					failureStage)
+				: !BuildExtrusionCandidate(
 					_extrusion.originalShape,
 					_extrusion.selectedFace,
 					distance,
@@ -1352,11 +1577,18 @@ namespace core3d {
 			_extrusion.candidatePresentation = candidate;
 
 			myContext->ClearSelected(Standard_False);
-			myContext->Display(
-				_extrusion.originalPresentation,
-				AIS_WireFrame,
-				_topAbsSelMode,
-				Standard_False);
+			if (isSplit) {
+				// Split changes topology only: the candidate contains the whole
+				// unchanged solid. Its boundary overlay also includes old splits;
+				// a second source wireframe would expose periodic surface seams.
+				myContext->Erase(_extrusion.originalPresentation, Standard_False);
+			} else {
+				myContext->Display(
+					_extrusion.originalPresentation,
+					AIS_WireFrame,
+					_topAbsSelMode,
+					Standard_False);
+			}
 			myContext->Deactivate(_extrusion.originalPresentation);
 			myContext->Display(
 				candidate,
@@ -1400,6 +1632,73 @@ namespace core3d {
 		}
 	}
 
+	std::vector<std::pair<std::string, Standard_Real>>
+	ShapeInteractor::extrusionSplitEdges() const noexcept {
+		std::vector<std::pair<std::string, Standard_Real>> result;
+		try {
+			OCC_CATCH_SIGNALS
+			TopoDS_Face face = _extrusion.selectedFace;
+			gp_Trsf transform = _extrusion.transform;
+			if (!_extrusion.IsReady()) {
+				// The Split cell's native menu needs the selected face's edges
+				// before the user chooses one. This capture opens no transaction.
+				FaceOperationSourceProof proof;
+				if (!tryCaptureExactlyOneSelectedPlanarFace(proof)) return result;
+				face = proof.openingFace;
+				transform = proof.transform;
+			}
+			const gp_Pnt centroid = FaceCentroid(face);
+			for (const TopoDS_Edge& edge
+				 : StraightFaceEdges(face)) {
+				const BRepAdaptor_Curve curve(edge);
+				const gp_Pnt middle = curve.Value(
+					0.5 * (curve.FirstParameter() + curve.LastParameter()));
+				gp_Vec side(centroid, middle);
+				side.Transform(transform);
+				const Standard_Real components[3] = {
+					side.X(), side.Y(), side.Z()};
+				int axis = 0;
+				for (int i = 1; i < 3; ++i) {
+					if (std::abs(components[i]) > std::abs(components[axis])) {
+						axis = i;
+					}
+				}
+				std::string name(components[axis] < 0.0 ? "-" : "+");
+				name += "XYZ"[axis];
+				GProp_GProps length;
+				BRepGProp::LinearProperties(edge, length);
+				result.emplace_back(name, length.Mass());
+			}
+		} catch (...) {
+			result.clear();
+		}
+		return result;
+	}
+
+	Standard_Boolean ShapeInteractor::setExtrusionSplitReferenceEdge(
+		const Standard_Integer index) noexcept {
+		try {
+			if (!_extrusion.IsReady()) {
+				return Standard_False;
+			}
+			const Standard_Integer count = static_cast<Standard_Integer>(
+				StraightFaceEdges(_extrusion.selectedFace).size());
+			if (index < -1 || index >= count) {
+				return Standard_False;
+			}
+			if (index == _extrusion.splitReferenceEdge) {
+				return Standard_True;
+			}
+			if (!discardExtrusionPreview(Standard_True)) {
+				return Standard_False;
+			}
+			_extrusion.splitReferenceEdge = index;
+			return Standard_True;
+		} catch (...) {
+			return Standard_False;
+		}
+	}
+
 	Standard_Boolean ShapeInteractor::canApplyExtrusion() const noexcept {
 		try {
 			const Handle(TDocStd_Document) document = myDoc.IsNull()
@@ -1417,7 +1716,7 @@ namespace core3d {
 				&& document->GetUndoLimit() != 0
 				&& document->HasOpenCommand()
 				&& _extrusion.label.Data() == document->GetData()
-				&& IsBRepModelingLabel(myDoc, _extrusion.label)
+				&& IsBRepModelingLabel(myDoc, _extrusion.label, Standard_True)
 				&& XCAFDoc_ShapeTool::GetShape(_extrusion.label).IsEqual(
 					_extrusion.originalShape);
 		} catch (...) {
@@ -1445,6 +1744,15 @@ namespace core3d {
 	Standard_Boolean ShapeInteractor::hasExtrusionPreview() const noexcept {
 		return canApplyExtrusion();
 	}
+
+    Handle(AIS_Shape) ShapeInteractor::splitBoundaryPresentation() const noexcept {
+        if (!_extrusion.IsReady() || _extrusion.splitReferenceEdge < 0
+            || _extrusion.rollbackFailed || _extrusion.commitOutcomeUnknown) {
+            return Handle(AIS_Shape)();
+        }
+        return _extrusion.candidatePresentation.IsNull()
+            ? _extrusion.originalPresentation : _extrusion.candidatePresentation;
+    }
 
 	ExtrusionPreviewState
 	ShapeInteractor::extrusionPreviewState() const noexcept {
@@ -1547,7 +1855,8 @@ namespace core3d {
 				// Preview commands remain empty so AbortCommand is byte-neutral.
 				// Publish the detached candidate only at the Apply boundary; the
 				// existing OCAF command still supplies exactly one undo delta.
-				if (!myDoc->ReplaceShape(_extrusion.label, candidate)) {
+				if (!myDoc->PrepareBooleanResultForFaceEdit(_extrusion.label)
+					|| !myDoc->ReplaceShape(_extrusion.label, candidate)) {
 					throw Standard_Failure(
 						"Unable to replace extrusion result geometry");
 				}
@@ -1630,7 +1939,7 @@ namespace core3d {
 			face,
 			ShellOperationController::kMaximumSourceTopologyNodes,
 			ShellOperationController::kMaximumStyledSubshapeLabels,
-			proof)
+			proof, Standard_True)
 			&& beginShellSelectionImpl(proof);
 	}
 
@@ -1753,7 +2062,7 @@ namespace core3d {
 			face,
 			ShellOperationController::kMaximumSourceTopologyNodes,
 			ShellOperationController::kMaximumStyledSubshapeLabels,
-			proof)
+			proof, Standard_True, Standard_True)
 			&& beginExtrusionSelectionImpl(proof);
 	}
 

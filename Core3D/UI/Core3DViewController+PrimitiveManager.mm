@@ -672,6 +672,27 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     [self sendNotifyUIState:UIStateChangingApply];
 }
 
+- (NSArray<NSDictionary<NSString *, id> *> *)extrusionSplitEdges {
+    // Read-only selection capture also serves Split's menu before activation.
+    // The interactor refuses invalid/busy selections without opening a command.
+    return [GLController extrusionSplitEdges];
+}
+
+- (BOOL)setExtrusionSplitReferenceEdge:(NSInteger)index {
+    if (_currentGizmoType != PrimitiveGizmoTypeExtrude) {
+        return NO;
+    }
+    const BOOL result = [GLController setExtrusionSplitReferenceEdge:index];
+    self.can_apply = [GLController canApplyExtrusion];
+    [self viewDidChangeViewportPresentationState];
+    [self sendNotifyUIState:UIStateChangingApply];
+    return result;
+}
+
+- (NSInteger)extrusionSplitReferenceEdge {
+    return [GLController extrusionSplitReferenceEdge];
+}
+
 - (double)getExtrusionMetersPerUnit {
     if (![NSThread isMainThread] || GLController == nil
         || _currentGizmoType != PrimitiveGizmoTypeExtrude) {

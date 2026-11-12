@@ -19,6 +19,7 @@
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
+#include <Geom_BSplineSurface.hxx>
 #include <Message_ProgressIndicator.hxx>
 #include <Precision.hxx>
 #include <Standard_ErrorHandler.hxx>
@@ -113,11 +114,13 @@ dispatch_queue_t ShellWorkerQueue()
 
 Standard_Boolean IsBRepModelingLabel(
     const Handle(OcctDocument)& theDocument,
-    const TDF_Label& theLabel) noexcept
+    const TDF_Label& theLabel,
+    const Standard_Boolean allowSavedCut = Standard_False) noexcept
 {
     if (theDocument.IsNull() || theLabel.IsNull()
         || !theDocument->IsEditableFreeSimpleDefinitionLabel(theLabel)
-        || !theDocument->HasNoSavedSweepForTopology(theLabel)) {
+        || (!theDocument->HasNoSavedSweepForTopology(theLabel)
+            && !(allowSavedCut && theDocument->CanBakeSavedCutForFaceEdit(theLabel)))) {
         return Standard_False;
     }
     const OcctGeometryRepresentation aRepresentation =
@@ -515,9 +518,8 @@ Standard_Boolean TryResolveShellOpeningSelectors(
             Standard_Integer match = 0;
             for (Standard_Integer i = 1; i <= canonical.Extent(); ++i) {
                 const auto face = TopoDS::Face(canonical(i));
-                BRepAdaptor_Surface surface(face, Standard_True);
-                if (surface.GetType() != GeomAbs_Plane) continue;
-                const auto plane = surface.Plane();
+                gp_Pln plane;
+                if (!ShellFacePlane(face, plane)) continue;
                 gp_Dir direction(axis == 0, axis == 1, axis == 2);
                 if (!plane.Axis().Direction().IsParallel(direction, Precision::Angular())
                     || std::abs(plane.Location().Coord(axis + 1) - extremum) > tolerance) continue;
@@ -591,6 +593,55 @@ Standard_Boolean ReplayProfileShells(
     } catch (...) { result.Nullify(); return Standard_False; }
 }
 
+Standard_Boolean TryFaceOperationPlane(
+    const TopoDS_Face& face, gp_Pln& plane) noexcept
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (face.IsNull()) return Standard_False;
+        const BRepAdaptor_Surface surface(face, Standard_True);
+        if (surface.GetType() == GeomAbs_Plane) {
+            plane = surface.Plane();
+            return Standard_True;
+        }
+        // A whole control net, rather than sampled surface points, proves
+        // planarity. Positive rational weights keep the surface in its hull.
+        if (surface.GetType() != GeomAbs_BSplineSurface
+            || surface.NbUPoles() < 2 || surface.NbUPoles() > 16
+            || surface.NbVPoles() < 2 || surface.NbVPoles() > 16)
+            return Standard_False;
+        const Standard_Real u = 0.5 * surface.FirstUParameter()
+            + 0.5 * surface.LastUParameter();
+        const Standard_Real v = 0.5 * surface.FirstVParameter()
+            + 0.5 * surface.LastVParameter();
+        if (!std::isfinite(u) || !std::isfinite(v)) return Standard_False;
+        gp_Pnt point;
+        gp_Vec du, dv;
+        surface.D1(u, v, point, du, dv);
+        const gp_Vec normal = du.Crossed(dv);
+        if (!std::isfinite(normal.SquareMagnitude())
+            || normal.SquareMagnitude() <= Precision::SquareConfusion())
+            return Standard_False;
+        // Preserve the original surface's U/V orientation for signed pull.
+        const gp_Pln candidate(point, gp_Dir(normal));
+        const Handle(Geom_BSplineSurface) spline = surface.BSpline();
+        if (spline.IsNull()) return Standard_False;
+        for (Standard_Integer i = 1; i <= spline->NbUPoles(); ++i) {
+            for (Standard_Integer j = 1; j <= spline->NbVPoles(); ++j) {
+                const Standard_Real weight = spline->Weight(i, j);
+                const Standard_Real distance = candidate.Distance(spline->Pole(i, j));
+                if (!std::isfinite(weight) || weight <= 0.0
+                    || !std::isfinite(distance) || distance > Precision::Confusion())
+                    return Standard_False;
+            }
+        }
+        plane = candidate;
+        return Standard_True;
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
 Standard_Boolean TryPrepareFaceOperationSource(
     const Handle(AIS_InteractiveContext)& theContext,
     const Handle(OcctDocument)& theDocument,
@@ -598,7 +649,9 @@ Standard_Boolean TryPrepareFaceOperationSource(
     const TopoDS_Face& theSelectedFace,
     const Standard_Size theMaximumTopologyNodes,
     const Standard_Size theMaximumStyledSubshapeLabels,
-    FaceOperationSourceProof& theProof) noexcept
+    FaceOperationSourceProof& theProof,
+    const Standard_Boolean allowPlanarSpline,
+    const Standard_Boolean allowSavedCut) noexcept
 {
     theProof = FaceOperationSourceProof();
     if (theContext.IsNull() || theDocument.IsNull()
@@ -616,7 +669,7 @@ Standard_Boolean TryPrepareFaceOperationSource(
         if (aDocument.IsNull() || aDocument->HasOpenCommand()
             || aDocument->GetUndoLimit() == 0 || aLabel.IsNull()
             || aLabel.Data() != aDocument->GetData()
-            || !IsBRepModelingLabel(theDocument, aLabel)
+            || !IsBRepModelingLabel(theDocument, aLabel, allowSavedCut)
             || !theDocument->IsPresentationEditable(thePresentation)
             || !theContext->IsDisplayed(thePresentation)) {
             return Standard_False;
@@ -678,7 +731,9 @@ Standard_Boolean TryPrepareFaceOperationSource(
         }
         const BRepAdaptor_Surface aSurface(
             aCanonicalFace, Standard_True);
-        if (aSurface.GetType() != GeomAbs_Plane) {
+        gp_Pln plane;
+        if ((!allowPlanarSpline && aSurface.GetType() != GeomAbs_Plane)
+            || !TryFaceOperationPlane(aCanonicalFace, plane)) {
             return Standard_False;
         }
 
@@ -726,7 +781,9 @@ Standard_Boolean TryPrepareShellOperationSource(
             FaceOperationSourceProof single;
             if (!TryPrepareFaceOperationSource(context, document, presentation, face,
                     ShellOperationController::kMaximumSourceTopologyNodes,
-                    ShellOperationController::kMaximumStyledSubshapeLabels, single))
+                    ShellOperationController::kMaximumStyledSubshapeLabels, single,
+                    // Resized Add shapes store flat faces as splines (mug body top).
+                    Standard_True))
                 return Standard_False;
             if (result.original.IsNull()) {
                 result = single;
@@ -756,7 +813,8 @@ Standard_Boolean FaceOperationSourceProofIsCurrent(
     const Handle(AIS_InteractiveContext)& theContext,
     const Handle(OcctDocument)& theDocument,
     const FaceOperationSourceProof& theProof,
-    const Standard_Size theMaximumStyledSubshapeLabels) noexcept
+    const Standard_Size theMaximumStyledSubshapeLabels,
+    const Standard_Boolean allowSavedCut) noexcept
 {
     if (theContext.IsNull() || theDocument.IsNull()
         || theProof.original.IsNull() || theProof.documentLabel.IsNull()
@@ -778,7 +836,7 @@ Standard_Boolean FaceOperationSourceProofIsCurrent(
             || aDocument->GetUndoLimit() == 0
             || theProof.documentLabel.Data() != aDocument->GetData()
             || !IsBRepModelingLabel(
-                theDocument, theProof.documentLabel)
+                theDocument, theProof.documentLabel, allowSavedCut)
             || !theDocument->IsPresentationEditable(theProof.original)
             || !theDocument->ShapeLabel(theProof.original).IsEqual(
                 theProof.documentLabel)
@@ -805,9 +863,8 @@ Standard_Boolean FaceOperationSourceProofIsCurrent(
                 && theProof.openingFace.Orientation() != TopAbs_REVERSED)) {
             return Standard_False;
         }
-        const BRepAdaptor_Surface aSurface(
-            theProof.openingFace, Standard_True);
-        return aSurface.GetType() == GeomAbs_Plane
+        gp_Pln plane;
+        return TryFaceOperationPlane(theProof.openingFace, plane)
             && (theProof.openingFaces.size() <= 1
                 || ShellOpeningSetIsValid(theProof.shape, theProof.openingFaces,
                                           theProof.openingFaceTopologyIndices));

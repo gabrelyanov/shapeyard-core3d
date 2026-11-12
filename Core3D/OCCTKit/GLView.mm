@@ -747,7 +747,17 @@ private:
     const NSUInteger width = static_cast<NSUInteger>(myBackingWidth);
     const NSUInteger height = static_cast<NSUInteger>(myBackingHeight);
     NSData *pixels = [self debugDrawAndReadBoundedRGBAWithWidth:width height:height];
-    return pixels == nil ? nil : @{ @"width": @(width), @"height": @(height), @"rgba": pixels };
+    if (pixels == nil) return nil;
+    __block GLint depthBits = 0;
+    [self performWithRenderingContext:^{
+        GLint previousFramebuffer = 0;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previousFramebuffer);
+        glBindFramebuffer(GL_FRAMEBUFFER, self->myFrameBuffer);
+        glGetIntegerv(GL_DEPTH_BITS, &depthBits);
+        glBindFramebuffer(GL_FRAMEBUFFER, previousFramebuffer);
+    }];
+    return @{ @"width": @(width), @"height": @(height), @"rgba": pixels,
+              @"depthBits": @(depthBits) };
 }
 
 #endif

@@ -1,3 +1,7 @@
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <Bnd_Box.hxx>
+#include <gp_Pnt2d.hxx>
 #include "../OCCTKit/NativeMeshVertexMove.hxx"
 #include "../OCCTKit/NativeMeshRegionExtrude.hxx"
 //
@@ -2395,6 +2399,240 @@ bool Core3DViewer::acknowledgeRawR2BevelPreviewRevision(
         ||_rawR2PreviewPresentation->session!=session)return false;
     std::lock_guard<std::mutex> lock(session->mutex_);
     session->presentationRevision_=revision;return true;
+}
+
+bool Core3DViewer::showBooleanPairPreview(const std::string& targetEntity,
+    const std::string& toolEntity, const TopoDS_Shape& result, int operation) noexcept {
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()||result.IsNull()
+        ||targetEntity.empty()||toolEntity==targetEntity||operation<0||operation>2)return false;
+    try{
+        OCC_CATCH_SIGNALS
+        if(_booleanPairPreview&&!clearBooleanPairPreview())return false;
+        const auto findPresentation=[&](const std::string& entity,
+            Handle(AIS_Shape)& presentation,TDF_Label& label)->bool{
+            presentation.Nullify();label.Nullify();AIS_ListOfInteractive displayed;
+            myContext->DisplayedObjects(AIS_KOI_Shape,-1,displayed);
+            for(AIS_ListIteratorOfListOfInteractive item(displayed);item.More();item.Next()){
+                const auto candidate=Handle(AIS_Shape)::DownCast(item.Value());
+                if(candidate.IsNull())continue;
+                const TDF_Label candidateLabel=myDoc->ShapeLabel(candidate);
+                if(candidateLabel.IsNull()
+                    ||myDoc->EntityIdentifierForLabel(candidateLabel)!=entity)continue;
+                if(!presentation.IsNull()||candidate->Shape().IsNull())return false;
+                presentation=candidate;label=candidateLabel;
+            }
+            return !presentation.IsNull()&&!label.IsNull();
+        };
+        auto state=std::make_shared<BooleanPairPreview>();
+        if(!findPresentation(targetEntity,state->target,state->targetLabel)
+            ||!findPresentation(toolEntity,state->tool,state->toolLabel))return false;
+        state->operation=operation;
+        state->preview=new AIS_Shape(result);
+        state->preview->SetLocalTransformation(state->target->LocalTransformation());
+        myDoc->LoadObjectMeterial(state->targetLabel,state->preview);
+        myContext->ClearSelected(Standard_False);
+        myContext->Display(state->preview,AIS_Shaded,0,Standard_False);
+        myContext->Deactivate(state->preview);
+        myContext->Erase(state->target,Standard_False);
+        myContext->Erase(state->tool,Standard_False);
+        myContext->UpdateCurrentViewer();
+        _booleanPairPreview=std::move(state);
+        return true;
+    }catch(...){return false;}
+}
+
+namespace {
+bool FindEntityPresentation(const Handle(AIS_InteractiveContext)& context,
+    const Handle(OcctDocument)& document, const std::string& entity,
+    Handle(AIS_Shape)& presentation, TDF_Label& label) {
+    presentation.Nullify(); label.Nullify();
+    AIS_ListOfInteractive displayed;
+    context->DisplayedObjects(AIS_KOI_Shape,-1,displayed);
+    for(AIS_ListIteratorOfListOfInteractive item(displayed);item.More();item.Next()){
+        const auto candidate=Handle(AIS_Shape)::DownCast(item.Value());
+        if(candidate.IsNull())continue;
+        const TDF_Label candidateLabel=document->ShapeLabel(candidate);
+        if(candidateLabel.IsNull()||document->EntityIdentifierForLabel(candidateLabel)!=entity)continue;
+        if(!presentation.IsNull())return false;
+        presentation=candidate;label=candidateLabel;
+    }
+    return !presentation.IsNull()&&!label.IsNull();
+}
+}
+
+bool Core3DViewer::applyBakedBoolean(const std::string& targetEntity,
+    const std::string& toolEntity, int operation, std::string& refusal) noexcept {
+    refusal="unsupported-source";
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()||targetEntity==toolEntity)return false;
+    try{
+        OCC_CATCH_SIGNALS
+        if(_booleanPairPreview)clearBooleanPairPreview();
+        Handle(AIS_Shape) target,tool;TDF_Label targetLabel,toolLabel;
+        if(!FindEntityPresentation(myContext,myDoc,targetEntity,target,targetLabel)
+            ||!FindEntityPresentation(myContext,myDoc,toolEntity,tool,toolLabel))return false;
+        if(!myDoc->ApplyBakedBoolean(targetLabel,target,toolLabel,tool,operation,refusal))return false;
+        redrawDocument();
+        return true;
+    }catch(...){refusal="invalid-result";return false;}
+}
+
+bool Core3DViewer::holeAnchor(const std::string& entity, std::uint32_t faceIndex,
+    gp_Pnt& worldPoint, gp_Dir& worldDirection) noexcept {
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull())return false;
+    try{
+        OCC_CATCH_SIGNALS
+        Handle(AIS_Shape) presentation;TDF_Label label;
+        if(!FindEntityPresentation(myContext,myDoc,entity,presentation,label))return false;
+        const TopoDS_Shape shape=XCAFDoc_ShapeTool::GetShape(label);
+        TopTools_IndexedMapOfShape faces;TopExp::MapShapes(shape,TopAbs_FACE,faces);
+        if(faceIndex>=std::uint32_t(faces.Extent()))return false;
+        const TopoDS_Face face=TopoDS::Face(faces(int(faceIndex)+1));
+        GProp_GProps area;BRepGProp::SurfaceProperties(face,area);
+        BRepAdaptor_Surface surface(face,Standard_True);
+        const Handle(Geom_Surface) geometry=BRep_Tool::Surface(face);
+        GeomAPI_ProjectPointOnSurf projection(area.CentreOfMass(),geometry);
+        if(!projection.IsDone()||projection.NbPoints()==0)return false;
+        double u=0,v=0;projection.LowerDistanceParameters(u,v);
+        const gp_Trsf toWorld=presentation->LocalTransformation();
+        // Where the user tapped, when the last pick landed on this face; close to
+        // the face centre it snaps to the centre.
+        const Handle(StdSelect_ViewerSelector3d)& selector=myContext->MainSelector();
+        if(!selector.IsNull()&&selector->NbPicked()>0){
+            const gp_Pnt tapped=selector->PickedPoint(1).Transformed(toWorld.Inverted());
+            Bnd_Box box;BRepBndLib::Add(face,box);
+            const double size=box.IsVoid()?0:std::sqrt(box.SquareExtent());
+            GeomAPI_ProjectPointOnSurf hit(tapped,geometry);
+            if(size>0&&hit.IsDone()&&hit.NbPoints()>0&&hit.LowerDistance()<size*0.02
+               &&tapped.Distance(area.CentreOfMass())>size*0.1){
+                double hu=0,hv=0;hit.LowerDistanceParameters(hu,hv);
+                BRepClass_FaceClassifier inside(face,gp_Pnt2d(hu,hv),Precision::Confusion());
+                if(inside.State()==TopAbs_IN){u=hu;v=hv;}
+            }
+        }
+        gp_Pnt point;gp_Vec du,dv;
+        geometry->D1(u,v,point,du,dv);
+        gp_Vec normal=du.Crossed(dv);
+        if(normal.Magnitude()<1e-12)return false;
+        if(face.Orientation()==TopAbs_REVERSED)normal.Reverse();
+        // Into the part: against the outward face normal.
+        worldPoint=point.Transformed(toWorld);
+        worldDirection=gp_Dir(normal.Reversed()).Transformed(toWorld);
+        return true;
+    }catch(...){return false;}
+}
+
+bool Core3DViewer::isBooleanResult(const std::string& entity) noexcept {
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull())return false;
+    try{
+        Handle(AIS_Shape) presentation;TDF_Label label;
+        return FindEntityPresentation(myContext,myDoc,entity,presentation,label)
+            &&myDoc->IsBooleanResultLabel(label);
+    }catch(...){return false;}
+}
+
+bool Core3DViewer::partLocalAnchor(const std::string& entity, const gp_Pnt& worldPoint,
+    const gp_Dir& worldDirection, gp_Pnt& localPoint, gp_Dir& localDirection) noexcept {
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull())return false;
+    try{
+        OCC_CATCH_SIGNALS
+        Handle(AIS_Shape) presentation;TDF_Label label;
+        if(!FindEntityPresentation(myContext,myDoc,entity,presentation,label))return false;
+        const gp_Trsf toLocal=presentation->LocalTransformation().Inverted();
+        localPoint=worldPoint.Transformed(toLocal);
+        localDirection=worldDirection.Transformed(toLocal);
+        return true;
+    }catch(...){return false;}
+}
+
+bool Core3DViewer::showHolePreview(const std::string& entity, const gp_Pnt& worldPoint,
+    const gp_Dir& worldDirection, double radius, double depth, std::string& refusal) noexcept {
+    refusal="unsupported-source";
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull())return false;
+    try{
+        OCC_CATCH_SIGNALS
+        if(_booleanPairPreview&&!clearBooleanPairPreview())return false;
+        Handle(AIS_Shape) presentation;TDF_Label label;
+        if(!FindEntityPresentation(myContext,myDoc,entity,presentation,label))return false;
+        const gp_Trsf toWorld=presentation->LocalTransformation();
+        const double scale=std::abs(toWorld.ScaleFactor());
+        if(!(scale>0))return false;
+        const gp_Trsf toLocal=toWorld.Inverted();
+        TopoDS_Shape result;
+        if(!myDoc->BuildThroughHole(label,worldPoint.Transformed(toLocal),
+            worldDirection.Transformed(toLocal),radius/scale,depth>0?depth/scale:0,
+            result,refusal))return false;
+        auto state=std::make_shared<BooleanPairPreview>();
+        state->target=presentation;state->targetLabel=label;state->operation=1;
+        state->preview=new AIS_Shape(result);
+        state->preview->SetLocalTransformation(toWorld);
+        myDoc->LoadObjectMeterial(label,state->preview);
+        myContext->ClearSelected(Standard_False);
+        myContext->Display(state->preview,AIS_Shaded,0,Standard_False);
+        myContext->Deactivate(state->preview);
+        myContext->Erase(presentation,Standard_False);
+        myContext->UpdateCurrentViewer();
+        _booleanPairPreview=std::move(state);
+        refusal.clear();
+        return true;
+    }catch(...){refusal="invalid-result";return false;}
+}
+
+bool Core3DViewer::applyThroughHole(const std::string& entity, const gp_Pnt& worldPoint,
+    const gp_Dir& worldDirection, double radius, double depth, std::string& refusal) noexcept {
+    refusal="unsupported-source";
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()||entity.empty())return false;
+    try{
+        OCC_CATCH_SIGNALS
+        if(_booleanPairPreview)clearBooleanPairPreview();
+        Handle(AIS_Shape) presentation;TDF_Label label;
+        AIS_ListOfInteractive displayed;
+        myContext->DisplayedObjects(AIS_KOI_Shape,-1,displayed);
+        for(AIS_ListIteratorOfListOfInteractive item(displayed);item.More();item.Next()){
+            const auto candidate=Handle(AIS_Shape)::DownCast(item.Value());
+            if(candidate.IsNull())continue;
+            const TDF_Label candidateLabel=myDoc->ShapeLabel(candidate);
+            if(candidateLabel.IsNull()||myDoc->EntityIdentifierForLabel(candidateLabel)!=entity)continue;
+            if(!presentation.IsNull())return false;
+            presentation=candidate;label=candidateLabel;
+        }
+        if(presentation.IsNull()||label.IsNull())return false;
+        const gp_Trsf toWorld=presentation->LocalTransformation();
+        const double scale=std::abs(toWorld.ScaleFactor());
+        if(!(scale>0))return false;
+        const gp_Trsf toLocal=toWorld.Inverted();
+        const gp_Pnt localPoint=worldPoint.Transformed(toLocal);
+        const gp_Dir localDirection=worldDirection.Transformed(toLocal);
+        if(!myDoc->ApplyThroughHole(label,presentation,localPoint,localDirection,
+            radius/scale,depth>0?depth/scale:0,refusal))return false;
+        redrawDocument();
+        return true;
+    }catch(...){refusal="invalid-result";return false;}
+}
+
+bool Core3DViewer::clearBooleanPairPreview() noexcept {
+    if(![NSThread isMainThread]||myContext.IsNull())return false;
+    const auto state=std::move(_booleanPairPreview);
+    _booleanPairPreview.reset();
+    if(!state)return true;
+    try{
+        OCC_CATCH_SIGNALS
+        if(!state->preview.IsNull())myContext->Remove(state->preview,Standard_False);
+        if(!state->target.IsNull())myContext->Display(state->target,Standard_False);
+        if(!state->tool.IsNull())myContext->Display(state->tool,Standard_False);
+        // The part that stays is selected again, as before the preview, so the
+        // tick can apply the same pair.
+        myContext->ClearSelected(Standard_False);
+        if(!state->target.IsNull()){
+            const Handle(SelectMgr_EntityOwner) owner=state->target->GlobalSelOwner();
+            if(!owner.IsNull())myContext->SetSelected(owner,Standard_False);
+        }
+        myContext->UpdateCurrentViewer();
+        return true;
+    }catch(...){return false;}
+}
+
+bool Core3DViewer::hasBooleanPairPreview() const noexcept {
+    return _booleanPairPreview!=nullptr;
 }
 
 bool Core3DViewer::restoreRawR2PreviewSource(
@@ -4798,6 +5036,49 @@ constexpr double kMaximumRotationMagnitude = 360000.0;
 
 using PreparedPrimitive = OrdinaryCreationRequest;
 
+namespace {
+// v1.3 (owner editor): objects are named by what they are. A shape the user
+// adds from Create is called "<Kind> N", where N is one more than the largest
+// "<Kind> n" already in the document, so names never repeat after a delete.
+TCollection_ExtendedString NextPrimitiveName(const Handle(OcctDocument)& document,
+                                             const char* kind) noexcept {
+    const std::string prefix = std::string(kind) + " ";
+    long largest = 0;
+    try {
+        if (!document.IsNull() && !document->Document().IsNull()) {
+            const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Document()->Main());
+            TDF_LabelSequence roots;
+            shapes->GetFreeShapes(roots);
+            for (int index = 1; index <= roots.Length(); ++index) {
+                OcctObjectNameState state;
+                if (!document->CaptureObjectNameStateForLabel(roots.Value(index), state)
+                    || !state.namePresent || !state.name.IsAscii()) { continue; }
+                const TCollection_AsciiString ascii(state.name);
+                const std::string name(ascii.ToCString());
+                if (name.size() <= prefix.size() || name.compare(0, prefix.size(), prefix) != 0) { continue; }
+                const std::string digits = name.substr(prefix.size());
+                if (digits.size() > 6
+                    || digits.find_first_not_of("0123456789") != std::string::npos) { continue; }
+                largest = std::max(largest, std::stol(digits));
+            }
+        }
+    } catch (...) {}
+    const std::string name = prefix + std::to_string(largest + 1);
+    return TCollection_ExtendedString(name.c_str());
+}
+
+const char* PrimitiveKindName(PrimitiveType primitiveType) noexcept {
+    switch (primitiveType) {
+        case PrimitiveTypeCube: return "Box";
+        case PrimitiveTypeSphere: return "Sphere";
+        case PrimitiveTypeCylinder: return "Cylinder";
+        case PrimitiveTypeCone: return "Cone";
+        case PrimitiveTypeTorus: return "Ring";
+        default: return nullptr;
+    }
+}
+} // namespace
+
 bool ReadFiniteJSONNumber(id value, double& result) {
     if (![value isKindOfClass:[NSNumber class]]) {
         return false;
@@ -5372,8 +5653,20 @@ bool ValidateVisualMaterials(
             }
             continue;
         }
+        // Local scalar styles may belong to an exact face of an active
+        // definition. Metadata labels, detached faces and nested owners still
+        // fail the same admission; normal-map recipes remain object-owned.
+        const auto shapeTool = XCAFDoc_DocumentTool::CheckShapeTool(document->Main())
+            ? XCAFDoc_DocumentTool::ShapeTool(document->Main()) : Handle(XCAFDoc_ShapeTool)();
+        const auto face = XCAFDoc_ShapeTool::GetShape(label);
+        const bool activeFace = !shapeTool.IsNull() && !face.IsNull()
+            && face.ShapeType() == TopAbs_FACE
+            && XCAFDoc_ShapeTool::IsSubShape(label)
+            && activeDefinitionLabels.Contains(label.Father())
+            && shapeTool->IsSubShape(label.Father(), face)
+            && normalRecipe == 0 && !hasAutoPromotedEmissiveFactor;
         if (marker.IsNull() || marker->Get() != 1
-            || !activeDefinitionLabels.Contains(label)
+            || (!activeDefinitionLabels.Contains(label) && !activeFace)
             || materialTool.IsNull()
             || assignedMaterialLabel.IsNull()) {
             return false;
@@ -5616,6 +5909,15 @@ void Core3DViewer::registerRetainedBevelAdapter(
     }
 }
 
+#if !TARGET_OS_OSX
+//! Design system 7.2: the handles are one size on screen at every zoom,
+//! 96 pt on iPad and 72 pt on iPhone. OCCT view units are pixels.
+static float Core3DManipulatorSidePixels() {
+    const bool pad = [[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad;
+    return (pad ? 96.0f : 72.0f) * static_cast<float>([[UIScreen mainScreen] scale]);
+}
+#endif
+
 bool Core3DViewer::InitViewer (Core3DPlatformView* theWin) {
     bool result = OcctViewer::InitViewer(theWin);
     if(result) {
@@ -5623,9 +5925,7 @@ bool Core3DViewer::InitViewer (Core3DPlatformView* theWin) {
 #if TARGET_OS_OSX
             const float device_independent_side = 96.0f; // OCCT logical view units.
 #else
-            const float scale = [[UIScreen mainScreen] scale];
-            const float ppm = scale * (([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad) ? 132 : 163) / 25.4;
-            const float device_independent_side = 15 * ppm;
+            const float device_independent_side = Core3DManipulatorSidePixels();
 #endif
             _objectInteractor = std::make_shared<ObjectInteractor>(myContext, myView, myDoc, device_independent_side);
             _objectInteractor->setBooleanPreviewStateChangedCallback(
@@ -5841,11 +6141,7 @@ bool Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorTy
 #if TARGET_OS_OSX
     const float manipulatorSide = 96.0f; // Same view units as initial attachment.
 #else
-    const float scale = [[UIScreen mainScreen] scale];
-    const float pointsPerMillimeter = scale
-        * (([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad) ? 132 : 163)
-        / 25.4;
-    const float manipulatorSide = 15 * pointsPerMillimeter;
+    const float manipulatorSide = Core3DManipulatorSidePixels();
 #endif
 
     std::shared_ptr<ObjectInteractor> objectInteractor =
@@ -11687,7 +11983,7 @@ void Core3DViewer::addPrimitivesFromJSON(NSString* json) {
             translationTransform.SetTranslation(gp_Vec(px, py, pz));
             const gp_Trsf objectTransform = translationTransform * rotationTransform;
 
-            Handle(AIS_Shape) presentation = new AIS_Shape(shape);
+            Handle(AIS_Shape) presentation = new AIS_ColoredShape(shape);
             presentation->SetLocalTransformation(objectTransform);
             myContext->ApplyDefaultMaterial(presentation);
             Quantity_NameOfColor shapeColor = Quantity_NOC_GRAY80;
@@ -11784,7 +12080,7 @@ void Core3DViewer::addPrimitive(PrimitiveType primitiveType) {
             break;
     }
 
-    Handle(AIS_Shape) aShapePrs = new AIS_Shape (shape);
+    Handle(AIS_Shape) aShapePrs = new AIS_ColoredShape (shape);
     myContext->ApplyDefaultMaterial(aShapePrs);
     Quantity_Color qc;
     aShapePrs->Color(qc);
@@ -11792,11 +12088,15 @@ void Core3DViewer::addPrimitive(PrimitiveType primitiveType) {
 		return;
 	}
 	deselectAll();
-	const std::vector<PreparedPrimitive> primitive = {{
+	std::vector<PreparedPrimitive> primitive = {{
 		aShapePrs,
 		Graphic3d_NameOfMaterial_ShinyPlastified,
 		qc.Name(),
 	}};
+	// Named in the same creation command, so Undo removes shape and name together.
+	if (const char* kind = PrimitiveKindName(primitiveType)) {
+		primitive.front().name = NextPrimitiveName(myDoc, kind);
+	}
 	if (publishCreatedPrimitives(primitive) != OrdinaryEditResult::Committed) {
         return;
     }
@@ -13849,6 +14149,18 @@ Core3DViewer::captureScenePresentationOverlay() noexcept {
             myDoc,{_rawR2PreviewPresentation->preview},
             {_rawR2PreviewPresentation->sourceLabel});
     }
+    if (_booleanPairPreview && !_booleanPairPreview->preview.IsNull()) {
+        static const scene::PresentationOverlayKind kinds[3] = {
+            scene::PresentationOverlayKind::BooleanUnionPreview,
+            scene::PresentationOverlayKind::BooleanSubtractPreview,
+            scene::PresentationOverlayKind::BooleanIntersectPreview};
+        std::vector<TDF_Label> hidden{_booleanPairPreview->targetLabel};
+        if (!_booleanPairPreview->toolLabel.IsNull())
+            hidden.push_back(_booleanPairPreview->toolLabel);
+        return _sceneSnapshotBuilder.PublishBooleanPreviewOverlay(
+            myDoc, kinds[_booleanPairPreview->operation], {},
+            {_booleanPairPreview->preview}, hidden);
+    }
     if (_shapeInteractor != nullptr
         && _shapeInteractor->hasActiveShell()) {
         ShellPreviewCapture aShellPreview;
@@ -14672,20 +14984,42 @@ void Core3DViewer::Select(int theX, int theY) {
         AIS_ListIteratorOfListOfInteractive iobject(objects);
 
         while (iobject.More()) {
-            TopoDS_Shape shape = BRepBuilderAPI_Transform(Handle(AIS_Shape)::DownCast(iobject.Value())->Shape(),
-                                                          iobject.Value()->LocalTransformation());
-
-            // prepare presentation filled by shape
-            auto color = Quantity_Color();
-            Handle(AIS_Shape)::DownCast(iobject.Value())->Color(color);
-            Handle(AIS_Shape) presentation = new AIS_Shape(shape);
-			presentation->UnsetColor();
-			auto mat = myDoc->MaterialNameForShape(Handle(AIS_Shape)::DownCast(iobject.Value()));
-			presentation->SetMaterial(mat);
-			presentation->SetColor(color.Name());
+            const auto source = Handle(AIS_Shape)::DownCast(iobject.Value());
+            if (source.IsNull() || source->Shape().IsNull()) {
+                iobject.Next();
+                continue;
+            }
+            // Keep definition-local topology so each face drawer still refers
+            // to the same subshape. Applying a BRep transform first discards
+            // that correspondence. These new drawers belong only to the
+            // thumbnail; no live presentation or document attribute is edited.
+            Handle(AIS_ColoredShape) presentation = new AIS_ColoredShape(source->Shape());
+            presentation->SetLocalTransformation(source->LocalTransformation());
+            const auto copyShading = [](const Handle(Prs3d_Drawer)& from,
+                                        const Handle(Prs3d_Drawer)& to) {
+                if (from.IsNull() || from->ShadingAspect().IsNull()
+                    || from->ShadingAspect()->Aspect().IsNull()) return;
+                to->SetShadingAspect(new Prs3d_ShadingAspect(
+                    new Graphic3d_AspectFillArea3d(*from->ShadingAspect()->Aspect())));
+            };
+            copyShading(source->Attributes(), presentation->Attributes());
+            const auto colored = Handle(AIS_ColoredShape)::DownCast(source);
+            if (!colored.IsNull()) {
+                for (AIS_DataMapOfShapeDrawer::Iterator face(colored->CustomAspectsMap());
+                     face.More(); face.Next()) {
+                    const auto from = face.Value();
+                    if (from.IsNull()) continue;
+                    const auto to = presentation->CustomAspects(face.Key());
+                    copyShading(from, to);
+                    to->SetHidden(from->IsHidden());
+                    to->myHasOwnMaterial = from->HasOwnMaterial();
+                    to->myHasOwnColor = from->HasOwnColor();
+                    to->myHasOwnTransp = from->HasOwnTransparency();
+                    to->myHasOwnWidth = from->HasOwnWidth();
+                }
+            }
             context->Display(presentation, Standard_False);
             context->SetDisplayMode(presentation, AIS_Shaded, Standard_False);
-
             iobject.Next();
         }
 

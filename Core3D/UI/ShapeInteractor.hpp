@@ -141,6 +141,10 @@ namespace core3d {
             TopoDS_Face selectedFace;
             gp_Trsf transform;
             Standard_Real distance = 0.0;
+            //! Split mode: index into the face's straight boundary edges. The
+            //! distance is then the split line's offset from that edge and the
+            //! candidate keeps the volume while splitting the face in two.
+            Standard_Integer splitReferenceEdge = -1;
             Standard_Size sourceSubshapeCount = 0;
             Standard_Size profileEdgeCount = 0;
             Standard_Size candidateSubshapeCount = 0;
@@ -290,6 +294,17 @@ namespace core3d {
         //! discards the open preview while retaining the captured face.
         Standard_Boolean setExtrusionValueForSelection(
             Standard_Real distance) noexcept;
+        //! Straight boundary edges of the captured face, in the order used by
+        //! setExtrusionSplitReferenceEdge: the dominant world side of each
+        //! edge ("+X", "-Y", ...) and its length in model units.
+        std::vector<std::pair<std::string, Standard_Real>>
+            extrusionSplitEdges() const noexcept;
+        //! -1 returns to push/pull. Any change discards the open preview.
+        Standard_Boolean setExtrusionSplitReferenceEdge(
+            Standard_Integer index) noexcept;
+        Standard_Integer extrusionSplitReferenceEdge() const noexcept {
+            return _extrusion.splitReferenceEdge;
+        }
         Standard_Boolean canApplyExtrusion() const noexcept;
         //! A prior CommitCommand closed or threw, but the authoritative label
         //! could not yet be classified. Apply remains available solely to
@@ -297,6 +312,9 @@ namespace core3d {
         Standard_Boolean canRetryExtrusionResolution() const noexcept;
         Standard_Boolean hasActiveExtrusion() const noexcept;
         Standard_Boolean hasExtrusionPreview() const noexcept;
+        //! Read-only graphics source for Split's native boundary overlay. While
+        //! the distance is zero/invalid, use the unchanged source presentation.
+        Handle(AIS_Shape) splitBoundaryPresentation() const noexcept;
         ExtrusionPreviewState extrusionPreviewState() const noexcept;
         Standard_Boolean applyExtrusion() noexcept;
         //! Return false only when an owned preview command could not be

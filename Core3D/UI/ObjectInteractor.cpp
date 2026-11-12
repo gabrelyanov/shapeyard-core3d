@@ -52,6 +52,7 @@
 #include <Prs3d_Drawer.hxx>
 #include <Prs3d_LineAspect.hxx>
 #include <AIS_Shape.hxx>
+#include <AIS_ColoredShape.hxx>
 #include <Standard_ErrorHandler.hxx>
 #include <Standard_Failure.hxx>
 #include <Aspect_Window.hxx>
@@ -1758,7 +1759,9 @@ namespace core3d {
 							source.presentation->Shape(), shapeCopy))) {
 					return;
 				}
-				Handle(AIS_Shape) copy = new AIS_Shape(shapeCopy.Shape());
+				// Duplicates must remain capable of drawing authored face
+                // materials immediately, before history rebuilds a CafShapePrs.
+                Handle(AIS_Shape) copy = new AIS_ColoredShape(shapeCopy.Shape());
                 const gp_Trsf sourceTransform = source.presentation->LocalTransformation();
                 if (source.sweepLoft.family
                         == pattern_recipe_clone::Family::AnalyticBoolean
@@ -1814,7 +1817,7 @@ namespace core3d {
                         for (const DuplicatePendingResult& existing : duplicates) {
                             if (replayRoot.IsPartner(existing.expectedShape)) return;
                         }
-                        Handle(AIS_Shape) replayPresentation = new AIS_Shape(replayRoot);
+                        Handle(AIS_Shape) replayPresentation = new AIS_ColoredShape(replayRoot);
                         if (replayPresentation.IsNull()) return;
                         replayPresentation->SetLocalTransformation(duplicate.expectedTransform);
                         myDoc->LoadObjectMeterial(source.label, replayPresentation);
