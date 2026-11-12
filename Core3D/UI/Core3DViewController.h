@@ -212,6 +212,10 @@ __attribute__((objc_subclassing_restricted))
             expectedSHA256:(NSString *)expectedSHA256
     NS_SWIFT_NAME(load(fromAssetFile:expectedByteCount:expectedSHA256:));
 - (void)saveSnapshot;
+//! Opt-in geometry snapping for ordinary Move; model units, zero disables.
+//! Refuses changes during an active edit. Does not alter grid preferences.
+- (BOOL)setGeometrySnappingTolerance:(double)tolerance;
+
 
 //! Capture one fail-closed retained editor opening from the exact current
 //! whole-object selection. Main-thread only; nil never changes model/history.
@@ -2228,6 +2232,10 @@ __attribute__((objc_subclassing_restricted))
 + (NSDictionary<NSString *, id> *)debugGeometrySnapFixture:(NSInteger)fixture
     point:(NSArray<NSNumber *> *)point tolerance:(double)tolerance kinds:(NSUInteger)kinds
     NS_SWIFT_NAME(debugGeometrySnap(fixture:point:tolerance:kinds:));
++ (NSDictionary<NSString *, id> *)debugGeometryAxisSnapFixture:(NSInteger)fixture
+    point:(NSArray<NSNumber *> *)point tolerance:(double)tolerance kinds:(NSUInteger)kinds
+    axis:(NSArray<NSNumber *> *)axis
+    NS_SWIFT_NAME(debugGeometryAxisSnap(fixture:point:tolerance:kinds:axis:));
 + (NSDictionary<NSString *, id> *)debugFaceSketchFixture:(NSInteger)fixture
     cut:(BOOL)cut depth:(double)depth fault:(NSInteger)fault
     NS_SWIFT_NAME(debugFaceSketch(fixture:cut:depth:fault:));

@@ -13698,7 +13698,14 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
 
 + (NSDictionary<NSString *, id> *)debugGeometrySnapFixture:(NSInteger)fixture
     point:(NSArray<NSNumber *> *)point tolerance:(double)tolerance kinds:(NSUInteger)kinds {
-    if (point.count != 3 || fixture < 0 || fixture > 6 || kinds > UINT_MAX)
+    return [self debugGeometryAxisSnapFixture:fixture point:point tolerance:tolerance kinds:kinds axis:@[]];
+}
+
++ (NSDictionary<NSString *, id> *)debugGeometryAxisSnapFixture:(NSInteger)fixture
+    point:(NSArray<NSNumber *> *)point tolerance:(double)tolerance kinds:(NSUInteger)kinds
+    axis:(NSArray<NSNumber *> *)axis {
+    if (point.count != 3 || fixture < 0 || fixture > 6 || kinds > UINT_MAX
+        || (axis.count != 0 && axis.count != 3))
         return @{@"error": @"fixture-input"};
     try {
         TopoDS_Shape shape;
@@ -20231,6 +20238,13 @@ static bool Core3DPublishCommittedSpatialSweep(
             });
         });
     } catch (...) { completion(Core3DObjectAlignmentResultRejected); }
+}
+
+- (BOOL)setGeometrySnappingTolerance:(double)tolerance {
+    if (![NSThread isMainThread] || !_isSetuped || !GLController
+        || !GLController.viewer || !GLController.viewer->canBeginCommittedEdit()) return NO;
+    const auto interactor = GLController.viewer->getObjectInteractor();
+    return interactor && interactor->setGeometrySnappingTolerance(tolerance);
 }
 
 - (BOOL)selectObjectWithEntityIdentifier:(NSString *)entityIdentifier

@@ -2494,6 +2494,13 @@ namespace core3d {
         myContext->UpdateCurrentViewer();
     }
 
+    bool ObjectInteractor::setGeometrySnappingTolerance(double tolerance) noexcept {
+        if (!std::isfinite(tolerance) || tolerance < 0 || tolerance > 1e6
+            || isManipulatorGestureActive() || hasUnresolvedEdit()) return false;
+        _geometrySnappingTolerance = tolerance;
+        return true;
+    }
+
     bool ObjectInteractor::transformManipulator(const int theX, const int theY) {
 		if (hasUnresolvedEdit()) { return false; }
 		if (ManipulatorRequiresBRepModeling(_manipulatorType)

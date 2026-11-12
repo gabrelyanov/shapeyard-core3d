@@ -146,6 +146,12 @@ namespace core3d {
 		bool hasUnresolvedDuplicate() const noexcept;
 		void attachManipulatorToSelection(bool detach = false);
         
+        //! Optional geometry snapping for the next translation gestures. Model
+        //! units, zero disables. Settings are editor-local, never saved in OCAF.
+        bool setGeometrySnappingTolerance(double tolerance) noexcept;
+    private:
+        double _geometrySnappingTolerance = 0;
+    public:
         bool transformManipulator(int theX, int theY);
         bool startTransformManipulator(int theX, int theY);
         void finishInteraction();
