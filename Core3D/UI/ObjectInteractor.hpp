@@ -150,6 +150,9 @@ namespace core3d {
         //! Optional geometry snapping for the next translation gestures. Model
         //! units, zero disables. Settings are editor-local, never saved in OCAF.
         bool setGeometrySnappingTolerance(double tolerance) noexcept;
+        void setGeometrySnapFeedbackChangedCallback(std::function<void(bool)> callback) {
+            _geometrySnapFeedbackChangedCallback = std::move(callback);
+        }
         struct GeometryMoveSnap {
             GeometrySnapResult hit;
             std::string targetIdentifier;
@@ -161,6 +164,15 @@ namespace core3d {
         double _geometrySnappingTolerance = 0;
         std::optional<GeometryMoveSnap> _geometryMoveSnap;
         void applyGeometrySnapping() noexcept;
+        std::function<void(bool)> _geometrySnapFeedbackChangedCallback;
+        bool _geometrySnapSamplesActive = false;
+        void publishGeometrySnapFeedback(bool ended) noexcept;
+        struct GeometrySnapTerminalNotification {
+            ObjectInteractor& owner;
+            ~GeometrySnapTerminalNotification() noexcept {
+                owner.publishGeometrySnapFeedback(true);
+            }
+        };
     public:
         bool transformManipulator(int theX, int theY);
         bool startTransformManipulator(int theX, int theY);

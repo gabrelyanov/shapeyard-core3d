@@ -2505,6 +2505,16 @@ namespace core3d {
         return true;
     }
 
+    void ObjectInteractor::publishGeometrySnapFeedback(bool ended) noexcept {
+        if (ended && !_geometrySnapSamplesActive) return;
+        _geometrySnapSamplesActive = !ended;
+        try {
+            if (_geometrySnapFeedbackChangedCallback) _geometrySnapFeedbackChangedCallback(ended);
+        } catch (...) {
+            // Optional observation must not abort or commit a model edit.
+        }
+    }
+
     void ObjectInteractor::applyGeometrySnapping() noexcept {
         _geometryMoveSnap.reset();
         if (_geometrySnappingTolerance <= 0 || _manipulator.IsNull()
@@ -2664,6 +2674,11 @@ namespace core3d {
                     _geometryMoveSnap.reset();
                 }
                 myContext->UpdateCurrentViewer();
+                if (_geometrySnappingTolerance > 0
+                    && _manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
+                    && _manipulator->ActiveMode() == AIS_MM_Translation) {
+                    publishGeometrySnapFeedback(false);
+                }
                 return true;
             }
         }
@@ -2866,6 +2881,9 @@ namespace core3d {
 #endif
 
     void ObjectInteractor::finishInteraction() {
+        // Declared before GestureStateReset: notification follows both the
+        // history reconciliation and the active-gesture flag reset on exit.
+        GeometrySnapTerminalNotification notification{*this};
         _geometryMoveSnap.reset();
         if (!_manipulatorRotationAllowed && !_manipulator.IsNull()
             && _manipulator->ActiveMode() == AIS_MM_Rotation) {
@@ -3092,6 +3110,7 @@ namespace core3d {
     }
 
     void ObjectInteractor::cancelInteraction() {
+        GeometrySnapTerminalNotification notification{*this};
         _geometryMoveSnap.reset();
 		if (hasUnresolvedEdit()) {
 			_manipulatorGestureActive = false;
