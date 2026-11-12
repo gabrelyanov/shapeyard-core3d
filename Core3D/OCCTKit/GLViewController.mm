@@ -3665,6 +3665,49 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     //	std::cout << "incorrect chamfer value" << std::endl;
 }
 
+- (BOOL)canBeginRound {
+    if (_viewer == nullptr || _viewer->hasUnresolvedEdit()
+        || [self getSelectionType] != PrimitiveSelectionTypeEdge
+        || [self getGizmoType] != PrimitiveGizmoTypeNone) {
+        return NO;
+    }
+    const std::shared_ptr<ShapeInteractor> interactor =
+        _viewer->getShapeInteractor();
+    return interactor != nullptr
+        && interactor->selectionModeAuthorityIsExact()
+        && interactor->canBeginRoundSelection();
+}
+
+- (BOOL)beginRound {
+    // Repeat the live proof in this call. A prior availability answer never
+    // authorizes activation after the selection has changed.
+    if (![self canBeginRound] || _viewer == nullptr) {
+        return NO;
+    }
+    const std::shared_ptr<ShapeInteractor> shapeInteractor =
+        _viewer->getShapeInteractor();
+    const std::shared_ptr<ObjectInteractor> objectInteractor =
+        _viewer->getObjectInteractor();
+    if (shapeInteractor == nullptr || objectInteractor == nullptr) {
+        return NO;
+    }
+    objectInteractor->setManipulatorType(
+        PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer);
+    if (objectInteractor->getManipulatorType()
+            != PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer
+        || !shapeInteractor->beginRoundSelectionFromCurrentSelection()
+        || !shapeInteractor->hasActiveBevel()) {
+        (void)shapeInteractor->cancelChamfer();
+        objectInteractor->setManipulatorType(
+            PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
+        [self requestRender];
+        return NO;
+    }
+    _visibleRawR2BevelOwnsChamferTool = NO;
+    [self requestRender];
+    return YES;
+}
+
 - (BOOL)applyChamfer {
     Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
     if ([rawOwner core3d_hasVisibleRawR2Bevel]) {

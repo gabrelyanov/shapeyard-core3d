@@ -967,6 +967,18 @@ Standard_Boolean BevelOperationController::canBegin(
     return tryPrepareSources(theSelection, aSources);
 }
 
+Standard_Boolean BevelOperationController::canBeginRound(
+    const std::vector<BevelSourceSelection>& theSelection) const noexcept
+{
+    if (theSelection.size() != 1) {
+        return Standard_False;
+    }
+    std::vector<Source> aSources;
+    return (!hasActiveOperation() || canAtomicallyReplaceSelectingSources())
+        && tryPrepareSources(theSelection, aSources)
+        && aSources.size() == 1;
+}
+
 Standard_Boolean BevelOperationController::tryPrepareSources(
     const std::vector<BevelSourceSelection>& theSelection,
     std::vector<Source>& theSources) const noexcept
@@ -1241,6 +1253,15 @@ Standard_Boolean BevelOperationController::begin(
         clearState();
         return Standard_False;
     }
+}
+
+Standard_Boolean BevelOperationController::beginRound(
+    const std::vector<BevelSourceSelection>& theSelection) noexcept
+{
+    // begin() repeats the full bounded source proof immediately before it
+    // creates or replaces the ledger. The explicit count keeps this entry
+    // point from ever inheriting legacy Bevel's multi-body authority.
+    return theSelection.size() == 1 && begin(theSelection);
 }
 
 Standard_Boolean BevelOperationController::sourcesAreCurrent() const noexcept

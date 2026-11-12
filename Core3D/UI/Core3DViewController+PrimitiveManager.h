@@ -16,6 +16,17 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)deleteSelected;
 - (void)duplicateSelected;
 - (void)setChamfer:(CGFloat)value;
+//! Read-only direct-Round admission. It is deliberately narrower than the
+//! legacy signed Bevel capability and never changes selection or history.
+- (BOOL)roundAdmission;
+- (BOOL)canBeginRound;
+//! Atomic activation repeats the live one-solid edge proof before opening a
+//! Chamfer ledger. A prior canBeginRound result grants no authority.
+- (BOOL)beginRound;
+- (BOOL)setRoundRadius:(CGFloat)radius;
+- (double)roundMetersPerUnit;
+- (double)roundMaximumRadiusMM;
+- (Core3DRoundFailureObservation)roundFailureObservation;
 - (Boundaries)getChamferBoundaries;
 - (Core3DModelingOperationResult)tryApplyChamfer
     NS_SWIFT_NAME(tryApplyChamfer());

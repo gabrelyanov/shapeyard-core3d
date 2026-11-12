@@ -100,6 +100,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSInteger)numberOfDetectedEdges;
 
 - (void)setChamfer:(CGFloat)value;
+- (BOOL)canBeginRound;
+- (BOOL)beginRound;
 - (BOOL)applyChamfer;
 - (BOOL)cancelChamfer;
 - (BOOL)canApplyChamfer;

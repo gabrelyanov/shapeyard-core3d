@@ -126,7 +126,13 @@ public:
     //! presentation, controller, or document state.
     Standard_Boolean canBegin(
         const std::vector<BevelSourceSelection>& selection) const noexcept;
+    //! Direct Round is intentionally narrower than legacy signed Bevel: all
+    //! selected edges must resolve to exactly one editable solid.
+    Standard_Boolean canBeginRound(
+        const std::vector<BevelSourceSelection>& selection) const noexcept;
     Standard_Boolean begin(
+        const std::vector<BevelSourceSelection>& selection) noexcept;
+    Standard_Boolean beginRound(
         const std::vector<BevelSourceSelection>& selection) noexcept;
     void setRetainedAdapter(RetainedBevelAdapter adapter) noexcept;
 	//! Used only after an in-tool AIS selection refresh became empty/invalid.

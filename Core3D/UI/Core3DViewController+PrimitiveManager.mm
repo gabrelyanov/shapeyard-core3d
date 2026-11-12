@@ -649,6 +649,56 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     [self sendNotifyUIState:UIStateChangingApply];
 }
 
+- (BOOL)roundAdmission {
+    return [self canBeginRound];
+}
+
+- (BOOL)canBeginRound {
+    return NSThread.isMainThread && GLController != nil
+        && _currentSelectionType == PrimitiveSelectionTypeEdge
+        && [GLController getSelectionType] == PrimitiveSelectionTypeEdge
+        && [GLController canBeginRound];
+}
+
+- (BOOL)beginRound {
+    if (![self canBeginRound] || ![GLController beginRound]) {
+        return NO;
+    }
+    _currentGizmoType = [GLController getGizmoType];
+    if (_currentGizmoType != PrimitiveGizmoTypeChamfer
+        || ![GLController hasActiveBevel]) {
+        (void)[GLController cancelChamfer];
+        _currentGizmoType = [GLController getGizmoType];
+        return NO;
+    }
+    self.can_apply = NO;
+    [self viewDidChangeViewportPresentationState];
+    [self sendNotifyUIState:UIStateChangingSelection
+                            | UIStateChangingGizmo
+                            | UIStateChangingApply];
+    return YES;
+}
+
+- (BOOL)setRoundRadius:(CGFloat)radius {
+    // Radius conversion and the non-clamping positive setter are the next
+    // bridge slice. Fail closed until the active ledger exposes its immutable
+    // physical unit and bounded maximum.
+    (void)radius;
+    return NO;
+}
+
+- (double)roundMetersPerUnit {
+    return 0.0;
+}
+
+- (double)roundMaximumRadiusMM {
+    return 0.0;
+}
+
+- (Core3DRoundFailureObservation)roundFailureObservation {
+    return {0, Core3DRoundFailureKindNone};
+}
+
 - (Boundaries)getChamferBoundaries {
     const double metersPerUnit =
         [self core3d_visibleRawR2BevelMetersPerUnit];

@@ -1160,6 +1160,20 @@ typedef struct {
     BOOL canApply;
 } Core3DModelingPreviewStatus;
 
+//! Bounded direct-Round failure classification. Only radiusRefused may be
+//! presented as a user-correctable oversized radius; all other failures stay
+//! on the existing generic modeling recovery path.
+typedef NS_ENUM(NSInteger, Core3DRoundFailureKind) {
+    Core3DRoundFailureKindNone = 0,
+    Core3DRoundFailureKindRadiusRefused,
+    Core3DRoundFailureKindOther,
+};
+
+typedef struct {
+    uint64_t generation;
+    Core3DRoundFailureKind kind;
+} Core3DRoundFailureObservation;
+
 @protocol PrimitiveManagerProtocol<NSObject>
 
 - (void)addPrimitive:(PrimitiveType)primitiveType;
@@ -1168,6 +1182,13 @@ typedef struct {
 - (void)selectAll;
 - (void)duplicateSelected;
 - (void)setChamfer:(CGFloat)value;
+- (BOOL)roundAdmission;
+- (BOOL)canBeginRound;
+- (BOOL)beginRound;
+- (BOOL)setRoundRadius:(CGFloat)radius;
+- (double)roundMetersPerUnit;
+- (double)roundMaximumRadiusMM;
+- (Core3DRoundFailureObservation)roundFailureObservation;
 - (Boundaries)getChamferBoundaries;
 - (Core3DModelingOperationResult)tryApplyChamfer
     NS_SWIFT_NAME(tryApplyChamfer());
