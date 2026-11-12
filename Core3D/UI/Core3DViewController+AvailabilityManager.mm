@@ -360,14 +360,19 @@ Core3DModelCapability DocumentExportCapabilities(
             GLController.viewer;
         const std::shared_ptr<core3d::ShapeInteractor> shapeInteractor =
             viewer == nullptr ? nullptr : viewer->getShapeInteractor();
+		// Round owns its Selecting ledger immediately: unlike generic Bevel,
+		// it is not eligible for a second admission merely because no radius
+		// preview has been requested yet. Keep its one Chamfer control surface.
 		const BOOL hasRetainedChamfer =
 			_currentGizmoType == PrimitiveGizmoTypeChamfer
 			&& ([self core3d_hasVisibleRawR2Bevel]
 				|| ([GLController hasActiveBevel]
-					&& shapeInteractor != nullptr
-					&& (shapeInteractor->isBevelSelectionFrozen()
-						|| shapeInteractor->bevelPreviewState()
-							!= core3d::BevelPreviewState::Selecting)));
+					&& (([GLController roundMetersPerUnit] > 0.0
+						&& [GLController roundMaximumRadiusMM] > 0.0)
+						|| (shapeInteractor != nullptr
+							&& (shapeInteractor->isBevelSelectionFrozen()
+								|| shapeInteractor->bevelPreviewState()
+									!= core3d::BevelPreviewState::Selecting)))));
 		const BOOL hasSelectingChamfer =
 			_currentGizmoType == PrimitiveGizmoTypeChamfer
 			&& [GLController hasActiveBevel]
