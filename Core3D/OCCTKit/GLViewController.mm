@@ -5678,6 +5678,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
             static_cast<unsigned long long>(state.generation)),
         @"previewBodyCount": @(state.previewBodyCount),
         @"pendingResultCount": @(state.pendingResultCount),
+        @"applyFailureLine": @(state.applyFailureLine),
         @"activeOperation": @(
             state.activeOperation != Standard_False),
         @"previewValid": @(state.previewValid != Standard_False),

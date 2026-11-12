@@ -57,6 +57,7 @@ struct LinearArrayPreviewDebugState {
     std::uint64_t generation = 0;
     Standard_Size previewBodyCount = 0;
     Standard_Size pendingResultCount = 0;
+    Standard_Integer applyFailureLine = 0;
     Standard_Boolean activeOperation = Standard_False;
     Standard_Boolean previewValid = Standard_False;
     Standard_Boolean canApply = Standard_False;
@@ -246,6 +247,7 @@ private:
     std::uint64_t _generation = 0;
     std::function<void()> _previewStateChangedCallback;
 #ifdef DEBUG
+    Standard_Integer _debugApplyFailureLine = 0;
     Standard_Size _debugTransactionFailureCount = 0;
     Standard_Size _debugAbortFailureCount = 0;
     Standard_Size _debugEraseFailureCount = 0;
