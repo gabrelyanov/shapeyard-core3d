@@ -3441,8 +3441,8 @@ bool IsValidPresentationOverlaySnapshotImpl(
         case PresentationOverlayKind::None:
             return isEmpty && snapshot.suppressedEntityIdentifiers.empty();
         case PresentationOverlayKind::MoveRotateGizmo:
-            if (isEmpty || snapshot.meshes.size() != 7
-                || snapshot.instances.size() != 7
+            if (isEmpty || (snapshot.meshes.size() != 7 && snapshot.meshes.size() != 4)
+                || snapshot.instances.size() != snapshot.meshes.size()
                 || snapshot.materials.size() != 4) {
                 return false;
             }

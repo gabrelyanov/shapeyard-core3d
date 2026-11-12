@@ -12,6 +12,8 @@ NS_ASSUME_NONNULL_BEGIN
 @interface Core3DViewController (PrimitiveManager)<PrimitiveManagerProtocol>
 
 - (void)addPrimitive:(PrimitiveType)primitiveType;
+//! Torus dictionaries accept optional arcAngleDegrees (0.001...360, default360).
+//! Invalid angles reject the whole batch before changing geometry or history.
 - (void)addPrimitivesFromJSON:(NSString *)json;
 - (void)deleteSelected;
 - (void)duplicateSelected;
