@@ -150,6 +150,9 @@ namespace core3d {
         //! Optional geometry snapping for the next translation gestures. Model
         //! units, zero disables. Settings are editor-local, never saved in OCAF.
         bool setGeometrySnappingTolerance(double tolerance) noexcept;
+        void setGeometrySnapFeedbackChangedCallback(std::function<void(bool)> callback) {
+            _geometrySnapFeedbackChangedCallback = std::move(callback);
+        }
         struct GeometryMoveSnap {
             GeometrySnapResult hit;
             std::string targetIdentifier;
@@ -165,6 +168,15 @@ namespace core3d {
         //! style while a drag holds the snap; corners have no highlight yet.
         Handle(AIS_Shape) _geometrySnapHighlight;
         void syncGeometrySnapHighlight() noexcept;
+        std::function<void(bool)> _geometrySnapFeedbackChangedCallback;
+        bool _geometrySnapSamplesActive = false;
+        void publishGeometrySnapFeedback(bool ended) noexcept;
+        struct GeometrySnapTerminalNotification {
+            ObjectInteractor& owner;
+            ~GeometrySnapTerminalNotification() noexcept {
+                owner.publishGeometrySnapFeedback(true);
+            }
+        };
     public:
         bool transformManipulator(int theX, int theY);
         bool startTransformManipulator(int theX, int theY);
@@ -177,7 +189,7 @@ namespace core3d {
         bool debugReplayGesture(
             Standard_Integer mode, Standard_Integer axis,
             const std::vector<Standard_Real>& values,
-            std::vector<std::array<Standard_Real, 2>>& samples) noexcept;
+            std::vector<std::array<Standard_Real, 2>>& samples, bool cancel = false) noexcept;
         const std::vector<std::map<std::string, double>>& debugGestureTrace() const {
             return _debugGestureTrace;
         }

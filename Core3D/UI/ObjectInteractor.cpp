@@ -2505,6 +2505,16 @@ namespace core3d {
         return true;
     }
 
+    void ObjectInteractor::publishGeometrySnapFeedback(bool ended) noexcept {
+        if (ended && !_geometrySnapSamplesActive) return;
+        _geometrySnapSamplesActive = !ended;
+        try {
+            if (_geometrySnapFeedbackChangedCallback) _geometrySnapFeedbackChangedCallback(ended);
+        } catch (...) {
+            // Optional observation must not abort or commit a model edit.
+        }
+    }
+
     void ObjectInteractor::applyGeometrySnapping() noexcept {
         _geometryMoveSnap.reset(); syncGeometrySnapHighlight();
         if (_geometrySnappingTolerance <= 0 || _manipulator.IsNull()
@@ -2700,6 +2710,11 @@ namespace core3d {
                     _geometryMoveSnap.reset(); syncGeometrySnapHighlight();
                 }
                 myContext->UpdateCurrentViewer();
+                if (_geometrySnappingTolerance > 0
+                    && _manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
+                    && _manipulator->ActiveMode() == AIS_MM_Translation) {
+                    publishGeometrySnapFeedback(false);
+                }
                 return true;
             }
         }
@@ -2750,7 +2765,7 @@ namespace core3d {
     bool ObjectInteractor::debugReplayGesture(
         const Standard_Integer mode, const Standard_Integer axis,
         const std::vector<Standard_Real>& values,
-        std::vector<std::array<Standard_Real, 2>>& samples) noexcept {
+        std::vector<std::array<Standard_Real, 2>>& samples, bool cancel) noexcept {
         samples.clear();
         _debugGestureTrace.clear();
         _debugGestureTraceIndices.clear();
@@ -2883,7 +2898,7 @@ namespace core3d {
                 samples.push_back(sample);
                 _debugGestureTrace.push_back(std::move(trace));
             }
-            finishInteraction();
+            if (cancel) cancelInteraction(); else finishInteraction();
             // Read authority after reconciliation, even if it aborted the batch.
             for (std::size_t index = 0; index < traceLabels.size(); ++index) {
                 OcctObjectTransformState committed;
@@ -2903,6 +2918,9 @@ namespace core3d {
 #endif
 
     void ObjectInteractor::finishInteraction() {
+        // Declared before GestureStateReset: notification follows both the
+        // history reconciliation and the active-gesture flag reset on exit.
+        GeometrySnapTerminalNotification notification{*this};
         _geometryMoveSnap.reset(); syncGeometrySnapHighlight();
         if (!_manipulatorRotationAllowed && !_manipulator.IsNull()
             && _manipulator->ActiveMode() == AIS_MM_Rotation) {
@@ -3129,6 +3147,7 @@ namespace core3d {
     }
 
     void ObjectInteractor::cancelInteraction() {
+        GeometrySnapTerminalNotification notification{*this};
         _geometryMoveSnap.reset(); syncGeometrySnapHighlight();
 		if (hasUnresolvedEdit()) {
 			_manipulatorGestureActive = false;

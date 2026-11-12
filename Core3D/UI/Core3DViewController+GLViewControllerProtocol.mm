@@ -506,6 +506,17 @@ supportsNormalTextureEditing:supportsNormalTextureEditing];
     [self viewDidInvalidateSceneSnapshot];
 }
 
+- (void)viewer:(id)sender didChangeGeometrySnapFeedbackEnded:(BOOL)ended {
+    (void)sender;
+    if (![NSThread isMainThread]) return;
+    Core3DGeometrySnapFeedback *feedback = [self geometrySnapFeedback];
+    NSMutableDictionary *payload = [@{@"ended": @(ended)} mutableCopy];
+    if (feedback) payload[@"feedback"] = feedback;
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:Core3DViewController.geometrySnapFeedbackDidChangeNotification
+        object:self userInfo:payload];
+}
+
 - (void)didPresentNativeViewport:(id)sender {
     (void)sender;
     [self viewDidPresentNativeViewport];
