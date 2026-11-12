@@ -352,7 +352,7 @@ Standard_Boolean Core3DManipulator::CaptureIdleMoveRotateOverlay(
         }
         for (Standard_Integer anAxis = 0; anAxis < 3; ++anAxis) {
             if (!myAxes[anAxis].HasTranslation()
-                || !myAxes[anAxis].HasRotation()) {
+                || myAxes[anAxis].HasRotation() != myAxes[0].HasRotation()) {
                 return Standard_False;
             }
         }
@@ -399,6 +399,7 @@ Standard_Boolean Core3DManipulator::CaptureIdleMoveRotateOverlay(
                     static_cast<std::uint32_t>(anAxis + 1))) {
                 return Standard_False;
             }
+            if (!myAxes[anAxis].HasRotation()) continue;
             const std::string aRotationIdentifier =
                 std::string("gizmo/rotation/") + kAxisNames[anAxis];
             const std::string aRotationName =
@@ -413,8 +414,9 @@ Standard_Boolean Core3DManipulator::CaptureIdleMoveRotateOverlay(
                 return Standard_False;
             }
         }
-        if (aContent.meshes.size() != 7
-            || aContent.instances.size() != 7
+        const std::size_t expectedCount = myAxes[0].HasRotation() ? 7 : 4;
+        if (aContent.meshes.size() != expectedCount
+            || aContent.instances.size() != expectedCount
             || aContent.materials.size() != 4) {
             return Standard_False;
         }

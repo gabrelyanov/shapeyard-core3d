@@ -14008,6 +14008,50 @@ core3d_visibleRawR2RoundFailureObservation {
     return [GLController debugSelectedShapeCount];
 }
 
+- (NSDictionary<NSString *, id> *)debugMugLessonSelectedWallEvidence {
+    NSDictionary<NSString *, id> *state = [self debugTopologySelectionState];
+    if (![state[@"ready"] boolValue]
+        || [state[@"acceptedMode"] unsignedIntegerValue] != PrimitiveSelectionTypeFace
+        || ![state[@"publicMatchesNative"] boolValue]
+        || ![state[@"selectionMatchesMode"] boolValue]
+        || [state[@"invalidSelectedOwnerCount"] unsignedIntegerValue] != 0
+        || [state[@"rawSelectedOwnerCount"] unsignedIntegerValue]
+            != [state[@"selectedCount"] unsignedIntegerValue]) return @{};
+    NSMutableDictionary<NSString *, id> *evidence = [@{
+        @"selectedCount": state[@"selectedCount"], @"selectedWallFaces": @[]
+    } mutableCopy];
+    // The first wall is the identity witness. A pair is measured separately
+    // through the production Distance API, never through this diagnostic.
+    if ([state[@"selectedCount"] unsignedIntegerValue] != 1
+        || ![state[@"singleSelectionExact"] boolValue]) return evidence;
+    try {
+        OCC_CATCH_SIGNALS
+        const auto viewer = GLController.viewer;
+        if (viewer == nullptr || viewer->AisContext().IsNull()
+            || viewer->getDocument().IsNull()) return @{};
+        const auto context = viewer->AisContext();
+        context->InitSelected();
+        if (!context->MoreSelected()) return @{};
+        const auto presentation = Handle(AIS_Shape)::DownCast(context->SelectedInteractive());
+        const auto owner = Handle(StdSelect_BRepOwner)::DownCast(context->SelectedOwner());
+        if (presentation.IsNull() || owner.IsNull() || !owner->HasShape()
+            || owner->Selectable() != presentation || owner->Shape().ShapeType() != TopAbs_FACE) return @{};
+        const BRepAdaptor_Surface surface(TopoDS::Face(owner->Shape()), Standard_True);
+        if (surface.GetType() != GeomAbs_Cylinder) return evidence;
+        Standard_Real metersPerUnit = 0.001;
+        (void)XCAFDoc_DocumentTool::GetLengthUnit(viewer->getDocument()->Document(), metersPerUnit);
+        const double radius = surface.Cylinder().Radius()
+            * std::abs(presentation->Transformation().ScaleFactor()) * metersPerUnit * 1000.0;
+        if (!std::isfinite(metersPerUnit) || metersPerUnit <= 0
+            || !std::isfinite(radius) || radius <= 0) return @{};
+        evidence[@"selectedWallFaces"] = @[@{
+            @"topology": state[@"topologyIndex"], @"radiusMM": @(radius),
+            @"entityIdentifier": state[@"entityIdentifier"]
+        }];
+        return evidence;
+    } catch (...) { return @{}; }
+}
+
 - (NSData *)debugJoinedHalfRingCupFixtureData {
     return [self debugHalfRingCupFixtureDataRingOnly:NO];
 }
@@ -25206,6 +25250,14 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
 - (void)setSelectedSurfaceAppearanceColor:(UIColor *)color widthPoints:(CGFloat)width faceWashOpacity:(CGFloat)opacity {
     if (!NSThread.isMainThread) return;
     [GLController setSelectedSurfaceAppearanceColor:color widthPoints:width faceWashOpacity:opacity];
+}
+
+- (void)setManipulatorRotationAllowed:(BOOL)allowed {
+    if (!NSThread.isMainThread || GLController.viewer == nullptr) return;
+    const auto interactor = GLController.viewer->getObjectInteractor();
+    if (!interactor || interactor->manipulatorRotationAllowed() == bool(allowed)) return;
+    interactor->setManipulatorRotationAllowed(allowed);
+    [self viewDidChangeViewportPresentationState];
 }
 
 - (void)setGizmoType:(PrimitiveGizmoType)type {
