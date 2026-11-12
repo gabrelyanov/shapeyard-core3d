@@ -700,7 +700,11 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 }
 
 - (Core3DRoundFailureObservation)roundFailureObservation {
-    return {0, Core3DRoundFailureKindNone};
+    if (![NSThread isMainThread] || GLController == nil
+        || _currentGizmoType != PrimitiveGizmoTypeChamfer) {
+        return {0, Core3DRoundFailureKindNone};
+    }
+    return [GLController roundFailureObservation];
 }
 
 - (Boundaries)getChamferBoundaries {

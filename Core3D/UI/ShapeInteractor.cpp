@@ -2609,6 +2609,13 @@ namespace core3d {
 			? 0.0 : _bevelController->roundMaximumRadiusMM();
 	}
 
+	BevelFailureObservation
+	ShapeInteractor::roundFailureObservation() const noexcept {
+		return _bevelController == nullptr
+			? BevelFailureObservation{}
+			: _bevelController->failureObservation();
+	}
+
 	Standard_Boolean
 	ShapeInteractor::beginBevelSelectionFromCurrentSelection() noexcept {
 		if (_bevelController == nullptr) {

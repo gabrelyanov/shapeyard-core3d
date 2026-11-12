@@ -3776,6 +3776,32 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     return _viewer->getShapeInteractor()->roundMaximumRadiusMM();
 }
 
+- (Core3DRoundFailureObservation)roundFailureObservation {
+    Core3DRoundFailureObservation result = {
+        0,
+        Core3DRoundFailureKindNone,
+    };
+    if (_viewer == nullptr || [self getGizmoType] != PrimitiveGizmoTypeChamfer
+        || _viewer->getShapeInteractor() == nullptr) {
+        return result;
+    }
+    const BevelFailureObservation observation =
+        _viewer->getShapeInteractor()->roundFailureObservation();
+    result.generation = observation.generation;
+    switch (observation.kind) {
+        case BevelFailureKind::None:
+            result.kind = Core3DRoundFailureKindNone;
+            break;
+        case BevelFailureKind::RadiusRefused:
+            result.kind = Core3DRoundFailureKindRadiusRefused;
+            break;
+        case BevelFailureKind::Other:
+            result.kind = Core3DRoundFailureKindOther;
+            break;
+    }
+    return result;
+}
+
 - (BOOL)applyChamfer {
     Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
     if ([rawOwner core3d_hasVisibleRawR2Bevel]) {

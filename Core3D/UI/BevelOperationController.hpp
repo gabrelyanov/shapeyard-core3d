@@ -35,6 +35,17 @@ enum class BevelPreviewState : std::uint8_t {
     Failed,
 };
 
+enum class BevelFailureKind : std::uint8_t {
+    None = 0,
+    RadiusRefused,
+    Other,
+};
+
+struct BevelFailureObservation {
+    std::uint64_t generation = 0;
+    BevelFailureKind kind = BevelFailureKind::None;
+};
+
 //! Immutable selection captured on the main thread before any worker starts.
 //! Positive values produce a round fillet and negative values a flat chamfer.
 struct BevelSourceSelection {
@@ -154,6 +165,7 @@ public:
     Standard_Boolean isSelectionFrozen() const noexcept;
     BevelPreviewState previewState() const noexcept;
     std::uint64_t previewGeneration() const noexcept;
+    BevelFailureObservation failureObservation() const noexcept;
     Standard_Boolean capturePreview(
         BevelPreviewCapture& capture) const noexcept;
     void setPreviewStateChangedCallback(std::function<void()> callback);
@@ -211,6 +223,7 @@ private:
     Standard_Boolean sourcesAreCurrent() const noexcept;
     std::string selectionFingerprint(Standard_Boolean& complete) const;
     void notifyPreviewStateChanged() noexcept;
+    void recordFailure(BevelFailureKind kind) noexcept;
     void clearState() noexcept;
     Standard_Boolean abortOpenCommand(
         const Handle(TDocStd_Document)& document) noexcept;
@@ -226,6 +239,7 @@ private:
     BevelPreviewState myState = BevelPreviewState::Selecting;
     Standard_Real myValue = 0.0;
     std::uint64_t myGeneration = 0;
+    BevelFailureObservation myFailureObservation;
     std::string myRequestedFingerprint;
     Standard_Boolean myCanApply = Standard_False;
     Standard_Boolean mySelectionFrozen = Standard_False;
