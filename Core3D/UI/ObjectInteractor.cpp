@@ -2714,7 +2714,7 @@ namespace core3d {
     bool ObjectInteractor::debugReplayGesture(
         const Standard_Integer mode, const Standard_Integer axis,
         const std::vector<Standard_Real>& values,
-        std::vector<std::array<Standard_Real, 2>>& samples) noexcept {
+        std::vector<std::array<Standard_Real, 2>>& samples, bool cancel) noexcept {
         samples.clear();
         _debugGestureTrace.clear();
         _debugGestureTraceIndices.clear();
@@ -2846,7 +2846,7 @@ namespace core3d {
                 samples.push_back(sample);
                 _debugGestureTrace.push_back(std::move(trace));
             }
-            finishInteraction();
+            if (cancel) cancelInteraction(); else finishInteraction();
             // Read authority after reconciliation, even if it aborted the batch.
             for (std::size_t index = 0; index < traceLabels.size(); ++index) {
                 OcctObjectTransformState committed;

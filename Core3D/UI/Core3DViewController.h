@@ -237,6 +237,12 @@ __attribute__((objc_subclassing_restricted))
 - (BOOL)setGeometrySnappingTolerance:(double)tolerance;
 //! Nil outside an active snapped translation, including finish/cancel.
 - (nullable Core3DGeometrySnapFeedback *)geometrySnapFeedback;
+//! Synchronous main-thread notifications, object=this controller. One per
+//! opt-in Move sample (including no hit), plus one after finish/cancel.
+//! userInfo["feedback"] is an immutable Core3DGeometrySnapFeedback or absent;
+//! userInfo["ended"] is YES only for the terminal clear. Observers may update
+//! UI, but must defer model edits until after notification delivery.
+@property(class, nonatomic, copy, readonly) NSNotificationName geometrySnapFeedbackDidChangeNotification;
 
 
 //! Capture one fail-closed retained editor opening from the exact current
@@ -2172,6 +2178,11 @@ __attribute__((objc_subclassing_restricted))
     debugReplayGesture:(NSInteger)mode axis:(NSInteger)axis
     values:(NSArray<NSNumber *> *)values
     NS_SWIFT_NAME(debugReplayGesture(mode:axis:values:));
+//! Same projected samples, ending through production Cancel when requested.
+- (NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable)
+    debugReplayGesture:(NSInteger)mode axis:(NSInteger)axis
+    values:(NSArray<NSNumber *> *)values cancel:(BOOL)cancel
+    NS_SWIFT_NAME(debugReplayGesture(mode:axis:values:cancel:));
 //! Current XCAF visual-material table size for ownership/GC regressions.
 - (NSInteger)debugVisualMaterialDefinitionCount;
 - (NSDictionary<NSString *,id> *_Nullable)debugScalarPBREvidence:(NSString *)entity;

@@ -173,7 +173,7 @@ namespace core3d {
         bool debugReplayGesture(
             Standard_Integer mode, Standard_Integer axis,
             const std::vector<Standard_Real>& values,
-            std::vector<std::array<Standard_Real, 2>>& samples) noexcept;
+            std::vector<std::array<Standard_Real, 2>>& samples, bool cancel = false) noexcept;
         const std::vector<std::map<std::string, double>>& debugGestureTrace() const {
             return _debugGestureTrace;
         }
