@@ -4696,16 +4696,38 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
         || GLController.viewer->hasUnresolvedEdit()) return NO;
     Core3DSceneSnapshot *scene = [self captureSceneSnapshot];
     if (!scene || scene.selectionMode != Core3DSceneElementKindEdge
-        || scene.selection.selectedElements.count != 1) return NO;
+        || scene.selection.selectedElements.count == 0) return NO;
     Core3DSceneElementIdentifier *selected = scene.selection.selectedElements.firstObject;
     if (selected.kind != Core3DSceneElementKindEdge
         || selected.entityIdentifier.length == 0) return NO;
-    Core3DEdgeTreatmentCaptureR2 *capture =
-        [self captureEdgeTreatmentR2:selected.entityIdentifier expected:scene];
-    return capture.status == Core3DEdgeTreatmentStatusCurrentEditable
-        && capture.snapshot != nil && capture.snapshot.current
-        && capture.snapshot.dimensionMetersPerUnit > 0.0
-        && std::isfinite(capture.snapshot.dimensionMetersPerUnit);
+    for (Core3DSceneElementIdentifier *element
+            in scene.selection.selectedElements) {
+        if (element.kind != Core3DSceneElementKindEdge
+            || ![element.entityIdentifier
+                isEqualToString:selected.entityIdentifier]) return NO;
+    }
+
+    // Use the same native capture that begin consumes, but do not bind it to
+    // Object mode or expose it through the consuming bridge. This is a
+    // read-only proof over the live owners; begin repeats it and captures a
+    // fresh authority, so this answer cannot authorize a later selection.
+    const CGSize size = GLController.drawableSize;
+    core3d::ObjectFrameIdentity identity;
+    identity.entityIdentifier = selected.entityIdentifier.UTF8String;
+    identity.publicationSourceIdentifier =
+        scene.publicationSourceIdentifier.UTF8String;
+    identity.documentGeneration = scene.revisions.documentGeneration;
+    identity.modelRevision = scene.revisions.modelRevision;
+    core3d::retained_edge_treatment::Refusal refusal;
+    const auto targets = GLController.viewer->captureEdgeTreatmentRawTargetsR2(
+        identity, scene.revisions.presentationRevision,
+        std::uint32_t(size.width), std::uint32_t(size.height), refusal);
+    if (!targets || targets->anchors().size()
+            != scene.selection.selectedElements.count) return NO;
+    const auto snapshot = targets->snapshot();
+    return snapshot && snapshot->current()
+        && snapshot->dimensionMetersPerUnit() > 0.0
+        && std::isfinite(snapshot->dimensionMetersPerUnit());
 }
 
 - (BOOL)core3d_beginVisibleRawR2Bevel {

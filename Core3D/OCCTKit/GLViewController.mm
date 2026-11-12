@@ -1291,10 +1291,13 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 
 @interface Core3DViewController (VisibleRawR2BevelRouting)
 - (BOOL)core3d_hasVisibleRawR2Bevel;
+- (BOOL)core3d_canBeginVisibleRawR2Bevel;
+- (BOOL)core3d_beginVisibleRawR2Bevel;
 - (void)core3d_setVisibleRawR2BevelValue:(double)localValue;
 - (BOOL)core3d_applyVisibleRawR2Bevel;
 - (BOOL)core3d_cancelVisibleRawR2Bevel;
 - (Core3DModelingPreviewStatus)core3d_visibleRawR2BevelStatus;
+- (double)core3d_visibleRawR2BevelMetersPerUnit;
 @end
 
 static Core3DViewController *Core3DVisibleRawR2BevelOwner(
@@ -3673,9 +3676,12 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     }
     const std::shared_ptr<ShapeInteractor> interactor =
         _viewer->getShapeInteractor();
-    return interactor != nullptr
-        && interactor->selectionModeAuthorityIsExact()
-        && interactor->canBeginRoundSelection();
+    if (interactor == nullptr || !interactor->selectionModeAuthorityIsExact()) {
+        return NO;
+    }
+    Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+    return [rawOwner core3d_canBeginVisibleRawR2Bevel]
+        || interactor->canBeginRoundSelection();
 }
 
 - (BOOL)beginRound {
@@ -3691,21 +3697,65 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     if (shapeInteractor == nullptr || objectInteractor == nullptr) {
         return NO;
     }
-    objectInteractor->setManipulatorType(
-        PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer);
-    if (objectInteractor->getManipulatorType()
-            != PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer
-        || !shapeInteractor->beginRoundSelectionFromCurrentSelection()
-        || !shapeInteractor->hasActiveBevel()) {
-        (void)shapeInteractor->cancelChamfer();
-        objectInteractor->setManipulatorType(
-            PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
+    Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+    if ([rawOwner core3d_canBeginVisibleRawR2Bevel]) {
+        if (![rawOwner core3d_beginVisibleRawR2Bevel]
+            || ![rawOwner core3d_hasVisibleRawR2Bevel]) {
+            [self requestRender];
+            return NO;
+        }
+        _visibleRawR2BevelOwnsChamferTool = YES;
         [self requestRender];
-        return NO;
+        return YES;
     }
-    _visibleRawR2BevelOwnsChamferTool = NO;
+
+    if (shapeInteractor->canBeginRoundSelection()) {
+        objectInteractor->setManipulatorType(
+            PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer);
+        if (objectInteractor->getManipulatorType()
+                != PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer
+            || !shapeInteractor->beginRoundSelectionFromCurrentSelection()
+            || !shapeInteractor->hasActiveBevel()) {
+            (void)shapeInteractor->cancelChamfer();
+            objectInteractor->setManipulatorType(
+                PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
+            [self requestRender];
+            return NO;
+        }
+        _visibleRawR2BevelOwnsChamferTool = NO;
+        [self requestRender];
+        return YES;
+    }
+
     [self requestRender];
-    return YES;
+    return NO;
+}
+
+- (BOOL)setRoundRadius:(CGFloat)radius {
+    Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+    if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
+        const double metersPerUnit =
+            [rawOwner core3d_visibleRawR2BevelMetersPerUnit];
+        const double amountMM = radius * metersPerUnit * 1000.0;
+        if (!std::isfinite(radius) || radius <= 0.0
+            || !std::isfinite(amountMM) || amountMM <= 0.0
+            || amountMM > 20.0) return NO;
+        [rawOwner core3d_setVisibleRawR2BevelValue:radius];
+        [self requestRender];
+        return YES;
+    }
+    return NO;
+}
+
+- (double)roundMetersPerUnit {
+    Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+    return [rawOwner core3d_hasVisibleRawR2Bevel]
+        ? [rawOwner core3d_visibleRawR2BevelMetersPerUnit] : 0.0;
+}
+
+- (double)roundMaximumRadiusMM {
+    Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+    return [rawOwner core3d_hasVisibleRawR2Bevel] ? 20.0 : 0.0;
 }
 
 - (BOOL)applyChamfer {

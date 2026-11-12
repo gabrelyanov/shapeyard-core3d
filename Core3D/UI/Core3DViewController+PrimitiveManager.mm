@@ -680,19 +680,23 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
 }
 
 - (BOOL)setRoundRadius:(CGFloat)radius {
-    // Radius conversion and the non-clamping positive setter are the next
-    // bridge slice. Fail closed until the active ledger exposes its immutable
-    // physical unit and bounded maximum.
-    (void)radius;
-    return NO;
+    if (![NSThread isMainThread] || GLController == nil
+        || _currentGizmoType != PrimitiveGizmoTypeChamfer) return NO;
+    const BOOL didSet = [GLController setRoundRadius:radius];
+    self.can_apply = [GLController canApplyChamfer];
+    [self viewDidChangeViewportPresentationState];
+    [self sendNotifyUIState:UIStateChangingApply];
+    return didSet;
 }
 
 - (double)roundMetersPerUnit {
-    return 0.0;
+    return [NSThread isMainThread] && GLController != nil
+        ? [GLController roundMetersPerUnit] : 0.0;
 }
 
 - (double)roundMaximumRadiusMM {
-    return 0.0;
+    return [NSThread isMainThread] && GLController != nil
+        ? [GLController roundMaximumRadiusMM] : 0.0;
 }
 
 - (Core3DRoundFailureObservation)roundFailureObservation {

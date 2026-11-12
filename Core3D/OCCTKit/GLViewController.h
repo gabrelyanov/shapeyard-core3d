@@ -102,6 +102,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)setChamfer:(CGFloat)value;
 - (BOOL)canBeginRound;
 - (BOOL)beginRound;
+- (BOOL)setRoundRadius:(CGFloat)radius;
+- (double)roundMetersPerUnit;
+- (double)roundMaximumRadiusMM;
 - (BOOL)applyChamfer;
 - (BOOL)cancelChamfer;
 - (BOOL)canApplyChamfer;
