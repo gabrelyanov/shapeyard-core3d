@@ -23,6 +23,7 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <GeomAdaptor_Curve.hxx>
+#include <Geom_Conic.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <BRepFeat_MakePrism.hxx>
 #include <BRepFeat_SplitShape.hxx>
@@ -441,6 +442,38 @@ namespace core3d {
 					return Standard_False;
 				}
 
+                // BinTools reconstructs a conic's gp_Ax2 from its directions;
+                // that can change signed zeros before any modeling runs.
+                // Preserve the frame by value on the detached curve only.
+                // The complete raw V3 comparison below still proves the copy.
+                // Both maps are bounded by the source/working census above.
+                TopTools_IndexedMapOfShape sourceEdges, workingEdges;
+                TopExp::MapShapes(source, TopAbs_EDGE, sourceEdges);
+                TopExp::MapShapes(workingSource, TopAbs_EDGE, workingEdges);
+                if (sourceEdges.Extent() != workingEdges.Extent()) {
+                    workingSource.Nullify();
+                    workingFace.Nullify();
+                    failureStage = 11;
+                    return Standard_False;
+                }
+                for (Standard_Integer index = 1; index <= sourceEdges.Extent(); ++index) {
+                    TopLoc_Location sourceLocation, workingLocation;
+                    Standard_Real first = 0, last = 0;
+                    const auto original = Handle(Geom_Conic)::DownCast(
+                        BRep_Tool::Curve(TopoDS::Edge(sourceEdges(index)), sourceLocation, first, last));
+                    if (original.IsNull()) continue;
+                    const auto copied = Handle(Geom_Conic)::DownCast(
+                        BRep_Tool::Curve(TopoDS::Edge(workingEdges(index)), workingLocation, first, last));
+                    if (copied.IsNull() || copied == original
+                        || copied->DynamicType() != original->DynamicType()) {
+                        workingSource.Nullify();
+                        workingFace.Nullify();
+                        failureStage = 11;
+                        return Standard_False;
+                    }
+                    copied->SetPosition(original->Position());
+                }
+
 				ExtrusionGeometryBuffer sourceCommitment;
 				ExtrusionGeometryBuffer workingCommitment;
 				if (!WriteExtrusionGeometryCommitment(
@@ -470,8 +503,12 @@ namespace core3d {
                             detached[index] = value == '\n' ? '|' : value;
                         }
                     }
-                    fprintf(stderr, "BASE_DETACH source=%zu working=%zu first=%zu source=[%s] working=[%s]\n",
-                        sourceCommitment.size(), workingCommitment.size(), mismatch, original, detached);
+                    const std::string prefix(sourceCommitment.data(), mismatch);
+                    const auto curves = prefix.rfind("Curves ");
+                    const auto surfaces = prefix.rfind("Surfaces ");
+                    const char* section = surfaces != std::string::npos && (curves == std::string::npos || surfaces > curves) ? "surfaces" : "curves";
+                    fprintf(stderr, "BASE_DETACH section=%s source=%zu working=%zu first=%zu source=[%s] working=[%s]\n",
+                        section, sourceCommitment.size(), workingCommitment.size(), mismatch, original, detached);
 #endif
 					workingSource.Nullify();
 					workingFace.Nullify();
