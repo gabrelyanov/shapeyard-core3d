@@ -117,6 +117,7 @@ namespace core3d {
         std::shared_ptr<RadialArrayOperationController>
             _radialArrayController;
         Handle(Core3DManipulator) _manipulator;
+        bool _manipulatorRotationAllowed = true;
 //        std::vector<TopoDS_Shape> _beforeTransformObjects;
     public:
         static constexpr Standard_ShortReal kManipulatorGap = 100;
@@ -162,6 +163,9 @@ namespace core3d {
         }
 #endif
         void setManipulatorType(PrimitiveManipulatorType type);
+        //! Per-editor guided placement policy; ordinary editors default to rotation.
+        void setManipulatorRotationAllowed(bool allowed);
+        bool manipulatorRotationAllowed() const { return _manipulatorRotationAllowed; }
 		Handle(TopLoc_Datum3D) manipulatorTransform();
 		gp_XYZ manipulatorPosition();
 		//! The handles' configured side in view pixels (design system 7.2).

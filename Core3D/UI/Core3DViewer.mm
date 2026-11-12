@@ -11852,6 +11852,13 @@ void Core3DViewer::addPrimitivesFromJSON(NSString* json) {
             }
 
             NSString* type = static_cast<NSString*>(typeValue);
+            // Optional Ring arc; omitting it preserves the ordinary full ring.
+            double arcAngleDegrees = 360.0;
+            if (id arcValue = primitive[@"arcAngleDegrees"]) {
+                if (![type isEqualToString:@"torus"]
+                    || !ReadFiniteJSONNumber(arcValue, arcAngleDegrees)
+                    || arcAngleDegrees < 0.001 || arcAngleDegrees > 360.0) return;
+            }
             NSString* color = colorValue == nil
                 ? nil
                 : static_cast<NSString*>(colorValue);
@@ -11942,8 +11949,14 @@ void Core3DViewer::addPrimitivesFromJSON(NSString* json) {
                     }
                     gp_Ax2 axis;
                     axis.SetLocation(gp_Pnt(0.0, 0.0, 0.0));
-                    BRepPrimAPI_MakeTorus maker(axis, radius, minorRadius);
-                    shape = maker.Shape();
+                    if (arcAngleDegrees == 360.0) {
+                        BRepPrimAPI_MakeTorus maker(axis, radius, minorRadius);
+                        shape = maker.Shape();
+                    } else {
+                        BRepPrimAPI_MakeTorus maker(axis, radius, minorRadius,
+                            arcAngleDegrees * M_PI / 180.0);
+                        shape = maker.Shape();
+                    }
                 }
             } else {
                 return;
