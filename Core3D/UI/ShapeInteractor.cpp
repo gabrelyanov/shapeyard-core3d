@@ -454,6 +454,25 @@ namespace core3d {
 						sourceCommitment.data()
 							+ sourceCommitment.size(),
 						workingCommitment.data())) {
+#if DEBUG
+                    const auto length = std::min(sourceCommitment.size(), workingCommitment.size());
+                    std::size_t mismatch = 0;
+                    while (mismatch < length && sourceCommitment.data()[mismatch] == workingCommitment.data()[mismatch]) ++mismatch;
+                    const auto start = mismatch > 20 ? mismatch - 20 : 0;
+                    char original[81] = {}, detached[81] = {};
+                    for (std::size_t index = 0; index < 80; ++index) {
+                        if (start + index < sourceCommitment.size()) {
+                            const char value = sourceCommitment.data()[start + index];
+                            original[index] = value == '\n' ? '|' : value;
+                        }
+                        if (start + index < workingCommitment.size()) {
+                            const char value = workingCommitment.data()[start + index];
+                            detached[index] = value == '\n' ? '|' : value;
+                        }
+                    }
+                    fprintf(stderr, "BASE_DETACH source=%zu working=%zu first=%zu source=[%s] working=[%s]\n",
+                        sourceCommitment.size(), workingCommitment.size(), mismatch, original, detached);
+#endif
 					workingSource.Nullify();
 					workingFace.Nullify();
 					failureStage = 11;
