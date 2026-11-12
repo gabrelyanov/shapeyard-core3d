@@ -7,6 +7,7 @@
 
 #include "ShapeInteractor.hpp"
 #include "../OCCTKit/Core3DSTEPExchangeLock.h"
+#include "../OCCTKit/NativeModelingReceipt.hxx"
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <StdSelect_BRepOwner.hxx>
@@ -343,6 +344,43 @@ namespace core3d {
 				&& buffer.size() < kMaximumExtrusionWorkingShapeBytes;
 		}
 
+		Standard_Boolean ExtrusionGeometryCommitmentsMatch(
+			const TopoDS_Shape& source,
+			const TopoDS_Shape& workingSource) {
+			ExtrusionGeometryBuffer sourceCommitment;
+			ExtrusionGeometryBuffer workingCommitment;
+			if (!WriteExtrusionGeometryCommitment(
+					source, sourceCommitment)
+				|| !WriteExtrusionGeometryCommitment(
+					workingSource, workingCommitment)) {
+				return Standard_False;
+			}
+			if (sourceCommitment.size() == workingCommitment.size()
+				&& std::equal(
+					sourceCommitment.data(),
+					sourceCommitment.data() + sourceCommitment.size(),
+					workingCommitment.data())) {
+				return Standard_True;
+			}
+
+			// BinTools reconstructs analytic gp_Dir/gp_Ax values while making
+			// the private working copy and may turn a signed zero into +0. The
+			// receipt policy canonicalizes only those proven typed analytic-zero
+			// fields (and mutable bookkeeping on its own deep copies); every
+			// other V3 representation byte must still match.
+			if (source.ShapeType() != TopAbs_SOLID
+				|| workingSource.ShapeType() != TopAbs_SOLID) {
+				return Standard_False;
+			}
+			receipt::Digest sourceDigest{};
+			receipt::Digest workingDigest{};
+			return receipt::GeometryDigestForPolicy(
+					source, sourceDigest, true)
+				&& receipt::GeometryDigestForPolicy(
+					workingSource, workingDigest, true)
+				&& sourceDigest == workingDigest;
+		}
+
 		Standard_Boolean DetachExtrusionSource(
 			const TopoDS_Shape& source,
 			const TopoDS_Face& selectedFace,
@@ -441,19 +479,8 @@ namespace core3d {
 					return Standard_False;
 				}
 
-				ExtrusionGeometryBuffer sourceCommitment;
-				ExtrusionGeometryBuffer workingCommitment;
-				if (!WriteExtrusionGeometryCommitment(
-						source, sourceCommitment)
-					|| !WriteExtrusionGeometryCommitment(
-						workingSource, workingCommitment)
-					|| sourceCommitment.size()
-						!= workingCommitment.size()
-					|| !std::equal(
-						sourceCommitment.data(),
-						sourceCommitment.data()
-							+ sourceCommitment.size(),
-						workingCommitment.data())) {
+				if (!ExtrusionGeometryCommitmentsMatch(
+						source, workingSource)) {
 					workingSource.Nullify();
 					workingFace.Nullify();
 					failureStage = 11;
