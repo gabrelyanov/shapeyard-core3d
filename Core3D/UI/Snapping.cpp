@@ -11,7 +11,7 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
-#include <IntCurvesFace_ShapeIntersector.hxx>
+#include <IntCurvesFace_Intersector.hxx>
 #include <gp_Lin.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRep_Tool.hxx>
@@ -43,7 +43,16 @@ std::optional<core3d::GeometrySnapResult> core3d::SnapPointToGeometry(
         const auto consider = [&](const gp_Pnt& candidate, GeometrySnapKind kind,
                                   int index, const TopoDS_Shape& topology) {
             if (!finitePoint(candidate)) return;
-            if (axis && gp_Lin(point,*axis).Distance(candidate) > Precision::Confusion()) return;
+            if (axis) {
+                // OCCT's modelling tolerance may admit a nearby corner that
+                // the constrained Move cannot actually reach. Allow only
+                // coordinate-sized floating-point roundoff; otherwise the
+                // feedback point would disagree with the projected movement.
+                const double roundoff = 64 * std::numeric_limits<double>::epsilon()
+                    * std::max({1.0,std::abs(point.X()),std::abs(point.Y()),std::abs(point.Z()),
+                                std::abs(candidate.X()),std::abs(candidate.Y()),std::abs(candidate.Z())});
+                if (gp_Lin(point,*axis).Distance(candidate) > roundoff) return;
+            }
             const double distance = point.Distance(candidate);
             if (!std::isfinite(distance) || distance > tolerance) return;
             if (best) {
@@ -92,8 +101,11 @@ std::optional<core3d::GeometrySnapResult> core3d::SnapPointToGeometry(
             if (kind == GeometrySnapKind::Face) {
                 // A normal projection can be off the drag axis, especially
                 // on sloping and curved faces. Find all reachable crossings.
-                IntCurvesFace_ShapeIntersector intersections;
-                intersections.Load(topology,Precision::Confusion());
+                // Do not inflate a trim boundary by its stored edge tolerance:
+                // a line just outside the face (or inside a hole) cannot land
+                // on the face's infinite supporting surface.
+                IntCurvesFace_Intersector intersections(TopoDS::Face(topology),
+                    Precision::Confusion(),Standard_True,Standard_False);
                 intersections.Perform(line,-tolerance,tolerance);
                 if (!intersections.IsDone()) throw Standard_Failure("Geometry snap intersection failed");
                 for (int hit = 1; hit <= intersections.NbPnt(); ++hit)
