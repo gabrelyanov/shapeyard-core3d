@@ -1038,6 +1038,9 @@ struct OcctGeometryDuplicationRequest
     // native promotion guard is retained; false keeps every composite owner
     // on the established fail-closed path.
     bool preservesAnalyticBooleanRecipe = false;
+    // Repeat copies supported authored face finishes onto new subshape labels.
+    // Charge those labels as well as the whole-part appearance before copying.
+    bool preservesAuthoredFaceMaterials = false;
 };
 
 //! Register the app-owned BinOcaf/BinXCAF project formats with a narrow,

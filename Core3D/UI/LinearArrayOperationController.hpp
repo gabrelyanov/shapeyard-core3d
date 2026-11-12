@@ -11,6 +11,7 @@
 #include "../OCCTKit/PatternRecipeClone.hxx"
 
 #include <AIS_Shape.hxx>
+#include <XCAFDoc_VisMaterialPBR.hxx>
 
 #include <cstdint>
 #include <functional>
@@ -40,6 +41,13 @@ enum class LinearArrayPreviewState : std::uint8_t {
     Committing,
     OutcomeUnknown,
     Failed,
+};
+
+//! A supported authored face finish tied to exact topology, not a face ordinal.
+//! Values are copied so an in-place material edit cannot change the witness.
+struct LinearArrayFaceFinish {
+    TopoDS_Shape face;
+    XCAFDoc_VisMaterialPBR material;
 };
 
 #ifdef DEBUG
@@ -143,6 +151,7 @@ private:
         OcctGeometryRepresentation destinationRepresentation =
             OcctGeometryRepresentation::Invalid;
         TopoDS_Shape storedShape;
+        std::vector<LinearArrayFaceFinish> faceFinishes;
         gp_Trsf transform;
         OcctReferenceAxisReadState referenceAxisState =
             OcctReferenceAxisReadState::Invalid;
@@ -178,6 +187,8 @@ private:
         pattern_recipe_clone::Candidate expectedSweepLoft;
         Standard_Boolean sweepLoftCandidateSealed = Standard_False;
         Standard_Boolean profileCandidateSealed = Standard_False;
+        std::vector<LinearArrayFaceFinish> expectedFaceFinishes;
+        Standard_Boolean faceFinishesSealed = Standard_False;
     };
 
     enum class DocumentState : std::uint8_t {
