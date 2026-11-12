@@ -16,6 +16,7 @@
 #import <Foundation/Foundation.h>
 #include "OcctViewer.h"
 #include "AIS_Manipulator.hxx"
+#include <StdSelect_BRepOwner.hxx>
 
 #import <Core3D/PrimitiveType.h>
 
@@ -661,6 +662,13 @@ namespace core3d {
         /***
          Interactions
          */
+        struct MeasurePick {
+            Handle(StdSelect_BRepOwner) owner;
+            TopoDS_Shape worldEdge;
+            gp_Pnt pickedPoint;
+            double pixelTolerance = 0;
+        };
+        std::vector<MeasurePick> measurePicksForCurrentSelection() noexcept;
         void Select(int theX, int theY);
         void StartRotation(int theX, int theY);
         void Rotation(int theX, int theY);
@@ -1197,6 +1205,7 @@ namespace core3d {
         std::shared_ptr<ShapeInteractor> _shapeInteractor;
         std::shared_ptr<TransformInspectorMeasurementController>
             _transformInspectorMeasurementController;
+        std::vector<MeasurePick> _measurePicks;
         
         std::function<void(int,int)> _interactiveCallback;
         std::function<void()> _booleanPreviewStateChangedCallback;
