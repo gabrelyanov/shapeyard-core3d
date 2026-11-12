@@ -13946,14 +13946,6 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
 }
 
 - (NSData *)debugJoinedHalfRingCupFixtureData {
-    return [self debugHalfRingCupFixtureDataRingOnly:NO];
-}
-
-- (NSData *)debugHalfRingHandleFixtureData {
-    return [self debugHalfRingCupFixtureDataRingOnly:YES];
-}
-
-- (NSData *)debugHalfRingCupFixtureDataRingOnly:(BOOL)ringOnly {
     if (!NSThread.isMainThread) return nil;
     Handle(TDocStd_Application) app;
     Handle(TDocStd_Document) document;
@@ -13976,9 +13968,7 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
         app = new TDocStd_Application(); Core3DDefineSafeBinXCAFFormat(app);
         app->NewDocument(TCollection_ExtendedString("BinXCAF"),document);
         XCAFDoc_DocumentTool::SetLengthUnit(document,0.001);
-        const auto localHandle = BRepPrimAPI_MakeTorus(22,4.5,M_PI).Shape();
-        const auto label = XCAFDoc_DocumentTool::ShapeTool(document->Main())->AddShape(
-            ringOnly ? localHandle : join.Shape(),Standard_False,Standard_True);
+        XCAFDoc_DocumentTool::ShapeTool(document->Main())->AddShape(join.Shape(),Standard_False,Standard_True);
         // Match the ordinary STEP importer: raw XCAF topology alone has no
         // editing identity or explicit BRep representation and is not enough.
         Handle(OcctDocument) imported = new OcctDocument(); imported->ChangeDocument() = document;
@@ -13994,31 +13984,7 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
     return data;
 }
 
-- (BOOL)debugMoveCameraEyeX:(double)x y:(double)y z:(double)z {
-    if (!NSThread.isMainThread || !GLController.viewer
-        || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return NO;
-    const auto view = GLController.viewer->ActiveView();
-    GLView *renderView = [GLController.view isKindOfClass:GLView.class] ? (GLView *)GLController.view : nil;
-    if (view.IsNull() || !renderView) return NO;
-    __block BOOL moved = NO;
-    [renderView performWithRenderingContext:^{
-        try {
-            view->Camera()->MoveEyeTo(gp_Pnt(x,y,z));
-            view->ZFitAll(); view->Redraw(); moved = YES;
-        } catch (...) {}
-    }];
-    return moved;
-}
-
 - (NSDictionary<NSString *, id> *)debugSelectAtWorldPointX:(double)x y:(double)y z:(double)z {
-    return [self debugSelectAtWorldPointX:x y:y z:z nativeTouch:NO];
-}
-
-- (NSDictionary<NSString *, id> *)debugTapAtWorldPointX:(double)x y:(double)y z:(double)z {
-    return [self debugSelectAtWorldPointX:x y:y z:z nativeTouch:YES];
-}
-
-- (NSDictionary<NSString *, id> *)debugSelectAtWorldPointX:(double)x y:(double)y z:(double)z nativeTouch:(BOOL)nativeTouch {
     if (!NSThread.isMainThread || !GLController.viewer
         || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return @{@"error":@"Invalid pick"};
     const auto viewer = GLController.viewer;
@@ -14035,18 +14001,9 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
             const gp_Pnt projected = view->Camera()->Project(gp_Pnt(x,y,z));
             answer[@"continuousX"]=@((projected.X()+1)*0.5*width);
             answer[@"continuousY"]=@((1-projected.Y())*0.5*height);
-            if (nativeTouch) {
-                px = (int)lround((projected.X()+1)*0.5*width);
-                py = (int)lround((1-projected.Y())*0.5*height);
-                answer[@"x"]=@(px); answer[@"y"]=@(py);
-            }
             answer[@"before"]=@([GLController debugSelectedShapeCount]);
             if (px<0 || py<0 || px>=width || py>=height) {
                 answer[@"error"]=@"Projected point outside viewport"; return;
-            }
-            if (nativeTouch) {
-                viewer->StartRotation(px,py);
-                viewer->CancelInteraction(px,py);
             }
             viewer->Select(px,py);
             answer[@"after"]=@([GLController debugSelectedShapeCount]);
@@ -14111,10 +14068,6 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
     if (!current) answer[@"error"]=@"No rendering context";
     [GLController refreshSelectionState];
     return answer;
-}
-
-- (NSArray<NSString *> *)debugNativeFaceTapTrace {
-    return NSThread.isMainThread ? ([GLController debugNativeFaceTapTrace] ?: @[]) : @[];
 }
 
 - (NSDictionary<NSString *, id> *)debugTopologySelectionState {

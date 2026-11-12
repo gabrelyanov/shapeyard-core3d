@@ -181,7 +181,6 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSUInteger)debugGeometricBRepValidationCount;
 - (NSInteger)debugSelectedShapeCount;
 - (NSDictionary<NSString *, id> *)debugTopologySelectionState;
-- (NSArray<NSString *> *)debugNativeFaceTapTrace;
 - (BOOL)debugDetectAnyDisplayedShape;
 - (BOOL)debugDetectReversedFaceTopologyIndexWithEntityIdentifier:
 			(NSString *)entityIdentifier

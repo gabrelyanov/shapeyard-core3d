@@ -59,10 +59,6 @@
 #include <TopExp.hxx>
 #include <TopoDS.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
-#ifdef DEBUG
-#include <IntCurvesFace_ShapeIntersector.hxx>
-#include <BRepAdaptor_Surface.hxx>
-#endif
 #include <XCAFPrs_Texture.hxx>
 #include <algorithm>
 #include <array>
@@ -1322,7 +1318,6 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     void (^_debugResumeQueuedAdoption)(void);
     Core3DQueuedPrivateFile *_debugStagedPrivateFile;
     NSUInteger _debugQueuedCleanupFailures;
-    NSMutableArray<NSString *> *_debugNativeFaceTapTrace;
 #endif
     BOOL _cancelTouches;
     BOOL _didSetupViewer;
@@ -2452,9 +2447,6 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     UITouch *aTouch = [theTouches anyObject];
     if (aTouch != NULL) {
         const CGPoint point = [self drawablePointForPoint:[aTouch locationInView:self.view]];
-#ifdef DEBUG
-        [self debugTraceNativeFaceTap:point stage:@"touch-begin"];
-#endif
         if (didBeginPrimaryInteraction
             && _delegate
             && [_delegate respondsToSelector:
@@ -2465,9 +2457,6 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         }
         _tapRecognizer.cancelsTouchesInView = YES;
         _viewer->StartRotation((int)point.x, (int)point.y);
-#ifdef DEBUG
-        [self debugTraceNativeFaceTap:point stage:@"after-touch-begin"];
-#endif
         const std::shared_ptr<ObjectInteractor> anInteractor =
             _viewer->getObjectInteractor();
         _suppressTapSelectionForManipulatorInteraction =
@@ -2564,9 +2553,6 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     if (!_isPreviewMode && aTouch != NULL) {
         const CGPoint point = [self drawablePointForPoint:[aTouch locationInView:self.view]];
         _viewer->CancelInteraction((int)point.x, (int)point.y);
-#ifdef DEBUG
-        [self debugTraceNativeFaceTap:point stage:@"touch-cancel"];
-#endif
         [self requestRender];
 
 #ifdef DEBUG
@@ -2762,77 +2748,6 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 // function : tapHandler
 // purpose  :
 // =======================================================================
-#ifdef DEBUG
-// The lesson's raster hit token is not the native selection result. Retain
-// actual UIKit coordinates and native owners at each boundary without moving
-// detection, changing selection, or asking the full scene builder to publish.
-- (NSArray<NSString *> *)debugNativeFaceTapTrace {
-    return NSThread.isMainThread ? ([_debugNativeFaceTapTrace copy] ?: @[]) : @[];
-}
-
-- (void)debugTraceNativeFaceTap:(CGPoint)point stage:(NSString *)stage {
-    const auto environment = NSProcessInfo.processInfo.environment;
-    if (![environment[@"SHAPEYARD_NATIVE_FACE_TRACE"] isEqualToString:@"1"]
-        && ![environment[@"SHAPEYARD_MUG_LESSON_STL_ORACLE"] isEqualToString:@"1"]
-        && ![NSProcessInfo.processInfo.arguments containsObject:@"-ShapeyardMugLessonStart"]) return;
-    if (!_viewer || !_viewer->getShapeInteractor()
-        || _viewer->getShapeInteractor()->getSelectionMode() != ShapeSelectionMode::Face) return;
-    try {
-        const auto context = _viewer->AisContext(); const auto view = _viewer->ActiveView();
-        if (context.IsNull() || view.IsNull()) return;
-        int width=0,height=0; view->Window()->Size(width,height);
-        int detected=-1,nearest=-1; double radius=-1;
-        NSMutableArray<NSString *> *ranks = [NSMutableArray array];
-        const auto owner = Handle(StdSelect_BRepOwner)::DownCast(context->DetectedOwner());
-        const auto shape = owner.IsNull() ? Handle(AIS_Shape)() : Handle(AIS_Shape)::DownCast(owner->Selectable());
-        if (!shape.IsNull() && owner->HasShape()) {
-            TopTools_IndexedMapOfShape faces;
-            for (TopExp_Explorer face(shape->Shape(),TopAbs_FACE); face.More() && faces.Extent()<=128; face.Next())
-                faces.Add(face.Current());
-            if (faces.Extent()<=128) {
-                detected=faces.FindIndex(owner->Shape())-1;
-                if (owner->Shape().ShapeType()==TopAbs_FACE) {
-                    BRepAdaptor_Surface surface(TopoDS::Face(owner->Shape()),Standard_True);
-                    if (surface.GetType()==GeomAbs_Cylinder)
-                        radius=surface.Cylinder().Radius()*std::abs(shape->Transformation().ScaleFactor());
-                }
-                const auto selector=context->MainSelector();
-                for (int rank=1; !selector.IsNull() && rank<=selector->NbPicked() && rank<=8; ++rank) {
-                    const auto candidate=Handle(StdSelect_BRepOwner)::DownCast(selector->Picked(rank));
-                    if (!candidate.IsNull() && candidate->HasShape())
-                        [ranks addObject:[NSString stringWithFormat:@"%d:%.6f",faces.FindIndex(candidate->Shape())-1,
-                            selector->PickedData(rank).Depth]];
-                }
-                // Only intersect after the native pick. Earlier stages observe
-                // counts and the previous hover, never prime a detection probe.
-                if ([stage isEqualToString:@"after-select"]) {
-                    double x,y,z,dx,dy,dz;
-                    view->ConvertWithProj((int)point.x,(int)point.y,x,y,z,dx,dy,dz);
-                    const auto inverse=shape->Transformation().Inverted();
-                    IntCurvesFace_ShapeIntersector ray; ray.Load(shape->Shape(),1e-7);
-                    ray.Perform(gp_Lin(gp_Pnt(x,y,z).Transformed(inverse),gp_Dir(dx,dy,dz).Transformed(inverse)),0,1e6);
-                    double depth=1e6;
-                    if (ray.IsDone()) for (int hit=1;hit<=ray.NbPnt();++hit)
-                        if (ray.WParameter(hit)>=0 && ray.WParameter(hit)<depth) {
-                            depth=ray.WParameter(hit); nearest=faces.FindIndex(ray.Face(hit))-1;
-                        }
-                }
-            }
-        }
-        const auto eye=view->Camera()->Eye();
-        NSString *entry = [NSString stringWithFormat:@"stage=%@ xy=%.0f,%.0f viewport=%d,%d count=%d hit=%d face=%d radius=%.6f ray=%d ranks=%@ eye=%.6f,%.6f,%.6f clip=%.6f,%.6f",
-            stage,point.x,point.y,width,height,_viewer->selectedCount(),context->HasDetected(),detected,radius,nearest,
-            [ranks componentsJoinedByString:@","],eye.X(),eye.Y(),eye.Z(),view->Camera()->ZNear(),view->Camera()->ZFar()];
-        if (!_debugNativeFaceTapTrace) _debugNativeFaceTapTrace = [NSMutableArray array];
-        [_debugNativeFaceTapTrace addObject:entry];
-        if (_debugNativeFaceTapTrace.count > 32) [_debugNativeFaceTapTrace removeObjectAtIndex:0];
-        NSLog(@"SHAPEYARD_NATIVE_FACE_TAP %@", entry);
-    } catch (...) {
-        NSLog(@"SHAPEYARD_NATIVE_FACE_TAP stage=%@ unavailable",stage);
-    }
-}
-#endif
-
 - (void)tapHandler:(UITapGestureRecognizer *)tapRecognizer
 {
     if (_suppressTapSelectionForManipulatorInteraction) {
@@ -2864,9 +2779,6 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     const CGPoint aTapPoint =
         [self drawablePointForPoint:[tapRecognizer locationInView:self.view]];
 	if (!_isConstructorMode) {
-#ifdef DEBUG
-        [self debugTraceNativeFaceTap:aTapPoint stage:@"before-delegate"];
-#endif
 		if (_delegate
 			&& [_delegate respondsToSelector:
 				@selector(viewer:willSelectAtDrawablePoint:drawableSize:)]) {
@@ -2874,19 +2786,10 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 				willSelectAtDrawablePoint:aTapPoint
 				             drawableSize:self.drawableSize];
 		}
-#ifdef DEBUG
-        [self debugTraceNativeFaceTap:aTapPoint stage:@"before-select"];
-#endif
 		_viewer->Select((int)aTapPoint.x, (int)aTapPoint.y);
-#ifdef DEBUG
-        [self debugTraceNativeFaceTap:aTapPoint stage:@"after-select"];
-#endif
 	}
 
 	[self checkSelections];
-#ifdef DEBUG
-    [self debugTraceNativeFaceTap:aTapPoint stage:@"after-publication"];
-#endif
 	[self requestRender];
 }
 

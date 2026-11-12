@@ -11,9 +11,6 @@
 #include <Prs3d_IsoAspect.hxx>
 #include <StdSelect_BRepOwner.hxx>
 #include <Select3D_SensitiveCylinder.hxx>
-#include <Select3D_SensitiveTriangulation.hxx>
-#include <BRep_Tool.hxx>
-#include <TopoDS.hxx>
 #include <IntCurvesFace_ShapeIntersector.hxx>
 #include <TopExp_Explorer.hxx>
 #include <V3d_View.hxx>
@@ -25,80 +22,11 @@ Core3DContext::Core3DContext(const Handle(V3d_Viewer)& MainViewer)
     
 }
 
-// A trimmed/hollow cylindrical face is not a solid cylinder. OCCT's cylinder
-// sensitive can omit the visible wall altogether (including a zero-hit pick),
-// so reordering detected candidates cannot repair it. Use the face's existing
-// rendered triangulation, retaining the exact native owner and mode/filter
-// authority. Never mesh, manufacture owners, or change the selected set here.
-static bool UseRenderedCylindricalFaceSensitives(Core3DContext& context)
-{
-    const auto selector = context.MainSelector();
-    const auto manager = context.SelectionManager();
-    if (selector.IsNull() || manager.IsNull()) return false;
-    AIS_ListOfInteractive displayed;
-    context.DisplayedObjects(AIS_KOI_Shape, -1, displayed);
-    if (displayed.Extent() > 256) return false;
-    bool changed = false;
-    const int mode = AIS_Shape::SelectionMode(TopAbs_FACE);
-    for (AIS_ListIteratorOfListOfInteractive object(displayed); object.More(); object.Next()) {
-        const auto shape = Handle(AIS_Shape)::DownCast(object.Value());
-        if (shape.IsNull() || !selector->IsActive(shape, mode)) continue;
-        const auto selection = shape->Selection(mode);
-        if (selection.IsNull() || selection->Entities().Size() > 4096) continue;
-        struct Replacement {
-            int index;
-            Handle(SelectMgr_SensitiveEntity) oldEntity, newEntity;
-        };
-        std::vector<Replacement> replacements;
-        int index = 0;
-        for (const auto& entity : selection->Entities()) {
-            const int current = index++;
-            if (entity.IsNull()) continue;
-            const auto cylinder = Handle(Select3D_SensitiveCylinder)::DownCast(entity->BaseSensitive());
-            if (cylinder.IsNull()) continue;
-            const auto owner = Handle(StdSelect_BRepOwner)::DownCast(cylinder->OwnerId());
-            if (owner.IsNull() || !owner->HasShape() || owner->Selectable() != shape
-                || owner->Shape().ShapeType() != TopAbs_FACE) continue;
-            TopLoc_Location location;
-            const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(owner->Shape()), location);
-            if (mesh.IsNull() || mesh->NbTriangles() == 0 || mesh->NbTriangles() > 100000) continue;
-            Handle(Select3D_SensitiveTriangulation) triangles =
-                new Select3D_SensitiveTriangulation(owner, mesh, location, Standard_True);
-            triangles->SetSensitivityFactor(cylinder->SensitivityFactor());
-            Handle(SelectMgr_SensitiveEntity) replacement = new SelectMgr_SensitiveEntity(triangles);
-            if (entity->IsActiveForSelection()) replacement->SetActiveForSelection();
-            replacements.push_back({current, entity, replacement});
-        }
-        if (replacements.empty()) continue;
-        context.ClearDetected(Standard_False);
-        manager->ClearSelectionStructures(shape, mode);
-        try {
-            for (const auto& replacement : replacements)
-                selection->ChangeEntities().ChangeValue(replacement.index) = replacement.newEntity;
-            manager->RestoreSelectionStructures(shape, mode);
-        } catch (...) {
-            for (const auto& replacement : replacements)
-                selection->ChangeEntities().ChangeValue(replacement.index) = replacement.oldEntity;
-            manager->RestoreSelectionStructures(shape, mode);
-            throw;
-        }
-        changed = true;
-    }
-    return changed;
-}
-
 AIS_StatusOfDetection Core3DContext::MoveTo(
     Standard_Integer x, Standard_Integer y,
     const Handle(V3d_View)& view, Standard_Boolean redraw)
 {
-    auto status = AIS_InteractiveContext::MoveTo(x, y, view, redraw);
-    try {
-        if (UseRenderedCylindricalFaceSensitives(*this))
-            status = AIS_InteractiveContext::MoveTo(x, y, view, redraw);
-    } catch (...) {
-        // The replacement restores its original native entities on failure.
-        status = AIS_InteractiveContext::MoveTo(x, y, view, redraw);
-    }
+    const auto status = AIS_InteractiveContext::MoveTo(x, y, view, redraw);
     const auto original = Handle(StdSelect_BRepOwner)::DownCast(DetectedOwner());
     if (original.IsNull() || !original->HasShape()
         || original->Shape().ShapeType() != TopAbs_FACE || view.IsNull()) return status;

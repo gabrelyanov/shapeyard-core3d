@@ -2294,20 +2294,12 @@ __attribute__((objc_subclassing_restricted))
 //! zero-based; -1 means no exact single topology identity. Representation uses
 //! -1 invalid, 0 legacy BRep, 1 BRep, and 2 TriangleMesh.
 - (NSDictionary<NSString *, id> *)debugTopologySelectionState;
-- (NSArray<NSString *> *)debugNativeFaceTapTrace;
 //! Native picking diagnostic: projects a world-space point with the active
 //! OCCT camera, then uses ordinary XOR selection; never selects by topology ID.
 - (NSDictionary<NSString *, id> *)debugSelectAtWorldPointX:(double)x y:(double)y z:(double)z
     NS_SWIFT_NAME(debugSelectAtWorldPoint(x:y:z:));
-//! Replay native touch begin/cancel/select with UIKit's rounded projected pixel.
-- (NSDictionary<NSString *, id> *)debugTapAtWorldPointX:(double)x y:(double)y z:(double)z
-    NS_SWIFT_NAME(debugTapAtWorldPoint(x:y:z:));
-//! Replay a reported camera eye without changing its direction or any model/selection state.
-- (BOOL)debugMoveCameraEyeX:(double)x y:(double)y z:(double)z
-    NS_SWIFT_NAME(debugMoveCameraEye(x:y:z:));
 //! Valid imported BRep fixture: Shell-3 cup with an upright R22/r4.5 half-ring.
 - (nullable NSData *)debugJoinedHalfRingCupFixtureData;
-- (nullable NSData *)debugHalfRingHandleFixtureData;
 
 
 //! Test-only OCCT detection seam. Boundedly probes the drawable for one
