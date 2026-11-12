@@ -85,10 +85,13 @@ public:
 
     Standard_Boolean setAxis(LinearArrayAxis axis) noexcept;
     Standard_Boolean setCount(Standard_Integer count) noexcept;
+    Standard_Boolean setRows(Standard_Integer rows) noexcept;
     Standard_Boolean setSpacing(Standard_Real spacing) noexcept;
 
     LinearArrayAxis axis() const noexcept;
     Standard_Integer count() const noexcept;
+    Standard_Integer rows() const noexcept;
+    Standard_Integer maximumRows() const noexcept;
     Standard_Real spacing() const noexcept;
     Standard_Real metersPerUnit() const noexcept;
     std::pair<Standard_Integer, Standard_Integer> countRange() const noexcept;
@@ -201,7 +204,9 @@ private:
     std::pair<Standard_Real, Standard_Real> spacingRange(
         const SourceSnapshot& source,
         LinearArrayAxis axis,
-        Standard_Integer count) const noexcept;
+        Standard_Integer count,
+        Standard_Integer rows = 1) const noexcept;
+    Standard_Integer totalCount() const noexcept;
     Standard_Boolean rebuildPreview() noexcept;
     Standard_Boolean clearPreviewObjects() noexcept;
     Standard_Boolean abortOwnedCommand() noexcept;
@@ -218,6 +223,9 @@ private:
     std::vector<PendingResult> _pendingResults;
     LinearArrayAxis _axis = LinearArrayAxis::X;
     Standard_Integer _count = kDefaultCount;
+    // A row is the existing operation. Grid rows extend it in the next world
+    // axis (X/Y, Y/Z, Z/X), sharing the same centre-to-centre spacing.
+    Standard_Integer _rows = 1;
     Standard_Integer _maximumAdmittedCount = kMaximumCount;
     Standard_Real _spacing = 0.0;
     Standard_Boolean _previewValid = Standard_False;

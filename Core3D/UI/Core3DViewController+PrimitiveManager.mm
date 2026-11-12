@@ -914,6 +914,19 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     return didSet;
 }
 
+- (BOOL)setLinearArrayRows:(NSInteger)rows {
+    if (_currentGizmoType != PrimitiveGizmoTypeLinearArray) {
+        return NO;
+    }
+    const BOOL didSet = [GLController setLinearArrayRows:rows];
+    const Core3DModelingPreviewStatus status =
+        [self modelingPreviewStatusForGizmoType:
+            PrimitiveGizmoTypeLinearArray];
+    self.can_apply = status.canApply;
+    [self sendNotifyUIState:UIStateChangingApply];
+    return didSet;
+}
+
 - (BOOL)setLinearArraySpacing:(CGFloat)spacing {
     if (_currentGizmoType != PrimitiveGizmoTypeLinearArray) {
         return NO;

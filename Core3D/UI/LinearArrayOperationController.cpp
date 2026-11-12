@@ -392,20 +392,26 @@ gp_Trsf ArrayTransform(
     const gp_Trsf& theSourceTransform,
     const LinearArrayAxis theAxis,
     const Standard_Integer theOrdinal,
+    const Standard_Integer theColumns,
     const Standard_Real theSpacing) noexcept
 {
     gp_Vec aTranslation(0.0, 0.0, 0.0);
     const Standard_Real aDistance =
-        static_cast<Standard_Real>(theOrdinal) * theSpacing;
+        static_cast<Standard_Real>(theOrdinal % theColumns) * theSpacing;
+    const Standard_Real aRowDistance =
+        static_cast<Standard_Real>(theOrdinal / theColumns) * theSpacing;
     switch (theAxis) {
         case LinearArrayAxis::X:
             aTranslation.SetX(aDistance);
+            aTranslation.SetY(aRowDistance);
             break;
         case LinearArrayAxis::Y:
             aTranslation.SetY(aDistance);
+            aTranslation.SetZ(aRowDistance);
             break;
         case LinearArrayAxis::Z:
             aTranslation.SetZ(aDistance);
+            aTranslation.SetX(aRowDistance);
             break;
     }
     gp_Trsf aWorldTranslation;
@@ -768,7 +774,8 @@ std::pair<Standard_Real, Standard_Real>
 LinearArrayOperationController::spacingRange(
     const SourceSnapshot& theSource,
     const LinearArrayAxis theAxis,
-    const Standard_Integer theCount) const noexcept
+    const Standard_Integer theCount,
+    const Standard_Integer theRows) const noexcept
 {
     const Standard_Integer anAxis = AxisIndex(theAxis);
     const Standard_Integer aLastOrdinal = theCount - 1;
@@ -791,6 +798,13 @@ LinearArrayOperationController::spacingRange(
     if (!std::isfinite(aMinimum) || !std::isfinite(aMaximum)
         || aMinimum > aMaximum) {
         return {0.0, 0.0};
+    }
+    if (theRows > 1) {
+        const auto aRowAxis = static_cast<LinearArrayAxis>((anAxis + 1) % 3);
+        const auto aRowRange = spacingRange(theSource, aRowAxis, theRows, 1);
+        aMinimum = std::max(aMinimum, aRowRange.first);
+        aMaximum = std::min(aMaximum, aRowRange.second);
+        if (aMinimum > aMaximum) { return {0.0, 0.0}; }
     }
     return {aMinimum, aMaximum};
 }
@@ -830,6 +844,7 @@ Standard_Boolean LinearArrayOperationController::begin() noexcept
     _source = std::move(aSource);
     _axis = LinearArrayAxis::X;
     _count = anInitialCount;
+    _rows = 1;
     _maximumAdmittedCount = aMaximum;
     _spacing = anInitialSpacing;
     _previewValid = Standard_False;
@@ -852,12 +867,13 @@ Standard_Boolean LinearArrayOperationController::begin() noexcept
 Standard_Boolean LinearArrayOperationController::rebuildPreview() noexcept
 {
     if (!_source.has_value() || IsNearZero(_spacing)
-        || _count < kMinimumCount || _count > _maximumAdmittedCount
+        || _count < kMinimumCount || _rows < 1
+        || _count > _maximumAdmittedCount / _rows
         || !sourceIsCurrent(Standard_True)
-        || !canAdmitCount(*_source, _count)) {
+        || !canAdmitCount(*_source, totalCount())) {
         return Standard_False;
     }
-    const auto aRange = spacingRange(*_source, _axis, _count);
+    const auto aRange = spacingRange(*_source, _axis, _count, _rows);
     if (_spacing < aRange.first || _spacing > aRange.second) {
         return Standard_False;
     }
@@ -869,9 +885,9 @@ Standard_Boolean LinearArrayOperationController::rebuildPreview() noexcept
 
     std::vector<Handle(AIS_Shape)> aReplacement;
     try {
-        aReplacement.reserve(static_cast<std::size_t>(_count - 1));
+        aReplacement.reserve(static_cast<std::size_t>(totalCount() - 1));
         for (Standard_Integer anOrdinal = 1;
-             anOrdinal < _count; ++anOrdinal) {
+             anOrdinal < totalCount(); ++anOrdinal) {
             Handle(AIS_Shape) aPreview =
                 new AIS_Shape(_source->storedShape);
             if (aPreview.IsNull() || aPreview->Shape().IsNull()
@@ -879,7 +895,7 @@ Standard_Boolean LinearArrayOperationController::rebuildPreview() noexcept
                 return Standard_False;
             }
             aPreview->SetLocalTransformation(ArrayTransform(
-                _source->transform, _axis, anOrdinal, _spacing));
+                _source->transform, _axis, anOrdinal, _count, _spacing));
             Standard_Real aMinimum[3] = {0.0, 0.0, 0.0};
             Standard_Real aMaximum[3] = {0.0, 0.0, 0.0};
             if (!WorldBounds(
@@ -997,7 +1013,7 @@ Standard_Boolean LinearArrayOperationController::setAxis(
         || !sourceIsCurrent(Standard_True)) {
         return Standard_False;
     }
-    const auto aRange = spacingRange(*_source, theAxis, _count);
+    const auto aRange = spacingRange(*_source, theAxis, _count, _rows);
     if (!IsNearZero(_spacing)
         && (_spacing < aRange.first || _spacing > aRange.second)) {
         return Standard_False;
@@ -1034,15 +1050,15 @@ Standard_Boolean LinearArrayOperationController::setCount(
 {
     if (!_source.has_value()
         || theCount < kMinimumCount
-        || theCount > _maximumAdmittedCount
+        || theCount > _maximumAdmittedCount / _rows
         || _state == LinearArrayPreviewState::Committing
         || _state == LinearArrayPreviewState::OutcomeUnknown
         || _ownsDocumentCommand || !_pendingResults.empty()
         || !sourceIsCurrent(Standard_True)
-        || !canAdmitCount(*_source, theCount)) {
+        || !canAdmitCount(*_source, theCount * _rows)) {
         return Standard_False;
     }
-    const auto aRange = spacingRange(*_source, _axis, theCount);
+    const auto aRange = spacingRange(*_source, _axis, theCount, _rows);
     if (!IsNearZero(_spacing)
         && (_spacing < aRange.first || _spacing > aRange.second)) {
         return Standard_False;
@@ -1051,6 +1067,51 @@ Standard_Boolean LinearArrayOperationController::setCount(
         return Standard_True;
     }
     _count = theCount;
+    if (IsNearZero(_spacing)) {
+        if (!clearPreviewObjects()) {
+            _state = LinearArrayPreviewState::Failed;
+            notifyStateChanged();
+            return Standard_False;
+        }
+        _state = LinearArrayPreviewState::Selecting;
+        ++_generation;
+        notifyStateChanged();
+        return Standard_True;
+    }
+    if (!rebuildPreview()) {
+        _state = LinearArrayPreviewState::Failed;
+        ++_generation;
+        notifyStateChanged();
+        return Standard_False;
+    }
+    _state = LinearArrayPreviewState::Ready;
+    ++_generation;
+    notifyStateChanged();
+    return Standard_True;
+}
+
+Standard_Boolean LinearArrayOperationController::setRows(
+    const Standard_Integer theRows) noexcept
+{
+    if (!_source.has_value()
+        || theRows < 1
+        || theRows > _maximumAdmittedCount / _count
+        || _state == LinearArrayPreviewState::Committing
+        || _state == LinearArrayPreviewState::OutcomeUnknown
+        || _ownsDocumentCommand || !_pendingResults.empty()
+        || !sourceIsCurrent(Standard_True)
+        || !canAdmitCount(*_source, _count * theRows)) {
+        return Standard_False;
+    }
+    const auto aRange = spacingRange(*_source, _axis, _count, theRows);
+    if (!IsNearZero(_spacing)
+        && (_spacing < aRange.first || _spacing > aRange.second)) {
+        return Standard_False;
+    }
+    if (_rows == theRows && _state == LinearArrayPreviewState::Ready) {
+        return Standard_True;
+    }
+    _rows = theRows;
     if (IsNearZero(_spacing)) {
         if (!clearPreviewObjects()) {
             _state = LinearArrayPreviewState::Failed;
@@ -1084,7 +1145,7 @@ Standard_Boolean LinearArrayOperationController::setSpacing(
         || !sourceIsCurrent(Standard_True)) {
         return Standard_False;
     }
-    const auto aRange = spacingRange(*_source, _axis, _count);
+    const auto aRange = spacingRange(*_source, _axis, _count, _rows);
     if (!IsNearZero(theSpacing)
         && (theSpacing < aRange.first || theSpacing > aRange.second)) {
         return Standard_False;
@@ -1132,6 +1193,22 @@ Standard_Integer LinearArrayOperationController::count() const noexcept
     return _count;
 }
 
+Standard_Integer LinearArrayOperationController::rows() const noexcept
+{
+    return _rows;
+}
+
+Standard_Integer LinearArrayOperationController::maximumRows() const noexcept
+{
+    return std::max(1, _maximumAdmittedCount / _count);
+}
+
+Standard_Integer LinearArrayOperationController::totalCount() const noexcept
+{
+    // Setters check division bounds before assigning either factor.
+    return _count * _rows;
+}
+
 Standard_Real LinearArrayOperationController::spacing() const noexcept
 {
     return _spacing;
@@ -1147,7 +1224,7 @@ LinearArrayOperationController::countRange() const noexcept
 {
     return {
         kMinimumCount,
-        std::max(kMinimumCount, _maximumAdmittedCount),
+        std::max(kMinimumCount, _maximumAdmittedCount / _rows),
     };
 }
 
@@ -1155,7 +1232,7 @@ std::pair<Standard_Real, Standard_Real>
 LinearArrayOperationController::spacingRange() const noexcept
 {
     return _source.has_value()
-        ? spacingRange(*_source, _axis, _count)
+        ? spacingRange(*_source, _axis, _count, _rows)
         : std::pair<Standard_Real, Standard_Real>{0.0, 0.0};
 }
 
@@ -1191,7 +1268,7 @@ Standard_Boolean LinearArrayOperationController::canApply() const noexcept
             && _previewValid && _source.has_value()
             && !IsNearZero(_spacing)
             && _previewObjects.size()
-                == static_cast<std::size_t>(_count - 1))
+                == static_cast<std::size_t>(totalCount() - 1))
         || (_state == LinearArrayPreviewState::OutcomeUnknown
             && (_ownsDocumentCommand || !_pendingResults.empty()));
 }
@@ -1205,7 +1282,7 @@ Standard_Boolean LinearArrayOperationController::capturePreview(
         || HasUnsupportedOverlayTexture(_source->label)
         || _previewObjects.empty()
         || _previewObjects.size()
-            != static_cast<std::size_t>(_count - 1)
+            != static_cast<std::size_t>(totalCount() - 1)
         || _previewObjects.size() > kMaximumPreviewBodies) {
         return Standard_False;
     }
@@ -1474,7 +1551,7 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
     }
     if (_state != LinearArrayPreviewState::Ready || !canApply()
         || !sourceIsCurrent(Standard_True)
-        || !canAdmitCount(*_source, _count)) {
+        || !canAdmitCount(*_source, totalCount())) {
         _state = LinearArrayPreviewState::Failed;
         ++_generation;
         notifyStateChanged();
@@ -1495,7 +1572,7 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
     core3d::retained_edge_treatment::ReplayBudget aTreatmentBudget;
     try {
         OCC_CATCH_SIGNALS
-        aPrepared.reserve(static_cast<std::size_t>(_count - 1));
+        aPrepared.reserve(static_cast<std::size_t>(totalCount() - 1));
 #ifdef DEBUG
         const Standard_Size anAggregateLimit = std::max<Standard_Size>(
             1,
@@ -1509,7 +1586,7 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
         Standard_Size anAggregateTopology = _source->topologyNodeCount
             + _source->retainedProfileTopologyNodes + _source->retainedEnclosureTopologyNodes;
         for (Standard_Integer anOrdinal = 1;
-             anOrdinal < _count; ++anOrdinal) {
+             anOrdinal < totalCount(); ++anOrdinal) {
             BRepBuilderAPI_Copy aCopy;
             aCopy.Perform(
                 _source->storedShape,
@@ -1546,7 +1623,7 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
             }
             anAggregateTopology += aResultTopology;
             const gp_Trsf aTransform = ArrayTransform(
-                _source->transform, _axis, anOrdinal, _spacing);
+                _source->transform, _axis, anOrdinal, _count, _spacing);
             Standard_Real aMinimum[3] = {0.0, 0.0, 0.0};
             Standard_Real aMaximum[3] = {0.0, 0.0, 0.0};
             if (!WorldBounds(
@@ -1689,9 +1766,9 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
     } catch (...) {
         return LinearArrayApplyResult::NoChange;
     }
-    if (aPrepared.size() != static_cast<std::size_t>(_count - 1)
+    if (aPrepared.size() != static_cast<std::size_t>(totalCount() - 1)
         || !sourceIsCurrent(Standard_True)
-        || !canAdmitCount(*_source, _count)) {
+        || !canAdmitCount(*_source, totalCount())) {
         return LinearArrayApplyResult::NoChange;
     }
 
@@ -1970,6 +2047,7 @@ void LinearArrayOperationController::clearInactiveState() noexcept
     _source.reset();
     _axis = LinearArrayAxis::X;
     _count = kDefaultCount;
+    _rows = 1;
     _maximumAdmittedCount = kMaximumCount;
     _spacing = 0.0;
     _previewValid = Standard_False;
