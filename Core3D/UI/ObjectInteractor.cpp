@@ -17,6 +17,9 @@
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <gp_Lin.hxx>
+#include <gp_Pln.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
@@ -2589,8 +2592,30 @@ namespace core3d {
                 for (const auto& anchor : anchors) {
                     const auto proposed = anchor.Transformed(raw);
                     if (target.nearby.IsOut(proposed)) continue;
-                    const auto hit = SnapPointToGeometry(target.world,proposed,
-                        _geometrySnappingTolerance,AllGeometrySnapKinds,axis);
+                    unsigned kinds = AllGeometrySnapKinds;
+                    std::optional<GeometrySnapResult> hit;
+                    for (int attempt = 0; attempt < 3; ++attempt) {
+                        hit = SnapPointToGeometry(target.world,proposed,
+                            _geometrySnappingTolerance,kinds,axis);
+                        if (!hit || hit->distance > Precision::Confusion()) break;
+                        // Contact along the drag direction is not a positional
+                        // anchor: a lid already resting on a plane must still
+                        // reach its edge. Only discard a proven continuum;
+                        // exact curved crossings and discrete points remain.
+                        bool continuous = false;
+                        if (hit->kind == GeometrySnapKind::Face) {
+                            BRepAdaptor_Surface surface(TopoDS::Face(hit->topology));
+                            continuous = surface.GetType() == GeomAbs_Plane
+                                && std::abs(surface.Plane().Axis().Direction().Dot(axis)) <= Precision::Angular();
+                        } else if (hit->kind == GeometrySnapKind::Edge) {
+                            BRepAdaptor_Curve curve(TopoDS::Edge(hit->topology));
+                            continuous = curve.GetType() == GeomAbs_Line
+                                && curve.Line().Direction().IsParallel(axis,Precision::Angular());
+                        }
+                        if (!continuous) break;
+                        kinds &= ~static_cast<unsigned>(hit->kind);
+                        hit.reset();
+                    }
                     if (!hit) continue;
                     if (_geometryMoveSnap) {
                         const auto& old = _geometryMoveSnap->hit;
