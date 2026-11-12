@@ -2501,12 +2501,12 @@ namespace core3d {
         if (!std::isfinite(tolerance) || tolerance < 0 || tolerance > 1e6
             || isManipulatorGestureActive() || hasUnresolvedEdit()) return false;
         _geometrySnappingTolerance = tolerance;
-        _geometryMoveSnap.reset();
+        _geometryMoveSnap.reset(); syncGeometrySnapHighlight();
         return true;
     }
 
     void ObjectInteractor::applyGeometrySnapping() noexcept {
-        _geometryMoveSnap.reset();
+        _geometryMoveSnap.reset(); syncGeometrySnapHighlight();
         if (_geometrySnappingTolerance <= 0 || _manipulator.IsNull()
             || !_manipulator->HasActiveTransformation()
             || _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
@@ -2636,7 +2636,42 @@ namespace core3d {
                 snapped.SetTranslationPart(raw.TranslationPart() + correction.XYZ());
                 _manipulator->Transform(snapped);
             }
-        } catch (...) { _geometryMoveSnap.reset(); }
+        } catch (...) { _geometryMoveSnap.reset(); syncGeometrySnapHighlight(); }
+    }
+
+    void ObjectInteractor::syncGeometrySnapHighlight() noexcept {
+        if (myContext.IsNull()) { _geometrySnapHighlight.Nullify(); return; }
+        try {
+            TopoDS_Shape wanted;
+            if (_geometryMoveSnap && _geometryMoveSnap->hit.kind != GeometrySnapKind::Vertex) {
+                wanted = _geometryMoveSnap->hit.topology;
+            }
+            if (!_geometrySnapHighlight.IsNull()) {
+                if (!wanted.IsNull() && _geometrySnapHighlight->Shape().IsSame(wanted)) { return; }
+                // Erase before Remove: never leave a stale presentation behind.
+                myContext->Erase(_geometrySnapHighlight, false);
+                myContext->Remove(_geometrySnapHighlight, false);
+                _geometrySnapHighlight.Nullify();
+            }
+            if (wanted.IsNull()) { return; }
+            // Selection tokens (design system 7.1): white, a chosen edge 3 pt,
+            // a chosen face a 20 % wash with its 2 pt edge. Never selectable.
+            Handle(AIS_Shape) highlight = new AIS_Shape(wanted);
+            highlight->SetColor(Quantity_NOC_WHITE);
+            const bool face = wanted.ShapeType() == TopAbs_FACE;
+            if (face) {
+                highlight->SetTransparency(0.8);
+                highlight->Attributes()->SetFaceBoundaryDraw(true);
+                highlight->Attributes()->SetFaceBoundaryAspect(
+                    new Prs3d_LineAspect(Quantity_NOC_WHITE, Aspect_TOL_SOLID, 2.0));
+            } else {
+                highlight->SetWidth(3.0);
+            }
+            myContext->Display(highlight, face ? AIS_Shaded : AIS_WireFrame, -1, false);
+            _geometrySnapHighlight = highlight;
+        } catch (...) {
+            _geometrySnapHighlight.Nullify();
+        }
     }
 
     bool ObjectInteractor::transformManipulator(const int theX, const int theY) {
@@ -2660,8 +2695,9 @@ namespace core3d {
                 if (_manipulator->ObjectTransformation(theX,theY,myView,myContext,raw)) {
                     _manipulator->Transform(raw);
                     applyGeometrySnapping();
+                    syncGeometrySnapHighlight();
                 } else {
-                    _geometryMoveSnap.reset();
+                    _geometryMoveSnap.reset(); syncGeometrySnapHighlight();
                 }
                 myContext->UpdateCurrentViewer();
                 return true;
@@ -2671,7 +2707,7 @@ namespace core3d {
     }
 
     bool ObjectInteractor::startTransformManipulator(const int theX, const int theY) {
-        _geometryMoveSnap.reset();
+        _geometryMoveSnap.reset(); syncGeometrySnapHighlight();
 		if (hasUnresolvedEdit()) { return false; }
 		if (ManipulatorRequiresBRepModeling(_manipulatorType)
 			&& !ManipulatorObjectsSupportBRepModeling(
@@ -2795,6 +2831,7 @@ namespace core3d {
                 std::map<std::string, double> trace = _manipulator->DebugRotationTrace();
                 trace["geometrySnapKind"] = _geometryMoveSnap ? static_cast<unsigned>(_geometryMoveSnap->hit.kind) : 0;
                 trace["geometrySnapIndex"] = _geometryMoveSnap ? _geometryMoveSnap->hit.topologyIndex : 0;
+                trace["geometrySnapHighlight"] = _geometrySnapHighlight.IsNull() ? 0 : 1;
                 trace["sample"] = static_cast<double>(index);
                 trace["mode"] = mode;
                 trace["axis"] = axis;
@@ -2866,7 +2903,7 @@ namespace core3d {
 #endif
 
     void ObjectInteractor::finishInteraction() {
-        _geometryMoveSnap.reset();
+        _geometryMoveSnap.reset(); syncGeometrySnapHighlight();
         if (!_manipulatorRotationAllowed && !_manipulator.IsNull()
             && _manipulator->ActiveMode() == AIS_MM_Rotation) {
             cancelInteraction();
@@ -3092,7 +3129,7 @@ namespace core3d {
     }
 
     void ObjectInteractor::cancelInteraction() {
-        _geometryMoveSnap.reset();
+        _geometryMoveSnap.reset(); syncGeometrySnapHighlight();
 		if (hasUnresolvedEdit()) {
 			_manipulatorGestureActive = false;
 			return;
