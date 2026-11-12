@@ -802,10 +802,6 @@ private:
                     }
                     aBuilder.Build(aProgress->Start());
                     if (!aBuilder.IsDone()) {
-                        aResult.failureKind =
-                            fillet_failure::IsClearanceRefusal(aBuilder)
-                                ? BevelFailureKind::RadiusRefused
-                                : BevelFailureKind::Other;
                         return aResult;
                     }
                     aCandidate = aBuilder.Shape();
@@ -816,6 +812,10 @@ private:
                     }
                     aBuilder.Build(aProgress->Start());
                     if (!aBuilder.IsDone()) {
+                        aResult.failureKind =
+                            fillet_failure::IsClearanceRefusal(aBuilder)
+                                ? BevelFailureKind::RadiusRefused
+                                : BevelFailureKind::Other;
                         return aResult;
                     }
                     aCandidate = aBuilder.Shape();
