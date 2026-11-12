@@ -2729,7 +2729,7 @@ namespace core3d {
     bool ObjectInteractor::debugReplayGesture(
         const Standard_Integer mode, const Standard_Integer axis,
         const std::vector<Standard_Real>& values,
-        std::vector<std::array<Standard_Real, 2>>& samples, bool cancel) noexcept {
+        std::vector<std::array<Standard_Real, 2>>& samples, bool cancel, bool physicalScale) noexcept {
         samples.clear();
         _debugGestureTrace.clear();
         _debugGestureTraceIndices.clear();
@@ -2750,6 +2750,19 @@ namespace core3d {
             const AIS_ManipulatorMode modes[] = {
                 AIS_MM_Translation, AIS_MM_Rotation,
                 AIS_MM_ScalingUniform, AIS_MM_Scaling};
+            // Explicit opt-in keeps legacy raw-unit fixtures byte-for-byte
+            // equivalent while resolving physical-size edits in metre files.
+            double modelUnitsPerMM = 1.0;
+            if (physicalScale) {
+                double metersPerUnit = 0.001;
+                bool hasUnits = false;
+                if (!ReadMirrorDocumentUnits(myDoc->Document(), metersPerUnit, hasUnits)) return false;
+                modelUnitsPerMM = 0.001 / metersPerUnit;
+            }
+            const double cameraSpan = 400.0 * modelUnitsPerMM;
+            const double handleRadius = 100.0 * modelUnitsPerMM;
+            if (!std::isfinite(cameraSpan) || !std::isfinite(handleRadius)
+                || handleRadius <= Precision::Confusion()) return false;
             const gp_Ax2 position = _manipulator->Position();
             const gp_Dir directions[] = {
                 position.XDirection(), position.YDirection(), position.Direction()};
@@ -2763,10 +2776,10 @@ namespace core3d {
             // after Undo. Define the complete orientation together so each
             // replay projects identical world samples onto identical pixels.
             myView->Camera()->SetEyeAndCenter(
-                position.Location().Translated(gp_Vec(400.0, 400.0, 400.0)),
+                position.Location().Translated(gp_Vec(cameraSpan, cameraSpan, cameraSpan)),
                 position.Location());
             myView->Camera()->SetUp(gp_Dir(-1.0, -1.0, 2.0));
-            myView->Camera()->SetScale(400.0);
+            myView->Camera()->SetScale(cameraSpan);
             myView->Redraw();
             std::vector<std::array<Standard_Integer, 2>> points;
             for (const Standard_Real value : values) {
@@ -2776,14 +2789,14 @@ namespace core3d {
                 }
                 gp_Pnt point = position.Location();
                 if (mode == 1) {
-                    point.Translate(gp_Vec(directions[(axis + 1) % 3]) * 100.0);
+                    point.Translate(gp_Vec(directions[(axis + 1) % 3]) * handleRadius);
                     gp_Trsf rotation;
                     rotation.SetRotation(gp_Ax1(position.Location(), directions[axis]),
                         value * M_PI / 180.0);
                     point.Transform(rotation);
                 } else {
                     point.Translate(gp_Vec(directions[axis])
-                        * (mode >= 2 ? 100.0 * value : 100.0 + value));
+                        * (mode >= 2 ? handleRadius * value : handleRadius + value));
                 }
                 Standard_Integer x = 0, y = 0;
                 myView->Convert(point.X(), point.Y(), point.Z(), x, y);

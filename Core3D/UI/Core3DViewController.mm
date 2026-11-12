@@ -12170,6 +12170,12 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
 - (NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable)
     debugReplayGesture:(NSInteger)mode axis:(NSInteger)axis
     values:(NSArray<NSNumber *> *)values cancel:(BOOL)cancel {
+    return [self debugReplayGesture:mode axis:axis values:values cancel:cancel physicalScale:NO];
+}
+
+- (NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable)
+    debugReplayGesture:(NSInteger)mode axis:(NSInteger)axis
+    values:(NSArray<NSNumber *> *)values cancel:(BOOL)cancel physicalScale:(BOOL)physicalScale {
     if (![NSThread isMainThread] || mode < 0 || mode > 3 || axis < 0 || axis > 2
         || values.count < 2 || values.count > 32 || GLController.viewer == nullptr) {
         return nil;
@@ -12185,7 +12191,7 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
     std::vector<std::array<Standard_Real, 2>> observed;
     if (!interactor->debugReplayGesture(
             static_cast<Standard_Integer>(mode), static_cast<Standard_Integer>(axis),
-            samples, observed, cancel)) {
+            samples, observed, cancel, physicalScale)) {
         return nil;
     }
     NSMutableArray<NSDictionary<NSString *, NSNumber *> *> *result =

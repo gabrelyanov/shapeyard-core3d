@@ -2183,6 +2183,12 @@ __attribute__((objc_subclassing_restricted))
     debugReplayGesture:(NSInteger)mode axis:(NSInteger)axis
     values:(NSArray<NSNumber *> *)values cancel:(BOOL)cancel
     NS_SWIFT_NAME(debugReplayGesture(mode:axis:values:cancel:));
+//! Opt-in 400 mm camera span / 100 mm handle radius in document model units.
+//! Translation values remain model units; legacy overloads keep raw-unit scale.
+- (NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable)
+    debugReplayGesture:(NSInteger)mode axis:(NSInteger)axis
+    values:(NSArray<NSNumber *> *)values cancel:(BOOL)cancel physicalScale:(BOOL)physicalScale
+    NS_SWIFT_NAME(debugReplayGesture(mode:axis:values:cancel:physicalScale:));
 //! Current XCAF visual-material table size for ownership/GC regressions.
 - (NSInteger)debugVisualMaterialDefinitionCount;
 - (NSDictionary<NSString *,id> *_Nullable)debugScalarPBREvidence:(NSString *)entity;
