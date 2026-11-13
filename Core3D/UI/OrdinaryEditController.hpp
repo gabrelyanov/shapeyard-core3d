@@ -369,6 +369,13 @@ struct OrdinaryAppearanceLedger {
     bool candidateSealed=false;
 };
 
+struct OrdinaryColourLedger {
+    std::shared_ptr<const OcctPBRColourPreparation> prepared;
+    std::shared_ptr<const OcctPBRScalarState> previous,candidate;
+    OrdinaryNameLedger authority;
+    bool candidateSealed=false;
+};
+
 //! Organization is a distinct durable family; names of objects, geometry,
 //! transforms and existing presentation/selection authority are preserved.
 struct OrdinaryGroupingLedger {
@@ -456,6 +463,8 @@ public:
     virtual bool repairCreation(const OrdinaryCreationLedger&, bool) noexcept { return false; }
     virtual bool admitAppearance(OrdinaryAppearanceLedger&) noexcept { return false; }
     virtual bool repairAppearance(const OrdinaryAppearanceLedger&, bool) noexcept { return false; }
+    virtual bool admitColour(OrdinaryColourLedger&) noexcept { return false; }
+    virtual bool repairColour(const OrdinaryColourLedger&, bool) noexcept { return false; }
     virtual bool admitGrouping(OrdinaryGroupingLedger&) noexcept { return false; }
     virtual bool repairGrouping(const OrdinaryGroupingLedger&, bool) noexcept { return false; }
     virtual bool admitNames(OrdinaryNameLedger&) noexcept { return false; }
@@ -532,6 +541,8 @@ public:
         std::shared_ptr<NativeModelingCommitPermit> permit, OrdinaryEditResult* failure) noexcept;
     OrdinaryEditLease beginAppearance(const std::shared_ptr<const OcctPBRScalarPreparation>&,
         OrdinaryEditResult* failure = nullptr) noexcept;
+    OrdinaryEditLease beginColour(const std::shared_ptr<const OcctPBRColourPreparation>&,
+        OrdinaryEditResult* failure = nullptr) noexcept;
     OrdinaryEditLease beginGrouping(const std::vector<OcctSavedGroup>& groups,
                                    OrdinaryEditResult* failure = nullptr) noexcept;
     OrdinaryEditLease beginNames(const std::vector<OrdinaryNameChange>& changes,
@@ -560,7 +571,7 @@ public:
 private:
     friend class OrdinaryEditLease;
     friend class OrdinaryDependentSourceMutation;
-    using PendingEdit = std::variant<OrdinaryTransformLedger, OrdinaryNameLedger, OrdinaryVisibilityLedger, OrdinaryGroupingLedger, OrdinaryCreationLedger, OrdinaryAppearanceLedger>;
+    using PendingEdit = std::variant<OrdinaryTransformLedger, OrdinaryNameLedger, OrdinaryVisibilityLedger, OrdinaryGroupingLedger, OrdinaryCreationLedger, OrdinaryAppearanceLedger, OrdinaryColourLedger>;
     OrdinaryEditResult stageAndCommit(std::uint64_t token) noexcept;
     OrdinaryEditResult cancel(std::uint64_t token) noexcept;
     OrdinaryEditResult reconcileImpl() noexcept;
@@ -588,6 +599,8 @@ private:
     bool meshCopySourceMatches(const OrdinaryMeshCopySource& source, bool candidate) const noexcept;
     OrdinaryEditResult stageAppearanceAndCommit(std::uint64_t token) noexcept;
     OrdinaryEditResult reconcileAppearanceImpl() noexcept;
+    OrdinaryEditResult stageColourAndCommit(std::uint64_t token) noexcept;
+    OrdinaryEditResult reconcileColourImpl() noexcept;
     OrdinaryEditResult stageGroupingAndCommit(std::uint64_t token) noexcept;
     OrdinaryEditResult reconcileGroupingImpl() noexcept;
     bool groupingMatches(const OrdinaryGroupingLedger& ledger, bool candidate) const noexcept;
