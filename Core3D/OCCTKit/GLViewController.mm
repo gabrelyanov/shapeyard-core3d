@@ -3821,6 +3821,9 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
     if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
         const BOOL committed = [rawOwner core3d_applyVisibleRawR2Bevel];
+        if (committed) {
+            _visibleRawR2BevelOwnsChamferTool = NO;
+        }
         [self checkSelections];
         [self requestRender];
         return committed;
@@ -3844,6 +3847,9 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 	Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
 	if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
 		const BOOL didCancel = [rawOwner core3d_cancelVisibleRawR2Bevel];
+		if (didCancel) {
+			_visibleRawR2BevelOwnsChamferTool = NO;
+		}
 		[self checkSelections];
 		[self requestRender];
 		return didCancel;
