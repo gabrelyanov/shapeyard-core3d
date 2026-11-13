@@ -2984,6 +2984,8 @@ namespace core3d {
         attachManipulatorToSelection();
     }
 
+    extern std::string g_r179LastSelectRefusal;   // defined in Core3DViewer.mm (DEBUG Join trace)
+
     bool ObjectInteractor::replaceSelectedObjectForBrowser(
         const Handle(AIS_InteractiveObject)& target, bool& selectionWasTouched) noexcept {
         return replaceSelectedObjectsForBrowser({target}, selectionWasTouched);
@@ -3013,6 +3015,7 @@ namespace core3d {
                     && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeScale)) {
 #ifdef DEBUG
                 std::fprintf(stderr, "R179_SELECT_REFUSED stage=precondition\n");
+                g_r179LastSelectRefusal = std::string("browser-precondition unresolved=") + (hasUnresolvedEdit() ? "1" : "0") + " gesture=" + (_manipulatorGestureActive ? "1" : "0") + " active=" + ((!_manipulator.IsNull() && _manipulator->HasActiveTransformation()) ? "1" : "0") + " type=" + std::to_string(static_cast<int>(_manipulatorType));
 #endif
                 return false;
             }
@@ -3020,6 +3023,7 @@ namespace core3d {
             if (document.IsNull() || document->HasOpenCommand()) {
 #ifdef DEBUG
                 std::fprintf(stderr, "R179_SELECT_REFUSED stage=open-command\n");
+                g_r179LastSelectRefusal = "browser-open-command";
 #endif
                 return false;
             }
@@ -3043,18 +3047,36 @@ namespace core3d {
                 if (!isCommittedPresentation(target)) {
 #ifdef DEBUG
                     std::fprintf(stderr, "R179_SELECT_REFUSED stage=target-committed\n");
+                    {
+                        const Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(target);
+                        const TDF_Label label = shape.IsNull() ? TDF_Label() : myDoc->ShapeLabel(target);
+                        gp_Trsf transform;
+                        const bool hasTransform = !label.IsNull() && myDoc->TryObjectTransformForLabel(label, transform);
+                        g_r179LastSelectRefusal = std::string("browser-target-committed")
+                            + " shape=" + (shape.IsNull() ? "null" : "ok")
+                            + " displayed=" + (!shape.IsNull() && myContext->IsDisplayed(target) ? "1" : "0")
+                            + " editable=" + (!shape.IsNull() && myDoc->IsPresentationEditable(target) ? "1" : "0")
+                            + " label=" + (label.IsNull() ? "null" : "ok")
+                            + " free=" + (!label.IsNull() && myDoc->IsEditableFreeSimpleDefinitionLabel(label) ? "1" : "0")
+                            + " repr=" + (!label.IsNull() && IsObjectModelingRepresentation(myDoc->GeometryRepresentationForLabel(label)) ? "1" : "0")
+                            + " same=" + (!label.IsNull() && !shape.IsNull() && XCAFDoc_ShapeTool::GetShape(label).IsEqual(shape->Shape()) ? "1" : "0")
+                            + " partner=" + (!label.IsNull() && !shape.IsNull() && XCAFDoc_ShapeTool::GetShape(label).IsPartner(shape->Shape()) ? "1" : "0")
+                            + " trsf=" + (hasTransform ? (TransformDiffers(transform, shape->LocalTransformation()) ? "differs" : "same") : "none");
+                    }
 #endif
                     return false;
                 }
                 if (!targetSet.insert(target.get()).second) {
 #ifdef DEBUG
                     std::fprintf(stderr, "R179_SELECT_REFUSED stage=target-duplicate\n");
+                g_r179LastSelectRefusal = "browser-target-duplicate";
 #endif
                     return false;
                 }
                 if (target->GlobalSelOwner().IsNull()) {
 #ifdef DEBUG
                     std::fprintf(stderr, "R179_SELECT_REFUSED stage=target-owner\n");
+                g_r179LastSelectRefusal = "browser-target-owner";
 #endif
                     return false;
                 }
@@ -3067,6 +3089,7 @@ namespace core3d {
                     || !isCommittedPresentation(object)) {
 #ifdef DEBUG
                     std::fprintf(stderr, "R179_SELECT_REFUSED stage=previous-committed\n");
+                g_r179LastSelectRefusal = "browser-previous-committed";
 #endif
                     return false;
                 }
@@ -3074,6 +3097,7 @@ namespace core3d {
                     || !previousPresentations.insert(object.get()).second) {
 #ifdef DEBUG
                     std::fprintf(stderr, "R179_SELECT_REFUSED stage=previous-duplicate\n");
+                g_r179LastSelectRefusal = "browser-previous-duplicate";
 #endif
                     return false;
                 }
@@ -3207,6 +3231,7 @@ namespace core3d {
             if (!selectionWasTouched) {
 #ifdef DEBUG
                 std::fprintf(stderr, "R179_SELECT_REFUSED stage=exception\n");
+                g_r179LastSelectRefusal = "browser-exception";
 #endif
                 return false;
             }
@@ -3265,6 +3290,7 @@ namespace core3d {
         }
 #ifdef DEBUG
         std::fprintf(stderr, "R179_SELECT_REFUSED stage=rollback\n");
+                g_r179LastSelectRefusal = "browser-rollback";
 #endif
         return false;
     }
