@@ -7868,6 +7868,28 @@ struct NativePBRColourWork {
     ObjectFrameIdentity identity;std::uint64_t presentationRevision=0;std::uint32_t width=0,height=0;
     core3d::authority::Stamp stamp;Standard_Integer documentTime=0;bool consumed=false,changed=false;
 };
+namespace {
+bool CaptureColourFaces(const Handle(OcctDocument)& doc,const OrdinaryNameLedger& authority,
+    std::vector<OcctPBRColourFaceTarget>& faces) {
+    faces.clear();const auto shapes=XCAFDoc_DocumentTool::ShapeTool(doc->Document()->Main());
+    if(shapes.IsNull()||authority.selectionOwners.empty()||authority.selectionOwners.size()>64)return false;
+    for(const auto& selected:authority.selectionOwners){
+        const auto owner=Handle(StdSelect_BRepOwner)::DownCast(selected);
+        if(owner.IsNull()||!owner->HasShape()||owner->Shape().ShapeType()!=TopAbs_FACE)return false;
+        const auto presentation=Handle(AIS_Shape)::DownCast(owner->Selectable());
+        const auto root=doc->ShapeLabel(presentation);
+        if(presentation.IsNull()||Handle(AIS_ColoredShape)::DownCast(presentation).IsNull()
+            ||root.IsNull()||!doc->IsEditableFreeSimpleDefinitionLabel(root)||!doc->IsPresentationEditable(presentation)
+            ||!shapes->IsSubShape(root,owner->Shape()))return false;
+        if(std::count_if(authority.selectedPresentations.begin(),authority.selectedPresentations.end(),
+            [&](const auto& value){return value.presentation==presentation;})!=1)return false;
+        if(std::any_of(faces.begin(),faces.end(),[&](const auto& face){return face.root.IsEqual(root)&&face.face.IsSame(owner->Shape());}))return false;
+        TDF_Label label;shapes->FindSubShape(root,owner->Shape(),label);
+        faces.push_back({root,label,owner->Shape()});
+    }
+    return !faces.empty();
+}
+}
 std::shared_ptr<NativePBRColourWork> Core3DViewer::preparePBRColour(
     const std::array<double,3>& sRGB,const ObjectFrameIdentity& identity,std::uint64_t presentation,
     std::uint32_t width,std::uint32_t height) noexcept {
@@ -7875,7 +7897,7 @@ std::shared_ptr<NativePBRColourWork> Core3DViewer::preparePBRColour(
     try{
         const auto stamp=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
         const auto snapshot=captureSceneSnapshot(width,height);
-        if(!stamp||!snapshot||snapshot->selectionMode!=scene::ElementKind::Object||snapshot->publicationSourceIdentifier!=identity.publicationSourceIdentifier
+        if(!stamp||!snapshot||(snapshot->selectionMode!=scene::ElementKind::Object&&snapshot->selectionMode!=scene::ElementKind::Face)||snapshot->publicationSourceIdentifier!=identity.publicationSourceIdentifier
             ||snapshot->revisions.documentGeneration!=identity.documentGeneration||snapshot->revisions.model!=identity.modelRevision
             ||snapshot->revisions.presentation!=presentation)return {};
         auto work=std::make_shared<NativePBRColourWork>();work->owner=myDoc;work->document=myDoc->Document();
@@ -7889,7 +7911,9 @@ std::shared_ptr<NativePBRColourWork> Core3DViewer::preparePBRColour(
         }
         work->identity=identity;work->stamp=*stamp;work->presentationRevision=presentation;
         work->width=width;work->height=height;work->documentTime=work->document->GetData()->Time();
-        work->prepared=myDoc->PreparePBRColourPatch(targets,sRGB,work->changed);
+        std::vector<OcctPBRColourFaceTarget> faces;
+        if(snapshot->selectionMode==scene::ElementKind::Face&&!CaptureColourFaces(myDoc,work->authority,faces))return {};
+        work->prepared=myDoc->PreparePBRColourPatch(targets,sRGB,work->changed,faces);
         const auto after=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
         if(!work->prepared||!after||!(*after==work->stamp)||!myDoc->PBRScalarStateMatches(myDoc->PBRColourOriginal(work->prepared)))return {};
         return work;
@@ -7959,6 +7983,7 @@ struct NativeColourSessionWork {
     std::uint32_t width=0,height=0;
     std::string previewIdentifier;
     std::vector<TDF_Label> targets;
+    std::vector<OcctPBRColourFaceTarget> faces;
     std::vector<Handle(AIS_Shape)> presentations;
     std::shared_ptr<const OcctPBRScalarState> source;
     std::shared_ptr<NativePBRColourWork> candidate;
@@ -7972,7 +7997,8 @@ namespace {
 scene::OcctSceneSnapshotBuilder::SnapshotPointer ColourPresentation(
     const Handle(OcctDocument)& owner,const scene::SceneSnapshot& source,
     const std::vector<TDF_Label>& targets,const std::array<double,3>& sRGB,
-    const std::string& identifier,std::uint64_t revision) {
+    const std::string& identifier,std::uint64_t revision,
+    const std::vector<OcctPBRColourFaceTarget>& selectedFaces) {
     auto result=std::make_shared<scene::SceneSnapshot>(source);
     result->publicationSourceIdentifier=identifier;
     result->revisions.snapshot=revision;
@@ -7989,9 +8015,11 @@ scene::OcctSceneSnapshotBuilder::SnapshotPointer ColourPresentation(
         });
         if(target==targets.end())continue;
         ++found;
-        // E3/E4 and painted atlases bake base colour into derived pixels. They
-        // require a dedicated recomposition path, not a fabricated RGB uniform.
-        if(!item.faceImageBindings.empty()||!item.decalDerivedAppearances.empty())return {};
+        // E3 carries its original texture and UV transform separately from the
+        // base material; copying the binding retains those inputs exactly.
+        // E4 and painted atlases already bake base colour into derived pixels
+        // and still require a dedicated recomposition path.
+        if(!item.decalDerivedAppearances.empty())return {};
         if(item.meshIndex>=source.meshes.size())return {};
         const auto& mesh=source.meshes[item.meshIndex];
         if(mesh.primitives.size()!=item.primitiveBindings.size())return {};
@@ -8004,7 +8032,11 @@ scene::OcctSceneSnapshotBuilder::SnapshotPointer ColourPresentation(
             const auto faceIndex=mesh.primitives[i].faceIndex;
             if(faceIndex>=static_cast<std::uint32_t>(faces.Extent()))return {};
             TDF_Label face;XCAFDoc_VisMaterialPBR authored;
-            if(shapes->FindSubShape(*target,faces(faceIndex+1),face)
+            if(!selectedFaces.empty()){
+                if(std::none_of(selectedFaces.begin(),selectedFaces.end(),[&](const auto& selected){
+                    return selected.root.IsEqual(*target)&&selected.face.IsSame(faces(faceIndex+1));
+                }))continue;
+            }else if(shapes->FindSubShape(*target,faces(faceIndex+1),face)
                 &&owner->TryPBRMaterialForLabel(face,authored))continue;
             auto& binding=item.primitiveBindings[i];
             const auto slot=binding.materialIndex;
@@ -8048,11 +8080,11 @@ bool Core3DViewer::colourSessionMatches(const std::shared_ptr<NativeColourSessio
 }
 
 std::shared_ptr<NativeColourSessionWork> Core3DViewer::beginColourSession(
-    const ObjectFrameIdentity& identity,std::uint64_t presentation,std::uint32_t width,std::uint32_t height) noexcept {
+    const ObjectFrameIdentity& identity,std::uint64_t presentation,std::uint32_t width,std::uint32_t height,bool faceScope) noexcept {
     if(![NSThread isMainThread]||!canBeginCommittedEdit()||myDoc.IsNull()||myContext.IsNull()||!width||!height)return {};
     try {
         const auto snapshot=captureSceneSnapshot(width,height);
-        if(!snapshot||snapshot->selectionMode!=scene::ElementKind::Object
+        if(!snapshot||snapshot->selectionMode!=(faceScope?scene::ElementKind::Face:scene::ElementKind::Object)
             ||snapshot->publicationSourceIdentifier!=identity.publicationSourceIdentifier
             ||snapshot->revisions.documentGeneration!=identity.documentGeneration
             ||snapshot->revisions.model!=identity.modelRevision||snapshot->revisions.presentation!=presentation)return {};
@@ -8070,13 +8102,14 @@ std::shared_ptr<NativeColourSessionWork> Core3DViewer::beginColourSession(
             const auto label=myDoc->ShapeLabel(selected.presentation);if(label.IsNull())return {};
             work->targets.push_back(label);work->presentations.push_back(selected.presentation);
         }
+        if(faceScope&&!CaptureColourFaces(myDoc,work->authority,work->faces))return {};
         work->source=myDoc->CapturePBRColourState(work->targets);if(!work->source)return {};
         work->identity=identity;work->stamp=*stamp;work->presentationRevision=presentation;
         work->width=width;work->height=height;work->documentTime=work->document->GetData()->Time();
         work->previewIdentifier=std::string(NSUUID.UUID.UUIDString.UTF8String);
         // Validate the complete presentation route at admission, including
         // mixed finishes/face overrides. No publication or AIS mutation yet.
-        if(!ColourPresentation(myDoc,*snapshot,work->targets,{0,0,0},work->previewIdentifier,1))return {};
+        if(!ColourPresentation(myDoc,*snapshot,work->targets,{0,0,0},work->previewIdentifier,1,work->faces))return {};
         _colourSession=work;
         if(!colourSessionMatches(work)){_colourSession.reset();return {};}
         return work;
@@ -8094,6 +8127,9 @@ void Core3DViewer::restoreColourPresentation(const std::shared_ptr<NativeColourS
             const auto& shape=work->presentations[i];const auto& label=work->targets[i];
             if(shape.IsNull()||!myDoc->IsEditableFreeSimpleDefinitionLabel(label)
                 ||!myDoc->ShapeLabel(shape).IsEqual(label))continue;
+            const auto colored=Handle(AIS_ColoredShape)::DownCast(shape);
+            if(!colored.IsNull())for(const auto& face:work->faces)
+                if(face.root.IsEqual(label))colored->UnsetCustomAspects(face.face,Standard_True);
             shape->UnsetColor();myDoc->LoadObjectMeterial(label,shape);
             myContext->RecomputePrsOnly(shape,Standard_False);
         }
@@ -8114,7 +8150,7 @@ bool Core3DViewer::previewColourSession(const std::shared_ptr<NativeColourSessio
         const auto snapshot=captureSceneSnapshot(work->width,work->height);
         if(!candidate||!snapshot)return false;
         auto preview=ColourPresentation(myDoc,*snapshot,work->targets,sRGB,
-            work->previewIdentifier,work->previewRevision+1);
+            work->previewIdentifier,work->previewRevision+1,work->faces);
         if(!preview||!colourSessionMatches(work))return false;
         work->presented=true;
         if(!myDoc->PresentPBRColourPatch(candidate->prepared,work->presentations)){

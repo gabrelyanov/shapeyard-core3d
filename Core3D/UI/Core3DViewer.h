@@ -266,7 +266,7 @@ namespace core3d {
         OrdinaryEditResult executePBRColour(const std::shared_ptr<NativePBRColourWork>&) noexcept;
         void cancelPBRColour(const std::shared_ptr<NativePBRColourWork>&) noexcept;
         std::shared_ptr<NativeColourSessionWork> beginColourSession(const ObjectFrameIdentity&,
-            std::uint64_t presentation,std::uint32_t width,std::uint32_t height) noexcept;
+            std::uint64_t presentation,std::uint32_t width,std::uint32_t height,bool faceScope=false) noexcept;
         bool previewColourSession(const std::shared_ptr<NativeColourSessionWork>&,
             const std::array<double,3>& sRGB) noexcept;
         OrdinaryEditResult commitColourSession(const std::shared_ptr<NativeColourSessionWork>&) noexcept;

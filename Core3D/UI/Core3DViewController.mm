@@ -5638,11 +5638,10 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
 }
 #endif
 
-// Whole-object native sessions are implemented first. The UI adapter is not
-// connected until face scope and both renderer pixel journeys are qualified.
+// The UI adapter stays disconnected until both renderer pixel journeys qualify.
 - (Core3DColourEditSession *)beginColourEditWithScope:(Core3DColourScope)scope
     expected:(Core3DSceneSnapshot *)expected {
-    if(![NSThread isMainThread]||scope!=Core3DColourScopeObject||!expected
+    if(![NSThread isMainThread]||(scope!=Core3DColourScopeObject&&scope!=Core3DColourScopeFace)||!expected
         ||expected.class!=Core3DSceneSnapshot.class||!_isSetuped||!GLController||!GLController.viewer)return nil;
     const CGSize size=GLController.drawableSize;
     if(!std::isfinite(size.width)||!std::isfinite(size.height)||size.width<1||size.height<1
@@ -5653,7 +5652,7 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
         identity.publicationSourceIdentifier.assign(source,[expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
         identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;
         auto work=GLController.viewer->beginColourSession(identity,expected.revisions.presentationRevision,
-            std::uint32_t(std::llround(size.width)),std::uint32_t(std::llround(size.height)));
+            std::uint32_t(std::llround(size.width)),std::uint32_t(std::llround(size.height)),scope==Core3DColourScopeFace);
         if(!work)return nil;
         auto session=[[Core3DColourEditSession alloc]initPrivate];
         if(!session){GLController.viewer->cancelColourSession(work);return nil;}

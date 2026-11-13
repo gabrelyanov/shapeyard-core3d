@@ -1004,6 +1004,12 @@ struct OcctSavedCutSceneState;
 struct OcctPBRScalarState;
 struct OcctPBRScalarPreparation;
 struct OcctPBRColourPreparation;
+// A native face identity, never a publication-local topology ordinal. A null
+// label records an absent subshape and must stay absent until owned staging.
+struct OcctPBRColourFaceTarget {
+    TDF_Label root, label;
+    TopoDS_Shape face;
+};
 
 struct OcctPBRMaterialUpdate
 {
@@ -2120,13 +2126,13 @@ public:
     Standard_EXPORT bool PBRScalarStateMatches(const std::shared_ptr<const OcctPBRScalarState>&) const noexcept;
     Standard_EXPORT bool StagePBRScalarPatch(const std::shared_ptr<const OcctPBRScalarPreparation>&,
         std::shared_ptr<const OcctPBRScalarState>& sealed) noexcept;
-    // Whole-object Colour uses one captured scene and per-target exact material
-    // candidates. Face labels require a separate topology allowance; this entry
-    // deliberately admits editable free roots only.
+    // One captured scene and exact candidates; optional native face targets
+    // restrict the edit within the admitted free roots.
     Standard_EXPORT std::shared_ptr<const OcctPBRScalarState> CapturePBRColourState(
         const std::vector<TDF_Label>&) const noexcept;
     Standard_EXPORT std::shared_ptr<const OcctPBRColourPreparation> PreparePBRColourPatch(
-        const std::vector<TDF_Label>&, const std::array<double,3>& sRGB, bool& changed) const noexcept;
+        const std::vector<TDF_Label>&, const std::array<double,3>& sRGB, bool& changed,
+        const std::vector<OcctPBRColourFaceTarget>& faces = {}) const noexcept;
     Standard_EXPORT std::shared_ptr<const OcctPBRScalarState> PBRColourOriginal(
         const std::shared_ptr<const OcctPBRColourPreparation>&) const noexcept;
     Standard_EXPORT std::vector<TDF_Label> PBRColourTargets(
@@ -2603,7 +2609,7 @@ private:
   // Pure native eligibility for an exclusively owned document, including the
   // private import worker. UI-facing admission retains its main-thread guard.
   Standard_Boolean HasNativeNormalTextureGeometry(const TDF_Label& label) const noexcept;
-    std::shared_ptr<const OcctPBRScalarState> CapturePBRScalarState(const TDF_Label&) const noexcept;
+    std::shared_ptr<const OcctPBRScalarState> CapturePBRScalarState(const TDF_Label&, bool colourSubshapes = false) const noexcept;
     Handle(XCAFDoc_VisMaterial) PrepareExactPBRMaterial(const TDF_Label&,
         const OcctPBRScalarPatch&, bool& changed) const noexcept;
     Standard_Boolean SaveObjectPBRMaterialsImpl(const std::vector<OcctPBRMaterialUpdate>&,
@@ -2614,7 +2620,8 @@ private:
         const std::vector<OcctPBRMaterialUpdate>& updates,
         std::vector<TDF_Label>* reclaimMaterialLabels,
         const Handle(XCAFDoc_VisMaterial)& scalarMaterial = Handle(XCAFDoc_VisMaterial)(),
-        const std::vector<Handle(XCAFDoc_VisMaterial)>* exactMaterials = nullptr) const;
+        const std::vector<Handle(XCAFDoc_VisMaterial)>* exactMaterials = nullptr,
+        bool virtualFaceEndpoints = false) const;
     
 #if DEBUG
   // Exact pointer created below and kept alive by myApp; no foreign downcast.
