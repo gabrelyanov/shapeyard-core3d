@@ -5030,6 +5030,12 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
     }
 }
 
+namespace core3d { extern std::string g_r179LastSelectRefusal; }
+// DEBUG/test readout only (Join tap trace): the stage at which the last whole-part select was refused.
+- (NSString *)core3d_lastSelectRefusal {
+    return [NSString stringWithUTF8String:core3d::g_r179LastSelectRefusal.c_str()] ?: @"";
+}
+
 - (BOOL)core3d_canBeginCommittedEdit {
     return [NSThread isMainThread]
         && GLController != nil
