@@ -5785,6 +5785,7 @@ struct DocumentReplacementWork {
 };
 
 void Core3DViewer::release() noexcept {
+    _measurePicks.clear();
     if (_nativeOpeningState) _nativeOpeningState->owner = nullptr;
     _nativeOpeningState.reset();
     // Retire pre-commit source authority on main before graphics teardown.
@@ -6219,6 +6220,7 @@ NativeHistoryTransition Core3DViewer::performHistory(NativeHistoryDirection dire
 
 bool Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorType,
                                        ShapeSelectionMode theSelectionMode) {
+    _measurePicks.clear();
     if (!IsStatelessManipulatorType(theManipulatorType)) {
         // Operation controllers own state that is not encoded by this enum.
         // Reconstructing one from the enum would fabricate a fresh ledger and
@@ -13203,6 +13205,7 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
 }
 
 bool Core3DViewer::redrawDocument() noexcept {
+    _measurePicks.clear();
     if (hasUnresolvedOrdinaryEdit() || HasActiveOperationLedger(_objectInteractor, _shapeInteractor)) {
         // A same-document rebuild is safe only after every typed operation has
         // retired its controller ledger. The manipulator enum alone cannot
@@ -14891,6 +14894,75 @@ const int Core3DViewer::selectedCount() const {
     return count;
 }
 
+static bool Core3DMeasurePickedPointForOwner(
+    const Handle(StdSelect_ViewerSelector3d)& selector,
+    const Handle(StdSelect_BRepOwner)& owner, gp_Pnt& point, int& rank) noexcept {
+    if (selector.IsNull() || owner.IsNull()) return false;
+    try {
+        for (rank = 1; rank <= selector->NbPicked(); ++rank) {
+            if (selector->Picked(rank) != owner) continue;
+            point = selector->PickedPoint(rank);
+            return std::isfinite(point.X()) && std::isfinite(point.Y())
+                && std::isfinite(point.Z());
+        }
+    } catch (...) {}
+    rank = 0;
+    return false;
+}
+
+std::vector<Core3DViewer::MeasurePick>
+Core3DViewer::measurePicksForCurrentSelection() noexcept {
+    try {
+        std::unordered_set<const SelectMgr_EntityOwner*> selected;
+        for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected())
+            selected.insert(myContext->SelectedOwner().get());
+        _measurePicks.erase(std::remove_if(_measurePicks.begin(), _measurePicks.end(),
+            [&](const MeasurePick& pick) {
+                return pick.owner.IsNull() || !pick.owner->IsSelected()
+                    || selected.count(pick.owner.get()) == 0;
+            }), _measurePicks.end());
+        return _measurePicks;
+    } catch (...) {
+        _measurePicks.clear();
+        return {};
+    }
+}
+
+#if DEBUG
+namespace {
+class Core3DMeasureFixtureSelector final : public StdSelect_ViewerSelector3d {
+public:
+    void add(const Handle(StdSelect_BRepOwner)& owner, const gp_Pnt& point) {
+        SelectMgr_SortCriterion criterion;
+        criterion.Point = point;
+        mystored.Add(owner, criterion);
+    }
+};
+}
+
+extern "C" void *Core3DDebugMeasureNonFirstSelectorRankProbe() {
+    @autoreleasepool {
+        const auto box = BRepPrimAPI_MakeBox(40, 30, 20).Shape();
+        TopExp_Explorer edges(box, TopAbs_EDGE);
+        const Handle(StdSelect_BRepOwner) wrong = new StdSelect_BRepOwner(edges.Current(), 0);
+        edges.Next();
+        const Handle(StdSelect_BRepOwner) selected = new StdSelect_BRepOwner(edges.Current(), 0);
+        Handle(Core3DMeasureFixtureSelector) selector = new Core3DMeasureFixtureSelector();
+        selector->add(wrong, gp_Pnt(0, 0, 0));
+        selector->add(selected, gp_Pnt(-20, -15, 10));
+        gp_Pnt point;
+        int rank = 0;
+        const bool matched = Core3DMeasurePickedPointForOwner(selector, selected, point, rank);
+        NSDictionary *result = @{
+            @"captureCount": @(matched ? 1 : 0), @"selectedRank": @(rank),
+            @"selectedOwnerMatched": @(matched),
+            @"pickedX": @(point.X()), @"pickedY": @(point.Y()), @"pickedZ": @(point.Z()),
+        };
+        return (__bridge_retained void *)result;
+    }
+}
+#endif
+
 void Core3DViewer::Select(int theX, int theY) {
     observeNativePlanningInteraction();
     if (_objectInteractor == nullptr || _shapeInteractor == nullptr) {
@@ -14945,16 +15017,47 @@ void Core3DViewer::Select(int theX, int theY) {
             break;
     }
 
+    std::unordered_set<const SelectMgr_EntityOwner*> oldOwners;
+    for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected())
+        oldOwners.insert(myContext->SelectedOwner().get());
     int oldCount = selectedCount();
-    // cancel chamfer when empty tapped
-    //		if (!hitTest(theX, theY) && _objectInteractor->getManipulatorType() == PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer) {
-    //            _shapeInteractor->setChamferValueForSelection(0);
-    //            _shapeInteractor->resetWireframeTemplateShape();
-    //		}
-
-//	bool isMirrorOp = _objectInteractor->getManipulatorType() == PrimitiveManipulatorType::PrimitiveGizmoTypeMirror;
-//	OcctViewer::Select(theX, theY, isMirrorOp ? AIS_SelectionScheme::AIS_SelectionScheme_Replace : AIS_SelectionScheme::AIS_SelectionScheme_XOR);
     OcctViewer::Select(theX, theY, AIS_SelectionScheme::AIS_SelectionScheme_XOR);
+
+    try {
+        (void)measurePicksForCurrentSelection();
+        const Handle(StdSelect_ViewerSelector3d)& selector = myContext->MainSelector();
+        for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+            const auto owner = Handle(StdSelect_BRepOwner)::DownCast(myContext->SelectedOwner());
+            if (owner.IsNull() || !owner->HasShape()
+                || owner->Shape().ShapeType() != TopAbs_EDGE
+                || oldOwners.count(owner.get()) != 0) continue;
+            const auto existing = std::find_if(_measurePicks.begin(), _measurePicks.end(),
+                [&](const MeasurePick& pick) { return pick.owner == owner; });
+            if (existing != _measurePicks.end()) continue;
+            gp_Pnt point;
+            int rank = 0;
+            if (!Core3DMeasurePickedPointForOwner(selector, owner, point, rank)) continue;
+            TopoDS_Shape world = owner->Shape();
+            const auto selectable = owner->Selectable();
+            if (!selectable.IsNull()) {
+                const gp_Trsf& transform = selectable->Transformation();
+                if (std::abs(std::abs(transform.ScaleFactor()) - 1.0)
+                        > TopLoc_Location::ScalePrec() || transform.IsNegative()) {
+                    BRepBuilderAPI_Transform transformed(world, transform, Standard_True);
+                    if (!transformed.IsDone() || transformed.Shape().IsNull()) continue;
+                    world = transformed.Shape();
+                } else {
+                    world = world.Moved(TopLoc_Location(transform));
+                }
+            }
+            _measurePicks.push_back(MeasurePick{owner, world, point,
+                static_cast<double>(selector->PixelTolerance())});
+        }
+        if (_measurePicks.size() > 2)
+            _measurePicks.erase(_measurePicks.begin(), _measurePicks.end() - 2);
+    } catch (...) {
+        _measurePicks.clear();
+    }
 
     int newCount = selectedCount();
 
