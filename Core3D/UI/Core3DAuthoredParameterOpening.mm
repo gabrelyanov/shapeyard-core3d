@@ -1559,7 +1559,24 @@ static NSMapTable<Core3DViewController *, Core3DBooleanPairRecoveryIssuer *>
             // different shape object than the stored one, and the next whole-part select of
             // it (a second Join, a Hole on its face) is refused as stale (Astra 12 Nov 18:52
             // steps 37-40 and 61; tutorial reproductions A and B).
+            // The redraw clears the selection; the part that stays was selected before it and
+            // must be selected again, so the next step (Measure, another Join, editing the
+            // originals of this result) starts from it as it did before the redraw
+            // (integration 13 Nov 05:06; ai 13 Nov 10:49 A2 originals edit after a Join).
+            Core3DSceneSnapshot *beforeRedraw = [self captureSceneSnapshot];
+            Core3DSceneElementIdentifier *kept =
+                beforeRedraw.selectionMode == Core3DSceneElementKindObject
+                    && beforeRedraw.selection.selectedElements.count == 1
+                ? beforeRedraw.selection.selectedElements.firstObject : nil;
+            NSString *keptEntity = kept.kind == Core3DSceneElementKindObject
+                ? kept.entityIdentifier : nil;
             viewer->redrawDocument();
+            if (keptEntity.length > 0) {
+                Core3DSceneSnapshot *afterRedraw = [self captureSceneSnapshot];
+                if (afterRedraw.selectionMode == Core3DSceneElementKindObject
+                    && afterRedraw.selection.selectedElements.count == 0)
+                    [self selectObjectWithEntityIdentifier:keptEntity expected:afterRedraw];
+            }
             [gl requestRender];
         }
         if (reply.status == PairApplyStatus::OutcomeUnknown && reply.recovery) {
