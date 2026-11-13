@@ -12641,6 +12641,20 @@ bool FileStableShape(const TopoDS_Shape& shape, TopoDS_Shape& output) noexcept {
 }
 }
 
+namespace core3d { std::string g_booleanCaptureLastRefusal; }
+namespace {
+// DEBUG: which input (0 = the part that stays, 1 = the other) and which check refused a
+// Join/Cut opening, for the on-model tap trace and the app log.
+void BooleanCaptureDebugRefusal(std::size_t index, const char* stage) noexcept {
+#if DEBUG
+    std::fprintf(stderr, "BOOLEAN_CAPTURE_REFUSED input=%zu stage=%s\n", index, stage);
+    core3d::g_booleanCaptureLastRefusal = std::to_string(index) + ":" + stage;
+#else
+    (void)index; (void)stage;
+#endif
+}
+} // namespace
+
 core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources(
     const std::shared_ptr<core3d::native_opening::Context>& context,
     const TDF_Label& target, const TDF_Label& tool,
@@ -12678,8 +12692,10 @@ core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources
             const BooleanRecordExactCaptureScope scope(admitOrdinaryInputs);
             const auto admitted = CaptureToolInput(
                 labels[index], core3d::ordinary_input::Purpose::SolidModel);
-            if (!admitted.ready())
+            if (!admitted.ready()) {
+                BooleanCaptureDebugRefusal(index, "tool-input-not-ready");
                 return PairCaptureRefused(PairRefusal::UnsupportedSource);
+            }
             bool ordinary = false;
             // A previous Boolean result (its only record is a Part Boolean
             // composite) enters as a frozen solid, like an Add primitive, so
@@ -12725,7 +12741,10 @@ core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources
                 ordinary = FileStableShape(snapshot.detachedShape, frozen)
                     && OrdinaryCommitments(snapshot.exact, snapshot.groups, frozen,
                         snapshot.metersPerUnit, snapshot.recipe, frozenCommitments);
-                if (!ordinary) return PairCaptureRefused(PairRefusal::UnsupportedSource);
+                if (!ordinary) {
+                    BooleanCaptureDebugRefusal(index, "ordinary-file-stable-or-commitments");
+                    return PairCaptureRefused(PairRefusal::UnsupportedSource);
+                }
             }
             if (ordinary) {
                 state->ordinarySources[index] = admitted.snapshot;
@@ -12741,17 +12760,26 @@ core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources
                 source.placement = admitted.snapshot->state_->exact.visibility
                     .object.object.transform;
                 source.boundRoot = frozen;
-                if (!CaptureExactFreeLabel(labels[index], state->exact[index]))
+                if (!CaptureExactFreeLabel(labels[index], state->exact[index])) {
+                    BooleanCaptureDebugRefusal(index, "ordinary-exact-free-label");
                     return PairCaptureRefused(PairRefusal::UnsupportedSource);
+                }
                 continue;
             }
             if (!CapturePlainProfileOperationSource(labels[index], state->sources[index])
-                || !CaptureExactFreeLabel(labels[index], state->exact[index]))
+                || !CaptureExactFreeLabel(labels[index], state->exact[index])) {
+                BooleanCaptureDebugRefusal(index, admitted.snapshot
+                    ? (admitted.snapshot->history() == core3d::ordinary_input::History::Absent
+                        ? "not-ordinary-history-absent" : "not-ordinary-history-present")
+                    : "not-ordinary-no-snapshot");
                 return PairCaptureRefused(PairRefusal::UnsupportedSource);
+            }
             core3d::profile::Parameters recipe;
             if (!core3d::profile::Decode(state->sources[index].recipeValues, recipe)
-                || !pb::build::IsRectangularP1BaseRecipe(recipe, false))
+                || !pb::build::IsRectangularP1BaseRecipe(recipe, false)) {
+                BooleanCaptureDebugRefusal(index, "profile-recipe");
                 return PairCaptureRefused(PairRefusal::UnsupportedSource);
+            }
         }
         const bool sameFeature = state->ordinarySources[0] && state->ordinarySources[1]
             ? state->ordinarySources[0]->sourceAnchor()
