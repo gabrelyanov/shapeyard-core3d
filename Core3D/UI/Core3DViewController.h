@@ -2277,6 +2277,8 @@ __attribute__((objc_subclassing_restricted))
 - (NSData *_Nullable)debugHiddenAssemblyVisibilityBinXCAFFixtureData;
 //! Standalone free located box used to verify TopoDS location ownership.
 - (NSData *_Nullable)debugLocatedFreeShapeBinXCAFFixtureData;
+//! Independent spline-aware metrics for native snap regression targets only.
+- (NSDictionary<NSString *, id> *_Nullable)debugSplineSnapTargetMetrics:(NSString *)entity;
 //! Detached geometry query fixture; does not create or edit a document.
 + (NSDictionary<NSString *, id> *)debugGeometrySnapFixture:(NSInteger)fixture
     point:(NSArray<NSNumber *> *)point tolerance:(double)tolerance kinds:(NSUInteger)kinds

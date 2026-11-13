@@ -23,6 +23,9 @@
 #include "../OCCTKit/DetachedRectangularLoftProbe.hxx"
 #include <GProp_GProps.hxx>
 #include <BRepGProp.hxx>
+#include <BRepBuilderAPI_GTransform.hxx>
+#include <gp_GTrsf.hxx>
+#include <IntCurvesFace_Intersector.hxx>
 #include <BRepBndLib.hxx>
 #endif
 #if DEBUG
@@ -13739,7 +13742,7 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
 + (NSDictionary<NSString *, id> *)debugGeometryAxisSnapFixture:(NSInteger)fixture
     point:(NSArray<NSNumber *> *)point tolerance:(double)tolerance kinds:(NSUInteger)kinds
     axis:(NSArray<NSNumber *> *)axis {
-    if (point.count != 3 || fixture < 0 || fixture > 6 || kinds > UINT_MAX
+    if (point.count != 3 || fixture < 0 || fixture > 7 || kinds > UINT_MAX
         || (axis.count != 0 && axis.count != 3))
         return @{@"error": @"fixture-input"};
     try {
@@ -13773,6 +13776,11 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
             shape = BRepBuilderAPI_MakeEdge(
                 gp_Elips(gp_Ax2(gp_Pnt(0,0,0),gp_Dir(0,0,1)),10,4),0,M_PI/2).Edge();
         }
+        if (fixture == 7) {
+            const auto cylinder = BRepPrimAPI_MakeCylinder(30,50).Shape();
+            const gp_GTrsf stretch(gp_Mat(1,0,0, 0,5.0/6.0,0, 0,0,1),gp_XYZ(0,0,0));
+            shape = BRepBuilderAPI_GTransform(cylinder,stretch,Standard_True).Shape();
+        }
         auto bytes = [&]() {
             if (shape.IsNull()) return std::string();
             std::ostringstream stream;
@@ -13793,6 +13801,25 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
             tolerance,static_cast<unsigned>(kinds),direction);
         NSMutableDictionary *result = [@{@"matched": @(bool(hit)),
             @"unchanged": @(before == bytes())} mutableCopy];
+        if (fixture == 7 && direction && !hit) {
+            const gp_Pnt proposed(point[0].doubleValue,point[1].doubleValue,point[2].doubleValue);
+            const gp_Lin line(proposed,*direction);
+            const auto probe = BRepBuilderAPI_MakeVertex(proposed).Vertex();
+            NSMutableArray *diagnostic = [NSMutableArray array];
+            for (TopExp_Explorer it(shape,TopAbs_FACE); it.More(); it.Next()) {
+                const auto face = TopoDS::Face(it.Current());
+                BRepExtrema_DistShapeShape nearest(probe,face);
+                if (!nearest.IsDone() || nearest.Value() > tolerance) continue;
+                IntCurvesFace_Intersector crossing(face,Precision::Confusion(),Standard_True,Standard_False);
+                crossing.Perform(line,-tolerance,tolerance);
+                NSMutableArray *residuals = [NSMutableArray array];
+                for (int i=1; i<=crossing.NbPnt(); ++i)
+                    [residuals addObject:@(line.Distance(crossing.Pnt(i)))];
+                [diagnostic addObject:@{@"surface":@(BRepAdaptor_Surface(face).GetType()),
+                    @"nearest":@(nearest.Value()),@"axisResiduals":residuals}];
+            }
+            result[@"diagnostic"] = diagnostic;
+        }
         if (hit) {
             result[@"kind"] = @(static_cast<unsigned>(hit->kind));
             result[@"index"] = @(hit->topologyIndex);
@@ -21645,6 +21672,30 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
             @"boundsMinMM":@[@(bounds[0]),@(bounds[1]),@(bounds[2])],
             @"boundsMaxMM":@[@(bounds[3]),@(bounds[4]),@(bounds[5])]};
     }catch(...){return nil;}
+}
+
+- (NSDictionary<NSString *,id> *)debugSplineSnapTargetMetrics:(NSString *)entity {
+    if(!NSThread.isMainThread || !GLController || !GLController.viewer || !entity
+        || entity.length>128 || !entity.UTF8String || ![self core3d_canBeginCommittedEdit])return nil;
+    try {
+        OcctObjectNameState named; TopoDS_Shape local,world;
+        double unit=0,mm=0; std::size_t nodes=0;
+        if(!core3dDebugSolidCopy(GLController.viewer->getDocument(),entity,named,local,world,unit,mm,nodes))return nil;
+        GProp_GProps props;
+        // Split integration at spline spans; retain the ordinary evidence
+        // readout separately, unchanged, for exact history comparisons.
+        const double error=BRepGProp::VolumePropertiesGK(world,props,1e-10,
+            Standard_False,Standard_True);
+        if(!std::isfinite(error)||error<0||!std::isfinite(props.Mass()))return nil;
+        Bnd_Box box; BRepBndLib::AddOptimal(world,box,Standard_False,Standard_False);
+        if(box.IsVoid()||box.IsOpen())return nil;
+        const double gap=box.GetGap(); box.SetGap(0);
+        double b[6];box.Get(b[0],b[1],b[2],b[3],b[4],b[5]);
+        NSMutableArray *bounds=[NSMutableArray arrayWithCapacity:6];
+        for(double v:b){if(!std::isfinite(v*mm))return nil;[bounds addObject:@(v*mm)];}
+        return @{@"volumeMM3":@(props.Mass()*mm*mm*mm),@"integrationError":@(error),
+            @"boundsMM":bounds,@"boundsGapMM":@(gap*mm)};
+    } catch (...) {return nil;}
 }
 
 - (NSDictionary<NSString *,id> *)debugB2cProfileSourceCorrespondenceEvidence:
