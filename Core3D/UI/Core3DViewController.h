@@ -29,6 +29,26 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+typedef NS_ENUM(NSInteger, Core3DGeometrySnapKind) {
+    Core3DGeometrySnapKindVertex = 1,
+    Core3DGeometrySnapKindEdgeMidpoint = 2,
+    Core3DGeometrySnapKindEdge = 4,
+    Core3DGeometrySnapKindFace = 8,
+};
+
+//! Read-only, transient evidence for the current Move sample. Indices are
+//! one-based in the target's topology; never retain them across model edits.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DGeometrySnapFeedback : NSObject
+@property(nonatomic, readonly) Core3DGeometrySnapKind kind;
+@property(nonatomic, copy, readonly) NSString *targetIdentifier;
+@property(nonatomic, readonly) NSInteger topologyIndex;
+@property(nonatomic, readonly) simd_double3 point;
+@property(nonatomic, readonly) double distance;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 typedef NS_ENUM(NSInteger, Core3DShellOpeningAxis) {
     Core3DShellOpeningAxisX, Core3DShellOpeningAxisY, Core3DShellOpeningAxisZ,
 };
@@ -212,6 +232,18 @@ __attribute__((objc_subclassing_restricted))
             expectedSHA256:(NSString *)expectedSHA256
     NS_SWIFT_NAME(load(fromAssetFile:expectedByteCount:expectedSHA256:));
 - (void)saveSnapshot;
+//! Opt-in geometry snapping for ordinary Move; model units, zero disables.
+//! Refuses changes during an active edit. Does not alter grid preferences.
+- (BOOL)setGeometrySnappingTolerance:(double)tolerance;
+//! Nil outside an active snapped translation, including finish/cancel.
+- (nullable Core3DGeometrySnapFeedback *)geometrySnapFeedback;
+//! Synchronous main-thread notifications, object=this controller. One per
+//! opt-in Move sample (including no hit), plus one after finish/cancel.
+//! userInfo["feedback"] is an immutable Core3DGeometrySnapFeedback or absent;
+//! userInfo["ended"] is YES only for the terminal clear. Observers may update
+//! UI, but must defer model edits until after notification delivery.
+@property(class, nonatomic, copy, readonly) NSNotificationName geometrySnapFeedbackDidChangeNotification;
+
 
 //! Capture one fail-closed retained editor opening from the exact current
 //! whole-object selection. Main-thread only; nil never changes model/history.
@@ -2146,6 +2178,17 @@ __attribute__((objc_subclassing_restricted))
     debugReplayGesture:(NSInteger)mode axis:(NSInteger)axis
     values:(NSArray<NSNumber *> *)values
     NS_SWIFT_NAME(debugReplayGesture(mode:axis:values:));
+//! Same projected samples, ending through production Cancel when requested.
+- (NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable)
+    debugReplayGesture:(NSInteger)mode axis:(NSInteger)axis
+    values:(NSArray<NSNumber *> *)values cancel:(BOOL)cancel
+    NS_SWIFT_NAME(debugReplayGesture(mode:axis:values:cancel:));
+//! Opt-in 400 mm camera span / 100 mm handle radius in document model units.
+//! Translation values remain model units; legacy overloads keep raw-unit scale.
+- (NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable)
+    debugReplayGesture:(NSInteger)mode axis:(NSInteger)axis
+    values:(NSArray<NSNumber *> *)values cancel:(BOOL)cancel physicalScale:(BOOL)physicalScale
+    NS_SWIFT_NAME(debugReplayGesture(mode:axis:values:cancel:physicalScale:));
 //! Current XCAF visual-material table size for ownership/GC regressions.
 - (NSInteger)debugVisualMaterialDefinitionCount;
 - (NSDictionary<NSString *,id> *_Nullable)debugScalarPBREvidence:(NSString *)entity;
@@ -2228,6 +2271,10 @@ __attribute__((objc_subclassing_restricted))
 + (NSDictionary<NSString *, id> *)debugGeometrySnapFixture:(NSInteger)fixture
     point:(NSArray<NSNumber *> *)point tolerance:(double)tolerance kinds:(NSUInteger)kinds
     NS_SWIFT_NAME(debugGeometrySnap(fixture:point:tolerance:kinds:));
++ (NSDictionary<NSString *, id> *)debugGeometryAxisSnapFixture:(NSInteger)fixture
+    point:(NSArray<NSNumber *> *)point tolerance:(double)tolerance kinds:(NSUInteger)kinds
+    axis:(NSArray<NSNumber *> *)axis
+    NS_SWIFT_NAME(debugGeometryAxisSnap(fixture:point:tolerance:kinds:axis:));
 + (NSDictionary<NSString *, id> *)debugFaceSketchFixture:(NSInteger)fixture
     cut:(BOOL)cut depth:(double)depth fault:(NSInteger)fault
     NS_SWIFT_NAME(debugFaceSketch(fixture:cut:depth:fault:));
