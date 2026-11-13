@@ -23,8 +23,8 @@
 #include "../OCCTKit/DetachedRectangularLoftProbe.hxx"
 #include <GProp_GProps.hxx>
 #include <BRepGProp.hxx>
-#include <BRepBndLib.hxx>
 #endif
+#include <BRepBndLib.hxx>
 #if DEBUG
 #include "../OCCTKit/DetachedPlanarSweepProbe.hxx"
 #include <BRepMesh_IncrementalMesh.hxx>
