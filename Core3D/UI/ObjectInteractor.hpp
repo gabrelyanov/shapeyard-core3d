@@ -9,7 +9,6 @@
 #define ObjectInteractor_hpp
 
 #include "Interactor.hpp"
-#include "Snapping.hpp"
 #include "Core3DManipulator.hpp"
 #include <AIS_Shape.hxx>
 #include "BooleanOperationController.hpp"
@@ -147,33 +146,6 @@ namespace core3d {
 		bool hasUnresolvedDuplicate() const noexcept;
 		void attachManipulatorToSelection(bool detach = false);
         
-        //! Optional geometry snapping for the next translation gestures. Model
-        //! units, zero disables. Settings are editor-local, never saved in OCAF.
-        bool setGeometrySnappingTolerance(double tolerance) noexcept;
-        void setGeometrySnapFeedbackChangedCallback(std::function<void(bool)> callback) {
-            _geometrySnapFeedbackChangedCallback = std::move(callback);
-        }
-        struct GeometryMoveSnap {
-            GeometrySnapResult hit;
-            std::string targetIdentifier;
-        };
-        const GeometryMoveSnap* geometrySnapFeedback() const noexcept {
-            return isManipulatorGestureActive() && _geometryMoveSnap ? &*_geometryMoveSnap : nullptr;
-        }
-    private:
-        double _geometrySnappingTolerance = 0;
-        std::optional<GeometryMoveSnap> _geometryMoveSnap;
-        void applyGeometrySnapping() noexcept;
-        std::function<void(bool)> _geometrySnapFeedbackChangedCallback;
-        bool _geometrySnapSamplesActive = false;
-        void publishGeometrySnapFeedback(bool ended) noexcept;
-        struct GeometrySnapTerminalNotification {
-            ObjectInteractor& owner;
-            ~GeometrySnapTerminalNotification() noexcept {
-                owner.publishGeometrySnapFeedback(true);
-            }
-        };
-    public:
         bool transformManipulator(int theX, int theY);
         bool startTransformManipulator(int theX, int theY);
         void finishInteraction();
@@ -185,8 +157,7 @@ namespace core3d {
         bool debugReplayGesture(
             Standard_Integer mode, Standard_Integer axis,
             const std::vector<Standard_Real>& values,
-            std::vector<std::array<Standard_Real, 2>>& samples, bool cancel = false,
-            bool physicalScale = false) noexcept;
+            std::vector<std::array<Standard_Real, 2>>& samples) noexcept;
         const std::vector<std::map<std::string, double>>& debugGestureTrace() const {
             return _debugGestureTrace;
         }

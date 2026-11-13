@@ -17,8 +17,6 @@
 -(void)viewer:(id)sender didChangeSelections:(core3d::selection_t)selectionType;
 
 @optional
-//! Synchronous read-only snap sample; ended means native finish/cancel is resolved.
--(void)viewer:(id)sender didChangeGeometrySnapFeedbackEnded:(BOOL)ended;
 -(void)viewer:(id)sender
     willBeginPrimaryInteractionAtDrawablePoint:(CGPoint)point
                                   drawableSize:(CGSize)drawableSize;

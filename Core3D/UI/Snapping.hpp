@@ -12,7 +12,6 @@
 #include <memory>
 #include <optional>
 #include "gp_Pnt.hxx"
-#include "gp_Dir.hxx"
 #include "TopoDS_Shape.hxx"
 
 namespace core3d {
@@ -33,14 +32,11 @@ struct GeometrySnapResult {
 // Tolerance uses the same units as point/target. Finds the nearest enabled
 // feature; ties prefer vertex, midpoint, edge, face, then topology order.
 // Midpoint means half arc length of a trimmed edge. Faces respect trim holes.
-// Optional axis restricts hits to the line through point, preserving a Move
-// handle constraint. Intersections use the actual trimmed topology, not its
-// infinite supporting surface. No hit, invalid input or geometry failure returns nullopt. Does not move a
+// No hit, invalid input or geometry failure returns nullopt. Does not move a
 // model, change grid snapping, selection, camera, document or history.
 std::optional<GeometrySnapResult> SnapPointToGeometry(
     const TopoDS_Shape& target, const gp_Pnt& point, double tolerance,
-    unsigned kinds = AllGeometrySnapKinds,
-    const std::optional<gp_Dir>& axis = std::nullopt) noexcept;
+    unsigned kinds = AllGeometrySnapKinds) noexcept;
 }
 
 class SnappingHolder;
