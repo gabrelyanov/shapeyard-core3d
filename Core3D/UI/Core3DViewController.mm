@@ -3910,6 +3910,9 @@ struct NativeModelingPermitIssuer final {
     receiptFailure:(BOOL)receiptFailure asyncCompletion:(Core3DModelingAsyncCompletion *)box;
 @end
 
+@implementation Core3DColourEditSession
+@end
+
 @interface Core3DPBRScalarPreparation () {
 @public
     __weak Core3DViewController* _scalarOwner;
@@ -5616,6 +5619,20 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
     }catch(...){Core3DAbortCommandNoThrow(document);return NO;}
 }
 #endif
+
+// Failure-first admission seam for job 3a. No session is granted until the
+// complete native owner/target/history and transient-presentation path exists.
+- (Core3DColourEditSession *)beginColourEditWithScope:(Core3DColourScope)scope
+    expected:(Core3DSceneSnapshot *)expected { return nil; }
+- (BOOL)previewColourWithRGB:(NSArray<NSNumber *> *)rgb
+    session:(Core3DColourEditSession *)session { return NO; }
+- (Core3DPBRScalarResult)commitColourEdit:(Core3DColourEditSession *)session {
+    return Core3DPBRScalarResultInvalid;
+}
+- (void)cancelColourEdit:(Core3DColourEditSession *)session {}
+- (Core3DSceneSnapshot *)captureColourPresentationSnapshot {
+    return [self captureSceneSnapshot];
+}
 
 - (Core3DPBRScalarPreparation *)prepareScalarPBREdit:(Core3DPBRScalarEdit *)edit expected:(Core3DSceneSnapshot *)expected {
     if(![NSThread isMainThread]||!edit||edit.class!=Core3DPBRScalarEdit.class||!expected||expected.class!=Core3DSceneSnapshot.class||!_isSetuped||!GLController||!GLController.viewer

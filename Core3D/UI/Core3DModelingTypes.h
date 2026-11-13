@@ -1386,6 +1386,17 @@ typedef struct {
 @property (nonatomic, readonly) double occupancy;
 @end
 
+//! Native colour session scope. Targets are captured once at begin.
+typedef NS_ENUM(NSInteger, Core3DColourScope) {
+    Core3DColourScopeObject = 0,
+    Core3DColourScopeFace = 1
+};
+__attribute__((objc_subclassing_restricted))
+@interface Core3DColourEditSession : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 typedef NS_ENUM(NSInteger, Core3DPBRScalarResult) {
     Core3DPBRScalarResultCommitted=0, Core3DPBRScalarResultUnchanged=1,
     Core3DPBRScalarResultInvalid=2, Core3DPBRScalarResultBusy=3, Core3DPBRScalarResultOutcomeUnknown=4
