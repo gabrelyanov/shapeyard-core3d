@@ -7,6 +7,7 @@
 
 #include "../Common/Core3DMobileResourceLimits.h"
 
+#include <AIS_ColoredShape.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -333,18 +334,22 @@ Standard_Boolean RestoreTriangleMeshCopyParameters(
     }
 }
 
-Standard_Boolean HasStyledSubshape(
-    const Handle(TDocStd_Document)& theDocument,
+Standard_Boolean CaptureFaceFinishes(
+    const Handle(OcctDocument)& theOwner,
     const TDF_Label& theDefinition,
-    const Standard_Size theMaximumLabels) noexcept
+    const Standard_Size theMaximumLabels,
+    std::vector<RadialArrayFaceFinish>& theFinishes) noexcept
 {
-    if (theDocument.IsNull() || theDefinition.IsNull()
-        || theDefinition.Data() != theDocument->GetData()
-        || theMaximumLabels == 0) {
-        return Standard_True;
-    }
+    theFinishes.clear();
     try {
         OCC_CATCH_SIGNALS
+        const Handle(TDocStd_Document) theDocument = theOwner.IsNull()
+            ? Handle(TDocStd_Document)() : theOwner->Document();
+        if (theDocument.IsNull() || theDefinition.IsNull()
+            || theDefinition.Data() != theDocument->GetData()
+            || theMaximumLabels == 0) return Standard_False;
+        const auto aShapeTool = XCAFDoc_DocumentTool::ShapeTool(theDocument->Main());
+        if (aShapeTool.IsNull()) return Standard_False;
         const Handle(XCAFDoc_ColorTool) aColorTool =
             XCAFDoc_DocumentTool::CheckColorTool(theDocument->Main())
             ? XCAFDoc_DocumentTool::ColorTool(theDocument->Main())
@@ -357,7 +362,7 @@ Standard_Boolean HasStyledSubshape(
         for (TDF_ChildIterator anItem(theDefinition, Standard_False);
              anItem.More(); anItem.Next()) {
             if (++aLabelCount > theMaximumLabels) {
-                return Standard_True;
+                return Standard_False;
             }
             const TDF_Label& aLabel = anItem.Value();
             if (!XCAFDoc_ShapeTool::IsSubShape(aLabel)) {
@@ -370,17 +375,78 @@ Standard_Boolean HasStyledSubshape(
                         || aColorTool->IsSet(aLabel, XCAFDoc_ColorSurf)
                         || aColorTool->IsSet(aLabel, XCAFDoc_ColorCurv)
                         || !XCAFDoc_ColorTool::IsVisible(aLabel)))
-                || !XCAFDoc_VisMaterialTool::GetShapeMaterial(aLabel).IsNull()
                 || (!aLayerTool.IsNull()
                     && aLayerTool->GetLayers(aLabel, aLayers)
                     && !aLayers.IsEmpty())) {
-                return Standard_True;
+                return Standard_False;
             }
+            const auto aVisual = XCAFDoc_VisMaterialTool::GetShapeMaterial(aLabel);
+            if (aVisual.IsNull()) continue;
+            const TopoDS_Shape aFace = XCAFDoc_ShapeTool::GetShape(aLabel);
+            XCAFDoc_VisMaterialPBR aPbr;
+            if (aFace.IsNull() || aFace.ShapeType() != TopAbs_FACE
+                || !aShapeTool->IsSubShape(theDefinition, aFace)
+                || !theOwner->TryPBRMaterialForLabel(aLabel, aPbr)
+                || !aPbr.BaseColorTexture.IsNull()
+                || !aPbr.EmissiveTexture.IsNull()
+                || !aPbr.MetallicRoughnessTexture.IsNull()
+                || !aPbr.OcclusionTexture.IsNull()
+                || !aPbr.NormalTexture.IsNull()
+                || aPbr.BaseColor.Alpha() != 1.0f) return Standard_False;
+            const auto isUnit = [](const double value) {
+                return std::isfinite(value) && value >= 0.0 && value <= 1.0;
+            };
+            const auto& aColor = aPbr.BaseColor.GetRGB();
+            if (!isUnit(aColor.Red()) || !isUnit(aColor.Green())
+                || !isUnit(aColor.Blue()) || !isUnit(aPbr.Metallic)
+                || !isUnit(aPbr.Roughness) || !std::isfinite(aPbr.RefractionIndex)
+                || aPbr.RefractionIndex < 1.0f || aPbr.RefractionIndex > 3.0f)
+                return Standard_False;
+            for (int axis = 0; axis < 3; ++axis)
+                if (!std::isfinite(aPbr.EmissiveFactor[axis])
+                    || aPbr.EmissiveFactor[axis] < 0.0f
+                    || aPbr.EmissiveFactor[axis] > 65504.0f) return Standard_False;
+
+            // SaveObjectPBRMaterials writes this canonical opaque scalar form.
+            // Refuse imported/custom culling, alpha or Common definitions rather
+            // than silently converting them during the independent copy.
+            Handle(XCAFDoc_VisMaterial) aCanonical = new XCAFDoc_VisMaterial();
+            aCanonical->SetPbrMaterial(aPbr);
+            aCanonical->SetCommonMaterial(aCanonical->ConvertToCommonMaterial());
+            aCanonical->SetAlphaMode(Graphic3d_AlphaMode_Opaque, 0.5f);
+            aCanonical->SetFaceCulling(Graphic3d_TypeOfBackfacingModel_Auto);
+            if (!aVisual->IsEqual(aCanonical)) return Standard_False;
+            for (const auto& anExisting : theFinishes)
+                if (anExisting.face.IsSame(aFace)) return Standard_False;
+            theFinishes.push_back({aFace, aPbr});
         }
-        return Standard_False;
-    } catch (...) {
         return Standard_True;
+    } catch (...) {
+        theFinishes.clear();
+        return Standard_False;
     }
+}
+
+Standard_Boolean FaceFinishesMatch(
+    const std::vector<RadialArrayFaceFinish>& theExpected,
+    const std::vector<RadialArrayFaceFinish>& theActual) noexcept
+{
+    if (theExpected.size() != theActual.size()) return Standard_False;
+    for (const auto& expected : theExpected) {
+        const auto found = std::find_if(theActual.begin(), theActual.end(),
+            [&expected](const auto& actual) { return expected.face.IsEqual(actual.face); });
+        if (found == theActual.end()) return Standard_False;
+        const auto& a = expected.material;
+        const auto& b = found->material;
+        // Quantity_Color's equality is tolerant. Recovery needs the exact
+        // captured scalar values as well as the same face binding.
+        if (!a.IsEqual(b)
+            || a.BaseColor.GetRGB().Red() != b.BaseColor.GetRGB().Red()
+            || a.BaseColor.GetRGB().Green() != b.BaseColor.GetRGB().Green()
+            || a.BaseColor.GetRGB().Blue() != b.BaseColor.GetRGB().Blue())
+            return Standard_False;
+    }
+    return Standard_True;
 }
 
 Standard_Boolean HasUnsupportedOverlayTexture(
@@ -605,6 +671,7 @@ Standard_Boolean RadialArrayOperationController::captureSelectedSource(
         gp_Ax1 aWorldAxis;
         Standard_Real aMinimum[3] = {0.0, 0.0, 0.0};
         Standard_Real aMaximum[3] = {0.0, 0.0, 0.0};
+        std::vector<RadialArrayFaceFinish> aFaceFinishes;
         if (aLabel.IsNull()
             || aLabel.Data() != aDocument->GetData()
             || !_document->IsEditableFreeSimpleDefinitionLabel(aLabel)
@@ -625,8 +692,8 @@ Standard_Boolean RadialArrayOperationController::captureSelectedSource(
             || !_document->ResolveReferenceAxisInWorld(
                 aLabel, TopLoc_Location(), aWorldAxis)
             || !TryReadMetersPerUnit(aDocument, aMetersPerUnit)
-            || HasStyledSubshape(
-                aDocument, aLabel, kMaximumSourceTopologyNodes)
+            || !CaptureFaceFinishes(
+                _document, aLabel, kMaximumSourceTopologyNodes, aFaceFinishes)
             || !CountBoundedTopology(
                 aStored,
                 kMaximumSourceTopologyNodes,
@@ -646,6 +713,11 @@ Standard_Boolean RadialArrayOperationController::captureSelectedSource(
             || !pattern_recipe_clone::Capture(aDocument, aLabel, aSweepLoft)) {
             return Standard_False;
         }
+        // Replayed edge treatment replaces the copied topology. Do not guess
+        // how a styled face maps onto that different result.
+        if (!aFaceFinishes.empty()
+            && (aProfileOwner.object.edgeTreatment.has_value()
+                || aProfileOwner.object.edgeTreatmentR2.has_value())) return Standard_False;
         const profile::Record& aProfile = aProfileOwner.object.profile;
         if (!aProfile.label.IsNull() && !aProfile.boundShape.IsEqual(aStored)
             && (!CountBoundedTopology(aProfile.boundShape,
@@ -679,6 +751,7 @@ Standard_Boolean RadialArrayOperationController::captureSelectedSource(
         theSource.representation = aRepresentation;
         theSource.destinationRepresentation = aDestinationRepresentation;
         theSource.storedShape = aStored;
+        theSource.faceFinishes = std::move(aFaceFinishes);
         theSource.transform = aTransform;
         theSource.hasStrictOverlayStyle = hasStrictOverlayStyle;
         theSource.materialName = aMaterialName;
@@ -750,6 +823,7 @@ Standard_Boolean RadialArrayOperationController::sourceIsCurrent(
         gp_Ax1 aWorldAxis;
         Standard_Real aMinimum[3] = {0.0, 0.0, 0.0};
         Standard_Real aMaximum[3] = {0.0, 0.0, 0.0};
+        std::vector<RadialArrayFaceFinish> aFaceFinishes;
         if (aStored.IsNull() || theSource.storedShape.IsNull()
             || !aStored.IsEqual(theSource.storedShape)
             || theSource.presentation->Shape().IsNull()
@@ -793,10 +867,9 @@ Standard_Boolean RadialArrayOperationController::sourceIsCurrent(
             || TransformDiffers(
                 _document->ObjectTransformForLabel(theSource.label),
                 theSource.transform)
-            || HasStyledSubshape(
-                aDocument,
-                theSource.label,
-                kMaximumSourceTopologyNodes)
+            || !CaptureFaceFinishes(_document, theSource.label,
+                kMaximumSourceTopologyNodes, aFaceFinishes)
+            || !FaceFinishesMatch(theSource.faceFinishes, aFaceFinishes)
             || !CountBoundedTopology(
                 aStored,
                 kMaximumSourceTopologyNodes,
@@ -944,7 +1017,7 @@ Standard_Boolean RadialArrayOperationController::rebuildPreview() noexcept
         for (Standard_Integer anOrdinal = 1;
              anOrdinal < _count; ++anOrdinal) {
             Handle(AIS_Shape) aPreview =
-                new AIS_Shape(_source->storedShape);
+                new AIS_ColoredShape(_source->storedShape);
             if (aPreview.IsNull() || aPreview->Shape().IsNull()
                 || !aPreview->Shape().IsPartner(_source->storedShape)
                 || !aPreview->Shape().IsEqual(_source->storedShape)) {
@@ -1638,7 +1711,11 @@ RadialArrayOperationController::inspectPendingResults() noexcept
         }
         OcctObjectNameState aSourceProfileOwner;
         pattern_recipe_clone::Source aSourceSweepLoft;
+        std::vector<RadialArrayFaceFinish> aSourceFinishes;
         if (!_source.has_value() || aDocument != _source->document
+            || !CaptureFaceFinishes(_document, _source->label,
+                kMaximumSourceTopologyNodes, aSourceFinishes)
+            || !FaceFinishesMatch(_source->faceFinishes, aSourceFinishes)
             || !_document->CaptureObjectNameStateForLabel(_source->label, aSourceProfileOwner)
             || !aSourceProfileOwner.IsEqual(_source->profileOwner)
             || !pattern_recipe_clone::Capture(aDocument, _source->label, aSourceSweepLoft)
@@ -1676,8 +1753,13 @@ RadialArrayOperationController::inspectPendingResults() noexcept
                 _document->ReadReferenceAxisForLabel(
                     aResult.label, aReferenceAxis);
             OcctObjectNameState aName;
+            std::vector<RadialArrayFaceFinish> aStoredFinishes;
             if (!aResult.profileCandidateSealed
                 || !aResult.sweepLoftCandidateSealed
+                || !aResult.faceFinishesSealed
+                || !CaptureFaceFinishes(_document, aResult.label,
+                    kMaximumSourceTopologyNodes, aStoredFinishes)
+                || !FaceFinishesMatch(aResult.expectedFaceFinishes, aStoredFinishes)
                 || !aProfile.IsEqual(aResult.expectedProfile)
                 || !anEnclosure.IsEqual(aResult.expectedEnclosure)
                 || anEnclosure.IsCurrent(aDocument, aResult.label) != _source->enclosureCurrent
@@ -2137,6 +2219,7 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
         std::string enclosureIdentifier;
         pattern_recipe_clone::Prepared sweepLoft;
         std::shared_ptr<const core3d::retained_edge_treatment::Payload> treatmentCopy;
+        std::vector<RadialArrayFaceFinish> faceFinishes;
     };
     std::vector<PreparedResult> aPrepared;
     core3d::retained_edge_treatment::ReplayBudget aTreatmentBudget;
@@ -2192,6 +2275,22 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
                 }
             }
             anAggregateTopology += aResultTopology;
+            std::vector<RadialArrayFaceFinish> aCopiedFinishes;
+            for (const auto& finish : _source->faceFinishes) {
+                const TopoDS_Shape aCopiedFace = aCopy.ModifiedShape(finish.face);
+                if (aCopiedFace.IsNull() || aCopiedFace.ShapeType() != TopAbs_FACE
+                    || aCopiedFace.IsPartner(finish.face)) return RadialArrayApplyResult::NoChange;
+                bool found = false;
+                // A face label and its occurrence in the solid may have
+                // opposite orientations. Material ownership follows the exact
+                // copied TShape and location; the solid keeps its own winding.
+                for (TopExp_Explorer faces(aCopy.Shape(), TopAbs_FACE); faces.More(); faces.Next())
+                    if (faces.Current().IsSame(aCopiedFace)) { found = true; break; }
+                if (!found) return RadialArrayApplyResult::NoChange;
+                for (const auto& existing : aCopiedFinishes)
+                    if (existing.face.IsSame(aCopiedFace)) return RadialArrayApplyResult::NoChange;
+                aCopiedFinishes.push_back({aCopiedFace, finish.material});
+            }
             const gp_Trsf aTransform = ArrayTransform(
                 _source->transform,
                 _source->worldAxis,
@@ -2266,6 +2365,7 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
                     return RadialArrayApplyResult::NoChange;
                 }
                 if (aTreatmentCopy) {
+                    if (!aCopiedFinishes.empty()) return RadialArrayApplyResult::NoChange;
                     Standard_Size aReplayTopology = 0;
                     if (aReplayRoot.IsNull() || aReplayRoot.IsPartner(_source->storedShape)
                         || !IsTopologicallyValid(aReplayRoot)
@@ -2342,7 +2442,7 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
                     return RadialArrayApplyResult::NoChange;
             aPrepared.push_back({aPresentation, aTransform, aProfileBinding,
                 aProfileIdentifier, anEnclosureBinding, anEnclosureIdentifier,
-                aSweepLoft, aTreatmentCopy});
+                aSweepLoft, aTreatmentCopy, std::move(aCopiedFinishes)});
         }
     } catch (...) {
         return RadialArrayApplyResult::NoChange;
@@ -2437,6 +2537,25 @@ RadialArrayApplyResult RadialArrayOperationController::apply() noexcept
                     _source->label, aLabel)) {
                 return retainRetryableOrUnknown();
             }
+            const auto aShapeTool = XCAFDoc_DocumentTool::ShapeTool(aDocument->Main());
+            if (aShapeTool.IsNull()) return retainRetryableOrUnknown();
+            std::vector<OcctPBRMaterialUpdate> aFaceUpdates;
+            for (const auto& finish : aResult.faceFinishes) {
+                const TDF_Label aFaceLabel = aShapeTool->AddSubShape(aLabel, finish.face);
+                if (aFaceLabel.IsNull()
+                    || !XCAFDoc_ShapeTool::GetShape(aFaceLabel).IsEqual(finish.face))
+                    return retainRetryableOrUnknown();
+                aFaceUpdates.push_back({aFaceLabel, finish.material});
+            }
+            if (!aFaceUpdates.empty() && !_document->SaveObjectPBRMaterials(aFaceUpdates))
+                return retainRetryableOrUnknown();
+            std::vector<RadialArrayFaceFinish> aStoredFinishes;
+            if (!CaptureFaceFinishes(_document, aLabel,
+                    kMaximumSourceTopologyNodes, aStoredFinishes)
+                || !FaceFinishesMatch(aResult.faceFinishes, aStoredFinishes))
+                return retainRetryableOrUnknown();
+            aPending.expectedFaceFinishes = aResult.faceFinishes;
+            aPending.faceFinishesSealed = Standard_True;
             OcctReferenceAxis aStoredReferenceAxis;
             const OcctReferenceAxisReadState aStoredReferenceAxisState =
                 _document->ReadReferenceAxisForLabel(
