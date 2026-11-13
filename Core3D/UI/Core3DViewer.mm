@@ -7925,7 +7925,13 @@ void Core3DViewer::cancelPBRColour(const std::shared_ptr<NativePBRColourWork>& w
     if([NSThread isMainThread]&&work&&work->owner==myDoc)work->consumed=true;
 }
 OrdinaryEditResult Core3DViewer::executePBRColour(const std::shared_ptr<NativePBRColourWork>& work) noexcept {
-    if(![NSThread isMainThread]||!work||work->owner!=myDoc||work->consumed)return OrdinaryEditResult::Invalid;
+    const auto refused=[&](int line){
+#ifdef DEBUG
+        if(!myDoc.IsNull())myDoc->DebugRecordColourFailure("colour.execute:"+std::to_string(line));
+#endif
+        return OrdinaryEditResult::Invalid;
+    };
+    if(![NSThread isMainThread]||!work||work->owner!=myDoc||work->consumed)return refused(__LINE__);
     work->consumed=true;
     if(!canBeginCommittedEdit()||!_ordinaryEditController)return OrdinaryEditResult::Busy;
     try{
@@ -7937,7 +7943,7 @@ OrdinaryEditResult Core3DViewer::executePBRColour(const std::shared_ptr<NativePB
             ||snapshot->revisions.presentation!=work->presentationRevision||!_objectInteractor||!_shapeInteractor
             ||!_shapeInteractor->selectionModeAuthorityIsExact()||_shapeInteractor->getSelectionMode()!=work->authority.selectionMode
             ||!_objectInteractor->verifyOrdinaryNameAuthority(work->authority)
-            ||!myDoc->PBRScalarStateMatches(myDoc->PBRColourOriginal(work->prepared)))return OrdinaryEditResult::Invalid;
+            ||!myDoc->PBRScalarStateMatches(myDoc->PBRColourOriginal(work->prepared)))return refused(__LINE__);
         if(!work->changed)return OrdinaryEditResult::NoChange;
         OrdinaryEditResult result=OrdinaryEditResult::Invalid;auto lease=_ordinaryEditController->beginColour(work->prepared,&result);
         if(lease)result=lease.stageAndCommit();return result;
@@ -8083,39 +8089,48 @@ bool Core3DViewer::colourSessionMatches(const std::shared_ptr<NativeColourSessio
 
 std::shared_ptr<NativeColourSessionWork> Core3DViewer::beginColourSession(
     const ObjectFrameIdentity& identity,std::uint64_t presentation,std::uint32_t width,std::uint32_t height,bool faceScope) noexcept {
-    if(![NSThread isMainThread]||!canBeginCommittedEdit()||myDoc.IsNull()||myContext.IsNull()||!width||!height)return {};
+#ifdef DEBUG
+    if(!myDoc.IsNull())myDoc->DebugClearColourFailure();
+#endif
+    const auto refused=[&](int line)->std::shared_ptr<NativeColourSessionWork> {
+#ifdef DEBUG
+        if(!myDoc.IsNull())myDoc->DebugRecordColourFailure("colour.begin:"+std::to_string(line));
+#endif
+        return {};
+    };
+    if(![NSThread isMainThread]||!canBeginCommittedEdit()||myDoc.IsNull()||myContext.IsNull()||!width||!height)return refused(__LINE__);
     try {
         const auto snapshot=captureSceneSnapshot(width,height);
         if(!snapshot||snapshot->selectionMode!=(faceScope?scene::ElementKind::Face:scene::ElementKind::Object)
             ||snapshot->publicationSourceIdentifier!=identity.publicationSourceIdentifier
             ||snapshot->revisions.documentGeneration!=identity.documentGeneration
-            ||snapshot->revisions.model!=identity.modelRevision||snapshot->revisions.presentation!=presentation)return {};
+            ||snapshot->revisions.model!=identity.modelRevision||snapshot->revisions.presentation!=presentation)return refused(__LINE__);
         // A rejected foreign/stale opening never cancels the current session.
         if(auto previous=_colourSession.lock()){
-            if(colourSessionMatches(previous))return {};
+            if(colourSessionMatches(previous))return refused(__LINE__);
             cancelColourSession(previous);
         }
-        const auto stamp=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());if(!stamp)return {};
+        const auto stamp=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());if(!stamp)return refused(__LINE__);
         auto work=std::make_shared<NativeColourSessionWork>();
         work->owner=myDoc;work->document=myDoc->Document();
         if(work->document.IsNull()||!admitNames(work->authority)||work->authority.selectedPresentations.empty()
-            ||work->authority.selectedPresentations.size()>64)return {};
+            ||work->authority.selectedPresentations.size()>64)return refused(__LINE__);
         for(const auto& selected:work->authority.selectedPresentations){
-            const auto label=myDoc->ShapeLabel(selected.presentation);if(label.IsNull())return {};
+            const auto label=myDoc->ShapeLabel(selected.presentation);if(label.IsNull())return refused(__LINE__);
             work->targets.push_back(label);work->presentations.push_back(selected.presentation);
         }
-        if(faceScope&&!CaptureColourFaces(myDoc,work->authority,work->faces))return {};
-        work->source=myDoc->CapturePBRColourState(work->targets);if(!work->source)return {};
+        if(faceScope&&!CaptureColourFaces(myDoc,work->authority,work->faces))return refused(__LINE__);
+        work->source=myDoc->CapturePBRColourState(work->targets);if(!work->source)return refused(__LINE__);
         work->identity=identity;work->stamp=*stamp;work->presentationRevision=presentation;
         work->width=width;work->height=height;work->documentTime=work->document->GetData()->Time();
         work->previewIdentifier=std::string(NSUUID.UUID.UUIDString.UTF8String);
         // Validate the complete presentation route at admission, including
         // mixed finishes/face overrides. No publication or AIS mutation yet.
-        if(!ColourPresentation(myDoc,*snapshot,work->targets,{0,0,0},work->previewIdentifier,1,work->faces))return {};
+        if(!ColourPresentation(myDoc,*snapshot,work->targets,{0,0,0},work->previewIdentifier,1,work->faces))return refused(__LINE__);
         _colourSession=work;
-        if(!colourSessionMatches(work)){_colourSession.reset();return {};}
+        if(!colourSessionMatches(work)){_colourSession.reset();return refused(__LINE__);}
         return work;
-    }catch(...){return {};}
+    }catch(...){return refused(__LINE__);}
 }
 
 void Core3DViewer::restoreColourPresentation(const std::shared_ptr<NativeColourSessionWork>& work) noexcept {

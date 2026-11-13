@@ -2111,6 +2111,11 @@ public:
     //! definition set is checked against the safe reader's per-serialized-slot
     //! texture-byte budget before any table entry is added, removed, or linked.
 #ifdef DEBUG
+    const std::string& DebugColourFailure() const noexcept { return myColourFailure; }
+    void DebugClearColourFailure() const noexcept { myColourFailure.clear(); }
+    void DebugRecordColourFailure(const std::string& value) const noexcept {
+        try { if(myColourFailure.empty())myColourFailure=value.substr(0,512); } catch(...) {}
+    }
     Standard_EXPORT std::optional<OcctPBRScalarDebugEvidence> DebugPBRScalarEvidence(
         const TDF_Label&, bool allowUnboundMaterial = false) const noexcept;
 #endif
@@ -2659,6 +2664,9 @@ private:
   bool myBooleanOriginalsRecovery = false;
   Standard_Size myMaximumSerializedTextureOccurrenceBytes;
   Standard_Size myMaximumDecodedTextureResourceBytes;
+#ifdef DEBUG
+  mutable std::string myColourFailure;
+#endif
   Standard_Size myMaximumVisualMaterialDefinitions;
   std::uint64_t myNextExactIdentityReservation = 0;
   std::unordered_map<std::uint64_t, std::pair<std::string, std::string>>

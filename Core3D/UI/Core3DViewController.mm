@@ -5616,7 +5616,7 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
         const auto e=owner->DebugPBRScalarEvidence(target,allowUnboundMaterial);if(!e)return nil;
         NSMutableDictionary* geometry=[NSMutableDictionary dictionary];for(const auto& [key,digest]:e->geometry)geometry[[NSString stringWithUTF8String:key.c_str()]]=[NSData dataWithBytes:digest.data() length:digest.size()];
         NSMutableDictionary* streams=[NSMutableDictionary dictionary];for(const auto& [key,bytes]:e->geometryStreams)streams[[NSString stringWithUTF8String:key.c_str()]]=[NSData dataWithBytes:bytes.data() length:bytes.size()];
-        return @{@"geometryStreams":streams,@"hasMaterialBinding":@(e->hasMaterialBinding),@"materialBytes":[NSData dataWithBytes:e->material.data() length:e->material.size()],@"materialAttributesBytes":[NSData dataWithBytes:e->materialAttributes.data() length:e->materialAttributes.size()],@"preservedBytes":[NSData dataWithBytes:e->preserved.data() length:e->preserved.size()],
+        return @{@"colourFailure":[NSString stringWithUTF8String:owner->DebugColourFailure().c_str()],@"geometryStreams":streams,@"hasMaterialBinding":@(e->hasMaterialBinding),@"materialBytes":[NSData dataWithBytes:e->material.data() length:e->material.size()],@"materialAttributesBytes":[NSData dataWithBytes:e->materialAttributes.data() length:e->materialAttributes.size()],@"preservedBytes":[NSData dataWithBytes:e->preserved.data() length:e->preserved.size()],
             @"tableBytes":[NSData dataWithBytes:e->table.data() length:e->table.size()],@"geometry":geometry};
     }catch(...){return nil;}
 }
