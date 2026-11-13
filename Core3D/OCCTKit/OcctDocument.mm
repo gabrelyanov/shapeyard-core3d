@@ -2902,7 +2902,6 @@ Standard_Boolean Core3DValidateRetainedEdgeTreatmentDocumentForPrepare(
 #include <vector>
 #endif
 
-#include <BRepPrimAPI_MakeTorus.hxx>
 #include "OcctDocument.h"
 #include "NativeOpeningContext.hxx"
 #include "NativeOpeningDependentReplay.hxx"
