@@ -25,7 +25,6 @@
 #include <BRepGProp.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
 #include <gp_GTrsf.hxx>
-#include <IntCurvesFace_Intersector.hxx>
 #include <BRepBndLib.hxx>
 #endif
 #if DEBUG
@@ -13801,25 +13800,6 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
             tolerance,static_cast<unsigned>(kinds),direction);
         NSMutableDictionary *result = [@{@"matched": @(bool(hit)),
             @"unchanged": @(before == bytes())} mutableCopy];
-        if (fixture == 7 && direction && !hit) {
-            const gp_Pnt proposed(point[0].doubleValue,point[1].doubleValue,point[2].doubleValue);
-            const gp_Lin line(proposed,*direction);
-            const auto probe = BRepBuilderAPI_MakeVertex(proposed).Vertex();
-            NSMutableArray *diagnostic = [NSMutableArray array];
-            for (TopExp_Explorer it(shape,TopAbs_FACE); it.More(); it.Next()) {
-                const auto face = TopoDS::Face(it.Current());
-                BRepExtrema_DistShapeShape nearest(probe,face);
-                if (!nearest.IsDone() || nearest.Value() > tolerance) continue;
-                IntCurvesFace_Intersector crossing(face,Precision::Confusion(),Standard_True,Standard_False);
-                crossing.Perform(line,-tolerance,tolerance);
-                NSMutableArray *residuals = [NSMutableArray array];
-                for (int i=1; i<=crossing.NbPnt(); ++i)
-                    [residuals addObject:@(line.Distance(crossing.Pnt(i)))];
-                [diagnostic addObject:@{@"surface":@(BRepAdaptor_Surface(face).GetType()),
-                    @"nearest":@(nearest.Value()),@"axisResiduals":residuals}];
-            }
-            result[@"diagnostic"] = diagnostic;
-        }
         if (hit) {
             result[@"kind"] = @(static_cast<unsigned>(hit->kind));
             result[@"index"] = @(hit->topologyIndex);
@@ -21694,7 +21674,8 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         NSMutableArray *bounds=[NSMutableArray arrayWithCapacity:6];
         for(double v:b){if(!std::isfinite(v*mm))return nil;[bounds addObject:@(v*mm)];}
         return @{@"volumeMM3":@(props.Mass()*mm*mm*mm),@"integrationError":@(error),
-            @"boundsMM":bounds,@"boundsGapMM":@(gap*mm)};
+            @"boundsMM":bounds,@"boundsGapMM":@(gap*mm),
+            @"boundsPrecisionMM":@(Precision::Confusion()*mm)};
     } catch (...) {return nil;}
 }
 

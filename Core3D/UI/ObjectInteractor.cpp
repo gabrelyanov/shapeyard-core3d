@@ -17,6 +17,7 @@
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <Geom_BSplineSurface.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
@@ -68,6 +69,44 @@
 
 namespace core3d {
 	namespace {
+        // A general transform represents an oval cylinder as a rational
+        // spline. Prove an extrusion from its complete control net, rather
+        // than confusing a tangent to an arbitrary spline with a generator.
+        bool HasSplineSnapGenerator(const BRepAdaptor_Surface& surface, const gp_Dir& axis) {
+            if (surface.GetType() != GeomAbs_BSplineSurface) return false;
+            const auto spline = surface.Surface().BSpline();
+            if (spline.IsNull()) return false;
+            for (bool alongU : {false,true}) {
+                if ((alongU ? spline->UDegree() : spline->VDegree()) != 1
+                    || (alongU ? spline->NbUPoles() : spline->NbVPoles()) != 2
+                    || (alongU ? spline->IsUPeriodic() : spline->IsVPeriodic())) continue;
+                const int count = alongU ? spline->NbVPoles() : spline->NbUPoles();
+                if (count < 2 || count > 128) continue;
+                gp_Vec generator;
+                bool proven = true;
+                for (int i = 1; i <= count; ++i) {
+                    const int u = alongU ? 1 : i, v = alongU ? i : 1;
+                    const int nextU = alongU ? 2 : i, nextV = alongU ? i : 2;
+                    const double weight = spline->Weight(u,v);
+                    if (!std::isfinite(weight) || weight <= 0
+                        || weight != spline->Weight(nextU,nextV)) { proven = false; break; }
+                    const gp_Pnt a = spline->Pole(u,v).Transformed(surface.Trsf());
+                    const gp_Pnt b = spline->Pole(nextU,nextV).Transformed(surface.Trsf());
+                    const gp_Vec shift(a,b);
+                    const double length = shift.Magnitude();
+                    if (!std::isfinite(length) || length <= Precision::Confusion()
+                        || !gp_Dir(shift).IsParallel(axis,Precision::Angular())) { proven = false; break; }
+                    if (i == 1) generator = shift;
+                    const double roundoff = 64 * std::numeric_limits<double>::epsilon()
+                        * std::max({1.0,std::abs(a.X()),std::abs(a.Y()),std::abs(a.Z()),
+                                    std::abs(b.X()),std::abs(b.Y()),std::abs(b.Z())});
+                    if ((shift - generator).Magnitude() > roundoff) { proven = false; break; }
+                }
+                if (proven) return true;
+            }
+            return false;
+        }
+
         // Preserve absent legacy units as distinct authority. The established
         // legacy interpretation is millimetres; reading must not add metadata.
         bool ReadMirrorDocumentUnits(const Handle(TDocStd_Document)& document,
@@ -2623,6 +2662,8 @@ namespace core3d {
                             if (surface.GetType() == GeomAbs_Cylinder)
                                 continuous = surface.Cylinder().Axis().Direction()
                                     .IsParallel(axis,Precision::Angular());
+                            else if (surface.GetType() == GeomAbs_BSplineSurface)
+                                continuous = HasSplineSnapGenerator(surface,axis);
                         } else if (hit->kind == GeometrySnapKind::Edge) {
                             BRepAdaptor_Curve curve(TopoDS::Edge(hit->topology));
                             continuous = curve.GetType() == GeomAbs_Line
