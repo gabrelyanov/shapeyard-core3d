@@ -22,6 +22,7 @@
 #include <TNaming_Iterator.hxx>
 #include <BRepTools.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakeTorus.hxx>
 #include <BinTools_ShapeReader.hxx>
 #include <BinTools_ShapeSet.hxx>
 #include <BinTools_ShapeWriter.hxx>
@@ -2889,7 +2890,6 @@ Standard_Boolean Core3DValidateRetainedEdgeTreatmentDocumentForPrepare(
 #import "GLView.h"
 #import "GLViewController.h"
 #include "../UI/ShellOperationController.hpp"
-#include <BRepPrimAPI_MakeTorus.hxx>
 #include <AIS_ListIteratorOfListOfInteractive.hxx>
 #include <Precision.hxx>
 #include <Standard_ErrorHandler.hxx>
