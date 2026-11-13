@@ -7,6 +7,7 @@
 
 #include "../Common/Core3DMobileResourceLimits.h"
 
+#include <AIS_ColoredShape.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -266,18 +267,22 @@ Standard_Boolean RestoreTriangleMeshCopyParameters(
     }
 }
 
-Standard_Boolean HasStyledSubshape(
-    const Handle(TDocStd_Document)& theDocument,
+Standard_Boolean CaptureFaceFinishes(
+    const Handle(OcctDocument)& theOwner,
     const TDF_Label& theDefinition,
-    const Standard_Size theMaximumLabels) noexcept
+    const Standard_Size theMaximumLabels,
+    std::vector<LinearArrayFaceFinish>& theFinishes) noexcept
 {
-    if (theDocument.IsNull() || theDefinition.IsNull()
-        || theDefinition.Data() != theDocument->GetData()
-        || theMaximumLabels == 0) {
-        return Standard_True;
-    }
+    theFinishes.clear();
     try {
         OCC_CATCH_SIGNALS
+        const Handle(TDocStd_Document) theDocument = theOwner.IsNull()
+            ? Handle(TDocStd_Document)() : theOwner->Document();
+        if (theDocument.IsNull() || theDefinition.IsNull()
+            || theDefinition.Data() != theDocument->GetData()
+            || theMaximumLabels == 0) return Standard_False;
+        const auto aShapeTool = XCAFDoc_DocumentTool::ShapeTool(theDocument->Main());
+        if (aShapeTool.IsNull()) return Standard_False;
         const Handle(XCAFDoc_ColorTool) aColorTool =
             XCAFDoc_DocumentTool::CheckColorTool(theDocument->Main())
             ? XCAFDoc_DocumentTool::ColorTool(theDocument->Main())
@@ -290,7 +295,7 @@ Standard_Boolean HasStyledSubshape(
         for (TDF_ChildIterator anItem(theDefinition, Standard_False);
              anItem.More(); anItem.Next()) {
             if (++aLabelCount > theMaximumLabels) {
-                return Standard_True;
+                return Standard_False;
             }
             const TDF_Label& aLabel = anItem.Value();
             if (!XCAFDoc_ShapeTool::IsSubShape(aLabel)) {
@@ -303,17 +308,78 @@ Standard_Boolean HasStyledSubshape(
                         || aColorTool->IsSet(aLabel, XCAFDoc_ColorSurf)
                         || aColorTool->IsSet(aLabel, XCAFDoc_ColorCurv)
                         || !XCAFDoc_ColorTool::IsVisible(aLabel)))
-                || !XCAFDoc_VisMaterialTool::GetShapeMaterial(aLabel).IsNull()
                 || (!aLayerTool.IsNull()
                     && aLayerTool->GetLayers(aLabel, aLayers)
                     && !aLayers.IsEmpty())) {
-                return Standard_True;
+                return Standard_False;
             }
+            const auto aVisual = XCAFDoc_VisMaterialTool::GetShapeMaterial(aLabel);
+            if (aVisual.IsNull()) continue;
+            const TopoDS_Shape aFace = XCAFDoc_ShapeTool::GetShape(aLabel);
+            XCAFDoc_VisMaterialPBR aPbr;
+            if (aFace.IsNull() || aFace.ShapeType() != TopAbs_FACE
+                || !aShapeTool->IsSubShape(theDefinition, aFace)
+                || !theOwner->TryPBRMaterialForLabel(aLabel, aPbr)
+                || !aPbr.BaseColorTexture.IsNull()
+                || !aPbr.EmissiveTexture.IsNull()
+                || !aPbr.MetallicRoughnessTexture.IsNull()
+                || !aPbr.OcclusionTexture.IsNull()
+                || !aPbr.NormalTexture.IsNull()
+                || aPbr.BaseColor.Alpha() != 1.0f) return Standard_False;
+            const auto isUnit = [](const double value) {
+                return std::isfinite(value) && value >= 0.0 && value <= 1.0;
+            };
+            const auto& aColor = aPbr.BaseColor.GetRGB();
+            if (!isUnit(aColor.Red()) || !isUnit(aColor.Green())
+                || !isUnit(aColor.Blue()) || !isUnit(aPbr.Metallic)
+                || !isUnit(aPbr.Roughness) || !std::isfinite(aPbr.RefractionIndex)
+                || aPbr.RefractionIndex < 1.0f || aPbr.RefractionIndex > 3.0f)
+                return Standard_False;
+            for (int axis = 0; axis < 3; ++axis)
+                if (!std::isfinite(aPbr.EmissiveFactor[axis])
+                    || aPbr.EmissiveFactor[axis] < 0.0f
+                    || aPbr.EmissiveFactor[axis] > 65504.0f) return Standard_False;
+
+            // SaveObjectPBRMaterials writes this canonical opaque scalar form.
+            // Refuse imported/custom culling, alpha or Common definitions rather
+            // than silently converting them during the independent copy.
+            Handle(XCAFDoc_VisMaterial) aCanonical = new XCAFDoc_VisMaterial();
+            aCanonical->SetPbrMaterial(aPbr);
+            aCanonical->SetCommonMaterial(aCanonical->ConvertToCommonMaterial());
+            aCanonical->SetAlphaMode(Graphic3d_AlphaMode_Opaque, 0.5f);
+            aCanonical->SetFaceCulling(Graphic3d_TypeOfBackfacingModel_Auto);
+            if (!aVisual->IsEqual(aCanonical)) return Standard_False;
+            for (const auto& anExisting : theFinishes)
+                if (anExisting.face.IsSame(aFace)) return Standard_False;
+            theFinishes.push_back({aFace, aPbr});
         }
-        return Standard_False;
-    } catch (...) {
         return Standard_True;
+    } catch (...) {
+        theFinishes.clear();
+        return Standard_False;
     }
+}
+
+Standard_Boolean FaceFinishesMatch(
+    const std::vector<LinearArrayFaceFinish>& theExpected,
+    const std::vector<LinearArrayFaceFinish>& theActual) noexcept
+{
+    if (theExpected.size() != theActual.size()) return Standard_False;
+    for (const auto& expected : theExpected) {
+        const auto found = std::find_if(theActual.begin(), theActual.end(),
+            [&expected](const auto& actual) { return expected.face.IsEqual(actual.face); });
+        if (found == theActual.end()) return Standard_False;
+        const auto& a = expected.material;
+        const auto& b = found->material;
+        // Quantity_Color's equality is tolerant. Recovery needs the exact
+        // captured scalar values as well as the same face binding.
+        if (!a.IsEqual(b)
+            || a.BaseColor.GetRGB().Red() != b.BaseColor.GetRGB().Red()
+            || a.BaseColor.GetRGB().Green() != b.BaseColor.GetRGB().Green()
+            || a.BaseColor.GetRGB().Blue() != b.BaseColor.GetRGB().Blue())
+            return Standard_False;
+    }
+    return Standard_True;
 }
 
 Standard_Boolean HasUnsupportedOverlayTexture(
@@ -392,20 +458,26 @@ gp_Trsf ArrayTransform(
     const gp_Trsf& theSourceTransform,
     const LinearArrayAxis theAxis,
     const Standard_Integer theOrdinal,
+    const Standard_Integer theColumns,
     const Standard_Real theSpacing) noexcept
 {
     gp_Vec aTranslation(0.0, 0.0, 0.0);
     const Standard_Real aDistance =
-        static_cast<Standard_Real>(theOrdinal) * theSpacing;
+        static_cast<Standard_Real>(theOrdinal % theColumns) * theSpacing;
+    const Standard_Real aRowDistance =
+        static_cast<Standard_Real>(theOrdinal / theColumns) * theSpacing;
     switch (theAxis) {
         case LinearArrayAxis::X:
             aTranslation.SetX(aDistance);
+            aTranslation.SetY(aRowDistance);
             break;
         case LinearArrayAxis::Y:
             aTranslation.SetY(aDistance);
+            aTranslation.SetZ(aRowDistance);
             break;
         case LinearArrayAxis::Z:
             aTranslation.SetZ(aDistance);
+            aTranslation.SetX(aRowDistance);
             break;
     }
     gp_Trsf aWorldTranslation;
@@ -507,6 +579,7 @@ Standard_Boolean LinearArrayOperationController::captureSelectedSource(
                 aLabel, aReferenceAxis);
         Standard_Real aMinimum[3] = {0.0, 0.0, 0.0};
         Standard_Real aMaximum[3] = {0.0, 0.0, 0.0};
+        std::vector<LinearArrayFaceFinish> aFaceFinishes;
         if (aLabel.IsNull()
             || aLabel.Data() != aDocument->GetData()
             || !_document->IsEditableFreeSimpleDefinitionLabel(aLabel)
@@ -524,8 +597,8 @@ Standard_Boolean LinearArrayOperationController::captureSelectedSource(
             || aReferenceAxisState
                 == OcctReferenceAxisReadState::Invalid
             || !TryReadMetersPerUnit(aDocument, aMetersPerUnit)
-            || HasStyledSubshape(
-                aDocument, aLabel, kMaximumSourceTopologyNodes)
+            || !CaptureFaceFinishes(
+                _document, aLabel, kMaximumSourceTopologyNodes, aFaceFinishes)
             || !CountBoundedTopology(
                 aStored,
                 kMaximumSourceTopologyNodes,
@@ -544,6 +617,11 @@ Standard_Boolean LinearArrayOperationController::captureSelectedSource(
             || !pattern_recipe_clone::Capture(aDocument, aLabel, aSweepLoft)) {
             return Standard_False;
         }
+        // Treatment replay builds different topology from BRepBuilderAPI_Copy.
+        // Its styled faces need a separate correspondence proof before admission.
+        if (!aFaceFinishes.empty()
+            && (aProfileOwner.object.edgeTreatment.has_value()
+                || aProfileOwner.object.edgeTreatmentR2.has_value())) return Standard_False;
         const profile::Record& aProfile = aProfileOwner.object.profile;
         if (!aProfile.label.IsNull() && !aProfile.boundShape.IsEqual(aStored)
             && (!CountBoundedTopology(aProfile.boundShape,
@@ -577,6 +655,7 @@ Standard_Boolean LinearArrayOperationController::captureSelectedSource(
         theSource.representation = aRepresentation;
         theSource.destinationRepresentation = aDestinationRepresentation;
         theSource.storedShape = aStored;
+        theSource.faceFinishes = std::move(aFaceFinishes);
         theSource.transform = aTransform;
         theSource.referenceAxisState = aReferenceAxisState;
         theSource.referenceAxis = aReferenceAxis;
@@ -634,6 +713,7 @@ Standard_Boolean LinearArrayOperationController::sourceIsCurrent(
         }
         const TopoDS_Shape aStored =
             XCAFDoc_ShapeTool::GetShape(theSource.label);
+        std::vector<LinearArrayFaceFinish> aFaceFinishes;
         Standard_Size aTopologyNodeCount = 0;
         Standard_Real aMetersPerUnit = kLegacyMetersPerUnit;
         OcctReferenceAxis aReferenceAxis;
@@ -674,10 +754,9 @@ Standard_Boolean LinearArrayOperationController::sourceIsCurrent(
             || TransformDiffers(
                 _document->ObjectTransformForLabel(theSource.label),
                 theSource.transform)
-            || HasStyledSubshape(
-                aDocument,
-                theSource.label,
-                kMaximumSourceTopologyNodes)
+            || !CaptureFaceFinishes(_document, theSource.label,
+                kMaximumSourceTopologyNodes, aFaceFinishes)
+            || !FaceFinishesMatch(theSource.faceFinishes, aFaceFinishes)
             || !CountBoundedTopology(
                 aStored,
                 kMaximumSourceTopologyNodes,
@@ -735,11 +814,12 @@ Standard_Boolean LinearArrayOperationController::canAdmitCount(
         return Standard_False;
     }
     try {
-        const std::vector<OcctGeometryDuplicationRequest> aRequests = {{
+        std::vector<OcctGeometryDuplicationRequest> aRequests = {{
             theSource.label,
             static_cast<Standard_Size>(theCount - 1),
             false, true, false, true, false, // Local-transform copies preserve recipe frames verbatim.
         }};
+        aRequests.front().preservesAuthoredFaceMaterials = true;
         return _document->CanDuplicateGeometryDefinitions(aRequests);
     } catch (...) {
         return Standard_False;
@@ -768,7 +848,8 @@ std::pair<Standard_Real, Standard_Real>
 LinearArrayOperationController::spacingRange(
     const SourceSnapshot& theSource,
     const LinearArrayAxis theAxis,
-    const Standard_Integer theCount) const noexcept
+    const Standard_Integer theCount,
+    const Standard_Integer theRows) const noexcept
 {
     const Standard_Integer anAxis = AxisIndex(theAxis);
     const Standard_Integer aLastOrdinal = theCount - 1;
@@ -791,6 +872,13 @@ LinearArrayOperationController::spacingRange(
     if (!std::isfinite(aMinimum) || !std::isfinite(aMaximum)
         || aMinimum > aMaximum) {
         return {0.0, 0.0};
+    }
+    if (theRows > 1) {
+        const auto aRowAxis = static_cast<LinearArrayAxis>((anAxis + 1) % 3);
+        const auto aRowRange = spacingRange(theSource, aRowAxis, theRows, 1);
+        aMinimum = std::max(aMinimum, aRowRange.first);
+        aMaximum = std::min(aMaximum, aRowRange.second);
+        if (aMinimum > aMaximum) { return {0.0, 0.0}; }
     }
     return {aMinimum, aMaximum};
 }
@@ -830,6 +918,7 @@ Standard_Boolean LinearArrayOperationController::begin() noexcept
     _source = std::move(aSource);
     _axis = LinearArrayAxis::X;
     _count = anInitialCount;
+    _rows = 1;
     _maximumAdmittedCount = aMaximum;
     _spacing = anInitialSpacing;
     _previewValid = Standard_False;
@@ -852,12 +941,13 @@ Standard_Boolean LinearArrayOperationController::begin() noexcept
 Standard_Boolean LinearArrayOperationController::rebuildPreview() noexcept
 {
     if (!_source.has_value() || IsNearZero(_spacing)
-        || _count < kMinimumCount || _count > _maximumAdmittedCount
+        || _count < kMinimumCount || _rows < 1
+        || _count > _maximumAdmittedCount / _rows
         || !sourceIsCurrent(Standard_True)
-        || !canAdmitCount(*_source, _count)) {
+        || !canAdmitCount(*_source, totalCount())) {
         return Standard_False;
     }
-    const auto aRange = spacingRange(*_source, _axis, _count);
+    const auto aRange = spacingRange(*_source, _axis, _count, _rows);
     if (_spacing < aRange.first || _spacing > aRange.second) {
         return Standard_False;
     }
@@ -869,17 +959,17 @@ Standard_Boolean LinearArrayOperationController::rebuildPreview() noexcept
 
     std::vector<Handle(AIS_Shape)> aReplacement;
     try {
-        aReplacement.reserve(static_cast<std::size_t>(_count - 1));
+        aReplacement.reserve(static_cast<std::size_t>(totalCount() - 1));
         for (Standard_Integer anOrdinal = 1;
-             anOrdinal < _count; ++anOrdinal) {
+             anOrdinal < totalCount(); ++anOrdinal) {
             Handle(AIS_Shape) aPreview =
-                new AIS_Shape(_source->storedShape);
+                new AIS_ColoredShape(_source->storedShape);
             if (aPreview.IsNull() || aPreview->Shape().IsNull()
                 || !aPreview->Shape().IsPartner(_source->storedShape)) {
                 return Standard_False;
             }
             aPreview->SetLocalTransformation(ArrayTransform(
-                _source->transform, _axis, anOrdinal, _spacing));
+                _source->transform, _axis, anOrdinal, _count, _spacing));
             Standard_Real aMinimum[3] = {0.0, 0.0, 0.0};
             Standard_Real aMaximum[3] = {0.0, 0.0, 0.0};
             if (!WorldBounds(
@@ -997,7 +1087,7 @@ Standard_Boolean LinearArrayOperationController::setAxis(
         || !sourceIsCurrent(Standard_True)) {
         return Standard_False;
     }
-    const auto aRange = spacingRange(*_source, theAxis, _count);
+    const auto aRange = spacingRange(*_source, theAxis, _count, _rows);
     if (!IsNearZero(_spacing)
         && (_spacing < aRange.first || _spacing > aRange.second)) {
         return Standard_False;
@@ -1034,15 +1124,15 @@ Standard_Boolean LinearArrayOperationController::setCount(
 {
     if (!_source.has_value()
         || theCount < kMinimumCount
-        || theCount > _maximumAdmittedCount
+        || theCount > _maximumAdmittedCount / _rows
         || _state == LinearArrayPreviewState::Committing
         || _state == LinearArrayPreviewState::OutcomeUnknown
         || _ownsDocumentCommand || !_pendingResults.empty()
         || !sourceIsCurrent(Standard_True)
-        || !canAdmitCount(*_source, theCount)) {
+        || !canAdmitCount(*_source, theCount * _rows)) {
         return Standard_False;
     }
-    const auto aRange = spacingRange(*_source, _axis, theCount);
+    const auto aRange = spacingRange(*_source, _axis, theCount, _rows);
     if (!IsNearZero(_spacing)
         && (_spacing < aRange.first || _spacing > aRange.second)) {
         return Standard_False;
@@ -1051,6 +1141,51 @@ Standard_Boolean LinearArrayOperationController::setCount(
         return Standard_True;
     }
     _count = theCount;
+    if (IsNearZero(_spacing)) {
+        if (!clearPreviewObjects()) {
+            _state = LinearArrayPreviewState::Failed;
+            notifyStateChanged();
+            return Standard_False;
+        }
+        _state = LinearArrayPreviewState::Selecting;
+        ++_generation;
+        notifyStateChanged();
+        return Standard_True;
+    }
+    if (!rebuildPreview()) {
+        _state = LinearArrayPreviewState::Failed;
+        ++_generation;
+        notifyStateChanged();
+        return Standard_False;
+    }
+    _state = LinearArrayPreviewState::Ready;
+    ++_generation;
+    notifyStateChanged();
+    return Standard_True;
+}
+
+Standard_Boolean LinearArrayOperationController::setRows(
+    const Standard_Integer theRows) noexcept
+{
+    if (!_source.has_value()
+        || theRows < 1
+        || theRows > _maximumAdmittedCount / _count
+        || _state == LinearArrayPreviewState::Committing
+        || _state == LinearArrayPreviewState::OutcomeUnknown
+        || _ownsDocumentCommand || !_pendingResults.empty()
+        || !sourceIsCurrent(Standard_True)
+        || !canAdmitCount(*_source, _count * theRows)) {
+        return Standard_False;
+    }
+    const auto aRange = spacingRange(*_source, _axis, _count, theRows);
+    if (!IsNearZero(_spacing)
+        && (_spacing < aRange.first || _spacing > aRange.second)) {
+        return Standard_False;
+    }
+    if (_rows == theRows && _state == LinearArrayPreviewState::Ready) {
+        return Standard_True;
+    }
+    _rows = theRows;
     if (IsNearZero(_spacing)) {
         if (!clearPreviewObjects()) {
             _state = LinearArrayPreviewState::Failed;
@@ -1084,7 +1219,7 @@ Standard_Boolean LinearArrayOperationController::setSpacing(
         || !sourceIsCurrent(Standard_True)) {
         return Standard_False;
     }
-    const auto aRange = spacingRange(*_source, _axis, _count);
+    const auto aRange = spacingRange(*_source, _axis, _count, _rows);
     if (!IsNearZero(theSpacing)
         && (theSpacing < aRange.first || theSpacing > aRange.second)) {
         return Standard_False;
@@ -1132,6 +1267,22 @@ Standard_Integer LinearArrayOperationController::count() const noexcept
     return _count;
 }
 
+Standard_Integer LinearArrayOperationController::rows() const noexcept
+{
+    return _rows;
+}
+
+Standard_Integer LinearArrayOperationController::maximumRows() const noexcept
+{
+    return std::max(1, _maximumAdmittedCount / _count);
+}
+
+Standard_Integer LinearArrayOperationController::totalCount() const noexcept
+{
+    // Setters check division bounds before assigning either factor.
+    return _count * _rows;
+}
+
 Standard_Real LinearArrayOperationController::spacing() const noexcept
 {
     return _spacing;
@@ -1147,7 +1298,7 @@ LinearArrayOperationController::countRange() const noexcept
 {
     return {
         kMinimumCount,
-        std::max(kMinimumCount, _maximumAdmittedCount),
+        std::max(kMinimumCount, _maximumAdmittedCount / _rows),
     };
 }
 
@@ -1155,7 +1306,7 @@ std::pair<Standard_Real, Standard_Real>
 LinearArrayOperationController::spacingRange() const noexcept
 {
     return _source.has_value()
-        ? spacingRange(*_source, _axis, _count)
+        ? spacingRange(*_source, _axis, _count, _rows)
         : std::pair<Standard_Real, Standard_Real>{0.0, 0.0};
 }
 
@@ -1191,7 +1342,7 @@ Standard_Boolean LinearArrayOperationController::canApply() const noexcept
             && _previewValid && _source.has_value()
             && !IsNearZero(_spacing)
             && _previewObjects.size()
-                == static_cast<std::size_t>(_count - 1))
+                == static_cast<std::size_t>(totalCount() - 1))
         || (_state == LinearArrayPreviewState::OutcomeUnknown
             && (_ownsDocumentCommand || !_pendingResults.empty()));
 }
@@ -1205,7 +1356,7 @@ Standard_Boolean LinearArrayOperationController::capturePreview(
         || HasUnsupportedOverlayTexture(_source->label)
         || _previewObjects.empty()
         || _previewObjects.size()
-            != static_cast<std::size_t>(_count - 1)
+            != static_cast<std::size_t>(totalCount() - 1)
         || _previewObjects.size() > kMaximumPreviewBodies) {
         return Standard_False;
     }
@@ -1296,7 +1447,11 @@ LinearArrayOperationController::inspectPendingResults() const noexcept
         }
         OcctObjectNameState aSourceProfileOwner;
         pattern_recipe_clone::Source aSourceSweepLoft;
+        std::vector<LinearArrayFaceFinish> aSourceFinishes;
         if (!_source.has_value() || aDocument != _source->document
+            || !CaptureFaceFinishes(_document, _source->label,
+                kMaximumSourceTopologyNodes, aSourceFinishes)
+            || !FaceFinishesMatch(_source->faceFinishes, aSourceFinishes)
             || !_document->CaptureObjectNameStateForLabel(_source->label, aSourceProfileOwner)
             || !aSourceProfileOwner.IsEqual(_source->profileOwner)
             || !pattern_recipe_clone::Capture(aDocument, _source->label, aSourceSweepLoft)
@@ -1334,8 +1489,13 @@ LinearArrayOperationController::inspectPendingResults() const noexcept
                 _document->ReadReferenceAxisForLabel(
                     aResult.label, aReferenceAxis);
             OcctObjectNameState aName;
+            std::vector<LinearArrayFaceFinish> aStoredFinishes;
             if (!aResult.profileCandidateSealed
                 || !aResult.sweepLoftCandidateSealed
+                || !aResult.faceFinishesSealed
+                || !CaptureFaceFinishes(_document, aResult.label,
+                    kMaximumSourceTopologyNodes, aStoredFinishes)
+                || !FaceFinishesMatch(aResult.expectedFaceFinishes, aStoredFinishes)
                 || !aProfile.IsEqual(aResult.expectedProfile)
                 || !anEnclosure.IsEqual(aResult.expectedEnclosure)
                 || anEnclosure.IsCurrent(aDocument, aResult.label) != _source->enclosureCurrent
@@ -1435,8 +1595,21 @@ LinearArrayOperationController::finishCommittedOperation() noexcept
 
 LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
 {
-    if (!hasActiveOperation()) {
+#ifdef DEBUG
+    _debugApplyFailureLine = 0;
+#endif
+    // Preserve the exact refusing branch in the existing test observation.
+    // No logging, allocation, admission or recovery behavior changes.
+    const auto noChangeAt = [this](const Standard_Integer line) noexcept {
+#ifdef DEBUG
+        _debugApplyFailureLine = line;
+#else
+        (void)line;
+#endif
         return LinearArrayApplyResult::NoChange;
+    };
+    if (!hasActiveOperation()) {
+        return noChangeAt(__LINE__);
     }
     const auto inspectAfterCommit = [this]() noexcept {
 #ifdef DEBUG
@@ -1465,20 +1638,20 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                 : LinearArrayPreviewState::Failed;
             ++_generation;
             notifyStateChanged();
-            return LinearArrayApplyResult::NoChange;
+            return noChangeAt(__LINE__);
         }
         _state = LinearArrayPreviewState::OutcomeUnknown;
         ++_generation;
         notifyStateChanged();
-        return LinearArrayApplyResult::NoChange;
+        return noChangeAt(__LINE__);
     }
     if (_state != LinearArrayPreviewState::Ready || !canApply()
         || !sourceIsCurrent(Standard_True)
-        || !canAdmitCount(*_source, _count)) {
+        || !canAdmitCount(*_source, totalCount())) {
         _state = LinearArrayPreviewState::Failed;
         ++_generation;
         notifyStateChanged();
-        return LinearArrayApplyResult::NoChange;
+        return noChangeAt(__LINE__);
     }
 
     struct PreparedResult {
@@ -1490,12 +1663,13 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
         std::string enclosureIdentifier;
         pattern_recipe_clone::Prepared sweepLoft;
         std::shared_ptr<const core3d::retained_edge_treatment::Payload> treatmentCopy;
+        std::vector<LinearArrayFaceFinish> faceFinishes;
     };
     std::vector<PreparedResult> aPrepared;
     core3d::retained_edge_treatment::ReplayBudget aTreatmentBudget;
     try {
         OCC_CATCH_SIGNALS
-        aPrepared.reserve(static_cast<std::size_t>(_count - 1));
+        aPrepared.reserve(static_cast<std::size_t>(totalCount() - 1));
 #ifdef DEBUG
         const Standard_Size anAggregateLimit = std::max<Standard_Size>(
             1,
@@ -1509,7 +1683,7 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
         Standard_Size anAggregateTopology = _source->topologyNodeCount
             + _source->retainedProfileTopologyNodes + _source->retainedEnclosureTopologyNodes;
         for (Standard_Integer anOrdinal = 1;
-             anOrdinal < _count; ++anOrdinal) {
+             anOrdinal < totalCount(); ++anOrdinal) {
             BRepBuilderAPI_Copy aCopy;
             aCopy.Perform(
                 _source->storedShape,
@@ -1535,23 +1709,39 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                     aResultTopology)
                 || aResultTopology
                     > anAggregateLimit - anAggregateTopology) {
-                return LinearArrayApplyResult::NoChange;
+                return noChangeAt(__LINE__);
             }
             for (const PreparedResult& anExisting : aPrepared) {
                 if (anExisting.presentation.IsNull()
                     || aCopy.Shape().IsPartner(
                         anExisting.presentation->Shape())) {
-                    return LinearArrayApplyResult::NoChange;
+                    return noChangeAt(__LINE__);
                 }
             }
             anAggregateTopology += aResultTopology;
+            std::vector<LinearArrayFaceFinish> aCopiedFinishes;
+            for (const auto& finish : _source->faceFinishes) {
+                const TopoDS_Shape aCopiedFace = aCopy.ModifiedShape(finish.face);
+                if (aCopiedFace.IsNull() || aCopiedFace.ShapeType() != TopAbs_FACE
+                    || aCopiedFace.IsPartner(finish.face)) return noChangeAt(__LINE__);
+                bool found = false;
+                // A face label and its occurrence in the solid may have
+                // opposite orientations. Material ownership follows the exact
+                // copied TShape and location; the solid keeps its own winding.
+                for (TopExp_Explorer faces(aCopy.Shape(), TopAbs_FACE); faces.More(); faces.Next())
+                    if (faces.Current().IsSame(aCopiedFace)) { found = true; break; }
+                if (!found) return noChangeAt(__LINE__);
+                for (const auto& existing : aCopiedFinishes)
+                    if (existing.face.IsSame(aCopiedFace)) return noChangeAt(__LINE__);
+                aCopiedFinishes.push_back({aCopiedFace, finish.material});
+            }
             const gp_Trsf aTransform = ArrayTransform(
-                _source->transform, _axis, anOrdinal, _spacing);
+                _source->transform, _axis, anOrdinal, _count, _spacing);
             Standard_Real aMinimum[3] = {0.0, 0.0, 0.0};
             Standard_Real aMaximum[3] = {0.0, 0.0, 0.0};
             if (!WorldBounds(
                     aCopy.Shape(), aTransform, aMinimum, aMaximum)) {
-                return LinearArrayApplyResult::NoChange;
+                return noChangeAt(__LINE__);
             }
             Handle(AIS_Shape) aPresentation =
                 new AIS_Shape(aCopy.Shape());
@@ -1565,7 +1755,7 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                 aProfileIdentifier = OcctDocument::NewProfileIdentifier();
                 if (!profile::IsIdentifier(aProfileIdentifier)
                     || aProfileIdentifier == anOriginalProfile.identifier) {
-                    return LinearArrayApplyResult::NoChange;
+                    return noChangeAt(__LINE__);
                 }
                 if (anOriginalProfile.boundShape.IsEqual(_source->storedShape)) {
                     // Root binding remains exact even if only units are stale.
@@ -1583,7 +1773,7 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                             anAggregateLimit - anAggregateTopology, aRetainedTopology)
                         || aRetainedTopology != _source->retainedProfileTopologyNodes
                         || aRetainedTopology > anAggregateLimit - anAggregateTopology) {
-                        return LinearArrayApplyResult::NoChange;
+                        return noChangeAt(__LINE__);
                     }
                     anAggregateTopology += aRetainedTopology;
                     aProfileBinding = aRetainedCopy.Shape();
@@ -1592,7 +1782,7 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                     if (aProfileIdentifier == anExisting.profileIdentifier
                         || (!anExisting.profileBinding.IsNull()
                             && aProfileBinding.IsPartner(anExisting.profileBinding))) {
-                        return LinearArrayApplyResult::NoChange;
+                        return noChangeAt(__LINE__);
                     }
                 }
             }
@@ -1605,28 +1795,29 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                     || !_document->PrepareRetainedEdgeTreatmentIndependentCopy(
                         _source->label, aProfileIdentifier, aDestinationParameters,
                         aTreatmentBudget, aTreatmentCopy, aReplayRoot)) {
-                    return LinearArrayApplyResult::NoChange;
+                    return noChangeAt(__LINE__);
                 }
                 if (aTreatmentCopy) {
+                    if (!aCopiedFinishes.empty()) return noChangeAt(__LINE__);
                     Standard_Size aReplayTopology = 0;
                     if (aReplayRoot.IsNull() || aReplayRoot.IsPartner(_source->storedShape)
                         || !IsTopologicallyValid(aReplayRoot)
                         || !CountBoundedTopology(aReplayRoot, anAggregateLimit, aReplayTopology)
                         || aReplayTopology != aResultTopology) {
-                        return LinearArrayApplyResult::NoChange;
+                        return noChangeAt(__LINE__);
                     }
                     for (const PreparedResult& anExisting : aPrepared) {
                         if (anExisting.presentation.IsNull()
                             || aReplayRoot.IsPartner(anExisting.presentation->Shape())) {
-                            return LinearArrayApplyResult::NoChange;
+                            return noChangeAt(__LINE__);
                         }
                     }
                     Standard_Real replayMinimum[3] = {0.0, 0.0, 0.0};
                     Standard_Real replayMaximum[3] = {0.0, 0.0, 0.0};
                     if (!WorldBounds(aReplayRoot, aTransform, replayMinimum, replayMaximum))
-                        return LinearArrayApplyResult::NoChange;
+                        return noChangeAt(__LINE__);
                     aPresentation = new AIS_Shape(aReplayRoot);
-                    if (aPresentation.IsNull()) return LinearArrayApplyResult::NoChange;
+                    if (aPresentation.IsNull()) return noChangeAt(__LINE__);
                     aPresentation->SetLocalTransformation(aTransform);
                     _document->LoadObjectMeterial(_source->label, aPresentation);
                     aProfileBinding = aReplayRoot;
@@ -1639,7 +1830,7 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                 anEnclosureIdentifier = OcctDocument::NewProfileIdentifier();
                 if (!profile::IsIdentifier(anEnclosureIdentifier)
                     || anEnclosureIdentifier == anOriginalEnclosure.identifier) {
-                    return LinearArrayApplyResult::NoChange;
+                    return noChangeAt(__LINE__);
                 }
                 if (anOriginalEnclosure.boundShape.IsEqual(_source->storedShape)) {
                     // Root binding remains exact even if only units are stale.
@@ -1657,7 +1848,7 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                             anAggregateLimit - anAggregateTopology, aRetainedTopology)
                         || aRetainedTopology != _source->retainedEnclosureTopologyNodes
                         || aRetainedTopology > anAggregateLimit - anAggregateTopology) {
-                        return LinearArrayApplyResult::NoChange;
+                        return noChangeAt(__LINE__);
                     }
                     anAggregateTopology += aRetainedTopology;
                     anEnclosureBinding = aRetainedCopy.Shape();
@@ -1666,7 +1857,7 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                     if (anEnclosureIdentifier == anExisting.enclosureIdentifier
                         || (!anExisting.enclosureBinding.IsNull()
                             && anEnclosureBinding.IsPartner(anExisting.enclosureBinding))) {
-                        return LinearArrayApplyResult::NoChange;
+                        return noChangeAt(__LINE__);
                     }
                 }
             }
@@ -1676,23 +1867,23 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                 ? std::string() : OcctDocument::NewProfileIdentifier();
             if (!pattern_recipe_clone::Prepare(_source->sweepLoft,
                     aPresentation->Shape(), aSweepLoftIdentifier,
-                    std::nullopt, aSweepLoft)) return LinearArrayApplyResult::NoChange;
+                    std::nullopt, aSweepLoft)) return noChangeAt(__LINE__);
             for (const PreparedResult& anExisting : aPrepared)
                 if (!aSweepLoft.featureIdentifier.empty()
                     && aSweepLoft.featureIdentifier
                         == anExisting.sweepLoft.featureIdentifier)
-                    return LinearArrayApplyResult::NoChange;
+                    return noChangeAt(__LINE__);
             aPrepared.push_back({aPresentation, aTransform, aProfileBinding,
                 aProfileIdentifier, anEnclosureBinding, anEnclosureIdentifier,
-                aSweepLoft, aTreatmentCopy});
+                aSweepLoft, aTreatmentCopy, std::move(aCopiedFinishes)});
         }
     } catch (...) {
-        return LinearArrayApplyResult::NoChange;
+        return noChangeAt(__LINE__);
     }
-    if (aPrepared.size() != static_cast<std::size_t>(_count - 1)
+    if (aPrepared.size() != static_cast<std::size_t>(totalCount() - 1)
         || !sourceIsCurrent(Standard_True)
-        || !canAdmitCount(*_source, _count)) {
-        return LinearArrayApplyResult::NoChange;
+        || !canAdmitCount(*_source, totalCount())) {
+        return noChangeAt(__LINE__);
     }
 
     Handle(TDocStd_Document) aDocument;
@@ -1700,12 +1891,12 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
         aDocument = _document->ChangeDocument();
         if (aDocument.IsNull() || aDocument != _source->document
             || aDocument->HasOpenCommand()) {
-            return LinearArrayApplyResult::NoChange;
+            return noChangeAt(__LINE__);
         }
     } catch (...) {
-        return LinearArrayApplyResult::NoChange;
+        return noChangeAt(__LINE__);
     }
-    const auto retainRetryableOrUnknown = [this]() noexcept {
+    const auto retainRetryableOrUnknown = [this, &noChangeAt](const Standard_Integer line) noexcept {
         if (abortOwnedCommand()
             && inspectPendingResults() == DocumentState::None) {
             _pendingResults.clear();
@@ -1717,7 +1908,7 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
         }
         ++_generation;
         notifyStateChanged();
-        return LinearArrayApplyResult::NoChange;
+        return noChangeAt(line);
     };
 
     _state = LinearArrayPreviewState::Committing;
@@ -1733,12 +1924,12 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
             _state = LinearArrayPreviewState::Ready;
             ++_generation;
             notifyStateChanged();
-            return LinearArrayApplyResult::NoChange;
+            return noChangeAt(__LINE__);
         }
 #ifdef DEBUG
         if (_debugTransactionFailureCount > 0) {
             --_debugTransactionFailureCount;
-            return retainRetryableOrUnknown();
+            return retainRetryableOrUnknown(__LINE__);
         }
 #endif
         _pendingResults.reserve(aPrepared.size());
@@ -1747,7 +1938,7 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                 aResult.presentation,
                 _source->destinationRepresentation);
             if (aLabel.IsNull()) {
-                return retainRetryableOrUnknown();
+                return retainRetryableOrUnknown(__LINE__);
             }
             _pendingResults.push_back({
                 aLabel,
@@ -1775,8 +1966,27 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                     _source->label, aLabel)
                 || !_document->CopyReferenceAxis(
                     _source->label, aLabel)) {
-                return retainRetryableOrUnknown();
+                return retainRetryableOrUnknown(__LINE__);
             }
+            const auto aShapeTool = XCAFDoc_DocumentTool::ShapeTool(aDocument->Main());
+            if (aShapeTool.IsNull()) return retainRetryableOrUnknown(__LINE__);
+            std::vector<OcctPBRMaterialUpdate> aFaceUpdates;
+            for (const auto& finish : aResult.faceFinishes) {
+                const TDF_Label aFaceLabel = aShapeTool->AddSubShape(aLabel, finish.face);
+                if (aFaceLabel.IsNull()
+                    || !XCAFDoc_ShapeTool::GetShape(aFaceLabel).IsEqual(finish.face))
+                    return retainRetryableOrUnknown(__LINE__);
+                aFaceUpdates.push_back({aFaceLabel, finish.material});
+            }
+            if (!aFaceUpdates.empty() && !_document->SaveObjectPBRMaterials(aFaceUpdates))
+                return retainRetryableOrUnknown(__LINE__);
+            std::vector<LinearArrayFaceFinish> aStoredFinishes;
+            if (!CaptureFaceFinishes(_document, aLabel,
+                    kMaximumSourceTopologyNodes, aStoredFinishes)
+                || !FaceFinishesMatch(aResult.faceFinishes, aStoredFinishes))
+                return retainRetryableOrUnknown(__LINE__);
+            aPending.expectedFaceFinishes = aResult.faceFinishes;
+            aPending.faceFinishesSealed = Standard_True;
             OcctReferenceAxis aStoredReferenceAxis;
             const OcctReferenceAxisReadState aStoredReferenceAxisState =
                 _document->ReadReferenceAxisForLabel(
@@ -1788,7 +1998,7 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                 || ReferenceAxisDiffers(
                     aStoredReferenceAxis,
                     aPending.expectedReferenceAxis)) {
-                return retainRetryableOrUnknown();
+                return retainRetryableOrUnknown(__LINE__);
             }
             profile::Record aStageAuthority = _source->profileOwner.object.profile;
 #ifdef DEBUG
@@ -1804,14 +2014,14 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                     aStageAuthority, _source->storedShape,
                     aLabel, aResult.profileBinding, aResult.profileIdentifier,
                     aPending.expectedProfile, aResult.treatmentCopy != nullptr)) {
-                return retainRetryableOrUnknown();
+                return retainRetryableOrUnknown(__LINE__);
             }
             if (!aStageAuthority.label.IsNull()
                 && !_document->StageRetainedEdgeTreatmentIndependentCopy(
                     _source->label, _source->profileOwner.object.profile,
                     aLabel, aPending.expectedProfile, aTreatmentBudget,
                     aResult.treatmentCopy)) {
-                return retainRetryableOrUnknown();
+                return retainRetryableOrUnknown(__LINE__);
             }
             if (_source->profileOwner.namePresent) {
                 TDataStd_Name::Set(aLabel, _source->profileOwner.name);
@@ -1824,7 +2034,7 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                     static_cast<int>(aPending.expectedProfile.values.size()) + 1);
                 profile::Record aReadback;
                 if (!profile::Read(aDocument, aLabel, aReadback)) {
-                    return retainRetryableOrUnknown();
+                    return retainRetryableOrUnknown(__LINE__);
                 }
                 throw Standard_Failure("Injected invalid array profile unexpectedly read back");
             }
@@ -1841,13 +2051,13 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
             if (!enclosure::StageDuplicate(aDocument, _source->label,
                     anEnclosureAuthority, _source->storedShape,
                     aLabel, aResult.enclosureBinding, aResult.enclosureIdentifier,
-                    aPending.expectedEnclosure)) return retainRetryableOrUnknown();
+                    aPending.expectedEnclosure)) return retainRetryableOrUnknown(__LINE__);
 #ifdef DEBUG
             if (anEnclosureFault == 10) {
                 TDataStd_Integer::Set(aPending.expectedEnclosure.label, enclosure::CountID(),
                     static_cast<int>(aPending.expectedEnclosure.values.size()) + 1);
                 enclosure::Record aReadback;
-                if (!enclosure::Read(aDocument, aLabel, aReadback)) return retainRetryableOrUnknown();
+                if (!enclosure::Read(aDocument, aLabel, aReadback)) return retainRetryableOrUnknown(__LINE__);
                 throw Standard_Failure("Injected invalid array enclosure unexpectedly read back");
             }
 #endif
@@ -1855,14 +2065,14 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
                     aLabel, _source->entityIdentifier,
                     _source->definitionIdentifier, aPending.entityIdentifier,
                     aPending.definitionIdentifier, aResult.sweepLoft,
-                    aPending.expectedSweepLoft)) return retainRetryableOrUnknown();
+                    aPending.expectedSweepLoft)) return retainRetryableOrUnknown(__LINE__);
             aPending.sweepLoftCandidateSealed = Standard_True;
             aPending.profileCandidateSealed = Standard_True;
             _document->LoadObjectMeterial(
                 aLabel, aResult.presentation);
         }
         if (!_document->ValidateGeometryRepresentations()) {
-            return retainRetryableOrUnknown();
+            return retainRetryableOrUnknown(__LINE__);
         }
 #ifdef DEBUG
         if (!_source->profileOwner.object.enclosure.label.IsNull()
@@ -1914,7 +2124,7 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
             // The command state and pending labels below are authoritative.
         }
     } catch (...) {
-        return retainRetryableOrUnknown();
+        return retainRetryableOrUnknown(__LINE__);
     }
 
     DocumentState aState = inspectAfterCommit();
@@ -1932,12 +2142,12 @@ LinearArrayApplyResult LinearArrayOperationController::apply() noexcept
             : LinearArrayPreviewState::Failed;
         ++_generation;
         notifyStateChanged();
-        return LinearArrayApplyResult::NoChange;
+        return noChangeAt(__LINE__);
     }
     _state = LinearArrayPreviewState::OutcomeUnknown;
     ++_generation;
     notifyStateChanged();
-    return LinearArrayApplyResult::NoChange;
+    return noChangeAt(__LINE__);
 }
 
 Standard_Boolean LinearArrayOperationController::cancel() noexcept
@@ -1970,6 +2180,7 @@ void LinearArrayOperationController::clearInactiveState() noexcept
     _source.reset();
     _axis = LinearArrayAxis::X;
     _count = kDefaultCount;
+    _rows = 1;
     _maximumAdmittedCount = kMaximumCount;
     _spacing = 0.0;
     _previewValid = Standard_False;
@@ -1987,6 +2198,7 @@ LinearArrayOperationController::debugPreviewState() const noexcept
     aState.generation = _generation;
     aState.previewBodyCount = _previewObjects.size();
     aState.pendingResultCount = _pendingResults.size();
+    aState.applyFailureLine = _debugApplyFailureLine;
     aState.activeOperation = hasActiveOperation();
     aState.previewValid = _previewValid;
     aState.canApply = canApply();

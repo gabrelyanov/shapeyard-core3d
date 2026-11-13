@@ -70,6 +70,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (Core3DLinearArrayParameters)getLinearArrayParameters;
 - (BOOL)setLinearArrayAxis:(Core3DLinearArrayAxis)axis;
 - (BOOL)setLinearArrayCount:(NSInteger)count;
+- (BOOL)setLinearArrayRows:(NSInteger)rows;
 - (BOOL)setLinearArraySpacing:(CGFloat)spacing;
 - (Core3DModelingOperationResult)tryApplyLinearArray
     NS_SWIFT_NAME(tryApplyLinearArray());
