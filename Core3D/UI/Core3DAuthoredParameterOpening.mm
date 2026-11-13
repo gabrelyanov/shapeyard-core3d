@@ -1553,6 +1553,15 @@ static NSMapTable<Core3DViewController *, Core3DBooleanPairRecoveryIssuer *>
             return refused(PairRefusal::StaleSource);
         reply = document->ApplyBooleanSources(prepared->_prepared,
             std::uint32_t(size.width), std::uint32_t(size.height));
+        if (reply.status == PairApplyStatus::Committed) {
+            // The document keeps its own copy of the result (StageIndependentClone), so the
+            // part on screen must be drawn again from the document: otherwise it shows a
+            // different shape object than the stored one, and the next whole-part select of
+            // it (a second Join, a Hole on its face) is refused as stale (Astra 12 Nov 18:52
+            // steps 37-40 and 61; tutorial reproductions A and B).
+            viewer->redrawDocument();
+            [gl requestRender];
+        }
         if (reply.status == PairApplyStatus::OutcomeUnknown && reply.recovery) {
             Core3DBooleanPairRecoveryIssuer *issuer =
                 [[Core3DBooleanPairRecoveryIssuer alloc]

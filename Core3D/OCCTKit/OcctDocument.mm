@@ -12995,12 +12995,16 @@ Standard_Boolean OcctDocument::BuildThroughHole(
             || !std::isfinite(radius) || radius <= 0 || !std::isfinite(depth))
             return Standard_False;
         const auto coverage = RetainedRecipeCoverageForLabel(label);
-        if (coverage == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage) {
+        if (coverage == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
+            && core3d::composite_recipe::HasRecord(label)) {
             core3d::composite_recipe::Record composite;
             if (!core3d::composite_recipe::Read(myOcafDoc, label, composite)
                 || !composite.value || composite.label.IsNull()
                 || !OriginalsFeature(composite.value->definition)) return Standard_False;
-        } else if (coverage != OcctRetainedRecipeCoverage::Absent) {
+        } else if (coverage != OcctRetainedRecipeCoverage::Absent
+                   && !CanBakeSavedCutForFaceEdit(label)) {
+            // A part with an earlier saved hole takes a second one: that
+            // saved cut is baked in the same step (as Push-pull does).
             return Standard_False;
         }
         // A copy: the stored part (and a Join record Undo brings back) must stay
@@ -13092,7 +13096,8 @@ Standard_Boolean OcctDocument::ApplyThroughHole(
         // A previous Boolean result is baked: its record goes in the same step.
         TDF_Label bakedRecord;
         if (RetainedRecipeCoverageForLabel(label)
-                == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage) {
+                == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
+            && core3d::composite_recipe::HasRecord(label)) {
             core3d::composite_recipe::Record composite;
             if (!core3d::composite_recipe::Read(myOcafDoc, label, composite)
                 || composite.label.IsNull()) { refusal = "stale-source"; return Standard_False; }
@@ -13104,6 +13109,13 @@ Standard_Boolean OcctDocument::ApplyThroughHole(
         myOcafDoc->NewCommand();
         if (!myOcafDoc->HasOpenCommand()) return Standard_False;
         if (!bakedRecord.IsNull()) bakedRecord.ForgetAllAttributes(Standard_True);
+        // An earlier saved hole (a retained cut) is baked in this same command,
+        // so Undo brings back exactly that saved, resizable hole.
+        if (core3d::retained_solid::HasRecord(label)
+            && !PrepareBooleanResultForFaceEdit(label)) {
+            myOcafDoc->AbortCommand();
+            return Standard_False;
+        }
         ForgetInspectorPrimitiveRecord(label);
         if (!ReplaceShape(label, shown)
             || !XCAFDoc_ShapeTool::GetShape(label).IsEqual(result)) {
