@@ -7,7 +7,6 @@
 
 #include "ShapeInteractor.hpp"
 #include "../OCCTKit/Core3DSTEPExchangeLock.h"
-#include "../OCCTKit/NativeModelingReceipt.hxx"
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <StdSelect_BRepOwner.hxx>
@@ -24,6 +23,7 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <GeomAdaptor_Curve.hxx>
+#include <Geom_Conic.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <BRepFeat_MakePrism.hxx>
 #include <BRepFeat_SplitShape.hxx>
@@ -344,43 +344,6 @@ namespace core3d {
 				&& buffer.size() < kMaximumExtrusionWorkingShapeBytes;
 		}
 
-		Standard_Boolean ExtrusionGeometryCommitmentsMatch(
-			const TopoDS_Shape& source,
-			const TopoDS_Shape& workingSource) {
-			ExtrusionGeometryBuffer sourceCommitment;
-			ExtrusionGeometryBuffer workingCommitment;
-			if (!WriteExtrusionGeometryCommitment(
-					source, sourceCommitment)
-				|| !WriteExtrusionGeometryCommitment(
-					workingSource, workingCommitment)) {
-				return Standard_False;
-			}
-			if (sourceCommitment.size() == workingCommitment.size()
-				&& std::equal(
-					sourceCommitment.data(),
-					sourceCommitment.data() + sourceCommitment.size(),
-					workingCommitment.data())) {
-				return Standard_True;
-			}
-
-			// BinTools reconstructs analytic gp_Dir/gp_Ax values while making
-			// the private working copy and may turn a signed zero into +0. The
-			// receipt policy canonicalizes only those proven typed analytic-zero
-			// fields (and mutable bookkeeping on its own deep copies); every
-			// other V3 representation byte must still match.
-			if (source.ShapeType() != TopAbs_SOLID
-				|| workingSource.ShapeType() != TopAbs_SOLID) {
-				return Standard_False;
-			}
-			receipt::Digest sourceDigest{};
-			receipt::Digest workingDigest{};
-			return receipt::GeometryDigestForPolicy(
-					source, sourceDigest, true)
-				&& receipt::GeometryDigestForPolicy(
-					workingSource, workingDigest, true)
-				&& sourceDigest == workingDigest;
-		}
-
 		Standard_Boolean DetachExtrusionSource(
 			const TopoDS_Shape& source,
 			const TopoDS_Face& selectedFace,
@@ -479,8 +442,74 @@ namespace core3d {
 					return Standard_False;
 				}
 
-				if (!ExtrusionGeometryCommitmentsMatch(
-						source, workingSource)) {
+                // BinTools reconstructs a conic's gp_Ax2 from its directions;
+                // that can change signed zeros before any modeling runs.
+                // Preserve the frame by value on the detached curve only.
+                // The complete raw V3 comparison below still proves the copy.
+                // Both maps are bounded by the source/working census above.
+                TopTools_IndexedMapOfShape sourceEdges, workingEdges;
+                TopExp::MapShapes(source, TopAbs_EDGE, sourceEdges);
+                TopExp::MapShapes(workingSource, TopAbs_EDGE, workingEdges);
+                if (sourceEdges.Extent() != workingEdges.Extent()) {
+                    workingSource.Nullify();
+                    workingFace.Nullify();
+                    failureStage = 11;
+                    return Standard_False;
+                }
+                for (Standard_Integer index = 1; index <= sourceEdges.Extent(); ++index) {
+                    TopLoc_Location sourceLocation, workingLocation;
+                    Standard_Real first = 0, last = 0;
+                    const auto original = Handle(Geom_Conic)::DownCast(
+                        BRep_Tool::Curve(TopoDS::Edge(sourceEdges(index)), sourceLocation, first, last));
+                    if (original.IsNull()) continue;
+                    const auto copied = Handle(Geom_Conic)::DownCast(
+                        BRep_Tool::Curve(TopoDS::Edge(workingEdges(index)), workingLocation, first, last));
+                    if (copied.IsNull() || copied == original
+                        || copied->DynamicType() != original->DynamicType()) {
+                        workingSource.Nullify();
+                        workingFace.Nullify();
+                        failureStage = 11;
+                        return Standard_False;
+                    }
+                    copied->SetPosition(original->Position());
+                }
+
+				ExtrusionGeometryBuffer sourceCommitment;
+				ExtrusionGeometryBuffer workingCommitment;
+				if (!WriteExtrusionGeometryCommitment(
+						source, sourceCommitment)
+					|| !WriteExtrusionGeometryCommitment(
+						workingSource, workingCommitment)
+					|| sourceCommitment.size()
+						!= workingCommitment.size()
+					|| !std::equal(
+						sourceCommitment.data(),
+						sourceCommitment.data()
+							+ sourceCommitment.size(),
+						workingCommitment.data())) {
+#if DEBUG
+                    const auto length = std::min(sourceCommitment.size(), workingCommitment.size());
+                    std::size_t mismatch = 0;
+                    while (mismatch < length && sourceCommitment.data()[mismatch] == workingCommitment.data()[mismatch]) ++mismatch;
+                    const auto start = mismatch > 20 ? mismatch - 20 : 0;
+                    char original[81] = {}, detached[81] = {};
+                    for (std::size_t index = 0; index < 80; ++index) {
+                        if (start + index < sourceCommitment.size()) {
+                            const char value = sourceCommitment.data()[start + index];
+                            original[index] = value == '\n' ? '|' : value;
+                        }
+                        if (start + index < workingCommitment.size()) {
+                            const char value = workingCommitment.data()[start + index];
+                            detached[index] = value == '\n' ? '|' : value;
+                        }
+                    }
+                    const std::string prefix(sourceCommitment.data(), mismatch);
+                    const auto curves = prefix.rfind("Curves ");
+                    const auto surfaces = prefix.rfind("Surfaces ");
+                    const char* section = surfaces != std::string::npos && (curves == std::string::npos || surfaces > curves) ? "surfaces" : "curves";
+                    fprintf(stderr, "BASE_DETACH section=%s source=%zu working=%zu first=%zu source=[%s] working=[%s]\n",
+                        section, sourceCommitment.size(), workingCommitment.size(), mismatch, original, detached);
+#endif
 					workingSource.Nullify();
 					workingFace.Nullify();
 					failureStage = 11;

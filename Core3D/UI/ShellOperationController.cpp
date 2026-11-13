@@ -1220,6 +1220,11 @@ ShellOperationController::~ShellOperationController() noexcept
         myWorker->shutdown();
         myWorker.reset();
     }
+    // An inactive controller owns no presentation or selection. In particular,
+    // history redraw retains the old interactor until after the new selection
+    // is restored; destroying this empty controller must not clear that state.
+    if (mySource == nullptr && myPreviewResult.IsNull()
+        && myPendingCandidate.IsNull() && !myOwnsDocumentCommand) return;
     DocumentState aDocumentState = inspectDocumentState();
     if (aDocumentState == DocumentState::OpenCommand
         && abortOwnedCommand()) {

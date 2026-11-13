@@ -1267,6 +1267,7 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 - (void)endActiveRenderingInteractions;
 - (void)endRawPrimaryInteractionIfNeededCancelled:(BOOL)cancelled;
 - (void)checkSelections;
+- (void)checkSelectionsPreservingHistory:(BOOL)historyPublication;
 - (void)updateSelectedEdgeAppearance;
 - (void)updateSelectedSurfaceAppearance;
 - (void)clearSelectedFaceWash;
@@ -2896,10 +2897,14 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 }
 
 -(void) checkSelections {
+    [self checkSelectionsPreservingHistory:NO];
+}
+
+- (void)checkSelectionsPreservingHistory:(BOOL)historyPublication {
     _committedBoundariesDirty = YES;
     // Observe synchronously, before the debounced UI delegate. This also
     // catches a select/deselect round trip between two immutable scene reads.
-    if (_viewer != nullptr) _viewer->observeNativePlanningInteraction();
+    if (_viewer != nullptr) _viewer->observeNativePlanningInteraction(historyPublication);
 	bool isSelected = _viewer->getObjectInteractor()->isSelected();
 	bool isManipulatorAttached = _viewer->getObjectInteractor()->isManipulatorAttached();
 	unsigned char selections = Core3DViewer::kSelectionTypeNone;
@@ -3180,7 +3185,9 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
                 PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
         }
     }
-    if (result.refreshSelection) [self checkSelections];
+    if (result.refreshSelection) [self checkSelectionsPreservingHistory:
+        result.outcome == NativeHistoryOutcome::HistoryChanged
+            || result.outcome == NativeHistoryOutcome::NoHistory];
     if (result.requestRender) [self requestRender];
     if (result.primaryInteractionCancelled && _delegate != nil
         && [_delegate respondsToSelector:
