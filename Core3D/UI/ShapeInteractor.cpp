@@ -54,6 +54,7 @@
 #include <locale>
 #include <ostream>
 #include <set>
+#include <sstream>
 #include <streambuf>
 #include <unordered_set>
 #include <vector>
@@ -723,6 +724,37 @@ namespace core3d {
 				candidateSubshapeCount = 0;
 				candidateSolidCount = 0;
 				failureStage = 32;
+				return Standard_False;
+			}
+		}
+
+		// The saved file holds shapes in the binary format, and a few values come
+		// back from it changed only in sign (a -0 direction component reads as 0),
+		// which changes a face's fingerprint after a reopen. Keep the result exactly
+		// as the file will: round trip until the bytes no longer change.
+		Standard_Boolean FileStableResult(TopoDS_Shape& shape) noexcept {
+			try {
+				std::string currentBytes;
+				{
+					std::ostringstream writer;
+					BinTools::Write(shape, writer);
+					if (!writer.good()) return Standard_False;
+					currentBytes = writer.str();
+				}
+				for (int pass = 0; pass < 3; ++pass) {
+					std::istringstream reader(currentBytes);
+					TopoDS_Shape back;
+					BinTools::Read(back, reader);
+					if (back.IsNull()) return Standard_False;
+					std::ostringstream writer;
+					BinTools::Write(back, writer);
+					if (!writer.good()) return Standard_False;
+					shape = back;
+					if (writer.str() == currentBytes) return Standard_True;
+					currentBytes = writer.str();
+				}
+				return Standard_False;
+			} catch (...) {
 				return Standard_False;
 			}
 		}
@@ -1619,6 +1651,11 @@ namespace core3d {
 				return Standard_False;
 			}
 
+			if (!FileStableResult(candidateShape)) {
+				restoreExtrusionOriginalPresentation();
+				myContext->UpdateCurrentViewer();
+				return Standard_False;
+			}
 			Handle(AIS_Shape) candidate = new AIS_Shape(candidateShape);
 			candidate->SetLocalTransformation(_extrusion.transform);
 			myDoc->LoadObjectMeterial(_extrusion.label, candidate);
