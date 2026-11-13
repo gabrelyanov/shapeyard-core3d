@@ -7504,6 +7504,16 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 - (void)setOrthoProjection:(OrthoProjectionType)orthoType {
     _viewer->setOrthoProjection(orthoType);
     [self requestRender];
+    // Standard Views can coincide with UIKit dismissing its nested menu. A
+    // single native presentation may then be absent from the composed iPad
+    // frame even though OCCT completed it successfully. Publish one bounded
+    // recovery frame without waiting for the next edge tap or camera action.
+    __weak GLViewController *weakSelf = self;
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC),
+        dispatch_get_main_queue(), ^{
+            [weakSelf requestRender];
+        });
 }
 
 // =======================================================================
