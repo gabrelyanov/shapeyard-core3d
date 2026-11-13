@@ -3913,6 +3913,10 @@ struct NativeModelingPermitIssuer final {
 @interface Core3DViewController (ColourSessionPrivate)
 - (void)core3d_cancelColourWork:(std::shared_ptr<core3d::NativeColourSessionWork>)work;
 @end
+// The refusing boundary below cannot construct a publication yet.
+@implementation Core3DColourPresentation
+@end
+
 @interface Core3DColourEditSession () {
 @public
     __weak Core3DViewController* _colourOwner;
@@ -5719,6 +5723,12 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
         @"detachedEndpoints":@(p.detachedEndpoints),@"writtenEndpoints":@(p.writtenEndpoints)};
 }
 #endif
+- (Core3DColourPresentation *)captureColourPresentationForSession:(Core3DColourEditSession *)session {
+    // Failure-first bridge: qualify the five positive controls before adding
+    // native publication. This must not borrow the legacy ordinary fallback.
+    (void)session;
+    return nil;
+}
 - (Core3DSceneSnapshot *)captureColourPresentationSnapshot {
     if(![NSThread isMainThread]||!_isSetuped||!GLController||!GLController.viewer)return nil;
     const CGSize size=GLController.drawableSize;
