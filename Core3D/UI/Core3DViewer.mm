@@ -13458,6 +13458,9 @@ std::string R179SceneInstanceCensus(const scene::SceneSnapshot& snapshot) noexce
 } // namespace
 #endif
 
+// DEBUG: the last refusal stage of selectObjectFromBrowser, read by the Join tap trace.
+std::string g_r179LastSelectRefusal;
+
 bool Core3DViewer::selectObjectFromBrowser(
     const ObjectFrameIdentity& identity,
     const std::uint32_t viewportWidth,
@@ -13478,6 +13481,7 @@ bool Core3DViewer::selectObjectFromBrowser(
         || !_shapeInteractor->selectionModeAuthorityIsExact()) {
 #if DEBUG
         std::fprintf(stderr, "R179_SELECT_REFUSED stage=precondition\n");
+        g_r179LastSelectRefusal = "precondition";
 #endif
         return false;
     }
@@ -13488,6 +13492,7 @@ bool Core3DViewer::selectObjectFromBrowser(
             || snapshot->selectionMode != scene::ElementKind::Object) {
 #if DEBUG
             std::fprintf(stderr, "R179_SELECT_REFUSED stage=snapshot\n");
+        g_r179LastSelectRefusal = "snapshot";
 #endif
             return false;
         }
@@ -13496,6 +13501,7 @@ bool Core3DViewer::selectObjectFromBrowser(
             || identity.modelRevision != snapshot->revisions.model) {
 #if DEBUG
             std::fprintf(stderr, "R179_SELECT_REFUSED stage=snapshot-identity\n");
+        g_r179LastSelectRefusal = "snapshot-identity";
 #endif
             return false;
         }
@@ -13506,6 +13512,7 @@ bool Core3DViewer::selectObjectFromBrowser(
                     || !instance.selectable) {
 #if DEBUG
                     std::fprintf(stderr, "R179_SELECT_REFUSED stage=instance\n");
+        g_r179LastSelectRefusal = "instance";
 #endif
                     return false;
                 }
@@ -13525,6 +13532,7 @@ bool Core3DViewer::selectObjectFromBrowser(
                 sceneRows = R179SceneInstanceCensus(*snapshot);
             } catch (...) {}
             std::fprintf(stderr, "R179_SELECT_REFUSED stage=instance-count entity=%.128s matching=%zu total=%zu document=%.128s publication=%.128s generation=%llu model=%llu native=%s scene=%s\n", identity.entityIdentifier.c_str(), matchingInstances, snapshot->instances.size(), myDoc->DocumentIdentifier().c_str(), snapshot->publicationSourceIdentifier.c_str(), static_cast<unsigned long long>(snapshot->revisions.documentGeneration), static_cast<unsigned long long>(snapshot->revisions.model), nativeRows.c_str(), sceneRows.c_str());
+        g_r179LastSelectRefusal = "instance-count";
 #endif
             return false;
         }
@@ -13536,6 +13544,7 @@ bool Core3DViewer::selectObjectFromBrowser(
             if (++inspected > 50000) {
 #if DEBUG
                 std::fprintf(stderr, "R179_SELECT_REFUSED stage=target-bounds\n");
+        g_r179LastSelectRefusal = "target-bounds";
 #endif
                 return false;
             }
@@ -13549,6 +13558,7 @@ bool Core3DViewer::selectObjectFromBrowser(
                 || !myDoc->IsEditableFreeSimpleDefinitionLabel(label)) {
 #if DEBUG
                 std::fprintf(stderr, "R179_SELECT_REFUSED stage=target-editable\n");
+        g_r179LastSelectRefusal = "target-editable";
 #endif
                 return false;
             }
@@ -13557,12 +13567,14 @@ bool Core3DViewer::selectObjectFromBrowser(
         if (target.IsNull()) {
 #if DEBUG
             std::fprintf(stderr, "R179_SELECT_REFUSED stage=target-lookup\n");
+        g_r179LastSelectRefusal = "target-lookup";
 #endif
             return false;
         }
         if (!_objectInteractor->replaceSelectedObjectForBrowser(target, selectionWasTouched)) {
 #if DEBUG
             std::fprintf(stderr, "R179_SELECT_REFUSED stage=interactor-busy\n");
+        g_r179LastSelectRefusal = "interactor-busy " + g_r179LastSelectRefusal;
 #endif
             return false;
         }
@@ -13570,6 +13582,7 @@ bool Core3DViewer::selectObjectFromBrowser(
     } catch (...) {
 #if DEBUG
         std::fprintf(stderr, "R179_SELECT_REFUSED stage=exception\n");
+        g_r179LastSelectRefusal = "exception";
 #endif
         return false;
     }
