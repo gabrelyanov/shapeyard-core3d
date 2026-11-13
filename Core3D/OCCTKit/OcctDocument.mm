@@ -16212,6 +16212,19 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
             // authoritative; visual-material/texture definitions are shared.
             Standard_Size destinationLabels = 9U + profileLabels + enclosureLabels
                 + sweepLoftLabels + analyticBooleanLabels;
+            if (request.preservesAuthoredFaceMaterials) {
+                for (TDF_ChildIterator child(source, Standard_False); child.More(); child.Next()) {
+                    if (!XCAFDoc_ShapeTool::IsSubShape(child.Value())) continue;
+                    const auto visual = XCAFDoc_VisMaterialTool::GetShapeMaterial(child.Value());
+                    if (visual.IsNull()) continue;
+                    XCAFDoc_VisMaterialPBR faceMaterial;
+                    const auto face = XCAFDoc_ShapeTool::GetShape(child.Value());
+                    if (face.IsNull() || face.ShapeType() != TopAbs_FACE
+                        || !TryPBRMaterialForLabel(child.Value(), faceMaterial)
+                        || !AddMultipliedWithinLimit(destinationLabels, 1U, 1U,
+                            kMaximumGeometryDocumentLabels)) return Standard_False;
+                }
+            }
             Handle(TDataStd_Integer) localPBRMarker;
             const Standard_Boolean hasLocalPBR =
                 source.FindAttribute(

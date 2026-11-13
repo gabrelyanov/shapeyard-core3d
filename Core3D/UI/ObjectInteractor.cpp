@@ -4191,6 +4191,21 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			&& _linearArrayController->setCount(count);
 	}
 
+    Standard_Boolean ObjectInteractor::setLinearArrayRows(
+        const Standard_Integer rows) noexcept {
+        return _manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
+            && _linearArrayController != nullptr
+            && _linearArrayController->setRows(rows);
+    }
+
+    Standard_Integer ObjectInteractor::linearArrayRows() const noexcept {
+        return _linearArrayController == nullptr ? 1 : _linearArrayController->rows();
+    }
+
+    Standard_Integer ObjectInteractor::linearArrayMaximumRows() const noexcept {
+        return _linearArrayController == nullptr ? 1 : _linearArrayController->maximumRows();
+    }
+
 	Standard_Boolean ObjectInteractor::setLinearArraySpacing(
 		const Standard_Real spacing) noexcept {
 		return _manipulatorType

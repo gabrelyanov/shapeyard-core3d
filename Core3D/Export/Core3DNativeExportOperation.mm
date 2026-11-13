@@ -240,8 +240,69 @@ private:
 //! texture-copy failure inside RWObj_ObjMaterialMap.
 class ValidatedOBJWriter final : public RWObj_CafWriter {
 public:
-    explicit ValidatedOBJWriter(const TCollection_AsciiString& path, Core3DOBJColorConvention convention)
-    : RWObj_CafWriter(path), myConvention(convention) {
+    explicit ValidatedOBJWriter(const std::shared_ptr<NativeExportState>& state)
+    : RWObj_CafWriter(TCollection_AsciiString(state->primaryPath.c_str())),
+      myConvention(state->objColorConvention), myState(state),
+      myPositionsPath(std::filesystem::path(state->snapshotCleanupPath) / "obj-positions.bin"),
+      myPositions(myPositionsPath, std::ios::binary | std::ios::trunc) {
+        if (!myPositions.is_open()) {
+            throw NativeExportFailure(Core3DNativeExportErrorWriterFailed,
+                "The OBJ position staging file could not be opened.");
+        }
+    }
+
+    // OCCT's context narrows positions to Float and prints six fractional
+    // digits. Replace only its v records with the double positions captured
+    // in the same face/node order, before the private bundle is published.
+    void PreservePositions() {
+        myPositions.close();
+        if (!myPositions.good()) {
+            throw NativeExportFailure(Core3DNativeExportErrorWriterFailed,
+                "The OBJ positions could not be staged.");
+        }
+        const auto temporary = myState->primaryPath + ".positions.tmp";
+        std::ifstream input(myState->primaryPath, std::ios::binary);
+        std::ifstream positions(myPositionsPath, std::ios::binary);
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!input.is_open() || !positions.is_open() || !output.is_open()) {
+            throw NativeExportFailure(Core3DNativeExportErrorWriterFailed,
+                "The OBJ positions could not be retained.");
+        }
+        output.imbue(std::locale::classic());
+        output << std::setprecision(std::numeric_limits<double>::max_digits10);
+        std::string line;
+        std::size_t lineCount = 0, positionCount = 0;
+        while (std::getline(input, line)) {
+            if ((lineCount++ % 256) == 0) {
+                CheckPositionCancellation();
+            }
+            if (line.rfind("v ", 0) == 0) {
+                std::array<double, 3> point;
+                if (!positions.read(reinterpret_cast<char*>(point.data()), sizeof(double) * point.size())) {
+                    throw NativeExportFailure(Core3DNativeExportErrorInvalidArtifact,
+                        "The OBJ contains more positions than its source traversal.");
+                }
+                output << "v " << point[0] << ' ' << point[1] << ' ' << point[2] << '\n';
+                ++positionCount;
+            } else {
+                output << line << '\n';
+            }
+        }
+        output.flush();
+        if (!input.eof() || !output.good() || positionCount != myPositionCount
+            || positions.peek() != std::char_traits<char>::eof() || positions.bad()) {
+            throw NativeExportFailure(Core3DNativeExportErrorInvalidArtifact,
+                "The OBJ did not retain every source position.");
+        }
+        input.close();
+        positions.close();
+        output.close();
+        if (!output.good()) {
+            throw NativeExportFailure(Core3DNativeExportErrorWriterFailed,
+                "The OBJ positions could not be written.");
+        }
+        CheckPositionCancellation();
+        std::filesystem::rename(temporary, myState->primaryPath);
     }
 
     Standard_Integer ExpectedTextureCount() const {
@@ -296,6 +357,29 @@ protected:
                 myMaterialScalars.emplace(name, values);
             }
         }
+        // Capture placed, converted doubles before the base writer narrows
+        // them. Stream into this operation's snapshot directory so memory does
+        // not grow with mesh size and no scratch file enters the shared ZIP.
+        for (Standard_Integer node = face.NodeLower(); node <= face.NodeUpper(); ++node) {
+            if ((myPositionCount % 1024) == 0) {
+                CheckPositionCancellation();
+            }
+            gp_XYZ point = face.NodeTransformed(node).XYZ();
+            CoordinateSystemConverter().TransformPosition(point);
+            const std::array<double, 3> values{point.X(), point.Y(), point.Z()};
+            for (double value : values) {
+                if (!std::isfinite(value)) {
+                    throw NativeExportFailure(Core3DNativeExportErrorInvalidArtifact,
+                        "An OBJ source position is nonfinite.");
+                }
+            }
+            myPositions.write(reinterpret_cast<const char*>(values.data()), sizeof(double) * values.size());
+            if (!myPositions.good()) {
+                throw NativeExportFailure(Core3DNativeExportErrorWriterFailed,
+                    "The OBJ positions could not be staged.");
+            }
+            ++myPositionCount;
+        }
         return RWObj_CafWriter::writePositions(writer, progress, face);
     }
 
@@ -321,7 +405,18 @@ protected:
     }
 
 private:
+    void CheckPositionCancellation() const {
+        if (myState->cancelled.load(std::memory_order_acquire)) {
+            throw NativeExportFailure(Core3DNativeExportErrorCancelled,
+                "OBJ export was cancelled while retaining its positions.");
+        }
+    }
+
     Core3DOBJColorConvention myConvention;
+    std::shared_ptr<NativeExportState> myState;
+    std::filesystem::path myPositionsPath;
+    std::ofstream myPositions;
+    std::size_t myPositionCount = 0;
     std::unordered_map<std::string, PBRScalars> myMaterialScalars;
     NCollection_Map<Handle(Image_Texture)> myTextures;
     Standard_Boolean myCreatesMaterialFile = Standard_False;
@@ -2582,8 +2677,7 @@ NativeExportResult RunNativeExport(
                     ocafDocument,
                     rootLabels,
                     "The OBJ color table is unavailable.");
-                ValidatedOBJWriter writer(
-                    TCollection_AsciiString(state->primaryPath.c_str()), state->objColorConvention);
+                ValidatedOBJWriter writer(state);
                 const bool writerSucceeded = writer.Perform(
                     ocafDocument,
                     rootLabels,
@@ -2596,6 +2690,7 @@ NativeExportResult RunNativeExport(
                         Core3DNativeExportErrorWriterFailed,
                         "The OBJ writer reported a failure.");
                 }
+                writer.PreservePositions();
                 if (!EnsureOBJMaterialLibrary(state)) {
                     throw NativeExportFailure(
                         Core3DNativeExportErrorInvalidArtifact,
