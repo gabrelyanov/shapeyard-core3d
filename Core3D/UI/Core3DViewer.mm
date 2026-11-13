@@ -6018,6 +6018,88 @@ NativeBooleanRetention Core3DViewer::restoreBooleanAction(BooleanAction action)
     return NativeBooleanRetention::HostReconciliationRequired;
 }
 
+bool Core3DViewer::captureHistorySelectedEntities(std::vector<std::string>& entities) const noexcept
+{
+    entities.clear();
+    try {
+        if (myDoc.IsNull() || myContext.IsNull() || !_shapeInteractor
+            || _shapeInteractor->getSelectionMode() != ShapeSelectionMode::WholeShape
+            || !_shapeInteractor->selectionModeAuthorityIsExact()) return false;
+        for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+            if (entities.size() >= 50000) return false;
+            const auto object = myContext->SelectedInteractive();
+            const auto label = myDoc->ShapeLabel(object);
+            if (label.IsNull()) return false;
+            const auto entity = myDoc->EntityIdentifierForLabel(label);
+            if (entity.empty()) return false;
+            entities.push_back(entity);
+        }
+        std::sort(entities.begin(), entities.end());
+        entities.erase(std::unique(entities.begin(), entities.end()), entities.end());
+        return true;
+    } catch (...) { entities.clear(); return false; }
+}
+
+void Core3DViewer::prepareHistorySelection() noexcept
+{
+    std::vector<std::string> current;
+    const auto stamp = myDoc->CaptureNativePlanningStamp(true);
+    const bool captured = captureHistorySelectedEntities(current);
+    if (!stamp || !captured) {
+        _historySelectedEntities.clear(); _historySelectionStamp.reset(); return;
+    }
+    if (!_historySelectionStamp || !(*stamp == *_historySelectionStamp)
+        || current != _historyVisibleSelectedEntities) {
+        _historySelectedEntities = std::move(current);
+    }
+    _historySelectionStamp.reset();
+}
+
+void Core3DViewer::restoreHistorySelection() noexcept
+{
+    try {
+        if (!_shapeInteractor || _shapeInteractor->getSelectionMode() != ShapeSelectionMode::WholeShape
+            || !_shapeInteractor->selectionModeAuthorityIsExact()) return;
+        // Resolve only currently displayed, editable roots. An undone creation
+        // may be absent for many steps; retain its identity until it returns.
+        AIS_ListOfInteractive displayed;
+        myContext->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+        std::map<std::string, Handle(AIS_InteractiveObject)> matches;
+        std::size_t count = 0;
+        for (AIS_ListIteratorOfListOfInteractive item(displayed); item.More(); item.Next()) {
+            if (++count > 50000) return;
+            const auto object = item.Value();
+            const auto label = myDoc->ShapeLabel(object);
+            if (label.IsNull() || !myDoc->IsPresentationEditable(object)
+                || !myDoc->IsEditableFreeSimpleDefinitionLabel(label)) continue;
+            const auto entity = myDoc->EntityIdentifierForLabel(label);
+            if (!std::binary_search(_historySelectedEntities.begin(), _historySelectedEntities.end(), entity)) continue;
+            // Ambiguous instances are never guessed at.
+            if (!matches.emplace(entity, object).second) matches[entity].Nullify();
+        }
+        std::vector<Handle(AIS_InteractiveObject)> targets;
+        for (const auto& match : matches)
+            if (!match.second.IsNull()) targets.push_back(match.second);
+        if (!targets.empty() && targets.size() <= 32) {
+            // This path restores all manipulator attachments and saved group
+            // pivots atomically; the legacy attachment helper binds only the
+            // last selected object.
+            bool touched = false;
+            const bool restored = _objectInteractor->replaceSelectedObjectsForBrowser(targets, touched);
+            if (!restored) return;
+        } else {
+            // Larger selections remain selected, without inventing an
+            // unqualified group manipulator beyond the existing 32-part limit.
+            for (const auto& target : targets)
+                myContext->AddOrRemoveSelected(target->GlobalSelOwner(), Standard_False);
+            _objectInteractor->detachManipulator(false);
+            myContext->UpdateCurrentViewer();
+        }
+        if (captureHistorySelectedEntities(_historyVisibleSelectedEntities))
+            _historySelectionStamp = myDoc->CaptureNativePlanningStamp(true);
+    } catch (...) { _historySelectionStamp.reset(); }
+}
+
 NativeHistoryTransition Core3DViewer::performHistory(NativeHistoryDirection direction)
 {
     NativeHistoryTransition result;
@@ -6104,17 +6186,27 @@ NativeHistoryTransition Core3DViewer::performHistory(NativeHistoryDirection dire
         cancelledPreview(cancelled, true);
         return result;
     }
+    prepareHistorySelection();
     objectInteractor->detachManipulator(false);
     if (!ownsHistory()) return result;
     const bool canChange = direction == NativeHistoryDirection::Undo
         ? document->canUndo() : document->canRedo();
     result.outcome = NativeHistoryOutcome::NoHistory;
     if (canChange) {
+        const Handle(TDocStd_Document) nativeDocument = document->Document();
         const bool changed = direction == NativeHistoryDirection::Undo
             ? document->undo() : document->redo();
         result.outcome = changed ? NativeHistoryOutcome::HistoryChanged
                                  : NativeHistoryOutcome::HistoryFailed;
-        if (changed) result.documentRedrawn = redrawDocument();
+        if (changed && myDoc == document && document->Document() == nativeDocument) {
+            result.documentRedrawn = redrawDocument();
+            if (result.documentRedrawn) restoreHistorySelection();
+        }
+    } else {
+        // An extra Undo at the beginning must not forget selected parts that
+        // are temporarily absent and will return on Redo.
+        if (captureHistorySelectedEntities(_historyVisibleSelectedEntities))
+            _historySelectionStamp = document->CaptureNativePlanningStamp(true);
     }
     if (booleanAction) {
         result.reconcileBooleanTool = restoreBooleanAction(*booleanAction)
@@ -6695,8 +6787,16 @@ Core3DViewer::captureNativeSelectionReplacementContext(
     }
 }
 
-void Core3DViewer::observeNativePlanningInteraction() noexcept {
-    if (!myDoc.IsNull()) myDoc->ObserveNativePlanningInteraction();
+void Core3DViewer::observeNativePlanningInteraction(bool historyPublication) noexcept {
+    if (myDoc.IsNull()) return;
+    // History's bridge publishes the restored selection before its delegate.
+    // Advance the ordinary authority fence, but carry our bookmark through
+    // this one publication. Reentrant/user changes still invalidate it.
+    const auto before = historyPublication ? myDoc->CaptureNativePlanningStamp(true)
+                                           : std::optional<authority::Stamp>();
+    const bool carry = before && _historySelectionStamp && *before == *_historySelectionStamp;
+    myDoc->ObserveNativePlanningInteraction();
+    if (carry) _historySelectionStamp = myDoc->CaptureNativePlanningStamp(true);
 }
 
 bool Core3DViewer::canBeginCommittedEdit() const noexcept {
