@@ -2890,7 +2890,6 @@ Standard_Boolean Core3DValidateRetainedEdgeTreatmentDocumentForPrepare(
 #import "GLView.h"
 #import "GLViewController.h"
 #include "../UI/ShellOperationController.hpp"
-#include <BRepPrimAPI_MakeTorus.hxx>
 #include <AIS_ListIteratorOfListOfInteractive.hxx>
 #include <Precision.hxx>
 #include <Standard_ErrorHandler.hxx>
