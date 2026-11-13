@@ -2244,6 +2244,14 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     }
 
     __weak typeof(self) weakSelf = self;
+    _viewer->setGeometrySnapFeedbackChangedCallback([weakSelf](bool ended) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf && strongSelf->_delegate
+            && [strongSelf->_delegate respondsToSelector:
+                @selector(viewer:didChangeGeometrySnapFeedbackEnded:)]) {
+            [strongSelf->_delegate viewer:strongSelf didChangeGeometrySnapFeedbackEnded:ended];
+        }
+    });
     _viewer->setBooleanPreviewStateChangedCallback([weakSelf]() {
         dispatch_async(dispatch_get_main_queue(), ^{
             __strong typeof(weakSelf) strongSelf = weakSelf;
@@ -4033,6 +4041,8 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     const auto countRange = interactor->linearArrayCountRange();
     const auto spacingRange = interactor->linearArraySpacingRange();
     parameters.count = interactor->linearArrayCount();
+    parameters.rows = interactor->linearArrayRows();
+    parameters.maximumRows = interactor->linearArrayMaximumRows();
     parameters.minimumCount = countRange.first;
     parameters.maximumCount = countRange.second;
     parameters.spacing = interactor->linearArraySpacing();
@@ -4076,6 +4086,19 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     }
     const BOOL didSet = _viewer->getObjectInteractor()
         ->setLinearArrayCount(static_cast<Standard_Integer>(count));
+    [self requestRender];
+    return didSet;
+}
+
+- (BOOL)setLinearArrayRows:(NSInteger)rows {
+    if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr
+        || [self getGizmoType] != PrimitiveGizmoTypeLinearArray
+        || rows < 1
+        || rows > std::numeric_limits<Standard_Integer>::max()) {
+        return NO;
+    }
+    const BOOL didSet = _viewer->getObjectInteractor()
+        ->setLinearArrayRows(static_cast<Standard_Integer>(rows));
     [self requestRender];
     return didSet;
 }
@@ -5670,6 +5693,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
             static_cast<unsigned long long>(state.generation)),
         @"previewBodyCount": @(state.previewBodyCount),
         @"pendingResultCount": @(state.pendingResultCount),
+        @"applyFailureLine": @(state.applyFailureLine),
         @"activeOperation": @(
             state.activeOperation != Standard_False),
         @"previewValid": @(state.previewValid != Standard_False),

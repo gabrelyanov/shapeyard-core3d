@@ -5826,6 +5826,8 @@ void Core3DViewer::release() noexcept {
     _meshRegionExtrudeWork.reset();
     _meshRegionInsetWork.reset();
     _interactiveCallback = {};
+    _geometrySnapFeedbackChangedCallback = {};
+    if (_objectInteractor) _objectInteractor->setGeometrySnapFeedbackChangedCallback({});
     _booleanPreviewStateChangedCallback = {};
     _linearArrayPreviewStateChangedCallback = {};
     _bevelPreviewStateChangedCallback = {};
@@ -5952,6 +5954,8 @@ bool Core3DViewer::InitViewer (Core3DPlatformView* theWin) {
             const float device_independent_side = Core3DManipulatorSidePixels();
 #endif
             _objectInteractor = std::make_shared<ObjectInteractor>(myContext, myView, myDoc, device_independent_side);
+            _objectInteractor->setGeometrySnapFeedbackChangedCallback(
+                _geometrySnapFeedbackChangedCallback);
             _objectInteractor->setBooleanPreviewStateChangedCallback(
                 _booleanPreviewStateChangedCallback);
             _objectInteractor->setLinearArrayPreviewStateChangedCallback(
@@ -6264,6 +6268,8 @@ bool Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorTy
     std::shared_ptr<ObjectInteractor> objectInteractor =
         std::make_shared<ObjectInteractor>(
             myContext, myView, myDoc, manipulatorSide);
+    objectInteractor->setGeometrySnapFeedbackChangedCallback(
+        _geometrySnapFeedbackChangedCallback);
     objectInteractor->setBooleanPreviewStateChangedCallback(
         _booleanPreviewStateChangedCallback);
     objectInteractor->setLinearArrayPreviewStateChangedCallback(
@@ -6357,6 +6363,12 @@ bool Core3DViewer::publishRecreatedInteractorState() noexcept
     } catch (...) {
         return false;
     }
+}
+
+void Core3DViewer::setGeometrySnapFeedbackChangedCallback(std::function<void(bool)> callback) {
+    _geometrySnapFeedbackChangedCallback = std::move(callback);
+    if (_objectInteractor)
+        _objectInteractor->setGeometrySnapFeedbackChangedCallback(_geometrySnapFeedbackChangedCallback);
 }
 
 void Core3DViewer::setBooleanPreviewStateChangedCallback(

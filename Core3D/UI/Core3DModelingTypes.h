@@ -1041,7 +1041,8 @@ typedef NS_ENUM(NSInteger, Core3DLinearArrayAxis) {
 };
 
 //! Native-authoritative parameters and bounds for one active Linear Array.
-//! Count is the total number of objects, including the unchanged source.
+//! Count includes the unchanged source in each row. With rows == 1 this is
+//! the total part count; a grid contains count * rows separate parts.
 typedef struct {
     Core3DLinearArrayAxis axis;
     NSInteger count;
@@ -1052,6 +1053,9 @@ typedef struct {
     CGFloat maximumSpacing;
     //! Physical document scale used to present spacing in millimetres.
     double metersPerUnit;
+    //! Grid rows (one means a plain row). Both directions use spacing.
+    NSInteger rows;
+    NSInteger maximumRows;
 } Core3DLinearArrayParameters;
 
 //! Coordinate authority for one Reference Axis component. Numeric values are
@@ -1227,6 +1231,7 @@ typedef struct {
 - (Core3DLinearArrayParameters)getLinearArrayParameters;
 - (BOOL)setLinearArrayAxis:(Core3DLinearArrayAxis)axis;
 - (BOOL)setLinearArrayCount:(NSInteger)count;
+- (BOOL)setLinearArrayRows:(NSInteger)rows;
 - (BOOL)setLinearArraySpacing:(CGFloat)spacing;
 - (Core3DModelingOperationResult)tryApplyLinearArray
     NS_SWIFT_NAME(tryApplyLinearArray());

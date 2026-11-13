@@ -648,7 +648,7 @@ public:
         const Handle(AIS_Shape)& theResultShape,
         const TDF_Label& theSuppressedSourceLabel) noexcept;
 
-    //! Publish one source mesh/material with one world-space instance per
+    //! Publish one source mesh and its bounded face-material table, with one instance per
     //! explicitly owned Linear Array preview body. Geometry and appearance are
     //! copied once from the first handle's existing cache; the committed source
     //! remains unchanged and is never suppressed. Main-thread only.

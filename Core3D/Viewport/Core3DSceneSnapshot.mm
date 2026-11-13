@@ -3525,7 +3525,7 @@ bool IsValidPresentationOverlaySnapshotImpl(
         case PresentationOverlayKind::LinearArrayPreview:
             if (!isEmpty
                 && (snapshot.meshes.size() != 1
-                    || snapshot.materials.size() != 1
+                    || snapshot.materials.empty()
                     || snapshot.instances.empty()
                     || snapshot.instances.size()
                         > kMaximumLinearArrayPreviewBodies)) {
@@ -3678,9 +3678,9 @@ bool IsValidPresentationOverlaySnapshotImpl(
             hasExpectedAlpha = material.alphaMode == AlphaMode::Opaque
                 && material.baseColor.w == 1.0f;
         } else if (isLinearArrayMaterial) {
-            hasExpectedIdentifier = materialIndex == 0
-                && material.identifier
-                    == "linear-array/source/0/material";
+            hasExpectedIdentifier = material.identifier
+                == (materialIndex == 0 ? "linear-array/source/0/material"
+                    : "linear-array/source/0/material/" + std::to_string(materialIndex));
             hasExpectedAlpha = material.alphaMode == AlphaMode::Opaque
                 && material.baseColor.w == 1.0f;
         } else if (isRadialArrayMaterial) {
@@ -4003,13 +4003,19 @@ bool IsValidPresentationOverlaySnapshotImpl(
             && !isLinearArrayItem && !isRadialArrayItem) {
             return false;
         }
+        if (isLinearArrayItem && !std::equal(
+                instance.primitiveBindings.begin(), instance.primitiveBindings.end(),
+                snapshot.instances.front().primitiveBindings.begin(),
+                [](const auto& left, const auto& right) {
+                    return left.materialIndex == right.materialIndex;
+                })) return false;
         for (const PrimitiveBinding& binding :
              instance.primitiveBindings) {
             if (((isMirrorPlane || isMirrorPreview
                     || isBooleanItem || isChamferItem
-                    || isLinearArrayItem || isRadialArrayItem || isShellItem)
+                    || isRadialArrayItem || isShellItem)
                     && binding.materialIndex
-                        != ((isLinearArrayItem || isRadialArrayItem)
+                        != (isRadialArrayItem
                             ? 0 : instanceIndex))
                 || binding.materialIndex >= snapshot.materials.size()
                 || binding.pickToken != 0 || !binding.visible) {
@@ -4037,8 +4043,9 @@ bool IsValidPresentationOverlaySnapshotImpl(
         return isEmpty
             || (meshReferences.size() == 1
             && meshReferences[0] == snapshot.instances.size()
-            && materialReferences.size() == 1
-            && materialReferences[0] == 1);
+            && (isLinearArrayPreview || materialReferences.size() == 1)
+            && std::all_of(materialReferences.begin(), materialReferences.end(),
+                [](const auto count) { return count == 1; }));
     }
     return std::all_of(meshReferences.begin(), meshReferences.end(),
                        [](const std::uint8_t count) { return count == 1; })
