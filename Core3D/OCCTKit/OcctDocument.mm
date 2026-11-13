@@ -22,6 +22,7 @@
 #include <TNaming_Iterator.hxx>
 #include <BRepTools.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakeTorus.hxx>
 #include <BinTools_ShapeReader.hxx>
 #include <BinTools_ShapeSet.hxx>
 #include <BinTools_ShapeWriter.hxx>
