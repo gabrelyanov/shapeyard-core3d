@@ -16,6 +16,7 @@
 #import <Foundation/Foundation.h>
 #include "OcctViewer.h"
 #include "AIS_Manipulator.hxx"
+#include <StdSelect_BRepOwner.hxx>
 
 #import <Core3D/PrimitiveType.h>
 
@@ -661,6 +662,13 @@ namespace core3d {
         /***
          Interactions
          */
+        struct MeasurePick {
+            Handle(StdSelect_BRepOwner) owner;
+            TopoDS_Shape worldEdge;
+            gp_Pnt pickedPoint;
+            double pixelTolerance = 0;
+        };
+        std::vector<MeasurePick> measurePicksForCurrentSelection() noexcept;
         void Select(int theX, int theY);
         void StartRotation(int theX, int theY);
         void Rotation(int theX, int theY);
@@ -695,7 +703,7 @@ namespace core3d {
         bool beginCapturedShell(const FaceOperationSourceProof& proof) noexcept;
         //! Conservative semantic transition fence, including failed/no-op
         //! selection and tool attempts. Camera-only publication does not call it.
-        void observeNativePlanningInteraction() noexcept;
+        void observeNativePlanningInteraction(bool historyPublication = false) noexcept;
         //! Duplicate presentation repair is intentionally exposed separately:
         //! committed snapshots and project serialization must fail closed while
         //! its result ledger remains the sole recovery authority.
@@ -1124,6 +1132,15 @@ namespace core3d {
             std::vector<Handle(AIS_Shape)>& presentations) const noexcept;
 
     private:
+        // Session-only identities across consecutive history transitions. No AIS
+        // handles or topology indices survive a redraw; explicit interaction,
+        // another edit or document adoption invalidates this bookmark.
+        std::vector<std::string> _historySelectedEntities;
+        std::vector<std::string> _historyVisibleSelectedEntities;
+        std::optional<authority::Stamp> _historySelectionStamp;
+        bool captureHistorySelectedEntities(std::vector<std::string>&) const noexcept;
+        void prepareHistorySelection() noexcept;
+        void restoreHistorySelection() noexcept;
         friend class RawR2BevelPreviewAdapter;
         bool validateRawR2CandidateFence(
             const std::shared_ptr<const retained_edge_treatment::r2::RawTargetCapture>&,
@@ -1198,6 +1215,7 @@ namespace core3d {
         std::shared_ptr<ShapeInteractor> _shapeInteractor;
         std::shared_ptr<TransformInspectorMeasurementController>
             _transformInspectorMeasurementController;
+        std::vector<MeasurePick> _measurePicks;
         
         std::function<void(int,int)> _interactiveCallback;
         std::function<void(bool)> _geometrySnapFeedbackChangedCallback;

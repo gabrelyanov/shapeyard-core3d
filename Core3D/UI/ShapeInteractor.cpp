@@ -23,6 +23,7 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <GeomAdaptor_Curve.hxx>
+#include <Geom_Conic.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <BRepFeat_MakePrism.hxx>
 #include <BRepFeat_SplitShape.hxx>
@@ -53,6 +54,7 @@
 #include <locale>
 #include <ostream>
 #include <set>
+#include <sstream>
 #include <streambuf>
 #include <unordered_set>
 #include <vector>
@@ -441,6 +443,38 @@ namespace core3d {
 					return Standard_False;
 				}
 
+                // BinTools reconstructs a conic's gp_Ax2 from its directions;
+                // that can change signed zeros before any modeling runs.
+                // Preserve the frame by value on the detached curve only.
+                // The complete raw V3 comparison below still proves the copy.
+                // Both maps are bounded by the source/working census above.
+                TopTools_IndexedMapOfShape sourceEdges, workingEdges;
+                TopExp::MapShapes(source, TopAbs_EDGE, sourceEdges);
+                TopExp::MapShapes(workingSource, TopAbs_EDGE, workingEdges);
+                if (sourceEdges.Extent() != workingEdges.Extent()) {
+                    workingSource.Nullify();
+                    workingFace.Nullify();
+                    failureStage = 11;
+                    return Standard_False;
+                }
+                for (Standard_Integer index = 1; index <= sourceEdges.Extent(); ++index) {
+                    TopLoc_Location sourceLocation, workingLocation;
+                    Standard_Real first = 0, last = 0;
+                    const auto original = Handle(Geom_Conic)::DownCast(
+                        BRep_Tool::Curve(TopoDS::Edge(sourceEdges(index)), sourceLocation, first, last));
+                    if (original.IsNull()) continue;
+                    const auto copied = Handle(Geom_Conic)::DownCast(
+                        BRep_Tool::Curve(TopoDS::Edge(workingEdges(index)), workingLocation, first, last));
+                    if (copied.IsNull() || copied == original
+                        || copied->DynamicType() != original->DynamicType()) {
+                        workingSource.Nullify();
+                        workingFace.Nullify();
+                        failureStage = 11;
+                        return Standard_False;
+                    }
+                    copied->SetPosition(original->Position());
+                }
+
 				ExtrusionGeometryBuffer sourceCommitment;
 				ExtrusionGeometryBuffer workingCommitment;
 				if (!WriteExtrusionGeometryCommitment(
@@ -454,6 +488,29 @@ namespace core3d {
 						sourceCommitment.data()
 							+ sourceCommitment.size(),
 						workingCommitment.data())) {
+#if DEBUG
+                    const auto length = std::min(sourceCommitment.size(), workingCommitment.size());
+                    std::size_t mismatch = 0;
+                    while (mismatch < length && sourceCommitment.data()[mismatch] == workingCommitment.data()[mismatch]) ++mismatch;
+                    const auto start = mismatch > 20 ? mismatch - 20 : 0;
+                    char original[81] = {}, detached[81] = {};
+                    for (std::size_t index = 0; index < 80; ++index) {
+                        if (start + index < sourceCommitment.size()) {
+                            const char value = sourceCommitment.data()[start + index];
+                            original[index] = value == '\n' ? '|' : value;
+                        }
+                        if (start + index < workingCommitment.size()) {
+                            const char value = workingCommitment.data()[start + index];
+                            detached[index] = value == '\n' ? '|' : value;
+                        }
+                    }
+                    const std::string prefix(sourceCommitment.data(), mismatch);
+                    const auto curves = prefix.rfind("Curves ");
+                    const auto surfaces = prefix.rfind("Surfaces ");
+                    const char* section = surfaces != std::string::npos && (curves == std::string::npos || surfaces > curves) ? "surfaces" : "curves";
+                    fprintf(stderr, "BASE_DETACH section=%s source=%zu working=%zu first=%zu source=[%s] working=[%s]\n",
+                        section, sourceCommitment.size(), workingCommitment.size(), mismatch, original, detached);
+#endif
 					workingSource.Nullify();
 					workingFace.Nullify();
 					failureStage = 11;
@@ -667,6 +724,37 @@ namespace core3d {
 				candidateSubshapeCount = 0;
 				candidateSolidCount = 0;
 				failureStage = 32;
+				return Standard_False;
+			}
+		}
+
+		// The saved file holds shapes in the binary format, and a few values come
+		// back from it changed only in sign (a -0 direction component reads as 0),
+		// which changes a face's fingerprint after a reopen. Keep the result exactly
+		// as the file will: round trip until the bytes no longer change.
+		Standard_Boolean FileStableResult(TopoDS_Shape& shape) noexcept {
+			try {
+				std::string currentBytes;
+				{
+					std::ostringstream writer;
+					BinTools::Write(shape, writer);
+					if (!writer.good()) return Standard_False;
+					currentBytes = writer.str();
+				}
+				for (int pass = 0; pass < 3; ++pass) {
+					std::istringstream reader(currentBytes);
+					TopoDS_Shape back;
+					BinTools::Read(back, reader);
+					if (back.IsNull()) return Standard_False;
+					std::ostringstream writer;
+					BinTools::Write(back, writer);
+					if (!writer.good()) return Standard_False;
+					shape = back;
+					if (writer.str() == currentBytes) return Standard_True;
+					currentBytes = writer.str();
+				}
+				return Standard_False;
+			} catch (...) {
 				return Standard_False;
 			}
 		}
@@ -1563,6 +1651,11 @@ namespace core3d {
 				return Standard_False;
 			}
 
+			if (!FileStableResult(candidateShape)) {
+				restoreExtrusionOriginalPresentation();
+				myContext->UpdateCurrentViewer();
+				return Standard_False;
+			}
 			Handle(AIS_Shape) candidate = new AIS_Shape(candidateShape);
 			candidate->SetLocalTransformation(_extrusion.transform);
 			myDoc->LoadObjectMeterial(_extrusion.label, candidate);

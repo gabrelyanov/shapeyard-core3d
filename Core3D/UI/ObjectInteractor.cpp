@@ -17,6 +17,7 @@
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <Geom_BSplineSurface.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
@@ -68,6 +69,44 @@
 
 namespace core3d {
 	namespace {
+        // A general transform represents an oval cylinder as a rational
+        // spline. Prove an extrusion from its complete control net, rather
+        // than confusing a tangent to an arbitrary spline with a generator.
+        bool HasSplineSnapGenerator(const BRepAdaptor_Surface& surface, const gp_Dir& axis) {
+            if (surface.GetType() != GeomAbs_BSplineSurface) return false;
+            const auto spline = surface.Surface().BSpline();
+            if (spline.IsNull()) return false;
+            for (bool alongU : {false,true}) {
+                if ((alongU ? spline->UDegree() : spline->VDegree()) != 1
+                    || (alongU ? spline->NbUPoles() : spline->NbVPoles()) != 2
+                    || (alongU ? spline->IsUPeriodic() : spline->IsVPeriodic())) continue;
+                const int count = alongU ? spline->NbVPoles() : spline->NbUPoles();
+                if (count < 2 || count > 128) continue;
+                gp_Vec generator;
+                bool proven = true;
+                for (int i = 1; i <= count; ++i) {
+                    const int u = alongU ? 1 : i, v = alongU ? i : 1;
+                    const int nextU = alongU ? 2 : i, nextV = alongU ? i : 2;
+                    const double weight = spline->Weight(u,v);
+                    if (!std::isfinite(weight) || weight <= 0
+                        || weight != spline->Weight(nextU,nextV)) { proven = false; break; }
+                    const gp_Pnt a = spline->Pole(u,v).Transformed(surface.Trsf());
+                    const gp_Pnt b = spline->Pole(nextU,nextV).Transformed(surface.Trsf());
+                    const gp_Vec shift(a,b);
+                    const double length = shift.Magnitude();
+                    if (!std::isfinite(length) || length <= Precision::Confusion()
+                        || !gp_Dir(shift).IsParallel(axis,Precision::Angular())) { proven = false; break; }
+                    if (i == 1) generator = shift;
+                    const double roundoff = 64 * std::numeric_limits<double>::epsilon()
+                        * std::max({1.0,std::abs(a.X()),std::abs(a.Y()),std::abs(a.Z()),
+                                    std::abs(b.X()),std::abs(b.Y()),std::abs(b.Z())});
+                    if ((shift - generator).Magnitude() > roundoff) { proven = false; break; }
+                }
+                if (proven) return true;
+            }
+            return false;
+        }
+
         // Preserve absent legacy units as distinct authority. The established
         // legacy interpretation is millimetres; reading must not add metadata.
         bool ReadMirrorDocumentUnits(const Handle(TDocStd_Document)& document,
@@ -2617,6 +2656,14 @@ namespace core3d {
                             BRepAdaptor_Surface surface(TopoDS::Face(hit->topology));
                             continuous = surface.GetType() == GeomAbs_Plane
                                 && std::abs(surface.Plane().Axis().Direction().Dot(axis)) <= Precision::Angular();
+                            // Moving along a cylinder's generator stays on
+                            // its wall too. That contact must not hide a cap
+                            // edge which the same moving vertex can reach.
+                            if (surface.GetType() == GeomAbs_Cylinder)
+                                continuous = surface.Cylinder().Axis().Direction()
+                                    .IsParallel(axis,Precision::Angular());
+                            else if (surface.GetType() == GeomAbs_BSplineSurface)
+                                continuous = HasSplineSnapGenerator(surface,axis);
                         } else if (hit->kind == GeometrySnapKind::Edge) {
                             BRepAdaptor_Curve curve(TopoDS::Edge(hit->topology));
                             continuous = curve.GetType() == GeomAbs_Line
@@ -2765,7 +2812,7 @@ namespace core3d {
     bool ObjectInteractor::debugReplayGesture(
         const Standard_Integer mode, const Standard_Integer axis,
         const std::vector<Standard_Real>& values,
-        std::vector<std::array<Standard_Real, 2>>& samples, bool cancel) noexcept {
+        std::vector<std::array<Standard_Real, 2>>& samples, bool cancel, bool physicalScale) noexcept {
         samples.clear();
         _debugGestureTrace.clear();
         _debugGestureTraceIndices.clear();
@@ -2786,6 +2833,19 @@ namespace core3d {
             const AIS_ManipulatorMode modes[] = {
                 AIS_MM_Translation, AIS_MM_Rotation,
                 AIS_MM_ScalingUniform, AIS_MM_Scaling};
+            // Explicit opt-in keeps legacy raw-unit fixtures byte-for-byte
+            // equivalent while resolving physical-size edits in metre files.
+            double modelUnitsPerMM = 1.0;
+            if (physicalScale) {
+                double metersPerUnit = 0.001;
+                bool hasUnits = false;
+                if (!ReadMirrorDocumentUnits(myDoc->Document(), metersPerUnit, hasUnits)) return false;
+                modelUnitsPerMM = 0.001 / metersPerUnit;
+            }
+            const double cameraSpan = 400.0 * modelUnitsPerMM;
+            const double handleRadius = 100.0 * modelUnitsPerMM;
+            if (!std::isfinite(cameraSpan) || !std::isfinite(handleRadius)
+                || handleRadius <= Precision::Confusion()) return false;
             const gp_Ax2 position = _manipulator->Position();
             const gp_Dir directions[] = {
                 position.XDirection(), position.YDirection(), position.Direction()};
@@ -2799,10 +2859,10 @@ namespace core3d {
             // after Undo. Define the complete orientation together so each
             // replay projects identical world samples onto identical pixels.
             myView->Camera()->SetEyeAndCenter(
-                position.Location().Translated(gp_Vec(400.0, 400.0, 400.0)),
+                position.Location().Translated(gp_Vec(cameraSpan, cameraSpan, cameraSpan)),
                 position.Location());
             myView->Camera()->SetUp(gp_Dir(-1.0, -1.0, 2.0));
-            myView->Camera()->SetScale(400.0);
+            myView->Camera()->SetScale(cameraSpan);
             myView->Redraw();
             std::vector<std::array<Standard_Integer, 2>> points;
             for (const Standard_Real value : values) {
@@ -2812,14 +2872,14 @@ namespace core3d {
                 }
                 gp_Pnt point = position.Location();
                 if (mode == 1) {
-                    point.Translate(gp_Vec(directions[(axis + 1) % 3]) * 100.0);
+                    point.Translate(gp_Vec(directions[(axis + 1) % 3]) * handleRadius);
                     gp_Trsf rotation;
                     rotation.SetRotation(gp_Ax1(position.Location(), directions[axis]),
                         value * M_PI / 180.0);
                     point.Transform(rotation);
                 } else {
                     point.Translate(gp_Vec(directions[axis])
-                        * (mode >= 2 ? 100.0 * value : 100.0 + value));
+                        * (mode >= 2 ? handleRadius * value : handleRadius + value));
                 }
                 Standard_Integer x = 0, y = 0;
                 myView->Convert(point.X(), point.Y(), point.Z(), x, y);
@@ -3196,6 +3256,8 @@ namespace core3d {
         attachManipulatorToSelection();
     }
 
+    extern std::string g_r179LastSelectRefusal;   // defined in Core3DViewer.mm (DEBUG Join trace)
+
     bool ObjectInteractor::replaceSelectedObjectForBrowser(
         const Handle(AIS_InteractiveObject)& target, bool& selectionWasTouched) noexcept {
         return replaceSelectedObjectsForBrowser({target}, selectionWasTouched);
@@ -3225,6 +3287,7 @@ namespace core3d {
                     && _manipulatorType != PrimitiveManipulatorType::PrimitiveGizmoTypeScale)) {
 #ifdef DEBUG
                 std::fprintf(stderr, "R179_SELECT_REFUSED stage=precondition\n");
+                g_r179LastSelectRefusal = std::string("browser-precondition unresolved=") + (hasUnresolvedEdit() ? "1" : "0") + " gesture=" + (_manipulatorGestureActive ? "1" : "0") + " active=" + ((!_manipulator.IsNull() && _manipulator->HasActiveTransformation()) ? "1" : "0") + " type=" + std::to_string(static_cast<int>(_manipulatorType));
 #endif
                 return false;
             }
@@ -3232,6 +3295,7 @@ namespace core3d {
             if (document.IsNull() || document->HasOpenCommand()) {
 #ifdef DEBUG
                 std::fprintf(stderr, "R179_SELECT_REFUSED stage=open-command\n");
+                g_r179LastSelectRefusal = "browser-open-command";
 #endif
                 return false;
             }
@@ -3255,18 +3319,36 @@ namespace core3d {
                 if (!isCommittedPresentation(target)) {
 #ifdef DEBUG
                     std::fprintf(stderr, "R179_SELECT_REFUSED stage=target-committed\n");
+                    {
+                        const Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(target);
+                        const TDF_Label label = shape.IsNull() ? TDF_Label() : myDoc->ShapeLabel(target);
+                        gp_Trsf transform;
+                        const bool hasTransform = !label.IsNull() && myDoc->TryObjectTransformForLabel(label, transform);
+                        g_r179LastSelectRefusal = std::string("browser-target-committed")
+                            + " shape=" + (shape.IsNull() ? "null" : "ok")
+                            + " displayed=" + (!shape.IsNull() && myContext->IsDisplayed(target) ? "1" : "0")
+                            + " editable=" + (!shape.IsNull() && myDoc->IsPresentationEditable(target) ? "1" : "0")
+                            + " label=" + (label.IsNull() ? "null" : "ok")
+                            + " free=" + (!label.IsNull() && myDoc->IsEditableFreeSimpleDefinitionLabel(label) ? "1" : "0")
+                            + " repr=" + (!label.IsNull() && IsObjectModelingRepresentation(myDoc->GeometryRepresentationForLabel(label)) ? "1" : "0")
+                            + " same=" + (!label.IsNull() && !shape.IsNull() && XCAFDoc_ShapeTool::GetShape(label).IsEqual(shape->Shape()) ? "1" : "0")
+                            + " partner=" + (!label.IsNull() && !shape.IsNull() && XCAFDoc_ShapeTool::GetShape(label).IsPartner(shape->Shape()) ? "1" : "0")
+                            + " trsf=" + (hasTransform ? (TransformDiffers(transform, shape->LocalTransformation()) ? "differs" : "same") : "none");
+                    }
 #endif
                     return false;
                 }
                 if (!targetSet.insert(target.get()).second) {
 #ifdef DEBUG
                     std::fprintf(stderr, "R179_SELECT_REFUSED stage=target-duplicate\n");
+                g_r179LastSelectRefusal = "browser-target-duplicate";
 #endif
                     return false;
                 }
                 if (target->GlobalSelOwner().IsNull()) {
 #ifdef DEBUG
                     std::fprintf(stderr, "R179_SELECT_REFUSED stage=target-owner\n");
+                g_r179LastSelectRefusal = "browser-target-owner";
 #endif
                     return false;
                 }
@@ -3279,6 +3361,7 @@ namespace core3d {
                     || !isCommittedPresentation(object)) {
 #ifdef DEBUG
                     std::fprintf(stderr, "R179_SELECT_REFUSED stage=previous-committed\n");
+                g_r179LastSelectRefusal = "browser-previous-committed";
 #endif
                     return false;
                 }
@@ -3286,6 +3369,7 @@ namespace core3d {
                     || !previousPresentations.insert(object.get()).second) {
 #ifdef DEBUG
                     std::fprintf(stderr, "R179_SELECT_REFUSED stage=previous-duplicate\n");
+                g_r179LastSelectRefusal = "browser-previous-duplicate";
 #endif
                     return false;
                 }
@@ -3419,6 +3503,7 @@ namespace core3d {
             if (!selectionWasTouched) {
 #ifdef DEBUG
                 std::fprintf(stderr, "R179_SELECT_REFUSED stage=exception\n");
+                g_r179LastSelectRefusal = "browser-exception";
 #endif
                 return false;
             }
@@ -3477,6 +3562,7 @@ namespace core3d {
         }
 #ifdef DEBUG
         std::fprintf(stderr, "R179_SELECT_REFUSED stage=rollback\n");
+                g_r179LastSelectRefusal = "browser-rollback";
 #endif
         return false;
     }
@@ -4376,6 +4462,21 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			&& _linearArrayController != nullptr
 			&& _linearArrayController->setCount(count);
 	}
+
+    Standard_Boolean ObjectInteractor::setLinearArrayRows(
+        const Standard_Integer rows) noexcept {
+        return _manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeLinearArray
+            && _linearArrayController != nullptr
+            && _linearArrayController->setRows(rows);
+    }
+
+    Standard_Integer ObjectInteractor::linearArrayRows() const noexcept {
+        return _linearArrayController == nullptr ? 1 : _linearArrayController->rows();
+    }
+
+    Standard_Integer ObjectInteractor::linearArrayMaximumRows() const noexcept {
+        return _linearArrayController == nullptr ? 1 : _linearArrayController->maximumRows();
+    }
 
 	Standard_Boolean ObjectInteractor::setLinearArraySpacing(
 		const Standard_Real spacing) noexcept {

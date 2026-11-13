@@ -1457,9 +1457,19 @@ __attribute__((objc_subclassing_restricted))
 //! left) and "drawableWidth","drawableHeight". For exactly one full-circle
 //! edge, "diameter" is its world-space diameter in model units, the pixel
 //! position is its centre and "circleRadiusPixels" is its projected radius.
-//! "distance" is absent for a single edge.
+//! "distance" is absent for a single edge. Live edge picks may add "snapKindA"
+//! and "snapKindB" (1 corner, 2 midpoint, 3 edge, 4 circle centre); their
+//! points then define the pair distance. Projected topology bounds are in
+//! "avoidanceMinPixelX/Y" and "avoidanceMaxPixelX/Y".
 - (nullable NSDictionary<NSString *, NSNumber *> *)measureSelectedElementDistance
     NS_SWIFT_NAME(measureSelectedElementDistance());
+
+//! Measure the smaller angle between exactly two planar faces or two straight
+//! edges. Returns "angleDegrees" in 0...90 and the same projection fields as
+//! the distance query. Mixed, curved, degenerate and incomplete pairs are
+//! reported with "selectedCount" but no angle. Main-thread only and read-only.
+- (nullable NSDictionary<NSString *, NSNumber *> *)measureSelectedElementAngle
+    NS_SWIFT_NAME(measureSelectedElementAngle());
 
 //! Atomically commit one Position component from an immutable inspector
 //! snapshot. `value` is in raw document model units. The expected snapshot is
@@ -2183,6 +2193,12 @@ __attribute__((objc_subclassing_restricted))
     debugReplayGesture:(NSInteger)mode axis:(NSInteger)axis
     values:(NSArray<NSNumber *> *)values cancel:(BOOL)cancel
     NS_SWIFT_NAME(debugReplayGesture(mode:axis:values:cancel:));
+//! Opt-in 400 mm camera span / 100 mm handle radius in document model units.
+//! Translation values remain model units; legacy overloads keep raw-unit scale.
+- (NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable)
+    debugReplayGesture:(NSInteger)mode axis:(NSInteger)axis
+    values:(NSArray<NSNumber *> *)values cancel:(BOOL)cancel physicalScale:(BOOL)physicalScale
+    NS_SWIFT_NAME(debugReplayGesture(mode:axis:values:cancel:physicalScale:));
 //! Current XCAF visual-material table size for ownership/GC regressions.
 - (NSInteger)debugVisualMaterialDefinitionCount;
 - (NSDictionary<NSString *,id> *_Nullable)debugScalarPBREvidence:(NSString *)entity;
@@ -2261,6 +2277,8 @@ __attribute__((objc_subclassing_restricted))
 - (NSData *_Nullable)debugHiddenAssemblyVisibilityBinXCAFFixtureData;
 //! Standalone free located box used to verify TopoDS location ownership.
 - (NSData *_Nullable)debugLocatedFreeShapeBinXCAFFixtureData;
+//! Independent spline-aware metrics for native snap regression targets only.
+- (NSDictionary<NSString *, id> *_Nullable)debugSplineSnapTargetMetrics:(NSString *)entity;
 //! Detached geometry query fixture; does not create or edit a document.
 + (NSDictionary<NSString *, id> *)debugGeometrySnapFixture:(NSInteger)fixture
     point:(NSArray<NSNumber *> *)point tolerance:(double)tolerance kinds:(NSUInteger)kinds

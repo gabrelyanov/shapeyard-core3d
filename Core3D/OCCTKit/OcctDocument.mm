@@ -22,6 +22,7 @@
 #include <TNaming_Iterator.hxx>
 #include <BRepTools.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakeTorus.hxx>
 #include <BinTools_ShapeReader.hxx>
 #include <BinTools_ShapeSet.hxx>
 #include <BinTools_ShapeWriter.hxx>
@@ -2889,7 +2890,6 @@ Standard_Boolean Core3DValidateRetainedEdgeTreatmentDocumentForPrepare(
 #import "GLView.h"
 #import "GLViewController.h"
 #include "../UI/ShellOperationController.hpp"
-#include <BRepPrimAPI_MakeTorus.hxx>
 #include <AIS_ListIteratorOfListOfInteractive.hxx>
 #include <Precision.hxx>
 #include <Standard_ErrorHandler.hxx>
@@ -12995,12 +12995,16 @@ Standard_Boolean OcctDocument::BuildThroughHole(
             || !std::isfinite(radius) || radius <= 0 || !std::isfinite(depth))
             return Standard_False;
         const auto coverage = RetainedRecipeCoverageForLabel(label);
-        if (coverage == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage) {
+        if (coverage == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
+            && core3d::composite_recipe::HasRecord(label)) {
             core3d::composite_recipe::Record composite;
             if (!core3d::composite_recipe::Read(myOcafDoc, label, composite)
                 || !composite.value || composite.label.IsNull()
                 || !OriginalsFeature(composite.value->definition)) return Standard_False;
-        } else if (coverage != OcctRetainedRecipeCoverage::Absent) {
+        } else if (coverage != OcctRetainedRecipeCoverage::Absent
+                   && !CanBakeSavedCutForFaceEdit(label)) {
+            // A part with an earlier saved hole takes a second one: that
+            // saved cut is baked in the same step (as Push-pull does).
             return Standard_False;
         }
         // A copy: the stored part (and a Join record Undo brings back) must stay
@@ -13092,7 +13096,8 @@ Standard_Boolean OcctDocument::ApplyThroughHole(
         // A previous Boolean result is baked: its record goes in the same step.
         TDF_Label bakedRecord;
         if (RetainedRecipeCoverageForLabel(label)
-                == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage) {
+                == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
+            && core3d::composite_recipe::HasRecord(label)) {
             core3d::composite_recipe::Record composite;
             if (!core3d::composite_recipe::Read(myOcafDoc, label, composite)
                 || composite.label.IsNull()) { refusal = "stale-source"; return Standard_False; }
@@ -13104,6 +13109,13 @@ Standard_Boolean OcctDocument::ApplyThroughHole(
         myOcafDoc->NewCommand();
         if (!myOcafDoc->HasOpenCommand()) return Standard_False;
         if (!bakedRecord.IsNull()) bakedRecord.ForgetAllAttributes(Standard_True);
+        // An earlier saved hole (a retained cut) is baked in this same command,
+        // so Undo brings back exactly that saved, resizable hole.
+        if (core3d::retained_solid::HasRecord(label)
+            && !PrepareBooleanResultForFaceEdit(label)) {
+            myOcafDoc->AbortCommand();
+            return Standard_False;
+        }
         ForgetInspectorPrimitiveRecord(label);
         if (!ReplaceShape(label, shown)
             || !XCAFDoc_ShapeTool::GetShape(label).IsEqual(result)) {
@@ -16199,6 +16211,19 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
             // authoritative; visual-material/texture definitions are shared.
             Standard_Size destinationLabels = 9U + profileLabels + enclosureLabels
                 + sweepLoftLabels + analyticBooleanLabels;
+            if (request.preservesAuthoredFaceMaterials) {
+                for (TDF_ChildIterator child(source, Standard_False); child.More(); child.Next()) {
+                    if (!XCAFDoc_ShapeTool::IsSubShape(child.Value())) continue;
+                    const auto visual = XCAFDoc_VisMaterialTool::GetShapeMaterial(child.Value());
+                    if (visual.IsNull()) continue;
+                    XCAFDoc_VisMaterialPBR faceMaterial;
+                    const auto face = XCAFDoc_ShapeTool::GetShape(child.Value());
+                    if (face.IsNull() || face.ShapeType() != TopAbs_FACE
+                        || !TryPBRMaterialForLabel(child.Value(), faceMaterial)
+                        || !AddMultipliedWithinLimit(destinationLabels, 1U, 1U,
+                            kMaximumGeometryDocumentLabels)) return Standard_False;
+                }
+            }
             Handle(TDataStd_Integer) localPBRMarker;
             const Standard_Boolean hasLocalPBR =
                 source.FindAttribute(

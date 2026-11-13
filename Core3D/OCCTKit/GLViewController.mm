@@ -1267,6 +1267,7 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 - (void)endActiveRenderingInteractions;
 - (void)endRawPrimaryInteractionIfNeededCancelled:(BOOL)cancelled;
 - (void)checkSelections;
+- (void)checkSelectionsPreservingHistory:(BOOL)historyPublication;
 - (void)updateSelectedEdgeAppearance;
 - (void)updateSelectedSurfaceAppearance;
 - (void)clearSelectedFaceWash;
@@ -2899,10 +2900,14 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 }
 
 -(void) checkSelections {
+    [self checkSelectionsPreservingHistory:NO];
+}
+
+- (void)checkSelectionsPreservingHistory:(BOOL)historyPublication {
     _committedBoundariesDirty = YES;
     // Observe synchronously, before the debounced UI delegate. This also
     // catches a select/deselect round trip between two immutable scene reads.
-    if (_viewer != nullptr) _viewer->observeNativePlanningInteraction();
+    if (_viewer != nullptr) _viewer->observeNativePlanningInteraction(historyPublication);
 	bool isSelected = _viewer->getObjectInteractor()->isSelected();
 	bool isManipulatorAttached = _viewer->getObjectInteractor()->isManipulatorAttached();
 	unsigned char selections = Core3DViewer::kSelectionTypeNone;
@@ -3183,7 +3188,9 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
                 PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
         }
     }
-    if (result.refreshSelection) [self checkSelections];
+    if (result.refreshSelection) [self checkSelectionsPreservingHistory:
+        result.outcome == NativeHistoryOutcome::HistoryChanged
+            || result.outcome == NativeHistoryOutcome::NoHistory];
     if (result.requestRender) [self requestRender];
     if (result.primaryInteractionCancelled && _delegate != nil
         && [_delegate respondsToSelector:
@@ -4034,6 +4041,8 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     const auto countRange = interactor->linearArrayCountRange();
     const auto spacingRange = interactor->linearArraySpacingRange();
     parameters.count = interactor->linearArrayCount();
+    parameters.rows = interactor->linearArrayRows();
+    parameters.maximumRows = interactor->linearArrayMaximumRows();
     parameters.minimumCount = countRange.first;
     parameters.maximumCount = countRange.second;
     parameters.spacing = interactor->linearArraySpacing();
@@ -4077,6 +4086,19 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     }
     const BOOL didSet = _viewer->getObjectInteractor()
         ->setLinearArrayCount(static_cast<Standard_Integer>(count));
+    [self requestRender];
+    return didSet;
+}
+
+- (BOOL)setLinearArrayRows:(NSInteger)rows {
+    if (_viewer == nullptr || _viewer->getObjectInteractor() == nullptr
+        || [self getGizmoType] != PrimitiveGizmoTypeLinearArray
+        || rows < 1
+        || rows > std::numeric_limits<Standard_Integer>::max()) {
+        return NO;
+    }
+    const BOOL didSet = _viewer->getObjectInteractor()
+        ->setLinearArrayRows(static_cast<Standard_Integer>(rows));
     [self requestRender];
     return didSet;
 }
@@ -5671,6 +5693,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
             static_cast<unsigned long long>(state.generation)),
         @"previewBodyCount": @(state.previewBodyCount),
         @"pendingResultCount": @(state.pendingResultCount),
+        @"applyFailureLine": @(state.applyFailureLine),
         @"activeOperation": @(
             state.activeOperation != Standard_False),
         @"previewValid": @(state.previewValid != Standard_False),

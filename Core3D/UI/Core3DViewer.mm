@@ -5785,6 +5785,7 @@ struct DocumentReplacementWork {
 };
 
 void Core3DViewer::release() noexcept {
+    _measurePicks.clear();
     if (_nativeOpeningState) _nativeOpeningState->owner = nullptr;
     _nativeOpeningState.reset();
     // Retire pre-commit source authority on main before graphics teardown.
@@ -6022,6 +6023,88 @@ NativeBooleanRetention Core3DViewer::restoreBooleanAction(BooleanAction action)
     return NativeBooleanRetention::HostReconciliationRequired;
 }
 
+bool Core3DViewer::captureHistorySelectedEntities(std::vector<std::string>& entities) const noexcept
+{
+    entities.clear();
+    try {
+        if (myDoc.IsNull() || myContext.IsNull() || !_shapeInteractor
+            || _shapeInteractor->getSelectionMode() != ShapeSelectionMode::WholeShape
+            || !_shapeInteractor->selectionModeAuthorityIsExact()) return false;
+        for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+            if (entities.size() >= 50000) return false;
+            const auto object = myContext->SelectedInteractive();
+            const auto label = myDoc->ShapeLabel(object);
+            if (label.IsNull()) return false;
+            const auto entity = myDoc->EntityIdentifierForLabel(label);
+            if (entity.empty()) return false;
+            entities.push_back(entity);
+        }
+        std::sort(entities.begin(), entities.end());
+        entities.erase(std::unique(entities.begin(), entities.end()), entities.end());
+        return true;
+    } catch (...) { entities.clear(); return false; }
+}
+
+void Core3DViewer::prepareHistorySelection() noexcept
+{
+    std::vector<std::string> current;
+    const auto stamp = myDoc->CaptureNativePlanningStamp(true);
+    const bool captured = captureHistorySelectedEntities(current);
+    if (!stamp || !captured) {
+        _historySelectedEntities.clear(); _historySelectionStamp.reset(); return;
+    }
+    if (!_historySelectionStamp || !(*stamp == *_historySelectionStamp)
+        || current != _historyVisibleSelectedEntities) {
+        _historySelectedEntities = std::move(current);
+    }
+    _historySelectionStamp.reset();
+}
+
+void Core3DViewer::restoreHistorySelection() noexcept
+{
+    try {
+        if (!_shapeInteractor || _shapeInteractor->getSelectionMode() != ShapeSelectionMode::WholeShape
+            || !_shapeInteractor->selectionModeAuthorityIsExact()) return;
+        // Resolve only currently displayed, editable roots. An undone creation
+        // may be absent for many steps; retain its identity until it returns.
+        AIS_ListOfInteractive displayed;
+        myContext->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+        std::map<std::string, Handle(AIS_InteractiveObject)> matches;
+        std::size_t count = 0;
+        for (AIS_ListIteratorOfListOfInteractive item(displayed); item.More(); item.Next()) {
+            if (++count > 50000) return;
+            const auto object = item.Value();
+            const auto label = myDoc->ShapeLabel(object);
+            if (label.IsNull() || !myDoc->IsPresentationEditable(object)
+                || !myDoc->IsEditableFreeSimpleDefinitionLabel(label)) continue;
+            const auto entity = myDoc->EntityIdentifierForLabel(label);
+            if (!std::binary_search(_historySelectedEntities.begin(), _historySelectedEntities.end(), entity)) continue;
+            // Ambiguous instances are never guessed at.
+            if (!matches.emplace(entity, object).second) matches[entity].Nullify();
+        }
+        std::vector<Handle(AIS_InteractiveObject)> targets;
+        for (const auto& match : matches)
+            if (!match.second.IsNull()) targets.push_back(match.second);
+        if (!targets.empty() && targets.size() <= 32) {
+            // This path restores all manipulator attachments and saved group
+            // pivots atomically; the legacy attachment helper binds only the
+            // last selected object.
+            bool touched = false;
+            const bool restored = _objectInteractor->replaceSelectedObjectsForBrowser(targets, touched);
+            if (!restored) return;
+        } else {
+            // Larger selections remain selected, without inventing an
+            // unqualified group manipulator beyond the existing 32-part limit.
+            for (const auto& target : targets)
+                myContext->AddOrRemoveSelected(target->GlobalSelOwner(), Standard_False);
+            _objectInteractor->detachManipulator(false);
+            myContext->UpdateCurrentViewer();
+        }
+        if (captureHistorySelectedEntities(_historyVisibleSelectedEntities))
+            _historySelectionStamp = myDoc->CaptureNativePlanningStamp(true);
+    } catch (...) { _historySelectionStamp.reset(); }
+}
+
 NativeHistoryTransition Core3DViewer::performHistory(NativeHistoryDirection direction)
 {
     NativeHistoryTransition result;
@@ -6108,17 +6191,27 @@ NativeHistoryTransition Core3DViewer::performHistory(NativeHistoryDirection dire
         cancelledPreview(cancelled, true);
         return result;
     }
+    prepareHistorySelection();
     objectInteractor->detachManipulator(false);
     if (!ownsHistory()) return result;
     const bool canChange = direction == NativeHistoryDirection::Undo
         ? document->canUndo() : document->canRedo();
     result.outcome = NativeHistoryOutcome::NoHistory;
     if (canChange) {
+        const Handle(TDocStd_Document) nativeDocument = document->Document();
         const bool changed = direction == NativeHistoryDirection::Undo
             ? document->undo() : document->redo();
         result.outcome = changed ? NativeHistoryOutcome::HistoryChanged
                                  : NativeHistoryOutcome::HistoryFailed;
-        if (changed) result.documentRedrawn = redrawDocument();
+        if (changed && myDoc == document && document->Document() == nativeDocument) {
+            result.documentRedrawn = redrawDocument();
+            if (result.documentRedrawn) restoreHistorySelection();
+        }
+    } else {
+        // An extra Undo at the beginning must not forget selected parts that
+        // are temporarily absent and will return on Redo.
+        if (captureHistorySelectedEntities(_historyVisibleSelectedEntities))
+            _historySelectionStamp = document->CaptureNativePlanningStamp(true);
     }
     if (booleanAction) {
         result.reconcileBooleanTool = restoreBooleanAction(*booleanAction)
@@ -6131,6 +6224,7 @@ NativeHistoryTransition Core3DViewer::performHistory(NativeHistoryDirection dire
 
 bool Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorType,
                                        ShapeSelectionMode theSelectionMode) {
+    _measurePicks.clear();
     if (!IsStatelessManipulatorType(theManipulatorType)) {
         // Operation controllers own state that is not encoded by this enum.
         // Reconstructing one from the enum would fabricate a fresh ledger and
@@ -6707,8 +6801,16 @@ Core3DViewer::captureNativeSelectionReplacementContext(
     }
 }
 
-void Core3DViewer::observeNativePlanningInteraction() noexcept {
-    if (!myDoc.IsNull()) myDoc->ObserveNativePlanningInteraction();
+void Core3DViewer::observeNativePlanningInteraction(bool historyPublication) noexcept {
+    if (myDoc.IsNull()) return;
+    // History's bridge publishes the restored selection before its delegate.
+    // Advance the ordinary authority fence, but carry our bookmark through
+    // this one publication. Reentrant/user changes still invalidate it.
+    const auto before = historyPublication ? myDoc->CaptureNativePlanningStamp(true)
+                                           : std::optional<authority::Stamp>();
+    const bool carry = before && _historySelectionStamp && *before == *_historySelectionStamp;
+    myDoc->ObserveNativePlanningInteraction();
+    if (carry) _historySelectionStamp = myDoc->CaptureNativePlanningStamp(true);
 }
 
 bool Core3DViewer::canBeginCommittedEdit() const noexcept {
@@ -13115,6 +13217,7 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
 }
 
 bool Core3DViewer::redrawDocument() noexcept {
+    _measurePicks.clear();
     if (hasUnresolvedOrdinaryEdit() || HasActiveOperationLedger(_objectInteractor, _shapeInteractor)) {
         // A same-document rebuild is safe only after every typed operation has
         // retired its controller ledger. The manipulator enum alone cannot
@@ -13355,6 +13458,9 @@ std::string R179SceneInstanceCensus(const scene::SceneSnapshot& snapshot) noexce
 } // namespace
 #endif
 
+// DEBUG: the last refusal stage of selectObjectFromBrowser, read by the Join tap trace.
+std::string g_r179LastSelectRefusal;
+
 bool Core3DViewer::selectObjectFromBrowser(
     const ObjectFrameIdentity& identity,
     const std::uint32_t viewportWidth,
@@ -13375,6 +13481,7 @@ bool Core3DViewer::selectObjectFromBrowser(
         || !_shapeInteractor->selectionModeAuthorityIsExact()) {
 #if DEBUG
         std::fprintf(stderr, "R179_SELECT_REFUSED stage=precondition\n");
+        g_r179LastSelectRefusal = "precondition";
 #endif
         return false;
     }
@@ -13385,6 +13492,7 @@ bool Core3DViewer::selectObjectFromBrowser(
             || snapshot->selectionMode != scene::ElementKind::Object) {
 #if DEBUG
             std::fprintf(stderr, "R179_SELECT_REFUSED stage=snapshot\n");
+        g_r179LastSelectRefusal = "snapshot";
 #endif
             return false;
         }
@@ -13393,6 +13501,7 @@ bool Core3DViewer::selectObjectFromBrowser(
             || identity.modelRevision != snapshot->revisions.model) {
 #if DEBUG
             std::fprintf(stderr, "R179_SELECT_REFUSED stage=snapshot-identity\n");
+        g_r179LastSelectRefusal = "snapshot-identity";
 #endif
             return false;
         }
@@ -13403,6 +13512,7 @@ bool Core3DViewer::selectObjectFromBrowser(
                     || !instance.selectable) {
 #if DEBUG
                     std::fprintf(stderr, "R179_SELECT_REFUSED stage=instance\n");
+        g_r179LastSelectRefusal = "instance";
 #endif
                     return false;
                 }
@@ -13422,6 +13532,7 @@ bool Core3DViewer::selectObjectFromBrowser(
                 sceneRows = R179SceneInstanceCensus(*snapshot);
             } catch (...) {}
             std::fprintf(stderr, "R179_SELECT_REFUSED stage=instance-count entity=%.128s matching=%zu total=%zu document=%.128s publication=%.128s generation=%llu model=%llu native=%s scene=%s\n", identity.entityIdentifier.c_str(), matchingInstances, snapshot->instances.size(), myDoc->DocumentIdentifier().c_str(), snapshot->publicationSourceIdentifier.c_str(), static_cast<unsigned long long>(snapshot->revisions.documentGeneration), static_cast<unsigned long long>(snapshot->revisions.model), nativeRows.c_str(), sceneRows.c_str());
+        g_r179LastSelectRefusal = "instance-count";
 #endif
             return false;
         }
@@ -13433,6 +13544,7 @@ bool Core3DViewer::selectObjectFromBrowser(
             if (++inspected > 50000) {
 #if DEBUG
                 std::fprintf(stderr, "R179_SELECT_REFUSED stage=target-bounds\n");
+        g_r179LastSelectRefusal = "target-bounds";
 #endif
                 return false;
             }
@@ -13446,6 +13558,7 @@ bool Core3DViewer::selectObjectFromBrowser(
                 || !myDoc->IsEditableFreeSimpleDefinitionLabel(label)) {
 #if DEBUG
                 std::fprintf(stderr, "R179_SELECT_REFUSED stage=target-editable\n");
+        g_r179LastSelectRefusal = "target-editable";
 #endif
                 return false;
             }
@@ -13454,12 +13567,14 @@ bool Core3DViewer::selectObjectFromBrowser(
         if (target.IsNull()) {
 #if DEBUG
             std::fprintf(stderr, "R179_SELECT_REFUSED stage=target-lookup\n");
+        g_r179LastSelectRefusal = "target-lookup";
 #endif
             return false;
         }
         if (!_objectInteractor->replaceSelectedObjectForBrowser(target, selectionWasTouched)) {
 #if DEBUG
             std::fprintf(stderr, "R179_SELECT_REFUSED stage=interactor-busy\n");
+        g_r179LastSelectRefusal = "interactor-busy " + g_r179LastSelectRefusal;
 #endif
             return false;
         }
@@ -13467,6 +13582,7 @@ bool Core3DViewer::selectObjectFromBrowser(
     } catch (...) {
 #if DEBUG
         std::fprintf(stderr, "R179_SELECT_REFUSED stage=exception\n");
+        g_r179LastSelectRefusal = "exception";
 #endif
         return false;
     }
@@ -14803,6 +14919,75 @@ const int Core3DViewer::selectedCount() const {
     return count;
 }
 
+static bool Core3DMeasurePickedPointForOwner(
+    const Handle(StdSelect_ViewerSelector3d)& selector,
+    const Handle(StdSelect_BRepOwner)& owner, gp_Pnt& point, int& rank) noexcept {
+    if (selector.IsNull() || owner.IsNull()) return false;
+    try {
+        for (rank = 1; rank <= selector->NbPicked(); ++rank) {
+            if (selector->Picked(rank) != owner) continue;
+            point = selector->PickedPoint(rank);
+            return std::isfinite(point.X()) && std::isfinite(point.Y())
+                && std::isfinite(point.Z());
+        }
+    } catch (...) {}
+    rank = 0;
+    return false;
+}
+
+std::vector<Core3DViewer::MeasurePick>
+Core3DViewer::measurePicksForCurrentSelection() noexcept {
+    try {
+        std::unordered_set<const SelectMgr_EntityOwner*> selected;
+        for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected())
+            selected.insert(myContext->SelectedOwner().get());
+        _measurePicks.erase(std::remove_if(_measurePicks.begin(), _measurePicks.end(),
+            [&](const MeasurePick& pick) {
+                return pick.owner.IsNull() || !pick.owner->IsSelected()
+                    || selected.count(pick.owner.get()) == 0;
+            }), _measurePicks.end());
+        return _measurePicks;
+    } catch (...) {
+        _measurePicks.clear();
+        return {};
+    }
+}
+
+#if DEBUG
+namespace {
+class Core3DMeasureFixtureSelector final : public StdSelect_ViewerSelector3d {
+public:
+    void add(const Handle(StdSelect_BRepOwner)& owner, const gp_Pnt& point) {
+        SelectMgr_SortCriterion criterion;
+        criterion.Point = point;
+        mystored.Add(owner, criterion);
+    }
+};
+}
+
+extern "C" void *Core3DDebugMeasureNonFirstSelectorRankProbe() {
+    @autoreleasepool {
+        const auto box = BRepPrimAPI_MakeBox(40, 30, 20).Shape();
+        TopExp_Explorer edges(box, TopAbs_EDGE);
+        const Handle(StdSelect_BRepOwner) wrong = new StdSelect_BRepOwner(edges.Current(), 0);
+        edges.Next();
+        const Handle(StdSelect_BRepOwner) selected = new StdSelect_BRepOwner(edges.Current(), 0);
+        Handle(Core3DMeasureFixtureSelector) selector = new Core3DMeasureFixtureSelector();
+        selector->add(wrong, gp_Pnt(0, 0, 0));
+        selector->add(selected, gp_Pnt(-20, -15, 10));
+        gp_Pnt point;
+        int rank = 0;
+        const bool matched = Core3DMeasurePickedPointForOwner(selector, selected, point, rank);
+        NSDictionary *result = @{
+            @"captureCount": @(matched ? 1 : 0), @"selectedRank": @(rank),
+            @"selectedOwnerMatched": @(matched),
+            @"pickedX": @(point.X()), @"pickedY": @(point.Y()), @"pickedZ": @(point.Z()),
+        };
+        return (__bridge_retained void *)result;
+    }
+}
+#endif
+
 void Core3DViewer::Select(int theX, int theY) {
     observeNativePlanningInteraction();
     if (_objectInteractor == nullptr || _shapeInteractor == nullptr) {
@@ -14857,16 +15042,47 @@ void Core3DViewer::Select(int theX, int theY) {
             break;
     }
 
+    std::unordered_set<const SelectMgr_EntityOwner*> oldOwners;
+    for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected())
+        oldOwners.insert(myContext->SelectedOwner().get());
     int oldCount = selectedCount();
-    // cancel chamfer when empty tapped
-    //		if (!hitTest(theX, theY) && _objectInteractor->getManipulatorType() == PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer) {
-    //            _shapeInteractor->setChamferValueForSelection(0);
-    //            _shapeInteractor->resetWireframeTemplateShape();
-    //		}
-
-//	bool isMirrorOp = _objectInteractor->getManipulatorType() == PrimitiveManipulatorType::PrimitiveGizmoTypeMirror;
-//	OcctViewer::Select(theX, theY, isMirrorOp ? AIS_SelectionScheme::AIS_SelectionScheme_Replace : AIS_SelectionScheme::AIS_SelectionScheme_XOR);
     OcctViewer::Select(theX, theY, AIS_SelectionScheme::AIS_SelectionScheme_XOR);
+
+    try {
+        (void)measurePicksForCurrentSelection();
+        const Handle(StdSelect_ViewerSelector3d)& selector = myContext->MainSelector();
+        for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+            const auto owner = Handle(StdSelect_BRepOwner)::DownCast(myContext->SelectedOwner());
+            if (owner.IsNull() || !owner->HasShape()
+                || owner->Shape().ShapeType() != TopAbs_EDGE
+                || oldOwners.count(owner.get()) != 0) continue;
+            const auto existing = std::find_if(_measurePicks.begin(), _measurePicks.end(),
+                [&](const MeasurePick& pick) { return pick.owner == owner; });
+            if (existing != _measurePicks.end()) continue;
+            gp_Pnt point;
+            int rank = 0;
+            if (!Core3DMeasurePickedPointForOwner(selector, owner, point, rank)) continue;
+            TopoDS_Shape world = owner->Shape();
+            const auto selectable = owner->Selectable();
+            if (!selectable.IsNull()) {
+                const gp_Trsf& transform = selectable->Transformation();
+                if (std::abs(std::abs(transform.ScaleFactor()) - 1.0)
+                        > TopLoc_Location::ScalePrec() || transform.IsNegative()) {
+                    BRepBuilderAPI_Transform transformed(world, transform, Standard_True);
+                    if (!transformed.IsDone() || transformed.Shape().IsNull()) continue;
+                    world = transformed.Shape();
+                } else {
+                    world = world.Moved(TopLoc_Location(transform));
+                }
+            }
+            _measurePicks.push_back(MeasurePick{owner, world, point,
+                static_cast<double>(selector->PixelTolerance())});
+        }
+        if (_measurePicks.size() > 2)
+            _measurePicks.erase(_measurePicks.begin(), _measurePicks.end() - 2);
+    } catch (...) {
+        _measurePicks.clear();
+    }
 
     int newCount = selectedCount();
 
