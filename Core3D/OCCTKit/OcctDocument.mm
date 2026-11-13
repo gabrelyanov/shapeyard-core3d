@@ -20221,14 +20221,26 @@ PBRBytes PBRMaterialBytes(const Handle(XCAFDoc_VisMaterial)& m,std::size_t& tota
 }
 bool PBRMaterialsExactlyEqual(const Handle(XCAFDoc_VisMaterial)& a,const Handle(XCAFDoc_VisMaterial)& b){std::size_t x=0,y=0;return PBRMaterialBytes(a,x)==PBRMaterialBytes(b,y);}
 struct PBRTableEntry {PBRBytes material,attributes;bool operator==(const PBRTableEntry&)const=default;};
-struct PBRRootEntry {OcctObjectVisibilityState object;PBRDigest geometry{};PBRBytes raw;
-    bool equals(const PBRRootEntry& b)const noexcept{return object.IsEqual(b.object)&&geometry==b.geometry&&raw==b.raw;}};
+struct PBRRootEntry {
+    OcctObjectVisibilityState object;
+    PBRDigest geometry{};
+    PBRBytes raw;
+    // Colour may coexist with an already validated retained construction
+    // carrier. Its exact TNaming history is protected separately from faces
+    // that may gain a new material endpoint during Apply.
+    std::vector<core3d::treatment_history::NamingState> colourCarrierNaming;
+    bool equals(const PBRRootEntry& b)const noexcept {
+        return object.IsEqual(b.object)&&geometry==b.geometry&&raw==b.raw
+            &&SameTreatmentNamingSet(colourCarrierNaming,b.colourCarrierNaming,true);
+    }
+};
 struct PBRFaceEntry {
     std::string root;
     std::vector<core3d::treatment_history::NamingState> naming;
-    PBRBytes stable,appearance;
+    PBRBytes stable,appearance,sharedLegacyScalar;
     bool stableEquals(const PBRFaceEntry& b)const noexcept {
-        return root==b.root&&stable==b.stable&&SameTreatmentNamingSet(naming,b.naming,true);
+        return root==b.root&&stable==b.stable&&sharedLegacyScalar==b.sharedLegacyScalar
+            &&SameTreatmentNamingSet(naming,b.naming,true);
     }
     bool operator==(const PBRFaceEntry& b)const noexcept {return stableEquals(b)&&appearance==b.appearance;}
 };
@@ -20336,6 +20348,12 @@ std::shared_ptr<const OcctPBRScalarState> OcctDocument::CapturePBRScalarState(co
         TDF_LabelSequence roots;XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main())->GetFreeShapes(roots);if(roots.Length()>50000)return refused(__LINE__);
         for(int i=1;i<=roots.Length();++i){const auto l=roots.Value(i);PBRRootEntry e;
             if(!CaptureObjectVisibilityStateForLabel(l,e.object))return refused(__LINE__);
+            if(colourSubshapes&&!e.object.object.object.retained.label.IsNull()){
+                bool hasNaming=false;core3d::treatment_history::NamingState naming;
+                if(!CaptureTreatmentNamingState(e.object.object.object.retained.label,hasNaming,naming)
+                    ||!hasNaming)return refused(__LINE__);
+                e.colourCarrierNaming.push_back(std::move(naming));
+            }
             PBRGeometryStream stream(geometry);std::ostream out(&stream);out.imbue(std::locale::classic());
             BRepTools::Write(e.object.object.object.shape,out,Standard_True,Standard_True,TopTools_FormatVersion_VERSION_3);
             if(!out.good()||!stream.finish(e.geometry))return refused(__LINE__);
@@ -20363,6 +20381,11 @@ std::shared_ptr<const OcctPBRScalarState> OcctDocument::CapturePBRScalarState(co
                 if(children.Length()>4096||state->faces.size()+children.Length()>50000)return refused(__LINE__);
                 for(int n=1;n<=children.Length();++n){
                     const auto child=children.Value(n);const auto face=XCAFDoc_ShapeTool::GetShape(child);
+                    // The strict retained reader above has already checked this
+                    // exact carrier's owner, payload, attributes and descendants.
+                    // Both its record and naming history remain in root.equals.
+                    const auto& retained=state->roots.at(key).object.object.object.retained;
+                    if(!retained.label.IsNull()&&child.IsEqual(retained.label))continue;
                     if(face.IsNull()||face.ShapeType()!=TopAbs_FACE)return refused(__LINE__);
                     PBRFaceEntry entry;entry.root=key;PBRWriter stable;
                     bool hasNaming=false;core3d::treatment_history::NamingState naming;
@@ -20370,6 +20393,20 @@ std::shared_ptr<const OcctPBRScalarState> OcctDocument::CapturePBRScalarState(co
                     entry.naming.push_back(std::move(naming));
                     for(TDF_AttributeIterator it(child);it.More();it.Next()){
                         const auto& id=it.Value()->ID();
+                        // Old face-material writes can share a label with one
+                        // of the root's eight scalar fields. Admit only that
+                        // exact legacy slot, retaining its value and dimension.
+                        // New Colour endpoints are allocated beyond these slots.
+                        if(id==TDataStd_Real::GetID()&&child.Father().IsEqual(l)
+                            &&child.Tag()>=1&&child.Tag()<=8){
+                            const auto value=Handle(TDataStd_Real)::DownCast(it.Value());
+                            const auto& object=state->roots.at(key).object.object.object;
+                            if(value.IsNull()||!object.present[child.Tag()-1])return refused(__LINE__);
+                            PBRWriter shared;shared.scalar(value->Get());
+                            shared.integer(static_cast<unsigned>(value->GetDimension()));
+                            entry.sharedLegacyScalar=std::move(shared.bytes);
+                            continue;
+                        }
                         if(id!=TNaming_NamedShape::GetID()&&id!=TDataStd_Name::GetID()
                             &&id!=XCAFDoc::VisMaterialRefGUID()&&id!=LocalPBRMaterialAttributeID()
                             &&id!=NormalTextureRecipeAttributeID()&&id!=AutoPromotedEmissiveFactorAttributeID()){
@@ -21205,6 +21242,7 @@ bool OcctDocument::StagePBRColourPatch(const std::shared_ptr<const OcctPBRColour
         auto staged=p->changed;
         const auto shapes=XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
         std::set<std::string> created;
+        std::set<std::string> reservedRoots;
         for(auto& target:staged){
             std::size_t bytes=0;
             if(PBRMaterialBytes(target.material,bytes)!=target.bytes)return refused(__LINE__);
@@ -21212,6 +21250,26 @@ bool OcctDocument::StagePBRColourPatch(const std::shared_ptr<const OcctPBRColour
                 TDF_Label actual;shapes->FindSubShape(target.root,target.face,actual);
                 if(!actual.IsEqual(target.label)||!shapes->IsSubShape(target.root,target.face))return refused(__LINE__);
                 if(target.label.IsNull()){
+                    if(reservedRoots.insert(PBRLabelKey(target.root)).second){
+                        // FindChild legacy fields need not advance TagSource.
+                        // Never let AddSubShape reuse those fields or a feature
+                        // record. This reservation belongs to the owned command.
+                        Standard_Integer highWater=12;
+                        std::size_t visited=0;
+                        for(TDF_ChildIterator child(target.root,Standard_False);child.More();child.Next()){
+                            if(++visited>kMaximumDocumentLabels)return refused(__LINE__);
+                            highWater=std::max(highWater,child.Value().Tag());
+                        }
+                        Handle(TDF_Attribute) attribute;
+                        if(target.root.FindAttribute(TDF_TagSource::GetID(),attribute)){
+                            const auto tags=Handle(TDF_TagSource)::DownCast(attribute);
+                            if(tags.IsNull()||tags->Get()<0)return refused(__LINE__);
+                            highWater=std::max(highWater,tags->Get());
+                        }
+                        if(highWater>std::numeric_limits<Standard_Integer>::max()
+                            -static_cast<Standard_Integer>(staged.size()))return refused(__LINE__);
+                        TDF_TagSource::Set(target.root)->Set(highWater);
+                    }
                     target.label=shapes->AddSubShape(target.root,target.face);
                     if(target.label.IsNull()||p->source->faces.contains(PBRLabelKey(target.label))
                         ||!created.insert(PBRLabelKey(target.label)).second)return refused(__LINE__);
@@ -21257,6 +21315,7 @@ bool OcctDocument::StagePBRColourPatch(const std::shared_ptr<const OcctPBRColour
                     PBRWriter automaticName;automaticName.integer(1);automaticName.name(TCollection_ExtendedString("FACE"));
                     if(current.root!=PBRLabelKey(target.root)
                         ||(current.stable!=unnamed.bytes&&current.stable!=automaticName.bytes)
+                        ||!current.sharedLegacyScalar.empty()
                         ||current.naming.size()!=1)return refused(__LINE__);
                     const auto& naming=current.naming.front();
                     if(naming.evolution!=TNaming_PRIMITIVE||naming.shapePairs.size()!=1
