@@ -2617,6 +2617,12 @@ namespace core3d {
                             BRepAdaptor_Surface surface(TopoDS::Face(hit->topology));
                             continuous = surface.GetType() == GeomAbs_Plane
                                 && std::abs(surface.Plane().Axis().Direction().Dot(axis)) <= Precision::Angular();
+                            // Moving along a cylinder's generator stays on
+                            // its wall too. That contact must not hide a cap
+                            // edge which the same moving vertex can reach.
+                            if (surface.GetType() == GeomAbs_Cylinder)
+                                continuous = surface.Cylinder().Axis().Direction()
+                                    .IsParallel(axis,Precision::Angular());
                         } else if (hit->kind == GeometrySnapKind::Edge) {
                             BRepAdaptor_Curve curve(TopoDS::Edge(hit->topology));
                             continuous = curve.GetType() == GeomAbs_Line
