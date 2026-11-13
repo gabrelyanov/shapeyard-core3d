@@ -3910,7 +3910,25 @@ struct NativeModelingPermitIssuer final {
     receiptFailure:(BOOL)receiptFailure asyncCompletion:(Core3DModelingAsyncCompletion *)box;
 @end
 
+@interface Core3DViewController (ColourSessionPrivate)
+- (void)core3d_cancelColourWork:(std::shared_ptr<core3d::NativeColourSessionWork>)work;
+@end
+@interface Core3DColourEditSession () {
+@public
+    __weak Core3DViewController* _colourOwner;
+    std::shared_ptr<core3d::NativeColourSessionWork> _colourWork;
+}
+- (instancetype)initPrivate;
+@end
 @implementation Core3DColourEditSession
+- (instancetype)initPrivate {return [super init];}
+- (void)dealloc {
+    __weak Core3DViewController* owner=_colourOwner;
+    auto work=std::move(_colourWork);
+    if(!work)return;
+    if([NSThread isMainThread])[owner core3d_cancelColourWork:work];
+    else dispatch_async(dispatch_get_main_queue(), ^{[owner core3d_cancelColourWork:work];});
+}
 @end
 
 @interface Core3DPBRScalarPreparation () {
@@ -5620,18 +5638,71 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
 }
 #endif
 
-// Failure-first admission seam for job 3a. No session is granted until the
-// complete native owner/target/history and transient-presentation path exists.
+// Whole-object native sessions are implemented first. The UI adapter is not
+// connected until face scope and both renderer pixel journeys are qualified.
 - (Core3DColourEditSession *)beginColourEditWithScope:(Core3DColourScope)scope
-    expected:(Core3DSceneSnapshot *)expected { return nil; }
-- (BOOL)previewColourWithRGB:(NSArray<NSNumber *> *)rgb
-    session:(Core3DColourEditSession *)session { return NO; }
-- (Core3DPBRScalarResult)commitColourEdit:(Core3DColourEditSession *)session {
-    return Core3DPBRScalarResultInvalid;
+    expected:(Core3DSceneSnapshot *)expected {
+    if(![NSThread isMainThread]||scope!=Core3DColourScopeObject||!expected
+        ||expected.class!=Core3DSceneSnapshot.class||!_isSetuped||!GLController||!GLController.viewer)return nil;
+    const CGSize size=GLController.drawableSize;
+    if(!std::isfinite(size.width)||!std::isfinite(size.height)||size.width<1||size.height<1
+        ||size.width>UINT32_MAX||size.height>UINT32_MAX)return nil;
+    try {
+        core3d::ObjectFrameIdentity identity;const char* source=expected.publicationSourceIdentifier.UTF8String;
+        if(!source)return nil;
+        identity.publicationSourceIdentifier.assign(source,[expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration=expected.revisions.documentGeneration;identity.modelRevision=expected.revisions.modelRevision;
+        auto work=GLController.viewer->beginColourSession(identity,expected.revisions.presentationRevision,
+            std::uint32_t(std::llround(size.width)),std::uint32_t(std::llround(size.height)));
+        if(!work)return nil;
+        auto session=[[Core3DColourEditSession alloc]initPrivate];
+        if(!session){GLController.viewer->cancelColourSession(work);return nil;}
+        session->_colourOwner=self;session->_colourWork=std::move(work);return session;
+    }catch(...){return nil;}
 }
-- (void)cancelColourEdit:(Core3DColourEditSession *)session {}
+- (BOOL)previewColourWithRGB:(NSArray<NSNumber *> *)rgb session:(Core3DColourEditSession *)session {
+    if(![NSThread isMainThread]||!session||session.class!=Core3DColourEditSession.class
+        ||session->_colourOwner!=self||!session->_colourWork||!GLController||!GLController.viewer)return NO;
+    Core3DPBRScalarEdit* edit=[[Core3DPBRScalarEdit alloc]initWithBaseColorSRGB:rgb metallic:nil roughness:nil];
+    if(!edit)return NO;
+    const auto values=edit.baseColorSRGB;
+    return GLController.viewer->previewColourSession(session->_colourWork,
+        {values[0].doubleValue,values[1].doubleValue,values[2].doubleValue});
+}
+- (Core3DPBRScalarResult)commitColourEdit:(Core3DColourEditSession *)session {
+    if(![NSThread isMainThread]||!session||session.class!=Core3DColourEditSession.class
+        ||session->_colourOwner!=self||!session->_colourWork||!GLController||!GLController.viewer)
+        return Core3DPBRScalarResultInvalid;
+    auto work=std::move(session->_colourWork); // Consume before notification/reentry.
+    const auto result=GLController.viewer->commitColourSession(work);
+    switch(result){
+        case core3d::OrdinaryEditResult::Committed:
+            [self sendNotifyUIState:UIStateChangingApplyMaterial|UIStateChangingHistory];
+            return Core3DPBRScalarResultCommitted;
+        case core3d::OrdinaryEditResult::NoChange:return Core3DPBRScalarResultUnchanged;
+        case core3d::OrdinaryEditResult::Busy:return Core3DPBRScalarResultBusy;
+        case core3d::OrdinaryEditResult::OutcomeUnknown:return Core3DPBRScalarResultOutcomeUnknown;
+        default:return Core3DPBRScalarResultInvalid;
+    }
+}
+- (void)core3d_cancelColourWork:(std::shared_ptr<core3d::NativeColourSessionWork>)work {
+    if([NSThread isMainThread]&&GLController&&GLController.viewer)
+        GLController.viewer->cancelColourSession(work);
+}
+- (void)cancelColourEdit:(Core3DColourEditSession *)session {
+    if(![NSThread isMainThread]||!session||session.class!=Core3DColourEditSession.class||session->_colourOwner!=self)return;
+    [self core3d_cancelColourWork:std::move(session->_colourWork)];
+}
 - (Core3DSceneSnapshot *)captureColourPresentationSnapshot {
-    return [self captureSceneSnapshot];
+    if(![NSThread isMainThread]||!_isSetuped||!GLController||!GLController.viewer)return nil;
+    const CGSize size=GLController.drawableSize;
+    if(!std::isfinite(size.width)||!std::isfinite(size.height)||size.width<1||size.height<1
+        ||size.width>UINT32_MAX||size.height>UINT32_MAX)return nil;
+    try {
+        const auto snapshot=GLController.viewer->captureColourPresentation(
+            std::uint32_t(std::llround(size.width)),std::uint32_t(std::llround(size.height)));
+        return snapshot?Core3DCreateSceneSnapshotDTO(*snapshot):nil;
+    }catch(...){return nil;}
 }
 
 - (Core3DPBRScalarPreparation *)prepareScalarPBREdit:(Core3DPBRScalarEdit *)edit expected:(Core3DSceneSnapshot *)expected {

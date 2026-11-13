@@ -7862,6 +7862,290 @@ bool Core3DViewer::repairAppearance(const OrdinaryAppearanceLedger& ledger,bool 
     }catch(...){return false;}
 }
 
+struct NativePBRColourWork {
+    std::shared_ptr<const OcctPBRColourPreparation> prepared;
+    OrdinaryNameLedger authority;Handle(OcctDocument) owner;Handle(TDocStd_Document) document;
+    ObjectFrameIdentity identity;std::uint64_t presentationRevision=0;std::uint32_t width=0,height=0;
+    core3d::authority::Stamp stamp;Standard_Integer documentTime=0;bool consumed=false,changed=false;
+};
+std::shared_ptr<NativePBRColourWork> Core3DViewer::preparePBRColour(
+    const std::array<double,3>& sRGB,const ObjectFrameIdentity& identity,std::uint64_t presentation,
+    std::uint32_t width,std::uint32_t height) noexcept {
+    if(![NSThread isMainThread]||!canBeginCommittedEdit()||myDoc.IsNull()||myContext.IsNull()||!width||!height)return {};
+    try{
+        const auto stamp=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
+        const auto snapshot=captureSceneSnapshot(width,height);
+        if(!stamp||!snapshot||snapshot->selectionMode!=scene::ElementKind::Object||snapshot->publicationSourceIdentifier!=identity.publicationSourceIdentifier
+            ||snapshot->revisions.documentGeneration!=identity.documentGeneration||snapshot->revisions.model!=identity.modelRevision
+            ||snapshot->revisions.presentation!=presentation)return {};
+        auto work=std::make_shared<NativePBRColourWork>();work->owner=myDoc;work->document=myDoc->Document();
+        if(work->document.IsNull()||!admitNames(work->authority)||work->authority.selectedPresentations.empty()
+            ||work->authority.selectedPresentations.size()>64)return {};
+        std::vector<TDF_Label> targets;
+        for(const auto& selected:work->authority.selectedPresentations){
+            const auto label=myDoc->ShapeLabel(selected.presentation);
+            if(label.IsNull())return {};
+            targets.push_back(label);
+        }
+        work->identity=identity;work->stamp=*stamp;work->presentationRevision=presentation;
+        work->width=width;work->height=height;work->documentTime=work->document->GetData()->Time();
+        work->prepared=myDoc->PreparePBRColourPatch(targets,sRGB,work->changed);
+        const auto after=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
+        if(!work->prepared||!after||!(*after==work->stamp)||!myDoc->PBRScalarStateMatches(myDoc->PBRColourOriginal(work->prepared)))return {};
+        return work;
+    }catch(...){return {};}
+}
+void Core3DViewer::cancelPBRColour(const std::shared_ptr<NativePBRColourWork>& work) noexcept {
+    if([NSThread isMainThread]&&work&&work->owner==myDoc)work->consumed=true;
+}
+OrdinaryEditResult Core3DViewer::executePBRColour(const std::shared_ptr<NativePBRColourWork>& work) noexcept {
+    if(![NSThread isMainThread]||!work||work->owner!=myDoc||work->consumed)return OrdinaryEditResult::Invalid;
+    work->consumed=true;
+    if(!canBeginCommittedEdit()||!_ordinaryEditController)return OrdinaryEditResult::Busy;
+    try{
+        const auto stamp=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
+        const auto snapshot=captureSceneSnapshot(work->width,work->height);
+        if(!stamp||!(*stamp==work->stamp)||!snapshot||myDoc->Document()!=work->document||work->document->GetData()->Time()!=work->documentTime
+            ||snapshot->publicationSourceIdentifier!=work->identity.publicationSourceIdentifier
+            ||snapshot->revisions.documentGeneration!=work->identity.documentGeneration||snapshot->revisions.model!=work->identity.modelRevision
+            ||snapshot->revisions.presentation!=work->presentationRevision||!_objectInteractor||!_shapeInteractor
+            ||!_shapeInteractor->selectionModeAuthorityIsExact()||_shapeInteractor->getSelectionMode()!=work->authority.selectionMode
+            ||!_objectInteractor->verifyOrdinaryNameAuthority(work->authority)
+            ||!myDoc->PBRScalarStateMatches(myDoc->PBRColourOriginal(work->prepared)))return OrdinaryEditResult::Invalid;
+        if(!work->changed)return OrdinaryEditResult::NoChange;
+        OrdinaryEditResult result=OrdinaryEditResult::Invalid;auto lease=_ordinaryEditController->beginColour(work->prepared,&result);
+        if(lease)result=lease.stageAndCommit();return result;
+    }catch(...){return OrdinaryEditResult::OutcomeUnknown;}
+}
+
+bool Core3DViewer::admitColour(OrdinaryColourLedger& ledger) noexcept {
+    try {
+        if(!admitNames(ledger.authority))return false;
+        const auto targets=myDoc->PBRColourTargets(ledger.prepared);
+        if(targets.empty()||targets.size()!=ledger.authority.selectedPresentations.size())return false;
+        for(const auto& selected:ledger.authority.selectedPresentations){
+            const auto label=myDoc->ShapeLabel(selected.presentation);
+            if(label.IsNull()||std::count_if(targets.begin(),targets.end(),
+                [&](const auto& target){return target.IsEqual(label);})!=1)return false;
+        }
+        return true;
+    }catch(...){return false;}
+}
+bool Core3DViewer::repairColour(const OrdinaryColourLedger& ledger,bool committed) noexcept {
+    if(!repairNames(ledger.authority,committed))return false;
+    try {
+        const auto targets=myDoc->PBRColourTargets(ledger.prepared);
+        for(const auto& selected:ledger.authority.selectedPresentations){
+            const auto& shape=selected.presentation;const auto label=myDoc->ShapeLabel(shape);
+            if(shape.IsNull()||label.IsNull()||std::count_if(targets.begin(),targets.end(),
+                [&](const auto& target){return target.IsEqual(label);})!=1)return false;
+            shape->UnsetColor();myDoc->LoadObjectMeterial(label,shape);
+            myContext->RecomputePrsOnly(shape,Standard_False);
+        }
+        myContext->UpdateCurrentViewer();return repairNames(ledger.authority,committed);
+    }catch(...){return false;}
+}
+
+// A Colour session owns only transient presentation and immutable native edit
+// evidence. Its weak viewer slot does not extend the editor's lifetime.
+struct NativeColourSessionWork {
+    Handle(OcctDocument) owner;
+    Handle(TDocStd_Document) document;
+    OrdinaryNameLedger authority;
+    ObjectFrameIdentity identity;
+    core3d::authority::Stamp stamp;
+    Standard_Integer documentTime=0;
+    std::uint64_t presentationRevision=0,previewRevision=0;
+    std::uint32_t width=0,height=0;
+    std::string previewIdentifier;
+    std::vector<TDF_Label> targets;
+    std::vector<Handle(AIS_Shape)> presentations;
+    std::shared_ptr<const OcctPBRScalarState> source;
+    std::shared_ptr<NativePBRColourWork> candidate;
+    scene::OcctSceneSnapshotBuilder::SnapshotPointer preview;
+    bool consumed=false,presented=false;
+};
+
+namespace {
+// This is an independently identified, non-pickable presentation publication.
+// It must never replace the coordinator's authoritative full-scene checkpoint.
+scene::OcctSceneSnapshotBuilder::SnapshotPointer ColourPresentation(
+    const Handle(OcctDocument)& owner,const scene::SceneSnapshot& source,
+    const std::vector<TDF_Label>& targets,const std::array<double,3>& sRGB,
+    const std::string& identifier,std::uint64_t revision) {
+    auto result=std::make_shared<scene::SceneSnapshot>(source);
+    result->publicationSourceIdentifier=identifier;
+    result->revisions.snapshot=revision;
+    result->revisions.presentation=revision;
+    result->selection={};result->pickTable={scene::ElementIdentifier()};
+    const auto shapes=XCAFDoc_DocumentTool::ShapeTool(owner->Document()->Main());
+    const Quantity_Color rgb(sRGB[0],sRGB[1],sRGB[2],Quantity_TOC_sRGB);
+    std::size_t found=0;
+    for(auto& item:result->instances){
+        item.selectable=false;item.selected=false;
+        for(auto& binding:item.primitiveBindings)binding.pickToken=0;
+        const auto target=std::find_if(targets.begin(),targets.end(),[&](const auto& label){
+            return owner->EntityIdentifierForLabel(label)==item.entityIdentifier;
+        });
+        if(target==targets.end())continue;
+        ++found;
+        // E3/E4 and painted atlases bake base colour into derived pixels. They
+        // require a dedicated recomposition path, not a fabricated RGB uniform.
+        if(!item.faceImageBindings.empty()||!item.decalDerivedAppearances.empty())return {};
+        if(item.meshIndex>=source.meshes.size())return {};
+        const auto& mesh=source.meshes[item.meshIndex];
+        if(mesh.primitives.size()!=item.primitiveBindings.size())return {};
+        auto shape=XCAFDoc_ShapeTool::GetShape(*target);
+        if(owner->GeometryRepresentationForLabel(*target)==OcctGeometryRepresentation::TriangleMesh)
+            shape.Location(TopLoc_Location());
+        TopTools_IndexedMapOfShape faces;TopExp::MapShapes(shape,TopAbs_FACE,faces);
+        std::map<std::uint32_t,std::uint32_t> remap;
+        for(std::size_t i=0;i<mesh.primitives.size();++i){
+            const auto faceIndex=mesh.primitives[i].faceIndex;
+            if(faceIndex>=static_cast<std::uint32_t>(faces.Extent()))return {};
+            TDF_Label face;XCAFDoc_VisMaterialPBR authored;
+            if(shapes->FindSubShape(*target,faces(faceIndex+1),face)
+                &&owner->TryPBRMaterialForLabel(face,authored))continue;
+            auto& binding=item.primitiveBindings[i];
+            const auto slot=binding.materialIndex;
+            if(slot>=source.materials.size())return {};
+            const auto existing=remap.find(slot);
+            if(existing!=remap.end()){binding.materialIndex=existing->second;continue;}
+            auto material=source.materials[slot];
+            if(material.baseColorTextureIndex>=0
+                &&source.textures.at(material.baseColorTextureIndex).paintedAtlasDerivative)return {};
+            material.identifier=identifier+"/"+std::to_string(result->materials.size());
+            material.baseColor.x=static_cast<float>(rgb.Red());
+            material.baseColor.y=static_cast<float>(rgb.Green());
+            material.baseColor.z=static_cast<float>(rgb.Blue());
+            if(result->materials.size()>=4096)return {};
+            binding.materialIndex=static_cast<std::uint32_t>(result->materials.size());
+            remap.emplace(slot,binding.materialIndex);result->materials.push_back(std::move(material));
+        }
+    }
+    if(found!=targets.size()||!scene::IsValidSceneSnapshot(*result))return {};
+    return result;
+}
+}
+
+bool Core3DViewer::colourSessionMatches(const std::shared_ptr<NativeColourSessionWork>& work) noexcept {
+    if(![NSThread isMainThread]||!work||work->consumed||_colourSession.lock()!=work
+        ||work->owner!=myDoc||myDoc.IsNull()||myDoc->Document()!=work->document
+        ||!canBeginCommittedEdit()||!_objectInteractor||!_shapeInteractor)return false;
+    try {
+        const auto stamp=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
+        const auto snapshot=captureSceneSnapshot(work->width,work->height);
+        return stamp&&*stamp==work->stamp&&snapshot&&work->document->GetData()->Time()==work->documentTime
+            &&snapshot->publicationSourceIdentifier==work->identity.publicationSourceIdentifier
+            &&snapshot->revisions.documentGeneration==work->identity.documentGeneration
+            &&snapshot->revisions.model==work->identity.modelRevision
+            &&snapshot->revisions.presentation==work->presentationRevision
+            &&_shapeInteractor->selectionModeAuthorityIsExact()
+            &&_shapeInteractor->getSelectionMode()==work->authority.selectionMode
+            &&_objectInteractor->verifyOrdinaryNameAuthority(work->authority)
+            &&myDoc->PBRScalarStateMatches(work->source);
+    }catch(...){return false;}
+}
+
+std::shared_ptr<NativeColourSessionWork> Core3DViewer::beginColourSession(
+    const ObjectFrameIdentity& identity,std::uint64_t presentation,std::uint32_t width,std::uint32_t height) noexcept {
+    if(![NSThread isMainThread]||!canBeginCommittedEdit()||myDoc.IsNull()||myContext.IsNull()||!width||!height)return {};
+    try {
+        const auto snapshot=captureSceneSnapshot(width,height);
+        if(!snapshot||snapshot->selectionMode!=scene::ElementKind::Object
+            ||snapshot->publicationSourceIdentifier!=identity.publicationSourceIdentifier
+            ||snapshot->revisions.documentGeneration!=identity.documentGeneration
+            ||snapshot->revisions.model!=identity.modelRevision||snapshot->revisions.presentation!=presentation)return {};
+        // A rejected foreign/stale opening never cancels the current session.
+        if(auto previous=_colourSession.lock()){
+            if(colourSessionMatches(previous))return {};
+            cancelColourSession(previous);
+        }
+        const auto stamp=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());if(!stamp)return {};
+        auto work=std::make_shared<NativeColourSessionWork>();
+        work->owner=myDoc;work->document=myDoc->Document();
+        if(work->document.IsNull()||!admitNames(work->authority)||work->authority.selectedPresentations.empty()
+            ||work->authority.selectedPresentations.size()>64)return {};
+        for(const auto& selected:work->authority.selectedPresentations){
+            const auto label=myDoc->ShapeLabel(selected.presentation);if(label.IsNull())return {};
+            work->targets.push_back(label);work->presentations.push_back(selected.presentation);
+        }
+        work->source=myDoc->CapturePBRColourState(work->targets);if(!work->source)return {};
+        work->identity=identity;work->stamp=*stamp;work->presentationRevision=presentation;
+        work->width=width;work->height=height;work->documentTime=work->document->GetData()->Time();
+        work->previewIdentifier=std::string(NSUUID.UUID.UUIDString.UTF8String);
+        // Validate the complete presentation route at admission, including
+        // mixed finishes/face overrides. No publication or AIS mutation yet.
+        if(!ColourPresentation(myDoc,*snapshot,work->targets,{0,0,0},work->previewIdentifier,1))return {};
+        _colourSession=work;
+        if(!colourSessionMatches(work)){_colourSession.reset();return {};}
+        return work;
+    }catch(...){return {};}
+}
+
+void Core3DViewer::restoreColourPresentation(const std::shared_ptr<NativeColourSessionWork>& work) noexcept {
+    if(!work||!work->presented)return;
+    work->presented=false;work->preview.reset();
+    if(myDoc.IsNull()||myContext.IsNull()||work->owner!=myDoc||myDoc->Document()!=work->document)return;
+    try {
+        // Read the current durable appearance, including unrelated later edits.
+        // Removed targets and replaced documents are never resurrected.
+        for(std::size_t i=0;i<work->targets.size();++i){
+            const auto& shape=work->presentations[i];const auto& label=work->targets[i];
+            if(shape.IsNull()||!myDoc->IsEditableFreeSimpleDefinitionLabel(label)
+                ||!myDoc->ShapeLabel(shape).IsEqual(label))continue;
+            shape->UnsetColor();myDoc->LoadObjectMeterial(label,shape);
+            myContext->RecomputePrsOnly(shape,Standard_False);
+        }
+        myContext->UpdateCurrentViewer();
+    }catch(...){}
+}
+void Core3DViewer::cancelColourSession(const std::shared_ptr<NativeColourSessionWork>& work) noexcept {
+    if(![NSThread isMainThread]||!work||_colourSession.lock()!=work)return;
+    work->consumed=true;restoreColourPresentation(work);work->candidate.reset();_colourSession.reset();
+}
+bool Core3DViewer::previewColourSession(const std::shared_ptr<NativeColourSessionWork>& work,
+    const std::array<double,3>& sRGB) noexcept {
+    if(!colourSessionMatches(work)){cancelColourSession(work);return false;}
+    OcctPBRScalarPatch patch;patch.baseColorSRGB=sRGB;if(!patch.IsValid())return false;
+    try {
+        if(work->previewRevision==std::numeric_limits<std::uint64_t>::max())return false;
+        auto candidate=preparePBRColour(sRGB,work->identity,work->presentationRevision,work->width,work->height);
+        const auto snapshot=captureSceneSnapshot(work->width,work->height);
+        if(!candidate||!snapshot)return false;
+        auto preview=ColourPresentation(myDoc,*snapshot,work->targets,sRGB,
+            work->previewIdentifier,work->previewRevision+1);
+        if(!preview||!colourSessionMatches(work))return false;
+        work->presented=true;
+        if(!myDoc->PresentPBRColourPatch(candidate->prepared,work->presentations)){
+            cancelColourSession(work);return false;
+        }
+        for(const auto& shape:work->presentations)myContext->RecomputePrsOnly(shape,Standard_False);
+        myContext->UpdateCurrentViewer();
+        if(!colourSessionMatches(work)){cancelColourSession(work);return false;}
+        work->candidate=std::move(candidate);work->preview=std::move(preview);++work->previewRevision;
+        return true;
+    }catch(...){cancelColourSession(work);return false;}
+}
+OrdinaryEditResult Core3DViewer::commitColourSession(const std::shared_ptr<NativeColourSessionWork>& work) noexcept {
+    if(!colourSessionMatches(work)){cancelColourSession(work);return OrdinaryEditResult::Invalid;}
+    work->consumed=true;_colourSession.reset();
+    restoreColourPresentation(work);
+    auto candidate=std::move(work->candidate);
+    return candidate?executePBRColour(candidate):OrdinaryEditResult::NoChange;
+}
+scene::OcctSceneSnapshotBuilder::SnapshotPointer Core3DViewer::captureColourPresentation(
+    std::uint32_t width,std::uint32_t height) noexcept {
+    if(![NSThread isMainThread])return {};
+    if(auto work=_colourSession.lock()){
+        if(colourSessionMatches(work)&&width==work->width&&height==work->height){
+            if(work->preview)return work->preview;
+        }else cancelColourSession(work);
+    }
+    return captureSceneSnapshot(width,height);
+}
+
+
 struct NativeSolidWork {
     std::shared_ptr<NativeModelingCommitPermit> modelingPermit; // Main only; excluded from numeric geometry payload.
     NativeSolidGeometryPayload geometry;

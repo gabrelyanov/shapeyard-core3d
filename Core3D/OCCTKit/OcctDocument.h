@@ -1003,6 +1003,7 @@ struct OcctPBRScalarDebugEvidence {
 struct OcctSavedCutSceneState;
 struct OcctPBRScalarState;
 struct OcctPBRScalarPreparation;
+struct OcctPBRColourPreparation;
 
 struct OcctPBRMaterialUpdate
 {
@@ -2119,6 +2120,23 @@ public:
     Standard_EXPORT bool PBRScalarStateMatches(const std::shared_ptr<const OcctPBRScalarState>&) const noexcept;
     Standard_EXPORT bool StagePBRScalarPatch(const std::shared_ptr<const OcctPBRScalarPreparation>&,
         std::shared_ptr<const OcctPBRScalarState>& sealed) noexcept;
+    // Whole-object Colour uses one captured scene and per-target exact material
+    // candidates. Face labels require a separate topology allowance; this entry
+    // deliberately admits editable free roots only.
+    Standard_EXPORT std::shared_ptr<const OcctPBRScalarState> CapturePBRColourState(
+        const std::vector<TDF_Label>&) const noexcept;
+    Standard_EXPORT std::shared_ptr<const OcctPBRColourPreparation> PreparePBRColourPatch(
+        const std::vector<TDF_Label>&, const std::array<double,3>& sRGB, bool& changed) const noexcept;
+    Standard_EXPORT std::shared_ptr<const OcctPBRScalarState> PBRColourOriginal(
+        const std::shared_ptr<const OcctPBRColourPreparation>&) const noexcept;
+    Standard_EXPORT std::vector<TDF_Label> PBRColourTargets(
+        const std::shared_ptr<const OcctPBRColourPreparation>&) const;
+    Standard_EXPORT bool StagePBRColourPatch(const std::shared_ptr<const OcctPBRColourPreparation>&,
+        std::shared_ptr<const OcctPBRScalarState>& sealed) noexcept;
+    // Presentation only: reload unchanged targets, then apply private material
+    // handles to AIS. No OCAF command, material-table write or notification.
+    Standard_EXPORT bool PresentPBRColourPatch(const std::shared_ptr<const OcctPBRColourPreparation>&,
+        const std::vector<Handle(AIS_Shape)>&) noexcept;
     Standard_Boolean SaveObjectPBRMaterials(
         const std::vector<OcctPBRMaterialUpdate>& updates);
     //! DEBUG seam for exercising aggregate occurrence limits with small valid
@@ -2586,13 +2604,17 @@ private:
   // private import worker. UI-facing admission retains its main-thread guard.
   Standard_Boolean HasNativeNormalTextureGeometry(const TDF_Label& label) const noexcept;
     std::shared_ptr<const OcctPBRScalarState> CapturePBRScalarState(const TDF_Label&) const noexcept;
+    Handle(XCAFDoc_VisMaterial) PrepareExactPBRMaterial(const TDF_Label&,
+        const OcctPBRScalarPatch&, bool& changed) const noexcept;
     Standard_Boolean SaveObjectPBRMaterialsImpl(const std::vector<OcctPBRMaterialUpdate>&,
         const Handle(XCAFDoc_VisMaterial)& scalarMaterial,
-        bool retainPreviousMaterial = false);
+        bool retainPreviousMaterial = false,
+        const std::vector<Handle(XCAFDoc_VisMaterial)>* exactMaterials = nullptr);
     Standard_Boolean CanSaveObjectPBRMaterials(
         const std::vector<OcctPBRMaterialUpdate>& updates,
         std::vector<TDF_Label>* reclaimMaterialLabels,
-        const Handle(XCAFDoc_VisMaterial)& scalarMaterial = Handle(XCAFDoc_VisMaterial)()) const;
+        const Handle(XCAFDoc_VisMaterial)& scalarMaterial = Handle(XCAFDoc_VisMaterial)(),
+        const std::vector<Handle(XCAFDoc_VisMaterial)>* exactMaterials = nullptr) const;
     
 #if DEBUG
   // Exact pointer created below and kept alive by myApp; no foreign downcast.

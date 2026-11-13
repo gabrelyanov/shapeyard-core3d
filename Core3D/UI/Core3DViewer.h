@@ -91,6 +91,8 @@ namespace core3d {
     };
 
     struct NativePBRScalarWork;
+    struct NativePBRColourWork;
+    struct NativeColourSessionWork;
     struct NativeSolidWork;
     class SavedCutSourceEditWork;
     class SavedCutSourceEditCancellation;
@@ -259,6 +261,18 @@ namespace core3d {
             const ObjectFrameIdentity&,std::uint64_t presentation,std::uint32_t width,std::uint32_t height) noexcept;
         OrdinaryEditResult executePBRScalar(const std::shared_ptr<NativePBRScalarWork>&) noexcept;
         void cancelPBRScalar(const std::shared_ptr<NativePBRScalarWork>&) noexcept;
+        std::shared_ptr<NativePBRColourWork> preparePBRColour(const std::array<double,3>& sRGB,
+            const ObjectFrameIdentity&,std::uint64_t presentation,std::uint32_t width,std::uint32_t height) noexcept;
+        OrdinaryEditResult executePBRColour(const std::shared_ptr<NativePBRColourWork>&) noexcept;
+        void cancelPBRColour(const std::shared_ptr<NativePBRColourWork>&) noexcept;
+        std::shared_ptr<NativeColourSessionWork> beginColourSession(const ObjectFrameIdentity&,
+            std::uint64_t presentation,std::uint32_t width,std::uint32_t height) noexcept;
+        bool previewColourSession(const std::shared_ptr<NativeColourSessionWork>&,
+            const std::array<double,3>& sRGB) noexcept;
+        OrdinaryEditResult commitColourSession(const std::shared_ptr<NativeColourSessionWork>&) noexcept;
+        void cancelColourSession(const std::shared_ptr<NativeColourSessionWork>&) noexcept;
+        scene::OcctSceneSnapshotBuilder::SnapshotPointer captureColourPresentation(
+            std::uint32_t width,std::uint32_t height) noexcept;
         std::shared_ptr<NativeSolidWork> prepareProfileSolid(
             const profile::Parameters& parameters, const ObjectFrameIdentity& identity,
             std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept;
@@ -1195,6 +1209,11 @@ namespace core3d {
         bool repairCreation(const OrdinaryCreationLedger& ledger, bool committed) noexcept override;
         bool admitAppearance(OrdinaryAppearanceLedger&) noexcept override;
         bool repairAppearance(const OrdinaryAppearanceLedger&,bool) noexcept override;
+        bool admitColour(OrdinaryColourLedger&) noexcept override;
+        bool repairColour(const OrdinaryColourLedger&,bool) noexcept override;
+        bool colourSessionMatches(const std::shared_ptr<NativeColourSessionWork>&) noexcept;
+        void restoreColourPresentation(const std::shared_ptr<NativeColourSessionWork>&) noexcept;
+        std::weak_ptr<NativeColourSessionWork> _colourSession;
         bool admitGrouping(OrdinaryGroupingLedger& ledger) noexcept override;
         bool repairGrouping(const OrdinaryGroupingLedger& ledger, bool committed) noexcept override;
         bool admitNames(OrdinaryNameLedger& ledger) noexcept override;
