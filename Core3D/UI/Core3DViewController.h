@@ -308,6 +308,11 @@ __attribute__((objc_subclassing_restricted))
 //! Presentation-only readback. Must never replace captureSceneSnapshot for
 //! admission, persistence, export, thumbnails or semantic picking authority.
 - (Core3DSceneSnapshot *_Nullable)captureColourPresentationSnapshot;
+//! Atomically capture one current session's appearance scene, matching explicit
+//! empty overlay and exact semantic selection. Nil before a preview or for any
+//! stale/foreign/ended token; never falls back to an ordinary publication.
+- (Core3DColourPresentation *_Nullable)captureColourPresentationForSession:(Core3DColourEditSession *)session
+    NS_SWIFT_NAME(captureColourPresentation(session:));
 //! Observe one native frame and its invalidation, main-thread only. The callback
 //! receives a camera only after actual Draw and successful presentation; a later
 //! redraw/edit/lifecycle invalidation reports nil and releases the observer.
