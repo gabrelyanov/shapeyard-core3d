@@ -3380,6 +3380,19 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 	if (_viewer == nullptr || _viewer->hasUnresolvedEdit()) {
 		return;
 	}
+	// Keep raw-R2 ownership alive while Cancel/Apply republishes selection.
+	// Once that operation is inactive, retire its presentation token at the
+	// explicit tool boundary before deriving the previous tool. Treating the
+	// stale token as an ordinary Chamfer would ask the empty ordinary ledger to
+	// reset a wireframe it never owned.
+	if (type != PrimitiveGizmoTypeChamfer
+		&& _visibleRawR2BevelOwnsChamferTool) {
+		Core3DViewController *rawOwner =
+			Core3DVisibleRawR2BevelOwner(self);
+		if (![rawOwner core3d_hasVisibleRawR2Bevel]) {
+			_visibleRawR2BevelOwnsChamferTool = NO;
+		}
+	}
 	const PrimitiveGizmoType previousType = [self getGizmoType];
 	if (type != PrimitiveGizmoTypeNone) {
 		const std::shared_ptr<ShapeInteractor> shapeInteractor =
@@ -3821,9 +3834,6 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
     if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
         const BOOL committed = [rawOwner core3d_applyVisibleRawR2Bevel];
-        if (committed) {
-            _visibleRawR2BevelOwnsChamferTool = NO;
-        }
         [self checkSelections];
         [self requestRender];
         return committed;
@@ -3847,9 +3857,6 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 	Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
 	if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
 		const BOOL didCancel = [rawOwner core3d_cancelVisibleRawR2Bevel];
-		if (didCancel) {
-			_visibleRawR2BevelOwnsChamferTool = NO;
-		}
 		[self checkSelections];
 		[self requestRender];
 		return didCancel;
