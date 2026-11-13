@@ -23,6 +23,8 @@
 #include "../OCCTKit/DetachedRectangularLoftProbe.hxx"
 #include <GProp_GProps.hxx>
 #include <BRepGProp.hxx>
+#include <BRepBuilderAPI_GTransform.hxx>
+#include <gp_GTrsf.hxx>
 #endif
 #include <BRepBndLib.hxx>
 #if DEBUG
@@ -881,6 +883,23 @@ void Core3DAddDebugOrphanVisualMaterial(
 
 // Native DTO bridges remain declared here for controller call sites; their
 // implementations live with the detached value objects in Core3DModelingTypes.mm.
+@interface Core3DGeometrySnapFeedback ()
+- (instancetype)initWithNative:(const core3d::ObjectInteractor::GeometryMoveSnap&)value;
+@end
+@implementation Core3DGeometrySnapFeedback
+- (instancetype)initWithNative:(const core3d::ObjectInteractor::GeometryMoveSnap&)value {
+    self = [super init];
+    if (self) {
+        _kind = static_cast<Core3DGeometrySnapKind>(value.hit.kind);
+        _targetIdentifier = [NSString stringWithUTF8String:value.targetIdentifier.c_str()];
+        _topologyIndex = value.hit.topologyIndex;
+        _point = simd_make_double3(value.hit.point.X(),value.hit.point.Y(),value.hit.point.Z());
+        _distance = value.hit.distance;
+    }
+    return self;
+}
+@end
+
 @interface Core3DProfileCurveLoop ()
 - (core3d::ProfileCurveLoop)nativeLoop;
 @end
@@ -12153,6 +12172,18 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
 - (NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable)
     debugReplayGesture:(NSInteger)mode axis:(NSInteger)axis
     values:(NSArray<NSNumber *> *)values {
+    return [self debugReplayGesture:mode axis:axis values:values cancel:NO];
+}
+
+- (NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable)
+    debugReplayGesture:(NSInteger)mode axis:(NSInteger)axis
+    values:(NSArray<NSNumber *> *)values cancel:(BOOL)cancel {
+    return [self debugReplayGesture:mode axis:axis values:values cancel:cancel physicalScale:NO];
+}
+
+- (NSArray<NSDictionary<NSString *, NSNumber *> *> *_Nullable)
+    debugReplayGesture:(NSInteger)mode axis:(NSInteger)axis
+    values:(NSArray<NSNumber *> *)values cancel:(BOOL)cancel physicalScale:(BOOL)physicalScale {
     if (![NSThread isMainThread] || mode < 0 || mode > 3 || axis < 0 || axis > 2
         || values.count < 2 || values.count > 32 || GLController.viewer == nullptr) {
         return nil;
@@ -12168,7 +12199,7 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
     std::vector<std::array<Standard_Real, 2>> observed;
     if (!interactor->debugReplayGesture(
             static_cast<Standard_Integer>(mode), static_cast<Standard_Integer>(axis),
-            samples, observed)) {
+            samples, observed, cancel, physicalScale)) {
         return nil;
     }
     NSMutableArray<NSDictionary<NSString *, NSNumber *> *> *result =
@@ -13704,7 +13735,14 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
 
 + (NSDictionary<NSString *, id> *)debugGeometrySnapFixture:(NSInteger)fixture
     point:(NSArray<NSNumber *> *)point tolerance:(double)tolerance kinds:(NSUInteger)kinds {
-    if (point.count != 3 || fixture < 0 || fixture > 6 || kinds > UINT_MAX)
+    return [self debugGeometryAxisSnapFixture:fixture point:point tolerance:tolerance kinds:kinds axis:@[]];
+}
+
++ (NSDictionary<NSString *, id> *)debugGeometryAxisSnapFixture:(NSInteger)fixture
+    point:(NSArray<NSNumber *> *)point tolerance:(double)tolerance kinds:(NSUInteger)kinds
+    axis:(NSArray<NSNumber *> *)axis {
+    if (point.count != 3 || fixture < 0 || fixture > 7 || kinds > UINT_MAX
+        || (axis.count != 0 && axis.count != 3))
         return @{@"error": @"fixture-input"};
     try {
         TopoDS_Shape shape;
@@ -13737,6 +13775,11 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
             shape = BRepBuilderAPI_MakeEdge(
                 gp_Elips(gp_Ax2(gp_Pnt(0,0,0),gp_Dir(0,0,1)),10,4),0,M_PI/2).Edge();
         }
+        if (fixture == 7) {
+            const auto cylinder = BRepPrimAPI_MakeCylinder(30,50).Shape();
+            const gp_GTrsf stretch(gp_Mat(1,0,0, 0,5.0/6.0,0, 0,0,1),gp_XYZ(0,0,0));
+            shape = BRepBuilderAPI_GTransform(cylinder,stretch,Standard_True).Shape();
+        }
         auto bytes = [&]() {
             if (shape.IsNull()) return std::string();
             std::ostringstream stream;
@@ -13745,9 +13788,16 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
             return stream.str();
         };
         const auto before = bytes();
+        std::optional<gp_Dir> direction;
+        if (axis.count == 3) {
+            const gp_Vec vector(axis[0].doubleValue,axis[1].doubleValue,axis[2].doubleValue);
+            if (!std::isfinite(vector.X()) || !std::isfinite(vector.Y()) || !std::isfinite(vector.Z())
+                || vector.SquareMagnitude() <= gp::Resolution()) return @{@"matched": @NO, @"unchanged": @YES};
+            direction = gp_Dir(vector);
+        }
         const auto hit = core3d::SnapPointToGeometry(shape,
             gp_Pnt(point[0].doubleValue,point[1].doubleValue,point[2].doubleValue),
-            tolerance,static_cast<unsigned>(kinds));
+            tolerance,static_cast<unsigned>(kinds),direction);
         NSMutableDictionary *result = [@{@"matched": @(bool(hit)),
             @"unchanged": @(before == bytes())} mutableCopy];
         if (hit) {
@@ -20239,6 +20289,24 @@ static bool Core3DPublishCommittedSpatialSweep(
     } catch (...) { completion(Core3DObjectAlignmentResultRejected); }
 }
 
++ (NSNotificationName)geometrySnapFeedbackDidChangeNotification {
+    return @"Core3DGeometrySnapFeedbackDidChangeNotification";
+}
+
+- (Core3DGeometrySnapFeedback *_Nullable)geometrySnapFeedback {
+    if (![NSThread isMainThread] || !_isSetuped || !GLController || !GLController.viewer) return nil;
+    const auto interactor = GLController.viewer->getObjectInteractor();
+    const auto feedback = interactor ? interactor->geometrySnapFeedback() : nullptr;
+    return feedback ? [[Core3DGeometrySnapFeedback alloc] initWithNative:*feedback] : nil;
+}
+
+- (BOOL)setGeometrySnappingTolerance:(double)tolerance {
+    if (![NSThread isMainThread] || !_isSetuped || !GLController
+        || !GLController.viewer || !GLController.viewer->canBeginCommittedEdit()) return NO;
+    const auto interactor = GLController.viewer->getObjectInteractor();
+    return interactor && interactor->setGeometrySnappingTolerance(tolerance);
+}
+
 - (BOOL)selectObjectWithEntityIdentifier:(NSString *)entityIdentifier
                               expected:(Core3DSceneSnapshot *)expected {
     const auto traceSelectionRefusal = [](const char* predicate, bool failed) noexcept {
@@ -21615,6 +21683,31 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
             @"boundsMinMM":@[@(bounds[0]),@(bounds[1]),@(bounds[2])],
             @"boundsMaxMM":@[@(bounds[3]),@(bounds[4]),@(bounds[5])]};
     }catch(...){return nil;}
+}
+
+- (NSDictionary<NSString *,id> *)debugSplineSnapTargetMetrics:(NSString *)entity {
+    if(!NSThread.isMainThread || !GLController || !GLController.viewer || !entity
+        || entity.length>128 || !entity.UTF8String || ![self core3d_canBeginCommittedEdit])return nil;
+    try {
+        OcctObjectNameState named; TopoDS_Shape local,world;
+        double unit=0,mm=0; std::size_t nodes=0;
+        if(!core3dDebugSolidCopy(GLController.viewer->getDocument(),entity,named,local,world,unit,mm,nodes))return nil;
+        GProp_GProps props;
+        // Split integration at spline spans; retain the ordinary evidence
+        // readout separately, unchanged, for exact history comparisons.
+        const double error=BRepGProp::VolumePropertiesGK(world,props,1e-10,
+            Standard_False,Standard_True);
+        if(!std::isfinite(error)||error<0||!std::isfinite(props.Mass()))return nil;
+        Bnd_Box box; BRepBndLib::AddOptimal(world,box,Standard_False,Standard_False);
+        if(box.IsVoid()||box.IsOpen())return nil;
+        const double gap=box.GetGap(); box.SetGap(0);
+        double b[6];box.Get(b[0],b[1],b[2],b[3],b[4],b[5]);
+        NSMutableArray *bounds=[NSMutableArray arrayWithCapacity:6];
+        for(double v:b){if(!std::isfinite(v*mm))return nil;[bounds addObject:@(v*mm)];}
+        return @{@"volumeMM3":@(props.Mass()*mm*mm*mm),@"integrationError":@(error),
+            @"boundsMM":bounds,@"boundsGapMM":@(gap*mm),
+            @"boundsPrecisionMM":@(Precision::Confusion()*mm)};
+    } catch (...) {return nil;}
 }
 
 - (NSDictionary<NSString *,id> *)debugB2cProfileSourceCorrespondenceEvidence:
