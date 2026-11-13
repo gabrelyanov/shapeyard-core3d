@@ -20241,8 +20241,14 @@ struct PBRRootEntry {
     // carrier. Its exact TNaming history is protected separately from faces
     // that may gain a new material endpoint during Apply.
     std::vector<core3d::treatment_history::NamingState> colourCarrierNaming;
+    TDF_Label colourCompositeLabel;
+    PBRBytes colourCompositeBytes;
+    std::vector<PBRDigest> colourCompositeSources;
     bool equals(const PBRRootEntry& b)const noexcept {
         return object.IsEqual(b.object)&&geometry==b.geometry&&raw==b.raw
+            &&colourCompositeLabel.IsEqual(b.colourCompositeLabel)
+            &&colourCompositeBytes==b.colourCompositeBytes
+            &&colourCompositeSources==b.colourCompositeSources
             &&SameTreatmentNamingSet(colourCarrierNaming,b.colourCarrierNaming,true);
     }
 };
@@ -20370,6 +20376,30 @@ std::shared_ptr<const OcctPBRScalarState> OcctDocument::CapturePBRScalarState(co
                     ||!hasNaming)return refused(__LINE__);
                 e.colourCarrierNaming.push_back(std::move(naming));
             }
+            if(colourSubshapes){
+                // A Join/Cut recipe is a whole-result NamedShape carrier, not
+                // an editable face. Admit only the strict reader's exact
+                // carrier, retaining its canonical recipe, original shapes
+                // and naming history through preview, commit and rollback.
+                core3d::composite_recipe::Record composite;
+                if(!core3d::composite_recipe::Read(myOcafDoc,l,composite))return refused(__LINE__);
+                if(composite.value){
+                    e.colourCompositeLabel=composite.label;
+                    e.colourCompositeBytes=composite.value->bytes;
+                    bool hasNaming=false;core3d::treatment_history::NamingState naming;
+                    if(!CaptureTreatmentNamingState(composite.label,hasNaming,naming)
+                        ||!hasNaming)return refused(__LINE__);
+                    e.colourCarrierNaming.push_back(std::move(naming));
+                    for(const auto& shape:composite.value->sourceShapes){
+                        PBRGeometryStream sourceStream(geometry);std::ostream sourceOut(&sourceStream);
+                        sourceOut.imbue(std::locale::classic());
+                        BRepTools::Write(shape,sourceOut,Standard_True,Standard_True,TopTools_FormatVersion_VERSION_3);
+                        PBRDigest digest{};
+                        if(!sourceOut.good()||!sourceStream.finish(digest))return refused(__LINE__);
+                        e.colourCompositeSources.push_back(digest);
+                    }
+                }
+            }
             PBRGeometryStream stream(geometry);std::ostream out(&stream);out.imbue(std::locale::classic());
             BRepTools::Write(e.object.object.object.shape,out,Standard_True,Standard_True,TopTools_FormatVersion_VERSION_3);
             if(!out.good()||!stream.finish(e.geometry))return refused(__LINE__);
@@ -20402,7 +20432,27 @@ std::shared_ptr<const OcctPBRScalarState> OcctDocument::CapturePBRScalarState(co
                     // Both its record and naming history remain in root.equals.
                     const auto& retained=state->roots.at(key).object.object.object.retained;
                     if(!retained.label.IsNull()&&child.IsEqual(retained.label))continue;
-                    if(face.IsNull()||face.ShapeType()!=TopAbs_FACE)return refused(__LINE__);
+                    const auto& compositeLabel=state->roots.at(key).colourCompositeLabel;
+                    if(!compositeLabel.IsNull()&&child.IsEqual(compositeLabel))continue;
+                    if(face.IsNull()||face.ShapeType()!=TopAbs_FACE){
+#if DEBUG
+                        std::string detail="colour.non-face:"+PBRLabelKey(child)
+                            +":type="+std::to_string(face.IsNull()?-1:static_cast<int>(face.ShapeType()));
+                        for(TDF_AttributeIterator it(child);it.More();it.Next())
+                            detail+=":"+std::string(it.Value()->DynamicType()->Name());
+                        Handle(TNaming_NamedShape) naming;
+                        if(child.FindAttribute(TNaming_NamedShape::GetID(),naming)&&!naming.IsNull()){
+                            detail+=":evolution="+std::to_string(static_cast<int>(naming->Evolution()));
+                            for(TNaming_Iterator it(naming);it.More();it.Next()){
+                                const auto old=it.OldShape(),now=it.NewShape();
+                                detail+=":pair="+std::to_string(old.IsNull()?-1:static_cast<int>(old.ShapeType()))
+                                    +"/"+std::to_string(now.IsNull()?-1:static_cast<int>(now.ShapeType()));
+                            }
+                        }
+                        DebugRecordColourFailure(detail);
+#endif
+                        return refused(__LINE__);
+                    }
                     PBRFaceEntry entry;entry.root=key;PBRWriter stable;
                     bool hasNaming=false;core3d::treatment_history::NamingState naming;
                     if(!CaptureTreatmentNamingState(child,hasNaming,naming)||!hasNaming)return refused(__LINE__);
