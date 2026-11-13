@@ -143,6 +143,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (Core3DLinearArrayParameters)getLinearArrayParameters;
 - (BOOL)setLinearArrayAxis:(Core3DLinearArrayAxis)axis;
 - (BOOL)setLinearArrayCount:(NSInteger)count;
+- (BOOL)setLinearArrayRows:(NSInteger)rows;
 - (BOOL)setLinearArraySpacing:(CGFloat)spacing;
 - (BOOL)applyLinearArray;
 - (BOOL)cancelLinearArray;

@@ -3309,6 +3309,90 @@ bool HaveCompatibleLinearArrayBasis(
     return true;
 }
 
+//! Resolve Repeat's face bindings from the same authored material authority as
+//! the committed scene. Match exact faces, never iterator ordinals between two
+//! different traversals; the overlay still shares one bounded mesh.
+bool ResolveLinearArrayPreviewMaterials(
+    const Handle(OcctDocument)& theDocument,
+    const TopoDS_Shape& theShape,
+    std::vector<MaterialSnapshot>& theMaterials,
+    std::vector<std::uint32_t>& theBindings)
+{
+    theMaterials.clear();
+    theBindings.clear();
+    const auto aShapes = XCAFDoc_DocumentTool::ShapeTool(theDocument->Document()->Main());
+    TDF_Label aLabel;
+    if (aShapes.IsNull() || !aShapes->FindShape(theShape, aLabel)
+        || !theDocument->IsEditableFreeSimpleDefinitionLabel(aLabel)
+        || !XCAFDoc_ShapeTool::GetShape(aLabel).IsEqual(theShape)) return false;
+
+    std::vector<TopoDS_Shape> aFaces;
+    for (TopExp_Explorer face(theShape, TopAbs_FACE); face.More(); face.Next()) {
+        if (aFaces.size() >= kMaxOverlayPrimitives) return false;
+        aFaces.push_back(face.Current());
+    }
+    if (aFaces.empty()) return false;
+    theBindings.resize(aFaces.size(), std::numeric_limits<std::uint32_t>::max());
+    Graphic3d_NameOfMaterial aMaterialName;
+    Quantity_NameOfColor aColorName;
+    const std::optional<Graphic3d_NameOfMaterial> aMaterialOverride =
+        theDocument->TryMaterialNameForLabel(aLabel, aMaterialName)
+            ? std::optional<Graphic3d_NameOfMaterial>(aMaterialName) : std::nullopt;
+    const std::optional<Quantity_NameOfColor> aColorOverride =
+        theDocument->TryColorNameForLabel(aLabel, aColorName)
+            ? std::optional<Quantity_NameOfColor>(aColorName) : std::nullopt;
+    const auto authoredPbr = [&](const TDF_Label& label)
+        -> std::optional<WholeObjectPBRMaterial> {
+        XCAFDoc_VisMaterialPBR pbr;
+        if (!theDocument->TryPBRMaterialForLabel(label, pbr)) return std::nullopt;
+        const auto visual = XCAFDoc_VisMaterialTool::GetShapeMaterial(label);
+        if (visual.IsNull()) return std::nullopt;
+        return WholeObjectPBRMaterial{pbr, visual->AlphaMode(),
+            visual->AlphaCutOff(), visual->FaceCulling()};
+    };
+    const auto aBasePbr = authoredPbr(aLabel);
+    const bool isClosed = StdPrs_ToolTriangulatedShape::IsClosed(theShape);
+    for (RWMesh_FaceIterator face(aLabel, TopLoc_Location(), Standard_True);
+         face.More(); face.Next()) {
+        auto effectivePbr = aBasePbr;
+        TDF_Label aFaceLabel;
+        if (aShapes->FindSubShape(aLabel, face.Face(), aFaceLabel)) {
+            const auto facePbr = authoredPbr(aFaceLabel);
+            if (facePbr.has_value()) effectivePbr = facePbr;
+        }
+        MaterialSnapshot material;
+        Handle(Image_Texture) base, emissive, metallicRoughness, occlusion, normal;
+        if (!face.FaceStyle().IsVisible()
+            || !ResolveMaterial(face, aMaterialOverride, aColorOverride, effectivePbr,
+                isClosed, true, material, base, emissive, metallicRoughness, occlusion, normal)
+            || !base.IsNull() || !emissive.IsNull() || !metallicRoughness.IsNull()
+            || !occlusion.IsNull() || !normal.IsNull()
+            || material.alphaMode != AlphaMode::Opaque || material.baseColor.w != 1.0f)
+            return false;
+        const auto existing = std::find_if(theMaterials.begin(), theMaterials.end(),
+            [&material](const auto& item) { return MaterialValuesEqual(item, material); });
+        std::uint32_t materialIndex = static_cast<std::uint32_t>(existing - theMaterials.begin());
+        if (existing == theMaterials.end()) {
+            if (theMaterials.size() >= kMaxOverlayMaterials) return false;
+            material.identifier = materialIndex == 0 ? "linear-array/source/0/material"
+                : "linear-array/source/0/material/" + std::to_string(materialIndex);
+            theMaterials.push_back(std::move(material));
+        }
+        bool found = false;
+        for (std::size_t index = 0; index < aFaces.size(); ++index) {
+            if (!aFaces[index].IsEqual(face.Face())) continue;
+            if (theBindings[index] != std::numeric_limits<std::uint32_t>::max()
+                && theBindings[index] != materialIndex) return false;
+            theBindings[index] = materialIndex;
+            found = true;
+        }
+        if (!found) return false;
+    }
+    return !theMaterials.empty()
+        && std::all_of(theBindings.begin(), theBindings.end(),
+            [&theMaterials](const auto index) { return index < theMaterials.size(); });
+}
+
 //! Copy one explicitly owned AIS preview using only triangulations that
 //! already exist on its BRep faces. No mesher is invoked: a cache miss fails
 //! closed so OCCT remains the authoritative renderer for that frame.
@@ -3323,7 +3407,8 @@ bool ExtractWorldPreviewItem(
     const std::size_t theMaxVertices,
     const std::size_t theMaxIndices,
     const std::size_t theMaxPrimitives,
-    WorldPreviewItem& theItem)
+    WorldPreviewItem& theItem,
+    const MaterialSnapshot* theResolvedMaterial = nullptr)
 {
     if (thePresentation.IsNull()
         || !IsValidIdentifier(theIdentifier)
@@ -3575,59 +3660,64 @@ bool ExtractWorldPreviewItem(
     const bool isClosed =
         StdPrs_ToolTriangulatedShape::IsClosed(aShape);
     MaterialSnapshot aMaterial = DefaultMaterial(isClosed);
-    if (!ApplyPreset(aMaterial,
-                     thePresentation->Material(),
-                     isClosed)) {
-        // Authored PBR is represented by an actual material aspect, not an
-        // OCCT preset name. Boolean highlights still use the fixed role color,
-        // but must preserve the admitted opaque scalar appearance. Other
-        // overlay kinds retain their existing preset-only contract.
-        const bool isBoolean = theRole == RenderRole::BooleanActor
-            || theRole == RenderRole::BooleanSubject;
-        const auto aMaterialName = thePresentation->Material();
-        if (!isBoolean || !theColorOverride.has_value()
-            || (aMaterialName != Graphic3d_NameOfMaterial_UserDefined
-                && aMaterialName != Graphic3d_NameOfMaterial_DEFAULT)
-            || HasUnsupportedPresentationTexture(thePresentation)) {
-            return false;
-        }
-        const auto& anAspect =
-            thePresentation->Attributes()->ShadingAspect()->Aspect();
-        // The app's sampler-free scalar PBR shader carries exactly these
-        // admitted material values. Keep foreign/custom shaders refused.
-        const bool hasForeignShader = !anAspect->ShaderProgram().IsNull()
-            && anAspect->ShaderProgram()->GetId() != "shapeyard-data-maps-v1-0";
-        if (hasForeignShader
-            || (anAspect->AlphaMode() != Graphic3d_AlphaMode_Opaque
-                && anAspect->AlphaMode() != Graphic3d_AlphaMode_BlendAuto)) {
-            return false;
-        }
-        const auto& aPbr = anAspect->FrontMaterial().PBRMaterial();
-        if (!IsFinite(aPbr.Alpha()) || aPbr.Alpha() != 1.0f) {
-            return false;
-        }
-        const auto anEmission = aPbr.Emission();
-        aMaterial.emission = {anEmission.x(), anEmission.y(), anEmission.z()};
-        aMaterial.metallic = aPbr.Metallic();
-        aMaterial.roughness = aPbr.NormalizedRoughness();
-        aMaterial.indexOfRefraction = aPbr.IOR();
-    }
-    Quantity_Color aColor;
-    if (theColorOverride.has_value()) {
-        aColor = Quantity_Color(*theColorOverride);
+    if (theResolvedMaterial != nullptr) {
+        if (theRole != RenderRole::LinearArrayPreview) return false;
+        aMaterial = *theResolvedMaterial;
     } else {
-        thePresentation->Color(aColor);
+        if (!ApplyPreset(aMaterial,
+                         thePresentation->Material(),
+                         isClosed)) {
+            // Authored PBR is represented by an actual material aspect, not an
+            // OCCT preset name. Boolean highlights still use the fixed role color,
+            // but must preserve the admitted opaque scalar appearance. Other
+            // overlay kinds retain their existing preset-only contract.
+            const bool isBoolean = theRole == RenderRole::BooleanActor
+                || theRole == RenderRole::BooleanSubject;
+            const auto aMaterialName = thePresentation->Material();
+            if (!isBoolean || !theColorOverride.has_value()
+                || (aMaterialName != Graphic3d_NameOfMaterial_UserDefined
+                    && aMaterialName != Graphic3d_NameOfMaterial_DEFAULT)
+                || HasUnsupportedPresentationTexture(thePresentation)) {
+                return false;
+            }
+            const auto& anAspect =
+                thePresentation->Attributes()->ShadingAspect()->Aspect();
+            // The app's sampler-free scalar PBR shader carries exactly these
+            // admitted material values. Keep foreign/custom shaders refused.
+            const bool hasForeignShader = !anAspect->ShaderProgram().IsNull()
+                && anAspect->ShaderProgram()->GetId() != "shapeyard-data-maps-v1-0";
+            if (hasForeignShader
+                || (anAspect->AlphaMode() != Graphic3d_AlphaMode_Opaque
+                    && anAspect->AlphaMode() != Graphic3d_AlphaMode_BlendAuto)) {
+                return false;
+            }
+            const auto& aPbr = anAspect->FrontMaterial().PBRMaterial();
+            if (!IsFinite(aPbr.Alpha()) || aPbr.Alpha() != 1.0f) {
+                return false;
+            }
+            const auto anEmission = aPbr.Emission();
+            aMaterial.emission = {anEmission.x(), anEmission.y(), anEmission.z()};
+            aMaterial.metallic = aPbr.Metallic();
+            aMaterial.roughness = aPbr.NormalizedRoughness();
+            aMaterial.indexOfRefraction = aPbr.IOR();
+        }
+        Quantity_Color aColor;
+        if (theColorOverride.has_value()) {
+            aColor = Quantity_Color(*theColorOverride);
+        } else {
+            thePresentation->Color(aColor);
+        }
+        const double aTransparency = thePresentation->Transparency();
+        if (!IsFinite(aTransparency)
+            || aTransparency < 0.0 || aTransparency > 1.0
+            || aTransparency > 1.0e-6) {
+            return false;
+        }
+        SetColor(aMaterial,
+                 aColor,
+                 static_cast<float>(1.0 - aTransparency));
+        aMaterial.alphaMode = AlphaMode::Opaque;
     }
-    const double aTransparency = thePresentation->Transparency();
-    if (!IsFinite(aTransparency)
-        || aTransparency < 0.0 || aTransparency > 1.0
-        || aTransparency > 1.0e-6) {
-        return false;
-    }
-    SetColor(aMaterial,
-             aColor,
-             static_cast<float>(1.0 - aTransparency));
-    aMaterial.alphaMode = AlphaMode::Opaque;
     aMaterial.identifier = theIdentifier + "/material";
     if (!ValidateMaterial(aMaterial)) {
         return false;
@@ -4849,7 +4939,7 @@ bool ValidatePresentationOverlayPayload(
         }
         case PresentationOverlayKind::LinearArrayPreview:
             if (!isEmpty
-                && (theMeshes.size() != 1 || theMaterials.size() != 1
+                && (theMeshes.size() != 1 || theMaterials.empty()
                     || theInstances.empty()
                     || theInstances.size()
                         > kMaxLinearArrayPreviewBodies)) {
@@ -4994,9 +5084,9 @@ bool ValidatePresentationOverlayPayload(
             hasExpectedAlpha = aMaterial.alphaMode == AlphaMode::Opaque
                 && aMaterial.baseColor.w == 1.0f;
         } else if (isLinearArrayMaterial) {
-            hasExpectedIdentifier = aMaterialIndex == 0
-                && aMaterial.identifier
-                    == "linear-array/source/0/material";
+            hasExpectedIdentifier = aMaterial.identifier
+                == (aMaterialIndex == 0 ? "linear-array/source/0/material"
+                    : "linear-array/source/0/material/" + std::to_string(aMaterialIndex));
             hasExpectedAlpha = aMaterial.alphaMode == AlphaMode::Opaque
                 && aMaterial.baseColor.w == 1.0f;
         } else if (isRadialArrayMaterial) {
@@ -5318,13 +5408,19 @@ bool ValidatePresentationOverlayPayload(
             && !isLinearArrayItem && !isRadialArrayItem) {
             return false;
         }
+        if (isLinearArrayItem && !std::equal(
+                anInstance.primitiveBindings.begin(), anInstance.primitiveBindings.end(),
+                theInstances.front().primitiveBindings.begin(),
+                [](const auto& left, const auto& right) {
+                    return left.materialIndex == right.materialIndex;
+                })) return false;
         for (const PrimitiveBinding& aBinding :
              anInstance.primitiveBindings) {
             if (((isMirrorPlane || isMirrorPreview
                     || isBooleanItem || isChamferItem
-                    || isLinearArrayItem || isRadialArrayItem || isShellItem)
+                    || isRadialArrayItem || isShellItem)
                     && aBinding.materialIndex
-                        != ((isLinearArrayItem || isRadialArrayItem)
+                        != (isRadialArrayItem
                             ? 0 : anInstanceIndex))
                 || aBinding.materialIndex >= theMaterials.size()
                 || aBinding.pickToken != 0 || !aBinding.visible) {
@@ -5352,8 +5448,9 @@ bool ValidatePresentationOverlayPayload(
         return isEmpty
             || (aMeshReferences.size() == 1
             && aMeshReferences[0] == theInstances.size()
-            && aMaterialReferences.size() == 1
-            && aMaterialReferences[0] == 1);
+            && (isLinearArrayPreview || aMaterialReferences.size() == 1)
+            && std::all_of(aMaterialReferences.begin(), aMaterialReferences.end(),
+                [](const auto count) { return count == 1; }));
     }
     return std::all_of(aMeshReferences.begin(), aMeshReferences.end(),
                        [](const std::uint8_t theCount) {
@@ -21797,6 +21894,10 @@ OcctSceneSnapshotBuilder::PublishLinearArrayPreviewOverlay(
         if (aMaximumPrimitiveCount == 0) {
             return {};
         }
+        std::vector<MaterialSnapshot> aMaterials;
+        std::vector<std::uint32_t> aFaceBindings;
+        if (!ResolveLinearArrayPreviewMaterials(
+                theDocument, aFirstShape, aMaterials, aFaceBindings)) return {};
         WorldPreviewItem aSourceItem;
         if (!ExtractWorldPreviewItem(
                 aFirstPresentation,
@@ -21809,7 +21910,8 @@ OcctSceneSnapshotBuilder::PublishLinearArrayPreviewOverlay(
                 kMaxOverlayVertices,
                 kMaxOverlayIndices,
                 aMaximumPrimitiveCount,
-                aSourceItem)
+                aSourceItem,
+                &aMaterials.front())
             || !IsTranslationOnlyWorldTransform(
                 aSourceItem.instance.worldFromObject)
             || aSourceItem.material.baseColorTextureIndex != -1
@@ -21820,10 +21922,14 @@ OcctSceneSnapshotBuilder::PublishLinearArrayPreviewOverlay(
             return {};
         }
 
+        if (aSourceItem.instance.primitiveBindings.size() != aFaceBindings.size()) return {};
+        for (std::size_t index = 0; index < aFaceBindings.size(); ++index)
+            aSourceItem.instance.primitiveBindings[index].materialIndex = aFaceBindings[index];
+
         PresentationOverlayContent aContent;
         aContent.kind = PresentationOverlayKind::LinearArrayPreview;
         aContent.meshes.reserve(1);
-        aContent.materials.reserve(1);
+        aContent.materials = std::move(aMaterials);
         aContent.instances.reserve(anInstanceCount);
         std::unordered_set<const AIS_Shape*> aSeenPresentations;
         aSeenPresentations.reserve(anInstanceCount);
@@ -21884,14 +21990,12 @@ OcctSceneSnapshotBuilder::PublishLinearArrayPreviewOverlay(
             }
             for (PrimitiveBinding& aBinding :
                  anInstance.primitiveBindings) {
-                aBinding.materialIndex = 0;
                 aBinding.pickToken = 0;
                 aBinding.visible = true;
             }
             aContent.instances.push_back(std::move(anInstance));
         }
         aContent.meshes.push_back(std::move(aSourceItem.mesh));
-        aContent.materials.push_back(std::move(aSourceItem.material));
 
         return PublishPresentationOverlayImpl(
             theDocument,
