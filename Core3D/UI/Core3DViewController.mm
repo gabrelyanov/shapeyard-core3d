@@ -3913,8 +3913,18 @@ struct NativeModelingPermitIssuer final {
 @interface Core3DViewController (ColourSessionPrivate)
 - (void)core3d_cancelColourWork:(std::shared_ptr<core3d::NativeColourSessionWork>)work;
 @end
-// The refusing boundary below cannot construct a publication yet.
+@interface Core3DColourPresentation ()
+- (instancetype)initWithScene:(Core3DSceneSnapshot *)scene
+    overlay:(Core3DScenePresentationOverlaySnapshot *)overlay
+    selection:(Core3DSceneSelectionSnapshot *)selection;
+@end
 @implementation Core3DColourPresentation
+- (instancetype)initWithScene:(Core3DSceneSnapshot *)scene
+    overlay:(Core3DScenePresentationOverlaySnapshot *)overlay
+    selection:(Core3DSceneSelectionSnapshot *)selection {
+    if((self=[super init])){_scene=scene;_overlay=overlay;_selection=selection;}
+    return self;
+}
 @end
 
 @interface Core3DColourEditSession () {
@@ -5724,10 +5734,22 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
 }
 #endif
 - (Core3DColourPresentation *)captureColourPresentationForSession:(Core3DColourEditSession *)session {
-    // Failure-first bridge: qualify the five positive controls before adding
-    // native publication. This must not borrow the legacy ordinary fallback.
-    (void)session;
-    return nil;
+    if(![NSThread isMainThread]||!session||session.class!=Core3DColourEditSession.class
+        ||session->_colourOwner!=self||!session->_colourWork||!_isSetuped
+        ||!GLController||!GLController.viewer)return nil;
+    const CGSize size=GLController.drawableSize;
+    if(!std::isfinite(size.width)||!std::isfinite(size.height)||size.width<1||size.height<1
+        ||size.width>UINT32_MAX||size.height>UINT32_MAX)return nil;
+    try {
+        const auto pair=GLController.viewer->captureColourPresentationForSession(session->_colourWork,
+            std::uint32_t(std::llround(size.width)),std::uint32_t(std::llround(size.height)));
+        if(!pair||!pair->scene||!pair->ordinary)return nil;
+        auto scene=Core3DCreateSceneSnapshotDTO(*pair->scene);
+        auto overlay=Core3DCreateScenePresentationOverlaySnapshotDTO(pair->overlay);
+        auto ordinary=Core3DCreateSceneSnapshotDTO(*pair->ordinary);
+        if(!scene||!overlay||!ordinary)return nil;
+        return [[Core3DColourPresentation alloc]initWithScene:scene overlay:overlay selection:ordinary.selection];
+    }catch(...){return nil;}
 }
 - (Core3DSceneSnapshot *)captureColourPresentationSnapshot {
     if(![NSThread isMainThread]||!_isSetuped||!GLController||!GLController.viewer)return nil;

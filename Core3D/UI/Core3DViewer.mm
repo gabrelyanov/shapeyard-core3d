@@ -7995,7 +7995,8 @@ struct NativeColourSessionWork {
     std::vector<Handle(AIS_Shape)> presentations;
     std::shared_ptr<const OcctPBRScalarState> source;
     std::shared_ptr<NativePBRColourWork> candidate;
-    scene::OcctSceneSnapshotBuilder::SnapshotPointer preview;
+    scene::OcctSceneSnapshotBuilder::SnapshotPointer preview,previewSource;
+    std::optional<std::array<double,3>> previewRGB;
     bool consumed=false,presented=false;
 #if DEBUG
     std::shared_ptr<OcctColourWriteProbe> writeProbe;
@@ -8071,14 +8072,17 @@ scene::OcctSceneSnapshotBuilder::SnapshotPointer ColourPresentation(
 }
 }
 
-bool Core3DViewer::colourSessionMatches(const std::shared_ptr<NativeColourSessionWork>& work) noexcept {
+bool Core3DViewer::colourSessionMatches(const std::shared_ptr<NativeColourSessionWork>& work,
+    std::uint32_t width,std::uint32_t height,
+    scene::OcctSceneSnapshotBuilder::SnapshotPointer* verified) noexcept {
+    if(verified)verified->reset();
     if(![NSThread isMainThread]||!work||work->consumed||_colourSession.lock()!=work
         ||work->owner!=myDoc||myDoc.IsNull()||myDoc->Document()!=work->document
         ||!canBeginCommittedEdit()||!_objectInteractor||!_shapeInteractor)return false;
     try {
         const auto stamp=myDoc->CaptureNativePlanningStamp(canBeginCommittedEdit());
-        const auto snapshot=captureSceneSnapshot(work->width,work->height);
-        return stamp&&*stamp==work->stamp&&snapshot&&work->document->GetData()->Time()==work->documentTime
+        const auto snapshot=captureSceneSnapshot(width?width:work->width,height?height:work->height);
+        const bool matches=stamp&&*stamp==work->stamp&&snapshot&&work->document->GetData()->Time()==work->documentTime
             &&snapshot->publicationSourceIdentifier==work->identity.publicationSourceIdentifier
             &&snapshot->revisions.documentGeneration==work->identity.documentGeneration
             &&snapshot->revisions.model==work->identity.modelRevision
@@ -8087,6 +8091,8 @@ bool Core3DViewer::colourSessionMatches(const std::shared_ptr<NativeColourSessio
             &&_shapeInteractor->getSelectionMode()==work->authority.selectionMode
             &&_objectInteractor->verifyOrdinaryNameAuthority(work->authority)
             &&myDoc->PBRScalarStateMatches(work->source);
+        if(matches&&verified)*verified=snapshot;
+        return matches;
     }catch(...){return false;}
 }
 
@@ -8137,8 +8143,10 @@ std::shared_ptr<NativeColourSessionWork> Core3DViewer::beginColourSession(
 }
 
 void Core3DViewer::restoreColourPresentation(const std::shared_ptr<NativeColourSessionWork>& work) noexcept {
-    if(!work||!work->presented)return;
-    work->presented=false;work->preview.reset();
+    if(!work)return;
+    work->preview.reset();work->previewSource.reset();work->previewRGB.reset();
+    if(!work->presented)return;
+    work->presented=false;
     if(myDoc.IsNull()||myContext.IsNull()||work->owner!=myDoc||myDoc->Document()!=work->document)return;
     try {
         // Read the current durable appearance, including unrelated later edits.
@@ -8179,7 +8187,8 @@ bool Core3DViewer::previewColourSession(const std::shared_ptr<NativeColourSessio
         for(const auto& shape:work->presentations)myContext->RecomputePrsOnly(shape,Standard_False);
         myContext->UpdateCurrentViewer();
         if(!colourSessionMatches(work)){cancelColourSession(work);return false;}
-        work->candidate=std::move(candidate);work->preview=std::move(preview);++work->previewRevision;
+        work->candidate=std::move(candidate);work->preview=std::move(preview);
+        work->previewSource=snapshot;work->previewRGB=sRGB;++work->previewRevision;
         return true;
     }catch(...){cancelColourSession(work);return false;}
 }
@@ -8206,6 +8215,41 @@ OrdinaryEditResult Core3DViewer::commitColourSession(const std::shared_ptr<Nativ
         return OrdinaryEditResult::Invalid;
 #endif
     return candidate?executePBRColour(candidate):OrdinaryEditResult::NoChange;
+}
+std::optional<NativeColourPresentation> Core3DViewer::captureColourPresentationForSession(
+    const std::shared_ptr<NativeColourSessionWork>& work,
+    std::uint32_t width,std::uint32_t height) noexcept {
+    // Foreign/retired callbacks have no authority over the live successor.
+    if(![NSThread isMainThread]||!work||work->consumed||_colourSession.lock()!=work
+        ||!width||!height)return {};
+    try {
+        scene::OcctSceneSnapshotBuilder::SnapshotPointer ordinary;
+        if(!colourSessionMatches(work,width,height,&ordinary)){
+            cancelColourSession(work);return {};
+        }
+        if(!work->preview||!work->previewSource||!work->previewRGB)return {};
+        // Camera/viewport changes do not stage another edit or touch AIS.
+        // Refresh against the exact capture used to revalidate native authority.
+        if(ordinary->revisions.camera!=work->previewSource->revisions.camera
+            ||width!=work->width||height!=work->height){
+            if(work->previewRevision==std::numeric_limits<std::uint64_t>::max())return {};
+            auto refreshed=ColourPresentation(myDoc,*ordinary,work->targets,*work->previewRGB,
+                work->previewIdentifier,work->previewRevision+1,work->faces);
+            if(!refreshed)return {};
+            work->preview=std::move(refreshed);work->previewSource=std::move(ordinary);
+            work->width=width;work->height=height;++work->previewRevision;
+        }
+        NativeColourPresentation result;
+        result.scene=work->preview;result.ordinary=work->previewSource;
+        // Native-minted explicit empty overlay, independent of ordinary gizmos.
+        result.overlay.publicationSourceIdentifier=result.scene->publicationSourceIdentifier;
+        result.overlay.baseSnapshotRevision=result.scene->revisions.snapshot;
+        result.overlay.baseDocumentGeneration=result.scene->revisions.documentGeneration;
+        result.overlay.baseModelRevision=result.scene->revisions.model;
+        result.overlay.basePresentationRevision=result.scene->revisions.presentation;
+        result.overlay.overlayRevision=work->previewRevision;
+        return result;
+    }catch(...){cancelColourSession(work);return {};}
 }
 scene::OcctSceneSnapshotBuilder::SnapshotPointer Core3DViewer::captureColourPresentation(
     std::uint32_t width,std::uint32_t height) noexcept {
