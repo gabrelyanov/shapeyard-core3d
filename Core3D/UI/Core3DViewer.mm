@@ -2460,6 +2460,29 @@ bool FindEntityPresentation(const Handle(AIS_InteractiveContext)& context,
 }
 }
 
+// Defined in OcctDocument.mm (this file is already inside namespace core3d).
+bool BakedBooleanPreviewShape(const Handle(OcctDocument)& document,
+    const TDF_Label& target, const gp_Trsf& targetPlacement,
+    const TDF_Label& tool, const gp_Trsf& toolPlacement, int operation,
+    TopoDS_Shape& result, std::string& refusal) noexcept;
+
+bool Core3DViewer::showBakedBooleanPreview(const std::string& targetEntity,
+    const std::string& toolEntity, int operation, std::string& refusal) noexcept {
+    refusal="unsupported-source";
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()||targetEntity==toolEntity)return false;
+    try{
+        OCC_CATCH_SIGNALS
+        if(_booleanPairPreview&&!clearBooleanPairPreview())return false;
+        Handle(AIS_Shape) target,tool;TDF_Label targetLabel,toolLabel;
+        if(!FindEntityPresentation(myContext,myDoc,targetEntity,target,targetLabel)
+            ||!FindEntityPresentation(myContext,myDoc,toolEntity,tool,toolLabel))return false;
+        TopoDS_Shape result;
+        if(!BakedBooleanPreviewShape(myDoc,targetLabel,target->LocalTransformation(),
+            toolLabel,tool->LocalTransformation(),operation,result,refusal))return false;
+        return showBooleanPairPreview(targetEntity,toolEntity,result,operation);
+    }catch(...){refusal="invalid-result";return false;}
+}
+
 bool Core3DViewer::applyBakedBoolean(const std::string& targetEntity,
     const std::string& toolEntity, int operation, std::string& refusal) noexcept {
     refusal="unsupported-source";

@@ -1317,6 +1317,24 @@ static NSMapTable<Core3DViewController *, Core3DBooleanPairRecoveryIssuer *>
     } catch (...) { return NO; }
 }
 
+- (BOOL)showBakedBooleanPreviewTarget:(NSString *)target tool:(NSString *)tool
+    operation:(Core3DPartBooleanOperation)operation {
+    if (![NSThread isMainThread] || ![target isKindOfClass:NSString.class]
+        || ![tool isKindOfClass:NSString.class]) return NO;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        if (!viewer) return NO;
+        std::string code;
+        const bool shown = viewer->showBakedBooleanPreview(target.UTF8String ?: "",
+            tool.UTF8String ?: "",
+            static_cast<int>(operation) - static_cast<int>(Core3DPartBooleanOperationUnion), code);
+        if (shown) [gl requestRender];
+        return shown ? YES : NO;
+    } catch (...) { return NO; }
+}
+
 - (BOOL)applyBakedBooleanTarget:(NSString *)target tool:(NSString *)tool
     operation:(Core3DPartBooleanOperation)operation
     refusal:(NSString * _Nullable * _Nullable)refusal {
