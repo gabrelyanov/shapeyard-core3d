@@ -300,6 +300,11 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(previewColour(rgb:session:));
 - (Core3DPBRScalarResult)commitColourEdit:(Core3DColourEditSession *)session;
 - (void)cancelColourEdit:(Core3DColourEditSession *)session;
+#if DEBUG
+- (BOOL)debugArmColourWriteFault:(NSInteger)site session:(Core3DColourEditSession *)session
+    NS_SWIFT_NAME(debugArmColourWriteFault(_:session:));
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugColourWriteFaultReceipt:(Core3DColourEditSession *)session;
+#endif
 //! Presentation-only readback. Must never replace captureSceneSnapshot for
 //! admission, persistence, export, thumbnails or semantic picking authority.
 - (Core3DSceneSnapshot *_Nullable)captureColourPresentationSnapshot;

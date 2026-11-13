@@ -272,6 +272,10 @@ namespace core3d {
             const std::array<double,3>& sRGB) noexcept;
         OrdinaryEditResult commitColourSession(const std::shared_ptr<NativeColourSessionWork>&) noexcept;
         void cancelColourSession(const std::shared_ptr<NativeColourSessionWork>&) noexcept;
+#if DEBUG
+        std::shared_ptr<OcctColourWriteProbe> debugArmColourWriteFault(
+            const std::shared_ptr<NativeColourSessionWork>&,int site) noexcept;
+#endif
         scene::OcctSceneSnapshotBuilder::SnapshotPointer captureColourPresentation(
             std::uint32_t width,std::uint32_t height) noexcept;
         std::shared_ptr<NativeSolidWork> prepareProfileSolid(

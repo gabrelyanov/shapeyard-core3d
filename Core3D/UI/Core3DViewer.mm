@@ -7997,6 +7997,9 @@ struct NativeColourSessionWork {
     std::shared_ptr<NativePBRColourWork> candidate;
     scene::OcctSceneSnapshotBuilder::SnapshotPointer preview;
     bool consumed=false,presented=false;
+#if DEBUG
+    std::shared_ptr<OcctColourWriteProbe> writeProbe;
+#endif
 };
 
 namespace {
@@ -8180,11 +8183,28 @@ bool Core3DViewer::previewColourSession(const std::shared_ptr<NativeColourSessio
         return true;
     }catch(...){cancelColourSession(work);return false;}
 }
+#if DEBUG
+std::shared_ptr<OcctColourWriteProbe> Core3DViewer::debugArmColourWriteFault(
+    const std::shared_ptr<NativeColourSessionWork>& work,int site) noexcept {
+    if(site<1||site>3||!colourSessionMatches(work)||work->writeProbe
+        ||!work->candidate||!work->candidate->changed)return {};
+    try {
+        auto probe=std::make_shared<OcctColourWriteProbe>();probe->site=site;
+        work->writeProbe=probe;return probe;
+    }catch(...){return {};}
+}
+#endif
 OrdinaryEditResult Core3DViewer::commitColourSession(const std::shared_ptr<NativeColourSessionWork>& work) noexcept {
     if(!colourSessionMatches(work)){cancelColourSession(work);return OrdinaryEditResult::Invalid;}
     work->consumed=true;_colourSession.reset();
     restoreColourPresentation(work);
     auto candidate=std::move(work->candidate);
+#if DEBUG
+    // Bind only this token's final swatch. Preview may have replaced its
+    // immutable candidate since arming; no probe reaches ordinary callers.
+    if(work->writeProbe&&(!candidate||!myDoc->DebugAttachColourWriteProbe(candidate->prepared,work->writeProbe)))
+        return OrdinaryEditResult::Invalid;
+#endif
     return candidate?executePBRColour(candidate):OrdinaryEditResult::NoChange;
 }
 scene::OcctSceneSnapshotBuilder::SnapshotPointer Core3DViewer::captureColourPresentation(

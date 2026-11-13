@@ -1004,6 +1004,15 @@ struct OcctSavedCutSceneState;
 struct OcctPBRScalarState;
 struct OcctPBRScalarPreparation;
 struct OcctPBRColourPreparation;
+#if DEBUG
+// One session-owned probe. It observes real staging progress before abort;
+// neither the document nor another writer retains a global fault setting.
+struct OcctColourWriteProbe {
+    int site=0, firedSite=0;
+    std::size_t changedEndpoints=0, createdFaces=0, detachedEndpoints=0, writtenEndpoints=0;
+    bool attached=false, attempted=false;
+};
+#endif
 // A native face identity, never a publication-local topology ordinal. A null
 // label records an absent subshape and must stay absent until owned staging.
 struct OcctPBRColourFaceTarget {
@@ -2144,6 +2153,11 @@ public:
         const std::shared_ptr<const OcctPBRColourPreparation>&) const;
     Standard_EXPORT bool StagePBRColourPatch(const std::shared_ptr<const OcctPBRColourPreparation>&,
         std::shared_ptr<const OcctPBRScalarState>& sealed) noexcept;
+#if DEBUG
+    Standard_EXPORT bool DebugAttachColourWriteProbe(
+        const std::shared_ptr<const OcctPBRColourPreparation>&,
+        const std::shared_ptr<OcctColourWriteProbe>&) const noexcept;
+#endif
     // Presentation only: reload unchanged targets, then apply private material
     // handles to AIS. No OCAF command, material-table write or notification.
     Standard_EXPORT bool PresentPBRColourPatch(const std::shared_ptr<const OcctPBRColourPreparation>&,
@@ -2620,7 +2634,11 @@ private:
     Standard_Boolean SaveObjectPBRMaterialsImpl(const std::vector<OcctPBRMaterialUpdate>&,
         const Handle(XCAFDoc_VisMaterial)& scalarMaterial,
         bool retainPreviousMaterial = false,
-        const std::vector<Handle(XCAFDoc_VisMaterial)>* exactMaterials = nullptr);
+        const std::vector<Handle(XCAFDoc_VisMaterial)>* exactMaterials = nullptr
+#if DEBUG
+        , OcctColourWriteProbe* colourProbe = nullptr
+#endif
+        );
     Standard_Boolean CanSaveObjectPBRMaterials(
         const std::vector<OcctPBRMaterialUpdate>& updates,
         std::vector<TDF_Label>* reclaimMaterialLabels,

@@ -20302,6 +20302,10 @@ struct OcctPBRColourPreparation {
     // Only changed targets may be detached or have authoring attributes changed.
     std::vector<Target> changed;
     std::set<std::string> reclaim;
+#if DEBUG
+    // Instrumentation only. Captured document evidence remains immutable.
+    mutable std::shared_ptr<OcctColourWriteProbe> writeProbe;
+#endif
 };
 
 std::shared_ptr<const OcctPBRScalarState> OcctDocument::CapturePBRScalarState(const TDF_Label& target,bool colourSubshapes) const noexcept {
@@ -21237,6 +21241,26 @@ std::vector<TDF_Label> OcctDocument::PBRColourTargets(
     return p?p->targets:std::vector<TDF_Label>{};
 }
 
+#if DEBUG
+bool OcctDocument::DebugAttachColourWriteProbe(
+    const std::shared_ptr<const OcctPBRColourPreparation>& p,
+    const std::shared_ptr<OcctColourWriteProbe>& probe) const noexcept {
+    if(![NSThread isMainThread]||!p||!probe||p->writeProbe||probe->attached||probe->attempted
+        ||probe->site<1||probe->site>3||p->changed.size()<2||!PBRScalarStateMatches(p->source))return false;
+    if(probe->site==1&&std::none_of(p->changed.begin(),p->changed.end(),
+        [](const auto& target){return !target.face.IsNull()&&target.label.IsNull();}))return false;
+    p->writeProbe=probe;probe->attached=true;return true;
+}
+namespace {
+void ReachColourWriteFault(OcctColourWriteProbe* probe,int site) {
+    if(probe&&probe->site==site&&!probe->firedSite){
+        probe->firedSite=site;
+        throw Standard_Failure("Colour interior material write fault");
+    }
+}
+}
+#endif
+
 bool OcctDocument::StagePBRColourPatch(const std::shared_ptr<const OcctPBRColourPreparation>& p,
     std::shared_ptr<const OcctPBRScalarState>& sealed) noexcept {
     const auto refused=[&](int line){
@@ -21252,6 +21276,13 @@ bool OcctDocument::StagePBRColourPatch(const std::shared_ptr<const OcctPBRColour
         std::vector<OcctPBRMaterialUpdate> updates;
         std::vector<Handle(XCAFDoc_VisMaterial)> exact;
         auto staged=p->changed;
+#if DEBUG
+        const auto probe=p->writeProbe;
+        if(probe){
+            if(!probe->attached||probe->attempted)return refused(__LINE__);
+            probe->attempted=true;probe->changedEndpoints=staged.size();
+        }
+#endif
         const auto shapes=XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
         std::set<std::string> created;
         std::set<std::string> reservedRoots;
@@ -21285,6 +21316,10 @@ bool OcctDocument::StagePBRColourPatch(const std::shared_ptr<const OcctPBRColour
                     target.label=shapes->AddSubShape(target.root,target.face);
                     if(target.label.IsNull()||p->source->faces.contains(PBRLabelKey(target.label))
                         ||!created.insert(PBRLabelKey(target.label)).second)return refused(__LINE__);
+#if DEBUG
+                    if(probe)++probe->createdFaces;
+                    ReachColourWriteFault(probe.get(),1);
+#endif
                 }
             }
             const auto& material=target.material->PbrMaterial();
@@ -21293,7 +21328,11 @@ bool OcctDocument::StagePBRColourPatch(const std::shared_ptr<const OcctPBRColour
         }
         // Source is compared once. Every detach/write belongs to the same
         // owned command; a failure is reconciled by its caller, never by Undo.
-        if(!SaveObjectPBRMaterialsImpl(updates,{},false,&exact))return refused(__LINE__);
+        if(!SaveObjectPBRMaterialsImpl(updates,{},false,&exact
+#if DEBUG
+            ,probe.get()
+#endif
+            ))return refused(__LINE__);
         auto after=CapturePBRScalarState(p->targets.front(),true);if(!after)return refused(__LINE__);
         const auto& before=*p->source;
         if(after->data!=before.data||after->target!=before.target||after->roots.size()!=before.roots.size()
@@ -21786,8 +21825,16 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterialsImpl(
     const std::vector<OcctPBRMaterialUpdate>& updates,
     const Handle(XCAFDoc_VisMaterial)& scalarMaterial,
     const bool retainPreviousMaterial,
-    const std::vector<Handle(XCAFDoc_VisMaterial)>* exactMaterials)
+    const std::vector<Handle(XCAFDoc_VisMaterial)>* exactMaterials
+#if DEBUG
+    , OcctColourWriteProbe* colourProbe
+#endif
+    )
 {
+#if DEBUG
+    if(colourProbe&&(!exactMaterials||!colourProbe->attempted||colourProbe->firedSite
+        ||updates.size()<2||colourProbe->changedEndpoints!=updates.size()))return Standard_False;
+#endif
     if (!scalarMaterial.IsNull() && updates.size()!=1) return Standard_False;
     // Preserve the scalar singleton contract. Only the private Colour path
     // supplies a complete exact vector, never a partially overridden batch.
@@ -21920,7 +21967,13 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterialsImpl(
     // alpha/cutoff/culling before those links are removed.
     for (const PreparedUpdate& update : preparedUpdates) {
         aTool->UnSetShapeMaterial(update.label);
+#if DEBUG
+        if(colourProbe)++colourProbe->detachedEndpoints;
+#endif
     }
+#if DEBUG
+    ReachColourWriteFault(colourProbe,2);
+#endif
     for (const TDF_Label& reclaimLabel : reclaimMaterialLabels) {
         RemoveUnreferencedOwnedMaterial(aTool, reclaimLabel);
     }
@@ -21983,6 +22036,12 @@ Standard_Boolean OcctDocument::SaveObjectPBRMaterialsImpl(
                     TDataStd_Integer::GetID());
             }
         }
+#if DEBUG
+        // This is after the link and all authoring fields, inside the loop:
+        // a two-target batch has one final binding and one detached endpoint.
+        if(colourProbe)++colourProbe->writtenEndpoints;
+        ReachColourWriteFault(colourProbe,3);
+#endif
     }
     if (!retainPreviousMaterial) {
         for (const PreparedUpdate& update : preparedUpdates) {

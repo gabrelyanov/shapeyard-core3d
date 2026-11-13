@@ -3917,6 +3917,10 @@ struct NativeModelingPermitIssuer final {
 @public
     __weak Core3DViewController* _colourOwner;
     std::shared_ptr<core3d::NativeColourSessionWork> _colourWork;
+#if DEBUG
+    // Receipt outlives work consumption, without retaining viewer/document.
+    std::shared_ptr<OcctColourWriteProbe> _colourWriteProbe;
+#endif
 }
 - (instancetype)initPrivate;
 @end
@@ -5698,6 +5702,23 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
     if(![NSThread isMainThread]||!session||session.class!=Core3DColourEditSession.class||session->_colourOwner!=self)return;
     [self core3d_cancelColourWork:std::move(session->_colourWork)];
 }
+#if DEBUG
+- (BOOL)debugArmColourWriteFault:(NSInteger)site session:(Core3DColourEditSession *)session {
+    if(![NSThread isMainThread]||site<1||site>3||!session||session.class!=Core3DColourEditSession.class
+        ||session->_colourOwner!=self||!session->_colourWork||session->_colourWriteProbe
+        ||!GLController||!GLController.viewer)return NO;
+    session->_colourWriteProbe=GLController.viewer->debugArmColourWriteFault(session->_colourWork,int(site));
+    return bool(session->_colourWriteProbe);
+}
+- (NSDictionary<NSString *, NSNumber *> *)debugColourWriteFaultReceipt:(Core3DColourEditSession *)session {
+    if(![NSThread isMainThread]||!session||session.class!=Core3DColourEditSession.class
+        ||session->_colourOwner!=self||!session->_colourWriteProbe)return nil;
+    const auto& p=*session->_colourWriteProbe;
+    return @{@"site":@(p.site),@"firedSite":@(p.firedSite),
+        @"changedEndpoints":@(p.changedEndpoints),@"createdFaces":@(p.createdFaces),
+        @"detachedEndpoints":@(p.detachedEndpoints),@"writtenEndpoints":@(p.writtenEndpoints)};
+}
+#endif
 - (Core3DSceneSnapshot *)captureColourPresentationSnapshot {
     if(![NSThread isMainThread]||!_isSetuped||!GLController||!GLController.viewer)return nil;
     const CGSize size=GLController.drawableSize;
