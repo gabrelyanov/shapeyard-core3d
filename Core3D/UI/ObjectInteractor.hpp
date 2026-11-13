@@ -295,6 +295,9 @@ namespace core3d {
         Standard_Boolean setLinearArrayAxis(LinearArrayAxis axis) noexcept;
         Standard_Boolean setLinearArrayCount(
             Standard_Integer count) noexcept;
+        Standard_Boolean setLinearArrayRows(Standard_Integer rows) noexcept;
+        Standard_Integer linearArrayRows() const noexcept;
+        Standard_Integer linearArrayMaximumRows() const noexcept;
         Standard_Boolean setLinearArraySpacing(
             Standard_Real spacing) noexcept;
         LinearArrayAxis linearArrayAxis() const noexcept;
