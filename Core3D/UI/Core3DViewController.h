@@ -1437,9 +1437,19 @@ __attribute__((objc_subclassing_restricted))
 //! left) and "drawableWidth","drawableHeight". For exactly one full-circle
 //! edge, "diameter" is its world-space diameter in model units, the pixel
 //! position is its centre and "circleRadiusPixels" is its projected radius.
-//! "distance" is absent for a single edge.
+//! "distance" is absent for a single edge. Live edge picks may add "snapKindA"
+//! and "snapKindB" (1 corner, 2 midpoint, 3 edge, 4 circle centre); their
+//! points then define the pair distance. Projected topology bounds are in
+//! "avoidanceMinPixelX/Y" and "avoidanceMaxPixelX/Y".
 - (nullable NSDictionary<NSString *, NSNumber *> *)measureSelectedElementDistance
     NS_SWIFT_NAME(measureSelectedElementDistance());
+
+//! Measure the smaller angle between exactly two planar faces or two straight
+//! edges. Returns "angleDegrees" in 0...90 and the same projection fields as
+//! the distance query. Mixed, curved, degenerate and incomplete pairs are
+//! reported with "selectedCount" but no angle. Main-thread only and read-only.
+- (nullable NSDictionary<NSString *, NSNumber *> *)measureSelectedElementAngle
+    NS_SWIFT_NAME(measureSelectedElementAngle());
 
 //! Atomically commit one Position component from an immutable inspector
 //! snapshot. `value` is in raw document model units. The expected snapshot is
