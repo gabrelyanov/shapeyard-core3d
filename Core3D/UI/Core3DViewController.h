@@ -232,6 +232,8 @@ __attribute__((objc_subclassing_restricted))
             expectedSHA256:(NSString *)expectedSHA256
     NS_SWIFT_NAME(load(fromAssetFile:expectedByteCount:expectedSHA256:));
 - (void)saveSnapshot;
+//! Lifts the engine's lower-left axis triad by `points` (0 = default corner).
+- (void)setAxisTriadLiftPoints:(CGFloat)points;
 //! Opt-in geometry snapping for ordinary Move; model units, zero disables.
 //! Refuses changes during an active edit. Does not alter grid preferences.
 - (BOOL)setGeometrySnappingTolerance:(double)tolerance;
