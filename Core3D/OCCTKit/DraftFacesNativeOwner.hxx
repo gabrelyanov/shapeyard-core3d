@@ -293,6 +293,8 @@ class Capture final {
     // Create-only: declared retained source proven against the actual shape.
     profile::Parameters sourceProfile;
     cr::SourceRecipe sourceRecipe{};
+    retained_recipe::UUID sourceFeature{};
+    bool ordinarySource = false;
     std::vector<std::uint8_t> sourceBytes;
     // Edit-only: the exact committed record read back at mint time.
     cr::Record record;
@@ -354,6 +356,83 @@ public:
             capture->redoDepth = native->GetAvailableRedos();
             capture->forEdit = false;
             capture->sourceProfile = sourceProfile;
+            capture->sourceBytes = std::move(sourceBytes);
+            return capture;
+        } catch (...) { return nullptr; }
+    }
+
+    //! Create-capture authority for an ordinary app-created solid such as a
+    //! Box. The shared ordinary-input gate proves that the current free BRep
+    //! can be promoted on its first successful mutation; Draft then retains
+    //! that exact source as a frozen SYOS node instead of inventing a Profile.
+    static std::shared_ptr<const Capture> MintCreateOrdinaryCapture(
+        OcctDocument& owner, const std::shared_ptr<native_opening::Context>& context,
+        const TDF_Label& carrier, const std::string& entityIdentifier,
+        std::uint32_t viewportWidth, std::uint32_t viewportHeight) noexcept {
+        try {
+            if (pthread_main_np() == 0 || !context || carrier.IsNull()
+                || entityIdentifier.empty()) return nullptr;
+            const auto native = owner.Document();
+            if (native.IsNull() || native->GetData().IsNull() || native->HasOpenCommand()
+                || context->openingFence().document() != native
+                || context->openingFence().data() != native->GetData()
+                || !context->isCurrent(viewportWidth, viewportHeight)
+                || !XCAFDoc_ShapeTool::IsFree(carrier)
+                || !XCAFDoc_ShapeTool::IsSimpleShape(carrier)
+                || carrier.Data() != native->GetData()
+                || owner.EntityIdentifierForLabel(carrier) != entityIdentifier
+                || cr::HasRecord(carrier)) return nullptr;
+            const auto admitted = owner.CaptureToolInput(
+                carrier, core3d::ordinary_input::Purpose::SolidModel);
+            if (!admitted.ready() || !admitted.snapshot || !admitted.promotion
+                || admitted.snapshot->representation()
+                    != core3d::ordinary_input::Representation::BRepSolid
+                || admitted.snapshot->history()
+                    != core3d::ordinary_input::History::Absent
+                || admitted.snapshot->entityIdentifier() != entityIdentifier)
+                return nullptr;
+            const double unit = context->openingFence().metersPerUnit();
+            if (!std::isfinite(unit) || unit <= 0 || unit > 1
+                || admitted.snapshot->metersPerUnit() != unit) return nullptr;
+            const TopoDS_Shape source = XCAFDoc_ShapeTool::GetShape(carrier);
+            std::vector<std::uint8_t> sourceBytes;
+            if (source.IsNull() || source.ShapeType() != TopAbs_SOLID
+                || source.Orientation() != TopAbs_FORWARD
+                || !draft_faces::detail::exactShapeBytes(source, sourceBytes))
+                return nullptr;
+            cr::OrdinarySourceRecipe ordinary;
+            ordinary.shape = cr::SourceShapeKind::Solid;
+            switch (admitted.snapshot->origin()) {
+            case core3d::ordinary_input::Origin::AddPrimitive:
+                ordinary.origin = cr::OrdinarySourceOrigin::AddPrimitive; break;
+            case core3d::ordinary_input::Origin::Import:
+                ordinary.origin = cr::OrdinarySourceOrigin::Import; break;
+            case core3d::ordinary_input::Origin::Duplicate:
+                ordinary.origin = cr::OrdinarySourceOrigin::Duplicate; break;
+            case core3d::ordinary_input::Origin::RetainedFeature:
+                ordinary.origin = cr::OrdinarySourceOrigin::RetainedFeature; break;
+            case core3d::ordinary_input::Origin::LegacyGeometry:
+                ordinary.origin = cr::OrdinarySourceOrigin::LegacyGeometry; break;
+            default:
+                ordinary.origin = cr::OrdinarySourceOrigin::Unknown; break;
+            }
+            ordinary.sourceAnchor = admitted.snapshot->sourceAnchor();
+            cr::SourceRecipe recipe;
+            recipe.kind = cr::RecipeKind::OrdinarySource;
+            recipe.schema = 1;
+            if (!cr::EncodeOrdinarySourceRecipe(ordinary, recipe.bytes)) return nullptr;
+            auto capture = std::shared_ptr<Capture>(new Capture());
+            if (!detail::ReadOwnerKey(owner, carrier, capture->ownerKey)) return nullptr;
+            capture->document = native; capture->context = context;
+            capture->viewportWidth = viewportWidth; capture->viewportHeight = viewportHeight;
+            capture->carrier = carrier; capture->entityIdentifier = entityIdentifier;
+            capture->metersPerUnit = unit;
+            capture->undoDepth = native->GetAvailableUndos();
+            capture->redoDepth = native->GetAvailableRedos();
+            capture->forEdit = false;
+            capture->sourceRecipe = std::move(recipe);
+            capture->sourceFeature = ordinary.sourceAnchor;
+            capture->ordinarySource = true;
             capture->sourceBytes = std::move(sourceBytes);
             return capture;
         } catch (...) { return nullptr; }
@@ -447,7 +526,8 @@ public:
             // Preserve its feature identity as the composite source lineage;
             // the lower-level owner fixture without a stored profile retains
             // its historical minted identity path.
-            source.original.sourceFeature = detail::MintUUID();
+            source.original.sourceFeature = capture->ordinarySource
+                ? capture->sourceFeature : detail::MintUUID();
             profile::Record sourceProfile;
             if (!profile::Read(capture->document, capture->carrier, sourceProfile))
                 return refuse("b4.stale-capture");
