@@ -7670,6 +7670,20 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
     return values;
 }
 
+- (NSInteger)debugPartsWithOwnHighlightStyle {
+    if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) { return -1; }
+    const Handle(AIS_InteractiveContext) context = GLController.viewer->AisContext();
+    if (context.IsNull()) { return -1; }
+    AIS_ListOfInteractive displayed;
+    context->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+    NSInteger count = 0;
+    for (AIS_ListIteratorOfListOfInteractive item(displayed); item.More(); item.Next()) {
+        const Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(item.Value());
+        if (!shape.IsNull() && !shape->HilightAttributes().IsNull()) ++count;
+    }
+    return count;
+}
+
 - (NSNumber *_Nullable)debugManipulatorSidePoints {
     if (![NSThread isMainThread] || GLController == nil
         || GLController.viewer == nullptr) { return nil; }
