@@ -3816,6 +3816,26 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     return _viewer->getShapeInteractor()->extrusionSplitReferenceEdge();
 }
 
+- (NSArray<NSNumber *> *_Nullable)extrusionPreviewSizeMeters {
+    if (![NSThread isMainThread] || _viewer == nullptr
+        || [self getGizmoType] != PrimitiveGizmoTypeExtrude
+        || _viewer->getShapeInteractor() == nullptr) {
+        return nil;
+    }
+    const auto interactor = _viewer->getShapeInteractor();
+    const double metersPerUnit = interactor->extrusionMetersPerUnit();
+    Standard_Real x = 0, y = 0, z = 0;
+    if (!std::isfinite(metersPerUnit) || metersPerUnit <= 0.0
+        || !interactor->extrusionPreviewExtents(x, y, z)) {
+        return nil;
+    }
+    const double values[3] = {x * metersPerUnit, y * metersPerUnit, z * metersPerUnit};
+    for (double value : values) {
+        if (!std::isfinite(value) || value < 0.0) { return nil; }
+    }
+    return @[@(values[0]), @(values[1]), @(values[2])];
+}
+
 - (BOOL)canApplyExtrusion {
     return _viewer != nullptr
         && _viewer->getShapeInteractor() != nullptr

@@ -20440,6 +20440,28 @@ static bool Core3DPublishCommittedSpatialSweep(
     return feedback ? [[Core3DGeometrySnapFeedback alloc] initWithNative:*feedback] : nil;
 }
 
+- (NSArray<NSNumber *> *_Nullable)liveMoveOffsetMeters {
+    if (![NSThread isMainThread] || !_isSetuped || !GLController || !GLController.viewer) return nil;
+    try {
+        const auto interactor = GLController.viewer->getObjectInteractor();
+        double x = 0, y = 0, z = 0;
+        if (!interactor || !interactor->liveGestureOffset(x, y, z)) return nil;
+        const auto owner = GLController.viewer->getDocument();
+        if (owner.IsNull()) return nil;
+        const auto document = owner->ChangeDocument();
+        Standard_Real metersPerUnit = 0.001;
+        if (document.IsNull()) return nil;
+        const bool hasUnit = XCAFDoc_DocumentTool::GetLengthUnit(document, metersPerUnit);
+        if ((!hasUnit && metersPerUnit != 0.001) || !std::isfinite(metersPerUnit)
+            || metersPerUnit <= 0.0) return nil;
+        const double values[3] = {x * metersPerUnit, y * metersPerUnit, z * metersPerUnit};
+        for (double value : values) { if (!std::isfinite(value)) return nil; }
+        return @[@(values[0]), @(values[1]), @(values[2])];
+    } catch (...) {
+        return nil;
+    }
+}
+
 - (BOOL)setGeometrySnappingTolerance:(double)tolerance {
     if (![NSThread isMainThread] || !_isSetuped || !GLController
         || !GLController.viewer || !GLController.viewer->canBeginCommittedEdit()) return NO;

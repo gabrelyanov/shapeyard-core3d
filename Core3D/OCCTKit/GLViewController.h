@@ -109,6 +109,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)applyExtrusion;
 - (BOOL)cancelExtrusion;
 - (BOOL)canApplyExtrusion;
+//! Measure: [x, y, z] metres of the shown push/pull preview solid's local
+//! axis extents (saved uniform scale included); nil without a preview.
+- (NSArray<NSNumber *> *_Nullable)extrusionPreviewSizeMeters;
 //! Straight edges of the captured push/pull face in engine order, each
 //! @{@"side": @"+Y", @"length": model units}. Empty when no face is captured.
 - (NSArray<NSDictionary<NSString *, id> *> *)extrusionSplitEdges;
