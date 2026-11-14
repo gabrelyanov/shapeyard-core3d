@@ -2499,6 +2499,31 @@ bool Core3DViewer::applyBakedBoolean(const std::string& targetEntity,
     }catch(...){refusal="invalid-result";return false;}
 }
 
+bool Core3DViewer::applyBakedBooleanBatch(const std::vector<std::string>& targetEntities,
+    const std::vector<std::string>& toolEntities, int operation, std::string& refusal) noexcept {
+    refusal="unsupported-source";
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()
+        ||targetEntities.empty()||toolEntities.empty())return false;
+    try{
+        OCC_CATCH_SIGNALS
+        if(_booleanPairPreview)clearBooleanPairPreview();
+        const auto find=[&](const std::vector<std::string>& entities,
+            std::vector<std::pair<TDF_Label,Handle(AIS_Shape)>>& found)->bool{
+            for(const auto& entity:entities){
+                Handle(AIS_Shape) presentation;TDF_Label label;
+                if(entity.empty()||!FindEntityPresentation(myContext,myDoc,entity,presentation,label))return false;
+                found.emplace_back(label,presentation);
+            }
+            return true;
+        };
+        std::vector<std::pair<TDF_Label,Handle(AIS_Shape)>> targets,tools;
+        if(!find(targetEntities,targets)||!find(toolEntities,tools))return false;
+        if(!myDoc->ApplyBakedBooleanBatch(targets,tools,operation,refusal))return false;
+        redrawDocument();
+        return true;
+    }catch(...){refusal="invalid-result";return false;}
+}
+
 bool Core3DViewer::holeAnchor(const std::string& entity, std::uint32_t faceIndex,
     gp_Pnt& worldPoint, gp_Dir& worldDirection) noexcept {
     if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull())return false;

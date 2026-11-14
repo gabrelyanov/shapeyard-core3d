@@ -477,6 +477,14 @@ __attribute__((objc_subclassing_restricted))
     operation:(Core3DPartBooleanOperation)operation
     refusal:(NSString * _Nullable * _Nullable)refusal
     NS_SWIFT_NAME(applyBakedBoolean(target:tool:operation:refusal:));
+//! Several parts in ONE Undo step (App Store Subtract and Union): Subtract takes every
+//! part in `tools` (the cutters) out of every part in `targets`; Union fuses every
+//! tool into the one target. The tools are used up. `refusal` gets the code.
+- (BOOL)applyBakedBooleanTargets:(NSArray<NSString *> *)targets
+    tools:(NSArray<NSString *> *)tools
+    operation:(Core3DPartBooleanOperation)operation
+    refusal:(NSString * _Nullable * _Nullable)refusal
+    NS_SWIFT_NAME(applyBakedBoolean(targets:tools:operation:refusal:));
 //! The centre of face `faceIndex` (scene topology index) of the part and the
 //! direction into the part, world coordinates: [px, py, pz, dx, dy, dz].
 - (nullable NSArray<NSNumber *> *)holeAnchorForEntity:(NSString *)entity
