@@ -169,6 +169,12 @@ unsigned long long Core3DDebugColdOpenCandidateProbeValue(
 #include <XCAFDoc_ShapeMapTool.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <TDF_Tool.hxx>
+#include <TDF_AttributeIterator.hxx>
+#include <TDF_ChildIterator.hxx>
+#include <TDF_ListIteratorOfAttributeDeltaList.hxx>
+#include <TDF_Delta.hxx>
+#include <TDF_AttributeDelta.hxx>
+#include <TNaming_Iterator.hxx>
 #include <thread>
 #include <atomic>
 #include <stdexcept>
@@ -13871,6 +13877,89 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
         }
         return record;
     } catch (...) { return @{@"error": @"fixture-exception"}; }
+}
+
+// DEBUG-only read observation after the native failing-first baseline.
+// No entity resolver: Undo intentionally removes a creation from free roots.
+- (NSDictionary<NSString *, id> *_Nullable)debugObserveNamingSubtreeAtLabelEntry:(NSString *)entry {
+    if (![NSThread isMainThread] || ![entry isKindOfClass:NSString.class]
+        || entry.length == 0 || entry.length > 256) return nil;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) owner = viewer ? viewer->getDocument() : Handle(OcctDocument)();
+        const Handle(TDocStd_Document) document = owner.IsNull() ? Handle(TDocStd_Document)() : owner->Document();
+        if (document.IsNull() || document->GetData().IsNull()) return nil;
+        TDF_Label root;
+        TDF_Tool::Label(document->GetData(), entry.UTF8String, root, Standard_False);
+        NSMutableDictionary *result = [@{
+            @"document": [NSString stringWithUTF8String:owner->DocumentIdentifier().c_str()],
+            @"labelExists": @(!root.IsNull()),
+            @"undo": @(document->GetAvailableUndos()),
+            @"redo": @(document->GetAvailableRedos()),
+            @"openCommand": @(document->HasOpenCommand())
+        } mutableCopy];
+        if (root.IsNull()) return result;
+        NSMutableArray *naming = [NSMutableArray array];
+        std::size_t labels = 0, attributes = 0, active = 0, forgotten = 0;
+        const auto observe = [&](const TDF_Label& label) {
+            if (++labels > 65536) throw Standard_Failure("Naming observation label bound");
+            TCollection_AsciiString labelEntry;
+            TDF_Tool::Entry(label, labelEntry);
+            for (TDF_AttributeIterator it(label, Standard_False); it.More(); it.Next()) {
+                if (++attributes > 65536) throw Standard_Failure("Naming observation attribute bound");
+                const Handle(TDF_Attribute) attribute = it.Value();
+                if (attribute.IsNull()) throw Standard_Failure("Naming observation null attribute");
+                if (attribute->IsValid()) ++active;
+                if (attribute->IsForgotten()) ++forgotten;
+                const Handle(TNaming_NamedShape) named = Handle(TNaming_NamedShape)::DownCast(attribute);
+                if (named.IsNull()) continue;
+                std::size_t pairs = 0;
+                for (TNaming_Iterator pair(named); pair.More(); pair.Next())
+                    if (++pairs > 4096) throw Standard_Failure("Naming observation pair bound");
+                [naming addObject:@{
+                    @"entry": [NSString stringWithUTF8String:labelEntry.ToCString()],
+                    @"valid": @(attribute->IsValid()), @"forgotten": @(attribute->IsForgotten()),
+                    @"version": @(named->Version()), @"evolution": @(int(named->Evolution())),
+                    @"empty": @(named->IsEmpty()), @"currentNull": @(named->Get().IsNull()),
+                    @"pairs": @(pairs)
+                }];
+            }
+        };
+        observe(root);
+        for (TDF_ChildIterator it(root, Standard_True); it.More(); it.Next()) observe(it.Value());
+        result[@"labels"] = @(labels);
+        result[@"attributes"] = @(attributes);
+        result[@"activeAttributes"] = @(active);
+        result[@"forgottenAttributes"] = @(forgotten);
+        result[@"rootShapeNull"] = @(XCAFDoc_ShapeTool::GetShape(root).IsNull());
+        result[@"naming"] = naming;
+        NSMutableArray *deltas = [NSMutableArray array];
+        const auto observeDelta = [&](const Handle(TDF_Delta)& delta, NSString *side) {
+            std::size_t visited = 0;
+            for (TDF_ListIteratorOfAttributeDeltaList it(delta->AttributeDeltas()); it.More(); it.Next()) {
+                if (++visited > 8192) throw Standard_Failure("Naming observation delta bound");
+                const Handle(TDF_AttributeDelta) change = it.Value();
+                if (change.IsNull()) throw Standard_Failure("Naming observation null delta");
+                const auto label = change->Label();
+                if (!label.IsEqual(root) && !label.IsDescendant(root)) continue;
+                const auto named = Handle(TNaming_NamedShape)::DownCast(change->Attribute());
+                if (named.IsNull()) continue;
+                TCollection_AsciiString labelEntry;
+                TDF_Tool::Entry(label, labelEntry);
+                [deltas addObject:@{@"side": side,
+                    @"entry": [NSString stringWithUTF8String:labelEntry.ToCString()],
+                    @"type": [NSString stringWithUTF8String:change->DynamicType()->Name()],
+                    @"version": @(named->Version()),
+                    @"valid": @(named->IsValid()), @"forgotten": @(named->IsForgotten())}];
+            }
+        };
+        if (!document->GetUndos().IsEmpty()) observeDelta(document->GetUndos().Last(), @"undo");
+        if (!document->GetRedos().IsEmpty()) observeDelta(document->GetRedos().First(), @"redo");
+        result[@"namingDeltas"] = deltas;
+        return result;
+    } catch (...) { return nil; }
 }
 
 + (NSDictionary<NSString *, id> *)debugGeometrySnapFixture:(NSInteger)fixture
