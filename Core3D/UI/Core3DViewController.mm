@@ -20433,6 +20433,10 @@ static bool Core3DPublishCommittedSpatialSweep(
     return @"Core3DGeometrySnapFeedbackDidChangeNotification";
 }
 
++ (NSNotificationName)liveMoveDidChangeNotification {
+    return @"Core3DLiveMoveDidChangeNotification";
+}
+
 - (Core3DGeometrySnapFeedback *_Nullable)geometrySnapFeedback {
     if (![NSThread isMainThread] || !_isSetuped || !GLController || !GLController.viewer) return nil;
     const auto interactor = GLController.viewer->getObjectInteractor();

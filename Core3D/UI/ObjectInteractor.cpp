@@ -2554,6 +2554,16 @@ namespace core3d {
         }
     }
 
+    void ObjectInteractor::publishLiveMove(bool ended) noexcept {
+        if (ended && !_liveMoveSamplesActive) return;
+        _liveMoveSamplesActive = !ended;
+        try {
+            if (_liveMoveChangedCallback) _liveMoveChangedCallback(ended);
+        } catch (...) {
+            // Optional observation must not abort or commit a model edit.
+        }
+    }
+
     void ObjectInteractor::applyGeometrySnapping() noexcept {
         _geometryMoveSnap.reset(); syncGeometrySnapHighlight();
         if (_geometrySnappingTolerance <= 0 || _manipulator.IsNull()
@@ -2761,6 +2771,10 @@ namespace core3d {
                     && _manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
                     && _manipulator->ActiveMode() == AIS_MM_Translation) {
                     publishGeometrySnapFeedback(false);
+                }
+                if (_manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
+                    && _manipulator->ActiveMode() == AIS_MM_Translation) {
+                    publishLiveMove(false);
                 }
                 return true;
             }

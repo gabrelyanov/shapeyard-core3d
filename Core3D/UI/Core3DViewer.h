@@ -867,6 +867,7 @@ namespace core3d {
             _interactiveCallback = cb;
         }
         void setGeometrySnapFeedbackChangedCallback(std::function<void(bool)> callback);
+        void setLiveMoveChangedCallback(std::function<void(bool)> callback);
         void setBooleanPreviewStateChangedCallback(
             std::function<void()> callback);
         void setLinearArrayPreviewStateChangedCallback(
@@ -1254,6 +1255,7 @@ namespace core3d {
         
         std::function<void(int,int)> _interactiveCallback;
         std::function<void(bool)> _geometrySnapFeedbackChangedCallback;
+        std::function<void(bool)> _liveMoveChangedCallback;
         std::function<void()> _booleanPreviewStateChangedCallback;
         std::function<void()> _linearArrayPreviewStateChangedCallback;
         std::function<void()> _radialArrayPreviewStateChangedCallback;
