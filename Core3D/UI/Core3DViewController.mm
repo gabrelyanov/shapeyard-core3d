@@ -3798,6 +3798,8 @@ struct NativeModelingPermitIssuer final {
     void (^_debugSavedCutSourceDeliveryGate)(void (^resume)(void));
     std::shared_ptr<core3d::cylindrical_cut::DebugRefusalRecord> _debugLastCutRefusal;
     void (^_debugNextNativeSolidDeliveryGate)(void (^resume)(void));
+    // Main-thread totals only; workers transfer immutable scalar durations.
+    double _debugNativeSolidCosts[8]; // Objective-C allocation zero-initializes these scalars.
     NSTimeInterval _debugNextNativeSolidDeadline;
     NSString *_debugNextNativeSolidDeadlineLabel;
     void (^_debugNextNativeSolidDeadlineObserver)(NSDictionary<NSString *,id> *);
@@ -13890,6 +13892,7 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
         if (owner.IsNull() || owner->Document().IsNull()) return @{};
         const auto counts = owner->DebugOrdinaryNamingHistoryStorage();
         const auto costs = viewer->debugHistoryCostObservation();
+        const auto drawing = [gl debugHistoryDrawingCosts];
         return @{ @"pending": @(counts[0]), @"finalized": @(counts[1]), @"bytes": @(counts[2]),
                   @"document": [NSString stringWithUTF8String:owner->DocumentIdentifier().c_str()],
                   @"limit": @(owner->Document()->GetUndoLimit()),
@@ -13897,7 +13900,20 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
                   @"assemblyPrepareCalls": @(costs[2]), @"assemblyPrepareSeconds": @(costs[3]),
                   @"nativeCommitCalls": @(costs[4]), @"nativeCommitSeconds": @(costs[5]),
                   @"creationPublishCalls": @(costs[6]), @"creationPublishSeconds": @(costs[7]),
-                  @"creationViewerCalls": @(costs[8]), @"creationViewerSeconds": @(costs[9]) };
+                  @"creationViewerCalls": @(costs[8]), @"creationViewerSeconds": @(costs[9]),
+                  @"solidTimingCalls": @(_debugNativeSolidCosts[0]),
+                  @"workerQueueSeconds": @(_debugNativeSolidCosts[1]),
+                  @"workerBuildSeconds": @(_debugNativeSolidCosts[2]),
+                  @"mainQueueSeconds": @(_debugNativeSolidCosts[3]),
+                  @"deliveryCheckSeconds": @(_debugNativeSolidCosts[4]),
+                  @"deliveryCommitSeconds": @(_debugNativeSolidCosts[5]),
+                  @"controllerNotifySeconds": @(_debugNativeSolidCosts[6]),
+                  @"completionSeconds": @(_debugNativeSolidCosts[7]),
+                  @"drawCalls": drawing[@"drawCalls"],
+                  @"drawBoundarySeconds": drawing[@"drawBoundarySeconds"],
+                  @"drawSelectionSeconds": drawing[@"drawSelectionSeconds"],
+                  @"drawRenderSeconds": drawing[@"drawRenderSeconds"],
+                  @"drawMaxSeconds": drawing[@"drawMaxSeconds"] };
     } catch (...) { return @{}; }
 }
 
@@ -20193,20 +20209,26 @@ static bool Core3DPublishCommittedSpatialSweep(
         __weak UIViewController *expectedRoot = self.viewIfLoaded.window.rootViewController;
         const BOOL wasHosted = self.viewIfLoaded.window != nil;
         __weak Core3DViewController* weakSelf = self;
+#if DEBUG
+        const auto timingEnqueued = std::chrono::steady_clock::now();
+#endif
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
 #if DEBUG
+            const auto timingWorkerStart = std::chrono::steady_clock::now();
             core3d::cylindrical_cut::DebugRefusalScope workerScope(diagnostic);
             if(deadlineTicket)deadlineTicket->_phase.store(Core3DDebugNativeSolidDeadlinePhase::GeometryStarted);
 #endif
             core3d::retained_fillet::Outcome filletOutcome=core3d::retained_fillet::Outcome::Built;
             const bool built = core3d::Core3DViewer::buildNativeSolidGeometry(geometry,&filletOutcome);
 #if DEBUG
+            const auto timingWorkerEnd = std::chrono::steady_clock::now();
             if(deadlineTicket)deadlineTicket->_phase.store(Core3DDebugNativeSolidDeadlinePhase::GeometryReturned);
             if(deadlineTicket)deadlineTicket->_phase.store(Core3DDebugNativeSolidDeadlinePhase::MainDeliveryEnqueued);
 #endif
             dispatch_async(dispatch_get_main_queue(), ^{
 #if DEBUG
                 dispatch_block_t delivery=^{
+                const auto timingDeliveryStart = std::chrono::steady_clock::now();
                 core3d::cylindrical_cut::DebugRefusalScope deliveryScope(diagnostic);
                 if(deadlineTicket){
                     auto expected=Core3DDebugNativeSolidDeadlineDecision::Pending;
@@ -20262,7 +20284,13 @@ static bool Core3DPublishCommittedSpatialSweep(
                     }
                     return;
                 }
+#if DEBUG
+                const auto timingCommitStart = std::chrono::steady_clock::now();
+#endif
                 const auto native = currentViewer->commitNativeSolid(pendingWork);
+#if DEBUG
+                const auto timingCommitEnd = std::chrono::steady_clock::now();
+#endif
                 Core3DProfileConstructionResult result = Core3DProfileConstructionResultRejected;
                 switch (native) {
                     case core3d::OrdinaryEditResult::Committed:
@@ -20284,8 +20312,26 @@ static bool Core3DPublishCommittedSpatialSweep(
 #if DEBUG
                 if(deadlineTicket)deadlineTicket->_phase.store(Core3DDebugNativeSolidDeadlinePhase::CommitReturned);
 #endif
+#if DEBUG
+                const auto timingNotifyEnd = std::chrono::steady_clock::now();
+#endif
                 Core3DDeliverNativeSolidCompletion(completionToken, result);
 #if DEBUG
+                const auto timingCompletionEnd = std::chrono::steady_clock::now();
+                auto seconds = [](auto from, auto to) {
+                    return std::chrono::duration<double>(to - from).count();
+                };
+                // No shared worker writes, new scene capture or authority.
+                // Counts cover deliveries reaching commit, including refusal.
+                auto& costs = controller->_debugNativeSolidCosts;
+                ++costs[0];
+                costs[1] += seconds(timingEnqueued, timingWorkerStart);
+                costs[2] += seconds(timingWorkerStart, timingWorkerEnd);
+                costs[3] += seconds(timingWorkerEnd, timingDeliveryStart);
+                costs[4] += seconds(timingDeliveryStart, timingCommitStart);
+                costs[5] += seconds(timingCommitStart, timingCommitEnd);
+                costs[6] += seconds(timingCommitEnd, timingNotifyEnd);
+                costs[7] += seconds(timingNotifyEnd, timingCompletionEnd);
                 };
                 Core3DGateNativeSolidGeometryDelivery(completionToken,delivery);
 #endif

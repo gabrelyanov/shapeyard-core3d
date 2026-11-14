@@ -76,6 +76,7 @@
 #include <unistd.h>
 
 #if DEBUG
+#include <chrono>
 // D333/D326 probe (defined in OcctDocument.mm): real measurements of
 // relocation-table payloads still bound when a bounded retrieval driver dies.
 void Core3DDebugResetBoundedRetrievalDriverTeardownStats();
@@ -1351,6 +1352,9 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     std::string _committedBoundaryDocument;
     const void *_committedBoundaryDocumentOwner;
     BOOL _committedBoundariesDirty;
+#if DEBUG
+    double _debugHistoryDrawingCosts[5]; // Zero-initialized with the ObjC owner.
+#endif
     Handle(AIS_Shape) _splitBoundaryPresentation;
     BOOL _rawTouchRendering;
     BOOL _rawTouchWasCancelled;
@@ -1696,11 +1700,17 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 - (BOOL) Draw
 {
     if (_didSetupViewer && _viewer != nullptr) {
+#if DEBUG
+        const auto timingDrawStart = std::chrono::steady_clock::now();
+#endif
         // Appearance is optional presentation work. An allocation/OCCT style
         // failure must never suppress the model's normal native frame.
         try { [self updateCommittedBoundaries]; } catch (...) {
             try { [self clearCommittedBoundaries]; } catch (...) {}
         }
+#if DEBUG
+        const auto timingBoundariesEnd = std::chrono::steady_clock::now();
+#endif
         try { [self updateSelectedSurfaceAppearance]; } catch (...) {
             try {
                 [self clearSelectedFaceWash];
@@ -1710,10 +1720,38 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
                     context->HilightSelected(Standard_False);
             } catch (...) {}
         }
+#if DEBUG
+        const auto timingSelectionEnd = std::chrono::steady_clock::now();
+        const BOOL rendered = _viewer->RenderFrame();
+        const auto timingDrawEnd = std::chrono::steady_clock::now();
+        if ([NSThread isMainThread]) {
+            auto seconds = [](auto from, auto to) {
+                return std::chrono::duration<double>(to - from).count();
+            };
+            ++_debugHistoryDrawingCosts[0];
+            _debugHistoryDrawingCosts[1] += seconds(timingDrawStart, timingBoundariesEnd);
+            _debugHistoryDrawingCosts[2] += seconds(timingBoundariesEnd, timingSelectionEnd);
+            _debugHistoryDrawingCosts[3] += seconds(timingSelectionEnd, timingDrawEnd);
+            _debugHistoryDrawingCosts[4] = std::max(_debugHistoryDrawingCosts[4], seconds(timingDrawStart, timingDrawEnd));
+        }
+        return rendered;
+#else
         return _viewer->RenderFrame();
+#endif
     }
     return NO;
 }
+
+#if DEBUG
+- (NSDictionary<NSString *, NSNumber *> *)debugHistoryDrawingCosts {
+    if (![NSThread isMainThread]) return @{};
+    return @{ @"drawCalls": @(_debugHistoryDrawingCosts[0]),
+              @"drawBoundarySeconds": @(_debugHistoryDrawingCosts[1]),
+              @"drawSelectionSeconds": @(_debugHistoryDrawingCosts[2]),
+              @"drawRenderSeconds": @(_debugHistoryDrawingCosts[3]),
+              @"drawMaxSeconds": @(_debugHistoryDrawingCosts[4]) };
+}
+#endif
 
 - (void)setSelectedEdgeAppearanceColor:(UIColor *)color widthPoints:(CGFloat)width {
     CGFloat r = 0, g = 0, b = 0, a = 0;
