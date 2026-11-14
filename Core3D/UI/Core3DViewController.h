@@ -1656,6 +1656,12 @@ __attribute__((objc_subclassing_restricted))
 - (NSArray<NSNumber *> *_Nullable)debugAttachedManipulatorPosition;
 //! The handles' side in screen points (design system 7.2: 96 iPad, 72 iPhone).
 - (NSNumber *_Nullable)debugManipulatorSidePoints;
+//! How many displayed parts carry a highlight style of their own (a tool's colour); 0 when no
+//! tool is open.
+- (NSInteger)debugPartsWithOwnHighlightStyle;
+//! Where the real hit test finds each Scale handle (X, Y, Z cube, uniform sphere) as
+//! fractions of the viewport [x0,y0,...,x3,y3], -1 when not found; nil without a gizmo.
+- (NSArray<NSNumber *> *_Nullable)debugScaleHandleViewportFractions;
 - (BOOL)debugConfigureOrdinaryNameFault:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryVisibilityFault:(NSInteger)mode;
 - (void)debugSetViewerOrdinaryVisibilityAfterRepairFailures:(NSInteger)count;

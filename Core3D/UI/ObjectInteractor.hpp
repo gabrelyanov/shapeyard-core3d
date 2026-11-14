@@ -208,6 +208,15 @@ namespace core3d {
 		gp_XYZ manipulatorPosition();
 		//! The handles' configured side in view pixels (design system 7.2).
 		float manipulatorSide() const { return _manipulatorSide; }
+		//! DEBUG/UI-test evidence: where the real hit test finds each Scale handle
+		//! (X, Y, Z cube, uniform sphere) as viewport fractions [x0,y0,...,x3,y3];
+		//! -1 where a handle is not found. Probes MoveTo on a pixel grid round the gizmo.
+		bool debugScaleHandleFractions(std::array<double, 8>& theFractions) noexcept;
+		//! The last probe's view size, gizmo centre pixel and handle side (pixels).
+		std::array<double, 5> debugScaleProbeFrame() const noexcept { return _debugScaleProbeFrame; }
+		std::array<double, 5> _debugScaleProbeFrame{};
+		//! The last probe's hits: x, y (view pixels) and handle (0..2 cube, 3 sphere).
+		std::vector<std::array<int, 3>> _debugScaleProbeHits;
         
         void SelectAndAttachManipulator(Handle(AIS_InteractiveObject) toObject);
         //! Caller proves committed Object-mode authority and a current identity
