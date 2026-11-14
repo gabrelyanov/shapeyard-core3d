@@ -30,6 +30,10 @@ NS_ASSUME_NONNULL_BEGIN
 //! Metres per local BRep distance, including the active source's absolute
 //! saved uniform scale. Zero means no valid active extrusion. Read-only.
 - (double)getExtrusionMetersPerUnit;
+//! Measure (sizes while dragging): [x, y, z] metres of the push/pull
+//! preview solid's local axis extents, the finished size if applied now.
+//! Main thread, read-only; nil while no preview is shown.
+- (NSArray<NSNumber *> *_Nullable)extrusionPreviewSizeMeters;
 - (Core3DModelingOperationResult)tryApplyExtrusion
     NS_SWIFT_NAME(tryApplyExtrusion());
 - (Core3DModelingOperationResult)tryCancelExtrusion
