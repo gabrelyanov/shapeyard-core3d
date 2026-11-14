@@ -10683,7 +10683,10 @@ std::shared_ptr<ObjectAlignmentWork> Core3DViewer::prepareObjectAlignment(
         std::size_t nodes = 0, faces = 0, meshNodes = 0;
         for (const auto& record : work->authority.records) {
             const auto& state = record.previous;
+            // A part saved by App Store 5.34.1 or earlier has no marker (LegacyUnknown):
+            // it is an exact solid and aligns like one (Move already admits it).
             if (state.resolvedRepresentation != OcctGeometryRepresentation::BRep
+                && state.resolvedRepresentation != OcctGeometryRepresentation::LegacyUnknown
                 && state.resolvedRepresentation != OcctGeometryRepresentation::TriangleMesh) { return {}; }
             std::vector<TopoDS_Shape> stack{state.shape};
             TopTools_IndexedMapOfShape visited;

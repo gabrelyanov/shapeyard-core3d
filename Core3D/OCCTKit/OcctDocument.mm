@@ -13101,7 +13101,17 @@ Standard_Boolean OcctDocument::BuildThroughHole(
         }
         // A copy: the stored part (and a Join record Undo brings back) must stay
         // byte-identical; building the hole can touch tolerances.
-        const TopoDS_Shape source = DetachedCopy(XCAFDoc_ShapeTool::GetShape(label));
+        // App Store 5.34.1 and earlier stored a Union/Subtract result as a
+        // compound around its one solid; a hole goes into that solid.
+        TopoDS_Shape source = DetachedCopy(XCAFDoc_ShapeTool::GetShape(label));
+        while (!source.IsNull() && source.ShapeType() == TopAbs_COMPOUND) {
+            TopoDS_Iterator only(source);
+            if (!only.More()) break;
+            const TopoDS_Shape child = only.Value();
+            only.Next();
+            if (only.More()) break;
+            source = child;
+        }
         if (source.IsNull() || source.ShapeType() != TopAbs_SOLID
             || !BRepCheck_Analyzer(source, Standard_True).IsValid()) return Standard_False;
         Bnd_Box box; BRepBndLib::AddOptimal(source, box, Standard_False, Standard_False);
