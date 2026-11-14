@@ -74,6 +74,13 @@ public:
     
     //! Return active view.
     const Handle(V3d_View)& ActiveView() const { return myView; }
+
+    //! Lifts the lower-left axis triad by `pixels` above its default corner
+    //! offset (the editor's App Store layout keeps its bottom row there on
+    //! iPad). Zero restores the default. Kept across triad redisplays.
+    void setTriedronLift(int pixels);
+    //! Re-applies the lift after a TriedronDisplay call.
+    void applyTriedronLift();
     
     //! Interactive context.
     const Handle(AIS_InteractiveContext)& AisContext() const { return myContext; }
@@ -149,6 +156,8 @@ protected:
     void clearContext();
     
 protected:
+    int myTriedronLiftPixels = 0;
+
     
     Handle(V3d_Viewer)              myViewer;  //!< main viewer
     Handle(Core3DView)              myView;    //!< main view
