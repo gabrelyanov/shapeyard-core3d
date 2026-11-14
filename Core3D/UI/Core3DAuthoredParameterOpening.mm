@@ -1335,6 +1335,18 @@ static NSMapTable<Core3DViewController *, Core3DBooleanPairRecoveryIssuer *>
     } catch (...) { return NO; }
 }
 
+- (nullable NSString *)booleanPreviewEntityAtDrawablePoint:(CGPoint)point {
+    if (![NSThread isMainThread]) return nil;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        if (!viewer) return nil;
+        const std::string entity = viewer->booleanPreviewTargetAt(point.x, point.y);
+        return entity.empty() ? nil : [NSString stringWithUTF8String:entity.c_str()];
+    } catch (...) { return nil; }
+}
+
 - (BOOL)showBakedBooleanPreviewTargets:(NSArray<NSString *> *)targets
     tools:(NSArray<NSString *> *)tools
     operation:(Core3DPartBooleanOperation)operation {
@@ -1528,6 +1540,21 @@ static NSMapTable<Core3DViewController *, Core3DBooleanPairRecoveryIssuer *>
     const auto viewer = gl ? gl.viewer : nullptr;
     const bool cleared = viewer && viewer->clearBooleanPairPreview();
     if (cleared) [gl requestRender];
+    return cleared ? YES : NO;
+}
+
+- (BOOL)clearBooleanPairPreviewLeavingNothingSelected {
+    if (![NSThread isMainThread]) return NO;
+    GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+        ? (GLViewController *)self.glController : nil;
+    const auto viewer = gl ? gl.viewer : nullptr;
+    const bool cleared = viewer && viewer->clearBooleanPairPreview(false);
+    if (cleared) {
+        const SEL checkSelections = NSSelectorFromString(@"checkSelections");
+        if ([gl respondsToSelector:checkSelections])
+            ((void (*)(id, SEL))[gl methodForSelector:checkSelections])(gl, checkSelections);
+        [gl requestRender];
+    }
     return cleared ? YES : NO;
 }
 

@@ -465,6 +465,9 @@ __attribute__((objc_subclassing_restricted))
     operation:(Core3DPartBooleanOperation)operation
     NS_SWIFT_NAME(showBooleanPairPreview(_:operation:));
 - (BOOL)clearBooleanPairPreview NS_SWIFT_NAME(clearBooleanPairPreview());
+//! The same, leaving nothing selected (the last object to cut was un-picked).
+- (BOOL)clearBooleanPairPreviewLeavingNothingSelected
+    NS_SWIFT_NAME(clearBooleanPairPreviewLeavingNothingSelected());
 //! Preview of the plain Join / Cut / Overlap (as applyBakedBoolean makes it) on
 //! the model, for parts the editable Boolean cannot open (a part with a saved
 //! Hole). Nothing in the document changes; clearBooleanPairPreview puts both back.
@@ -477,6 +480,10 @@ __attribute__((objc_subclassing_restricted))
     tools:(NSArray<NSString *> *)tools
     operation:(Core3DPartBooleanOperation)operation
     NS_SWIFT_NAME(showBakedBooleanPreview(targets:tools:operation:));
+//! While a Join/Cut preview shows: the kept part whose result is under the drawable point
+//! (the same point viewWillSelect gets), or nil. Lets a second tap un-pick an object to cut.
+- (nullable NSString *)booleanPreviewEntityAtDrawablePoint:(CGPoint)point
+    NS_SWIFT_NAME(booleanPreviewEntity(atDrawablePoint:));
 //! Join / Cut / Overlap without keeping the originals (one Undo step): used
 //! when the editable Boolean is refused at Apply. `refusal` gets the code.
 - (BOOL)applyBakedBooleanTarget:(NSString *)target tool:(NSString *)tool

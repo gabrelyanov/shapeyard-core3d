@@ -558,7 +558,12 @@ namespace core3d {
     //! cutter or joined part is hidden. Nothing in the document changes.
     bool showBakedBooleanBatchPreview(const std::vector<std::string>& targetEntities,
         const std::vector<std::string>& toolEntities, int operation, std::string& refusal) noexcept;
-    bool clearBooleanPairPreview() noexcept;
+    //! While a Join/Cut preview shows: the kept part whose previewed result is under the
+    //! view pixel (x, y), nearest first, or "" (the App Store Subtract un-pick tap).
+    std::string booleanPreviewTargetAt(double x, double y) noexcept;
+    //! Puts every part back; the part that stays is selected again unless
+    //! `reselectTarget` is false (the App Store Subtract un-pick of the last object).
+    bool clearBooleanPairPreview(bool reselectTarget = true) noexcept;
     bool hasBooleanPairPreview() const noexcept;
     //! Hole through any solid part, in world coordinates and document units:
     //! a cylinder of `radius` from `worldPoint` along `worldDirection`, through

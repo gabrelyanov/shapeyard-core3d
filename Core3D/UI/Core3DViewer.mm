@@ -145,6 +145,7 @@ private:
 #include <atomic>
 #include <array>
 #include <cmath>
+#include <IntCurvesFace_ShapeIntersector.hxx>
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
@@ -2723,7 +2724,7 @@ bool Core3DViewer::applyThroughHole(const std::string& entity, const gp_Pnt& wor
     }catch(...){refusal="invalid-result";return false;}
 }
 
-bool Core3DViewer::clearBooleanPairPreview() noexcept {
+bool Core3DViewer::clearBooleanPairPreview(bool reselectTarget) noexcept {
     if(![NSThread isMainThread]||myContext.IsNull())return false;
     const auto state=std::move(_booleanPairPreview);
     _booleanPairPreview.reset();
@@ -2740,13 +2741,44 @@ bool Core3DViewer::clearBooleanPairPreview() noexcept {
         // The part that stays is selected again, as before the preview, so the
         // tick can apply the same pair.
         myContext->ClearSelected(Standard_False);
-        if(!state->target.IsNull()){
+        if(reselectTarget&&!state->target.IsNull()){
             const Handle(SelectMgr_EntityOwner) owner=state->target->GlobalSelOwner();
             if(!owner.IsNull())myContext->SetSelected(owner,Standard_False);
         }
         myContext->UpdateCurrentViewer();
         return true;
     }catch(...){return false;}
+}
+
+std::string Core3DViewer::booleanPreviewTargetAt(double x, double y) noexcept {
+    if(![NSThread isMainThread]||!_booleanPairPreview||myDoc.IsNull()||!std::isfinite(x)||!std::isfinite(y))return {};
+    try{
+        OCC_CATCH_SIGNALS
+        const Handle(V3d_View) view=ActiveView();
+        if(view.IsNull())return {};
+        double ox,oy,oz,dx,dy,dz;
+        view->ConvertWithProj(int(x),int(y),ox,oy,oz,dx,dy,dz);
+        const auto& state=*_booleanPairPreview;
+        std::vector<std::pair<Handle(AIS_Shape),TDF_Label>> previews{{state.preview,state.targetLabel}};
+        for(std::size_t index=0;index<state.morePreviews.size()&&index<state.moreLabels.size();++index)
+            previews.emplace_back(state.morePreviews[index],state.moreLabels[index]);
+        double nearest=1e300;std::string entity;
+        for(const auto& [preview,label]:previews){
+            if(preview.IsNull()||preview->Shape().IsNull()||label.IsNull())continue;
+            const gp_Trsf inverse=preview->Transformation().Inverted();
+            IntCurvesFace_ShapeIntersector ray;ray.Load(preview->Shape(),1e-7);
+            ray.Perform(gp_Lin(gp_Pnt(ox,oy,oz).Transformed(inverse),
+                               gp_Dir(dx,dy,dz).Transformed(inverse)),-1e9,1e9);
+            if(!ray.IsDone())continue;
+            for(int hit=1;hit<=ray.NbPnt();++hit){
+                // Depth along the eye ray in world units (the inverse may scale).
+                const gp_Pnt world=ray.Pnt(hit).Transformed(preview->Transformation());
+                const double depth=gp_Vec(gp_Pnt(ox,oy,oz),world).Dot(gp_Vec(dx,dy,dz));
+                if(depth<nearest){nearest=depth;entity=myDoc->EntityIdentifierForLabel(label);}
+            }
+        }
+        return entity;
+    }catch(...){return {};}
 }
 
 bool Core3DViewer::hasBooleanPairPreview() const noexcept {
