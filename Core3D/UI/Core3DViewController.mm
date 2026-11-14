@@ -7633,6 +7633,19 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
     return @[@(position.X()), @(position.Y()), @(position.Z())];
 }
 
+- (NSArray<NSNumber *> *_Nullable)debugScaleHandleViewportFractions {
+    if (![NSThread isMainThread] || GLController == nil
+        || GLController.viewer == nullptr) { return nil; }
+    const auto interactor = GLController.viewer->getObjectInteractor();
+    std::array<double, 8> fractions{};
+    if (interactor == nullptr || !interactor->debugScaleHandleFractions(fractions)) { return nil; }
+    NSMutableArray<NSNumber *> *values = [NSMutableArray arrayWithCapacity:8];
+    for (const double value : fractions) [values addObject:@(value)];
+    for (const double value : interactor->debugScaleProbeFrame()) [values addObject:@(value)];
+    [GLController requestRender];
+    return values;
+}
+
 - (NSNumber *_Nullable)debugManipulatorSidePoints {
     if (![NSThread isMainThread] || GLController == nil
         || GLController.viewer == nullptr) { return nil; }

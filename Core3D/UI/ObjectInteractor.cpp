@@ -2773,6 +2773,59 @@ namespace core3d {
         }
     }
 
+    bool ObjectInteractor::debugScaleHandleFractions(std::array<double, 8>& theFractions) noexcept {
+        theFractions.fill(-1);
+        if (_manipulator.IsNull() || !_manipulator->IsAttached() || myView.IsNull()
+            || myContext.IsNull() || myView->Window().IsNull()
+            || isManipulatorGestureActive() || hasUnresolvedEdit()) {
+            return false;
+        }
+        try {
+            OCC_CATCH_SIGNALS
+            Standard_Integer width = 0, height = 0;
+            myView->Window()->Size(width, height);
+            if (width <= 0 || height <= 0) return false;
+            Standard_Integer cx = 0, cy = 0;
+            const gp_Pnt centre = _manipulator->Position().Location();
+            myView->Convert(centre.X(), centre.Y(), centre.Z(), cx, cy);
+            const int reach = std::max(64, int(_manipulatorSide * 2.5f));
+            _debugScaleProbeFrame = {double(width), double(height), double(cx), double(cy), double(_manipulatorSide)};
+            std::array<std::vector<std::pair<int, int>>, 4> hits;
+            for (int dy = -reach; dy <= reach; dy += 3) {
+                for (int dx = -reach; dx <= reach; dx += 3) {
+                    const int x = cx + dx, y = cy + dy;
+                    if (x < 0 || y < 0 || x >= width || y >= height) continue;
+                    myContext->MoveTo(x, y, myView, Standard_False);
+                    if (!_manipulator->HasActiveMode()) continue;
+                    int bucket = -1;
+                    if (_manipulator->ActiveMode() == AIS_MM_ScalingUniform) bucket = 3;
+                    else if (_manipulator->ActiveMode() == AIS_MM_Scaling) bucket = _manipulator->ActiveAxisIndex();
+                    if (bucket < 0 || bucket > 3) continue;
+                    hits[bucket].emplace_back(x, y);
+                }
+            }
+            _manipulator->DeactivateCurrentMode();
+            myContext->ClearDetected(Standard_False);
+            for (int bucket = 0; bucket < 4; ++bucket) {
+                if (hits[bucket].empty()) continue;
+                // A cube sits at the tip of its arm: take the outermost fifth of
+                // its hits; the sphere is the centre of its hits.
+                double far = 0;
+                for (const auto& [x, y] : hits[bucket]) far = std::max(far, std::hypot(x - cx, y - cy));
+                double sumX = 0, sumY = 0, count = 0;
+                for (const auto& [x, y] : hits[bucket])
+                    if (bucket == 3 || std::hypot(x - cx, y - cy) >= 0.8 * far) { sumX += x; sumY += y; count += 1; }
+                if (count > 0) {
+                    theFractions[2 * bucket] = sumX / count / width;
+                    theFractions[2 * bucket + 1] = sumY / count / height;
+                }
+            }
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
     bool ObjectInteractor::debugReplayGesture(
         const Standard_Integer mode, const Standard_Integer axis,
         const std::vector<Standard_Real>& values,
