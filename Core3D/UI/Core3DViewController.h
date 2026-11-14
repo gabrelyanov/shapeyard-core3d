@@ -1132,6 +1132,9 @@ __attribute__((objc_subclassing_restricted))
 //! accepted suffix. Foreign, busy or changed history is refused untouched.
 - (nullable Core3DModelingPlanHistory *)captureModelingPlanHistory;
 - (BOOL)isModelingPlanHistoryCurrent:(Core3DModelingPlanHistory *)history;
+//! Read-only check of exact current history with no user Redo to overwrite.
+- (BOOL)isModelingPlanHistoryAtTip:(Core3DModelingPlanHistory *)history
+    NS_SWIFT_NAME(isModelingPlanHistoryAtTip(_:));
 - (BOOL)acceptModelingPlanHistory:(Core3DModelingPlanHistory *)history committedSteps:(NSInteger)steps
     NS_SWIFT_NAME(acceptModelingPlanHistory(_:committedSteps:));
 - (BOOL)discardModelingPlanHistory:(Core3DModelingPlanHistory *)history;

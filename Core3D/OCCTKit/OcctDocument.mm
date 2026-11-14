@@ -29618,6 +29618,11 @@ bool OcctDocument::IsModelingPlanHistoryCurrent(
     } catch (...) { return false; }
 }
 
+bool OcctDocument::IsModelingPlanHistoryAtTip(
+    const std::shared_ptr<OcctModelingPlanHistory>& history) const noexcept {
+    return IsModelingPlanHistoryCurrent(history) && history->redos.empty();
+}
+
 bool OcctDocument::AcceptModelingPlanHistory(
     const std::shared_ptr<OcctModelingPlanHistory>& history, Standard_Integer committedSteps) noexcept {
     try {
