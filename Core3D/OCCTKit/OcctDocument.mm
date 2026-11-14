@@ -12641,6 +12641,20 @@ bool FileStableShape(const TopoDS_Shape& shape, TopoDS_Shape& output) noexcept {
 }
 }
 
+namespace core3d { std::string g_booleanCaptureLastRefusal; std::string g_bakeSavedCutRefusal; }
+namespace {
+// DEBUG: which input (0 = the part that stays, 1 = the other) and which check refused a
+// Join/Cut opening, for the on-model tap trace and the app log.
+void BooleanCaptureDebugRefusal(std::size_t index, const char* stage) noexcept {
+#if DEBUG
+    std::fprintf(stderr, "BOOLEAN_CAPTURE_REFUSED input=%zu stage=%s\n", index, stage);
+    core3d::g_booleanCaptureLastRefusal = std::to_string(index) + ":" + stage;
+#else
+    (void)index; (void)stage;
+#endif
+}
+} // namespace
+
 core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources(
     const std::shared_ptr<core3d::native_opening::Context>& context,
     const TDF_Label& target, const TDF_Label& tool,
@@ -12678,8 +12692,10 @@ core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources
             const BooleanRecordExactCaptureScope scope(admitOrdinaryInputs);
             const auto admitted = CaptureToolInput(
                 labels[index], core3d::ordinary_input::Purpose::SolidModel);
-            if (!admitted.ready())
+            if (!admitted.ready()) {
+                BooleanCaptureDebugRefusal(index, "tool-input-not-ready");
                 return PairCaptureRefused(PairRefusal::UnsupportedSource);
+            }
             bool ordinary = false;
             // A previous Boolean result (its only record is a Part Boolean
             // composite) enters as a frozen solid, like an Add primitive, so
@@ -12725,7 +12741,10 @@ core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources
                 ordinary = FileStableShape(snapshot.detachedShape, frozen)
                     && OrdinaryCommitments(snapshot.exact, snapshot.groups, frozen,
                         snapshot.metersPerUnit, snapshot.recipe, frozenCommitments);
-                if (!ordinary) return PairCaptureRefused(PairRefusal::UnsupportedSource);
+                if (!ordinary) {
+                    BooleanCaptureDebugRefusal(index, "ordinary-file-stable-or-commitments");
+                    return PairCaptureRefused(PairRefusal::UnsupportedSource);
+                }
             }
             if (ordinary) {
                 state->ordinarySources[index] = admitted.snapshot;
@@ -12741,17 +12760,26 @@ core3d::authored_parameter::PairCaptureReply OcctDocument::CaptureBooleanSources
                 source.placement = admitted.snapshot->state_->exact.visibility
                     .object.object.transform;
                 source.boundRoot = frozen;
-                if (!CaptureExactFreeLabel(labels[index], state->exact[index]))
+                if (!CaptureExactFreeLabel(labels[index], state->exact[index])) {
+                    BooleanCaptureDebugRefusal(index, "ordinary-exact-free-label");
                     return PairCaptureRefused(PairRefusal::UnsupportedSource);
+                }
                 continue;
             }
             if (!CapturePlainProfileOperationSource(labels[index], state->sources[index])
-                || !CaptureExactFreeLabel(labels[index], state->exact[index]))
+                || !CaptureExactFreeLabel(labels[index], state->exact[index])) {
+                BooleanCaptureDebugRefusal(index, admitted.snapshot
+                    ? (admitted.snapshot->history() == core3d::ordinary_input::History::Absent
+                        ? "not-ordinary-history-absent" : "not-ordinary-history-present")
+                    : "not-ordinary-no-snapshot");
                 return PairCaptureRefused(PairRefusal::UnsupportedSource);
+            }
             core3d::profile::Parameters recipe;
             if (!core3d::profile::Decode(state->sources[index].recipeValues, recipe)
-                || !pb::build::IsRectangularP1BaseRecipe(recipe, false))
+                || !pb::build::IsRectangularP1BaseRecipe(recipe, false)) {
+                BooleanCaptureDebugRefusal(index, "profile-recipe");
                 return PairCaptureRefused(PairRefusal::UnsupportedSource);
+            }
         }
         const bool sameFeature = state->ordinarySources[0] && state->ordinarySources[1]
             ? state->ordinarySources[0]->sourceAnchor()
@@ -12876,45 +12904,30 @@ Standard_Boolean OcctDocument::IsBooleanResultLabel(const TDF_Label& label) cons
     } catch (...) { return Standard_False; }
 }
 
-Standard_Boolean OcctDocument::ApplyBakedBoolean(
-    const TDF_Label& target, const Handle(AIS_Shape)& targetPresentation,
-    const TDF_Label& tool, const Handle(AIS_Shape)& toolPresentation,
-    int operation, std::string& refusal) noexcept {
-    refusal = "unsupported-source";
+namespace {
+// The plain (baked) Join / Cut / Overlap of two stored parts, in the frame of the part
+// that stays (0 union, 1 subtract, 2 intersect). Works on copies. Shared by Apply and the
+// on-model preview, so the preview shows exactly what Apply makes.
+bool BakedBooleanShape(const TopoDS_Shape& targetStored, const gp_Trsf& targetPlacement,
+    const TopoDS_Shape& toolStored, const gp_Trsf& toolPlacement, int operation,
+    TopoDS_Shape& result, std::string& refusal) noexcept {
     try {
-        if (![NSThread isMainThread] || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
-            || target.IsNull() || tool.IsNull() || target.IsEqual(tool)
-            || targetPresentation.IsNull() || toolPresentation.IsNull()
-            || operation < 0 || operation > 2) return Standard_False;
-        // Plain parts and earlier Boolean results only (their record is dropped).
-        std::array<TDF_Label, 2> bakedRecords;
-        const std::array<TDF_Label, 2> labels{{target, tool}};
-        for (std::size_t index = 0; index < 2; ++index) {
-            const auto coverage = RetainedRecipeCoverageForLabel(labels[index]);
-            if (coverage == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage) {
-                core3d::composite_recipe::Record composite;
-                if (!core3d::composite_recipe::Read(myOcafDoc, labels[index], composite)
-                    || !composite.value || composite.label.IsNull()
-                    || !OriginalsFeature(composite.value->definition)) return Standard_False;
-                bakedRecords[index] = composite.label;
-            } else if (coverage != OcctRetainedRecipeCoverage::Absent) {
-                return Standard_False;
-            }
-        }
+        OCC_CATCH_SIGNALS
+        result.Nullify();
         // Work on copies: the stored parts (and a Join record that Undo brings
         // back) must stay byte-identical; building can touch tolerances.
-        const TopoDS_Shape targetShape = ExactResizedPrimitive(DetachedCopy(XCAFDoc_ShapeTool::GetShape(target)));
-        const TopoDS_Shape toolShape = ExactResizedPrimitive(DetachedCopy(XCAFDoc_ShapeTool::GetShape(tool)));
+        const TopoDS_Shape targetShape = ExactResizedPrimitive(DetachedCopy(targetStored));
+        const TopoDS_Shape toolShape = ExactResizedPrimitive(DetachedCopy(toolStored));
         if (targetShape.IsNull() || toolShape.IsNull()
-            || targetShape.ShapeType() != TopAbs_SOLID || toolShape.ShapeType() != TopAbs_SOLID)
-            return Standard_False;
-        gp_Trsf toolToTarget = targetPresentation->LocalTransformation().Inverted();
-        toolToTarget.Multiply(toolPresentation->LocalTransformation());
+            || targetShape.ShapeType() != TopAbs_SOLID || toolShape.ShapeType() != TopAbs_SOLID
+            || operation < 0 || operation > 2)
+            return false;
+        gp_Trsf toolToTarget = targetPlacement.Inverted();
+        toolToTarget.Multiply(toolPlacement);
         BRepBuilderAPI_Transform moved(toolShape, toolToTarget, Standard_True, Standard_False);
-        if (!moved.IsDone()) { refusal = "invalid-result"; return Standard_False; }
+        if (!moved.IsDone()) { refusal = "invalid-result"; return false; }
         TopTools_ListOfShape arguments, tools;
         arguments.Append(targetShape); tools.Append(moved.Shape());
-        TopoDS_Shape result;
         const auto run = [&](BRepAlgoAPI_BooleanOperation& algorithm) {
             algorithm.SetArguments(arguments); algorithm.SetTools(tools);
             algorithm.SetRunParallel(Standard_False); algorithm.SetNonDestructive(Standard_True);
@@ -12935,8 +12948,80 @@ Standard_Boolean OcctDocument::ApplyBakedBoolean(
         if (result.IsNull() || !BRepCheck_Analyzer(result, Standard_True).IsValid()
             || !(mass.Mass() > 0)) {
             refusal = "invalid-result";
-            return Standard_False;
+            result.Nullify();
+            return false;
         }
+        return true;
+    } catch (...) { refusal = "invalid-result"; result.Nullify(); return false; }
+}
+} // namespace
+
+namespace {
+// Which parts the plain Join / Cut / Overlap takes: plain parts, earlier Join/Cut results
+// (their record is dropped) and parts with a saved Hole (that cut is baked in the same
+// step). The preview and Apply use this one rule, so a preview is never followed by "no".
+bool BakedBooleanAdmits(const OcctDocument& document, const TDF_Label& label,
+    TDF_Label& bakedRecord) noexcept {
+    try {
+        bakedRecord.Nullify();
+        const auto coverage = document.RetainedRecipeCoverageForLabel(label);
+        if (coverage == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
+            && core3d::composite_recipe::HasRecord(label)) {
+            core3d::composite_recipe::Record composite;
+            if (!core3d::composite_recipe::Read(document.Document(), label, composite)
+                || !composite.value || composite.label.IsNull()
+                || !OriginalsFeature(composite.value->definition)) return false;
+            bakedRecord = composite.label;
+            return true;
+        }
+        return coverage == OcctRetainedRecipeCoverage::Absent
+            || document.CanBakeSavedCutForFaceEdit(label);
+    } catch (...) { return false; }
+}
+} // namespace
+
+namespace core3d {
+// On-model preview of the plain Join / Cut / Overlap (nothing in the document changes).
+bool BakedBooleanPreviewShape(const Handle(OcctDocument)& document,
+    const TDF_Label& target, const gp_Trsf& targetPlacement,
+    const TDF_Label& tool, const gp_Trsf& toolPlacement, int operation,
+    TopoDS_Shape& result, std::string& refusal) noexcept {
+    refusal = "unsupported-source";
+    if (document.IsNull() || target.IsNull() || tool.IsNull() || target.IsEqual(tool)) return false;
+    TDF_Label ignored;
+    if (!BakedBooleanAdmits(*document, target, ignored) || !BakedBooleanAdmits(*document, tool, ignored))
+        return false;
+    return BakedBooleanShape(XCAFDoc_ShapeTool::GetShape(target), targetPlacement,
+        XCAFDoc_ShapeTool::GetShape(tool), toolPlacement, operation, result, refusal);
+}
+} // namespace core3d
+
+Standard_Boolean OcctDocument::ApplyBakedBoolean(
+    const TDF_Label& target, const Handle(AIS_Shape)& targetPresentation,
+    const TDF_Label& tool, const Handle(AIS_Shape)& toolPresentation,
+    int operation, std::string& refusal) noexcept {
+    refusal = "unsupported-source";
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+            || target.IsNull() || tool.IsNull() || target.IsEqual(tool)
+            || targetPresentation.IsNull() || toolPresentation.IsNull()
+            || operation < 0 || operation > 2) return Standard_False;
+        // Plain parts and earlier Boolean results only (their record is dropped).
+        std::array<TDF_Label, 2> bakedRecords;
+        const std::array<TDF_Label, 2> labels{{target, tool}};
+        for (std::size_t index = 0; index < 2; ++index)
+            if (!BakedBooleanAdmits(*this, labels[index], bakedRecords[index])) {
+#if DEBUG
+                core3d::g_booleanCaptureLastRefusal = "bake " + std::to_string(index)
+                    + ":" + core3d::g_bakeSavedCutRefusal;
+#endif
+                return Standard_False;
+            }
+        TopoDS_Shape result;
+        if (!BakedBooleanShape(XCAFDoc_ShapeTool::GetShape(target),
+                targetPresentation->LocalTransformation(), XCAFDoc_ShapeTool::GetShape(tool),
+                toolPresentation->LocalTransformation(), operation, result, refusal))
+            return Standard_False;
         // A part that stays with a scale other than 1 (a ring scaled to 0.8): the
         // result keeps that size in its own shape and the part's scale becomes 1,
         // so taps, export and later tools all see the same part (Astra 11 Nov
@@ -12962,6 +13047,13 @@ Standard_Boolean OcctDocument::ApplyBakedBoolean(
         if (!myOcafDoc->HasOpenCommand()) return Standard_False;
         for (const auto& record : bakedRecords)
             if (!record.IsNull()) record.ForgetAllAttributes(Standard_True);
+        // A saved Hole on either part is baked in this command: Undo brings it back.
+        for (const auto& label : labels)
+            if (core3d::retained_solid::HasRecord(label)
+                && !PrepareBooleanResultForFaceEdit(label)) {
+                myOcafDoc->AbortCommand();
+                return Standard_False;
+            }
         const TCollection_ExtendedString name = NextBooleanResultName(myOcafDoc, operation);
         ForgetInspectorPrimitiveRecord(target);
         if (!ReplaceShape(target, shown)
@@ -13372,6 +13464,38 @@ OcctDocument::DebugArmBooleanPairRecoveryCensusFailure(
 }
 #endif
 
+namespace {
+// The TShape Checked bit of every distinct sub-shape of a stored shape, put back when
+// this object goes out of scope (also on early exits). Shaded publication clears the
+// bit while adding triangulation; the persisted BRep stream includes it.
+class StoredShapeCacheBits final {
+public:
+    explicit StoredShapeCacheBits(const TopoDS_Shape& shape) noexcept {
+        try {
+            if (shape.IsNull()) return;
+            TopTools_IndexedMapOfShape all;
+            TopExp::MapShapes(shape, all);
+            constexpr int maximumShapes = 200000;
+            if (all.Extent() > maximumShapes) return;
+            bits_.reserve(std::size_t(all.Extent()) + 1);
+            bits_.emplace_back(shape.TShape(), shape.TShape()->Checked());
+            for (int i = 1; i <= all.Extent(); ++i) {
+                const Handle(TopoDS_TShape)& tshape = all(i).TShape();
+                if (!tshape.IsNull()) bits_.emplace_back(tshape, tshape->Checked());
+            }
+        } catch (...) { bits_.clear(); }
+    }
+    ~StoredShapeCacheBits() {
+        for (auto& entry : bits_)
+            if (!entry.first.IsNull()) entry.first->Checked(entry.second);
+    }
+    StoredShapeCacheBits(const StoredShapeCacheBits&) = delete;
+    StoredShapeCacheBits& operator=(const StoredShapeCacheBits&) = delete;
+private:
+    std::vector<std::pair<Handle(TopoDS_TShape), Standard_Boolean>> bits_;
+};
+} // namespace
+
 core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
     const std::shared_ptr<const core3d::authored_parameter::PairPrepared>& prepared,
     std::uint32_t viewportWidth, std::uint32_t viewportHeight) noexcept {
@@ -13703,6 +13827,12 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
             || !pb::owner::ValidateOriginalsRecord(myOcafDoc, committed)) {
             return unknown(0);
         }
+        // Drawing the new part (shaded publication adds triangulation) clears the
+        // TShape Checked cache bit on its faces. That bit is part of the exact stored
+        // stream that the originals proof compares with its replay, so keep the
+        // values the replay produced (as redrawDocument does); otherwise the part can
+        // no longer be saved or exported (ai lane 13 Nov: Join/Cut of drawn profiles).
+        const StoredShapeCacheBits keepCacheBits(XCAFDoc_ShapeTool::GetShape(capture.sources[0].label));
         core3d::native_opening::CommittedEditPublication publication;
         publication.replaced.push_back({capture.sources[0].entityIdentifier,
                                         previousTarget});
@@ -13979,6 +14109,8 @@ Standard_Integer OcctDocument::DebugAppendBooleanOriginalsSuffix(
             || readback.value->bytes != payload->bytes
             || !pb::owner::ValidateOriginalsRecord(myOcafDoc, readback))
             throw Standard_Failure("suffix readback");
+        // Keep the replay's cache bits through the drawing below (see StoredShapeCacheBits).
+        const StoredShapeCacheBits keepCacheBits(XCAFDoc_ShapeTool::GetShape(owner));
         core3d::native_opening::CommittedEditPublication publication;
         publication.replaced.push_back({capture.capture->state_->entityIdentifier, record.current});
         phase = 9;
@@ -15114,6 +15246,8 @@ OcctDocument::ApplyBooleanOriginalsEdit(
             sealed.resultBytes.assign(expectedResult.begin(), expectedResult.end());
             if (!OriginalsCurrent(*this, sealed, committed)) return unknown();
         }
+        // Keep the replay's cache bits through the drawing below (see StoredShapeCacheBits).
+        const StoredShapeCacheBits keepCacheBits(XCAFDoc_ShapeTool::GetShape(capture.label));
         core3d::native_opening::CommittedEditPublication publication;
         publication.replaced.push_back({capture.entityIdentifier, previous});
 #if DEBUG
@@ -15963,6 +16097,13 @@ Standard_Boolean OcctDocument::CanBakeSavedCutForFaceEdit(
     const TDF_Label& label) const noexcept {
     try {
         OCC_CATCH_SIGNALS
+#if DEBUG
+        core3d::g_bakeSavedCutRefusal =
+            !IsEditableFreeSimpleDefinitionLabel(label) ? "not-free-simple"
+            : HasUnroutedRetainedDependent(label) ? "dependent"
+            : core3d::composite_recipe::HasRecord(label) ? "composite"
+            : label.IsAttribute(core3d::retained_edge_treatment::AttributeID()) ? "edge-attribute" : "";
+#endif
         if (![NSThread isMainThread] || myOcafDoc.IsNull()
             || !IsEditableFreeSimpleDefinitionLabel(label)
             || HasUnroutedRetainedDependent(label)
@@ -15974,7 +16115,23 @@ Standard_Boolean OcctDocument::CanBakeSavedCutForFaceEdit(
         // units and immutable base. Only the legacy cut envelope is consumed;
         // programs and companion treatments retain their own replay contracts.
         OcctObjectTransformState state;
-        return CaptureObjectTransformStateForLabel(label, state)
+        const bool captured = CaptureObjectTransformStateForLabel(label, state);
+#if DEBUG
+        // Which clause keeps a saved cut from being baked (Join/Cut of a drilled part).
+        core3d::g_bakeSavedCutRefusal =
+            !captured ? "capture"
+            : !(state.retained.value && !state.retained.label.IsNull()) ? "no-retained"
+            : !std::holds_alternative<core3d::retained_solid::Envelope>(state.retained.value->envelope) ? "not-envelope"
+            : !state.profile.label.IsNull() ? "profile"
+            : !state.enclosure.label.IsNull() ? "enclosure"
+            : !(state.sweep.label.IsNull() && state.loft.label.IsNull()) ? "sweep-loft"
+            : (state.edgeTreatment || state.edgeTreatmentR2) ? "edge-treatment"
+            : state.authoredFramesPresent ? "frames"
+            : state.meshUVAtlasVersion != 0 ? "uv-atlas"
+            : !state.meshRegionPartition.empty() ? "regions"
+            : state.resolvedRepresentation != OcctGeometryRepresentation::BRep ? "not-brep" : "ok";
+#endif
+        return captured
             && state.retained.value && !state.retained.label.IsNull()
             && std::holds_alternative<core3d::retained_solid::Envelope>(
                 state.retained.value->envelope)

@@ -550,6 +550,10 @@ namespace core3d {
     bool showBooleanPairPreview(const std::string& targetEntity,
         const std::string& toolEntity, const TopoDS_Shape& result,
         int operation) noexcept;
+    //! The plain (baked) Join / Cut / Overlap shown the same way, for parts the
+    //! editable Boolean cannot open (a part with a saved Hole).
+    bool showBakedBooleanPreview(const std::string& targetEntity,
+        const std::string& toolEntity, int operation, std::string& refusal) noexcept;
     bool clearBooleanPairPreview() noexcept;
     bool hasBooleanPairPreview() const noexcept;
     //! Hole through any solid part, in world coordinates and document units:
