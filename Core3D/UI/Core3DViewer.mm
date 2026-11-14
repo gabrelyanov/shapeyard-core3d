@@ -2525,8 +2525,11 @@ bool Core3DViewer::holeAnchor(const std::string& entity, std::uint32_t faceIndex
             Bnd_Box box;BRepBndLib::Add(face,box);
             const double size=box.IsVoid()?0:std::sqrt(box.SquareExtent());
             GeomAPI_ProjectPointOnSurf hit(tapped,geometry);
+            // Only a tap right at the face centre snaps to it (2 % of the face's size): a tap
+            // a few millimetres off the middle stays where it was (Astra long build 13 Nov
+            // 18:34 step 38: 5 mm above the middle of an 80 x 60 face landed on the middle).
             if(size>0&&hit.IsDone()&&hit.NbPoints()>0&&hit.LowerDistance()<size*0.02
-               &&tapped.Distance(area.CentreOfMass())>size*0.1){
+               &&tapped.Distance(area.CentreOfMass())>size*0.02){
                 double hu=0,hv=0;hit.LowerDistanceParameters(hu,hv);
                 BRepClass_FaceClassifier inside(face,gp_Pnt2d(hu,hv),Precision::Confusion());
                 if(inside.State()==TopAbs_IN){u=hu;v=hv;}
