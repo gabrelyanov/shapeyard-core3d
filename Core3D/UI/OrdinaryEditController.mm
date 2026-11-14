@@ -1635,6 +1635,68 @@ OrdinaryEditResult OrdinaryEditController::reconcileAppearanceImpl() noexcept {
     }catch(...){_state=OrdinaryEditState::OutcomeUnknown;return OrdinaryEditResult::OutcomeUnknown;}
 }
 
+OrdinaryEditLease OrdinaryEditController::beginColour(
+    const std::shared_ptr<const OcctPBRColourPreparation>& prepared, OrdinaryEditResult* failure) noexcept {
+    const auto reject=[&](OrdinaryEditResult r){if(failure)*failure=r;return OrdinaryEditLease();};
+    if(![NSThread isMainThread]||!prepared||_document.IsNull())return reject(OrdinaryEditResult::Invalid);
+    if(blocksNormalWork())return reject(OrdinaryEditResult::Busy);
+    if(_nextToken==std::numeric_limits<std::uint64_t>::max())return reject(OrdinaryEditResult::Invalid);
+    _entering=true;struct Reset{bool& b;~Reset(){b=false;}} reset{_entering};
+    try{
+        auto self=shared_from_this();auto lifetime=std::make_shared<const std::uint8_t>(0);
+        if(_document->Document().IsNull()||_document->Document()->HasOpenCommand())return reject(OrdinaryEditResult::Busy);
+        OrdinaryColourLedger ledger;ledger.prepared=prepared;ledger.previous=_document->PBRColourOriginal(prepared);
+        if(!ledger.previous||!_document->PBRScalarStateMatches(ledger.previous)||!_host.admitColour(ledger)
+            ||!_document->PBRScalarStateMatches(ledger.previous))return reject(OrdinaryEditResult::Invalid);
+        _pending.emplace(std::move(ledger));_leaseLifetime=lifetime;_activeToken=++_nextToken;
+        const auto began=_command.begin(_document);
+        if(began!=OrdinaryCommandBeginResult::Started){
+            if(began==OrdinaryCommandBeginResult::OutcomeUnknown){_state=OrdinaryEditState::OutcomeUnknown;return reject(OrdinaryEditResult::OutcomeUnknown);}
+            _pending.reset();_activeToken=0;return reject(began==OrdinaryCommandBeginResult::Busy?OrdinaryEditResult::Busy:OrdinaryEditResult::RetryableFailure);
+        }
+        _state=OrdinaryEditState::OpenOwned;return OrdinaryEditLease(self,_activeToken,lifetime);
+    }catch(...){if(_command.isRetained()){_state=OrdinaryEditState::OutcomeUnknown;return reject(OrdinaryEditResult::OutcomeUnknown);}
+        _pending.reset();_activeToken=0;return reject(OrdinaryEditResult::Invalid);}
+}
+OrdinaryEditResult OrdinaryEditController::stageColourAndCommit(std::uint64_t token) noexcept {
+    try{
+        auto& ledger=std::get<OrdinaryColourLedger>(*_pending);
+        if(!_document->PBRScalarStateMatches(ledger.previous))return cancel(token);
+        if(_command.observe()!=OrdinaryCommandObservation::OpenOwned){_state=OrdinaryEditState::OutcomeUnknown;return OrdinaryEditResult::OutcomeUnknown;}
+#ifdef DEBUG
+        if(_stageFailureIndex==0){_stageFailureIndex=-1;throw Standard_Failure("Colour before-stage fault");}
+#endif
+        if(!_document->StagePBRColourPatch(ledger.prepared,ledger.candidate))throw Standard_Failure("Colour exact stage/readback failure");
+#ifdef DEBUG
+        if(_stageFailureIndex==1){_stageFailureIndex=-1;throw Standard_Failure("Colour after-stage fault");}
+#endif
+        ledger.candidateSealed=true;
+        if(_command.commitAndObserve()==OrdinaryCommandObservation::Unavailable){_state=OrdinaryEditState::OutcomeUnknown;_activeToken=0;return OrdinaryEditResult::OutcomeUnknown;}
+    }catch(...){}
+    _state=OrdinaryEditState::OutcomeUnknown;_activeToken=0;return reconcile();
+}
+OrdinaryEditResult OrdinaryEditController::reconcileColourImpl() noexcept {
+    try{
+        auto& ledger=std::get<OrdinaryColourLedger>(*_pending);
+#ifdef DEBUG
+        if(_truthUnavailableCount>0){--_truthUnavailableCount;_state=OrdinaryEditState::OutcomeUnknown;return OrdinaryEditResult::OutcomeUnknown;}
+#endif
+        auto observed=_command.observe();if(observed==OrdinaryCommandObservation::OpenOwned)observed=_command.abortAndObserve();
+        const bool candidate=observed==OrdinaryCommandObservation::ClosedWithCandidateMarker;
+        const bool previous=observed==OrdinaryCommandObservation::ClosedWithPriorMarker;
+        const auto& expected=candidate?ledger.candidate:ledger.previous;
+        if((!candidate&&!previous)||(candidate&&!ledger.candidateSealed)||!_document->PBRScalarStateMatches(expected)){
+            _state=OrdinaryEditState::OutcomeUnknown;return OrdinaryEditResult::OutcomeUnknown;}
+        _committed=candidate;_state=OrdinaryEditState::RepairPending;
+        if(!_host.repairColour(ledger,candidate))return OrdinaryEditResult::OutcomeUnknown;
+        if(!_document->PBRScalarStateMatches(expected)){_state=OrdinaryEditState::OutcomeUnknown;return OrdinaryEditResult::OutcomeUnknown;}
+        _state=OrdinaryEditState::Publishing;
+        if(!_command.releaseClosed()){_state=OrdinaryEditState::OutcomeUnknown;return OrdinaryEditResult::OutcomeUnknown;}
+        if(candidate&&!_didPublish){_didPublish=true;try{_document->NotifyChanges();}catch(...){}}
+        clearResolved();return candidate?OrdinaryEditResult::Committed:OrdinaryEditResult::RetryableFailure;
+    }catch(...){_state=OrdinaryEditState::OutcomeUnknown;return OrdinaryEditResult::OutcomeUnknown;}
+}
+
 OrdinaryEditLease OrdinaryEditController::beginGrouping(
     const std::vector<OcctSavedGroup>& groups, OrdinaryEditResult* failure) noexcept {
     const auto reject = [&](OrdinaryEditResult result) {
@@ -2431,6 +2493,7 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
     if (_entering || _reconciling || _state != OrdinaryEditState::OpenOwned
         || !_pending || token == 0 || token != _activeToken) { return OrdinaryEditResult::Busy; }
     if (std::holds_alternative<OrdinaryAppearanceLedger>(*_pending)) { return stageAppearanceAndCommit(token); }
+    if (std::holds_alternative<OrdinaryColourLedger>(*_pending)) { return stageColourAndCommit(token); }
     if (std::holds_alternative<OrdinaryCreationLedger>(*_pending)) { return stageCreationAndCommit(token); }
     if (std::holds_alternative<OrdinaryGroupingLedger>(*_pending)) { return stageGroupingAndCommit(token); }
     if (std::holds_alternative<OrdinaryVisibilityLedger>(*_pending)) { return stageVisibilityAndCommit(token); }
@@ -3068,6 +3131,7 @@ OrdinaryEditResult OrdinaryEditController::reconcile() noexcept {
 OrdinaryEditResult OrdinaryEditController::reconcileImpl() noexcept {
     RetainedValidationOperationScope validationOperation;
     if (std::holds_alternative<OrdinaryAppearanceLedger>(*_pending)) { return reconcileAppearanceImpl(); }
+    if (std::holds_alternative<OrdinaryColourLedger>(*_pending)) { return reconcileColourImpl(); }
     if (std::holds_alternative<OrdinaryCreationLedger>(*_pending)) { return reconcileCreationImpl(); }
     if (std::holds_alternative<OrdinaryGroupingLedger>(*_pending)) { return reconcileGroupingImpl(); }
     if (std::holds_alternative<OrdinaryVisibilityLedger>(*_pending)) { return reconcileVisibilityImpl(); }
