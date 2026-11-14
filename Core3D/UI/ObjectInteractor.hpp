@@ -164,6 +164,10 @@ namespace core3d {
         double _geometrySnappingTolerance = 0;
         std::optional<GeometryMoveSnap> _geometryMoveSnap;
         void applyGeometrySnapping() noexcept;
+        //! Editor (job 3b): the snapped edge or face shown in the selection
+        //! style while a drag holds the snap; corners have no highlight yet.
+        Handle(AIS_Shape) _geometrySnapHighlight;
+        void syncGeometrySnapHighlight() noexcept;
         std::function<void(bool)> _geometrySnapFeedbackChangedCallback;
         bool _geometrySnapSamplesActive = false;
         void publishGeometrySnapFeedback(bool ended) noexcept;
