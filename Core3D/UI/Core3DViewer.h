@@ -92,6 +92,15 @@ namespace core3d {
     };
 
     struct NativePBRScalarWork;
+    struct NativePBRColourWork;
+    struct NativeColourSessionWork;
+    //! Both immutable scenes come from one verified native authority capture.
+    //! The ordinary source is retained only for exact semantic selection DTOs.
+    struct NativeColourPresentation {
+        scene::OcctSceneSnapshotBuilder::SnapshotPointer scene;
+        scene::OcctSceneSnapshotBuilder::SnapshotPointer ordinary;
+        scene::PresentationOverlaySnapshot overlay;
+    };
     struct NativeSolidWork;
     class SavedCutSourceEditWork;
     class SavedCutSourceEditCancellation;
@@ -260,6 +269,25 @@ namespace core3d {
             const ObjectFrameIdentity&,std::uint64_t presentation,std::uint32_t width,std::uint32_t height) noexcept;
         OrdinaryEditResult executePBRScalar(const std::shared_ptr<NativePBRScalarWork>&) noexcept;
         void cancelPBRScalar(const std::shared_ptr<NativePBRScalarWork>&) noexcept;
+        std::shared_ptr<NativePBRColourWork> preparePBRColour(const std::array<double,3>& sRGB,
+            const ObjectFrameIdentity&,std::uint64_t presentation,std::uint32_t width,std::uint32_t height) noexcept;
+        OrdinaryEditResult executePBRColour(const std::shared_ptr<NativePBRColourWork>&) noexcept;
+        void cancelPBRColour(const std::shared_ptr<NativePBRColourWork>&) noexcept;
+        std::shared_ptr<NativeColourSessionWork> beginColourSession(const ObjectFrameIdentity&,
+            std::uint64_t presentation,std::uint32_t width,std::uint32_t height,bool faceScope=false) noexcept;
+        bool previewColourSession(const std::shared_ptr<NativeColourSessionWork>&,
+            const std::array<double,3>& sRGB) noexcept;
+        OrdinaryEditResult commitColourSession(const std::shared_ptr<NativeColourSessionWork>&) noexcept;
+        void cancelColourSession(const std::shared_ptr<NativeColourSessionWork>&) noexcept;
+#if DEBUG
+        std::shared_ptr<OcctColourWriteProbe> debugArmColourWriteFault(
+            const std::shared_ptr<NativeColourSessionWork>&,int site) noexcept;
+#endif
+        std::optional<NativeColourPresentation> captureColourPresentationForSession(
+            const std::shared_ptr<NativeColourSessionWork>&,
+            std::uint32_t width,std::uint32_t height) noexcept;
+        scene::OcctSceneSnapshotBuilder::SnapshotPointer captureColourPresentation(
+            std::uint32_t width,std::uint32_t height) noexcept;
         std::shared_ptr<NativeSolidWork> prepareProfileSolid(
             const profile::Parameters& parameters, const ObjectFrameIdentity& identity,
             std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept;
@@ -1204,6 +1232,13 @@ namespace core3d {
         bool repairCreation(const OrdinaryCreationLedger& ledger, bool committed) noexcept override;
         bool admitAppearance(OrdinaryAppearanceLedger&) noexcept override;
         bool repairAppearance(const OrdinaryAppearanceLedger&,bool) noexcept override;
+        bool admitColour(OrdinaryColourLedger&) noexcept override;
+        bool repairColour(const OrdinaryColourLedger&,bool) noexcept override;
+        bool colourSessionMatches(const std::shared_ptr<NativeColourSessionWork>&,
+            std::uint32_t width=0,std::uint32_t height=0,
+            scene::OcctSceneSnapshotBuilder::SnapshotPointer* verified=nullptr) noexcept;
+        void restoreColourPresentation(const std::shared_ptr<NativeColourSessionWork>&) noexcept;
+        std::weak_ptr<NativeColourSessionWork> _colourSession;
         bool admitGrouping(OrdinaryGroupingLedger& ledger) noexcept override;
         bool repairGrouping(const OrdinaryGroupingLedger& ledger, bool committed) noexcept override;
         bool admitNames(OrdinaryNameLedger& ledger) noexcept override;
