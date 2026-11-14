@@ -1335,6 +1335,34 @@ static NSMapTable<Core3DViewController *, Core3DBooleanPairRecoveryIssuer *>
     } catch (...) { return NO; }
 }
 
+- (BOOL)showBakedBooleanPreviewTargets:(NSArray<NSString *> *)targets
+    tools:(NSArray<NSString *> *)tools
+    operation:(Core3DPartBooleanOperation)operation {
+    if (![NSThread isMainThread] || ![targets isKindOfClass:NSArray.class]
+        || ![tools isKindOfClass:NSArray.class] || targets.count == 0 || tools.count == 0
+        || targets.count + tools.count > 32) return NO;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        if (!viewer) return NO;
+        std::vector<std::string> targetEntities, toolEntities;
+        for (id entity in targets) {
+            if (![entity isKindOfClass:NSString.class]) return NO;
+            targetEntities.emplace_back(((NSString *)entity).UTF8String ?: "");
+        }
+        for (id entity in tools) {
+            if (![entity isKindOfClass:NSString.class]) return NO;
+            toolEntities.emplace_back(((NSString *)entity).UTF8String ?: "");
+        }
+        std::string code;
+        const bool shown = viewer->showBakedBooleanBatchPreview(targetEntities, toolEntities,
+            static_cast<int>(operation) - static_cast<int>(Core3DPartBooleanOperationUnion), code);
+        if (shown) [gl requestRender];
+        return shown ? YES : NO;
+    } catch (...) { return NO; }
+}
+
 - (BOOL)applyBakedBooleanTargets:(NSArray<NSString *> *)targets
     tools:(NSArray<NSString *> *)tools
     operation:(Core3DPartBooleanOperation)operation

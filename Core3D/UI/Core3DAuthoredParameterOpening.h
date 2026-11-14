@@ -471,6 +471,12 @@ __attribute__((objc_subclassing_restricted))
 - (BOOL)showBakedBooleanPreviewTarget:(NSString *)target tool:(NSString *)tool
     operation:(Core3DPartBooleanOperation)operation
     NS_SWIFT_NAME(showBakedBooleanPreview(target:tool:operation:));
+//! Preview of applyBakedBoolean(targets:tools:) on the model: each kept part shows its
+//! result, the other parts are hidden. Nothing changes; clearBooleanPairPreview puts all back.
+- (BOOL)showBakedBooleanPreviewTargets:(NSArray<NSString *> *)targets
+    tools:(NSArray<NSString *> *)tools
+    operation:(Core3DPartBooleanOperation)operation
+    NS_SWIFT_NAME(showBakedBooleanPreview(targets:tools:operation:));
 //! Join / Cut / Overlap without keeping the originals (one Undo step): used
 //! when the editable Boolean is refused at Apply. `refusal` gets the code.
 - (BOOL)applyBakedBooleanTarget:(NSString *)target tool:(NSString *)tool

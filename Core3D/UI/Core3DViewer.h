@@ -554,6 +554,10 @@ namespace core3d {
     //! editable Boolean cannot open (a part with a saved Hole).
     bool showBakedBooleanPreview(const std::string& targetEntity,
         const std::string& toolEntity, int operation, std::string& refusal) noexcept;
+    //! Preview of applyBakedBooleanBatch: each kept part shows its result, every
+    //! cutter or joined part is hidden. Nothing in the document changes.
+    bool showBakedBooleanBatchPreview(const std::vector<std::string>& targetEntities,
+        const std::vector<std::string>& toolEntities, int operation, std::string& refusal) noexcept;
     bool clearBooleanPairPreview() noexcept;
     bool hasBooleanPairPreview() const noexcept;
     //! Hole through any solid part, in world coordinates and document units:
@@ -1199,6 +1203,10 @@ namespace core3d {
             Handle(AIS_Shape) target, tool, preview;
             TDF_Label targetLabel, toolLabel;
             int operation = 0;
+            // Several parts at once: the other kept parts' results, and every other
+            // part hidden while the preview shows (put back on clear).
+            std::vector<Handle(AIS_Shape)> morePreviews, moreParts;
+            std::vector<TDF_Label> moreLabels;
         };
         std::shared_ptr<BooleanPairPreview> _booleanPairPreview;
         std::shared_ptr<OrdinaryEditController> _ordinaryEditController;

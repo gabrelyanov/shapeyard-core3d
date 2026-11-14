@@ -2465,6 +2465,69 @@ bool BakedBooleanPreviewShape(const Handle(OcctDocument)& document,
     const TDF_Label& target, const gp_Trsf& targetPlacement,
     const TDF_Label& tool, const gp_Trsf& toolPlacement, int operation,
     TopoDS_Shape& result, std::string& refusal) noexcept;
+bool BakedBooleanBatchPreviewShape(const Handle(OcctDocument)& document,
+    const TDF_Label& target, const gp_Trsf& targetPlacement,
+    const std::vector<std::pair<TDF_Label, gp_Trsf>>& tools, int operation,
+    TopoDS_Shape& result, std::string& refusal) noexcept;
+
+bool Core3DViewer::showBakedBooleanBatchPreview(const std::vector<std::string>& targetEntities,
+    const std::vector<std::string>& toolEntities, int operation, std::string& refusal) noexcept {
+    refusal="unsupported-source";
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()||targetEntities.empty()
+        ||toolEntities.empty()||targetEntities.size()+toolEntities.size()>32
+        ||operation<0||operation>2||(operation!=1&&targetEntities.size()!=1))return false;
+    try{
+        OCC_CATCH_SIGNALS
+        if(_booleanPairPreview&&!clearBooleanPairPreview())return false;
+        std::vector<std::pair<Handle(AIS_Shape),TDF_Label>> targets,tools;
+        for(const auto* list:{&targetEntities,&toolEntities})
+            for(const auto& entity:*list){
+                Handle(AIS_Shape) presentation;TDF_Label label;
+                if(!FindEntityPresentation(myContext,myDoc,entity,presentation,label))return false;
+                for(const auto& seen:targets)if(seen.second.IsEqual(label))return false;
+                for(const auto& seen:tools)if(seen.second.IsEqual(label))return false;
+                (list==&targetEntities?targets:tools).emplace_back(presentation,label);
+            }
+        std::vector<std::pair<TDF_Label,gp_Trsf>> toolPlacements;
+        for(const auto& [presentation,label]:tools)
+            toolPlacements.emplace_back(label,presentation->LocalTransformation());
+        std::vector<Handle(AIS_Shape)> previews;
+        for(const auto& [presentation,label]:targets){
+            TopoDS_Shape result;
+            if(!BakedBooleanBatchPreviewShape(myDoc,label,presentation->LocalTransformation(),
+                toolPlacements,operation,result,refusal))return false;
+            Handle(AIS_Shape) preview=new AIS_Shape(result);
+            preview->SetLocalTransformation(presentation->LocalTransformation());
+            myDoc->LoadObjectMeterial(label,preview);
+            previews.push_back(preview);
+        }
+        auto state=std::make_shared<BooleanPairPreview>();
+        state->operation=operation;
+        state->target=targets.front().first;state->targetLabel=targets.front().second;
+        state->tool=tools.front().first;state->toolLabel=tools.front().second;
+        state->preview=previews.front();
+        for(std::size_t index=1;index<targets.size();++index){
+            state->morePreviews.push_back(previews[index]);
+            state->moreParts.push_back(targets[index].first);
+            state->moreLabels.push_back(targets[index].second);
+        }
+        for(std::size_t index=1;index<tools.size();++index){
+            state->moreParts.push_back(tools[index].first);
+            state->moreLabels.push_back(tools[index].second);
+        }
+        myContext->ClearSelected(Standard_False);
+        for(const auto& preview:previews){
+            myContext->Display(preview,AIS_Shaded,0,Standard_False);
+            myContext->Deactivate(preview);
+        }
+        for(const auto& part:targets)myContext->Erase(part.first,Standard_False);
+        for(const auto& part:tools)myContext->Erase(part.first,Standard_False);
+        myContext->UpdateCurrentViewer();
+        _booleanPairPreview=std::move(state);
+        refusal.clear();
+        return true;
+    }catch(...){refusal="invalid-result";return false;}
+}
 
 bool Core3DViewer::showBakedBooleanPreview(const std::string& targetEntity,
     const std::string& toolEntity, int operation, std::string& refusal) noexcept {
@@ -2670,6 +2733,10 @@ bool Core3DViewer::clearBooleanPairPreview() noexcept {
         if(!state->preview.IsNull())myContext->Remove(state->preview,Standard_False);
         if(!state->target.IsNull())myContext->Display(state->target,Standard_False);
         if(!state->tool.IsNull())myContext->Display(state->tool,Standard_False);
+        for(const auto& preview:state->morePreviews)
+            if(!preview.IsNull())myContext->Remove(preview,Standard_False);
+        for(const auto& part:state->moreParts)
+            if(!part.IsNull())myContext->Display(part,Standard_False);
         // The part that stays is selected again, as before the preview, so the
         // tick can apply the same pair.
         myContext->ClearSelected(Standard_False);
@@ -14751,9 +14818,14 @@ Core3DViewer::captureScenePresentationOverlay() noexcept {
         std::vector<TDF_Label> hidden{_booleanPairPreview->targetLabel};
         if (!_booleanPairPreview->toolLabel.IsNull())
             hidden.push_back(_booleanPairPreview->toolLabel);
+        hidden.insert(hidden.end(), _booleanPairPreview->moreLabels.begin(),
+                      _booleanPairPreview->moreLabels.end());
+        std::vector<Handle(AIS_Shape)> previews{_booleanPairPreview->preview};
+        previews.insert(previews.end(), _booleanPairPreview->morePreviews.begin(),
+                        _booleanPairPreview->morePreviews.end());
         return _sceneSnapshotBuilder.PublishBooleanPreviewOverlay(
             myDoc, kinds[_booleanPairPreview->operation], {},
-            {_booleanPairPreview->preview}, hidden);
+            previews, hidden);
     }
     if (_shapeInteractor != nullptr
         && _shapeInteractor->hasActiveShell()) {

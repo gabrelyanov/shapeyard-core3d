@@ -13024,6 +13024,27 @@ bool BakedBooleanPreviewShape(const Handle(OcctDocument)& document,
     return BakedBooleanShape(XCAFDoc_ShapeTool::GetShape(target), targetPlacement,
         XCAFDoc_ShapeTool::GetShape(tool), toolPlacement, operation, result, refusal);
 }
+
+// The same for one kept part and several tools (the App Store Subtract and Union of more parts).
+bool BakedBooleanBatchPreviewShape(const Handle(OcctDocument)& document,
+    const TDF_Label& target, const gp_Trsf& targetPlacement,
+    const std::vector<std::pair<TDF_Label, gp_Trsf>>& tools, int operation,
+    TopoDS_Shape& result, std::string& refusal) noexcept {
+    refusal = "unsupported-source";
+    try {
+        if (document.IsNull() || target.IsNull() || tools.empty()) return false;
+        TDF_Label ignored;
+        if (!BakedBooleanAdmits(*document, target, ignored)) return false;
+        std::vector<std::pair<TopoDS_Shape, gp_Trsf>> shapes;
+        for (const auto& [tool, placement] : tools) {
+            if (tool.IsNull() || tool.IsEqual(target) || !BakedBooleanAdmits(*document, tool, ignored))
+                return false;
+            shapes.emplace_back(XCAFDoc_ShapeTool::GetShape(tool), placement);
+        }
+        return BakedBooleanShapeOfMany(XCAFDoc_ShapeTool::GetShape(target), targetPlacement,
+            shapes, operation, result, refusal);
+    } catch (...) { refusal = "invalid-result"; return false; }
+}
 } // namespace core3d
 
 Standard_Boolean OcctDocument::ApplyBakedBoolean(
