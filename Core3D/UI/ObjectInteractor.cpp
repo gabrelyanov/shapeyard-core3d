@@ -2697,23 +2697,34 @@ namespace core3d {
     }
 
     void ObjectInteractor::syncGeometrySnapHighlight() noexcept {
-        if (myContext.IsNull()) { _geometrySnapHighlight.Nullify(); return; }
+        if (myContext.IsNull()) {
+            _geometrySnapHighlight.Nullify();
+            _geometrySnapHighlightSource.Nullify();
+            return;
+        }
         try {
             TopoDS_Shape wanted;
             if (_geometryMoveSnap && _geometryMoveSnap->hit.kind != GeometrySnapKind::Vertex) {
                 wanted = _geometryMoveSnap->hit.topology;
             }
             if (!_geometrySnapHighlight.IsNull()) {
-                if (!wanted.IsNull() && _geometrySnapHighlight->Shape().IsSame(wanted)) { return; }
+                if (!wanted.IsNull() && _geometrySnapHighlightSource.IsSame(wanted)) { return; }
                 // Erase before Remove: never leave a stale presentation behind.
                 myContext->Erase(_geometrySnapHighlight, false);
                 myContext->Remove(_geometrySnapHighlight, false);
                 _geometrySnapHighlight.Nullify();
+                _geometrySnapHighlightSource.Nullify();
             }
             if (wanted.IsNull()) { return; }
+            // AIS presentation can populate edge polygon/triangulation caches.
+            // A transient snap must never write those caches into the saved
+            // target, even when the gesture is cancelled. Keep the original
+            // topology only for identity/feedback; draw an independent copy.
+            BRepBuilderAPI_Copy copy(wanted, Standard_True, Standard_True);
+            if (!copy.IsDone() || copy.Shape().IsNull() || copy.Shape().IsPartner(wanted)) { return; }
             // Selection tokens (design system 7.1): white, a chosen edge 3 pt,
             // a chosen face a 20 % wash with its 2 pt edge. Never selectable.
-            Handle(AIS_Shape) highlight = new AIS_Shape(wanted);
+            Handle(AIS_Shape) highlight = new AIS_Shape(copy.Shape());
             highlight->SetColor(Quantity_NOC_WHITE);
             const bool face = wanted.ShapeType() == TopAbs_FACE;
             if (face) {
@@ -2726,8 +2737,10 @@ namespace core3d {
             }
             myContext->Display(highlight, face ? AIS_Shaded : AIS_WireFrame, -1, false);
             _geometrySnapHighlight = highlight;
+            _geometrySnapHighlightSource = wanted;
         } catch (...) {
             _geometrySnapHighlight.Nullify();
+            _geometrySnapHighlightSource.Nullify();
         }
     }
 
