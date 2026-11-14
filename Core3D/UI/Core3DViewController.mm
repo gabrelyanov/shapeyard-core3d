@@ -5088,7 +5088,11 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
     }
 }
 
-namespace core3d { extern std::string g_r179LastSelectRefusal; }
+namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::string g_booleanCaptureLastRefusal; }
+// DEBUG/test readout only (Join/Cut tap trace): input and check of the last refused opening.
+- (NSString *)core3d_lastBooleanCaptureRefusal {
+    return [NSString stringWithUTF8String:core3d::g_booleanCaptureLastRefusal.c_str()] ?: @"";
+}
 // DEBUG/test readout only (Join tap trace): the stage at which the last whole-part select was refused.
 - (NSString *)core3d_lastSelectRefusal {
     return [NSString stringWithUTF8String:core3d::g_r179LastSelectRefusal.c_str()] ?: @"";

@@ -550,7 +550,20 @@ namespace core3d {
     bool showBooleanPairPreview(const std::string& targetEntity,
         const std::string& toolEntity, const TopoDS_Shape& result,
         int operation) noexcept;
-    bool clearBooleanPairPreview() noexcept;
+    //! The plain (baked) Join / Cut / Overlap shown the same way, for parts the
+    //! editable Boolean cannot open (a part with a saved Hole).
+    bool showBakedBooleanPreview(const std::string& targetEntity,
+        const std::string& toolEntity, int operation, std::string& refusal) noexcept;
+    //! Preview of applyBakedBooleanBatch: each kept part shows its result, every
+    //! cutter or joined part is hidden. Nothing in the document changes.
+    bool showBakedBooleanBatchPreview(const std::vector<std::string>& targetEntities,
+        const std::vector<std::string>& toolEntities, int operation, std::string& refusal) noexcept;
+    //! While a Join/Cut preview shows: the kept part whose previewed result is under the
+    //! view pixel (x, y), nearest first, or "" (the App Store Subtract un-pick tap).
+    std::string booleanPreviewTargetAt(double x, double y) noexcept;
+    //! Puts every part back; the part that stays is selected again unless
+    //! `reselectTarget` is false (the App Store Subtract un-pick of the last object).
+    bool clearBooleanPairPreview(bool reselectTarget = true) noexcept;
     bool hasBooleanPairPreview() const noexcept;
     //! Hole through any solid part, in world coordinates and document units:
     //! a cylinder of `radius` from `worldPoint` along `worldDirection`, through
@@ -575,6 +588,11 @@ namespace core3d {
     //! parts: one Undo step, no originals kept. Redraws on success.
     bool applyBakedBoolean(const std::string& targetEntity, const std::string& toolEntity,
         int operation, std::string& refusal) noexcept;
+    //! The same for several parts in ONE Undo step: Cut (1) takes every tool out of
+    //! every target; Join (0) fuses every tool into the one target. Tools are used up.
+    bool applyBakedBooleanBatch(const std::vector<std::string>& targetEntities,
+        const std::vector<std::string>& toolEntities, int operation,
+        std::string& refusal) noexcept;
     bool applyThroughHole(const std::string& entity, const gp_Pnt& worldPoint,
         const gp_Dir& worldDirection, double radius, double depth,
         std::string& refusal) noexcept;
@@ -1190,6 +1208,10 @@ namespace core3d {
             Handle(AIS_Shape) target, tool, preview;
             TDF_Label targetLabel, toolLabel;
             int operation = 0;
+            // Several parts at once: the other kept parts' results, and every other
+            // part hidden while the preview shows (put back on clear).
+            std::vector<Handle(AIS_Shape)> morePreviews, moreParts;
+            std::vector<TDF_Label> moreLabels;
         };
         std::shared_ptr<BooleanPairPreview> _booleanPairPreview;
         std::shared_ptr<OrdinaryEditController> _ordinaryEditController;

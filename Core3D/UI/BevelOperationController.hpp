@@ -164,7 +164,11 @@ private:
     struct Source {
         Handle(AIS_Shape) original;
         TDF_Label label;
+        //! The solid the Bevel is built on.
         TopoDS_Shape shape;
+        //! The part as stored and shown: `shape` itself, or (App Store 5.34.1
+        //! Union/Subtract results) a compound around it. Currency checks use this.
+        TopoDS_Shape stored;
         std::vector<TopoDS_Edge> edges;
         std::vector<Standard_Size> edgeTopologyIndices;
         gp_Trsf transform;

@@ -465,12 +465,39 @@ __attribute__((objc_subclassing_restricted))
     operation:(Core3DPartBooleanOperation)operation
     NS_SWIFT_NAME(showBooleanPairPreview(_:operation:));
 - (BOOL)clearBooleanPairPreview NS_SWIFT_NAME(clearBooleanPairPreview());
+//! The same, leaving nothing selected (the last object to cut was un-picked).
+- (BOOL)clearBooleanPairPreviewLeavingNothingSelected
+    NS_SWIFT_NAME(clearBooleanPairPreviewLeavingNothingSelected());
+//! Preview of the plain Join / Cut / Overlap (as applyBakedBoolean makes it) on
+//! the model, for parts the editable Boolean cannot open (a part with a saved
+//! Hole). Nothing in the document changes; clearBooleanPairPreview puts both back.
+- (BOOL)showBakedBooleanPreviewTarget:(NSString *)target tool:(NSString *)tool
+    operation:(Core3DPartBooleanOperation)operation
+    NS_SWIFT_NAME(showBakedBooleanPreview(target:tool:operation:));
+//! Preview of applyBakedBoolean(targets:tools:) on the model: each kept part shows its
+//! result, the other parts are hidden. Nothing changes; clearBooleanPairPreview puts all back.
+- (BOOL)showBakedBooleanPreviewTargets:(NSArray<NSString *> *)targets
+    tools:(NSArray<NSString *> *)tools
+    operation:(Core3DPartBooleanOperation)operation
+    NS_SWIFT_NAME(showBakedBooleanPreview(targets:tools:operation:));
+//! While a Join/Cut preview shows: the kept part whose result is under the drawable point
+//! (the same point viewWillSelect gets), or nil. Lets a second tap un-pick an object to cut.
+- (nullable NSString *)booleanPreviewEntityAtDrawablePoint:(CGPoint)point
+    NS_SWIFT_NAME(booleanPreviewEntity(atDrawablePoint:));
 //! Join / Cut / Overlap without keeping the originals (one Undo step): used
 //! when the editable Boolean is refused at Apply. `refusal` gets the code.
 - (BOOL)applyBakedBooleanTarget:(NSString *)target tool:(NSString *)tool
     operation:(Core3DPartBooleanOperation)operation
     refusal:(NSString * _Nullable * _Nullable)refusal
     NS_SWIFT_NAME(applyBakedBoolean(target:tool:operation:refusal:));
+//! Several parts in ONE Undo step (App Store Subtract and Union): Subtract takes every
+//! part in `tools` (the cutters) out of every part in `targets`; Union fuses every
+//! tool into the one target. The tools are used up. `refusal` gets the code.
+- (BOOL)applyBakedBooleanTargets:(NSArray<NSString *> *)targets
+    tools:(NSArray<NSString *> *)tools
+    operation:(Core3DPartBooleanOperation)operation
+    refusal:(NSString * _Nullable * _Nullable)refusal
+    NS_SWIFT_NAME(applyBakedBoolean(targets:tools:operation:refusal:));
 //! The centre of face `faceIndex` (scene topology index) of the part and the
 //! direction into the part, world coordinates: [px, py, pz, dx, dy, dz].
 - (nullable NSArray<NSNumber *> *)holeAnchorForEntity:(NSString *)entity
