@@ -12995,18 +12995,22 @@ Standard_Boolean OcctDocument::BuildThroughHole(
             || !std::isfinite(radius) || radius <= 0 || !std::isfinite(depth))
             return Standard_False;
         const auto coverage = RetainedRecipeCoverageForLabel(label);
-        if (coverage == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
-            && core3d::composite_recipe::HasRecord(label)) {
-            core3d::composite_recipe::Record composite;
-            if (!core3d::composite_recipe::Read(myOcafDoc, label, composite)
-                || !composite.value || composite.label.IsNull()
-                || !OriginalsFeature(composite.value->definition)) return Standard_False;
-        } else if (coverage != OcctRetainedRecipeCoverage::Absent
-                   && !CanBakeSavedCutForFaceEdit(label)) {
-            // A part with an earlier saved hole takes a second one: that
-            // saved cut is baked in the same step (as Push-pull does).
+        if (coverage == OcctRetainedRecipeCoverage::InvalidOrUnknown)
             return Standard_False;
+        if (coverage == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage) {
+            if (core3d::composite_recipe::HasRecord(label)) {
+                core3d::composite_recipe::Record composite;
+                if (!core3d::composite_recipe::Read(myOcafDoc, label, composite)
+                    || !composite.value || composite.label.IsNull()
+                    || !OriginalsFeature(composite.value->definition)) return Standard_False;
+            } else if (!CanBakeSavedCutForFaceEdit(label)) {
+                // A part with an earlier saved hole takes a second one: that
+                // saved cut is baked in the same step (as Push-pull does).
+                return Standard_False;
+            }
         }
+        // A current Profile may show this disposable result. Apply remains on
+        // the retained Hole route, so preview never retires its source record.
         // A copy: the stored part (and a Join record Undo brings back) must stay
         // byte-identical; building the hole can touch tolerances.
         const TopoDS_Shape source = DetachedCopy(XCAFDoc_ShapeTool::GetShape(label));
@@ -13090,6 +13094,14 @@ Standard_Boolean OcctDocument::ApplyThroughHole(
     std::string& refusal) noexcept {
     try {
         if (presentation.IsNull()) { refusal = "unsupported-source"; return Standard_False; }
+        // Current Profiles are authored inputs. The editor commits their Hole
+        // through the retained cut session; never let this baked fallback
+        // replace the shape while leaving the Profile record behind.
+        if (RetainedRecipeCoverageForLabel(label)
+                == OcctRetainedRecipeCoverage::CurrentProfile) {
+            refusal = "unsupported-source";
+            return Standard_False;
+        }
         TopoDS_Shape result;
         if (!BuildThroughHole(label, start, direction, radius, depth, result, refusal))
             return Standard_False;
