@@ -107,6 +107,36 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepLProp_SLProps.hxx>
 
+#if DEBUG
+#include <chrono>
+namespace {
+// Read-only diagnostic counters. No scene capture, callback, retained shape,
+// timer, deadline, cancellation or native transaction is introduced here.
+class DebugHistoryCostScope final {
+public:
+    DebugHistoryCostScope(std::array<double, 10>& costs, std::size_t index) noexcept
+        : costs_([NSThread isMainThread] ? &costs : nullptr), index_(index),
+          started_(std::chrono::steady_clock::now()) {}
+    ~DebugHistoryCostScope() noexcept {
+        if (!costs_) return;
+        ++(*costs_)[index_];
+        (*costs_)[index_ + 1] += std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started_).count();
+    }
+    DebugHistoryCostScope(const DebugHistoryCostScope&) = delete;
+    DebugHistoryCostScope& operator=(const DebugHistoryCostScope&) = delete;
+private:
+    std::array<double, 10>* costs_;
+    std::size_t index_;
+    std::chrono::steady_clock::time_point started_;
+};
+}
+std::array<double, 10> core3d::Core3DViewer::debugHistoryCostObservation() const noexcept {
+    if (![NSThread isMainThread]) return {};
+    return _debugHistoryCosts;
+}
+#endif
+
 namespace {
 class RetainedValidationOperationScope final {
 public:
@@ -8991,6 +9021,9 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareProfileSolid(
 std::shared_ptr<NativeSolidWork> Core3DViewer::prepareAssemblySolid(
     const std::vector<AssemblyPartDefinition>& parts, const ObjectFrameIdentity& identity,
     std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept {
+#if DEBUG
+    DebugHistoryCostScope measured(_debugHistoryCosts, 2);
+#endif
     if (![NSThread isMainThread] || parts.empty() || parts.size()>16) return {};
     try {
         auto work = prepareNativeSolidWork(identity,presentationRevision,width,height);
@@ -10316,6 +10349,9 @@ bool Core3DViewer::attachModelingRebuildPermit(const std::shared_ptr<NativeSolid
 }
 
 OrdinaryEditResult Core3DViewer::commitNativeSolid(const std::shared_ptr<NativeSolidWork>& work) noexcept {
+#if DEBUG
+    DebugHistoryCostScope measured(_debugHistoryCosts, 4);
+#endif
     if (![NSThread isMainThread] || !work || work->consumed) CORE3D_CUT_REFUSE("commit.invalid:" CORE3D_CUT_STRINGIFY(__LINE__), OrdinaryEditResult::Invalid);
     const auto cutPayload=std::get_if<std::shared_ptr<CutSolidGeometry>>(&work->geometry);
     if(cutPayload){
@@ -11170,6 +11206,9 @@ bool Core3DViewer::selectSavedGroup(const ObjectFrameIdentity& expected,
 
 OrdinaryEditResult Core3DViewer::publishCreatedPrimitives(
     const std::vector<OrdinaryCreationRequest>& requests, std::shared_ptr<NativeModelingCommitPermit> permit) noexcept {
+#if DEBUG
+    DebugHistoryCostScope measured(_debugHistoryCosts, 6);
+#endif
     if (![NSThread isMainThread] || !canBeginCommittedEdit() || !_ordinaryEditController) {
         return OrdinaryEditResult::Busy;
     }
@@ -11835,7 +11874,12 @@ bool Core3DViewer::repairCreation(const OrdinaryCreationLedger& ledger, bool com
             }
         }
         if (!_objectInteractor->verifyOrdinaryNameAuthority(ledger.authority)) { return false; }
-        myContext->UpdateCurrentViewer();
+        {
+#if DEBUG
+            DebugHistoryCostScope measured(_debugHistoryCosts, 8);
+#endif
+            myContext->UpdateCurrentViewer();
+        }
         return true;
     } catch (...) { return false; }
 }
@@ -14563,6 +14607,9 @@ Core3DViewer::captureSceneSnapshot(
     const std::uint32_t viewportWidth,
     const std::uint32_t viewportHeight,
     scene::SceneSnapshotCaptureFailure* failureOut) noexcept {
+#if DEBUG
+    DebugHistoryCostScope measured(_debugHistoryCosts, 0);
+#endif
     if (failureOut != nullptr) *failureOut = {};
     if ((_nativeOpeningState && _nativeOpeningState->loftRollbackUnproven)
         || hasUnresolvedEdit()) {

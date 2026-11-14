@@ -13889,9 +13889,15 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
         const Handle(OcctDocument) owner = viewer ? viewer->getDocument() : Handle(OcctDocument)();
         if (owner.IsNull() || owner->Document().IsNull()) return @{};
         const auto counts = owner->DebugOrdinaryNamingHistoryStorage();
+        const auto costs = viewer->debugHistoryCostObservation();
         return @{ @"pending": @(counts[0]), @"finalized": @(counts[1]), @"bytes": @(counts[2]),
                   @"document": [NSString stringWithUTF8String:owner->DocumentIdentifier().c_str()],
-                  @"limit": @(owner->Document()->GetUndoLimit()) };
+                  @"limit": @(owner->Document()->GetUndoLimit()),
+                  @"sceneCalls": @(costs[0]), @"sceneSeconds": @(costs[1]),
+                  @"assemblyPrepareCalls": @(costs[2]), @"assemblyPrepareSeconds": @(costs[3]),
+                  @"nativeCommitCalls": @(costs[4]), @"nativeCommitSeconds": @(costs[5]),
+                  @"creationPublishCalls": @(costs[6]), @"creationPublishSeconds": @(costs[7]),
+                  @"creationViewerCalls": @(costs[8]), @"creationViewerSeconds": @(costs[9]) };
     } catch (...) { return @{}; }
 }
 
