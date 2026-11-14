@@ -949,28 +949,28 @@ Core3DDraftFacesNativeSnapshot *DFPublicSnapshot(const DFEditingState& state) {
     if (![opening s4aValidateIssuedCandidate:candidate error:error]) return nil;
     core3d::profile::Record profileRecord;
     const auto native = document->Document();
-    if (!core3d::profile::Read(native, carrier, profileRecord)) {
-        if (error) *error = DFError(Core3DDraftFacesErrorUnavailable,
-                                    @"b4.source-profile-malformed");
-        return nil;
-    }
-    if (profileRecord.label.IsNull()) {
-        if (error) *error = DFError(Core3DDraftFacesErrorUnavailable,
-                                    @"b4.source-profile-unretained");
-        return nil;
-    }
-    if (!profileRecord.IsCurrent(native, carrier)
-        || profileRecord.parameters.metersPerUnit != opening.metersPerUnit
+    if (!core3d::profile::Read(native, carrier, profileRecord)
         || candidate.metersPerUnit != opening.metersPerUnit) {
+        if (error) *error = DFError(Core3DDraftFacesErrorUnavailable,
+                                    @"b4.source-solid-unsupported");
+        return nil;
+    }
+    if (!profileRecord.label.IsNull()
+        && (!profileRecord.IsCurrent(native, carrier)
+            || profileRecord.parameters.metersPerUnit != opening.metersPerUnit)) {
         if (error) *error = DFError(Core3DDraftFacesErrorStale,
                                     @"b4.source-profile-stale");
         return nil;
     }
-    auto capture = dfo::NativeOwner::MintCreateCapture(
-        *document, openingContext, carrier, entity, profileRecord.parameters, width, height);
+    auto capture = profileRecord.label.IsNull()
+        ? dfo::NativeOwner::MintCreateOrdinaryCapture(
+            *document, openingContext, carrier, entity, width, height)
+        : dfo::NativeOwner::MintCreateCapture(
+            *document, openingContext, carrier, entity,
+            profileRecord.parameters, width, height);
     if (!capture) {
-        if (error) *error = DFError(Core3DDraftFacesErrorStale,
-                                    @"b4.create-capture-refused");
+        if (error) *error = DFError(Core3DDraftFacesErrorUnavailable,
+                                    @"b4.source-solid-unsupported");
         return nil;
     }
     Core3DDraftFacesNativeEditingBridge *bridge = [[self alloc] initPrivate];
