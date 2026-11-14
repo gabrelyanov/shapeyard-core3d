@@ -16817,6 +16817,11 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
         && history->_historyDocument->IsModelingPlanHistoryCurrent(history->_historyWitness);
 }
 
+- (BOOL)isModelingPlanHistoryAtTip:(Core3DModelingPlanHistory *)history {
+    return [self core3d_ownsModelingPlanHistory:history]
+        && history->_historyDocument->IsModelingPlanHistoryAtTip(history->_historyWitness);
+}
+
 - (BOOL)acceptModelingPlanHistory:(Core3DModelingPlanHistory *)history committedSteps:(NSInteger)steps {
     return steps >= 0 && steps <= 128 && [self core3d_ownsModelingPlanHistory:history]
         && history->_historyDocument->AcceptModelingPlanHistory(history->_historyWitness,

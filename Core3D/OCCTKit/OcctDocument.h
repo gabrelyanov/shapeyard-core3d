@@ -2476,6 +2476,8 @@ public:
     // known completed steps may extend it; disposal never adopts unseen work.
     std::shared_ptr<OcctModelingPlanHistory> CaptureModelingPlanHistory() noexcept;
     bool IsModelingPlanHistoryCurrent(const std::shared_ptr<OcctModelingPlanHistory>&) const noexcept;
+    // Read-only gate before a plan step: an ordinary commit would destroy Redo.
+    bool IsModelingPlanHistoryAtTip(const std::shared_ptr<OcctModelingPlanHistory>&) const noexcept;
     bool AcceptModelingPlanHistory(const std::shared_ptr<OcctModelingPlanHistory>&,
                                   Standard_Integer committedSteps) noexcept;
     bool DiscardModelingPlanHistory(const std::shared_ptr<OcctModelingPlanHistory>&,
