@@ -1792,6 +1792,35 @@ namespace core3d {
 		}
 	}
 
+	Standard_Boolean ShapeInteractor::extrusionPreviewExtents(
+		Standard_Real& x, Standard_Real& y, Standard_Real& z) const noexcept {
+		x = y = z = 0.0;
+		try {
+			OCC_CATCH_SIGNALS
+			if (!_extrusion.IsReady() || !_extrusion.ownsCommand
+				|| _extrusion.candidatePresentation.IsNull()
+				|| _extrusion.candidatePresentation->Shape().IsNull()) {
+				return Standard_False;
+			}
+			Bnd_Box bounds;
+			BRepBndLib::AddOptimal(_extrusion.candidatePresentation->Shape(),
+				bounds, Standard_False, Standard_False);
+			if (bounds.IsVoid()) { return Standard_False; }
+			Standard_Real minX = 0, minY = 0, minZ = 0, maxX = 0, maxY = 0, maxZ = 0;
+			bounds.Get(minX, minY, minZ, maxX, maxY, maxZ);
+			const Standard_Real dx = maxX - minX, dy = maxY - minY, dz = maxZ - minZ;
+			if (!std::isfinite(dx) || !std::isfinite(dy) || !std::isfinite(dz)
+				|| dx < 0 || dy < 0 || dz < 0) {
+				return Standard_False;
+			}
+			x = dx; y = dy; z = dz;
+			return Standard_True;
+		} catch (...) {
+			x = y = z = 0.0;
+			return Standard_False;
+		}
+	}
+
 	Standard_Boolean ShapeInteractor::canApplyExtrusion() const noexcept {
 		try {
 			const Handle(TDocStd_Document) document = myDoc.IsNull()

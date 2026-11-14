@@ -701,6 +701,14 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     return [GLController getExtrusionMetersPerUnit];
 }
 
+- (NSArray<NSNumber *> *_Nullable)extrusionPreviewSizeMeters {
+    if (![NSThread isMainThread] || GLController == nil
+        || _currentGizmoType != PrimitiveGizmoTypeExtrude) {
+        return nil;
+    }
+    return [GLController extrusionPreviewSizeMeters];
+}
+
 - (Boundaries)getExtrusionBoundaries {
     return {.min = -1.0, .max = 1.0};
 }

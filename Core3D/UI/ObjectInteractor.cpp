@@ -3235,6 +3235,29 @@ namespace core3d {
         return !_manipulator.IsNull() && _manipulator->IsAttached();
     }
 
+    bool ObjectInteractor::liveGestureOffset(double& x, double& y, double& z) const noexcept {
+        x = y = z = 0.0;
+        try {
+            if (!_manipulatorGestureActive || _manipulator.IsNull()
+                || !_manipulator->HasActiveTransformation()) { return false; }
+            const Handle(Core3DManipulatorObjectSequence) objects = _manipulator->Objects();
+            if (objects.IsNull() || objects->IsEmpty()) { return false; }
+            const Handle(AIS_InteractiveObject)& first = objects->Value(objects->Lower());
+            if (first.IsNull()) { return false; }
+            const gp_XYZ current = first->LocalTransformation().TranslationPart();
+            const gp_XYZ initial = _manipulator->StartTransformation(objects->Lower())
+                .TranslationPart();
+            const gp_XYZ offset = current - initial;
+            if (!std::isfinite(offset.X()) || !std::isfinite(offset.Y())
+                || !std::isfinite(offset.Z())) { return false; }
+            x = offset.X(); y = offset.Y(); z = offset.Z();
+            return true;
+        } catch (...) {
+            x = y = z = 0.0;
+            return false;
+        }
+    }
+
     const bool ObjectInteractor::isManipulatorGestureActive() const {
         return _manipulatorGestureActive;
     }
