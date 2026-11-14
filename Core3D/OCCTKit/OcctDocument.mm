@@ -9022,8 +9022,13 @@ core3d::authority::ReplacementEnd OcctDocument::EndNativeReplacement(
     try {
         if (myOcafDoc.IsNull() || myOcafDoc->Application().get() != myApp.get()
             || DocumentIdentifier().empty()) return ReplacementEnd::Unavailable;
-        return myNativeAuthority->EndReplacement(reservation, myOcafDoc.get(), accepted,
+        const auto result = myNativeAuthority->EndReplacement(reservation, myOcafDoc.get(), accepted,
             restored, myOcafDoc->HasOpenCommand());
+        // Candidate assignment is provisional until authority accepts it.
+        // Preserve the old records on rollback; retire them only after the
+        // replacement really owns the document, even if its saved UUID matches.
+        if (result == ReplacementEnd::Adopted) PruneOrdinaryNamingHistory();
+        return result;
     } catch (...) { return ReplacementEnd::Unavailable; }
 }
 
@@ -28654,6 +28659,8 @@ namespace core3d::ordinary_naming {
 struct Side {
     std::vector<treatment_history::NamingState> naming;
     std::vector<std::uint8_t> source, treatment;
+    std::string profileIdentifier;
+    TDF_Label profileLabel;
     TopoDS_Shape shape;
     bool hasTreatment = false;
 };
@@ -28683,6 +28690,8 @@ bool CaptureOrdinaryNamingSide(const Handle(TDocStd_Document)& doc,
         if (label.IsNull() || label.Data() != doc->GetData()
             || !core3d::profile::Read(doc, label, profile)
             || profile.label.IsNull() || !profile.IsCurrent(doc, label)) return false;
+        side.profileIdentifier = profile.identifier;
+        side.profileLabel = profile.label;
         side.shape = XCAFDoc_ShapeTool::GetShape(label);
         return !side.shape.IsNull() && CaptureTreatmentCompanionSide(doc, label,
             side.naming, side.source, side.hasTreatment, side.treatment);
@@ -28713,6 +28722,8 @@ bool OrdinaryNamingSideMatches(const Handle(TDocStd_Document)& doc,
     return CaptureOrdinaryNamingSide(doc, root, actual)
         && TreatmentHistorySameShape(expected.shape, actual.shape)
         && SameTreatmentNamingSet(expected.naming, actual.naming, versions)
+        && expected.profileIdentifier == actual.profileIdentifier
+        && expected.profileLabel == actual.profileLabel
         && expected.source == actual.source && expected.hasTreatment == actual.hasTreatment
         && expected.treatment == actual.treatment;
 }
@@ -28722,6 +28733,7 @@ std::size_t OrdinaryNamingStorage(const ordinary_naming::Record& record) noexcep
     for (const auto& root : record.roots) {
         for (const auto* side : {&root.before, &root.after}) {
             bytes += side->source.capacity() + side->treatment.capacity()
+                + side->profileIdentifier.capacity() + 1
                 + side->naming.capacity() * sizeof(treatment_history::NamingState);
             for (const auto& naming : side->naming)
                 bytes += naming.labelEntry.capacity() + 1
@@ -28760,13 +28772,38 @@ bool RestoreOrdinaryNamingSide(const Handle(TDocStd_Document)& doc,
 }
 }
 
+#if DEBUG
+std::array<std::size_t, 3> OcctDocument::DebugOrdinaryNamingHistoryStorage() const noexcept {
+    std::array<std::size_t, 3> result{};
+    for (const auto& record : myOrdinaryNamingHistory) {
+        ++result[record->finalized ? 1 : 0];
+        result[2] += OrdinaryNamingStorage(*record);
+    }
+    return result;
+}
+#endif
+
 void OcctDocument::PruneOrdinaryNamingHistory() noexcept {
+    if (myOrdinaryNamingHistory.empty()) return;
     try {
         if (myOcafDoc.IsNull()) { myOrdinaryNamingHistory.clear(); return; }
+        // The supported ordinary window is 1000. Take one bounded, stack-only
+        // identity census instead of rescanning both lists for every record.
+        // If a foreign caller enlarged the window, retain evidence rather
+        // than truncate the census and accidentally drop a live record.
+        std::array<const TDF_Delta*, kNativeSessionUndoLimit> deltas{};
+        std::size_t count = 0;
+        for (const auto* list : {&myOcafDoc->GetUndos(), &myOcafDoc->GetRedos()}) {
+            for (const auto& delta : *list) {
+                if (delta.IsNull() || count == deltas.size()) return;
+                deltas[count++] = delta.get();
+            }
+        }
+        const auto end = deltas.begin() + count;
+        const std::less<const TDF_Delta*> less;
+        std::sort(deltas.begin(), end, less);
         const auto live = [&](const Handle(TDF_Delta)& delta) {
-            for (const auto& item : myOcafDoc->GetUndos()) if (item == delta) return true;
-            for (const auto& item : myOcafDoc->GetRedos()) if (item == delta) return true;
-            return false;
+            return !delta.IsNull() && std::binary_search(deltas.begin(), end, delta.get(), less);
         };
         for (auto it = myOrdinaryNamingHistory.begin(); it != myOrdinaryNamingHistory.end();) {
             const auto& record = *it;

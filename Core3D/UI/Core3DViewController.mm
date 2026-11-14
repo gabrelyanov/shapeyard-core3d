@@ -13881,6 +13881,32 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
 
 // DEBUG-only read observation after the native failing-first baseline.
 // No entity resolver: Undo intentionally removes a creation from free roots.
+- (NSDictionary<NSString *, id> *)debugOrdinaryNamingHistoryState {
+    if (![NSThread isMainThread]) return @{};
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class] ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) owner = viewer ? viewer->getDocument() : Handle(OcctDocument)();
+        if (owner.IsNull() || owner->Document().IsNull()) return @{};
+        const auto counts = owner->DebugOrdinaryNamingHistoryStorage();
+        return @{ @"pending": @(counts[0]), @"finalized": @(counts[1]), @"bytes": @(counts[2]),
+                  @"document": [NSString stringWithUTF8String:owner->DocumentIdentifier().c_str()],
+                  @"limit": @(owner->Document()->GetUndoLimit()) };
+    } catch (...) { return @{}; }
+}
+
+- (BOOL)debugSetOrdinaryNamingHistoryUndoLimit:(NSInteger)limit {
+    if (![NSThread isMainThread] || limit < 1 || limit > 1000 || [self hasUnresolvedOrdinaryEdit]) return NO;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class] ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) owner = viewer ? viewer->getDocument() : Handle(OcctDocument)();
+        if (owner.IsNull() || owner->Document().IsNull() || owner->Document()->HasOpenCommand()) return NO;
+        owner->Document()->SetUndoLimit(static_cast<Standard_Integer>(limit));
+        return owner->Document()->GetUndoLimit() == limit;
+    } catch (...) { return NO; }
+}
+
 - (NSDictionary<NSString *, id> *_Nullable)debugObserveNamingSubtreeAtLabelEntry:(NSString *)entry {
     if (![NSThread isMainThread] || ![entry isKindOfClass:NSString.class]
         || entry.length == 0 || entry.length > 256) return nil;

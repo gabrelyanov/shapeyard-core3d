@@ -2303,6 +2303,9 @@ __attribute__((objc_subclassing_restricted))
 - (NSDictionary<NSString *, id> *_Nullable)debugSplineSnapTargetMetrics:(NSString *)entity;
 //! Read-only current-label and history-delta observation, including forgotten attributes.
 //! A nil result means unavailable, never absent. Does not resolve or create an entity.
+- (NSDictionary<NSString *, id> *)debugOrdinaryNamingHistoryState;
+//! Test-only shorter native Undo window; ordinary production limits are untouched.
+- (BOOL)debugSetOrdinaryNamingHistoryUndoLimit:(NSInteger)limit;
 - (NSDictionary<NSString *, id> *_Nullable)debugObserveNamingSubtreeAtLabelEntry:(NSString *)entry
     NS_SWIFT_NAME(debugObserveNamingSubtree(labelEntry:));
 //! Detached geometry query fixture; does not create or edit a document.

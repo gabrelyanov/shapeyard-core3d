@@ -2021,6 +2021,9 @@ public:
 
     // Native-only measured naming history for profile creation and Shell.
     // The issuing controller owns the pending token through reconciliation.
+#if DEBUG
+    std::array<std::size_t, 3> DebugOrdinaryNamingHistoryStorage() const noexcept;
+#endif
     std::shared_ptr<core3d::ordinary_naming::Record> PrepareOrdinaryNamingHistory(
         std::size_t creationRootCount, const TDF_Label& existingOwner = {}) noexcept;
     Standard_Boolean TrackOrdinaryNamingCreationRoot(
