@@ -17884,6 +17884,15 @@ Standard_Integer OcctDocument::DebugCorruptCopySourceFaceProvenance(
 }
 #endif
 
+// A part saved before representation markers existed (App Store 5.34.1 and
+// earlier) reads LegacyUnknown; CopyGeometryRepresentation writes BRep on its
+// copy. Compare the two as the same kind, or every copy of an old part fails.
+static OcctGeometryRepresentation AsCopiedGeometryRepresentation(
+    const OcctGeometryRepresentation representation) noexcept {
+    return representation == OcctGeometryRepresentation::LegacyUnknown
+        ? OcctGeometryRepresentation::BRep : representation;
+}
+
 Standard_Boolean OcctDocument::CopyGeometryOwnedMeshMetadata(
     const TDF_Label& source, const TDF_Label& destination) {
     if (![NSThread isMainThread]) return Standard_False;
@@ -17893,7 +17902,8 @@ Standard_Boolean OcctDocument::CopyGeometryOwnedMeshMetadata(
         OcctObjectTransformState before, target;
         if (!CaptureObjectTransformStateForLabel(source, before)
             || !CaptureObjectTransformStateForLabel(destination, target)
-            || before.resolvedRepresentation != target.resolvedRepresentation) return Standard_False;
+            || AsCopiedGeometryRepresentation(before.resolvedRepresentation)
+                != AsCopiedGeometryRepresentation(target.resolvedRepresentation)) return Standard_False;
         OcctAuthoredFrameRecord frame, previousFrame;
         if (Core3DReadAuthoredFrameOwner(myOcafDoc, source, frame) == OcctAuthoredFrameReadState::Invalid
             || Core3DReadAuthoredFrameOwner(myOcafDoc, destination, previousFrame) == OcctAuthoredFrameReadState::Invalid)
