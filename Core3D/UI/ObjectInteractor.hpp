@@ -167,6 +167,7 @@ namespace core3d {
         //! Editor (job 3b): the snapped edge or face shown in the selection
         //! style while a drag holds the snap; corners have no highlight yet.
         Handle(AIS_Shape) _geometrySnapHighlight;
+        TopoDS_Shape _geometrySnapHighlightSource;
         void syncGeometrySnapHighlight() noexcept;
         std::function<void(bool)> _geometrySnapFeedbackChangedCallback;
         bool _geometrySnapSamplesActive = false;
