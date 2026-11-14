@@ -21,6 +21,8 @@
 #include <TNaming_NamedShape.hxx>
 #include <TNaming_Iterator.hxx>
 #include <BRepTools.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <BinTools_ShapeReader.hxx>
@@ -12924,6 +12926,38 @@ TopoDS_Shape SingleSolidOf(TopoDS_Shape shape) noexcept {
     } catch (...) { return TopoDS_Shape(); }
 }
 
+// A point inside a face (not on its border), for matching faces after a Boolean.
+bool InteriorPointOfFace(const TopoDS_Face& face, gp_Pnt& point) noexcept {
+    try {
+        Standard_Real u0, u1, v0, v1;
+        BRepTools::UVBounds(face, u0, u1, v0, v1);
+        const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+        if (surface.IsNull()) return false;
+        for (int i = 1; i <= 7; ++i)
+            for (int j = 1; j <= 7; ++j) {
+                const gp_Pnt2d uv(u0 + (u1 - u0) * (i / 8.0 + (i % 2) * 0.011),
+                                  v0 + (v1 - v0) * (j / 8.0 + (j % 2) * 0.013));
+                BRepClass_FaceClassifier inside(face, uv, Precision::Confusion());
+                if (inside.State() == TopAbs_IN) { point = surface->Value(uv.X(), uv.Y()); return true; }
+            }
+        return false;
+    } catch (...) { return false; }
+}
+
+// Whether `point` lies on `face` (on its surface and inside its border).
+bool PointOnFace(const gp_Pnt& point, const TopoDS_Face& face, double tolerance) noexcept {
+    try {
+        const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+        if (surface.IsNull()) return false;
+        GeomAPI_ProjectPointOnSurf projection(point, surface);
+        if (!projection.IsDone() || projection.NbPoints() == 0
+            || projection.LowerDistance() > tolerance) return false;
+        Standard_Real u = 0, v = 0; projection.LowerDistanceParameters(u, v);
+        BRepClass_FaceClassifier inside(face, gp_Pnt2d(u, v), tolerance);
+        return inside.State() == TopAbs_IN || inside.State() == TopAbs_ON;
+    } catch (...) { return false; }
+}
+
 // Join / Cut / Overlap of one part with one or more tools, in the part's own
 // frame: Cut takes every tool away, Join fuses every tool in; Overlap takes one.
 bool BakedBooleanShapeOfMany(const TopoDS_Shape& targetStored, const gp_Trsf& targetPlacement,
@@ -13089,6 +13123,11 @@ Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
                                     presentation->LocalTransformation());
         // Each kept part: its result and its new presentation.
         std::vector<std::pair<TopoDS_Shape, Handle(AIS_Shape)>> made;
+        // Colours put on single faces (founder test 14 Nov, build 8545: lost by Subtract): each
+        // result face that lies on a coloured face keeps that colour, in the same command.
+        struct ColouredFace { TopoDS_Face face; XCAFDoc_VisMaterialPBR material; };
+        std::vector<std::vector<ColouredFace>> coloured(targets.size());
+        std::vector<std::vector<TDF_Label>> oldFaceLabels(targets.size());
         for (const auto& [target, targetPresentation] : targets) {
             TopoDS_Shape result;
             if (!BakedBooleanShapeOfMany(XCAFDoc_ShapeTool::GetShape(target),
@@ -13115,7 +13154,58 @@ Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
             Handle(AIS_Shape) shown = new AIS_Shape(result);
             shown->SetLocalTransformation(placement);
             made.emplace_back(result, shown);
+            const std::size_t at = made.size() - 1;
+            TDF_LabelSequence subs; XCAFDoc_ShapeTool::GetSubShapes(target, subs);
+            for (int i = 1; i <= subs.Length(); ++i) {
+                const TopoDS_Shape face = XCAFDoc_ShapeTool::GetShape(subs.Value(i));
+                oldFaceLabels[at].push_back(subs.Value(i));
+                XCAFDoc_VisMaterialPBR material;
+                if (face.IsNull() || face.ShapeType() != TopAbs_FACE
+                    || !TryPBRMaterialForLabel(subs.Value(i), material)) continue;
+                TopoDS_Shape placed = face;
+                if (std::abs(scale - 1.0) > 1.0e-12) {
+                    gp_Trsf sizeUp; sizeUp.SetScale(gp_Pnt(0, 0, 0), scale);
+                    placed = BRepBuilderAPI_Transform(face, sizeUp, Standard_True).Shape();
+                }
+                if (!placed.IsNull() && placed.ShapeType() == TopAbs_FACE)
+                    coloured[at].push_back({TopoDS::Face(placed), material});
+            }
         }
+        const auto carryFaceColours = [this](const TDF_Label& target, const TopoDS_Shape& result,
+                const std::vector<TDF_Label>& oldLabels,
+                const std::vector<ColouredFace>& faces) -> bool {
+            const Handle(XCAFDoc_VisMaterialTool) materials =
+                XCAFDoc_DocumentTool::VisMaterialTool(myOcafDoc->Main());
+            const Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+            if (materials.IsNull() || shapes.IsNull()) return false;
+            // The old faces are gone: their labels would point at nothing (and fail the save check).
+            for (const TDF_Label& old : oldLabels) {
+                materials->UnSetShapeMaterial(old);
+                old.ForgetAllAttributes(Standard_True);
+            }
+            if (faces.empty()) return true;
+            Bnd_Box box; BRepBndLib::Add(result, box);
+            const double tolerance = box.IsVoid() ? 1.0e-6 : 1.0e-5 * std::sqrt(box.SquareExtent());
+            const Handle(TDF_TagSource) tags = TDF_TagSource::Set(target);
+            Standard_Integer highWater = std::max(12, tags->Get());
+            for (TDF_ChildIterator child(target, Standard_False); child.More(); child.Next())
+                highWater = std::max(highWater, child.Value().Tag());
+            tags->Set(highWater);
+            std::vector<OcctPBRMaterialUpdate> updates;
+            for (TopExp_Explorer face(result, TopAbs_FACE); face.More(); face.Next()) {
+                gp_Pnt point;
+                if (!InteriorPointOfFace(TopoDS::Face(face.Current()), point)) continue;
+                for (const ColouredFace& coloured : faces) {
+                    if (!PointOnFace(point, coloured.face, tolerance)) continue;
+                    if (!shapes->IsSubShape(target, face.Current())) return false;
+                    const TDF_Label label = shapes->AddSubShape(target, face.Current());
+                    if (label.IsNull()) return false;
+                    updates.push_back({label, coloured.material, Handle(Image_Texture)(), Handle(Image_Texture)()});
+                    break;
+                }
+            }
+            return updates.empty() || SaveObjectPBRMaterials(updates);
+        };
         refusal = "stale-source";
         myOcafDoc->NewCommand();
         if (!myOcafDoc->HasOpenCommand()) return Standard_False;
@@ -13134,7 +13224,9 @@ Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
             ForgetInspectorPrimitiveRecord(target);
             if (!ReplaceShape(target, made[index].second)
                 || !XCAFDoc_ShapeTool::GetShape(target).IsEqual(made[index].first)
-                || !SetObjectNameForLabel(target, name)) {
+                || !SetObjectNameForLabel(target, name)
+                || !carryFaceColours(target, made[index].first,
+                       oldFaceLabels[index], coloured[index])) {
                 myOcafDoc->AbortCommand();
                 return Standard_False;
             }
