@@ -13464,6 +13464,38 @@ OcctDocument::DebugArmBooleanPairRecoveryCensusFailure(
 }
 #endif
 
+namespace {
+// The TShape Checked bit of every distinct sub-shape of a stored shape, put back when
+// this object goes out of scope (also on early exits). Shaded publication clears the
+// bit while adding triangulation; the persisted BRep stream includes it.
+class StoredShapeCacheBits final {
+public:
+    explicit StoredShapeCacheBits(const TopoDS_Shape& shape) noexcept {
+        try {
+            if (shape.IsNull()) return;
+            TopTools_IndexedMapOfShape all;
+            TopExp::MapShapes(shape, all);
+            constexpr int maximumShapes = 200000;
+            if (all.Extent() > maximumShapes) return;
+            bits_.reserve(std::size_t(all.Extent()) + 1);
+            bits_.emplace_back(shape.TShape(), shape.TShape()->Checked());
+            for (int i = 1; i <= all.Extent(); ++i) {
+                const Handle(TopoDS_TShape)& tshape = all(i).TShape();
+                if (!tshape.IsNull()) bits_.emplace_back(tshape, tshape->Checked());
+            }
+        } catch (...) { bits_.clear(); }
+    }
+    ~StoredShapeCacheBits() {
+        for (auto& entry : bits_)
+            if (!entry.first.IsNull()) entry.first->Checked(entry.second);
+    }
+    StoredShapeCacheBits(const StoredShapeCacheBits&) = delete;
+    StoredShapeCacheBits& operator=(const StoredShapeCacheBits&) = delete;
+private:
+    std::vector<std::pair<Handle(TopoDS_TShape), Standard_Boolean>> bits_;
+};
+} // namespace
+
 core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
     const std::shared_ptr<const core3d::authored_parameter::PairPrepared>& prepared,
     std::uint32_t viewportWidth, std::uint32_t viewportHeight) noexcept {
@@ -13795,6 +13827,12 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
             || !pb::owner::ValidateOriginalsRecord(myOcafDoc, committed)) {
             return unknown(0);
         }
+        // Drawing the new part (shaded publication adds triangulation) clears the
+        // TShape Checked cache bit on its faces. That bit is part of the exact stored
+        // stream that the originals proof compares with its replay, so keep the
+        // values the replay produced (as redrawDocument does); otherwise the part can
+        // no longer be saved or exported (ai lane 13 Nov: Join/Cut of drawn profiles).
+        const StoredShapeCacheBits keepCacheBits(XCAFDoc_ShapeTool::GetShape(capture.sources[0].label));
         core3d::native_opening::CommittedEditPublication publication;
         publication.replaced.push_back({capture.sources[0].entityIdentifier,
                                         previousTarget});
@@ -14071,6 +14109,8 @@ Standard_Integer OcctDocument::DebugAppendBooleanOriginalsSuffix(
             || readback.value->bytes != payload->bytes
             || !pb::owner::ValidateOriginalsRecord(myOcafDoc, readback))
             throw Standard_Failure("suffix readback");
+        // Keep the replay's cache bits through the drawing below (see StoredShapeCacheBits).
+        const StoredShapeCacheBits keepCacheBits(XCAFDoc_ShapeTool::GetShape(owner));
         core3d::native_opening::CommittedEditPublication publication;
         publication.replaced.push_back({capture.capture->state_->entityIdentifier, record.current});
         phase = 9;
@@ -15206,6 +15246,8 @@ OcctDocument::ApplyBooleanOriginalsEdit(
             sealed.resultBytes.assign(expectedResult.begin(), expectedResult.end());
             if (!OriginalsCurrent(*this, sealed, committed)) return unknown();
         }
+        // Keep the replay's cache bits through the drawing below (see StoredShapeCacheBits).
+        const StoredShapeCacheBits keepCacheBits(XCAFDoc_ShapeTool::GetShape(capture.label));
         core3d::native_opening::CommittedEditPublication publication;
         publication.replaced.push_back({capture.entityIdentifier, previous});
 #if DEBUG
