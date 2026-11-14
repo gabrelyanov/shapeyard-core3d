@@ -100,6 +100,12 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSInteger)numberOfDetectedEdges;
 
 - (void)setChamfer:(CGFloat)value;
+- (BOOL)canBeginRound;
+- (BOOL)beginRound;
+- (BOOL)setRoundRadius:(CGFloat)radius;
+- (double)roundMetersPerUnit;
+- (double)roundMaximumRadiusMM;
+- (Core3DRoundFailureObservation)roundFailureObservation;
 - (BOOL)applyChamfer;
 - (BOOL)cancelChamfer;
 - (BOOL)canApplyChamfer;

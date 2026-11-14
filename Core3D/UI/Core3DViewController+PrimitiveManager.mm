@@ -649,6 +649,64 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
     [self sendNotifyUIState:UIStateChangingApply];
 }
 
+- (BOOL)roundAdmission {
+    return [self canBeginRound];
+}
+
+- (BOOL)canBeginRound {
+    return NSThread.isMainThread && GLController != nil
+        && _currentSelectionType == PrimitiveSelectionTypeEdge
+        && [GLController getSelectionType] == PrimitiveSelectionTypeEdge
+        && [GLController canBeginRound];
+}
+
+- (BOOL)beginRound {
+    if (![self canBeginRound] || ![GLController beginRound]) {
+        return NO;
+    }
+    _currentGizmoType = [GLController getGizmoType];
+    if (_currentGizmoType != PrimitiveGizmoTypeChamfer
+        || ![GLController hasActiveBevel]) {
+        (void)[GLController cancelChamfer];
+        _currentGizmoType = [GLController getGizmoType];
+        return NO;
+    }
+    self.can_apply = NO;
+    [self viewDidChangeViewportPresentationState];
+    [self sendNotifyUIState:UIStateChangingSelection
+                            | UIStateChangingGizmo
+                            | UIStateChangingApply];
+    return YES;
+}
+
+- (BOOL)setRoundRadius:(CGFloat)radius {
+    if (![NSThread isMainThread] || GLController == nil
+        || _currentGizmoType != PrimitiveGizmoTypeChamfer) return NO;
+    const BOOL didSet = [GLController setRoundRadius:radius];
+    self.can_apply = [GLController canApplyChamfer];
+    [self viewDidChangeViewportPresentationState];
+    [self sendNotifyUIState:UIStateChangingApply];
+    return didSet;
+}
+
+- (double)roundMetersPerUnit {
+    return [NSThread isMainThread] && GLController != nil
+        ? [GLController roundMetersPerUnit] : 0.0;
+}
+
+- (double)roundMaximumRadiusMM {
+    return [NSThread isMainThread] && GLController != nil
+        ? [GLController roundMaximumRadiusMM] : 0.0;
+}
+
+- (Core3DRoundFailureObservation)roundFailureObservation {
+    if (![NSThread isMainThread] || GLController == nil
+        || _currentGizmoType != PrimitiveGizmoTypeChamfer) {
+        return {0, Core3DRoundFailureKindNone};
+    }
+    return [GLController roundFailureObservation];
+}
+
 - (Boundaries)getChamferBoundaries {
     const double metersPerUnit =
         [self core3d_visibleRawR2BevelMetersPerUnit];

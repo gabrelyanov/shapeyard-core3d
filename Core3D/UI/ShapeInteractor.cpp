@@ -2689,6 +2689,55 @@ namespace core3d {
 			&& _bevelController->canBegin(aSelection);
 	}
 
+	Standard_Boolean ShapeInteractor::canBeginRoundSelection() const noexcept {
+		if (_bevelController == nullptr) {
+			return Standard_False;
+		}
+		std::vector<BevelSourceSelection> aSelection;
+		return tryCaptureBevelSelection(aSelection)
+			&& aSelection.size() == 1
+			&& _bevelController->canBeginRound(aSelection);
+	}
+
+	Standard_Boolean
+	ShapeInteractor::beginRoundSelectionFromCurrentSelection() noexcept {
+		if (_bevelController == nullptr) {
+			return Standard_False;
+		}
+		std::vector<BevelSourceSelection> aSelection;
+		if (!tryCaptureBevelSelection(aSelection)
+			|| aSelection.size() != 1
+			|| !_bevelController->beginRound(aSelection)) {
+			return Standard_False;
+		}
+		_detectedEdges.clear();
+		_detectedEdges.resize(1);
+		return Standard_True;
+	}
+
+	Standard_Boolean ShapeInteractor::setRoundRadiusForSelection(
+		const Standard_Real radius) noexcept {
+		return _bevelController != nullptr
+			&& _bevelController->setRoundRadius(radius);
+	}
+
+	Standard_Real ShapeInteractor::roundMetersPerUnit() const noexcept {
+		return _bevelController == nullptr
+			? 0.0 : _bevelController->roundMetersPerUnit();
+	}
+
+	Standard_Real ShapeInteractor::roundMaximumRadiusMM() const noexcept {
+		return _bevelController == nullptr
+			? 0.0 : _bevelController->roundMaximumRadiusMM();
+	}
+
+	BevelFailureObservation
+	ShapeInteractor::roundFailureObservation() const noexcept {
+		return _bevelController == nullptr
+			? BevelFailureObservation{}
+			: _bevelController->failureObservation();
+	}
+
 	Standard_Boolean
 	ShapeInteractor::beginBevelSelectionFromCurrentSelection() noexcept {
 		if (_bevelController == nullptr) {

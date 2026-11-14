@@ -270,6 +270,7 @@ struct RecoverySnapshot final {
     TDF_Label carrier;
     std::shared_ptr<native_opening::Context> context;
     std::vector<double> baselineProfileValues;
+    std::vector<std::uint8_t> baselineRetainedCutBytes;
     std::vector<std::uint8_t> baselineGraphBytes, baselineShapeBytes;
     std::vector<std::uint8_t> expectedGraphBytes, expectedShapeBytes;
 };
@@ -293,7 +294,10 @@ class Capture final {
     // Create-only: declared retained source proven against the actual shape.
     profile::Parameters sourceProfile;
     cr::SourceRecipe sourceRecipe{};
-    std::vector<std::uint8_t> sourceBytes;
+    retained_recipe::UUID sourceFeature{};
+    bool preservesSourceFeature = false;
+    TDF_Label retainedRecipeLabel;
+    std::vector<std::uint8_t> sourceBytes, currentBytes;
     // Edit-only: the exact committed record read back at mint time.
     cr::Record record;
     std::size_t sourceIndex = 0, featureIndex = 0;
@@ -355,6 +359,156 @@ public:
             capture->forEdit = false;
             capture->sourceProfile = sourceProfile;
             capture->sourceBytes = std::move(sourceBytes);
+            capture->currentBytes = capture->sourceBytes;
+            return capture;
+        } catch (...) { return nullptr; }
+    }
+
+    //! Create-capture authority for an ordinary app-created solid such as a
+    //! Box. The shared ordinary-input gate proves that the current free BRep
+    //! can be promoted on its first successful mutation; Draft then retains
+    //! that exact source as a frozen SYOS node instead of inventing a Profile.
+    static std::shared_ptr<const Capture> MintCreateOrdinaryCapture(
+        OcctDocument& owner, const std::shared_ptr<native_opening::Context>& context,
+        const TDF_Label& carrier, const std::string& entityIdentifier,
+        std::uint32_t viewportWidth, std::uint32_t viewportHeight) noexcept {
+        try {
+            if (pthread_main_np() == 0 || !context || carrier.IsNull()
+                || entityIdentifier.empty()) return nullptr;
+            const auto native = owner.Document();
+            if (native.IsNull() || native->GetData().IsNull() || native->HasOpenCommand()
+                || context->openingFence().document() != native
+                || context->openingFence().data() != native->GetData()
+                || !context->isCurrent(viewportWidth, viewportHeight)
+                || !XCAFDoc_ShapeTool::IsFree(carrier)
+                || !XCAFDoc_ShapeTool::IsSimpleShape(carrier)
+                || carrier.Data() != native->GetData()
+                || owner.EntityIdentifierForLabel(carrier) != entityIdentifier
+                || cr::HasRecord(carrier)) return nullptr;
+            const auto admitted = owner.CaptureToolInput(
+                carrier, core3d::ordinary_input::Purpose::SolidModel);
+            if (!admitted.ready() || !admitted.snapshot || !admitted.promotion
+                || admitted.snapshot->representation()
+                    != core3d::ordinary_input::Representation::BRepSolid
+                || admitted.snapshot->history()
+                    != core3d::ordinary_input::History::Absent
+                || admitted.snapshot->entityIdentifier() != entityIdentifier)
+                return nullptr;
+            const double unit = context->openingFence().metersPerUnit();
+            if (!std::isfinite(unit) || unit <= 0 || unit > 1
+                || admitted.snapshot->metersPerUnit() != unit) return nullptr;
+            const TopoDS_Shape source = XCAFDoc_ShapeTool::GetShape(carrier);
+            std::vector<std::uint8_t> sourceBytes;
+            if (source.IsNull() || source.ShapeType() != TopAbs_SOLID
+                || source.Orientation() != TopAbs_FORWARD
+                || !draft_faces::detail::exactShapeBytes(source, sourceBytes))
+                return nullptr;
+            cr::OrdinarySourceRecipe ordinary;
+            ordinary.shape = cr::SourceShapeKind::Solid;
+            switch (admitted.snapshot->origin()) {
+            case core3d::ordinary_input::Origin::AddPrimitive:
+                ordinary.origin = cr::OrdinarySourceOrigin::AddPrimitive; break;
+            case core3d::ordinary_input::Origin::Import:
+                ordinary.origin = cr::OrdinarySourceOrigin::Import; break;
+            case core3d::ordinary_input::Origin::Duplicate:
+                ordinary.origin = cr::OrdinarySourceOrigin::Duplicate; break;
+            case core3d::ordinary_input::Origin::RetainedFeature:
+                ordinary.origin = cr::OrdinarySourceOrigin::RetainedFeature; break;
+            case core3d::ordinary_input::Origin::LegacyGeometry:
+                ordinary.origin = cr::OrdinarySourceOrigin::LegacyGeometry; break;
+            default:
+                ordinary.origin = cr::OrdinarySourceOrigin::Unknown; break;
+            }
+            ordinary.sourceAnchor = admitted.snapshot->sourceAnchor();
+            cr::SourceRecipe recipe;
+            recipe.kind = cr::RecipeKind::OrdinarySource;
+            recipe.schema = 1;
+            if (!cr::EncodeOrdinarySourceRecipe(ordinary, recipe.bytes)) return nullptr;
+            auto capture = std::shared_ptr<Capture>(new Capture());
+            if (!detail::ReadOwnerKey(owner, carrier, capture->ownerKey)) return nullptr;
+            capture->document = native; capture->context = context;
+            capture->viewportWidth = viewportWidth; capture->viewportHeight = viewportHeight;
+            capture->carrier = carrier; capture->entityIdentifier = entityIdentifier;
+            capture->metersPerUnit = unit;
+            capture->undoDepth = native->GetAvailableUndos();
+            capture->redoDepth = native->GetAvailableRedos();
+            capture->forEdit = false;
+            capture->sourceRecipe = std::move(recipe);
+            capture->sourceFeature = ordinary.sourceAnchor;
+            capture->preservesSourceFeature = true;
+            capture->sourceBytes = std::move(sourceBytes);
+            capture->currentBytes = capture->sourceBytes;
+            return capture;
+        } catch (...) { return nullptr; }
+    }
+
+    //! Captures the exact original base and canonical first-Hole recipe from
+    //! a retained cut carrier. Draft replays that one cut after changing the
+    //! base, rather than asking OCCT DraftAngle to mutate an already-bored BRep.
+    static std::shared_ptr<const Capture> MintCreateRetainedCutCapture(
+        OcctDocument& owner, const std::shared_ptr<native_opening::Context>& context,
+        const TDF_Label& carrier, const std::string& entityIdentifier,
+        std::uint32_t viewportWidth, std::uint32_t viewportHeight) noexcept {
+        try {
+            if (pthread_main_np() == 0 || !context || carrier.IsNull()
+                || entityIdentifier.empty()) return nullptr;
+            const auto native = owner.Document();
+            if (native.IsNull() || native->GetData().IsNull() || native->HasOpenCommand()
+                || context->openingFence().document() != native
+                || context->openingFence().data() != native->GetData()
+                || !context->isCurrent(viewportWidth, viewportHeight)
+                || !XCAFDoc_ShapeTool::IsFree(carrier)
+                || !XCAFDoc_ShapeTool::IsSimpleShape(carrier)
+                || carrier.Data() != native->GetData()
+                || owner.EntityIdentifierForLabel(carrier) != entityIdentifier
+                || cr::HasRecord(carrier)) return nullptr;
+            const auto admitted = owner.CaptureToolInput(
+                carrier, core3d::ordinary_input::Purpose::FeatureEdit);
+            if (!admitted.ready() || !admitted.snapshot
+                || admitted.snapshot->representation()
+                    != core3d::ordinary_input::Representation::BRepSolid
+                || admitted.snapshot->history()
+                    != core3d::ordinary_input::History::Current
+                || admitted.snapshot->entityIdentifier() != entityIdentifier)
+                return nullptr;
+            OcctCylindricalCutProgramSource retained;
+            if (!owner.CaptureCylindricalCutProgramSource(carrier, retained)
+                || retained.original.retained.label.IsNull()
+                || retained.base.IsNull()
+                || !std::holds_alternative<retained_boolean::Legacy>(retained.recipe))
+                return nullptr;
+            const double unit = context->openingFence().metersPerUnit();
+            const auto identity = retained_boolean::Identities(retained.recipe);
+            std::vector<std::uint8_t> recipeBytes, baseBytes, currentBytes;
+            const TopoDS_Shape current = XCAFDoc_ShapeTool::GetShape(carrier);
+            if (!std::isfinite(unit) || unit <= 0 || unit > 1
+                || admitted.snapshot->metersPerUnit() != unit
+                || identity.metersPerUnit != unit
+                || !retained_boolean::Encode(retained.recipe, recipeBytes)
+                || recipeBytes != retained.recipeBytes
+                || !draft_faces::detail::exactShapeBytes(retained.base, baseBytes)
+                || current.IsNull()
+                || !draft_faces::detail::exactShapeBytes(current, currentBytes))
+                return nullptr;
+            cr::SourceRecipe recipe;
+            recipe.kind = cr::RecipeKind::RetainedBoolean;
+            recipe.schema = 1;
+            recipe.bytes = recipeBytes;
+            auto capture = std::shared_ptr<Capture>(new Capture());
+            if (!detail::ReadOwnerKey(owner, carrier, capture->ownerKey)) return nullptr;
+            capture->document = native; capture->context = context;
+            capture->viewportWidth = viewportWidth; capture->viewportHeight = viewportHeight;
+            capture->carrier = carrier; capture->entityIdentifier = entityIdentifier;
+            capture->metersPerUnit = unit;
+            capture->undoDepth = native->GetAvailableUndos();
+            capture->redoDepth = native->GetAvailableRedos();
+            capture->forEdit = false;
+            capture->sourceRecipe = std::move(recipe);
+            capture->sourceFeature = identity.derivedFeature;
+            capture->preservesSourceFeature = true;
+            capture->retainedRecipeLabel = retained.original.retained.label;
+            capture->sourceBytes = std::move(baseBytes);
+            capture->currentBytes = std::move(currentBytes);
             return capture;
         } catch (...) { return nullptr; }
     }
@@ -436,6 +590,12 @@ public:
                 || candidateBytes.empty()
                 || definition.metersPerLocalUnit != capture->metersPerUnit)
                 return refuse("b4.malformed-candidate");
+            const bool retainedCutSource = capture->sourceRecipe.kind
+                == cr::RecipeKind::RetainedBoolean;
+            if (retainedCutSource != !definition.retainedCutBytes.empty()
+                || (retainedCutSource
+                    && definition.retainedCutBytes != capture->sourceRecipe.bytes))
+                return refuse("b4.malformed-candidate");
             cr::Definition graph = cr::MakeV3Definition();
             graph.owner = capture->ownerKey;
             cr::SourceNode source; source.node = detail::MintUUID(); source.localID = 1;
@@ -447,7 +607,8 @@ public:
             // Preserve its feature identity as the composite source lineage;
             // the lower-level owner fixture without a stored profile retains
             // its historical minted identity path.
-            source.original.sourceFeature = detail::MintUUID();
+            source.original.sourceFeature = capture->preservesSourceFeature
+                ? capture->sourceFeature : detail::MintUUID();
             profile::Record sourceProfile;
             if (!profile::Read(capture->document, capture->carrier, sourceProfile))
                 return refuse("b4.stale-capture");
@@ -620,7 +781,8 @@ public:
                 && shapeBytes == recovery_.expectedShapeBytes;
             const bool priorProven = recovery_.create
                 ? (!recordPresent && shapeBytes == recovery_.baselineShapeBytes
-                   && profileBaselineEqual(native, recovery_.carrier, recovery_))
+                   && profileBaselineEqual(native, recovery_.carrier, recovery_)
+                   && retainedBaselineEqual(native, recovery_.carrier, recovery_))
                 : (recordPresent && graphBytes == recovery_.baselineGraphBytes
                    && shapeBytes == recovery_.baselineShapeBytes);
             if (!expectedProven && !priorProven)
@@ -671,7 +833,7 @@ private:
             const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(capture.carrier);
             if (shape.IsNull()
                 || !draft_faces::detail::exactShapeBytes(shape, shapeBytes)
-                || shapeBytes != capture.sourceBytes) {
+                || shapeBytes != capture.currentBytes) {
                 receipt = refuse("b4.stale-capture"); return false;
             }
             return true;
@@ -754,6 +916,9 @@ private:
         recovery_.context = capture->context;
         recovery_.baselineGraphBytes = baselineGraphBytes;
         recovery_.expectedGraphBytes = graphBytes;
+        if (!capture->forEdit && capture->sourceRecipe.kind
+                == cr::RecipeKind::RetainedBoolean)
+            recovery_.baselineRetainedCutBytes = capture->sourceRecipe.bytes;
         // Snapshot the decoded shape that SetShape will publish. Raw replay
         // bytes can differ after OCCT reads them; reconcile uses this serializer.
         if (!draft_faces::detail::exactShapeBytes(drafted, recovery_.expectedShapeBytes)
@@ -793,6 +958,16 @@ private:
             sourceProfile.label.ForgetAllAttributes(Standard_True);
             if (profile::HasAttribute(sourceProfile.label))
                 stageFailure = "b4.stage-profile-retire";
+        }
+        if (!stageFailure && !capture->forEdit
+            && !capture->retainedRecipeLabel.IsNull()) {
+            if (!retained_solid::HasRecord(capture->retainedRecipeLabel))
+                stageFailure = "b4.stage-retained-cut-stale";
+            else {
+                capture->retainedRecipeLabel.ForgetAllAttributes(Standard_True);
+                if (retained_solid::HasRecord(capture->retainedRecipeLabel))
+                    stageFailure = "b4.stage-retained-cut-retire";
+            }
         }
         if (!stageFailure && !capture->forEdit) {
             for (TDF_ChildIterator child(capture->carrier, Standard_False);
@@ -867,7 +1042,8 @@ private:
                         ? recordBytesEqual(native, capture->carrier,
                                            recovery_.baselineGraphBytes)
                         : (!cr::HasRecord(capture->carrier)
-                           && profileBaselineEqual(native, capture->carrier, recovery_)));
+                           && profileBaselineEqual(native, capture->carrier, recovery_)
+                           && retainedBaselineEqual(native, capture->carrier, recovery_)));
             }
             if (priorProven) { recovery_ = {}; return refuse(stageFailure); }
             capture->context->armRecoveryAfterAbortedClose();
@@ -894,7 +1070,8 @@ private:
                     ? recordBytesEqual(native, capture->carrier,
                                        recovery_.baselineGraphBytes)
                     : (!cr::HasRecord(capture->carrier)
-                       && profileBaselineEqual(native, capture->carrier, recovery_)));
+                       && profileBaselineEqual(native, capture->carrier, recovery_)
+                       && retainedBaselineEqual(native, capture->carrier, recovery_)));
             if (priorProven) { recovery_ = {}; return cancel("b4.cancelled"); }
             capture->context->armRecoveryAfterAbortedClose();
             capture->context->retainUnprovenEdit(publication);
@@ -944,6 +1121,18 @@ private:
             && profile::Encode(actual.parameters, values)
             && values == expected.baselineProfileValues
             && actual.IsCurrent(native, carrier);
+    }
+
+    static bool retainedBaselineEqual(const Handle(TDocStd_Document)& native,
+                                      const TDF_Label& carrier,
+                                      const detail::RecoverySnapshot& expected) noexcept {
+        retained_solid::Record actual;
+        if (!retained_solid::Read(native, carrier, actual)) return false;
+        if (expected.baselineRetainedCutBytes.empty()) return actual.label.IsNull();
+        return !actual.label.IsNull() && actual.value
+            && actual.value->bytes == expected.baselineRetainedCutBytes
+            && !actual.current.IsNull()
+            && actual.current.IsEqual(XCAFDoc_ShapeTool::GetShape(carrier));
     }
 
     // Recovery state is owner-held per document; S3 binds the long-lived

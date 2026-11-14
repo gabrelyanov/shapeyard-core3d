@@ -237,6 +237,12 @@ namespace core3d {
 			//! Pure, fail-closed admission for the current Shape/Face/Edge
 			//! selection. Availability and begin share the same fresh capture.
 			Standard_Boolean canBeginBevelSelection() const noexcept;
+			Standard_Boolean canBeginRoundSelection() const noexcept;
+			Standard_Boolean beginRoundSelectionFromCurrentSelection() noexcept;
+			Standard_Boolean setRoundRadiusForSelection(Standard_Real radius) noexcept;
+			Standard_Real roundMetersPerUnit() const noexcept;
+			Standard_Real roundMaximumRadiusMM() const noexcept;
+			BevelFailureObservation roundFailureObservation() const noexcept;
 			Standard_Boolean setChamferValueForSelection(const Standard_Real value);
 			BevelApplyResult applyBevel() noexcept;
 			Standard_Boolean canApplyBevel() const noexcept;
