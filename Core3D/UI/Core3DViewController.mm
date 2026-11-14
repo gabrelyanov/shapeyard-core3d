@@ -25,8 +25,8 @@
 #include <BRepGProp.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
 #include <gp_GTrsf.hxx>
-#include <BRepBndLib.hxx>
 #endif
+#include <BRepBndLib.hxx>
 #if DEBUG
 #include "../OCCTKit/DetachedPlanarSweepProbe.hxx"
 #include <BRepMesh_IncrementalMesh.hxx>
@@ -21021,6 +21021,36 @@ static gp_Pnt Core3DMeasureAnchor(const Core3DMeasureElement& element) {
     return gp_Pnt();
 }
 
+static void Core3DMeasureAppendWholeObjectBounds(
+    const Core3DMeasureElement& element, std::vector<gp_Pnt>& points) {
+    if (element.owner.IsNull()) return;
+    const auto presentation = Handle(AIS_Shape)::DownCast(element.owner->Selectable());
+    if (presentation.IsNull() || presentation->Shape().IsNull()) return;
+    TopoDS_Shape world = presentation->Shape();
+    const gp_Trsf& transform = presentation->Transformation();
+    if (std::abs(std::abs(transform.ScaleFactor()) - 1.0)
+            > TopLoc_Location::ScalePrec() || transform.IsNegative()) {
+        BRepBuilderAPI_Transform transformed(world, transform, Standard_True);
+        if (!transformed.IsDone() || transformed.Shape().IsNull()) return;
+        world = transformed.Shape();
+    } else {
+        world = world.Moved(TopLoc_Location(transform));
+    }
+    Bnd_Box bounds;
+    BRepBndLib::Add(world, bounds, Standard_False);
+    if (bounds.IsVoid()) return;
+    double values[6];
+    bounds.Get(values[0], values[1], values[2], values[3], values[4], values[5]);
+    for (int x = 0; x < 2; ++x) {
+        for (int y = 0; y < 2; ++y) {
+            for (int z = 0; z < 2; ++z) {
+                points.emplace_back(x ? values[3] : values[0],
+                    y ? values[4] : values[1], z ? values[5] : values[2]);
+            }
+        }
+    }
+}
+
 static void Core3DMeasureProjection(
     const Handle(V3d_View)& view, const std::vector<Core3DMeasureElement>& elements,
     const gp_Pnt& a, const gp_Pnt& b, NSMutableDictionary<NSString *, NSNumber *> *result) {
@@ -21030,6 +21060,7 @@ static void Core3DMeasureProjection(
     if (width <= 0 || height <= 0) return;
     std::vector<gp_Pnt> points;
     for (const auto& element : elements) {
+        Core3DMeasureAppendWholeObjectBounds(element, points);
         for (TopExp_Explorer vertices(element.world, TopAbs_VERTEX); vertices.More(); vertices.Next())
             points.push_back(BRep_Tool::Pnt(TopoDS::Vertex(vertices.Current())));
         for (TopExp_Explorer edges(element.world, TopAbs_EDGE); edges.More(); edges.Next()) {
