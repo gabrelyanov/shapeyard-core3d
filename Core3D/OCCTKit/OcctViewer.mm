@@ -421,6 +421,7 @@ bool OcctViewer::InitViewer (Core3DPlatformView* theWin)
     myView = new Core3DView(myViewer, V3d_ORTHOGRAPHIC);
     myView->SetImmediateUpdate(Standard_False);
     myView->TriedronDisplay (Aspect_TOTP_LEFT_LOWER, Quantity_NOC_WHITE, 0.20, V3d_ZBUFFER);
+    applyTriedronLift();
 
     myView->SetBgGradientColors(
         Quantity_Color(0.055, 0.065, 0.085, Quantity_TOC_sRGB),
@@ -458,6 +459,30 @@ bool OcctViewer::InitViewer (Core3DPlatformView* theWin)
     myView->Camera()->SetProjectionType(Graphic3d_Camera::Projection_Perspective);
     Resize();
     return true;
+}
+
+void OcctViewer::setTriedronLift(int pixels)
+{
+    myTriedronLiftPixels = std::max(0, pixels);
+    applyTriedronLift();
+    if (!myView.IsNull()) {
+        myView->Invalidate();
+    }
+}
+
+void OcctViewer::applyTriedronLift()
+{
+    if (myView.IsNull()) return;
+    const Handle(V3d_Trihedron)& trihedron = myView->Trihedron(false);
+    if (trihedron.IsNull()) return;
+    // SetPosition restores the default corner offset; the lift adds to it.
+    trihedron->SetPosition(Aspect_TOTP_LEFT_LOWER);
+    const Handle(Graphic3d_TransformPers)& persistence = trihedron->TransformPersistence();
+    if (persistence.IsNull() || !persistence->IsTrihedronOr2d()) return;
+    Graphic3d_Vec2i offset = persistence->Offset2d();
+    offset.y() += myTriedronLiftPixels;
+    persistence->SetOffset2d(offset);
+    trihedron->Display(*myView);
 }
 
 void OcctViewer::Resize()

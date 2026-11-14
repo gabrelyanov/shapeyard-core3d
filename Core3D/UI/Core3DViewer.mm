@@ -15816,6 +15816,7 @@ void Core3DViewer::Select(int theX, int theY) {
         const auto result = myView->Dump(thePath.ToCString());
         showGrid(true);
         myView->TriedronDisplay (Aspect_TOTP_LEFT_LOWER, Quantity_NOC_WHITE, 0.20, V3d_ZBUFFER); //FIXME: tmp solution!
+        applyTriedronLift();
         return result;
 
 // FIXME: commented non-working code

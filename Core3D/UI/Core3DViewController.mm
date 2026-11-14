@@ -20440,6 +20440,12 @@ static bool Core3DPublishCommittedSpatialSweep(
     return feedback ? [[Core3DGeometrySnapFeedback alloc] initWithNative:*feedback] : nil;
 }
 
+- (void)setAxisTriadLiftPoints:(CGFloat)points {
+    if (![NSThread isMainThread] || !_isSetuped || !GLController || !GLController.viewer) return;
+    const CGFloat scale = self.view.window.screen.scale > 0 ? self.view.window.screen.scale : UIScreen.mainScreen.scale;
+    GLController.viewer->setTriedronLift(static_cast<int>(std::lround(std::max<CGFloat>(0, points) * scale)));
+}
+
 - (BOOL)setGeometrySnappingTolerance:(double)tolerance {
     if (![NSThread isMainThread] || !_isSetuped || !GLController
         || !GLController.viewer || !GLController.viewer->canBeginCommittedEdit()) return NO;
