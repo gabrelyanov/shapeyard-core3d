@@ -330,6 +330,28 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(executeScalarPBR(_:));
 - (void)cancelScalarPBRPreparation:(Core3DPBRScalarPreparation *)prepared
     NS_SWIFT_NAME(cancelScalarPBR(_:));
+//! Main-thread transient colour session. Nil is an atomic admission refusal.
+//! No caller in the product uses this API until native and renderer qualification.
+- (Core3DColourEditSession *_Nullable)beginColourEditWithScope:(Core3DColourScope)scope
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(beginColourEdit(scope:expected:));
+//! Finite sRGB only; invalid input leaves the last valid preview intact.
+- (BOOL)previewColourWithRGB:(NSArray<NSNumber *> *)rgb session:(Core3DColourEditSession *)session
+    NS_SWIFT_NAME(previewColour(rgb:session:));
+- (Core3DPBRScalarResult)commitColourEdit:(Core3DColourEditSession *)session;
+- (void)cancelColourEdit:(Core3DColourEditSession *)session;
+#if DEBUG
+- (BOOL)debugArmColourWriteFault:(NSInteger)site session:(Core3DColourEditSession *)session
+    NS_SWIFT_NAME(debugArmColourWriteFault(_:session:));
+- (NSDictionary<NSString *, NSNumber *> *_Nullable)debugColourWriteFaultReceipt:(Core3DColourEditSession *)session;
+#endif
+//! Presentation-only readback. Must never replace captureSceneSnapshot for
+//! admission, persistence, export, thumbnails or semantic picking authority.
+- (Core3DSceneSnapshot *_Nullable)captureColourPresentationSnapshot;
+//! Atomically capture one current session's appearance scene, matching explicit
+//! empty overlay and exact semantic selection. Nil before a preview or for any
+//! stale/foreign/ended token; never falls back to an ordinary publication.
+- (Core3DColourPresentation *_Nullable)captureColourPresentationForSession:(Core3DColourEditSession *)session
+    NS_SWIFT_NAME(captureColourPresentation(session:));
 //! Observe one native frame and its invalidation, main-thread only. The callback
 //! receives a camera only after actual Draw and successful presentation; a later
 //! redraw/edit/lifecycle invalidation reports nil and releases the observer.

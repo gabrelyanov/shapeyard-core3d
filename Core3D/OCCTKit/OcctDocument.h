@@ -1004,6 +1004,22 @@ struct OcctPBRScalarDebugEvidence {
 struct OcctSavedCutSceneState;
 struct OcctPBRScalarState;
 struct OcctPBRScalarPreparation;
+struct OcctPBRColourPreparation;
+#if DEBUG
+// One session-owned probe. It observes real staging progress before abort;
+// neither the document nor another writer retains a global fault setting.
+struct OcctColourWriteProbe {
+    int site=0, firedSite=0;
+    std::size_t changedEndpoints=0, createdFaces=0, detachedEndpoints=0, writtenEndpoints=0;
+    bool attached=false, attempted=false;
+};
+#endif
+// A native face identity, never a publication-local topology ordinal. A null
+// label records an absent subshape and must stay absent until owned staging.
+struct OcctPBRColourFaceTarget {
+    TDF_Label root, label;
+    TopoDS_Shape face;
+};
 
 struct OcctPBRMaterialUpdate
 {
@@ -2105,6 +2121,11 @@ public:
     //! definition set is checked against the safe reader's per-serialized-slot
     //! texture-byte budget before any table entry is added, removed, or linked.
 #ifdef DEBUG
+    const std::string& DebugColourFailure() const noexcept { return myColourFailure; }
+    void DebugClearColourFailure() const noexcept { myColourFailure.clear(); }
+    void DebugRecordColourFailure(const std::string& value) const noexcept {
+        try { if(myColourFailure.empty())myColourFailure=value.substr(0,512); } catch(...) {}
+    }
     Standard_EXPORT std::optional<OcctPBRScalarDebugEvidence> DebugPBRScalarEvidence(
         const TDF_Label&, bool allowUnboundMaterial = false) const noexcept;
 #endif
@@ -2120,6 +2141,28 @@ public:
     Standard_EXPORT bool PBRScalarStateMatches(const std::shared_ptr<const OcctPBRScalarState>&) const noexcept;
     Standard_EXPORT bool StagePBRScalarPatch(const std::shared_ptr<const OcctPBRScalarPreparation>&,
         std::shared_ptr<const OcctPBRScalarState>& sealed) noexcept;
+    // One captured scene and exact candidates; optional native face targets
+    // restrict the edit within the admitted free roots.
+    Standard_EXPORT std::shared_ptr<const OcctPBRScalarState> CapturePBRColourState(
+        const std::vector<TDF_Label>&) const noexcept;
+    Standard_EXPORT std::shared_ptr<const OcctPBRColourPreparation> PreparePBRColourPatch(
+        const std::vector<TDF_Label>&, const std::array<double,3>& sRGB, bool& changed,
+        const std::vector<OcctPBRColourFaceTarget>& faces = {}) const noexcept;
+    Standard_EXPORT std::shared_ptr<const OcctPBRScalarState> PBRColourOriginal(
+        const std::shared_ptr<const OcctPBRColourPreparation>&) const noexcept;
+    Standard_EXPORT std::vector<TDF_Label> PBRColourTargets(
+        const std::shared_ptr<const OcctPBRColourPreparation>&) const;
+    Standard_EXPORT bool StagePBRColourPatch(const std::shared_ptr<const OcctPBRColourPreparation>&,
+        std::shared_ptr<const OcctPBRScalarState>& sealed) noexcept;
+#if DEBUG
+    Standard_EXPORT bool DebugAttachColourWriteProbe(
+        const std::shared_ptr<const OcctPBRColourPreparation>&,
+        const std::shared_ptr<OcctColourWriteProbe>&) const noexcept;
+#endif
+    // Presentation only: reload unchanged targets, then apply private material
+    // handles to AIS. No OCAF command, material-table write or notification.
+    Standard_EXPORT bool PresentPBRColourPatch(const std::shared_ptr<const OcctPBRColourPreparation>&,
+        const std::vector<Handle(AIS_Shape)>&) noexcept;
     Standard_Boolean SaveObjectPBRMaterials(
         const std::vector<OcctPBRMaterialUpdate>& updates);
     //! DEBUG seam for exercising aggregate occurrence limits with small valid
@@ -2594,14 +2637,23 @@ private:
   // Pure native eligibility for an exclusively owned document, including the
   // private import worker. UI-facing admission retains its main-thread guard.
   Standard_Boolean HasNativeNormalTextureGeometry(const TDF_Label& label) const noexcept;
-    std::shared_ptr<const OcctPBRScalarState> CapturePBRScalarState(const TDF_Label&) const noexcept;
+    std::shared_ptr<const OcctPBRScalarState> CapturePBRScalarState(const TDF_Label&, bool colourSubshapes = false) const noexcept;
+    Handle(XCAFDoc_VisMaterial) PrepareExactPBRMaterial(const TDF_Label&,
+        const OcctPBRScalarPatch&, bool& changed) const noexcept;
     Standard_Boolean SaveObjectPBRMaterialsImpl(const std::vector<OcctPBRMaterialUpdate>&,
         const Handle(XCAFDoc_VisMaterial)& scalarMaterial,
-        bool retainPreviousMaterial = false);
+        bool retainPreviousMaterial = false,
+        const std::vector<Handle(XCAFDoc_VisMaterial)>* exactMaterials = nullptr
+#if DEBUG
+        , OcctColourWriteProbe* colourProbe = nullptr
+#endif
+        );
     Standard_Boolean CanSaveObjectPBRMaterials(
         const std::vector<OcctPBRMaterialUpdate>& updates,
         std::vector<TDF_Label>* reclaimMaterialLabels,
-        const Handle(XCAFDoc_VisMaterial)& scalarMaterial = Handle(XCAFDoc_VisMaterial)()) const;
+        const Handle(XCAFDoc_VisMaterial)& scalarMaterial = Handle(XCAFDoc_VisMaterial)(),
+        const std::vector<Handle(XCAFDoc_VisMaterial)>* exactMaterials = nullptr,
+        bool virtualFaceEndpoints = false) const;
     
 #if DEBUG
   // Exact pointer created below and kept alive by myApp; no foreign downcast.
@@ -2639,6 +2691,9 @@ private:
   bool myBooleanOriginalsRecovery = false;
   Standard_Size myMaximumSerializedTextureOccurrenceBytes;
   Standard_Size myMaximumDecodedTextureResourceBytes;
+#ifdef DEBUG
+  mutable std::string myColourFailure;
+#endif
   Standard_Size myMaximumVisualMaterialDefinitions;
   std::uint64_t myNextExactIdentityReservation = 0;
   std::unordered_map<std::uint64_t, std::pair<std::string, std::string>>
