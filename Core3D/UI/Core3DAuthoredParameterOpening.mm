@@ -1335,6 +1335,42 @@ static NSMapTable<Core3DViewController *, Core3DBooleanPairRecoveryIssuer *>
     } catch (...) { return NO; }
 }
 
+- (BOOL)applyBakedBooleanTargets:(NSArray<NSString *> *)targets
+    tools:(NSArray<NSString *> *)tools
+    operation:(Core3DPartBooleanOperation)operation
+    refusal:(NSString * _Nullable * _Nullable)refusal {
+    if (refusal) *refusal = @"unsupported-source";
+    if (![NSThread isMainThread] || ![targets isKindOfClass:NSArray.class]
+        || ![tools isKindOfClass:NSArray.class] || targets.count == 0 || tools.count == 0
+        || targets.count + tools.count > 32) return NO;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        if (!viewer) return NO;
+        std::vector<std::string> targetEntities, toolEntities;
+        for (id entity in targets) {
+            if (![entity isKindOfClass:NSString.class]) return NO;
+            targetEntities.emplace_back(((NSString *)entity).UTF8String ?: "");
+        }
+        for (id entity in tools) {
+            if (![entity isKindOfClass:NSString.class]) return NO;
+            toolEntities.emplace_back(((NSString *)entity).UTF8String ?: "");
+        }
+        std::string code;
+        const bool applied = viewer->applyBakedBooleanBatch(targetEntities, toolEntities,
+            static_cast<int>(operation) - static_cast<int>(Core3DPartBooleanOperationUnion), code);
+        if (refusal) *refusal = [NSString stringWithUTF8String:code.c_str()];
+        if (applied) {
+            const SEL checkSelections = NSSelectorFromString(@"checkSelections");
+            if ([gl respondsToSelector:checkSelections])
+                ((void (*)(id, SEL))[gl methodForSelector:checkSelections])(gl, checkSelections);
+            [gl requestRender];
+        }
+        return applied ? YES : NO;
+    } catch (...) { return NO; }
+}
+
 - (BOOL)applyBakedBooleanTarget:(NSString *)target tool:(NSString *)tool
     operation:(Core3DPartBooleanOperation)operation
     refusal:(NSString * _Nullable * _Nullable)refusal {

@@ -579,6 +579,11 @@ namespace core3d {
     //! parts: one Undo step, no originals kept. Redraws on success.
     bool applyBakedBoolean(const std::string& targetEntity, const std::string& toolEntity,
         int operation, std::string& refusal) noexcept;
+    //! The same for several parts in ONE Undo step: Cut (1) takes every tool out of
+    //! every target; Join (0) fuses every tool into the one target. Tools are used up.
+    bool applyBakedBooleanBatch(const std::vector<std::string>& targetEntities,
+        const std::vector<std::string>& toolEntities, int operation,
+        std::string& refusal) noexcept;
     bool applyThroughHole(const std::string& entity, const gp_Pnt& worldPoint,
         const gp_Dir& worldDirection, double radius, double depth,
         std::string& refusal) noexcept;

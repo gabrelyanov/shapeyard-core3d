@@ -12908,26 +12908,49 @@ namespace {
 // The plain (baked) Join / Cut / Overlap of two stored parts, in the frame of the part
 // that stays (0 union, 1 subtract, 2 intersect). Works on copies. Shared by Apply and the
 // on-model preview, so the preview shows exactly what Apply makes.
-bool BakedBooleanShape(const TopoDS_Shape& targetStored, const gp_Trsf& targetPlacement,
-    const TopoDS_Shape& toolStored, const gp_Trsf& toolPlacement, int operation,
+// App Store 5.34.1 and earlier stored a Union/Subtract result as a compound
+// around its one solid: tools that take one solid take that solid.
+TopoDS_Shape SingleSolidOf(TopoDS_Shape shape) noexcept {
+    try {
+        while (!shape.IsNull() && shape.ShapeType() == TopAbs_COMPOUND) {
+            TopoDS_Iterator only(shape);
+            if (!only.More()) break;
+            const TopoDS_Shape child = only.Value();
+            only.Next();
+            if (only.More()) break;
+            shape = child;
+        }
+        return shape;
+    } catch (...) { return TopoDS_Shape(); }
+}
+
+// Join / Cut / Overlap of one part with one or more tools, in the part's own
+// frame: Cut takes every tool away, Join fuses every tool in; Overlap takes one.
+bool BakedBooleanShapeOfMany(const TopoDS_Shape& targetStored, const gp_Trsf& targetPlacement,
+    const std::vector<std::pair<TopoDS_Shape, gp_Trsf>>& toolsStored, int operation,
     TopoDS_Shape& result, std::string& refusal) noexcept {
     try {
         OCC_CATCH_SIGNALS
         result.Nullify();
+        if (toolsStored.empty() || toolsStored.size() > 32
+            || (operation == 2 && toolsStored.size() != 1)) return false;
         // Work on copies: the stored parts (and a Join record that Undo brings
         // back) must stay byte-identical; building can touch tolerances.
-        const TopoDS_Shape targetShape = ExactResizedPrimitive(DetachedCopy(targetStored));
-        const TopoDS_Shape toolShape = ExactResizedPrimitive(DetachedCopy(toolStored));
-        if (targetShape.IsNull() || toolShape.IsNull()
-            || targetShape.ShapeType() != TopAbs_SOLID || toolShape.ShapeType() != TopAbs_SOLID
+        const TopoDS_Shape targetShape = ExactResizedPrimitive(DetachedCopy(SingleSolidOf(targetStored)));
+        if (targetShape.IsNull() || targetShape.ShapeType() != TopAbs_SOLID
             || operation < 0 || operation > 2)
             return false;
-        gp_Trsf toolToTarget = targetPlacement.Inverted();
-        toolToTarget.Multiply(toolPlacement);
-        BRepBuilderAPI_Transform moved(toolShape, toolToTarget, Standard_True, Standard_False);
-        if (!moved.IsDone()) { refusal = "invalid-result"; return false; }
         TopTools_ListOfShape arguments, tools;
-        arguments.Append(targetShape); tools.Append(moved.Shape());
+        arguments.Append(targetShape);
+        for (const auto& [toolStored, toolPlacement] : toolsStored) {
+            const TopoDS_Shape toolShape = ExactResizedPrimitive(DetachedCopy(SingleSolidOf(toolStored)));
+            if (toolShape.IsNull() || toolShape.ShapeType() != TopAbs_SOLID) return false;
+            gp_Trsf toolToTarget = targetPlacement.Inverted();
+            toolToTarget.Multiply(toolPlacement);
+            BRepBuilderAPI_Transform moved(toolShape, toolToTarget, Standard_True, Standard_False);
+            if (!moved.IsDone()) { refusal = "invalid-result"; return false; }
+            tools.Append(moved.Shape());
+        }
         const auto run = [&](BRepAlgoAPI_BooleanOperation& algorithm) {
             algorithm.SetArguments(arguments); algorithm.SetTools(tools);
             algorithm.SetRunParallel(Standard_False); algorithm.SetNonDestructive(Standard_True);
@@ -12953,6 +12976,13 @@ bool BakedBooleanShape(const TopoDS_Shape& targetStored, const gp_Trsf& targetPl
         }
         return true;
     } catch (...) { refusal = "invalid-result"; result.Nullify(); return false; }
+}
+
+bool BakedBooleanShape(const TopoDS_Shape& targetStored, const gp_Trsf& targetPlacement,
+    const TopoDS_Shape& toolStored, const gp_Trsf& toolPlacement, int operation,
+    TopoDS_Shape& result, std::string& refusal) noexcept {
+    return BakedBooleanShapeOfMany(targetStored, targetPlacement,
+        {{toolStored, toolPlacement}}, operation, result, refusal);
 }
 } // namespace
 
@@ -13000,69 +13030,99 @@ Standard_Boolean OcctDocument::ApplyBakedBoolean(
     const TDF_Label& target, const Handle(AIS_Shape)& targetPresentation,
     const TDF_Label& tool, const Handle(AIS_Shape)& toolPresentation,
     int operation, std::string& refusal) noexcept {
+    return ApplyBakedBooleanBatch({{target, targetPresentation}},
+        {{tool, toolPresentation}}, operation, refusal);
+}
+
+Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
+    const std::vector<std::pair<TDF_Label, Handle(AIS_Shape)>>& targets,
+    const std::vector<std::pair<TDF_Label, Handle(AIS_Shape)>>& tools,
+    int operation, std::string& refusal) noexcept {
     refusal = "unsupported-source";
     try {
         if (![NSThread isMainThread] || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
-            || target.IsNull() || tool.IsNull() || target.IsEqual(tool)
-            || targetPresentation.IsNull() || toolPresentation.IsNull()
-            || operation < 0 || operation > 2) return Standard_False;
+            || targets.empty() || tools.empty() || targets.size() + tools.size() > 32
+            || operation < 0 || operation > 2
+            || (operation != 1 && targets.size() != 1)) return Standard_False;
+        // Every part once: no part is both kept and used up, none twice.
+        std::vector<std::pair<TDF_Label, Handle(AIS_Shape)>> parts(targets);
+        parts.insert(parts.end(), tools.begin(), tools.end());
+        for (std::size_t a = 0; a < parts.size(); ++a) {
+            if (parts[a].first.IsNull() || parts[a].second.IsNull()) return Standard_False;
+            for (std::size_t b = a + 1; b < parts.size(); ++b)
+                if (parts[a].first.IsEqual(parts[b].first)) return Standard_False;
+        }
         // Plain parts and earlier Boolean results only (their record is dropped).
-        std::array<TDF_Label, 2> bakedRecords;
-        const std::array<TDF_Label, 2> labels{{target, tool}};
-        for (std::size_t index = 0; index < 2; ++index)
-            if (!BakedBooleanAdmits(*this, labels[index], bakedRecords[index])) {
+        std::vector<TDF_Label> bakedRecords(parts.size());
+        for (std::size_t index = 0; index < parts.size(); ++index)
+            if (!BakedBooleanAdmits(*this, parts[index].first, bakedRecords[index])) {
 #if DEBUG
                 core3d::g_booleanCaptureLastRefusal = "bake " + std::to_string(index)
                     + ":" + core3d::g_bakeSavedCutRefusal;
 #endif
                 return Standard_False;
             }
-        TopoDS_Shape result;
-        if (!BakedBooleanShape(XCAFDoc_ShapeTool::GetShape(target),
-                targetPresentation->LocalTransformation(), XCAFDoc_ShapeTool::GetShape(tool),
-                toolPresentation->LocalTransformation(), operation, result, refusal))
-            return Standard_False;
-        // A part that stays with a scale other than 1 (a ring scaled to 0.8): the
-        // result keeps that size in its own shape and the part's scale becomes 1,
-        // so taps, export and later tools all see the same part (Astra 11 Nov
-        // 21:56: the cup wall of such a mug could not be tapped).
-        gp_Trsf placement = targetPresentation->LocalTransformation();
-        const Standard_Real scale = placement.ScaleFactor();
-        if (std::abs(scale - 1.0) > 1.0e-12) {
-            gp_Trsf sizeUp; sizeUp.SetScale(gp_Pnt(0, 0, 0), scale);
-            BRepBuilderAPI_Transform sized(result, sizeUp, Standard_True, Standard_True);
-            if (!sized.IsDone() || sized.Shape().IsNull()) { refusal = "invalid-result"; return Standard_False; }
-            result = sized.Shape();
-            if (result.ShapeType() != TopAbs_SOLID
-                || !BRepCheck_Analyzer(result, Standard_True).IsValid()) {
-                refusal = "invalid-result";
+        std::vector<std::pair<TopoDS_Shape, gp_Trsf>> toolShapes;
+        for (const auto& [label, presentation] : tools)
+            toolShapes.emplace_back(XCAFDoc_ShapeTool::GetShape(label),
+                                    presentation->LocalTransformation());
+        // Each kept part: its result and its new presentation.
+        std::vector<std::pair<TopoDS_Shape, Handle(AIS_Shape)>> made;
+        for (const auto& [target, targetPresentation] : targets) {
+            TopoDS_Shape result;
+            if (!BakedBooleanShapeOfMany(XCAFDoc_ShapeTool::GetShape(target),
+                    targetPresentation->LocalTransformation(), toolShapes, operation, result, refusal))
                 return Standard_False;
+            // A part that stays with a scale other than 1 (a ring scaled to 0.8): the
+            // result keeps that size in its own shape and the part's scale becomes 1,
+            // so taps, export and later tools all see the same part (Astra 11 Nov
+            // 21:56: the cup wall of such a mug could not be tapped).
+            gp_Trsf placement = targetPresentation->LocalTransformation();
+            const Standard_Real scale = placement.ScaleFactor();
+            if (std::abs(scale - 1.0) > 1.0e-12) {
+                gp_Trsf sizeUp; sizeUp.SetScale(gp_Pnt(0, 0, 0), scale);
+                BRepBuilderAPI_Transform sized(result, sizeUp, Standard_True, Standard_True);
+                if (!sized.IsDone() || sized.Shape().IsNull()) { refusal = "invalid-result"; return Standard_False; }
+                result = sized.Shape();
+                if (result.ShapeType() != TopAbs_SOLID
+                    || !BRepCheck_Analyzer(result, Standard_True).IsValid()) {
+                    refusal = "invalid-result";
+                    return Standard_False;
+                }
+                placement.SetScaleFactor(1.0);
             }
-            placement.SetScaleFactor(1.0);
+            Handle(AIS_Shape) shown = new AIS_Shape(result);
+            shown->SetLocalTransformation(placement);
+            made.emplace_back(result, shown);
         }
-        Handle(AIS_Shape) shown = new AIS_Shape(result);
-        shown->SetLocalTransformation(placement);
         refusal = "stale-source";
         myOcafDoc->NewCommand();
         if (!myOcafDoc->HasOpenCommand()) return Standard_False;
         for (const auto& record : bakedRecords)
             if (!record.IsNull()) record.ForgetAllAttributes(Standard_True);
-        // A saved Hole on either part is baked in this command: Undo brings it back.
-        for (const auto& label : labels)
-            if (core3d::retained_solid::HasRecord(label)
-                && !PrepareBooleanResultForFaceEdit(label)) {
+        // A saved Hole on any part is baked in this command: Undo brings it back.
+        for (const auto& part : parts)
+            if (core3d::retained_solid::HasRecord(part.first)
+                && !PrepareBooleanResultForFaceEdit(part.first)) {
                 myOcafDoc->AbortCommand();
                 return Standard_False;
             }
-        const TCollection_ExtendedString name = NextBooleanResultName(myOcafDoc, operation);
-        ForgetInspectorPrimitiveRecord(target);
-        if (!ReplaceShape(target, shown)
-            || !XCAFDoc_ShapeTool::GetShape(target).IsEqual(result)
-            || !RemoveShape(tool, Standard_True)
-            || !SetObjectNameForLabel(target, name)) {
-            myOcafDoc->AbortCommand();
-            return Standard_False;
+        for (std::size_t index = 0; index < targets.size(); ++index) {
+            const TDF_Label& target = targets[index].first;
+            const TCollection_ExtendedString name = NextBooleanResultName(myOcafDoc, operation);
+            ForgetInspectorPrimitiveRecord(target);
+            if (!ReplaceShape(target, made[index].second)
+                || !XCAFDoc_ShapeTool::GetShape(target).IsEqual(made[index].first)
+                || !SetObjectNameForLabel(target, name)) {
+                myOcafDoc->AbortCommand();
+                return Standard_False;
+            }
         }
+        for (const auto& [tool, unused] : tools)
+            if (!RemoveShape(tool, Standard_True)) {
+                myOcafDoc->AbortCommand();
+                return Standard_False;
+            }
         myOcafDoc->CommitCommand();
         NotifyChanges();
         refusal.clear();
@@ -13103,15 +13163,7 @@ Standard_Boolean OcctDocument::BuildThroughHole(
         // byte-identical; building the hole can touch tolerances.
         // App Store 5.34.1 and earlier stored a Union/Subtract result as a
         // compound around its one solid; a hole goes into that solid.
-        TopoDS_Shape source = DetachedCopy(XCAFDoc_ShapeTool::GetShape(label));
-        while (!source.IsNull() && source.ShapeType() == TopAbs_COMPOUND) {
-            TopoDS_Iterator only(source);
-            if (!only.More()) break;
-            const TopoDS_Shape child = only.Value();
-            only.Next();
-            if (only.More()) break;
-            source = child;
-        }
+        const TopoDS_Shape source = SingleSolidOf(DetachedCopy(XCAFDoc_ShapeTool::GetShape(label)));
         if (source.IsNull() || source.ShapeType() != TopAbs_SOLID
             || !BRepCheck_Analyzer(source, Standard_True).IsValid()) return Standard_False;
         Bnd_Box box; BRepBndLib::AddOptimal(source, box, Standard_False, Standard_False);
