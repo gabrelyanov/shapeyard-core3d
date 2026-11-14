@@ -127,6 +127,8 @@ struct IssuedFaceValue final {
 struct IssuedSelection final {
     std::vector<IssuedFaceValue> faces;
     std::vector<std::uint8_t> sourceBytes;
+    std::vector<std::uint8_t> retainedBaseBytes;
+    std::vector<std::uint8_t> retainedCutBytes;
     std::string entity;
 };
 
@@ -427,6 +429,20 @@ NSDictionary *BuildProbe(int32_t scenario, double unit, double angle,
                                         @"selected native source unavailable");
             return nil;
         }
+        OcctCylindricalCutProgramSource retainedCut;
+        if (document->CaptureCylindricalCutProgramSource(label, retainedCut)
+            && std::holds_alternative<core3d::retained_boolean::Legacy>(retainedCut.recipe)) {
+            std::vector<std::uint8_t> exact;
+            if (!core3d::retained_boolean::Encode(retainedCut.recipe, exact)
+                || exact != retainedCut.recipeBytes
+                || !df::detail::exactShapeBytes(
+                    retainedCut.base, issued.retainedBaseBytes)) {
+                if (error) *error = DFError(Core3DDraftFacesErrorUnavailable,
+                                            @"retained Hole source unavailable");
+                return nil;
+            }
+            issued.retainedCutBytes = std::move(exact);
+        }
         NSMutableArray *publicFaces = [NSMutableArray array];
         std::set<std::uint32_t> unique;
         for (Core3DSceneElementIdentifier *element in scene.selection.selectedElements) {
@@ -526,8 +542,12 @@ NSDictionary *BuildProbe(int32_t scenario, double unit, double angle,
                                     @"finite three-component plane and pull required"); return nil;
     }
     definition.signedAngleRadians = angle;
-    TopoDS_Shape source;
-    if (!df::detail::readShape(_issued.sourceBytes, source)) {
+    TopoDS_Shape source, selectionSource;
+    const std::vector<std::uint8_t>& buildSourceBytes = _issued.retainedCutBytes.empty()
+        ? _issued.sourceBytes : _issued.retainedBaseBytes;
+    definition.retainedCutBytes = _issued.retainedCutBytes;
+    if (!df::detail::readShape(buildSourceBytes, source)
+        || !df::detail::readShape(_issued.sourceBytes, selectionSource)) {
         if (error) *error = DFError(Core3DDraftFacesErrorUnavailable, @"captured source unreadable");
         return nil;
     }
@@ -535,7 +555,8 @@ NSDictionary *BuildProbe(int32_t scenario, double unit, double angle,
                        df::detail::direction(definition.neutralNormalLocal));
     const double tolerance = std::max(Precision::Confusion() * 32,
                                       1e-7 / self.metersPerUnit);
-    TopTools_IndexedMapOfShape faces; TopExp::MapShapes(source, TopAbs_FACE, faces);
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(selectionSource, TopAbs_FACE, faces);
     for (const IssuedFaceValue& issued : _issued.faces) {
         df::FaceIntent intent = issued.intent;
         const TopoDS_Face face = TopoDS::Face(
@@ -558,7 +579,8 @@ NSDictionary *BuildProbe(int32_t scenario, double unit, double angle,
     cr::FeatureNode feature; feature.node = MintUUID(); feature.feature = MintUUID();
     feature.kind = df::FeatureKind; feature.codecVersion = df::CodecVersion;
     feature.inputs.push_back(MintUUID()); feature.parameters = parameters;
-    rf::ReplayValue input; input.shape = rf::ShapeKind::Solid; input.detachedShape = _issued.sourceBytes;
+    rf::ReplayValue input; input.shape = rf::ShapeKind::Solid;
+    input.detachedShape = buildSourceBytes;
     rf::ReplayValue output; tb::Counter budget; df::Refusal refusal; df::BuildEvidence evidence;
     if (!df::detail::buildDetachedObserved(feature, {input}, budget, *_cancelled,
                                             output, &refusal, &evidence)) {
@@ -962,12 +984,24 @@ Core3DDraftFacesNativeSnapshot *DFPublicSnapshot(const DFEditingState& state) {
                                     @"b4.source-profile-stale");
         return nil;
     }
-    auto capture = profileRecord.label.IsNull()
-        ? dfo::NativeOwner::MintCreateOrdinaryCapture(
-            *document, openingContext, carrier, entity, width, height)
-        : dfo::NativeOwner::MintCreateCapture(
+    df::Definition issuedDefinition;
+    if (!df::Decode(DFBytes(candidate.canonicalDefinitionBytes), issuedDefinition)) {
+        if (error) *error = DFError(Core3DDraftFacesErrorStale,
+                                    @"issued Slant definition changed");
+        return nil;
+    }
+    std::shared_ptr<const dfo::Capture> capture;
+    if (!issuedDefinition.retainedCutBytes.empty()) {
+        capture = dfo::NativeOwner::MintCreateRetainedCutCapture(
+            *document, openingContext, carrier, entity, width, height);
+    } else if (profileRecord.label.IsNull()) {
+        capture = dfo::NativeOwner::MintCreateOrdinaryCapture(
+            *document, openingContext, carrier, entity, width, height);
+    } else {
+        capture = dfo::NativeOwner::MintCreateCapture(
             *document, openingContext, carrier, entity,
             profileRecord.parameters, width, height);
+    }
     if (!capture) {
         if (error) *error = DFError(Core3DDraftFacesErrorUnavailable,
                                     @"b4.source-solid-unsupported");
