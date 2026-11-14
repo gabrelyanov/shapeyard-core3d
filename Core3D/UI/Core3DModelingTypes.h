@@ -21,6 +21,7 @@ NS_ASSUME_NONNULL_BEGIN
 @class Core3DSceneSnapshot;
 @class Core3DStoredProfileSnapshot;
 @class Core3DSceneFrameSnapshot;
+@class Core3DSceneSelectionSnapshot;
 @class Core3DScenePresentationOverlaySnapshot;
 
 //! Opaque native openings for retained C1/D2/D3/D4 editors. Dictionaries are
@@ -1384,6 +1385,29 @@ typedef struct {
 @property (nonatomic, readonly) NSInteger authoredGutterPixels;
 @property (nonatomic, readonly) NSInteger chartCount;
 @property (nonatomic, readonly) double occupancy;
+@end
+
+//! Native colour session scope. Targets are captured once at begin.
+typedef NS_ENUM(NSInteger, Core3DColourScope) {
+    Core3DColourScopeObject = 0,
+    Core3DColourScopeFace = 1
+};
+__attribute__((objc_subclassing_restricted))
+@interface Core3DColourEditSession : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
+//! Immutable appearance-only publication. Never grants edit or pick authority.
+//! The scene has zero pick tokens and empty selection; selection below retains
+//! the verified ordinary semantic identities for appearance-only highlights.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DColourPresentation : NSObject
+@property(nonatomic, strong, readonly) Core3DSceneSnapshot *scene;
+@property(nonatomic, strong, readonly) Core3DScenePresentationOverlaySnapshot *overlay;
+@property(nonatomic, strong, readonly) Core3DSceneSelectionSnapshot *selection;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
 @end
 
 typedef NS_ENUM(NSInteger, Core3DPBRScalarResult) {
