@@ -11,6 +11,7 @@
 #include "../OCCTKit/PatternRecipeClone.hxx"
 
 #include <AIS_Shape.hxx>
+#include <XCAFDoc_VisMaterialPBR.hxx>
 #include <Graphic3d_NameOfMaterial.hxx>
 #include <Quantity_Color.hxx>
 
@@ -43,6 +44,12 @@ enum class RadialArrayReferenceEditResult : std::uint8_t {
     Applied,
     OutcomeUnknown,
     RetryableFailure,
+};
+
+//! Exact authored face topology and scalar finish, copied by value.
+struct RadialArrayFaceFinish {
+    TopoDS_Shape face;
+    XCAFDoc_VisMaterialPBR material;
 };
 
 //! Complete renderer handoff for one lease-validated radial preview. The
@@ -165,6 +172,7 @@ private:
         OcctGeometryRepresentation destinationRepresentation =
             OcctGeometryRepresentation::Invalid;
         TopoDS_Shape storedShape;
+        std::vector<RadialArrayFaceFinish> faceFinishes;
         gp_Trsf transform;
         Standard_Boolean hasStrictOverlayStyle = Standard_False;
         Graphic3d_NameOfMaterial materialName =
@@ -206,6 +214,8 @@ private:
         pattern_recipe_clone::Candidate expectedSweepLoft;
         Standard_Boolean sweepLoftCandidateSealed = Standard_False;
         Standard_Boolean profileCandidateSealed = Standard_False;
+        std::vector<RadialArrayFaceFinish> expectedFaceFinishes;
+        Standard_Boolean faceFinishesSealed = Standard_False;
     };
 
     struct PendingReferenceEdit {
