@@ -2671,6 +2671,22 @@ static NSString *Core3DDebugPartBooleanFixtureRefusal(const char *reason) {
 - (void)dealloc { if ([NSThread isMainThread] && !_booleanTerminal && !_recoveryRequired) (void)[self cancel]; }
 @end
 
+@interface Core3DModelingPlanHistory () {
+@public
+    __weak Core3DViewController *_historyOwner;
+    std::weak_ptr<core3d::Core3DViewer> _historyViewer;
+    Handle(OcctDocument) _historyDocument;
+    std::shared_ptr<OcctModelingPlanHistory> _historyWitness;
+}
+- (instancetype)initWithOwner:(Core3DViewController *)owner;
+@end
+@implementation Core3DModelingPlanHistory
+- (instancetype)initWithOwner:(Core3DViewController *)owner {
+    if ((self = [super init])) _historyOwner = owner;
+    return self;
+}
+@end
+
 @class Core3DSavedCutSourceJob;
 @interface Core3DModelingPlanningContext () {
 @public
@@ -16629,6 +16645,72 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
         return GLController.viewer == viewer && viewer->getDocument() == owner
             && owner->Document() == document
             && document->GetAvailableUndos() == depth - 1;
+    } catch (...) { return NO; }
+}
+
+- (Core3DModelingPlanHistory *)captureModelingPlanHistory {
+    if (![self core3d_canCaptureModelingContext]) return nil;
+    try {
+        const auto viewer = GLController.viewer;
+        const auto document = viewer->getDocument();
+        if (document.IsNull()) return nil;
+        const auto witness = document->CaptureModelingPlanHistory();
+        if (!witness) return nil;
+        auto history = [[Core3DModelingPlanHistory alloc] initWithOwner:self];
+        history->_historyViewer = viewer;
+        history->_historyDocument = document;
+        history->_historyWitness = witness;
+        return history;
+    } catch (...) { return nil; }
+}
+
+- (BOOL)core3d_ownsModelingPlanHistory:(Core3DModelingPlanHistory *)history {
+    return [history isKindOfClass:Core3DModelingPlanHistory.class]
+        && history->_historyOwner == self && [self core3d_canCaptureModelingContext]
+        && history->_historyViewer.lock() == GLController.viewer
+        && history->_historyDocument == GLController.viewer->getDocument()
+        && !history->_historyDocument.IsNull();
+}
+
+- (BOOL)isModelingPlanHistoryCurrent:(Core3DModelingPlanHistory *)history {
+    return [self core3d_ownsModelingPlanHistory:history]
+        && history->_historyDocument->IsModelingPlanHistoryCurrent(history->_historyWitness);
+}
+
+- (BOOL)acceptModelingPlanHistory:(Core3DModelingPlanHistory *)history committedSteps:(NSInteger)steps {
+    return steps >= 0 && steps <= 128 && [self core3d_ownsModelingPlanHistory:history]
+        && history->_historyDocument->AcceptModelingPlanHistory(history->_historyWitness,
+            static_cast<Standard_Integer>(steps));
+}
+
+- (BOOL)discardModelingPlanHistory:(Core3DModelingPlanHistory *)history {
+    if (![self isModelingPlanHistoryCurrent:history]) return NO;
+    try {
+        const auto viewer = GLController.viewer;
+        const auto owner = history->_historyDocument;
+        const auto document = owner->Document();
+        const auto undoVerified = [&](const std::function<bool()>& stillExact) {
+            if (![self core3d_ownsModelingPlanHistory:history] || owner->Document() != document) return false;
+            const auto context = viewer->AisContext();
+            const auto interactor = viewer->getObjectInteractor();
+            if (context.IsNull() || !interactor) return false;
+            [self retireModelingPlanningContext:_issuedModelingPlanningContext];
+            interactor->detachManipulator(false);
+            context->ClearDetected(Standard_False);
+            context->ClearSelected(Standard_False);
+            // Presentation retirement can publish synchronously too.
+            if (![self core3d_ownsModelingPlanHistory:history] || owner->Document() != document) return false;
+            const std::function<bool()> current = [&] {
+                return [self core3d_ownsModelingPlanHistory:history]
+                    && owner->Document() == document && stillExact();
+            };
+            const BOOL changed = [GLController undoCommittedModelingHistoryIfCurrent:current];
+            return changed && [self core3d_ownsModelingPlanHistory:history] && owner->Document() == document;
+        };
+        const bool discarded = owner->DiscardModelingPlanHistory(history->_historyWitness, undoVerified);
+        if ([self core3d_ownsModelingPlanHistory:history] && owner->Document() == document)
+            [self sendNotifyUIState:UIStateChangingHistory];
+        return discarded;
     } catch (...) { return NO; }
 }
 

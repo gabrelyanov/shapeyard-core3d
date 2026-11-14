@@ -29,6 +29,13 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+//! Native-only history witness. Providers cannot construct or serialize it.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DModelingPlanHistory : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 typedef NS_ENUM(NSInteger, Core3DGeometrySnapKind) {
     Core3DGeometrySnapKindVertex = 1,
     Core3DGeometrySnapKindEdgeMidpoint = 2,
@@ -1098,6 +1105,14 @@ __attribute__((objc_subclassing_restricted))
 //! publishes its synchronous change notification. Refuses previews or busy work.
 //! Returns YES only for one verified ordinary Undo on the same document.
 - (BOOL)undoCommittedModelingStep NS_SWIFT_NAME(undoCommittedModelingStep());
+//! Failed-plan cleanup is separate from ordinary user Undo. Capture before any
+//! edit, accept only known completed native commits, then dispose the exact
+//! accepted suffix. Foreign, busy or changed history is refused untouched.
+- (nullable Core3DModelingPlanHistory *)captureModelingPlanHistory;
+- (BOOL)isModelingPlanHistoryCurrent:(Core3DModelingPlanHistory *)history;
+- (BOOL)acceptModelingPlanHistory:(Core3DModelingPlanHistory *)history committedSteps:(NSInteger)steps
+    NS_SWIFT_NAME(acceptModelingPlanHistory(_:committedSteps:));
+- (BOOL)discardModelingPlanHistory:(Core3DModelingPlanHistory *)history;
 //! Authoritative OCAF history depth used by the production AI apply path.
 - (NSInteger)documentUndoCount;
 //! Capture supersedes the previous unused lease. Camera changes alone remain

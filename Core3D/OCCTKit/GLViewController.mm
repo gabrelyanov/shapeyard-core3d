@@ -1274,7 +1274,8 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 - (void)clearCommittedBoundaries;
 - (void)updateCommittedBoundaries;
 - (void)updateSplitBoundaries:(const Handle(AIS_Shape)&)presentation;
-- (void)performNativeHistoryDirection:(NativeHistoryDirection)direction;
+- (BOOL)performNativeHistoryDirection:(NativeHistoryDirection)direction
+    ifCurrent:(const std::function<bool()>&)current;
 - (void)addCube:(UIBarButtonItem *)sender;
 - (BOOL)restoreBooleanActionForRetainedGizmoType:(PrimitiveGizmoType)type;
 - (BOOL)retireBooleanActionForGizmoType:(PrimitiveGizmoType)type;
@@ -3157,15 +3158,20 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 }
 
 - (void)undo {
-    [self performNativeHistoryDirection:NativeHistoryDirection::Undo];
+    [self performNativeHistoryDirection:NativeHistoryDirection::Undo ifCurrent:std::function<bool()>()];
 }
 
 - (void)redo {
-    [self performNativeHistoryDirection:NativeHistoryDirection::Redo];
+    [self performNativeHistoryDirection:NativeHistoryDirection::Redo ifCurrent:std::function<bool()>()];
 }
 
-- (void)performNativeHistoryDirection:(NativeHistoryDirection)direction {
-    if (_viewer == nullptr) return;
+- (BOOL)undoCommittedModelingHistoryIfCurrent:(const std::function<bool()>&)current {
+    return [self performNativeHistoryDirection:NativeHistoryDirection::Undo ifCurrent:current];
+}
+
+- (BOOL)performNativeHistoryDirection:(NativeHistoryDirection)direction
+    ifCurrent:(const std::function<bool()>&)current {
+    if (_viewer == nullptr) return NO;
     Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
     if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
         if ([rawOwner core3d_cancelVisibleRawR2Bevel]) {
@@ -3176,9 +3182,9 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
                 [_delegate viewer:self didEndPrimaryInteractionCancelled:YES];
             }
         }
-        return;
+        return NO;
     }
-    const NativeHistoryTransition result = _viewer->performHistory(direction);
+    const NativeHistoryTransition result = _viewer->performHistory(direction, current);
     if (result.reconcileBooleanTool) {
         if (_delegate != nil && [_delegate respondsToSelector:
             @selector(viewerDidFailToRetainBooleanMode:)]) {
@@ -3197,6 +3203,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
             @selector(viewer:didEndPrimaryInteractionCancelled:)]) {
         [_delegate viewer:self didEndPrimaryInteractionCancelled:YES];
     }
+    return result.outcome == NativeHistoryOutcome::HistoryChanged && result.documentRedrawn;
 }
 
 - (Core3DSelectionTypeChangeResult)

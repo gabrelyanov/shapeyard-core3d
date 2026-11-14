@@ -93,6 +93,7 @@ namespace core3d::composite_recipe { struct Payload; struct Record; }
 #include "CurvedFaceUVUnwrap.hpp"
 class XCAFDoc_VisMaterial;
 class OcctDocument;
+class OcctModelingPlanHistory;
 
 class Message_ProgressRange;
 namespace core3d { class OrdinaryEditController; class Core3DViewer; class BevelOperationController; class SavedCutSourceDetachedResult; class SavedProgramSourceDetachedResult; }
@@ -2428,6 +2429,14 @@ public:
 	Standard_Boolean redo();
     const bool canUndo() const;
     const bool canRedo() const;
+    // Opaque, document-issued history witness for a sequential AI plan. Only
+    // known completed steps may extend it; disposal never adopts unseen work.
+    std::shared_ptr<OcctModelingPlanHistory> CaptureModelingPlanHistory() noexcept;
+    bool IsModelingPlanHistoryCurrent(const std::shared_ptr<OcctModelingPlanHistory>&) const noexcept;
+    bool AcceptModelingPlanHistory(const std::shared_ptr<OcctModelingPlanHistory>&,
+                                  Standard_Integer committedSteps) noexcept;
+    bool DiscardModelingPlanHistory(const std::shared_ptr<OcctModelingPlanHistory>&,
+        const std::function<bool(const std::function<bool()>&)>& undoVerified) noexcept;
     
     std::string save(const std::string& path);
     std::string save(

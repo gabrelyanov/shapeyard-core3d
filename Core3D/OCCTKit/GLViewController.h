@@ -300,6 +300,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)setOrthoProjection:(OrthoProjectionType)orthoType;
 
 - (void)undo;
+//! AI disposal needs the real transition result, including failed restoration,
+//! rather than inferring success from the changed OCAF depth.
+- (BOOL)undoCommittedModelingHistoryIfCurrent:(const std::function<bool()>&)current;
 - (void)redo;
 
 - (void)assetData:(void(^)(NSData *_Nullable))completion;

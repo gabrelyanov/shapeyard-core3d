@@ -29067,6 +29067,115 @@ Standard_Boolean OcctDocument::ApplyTreatmentHistoryAfterHistoryChange(
     } catch (...) { return Standard_False; }
 }
 
+// A retained Handle prevents a removed delta's address being reused while a
+// plan is alive. This is native history identity, not an app-supplied depth.
+class OcctModelingPlanHistory {
+    friend class OcctDocument;
+    const OcctDocument* owner = nullptr;
+    Handle(TDocStd_Document) document;
+    std::vector<Handle(TDF_Delta)> originalUndos, undos, redos;
+    bool retired = false;
+};
+
+namespace {
+std::vector<Handle(TDF_Delta)> ModelingHistoryDeltas(const TDF_DeltaList& list) {
+    return {list.begin(), list.end()};
+}
+bool SameModelingHistory(const TDF_DeltaList& list,
+                         const std::vector<Handle(TDF_Delta)>& expected) {
+    if (list.Size() != expected.size()) return false;
+    auto item = expected.begin();
+    for (const auto& delta : list) {
+        if (delta.IsNull() || delta != *item++) return false;
+    }
+    return true;
+}
+}
+
+std::shared_ptr<OcctModelingPlanHistory> OcctDocument::CaptureModelingPlanHistory() noexcept {
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+            || NativeBooleanOwnerBlocksOtherWork() || HasUnresolvedTreatmentHistoryCompanion()) return {};
+        auto history = std::make_shared<OcctModelingPlanHistory>();
+        history->owner = this; history->document = myOcafDoc;
+        history->originalUndos = history->undos = ModelingHistoryDeltas(myOcafDoc->GetUndos());
+        history->redos = ModelingHistoryDeltas(myOcafDoc->GetRedos());
+        return history;
+    } catch (...) { return {}; }
+}
+
+bool OcctDocument::IsModelingPlanHistoryCurrent(
+    const std::shared_ptr<OcctModelingPlanHistory>& history) const noexcept {
+    try {
+        return [NSThread isMainThread] && history && !history->retired
+            && history->owner == this && !myOcafDoc.IsNull() && history->document == myOcafDoc
+            && !myOcafDoc->HasOpenCommand() && !NativeBooleanOwnerBlocksOtherWork()
+            && !HasUnresolvedTreatmentHistoryCompanion()
+            && SameModelingHistory(myOcafDoc->GetUndos(), history->undos)
+            && SameModelingHistory(myOcafDoc->GetRedos(), history->redos);
+    } catch (...) { return false; }
+}
+
+bool OcctDocument::AcceptModelingPlanHistory(
+    const std::shared_ptr<OcctModelingPlanHistory>& history, Standard_Integer committedSteps) noexcept {
+    try {
+        if (committedSteps == 0) return IsModelingPlanHistoryCurrent(history);
+        if (![NSThread isMainThread] || !history || history->retired || history->owner != this
+            || myOcafDoc.IsNull() || history->document != myOcafDoc || myOcafDoc->HasOpenCommand()
+            || NativeBooleanOwnerBlocksOtherWork() || HasUnresolvedTreatmentHistoryCompanion()
+            || committedSteps < 1 || committedSteps > 128 || !myOcafDoc->GetRedos().IsEmpty()) return false;
+        const auto now = ModelingHistoryDeltas(myOcafDoc->GetUndos());
+        if (now.size() != history->undos.size() + committedSteps
+            || !std::equal(history->undos.begin(), history->undos.end(), now.begin())) return false;
+        history->undos = now;
+        history->redos.clear();
+        return true;
+    } catch (...) { return false; }
+}
+
+bool OcctDocument::DiscardModelingPlanHistory(
+    const std::shared_ptr<OcctModelingPlanHistory>& history,
+    const std::function<bool(const std::function<bool()>&)>& undoVerified) noexcept {
+    try {
+        if (!IsModelingPlanHistoryCurrent(history) || !undoVerified) return false;
+        history->retired = true; // Single-use, including reentrant notifications or failed Undo.
+        if (history->undos == history->originalUndos) return true; // Preserve preexisting user Redo.
+        if (!history->redos.empty()) return false;
+        auto remaining = history->undos;
+        std::vector<Handle(TDF_Delta)> inverses;
+        const auto unchangedOwner = [&] {
+            return myOcafDoc == history->document && !myOcafDoc->HasOpenCommand()
+                && !NativeBooleanOwnerBlocksOtherWork() && !HasUnresolvedTreatmentHistoryCompanion();
+        };
+        while (remaining.size() > history->originalUndos.size()) {
+            if (!unchangedOwner() || !SameModelingHistory(myOcafDoc->GetUndos(), remaining)
+                || !SameModelingHistory(myOcafDoc->GetRedos(), inverses)) return false;
+            // Do not infer success from depth: retained-treatment restoration
+            // can fail after OCAF has already changed the history lists.
+            const auto stillExact = [&] {
+                return unchangedOwner() && SameModelingHistory(myOcafDoc->GetUndos(), remaining)
+                    && SameModelingHistory(myOcafDoc->GetRedos(), inverses);
+            };
+            if (!undoVerified(stillExact) || !unchangedOwner()) return false;
+            remaining.pop_back();
+            if (!SameModelingHistory(myOcafDoc->GetUndos(), remaining)
+                || myOcafDoc->GetRedos().IsEmpty()) return false;
+            // OCAF creates a fresh inverse delta, prepended to Redo. Treatment
+            // companions have already rebound to this actual inverse in undo().
+            inverses.insert(inverses.begin(), myOcafDoc->GetRedos().First());
+            if (!SameModelingHistory(myOcafDoc->GetRedos(), inverses)) return false;
+        }
+        if (remaining != history->originalUndos || !unchangedOwner()
+            || !SameModelingHistory(myOcafDoc->GetUndos(), history->originalUndos)
+            || !SameModelingHistory(myOcafDoc->GetRedos(), inverses)) return false;
+        if (myNativeAuthority) myNativeAuthority->HistoryBoundary(myOcafDoc.get());
+        myOcafDoc->ClearRedos();
+        PruneTreatmentHistoryCompanions();
+        return myOcafDoc->GetRedos().IsEmpty()
+            && SameModelingHistory(myOcafDoc->GetUndos(), history->originalUndos);
+    } catch (...) { return false; }
+}
+
 Standard_Boolean OcctDocument::undo() {
     RetainedValidationOperationScope validationOperation;
     RetireBooleanOriginalsEditor();

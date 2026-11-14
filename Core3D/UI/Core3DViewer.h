@@ -713,7 +713,8 @@ namespace core3d {
         //! Main-thread, preview-aware history shared by native platform hosts.
         //! Host order: Boolean tool reconciliation, selection, render, then
         //! primary-interaction cancellation notification when requested.
-        NativeHistoryTransition performHistory(NativeHistoryDirection direction);
+        NativeHistoryTransition performHistory(NativeHistoryDirection direction,
+            const std::function<bool()>& stillCurrent = {});
         bool retireBooleanAction(BooleanAction action);
         NativeBooleanRetention restoreBooleanAction(BooleanAction action);
         OrdinaryEditLease beginOrdinaryTransform(const std::vector<OrdinaryTransformChange>& changes,
