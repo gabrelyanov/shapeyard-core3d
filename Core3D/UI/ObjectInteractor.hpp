@@ -206,6 +206,8 @@ namespace core3d {
 		//! The last probe's view size, gizmo centre pixel and handle side (pixels).
 		std::array<double, 5> debugScaleProbeFrame() const noexcept { return _debugScaleProbeFrame; }
 		std::array<double, 5> _debugScaleProbeFrame{};
+		//! The last probe's hits: x, y (view pixels) and handle (0..2 cube, 3 sphere).
+		std::vector<std::array<int, 3>> _debugScaleProbeHits;
         
         void SelectAndAttachManipulator(Handle(AIS_InteractiveObject) toObject);
         //! Caller proves committed Object-mode authority and a current identity

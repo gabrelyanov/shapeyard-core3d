@@ -63,6 +63,7 @@
 #include <array>
 #include <algorithm>
 #include <cmath>
+#include <AIS_ManipulatorOwner.hxx>
 #include <limits>
 #include <unordered_set>
 #include <utility>
@@ -2791,30 +2792,34 @@ namespace core3d {
             const int reach = std::max(64, int(_manipulatorSide * 2.5f));
             _debugScaleProbeFrame = {double(width), double(height), double(cx), double(cy), double(_manipulatorSide)};
             std::array<std::vector<std::pair<int, int>>, 4> hits;
+            _debugScaleProbeHits.clear();
             for (int dy = -reach; dy <= reach; dy += 3) {
                 for (int dx = -reach; dx <= reach; dx += 3) {
                     const int x = cx + dx, y = cy + dy;
                     if (x < 0 || y < 0 || x >= width || y >= height) continue;
                     myContext->MoveTo(x, y, myView, Standard_False);
-                    if (!_manipulator->HasActiveMode()) continue;
+                    // What the hit test detects under THIS pixel (the manipulator keeps its
+                    // last active mode after the finger moves off, so that is not enough).
+                    if (!myContext->HasDetected()
+                        || myContext->DetectedInteractive() != _manipulator) continue;
+                    const Handle(AIS_ManipulatorOwner) owner =
+                        Handle(AIS_ManipulatorOwner)::DownCast(myContext->DetectedOwner());
+                    if (owner.IsNull()) continue;
                     int bucket = -1;
-                    if (_manipulator->ActiveMode() == AIS_MM_ScalingUniform) bucket = 3;
-                    else if (_manipulator->ActiveMode() == AIS_MM_Scaling) bucket = _manipulator->ActiveAxisIndex();
+                    if (owner->Mode() == AIS_MM_ScalingUniform) bucket = 3;
+                    else if (owner->Mode() == AIS_MM_Scaling) bucket = owner->Index();
                     if (bucket < 0 || bucket > 3) continue;
                     hits[bucket].emplace_back(x, y);
+                    _debugScaleProbeHits.push_back({x, y, bucket});
                 }
             }
             _manipulator->DeactivateCurrentMode();
             myContext->ClearDetected(Standard_False);
             for (int bucket = 0; bucket < 4; ++bucket) {
                 if (hits[bucket].empty()) continue;
-                // A cube sits at the tip of its arm: take the outermost fifth of
-                // its hits; the sphere is the centre of its hits.
-                double far = 0;
-                for (const auto& [x, y] : hits[bucket]) far = std::max(far, std::hypot(x - cx, y - cy));
+                // The middle of the pixels where the hit test finds this handle.
                 double sumX = 0, sumY = 0, count = 0;
-                for (const auto& [x, y] : hits[bucket])
-                    if (bucket == 3 || std::hypot(x - cx, y - cy) >= 0.8 * far) { sumX += x; sumY += y; count += 1; }
+                for (const auto& [x, y] : hits[bucket]) { sumX += x; sumY += y; count += 1; }
                 if (count > 0) {
                     theFractions[2 * bucket] = sumX / count / width;
                     theFractions[2 * bucket + 1] = sumY / count / height;

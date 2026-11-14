@@ -7642,6 +7642,30 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
     NSMutableArray<NSNumber *> *values = [NSMutableArray arrayWithCapacity:8];
     for (const double value : fractions) [values addObject:@(value)];
     for (const double value : interactor->debugScaleProbeFrame()) [values addObject:@(value)];
+    // A picture of where the hit test finds each handle (X red, Y green, Z blue, sphere white),
+    // one dot per probed pixel, a third of the view size, for comparing with a screenshot.
+    const auto frame = interactor->debugScaleProbeFrame();
+    const CGSize mapSize = CGSizeMake(frame[0] / 3.0, frame[1] / 3.0);
+    if (mapSize.width > 0 && mapSize.height > 0) {
+        UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+        format.scale = 1;
+        UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:mapSize format:format];
+        const auto hits = interactor->_debugScaleProbeHits;
+        UIImage *map = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+            [UIColor.blackColor setFill];
+            UIRectFill(CGRectMake(0, 0, mapSize.width, mapSize.height));
+            NSArray<UIColor *> *colours = @[UIColor.redColor, UIColor.greenColor, UIColor.blueColor, UIColor.whiteColor];
+            for (const auto& hit : hits) {
+                [colours[hit[2]] setFill];
+                UIRectFill(CGRectMake(hit[0] / 3.0 - 0.5, hit[1] / 3.0 - 0.5, 1.2, 1.2));
+            }
+            [UIColor.yellowColor setFill];
+            UIRectFill(CGRectMake(frame[2] / 3.0 - 2, frame[3] / 3.0 - 2, 4, 4));
+        }];
+        [[NSFileManager defaultManager] createDirectoryAtPath:@"/private/tmp/shapeyard-owner-boolean-shots"
+                                  withIntermediateDirectories:YES attributes:nil error:nil];
+        [UIImagePNGRepresentation(map) writeToFile:@"/private/tmp/shapeyard-owner-boolean-shots/scale-touchmap.png" atomically:YES];
+    }
     [GLController requestRender];
     return values;
 }
