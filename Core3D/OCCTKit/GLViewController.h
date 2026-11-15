@@ -49,6 +49,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// While a tool waits for the user to tap a part (Subtract, Union), a tap
 /// that lands on the selected part's move arrows picks the part behind them;
 /// a drag that starts on an arrow still moves the selection. Off by default.
+/// (Plain selection of whole parts lets such a tap through without this.)
 @property (nonatomic, assign) BOOL tapsSelectThroughManipulator;
 @property (nonatomic, assign, readonly) NSUInteger renderedFrameCount;
 @property (nonatomic, assign, readonly) CGSize drawableSize;

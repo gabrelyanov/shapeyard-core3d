@@ -1368,6 +1368,23 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         ? static_cast<Core3DViewController *>(delegate) : nil;
 }
 
+// Plain selection: a tap that begins on the Move or Scale handles of the
+// selected part adds the part behind them (founder walk 15 Nov). One switch;
+// a screen check launches with SHAPEYARD_UITEST_TAPS_STOP_AT_HANDLES to show
+// the behaviour before the repair (Debug builds only).
+static const BOOL kPlainTapsSelectBehindMoveHandles = YES;
+static BOOL PlainTapsSelectBehindMoveHandles()
+{
+#ifdef DEBUG
+    static const BOOL sStoppedByCheck =
+        getenv("SHAPEYARD_UITEST_TAPS_STOP_AT_HANDLES") != nullptr;
+    if (sStoppedByCheck) {
+        return NO;
+    }
+#endif
+    return kPlainTapsSelectBehindMoveHandles;
+}
+
 @implementation GLViewController {
     dispatch_queue_t _assetDataQueue;
     NSUInteger _pendingAssetDataCount;
@@ -2958,6 +2975,43 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 }
 #endif
 
+/// Whether a tap that began on the selected part's handles may go to the part
+/// behind them. Always while a tool waits for a tapped part (the editor sets
+/// tapsSelectThroughManipulator). Also in plain selection of whole parts with
+/// the Move or Scale handles showing: there a tap adds the part behind to the
+/// selection, exactly as a tap beside the handles would, and never takes a
+/// selected part out. Face and Edge selection and every other tool keep the
+/// old behaviour: a tap on a handle changes nothing.
+- (BOOL)tapMaySelectBehindManipulator
+{
+    if (_isPreviewMode || _isConstructorMode || _viewer == nullptr) {
+        return NO;
+    }
+    if (self.tapsSelectThroughManipulator) {
+        return YES;
+    }
+    if (!PlainTapsSelectBehindMoveHandles()) {
+        return NO;
+    }
+    const std::shared_ptr<ObjectInteractor> anInteractor =
+        _viewer->getObjectInteractor();
+    const std::shared_ptr<ShapeInteractor> aShapeInteractor =
+        _viewer->getShapeInteractor();
+    if (anInteractor == nullptr || aShapeInteractor == nullptr) {
+        return NO;
+    }
+    const PrimitiveManipulatorType aType = anInteractor->getManipulatorType();
+    if (aType != PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
+        && aType != PrimitiveManipulatorType::PrimitiveGizmoTypeScale) {
+        return NO;
+    }
+    // The same refusals as an ordinary tap in tapHandler.
+    return aShapeInteractor->getSelectionMode() == ShapeSelectionMode::WholeShape
+        && !anInteractor->hasActiveLinearArray()
+        && !anInteractor->hasActiveRadialArray()
+        && !aShapeInteractor->isShellSelectionFrozen();
+}
+
 /// A tap that began on a move arrow picks the part behind the arrows, but
 /// only after the raw touch has ended and the arrows have closed their own
 /// zero-move gesture: the pick never runs inside that gesture (an attempt
@@ -2967,8 +3021,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     if (!_pendingTapBehindManipulator) {
         return;
     }
-    if (!self.tapsSelectThroughManipulator || _isPreviewMode
-        || _isConstructorMode || _viewer == nullptr) {
+    if (![self tapMaySelectBehindManipulator]) {
         _pendingTapBehindManipulator = NO;
         return;
     }
@@ -2998,8 +3051,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 {
     if (_suppressTapSelectionForManipulatorInteraction) {
         _suppressTapSelectionForManipulatorInteraction = NO;
-        if (self.tapsSelectThroughManipulator && !_isPreviewMode
-            && !_isConstructorMode) {
+        if ([self tapMaySelectBehindManipulator]) {
             _pendingTapBehindManipulatorPoint =
                 [self drawablePointForPoint:
                     [tapRecognizer locationInView:self.view]];
