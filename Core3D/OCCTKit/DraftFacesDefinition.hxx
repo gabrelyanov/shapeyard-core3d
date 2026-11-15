@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CompositeRecipeDefinition.hxx"
+#include "RetainedBooleanProgram.hxx"
 #include "RetainedRecipeIdentity.hxx"
 #include <algorithm>
 #include <array>
@@ -55,6 +56,10 @@ struct Definition final {
     std::array<double, 3> pullDirectionLocal{};
     double signedAngleRadians = 0;
     std::vector<FaceIntent> faces;
+    // A retained first Hole is replayed after Draft has changed its analytic
+    // source. Only the canonical legacy one-cut envelope is admitted here;
+    // wider retained programs need their own ordered composite suffix.
+    std::vector<std::uint8_t> retainedCutBytes;
     bool operator==(const Definition&) const noexcept = default;
 };
 
@@ -247,6 +252,18 @@ inline bool Validate(const Definition& value, Refusal& refusal) noexcept {
         if (value.faces.empty() || value.faces.size() > MaximumFaces) {
             refusal = Refusal::InvalidFaceIntent; return false;
         }
+        if (!value.retainedCutBytes.empty()) {
+            retained_boolean::Recipe retained;
+            std::vector<std::uint8_t> exact;
+            if (!retained_boolean::Decode(value.retainedCutBytes, retained)
+                || !std::holds_alternative<retained_boolean::Legacy>(retained)
+                || !retained_boolean::Encode(retained, exact)
+                || exact != value.retainedCutBytes
+                || retained_boolean::Identities(retained).metersPerUnit
+                    != value.metersPerLocalUnit) {
+                refusal = Refusal::MalformedPayload; return false;
+            }
+        }
         std::set<UUID> identifiers;
         for (const auto& face : value.faces) {
             if (!retained_recipe::Nonzero(face.identifier)
@@ -281,7 +298,8 @@ inline bool Encode(const Definition& value, std::vector<std::uint8_t>& output) n
         detail::Writer writer;
         writer.raw("SYDF", 4); writer.integer(CodecVersion, 1);
         writer.integer(value.selectorVersion, 1); writer.integer(value.proofVersion, 1);
-        writer.integer(0, 1); writer.scalar(value.metersPerLocalUnit);
+        writer.integer(value.retainedCutBytes.empty() ? 0 : 1, 1);
+        writer.scalar(value.metersPerLocalUnit);
         for (double component : value.neutralOriginLocal) writer.scalar(component);
         for (double component : value.neutralNormalLocal) writer.scalar(component);
         for (double component : value.pullDirectionLocal) writer.scalar(component);
@@ -296,6 +314,10 @@ inline bool Encode(const Definition& value, std::vector<std::uint8_t>& output) n
             for (double component : face.outwardNormalLocal) writer.scalar(component);
             writer.raw(face.selectorProof);
         }
+        if (!value.retainedCutBytes.empty()) {
+            writer.integer(value.retainedCutBytes.size(), 4);
+            writer.raw(value.retainedCutBytes.data(), value.retainedCutBytes.size());
+        }
         if (!writer.valid || writer.bytes.size() > MaximumPayloadBytes) return false;
         output = std::move(writer.bytes); return true;
     } catch (...) { output.clear(); return false; }
@@ -307,11 +329,12 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes, Definition& output) n
         if (bytes.size() < 204 || bytes.size() > MaximumPayloadBytes
             || std::memcmp(bytes.data(), "SYDF", 4) != 0) return false;
         detail::Reader reader{bytes}; std::array<std::uint8_t, 4> magic{};
-        std::uint64_t schema = 0, selector = 0, proof = 0, reserved = 0, count = 0;
+        std::uint64_t schema = 0, selector = 0, proof = 0, suffix = 0;
+        std::uint64_t reserved = 0, count = 0;
         Definition decoded;
         if (!reader.raw(magic) || !reader.integer(1, schema)
             || !reader.integer(1, selector) || !reader.integer(1, proof)
-            || !reader.integer(1, reserved) || reserved != 0
+            || !reader.integer(1, suffix) || suffix > 1
             || !reader.scalar(decoded.metersPerLocalUnit)) return false;
         decoded.schema = std::uint32_t(schema);
         decoded.selectorVersion = std::uint8_t(selector);
@@ -340,6 +363,15 @@ inline bool Decode(const std::vector<std::uint8_t>& bytes, Definition& output) n
             for (double& component : face.outwardNormalLocal)
                 if (!reader.scalar(component)) return false;
             if (!reader.raw(face.selectorProof)) return false;
+        }
+        if (suffix == 1) {
+            std::uint64_t size = 0;
+            if (!reader.integer(4, size) || size == 0
+                || size > MaximumPayloadBytes || size > bytes.size() - reader.position)
+                return false;
+            decoded.retainedCutBytes.resize(std::size_t(size));
+            if (!reader.raw(decoded.retainedCutBytes.data(), decoded.retainedCutBytes.size()))
+                return false;
         }
         Refusal refusal; std::vector<std::uint8_t> exact;
         if (!reader.complete() || !Validate(decoded, refusal) || !Encode(decoded, exact)

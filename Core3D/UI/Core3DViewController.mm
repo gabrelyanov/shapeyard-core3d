@@ -4172,6 +4172,13 @@ void B1SetRawPreviewSession(Core3DEdgeTreatmentRawPreviewSessionR2 *value,
     [value setValue:@(NSInteger(candidate?candidate->kind():
         core3d::retained_edge_treatment::Kind::ConstantFillet)) forKey:@"kind"];
     [value setValue:@(candidate?candidate->amountMM():0) forKey:@"amountMM"];
+    const Core3DEdgeTreatmentRawPreviewRefusalKindR2 refusalKind =
+        status != Core3DEdgeTreatmentRawPreviewStatusR2Refused
+            ? Core3DEdgeTreatmentRawPreviewRefusalKindR2None
+            : refusal == core3d::retained_edge_treatment::Refusal::Clearance
+                ? Core3DEdgeTreatmentRawPreviewRefusalKindR2RadiusRefused
+                : Core3DEdgeTreatmentRawPreviewRefusalKindR2Other;
+    [value setValue:@(refusalKind) forKey:@"refusalKind"];
     [value setValue:@(core3d::retained_edge_treatment::RefusalCode(refusal))
         forKey:@"refusalCode"];
     [value setValue:@(core3d::retained_edge_treatment::RefusalMessage(refusal))
@@ -4191,6 +4198,13 @@ Core3DEdgeTreatmentRawPreviewResultR2 *B1RawPreviewResult(
     [value setValue:@(NSInteger(candidate?candidate->kind():
         core3d::retained_edge_treatment::Kind::ConstantFillet)) forKey:@"kind"];
     [value setValue:@(candidate?candidate->amountMM():0) forKey:@"amountMM"];
+    const Core3DEdgeTreatmentRawPreviewRefusalKindR2 refusalKind =
+        status != Core3DEdgeTreatmentRawPreviewStatusR2Refused
+            ? Core3DEdgeTreatmentRawPreviewRefusalKindR2None
+            : refusal == core3d::retained_edge_treatment::Refusal::Clearance
+                ? Core3DEdgeTreatmentRawPreviewRefusalKindR2RadiusRefused
+                : Core3DEdgeTreatmentRawPreviewRefusalKindR2Other;
+    [value setValue:@(refusalKind) forKey:@"refusalKind"];
     [value setValue:@(core3d::retained_edge_treatment::RefusalCode(refusal))
         forKey:@"refusalCode"];
     [value setValue:@(core3d::retained_edge_treatment::RefusalMessage(refusal))
@@ -4734,6 +4748,8 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
     Core3DEdgeTreatmentOperation *_visibleRawR2BevelOperation;
     Core3DEdgeTreatmentRawPreviewStatusR2 _visibleRawR2BevelStatus;
     uint64_t _visibleRawR2BevelGeneration;
+    Core3DEdgeTreatmentRawPreviewRefusalKindR2
+        _visibleRawR2BevelRefusalKind;
     double _visibleRawR2BevelMetersPerUnit;
     NSNumber *_visibleRawR2BevelPendingValue;
     NSNumber *_visibleRawR2BevelLastRequestedValue;
@@ -4754,16 +4770,38 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
         || GLController.viewer->hasUnresolvedEdit()) return NO;
     Core3DSceneSnapshot *scene = [self captureSceneSnapshot];
     if (!scene || scene.selectionMode != Core3DSceneElementKindEdge
-        || scene.selection.selectedElements.count != 1) return NO;
+        || scene.selection.selectedElements.count == 0) return NO;
     Core3DSceneElementIdentifier *selected = scene.selection.selectedElements.firstObject;
     if (selected.kind != Core3DSceneElementKindEdge
         || selected.entityIdentifier.length == 0) return NO;
-    Core3DEdgeTreatmentCaptureR2 *capture =
-        [self captureEdgeTreatmentR2:selected.entityIdentifier expected:scene];
-    return capture.status == Core3DEdgeTreatmentStatusCurrentEditable
-        && capture.snapshot != nil && capture.snapshot.current
-        && capture.snapshot.dimensionMetersPerUnit > 0.0
-        && std::isfinite(capture.snapshot.dimensionMetersPerUnit);
+    for (Core3DSceneElementIdentifier *element
+            in scene.selection.selectedElements) {
+        if (element.kind != Core3DSceneElementKindEdge
+            || ![element.entityIdentifier
+                isEqualToString:selected.entityIdentifier]) return NO;
+    }
+
+    // Use the same native capture that begin consumes, but do not bind it to
+    // Object mode or expose it through the consuming bridge. This is a
+    // read-only proof over the live owners; begin repeats it and captures a
+    // fresh authority, so this answer cannot authorize a later selection.
+    const CGSize size = GLController.drawableSize;
+    core3d::ObjectFrameIdentity identity;
+    identity.entityIdentifier = selected.entityIdentifier.UTF8String;
+    identity.publicationSourceIdentifier =
+        scene.publicationSourceIdentifier.UTF8String;
+    identity.documentGeneration = scene.revisions.documentGeneration;
+    identity.modelRevision = scene.revisions.modelRevision;
+    core3d::retained_edge_treatment::Refusal refusal;
+    const auto targets = GLController.viewer->captureEdgeTreatmentRawTargetsR2(
+        identity, scene.revisions.presentationRevision,
+        std::uint32_t(size.width), std::uint32_t(size.height), refusal);
+    if (!targets || targets->anchors().size()
+            != scene.selection.selectedElements.count) return NO;
+    const auto snapshot = targets->snapshot();
+    return snapshot && snapshot->current()
+        && snapshot->dimensionMetersPerUnit() > 0.0
+        && std::isfinite(snapshot->dimensionMetersPerUnit());
 }
 
 - (BOOL)core3d_beginVisibleRawR2Bevel {
@@ -4785,6 +4823,8 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
     _visibleRawR2BevelOperation = nil;
     _visibleRawR2BevelStatus = session.status;
     _visibleRawR2BevelGeneration = session.generation;
+    _visibleRawR2BevelRefusalKind =
+        Core3DEdgeTreatmentRawPreviewRefusalKindR2None;
     _visibleRawR2BevelMetersPerUnit = targets.snapshot.dimensionMetersPerUnit;
     _visibleRawR2BevelPendingValue = nil;
     _visibleRawR2BevelLastRequestedValue = nil;
@@ -4834,6 +4874,26 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
     return _visibleRawR2BevelActive ? _visibleRawR2BevelMetersPerUnit : 0.0;
 }
 
+- (Core3DRoundFailureObservation)
+core3d_visibleRawR2RoundFailureObservation {
+    Core3DRoundFailureObservation result = {
+        _visibleRawR2BevelGeneration,
+        Core3DRoundFailureKindNone,
+    };
+    if (!_visibleRawR2BevelActive) return result;
+    switch (_visibleRawR2BevelRefusalKind) {
+        case Core3DEdgeTreatmentRawPreviewRefusalKindR2None:
+            break;
+        case Core3DEdgeTreatmentRawPreviewRefusalKindR2RadiusRefused:
+            result.kind = Core3DRoundFailureKindRadiusRefused;
+            break;
+        case Core3DEdgeTreatmentRawPreviewRefusalKindR2Other:
+            result.kind = Core3DRoundFailureKindOther;
+            break;
+    }
+    return result;
+}
+
 - (void)core3d_publishVisibleRawR2BevelState {
     const Core3DModelingPreviewStatus status =
         [self core3d_visibleRawR2BevelStatus];
@@ -4848,6 +4908,8 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
     _visibleRawR2BevelPendingValue = nil;
     _visibleRawR2BevelUpdateInFlight = YES;
     _visibleRawR2BevelStatus = Core3DEdgeTreatmentRawPreviewStatusR2Building;
+    _visibleRawR2BevelRefusalKind =
+        Core3DEdgeTreatmentRawPreviewRefusalKindR2None;
     [self core3d_publishVisibleRawR2BevelState];
     const double amountMM = std::abs(localValue)
         * _visibleRawR2BevelMetersPerUnit * 1000.0;
@@ -4869,6 +4931,7 @@ bool B1Placement(Core3DRetainedBooleanInputPlacementR2 *dto,core3d::composite_re
                 strongSelf->_visibleRawR2BevelUpdateInFlight = NO;
                 strongSelf->_visibleRawR2BevelStatus = result.status;
                 strongSelf->_visibleRawR2BevelGeneration = result.generation;
+                strongSelf->_visibleRawR2BevelRefusalKind = result.refusalKind;
                 if (result.status
                         == Core3DEdgeTreatmentRawPreviewStatusR2Cancelled
                     || result.status
@@ -20446,6 +20509,28 @@ static bool Core3DPublishCommittedSpatialSweep(
     GLController.viewer->setTriedronLift(static_cast<int>(std::lround(std::max<CGFloat>(0, points) * scale)));
 }
 
+- (NSArray<NSNumber *> *_Nullable)liveMoveOffsetMeters {
+    if (![NSThread isMainThread] || !_isSetuped || !GLController || !GLController.viewer) return nil;
+    try {
+        const auto interactor = GLController.viewer->getObjectInteractor();
+        double x = 0, y = 0, z = 0;
+        if (!interactor || !interactor->liveGestureOffset(x, y, z)) return nil;
+        const auto owner = GLController.viewer->getDocument();
+        if (owner.IsNull()) return nil;
+        const auto document = owner->ChangeDocument();
+        Standard_Real metersPerUnit = 0.001;
+        if (document.IsNull()) return nil;
+        const bool hasUnit = XCAFDoc_DocumentTool::GetLengthUnit(document, metersPerUnit);
+        if ((!hasUnit && metersPerUnit != 0.001) || !std::isfinite(metersPerUnit)
+            || metersPerUnit <= 0.0) return nil;
+        const double values[3] = {x * metersPerUnit, y * metersPerUnit, z * metersPerUnit};
+        for (double value : values) { if (!std::isfinite(value)) return nil; }
+        return @[@(values[0]), @(values[1]), @(values[2])];
+    } catch (...) {
+        return nil;
+    }
+}
+
 - (BOOL)setGeometrySnappingTolerance:(double)tolerance {
     if (![NSThread isMainThread] || !_isSetuped || !GLController
         || !GLController.viewer || !GLController.viewer->canBeginCommittedEdit()) return NO;
@@ -27102,8 +27187,17 @@ std::unordered_map<NSUInteger,B2BudgetSessionBox>& B2BudgetSessions(){
                     // native value synchronously: GLController publishes its
                     // selection callback immediately after redraw and asserts
                     // that these two authorities already agree.
+                    // A retained raw-R2 or ordinary typed Bevel/Round session
+                    // may have no ObjectInteractor manipulator. Its public
+                    // tool authority is still Chamfer until that session is
+                    // applied or cancelled; renderer-driven interactor
+                    // recreation must not publish a transient None over it.
                     strongSelf->_currentGizmoType =
-                        static_cast<PrimitiveGizmoType>(nativeType);
+                        [strongSelf core3d_hasVisibleRawR2Bevel]
+                            || [(GLViewController *)strongSelf.glController
+                                hasActiveBevel]
+                            ? PrimitiveGizmoTypeChamfer
+                            : static_cast<PrimitiveGizmoType>(nativeType);
                     strongSelf.can_apply = NO;
                 });
         }

@@ -5,6 +5,7 @@
 #include "RetainedTopologyBudget.hxx"
 #include "RectangularLoftPersistence.hxx"
 #include "RetainedFaceSelector.hxx"
+#include "FilletFailureClassifier.hxx"
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
@@ -860,7 +861,11 @@ inline bool BuildWorkingStage(const Definition& definition, const Step& step,
         }
         build.Build();
         if (stop.load()) { refusal = Refusal::Cancelled; return false; }
-        if (!build.IsDone()) { refusal = Refusal::BuildFailed; return false; }
+        if (!build.IsDone()) {
+            refusal = fillet_failure::IsClearanceRefusal(build)
+                ? Refusal::Clearance : Refusal::BuildFailed;
+            return false;
+        }
         candidate = build.Shape();
     }
 #if DEBUG
