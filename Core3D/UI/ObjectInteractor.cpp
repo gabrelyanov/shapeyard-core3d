@@ -1901,16 +1901,34 @@ Standard_Boolean DuplicateFaceFinishesMatch(
         if (activeGroups + copiedGroups > 128) { return; }
 
         Bnd_Box overallBox;
-        for (const DuplicateSource& source : sources) {
-            Bnd_Box b;
-            source.presentation->BoundingBox(b);
-            if (b.IsVoid()) { return; }
-            if(overallBox.IsVoid()) {
-                overallBox = b;
-            } else {
+        try {
+            for (const DuplicateSource& source : sources) {
+                Bnd_Box b;
+                const gp_Trsf transform = source.presentation->LocalTransformation();
+                if (source.representation == OcctGeometryRepresentation::TriangleMesh) {
+                    for (TopExp_Explorer faces(source.ownerShape, TopAbs_FACE); faces.More(); faces.Next()) {
+                        TopLoc_Location location;
+                        const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(faces.Current()), location);
+                        if (mesh.IsNull()) { return; }
+                        for (int node = 1; node <= mesh->NbNodes(); ++node) {
+                            auto point = mesh->Node(node).Transformed(location.Transformation());
+                            point.Transform(transform);
+                            if (!IsFiniteBoundedPoint(point)) { return; }
+                            b.Add(point);
+                        }
+                    }
+                } else {
+                    // Measure the part as it stands, not a rotated local AABB
+                    // or presentation bounds enlarged for drawing tolerances.
+                    BRepBuilderAPI_Transform world(source.ownerShape, transform,
+                                                   Standard_True, Standard_False);
+                    if (!world.IsDone() || world.Shape().IsNull()) { return; }
+                    BRepBndLib::AddOptimal(world.Shape(), b, Standard_False, Standard_False);
+                }
+                if (b.IsVoid() || b.IsOpen()) { return; }
                 overallBox.Add(b);
             }
-        }
+        } catch (...) { return; }
 
 		if (overallBox.IsVoid()) { return; }
 		
@@ -1924,12 +1942,13 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 			return;
 		}
         
-        // Duplicate always uses a small world-space nudge. A source's
-        // dimensions, rotation or scale must not magnify or redirect it.
+        // Keep the legacy one-width spacing, measured after the selected
+        // parts' scale and rotation. Translate along world X with a 1 mm floor.
+        // A selected set moves together so its relative layout is preserved.
         double metersPerUnit = 0;
         bool hasLengthUnit = false;
         if (!ReadMirrorDocumentUnits(doc, metersPerUnit, hasLengthUnit)) { return; }
-        const double nudge = 0.010 / metersPerUnit;
+        const double nudge = std::max(w, 0.001 / metersPerUnit);
         if (!std::isfinite(nudge) || nudge <= 0.0
             || nudge > limits::kMaximumModelCoordinateMagnitude) { return; }
         const gp_Vec aDisplacement(nudge, 0.0, 0.0);
