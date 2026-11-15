@@ -1893,6 +1893,11 @@ public:
         const TDF_Label& target, const Handle(AIS_Shape)& targetPresentation,
         const TDF_Label& tool, const Handle(AIS_Shape)& toolPresentation,
         int operation, std::string& refusal) noexcept;
+    //! A previous Join/Cut/Overlap result whose only record is its Boolean (originals) record:
+    //! `record` names that record so a tool that bakes the part (Bevel) can drop it in its own
+    //! command (Undo brings the editable result back). False for every other part.
+    Standard_EXPORT Standard_Boolean BooleanResultRecordForBake(
+        const TDF_Label& label, TDF_Label& record) const noexcept;
     //! The same for several parts in ONE undoable command. Cut (1): every part in
     //! `targets` loses every part in `tools`; Join (0) and Overlap (2): one target
     //! (Overlap: one tool). Every tool is removed. Main thread.

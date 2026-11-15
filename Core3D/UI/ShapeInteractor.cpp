@@ -2400,6 +2400,12 @@ namespace core3d {
 			if (aCoverage == OcctRetainedRecipeCoverage::Absent) {
 				return Standard_True;
 			}
+			// A fresh Join/Cut result: bevelled as a plain solid, its Boolean record baked in
+			// the Bevel command (no retained treatment capture).
+			TDF_Label aBooleanRecord;
+			if (myDoc->BooleanResultRecordForBake(theSelection.documentLabel, aBooleanRecord)) {
+				return Standard_True;
+			}
 			if ((aCoverage != OcctRetainedRecipeCoverage::CurrentProfile
 					&& aCoverage
 						!= OcctRetainedRecipeCoverage::PresentOutsideP4Coverage)

@@ -13081,6 +13081,20 @@ bool BakedBooleanBatchPreviewShape(const Handle(OcctDocument)& document,
 }
 } // namespace core3d
 
+Standard_Boolean OcctDocument::BooleanResultRecordForBake(
+    const TDF_Label& label, TDF_Label& record) const noexcept {
+    record.Nullify();
+    try {
+        if (label.IsNull()
+            || RetainedRecipeCoverageForLabel(label) != OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
+            || !core3d::composite_recipe::HasRecord(label)) return Standard_False;
+        TDF_Label baked;
+        if (!BakedBooleanAdmits(*this, label, baked) || baked.IsNull()) return Standard_False;
+        record = baked;
+        return Standard_True;
+    } catch (...) { record.Nullify(); return Standard_False; }
+}
+
 Standard_Boolean OcctDocument::ApplyBakedBoolean(
     const TDF_Label& target, const Handle(AIS_Shape)& targetPresentation,
     const TDF_Label& tool, const Handle(AIS_Shape)& toolPresentation,
