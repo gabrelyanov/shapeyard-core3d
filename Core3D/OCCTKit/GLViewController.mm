@@ -90,6 +90,63 @@ using namespace core3d;
 
 namespace {
 
+// Founder 15 Nov 2026: while whole objects are worked on, an edge between two faces that meet
+// smoothly (a fillet, the halves of a revolved face) and a closed seam between flat faces in one
+// plane (what a Join leaves) are not drawn when both faces look the same, so a model reads as an
+// object, not as a drawing. A crease, the outline, a border between two colours and a Split line
+// are drawn as always. The class of each edge was decided once at tessellation
+// (MeshSnapshot::edgeDrawClasses); this only reads it and compares the two faces' materials.
+// Returns the edge numbers of one drawn part that are left out; the black lines and the white
+// lines of a selected part both use it. Face and Edge modes never call it.
+template <class Scene, class Mesh, class Item>
+std::unordered_set<std::uint32_t> NativeLeftOutEdges(const Scene& scene, const Mesh& mesh, const Item& item)
+{
+    std::unordered_set<std::uint32_t> leftOut;
+    if (mesh.edgeDrawClasses.empty() || item.primitiveBindings.size() != mesh.primitives.size())
+        return leftOut;
+    const std::uint32_t noFace = std::numeric_limits<std::uint32_t>::max();
+    std::unordered_map<std::uint32_t, std::size_t> primitiveOfFace;
+    for (std::size_t index = 0; index < mesh.primitives.size(); ++index)
+        primitiveOfFace.emplace(mesh.primitives[index].faceIndex, index);
+    std::unordered_map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> facesOfEdge;
+    for (const auto& edge : mesh.edgeSegments) {
+        if (edge.edgeIndex >= mesh.edgeDrawClasses.size()
+            || mesh.edgeDrawClasses[edge.edgeIndex] == 0) continue;
+        auto& faces = facesOfEdge.emplace(edge.edgeIndex,
+            std::make_pair(edge.faceIndex, noFace)).first->second;
+        if (faces.first != edge.faceIndex && faces.second == noFace) faces.second = edge.faceIndex;
+    }
+    const auto sameLook = [&](std::uint32_t first, std::uint32_t second) {
+        if (first == second) return true;
+        if (first >= scene.materials.size() || second >= scene.materials.size()) return false;
+        const auto& a = scene.materials[first];
+        const auto& b = scene.materials[second];
+        const auto plain = [](const auto& material) {
+            return material.baseColorTextureIndex < 0 && material.emissiveTextureIndex < 0
+                && material.metallicRoughnessTextureIndex < 0
+                && material.occlusionTextureIndex < 0 && material.normalTextureIndex < 0;
+        };
+        const auto about = [](float x, float y) { return std::abs(x - y) < 1.0e-3f; };
+        return plain(a) && plain(b) && a.alphaMode == b.alphaMode
+            && about(a.baseColor.x, b.baseColor.x) && about(a.baseColor.y, b.baseColor.y)
+            && about(a.baseColor.z, b.baseColor.z) && about(a.baseColor.w, b.baseColor.w)
+            && about(a.emission.x, b.emission.x) && about(a.emission.y, b.emission.y)
+            && about(a.emission.z, b.emission.z)
+            && about(a.metallic, b.metallic) && about(a.roughness, b.roughness);
+    };
+    for (const auto& entry : facesOfEdge) {
+        if (entry.second.second == noFace) continue;
+        const auto first = primitiveOfFace.find(entry.second.first);
+        const auto second = primitiveOfFace.find(entry.second.second);
+        if (first == primitiveOfFace.end() || second == primitiveOfFace.end()) continue;
+        const auto& a = item.primitiveBindings[first->second];
+        const auto& b = item.primitiveBindings[second->second];
+        if (a.visible && b.visible && sameLook(a.materialIndex, b.materialIndex))
+            leftOut.insert(entry.first);
+    }
+    return leftOut;
+}
+
 void RemoveNativeSelectionStructure(Handle(Graphic3d_Structure)& structure)
 {
     if (structure.IsNull()) return;
@@ -1911,64 +1968,15 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
             };
             std::vector<gp_Pnt> points;
             std::unordered_map<std::uint32_t, std::uint32_t> incidentFace;
-            // Founder 15 Nov 2026: while whole objects are worked on, an edge between two
-            // faces that meet smoothly (a fillet, the halves of a revolved face) and a closed
-            // seam between flat faces in one plane (what a Join leaves) are not drawn when
-            // both faces look the same, so a model reads as an object, not as a drawing. A
-            // crease, the outline, a border between two colours and a Split line are drawn as
-            // always; Face and Edge modes draw every edge. The class of each edge was decided
-            // once at tessellation (MeshSnapshot::edgeDrawClasses); nothing is searched here.
-            // The white lines of a selected part are a separate structure and are not touched.
-            const bool leavesEdgesOut = objectMode == 1
-                && scene->selectionMode == core3d::scene::ElementKind::Object
-                && !mesh.edgeDrawClasses.empty();
-            const std::uint32_t noFace = std::numeric_limits<std::uint32_t>::max();
-            std::unordered_map<std::uint32_t, std::size_t> primitiveOfFace;
-            std::unordered_map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> facesOfEdge;
-            if (leavesEdgesOut) {
-                for (std::size_t index = 0; index < mesh.primitives.size(); ++index)
-                    primitiveOfFace.emplace(mesh.primitives[index].faceIndex, index);
-                for (const auto& edge : mesh.edgeSegments) {
-                    if (edge.edgeIndex >= mesh.edgeDrawClasses.size()
-                        || mesh.edgeDrawClasses[edge.edgeIndex] == 0) continue;
-                    auto& faces = facesOfEdge.emplace(edge.edgeIndex,
-                        std::make_pair(edge.faceIndex, noFace)).first->second;
-                    if (faces.first != edge.faceIndex && faces.second == noFace)
-                        faces.second = edge.faceIndex;
-                }
-            }
-            const auto sameLook = [&](std::uint32_t first, std::uint32_t second) {
-                if (first == second) return true;
-                if (first >= scene->materials.size() || second >= scene->materials.size()) return false;
-                const auto& a = scene->materials[first];
-                const auto& b = scene->materials[second];
-                const auto plain = [](const auto& material) {
-                    return material.baseColorTextureIndex < 0 && material.emissiveTextureIndex < 0
-                        && material.metallicRoughnessTextureIndex < 0
-                        && material.occlusionTextureIndex < 0 && material.normalTextureIndex < 0;
-                };
-                const auto about = [](float x, float y) { return std::abs(x - y) < 1.0e-3f; };
-                return plain(a) && plain(b) && a.alphaMode == b.alphaMode
-                    && about(a.baseColor.x, b.baseColor.x) && about(a.baseColor.y, b.baseColor.y)
-                    && about(a.baseColor.z, b.baseColor.z) && about(a.baseColor.w, b.baseColor.w)
-                    && about(a.emission.x, b.emission.x) && about(a.emission.y, b.emission.y)
-                    && about(a.emission.z, b.emission.z)
-                    && about(a.metallic, b.metallic) && about(a.roughness, b.roughness);
-            };
-            const auto leftOut = [&](std::uint32_t edgeIndex) {
-                if (!leavesEdgesOut) return false;
-                const auto faces = facesOfEdge.find(edgeIndex);
-                if (faces == facesOfEdge.end() || faces->second.second == noFace) return false;
-                const auto first = primitiveOfFace.find(faces->second.first);
-                const auto second = primitiveOfFace.find(faces->second.second);
-                if (first == primitiveOfFace.end() || second == primitiveOfFace.end()) return false;
-                const auto& a = item.primitiveBindings[first->second];
-                const auto& b = item.primitiveBindings[second->second];
-                return a.visible && b.visible && sameLook(a.materialIndex, b.materialIndex);
-            };
+            // Object mode only: smooth edges and closed same-plane seams between faces that
+            // look the same are left out (see NativeLeftOutEdges). The white lines of a
+            // selected part follow the same rule in updateSelectedSurfaceAppearance.
+            const auto leftOutEdges = (objectMode == 1
+                    && scene->selectionMode == core3d::scene::ElementKind::Object)
+                ? NativeLeftOutEdges(*scene, mesh, item) : std::unordered_set<std::uint32_t>();
             for (const auto& edge : mesh.edgeSegments) {
                 if (!visibleFaces.count(edge.faceIndex)) continue;
-                if (leftOut(edge.edgeIndex)) continue;
+                if (leftOutEdges.count(edge.edgeIndex)) continue;
                 const auto inserted = incidentFace.emplace(edge.edgeIndex, edge.faceIndex);
                 if (!inserted.second && inserted.first->second != edge.faceIndex) continue;
                 // Match the selected-overlay cap. Never publish a partial scene.
@@ -2148,9 +2156,16 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         };
         std::unordered_map<std::uint32_t, std::uint32_t> incidentFace;
         const auto before = points.size();
+        // A selected whole part shows its outline and its creases in white, not its smooth
+        // edges or closed seams (founder, 15 Nov 2026). Face mode draws every edge of the
+        // chosen faces as before.
+        const auto leftOutEdges = (!faceMode && selection->second.object
+                && scene->selectionMode == core3d::scene::ElementKind::Object)
+            ? NativeLeftOutEdges(*scene, mesh, item) : std::unordered_set<std::uint32_t>();
         for (const auto& edge : mesh.edgeSegments) {
             if (!visibleFaces.count(edge.faceIndex)) continue;
             if (!selection->second.object && !selection->second.faces.count(edge.faceIndex)) continue;
+            if (leftOutEdges.count(edge.edgeIndex)) continue;
             const auto inserted = incidentFace.emplace(edge.edgeIndex, edge.faceIndex);
             // Keep every segment of a curved edge, but only one incident face.
             if (!inserted.second && inserted.first->second != edge.faceIndex) continue;
