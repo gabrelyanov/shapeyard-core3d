@@ -1274,6 +1274,7 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 - (void)clearCommittedBoundaries;
 - (void)updateCommittedBoundaries;
 - (void)updateSplitBoundaries:(const Handle(AIS_Shape)&)presentation;
+- (void)updateBoundariesOfPresentations:(const std::vector<Handle(AIS_Shape)>&)presentations;
 - (void)performNativeHistoryDirection:(NativeHistoryDirection)direction;
 - (void)addCube:(UIBarButtonItem *)sender;
 - (BOOL)restoreBooleanActionForRetainedGizmoType:(PrimitiveGizmoType)type;
@@ -1360,6 +1361,9 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     // and closed same-plane seams are left out then, and must come back in Face and Edge mode.
     int _committedBoundaryObjectMode;
     Handle(AIS_Shape) _splitBoundaryPresentation;
+    // Every shape whose own edges are drawn now in place of the committed lines: the Split
+    // candidate, or the result a tool is previewing (the first one is also kept above).
+    std::vector<Handle(AIS_Shape)> _boundaryPresentations;
     BOOL _rawTouchRendering;
     BOOL _rawTouchWasCancelled;
     NSMutableSet<UITouch *> *_rawViewportTouches;
@@ -1760,11 +1764,23 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     for (auto& structure : _committedBoundaries) RemoveNativeSelectionStructure(structure);
     _committedBoundaries.clear();
     _splitBoundaryPresentation.Nullify();
+    _boundaryPresentations.clear();
     _committedBoundariesDirty = YES;
 }
 
 - (void)updateSplitBoundaries:(const Handle(AIS_Shape)&)presentation {
-    if (!_committedBoundariesDirty && _splitBoundaryPresentation == presentation) return;
+    const std::vector<Handle(AIS_Shape)> one{presentation};
+    [self updateBoundariesOfPresentations:one];
+}
+
+// The edges of shapes that are on screen but not in the document yet: the Split candidate, and
+// (HOLE-TOOLS-DIAGNOSIS 15 Nov, Q4) the result a tool is previewing. A previewed Shell showed no
+// opening and a previewed Cut no pocket, because a flat grey result without edge lines has
+// nothing to show them by. The lines live in this view's own structures; the shapes themselves
+// are not touched, so nothing stays behind when the tick turns a preview into the part.
+- (void)updateBoundariesOfPresentations:(const std::vector<Handle(AIS_Shape)>&)presentations {
+    if (presentations.empty()) return;
+    if (!_committedBoundariesDirty && _boundaryPresentations == presentations) return;
     std::vector<Handle(Graphic3d_Structure)> replacements;
     try {
         // Use the candidate's display tessellation, never triangle wireframe.
@@ -1772,6 +1788,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         // exactly as the committed scene extractor does. No document writes or
         // remeshing are needed, including while the preview command is open.
         std::vector<gp_Pnt> points;
+        for (const Handle(AIS_Shape)& presentation : presentations) {
         TopTools_IndexedMapOfShape faces, drawnEdges;
         TopExp::MapShapes(presentation->Shape(), TopAbs_FACE, faces);
         const auto transform = presentation->LocalTransformation();
@@ -1806,6 +1823,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
                 }
             }
         }
+        }
         if (!points.empty()) {
             Handle(Graphic3d_Structure) boundaries = new Graphic3d_Structure(_viewer->V3dViewer()->StructureManager());
             replacements.push_back(boundaries);
@@ -1826,7 +1844,8 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         [self clearCommittedBoundaries];
         _committedBoundaries = std::move(replacements);
         for (const auto& structure : _committedBoundaries) structure->Display();
-        _splitBoundaryPresentation = presentation;
+        _splitBoundaryPresentation = presentations.front();
+        _boundaryPresentations = presentations;
         _committedBoundariesDirty = NO;
     } catch (...) {
         for (auto& structure : replacements) RemoveNativeSelectionStructure(structure);
@@ -1842,6 +1861,12 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         ? shapeInteractor->splitBoundaryPresentation() : Handle(AIS_Shape)();
     if (!splitPresentation.IsNull()) {
         [self updateSplitBoundaries:splitPresentation];
+        return;
+    }
+    // The result a tool is previewing (Shell, Bevel, Join, Cut, Hole) shows its own edges.
+    const auto previewed = _viewer->previewedResultPresentations();
+    if (!previewed.empty()) {
+        [self updateBoundariesOfPresentations:previewed];
         return;
     }
     const auto interactor = _viewer->getObjectInteractor();

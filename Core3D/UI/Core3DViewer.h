@@ -990,6 +990,10 @@ namespace core3d {
         //! committed sources; empty generic content is a valid explicit clear.
         scene::OcctSceneSnapshotBuilder::OverlayPointer
         captureScenePresentationOverlay() noexcept;
+        //! The result shapes a tool is showing before its tick (Shell, Bevel,
+        //! Join, Cut, Hole) that are on screen now; empty when none. Read-only.
+        //! The OpenGL view draws their edge lines from this.
+        std::vector<Handle(AIS_Shape)> previewedResultPresentations() const noexcept;
 #ifdef DEBUG
         struct RawR2AuthorityObservation {
             bool native = false;
