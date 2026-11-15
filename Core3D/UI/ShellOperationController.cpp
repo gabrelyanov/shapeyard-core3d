@@ -84,7 +84,12 @@ struct ShellPreviewWorkerRequest {
 
 namespace {
 std::atomic_bool gShellOffsetGuardSkipped{false};
+std::atomic<int> gShellOffsetGuardRefusals{0};
 }
+
+void NoteShellOffsetGuardRefusal() noexcept { gShellOffsetGuardRefusals.fetch_add(1); }
+
+Standard_Integer ShellOffsetGuardRefusalCount() noexcept { return gShellOffsetGuardRefusals.load(); }
 
 Standard_Boolean ShellOffsetGuardSkipped() noexcept
 {
@@ -2438,6 +2443,11 @@ void ShellOperationController::debugSetOffsetGuardSkipped(
     const Standard_Boolean skipped) noexcept
 {
     DebugSetShellOffsetGuardSkipped(skipped);
+}
+
+Standard_Integer ShellOperationController::debugOffsetGuardRefusalCount() noexcept
+{
+    return ShellOffsetGuardRefusalCount();
 }
 
 void ShellOperationController::debugSetWorkerBlocked(
