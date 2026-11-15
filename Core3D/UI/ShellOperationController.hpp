@@ -378,6 +378,12 @@ struct ShellPreviewCapture {
 
 #ifdef DEBUG
 struct ShellPreviewDebugState {
+    // Last delivered result: 0 accepted; 1 precompute; 2 offset exception; 3 offset status;
+    // 4 identity; 5 topology; 6 BRep validity; 7 volume; 8 bounds;
+    // 9 containment; 10 source currentness; 11 preview installation.
+    Standard_Integer failureStage = -1;
+    Standard_Integer offsetError = -1;
+    Standard_Boolean offsetDone = Standard_False;
     ShellPreviewState state = ShellPreviewState::Unavailable;
     std::uint64_t generation = 0;
     std::uint64_t submittedCount = 0;
@@ -547,6 +553,9 @@ private:
     Standard_Boolean myStateValid = Standard_True;
     Standard_Boolean myOwnsDocumentCommand = Standard_False;
 #ifdef DEBUG
+    Standard_Integer myDebugFailureStage = -1;
+    Standard_Integer myDebugOffsetError = -1;
+    Standard_Boolean myDebugOffsetDone = Standard_False;
     Standard_Boolean myDebugWorkerBlocked = Standard_False;
     Standard_Size myDebugMaximumCaptureTopologyNodes =
         kMaximumSourceTopologyNodes;

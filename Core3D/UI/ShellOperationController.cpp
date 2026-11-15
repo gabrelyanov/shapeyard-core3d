@@ -90,6 +90,11 @@ struct ShellPreviewWorkerResult {
         ShellPreviewWorkerOutcome::Failed;
     TopoDS_Shape result;
     Standard_Boolean computeWasMainThread = Standard_False;
+#ifdef DEBUG
+    Standard_Integer failureStage = 1;
+    Standard_Integer offsetError = -1;
+    Standard_Boolean offsetDone = Standard_False;
+#endif
 };
 
 namespace {
@@ -394,8 +399,18 @@ Standard_Boolean IsValidInwardResult(
     const Standard_Real (&theSourceBounds)[6],
     const Standard_Real theTolerance,
     const Standard_Size theMaximumTopologyNodes,
-    const std::shared_ptr<std::atomic_bool>& theCancellation) noexcept
+    const std::shared_ptr<std::atomic_bool>& theCancellation
+#ifdef DEBUG
+    , Standard_Integer* theFailureStage = nullptr
+#endif
+    ) noexcept
 {
+#ifdef DEBUG
+    const auto stage = [&](Standard_Integer value) {
+        if (theFailureStage != nullptr) *theFailureStage = value;
+    };
+    stage(4); // Identity/type/source-volume gate.
+#endif
     const auto wasCancelled = [&]() {
         return theCancellation == nullptr
             || theCancellation->load(std::memory_order_relaxed);
@@ -407,6 +422,9 @@ Standard_Boolean IsValidInwardResult(
         || !std::isfinite(theSourceVolume) || theSourceVolume <= 0.0) {
         return Standard_False;
     }
+#ifdef DEBUG
+    stage(5); // Bounded topology.
+#endif
     Standard_Size aTopologyCount = 0;
     if (!CountBoundedTopology(
             theCandidate,
@@ -415,6 +433,9 @@ Standard_Boolean IsValidInwardResult(
         || wasCancelled()) {
         return Standard_False;
     }
+#ifdef DEBUG
+    stage(6); // Full BRep validity.
+#endif
     try {
         BRepCheck_Analyzer anAnalyzer(theCandidate, Standard_True);
         if (!anAnalyzer.IsValid() || wasCancelled()) {
@@ -423,12 +444,18 @@ Standard_Boolean IsValidInwardResult(
     } catch (...) {
         return Standard_False;
     }
+#ifdef DEBUG
+    stage(7); // Positive, smaller volume.
+#endif
     Standard_Real aCandidateVolume = 0.0;
     if (!ShapeVolume(theCandidate, aCandidateVolume)
         || wasCancelled()
         || !(aCandidateVolume < theSourceVolume)) {
         return Standard_False;
     }
+#ifdef DEBUG
+    stage(8); // Finite bounds.
+#endif
     Standard_Real aCandidateBounds[6] = {};
     if (!ShapeBounds(theCandidate, aCandidateBounds)
         || wasCancelled()) {
@@ -447,6 +474,9 @@ Standard_Boolean IsValidInwardResult(
         10.0 * theTolerance,
         64.0 * std::numeric_limits<Standard_Real>::epsilon()
             * aScale);
+#ifdef DEBUG
+    stage(9); // Bounds remain inside source.
+#endif
     for (Standard_Integer anAxis = 0; anAxis < 3; ++anAxis) {
         if (aCandidateBounds[anAxis]
                 < theSourceBounds[anAxis] - aContainmentTolerance
@@ -1097,8 +1127,16 @@ private:
                 new ShellCancellationIndicator(
                     theRequest.cancellation);
             BRepOffsetAPI_MakeThickSolid aBuilder;
+#ifdef DEBUG
+            aResult.failureStage = 2; // Offset construction, including exceptions.
+#endif
             MakeInwardShell(aBuilder, theRequest.source, theRequest.openingFaces,
                             theRequest.thickness, theRequest.tolerance, aProgress->Start());
+#ifdef DEBUG
+            aResult.offsetDone = aBuilder.IsDone();
+            aResult.offsetError = static_cast<Standard_Integer>(aBuilder.MakeOffset().Error());
+            aResult.failureStage = 3; // Offset completion/error gate.
+#endif
             if (wasCancelled()
                 || (!aBuilder.IsDone()
                     && aBuilder.MakeOffset().Error()
@@ -1119,7 +1157,11 @@ private:
                     theRequest.sourceBounds,
                     theRequest.tolerance,
                     theRequest.maximumResultTopologyNodes,
-                    theRequest.cancellation)) {
+                    theRequest.cancellation
+#ifdef DEBUG
+                    , &aResult.failureStage
+#endif
+                    )) {
                 if (wasCancelled()) {
                     aResult.outcome =
                         ShellPreviewWorkerOutcome::Cancelled;
@@ -1128,6 +1170,9 @@ private:
             }
             aResult.result = aCandidate;
             aResult.outcome = ShellPreviewWorkerOutcome::Success;
+#ifdef DEBUG
+            aResult.failureStage = 0;
+#endif
             return aResult;
         } catch (...) {
             if (wasCancelled()) {
@@ -1699,10 +1744,18 @@ void ShellOperationController::acceptWorkerResult(
 #endif
         return;
     }
-    if (theResult.outcome != ShellPreviewWorkerOutcome::Success
-        || theResult.result.IsNull()
-        || !sourceIsCurrent()
-        || !installPreview(theResult.result)) {
+    // Preserve the original short-circuit order and call each gate only once.
+    const bool hasResult = theResult.outcome == ShellPreviewWorkerOutcome::Success
+        && !theResult.result.IsNull();
+    const bool sourceCurrent = hasResult && sourceIsCurrent();
+    const bool installed = sourceCurrent && installPreview(theResult.result);
+#ifdef DEBUG
+    myDebugFailureStage = !hasResult ? theResult.failureStage
+        : !sourceCurrent ? 10 : !installed ? 11 : 0;
+    myDebugOffsetError = theResult.offsetError;
+    myDebugOffsetDone = theResult.offsetDone;
+#endif
+    if (!installed) {
         myCanApply = Standard_False;
         myState = ShellPreviewState::Failed;
         notifyPreviewStateChanged();
@@ -2312,6 +2365,9 @@ ShellOperationController::debugPreviewState() const noexcept
 {
     ShellPreviewDebugState aState;
     aState.state = myState;
+    aState.failureStage = myDebugFailureStage;
+    aState.offsetError = myDebugOffsetError;
+    aState.offsetDone = myDebugOffsetDone;
     aState.generation = myGeneration;
     aState.activeOperation = hasActiveOperation();
     aState.canApply = canApply();
