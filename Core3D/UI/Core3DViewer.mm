@@ -114,24 +114,26 @@ namespace {
 // timer, deadline, cancellation or native transaction is introduced here.
 class DebugHistoryCostScope final {
 public:
-    DebugHistoryCostScope(std::array<double, 10>& costs, std::size_t index) noexcept
+    DebugHistoryCostScope(std::array<double, 20>& costs, std::size_t index) noexcept
         : costs_([NSThread isMainThread] ? &costs : nullptr), index_(index),
           started_(std::chrono::steady_clock::now()) {}
-    ~DebugHistoryCostScope() noexcept {
+    ~DebugHistoryCostScope() noexcept { finish(); }
+    void finish() noexcept {
         if (!costs_) return;
         ++(*costs_)[index_];
         (*costs_)[index_ + 1] += std::chrono::duration<double>(
             std::chrono::steady_clock::now() - started_).count();
+        costs_ = nullptr;
     }
     DebugHistoryCostScope(const DebugHistoryCostScope&) = delete;
     DebugHistoryCostScope& operator=(const DebugHistoryCostScope&) = delete;
 private:
-    std::array<double, 10>* costs_;
+    std::array<double, 20>* costs_;
     std::size_t index_;
     std::chrono::steady_clock::time_point started_;
 };
 }
-std::array<double, 10> core3d::Core3DViewer::debugHistoryCostObservation() const noexcept {
+std::array<double, 20> core3d::Core3DViewer::debugHistoryCostObservation() const noexcept {
     if (![NSThread isMainThread]) return {};
     return _debugHistoryCosts;
 }
@@ -6559,6 +6561,9 @@ std::shared_ptr<const native_opening::Fence>
 Core3DViewer::recaptureNativeOpeningFence(
     std::uint64_t contextIdentifier, std::uint32_t width, std::uint32_t height,
     const std::vector<std::string>& sourceReceipts) noexcept {
+#if DEBUG
+    DebugHistoryCostScope measured(_debugHistoryCosts, 18);
+#endif
     if (![NSThread isMainThread] || width == 0 || height == 0
         || !nativeOpeningReady(contextIdentifier)) {
 #if DEBUG
@@ -9102,6 +9107,9 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareEnclosureSolid(
 std::optional<StoredProfileSnapshot> Core3DViewer::storedProfileDefinition(
     const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
     std::uint32_t width, std::uint32_t height) noexcept {
+#if DEBUG
+    DebugHistoryCostScope measured(_debugHistoryCosts, 14);
+#endif
     if (![NSThread isMainThread] || !canBeginCommittedEdit() || myContext.IsNull()
         || myDoc.IsNull() || identity.entityIdentifier.empty() || width == 0 || height == 0) return {};
     try {
@@ -9304,6 +9312,9 @@ Standard_Boolean Core3DViewer::returnEdgeTreatmentTargetsToObjectMode(
 std::optional<StoredEnclosureSnapshot> Core3DViewer::storedEnclosureDefinition(
     const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
     std::uint32_t width, std::uint32_t height) noexcept {
+#if DEBUG
+    DebugHistoryCostScope measured(_debugHistoryCosts, 16);
+#endif
     if (![NSThread isMainThread] || !canBeginCommittedEdit() || myContext.IsNull()
         || myDoc.IsNull() || identity.entityIdentifier.empty() || width == 0 || height == 0) return {};
     try {
@@ -14609,6 +14620,7 @@ Core3DViewer::captureSceneSnapshot(
     scene::SceneSnapshotCaptureFailure* failureOut) noexcept {
 #if DEBUG
     DebugHistoryCostScope measured(_debugHistoryCosts, 0);
+    DebugHistoryCostScope admission(_debugHistoryCosts, 10);
 #endif
     if (failureOut != nullptr) *failureOut = {};
     if ((_nativeOpeningState && _nativeOpeningState->loftRollbackUnproven)
@@ -14703,6 +14715,10 @@ Core3DViewer::captureSceneSnapshot(
         case ShapeSelectionMode::Wire:
             return {};
     }
+#if DEBUG
+    admission.finish();
+    DebugHistoryCostScope build(_debugHistoryCosts, 12);
+#endif
     return _sceneSnapshotBuilder.Build(
         myDoc,
         myContext,

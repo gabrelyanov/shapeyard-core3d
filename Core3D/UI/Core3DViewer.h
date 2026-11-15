@@ -952,7 +952,9 @@ namespace core3d {
         //! pairs for scene capture, assembly prepare, native commit, creation
         //! publication and its viewer update. These inclusive totals overlap.
         //! Scene captures nested in prepare/commit overlap those totals.
-        std::array<double, 10> debugHistoryCostObservation() const noexcept;
+        //! Further pairs split scene admission/build and time stored profile,
+        //! stored enclosure and native-opening fence reads (also inclusive).
+        std::array<double, 20> debugHistoryCostObservation() const noexcept;
 #endif
         //! True only when the active typed operation owns every deviation from
         //! the retained selection mode. Ordinary GL selection authority stays
@@ -1270,7 +1272,7 @@ namespace core3d {
         std::function<void(PrimitiveManipulatorType)>
             _interactorRecreatedCallback;
 #if DEBUG
-        std::array<double, 10> _debugHistoryCosts{};
+        std::array<double, 20> _debugHistoryCosts{};
 #endif
         scene::OcctSceneSnapshotBuilder _sceneSnapshotBuilder;
         std::shared_ptr<native_opening::detail::State> _nativeOpeningState;
