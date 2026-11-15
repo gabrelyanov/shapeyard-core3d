@@ -18,6 +18,17 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)deleteSelected;
 - (void)duplicateSelected;
 - (void)setChamfer:(CGFloat)value;
+//! Read-only direct-Round admission. It is deliberately narrower than the
+//! legacy signed Bevel capability and never changes selection or history.
+- (BOOL)roundAdmission;
+- (BOOL)canBeginRound;
+//! Atomic activation repeats the live one-solid edge proof before opening a
+//! Chamfer ledger. A prior canBeginRound result grants no authority.
+- (BOOL)beginRound;
+- (BOOL)setRoundRadius:(CGFloat)radius;
+- (double)roundMetersPerUnit;
+- (double)roundMaximumRadiusMM;
+- (Core3DRoundFailureObservation)roundFailureObservation;
 - (Boundaries)getChamferBoundaries;
 - (Core3DModelingOperationResult)tryApplyChamfer
     NS_SWIFT_NAME(tryApplyChamfer());
@@ -30,6 +41,10 @@ NS_ASSUME_NONNULL_BEGIN
 //! Metres per local BRep distance, including the active source's absolute
 //! saved uniform scale. Zero means no valid active extrusion. Read-only.
 - (double)getExtrusionMetersPerUnit;
+//! Measure (sizes while dragging): [x, y, z] metres of the push/pull
+//! preview solid's local axis extents, the finished size if applied now.
+//! Main thread, read-only; nil while no preview is shown.
+- (NSArray<NSNumber *> *_Nullable)extrusionPreviewSizeMeters;
 - (Core3DModelingOperationResult)tryApplyExtrusion
     NS_SWIFT_NAME(tryApplyExtrusion());
 - (Core3DModelingOperationResult)tryCancelExtrusion
