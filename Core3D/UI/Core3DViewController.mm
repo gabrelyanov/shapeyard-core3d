@@ -16283,6 +16283,48 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
     return Core3DMeshWindingRepairResultRejected;
 }
 
+- (Core3DMeshSolidConversionResult)makeSolidFromMeshForEntityIdentifier:(NSString *)entityIdentifier
+                                                         expected:(Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr || expected == nil
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128) { return Core3DMeshSolidConversionResultRejected; }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) { return Core3DMeshSolidConversionResultRejected; }
+    const char* entity = entityIdentifier.UTF8String;
+    const char* publication = expected.publicationSourceIdentifier.UTF8String;
+    if (entity == nullptr || publication == nullptr) { return Core3DMeshSolidConversionResultRejected; }
+    try {
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entity, [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        const auto result = GLController.viewer->makeSolidFromMesh(identity, expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)));
+        switch (result) {
+            case core3d::OrdinaryEditResult::NoChange: return Core3DMeshSolidConversionResultUnchanged;
+            case core3d::OrdinaryEditResult::Committed:
+                [GLController refreshSelectionState];
+                [GLController requestRender];
+                [self viewDidInvalidateSceneSnapshot];
+                [self sendNotifyUIState:UIStateChangingHistory];
+                return Core3DMeshSolidConversionResultCommitted;
+            case core3d::OrdinaryEditResult::Busy: return Core3DMeshSolidConversionResultBusy;
+            case core3d::OrdinaryEditResult::Invalid: return Core3DMeshSolidConversionResultRejected;
+            case core3d::OrdinaryEditResult::OutcomeUnknown: return Core3DMeshSolidConversionResultRecoveryRequired;
+            case core3d::OrdinaryEditResult::RetryableFailure: return Core3DMeshSolidConversionResultFailed;
+        }
+    } catch (...) {}
+    return Core3DMeshSolidConversionResultRejected;
+}
+
 - (Core3DMeshUVAtlasResult)generateTriangleUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
                                                          expected:(Core3DSceneSnapshot *)expected {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil

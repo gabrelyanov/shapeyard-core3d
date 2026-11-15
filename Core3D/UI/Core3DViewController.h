@@ -523,6 +523,10 @@ __attribute__((objc_subclassing_restricted))
 //! Exact publication, document, model, presentation and native selection are revalidated.
 - (Core3DMeshWindingRepairResult)repairMeshWindingForEntityIdentifier:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(repairMeshWinding(entityIdentifier:expected:));
+//! Make solid: the one selected closed, untextured imported mesh becomes one solid in place
+//! (coplanar triangles merged); one ordinary Undo returns the mesh. Open meshes are rejected.
+- (Core3DMeshSolidConversionResult)makeSolidFromMeshForEntityIdentifier:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(makeSolidFromMesh(entityIdentifier:expected:));
 //! Generate a padded triangle atlas on one selected untextured mesh; one Undo.
 - (Core3DMeshUVAtlasResult)generateTriangleUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
                                                          expected:(Core3DSceneSnapshot *)expected

@@ -271,6 +271,8 @@ struct Record final {
 //! reuse them. Invalid is a read-only fail-closed sentinel and must never be
 //! written to a document.
 enum class OcctMeshWindingRepairResult { Invalid, Unchanged, Prepared };
+//! Make solid from one closed imported triangle mesh (Job 4): Open = free or shared-by-three edges.
+enum class OcctMeshSolidConversionResult { Invalid, Open, TooLarge, Prepared };
 
 enum class OcctGeometryRepresentation : Standard_Integer
 {
@@ -2324,6 +2326,10 @@ public:
     //! Private consistent-winding candidate; source ownership and material contracts remain strict.
     Standard_EXPORT OcctMeshWindingRepairResult PrepareMeshWindingRepair(const TDF_Label& label, TopoDS_Shape& candidate) const noexcept;
     Standard_EXPORT Standard_Boolean ValidateMeshWindingRepair(const TDF_Label& label, const TopoDS_Shape& candidate) const noexcept;
+    //! One closed, consistently wound triangle mesh -> one valid FORWARD solid in the same object-local frame,
+    //! coplanar triangles merged into planar faces. Untextured meshes without authored frames or atlas only.
+    Standard_EXPORT OcctMeshSolidConversionResult PrepareMeshSolidConversion(const TDF_Label& label, TopoDS_Shape& candidate) const noexcept;
+    Standard_EXPORT Standard_Boolean ValidateMeshSolidConversion(const TDF_Label& label, const TopoDS_Shape& candidate) const noexcept;
     //! Bounded flat-corner editing; preserves atlas/maps, rejects supplied frames.
     Standard_EXPORT Standard_Boolean CanEditMeshVertices(const TDF_Label& label) const noexcept;
     Standard_EXPORT Standard_Boolean PrepareMeshVertexMove(const TDF_Label& label,
@@ -2441,6 +2447,9 @@ public:
         const TDF_Label& label,
         Handle(AIS_Shape) aisShape,
         const std::function<Standard_Boolean(const TDF_Label&)>& shapeStager = {});
+    //! Make solid staging: replace a TriangleMesh-marked definition's mesh with a BRep solid and set
+    //! its marker to BRep in the open command. Every other replacement keeps its representation.
+    Standard_Boolean ReplaceMeshWithSolid(const TDF_Label& label, Handle(AIS_Shape) aisShape);
     Standard_Boolean HasUnroutedRetainedDependent(
         const TDF_Label& label) const noexcept;
     

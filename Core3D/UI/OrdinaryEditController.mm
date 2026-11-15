@@ -517,6 +517,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 && request.operation != OrdinaryTransformOperation::MeshRegionExtrude
                 && request.operation != OrdinaryTransformOperation::MeshRegionInset
                 && request.operation != OrdinaryTransformOperation::MeshWindingRepair
+                && request.operation != OrdinaryTransformOperation::MeshSolidConversion
                 && request.operation != OrdinaryTransformOperation::ProfileRebuild
                 && request.operation != OrdinaryTransformOperation::CompleteProfileRebuild
                 && request.operation != OrdinaryTransformOperation::EnclosureRebuild
@@ -736,6 +737,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 && request.operation != OrdinaryTransformOperation::MeshRegionExtrude
                 && request.operation != OrdinaryTransformOperation::MeshRegionInset
                 && request.operation != OrdinaryTransformOperation::MeshWindingRepair
+                && request.operation != OrdinaryTransformOperation::MeshSolidConversion
                 && request.operation != OrdinaryTransformOperation::ProfileRebuild
                 && request.operation != OrdinaryTransformOperation::CompleteProfileRebuild
                 && request.operation != OrdinaryTransformOperation::EnclosureRebuild
@@ -1010,6 +1012,16 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                     || request.rotationAroundPivot.has_value()
                     || request.meshVertexMove.has_value()
                     || !_document->ValidateMeshWindingRepair(request.label, request.shape))) {
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
+            }
+            if (request.operation == OrdinaryTransformOperation::MeshSolidConversion
+                && (changes.size() != 1 || permit || !geometryChanges
+                    || representation != OcctGeometryRepresentation::TriangleMesh
+                    || !MatricesEqual(record.previous.transform, request.transform)
+                    || request.rotationAroundPivot.has_value()
+                    || request.meshVertexMove.has_value()
+                    || !record.previous.meshRegionPartition.empty()
+                    || !_document->ValidateMeshSolidConversion(request.label, request.shape))) {
                 CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
             if ((representation != OcctGeometryRepresentation::BRep
@@ -2574,6 +2586,11 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     record.previous.label, record.requested.shape)) {
                 throw Standard_Failure("Stale mesh winding candidate");
             }
+            if (record.requested.operation == OrdinaryTransformOperation::MeshSolidConversion
+                && !_document->ValidateMeshSolidConversion(
+                    record.previous.label, record.requested.shape)) {
+                throw Standard_Failure("Stale mesh solid candidate");
+            }
             Handle(AIS_Shape) candidate = new AIS_Shape(record.requested.shape);
             candidate->SetLocalTransformation(record.requested.transform);
             bool sweepStaged=false,loftStaged=false,cutStaged=false,cutSourceStaged=false,programSourceStaged=false,profileD4Staged=false,treatmentStaged=false,treatmentStagedR2=false;
@@ -2756,7 +2773,10 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 && !_document->ClearMeshRegionPartition(record.previous.label))
                 throw Standard_Failure("Mesh region partition clear failed");
             if ((!featureStaged && !treatmentStagedR2 && !record.previous.shape.IsEqual(record.requested.shape)
-                    && !_document->ReplaceShape(record.previous.label, candidate))
+                    && (record.requested.operation == OrdinaryTransformOperation::MeshSolidConversion
+                        // ReplaceShape keeps the representation; Make solid alone changes it.
+                        ? !_document->ReplaceMeshWithSolid(record.previous.label, candidate)
+                        : !_document->ReplaceShape(record.previous.label, candidate)))
                 || (!featureStaged && !_document->SaveObjectTransform(record.previous.label, candidate))
                 || (regionMutation
                     && !_document->MarkAuthoredMeshUVLayout(record.previous.label))
