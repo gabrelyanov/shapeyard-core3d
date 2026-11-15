@@ -501,6 +501,9 @@ private:
         std::string definitionIdentifier;
         profile::Record profileRecord;
         std::vector<int> profileShellOpenings;
+        // A standalone saved Hole that Apply bakes inside its own command
+        // (PrepareBooleanResultForFaceEdit); Undo restores the hole record.
+        Standard_Boolean bakesSavedCut = Standard_False;
     };
 
     Standard_Boolean tryPrepareSource(

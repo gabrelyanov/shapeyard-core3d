@@ -783,6 +783,8 @@ Standard_Boolean TryPrepareShellOperationSource(
                     ShellOperationController::kMaximumSourceTopologyNodes,
                     ShellOperationController::kMaximumStyledSubshapeLabels, single,
                     // Resized Add shapes store flat faces as splines (mug body top).
+                    Standard_True,
+                    // A part with a saved Hole: Apply bakes the hole (route B1).
                     Standard_True))
                 return Standard_False;
             if (result.original.IsNull()) {
@@ -1293,7 +1295,8 @@ Standard_Boolean ShellOperationController::tryPrepareSource(
                 myContext,
                 myDoc,
                 aProof,
-                kMaximumStyledSubshapeLabels)
+                kMaximumStyledSubshapeLabels,
+                Standard_True)
             || !ShellOpeningSetIsValid(aProof.shape, aProof.openingFaces,
                                   aProof.openingFaceTopologyIndices)) {
             return Standard_False;
@@ -1374,6 +1377,12 @@ Standard_Boolean ShellOperationController::tryPrepareSource(
 		if (coverage == OcctRetainedRecipeCoverage::CurrentProfile) {
 			if (aSource->profileShellOpenings.size() != aProof.openingFaces.size())
 				return Standard_False;
+		} else if (coverage == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
+				&& myDoc->CanBakeSavedCutForFaceEdit(aProof.documentLabel)) {
+			// Route B1: a standalone saved Hole is baked inside Apply's own
+			// command, exactly as Push-pull and Bevel do.
+			aSource->profileShellOpenings.clear();
+			aSource->bakesSavedCut = Standard_True;
 		} else if (coverage != OcctRetainedRecipeCoverage::Absent) {
 			return Standard_False;
 		}
@@ -1472,7 +1481,10 @@ Standard_Boolean ShellOperationController::sourceIsCurrent() const noexcept
             || mySource->original.IsNull()
             || mySource->shape.IsNull()
             || aStoredShape.IsNull()
-            || !IsBRepModelingLabel(myDoc, mySource->label)
+            || !IsBRepModelingLabel(myDoc, mySource->label,
+                mySource->bakesSavedCut)
+            || (mySource->bakesSavedCut
+                && !myDoc->CanBakeSavedCutForFaceEdit(mySource->label))
             || !myDoc->IsPresentationEditable(mySource->original)
             || !myDoc->ShapeLabel(mySource->original).IsEqual(
                 mySource->label)
@@ -2028,7 +2040,8 @@ ShellOperationController::inspectDocumentState() const noexcept
             profile::Record restored;
             if (!profile::Read(myDoc->Document(), mySource->label, restored)
                 || !restored.IsEqual(mySource->profileRecord)) return DocumentState::Other;
-            return IsBRepModelingLabel(myDoc, mySource->label)
+            return IsBRepModelingLabel(myDoc, mySource->label,
+                    mySource->bakesSavedCut)
                 ? DocumentState::Original
                 : DocumentState::Other;
         }
@@ -2196,7 +2209,9 @@ ShellApplyResult ShellOperationController::apply() noexcept
             return resolveAfterMutation();
         }
 #endif
-        if (!myDoc->ReplaceShape(mySource->label, myPreviewResult)
+        if ((mySource->bakesSavedCut
+                && !myDoc->PrepareBooleanResultForFaceEdit(mySource->label))
+            || !myDoc->ReplaceShape(mySource->label, myPreviewResult)
             || (myPendingProfile && !profile::Stage(aDocument, mySource->label,
                     *myPendingProfile, mySource->profileRecord.identifier, true))) {
             return resolveAfterMutation();
