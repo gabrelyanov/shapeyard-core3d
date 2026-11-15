@@ -6321,6 +6321,9 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
             state.sourceTopologyNodeCount),
         @"candidateTopologyNodeCount": @(
             state.candidateTopologyNodeCount),
+        @"debugFaceShape": @(state.debugFaceShape),
+        @"debugConeStep": @(state.debugConeStep),
+        @"debugComputeStage": @(state.debugComputeStage),
         @"candidateSolidCount": @(state.candidateSolidCount),
         @"sourceVolume": @(state.sourceVolume),
         @"candidateVolume": @(state.candidateVolume),

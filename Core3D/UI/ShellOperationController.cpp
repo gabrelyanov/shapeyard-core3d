@@ -1099,8 +1099,13 @@ private:
                 new ShellCancellationIndicator(
                     theRequest.cancellation);
             BRepOffsetAPI_MakeThickSolid aBuilder;
+            SHELL_DEBUG_PROBE(gShellDebugFaceShape, 0);
+            SHELL_DEBUG_PROBE(gShellDebugConeStep, 0);
+            SHELL_DEBUG_PROBE(gShellDebugComputeStage, 4);
             MakeInwardShell(aBuilder, theRequest.source, theRequest.openingFaces,
                             theRequest.thickness, theRequest.tolerance, aProgress->Start());
+            SHELL_DEBUG_PROBE(gShellDebugComputeStage, aBuilder.IsDone()
+                ? 300 : 100 + static_cast<int>(aBuilder.MakeOffset().Error()));
             if (wasCancelled()
                 || (!aBuilder.IsDone()
                     && aBuilder.MakeOffset().Error()
@@ -1122,6 +1127,7 @@ private:
                     theRequest.tolerance,
                     theRequest.maximumResultTopologyNodes,
                     theRequest.cancellation)) {
+                SHELL_DEBUG_PROBE(gShellDebugComputeStage, 200);
                 if (wasCancelled()) {
                     aResult.outcome =
                         ShellPreviewWorkerOutcome::Cancelled;
@@ -2381,6 +2387,9 @@ ShellOperationController::debugPreviewState() const noexcept
         aState.workerPending = aWorker.pending;
         aState.lastComputeWasMainThread =
             aWorker.lastComputeWasMainThread;
+        aState.debugFaceShape = gShellDebugFaceShape.load();
+        aState.debugConeStep = gShellDebugConeStep.load();
+        aState.debugComputeStage = gShellDebugComputeStage.load();
     }
     return aState;
 }
