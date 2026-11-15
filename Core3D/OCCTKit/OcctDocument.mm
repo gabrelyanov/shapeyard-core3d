@@ -13522,6 +13522,16 @@ Standard_Boolean OcctDocument::ApplyThroughHole(
         }
         Handle(AIS_Shape) shown = new AIS_Shape(result);
         shown->SetLocalTransformation(presentation->LocalTransformation());
+        // A colour put on one face is a label that points at that face. The hole replaces the
+        // shape, so every such label must follow in the same command (toy car, 15 Nov 2026:
+        // left behind, the label pointed at a face the part no longer had; the colour was gone
+        // and the project could not be saved until Undo). As Join/Cut and Bevel do.
+        std::vector<TDF_Label> oldFaceLabels;
+        std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> colouredFaces;
+        if (!CaptureFaceColours(label, 1.0, oldFaceLabels, colouredFaces)) {
+            refusal = "invalid-result";
+            return Standard_False;
+        }
         refusal = "stale-source";
         myOcafDoc->NewCommand();
         if (!myOcafDoc->HasOpenCommand()) return Standard_False;
@@ -13535,7 +13545,8 @@ Standard_Boolean OcctDocument::ApplyThroughHole(
         }
         ForgetInspectorPrimitiveRecord(label);
         if (!ReplaceShape(label, shown)
-            || !XCAFDoc_ShapeTool::GetShape(label).IsEqual(result)) {
+            || !XCAFDoc_ShapeTool::GetShape(label).IsEqual(result)
+            || !CarryFaceColours(label, result, oldFaceLabels, colouredFaces)) {
             myOcafDoc->AbortCommand();
             return Standard_False;
         }
