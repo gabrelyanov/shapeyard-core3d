@@ -498,10 +498,19 @@ Standard_Boolean CanonicalPlainProfileBevelCandidate(
 //! CanonicalPlainProfileBevelCandidate, so the kept child keeps its located
 //! geometry; nothing is rebuilt. Anything else is returned unchanged and is
 //! judged by the usual result checks.
+#ifdef DEBUG
+std::atomic_bool gDebugPlainResultKeepsBuilderWrapper{false};
+#endif
+
 TopoDS_Shape PlainBevelResultWithoutWrapper(const TopoDS_Shape& theResult) noexcept
 {
     try {
         OCC_CATCH_SIGNALS
+#ifdef DEBUG
+        if (gDebugPlainResultKeepsBuilderWrapper.load()) {
+            return theResult;
+        }
+#endif
         if (theResult.IsNull() || theResult.ShapeType() != TopAbs_COMPOUND
             || theResult.Orientation() != TopAbs_FORWARD) {
             return theResult;
@@ -2484,6 +2493,12 @@ BevelOperationController::debugPreviewState() const noexcept
             aWorker.lastComputeWasMainThread;
     }
     return aState;
+}
+
+void BevelOperationController::debugSetPlainResultKeepsBuilderWrapper(
+    const Standard_Boolean keeps) noexcept
+{
+    gDebugPlainResultKeepsBuilderWrapper.store(keeps == Standard_True);
 }
 
 void BevelOperationController::debugSetWorkerBlocked(

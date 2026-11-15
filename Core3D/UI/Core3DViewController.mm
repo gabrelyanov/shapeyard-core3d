@@ -25403,6 +25403,11 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     [GLController debugSetBevelPreviewWorkerBlocked:blocked];
 }
 
++ (void)debugSetPlainBevelKeepsBuilderWrapper:(BOOL)keeps {
+    core3d::BevelOperationController::debugSetPlainResultKeepsBuilderWrapper(
+        keeps ? Standard_True : Standard_False);
+}
+
 - (void)debugSetMaximumBevelCaptureTopologyNodes:(NSUInteger)limit {
     [GLController debugSetMaximumBevelCaptureTopologyNodes:limit];
 }

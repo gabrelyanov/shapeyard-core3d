@@ -179,6 +179,11 @@ public:
     void debugSetTransactionFailureCount(Standard_Size count) noexcept;
     void debugSetCancelDiscardFailureCount(Standard_Size count) noexcept;
     Standard_Boolean debugMutateFirstSourcePersistedTransform() noexcept;
+    //! Check seam: while on, a plain Bevel stores the builder's raw result (a
+    //! compound around the one solid), exactly as builds before 15 Nov 2026
+    //! did, so a check can make such a saved part without an old build.
+    static void debugSetPlainResultKeepsBuilderWrapper(
+        Standard_Boolean keeps) noexcept;
 #endif
 
 private:

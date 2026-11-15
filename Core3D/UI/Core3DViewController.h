@@ -1837,6 +1837,10 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(debugBeginBevel(entityIdentifiers:edgeTopologyIndicesByEntity:));
 - (NSDictionary<NSString *, NSNumber *> *)debugBevelState;
 - (void)debugSetBevelPreviewWorkerBlocked:(BOOL)blocked;
+//! Check seam: while on, a plain Bevel stores the builder's raw result (a
+//! compound around the one solid), as builds before 15 Nov 2026 did.
++ (void)debugSetPlainBevelKeepsBuilderWrapper:(BOOL)keeps
+    NS_SWIFT_NAME(debugSetPlainBevelKeepsBuilderWrapper(_:));
 - (void)debugSetMaximumBevelCaptureTopologyNodes:(NSUInteger)limit;
 - (void)debugSetMaximumBevelResultTopologyNodes:(NSUInteger)limit;
 - (void)debugSetMaximumBevelResultSolids:(NSUInteger)limit;
