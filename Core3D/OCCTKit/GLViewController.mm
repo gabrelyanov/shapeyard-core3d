@@ -1450,6 +1450,11 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     // resolved once the raw touch and the arrows' own gesture have ended.
     BOOL _pendingTapBehindManipulator;
     CGPoint _pendingTapBehindManipulatorPoint;
+    // Where the finger went down, and whether it has left that spot: the tap
+    // recognizer still reports a short drag (up to 45 pt) as a tap, and a
+    // drag on an arrow moves the part and must pick nothing.
+    CGPoint _primaryTouchDownPoint;
+    BOOL _primaryTouchTravelled;
     BOOL _visibleRawR2BevelOwnsChamferTool;
 }
 
@@ -2586,6 +2591,10 @@ static BOOL PlainTapsSelectBehindMoveHandles()
 		_rawTouchRendering = YES;
 		_suppressTapSelectionForManipulatorInteraction = NO;
 		_pendingTapBehindManipulator = NO;
+		_primaryTouchTravelled = NO;
+		UITouch *aFirstTouch = [theTouches anyObject];
+		_primaryTouchDownPoint = aFirstTouch != nil
+			? [aFirstTouch locationInView:self.view] : CGPointZero;
 		[[self viewportView] beginInteractiveRendering];
 	}
 
@@ -2656,6 +2665,12 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     [super touchesMoved:theTouches withEvent:theEvent];
     
     UITouch *aTouch = [theTouches anyObject];
+    if (aTouch != NULL && !_primaryTouchTravelled) {
+        const CGPoint aNow = [aTouch locationInView:self.view];
+        // Six points: more than a tapping finger wanders, less than any drag.
+        _primaryTouchTravelled = hypot(aNow.x - _primaryTouchDownPoint.x,
+                                       aNow.y - _primaryTouchDownPoint.y) > 6.0;
+    }
     if ((aTouch != NULL) && theEvent.allTouches.count == 1) {
         const CGPoint point = [self drawablePointForPoint:[aTouch locationInView:self.view]];
         _viewer->Rotation((int)point.x, (int)point.y);
@@ -3051,7 +3066,7 @@ static BOOL PlainTapsSelectBehindMoveHandles()
 {
     if (_suppressTapSelectionForManipulatorInteraction) {
         _suppressTapSelectionForManipulatorInteraction = NO;
-        if ([self tapMaySelectBehindManipulator]) {
+        if (!_primaryTouchTravelled && [self tapMaySelectBehindManipulator]) {
             _pendingTapBehindManipulatorPoint =
                 [self drawablePointForPoint:
                     [tapRecognizer locationInView:self.view]];

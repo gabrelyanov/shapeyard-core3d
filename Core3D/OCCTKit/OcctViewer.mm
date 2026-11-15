@@ -722,8 +722,16 @@ bool OcctViewer::SelectBehind(int theX, int theY, const Handle(AIS_InteractiveOb
             if (anOwner.IsNull() || !anOwner->HasSelectable()) { continue; }
             if (!theSkipped.IsNull() && anOwner->Selectable() == theSkipped) { continue; }
             // The selected part itself (the cutter behind its own arrows) is
-            // not what the tap is for: go on to the part behind it.
+            // not what the tap is for: go on to the part behind it. A part
+            // counts as selected when any of its owners is.
             if (anOwner->IsSelected()) { continue; }
+            const Handle(AIS_InteractiveObject) aPart =
+                Handle(AIS_InteractiveObject)::DownCast(anOwner->Selectable());
+            if (aPart.IsNull() || myContext->IsSelected(aPart)) { continue; }
+            // Only a part of the document: a normal tap never reaches the
+            // helpers that can lie behind the nearest hit, this walk can.
+            if (myDoc.IsNull() || myDoc->ShapeLabel(aPart).IsNull()
+                || !myDoc->IsPresentationEditable(aPart)) { continue; }
             if (!myContext->GlobalFilter().IsNull()
                 && !myContext->GlobalFilter()->IsOk(anOwner)) { continue; }
             aBehind = anOwner;
