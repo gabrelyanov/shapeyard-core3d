@@ -25,7 +25,6 @@
 #include <BRep_Tool.hxx>
 #include <GeomLib_IsPlanarSurface.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
-#include <BRepLProp_SLProps.hxx>
 #include <GeomLProp_SLProps.hxx>
 #include <Geom2d_Curve.hxx>
 #include <Geom_Surface.hxx>
@@ -274,23 +273,25 @@ Standard_Boolean ShellOffsetGuardSkipped() noexcept;
 void DebugSetShellOffsetGuardSkipped(Standard_Boolean skipped) noexcept;
 
 //! Whether the offset kernel may be given this shell at all. The kernel does not
-//! refuse what it cannot hollow, it reads through a null pointer and the app
-//! closes (build 4, 15 Nov 2026: a cube with Bevel 3, Shell from its bottom
-//! face; SIGSEGV in BRepOffset_Tool::TryProject under ContextIntByArc). A
-//! crash cannot be caught, so the kernel must not be called with these:
-//!  1. an opening face that meets a neighbour smoothly along an edge (a flat
-//!     face ringed by fillets): the kernel builds a rounded joint between the
-//!     opening and each neighbour's offset, and there is none to build;
-//!  2. (`checkBlendRadii`) a convex rounded face whose radius is not larger than
-//!     the thickness: its inward offset does not exist. Cones are left to the
-//!     kernel, which offsets them exactly; so are flat faces.
-//! Any doubt is "not safe": the caller then reports an ordinary failed preview.
+//! always refuse what it cannot hollow: for a cube with Bevel 3 on every edge,
+//! opened at its bottom face, it reads through a null pointer and the app closes
+//! (build 4, 15 Nov 2026: SIGSEGV in BRepOffset_Tool::TryProject under
+//! ContextIntByArc). A crash cannot be caught, so the kernel is not called when
+//! an opening face meets a neighbour smoothly along an edge (a flat face next
+//! to a fillet): the kernel builds a rounded joint between the opening and each
+//! neighbour's offset, and there is none to build. Probed without this guard,
+//! one process per case (15 Nov): every such opening either closed the process
+//! (fillets on every edge) or was refused by the kernel itself (a rounded
+//! cylinder rim, one or four filleted edges), so nothing the kernel can make is
+//! held back. A rounding smaller than the thickness away from the opening, a
+//! holed part and a flat Bevel were probed too: the kernel refuses or makes
+//! them, and they are left to it. Any doubt here is "not safe": the caller then
+//! reports an ordinary failed preview.
 inline Standard_Boolean ShellOffsetIsSafe(
-    const TopoDS_Shape& source, const std::vector<TopoDS_Face>& openings,
-    const Standard_Real thickness, const Standard_Boolean checkBlendRadii) noexcept
+    const TopoDS_Shape& source, const std::vector<TopoDS_Face>& openings) noexcept
 {
     try {
-        if (source.IsNull() || openings.empty() || !(thickness > 0.0)) return Standard_False;
+        if (source.IsNull() || openings.empty()) return Standard_False;
         TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
         TopExp::MapShapesAndAncestors(source, TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
         const auto outwardNormal = [](const TopoDS_Face& face, const TopoDS_Edge& edge,
@@ -325,51 +326,26 @@ inline Standard_Boolean ShellOffsetIsSafe(
                 }
             }
         }
-        if (!checkBlendRadii) return Standard_True;
-        for (TopExp_Explorer walk(source, TopAbs_FACE); walk.More(); walk.Next()) {
-            const TopoDS_Face face = TopoDS::Face(walk.Current());
-            const BRepAdaptor_Surface surface(face, Standard_True);
-            if (surface.GetType() == GeomAbs_Plane || surface.GetType() == GeomAbs_Cone) continue;
-            const Standard_Real u0 = surface.FirstUParameter(), u1 = surface.LastUParameter();
-            const Standard_Real v0 = surface.FirstVParameter(), v1 = surface.LastVParameter();
-            if (!std::isfinite(u0) || !std::isfinite(u1) || !std::isfinite(v0) || !std::isfinite(v1)
-                || std::abs(u0) > 1.0e100 || std::abs(u1) > 1.0e100
-                || std::abs(v0) > 1.0e100 || std::abs(v1) > 1.0e100) continue;
-            for (const Standard_Real s : {1.0 / 6.0, 0.5, 5.0 / 6.0}) {
-                for (const Standard_Real t : {1.0 / 6.0, 0.5, 5.0 / 6.0}) {
-                    BRepLProp_SLProps properties(surface, u0 + (u1 - u0) * s, v0 + (v1 - v0) * t, 2, 1.0e-9);
-                    if (!properties.IsCurvatureDefined()) continue;
-                    // Signed against the outward normal: a convex face bends away from it
-                    // (negative), and its centre lies 1/|k| inside the part.
-                    Standard_Real bend = std::min(properties.MaxCurvature(), properties.MinCurvature());
-                    if (face.Orientation() == TopAbs_REVERSED)
-                        bend = -std::max(properties.MaxCurvature(), properties.MinCurvature());
-                    if (std::isfinite(bend) && bend < 0.0 && -bend * thickness >= 0.98) return Standard_False;
-                }
-            }
-        }
         return Standard_True;
     } catch (...) { return Standard_False; }
 }
 
 //! Runs the offset kernel for an inward shell, unless the guard above says the
 //! kernel cannot be trusted with it; then nothing is built and false is
-//! returned (the caller's ordinary failure). `checkBlendRadii` is for a shell
-//! the user is making now; a saved shell being rebuilt keeps its old admission.
+//! returned (the caller's ordinary failure).
 inline Standard_Boolean MakeInwardShell(
     BRepOffsetAPI_MakeThickSolid& builder,
     const TopoDS_Shape& source,
     const std::vector<TopoDS_Face>& faces,
     Standard_Real thickness, Standard_Real tolerance,
-    const Message_ProgressRange& progress = Message_ProgressRange(),
-    const Standard_Boolean checkBlendRadii = Standard_False)
+    const Message_ProgressRange& progress = Message_ProgressRange())
 {
     TopoDS_Shape analytic; std::vector<TopoDS_Face> analyticFaces;
     const Standard_Boolean rebuilt =
         AnalyticPrimitiveForShell(source, faces, analytic, analyticFaces);
     if (!ShellOffsetGuardSkipped()
-        && !ShellOffsetIsSafe(rebuilt ? analytic : source, rebuilt ? analyticFaces : faces,
-                              thickness, checkBlendRadii)) return Standard_False;
+        && !ShellOffsetIsSafe(rebuilt ? analytic : source, rebuilt ? analyticFaces : faces))
+        return Standard_False;
     TopTools_ListOfShape openings;
     for (const auto& face : rebuilt ? analyticFaces : faces) openings.Append(face);
     builder.MakeThickSolidByJoin(rebuilt ? analytic : source, openings, -thickness, tolerance,
