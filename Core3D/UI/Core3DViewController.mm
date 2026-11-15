@@ -27413,6 +27413,11 @@ std::unordered_map<NSUInteger,B2BudgetSessionBox>& B2BudgetSessions(){
     }];
 }
 
+- (NSInteger)documentWouldSaveProbe {
+    if (![NSThread isMainThread] || _isLoading || !_isSetuped || GLController == nil) return -1;
+    return [GLController core3d_documentWouldSave];
+}
+
 - (NSData *)thumbData {
     return [GLController thumbData];
 }

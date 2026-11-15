@@ -213,6 +213,11 @@ __attribute__((objc_subclassing_restricted))
 - (BOOL)prepareOrdinaryEditForDocumentClose;
 - (BOOL)hasUnresolvedOrdinaryEdit;
 - (void)assetData:(void(^)(NSData *_Nullable))completion;
+/// Would Home's save succeed right now? 1 yes, 0 no, -1 cannot be told now (a tool or a
+/// preview is open, or the document is loading). Main thread, synchronous: the document is
+/// written to a temporary file and read back through the checks opening a project runs,
+/// exactly as assetData does (one shared helper). Nothing in the document changes.
+- (NSInteger)documentWouldSaveProbe NS_SWIFT_NAME(documentWouldSaveProbe());
 - (NSData *_Nullable)thumbData;
 
 // Success means accepted; terminal completion follows private cleanup.

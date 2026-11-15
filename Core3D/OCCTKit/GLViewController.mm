@@ -1329,6 +1329,7 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 - (void)updateSelectedSurfaceAppearance;
 - (void)clearSelectedFaceWash;
 - (void)clearCommittedBoundaries;
+- (std::string)core3d_writeCheckedDocumentAt:(const std::string &)fn inconclusive:(BOOL *)inconclusive;
 - (void)updateCommittedBoundaries;
 - (void)updateSplitBoundaries:(const Handle(AIS_Shape)&)presentation;
 - (void)updateBoundariesOfPresentations:(const std::vector<Handle(AIS_Shape)>&)presentations;
@@ -7267,6 +7268,83 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     return _viewer->getShapeInteractor()->getNumberOfDetectedEdges();
 }
 
+/// The one save check, shared by assetData: and core3d_documentWouldSave so the two cannot
+/// drift (SAVE-REFUSED-AFTER-JOIN-DIAGNOSIS 15 Nov, repair D). Main thread only. Writes the
+/// committed document to a file named after `fn` and reads that file back through the same
+/// checks opening a project runs. Returns the written file's path, or empty when the document
+/// would not save. `*inconclusive` is set, and nothing is written, while a tool or a preview
+/// holds the document: that is not a failure of the document.
+- (std::string)core3d_writeCheckedDocumentAt:(const std::string &)fn inconclusive:(BOOL *)inconclusive
+{
+    std::string cbfFilePath;
+    if (inconclusive != nullptr) *inconclusive = NO;
+    try {
+        if (_viewer != nullptr) {
+            const auto objectInteractor = _viewer->getObjectInteractor();
+            const auto shapeInteractor = _viewer->getShapeInteractor();
+            const bool hasTransientModeling =
+                objectInteractor == nullptr
+                || shapeInteractor == nullptr
+                || _viewer->hasUnresolvedEdit()
+                || objectInteractor->hasActiveBoolean()
+                || objectInteractor->hasUnresolvedBoolean()
+                || objectInteractor->hasUnresolvedMirrorObjects()
+                || objectInteractor->hasActiveLinearArray()
+                || objectInteractor->hasUnresolvedLinearArray()
+                || objectInteractor->hasActiveRadialArray()
+                || objectInteractor->hasUnresolvedRadialArray()
+                || shapeInteractor->hasActiveExtrusion()
+                || shapeInteractor->hasActiveShell()
+                || shapeInteractor->hasUnresolvedShell();
+            // Bevel previews own only transient AIS presentations and
+            // never retain an open OCAF command. Apply is synchronous
+            // on this main queue, so serializing here always captures
+            // a coherent committed document (not the transient trial).
+            // Keep recovery autosaves working while a user evaluates
+            // or retries a Bevel preview.
+            if (hasTransientModeling) {
+                if (inconclusive != nullptr) *inconclusive = YES;
+            } else {
+                cbfFilePath = _viewer->getDocument()->save(fn);
+            }
+            if (!cbfFilePath.empty()) {
+                const AssetImportResult validation = _viewer->ValidateCbf(cbfFilePath);
+                if (validation != AssetImportResult::Success) {
+                    NSLog(@"CBF validation failed after save: %d at %@",
+                          static_cast<int>(validation),
+                          [NSString stringForStdString:cbfFilePath]);
+                    cbfFilePath.clear();
+                }
+            }
+        }
+    } catch (...) {
+        cbfFilePath.clear();
+    }
+    return cbfFilePath;
+}
+
+/// Would Home's save succeed right now? 1 yes, 0 no, -1 cannot be told now (a tool or a
+/// preview is open, or this is not the main thread). Synchronous: one save to a temporary
+/// file, the read-back check, and the file is deleted again. Nothing in the document changes.
+- (NSInteger)core3d_documentWouldSave
+{
+    if (![NSThread isMainThread] || _viewer == nullptr || _isPreviewMode) return -1;
+    NSString *name = [NSString stringWithFormat:@"%@.probe.tmp", NSUUID.UUID.UUIDString];
+    NSURL *baseURL = [[NSFileManager.defaultManager temporaryDirectory] URLByAppendingPathComponent:name];
+    const std::string fn = baseURL.path.UTF8String;
+    BOOL inconclusive = NO;
+    const std::string written = [self core3d_writeCheckedDocumentAt:fn inconclusive:&inconclusive];
+    NSFileManager *fileManager = NSFileManager.defaultManager;
+    [fileManager removeItemAtURL:baseURL error:nil];
+    [fileManager removeItemAtPath:[baseURL.path stringByAppendingString:@".cbf"] error:nil];
+    [fileManager removeItemAtPath:[baseURL.path stringByAppendingString:@".xbf"] error:nil];
+    if (!written.empty()) {
+        [fileManager removeItemAtPath:[NSString stringForStdString:written] error:nil];
+    }
+    if (inconclusive) return -1;
+    return written.empty() ? 0 : 1;
+}
+
 - (void)assetData:(void(^)(NSData *_Nullable))completion {
     if (![NSThread isMainThread] || _queuedAssetOwner != nil
         || _pendingAssetDataCount == NSUIntegerMax) {
@@ -7293,50 +7371,8 @@ static BOOL PlainTapsSelectBehindMoveHandles()
 
         __block std::string cbfFilePath;
         dispatch_sync(dispatch_get_main_queue(), ^{
-            try {
-                if (strongSelf->_viewer != nullptr) {
-                    const auto objectInteractor =
-                        strongSelf->_viewer->getObjectInteractor();
-                    const auto shapeInteractor =
-                        strongSelf->_viewer->getShapeInteractor();
-                    const bool hasTransientModeling =
-                        objectInteractor == nullptr
-                        || shapeInteractor == nullptr
-                        || strongSelf->_viewer->hasUnresolvedEdit()
-                        || objectInteractor->hasActiveBoolean()
-                        || objectInteractor->hasUnresolvedBoolean()
-                        || objectInteractor->hasUnresolvedMirrorObjects()
-                        || objectInteractor->hasActiveLinearArray()
-                        || objectInteractor->hasUnresolvedLinearArray()
-                        || objectInteractor->hasActiveRadialArray()
-                        || objectInteractor->hasUnresolvedRadialArray()
-                        || shapeInteractor->hasActiveExtrusion()
-                        || shapeInteractor->hasActiveShell()
-                        || shapeInteractor->hasUnresolvedShell();
-                    // Bevel previews own only transient AIS presentations and
-                    // never retain an open OCAF command. Apply is synchronous
-                    // on this main queue, so serializing here always captures
-                    // a coherent committed document (not the transient trial).
-                    // Keep recovery autosaves working while a user evaluates
-                    // or retries a Bevel preview.
-                    if (!hasTransientModeling) {
-                        cbfFilePath = strongSelf->_viewer
-                            ->getDocument()->save(fn);
-                    }
-                    if (!cbfFilePath.empty()) {
-                        const AssetImportResult validation =
-                            strongSelf->_viewer->ValidateCbf(cbfFilePath);
-                        if (validation != AssetImportResult::Success) {
-                            NSLog(@"CBF validation failed after save: %d at %@",
-                                  static_cast<int>(validation),
-                                  [NSString stringForStdString:cbfFilePath]);
-                            cbfFilePath.clear();
-                        }
-                    }
-                }
-            } catch (...) {
-                cbfFilePath.clear();
-            }
+            BOOL inconclusive = NO;
+            cbfFilePath = [strongSelf core3d_writeCheckedDocumentAt:fn inconclusive:&inconclusive];
         });
 
         NSString *dataPath = cbfFilePath.empty()
