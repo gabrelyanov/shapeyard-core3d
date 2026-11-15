@@ -15507,6 +15507,31 @@ static TopoDS_Shape Core3DMeasureRimForSeamPick(
     return {};
 }
 
+// Model units covered by one screen pixel at `point` with the view's current camera.
+static double Core3DMeasureUnitsPerPixelAtTap(const Handle(V3d_View)& view,
+                                              const gp_Pnt& point) noexcept {
+    try {
+        if (view.IsNull() || view->Window().IsNull() || view->Camera().IsNull()) return 0;
+        Standard_Integer width = 0, height = 0;
+        view->Window()->Size(width, height);
+        if (width <= 0 || height <= 0) return 0;
+        const auto camera = view->Camera();
+        const gp_Pnt projected = camera->Project(point);
+        double units = 0;
+        for (int axis = 0; axis < 2; ++axis) {
+            const double dx = axis == 0 ? 2.0 / width : 0;
+            const double dy = axis == 1 ? -2.0 / height : 0;
+            const gp_Pnt shifted = camera->UnProject(gp_Pnt(
+                projected.X() + dx, projected.Y() + dy, projected.Z()));
+            const double candidate = point.Distance(shifted);
+            if (std::isfinite(candidate)) units = std::max(units, candidate);
+        }
+        return units;
+    } catch (...) {
+        return 0;
+    }
+}
+
 void Core3DViewer::Select(int theX, int theY) {
     observeNativePlanningInteraction();
     if (_objectInteractor == nullptr || _shapeInteractor == nullptr) {
@@ -15600,8 +15625,11 @@ void Core3DViewer::Select(int theX, int theY) {
                     world = world.Moved(TopLoc_Location(transform));
                 }
             }
-            _measurePicks.push_back(MeasurePick{owner, world, point,
-                static_cast<double>(selector->PixelTolerance())});
+            const double pixelTolerance = static_cast<double>(selector->PixelTolerance());
+            const double unitsPerPixel = Core3DMeasureUnitsPerPixelAtTap(myView, point);
+            const double snapRadius = std::isfinite(unitsPerPixel) && unitsPerPixel > 0
+                && pixelTolerance > 0 ? unitsPerPixel * pixelTolerance : 0;
+            _measurePicks.push_back(MeasurePick{owner, world, point, pixelTolerance, snapRadius});
         }
         if (_measurePicks.size() > 2)
             _measurePicks.erase(_measurePicks.begin(), _measurePicks.end() - 2);

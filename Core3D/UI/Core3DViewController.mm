@@ -21114,12 +21114,14 @@ static Core3DMeasureSnap Core3DMeasureSnapPoint(
         if (onEdge.IsDone() && onEdge.NbSolution() > 0)
             picked = onEdge.PointOnShape2(1);
     }
-    const double unitsPerPixel = Core3DMeasureUnitsPerPixel(view, picked);
-    if (unitsPerPixel > 0 && std::isfinite(unitsPerPixel) && pick.pixelTolerance > 0) {
+    // The radius the tap was made with; a later zoom or view change keeps the snap it gave.
+    const double snapRadius = pick.snapRadius > 0 && std::isfinite(pick.snapRadius)
+        ? pick.snapRadius : Core3DMeasureUnitsPerPixel(view, picked) * pick.pixelTolerance;
+    if (snapRadius > 0 && std::isfinite(snapRadius)) {
         const unsigned kinds = static_cast<unsigned>(core3d::GeometrySnapKind::Vertex)
             | static_cast<unsigned>(core3d::GeometrySnapKind::EdgeMidpoint);
         const auto snapped = core3d::SnapPointToGeometry(pick.worldEdge, picked,
-            unitsPerPixel * pick.pixelTolerance, kinds);
+            snapRadius, kinds);
         if (snapped) {
             const int kind = snapped->kind == core3d::GeometrySnapKind::Vertex ? 1 : 2;
             const gp_Pnt point = kind == 2 && straight

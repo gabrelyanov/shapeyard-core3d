@@ -695,6 +695,9 @@ namespace core3d {
             TopoDS_Shape worldEdge;
             gp_Pnt pickedPoint;
             double pixelTolerance = 0;
+            // The snap radius in model units, fixed with the camera of the tap: zooming in
+            // afterwards must not undo a snap the user already saw.
+            double snapRadius = 0;
         };
         std::vector<MeasurePick> measurePicksForCurrentSelection() noexcept;
         void Select(int theX, int theY);
