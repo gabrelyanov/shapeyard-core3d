@@ -617,6 +617,7 @@ private:
     Handle(AIS_Shape) myPreviewResult;
     TopoDS_Shape myPendingCandidate;
     std::optional<profile::Parameters> myPendingProfile;
+    std::shared_ptr<ordinary_naming::Record> myNamingHistory;
     std::shared_ptr<ShellPreviewWorker> myWorker;
     std::function<void()> myPreviewStateChangedCallback;
     ShellPreviewState myState = ShellPreviewState::Unavailable;

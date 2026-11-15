@@ -303,6 +303,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSDictionary<NSString *, id> *_Nullable)debugViewportRGBA;
 - (NSDictionary<NSString *, NSNumber *> *)
     debugFramebufferStatistics;
+- (NSDictionary<NSString *, NSNumber *> *)debugHistoryDrawingCosts;
 #endif
 
 - (void) setConstructorMode;

@@ -517,6 +517,14 @@ supportsNormalTextureEditing:supportsNormalTextureEditing];
         object:self userInfo:payload];
 }
 
+- (void)viewer:(id)sender didChangeLiveMoveEnded:(BOOL)ended {
+    (void)sender;
+    if (![NSThread isMainThread]) return;
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:Core3DViewController.liveMoveDidChangeNotification
+        object:self userInfo:@{@"ended": @(ended)}];
+}
+
 - (void)didPresentNativeViewport:(id)sender {
     (void)sender;
     [self viewDidPresentNativeViewport];

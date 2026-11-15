@@ -139,6 +139,8 @@ __attribute__((objc_subclassing_restricted))
 @optional
 -(void) updateSelectionWithMaterial:(Core3DMaterial*)material
                            color:(Core3DColor*)color;
+-(void)updateSelectedPartsWithMaterial:(Core3DMaterial* _Nullable)material color:(Core3DColor* _Nullable)color
+    NS_SWIFT_NAME(updateSelectedParts(with:color:));
 -(void) updateSelectionWithPBRMaterial:(Core3DPBRMaterial*)material;
 -(BOOL)updateSelectionWithBaseColorTextureData:(NSData*)textureData
                                       mediaType:(NSString*)mediaType
@@ -173,6 +175,11 @@ __attribute__((objc_subclassing_restricted))
 @property (nonatomic, strong, readonly) NSArray<Core3DPBRMaterial*>* selectedPBRMaterials;
 
 -(void) updateSelectionWithMaterial:(Core3DMaterial* _Nullable)material color:(Core3DColor* _Nullable)color;
+//! Ordinary Material palette scope: replace the selected parts' appearance,
+//! including old face overrides, without changing the selection mode or faces.
+//! The selection-scoped palette and PBR APIs above/below remain face-aware.
+-(void)updateSelectedPartsWithMaterial:(Core3DMaterial* _Nullable)material color:(Core3DColor* _Nullable)color
+    NS_SWIFT_NAME(updateSelectedParts(with:color:));
 -(void) updateSelectionWithPBRMaterial:(Core3DPBRMaterial*)material;
 -(BOOL)updateSelectionWithBaseColorTextureData:(NSData*)textureData
                                       mediaType:(NSString*)mediaType
