@@ -2426,6 +2426,15 @@ namespace core3d {
 			if (aCoverage == OcctRetainedRecipeCoverage::Absent) {
 				return Standard_True;
 			}
+			// A standalone saved Hole takes the plain route: the controller
+			// bakes it inside its Apply command and Undo restores the record.
+			if (aCoverage
+					== OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
+				&& myDoc->CanBakeSavedCutForFaceEdit(
+					theSelection.documentLabel)) {
+				theSelection.retainedCapture.reset();
+				return Standard_True;
+			}
 			if ((aCoverage != OcctRetainedRecipeCoverage::CurrentProfile
 					&& aCoverage
 						!= OcctRetainedRecipeCoverage::PresentOutsideP4Coverage)
@@ -2546,7 +2555,7 @@ namespace core3d {
 					if (aShape.ShapeType() != TopAbs_SOLID
 						|| aLabel.IsNull()
 						|| aLabel.Data() != aDocument->GetData()
-						|| !IsBRepModelingLabel(myDoc, aLabel)
+						|| !IsBRepModelingLabel(myDoc, aLabel, Standard_True)
 						|| !myDoc->IsPresentationEditable(aPresentation)
 						|| aStoredShape.IsNull()
 						|| !aStoredShape.IsEqual(aShape)

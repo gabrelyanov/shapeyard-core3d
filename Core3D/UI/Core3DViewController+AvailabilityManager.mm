@@ -306,12 +306,13 @@ Core3DModelCapability DocumentExportCapabilities(
             if(retained.value) {
                 hasRetainedOccurrence=true;
                 std::uint64_t unsupported=core3d::cylindrical_cut::UnsupportedOccurrenceCapabilities;
-                // Push-pull bakes a standalone saved Hole inside its own Apply
-                // command (PrepareBooleanResultForFaceEdit; Undo restores the
-                // resizable hole) and its admission already accepts this owner.
-                // Keep only that face tool; other derived routes stay withheld.
+                // Push-pull and Bevel/Round bake a standalone saved Hole inside
+                // their own Apply command (PrepareBooleanResultForFaceEdit;
+                // Undo restores the resizable hole) and their admission accepts
+                // this owner. Keep those tools; other derived routes stay withheld.
                 if(document->CanBakeSavedCutForFaceEdit(label))
-                    unsupported&=~static_cast<std::uint64_t>(Core3DModelCapabilityExtrusion);
+                    unsupported&=~(static_cast<std::uint64_t>(Core3DModelCapabilityExtrusion)
+                        |static_cast<std::uint64_t>(Core3DModelCapabilityChamfer));
                 definitionCapabilities=static_cast<Core3DModelCapability>(
                     static_cast<std::uint64_t>(definitionCapabilities)&~unsupported);
             }

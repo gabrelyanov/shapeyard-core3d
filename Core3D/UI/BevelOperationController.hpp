@@ -196,6 +196,8 @@ private:
         Standard_Size topologyNodeCount = 0;
         Standard_Size sourceEdgeCount = 0;
         std::shared_ptr<const RetainedBevelAdapter::Capture> retainedCapture;
+        // A standalone saved Hole that Apply bakes in its own command.
+        Standard_Boolean bakesSavedCut = Standard_False;
         std::shared_ptr<const RetainedBevelAdapter::PreparedPreview>
             retainedPrepared;
         std::optional<retained_edge_treatment::Edit> retainedEdit;
