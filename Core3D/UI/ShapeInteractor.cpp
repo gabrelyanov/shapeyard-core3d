@@ -1594,12 +1594,18 @@ namespace core3d {
 				return discardExtrusionPreview(Standard_True);
 			}
 			if (!_extrusion.IsReady()) {
+#ifdef DEBUG
+				_lastExtrusionFailureStage = 20;	// no face was taken
+#endif
 				return Standard_False;
 			}
 
 			// Every recompute starts from the exact committed source. The prior
 			// empty preview command is aborted before any new feature work begins.
 			if (!discardExtrusionPreview(Standard_False)) {
+#ifdef DEBUG
+				_lastExtrusionFailureStage = 21;	// the last preview could not be dropped
+#endif
 				return Standard_False;
 			}
 			const Handle(TDocStd_Document) document = myDoc.IsNull()
@@ -1615,7 +1621,23 @@ namespace core3d {
 				|| !currentLabel.IsEqual(_extrusion.label)
 				|| !XCAFDoc_ShapeTool::GetShape(_extrusion.label)
 					.IsEqual(_extrusion.originalShape)) {
+#ifdef DEBUG
+				// Which of the source checks failed (check seam): 100 + one bit each.
+				Standard_Integer why = 100;
+				if (document.IsNull() || document->HasOpenCommand()
+					|| document->GetUndoLimit() == 0) why += 1;
+				else {
+					if (_extrusion.label.Data() != document->GetData()) why += 2;
+					if (!IsBRepModelingLabel(myDoc, _extrusion.label, Standard_True)) why += 4;
+					if (currentLabel.IsNull() || !currentLabel.IsEqual(_extrusion.label)) why += 8;
+					if (!XCAFDoc_ShapeTool::GetShape(_extrusion.label)
+							.IsEqual(_extrusion.originalShape)) why += 16;
+				}
+#endif
 				cancelExtrusion();
+#ifdef DEBUG
+				_lastExtrusionFailureStage = why;
+#endif
 				return Standard_False;
 			}
 
@@ -1679,6 +1701,9 @@ namespace core3d {
 			}
 
 			if (!FileStableResult(candidateShape)) {
+#ifdef DEBUG
+				_lastExtrusionFailureStage = 30;	// the result does not read back the same
+#endif
 				restoreExtrusionOriginalPresentation();
 				myContext->UpdateCurrentViewer();
 				return Standard_False;
@@ -1692,6 +1717,9 @@ namespace core3d {
 			document->NewCommand();
 			_extrusion.ownsCommand = document->HasOpenCommand();
 			if (!_extrusion.ownsCommand) {
+#ifdef DEBUG
+				_lastExtrusionFailureStage = 31;	// no command could be opened
+#endif
 				return Standard_False;
 			}
 			_extrusion.candidatePresentation = candidate;
