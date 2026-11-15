@@ -13106,6 +13106,21 @@ bool BakedBooleanBatchPreviewShape(const Handle(OcctDocument)& document,
             shapes, operation, result, refusal);
     } catch (...) { refusal = "invalid-result"; return false; }
 }
+
+// How much of `target` a Cut by `tool` would take away (0 = nothing: the parts only touch or
+// miss). Works on copies; nothing in the document changes. False when it cannot be told.
+bool BakedCutRemovedShare(const Handle(OcctDocument)& document,
+    const TDF_Label& target, const gp_Trsf& targetPlacement,
+    const TDF_Label& tool, const gp_Trsf& toolPlacement, double& share) noexcept {
+    share = 1.0;
+    try {
+        if (document.IsNull() || target.IsNull() || tool.IsNull() || tool.IsEqual(target)) return false;
+        TopoDS_Shape result;
+        std::string refusal;
+        return BakedBooleanShapeOfMany(XCAFDoc_ShapeTool::GetShape(target), targetPlacement,
+            {{XCAFDoc_ShapeTool::GetShape(tool), toolPlacement}}, 1, result, refusal, &share);
+    } catch (...) { share = 1.0; return false; }
+}
 } // namespace core3d
 
 Standard_Boolean OcctDocument::JoinFaceLooks(const TDF_Label& target,

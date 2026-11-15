@@ -2472,6 +2472,23 @@ bool BakedBooleanBatchPreviewShape(const Handle(OcctDocument)& document,
     const std::vector<std::pair<TDF_Label, gp_Trsf>>& tools, int operation,
     TopoDS_Shape& result, std::string& refusal) noexcept;
 
+bool BakedCutRemovedShare(const Handle(OcctDocument)& document,
+    const TDF_Label& target, const gp_Trsf& targetPlacement,
+    const TDF_Label& tool, const gp_Trsf& toolPlacement, double& share) noexcept;
+
+bool Core3DViewer::cutRemovesNothing(const std::string& targetEntity,
+    const std::string& toolEntity) noexcept {
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull())return false;
+    try{
+        Handle(AIS_Shape) target,tool;TDF_Label targetLabel,toolLabel;
+        if(!FindEntityPresentation(myContext,myDoc,targetEntity,target,targetLabel)
+            ||!FindEntityPresentation(myContext,myDoc,toolEntity,tool,toolLabel))return false;
+        double share=1.0;
+        return BakedCutRemovedShare(myDoc,targetLabel,target->LocalTransformation(),
+            toolLabel,tool->LocalTransformation(),share)&&share<=1.0e-9;
+    }catch(...){return false;}
+}
+
 bool Core3DViewer::showBakedBooleanBatchPreview(const std::vector<std::string>& targetEntities,
     const std::vector<std::string>& toolEntities, int operation, std::string& refusal) noexcept {
     refusal="unsupported-source";

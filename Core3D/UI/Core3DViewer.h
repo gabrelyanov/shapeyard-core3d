@@ -554,6 +554,9 @@ namespace core3d {
     //! editable Boolean cannot open (a part with a saved Hole).
     bool showBakedBooleanPreview(const std::string& targetEntity,
         const std::string& toolEntity, int operation, std::string& refusal) noexcept;
+    //! True when a Cut of the target by the tool would take nothing away (the parts only
+    //! touch or miss; design system rule 11). False when it cannot be told.
+    bool cutRemovesNothing(const std::string& targetEntity, const std::string& toolEntity) noexcept;
     //! Preview of applyBakedBooleanBatch: each kept part shows its result, every
     //! cutter or joined part is hidden. Nothing in the document changes.
     bool showBakedBooleanBatchPreview(const std::vector<std::string>& targetEntities,
