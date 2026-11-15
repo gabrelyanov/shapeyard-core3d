@@ -82,6 +82,24 @@ struct ShellPreviewWorkerRequest {
         ShellOperationController::kMaximumResultTopologyNodes;
 };
 
+namespace {
+std::atomic_bool gShellOffsetGuardSkipped{false};
+}
+
+Standard_Boolean ShellOffsetGuardSkipped() noexcept
+{
+    return gShellOffsetGuardSkipped.load() ? Standard_True : Standard_False;
+}
+
+void DebugSetShellOffsetGuardSkipped(const Standard_Boolean skipped) noexcept
+{
+#ifdef DEBUG
+    gShellOffsetGuardSkipped.store(skipped == Standard_True);
+#else
+    (void)skipped;
+#endif
+}
+
 struct ShellPreviewWorkerResult {
     std::uint64_t generation = 0;
     Standard_Real thickness = 0.0;
@@ -582,7 +600,8 @@ Standard_Boolean ReplayProfileShells(
             if (!TryResolveShellOpeningSelectors(current, selectors, faces) || cancelled.load()) return Standard_False;
             Handle(ShellCancellationIndicator) progress = new ShellCancellationIndicator(stop);
             BRepOffsetAPI_MakeThickSolid builder;
-            MakeInwardShell(builder, current, faces, step.thickness, tolerance, progress->Start());
+            if (!MakeInwardShell(builder, current, faces, step.thickness, tolerance, progress->Start()))
+                return Standard_False;
             if (cancelled.load() || !builder.IsDone() || builder.MakeOffset().Error() != BRepOffset_NoError
                 || !IsValidInwardResult(builder.Shape(), current, volume, bounds, tolerance,
                                        ShellOperationController::kMaximumResultTopologyNodes, stop)) return Standard_False;
@@ -1097,8 +1116,13 @@ private:
                 new ShellCancellationIndicator(
                     theRequest.cancellation);
             BRepOffsetAPI_MakeThickSolid aBuilder;
-            MakeInwardShell(aBuilder, theRequest.source, theRequest.openingFaces,
-                            theRequest.thickness, theRequest.tolerance, aProgress->Start());
+            // False: the guard would not let the kernel have this shell (it would crash the
+            // app, not fail). The result stays Failed, like any shell the kernel refuses.
+            if (!MakeInwardShell(aBuilder, theRequest.source, theRequest.openingFaces,
+                                 theRequest.thickness, theRequest.tolerance, aProgress->Start(),
+                                 Standard_True)) {
+                return aResult;
+            }
             if (wasCancelled()
                 || (!aBuilder.IsDone()
                     && aBuilder.MakeOffset().Error()
@@ -2368,6 +2392,12 @@ ShellOperationController::debugPreviewState() const noexcept
             aWorker.lastComputeWasMainThread;
     }
     return aState;
+}
+
+void ShellOperationController::debugSetOffsetGuardSkipped(
+    const Standard_Boolean skipped) noexcept
+{
+    DebugSetShellOffsetGuardSkipped(skipped);
 }
 
 void ShellOperationController::debugSetWorkerBlocked(

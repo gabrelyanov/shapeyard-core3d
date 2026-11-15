@@ -25,6 +25,13 @@
 #include <BRep_Tool.hxx>
 #include <GeomLib_IsPlanarSurface.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <BRepLProp_SLProps.hxx>
+#include <GeomLProp_SLProps.hxx>
+#include <Geom2d_Curve.hxx>
+#include <Geom_Surface.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopoDS_Edge.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
@@ -32,7 +39,9 @@
 #include <TopoDS_Shape.hxx>
 #include <gp_Pln.hxx>
 
+#include <cmath>
 #include <cstdint>
+#include <initializer_list>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -259,21 +268,114 @@ inline Standard_Boolean AnalyticPrimitiveForShell(
     } catch (...) { rebuilt.Nullify(); rebuiltOpenings.clear(); return Standard_False; }
 }
 
-inline void MakeInwardShell(
+//! Check seam (debug builds): while on, the guard below is skipped so a check
+//! can record, in a process of its own, what the kernel does without it.
+Standard_Boolean ShellOffsetGuardSkipped() noexcept;
+void DebugSetShellOffsetGuardSkipped(Standard_Boolean skipped) noexcept;
+
+//! Whether the offset kernel may be given this shell at all. The kernel does not
+//! refuse what it cannot hollow, it reads through a null pointer and the app
+//! closes (build 4, 15 Nov 2026: a cube with Bevel 3, Shell from its bottom
+//! face; SIGSEGV in BRepOffset_Tool::TryProject under ContextIntByArc). A
+//! crash cannot be caught, so the kernel must not be called with these:
+//!  1. an opening face that meets a neighbour smoothly along an edge (a flat
+//!     face ringed by fillets): the kernel builds a rounded joint between the
+//!     opening and each neighbour's offset, and there is none to build;
+//!  2. (`checkBlendRadii`) a convex rounded face whose radius is not larger than
+//!     the thickness: its inward offset does not exist. Cones are left to the
+//!     kernel, which offsets them exactly; so are flat faces.
+//! Any doubt is "not safe": the caller then reports an ordinary failed preview.
+inline Standard_Boolean ShellOffsetIsSafe(
+    const TopoDS_Shape& source, const std::vector<TopoDS_Face>& openings,
+    const Standard_Real thickness, const Standard_Boolean checkBlendRadii) noexcept
+{
+    try {
+        if (source.IsNull() || openings.empty() || !(thickness > 0.0)) return Standard_False;
+        TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
+        TopExp::MapShapesAndAncestors(source, TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
+        const auto outwardNormal = [](const TopoDS_Face& face, const TopoDS_Edge& edge,
+                                      const Standard_Real along, gp_Dir& normal) -> bool {
+            Standard_Real first = 0.0, last = 0.0;
+            const Handle(Geom2d_Curve) onSurface = BRep_Tool::CurveOnSurface(edge, face, first, last);
+            const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+            if (onSurface.IsNull() || surface.IsNull() || !std::isfinite(first) || !std::isfinite(last)
+                || std::abs(first) > 1.0e100 || std::abs(last) > 1.0e100) return false;
+            const gp_Pnt2d uv = onSurface->Value(first + (last - first) * along);
+            GeomLProp_SLProps properties(surface, uv.X(), uv.Y(), 1, 1.0e-9);
+            if (!properties.IsNormalDefined()) return false;
+            normal = properties.Normal();
+            if (face.Orientation() == TopAbs_REVERSED) normal.Reverse();
+            return true;
+        };
+        for (const TopoDS_Face& opening : openings) {
+            for (TopExp_Explorer walk(opening, TopAbs_EDGE); walk.More(); walk.Next()) {
+                const TopoDS_Edge edge = TopoDS::Edge(walk.Current());
+                if (BRep_Tool::Degenerated(edge) || !facesOfEdges.Contains(edge)) continue;
+                const TopTools_ListOfShape& faces = facesOfEdges.FindFromKey(edge);
+                for (TopTools_ListOfShape::Iterator other(faces); other.More(); other.Next()) {
+                    if (other.Value().IsSame(opening)) continue;
+                    const TopoDS_Face neighbour = TopoDS::Face(other.Value());
+                    // Smooth anywhere along the edge (within about eight degrees) is smooth.
+                    for (const Standard_Real along : {0.2, 0.5, 0.8}) {
+                        gp_Dir onOpening, onNeighbour;
+                        if (!outwardNormal(opening, edge, along, onOpening)
+                            || !outwardNormal(neighbour, edge, along, onNeighbour)
+                            || onOpening.Dot(onNeighbour) >= 0.990) return Standard_False;
+                    }
+                }
+            }
+        }
+        if (!checkBlendRadii) return Standard_True;
+        for (TopExp_Explorer walk(source, TopAbs_FACE); walk.More(); walk.Next()) {
+            const TopoDS_Face face = TopoDS::Face(walk.Current());
+            const BRepAdaptor_Surface surface(face, Standard_True);
+            if (surface.GetType() == GeomAbs_Plane || surface.GetType() == GeomAbs_Cone) continue;
+            const Standard_Real u0 = surface.FirstUParameter(), u1 = surface.LastUParameter();
+            const Standard_Real v0 = surface.FirstVParameter(), v1 = surface.LastVParameter();
+            if (!std::isfinite(u0) || !std::isfinite(u1) || !std::isfinite(v0) || !std::isfinite(v1)
+                || std::abs(u0) > 1.0e100 || std::abs(u1) > 1.0e100
+                || std::abs(v0) > 1.0e100 || std::abs(v1) > 1.0e100) continue;
+            for (const Standard_Real s : {1.0 / 6.0, 0.5, 5.0 / 6.0}) {
+                for (const Standard_Real t : {1.0 / 6.0, 0.5, 5.0 / 6.0}) {
+                    BRepLProp_SLProps properties(surface, u0 + (u1 - u0) * s, v0 + (v1 - v0) * t, 2, 1.0e-9);
+                    if (!properties.IsCurvatureDefined()) continue;
+                    // Signed against the outward normal: a convex face bends away from it
+                    // (negative), and its centre lies 1/|k| inside the part.
+                    Standard_Real bend = std::min(properties.MaxCurvature(), properties.MinCurvature());
+                    if (face.Orientation() == TopAbs_REVERSED)
+                        bend = -std::max(properties.MaxCurvature(), properties.MinCurvature());
+                    if (std::isfinite(bend) && bend < 0.0 && -bend * thickness >= 0.98) return Standard_False;
+                }
+            }
+        }
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+//! Runs the offset kernel for an inward shell, unless the guard above says the
+//! kernel cannot be trusted with it; then nothing is built and false is
+//! returned (the caller's ordinary failure). `checkBlendRadii` is for a shell
+//! the user is making now; a saved shell being rebuilt keeps its old admission.
+inline Standard_Boolean MakeInwardShell(
     BRepOffsetAPI_MakeThickSolid& builder,
     const TopoDS_Shape& source,
     const std::vector<TopoDS_Face>& faces,
     Standard_Real thickness, Standard_Real tolerance,
-    const Message_ProgressRange& progress = Message_ProgressRange())
+    const Message_ProgressRange& progress = Message_ProgressRange(),
+    const Standard_Boolean checkBlendRadii = Standard_False)
 {
     TopoDS_Shape analytic; std::vector<TopoDS_Face> analyticFaces;
     const Standard_Boolean rebuilt =
         AnalyticPrimitiveForShell(source, faces, analytic, analyticFaces);
+    if (!ShellOffsetGuardSkipped()
+        && !ShellOffsetIsSafe(rebuilt ? analytic : source, rebuilt ? analyticFaces : faces,
+                              thickness, checkBlendRadii)) return Standard_False;
     TopTools_ListOfShape openings;
     for (const auto& face : rebuilt ? analyticFaces : faces) openings.Append(face);
     builder.MakeThickSolidByJoin(rebuilt ? analytic : source, openings, -thickness, tolerance,
         BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Arc,
         Standard_False, progress);
+    return Standard_True;
 }
 
 enum class ShellApplyResult : std::uint8_t {
@@ -473,6 +575,9 @@ public:
     void debugSetTransactionFailureCount(Standard_Size count) noexcept;
     void debugSetAbortFailureCount(Standard_Size count) noexcept;
     void debugSetPreviewEraseFailureCount(Standard_Size count) noexcept;
+    //! Check seam: lets a check, in a process of its own, give the kernel what the
+    //! offset guard holds back (see ShellOffsetIsSafe).
+    static void debugSetOffsetGuardSkipped(Standard_Boolean skipped) noexcept;
     void debugSetCommitMode(Standard_Integer mode) noexcept;
     void debugSetPostCommitInspectFailureCount(Standard_Size count) noexcept;
     Standard_Boolean debugMutateSourcePersistedTransform() noexcept;
