@@ -1895,12 +1895,6 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                 return std::any_of(sourceLabels.begin(), sourceLabels.end(), [&](const auto& source) { return source.IsEqual(label); });
             });
         };
-        const auto belongsToFullySelectedSavedGroup = [&](const TDF_Label& label) {
-            return std::any_of(groupBefore.groups.begin(), groupBefore.groups.end(), [&](const auto& group) {
-                return fullySelected(group) && std::any_of(group.members.begin(), group.members.end(),
-                    [&](const auto& member) { return member.IsEqual(label); });
-            });
-        };
         const auto activeGroups = std::count_if(groupBefore.groups.begin(), groupBefore.groups.end(), [](const auto& g) { return !g.members.empty(); });
         const auto copiedGroups = std::count_if(groupBefore.groups.begin(), groupBefore.groups.end(), fullySelected);
         if (activeGroups + copiedGroups > 128) { return; }
@@ -1929,25 +1923,17 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 			return;
 		}
         
-        gp_Trsf minAxisDisplacement;
-		const Standard_Real aMinimumExtent = Precision::Confusion();
-		gp_Vec aDisplacement;
-		if (w > aMinimumExtent && d > aMinimumExtent) {
-			aDisplacement = w > d
-				? gp_Vec(0.0, d, 0.0)
-				: gp_Vec(w, 0.0, 0.0);
-		} else if (w > aMinimumExtent) {
-			aDisplacement = gp_Vec(w, 0.0, 0.0);
-		} else if (d > aMinimumExtent) {
-			aDisplacement = gp_Vec(0.0, d, 0.0);
-		} else if (h > aMinimumExtent) {
-			aDisplacement = gp_Vec(0.0, 0.0, h);
-		} else {
-			// Keep a point-sized legacy BRep visibly separate without risking
-			// the document coordinate bound.
-			aDisplacement = gp_Vec(10.0, 0.0, 0.0);
-		}
-		minAxisDisplacement.SetTranslation(aDisplacement);
+        // Duplicate always uses a small world-space nudge. A source's
+        // dimensions, rotation or scale must not magnify or redirect it.
+        double metersPerUnit = 0;
+        bool hasLengthUnit = false;
+        if (!ReadMirrorDocumentUnits(doc, metersPerUnit, hasLengthUnit)) { return; }
+        const double nudge = 0.010 / metersPerUnit;
+        if (!std::isfinite(nudge) || nudge <= 0.0
+            || nudge > limits::kMaximumModelCoordinateMagnitude) { return; }
+        const gp_Vec aDisplacement(nudge, 0.0, 0.0);
+        gp_Trsf worldDisplacement;
+        worldDisplacement.SetTranslation(aDisplacement);
         
 		std::vector<DuplicatePendingResult> duplicates;
         core3d::retained_edge_treatment::ReplayBudget treatmentBudget;
@@ -1980,13 +1966,9 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                 if (source.sweepLoft.family
                         == pattern_recipe_clone::Family::AnalyticBoolean
                     && !pattern_recipe_clone::IsProperRigidPlacement(sourceTransform)) return;
-                // A complete saved group is one assembly operation: apply the
-                // admitted bounds displacement in document/world space so
-                // heterogeneous member transforms preserve their layout.
-                // Partial and ungrouped duplication retain existing behavior.
-                copy->SetLocalTransformation(belongsToFullySelectedSavedGroup(source.label)
-                    ? minAxisDisplacement.Multiplied(sourceTransform)
-                    : sourceTransform.Multiplied(minAxisDisplacement));
+                // Apply the same world translation to every selected part,
+                // including partial groups, preserving their relative layout.
+                copy->SetLocalTransformation(worldDisplacement.Multiplied(sourceTransform));
 				myDoc->LoadObjectMeterial(source.label, copy);
                 DuplicatePendingResult duplicate;
                 duplicate.presentation = copy;
