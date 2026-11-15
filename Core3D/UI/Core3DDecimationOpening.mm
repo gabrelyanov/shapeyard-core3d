@@ -208,6 +208,10 @@ bool F2EvidenceEqual(Core3DPublishArtifactEvidence *left, Core3DPublishArtifactE
         && F2NumberArraysEqual(left.sourceIndices, right.sourceIndices)
         && [left.faceEvidenceSHA256InEmittedOrder
             isEqualToArray:right.faceEvidenceSHA256InEmittedOrder]
+        && ((left.triangleIdentitySHA256InEmittedOrder == nil
+                && right.triangleIdentitySHA256InEmittedOrder == nil)
+            || [left.triangleIdentitySHA256InEmittedOrder
+                isEqualToArray:right.triangleIdentitySHA256InEmittedOrder])
         && [left.measurementReceiptSHA256 isEqualToString:right.measurementReceiptSHA256]
         && left.addressedTriangleCount == right.addressedTriangleCount;
 }

@@ -59,6 +59,10 @@ __attribute__((objc_subclassing_restricted))
 @property(nonatomic, copy, readonly) NSArray<NSNumber *> *sourcePositionsMM; // 9 doubles per triangle, mm
 @property(nonatomic, copy, readonly) NSArray<NSNumber *> *sourceIndices;     // 3 per triangle, identity 0..n-1
 @property(nonatomic, copy, readonly) NSArray<NSString *> *faceEvidenceSHA256InEmittedOrder; // 64-lower-hex each
+//! Native-issued physical triangle identities, distinct from repeated analytic
+//! face evidence. Nil on legacy/unqualified bindings; no public initializer
+//! can manufacture these. Scalar identity alone does not authorize reduction.
+@property(nonatomic, copy, readonly, nullable) NSArray<NSString *> *triangleIdentitySHA256InEmittedOrder;
 @property(nonatomic, copy, readonly) NSString *measurementReceiptSHA256;  // 64-lower-hex
 @property(nonatomic, assign, readonly) uint64_t addressedTriangleCount;
 - (instancetype)initWithArtifactSHA256:(NSString *)artifactSHA256
@@ -108,6 +112,16 @@ __attribute__((objc_subclassing_restricted))
 - (BOOL)bindArtifactEvidence:(Core3DPublishArtifactEvidence *)evidence
                        error:(NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(bindArtifactEvidence(_:));
+
+//! Qualify one scalar owner after the completed GLB's physical channels have
+//! been independently checked. Addresses are pairs (native primitive ordinal,
+//! first native index), in emitted order; they are locators, never authority.
+//! Native validates complete coverage, corners and analytic face membership,
+//! then owns a copy of evidence with separate physical triangle identities.
+- (BOOL)bindScalarArtifactEvidence:(Core3DPublishArtifactEvidence *)evidence
+          sourceTriangleAddresses:(NSArray<NSNumber *> *)addresses
+                            error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(bindScalarArtifactEvidence(_:sourceTriangleAddresses:));
 
 + (nullable instancetype)captureController:(Core3DViewController *)controller
                                       error:(NSError * _Nullable * _Nullable)error
