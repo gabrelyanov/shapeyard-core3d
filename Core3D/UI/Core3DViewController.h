@@ -247,6 +247,11 @@ __attribute__((objc_subclassing_restricted))
 //! object has moved since the active Move gesture began, snapping included.
 //! Main thread, read-only; nil outside an active gesture.
 - (NSArray<NSNumber *> *_Nullable)liveMoveOffsetMeters;
+//! Measure: synchronous main-thread notifications, object=this controller. One per
+//! Move translation step whether or not geometry snapping is on (lessons run with
+//! it off), plus one after finish/cancel. userInfo["ended"] is YES only for that
+//! terminal one. Read liveMoveOffsetMeters inside; never edit the model there.
+@property(class, nonatomic, copy, readonly) NSNotificationName liveMoveDidChangeNotification;
 
 
 //! Capture one fail-closed retained editor opening from the exact current
@@ -1654,6 +1659,12 @@ __attribute__((objc_subclassing_restricted))
 - (NSArray<NSNumber *> *_Nullable)debugAttachedManipulatorPosition;
 //! The handles' side in screen points (design system 7.2: 96 iPad, 72 iPhone).
 - (NSNumber *_Nullable)debugManipulatorSidePoints;
+//! How many displayed parts carry a highlight style of their own (a tool's colour); 0 when no
+//! tool is open.
+- (NSInteger)debugPartsWithOwnHighlightStyle;
+//! Where the real hit test finds each Scale handle (X, Y, Z cube, uniform sphere) as
+//! fractions of the viewport [x0,y0,...,x3,y3], -1 when not found; nil without a gizmo.
+- (NSArray<NSNumber *> *_Nullable)debugScaleHandleViewportFractions;
 - (BOOL)debugConfigureOrdinaryNameFault:(NSInteger)mode;
 - (BOOL)debugConfigureOrdinaryVisibilityFault:(NSInteger)mode;
 - (void)debugSetViewerOrdinaryVisibilityAfterRepairFailures:(NSInteger)count;
@@ -2305,6 +2316,13 @@ __attribute__((objc_subclassing_restricted))
 - (NSData *_Nullable)debugLocatedFreeShapeBinXCAFFixtureData;
 //! Independent spline-aware metrics for native snap regression targets only.
 - (NSDictionary<NSString *, id> *_Nullable)debugSplineSnapTargetMetrics:(NSString *)entity;
+//! Read-only current-label and history-delta observation, including forgotten attributes.
+//! A nil result means unavailable, never absent. Does not resolve or create an entity.
+- (NSDictionary<NSString *, id> *)debugOrdinaryNamingHistoryState;
+//! Test-only shorter native Undo window; ordinary production limits are untouched.
+- (BOOL)debugSetOrdinaryNamingHistoryUndoLimit:(NSInteger)limit;
+- (NSDictionary<NSString *, id> *_Nullable)debugObserveNamingSubtreeAtLabelEntry:(NSString *)entry
+    NS_SWIFT_NAME(debugObserveNamingSubtree(labelEntry:));
 //! Detached geometry query fixture; does not create or edit a document.
 + (NSDictionary<NSString *, id> *)debugGeometrySnapFixture:(NSInteger)fixture
     point:(NSArray<NSNumber *> *)point tolerance:(double)tolerance kinds:(NSUInteger)kinds
