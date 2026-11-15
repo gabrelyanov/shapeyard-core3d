@@ -256,6 +256,7 @@ unsigned long long Core3DDebugColdOpenCandidateProbeValue(
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <gp_Ax3.hxx>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -21310,15 +21311,128 @@ static bool Core3DCollectMeasureElements(
     return true;
 }
 
-static bool Core3DMeasureFullCircle(const TopoDS_Shape& shape, gp_Circ& circle) {
-    if (shape.ShapeType() != TopAbs_EDGE) return false;
-    const TopoDS_Edge edge = TopoDS::Edge(shape);
+// A round edge whose curve is not stored as an exact circle (a Bevel can leave the rim of a
+// pulled cylinder as a spline) or a rim split into arcs still reads as its circle when every
+// sample lies on one circle within the kernel's working tolerance.
+static bool Core3DMeasureFitCircle(const TopoDS_Edge& edge, gp_Circ& circle, double& span) {
     if (BRep_Tool::Degenerated(edge)) return false;
     BRepAdaptor_Curve curve(edge);
-    if (curve.GetType() != GeomAbs_Circle
-        || std::abs(curve.LastParameter() - curve.FirstParameter() - 2 * M_PI) >= 1e-7)
+    const GeomAbs_CurveType type = curve.GetType();
+    if (type == GeomAbs_Line) return false;
+    const double first = curve.FirstParameter(), last = curve.LastParameter();
+    if (!std::isfinite(first) || !std::isfinite(last) || !(last > first)) return false;
+    if (type == GeomAbs_Circle) {
+        circle = curve.Circle();
+        span = last - first;
+        return std::isfinite(circle.Radius()) && circle.Radius() > 0;
+    }
+    constexpr int kSamples = 96;
+    std::array<gp_XYZ, kSamples + 1> points;
+    gp_XYZ mean(0, 0, 0);
+    for (int i = 0; i <= kSamples; ++i) {
+        points[i] = curve.Value(first + (last - first) * i / kSamples).XYZ();
+        if (!std::isfinite(points[i].X()) || !std::isfinite(points[i].Y())
+            || !std::isfinite(points[i].Z())) return false;
+        mean += points[i];
+    }
+    mean /= kSamples + 1;
+    gp_XYZ normal(0, 0, 0);
+    for (int i = 0; i <= kSamples; ++i)
+        normal += (points[i] - mean).Crossed(points[(i + 1) % (kSamples + 1)] - mean);
+    if (!(normal.Modulus() > Precision::SquareConfusion())) return false;
+    const gp_Ax3 frame{gp_Pnt(mean), gp_Dir(normal)};
+    const gp_XYZ xAxis = frame.XDirection().XYZ(), yAxis = frame.YDirection().XYZ();
+    // Least squares circle in the plane: x^2 + y^2 + D x + E y + F = 0.
+    double sxx = 0, sxy = 0, syy = 0, sx = 0, sy = 0, sxz = 0, syz = 0, sz = 0;
+    for (const auto& point : points) {
+        const gp_XYZ local = point - mean;
+        const double x = local.Dot(xAxis), y = local.Dot(yAxis), z = x * x + y * y;
+        sxx += x * x; sxy += x * y; syy += y * y; sx += x; sy += y;
+        sxz += x * z; syz += y * z; sz += z;
+    }
+    const double n = kSamples + 1;
+    const double m[3][3] = {{sxx, sxy, sx}, {sxy, syy, sy}, {sx, sy, n}};
+    const double r[3] = {-sxz, -syz, -sz};
+    const auto det3 = [](const double a[3][3]) {
+        return a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
+             - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
+             + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+    };
+    const double det = det3(m);
+    if (!std::isfinite(det) || std::abs(det) <= std::numeric_limits<double>::min()) return false;
+    double solution[3];
+    for (int column = 0; column < 3; ++column) {
+        double replaced[3][3];
+        for (int row = 0; row < 3; ++row)
+            for (int k = 0; k < 3; ++k) replaced[row][k] = k == column ? r[row] : m[row][k];
+        solution[column] = det3(replaced) / det;
+    }
+    const double cx = -solution[0] / 2, cy = -solution[1] / 2;
+    const double squared = cx * cx + cy * cy - solution[2];
+    if (!std::isfinite(squared) || squared <= 0) return false;
+    const double radius = std::sqrt(squared);
+    const gp_XYZ centre = mean + xAxis * cx + yAxis * cy;
+    const double tolerance = std::min(1e-3 * radius,
+        std::max(1e-4 * radius, 2 * BRep_Tool::Tolerance(edge)));
+    double turned = 0, previous = 0;
+    for (int i = 0; i <= kSamples; ++i) {
+        const gp_XYZ offset = points[i] - centre;
+        const double height = offset.Dot(frame.Direction().XYZ());
+        const double x = offset.Dot(xAxis), y = offset.Dot(yAxis);
+        if (std::abs(height) > tolerance || std::abs(std::hypot(x, y) - radius) > tolerance)
+            return false;
+        const double angle = std::atan2(y, x);
+        if (i > 0) turned += std::remainder(angle - previous, 2 * M_PI);
+        previous = angle;
+    }
+    circle = gp_Circ(gp_Ax2(gp_Pnt(centre), frame.Direction(), frame.XDirection()), radius);
+    span = std::abs(turned);
+    return true;
+}
+
+static bool Core3DMeasureSameCircle(const gp_Circ& a, const gp_Circ& b) {
+    const double tolerance = std::max(1e-4 * a.Radius(), Precision::Confusion());
+    return std::abs(a.Radius() - b.Radius()) <= tolerance
+        && a.Location().Distance(b.Location()) <= tolerance
+        && a.Axis().Direction().IsParallel(b.Axis().Direction(), 1e-4);
+}
+
+static bool Core3DMeasureFullCircle(const TopoDS_Shape& shape, gp_Circ& circle) {
+    if (shape.IsNull() || shape.ShapeType() != TopAbs_EDGE) return false;
+    double span = 0;
+    if (!Core3DMeasureFitCircle(TopoDS::Edge(shape), circle, span)) return false;
+    const bool exact = BRepAdaptor_Curve(TopoDS::Edge(shape)).GetType() == GeomAbs_Circle;
+    return std::abs(span - 2 * M_PI) < (exact ? 1e-7 : 1e-3);
+}
+
+// One arc of a rim the model keeps split in pieces: the other arcs on the same circle in the
+// same part complete it. The circle is returned in world coordinates.
+static bool Core3DMeasureFullCircleOfPart(const TopoDS_Shape& world,
+                                          const Handle(StdSelect_BRepOwner)& owner,
+                                          gp_Circ& circle) {
+    if (Core3DMeasureFullCircle(world, circle)) return true;
+    if (world.IsNull() || world.ShapeType() != TopAbs_EDGE || owner.IsNull() || !owner->HasShape())
         return false;
-    circle = curve.Circle();
+    const auto part = Handle(AIS_Shape)::DownCast(owner->Selectable());
+    const TopoDS_Shape& local = owner->Shape();
+    if (part.IsNull() || part->Shape().IsNull() || local.ShapeType() != TopAbs_EDGE) return false;
+    gp_Circ arc;
+    double covered = 0;
+    if (!Core3DMeasureFitCircle(TopoDS::Edge(local), arc, covered) || covered >= 2 * M_PI - 1e-3)
+        return false;
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(part->Shape(), TopAbs_EDGE, edges);
+    for (int index = 1; index <= edges.Extent(); ++index) {
+        const TopoDS_Edge& other = TopoDS::Edge(edges(index));
+        if (other.IsSame(local)) continue;
+        gp_Circ candidate;
+        double span = 0;
+        if (Core3DMeasureFitCircle(other, candidate, span) && Core3DMeasureSameCircle(arc, candidate))
+            covered += span;
+    }
+    if (std::abs(covered - 2 * M_PI) >= 1e-3) return false;
+    circle = arc;
+    circle.Transform(part->Transformation());
     return std::isfinite(circle.Radius()) && circle.Radius() > 0;
 }
 
@@ -21350,7 +21464,7 @@ struct Core3DMeasureSnap {
 static Core3DMeasureSnap Core3DMeasureSnapPoint(
     const Handle(V3d_View)& view, const core3d::Core3DViewer::MeasurePick& pick) {
     gp_Circ circle;
-    if (Core3DMeasureFullCircle(pick.worldEdge, circle))
+    if (Core3DMeasureFullCircleOfPart(pick.worldEdge, pick.owner, circle))
         return Core3DMeasureSnap{circle.Location(), 4};
     gp_Pnt picked = pick.pickedPoint;
     gp_Pnt endpoints[2];
@@ -21586,14 +21700,15 @@ extern "C" double Core3DDebugMeasureAnglePairProbe(int pair) {
                         return candidate.owner == topology[index].owner;
                     });
                 gp_Circ circle;
-                if (pick != picks.end() && !Core3DMeasureFullCircle(world, circle)
+                if (pick != picks.end()
+                    && !Core3DMeasureFullCircleOfPart(world, topology[index].owner, circle)
                     && Core3DMeasureFullCircle(pick->worldEdge, circle))
                     world = pick->worldEdge; // a tap on a hole's seam measures its rim
                 if (index < 2 && pick != picks.end()) {
                     snaps[index] = Core3DMeasureSnapPoint(view, *pick);
                     hasSnap[index] = snaps[index].kind > 0;
                 }
-                if (Core3DMeasureFullCircle(world, circle)) {
+                if (Core3DMeasureFullCircleOfPart(world, topology[index].owner, circle)) {
                     measuredCircle = circle;
                     circleDiameter = 2 * circle.Radius();
                     circleCentre = circle.Location();
