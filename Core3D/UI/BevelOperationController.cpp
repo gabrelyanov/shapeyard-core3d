@@ -167,7 +167,8 @@ Standard_Boolean TransformsMatch(
 Standard_Boolean HasStyledXCAFSubshape(
     const Handle(TDocStd_Document)& theDocument,
     const TDF_Label& theDefinition,
-    const Standard_Size theMaximumLabels) noexcept
+    const Standard_Size theMaximumLabels,
+    const Standard_Boolean theAllowFaceMaterials = Standard_False) noexcept
 {
     if (theDocument.IsNull() || theDefinition.IsNull()
         || theDefinition.Data() != theDocument->GetData()
@@ -201,7 +202,11 @@ Standard_Boolean HasStyledXCAFSubshape(
                         || aColorTool->IsSet(aLabel, XCAFDoc_ColorSurf)
                         || aColorTool->IsSet(aLabel, XCAFDoc_ColorCurv)
                         || !XCAFDoc_ColorTool::IsVisible(aLabel)))
-                || !XCAFDoc_VisMaterialTool::GetShapeMaterial(aLabel).IsNull()
+                || (!XCAFDoc_VisMaterialTool::GetShapeMaterial(aLabel).IsNull()
+                    // A colour put on one face (a material only) is carried by Bevel.
+                    && !(theAllowFaceMaterials
+                        && !XCAFDoc_ShapeTool::GetShape(aLabel).IsNull()
+                        && XCAFDoc_ShapeTool::GetShape(aLabel).ShapeType() == TopAbs_FACE))
                 || (!aLayerTool.IsNull()
                     && aLayerTool->GetLayers(aLabel, aLayers)
                     && !aLayers.IsEmpty())) {
@@ -1086,7 +1091,7 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
                 || HasStyledXCAFSubshape(
                     aDocument,
                     aSelection.documentLabel,
-                    kMaxStyledSubshapeLabels)
+                    kMaxStyledSubshapeLabels, Standard_True)
                 || !HasOnlySolidBranches(
                     aShape,
                     aPerSourceLimit,
@@ -1233,7 +1238,7 @@ Standard_Boolean BevelOperationController::preparedSourcesAreCurrent(
                 || HasStyledXCAFSubshape(
                     aDocument,
                     aSource.label,
-                    kMaxStyledSubshapeLabels)
+                    kMaxStyledSubshapeLabels, Standard_True)
                 || myDoc->EntityIdentifierForLabel(aSource.label)
                     != aSource.entityIdentifier
                 || myDoc->DefinitionIdentifierForLabel(aSource.label)
@@ -2161,7 +2166,13 @@ BevelApplyResult BevelOperationController::apply() noexcept
             }else{
                 TDF_Label record=source.bakedBooleanRecord;
                 if(!record.IsNull()) record.ForgetAllAttributes(Standard_True);
-                staged=myDoc->ReplaceShape(source.label,myPreviewResults[anIndex]);
+                // Colours put on single faces stay on the faces they were on (founder test 14 Nov).
+                std::vector<TDF_Label> faceLabels;
+                std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> colouredFaces;
+                staged=myDoc->CaptureFaceColours(source.label,1.0,faceLabels,colouredFaces)
+                    &&myDoc->ReplaceShape(source.label,myPreviewResults[anIndex])
+                    &&myDoc->CarryFaceColours(source.label,myPreviewResults[anIndex]->Shape(),
+                        faceLabels,colouredFaces);
             }
             if (!staged) {
                 // Discharge this command's companion only after verified
