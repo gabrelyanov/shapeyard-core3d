@@ -3866,6 +3866,10 @@ struct NativeModelingPermitIssuer final {
 - (BOOL)frameCommittedSceneSelectedOnly:(BOOL)selectedObjectsOnly
                                  rect:(CGRect)rect
                        objectIdentity:(const core3d::ObjectFrameIdentity*)identity;
+- (BOOL)frameCommittedSceneSelectedOnly:(BOOL)selectedObjectsOnly
+                                 rect:(CGRect)rect
+                       objectIdentity:(const core3d::ObjectFrameIdentity*)identity
+                           fillingRect:(BOOL)fillingRect;
 
 - (BOOL)core3d_updateSelectionWithTextureData:(NSData*)data mediaType:(NSString*)mediaType
     slot:(OcctMaterialTextureSlot)slot error:(NSError* _Nullable * _Nullable)error;
@@ -15754,6 +15758,14 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
                                            rect:rect objectIdentity:nullptr];
 }
 
+- (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly
+                normalizedViewportRect:(CGRect)rect
+                           fillingRect:(BOOL)fillingRect {
+    return [self frameCommittedSceneSelectedOnly:selectedObjectsOnly
+                                           rect:rect objectIdentity:nullptr
+                                    fillingRect:fillingRect];
+}
+
 - (BOOL)frameObjectWithEntityIdentifier:(NSString *)entityIdentifier
                              expected:(Core3DSceneSnapshot *)expected
                normalizedViewportRect:(CGRect)rect {
@@ -20854,6 +20866,14 @@ static bool Core3DPublishCommittedSpatialSweep(
 - (BOOL)frameCommittedSceneSelectedOnly:(BOOL)selectedObjectsOnly
                                  rect:(CGRect)rect
                        objectIdentity:(const core3d::ObjectFrameIdentity*)identity {
+    return [self frameCommittedSceneSelectedOnly:selectedObjectsOnly rect:rect
+                                  objectIdentity:identity fillingRect:NO];
+}
+
+- (BOOL)frameCommittedSceneSelectedOnly:(BOOL)selectedObjectsOnly
+                                 rect:(CGRect)rect
+                       objectIdentity:(const core3d::ObjectFrameIdentity*)identity
+                           fillingRect:(BOOL)fillingRect {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
         return NO;
     }
@@ -20868,7 +20888,8 @@ static bool Core3DPublishCommittedSpatialSweep(
     if (viewer == nullptr || !viewer->frameModel(selectedObjectsOnly,
             static_cast<std::uint32_t>(std::llround(size.width)),
             static_cast<std::uint32_t>(std::llround(size.height)),
-            rect.origin.x, rect.origin.y, rect.size.width, rect.size.height, identity)) {
+            rect.origin.x, rect.origin.y, rect.size.width, rect.size.height, identity,
+            fillingRect ? true : false)) {
         return NO;
     }
     [GLController requestRender];

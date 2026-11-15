@@ -14143,7 +14143,8 @@ bool Core3DViewer::selectObjectFromBrowser(
 // Shared camera math only. Admission and authoritative bounds remain with
 // each caller; a failed fit restores the exact previous camera.
 static bool FitCameraToBounds(const Handle(V3d_View)& view, const Bnd_Box& bounds,
-    double targetX, double targetY, double targetWidth, double targetHeight) noexcept {
+    double targetX, double targetY, double targetWidth, double targetHeight,
+    bool fillTarget = false) noexcept {
     // Target coordinates are normalized to the full viewport, origin top-left.
     if (!std::isfinite(targetX) || !std::isfinite(targetY)
         || !std::isfinite(targetWidth) || !std::isfinite(targetHeight)
@@ -14209,6 +14210,68 @@ static bool FitCameraToBounds(const Handle(V3d_View)& view, const Bnd_Box& bound
                 camera->Copy(previousCamera);
                 return false;
             }
+            // The fit above is safe but loose: the full-view fit is shrunk by the target's
+            // smaller side whichever side limits the model, and every failed try zooms out
+            // by a fifth (a row of parts on a sideways phone came out under half the free
+            // area). A caller that asks to fill the target (the user's own Frame All and
+            // Frame Selected Objects) gets it tightened: zoom until the corner furthest from
+            // the target's centre reaches the target with a small margin, re-centring each
+            // time. Every corner is verified against the whole target again; a failed
+            // tightening keeps the safe fit. Every other caller keeps the fit it had.
+            Handle(Graphic3d_Camera) safeFit = new Graphic3d_Camera(camera);
+            const double kFill = 0.90;
+            const double halfWidth = (right - left) * 0.5, halfHeight = (top - bottom) * 0.5;
+            const double centerX = (left + right) * 0.5, centerY = (bottom + top) * 0.5;
+            bool tightened = fillTarget && halfWidth > 0.0 && halfHeight > 0.0;
+            for (int pass = 0; tightened && pass < 8; ++pass) {
+                const auto projectedCenter = camera->Project(worldCenter);
+                const auto targetWorld = camera->UnProject(gp_Pnt(
+                    centerX, centerY, projectedCenter.Z()));
+                gp_Trsf shift;
+                shift.SetTranslation(gp_Vec(targetWorld, worldCenter));
+                camera->Transform(shift);
+                double reach = 0.0;
+                for (const double x : {minX, maxX}) {
+                    for (const double y : {minY, maxY}) {
+                        for (const double z : {minZ, maxZ}) {
+                            const auto point = camera->Project(gp_Pnt(x, y, z));
+                            if (!std::isfinite(point.X()) || !std::isfinite(point.Y())
+                                || !std::isfinite(point.Z())) {
+                                tightened = false;
+                            } else {
+                                reach = std::max(reach, std::max(
+                                    std::abs(point.X() - centerX) / halfWidth,
+                                    std::abs(point.Y() - centerY) / halfHeight));
+                            }
+                        }
+                    }
+                }
+                if (!tightened || !std::isfinite(reach) || reach <= 1e-9) {
+                    tightened = false;
+                    break;
+                }
+                const double ratio = reach / kFill;
+                if (std::abs(ratio - 1.0) < 0.01) { break; }
+                const double scale = camera->Scale() * ratio;
+                if (!std::isfinite(scale) || scale <= 0.0) { tightened = false; break; }
+                camera->SetScale(scale);
+            }
+            if (tightened) {
+                for (const double x : {minX, maxX}) {
+                    for (const double y : {minY, maxY}) {
+                        for (const double z : {minZ, maxZ}) {
+                            const auto point = camera->Project(gp_Pnt(x, y, z));
+                            if (!std::isfinite(point.X()) || !std::isfinite(point.Y())
+                                || !std::isfinite(point.Z())
+                                || point.X() < left || point.X() > right
+                                || point.Y() < bottom || point.Y() > top) {
+                                tightened = false;
+                            }
+                        }
+                    }
+                }
+            }
+            if (fillTarget && !tightened) { camera->Copy(safeFit); }
         }
         view->ZFitAll();
         const gp_Pnt eye = camera->Eye();
@@ -14244,7 +14307,7 @@ bool Core3DViewer::frameModel(
     const std::uint32_t viewportHeight,
     const double targetX, const double targetY,
     const double targetWidth, const double targetHeight,
-    const ObjectFrameIdentity* objectIdentity) noexcept {
+    const ObjectFrameIdentity* objectIdentity, const bool fillTarget) noexcept {
     // Target coordinates are normalized to the full viewport, origin top-left.
     if (!std::isfinite(targetX) || !std::isfinite(targetY)
         || !std::isfinite(targetWidth) || !std::isfinite(targetHeight)
@@ -14304,7 +14367,7 @@ bool Core3DViewer::frameModel(
         }
         if (bounds.IsVoid() || bounds.IsWhole() || bounds.IsOpen()) { return false; }
         return FitCameraToBounds(myView, bounds,
-            targetX, targetY, targetWidth, targetHeight);
+            targetX, targetY, targetWidth, targetHeight, fillTarget);
     } catch (...) { return false; }
 }
 

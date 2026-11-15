@@ -927,7 +927,8 @@ namespace core3d {
                         std::uint32_t viewportHeight,
                         double targetX = 0.0, double targetY = 0.0,
                         double targetWidth = 1.0, double targetHeight = 1.0,
-                        const ObjectFrameIdentity* objectIdentity = nullptr) noexcept;
+                        const ObjectFrameIdentity* objectIdentity = nullptr,
+                        bool fillTarget = false) noexcept;
         //! Fit selected committed sources plus an exact Ready axis preview.
         //! Never changes the document, selection, operation or model history.
         bool frameMirrorPreview(const MirrorPreviewFrameIdentity& expected,

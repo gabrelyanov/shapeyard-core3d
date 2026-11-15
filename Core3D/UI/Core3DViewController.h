@@ -417,6 +417,12 @@ __attribute__((objc_subclassing_restricted))
 - (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly
                 normalizedViewportRect:(CGRect)normalizedViewportRect
     NS_SWIFT_NAME(frameModel(selectedObjectsOnly:normalizedViewportRect:));
+//! As above; with fillingRect the model is zoomed until it reaches the rectangle
+//! with a small margin (the user's own Frame All and Frame Selected Objects).
+- (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly
+                normalizedViewportRect:(CGRect)normalizedViewportRect
+                           fillingRect:(BOOL)fillingRect
+    NS_SWIFT_NAME(frameModel(selectedObjectsOnly:normalizedViewportRect:fillingRect:));
 //! Focus one visible model occurrence without selecting it. The expected
 //! publication stream, document generation and model revision must still match.
 //! Camera/selection-only changes do not invalidate this read-only request.
