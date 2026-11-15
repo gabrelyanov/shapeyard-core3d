@@ -1126,15 +1126,22 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
                 bool(aSelection.retainedCapture)
                 && bool(aSelection.retainedCapture->snapshot);
             const auto coverage=myDoc->RetainedRecipeCoverageForLabel(aSelection.documentLabel);
+            // A fresh Join/Cut result (its only record is the Boolean originals record) is
+            // bevelled as the solid it is; the record goes in the Bevel command (editor lane
+            // 15 Nov 01:35: no Bevel after Union).
+            TDF_Label aBakedBooleanRecord;
+            const bool bakesBooleanResult = !hasRetainedCapture
+                && myDoc->BooleanResultRecordForBake(aSelection.documentLabel, aBakedBooleanRecord);
             if ((hasRetainedCapture
                     && (!RetainedBevelCoverageMatches(
                             coverage, aSelection.retainedCapture)
                         || theSelection.size() != 1
                         || !myRetainedAdapter))
-                || (!hasRetainedCapture
+                || (!hasRetainedCapture && !bakesBooleanResult
                     && coverage != OcctRetainedRecipeCoverage::Absent)) {
                 return Standard_False;
             }
+            aSource.bakedBooleanRecord = aBakedBooleanRecord;
             aSource.retainedCapture=aSelection.retainedCapture;
             if (!aSelection.edgeTopologyIndices.empty()
                 && aSelection.edgeTopologyIndices
@@ -1776,6 +1783,13 @@ BevelApplyResult BevelOperationController::apply() noexcept
 			if (aCoverage == OcctRetainedRecipeCoverage::Absent) {
 				continue;
 			}
+			// A fresh Join/Cut result admitted at begin: its record is baked in the command.
+			TDF_Label aCurrentRecord;
+			if (!source.bakedBooleanRecord.IsNull()
+				&& myDoc->BooleanResultRecordForBake(source.label, aCurrentRecord)
+				&& aCurrentRecord.IsEqual(source.bakedBooleanRecord)) {
+				continue;
+			}
 			OcctPlainProfileOperationCapture aCapture;
 			if (aCoverage != OcctRetainedRecipeCoverage::CurrentProfile
 				|| !myDoc->CapturePlainProfileOperationSource(
@@ -1993,7 +2007,11 @@ BevelApplyResult BevelOperationController::apply() noexcept
                     &&source.retainedCapture->snapshot
                     &&myDoc->StageRetainedEdgeTreatment(*source.retainedCapture->snapshot,
                         *source.retainedEdit,*source.retainedResult,readback,refusal);
-            }else staged=myDoc->ReplaceShape(source.label,myPreviewResults[anIndex]);
+            }else{
+                TDF_Label record=source.bakedBooleanRecord;
+                if(!record.IsNull()) record.ForgetAllAttributes(Standard_True);
+                staged=myDoc->ReplaceShape(source.label,myPreviewResults[anIndex]);
+            }
             if (!staged) {
                 // Discharge this command's companion only after verified
                 // prior-state settlement. A failed proof remains recovery
