@@ -3889,8 +3889,8 @@ bool ExtractBoundarySegments(const DefinitionData& definition,
     return true;
 }
 
-// Off in this commit (edges can be classified, none is yet); the next commit turns it on.
-constexpr bool kEdgeDrawClassesOnByDefault = false;
+// The one switch of the rule (see EdgeDrawClassesEnabled in the header).
+constexpr bool kEdgeDrawClassesOnByDefault = true;
 
 std::atomic<int>& EdgeDrawClassesSwitch() noexcept {
     // -1 = not read yet, 0 = off, 1 = on.
