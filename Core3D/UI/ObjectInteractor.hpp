@@ -157,6 +157,10 @@ namespace core3d {
             GeometrySnapResult hit;
             std::string targetIdentifier;
         };
+        //! Measure: world model-unit offset of the first dragged object since
+        //! the active Move/Rotate gesture began (snapping included). False
+        //! outside an active gesture. Read-only.
+        bool liveGestureOffset(double& x, double& y, double& z) const noexcept;
         const GeometryMoveSnap* geometrySnapFeedback() const noexcept {
             return isManipulatorGestureActive() && _geometryMoveSnap ? &*_geometryMoveSnap : nullptr;
         }
@@ -167,6 +171,7 @@ namespace core3d {
         //! Editor (job 3b): the snapped edge or face shown in the selection
         //! style while a drag holds the snap; corners have no highlight yet.
         Handle(AIS_Shape) _geometrySnapHighlight;
+        TopoDS_Shape _geometrySnapHighlightSource;
         void syncGeometrySnapHighlight() noexcept;
         std::function<void(bool)> _geometrySnapFeedbackChangedCallback;
         bool _geometrySnapSamplesActive = false;

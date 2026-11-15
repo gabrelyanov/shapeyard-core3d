@@ -2,6 +2,7 @@
 
 #include "DraftFacesDefinition.hxx"
 #include "RetainedTopologyBudget.hxx"
+#include "AnalyticBooleanSolid.hxx"
 #include <BOPAlgo_ArgumentAnalyzer.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Section.hxx>
@@ -396,20 +397,17 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
         for (const auto& face : selected)
             if (draft.ConnectedFaces(face).Size() != 1)
                 return decline(Refusal::PropagatedUnselectedFace);
-        const TopoDS_Shape candidate = draft.Shape();
-        if (!BRepCheck_Analyzer(candidate).IsValid()) return decline(Refusal::InvalidCandidate);
-        if (!detail::selfIntersectionFree(candidate)) return decline(Refusal::SelfIntersection);
-        if (!detail::chargeShape(budget, candidate,
+        const TopoDS_Shape draftedCandidate = draft.Shape();
+        if (!BRepCheck_Analyzer(draftedCandidate).IsValid())
+            return decline(Refusal::InvalidCandidate);
+        if (!detail::selfIntersectionFree(draftedCandidate))
+            return decline(Refusal::SelfIntersection);
+        if (!detail::chargeShape(budget, draftedCandidate,
                 retained_topology_budget::Site::C11GeometryCensus))
             return decline(Refusal::TopologyBudgetExceeded);
 
-        for (TopExp_Explorer explorer(candidate, TopAbs_SOLID); explorer.More(); explorer.Next())
-            ++output.evidence.connectedSolids;
-        if (candidate.ShapeType() != TopAbs_SOLID || output.evidence.connectedSolids != 1)
-            return decline(Refusal::DisconnectedSolid);
-
         detail::SectionWitness candidateSection;
-        if (!detail::sectionWitness(candidate, neutral, tolerance, candidateSection)
+        if (!detail::sectionWitness(draftedCandidate, neutral, tolerance, candidateSection)
             || !detail::sameSection(sourceSection, candidateSection, tolerance))
             return decline(Refusal::NeutralPlaneChanged);
         output.evidence.neutralSectionEdges = candidateSection.edges;
@@ -417,7 +415,7 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
 
         for (const auto& intent : definition.faces) {
             TopoDS_Face draftedFace; gp_Dir normal;
-            if (!detail::candidateFace(candidate, intent, definition, tolerance,
+            if (!detail::candidateFace(draftedCandidate, intent, definition, tolerance,
                                        draftedFace, normal))
                 return decline(Refusal::SignedAngleMismatch);
             double measured = 0;
@@ -426,6 +424,35 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
                 return decline(Refusal::AnalyticSectionMismatch);
             output.evidence.measuredSignedAngleRadians = measured;
         }
+
+        TopoDS_Shape candidate = draftedCandidate;
+        if (!definition.retainedCutBytes.empty()) {
+            retained_boolean::Recipe retained;
+            if (!retained_boolean::Decode(definition.retainedCutBytes, retained))
+                return decline(Refusal::MalformedPayload);
+            const auto* legacy = std::get_if<retained_boolean::Legacy>(&retained);
+            if (!legacy) return decline(Refusal::MalformedPayload);
+            analytic_boolean::Result cut;
+            if (!budget.beginStage(retained_topology_budget::Site::C16KernelBuild)
+                || analytic_boolean::Build(candidate, cylindrical_cut::Recipe(*legacy),
+                    cancelled, cut, 0, budget) != analytic_boolean::Status::Built
+                || cut.solid.IsNull())
+                return decline(cancelled.load() ? Refusal::Cancelled
+                                                : Refusal::BuildFailure);
+            candidate = cut.solid;
+            if (!BRepCheck_Analyzer(candidate).IsValid())
+                return decline(Refusal::InvalidCandidate);
+            if (!detail::selfIntersectionFree(candidate))
+                return decline(Refusal::SelfIntersection);
+            if (!detail::chargeShape(budget, candidate,
+                    retained_topology_budget::Site::C11GeometryCensus))
+                return decline(Refusal::TopologyBudgetExceeded);
+        }
+
+        for (TopExp_Explorer explorer(candidate, TopAbs_SOLID); explorer.More(); explorer.Next())
+            ++output.evidence.connectedSolids;
+        if (candidate.ShapeType() != TopAbs_SOLID || output.evidence.connectedSolids != 1)
+            return decline(Refusal::DisconnectedSolid);
 
         if (!detail::exactShapeBytes(source, sourceAfter) || sourceAfter != sourceBefore)
             return decline(Refusal::SourceMutation);
