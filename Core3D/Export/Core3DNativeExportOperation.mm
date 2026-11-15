@@ -2181,6 +2181,55 @@ private:
     std::shared_ptr<ExportParametricBudget> budget_;
 };
 
+// CTO 15 Nov 15:47: where three fillets meet, the mesher leaves one collapsed
+// (zero-area) triangle on the corner patch's degenerate edge. Remove such
+// triangles from each freshly meshed face of the private export document.
+// Nodes are kept, so edge polygons and node indices stay valid; a face whose
+// triangles would all be removed is left unchanged. Returns removed count.
+Standard_Integer RemoveCollapsedExportTriangles(
+    const TopoDS_Shape& meshingShape,
+    const std::shared_ptr<NativeExportState>& state) {
+    Standard_Integer removed = 0;
+    for (TopExp_Explorer faces(meshingShape, TopAbs_FACE); faces.More(); faces.Next()) {
+        ThrowIfCancelled(state);
+        TopLoc_Location location;
+        const Handle(Poly_Triangulation) mesh =
+            BRep_Tool::Triangulation(TopoDS::Face(faces.Current()), location);
+        if (mesh.IsNull() || !mesh->HasGeometry() || mesh->NbTriangles() <= 0) continue;
+        const Standard_Integer count = mesh->NbTriangles();
+        const Standard_Integer nodeCount = mesh->NbNodes();
+        std::vector<Poly_Triangle> kept;
+        kept.reserve(static_cast<std::size_t>(count));
+        for (Standard_Integer index = 1; index <= count; ++index) {
+            const Poly_Triangle triangle = mesh->Triangle(index);
+            Standard_Integer n1 = 0, n2 = 0, n3 = 0;
+            triangle.Get(n1, n2, n3);
+            if (n1 < 1 || n2 < 1 || n3 < 1 || n1 > nodeCount || n2 > nodeCount || n3 > nodeCount) {
+                kept.push_back(triangle);
+                continue;
+            }
+            const gp_XYZ a = mesh->Node(n1).XYZ(), b = mesh->Node(n2).XYZ(), c = mesh->Node(n3).XYZ();
+            const double ab = (b - a).SquareModulus(), ac = (c - a).SquareModulus(),
+                bc = (c - b).SquareModulus();
+            const double longest = std::max(ab, std::max(ac, bc));
+            const double shortest = std::min(ab, std::min(ac, bc));
+            const double confusion = Precision::Confusion() * Precision::Confusion();
+            const bool collapsed = n1 == n2 || n1 == n3 || n2 == n3
+                || !(longest > 0.0) || shortest <= confusion
+                || !((b - a).Crossed(c - a).Modulus() > longest * 1e-10);
+            if (!collapsed) kept.push_back(triangle);
+        }
+        const auto keptCount = static_cast<Standard_Integer>(kept.size());
+        if (keptCount == count || keptCount == 0) continue;
+        mesh->ResizeTriangles(keptCount, Standard_False);
+        for (Standard_Integer index = 1; index <= keptCount; ++index) {
+            mesh->SetTriangle(index, kept[static_cast<std::size_t>(index - 1)]);
+        }
+        removed += count - keptCount;
+    }
+    return removed;
+}
+
 void MeshPrivateExportSurfaces(
     const TopoDS_Shape& compound,
     const std::shared_ptr<NativeExportState>& state,
@@ -2320,6 +2369,16 @@ void MeshPrivateExportSurfaces(
         if (!validMesh) {
             throw NativeExportFailure(Core3DNativeExportErrorMeshingFailed,
                 "The committed geometry could not be meshed within the requested quality.");
+        }
+        if (qualityPreset) {
+            const Standard_Integer removedCollapsed = RemoveCollapsedExportTriangles(meshingShape, state);
+#if DEBUG
+            if (removedCollapsed > 0) {
+                NSLog(@"[NativeExportMeshDiagnostic] removedCollapsedTriangles=%d", removedCollapsed);
+            }
+#else
+            (void)removedCollapsed;
+#endif
         }
     } else {
         whole.Next(4).Close();
