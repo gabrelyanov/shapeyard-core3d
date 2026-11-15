@@ -54,6 +54,9 @@
 #include <TopoDS_Iterator.hxx>
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
+#include <Prs3d_Drawer.hxx>
+#include <Prs3d_LineAspect.hxx>
+#include <Quantity_Color.hxx>
 #include <AIS_DisplayMode.hxx>
 #include <SelectMgr_Selection.hxx>
 #include <SelectMgr_SensitiveEntity.hxx>
@@ -2403,6 +2406,25 @@ bool Core3DViewer::acknowledgeRawR2BevelPreviewRevision(
     session->presentationRevision_=revision;return true;
 }
 
+namespace {
+// A previewed result drawn by the OCCT view (Cut, Hole, a Join the Metal picture does not take)
+// shows its edges as thin black lines, like the lines of a committed part: without them a pocket
+// or a step in a flat grey result cannot be seen before the tick. The Metal picture draws its own
+// lines for the previews it takes and does not read this.
+void ShowEdgesOfPreviewedResult(const Handle(AIS_Shape)& preview) noexcept {
+    try{
+        if(preview.IsNull()||preview->Attributes().IsNull())return;
+        const Handle(Prs3d_Drawer)& drawer=preview->Attributes();
+        drawer->SetFaceBoundaryDraw(Standard_True);
+        (void)drawer->SetupOwnFaceBoundaryAspect();
+        const Handle(Prs3d_LineAspect)& line=drawer->FaceBoundaryAspect();
+        if(line.IsNull()){drawer->SetFaceBoundaryDraw(Standard_False);return;}
+        line->SetColor(Quantity_Color(Quantity_NOC_BLACK));
+        line->SetWidth(1.0);
+    }catch(...){}
+}
+} // namespace
+
 bool Core3DViewer::showBooleanPairPreview(const std::string& targetEntity,
     const std::string& toolEntity, const TopoDS_Shape& result, int operation) noexcept {
     if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()||result.IsNull()
@@ -2432,6 +2454,7 @@ bool Core3DViewer::showBooleanPairPreview(const std::string& targetEntity,
         state->preview=new AIS_Shape(result);
         state->preview->SetLocalTransformation(state->target->LocalTransformation());
         myDoc->LoadObjectMeterial(state->targetLabel,state->preview);
+        ShowEdgesOfPreviewedResult(state->preview);
         myContext->ClearSelected(Standard_False);
         myContext->Display(state->preview,AIS_Shaded,0,Standard_False);
         myContext->Deactivate(state->preview);
@@ -2501,6 +2524,7 @@ bool Core3DViewer::showBakedBooleanBatchPreview(const std::vector<std::string>& 
             Handle(AIS_Shape) preview=new AIS_Shape(result);
             preview->SetLocalTransformation(presentation->LocalTransformation());
             myDoc->LoadObjectMeterial(label,preview);
+            ShowEdgesOfPreviewedResult(preview);
             previews.push_back(preview);
         }
         auto state=std::make_shared<BooleanPairPreview>();
@@ -2553,6 +2577,7 @@ void Core3DViewer::colourJoinPreview(const TDF_Label& targetLabel, const Handle(
         Handle(AIS_ColoredShape) coloured=new AIS_ColoredShape(result);
         coloured->SetLocalTransformation(_booleanPairPreview->preview->LocalTransformation());
         myDoc->LoadObjectMeterial(targetLabel,coloured);
+        ShowEdgesOfPreviewedResult(coloured);
         for(const auto& [face,material]:matched)coloured->SetCustomColor(face,material.BaseColor.GetRGB());
         myContext->Remove(_booleanPairPreview->preview,Standard_False);
         _booleanPairPreview->preview=coloured;
@@ -2715,6 +2740,7 @@ bool Core3DViewer::showHolePreview(const std::string& entity, const gp_Pnt& worl
         state->preview=new AIS_Shape(result);
         state->preview->SetLocalTransformation(toWorld);
         myDoc->LoadObjectMeterial(label,state->preview);
+        ShowEdgesOfPreviewedResult(state->preview);
         myContext->ClearSelected(Standard_False);
         myContext->Display(state->preview,AIS_Shaded,0,Standard_False);
         myContext->Deactivate(state->preview);
