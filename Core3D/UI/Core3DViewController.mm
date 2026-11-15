@@ -23451,6 +23451,10 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         skipped ? Standard_True : Standard_False);
 }
 
++ (NSInteger)debugShellOffsetGuardRefusalCount {
+    return core3d::ShellOperationController::debugOffsetGuardRefusalCount();
+}
+
 - (void)debugSetMaximumShellCaptureTopologyNodes:(NSUInteger)limit {
     [GLController debugSetMaximumShellCaptureTopologyNodes:limit];
 }

@@ -1870,6 +1870,8 @@ __attribute__((objc_subclassing_restricted))
 //! process of its own.
 + (void)debugSetShellOffsetGuardSkipped:(BOOL)skipped
     NS_SWIFT_NAME(debugSetShellOffsetGuardSkipped(_:));
+//! How often the Shell guard has held a shell back from the kernel in this process.
++ (NSInteger)debugShellOffsetGuardRefusalCount NS_SWIFT_NAME(debugShellOffsetGuardRefusalCount());
 - (void)debugSetMaximumShellCaptureTopologyNodes:(NSUInteger)limit;
 - (void)debugSetMaximumShellResultTopologyNodes:(NSUInteger)limit;
 - (void)debugSetShellTransactionFailureCount:(NSUInteger)count;

@@ -271,6 +271,10 @@ inline Standard_Boolean AnalyticPrimitiveForShell(
 //! can record, in a process of its own, what the kernel does without it.
 Standard_Boolean ShellOffsetGuardSkipped() noexcept;
 void DebugSetShellOffsetGuardSkipped(Standard_Boolean skipped) noexcept;
+//! How often the guard has held a shell back from the kernel in this process
+//! (evidence for checks: a refusal that came from the guard, not the kernel).
+void NoteShellOffsetGuardRefusal() noexcept;
+Standard_Integer ShellOffsetGuardRefusalCount() noexcept;
 
 //! Whether the offset kernel may be given this shell at all. The kernel does not
 //! always refuse what it cannot hollow: for a cube with Bevel 3 on every edge,
@@ -294,7 +298,11 @@ inline Standard_Boolean ShellOffsetIsSafe(
         if (source.IsNull() || openings.empty()) return Standard_False;
         TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
         TopExp::MapShapesAndAncestors(source, TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
-        const auto outwardNormal = [](const TopoDS_Face& face, const TopoDS_Edge& edge,
+        // The surface normal of a face at a place on one of its edges. Its sign is not used:
+        // an opening face reaches the worker as a copy whose orientation flag need not match
+        // the original's (build 4b, first try: the guard compared signed normals, saw
+        // "opposite" on the crash route and let the kernel have it).
+        const auto surfaceNormal = [](const TopoDS_Face& face, const TopoDS_Edge& edge,
                                       const Standard_Real along, gp_Dir& normal) -> bool {
             Standard_Real first = 0.0, last = 0.0;
             const Handle(Geom2d_Curve) onSurface = BRep_Tool::CurveOnSurface(edge, face, first, last);
@@ -305,25 +313,33 @@ inline Standard_Boolean ShellOffsetIsSafe(
             GeomLProp_SLProps properties(surface, uv.X(), uv.Y(), 1, 1.0e-9);
             if (!properties.IsNormalDefined()) return false;
             normal = properties.Normal();
-            if (face.Orientation() == TopAbs_REVERSED) normal.Reverse();
             return true;
         };
         for (const TopoDS_Face& opening : openings) {
             for (TopExp_Explorer walk(opening, TopAbs_EDGE); walk.More(); walk.Next()) {
                 const TopoDS_Edge edge = TopoDS::Edge(walk.Current());
-                if (BRep_Tool::Degenerated(edge) || !facesOfEdges.Contains(edge)) continue;
+                if (BRep_Tool::Degenerated(edge)) continue;
+                // Every edge of an opening has a neighbour in the solid it is cut from. An
+                // edge without one means the opening is not a face of this shape: not judged
+                // safe.
+                if (!facesOfEdges.Contains(edge)) return Standard_False;
                 const TopTools_ListOfShape& faces = facesOfEdges.FindFromKey(edge);
+                Standard_Boolean hasNeighbour = Standard_False;
                 for (TopTools_ListOfShape::Iterator other(faces); other.More(); other.Next()) {
                     if (other.Value().IsSame(opening)) continue;
+                    hasNeighbour = Standard_True;
                     const TopoDS_Face neighbour = TopoDS::Face(other.Value());
-                    // Smooth anywhere along the edge (within about eight degrees) is smooth.
+                    // Smooth anywhere along the edge (the two surfaces' normals within about
+                    // eight degrees of one line) is smooth. Two faces of a valid solid never
+                    // fold back flat on each other, so the sign carries nothing.
                     for (const Standard_Real along : {0.2, 0.5, 0.8}) {
                         gp_Dir onOpening, onNeighbour;
-                        if (!outwardNormal(opening, edge, along, onOpening)
-                            || !outwardNormal(neighbour, edge, along, onNeighbour)
-                            || onOpening.Dot(onNeighbour) >= 0.990) return Standard_False;
+                        if (!surfaceNormal(opening, edge, along, onOpening)
+                            || !surfaceNormal(neighbour, edge, along, onNeighbour)
+                            || std::abs(onOpening.Dot(onNeighbour)) >= 0.990) return Standard_False;
                     }
                 }
+                if (!hasNeighbour) return Standard_False;
             }
         }
         return Standard_True;
@@ -344,8 +360,10 @@ inline Standard_Boolean MakeInwardShell(
     const Standard_Boolean rebuilt =
         AnalyticPrimitiveForShell(source, faces, analytic, analyticFaces);
     if (!ShellOffsetGuardSkipped()
-        && !ShellOffsetIsSafe(rebuilt ? analytic : source, rebuilt ? analyticFaces : faces))
+        && !ShellOffsetIsSafe(rebuilt ? analytic : source, rebuilt ? analyticFaces : faces)) {
+        NoteShellOffsetGuardRefusal();
         return Standard_False;
+    }
     TopTools_ListOfShape openings;
     for (const auto& face : rebuilt ? analyticFaces : faces) openings.Append(face);
     builder.MakeThickSolidByJoin(rebuilt ? analytic : source, openings, -thickness, tolerance,
@@ -554,6 +572,7 @@ public:
     //! Check seam: lets a check, in a process of its own, give the kernel what the
     //! offset guard holds back (see ShellOffsetIsSafe).
     static void debugSetOffsetGuardSkipped(Standard_Boolean skipped) noexcept;
+    static Standard_Integer debugOffsetGuardRefusalCount() noexcept;
     void debugSetCommitMode(Standard_Integer mode) noexcept;
     void debugSetPostCommitInspectFailureCount(Standard_Size count) noexcept;
     Standard_Boolean debugMutateSourcePersistedTransform() noexcept;
