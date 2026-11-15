@@ -7670,6 +7670,16 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
     return values;
 }
 
+- (void)debugSetForceSelectionOutlineFallback:(BOOL)force {
+    if (![NSThread isMainThread] || GLController == nil) { return; }
+    [GLController debugSetForceSelectionOutlineFallback:force];
+}
+
+- (NSArray<NSNumber *> *_Nullable)debugSelectedPartHighlightRGB {
+    if (![NSThread isMainThread] || GLController == nil) { return nil; }
+    return [GLController debugSelectedPartHighlightRGB];
+}
+
 - (NSInteger)debugPartsWithOwnHighlightStyle {
     if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) { return -1; }
     const Handle(AIS_InteractiveContext) context = GLController.viewer->AisContext();
