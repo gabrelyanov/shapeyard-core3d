@@ -39,6 +39,12 @@ typedef NS_ENUM(NSInteger, Core3DEdgeTreatmentRawPreviewStatusR2) {
     Core3DEdgeTreatmentRawPreviewStatusR2OutcomeUnknown = 6,
 };
 
+typedef NS_ENUM(NSInteger, Core3DEdgeTreatmentRawPreviewRefusalKindR2) {
+    Core3DEdgeTreatmentRawPreviewRefusalKindR2None = 0,
+    Core3DEdgeTreatmentRawPreviewRefusalKindR2RadiusRefused,
+    Core3DEdgeTreatmentRawPreviewRefusalKindR2Other,
+};
+
 @interface Core3DRetainedBooleanRecipeLocatorR2 : NSObject
 @property(nonatomic,copy,readonly) NSString *documentIdentifier, *entityIdentifier,
     *definitionIdentifier, *nodeIdentifier, *sourceFeatureIdentifier;
@@ -180,6 +186,7 @@ typedef NS_ENUM(NSInteger, Core3DEdgeTreatmentRawPreviewStatusR2) {
 @property(nonatomic,readonly) uint64_t generation;
 @property(nonatomic,readonly) Core3DEdgeTreatmentKind kind;
 @property(nonatomic,readonly) double amountMM;
+@property(nonatomic,readonly) Core3DEdgeTreatmentRawPreviewRefusalKindR2 refusalKind;
 @property(nonatomic,copy,readonly) NSString *refusalCode, *refusalMessage;
 - (instancetype)init NS_UNAVAILABLE; + (instancetype)new NS_UNAVAILABLE;
 @end
@@ -191,6 +198,7 @@ typedef NS_ENUM(NSInteger, Core3DEdgeTreatmentRawPreviewStatusR2) {
 @property(nonatomic,readonly) uint64_t generation;
 @property(nonatomic,readonly) Core3DEdgeTreatmentKind kind;
 @property(nonatomic,readonly) double amountMM;
+@property(nonatomic,readonly) Core3DEdgeTreatmentRawPreviewRefusalKindR2 refusalKind;
 @property(nonatomic,copy,readonly) NSString *refusalCode, *refusalMessage;
 @property(nonatomic,strong,readonly,nullable) Core3DEdgeTreatmentResult *commitResult;
 - (instancetype)init NS_UNAVAILABLE; + (instancetype)new NS_UNAVAILABLE;

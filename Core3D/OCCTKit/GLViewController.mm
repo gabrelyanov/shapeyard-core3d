@@ -1293,10 +1293,15 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 
 @interface Core3DViewController (VisibleRawR2BevelRouting)
 - (BOOL)core3d_hasVisibleRawR2Bevel;
+- (BOOL)core3d_canBeginVisibleRawR2Bevel;
+- (BOOL)core3d_beginVisibleRawR2Bevel;
 - (void)core3d_setVisibleRawR2BevelValue:(double)localValue;
 - (BOOL)core3d_applyVisibleRawR2Bevel;
 - (BOOL)core3d_cancelVisibleRawR2Bevel;
 - (Core3DModelingPreviewStatus)core3d_visibleRawR2BevelStatus;
+- (double)core3d_visibleRawR2BevelMetersPerUnit;
+- (Core3DRoundFailureObservation)
+    core3d_visibleRawR2RoundFailureObservation;
 @end
 
 static Core3DViewController *Core3DVisibleRawR2BevelOwner(
@@ -3428,6 +3433,19 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 	if (_viewer == nullptr || _viewer->hasUnresolvedEdit()) {
 		return;
 	}
+	// Keep raw-R2 ownership alive while Cancel/Apply republishes selection.
+	// Once that operation is inactive, retire its presentation token at the
+	// explicit tool boundary before deriving the previous tool. Treating the
+	// stale token as an ordinary Chamfer would ask the empty ordinary ledger to
+	// reset a wireframe it never owned.
+	if (type != PrimitiveGizmoTypeChamfer
+		&& _visibleRawR2BevelOwnsChamferTool) {
+		Core3DViewController *rawOwner =
+			Core3DVisibleRawR2BevelOwner(self);
+		if (![rawOwner core3d_hasVisibleRawR2Bevel]) {
+			_visibleRawR2BevelOwnsChamferTool = NO;
+		}
+	}
 	const PrimitiveGizmoType previousType = [self getGizmoType];
 	if (type != PrimitiveGizmoTypeNone) {
 		const std::shared_ptr<ShapeInteractor> shapeInteractor =
@@ -3655,6 +3673,15 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     if (_visibleRawR2BevelOwnsChamferTool)
         return PrimitiveGizmoTypeChamfer;
     if (_viewer == nullptr) { return PrimitiveGizmoTypeNone; }
+    // Ordinary Round owns the Chamfer control surface through its typed
+    // Bevel ledger. The ObjectInteractor can legitimately have no attached
+    // manipulator after renderer publication; that presentation detail must
+    // not retire Radius while the operation is still active.
+    const std::shared_ptr<ShapeInteractor> shapeInteractor =
+        _viewer->getShapeInteractor();
+    if (shapeInteractor != nullptr && shapeInteractor->hasActiveBevel()) {
+        return PrimitiveGizmoTypeChamfer;
+    }
     const auto interactor = _viewer->getObjectInteractor();
     if (interactor == nullptr) { return PrimitiveGizmoTypeNone; }
     PrimitiveGizmoType type = PrimitiveGizmoTypeNone;
@@ -3716,6 +3743,144 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     [self requestRender];
     //if (!result)
     //	std::cout << "incorrect chamfer value" << std::endl;
+}
+
+- (BOOL)canBeginRound {
+    if (_viewer == nullptr || _viewer->hasUnresolvedEdit()
+        || [self getSelectionType] != PrimitiveSelectionTypeEdge
+        || [self getGizmoType] != PrimitiveGizmoTypeNone) {
+        return NO;
+    }
+    const std::shared_ptr<ShapeInteractor> interactor =
+        _viewer->getShapeInteractor();
+    if (interactor == nullptr || !interactor->selectionModeAuthorityIsExact()) {
+        return NO;
+    }
+    Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+    return [rawOwner core3d_canBeginVisibleRawR2Bevel]
+        || interactor->canBeginRoundSelection();
+}
+
+- (BOOL)beginRound {
+    // Repeat the live proof in this call. A prior availability answer never
+    // authorizes activation after the selection has changed.
+    if (![self canBeginRound] || _viewer == nullptr) {
+        return NO;
+    }
+    const std::shared_ptr<ShapeInteractor> shapeInteractor =
+        _viewer->getShapeInteractor();
+    const std::shared_ptr<ObjectInteractor> objectInteractor =
+        _viewer->getObjectInteractor();
+    if (shapeInteractor == nullptr || objectInteractor == nullptr) {
+        return NO;
+    }
+    Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+    if ([rawOwner core3d_canBeginVisibleRawR2Bevel]) {
+        if (![rawOwner core3d_beginVisibleRawR2Bevel]
+            || ![rawOwner core3d_hasVisibleRawR2Bevel]) {
+            [self requestRender];
+            return NO;
+        }
+        _visibleRawR2BevelOwnsChamferTool = YES;
+        [self requestRender];
+        return YES;
+    }
+
+    if (shapeInteractor->canBeginRoundSelection()) {
+        objectInteractor->setManipulatorType(
+            PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer);
+        if (objectInteractor->getManipulatorType()
+                != PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer
+            || !shapeInteractor->beginRoundSelectionFromCurrentSelection()
+            || !shapeInteractor->hasActiveBevel()) {
+            (void)shapeInteractor->cancelChamfer();
+            objectInteractor->setManipulatorType(
+                PrimitiveManipulatorType::PrimitiveGizmoTypeNone);
+            [self requestRender];
+            return NO;
+        }
+        _visibleRawR2BevelOwnsChamferTool = NO;
+        [self requestRender];
+        return YES;
+    }
+
+    [self requestRender];
+    return NO;
+}
+
+- (BOOL)setRoundRadius:(CGFloat)radius {
+    Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+    if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
+        const double metersPerUnit =
+            [rawOwner core3d_visibleRawR2BevelMetersPerUnit];
+        const double amountMM = radius * metersPerUnit * 1000.0;
+        if (!std::isfinite(radius) || radius <= 0.0
+            || !std::isfinite(amountMM) || amountMM <= 0.0
+            || amountMM > 20.0) return NO;
+        [rawOwner core3d_setVisibleRawR2BevelValue:radius];
+        [self requestRender];
+        return YES;
+    }
+    if (_viewer == nullptr || [self getGizmoType] != PrimitiveGizmoTypeChamfer
+        || _viewer->getShapeInteractor() == nullptr) {
+        return NO;
+    }
+    const BOOL didSet = _viewer->getShapeInteractor()
+        ->setRoundRadiusForSelection(radius);
+    [self requestRender];
+    return didSet;
+}
+
+- (double)roundMetersPerUnit {
+    Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+    if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
+        return [rawOwner core3d_visibleRawR2BevelMetersPerUnit];
+    }
+    if (_viewer == nullptr || [self getGizmoType] != PrimitiveGizmoTypeChamfer
+        || _viewer->getShapeInteractor() == nullptr) {
+        return 0.0;
+    }
+    return _viewer->getShapeInteractor()->roundMetersPerUnit();
+}
+
+- (double)roundMaximumRadiusMM {
+    Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+    if ([rawOwner core3d_hasVisibleRawR2Bevel]) return 20.0;
+    if (_viewer == nullptr || [self getGizmoType] != PrimitiveGizmoTypeChamfer
+        || _viewer->getShapeInteractor() == nullptr) {
+        return 0.0;
+    }
+    return _viewer->getShapeInteractor()->roundMaximumRadiusMM();
+}
+
+- (Core3DRoundFailureObservation)roundFailureObservation {
+    Core3DRoundFailureObservation result = {
+        0,
+        Core3DRoundFailureKindNone,
+    };
+    Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+    if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
+        return [rawOwner core3d_visibleRawR2RoundFailureObservation];
+    }
+    if (_viewer == nullptr || [self getGizmoType] != PrimitiveGizmoTypeChamfer
+        || _viewer->getShapeInteractor() == nullptr) {
+        return result;
+    }
+    const BevelFailureObservation observation =
+        _viewer->getShapeInteractor()->roundFailureObservation();
+    result.generation = observation.generation;
+    switch (observation.kind) {
+        case BevelFailureKind::None:
+            result.kind = Core3DRoundFailureKindNone;
+            break;
+        case BevelFailureKind::RadiusRefused:
+            result.kind = Core3DRoundFailureKindRadiusRefused;
+            break;
+        case BevelFailureKind::Other:
+            result.kind = Core3DRoundFailureKindOther;
+            break;
+    }
+    return result;
 }
 
 - (BOOL)applyChamfer {
@@ -3852,6 +4017,26 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         return -1;
     }
     return _viewer->getShapeInteractor()->extrusionSplitReferenceEdge();
+}
+
+- (NSArray<NSNumber *> *_Nullable)extrusionPreviewSizeMeters {
+    if (![NSThread isMainThread] || _viewer == nullptr
+        || [self getGizmoType] != PrimitiveGizmoTypeExtrude
+        || _viewer->getShapeInteractor() == nullptr) {
+        return nil;
+    }
+    const auto interactor = _viewer->getShapeInteractor();
+    const double metersPerUnit = interactor->extrusionMetersPerUnit();
+    Standard_Real x = 0, y = 0, z = 0;
+    if (!std::isfinite(metersPerUnit) || metersPerUnit <= 0.0
+        || !interactor->extrusionPreviewExtents(x, y, z)) {
+        return nil;
+    }
+    const double values[3] = {x * metersPerUnit, y * metersPerUnit, z * metersPerUnit};
+    for (double value : values) {
+        if (!std::isfinite(value) || value < 0.0) { return nil; }
+    }
+    return @[@(values[0]), @(values[1]), @(values[2])];
 }
 
 - (BOOL)canApplyExtrusion {
@@ -7401,6 +7586,16 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 - (void)setOrthoProjection:(OrthoProjectionType)orthoType {
     _viewer->setOrthoProjection(orthoType);
     [self requestRender];
+    // Standard Views can coincide with UIKit dismissing its nested menu. A
+    // single native presentation may then be absent from the composed iPad
+    // frame even though OCCT completed it successfully. Publish one bounded
+    // recovery frame without waiting for the next edge tap or camera action.
+    __weak GLViewController *weakSelf = self;
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC),
+        dispatch_get_main_queue(), ^{
+            [weakSelf requestRender];
+        });
 }
 
 // =======================================================================

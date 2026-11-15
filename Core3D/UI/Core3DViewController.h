@@ -243,6 +243,10 @@ __attribute__((objc_subclassing_restricted))
 //! userInfo["ended"] is YES only for the terminal clear. Observers may update
 //! UI, but must defer model edits until after notification delivery.
 @property(class, nonatomic, copy, readonly) NSNotificationName geometrySnapFeedbackDidChangeNotification;
+//! Measure (sizes while dragging): [x, y, z] world metres the first dragged
+//! object has moved since the active Move gesture began, snapping included.
+//! Main thread, read-only; nil outside an active gesture.
+- (NSArray<NSNumber *> *_Nullable)liveMoveOffsetMeters;
 
 
 //! Capture one fail-closed retained editor opening from the exact current
