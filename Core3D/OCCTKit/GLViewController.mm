@@ -1365,6 +1365,10 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     CGPoint _pinchPreviousTouch[2];
     UITapGestureRecognizer *_tapRecognizer;
     BOOL _suppressTapSelectionForManipulatorInteraction;
+    // A tap that began on a move arrow while taps select through the arrows:
+    // resolved once the raw touch and the arrows' own gesture have ended.
+    BOOL _pendingTapBehindManipulator;
+    CGPoint _pendingTapBehindManipulatorPoint;
     BOOL _visibleRawR2BevelOwnsChamferTool;
 }
 
@@ -2460,6 +2464,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 		_rawTouchWasCancelled = NO;
 		_rawTouchRendering = YES;
 		_suppressTapSelectionForManipulatorInteraction = NO;
+		_pendingTapBehindManipulator = NO;
 		[[self viewportView] beginInteractiveRendering];
 	}
 
@@ -2566,6 +2571,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 	}
 	[_rawViewportTouches minusSet:touches];
 	[self endRawPrimaryInteractionIfNeededCancelled:NO];
+	[self resolvePendingTapBehindManipulatorIfSettled];
 
     return;
 }
@@ -2573,6 +2579,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 -(void) touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event{
     [super touchesCancelled:touches withEvent:event];
 	_rawTouchWasCancelled = YES;
+	_pendingTapBehindManipulator = NO;
 
     UITouch *aTouch = [touches anyObject];
     if (!_isPreviewMode && aTouch != NULL) {
@@ -2847,10 +2854,54 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 }
 #endif
 
+/// A tap that began on a move arrow picks the part behind the arrows, but
+/// only after the raw touch has ended and the arrows have closed their own
+/// zero-move gesture: the pick never runs inside that gesture (an attempt
+/// that changed the arrows' pick state from the tap handler crashed there).
+- (void)resolvePendingTapBehindManipulatorIfSettled
+{
+    if (!_pendingTapBehindManipulator) {
+        return;
+    }
+    if (!self.tapsSelectThroughManipulator || _isPreviewMode
+        || _isConstructorMode || _viewer == nullptr) {
+        _pendingTapBehindManipulator = NO;
+        return;
+    }
+    const std::shared_ptr<ObjectInteractor> anInteractor =
+        _viewer->getObjectInteractor();
+    if (_rawViewportTouches.count != 0
+        || (anInteractor != nullptr
+            && anInteractor->isManipulatorGestureActive())) {
+        // The touch-up has not been delivered yet: it calls this again.
+        return;
+    }
+    _pendingTapBehindManipulator = NO;
+    const CGPoint aTapPoint = _pendingTapBehindManipulatorPoint;
+    if (_delegate
+        && [_delegate respondsToSelector:
+            @selector(viewer:willSelectAtDrawablePoint:drawableSize:)]) {
+        [_delegate viewer:self
+            willSelectAtDrawablePoint:aTapPoint
+                         drawableSize:self.drawableSize];
+    }
+    _viewer->SelectBehindMoveHandles((int)aTapPoint.x, (int)aTapPoint.y);
+    [self checkSelections];
+    [self requestRender];
+}
+
 - (void)tapHandler:(UITapGestureRecognizer *)tapRecognizer
 {
     if (_suppressTapSelectionForManipulatorInteraction) {
         _suppressTapSelectionForManipulatorInteraction = NO;
+        if (self.tapsSelectThroughManipulator && !_isPreviewMode
+            && !_isConstructorMode) {
+            _pendingTapBehindManipulatorPoint =
+                [self drawablePointForPoint:
+                    [tapRecognizer locationInView:self.view]];
+            _pendingTapBehindManipulator = YES;
+            [self resolvePendingTapBehindManipulatorIfSettled];
+        }
         return;
     }
     if (_isPreviewMode) {

@@ -15619,6 +15619,14 @@ extern "C" void *Core3DDebugMeasureNonFirstSelectorRankProbe() {
 #endif
 
 void Core3DViewer::Select(int theX, int theY) {
+    selectAt(theX, theY, false);
+}
+
+void Core3DViewer::SelectBehindMoveHandles(int theX, int theY) {
+    selectAt(theX, theY, true);
+}
+
+void Core3DViewer::selectAt(int theX, int theY, bool behindMoveHandles) {
     observeNativePlanningInteraction();
     if (_objectInteractor == nullptr || _shapeInteractor == nullptr) {
         return;
@@ -15676,7 +15684,20 @@ void Core3DViewer::Select(int theX, int theY) {
     for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected())
         oldOwners.insert(myContext->SelectedOwner().get());
     int oldCount = selectedCount();
-    OcctViewer::Select(theX, theY, AIS_SelectionScheme::AIS_SelectionScheme_XOR);
+    if (behindMoveHandles) {
+        // The arrows' own gesture must be over: never pick inside it.
+        if (_objectInteractor->isManipulatorGestureActive()) {
+            return;
+        }
+        // Only arrows (or the selected part) under the finger: the tap
+        // changes nothing, as a tap on an arrow always did.
+        if (!OcctViewer::SelectBehind(
+                theX, theY, _objectInteractor->manipulatorPresentation())) {
+            return;
+        }
+    } else {
+        OcctViewer::Select(theX, theY, AIS_SelectionScheme::AIS_SelectionScheme_XOR);
+    }
 
     try {
         (void)measurePicksForCurrentSelection();

@@ -113,6 +113,13 @@ public:
     //! Zoom with no limit on zooming out (Zoom stops while the model is about a tenth of the view).
     Standard_EXPORT void ZoomWithoutLimit(int theX, int theY, double theDelta);
     Standard_EXPORT void Select(int theX, int theY, AIS_SelectionScheme scheme = AIS_SelectionScheme::AIS_SelectionScheme_XOR);
+    //! One tap resolved BEHIND a presentation that is drawn on top (the move
+    //! arrows): the nearest hit at the point that belongs neither to
+    //! theSkipped nor to an already selected part is toggled, as a normal tap
+    //! toggles what it hits. A read-only query of the hit list: nothing is
+    //! highlighted, activated or deactivated. False (and no change) when only
+    //! theSkipped or selected parts lie under the point.
+    Standard_EXPORT bool SelectBehind(int theX, int theY, const Handle(AIS_InteractiveObject)& theSkipped);
     
     Standard_EXPORT bool ImportSTEP(const std::string &theFilename);
 #ifdef DEBUG

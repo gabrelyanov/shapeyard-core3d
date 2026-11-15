@@ -716,6 +716,11 @@ namespace core3d {
         };
         std::vector<MeasurePick> measurePicksForCurrentSelection() noexcept;
         void Select(int theX, int theY);
+        //! The same tap, resolved behind the selected part's move arrows: the
+        //! nearest part under the point that is not the arrows and not already
+        //! selected. For a tap that began on an arrow while a tool waits for a
+        //! tapped part; call it only after the arrows' own gesture has ended.
+        void SelectBehindMoveHandles(int theX, int theY);
         void StartRotation(int theX, int theY);
         void Rotation(int theX, int theY);
         void FinishInteraction(int theX, int theY);
@@ -1133,6 +1138,7 @@ namespace core3d {
         bool debugSelectHiddenBooleanOwner(const std::string& entity) noexcept;
 #endif
     private:
+        void selectAt(int theX, int theY, bool behindMoveHandles);
         friend class native_opening::Context;
         friend class native_opening::CommandLease;
         std::shared_ptr<const native_opening::Fence> recaptureNativeOpeningFence(

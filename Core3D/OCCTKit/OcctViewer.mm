@@ -142,6 +142,9 @@ void PrepareNativeLessonLighting(const Handle(AIS_InteractiveContext)& context,
 #include <TopoDS_Solid.hxx>
 #include <TopoDS.hxx>
 #include <algorithm>
+#include <SelectMgr_AndOrFilter.hxx>
+#include <SelectMgr_EntityOwner.hxx>
+#include <StdSelect_ViewerSelector3d.hxx>
 #include <vector>
 
 #include <StlAPI_Writer.hxx>
@@ -699,6 +702,42 @@ void OcctViewer::Select(int theX, int theY, AIS_SelectionScheme scheme)
         myContext->ClearSelected(Standard_True);
     }
     myContext->SelectDetected(scheme);
+}
+
+bool OcctViewer::SelectBehind(int theX, int theY, const Handle(AIS_InteractiveObject)& theSkipped)
+{
+    if (myContext.IsNull() || myView.IsNull()) { return false; }
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(StdSelect_ViewerSelector3d)& aSelector = myContext->MainSelector();
+        if (aSelector.IsNull()) { return false; }
+        // The hit list at the point, nearest first, exactly as MoveTo sorts it,
+        // read without MoveTo: MoveTo would highlight the arrows and switch
+        // their active mode on again.
+        aSelector->Pick(theX, theY, myView);
+        Handle(SelectMgr_EntityOwner) aBehind;
+        const Standard_Integer aCount = std::min<Standard_Integer>(aSelector->NbPicked(), 256);
+        for (Standard_Integer aRank = 1; aRank <= aCount; ++aRank) {
+            const Handle(SelectMgr_EntityOwner) anOwner = aSelector->Picked(aRank);
+            if (anOwner.IsNull() || !anOwner->HasSelectable()) { continue; }
+            if (!theSkipped.IsNull() && anOwner->Selectable() == theSkipped) { continue; }
+            // The selected part itself (the cutter behind its own arrows) is
+            // not what the tap is for: go on to the part behind it.
+            if (anOwner->IsSelected()) { continue; }
+            if (!myContext->GlobalFilter().IsNull()
+                && !myContext->GlobalFilter()->IsOk(anOwner)) { continue; }
+            aBehind = anOwner;
+            break;
+        }
+        // The context's detected list indexes the selector's previous hit
+        // list: reset it so nothing reads stale ranks after this query.
+        myContext->ClearDetected(Standard_False);
+        if (aBehind.IsNull()) { return false; }
+        myContext->AddOrRemoveSelected(aBehind, Standard_True);
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 // =======================================================================

@@ -46,6 +46,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, weak, nullable) id<GLViewControllerProtocol> delegate;
 @property (nonatomic, assign, readonly) BOOL isPreviewMode;
+/// While a tool waits for the user to tap a part (Subtract, Union), a tap
+/// that lands on the selected part's move arrows picks the part behind them;
+/// a drag that starts on an arrow still moves the selection. Off by default.
+@property (nonatomic, assign) BOOL tapsSelectThroughManipulator;
 @property (nonatomic, assign, readonly) NSUInteger renderedFrameCount;
 @property (nonatomic, assign, readonly) CGSize drawableSize;
 @property (nonatomic, assign, readonly, getter=isRenderLoopRunning) BOOL renderLoopRunning;
