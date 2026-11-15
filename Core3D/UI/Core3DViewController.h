@@ -1895,6 +1895,11 @@ __attribute__((objc_subclassing_restricted))
 //! expose latest-wins behavior without changing production scheduling.
 - (NSDictionary<NSString *, NSNumber *> *)debugShellState;
 - (void)debugSetShellPreviewWorkerBlocked:(BOOL)blocked;
+//! Check seam: gives the offset kernel what the Shell guard holds back. The
+//! kernel can then close the process; use it only in a check that runs in a
+//! process of its own.
++ (void)debugSetShellOffsetGuardSkipped:(BOOL)skipped
+    NS_SWIFT_NAME(debugSetShellOffsetGuardSkipped(_:));
 - (void)debugSetMaximumShellCaptureTopologyNodes:(NSUInteger)limit;
 - (void)debugSetMaximumShellResultTopologyNodes:(NSUInteger)limit;
 - (void)debugSetShellTransactionFailureCount:(NSUInteger)count;
