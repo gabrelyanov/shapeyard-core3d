@@ -602,6 +602,9 @@ namespace core3d {
             std::string preparedEnclosureIdentifier;
             enclosure::Record candidateEnclosure;
             bool enclosureCandidateSealed = false;
+            std::vector<LinearArrayFaceFinish> originalFaceFinishes;
+            std::vector<LinearArrayFaceFinish> expectedFaceFinishes;
+            bool faceFinishesSealed = false;
             pattern_recipe_clone::Source originalSweepLoft;
             pattern_recipe_clone::Prepared preparedSweepLoft;
             pattern_recipe_clone::Candidate candidateSweepLoft;

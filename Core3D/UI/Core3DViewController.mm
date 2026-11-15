@@ -171,6 +171,12 @@ unsigned long long Core3DDebugColdOpenCandidateProbeValue(
 #include <XCAFDoc_ShapeMapTool.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <TDF_Tool.hxx>
+#include <TDF_AttributeIterator.hxx>
+#include <TDF_ChildIterator.hxx>
+#include <TDF_ListIteratorOfAttributeDeltaList.hxx>
+#include <TDF_Delta.hxx>
+#include <TDF_AttributeDelta.hxx>
+#include <TNaming_Iterator.hxx>
 #include <thread>
 #include <atomic>
 #include <stdexcept>
@@ -3794,6 +3800,8 @@ struct NativeModelingPermitIssuer final {
     void (^_debugSavedCutSourceDeliveryGate)(void (^resume)(void));
     std::shared_ptr<core3d::cylindrical_cut::DebugRefusalRecord> _debugLastCutRefusal;
     void (^_debugNextNativeSolidDeliveryGate)(void (^resume)(void));
+    // Main-thread totals only; workers transfer immutable scalar durations.
+    double _debugNativeSolidCosts[8]; // Objective-C allocation zero-initializes these scalars.
     NSTimeInterval _debugNextNativeSolidDeadline;
     NSString *_debugNextNativeSolidDeadlineLabel;
     void (^_debugNextNativeSolidDeadlineObserver)(NSDictionary<NSString *,id> *);
@@ -14030,6 +14038,135 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
     } catch (...) { return @{@"error": @"fixture-exception"}; }
 }
 
+// DEBUG-only read observation after the native failing-first baseline.
+// No entity resolver: Undo intentionally removes a creation from free roots.
+- (NSDictionary<NSString *, id> *)debugOrdinaryNamingHistoryState {
+    if (![NSThread isMainThread]) return @{};
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class] ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) owner = viewer ? viewer->getDocument() : Handle(OcctDocument)();
+        if (owner.IsNull() || owner->Document().IsNull()) return @{};
+        const auto counts = owner->DebugOrdinaryNamingHistoryStorage();
+        const auto costs = viewer->debugHistoryCostObservation();
+        const auto drawing = [gl debugHistoryDrawingCosts];
+        return @{ @"pending": @(counts[0]), @"finalized": @(counts[1]), @"bytes": @(counts[2]),
+                  @"document": [NSString stringWithUTF8String:owner->DocumentIdentifier().c_str()],
+                  @"limit": @(owner->Document()->GetUndoLimit()),
+                  @"sceneCalls": @(costs[0]), @"sceneSeconds": @(costs[1]),
+                  @"assemblyPrepareCalls": @(costs[2]), @"assemblyPrepareSeconds": @(costs[3]),
+                  @"nativeCommitCalls": @(costs[4]), @"nativeCommitSeconds": @(costs[5]),
+                  @"creationPublishCalls": @(costs[6]), @"creationPublishSeconds": @(costs[7]),
+                  @"creationViewerCalls": @(costs[8]), @"creationViewerSeconds": @(costs[9]),
+                  @"solidTimingCalls": @(_debugNativeSolidCosts[0]),
+                  @"workerQueueSeconds": @(_debugNativeSolidCosts[1]),
+                  @"workerBuildSeconds": @(_debugNativeSolidCosts[2]),
+                  @"mainQueueSeconds": @(_debugNativeSolidCosts[3]),
+                  @"deliveryCheckSeconds": @(_debugNativeSolidCosts[4]),
+                  @"deliveryCommitSeconds": @(_debugNativeSolidCosts[5]),
+                  @"controllerNotifySeconds": @(_debugNativeSolidCosts[6]),
+                  @"completionSeconds": @(_debugNativeSolidCosts[7]),
+                  @"drawCalls": drawing[@"drawCalls"],
+                  @"drawBoundarySeconds": drawing[@"drawBoundarySeconds"],
+                  @"drawSelectionSeconds": drawing[@"drawSelectionSeconds"],
+                  @"drawRenderSeconds": drawing[@"drawRenderSeconds"],
+                  @"drawMaxSeconds": drawing[@"drawMaxSeconds"] };
+    } catch (...) { return @{}; }
+}
+
+- (BOOL)debugSetOrdinaryNamingHistoryUndoLimit:(NSInteger)limit {
+    if (![NSThread isMainThread] || limit < 1 || limit > 1000 || [self hasUnresolvedOrdinaryEdit]) return NO;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class] ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) owner = viewer ? viewer->getDocument() : Handle(OcctDocument)();
+        if (owner.IsNull() || owner->Document().IsNull() || owner->Document()->HasOpenCommand()) return NO;
+        owner->Document()->SetUndoLimit(static_cast<Standard_Integer>(limit));
+        return owner->Document()->GetUndoLimit() == limit;
+    } catch (...) { return NO; }
+}
+
+- (NSDictionary<NSString *, id> *_Nullable)debugObserveNamingSubtreeAtLabelEntry:(NSString *)entry {
+    if (![NSThread isMainThread] || ![entry isKindOfClass:NSString.class]
+        || entry.length == 0 || entry.length > 256) return nil;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const Handle(OcctDocument) owner = viewer ? viewer->getDocument() : Handle(OcctDocument)();
+        const Handle(TDocStd_Document) document = owner.IsNull() ? Handle(TDocStd_Document)() : owner->Document();
+        if (document.IsNull() || document->GetData().IsNull()) return nil;
+        TDF_Label root;
+        TDF_Tool::Label(document->GetData(), entry.UTF8String, root, Standard_False);
+        NSMutableDictionary *result = [@{
+            @"document": [NSString stringWithUTF8String:owner->DocumentIdentifier().c_str()],
+            @"labelExists": @(!root.IsNull()),
+            @"undo": @(document->GetAvailableUndos()),
+            @"redo": @(document->GetAvailableRedos()),
+            @"openCommand": @(document->HasOpenCommand())
+        } mutableCopy];
+        if (root.IsNull()) return result;
+        NSMutableArray *naming = [NSMutableArray array];
+        std::size_t labels = 0, attributes = 0, active = 0, forgotten = 0;
+        const auto observe = [&](const TDF_Label& label) {
+            if (++labels > 65536) throw Standard_Failure("Naming observation label bound");
+            TCollection_AsciiString labelEntry;
+            TDF_Tool::Entry(label, labelEntry);
+            for (TDF_AttributeIterator it(label, Standard_False); it.More(); it.Next()) {
+                if (++attributes > 65536) throw Standard_Failure("Naming observation attribute bound");
+                const Handle(TDF_Attribute) attribute = it.Value();
+                if (attribute.IsNull()) throw Standard_Failure("Naming observation null attribute");
+                if (attribute->IsValid()) ++active;
+                if (attribute->IsForgotten()) ++forgotten;
+                const Handle(TNaming_NamedShape) named = Handle(TNaming_NamedShape)::DownCast(attribute);
+                if (named.IsNull()) continue;
+                std::size_t pairs = 0;
+                for (TNaming_Iterator pair(named); pair.More(); pair.Next())
+                    if (++pairs > 4096) throw Standard_Failure("Naming observation pair bound");
+                [naming addObject:@{
+                    @"entry": [NSString stringWithUTF8String:labelEntry.ToCString()],
+                    @"valid": @(attribute->IsValid()), @"forgotten": @(attribute->IsForgotten()),
+                    @"version": @(named->Version()), @"evolution": @(int(named->Evolution())),
+                    @"empty": @(named->IsEmpty()), @"currentNull": @(named->Get().IsNull()),
+                    @"pairs": @(pairs)
+                }];
+            }
+        };
+        observe(root);
+        for (TDF_ChildIterator it(root, Standard_True); it.More(); it.Next()) observe(it.Value());
+        result[@"labels"] = @(labels);
+        result[@"attributes"] = @(attributes);
+        result[@"activeAttributes"] = @(active);
+        result[@"forgottenAttributes"] = @(forgotten);
+        result[@"rootShapeNull"] = @(XCAFDoc_ShapeTool::GetShape(root).IsNull());
+        result[@"naming"] = naming;
+        NSMutableArray *deltas = [NSMutableArray array];
+        const auto observeDelta = [&](const Handle(TDF_Delta)& delta, NSString *side) {
+            std::size_t visited = 0;
+            for (TDF_ListIteratorOfAttributeDeltaList it(delta->AttributeDeltas()); it.More(); it.Next()) {
+                if (++visited > 8192) throw Standard_Failure("Naming observation delta bound");
+                const Handle(TDF_AttributeDelta) change = it.Value();
+                if (change.IsNull()) throw Standard_Failure("Naming observation null delta");
+                const auto label = change->Label();
+                if (!label.IsEqual(root) && !label.IsDescendant(root)) continue;
+                const auto named = Handle(TNaming_NamedShape)::DownCast(change->Attribute());
+                if (named.IsNull()) continue;
+                TCollection_AsciiString labelEntry;
+                TDF_Tool::Entry(label, labelEntry);
+                [deltas addObject:@{@"side": side,
+                    @"entry": [NSString stringWithUTF8String:labelEntry.ToCString()],
+                    @"type": [NSString stringWithUTF8String:change->DynamicType()->Name()],
+                    @"version": @(named->Version()),
+                    @"valid": @(named->IsValid()), @"forgotten": @(named->IsForgotten())}];
+            }
+        };
+        if (!document->GetUndos().IsEmpty()) observeDelta(document->GetUndos().Last(), @"undo");
+        if (!document->GetRedos().IsEmpty()) observeDelta(document->GetRedos().First(), @"redo");
+        result[@"namingDeltas"] = deltas;
+        return result;
+    } catch (...) { return nil; }
+}
+
 + (NSDictionary<NSString *, id> *)debugGeometrySnapFixture:(NSInteger)fixture
     point:(NSArray<NSNumber *> *)point tolerance:(double)tolerance kinds:(NSUInteger)kinds {
     return [self debugGeometryAxisSnapFixture:fixture point:point tolerance:tolerance kinds:kinds axis:@[]];
@@ -20229,20 +20366,26 @@ static bool Core3DPublishCommittedSpatialSweep(
         __weak UIViewController *expectedRoot = self.viewIfLoaded.window.rootViewController;
         const BOOL wasHosted = self.viewIfLoaded.window != nil;
         __weak Core3DViewController* weakSelf = self;
+#if DEBUG
+        const auto timingEnqueued = std::chrono::steady_clock::now();
+#endif
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
 #if DEBUG
+            const auto timingWorkerStart = std::chrono::steady_clock::now();
             core3d::cylindrical_cut::DebugRefusalScope workerScope(diagnostic);
             if(deadlineTicket)deadlineTicket->_phase.store(Core3DDebugNativeSolidDeadlinePhase::GeometryStarted);
 #endif
             core3d::retained_fillet::Outcome filletOutcome=core3d::retained_fillet::Outcome::Built;
             const bool built = core3d::Core3DViewer::buildNativeSolidGeometry(geometry,&filletOutcome);
 #if DEBUG
+            const auto timingWorkerEnd = std::chrono::steady_clock::now();
             if(deadlineTicket)deadlineTicket->_phase.store(Core3DDebugNativeSolidDeadlinePhase::GeometryReturned);
             if(deadlineTicket)deadlineTicket->_phase.store(Core3DDebugNativeSolidDeadlinePhase::MainDeliveryEnqueued);
 #endif
             dispatch_async(dispatch_get_main_queue(), ^{
 #if DEBUG
                 dispatch_block_t delivery=^{
+                const auto timingDeliveryStart = std::chrono::steady_clock::now();
                 core3d::cylindrical_cut::DebugRefusalScope deliveryScope(diagnostic);
                 if(deadlineTicket){
                     auto expected=Core3DDebugNativeSolidDeadlineDecision::Pending;
@@ -20298,7 +20441,13 @@ static bool Core3DPublishCommittedSpatialSweep(
                     }
                     return;
                 }
+#if DEBUG
+                const auto timingCommitStart = std::chrono::steady_clock::now();
+#endif
                 const auto native = currentViewer->commitNativeSolid(pendingWork);
+#if DEBUG
+                const auto timingCommitEnd = std::chrono::steady_clock::now();
+#endif
                 Core3DProfileConstructionResult result = Core3DProfileConstructionResultRejected;
                 switch (native) {
                     case core3d::OrdinaryEditResult::Committed:
@@ -20320,8 +20469,26 @@ static bool Core3DPublishCommittedSpatialSweep(
 #if DEBUG
                 if(deadlineTicket)deadlineTicket->_phase.store(Core3DDebugNativeSolidDeadlinePhase::CommitReturned);
 #endif
+#if DEBUG
+                const auto timingNotifyEnd = std::chrono::steady_clock::now();
+#endif
                 Core3DDeliverNativeSolidCompletion(completionToken, result);
 #if DEBUG
+                const auto timingCompletionEnd = std::chrono::steady_clock::now();
+                auto seconds = [](auto from, auto to) {
+                    return std::chrono::duration<double>(to - from).count();
+                };
+                // No shared worker writes, new scene capture or authority.
+                // Counts cover deliveries reaching commit, including refusal.
+                auto& costs = controller->_debugNativeSolidCosts;
+                ++costs[0];
+                costs[1] += seconds(timingEnqueued, timingWorkerStart);
+                costs[2] += seconds(timingWorkerStart, timingWorkerEnd);
+                costs[3] += seconds(timingWorkerEnd, timingDeliveryStart);
+                costs[4] += seconds(timingDeliveryStart, timingCommitStart);
+                costs[5] += seconds(timingCommitStart, timingCommitEnd);
+                costs[6] += seconds(timingCommitEnd, timingNotifyEnd);
+                costs[7] += seconds(timingNotifyEnd, timingCompletionEnd);
                 };
                 Core3DGateNativeSolidGeometryDelivery(completionToken,delivery);
 #endif

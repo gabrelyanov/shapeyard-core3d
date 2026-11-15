@@ -9024,8 +9024,13 @@ core3d::authority::ReplacementEnd OcctDocument::EndNativeReplacement(
     try {
         if (myOcafDoc.IsNull() || myOcafDoc->Application().get() != myApp.get()
             || DocumentIdentifier().empty()) return ReplacementEnd::Unavailable;
-        return myNativeAuthority->EndReplacement(reservation, myOcafDoc.get(), accepted,
+        const auto result = myNativeAuthority->EndReplacement(reservation, myOcafDoc.get(), accepted,
             restored, myOcafDoc->HasOpenCommand());
+        // Candidate assignment is provisional until authority accepts it.
+        // Preserve the old records on rollback; retire them only after the
+        // replacement really owns the document, even if its saved UUID matches.
+        if (result == ReplacementEnd::Adopted) PruneOrdinaryNamingHistory();
+        return result;
     } catch (...) { return ReplacementEnd::Unavailable; }
 }
 
@@ -29040,10 +29045,279 @@ void OcctDocument::LoadObjectTransform(const TDF_Label& aRefLabel, const Handle(
     anAis->SetLocalTransformation(ObjectTransformForLabel(aRefLabel));
 }
 
+namespace core3d::ordinary_naming {
+struct Side {
+    std::vector<treatment_history::NamingState> naming;
+    std::vector<std::uint8_t> source, treatment;
+    std::string profileIdentifier;
+    TDF_Label profileLabel;
+    TopoDS_Shape shape;
+    bool hasTreatment = false;
+};
+struct Root {
+    TDF_Label label;
+    Side before, after;
+};
+struct Record {
+    Handle(TDF_Data) data;
+    Handle(TDF_Delta) priorTop, delta;
+    std::vector<Root> roots;
+    int undoDepth = 0;
+    bool creation = false, captured = false, finalized = false, settled = false;
+};
+}
+
+namespace {
+namespace ordinary_naming = core3d::ordinary_naming;
+constexpr std::size_t kOrdinaryNamingBytes = 128 * 1024 * 1024;
+constexpr std::size_t kOrdinaryNamingRecords = 1001; // ordinary Undo limit + pending
+
+bool CaptureOrdinaryNamingSide(const Handle(TDocStd_Document)& doc,
+    const TDF_Label& label, ordinary_naming::Side& side) noexcept {
+    side = {};
+    try {
+        core3d::profile::Record profile;
+        if (label.IsNull() || label.Data() != doc->GetData()
+            || !core3d::profile::Read(doc, label, profile)
+            || profile.label.IsNull() || !profile.IsCurrent(doc, label)) return false;
+        side.profileIdentifier = profile.identifier;
+        side.profileLabel = profile.label;
+        side.shape = XCAFDoc_ShapeTool::GetShape(label);
+        return !side.shape.IsNull() && CaptureTreatmentCompanionSide(doc, label,
+            side.naming, side.source, side.hasTreatment, side.treatment);
+    } catch (...) { return false; }
+}
+
+bool OrdinaryCreationRootAbsent(const TDF_Label& root) noexcept {
+    // Null is an unstaged reserved slot. A staged root must retain its real
+    // label but have no attributes, including forgotten attributes, anywhere
+    // below it. No catalog-only inference and no label creation on this read.
+    if (root.IsNull()) return true;
+    try {
+        const auto empty = [](const TDF_Label& label) {
+            return !TDF_AttributeIterator(label, Standard_False).More();
+        };
+        if (!empty(root)) return false;
+        std::size_t count = 0;
+        for (TDF_ChildIterator it(root, Standard_True); it.More(); it.Next()) {
+            if (++count > kTreatmentHistoryMaxLabelsVisited || !empty(it.Value())) return false;
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
+bool OrdinaryNamingSideMatches(const Handle(TDocStd_Document)& doc,
+    const TDF_Label& root, const ordinary_naming::Side& expected, bool versions) noexcept {
+    ordinary_naming::Side actual;
+    return CaptureOrdinaryNamingSide(doc, root, actual)
+        && TreatmentHistorySameShape(expected.shape, actual.shape)
+        && SameTreatmentNamingSet(expected.naming, actual.naming, versions)
+        && expected.profileIdentifier == actual.profileIdentifier
+        && expected.profileLabel == actual.profileLabel
+        && expected.source == actual.source && expected.hasTreatment == actual.hasTreatment
+        && expected.treatment == actual.treatment;
+}
+
+std::size_t OrdinaryNamingStorage(const ordinary_naming::Record& record) noexcept {
+    std::size_t bytes = sizeof(record) + record.roots.capacity() * sizeof(ordinary_naming::Root);
+    for (const auto& root : record.roots) {
+        for (const auto* side : {&root.before, &root.after}) {
+            bytes += side->source.capacity() + side->treatment.capacity()
+                + side->profileIdentifier.capacity() + 1
+                + side->naming.capacity() * sizeof(treatment_history::NamingState);
+            for (const auto& naming : side->naming)
+                bytes += naming.labelEntry.capacity() + 1
+                    + naming.shapePairs.capacity() * sizeof(std::pair<TopoDS_Shape, TopoDS_Shape>);
+        }
+    }
+    // Shape handles share the geometry already held by the live OCAF delta;
+    // no BRep copies are made by this record.
+    return bytes;
+}
+
+bool RestoreOrdinaryNamingSide(const Handle(TDocStd_Document)& doc,
+    ordinary_naming::Record& record, bool before) noexcept {
+    try {
+        // Validate ALL roots before changing any scalar.
+        for (const auto& root : record.roots) {
+            if (before && record.creation) {
+                if (!OrdinaryCreationRootAbsent(root.label)) return false;
+            } else if (!OrdinaryNamingSideMatches(doc, root.label,
+                       before ? root.before : root.after, false)) return false;
+        }
+        if (before && record.creation) return true;
+        for (const auto& root : record.roots) {
+            for (const auto& state : (before ? root.before : root.after).naming) {
+                Handle(TNaming_NamedShape) naming;
+                if (!state.label.FindAttribute(TNaming_NamedShape::GetID(), naming)
+                    || naming.IsNull()) return false;
+                naming->SetVersion(state.version);
+            }
+        }
+        for (const auto& root : record.roots)
+            if (!OrdinaryNamingSideMatches(doc, root.label,
+                    before ? root.before : root.after, true)) return false;
+        return true;
+    } catch (...) { return false; }
+}
+}
+
+#if DEBUG
+std::array<std::size_t, 3> OcctDocument::DebugOrdinaryNamingHistoryStorage() const noexcept {
+    std::array<std::size_t, 3> result{};
+    for (const auto& record : myOrdinaryNamingHistory) {
+        ++result[record->finalized ? 1 : 0];
+        result[2] += OrdinaryNamingStorage(*record);
+    }
+    return result;
+}
+#endif
+
+void OcctDocument::PruneOrdinaryNamingHistory() noexcept {
+    if (myOrdinaryNamingHistory.empty()) return;
+    try {
+        if (myOcafDoc.IsNull()) { myOrdinaryNamingHistory.clear(); return; }
+        // The supported ordinary window is 1000. Take one bounded, stack-only
+        // identity census instead of rescanning both lists for every record.
+        // If a foreign caller enlarged the window, retain evidence rather
+        // than truncate the census and accidentally drop a live record.
+        std::array<const TDF_Delta*, kNativeSessionUndoLimit> deltas{};
+        std::size_t count = 0;
+        for (const auto* list : {&myOcafDoc->GetUndos(), &myOcafDoc->GetRedos()}) {
+            for (const auto& delta : *list) {
+                if (delta.IsNull() || count == deltas.size()) return;
+                deltas[count++] = delta.get();
+            }
+        }
+        const auto end = deltas.begin() + count;
+        const std::less<const TDF_Delta*> less;
+        std::sort(deltas.begin(), end, less);
+        const auto live = [&](const Handle(TDF_Delta)& delta) {
+            return !delta.IsNull() && std::binary_search(deltas.begin(), end, delta.get(), less);
+        };
+        for (auto it = myOrdinaryNamingHistory.begin(); it != myOrdinaryNamingHistory.end();) {
+            const auto& record = *it;
+            if (record->data != myOcafDoc->GetData() || record->settled
+                || (record->finalized ? !live(record->delta) : record.use_count() == 1))
+                it = myOrdinaryNamingHistory.erase(it);
+            else ++it;
+        }
+    } catch (...) {} // Never evict live evidence on an inspection failure.
+}
+
+std::shared_ptr<core3d::ordinary_naming::Record> OcctDocument::PrepareOrdinaryNamingHistory(
+    std::size_t creationRootCount, const TDF_Label& existingOwner) noexcept {
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+            || myOcafDoc->GetUndoLimit() <= 0 || myOcafDoc->GetUndoLimit() > 1000
+            || creationRootCount > 1024 || (creationRootCount == 0) == existingOwner.IsNull()) return {};
+        PruneOrdinaryNamingHistory();
+        if (myOrdinaryNamingHistory.size() >= kOrdinaryNamingRecords) return {};
+        auto record = std::make_shared<ordinary_naming::Record>();
+        record->data = myOcafDoc->GetData();
+        record->undoDepth = myOcafDoc->GetAvailableUndos();
+        if (!myOcafDoc->GetUndos().IsEmpty()) record->priorTop = myOcafDoc->GetUndos().Last();
+        record->creation = creationRootCount > 0;
+        record->roots.resize(record->creation ? creationRootCount : 1);
+        if (!record->creation) {
+            record->roots[0].label = existingOwner;
+            if (!CaptureOrdinaryNamingSide(myOcafDoc, existingOwner, record->roots[0].before)) return {};
+        }
+        std::size_t bytes = OrdinaryNamingStorage(*record);
+        for (const auto& existing : myOrdinaryNamingHistory) bytes += OrdinaryNamingStorage(*existing);
+        if (bytes > kOrdinaryNamingBytes) return {};
+        // Allocate the document's slot BEFORE opening the command. Settlement
+        // only assigns handles/scalars; it cannot fail because a vector grew.
+        myOrdinaryNamingHistory.push_back(record);
+        return record;
+    } catch (...) { return {}; }
+}
+
+Standard_Boolean OcctDocument::TrackOrdinaryNamingCreationRoot(
+    const std::shared_ptr<ordinary_naming::Record>& record, std::size_t index,
+    const TDF_Label& label) noexcept {
+    if (!record || !record->creation || record->captured || record->finalized
+        || myOcafDoc.IsNull() || record->data != myOcafDoc->GetData()
+        || !myOcafDoc->HasOpenCommand() || index >= record->roots.size()
+        || label.IsNull() || label.Data() != record->data || !record->roots[index].label.IsNull())
+        return Standard_False;
+    record->roots[index].label = label; // pre-reserved, no allocation
+    return Standard_True;
+}
+
+Standard_Boolean OcctDocument::CaptureOrdinaryNamingCandidate(
+    const std::shared_ptr<ordinary_naming::Record>& record) noexcept {
+    try {
+        if (!record || myOcafDoc.IsNull() || record->data != myOcafDoc->GetData()
+            || !myOcafDoc->HasOpenCommand() || record->finalized || record->captured) return Standard_False;
+        for (auto& root : record->roots) {
+            if (!CaptureOrdinaryNamingSide(myOcafDoc, root.label, root.after)) return Standard_False;
+            std::size_t bytes = 0;
+            for (const auto& existing : myOrdinaryNamingHistory) bytes += OrdinaryNamingStorage(*existing);
+            if (bytes > kOrdinaryNamingBytes) return Standard_False;
+        }
+        record->captured = true;
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::SettleOrdinaryNamingHistory(
+    const std::shared_ptr<ordinary_naming::Record>& record, Standard_Boolean candidate) noexcept {
+    if (!record) return Standard_True; // other ordinary families keep their own history
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+            || record->data != myOcafDoc->GetData()) return Standard_False;
+        if (!candidate) {
+            if (record->finalized || !RestoreOrdinaryNamingSide(myOcafDoc, *record, true)) return Standard_False;
+            record->settled = true;
+            PruneOrdinaryNamingHistory();
+            return Standard_True;
+        }
+        if (!record->captured || record->settled || myOcafDoc->GetUndos().IsEmpty()) return Standard_False;
+        const auto& delta = myOcafDoc->GetUndos().Last();
+        if (record->finalized) return record->delta == delta; // same reconciliation, once only
+        const auto depth = myOcafDoc->GetAvailableUndos();
+        if (delta == record->priorTop || !(depth == record->undoDepth + 1
+            || (record->undoDepth == myOcafDoc->GetUndoLimit() && depth == record->undoDepth))) return Standard_False;
+        for (const auto& root : record->roots) {
+            if (!OrdinaryNamingSideMatches(myOcafDoc, root.label, root.after, true)) return Standard_False;
+            bool touched = false;
+            for (TDF_ListIteratorOfAttributeDeltaList it(delta->AttributeDeltas()); it.More(); it.Next()) {
+                if (it.Value().IsNull()) return Standard_False;
+                if (it.Value()->Label() == root.label) { touched = true; break; }
+            }
+            if (!touched) return Standard_False;
+        }
+        record->delta = delta;
+        record->priorTop.Nullify();
+        record->finalized = true;
+        PruneOrdinaryNamingHistory();
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::ApplyOrdinaryNamingHistory(
+    const Handle(TDF_Delta)& applied, Standard_Boolean undoDirection) noexcept {
+    try {
+        for (const auto& record : myOrdinaryNamingHistory) {
+            if (!record->finalized || record->delta != applied) continue;
+            if (record->data != myOcafDoc->GetData()
+                || !RestoreOrdinaryNamingSide(myOcafDoc, *record, undoDirection)) return Standard_False;
+            const auto& inverse = undoDirection ? myOcafDoc->GetRedos() : myOcafDoc->GetUndos();
+            if (inverse.IsEmpty()) return Standard_False;
+            record->delta = undoDirection ? inverse.First() : inverse.Last();
+            break;
+        }
+        PruneOrdinaryNamingHistory();
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
 void OcctDocument::ReleaseTreatmentHistoryCompanions() noexcept {
     try {
         myPendingTreatmentCompanion.reset();
         myTreatmentHistoryCompanions.clear();
+        myOrdinaryNamingHistory.clear();
         // A2-N2: the recovery record is bound to this session's live document
         // and never crosses a replacement or destruction.
         myAuthoredBooleanRecovery.reset();
@@ -29053,6 +29327,7 @@ void OcctDocument::ReleaseTreatmentHistoryCompanions() noexcept {
 }
 
 void OcctDocument::PruneTreatmentHistoryCompanions() noexcept {
+    PruneOrdinaryNamingHistory();
     try {
         if (myOcafDoc.IsNull()) { myTreatmentHistoryCompanions.clear(); return; }
         // Only companions bound to a delta that is still live in either
@@ -29983,7 +30258,9 @@ Standard_Boolean OcctDocument::undo() {
                 }
             }
         }
+        const auto ordinaryDelta = myOcafDoc->GetUndos().Last();
         if (myOcafDoc->Undo()) {
+            if (!ApplyOrdinaryNamingHistory(ordinaryDelta, Standard_True)) return Standard_False;
             // Restoration precedes the authority fence advance, NotifyChanges,
             // redraw and any externally visible success; a failed validation
             // is an honest unknown outcome, never a fabricated success.
@@ -30038,7 +30315,9 @@ Standard_Boolean OcctDocument::redo() {
                 }
             }
         }
+        const auto ordinaryDelta = myOcafDoc->GetRedos().First();
 		if (myOcafDoc->Redo()) {
+            if (!ApplyOrdinaryNamingHistory(ordinaryDelta, Standard_False)) return Standard_False;
             // Restoration precedes the authority fence advance, NotifyChanges,
             // redraw and any externally visible success; a failed validation
             // is an honest unknown outcome, never a fabricated success.

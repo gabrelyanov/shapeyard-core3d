@@ -2316,6 +2316,13 @@ __attribute__((objc_subclassing_restricted))
 - (NSData *_Nullable)debugLocatedFreeShapeBinXCAFFixtureData;
 //! Independent spline-aware metrics for native snap regression targets only.
 - (NSDictionary<NSString *, id> *_Nullable)debugSplineSnapTargetMetrics:(NSString *)entity;
+//! Read-only current-label and history-delta observation, including forgotten attributes.
+//! A nil result means unavailable, never absent. Does not resolve or create an entity.
+- (NSDictionary<NSString *, id> *)debugOrdinaryNamingHistoryState;
+//! Test-only shorter native Undo window; ordinary production limits are untouched.
+- (BOOL)debugSetOrdinaryNamingHistoryUndoLimit:(NSInteger)limit;
+- (NSDictionary<NSString *, id> *_Nullable)debugObserveNamingSubtreeAtLabelEntry:(NSString *)entry
+    NS_SWIFT_NAME(debugObserveNamingSubtree(labelEntry:));
 //! Detached geometry query fixture; does not create or edit a document.
 + (NSDictionary<NSString *, id> *)debugGeometrySnapFixture:(NSInteger)fixture
     point:(NSArray<NSNumber *> *)point tolerance:(double)tolerance kinds:(NSUInteger)kinds
