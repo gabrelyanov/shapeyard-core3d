@@ -153,6 +153,12 @@ namespace core3d {
         void setGeometrySnapFeedbackChangedCallback(std::function<void(bool)> callback) {
             _geometrySnapFeedbackChangedCallback = std::move(callback);
         }
+        //! Measure (sizes while dragging): one call per Move translation step,
+        //! whether or not geometry snapping is on, plus one with ended=true
+        //! after finish/cancel. Read-only observation; never edits the model.
+        void setLiveMoveChangedCallback(std::function<void(bool)> callback) {
+            _liveMoveChangedCallback = std::move(callback);
+        }
         struct GeometryMoveSnap {
             GeometrySnapResult hit;
             std::string targetIdentifier;
@@ -176,10 +182,14 @@ namespace core3d {
         std::function<void(bool)> _geometrySnapFeedbackChangedCallback;
         bool _geometrySnapSamplesActive = false;
         void publishGeometrySnapFeedback(bool ended) noexcept;
+        std::function<void(bool)> _liveMoveChangedCallback;
+        bool _liveMoveSamplesActive = false;
+        void publishLiveMove(bool ended) noexcept;
         struct GeometrySnapTerminalNotification {
             ObjectInteractor& owner;
             ~GeometrySnapTerminalNotification() noexcept {
                 owner.publishGeometrySnapFeedback(true);
+                owner.publishLiveMove(true);
             }
         };
     public:
@@ -592,6 +602,9 @@ namespace core3d {
             std::string preparedEnclosureIdentifier;
             enclosure::Record candidateEnclosure;
             bool enclosureCandidateSealed = false;
+            std::vector<LinearArrayFaceFinish> originalFaceFinishes;
+            std::vector<LinearArrayFaceFinish> expectedFaceFinishes;
+            bool faceFinishesSealed = false;
             pattern_recipe_clone::Source originalSweepLoft;
             pattern_recipe_clone::Prepared preparedSweepLoft;
             pattern_recipe_clone::Candidate candidateSweepLoft;
