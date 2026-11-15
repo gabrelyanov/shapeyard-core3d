@@ -234,9 +234,6 @@ __attribute__((objc_subclassing_restricted))
 - (void)saveSnapshot;
 //! Lifts the engine's lower-left axis triad by `points` (0 = default corner).
 - (void)setAxisTriadLiftPoints:(CGFloat)points;
-/// While a tool waits for a tapped part, taps on the move arrows select the
-/// part behind them (drags still move). Off by default.
-- (void)setTapsSelectThroughMoveHandles:(BOOL)enabled;
 //! Opt-in geometry snapping for ordinary Move; model units, zero disables.
 //! Refuses changes during an active edit. Does not alter grid preferences.
 - (BOOL)setGeometrySnappingTolerance:(double)tolerance;
