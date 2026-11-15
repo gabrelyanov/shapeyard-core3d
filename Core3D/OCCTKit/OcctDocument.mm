@@ -13257,6 +13257,65 @@ Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
                 refusal = "invalid-result";
                 return Standard_False;
             }
+            // Union keeps every face's colour (CTO 15 Nov 07:01, benchmark chest: a brown body joined
+            // with a grey band came out one colour). When the parts look different, every face of the
+            // result takes the look of the part it came from; painted faces come first.
+            if (operation == 0) {
+                const auto lookOf = [this](const TDF_Label& label, const Handle(AIS_Shape)& shape,
+                                           XCAFDoc_VisMaterialPBR& look) {
+                    if (TryPBRMaterialForLabel(label, look)) return true;
+                    if (shape.IsNull() || shape->Attributes().IsNull()
+                        || shape->Attributes()->ShadingAspect().IsNull()) return false;
+                    look = XCAFDoc_VisMaterialPBR();
+                    look.BaseColor = Quantity_ColorRGBA(shape->Attributes()->ShadingAspect()->Color());
+                    look.Metallic = 0.0f; look.Roughness = 0.5f; look.IsDefined = Standard_True;
+                    return true;
+                };
+                const auto same = [](const XCAFDoc_VisMaterialPBR& a, const XCAFDoc_VisMaterialPBR& b) {
+                    const Quantity_Color ca = a.BaseColor.GetRGB(), cb = b.BaseColor.GetRGB();
+                    return std::abs(ca.Red() - cb.Red()) < 1e-3 && std::abs(ca.Green() - cb.Green()) < 1e-3
+                        && std::abs(ca.Blue() - cb.Blue()) < 1e-3
+                        && std::abs(a.Metallic - b.Metallic) < 1e-3 && std::abs(a.Roughness - b.Roughness) < 1e-3;
+                };
+                const auto place = [](const TopoDS_Shape& shape, const gp_Trsf& trsf) {
+                    BRepBuilderAPI_Transform moved(shape, trsf, Standard_True);
+                    return moved.IsDone() ? moved.Shape() : TopoDS_Shape();
+                };
+                gp_Trsf sizeUp; if (std::abs(scale - 1.0) > 1.0e-12) sizeUp.SetScale(gp_Pnt(0, 0, 0), scale);
+                XCAFDoc_VisMaterialPBR targetLook;
+                const bool hasTargetLook = lookOf(target, targetPresentation, targetLook);
+                std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> fromTools;
+                bool differs = false;
+                for (const auto& [tool, toolPresentation] : tools) {
+                    gp_Trsf toolToResult = sizeUp;
+                    gp_Trsf toTarget = targetPresentation->LocalTransformation().Inverted();
+                    toTarget.Multiply(toolPresentation->LocalTransformation());
+                    toolToResult.Multiply(toTarget);
+                    std::vector<TDF_Label> unusedLabels;
+                    std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> painted;
+                    if (CaptureFaceColours(tool, 1.0, unusedLabels, painted)) {
+                        for (const auto& [face, material] : painted) {
+                            const TopoDS_Shape moved = place(face, toolToResult);
+                            if (!moved.IsNull() && moved.ShapeType() == TopAbs_FACE) {
+                                fromTools.emplace_back(TopoDS::Face(moved), material); differs = true;
+                            }
+                        }
+                    }
+                    XCAFDoc_VisMaterialPBR toolLook;
+                    if (lookOf(tool, toolPresentation, toolLook) && !(hasTargetLook && same(targetLook, toolLook))) {
+                        differs = true;
+                        const TopoDS_Shape moved = place(XCAFDoc_ShapeTool::GetShape(tool), toolToResult);
+                        for (TopExp_Explorer face(moved, TopAbs_FACE); face.More(); face.Next())
+                            fromTools.emplace_back(TopoDS::Face(face.Current()), toolLook);
+                    }
+                }
+                if (differs && hasTargetLook) {
+                    const TopoDS_Shape own = place(XCAFDoc_ShapeTool::GetShape(target), sizeUp);
+                    for (TopExp_Explorer face(own, TopAbs_FACE); face.More(); face.Next())
+                        coloured[at].emplace_back(TopoDS::Face(face.Current()), targetLook);
+                    coloured[at].insert(coloured[at].end(), fromTools.begin(), fromTools.end());
+                }
+            }
         }
         refusal = "stale-source";
         myOcafDoc->NewCommand();
