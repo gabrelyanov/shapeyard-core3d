@@ -320,6 +320,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// Would Home's save succeed right now? 1 yes, 0 no, -1 cannot be told now (a tool or a
 /// preview is open). Main thread, synchronous; the same check assetData: runs.
 - (NSInteger)core3d_documentWouldSave;
+/// Check seam (Debug builds; no effect otherwise): the next `count` probes of a document that
+/// does save answer 0. assetData is not affected.
++ (void)debugSetForcedSaveProbeFailures:(NSInteger)count;
 - (void)setAssetData:(NSData *_Nonnull)data completion:(void(^)(Core3DAssetLoadResult result))completion;
 - (void)setAssetFileURL:(NSURL *_Nonnull)assetFileURL
       expectedByteCount:(unsigned long long)expectedByteCount

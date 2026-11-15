@@ -218,6 +218,10 @@ __attribute__((objc_subclassing_restricted))
 /// written to a temporary file and read back through the checks opening a project runs,
 /// exactly as assetData does (one shared helper). Nothing in the document changes.
 - (NSInteger)documentWouldSaveProbe NS_SWIFT_NAME(documentWouldSaveProbe());
+/// Check seam (Debug builds; no effect otherwise): the next `count` probes of a document that
+/// does save answer 0, so a check can walk the route a refused save takes. Home's save itself
+/// is not affected.
++ (void)debugSetForcedSaveProbeFailures:(NSInteger)count NS_SWIFT_NAME(debugSetForcedSaveProbeFailures(_:));
 - (NSData *_Nullable)thumbData;
 
 // Success means accepted; terminal completion follows private cleanup.

@@ -1373,6 +1373,9 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 // selected part adds the part behind them (founder walk 15 Nov). One switch;
 // a screen check launches with SHAPEYARD_UITEST_TAPS_STOP_AT_HANDLES to show
 // the behaviour before the repair (Debug builds only).
+#ifdef DEBUG
+static NSInteger sDebugForcedSaveProbeFailures = 0;
+#endif
 static const BOOL kPlainTapsSelectBehindMoveHandles = YES;
 static BOOL PlainTapsSelectBehindMoveHandles()
 {
@@ -7342,7 +7345,22 @@ static BOOL PlainTapsSelectBehindMoveHandles()
         [fileManager removeItemAtPath:[NSString stringForStdString:written] error:nil];
     }
     if (inconclusive) return -1;
+#ifdef DEBUG
+    // Check seam: the next probes of a document that does save answer "would not save",
+    // so a check can walk the route a refused save takes without a shape that trips it.
+    if (!written.empty() && sDebugForcedSaveProbeFailures > 0) {
+        --sDebugForcedSaveProbeFailures;
+        return 0;
+    }
+#endif
     return written.empty() ? 0 : 1;
+}
+
++ (void)debugSetForcedSaveProbeFailures:(NSInteger)count
+{
+#ifdef DEBUG
+    sDebugForcedSaveProbeFailures = std::max<NSInteger>(0, count);
+#endif
 }
 
 - (void)assetData:(void(^)(NSData *_Nullable))completion {
