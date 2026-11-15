@@ -1356,6 +1356,9 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     std::string _committedBoundaryDocument;
     const void *_committedBoundaryDocumentOwner;
     BOOL _committedBoundariesDirty;
+    // Whether the committed lines were last built for work on whole objects: smooth edges
+    // and closed same-plane seams are left out then, and must come back in Face and Edge mode.
+    int _committedBoundaryObjectMode;
     Handle(AIS_Shape) _splitBoundaryPresentation;
     BOOL _rawTouchRendering;
     BOOL _rawTouchWasCancelled;
@@ -1430,6 +1433,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     if (self) {
         _viewer = std::make_shared<Core3DViewer>();
         _committedBoundariesDirty = YES;
+        _committedBoundaryObjectMode = -1;
         _assetDataQueue = dispatch_queue_create("com.shapeyard.sync", NULL);
 		_rawViewportTouches = [NSMutableSet set];
 		_isConstructorMode = false;
@@ -1850,9 +1854,12 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     const auto document = _viewer->getDocument();
     if (document.IsNull()) { [self clearCommittedBoundaries]; return; }
     const auto documentIdentifier = document->DocumentIdentifier();
+    const int objectMode = (!shapeInteractor
+        || shapeInteractor->getSelectionMode() == ShapeSelectionMode::WholeShape) ? 1 : 0;
     if (!_committedBoundariesDirty && _splitBoundaryPresentation.IsNull()
         && _committedBoundaryDocument == documentIdentifier
-        && _committedBoundaryDocumentOwner == document->Document().get()) return;
+        && _committedBoundaryDocumentOwner == document->Document().get()
+        && _committedBoundaryObjectMode == objectMode) return;
     const CGSize drawable = self.drawableSize;
     if (drawable.width <= 0 || drawable.height <= 0) { [self clearCommittedBoundaries]; return; }
     const auto scene = _viewer->captureSceneSnapshot(drawable.width, drawable.height);
@@ -1879,8 +1886,64 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
             };
             std::vector<gp_Pnt> points;
             std::unordered_map<std::uint32_t, std::uint32_t> incidentFace;
+            // Founder 15 Nov 2026: while whole objects are worked on, an edge between two
+            // faces that meet smoothly (a fillet, the halves of a revolved face) and a closed
+            // seam between flat faces in one plane (what a Join leaves) are not drawn when
+            // both faces look the same, so a model reads as an object, not as a drawing. A
+            // crease, the outline, a border between two colours and a Split line are drawn as
+            // always; Face and Edge modes draw every edge. The class of each edge was decided
+            // once at tessellation (MeshSnapshot::edgeDrawClasses); nothing is searched here.
+            // The white lines of a selected part are a separate structure and are not touched.
+            const bool leavesEdgesOut = objectMode == 1
+                && scene->selectionMode == core3d::scene::ElementKind::Object
+                && !mesh.edgeDrawClasses.empty();
+            const std::uint32_t noFace = std::numeric_limits<std::uint32_t>::max();
+            std::unordered_map<std::uint32_t, std::size_t> primitiveOfFace;
+            std::unordered_map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> facesOfEdge;
+            if (leavesEdgesOut) {
+                for (std::size_t index = 0; index < mesh.primitives.size(); ++index)
+                    primitiveOfFace.emplace(mesh.primitives[index].faceIndex, index);
+                for (const auto& edge : mesh.edgeSegments) {
+                    if (edge.edgeIndex >= mesh.edgeDrawClasses.size()
+                        || mesh.edgeDrawClasses[edge.edgeIndex] == 0) continue;
+                    auto& faces = facesOfEdge.emplace(edge.edgeIndex,
+                        std::make_pair(edge.faceIndex, noFace)).first->second;
+                    if (faces.first != edge.faceIndex && faces.second == noFace)
+                        faces.second = edge.faceIndex;
+                }
+            }
+            const auto sameLook = [&](std::uint32_t first, std::uint32_t second) {
+                if (first == second) return true;
+                if (first >= scene->materials.size() || second >= scene->materials.size()) return false;
+                const auto& a = scene->materials[first];
+                const auto& b = scene->materials[second];
+                const auto plain = [](const auto& material) {
+                    return material.baseColorTextureIndex < 0 && material.emissiveTextureIndex < 0
+                        && material.metallicRoughnessTextureIndex < 0
+                        && material.occlusionTextureIndex < 0 && material.normalTextureIndex < 0;
+                };
+                const auto about = [](float x, float y) { return std::abs(x - y) < 1.0e-3f; };
+                return plain(a) && plain(b) && a.alphaMode == b.alphaMode
+                    && about(a.baseColor.x, b.baseColor.x) && about(a.baseColor.y, b.baseColor.y)
+                    && about(a.baseColor.z, b.baseColor.z) && about(a.baseColor.w, b.baseColor.w)
+                    && about(a.emission.x, b.emission.x) && about(a.emission.y, b.emission.y)
+                    && about(a.emission.z, b.emission.z)
+                    && about(a.metallic, b.metallic) && about(a.roughness, b.roughness);
+            };
+            const auto leftOut = [&](std::uint32_t edgeIndex) {
+                if (!leavesEdgesOut) return false;
+                const auto faces = facesOfEdge.find(edgeIndex);
+                if (faces == facesOfEdge.end() || faces->second.second == noFace) return false;
+                const auto first = primitiveOfFace.find(faces->second.first);
+                const auto second = primitiveOfFace.find(faces->second.second);
+                if (first == primitiveOfFace.end() || second == primitiveOfFace.end()) return false;
+                const auto& a = item.primitiveBindings[first->second];
+                const auto& b = item.primitiveBindings[second->second];
+                return a.visible && b.visible && sameLook(a.materialIndex, b.materialIndex);
+            };
             for (const auto& edge : mesh.edgeSegments) {
                 if (!visibleFaces.count(edge.faceIndex)) continue;
+                if (leftOut(edge.edgeIndex)) continue;
                 const auto inserted = incidentFace.emplace(edge.edgeIndex, edge.faceIndex);
                 if (!inserted.second && inserted.first->second != edge.faceIndex) continue;
                 // Match the selected-overlay cap. Never publish a partial scene.
@@ -1913,6 +1976,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         for (const auto& structure : _committedBoundaries) structure->Display();
         _committedBoundaryDocument = documentIdentifier;
         _committedBoundaryDocumentOwner = document->Document().get();
+        _committedBoundaryObjectMode = objectMode;
         _committedBoundariesDirty = NO;
     } catch (...) {
         for (auto& structure : replacements) RemoveNativeSelectionStructure(structure);
