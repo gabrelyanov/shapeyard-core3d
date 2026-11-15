@@ -5955,6 +5955,8 @@ void Core3DViewer::release() noexcept {
     _interactiveCallback = {};
     _geometrySnapFeedbackChangedCallback = {};
     if (_objectInteractor) _objectInteractor->setGeometrySnapFeedbackChangedCallback({});
+    _liveMoveChangedCallback = {};
+    if (_objectInteractor) _objectInteractor->setLiveMoveChangedCallback({});
     _booleanPreviewStateChangedCallback = {};
     _linearArrayPreviewStateChangedCallback = {};
     _bevelPreviewStateChangedCallback = {};
@@ -6083,6 +6085,7 @@ bool Core3DViewer::InitViewer (Core3DPlatformView* theWin) {
             _objectInteractor = std::make_shared<ObjectInteractor>(myContext, myView, myDoc, device_independent_side);
             _objectInteractor->setGeometrySnapFeedbackChangedCallback(
                 _geometrySnapFeedbackChangedCallback);
+            _objectInteractor->setLiveMoveChangedCallback(_liveMoveChangedCallback);
             _objectInteractor->setBooleanPreviewStateChangedCallback(
                 _booleanPreviewStateChangedCallback);
             _objectInteractor->setLinearArrayPreviewStateChangedCallback(
@@ -6397,6 +6400,7 @@ bool Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorTy
             myContext, myView, myDoc, manipulatorSide);
     objectInteractor->setGeometrySnapFeedbackChangedCallback(
         _geometrySnapFeedbackChangedCallback);
+    objectInteractor->setLiveMoveChangedCallback(_liveMoveChangedCallback);
     objectInteractor->setBooleanPreviewStateChangedCallback(
         _booleanPreviewStateChangedCallback);
     objectInteractor->setLinearArrayPreviewStateChangedCallback(
@@ -6496,6 +6500,11 @@ void Core3DViewer::setGeometrySnapFeedbackChangedCallback(std::function<void(boo
     _geometrySnapFeedbackChangedCallback = std::move(callback);
     if (_objectInteractor)
         _objectInteractor->setGeometrySnapFeedbackChangedCallback(_geometrySnapFeedbackChangedCallback);
+}
+
+void Core3DViewer::setLiveMoveChangedCallback(std::function<void(bool)> callback) {
+    _liveMoveChangedCallback = std::move(callback);
+    if (_objectInteractor) _objectInteractor->setLiveMoveChangedCallback(_liveMoveChangedCallback);
 }
 
 void Core3DViewer::setBooleanPreviewStateChangedCallback(
