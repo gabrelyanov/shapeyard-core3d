@@ -1848,6 +1848,15 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(debugSetLeavesSmoothEdgesAndSeamsOut(_:));
 + (BOOL)debugLeavesSmoothEdgesAndSeamsOut
     NS_SWIFT_NAME(debugLeavesSmoothEdgesAndSeamsOut());
+//! The numbers-only guard of Join / Cut / Overlap (0, 1, 2), exactly as the
+//! engine applies it: inputVolumes[0] is the part that stays; boxes are min x y z,
+//! max x y z, or nil to judge by volume alone.
++ (BOOL)debugBooleanResultIsPlausibleForOperation:(NSInteger)operation
+                                     inputVolumes:(NSArray<NSNumber *> *)inputVolumes
+                                     resultVolume:(double)resultVolume
+                                        inputsBox:(nullable NSArray<NSNumber *> *)inputsBox
+                                        resultBox:(nullable NSArray<NSNumber *> *)resultBox
+    NS_SWIFT_NAME(debugBooleanResultIsPlausible(operation:inputVolumes:resultVolume:inputsBox:resultBox:));
 - (void)debugSetMaximumBevelCaptureTopologyNodes:(NSUInteger)limit;
 - (void)debugSetMaximumBevelResultTopologyNodes:(NSUInteger)limit;
 - (void)debugSetMaximumBevelResultSolids:(NSUInteger)limit;

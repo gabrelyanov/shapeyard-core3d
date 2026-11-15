@@ -25416,6 +25416,25 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     return core3d::scene::EdgeDrawClassesEnabled();
 }
 
++ (BOOL)debugBooleanResultIsPlausibleForOperation:(NSInteger)operation
+                                     inputVolumes:(NSArray<NSNumber *> *)inputVolumes
+                                     resultVolume:(double)resultVolume
+                                        inputsBox:(nullable NSArray<NSNumber *> *)inputsBox
+                                        resultBox:(nullable NSArray<NSNumber *> *)resultBox {
+    std::vector<double> volumes;
+    for (NSNumber *volume in inputVolumes) volumes.push_back(volume.doubleValue);
+    double inputs[6] = {}, result[6] = {};
+    const bool boxes = inputsBox.count == 6 && resultBox.count == 6;
+    if (boxes) {
+        for (NSUInteger index = 0; index < 6; ++index) {
+            inputs[index] = inputsBox[index].doubleValue;
+            result[index] = resultBox[index].doubleValue;
+        }
+    }
+    return Core3DBooleanResultIsPlausible(static_cast<int>(operation), volumes, resultVolume,
+        boxes ? inputs : nullptr, boxes ? result : nullptr) ? YES : NO;
+}
+
 - (void)debugSetMaximumBevelCaptureTopologyNodes:(NSUInteger)limit {
     [GLController debugSetMaximumBevelCaptureTopologyNodes:limit];
 }

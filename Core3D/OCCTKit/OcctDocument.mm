@@ -12908,6 +12908,39 @@ Standard_Boolean OcctDocument::IsBooleanResultLabel(const TDF_Label& label) cons
     } catch (...) { return Standard_False; }
 }
 
+
+bool Core3DBooleanResultIsPlausible(
+    const int operation, const std::vector<double>& inputVolumes, const double resultVolume,
+    const double* inputsBox, const double* resultBox) noexcept {
+    try {
+        if (operation < 0 || operation > 2 || inputVolumes.size() < 2) return true;
+        double largest = 0.0, smallest = std::numeric_limits<double>::infinity(), sum = 0.0;
+        for (const double volume : inputVolumes) {
+            if (!std::isfinite(volume) || !(volume > 0.0)) return true;
+            largest = std::max(largest, volume);
+            smallest = std::min(smallest, volume);
+            sum += volume;
+        }
+        if (!std::isfinite(resultVolume) || !(resultVolume > 0.0)) return false;
+        if (operation == 1) return resultVolume <= inputVolumes.front() * (1.0 + 1.0e-3);
+        if (operation == 2) return resultVolume <= smallest * (1.0 + 1.0e-3);
+        const double tolerance = 1.0e-3 * largest;
+        if (resultVolume < largest - tolerance || resultVolume > sum + tolerance) return false;
+        if (inputsBox == nullptr || resultBox == nullptr) return true;
+        double diagonal = 0.0;
+        for (int axis = 0; axis < 3; ++axis) {
+            if (!std::isfinite(inputsBox[axis]) || !std::isfinite(inputsBox[axis + 3])
+                || !std::isfinite(resultBox[axis]) || !std::isfinite(resultBox[axis + 3])) return false;
+            const double side = inputsBox[axis + 3] - inputsBox[axis];
+            diagonal += side * side;
+        }
+        const double slack = std::max(1.0e-9, 1.0e-3 * std::sqrt(diagonal));
+        for (int value = 0; value < 6; ++value)
+            if (std::abs(inputsBox[value] - resultBox[value]) > slack) return false;
+        return true;
+    } catch (...) { return false; }
+}
+
 namespace {
 // The plain (baked) Join / Cut / Overlap of two stored parts, in the frame of the part
 // that stays (0 union, 1 subtract, 2 intersect). Works on copies. Shared by Apply and the
@@ -13026,6 +13059,39 @@ bool BakedBooleanShapeOfMany(const TopoDS_Shape& targetStored, const gp_Trsf& ta
             refusal = "invalid-result";
             result.Nullify();
             return false;
+        }
+        // A valid solid is not yet the right one. The builder can return a small wrong piece
+        // without reporting an error (toy car, 15 Nov 2026: a Union left a fragment of the axle
+        // as "the body"). Preview and Apply both come through here, so a result that cannot be
+        // what was asked for never reaches the tick: both parts stay, no history step.
+        {
+            std::vector<double> volumes;
+            Bnd_Box inputs;
+            const auto measure = [&](const TopoDS_Shape& shape) {
+                GProp_GProps properties;
+                BRepGProp::VolumeProperties(shape, properties);
+                volumes.push_back(properties.Mass());
+                if (operation == 0) BRepBndLib::AddOptimal(shape, inputs, Standard_False, Standard_False);
+            };
+            measure(targetShape);
+            for (TopTools_ListOfShape::Iterator tool(tools); tool.More(); tool.Next()) measure(tool.Value());
+            double inputsBox[6] = {}, resultBox[6] = {};
+            bool boxes = false;
+            if (operation == 0 && !inputs.IsVoid() && !inputs.IsOpen()) {
+                Bnd_Box made;
+                BRepBndLib::AddOptimal(result, made, Standard_False, Standard_False);
+                if (!made.IsVoid() && !made.IsOpen()) {
+                    inputs.Get(inputsBox[0], inputsBox[1], inputsBox[2], inputsBox[3], inputsBox[4], inputsBox[5]);
+                    made.Get(resultBox[0], resultBox[1], resultBox[2], resultBox[3], resultBox[4], resultBox[5]);
+                    boxes = true;
+                }
+            }
+            if (!Core3DBooleanResultIsPlausible(operation, volumes, mass.Mass(),
+                    boxes ? inputsBox : nullptr, boxes ? resultBox : nullptr)) {
+                refusal = "unreliable-result";
+                result.Nullify();
+                return false;
+            }
         }
         return true;
     } catch (...) { refusal = "invalid-result"; result.Nullify(); return false; }
@@ -13690,19 +13756,35 @@ core3d::authored_parameter::PairPrepareReply OcctDocument::PrepareBooleanSources
         observation.recipeBytes = std::move(recipes);
         observation.undoDepth = capture->state_->undoDepth;
         observation.redoDepth = capture->state_->redoDepth;
+        std::array<std::array<double, 6>, 2> sourceBounds{};
         for (std::size_t index = 0; index < 2; ++index) {
             observation.entityIdentifiers[index] =
                 capture->state_->sources[index].entityIdentifier;
             observation.sourceFeatureIdentifiers[index] =
                 capture->state_->sources[index].featureIdentifier;
-            std::array<double, 6> ignoredBounds; std::uint32_t ignoredLoops = 0;
+            std::uint32_t ignoredLoops = 0;
             if (!PairMeasure(observed[index], observation.sourceVolumes[index],
-                    ignoredBounds, ignoredLoops))
+                    sourceBounds[index], ignoredLoops))
                 return PairPrepareRefused(PairRefusal::UnprovedCorrespondence);
         }
         if (!PairMeasure(independent, observation.resultVolume,
                 observation.resultBounds, observation.resultClosedLoops, resultSet))
             return PairPrepareRefused(PairRefusal::InvalidResult);
+        // The same guard as the plain Join (toy car, 15 Nov 2026): a fuse that returns a small
+        // wrong piece is refused here, before any preview, so the tick never appears.
+        if (capture->state_->operation == pb::Operation::Union) {
+            double inputsBox[6] = {}, resultBox[6] = {};
+            for (int axis = 0; axis < 3; ++axis) {
+                inputsBox[axis] = std::min(sourceBounds[0][axis], sourceBounds[1][axis]);
+                inputsBox[axis + 3] = std::max(sourceBounds[0][axis + 3], sourceBounds[1][axis + 3]);
+                resultBox[axis] = observation.resultBounds[axis];
+                resultBox[axis + 3] = observation.resultBounds[axis + 3];
+            }
+            if (!Core3DBooleanResultIsPlausible(0,
+                    {observation.sourceVolumes[0], observation.sourceVolumes[1]},
+                    observation.resultVolume, inputsBox, resultBox))
+                return PairPrepareRefused(PairRefusal::InvalidResult);
+        }
         observation.resultMembership = {{1, 1}};
         PairPrepareReply reply;
         reply.status = PairStatus::Prepared; reply.refusal = PairRefusal::None;

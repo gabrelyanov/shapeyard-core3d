@@ -480,6 +480,10 @@ __attribute__((objc_subclassing_restricted))
     tools:(NSArray<NSString *> *)tools
     operation:(Core3DPartBooleanOperation)operation
     NS_SWIFT_NAME(showBakedBooleanPreview(targets:tools:operation:));
+//! Why the last showBakedBooleanPreview call was not shown: the engine's refusal
+//! code ("unreliable-result" when the builder returned something that cannot be
+//! the Join / Cut / Overlap asked for); empty when the preview was shown.
+- (NSString *)lastBakedBooleanPreviewRefusal NS_SWIFT_NAME(lastBakedBooleanPreviewRefusal());
 //! While a Join/Cut preview shows: the kept part whose result is under the drawable point
 //! (the same point viewWillSelect gets), or nil. Lets a second tap un-pick an object to cut.
 - (nullable NSString *)booleanPreviewEntityAtDrawablePoint:(CGPoint)point
