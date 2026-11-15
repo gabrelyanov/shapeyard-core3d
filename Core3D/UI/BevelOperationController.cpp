@@ -490,6 +490,42 @@ Standard_Boolean CanonicalPlainProfileBevelCandidate(
     }
 }
 
+//! The plain chamfer and fillet builders return a forward COMPOUND that wraps
+//! the one result solid. Stored like that, the part's root is no longer a
+//! single SOLID and the face tools (Push-pull, Shell, Split) refuse the part
+//! after one Bevel. Take the one forward solid out of its wrapper, examined
+//! with cumulative orientation and location as in
+//! CanonicalPlainProfileBevelCandidate, so the kept child keeps its located
+//! geometry; nothing is rebuilt. Anything else is returned unchanged and is
+//! judged by the usual result checks.
+TopoDS_Shape PlainBevelResultWithoutWrapper(const TopoDS_Shape& theResult) noexcept
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (theResult.IsNull() || theResult.ShapeType() != TopAbs_COMPOUND
+            || theResult.Orientation() != TopAbs_FORWARD) {
+            return theResult;
+        }
+        TopoDS_Shape aSolid;
+        Standard_Size aChildCount = 0;
+        for (TopoDS_Iterator aChild(theResult, Standard_True, Standard_True);
+             aChild.More(); aChild.Next()) {
+            if (++aChildCount > 1) {
+                return theResult;
+            }
+            aSolid = aChild.Value();
+        }
+        if (aChildCount != 1 || aSolid.IsNull()
+            || aSolid.ShapeType() != TopAbs_SOLID
+            || aSolid.Orientation() != TopAbs_FORWARD) {
+            return theResult;
+        }
+        return aSolid;
+    } catch (...) {
+        return theResult;
+    }
+}
+
 class BevelCancellationIndicator final
     : public Message_ProgressIndicator {
     DEFINE_STANDARD_RTTI_INLINE(
@@ -809,7 +845,7 @@ private:
                     if (!aBuilder.IsDone()) {
                         return aResult;
                     }
-                    aCandidate = aBuilder.Shape();
+                    aCandidate = PlainBevelResultWithoutWrapper(aBuilder.Shape());
                 } else {
                     BRepFilletAPI_MakeFillet aBuilder(aSource.shape);
                     for (const TopoDS_Edge& anEdge : aSource.edges) {
@@ -823,7 +859,7 @@ private:
                                 : BevelFailureKind::Other;
                         return aResult;
                     }
-                    aCandidate = aBuilder.Shape();
+                    aCandidate = PlainBevelResultWithoutWrapper(aBuilder.Shape());
                 }
                 if (wasCancelled()) {
                     aResult.outcome = BevelPreviewWorkerOutcome::Cancelled;
