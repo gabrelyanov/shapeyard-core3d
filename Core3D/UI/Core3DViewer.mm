@@ -14223,14 +14223,12 @@ static bool FitCameraToBounds(const Handle(V3d_View)& view, const Bnd_Box& bound
             const double halfWidth = (right - left) * 0.5, halfHeight = (top - bottom) * 0.5;
             const double centerX = (left + right) * 0.5, centerY = (bottom + top) * 0.5;
             bool tightened = fillTarget && halfWidth > 0.0 && halfHeight > 0.0;
-            for (int pass = 0; tightened && pass < 8; ++pass) {
-                const auto projectedCenter = camera->Project(worldCenter);
-                const auto targetWorld = camera->UnProject(gp_Pnt(
-                    centerX, centerY, projectedCenter.Z()));
-                gp_Trsf shift;
-                shift.SetTranslation(gp_Vec(targetWorld, worldCenter));
-                camera->Transform(shift);
-                double reach = 0.0;
+            for (int pass = 0; tightened && pass < 10; ++pass) {
+                // Where the corners are drawn now: their box on the picture. In perspective
+                // that box is not centred on the model's centre (the near end is drawn
+                // larger), so centre the box itself, then zoom until it reaches the target.
+                double lowX = 0.0, highX = 0.0, lowY = 0.0, highY = 0.0;
+                bool first = true;
                 for (const double x : {minX, maxX}) {
                     for (const double y : {minY, maxY}) {
                         for (const double z : {minZ, maxZ}) {
@@ -14238,20 +14236,32 @@ static bool FitCameraToBounds(const Handle(V3d_View)& view, const Bnd_Box& bound
                             if (!std::isfinite(point.X()) || !std::isfinite(point.Y())
                                 || !std::isfinite(point.Z())) {
                                 tightened = false;
+                            } else if (first) {
+                                lowX = highX = point.X(); lowY = highY = point.Y();
+                                first = false;
                             } else {
-                                reach = std::max(reach, std::max(
-                                    std::abs(point.X() - centerX) / halfWidth,
-                                    std::abs(point.Y() - centerY) / halfHeight));
+                                lowX = std::min(lowX, point.X()); highX = std::max(highX, point.X());
+                                lowY = std::min(lowY, point.Y()); highY = std::max(highY, point.Y());
                             }
                         }
                     }
                 }
-                if (!tightened || !std::isfinite(reach) || reach <= 1e-9) {
-                    tightened = false;
-                    break;
-                }
+                if (!tightened || first) { tightened = false; break; }
+                const double depth = camera->Project(worldCenter).Z();
+                const auto drawnCenter = camera->UnProject(gp_Pnt(
+                    (lowX + highX) * 0.5, (lowY + highY) * 0.5, depth));
+                const auto targetCenter = camera->UnProject(gp_Pnt(centerX, centerY, depth));
+                gp_Trsf shift;
+                shift.SetTranslation(gp_Vec(targetCenter, drawnCenter));
+                camera->Transform(shift);
+                const double reach = std::max((highX - lowX) * 0.5 / halfWidth,
+                                              (highY - lowY) * 0.5 / halfHeight);
+                if (!std::isfinite(reach) || reach <= 1e-9) { tightened = false; break; }
                 const double ratio = reach / kFill;
-                if (std::abs(ratio - 1.0) < 0.01) { break; }
+                const double offCenter = std::max(
+                    std::abs((lowX + highX) * 0.5 - centerX) / halfWidth,
+                    std::abs((lowY + highY) * 0.5 - centerY) / halfHeight);
+                if (std::abs(ratio - 1.0) < 0.01 && offCenter < 0.01) { break; }
                 const double scale = camera->Scale() * ratio;
                 if (!std::isfinite(scale) || scale <= 0.0) { tightened = false; break; }
                 camera->SetScale(scale);
