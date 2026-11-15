@@ -21367,6 +21367,24 @@ extern "C" double Core3DDebugMeasureAnglePairProbe(int pair) {
             a = b = snaps[0].point;
             projected = true;
         }
+        // One tap on one straight edge reads that edge's own length at once.
+        if (elements.size() == 1 && circleDiameter <= 0
+            && elements[0].ShapeType() == TopAbs_EDGE
+            && !BRep_Tool::Degenerated(TopoDS::Edge(elements[0]))) {
+            const BRepAdaptor_Curve line(TopoDS::Edge(elements[0]));
+            if (line.GetType() == GeomAbs_Line) {
+                const gp_Pnt start = line.Value(line.FirstParameter());
+                const gp_Pnt end = line.Value(line.LastParameter());
+                const double length = start.Distance(end);
+                if (std::isfinite(length) && length > Precision::Confusion()) {
+                    result[@"edgeLength"] = @(length);
+                    if (!projected) {
+                        a = b = gp_Pnt((start.XYZ() + end.XYZ()) / 2);
+                        projected = true;
+                    }
+                }
+            }
+        }
         if (!projected) return result;
         result[@"ax"] = @(a.X()); result[@"ay"] = @(a.Y()); result[@"az"] = @(a.Z());
         result[@"bx"] = @(b.X()); result[@"by"] = @(b.Y()); result[@"bz"] = @(b.Z());

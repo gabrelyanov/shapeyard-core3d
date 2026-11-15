@@ -1492,6 +1492,8 @@ __attribute__((objc_subclassing_restricted))
 //! left) and "drawableWidth","drawableHeight". For exactly one full-circle
 //! edge, "diameter" is its world-space diameter in model units, the pixel
 //! position is its centre and "circleRadiusPixels" is its projected radius.
+//! For exactly one straight (line) edge, "edgeLength" is its length in model
+//! units and the pixel position is its snapped pick (else its middle).
 //! "distance" is absent for a single edge. Live edge picks may add "snapKindA"
 //! and "snapKindB" (1 corner, 2 midpoint, 3 edge, 4 circle centre); their
 //! points then define the pair distance. Projected topology bounds are in
