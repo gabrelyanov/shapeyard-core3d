@@ -2847,6 +2847,14 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 }
 #endif
 
+- (void)setTapsSelectThroughManipulator:(BOOL)on
+{
+    _tapsSelectThroughManipulator = on;
+    if (_viewer != nullptr) {
+        _viewer->setSelectThroughManipulator(on);
+    }
+}
+
 - (void)tapHandler:(UITapGestureRecognizer *)tapRecognizer
 {
     if (_suppressTapSelectionForManipulatorInteraction) {

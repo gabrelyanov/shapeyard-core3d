@@ -2229,6 +2229,29 @@ namespace core3d {
         return !myContext->FirstSelectedObject().IsNull();
     }
 
+    void ObjectInteractor::withManipulatorUnpickable(const std::function<void()>& body) {
+        if (_manipulator.IsNull() || !myContext->IsDisplayed(_manipulator)) {
+            body();
+            return;
+        }
+        TColStd_ListOfInteger aModes;
+        myContext->ActivatedModes(_manipulator, aModes);
+        myContext->Deactivate(_manipulator);
+        myContext->ClearDetected(Standard_False);
+        auto restore = [&]() {
+            for (TColStd_ListIteratorOfListOfInteger anIt(aModes); anIt.More(); anIt.Next()) {
+                myContext->Activate(_manipulator, anIt.Value());
+            }
+        };
+        try {
+            body();
+        } catch (...) {
+            restore();
+            throw;
+        }
+        restore();
+    }
+
     void ObjectInteractor::attachManipulatorToSelection(bool detach) {
         if (hasUnresolvedEdit()) { return; }
         if (_manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeNone) { return; }

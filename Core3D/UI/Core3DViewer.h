@@ -716,6 +716,10 @@ namespace core3d {
         };
         std::vector<MeasurePick> measurePicksForCurrentSelection() noexcept;
         void Select(int theX, int theY);
+        //! While a tool waits for a tapped part, a tap selects through the
+        //! move arrows (App Store 5.34.1). Off by default.
+        void setSelectThroughManipulator(bool on) { _selectThroughManipulator = on; }
+        bool selectsThroughManipulator() const { return _selectThroughManipulator; }
         void StartRotation(int theX, int theY);
         void Rotation(int theX, int theY);
         void FinishInteraction(int theX, int theY);
@@ -1132,6 +1136,7 @@ namespace core3d {
         bool debugSelectHiddenBooleanOwner(const std::string& entity) noexcept;
 #endif
     private:
+        bool _selectThroughManipulator = false;
         friend class native_opening::Context;
         friend class native_opening::CommandLease;
         std::shared_ptr<const native_opening::Fence> recaptureNativeOpeningFence(
