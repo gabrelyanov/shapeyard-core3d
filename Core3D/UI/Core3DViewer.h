@@ -27,6 +27,7 @@
 #include <atomic>
 #include <gp_Pnt2d.hxx>
 #include <optional>
+#include <array>
 #if DEBUG
 #include <map>
 #include "../OCCTKit/ProfileSourceCorrespondence.hxx"
@@ -891,6 +892,7 @@ namespace core3d {
             _interactiveCallback = cb;
         }
         void setGeometrySnapFeedbackChangedCallback(std::function<void(bool)> callback);
+        void setLiveMoveChangedCallback(std::function<void(bool)> callback);
         void setBooleanPreviewStateChangedCallback(
             std::function<void()> callback);
         void setLinearArrayPreviewStateChangedCallback(
@@ -970,6 +972,13 @@ namespace core3d {
             std::uint32_t viewportWidth,
             std::uint32_t viewportHeight,
             scene::SceneSnapshotCaptureFailure* failureOut) noexcept;
+#if DEBUG
+        //! Main-thread, viewer-lifetime inclusive wall costs: count/seconds
+        //! pairs for scene capture, assembly prepare, native commit, creation
+        //! publication and its viewer update. These inclusive totals overlap.
+        //! Scene captures nested in prepare/commit overlap those totals.
+        std::array<double, 10> debugHistoryCostObservation() const noexcept;
+#endif
         //! True only when the active typed operation owns every deviation from
         //! the retained selection mode. Ordinary GL selection authority stays
         //! strict and OutcomeUnknown scene publication remains blocked.
@@ -1282,6 +1291,7 @@ namespace core3d {
         
         std::function<void(int,int)> _interactiveCallback;
         std::function<void(bool)> _geometrySnapFeedbackChangedCallback;
+        std::function<void(bool)> _liveMoveChangedCallback;
         std::function<void()> _booleanPreviewStateChangedCallback;
         std::function<void()> _linearArrayPreviewStateChangedCallback;
         std::function<void()> _radialArrayPreviewStateChangedCallback;
@@ -1289,6 +1299,9 @@ namespace core3d {
         std::function<void()> _shellPreviewStateChangedCallback;
         std::function<void(PrimitiveManipulatorType)>
             _interactorRecreatedCallback;
+#if DEBUG
+        std::array<double, 10> _debugHistoryCosts{};
+#endif
         scene::OcctSceneSnapshotBuilder _sceneSnapshotBuilder;
         std::shared_ptr<native_opening::detail::State> _nativeOpeningState;
 #ifdef DEBUG

@@ -316,6 +316,12 @@ supportsNormalTextureEditing:self.supportsNormalTextureEditing];
     }
 }
 
+-(void)updateSelectedPartsWithMaterial:(Core3DMaterial*)material color:(Core3DColor*)color {
+    if (_pass && [_pass respondsToSelector:@selector(updateSelectedPartsWithMaterial:color:)]) {
+        [_pass updateSelectedPartsWithMaterial:material color:color];
+    }
+}
+
 -(BOOL)updateSelectionWithBaseColorTextureData:(NSData*)textureData
                                       mediaType:(NSString*)mediaType
                                           error:(NSError* _Nullable * _Nullable)error {
