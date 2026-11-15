@@ -91,6 +91,8 @@ struct ShellPreviewWorkerResult {
     TopoDS_Shape result;
     Standard_Boolean computeWasMainThread = Standard_False;
 #ifdef DEBUG
+    Standard_Integer planarNormalizationStatus = 0;
+    Standard_Boolean usedPlanarNormalization = Standard_False;
     Standard_Integer failureStage = 1;
     Standard_Integer offsetError = -1;
     Standard_Boolean offsetDone = Standard_False;
@@ -1130,9 +1132,12 @@ private:
 #ifdef DEBUG
             aResult.failureStage = 2; // Offset construction, including exceptions.
 #endif
-            MakeInwardShell(aBuilder, theRequest.source, theRequest.openingFaces,
+            [[maybe_unused]] const Standard_Integer normalized =
+                MakeInwardShell(aBuilder, theRequest.source, theRequest.openingFaces,
                             theRequest.thickness, theRequest.tolerance, aProgress->Start());
 #ifdef DEBUG
+            aResult.planarNormalizationStatus = normalized;
+            aResult.usedPlanarNormalization = normalized > 0;
             aResult.offsetDone = aBuilder.IsDone();
             aResult.offsetError = static_cast<Standard_Integer>(aBuilder.MakeOffset().Error());
             aResult.failureStage = 3; // Offset completion/error gate.
@@ -1752,6 +1757,8 @@ void ShellOperationController::acceptWorkerResult(
 #ifdef DEBUG
     myDebugFailureStage = !hasResult ? theResult.failureStage
         : !sourceCurrent ? 10 : !installed ? 11 : 0;
+    myDebugPlanarNormalizationStatus = theResult.planarNormalizationStatus;
+    myDebugUsedPlanarNormalization = theResult.usedPlanarNormalization;
     myDebugOffsetError = theResult.offsetError;
     myDebugOffsetDone = theResult.offsetDone;
 #endif
@@ -2366,6 +2373,8 @@ ShellOperationController::debugPreviewState() const noexcept
 {
     ShellPreviewDebugState aState;
     aState.state = myState;
+    aState.planarNormalizationStatus = myDebugPlanarNormalizationStatus;
+    aState.usedPlanarNormalization = myDebugUsedPlanarNormalization;
     aState.failureStage = myDebugFailureStage;
     aState.offsetError = myDebugOffsetError;
     aState.offsetDone = myDebugOffsetDone;

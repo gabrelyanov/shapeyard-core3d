@@ -6299,6 +6299,8 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         state.state == ShellPreviewState::Ready
         && state.canApply != Standard_False;
     return @{
+        @"planarNormalizationStatus": @(state.planarNormalizationStatus),
+        @"usedPlanarNormalization": @(state.usedPlanarNormalization != Standard_False),
         @"failureStage": @(state.failureStage),
         @"offsetError": @(state.offsetError),
         @"offsetDone": @(state.offsetDone != Standard_False),
