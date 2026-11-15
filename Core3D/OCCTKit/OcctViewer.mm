@@ -728,6 +728,18 @@ bool OcctViewer::SelectBehind(int theX, int theY, const Handle(AIS_InteractiveOb
             const Handle(AIS_InteractiveObject) aPart =
                 Handle(AIS_InteractiveObject)::DownCast(anOwner->Selectable());
             if (aPart.IsNull() || myContext->IsSelected(aPart)) { continue; }
+            // A part can answer a pick through more than one owner; with one
+            // of them selected the others are not, and taking one of those
+            // would select the same part a second time (seen as a third
+            // selection with two parts on screen, 15 Nov).
+            bool aPartIsSelected = false;
+            for (myContext->InitSelected(); myContext->MoreSelected() && !aPartIsSelected;
+                 myContext->NextSelected()) {
+                const Handle(SelectMgr_EntityOwner) aSelected = myContext->SelectedOwner();
+                aPartIsSelected = !aSelected.IsNull() && aSelected->HasSelectable()
+                    && aSelected->Selectable() == anOwner->Selectable();
+            }
+            if (aPartIsSelected) { continue; }
             // Only a part of the document: a normal tap never reaches the
             // helpers that can lie behind the nearest hit, this walk can.
             if (myDoc.IsNull() || myDoc->ShapeLabel(aPart).IsNull()
