@@ -14480,11 +14480,15 @@ void Core3DViewer::setOrthoProjection(const OrthoProjectionType orthoType) {
 
         if (myView->Camera()->ProjectionType() != Graphic3d_Camera::Projection_Orthographic) {
             myView->Camera()->SetProjectionType(Graphic3d_Camera::Projection_Orthographic);
-			if (orthoType == OrthoProjectionTypeTop)
-				myView->Camera()->SetUp(gp::DX());
-			else if (orthoType == OrthoProjectionTypeBottom)
-				myView->Camera()->SetUp(-gp::DX());
         }
+        // Top and Bottom keep the up direction a fresh session shows (5.34.1),
+        // whether they come from the 3D view or from another flat view; it was
+        // set only on the first switch, so Top turned 90 degrees after a
+        // reopen (CTO 15 Nov 19:00, desk lamp fault 1).
+        if (orthoType == OrthoProjectionTypeTop)
+            myView->Camera()->SetUp(gp::DX());
+        else if (orthoType == OrthoProjectionTypeBottom)
+            myView->Camera()->SetUp(-gp::DX());
 
         myView->FitAll(0.2, Standard_False);
         myView->RedrawImmediate();
