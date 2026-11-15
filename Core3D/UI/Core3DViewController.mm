@@ -25420,6 +25420,10 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     Core3DDebugSetBooleanPlausibilityGuardSkipped(skipped);
 }
 
++ (NSInteger)debugLastBakedBooleanAttempts {
+    return Core3DDebugLastBakedBooleanAttempts();
+}
+
 + (BOOL)debugBooleanResultIsPlausibleForOperation:(NSInteger)operation
                                      inputVolumes:(NSArray<NSNumber *> *)inputVolumes
                                      resultVolume:(double)resultVolume

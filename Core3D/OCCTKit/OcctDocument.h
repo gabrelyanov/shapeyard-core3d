@@ -1107,6 +1107,10 @@ Standard_EXPORT bool Core3DBooleanResultIsPlausible(
 //! Check seam (debug builds): with the guard skipped a check can show what the
 //! builder stored before the guard existed. Never skipped otherwise.
 Standard_EXPORT void Core3DDebugSetBooleanPlausibilityGuardSkipped(bool skipped) noexcept;
+//! How many times the plain Join / Cut / Overlap builder ran for its last
+//! result: 1, or 2 when a refused Join was tried once more with a looser
+//! coincidence tolerance.
+Standard_EXPORT int Core3DDebugLastBakedBooleanAttempts() noexcept;
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanWedgeProbe(Standard_Integer scenario);
 Standard_EXPORT std::map<std::string,bool> Core3DDebugNativeBooleanOwnerProbe(Standard_Integer scenario);
 //! One-shot, non-reentrant capture of canonical pre-G0 writer bytes. The map

@@ -1852,6 +1852,8 @@ __attribute__((objc_subclassing_restricted))
 //! what was stored before the guard existed. Debug builds only.
 + (void)debugSetBooleanPlausibilityGuardSkipped:(BOOL)skipped
     NS_SWIFT_NAME(debugSetBooleanPlausibilityGuardSkipped(_:));
+//! How many times the plain builder ran for its last result (2 = the looser retry).
++ (NSInteger)debugLastBakedBooleanAttempts NS_SWIFT_NAME(debugLastBakedBooleanAttempts());
 //! The numbers-only guard of Join / Cut / Overlap (0, 1, 2), exactly as the
 //! engine applies it: inputVolumes[0] is the part that stays; boxes are min x y z,
 //! max x y z, or nil to judge by volume alone.

@@ -12911,7 +12911,11 @@ Standard_Boolean OcctDocument::IsBooleanResultLabel(const TDF_Label& label) cons
 
 namespace {
 std::atomic_bool gBooleanPlausibilityGuardSkipped{false};
+// How many times the plain builder ran for its last result: 1, or 2 when the looser retry was used.
+std::atomic<int> gBakedBooleanLastAttempts{0};
 }
+
+int Core3DDebugLastBakedBooleanAttempts() noexcept { return gBakedBooleanLastAttempts.load(); }
 
 void Core3DDebugSetBooleanPlausibilityGuardSkipped(const bool skipped) noexcept {
 #if DEBUG
@@ -13054,65 +13058,93 @@ bool BakedBooleanShapeOfMany(const TopoDS_Shape& targetStored, const gp_Trsf& ta
             if (!moved.IsDone()) { refusal = "invalid-result"; return false; }
             tools.Append(moved.Shape());
         }
-        const auto run = [&](BRepAlgoAPI_BooleanOperation& algorithm) {
-            algorithm.SetArguments(arguments); algorithm.SetTools(tools);
-            algorithm.SetRunParallel(Standard_False); algorithm.SetNonDestructive(Standard_True);
-            algorithm.SetFuzzyValue(Precision::Confusion());
-            algorithm.Build();
-            if (algorithm.IsDone() && !algorithm.HasErrors()) result = algorithm.Shape();
+        // The inputs are measured once; every attempt is judged against them.
+        std::vector<double> volumes;
+        Bnd_Box inputs;
+        const auto measure = [&](const TopoDS_Shape& shape) {
+            GProp_GProps properties;
+            BRepGProp::VolumeProperties(shape, properties);
+            volumes.push_back(properties.Mass());
+            if (operation == 0) BRepBndLib::AddOptimal(shape, inputs, Standard_False, Standard_False);
         };
-        if (operation == 0) { BRepAlgoAPI_Fuse a; run(a); }
-        else if (operation == 1) { BRepAlgoAPI_Cut a; run(a); }
-        else { BRepAlgoAPI_Common a; run(a); }
-        if (!result.IsNull() && result.ShapeType() != TopAbs_SOLID) {
-            TopoDS_Shape only; int solids = 0;
-            TopoDS_Compound pieces; BRep_Builder builder; builder.MakeCompound(pieces);
-            for (TopExp_Explorer it(result, TopAbs_SOLID); it.More(); it.Next()) {
-                only = it.Current(); ++solids; builder.Add(pieces, it.Current());
-            }
-            // A part that was several pieces may stay several pieces; one piece stays a solid.
-            result = solids == 1 ? only : (severalPieces && solids >= 2 ? TopoDS_Shape(pieces) : TopoDS_Shape());
-        }
-        GProp_GProps mass;
-        if (!result.IsNull()) BRepGProp::VolumeProperties(result, mass);
-        if (result.IsNull() || !BRepCheck_Analyzer(result, Standard_True).IsValid()
-            || !(mass.Mass() > 0)) {
-            refusal = "invalid-result";
+        measure(targetShape);
+        for (TopTools_ListOfShape::Iterator tool(tools); tool.More(); tool.Next()) measure(tool.Value());
+        double inputsBox[6] = {};
+        const bool inputsBoxed = operation == 0 && !inputs.IsVoid() && !inputs.IsOpen();
+        if (inputsBoxed)
+            inputs.Get(inputsBox[0], inputsBox[1], inputsBox[2], inputsBox[3], inputsBox[4], inputsBox[5]);
+
+        // One run of the builder with the given fuzzy value: 0 = a result that can be trusted
+        // (left in `result`), 1 = no valid solid, 2 = a valid solid that cannot be what was asked for.
+        const auto attempt = [&](const double fuzzy) -> int {
             result.Nullify();
-            return false;
-        }
-        // A valid solid is not yet the right one. The builder can return a small wrong piece
-        // without reporting an error (toy car, 15 Nov 2026: a Union left a fragment of the axle
-        // as "the body"). Preview and Apply both come through here, so a result that cannot be
-        // what was asked for never reaches the tick: both parts stay, no history step.
-        {
-            std::vector<double> volumes;
-            Bnd_Box inputs;
-            const auto measure = [&](const TopoDS_Shape& shape) {
-                GProp_GProps properties;
-                BRepGProp::VolumeProperties(shape, properties);
-                volumes.push_back(properties.Mass());
-                if (operation == 0) BRepBndLib::AddOptimal(shape, inputs, Standard_False, Standard_False);
+            const auto run = [&](BRepAlgoAPI_BooleanOperation& algorithm) {
+                algorithm.SetArguments(arguments); algorithm.SetTools(tools);
+                algorithm.SetRunParallel(Standard_False); algorithm.SetNonDestructive(Standard_True);
+                algorithm.SetFuzzyValue(fuzzy);
+                algorithm.Build();
+                if (algorithm.IsDone() && !algorithm.HasErrors()) result = algorithm.Shape();
             };
-            measure(targetShape);
-            for (TopTools_ListOfShape::Iterator tool(tools); tool.More(); tool.Next()) measure(tool.Value());
-            double inputsBox[6] = {}, resultBox[6] = {};
+            if (operation == 0) { BRepAlgoAPI_Fuse a; run(a); }
+            else if (operation == 1) { BRepAlgoAPI_Cut a; run(a); }
+            else { BRepAlgoAPI_Common a; run(a); }
+            if (!result.IsNull() && result.ShapeType() != TopAbs_SOLID) {
+                TopoDS_Shape only; int solids = 0;
+                TopoDS_Compound pieces; BRep_Builder builder; builder.MakeCompound(pieces);
+                for (TopExp_Explorer it(result, TopAbs_SOLID); it.More(); it.Next()) {
+                    only = it.Current(); ++solids; builder.Add(pieces, it.Current());
+                }
+                // A part that was several pieces may stay several pieces; one piece stays a solid.
+                result = solids == 1 ? only : (severalPieces && solids >= 2 ? TopoDS_Shape(pieces) : TopoDS_Shape());
+            }
+            GProp_GProps mass;
+            if (!result.IsNull()) BRepGProp::VolumeProperties(result, mass);
+            if (result.IsNull() || !BRepCheck_Analyzer(result, Standard_True).IsValid()
+                || !(mass.Mass() > 0)) {
+                result.Nullify();
+                return 1;
+            }
+            // A valid solid is not yet the right one. The builder can return a small wrong piece
+            // without reporting an error (toy car, 15 Nov 2026: a Union left a fragment of the
+            // axle as "the body"). Preview and Apply both come through here, so a result that
+            // cannot be what was asked for never reaches the tick: both parts stay, no history step.
+            double resultBox[6] = {};
             bool boxes = false;
-            if (operation == 0 && !inputs.IsVoid() && !inputs.IsOpen()) {
+            if (inputsBoxed) {
                 Bnd_Box made;
                 BRepBndLib::AddOptimal(result, made, Standard_False, Standard_False);
                 if (!made.IsVoid() && !made.IsOpen()) {
-                    inputs.Get(inputsBox[0], inputsBox[1], inputsBox[2], inputsBox[3], inputsBox[4], inputsBox[5]);
                     made.Get(resultBox[0], resultBox[1], resultBox[2], resultBox[3], resultBox[4], resultBox[5]);
                     boxes = true;
                 }
             }
             if (!BooleanResultPassesGuard(operation, volumes, mass.Mass(),
                     boxes ? inputsBox : nullptr, boxes ? resultBox : nullptr)) {
-                refusal = "unreliable-result";
                 result.Nullify();
-                return false;
+                return 2;
             }
+            return 0;
+        };
+        gBakedBooleanLastAttempts.store(1);
+        int outcome = attempt(Precision::Confusion());
+        if (outcome == 2 && operation == 0 && inputsBoxed) {
+            // Second and last try for a Join the guard refused: the same fuse with a looser
+            // coincidence tolerance, a ten-thousandth of the parts' size. Faces that should
+            // coincide but are microns apart (resized and bevelled parts are stored as
+            // approximated surfaces) are then treated as coinciding. Its result must pass the
+            // same validity check and the same guard, or the Join is refused as before.
+            const double dx = inputsBox[3] - inputsBox[0], dy = inputsBox[4] - inputsBox[1],
+                dz = inputsBox[5] - inputsBox[2];
+            const double looser = 1.0e-4 * std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (std::isfinite(looser) && looser > Precision::Confusion()) {
+                gBakedBooleanLastAttempts.store(2);
+                if (attempt(looser) == 0) outcome = 0; else outcome = 2;
+            }
+        }
+        if (outcome != 0) {
+            refusal = outcome == 1 ? "invalid-result" : "unreliable-result";
+            result.Nullify();
+            return false;
         }
         return true;
     } catch (...) { refusal = "invalid-result"; result.Nullify(); return false; }
