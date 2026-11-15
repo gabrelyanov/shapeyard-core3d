@@ -2238,9 +2238,19 @@ namespace core3d {
         myContext->ActivatedModes(_manipulator, aModes);
         myContext->Deactivate(_manipulator);
         myContext->ClearDetected(Standard_False);
+        const Handle(Core3DManipulator) aManipulator = _manipulator;
         auto restore = [&]() {
-            for (TColStd_ListIteratorOfListOfInteger anIt(aModes); anIt.More(); anIt.Next()) {
-                myContext->Activate(_manipulator, anIt.Value());
+            // The tap may move or detach the arrows (a new selection); only an
+            // arrow set that is still on screen gets its modes back.
+            if (aManipulator.IsNull() || aManipulator != _manipulator
+                || !myContext->IsDisplayed(aManipulator)) {
+                return;
+            }
+            try {
+                for (TColStd_ListIteratorOfListOfInteger anIt(aModes); anIt.More(); anIt.Next()) {
+                    myContext->Activate(aManipulator, anIt.Value());
+                }
+            } catch (...) {
             }
         };
         try {
