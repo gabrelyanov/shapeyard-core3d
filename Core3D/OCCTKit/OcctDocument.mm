@@ -13022,10 +13022,11 @@ bool PointOnFace(const gp_Pnt& point, const TopoDS_Face& face, double tolerance)
 // frame: Cut takes every tool away, Join fuses every tool in; Overlap takes one.
 bool BakedBooleanShapeOfMany(const TopoDS_Shape& targetStored, const gp_Trsf& targetPlacement,
     const std::vector<std::pair<TopoDS_Shape, gp_Trsf>>& toolsStored, int operation,
-    TopoDS_Shape& result, std::string& refusal) noexcept {
+    TopoDS_Shape& result, std::string& refusal, double* removedShare = nullptr) noexcept {
     try {
         OCC_CATCH_SIGNALS
         result.Nullify();
+        if (removedShare) *removedShare = 1.0;
         if (toolsStored.empty() || toolsStored.size() > 32
             || (operation == 2 && toolsStored.size() != 1)) return false;
         // Work on copies: the stored parts (and a Join record that Undo brings
@@ -13145,6 +13146,16 @@ bool BakedBooleanShapeOfMany(const TopoDS_Shape& targetStored, const gp_Trsf& ta
             refusal = outcome == 1 ? "invalid-result" : "unreliable-result";
             result.Nullify();
             return false;
+        }
+        // How much of the part a Cut took away (design system rule 11: a Cut that removes
+        // nothing must not use up the cutter).
+        // (Build 5: the result's volume is measured here; the builder's own measure now lives
+        // inside each attempt, see the plausibility guard above.)
+        if (removedShare && operation == 1) {
+            GProp_GProps whole, left;
+            BRepGProp::VolumeProperties(targetShape, whole);
+            BRepGProp::VolumeProperties(result, left);
+            if (whole.Mass() > 0) *removedShare = (whole.Mass() - left.Mass()) / whole.Mass();
         }
         return true;
     } catch (...) { refusal = "invalid-result"; result.Nullify(); return false; }
@@ -13423,11 +13434,17 @@ Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
         // result face that lies on a coloured face keeps that colour, in the same command.
         std::vector<std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>> coloured(targets.size());
         std::vector<std::vector<TDF_Label>> oldFaceLabels(targets.size());
+        // Design system rule 11 (CTO 15 Nov): a Subtract that removes nothing (the parts only
+        // touch, or miss) changes nothing: no step, the cutter stays.
+        bool anythingCut = operation != 1;
         for (const auto& [target, targetPresentation] : targets) {
             TopoDS_Shape result;
+            double removedShare = 1.0;
             if (!BakedBooleanShapeOfMany(XCAFDoc_ShapeTool::GetShape(target),
-                    targetPresentation->LocalTransformation(), toolShapes, operation, result, refusal))
+                    targetPresentation->LocalTransformation(), toolShapes, operation, result, refusal,
+                    &removedShare))
                 return Standard_False;
+            if (removedShare > 1.0e-9) anythingCut = true;
             // A part that stays with a scale other than 1 (a ring scaled to 0.8): the
             // result keeps that size in its own shape and the part's scale becomes 1,
             // so taps, export and later tools all see the same part (Astra 11 Nov
@@ -13462,6 +13479,7 @@ Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
                     coloured[at].insert(coloured[at].end(), looks.begin(), looks.end());
             }
         }
+        if (!anythingCut) { refusal = "no-overlap"; return Standard_False; }
         refusal = "stale-source";
         myOcafDoc->NewCommand();
         if (!myOcafDoc->HasOpenCommand()) return Standard_False;
