@@ -12970,8 +12970,21 @@ bool BakedBooleanShapeOfMany(const TopoDS_Shape& targetStored, const gp_Trsf& ta
             || (operation == 2 && toolsStored.size() != 1)) return false;
         // Work on copies: the stored parts (and a Join record that Undo brings
         // back) must stay byte-identical; building can touch tolerances.
-        const TopoDS_Shape targetShape = ExactResizedPrimitive(DetachedCopy(SingleSolidOf(targetStored)));
-        if (targetShape.IsNull() || targetShape.ShapeType() != TopAbs_SOLID
+        // A part may be made of separate pieces (a Union of parts that do not touch, CTO 15 Nov
+        // 04:24): every piece must be a solid; the Boolean then works on all of them.
+        const TopoDS_Shape stored = SingleSolidOf(targetStored);
+        int targetPieces = 0;
+        bool onlySolids = !stored.IsNull();
+        if (!stored.IsNull() && stored.ShapeType() == TopAbs_COMPOUND) {
+            for (TopoDS_Iterator piece(stored); piece.More(); piece.Next()) {
+                if (piece.Value().ShapeType() != TopAbs_SOLID) { onlySolids = false; break; }
+                ++targetPieces;
+            }
+        }
+        const bool severalPieces = onlySolids && targetPieces >= 2;
+        const TopoDS_Shape targetShape = severalPieces ? DetachedCopy(stored)
+            : ExactResizedPrimitive(DetachedCopy(stored));
+        if (targetShape.IsNull() || (!severalPieces && targetShape.ShapeType() != TopAbs_SOLID)
             || operation < 0 || operation > 2)
             return false;
         TopTools_ListOfShape arguments, tools;
@@ -12997,8 +13010,12 @@ bool BakedBooleanShapeOfMany(const TopoDS_Shape& targetStored, const gp_Trsf& ta
         else { BRepAlgoAPI_Common a; run(a); }
         if (!result.IsNull() && result.ShapeType() != TopAbs_SOLID) {
             TopoDS_Shape only; int solids = 0;
-            for (TopExp_Explorer it(result, TopAbs_SOLID); it.More(); it.Next()) { only = it.Current(); ++solids; }
-            result = solids == 1 ? only : TopoDS_Shape();
+            TopoDS_Compound pieces; BRep_Builder builder; builder.MakeCompound(pieces);
+            for (TopExp_Explorer it(result, TopAbs_SOLID); it.More(); it.Next()) {
+                only = it.Current(); ++solids; builder.Add(pieces, it.Current());
+            }
+            // A part that was several pieces may stay several pieces; one piece stays a solid.
+            result = solids == 1 ? only : (severalPieces && solids >= 2 ? TopoDS_Shape(pieces) : TopoDS_Shape());
         }
         GProp_GProps mass;
         if (!result.IsNull()) BRepGProp::VolumeProperties(result, mass);
@@ -13223,7 +13240,7 @@ Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
                 BRepBuilderAPI_Transform sized(result, sizeUp, Standard_True, Standard_True);
                 if (!sized.IsDone() || sized.Shape().IsNull()) { refusal = "invalid-result"; return Standard_False; }
                 result = sized.Shape();
-                if (result.ShapeType() != TopAbs_SOLID
+                if ((result.ShapeType() != TopAbs_SOLID && result.ShapeType() != TopAbs_COMPOUND)
                     || !BRepCheck_Analyzer(result, Standard_True).IsValid()) {
                     refusal = "invalid-result";
                     return Standard_False;
