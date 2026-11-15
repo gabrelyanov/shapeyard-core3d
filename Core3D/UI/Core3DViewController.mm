@@ -5257,6 +5257,9 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
         auto value = Core3DMakePBRMaterial(style.material, YES, NO, NO, NO, NO, NO);
         if (value) [values addObject:value];
     }
+    // Founder test, build 8545: a colour put on a pocket floor showed only after the project
+    // was reopened. Draw the parts again from the document, as reopening does.
+    (void)viewer->redrawDocument();
     [self.materialController didChangeSelectionWithMaterials:@[] colors:@[]];
     [self.materialController didChangeSelectionWithPBRMaterials:values];
     context->UpdateCurrentViewer();

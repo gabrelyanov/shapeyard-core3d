@@ -110,6 +110,8 @@ public:
     Standard_EXPORT void Rotation(int theX, int theY);
     Standard_EXPORT void Pan(int theX, int theY, Standard_Boolean theToStart);
     Standard_EXPORT void Zoom(int theX, int theY, double theDelta);
+    //! Zoom with no limit on zooming out (Zoom stops while the model is about a tenth of the view).
+    Standard_EXPORT void ZoomWithoutLimit(int theX, int theY, double theDelta);
     Standard_EXPORT void Select(int theX, int theY, AIS_SelectionScheme scheme = AIS_SelectionScheme::AIS_SelectionScheme_XOR);
     
     Standard_EXPORT bool ImportSTEP(const std::string &theFilename);

@@ -26,6 +26,9 @@
 #include "PatternAllLabelAuthority.hxx"
 #include "TextReliefPersistence.hxx"
 #include <AIS_ColoredShape.hxx>
+#include <AIS_ListOfInteractive.hxx>
+#include <Bnd_Box.hxx>
+#include <Graphic3d_Camera.hxx>
 #include <AIS_ConnectedInteractive.hxx>
 #include <Graphic3d_ShaderVariable.hxx>
 #include <OpenGl_ShaderProgram.hxx>
@@ -612,7 +615,61 @@ void OcctViewer::Pan(int theX, int theY, Standard_Boolean theToStart)
 // function : Zoom
 // purpose  :
 // =======================================================================
+namespace {
+// Founder test of build 8545: a pinch out had no limit and the model shrank to a dot.
+// A zoom out stops while the model's size is about a tenth of the view height.
+constexpr Standard_Real kMinimumModelToViewRatio = 0.15;
+
+Standard_Real ModelToViewRatio(const Handle(V3d_View)& theView,
+                               const Handle(Core3DContext)& theContext,
+                               const Handle(OcctDocument)& theDoc)
+{
+    if (theView.IsNull() || theContext.IsNull() || theDoc.IsNull()) return -1.0;
+    AIS_ListOfInteractive anObjects;
+    theContext->DisplayedObjects(anObjects);
+    Bnd_Box aBox;
+    for (AIS_ListOfInteractive::Iterator anIter(anObjects); anIter.More(); anIter.Next())
+    {
+        const Handle(AIS_InteractiveObject)& anObject = anIter.Value();
+        if (anObject.IsNull() || theDoc->ShapeLabel(anObject).IsNull()) continue;
+        Bnd_Box anObjectBox;
+        anObject->BoundingBox(anObjectBox);
+        if (!anObjectBox.IsVoid()) aBox.Add(anObjectBox);
+    }
+    if (aBox.IsVoid()) return -1.0;
+    const Standard_Real aModelSize = Sqrt(aBox.SquareExtent());
+    const Handle(Graphic3d_Camera)& aCamera = theView->Camera();
+    if (aCamera.IsNull() || aModelSize <= 0.0) return -1.0;
+    const gp_XYZ aDimensions = aCamera->ViewDimensions(aCamera->Distance());
+    if (!(aDimensions.Y() > 0.0)) return -1.0;
+    return aModelSize / aDimensions.Y();
+}
+}
+
 void OcctViewer::Zoom(int theX, int theY, double theDelta)
+{
+    if (!myView.IsNull())
+    {
+        Handle(Graphic3d_Camera) aBefore;
+        if (theDelta < 0.0)
+        {
+            aBefore = new Graphic3d_Camera();
+            aBefore->Copy(myView->Camera());
+        }
+        ZoomWithoutLimit(theX, theY, theDelta);
+        if (!aBefore.IsNull())
+        {
+            const Standard_Real aRatio = ModelToViewRatio(myView, myContext, myDoc);
+            if (aRatio >= 0.0 && aRatio < kMinimumModelToViewRatio)
+            {
+                myView->Camera()->Copy(aBefore);
+                myView->Invalidate();
+            }
+        }
+    }
+}
+
+void OcctViewer::ZoomWithoutLimit(int theX, int theY, double theDelta)
 {
     if (!myView.IsNull())
     {
