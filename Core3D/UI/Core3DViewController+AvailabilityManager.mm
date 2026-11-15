@@ -305,8 +305,19 @@ Core3DModelCapability DocumentExportCapabilities(
             if(!core3d::retained_solid::Read(document->Document(),label,retained))return Core3DModelCapabilityNone;
             if(retained.value) {
                 hasRetainedOccurrence=true;
+                // A part with a saved (resizable) hole. The engine already runs Push-pull,
+                // Split and plain Cut / Join / Overlap on it by baking the hole in the same
+                // command (ShapeInteractor, ApplyBakedBooleanBatch); only this list refused
+                // them, so a holed part lost Subtract, Union and Push-pull (phone stand rows
+                // 23 and 30, 15 Nov). Offer them whenever that bake is possible. The constant
+                // itself stays as it is: By numbers pins it.
+                std::uint64_t unsupported=core3d::cylindrical_cut::UnsupportedOccurrenceCapabilities;
+                if(document->CanBakeSavedCutForFaceEdit(label)) {
+                    unsupported&=~(static_cast<std::uint64_t>(Core3DModelCapabilityBoolean)
+                        |static_cast<std::uint64_t>(Core3DModelCapabilityExtrusion));
+                }
                 definitionCapabilities=static_cast<Core3DModelCapability>(
-                    static_cast<std::uint64_t>(definitionCapabilities)&~core3d::cylindrical_cut::UnsupportedOccurrenceCapabilities);
+                    static_cast<std::uint64_t>(definitionCapabilities)&~unsupported);
             }
             if (!sweep.label.IsNull() || !loft.label.IsNull()) {
                 // Translation/local-transform copies stage an exact recipe on
