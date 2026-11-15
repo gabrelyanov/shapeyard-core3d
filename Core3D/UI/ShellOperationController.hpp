@@ -299,7 +299,14 @@ enum class ShellPreviewState : std::uint8_t {
 struct FaceOperationSourceProof {
     Handle(AIS_Shape) original;
     TDF_Label documentLabel;
+    //! Exactly what the document stores and the presentation shows. Every
+    //! "is this still the same part" check compares against this one.
     TopoDS_Shape shape;
+    //! The one solid the tool builds from. The same object as `shape` for a
+    //! plain part. App Store 5.34.1 Join/Cut results and bevels made before
+    //! 15 Nov 2026 are stored as a compound around their one solid: then this
+    //! is that solid, and the tool's plain result replaces the wrapper.
+    TopoDS_Shape solid;
     // Single-face compatibility for Extrude; Shell consumes the ordered set below.
     TopoDS_Face openingFace;
     std::vector<TopoDS_Face> openingFaces;
@@ -316,6 +323,12 @@ struct FaceOperationSourceProof {
 //! the pole count is bounded before the adaptor copies any spline geometry.
 Standard_Boolean TryFaceOperationPlane(
     const TopoDS_Face& face, gp_Pln& plane) noexcept;
+
+//! The one solid a face tool builds from: the shape itself when it is a solid,
+//! or the single forward solid inside a compound that wraps exactly one child
+//! (taken with the wrapper's place and orientation; nothing is rebuilt). Null
+//! for anything else.
+TopoDS_Shape FaceOperationSolidOf(const TopoDS_Shape& shape) noexcept;
 
 //! Produce the shared idle/begin admission proof for face-local solid tools.
 //! theSelectedFace must have the same TShape, location, and orientation as the
@@ -483,7 +496,10 @@ private:
     struct Source {
         Handle(AIS_Shape) original;
         TDF_Label label;
+        // What the document stores (identity checks) and the one solid inside
+        // it (geometry); the same object for a plain part.
         TopoDS_Shape shape;
+        TopoDS_Shape solid;
         std::vector<TopoDS_Face> openingFaces;
         gp_Trsf transform;
         Standard_Integer selectionMode =

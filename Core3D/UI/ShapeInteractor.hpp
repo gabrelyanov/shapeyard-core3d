@@ -137,7 +137,11 @@ namespace core3d {
             TDF_Label label;
             Handle(AIS_Shape) originalPresentation;
             Handle(AIS_Shape) candidatePresentation;
+            //! What the document stores: identity checks, Cancel and Undo.
             TopoDS_Shape originalShape;
+            //! The one solid Push-pull and Split build from (the same object
+            //! for a plain part, the single child of a part saved wrapped).
+            TopoDS_Shape sourceSolid;
             TopoDS_Face selectedFace;
             gp_Trsf transform;
             Standard_Real distance = 0.0;
@@ -157,6 +161,7 @@ namespace core3d {
                 return !label.IsNull()
                     && !originalPresentation.IsNull()
                     && !originalShape.IsNull()
+                    && !sourceSolid.IsNull()
                     && !selectedFace.IsNull();
             }
         };

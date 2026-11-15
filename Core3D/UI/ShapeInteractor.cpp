@@ -1233,7 +1233,7 @@ namespace core3d {
 		const FaceOperationSourceProof& proof) noexcept {
 		if (_shellController == nullptr || myDoc.IsNull()
 			|| proof.original.IsNull() || proof.shape.IsNull()
-			|| proof.openingFace.IsNull()) {
+			|| proof.solid.IsNull() || proof.openingFace.IsNull()) {
 			return Standard_False;
 		}
 		try {
@@ -1447,6 +1447,7 @@ namespace core3d {
 			_extrusion.label = label;
 			_extrusion.originalPresentation = proof.original;
 			_extrusion.originalShape = proof.shape;
+			_extrusion.sourceSolid = proof.solid;
 			_extrusion.selectedFace = proof.openingFace;
 			_extrusion.transform = proof.transform;
 			_extrusion.sourceSubshapeCount = sourceSubshapeCount;
@@ -1637,7 +1638,7 @@ namespace core3d {
 			}
 			if (isSplit
 				? !BuildFaceSplitCandidate(
-					_extrusion.originalShape,
+					_extrusion.sourceSolid,
 					_extrusion.selectedFace,
 					_extrusion.splitReferenceEdge,
 					distance,
@@ -1646,7 +1647,7 @@ namespace core3d {
 					candidateSolidCount,
 					failureStage)
 				: !BuildExtrusionCandidate(
-					_extrusion.originalShape,
+					_extrusion.sourceSolid,
 					_extrusion.selectedFace,
 					distance,
 					candidateShape,
