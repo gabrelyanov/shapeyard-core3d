@@ -1193,6 +1193,9 @@ typedef struct {
 - (BOOL)setRoundRadius:(CGFloat)radius;
 - (double)roundMetersPerUnit;
 - (double)roundMaximumRadiusMM;
+/// Metres per stored unit for the active plain Bevel (document unit x the
+/// selected parts' common scale); 0 when inactive or the scales differ.
+- (double)bevelMetersPerUnit;
 - (Core3DRoundFailureObservation)roundFailureObservation;
 - (Boundaries)getChamferBoundaries;
 - (Core3DModelingOperationResult)tryApplyChamfer

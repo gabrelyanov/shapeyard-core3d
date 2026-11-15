@@ -2766,6 +2766,11 @@ namespace core3d {
 			? 0.0 : _bevelController->roundMaximumRadiusMM();
 	}
 
+	Standard_Real ShapeInteractor::bevelMetersPerUnit() const noexcept {
+		return _bevelController == nullptr
+			? 0.0 : _bevelController->bevelMetersPerUnit();
+	}
+
 	BevelFailureObservation
 	ShapeInteractor::roundFailureObservation() const noexcept {
 		return _bevelController == nullptr

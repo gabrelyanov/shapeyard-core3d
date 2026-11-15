@@ -1545,6 +1545,43 @@ Standard_Real BevelOperationController::roundMaximumRadiusMM() const noexcept
         ? myRoundMaximumRadiusMM : 0.0;
 }
 
+Standard_Real BevelOperationController::bevelMetersPerUnit() const noexcept
+{
+    try {
+        if (!hasActiveOperation() || mySources.empty() || myDoc.IsNull()) {
+            return 0.0;
+        }
+        const Handle(TDocStd_Document) aDocument = myDoc->Document();
+        Standard_Real aDocumentMetersPerUnit = 0.001;
+        const Standard_Boolean hasUnit = !aDocument.IsNull()
+            && XCAFDoc_DocumentTool::GetLengthUnit(
+                aDocument, aDocumentMetersPerUnit);
+        if ((!hasUnit && aDocumentMetersPerUnit != 0.001)
+            || !std::isfinite(aDocumentMetersPerUnit)
+            || aDocumentMetersPerUnit <= 0.0) {
+            return 0.0;
+        }
+        const Standard_Real aScale =
+            std::abs(mySources.front().transform.ScaleFactor());
+        if (!std::isfinite(aScale) || aScale <= 0.0) {
+            return 0.0;
+        }
+        for (const Source& aSource : mySources) {
+            const Standard_Real anOtherScale =
+                std::abs(aSource.transform.ScaleFactor());
+            if (!std::isfinite(anOtherScale)
+                || std::abs(anOtherScale - aScale) > 1.0e-9 * aScale) {
+                return 0.0;
+            }
+        }
+        const Standard_Real aMetersPerUnit = aDocumentMetersPerUnit * aScale;
+        return std::isfinite(aMetersPerUnit) && aMetersPerUnit > 0.0
+            ? aMetersPerUnit : 0.0;
+    } catch (...) {
+        return 0.0;
+    }
+}
+
 Standard_Boolean BevelOperationController::setValueImpl(
     const Standard_Real theSignedDistance,
     const Standard_Boolean theRefuseOutOfRange) noexcept
