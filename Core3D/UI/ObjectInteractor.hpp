@@ -146,9 +146,6 @@ namespace core3d {
 		//! exactly-once recovery state that must survive interactor recreation.
 		bool hasUnresolvedDuplicate() const noexcept;
 		void attachManipulatorToSelection(bool detach = false);
-		//! Runs `body` (one tap's selection) with the move arrows taken out of
-		//! picking, then restores exactly the arrow modes that were active.
-		void withManipulatorUnpickable(const std::function<void()>& body);
         
         //! Optional geometry snapping for the next translation gestures. Model
         //! units, zero disables. Settings are editor-local, never saved in OCAF.

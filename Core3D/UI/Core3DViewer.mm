@@ -15603,13 +15603,7 @@ void Core3DViewer::Select(int theX, int theY) {
     for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected())
         oldOwners.insert(myContext->SelectedOwner().get());
     int oldCount = selectedCount();
-    if (_selectThroughManipulator) {
-        _objectInteractor->withManipulatorUnpickable([&]() {
-            OcctViewer::Select(theX, theY, AIS_SelectionScheme::AIS_SelectionScheme_XOR);
-        });
-    } else {
-        OcctViewer::Select(theX, theY, AIS_SelectionScheme::AIS_SelectionScheme_XOR);
-    }
+    OcctViewer::Select(theX, theY, AIS_SelectionScheme::AIS_SelectionScheme_XOR);
 
     try {
         (void)measurePicksForCurrentSelection();
