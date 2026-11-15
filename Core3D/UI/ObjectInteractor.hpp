@@ -626,6 +626,7 @@ namespace core3d {
 			TopoDS_Shape storedShape;
 			gp_Trsf transform;
 			gp_Trsf bakedTransform;
+            gp_Trsf resultTransform;
 			OcctReferenceAxisReadState referenceAxisState =
 				OcctReferenceAxisReadState::Invalid;
 			OcctReferenceAxis referenceAxis;

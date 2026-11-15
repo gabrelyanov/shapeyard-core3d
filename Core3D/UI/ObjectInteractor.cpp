@@ -5537,8 +5537,27 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 
 			gp_Trsf aTrsfMirror;
 			aTrsfMirror.SetMirror(gp_Ax2(offset, mirrorAxis, mirrorPln));
-			const gp_Trsf aBakedTransform =
-				aTrsfSelected * aTrsfMirror;
+            // Ordinary solids store their reflected placement separately from
+            // the definition, just like a moved or rotated original. With J a
+            // fixed local-X reflection and M the chosen world reflection,
+            // (M * T * J) * (J * S) == M * T * S. This retains the signed source
+            // scale and gives By numbers the reflected origin and a proper
+            // rotation, without baking that user pose into the copied solid.
+            // Recipe-backed copies keep their existing construction-frame
+            // contract until its independent parameter-edit proof is migrated.
+            const bool hasOrdinaryDefinition = originalProfile.label.IsNull()
+                && originalEnclosure.label.IsNull()
+                && sweepLoft.family == pattern_recipe_clone::Family::None;
+            gp_Trsf aBakedTransform = aTrsfSelected * aTrsfMirror;
+            gp_Trsf anOccurrenceTransform;
+            if (hasOrdinaryDefinition) {
+                aBakedTransform.SetMirror(gp_Ax2(gp_Pnt(0, 0, 0),
+                    gp_Dir(1, 0, 0), gp_Dir(0, 1, 0)));
+                gp_Trsf aWorldReflection;
+                aWorldReflection.SetMirror(theWorldPlane);
+                anOccurrenceTransform = aWorldReflection * aTrsfSelected
+                    * aBakedTransform;
+            }
             if (!originalProfile.label.IsNull()) {
                 gp_Trsf originalFrame;
                 if (originalProfile.parameters.constructionFrame
@@ -5577,6 +5596,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                         anAggregateLimit - anAggregateTopologyNodes);
                 }
                 aShapePrs = new AIS_Shape(mirrored);
+                aShapePrs->SetLocalTransformation(anOccurrenceTransform);
             }
             TopoDS_Shape preparedProfileBinding;
             std::string profileIdentifier;
@@ -5661,6 +5681,8 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			Standard_Size resultNodeCount = 0;
 			if (aShapePrs.IsNull() || aShapePrs->Shape().IsNull()
 				|| !IsShapeWithinModelCoordinates(aShapePrs->Shape())
+                || !IsShapeWithinModelCoordinates(aShapePrs->Shape(),
+                    aShapePrs->Transformation())
 				|| !CountBoundedMirrorTopology(
 					aShapePrs->Shape(),
 					anAggregateLimit - anAggregateTopologyNodes,
@@ -5718,6 +5740,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 				sourceStoredShape,
 				aTrsfSelected,
 				aBakedTransform,
+                anOccurrenceTransform,
 				aSourceReferenceAxisState,
 				aSourceReferenceAxis,
                 profileOwner,
@@ -6296,6 +6319,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 				Bnd_Box aPreviewBox;
 				BRepBndLib::Add(
 					aPreview->Shape(), aPreviewBox, Standard_False);
+                aPreviewBox = aPreviewBox.Transformed(aPreview->Transformation());
 				// Moving a reflection plane by t moves the reflected result by
 				// 2*t along its normal. The current preview supplies the exact
 				// reference AABB at _mirrorPlaneOffset.
@@ -7090,6 +7114,10 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 				}
 				anAggregateNodes += aSourceNodes;
 				if (!myContext->IsDisplayed(aResult)
+                    || TransformDiffers(aResult->LocalTransformation(),
+                        aSource.resultTransform)
+                    || !IsShapeWithinModelCoordinates(aResult->Shape(),
+                        aResult->Transformation())
 					|| !CountBoundedMirrorTopology(
 						aResult->Shape(),
 						anAggregateLimit - anAggregateNodes,
