@@ -4,6 +4,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @class Core3DSceneSnapshot;
 @class Core3DViewController;
+@class Core3DDecimationRequest;
 
 FOUNDATION_EXPORT NSErrorDomain const Core3DPublishCaptureErrorDomain;
 
@@ -122,6 +123,16 @@ __attribute__((objc_subclassing_restricted))
           sourceTriangleAddresses:(NSArray<NSNumber *> *)addresses
                             error:(NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(bindScalarArtifactEvidence(_:sourceTriangleAddresses:));
+
+//! Read-only construction from this capture's native-bound scalar channels.
+//! Only settings are supplied by the caller; physical attributes, compact
+//! material slots and unique triangle identities come from the native source.
+//! This does not enable attributed execution or confer a persistence seal.
+//! The retained flat-policy settings supply numeric inputs only here; a distinct
+//! attributed settings/build contract is still required before worker admission.
+- (nullable Core3DDecimationRequest *)makeScalarDecimationRequestWithSettingsCanonicalBytes:(NSData *)settings
+    error:(NSError * _Nullable * _Nullable)error
+    NS_SWIFT_NAME(makeScalarDecimationRequest(settingsCanonicalBytes:));
 
 + (nullable instancetype)captureController:(Core3DViewController *)controller
                                       error:(NSError * _Nullable * _Nullable)error

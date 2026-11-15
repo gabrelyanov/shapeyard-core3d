@@ -1,4 +1,5 @@
 #import "Core3DPublishCapture.h"
+#import "Core3DDecimationOpening.h"
 
 #import "Core3DViewController.h"
 #import "Core3DViewController+ExportManager.h"
@@ -24,6 +25,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <set>
@@ -974,6 +976,7 @@ static NSArray<NSString *> *F2IssueTriangleIdentities(Core3DPublishCapture *capt
     Handle(OcctDocument) _owner;
     std::shared_ptr<OpeningContext> _context;
     NSData *_f2ScalarSourceChannels;
+    NSArray<NSNumber *> *_f2ScalarTriangleAddresses;
 }
 
 + (instancetype)captureController:(Core3DViewController *)controller error:(NSError **)error {
@@ -1097,6 +1100,133 @@ static NSArray<NSString *> *F2IssueTriangleIdentities(Core3DPublishCapture *capt
     return YES;
 }
 
+- (Core3DDecimationRequest *)makeScalarDecimationRequestWithSettingsCanonicalBytes:(NSData *)settingsBytes
+                                                                           error:(NSError **)error {
+    if (error) *error = nil;
+    if (!NSThread.isMainThread) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorInvalidThread, @"main-thread request construction required");
+        return nil;
+    }
+    if (![self isCurrent:error]) return nil;
+    Core3DPublishArtifactEvidence *evidence = self.artifactEvidence;
+    if (self.scope != Core3DPublishCaptureScopeSelected || self.ownerCommitments.count != 1
+        || !_f2ScalarSourceChannels || !_f2ScalarTriangleAddresses
+        || !F2ValidArtifactEvidence(evidence) || !evidence.triangleIdentitySHA256InEmittedOrder) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorUnsupportedAppearance,
+                                    @"request requires native-bound scalar triangle channels");
+        return nil;
+    }
+    NSData *settings = [settingsBytes isKindOfClass:NSData.class] ? [settingsBytes copy] : nil;
+    Core3DDecimationSettingsReadback *readback = settings
+        ? [Core3DDecimationOpening f2SettingsReadbackForCanonicalBytes:settings error:nil] : nil;
+    if (!readback || readback.metersPerUnit != self.metersPerUnit
+        || readback.targetTriangleCount < 4
+        || readback.targetTriangleCount > evidence.addressedTriangleCount) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorBounds,
+                                    @"request settings do not match the captured source");
+        return nil;
+    }
+    F2ScalarSource source;
+    if (!F2ReadScalarSource(self.sceneSnapshot, self.selectedEntityIdentifiers, source)
+        || ![source.channels isEqualToData:_f2ScalarSourceChannels]) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorStale, @"captured scalar channels changed");
+        return nil;
+    }
+    NSArray<NSString *> *identities = F2IssueTriangleIdentities(
+        self, evidence, _f2ScalarTriangleAddresses, source);
+    if (!identities || ![identities isEqualToArray:evidence.triangleIdentitySHA256InEmittedOrder]) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorBounds, @"captured triangle addresses changed");
+        return nil;
+    }
+    const simd_double4x4 world = source.item.worldTransform;
+    simd_double3x3 linear;
+    for (NSUInteger column = 0; column < 3; ++column) {
+        if (world.columns[column][3] != 0.0) {
+            if (error) *error = Refusal(Core3DPublishCaptureErrorUnsupportedAppearance, @"non-affine scalar placement");
+            return nil;
+        }
+        for (NSUInteger row = 0; row < 3; ++row)
+            linear.columns[column][row] = world.columns[column][row];
+    }
+    const double determinant = simd_determinant(linear);
+    if (world.columns[3][3] != 1.0 || !std::isfinite(determinant) || determinant == 0.0) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorUnsupportedAppearance, @"singular scalar placement");
+        return nil;
+    }
+    const simd_double3x3 normalTransform = simd_transpose(simd_inverse(linear));
+    // Standard selected-owner GLB compacts visible native material indices in
+    // ascending order. A palette entry is never substituted for membership.
+    std::set<NSUInteger> visibleMaterials;
+    for (Core3DScenePrimitiveBindingSnapshot *binding in source.item.primitiveBindings)
+        if (binding.isVisible) visibleMaterials.insert(binding.materialIndex);
+    const auto *indices = static_cast<const uint32_t *>(source.mesh.indexData.bytes);
+    const auto *vertices = static_cast<const Core3DSceneVertex *>(source.mesh.vertexData.bytes);
+    NSMutableArray<NSNumber *> *normals = [NSMutableArray arrayWithCapacity:evidence.sourcePositionsMM.count];
+    NSMutableArray<NSNumber *> *uvs = [NSMutableArray arrayWithCapacity:evidence.sourceIndices.count * 2];
+    NSMutableArray<NSNumber *> *materials = [NSMutableArray arrayWithCapacity:evidence.addressedTriangleCount];
+    for (NSUInteger t = 0; t < evidence.addressedTriangleCount; ++t) {
+        const NSUInteger p = _f2ScalarTriangleAddresses[2 * t].unsignedIntegerValue;
+        const NSUInteger first = _f2ScalarTriangleAddresses[2 * t + 1].unsignedIntegerValue;
+        Core3DSceneFacePrimitiveSnapshot *face = source.mesh.facePrimitives[p];
+        Core3DScenePrimitiveBindingSnapshot *binding = source.item.primitiveBindings[p];
+        if (!face.hasTextureCoordinates) {
+            if (error) *error = Refusal(Core3DPublishCaptureErrorUnsupportedAppearance, @"scalar attribute source has no UV channel");
+            return nil;
+        }
+        const auto material = visibleMaterials.find(binding.materialIndex);
+        if (material == visibleMaterials.end()) {
+            if (error) *error = Refusal(Core3DPublishCaptureErrorBounds, @"scalar material membership is absent");
+            return nil;
+        }
+        [materials addObject:@(std::distance(visibleMaterials.begin(), material))];
+        const bool reverse = self.sceneSnapshot.materials[binding.materialIndex].cullMode == Core3DSceneCullModeFront;
+        for (NSUInteger c = 0; c < 3; ++c) {
+            const NSUInteger offset = reverse && c != 0 ? 3 - c : c;
+            const Core3DSceneVertex& vertex = vertices[indices[first + offset]];
+            const double nx = vertex.normalX, ny = vertex.normalY, nz = vertex.normalZ;
+            const double lengthSquared = nx * nx + ny * ny + nz * nz;
+            if (!std::isfinite(lengthSquared) || lengthSquared <= 0) {
+                if (error) *error = Refusal(Core3DPublishCaptureErrorUnsupportedAppearance, @"scalar normal is invalid");
+                return nil;
+            }
+            // Reproduce the actual GLB's normalized Float32 local NORMAL,
+            // then the independent reader's normalized world direction.
+            const double scale = (reverse ? -1.0 : 1.0) / std::sqrt(lengthSquared);
+            const simd_float3 encoded = simd_make_float3(
+                static_cast<float>(nx * scale), static_cast<float>(ny * scale), static_cast<float>(nz * scale));
+            simd_double3 direction = simd_mul(normalTransform,
+                simd_make_double3(encoded.x, encoded.y, encoded.z));
+            const double magnitude = simd_length(direction);
+            if (!std::isfinite(magnitude) || magnitude <= 0) {
+                if (error) *error = Refusal(Core3DPublishCaptureErrorUnsupportedAppearance, @"scalar world normal is invalid");
+                return nil;
+            }
+            direction /= magnitude;
+            for (NSUInteger axis = 0; axis < 3; ++axis) [normals addObject:@(direction[axis])];
+            const float v = 1.0f - vertex.textureV;
+            if (!std::isfinite(v)) {
+                if (error) *error = Refusal(Core3DPublishCaptureErrorUnsupportedAppearance, @"scalar UV is invalid");
+                return nil;
+            }
+            [uvs addObject:@(vertex.textureU)]; [uvs addObject:@(v)];
+        }
+    }
+    Core3DDecimationRequest *request = [[Core3DDecimationRequest alloc]
+        initWithPositionsMM:evidence.sourcePositionsMM indices:evidence.sourceIndices
+        sourceContributionTokens:identities
+        materialBytes:self.ownerCommitments.firstObject.materialTextureWitnessBytes
+        sourceArtifactSHA256:evidence.artifactSHA256 settingsSHA256:readback.settingsSHA256
+        targetTriangleCount:readback.targetTriangleCount metersPerUnit:self.metersPerUnit
+        attributeWedgeNormals:normals attributeWedgeUVs:uvs
+        attributeFaceMaterials:materials attributeFaceAnchors:identities];
+    if (!request) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorBounds, @"scalar request channels are inconsistent");
+        return nil;
+    }
+    if (![self isCurrent:error]) return nil;
+    return request;
+}
+
 - (BOOL)bindScalarArtifactEvidence:(Core3DPublishArtifactEvidence *)evidence
           sourceTriangleAddresses:(NSArray<NSNumber *> *)addresses
                             error:(NSError **)error {
@@ -1145,6 +1275,7 @@ static NSArray<NSString *> *F2IssueTriangleIdentities(Core3DPublishCapture *capt
         addressedTriangleCount:evidence.addressedTriangleCount];
     owned.triangleIdentitySHA256InEmittedOrder = identities;
     _f2ScalarSourceChannels = [source.channels copy];
+    _f2ScalarTriangleAddresses = [addresses copy];
     _artifactEvidence = owned;
     return YES;
 }
