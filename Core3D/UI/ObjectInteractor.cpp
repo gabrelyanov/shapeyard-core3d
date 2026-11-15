@@ -24,6 +24,8 @@
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
+#include <BinTools.hxx>
+#include <cstring>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRep_Tool.hxx>
 #include <Poly_ListOfTriangulation.hxx>
@@ -584,6 +586,52 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 				return Standard_False;
 			}
 		}
+
+        // An ordinary mirrored body owns new geometry but has no recipe binding.
+        // Bring that private result through the same binary axis reconstruction
+        // as a saved file before publishing it. In particular gp_Ax3 readback
+        // can change the sign of zero after a reflection. Raw face witnesses
+        // and their digests remain exact; no comparison is normalised.
+        // Non-axis-aligned frames can cycle under kernel reconstruction. This
+        // is an optional preparation, not a new Mirror admission requirement:
+        // on failure the original private result is left completely untouched.
+        Standard_Boolean StabilizeOrdinaryMirrorResult(
+            TopoDS_Shape& theShape, Standard_Size theMaximumNodes) noexcept {
+            try {
+                Standard_Size originalNodes = 0;
+                if (!CountBoundedMirrorTopology(theShape, theMaximumNodes, originalNodes))
+                    return Standard_False;
+                std::string previous;
+                TopoDS_Shape candidate = theShape;
+                for (int pass = 0; pass < 4; ++pass) {
+                    // Reuse the engine's bounded binary geometry buffer (8 MiB),
+                    // without entering retained-treatment replay or its gates.
+                    retained_edge_treatment::detail::GeometryBuffer buffer;
+                    std::ostream writer(&buffer);
+                    BinTools::Write(candidate, writer, Standard_False, Standard_False,
+                                    BinTools_FormatVersion_VERSION_4);
+                    if (!writer.good() || buffer.size() == 0) return Standard_False;
+                    if (!previous.empty() && previous.size() == buffer.size()
+                        && std::memcmp(previous.data(), buffer.data(), buffer.size()) == 0) {
+                        theShape = candidate;
+                        return Standard_True;
+                    }
+                    previous.assign(buffer.data(), buffer.size());
+                    buffer.read();
+                    std::istream reader(&buffer);
+                    TopoDS_Shape restored;
+                    BinTools::Read(restored, reader);
+                    Standard_Size restoredNodes = 0;
+                    if (!reader.good() || restored.IsNull()
+                        || restored.ShapeType() != theShape.ShapeType()
+                        || restored.Orientation() != theShape.Orientation()
+                        || !CountBoundedMirrorTopology(restored, theMaximumNodes, restoredNodes)
+                        || restoredNodes != originalNodes) return Standard_False;
+                    candidate = restored;
+                }
+            } catch (...) {}
+            return Standard_False;
+        }
 
 		//! Build the same deterministic, first-occurrence face ordering as
 		//! TopExp::MapShapes using an explicit depth-first walk. Every topology
@@ -5446,7 +5494,16 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                         && sweepLoft.family == pattern_recipe_clone::Family::None
                         ? Standard_False : Standard_True,
 				    Standard_False);
-			    aShapePrs = new AIS_Shape(aBRepTrsf.Shape());
+                TopoDS_Shape mirrored = aBRepTrsf.Shape();
+                if (originalProfile.label.IsNull() && originalEnclosure.label.IsNull()
+                    && sweepLoft.family == pattern_recipe_clone::Family::None) {
+                    // Retain existing rotated Mirror behavior if the bounded
+                    // persistence probe cannot prove a stable replacement.
+                    // All ordinary source/result gates below still apply.
+                    (void)StabilizeOrdinaryMirrorResult(mirrored,
+                        anAggregateLimit - anAggregateTopologyNodes);
+                }
+                aShapePrs = new AIS_Shape(mirrored);
             }
             TopoDS_Shape preparedProfileBinding;
             std::string profileIdentifier;
