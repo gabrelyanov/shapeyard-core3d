@@ -1,6 +1,10 @@
 #include "../OCCTKit/SavedCutSourceEdit.hxx"
 
 #if DEBUG // Cut475 phase diagnostics only
+#include <TopoDS_Face.hxx>
+#include <TopoDS.hxx>
+#include <XCAFDoc_VisMaterialPBR.hxx>
+#include <BRepBuilderAPI_GTransform.hxx>
 #include <cstdio>
 #include <atomic>
 namespace {
@@ -2755,8 +2759,29 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             if(partitionMutation && !record.previous.meshRegionPartition.empty()
                 && !_document->ClearMeshRegionPartition(record.previous.label))
                 throw Standard_Failure("Mesh region partition clear failed");
+            // A resize that rebuilds the shape (Dimensions, Scale handles): the labels of
+            // faces with a colour of their own would point at faces that are gone, and the
+            // project could no longer be saved (sweep of 15 Nov). They are dropped in this
+            // command and each colour is put on the face it belongs to in the new shape.
+            std::vector<TDF_Label> paintedLabels;
+            std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> paintedFaces;
+            const bool carriesFaceColours = !featureStaged && !treatmentStagedR2
+                && record.requested.operation == OrdinaryTransformOperation::Scale
+                && !record.previous.shape.IsEqual(record.requested.shape)
+                && _document->CaptureFaceColours(record.previous.label, 1.0, paintedLabels, paintedFaces)
+                && !paintedLabels.empty();
+            if (carriesFaceColours && record.requested.faceColourMap) {
+                for (auto& painted : paintedFaces) {
+                    BRepBuilderAPI_GTransform moved(painted.first, *record.requested.faceColourMap, Standard_True);
+                    if (moved.IsDone() && !moved.Shape().IsNull() && moved.Shape().ShapeType() == TopAbs_FACE)
+                        painted.first = TopoDS::Face(moved.Shape());
+                }
+            }
             if ((!featureStaged && !treatmentStagedR2 && !record.previous.shape.IsEqual(record.requested.shape)
                     && !_document->ReplaceShape(record.previous.label, candidate))
+                || (carriesFaceColours
+                    && !_document->CarryFaceColours(record.previous.label, record.requested.shape,
+                        paintedLabels, paintedFaces))
                 || (!featureStaged && !_document->SaveObjectTransform(record.previous.label, candidate))
                 || (regionMutation
                     && !_document->MarkAuthoredMeshUVLayout(record.previous.label))
