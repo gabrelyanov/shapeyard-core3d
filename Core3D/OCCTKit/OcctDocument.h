@@ -2186,6 +2186,9 @@ public:
     //! Remove a canonical XCAF material assignment before applying a legacy
     //! preset/color. Existing legacy projects continue to load unchanged.
     Standard_Boolean ClearObjectVisualMaterial(const TDF_Label& label);
+    //! Whole-part palette authoring only: clear subordinate appearance in the
+    //! caller's open history transaction, preserving topology and labels.
+    Standard_Boolean ClearPartSubshapeAppearance(const TDF_Label& root);
     //! Copy the effective source appearance without mutating shared XCAF
     //! material definitions. Used by duplicate and topology-changing tools.
     Standard_Boolean CopyObjectAppearance(

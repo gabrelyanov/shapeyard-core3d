@@ -43,8 +43,10 @@
 #include <IntCurvesFace_ShapeIntersector.hxx>
 #include <gp_Lin.hxx>
 #include <Graphic3d_CLight.hxx>
-#include <Prs3d_ShadingAspect.hxx>
 #endif
+#include <Prs3d_ShadingAspect.hxx>
+#include <AIS_ColoredShape.hxx>
+#include <AIS_DataMapOfShapeDrawer.hxx>
 #include "../OCCTKit/ProfileCurvePresets.hxx"
 #import "../OCCTKit/GLViewController+QueuedAssetLoading.h"
 #import "../OCCTKit/Core3DQueuedAssetRequest.h"
@@ -5268,6 +5270,16 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
         [self core3d_updateSelectedFacesWithPBR:nil preset:material color:color];
         return;
     }
+    [self core3d_updatePaletteWithMaterial:material color:color wholeParts:NO];
+}
+
+-(void)updateSelectedPartsWithMaterial:(Core3DMaterial*)material color:(Core3DColor*)color {
+    [self core3d_updatePaletteWithMaterial:material color:color wholeParts:YES];
+}
+
+-(void)core3d_updatePaletteWithMaterial:(Core3DMaterial*)material
+                                 color:(Core3DColor*)color
+                            wholeParts:(BOOL)wholeParts {
 
     if ((self.selectedModelCapabilities
             & Core3DModelCapabilityMaterial) == 0
@@ -5300,6 +5312,14 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
 		const TDF_Label label = doc->ShapeLabel(selected);
 		if (label.IsNull()) {
 			return;
+        }
+
+        if (wholeParts) {
+            if (!doc->IsPresentationEditable(shape)
+                || !doc->IsEditableFreeSimpleDefinitionLabel(label)) return;
+            if (std::any_of(pendingStyles.begin(), pendingStyles.end(), [&](const auto& pending) {
+                return pending.label.IsEqual(label);
+            })) continue;
         }
 
 		Graphic3d_NameOfMaterial materialName = doc->MaterialNameForLabel(label);
@@ -5338,6 +5358,11 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
 			return;
 		}
 		for (const PendingStyle& style : pendingStyles) {
+
+            if (wholeParts && !doc->ClearPartSubshapeAppearance(style.label)) {
+                Core3DAbortCommandNoThrow(transaction);
+                return;
+            }
 			if (!doc->ClearObjectVisualMaterial(style.label)) {
 				Core3DAbortCommandNoThrow(transaction);
 				return;
@@ -5356,8 +5381,22 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
 	doc->NotifyChanges();
 
 	for (const PendingStyle& style : pendingStyles) {
+        if (wholeParts) {
+            const auto colored = Handle(AIS_ColoredShape)::DownCast(style.shape);
+            if (!colored.IsNull()) {
+                for (AIS_DataMapOfShapeDrawer::Iterator entry(colored->CustomAspectsMap()); entry.More(); entry.Next()) {
+                    const auto& drawer = entry.Value();
+                    if (drawer.IsNull()) continue;
+                    drawer->UnsetOwnMaterial();
+                    drawer->UnsetOwnColor();
+                    drawer->SetShadingAspect(Handle(Prs3d_ShadingAspect)());
+                }
+            }
+        }
 		style.shape->UnsetColor();
 		doc->LoadObjectMeterial(style.label, style.shape);
+
+        if (wholeParts) context->Redisplay(style.shape, Standard_False);
 	}
 	[self.materialController didChangeSelectionWithMaterials:[materials copy] colors:[colors copy]];
 	NSMutableArray<Core3DPBRMaterial*>* selectedPBR =

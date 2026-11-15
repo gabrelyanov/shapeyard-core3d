@@ -22481,6 +22481,42 @@ Standard_Boolean OcctDocument::ClearObjectVisualMaterial(
     return Standard_True;
 }
 
+Standard_Boolean OcctDocument::ClearPartSubshapeAppearance(const TDF_Label& root) {
+    if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+        || !IsEditableFreeSimpleDefinitionLabel(root)
+        || !EnsureGeometryRepresentationForMutation(root)) return Standard_False;
+    const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+    if (shapes.IsNull()) return Standard_False;
+    TDF_LabelSequence children;
+    XCAFDoc_ShapeTool::GetSubShapes(root, children);
+    for (Standard_Integer index = 1; index <= children.Length(); ++index) {
+        const auto& label = children.Value(index);
+        const auto shape = XCAFDoc_ShapeTool::GetShape(label);
+        if (label.Data() != root.Data() || shape.IsNull()
+            || !shapes->IsSubShape(root, shape)) return Standard_False;
+    }
+    const auto visual = XCAFDoc_DocumentTool::VisMaterialTool(myOcafDoc->Main());
+    const auto colors = XCAFDoc_DocumentTool::ColorTool(myOcafDoc->Main());
+    if (visual.IsNull() || colors.IsNull()) return Standard_False;
+    for (Standard_Integer index = 1; index <= children.Length(); ++index) {
+        const auto& label = children.Value(index);
+        TDF_Label previous;
+        XCAFDoc_VisMaterialTool::GetShapeMaterial(label, previous);
+        visual->UnSetShapeMaterial(label);
+        RemoveUnreferencedOwnedMaterial(visual, previous);
+        label.ForgetAttribute(LocalPBRMaterialAttributeID());
+        label.ForgetAttribute(NormalTextureRecipeAttributeID());
+        label.ForgetAttribute(AutoPromotedEmissiveFactorAttributeID());
+        for (const Standard_Integer tag : {11, 12}) {
+            const auto legacy = label.FindChild(tag, Standard_False);
+            if (!legacy.IsNull()) legacy.ForgetAttribute(TDataStd_Integer::GetID());
+        }
+        for (auto type : {XCAFDoc_ColorGen, XCAFDoc_ColorSurf, XCAFDoc_ColorCurv})
+            colors->UnSetColor(label, type);
+    }
+    return Standard_True;
+}
+
 namespace {
 Standard_Boolean CaptureWholeObjectScalarAppearance(
     const Handle(TDocStd_Document)& document, const TDF_Label& label,
