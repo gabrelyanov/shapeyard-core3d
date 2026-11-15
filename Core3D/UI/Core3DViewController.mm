@@ -21322,11 +21322,14 @@ extern "C" double Core3DDebugMeasureAnglePairProbe(int pair) {
                     [&](const core3d::Core3DViewer::MeasurePick& candidate) {
                         return candidate.owner == topology[index].owner;
                     });
+                gp_Circ circle;
+                if (pick != picks.end() && !Core3DMeasureFullCircle(world, circle)
+                    && Core3DMeasureFullCircle(pick->worldEdge, circle))
+                    world = pick->worldEdge; // a tap on a hole's seam measures its rim
                 if (index < 2 && pick != picks.end()) {
                     snaps[index] = Core3DMeasureSnapPoint(view, *pick);
                     hasSnap[index] = snaps[index].kind > 0;
                 }
-                gp_Circ circle;
                 if (Core3DMeasureFullCircle(world, circle)) {
                     measuredCircle = circle;
                     circleDiameter = 2 * circle.Radius();

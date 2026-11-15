@@ -15462,6 +15462,51 @@ extern "C" void *Core3DDebugMeasureNonFirstSelectorRankProbe() {
 }
 #endif
 
+// A hole's seam is a line where its round face meets itself; nobody sees it as an edge. A Measure
+// tap that lands on one (seen end-on from the top it sits on the rim) means the rim circle that
+// shares its end: return that circle, still in the selectable's local space, or a null shape.
+static TopoDS_Shape Core3DMeasureRimForSeamPick(
+    const Handle(StdSelect_ViewerSelector3d)& selector,
+    const Handle(StdSelect_BRepOwner)& seamOwner) noexcept {
+    try {
+        if (selector.IsNull() || seamOwner.IsNull() || !seamOwner->HasShape()) return {};
+        const TopoDS_Shape& local = seamOwner->Shape();
+        if (local.ShapeType() != TopAbs_EDGE) return {};
+        const TopoDS_Edge seam = TopoDS::Edge(local);
+        const auto parent = Handle(AIS_Shape)::DownCast(seamOwner->Selectable());
+        if (parent.IsNull() || parent->Shape().IsNull()) return {};
+        TopTools_IndexedDataMapOfShapeListOfShape facesOfEdge;
+        TopExp::MapShapesAndAncestors(parent->Shape(), TopAbs_EDGE, TopAbs_FACE, facesOfEdge);
+        const int index = facesOfEdge.FindIndex(seam);
+        if (index <= 0) return {};
+        bool isSeam = false;
+        for (TopTools_ListIteratorOfListOfShape faces(facesOfEdge.FindFromIndex(index));
+             faces.More() && !isSeam; faces.Next())
+            isSeam = BRep_Tool::IsClosed(seam, TopoDS::Face(faces.Value()));
+        if (!isSeam) return {};
+        TopoDS_Vertex seamEnds[2];
+        TopExp::Vertices(seam, seamEnds[0], seamEnds[1]);
+        for (int rank = 1; rank <= selector->NbPicked(); ++rank) {
+            const auto candidate = Handle(StdSelect_BRepOwner)::DownCast(selector->Picked(rank));
+            if (candidate.IsNull() || candidate == seamOwner || !candidate->HasShape()
+                || candidate->Selectable() != seamOwner->Selectable()
+                || candidate->Shape().ShapeType() != TopAbs_EDGE) continue;
+            const TopoDS_Edge rim = TopoDS::Edge(candidate->Shape());
+            if (BRep_Tool::Degenerated(rim)) continue;
+            const BRepAdaptor_Curve curve(rim);
+            if (curve.GetType() != GeomAbs_Circle
+                || std::abs(curve.LastParameter() - curve.FirstParameter() - 2 * M_PI) >= 1e-7)
+                continue;
+            TopoDS_Vertex rimEnds[2];
+            TopExp::Vertices(rim, rimEnds[0], rimEnds[1]);
+            for (const auto& end : seamEnds)
+                for (const auto& rimEnd : rimEnds)
+                    if (!end.IsNull() && !rimEnd.IsNull() && end.IsSame(rimEnd)) return rim;
+        }
+    } catch (...) {}
+    return {};
+}
+
 void Core3DViewer::Select(int theX, int theY) {
     observeNativePlanningInteraction();
     if (_objectInteractor == nullptr || _shapeInteractor == nullptr) {
@@ -15537,6 +15582,8 @@ void Core3DViewer::Select(int theX, int theY) {
             int rank = 0;
             if (!Core3DMeasurePickedPointForOwner(selector, owner, point, rank)) continue;
             TopoDS_Shape world = owner->Shape();
+            const TopoDS_Shape rim = Core3DMeasureRimForSeamPick(selector, owner);
+            if (!rim.IsNull()) world = rim;
             const auto selectable = owner->Selectable();
             if (!selectable.IsNull()) {
                 const gp_Trsf& transform = selectable->Transformation();
