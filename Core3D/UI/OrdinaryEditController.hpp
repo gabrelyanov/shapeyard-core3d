@@ -441,6 +441,7 @@ struct OrdinaryMeshCopySource {
 };
 
 struct OrdinaryCreationLedger {
+    std::shared_ptr<ordinary_naming::Record> namingHistory;
     std::optional<OrdinaryModelingReceiptLedger> modelingReceipt;
     std::optional<OrdinaryMeshCopySource> meshCopy;
     OrdinaryCreationCatalog previousRoots;

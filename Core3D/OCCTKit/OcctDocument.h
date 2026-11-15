@@ -180,6 +180,7 @@ struct AuthoredBooleanObservation;
 // document session.
 namespace core3d::treatment_history {
 struct TextReliefReplayMembers;
+
 struct NamingState {
     TDF_Label label;
     std::string labelEntry;
@@ -233,6 +234,8 @@ struct Companion {
     Handle(TDF_Delta) delta;
 };
 } // namespace core3d::treatment_history
+
+namespace core3d::ordinary_naming { struct Record; }
 
 // A2-N2 document-owned authored-Boolean recovery record — nonpersisted
 // native authority for the single outstanding authored-Boolean transaction.
@@ -1895,6 +1898,13 @@ public:
         const TDF_Label& target, const Handle(AIS_Shape)& targetPresentation,
         const TDF_Label& tool, const Handle(AIS_Shape)& toolPresentation,
         int operation, std::string& refusal) noexcept;
+    //! The same for several parts in ONE undoable command. Cut (1): every part in
+    //! `targets` loses every part in `tools`; Join (0) and Overlap (2): one target
+    //! (Overlap: one tool). Every tool is removed. Main thread.
+    Standard_EXPORT Standard_Boolean ApplyBakedBooleanBatch(
+        const std::vector<std::pair<TDF_Label, Handle(AIS_Shape)>>& targets,
+        const std::vector<std::pair<TDF_Label, Handle(AIS_Shape)>>& tools,
+        int operation, std::string& refusal) noexcept;
     //! The drilled solid ApplyThroughHole would write, without changing the
     //! document (for the on-model preview). Same inputs and refusals.
     Standard_EXPORT Standard_Boolean BuildThroughHole(
@@ -2017,6 +2027,23 @@ public:
     //! True while a measured treatment-history companion has not been bound
     //! to its own committed delta or discharged by verified prior settlement.
     Standard_EXPORT Standard_Boolean HasUnresolvedTreatmentHistoryCompanion() const noexcept;
+
+    // Native-only measured naming history for profile creation and Shell.
+    // The issuing controller owns the pending token through reconciliation.
+#if DEBUG
+    std::array<std::size_t, 3> DebugOrdinaryNamingHistoryStorage() const noexcept;
+#endif
+    std::shared_ptr<core3d::ordinary_naming::Record> PrepareOrdinaryNamingHistory(
+        std::size_t creationRootCount, const TDF_Label& existingOwner = {}) noexcept;
+    Standard_Boolean TrackOrdinaryNamingCreationRoot(
+        const std::shared_ptr<core3d::ordinary_naming::Record>& record,
+        std::size_t index, const TDF_Label& label) noexcept;
+    Standard_Boolean CaptureOrdinaryNamingCandidate(
+        const std::shared_ptr<core3d::ordinary_naming::Record>& record) noexcept;
+    Standard_Boolean SettleOrdinaryNamingHistory(
+        const std::shared_ptr<core3d::ordinary_naming::Record>& record,
+        Standard_Boolean candidate) noexcept;
+
 #if DEBUG
     //! SAB-N1 read-only DEBUG observation for the authored-Boolean fault
     //! proof: exact current owner-subtree TNaming (labelEntry, version) rows
@@ -2181,6 +2208,9 @@ public:
     //! Remove a canonical XCAF material assignment before applying a legacy
     //! preset/color. Existing legacy projects continue to load unchanged.
     Standard_Boolean ClearObjectVisualMaterial(const TDF_Label& label);
+    //! Whole-part palette authoring only: clear subordinate appearance in the
+    //! caller's open history transaction, preserving topology and labels.
+    Standard_Boolean ClearPartSubshapeAppearance(const TDF_Label& root);
     //! Copy the effective source appearance without mutating shared XCAF
     //! material definitions. Used by duplicate and topology-changing tools.
     Standard_Boolean CopyObjectAppearance(
@@ -2558,6 +2588,10 @@ private:
   void RetireAuthoredBooleanRecovery() noexcept;
   void ReleaseTreatmentHistoryCompanions() noexcept;
   void PruneTreatmentHistoryCompanions() noexcept;
+  void PruneOrdinaryNamingHistory() noexcept;
+  Standard_Boolean ApplyOrdinaryNamingHistory(
+      const Handle(TDF_Delta)& applied, Standard_Boolean undoDirection) noexcept;
+
   Standard_Boolean ApplyTreatmentHistoryAfterHistoryChange(
       const Handle(TDF_Delta)& engaged, Standard_Boolean undoDirection) noexcept;
   Standard_Boolean StageRetainedEdgeTreatment(
@@ -2675,6 +2709,7 @@ private:
       myTextReliefReplayPairFault;
 #endif
   std::deque<std::unique_ptr<core3d::treatment_history::Companion>> myTreatmentHistoryCompanions;
+  std::vector<std::shared_ptr<core3d::ordinary_naming::Record>> myOrdinaryNamingHistory;
   // A2-N2: the single document-owned authored-Boolean recovery authority,
   // nonpersisted and released with this native document session.
   std::unique_ptr<core3d::authored_recovery::Record> myAuthoredBooleanRecovery;

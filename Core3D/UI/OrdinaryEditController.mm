@@ -1289,6 +1289,13 @@ OrdinaryEditLease OrdinaryEditController::beginCreationImpl(
         }
         if (!_host.admitCreation(ledger) || (ledger.meshCopy && !_host.admitMeshCopy(ledger))
             || !creationMatches(ledger, false)) { return reject(OrdinaryEditResult::Invalid); }
+        // The measured repair covers profile creation (including assembly
+        // batches). Other source families retain their existing history path.
+        if (!ledger.meshCopy && std::all_of(requests.begin(), requests.end(),
+                [](const auto& request) { return request.profile.has_value(); })) {
+            ledger.namingHistory = _document->PrepareOrdinaryNamingHistory(requests.size());
+            if (!ledger.namingHistory) return reject(OrdinaryEditResult::BudgetRefused);
+        }
         _pending.emplace(std::move(ledger));
         _leaseLifetime = lifetime;
         _activeToken = ++_nextToken;
@@ -1461,6 +1468,9 @@ OrdinaryEditResult OrdinaryEditController::stageCreationAndCommit(std::uint64_t 
             }
             const auto label = _document->AddShape(record.requested.presentation, record.requested.representation);
             if (label.IsNull()) { throw Standard_Failure("Creation returned no root"); }
+            if (ledger.namingHistory && !_document->TrackOrdinaryNamingCreationRoot(
+                    ledger.namingHistory, index, label))
+                throw Standard_Failure("Creation naming root tracking failed");
             if (ledger.meshCopy) {
                 auto& source=*ledger.meshCopy;
                 const auto from=source.previous.object.object.label;
@@ -1530,6 +1540,8 @@ OrdinaryEditResult OrdinaryEditController::stageCreationAndCommit(std::uint64_t 
             || !creationMatches(ledger, true)) { throw Standard_Failure("Creation catalog readback failed"); }
         if(!stageCreationReceipt(ledger) || (ledger.modelingReceipt && !ledger.modelingReceipt->permit->current()))
             throw Standard_Failure("Modeling receipt staging or epoch fence failed");
+        if (ledger.namingHistory && !_document->CaptureOrdinaryNamingCandidate(ledger.namingHistory))
+            throw Standard_Failure("Creation naming readback failed");
         ledger.candidateSealed = true;
         if (_command.commitAndObserve() == OrdinaryCommandObservation::Unavailable) {
             _state = OrdinaryEditState::OutcomeUnknown; _activeToken = 0; return OrdinaryEditResult::OutcomeUnknown;
@@ -1552,6 +1564,9 @@ OrdinaryEditResult OrdinaryEditController::reconcileCreationImpl() noexcept {
         const bool previous = observation == OrdinaryCommandObservation::ClosedWithPriorMarker;
         if ((!candidate && !previous) || (candidate && (!ledger.candidateSealed
             || (ledger.modelingReceipt && !ledger.modelingReceipt->staged))) || !creationMatches(ledger, candidate)) {
+            _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown;
+        }
+        if (!_document->SettleOrdinaryNamingHistory(ledger.namingHistory, candidate)) {
             _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown;
         }
         _committed = candidate; _state = OrdinaryEditState::RepairPending;
