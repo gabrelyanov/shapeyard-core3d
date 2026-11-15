@@ -24,6 +24,7 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <GeomAdaptor_Curve.hxx>
 #include <Geom_Conic.hxx>
+#include <Geom_ElementarySurface.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <BRepFeat_MakePrism.hxx>
 #include <BRepFeat_SplitShape.hxx>
@@ -465,6 +466,31 @@ namespace core3d {
                     if (original.IsNull()) continue;
                     const auto copied = Handle(Geom_Conic)::DownCast(
                         BRep_Tool::Curve(TopoDS::Edge(workingEdges(index)), workingLocation, first, last));
+                    if (copied.IsNull() || copied == original
+                        || copied->DynamicType() != original->DynamicType()) {
+                        workingSource.Nullify();
+                        workingFace.Nullify();
+                        failureStage = 11;
+                        return Standard_False;
+                    }
+                    copied->SetPosition(original->Position());
+                }
+
+                // BinTools reconstructs elementary surface gp_Ax3 frames in
+                // the same way. A scaled, positioned cylinder followed by a
+                // Boolean cut exposes signed-zero differences on its annular
+                // plane/cylinder faces even after every conic edge is exact.
+                // Restore only the detached surface frames by value; the raw
+                // V3 comparison below remains the authority for every byte.
+                for (Standard_Integer index = 1; index <= sourceFaces.Extent(); ++index) {
+                    TopLoc_Location sourceLocation, workingLocation;
+                    const auto original = Handle(Geom_ElementarySurface)::DownCast(
+                        BRep_Tool::Surface(
+                            TopoDS::Face(sourceFaces(index)), sourceLocation));
+                    if (original.IsNull()) continue;
+                    const auto copied = Handle(Geom_ElementarySurface)::DownCast(
+                        BRep_Tool::Surface(
+                            TopoDS::Face(workingFaces(index)), workingLocation));
                     if (copied.IsNull() || copied == original
                         || copied->DynamicType() != original->DynamicType()) {
                         workingSource.Nullify();
