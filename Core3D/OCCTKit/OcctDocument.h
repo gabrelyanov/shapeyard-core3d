@@ -1896,6 +1896,13 @@ public:
         const TDF_Label& target, const Handle(AIS_Shape)& targetPresentation,
         const TDF_Label& tool, const Handle(AIS_Shape)& toolPresentation,
         int operation, std::string& refusal) noexcept;
+    //! The same for several parts in ONE undoable command. Cut (1): every part in
+    //! `targets` loses every part in `tools`; Join (0) and Overlap (2): one target
+    //! (Overlap: one tool). Every tool is removed. Main thread.
+    Standard_EXPORT Standard_Boolean ApplyBakedBooleanBatch(
+        const std::vector<std::pair<TDF_Label, Handle(AIS_Shape)>>& targets,
+        const std::vector<std::pair<TDF_Label, Handle(AIS_Shape)>>& tools,
+        int operation, std::string& refusal) noexcept;
     //! The drilled solid ApplyThroughHole would write, without changing the
     //! document (for the on-model preview). Same inputs and refusals.
     Standard_EXPORT Standard_Boolean BuildThroughHole(
@@ -2201,6 +2208,9 @@ public:
     //! Remove a canonical XCAF material assignment before applying a legacy
     //! preset/color. Existing legacy projects continue to load unchanged.
     Standard_Boolean ClearObjectVisualMaterial(const TDF_Label& label);
+    //! Whole-part palette authoring only: clear subordinate appearance in the
+    //! caller's open history transaction, preserving topology and labels.
+    Standard_Boolean ClearPartSubshapeAppearance(const TDF_Label& root);
     //! Copy the effective source appearance without mutating shared XCAF
     //! material definitions. Used by duplicate and topology-changing tools.
     Standard_Boolean CopyObjectAppearance(

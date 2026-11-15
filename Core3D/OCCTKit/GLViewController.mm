@@ -2295,6 +2295,14 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
             [strongSelf->_delegate viewer:strongSelf didChangeGeometrySnapFeedbackEnded:ended];
         }
     });
+    _viewer->setLiveMoveChangedCallback([weakSelf](bool ended) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf && strongSelf->_delegate
+            && [strongSelf->_delegate respondsToSelector:
+                @selector(viewer:didChangeLiveMoveEnded:)]) {
+            [strongSelf->_delegate viewer:strongSelf didChangeLiveMoveEnded:ended];
+        }
+    });
     _viewer->setBooleanPreviewStateChangedCallback([weakSelf]() {
         dispatch_async(dispatch_get_main_queue(), ^{
             __strong typeof(weakSelf) strongSelf = weakSelf;

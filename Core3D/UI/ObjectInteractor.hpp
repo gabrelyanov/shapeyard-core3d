@@ -153,6 +153,12 @@ namespace core3d {
         void setGeometrySnapFeedbackChangedCallback(std::function<void(bool)> callback) {
             _geometrySnapFeedbackChangedCallback = std::move(callback);
         }
+        //! Measure (sizes while dragging): one call per Move translation step,
+        //! whether or not geometry snapping is on, plus one with ended=true
+        //! after finish/cancel. Read-only observation; never edits the model.
+        void setLiveMoveChangedCallback(std::function<void(bool)> callback) {
+            _liveMoveChangedCallback = std::move(callback);
+        }
         struct GeometryMoveSnap {
             GeometrySnapResult hit;
             std::string targetIdentifier;
@@ -176,10 +182,14 @@ namespace core3d {
         std::function<void(bool)> _geometrySnapFeedbackChangedCallback;
         bool _geometrySnapSamplesActive = false;
         void publishGeometrySnapFeedback(bool ended) noexcept;
+        std::function<void(bool)> _liveMoveChangedCallback;
+        bool _liveMoveSamplesActive = false;
+        void publishLiveMove(bool ended) noexcept;
         struct GeometrySnapTerminalNotification {
             ObjectInteractor& owner;
             ~GeometrySnapTerminalNotification() noexcept {
                 owner.publishGeometrySnapFeedback(true);
+                owner.publishLiveMove(true);
             }
         };
     public:
@@ -208,6 +218,15 @@ namespace core3d {
 		gp_XYZ manipulatorPosition();
 		//! The handles' configured side in view pixels (design system 7.2).
 		float manipulatorSide() const { return _manipulatorSide; }
+		//! DEBUG/UI-test evidence: where the real hit test finds each Scale handle
+		//! (X, Y, Z cube, uniform sphere) as viewport fractions [x0,y0,...,x3,y3];
+		//! -1 where a handle is not found. Probes MoveTo on a pixel grid round the gizmo.
+		bool debugScaleHandleFractions(std::array<double, 8>& theFractions) noexcept;
+		//! The last probe's view size, gizmo centre pixel and handle side (pixels).
+		std::array<double, 5> debugScaleProbeFrame() const noexcept { return _debugScaleProbeFrame; }
+		std::array<double, 5> _debugScaleProbeFrame{};
+		//! The last probe's hits: x, y (view pixels) and handle (0..2 cube, 3 sphere).
+		std::vector<std::array<int, 3>> _debugScaleProbeHits;
         
         void SelectAndAttachManipulator(Handle(AIS_InteractiveObject) toObject);
         //! Caller proves committed Object-mode authority and a current identity

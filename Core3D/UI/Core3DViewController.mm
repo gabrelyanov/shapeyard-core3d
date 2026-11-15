@@ -43,8 +43,10 @@
 #include <IntCurvesFace_ShapeIntersector.hxx>
 #include <gp_Lin.hxx>
 #include <Graphic3d_CLight.hxx>
-#include <Prs3d_ShadingAspect.hxx>
 #endif
+#include <Prs3d_ShadingAspect.hxx>
+#include <AIS_ColoredShape.hxx>
+#include <AIS_DataMapOfShapeDrawer.hxx>
 #include "../OCCTKit/ProfileCurvePresets.hxx"
 #import "../OCCTKit/GLViewController+QueuedAssetLoading.h"
 #import "../OCCTKit/Core3DQueuedAssetRequest.h"
@@ -5159,7 +5161,11 @@ core3d_visibleRawR2RoundFailureObservation {
     }
 }
 
-namespace core3d { extern std::string g_r179LastSelectRefusal; }
+namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::string g_booleanCaptureLastRefusal; }
+// DEBUG/test readout only (Join/Cut tap trace): input and check of the last refused opening.
+- (NSString *)core3d_lastBooleanCaptureRefusal {
+    return [NSString stringWithUTF8String:core3d::g_booleanCaptureLastRefusal.c_str()] ?: @"";
+}
 // DEBUG/test readout only (Join tap trace): the stage at which the last whole-part select was refused.
 - (NSString *)core3d_lastSelectRefusal {
     return [NSString stringWithUTF8String:core3d::g_r179LastSelectRefusal.c_str()] ?: @"";
@@ -5272,6 +5278,16 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
         [self core3d_updateSelectedFacesWithPBR:nil preset:material color:color];
         return;
     }
+    [self core3d_updatePaletteWithMaterial:material color:color wholeParts:NO];
+}
+
+-(void)updateSelectedPartsWithMaterial:(Core3DMaterial*)material color:(Core3DColor*)color {
+    [self core3d_updatePaletteWithMaterial:material color:color wholeParts:YES];
+}
+
+-(void)core3d_updatePaletteWithMaterial:(Core3DMaterial*)material
+                                 color:(Core3DColor*)color
+                            wholeParts:(BOOL)wholeParts {
 
     if ((self.selectedModelCapabilities
             & Core3DModelCapabilityMaterial) == 0
@@ -5304,6 +5320,14 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
 		const TDF_Label label = doc->ShapeLabel(selected);
 		if (label.IsNull()) {
 			return;
+        }
+
+        if (wholeParts) {
+            if (!doc->IsPresentationEditable(shape)
+                || !doc->IsEditableFreeSimpleDefinitionLabel(label)) return;
+            if (std::any_of(pendingStyles.begin(), pendingStyles.end(), [&](const auto& pending) {
+                return pending.label.IsEqual(label);
+            })) continue;
         }
 
 		Graphic3d_NameOfMaterial materialName = doc->MaterialNameForLabel(label);
@@ -5342,6 +5366,11 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
 			return;
 		}
 		for (const PendingStyle& style : pendingStyles) {
+
+            if (wholeParts && !doc->ClearPartSubshapeAppearance(style.label)) {
+                Core3DAbortCommandNoThrow(transaction);
+                return;
+            }
 			if (!doc->ClearObjectVisualMaterial(style.label)) {
 				Core3DAbortCommandNoThrow(transaction);
 				return;
@@ -5360,8 +5389,22 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
 	doc->NotifyChanges();
 
 	for (const PendingStyle& style : pendingStyles) {
+        if (wholeParts) {
+            const auto colored = Handle(AIS_ColoredShape)::DownCast(style.shape);
+            if (!colored.IsNull()) {
+                for (AIS_DataMapOfShapeDrawer::Iterator entry(colored->CustomAspectsMap()); entry.More(); entry.Next()) {
+                    const auto& drawer = entry.Value();
+                    if (drawer.IsNull()) continue;
+                    drawer->UnsetOwnMaterial();
+                    drawer->UnsetOwnColor();
+                    drawer->SetShadingAspect(Handle(Prs3d_ShadingAspect)());
+                }
+            }
+        }
 		style.shape->UnsetColor();
 		doc->LoadObjectMeterial(style.label, style.shape);
+
+        if (wholeParts) context->Redisplay(style.shape, Standard_False);
 	}
 	[self.materialController didChangeSelectionWithMaterials:[materials copy] colors:[colors copy]];
 	NSMutableArray<Core3DPBRMaterial*>* selectedPBR =
@@ -7698,6 +7741,57 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; }
     if (!std::isfinite(position.X()) || !std::isfinite(position.Y())
         || !std::isfinite(position.Z())) { return nil; }
     return @[@(position.X()), @(position.Y()), @(position.Z())];
+}
+
+- (NSArray<NSNumber *> *_Nullable)debugScaleHandleViewportFractions {
+    if (![NSThread isMainThread] || GLController == nil
+        || GLController.viewer == nullptr) { return nil; }
+    const auto interactor = GLController.viewer->getObjectInteractor();
+    std::array<double, 8> fractions{};
+    if (interactor == nullptr || !interactor->debugScaleHandleFractions(fractions)) { return nil; }
+    NSMutableArray<NSNumber *> *values = [NSMutableArray arrayWithCapacity:8];
+    for (const double value : fractions) [values addObject:@(value)];
+    for (const double value : interactor->debugScaleProbeFrame()) [values addObject:@(value)];
+    // A picture of where the hit test finds each handle (X red, Y green, Z blue, sphere white),
+    // one dot per probed pixel, a third of the view size, for comparing with a screenshot.
+    const auto frame = interactor->debugScaleProbeFrame();
+    const CGSize mapSize = CGSizeMake(frame[0] / 3.0, frame[1] / 3.0);
+    if (mapSize.width > 0 && mapSize.height > 0) {
+        UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+        format.scale = 1;
+        UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:mapSize format:format];
+        const auto hits = interactor->_debugScaleProbeHits;
+        UIImage *map = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+            [UIColor.blackColor setFill];
+            UIRectFill(CGRectMake(0, 0, mapSize.width, mapSize.height));
+            NSArray<UIColor *> *colours = @[UIColor.redColor, UIColor.greenColor, UIColor.blueColor, UIColor.whiteColor];
+            for (const auto& hit : hits) {
+                [colours[hit[2]] setFill];
+                UIRectFill(CGRectMake(hit[0] / 3.0 - 0.5, hit[1] / 3.0 - 0.5, 1.2, 1.2));
+            }
+            [UIColor.yellowColor setFill];
+            UIRectFill(CGRectMake(frame[2] / 3.0 - 2, frame[3] / 3.0 - 2, 4, 4));
+        }];
+        [[NSFileManager defaultManager] createDirectoryAtPath:@"/private/tmp/shapeyard-owner-boolean-shots"
+                                  withIntermediateDirectories:YES attributes:nil error:nil];
+        [UIImagePNGRepresentation(map) writeToFile:@"/private/tmp/shapeyard-owner-boolean-shots/scale-touchmap.png" atomically:YES];
+    }
+    [GLController requestRender];
+    return values;
+}
+
+- (NSInteger)debugPartsWithOwnHighlightStyle {
+    if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) { return -1; }
+    const Handle(AIS_InteractiveContext) context = GLController.viewer->AisContext();
+    if (context.IsNull()) { return -1; }
+    AIS_ListOfInteractive displayed;
+    context->DisplayedObjects(AIS_KOI_Shape, -1, displayed);
+    NSInteger count = 0;
+    for (AIS_ListIteratorOfListOfInteractive item(displayed); item.More(); item.Next()) {
+        const Handle(AIS_Shape) shape = Handle(AIS_Shape)::DownCast(item.Value());
+        if (!shape.IsNull() && !shape->HilightAttributes().IsNull()) ++count;
+    }
+    return count;
 }
 
 - (NSNumber *_Nullable)debugManipulatorSidePoints {
@@ -20666,6 +20760,10 @@ static bool Core3DPublishCommittedSpatialSweep(
 
 + (NSNotificationName)geometrySnapFeedbackDidChangeNotification {
     return @"Core3DGeometrySnapFeedbackDidChangeNotification";
+}
+
++ (NSNotificationName)liveMoveDidChangeNotification {
+    return @"Core3DLiveMoveDidChangeNotification";
 }
 
 - (Core3DGeometrySnapFeedback *_Nullable)geometrySnapFeedback {
