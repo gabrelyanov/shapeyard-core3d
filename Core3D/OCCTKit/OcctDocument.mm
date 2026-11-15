@@ -22,6 +22,8 @@
 #include <TNaming_Iterator.hxx>
 #include <BRepTools.hxx>
 #include <BRepClass_FaceClassifier.hxx>
+#include <TopoDS_Compound.hxx>
+#include <BRep_Builder.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakeTorus.hxx>
