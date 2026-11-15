@@ -145,6 +145,7 @@ private:
 #include <atomic>
 #include <array>
 #include <cmath>
+#include <IntCurvesFace_ShapeIntersector.hxx>
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
@@ -2460,6 +2461,92 @@ bool FindEntityPresentation(const Handle(AIS_InteractiveContext)& context,
 }
 }
 
+// Defined in OcctDocument.mm (this file is already inside namespace core3d).
+bool BakedBooleanPreviewShape(const Handle(OcctDocument)& document,
+    const TDF_Label& target, const gp_Trsf& targetPlacement,
+    const TDF_Label& tool, const gp_Trsf& toolPlacement, int operation,
+    TopoDS_Shape& result, std::string& refusal) noexcept;
+bool BakedBooleanBatchPreviewShape(const Handle(OcctDocument)& document,
+    const TDF_Label& target, const gp_Trsf& targetPlacement,
+    const std::vector<std::pair<TDF_Label, gp_Trsf>>& tools, int operation,
+    TopoDS_Shape& result, std::string& refusal) noexcept;
+
+bool Core3DViewer::showBakedBooleanBatchPreview(const std::vector<std::string>& targetEntities,
+    const std::vector<std::string>& toolEntities, int operation, std::string& refusal) noexcept {
+    refusal="unsupported-source";
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()||targetEntities.empty()
+        ||toolEntities.empty()||targetEntities.size()+toolEntities.size()>32
+        ||operation<0||operation>2||(operation!=1&&targetEntities.size()!=1))return false;
+    try{
+        OCC_CATCH_SIGNALS
+        if(_booleanPairPreview&&!clearBooleanPairPreview())return false;
+        std::vector<std::pair<Handle(AIS_Shape),TDF_Label>> targets,tools;
+        for(const auto* list:{&targetEntities,&toolEntities})
+            for(const auto& entity:*list){
+                Handle(AIS_Shape) presentation;TDF_Label label;
+                if(!FindEntityPresentation(myContext,myDoc,entity,presentation,label))return false;
+                for(const auto& seen:targets)if(seen.second.IsEqual(label))return false;
+                for(const auto& seen:tools)if(seen.second.IsEqual(label))return false;
+                (list==&targetEntities?targets:tools).emplace_back(presentation,label);
+            }
+        std::vector<std::pair<TDF_Label,gp_Trsf>> toolPlacements;
+        for(const auto& [presentation,label]:tools)
+            toolPlacements.emplace_back(label,presentation->LocalTransformation());
+        std::vector<Handle(AIS_Shape)> previews;
+        for(const auto& [presentation,label]:targets){
+            TopoDS_Shape result;
+            if(!BakedBooleanBatchPreviewShape(myDoc,label,presentation->LocalTransformation(),
+                toolPlacements,operation,result,refusal))return false;
+            Handle(AIS_Shape) preview=new AIS_Shape(result);
+            preview->SetLocalTransformation(presentation->LocalTransformation());
+            myDoc->LoadObjectMeterial(label,preview);
+            previews.push_back(preview);
+        }
+        auto state=std::make_shared<BooleanPairPreview>();
+        state->operation=operation;
+        state->target=targets.front().first;state->targetLabel=targets.front().second;
+        state->tool=tools.front().first;state->toolLabel=tools.front().second;
+        state->preview=previews.front();
+        for(std::size_t index=1;index<targets.size();++index){
+            state->morePreviews.push_back(previews[index]);
+            state->moreParts.push_back(targets[index].first);
+            state->moreLabels.push_back(targets[index].second);
+        }
+        for(std::size_t index=1;index<tools.size();++index){
+            state->moreParts.push_back(tools[index].first);
+            state->moreLabels.push_back(tools[index].second);
+        }
+        myContext->ClearSelected(Standard_False);
+        for(const auto& preview:previews){
+            myContext->Display(preview,AIS_Shaded,0,Standard_False);
+            myContext->Deactivate(preview);
+        }
+        for(const auto& part:targets)myContext->Erase(part.first,Standard_False);
+        for(const auto& part:tools)myContext->Erase(part.first,Standard_False);
+        myContext->UpdateCurrentViewer();
+        _booleanPairPreview=std::move(state);
+        refusal.clear();
+        return true;
+    }catch(...){refusal="invalid-result";return false;}
+}
+
+bool Core3DViewer::showBakedBooleanPreview(const std::string& targetEntity,
+    const std::string& toolEntity, int operation, std::string& refusal) noexcept {
+    refusal="unsupported-source";
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()||targetEntity==toolEntity)return false;
+    try{
+        OCC_CATCH_SIGNALS
+        if(_booleanPairPreview&&!clearBooleanPairPreview())return false;
+        Handle(AIS_Shape) target,tool;TDF_Label targetLabel,toolLabel;
+        if(!FindEntityPresentation(myContext,myDoc,targetEntity,target,targetLabel)
+            ||!FindEntityPresentation(myContext,myDoc,toolEntity,tool,toolLabel))return false;
+        TopoDS_Shape result;
+        if(!BakedBooleanPreviewShape(myDoc,targetLabel,target->LocalTransformation(),
+            toolLabel,tool->LocalTransformation(),operation,result,refusal))return false;
+        return showBooleanPairPreview(targetEntity,toolEntity,result,operation);
+    }catch(...){refusal="invalid-result";return false;}
+}
+
 bool Core3DViewer::applyBakedBoolean(const std::string& targetEntity,
     const std::string& toolEntity, int operation, std::string& refusal) noexcept {
     refusal="unsupported-source";
@@ -2471,6 +2558,31 @@ bool Core3DViewer::applyBakedBoolean(const std::string& targetEntity,
         if(!FindEntityPresentation(myContext,myDoc,targetEntity,target,targetLabel)
             ||!FindEntityPresentation(myContext,myDoc,toolEntity,tool,toolLabel))return false;
         if(!myDoc->ApplyBakedBoolean(targetLabel,target,toolLabel,tool,operation,refusal))return false;
+        redrawDocument();
+        return true;
+    }catch(...){refusal="invalid-result";return false;}
+}
+
+bool Core3DViewer::applyBakedBooleanBatch(const std::vector<std::string>& targetEntities,
+    const std::vector<std::string>& toolEntities, int operation, std::string& refusal) noexcept {
+    refusal="unsupported-source";
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()
+        ||targetEntities.empty()||toolEntities.empty())return false;
+    try{
+        OCC_CATCH_SIGNALS
+        if(_booleanPairPreview)clearBooleanPairPreview();
+        const auto find=[&](const std::vector<std::string>& entities,
+            std::vector<std::pair<TDF_Label,Handle(AIS_Shape)>>& found)->bool{
+            for(const auto& entity:entities){
+                Handle(AIS_Shape) presentation;TDF_Label label;
+                if(entity.empty()||!FindEntityPresentation(myContext,myDoc,entity,presentation,label))return false;
+                found.emplace_back(label,presentation);
+            }
+            return true;
+        };
+        std::vector<std::pair<TDF_Label,Handle(AIS_Shape)>> targets,tools;
+        if(!find(targetEntities,targets)||!find(toolEntities,tools))return false;
+        if(!myDoc->ApplyBakedBooleanBatch(targets,tools,operation,refusal))return false;
         redrawDocument();
         return true;
     }catch(...){refusal="invalid-result";return false;}
@@ -2502,8 +2614,11 @@ bool Core3DViewer::holeAnchor(const std::string& entity, std::uint32_t faceIndex
             Bnd_Box box;BRepBndLib::Add(face,box);
             const double size=box.IsVoid()?0:std::sqrt(box.SquareExtent());
             GeomAPI_ProjectPointOnSurf hit(tapped,geometry);
+            // Only a tap right at the face centre snaps to it (2 % of the face's size): a tap
+            // a few millimetres off the middle stays where it was (Astra long build 13 Nov
+            // 18:34 step 38: 5 mm above the middle of an 80 x 60 face landed on the middle).
             if(size>0&&hit.IsDone()&&hit.NbPoints()>0&&hit.LowerDistance()<size*0.02
-               &&tapped.Distance(area.CentreOfMass())>size*0.1){
+               &&tapped.Distance(area.CentreOfMass())>size*0.02){
                 double hu=0,hv=0;hit.LowerDistanceParameters(hu,hv);
                 BRepClass_FaceClassifier inside(face,gp_Pnt2d(hu,hv),Precision::Confusion());
                 if(inside.State()==TopAbs_IN){u=hu;v=hv;}
@@ -2609,7 +2724,7 @@ bool Core3DViewer::applyThroughHole(const std::string& entity, const gp_Pnt& wor
     }catch(...){refusal="invalid-result";return false;}
 }
 
-bool Core3DViewer::clearBooleanPairPreview() noexcept {
+bool Core3DViewer::clearBooleanPairPreview(bool reselectTarget) noexcept {
     if(![NSThread isMainThread]||myContext.IsNull())return false;
     const auto state=std::move(_booleanPairPreview);
     _booleanPairPreview.reset();
@@ -2619,16 +2734,51 @@ bool Core3DViewer::clearBooleanPairPreview() noexcept {
         if(!state->preview.IsNull())myContext->Remove(state->preview,Standard_False);
         if(!state->target.IsNull())myContext->Display(state->target,Standard_False);
         if(!state->tool.IsNull())myContext->Display(state->tool,Standard_False);
+        for(const auto& preview:state->morePreviews)
+            if(!preview.IsNull())myContext->Remove(preview,Standard_False);
+        for(const auto& part:state->moreParts)
+            if(!part.IsNull())myContext->Display(part,Standard_False);
         // The part that stays is selected again, as before the preview, so the
         // tick can apply the same pair.
         myContext->ClearSelected(Standard_False);
-        if(!state->target.IsNull()){
+        if(reselectTarget&&!state->target.IsNull()){
             const Handle(SelectMgr_EntityOwner) owner=state->target->GlobalSelOwner();
             if(!owner.IsNull())myContext->SetSelected(owner,Standard_False);
         }
         myContext->UpdateCurrentViewer();
         return true;
     }catch(...){return false;}
+}
+
+std::string Core3DViewer::booleanPreviewTargetAt(double x, double y) noexcept {
+    if(![NSThread isMainThread]||!_booleanPairPreview||myDoc.IsNull()||!std::isfinite(x)||!std::isfinite(y))return {};
+    try{
+        OCC_CATCH_SIGNALS
+        const Handle(V3d_View) view=ActiveView();
+        if(view.IsNull())return {};
+        double ox,oy,oz,dx,dy,dz;
+        view->ConvertWithProj(int(x),int(y),ox,oy,oz,dx,dy,dz);
+        const auto& state=*_booleanPairPreview;
+        std::vector<std::pair<Handle(AIS_Shape),TDF_Label>> previews{{state.preview,state.targetLabel}};
+        for(std::size_t index=0;index<state.morePreviews.size()&&index<state.moreLabels.size();++index)
+            previews.emplace_back(state.morePreviews[index],state.moreLabels[index]);
+        double nearest=1e300;std::string entity;
+        for(const auto& [preview,label]:previews){
+            if(preview.IsNull()||preview->Shape().IsNull()||label.IsNull())continue;
+            const gp_Trsf inverse=preview->Transformation().Inverted();
+            IntCurvesFace_ShapeIntersector ray;ray.Load(preview->Shape(),1e-7);
+            ray.Perform(gp_Lin(gp_Pnt(ox,oy,oz).Transformed(inverse),
+                               gp_Dir(dx,dy,dz).Transformed(inverse)),-1e9,1e9);
+            if(!ray.IsDone())continue;
+            for(int hit=1;hit<=ray.NbPnt();++hit){
+                // Depth along the eye ray in world units (the inverse may scale).
+                const gp_Pnt world=ray.Pnt(hit).Transformed(preview->Transformation());
+                const double depth=gp_Vec(gp_Pnt(ox,oy,oz),world).Dot(gp_Vec(dx,dy,dz));
+                if(depth<nearest){nearest=depth;entity=myDoc->EntityIdentifierForLabel(label);}
+            }
+        }
+        return entity;
+    }catch(...){return {};}
 }
 
 bool Core3DViewer::hasBooleanPairPreview() const noexcept {
@@ -10657,7 +10807,10 @@ std::shared_ptr<ObjectAlignmentWork> Core3DViewer::prepareObjectAlignment(
         std::size_t nodes = 0, faces = 0, meshNodes = 0;
         for (const auto& record : work->authority.records) {
             const auto& state = record.previous;
+            // A part saved by App Store 5.34.1 or earlier has no marker (LegacyUnknown):
+            // it is an exact solid and aligns like one (Move already admits it).
             if (state.resolvedRepresentation != OcctGeometryRepresentation::BRep
+                && state.resolvedRepresentation != OcctGeometryRepresentation::LegacyUnknown
                 && state.resolvedRepresentation != OcctGeometryRepresentation::TriangleMesh) { return {}; }
             std::vector<TopoDS_Shape> stack{state.shape};
             TopTools_IndexedMapOfShape visited;
@@ -14697,9 +14850,14 @@ Core3DViewer::captureScenePresentationOverlay() noexcept {
         std::vector<TDF_Label> hidden{_booleanPairPreview->targetLabel};
         if (!_booleanPairPreview->toolLabel.IsNull())
             hidden.push_back(_booleanPairPreview->toolLabel);
+        hidden.insert(hidden.end(), _booleanPairPreview->moreLabels.begin(),
+                      _booleanPairPreview->moreLabels.end());
+        std::vector<Handle(AIS_Shape)> previews{_booleanPairPreview->preview};
+        previews.insert(previews.end(), _booleanPairPreview->morePreviews.begin(),
+                        _booleanPairPreview->morePreviews.end());
         return _sceneSnapshotBuilder.PublishBooleanPreviewOverlay(
             myDoc, kinds[_booleanPairPreview->operation], {},
-            {_booleanPairPreview->preview}, hidden);
+            previews, hidden);
     }
     if (_shapeInteractor != nullptr
         && _shapeInteractor->hasActiveShell()) {
