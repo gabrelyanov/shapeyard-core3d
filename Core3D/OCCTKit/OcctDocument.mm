@@ -13357,13 +13357,12 @@ Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
             }
         for (std::size_t index = 0; index < targets.size(); ++index) {
             const TDF_Label& target = targets[index].first;
-            // A Join keeps the name of the part tapped first (design system rule 9, CTO 15 Nov 10:28);
-            // a Cut or Overlap result is named by what it is.
+            // Every result is named by what it is ("Joined part N", rule 1a; CTO 15 Nov 10:39).
             const TCollection_ExtendedString name = NextBooleanResultName(myOcafDoc, operation);
             ForgetInspectorPrimitiveRecord(target);
             if (!ReplaceShape(target, made[index].second)
                 || !XCAFDoc_ShapeTool::GetShape(target).IsEqual(made[index].first)
-                || (operation != 0 && !SetObjectNameForLabel(target, name))
+                || !SetObjectNameForLabel(target, name)
                 || !CarryFaceColours(target, made[index].first,
                        oldFaceLabels[index], coloured[index])) {
                 myOcafDoc->AbortCommand();
@@ -14044,10 +14043,9 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
                 throw Standard_Failure("metadata stage");
             }
             // Named in the same step, so Undo brings back the old name too.
-            // A Join keeps the first part's name (rule 9); Cut and Overlap are named by what they are.
-            if (capture.operation != pb::Operation::Union
-                && !SetObjectNameForLabel(capture.sources[0].label, NextBooleanResultName(myOcafDoc,
-                    capture.operation == pb::Operation::Subtract ? 1 : 2))) {
+            if (!SetObjectNameForLabel(capture.sources[0].label, NextBooleanResultName(myOcafDoc,
+                    capture.operation == pb::Operation::Union ? 0
+                    : capture.operation == pb::Operation::Subtract ? 1 : 2))) {
                 stageFailure = ap::PairRefusal::BadEncoding;
                 throw Standard_Failure("result name stage");
             }
