@@ -452,6 +452,15 @@ struct PrivateExportDerivativeFailure final {
     const char* stage = nullptr;
 };
 
+//! The one switch of the drawing rule "smooth edges and closed same-plane seams
+//! are not drawn while whole objects are worked on" (founder, 15 Nov 2026).
+//! Off: no edge is classified, so the OpenGL view and Metal draw every edge as
+//! before. Meshes tessellated earlier keep the classes they were given. Debug
+//! builds also read SHAPEYARD_UITEST_DRAW_EVERY_EDGE=1 at first use, for
+//! before/after pictures from one build.
+bool EdgeDrawClassesEnabled() noexcept;
+void SetEdgeDrawClassesEnabled(bool enabled) noexcept;
+
 class OcctSceneSnapshotBuilder final {
 public:
     using SnapshotPointer = std::shared_ptr<const SceneSnapshot>;

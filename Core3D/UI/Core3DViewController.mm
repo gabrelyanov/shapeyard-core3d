@@ -25408,6 +25408,14 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
         keeps ? Standard_True : Standard_False);
 }
 
++ (void)debugSetLeavesSmoothEdgesAndSeamsOut:(BOOL)leavesOut {
+    core3d::scene::SetEdgeDrawClassesEnabled(leavesOut);
+}
+
++ (BOOL)debugLeavesSmoothEdgesAndSeamsOut {
+    return core3d::scene::EdgeDrawClassesEnabled();
+}
+
 - (void)debugSetMaximumBevelCaptureTopologyNodes:(NSUInteger)limit {
     [GLController debugSetMaximumBevelCaptureTopologyNodes:limit];
 }

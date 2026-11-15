@@ -1841,6 +1841,13 @@ __attribute__((objc_subclassing_restricted))
 //! compound around the one solid), as builds before 15 Nov 2026 did.
 + (void)debugSetPlainBevelKeepsBuilderWrapper:(BOOL)keeps
     NS_SWIFT_NAME(debugSetPlainBevelKeepsBuilderWrapper(_:));
+//! Check seam for the drawing rule "smooth edges and closed same-plane seams are
+//! not drawn while whole objects are worked on": turns the rule's one switch on
+//! or off for parts tessellated from now on.
++ (void)debugSetLeavesSmoothEdgesAndSeamsOut:(BOOL)leavesOut
+    NS_SWIFT_NAME(debugSetLeavesSmoothEdgesAndSeamsOut(_:));
++ (BOOL)debugLeavesSmoothEdgesAndSeamsOut
+    NS_SWIFT_NAME(debugLeavesSmoothEdgesAndSeamsOut());
 - (void)debugSetMaximumBevelCaptureTopologyNodes:(NSUInteger)limit;
 - (void)debugSetMaximumBevelResultTopologyNodes:(NSUInteger)limit;
 - (void)debugSetMaximumBevelResultSolids:(NSUInteger)limit;
