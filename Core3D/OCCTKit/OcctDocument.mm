@@ -28671,6 +28671,8 @@ namespace core3d::ordinary_naming {
 struct Side {
     std::vector<treatment_history::NamingState> naming;
     std::vector<std::uint8_t> source, treatment;
+    core3d::inspector_primitive::Record inspectorPrimitive;
+    std::string entityIdentifier, definitionIdentifier;
     std::string profileIdentifier;
     TDF_Label profileLabel;
     TopoDS_Shape shape;
@@ -28684,6 +28686,7 @@ struct Record {
     Handle(TDF_Data) data;
     Handle(TDF_Delta) priorTop, delta;
     std::vector<Root> roots;
+    OcctDocument::OrdinaryNamingFamily family = OcctDocument::OrdinaryNamingFamily::Profile;
     int undoDepth = 0;
     bool creation = false, captured = false, finalized = false, settled = false;
 };
@@ -28694,18 +28697,43 @@ namespace ordinary_naming = core3d::ordinary_naming;
 constexpr std::size_t kOrdinaryNamingBytes = 128 * 1024 * 1024;
 constexpr std::size_t kOrdinaryNamingRecords = 1001; // ordinary Undo limit + pending
 
-bool CaptureOrdinaryNamingSide(const Handle(TDocStd_Document)& doc,
-    const TDF_Label& label, ordinary_naming::Side& side) noexcept {
+bool CaptureOrdinaryNamingSide(const OcctDocument& owner,
+    const TDF_Label& label, OcctDocument::OrdinaryNamingFamily family,
+    ordinary_naming::Side& side) noexcept {
     side = {};
     try {
+        const auto doc = owner.Document();
+        if (doc.IsNull() || label.IsNull() || label.Data() != doc->GetData()) return false;
+        side.shape = XCAFDoc_ShapeTool::GetShape(label);
+        if (side.shape.IsNull()) return false;
+        if (family == OcctDocument::OrdinaryNamingFamily::UnretainedShell) {
+            // This arm belongs only to an already-admitted ordinary Shell.
+            // Absence of Profile alone is insufficient: every retained recipe
+            // must be absent, and any treatment carrier (even malformed or of
+            // the wrong dynamic type) refuses. Do not broaden generic capture.
+            if (!owner.IsEditableFreeSimpleDefinitionLabel(label)
+                || owner.RetainedRecipeCoverageForLabel(label) != OcctRetainedRecipeCoverage::Absent
+                || !core3d::inspector_primitive::Read(label, side.inspectorPrimitive)
+                || !CaptureTreatmentSubtreeNaming(label, side.naming)) return false;
+            const auto hasTreatment = [](const TDF_Label& candidate) {
+                Handle(TDF_Attribute) raw;
+                return candidate.FindAttribute(core3d::retained_edge_treatment::AttributeID(), raw);
+            };
+            if (hasTreatment(label)) return false;
+            // The naming census above has already bounded this same subtree.
+            for (TDF_ChildIterator it(label, Standard_True); it.More(); it.Next())
+                if (hasTreatment(it.Value())) return false;
+            side.entityIdentifier = owner.EntityIdentifierForLabel(label);
+            side.definitionIdentifier = owner.DefinitionIdentifierForLabel(label);
+            return !side.entityIdentifier.empty() && !side.definitionIdentifier.empty();
+        }
+        if (family != OcctDocument::OrdinaryNamingFamily::Profile) return false;
         core3d::profile::Record profile;
-        if (label.IsNull() || label.Data() != doc->GetData()
-            || !core3d::profile::Read(doc, label, profile)
+        if (!core3d::profile::Read(doc, label, profile)
             || profile.label.IsNull() || !profile.IsCurrent(doc, label)) return false;
         side.profileIdentifier = profile.identifier;
         side.profileLabel = profile.label;
-        side.shape = XCAFDoc_ShapeTool::GetShape(label);
-        return !side.shape.IsNull() && CaptureTreatmentCompanionSide(doc, label,
+        return CaptureTreatmentCompanionSide(doc, label,
             side.naming, side.source, side.hasTreatment, side.treatment);
     } catch (...) { return false; }
 }
@@ -28728,14 +28756,18 @@ bool OrdinaryCreationRootAbsent(const TDF_Label& root) noexcept {
     } catch (...) { return false; }
 }
 
-bool OrdinaryNamingSideMatches(const Handle(TDocStd_Document)& doc,
-    const TDF_Label& root, const ordinary_naming::Side& expected, bool versions) noexcept {
+bool OrdinaryNamingSideMatches(const OcctDocument& owner,
+    const TDF_Label& root, OcctDocument::OrdinaryNamingFamily family,
+    const ordinary_naming::Side& expected, bool versions) noexcept {
     ordinary_naming::Side actual;
-    return CaptureOrdinaryNamingSide(doc, root, actual)
+    return CaptureOrdinaryNamingSide(owner, root, family, actual)
         && TreatmentHistorySameShape(expected.shape, actual.shape)
         && SameTreatmentNamingSet(expected.naming, actual.naming, versions)
         && expected.profileIdentifier == actual.profileIdentifier
         && expected.profileLabel == actual.profileLabel
+        && expected.inspectorPrimitive.IsEqual(actual.inspectorPrimitive)
+        && expected.entityIdentifier == actual.entityIdentifier
+        && expected.definitionIdentifier == actual.definitionIdentifier
         && expected.source == actual.source && expected.hasTreatment == actual.hasTreatment
         && expected.treatment == actual.treatment;
 }
@@ -28746,6 +28778,8 @@ std::size_t OrdinaryNamingStorage(const ordinary_naming::Record& record) noexcep
         for (const auto* side : {&root.before, &root.after}) {
             bytes += side->source.capacity() + side->treatment.capacity()
                 + side->profileIdentifier.capacity() + 1
+                + side->entityIdentifier.capacity() + 1
+                + side->definitionIdentifier.capacity() + 1
                 + side->naming.capacity() * sizeof(treatment_history::NamingState);
             for (const auto& naming : side->naming)
                 bytes += naming.labelEntry.capacity() + 1
@@ -28757,14 +28791,14 @@ std::size_t OrdinaryNamingStorage(const ordinary_naming::Record& record) noexcep
     return bytes;
 }
 
-bool RestoreOrdinaryNamingSide(const Handle(TDocStd_Document)& doc,
+bool RestoreOrdinaryNamingSide(const OcctDocument& owner,
     ordinary_naming::Record& record, bool before) noexcept {
     try {
         // Validate ALL roots before changing any scalar.
         for (const auto& root : record.roots) {
             if (before && record.creation) {
                 if (!OrdinaryCreationRootAbsent(root.label)) return false;
-            } else if (!OrdinaryNamingSideMatches(doc, root.label,
+            } else if (!OrdinaryNamingSideMatches(owner, root.label, record.family,
                        before ? root.before : root.after, false)) return false;
         }
         if (before && record.creation) return true;
@@ -28777,7 +28811,7 @@ bool RestoreOrdinaryNamingSide(const Handle(TDocStd_Document)& doc,
             }
         }
         for (const auto& root : record.roots)
-            if (!OrdinaryNamingSideMatches(doc, root.label,
+            if (!OrdinaryNamingSideMatches(owner, root.label, record.family,
                     before ? root.before : root.after, true)) return false;
         return true;
     } catch (...) { return false; }
@@ -28828,11 +28862,14 @@ void OcctDocument::PruneOrdinaryNamingHistory() noexcept {
 }
 
 std::shared_ptr<core3d::ordinary_naming::Record> OcctDocument::PrepareOrdinaryNamingHistory(
-    std::size_t creationRootCount, const TDF_Label& existingOwner) noexcept {
+    std::size_t creationRootCount, const TDF_Label& existingOwner,
+    OrdinaryNamingFamily family) noexcept {
     try {
         if (![NSThread isMainThread] || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
             || myOcafDoc->GetUndoLimit() <= 0 || myOcafDoc->GetUndoLimit() > 1000
-            || creationRootCount > 1024 || (creationRootCount == 0) == existingOwner.IsNull()) return {};
+            || creationRootCount > 1024 || (creationRootCount == 0) == existingOwner.IsNull()
+            || (family != OrdinaryNamingFamily::Profile && family != OrdinaryNamingFamily::UnretainedShell)
+            || (creationRootCount > 0 && family != OrdinaryNamingFamily::Profile)) return {};
         PruneOrdinaryNamingHistory();
         if (myOrdinaryNamingHistory.size() >= kOrdinaryNamingRecords) return {};
         auto record = std::make_shared<ordinary_naming::Record>();
@@ -28840,10 +28877,11 @@ std::shared_ptr<core3d::ordinary_naming::Record> OcctDocument::PrepareOrdinaryNa
         record->undoDepth = myOcafDoc->GetAvailableUndos();
         if (!myOcafDoc->GetUndos().IsEmpty()) record->priorTop = myOcafDoc->GetUndos().Last();
         record->creation = creationRootCount > 0;
+        record->family = family;
         record->roots.resize(record->creation ? creationRootCount : 1);
         if (!record->creation) {
             record->roots[0].label = existingOwner;
-            if (!CaptureOrdinaryNamingSide(myOcafDoc, existingOwner, record->roots[0].before)) return {};
+            if (!CaptureOrdinaryNamingSide(*this, existingOwner, record->family, record->roots[0].before)) return {};
         }
         std::size_t bytes = OrdinaryNamingStorage(*record);
         for (const auto& existing : myOrdinaryNamingHistory) bytes += OrdinaryNamingStorage(*existing);
@@ -28873,7 +28911,7 @@ Standard_Boolean OcctDocument::CaptureOrdinaryNamingCandidate(
         if (!record || myOcafDoc.IsNull() || record->data != myOcafDoc->GetData()
             || !myOcafDoc->HasOpenCommand() || record->finalized || record->captured) return Standard_False;
         for (auto& root : record->roots) {
-            if (!CaptureOrdinaryNamingSide(myOcafDoc, root.label, root.after)) return Standard_False;
+            if (!CaptureOrdinaryNamingSide(*this, root.label, record->family, root.after)) return Standard_False;
             std::size_t bytes = 0;
             for (const auto& existing : myOrdinaryNamingHistory) bytes += OrdinaryNamingStorage(*existing);
             if (bytes > kOrdinaryNamingBytes) return Standard_False;
@@ -28890,7 +28928,7 @@ Standard_Boolean OcctDocument::SettleOrdinaryNamingHistory(
         if (![NSThread isMainThread] || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
             || record->data != myOcafDoc->GetData()) return Standard_False;
         if (!candidate) {
-            if (record->finalized || !RestoreOrdinaryNamingSide(myOcafDoc, *record, true)) return Standard_False;
+            if (record->finalized || !RestoreOrdinaryNamingSide(*this, *record, true)) return Standard_False;
             record->settled = true;
             PruneOrdinaryNamingHistory();
             return Standard_True;
@@ -28902,7 +28940,7 @@ Standard_Boolean OcctDocument::SettleOrdinaryNamingHistory(
         if (delta == record->priorTop || !(depth == record->undoDepth + 1
             || (record->undoDepth == myOcafDoc->GetUndoLimit() && depth == record->undoDepth))) return Standard_False;
         for (const auto& root : record->roots) {
-            if (!OrdinaryNamingSideMatches(myOcafDoc, root.label, root.after, true)) return Standard_False;
+            if (!OrdinaryNamingSideMatches(*this, root.label, record->family, root.after, true)) return Standard_False;
             bool touched = false;
             for (TDF_ListIteratorOfAttributeDeltaList it(delta->AttributeDeltas()); it.More(); it.Next()) {
                 if (it.Value().IsNull()) return Standard_False;
@@ -28924,7 +28962,7 @@ Standard_Boolean OcctDocument::ApplyOrdinaryNamingHistory(
         for (const auto& record : myOrdinaryNamingHistory) {
             if (!record->finalized || record->delta != applied) continue;
             if (record->data != myOcafDoc->GetData()
-                || !RestoreOrdinaryNamingSide(myOcafDoc, *record, undoDirection)) return Standard_False;
+                || !RestoreOrdinaryNamingSide(*this, *record, undoDirection)) return Standard_False;
             const auto& inverse = undoDirection ? myOcafDoc->GetRedos() : myOcafDoc->GetUndos();
             if (inverse.IsEmpty()) return Standard_False;
             record->delta = undoDirection ? inverse.First() : inverse.Last();

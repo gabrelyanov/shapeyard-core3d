@@ -2024,8 +2024,10 @@ public:
 #if DEBUG
     std::array<std::size_t, 3> DebugOrdinaryNamingHistoryStorage() const noexcept;
 #endif
+    enum class OrdinaryNamingFamily { Profile, UnretainedShell };
     std::shared_ptr<core3d::ordinary_naming::Record> PrepareOrdinaryNamingHistory(
-        std::size_t creationRootCount, const TDF_Label& existingOwner = {}) noexcept;
+        std::size_t creationRootCount, const TDF_Label& existingOwner = {},
+        OrdinaryNamingFamily family = OrdinaryNamingFamily::Profile) noexcept;
     Standard_Boolean TrackOrdinaryNamingCreationRoot(
         const std::shared_ptr<core3d::ordinary_naming::Record>& record,
         std::size_t index, const TDF_Label& label) noexcept;
