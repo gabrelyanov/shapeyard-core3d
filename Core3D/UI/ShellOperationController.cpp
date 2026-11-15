@@ -1119,8 +1119,7 @@ private:
             // False: the guard would not let the kernel have this shell (it would crash the
             // app, not fail). The result stays Failed, like any shell the kernel refuses.
             if (!MakeInwardShell(aBuilder, theRequest.source, theRequest.openingFaces,
-                                 theRequest.thickness, theRequest.tolerance, aProgress->Start(),
-                                 Standard_True)) {
+                                 theRequest.thickness, theRequest.tolerance, aProgress->Start())) {
                 return aResult;
             }
             if (wasCancelled()
