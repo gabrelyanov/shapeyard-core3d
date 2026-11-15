@@ -2863,7 +2863,11 @@ void BooleanOperationController::showInteractiveByType(
 
     Handle(Prs3d_Drawer) aHighlight = new Prs3d_Drawer();
     aHighlight->SetColor(aColor);
-    theShape->SetHilightAttributes(aHighlight);
+    // A part the tool gives back keeps NO highlight style of its own (founder test 14 Nov,
+    // build 8545: a part showed the cutter's orange afterwards; a GRAY drawer left on the
+    // part is what the engine highlight falls back to). Only the tool's parts carry one.
+    theShape->SetHilightAttributes(theType == BooleanSelectionType::Undefined
+        ? Handle(Prs3d_Drawer)() : aHighlight);
     theShape->SetDisplayMode(isWireframe ? AIS_WireFrame : AIS_Shaded);
     if (theType == BooleanSelectionType::Undefined) {
         theShape->UnsetDisplayMode();

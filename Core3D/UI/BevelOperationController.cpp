@@ -1052,7 +1052,18 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
                 || !myContext->IsDisplayed(aSelection.original)) {
                 return Standard_False;
             }
-            const TopoDS_Shape aShape = aSelection.original->Shape();
+            const TopoDS_Shape aPresentedShape = aSelection.original->Shape();
+            // App Store 5.34.1 stored a Union/Subtract result as a compound
+            // around its one solid: the Bevel is built on that solid.
+            TopoDS_Shape aShape = aPresentedShape;
+            while (!aShape.IsNull() && aShape.ShapeType() == TopAbs_COMPOUND) {
+                TopoDS_Iterator anOnly(aShape);
+                if (!anOnly.More()) break;
+                const TopoDS_Shape aChild = anOnly.Value();
+                anOnly.Next();
+                if (anOnly.More()) break;
+                aShape = aChild;
+            }
             const TopoDS_Shape aStoredShape =
                 XCAFDoc_ShapeTool::GetShape(aSelection.documentLabel);
             const gp_Trsf aCapturedTransform =
@@ -1060,7 +1071,7 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
             gp_Trsf aPersistedTransform;
             Standard_Size aSourceSolidCount = 0;
             Standard_Size aSourceTopologyNodeCount = 0;
-            if (aStoredShape.IsNull() || !aStoredShape.IsEqual(aShape)
+            if (aStoredShape.IsNull() || !aStoredShape.IsEqual(aPresentedShape)
                 || aShape.ShapeType() != TopAbs_SOLID
                 || !myDoc->TryObjectTransformForLabel(
                     aSelection.documentLabel, aPersistedTransform)
@@ -1133,6 +1144,7 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
             aSource.original = aSelection.original;
             aSource.label = aSelection.documentLabel;
             aSource.shape = aShape;
+            aSource.stored = aPresentedShape;
             aSource.edges = std::move(aCanonicalEdges);
             aSource.edgeTopologyIndices =
                 std::move(aCanonicalEdgeIndices);
@@ -1202,8 +1214,8 @@ Standard_Boolean BevelOperationController::preparedSourcesAreCurrent(
                     aSource.label)
                 || (theRequireDisplayed
                     && !myContext->IsDisplayed(aSource.original))
-                || !aStoredShape.IsEqual(aSource.shape)
-                || !aSource.original->Shape().IsEqual(aSource.shape)
+                || !aStoredShape.IsEqual(aSource.stored)
+                || !aSource.original->Shape().IsEqual(aSource.stored)
                 || !myDoc->TryObjectTransformForLabel(
                     aSource.label, aPersistedTransform)
                 || !TransformsMatch(

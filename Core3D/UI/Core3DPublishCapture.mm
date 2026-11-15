@@ -133,6 +133,7 @@ struct Bytes final {
 };
 
 struct OwnerObservation final {
+    NSString *failureStage = nil; // diagnostic only; never part of source authority
     NSString *entity = nil;
     NSString *definition = nil;
     NSString *sourceFeature = nil;
@@ -145,6 +146,7 @@ struct OwnerObservation final {
 };
 
 struct Observation final {
+    NSString *failureStage = nil;
     Core3DSceneSnapshot *scene = nil;
     NSString *document = nil;
     NSArray<NSString *> *selected = nil;
@@ -189,9 +191,11 @@ bool EqualCommitments(NSArray<Core3DPublishOwnerCommitments *> *left,
     return true;
 }
 
-NSError *Refusal(Core3DPublishCaptureError code, NSString *reason) {
+NSError *Refusal(Core3DPublishCaptureError code, NSString *reason, NSString *stage = nil) {
+    NSMutableDictionary *info = [@{NSLocalizedDescriptionKey: reason ?: @"publish capture refused"} mutableCopy];
+    if (stage.length != 0) info[@"shapeyard.publish.captureStage"] = stage;
     return [NSError errorWithDomain:Core3DPublishCaptureErrorDomain code:code
-                           userInfo:@{NSLocalizedDescriptionKey: reason ?: @"publish capture refused"}];
+                           userInfo:info];
 }
 
 bool Identifier(NSString *value) {
@@ -384,6 +388,8 @@ bool CaptureOrdinaryOwner(const Handle(OcctDocument)& owner, const TDF_Label& la
     const ordinary::CaptureResult capture = owner->CaptureToolInput(
         label, ordinary::Purpose::Observe);
     if (!capture.ready() || !capture.snapshot) {
+        output.failureStage = [NSString stringWithFormat:@"ordinary.observe.%u",
+            static_cast<unsigned>(capture.refusal)];
         switch (capture.refusal) {
         case ordinary::Refusal::Busy: refusal = Core3DPublishCaptureErrorBusy; break;
         case ordinary::Refusal::MalformedStoredSource:
@@ -394,8 +400,10 @@ bool CaptureOrdinaryOwner(const Handle(OcctDocument)& owner, const TDF_Label& la
         return false;
     }
     const auto& snapshot = capture.snapshot;
+    output.failureStage = @"ordinary.representation";
     if (snapshot->representation() != ordinary::Representation::BRepSolid
         && snapshot->representation() != ordinary::Representation::TriangleMesh) return false;
+    output.failureStage = @"ordinary.identity";
     if (snapshot->entityIdentifier() != (entity.UTF8String ?: "")
         || snapshot->documentIdentifier() != owner->DocumentIdentifier()
         || snapshot->definitionIdentifier() != owner->DefinitionIdentifierForLabel(label)
@@ -404,9 +412,15 @@ bool CaptureOrdinaryOwner(const Handle(OcctDocument)& owner, const TDF_Label& la
     }
     OcctObjectTransformState state;
     OcctScalarAppearanceState appearance;
-    if (!owner->CaptureObjectTransformStateForLabel(label, state)
-        || !owner->CaptureScalarAppearanceForMeshCopy(label, appearance)
-        || state.shape.IsNull()) return false;
+    // Preserve the original short-circuit order and every admission rule.
+    // Distinguish these boundaries only in NSError metadata, not UI wording.
+    output.failureStage = @"ordinary.transform";
+    if (!owner->CaptureObjectTransformStateForLabel(label, state)) return false;
+    output.failureStage = @"ordinary.mesh-copy-appearance";
+    if (!owner->CaptureScalarAppearanceForMeshCopy(label, appearance)) return false;
+    output.failureStage = @"ordinary.shape";
+    if (state.shape.IsNull()) return false;
+    output.failureStage = @"ordinary.commitments";
     BRepBuilderAPI_Copy shapeCopy(state.shape, Standard_True, Standard_False);
     core3d::saved_cut_source_edit::ShapeCommitment shapeCommitment;
     std::atomic_bool stop(false);
@@ -482,7 +496,9 @@ bool CaptureOrdinaryOwner(const Handle(OcctDocument)& owner, const TDF_Label& la
         initPrivateWithOwner:entity recipe:recipeBytes geometry:geometryBytes
         placement:placementBytes materialTexture:materialBytes];
     output.boundsMM = bounds;
-    return output.definition != nil && output.sourceFeature.length != 0;
+    const bool valid = output.definition != nil && output.sourceFeature.length != 0;
+    if (valid) output.failureStage = nil;
+    return valid;
 }
 
 bool CaptureOwner(const Handle(OcctDocument)& owner, Core3DSceneSnapshot *scene,
@@ -684,7 +700,10 @@ bool CaptureObservation(Core3DViewController *controller, const Handle(OcctDocum
     std::vector<OwnerObservation> observations; observations.reserve(selected.count);
     for (NSString *entity in selected) {
         OwnerObservation observation;
-        if (!CaptureOwner(owner, scene, entity, geometryBudget, observation, refusal)) return false;
+        if (!CaptureOwner(owner, scene, entity, geometryBudget, observation, refusal)) {
+            output.failureStage = observation.failureStage;
+            return false;
+        }
         observations.push_back(std::move(observation));
     }
     std::array<double, 6> unionBounds = observations.front().boundsMM;
@@ -819,7 +838,7 @@ static bool F2ValidArtifactEvidence(Core3DPublishArtifactEvidence *evidence) {
         }
         Observation observation; Core3DPublishCaptureError refusal;
         if (!CaptureObservation(controller, owner, scope, nil, observation, refusal)) {
-            if (error) *error = Refusal(refusal, @"native source observation refused"); return nil;
+            if (error) *error = Refusal(refusal, @"native source observation refused", observation.failureStage); return nil;
         }
         const CGSize drawable = controller.viewportDrawableSize;
         if (!std::isfinite(drawable.width) || !std::isfinite(drawable.height)
@@ -875,7 +894,7 @@ static bool F2ValidArtifactEvidence(Core3DPublishArtifactEvidence *evidence) {
         || ![fresh.operands isEqualToArray:self.operandWitnessBytes]
         || ![fresh.bounds isEqualToArray:self.nativeBoundsMM]) {
         if (error) *error = Refusal(refusal == Core3DPublishCaptureErrorBusy ? Core3DPublishCaptureErrorStale : refusal,
-                                    @"captured dependency changed");
+                                    @"captured dependency changed", fresh.failureStage);
         return NO;
     }
     if (!EqualCommitments(fresh.commitments, self.ownerCommitments, self.selectedEntityIdentifiers)) {

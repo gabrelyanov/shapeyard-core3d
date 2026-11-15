@@ -45,6 +45,7 @@
 #include <XCAFDoc_LayerTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFDoc_VisMaterialTool.hxx>
+#include <XCAFDoc_VisMaterial.hxx>
 #include <TDF_Attribute.hxx>
 #include <TDF_ChildIterator.hxx>
 #include <TDF_LabelSequence.hxx>
@@ -63,12 +64,129 @@
 #include <array>
 #include <algorithm>
 #include <cmath>
+#include <AIS_ManipulatorOwner.hxx>
 #include <limits>
 #include <unordered_set>
 #include <utility>
 
 namespace core3d {
 	namespace {
+Standard_Boolean CaptureDuplicateFaceFinishes(
+    const Handle(OcctDocument)& theOwner,
+    const TDF_Label& theDefinition,
+    const Standard_Size theMaximumLabels,
+    std::vector<LinearArrayFaceFinish>& theFinishes) noexcept
+{
+    theFinishes.clear();
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(TDocStd_Document) theDocument = theOwner.IsNull()
+            ? Handle(TDocStd_Document)() : theOwner->Document();
+        if (theDocument.IsNull() || theDefinition.IsNull()
+            || theDefinition.Data() != theDocument->GetData()
+            || theMaximumLabels == 0) return Standard_False;
+        const auto aShapeTool = XCAFDoc_DocumentTool::ShapeTool(theDocument->Main());
+        if (aShapeTool.IsNull()) return Standard_False;
+        const Handle(XCAFDoc_ColorTool) aColorTool =
+            XCAFDoc_DocumentTool::CheckColorTool(theDocument->Main())
+            ? XCAFDoc_DocumentTool::ColorTool(theDocument->Main())
+            : Handle(XCAFDoc_ColorTool)();
+        const Handle(XCAFDoc_LayerTool) aLayerTool =
+            XCAFDoc_DocumentTool::CheckLayerTool(theDocument->Main())
+            ? XCAFDoc_DocumentTool::LayerTool(theDocument->Main())
+            : Handle(XCAFDoc_LayerTool)();
+        Standard_Size aLabelCount = 0;
+        for (TDF_ChildIterator anItem(theDefinition, Standard_False);
+             anItem.More(); anItem.Next()) {
+            if (++aLabelCount > theMaximumLabels) {
+                return Standard_False;
+            }
+            const TDF_Label& aLabel = anItem.Value();
+            if (!XCAFDoc_ShapeTool::IsSubShape(aLabel)) {
+                continue;
+            }
+            TDF_LabelSequence aLayers;
+            if (aLabel.IsNull()
+                || (!aColorTool.IsNull()
+                    && (aColorTool->IsSet(aLabel, XCAFDoc_ColorGen)
+                        || aColorTool->IsSet(aLabel, XCAFDoc_ColorSurf)
+                        || aColorTool->IsSet(aLabel, XCAFDoc_ColorCurv)
+                        || !XCAFDoc_ColorTool::IsVisible(aLabel)))
+                || (!aLayerTool.IsNull()
+                    && aLayerTool->GetLayers(aLabel, aLayers)
+                    && !aLayers.IsEmpty())) {
+                return Standard_False;
+            }
+            const auto aVisual = XCAFDoc_VisMaterialTool::GetShapeMaterial(aLabel);
+            if (aVisual.IsNull()) continue;
+            const TopoDS_Shape aFace = XCAFDoc_ShapeTool::GetShape(aLabel);
+            XCAFDoc_VisMaterialPBR aPbr;
+            if (aFace.IsNull() || aFace.ShapeType() != TopAbs_FACE
+                || !aShapeTool->IsSubShape(theDefinition, aFace)
+                || !theOwner->TryPBRMaterialForLabel(aLabel, aPbr)
+                || !aPbr.BaseColorTexture.IsNull()
+                || !aPbr.EmissiveTexture.IsNull()
+                || !aPbr.MetallicRoughnessTexture.IsNull()
+                || !aPbr.OcclusionTexture.IsNull()
+                || !aPbr.NormalTexture.IsNull()
+                || aPbr.BaseColor.Alpha() != 1.0f) return Standard_False;
+            const auto isUnit = [](const double value) {
+                return std::isfinite(value) && value >= 0.0 && value <= 1.0;
+            };
+            const auto& aColor = aPbr.BaseColor.GetRGB();
+            if (!isUnit(aColor.Red()) || !isUnit(aColor.Green())
+                || !isUnit(aColor.Blue()) || !isUnit(aPbr.Metallic)
+                || !isUnit(aPbr.Roughness) || !std::isfinite(aPbr.RefractionIndex)
+                || aPbr.RefractionIndex < 1.0f || aPbr.RefractionIndex > 3.0f)
+                return Standard_False;
+            for (int axis = 0; axis < 3; ++axis)
+                if (!std::isfinite(aPbr.EmissiveFactor[axis])
+                    || aPbr.EmissiveFactor[axis] < 0.0f
+                    || aPbr.EmissiveFactor[axis] > 65504.0f) return Standard_False;
+
+            // SaveObjectPBRMaterials writes this canonical opaque scalar form.
+            // Refuse imported/custom culling, alpha or Common definitions rather
+            // than silently converting them during the independent copy.
+            Handle(XCAFDoc_VisMaterial) aCanonical = new XCAFDoc_VisMaterial();
+            aCanonical->SetPbrMaterial(aPbr);
+            aCanonical->SetCommonMaterial(aCanonical->ConvertToCommonMaterial());
+            aCanonical->SetAlphaMode(Graphic3d_AlphaMode_Opaque, 0.5f);
+            aCanonical->SetFaceCulling(Graphic3d_TypeOfBackfacingModel_Auto);
+            if (!aVisual->IsEqual(aCanonical)) return Standard_False;
+            for (const auto& anExisting : theFinishes)
+                if (anExisting.face.IsSame(aFace)) return Standard_False;
+            theFinishes.push_back({aFace, aPbr});
+        }
+        return Standard_True;
+    } catch (...) {
+        theFinishes.clear();
+        return Standard_False;
+    }
+}
+
+Standard_Boolean DuplicateFaceFinishesMatch(
+    const std::vector<LinearArrayFaceFinish>& theExpected,
+    const std::vector<LinearArrayFaceFinish>& theActual) noexcept
+{
+    if (theExpected.size() != theActual.size()) return Standard_False;
+    for (const auto& expected : theExpected) {
+        const auto found = std::find_if(theActual.begin(), theActual.end(),
+            [&expected](const auto& actual) { return expected.face.IsEqual(actual.face); });
+        if (found == theActual.end()) return Standard_False;
+        const auto& a = expected.material;
+        const auto& b = found->material;
+        // Quantity_Color's equality is tolerant. Recovery needs the exact
+        // captured scalar values as well as the same face binding.
+        if (!a.IsEqual(b)
+            || a.BaseColor.GetRGB().Red() != b.BaseColor.GetRGB().Red()
+            || a.BaseColor.GetRGB().Green() != b.BaseColor.GetRGB().Green()
+            || a.BaseColor.GetRGB().Blue() != b.BaseColor.GetRGB().Blue())
+            return Standard_False;
+    }
+    return Standard_True;
+}
+
+
         // A general transform represents an oval cylinder as a rational
         // spline. Prove an extrusion from its complete control net, rather
         // than confusing a tangent to an arbitrary spline with a generator.
@@ -1371,6 +1489,7 @@ namespace core3d {
                 profile::Record sourceProfile;
                 OcctObjectNameState sourceName;
                 pattern_recipe_clone::Source sourceSweepLoft;
+                std::vector<LinearArrayFaceFinish> sourceFinishes;
                 if (duplicate.sourceLabel.IsNull()
                     || duplicate.sourceLabel.Data() != document->GetData()
                     || duplicate.originalOwnerShape.IsNull()
@@ -1381,6 +1500,8 @@ namespace core3d {
                     || !pattern_recipe_clone::IsEqual(sourceSweepLoft, duplicate.originalSweepLoft)
                     || !myDoc->CaptureObjectNameStateForLabel(duplicate.sourceLabel, sourceName)
                     || !sourceName.IsEqual(duplicate.originalName)
+                    || !CaptureDuplicateFaceFinishes(myDoc, duplicate.sourceLabel, profile::MaximumLabels, sourceFinishes)
+                    || !DuplicateFaceFinishesMatch(duplicate.originalFaceFinishes, sourceFinishes)
                     || sourceProfile.IsCurrent(document, duplicate.sourceLabel) != duplicate.originalProfileCurrent
                     || sourceName.object.enclosure.IsCurrent(document, duplicate.sourceLabel)
                         != duplicate.originalEnclosureCurrent) {
@@ -1412,7 +1533,11 @@ namespace core3d {
 						duplicate.resultLabel,
 						storedReferenceAxis);
                 OcctObjectNameState actualName;
+                std::vector<LinearArrayFaceFinish> storedFinishes;
 				if (!duplicate.profileCandidateSealed
+                    || !duplicate.faceFinishesSealed
+                    || !CaptureDuplicateFaceFinishes(myDoc, duplicate.resultLabel, profile::MaximumLabels, storedFinishes)
+                    || !DuplicateFaceFinishesMatch(duplicate.expectedFaceFinishes, storedFinishes)
                     || !duplicate.enclosureCandidateSealed
                     || !duplicate.sweepLoftCandidateSealed
                     || !actualEnclosure.IsEqual(duplicate.candidateEnclosure)
@@ -1712,7 +1837,7 @@ namespace core3d {
         duplicationRequests.reserve(sourceLabels.size());
         for (const auto& label : sourceLabels)
             duplicationRequests.push_back({label, 1U, false, true, false, true, false,
-                                            kAdmitAnalyticBooleanDuplicate});
+                                            kAdmitAnalyticBooleanDuplicate, true});
 		if (!myDoc->CanDuplicateGeometryDefinitions(duplicationRequests)) {
 			return;
 		}
@@ -1829,6 +1954,22 @@ namespace core3d {
                 duplicate.originalOwnerShape = source.ownerShape;
                 duplicate.originalProfileCurrent = source.profileCurrent;
                 duplicate.originalSweepLoft = source.sweepLoft;
+                // Use the same canonical scalar-face contract as Repeat. The
+                // source and the copied face must both belong to these solids.
+                if (!CaptureDuplicateFaceFinishes(myDoc, source.label,
+                        profile::MaximumLabels, duplicate.originalFaceFinishes)) return;
+                for (const auto& finish : duplicate.originalFaceFinishes) {
+                    const auto copiedFace = shapeCopy.ModifiedShape(finish.face);
+                    if (copiedFace.IsNull() || copiedFace.ShapeType() != TopAbs_FACE
+                        || copiedFace.IsPartner(finish.face)) return;
+                    bool found = false;
+                    for (TopExp_Explorer faces(copy->Shape(), TopAbs_FACE); faces.More(); faces.Next())
+                        if (faces.Current().IsSame(copiedFace)) { found = true; break; }
+                    if (!found) return;
+                    for (const auto& previous : duplicate.expectedFaceFinishes)
+                        if (previous.face.IsSame(copiedFace)) return;
+                    duplicate.expectedFaceFinishes.push_back({copiedFace, finish.material});
+                }
                 if (!source.savedProfile.label.IsNull()) {
                     duplicate.preparedProfileIdentifier = OcctDocument::NewProfileIdentifier();
                     if (!profile::IsIdentifier(duplicate.preparedProfileIdentifier)
@@ -1854,6 +1995,9 @@ namespace core3d {
                             destinationParameters, treatmentBudget,
                             duplicate.preparedTreatmentCopy, replayRoot)) return;
                     if (duplicate.preparedTreatmentCopy) {
+                        // Replay generates another solid without the copy's
+                        // face correspondence. Match Repeat's fail-closed rule.
+                        if (!duplicate.expectedFaceFinishes.empty()) return;
                         if (replayRoot.IsNull() || replayRoot.IsPartner(source.ownerShape)
                             || !IsTopologicallyValid(replayRoot)) return;
                         for (const DuplicatePendingResult& existing : duplicates) {
@@ -1998,6 +2142,25 @@ namespace core3d {
 					retainRetryableOrUnknown();
 					return;
 				}
+                const auto shapeTool = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+                if (shapeTool.IsNull()) { retainRetryableOrUnknown(); return; }
+                std::vector<OcctPBRMaterialUpdate> faceUpdates;
+                for (const auto& finish : duplicate.expectedFaceFinishes) {
+                    const auto faceLabel = shapeTool->AddSubShape(label, finish.face);
+                    if (faceLabel.IsNull() || !XCAFDoc_ShapeTool::GetShape(faceLabel).IsEqual(finish.face)) {
+                        retainRetryableOrUnknown(); return;
+                    }
+                    faceUpdates.push_back({faceLabel, finish.material});
+                }
+                if (!faceUpdates.empty() && !myDoc->SaveObjectPBRMaterials(faceUpdates)) {
+                    retainRetryableOrUnknown(); return;
+                }
+                std::vector<LinearArrayFaceFinish> storedFinishes;
+                if (!CaptureDuplicateFaceFinishes(myDoc, label, profile::MaximumLabels, storedFinishes)
+                    || !DuplicateFaceFinishesMatch(duplicate.expectedFaceFinishes, storedFinishes)) {
+                    retainRetryableOrUnknown(); return;
+                }
+                duplicate.faceFinishesSealed = true;
 				duplicate.entityIdentifier =
 					myDoc->EntityIdentifierForLabel(label);
 				duplicate.definitionIdentifier =
@@ -2554,6 +2717,16 @@ namespace core3d {
         }
     }
 
+    void ObjectInteractor::publishLiveMove(bool ended) noexcept {
+        if (ended && !_liveMoveSamplesActive) return;
+        _liveMoveSamplesActive = !ended;
+        try {
+            if (_liveMoveChangedCallback) _liveMoveChangedCallback(ended);
+        } catch (...) {
+            // Optional observation must not abort or commit a model edit.
+        }
+    }
+
     void ObjectInteractor::applyGeometrySnapping() noexcept {
         _geometryMoveSnap.reset(); syncGeometrySnapHighlight();
         if (_geometrySnappingTolerance <= 0 || _manipulator.IsNull()
@@ -2775,6 +2948,10 @@ namespace core3d {
                     && _manipulator->ActiveMode() == AIS_MM_Translation) {
                     publishGeometrySnapFeedback(false);
                 }
+                if (_manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
+                    && _manipulator->ActiveMode() == AIS_MM_Translation) {
+                    publishLiveMove(false);
+                }
                 return true;
             }
         }
@@ -2819,6 +2996,63 @@ namespace core3d {
                 trace[prefix + std::to_string((column - 1) * 4 + row - 1)] =
                     row == 4 ? (column == 4 ? 1.0 : 0.0) : transform.Value(row, column);
             }
+        }
+    }
+
+    bool ObjectInteractor::debugScaleHandleFractions(std::array<double, 8>& theFractions) noexcept {
+        theFractions.fill(-1);
+        if (_manipulator.IsNull() || !_manipulator->IsAttached() || myView.IsNull()
+            || myContext.IsNull() || myView->Window().IsNull()
+            || isManipulatorGestureActive() || hasUnresolvedEdit()) {
+            return false;
+        }
+        try {
+            OCC_CATCH_SIGNALS
+            Standard_Integer width = 0, height = 0;
+            myView->Window()->Size(width, height);
+            if (width <= 0 || height <= 0) return false;
+            Standard_Integer cx = 0, cy = 0;
+            const gp_Pnt centre = _manipulator->Position().Location();
+            myView->Convert(centre.X(), centre.Y(), centre.Z(), cx, cy);
+            const int reach = std::max(64, int(_manipulatorSide * 2.5f));
+            _debugScaleProbeFrame = {double(width), double(height), double(cx), double(cy), double(_manipulatorSide)};
+            std::array<std::vector<std::pair<int, int>>, 4> hits;
+            _debugScaleProbeHits.clear();
+            for (int dy = -reach; dy <= reach; dy += 3) {
+                for (int dx = -reach; dx <= reach; dx += 3) {
+                    const int x = cx + dx, y = cy + dy;
+                    if (x < 0 || y < 0 || x >= width || y >= height) continue;
+                    myContext->MoveTo(x, y, myView, Standard_False);
+                    // What the hit test detects under THIS pixel (the manipulator keeps its
+                    // last active mode after the finger moves off, so that is not enough).
+                    if (!myContext->HasDetected()
+                        || myContext->DetectedInteractive() != _manipulator) continue;
+                    const Handle(AIS_ManipulatorOwner) owner =
+                        Handle(AIS_ManipulatorOwner)::DownCast(myContext->DetectedOwner());
+                    if (owner.IsNull()) continue;
+                    int bucket = -1;
+                    if (owner->Mode() == AIS_MM_ScalingUniform) bucket = 3;
+                    else if (owner->Mode() == AIS_MM_Scaling) bucket = owner->Index();
+                    if (bucket < 0 || bucket > 3) continue;
+                    hits[bucket].emplace_back(x, y);
+                    _debugScaleProbeHits.push_back({x, y, bucket});
+                }
+            }
+            _manipulator->DeactivateCurrentMode();
+            myContext->ClearDetected(Standard_False);
+            for (int bucket = 0; bucket < 4; ++bucket) {
+                if (hits[bucket].empty()) continue;
+                // The middle of the pixels where the hit test finds this handle.
+                double sumX = 0, sumY = 0, count = 0;
+                for (const auto& [x, y] : hits[bucket]) { sumX += x; sumY += y; count += 1; }
+                if (count > 0) {
+                    theFractions[2 * bucket] = sumX / count / width;
+                    theFractions[2 * bucket + 1] = sumY / count / height;
+                }
+            }
+            return true;
+        } catch (...) {
+            return false;
         }
     }
 

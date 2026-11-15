@@ -2071,6 +2071,12 @@ Standard_Boolean ShellOperationController::abortOwnedCommand() noexcept
 ShellApplyResult
 ShellOperationController::finishCommittedOperation() noexcept
 {
+    if (!myDoc->SettleOrdinaryNamingHistory(myNamingHistory, Standard_True)) {
+        myState = ShellPreviewState::OutcomeUnknown;
+        myCanApply = Standard_True;
+        notifyPreviewStateChanged();
+        return ShellApplyResult::NoChange;
+    }
     myOwnsDocumentCommand = Standard_False;
     if (!discardPreview(Standard_False)) {
         myState = ShellPreviewState::OutcomeUnknown;
@@ -2111,7 +2117,9 @@ ShellApplyResult ShellOperationController::apply() noexcept
         if (aState == DocumentState::Candidate) {
             return finishCommittedOperation();
         }
-        if (aState == DocumentState::Original) {
+        if (aState == DocumentState::Original
+            && myDoc->SettleOrdinaryNamingHistory(myNamingHistory, Standard_False)) {
+            myNamingHistory.reset();
             myPendingCandidate.Nullify();
             myPendingProfile.reset();
             myOwnsDocumentCommand = Standard_False;
@@ -2161,6 +2169,10 @@ ShellApplyResult ShellOperationController::apply() noexcept
             || myPreviewResult->Shape().IsNull()) {
             return ShellApplyResult::NoChange;
         }
+        if (!mySource->profileRecord.label.IsNull()) {
+            myNamingHistory = myDoc->PrepareOrdinaryNamingHistory(0, mySource->label);
+            if (!myNamingHistory) return ShellApplyResult::NoChange;
+        }
         myPendingCandidate = myPreviewResult->Shape();
         myPendingProfile.reset();
         if (!mySource->profileShellOpenings.empty()) {
@@ -2183,6 +2195,9 @@ ShellApplyResult ShellOperationController::apply() noexcept
         aDocument->NewCommand();
         if (!aDocument->HasOpenCommand()) {
             myOwnsDocumentCommand = Standard_False;
+            if (!myDoc->SettleOrdinaryNamingHistory(myNamingHistory, Standard_False))
+                return resolveAfterMutation();
+            myNamingHistory.reset();
             myPendingCandidate.Nullify();
             myPendingProfile.reset();
             myCanApply = Standard_True;
@@ -2217,6 +2232,8 @@ ShellApplyResult ShellOperationController::apply() noexcept
                 mySource->transform)) {
             return resolveAfterMutation();
         }
+        if (myNamingHistory && !myDoc->CaptureOrdinaryNamingCandidate(myNamingHistory))
+            return resolveAfterMutation();
         try {
             Standard_Boolean aCommitReported =
                 aDocument->CommitCommand();
@@ -2271,6 +2288,7 @@ Standard_Boolean ShellOperationController::cancel() noexcept
 
 void ShellOperationController::clearState() noexcept
 {
+    myNamingHistory.reset();
     mySource.reset();
     myPreviewResult.Nullify();
     myPendingCandidate.Nullify();

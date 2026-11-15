@@ -19,6 +19,8 @@
 @optional
 //! Synchronous read-only snap sample; ended means native finish/cancel is resolved.
 -(void)viewer:(id)sender didChangeGeometrySnapFeedbackEnded:(BOOL)ended;
+//! Synchronous read-only Move step (any snapping); ended after native finish/cancel.
+-(void)viewer:(id)sender didChangeLiveMoveEnded:(BOOL)ended;
 -(void)viewer:(id)sender
     willBeginPrimaryInteractionAtDrawablePoint:(CGPoint)point
                                   drawableSize:(CGSize)drawableSize;
