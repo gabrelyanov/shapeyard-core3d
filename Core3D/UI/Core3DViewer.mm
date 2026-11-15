@@ -15565,6 +15565,10 @@ void Core3DViewer::Select(int theX, int theY) {
     for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected())
         oldOwners.insert(myContext->SelectedOwner().get());
     int oldCount = selectedCount();
+    // Forget picks of edges that are no longer selected (a selection-mode change clears the
+    // selection but keeps the same owners) before this tap, so an edge picked again records
+    // where this tap landed, not where an earlier one did.
+    (void)measurePicksForCurrentSelection();
     OcctViewer::Select(theX, theY, AIS_SelectionScheme::AIS_SelectionScheme_XOR);
 
     try {
