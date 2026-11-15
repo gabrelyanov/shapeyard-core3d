@@ -25416,6 +25416,10 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     return core3d::scene::EdgeDrawClassesEnabled();
 }
 
++ (void)debugSetBooleanPlausibilityGuardSkipped:(BOOL)skipped {
+    Core3DDebugSetBooleanPlausibilityGuardSkipped(skipped);
+}
+
 + (BOOL)debugBooleanResultIsPlausibleForOperation:(NSInteger)operation
                                      inputVolumes:(NSArray<NSNumber *> *)inputVolumes
                                      resultVolume:(double)resultVolume

@@ -1104,6 +1104,9 @@ Standard_EXPORT void Core3DDebugSetRetainedFilletFailureCount(Standard_Integer c
 Standard_EXPORT bool Core3DBooleanResultIsPlausible(
     int operation, const std::vector<double>& inputVolumes, double resultVolume,
     const double* inputsBox, const double* resultBox) noexcept;
+//! Check seam (debug builds): with the guard skipped a check can show what the
+//! builder stored before the guard existed. Never skipped otherwise.
+Standard_EXPORT void Core3DDebugSetBooleanPlausibilityGuardSkipped(bool skipped) noexcept;
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanWedgeProbe(Standard_Integer scenario);
 Standard_EXPORT std::map<std::string,bool> Core3DDebugNativeBooleanOwnerProbe(Standard_Integer scenario);
 //! One-shot, non-reentrant capture of canonical pre-G0 writer bytes. The map

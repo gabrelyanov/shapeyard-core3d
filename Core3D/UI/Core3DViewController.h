@@ -1848,6 +1848,10 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(debugSetLeavesSmoothEdgesAndSeamsOut(_:));
 + (BOOL)debugLeavesSmoothEdgesAndSeamsOut
     NS_SWIFT_NAME(debugLeavesSmoothEdgesAndSeamsOut());
+//! Check seam: skips the Join / Cut / Overlap result guard, so a check can show
+//! what was stored before the guard existed. Debug builds only.
++ (void)debugSetBooleanPlausibilityGuardSkipped:(BOOL)skipped
+    NS_SWIFT_NAME(debugSetBooleanPlausibilityGuardSkipped(_:));
 //! The numbers-only guard of Join / Cut / Overlap (0, 1, 2), exactly as the
 //! engine applies it: inputVolumes[0] is the part that stays; boxes are min x y z,
 //! max x y z, or nil to judge by volume alone.

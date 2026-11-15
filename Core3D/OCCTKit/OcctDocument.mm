@@ -12909,6 +12909,27 @@ Standard_Boolean OcctDocument::IsBooleanResultLabel(const TDF_Label& label) cons
 }
 
 
+namespace {
+std::atomic_bool gBooleanPlausibilityGuardSkipped{false};
+}
+
+void Core3DDebugSetBooleanPlausibilityGuardSkipped(const bool skipped) noexcept {
+#if DEBUG
+    gBooleanPlausibilityGuardSkipped.store(skipped);
+#else
+    (void)skipped;
+#endif
+}
+
+// The guard as the two Join paths use it: the numbers test, unless a debug check has asked
+// to see what happens without it.
+static bool BooleanResultPassesGuard(
+    const int operation, const std::vector<double>& inputVolumes, const double resultVolume,
+    const double* inputsBox, const double* resultBox) noexcept {
+    if (gBooleanPlausibilityGuardSkipped.load()) return true;
+    return Core3DBooleanResultIsPlausible(operation, inputVolumes, resultVolume, inputsBox, resultBox);
+}
+
 bool Core3DBooleanResultIsPlausible(
     const int operation, const std::vector<double>& inputVolumes, const double resultVolume,
     const double* inputsBox, const double* resultBox) noexcept {
@@ -13086,7 +13107,7 @@ bool BakedBooleanShapeOfMany(const TopoDS_Shape& targetStored, const gp_Trsf& ta
                     boxes = true;
                 }
             }
-            if (!Core3DBooleanResultIsPlausible(operation, volumes, mass.Mass(),
+            if (!BooleanResultPassesGuard(operation, volumes, mass.Mass(),
                     boxes ? inputsBox : nullptr, boxes ? resultBox : nullptr)) {
                 refusal = "unreliable-result";
                 result.Nullify();
@@ -13780,7 +13801,7 @@ core3d::authored_parameter::PairPrepareReply OcctDocument::PrepareBooleanSources
                 resultBox[axis] = observation.resultBounds[axis];
                 resultBox[axis + 3] = observation.resultBounds[axis + 3];
             }
-            if (!Core3DBooleanResultIsPlausible(0,
+            if (!BooleanResultPassesGuard(0,
                     {observation.sourceVolumes[0], observation.sourceVolumes[1]},
                     observation.resultVolume, inputsBox, resultBox))
                 return PairPrepareRefused(PairRefusal::InvalidResult);
