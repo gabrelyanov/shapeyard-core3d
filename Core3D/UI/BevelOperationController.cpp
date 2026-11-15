@@ -125,11 +125,14 @@ dispatch_queue_t BevelWorkerQueue()
 
 Standard_Boolean IsBRepModelingLabel(
     const Handle(OcctDocument)& theDocument,
-    const TDF_Label& theLabel) noexcept
+    const TDF_Label& theLabel,
+    const Standard_Boolean allowSavedCut = Standard_False) noexcept
 {
     if (theDocument.IsNull() || theLabel.IsNull()
         || !theDocument->IsEditableFreeSimpleDefinitionLabel(theLabel)
-        || !theDocument->HasNoSavedSweepForTopology(theLabel)) {
+        || (!theDocument->HasNoSavedSweepForTopology(theLabel)
+            && !(allowSavedCut
+                && theDocument->CanBakeSavedCutForFaceEdit(theLabel)))) {
         return Standard_False;
     }
     const OcctGeometryRepresentation aRepresentation =
@@ -1095,7 +1098,8 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
                 || (aSelection.selectionMode != anObjectSelectionMode
                     && aSelection.selectionMode != aFaceSelectionMode
                     && aSelection.selectionMode != anEdgeSelectionMode)
-                || !IsBRepModelingLabel(myDoc, aSelection.documentLabel)
+                || !IsBRepModelingLabel(
+                    myDoc, aSelection.documentLabel, Standard_True)
                 || !myDoc->IsPresentationEditable(aSelection.original)
                 || !myDoc->ShapeLabel(aSelection.original).IsEqual(
                     aSelection.documentLabel)
@@ -1208,17 +1212,24 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
             TDF_Label aBakedBooleanRecord;
             const bool bakesBooleanResult = !hasRetainedCapture
                 && myDoc->BooleanResultRecordForBake(aSelection.documentLabel, aBakedBooleanRecord);
+            // A standalone saved Hole is baked inside this tool's own Apply
+            // command (PrepareBooleanResultForFaceEdit), exactly as Push-pull
+            // does; Undo restores the resizable hole record.
+            const Standard_Boolean bakesSavedCut = !hasRetainedCapture && !bakesBooleanResult
+                && coverage == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
+                && myDoc->CanBakeSavedCutForFaceEdit(aSelection.documentLabel);
             if ((hasRetainedCapture
                     && (!RetainedBevelCoverageMatches(
                             coverage, aSelection.retainedCapture)
                         || theSelection.size() != 1
                         || !myRetainedAdapter))
-                || (!hasRetainedCapture && !bakesBooleanResult
+                || (!hasRetainedCapture && !bakesBooleanResult && !bakesSavedCut
                     && coverage != OcctRetainedRecipeCoverage::Absent)) {
                 return Standard_False;
             }
             aSource.bakedBooleanRecord = aBakedBooleanRecord;
             aSource.retainedCapture=aSelection.retainedCapture;
+            aSource.bakesSavedCut=bakesSavedCut;
             if (!aSelection.edgeTopologyIndices.empty()
                 && aSelection.edgeTopologyIndices
                     != aSource.edgeTopologyIndices) {
@@ -1265,7 +1276,10 @@ Standard_Boolean BevelOperationController::preparedSourcesAreCurrent(
                 || aSource.shape.IsNull() || aSource.edges.empty()
                 || aSource.topologyNodeCount == 0
                 || aStoredShape.IsNull()
-                || !IsBRepModelingLabel(myDoc, aSource.label)
+                || !IsBRepModelingLabel(
+                    myDoc, aSource.label, aSource.bakesSavedCut)
+                || (aSource.bakesSavedCut
+                    && !myDoc->CanBakeSavedCutForFaceEdit(aSource.label))
                 || !myDoc->IsPresentationEditable(aSource.original)
                 || !myDoc->ShapeLabel(aSource.original).IsEqual(
                     aSource.label)
@@ -1991,6 +2005,13 @@ BevelApplyResult BevelOperationController::apply() noexcept
 				&& aCurrentRecord.IsEqual(source.bakedBooleanRecord)) {
 				continue;
 			}
+			// A standalone saved Hole admitted at begin: baked in the command (push-pull lane).
+			if (source.bakesSavedCut
+				&& aCoverage
+					== OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
+				&& myDoc->CanBakeSavedCutForFaceEdit(source.label)) {
+				continue;
+			}
 			OcctPlainProfileOperationCapture aCapture;
 			if (aCoverage != OcctRetainedRecipeCoverage::CurrentProfile
 				|| !myDoc->CapturePlainProfileOperationSource(
@@ -2212,9 +2233,12 @@ BevelApplyResult BevelOperationController::apply() noexcept
                 TDF_Label record=source.bakedBooleanRecord;
                 if(!record.IsNull()) record.ForgetAllAttributes(Standard_True);
                 // Colours put on single faces stay on the faces they were on (founder test 14 Nov).
+                // A standalone saved Hole is baked first, in this same command (push-pull lane).
                 std::vector<TDF_Label> faceLabels;
                 std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> colouredFaces;
-                staged=myDoc->CaptureFaceColours(source.label,1.0,faceLabels,colouredFaces)
+                staged=(!source.bakesSavedCut
+                        ||myDoc->PrepareBooleanResultForFaceEdit(source.label))
+                    &&myDoc->CaptureFaceColours(source.label,1.0,faceLabels,colouredFaces)
                     &&myDoc->ReplaceShape(source.label,myPreviewResults[anIndex])
                     &&myDoc->CarryFaceColours(source.label,myPreviewResults[anIndex]->Shape(),
                         faceLabels,colouredFaces);

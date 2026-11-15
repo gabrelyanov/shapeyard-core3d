@@ -312,9 +312,12 @@ Core3DModelCapability DocumentExportCapabilities(
                 // 23 and 30, 15 Nov). Offer them whenever that bake is possible. The constant
                 // itself stays as it is: By numbers pins it.
                 std::uint64_t unsupported=core3d::cylindrical_cut::UnsupportedOccurrenceCapabilities;
+                // Bevel and Round bake it in their own Apply command too (push-pull lane 15 Nov,
+                // 5785354): they are offered as well.
                 if(document->CanBakeSavedCutForFaceEdit(label)) {
                     unsupported&=~(static_cast<std::uint64_t>(Core3DModelCapabilityBoolean)
-                        |static_cast<std::uint64_t>(Core3DModelCapabilityExtrusion));
+                        |static_cast<std::uint64_t>(Core3DModelCapabilityExtrusion)
+                        |static_cast<std::uint64_t>(Core3DModelCapabilityChamfer));
                 }
                 definitionCapabilities=static_cast<Core3DModelCapability>(
                     static_cast<std::uint64_t>(definitionCapabilities)&~unsupported);
