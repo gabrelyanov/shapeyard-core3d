@@ -4,6 +4,7 @@
 //
 
 #include "BevelOperationController.hpp"
+#include "../OCCTKit/FilletFailureClassifier.hxx"
 
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBndLib.hxx>
@@ -82,6 +83,7 @@ struct BevelPreviewWorkerResult {
     Standard_Real value = 0.0;
     std::string fingerprint;
     BevelPreviewWorkerOutcome outcome = BevelPreviewWorkerOutcome::Failed;
+    BevelFailureKind failureKind = BevelFailureKind::Other;
     std::vector<TopoDS_Shape> results;
     std::vector<std::shared_ptr<const retained_edge_treatment::DetachedResult>>
         retainedResults;
@@ -759,6 +761,7 @@ private:
         };
         if (wasCancelled()) {
             aResult.outcome = BevelPreviewWorkerOutcome::Cancelled;
+            aResult.failureKind = BevelFailureKind::None;
             return aResult;
         }
 
@@ -777,6 +780,7 @@ private:
                 if (wasCancelled() || aSource.shape.IsNull()
                     || aSource.edges.empty()) {
                     aResult.outcome = BevelPreviewWorkerOutcome::Cancelled;
+                    aResult.failureKind = BevelFailureKind::None;
                     aResult.results.clear();
                     return aResult;
                 }
@@ -789,6 +793,10 @@ private:
                         .BuildRetainedBevelPreview(
                             aSource.retainedInput, aRefusal);
                     if (!aRetainedResult) {
+                        aResult.failureKind = aRefusal
+                                == retained_edge_treatment::Refusal::Clearance
+                            ? BevelFailureKind::RadiusRefused
+                            : BevelFailureKind::Other;
                         return aResult;
                     }
                     aCandidate = aRetainedResult->result();
@@ -809,12 +817,17 @@ private:
                     }
                     aBuilder.Build(aProgress->Start());
                     if (!aBuilder.IsDone()) {
+                        aResult.failureKind =
+                            fillet_failure::IsClearanceRefusal(aBuilder)
+                                ? BevelFailureKind::RadiusRefused
+                                : BevelFailureKind::Other;
                         return aResult;
                     }
                     aCandidate = aBuilder.Shape();
                 }
                 if (wasCancelled()) {
                     aResult.outcome = BevelPreviewWorkerOutcome::Cancelled;
+                    aResult.failureKind = BevelFailureKind::None;
                     aResult.results.clear();
                     return aResult;
                 }
@@ -838,6 +851,7 @@ private:
                 return aResult;
             }
             aResult.outcome = BevelPreviewWorkerOutcome::Success;
+            aResult.failureKind = BevelFailureKind::None;
             return aResult;
         } catch (...) {
             aResult.results.clear();
@@ -970,6 +984,18 @@ Standard_Boolean BevelOperationController::canBegin(
     }
     std::vector<Source> aSources;
     return tryPrepareSources(theSelection, aSources);
+}
+
+Standard_Boolean BevelOperationController::canBeginRound(
+    const std::vector<BevelSourceSelection>& theSelection) const noexcept
+{
+    if (theSelection.size() != 1) {
+        return Standard_False;
+    }
+    std::vector<Source> aSources;
+    return (!hasActiveOperation() || canAtomicallyReplaceSelectingSources())
+        && tryPrepareSources(theSelection, aSources)
+        && aSources.size() == 1;
 }
 
 Standard_Boolean BevelOperationController::tryPrepareSources(
@@ -1267,6 +1293,56 @@ Standard_Boolean BevelOperationController::begin(
     }
 }
 
+Standard_Boolean BevelOperationController::beginRound(
+    const std::vector<BevelSourceSelection>& theSelection) noexcept
+{
+    // begin() repeats the full bounded source proof immediately before it
+    // creates or replaces the ledger. The explicit count keeps this entry
+    // point from ever inheriting legacy Bevel's multi-body authority.
+    if (theSelection.size() != 1 || !begin(theSelection)) {
+        return Standard_False;
+    }
+    try {
+        OCC_CATCH_SIGNALS
+        if (mySources.size() != 1 || myDoc.IsNull()) {
+            (void)cancel();
+            return Standard_False;
+        }
+        const Handle(TDocStd_Document) aDocument = myDoc->Document();
+        Standard_Real aDocumentMetersPerUnit = 0.001;
+        const Standard_Boolean hasUnit = !aDocument.IsNull()
+            && XCAFDoc_DocumentTool::GetLengthUnit(
+                aDocument, aDocumentMetersPerUnit);
+        const Standard_Real aScale =
+            std::abs(mySources.front().transform.ScaleFactor());
+        const Standard_Real anEffectiveMetersPerUnit =
+            aDocumentMetersPerUnit * aScale;
+        Standard_Real aMaximumRadiusMM = 20.0;
+        if (mySources.front().retainedCapture) {
+            aMaximumRadiusMM = std::min<Standard_Real>(
+                aMaximumRadiusMM, 20.0 * aScale);
+        }
+        if ((!hasUnit && aDocumentMetersPerUnit != 0.001)
+            || !std::isfinite(aDocumentMetersPerUnit)
+            || aDocumentMetersPerUnit <= 0.0
+            || !std::isfinite(aScale) || aScale <= 0.0
+            || !std::isfinite(anEffectiveMetersPerUnit)
+            || anEffectiveMetersPerUnit <= 0.0
+            || !std::isfinite(aMaximumRadiusMM)
+            || aMaximumRadiusMM <= 0.0) {
+            (void)cancel();
+            return Standard_False;
+        }
+        myRoundOwned = Standard_True;
+        myRoundMetersPerUnit = anEffectiveMetersPerUnit;
+        myRoundMaximumRadiusMM = aMaximumRadiusMM;
+        return Standard_True;
+    } catch (...) {
+        (void)cancel();
+        return Standard_False;
+    }
+}
+
 Standard_Boolean BevelOperationController::sourcesAreCurrent() const noexcept
 {
     return preparedSourcesAreCurrent(mySources, Standard_False);
@@ -1347,6 +1423,7 @@ void BevelOperationController::cancelWorkerRequests() noexcept
     if (myGeneration != std::numeric_limits<std::uint64_t>::max()) {
         ++myGeneration;
     }
+    myFailureObservation = {myGeneration, BevelFailureKind::None};
     if (myWorker != nullptr) {
         myWorker->cancelAll();
     }
@@ -1375,6 +1452,7 @@ Standard_Boolean BevelOperationController::enqueuePreviewRequest() noexcept
         }
         BevelPreviewWorkerRequest aRequest;
         aRequest.generation = ++myGeneration;
+        myFailureObservation = {myGeneration, BevelFailureKind::None};
         aRequest.value = myValue;
         aRequest.fingerprint = aFingerprint;
         aRequest.retainedAdapter = myRetainedAdapter;
@@ -1442,12 +1520,56 @@ Standard_Boolean BevelOperationController::enqueuePreviewRequest() noexcept
 Standard_Boolean BevelOperationController::setValue(
     const Standard_Real theSignedDistance) noexcept
 {
+    return setValueImpl(theSignedDistance, Standard_False);
+}
+
+Standard_Boolean BevelOperationController::setRoundRadius(
+    const Standard_Real theRadius) noexcept
+{
+    if (!myRoundOwned || !hasActiveOperation()
+        || !std::isfinite(theRadius) || theRadius <= 0.0
+        || !std::isfinite(myRoundMetersPerUnit)
+        || myRoundMetersPerUnit <= 0.0
+        || !std::isfinite(myRoundMaximumRadiusMM)
+        || myRoundMaximumRadiusMM <= 0.0) {
+        return Standard_False;
+    }
+    const Standard_Real aRadiusMM =
+        theRadius * myRoundMetersPerUnit * 1000.0;
+    if (!std::isfinite(aRadiusMM) || aRadiusMM <= 0.0
+        || aRadiusMM > myRoundMaximumRadiusMM) {
+        return Standard_False;
+    }
+    return setValueImpl(theRadius, Standard_True);
+}
+
+Standard_Real BevelOperationController::roundMetersPerUnit() const noexcept
+{
+    return myRoundOwned && hasActiveOperation()
+        ? myRoundMetersPerUnit : 0.0;
+}
+
+Standard_Real BevelOperationController::roundMaximumRadiusMM() const noexcept
+{
+    return myRoundOwned && hasActiveOperation()
+        ? myRoundMaximumRadiusMM : 0.0;
+}
+
+Standard_Boolean BevelOperationController::setValueImpl(
+    const Standard_Real theSignedDistance,
+    const Standard_Boolean theRefuseOutOfRange) noexcept
+{
     if (!hasActiveOperation() || !std::isfinite(theSignedDistance)) {
         return Standard_False;
     }
-    const Standard_Real aValue = std::max(
-        -kMaxDistance,
-        std::min(theSignedDistance, kMaxDistance));
+    if (theRefuseOutOfRange
+        && theSignedDistance <= 0.0) {
+        return Standard_False;
+    }
+    const Standard_Real aValue = theRefuseOutOfRange
+        ? theSignedDistance
+        : std::max(-kMaxDistance,
+            std::min(theSignedDistance, kMaxDistance));
     if (std::abs(aValue - myValue) < 1.0e-9
         && (myState == BevelPreviewState::Computing
             || myState == BevelPreviewState::Ready)) {
@@ -1460,6 +1582,7 @@ Standard_Boolean BevelOperationController::setValue(
     if (needsPreviewDiscard && !discardPreview(Standard_True)) {
         myState = BevelPreviewState::Failed;
         myStateValid = Standard_False;
+        recordFailure(BevelFailureKind::Other);
         notifyPreviewStateChanged();
         return Standard_False;
     }
@@ -1479,6 +1602,7 @@ Standard_Boolean BevelOperationController::setValue(
     mySelectionFrozen = Standard_True;
     if (!enqueuePreviewRequest()) {
         myState = BevelPreviewState::Failed;
+        recordFailure(BevelFailureKind::Other);
         notifyPreviewStateChanged();
         return Standard_False;
     }
@@ -1498,13 +1622,20 @@ void BevelOperationController::acceptWorkerResult(
 #endif
         return;
     }
-    if (theResult.outcome != BevelPreviewWorkerOutcome::Success
-        || theResult.results.size() != mySources.size()
+    if (theResult.outcome != BevelPreviewWorkerOutcome::Success) {
+        myCanApply = Standard_False;
+        myState = BevelPreviewState::Failed;
+        recordFailure(theResult.failureKind);
+        notifyPreviewStateChanged();
+        return;
+    }
+    if (theResult.results.size() != mySources.size()
         || theResult.retainedResults.size() != mySources.size()
         || !sourcesAreCurrent()
         || !installPreview(theResult.results)) {
         myCanApply = Standard_False;
         myState = BevelPreviewState::Failed;
+        recordFailure(BevelFailureKind::Other);
         notifyPreviewStateChanged();
         return;
     }
@@ -1520,6 +1651,7 @@ void BevelOperationController::acceptWorkerResult(
                 (void)discardPreview(Standard_True);
                 myCanApply = Standard_False;
                 myState = BevelPreviewState::Failed;
+                recordFailure(BevelFailureKind::Other);
                 notifyPreviewStateChanged();
                 return;
             }
@@ -1528,6 +1660,7 @@ void BevelOperationController::acceptWorkerResult(
             (void)discardPreview(Standard_True);
             myCanApply = Standard_False;
             myState = BevelPreviewState::Failed;
+            recordFailure(BevelFailureKind::Other);
             notifyPreviewStateChanged();
             return;
         }
@@ -1535,6 +1668,7 @@ void BevelOperationController::acceptWorkerResult(
     myCanApply = Standard_True;
     myState = BevelPreviewState::Ready;
     mySelectionFrozen = Standard_True;
+    myFailureObservation = {myGeneration, BevelFailureKind::None};
 #ifdef DEBUG
     ++myDebugAcceptedCount;
 #endif
@@ -1688,6 +1822,23 @@ BevelPreviewState BevelOperationController::previewState() const noexcept
 std::uint64_t BevelOperationController::previewGeneration() const noexcept
 {
     return myGeneration;
+}
+
+BevelFailureObservation
+BevelOperationController::failureObservation() const noexcept
+{
+    return myRoundOwned
+        ? myFailureObservation
+        : BevelFailureObservation{myGeneration, BevelFailureKind::None};
+}
+
+void BevelOperationController::recordFailure(
+    const BevelFailureKind theKind) noexcept
+{
+    myFailureObservation = {
+        myGeneration,
+        theKind,
+    };
 }
 
 Standard_Boolean BevelOperationController::capturePreview(
@@ -2167,6 +2318,7 @@ Standard_Boolean BevelOperationController::cancel() noexcept
     if (!didDiscard) {
         myStateValid = Standard_False;
         myState = BevelPreviewState::Failed;
+        recordFailure(BevelFailureKind::Other);
         notifyPreviewStateChanged();
         return Standard_False;
     }
@@ -2185,6 +2337,10 @@ void BevelOperationController::clearState() noexcept
     mySelectionFrozen = Standard_False;
     myStateValid = Standard_True;
     myState = BevelPreviewState::Selecting;
+    myRoundOwned = Standard_False;
+    myRoundMetersPerUnit = 0.0;
+    myRoundMaximumRadiusMM = 0.0;
+    myFailureObservation = {myGeneration, BevelFailureKind::None};
 }
 
 #ifdef DEBUG

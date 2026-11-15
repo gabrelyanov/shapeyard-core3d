@@ -2698,23 +2698,34 @@ namespace core3d {
     }
 
     void ObjectInteractor::syncGeometrySnapHighlight() noexcept {
-        if (myContext.IsNull()) { _geometrySnapHighlight.Nullify(); return; }
+        if (myContext.IsNull()) {
+            _geometrySnapHighlight.Nullify();
+            _geometrySnapHighlightSource.Nullify();
+            return;
+        }
         try {
             TopoDS_Shape wanted;
             if (_geometryMoveSnap && _geometryMoveSnap->hit.kind != GeometrySnapKind::Vertex) {
                 wanted = _geometryMoveSnap->hit.topology;
             }
             if (!_geometrySnapHighlight.IsNull()) {
-                if (!wanted.IsNull() && _geometrySnapHighlight->Shape().IsSame(wanted)) { return; }
+                if (!wanted.IsNull() && _geometrySnapHighlightSource.IsSame(wanted)) { return; }
                 // Erase before Remove: never leave a stale presentation behind.
                 myContext->Erase(_geometrySnapHighlight, false);
                 myContext->Remove(_geometrySnapHighlight, false);
                 _geometrySnapHighlight.Nullify();
+                _geometrySnapHighlightSource.Nullify();
             }
             if (wanted.IsNull()) { return; }
+            // AIS presentation can populate edge polygon/triangulation caches.
+            // A transient snap must never write those caches into the saved
+            // target, even when the gesture is cancelled. Keep the original
+            // topology only for identity/feedback; draw an independent copy.
+            BRepBuilderAPI_Copy copy(wanted, Standard_True, Standard_True);
+            if (!copy.IsDone() || copy.Shape().IsNull() || copy.Shape().IsPartner(wanted)) { return; }
             // Selection tokens (design system 7.1): white, a chosen edge 3 pt,
             // a chosen face a 20 % wash with its 2 pt edge. Never selectable.
-            Handle(AIS_Shape) highlight = new AIS_Shape(wanted);
+            Handle(AIS_Shape) highlight = new AIS_Shape(copy.Shape());
             highlight->SetColor(Quantity_NOC_WHITE);
             const bool face = wanted.ShapeType() == TopAbs_FACE;
             if (face) {
@@ -2727,8 +2738,10 @@ namespace core3d {
             }
             myContext->Display(highlight, face ? AIS_Shaded : AIS_WireFrame, -1, false);
             _geometrySnapHighlight = highlight;
+            _geometrySnapHighlightSource = wanted;
         } catch (...) {
             _geometrySnapHighlight.Nullify();
+            _geometrySnapHighlightSource.Nullify();
         }
     }
 
@@ -3291,6 +3304,29 @@ namespace core3d {
 
     const bool ObjectInteractor::isManipulatorAttached() const {
         return !_manipulator.IsNull() && _manipulator->IsAttached();
+    }
+
+    bool ObjectInteractor::liveGestureOffset(double& x, double& y, double& z) const noexcept {
+        x = y = z = 0.0;
+        try {
+            if (!_manipulatorGestureActive || _manipulator.IsNull()
+                || !_manipulator->HasActiveTransformation()) { return false; }
+            const Handle(Core3DManipulatorObjectSequence) objects = _manipulator->Objects();
+            if (objects.IsNull() || objects->IsEmpty()) { return false; }
+            const Handle(AIS_InteractiveObject)& first = objects->Value(objects->Lower());
+            if (first.IsNull()) { return false; }
+            const gp_XYZ current = first->LocalTransformation().TranslationPart();
+            const gp_XYZ initial = _manipulator->StartTransformation(objects->Lower())
+                .TranslationPart();
+            const gp_XYZ offset = current - initial;
+            if (!std::isfinite(offset.X()) || !std::isfinite(offset.Y())
+                || !std::isfinite(offset.Z())) { return false; }
+            x = offset.X(); y = offset.Y(); z = offset.Z();
+            return true;
+        } catch (...) {
+            x = y = z = 0.0;
+            return false;
+        }
     }
 
     const bool ObjectInteractor::isManipulatorGestureActive() const {

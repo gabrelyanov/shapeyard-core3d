@@ -35,6 +35,17 @@ enum class BevelPreviewState : std::uint8_t {
     Failed,
 };
 
+enum class BevelFailureKind : std::uint8_t {
+    None = 0,
+    RadiusRefused,
+    Other,
+};
+
+struct BevelFailureObservation {
+    std::uint64_t generation = 0;
+    BevelFailureKind kind = BevelFailureKind::None;
+};
+
 //! Immutable selection captured on the main thread before any worker starts.
 //! Positive values produce a round fillet and negative values a flat chamfer.
 struct BevelSourceSelection {
@@ -126,7 +137,13 @@ public:
     //! presentation, controller, or document state.
     Standard_Boolean canBegin(
         const std::vector<BevelSourceSelection>& selection) const noexcept;
+    //! Direct Round is intentionally narrower than legacy signed Bevel: all
+    //! selected edges must resolve to exactly one editable solid.
+    Standard_Boolean canBeginRound(
+        const std::vector<BevelSourceSelection>& selection) const noexcept;
     Standard_Boolean begin(
+        const std::vector<BevelSourceSelection>& selection) noexcept;
+    Standard_Boolean beginRound(
         const std::vector<BevelSourceSelection>& selection) noexcept;
     void setRetainedAdapter(RetainedBevelAdapter adapter) noexcept;
 	//! Used only after an in-tool AIS selection refresh became empty/invalid.
@@ -134,6 +151,9 @@ public:
 	//! preview or retained Computing/Ready/Failed operation.
 	Standard_Boolean retireIdleSelectingSelection() noexcept;
     Standard_Boolean setValue(Standard_Real signedDistance) noexcept;
+    Standard_Boolean setRoundRadius(Standard_Real radius) noexcept;
+    Standard_Real roundMetersPerUnit() const noexcept;
+    Standard_Real roundMaximumRadiusMM() const noexcept;
     BevelApplyResult apply() noexcept;
     Standard_Boolean cancel() noexcept;
 
@@ -145,6 +165,7 @@ public:
     Standard_Boolean isSelectionFrozen() const noexcept;
     BevelPreviewState previewState() const noexcept;
     std::uint64_t previewGeneration() const noexcept;
+    BevelFailureObservation failureObservation() const noexcept;
     Standard_Boolean capturePreview(
         BevelPreviewCapture& capture) const noexcept;
     void setPreviewStateChangedCallback(std::function<void()> callback);
@@ -197,6 +218,8 @@ private:
 	Standard_Boolean canAtomicallyReplaceSelectingSources() const noexcept;
 
     Standard_Boolean enqueuePreviewRequest() noexcept;
+    Standard_Boolean setValueImpl(
+        Standard_Real value, Standard_Boolean refuseOutOfRange) noexcept;
     void acceptWorkerResult(BevelPreviewWorkerResult result) noexcept;
     void cancelWorkerRequests() noexcept;
     Standard_Boolean installPreview(
@@ -206,6 +229,7 @@ private:
     Standard_Boolean sourcesAreCurrent() const noexcept;
     std::string selectionFingerprint(Standard_Boolean& complete) const;
     void notifyPreviewStateChanged() noexcept;
+    void recordFailure(BevelFailureKind kind) noexcept;
     void clearState() noexcept;
     Standard_Boolean abortOpenCommand(
         const Handle(TDocStd_Document)& document) noexcept;
@@ -221,10 +245,14 @@ private:
     BevelPreviewState myState = BevelPreviewState::Selecting;
     Standard_Real myValue = 0.0;
     std::uint64_t myGeneration = 0;
+    BevelFailureObservation myFailureObservation;
     std::string myRequestedFingerprint;
     Standard_Boolean myCanApply = Standard_False;
     Standard_Boolean mySelectionFrozen = Standard_False;
     Standard_Boolean myStateValid = Standard_True;
+    Standard_Boolean myRoundOwned = Standard_False;
+    Standard_Real myRoundMetersPerUnit = 0.0;
+    Standard_Real myRoundMaximumRadiusMM = 0.0;
 #ifdef DEBUG
     Standard_Boolean myDebugWorkerBlocked = Standard_False;
     Standard_Size myDebugMaximumCaptureTopologyNodes =

@@ -237,6 +237,12 @@ namespace core3d {
 			//! Pure, fail-closed admission for the current Shape/Face/Edge
 			//! selection. Availability and begin share the same fresh capture.
 			Standard_Boolean canBeginBevelSelection() const noexcept;
+			Standard_Boolean canBeginRoundSelection() const noexcept;
+			Standard_Boolean beginRoundSelectionFromCurrentSelection() noexcept;
+			Standard_Boolean setRoundRadiusForSelection(Standard_Real radius) noexcept;
+			Standard_Real roundMetersPerUnit() const noexcept;
+			Standard_Real roundMaximumRadiusMM() const noexcept;
+			BevelFailureObservation roundFailureObservation() const noexcept;
 			Standard_Boolean setChamferValueForSelection(const Standard_Real value);
 			BevelApplyResult applyBevel() noexcept;
 			Standard_Boolean canApplyBevel() const noexcept;
@@ -306,6 +312,11 @@ namespace core3d {
             return _extrusion.splitReferenceEdge;
         }
         Standard_Boolean canApplyExtrusion() const noexcept;
+        //! Measure: exact local axis extents of the shown push/pull preview
+        //! solid, in local BRep units (multiply by extrusionMetersPerUnit()).
+        //! False while no preview is shown. Read-only.
+        Standard_Boolean extrusionPreviewExtents(
+            Standard_Real& x, Standard_Real& y, Standard_Real& z) const noexcept;
         //! A prior CommitCommand closed or threw, but the authoritative label
         //! could not yet be classified. Apply remains available solely to
         //! re-inspect; no second commit occurs while the document is closed.
