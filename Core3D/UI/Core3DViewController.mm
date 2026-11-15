@@ -20580,6 +20580,11 @@ static bool Core3DPublishCommittedSpatialSweep(
     }
 }
 
+- (void)setTapsSelectThroughMoveHandles:(BOOL)enabled {
+    if (![NSThread isMainThread] || !GLController) return;
+    GLController.tapsSelectThroughManipulator = enabled;
+}
+
 - (void)setAxisTriadLiftPoints:(CGFloat)points {
     if (![NSThread isMainThread] || !_isSetuped || !GLController || !GLController.viewer) return;
     const CGFloat scale = self.view.window.screen.scale > 0 ? self.view.window.screen.scale : UIScreen.mainScreen.scale;

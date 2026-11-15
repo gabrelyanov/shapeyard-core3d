@@ -2851,7 +2851,9 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 {
     if (_suppressTapSelectionForManipulatorInteraction) {
         _suppressTapSelectionForManipulatorInteraction = NO;
-        return;
+        if (!self.tapsSelectThroughManipulator) {
+            return;
+        }
     }
     if (_isPreviewMode) {
         return;
