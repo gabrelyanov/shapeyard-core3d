@@ -393,6 +393,11 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
         return;
     }
     [GLController addPrimitive:primitiveType];
+    // The viewer selects the new object without a tap, so publish that
+    // selection: the material controller's selected colours and PBR values
+    // are filled only by the selection callback. Without it Material > PBR
+    // on a just-added shape said "Select an object" and Apply was dimmed.
+    [GLController refreshSelectionState];
     self.can_undo = YES;
     self.can_delete = YES;
     self.can_duplicate = YES;
