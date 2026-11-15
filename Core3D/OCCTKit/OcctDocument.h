@@ -1899,6 +1899,16 @@ public:
     Standard_EXPORT Standard_Boolean CaptureFaceColours(const TDF_Label& label, double scale,
         std::vector<TDF_Label>& faceLabels,
         std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& colouredFaces) const noexcept;
+    //! Join of parts that look different: every face of the target and the tools with the look of
+    //! its part (painted faces of the tools first), in the result's frame. False when they look the same.
+    Standard_EXPORT Standard_Boolean JoinFaceLooks(const TDF_Label& target,
+        const Handle(AIS_Shape)& targetPresentation,
+        const std::vector<std::pair<TDF_Label, Handle(AIS_Shape)>>& tools, double scale,
+        std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks) const noexcept;
+    //! Each face of `result` that lies on one of `looks`, with that look (first match wins).
+    Standard_EXPORT std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> MatchFaceLooks(
+        const TopoDS_Shape& result,
+        const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks) const noexcept;
     //! Inside the tool's open command, after the shape is replaced: drop the old face labels and
     //! give every face of `result` that lies on a coloured face that colour.
     Standard_EXPORT Standard_Boolean CarryFaceColours(const TDF_Label& label, const TopoDS_Shape& result,

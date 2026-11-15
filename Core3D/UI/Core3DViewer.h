@@ -563,6 +563,9 @@ namespace core3d {
     std::string booleanPreviewTargetAt(double x, double y) noexcept;
     //! Puts every part back; the part that stays is selected again unless
     //! `reselectTarget` is false (the App Store Subtract un-pick of the last object).
+    //! Colours a Join preview face by face when the parts look different.
+    void colourJoinPreview(const TDF_Label& targetLabel, const Handle(AIS_Shape)& target,
+        const std::vector<std::pair<TDF_Label,Handle(AIS_Shape)>>& tools) noexcept;
     bool clearBooleanPairPreview(bool reselectTarget = true) noexcept;
     bool hasBooleanPairPreview() const noexcept;
     //! Hole through any solid part, in world coordinates and document units:

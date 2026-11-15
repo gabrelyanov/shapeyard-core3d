@@ -13100,6 +13100,92 @@ bool BakedBooleanBatchPreviewShape(const Handle(OcctDocument)& document,
 }
 } // namespace core3d
 
+Standard_Boolean OcctDocument::JoinFaceLooks(const TDF_Label& target,
+    const Handle(AIS_Shape)& targetPresentation,
+    const std::vector<std::pair<TDF_Label, Handle(AIS_Shape)>>& tools, double scale,
+    std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks) const noexcept {
+    looks.clear();
+    try {
+        if (target.IsNull() || targetPresentation.IsNull()) return Standard_False;
+        const auto lookOf = [this](const TDF_Label& label, const Handle(AIS_Shape)& shape,
+                                   XCAFDoc_VisMaterialPBR& look) {
+            if (TryPBRMaterialForLabel(label, look)) return true;
+            if (shape.IsNull() || shape->Attributes().IsNull()
+                || shape->Attributes()->ShadingAspect().IsNull()) return false;
+            look = XCAFDoc_VisMaterialPBR();
+            look.BaseColor = Quantity_ColorRGBA(shape->Attributes()->ShadingAspect()->Color());
+            look.Metallic = 0.0f; look.Roughness = 0.5f; look.IsDefined = Standard_True;
+            return true;
+        };
+        const auto same = [](const XCAFDoc_VisMaterialPBR& a, const XCAFDoc_VisMaterialPBR& b) {
+            const Quantity_Color ca = a.BaseColor.GetRGB(), cb = b.BaseColor.GetRGB();
+            return std::abs(ca.Red() - cb.Red()) < 1e-3 && std::abs(ca.Green() - cb.Green()) < 1e-3
+                && std::abs(ca.Blue() - cb.Blue()) < 1e-3
+                && std::abs(a.Metallic - b.Metallic) < 1e-3 && std::abs(a.Roughness - b.Roughness) < 1e-3;
+        };
+        const auto place = [](const TopoDS_Shape& shape, const gp_Trsf& trsf) {
+            BRepBuilderAPI_Transform moved(shape, trsf, Standard_True);
+            return moved.IsDone() ? moved.Shape() : TopoDS_Shape();
+        };
+        gp_Trsf sizeUp; if (std::abs(scale - 1.0) > 1.0e-12) sizeUp.SetScale(gp_Pnt(0, 0, 0), scale);
+        XCAFDoc_VisMaterialPBR targetLook;
+        const bool hasTargetLook = lookOf(target, targetPresentation, targetLook);
+        std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> fromTools;
+        bool differs = false;
+        for (const auto& [tool, toolPresentation] : tools) {
+            if (toolPresentation.IsNull()) continue;
+            gp_Trsf toolToResult = sizeUp;
+            gp_Trsf toTarget = targetPresentation->LocalTransformation().Inverted();
+            toTarget.Multiply(toolPresentation->LocalTransformation());
+            toolToResult.Multiply(toTarget);
+            std::vector<TDF_Label> unusedLabels;
+            std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> painted;
+            if (CaptureFaceColours(tool, 1.0, unusedLabels, painted)) {
+                for (const auto& [face, material] : painted) {
+                    const TopoDS_Shape moved = place(face, toolToResult);
+                    if (!moved.IsNull() && moved.ShapeType() == TopAbs_FACE) {
+                        fromTools.emplace_back(TopoDS::Face(moved), material); differs = true;
+                    }
+                }
+            }
+            XCAFDoc_VisMaterialPBR toolLook;
+            if (lookOf(tool, toolPresentation, toolLook) && !(hasTargetLook && same(targetLook, toolLook))) {
+                differs = true;
+                const TopoDS_Shape moved = place(XCAFDoc_ShapeTool::GetShape(tool), toolToResult);
+                for (TopExp_Explorer face(moved, TopAbs_FACE); face.More(); face.Next())
+                    fromTools.emplace_back(TopoDS::Face(face.Current()), toolLook);
+            }
+        }
+        if (!differs || !hasTargetLook) return Standard_False;
+        const TopoDS_Shape own = place(XCAFDoc_ShapeTool::GetShape(target), sizeUp);
+        for (TopExp_Explorer face(own, TopAbs_FACE); face.More(); face.Next())
+            looks.emplace_back(TopoDS::Face(face.Current()), targetLook);
+        looks.insert(looks.end(), fromTools.begin(), fromTools.end());
+        return Standard_True;
+    } catch (...) { looks.clear(); return Standard_False; }
+}
+
+std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> OcctDocument::MatchFaceLooks(
+    const TopoDS_Shape& result,
+    const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks) const noexcept {
+    std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> matched;
+    try {
+        if (result.IsNull() || looks.empty()) return matched;
+        Bnd_Box box; BRepBndLib::Add(result, box);
+        const double tolerance = box.IsVoid() ? 1.0e-6 : 1.0e-5 * std::sqrt(box.SquareExtent());
+        for (TopExp_Explorer face(result, TopAbs_FACE); face.More(); face.Next()) {
+            gp_Pnt point;
+            if (!InteriorPointOfFace(TopoDS::Face(face.Current()), point)) continue;
+            for (const auto& [coloured, material] : looks) {
+                if (!PointOnFace(point, coloured, tolerance)) continue;
+                matched.emplace_back(TopoDS::Face(face.Current()), material);
+                break;
+            }
+        }
+    } catch (...) { matched.clear(); }
+    return matched;
+}
+
 Standard_Boolean OcctDocument::CaptureFaceColours(const TDF_Label& label, double scale,
     std::vector<TDF_Label>& faceLabels,
     std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& colouredFaces) const noexcept {
@@ -13142,25 +13228,17 @@ Standard_Boolean OcctDocument::CarryFaceColours(const TDF_Label& target, const T
             label.ForgetAllAttributes(Standard_True);
         }
         if (faces.empty()) return Standard_True;
-        Bnd_Box box; BRepBndLib::Add(result, box);
-        const double tolerance = box.IsVoid() ? 1.0e-6 : 1.0e-5 * std::sqrt(box.SquareExtent());
         const Handle(TDF_TagSource) tags = TDF_TagSource::Set(target);
         Standard_Integer highWater = std::max(12, tags->Get());
         for (TDF_ChildIterator child(target, Standard_False); child.More(); child.Next())
             highWater = std::max(highWater, child.Value().Tag());
         tags->Set(highWater);
         std::vector<OcctPBRMaterialUpdate> updates;
-        for (TopExp_Explorer face(result, TopAbs_FACE); face.More(); face.Next()) {
-            gp_Pnt point;
-            if (!InteriorPointOfFace(TopoDS::Face(face.Current()), point)) continue;
-            for (const auto& [coloured, material] : faces) {
-                if (!PointOnFace(point, coloured, tolerance)) continue;
-                if (!shapes->IsSubShape(target, face.Current())) return Standard_False;
-                const TDF_Label label = shapes->AddSubShape(target, face.Current());
-                if (label.IsNull()) return Standard_False;
-                updates.push_back({label, material, Handle(Image_Texture)(), Handle(Image_Texture)()});
-                break;
-            }
+        for (const auto& [face, material] : MatchFaceLooks(result, faces)) {
+            if (!shapes->IsSubShape(target, face)) return Standard_False;
+            const TDF_Label label = shapes->AddSubShape(target, face);
+            if (label.IsNull()) return Standard_False;
+            updates.push_back({label, material, Handle(Image_Texture)(), Handle(Image_Texture)()});
         }
         return updates.empty() || SaveObjectPBRMaterials(updates);
     } catch (...) { return Standard_False; }
@@ -13257,64 +13335,12 @@ Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
                 refusal = "invalid-result";
                 return Standard_False;
             }
-            // Union keeps every face's colour (CTO 15 Nov 07:01, benchmark chest: a brown body joined
-            // with a grey band came out one colour). When the parts look different, every face of the
-            // result takes the look of the part it came from; painted faces come first.
+            // Union keeps every face's colour (CTO 15 Nov 07:01, benchmark chest): when the parts
+            // look different, every face takes the look of the part it came from.
             if (operation == 0) {
-                const auto lookOf = [this](const TDF_Label& label, const Handle(AIS_Shape)& shape,
-                                           XCAFDoc_VisMaterialPBR& look) {
-                    if (TryPBRMaterialForLabel(label, look)) return true;
-                    if (shape.IsNull() || shape->Attributes().IsNull()
-                        || shape->Attributes()->ShadingAspect().IsNull()) return false;
-                    look = XCAFDoc_VisMaterialPBR();
-                    look.BaseColor = Quantity_ColorRGBA(shape->Attributes()->ShadingAspect()->Color());
-                    look.Metallic = 0.0f; look.Roughness = 0.5f; look.IsDefined = Standard_True;
-                    return true;
-                };
-                const auto same = [](const XCAFDoc_VisMaterialPBR& a, const XCAFDoc_VisMaterialPBR& b) {
-                    const Quantity_Color ca = a.BaseColor.GetRGB(), cb = b.BaseColor.GetRGB();
-                    return std::abs(ca.Red() - cb.Red()) < 1e-3 && std::abs(ca.Green() - cb.Green()) < 1e-3
-                        && std::abs(ca.Blue() - cb.Blue()) < 1e-3
-                        && std::abs(a.Metallic - b.Metallic) < 1e-3 && std::abs(a.Roughness - b.Roughness) < 1e-3;
-                };
-                const auto place = [](const TopoDS_Shape& shape, const gp_Trsf& trsf) {
-                    BRepBuilderAPI_Transform moved(shape, trsf, Standard_True);
-                    return moved.IsDone() ? moved.Shape() : TopoDS_Shape();
-                };
-                gp_Trsf sizeUp; if (std::abs(scale - 1.0) > 1.0e-12) sizeUp.SetScale(gp_Pnt(0, 0, 0), scale);
-                XCAFDoc_VisMaterialPBR targetLook;
-                const bool hasTargetLook = lookOf(target, targetPresentation, targetLook);
-                std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> fromTools;
-                bool differs = false;
-                for (const auto& [tool, toolPresentation] : tools) {
-                    gp_Trsf toolToResult = sizeUp;
-                    gp_Trsf toTarget = targetPresentation->LocalTransformation().Inverted();
-                    toTarget.Multiply(toolPresentation->LocalTransformation());
-                    toolToResult.Multiply(toTarget);
-                    std::vector<TDF_Label> unusedLabels;
-                    std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> painted;
-                    if (CaptureFaceColours(tool, 1.0, unusedLabels, painted)) {
-                        for (const auto& [face, material] : painted) {
-                            const TopoDS_Shape moved = place(face, toolToResult);
-                            if (!moved.IsNull() && moved.ShapeType() == TopAbs_FACE) {
-                                fromTools.emplace_back(TopoDS::Face(moved), material); differs = true;
-                            }
-                        }
-                    }
-                    XCAFDoc_VisMaterialPBR toolLook;
-                    if (lookOf(tool, toolPresentation, toolLook) && !(hasTargetLook && same(targetLook, toolLook))) {
-                        differs = true;
-                        const TopoDS_Shape moved = place(XCAFDoc_ShapeTool::GetShape(tool), toolToResult);
-                        for (TopExp_Explorer face(moved, TopAbs_FACE); face.More(); face.Next())
-                            fromTools.emplace_back(TopoDS::Face(face.Current()), toolLook);
-                    }
-                }
-                if (differs && hasTargetLook) {
-                    const TopoDS_Shape own = place(XCAFDoc_ShapeTool::GetShape(target), sizeUp);
-                    for (TopExp_Explorer face(own, TopAbs_FACE); face.More(); face.Next())
-                        coloured[at].emplace_back(TopoDS::Face(face.Current()), targetLook);
-                    coloured[at].insert(coloured[at].end(), fromTools.begin(), fromTools.end());
-                }
+                std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> looks;
+                if (JoinFaceLooks(target, targetPresentation, tools, scale, looks))
+                    coloured[at].insert(coloured[at].end(), looks.begin(), looks.end());
             }
         }
         refusal = "stale-source";
@@ -13331,11 +13357,13 @@ Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
             }
         for (std::size_t index = 0; index < targets.size(); ++index) {
             const TDF_Label& target = targets[index].first;
+            // A Join keeps the name of the part tapped first (design system rule 9, CTO 15 Nov 10:28);
+            // a Cut or Overlap result is named by what it is.
             const TCollection_ExtendedString name = NextBooleanResultName(myOcafDoc, operation);
             ForgetInspectorPrimitiveRecord(target);
             if (!ReplaceShape(target, made[index].second)
                 || !XCAFDoc_ShapeTool::GetShape(target).IsEqual(made[index].first)
-                || !SetObjectNameForLabel(target, name)
+                || (operation != 0 && !SetObjectNameForLabel(target, name))
                 || !CarryFaceColours(target, made[index].first,
                        oldFaceLabels[index], coloured[index])) {
                 myOcafDoc->AbortCommand();
@@ -14016,9 +14044,10 @@ core3d::authored_parameter::PairApplyReply OcctDocument::ApplyBooleanSources(
                 throw Standard_Failure("metadata stage");
             }
             // Named in the same step, so Undo brings back the old name too.
-            if (!SetObjectNameForLabel(capture.sources[0].label, NextBooleanResultName(myOcafDoc,
-                    capture.operation == pb::Operation::Union ? 0
-                    : capture.operation == pb::Operation::Subtract ? 1 : 2))) {
+            // A Join keeps the first part's name (rule 9); Cut and Overlap are named by what they are.
+            if (capture.operation != pb::Operation::Union
+                && !SetObjectNameForLabel(capture.sources[0].label, NextBooleanResultName(myOcafDoc,
+                    capture.operation == pb::Operation::Subtract ? 1 : 2))) {
                 stageFailure = ap::PairRefusal::BadEncoding;
                 throw Standard_Failure("result name stage");
             }
