@@ -50,6 +50,8 @@
 #include <RWMesh_FaceIterator.hxx>
 #include <RWObj_CafWriter.hxx>
 #include <RWObj_ObjWriterContext.hxx>
+#include <RWObj_ObjMaterialMap.hxx>
+#include <Message_LazyProgressScope.hxx>
 #include <XCAFDoc_VisMaterial.hxx>
 #include <RWStl.hxx>
 #include <STEPCAFControl_Writer.hxx>
@@ -72,6 +74,11 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFDoc_VisMaterialTool.hxx>
+#include <XCAFPrs.hxx>
+#include <XCAFPrs_DocumentExplorer.hxx>
+#include <XCAFPrs_IndexedDataMapOfShapeStyle.hxx>
+#include <NCollection_DataMap.hxx>
+#include <TopTools_ShapeMapHasher.hxx>
 #include <XSControl_WorkSession.hxx>
 
 #include <atomic>
@@ -234,6 +241,27 @@ private:
     const std::atomic_bool* myCancelled;
 };
 
+//! OCCT 7.8 RWMesh_FaceIterator keys a sub-shape colour as
+//! subshape.Located(node location). That drops any location a face carries
+//! inside its solid, so after Push-pull (whose result faces carry nested
+//! locations) a painted face fell back to the object colour in OBJ only.
+//! Returns true, with the label's stored shape and styles, when some styled
+//! sub-shape carries such a nested location and OCCT's keying would miss it.
+bool CollectNestedLocationStyles(const TDF_Label& label,
+                                 TopoDS_Shape& shape,
+                                 XCAFPrs_IndexedDataMapOfShapeStyle& styles) {
+    if (!XCAFDoc_ShapeTool::GetShape(label, shape) || shape.IsNull()) {
+        return false;
+    }
+    XCAFPrs::CollectStyleSettings(label, TopLoc_Location(), styles);
+    for (XCAFPrs_IndexedDataMapOfShapeStyle::Iterator it(styles); it.More(); it.Next()) {
+        if (!it.Key().Location().IsEqual(shape.Location())) {
+            return true;
+        }
+    }
+    return false;
+}
+
 //! Tracks exactly the effective textures encountered by OCCT's own OBJ
 //! preflight traversal. The base writer calls addFaceInfo() for every nonempty
 //! face it will later write, so this expectation cannot be weakened by a
@@ -305,6 +333,28 @@ public:
         std::filesystem::rename(temporary, myState->primaryPath);
     }
 
+    //! Run before Perform: OCCT's preflight sees the location-blind styles,
+    //! so a face colour only the nested-location route finds still needs
+    //! the material library.
+    void PrepareNestedLocationStyles(const Handle(TDocStd_Document)& document,
+                                     const TDF_LabelSequence& roots) {
+        for (XCAFPrs_DocumentExplorer explorer(document, roots,
+                 XCAFPrs_DocumentExplorerFlags_OnlyLeafNodes);
+             explorer.More() && !myNestedStylesNeedMaterials; explorer.Next()) {
+            TopoDS_Shape shape;
+            XCAFPrs_IndexedDataMapOfShapeStyle styles;
+            if (!CollectNestedLocationStyles(explorer.Current().RefLabel, shape, styles)) {
+                continue;
+            }
+            for (XCAFPrs_IndexedDataMapOfShapeStyle::Iterator it(styles); it.More(); it.Next()) {
+                if (it.Value().IsSetColorSurf() || !it.Value().Material().IsNull()) {
+                    myNestedStylesNeedMaterials = true;
+                    break;
+                }
+            }
+        }
+    }
+
     Standard_Integer ExpectedTextureCount() const {
         return myCreatesMaterialFile ? myTextures.Extent() : 0;
     }
@@ -315,6 +365,98 @@ public:
     }
 
 protected:
+    //! Same steps as RWObj_CafWriter::writeShape (OCCT 7.8), but each face's
+    //! style is found by IsSame against the shape as stored, the way
+    //! XCAFDoc_ShapeTool::FindSubShape (and the screen) finds it. Labels
+    //! without nested-location styles keep OCCT's own route unchanged.
+    bool writeShape(RWObj_ObjWriterContext& writer,
+                    RWObj_ObjMaterialMap& materials,
+                    Message_LazyProgressScope& progress,
+                    const TDF_Label& label,
+                    const TopLoc_Location& parentTrsf,
+                    const XCAFPrs_Style& parentStyle,
+                    const TCollection_AsciiString& name) override {
+        TopoDS_Shape shape;
+        XCAFPrs_IndexedDataMapOfShapeStyle styles;
+        if (!CollectNestedLocationStyles(label, shape, styles)) {
+            return RWObj_CafWriter::writeShape(
+                writer, materials, progress, label, parentTrsf, parentStyle, name);
+        }
+        // RWMesh_FaceIterator::dispatchStyles precedence: face styles first,
+        // then larger shapes fill only faces still unstyled; unset fields
+        // inherit the node style.
+        NCollection_DataMap<TopoDS_Shape, XCAFPrs_Style, TopTools_ShapeMapHasher> faceStyles;
+        for (int type = TopAbs_FACE; type >= TopAbs_COMPOUND; --type) {
+            for (XCAFPrs_IndexedDataMapOfShapeStyle::Iterator it(styles); it.More(); it.Next()) {
+                const TopoDS_Shape& key = it.Key();
+                if (key.ShapeType() != type) {
+                    continue;
+                }
+                XCAFPrs_Style style = it.Value();
+                if (!style.IsSetColorCurv() && parentStyle.IsSetColorCurv()) {
+                    style.SetColorCurv(parentStyle.GetColorCurv());
+                }
+                if (!style.IsSetColorSurf() && parentStyle.IsSetColorSurf()) {
+                    style.SetColorSurf(parentStyle.GetColorSurfRGBA());
+                }
+                if (style.Material().IsNull() && !parentStyle.Material().IsNull()) {
+                    style.SetMaterial(parentStyle.Material());
+                }
+                if (type == TopAbs_FACE) {
+                    faceStyles.Bind(key, style);
+                    continue;
+                }
+                for (TopExp_Explorer face(key, TopAbs_FACE); face.More(); face.Next()) {
+                    if (!faceStyles.IsBound(face.Current())) {
+                        faceStyles.Bind(face.Current(), style);
+                    }
+                }
+            }
+        }
+        // Walk the stored shape (style keys) and the placed shape (what OCCT
+        // writes) together: same topology, same face order as the base.
+        TopExp_Explorer stored(shape, TopAbs_FACE);
+        TopExp_Explorer placed(shape.Located(parentTrsf), TopAbs_FACE);
+        bool toCreateGroup = true;
+        for (; stored.More() && placed.More() && !progress.IsAborted();
+             stored.Next(), placed.Next()) {
+            const XCAFPrs_Style* style = faceStyles.Seek(stored.Current());
+            RWMesh_FaceIterator face(placed.Current(), style != nullptr ? *style : parentStyle);
+            if (!face.More() || toSkipFaceMesh(face)) {
+                continue;
+            }
+            ++writer.NbFaces;
+            const bool hasNormals = face.HasNormals();
+            const bool hasTexCoords = face.HasTexCoords();
+            if (writer.NbFaces != 1) {
+                toCreateGroup = toCreateGroup
+                    || hasNormals != writer.HasNormals()
+                    || hasTexCoords != writer.HasTexCoords();
+            }
+            writer.SetNormals(hasNormals);
+            writer.SetTexCoords(hasTexCoords);
+            if (toCreateGroup && !writer.WriteGroup(name)) {
+                return false;
+            }
+            toCreateGroup = false;
+            TCollection_AsciiString materialName;
+            if (face.HasFaceColor() || !face.FaceStyle().BaseColorTexture().IsNull()) {
+                materialName = materials.AddMaterial(face.FaceStyle());
+            }
+            if (materialName.IsDifferent(writer.ActiveMaterial())) {
+                writer.WriteActiveMaterial(materialName);
+            }
+            if (!writePositions(writer, progress, face)
+                || (writer.HasNormals() && !writeNormals(writer, progress, face))
+                || (writer.HasTexCoords() && !writeTextCoords(writer, progress, face))
+                || !writeIndices(writer, progress, face)) {
+                return false;
+            }
+            writer.FlushFace(face.NbNodes());
+        }
+        return true;
+    }
+
     bool writePositions(RWObj_ObjWriterContext& writer,
                         Message_LazyProgressScope& progress,
                         const RWMesh_FaceIterator& face) override {
@@ -401,6 +543,9 @@ protected:
             elementCount,
             progressSteps,
             createsMaterialFile);
+        if (myNestedStylesNeedMaterials) {
+            createsMaterialFile = Standard_True;
+        }
         myCreatesMaterialFile = createsMaterialFile;
     }
 
@@ -420,6 +565,7 @@ private:
     std::unordered_map<std::string, PBRScalars> myMaterialScalars;
     NCollection_Map<Handle(Image_Texture)> myTextures;
     Standard_Boolean myCreatesMaterialFile = Standard_False;
+    bool myNestedStylesNeedMaterials = false;
 };
 
 //! Rewrite only writer-owned coefficients under the captured convention.
@@ -2737,6 +2883,7 @@ NativeExportResult RunNativeExport(
                     rootLabels,
                     "The OBJ color table is unavailable.");
                 ValidatedOBJWriter writer(state);
+                writer.PrepareNestedLocationStyles(ocafDocument, rootLabels);
                 const bool writerSucceeded = writer.Perform(
                     ocafDocument,
                     rootLabels,

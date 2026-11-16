@@ -1344,6 +1344,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     CGFloat _selectedSurfaceWidthPixels;
     CGFloat _selectedFaceWashOpacity;
     BOOL _selectedSurfaceAppearanceDirty;
+    BOOL _debugForceSelectionOutlineFallback;
     BOOL _selectedSurfaceWasFace;
     Handle(Graphic3d_Structure) _selectedFaceWash;
     std::vector<TopoDS_Shape> _selectedWashFaces;
@@ -1771,6 +1772,29 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     if (_didSetupViewer) [self requestRender];
 }
 
+#ifdef DEBUG
+- (void)debugSetForceSelectionOutlineFallback:(BOOL)force {
+    _debugForceSelectionOutlineFallback = force;
+    _selectedSurfaceAppearanceDirty = YES;
+    if (_didSetupViewer) [self requestRender];
+}
+
+- (nullable NSArray<NSNumber *> *)debugSelectedPartHighlightRGB {
+    if (!NSThread.isMainThread || _viewer == nullptr) return nil;
+    const auto context = _viewer->AisContext();
+    if (context.IsNull()) return nil;
+    context->InitSelected();
+    if (!context->MoreSelected()) return nil;
+    const Handle(AIS_InteractiveObject) part = context->SelectedInteractive();
+    if (part.IsNull()) return nil;
+    Handle(Prs3d_Drawer) style = part->HilightAttributes();
+    if (style.IsNull()) style = context->HighlightStyle(Prs3d_TypeOfHighlight_Selected);
+    if (style.IsNull()) return nil;
+    const Quantity_Color colour = style->Color();
+    return @[@(colour.Red()), @(colour.Green()), @(colour.Blue())];
+}
+#endif
+
 - (void)setSelectedSurfaceAppearanceColor:(UIColor *)color widthPoints:(CGFloat)width faceWashOpacity:(CGFloat)opacity {
     CGFloat r = 0, g = 0, b = 0, a = 0;
     if (!NSThread.isMainThread || !std::isfinite(width) || width <= 0
@@ -1986,6 +2010,9 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     }
     const CGFloat pixels = _selectedSurfaceWidthPoints * [self drawableScale];
     if (!std::isfinite(pixels) || pixels <= 0) { fallback(); return; }
+#ifdef DEBUG
+    if (_debugForceSelectionOutlineFallback) { fallback(); return; }
+#endif
     std::vector<TopoDS_Shape> faces;
     const auto document = _viewer->getDocument();
     for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {

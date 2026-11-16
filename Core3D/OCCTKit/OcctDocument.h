@@ -274,6 +274,8 @@ struct Record final {
 //! reuse them. Invalid is a read-only fail-closed sentinel and must never be
 //! written to a document.
 enum class OcctMeshWindingRepairResult { Invalid, Unchanged, Prepared };
+//! Make solid from one closed imported triangle mesh (Job 4): Open = free or shared-by-three edges.
+enum class OcctMeshSolidConversionResult { Invalid, Open, TooLarge, Prepared };
 
 enum class OcctGeometryRepresentation : Standard_Integer
 {
@@ -1896,6 +1898,32 @@ public:
         const TDF_Label& target, const Handle(AIS_Shape)& targetPresentation,
         const TDF_Label& tool, const Handle(AIS_Shape)& toolPresentation,
         int operation, std::string& refusal) noexcept;
+    //! Colours put on single faces of a part (face sub-labels with a PBR material), and every face
+    //! sub-label, for a tool that replaces the part's shape (Join/Cut, Bevel). `scale` is applied
+    //! to the faces when the tool also bakes a scale into the shape.
+    Standard_EXPORT Standard_Boolean CaptureFaceColours(const TDF_Label& label, double scale,
+        std::vector<TDF_Label>& faceLabels,
+        std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& colouredFaces) const noexcept;
+    //! Join of parts that look different: every face of the target and the tools with the look of
+    //! its part (painted faces of the tools first), in the result's frame. False when they look the same.
+    Standard_EXPORT Standard_Boolean JoinFaceLooks(const TDF_Label& target,
+        const Handle(AIS_Shape)& targetPresentation,
+        const std::vector<std::pair<TDF_Label, Handle(AIS_Shape)>>& tools, double scale,
+        std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks) const noexcept;
+    //! Each face of `result` that lies on one of `looks`, with that look (first match wins).
+    Standard_EXPORT std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> MatchFaceLooks(
+        const TopoDS_Shape& result,
+        const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks) const noexcept;
+    //! Inside the tool's open command, after the shape is replaced: drop the old face labels and
+    //! give every face of `result` that lies on a coloured face that colour.
+    Standard_EXPORT Standard_Boolean CarryFaceColours(const TDF_Label& label, const TopoDS_Shape& result,
+        const std::vector<TDF_Label>& faceLabels,
+        const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& colouredFaces) noexcept;
+    //! A previous Join/Cut/Overlap result whose only record is its Boolean (originals) record:
+    //! `record` names that record so a tool that bakes the part (Bevel) can drop it in its own
+    //! command (Undo brings the editable result back). False for every other part.
+    Standard_EXPORT Standard_Boolean BooleanResultRecordForBake(
+        const TDF_Label& label, TDF_Label& record) const noexcept;
     //! The same for several parts in ONE undoable command. Cut (1): every part in
     //! `targets` loses every part in `tools`; Join (0) and Overlap (2): one target
     //! (Overlap: one tool). Every tool is removed. Main thread.
@@ -2356,6 +2384,10 @@ public:
     //! Private consistent-winding candidate; source ownership and material contracts remain strict.
     Standard_EXPORT OcctMeshWindingRepairResult PrepareMeshWindingRepair(const TDF_Label& label, TopoDS_Shape& candidate) const noexcept;
     Standard_EXPORT Standard_Boolean ValidateMeshWindingRepair(const TDF_Label& label, const TopoDS_Shape& candidate) const noexcept;
+    //! One closed, consistently wound triangle mesh -> one valid FORWARD solid in the same object-local frame,
+    //! coplanar triangles merged into planar faces. Untextured meshes without authored frames or atlas only.
+    Standard_EXPORT OcctMeshSolidConversionResult PrepareMeshSolidConversion(const TDF_Label& label, TopoDS_Shape& candidate) const noexcept;
+    Standard_EXPORT Standard_Boolean ValidateMeshSolidConversion(const TDF_Label& label, const TopoDS_Shape& candidate) const noexcept;
     //! Bounded flat-corner editing; preserves atlas/maps, rejects supplied frames.
     Standard_EXPORT Standard_Boolean CanEditMeshVertices(const TDF_Label& label) const noexcept;
     Standard_EXPORT Standard_Boolean PrepareMeshVertexMove(const TDF_Label& label,
@@ -2473,6 +2505,9 @@ public:
         const TDF_Label& label,
         Handle(AIS_Shape) aisShape,
         const std::function<Standard_Boolean(const TDF_Label&)>& shapeStager = {});
+    //! Make solid staging: replace a TriangleMesh-marked definition's mesh with a BRep solid and set
+    //! its marker to BRep in the open command. Every other replacement keeps its representation.
+    Standard_Boolean ReplaceMeshWithSolid(const TDF_Label& label, Handle(AIS_Shape) aisShape);
     Standard_Boolean HasUnroutedRetainedDependent(
         const TDF_Label& label) const noexcept;
     

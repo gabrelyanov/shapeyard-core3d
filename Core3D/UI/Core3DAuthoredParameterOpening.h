@@ -474,6 +474,10 @@ __attribute__((objc_subclassing_restricted))
 - (BOOL)showBakedBooleanPreviewTarget:(NSString *)target tool:(NSString *)tool
     operation:(Core3DPartBooleanOperation)operation
     NS_SWIFT_NAME(showBakedBooleanPreview(target:tool:operation:));
+//! True when cutting `target` with `tool` would take nothing away (they only touch or miss),
+//! design system rule 11. Nothing changes. NO when it cannot be told.
+- (BOOL)cutRemovesNothingTarget:(NSString *)target tool:(NSString *)tool
+    NS_SWIFT_NAME(cutRemovesNothing(target:tool:));
 //! Preview of applyBakedBoolean(targets:tools:) on the model: each kept part shows its
 //! result, the other parts are hidden. Nothing changes; clearBooleanPairPreview puts all back.
 - (BOOL)showBakedBooleanPreviewTargets:(NSArray<NSString *> *)targets

@@ -181,6 +181,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL) hasActiveBoolean;
 - (BOOL) hasTrialMirrorObjects;
 #ifdef DEBUG
+//! Test only: build no selection outline, so the engine highlight fallback draws instead.
+- (void)debugSetForceSelectionOutlineFallback:(BOOL)force;
+//! Test only: the colour (r, g, b) the engine highlight would draw the first selected part in.
+- (nullable NSArray<NSNumber *> *)debugSelectedPartHighlightRGB;
 - (void)debugRequestRender;
 - (void)debugSetDuplicateCommitMode:(NSInteger)mode;
 - (void)debugSetMaximumDisplayTraversalNodes:(NSUInteger)limit;
