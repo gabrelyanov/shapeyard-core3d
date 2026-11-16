@@ -22391,6 +22391,13 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
 }
 
 - (Core3DTransformInspectorPositionCommitResult)
+    commitTransformInspectorDisplayedRotationValue:(double)value
+        axis:(Core3DTransformInspectorAxis)axis
+        expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot {
+    return [self commitTransformInspectorRotationValue:value axis:axis expectedSnapshot:snapshot];
+}
+
+- (Core3DTransformInspectorPositionCommitResult)
     commitTransformInspectorUniformScaleValue:(double)value
                           expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot {
     return [self commitTransformInspectorValue:value axis:Core3DTransformInspectorAxisX

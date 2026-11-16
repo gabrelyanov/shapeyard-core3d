@@ -1523,6 +1523,14 @@ __attribute__((objc_subclassing_restricted))
                           expectedSnapshot:
                               (Core3DTransformInspectorSnapshot *)snapshot
     NS_SWIFT_NAME(commitTransformInspectorRotation(_:axis:expected:));
+//! Edit one component of displayedEulerXYZDegrees. Use this together with that
+//! readback in By numbers; the canonical rotation API keeps its old semantics.
+- (Core3DTransformInspectorPositionCommitResult)
+    commitTransformInspectorDisplayedRotationValue:(double)value
+        axis:(Core3DTransformInspectorAxis)axis
+        expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot
+    NS_SWIFT_NAME(commitTransformInspectorDisplayedRotation(_:axis:expected:));
+
 
 //! Set an absolute signed uniform scale factor, dimensionless. Magnitude must
 //! be greater than OCCT confusion tolerance and at most 1,000,000. Uses the

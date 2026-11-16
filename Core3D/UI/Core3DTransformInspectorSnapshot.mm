@@ -51,6 +51,10 @@ const double Core3DTransformInspectorMaximumPositionMagnitude =
 
 @implementation Core3DTransformInspectorSnapshot
 
+- (simd_double3)displayedEulerXYZDegrees {
+    return self.canonicalEulerXYZDegrees;
+}
+
 - (instancetype)initWithState:(Core3DTransformInspectorState)state
                  selectedCount:(NSUInteger)selectedCount
              requestGeneration:(uint64_t)requestGeneration
