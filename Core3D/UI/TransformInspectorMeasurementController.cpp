@@ -2092,6 +2092,9 @@ TransformInspectorMeasurementController::commitPosition(
     const std::shared_ptr<OrdinaryEditController>& theEdits,
     std::shared_ptr<NativeModelingCommitPermit> placementPermit) noexcept
 {
+    // Ordinary commit publishes synchronous observers; they may close the
+    // viewer. Keep this controller alive until its optional readback is done.
+    [[maybe_unused]] const auto keepAlive = weak_from_this().lock();
     TransformInspectorPositionCommitOutcome anOutcome;
     anOutcome.result =
         TransformInspectorPositionCommitResult::InternalFailure;
@@ -2549,7 +2552,8 @@ TransformInspectorMeasurementController::commitPosition(
         auto lease = placementPermit?theEdits->beginModelingPlacement(change,std::move(placementPermit),&result)
             :theEdits->beginTransform({change}, &result);
         if (lease) { result = lease.stageAndCommit(); }
-        if (displayedRotation && (result == OrdinaryEditResult::Committed
+        if (displayedRotation && !myStopped && myImpl && !myDoc.IsNull()
+            && (result == OrdinaryEditResult::Committed
             || result == OrdinaryEditResult::NoChange)) {
             // Verify the actual persisted pose after reconciliation. Never
             // remember an aborted, unknown or externally replaced candidate.
