@@ -2426,11 +2426,12 @@ namespace core3d {
 			if (aCoverage == OcctRetainedRecipeCoverage::Absent) {
 				return Standard_True;
 			}
-			// A standalone saved Hole takes the plain route: the controller
-			// bakes it inside its Apply command and Undo restores the record.
+			// A standalone saved Hole, or an ordinary saved Join/Cut (a drilled
+			// plate after its keyhole Cut), takes the plain route: the controller
+			// bakes that record inside its Apply command and Undo restores it.
 			if (aCoverage
 					== OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
-				&& myDoc->CanBakeSavedCutForFaceEdit(
+				&& myDoc->CanBakeRecordForFaceEdit(
 					theSelection.documentLabel)) {
 				theSelection.retainedCapture.reset();
 				return Standard_True;

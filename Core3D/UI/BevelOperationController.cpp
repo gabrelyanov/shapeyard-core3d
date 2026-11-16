@@ -1161,7 +1161,7 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
             // does; Undo restores the resizable hole record.
             const Standard_Boolean bakesSavedCut = !hasRetainedCapture
                 && coverage == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
-                && myDoc->CanBakeSavedCutForFaceEdit(aSelection.documentLabel);
+                && myDoc->CanBakeRecordForFaceEdit(aSelection.documentLabel);
             if ((hasRetainedCapture
                     && (!RetainedBevelCoverageMatches(
                             coverage, aSelection.retainedCapture)
@@ -1222,7 +1222,7 @@ Standard_Boolean BevelOperationController::preparedSourcesAreCurrent(
                 || !IsBRepModelingLabel(
                     myDoc, aSource.label, aSource.bakesSavedCut)
                 || (aSource.bakesSavedCut
-                    && !myDoc->CanBakeSavedCutForFaceEdit(aSource.label))
+                    && !myDoc->CanBakeRecordForFaceEdit(aSource.label))
                 || !myDoc->IsPresentationEditable(aSource.original)
                 || !myDoc->ShapeLabel(aSource.original).IsEqual(
                     aSource.label)
@@ -1981,7 +1981,7 @@ BevelApplyResult BevelOperationController::apply() noexcept
 			if (source.bakesSavedCut
 				&& aCoverage
 					== OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
-				&& myDoc->CanBakeSavedCutForFaceEdit(source.label)) {
+				&& myDoc->CanBakeRecordForFaceEdit(source.label)) {
 				continue;
 			}
 			OcctPlainProfileOperationCapture aCapture;

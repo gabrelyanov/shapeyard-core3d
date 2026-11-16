@@ -16338,6 +16338,45 @@ Standard_Boolean OcctDocument::CanBakeSavedCutForFaceEdit(
     }
 }
 
+Standard_Boolean OcctDocument::CanBakeBooleanResultForFaceEdit(
+    const TDF_Label& label) const noexcept {
+    try {
+        OCC_CATCH_SIGNALS
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || label.IsNull()
+            || label.Data() != myOcafDoc->GetData()
+            || !IsEditableFreeSimpleDefinitionLabel(label)
+            || HasUnroutedRetainedDependent(label)
+            || core3d::retained_solid::HasRecord(label)
+            || label.IsAttribute(core3d::retained_edge_treatment::AttributeID())
+            || RetainedRecipeCoverageForLabel(label)
+                != OcctRetainedRecipeCoverage::PresentOutsideP4Coverage)
+            return Standard_False;
+        // Only the Boolean record may be present: a Profile, enclosure, sweep
+        // or loft keeps its own replay contract and is never baked here.
+        core3d::profile::Record profile;
+        core3d::enclosure::Record enclosure;
+        core3d::sweep_persistence::Record sweep;
+        core3d::loft_persistence::Record loft;
+        if (!core3d::profile::Read(myOcafDoc, label, profile) || !profile.label.IsNull()
+            || !core3d::enclosure::Read(myOcafDoc, label, enclosure) || !enclosure.label.IsNull()
+            || !core3d::sweep_persistence::Read(myOcafDoc, label, sweep) || !sweep.label.IsNull()
+            || !core3d::loft_persistence::Read(myOcafDoc, label, loft) || !loft.label.IsNull())
+            return Standard_False;
+        // The same rule PrepareBooleanResultForFaceEdit applies before it
+        // removes the record, so an admitted Bevel is never refused at Apply.
+        core3d::composite_recipe::Record record;
+        OcctScalarAppearanceState appearance;
+        return core3d::composite_recipe::Read(myOcafDoc, label, record)
+            && record.value && !record.label.IsNull()
+            && record.value->definition.nodes.size() == 3
+            && OriginalsFeature(record.value->definition)
+            && !record.label.IsAttribute(core3d::retained_edge_treatment::AttributeID())
+            && PairCaptureOriginalsAppearance(*this, label, appearance);
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
 Standard_Boolean OcctDocument::PrepareBooleanResultForFaceEdit(
     const TDF_Label& label) noexcept {
     try {

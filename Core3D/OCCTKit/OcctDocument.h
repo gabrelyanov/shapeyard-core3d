@@ -2462,6 +2462,16 @@ public:
     //! retain HasNoSavedSweepForTopology's stricter admission.
     Standard_Boolean CanBakeSavedCutForFaceEdit(const TDF_Label& label) const noexcept;
 
+    //! Bevel/Round may also bake an ordinary saved Join/Cut/Overlap (its two
+    //! frozen originals, nothing else) inside their own Apply command, exactly
+    //! as PrepareBooleanResultForFaceEdit removes it for Push-pull. Read-only.
+    Standard_Boolean CanBakeBooleanResultForFaceEdit(const TDF_Label& label) const noexcept;
+
+    //! Either of the two bakeable records above.
+    Standard_Boolean CanBakeRecordForFaceEdit(const TDF_Label& label) const noexcept {
+        return CanBakeSavedCutForFaceEdit(label) || CanBakeBooleanResultForFaceEdit(label);
+    }
+
     //! Bake a saved Join/Cut/Overlap or standalone older cut before a face edit.
     //! Requires the face edit's open command: abort/undo restores the record.
     //! Other saved feature families are never removed by this operation.
