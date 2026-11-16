@@ -95,6 +95,63 @@
 }
 @end
 
+@implementation Core3DAgentDistanceMeasurement
+- (instancetype)initCore3DUnmeasured:(Core3DAgentMeasurementStatus)status {
+    self = [super init];
+    if (self == nil) return nil;
+    _status = status == Core3DAgentMeasurementStatusMeasured ? Core3DAgentMeasurementStatusUnavailable : status;
+    _probeIdentifier = @""; _requestedPointAMM = @[]; _requestedPointBMM = @[];
+    _pointAMM = @[]; _pointBMM = @[]; _snapA = @""; _snapB = @"";
+    return self;
+}
+- (instancetype)initCore3DMeasuredWithSource:(Core3DAgentMeasurementSource *)source
+                              probeIdentifier:(NSString *)probeIdentifier
+                            requestedPointAMM:(NSArray<NSNumber *> *)requestedA
+                            requestedPointBMM:(NSArray<NSNumber *> *)requestedB
+                                     pointAMM:(NSArray<NSNumber *> *)pointA
+                                     pointBMM:(NSArray<NSNumber *> *)pointB
+                                        snapA:(NSString *)snapA snapB:(NSString *)snapB
+                                   distanceMM:(double)distanceMM {
+    self = [super init];
+    if (self == nil) return nil;
+    _status = Core3DAgentMeasurementStatusMeasured;
+    _source = source;
+    _probeIdentifier = [probeIdentifier copy];
+    _requestedPointAMM = [requestedA copy]; _requestedPointBMM = [requestedB copy];
+    _pointAMM = [pointA copy]; _pointBMM = [pointB copy];
+    _snapA = [snapA copy]; _snapB = [snapB copy];
+    _distanceMM = distanceMM;
+    return self;
+}
+@end
+
+@implementation Core3DAgentAngleMeasurement
+- (instancetype)initCore3DUnmeasured:(Core3DAgentMeasurementStatus)status {
+    self = [super init];
+    if (self == nil) return nil;
+    _status = status == Core3DAgentMeasurementStatusMeasured ? Core3DAgentMeasurementStatusUnavailable : status;
+    _probeIdentifier = @""; _faceAPointMM = @[]; _faceBPointMM = @[]; _faceANormal = @[]; _faceBNormal = @[];
+    return self;
+}
+- (instancetype)initCore3DMeasuredWithSource:(Core3DAgentMeasurementSource *)source
+                              probeIdentifier:(NSString *)probeIdentifier
+                                 faceAPointMM:(NSArray<NSNumber *> *)faceAPoint
+                                 faceBPointMM:(NSArray<NSNumber *> *)faceBPoint
+                                  faceANormal:(NSArray<NSNumber *> *)faceANormal
+                                  faceBNormal:(NSArray<NSNumber *> *)faceBNormal
+                                 angleDegrees:(double)angleDegrees {
+    self = [super init];
+    if (self == nil) return nil;
+    _status = Core3DAgentMeasurementStatusMeasured;
+    _source = source;
+    _probeIdentifier = [probeIdentifier copy];
+    _faceAPointMM = [faceAPoint copy]; _faceBPointMM = [faceBPoint copy];
+    _faceANormal = [faceANormal copy]; _faceBNormal = [faceBNormal copy];
+    _angleDegrees = angleDegrees;
+    return self;
+}
+@end
+
 @implementation Core3DAgentMaterialMeasurement
 @end
 

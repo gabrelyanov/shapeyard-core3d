@@ -64,6 +64,39 @@ typedef NS_ENUM(NSInteger, Core3DAgentMeasurementStatus) {
 @property(nonatomic, readonly, copy) NSArray<NSArray<NSNumber *> *> *intervalsMM;
 @end
 
+/// measure_distance (method occtExtremaDistance). Each requested world-mm point is taken onto the
+/// part: to a corner (vertex) within 0.5 mm, else to the nearest point of an edge within 0.5 mm,
+/// else to the nearest point of a face within 0.5 mm; farther from the part is Unavailable.
+/// `snapA`/`snapB` say which ("vertex", "edge", "face"); distanceMM is between the taken points.
+@interface Core3DAgentDistanceMeasurement : NSObject
+@property(nonatomic, readonly) Core3DAgentMeasurementStatus status;
+@property(nonatomic, readonly, strong, nullable) Core3DAgentMeasurementSource *source;
+@property(nonatomic, readonly, copy) NSString *probeIdentifier;
+@property(nonatomic, readonly, copy) NSArray<NSNumber *> *requestedPointAMM;
+@property(nonatomic, readonly, copy) NSArray<NSNumber *> *requestedPointBMM;
+@property(nonatomic, readonly, copy) NSArray<NSNumber *> *pointAMM;
+@property(nonatomic, readonly, copy) NSArray<NSNumber *> *pointBMM;
+@property(nonatomic, readonly, copy) NSString *snapA;
+@property(nonatomic, readonly, copy) NSString *snapB;
+@property(nonatomic, readonly) double distanceMM;
+@end
+
+/// measure_angle (method occtPlanarAngle). Each requested world-mm point names the one face of
+/// the part within 0.5 mm of it; both faces must be flat and different. angleDegrees is the angle
+/// between the two planes, 0...90, as Measure shows it on screen. A point within 0.5 mm of two
+/// faces is Ambiguous; a point on no face, a curved face or the same face twice is Unavailable.
+@interface Core3DAgentAngleMeasurement : NSObject
+@property(nonatomic, readonly) Core3DAgentMeasurementStatus status;
+@property(nonatomic, readonly, strong, nullable) Core3DAgentMeasurementSource *source;
+@property(nonatomic, readonly, copy) NSString *probeIdentifier;
+@property(nonatomic, readonly, copy) NSArray<NSNumber *> *faceAPointMM;
+@property(nonatomic, readonly, copy) NSArray<NSNumber *> *faceBPointMM;
+/// Unit outward world normals of the two faces.
+@property(nonatomic, readonly, copy) NSArray<NSNumber *> *faceANormal;
+@property(nonatomic, readonly, copy) NSArray<NSNumber *> *faceBNormal;
+@property(nonatomic, readonly) double angleDegrees;
+@end
+
 @interface Core3DAgentMaterialMeasurement : NSObject
 @property(nonatomic, readonly) Core3DAgentMeasurementStatus status;
 @property(nonatomic, readonly, strong, nullable) Core3DAgentMeasurementSource *source;

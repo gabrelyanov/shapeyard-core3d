@@ -3964,6 +3964,28 @@ static bool core3dAgentVector3(NSArray<NSNumber *> *values, double out[3]) {
                                   intervalsMM:(NSArray<NSArray<NSNumber *> *> *)intervalsMM;
 @end
 
+@interface Core3DAgentDistanceMeasurement (Core3DEngineProducer)
+- (instancetype)initCore3DUnmeasured:(Core3DAgentMeasurementStatus)status;
+- (instancetype)initCore3DMeasuredWithSource:(Core3DAgentMeasurementSource *)source
+                              probeIdentifier:(NSString *)probeIdentifier
+                            requestedPointAMM:(NSArray<NSNumber *> *)requestedA
+                            requestedPointBMM:(NSArray<NSNumber *> *)requestedB
+                                     pointAMM:(NSArray<NSNumber *> *)pointA
+                                     pointBMM:(NSArray<NSNumber *> *)pointB
+                                        snapA:(NSString *)snapA snapB:(NSString *)snapB
+                                   distanceMM:(double)distanceMM;
+@end
+@interface Core3DAgentAngleMeasurement (Core3DEngineProducer)
+- (instancetype)initCore3DUnmeasured:(Core3DAgentMeasurementStatus)status;
+- (instancetype)initCore3DMeasuredWithSource:(Core3DAgentMeasurementSource *)source
+                              probeIdentifier:(NSString *)probeIdentifier
+                                 faceAPointMM:(NSArray<NSNumber *> *)faceAPoint
+                                 faceBPointMM:(NSArray<NSNumber *> *)faceBPoint
+                                  faceANormal:(NSArray<NSNumber *> *)faceANormal
+                                  faceBNormal:(NSArray<NSNumber *> *)faceBNormal
+                                 angleDegrees:(double)angleDegrees;
+@end
+
 @interface Core3DViewController () {
     NSHashTable<Core3DModelingPreparedRequest *> *_issuedModelingPreparedRequests;
     Core3DModelingPreparedRequest *_pendingModelingReservation;
@@ -16931,6 +16953,23 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
     return [[Core3DAgentLineSectionMeasurement alloc] initCore3DMeasuredWithSource:source
         probeIdentifier:probeIdentifier originMM:@[@(origin[0]), @(origin[1]), @(origin[2])]
         requestedDirection:@[@(along[0]), @(along[1]), @(along[2])] intervalsMM:result];
+}
+
+// Declared first (red-first check): both answer NotQualified until the measuring code lands.
+- (Core3DAgentDistanceMeasurement *)agentMeasureDistanceOfEntityIdentifier:(NSString *)entityIdentifier
+    targetAlias:(NSString *)targetAlias documentIdentifier:(NSString *)documentIdentifier
+    sourceSHA256:(NSString *)sourceSHA256 probeIdentifier:(NSString *)probeIdentifier
+    pointAMM:(NSArray<NSNumber *> *)pointAMM pointBMM:(NSArray<NSNumber *> *)pointBMM
+    expected:(Core3DSceneSnapshot *)expected {
+    return [[Core3DAgentDistanceMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusNotQualified];
+}
+
+- (Core3DAgentAngleMeasurement *)agentMeasureAngleOfEntityIdentifier:(NSString *)entityIdentifier
+    targetAlias:(NSString *)targetAlias documentIdentifier:(NSString *)documentIdentifier
+    sourceSHA256:(NSString *)sourceSHA256 probeIdentifier:(NSString *)probeIdentifier
+    faceAPointMM:(NSArray<NSNumber *> *)faceAPointMM faceBPointMM:(NSArray<NSNumber *> *)faceBPointMM
+    expected:(Core3DSceneSnapshot *)expected {
+    return [[Core3DAgentAngleMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusNotQualified];
 }
 // AGENT MEASURE (measure lane) END
 
