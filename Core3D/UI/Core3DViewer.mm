@@ -176,6 +176,7 @@ private:
 #include <array>
 #include <cmath>
 #include <IntCurvesFace_ShapeIntersector.hxx>
+#include <AIS_ColoredShape.hxx>
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
@@ -2501,6 +2502,23 @@ bool BakedBooleanBatchPreviewShape(const Handle(OcctDocument)& document,
     const std::vector<std::pair<TDF_Label, gp_Trsf>>& tools, int operation,
     TopoDS_Shape& result, std::string& refusal) noexcept;
 
+bool BakedCutRemovedShare(const Handle(OcctDocument)& document,
+    const TDF_Label& target, const gp_Trsf& targetPlacement,
+    const TDF_Label& tool, const gp_Trsf& toolPlacement, double& share) noexcept;
+
+bool Core3DViewer::cutRemovesNothing(const std::string& targetEntity,
+    const std::string& toolEntity) noexcept {
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull())return false;
+    try{
+        Handle(AIS_Shape) target,tool;TDF_Label targetLabel,toolLabel;
+        if(!FindEntityPresentation(myContext,myDoc,targetEntity,target,targetLabel)
+            ||!FindEntityPresentation(myContext,myDoc,toolEntity,tool,toolLabel))return false;
+        double share=1.0;
+        return BakedCutRemovedShare(myDoc,targetLabel,target->LocalTransformation(),
+            toolLabel,tool->LocalTransformation(),share)&&share<=1.0e-9;
+    }catch(...){return false;}
+}
+
 bool Core3DViewer::showBakedBooleanBatchPreview(const std::vector<std::string>& targetEntities,
     const std::vector<std::string>& toolEntities, int operation, std::string& refusal) noexcept {
     refusal="unsupported-source";
@@ -2555,9 +2573,40 @@ bool Core3DViewer::showBakedBooleanBatchPreview(const std::vector<std::string>& 
         for(const auto& part:tools)myContext->Erase(part.first,Standard_False);
         myContext->UpdateCurrentViewer();
         _booleanPairPreview=std::move(state);
+        if(operation==0){
+            std::vector<std::pair<TDF_Label,Handle(AIS_Shape)>> joined;
+            for(const auto& [presentation,label]:tools)joined.emplace_back(label,presentation);
+            colourJoinPreview(targets.front().second,targets.front().first,joined);
+        }
         refusal.clear();
         return true;
     }catch(...){refusal="invalid-result";return false;}
+}
+
+// Join preview of parts that look different: each face shows the look of the part it comes from,
+// as the tick will make it (CTO 15 Nov 09:14: the preview was already one colour).
+void Core3DViewer::colourJoinPreview(const TDF_Label& targetLabel, const Handle(AIS_Shape)& target,
+    const std::vector<std::pair<TDF_Label,Handle(AIS_Shape)>>& tools) noexcept {
+    try{
+        if(!_booleanPairPreview||_booleanPairPreview->preview.IsNull()||myDoc.IsNull())return;
+        std::vector<TDF_Label> unused;
+        std::vector<std::pair<TopoDS_Face,XCAFDoc_VisMaterialPBR>> looks,joined;
+        myDoc->CaptureFaceColours(targetLabel,1.0,unused,looks);
+        if(!myDoc->JoinFaceLooks(targetLabel,target,tools,1.0,joined))return;
+        looks.insert(looks.end(),joined.begin(),joined.end());
+        const TopoDS_Shape result=_booleanPairPreview->preview->Shape();
+        const auto matched=myDoc->MatchFaceLooks(result,looks);
+        if(matched.empty())return;
+        Handle(AIS_ColoredShape) coloured=new AIS_ColoredShape(result);
+        coloured->SetLocalTransformation(_booleanPairPreview->preview->LocalTransformation());
+        myDoc->LoadObjectMeterial(targetLabel,coloured);
+        for(const auto& [face,material]:matched)coloured->SetCustomColor(face,material.BaseColor.GetRGB());
+        myContext->Remove(_booleanPairPreview->preview,Standard_False);
+        _booleanPairPreview->preview=coloured;
+        myContext->Display(coloured,AIS_Shaded,0,Standard_False);
+        myContext->Deactivate(coloured);
+        myContext->UpdateCurrentViewer();
+    }catch(...){}
 }
 
 bool Core3DViewer::showBakedBooleanPreview(const std::string& targetEntity,
@@ -2573,7 +2622,9 @@ bool Core3DViewer::showBakedBooleanPreview(const std::string& targetEntity,
         TopoDS_Shape result;
         if(!BakedBooleanPreviewShape(myDoc,targetLabel,target->LocalTransformation(),
             toolLabel,tool->LocalTransformation(),operation,result,refusal))return false;
-        return showBooleanPairPreview(targetEntity,toolEntity,result,operation);
+        if(!showBooleanPairPreview(targetEntity,toolEntity,result,operation))return false;
+        if(operation==0)colourJoinPreview(targetLabel,target,{{toolLabel,tool}});
+        return true;
     }catch(...){refusal="invalid-result";return false;}
 }
 
