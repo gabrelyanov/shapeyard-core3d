@@ -22,6 +22,8 @@
 #include <atomic>
 #include <array>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <istream>
 #include <map>
 #include <ostream>
@@ -154,10 +156,12 @@ inline bool SameTopologyCensus(const TopoDS_Shape& before,
     return true;
 }
 
-inline TopoDS_Shape PersistenceMaterializeDetached(
-    const TopoDS_Shape& shape) noexcept {
+// One detached write/read pass in the persisted binary shape format.
+template <typename Admit>
+inline TopoDS_Shape PersistenceRoundTripOnce(const TopoDS_Shape& shape,
+                                             Admit admit) noexcept {
     try {
-        if (!retained_part_boolean::IsOneValidForwardSolid(shape)) return {};
+        if (!admit(shape)) return {};
         PersistenceBuffer buffer;
         std::ostream writer(&buffer);
         BinTools::Write(shape, writer, Standard_False, Standard_False,
@@ -167,32 +171,61 @@ inline TopoDS_Shape PersistenceMaterializeDetached(
         std::istream reader(&buffer);
         TopoDS_Shape restored;
         BinTools::Read(restored, reader);
-        if (!reader.good() || !buffer.exhausted()
-            || !retained_part_boolean::IsOneValidForwardSolid(restored)
+        if (!reader.good() || !buffer.exhausted() || !admit(restored)
             || !SameTopologyCensus(shape, restored)) return {};
         return restored;
     } catch (...) { return {}; }
 }
 
+// A saved Boolean result is re-read when the project is saved, and the result
+// rebuilt from the saved inputs must match it byte for byte. Some surfaces (the
+// torus of a rounded rim, for example) still change their bytes on a second
+// trip through the file format, so one pass is not yet what the file will hold.
+// Repeat the trip until a pass changes nothing, as FileStableShape does for the
+// inputs. A shape that is already stable after one pass comes back exactly as
+// before, so files that save today do not change.
+template <typename Admit>
+inline TopoDS_Shape PersistenceMaterializeStable(const TopoDS_Shape& shape,
+                                                 Admit admit) noexcept {
+    TopoDS_Shape current = PersistenceRoundTripOnce(shape, admit);
+    if (current.IsNull()) return {};
+    try {
+        std::string currentBytes;
+        if (!retained_part_boolean::ExactShapeBytes(current, currentBytes))
+            return current;
+        for (int pass = 0; pass < 3; ++pass) {
+            const TopoDS_Shape next = PersistenceRoundTripOnce(current, admit);
+            std::string nextBytes;
+            if (next.IsNull()
+                || !retained_part_boolean::ExactShapeBytes(next, nextBytes))
+                return current;
+            if (nextBytes == currentBytes) return current;
+#if DEBUG
+            std::fprintf(stderr, "MATERIALIZE_UNSTABLE pass=%d bytes=%zu->%zu\n",
+                         pass + 2, currentBytes.size(), nextBytes.size());
+            // Debug-only comparison switch for the failing-first check: the old single pass.
+            if (std::getenv("SHAPEYARD_MATERIALIZE_ONE_PASS")) return current;
+#endif
+            current = next;
+            currentBytes = std::move(nextBytes);
+        }
+        return current;
+    } catch (...) { return current; }
+}
+
+inline TopoDS_Shape PersistenceMaterializeDetached(
+    const TopoDS_Shape& shape) noexcept {
+    return PersistenceMaterializeStable(shape, [](const TopoDS_Shape& value) {
+        return retained_part_boolean::IsOneValidForwardSolid(value);
+    });
+}
+
 // Explicit sibling for the SYPB/6 output; never broadens source families.
 inline TopoDS_Shape PersistenceMaterializeResultSetDetached(
     const TopoDS_Shape& shape) noexcept {
-    try {
-        if (!result_set::Valid(shape)) return {};
-        PersistenceBuffer buffer;
-        std::ostream writer(&buffer);
-        BinTools::Write(shape, writer, Standard_False, Standard_False,
-                        BinTools_FormatVersion_VERSION_4);
-        if (!writer.good() || buffer.size() == 0) return {};
-        buffer.beginRead();
-        std::istream reader(&buffer);
-        TopoDS_Shape restored;
-        BinTools::Read(restored, reader);
-        if (!reader.good() || !buffer.exhausted()
-            || !result_set::Valid(restored)
-            || !SameTopologyCensus(shape, restored)) return {};
-        return restored;
-    } catch (...) { return {}; }
+    return PersistenceMaterializeStable(shape, [](const TopoDS_Shape& value) {
+        return result_set::Valid(value);
+    });
 }
 
 inline retained_part_boolean::Operation NativeOperation(Operation operation) noexcept {
