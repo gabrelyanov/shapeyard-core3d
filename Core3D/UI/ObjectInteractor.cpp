@@ -5527,36 +5527,32 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                 anAggregateTopologyNodes += retainedEnclosureNodes;
             }
 
-			gp_Pnt offset = theWorldPlane.Location();
-			gp_Dir mirrorAxis = theWorldPlane.Direction();
-			gp_Dir mirrorPln = theWorldPlane.XDirection();
-			
-			mirrorAxis.Transform(aTrsfSelected.Inverted());
-			mirrorPln.Transform(aTrsfSelected.Inverted());
-			offset.Transform(aTrsfSelected.Inverted());
-
-			gp_Trsf aTrsfMirror;
-			aTrsfMirror.SetMirror(gp_Ax2(offset, mirrorAxis, mirrorPln));
-            // Ordinary solids store their reflected placement separately from
-            // the definition, just like a moved or rotated original. With J a
-            // fixed local-X reflection and M the chosen world reflection,
-            // (M * T * J) * (J * S) == M * T * S. This retains the signed source
-            // scale and gives By numbers the reflected origin and a proper
-            // rotation, without baking that user pose into the copied solid.
-            // Recipe-backed copies keep their existing construction-frame
-            // contract until its independent parameter-edit proof is migrated.
-            const bool hasOrdinaryDefinition = originalProfile.label.IsNull()
-                && originalEnclosure.label.IsNull()
-                && sweepLoft.family == pattern_recipe_clone::Family::None;
-            gp_Trsf aBakedTransform = aTrsfSelected * aTrsfMirror;
-            gp_Trsf anOccurrenceTransform;
-            if (hasOrdinaryDefinition) {
-                aBakedTransform.SetMirror(gp_Ax2(gp_Pnt(0, 0, 0),
-                    gp_Dir(1, 0, 0), gp_Dir(0, 1, 0)));
-                gp_Trsf aWorldReflection;
-                aWorldReflection.SetMirror(theWorldPlane);
-                anOccurrenceTransform = aWorldReflection * aTrsfSelected
-                    * aBakedTransform;
+            // Keep the reflected placement separate from every copied definition.
+            // With J a fixed local-X reflection and M the world-plane reflection,
+            // (M * T * J) * (J * S) == M * T * S. Recipe frames, retained bindings
+            // and treatment replay all receive J; By numbers receives M * T * J.
+            // The source signed scale and reflected origin remain editable, and
+            // later recipe edits still use the same frozen world reflection.
+            gp_Trsf aBakedTransform;
+            aBakedTransform.SetMirror(gp_Ax2(gp_Pnt(0, 0, 0),
+                gp_Dir(1, 0, 0), gp_Dir(0, 1, 0)));
+            gp_Trsf aWorldReflection;
+            aWorldReflection.SetMirror(theWorldPlane);
+            gp_Trsf anOccurrenceTransform = aWorldReflection
+                * aTrsfSelected * aBakedTransform;
+            // Sweep/loft Mirror is unavailable in the production capability
+            // layer. Leave its existing internal frame contract unchanged.
+            if (sweepLoft.family != pattern_recipe_clone::Family::None) {
+                gp_Pnt offset = theWorldPlane.Location();
+                gp_Dir mirrorAxis = theWorldPlane.Direction();
+                gp_Dir mirrorPln = theWorldPlane.XDirection();
+                mirrorAxis.Transform(aTrsfSelected.Inverted());
+                mirrorPln.Transform(aTrsfSelected.Inverted());
+                offset.Transform(aTrsfSelected.Inverted());
+                gp_Trsf aTrsfMirror;
+                aTrsfMirror.SetMirror(gp_Ax2(offset, mirrorAxis, mirrorPln));
+                aBakedTransform = aTrsfSelected * aTrsfMirror;
+                anOccurrenceTransform = gp_Trsf();
             }
             if (!originalProfile.label.IsNull()) {
                 gp_Trsf originalFrame;
@@ -5596,7 +5592,6 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                         anAggregateLimit - anAggregateTopologyNodes);
                 }
                 aShapePrs = new AIS_Shape(mirrored);
-                aShapePrs->SetLocalTransformation(anOccurrenceTransform);
             }
             TopoDS_Shape preparedProfileBinding;
             std::string profileIdentifier;
@@ -5671,6 +5666,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                         || retained.Shape().IsPartner(originalProfile.boundShape)
                         || retained.Shape().IsPartner(aShapePrs->Shape())
                         || !IsShapeWithinModelCoordinates(retained.Shape())
+                        || !IsShapeWithinModelCoordinates(retained.Shape(), anOccurrenceTransform)
                         || !IsTopologicallyValid(retained.Shape())
                         || !CountBoundedMirrorTopology(retained.Shape(), anAggregateLimit - anAggregateTopologyNodes, nodes)
                         || nodes != retainedProfileNodes) return Standard_False;
@@ -5678,6 +5674,10 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                     preparedProfileBinding = retained.Shape();
                 }
             }
+            // Treated profiles construct their replay presentation later than
+            // ordinary copies; both must carry the same occurrence authority.
+            if (!aShapePrs.IsNull())
+                aShapePrs->SetLocalTransformation(anOccurrenceTransform);
 			Standard_Size resultNodeCount = 0;
 			if (aShapePrs.IsNull() || aShapePrs->Shape().IsNull()
 				|| !IsShapeWithinModelCoordinates(aShapePrs->Shape())
@@ -5708,6 +5708,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                         || retained.Shape().IsPartner(originalEnclosure.boundShape)
                         || retained.Shape().IsPartner(aShapePrs->Shape())
                         || !IsShapeWithinModelCoordinates(retained.Shape())
+                        || !IsShapeWithinModelCoordinates(retained.Shape(), anOccurrenceTransform)
                         || !IsTopologicallyValid(retained.Shape())
                         || !CountBoundedMirrorTopology(retained.Shape(), anAggregateLimit - anAggregateTopologyNodes, nodes)
                         || nodes != retainedEnclosureNodes) return Standard_False;
