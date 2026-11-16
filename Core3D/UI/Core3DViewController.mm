@@ -256,6 +256,7 @@ unsigned long long Core3DDebugColdOpenCandidateProbeValue(
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <gp_Ax3.hxx>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -3798,6 +3799,185 @@ struct NativeModelingPermitIssuer final {
 }
 - (instancetype)initWithJob:(Core3DSavedCutSourceJob *)job {self=[super init];if(self)_job=job;return self;}
 - (BOOL)cancel {if(!NSThread.isMainThread)return NO;Core3DSavedCutSourceJob *job=_job;return job?[job cancel]:NO;}
+@end
+
+// AGENT MEASURE HELPERS (measure lane) BEGIN
+// Release-safe counterparts of the DEBUG solid copy and whole-line routines
+// further down this file (kept unchanged there for their own checks). These
+// headers are included here, outside DEBUG, because the file's other includes
+// of them sit inside DEBUG blocks.
+#include <BRepClass3d_SolidClassifier.hxx>
+#include <IntCurvesFace_ShapeIntersector.hxx>
+#include <gp_Lin.hxx>
+#include <GProp_GProps.hxx>
+#include <BRepGProp.hxx>
+#include <BRepBndLib.hxx>
+#include <Bnd_Box.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS_Iterator.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
+
+enum class Core3DAgentCopyResult { Copied, Unavailable, OverBudget };
+
+// One unique free root with this entity identifier, held as BRep: a private
+// mesh-free deep copy, object-local and world (the stored transform applied
+// once, as Core3DViewer::measureObjectAlignment does). Unique topology nodes
+// are counted BEFORE any copy; above 8192 the copy is refused.
+static Core3DAgentCopyResult core3dAgentSolidCopy(const Handle(OcctDocument)& owner,
+    const std::string& entity, TopoDS_Shape& local, TopoDS_Shape& world,
+    double& unit, double& mm, std::size_t& nodes) noexcept {
+    try {
+        local.Nullify(); world.Nullify(); unit = 0; mm = 0; nodes = 0;
+        if (owner.IsNull() || owner->Document().IsNull()) return Core3DAgentCopyResult::Unavailable;
+        TDF_Label label;
+        if (!core3d::placement::Find(owner, entity, label)) return Core3DAgentCopyResult::Unavailable;
+        OcctObjectTransformState state;
+        if (!owner->CaptureObjectTransformStateForLabel(label, state)
+            || state.entityIdentifier != entity
+            || state.resolvedRepresentation != OcctGeometryRepresentation::BRep
+            || state.shape.IsNull()) return Core3DAgentCopyResult::Unavailable;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(owner->Document(), unit)
+            || !core3d::placement::MillimetersPerUnit(unit, mm)) return Core3DAgentCopyResult::Unavailable;
+        constexpr auto maxNodes = core3d::TransformInspectorMeasurementController::kMaximumBRepTopologyNodes;
+        std::vector<TopoDS_Shape> stack{state.shape};
+        TopTools_IndexedMapOfShape visited;
+        while (!stack.empty()) {
+            const auto shape = stack.back(); stack.pop_back();
+            if (visited.Contains(shape)) continue;
+            visited.Add(shape);
+            if (++nodes > maxNodes) return Core3DAgentCopyResult::OverBudget;
+            for (TopoDS_Iterator child(shape, Standard_True, Standard_True); child.More(); child.Next()) {
+                if (stack.size() >= maxNodes) return Core3DAgentCopyResult::OverBudget;
+                if (!visited.Contains(child.Value())) stack.push_back(child.Value());
+            }
+        }
+        if (nodes == 0) return Core3DAgentCopyResult::Unavailable;
+        BRepBuilderAPI_Copy copy(state.shape, Standard_True, Standard_False);
+        if (!copy.IsDone() || copy.Shape().IsNull()) return Core3DAgentCopyResult::Unavailable;
+        BRepBuilderAPI_Transform transformed(copy.Shape(), state.transform, Standard_True);
+        if (!transformed.IsDone() || transformed.Shape().IsNull()) return Core3DAgentCopyResult::Unavailable;
+        local = copy.Shape(); world = transformed.Shape();
+        return Core3DAgentCopyResult::Copied;
+    } catch (...) { local.Nullify(); world.Nullify(); return Core3DAgentCopyResult::Unavailable; }
+}
+
+// Ordered signed [enter, exit] material intervals (mm) of the whole line.
+// Open spans between unique face hits are classified at their midpoints;
+// a boundary-only span, an unknown classification or a failed intersector
+// is Unavailable, never an empty result. Limits: 64 solids, 4096 hits, 64
+// intervals (measurement-core.v1), above them OverBudget.
+static Core3DAgentCopyResult core3dAgentLineIntervals(const TopoDS_Shape& world, double mm,
+    const double originMM[3], const double direction[3],
+    std::vector<std::pair<double, double>>& intervals) noexcept {
+    intervals.clear();
+    try {
+        if (world.IsNull() || !std::isfinite(mm) || mm <= 0) return Core3DAgentCopyResult::Unavailable;
+        double scale = 0;
+        for (int i = 0; i < 3; ++i) {
+            if (!std::isfinite(originMM[i]) || !std::isfinite(direction[i])
+                || !std::isfinite(originMM[i] / mm)) return Core3DAgentCopyResult::Unavailable;
+            scale = std::max(scale, std::abs(direction[i]));
+        }
+        if (scale == 0) return Core3DAgentCopyResult::Unavailable;
+        const gp_Dir unit(direction[0] / scale, direction[1] / scale, direction[2] / scale);
+        const gp_Pnt origin(originMM[0] / mm, originMM[1] / mm, originMM[2] / mm);
+        const gp_Lin line(origin, unit);
+        const double tolerance = 1.0e-7 / mm;
+        if (!std::isfinite(tolerance) || tolerance <= 0) return Core3DAgentCopyResult::Unavailable;
+        TopTools_IndexedMapOfShape solids;
+        TopExp::MapShapes(world, TopAbs_SOLID, solids);
+        if (solids.IsEmpty()) return Core3DAgentCopyResult::Unavailable;
+        if (solids.Extent() > 64) return Core3DAgentCopyResult::OverBudget;
+        if (!BRepCheck_Analyzer(world, Standard_True).IsValid()) return Core3DAgentCopyResult::Unavailable;
+        Bnd_Box box; BRepBndLib::AddOptimal(world, box, Standard_False, Standard_False);
+        if (box.IsVoid() || box.IsOpen()) return Core3DAgentCopyResult::Unavailable;
+        double bounds[6]; box.Get(bounds[0], bounds[1], bounds[2], bounds[3], bounds[4], bounds[5]);
+        double low = std::numeric_limits<double>::max(), high = -low;
+        for (int corner = 0; corner < 8; ++corner) {
+            const gp_Pnt point(bounds[(corner & 1) ? 3 : 0], bounds[(corner & 2) ? 4 : 1], bounds[(corner & 4) ? 5 : 2]);
+            const double t = gp_Vec(origin, point).Dot(gp_Vec(unit));
+            if (!std::isfinite(t)) return Core3DAgentCopyResult::Unavailable;
+            low = std::min(low, t); high = std::max(high, t);
+        }
+        low -= tolerance * 4; high += tolerance * 4;
+        if (!std::isfinite(low) || !std::isfinite(high) || low >= high) return Core3DAgentCopyResult::Unavailable;
+        IntCurvesFace_ShapeIntersector intersector;
+        intersector.Load(world, tolerance); intersector.Perform(line, low, high);
+        if (!intersector.IsDone()) return Core3DAgentCopyResult::Unavailable;
+        if (intersector.NbPnt() > 4096) return Core3DAgentCopyResult::OverBudget;
+        std::vector<double> cuts;
+        for (int i = 1; i <= intersector.NbPnt(); ++i) {
+            const double t = intersector.WParameter(i);
+            if (!std::isfinite(t) || !std::isfinite(t * mm)) return Core3DAgentCopyResult::Unavailable;
+            cuts.push_back(t);
+        }
+        std::sort(cuts.begin(), cuts.end());
+        cuts.erase(std::unique(cuts.begin(), cuts.end(), [tolerance](double a, double b) {
+            return std::abs(a - b) <= tolerance;
+        }), cuts.end());
+        for (std::size_t i = 1; i < cuts.size(); ++i) {
+            const double mid = cuts[i - 1] * 0.5 + cuts[i] * 0.5;
+            const gp_Pnt point = origin.Translated(gp_Vec(unit) * mid);
+            bool inside = false, boundary = false;
+            for (int j = 1; j <= solids.Extent(); ++j) {
+                BRepClass3d_SolidClassifier classifier(solids(j), point, tolerance);
+                const TopAbs_State state = classifier.State();
+                if (state == TopAbs_UNKNOWN) { intervals.clear(); return Core3DAgentCopyResult::Unavailable; }
+                inside = inside || state == TopAbs_IN; boundary = boundary || state == TopAbs_ON;
+            }
+            if (!inside) {
+                if (boundary) { intervals.clear(); return Core3DAgentCopyResult::Unavailable; }
+                continue;
+            }
+            const double enter = cuts[i - 1] * mm, exit = cuts[i] * mm;
+            if (!intervals.empty() && std::abs(intervals.back().second - enter) <= 1.0e-7) {
+                intervals.back().second = exit;
+            } else {
+                if (intervals.size() >= 64) { intervals.clear(); return Core3DAgentCopyResult::OverBudget; }
+                intervals.emplace_back(enter, exit);
+            }
+        }
+        return Core3DAgentCopyResult::Copied;
+    } catch (...) { intervals.clear(); return Core3DAgentCopyResult::Unavailable; }
+}
+
+static bool core3dAgentVector3(NSArray<NSNumber *> *values, double out[3]) {
+    if (![values isKindOfClass:NSArray.class] || values.count != 3) return false;
+    for (NSUInteger i = 0; i < 3; ++i) {
+        if (![values[i] isKindOfClass:NSNumber.class]) return false;
+        out[i] = values[i].doubleValue;
+        if (!std::isfinite(out[i])) return false;
+    }
+    return true;
+}
+// AGENT MEASURE HELPERS (measure lane) END
+
+// Engine-only producers, implemented in Core3DAgentMeasurements.mm (measure lane).
+@interface Core3DAgentSolidMeasurement (Core3DEngineProducer)
+- (instancetype)initCore3DUnmeasured:(Core3DAgentMeasurementStatus)status;
+- (instancetype)initCore3DMeasuredWithSource:(Core3DAgentMeasurementSource *)source
+                                  boundsMinMM:(NSArray<NSNumber *> *)boundsMinMM
+                                  boundsMaxMM:(NSArray<NSNumber *> *)boundsMaxMM
+                      localBoundsOptimalMinMM:(NSArray<NSNumber *> *)localMinMM
+                      localBoundsOptimalMaxMM:(NSArray<NSNumber *> *)localMaxMM
+                                    volumeMM3:(double)volumeMM3
+                volumeIntegrationRelativeError:(double)volumeError
+                                        valid:(BOOL)valid
+                                       solids:(NSUInteger)solids shells:(NSUInteger)shells
+                                        faces:(NSUInteger)faces edges:(NSUInteger)edges
+                                     vertices:(NSUInteger)vertices topologyNodes:(NSUInteger)topologyNodes;
+@end
+@interface Core3DAgentLineSectionMeasurement (Core3DEngineProducer)
+- (instancetype)initCore3DUnmeasured:(Core3DAgentMeasurementStatus)status;
+- (instancetype)initCore3DMeasuredWithSource:(Core3DAgentMeasurementSource *)source
+                              probeIdentifier:(NSString *)probeIdentifier
+                                     originMM:(NSArray<NSNumber *> *)originMM
+                           requestedDirection:(NSArray<NSNumber *> *)requestedDirection
+                                  intervalsMM:(NSArray<NSArray<NSNumber *> *> *)intervalsMM;
 @end
 
 @interface Core3DViewController () {
@@ -7794,6 +7974,16 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
     }
     [GLController requestRender];
     return values;
+}
+
+- (void)debugSetForceSelectionOutlineFallback:(BOOL)force {
+    if (![NSThread isMainThread] || GLController == nil) { return; }
+    [GLController debugSetForceSelectionOutlineFallback:force];
+}
+
+- (NSArray<NSNumber *> *_Nullable)debugSelectedPartHighlightRGB {
+    if (![NSThread isMainThread] || GLController == nil) { return nil; }
+    return [GLController debugSelectedPartHighlightRGB];
 }
 
 - (NSInteger)debugPartsWithOwnHighlightStyle {
@@ -16593,6 +16783,183 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
     return Core3DMeshWindingRepairResultRejected;
 }
 
+- (Core3DMeshSolidConversionResult)makeSolidFromMeshForEntityIdentifier:(NSString *)entityIdentifier
+                                                         expected:(Core3DSceneSnapshot *)expected {
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr || expected == nil
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || expected.publicationSourceIdentifier.length == 0
+        || expected.publicationSourceIdentifier.length > 128) { return Core3DMeshSolidConversionResultRejected; }
+    const CGSize size = GLController.drawableSize;
+    if (!std::isfinite(size.width) || !std::isfinite(size.height)
+        || size.width < 1 || size.height < 1
+        || size.width > std::numeric_limits<std::uint32_t>::max()
+        || size.height > std::numeric_limits<std::uint32_t>::max()) { return Core3DMeshSolidConversionResultRejected; }
+    const char* entity = entityIdentifier.UTF8String;
+    const char* publication = expected.publicationSourceIdentifier.UTF8String;
+    if (entity == nullptr || publication == nullptr) { return Core3DMeshSolidConversionResultRejected; }
+    try {
+        core3d::ObjectFrameIdentity identity;
+        identity.entityIdentifier.assign(entity, [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.publicationSourceIdentifier.assign(publication,
+            [expected.publicationSourceIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        identity.documentGeneration = expected.revisions.documentGeneration;
+        identity.modelRevision = expected.revisions.modelRevision;
+        const auto result = GLController.viewer->makeSolidFromMesh(identity, expected.revisions.presentationRevision,
+            static_cast<std::uint32_t>(std::llround(size.width)),
+            static_cast<std::uint32_t>(std::llround(size.height)));
+        switch (result) {
+            case core3d::OrdinaryEditResult::NoChange: return Core3DMeshSolidConversionResultUnchanged;
+            case core3d::OrdinaryEditResult::Committed:
+                [GLController refreshSelectionState];
+                [GLController requestRender];
+                [self viewDidInvalidateSceneSnapshot];
+                [self sendNotifyUIState:UIStateChangingHistory];
+                return Core3DMeshSolidConversionResultCommitted;
+            case core3d::OrdinaryEditResult::Busy: return Core3DMeshSolidConversionResultBusy;
+            case core3d::OrdinaryEditResult::Invalid: return Core3DMeshSolidConversionResultRejected;
+            case core3d::OrdinaryEditResult::OutcomeUnknown: return Core3DMeshSolidConversionResultRecoveryRequired;
+            case core3d::OrdinaryEditResult::RetryableFailure: return Core3DMeshSolidConversionResultFailed;
+        }
+    } catch (...) {}
+    return Core3DMeshSolidConversionResultRejected;
+}
+
+// AGENT MEASURE (measure lane) BEGIN
+// Shared fence of both read-only agent observations: main thread, no open
+// edit, the caller's expected publication equal to the current one (else
+// Stale), a valid source fence, then a private copy of the one saved solid.
+// Nothing here selects, edits, renders or records history.
+- (Core3DAgentMeasurementStatus)core3d_agentMeasureEntity:(NSString *)entityIdentifier
+    targetAlias:(NSString *)targetAlias documentIdentifier:(NSString *)documentIdentifier
+    sourceSHA256:(NSString *)sourceSHA256 method:(NSString *)method
+    expected:(Core3DSceneSnapshot *)expected
+    source:(Core3DAgentMeasurementSource * __strong *)source
+    local:(TopoDS_Shape *)local world:(TopoDS_Shape *)world
+    millimetresPerUnit:(double *)mm topologyNodes:(std::size_t *)nodes {
+    *source = nil;
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr || ![expected isKindOfClass:Core3DSceneSnapshot.class]
+        || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || entityIdentifier.UTF8String == nullptr
+        || ![targetAlias isKindOfClass:NSString.class]
+        || ![documentIdentifier isKindOfClass:NSString.class]
+        || ![sourceSHA256 isKindOfClass:NSString.class]) return Core3DAgentMeasurementStatusUnavailable;
+    try {
+        if (![self core3d_canBeginCommittedEdit]) return Core3DAgentMeasurementStatusUnavailable;
+        Core3DSceneSnapshot *current = [self captureSceneSnapshot];
+        if (current == nil) return Core3DAgentMeasurementStatusUnavailable;
+        if (![current.publicationSourceIdentifier isEqualToString:expected.publicationSourceIdentifier]
+            || current.revisions.documentGeneration != expected.revisions.documentGeneration
+            || current.revisions.modelRevision != expected.revisions.modelRevision
+            || current.revisions.presentationRevision != expected.revisions.presentationRevision)
+            return Core3DAgentMeasurementStatusStale;
+        Core3DAgentMeasurementSource *fence = [[Core3DAgentMeasurementSource alloc]
+            initWithTargetAlias:targetAlias documentIdentifier:documentIdentifier
+            publicationSourceIdentifier:current.publicationSourceIdentifier
+            documentGeneration:[NSString stringWithFormat:@"%llu", (unsigned long long)current.revisions.documentGeneration]
+            modelRevision:[NSString stringWithFormat:@"%llu", (unsigned long long)current.revisions.modelRevision]
+            presentationRevision:[NSString stringWithFormat:@"%llu", (unsigned long long)current.revisions.presentationRevision]
+            metersPerUnit:current.metersPerUnit method:method sourceSHA256:sourceSHA256];
+        if (fence == nil) return Core3DAgentMeasurementStatusUnavailable;
+        double unit = 0;
+        const std::string entity(entityIdentifier.UTF8String,
+            [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        switch (core3dAgentSolidCopy(GLController.viewer->getDocument(), entity, *local, *world, unit, *mm, *nodes)) {
+            case Core3DAgentCopyResult::Copied: break;
+            case Core3DAgentCopyResult::OverBudget: return Core3DAgentMeasurementStatusBudgetExceeded;
+            case Core3DAgentCopyResult::Unavailable: return Core3DAgentMeasurementStatusUnavailable;
+        }
+        // The document's unit and the publication's must agree.
+        if (!(std::abs(unit - current.metersPerUnit) <= 1.0e-9 * std::max(1.0, std::abs(unit))))
+            return Core3DAgentMeasurementStatusUnavailable;
+        *source = fence;
+        return Core3DAgentMeasurementStatusMeasured;
+    } catch (...) { return Core3DAgentMeasurementStatusUnavailable; }
+}
+
+- (Core3DAgentSolidMeasurement *)agentMeasureSolidOfEntityIdentifier:(NSString *)entityIdentifier
+    targetAlias:(NSString *)targetAlias documentIdentifier:(NSString *)documentIdentifier
+    sourceSHA256:(NSString *)sourceSHA256 expected:(Core3DSceneSnapshot *)expected {
+    Core3DAgentMeasurementSource *source = nil;
+    TopoDS_Shape local, world; double mm = 0; std::size_t nodes = 0;
+    const auto status = [self core3d_agentMeasureEntity:entityIdentifier targetAlias:targetAlias
+        documentIdentifier:documentIdentifier sourceSHA256:sourceSHA256 method:@"occtBRepCopy"
+        expected:expected source:&source local:&local world:&world millimetresPerUnit:&mm topologyNodes:&nodes];
+    if (status != Core3DAgentMeasurementStatusMeasured || source == nil)
+        return [[Core3DAgentSolidMeasurement alloc] initCore3DUnmeasured:status];
+    try {
+        auto bounds = [&](const TopoDS_Shape& shape, NSArray<NSNumber *> * __strong *low,
+                          NSArray<NSNumber *> * __strong *high) -> bool {
+            Bnd_Box box; BRepBndLib::AddOptimal(shape, box, Standard_False, Standard_False);
+            if (box.IsVoid() || box.IsOpen()) return false;
+            box.SetGap(0);
+            double v[6]; box.Get(v[0], v[1], v[2], v[3], v[4], v[5]);
+            for (double& value : v) { value *= mm; if (!std::isfinite(value)) return false; }
+            for (int i = 0; i < 3; ++i) if (v[i] > v[i + 3]) return false;
+            *low = @[@(v[0]), @(v[1]), @(v[2])]; *high = @[@(v[3]), @(v[4]), @(v[5])];
+            return true;
+        };
+        NSArray<NSNumber *> *worldLow = nil, *worldHigh = nil, *localLow = nil, *localHigh = nil;
+        if (!bounds(world, &worldLow, &worldHigh) || !bounds(local, &localLow, &localHigh))
+            return [[Core3DAgentSolidMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusUnavailable];
+        TopTools_IndexedMapOfShape solids, shells, faces, edges, vertices;
+        TopExp::MapShapes(world, TopAbs_SOLID, solids); TopExp::MapShapes(world, TopAbs_SHELL, shells);
+        TopExp::MapShapes(world, TopAbs_FACE, faces); TopExp::MapShapes(world, TopAbs_EDGE, edges);
+        TopExp::MapShapes(world, TopAbs_VERTEX, vertices);
+        GProp_GProps props;
+        // Adaptive integration of the analytic surfaces; no tessellated volume.
+        const double error = BRepGProp::VolumeProperties(world, props, 1.0e-9, Standard_False, Standard_False);
+        const double volume = props.Mass() * mm * mm * mm;
+        if (!std::isfinite(volume) || !std::isfinite(error) || error < 0)
+            return [[Core3DAgentSolidMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusUnavailable];
+        const BOOL valid = BRepCheck_Analyzer(world, Standard_True).IsValid() ? YES : NO;
+        return [[Core3DAgentSolidMeasurement alloc] initCore3DMeasuredWithSource:source
+            boundsMinMM:worldLow boundsMaxMM:worldHigh
+            localBoundsOptimalMinMM:localLow localBoundsOptimalMaxMM:localHigh
+            volumeMM3:volume volumeIntegrationRelativeError:error valid:valid
+            solids:NSUInteger(solids.Extent()) shells:NSUInteger(shells.Extent())
+            faces:NSUInteger(faces.Extent()) edges:NSUInteger(edges.Extent())
+            vertices:NSUInteger(vertices.Extent()) topologyNodes:NSUInteger(nodes)];
+    } catch (...) {
+        return [[Core3DAgentSolidMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusUnavailable];
+    }
+}
+
+- (Core3DAgentLineSectionMeasurement *)agentMeasureLineSectionOfEntityIdentifier:(NSString *)entityIdentifier
+    targetAlias:(NSString *)targetAlias documentIdentifier:(NSString *)documentIdentifier
+    sourceSHA256:(NSString *)sourceSHA256 probeIdentifier:(NSString *)probeIdentifier
+    originMM:(NSArray<NSNumber *> *)originMM direction:(NSArray<NSNumber *> *)direction
+    expected:(Core3DSceneSnapshot *)expected {
+    double origin[3] = {0, 0, 0}, along[3] = {0, 0, 0};
+    if (![probeIdentifier isKindOfClass:NSString.class] || probeIdentifier.length == 0
+        || probeIdentifier.length > 128 || !core3dAgentVector3(originMM, origin)
+        || !core3dAgentVector3(direction, along) || (along[0] == 0 && along[1] == 0 && along[2] == 0))
+        return [[Core3DAgentLineSectionMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusUnavailable];
+    Core3DAgentMeasurementSource *source = nil;
+    TopoDS_Shape local, world; double mm = 0; std::size_t nodes = 0;
+    const auto status = [self core3d_agentMeasureEntity:entityIdentifier targetAlias:targetAlias
+        documentIdentifier:documentIdentifier sourceSHA256:sourceSHA256 method:@"occtWholeLineIntervals"
+        expected:expected source:&source local:&local world:&world millimetresPerUnit:&mm topologyNodes:&nodes];
+    if (status != Core3DAgentMeasurementStatusMeasured || source == nil)
+        return [[Core3DAgentLineSectionMeasurement alloc] initCore3DUnmeasured:status];
+    std::vector<std::pair<double, double>> intervals;
+    switch (core3dAgentLineIntervals(world, mm, origin, along, intervals)) {
+        case Core3DAgentCopyResult::Copied: break;
+        case Core3DAgentCopyResult::OverBudget:
+            return [[Core3DAgentLineSectionMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusBudgetExceeded];
+        case Core3DAgentCopyResult::Unavailable:
+            return [[Core3DAgentLineSectionMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusUnavailable];
+    }
+    NSMutableArray<NSArray<NSNumber *> *> *result = [NSMutableArray arrayWithCapacity:intervals.size()];
+    for (const auto& interval : intervals) [result addObject:@[@(interval.first), @(interval.second)]];
+    return [[Core3DAgentLineSectionMeasurement alloc] initCore3DMeasuredWithSource:source
+        probeIdentifier:probeIdentifier originMM:@[@(origin[0]), @(origin[1]), @(origin[2])]
+        requestedDirection:@[@(along[0]), @(along[1]), @(along[2])] intervalsMM:result];
+}
+// AGENT MEASURE (measure lane) END
+
 - (Core3DMeshUVAtlasResult)generateTriangleUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
                                                          expected:(Core3DSceneSnapshot *)expected {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil
@@ -21355,15 +21722,128 @@ static bool Core3DCollectMeasureElements(
     return true;
 }
 
-static bool Core3DMeasureFullCircle(const TopoDS_Shape& shape, gp_Circ& circle) {
-    if (shape.ShapeType() != TopAbs_EDGE) return false;
-    const TopoDS_Edge edge = TopoDS::Edge(shape);
+// A round edge whose curve is not stored as an exact circle (a Bevel can leave the rim of a
+// pulled cylinder as a spline) or a rim split into arcs still reads as its circle when every
+// sample lies on one circle within the kernel's working tolerance.
+static bool Core3DMeasureFitCircle(const TopoDS_Edge& edge, gp_Circ& circle, double& span) {
     if (BRep_Tool::Degenerated(edge)) return false;
     BRepAdaptor_Curve curve(edge);
-    if (curve.GetType() != GeomAbs_Circle
-        || std::abs(curve.LastParameter() - curve.FirstParameter() - 2 * M_PI) >= 1e-7)
+    const GeomAbs_CurveType type = curve.GetType();
+    if (type == GeomAbs_Line) return false;
+    const double first = curve.FirstParameter(), last = curve.LastParameter();
+    if (!std::isfinite(first) || !std::isfinite(last) || !(last > first)) return false;
+    if (type == GeomAbs_Circle) {
+        circle = curve.Circle();
+        span = last - first;
+        return std::isfinite(circle.Radius()) && circle.Radius() > 0;
+    }
+    constexpr int kSamples = 96;
+    std::array<gp_XYZ, kSamples + 1> points;
+    gp_XYZ mean(0, 0, 0);
+    for (int i = 0; i <= kSamples; ++i) {
+        points[i] = curve.Value(first + (last - first) * i / kSamples).XYZ();
+        if (!std::isfinite(points[i].X()) || !std::isfinite(points[i].Y())
+            || !std::isfinite(points[i].Z())) return false;
+        mean += points[i];
+    }
+    mean /= kSamples + 1;
+    gp_XYZ normal(0, 0, 0);
+    for (int i = 0; i <= kSamples; ++i)
+        normal += (points[i] - mean).Crossed(points[(i + 1) % (kSamples + 1)] - mean);
+    if (!(normal.Modulus() > Precision::SquareConfusion())) return false;
+    const gp_Ax3 frame{gp_Pnt(mean), gp_Dir(normal)};
+    const gp_XYZ xAxis = frame.XDirection().XYZ(), yAxis = frame.YDirection().XYZ();
+    // Least squares circle in the plane: x^2 + y^2 + D x + E y + F = 0.
+    double sxx = 0, sxy = 0, syy = 0, sx = 0, sy = 0, sxz = 0, syz = 0, sz = 0;
+    for (const auto& point : points) {
+        const gp_XYZ local = point - mean;
+        const double x = local.Dot(xAxis), y = local.Dot(yAxis), z = x * x + y * y;
+        sxx += x * x; sxy += x * y; syy += y * y; sx += x; sy += y;
+        sxz += x * z; syz += y * z; sz += z;
+    }
+    const double n = kSamples + 1;
+    const double m[3][3] = {{sxx, sxy, sx}, {sxy, syy, sy}, {sx, sy, n}};
+    const double r[3] = {-sxz, -syz, -sz};
+    const auto det3 = [](const double a[3][3]) {
+        return a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
+             - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
+             + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+    };
+    const double det = det3(m);
+    if (!std::isfinite(det) || std::abs(det) <= std::numeric_limits<double>::min()) return false;
+    double solution[3];
+    for (int column = 0; column < 3; ++column) {
+        double replaced[3][3];
+        for (int row = 0; row < 3; ++row)
+            for (int k = 0; k < 3; ++k) replaced[row][k] = k == column ? r[row] : m[row][k];
+        solution[column] = det3(replaced) / det;
+    }
+    const double cx = -solution[0] / 2, cy = -solution[1] / 2;
+    const double squared = cx * cx + cy * cy - solution[2];
+    if (!std::isfinite(squared) || squared <= 0) return false;
+    const double radius = std::sqrt(squared);
+    const gp_XYZ centre = mean + xAxis * cx + yAxis * cy;
+    const double tolerance = std::min(1e-3 * radius,
+        std::max(1e-4 * radius, 2 * BRep_Tool::Tolerance(edge)));
+    double turned = 0, previous = 0;
+    for (int i = 0; i <= kSamples; ++i) {
+        const gp_XYZ offset = points[i] - centre;
+        const double height = offset.Dot(frame.Direction().XYZ());
+        const double x = offset.Dot(xAxis), y = offset.Dot(yAxis);
+        if (std::abs(height) > tolerance || std::abs(std::hypot(x, y) - radius) > tolerance)
+            return false;
+        const double angle = std::atan2(y, x);
+        if (i > 0) turned += std::remainder(angle - previous, 2 * M_PI);
+        previous = angle;
+    }
+    circle = gp_Circ(gp_Ax2(gp_Pnt(centre), frame.Direction(), frame.XDirection()), radius);
+    span = std::abs(turned);
+    return true;
+}
+
+static bool Core3DMeasureSameCircle(const gp_Circ& a, const gp_Circ& b) {
+    const double tolerance = std::max(1e-4 * a.Radius(), Precision::Confusion());
+    return std::abs(a.Radius() - b.Radius()) <= tolerance
+        && a.Location().Distance(b.Location()) <= tolerance
+        && a.Axis().Direction().IsParallel(b.Axis().Direction(), 1e-4);
+}
+
+static bool Core3DMeasureFullCircle(const TopoDS_Shape& shape, gp_Circ& circle) {
+    if (shape.IsNull() || shape.ShapeType() != TopAbs_EDGE) return false;
+    double span = 0;
+    if (!Core3DMeasureFitCircle(TopoDS::Edge(shape), circle, span)) return false;
+    const bool exact = BRepAdaptor_Curve(TopoDS::Edge(shape)).GetType() == GeomAbs_Circle;
+    return std::abs(span - 2 * M_PI) < (exact ? 1e-7 : 1e-3);
+}
+
+// One arc of a rim the model keeps split in pieces: the other arcs on the same circle in the
+// same part complete it. The circle is returned in world coordinates.
+static bool Core3DMeasureFullCircleOfPart(const TopoDS_Shape& world,
+                                          const Handle(StdSelect_BRepOwner)& owner,
+                                          gp_Circ& circle) {
+    if (Core3DMeasureFullCircle(world, circle)) return true;
+    if (world.IsNull() || world.ShapeType() != TopAbs_EDGE || owner.IsNull() || !owner->HasShape())
         return false;
-    circle = curve.Circle();
+    const auto part = Handle(AIS_Shape)::DownCast(owner->Selectable());
+    const TopoDS_Shape& local = owner->Shape();
+    if (part.IsNull() || part->Shape().IsNull() || local.ShapeType() != TopAbs_EDGE) return false;
+    gp_Circ arc;
+    double covered = 0;
+    if (!Core3DMeasureFitCircle(TopoDS::Edge(local), arc, covered) || covered >= 2 * M_PI - 1e-3)
+        return false;
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(part->Shape(), TopAbs_EDGE, edges);
+    for (int index = 1; index <= edges.Extent(); ++index) {
+        const TopoDS_Edge& other = TopoDS::Edge(edges(index));
+        if (other.IsSame(local)) continue;
+        gp_Circ candidate;
+        double span = 0;
+        if (Core3DMeasureFitCircle(other, candidate, span) && Core3DMeasureSameCircle(arc, candidate))
+            covered += span;
+    }
+    if (std::abs(covered - 2 * M_PI) >= 1e-3) return false;
+    circle = arc;
+    circle.Transform(part->Transformation());
     return std::isfinite(circle.Radius()) && circle.Radius() > 0;
 }
 
@@ -21395,7 +21875,7 @@ struct Core3DMeasureSnap {
 static Core3DMeasureSnap Core3DMeasureSnapPoint(
     const Handle(V3d_View)& view, const core3d::Core3DViewer::MeasurePick& pick) {
     gp_Circ circle;
-    if (Core3DMeasureFullCircle(pick.worldEdge, circle))
+    if (Core3DMeasureFullCircleOfPart(pick.worldEdge, pick.owner, circle))
         return Core3DMeasureSnap{circle.Location(), 4};
     gp_Pnt picked = pick.pickedPoint;
     gp_Pnt endpoints[2];
@@ -21420,12 +21900,14 @@ static Core3DMeasureSnap Core3DMeasureSnapPoint(
         if (onEdge.IsDone() && onEdge.NbSolution() > 0)
             picked = onEdge.PointOnShape2(1);
     }
-    const double unitsPerPixel = Core3DMeasureUnitsPerPixel(view, picked);
-    if (unitsPerPixel > 0 && std::isfinite(unitsPerPixel) && pick.pixelTolerance > 0) {
+    // The radius the tap was made with; a later zoom or view change keeps the snap it gave.
+    const double snapRadius = pick.snapRadius > 0 && std::isfinite(pick.snapRadius)
+        ? pick.snapRadius : Core3DMeasureUnitsPerPixel(view, picked) * pick.pixelTolerance;
+    if (snapRadius > 0 && std::isfinite(snapRadius)) {
         const unsigned kinds = static_cast<unsigned>(core3d::GeometrySnapKind::Vertex)
             | static_cast<unsigned>(core3d::GeometrySnapKind::EdgeMidpoint);
         const auto snapped = core3d::SnapPointToGeometry(pick.worldEdge, picked,
-            unitsPerPixel * pick.pixelTolerance, kinds);
+            snapRadius, kinds);
         if (snapped) {
             const int kind = snapped->kind == core3d::GeometrySnapKind::Vertex ? 1 : 2;
             const gp_Pnt point = kind == 2 && straight
@@ -21628,12 +22110,16 @@ extern "C" double Core3DDebugMeasureAnglePairProbe(int pair) {
                     [&](const core3d::Core3DViewer::MeasurePick& candidate) {
                         return candidate.owner == topology[index].owner;
                     });
+                gp_Circ circle;
+                if (pick != picks.end()
+                    && !Core3DMeasureFullCircleOfPart(world, topology[index].owner, circle)
+                    && Core3DMeasureFullCircle(pick->worldEdge, circle))
+                    world = pick->worldEdge; // a tap on a hole's seam measures its rim
                 if (index < 2 && pick != picks.end()) {
                     snaps[index] = Core3DMeasureSnapPoint(view, *pick);
                     hasSnap[index] = snaps[index].kind > 0;
                 }
-                gp_Circ circle;
-                if (Core3DMeasureFullCircle(world, circle)) {
+                if (Core3DMeasureFullCircleOfPart(world, topology[index].owner, circle)) {
                     measuredCircle = circle;
                     circleDiameter = 2 * circle.Radius();
                     circleCentre = circle.Location();
@@ -21667,6 +22153,24 @@ extern "C" double Core3DDebugMeasureAnglePairProbe(int pair) {
         } else if (elements.size() == 1 && hasSnap[0]) {
             a = b = snaps[0].point;
             projected = true;
+        }
+        // One tap on one straight edge reads that edge's own length at once.
+        if (elements.size() == 1 && circleDiameter <= 0
+            && elements[0].ShapeType() == TopAbs_EDGE
+            && !BRep_Tool::Degenerated(TopoDS::Edge(elements[0]))) {
+            const BRepAdaptor_Curve line(TopoDS::Edge(elements[0]));
+            if (line.GetType() == GeomAbs_Line) {
+                const gp_Pnt start = line.Value(line.FirstParameter());
+                const gp_Pnt end = line.Value(line.LastParameter());
+                const double length = start.Distance(end);
+                if (std::isfinite(length) && length > Precision::Confusion()) {
+                    result[@"edgeLength"] = @(length);
+                    if (!projected) {
+                        a = b = gp_Pnt((start.XYZ() + end.XYZ()) / 2);
+                        projected = true;
+                    }
+                }
+            }
         }
         if (!projected) return result;
         result[@"ax"] = @(a.X()); result[@"ay"] = @(a.Y()); result[@"az"] = @(a.Z());

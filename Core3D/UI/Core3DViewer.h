@@ -555,6 +555,9 @@ namespace core3d {
     //! editable Boolean cannot open (a part with a saved Hole).
     bool showBakedBooleanPreview(const std::string& targetEntity,
         const std::string& toolEntity, int operation, std::string& refusal) noexcept;
+    //! True when a Cut of the target by the tool would take nothing away (the parts only
+    //! touch or miss; design system rule 11). False when it cannot be told.
+    bool cutRemovesNothing(const std::string& targetEntity, const std::string& toolEntity) noexcept;
     //! Preview of applyBakedBooleanBatch: each kept part shows its result, every
     //! cutter or joined part is hidden. Nothing in the document changes.
     bool showBakedBooleanBatchPreview(const std::vector<std::string>& targetEntities,
@@ -564,6 +567,9 @@ namespace core3d {
     std::string booleanPreviewTargetAt(double x, double y) noexcept;
     //! Puts every part back; the part that stays is selected again unless
     //! `reselectTarget` is false (the App Store Subtract un-pick of the last object).
+    //! Colours a Join preview face by face when the parts look different.
+    void colourJoinPreview(const TDF_Label& targetLabel, const Handle(AIS_Shape)& target,
+        const std::vector<std::pair<TDF_Label,Handle(AIS_Shape)>>& tools) noexcept;
     bool clearBooleanPairPreview(bool reselectTarget = true) noexcept;
     bool hasBooleanPairPreview() const noexcept;
     //! Hole through any solid part, in world coordinates and document units:
@@ -714,6 +720,9 @@ namespace core3d {
             TopoDS_Shape worldEdge;
             gp_Pnt pickedPoint;
             double pixelTolerance = 0;
+            // The snap radius in model units, fixed with the camera of the tap: zooming in
+            // afterwards must not undo a snap the user already saw.
+            double snapRadius = 0;
         };
         std::vector<MeasurePick> measurePicksForCurrentSelection() noexcept;
         void Select(int theX, int theY);
@@ -823,6 +832,9 @@ namespace core3d {
             std::uint32_t width, std::uint32_t height,
             const std::optional<OcctMeshUVAtlasOptions>& options) noexcept;
         OrdinaryEditResult repairMeshWinding(const ObjectFrameIdentity& identity,
+            std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept;
+        //! Make solid: one selected closed imported mesh becomes one BRep solid in place; one Undo.
+        OrdinaryEditResult makeSolidFromMesh(const ObjectFrameIdentity& identity,
             std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept;
         OrdinaryEditResult generateTriangleUVAtlas(const ObjectFrameIdentity& identity,
             std::uint32_t width, std::uint32_t height, const OcctMeshUVAtlasOptions& options = {}) noexcept;

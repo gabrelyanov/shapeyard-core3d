@@ -23,6 +23,7 @@
 #import <Core3D/Core3DEdgeTreatmentTypes.h>
 #import <Core3D/Core3DEdgeTreatmentR2Types.h>
 #import <Core3D/Core3DFaceSelectorTypes.h>
+#import <Core3D/Core3DAgentMeasurements.h>
 
 @class Core3DVariableFilletOwnerValues;
 @class Core3DAttachmentRigOwnerObservationState;
@@ -530,6 +531,33 @@ __attribute__((objc_subclassing_restricted))
 //! Exact publication, document, model, presentation and native selection are revalidated.
 - (Core3DMeshWindingRepairResult)repairMeshWindingForEntityIdentifier:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(repairMeshWinding(entityIdentifier:expected:));
+//! Make solid: the one selected closed, untextured imported mesh becomes one solid in place
+//! (coplanar triangles merged); one ordinary Undo returns the mesh. Open meshes are rejected.
+- (Core3DMeshSolidConversionResult)makeSolidFromMeshForEntityIdentifier:(NSString *)entityIdentifier
+    expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(makeSolidFromMesh(entityIdentifier:expected:));
+//! Release-safe READ-ONLY agent observation of one saved solid (measure lane, CTO 15 Nov 21:50;
+//! measurement-core.v1 measure_solid, method occtBRepCopy). `expected` must be the current
+//! publication (publication, document generation, model and presentation revisions), else
+//! status Stale. A private mesh-free copy of the retained BRep is measured: AddOptimal world
+//! and local bounds in mm, adaptive analytic volume in mm3, BRepCheck validity, unique
+//! topology counts (cap 8192). No selection, gizmo, document, undo/redo or render change.
+//! `targetAlias`, `documentIdentifier` and the 64-hex `sourceSHA256` pin are the caller's
+//! correlation values, copied into the source fence unchanged. Never nil; anything but
+//! status Measured carries no values and no source.
+- (Core3DAgentSolidMeasurement *)agentMeasureSolidOfEntityIdentifier:(NSString *)entityIdentifier
+    targetAlias:(NSString *)targetAlias documentIdentifier:(NSString *)documentIdentifier
+    sourceSHA256:(NSString *)sourceSHA256 expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(agentMeasureSolid(entityIdentifier:targetAlias:documentIdentifier:sourceSHA256:expected:));
+//! Same fence and guarantees for measure_sections (method occtWholeLineIntervals): ordered
+//! signed [enterMM, exitMM] material intervals of the whole line through `originMM` (world
+//! mm) along `direction` (finite, nonzero; echoed as requested). [] with status Measured is
+//! measured empty; a failed or ambiguous line is never [] but status Unavailable.
+- (Core3DAgentLineSectionMeasurement *)agentMeasureLineSectionOfEntityIdentifier:(NSString *)entityIdentifier
+    targetAlias:(NSString *)targetAlias documentIdentifier:(NSString *)documentIdentifier
+    sourceSHA256:(NSString *)sourceSHA256 probeIdentifier:(NSString *)probeIdentifier
+    originMM:(NSArray<NSNumber *> *)originMM direction:(NSArray<NSNumber *> *)direction
+    expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(agentMeasureLineSection(entityIdentifier:targetAlias:documentIdentifier:sourceSHA256:probeIdentifier:originMM:direction:expected:));
 //! Generate a padded triangle atlas on one selected untextured mesh; one Undo.
 - (Core3DMeshUVAtlasResult)generateTriangleUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
                                                          expected:(Core3DSceneSnapshot *)expected
@@ -1506,6 +1534,8 @@ __attribute__((objc_subclassing_restricted))
 //! left) and "drawableWidth","drawableHeight". For exactly one full-circle
 //! edge, "diameter" is its world-space diameter in model units, the pixel
 //! position is its centre and "circleRadiusPixels" is its projected radius.
+//! For exactly one straight (line) edge, "edgeLength" is its length in model
+//! units and the pixel position is its snapped pick (else its middle).
 //! "distance" is absent for a single edge. Live edge picks may add "snapKindA"
 //! and "snapKindB" (1 corner, 2 midpoint, 3 edge, 4 circle centre); their
 //! points then define the pair distance. Projected topology bounds are in
@@ -1680,6 +1710,10 @@ __attribute__((objc_subclassing_restricted))
 //! How many displayed parts carry a highlight style of their own (a tool's colour); 0 when no
 //! tool is open.
 - (NSInteger)debugPartsWithOwnHighlightStyle;
+//! Force the engine highlight fallback for selections (no white outline built).
+- (void)debugSetForceSelectionOutlineFallback:(BOOL)force;
+//! The colour (r, g, b, 0...1) the engine highlight draws the first selected part in.
+- (NSArray<NSNumber *> *_Nullable)debugSelectedPartHighlightRGB;
 //! Where the real hit test finds each Scale handle (X, Y, Z cube, uniform sphere) as
 //! fractions of the viewport [x0,y0,...,x3,y3], -1 when not found; nil without a gizmo.
 - (NSArray<NSNumber *> *_Nullable)debugScaleHandleViewportFractions;
