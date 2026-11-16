@@ -67,6 +67,7 @@ typedef NS_ENUM(NSInteger, Core3DAgentMeasurementStatus) {
 /// measure_distance (method occtExtremaDistance). Each requested world-mm point is taken onto the
 /// part: to a corner (vertex) within 0.5 mm, else to the nearest point of an edge within 0.5 mm,
 /// else to the nearest point of a face within 0.5 mm; farther from the part is Unavailable.
+/// Two different places equally near (within 0.000001 mm) on the chosen level are Ambiguous.
 /// `snapA`/`snapB` say which ("vertex", "edge", "face"); distanceMM is between the taken points.
 @interface Core3DAgentDistanceMeasurement : NSObject
 @property(nonatomic, readonly) Core3DAgentMeasurementStatus status;

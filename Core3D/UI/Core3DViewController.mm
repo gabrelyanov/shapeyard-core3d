@@ -3955,7 +3955,8 @@ static double core3dAgentDistanceTo(const TopoDS_Vertex& probe, const gp_Pnt& po
 }
 
 // The requested point taken onto the part: the nearest corner within reach, else
-// the nearest point of an edge within reach, else of a face within reach.
+// the nearest point of an edge within reach, else of a face within reach; two
+// different nearest places on one level are Ambiguous.
 static Core3DAgentMeasurementStatus core3dAgentTakeOntoPart(const TopoDS_Shape& world, double mm,
     const double pointMM[3], gp_Pnt& taken, NSString * __strong *kind) noexcept {
     try {
@@ -3969,13 +3970,24 @@ static Core3DAgentMeasurementStatus core3dAgentTakeOntoPart(const TopoDS_Shape& 
         TopExp::MapShapes(world, TopAbs_VERTEX, vertices);
         TopExp::MapShapes(world, TopAbs_EDGE, edges);
         TopExp::MapShapes(world, TopAbs_FACE, faces);
+        // Two different places equally near (within 0.000001 mm) on one level are no one
+        // answer: Ambiguous, never whichever corner, edge or face the map lists first.
+        const double tie = 1.0e-6 / mm;
         double best = std::numeric_limits<double>::infinity();
+        bool ambiguous = false;
+        const auto consider = [&](double d, const gp_Pnt& at) {
+            if (!std::isfinite(d) || d > reach) return;
+            if (d < best - tie) { best = d; taken = at; ambiguous = false; }
+            else if (at.Distance(taken) > tie) ambiguous = true;
+        };
         for (int i = 1; i <= vertices.Extent(); ++i) {
             const gp_Pnt corner = BRep_Tool::Pnt(TopoDS::Vertex(vertices(i)));
-            const double d = point.Distance(corner);
-            if (std::isfinite(d) && d <= reach && d < best) { best = d; taken = corner; }
+            consider(point.Distance(corner), corner);
         }
-        if (std::isfinite(best)) { *kind = @"vertex"; return Core3DAgentMeasurementStatusMeasured; }
+        if (std::isfinite(best)) {
+            if (ambiguous) return Core3DAgentMeasurementStatusAmbiguous;
+            *kind = @"vertex"; return Core3DAgentMeasurementStatusMeasured;
+        }
         const TopoDS_Vertex probe = BRepBuilderAPI_MakeVertex(point).Vertex();
         const std::pair<TopTools_IndexedMapOfShape *, NSString *> levels[] = {{&edges, @"edge"}, {&faces, @"face"}};
         for (const auto& level : levels) {
@@ -3985,9 +3997,12 @@ static Core3DAgentMeasurementStatus core3dAgentTakeOntoPart(const TopoDS_Shape& 
                 gp_Pnt nearest;
                 const double d = core3dAgentDistanceTo(probe, point, part, reach, &nearest);
                 if (std::isnan(d)) return Core3DAgentMeasurementStatusUnavailable;
-                if (d <= reach && d < best) { best = d; taken = nearest; }
+                consider(d, nearest);
             }
-            if (std::isfinite(best)) { *kind = level.second; return Core3DAgentMeasurementStatusMeasured; }
+            if (std::isfinite(best)) {
+                if (ambiguous) return Core3DAgentMeasurementStatusAmbiguous;
+                *kind = level.second; return Core3DAgentMeasurementStatusMeasured;
+            }
         }
         return Core3DAgentMeasurementStatusUnavailable;
     } catch (...) { *kind = nil; return Core3DAgentMeasurementStatusUnavailable; }
