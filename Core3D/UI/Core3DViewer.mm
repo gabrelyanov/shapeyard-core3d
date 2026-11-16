@@ -4968,6 +4968,72 @@ OrdinaryEditResult Core3DViewer::repairMeshWinding(
     } catch (...) { return OrdinaryEditResult::Invalid; }
 }
 
+OrdinaryEditResult Core3DViewer::makeSolidFromMesh(
+    const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
+    std::uint32_t width, std::uint32_t height) noexcept {
+    if (![NSThread isMainThread]) return OrdinaryEditResult::Invalid;
+    if (!canBeginCommittedEdit() || !_ordinaryEditController) return OrdinaryEditResult::Busy;
+    if (myDoc.IsNull() || myContext.IsNull() || width == 0 || height == 0
+        || identity.entityIdentifier.empty() || identity.entityIdentifier.size() > 128
+        || identity.entityIdentifier.find('\0') != std::string::npos
+        || identity.publicationSourceIdentifier.empty() || identity.publicationSourceIdentifier.size() > 128
+        || identity.publicationSourceIdentifier.find('\0') != std::string::npos)
+        return OrdinaryEditResult::Invalid;
+    try {
+        const auto owner = myDoc;
+        const auto document = owner->Document();
+        if (document.IsNull() || document->HasOpenCommand()) return OrdinaryEditResult::Busy;
+        const auto documentTime = document->GetData()->Time();
+        const auto snapshot = captureSceneSnapshot(width, height);
+        if (!snapshot || snapshot->publicationSourceIdentifier != identity.publicationSourceIdentifier
+            || snapshot->revisions.documentGeneration != identity.documentGeneration
+            || snapshot->revisions.model != identity.modelRevision
+            || snapshot->revisions.presentation != presentationRevision
+            || snapshot->selectionMode != scene::ElementKind::Object
+            || snapshot->selection.selected.size() != 1
+            || snapshot->selection.selected[0].kind != scene::ElementKind::Object
+            || snapshot->selection.selected[0].entityIdentifier != identity.entityIdentifier)
+            return OrdinaryEditResult::Invalid;
+        myContext->InitSelected();
+        if (!myContext->MoreSelected()) return OrdinaryEditResult::Invalid;
+        const auto presentation = Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+        myContext->NextSelected();
+        if (myContext->MoreSelected() || presentation.IsNull()) return OrdinaryEditResult::Invalid;
+        const auto label = owner->ShapeLabel(presentation);
+        OrdinaryTransformRecord record;
+        if (!owner->CaptureObjectTransformStateForLabel(label, record.previous)
+            || record.previous.entityIdentifier != identity.entityIdentifier
+            || record.previous.resolvedRepresentation != OcctGeometryRepresentation::TriangleMesh
+            || record.previous.authoredFramesPresent) return OrdinaryEditResult::Invalid;
+        record.requested.label = label; record.requested.presentation = presentation;
+        record.requested.shape = record.previous.shape;
+        record.requested.transform = record.previous.transform;
+        OrdinaryTransformLedger authority; authority.records.push_back(record);
+        if (!admitTransform(authority)) return OrdinaryEditResult::Invalid;
+        TopoDS_Shape candidate;
+        const auto result = owner->PrepareMeshSolidConversion(label, candidate);
+        if (result != OcctMeshSolidConversionResult::Prepared || candidate.IsNull())
+            return OrdinaryEditResult::Invalid;
+        OcctObjectTransformState actual;
+        auto freshAuthority = authority;
+        if (myDoc != owner || owner->Document() != document
+            || document->GetData()->Time() != documentTime
+            || !owner->CaptureObjectTransformStateForLabel(label, actual)
+            || !record.previous.IsEqual(actual)
+            || !admitTransform(freshAuthority)
+            || freshAuthority.selectionOwners != authority.selectionOwners
+            || freshAuthority.manipulatorType != authority.manipulatorType
+            || freshAuthority.hadManipulator != authority.hadManipulator)
+            return OrdinaryEditResult::Invalid;
+        auto request = record.requested;
+        request.shape = candidate;
+        request.operation = OrdinaryTransformOperation::MeshSolidConversion;
+        OrdinaryEditResult failure = OrdinaryEditResult::Invalid;
+        auto lease = _ordinaryEditController->beginTransform({request}, &failure);
+        return lease ? lease.stageAndCommit() : failure;
+    } catch (...) { return OrdinaryEditResult::Invalid; }
+}
+
 
 
 namespace {
@@ -15652,6 +15718,76 @@ extern "C" void *Core3DDebugMeasureNonFirstSelectorRankProbe() {
 }
 #endif
 
+// A hole's seam is a line where its round face meets itself; nobody sees it as an edge. A Measure
+// tap that lands on one (seen end-on from the top it sits on the rim) means the rim circle that
+// shares its end: return that circle, still in the selectable's local space, or a null shape.
+static TopoDS_Shape Core3DMeasureRimForSeamPick(
+    const Handle(StdSelect_ViewerSelector3d)& selector,
+    const Handle(StdSelect_BRepOwner)& seamOwner) noexcept {
+    try {
+        if (selector.IsNull() || seamOwner.IsNull() || !seamOwner->HasShape()) return {};
+        const TopoDS_Shape& local = seamOwner->Shape();
+        if (local.ShapeType() != TopAbs_EDGE) return {};
+        const TopoDS_Edge seam = TopoDS::Edge(local);
+        const auto parent = Handle(AIS_Shape)::DownCast(seamOwner->Selectable());
+        if (parent.IsNull() || parent->Shape().IsNull()) return {};
+        TopTools_IndexedDataMapOfShapeListOfShape facesOfEdge;
+        TopExp::MapShapesAndAncestors(parent->Shape(), TopAbs_EDGE, TopAbs_FACE, facesOfEdge);
+        const int index = facesOfEdge.FindIndex(seam);
+        if (index <= 0) return {};
+        bool isSeam = false;
+        for (TopTools_ListIteratorOfListOfShape faces(facesOfEdge.FindFromIndex(index));
+             faces.More() && !isSeam; faces.Next())
+            isSeam = BRep_Tool::IsClosed(seam, TopoDS::Face(faces.Value()));
+        if (!isSeam) return {};
+        TopoDS_Vertex seamEnds[2];
+        TopExp::Vertices(seam, seamEnds[0], seamEnds[1]);
+        for (int rank = 1; rank <= selector->NbPicked(); ++rank) {
+            const auto candidate = Handle(StdSelect_BRepOwner)::DownCast(selector->Picked(rank));
+            if (candidate.IsNull() || candidate == seamOwner || !candidate->HasShape()
+                || candidate->Selectable() != seamOwner->Selectable()
+                || candidate->Shape().ShapeType() != TopAbs_EDGE) continue;
+            const TopoDS_Edge rim = TopoDS::Edge(candidate->Shape());
+            if (BRep_Tool::Degenerated(rim)) continue;
+            const BRepAdaptor_Curve curve(rim);
+            if (curve.GetType() != GeomAbs_Circle
+                || std::abs(curve.LastParameter() - curve.FirstParameter() - 2 * M_PI) >= 1e-7)
+                continue;
+            TopoDS_Vertex rimEnds[2];
+            TopExp::Vertices(rim, rimEnds[0], rimEnds[1]);
+            for (const auto& end : seamEnds)
+                for (const auto& rimEnd : rimEnds)
+                    if (!end.IsNull() && !rimEnd.IsNull() && end.IsSame(rimEnd)) return rim;
+        }
+    } catch (...) {}
+    return {};
+}
+
+// Model units covered by one screen pixel at `point` with the view's current camera.
+static double Core3DMeasureUnitsPerPixelAtTap(const Handle(V3d_View)& view,
+                                              const gp_Pnt& point) noexcept {
+    try {
+        if (view.IsNull() || view->Window().IsNull() || view->Camera().IsNull()) return 0;
+        Standard_Integer width = 0, height = 0;
+        view->Window()->Size(width, height);
+        if (width <= 0 || height <= 0) return 0;
+        const auto camera = view->Camera();
+        const gp_Pnt projected = camera->Project(point);
+        double units = 0;
+        for (int axis = 0; axis < 2; ++axis) {
+            const double dx = axis == 0 ? 2.0 / width : 0;
+            const double dy = axis == 1 ? -2.0 / height : 0;
+            const gp_Pnt shifted = camera->UnProject(gp_Pnt(
+                projected.X() + dx, projected.Y() + dy, projected.Z()));
+            const double candidate = point.Distance(shifted);
+            if (std::isfinite(candidate)) units = std::max(units, candidate);
+        }
+        return units;
+    } catch (...) {
+        return 0;
+    }
+}
+
 void Core3DViewer::Select(int theX, int theY) {
     observeNativePlanningInteraction();
     if (_objectInteractor == nullptr || _shapeInteractor == nullptr) {
@@ -15710,6 +15846,10 @@ void Core3DViewer::Select(int theX, int theY) {
     for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected())
         oldOwners.insert(myContext->SelectedOwner().get());
     int oldCount = selectedCount();
+    // Forget picks of edges that are no longer selected (a selection-mode change clears the
+    // selection but keeps the same owners) before this tap, so an edge picked again records
+    // where this tap landed, not where an earlier one did.
+    (void)measurePicksForCurrentSelection();
     OcctViewer::Select(theX, theY, AIS_SelectionScheme::AIS_SelectionScheme_XOR);
 
     try {
@@ -15727,6 +15867,8 @@ void Core3DViewer::Select(int theX, int theY) {
             int rank = 0;
             if (!Core3DMeasurePickedPointForOwner(selector, owner, point, rank)) continue;
             TopoDS_Shape world = owner->Shape();
+            const TopoDS_Shape rim = Core3DMeasureRimForSeamPick(selector, owner);
+            if (!rim.IsNull()) world = rim;
             const auto selectable = owner->Selectable();
             if (!selectable.IsNull()) {
                 const gp_Trsf& transform = selectable->Transformation();
@@ -15739,8 +15881,11 @@ void Core3DViewer::Select(int theX, int theY) {
                     world = world.Moved(TopLoc_Location(transform));
                 }
             }
-            _measurePicks.push_back(MeasurePick{owner, world, point,
-                static_cast<double>(selector->PixelTolerance())});
+            const double pixelTolerance = static_cast<double>(selector->PixelTolerance());
+            const double unitsPerPixel = Core3DMeasureUnitsPerPixelAtTap(myView, point);
+            const double snapRadius = std::isfinite(unitsPerPixel) && unitsPerPixel > 0
+                && pixelTolerance > 0 ? unitsPerPixel * pixelTolerance : 0;
+            _measurePicks.push_back(MeasurePick{owner, world, point, pixelTolerance, snapRadius});
         }
         if (_measurePicks.size() > 2)
             _measurePicks.erase(_measurePicks.begin(), _measurePicks.end() - 2);

@@ -37,10 +37,62 @@
 }
 @end
 
+// Engine-only producers (measure lane, CTO 15 Nov 21:50). Declared again as a
+// category in Core3DViewController.mm, the only caller; there is no public
+// initializer, so no caller outside the engine can forge a measured value.
 @implementation Core3DAgentSolidMeasurement
+- (instancetype)initCore3DUnmeasured:(Core3DAgentMeasurementStatus)status {
+    self = [super init];
+    if (self == nil) return nil;
+    _status = status == Core3DAgentMeasurementStatusMeasured ? Core3DAgentMeasurementStatusUnavailable : status;
+    _boundsMinMM = @[]; _boundsMaxMM = @[]; _localBoundsOptimalMinMM = @[]; _localBoundsOptimalMaxMM = @[];
+    return self;
+}
+- (instancetype)initCore3DMeasuredWithSource:(Core3DAgentMeasurementSource *)source
+                                  boundsMinMM:(NSArray<NSNumber *> *)boundsMinMM
+                                  boundsMaxMM:(NSArray<NSNumber *> *)boundsMaxMM
+                      localBoundsOptimalMinMM:(NSArray<NSNumber *> *)localMinMM
+                      localBoundsOptimalMaxMM:(NSArray<NSNumber *> *)localMaxMM
+                                    volumeMM3:(double)volumeMM3
+                volumeIntegrationRelativeError:(double)volumeError
+                                        valid:(BOOL)valid
+                                       solids:(NSUInteger)solids shells:(NSUInteger)shells
+                                        faces:(NSUInteger)faces edges:(NSUInteger)edges
+                                     vertices:(NSUInteger)vertices topologyNodes:(NSUInteger)topologyNodes {
+    self = [super init];
+    if (self == nil) return nil;
+    _status = Core3DAgentMeasurementStatusMeasured;
+    _source = source;
+    _boundsMinMM = [boundsMinMM copy]; _boundsMaxMM = [boundsMaxMM copy];
+    _localBoundsOptimalMinMM = [localMinMM copy]; _localBoundsOptimalMaxMM = [localMaxMM copy];
+    _volumeMM3 = volumeMM3; _volumeIntegrationRelativeError = volumeError; _valid = valid;
+    _solids = solids; _shells = shells; _faces = faces; _edges = edges; _vertices = vertices;
+    _topologyNodes = topologyNodes;
+    return self;
+}
 @end
 
 @implementation Core3DAgentLineSectionMeasurement
+- (instancetype)initCore3DUnmeasured:(Core3DAgentMeasurementStatus)status {
+    self = [super init];
+    if (self == nil) return nil;
+    _status = status == Core3DAgentMeasurementStatusMeasured ? Core3DAgentMeasurementStatusUnavailable : status;
+    _probeIdentifier = @""; _originMM = @[]; _requestedDirection = @[]; _intervalsMM = @[];
+    return self;
+}
+- (instancetype)initCore3DMeasuredWithSource:(Core3DAgentMeasurementSource *)source
+                              probeIdentifier:(NSString *)probeIdentifier
+                                     originMM:(NSArray<NSNumber *> *)originMM
+                           requestedDirection:(NSArray<NSNumber *> *)requestedDirection
+                                  intervalsMM:(NSArray<NSArray<NSNumber *> *> *)intervalsMM {
+    self = [super init];
+    if (self == nil) return nil;
+    _status = Core3DAgentMeasurementStatusMeasured;
+    _source = source;
+    _probeIdentifier = [probeIdentifier copy]; _originMM = [originMM copy];
+    _requestedDirection = [requestedDirection copy]; _intervalsMM = [intervalsMM copy];
+    return self;
+}
 @end
 
 @implementation Core3DAgentMaterialMeasurement
