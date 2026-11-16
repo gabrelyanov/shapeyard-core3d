@@ -103,6 +103,8 @@ public:
     Standard_EXPORT void Rotation(int theX, int theY);
     Standard_EXPORT void Pan(int theX, int theY, Standard_Boolean theToStart);
     Standard_EXPORT void Zoom(int theX, int theY, double theDelta);
+    //! Scale the view by a finger-spacing ratio around a drawable-pixel anchor.
+    Standard_EXPORT bool ZoomByFactor(double theX, double theY, double theFactor) noexcept;
     Standard_EXPORT void Select(int theX, int theY, AIS_SelectionScheme scheme = AIS_SelectionScheme::AIS_SelectionScheme_XOR);
     
     Standard_EXPORT bool ImportSTEP(const std::string &theFilename);

@@ -20,6 +20,11 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE
 
 #include "OcctViewer.h"
+#include <Aspect_Window.hxx>
+#include <Graphic3d_Camera.hxx>
+#include <gp_Trsf.hxx>
+#include <gp_Vec.hxx>
+#include <cmath>
 #include "OcctDocument.h"
 #include "Core3DSTEPExchangeLock.h"
 #include "Core3DNativeTangentBuffers.hxx"
@@ -603,6 +608,59 @@ void OcctViewer::Zoom(int theX, int theY, double theDelta)
             myView->SetZoom(aCoeff, Standard_True);
         }
     }
+}
+
+bool OcctViewer::ZoomByFactor(double theX, double theY, double theFactor) noexcept
+{
+    if (!std::isfinite(theX) || !std::isfinite(theY)
+        || !std::isfinite(theFactor) || theFactor <= 0.0
+        || myView.IsNull() || myView->Camera().IsNull()
+        || myView->Window().IsNull()) { return false; }
+    Handle(Graphic3d_Camera) previous;
+    const auto restore = [&]() {
+        if (!previous.IsNull()) {
+            try { myView->Camera()->Copy(previous); } catch (...) {}
+        }
+        return false;
+    };
+    try {
+        Standard_Integer width = 0, height = 0;
+        myView->Window()->Size(width, height);
+        if (width <= 0 || height <= 0) { return false; }
+        const auto camera = myView->Camera();
+        const double scale = camera->Scale() / theFactor;
+        if (!std::isfinite(scale) || scale <= 0.0) { return false; }
+        if (theFactor == 1.0) { return true; }
+        previous = new Graphic3d_Camera(camera);
+        const auto center = previous->Center();
+        const double nx = 2.0 * theX / width - 1.0;
+        const double ny = 1.0 - 2.0 * theY / height;
+        const auto anchor = previous->UnProject(gp_Pnt(nx, ny, previous->Project(center).Z()));
+
+        // A pinch is a ratio of finger spacing, not mouse displacement.
+        // Keep the target plane and direction while perspective scale changes
+        // eye distance; orthographic scale changes only the view size.
+        camera->SetScale(scale);
+        if (!camera->IsOrthographic()) {
+            camera->MoveEyeTo(center.Translated(gp_Vec(previous->Direction()) * -camera->Distance()));
+        }
+        const auto movedAnchor = camera->UnProject(gp_Pnt(nx, ny, camera->Project(center).Z()));
+        gp_Trsf shift;
+        shift.SetTranslation(gp_Vec(movedAnchor, anchor));
+        camera->Transform(shift);
+        myView->ZFitAll();
+        const auto eye = camera->Eye(), target = camera->Center();
+        for (const double value : {camera->Scale(), camera->Distance(),
+                camera->ZNear(), camera->ZFar(), eye.X(), eye.Y(), eye.Z(),
+                target.X(), target.Y(), target.Z()}) {
+            if (!std::isfinite(value)) { return restore(); }
+        }
+        if (camera->Scale() <= 0.0 || camera->Distance() <= 0.0
+            || camera->ZFar() <= camera->ZNear()
+            || (!camera->IsOrthographic() && camera->ZNear() <= 0.0)) { return restore(); }
+        myView->Invalidate();
+        return true;
+    } catch (...) { return restore(); }
 }
 
 // =======================================================================
