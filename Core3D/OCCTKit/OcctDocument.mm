@@ -8909,6 +8909,10 @@ void OcctDocument::InitDoc()
 	// because the same labels already carry those attributes.
 	(void)XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
 	(void)XCAFDoc_DocumentTool::ColorTool(myOcafDoc->Main());
+	// XCAF presentation also requests LayerTool on its first draw. Install it
+	// here, before any saved baseline or user history, so a redraw cannot add
+	// the Layers name/tool records and change the serialized model by97bytes.
+	(void)XCAFDoc_DocumentTool::LayerTool(myOcafDoc->Main());
 	(void)XCAFDoc_DocumentTool::VisMaterialTool(myOcafDoc->Main());
 	XCAFDoc_DocumentTool::SetLengthUnit(
 	    myOcafDoc, kDefaultMetersPerUnit);
