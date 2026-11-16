@@ -3785,6 +3785,161 @@ struct NativeModelingPermitIssuer final {
 - (BOOL)cancel {if(!NSThread.isMainThread)return NO;Core3DSavedCutSourceJob *job=_job;return job?[job cancel]:NO;}
 @end
 
+// AGENT MEASURE HELPERS (measure lane) BEGIN
+// Release-safe counterparts of the DEBUG solid copy and whole-line routines
+// further down this file (kept unchanged there for their own checks). These
+// headers are included here, outside DEBUG, because the file's other includes
+// of them sit inside DEBUG blocks.
+#include <BRepClass3d_SolidClassifier.hxx>
+#include <IntCurvesFace_ShapeIntersector.hxx>
+#include <gp_Lin.hxx>
+#include <GProp_GProps.hxx>
+#include <BRepGProp.hxx>
+#include <BRepBndLib.hxx>
+#include <Bnd_Box.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS_Iterator.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
+
+enum class Core3DAgentCopyResult { Copied, Unavailable, OverBudget };
+
+// One unique free root with this entity identifier, held as BRep: a private
+// mesh-free deep copy, object-local and world (the stored transform applied
+// once, as Core3DViewer::measureObjectAlignment does). Unique topology nodes
+// are counted BEFORE any copy; above 8192 the copy is refused.
+static Core3DAgentCopyResult core3dAgentSolidCopy(const Handle(OcctDocument)& owner,
+    const std::string& entity, TopoDS_Shape& local, TopoDS_Shape& world,
+    double& unit, double& mm, std::size_t& nodes) noexcept {
+    try {
+        local.Nullify(); world.Nullify(); unit = 0; mm = 0; nodes = 0;
+        if (owner.IsNull() || owner->Document().IsNull()) return Core3DAgentCopyResult::Unavailable;
+        TDF_Label label;
+        if (!core3d::placement::Find(owner, entity, label)) return Core3DAgentCopyResult::Unavailable;
+        OcctObjectTransformState state;
+        if (!owner->CaptureObjectTransformStateForLabel(label, state)
+            || state.entityIdentifier != entity
+            || state.resolvedRepresentation != OcctGeometryRepresentation::BRep
+            || state.shape.IsNull()) return Core3DAgentCopyResult::Unavailable;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(owner->Document(), unit)
+            || !core3d::placement::MillimetersPerUnit(unit, mm)) return Core3DAgentCopyResult::Unavailable;
+        constexpr auto maxNodes = core3d::TransformInspectorMeasurementController::kMaximumBRepTopologyNodes;
+        std::vector<TopoDS_Shape> stack{state.shape};
+        TopTools_IndexedMapOfShape visited;
+        while (!stack.empty()) {
+            const auto shape = stack.back(); stack.pop_back();
+            if (visited.Contains(shape)) continue;
+            visited.Add(shape);
+            if (++nodes > maxNodes) return Core3DAgentCopyResult::OverBudget;
+            for (TopoDS_Iterator child(shape, Standard_True, Standard_True); child.More(); child.Next()) {
+                if (stack.size() >= maxNodes) return Core3DAgentCopyResult::OverBudget;
+                if (!visited.Contains(child.Value())) stack.push_back(child.Value());
+            }
+        }
+        if (nodes == 0) return Core3DAgentCopyResult::Unavailable;
+        BRepBuilderAPI_Copy copy(state.shape, Standard_True, Standard_False);
+        if (!copy.IsDone() || copy.Shape().IsNull()) return Core3DAgentCopyResult::Unavailable;
+        BRepBuilderAPI_Transform transformed(copy.Shape(), state.transform, Standard_True);
+        if (!transformed.IsDone() || transformed.Shape().IsNull()) return Core3DAgentCopyResult::Unavailable;
+        local = copy.Shape(); world = transformed.Shape();
+        return Core3DAgentCopyResult::Copied;
+    } catch (...) { local.Nullify(); world.Nullify(); return Core3DAgentCopyResult::Unavailable; }
+}
+
+// Ordered signed [enter, exit] material intervals (mm) of the whole line.
+// Open spans between unique face hits are classified at their midpoints;
+// a boundary-only span, an unknown classification or a failed intersector
+// is Unavailable, never an empty result. Limits: 64 solids, 4096 hits, 64
+// intervals (measurement-core.v1), above them OverBudget.
+static Core3DAgentCopyResult core3dAgentLineIntervals(const TopoDS_Shape& world, double mm,
+    const double originMM[3], const double direction[3],
+    std::vector<std::pair<double, double>>& intervals) noexcept {
+    intervals.clear();
+    try {
+        if (world.IsNull() || !std::isfinite(mm) || mm <= 0) return Core3DAgentCopyResult::Unavailable;
+        double scale = 0;
+        for (int i = 0; i < 3; ++i) {
+            if (!std::isfinite(originMM[i]) || !std::isfinite(direction[i])
+                || !std::isfinite(originMM[i] / mm)) return Core3DAgentCopyResult::Unavailable;
+            scale = std::max(scale, std::abs(direction[i]));
+        }
+        if (scale == 0) return Core3DAgentCopyResult::Unavailable;
+        const gp_Dir unit(direction[0] / scale, direction[1] / scale, direction[2] / scale);
+        const gp_Pnt origin(originMM[0] / mm, originMM[1] / mm, originMM[2] / mm);
+        const gp_Lin line(origin, unit);
+        const double tolerance = 1.0e-7 / mm;
+        if (!std::isfinite(tolerance) || tolerance <= 0) return Core3DAgentCopyResult::Unavailable;
+        TopTools_IndexedMapOfShape solids;
+        TopExp::MapShapes(world, TopAbs_SOLID, solids);
+        if (solids.IsEmpty()) return Core3DAgentCopyResult::Unavailable;
+        if (solids.Extent() > 64) return Core3DAgentCopyResult::OverBudget;
+        if (!BRepCheck_Analyzer(world, Standard_True).IsValid()) return Core3DAgentCopyResult::Unavailable;
+        Bnd_Box box; BRepBndLib::AddOptimal(world, box, Standard_False, Standard_False);
+        if (box.IsVoid() || box.IsOpen()) return Core3DAgentCopyResult::Unavailable;
+        double bounds[6]; box.Get(bounds[0], bounds[1], bounds[2], bounds[3], bounds[4], bounds[5]);
+        double low = std::numeric_limits<double>::max(), high = -low;
+        for (int corner = 0; corner < 8; ++corner) {
+            const gp_Pnt point(bounds[(corner & 1) ? 3 : 0], bounds[(corner & 2) ? 4 : 1], bounds[(corner & 4) ? 5 : 2]);
+            const double t = gp_Vec(origin, point).Dot(gp_Vec(unit));
+            if (!std::isfinite(t)) return Core3DAgentCopyResult::Unavailable;
+            low = std::min(low, t); high = std::max(high, t);
+        }
+        low -= tolerance * 4; high += tolerance * 4;
+        if (!std::isfinite(low) || !std::isfinite(high) || low >= high) return Core3DAgentCopyResult::Unavailable;
+        IntCurvesFace_ShapeIntersector intersector;
+        intersector.Load(world, tolerance); intersector.Perform(line, low, high);
+        if (!intersector.IsDone()) return Core3DAgentCopyResult::Unavailable;
+        if (intersector.NbPnt() > 4096) return Core3DAgentCopyResult::OverBudget;
+        std::vector<double> cuts;
+        for (int i = 1; i <= intersector.NbPnt(); ++i) {
+            const double t = intersector.WParameter(i);
+            if (!std::isfinite(t) || !std::isfinite(t * mm)) return Core3DAgentCopyResult::Unavailable;
+            cuts.push_back(t);
+        }
+        std::sort(cuts.begin(), cuts.end());
+        cuts.erase(std::unique(cuts.begin(), cuts.end(), [tolerance](double a, double b) {
+            return std::abs(a - b) <= tolerance;
+        }), cuts.end());
+        for (std::size_t i = 1; i < cuts.size(); ++i) {
+            const double mid = cuts[i - 1] * 0.5 + cuts[i] * 0.5;
+            const gp_Pnt point = origin.Translated(gp_Vec(unit) * mid);
+            bool inside = false, boundary = false;
+            for (int j = 1; j <= solids.Extent(); ++j) {
+                BRepClass3d_SolidClassifier classifier(solids(j), point, tolerance);
+                const TopAbs_State state = classifier.State();
+                if (state == TopAbs_UNKNOWN) { intervals.clear(); return Core3DAgentCopyResult::Unavailable; }
+                inside = inside || state == TopAbs_IN; boundary = boundary || state == TopAbs_ON;
+            }
+            if (!inside) {
+                if (boundary) { intervals.clear(); return Core3DAgentCopyResult::Unavailable; }
+                continue;
+            }
+            const double enter = cuts[i - 1] * mm, exit = cuts[i] * mm;
+            if (!intervals.empty() && std::abs(intervals.back().second - enter) <= 1.0e-7) {
+                intervals.back().second = exit;
+            } else {
+                if (intervals.size() >= 64) { intervals.clear(); return Core3DAgentCopyResult::OverBudget; }
+                intervals.emplace_back(enter, exit);
+            }
+        }
+        return Core3DAgentCopyResult::Copied;
+    } catch (...) { intervals.clear(); return Core3DAgentCopyResult::Unavailable; }
+}
+
+static bool core3dAgentVector3(NSArray<NSNumber *> *values, double out[3]) {
+    if (![values isKindOfClass:NSArray.class] || values.count != 3) return false;
+    for (NSUInteger i = 0; i < 3; ++i) {
+        if (![values[i] isKindOfClass:NSNumber.class]) return false;
+        out[i] = values[i].doubleValue;
+        if (!std::isfinite(out[i])) return false;
+    }
+    return true;
+}
+// AGENT MEASURE HELPERS (measure lane) END
+
 // Engine-only producers, implemented in Core3DAgentMeasurements.mm (measure lane).
 @interface Core3DAgentSolidMeasurement (Core3DEngineProducer)
 - (instancetype)initCore3DUnmeasured:(Core3DAgentMeasurementStatus)status;
@@ -16645,10 +16800,105 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
 }
 
 // AGENT MEASURE (measure lane) BEGIN
+// Shared fence of both read-only agent observations: main thread, no open
+// edit, the caller's expected publication equal to the current one (else
+// Stale), a valid source fence, then a private copy of the one saved solid.
+// Nothing here selects, edits, renders or records history.
+- (Core3DAgentMeasurementStatus)core3d_agentMeasureEntity:(NSString *)entityIdentifier
+    targetAlias:(NSString *)targetAlias documentIdentifier:(NSString *)documentIdentifier
+    sourceSHA256:(NSString *)sourceSHA256 method:(NSString *)method
+    expected:(Core3DSceneSnapshot *)expected
+    source:(Core3DAgentMeasurementSource * __strong *)source
+    local:(TopoDS_Shape *)local world:(TopoDS_Shape *)world
+    millimetresPerUnit:(double *)mm topologyNodes:(std::size_t *)nodes {
+    *source = nil;
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil
+        || GLController.viewer == nullptr || ![expected isKindOfClass:Core3DSceneSnapshot.class]
+        || ![entityIdentifier isKindOfClass:NSString.class]
+        || entityIdentifier.length == 0 || entityIdentifier.length > 128
+        || entityIdentifier.UTF8String == nullptr
+        || ![targetAlias isKindOfClass:NSString.class]
+        || ![documentIdentifier isKindOfClass:NSString.class]
+        || ![sourceSHA256 isKindOfClass:NSString.class]) return Core3DAgentMeasurementStatusUnavailable;
+    try {
+        if (![self core3d_canBeginCommittedEdit]) return Core3DAgentMeasurementStatusUnavailable;
+        Core3DSceneSnapshot *current = [self captureSceneSnapshot];
+        if (current == nil) return Core3DAgentMeasurementStatusUnavailable;
+        if (![current.publicationSourceIdentifier isEqualToString:expected.publicationSourceIdentifier]
+            || current.revisions.documentGeneration != expected.revisions.documentGeneration
+            || current.revisions.modelRevision != expected.revisions.modelRevision
+            || current.revisions.presentationRevision != expected.revisions.presentationRevision)
+            return Core3DAgentMeasurementStatusStale;
+        Core3DAgentMeasurementSource *fence = [[Core3DAgentMeasurementSource alloc]
+            initWithTargetAlias:targetAlias documentIdentifier:documentIdentifier
+            publicationSourceIdentifier:current.publicationSourceIdentifier
+            documentGeneration:[NSString stringWithFormat:@"%llu", (unsigned long long)current.revisions.documentGeneration]
+            modelRevision:[NSString stringWithFormat:@"%llu", (unsigned long long)current.revisions.modelRevision]
+            presentationRevision:[NSString stringWithFormat:@"%llu", (unsigned long long)current.revisions.presentationRevision]
+            metersPerUnit:current.metersPerUnit method:method sourceSHA256:sourceSHA256];
+        if (fence == nil) return Core3DAgentMeasurementStatusUnavailable;
+        double unit = 0;
+        const std::string entity(entityIdentifier.UTF8String,
+            [entityIdentifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        switch (core3dAgentSolidCopy(GLController.viewer->getDocument(), entity, *local, *world, unit, *mm, *nodes)) {
+            case Core3DAgentCopyResult::Copied: break;
+            case Core3DAgentCopyResult::OverBudget: return Core3DAgentMeasurementStatusBudgetExceeded;
+            case Core3DAgentCopyResult::Unavailable: return Core3DAgentMeasurementStatusUnavailable;
+        }
+        // The document's unit and the publication's must agree.
+        if (!(std::abs(unit - current.metersPerUnit) <= 1.0e-9 * std::max(1.0, std::abs(unit))))
+            return Core3DAgentMeasurementStatusUnavailable;
+        *source = fence;
+        return Core3DAgentMeasurementStatusMeasured;
+    } catch (...) { return Core3DAgentMeasurementStatusUnavailable; }
+}
+
 - (Core3DAgentSolidMeasurement *)agentMeasureSolidOfEntityIdentifier:(NSString *)entityIdentifier
     targetAlias:(NSString *)targetAlias documentIdentifier:(NSString *)documentIdentifier
     sourceSHA256:(NSString *)sourceSHA256 expected:(Core3DSceneSnapshot *)expected {
-    return [[Core3DAgentSolidMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusNotQualified];
+    Core3DAgentMeasurementSource *source = nil;
+    TopoDS_Shape local, world; double mm = 0; std::size_t nodes = 0;
+    const auto status = [self core3d_agentMeasureEntity:entityIdentifier targetAlias:targetAlias
+        documentIdentifier:documentIdentifier sourceSHA256:sourceSHA256 method:@"occtBRepCopy"
+        expected:expected source:&source local:&local world:&world millimetresPerUnit:&mm topologyNodes:&nodes];
+    if (status != Core3DAgentMeasurementStatusMeasured || source == nil)
+        return [[Core3DAgentSolidMeasurement alloc] initCore3DUnmeasured:status];
+    try {
+        auto bounds = [&](const TopoDS_Shape& shape, NSArray<NSNumber *> * __strong *low,
+                          NSArray<NSNumber *> * __strong *high) -> bool {
+            Bnd_Box box; BRepBndLib::AddOptimal(shape, box, Standard_False, Standard_False);
+            if (box.IsVoid() || box.IsOpen()) return false;
+            box.SetGap(0);
+            double v[6]; box.Get(v[0], v[1], v[2], v[3], v[4], v[5]);
+            for (double& value : v) { value *= mm; if (!std::isfinite(value)) return false; }
+            for (int i = 0; i < 3; ++i) if (v[i] > v[i + 3]) return false;
+            *low = @[@(v[0]), @(v[1]), @(v[2])]; *high = @[@(v[3]), @(v[4]), @(v[5])];
+            return true;
+        };
+        NSArray<NSNumber *> *worldLow = nil, *worldHigh = nil, *localLow = nil, *localHigh = nil;
+        if (!bounds(world, &worldLow, &worldHigh) || !bounds(local, &localLow, &localHigh))
+            return [[Core3DAgentSolidMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusUnavailable];
+        TopTools_IndexedMapOfShape solids, shells, faces, edges, vertices;
+        TopExp::MapShapes(world, TopAbs_SOLID, solids); TopExp::MapShapes(world, TopAbs_SHELL, shells);
+        TopExp::MapShapes(world, TopAbs_FACE, faces); TopExp::MapShapes(world, TopAbs_EDGE, edges);
+        TopExp::MapShapes(world, TopAbs_VERTEX, vertices);
+        GProp_GProps props;
+        // Adaptive integration of the analytic surfaces; no tessellated volume.
+        const double error = BRepGProp::VolumeProperties(world, props, 1.0e-9, Standard_False, Standard_False);
+        const double volume = props.Mass() * mm * mm * mm;
+        if (!std::isfinite(volume) || !std::isfinite(error) || error < 0)
+            return [[Core3DAgentSolidMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusUnavailable];
+        const BOOL valid = BRepCheck_Analyzer(world, Standard_True).IsValid() ? YES : NO;
+        return [[Core3DAgentSolidMeasurement alloc] initCore3DMeasuredWithSource:source
+            boundsMinMM:worldLow boundsMaxMM:worldHigh
+            localBoundsOptimalMinMM:localLow localBoundsOptimalMaxMM:localHigh
+            volumeMM3:volume volumeIntegrationRelativeError:error valid:valid
+            solids:NSUInteger(solids.Extent()) shells:NSUInteger(shells.Extent())
+            faces:NSUInteger(faces.Extent()) edges:NSUInteger(edges.Extent())
+            vertices:NSUInteger(vertices.Extent()) topologyNodes:NSUInteger(nodes)];
+    } catch (...) {
+        return [[Core3DAgentSolidMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusUnavailable];
+    }
 }
 
 - (Core3DAgentLineSectionMeasurement *)agentMeasureLineSectionOfEntityIdentifier:(NSString *)entityIdentifier
@@ -16656,7 +16906,31 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
     sourceSHA256:(NSString *)sourceSHA256 probeIdentifier:(NSString *)probeIdentifier
     originMM:(NSArray<NSNumber *> *)originMM direction:(NSArray<NSNumber *> *)direction
     expected:(Core3DSceneSnapshot *)expected {
-    return [[Core3DAgentLineSectionMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusNotQualified];
+    double origin[3] = {0, 0, 0}, along[3] = {0, 0, 0};
+    if (![probeIdentifier isKindOfClass:NSString.class] || probeIdentifier.length == 0
+        || probeIdentifier.length > 128 || !core3dAgentVector3(originMM, origin)
+        || !core3dAgentVector3(direction, along) || (along[0] == 0 && along[1] == 0 && along[2] == 0))
+        return [[Core3DAgentLineSectionMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusUnavailable];
+    Core3DAgentMeasurementSource *source = nil;
+    TopoDS_Shape local, world; double mm = 0; std::size_t nodes = 0;
+    const auto status = [self core3d_agentMeasureEntity:entityIdentifier targetAlias:targetAlias
+        documentIdentifier:documentIdentifier sourceSHA256:sourceSHA256 method:@"occtWholeLineIntervals"
+        expected:expected source:&source local:&local world:&world millimetresPerUnit:&mm topologyNodes:&nodes];
+    if (status != Core3DAgentMeasurementStatusMeasured || source == nil)
+        return [[Core3DAgentLineSectionMeasurement alloc] initCore3DUnmeasured:status];
+    std::vector<std::pair<double, double>> intervals;
+    switch (core3dAgentLineIntervals(world, mm, origin, along, intervals)) {
+        case Core3DAgentCopyResult::Copied: break;
+        case Core3DAgentCopyResult::OverBudget:
+            return [[Core3DAgentLineSectionMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusBudgetExceeded];
+        case Core3DAgentCopyResult::Unavailable:
+            return [[Core3DAgentLineSectionMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusUnavailable];
+    }
+    NSMutableArray<NSArray<NSNumber *> *> *result = [NSMutableArray arrayWithCapacity:intervals.size()];
+    for (const auto& interval : intervals) [result addObject:@[@(interval.first), @(interval.second)]];
+    return [[Core3DAgentLineSectionMeasurement alloc] initCore3DMeasuredWithSource:source
+        probeIdentifier:probeIdentifier originMM:@[@(origin[0]), @(origin[1]), @(origin[2])]
+        requestedDirection:@[@(along[0]), @(along[1]), @(along[2])] intervalsMM:result];
 }
 // AGENT MEASURE (measure lane) END
 
