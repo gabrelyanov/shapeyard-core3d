@@ -3785,6 +3785,30 @@ struct NativeModelingPermitIssuer final {
 - (BOOL)cancel {if(!NSThread.isMainThread)return NO;Core3DSavedCutSourceJob *job=_job;return job?[job cancel]:NO;}
 @end
 
+// Engine-only producers, implemented in Core3DAgentMeasurements.mm (measure lane).
+@interface Core3DAgentSolidMeasurement (Core3DEngineProducer)
+- (instancetype)initCore3DUnmeasured:(Core3DAgentMeasurementStatus)status;
+- (instancetype)initCore3DMeasuredWithSource:(Core3DAgentMeasurementSource *)source
+                                  boundsMinMM:(NSArray<NSNumber *> *)boundsMinMM
+                                  boundsMaxMM:(NSArray<NSNumber *> *)boundsMaxMM
+                      localBoundsOptimalMinMM:(NSArray<NSNumber *> *)localMinMM
+                      localBoundsOptimalMaxMM:(NSArray<NSNumber *> *)localMaxMM
+                                    volumeMM3:(double)volumeMM3
+                volumeIntegrationRelativeError:(double)volumeError
+                                        valid:(BOOL)valid
+                                       solids:(NSUInteger)solids shells:(NSUInteger)shells
+                                        faces:(NSUInteger)faces edges:(NSUInteger)edges
+                                     vertices:(NSUInteger)vertices topologyNodes:(NSUInteger)topologyNodes;
+@end
+@interface Core3DAgentLineSectionMeasurement (Core3DEngineProducer)
+- (instancetype)initCore3DUnmeasured:(Core3DAgentMeasurementStatus)status;
+- (instancetype)initCore3DMeasuredWithSource:(Core3DAgentMeasurementSource *)source
+                              probeIdentifier:(NSString *)probeIdentifier
+                                     originMM:(NSArray<NSNumber *> *)originMM
+                           requestedDirection:(NSArray<NSNumber *> *)requestedDirection
+                                  intervalsMM:(NSArray<NSArray<NSNumber *> *> *)intervalsMM;
+@end
+
 @interface Core3DViewController () {
     NSHashTable<Core3DModelingPreparedRequest *> *_issuedModelingPreparedRequests;
     Core3DModelingPreparedRequest *_pendingModelingReservation;
@@ -16619,6 +16643,22 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
     } catch (...) {}
     return Core3DMeshSolidConversionResultRejected;
 }
+
+// AGENT MEASURE (measure lane) BEGIN
+- (Core3DAgentSolidMeasurement *)agentMeasureSolidOfEntityIdentifier:(NSString *)entityIdentifier
+    targetAlias:(NSString *)targetAlias documentIdentifier:(NSString *)documentIdentifier
+    sourceSHA256:(NSString *)sourceSHA256 expected:(Core3DSceneSnapshot *)expected {
+    return [[Core3DAgentSolidMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusNotQualified];
+}
+
+- (Core3DAgentLineSectionMeasurement *)agentMeasureLineSectionOfEntityIdentifier:(NSString *)entityIdentifier
+    targetAlias:(NSString *)targetAlias documentIdentifier:(NSString *)documentIdentifier
+    sourceSHA256:(NSString *)sourceSHA256 probeIdentifier:(NSString *)probeIdentifier
+    originMM:(NSArray<NSNumber *> *)originMM direction:(NSArray<NSNumber *> *)direction
+    expected:(Core3DSceneSnapshot *)expected {
+    return [[Core3DAgentLineSectionMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusNotQualified];
+}
+// AGENT MEASURE (measure lane) END
 
 - (Core3DMeshUVAtlasResult)generateTriangleUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
                                                          expected:(Core3DSceneSnapshot *)expected {

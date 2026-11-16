@@ -23,6 +23,7 @@
 #import <Core3D/Core3DEdgeTreatmentTypes.h>
 #import <Core3D/Core3DEdgeTreatmentR2Types.h>
 #import <Core3D/Core3DFaceSelectorTypes.h>
+#import <Core3D/Core3DAgentMeasurements.h>
 
 @class Core3DVariableFilletOwnerValues;
 @class Core3DAttachmentRigOwnerObservationState;
@@ -527,6 +528,29 @@ __attribute__((objc_subclassing_restricted))
 //! (coplanar triangles merged); one ordinary Undo returns the mesh. Open meshes are rejected.
 - (Core3DMeshSolidConversionResult)makeSolidFromMeshForEntityIdentifier:(NSString *)entityIdentifier
     expected:(Core3DSceneSnapshot *)expected NS_SWIFT_NAME(makeSolidFromMesh(entityIdentifier:expected:));
+//! Release-safe READ-ONLY agent observation of one saved solid (measure lane, CTO 15 Nov 21:50;
+//! measurement-core.v1 measure_solid, method occtBRepCopy). `expected` must be the current
+//! publication (publication, document generation, model and presentation revisions), else
+//! status Stale. A private mesh-free copy of the retained BRep is measured: AddOptimal world
+//! and local bounds in mm, adaptive analytic volume in mm3, BRepCheck validity, unique
+//! topology counts (cap 8192). No selection, gizmo, document, undo/redo or render change.
+//! `targetAlias`, `documentIdentifier` and the 64-hex `sourceSHA256` pin are the caller's
+//! correlation values, copied into the source fence unchanged. Never nil; anything but
+//! status Measured carries no values and no source.
+- (Core3DAgentSolidMeasurement *)agentMeasureSolidOfEntityIdentifier:(NSString *)entityIdentifier
+    targetAlias:(NSString *)targetAlias documentIdentifier:(NSString *)documentIdentifier
+    sourceSHA256:(NSString *)sourceSHA256 expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(agentMeasureSolid(entityIdentifier:targetAlias:documentIdentifier:sourceSHA256:expected:));
+//! Same fence and guarantees for measure_sections (method occtWholeLineIntervals): ordered
+//! signed [enterMM, exitMM] material intervals of the whole line through `originMM` (world
+//! mm) along `direction` (finite, nonzero; echoed as requested). [] with status Measured is
+//! measured empty; a failed or ambiguous line is never [] but status Unavailable.
+- (Core3DAgentLineSectionMeasurement *)agentMeasureLineSectionOfEntityIdentifier:(NSString *)entityIdentifier
+    targetAlias:(NSString *)targetAlias documentIdentifier:(NSString *)documentIdentifier
+    sourceSHA256:(NSString *)sourceSHA256 probeIdentifier:(NSString *)probeIdentifier
+    originMM:(NSArray<NSNumber *> *)originMM direction:(NSArray<NSNumber *> *)direction
+    expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(agentMeasureLineSection(entityIdentifier:targetAlias:documentIdentifier:sourceSHA256:probeIdentifier:originMM:direction:expected:));
 //! Generate a padded triangle atlas on one selected untextured mesh; one Undo.
 - (Core3DMeshUVAtlasResult)generateTriangleUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
                                                          expected:(Core3DSceneSnapshot *)expected
