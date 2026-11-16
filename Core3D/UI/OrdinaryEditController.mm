@@ -1,10 +1,12 @@
 #include "../OCCTKit/SavedCutSourceEdit.hxx"
 
-#if DEBUG // Cut475 phase diagnostics only
+// Used by every build (the face-colour carry of a resize): not part of the Debug block below.
 #include <TopoDS_Face.hxx>
 #include <TopoDS.hxx>
 #include <XCAFDoc_VisMaterialPBR.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
+
+#if DEBUG // Cut475 phase diagnostics only
 #include <cstdio>
 #include <atomic>
 namespace {

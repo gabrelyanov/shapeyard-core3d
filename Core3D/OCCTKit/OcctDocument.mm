@@ -12909,6 +12909,8 @@ Standard_Boolean OcctDocument::IsBooleanResultLabel(const TDF_Label& label) cons
 }
 
 
+#if DEBUG
+// Check seams, Debug builds only (declared in OcctDocument.h inside its Debug block).
 namespace {
 std::atomic_bool gBooleanPlausibilityGuardSkipped{false};
 // How many times the plain builder ran for its last result: 1, or 2 when the looser retry was used.
@@ -12918,19 +12920,18 @@ std::atomic<int> gBakedBooleanLastAttempts{0};
 int Core3DDebugLastBakedBooleanAttempts() noexcept { return gBakedBooleanLastAttempts.load(); }
 
 void Core3DDebugSetBooleanPlausibilityGuardSkipped(const bool skipped) noexcept {
-#if DEBUG
     gBooleanPlausibilityGuardSkipped.store(skipped);
-#else
-    (void)skipped;
-#endif
 }
+#endif
 
 // The guard as the two Join paths use it: the numbers test, unless a debug check has asked
 // to see what happens without it.
 static bool BooleanResultPassesGuard(
     const int operation, const std::vector<double>& inputVolumes, const double resultVolume,
     const double* inputsBox, const double* resultBox) noexcept {
+#if DEBUG
     if (gBooleanPlausibilityGuardSkipped.load()) return true;
+#endif
     return Core3DBooleanResultIsPlausible(operation, inputVolumes, resultVolume, inputsBox, resultBox);
 }
 
@@ -13126,7 +13127,9 @@ bool BakedBooleanShapeOfMany(const TopoDS_Shape& targetStored, const gp_Trsf& ta
             }
             return 0;
         };
+#if DEBUG
         gBakedBooleanLastAttempts.store(1);
+#endif
         int outcome = attempt(Precision::Confusion());
         if (outcome == 2 && operation == 0 && inputsBoxed) {
             // Second and last try for a Join the guard refused: the same fuse with a looser
@@ -13138,7 +13141,9 @@ bool BakedBooleanShapeOfMany(const TopoDS_Shape& targetStored, const gp_Trsf& ta
                 dz = inputsBox[5] - inputsBox[2];
             const double looser = 1.0e-4 * std::sqrt(dx * dx + dy * dy + dz * dz);
             if (std::isfinite(looser) && looser > Precision::Confusion()) {
+#if DEBUG
                 gBakedBooleanLastAttempts.store(2);
+#endif
                 if (attempt(looser) == 0) outcome = 0; else outcome = 2;
             }
         }
