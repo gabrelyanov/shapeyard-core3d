@@ -33,6 +33,8 @@ struct IdentityMap {
 struct Source {
     Family family = Family::None;
     TDF_Label owner;
+    // Captured with plainSavedCutCopy: re-captures of this owner admit it too.
+    bool plainSavedCutCopy = false;
     TopoDS_Shape ownerShape;
     bool carrierLengthUnitPresent = false;
     double carrierMetersPerUnit = 0;
@@ -193,17 +195,22 @@ inline bool SameLocalIDs(const rectangular_loft::Definition& left,
 }
 
 // A present-but-stale, malformed, composite, or retained-cut owner refuses.
+// plainSavedCutCopy: the caller has proven (CanBakeSavedCutForFaceEdit) that
+// the owner is a plain BRep whose only record is a standalone saved Hole; the
+// copy is then a plain solid (Family::None) and the source keeps its record.
 // The legacy readers already require their binding and document units to be
 // current, so success is a usable transaction fence rather than a readable
 // historical recipe.
 inline bool Capture(const Handle(TDocStd_Document)& document,
-                    const TDF_Label& owner, Source& output) noexcept {
+                    const TDF_Label& owner, Source& output,
+                    bool plainSavedCutCopy = false) noexcept {
     output = {};
     try {
         if (document.IsNull() || owner.IsNull() || owner.Data() != document->GetData()
-            || retained_solid::HasRecord(owner)
+            || (retained_solid::HasRecord(owner) && !plainSavedCutCopy)
             || loft_correspondence::persistence::HasRecord(owner)) return false;
         Source value; value.owner = owner; value.ownerShape = XCAFDoc_ShapeTool::GetShape(owner);
+        value.plainSavedCutCopy = plainSavedCutCopy && retained_solid::HasRecord(owner);
         if (value.ownerShape.IsNull()) return false;
         double carrierMetersPerUnit = 0;
         value.carrierLengthUnitPresent = XCAFDoc_DocumentTool::GetLengthUnit(
@@ -682,7 +689,8 @@ inline bool Stage(const Handle(TDocStd_Document)& document,
             || destinationEntityIdentifier.empty() || destinationDefinitionIdentifier.empty()
             || sourceEntityIdentifier == destinationEntityIdentifier
             || sourceDefinitionIdentifier == destinationDefinitionIdentifier
-            || !Capture(document, capturedSource.owner, live)
+            || !Capture(document, capturedSource.owner, live,
+                capturedSource.plainSavedCutCopy)
             || !IsEqual(live, capturedSource) || prepared.family != live.family
             || !Capture(document, destinationOwner, destinationBefore)
             || destinationBefore.family != Family::None
@@ -712,7 +720,8 @@ inline bool Stage(const Handle(TDocStd_Document)& document,
                 || !candidate.loft.IsCurrent(document, destinationOwner)) return false;
         } else return false;
         Source after;
-        if (!Capture(document, capturedSource.owner, after) || !IsEqual(after, capturedSource)) return false;
+        if (!Capture(document, capturedSource.owner, after,
+                capturedSource.plainSavedCutCopy) || !IsEqual(after, capturedSource)) return false;
         output = std::move(candidate); return true;
     } catch (...) { output = {}; return false; }
 }

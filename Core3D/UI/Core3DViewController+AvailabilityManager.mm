@@ -305,8 +305,23 @@ Core3DModelCapability DocumentExportCapabilities(
             if(!core3d::retained_solid::Read(document->Document(),label,retained))return Core3DModelCapabilityNone;
             if(retained.value) {
                 hasRetainedOccurrence=true;
+                std::uint64_t unsupported=core3d::cylindrical_cut::UnsupportedOccurrenceCapabilities;
+                // Push-pull, Bevel/Round and Shell bake a standalone saved Hole
+                // inside their own Apply command (PrepareBooleanResultForFaceEdit;
+                // Undo restores the resizable hole) and their admission accepts
+                // this owner. Keep those tools; other derived routes stay withheld.
+                if(document->CanBakeSavedCutForFaceEdit(label))
+                    unsupported&=~(static_cast<std::uint64_t>(Core3DModelCapabilityExtrusion)
+                        |static_cast<std::uint64_t>(Core3DModelCapabilityChamfer)
+                        |static_cast<std::uint64_t>(Core3DModelCapabilityShell)
+                        // Duplicate and Mirror copy it as a plain solid; the source keeps the record.
+                        |static_cast<std::uint64_t>(Core3DModelCapabilityDuplicate)
+                        |static_cast<std::uint64_t>(Core3DModelCapabilityMirror)
+                        // Repeat in a row / in a circle: every copy is plain too.
+                        |static_cast<std::uint64_t>(Core3DModelCapabilityLinearArray)
+                        |static_cast<std::uint64_t>(Core3DModelCapabilityRadialArray));
                 definitionCapabilities=static_cast<Core3DModelCapability>(
-                    static_cast<std::uint64_t>(definitionCapabilities)&~core3d::cylindrical_cut::UnsupportedOccurrenceCapabilities);
+                    static_cast<std::uint64_t>(definitionCapabilities)&~unsupported);
             }
             if (!sweep.label.IsNull() || !loft.label.IsNull()) {
                 // Translation/local-transform copies stage an exact recipe on
