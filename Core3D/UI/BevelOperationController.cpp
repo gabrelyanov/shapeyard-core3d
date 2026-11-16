@@ -513,6 +513,52 @@ private:
     std::shared_ptr<std::atomic_bool> myCancellation;
 };
 
+//! OCCT's chamfer builder, unlike the fillet builder, exposes no faulty
+//! contour status. A plain chamfer that failed at theDistance is classified
+//! as refused for its size only when the same edges chamfered at a quarter
+//! of that distance build one valid solid: then a smaller value works and
+//! the person can be told so. Anything else stays an ordinary failure.
+BevelFailureKind ClassifyFailedPlainChamfer(
+    const BevelPreviewWorkerSource& theSource,
+    const Standard_Real theDistance,
+    const std::shared_ptr<std::atomic_bool>& theCancellation,
+    const Standard_Size theMaximumNodes,
+    const Standard_Size theMaximumSolids) noexcept
+{
+    try {
+        OCC_CATCH_SIGNALS
+        const Standard_Real aProbe = theDistance * 0.25;
+        if (theSource.shape.IsNull() || theSource.edges.empty()
+            || !(aProbe > Precision::Confusion())
+            || theCancellation == nullptr
+            || theCancellation->load(std::memory_order_relaxed)) {
+            return BevelFailureKind::Other;
+        }
+        Handle(BevelCancellationIndicator) aProgress =
+            new BevelCancellationIndicator(theCancellation);
+        BRepFilletAPI_MakeChamfer aBuilder(theSource.shape);
+        for (const TopoDS_Edge& anEdge : theSource.edges) {
+            aBuilder.Add(aProbe, anEdge);
+        }
+        aBuilder.Build(aProgress->Start());
+        if (!aBuilder.IsDone()
+            || theCancellation->load(std::memory_order_relaxed)) {
+            return BevelFailureKind::Other;
+        }
+        const TopoDS_Shape aProbeShape = aBuilder.Shape();
+        Standard_Size aNodes = 0;
+        Standard_Size aSolids = 0;
+        if (aProbeShape.IsNull() || aProbeShape.IsSame(theSource.shape)
+            || !IsValidSolidResult(aProbeShape, theMaximumNodes,
+                   theMaximumSolids, aNodes, aSolids)) {
+            return BevelFailureKind::Other;
+        }
+        return BevelFailureKind::RadiusRefused;
+    } catch (...) {
+        return BevelFailureKind::Other;
+    }
+}
+
 } // namespace
 
 Standard_Boolean IsBevelEdgeEligible(
@@ -805,6 +851,10 @@ private:
                     }
                     aBuilder.Build(aProgress->Start());
                     if (!aBuilder.IsDone()) {
+                        aResult.failureKind = ClassifyFailedPlainChamfer(
+                            aSource, aDistance, theRequest.cancellation,
+                            theRequest.maximumResultTopologyNodes,
+                            theRequest.maximumResultSolids);
                         return aResult;
                     }
                     aCandidate = aBuilder.Shape();
@@ -837,6 +887,17 @@ private:
                         theRequest.maximumResultSolids,
                         anAggregateResultTopologyNodes,
                         anAggregateResultSolids)) {
+                    // A plain chamfer may "build" a broken solid when the
+                    // distance runs past a neighbouring edge (phone stand:
+                    // Bevel 2 on a 2 mm Push-pull step).
+                    if (isChamfer && !aSource.retainedInput
+                        && !aCandidate.IsNull()
+                        && !aCandidate.IsSame(aSource.shape)) {
+                        aResult.failureKind = ClassifyFailedPlainChamfer(
+                            aSource, aDistance, theRequest.cancellation,
+                            theRequest.maximumResultTopologyNodes,
+                            theRequest.maximumResultSolids);
+                    }
                     return aResult;
                 }
                 aResult.results.push_back(std::move(aCandidate));
@@ -1866,9 +1927,14 @@ std::uint64_t BevelOperationController::previewGeneration() const noexcept
 BevelFailureObservation
 BevelOperationController::failureObservation() const noexcept
 {
-    return myRoundOwned
-        ? myFailureObservation
-        : BevelFailureObservation{myGeneration, BevelFailureKind::None};
+    // Round owns the full classification. A plain Bevel reports only the
+    // bounded size refusal (ClassifyFailedPlainChamfer) so the screen can say
+    // the amount is too large; every other Bevel failure stays unclassified.
+    if (myRoundOwned
+        || myFailureObservation.kind == BevelFailureKind::RadiusRefused) {
+        return myFailureObservation;
+    }
+    return BevelFailureObservation{myGeneration, BevelFailureKind::None};
 }
 
 void BevelOperationController::recordFailure(
