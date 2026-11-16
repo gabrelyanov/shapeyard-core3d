@@ -170,7 +170,8 @@ Standard_Boolean TransformsMatch(
 Standard_Boolean HasStyledXCAFSubshape(
     const Handle(TDocStd_Document)& theDocument,
     const TDF_Label& theDefinition,
-    const Standard_Size theMaximumLabels) noexcept
+    const Standard_Size theMaximumLabels,
+    const Standard_Boolean theAllowFaceMaterials = Standard_False) noexcept
 {
     if (theDocument.IsNull() || theDefinition.IsNull()
         || theDefinition.Data() != theDocument->GetData()
@@ -204,7 +205,11 @@ Standard_Boolean HasStyledXCAFSubshape(
                         || aColorTool->IsSet(aLabel, XCAFDoc_ColorSurf)
                         || aColorTool->IsSet(aLabel, XCAFDoc_ColorCurv)
                         || !XCAFDoc_ColorTool::IsVisible(aLabel)))
-                || !XCAFDoc_VisMaterialTool::GetShapeMaterial(aLabel).IsNull()
+                || (!XCAFDoc_VisMaterialTool::GetShapeMaterial(aLabel).IsNull()
+                    // A colour put on one face (a material only) is carried by Bevel.
+                    && !(theAllowFaceMaterials
+                        && !XCAFDoc_ShapeTool::GetShape(aLabel).IsNull()
+                        && XCAFDoc_ShapeTool::GetShape(aLabel).ShapeType() == TopAbs_FACE))
                 || (!aLayerTool.IsNull()
                     && aLayerTool->GetLayers(aLabel, aLayers)
                     && !aLayers.IsEmpty())) {
@@ -485,6 +490,42 @@ Standard_Boolean CanonicalPlainProfileBevelCandidate(
     } catch (...) {
         theCandidate.Nullify();
         return Standard_False;
+    }
+}
+
+//! The plain chamfer and fillet builders return a forward COMPOUND that wraps
+//! the one result solid. Stored like that, the part's root is no longer a
+//! single SOLID and the face tools (Push-pull, Shell, Split) refuse the part
+//! after one Bevel. Take the one forward solid out of its wrapper, examined
+//! with cumulative orientation and location as in
+//! CanonicalPlainProfileBevelCandidate, so the kept child keeps its located
+//! geometry; nothing is rebuilt. Anything else is returned unchanged and is
+//! judged by the usual result checks.
+TopoDS_Shape PlainBevelResultWithoutWrapper(const TopoDS_Shape& theResult) noexcept
+{
+    try {
+        OCC_CATCH_SIGNALS
+        if (theResult.IsNull() || theResult.ShapeType() != TopAbs_COMPOUND
+            || theResult.Orientation() != TopAbs_FORWARD) {
+            return theResult;
+        }
+        TopoDS_Shape aSolid;
+        Standard_Size aChildCount = 0;
+        for (TopoDS_Iterator aChild(theResult, Standard_True, Standard_True);
+             aChild.More(); aChild.Next()) {
+            if (++aChildCount > 1) {
+                return theResult;
+            }
+            aSolid = aChild.Value();
+        }
+        if (aChildCount != 1 || aSolid.IsNull()
+            || aSolid.ShapeType() != TopAbs_SOLID
+            || aSolid.Orientation() != TopAbs_FORWARD) {
+            return theResult;
+        }
+        return aSolid;
+    } catch (...) {
+        return theResult;
     }
 }
 
@@ -857,7 +898,7 @@ private:
                             theRequest.maximumResultSolids);
                         return aResult;
                     }
-                    aCandidate = aBuilder.Shape();
+                    aCandidate = PlainBevelResultWithoutWrapper(aBuilder.Shape());
                 } else {
                     BRepFilletAPI_MakeFillet aBuilder(aSource.shape);
                     for (const TopoDS_Edge& anEdge : aSource.edges) {
@@ -871,7 +912,7 @@ private:
                                 : BevelFailureKind::Other;
                         return aResult;
                     }
-                    aCandidate = aBuilder.Shape();
+                    aCandidate = PlainBevelResultWithoutWrapper(aBuilder.Shape());
                 }
                 if (wasCancelled()) {
                     aResult.outcome = BevelPreviewWorkerOutcome::Cancelled;
@@ -1151,7 +1192,7 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
                 || HasStyledXCAFSubshape(
                     aDocument,
                     aSelection.documentLabel,
-                    kMaxStyledSubshapeLabels)
+                    kMaxStyledSubshapeLabels, Standard_True)
                 || !HasOnlySolidBranches(
                     aShape,
                     aPerSourceLimit,
@@ -1217,10 +1258,17 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
                 bool(aSelection.retainedCapture)
                 && bool(aSelection.retainedCapture->snapshot);
             const auto coverage=myDoc->RetainedRecipeCoverageForLabel(aSelection.documentLabel);
+            // A fresh Join/Cut result (its only record is the Boolean originals record) is
+            // bevelled as the solid it is; the record goes in the Bevel command (editor lane
+            // 15 Nov 01:35: no Bevel after Union).
+            TDF_Label aBakedBooleanRecord;
+            const bool bakesBooleanResult = !hasRetainedCapture
+                && myDoc->BooleanResultRecordForBake(aSelection.documentLabel, aBakedBooleanRecord);
             // A standalone saved Hole is baked inside this tool's own Apply
             // command (PrepareBooleanResultForFaceEdit), exactly as Push-pull
             // does; Undo restores the resizable hole record.
             const Standard_Boolean bakesSavedCut = !hasRetainedCapture
+                && !bakesBooleanResult
                 && coverage == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
                 && myDoc->CanBakeRecordForFaceEdit(aSelection.documentLabel);
             if ((hasRetainedCapture
@@ -1228,10 +1276,11 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
                             coverage, aSelection.retainedCapture)
                         || theSelection.size() != 1
                         || !myRetainedAdapter))
-                || (!hasRetainedCapture && !bakesSavedCut
+                || (!hasRetainedCapture && !bakesSavedCut && !bakesBooleanResult
                     && coverage != OcctRetainedRecipeCoverage::Absent)) {
                 return Standard_False;
             }
+            aSource.bakedBooleanRecord = aBakedBooleanRecord;
             aSource.retainedCapture=aSelection.retainedCapture;
             aSource.bakesSavedCut=bakesSavedCut;
             if (!aSelection.edgeTopologyIndices.empty()
@@ -1301,7 +1350,7 @@ Standard_Boolean BevelOperationController::preparedSourcesAreCurrent(
                 || HasStyledXCAFSubshape(
                     aDocument,
                     aSource.label,
-                    kMaxStyledSubshapeLabels)
+                    kMaxStyledSubshapeLabels, Standard_True)
                 || myDoc->EntityIdentifierForLabel(aSource.label)
                     != aSource.entityIdentifier
                 || myDoc->DefinitionIdentifierForLabel(aSource.label)
@@ -2044,10 +2093,15 @@ BevelApplyResult BevelOperationController::apply() noexcept
 			if (aCoverage == OcctRetainedRecipeCoverage::Absent) {
 				continue;
 			}
-			if (source.bakesSavedCut
-				&& aCoverage
-					== OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
-				&& myDoc->CanBakeRecordForFaceEdit(source.label)) {
+			// A fresh Join/Cut result admitted at begin: its record is baked in the command.
+			TDF_Label aCurrentRecord;
+			if ((!source.bakedBooleanRecord.IsNull()
+					&& myDoc->BooleanResultRecordForBake(source.label, aCurrentRecord)
+					&& aCurrentRecord.IsEqual(source.bakedBooleanRecord))
+				|| (source.bakesSavedCut
+					&& aCoverage
+						== OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
+					&& myDoc->CanBakeRecordForFaceEdit(source.label))) {
 				continue;
 			}
 			OcctPlainProfileOperationCapture aCapture;
@@ -2267,9 +2321,19 @@ BevelApplyResult BevelOperationController::apply() noexcept
                     &&source.retainedCapture->snapshot
                     &&myDoc->StageRetainedEdgeTreatment(*source.retainedCapture->snapshot,
                         *source.retainedEdit,*source.retainedResult,readback,refusal);
-            }else staged=(!source.bakesSavedCut
-                    ||myDoc->PrepareBooleanResultForFaceEdit(source.label))
-                &&myDoc->ReplaceShape(source.label,myPreviewResults[anIndex]);
+            }else{
+                TDF_Label record=source.bakedBooleanRecord;
+                if(!record.IsNull()) record.ForgetAllAttributes(Standard_True);
+                // Colours put on single faces stay on the faces they were on (founder test 14 Nov).
+                std::vector<TDF_Label> faceLabels;
+                std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> colouredFaces;
+                staged=(!source.bakesSavedCut
+                        ||myDoc->PrepareBooleanResultForFaceEdit(source.label))
+                    &&myDoc->CaptureFaceColours(source.label,1.0,faceLabels,colouredFaces)
+                    &&myDoc->ReplaceShape(source.label,myPreviewResults[anIndex])
+                    &&myDoc->CarryFaceColours(source.label,myPreviewResults[anIndex]->Shape(),
+                        faceLabels,colouredFaces);
+            }
             if (!staged) {
                 // Discharge this command's companion only after verified
                 // prior-state settlement. A failed proof remains recovery

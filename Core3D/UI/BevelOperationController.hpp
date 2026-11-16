@@ -195,6 +195,8 @@ private:
         //! The part as stored and shown: `shape` itself, or (App Store 5.34.1
         //! Union/Subtract results) a compound around it. Currency checks use this.
         TopoDS_Shape stored;
+        //! A Join/Cut result's Boolean record, dropped in the Bevel command (Undo restores it).
+        TDF_Label bakedBooleanRecord;
         std::vector<TopoDS_Edge> edges;
         std::vector<Standard_Size> edgeTopologyIndices;
         gp_Trsf transform;

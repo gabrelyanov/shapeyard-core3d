@@ -2426,6 +2426,13 @@ namespace core3d {
 			if (aCoverage == OcctRetainedRecipeCoverage::Absent) {
 				return Standard_True;
 			}
+			// A fresh Join/Cut result: bevelled as a plain solid, its Boolean record baked in
+			// the Bevel command (no retained treatment capture).
+			TDF_Label aBooleanRecord;
+			if (myDoc->BooleanResultRecordForBake(theSelection.documentLabel, aBooleanRecord)) {
+				theSelection.retainedCapture.reset();
+				return Standard_True;
+			}
 			// A standalone saved Hole, or an ordinary saved Join/Cut (a drilled
 			// plate after its keyhole Cut), takes the plain route: the controller
 			// bakes that record inside its Apply command and Undo restores it.
