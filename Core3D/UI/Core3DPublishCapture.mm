@@ -1,4 +1,5 @@
 #import "Core3DPublishCapture.h"
+#import "Core3DDecimationOpening.h"
 
 #import "Core3DViewController.h"
 #import "Core3DViewController+ExportManager.h"
@@ -24,6 +25,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <set>
@@ -68,6 +70,7 @@ NSErrorDomain const Core3DPublishCaptureErrorDomain = @"Core3DPublishCaptureErro
 @property(nonatomic, copy, readwrite) NSArray<NSNumber *> *sourcePositionsMM;
 @property(nonatomic, copy, readwrite) NSArray<NSNumber *> *sourceIndices;
 @property(nonatomic, copy, readwrite) NSArray<NSString *> *faceEvidenceSHA256InEmittedOrder;
+@property(nonatomic, copy, readwrite, nullable) NSArray<NSString *> *triangleIdentitySHA256InEmittedOrder;
 @property(nonatomic, copy, readwrite) NSString *measurementReceiptSHA256;
 @property(nonatomic, assign, readwrite) uint64_t addressedTriangleCount;
 @end
@@ -785,6 +788,166 @@ static bool F2ValidArtifactEvidence(Core3DPublishArtifactEvidence *evidence) {
     return true;
 }
 
+// Only the captured single-owner scalar source is supported here. This is a
+// physical-channel commitment, not another Observe admission path.
+struct F2ScalarSource final {
+    Core3DSceneRenderItemSnapshot *item = nil;
+    Core3DSceneMeshSnapshot *mesh = nil;
+    NSData *channels = nil;
+    std::set<std::pair<NSUInteger, NSUInteger>> addresses;
+};
+
+static NSString *F2ChannelDigest(NSData *bytes) {
+    if (!bytes || bytes.length == 0 || bytes.length > kMaximumEvidenceBytes) return nil;
+    core3d::receipt::Digest digest{};
+    if (!CC_SHA256(bytes.bytes, static_cast<CC_LONG>(bytes.length), digest.data())) return nil;
+    return [NSString stringWithUTF8String:core3d::receipt::Hex(digest).c_str()];
+}
+
+static bool F2ReadScalarSource(Core3DSceneSnapshot *scene, NSArray<NSString *> *owners,
+                               F2ScalarSource& result) {
+    if (owners.count != 1) return false;
+    Core3DSceneRenderItemSnapshot *selected = nil;
+    for (Core3DSceneRenderItemSnapshot *item in scene.renderItems) {
+        if (item.renderRole != Core3DSceneRenderRoleModel
+            || ![item.entityIdentifier isEqualToString:owners.firstObject]) continue;
+        if (selected || !item.isVisible) return false;
+        selected = item;
+    }
+    if (!selected || selected.meshIndex >= scene.meshes.count
+        || selected.faceImageBindings.count || selected.decalDerivedAppearances.count) return false;
+    Core3DSceneMeshSnapshot *mesh = scene.meshes[selected.meshIndex];
+    if (mesh.geometryKind != Core3DSceneGeometryKindSurfaceTriangles
+        || mesh.isPaintedAtlasDerivative || mesh.hasCornerTangents
+        || mesh.vertexStride != sizeof(Core3DSceneVertex) || mesh.indexStride != sizeof(uint32_t)
+        || mesh.vertexCount == 0 || mesh.vertexCount > 12288
+        || mesh.indexCount == 0 || mesh.indexCount > 12288
+        || mesh.vertexData.length != mesh.vertexCount * sizeof(Core3DSceneVertex)
+        || mesh.indexData.length != mesh.indexCount * sizeof(uint32_t)
+        || mesh.facePrimitives.count > 4096
+        || selected.primitiveBindings.count != mesh.facePrimitives.count) return false;
+    Bytes bytes;
+    bytes.text("shapeyard.f2-scalar-physical-source.v1");
+    bytes.text(selected.entityIdentifier); bytes.text(mesh.definitionIdentifier);
+    bytes.number(scene.metersPerUnit); bytes.u64(mesh.geometryRevision);
+    for (NSUInteger column = 0; column < 4; ++column)
+        for (NSUInteger row = 0; row < 4; ++row) {
+            const double value = selected.worldTransform.columns[column][row];
+            if (!std::isfinite(value)) return false;
+            bytes.number(value);
+        }
+    bytes.u64(selected.winding);
+    bytes.data(mesh.vertexData); bytes.data(mesh.indexData);
+    bytes.u64(mesh.facePrimitives.count);
+    const auto *indices = static_cast<const uint32_t *>(mesh.indexData.bytes);
+    const auto *vertices = static_cast<const Core3DSceneVertex *>(mesh.vertexData.bytes);
+    std::set<std::pair<NSUInteger, NSUInteger>> addresses;
+    for (NSUInteger p = 0; p < mesh.facePrimitives.count; ++p) {
+        Core3DSceneFacePrimitiveSnapshot *face = mesh.facePrimitives[p];
+        Core3DScenePrimitiveBindingSnapshot *binding = selected.primitiveBindings[p];
+        bytes.u64(p); bytes.u64(face.faceIndex);
+        bytes.u64(face.firstIndex); bytes.u64(face.indexCount);
+        bytes.u64(face.hasTextureCoordinates); bytes.u64(binding.isVisible);
+        bytes.u64(binding.materialIndex); // Physical membership, not a palette set.
+        bytes.text(face.analyticSourceFaceWitnessSHA256);
+        bytes.u64(face.analyticSurfaceType); bytes.u64(face.isAnalyticSurfaceReversed);
+        bytes.data(face.analyticParameters);
+        if (binding.materialIndex >= scene.materials.count) return false;
+        Core3DSceneMaterialSnapshot *m = scene.materials[binding.materialIndex];
+        for (NSInteger texture : {m.baseColorTextureIndex, m.emissiveTextureIndex,
+            m.metallicRoughnessTextureIndex, m.occlusionTextureIndex, m.normalTextureIndex})
+            if (texture >= 0) return false;
+        bytes.text(m.identifier);
+        for (NSUInteger c = 0; c < 4; ++c) bytes.number(m.linearBaseColorRGBA[c]);
+        for (NSUInteger c = 0; c < 3; ++c) bytes.number(m.linearEmissionRGB[c]);
+        bytes.number(m.metallic); bytes.number(m.roughness); bytes.number(m.indexOfRefraction);
+        bytes.u64(m.alphaMode); bytes.number(m.alphaCutoff); bytes.u64(m.cullMode);
+        if (!binding.isVisible) continue;
+        if (!face.hasAnalyticSourceFaceWitness
+            || !F2LowerHexDigest(face.analyticSourceFaceWitnessSHA256)
+            || face.indexCount == 0 || face.indexCount % 3 != 0
+            || face.firstIndex > mesh.indexCount
+            || face.indexCount > mesh.indexCount - face.firstIndex) return false;
+        for (NSUInteger first = face.firstIndex; first < face.firstIndex + face.indexCount; first += 3) {
+            addresses.insert({p, first});
+            for (NSUInteger corner = 0; corner < 3; ++corner) {
+                if (indices[first + corner] >= mesh.vertexCount) return false;
+                const Core3DSceneVertex& vertex = vertices[indices[first + corner]];
+                for (float value : {vertex.positionX, vertex.positionY, vertex.positionZ,
+                    vertex.normalX, vertex.normalY, vertex.normalZ, vertex.textureU, vertex.textureV})
+                    if (!std::isfinite(value)) return false;
+            }
+        }
+    }
+    if (addresses.size() < 4 || addresses.size() > 4096) return false;
+    result.item = selected; result.mesh = mesh; result.channels = bytes.finish();
+    result.addresses = std::move(addresses);
+    return result.channels != nil;
+}
+
+static bool F2ExactAddress(NSNumber *number, NSUInteger& output) {
+    if (![number isKindOfClass:NSNumber.class]) return false;
+    const double value = number.doubleValue;
+    if (!std::isfinite(value) || value < 0 || value > UINT32_MAX || std::floor(value) != value) return false;
+    output = static_cast<NSUInteger>(value);
+    return true;
+}
+
+// Each caller-provided address is checked against the native source, including
+// actual triangle corners and repeated analytic face evidence. The caller can
+// reorder a valid emission but cannot invent, duplicate or omit source faces.
+static NSArray<NSString *> *F2IssueTriangleIdentities(Core3DPublishCapture *capture,
+    Core3DPublishArtifactEvidence *evidence, NSArray<NSNumber *> *addresses,
+    const F2ScalarSource& source) {
+    if (![addresses isKindOfClass:NSArray.class]
+        || addresses.count != 2 * evidence.addressedTriangleCount
+        || source.addresses.size() != evidence.addressedTriangleCount) return nil;
+    NSString *channels = F2ChannelDigest(source.channels);
+    NSString *captureDigest = F2ChannelDigest(capture.sourceWitnessBytes);
+    if (!channels || !captureDigest) return nil;
+    const auto *indices = static_cast<const uint32_t *>(source.mesh.indexData.bytes);
+    const auto *vertices = static_cast<const Core3DSceneVertex *>(source.mesh.vertexData.bytes);
+    std::set<std::pair<NSUInteger, NSUInteger>> seen;
+    NSMutableArray<NSString *> *identities = [NSMutableArray arrayWithCapacity:evidence.addressedTriangleCount];
+    for (NSUInteger t = 0; t < evidence.addressedTriangleCount; ++t) {
+        NSUInteger p = 0, first = 0;
+        if (!F2ExactAddress(addresses[2 * t], p) || !F2ExactAddress(addresses[2 * t + 1], first)
+            || !source.addresses.count({p, first}) || !seen.insert({p, first}).second) return nil;
+        Core3DSceneFacePrimitiveSnapshot *face = source.mesh.facePrimitives[p];
+        if (![face.analyticSourceFaceWitnessSHA256 isEqualToString:evidence.faceEvidenceSHA256InEmittedOrder[t]]) return nil;
+        Core3DScenePrimitiveBindingSnapshot *binding = source.item.primitiveBindings[p];
+        Core3DSceneMaterialSnapshot *material = capture.sceneSnapshot.materials[binding.materialIndex];
+        const bool reverse = material.cullMode == Core3DSceneCullModeFront;
+        for (NSUInteger c = 0; c < 3; ++c) {
+            const NSUInteger offset = reverse && c != 0 ? 3 - c : c;
+            const Core3DSceneVertex& vertex = vertices[indices[first + offset]];
+            const simd_double4 world = simd_mul(source.item.worldTransform,
+                simd_make_double4(vertex.positionX, vertex.positionY, vertex.positionZ, 1.0));
+            if (!std::isfinite(world.w) || world.w == 0) return nil;
+            for (NSUInteger axis = 0; axis < 3; ++axis) {
+                const double expected = world[axis] / world.w * (capture.metersPerUnit * 1000.0);
+                const double observed = evidence.sourcePositionsMM[9 * t + 3 * c + axis].doubleValue;
+                if (!std::isfinite(expected) || std::abs(expected - observed)
+                    > std::max(1e-9, std::abs(expected) * 1e-12)) return nil;
+            }
+            NSUInteger index = 0;
+            if (!F2ExactAddress(evidence.sourceIndices[3 * t + c], index) || index != 3 * t + c) return nil;
+        }
+        Bytes identity;
+        identity.text("shapeyard.f2-captured-triangle.v1");
+        identity.text(captureDigest); identity.text(channels);
+        identity.text(evidence.artifactSHA256); identity.text(evidence.measurementReceiptSHA256);
+        identity.text(source.item.entityIdentifier); identity.text(source.mesh.definitionIdentifier);
+        identity.u64(p); identity.u64(first);
+        identity.text(face.analyticSourceFaceWitnessSHA256);
+        NSString *digest = F2ChannelDigest(identity.finish());
+        if (!digest) return nil;
+        [identities addObject:digest];
+    }
+    return seen == source.addresses ? [identities copy] : nil;
+}
+
+
 @interface Core3DPublishCapture ()
 @property(nonatomic, strong, readwrite) Core3DSceneSnapshot *sceneSnapshot;
 @property(nonatomic, copy, readwrite) NSData *sourceWitnessBytes;
@@ -812,6 +975,8 @@ static bool F2ValidArtifactEvidence(Core3DPublishArtifactEvidence *evidence) {
     __weak Core3DViewController *_controller;
     Handle(OcctDocument) _owner;
     std::shared_ptr<OpeningContext> _context;
+    NSData *_f2ScalarSourceChannels;
+    NSArray<NSNumber *> *_f2ScalarTriangleAddresses;
 }
 
 + (instancetype)captureController:(Core3DViewController *)controller error:(NSError **)error {
@@ -897,6 +1062,15 @@ static bool F2ValidArtifactEvidence(Core3DPublishArtifactEvidence *evidence) {
                                     @"captured dependency changed", fresh.failureStage);
         return NO;
     }
+    if (_f2ScalarSourceChannels) {
+        F2ScalarSource physical;
+        if (!F2ReadScalarSource(fresh.scene, self.selectedEntityIdentifiers, physical)
+            || ![physical.channels isEqualToData:_f2ScalarSourceChannels]) {
+            if (error) *error = Refusal(Core3DPublishCaptureErrorStale,
+                                        @"captured physical triangle channels changed");
+            return NO;
+        }
+    }
     if (!EqualCommitments(fresh.commitments, self.ownerCommitments, self.selectedEntityIdentifiers)) {
         if (error) *error = Refusal(Core3DPublishCaptureErrorStale, @"captured owner commitments changed");
         return NO;
@@ -917,12 +1091,192 @@ static bool F2ValidArtifactEvidence(Core3DPublishArtifactEvidence *evidence) {
                                     @"artifact evidence is already bound");
         return NO;
     }
-    if (!F2ValidArtifactEvidence(evidence)) {
+    if (!F2ValidArtifactEvidence(evidence) || evidence.triangleIdentitySHA256InEmittedOrder) {
         if (error) *error = Refusal(Core3DPublishCaptureErrorBounds,
                                     @"artifact evidence shape refused");
         return NO;
     }
     _artifactEvidence = evidence;
+    return YES;
+}
+
+- (Core3DDecimationRequest *)makeScalarDecimationRequestWithSettingsCanonicalBytes:(NSData *)settingsBytes
+                                                                           error:(NSError **)error {
+    if (error) *error = nil;
+    if (!NSThread.isMainThread) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorInvalidThread, @"main-thread request construction required");
+        return nil;
+    }
+    if (![self isCurrent:error]) return nil;
+    Core3DPublishArtifactEvidence *evidence = self.artifactEvidence;
+    if (self.scope != Core3DPublishCaptureScopeSelected || self.ownerCommitments.count != 1
+        || !_f2ScalarSourceChannels || !_f2ScalarTriangleAddresses
+        || !F2ValidArtifactEvidence(evidence) || !evidence.triangleIdentitySHA256InEmittedOrder) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorUnsupportedAppearance,
+                                    @"request requires native-bound scalar triangle channels");
+        return nil;
+    }
+    NSData *settings = [settingsBytes isKindOfClass:NSData.class] ? [settingsBytes copy] : nil;
+    Core3DDecimationSettingsReadback *readback = settings
+        ? [Core3DDecimationOpening f2SettingsReadbackForCanonicalBytes:settings error:nil] : nil;
+    if (!readback || readback.metersPerUnit != self.metersPerUnit
+        || readback.targetTriangleCount < 4
+        || readback.targetTriangleCount > evidence.addressedTriangleCount) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorBounds,
+                                    @"request settings do not match the captured source");
+        return nil;
+    }
+    F2ScalarSource source;
+    if (!F2ReadScalarSource(self.sceneSnapshot, self.selectedEntityIdentifiers, source)
+        || ![source.channels isEqualToData:_f2ScalarSourceChannels]) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorStale, @"captured scalar channels changed");
+        return nil;
+    }
+    NSArray<NSString *> *identities = F2IssueTriangleIdentities(
+        self, evidence, _f2ScalarTriangleAddresses, source);
+    if (!identities || ![identities isEqualToArray:evidence.triangleIdentitySHA256InEmittedOrder]) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorBounds, @"captured triangle addresses changed");
+        return nil;
+    }
+    const simd_double4x4 world = source.item.worldTransform;
+    simd_double3x3 linear;
+    for (NSUInteger column = 0; column < 3; ++column) {
+        if (world.columns[column][3] != 0.0) {
+            if (error) *error = Refusal(Core3DPublishCaptureErrorUnsupportedAppearance, @"non-affine scalar placement");
+            return nil;
+        }
+        for (NSUInteger row = 0; row < 3; ++row)
+            linear.columns[column][row] = world.columns[column][row];
+    }
+    const double determinant = simd_determinant(linear);
+    if (world.columns[3][3] != 1.0 || !std::isfinite(determinant) || determinant == 0.0) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorUnsupportedAppearance, @"singular scalar placement");
+        return nil;
+    }
+    const simd_double3x3 normalTransform = simd_transpose(simd_inverse(linear));
+    // Standard selected-owner GLB compacts visible native material indices in
+    // ascending order. A palette entry is never substituted for membership.
+    std::set<NSUInteger> visibleMaterials;
+    for (Core3DScenePrimitiveBindingSnapshot *binding in source.item.primitiveBindings)
+        if (binding.isVisible) visibleMaterials.insert(binding.materialIndex);
+    const auto *indices = static_cast<const uint32_t *>(source.mesh.indexData.bytes);
+    const auto *vertices = static_cast<const Core3DSceneVertex *>(source.mesh.vertexData.bytes);
+    NSMutableArray<NSNumber *> *normals = [NSMutableArray arrayWithCapacity:evidence.sourcePositionsMM.count];
+    NSMutableArray<NSNumber *> *uvs = [NSMutableArray arrayWithCapacity:evidence.sourceIndices.count * 2];
+    NSMutableArray<NSNumber *> *materials = [NSMutableArray arrayWithCapacity:evidence.addressedTriangleCount];
+    for (NSUInteger t = 0; t < evidence.addressedTriangleCount; ++t) {
+        const NSUInteger p = _f2ScalarTriangleAddresses[2 * t].unsignedIntegerValue;
+        const NSUInteger first = _f2ScalarTriangleAddresses[2 * t + 1].unsignedIntegerValue;
+        Core3DSceneFacePrimitiveSnapshot *face = source.mesh.facePrimitives[p];
+        Core3DScenePrimitiveBindingSnapshot *binding = source.item.primitiveBindings[p];
+        if (!face.hasTextureCoordinates) {
+            if (error) *error = Refusal(Core3DPublishCaptureErrorUnsupportedAppearance, @"scalar attribute source has no UV channel");
+            return nil;
+        }
+        const auto material = visibleMaterials.find(binding.materialIndex);
+        if (material == visibleMaterials.end()) {
+            if (error) *error = Refusal(Core3DPublishCaptureErrorBounds, @"scalar material membership is absent");
+            return nil;
+        }
+        [materials addObject:@(std::distance(visibleMaterials.begin(), material))];
+        const bool reverse = self.sceneSnapshot.materials[binding.materialIndex].cullMode == Core3DSceneCullModeFront;
+        for (NSUInteger c = 0; c < 3; ++c) {
+            const NSUInteger offset = reverse && c != 0 ? 3 - c : c;
+            const Core3DSceneVertex& vertex = vertices[indices[first + offset]];
+            const double nx = vertex.normalX, ny = vertex.normalY, nz = vertex.normalZ;
+            const double lengthSquared = nx * nx + ny * ny + nz * nz;
+            if (!std::isfinite(lengthSquared) || lengthSquared <= 0) {
+                if (error) *error = Refusal(Core3DPublishCaptureErrorUnsupportedAppearance, @"scalar normal is invalid");
+                return nil;
+            }
+            // Reproduce the actual GLB's normalized Float32 local NORMAL,
+            // then the independent reader's normalized world direction.
+            const double scale = (reverse ? -1.0 : 1.0) / std::sqrt(lengthSquared);
+            const simd_float3 encoded = simd_make_float3(
+                static_cast<float>(nx * scale), static_cast<float>(ny * scale), static_cast<float>(nz * scale));
+            simd_double3 direction = simd_mul(normalTransform,
+                simd_make_double3(encoded.x, encoded.y, encoded.z));
+            const double magnitude = simd_length(direction);
+            if (!std::isfinite(magnitude) || magnitude <= 0) {
+                if (error) *error = Refusal(Core3DPublishCaptureErrorUnsupportedAppearance, @"scalar world normal is invalid");
+                return nil;
+            }
+            direction /= magnitude;
+            for (NSUInteger axis = 0; axis < 3; ++axis) [normals addObject:@(direction[axis])];
+            const float v = 1.0f - vertex.textureV;
+            if (!std::isfinite(v)) {
+                if (error) *error = Refusal(Core3DPublishCaptureErrorUnsupportedAppearance, @"scalar UV is invalid");
+                return nil;
+            }
+            [uvs addObject:@(vertex.textureU)]; [uvs addObject:@(v)];
+        }
+    }
+    Core3DDecimationRequest *request = [[Core3DDecimationRequest alloc]
+        initWithPositionsMM:evidence.sourcePositionsMM indices:evidence.sourceIndices
+        sourceContributionTokens:identities
+        materialBytes:self.ownerCommitments.firstObject.materialTextureWitnessBytes
+        sourceArtifactSHA256:evidence.artifactSHA256 settingsSHA256:readback.settingsSHA256
+        targetTriangleCount:readback.targetTriangleCount metersPerUnit:self.metersPerUnit
+        attributeWedgeNormals:normals attributeWedgeUVs:uvs
+        attributeFaceMaterials:materials attributeFaceAnchors:identities];
+    if (!request) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorBounds, @"scalar request channels are inconsistent");
+        return nil;
+    }
+    if (![self isCurrent:error]) return nil;
+    return request;
+}
+
+- (BOOL)bindScalarArtifactEvidence:(Core3DPublishArtifactEvidence *)evidence
+          sourceTriangleAddresses:(NSArray<NSNumber *> *)addresses
+                            error:(NSError **)error {
+    if (error) *error = nil;
+    if (!NSThread.isMainThread) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorInvalidThread, @"main-thread binding required");
+        return NO;
+    }
+    if (![self isCurrent:error]) return NO;
+    if (_artifactEvidence) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorDuplicateArtifactEvidence, @"artifact evidence is already bound");
+        return NO;
+    }
+    if (!F2ValidArtifactEvidence(evidence)) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorBounds, @"artifact evidence shape refused");
+        return NO;
+    }
+    F2ScalarSource source;
+    if (!F2ReadScalarSource(self.sceneSnapshot, self.selectedEntityIdentifiers, source)) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorUnsupportedAppearance,
+                                    @"triangle identity requires one bounded scalar owner");
+        return NO;
+    }
+    NSArray<NSString *> *identities = F2IssueTriangleIdentities(self, evidence, addresses, source);
+    if (!identities) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorBounds,
+                                    @"physical source triangle binding refused");
+        return NO;
+    }
+    // Ordinary material commitments alone do not encode face membership.
+    // Re-observe actual channels before issuing this stronger scalar binding.
+    Observation fresh; Core3DPublishCaptureError refusal = Core3DPublishCaptureErrorStale;
+    F2ScalarSource current;
+    if (!CaptureObservation(_controller, _owner, self.scope, self.selectedEntityIdentifiers, fresh, refusal)
+        || !F2ReadScalarSource(fresh.scene, self.selectedEntityIdentifiers, current)
+        || ![current.channels isEqualToData:source.channels]) {
+        if (error) *error = Refusal(Core3DPublishCaptureErrorStale,
+                                    @"physical source channels changed before binding");
+        return NO;
+    }
+    Core3DPublishArtifactEvidence *owned = [[Core3DPublishArtifactEvidence alloc]
+        initWithArtifactSHA256:evidence.artifactSHA256
+        sourcePositionsMM:evidence.sourcePositionsMM sourceIndices:evidence.sourceIndices
+        faceEvidenceSHA256InEmittedOrder:evidence.faceEvidenceSHA256InEmittedOrder
+        measurementReceiptSHA256:evidence.measurementReceiptSHA256
+        addressedTriangleCount:evidence.addressedTriangleCount];
+    owned.triangleIdentitySHA256InEmittedOrder = identities;
+    _f2ScalarSourceChannels = [source.channels copy];
+    _f2ScalarTriangleAddresses = [addresses copy];
+    _artifactEvidence = owned;
     return YES;
 }
 
