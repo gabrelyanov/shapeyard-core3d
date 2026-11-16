@@ -1060,6 +1060,9 @@ struct OcctGeometryDuplicationRequest
     // Repeat copies supported authored face finishes onto new subshape labels.
     // Charge those labels as well as the whole-part appearance before copying.
     bool preservesAuthoredFaceMaterials = false;
+    // Duplicate only: a part whose standalone saved Hole could be baked is
+    // copied as a plain solid; the source keeps its resizable Hole record.
+    bool copiesSavedCutAsPlainSolid = false;
 };
 
 //! Register the app-owned BinOcaf/BinXCAF project formats with a narrow,

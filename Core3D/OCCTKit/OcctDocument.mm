@@ -16490,7 +16490,11 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
             }
 
             core3d::pattern_recipe_clone::Source sourceRecipe;
-            if (!core3d::pattern_recipe_clone::Capture(myOcafDoc, source, sourceRecipe)
+            const bool plainSavedCutCopy = request.copiesSavedCutAsPlainSolid
+                && core3d::retained_solid::HasRecord(source)
+                && CanBakeSavedCutForFaceEdit(source);
+            if (!core3d::pattern_recipe_clone::Capture(myOcafDoc, source, sourceRecipe,
+                    plainSavedCutCopy)
                 || ((sourceRecipe.family == core3d::pattern_recipe_clone::Family::Sweep
                         || sourceRecipe.family == core3d::pattern_recipe_clone::Family::Loft)
                     && !request.preservesSweepLoftRecipe)

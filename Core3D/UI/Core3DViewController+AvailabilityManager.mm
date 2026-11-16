@@ -313,7 +313,9 @@ Core3DModelCapability DocumentExportCapabilities(
                 if(document->CanBakeSavedCutForFaceEdit(label))
                     unsupported&=~(static_cast<std::uint64_t>(Core3DModelCapabilityExtrusion)
                         |static_cast<std::uint64_t>(Core3DModelCapabilityChamfer)
-                        |static_cast<std::uint64_t>(Core3DModelCapabilityShell));
+                        |static_cast<std::uint64_t>(Core3DModelCapabilityShell)
+                        // Duplicate copies it as a plain solid; the source keeps the record.
+                        |static_cast<std::uint64_t>(Core3DModelCapabilityDuplicate));
                 definitionCapabilities=static_cast<Core3DModelCapability>(
                     static_cast<std::uint64_t>(definitionCapabilities)&~unsupported);
             }
