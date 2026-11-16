@@ -614,7 +614,11 @@ Standard_Boolean LinearArrayOperationController::captureSelectedSource(
         pattern_recipe_clone::Source aSweepLoft;
         Standard_Size aRetainedProfileTopology = 0;
         if (!_document->CaptureObjectNameStateForLabel(aLabel, aProfileOwner)
-            || !pattern_recipe_clone::Capture(aDocument, aLabel, aSweepLoft)) {
+            // Route B1 (CTO 15 Nov 10:39): a standalone saved Hole is copied
+            // as a plain solid; the source keeps its resizable Hole record.
+            || !pattern_recipe_clone::Capture(aDocument, aLabel, aSweepLoft,
+                retained_solid::HasRecord(aLabel)
+                    && _document->CanBakeSavedCutForFaceEdit(aLabel))) {
             return Standard_False;
         }
         // Treatment replay builds different topology from BRepBuilderAPI_Copy.
@@ -703,7 +707,8 @@ Standard_Boolean LinearArrayOperationController::sourceIsCurrent(
         pattern_recipe_clone::Source aSweepLoft;
         if (!_document->CaptureObjectNameStateForLabel(theSource.label, aProfileOwner)
             || !aProfileOwner.IsEqual(theSource.profileOwner)
-            || !pattern_recipe_clone::Capture(aDocument, theSource.label, aSweepLoft)
+            || !pattern_recipe_clone::Capture(aDocument, theSource.label, aSweepLoft,
+                theSource.sweepLoft.plainSavedCutCopy)
             || !pattern_recipe_clone::IsEqual(aSweepLoft, theSource.sweepLoft)
             || aProfileOwner.object.profile.IsCurrent(aDocument, theSource.label)
                 != theSource.profileCurrent
@@ -820,6 +825,7 @@ Standard_Boolean LinearArrayOperationController::canAdmitCount(
             false, true, false, true, false, // Local-transform copies preserve recipe frames verbatim.
         }};
         aRequests.front().preservesAuthoredFaceMaterials = true;
+        aRequests.front().copiesSavedCutAsPlainSolid = theSource.sweepLoft.plainSavedCutCopy;
         return _document->CanDuplicateGeometryDefinitions(aRequests);
     } catch (...) {
         return Standard_False;
@@ -1454,7 +1460,8 @@ LinearArrayOperationController::inspectPendingResults() const noexcept
             || !FaceFinishesMatch(_source->faceFinishes, aSourceFinishes)
             || !_document->CaptureObjectNameStateForLabel(_source->label, aSourceProfileOwner)
             || !aSourceProfileOwner.IsEqual(_source->profileOwner)
-            || !pattern_recipe_clone::Capture(aDocument, _source->label, aSourceSweepLoft)
+            || !pattern_recipe_clone::Capture(aDocument, _source->label, aSourceSweepLoft,
+                _source->sweepLoft.plainSavedCutCopy)
             || !pattern_recipe_clone::IsEqual(aSourceSweepLoft, _source->sweepLoft)
             || aSourceProfileOwner.object.profile.IsCurrent(aDocument, _source->label)
                 != _source->profileCurrent

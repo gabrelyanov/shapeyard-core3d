@@ -316,7 +316,10 @@ Core3DModelCapability DocumentExportCapabilities(
                         |static_cast<std::uint64_t>(Core3DModelCapabilityShell)
                         // Duplicate and Mirror copy it as a plain solid; the source keeps the record.
                         |static_cast<std::uint64_t>(Core3DModelCapabilityDuplicate)
-                        |static_cast<std::uint64_t>(Core3DModelCapabilityMirror));
+                        |static_cast<std::uint64_t>(Core3DModelCapabilityMirror)
+                        // Repeat in a row / in a circle: every copy is plain too.
+                        |static_cast<std::uint64_t>(Core3DModelCapabilityLinearArray)
+                        |static_cast<std::uint64_t>(Core3DModelCapabilityRadialArray));
                 definitionCapabilities=static_cast<Core3DModelCapability>(
                     static_cast<std::uint64_t>(definitionCapabilities)&~unsupported);
             }
