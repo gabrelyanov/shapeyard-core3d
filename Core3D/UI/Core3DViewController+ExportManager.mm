@@ -42,33 +42,61 @@ NSString *DecalCoverageFailureCause(core3d::decal_layer::bake::Status status) {
     return nil;
 }
 
-bool CanCaptureCommittedExport(
+// Names the first committed-export admission check that refuses, or nullptr
+// when export may capture the committed document. Read-only: the refusal
+// cause is diagnostic evidence and never changes what is admitted.
+const char *CommittedExportBlocker(
     const std::shared_ptr<core3d::Core3DViewer>& viewer) {
-    if (viewer == nullptr || viewer->hasUnresolvedOrdinaryEdit()) {
-        return false;
-    }
+    if (viewer == nullptr) return "viewer-missing";
+    if (viewer->hasUnresolvedOrdinaryEdit()) return "unresolved-ordinary-edit";
     const Handle(OcctDocument) document = viewer->getDocument();
     const Handle(TDocStd_Document) transaction = document.IsNull()
         ? Handle(TDocStd_Document)()
         : document->ChangeDocument();
     const auto objectInteractor = viewer->getObjectInteractor();
     const auto shapeInteractor = viewer->getShapeInteractor();
-    return !transaction.IsNull()
-        && !transaction->HasOpenCommand()
-        && objectInteractor != nullptr
-        && shapeInteractor != nullptr
-        && !objectInteractor->hasUnresolvedDuplicate()
-        && !objectInteractor->hasActiveBoolean()
-        && !objectInteractor->hasUnresolvedBoolean()
-        && !objectInteractor->hasUnresolvedMirrorObjects()
-        && !objectInteractor->hasActiveLinearArray()
-        && !objectInteractor->hasUnresolvedLinearArray()
-        && !objectInteractor->hasActiveRadialArray()
-        && !objectInteractor->hasUnresolvedRadialArray()
-        && !shapeInteractor->hasActiveExtrusion()
-        && !shapeInteractor->hasActiveBevel()
-        && !shapeInteractor->hasActiveShell()
-        && !shapeInteractor->hasUnresolvedShell();
+    if (transaction.IsNull()) return "document-missing";
+    if (transaction->HasOpenCommand()) return "document-open-command";
+    if (objectInteractor == nullptr) return "object-interactor-missing";
+    if (shapeInteractor == nullptr) return "shape-interactor-missing";
+    if (objectInteractor->hasUnresolvedDuplicate()) return "unresolved-duplicate";
+    if (objectInteractor->hasActiveBoolean()) return "active-boolean";
+    if (objectInteractor->hasUnresolvedBoolean()) return "unresolved-boolean";
+    if (objectInteractor->hasUnresolvedMirrorObjects()) return "unresolved-mirror";
+    if (objectInteractor->hasActiveLinearArray()) return "active-linear-array";
+    if (objectInteractor->hasUnresolvedLinearArray()) return "unresolved-linear-array";
+    if (objectInteractor->hasActiveRadialArray()) return "active-radial-array";
+    if (objectInteractor->hasUnresolvedRadialArray()) return "unresolved-radial-array";
+    if (shapeInteractor->hasActiveExtrusion()) return "active-extrusion";
+    if (shapeInteractor->hasActiveBevel()) return "active-bevel";
+    if (shapeInteractor->hasActiveShell()) return "active-shell";
+    if (shapeInteractor->hasUnresolvedShell()) return "unresolved-shell";
+    return nullptr;
+}
+
+bool CanCaptureCommittedExport(
+    const std::shared_ptr<core3d::Core3DViewer>& viewer) {
+    return CommittedExportBlocker(viewer) == nullptr;
+}
+
+// Names why canExportType refused for a nonempty document (diagnostic only).
+const char *ExportTypeBlocker(
+    const std::shared_ptr<core3d::Core3DViewer>& viewer) {
+    if (viewer == nullptr) return "viewer-missing";
+    const Handle(OcctDocument) document = viewer->getDocument();
+    if (!document.IsNull() && document->NativeBooleanOwnerBlocksOtherWork())
+        return "boolean-owner";
+    if (!document.IsNull() && document->HasUnresolvedTreatmentHistoryCompanion())
+        return "treatment-history-companion";
+    if (viewer->hasUnresolvedOrdinaryEdit()) return "unresolved-ordinary-edit";
+    if (viewer->hasUnresolvedDuplicate()) return "unresolved-duplicate";
+    if (viewer->hasUnresolvedEdit()) return "array-or-mirror-committing";
+    if (document.IsNull()) return "document-missing";
+    if (!document->ValidateGeometryRepresentations())
+        return "geometry-representation-invalid";
+    if (document->SupportedGeometryExportFormats() == 0)
+        return "document-formats-none";
+    return "format-capability-missing";
 }
 
 bool SameCommittedPublication(Core3DSceneSnapshot *expected,
@@ -377,14 +405,20 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
     objColorConvention:(Core3DOBJColorConvention)objColorConvention
     error:(NSError **)error {
     if (error != nullptr) *error = nil;
-    const auto refuse = [error](NSString *stage) -> Core3DNativeExportOperation * {
+    const auto refuse = [error](NSString *stage,
+                                const char *cause = nullptr) -> Core3DNativeExportOperation * {
         if (error != nullptr) {
+            NSMutableDictionary *info = [@{
+                NSLocalizedDescriptionKey: @"Native export preparation failed.",
+                @"Core3DNativeExportFailureStage": stage,
+            } mutableCopy];
+            if (cause != nullptr) {
+                info[@"Core3DNativeExportFailureCause"] =
+                    [NSString stringWithUTF8String:cause];
+            }
             *error = [NSError errorWithDomain:Core3DNativeExportErrorDomain
                 code:Core3DNativeExportErrorInvalidState
-                userInfo:@{
-                    NSLocalizedDescriptionKey: @"Native export preparation failed.",
-                    @"Core3DNativeExportFailureStage": stage,
-                }];
+                userInfo:[info copy]];
         }
         return nil;
     };
@@ -417,11 +451,15 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
         const Handle(OcctDocument) document = viewer == nullptr
             ? Handle(OcctDocument)()
             : viewer->getDocument();
-        if (!CanCaptureCommittedExport(viewer)
-            || document.IsNull()
-            || (![self canExportType:exportType]
-                && !document->IsGeometryDocumentEmpty())) {
-            return refuse(@"committed-export-admission");
+        if (const char *blocker = CommittedExportBlocker(viewer)) {
+            return refuse(@"committed-export-admission", blocker);
+        }
+        if (document.IsNull()) {
+            return refuse(@"committed-export-admission", "document-missing");
+        }
+        if (![self canExportType:exportType]
+            && !document->IsGeometryDocumentEmpty()) {
+            return refuse(@"committed-export-admission", ExportTypeBlocker(viewer));
         }
 
         core3d::scene::OcctSceneSnapshotBuilder::SnapshotPointer sourceScene;
