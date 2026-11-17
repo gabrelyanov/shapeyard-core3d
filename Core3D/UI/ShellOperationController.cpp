@@ -2248,9 +2248,11 @@ ShellApplyResult ShellOperationController::apply() noexcept
             || myPreviewResult->Shape().IsNull()) {
             return ShellApplyResult::NoChange;
         }
-        const auto namingFamily = mySource->profileRecord.label.IsNull()
-            ? OcctDocument::OrdinaryNamingFamily::UnretainedShell
-            : OcctDocument::OrdinaryNamingFamily::Profile;
+        const auto namingFamily = mySource->bakesSavedCut
+            ? OcctDocument::OrdinaryNamingFamily::SavedCutShell
+            : (mySource->profileRecord.label.IsNull()
+                ? OcctDocument::OrdinaryNamingFamily::UnretainedShell
+                : OcctDocument::OrdinaryNamingFamily::Profile);
         myNamingHistory = myDoc->PrepareOrdinaryNamingHistory(0, mySource->label, namingFamily);
         if (!myNamingHistory) return ShellApplyResult::NoChange;
         myPendingCandidate = myPreviewResult->Shape();

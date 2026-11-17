@@ -29411,6 +29411,7 @@ struct Side {
     std::vector<treatment_history::NamingState> naming;
     std::vector<std::uint8_t> source, treatment;
     core3d::inspector_primitive::Record inspectorPrimitive;
+    core3d::retained_solid::Record savedCut;
     std::string entityIdentifier, definitionIdentifier;
     std::string profileIdentifier;
     TDF_Label profileLabel;
@@ -29445,13 +29446,20 @@ bool CaptureOrdinaryNamingSide(const OcctDocument& owner,
         if (doc.IsNull() || label.IsNull() || label.Data() != doc->GetData()) return false;
         side.shape = XCAFDoc_ShapeTool::GetShape(label);
         if (side.shape.IsNull()) return false;
-        if (family == OcctDocument::OrdinaryNamingFamily::UnretainedShell) {
-            // This arm belongs only to an already-admitted ordinary Shell.
-            // Absence of Profile alone is insufficient: every retained recipe
-            // must be absent, and any treatment carrier (even malformed or of
-            // the wrong dynamic type) refuses. Do not broaden generic capture.
+        if (family == OcctDocument::OrdinaryNamingFamily::UnretainedShell
+            || family == OcctDocument::OrdinaryNamingFamily::SavedCutShell) {
+            // Only an admitted Shell may use these measured naming sides.
+            // Ordinary Shell still requires all retained recipes to be absent.
+            // Saved-cut Shell owns one explicit transition: an exactly captured,
+            // bakeable standalone Hole before, no retained recipe afterwards.
+            const auto coverage = owner.RetainedRecipeCoverageForLabel(label);
+            if (coverage != OcctRetainedRecipeCoverage::Absent) {
+                if (family != OcctDocument::OrdinaryNamingFamily::SavedCutShell
+                    || !owner.CanBakeSavedCutForFaceEdit(label)
+                    || !core3d::retained_solid::Read(doc, label, side.savedCut)
+                    || !side.savedCut.value || side.savedCut.label.IsNull()) return false;
+            }
             if (!owner.IsEditableFreeSimpleDefinitionLabel(label)
-                || owner.RetainedRecipeCoverageForLabel(label) != OcctRetainedRecipeCoverage::Absent
                 || !core3d::inspector_primitive::Read(label, side.inspectorPrimitive)
                 || !CaptureTreatmentSubtreeNaming(label, side.naming)) return false;
             const auto hasTreatment = [](const TDF_Label& candidate) {
@@ -29505,6 +29513,7 @@ bool OrdinaryNamingSideMatches(const OcctDocument& owner,
         && expected.profileIdentifier == actual.profileIdentifier
         && expected.profileLabel == actual.profileLabel
         && expected.inspectorPrimitive.IsEqual(actual.inspectorPrimitive)
+        && expected.savedCut.IsEqual(actual.savedCut)
         && expected.entityIdentifier == actual.entityIdentifier
         && expected.definitionIdentifier == actual.definitionIdentifier
         && expected.source == actual.source && expected.hasTreatment == actual.hasTreatment
@@ -29525,8 +29534,8 @@ std::size_t OrdinaryNamingStorage(const ordinary_naming::Record& record) noexcep
                     + naming.shapePairs.capacity() * sizeof(std::pair<TopoDS_Shape, TopoDS_Shape>);
         }
     }
-    // Shape handles share the geometry already held by the live OCAF delta;
-    // no BRep copies are made by this record.
+    // Shape handles and the immutable saved-cut payload share storage already
+    // held by the live OCAF delta; this record makes no BRep or payload copy.
     return bytes;
 }
 
@@ -29607,7 +29616,8 @@ std::shared_ptr<core3d::ordinary_naming::Record> OcctDocument::PrepareOrdinaryNa
         if (![NSThread isMainThread] || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
             || myOcafDoc->GetUndoLimit() <= 0 || myOcafDoc->GetUndoLimit() > 1000
             || creationRootCount > 1024 || (creationRootCount == 0) == existingOwner.IsNull()
-            || (family != OrdinaryNamingFamily::Profile && family != OrdinaryNamingFamily::UnretainedShell)
+            || (family != OrdinaryNamingFamily::Profile && family != OrdinaryNamingFamily::UnretainedShell
+                && family != OrdinaryNamingFamily::SavedCutShell)
             || (creationRootCount > 0 && family != OrdinaryNamingFamily::Profile)) return {};
         PruneOrdinaryNamingHistory();
         if (myOrdinaryNamingHistory.size() >= kOrdinaryNamingRecords) return {};
@@ -29620,7 +29630,9 @@ std::shared_ptr<core3d::ordinary_naming::Record> OcctDocument::PrepareOrdinaryNa
         record->roots.resize(record->creation ? creationRootCount : 1);
         if (!record->creation) {
             record->roots[0].label = existingOwner;
-            if (!CaptureOrdinaryNamingSide(*this, existingOwner, record->family, record->roots[0].before)) return {};
+            if (!CaptureOrdinaryNamingSide(*this, existingOwner, record->family, record->roots[0].before)
+                || (family == OrdinaryNamingFamily::SavedCutShell
+                    && !record->roots[0].before.savedCut.value)) return {};
         }
         std::size_t bytes = OrdinaryNamingStorage(*record);
         for (const auto& existing : myOrdinaryNamingHistory) bytes += OrdinaryNamingStorage(*existing);
@@ -29650,7 +29662,9 @@ Standard_Boolean OcctDocument::CaptureOrdinaryNamingCandidate(
         if (!record || myOcafDoc.IsNull() || record->data != myOcafDoc->GetData()
             || !myOcafDoc->HasOpenCommand() || record->finalized || record->captured) return Standard_False;
         for (auto& root : record->roots) {
-            if (!CaptureOrdinaryNamingSide(*this, root.label, record->family, root.after)) return Standard_False;
+            if (!CaptureOrdinaryNamingSide(*this, root.label, record->family, root.after)
+                || (record->family == OrdinaryNamingFamily::SavedCutShell
+                    && root.after.savedCut.value)) return Standard_False;
             std::size_t bytes = 0;
             for (const auto& existing : myOrdinaryNamingHistory) bytes += OrdinaryNamingStorage(*existing);
             if (bytes > kOrdinaryNamingBytes) return Standard_False;
