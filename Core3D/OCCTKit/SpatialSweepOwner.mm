@@ -346,6 +346,14 @@ Receipt OcafOwner::create(const CreateRequest& request) noexcept {
             Receipt refusal = Refused(Outcome::refused,
                 BuildRefusalReason(first.built() ? second : first, largestRadiusMM));
             refusal.largestRadiusMM = largestRadiusMM;
+#if DEBUG
+            // Debug builds name the builder check that refused (K15 surface
+            // stage); release keeps the plain reason word.
+            const auto& refused = first.built() ? second : first;
+            if (refused.refusalPoint > 0)
+                refusal.reason += " at check " + std::to_string(refused.refusalPoint)
+                    + " value " + std::to_string(refused.refusalValue);
+#endif
             return finish(std::move(refusal));
         }
         const auto fixed = composite_recipe::spatial_g0::PrepareFixedPoint(
