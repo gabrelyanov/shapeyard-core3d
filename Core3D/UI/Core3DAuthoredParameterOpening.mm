@@ -1556,6 +1556,13 @@ static NSString *sLastBakedBooleanPreviewRefusal = @"";
     } catch (...) { return NO; }
 }
 
+- (BOOL)applyHoleRowOnEntity:(NSString *)entity count:(NSInteger)count spacing:(double)spacing
+    nearX:(double)nx y:(double)ny z:(double)nz
+    refusal:(NSString * _Nullable * _Nullable)refusal {
+    if (refusal) *refusal = @"unsupported-source";
+    return NO;
+}
+
 - (BOOL)clearBooleanPairPreview {
     if (![NSThread isMainThread]) return NO;
     GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]

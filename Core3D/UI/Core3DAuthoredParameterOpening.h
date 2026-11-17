@@ -536,6 +536,17 @@ __attribute__((objc_subclassing_restricted))
     radius:(double)radius depth:(double)depth
     refusal:(NSString * _Nullable * _Nullable)refusal
     NS_SWIFT_NAME(applyThroughHole(entity:pointX:y:z:directionX:y:z:radius:depth:refusal:));
+//! Holes (K07, desk lamp S55): repeats the part's hole in a row of `count` holes
+//! (the first is the existing one), `spacing` apart centre to centre (world, document
+//! units), across the hole along the part's longest side, towards the more room. A part
+//! with several holes takes the one nearest the world point (NaN: none given). One Undo
+//! step; a saved, resizable hole is baked in it (Undo brings it back). On refusal
+//! `refusal` gets the engine code: no-hole, several-holes, holes-overlap, row-leaves-part,
+//! unsupported-hole, bad-row, unsupported-source (never shown to users as is).
+- (BOOL)applyHoleRowOnEntity:(NSString *)entity count:(NSInteger)count spacing:(double)spacing
+    nearX:(double)nx y:(double)ny z:(double)nz
+    refusal:(NSString * _Nullable * _Nullable)refusal
+    NS_SWIFT_NAME(applyHoleRow(entity:count:spacing:nearX:y:z:refusal:));
 - (BOOL)hasBooleanPairPreview NS_SWIFT_NAME(hasBooleanPairPreview());
 //! Externally driven Stop for detached preparation. Once stopped, this exact
 //! opening can never prepare again and cannot affect a later opening.
