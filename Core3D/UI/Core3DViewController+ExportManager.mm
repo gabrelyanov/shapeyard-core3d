@@ -433,7 +433,8 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
             && exportType != ExportTypeObj && exportType != ExportTypeStl && exportType != ExportTypeGltf)) {
         return refuse(@"mesh-quality");
     }
-    if ((selectedObjectsOnly && exportType != ExportTypeStl && exportType != ExportTypeObj && exportType != ExportTypeGltf)
+    if ((selectedObjectsOnly && exportType != ExportTypeStl && exportType != ExportTypeObj
+            && exportType != ExportTypeGltf && exportType != ExportTypeStep)
         || ![NSThread isMainThread]
         || (exportType != ExportTypeObj
             && exportType != ExportTypeStl
