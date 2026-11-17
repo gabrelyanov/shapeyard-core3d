@@ -363,6 +363,16 @@ struct MeshSnapshot {
     //! Additive optional display payload in schema 10. Existing triangle and
     //! export consumers may ignore it. Empty for polygon meshes and C1 wires.
     std::vector<EdgeSegment> edgeSegments;
+    //! One drawing class per topological edge, indexed like
+    //! EdgeSegment::edgeIndex; empty when unknown, and then every edge is drawn.
+    //! Decided once at tessellation and never part of the mesh's identity.
+    //! 0 = an ordinary border. 1 = the two faces meet smoothly along the edge
+    //! (a fillet and the faces it blends into, the halves of a revolved face).
+    //! 2 = a closed seam between two flat faces in one plane (what a Join
+    //! leaves; a Split line simply ends on its face's outline and is 0).
+    //! While whole objects are worked on a renderer leaves classes 1 and 2 out
+    //! where both faces look the same. Nothing in the model depends on it.
+    std::vector<std::uint8_t> edgeDrawClasses;
     //! Optional unit tangent xyz / bitangent sign w, one float4 per INDEX
     //! CORNER. Never average mirrored/discontinuous frames into shared vertices.
     TangentBasis tangentBasis = TangentBasis::None;

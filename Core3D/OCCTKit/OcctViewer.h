@@ -74,6 +74,13 @@ public:
     
     //! Return active view.
     const Handle(V3d_View)& ActiveView() const { return myView; }
+
+    //! Lifts the lower-left axis triad by `pixels` above its default corner
+    //! offset (the editor's App Store layout keeps its bottom row there on
+    //! iPad). Zero restores the default. Kept across triad redisplays.
+    void setTriedronLift(int pixels);
+    //! Re-applies the lift after a TriedronDisplay call.
+    void applyTriedronLift();
     
     //! Interactive context.
     const Handle(AIS_InteractiveContext)& AisContext() const { return myContext; }
@@ -105,7 +112,16 @@ public:
     Standard_EXPORT void Zoom(int theX, int theY, double theDelta);
     //! Scale the view by a finger-spacing ratio around a drawable-pixel anchor.
     Standard_EXPORT bool ZoomByFactor(double theX, double theY, double theFactor) noexcept;
+    //! Zoom with no limit on zooming out (Zoom stops while the model is about a tenth of the view).
+    Standard_EXPORT void ZoomWithoutLimit(int theX, int theY, double theDelta);
     Standard_EXPORT void Select(int theX, int theY, AIS_SelectionScheme scheme = AIS_SelectionScheme::AIS_SelectionScheme_XOR);
+    //! One tap resolved BEHIND a presentation that is drawn on top (the move
+    //! arrows): the nearest hit at the point that belongs neither to
+    //! theSkipped nor to an already selected part is toggled, as a normal tap
+    //! toggles what it hits. A read-only query of the hit list: nothing is
+    //! highlighted, activated or deactivated. False (and no change) when only
+    //! theSkipped or selected parts lie under the point.
+    Standard_EXPORT bool SelectBehind(int theX, int theY, const Handle(AIS_InteractiveObject)& theSkipped);
     
     Standard_EXPORT bool ImportSTEP(const std::string &theFilename);
 #ifdef DEBUG
@@ -151,6 +167,8 @@ protected:
     void clearContext();
     
 protected:
+    int myTriedronLiftPixels = 0;
+
     
     Handle(V3d_Viewer)              myViewer;  //!< main viewer
     Handle(Core3DView)              myView;    //!< main view

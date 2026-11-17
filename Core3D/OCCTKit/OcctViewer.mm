@@ -31,6 +31,9 @@
 #include "PatternAllLabelAuthority.hxx"
 #include "TextReliefPersistence.hxx"
 #include <AIS_ColoredShape.hxx>
+#include <AIS_ListOfInteractive.hxx>
+#include <Bnd_Box.hxx>
+#include <Graphic3d_Camera.hxx>
 #include <AIS_ConnectedInteractive.hxx>
 #include <Graphic3d_ShaderVariable.hxx>
 #include <OpenGl_ShaderProgram.hxx>
@@ -144,6 +147,9 @@ void PrepareNativeLessonLighting(const Handle(AIS_InteractiveContext)& context,
 #include <TopoDS_Solid.hxx>
 #include <TopoDS.hxx>
 #include <algorithm>
+#include <SelectMgr_AndOrFilter.hxx>
+#include <SelectMgr_EntityOwner.hxx>
+#include <StdSelect_ViewerSelector3d.hxx>
 #include <vector>
 
 #include <StlAPI_Writer.hxx>
@@ -426,6 +432,7 @@ bool OcctViewer::InitViewer (Core3DPlatformView* theWin)
     myView = new Core3DView(myViewer, V3d_ORTHOGRAPHIC);
     myView->SetImmediateUpdate(Standard_False);
     myView->TriedronDisplay (Aspect_TOTP_LEFT_LOWER, Quantity_NOC_WHITE, 0.20, V3d_ZBUFFER);
+    applyTriedronLift();
 
     myView->SetBgGradientColors(
         Quantity_Color(0.055, 0.065, 0.085, Quantity_TOC_sRGB),
@@ -463,6 +470,30 @@ bool OcctViewer::InitViewer (Core3DPlatformView* theWin)
     myView->Camera()->SetProjectionType(Graphic3d_Camera::Projection_Perspective);
     Resize();
     return true;
+}
+
+void OcctViewer::setTriedronLift(int pixels)
+{
+    myTriedronLiftPixels = std::max(0, pixels);
+    applyTriedronLift();
+    if (!myView.IsNull()) {
+        myView->Invalidate();
+    }
+}
+
+void OcctViewer::applyTriedronLift()
+{
+    if (myView.IsNull()) return;
+    const Handle(V3d_Trihedron)& trihedron = myView->Trihedron(false);
+    if (trihedron.IsNull()) return;
+    // SetPosition restores the default corner offset; the lift adds to it.
+    trihedron->SetPosition(Aspect_TOTP_LEFT_LOWER);
+    const Handle(Graphic3d_TransformPers)& persistence = trihedron->TransformPersistence();
+    if (persistence.IsNull() || !persistence->IsTrihedronOr2d()) return;
+    Graphic3d_Vec2i offset = persistence->Offset2d();
+    offset.y() += myTriedronLiftPixels;
+    persistence->SetOffset2d(offset);
+    trihedron->Display(*myView);
 }
 
 void OcctViewer::Resize()
@@ -592,7 +623,61 @@ void OcctViewer::Pan(int theX, int theY, Standard_Boolean theToStart)
 // function : Zoom
 // purpose  :
 // =======================================================================
+namespace {
+// Founder test of build 8545: a pinch out had no limit and the model shrank to a dot.
+// A zoom out stops while the model's size is about a tenth of the view height.
+constexpr Standard_Real kMinimumModelToViewRatio = 0.15;
+
+Standard_Real ModelToViewRatio(const Handle(V3d_View)& theView,
+                               const Handle(Core3DContext)& theContext,
+                               const Handle(OcctDocument)& theDoc)
+{
+    if (theView.IsNull() || theContext.IsNull() || theDoc.IsNull()) return -1.0;
+    AIS_ListOfInteractive anObjects;
+    theContext->DisplayedObjects(anObjects);
+    Bnd_Box aBox;
+    for (AIS_ListOfInteractive::Iterator anIter(anObjects); anIter.More(); anIter.Next())
+    {
+        const Handle(AIS_InteractiveObject)& anObject = anIter.Value();
+        if (anObject.IsNull() || theDoc->ShapeLabel(anObject).IsNull()) continue;
+        Bnd_Box anObjectBox;
+        anObject->BoundingBox(anObjectBox);
+        if (!anObjectBox.IsVoid()) aBox.Add(anObjectBox);
+    }
+    if (aBox.IsVoid()) return -1.0;
+    const Standard_Real aModelSize = Sqrt(aBox.SquareExtent());
+    const Handle(Graphic3d_Camera)& aCamera = theView->Camera();
+    if (aCamera.IsNull() || aModelSize <= 0.0) return -1.0;
+    const gp_XYZ aDimensions = aCamera->ViewDimensions(aCamera->Distance());
+    if (!(aDimensions.Y() > 0.0)) return -1.0;
+    return aModelSize / aDimensions.Y();
+}
+}
+
 void OcctViewer::Zoom(int theX, int theY, double theDelta)
+{
+    if (!myView.IsNull())
+    {
+        Handle(Graphic3d_Camera) aBefore;
+        if (theDelta < 0.0)
+        {
+            aBefore = new Graphic3d_Camera();
+            aBefore->Copy(myView->Camera());
+        }
+        ZoomWithoutLimit(theX, theY, theDelta);
+        if (!aBefore.IsNull())
+        {
+            const Standard_Real aRatio = ModelToViewRatio(myView, myContext, myDoc);
+            if (aRatio >= 0.0 && aRatio < kMinimumModelToViewRatio)
+            {
+                myView->Camera()->Copy(aBefore);
+                myView->Invalidate();
+            }
+        }
+    }
+}
+
+void OcctViewer::ZoomWithoutLimit(int theX, int theY, double theDelta)
 {
     if (!myView.IsNull())
     {
@@ -675,6 +760,62 @@ void OcctViewer::Select(int theX, int theY, AIS_SelectionScheme scheme)
         myContext->ClearSelected(Standard_True);
     }
     myContext->SelectDetected(scheme);
+}
+
+bool OcctViewer::SelectBehind(int theX, int theY, const Handle(AIS_InteractiveObject)& theSkipped)
+{
+    if (myContext.IsNull() || myView.IsNull()) { return false; }
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(StdSelect_ViewerSelector3d)& aSelector = myContext->MainSelector();
+        if (aSelector.IsNull()) { return false; }
+        // The hit list at the point, nearest first, exactly as MoveTo sorts it,
+        // read without MoveTo: MoveTo would highlight the arrows and switch
+        // their active mode on again.
+        aSelector->Pick(theX, theY, myView);
+        Handle(SelectMgr_EntityOwner) aBehind;
+        const Standard_Integer aCount = std::min<Standard_Integer>(aSelector->NbPicked(), 256);
+        for (Standard_Integer aRank = 1; aRank <= aCount; ++aRank) {
+            const Handle(SelectMgr_EntityOwner) anOwner = aSelector->Picked(aRank);
+            if (anOwner.IsNull() || !anOwner->HasSelectable()) { continue; }
+            if (!theSkipped.IsNull() && anOwner->Selectable() == theSkipped) { continue; }
+            // The selected part itself (the cutter behind its own arrows) is
+            // not what the tap is for: go on to the part behind it. A part
+            // counts as selected when any of its owners is.
+            if (anOwner->IsSelected()) { continue; }
+            const Handle(AIS_InteractiveObject) aPart =
+                Handle(AIS_InteractiveObject)::DownCast(anOwner->Selectable());
+            if (aPart.IsNull() || myContext->IsSelected(aPart)) { continue; }
+            // A part can answer a pick through more than one owner; with one
+            // of them selected the others are not, and taking one of those
+            // would select the same part a second time (seen as a third
+            // selection with two parts on screen, 15 Nov).
+            bool aPartIsSelected = false;
+            for (myContext->InitSelected(); myContext->MoreSelected() && !aPartIsSelected;
+                 myContext->NextSelected()) {
+                const Handle(SelectMgr_EntityOwner) aSelected = myContext->SelectedOwner();
+                aPartIsSelected = !aSelected.IsNull() && aSelected->HasSelectable()
+                    && aSelected->Selectable() == anOwner->Selectable();
+            }
+            if (aPartIsSelected) { continue; }
+            // Only a part of the document: a normal tap never reaches the
+            // helpers that can lie behind the nearest hit, this walk can.
+            if (myDoc.IsNull() || myDoc->ShapeLabel(aPart).IsNull()
+                || !myDoc->IsPresentationEditable(aPart)) { continue; }
+            if (!myContext->GlobalFilter().IsNull()
+                && !myContext->GlobalFilter()->IsOk(anOwner)) { continue; }
+            aBehind = anOwner;
+            break;
+        }
+        // The context's detected list indexes the selector's previous hit
+        // list: reset it so nothing reads stale ranks after this query.
+        myContext->ClearDetected(Standard_False);
+        if (aBehind.IsNull()) { return false; }
+        myContext->AddOrRemoveSelected(aBehind, Standard_True);
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 // =======================================================================

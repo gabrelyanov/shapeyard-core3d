@@ -131,6 +131,12 @@
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
+#include <GeomLib_IsPlanarSurface.hxx>
+#include <GeomLProp_SLProps.hxx>
+#include <Geom2d_Curve.hxx>
+#include <Geom_Surface.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
@@ -3883,6 +3889,158 @@ bool ExtractBoundarySegments(const DefinitionData& definition,
     return true;
 }
 
+// The one switch of the rule (see EdgeDrawClassesEnabled in the header).
+constexpr bool kEdgeDrawClassesOnByDefault = true;
+
+std::atomic<int>& EdgeDrawClassesSwitch() noexcept {
+    // -1 = not read yet, 0 = off, 1 = on.
+    static std::atomic<int> value{-1};
+    return value;
+}
+
+//! Decides once, from the real topology, which edges a renderer may leave out
+//! while whole objects are worked on (MeshSnapshot::edgeDrawClasses). It only
+//! reads; any doubt, any failure and any unusual edge leave the edge an
+//! ordinary border that is always drawn.
+void ClassifyBoundaryEdges(const DefinitionData& definition, MeshSnapshot& mesh) noexcept
+{
+    mesh.edgeDrawClasses.clear();
+    if (!EdgeDrawClassesEnabled()) return;
+    try {
+        OCC_CATCH_SIGNALS
+        const Standard_Integer edgeCount = definition.edges.Extent();
+        const Standard_Integer faceCount = definition.faces.Extent();
+        if (edgeCount <= 0 || edgeCount > 200'000 || faceCount <= 0
+            || mesh.edgeSegments.empty()) return;
+        TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
+        TopExp::MapShapesAndAncestors(
+            definition.shape, TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
+
+        struct FaceSurface {
+            bool read = false;
+            bool flat = false;
+            Handle(Geom_Surface) surface;
+            gp_Pln plane;
+            gp_Dir outward;
+        };
+        std::vector<FaceSurface> surfaces(static_cast<std::size_t>(faceCount) + 1);
+        const auto surfaceOf = [&](const TopoDS_Face& face) -> const FaceSurface* {
+            const Standard_Integer index = definition.faces.FindIndex(face);
+            if (index <= 0 || index > faceCount) return nullptr;
+            FaceSurface& entry = surfaces[static_cast<std::size_t>(index)];
+            if (!entry.read) {
+                entry.read = true;
+                entry.surface = BRep_Tool::Surface(face);
+                if (!entry.surface.IsNull()) {
+                    const GeomLib_IsPlanarSurface planar(entry.surface, 1.0e-6);
+                    if (planar.IsPlanar()) {
+                        entry.flat = true;
+                        entry.plane = planar.Plan();
+                        entry.outward = entry.plane.Axis().Direction();
+                        if (face.Orientation() == TopAbs_REVERSED) entry.outward.Reverse();
+                    }
+                }
+            }
+            return entry.surface.IsNull() ? nullptr : &entry;
+        };
+        // The outward normal of a face at a place on one of its edges.
+        const auto normalAt = [](const FaceSurface& entry, const TopoDS_Face& face,
+                                 const Handle(Geom2d_Curve)& onSurface,
+                                 const Standard_Real parameter, gp_Dir& normal) -> bool {
+            const gp_Pnt2d uv = onSurface->Value(parameter);
+            if (!std::isfinite(uv.X()) || !std::isfinite(uv.Y())) return false;
+            GeomLProp_SLProps properties(entry.surface, uv.X(), uv.Y(), 1, 1.0e-9);
+            if (!properties.IsNormalDefined()) return false;
+            normal = properties.Normal();
+            if (face.Orientation() == TopAbs_REVERSED) normal.Reverse();
+            return true;
+        };
+
+        std::vector<std::uint8_t> classes(static_cast<std::size_t>(edgeCount), 0);
+        // Edges between two flat faces in one plane, with the two corners each ends on.
+        struct SeamEdge { Standard_Integer edge; Standard_Integer corners[2]; bool live; };
+        std::vector<SeamEdge> seams;
+        TopTools_IndexedMapOfShape corners;
+        bool any = false;
+        for (Standard_Integer edgeIndex = 1; edgeIndex <= edgeCount; ++edgeIndex) {
+            const TopoDS_Edge edge = TopoDS::Edge(definition.edges(edgeIndex));
+            if (BRep_Tool::Degenerated(edge) || !facesOfEdges.Contains(edge)) continue;
+            const TopTools_ListOfShape& faces = facesOfEdges.FindFromKey(edge);
+            // Exactly two different faces: the seam of a round face on itself and an
+            // edge shared by three faces stay ordinary borders.
+            if (faces.Extent() != 2 || faces.First().IsSame(faces.Last())) continue;
+            const TopoDS_Face first = TopoDS::Face(faces.First());
+            const TopoDS_Face second = TopoDS::Face(faces.Last());
+            const FaceSurface* a = surfaceOf(first);
+            const FaceSurface* b = surfaceOf(second);
+            if (a == nullptr || b == nullptr) continue;
+            if (a->flat && b->flat) {
+                // Two flat faces: a crease, or one plane. In one plane the edge is left
+                // out only when it is part of a closed seam (decided below).
+                if (a->outward.Dot(b->outward) < 0.99999
+                    || a->plane.Distance(b->plane.Location()) > 1.0e-5) continue;
+                TopoDS_Vertex from, to;
+                TopExp::Vertices(edge, from, to);
+                if (from.IsNull() || to.IsNull()) continue;
+                seams.push_back({edgeIndex, {corners.Add(from), corners.Add(to)}, true});
+                continue;
+            }
+            Standard_Real firstStart = 0.0, firstEnd = 0.0, secondStart = 0.0, secondEnd = 0.0;
+            const Handle(Geom2d_Curve) onFirst =
+                BRep_Tool::CurveOnSurface(edge, first, firstStart, firstEnd);
+            const Handle(Geom2d_Curve) onSecond =
+                BRep_Tool::CurveOnSurface(edge, second, secondStart, secondEnd);
+            if (onFirst.IsNull() || onSecond.IsNull()
+                || !std::isfinite(firstStart) || !std::isfinite(firstEnd)
+                || !std::isfinite(secondStart) || !std::isfinite(secondEnd)
+                || std::abs(firstStart) > 1.0e100 || std::abs(firstEnd) > 1.0e100
+                || std::abs(secondStart) > 1.0e100 || std::abs(secondEnd) > 1.0e100) continue;
+            bool smooth = true;
+            // The two normals within about three degrees at three places along the edge.
+            for (const Standard_Real along : {0.2, 0.5, 0.8}) {
+                gp_Dir normalOnFirst, normalOnSecond;
+                if (!normalAt(*a, first, onFirst,
+                              firstStart + (firstEnd - firstStart) * along, normalOnFirst)
+                    || !normalAt(*b, second, onSecond,
+                                 secondStart + (secondEnd - secondStart) * along, normalOnSecond)
+                    || normalOnFirst.Dot(normalOnSecond) < 0.99863) {
+                    smooth = false;
+                    break;
+                }
+            }
+            if (smooth) {
+                classes[static_cast<std::size_t>(edgeIndex - 1)] = 1;
+                any = true;
+            }
+        }
+        if (!seams.empty() && seams.size() <= 20'000) {
+            // A closed seam: every corner of it is met by at least two seam ends (an edge
+            // that closes on itself meets itself). Dead ends are peeled away until none is
+            // left, so a Split line, and anything hanging off one, stays an ordinary border.
+            std::vector<int> ends(static_cast<std::size_t>(corners.Extent()) + 1, 0);
+            for (const SeamEdge& seam : seams) { ++ends[seam.corners[0]]; ++ends[seam.corners[1]]; }
+            bool peeled = true;
+            while (peeled) {
+                peeled = false;
+                for (SeamEdge& seam : seams) {
+                    if (!seam.live || (ends[seam.corners[0]] >= 2 && ends[seam.corners[1]] >= 2)) continue;
+                    seam.live = false;
+                    --ends[seam.corners[0]]; --ends[seam.corners[1]];
+                    peeled = true;
+                }
+            }
+            for (const SeamEdge& seam : seams) {
+                if (!seam.live) continue;
+                classes[static_cast<std::size_t>(seam.edge - 1)] = 2;
+                any = true;
+            }
+        }
+        if (any) mesh.edgeDrawClasses = std::move(classes);
+    } catch (...) {
+        mesh.edgeDrawClasses.clear();
+    }
+}
+
 bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
                                const std::string& theDefinitionIdentifier,
 #ifdef DEBUG
@@ -4208,6 +4366,7 @@ bool ExtractDefinitionGeometry(const TDF_Label& theDefinitionLabel,
     if (hasSemanticBRepTopology
         && !ExtractBoundarySegments(theDefinition, kMaxMeshNumericBytes - aMeshBytes, aMesh))
         return false;
+    if (hasSemanticBRepTopology) ClassifyBoundaryEdges(theDefinition, aMesh);
     theDefinition.mesh = std::move(aMesh);
     // Geometry identity is derived from the immutable copied payload itself.
     // No desired quality is recomputed from attacker-controlled BRep geometry
@@ -5547,6 +5706,24 @@ std::uint64_t PresentationOverlayPayloadFingerprint(
 }
 
 } // namespace
+
+bool EdgeDrawClassesEnabled() noexcept {
+    std::atomic<int>& value = EdgeDrawClassesSwitch();
+    int current = value.load();
+    if (current < 0) {
+        current = kEdgeDrawClassesOnByDefault ? 1 : 0;
+#if DEBUG
+        const char* everyEdge = std::getenv("SHAPEYARD_UITEST_DRAW_EVERY_EDGE");
+        if (everyEdge != nullptr && everyEdge[0] == '1') current = 0;
+#endif
+        value.store(current);
+    }
+    return current == 1;
+}
+
+void SetEdgeDrawClassesEnabled(const bool enabled) noexcept {
+    EdgeDrawClassesSwitch().store(enabled ? 1 : 0);
+}
 
 TangentSpaceError GenerateAccountedMikkCornerTangents(
     const std::vector<Vertex>& vertices,
