@@ -15272,6 +15272,19 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
     [GLController deleteSelected];
 }
 
+- (BOOL)debugConfigureNativeDeleteFault:(NSInteger)mode {
+    if (![NSThread isMainThread] || mode < 0 || mode > 4 || GLController == nil
+        || !GLController.viewer || !GLController.viewer->getObjectInteractor()
+        || GLController.viewer->hasUnresolvedEdit()) return NO;
+    GLController.viewer->getObjectInteractor()->debugSetDeleteFailureMode(static_cast<int>(mode));
+    return YES;
+}
+- (NSInteger)debugNativeDeleteStagedRootCount {
+    if (![NSThread isMainThread] || GLController == nil || !GLController.viewer
+        || !GLController.viewer->getObjectInteractor()) return -1;
+    return GLController.viewer->getObjectInteractor()->_debugDeleteStagedRootCount;
+}
+
 - (PrimitiveGizmoType)debugNativeGizmoType {
     return GLController == nil
         ? PrimitiveGizmoTypeNone

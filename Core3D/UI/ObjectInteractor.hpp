@@ -141,6 +141,11 @@ namespace core3d {
         void selectLastObject();
 		void selectAll();
         void deleteSelected();
+#if DEBUG
+        void debugSetDeleteFailureMode(int mode) noexcept { _debugDeleteFailureMode = mode; _debugDeleteStagedRootCount = 0; }
+        int _debugDeleteFailureMode = 0;
+        int _debugDeleteStagedRootCount = 0;
+#endif
         void duplicateSelected();
 		//! A Duplicate command or committed-result presentation repair still owns
 		//! exactly-once recovery state that must survive interactor recreation.

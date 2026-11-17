@@ -2665,6 +2665,10 @@ __attribute__((objc_subclassing_restricted))
 //! reject both operations without changing document or selection state.
 - (void)debugInvokeNativeSelectAll;
 - (void)debugInvokeNativeDeleteSelected;
+//! Delete: 1 partial stage, 2 throw after commit, 3 commit/first-abort open,
+//! 4 two unavailable post-commit inspections. Zero clears the next fault.
+- (BOOL)debugConfigureNativeDeleteFault:(NSInteger)mode;
+- (NSInteger)debugNativeDeleteStagedRootCount;
 //! Direct native gizmo access for cache-reconciliation regressions. Setting the
 //! native value deliberately leaves the public cached tool untouched.
 - (PrimitiveGizmoType)debugNativeGizmoType;

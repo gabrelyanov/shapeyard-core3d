@@ -1474,6 +1474,9 @@ Standard_Boolean DuplicateFaceFinishesMatch(
         }
 		if (removals.empty()) { return; }
 
+#if DEBUG
+        const int fault = std::exchange(_debugDeleteFailureMode, 0);
+#endif
 		try {
 			doc->NewCommand();
 			for (const auto& removal : removals) {
@@ -1481,13 +1484,33 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 					doc->AbortCommand();
 					return;
 				}
+#if DEBUG
+                ++_debugDeleteStagedRootCount;
+                if (fault == 1) { doc->AbortCommand(); return; }
+#endif
 			}
+#if DEBUG
+            if (fault == 3) throw Standard_Failure("Delete commit before close");
+#endif
 			if (!doc->CommitCommand()) {
 				if (doc->HasOpenCommand()) { doc->AbortCommand(); }
 				return;
 			}
+#if DEBUG
+            if (fault == 2 || fault == 4)
+                throw Standard_Failure("Delete after commit / inspection unavailable");
+#endif
 		} catch (...) {
-			if (doc->HasOpenCommand()) { doc->AbortCommand(); }
+#if DEBUG
+            try {
+                if (doc->HasOpenCommand()) {
+                    if (fault == 3) throw Standard_Failure("Delete first abort before close");
+                    doc->AbortCommand();
+                }
+            } catch (...) {}
+#else
+            if (doc->HasOpenCommand()) { doc->AbortCommand(); }
+#endif
 			return;
 		}
 
