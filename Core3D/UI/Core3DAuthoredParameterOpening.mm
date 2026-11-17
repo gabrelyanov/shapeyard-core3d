@@ -2160,6 +2160,24 @@ static NSString *sLastBakedBooleanPreviewRefusal = @"";
     } catch (...) { return 1; }
 }
 
+- (BOOL)debugFlipFirstFaceCheckedBit:(NSString *)entityIdentifier {
+    if (![NSThread isMainThread]) return NO;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        if (!viewer) return NO;
+        const TDF_Label owner = ExactRoot(viewer->getDocument(),
+            entityIdentifier.UTF8String ?: "");
+        if (owner.IsNull()) return NO;
+        TopExp_Explorer face(XCAFDoc_ShapeTool::GetShape(owner), TopAbs_FACE);
+        if (!face.More() || face.Current().TShape().IsNull()) return NO;
+        const Handle(TopoDS_TShape)& tshape = face.Current().TShape();
+        tshape->Checked(!tshape->Checked());
+        return YES;
+    } catch (...) { return NO; }
+}
+
 - (BOOL)debugInstallBooleanSourceHiddenLayer:(NSString *)entityIdentifier {
     if (![NSThread isMainThread]
         || ![entityIdentifier isKindOfClass:NSString.class]

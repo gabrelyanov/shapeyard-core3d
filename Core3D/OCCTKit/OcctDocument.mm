@@ -37,6 +37,7 @@
 #include <TDF_ChildIterator.hxx>
 #include <TDF_Tool.hxx>
 #include <algorithm>
+#include <mutex>
 
 #if DEBUG // Cut475 phase diagnostics only
 #include <cstdio>
@@ -33569,9 +33570,108 @@ bool ValidateOriginalsRecordContinued(
     } catch (...) { output.Nullify(); operation.refused = true; return false; }
 }
 
+// JOIN-TICK (Fable diagnosis, 17 Nov 2026). One Join tick asks this same question about the
+// same record up to six times (stage readback, commit readback, the export check, the save
+// check on the live document, the save check on the file read back, then the autosave), and
+// every later step asks it again for every kept-originals part in the project. Each answer
+// rebuilds the Join from the stored bytes: two Boolean builds, about a dozen validity checks
+// and the file round trips.
+//
+// The answer of this ordinary entry (fresh budget, fresh Stop, the constant display) is a
+// pure function of five byte strings: the canonical graph, the two exact source streams, the
+// exact stored result stream and the document unit. So the digests of questions that were
+// answered YES by the full proof in this process are remembered, and the identical question
+// is answered YES without building again. Every byte is still read and hashed each time: a
+// source that changed in the file format, a result whose Checked bits moved, another unit or
+// another graph is another key and takes the full proof exactly as before. A refusal is
+// never remembered, and callers that carry their own budget or Stop state
+// (ValidateOriginalsRecordContinued) do not use this.
+namespace {
+class ProvenOriginalsMemo final {
+public:
+    static ProvenOriginalsMemo& Shared() noexcept {
+        static ProvenOriginalsMemo* const shared = new ProvenOriginalsMemo();
+        return *shared;
+    }
+    bool contains(const retained_recipe::Digest& key) noexcept {
+        try {
+            const std::lock_guard<std::mutex> guard(lock_);
+            return std::find(proven_.begin(), proven_.end(), key) != proven_.end();
+        } catch (...) { return false; }
+    }
+    void remember(const retained_recipe::Digest& key) noexcept {
+        try {
+            const std::lock_guard<std::mutex> guard(lock_);
+            if (std::find(proven_.begin(), proven_.end(), key) != proven_.end()) return;
+            if (proven_.size() < Capacity) proven_.push_back(key);
+            else { proven_[next_] = key; next_ = (next_ + 1) % Capacity; }
+        } catch (...) {}
+    }
+private:
+    static constexpr std::size_t Capacity = 256; // 32 bytes each; oldest replaced first
+    std::mutex lock_;
+    std::vector<retained_recipe::Digest> proven_;
+    std::size_t next_ = 0;
+};
+
+bool ProvenOriginalsMemoEnabled() noexcept {
+#if DEBUG
+    // Check seams: the memo off (before/after timing in one build), and the one-pass
+    // materialise switch, which changes what the same bytes rebuild to.
+    if (std::getenv("SHAPEYARD_ORIGINALS_PROOF_MEMO_OFF")
+        || std::getenv("SHAPEYARD_MATERIALIZE_ONE_PASS")) return false;
+#endif
+    return true;
+}
+
+// The digest of everything the ordinary proof reads. False when any part cannot be read:
+// the caller then runs the full proof, which refuses for the same reason.
+bool OriginalsProofKey(const Handle(TDocStd_Document)& document,
+                       const composite_recipe::Record& record,
+                       retained_recipe::Digest& key) noexcept {
+    try {
+        if (document.IsNull() || !record.value || record.current.IsNull()
+            || record.value->sourceShapes.size() != 2) return false;
+        double unit = 0;
+        std::vector<std::uint8_t> canonical, part, all;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(document, unit)
+            || !composite_recipe::Encode(record.value->definition, canonical)
+            || canonical != record.value->bytes) return false;
+        const auto add = [&](const std::vector<std::uint8_t>& bytes) {
+            const auto size = Bytes(std::uint64_t(bytes.size()));
+            all.insert(all.end(), size.begin(), size.end());
+            all.insert(all.end(), bytes.begin(), bytes.end());
+        };
+        add(canonical);
+        for (const auto& source : record.value->sourceShapes) {
+            if (!ShapeBytes(source, part)) return false;
+            add(part);
+        }
+        if (!ShapeBytes(record.current, part)) return false;
+        add(part);
+        Append(all, unit);
+        return HashBytes(all, key);
+    } catch (...) { return false; }
+}
+} // namespace
+
 bool ValidateOriginalsRecord(const Handle(TDocStd_Document)& document,
                              const composite_recipe::Record& record) noexcept {
     try {
+        retained_recipe::Digest proofKey{};
+        const bool keyed = ProvenOriginalsMemoEnabled()
+            && OriginalsProofKey(document, record, proofKey);
+#if DEBUG
+        const CFAbsoluteTime proofStarted = CFAbsoluteTimeGetCurrent();
+#endif
+        if (keyed && ProvenOriginalsMemo::Shared().contains(proofKey)) {
+#if DEBUG
+            if (std::getenv("SHAPEYARD_ORIGINALS_PROOF_TRACE"))
+                std::fprintf(stderr, "ORIGINALS_PROOF memo=hit ms=%.1f\n",
+                    (CFAbsoluteTimeGetCurrent() - proofStarted) * 1000.0);
+#endif
+            return true;
+        }
         // An ordinary cold read begins one bounded operation. Callers already
         // inside replay/proof use ValidateOriginalsRecordContinued instead and
         // carry their existing debt and Stop state through readback.
@@ -33584,13 +33684,21 @@ bool ValidateOriginalsRecord(const Handle(TDocStd_Document)& document,
         operation.featureBudget = &budget;
         retained_feature::ReplayResult replay;
         TopoDS_Shape output;
-        return CanonicalSuffixDisplay(display)
+        const bool proven = CanonicalSuffixDisplay(display)
             && record.value
             && ReplayOwnerGraphDetached(record.value->definition,
                 record.value->sourceShapes, operation, replay)
             && ValidateOriginalsRecordContinued(
                 document, record, operation, output)
             && !output.IsNull();
+        if (proven && keyed) ProvenOriginalsMemo::Shared().remember(proofKey);
+#if DEBUG
+        if (std::getenv("SHAPEYARD_ORIGINALS_PROOF_TRACE"))
+            std::fprintf(stderr, "ORIGINALS_PROOF memo=%s proven=%d ms=%.1f\n",
+                keyed ? "miss" : "unkeyed", proven ? 1 : 0,
+                (CFAbsoluteTimeGetCurrent() - proofStarted) * 1000.0);
+#endif
+        return proven;
     } catch (...) { return false; }
 }
 

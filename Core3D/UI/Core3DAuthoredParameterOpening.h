@@ -610,6 +610,10 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(debugAppendBooleanOriginalsSuffix(entityIdentifier:expected:));
 - (BOOL)debugInstallBooleanSourceHiddenLayer:(NSString *)entityIdentifier
     NS_SWIFT_NAME(debugInstallBooleanSourceHiddenLayer(entityIdentifier:));
+//! JOIN-TICK check seam: flips the TShape Checked cache bit of the first face of the
+//! part's stored shape (a remembered proof must not answer for changed bytes).
+- (BOOL)debugFlipFirstFaceCheckedBit:(NSString *)entityIdentifier
+    NS_SWIFT_NAME(debugFlipFirstFaceCheckedBit(entityIdentifier:));
 //! Test-only occurrence encoding producer applied to one exact ordinary
 //! Profile before pair capture. Tags are one-based transform scalar tags.
 - (BOOL)debugInstallBooleanSourceOccurrenceEncoding:(NSString *)entityIdentifier
