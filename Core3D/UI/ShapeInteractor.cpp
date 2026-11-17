@@ -61,6 +61,8 @@
 #include <vector>
 
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_MapOfShape.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <TopoDS_Iterator.hxx>
 
 #include "../Export/obj/vectornd.h"
@@ -936,6 +938,44 @@ namespace core3d {
 						&& !historyFaceDeleted)) {
 					failureStage = 8;
 					return Standard_False;
+				}
+				// A pulled face leaves each side as two faces in one plane (the old
+				// side and the new strip above it); Bevel then failed on that seam
+				// (phone stand 56, CTO 17 Nov 05:13). Merge only those seams: every
+				// edge the source had away from the pulled face is kept, so a Split
+				// line elsewhere stays where the user drew it.
+				if (isProtrusion) {
+					TopTools_IndexedMapOfShape faceEdges;
+					TopExp::MapShapes(workingFace, TopAbs_EDGE, faceEdges);
+					TopTools_IndexedMapOfShape sourceEdges;
+					TopExp::MapShapes(workingSource, TopAbs_EDGE, sourceEdges);
+					TopTools_MapOfShape keep;
+					for (TopExp_Explorer edge(candidate, TopAbs_EDGE);
+						 edge.More(); edge.Next()) {
+						if (sourceEdges.Contains(edge.Current())
+							&& !faceEdges.Contains(edge.Current())) {
+							keep.Add(edge.Current());
+						}
+					}
+					ShapeUpgrade_UnifySameDomain unify(
+						candidate, Standard_True, Standard_True, Standard_False);
+					unify.AllowInternalEdges(Standard_False);
+					unify.KeepShapes(keep);
+					unify.Build();
+					const TopoDS_Shape unified = unify.Shape();
+					Standard_Size unifiedCount = 0;
+					Standard_Size unifiedSolids = 0;
+					if (!unified.IsNull()
+						&& unified.ShapeType() == TopAbs_SOLID
+						&& CountBoundedTopology(unified,
+							kMaximumExtrusionSourceSubshapes,
+							unifiedCount, unifiedSolids)
+						&& unifiedSolids == 1
+						&& BRepCheck_Analyzer(unified, Standard_True).IsValid()) {
+						candidate = unified;
+						candidateSubshapeCount = unifiedCount;
+						candidateSolidCount = unifiedSolids;
+					}
 				}
 				// The OCCT contract explicitly defines GeomControls=false as a
 				// topological-only check. It runs only after the candidate is bounded.
