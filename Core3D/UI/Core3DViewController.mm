@@ -249,6 +249,7 @@ unsigned long long Core3DDebugColdOpenCandidateProbeValue(
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <SelectMgr_SelectableObject.hxx>
+#include <XCAFDoc_ShapeMapTool.hxx>
 #include <Precision.hxx>
 #include <StdSelect_BRepOwner.hxx>
 
@@ -5546,19 +5547,36 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
 
 // A face edit owns a subshape label, never the selected interactive's root.
 // Build the complete batch first; label creation and materials share one undo.
+// DEBUG probe (editor, 17 Nov; fault 2, phone stand): which guard refused a face colour.
+static NSString *gCore3DFacePBRRefusal = @"";
+static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal = reason; }
+
+- (NSString *)debugLastFacePBRRefusal { return gCore3DFacePBRRefusal ?: @""; }
+
+- (NSInteger)insertPartsFromImportedDocumentAtURL:(NSURL *)url {
+    if (!NSThread.isMainThread || !url.isFileURL || !GLController.viewer) return 0;
+    int inserted = 0;
+    const auto result = GLController.viewer->insertPartsFromImportedDocument(
+        std::string(url.path.UTF8String ?: ""), inserted);
+    if (result != core3d::OrdinaryEditResult::Committed || inserted <= 0) return 0;
+    [self sendNotifyUIState:UIStateChangingHistory];
+    return inserted;
+}
+
 -(void)core3d_updateSelectedFacesWithPBR:(Core3DPBRMaterial*)pbr
                                 preset:(Core3DMaterial*)preset
                                  color:(Core3DColor*)color {
-    if (self.currentSelectionType != PrimitiveSelectionTypeFace
-        || ![self core3d_canBeginCommittedEdit]
-        || (self.selectedModelCapabilities & Core3DModelCapabilityMaterial) == 0) return;
+    if (self.currentSelectionType != PrimitiveSelectionTypeFace) { Core3DFacePBRRefuse(@"not-face-mode"); return; }
+    if (![self core3d_canBeginCommittedEdit]) { Core3DFacePBRRefuse(@"cannot-begin-edit"); return; }
+    if ((self.selectedModelCapabilities & Core3DModelCapabilityMaterial) == 0) { Core3DFacePBRRefuse(@"no-material-capability"); return; }
+    Core3DFacePBRRefuse(@"none");
     const auto viewer = GLController.viewer;
     const auto context = viewer->AisContext();
     const auto doc = viewer->getDocument();
     const auto transaction = doc->ChangeDocument();
-    if (transaction.IsNull() || transaction->HasOpenCommand()) return;
+    if (transaction.IsNull() || transaction->HasOpenCommand()) { Core3DFacePBRRefuse(@"open-command"); return; }
     const auto shapes = XCAFDoc_DocumentTool::ShapeTool(transaction->Main());
-    if (shapes.IsNull()) return;
+    if (shapes.IsNull()) { Core3DFacePBRRefuse(@"no-shape-tool"); return; }
     struct FaceStyle {
         Handle(AIS_Shape) presentation;
         TDF_Label root;
@@ -5566,16 +5584,32 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
         XCAFDoc_VisMaterialPBR material;
     };
     std::vector<FaceStyle> pending;
+    std::vector<TDF_Label> staleMapRoots;
     try {
         for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
             const auto presentation = Handle(AIS_Shape)::DownCast(context->SelectedInteractive());
             const auto owner = Handle(StdSelect_BRepOwner)::DownCast(context->SelectedOwner());
             const auto root = doc->ShapeLabel(presentation);
             if (presentation.IsNull() || owner.IsNull() || !owner->HasShape()
-                || owner->Shape().ShapeType() != TopAbs_FACE || root.IsNull()
-                || !doc->IsPresentationEditable(presentation)
-                || !doc->IsEditableFreeSimpleDefinitionLabel(root)
-                || !shapes->IsSubShape(root, owner->Shape()) || pending.size() >= 64) return;
+                || owner->Shape().ShapeType() != TopAbs_FACE || root.IsNull()) { Core3DFacePBRRefuse(@"no-face-owner"); return; }
+            if (!doc->IsPresentationEditable(presentation)) { Core3DFacePBRRefuse(@"presentation-not-editable"); return; }
+            if (!doc->IsEditableFreeSimpleDefinitionLabel(root)) { Core3DFacePBRRefuse(@"root-not-free-simple"); return; }
+            if (!shapes->IsSubShape(root, owner->Shape())) {
+                // The part's cached sub-shape map can still describe an undone edit (fault 2,
+                // phone stand: a Hole, Undo, then a face colour did nothing). Trust the shape
+                // itself: a face of the document's shape is valid; its map is rebuilt inside
+                // this colour's own command below.
+                const TopoDS_Shape labelShape = XCAFDoc_ShapeTool::GetShape(root);
+                TopTools_IndexedMapOfShape labelFaces;
+                if (!labelShape.IsNull()) TopExp::MapShapes(labelShape, TopAbs_FACE, labelFaces);
+                if (labelFaces.FindIndex(owner->Shape()) == 0) {
+                    Core3DFacePBRRefuse(@"face-not-subshape-of-root"); return;
+                }
+                if (std::none_of(staleMapRoots.begin(), staleMapRoots.end(),
+                                 [&](const TDF_Label& old) { return old.IsEqual(root); }))
+                    staleMapRoots.push_back(root);
+            }
+            if (pending.size() >= 64) { Core3DFacePBRRefuse(@"too-many"); return; }
             // Owner shape is definition-local; SelectedShape applies the instance
             // transform and cannot safely identify a face on a scaled object.
             const auto face = owner->Shape();
@@ -5583,12 +5617,12 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
             shapes->FindSubShape(root, face, faceLabel);
             const auto materialLabel = faceLabel.IsNull()
                 || XCAFDoc_VisMaterialTool::GetShapeMaterial(faceLabel).IsNull() ? root : faceLabel;
-            if (!doc->SupportsScalarPBRMaterialEditingForLabel(materialLabel)) return;
+            if (!doc->SupportsScalarPBRMaterialEditingForLabel(materialLabel)) { Core3DFacePBRRefuse(@"label-no-scalar-pbr"); return; }
             XCAFDoc_VisMaterialPBR material;
             if (!doc->TryEffectivePBRMaterialForLabel(materialLabel, material))
                 material = Core3DLegacyPBRMaterial(doc->MaterialNameForLabel(materialLabel), doc->ColorNameForLabel(materialLabel));
             if (pbr) {
-                if (!Core3DApplyNativePBRScalars(pbr, material)) return;
+                if (!Core3DApplyNativePBRScalars(pbr, material)) { Core3DFacePBRRefuse(@"scalars-refused"); return; }
             } else {
                 if (preset || !color) {
                     const auto materialName = preset ? (Graphic3d_NameOfMaterial)preset.identity
@@ -5605,9 +5639,14 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
             })) return;
             pending.push_back({presentation, root, face, material});
         }
-        if (pending.empty()) return;
+        if (pending.empty()) { Core3DFacePBRRefuse(@"nothing-selected"); return; }
         transaction->NewCommand();
         if (!transaction->HasOpenCommand()) return;
+        for (const auto& root : staleMapRoots) {
+            Handle(XCAFDoc_ShapeMapTool) map;
+            if (root.FindAttribute(XCAFDoc_ShapeMapTool::GetID(), map) && !map.IsNull())
+                map->SetShape(XCAFDoc_ShapeTool::GetShape(root));
+        }
         std::vector<OcctPBRMaterialUpdate> updates;
         for (const auto& style : pending) {
             // A part keeps Position, Rotation and Scale as numbers on its children 1...8
@@ -6326,6 +6365,8 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
     if (self.currentSelectionType == PrimitiveSelectionTypeFace) {
         if (material && material.supportsScalarEditing)
             [self core3d_updateSelectedFacesWithPBR:material preset:nil color:nil];
+        else
+            Core3DFacePBRRefuse(material ? @"material-not-scalar" : @"no-material");
         return;
     }
 

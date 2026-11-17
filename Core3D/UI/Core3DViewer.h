@@ -953,6 +953,8 @@ namespace core3d {
         void cancelTransformInspectorMeasurement() noexcept;
         TransformInspectorMeasurementPerformanceState
             transformInspectorMeasurementPerformanceState() const noexcept;
+        //! Adds every part of an app-created import document at `path` as one creation (fault 3).
+        OrdinaryEditResult insertPartsFromImportedDocument(const std::string& path, int& inserted) noexcept;
 
         void setOrthoProjection(const OrthoProjectionType orthoType);
         //! Change projection while retaining target, direction and apparent
