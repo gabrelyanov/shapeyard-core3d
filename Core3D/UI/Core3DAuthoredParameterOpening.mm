@@ -16,6 +16,7 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_LayerTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
+#include "../OCCTKit/CommittedFaceCheckedBits.h"
 #include <TDF_Tool.hxx>
 #include <cmath>
 #include <memory>
@@ -1702,6 +1703,8 @@ static NSString *sLastBakedBooleanPreviewRefusal = @"";
                 ? beforeRedraw.selection.selectedElements.firstObject : nil;
             NSString *keptEntity = kept.kind == Core3DSceneElementKindObject
                 ? kept.entityIdentifier : nil;
+            // Selecting the part again meshes it for picking; keep its saved bits.
+            const core3d::CommittedFaceCheckedBits keepFaceBits(document->Document());
             viewer->redrawDocument();
             if (keptEntity.length > 0) {
                 Core3DSceneSnapshot *afterRedraw = [self captureSceneSnapshot];
