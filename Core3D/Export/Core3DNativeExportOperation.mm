@@ -4,6 +4,7 @@
 #include "../OCCTKit/DecalLayerPersistence.hxx"
 #include "../OCCTKit/DecalLayerBake.hxx"
 #include "../OCCTKit/OcctDocument.h"
+#include "../OCCTKit/PatternAllLabelAuthority.hxx"
 #include "../OCCTKit/EnclosurePersistence.hxx"
 #include "../Scene/OcctSceneSnapshotBuilder.hpp"
 #import "../Viewport/Core3DSceneSnapshotFactory.hpp"
@@ -70,6 +71,7 @@
 #include <UnitsMethods.hxx>
 #include <UnitsMethods_LengthUnit.hxx>
 #include <XCAFDoc_ColorTool.hxx>
+#include <XCAFDoc_LayerTool.hxx>
 #include <XCAFDoc_ColorType.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
@@ -2764,12 +2766,45 @@ NativeExportResult RunNativeExport(
         }
         TDF_LabelSequence rootLabels;
         std::set<std::string> matchedSelectedIdentifiers;
+        // A part the user hid (its own visibility, a hidden layer, or a
+        // suppressed Repeat copy) is left out, by the viewer's own rule
+        // (OcctViewer EffectiveVisibility), as FBX and USDZ already do from
+        // the scene's visible render items. Selected exports admit only
+        // visible parts before this point.
+        Handle(XCAFDoc_LayerTool) layerTool;
+        if (XCAFDoc_DocumentTool::CheckLayerTool(ocafDocument->Main())) {
+            layerTool = XCAFDoc_DocumentTool::LayerTool(ocafDocument->Main());
+        }
+        core3d::pattern_owner::RetainedPresentationIndex retainedPresentation;
+        if (!state->usesSelectedRoots
+            && !core3d::pattern_owner::CaptureRetainedPresentationIndex(
+                ocafDocument, retainedPresentation)) {
+            throw NativeExportFailure(
+                Core3DNativeExportErrorInvalidState,
+                "The hidden parts of this model could not be read.");
+        }
+        const auto isShownPart = [&](const TDF_Label& label) -> bool {
+            bool layersVisible = true;
+            TDF_LabelSequence layers;
+            if (!layerTool.IsNull() && layerTool->GetLayers(label, layers)) {
+                for (TDF_LabelSequence::Iterator layer(layers); layer.More(); layer.Next()) {
+                    if (!layerTool->IsVisible(layer.Value())) { layersVisible = false; break; }
+                }
+            }
+            return core3d::pattern_owner::EffectiveVisibility(
+                XCAFDoc_ColorTool::IsVisible(label) == Standard_True, layersVisible,
+                core3d::pattern_owner::StateForEntityIdentifier(
+                    retainedPresentation, document->EntityIdentifierForLabel(label)));
+        };
         for (Standard_Integer index = 1;
              index <= freeLabels.Length();
              ++index) {
             ThrowIfCancelled(state);
             const TDF_Label& label = freeLabels.Value(index);
             if (shapeTool->GetShape(label).IsNull()) {
+                continue;
+            }
+            if (!state->usesSelectedRoots && !isShownPart(label)) {
                 continue;
             }
             if (state->usesSelectedRoots) {
