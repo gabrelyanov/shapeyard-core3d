@@ -3945,6 +3945,13 @@ bool DebugMeshSavedGroupPrivateSurfaces(const TopoDS_Shape& shape) noexcept {
     core3d::decal_layer::bake::publication::DebugEvictAll();
 }
 
++ (BOOL)debugBinarySTLFacetHasZeroArea:(NSArray<NSNumber *> *)corners {
+    if (corners.count != 9) return NO;
+    std::array<float, 9> values{};
+    for (NSUInteger index = 0; index < 9; ++index) values[index] = corners[index].floatValue;
+    return BinarySTLFacetHasZeroArea(values);
+}
+
 + (NSDictionary<NSString *, id> *)debugParametricSTLRefinement:(double)metersPerUnit {
     NSString *stage = @"admission";
     if (![NSThread isMainThread] || (metersPerUnit!=0.001 && metersPerUnit!=1.0)) return @{@"failureStage":stage};
