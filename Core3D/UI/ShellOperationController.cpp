@@ -83,6 +83,29 @@ struct ShellPreviewWorkerRequest {
         ShellOperationController::kMaximumResultTopologyNodes;
 };
 
+namespace {
+std::atomic_bool gShellOffsetGuardSkipped{false};
+std::atomic<int> gShellOffsetGuardRefusals{0};
+}
+
+void NoteShellOffsetGuardRefusal() noexcept { gShellOffsetGuardRefusals.fetch_add(1); }
+
+Standard_Integer ShellOffsetGuardRefusalCount() noexcept { return gShellOffsetGuardRefusals.load(); }
+
+Standard_Boolean ShellOffsetGuardSkipped() noexcept
+{
+    return gShellOffsetGuardSkipped.load() ? Standard_True : Standard_False;
+}
+
+void DebugSetShellOffsetGuardSkipped(const Standard_Boolean skipped) noexcept
+{
+#ifdef DEBUG
+    gShellOffsetGuardSkipped.store(skipped == Standard_True);
+#else
+    (void)skipped;
+#endif
+}
+
 struct ShellPreviewWorkerResult {
     std::uint64_t generation = 0;
     Standard_Real thickness = 0.0;
@@ -596,7 +619,8 @@ Standard_Boolean ReplayProfileShells(
             if (!TryResolveShellOpeningSelectors(current, selectors, faces) || cancelled.load()) return Standard_False;
             Handle(ShellCancellationIndicator) progress = new ShellCancellationIndicator(stop);
             BRepOffsetAPI_MakeThickSolid builder;
-            MakeInwardShell(builder, current, faces, step.thickness, tolerance, progress->Start());
+            if (!MakeInwardShell(builder, current, faces, step.thickness, tolerance, progress->Start()))
+                return Standard_False;
             if (cancelled.load() || !builder.IsDone() || builder.MakeOffset().Error() != BRepOffset_NoError
                 || !IsValidInwardResult(builder.Shape(), current, volume, bounds, tolerance,
                                        ShellOperationController::kMaximumResultTopologyNodes, stop)) return Standard_False;
@@ -656,6 +680,40 @@ Standard_Boolean TryFaceOperationPlane(
     }
 }
 
+TopoDS_Shape FaceOperationSolidOf(const TopoDS_Shape& theShape) noexcept
+{
+    try {
+        OCC_CATCH_SIGNALS
+        TopoDS_Shape aShape = theShape;
+        // A wrapper around a wrapper has not been seen; four levels is ample.
+        for (int aDepth = 0; aDepth < 4 && !aShape.IsNull()
+             && aShape.ShapeType() == TopAbs_COMPOUND; ++aDepth) {
+            TopoDS_Iterator aChild(aShape, Standard_True, Standard_True);
+            if (!aChild.More()) {
+                return TopoDS_Shape();
+            }
+            const TopoDS_Shape anOnly = aChild.Value();
+            aChild.Next();
+            if (aChild.More()) {
+                return TopoDS_Shape();
+            }
+            aShape = anOnly;
+        }
+        if (aShape.IsNull() || aShape.ShapeType() != TopAbs_SOLID) {
+            return TopoDS_Shape();
+        }
+        // A plain stored solid is taken as it is, as before. One taken out of
+        // a wrapper must be an ordinary forward solid.
+        if (!aShape.IsEqual(theShape)
+            && aShape.Orientation() != TopAbs_FORWARD) {
+            return TopoDS_Shape();
+        }
+        return aShape;
+    } catch (...) {
+        return TopoDS_Shape();
+    }
+}
+
 Standard_Boolean TryPrepareFaceOperationSource(
     const Handle(AIS_InteractiveContext)& theContext,
     const Handle(OcctDocument)& theDocument,
@@ -690,15 +748,19 @@ Standard_Boolean TryPrepareFaceOperationSource(
             return Standard_False;
         }
 
-        const TopoDS_Shape aShape = thePresentation->Shape();
+        // aPresented is the identity (what is stored and shown); aShape is the
+        // one solid the tool works on. They are the same object for a plain
+        // part; a part saved as a compound around one solid gives that solid.
+        const TopoDS_Shape aPresented = thePresentation->Shape();
         const TopoDS_Shape aStoredShape =
             XCAFDoc_ShapeTool::GetShape(aLabel);
+        const TopoDS_Shape aShape = FaceOperationSolidOf(aPresented);
         gp_Trsf aPersistedTransform;
         const gp_Trsf aPresentationTransform =
             thePresentation->LocalTransformation();
-        if (aShape.IsNull() || aStoredShape.IsNull()
-            || aShape.ShapeType() != TopAbs_SOLID
-            || !aStoredShape.IsEqual(aShape)
+        if (aPresented.IsNull() || aStoredShape.IsNull()
+            || aShape.IsNull() || aShape.ShapeType() != TopAbs_SOLID
+            || !aStoredShape.IsEqual(aPresented)
             || !theDocument->TryObjectTransformForLabel(
                 aLabel, aPersistedTransform)
             || !TransformsMatch(
@@ -765,7 +827,8 @@ Standard_Boolean TryPrepareFaceOperationSource(
 
         theProof.original = thePresentation;
         theProof.documentLabel = aLabel;
-        theProof.shape = aShape;
+        theProof.shape = aPresented;
+        theProof.solid = aShape;
         theProof.openingFace = aCanonicalFace;
         theProof.transform = aPresentationTransform;
         theProof.faceTopologyIndex =
@@ -818,7 +881,7 @@ Standard_Boolean TryPrepareShellOperationSource(
             result.openingFaceTopologyIndices.insert(position, single.faceTopologyIndex);
             result.openingFaces.insert(result.openingFaces.begin() + offset, single.openingFace);
         }
-        if (!ShellOpeningSetIsValid(result.shape, result.openingFaces,
+        if (!ShellOpeningSetIsValid(result.solid, result.openingFaces,
                                result.openingFaceTopologyIndices)) return Standard_False;
         result.openingFace = result.openingFaces.front();
         result.faceTopologyIndex = result.openingFaceTopologyIndices.front();
@@ -839,7 +902,8 @@ Standard_Boolean FaceOperationSourceProofIsCurrent(
 {
     if (theContext.IsNull() || theDocument.IsNull()
         || theProof.original.IsNull() || theProof.documentLabel.IsNull()
-        || theProof.shape.IsNull() || theProof.openingFace.IsNull()
+        || theProof.shape.IsNull() || theProof.solid.IsNull()
+        || theProof.openingFace.IsNull()
         || theProof.topologyNodeCount == 0
         || theMaximumStyledSubshapeLabels == 0
         || theProof.entityIdentifier.empty()
@@ -888,7 +952,7 @@ Standard_Boolean FaceOperationSourceProofIsCurrent(
         gp_Pln plane;
         return TryFaceOperationPlane(theProof.openingFace, plane)
             && (theProof.openingFaces.size() <= 1
-                || ShellOpeningSetIsValid(theProof.shape, theProof.openingFaces,
+                || ShellOpeningSetIsValid(theProof.solid, theProof.openingFaces,
                                           theProof.openingFaceTopologyIndices));
     } catch (...) {
         return Standard_False;
@@ -1122,8 +1186,12 @@ private:
             SHELL_DEBUG_PROBE(gShellDebugFaceShape, 0);
             SHELL_DEBUG_PROBE(gShellDebugConeStep, 0);
             SHELL_DEBUG_PROBE(gShellDebugComputeStage, 4);
-            MakeInwardShell(aBuilder, theRequest.source, theRequest.openingFaces,
-                            theRequest.thickness, theRequest.tolerance, aProgress->Start());
+            // False: the guard would not let the kernel have this shell (it would crash the
+            // app, not fail). The result stays Failed, like any shell the kernel refuses.
+            if (!MakeInwardShell(aBuilder, theRequest.source, theRequest.openingFaces,
+                                 theRequest.thickness, theRequest.tolerance, aProgress->Start())) {
+                return aResult;
+            }
             SHELL_DEBUG_PROBE(gShellDebugComputeStage, aBuilder.IsDone()
                 ? 300 : 100 + static_cast<int>(aBuilder.MakeOffset().Error()));
             if (wasCancelled()
@@ -1323,7 +1391,7 @@ Standard_Boolean ShellOperationController::tryPrepareSource(
                 aProof,
                 kMaximumStyledSubshapeLabels,
                 Standard_True)
-            || !ShellOpeningSetIsValid(aProof.shape, aProof.openingFaces,
+            || !ShellOpeningSetIsValid(aProof.solid, aProof.openingFaces,
                                   aProof.openingFaceTopologyIndices)) {
             return Standard_False;
         }
@@ -1365,6 +1433,7 @@ Standard_Boolean ShellOperationController::tryPrepareSource(
         aSource->original = aProof.original;
         aSource->label = aProof.documentLabel;
         aSource->shape = aProof.shape;
+        aSource->solid = aProof.solid;
         aSource->openingFaces = aProof.openingFaces;
         aSource->transform = aProof.transform;
         aSource->selectionMode = theSelection.selectionMode;
@@ -1533,7 +1602,7 @@ Standard_Boolean ShellOperationController::sourceIsCurrent() const noexcept
                 != mySource->definitionIdentifier) {
             return Standard_False;
         }
-        return ShellOpeningSetIsValid(mySource->shape, mySource->openingFaces,
+        return ShellOpeningSetIsValid(mySource->solid, mySource->openingFaces,
                                  mySource->openingFaceTopologyIndices);
     } catch (...) {
         return Standard_False;
@@ -1607,7 +1676,7 @@ ShellOperationController::enqueuePreviewRequest() noexcept
         }
 
         BRepBuilderAPI_Copy aCopy(
-            mySource->shape,
+            mySource->solid,
             Standard_True,
             Standard_False);
         const TopoDS_Shape aCopiedShape = aCopy.Shape();
@@ -2430,6 +2499,17 @@ ShellOperationController::debugPreviewState() const noexcept
         aState.debugComputeStage = gShellDebugComputeStage.load();
     }
     return aState;
+}
+
+void ShellOperationController::debugSetOffsetGuardSkipped(
+    const Standard_Boolean skipped) noexcept
+{
+    DebugSetShellOffsetGuardSkipped(skipped);
+}
+
+Standard_Integer ShellOperationController::debugOffsetGuardRefusalCount() noexcept
+{
+    return ShellOffsetGuardRefusalCount();
 }
 
 void ShellOperationController::debugSetWorkerBlocked(

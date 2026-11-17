@@ -1079,6 +1079,19 @@ Standard_EXPORT void Core3DDefineSafeBinXCAFFormat(
 #include "NativeEditAuthority.hpp"
 #include <memory>
 namespace core3d::authority { class NativeObservedApplication; }
+// In every build: the plain Join / Cut / Overlap asks this before it stores a result.
+//! Whether a Join / Cut / Overlap result can be what was asked for, judged by
+//! numbers alone (toy car, 15 Nov 2026: a fuse returned a small wrong piece
+//! without reporting an error, and it was stored as the joined body).
+//! operation: 0 Join, 1 Cut, 2 Overlap. inputVolumes[0] is the part that stays,
+//! the others the tools. Join: the result is at least the largest input and at
+//! most their sum (within a thousandth of the largest), and, when both boxes
+//! are given (min x y z, max x y z), its box is the union of the inputs' boxes.
+//! Cut: not more than the part that stays. Overlap: not more than the smallest
+//! input. Inputs that cannot be measured are not judged (true, as before).
+Standard_EXPORT bool Core3DBooleanResultIsPlausible(
+    int operation, const std::vector<double>& inputVolumes, double resultVolume,
+    const double* inputsBox, const double* resultBox) noexcept;
 #if DEBUG
 #include <map>
 #include <string>
@@ -1100,6 +1113,13 @@ Standard_EXPORT std::map<std::string,bool> Core3DDebugRetainedPartBooleanProbe()
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanRingProbe(Standard_Integer scenario);
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanFilletProbe(Standard_Integer scenario);
 Standard_EXPORT void Core3DDebugSetRetainedFilletFailureCount(Standard_Integer count);
+//! Check seam (debug builds): with the guard skipped a check can show what the
+//! builder stored before the guard existed. Never skipped otherwise.
+Standard_EXPORT void Core3DDebugSetBooleanPlausibilityGuardSkipped(bool skipped) noexcept;
+//! How many times the plain Join / Cut / Overlap builder ran for its last
+//! result: 1, or 2 when a refused Join was tried once more with a looser
+//! coincidence tolerance.
+Standard_EXPORT int Core3DDebugLastBakedBooleanAttempts() noexcept;
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanWedgeProbe(Standard_Integer scenario);
 Standard_EXPORT std::map<std::string,bool> Core3DDebugNativeBooleanOwnerProbe(Standard_Integer scenario);
 //! One-shot, non-reentrant capture of canonical pre-G0 writer bytes. The map

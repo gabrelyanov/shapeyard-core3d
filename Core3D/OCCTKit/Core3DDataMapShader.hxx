@@ -102,11 +102,13 @@ void main() {
     n = normalize(mappedNormal.x * syWorldTangent + mappedNormal.y * syWorldBitangent + mappedNormal.z * syWorldNormal)
         * (gl_FrontFacing ? 1.0 : -1.0);
 #endif
-    // The lesson key stays above/left of the camera. The ordinary editor
-    // retains its original world light; authored/exported PBR values do not move.
-    vec3 light = syLessonLighting > 0.5
-        ? normalize((occWorldViewMatrixInverse * vec4(-0.35, 0.45, 1.0, 0.0)).xyz)
-        : normalize(vec3(0.35, 0.45, 0.82));
+    // The key light stays above/left of the camera, in the lesson and in the
+    // ordinary editor alike, as the viewer's own light does for grey parts. A
+    // light fixed in the world left every face turned away from +X+Y+Z in flat
+    // ambient (a typed #2F6DB5 read #0E2746 from the left view, 15 Nov). The
+    // syLessonLighting switch is kept and no longer changes the light.
+    // Authored/exported PBR values do not move.
+    vec3 light = normalize((occWorldViewMatrixInverse * vec4(-0.35, 0.45, 1.0, 0.0)).xyz);
     vec3 eye = (occWorldViewMatrixInverse * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
     vec3 view = normalize(eye - syWorldPosition);
     vec3 halfVector = normalize(light + view);
