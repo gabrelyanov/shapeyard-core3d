@@ -24,6 +24,7 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <GeomAdaptor_Curve.hxx>
 #include <Geom_Conic.hxx>
+#include <Geom_ElementarySurface.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <BRepFeat_MakePrism.hxx>
 #include <BRepFeat_SplitShape.hxx>
@@ -465,6 +466,31 @@ namespace core3d {
                     if (original.IsNull()) continue;
                     const auto copied = Handle(Geom_Conic)::DownCast(
                         BRep_Tool::Curve(TopoDS::Edge(workingEdges(index)), workingLocation, first, last));
+                    if (copied.IsNull() || copied == original
+                        || copied->DynamicType() != original->DynamicType()) {
+                        workingSource.Nullify();
+                        workingFace.Nullify();
+                        failureStage = 11;
+                        return Standard_False;
+                    }
+                    copied->SetPosition(original->Position());
+                }
+
+                // BinTools reconstructs elementary surface gp_Ax3 frames in
+                // the same way. A scaled, positioned cylinder followed by a
+                // Boolean cut exposes signed-zero differences on its annular
+                // plane/cylinder faces even after every conic edge is exact.
+                // Restore only the detached surface frames by value; the raw
+                // V3 comparison below remains the authority for every byte.
+                for (Standard_Integer index = 1; index <= sourceFaces.Extent(); ++index) {
+                    TopLoc_Location sourceLocation, workingLocation;
+                    const auto original = Handle(Geom_ElementarySurface)::DownCast(
+                        BRep_Tool::Surface(
+                            TopoDS::Face(sourceFaces(index)), sourceLocation));
+                    if (original.IsNull()) continue;
+                    const auto copied = Handle(Geom_ElementarySurface)::DownCast(
+                        BRep_Tool::Surface(
+                            TopoDS::Face(workingFaces(index)), workingLocation));
                     if (copied.IsNull() || copied == original
                         || copied->DynamicType() != original->DynamicType()) {
                         workingSource.Nullify();
@@ -2404,6 +2430,17 @@ namespace core3d {
 			// the Bevel command (no retained treatment capture).
 			TDF_Label aBooleanRecord;
 			if (myDoc->BooleanResultRecordForBake(theSelection.documentLabel, aBooleanRecord)) {
+				theSelection.retainedCapture.reset();
+				return Standard_True;
+			}
+			// A standalone saved Hole, or an ordinary saved Join/Cut (a drilled
+			// plate after its keyhole Cut), takes the plain route: the controller
+			// bakes that record inside its Apply command and Undo restores it.
+			if (aCoverage
+					== OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
+				&& myDoc->CanBakeRecordForFaceEdit(
+					theSelection.documentLabel)) {
+				theSelection.retainedCapture.reset();
 				return Standard_True;
 			}
 			if ((aCoverage != OcctRetainedRecipeCoverage::CurrentProfile
@@ -2526,7 +2563,7 @@ namespace core3d {
 					if (aShape.ShapeType() != TopAbs_SOLID
 						|| aLabel.IsNull()
 						|| aLabel.Data() != aDocument->GetData()
-						|| !IsBRepModelingLabel(myDoc, aLabel)
+						|| !IsBRepModelingLabel(myDoc, aLabel, Standard_True)
 						|| !myDoc->IsPresentationEditable(aPresentation)
 						|| aStoredShape.IsNull()
 						|| !aStoredShape.IsEqual(aShape)
@@ -2735,6 +2772,11 @@ namespace core3d {
 	Standard_Real ShapeInteractor::roundMaximumRadiusMM() const noexcept {
 		return _bevelController == nullptr
 			? 0.0 : _bevelController->roundMaximumRadiusMM();
+	}
+
+	Standard_Real ShapeInteractor::bevelMetersPerUnit() const noexcept {
+		return _bevelController == nullptr
+			? 0.0 : _bevelController->bevelMetersPerUnit();
 	}
 
 	BevelFailureObservation

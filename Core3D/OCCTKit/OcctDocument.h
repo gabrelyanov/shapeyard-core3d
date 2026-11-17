@@ -274,6 +274,8 @@ struct Record final {
 //! reuse them. Invalid is a read-only fail-closed sentinel and must never be
 //! written to a document.
 enum class OcctMeshWindingRepairResult { Invalid, Unchanged, Prepared };
+//! Make solid from one closed imported triangle mesh (Job 4): Open = free or shared-by-three edges.
+enum class OcctMeshSolidConversionResult { Invalid, Open, TooLarge, Prepared };
 
 enum class OcctGeometryRepresentation : Standard_Integer
 {
@@ -1060,6 +1062,9 @@ struct OcctGeometryDuplicationRequest
     // Repeat copies supported authored face finishes onto new subshape labels.
     // Charge those labels as well as the whole-part appearance before copying.
     bool preservesAuthoredFaceMaterials = false;
+    // Duplicate only: a part whose standalone saved Hole could be baked is
+    // copied as a plain solid; the source keeps its resizable Hole record.
+    bool copiesSavedCutAsPlainSolid = false;
 };
 
 //! Register the app-owned BinOcaf/BinXCAF project formats with a narrow,
@@ -2380,6 +2385,10 @@ public:
     //! Private consistent-winding candidate; source ownership and material contracts remain strict.
     Standard_EXPORT OcctMeshWindingRepairResult PrepareMeshWindingRepair(const TDF_Label& label, TopoDS_Shape& candidate) const noexcept;
     Standard_EXPORT Standard_Boolean ValidateMeshWindingRepair(const TDF_Label& label, const TopoDS_Shape& candidate) const noexcept;
+    //! One closed, consistently wound triangle mesh -> one valid FORWARD solid in the same object-local frame,
+    //! coplanar triangles merged into planar faces. Untextured meshes without authored frames or atlas only.
+    Standard_EXPORT OcctMeshSolidConversionResult PrepareMeshSolidConversion(const TDF_Label& label, TopoDS_Shape& candidate) const noexcept;
+    Standard_EXPORT Standard_Boolean ValidateMeshSolidConversion(const TDF_Label& label, const TopoDS_Shape& candidate) const noexcept;
     //! Bounded flat-corner editing; preserves atlas/maps, rejects supplied frames.
     Standard_EXPORT Standard_Boolean CanEditMeshVertices(const TDF_Label& label) const noexcept;
     Standard_EXPORT Standard_Boolean PrepareMeshVertexMove(const TDF_Label& label,
@@ -2488,6 +2497,16 @@ public:
     //! retain HasNoSavedSweepForTopology's stricter admission.
     Standard_Boolean CanBakeSavedCutForFaceEdit(const TDF_Label& label) const noexcept;
 
+    //! Bevel/Round may also bake an ordinary saved Join/Cut/Overlap (its two
+    //! frozen originals, nothing else) inside their own Apply command, exactly
+    //! as PrepareBooleanResultForFaceEdit removes it for Push-pull. Read-only.
+    Standard_Boolean CanBakeBooleanResultForFaceEdit(const TDF_Label& label) const noexcept;
+
+    //! Either of the two bakeable records above.
+    Standard_Boolean CanBakeRecordForFaceEdit(const TDF_Label& label) const noexcept {
+        return CanBakeSavedCutForFaceEdit(label) || CanBakeBooleanResultForFaceEdit(label);
+    }
+
     //! Bake a saved Join/Cut/Overlap or standalone older cut before a face edit.
     //! Requires the face edit's open command: abort/undo restores the record.
     //! Other saved feature families are never removed by this operation.
@@ -2497,6 +2516,9 @@ public:
         const TDF_Label& label,
         Handle(AIS_Shape) aisShape,
         const std::function<Standard_Boolean(const TDF_Label&)>& shapeStager = {});
+    //! Make solid staging: replace a TriangleMesh-marked definition's mesh with a BRep solid and set
+    //! its marker to BRep in the open command. Every other replacement keeps its representation.
+    Standard_Boolean ReplaceMeshWithSolid(const TDF_Label& label, Handle(AIS_Shape) aisShape);
     Standard_Boolean HasUnroutedRetainedDependent(
         const TDF_Label& label) const noexcept;
     

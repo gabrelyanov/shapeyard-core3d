@@ -3082,6 +3082,9 @@ bool ValidateAttachmentRigDocument(
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepBuilderAPI_Sewing.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BinTools.hxx>
@@ -16513,6 +16516,45 @@ Standard_Boolean OcctDocument::CanBakeSavedCutForFaceEdit(
     }
 }
 
+Standard_Boolean OcctDocument::CanBakeBooleanResultForFaceEdit(
+    const TDF_Label& label) const noexcept {
+    try {
+        OCC_CATCH_SIGNALS
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || label.IsNull()
+            || label.Data() != myOcafDoc->GetData()
+            || !IsEditableFreeSimpleDefinitionLabel(label)
+            || HasUnroutedRetainedDependent(label)
+            || core3d::retained_solid::HasRecord(label)
+            || label.IsAttribute(core3d::retained_edge_treatment::AttributeID())
+            || RetainedRecipeCoverageForLabel(label)
+                != OcctRetainedRecipeCoverage::PresentOutsideP4Coverage)
+            return Standard_False;
+        // Only the Boolean record may be present: a Profile, enclosure, sweep
+        // or loft keeps its own replay contract and is never baked here.
+        core3d::profile::Record profile;
+        core3d::enclosure::Record enclosure;
+        core3d::sweep_persistence::Record sweep;
+        core3d::loft_persistence::Record loft;
+        if (!core3d::profile::Read(myOcafDoc, label, profile) || !profile.label.IsNull()
+            || !core3d::enclosure::Read(myOcafDoc, label, enclosure) || !enclosure.label.IsNull()
+            || !core3d::sweep_persistence::Read(myOcafDoc, label, sweep) || !sweep.label.IsNull()
+            || !core3d::loft_persistence::Read(myOcafDoc, label, loft) || !loft.label.IsNull())
+            return Standard_False;
+        // The same rule PrepareBooleanResultForFaceEdit applies before it
+        // removes the record, so an admitted Bevel is never refused at Apply.
+        core3d::composite_recipe::Record record;
+        OcctScalarAppearanceState appearance;
+        return core3d::composite_recipe::Read(myOcafDoc, label, record)
+            && record.value && !record.label.IsNull()
+            && record.value->definition.nodes.size() == 3
+            && OriginalsFeature(record.value->definition)
+            && !record.label.IsAttribute(core3d::retained_edge_treatment::AttributeID())
+            && PairCaptureOriginalsAppearance(*this, label, appearance);
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
 Standard_Boolean OcctDocument::PrepareBooleanResultForFaceEdit(
     const TDF_Label& label) noexcept {
     try {
@@ -16626,7 +16668,11 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
             }
 
             core3d::pattern_recipe_clone::Source sourceRecipe;
-            if (!core3d::pattern_recipe_clone::Capture(myOcafDoc, source, sourceRecipe)
+            const bool plainSavedCutCopy = request.copiesSavedCutAsPlainSolid
+                && core3d::retained_solid::HasRecord(source)
+                && CanBakeSavedCutForFaceEdit(source);
+            if (!core3d::pattern_recipe_clone::Capture(myOcafDoc, source, sourceRecipe,
+                    plainSavedCutCopy)
                 || ((sourceRecipe.family == core3d::pattern_recipe_clone::Family::Sweep
                         || sourceRecipe.family == core3d::pattern_recipe_clone::Family::Loft)
                     && !request.preservesSweepLoftRecipe)
@@ -19143,6 +19189,94 @@ Standard_Boolean OcctDocument::ValidateMeshWindingRepair(const TDF_Label& label,
     } catch (...) { return Standard_False; }
 }
 
+OcctMeshSolidConversionResult OcctDocument::PrepareMeshSolidConversion(
+    const TDF_Label& label, TopoDS_Shape& candidate) const noexcept {
+    candidate.Nullify();
+    if (![NSThread isMainThread]) return OcctMeshSolidConversionResult::Invalid;
+    try {
+        OCC_CATCH_SIGNALS
+        OcctObjectTransformState source;
+        if (!CaptureObjectTransformStateForLabel(label,source)
+            || source.resolvedRepresentation!=OcctGeometryRepresentation::TriangleMesh
+            || source.authoredFramesPresent || source.meshUVAtlasVersion
+            || Core3DNormalTextureRecipeForLabel(label)!=0)
+            return OcctMeshSolidConversionResult::Invalid;
+        std::atomic_bool cancelled{false};
+        core3d::meshedit::NativeMeshStorageCapture captured;
+        const auto storage=core3d::meshedit::CaptureNativeMeshStorage(source.shape,captured,cancelled);
+        if (storage==core3d::meshedit::TopologyResult::TooLarge) return OcctMeshSolidConversionResult::TooLarge;
+        if (storage!=core3d::meshedit::TopologyResult::Ready || captured.storedTriangles.size()<4)
+            return OcctMeshSolidConversionResult::Invalid;
+        // Triangulation nodes -> the owner's object-local frame (the transform stays on the owner).
+        const gp_Trsf placement=captured.meshLocation.Transformation();
+        Bnd_Box extent;
+        for (const auto& node:captured.storedNodes) extent.Add(gp_Pnt(node[0],node[1],node[2]).Transformed(placement));
+        if (extent.IsVoid()) return OcctMeshSolidConversionResult::Invalid;
+        const double diagonal=std::sqrt(extent.SquareExtent());
+        if (!std::isfinite(diagonal) || diagonal<=1.e-9) return OcctMeshSolidConversionResult::Invalid;
+        const double tolerance=std::max(1.e-7,diagonal*1.e-6);
+        const bool reversed=captured.face.Orientation()==TopAbs_REVERSED;
+        BRepBuilderAPI_Sewing sewing(tolerance,Standard_True,Standard_True,Standard_True,Standard_False);
+        std::size_t added=0;
+        for (const auto& triangle:captured.storedTriangles) {
+            std::array<gp_Pnt,3> p;
+            for (int k=0;k<3;++k) p[k]=gp_Pnt(triangle[k][0],triangle[k][1],triangle[k][2]).Transformed(placement);
+            if (reversed) std::swap(p[1],p[2]);
+            // Zero-area slivers carry no surface; their edges collapse within the sewing tolerance.
+            if (gp_Vec(p[0],p[1]).Crossed(gp_Vec(p[0],p[2])).Magnitude()<=tolerance*tolerance) continue;
+            BRepBuilderAPI_MakePolygon polygon(p[0],p[1],p[2],Standard_True);
+            if (!polygon.IsDone()) return OcctMeshSolidConversionResult::Invalid;
+            BRepBuilderAPI_MakeFace face(polygon.Wire(),Standard_True);
+            if (!face.IsDone()) return OcctMeshSolidConversionResult::Invalid;
+            sewing.Add(face.Face());++added;
+        }
+        if (added<4) return OcctMeshSolidConversionResult::Invalid;
+        sewing.Perform();
+        if (sewing.NbFreeEdges()!=0 || sewing.NbMultipleEdges()!=0) return OcctMeshSolidConversionResult::Open;
+        TopoDS_Shell shell;int shells=0;
+        for (TopExp_Explorer it(sewing.SewedShape(),TopAbs_SHELL);it.More();it.Next()) {
+            shell=TopoDS::Shell(it.Current());++shells;
+        }
+        if (shells!=1 || !BRep_Tool::IsClosed(shell)) return OcctMeshSolidConversionResult::Open;
+        BRepBuilderAPI_MakeSolid made(shell);
+        if (!made.IsDone()) return OcctMeshSolidConversionResult::Invalid;
+        TopoDS_Solid solid=made.Solid();
+        if (!BRepLib::OrientClosedSolid(solid)) return OcctMeshSolidConversionResult::Invalid;
+        ShapeUpgrade_UnifySameDomain unify(solid,Standard_True,Standard_True,Standard_False);
+        unify.SetLinearTolerance(tolerance);
+        unify.SetAngularTolerance(1.e-7);
+        unify.Build();
+        TopoDS_Shape result;int solids=0;
+        for (TopExp_Explorer it(unify.Shape(),TopAbs_SOLID);it.More();it.Next()) { result=it.Current();++solids; }
+        if (solids!=1 || result.IsNull() || result.Orientation()!=TopAbs_FORWARD
+            || !BRepCheck_Analyzer(result,Standard_True).IsValid()) return OcctMeshSolidConversionResult::Invalid;
+        GProp_GProps props;BRepGProp::VolumeProperties(result,props);
+        if (!std::isfinite(props.Mass()) || props.Mass()<=0) return OcctMeshSolidConversionResult::Invalid;
+        candidate=result;
+        return OcctMeshSolidConversionResult::Prepared;
+    } catch (...) { candidate.Nullify(); return OcctMeshSolidConversionResult::Invalid; }
+}
+
+Standard_Boolean OcctDocument::ValidateMeshSolidConversion(const TDF_Label& label,
+    const TopoDS_Shape& candidate) const noexcept {
+    if (![NSThread isMainThread] || candidate.IsNull()) return Standard_False;
+    try {
+        OCC_CATCH_SIGNALS
+        TopoDS_Shape expected;
+        if (PrepareMeshSolidConversion(label,expected)!=OcctMeshSolidConversionResult::Prepared) return Standard_False;
+        if (expected.ShapeType()!=candidate.ShapeType() || expected.Orientation()!=candidate.Orientation()
+            || !expected.Location().IsEqual(candidate.Location())) return Standard_False;
+        TopTools_IndexedMapOfShape ef,cf,ee,ce,ev,cv;
+        TopExp::MapShapes(expected,TopAbs_FACE,ef);TopExp::MapShapes(candidate,TopAbs_FACE,cf);
+        TopExp::MapShapes(expected,TopAbs_EDGE,ee);TopExp::MapShapes(candidate,TopAbs_EDGE,ce);
+        TopExp::MapShapes(expected,TopAbs_VERTEX,ev);TopExp::MapShapes(candidate,TopAbs_VERTEX,cv);
+        if (ef.Extent()!=cf.Extent() || ee.Extent()!=ce.Extent() || ev.Extent()!=cv.Extent()) return Standard_False;
+        GProp_GProps a,b;BRepGProp::VolumeProperties(expected,a);BRepGProp::VolumeProperties(candidate,b);
+        return std::abs(a.Mass()-b.Mass())<=1.e-9*std::max(1.0,std::abs(a.Mass()))
+            && a.CentreOfMass().Distance(b.CentreOfMass())<=1.e-9*std::max(1.0,std::abs(a.Mass()));
+    } catch (...) { return Standard_False; }
+}
+
 
 
 Standard_Boolean OcctDocument::CaptureMeshRegionExtrudePreview(const TDF_Label& label,
@@ -19811,6 +19945,54 @@ Standard_Boolean OcctDocument::ReplaceShape(
             return Standard_False;
         }
         if (!SaveObjectTransform(label, aisShape)) {
+            restorePrevious();
+            return Standard_False;
+        }
+        return Standard_True;
+    } catch (...) {
+        restorePrevious();
+        return Standard_False;
+    }
+}
+
+Standard_Boolean OcctDocument::ReplaceMeshWithSolid(
+    const TDF_Label& label, Handle(AIS_Shape) aisShape) {
+    if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+        || label.IsNull() || label.Data() != myOcafDoc->GetData()
+        || aisShape.IsNull() || aisShape->Shape().IsNull()
+        || aisShape->Shape().ShapeType() != TopAbs_SOLID
+        || HasUnroutedRetainedDependent(label)
+        || !IsEditableFreeSimpleDefinitionLabel(label)) {
+        return Standard_False;
+    }
+    Handle(XCAFDoc_ShapeTool) shapeTool =
+        XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+    const TopoDS_Shape previousShape = XCAFDoc_ShapeTool::GetShape(label);
+    bool hadMarker = false;
+    OcctGeometryRepresentation stored = OcctGeometryRepresentation::Invalid;
+    if (shapeTool.IsNull() || previousShape.IsNull()
+        || GeometryRepresentationForLabel(label) != OcctGeometryRepresentation::TriangleMesh
+        || !ReadGeometryRepresentation(label, hadMarker, stored)
+        || !hadMarker || stored != OcctGeometryRepresentation::TriangleMesh
+        || !GeometryClassMatchesRepresentation(
+            ClassifyDefinitionGeometry(aisShape->Shape(), nullptr),
+            OcctGeometryRepresentation::BRep)) {
+        return Standard_False;
+    }
+    const auto restorePrevious = [&]() noexcept {
+        try {
+            shapeTool->SetShape(label, previousShape);
+            TDataStd_Integer::Set(label, GeometryRepresentationAttributeID(),
+                static_cast<Standard_Integer>(OcctGeometryRepresentation::TriangleMesh));
+        } catch (...) {
+        }
+    };
+    try {
+        shapeTool->SetShape(label, aisShape->Shape());
+        const TopoDS_Shape now = XCAFDoc_ShapeTool::GetShape(label);
+        if (now.IsNull() || !now.IsEqual(aisShape->Shape())
+            || !WriteGeometryRepresentationMarker(label, OcctGeometryRepresentation::BRep)
+            || !SaveObjectTransform(label, aisShape)) {
             restorePrevious();
             return Standard_False;
         }
