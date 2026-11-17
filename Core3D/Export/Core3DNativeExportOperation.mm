@@ -280,6 +280,12 @@ public:
             throw NativeExportFailure(Core3DNativeExportErrorWriterFailed,
                 "The OBJ position staging file could not be opened.");
         }
+        // Export lane rule (17 Nov): OBJ is the document's units with Y up, the
+        // axis Blender, Unity and Roblox read, so a part stands as modelled.
+        // Shapeyard is Z up: (x, y, z) is written as (x, z, -y). Units are
+        // left as they are (no scale); positions, staged doubles and normals convert.
+        ChangeCoordinateSystemConverter().SetInputCoordinateSystem(RWMesh_CoordinateSystem_Zup);
+        ChangeCoordinateSystemConverter().SetOutputCoordinateSystem(RWMesh_CoordinateSystem_Yup);
     }
 
     // OCCT's context narrows positions to Float and prints six fractional

@@ -3822,6 +3822,9 @@ namespace core3d {
                 aFileInfo.Add("Author", "Shapeyard 3D");
 
                 auto writer = RWObj_CafWriter(TCollection_AsciiString(filename.c_str()));
+                // Same rule as the native OBJ export: Z up in, Y up out, no scale.
+                writer.ChangeCoordinateSystemConverter().SetInputCoordinateSystem(RWMesh_CoordinateSystem_Zup);
+                writer.ChangeCoordinateSystemConverter().SetOutputCoordinateSystem(RWMesh_CoordinateSystem_Yup);
                 exportSucceeded = writer.Perform(myDoc->Document(), aFileInfo, Message_ProgressRange());
                 if (!exportSucceeded) {
                     printf("Error creating OBJ file (writer reported failure): %s\n", filename.c_str());
