@@ -547,6 +547,16 @@ __attribute__((objc_subclassing_restricted))
     nearX:(double)nx y:(double)ny z:(double)nz
     refusal:(NSString * _Nullable * _Nullable)refusal
     NS_SWIFT_NAME(applyHoleRow(entity:count:spacing:nearX:y:z:refusal:));
+//! Round holes of a part, read from its solid; [px, py, pz, dx, dy, dz, radius, depth]
+//! (world, document units, depth 0: through). Failing-first stage: always empty.
+- (NSArray<NSArray<NSNumber *> *> *)roundHolesOfEntity:(NSString *)entity
+    NS_SWIFT_NAME(roundHoles(entity:));
+//! Hole size for a round hole without a saved-cut record. Failing-first stage: always no.
+- (BOOL)applyHoleResizeOnEntity:(NSString *)entity
+    radius:(double)radius
+    nearX:(double)nx y:(double)ny z:(double)nz
+    refusal:(NSString * _Nullable * _Nullable)refusal
+    NS_SWIFT_NAME(applyHoleResize(entity:radius:nearX:y:z:refusal:));
 - (BOOL)hasBooleanPairPreview NS_SWIFT_NAME(hasBooleanPairPreview());
 //! Externally driven Stop for detached preparation. Once stopped, this exact
 //! opening can never prepare again and cannot affect a later opening.

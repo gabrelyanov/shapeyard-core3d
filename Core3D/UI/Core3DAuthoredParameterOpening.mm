@@ -1584,6 +1584,20 @@ static NSString *sLastBakedBooleanPreviewRefusal = @"";
     } catch (...) { return NO; }
 }
 
+- (NSArray<NSArray<NSNumber *> *> *)roundHolesOfEntity:(NSString *)entity {
+    (void)entity;
+    return @[];
+}
+
+- (BOOL)applyHoleResizeOnEntity:(NSString *)entity
+    radius:(double)radius
+    nearX:(double)nx y:(double)ny z:(double)nz
+    refusal:(NSString * _Nullable * _Nullable)refusal {
+    (void)entity; (void)radius; (void)nx; (void)ny; (void)nz;
+    if (refusal) *refusal = @"unsupported-source";
+    return NO;
+}
+
 - (BOOL)clearBooleanPairPreview {
     if (![NSThread isMainThread]) return NO;
     GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
