@@ -65,6 +65,7 @@ namespace core3d::composite_recipe { struct Payload; struct Record; }
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
+#include <gp_GTrsf.hxx>
 #include <gp_Vec.hxx>
 #include <cstdint>
 #include "ProfilePersistence.hxx"
@@ -1940,6 +1941,13 @@ public:
         const TopoDS_Shape& result,
         const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks,
         Standard_Boolean eitherWay = Standard_False) const noexcept;
+    //! A Dimensions change (`sizeChange` maps the old shape onto `result`): each face of `result`
+    //! whose inside point, taken back through the inverse of `sizeChange`, lies on one of the
+    //! `painted` faces of the old shape, with that face's look. Only points are mapped: a lone
+    //! painted face is never rebuilt (its GTransform crashed in OCCT NurbsConvert, 17 Nov).
+    Standard_EXPORT std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> ResizedFaceColours(
+        const TopoDS_Shape& result, const gp_GTrsf& sizeChange,
+        const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& painted) const noexcept;
     //! Push-pull: a face of `result` that is new (lies on no face of `original`), flat, and in the
     //! plane of a coloured face it touches continues that face (the upper strip of a side made
     //! longer), so it takes that face's look. Faces that were there before never change look here.
