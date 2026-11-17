@@ -13706,6 +13706,10 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string& theFilename,
 			} catch (...) {}
 		}
 #endif
+		// Older empty files have no LayerTool until their first presentation.
+		// Install that display infrastructure on the isolated candidate, just as
+		// InitDoc does, before a saved baseline or an undoable Path can exist.
+		(void)XCAFDoc_DocumentTool::LayerTool(candidate->Main());
 		candidate->SetUndoLimit(OcctDocument::kNativeSessionUndoLimit);
 
 #if DEBUG
