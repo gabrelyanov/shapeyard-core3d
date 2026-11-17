@@ -3092,6 +3092,7 @@ bool ValidateAttachmentRigDocument(
 #include <gp_Lin.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepLib.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -13612,6 +13613,179 @@ Standard_Boolean OcctDocument::ApplyThroughHole(
         if (!ReplaceShape(label, shown)
             || !XCAFDoc_ShapeTool::GetShape(label).IsEqual(result)) {
             myOcafDoc->AbortCommand();
+            return Standard_False;
+        }
+        myOcafDoc->CommitCommand();
+        NotifyChanges();
+        refusal.clear();
+        return Standard_True;
+    } catch (...) {
+        try { if (!myOcafDoc.IsNull() && myOcafDoc->HasOpenCommand()) myOcafDoc->AbortCommand(); }
+        catch (...) {}
+        refusal = "invalid-result";
+        return Standard_False;
+    }
+}
+
+// Draw on a face (boolean lane plan 17 Nov): a circle (shape 0, `width` across) or a
+// rectangle (shape 1, `width` x `height`, sides along the face's longest straight edge)
+// on the flat face at `start`, pulled out (`depth` > 0, joined to the part) or pushed in
+// (`depth` < 0, a pocket). `direction` points into the part (as for Hole). Part-local
+// coordinates, document units. Nothing in the document changes.
+Standard_Boolean OcctDocument::BuildFaceFeature(
+    const TDF_Label& label, const gp_Pnt& start, const gp_Dir& direction, int shape,
+    double width, double height, double depth, TopoDS_Shape& output, std::string& refusal)
+    const noexcept {
+    output.Nullify();
+    refusal = "unsupported-source";
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || label.IsNull()
+            || label.Data() != myOcafDoc->GetData() || myOcafDoc->HasOpenCommand()
+            || (shape != 0 && shape != 1) || !std::isfinite(width) || width <= 0
+            || (shape == 1 && (!std::isfinite(height) || height <= 0))
+            || !std::isfinite(depth) || depth == 0) return Standard_False;
+        TDF_Label ignored;
+        if (!BakedBooleanAdmits(*this, label, ignored)) return Standard_False;
+        const TopoDS_Shape source = SingleSolidOf(DetachedCopy(XCAFDoc_ShapeTool::GetShape(label)));
+        if (source.IsNull() || source.ShapeType() != TopAbs_SOLID
+            || !BRepCheck_Analyzer(source, Standard_True).IsValid()) return Standard_False;
+        Bnd_Box box; BRepBndLib::AddOptimal(source, box, Standard_False, Standard_False);
+        if (box.IsVoid()) return Standard_False;
+        const double reach = std::sqrt(box.SquareExtent());
+        const double tolerance = std::max(reach * 1e-6, Precision::Confusion());
+        const gp_Dir outward = direction.Reversed();
+        // The flat face under the point, facing out along `outward`.
+        bool onFlatFace = false, haveAxis = false;
+        gp_Dir xAxis;
+        double longest = 0;
+        for (TopExp_Explorer it(source, TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face face = TopoDS::Face(it.Current());
+            if (!PointOnFace(start, face, std::max(tolerance, reach * 1e-5))) continue;
+            BRepAdaptor_Surface surface(face, Standard_False);
+            if (surface.GetType() != GeomAbs_Plane) continue;
+            gp_Dir normal = surface.Plane().Axis().Direction();
+            if (face.Orientation() == TopAbs_REVERSED) normal.Reverse();
+            if (!normal.IsEqual(outward, 1e-6)) continue;
+            onFlatFace = true;
+            for (TopExp_Explorer edge(face, TopAbs_EDGE); edge.More(); edge.Next()) {
+                BRepAdaptor_Curve curve(TopoDS::Edge(edge.Current()));
+                if (curve.GetType() != GeomAbs_Line) continue;
+                const double length = curve.Value(curve.FirstParameter())
+                    .Distance(curve.Value(curve.LastParameter()));
+                if (length > longest) { longest = length; xAxis = curve.Line().Direction(); haveAxis = true; }
+            }
+            break;
+        }
+        if (!onFlatFace) { refusal = "not-flat"; return Standard_False; }
+        const gp_Ax2 frame = haveAxis ? gp_Ax2(start, outward, xAxis) : gp_Ax2(start, outward);
+        TopoDS_Wire wire;
+        if (shape == 0) {
+            BRepBuilderAPI_MakeEdge edge(gp_Circ(frame, width / 2));
+            if (!edge.IsDone()) { refusal = "invalid-result"; return Standard_False; }
+            wire = BRepBuilderAPI_MakeWire(edge.Edge()).Wire();
+        } else {
+            const gp_Vec x = gp_Vec(frame.XDirection()) * (width / 2);
+            const gp_Vec y = gp_Vec(frame.YDirection()) * (height / 2);
+            BRepBuilderAPI_MakePolygon polygon(start.Translated(-x - y), start.Translated(x - y),
+                start.Translated(x + y), start.Translated(-x + y), Standard_True);
+            if (!polygon.IsDone()) { refusal = "invalid-result"; return Standard_False; }
+            wire = polygon.Wire();
+        }
+        BRepBuilderAPI_MakeFace profile(wire, Standard_True);
+        if (!profile.IsDone()) { refusal = "invalid-result"; return Standard_False; }
+        // A small overlap so the new part never only touches the face.
+        const double overlap = std::max(reach * 1e-4, 10 * Precision::Confusion());
+        const bool pull = depth > 0;
+        gp_Trsf shift;
+        shift.SetTranslation(gp_Vec(pull ? direction : outward) * overlap);
+        BRepBuilderAPI_Transform moved(profile.Face(), shift, Standard_True);
+        if (!moved.IsDone()) { refusal = "invalid-result"; return Standard_False; }
+        BRepPrimAPI_MakePrism prism(moved.Shape(),
+            gp_Vec(pull ? outward : direction) * (std::abs(depth) + overlap));
+        prism.Build();
+        if (!prism.IsDone()) { refusal = "invalid-result"; return Standard_False; }
+        TopTools_ListOfShape arguments, tools;
+        arguments.Append(source); tools.Append(prism.Shape());
+        TopoDS_Shape result;
+        if (pull) {
+            BRepAlgoAPI_Fuse fuse;
+            fuse.SetArguments(arguments); fuse.SetTools(tools);
+            fuse.SetRunParallel(Standard_False); fuse.SetNonDestructive(Standard_True);
+            fuse.SetFuzzyValue(Precision::Confusion());
+            fuse.Build();
+            if (!fuse.IsDone() || fuse.HasErrors()) { refusal = "invalid-result"; return Standard_False; }
+            fuse.SimplifyResult();
+            result = fuse.Shape();
+        } else {
+            BRepAlgoAPI_Cut cut;
+            cut.SetArguments(arguments); cut.SetTools(tools);
+            cut.SetRunParallel(Standard_False); cut.SetNonDestructive(Standard_True);
+            cut.SetFuzzyValue(Precision::Confusion());
+            cut.Build();
+            if (!cut.IsDone() || cut.HasErrors()) { refusal = "invalid-result"; return Standard_False; }
+            cut.SimplifyResult();
+            result = cut.Shape();
+        }
+        if (result.ShapeType() == TopAbs_COMPOUND) {
+            TopoDS_Shape only; int solids = 0;
+            for (TopExp_Explorer it(result, TopAbs_SOLID); it.More(); it.Next()) { only = it.Current(); ++solids; }
+            if (solids != 1) { refusal = "invalid-result"; return Standard_False; }
+            result = only;
+        }
+        GProp_GProps before, after;
+        BRepGProp::VolumeProperties(source, before);
+        BRepGProp::VolumeProperties(result, after);
+        if (result.IsNull() || result.ShapeType() != TopAbs_SOLID
+            || !BRepCheck_Analyzer(result, Standard_True).IsValid() || !(after.Mass() > 0)
+            || (pull ? !(after.Mass() > before.Mass() * (1 + 1e-9))
+                     : !(after.Mass() < before.Mass() * (1 - 1e-9)))) {
+            refusal = "empty-result";
+            return Standard_False;
+        }
+        TopoDS_Shape stable;
+        if (FileStableShape(result, stable)) result = stable;
+        output = result;
+        refusal.clear();
+        return Standard_True;
+    } catch (...) { output.Nullify(); refusal = "invalid-result"; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::ApplyFaceFeature(
+    const TDF_Label& label, const Handle(AIS_Shape)& presentation,
+    const gp_Pnt& start, const gp_Dir& direction, int shape, double width, double height,
+    double depth, std::string& refusal) noexcept {
+    try {
+        if (presentation.IsNull()) { refusal = "unsupported-source"; return Standard_False; }
+        TopoDS_Shape result;
+        if (!BuildFaceFeature(label, start, direction, shape, width, height, depth, result, refusal))
+            return Standard_False;
+        TDF_Label bakedRecord;
+        if (!BakedBooleanAdmits(*this, label, bakedRecord)) { refusal = "stale-source"; return Standard_False; }
+        std::vector<TDF_Label> oldFaceLabels;
+        std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> coloured;
+        const bool keepColours = CaptureFaceColours(label, 1.0, oldFaceLabels, coloured);
+        Handle(AIS_Shape) shown = new AIS_Shape(result);
+        shown->SetLocalTransformation(presentation->LocalTransformation());
+        refusal = "stale-source";
+        myOcafDoc->NewCommand();
+        if (!myOcafDoc->HasOpenCommand()) return Standard_False;
+        if (!bakedRecord.IsNull()) bakedRecord.ForgetAllAttributes(Standard_True);
+        if (core3d::retained_solid::HasRecord(label)
+            && !PrepareBooleanResultForFaceEdit(label)) {
+            myOcafDoc->AbortCommand();
+            return Standard_False;
+        }
+        ForgetInspectorPrimitiveRecord(label);
+        if (!ReplaceShape(label, shown)
+            || !XCAFDoc_ShapeTool::GetShape(label).IsEqual(result)) {
+            myOcafDoc->AbortCommand();
+            return Standard_False;
+        }
+        // Painted faces keep their paint; old face labels go (they would point at nothing).
+        if (keepColours && (!coloured.empty() || !oldFaceLabels.empty())
+            && !CarryFaceColours(label, result, oldFaceLabels, coloured)) {
+            myOcafDoc->AbortCommand();
+            refusal = "invalid-result";
             return Standard_False;
         }
         myOcafDoc->CommitCommand();

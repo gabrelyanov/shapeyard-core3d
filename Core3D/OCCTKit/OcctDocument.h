@@ -1944,6 +1944,18 @@ public:
         const TDF_Label& label, const Handle(AIS_Shape)& presentation,
         const gp_Pnt& start, const gp_Dir& direction, double radius, double depth,
         std::string& refusal) noexcept;
+    //! Draw on a face: a circle (shape 0, `width` across) or rectangle (shape 1, `width` x
+    //! `height`) on the flat face at `start` (part-local, document units; `direction` into the
+    //! part), pulled out and joined (`depth` > 0) or pushed in as a pocket (`depth` < 0).
+    //! Build is read-only (preview); Apply is one Undo step and keeps painted faces.
+    Standard_EXPORT Standard_Boolean BuildFaceFeature(
+        const TDF_Label& label, const gp_Pnt& start, const gp_Dir& direction, int shape,
+        double width, double height, double depth, TopoDS_Shape& result, std::string& refusal)
+        const noexcept;
+    Standard_EXPORT Standard_Boolean ApplyFaceFeature(
+        const TDF_Label& label, const Handle(AIS_Shape)& presentation,
+        const gp_Pnt& start, const gp_Dir& direction, int shape, double width, double height,
+        double depth, std::string& refusal) noexcept;
     //! The prepared result (in the target's own frame) and the two entity
     //! identifiers, for an on-model preview before Apply. Read-only.
     Standard_EXPORT Standard_Boolean BooleanPairPreparedPreview(

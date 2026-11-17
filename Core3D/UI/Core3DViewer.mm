@@ -2805,6 +2805,62 @@ bool Core3DViewer::applyThroughHole(const std::string& entity, const gp_Pnt& wor
     }catch(...){refusal="invalid-result";return false;}
 }
 
+bool Core3DViewer::showFaceFeaturePreview(const std::string& entity, const gp_Pnt& worldPoint,
+    const gp_Dir& worldDirection, int shape, double width, double height, double depth,
+    std::string& refusal) noexcept {
+    refusal="unsupported-source";
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull())return false;
+    try{
+        OCC_CATCH_SIGNALS
+        if(_booleanPairPreview&&!clearBooleanPairPreview())return false;
+        Handle(AIS_Shape) presentation;TDF_Label label;
+        if(!FindEntityPresentation(myContext,myDoc,entity,presentation,label))return false;
+        const gp_Trsf toWorld=presentation->LocalTransformation();
+        const double scale=std::abs(toWorld.ScaleFactor());
+        if(!(scale>0))return false;
+        const gp_Trsf toLocal=toWorld.Inverted();
+        TopoDS_Shape result;
+        if(!myDoc->BuildFaceFeature(label,worldPoint.Transformed(toLocal),
+            worldDirection.Transformed(toLocal),shape,width/scale,height/scale,depth/scale,
+            result,refusal))return false;
+        auto state=std::make_shared<BooleanPairPreview>();
+        state->target=presentation;state->targetLabel=label;state->operation=depth>0?0:1;
+        state->preview=new AIS_Shape(result);
+        state->preview->SetLocalTransformation(toWorld);
+        myDoc->LoadObjectMeterial(label,state->preview);
+        myContext->ClearSelected(Standard_False);
+        myContext->Display(state->preview,AIS_Shaded,0,Standard_False);
+        myContext->Deactivate(state->preview);
+        myContext->Erase(presentation,Standard_False);
+        myContext->UpdateCurrentViewer();
+        _booleanPairPreview=std::move(state);
+        refusal.clear();
+        return true;
+    }catch(...){refusal="invalid-result";return false;}
+}
+
+bool Core3DViewer::applyFaceFeature(const std::string& entity, const gp_Pnt& worldPoint,
+    const gp_Dir& worldDirection, int shape, double width, double height, double depth,
+    std::string& refusal) noexcept {
+    refusal="unsupported-source";
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()||entity.empty())return false;
+    try{
+        OCC_CATCH_SIGNALS
+        if(_booleanPairPreview)clearBooleanPairPreview();
+        Handle(AIS_Shape) presentation;TDF_Label label;
+        if(!FindEntityPresentation(myContext,myDoc,entity,presentation,label))return false;
+        const gp_Trsf toWorld=presentation->LocalTransformation();
+        const double scale=std::abs(toWorld.ScaleFactor());
+        if(!(scale>0))return false;
+        const gp_Trsf toLocal=toWorld.Inverted();
+        if(!myDoc->ApplyFaceFeature(label,presentation,worldPoint.Transformed(toLocal),
+            worldDirection.Transformed(toLocal),shape,width/scale,height/scale,depth/scale,refusal))
+            return false;
+        redrawDocument();
+        return true;
+    }catch(...){refusal="invalid-result";return false;}
+}
+
 bool Core3DViewer::clearBooleanPairPreview(bool reselectTarget) noexcept {
     if(![NSThread isMainThread]||myContext.IsNull())return false;
     const auto state=std::move(_booleanPairPreview);

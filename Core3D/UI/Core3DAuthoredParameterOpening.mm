@@ -1490,6 +1490,59 @@ static NSMapTable<Core3DViewController *, Core3DBooleanPairRecoveryIssuer *>
     } catch (...) { return nil; }
 }
 
+- (BOOL)showFaceFeaturePreviewOnEntity:(NSString *)entity
+    pointX:(double)px y:(double)py z:(double)pz
+    directionX:(double)dx y:(double)dy z:(double)dz
+    shape:(NSInteger)shape width:(double)width height:(double)height depth:(double)depth
+    refusal:(NSString * _Nullable * _Nullable)refusal {
+    if (refusal) *refusal = @"unsupported-source";
+    if (![NSThread isMainThread] || ![entity isKindOfClass:NSString.class] || entity.length == 0)
+        return NO;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const double length = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (!viewer || !std::isfinite(length) || length <= 0) return NO;
+        std::string code;
+        const bool shown = viewer->showFaceFeaturePreview(entity.UTF8String ?: "",
+            gp_Pnt(px, py, pz), gp_Dir(dx / length, dy / length, dz / length),
+            int(shape), width, height, depth, code);
+        if (refusal) *refusal = [NSString stringWithUTF8String:code.c_str()];
+        if (shown) [gl requestRender];
+        return shown ? YES : NO;
+    } catch (...) { return NO; }
+}
+
+- (BOOL)applyFaceFeatureOnEntity:(NSString *)entity
+    pointX:(double)px y:(double)py z:(double)pz
+    directionX:(double)dx y:(double)dy z:(double)dz
+    shape:(NSInteger)shape width:(double)width height:(double)height depth:(double)depth
+    refusal:(NSString * _Nullable * _Nullable)refusal {
+    if (refusal) *refusal = @"unsupported-source";
+    if (![NSThread isMainThread] || ![entity isKindOfClass:NSString.class] || entity.length == 0)
+        return NO;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        const double length = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (!viewer || !std::isfinite(length) || length <= 0) return NO;
+        std::string code;
+        const bool applied = viewer->applyFaceFeature(entity.UTF8String ?: "",
+            gp_Pnt(px, py, pz), gp_Dir(dx / length, dy / length, dz / length),
+            int(shape), width, height, depth, code);
+        if (refusal) *refusal = [NSString stringWithUTF8String:code.c_str()];
+        if (applied) {
+            const SEL checkSelections = NSSelectorFromString(@"checkSelections");
+            if ([gl respondsToSelector:checkSelections])
+                ((void (*)(id, SEL))[gl methodForSelector:checkSelections])(gl, checkSelections);
+            [gl requestRender];
+        }
+        return applied ? YES : NO;
+    } catch (...) { return NO; }
+}
+
 - (BOOL)showHolePreviewOnEntity:(NSString *)entity
     pointX:(double)px y:(double)py z:(double)pz
     directionX:(double)dx y:(double)dy z:(double)dz

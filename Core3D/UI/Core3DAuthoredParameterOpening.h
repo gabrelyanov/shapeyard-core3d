@@ -532,6 +532,22 @@ __attribute__((objc_subclassing_restricted))
     radius:(double)radius depth:(double)depth
     refusal:(NSString * _Nullable * _Nullable)refusal
     NS_SWIFT_NAME(applyThroughHole(entity:pointX:y:z:directionX:y:z:radius:depth:refusal:));
+//! Draw on a face (world coordinates, document units; direction into the part): a circle
+//! (shape 0, `width` across) or rectangle (shape 1, `width` x `height`) pulled out and joined
+//! (`depth` > 0) or pushed in (`depth` < 0). Preview: nothing changes (clearBooleanPairPreview
+//! puts the part back). Apply: one Undo step. `refusal` gets the engine code (never shown).
+- (BOOL)showFaceFeaturePreviewOnEntity:(NSString *)entity
+    pointX:(double)px y:(double)py z:(double)pz
+    directionX:(double)dx y:(double)dy z:(double)dz
+    shape:(NSInteger)shape width:(double)width height:(double)height depth:(double)depth
+    refusal:(NSString * _Nullable * _Nullable)refusal
+    NS_SWIFT_NAME(showFaceFeaturePreview(entity:pointX:y:z:directionX:y:z:shape:width:height:depth:refusal:));
+- (BOOL)applyFaceFeatureOnEntity:(NSString *)entity
+    pointX:(double)px y:(double)py z:(double)pz
+    directionX:(double)dx y:(double)dy z:(double)dz
+    shape:(NSInteger)shape width:(double)width height:(double)height depth:(double)depth
+    refusal:(NSString * _Nullable * _Nullable)refusal
+    NS_SWIFT_NAME(applyFaceFeature(entity:pointX:y:z:directionX:y:z:shape:width:height:depth:refusal:));
 - (BOOL)hasBooleanPairPreview NS_SWIFT_NAME(hasBooleanPairPreview());
 //! Externally driven Stop for detached preparation. Once stopped, this exact
 //! opening can never prepare again and cannot affect a later opening.

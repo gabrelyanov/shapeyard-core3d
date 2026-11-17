@@ -603,6 +603,15 @@ namespace core3d {
     bool applyThroughHole(const std::string& entity, const gp_Pnt& worldPoint,
         const gp_Dir& worldDirection, double radius, double depth,
         std::string& refusal) noexcept;
+    //! Draw on a face (world coordinates, document units): circle (shape 0) or rectangle
+    //! (shape 1) pulled out (depth > 0, joined) or pushed in (depth < 0). Preview shows the
+    //! result in place of the part (clearBooleanPairPreview puts it back); apply is one Undo step.
+    bool showFaceFeaturePreview(const std::string& entity, const gp_Pnt& worldPoint,
+        const gp_Dir& worldDirection, int shape, double width, double height, double depth,
+        std::string& refusal) noexcept;
+    bool applyFaceFeature(const std::string& entity, const gp_Pnt& worldPoint,
+        const gp_Dir& worldDirection, int shape, double width, double height, double depth,
+        std::string& refusal) noexcept;
     std::shared_ptr<retained_edge_treatment::r2::Work> prepareEdgeTreatmentEditR2(
         const std::shared_ptr<const retained_edge_treatment::r2::Snapshot>&,
         const retained_edge_treatment::r2::Edit&, const ObjectFrameIdentity&,
