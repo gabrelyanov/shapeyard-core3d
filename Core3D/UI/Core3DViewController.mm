@@ -5529,6 +5529,7 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
         XCAFDoc_VisMaterialPBR material;
     };
     std::vector<FaceStyle> pending;
+    std::vector<TDF_Label> staleMapRoots;
     try {
         for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
             const auto presentation = Handle(AIS_Shape)::DownCast(context->SelectedInteractive());
@@ -5538,7 +5539,21 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
                 || owner->Shape().ShapeType() != TopAbs_FACE || root.IsNull()) { Core3DFacePBRRefuse(@"no-face-owner"); return; }
             if (!doc->IsPresentationEditable(presentation)) { Core3DFacePBRRefuse(@"presentation-not-editable"); return; }
             if (!doc->IsEditableFreeSimpleDefinitionLabel(root)) { Core3DFacePBRRefuse(@"root-not-free-simple"); return; }
-            if (!shapes->IsSubShape(root, owner->Shape())) { Core3DFacePBRRefuse(@"face-not-subshape-of-root"); return; }
+            if (!shapes->IsSubShape(root, owner->Shape())) {
+                // The part's cached sub-shape map can still describe an undone edit (fault 2,
+                // phone stand: a Hole, Undo, then a face colour did nothing). Trust the shape
+                // itself: a face of the document's shape is valid; its map is rebuilt inside
+                // this colour's own command below.
+                const TopoDS_Shape labelShape = XCAFDoc_ShapeTool::GetShape(root);
+                TopTools_IndexedMapOfShape labelFaces;
+                if (!labelShape.IsNull()) TopExp::MapShapes(labelShape, TopAbs_FACE, labelFaces);
+                if (labelFaces.FindIndex(owner->Shape()) == 0) {
+                    Core3DFacePBRRefuse(@"face-not-subshape-of-root"); return;
+                }
+                if (std::none_of(staleMapRoots.begin(), staleMapRoots.end(),
+                                 [&](const TDF_Label& old) { return old.IsEqual(root); }))
+                    staleMapRoots.push_back(root);
+            }
             if (pending.size() >= 64) { Core3DFacePBRRefuse(@"too-many"); return; }
             // Owner shape is definition-local; SelectedShape applies the instance
             // transform and cannot safely identify a face on a scaled object.
@@ -5572,6 +5587,11 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
         if (pending.empty()) { Core3DFacePBRRefuse(@"nothing-selected"); return; }
         transaction->NewCommand();
         if (!transaction->HasOpenCommand()) return;
+        for (const auto& root : staleMapRoots) {
+            Handle(XCAFDoc_ShapeMapTool) map;
+            if (root.FindAttribute(XCAFDoc_ShapeMapTool::GetID(), map) && !map.IsNull())
+                map->SetShape(XCAFDoc_ShapeTool::GetShape(root));
+        }
         std::vector<OcctPBRMaterialUpdate> updates;
         for (const auto& style : pending) {
             const auto label = shapes->AddSubShape(style.root, style.face);
