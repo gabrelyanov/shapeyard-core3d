@@ -735,6 +735,11 @@ namespace core3d {
         std::vector<MeasureMeshPick> measureMeshPicks() noexcept;
         void clearMeasureMeshPicks() noexcept { _measureMeshPicks.clear(); }
         void Select(int theX, int theY);
+        //! The same tap, resolved behind the selected part's move arrows: the
+        //! nearest part under the point that is not the arrows and not already
+        //! selected. For a tap that began on an arrow while a tool waits for a
+        //! tapped part; call it only after the arrows' own gesture has ended.
+        void SelectBehindMoveHandles(int theX, int theY);
         void StartRotation(int theX, int theY);
         void Rotation(int theX, int theY);
         void FinishInteraction(int theX, int theY);
@@ -950,7 +955,8 @@ namespace core3d {
                         std::uint32_t viewportHeight,
                         double targetX = 0.0, double targetY = 0.0,
                         double targetWidth = 1.0, double targetHeight = 1.0,
-                        const ObjectFrameIdentity* objectIdentity = nullptr) noexcept;
+                        const ObjectFrameIdentity* objectIdentity = nullptr,
+                        bool fillTarget = false) noexcept;
         //! Fit selected committed sources plus an exact Ready axis preview.
         //! Never changes the document, selection, operation or model history.
         bool frameMirrorPreview(const MirrorPreviewFrameIdentity& expected,
@@ -1011,6 +1017,10 @@ namespace core3d {
         //! committed sources; empty generic content is a valid explicit clear.
         scene::OcctSceneSnapshotBuilder::OverlayPointer
         captureScenePresentationOverlay() noexcept;
+        //! The result shapes a tool is showing before its tick (Shell, Bevel,
+        //! Join, Cut, Hole) that are on screen now; empty when none. Read-only.
+        //! The OpenGL view draws their edge lines from this.
+        std::vector<Handle(AIS_Shape)> previewedResultPresentations() const noexcept;
 #ifdef DEBUG
         struct RawR2AuthorityObservation {
             bool native = false;
@@ -1162,6 +1172,7 @@ namespace core3d {
         bool debugSelectHiddenBooleanOwner(const std::string& entity) noexcept;
 #endif
     private:
+        void selectAt(int theX, int theY, bool behindMoveHandles);
         friend class native_opening::Context;
         friend class native_opening::CommandLease;
         std::shared_ptr<const native_opening::Fence> recaptureNativeOpeningFence(

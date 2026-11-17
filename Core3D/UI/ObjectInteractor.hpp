@@ -242,6 +242,8 @@ namespace core3d {
         }
 #endif
         const bool isManipulatorAttached() const;
+        //! The move arrows as the viewer draws and picks them (may be null).
+        Handle(AIS_InteractiveObject) manipulatorPresentation() const { return _manipulator; }
         //! True only from a successful raw touch start through finish/cancel.
         //! Unlike isManipulatorInteractionActive(), hover detection alone does
         //! not activate this state; mirror-plane gestures are included.
