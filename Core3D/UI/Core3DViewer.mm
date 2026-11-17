@@ -5352,7 +5352,8 @@ bool HasActiveOperationLedger(
 {
     try {
         if (theObjectInteractor != nullptr
-            && (theObjectInteractor->hasUnresolvedDuplicate()
+            && (theObjectInteractor->hasUnresolvedDeletion()
+                || theObjectInteractor->hasUnresolvedDuplicate()
                 || theObjectInteractor->isPickingMirrorPlane()
                 || theObjectInteractor->hasActiveBoolean()
                 || theObjectInteractor->hasUnresolvedBoolean()
@@ -11284,6 +11285,7 @@ OrdinaryEditResult Core3DViewer::commitObjectAlignment(const std::shared_ptr<Obj
 
 bool Core3DViewer::hasUnresolvedOrdinaryEditExcludingQueuedLoad() const noexcept {
     return _documentReplacementWork != nullptr
+        || (_objectInteractor && _objectInteractor->hasUnresolvedDeletion())
         || (_ordinaryEditController != nullptr && _ordinaryEditController->blocksNormalWork());
 }
 bool Core3DViewer::hasUnresolvedOrdinaryEdit() const noexcept {
@@ -11320,6 +11322,9 @@ OrdinaryEditLease Core3DViewer::beginOrdinaryTransform(
 }
 OrdinaryEditResult Core3DViewer::reconcileOrdinaryEdit() noexcept {
     if (_queuedAssetLoadWork) return OrdinaryEditResult::Busy;
+    if (_objectInteractor && _objectInteractor->hasUnresolvedDeletion())
+        return _objectInteractor->reconcileDeletion() ? OrdinaryEditResult::NoChange
+            : OrdinaryEditResult::OutcomeUnknown;
     if (_documentReplacementWork) {
         return restoreDocumentReplacement() ? OrdinaryEditResult::NoChange : OrdinaryEditResult::OutcomeUnknown;
     }

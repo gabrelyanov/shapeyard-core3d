@@ -43,6 +43,40 @@ Settlement Settle(const sweep_owner::Receipt& receipt) noexcept {
     return settlement;
 }
 
+// A refusal has to tell the person what to change (round 1, K15). The document
+// and its history are untouched by every refusal named here.
+NSString *RefusalSentence(const sweep_owner::Receipt& receipt) {
+    const std::string& reason = receipt.reason;
+    if (reason == "bend-too-tight") {
+        if (receipt.largestRadiusMM >= 0.1)
+            return [NSString stringWithFormat:
+                @"The tube is too thick for the tightest bend of its guide. Use a radius of %.1f mm or less, or move the guide points further apart to widen the bend.",
+                receipt.largestRadiusMM];
+        return @"The guide bends too sharply for a tube. Move the guide points further apart to widen the bend.";
+    }
+    if (reason == "path-too-close-to-itself")
+        return @"The tube would touch itself. Use a smaller radius, or move the stretches of the guide that run side by side further apart.";
+    if (reason == "path-has-corner")
+        return @"The guide has a sharp corner. Move its points so the guide runs smoothly through it.";
+    if (reason == "path-stalls")
+        return @"Two guide points next to each other sit in the same place. Move them apart.";
+    if (reason == "path-length-out-of-range")
+        return @"The guide is too short or too long. A tube needs a guide between 1 mm and 1 km long.";
+    if (reason == "path-too-far-away")
+        return @"The guide is too far from the centre of the scene. Move its points closer.";
+    if (reason == "seed-along-path")
+        return @"The seed direction runs along the start of the guide. Enter a seed that points across it.";
+    if (reason == "radius-or-twist-out-of-range")
+        return @"The radius or twist does not fit this guide. Keep the larger radius within four times the smaller, change the radius more gently along the guide, or use less twist.";
+    if (reason == "closed-path-does-not-close")
+        return @"The closed guide does not join up smoothly. Make its end meet its start in the same direction, or choose open ends.";
+    if (reason == "creation-fence-stale")
+        return @"The model changed while the tube was being set up. Close Tube and open it again.";
+    return [NSString stringWithFormat:
+        @"The tube could not be made from these values. Try a smaller radius or a gentler guide. (%s)",
+        reason.c_str()];
+}
+
 bool ExactKeys(NSDictionary *value, NSArray<NSString *> *keys) {
     if (![value isKindOfClass:NSDictionary.class] || value.count != keys.count) return false;
     return [[NSSet setWithArray:value.allKeys]
@@ -282,8 +316,7 @@ bool CaptureOpening(Core3DViewController *controller, Capture& output) noexcept 
             ? @"Spatial sweep created as one native history command."
             : result == Core3DProfileConstructionResultRecoveryRequired
                 ? @"Spatial-sweep creation close is unknown; native recovery ownership is retained."
-                : [NSString stringWithFormat:@"Spatial-sweep creation refused without history (%s).",
-                    receipt.reason.c_str()], entity);
+                : RefusalSentence(receipt), entity);
 }
 
 - (BOOL)cancel {
