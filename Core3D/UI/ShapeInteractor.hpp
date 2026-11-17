@@ -247,6 +247,7 @@ namespace core3d {
 			Standard_Boolean setRoundRadiusForSelection(Standard_Real radius) noexcept;
 			Standard_Real roundMetersPerUnit() const noexcept;
 			Standard_Real roundMaximumRadiusMM() const noexcept;
+			Standard_Real bevelMetersPerUnit() const noexcept;
 			BevelFailureObservation roundFailureObservation() const noexcept;
 			Standard_Boolean setChamferValueForSelection(const Standard_Real value);
 			BevelApplyResult applyBevel() noexcept;

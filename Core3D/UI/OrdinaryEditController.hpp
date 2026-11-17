@@ -113,7 +113,7 @@ static_assert(static_cast<std::uint8_t>(OrdinaryEditResult::BudgetRefused) == 6)
 static_assert(static_cast<std::uint8_t>(OrdinaryEditResult::OutcomeUnknown) == 3);
 static_assert(static_cast<std::uint8_t>(OrdinaryEditResult::Busy) == 4);
 static_assert(static_cast<std::uint8_t>(OrdinaryEditResult::Invalid) == 5);
-enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild, LoftStationRebuild, CylindricalCut, CylindricalCutSourceRebuild, CylindricalCutProgramSourceRebuild, MeshRegionExtrude, MeshRegionInset, CylindricalCutRing, WedgeCut, RetainedFillet, RetainedEdgeTreatment, CompleteProfileRebuild };
+enum class OrdinaryTransformOperation : std::uint8_t { Translate, Rotate, Scale, MeshUVAtlas, MeshVertexMove, MeshWindingRepair, ProfileRebuild, EnclosureRebuild, SweepRebuild, LoftStationRebuild, CylindricalCut, CylindricalCutSourceRebuild, CylindricalCutProgramSourceRebuild, MeshRegionExtrude, MeshRegionInset, CylindricalCutRing, WedgeCut, RetainedFillet, RetainedEdgeTreatment, CompleteProfileRebuild, MeshSolidConversion };
 inline bool IsCylindricalCutOperation(OrdinaryTransformOperation op) noexcept {
     return op==OrdinaryTransformOperation::CylindricalCut||op==OrdinaryTransformOperation::CylindricalCutRing||op==OrdinaryTransformOperation::WedgeCut||op==OrdinaryTransformOperation::RetainedFillet;
 }
@@ -446,6 +446,7 @@ struct OrdinaryMeshCopySource {
 };
 
 struct OrdinaryCreationLedger {
+    std::shared_ptr<ordinary_naming::Record> namingHistory;
     std::optional<OrdinaryModelingReceiptLedger> modelingReceipt;
     std::optional<OrdinaryMeshCopySource> meshCopy;
     OrdinaryCreationCatalog previousRoots;

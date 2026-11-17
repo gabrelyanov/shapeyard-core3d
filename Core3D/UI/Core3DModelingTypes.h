@@ -908,6 +908,16 @@ typedef NS_ENUM(NSInteger, Core3DMeshWindingRepairResult) {
     Core3DMeshWindingRepairResultFailed,
 };
 
+//! Make solid from one closed imported mesh (Job 4). Committed = 1, as the native check expects.
+typedef NS_ENUM(NSInteger, Core3DMeshSolidConversionResult) {
+    Core3DMeshSolidConversionResultUnchanged,
+    Core3DMeshSolidConversionResultCommitted,
+    Core3DMeshSolidConversionResultRejected,
+    Core3DMeshSolidConversionResultBusy,
+    Core3DMeshSolidConversionResultRecoveryRequired,
+    Core3DMeshSolidConversionResultFailed,
+};
+
 typedef NS_ENUM(NSInteger, Core3DMeshUVAtlasResult) {
     Core3DMeshUVAtlasResultUnchanged,
     Core3DMeshUVAtlasResultCommitted,
@@ -1193,6 +1203,9 @@ typedef struct {
 - (BOOL)setRoundRadius:(CGFloat)radius;
 - (double)roundMetersPerUnit;
 - (double)roundMaximumRadiusMM;
+/// Metres per stored unit for the active plain Bevel (document unit x the
+/// selected parts' common scale); 0 when inactive or the scales differ.
+- (double)bevelMetersPerUnit;
 - (Core3DRoundFailureObservation)roundFailureObservation;
 - (Boundaries)getChamferBoundaries;
 - (Core3DModelingOperationResult)tryApplyChamfer

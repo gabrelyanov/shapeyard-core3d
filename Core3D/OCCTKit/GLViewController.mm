@@ -76,6 +76,7 @@
 #include <unistd.h>
 
 #if DEBUG
+#include <chrono>
 // D333/D326 probe (defined in OcctDocument.mm): real measurements of
 // relocation-table payloads still bound when a bounded retrieval driver dies.
 void Core3DDebugResetBoundedRetrievalDriverTeardownStats();
@@ -1422,6 +1423,7 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     CGFloat _selectedSurfaceWidthPixels;
     CGFloat _selectedFaceWashOpacity;
     BOOL _selectedSurfaceAppearanceDirty;
+    BOOL _debugForceSelectionOutlineFallback;
     BOOL _selectedSurfaceWasFace;
     Handle(Graphic3d_Structure) _selectedFaceWash;
     std::vector<TopoDS_Shape> _selectedWashFaces;
@@ -1438,6 +1440,9 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     // Whether the committed lines were last built for work on whole objects: smooth edges
     // and closed same-plane seams are left out then, and must come back in Face and Edge mode.
     int _committedBoundaryObjectMode;
+#if DEBUG
+    double _debugHistoryDrawingCosts[5]; // Zero-initialized with the ObjC owner.
+#endif
     Handle(AIS_Shape) _splitBoundaryPresentation;
     // Every shape whose own edges are drawn now in place of the committed lines: the Split
     // candidate, or the result a tool is previewing (the first one is also kept above).
@@ -1796,11 +1801,17 @@ static BOOL PlainTapsSelectBehindMoveHandles()
 - (BOOL) Draw
 {
     if (_didSetupViewer && _viewer != nullptr) {
+#if DEBUG
+        const auto timingDrawStart = std::chrono::steady_clock::now();
+#endif
         // Appearance is optional presentation work. An allocation/OCCT style
         // failure must never suppress the model's normal native frame.
         try { [self updateCommittedBoundaries]; } catch (...) {
             try { [self clearCommittedBoundaries]; } catch (...) {}
         }
+#if DEBUG
+        const auto timingBoundariesEnd = std::chrono::steady_clock::now();
+#endif
         try { [self updateSelectedSurfaceAppearance]; } catch (...) {
             try {
                 [self clearSelectedFaceWash];
@@ -1810,10 +1821,38 @@ static BOOL PlainTapsSelectBehindMoveHandles()
                     context->HilightSelected(Standard_False);
             } catch (...) {}
         }
+#if DEBUG
+        const auto timingSelectionEnd = std::chrono::steady_clock::now();
+        const BOOL rendered = _viewer->RenderFrame();
+        const auto timingDrawEnd = std::chrono::steady_clock::now();
+        if ([NSThread isMainThread]) {
+            auto seconds = [](auto from, auto to) {
+                return std::chrono::duration<double>(to - from).count();
+            };
+            ++_debugHistoryDrawingCosts[0];
+            _debugHistoryDrawingCosts[1] += seconds(timingDrawStart, timingBoundariesEnd);
+            _debugHistoryDrawingCosts[2] += seconds(timingBoundariesEnd, timingSelectionEnd);
+            _debugHistoryDrawingCosts[3] += seconds(timingSelectionEnd, timingDrawEnd);
+            _debugHistoryDrawingCosts[4] = std::max(_debugHistoryDrawingCosts[4], seconds(timingDrawStart, timingDrawEnd));
+        }
+        return rendered;
+#else
         return _viewer->RenderFrame();
+#endif
     }
     return NO;
 }
+
+#if DEBUG
+- (NSDictionary<NSString *, NSNumber *> *)debugHistoryDrawingCosts {
+    if (![NSThread isMainThread]) return @{};
+    return @{ @"drawCalls": @(_debugHistoryDrawingCosts[0]),
+              @"drawBoundarySeconds": @(_debugHistoryDrawingCosts[1]),
+              @"drawSelectionSeconds": @(_debugHistoryDrawingCosts[2]),
+              @"drawRenderSeconds": @(_debugHistoryDrawingCosts[3]),
+              @"drawMaxSeconds": @(_debugHistoryDrawingCosts[4]) };
+}
+#endif
 
 - (void)setSelectedEdgeAppearanceColor:(UIColor *)color widthPoints:(CGFloat)width {
     CGFloat r = 0, g = 0, b = 0, a = 0;
@@ -1826,6 +1865,29 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     _selectedEdgeAppearanceDirty = YES;
     if (_didSetupViewer) [self requestRender];
 }
+
+#ifdef DEBUG
+- (void)debugSetForceSelectionOutlineFallback:(BOOL)force {
+    _debugForceSelectionOutlineFallback = force;
+    _selectedSurfaceAppearanceDirty = YES;
+    if (_didSetupViewer) [self requestRender];
+}
+
+- (nullable NSArray<NSNumber *> *)debugSelectedPartHighlightRGB {
+    if (!NSThread.isMainThread || _viewer == nullptr) return nil;
+    const auto context = _viewer->AisContext();
+    if (context.IsNull()) return nil;
+    context->InitSelected();
+    if (!context->MoreSelected()) return nil;
+    const Handle(AIS_InteractiveObject) part = context->SelectedInteractive();
+    if (part.IsNull()) return nil;
+    Handle(Prs3d_Drawer) style = part->HilightAttributes();
+    if (style.IsNull()) style = context->HighlightStyle(Prs3d_TypeOfHighlight_Selected);
+    if (style.IsNull()) return nil;
+    const Quantity_Color colour = style->Color();
+    return @[@(colour.Red()), @(colour.Green()), @(colour.Blue())];
+}
+#endif
 
 - (void)setSelectedSurfaceAppearanceColor:(UIColor *)color widthPoints:(CGFloat)width faceWashOpacity:(CGFloat)opacity {
     CGFloat r = 0, g = 0, b = 0, a = 0;
@@ -2074,6 +2136,9 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     }
     const CGFloat pixels = _selectedSurfaceWidthPoints * [self drawableScale];
     if (!std::isfinite(pixels) || pixels <= 0) { fallback(); return; }
+#ifdef DEBUG
+    if (_debugForceSelectionOutlineFallback) { fallback(); return; }
+#endif
     std::vector<TopoDS_Shape> faces;
     const auto document = _viewer->getDocument();
     for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
@@ -2389,6 +2454,14 @@ static BOOL PlainTapsSelectBehindMoveHandles()
             && [strongSelf->_delegate respondsToSelector:
                 @selector(viewer:didChangeGeometrySnapFeedbackEnded:)]) {
             [strongSelf->_delegate viewer:strongSelf didChangeGeometrySnapFeedbackEnded:ended];
+        }
+    });
+    _viewer->setLiveMoveChangedCallback([weakSelf](bool ended) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf && strongSelf->_delegate
+            && [strongSelf->_delegate respondsToSelector:
+                @selector(viewer:didChangeLiveMoveEnded:)]) {
+            [strongSelf->_delegate viewer:strongSelf didChangeLiveMoveEnded:ended];
         }
     });
     _viewer->setBooleanPreviewStateChangedCallback([weakSelf]() {
@@ -4039,6 +4112,22 @@ static BOOL PlainTapsSelectBehindMoveHandles()
         return 0.0;
     }
     return _viewer->getShapeInteractor()->roundMaximumRadiusMM();
+}
+
+- (double)bevelMetersPerUnit {
+    Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+    if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
+        // The visible raw R2 Bevel keeps its own entry contract (the slider
+        // value is its local amount; testRawR2VisibleChamfer...BothUnits pins
+        // it in metre documents). Report the identity factor so the editor
+        // shows and accepts that value unchanged.
+        return 0.001;
+    }
+    if (_viewer == nullptr || [self getGizmoType] != PrimitiveGizmoTypeChamfer
+        || _viewer->getShapeInteractor() == nullptr) {
+        return 0.0;
+    }
+    return _viewer->getShapeInteractor()->bevelMetersPerUnit();
 }
 
 - (Core3DRoundFailureObservation)roundFailureObservation {
@@ -6531,6 +6620,9 @@ static BOOL PlainTapsSelectBehindMoveHandles()
             state.sourceTopologyNodeCount),
         @"candidateTopologyNodeCount": @(
             state.candidateTopologyNodeCount),
+        @"debugFaceShape": @(state.debugFaceShape),
+        @"debugConeStep": @(state.debugConeStep),
+        @"debugComputeStage": @(state.debugComputeStage),
         @"candidateSolidCount": @(state.candidateSolidCount),
         @"sourceVolume": @(state.sourceVolume),
         @"candidateVolume": @(state.candidateVolume),

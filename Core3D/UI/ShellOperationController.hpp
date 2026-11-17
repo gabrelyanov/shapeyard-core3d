@@ -17,6 +17,7 @@
 #include <BRepGProp.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepPrimAPI_MakeCone.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <ShapeAnalysis_CanonicalRecognition.hxx>
@@ -171,6 +172,73 @@ inline Standard_Boolean ShellFaceOutward(const TopoDS_Face& face, gp_Pln& plane,
     return Standard_True;
 }
 
+#ifdef DEBUG
+//! Debug-only probes for the native Shell checks (which step refused a rebuild or a preview).
+inline std::atomic<int> gShellDebugFaceShape{0};
+inline std::atomic<int> gShellDebugConeStep{0};
+inline std::atomic<int> gShellDebugComputeStage{0};
+#define SHELL_DEBUG_PROBE(name, value) (name).store((value))
+#else
+#define SHELL_DEBUG_PROBE(name, value) ((void)0)
+#endif
+
+//! An Add cone resized in the Inspector (desk lamp shade, CTO 15 Nov 17:40) is stored
+//! as splines like the cylinder below. One flat base square to an axis, at most one
+//! parallel flat top and a round outline: rebuild the cone the user typed from its
+//! bounds and the width of each flat end. Ends of equal width are a cylinder: no change.
+inline Standard_Boolean ResizedConeForShell(
+    const Bnd_Box& box, const std::vector<TopoDS_Face>& flat,
+    const std::vector<gp_Pln>& planes, const Standard_Real tolerance,
+    TopoDS_Shape& cone) noexcept
+{
+    cone.Nullify();
+    try {
+        if (flat.empty() || flat.size() > 2 || flat.size() != planes.size()) { SHELL_DEBUG_PROBE(gShellDebugConeStep, 1); return Standard_False; }
+        const gp_Dir normal = planes[0].Axis().Direction();
+        int k = -1;
+        for (int c = 0; c < 3; ++c) {
+            const gp_Dir unit(c == 0, c == 1, c == 2);
+            if (std::abs(std::abs(unit.Dot(normal)) - 1.0) <= 1.0e-9) k = c;
+        }
+        if (k < 0) { SHELL_DEBUG_PROBE(gShellDebugConeStep, 2); return Standard_False; }
+        for (const auto& plane : planes)
+            if (!plane.Axis().Direction().IsParallel(normal, 1.0e-9)) { SHELL_DEBUG_PROBE(gShellDebugConeStep, 3); return Standard_False; }
+        Standard_Real lo[3], hi[3];
+        box.Get(lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+        const int i = (k + 1) % 3, j = (k + 2) % 3;
+        const Standard_Real width = hi[i] - lo[i], depth = hi[j] - lo[j], height = hi[k] - lo[k];
+        if (!(height > tolerance) || !(width > tolerance)
+            || std::abs(width - depth) > 1.0e-3 * std::max(width, depth)) { SHELL_DEBUG_PROBE(gShellDebugConeStep, 4); return Standard_False; }
+        const Standard_Real slack = std::max(tolerance, 1.0e-3 * height);
+        Standard_Real radius[2] = {0.0, 0.0};
+        for (std::size_t f = 0; f < flat.size(); ++f) {
+            Bnd_Box capBox;
+            BRepBndLib::AddOptimal(flat[f], capBox, Standard_False, Standard_False);
+            if (capBox.IsVoid()) { SHELL_DEBUG_PROBE(gShellDebugConeStep, 5); return Standard_False; }
+            Standard_Real c0[3], c1[3];
+            capBox.Get(c0[0], c0[1], c0[2], c1[0], c1[1], c1[2]);
+            const Standard_Real at = planes[f].Location().Coord(k + 1);
+            const int end = std::abs(at - lo[k]) <= slack ? 0
+                : (std::abs(at - hi[k]) <= slack ? 1 : -1);
+            if (end < 0 || radius[end] > 0.0) { SHELL_DEBUG_PROBE(gShellDebugConeStep, 6); return Standard_False; }
+            radius[end] = (c1[i] - c0[i]) / 2;
+        }
+        const Standard_Real wide = std::max(radius[0], radius[1]);
+        if (std::abs(wide - width / 2) > 0.01 * width
+            || std::abs(radius[0] - radius[1]) <= 0.02 * wide) { SHELL_DEBUG_PROBE(gShellDebugConeStep, 7); return Standard_False; }
+        // The wide end is the bounds' width exactly, as the user typed it.
+        radius[radius[0] >= radius[1] ? 0 : 1] = width / 2;
+        gp_Pnt base;
+        base.SetCoord(k + 1, lo[k]);
+        base.SetCoord(i + 1, (lo[i] + hi[i]) / 2);
+        base.SetCoord(j + 1, (lo[j] + hi[j]) / 2);
+        const gp_Dir up(k == 0, k == 1, k == 2);
+        SHELL_DEBUG_PROBE(gShellDebugConeStep, 99);
+        cone = BRepPrimAPI_MakeCone(gp_Ax2(base, up), radius[0], radius[1], height).Shape();
+        return !cone.IsNull();
+    } catch (...) { cone.Nullify(); { SHELL_DEBUG_PROBE(gShellDebugConeStep, 8); return Standard_False; } }
+}
+
 //! An Add box or cylinder resized with different Width/Depth/Height is stored
 //! as splines, and the offset kernel cannot hollow a spline cylinder. When the
 //! source is exactly such a box (six flat faces facing the axes) or cylinder
@@ -197,6 +265,7 @@ inline Standard_Boolean AnalyticPrimitiveForShell(
             else if (wall.IsNull()) wall = face;
             else return Standard_False;
         }
+        SHELL_DEBUG_PROBE(gShellDebugFaceShape, 100 * faces.Extent() + 10 * static_cast<int>(flat.size()) + (wall.IsNull() ? 0 : 1) + (anySpline ? 1000 : 0));
         if (!anySpline) return Standard_False;
         Bnd_Box box; BRepBndLib::AddOptimal(source, box, Standard_False, Standard_False);
         if (box.IsVoid()) return Standard_False;
@@ -210,6 +279,11 @@ inline Standard_Boolean AnalyticPrimitiveForShell(
             }
             Standard_Real x0, y0, z0, x1, y1, z1; box.Get(x0, y0, z0, x1, y1, z1);
             candidate = BRepPrimAPI_MakeBox(gp_Pnt(x0, y0, z0), gp_Pnt(x1, y1, z1)).Shape();
+        } else if (!wall.IsNull()
+                   && ((faces.Extent() == 2 && flat.size() == 1)
+                       || (faces.Extent() == 3 && flat.size() == 2))
+                   && ResizedConeForShell(box, flat, planes, tolerance, candidate)) {
+            // A resized cone (pointed or cut flat on top): rebuilt from its bounds.
         } else if (faces.Extent() == 3 && flat.size() == 2 && !wall.IsNull()) {
             // The resize approximates the circle; recognise it loosely and
             // rebuild the cylinder the user typed (its bounding size).
@@ -243,6 +317,7 @@ inline Standard_Boolean AnalyticPrimitiveForShell(
         BRepGProp::VolumeProperties(candidate, after);
         if (!(before.Mass() > 0)
             || std::abs(after.Mass() - before.Mass()) > before.Mass() * 0.02) return Standard_False;
+        SHELL_DEBUG_PROBE(gShellDebugFaceShape, gShellDebugFaceShape.load() + 10000);
         TopTools_IndexedMapOfShape candidateFaces;
         TopExp::MapShapes(candidate, TopAbs_FACE, candidateFaces);
         for (const auto& opening : openings) {
@@ -253,7 +328,9 @@ inline Standard_Boolean AnalyticPrimitiveForShell(
                 const TopoDS_Face face = TopoDS::Face(candidateFaces(i));
                 gp_Pln other; gp_Dir otherOutward;
                 if (!ShellFaceOutward(face, other, otherOutward)) continue;
-                if (otherOutward.IsEqual(outward, 1.0e-9)
+                // Same plane, either way round: a flat spline face's fitted plane may point
+                // inward, and a box, cylinder or cone never has two faces on one plane.
+                if (otherOutward.IsParallel(outward, 1.0e-7)
                     && other.Distance(plane.Location()) <= tolerance) {
                     if (!match.IsNull()) return Standard_False;
                     match = face;
@@ -262,6 +339,7 @@ inline Standard_Boolean AnalyticPrimitiveForShell(
             if (match.IsNull()) return Standard_False;
             rebuiltOpenings.push_back(match);
         }
+        SHELL_DEBUG_PROBE(gShellDebugFaceShape, gShellDebugFaceShape.load() + 20000);
         rebuilt = candidate;
         return Standard_True;
     } catch (...) { rebuilt.Nullify(); rebuiltOpenings.clear(); return Standard_False; }
@@ -513,6 +591,7 @@ struct ShellPreviewDebugState {
     Standard_Size sourceTopologyNodeCount = 0;
     Standard_Size candidateTopologyNodeCount = 0;
     Standard_Size candidateSolidCount = 0;
+    Standard_Integer debugFaceShape = 0, debugConeStep = 0, debugComputeStage = 0;
     Standard_Real sourceVolume = 0.0;
     Standard_Real candidateVolume = 0.0;
     Standard_Real candidateBounds[6] = {};
@@ -617,6 +696,9 @@ private:
         std::string definitionIdentifier;
         profile::Record profileRecord;
         std::vector<int> profileShellOpenings;
+        // A standalone saved Hole that Apply bakes inside its own command
+        // (PrepareBooleanResultForFaceEdit); Undo restores the hole record.
+        Standard_Boolean bakesSavedCut = Standard_False;
     };
 
     Standard_Boolean tryPrepareSource(
@@ -651,6 +733,7 @@ private:
     Handle(AIS_Shape) myPreviewResult;
     TopoDS_Shape myPendingCandidate;
     std::optional<profile::Parameters> myPendingProfile;
+    std::shared_ptr<ordinary_naming::Record> myNamingHistory;
     std::shared_ptr<ShellPreviewWorker> myWorker;
     std::function<void()> myPreviewStateChangedCallback;
     ShellPreviewState myState = ShellPreviewState::Unavailable;

@@ -110,6 +110,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)setRoundRadius:(CGFloat)radius;
 - (double)roundMetersPerUnit;
 - (double)roundMaximumRadiusMM;
+- (double)bevelMetersPerUnit;
 - (Core3DRoundFailureObservation)roundFailureObservation;
 - (BOOL)applyChamfer;
 - (BOOL)cancelChamfer;
@@ -186,6 +187,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL) hasActiveBoolean;
 - (BOOL) hasTrialMirrorObjects;
 #ifdef DEBUG
+//! Test only: build no selection outline, so the engine highlight fallback draws instead.
+- (void)debugSetForceSelectionOutlineFallback:(BOOL)force;
+//! Test only: the colour (r, g, b) the engine highlight would draw the first selected part in.
+- (nullable NSArray<NSNumber *> *)debugSelectedPartHighlightRGB;
 - (void)debugRequestRender;
 - (void)debugSetDuplicateCommitMode:(NSInteger)mode;
 - (void)debugSetMaximumDisplayTraversalNodes:(NSUInteger)limit;
@@ -307,6 +312,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSDictionary<NSString *, id> *_Nullable)debugViewportRGBA;
 - (NSDictionary<NSString *, NSNumber *> *)
     debugFramebufferStatistics;
+- (NSDictionary<NSString *, NSNumber *> *)debugHistoryDrawingCosts;
 #endif
 
 - (void) setConstructorMode;

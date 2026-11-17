@@ -563,6 +563,52 @@ private:
     std::shared_ptr<std::atomic_bool> myCancellation;
 };
 
+//! OCCT's chamfer builder, unlike the fillet builder, exposes no faulty
+//! contour status. A plain chamfer that failed at theDistance is classified
+//! as refused for its size only when the same edges chamfered at a quarter
+//! of that distance build one valid solid: then a smaller value works and
+//! the person can be told so. Anything else stays an ordinary failure.
+BevelFailureKind ClassifyFailedPlainChamfer(
+    const BevelPreviewWorkerSource& theSource,
+    const Standard_Real theDistance,
+    const std::shared_ptr<std::atomic_bool>& theCancellation,
+    const Standard_Size theMaximumNodes,
+    const Standard_Size theMaximumSolids) noexcept
+{
+    try {
+        OCC_CATCH_SIGNALS
+        const Standard_Real aProbe = theDistance * 0.25;
+        if (theSource.shape.IsNull() || theSource.edges.empty()
+            || !(aProbe > Precision::Confusion())
+            || theCancellation == nullptr
+            || theCancellation->load(std::memory_order_relaxed)) {
+            return BevelFailureKind::Other;
+        }
+        Handle(BevelCancellationIndicator) aProgress =
+            new BevelCancellationIndicator(theCancellation);
+        BRepFilletAPI_MakeChamfer aBuilder(theSource.shape);
+        for (const TopoDS_Edge& anEdge : theSource.edges) {
+            aBuilder.Add(aProbe, anEdge);
+        }
+        aBuilder.Build(aProgress->Start());
+        if (!aBuilder.IsDone()
+            || theCancellation->load(std::memory_order_relaxed)) {
+            return BevelFailureKind::Other;
+        }
+        const TopoDS_Shape aProbeShape = aBuilder.Shape();
+        Standard_Size aNodes = 0;
+        Standard_Size aSolids = 0;
+        if (aProbeShape.IsNull() || aProbeShape.IsSame(theSource.shape)
+            || !IsValidSolidResult(aProbeShape, theMaximumNodes,
+                   theMaximumSolids, aNodes, aSolids)) {
+            return BevelFailureKind::Other;
+        }
+        return BevelFailureKind::RadiusRefused;
+    } catch (...) {
+        return BevelFailureKind::Other;
+    }
+}
+
 } // namespace
 
 Standard_Boolean IsBevelEdgeEligible(
@@ -855,6 +901,10 @@ private:
                     }
                     aBuilder.Build(aProgress->Start());
                     if (!aBuilder.IsDone()) {
+                        aResult.failureKind = ClassifyFailedPlainChamfer(
+                            aSource, aDistance, theRequest.cancellation,
+                            theRequest.maximumResultTopologyNodes,
+                            theRequest.maximumResultSolids);
                         return aResult;
                     }
                     aCandidate = PlainBevelResultWithoutWrapper(aBuilder.Shape());
@@ -887,6 +937,17 @@ private:
                         theRequest.maximumResultSolids,
                         anAggregateResultTopologyNodes,
                         anAggregateResultSolids)) {
+                    // A plain chamfer may "build" a broken solid when the
+                    // distance runs past a neighbouring edge (phone stand:
+                    // Bevel 2 on a 2 mm Push-pull step).
+                    if (isChamfer && !aSource.retainedInput
+                        && !aCandidate.IsNull()
+                        && !aCandidate.IsSame(aSource.shape)) {
+                        aResult.failureKind = ClassifyFailedPlainChamfer(
+                            aSource, aDistance, theRequest.cancellation,
+                            theRequest.maximumResultTopologyNodes,
+                            theRequest.maximumResultSolids);
+                    }
                     return aResult;
                 }
                 aResult.results.push_back(std::move(aCandidate));
@@ -1215,9 +1276,10 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
             // A standalone saved Hole is baked inside this tool's own Apply
             // command (PrepareBooleanResultForFaceEdit), exactly as Push-pull
             // does; Undo restores the resizable hole record.
-            const Standard_Boolean bakesSavedCut = !hasRetainedCapture && !bakesBooleanResult
+            const Standard_Boolean bakesSavedCut = !hasRetainedCapture
+                && !bakesBooleanResult
                 && coverage == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
-                && myDoc->CanBakeSavedCutForFaceEdit(aSelection.documentLabel);
+                && myDoc->CanBakeRecordForFaceEdit(aSelection.documentLabel);
             if ((hasRetainedCapture
                     && (!RetainedBevelCoverageMatches(
                             coverage, aSelection.retainedCapture)
@@ -1279,7 +1341,7 @@ Standard_Boolean BevelOperationController::preparedSourcesAreCurrent(
                 || !IsBRepModelingLabel(
                     myDoc, aSource.label, aSource.bakesSavedCut)
                 || (aSource.bakesSavedCut
-                    && !myDoc->CanBakeSavedCutForFaceEdit(aSource.label))
+                    && !myDoc->CanBakeRecordForFaceEdit(aSource.label))
                 || !myDoc->IsPresentationEditable(aSource.original)
                 || !myDoc->ShapeLabel(aSource.original).IsEqual(
                     aSource.label)
@@ -1614,6 +1676,43 @@ Standard_Real BevelOperationController::roundMaximumRadiusMM() const noexcept
         ? myRoundMaximumRadiusMM : 0.0;
 }
 
+Standard_Real BevelOperationController::bevelMetersPerUnit() const noexcept
+{
+    try {
+        if (!hasActiveOperation() || mySources.empty() || myDoc.IsNull()) {
+            return 0.0;
+        }
+        const Handle(TDocStd_Document) aDocument = myDoc->Document();
+        Standard_Real aDocumentMetersPerUnit = 0.001;
+        const Standard_Boolean hasUnit = !aDocument.IsNull()
+            && XCAFDoc_DocumentTool::GetLengthUnit(
+                aDocument, aDocumentMetersPerUnit);
+        if ((!hasUnit && aDocumentMetersPerUnit != 0.001)
+            || !std::isfinite(aDocumentMetersPerUnit)
+            || aDocumentMetersPerUnit <= 0.0) {
+            return 0.0;
+        }
+        const Standard_Real aScale =
+            std::abs(mySources.front().transform.ScaleFactor());
+        if (!std::isfinite(aScale) || aScale <= 0.0) {
+            return 0.0;
+        }
+        for (const Source& aSource : mySources) {
+            const Standard_Real anOtherScale =
+                std::abs(aSource.transform.ScaleFactor());
+            if (!std::isfinite(anOtherScale)
+                || std::abs(anOtherScale - aScale) > 1.0e-9 * aScale) {
+                return 0.0;
+            }
+        }
+        const Standard_Real aMetersPerUnit = aDocumentMetersPerUnit * aScale;
+        return std::isfinite(aMetersPerUnit) && aMetersPerUnit > 0.0
+            ? aMetersPerUnit : 0.0;
+    } catch (...) {
+        return 0.0;
+    }
+}
+
 Standard_Boolean BevelOperationController::setValueImpl(
     const Standard_Real theSignedDistance,
     const Standard_Boolean theRefuseOutOfRange) noexcept
@@ -1886,9 +1985,14 @@ std::uint64_t BevelOperationController::previewGeneration() const noexcept
 BevelFailureObservation
 BevelOperationController::failureObservation() const noexcept
 {
-    return myRoundOwned
-        ? myFailureObservation
-        : BevelFailureObservation{myGeneration, BevelFailureKind::None};
+    // Round owns the full classification. A plain Bevel reports only the
+    // bounded size refusal (ClassifyFailedPlainChamfer) so the screen can say
+    // the amount is too large; every other Bevel failure stays unclassified.
+    if (myRoundOwned
+        || myFailureObservation.kind == BevelFailureKind::RadiusRefused) {
+        return myFailureObservation;
+    }
+    return BevelFailureObservation{myGeneration, BevelFailureKind::None};
 }
 
 void BevelOperationController::recordFailure(
@@ -2000,16 +2104,13 @@ BevelApplyResult BevelOperationController::apply() noexcept
 			}
 			// A fresh Join/Cut result admitted at begin: its record is baked in the command.
 			TDF_Label aCurrentRecord;
-			if (!source.bakedBooleanRecord.IsNull()
-				&& myDoc->BooleanResultRecordForBake(source.label, aCurrentRecord)
-				&& aCurrentRecord.IsEqual(source.bakedBooleanRecord)) {
-				continue;
-			}
-			// A standalone saved Hole admitted at begin: baked in the command (push-pull lane).
-			if (source.bakesSavedCut
-				&& aCoverage
-					== OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
-				&& myDoc->CanBakeSavedCutForFaceEdit(source.label)) {
+			if ((!source.bakedBooleanRecord.IsNull()
+					&& myDoc->BooleanResultRecordForBake(source.label, aCurrentRecord)
+					&& aCurrentRecord.IsEqual(source.bakedBooleanRecord))
+				|| (source.bakesSavedCut
+					&& aCoverage
+						== OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
+					&& myDoc->CanBakeRecordForFaceEdit(source.label))) {
 				continue;
 			}
 			OcctPlainProfileOperationCapture aCapture;

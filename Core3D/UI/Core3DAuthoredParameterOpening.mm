@@ -1356,6 +1356,18 @@ static NSString *sLastBakedBooleanPreviewRefusal = @"";
     } catch (...) { return nil; }
 }
 
+- (BOOL)cutRemovesNothingTarget:(NSString *)target tool:(NSString *)tool {
+    if (![NSThread isMainThread] || ![target isKindOfClass:NSString.class]
+        || ![tool isKindOfClass:NSString.class]) return NO;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        return viewer && viewer->cutRemovesNothing(target.UTF8String ?: "", tool.UTF8String ?: "")
+            ? YES : NO;
+    } catch (...) { return NO; }
+}
+
 - (BOOL)showBakedBooleanPreviewTargets:(NSArray<NSString *> *)targets
     tools:(NSArray<NSString *> *)tools
     operation:(Core3DPartBooleanOperation)operation {

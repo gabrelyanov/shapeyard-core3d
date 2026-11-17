@@ -1496,7 +1496,8 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                     || !duplicate.originalOwnerShape.IsEqual(XCAFDoc_ShapeTool::GetShape(duplicate.sourceLabel))
                     || !profile::Read(document, duplicate.sourceLabel, sourceProfile)
                     || !sourceProfile.IsEqual(duplicate.originalProfile)
-                    || !pattern_recipe_clone::Capture(document, duplicate.sourceLabel, sourceSweepLoft)
+                    || !pattern_recipe_clone::Capture(document, duplicate.sourceLabel, sourceSweepLoft,
+                        duplicate.sourceSavedCutCopiedPlain)
                     || !pattern_recipe_clone::IsEqual(sourceSweepLoft, duplicate.originalSweepLoft)
                     || !myDoc->CaptureObjectNameStateForLabel(duplicate.sourceLabel, sourceName)
                     || !sourceName.IsEqual(duplicate.originalName)
@@ -1770,6 +1771,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
             TopoDS_Shape ownerShape;
             bool profileCurrent = false;
             pattern_recipe_clone::Source sweepLoft;
+            bool savedCutCopiedPlain = false;
         };
         std::vector<DuplicateSource> sources;
         for (myContext->InitSelected(); myContext->MoreSelected();
@@ -1819,12 +1821,17 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                 profile::Record savedProfile;
                 OcctObjectNameState name;
                 pattern_recipe_clone::Source sweepLoft;
+                // Route B1 (CTO 15 Nov 10:39): a standalone saved Hole is
+                // copied as a plain solid; the source keeps its record.
+                const bool savedCutCopiedPlain = retained_solid::HasRecord(label)
+                    && myDoc->CanBakeSavedCutForFaceEdit(label);
                 if (!profile::Read(doc, label, savedProfile)
                     || !myDoc->CaptureObjectNameStateForLabel(label, name)
-                    || !pattern_recipe_clone::Capture(doc, label, sweepLoft)) { return; }
+                    || !pattern_recipe_clone::Capture(doc, label, sweepLoft,
+                        savedCutCopiedPlain)) { return; }
 				sources.push_back({shape, label, destinationRepresentation,
                     referenceAxisState, referenceAxis, savedProfile, name, storedShape,
-                    savedProfile.IsCurrent(doc, label), sweepLoft});
+                    savedProfile.IsCurrent(doc, label), sweepLoft, savedCutCopiedPlain});
             }
         }
         if (sources.empty()) { return; }
@@ -1835,9 +1842,10 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 		}
         std::vector<OcctGeometryDuplicationRequest> duplicationRequests;
         duplicationRequests.reserve(sourceLabels.size());
-        for (const auto& label : sourceLabels)
-            duplicationRequests.push_back({label, 1U, false, true, false, true, false,
-                                            kAdmitAnalyticBooleanDuplicate, true});
+        for (const DuplicateSource& source : sources)
+            duplicationRequests.push_back({source.label, 1U, false, true, false, true, false,
+                                            kAdmitAnalyticBooleanDuplicate, true,
+                                            source.savedCutCopiedPlain});
 		if (!myDoc->CanDuplicateGeometryDefinitions(duplicationRequests)) {
 			return;
 		}
@@ -1954,6 +1962,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                 duplicate.originalOwnerShape = source.ownerShape;
                 duplicate.originalProfileCurrent = source.profileCurrent;
                 duplicate.originalSweepLoft = source.sweepLoft;
+                duplicate.sourceSavedCutCopiedPlain = source.savedCutCopiedPlain;
                 // Use the same canonical scalar-face contract as Repeat. The
                 // source and the copied face must both belong to these solids.
                 if (!CaptureDuplicateFaceFinishes(myDoc, source.label,
@@ -2717,6 +2726,16 @@ Standard_Boolean DuplicateFaceFinishesMatch(
         }
     }
 
+    void ObjectInteractor::publishLiveMove(bool ended) noexcept {
+        if (ended && !_liveMoveSamplesActive) return;
+        _liveMoveSamplesActive = !ended;
+        try {
+            if (_liveMoveChangedCallback) _liveMoveChangedCallback(ended);
+        } catch (...) {
+            // Optional observation must not abort or commit a model edit.
+        }
+    }
+
     void ObjectInteractor::applyGeometrySnapping() noexcept {
         _geometryMoveSnap.reset(); syncGeometrySnapHighlight();
         if (_geometrySnappingTolerance <= 0 || _manipulator.IsNull()
@@ -2937,6 +2956,10 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                     && _manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
                     && _manipulator->ActiveMode() == AIS_MM_Translation) {
                     publishGeometrySnapFeedback(false);
+                }
+                if (_manipulatorType == PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
+                    && _manipulator->ActiveMode() == AIS_MM_Translation) {
+                    publishLiveMove(false);
                 }
                 return true;
             }
@@ -5370,9 +5393,13 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                 if (cost > anAggregateLimit - projectedTopology) return Standard_False;
                 projectedTopology += cost;
             }
+            // Route B1 (CTO 15 Nov 10:39): a standalone saved Hole is mirrored
+            // as a plain solid; the source keeps its record.
+            const bool savedCutCopiedPlain = retained_solid::HasRecord(source->second)
+                && myDoc->CanBakeSavedCutForFaceEdit(source->second);
             profileRequests.push_back({source->second, 1, !profile.label.IsNull(),
                                        !enclosure.label.IsNull(), !enclosure.label.IsNull(),
-                                       true, true});
+                                       true, true, false, false, savedCutCopiedPlain});
         }
         if (!myDoc->CanDuplicateGeometryDefinitions(profileRequests)) return Standard_False;
 
@@ -5437,8 +5464,11 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			anAggregateTopologyNodes += sourceNodeCount;
             OcctObjectNameState profileOwner;
             pattern_recipe_clone::Source sweepLoft;
+            const bool savedCutCopiedPlain = retained_solid::HasRecord(sourceLabel)
+                && myDoc->CanBakeSavedCutForFaceEdit(sourceLabel);
             if (!myDoc->CaptureObjectNameStateForLabel(sourceLabel, profileOwner)
-                || !pattern_recipe_clone::Capture(aSourceDocument, sourceLabel, sweepLoft))
+                || !pattern_recipe_clone::Capture(aSourceDocument, sourceLabel, sweepLoft,
+                    savedCutCopiedPlain))
                 return Standard_False;
             const auto& originalProfile = profileOwner.object.profile;
             const auto& originalEnclosure = profileOwner.object.enclosure;
@@ -5670,7 +5700,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 			aSourceLabels.push_back({aSource.label, 1, !aSource.profileOwner.object.profile.label.IsNull(),
                                         !aSource.profileOwner.object.enclosure.label.IsNull(),
                                         !aSource.profileOwner.object.enclosure.label.IsNull(),
-                                        true, true});
+                                        true, true, false, false, aSource.sweepLoft.plainSavedCutCopy});
 		}
 		if (!myDoc->CanDuplicateGeometryDefinitions(aSourceLabels)) {
 			return Standard_False;
@@ -6967,7 +6997,8 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                     || documentMetersPerUnit != aSource.documentMetersPerUnit
                     || !myDoc->CaptureObjectNameStateForLabel(aSource.label, profileOwner)
                     || !profileOwner.IsEqual(aSource.profileOwner)
-                    || !pattern_recipe_clone::Capture(aDocument, aSource.label, currentSweepLoft)
+                    || !pattern_recipe_clone::Capture(aDocument, aSource.label, currentSweepLoft,
+                        aSource.sweepLoft.plainSavedCutCopy)
                     || !pattern_recipe_clone::IsEqual(currentSweepLoft, aSource.sweepLoft)
                     || profileOwner.object.profile.IsCurrent(aDocument, aSource.label) != aSource.profileCurrent
                     || profileOwner.object.enclosure.IsCurrent(aDocument, aSource.label) != aSource.enclosureCurrent)
@@ -7134,7 +7165,8 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                     || documentMetersPerUnit != source.documentMetersPerUnit
                     || !myDoc->CaptureObjectNameStateForLabel(source.label, current)
                     || !current.IsEqual(source.profileOwner)
-                    || !pattern_recipe_clone::Capture(aDocument, source.label, currentSweepLoft)
+                    || !pattern_recipe_clone::Capture(aDocument, source.label, currentSweepLoft,
+                        source.sweepLoft.plainSavedCutCopy)
                     || !pattern_recipe_clone::IsEqual(currentSweepLoft, source.sweepLoft)
                     || current.object.profile.IsCurrent(aDocument, source.label) != source.profileCurrent
                     || current.object.enclosure.IsCurrent(aDocument, source.label) != source.enclosureCurrent)
@@ -7335,7 +7367,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 				aSourceLabels.push_back({aSource.label, 1, !aSource.profileOwner.object.profile.label.IsNull(),
                                         !aSource.profileOwner.object.enclosure.label.IsNull(),
                                         !aSource.profileOwner.object.enclosure.label.IsNull(),
-                                        true, true});
+                                        true, true, false, false, aSource.sweepLoft.plainSavedCutCopy});
 			}
 		} catch (...) {
 			return MirrorApplyResult::NoChange;

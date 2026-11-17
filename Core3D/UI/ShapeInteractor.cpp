@@ -2459,13 +2459,15 @@ namespace core3d {
 			// the Bevel command (no retained treatment capture).
 			TDF_Label aBooleanRecord;
 			if (myDoc->BooleanResultRecordForBake(theSelection.documentLabel, aBooleanRecord)) {
+				theSelection.retainedCapture.reset();
 				return Standard_True;
 			}
-			// A standalone saved Hole takes the plain route: the controller
-			// bakes it inside its Apply command and Undo restores the record.
+			// A standalone saved Hole, or an ordinary saved Join/Cut (a drilled
+			// plate after its keyhole Cut), takes the plain route: the controller
+			// bakes that record inside its Apply command and Undo restores it.
 			if (aCoverage
 					== OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
-				&& myDoc->CanBakeSavedCutForFaceEdit(
+				&& myDoc->CanBakeRecordForFaceEdit(
 					theSelection.documentLabel)) {
 				theSelection.retainedCapture.reset();
 				return Standard_True;
@@ -2799,6 +2801,11 @@ namespace core3d {
 	Standard_Real ShapeInteractor::roundMaximumRadiusMM() const noexcept {
 		return _bevelController == nullptr
 			? 0.0 : _bevelController->roundMaximumRadiusMM();
+	}
+
+	Standard_Real ShapeInteractor::bevelMetersPerUnit() const noexcept {
+		return _bevelController == nullptr
+			? 0.0 : _bevelController->bevelMetersPerUnit();
 	}
 
 	BevelFailureObservation

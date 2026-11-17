@@ -3082,6 +3082,9 @@ bool ValidateAttachmentRigDocument(
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepBuilderAPI_Sewing.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BinTools.hxx>
@@ -9026,8 +9029,13 @@ core3d::authority::ReplacementEnd OcctDocument::EndNativeReplacement(
     try {
         if (myOcafDoc.IsNull() || myOcafDoc->Application().get() != myApp.get()
             || DocumentIdentifier().empty()) return ReplacementEnd::Unavailable;
-        return myNativeAuthority->EndReplacement(reservation, myOcafDoc.get(), accepted,
+        const auto result = myNativeAuthority->EndReplacement(reservation, myOcafDoc.get(), accepted,
             restored, myOcafDoc->HasOpenCommand());
+        // Candidate assignment is provisional until authority accepts it.
+        // Preserve the old records on rollback; retire them only after the
+        // replacement really owns the document, even if its saved UUID matches.
+        if (result == ReplacementEnd::Adopted) PruneOrdinaryNamingHistory();
+        return result;
     } catch (...) { return ReplacementEnd::Unavailable; }
 }
 
@@ -13233,6 +13241,21 @@ bool BakedBooleanBatchPreviewShape(const Handle(OcctDocument)& document,
             shapes, operation, result, refusal);
     } catch (...) { refusal = "invalid-result"; return false; }
 }
+
+// How much of `target` a Cut by `tool` would take away (0 = nothing: the parts only touch or
+// miss). Works on copies; nothing in the document changes. False when it cannot be told.
+bool BakedCutRemovedShare(const Handle(OcctDocument)& document,
+    const TDF_Label& target, const gp_Trsf& targetPlacement,
+    const TDF_Label& tool, const gp_Trsf& toolPlacement, double& share) noexcept {
+    share = 1.0;
+    try {
+        if (document.IsNull() || target.IsNull() || tool.IsNull() || tool.IsEqual(target)) return false;
+        TopoDS_Shape result;
+        std::string refusal;
+        return BakedBooleanShapeOfMany(XCAFDoc_ShapeTool::GetShape(target), targetPlacement,
+            {{XCAFDoc_ShapeTool::GetShape(tool), toolPlacement}}, 1, result, refusal, &share);
+    } catch (...) { share = 1.0; return false; }
+}
 } // namespace core3d
 
 Standard_Boolean OcctDocument::JoinFaceLooks(const TDF_Label& target,
@@ -13467,6 +13490,13 @@ Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
                     return Standard_False;
                 }
                 placement.SetScaleFactor(1.0);
+            }
+            // Store the result exactly as the file will hold it (signed zeros on curved faces
+            // come back as +0 from the file): a cold reopen must find the same faces
+            // (tutorial chest row 141: 'face witnesses changed for lid, param8 -0.0/0.0').
+            {
+                TopoDS_Shape stable;
+                if (FileStableShape(result, stable)) result = stable;
             }
             Handle(AIS_Shape) shown = new AIS_Shape(result);
             shown->SetLocalTransformation(placement);
@@ -16640,6 +16670,45 @@ Standard_Boolean OcctDocument::CanBakeSavedCutForFaceEdit(
     }
 }
 
+Standard_Boolean OcctDocument::CanBakeBooleanResultForFaceEdit(
+    const TDF_Label& label) const noexcept {
+    try {
+        OCC_CATCH_SIGNALS
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || label.IsNull()
+            || label.Data() != myOcafDoc->GetData()
+            || !IsEditableFreeSimpleDefinitionLabel(label)
+            || HasUnroutedRetainedDependent(label)
+            || core3d::retained_solid::HasRecord(label)
+            || label.IsAttribute(core3d::retained_edge_treatment::AttributeID())
+            || RetainedRecipeCoverageForLabel(label)
+                != OcctRetainedRecipeCoverage::PresentOutsideP4Coverage)
+            return Standard_False;
+        // Only the Boolean record may be present: a Profile, enclosure, sweep
+        // or loft keeps its own replay contract and is never baked here.
+        core3d::profile::Record profile;
+        core3d::enclosure::Record enclosure;
+        core3d::sweep_persistence::Record sweep;
+        core3d::loft_persistence::Record loft;
+        if (!core3d::profile::Read(myOcafDoc, label, profile) || !profile.label.IsNull()
+            || !core3d::enclosure::Read(myOcafDoc, label, enclosure) || !enclosure.label.IsNull()
+            || !core3d::sweep_persistence::Read(myOcafDoc, label, sweep) || !sweep.label.IsNull()
+            || !core3d::loft_persistence::Read(myOcafDoc, label, loft) || !loft.label.IsNull())
+            return Standard_False;
+        // The same rule PrepareBooleanResultForFaceEdit applies before it
+        // removes the record, so an admitted Bevel is never refused at Apply.
+        core3d::composite_recipe::Record record;
+        OcctScalarAppearanceState appearance;
+        return core3d::composite_recipe::Read(myOcafDoc, label, record)
+            && record.value && !record.label.IsNull()
+            && record.value->definition.nodes.size() == 3
+            && OriginalsFeature(record.value->definition)
+            && !record.label.IsAttribute(core3d::retained_edge_treatment::AttributeID())
+            && PairCaptureOriginalsAppearance(*this, label, appearance);
+    } catch (...) {
+        return Standard_False;
+    }
+}
+
 Standard_Boolean OcctDocument::PrepareBooleanResultForFaceEdit(
     const TDF_Label& label) noexcept {
     try {
@@ -16753,7 +16822,11 @@ Standard_Boolean OcctDocument::CanDuplicateGeometryDefinitions(
             }
 
             core3d::pattern_recipe_clone::Source sourceRecipe;
-            if (!core3d::pattern_recipe_clone::Capture(myOcafDoc, source, sourceRecipe)
+            const bool plainSavedCutCopy = request.copiesSavedCutAsPlainSolid
+                && core3d::retained_solid::HasRecord(source)
+                && CanBakeSavedCutForFaceEdit(source);
+            if (!core3d::pattern_recipe_clone::Capture(myOcafDoc, source, sourceRecipe,
+                    plainSavedCutCopy)
                 || ((sourceRecipe.family == core3d::pattern_recipe_clone::Family::Sweep
                         || sourceRecipe.family == core3d::pattern_recipe_clone::Family::Loft)
                     && !request.preservesSweepLoftRecipe)
@@ -19270,6 +19343,94 @@ Standard_Boolean OcctDocument::ValidateMeshWindingRepair(const TDF_Label& label,
     } catch (...) { return Standard_False; }
 }
 
+OcctMeshSolidConversionResult OcctDocument::PrepareMeshSolidConversion(
+    const TDF_Label& label, TopoDS_Shape& candidate) const noexcept {
+    candidate.Nullify();
+    if (![NSThread isMainThread]) return OcctMeshSolidConversionResult::Invalid;
+    try {
+        OCC_CATCH_SIGNALS
+        OcctObjectTransformState source;
+        if (!CaptureObjectTransformStateForLabel(label,source)
+            || source.resolvedRepresentation!=OcctGeometryRepresentation::TriangleMesh
+            || source.authoredFramesPresent || source.meshUVAtlasVersion
+            || Core3DNormalTextureRecipeForLabel(label)!=0)
+            return OcctMeshSolidConversionResult::Invalid;
+        std::atomic_bool cancelled{false};
+        core3d::meshedit::NativeMeshStorageCapture captured;
+        const auto storage=core3d::meshedit::CaptureNativeMeshStorage(source.shape,captured,cancelled);
+        if (storage==core3d::meshedit::TopologyResult::TooLarge) return OcctMeshSolidConversionResult::TooLarge;
+        if (storage!=core3d::meshedit::TopologyResult::Ready || captured.storedTriangles.size()<4)
+            return OcctMeshSolidConversionResult::Invalid;
+        // Triangulation nodes -> the owner's object-local frame (the transform stays on the owner).
+        const gp_Trsf placement=captured.meshLocation.Transformation();
+        Bnd_Box extent;
+        for (const auto& node:captured.storedNodes) extent.Add(gp_Pnt(node[0],node[1],node[2]).Transformed(placement));
+        if (extent.IsVoid()) return OcctMeshSolidConversionResult::Invalid;
+        const double diagonal=std::sqrt(extent.SquareExtent());
+        if (!std::isfinite(diagonal) || diagonal<=1.e-9) return OcctMeshSolidConversionResult::Invalid;
+        const double tolerance=std::max(1.e-7,diagonal*1.e-6);
+        const bool reversed=captured.face.Orientation()==TopAbs_REVERSED;
+        BRepBuilderAPI_Sewing sewing(tolerance,Standard_True,Standard_True,Standard_True,Standard_False);
+        std::size_t added=0;
+        for (const auto& triangle:captured.storedTriangles) {
+            std::array<gp_Pnt,3> p;
+            for (int k=0;k<3;++k) p[k]=gp_Pnt(triangle[k][0],triangle[k][1],triangle[k][2]).Transformed(placement);
+            if (reversed) std::swap(p[1],p[2]);
+            // Zero-area slivers carry no surface; their edges collapse within the sewing tolerance.
+            if (gp_Vec(p[0],p[1]).Crossed(gp_Vec(p[0],p[2])).Magnitude()<=tolerance*tolerance) continue;
+            BRepBuilderAPI_MakePolygon polygon(p[0],p[1],p[2],Standard_True);
+            if (!polygon.IsDone()) return OcctMeshSolidConversionResult::Invalid;
+            BRepBuilderAPI_MakeFace face(polygon.Wire(),Standard_True);
+            if (!face.IsDone()) return OcctMeshSolidConversionResult::Invalid;
+            sewing.Add(face.Face());++added;
+        }
+        if (added<4) return OcctMeshSolidConversionResult::Invalid;
+        sewing.Perform();
+        if (sewing.NbFreeEdges()!=0 || sewing.NbMultipleEdges()!=0) return OcctMeshSolidConversionResult::Open;
+        TopoDS_Shell shell;int shells=0;
+        for (TopExp_Explorer it(sewing.SewedShape(),TopAbs_SHELL);it.More();it.Next()) {
+            shell=TopoDS::Shell(it.Current());++shells;
+        }
+        if (shells!=1 || !BRep_Tool::IsClosed(shell)) return OcctMeshSolidConversionResult::Open;
+        BRepBuilderAPI_MakeSolid made(shell);
+        if (!made.IsDone()) return OcctMeshSolidConversionResult::Invalid;
+        TopoDS_Solid solid=made.Solid();
+        if (!BRepLib::OrientClosedSolid(solid)) return OcctMeshSolidConversionResult::Invalid;
+        ShapeUpgrade_UnifySameDomain unify(solid,Standard_True,Standard_True,Standard_False);
+        unify.SetLinearTolerance(tolerance);
+        unify.SetAngularTolerance(1.e-7);
+        unify.Build();
+        TopoDS_Shape result;int solids=0;
+        for (TopExp_Explorer it(unify.Shape(),TopAbs_SOLID);it.More();it.Next()) { result=it.Current();++solids; }
+        if (solids!=1 || result.IsNull() || result.Orientation()!=TopAbs_FORWARD
+            || !BRepCheck_Analyzer(result,Standard_True).IsValid()) return OcctMeshSolidConversionResult::Invalid;
+        GProp_GProps props;BRepGProp::VolumeProperties(result,props);
+        if (!std::isfinite(props.Mass()) || props.Mass()<=0) return OcctMeshSolidConversionResult::Invalid;
+        candidate=result;
+        return OcctMeshSolidConversionResult::Prepared;
+    } catch (...) { candidate.Nullify(); return OcctMeshSolidConversionResult::Invalid; }
+}
+
+Standard_Boolean OcctDocument::ValidateMeshSolidConversion(const TDF_Label& label,
+    const TopoDS_Shape& candidate) const noexcept {
+    if (![NSThread isMainThread] || candidate.IsNull()) return Standard_False;
+    try {
+        OCC_CATCH_SIGNALS
+        TopoDS_Shape expected;
+        if (PrepareMeshSolidConversion(label,expected)!=OcctMeshSolidConversionResult::Prepared) return Standard_False;
+        if (expected.ShapeType()!=candidate.ShapeType() || expected.Orientation()!=candidate.Orientation()
+            || !expected.Location().IsEqual(candidate.Location())) return Standard_False;
+        TopTools_IndexedMapOfShape ef,cf,ee,ce,ev,cv;
+        TopExp::MapShapes(expected,TopAbs_FACE,ef);TopExp::MapShapes(candidate,TopAbs_FACE,cf);
+        TopExp::MapShapes(expected,TopAbs_EDGE,ee);TopExp::MapShapes(candidate,TopAbs_EDGE,ce);
+        TopExp::MapShapes(expected,TopAbs_VERTEX,ev);TopExp::MapShapes(candidate,TopAbs_VERTEX,cv);
+        if (ef.Extent()!=cf.Extent() || ee.Extent()!=ce.Extent() || ev.Extent()!=cv.Extent()) return Standard_False;
+        GProp_GProps a,b;BRepGProp::VolumeProperties(expected,a);BRepGProp::VolumeProperties(candidate,b);
+        return std::abs(a.Mass()-b.Mass())<=1.e-9*std::max(1.0,std::abs(a.Mass()))
+            && a.CentreOfMass().Distance(b.CentreOfMass())<=1.e-9*std::max(1.0,std::abs(a.Mass()));
+    } catch (...) { return Standard_False; }
+}
+
 
 
 Standard_Boolean OcctDocument::CaptureMeshRegionExtrudePreview(const TDF_Label& label,
@@ -19938,6 +20099,54 @@ Standard_Boolean OcctDocument::ReplaceShape(
             return Standard_False;
         }
         if (!SaveObjectTransform(label, aisShape)) {
+            restorePrevious();
+            return Standard_False;
+        }
+        return Standard_True;
+    } catch (...) {
+        restorePrevious();
+        return Standard_False;
+    }
+}
+
+Standard_Boolean OcctDocument::ReplaceMeshWithSolid(
+    const TDF_Label& label, Handle(AIS_Shape) aisShape) {
+    if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+        || label.IsNull() || label.Data() != myOcafDoc->GetData()
+        || aisShape.IsNull() || aisShape->Shape().IsNull()
+        || aisShape->Shape().ShapeType() != TopAbs_SOLID
+        || HasUnroutedRetainedDependent(label)
+        || !IsEditableFreeSimpleDefinitionLabel(label)) {
+        return Standard_False;
+    }
+    Handle(XCAFDoc_ShapeTool) shapeTool =
+        XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+    const TopoDS_Shape previousShape = XCAFDoc_ShapeTool::GetShape(label);
+    bool hadMarker = false;
+    OcctGeometryRepresentation stored = OcctGeometryRepresentation::Invalid;
+    if (shapeTool.IsNull() || previousShape.IsNull()
+        || GeometryRepresentationForLabel(label) != OcctGeometryRepresentation::TriangleMesh
+        || !ReadGeometryRepresentation(label, hadMarker, stored)
+        || !hadMarker || stored != OcctGeometryRepresentation::TriangleMesh
+        || !GeometryClassMatchesRepresentation(
+            ClassifyDefinitionGeometry(aisShape->Shape(), nullptr),
+            OcctGeometryRepresentation::BRep)) {
+        return Standard_False;
+    }
+    const auto restorePrevious = [&]() noexcept {
+        try {
+            shapeTool->SetShape(label, previousShape);
+            TDataStd_Integer::Set(label, GeometryRepresentationAttributeID(),
+                static_cast<Standard_Integer>(OcctGeometryRepresentation::TriangleMesh));
+        } catch (...) {
+        }
+    };
+    try {
+        shapeTool->SetShape(label, aisShape->Shape());
+        const TopoDS_Shape now = XCAFDoc_ShapeTool::GetShape(label);
+        if (now.IsNull() || !now.IsEqual(aisShape->Shape())
+            || !WriteGeometryRepresentationMarker(label, OcctGeometryRepresentation::BRep)
+            || !SaveObjectTransform(label, aisShape)) {
             restorePrevious();
             return Standard_False;
         }
@@ -22785,6 +22994,42 @@ Standard_Boolean OcctDocument::ClearObjectVisualMaterial(
     label.ForgetAttribute(LocalPBRMaterialAttributeID());
     label.ForgetAttribute(NormalTextureRecipeAttributeID());
     label.ForgetAttribute(AutoPromotedEmissiveFactorAttributeID());
+    return Standard_True;
+}
+
+Standard_Boolean OcctDocument::ClearPartSubshapeAppearance(const TDF_Label& root) {
+    if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+        || !IsEditableFreeSimpleDefinitionLabel(root)
+        || !EnsureGeometryRepresentationForMutation(root)) return Standard_False;
+    const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+    if (shapes.IsNull()) return Standard_False;
+    TDF_LabelSequence children;
+    XCAFDoc_ShapeTool::GetSubShapes(root, children);
+    for (Standard_Integer index = 1; index <= children.Length(); ++index) {
+        const auto& label = children.Value(index);
+        const auto shape = XCAFDoc_ShapeTool::GetShape(label);
+        if (label.Data() != root.Data() || shape.IsNull()
+            || !shapes->IsSubShape(root, shape)) return Standard_False;
+    }
+    const auto visual = XCAFDoc_DocumentTool::VisMaterialTool(myOcafDoc->Main());
+    const auto colors = XCAFDoc_DocumentTool::ColorTool(myOcafDoc->Main());
+    if (visual.IsNull() || colors.IsNull()) return Standard_False;
+    for (Standard_Integer index = 1; index <= children.Length(); ++index) {
+        const auto& label = children.Value(index);
+        TDF_Label previous;
+        XCAFDoc_VisMaterialTool::GetShapeMaterial(label, previous);
+        visual->UnSetShapeMaterial(label);
+        RemoveUnreferencedOwnedMaterial(visual, previous);
+        label.ForgetAttribute(LocalPBRMaterialAttributeID());
+        label.ForgetAttribute(NormalTextureRecipeAttributeID());
+        label.ForgetAttribute(AutoPromotedEmissiveFactorAttributeID());
+        for (const Standard_Integer tag : {11, 12}) {
+            const auto legacy = label.FindChild(tag, Standard_False);
+            if (!legacy.IsNull()) legacy.ForgetAttribute(TDataStd_Integer::GetID());
+        }
+        for (auto type : {XCAFDoc_ColorGen, XCAFDoc_ColorSurf, XCAFDoc_ColorCurv})
+            colors->UnSetColor(label, type);
+    }
     return Standard_True;
 }
 
@@ -29311,10 +29556,279 @@ void OcctDocument::LoadObjectTransform(const TDF_Label& aRefLabel, const Handle(
     anAis->SetLocalTransformation(ObjectTransformForLabel(aRefLabel));
 }
 
+namespace core3d::ordinary_naming {
+struct Side {
+    std::vector<treatment_history::NamingState> naming;
+    std::vector<std::uint8_t> source, treatment;
+    std::string profileIdentifier;
+    TDF_Label profileLabel;
+    TopoDS_Shape shape;
+    bool hasTreatment = false;
+};
+struct Root {
+    TDF_Label label;
+    Side before, after;
+};
+struct Record {
+    Handle(TDF_Data) data;
+    Handle(TDF_Delta) priorTop, delta;
+    std::vector<Root> roots;
+    int undoDepth = 0;
+    bool creation = false, captured = false, finalized = false, settled = false;
+};
+}
+
+namespace {
+namespace ordinary_naming = core3d::ordinary_naming;
+constexpr std::size_t kOrdinaryNamingBytes = 128 * 1024 * 1024;
+constexpr std::size_t kOrdinaryNamingRecords = 1001; // ordinary Undo limit + pending
+
+bool CaptureOrdinaryNamingSide(const Handle(TDocStd_Document)& doc,
+    const TDF_Label& label, ordinary_naming::Side& side) noexcept {
+    side = {};
+    try {
+        core3d::profile::Record profile;
+        if (label.IsNull() || label.Data() != doc->GetData()
+            || !core3d::profile::Read(doc, label, profile)
+            || profile.label.IsNull() || !profile.IsCurrent(doc, label)) return false;
+        side.profileIdentifier = profile.identifier;
+        side.profileLabel = profile.label;
+        side.shape = XCAFDoc_ShapeTool::GetShape(label);
+        return !side.shape.IsNull() && CaptureTreatmentCompanionSide(doc, label,
+            side.naming, side.source, side.hasTreatment, side.treatment);
+    } catch (...) { return false; }
+}
+
+bool OrdinaryCreationRootAbsent(const TDF_Label& root) noexcept {
+    // Null is an unstaged reserved slot. A staged root must retain its real
+    // label but have no attributes, including forgotten attributes, anywhere
+    // below it. No catalog-only inference and no label creation on this read.
+    if (root.IsNull()) return true;
+    try {
+        const auto empty = [](const TDF_Label& label) {
+            return !TDF_AttributeIterator(label, Standard_False).More();
+        };
+        if (!empty(root)) return false;
+        std::size_t count = 0;
+        for (TDF_ChildIterator it(root, Standard_True); it.More(); it.Next()) {
+            if (++count > kTreatmentHistoryMaxLabelsVisited || !empty(it.Value())) return false;
+        }
+        return true;
+    } catch (...) { return false; }
+}
+
+bool OrdinaryNamingSideMatches(const Handle(TDocStd_Document)& doc,
+    const TDF_Label& root, const ordinary_naming::Side& expected, bool versions) noexcept {
+    ordinary_naming::Side actual;
+    return CaptureOrdinaryNamingSide(doc, root, actual)
+        && TreatmentHistorySameShape(expected.shape, actual.shape)
+        && SameTreatmentNamingSet(expected.naming, actual.naming, versions)
+        && expected.profileIdentifier == actual.profileIdentifier
+        && expected.profileLabel == actual.profileLabel
+        && expected.source == actual.source && expected.hasTreatment == actual.hasTreatment
+        && expected.treatment == actual.treatment;
+}
+
+std::size_t OrdinaryNamingStorage(const ordinary_naming::Record& record) noexcept {
+    std::size_t bytes = sizeof(record) + record.roots.capacity() * sizeof(ordinary_naming::Root);
+    for (const auto& root : record.roots) {
+        for (const auto* side : {&root.before, &root.after}) {
+            bytes += side->source.capacity() + side->treatment.capacity()
+                + side->profileIdentifier.capacity() + 1
+                + side->naming.capacity() * sizeof(treatment_history::NamingState);
+            for (const auto& naming : side->naming)
+                bytes += naming.labelEntry.capacity() + 1
+                    + naming.shapePairs.capacity() * sizeof(std::pair<TopoDS_Shape, TopoDS_Shape>);
+        }
+    }
+    // Shape handles share the geometry already held by the live OCAF delta;
+    // no BRep copies are made by this record.
+    return bytes;
+}
+
+bool RestoreOrdinaryNamingSide(const Handle(TDocStd_Document)& doc,
+    ordinary_naming::Record& record, bool before) noexcept {
+    try {
+        // Validate ALL roots before changing any scalar.
+        for (const auto& root : record.roots) {
+            if (before && record.creation) {
+                if (!OrdinaryCreationRootAbsent(root.label)) return false;
+            } else if (!OrdinaryNamingSideMatches(doc, root.label,
+                       before ? root.before : root.after, false)) return false;
+        }
+        if (before && record.creation) return true;
+        for (const auto& root : record.roots) {
+            for (const auto& state : (before ? root.before : root.after).naming) {
+                Handle(TNaming_NamedShape) naming;
+                if (!state.label.FindAttribute(TNaming_NamedShape::GetID(), naming)
+                    || naming.IsNull()) return false;
+                naming->SetVersion(state.version);
+            }
+        }
+        for (const auto& root : record.roots)
+            if (!OrdinaryNamingSideMatches(doc, root.label,
+                    before ? root.before : root.after, true)) return false;
+        return true;
+    } catch (...) { return false; }
+}
+}
+
+#if DEBUG
+std::array<std::size_t, 3> OcctDocument::DebugOrdinaryNamingHistoryStorage() const noexcept {
+    std::array<std::size_t, 3> result{};
+    for (const auto& record : myOrdinaryNamingHistory) {
+        ++result[record->finalized ? 1 : 0];
+        result[2] += OrdinaryNamingStorage(*record);
+    }
+    return result;
+}
+#endif
+
+void OcctDocument::PruneOrdinaryNamingHistory() noexcept {
+    if (myOrdinaryNamingHistory.empty()) return;
+    try {
+        if (myOcafDoc.IsNull()) { myOrdinaryNamingHistory.clear(); return; }
+        // The supported ordinary window is 1000. Take one bounded, stack-only
+        // identity census instead of rescanning both lists for every record.
+        // If a foreign caller enlarged the window, retain evidence rather
+        // than truncate the census and accidentally drop a live record.
+        std::array<const TDF_Delta*, kNativeSessionUndoLimit> deltas{};
+        std::size_t count = 0;
+        for (const auto* list : {&myOcafDoc->GetUndos(), &myOcafDoc->GetRedos()}) {
+            for (const auto& delta : *list) {
+                if (delta.IsNull() || count == deltas.size()) return;
+                deltas[count++] = delta.get();
+            }
+        }
+        const auto end = deltas.begin() + count;
+        const std::less<const TDF_Delta*> less;
+        std::sort(deltas.begin(), end, less);
+        const auto live = [&](const Handle(TDF_Delta)& delta) {
+            return !delta.IsNull() && std::binary_search(deltas.begin(), end, delta.get(), less);
+        };
+        for (auto it = myOrdinaryNamingHistory.begin(); it != myOrdinaryNamingHistory.end();) {
+            const auto& record = *it;
+            if (record->data != myOcafDoc->GetData() || record->settled
+                || (record->finalized ? !live(record->delta) : record.use_count() == 1))
+                it = myOrdinaryNamingHistory.erase(it);
+            else ++it;
+        }
+    } catch (...) {} // Never evict live evidence on an inspection failure.
+}
+
+std::shared_ptr<core3d::ordinary_naming::Record> OcctDocument::PrepareOrdinaryNamingHistory(
+    std::size_t creationRootCount, const TDF_Label& existingOwner) noexcept {
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+            || myOcafDoc->GetUndoLimit() <= 0 || myOcafDoc->GetUndoLimit() > 1000
+            || creationRootCount > 1024 || (creationRootCount == 0) == existingOwner.IsNull()) return {};
+        PruneOrdinaryNamingHistory();
+        if (myOrdinaryNamingHistory.size() >= kOrdinaryNamingRecords) return {};
+        auto record = std::make_shared<ordinary_naming::Record>();
+        record->data = myOcafDoc->GetData();
+        record->undoDepth = myOcafDoc->GetAvailableUndos();
+        if (!myOcafDoc->GetUndos().IsEmpty()) record->priorTop = myOcafDoc->GetUndos().Last();
+        record->creation = creationRootCount > 0;
+        record->roots.resize(record->creation ? creationRootCount : 1);
+        if (!record->creation) {
+            record->roots[0].label = existingOwner;
+            if (!CaptureOrdinaryNamingSide(myOcafDoc, existingOwner, record->roots[0].before)) return {};
+        }
+        std::size_t bytes = OrdinaryNamingStorage(*record);
+        for (const auto& existing : myOrdinaryNamingHistory) bytes += OrdinaryNamingStorage(*existing);
+        if (bytes > kOrdinaryNamingBytes) return {};
+        // Allocate the document's slot BEFORE opening the command. Settlement
+        // only assigns handles/scalars; it cannot fail because a vector grew.
+        myOrdinaryNamingHistory.push_back(record);
+        return record;
+    } catch (...) { return {}; }
+}
+
+Standard_Boolean OcctDocument::TrackOrdinaryNamingCreationRoot(
+    const std::shared_ptr<ordinary_naming::Record>& record, std::size_t index,
+    const TDF_Label& label) noexcept {
+    if (!record || !record->creation || record->captured || record->finalized
+        || myOcafDoc.IsNull() || record->data != myOcafDoc->GetData()
+        || !myOcafDoc->HasOpenCommand() || index >= record->roots.size()
+        || label.IsNull() || label.Data() != record->data || !record->roots[index].label.IsNull())
+        return Standard_False;
+    record->roots[index].label = label; // pre-reserved, no allocation
+    return Standard_True;
+}
+
+Standard_Boolean OcctDocument::CaptureOrdinaryNamingCandidate(
+    const std::shared_ptr<ordinary_naming::Record>& record) noexcept {
+    try {
+        if (!record || myOcafDoc.IsNull() || record->data != myOcafDoc->GetData()
+            || !myOcafDoc->HasOpenCommand() || record->finalized || record->captured) return Standard_False;
+        for (auto& root : record->roots) {
+            if (!CaptureOrdinaryNamingSide(myOcafDoc, root.label, root.after)) return Standard_False;
+            std::size_t bytes = 0;
+            for (const auto& existing : myOrdinaryNamingHistory) bytes += OrdinaryNamingStorage(*existing);
+            if (bytes > kOrdinaryNamingBytes) return Standard_False;
+        }
+        record->captured = true;
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::SettleOrdinaryNamingHistory(
+    const std::shared_ptr<ordinary_naming::Record>& record, Standard_Boolean candidate) noexcept {
+    if (!record) return Standard_True; // other ordinary families keep their own history
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || myOcafDoc->HasOpenCommand()
+            || record->data != myOcafDoc->GetData()) return Standard_False;
+        if (!candidate) {
+            if (record->finalized || !RestoreOrdinaryNamingSide(myOcafDoc, *record, true)) return Standard_False;
+            record->settled = true;
+            PruneOrdinaryNamingHistory();
+            return Standard_True;
+        }
+        if (!record->captured || record->settled || myOcafDoc->GetUndos().IsEmpty()) return Standard_False;
+        const auto& delta = myOcafDoc->GetUndos().Last();
+        if (record->finalized) return record->delta == delta; // same reconciliation, once only
+        const auto depth = myOcafDoc->GetAvailableUndos();
+        if (delta == record->priorTop || !(depth == record->undoDepth + 1
+            || (record->undoDepth == myOcafDoc->GetUndoLimit() && depth == record->undoDepth))) return Standard_False;
+        for (const auto& root : record->roots) {
+            if (!OrdinaryNamingSideMatches(myOcafDoc, root.label, root.after, true)) return Standard_False;
+            bool touched = false;
+            for (TDF_ListIteratorOfAttributeDeltaList it(delta->AttributeDeltas()); it.More(); it.Next()) {
+                if (it.Value().IsNull()) return Standard_False;
+                if (it.Value()->Label() == root.label) { touched = true; break; }
+            }
+            if (!touched) return Standard_False;
+        }
+        record->delta = delta;
+        record->priorTop.Nullify();
+        record->finalized = true;
+        PruneOrdinaryNamingHistory();
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::ApplyOrdinaryNamingHistory(
+    const Handle(TDF_Delta)& applied, Standard_Boolean undoDirection) noexcept {
+    try {
+        for (const auto& record : myOrdinaryNamingHistory) {
+            if (!record->finalized || record->delta != applied) continue;
+            if (record->data != myOcafDoc->GetData()
+                || !RestoreOrdinaryNamingSide(myOcafDoc, *record, undoDirection)) return Standard_False;
+            const auto& inverse = undoDirection ? myOcafDoc->GetRedos() : myOcafDoc->GetUndos();
+            if (inverse.IsEmpty()) return Standard_False;
+            record->delta = undoDirection ? inverse.First() : inverse.Last();
+            break;
+        }
+        PruneOrdinaryNamingHistory();
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
 void OcctDocument::ReleaseTreatmentHistoryCompanions() noexcept {
     try {
         myPendingTreatmentCompanion.reset();
         myTreatmentHistoryCompanions.clear();
+        myOrdinaryNamingHistory.clear();
         // A2-N2: the recovery record is bound to this session's live document
         // and never crosses a replacement or destruction.
         myAuthoredBooleanRecovery.reset();
@@ -29324,6 +29838,7 @@ void OcctDocument::ReleaseTreatmentHistoryCompanions() noexcept {
 }
 
 void OcctDocument::PruneTreatmentHistoryCompanions() noexcept {
+    PruneOrdinaryNamingHistory();
     try {
         if (myOcafDoc.IsNull()) { myTreatmentHistoryCompanions.clear(); return; }
         // Only companions bound to a delta that is still live in either
@@ -30254,7 +30769,9 @@ Standard_Boolean OcctDocument::undo() {
                 }
             }
         }
+        const auto ordinaryDelta = myOcafDoc->GetUndos().Last();
         if (myOcafDoc->Undo()) {
+            if (!ApplyOrdinaryNamingHistory(ordinaryDelta, Standard_True)) return Standard_False;
             // Restoration precedes the authority fence advance, NotifyChanges,
             // redraw and any externally visible success; a failed validation
             // is an honest unknown outcome, never a fabricated success.
@@ -30309,7 +30826,9 @@ Standard_Boolean OcctDocument::redo() {
                 }
             }
         }
+        const auto ordinaryDelta = myOcafDoc->GetRedos().First();
 		if (myOcafDoc->Redo()) {
+            if (!ApplyOrdinaryNamingHistory(ordinaryDelta, Standard_False)) return Standard_False;
             // Restoration precedes the authority fence advance, NotifyChanges,
             // redraw and any externally visible success; a failed validation
             // is an honest unknown outcome, never a fabricated success.

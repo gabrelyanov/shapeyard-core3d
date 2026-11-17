@@ -19,6 +19,9 @@
 #include <Precision.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepTools.hxx>
+#include <BRepTopAdaptor_FClass2d.hxx>
+#include <gp_Pnt2d.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
@@ -598,6 +601,134 @@ TopologyAdmission CountBoundedTopology(
     }
 }
 
+// BRepBndLib::AddOptimal can read a free-form face short: a 50 mm sphere sized to
+// 41.6 mm along X becomes a rational spline face and read back 41.419 mm. A point
+// on the face can only widen a box toward the true one, so for every free-form
+// face that might reach past the box, search its six extremes on the exact surface
+// (grid, then a shrinking pattern search kept inside the face) and add them.
+void WidenBoundsToFreeformFaceExtremes(
+    const TopoDS_Shape& theShape,
+    Bnd_Box& theBox)
+{
+    constexpr int kGrid = 24;
+    constexpr int kMaximumSteps = 400;
+    if (theShape.IsNull() || theBox.IsVoid() || theBox.IsOpen()) {
+        return;
+    }
+    for (TopExp_Explorer aFaceItem(theShape, TopAbs_FACE);
+         aFaceItem.More(); aFaceItem.Next()) {
+        const TopoDS_Face aFace = TopoDS::Face(aFaceItem.Current());
+        BRepAdaptor_Surface aSurface(aFace, Standard_False);
+        switch (aSurface.GetType()) {
+            case GeomAbs_Plane:
+            case GeomAbs_Cylinder:
+            case GeomAbs_Cone:
+            case GeomAbs_Sphere:
+            case GeomAbs_Torus:
+                continue;
+            default:
+                break;
+        }
+        Standard_Real aU0 = 0.0, aU1 = 0.0, aV0 = 0.0, aV1 = 0.0;
+        BRepTools::UVBounds(aFace, aU0, aU1, aV0, aV1);
+        if (!std::isfinite(aU0) || !std::isfinite(aU1) || !std::isfinite(aV0)
+            || !std::isfinite(aV1) || !(aU1 > aU0) || !(aV1 > aV0)) {
+            continue;
+        }
+        Bnd_Box aLoose;
+        BRepBndLib::Add(aFace, aLoose, Standard_False);
+        if (aLoose.IsVoid() || aLoose.IsOpen()) {
+            continue;
+        }
+        double aLooseBounds[6];
+        aLoose.Get(aLooseBounds[0], aLooseBounds[1], aLooseBounds[2],
+                   aLooseBounds[3], aLooseBounds[4], aLooseBounds[5]);
+        double aBounds[6];
+        theBox.Get(aBounds[0], aBounds[1], aBounds[2],
+                   aBounds[3], aBounds[4], aBounds[5]);
+        bool aMayWiden = false;
+        for (int anAxis = 0; anAxis < 3; ++anAxis) {
+            aMayWiden = aMayWiden || aLooseBounds[anAxis] < aBounds[anAxis]
+                || aLooseBounds[anAxis + 3] > aBounds[anAxis + 3];
+        }
+        if (!aMayWiden) {
+            continue;
+        }
+        BRepTopAdaptor_FClass2d aClassifier(aFace, Precision::PConfusion());
+        const auto inside = [&](const double theU, const double theV) {
+            const TopAbs_State aState =
+                aClassifier.Perform(gp_Pnt2d(theU, theV), Standard_False);
+            return aState == TopAbs_IN || aState == TopAbs_ON;
+        };
+        struct Sample { double u, v; gp_Pnt point; };
+        std::vector<Sample> aSamples;
+        aSamples.reserve((kGrid + 1) * (kGrid + 1));
+        for (int i = 0; i <= kGrid; ++i) {
+            const double aU = i == kGrid ? aU1 : aU0 + (aU1 - aU0) * i / kGrid;
+            for (int j = 0; j <= kGrid; ++j) {
+                const double aV = j == kGrid ? aV1 : aV0 + (aV1 - aV0) * j / kGrid;
+                if (inside(aU, aV)) {
+                    aSamples.push_back({aU, aV, aSurface.Value(aU, aV)});
+                }
+            }
+        }
+        if (aSamples.empty()) {
+            continue;
+        }
+        for (int anAxis = 0; anAxis < 3; ++anAxis) {
+            for (const double aSign : {-1.0, 1.0}) {
+                theBox.Get(aBounds[0], aBounds[1], aBounds[2],
+                           aBounds[3], aBounds[4], aBounds[5]);
+                if (aSign > 0.0 ? aLooseBounds[anAxis + 3] <= aBounds[anAxis + 3]
+                                : aLooseBounds[anAxis] >= aBounds[anAxis]) {
+                    continue;
+                }
+                const Sample* aStart = &aSamples.front();
+                for (const Sample& aSample : aSamples) {
+                    if (aSign * aSample.point.Coord(anAxis + 1)
+                        > aSign * aStart->point.Coord(anAxis + 1)) {
+                        aStart = &aSample;
+                    }
+                }
+                double aU = aStart->u, aV = aStart->v;
+                gp_Pnt aBest = aStart->point;
+                double aBestValue = aSign * aBest.Coord(anAxis + 1);
+                double aStepU = (aU1 - aU0) / kGrid, aStepV = (aV1 - aV0) / kGrid;
+                const double aStopU = (aU1 - aU0) * 1.0e-13;
+                const double aStopV = (aV1 - aV0) * 1.0e-13;
+                for (int aStep = 0; aStep < kMaximumSteps
+                     && (aStepU > aStopU || aStepV > aStopV); ++aStep) {
+                    bool aMoved = false;
+                    for (int a = -1; a <= 1 && !aMoved; ++a) {
+                        for (int b = -1; b <= 1 && !aMoved; ++b) {
+                            if (a == 0 && b == 0) {
+                                continue;
+                            }
+                            const double aNextU = std::clamp(aU + a * aStepU, aU0, aU1);
+                            const double aNextV = std::clamp(aV + b * aStepV, aV0, aV1);
+                            const gp_Pnt aPoint = aSurface.Value(aNextU, aNextV);
+                            const double aValue = aSign * aPoint.Coord(anAxis + 1);
+                            if (std::isfinite(aValue) && aValue > aBestValue
+                                && inside(aNextU, aNextV)) {
+                                aU = aNextU;
+                                aV = aNextV;
+                                aBest = aPoint;
+                                aBestValue = aValue;
+                                aMoved = true;
+                            }
+                        }
+                    }
+                    if (!aMoved) {
+                        aStepU *= 0.5;
+                        aStepV *= 0.5;
+                    }
+                }
+                theBox.Add(aBest);
+            }
+        }
+    }
+}
+
 TriangleMeshSweepOutcome TrySweepTriangleMeshBounds(
     const TopoDS_Shape& theShape,
     const Standard_Size theAdmittedNodeCount,
@@ -1166,6 +1297,8 @@ private:
                 aBounds,
                 Standard_False,
                 Standard_False);
+            WidenBoundsToFreeformFaceExtremes(
+                theRequest.copiedShape, aBounds);
             if (!TryBoundsValue(aBounds, aResult.bounds)) {
                 aResult.outcome = BoundsWorkerOutcome::Failed;
                 return aResult;

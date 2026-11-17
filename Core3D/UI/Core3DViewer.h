@@ -27,6 +27,7 @@
 #include <atomic>
 #include <gp_Pnt2d.hxx>
 #include <optional>
+#include <array>
 #if DEBUG
 #include <map>
 #include "../OCCTKit/ProfileSourceCorrespondence.hxx"
@@ -554,6 +555,9 @@ namespace core3d {
     //! editable Boolean cannot open (a part with a saved Hole).
     bool showBakedBooleanPreview(const std::string& targetEntity,
         const std::string& toolEntity, int operation, std::string& refusal) noexcept;
+    //! True when a Cut of the target by the tool would take nothing away (the parts only
+    //! touch or miss; design system rule 11). False when it cannot be told.
+    bool cutRemovesNothing(const std::string& targetEntity, const std::string& toolEntity) noexcept;
     //! Preview of applyBakedBooleanBatch: each kept part shows its result, every
     //! cutter or joined part is hidden. Nothing in the document changes.
     bool showBakedBooleanBatchPreview(const std::vector<std::string>& targetEntities,
@@ -716,6 +720,9 @@ namespace core3d {
             TopoDS_Shape worldEdge;
             gp_Pnt pickedPoint;
             double pixelTolerance = 0;
+            // The snap radius in model units, fixed with the camera of the tap: zooming in
+            // afterwards must not undo a snap the user already saw.
+            double snapRadius = 0;
         };
         std::vector<MeasurePick> measurePicksForCurrentSelection() noexcept;
         void Select(int theX, int theY);
@@ -830,6 +837,9 @@ namespace core3d {
             const std::optional<OcctMeshUVAtlasOptions>& options) noexcept;
         OrdinaryEditResult repairMeshWinding(const ObjectFrameIdentity& identity,
             std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept;
+        //! Make solid: one selected closed imported mesh becomes one BRep solid in place; one Undo.
+        OrdinaryEditResult makeSolidFromMesh(const ObjectFrameIdentity& identity,
+            std::uint64_t presentationRevision, std::uint32_t width, std::uint32_t height) noexcept;
         OrdinaryEditResult generateTriangleUVAtlas(const ObjectFrameIdentity& identity,
             std::uint32_t width, std::uint32_t height, const OcctMeshUVAtlasOptions& options = {}) noexcept;
         OrdinaryEditResult produceRetainedFinishing(const ObjectFrameIdentity& identity,
@@ -893,6 +903,7 @@ namespace core3d {
             _interactiveCallback = cb;
         }
         void setGeometrySnapFeedbackChangedCallback(std::function<void(bool)> callback);
+        void setLiveMoveChangedCallback(std::function<void(bool)> callback);
         void setBooleanPreviewStateChangedCallback(
             std::function<void()> callback);
         void setLinearArrayPreviewStateChangedCallback(
@@ -973,6 +984,13 @@ namespace core3d {
             std::uint32_t viewportWidth,
             std::uint32_t viewportHeight,
             scene::SceneSnapshotCaptureFailure* failureOut) noexcept;
+#if DEBUG
+        //! Main-thread, viewer-lifetime inclusive wall costs: count/seconds
+        //! pairs for scene capture, assembly prepare, native commit, creation
+        //! publication and its viewer update. These inclusive totals overlap.
+        //! Scene captures nested in prepare/commit overlap those totals.
+        std::array<double, 10> debugHistoryCostObservation() const noexcept;
+#endif
         //! True only when the active typed operation owns every deviation from
         //! the retained selection mode. Ordinary GL selection authority stays
         //! strict and OutcomeUnknown scene publication remains blocked.
@@ -1290,6 +1308,7 @@ namespace core3d {
         
         std::function<void(int,int)> _interactiveCallback;
         std::function<void(bool)> _geometrySnapFeedbackChangedCallback;
+        std::function<void(bool)> _liveMoveChangedCallback;
         std::function<void()> _booleanPreviewStateChangedCallback;
         std::function<void()> _linearArrayPreviewStateChangedCallback;
         std::function<void()> _radialArrayPreviewStateChangedCallback;
@@ -1297,6 +1316,9 @@ namespace core3d {
         std::function<void()> _shellPreviewStateChangedCallback;
         std::function<void(PrimitiveManipulatorType)>
             _interactorRecreatedCallback;
+#if DEBUG
+        std::array<double, 10> _debugHistoryCosts{};
+#endif
         scene::OcctSceneSnapshotBuilder _sceneSnapshotBuilder;
         std::shared_ptr<native_opening::detail::State> _nativeOpeningState;
 #ifdef DEBUG

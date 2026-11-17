@@ -136,6 +136,55 @@ bool F2CanonicalRequestBytes(Core3DDecimationRequest *request,
             || !std::isfinite(request.metersPerUnit)) return false;
         w.U32(static_cast<std::uint32_t>(request.targetTriangleCount));
         w.F64(request.metersPerUnit);
+        // The seal binds the exact producer input, including the absence of
+        // optional channels. Preserve the existing flat encoding; any present
+        // field adds a domain-separated extension with explicit presence tags.
+        // This is equality evidence, not admission of captured attributes.
+        NSArray<NSNumber *> *normals = request.f2AttributeWedgeNormals;
+        NSArray<NSNumber *> *uvs = request.f2AttributeWedgeUVs;
+        NSArray<NSNumber *> *materials = request.f2AttributeFaceMaterials;
+        NSArray<NSString *> *anchors = request.f2AttributeFaceAnchors;
+        if (normals || uvs || materials || anchors) {
+            w.Text("shapeyard.export-mesh-decimation.v1/request/attributes.v1");
+            auto floatingArray = [&](NSArray<NSNumber *> *values, NSUInteger count) {
+                w.U8(values ? 1 : 0);
+                if (!values) return true;
+                if (![values isKindOfClass:NSArray.class] || values.count != count) return false;
+                w.U64(values.count);
+                for (NSNumber *number in values) {
+                    if (![number isKindOfClass:NSNumber.class]
+                        || !std::isfinite(number.doubleValue)) return false;
+                    w.F64(number.doubleValue);
+                }
+                return true;
+            };
+            if (!floatingArray(normals, request.positionsMM.count)
+                || !floatingArray(uvs, 2 * (request.positionsMM.count / 3))) return false;
+            w.U8(materials ? 1 : 0);
+            if (materials) {
+                if (![materials isKindOfClass:NSArray.class]
+                    || materials.count != request.indices.count / 3) return false;
+                w.U64(materials.count);
+                for (NSNumber *number in materials) {
+                    if (![number isKindOfClass:NSNumber.class]) return false;
+                    const double value = number.doubleValue;
+                    if (!std::isfinite(value) || value < 0
+                        || value > std::numeric_limits<std::uint32_t>::max()
+                        || std::floor(value) != value) return false;
+                    w.U32(static_cast<std::uint32_t>(value));
+                }
+            }
+            w.U8(anchors ? 1 : 0);
+            if (anchors) {
+                if (![anchors isKindOfClass:NSArray.class]
+                    || anchors.count != request.indices.count / 3) return false;
+                w.U64(anchors.count);
+                for (NSString *anchor in anchors) {
+                    if (![anchor isKindOfClass:NSString.class] || !LowerHexDigest(anchor)) return false;
+                    w.Text(anchor.UTF8String ?: "");
+                }
+            }
+        }
         out = std::move(w.bytes);
         return true;
     } @catch (__unused NSException *exception) { out.clear(); return false; }
@@ -159,6 +208,10 @@ bool F2EvidenceEqual(Core3DPublishArtifactEvidence *left, Core3DPublishArtifactE
         && F2NumberArraysEqual(left.sourceIndices, right.sourceIndices)
         && [left.faceEvidenceSHA256InEmittedOrder
             isEqualToArray:right.faceEvidenceSHA256InEmittedOrder]
+        && ((left.triangleIdentitySHA256InEmittedOrder == nil
+                && right.triangleIdentitySHA256InEmittedOrder == nil)
+            || [left.triangleIdentitySHA256InEmittedOrder
+                isEqualToArray:right.triangleIdentitySHA256InEmittedOrder])
         && [left.measurementReceiptSHA256 isEqualToString:right.measurementReceiptSHA256]
         && left.addressedTriangleCount == right.addressedTriangleCount;
 }

@@ -180,6 +180,7 @@ struct AuthoredBooleanObservation;
 // document session.
 namespace core3d::treatment_history {
 struct TextReliefReplayMembers;
+
 struct NamingState {
     TDF_Label label;
     std::string labelEntry;
@@ -234,6 +235,8 @@ struct Companion {
 };
 } // namespace core3d::treatment_history
 
+namespace core3d::ordinary_naming { struct Record; }
+
 // A2-N2 document-owned authored-Boolean recovery record — nonpersisted
 // native authority for the single outstanding authored-Boolean transaction.
 // It is created from the document-issued capture and the issuing context
@@ -271,6 +274,8 @@ struct Record final {
 //! reuse them. Invalid is a read-only fail-closed sentinel and must never be
 //! written to a document.
 enum class OcctMeshWindingRepairResult { Invalid, Unchanged, Prepared };
+//! Make solid from one closed imported triangle mesh (Job 4): Open = free or shared-by-three edges.
+enum class OcctMeshSolidConversionResult { Invalid, Open, TooLarge, Prepared };
 
 enum class OcctGeometryRepresentation : Standard_Integer
 {
@@ -1057,6 +1062,9 @@ struct OcctGeometryDuplicationRequest
     // Repeat copies supported authored face finishes onto new subshape labels.
     // Charge those labels as well as the whole-part appearance before copying.
     bool preservesAuthoredFaceMaterials = false;
+    // Duplicate only: a part whose standalone saved Hole could be baked is
+    // copied as a plain solid; the source keeps its resizable Hole record.
+    bool copiesSavedCutAsPlainSolid = false;
 };
 
 //! Register the app-owned BinOcaf/BinXCAF project formats with a narrow,
@@ -2068,6 +2076,23 @@ public:
     //! True while a measured treatment-history companion has not been bound
     //! to its own committed delta or discharged by verified prior settlement.
     Standard_EXPORT Standard_Boolean HasUnresolvedTreatmentHistoryCompanion() const noexcept;
+
+    // Native-only measured naming history for profile creation and Shell.
+    // The issuing controller owns the pending token through reconciliation.
+#if DEBUG
+    std::array<std::size_t, 3> DebugOrdinaryNamingHistoryStorage() const noexcept;
+#endif
+    std::shared_ptr<core3d::ordinary_naming::Record> PrepareOrdinaryNamingHistory(
+        std::size_t creationRootCount, const TDF_Label& existingOwner = {}) noexcept;
+    Standard_Boolean TrackOrdinaryNamingCreationRoot(
+        const std::shared_ptr<core3d::ordinary_naming::Record>& record,
+        std::size_t index, const TDF_Label& label) noexcept;
+    Standard_Boolean CaptureOrdinaryNamingCandidate(
+        const std::shared_ptr<core3d::ordinary_naming::Record>& record) noexcept;
+    Standard_Boolean SettleOrdinaryNamingHistory(
+        const std::shared_ptr<core3d::ordinary_naming::Record>& record,
+        Standard_Boolean candidate) noexcept;
+
 #if DEBUG
     //! SAB-N1 read-only DEBUG observation for the authored-Boolean fault
     //! proof: exact current owner-subtree TNaming (labelEntry, version) rows
@@ -2232,6 +2257,9 @@ public:
     //! Remove a canonical XCAF material assignment before applying a legacy
     //! preset/color. Existing legacy projects continue to load unchanged.
     Standard_Boolean ClearObjectVisualMaterial(const TDF_Label& label);
+    //! Whole-part palette authoring only: clear subordinate appearance in the
+    //! caller's open history transaction, preserving topology and labels.
+    Standard_Boolean ClearPartSubshapeAppearance(const TDF_Label& root);
     //! Copy the effective source appearance without mutating shared XCAF
     //! material definitions. Used by duplicate and topology-changing tools.
     Standard_Boolean CopyObjectAppearance(
@@ -2377,6 +2405,10 @@ public:
     //! Private consistent-winding candidate; source ownership and material contracts remain strict.
     Standard_EXPORT OcctMeshWindingRepairResult PrepareMeshWindingRepair(const TDF_Label& label, TopoDS_Shape& candidate) const noexcept;
     Standard_EXPORT Standard_Boolean ValidateMeshWindingRepair(const TDF_Label& label, const TopoDS_Shape& candidate) const noexcept;
+    //! One closed, consistently wound triangle mesh -> one valid FORWARD solid in the same object-local frame,
+    //! coplanar triangles merged into planar faces. Untextured meshes without authored frames or atlas only.
+    Standard_EXPORT OcctMeshSolidConversionResult PrepareMeshSolidConversion(const TDF_Label& label, TopoDS_Shape& candidate) const noexcept;
+    Standard_EXPORT Standard_Boolean ValidateMeshSolidConversion(const TDF_Label& label, const TopoDS_Shape& candidate) const noexcept;
     //! Bounded flat-corner editing; preserves atlas/maps, rejects supplied frames.
     Standard_EXPORT Standard_Boolean CanEditMeshVertices(const TDF_Label& label) const noexcept;
     Standard_EXPORT Standard_Boolean PrepareMeshVertexMove(const TDF_Label& label,
@@ -2485,6 +2517,16 @@ public:
     //! retain HasNoSavedSweepForTopology's stricter admission.
     Standard_Boolean CanBakeSavedCutForFaceEdit(const TDF_Label& label) const noexcept;
 
+    //! Bevel/Round may also bake an ordinary saved Join/Cut/Overlap (its two
+    //! frozen originals, nothing else) inside their own Apply command, exactly
+    //! as PrepareBooleanResultForFaceEdit removes it for Push-pull. Read-only.
+    Standard_Boolean CanBakeBooleanResultForFaceEdit(const TDF_Label& label) const noexcept;
+
+    //! Either of the two bakeable records above.
+    Standard_Boolean CanBakeRecordForFaceEdit(const TDF_Label& label) const noexcept {
+        return CanBakeSavedCutForFaceEdit(label) || CanBakeBooleanResultForFaceEdit(label);
+    }
+
     //! Bake a saved Join/Cut/Overlap or standalone older cut before a face edit.
     //! Requires the face edit's open command: abort/undo restores the record.
     //! Other saved feature families are never removed by this operation.
@@ -2494,6 +2536,9 @@ public:
         const TDF_Label& label,
         Handle(AIS_Shape) aisShape,
         const std::function<Standard_Boolean(const TDF_Label&)>& shapeStager = {});
+    //! Make solid staging: replace a TriangleMesh-marked definition's mesh with a BRep solid and set
+    //! its marker to BRep in the open command. Every other replacement keeps its representation.
+    Standard_Boolean ReplaceMeshWithSolid(const TDF_Label& label, Handle(AIS_Shape) aisShape);
     Standard_Boolean HasUnroutedRetainedDependent(
         const TDF_Label& label) const noexcept;
     
@@ -2602,6 +2647,10 @@ private:
   void RetireAuthoredBooleanRecovery() noexcept;
   void ReleaseTreatmentHistoryCompanions() noexcept;
   void PruneTreatmentHistoryCompanions() noexcept;
+  void PruneOrdinaryNamingHistory() noexcept;
+  Standard_Boolean ApplyOrdinaryNamingHistory(
+      const Handle(TDF_Delta)& applied, Standard_Boolean undoDirection) noexcept;
+
   Standard_Boolean ApplyTreatmentHistoryAfterHistoryChange(
       const Handle(TDF_Delta)& engaged, Standard_Boolean undoDirection) noexcept;
   Standard_Boolean StageRetainedEdgeTreatment(
@@ -2719,6 +2768,7 @@ private:
       myTextReliefReplayPairFault;
 #endif
   std::deque<std::unique_ptr<core3d::treatment_history::Companion>> myTreatmentHistoryCompanions;
+  std::vector<std::shared_ptr<core3d::ordinary_naming::Record>> myOrdinaryNamingHistory;
   // A2-N2: the single document-owned authored-Boolean recovery authority,
   // nonpersisted and released with this native document session.
   std::unique_ptr<core3d::authored_recovery::Record> myAuthoredBooleanRecovery;

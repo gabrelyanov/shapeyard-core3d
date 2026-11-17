@@ -523,6 +523,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 && request.operation != OrdinaryTransformOperation::MeshRegionExtrude
                 && request.operation != OrdinaryTransformOperation::MeshRegionInset
                 && request.operation != OrdinaryTransformOperation::MeshWindingRepair
+                && request.operation != OrdinaryTransformOperation::MeshSolidConversion
                 && request.operation != OrdinaryTransformOperation::ProfileRebuild
                 && request.operation != OrdinaryTransformOperation::CompleteProfileRebuild
                 && request.operation != OrdinaryTransformOperation::EnclosureRebuild
@@ -742,6 +743,7 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 && request.operation != OrdinaryTransformOperation::MeshRegionExtrude
                 && request.operation != OrdinaryTransformOperation::MeshRegionInset
                 && request.operation != OrdinaryTransformOperation::MeshWindingRepair
+                && request.operation != OrdinaryTransformOperation::MeshSolidConversion
                 && request.operation != OrdinaryTransformOperation::ProfileRebuild
                 && request.operation != OrdinaryTransformOperation::CompleteProfileRebuild
                 && request.operation != OrdinaryTransformOperation::EnclosureRebuild
@@ -1018,6 +1020,16 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                     || !_document->ValidateMeshWindingRepair(request.label, request.shape))) {
                 CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             }
+            if (request.operation == OrdinaryTransformOperation::MeshSolidConversion
+                && (changes.size() != 1 || permit || !geometryChanges
+                    || representation != OcctGeometryRepresentation::TriangleMesh
+                    || !MatricesEqual(record.previous.transform, request.transform)
+                    || request.rotationAroundPivot.has_value()
+                    || request.meshVertexMove.has_value()
+                    || !record.previous.meshRegionPartition.empty()
+                    || !_document->ValidateMeshSolidConversion(request.label, request.shape))) {
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
+            }
             if ((representation != OcctGeometryRepresentation::BRep
                     && representation != OcctGeometryRepresentation::LegacyUnknown
                     && representation != OcctGeometryRepresentation::TriangleMesh)) {
@@ -1283,6 +1295,13 @@ OrdinaryEditLease OrdinaryEditController::beginCreationImpl(
         }
         if (!_host.admitCreation(ledger) || (ledger.meshCopy && !_host.admitMeshCopy(ledger))
             || !creationMatches(ledger, false)) { return reject(OrdinaryEditResult::Invalid); }
+        // The measured repair covers profile creation (including assembly
+        // batches). Other source families retain their existing history path.
+        if (!ledger.meshCopy && std::all_of(requests.begin(), requests.end(),
+                [](const auto& request) { return request.profile.has_value(); })) {
+            ledger.namingHistory = _document->PrepareOrdinaryNamingHistory(requests.size());
+            if (!ledger.namingHistory) return reject(OrdinaryEditResult::BudgetRefused);
+        }
         _pending.emplace(std::move(ledger));
         _leaseLifetime = lifetime;
         _activeToken = ++_nextToken;
@@ -1455,6 +1474,9 @@ OrdinaryEditResult OrdinaryEditController::stageCreationAndCommit(std::uint64_t 
             }
             const auto label = _document->AddShape(record.requested.presentation, record.requested.representation);
             if (label.IsNull()) { throw Standard_Failure("Creation returned no root"); }
+            if (ledger.namingHistory && !_document->TrackOrdinaryNamingCreationRoot(
+                    ledger.namingHistory, index, label))
+                throw Standard_Failure("Creation naming root tracking failed");
             if (ledger.meshCopy) {
                 auto& source=*ledger.meshCopy;
                 const auto from=source.previous.object.object.label;
@@ -1524,6 +1546,8 @@ OrdinaryEditResult OrdinaryEditController::stageCreationAndCommit(std::uint64_t 
             || !creationMatches(ledger, true)) { throw Standard_Failure("Creation catalog readback failed"); }
         if(!stageCreationReceipt(ledger) || (ledger.modelingReceipt && !ledger.modelingReceipt->permit->current()))
             throw Standard_Failure("Modeling receipt staging or epoch fence failed");
+        if (ledger.namingHistory && !_document->CaptureOrdinaryNamingCandidate(ledger.namingHistory))
+            throw Standard_Failure("Creation naming readback failed");
         ledger.candidateSealed = true;
         if (_command.commitAndObserve() == OrdinaryCommandObservation::Unavailable) {
             _state = OrdinaryEditState::OutcomeUnknown; _activeToken = 0; return OrdinaryEditResult::OutcomeUnknown;
@@ -1546,6 +1570,9 @@ OrdinaryEditResult OrdinaryEditController::reconcileCreationImpl() noexcept {
         const bool previous = observation == OrdinaryCommandObservation::ClosedWithPriorMarker;
         if ((!candidate && !previous) || (candidate && (!ledger.candidateSealed
             || (ledger.modelingReceipt && !ledger.modelingReceipt->staged))) || !creationMatches(ledger, candidate)) {
+            _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown;
+        }
+        if (!_document->SettleOrdinaryNamingHistory(ledger.namingHistory, candidate)) {
             _state = OrdinaryEditState::OutcomeUnknown; return OrdinaryEditResult::OutcomeUnknown;
         }
         _committed = candidate; _state = OrdinaryEditState::RepairPending;
@@ -2580,6 +2607,11 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                     record.previous.label, record.requested.shape)) {
                 throw Standard_Failure("Stale mesh winding candidate");
             }
+            if (record.requested.operation == OrdinaryTransformOperation::MeshSolidConversion
+                && !_document->ValidateMeshSolidConversion(
+                    record.previous.label, record.requested.shape)) {
+                throw Standard_Failure("Stale mesh solid candidate");
+            }
             Handle(AIS_Shape) candidate = new AIS_Shape(record.requested.shape);
             candidate->SetLocalTransformation(record.requested.transform);
             bool sweepStaged=false,loftStaged=false,cutStaged=false,cutSourceStaged=false,programSourceStaged=false,profileD4Staged=false,treatmentStaged=false,treatmentStagedR2=false;
@@ -2780,7 +2812,10 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 }
             }
             if ((!featureStaged && !treatmentStagedR2 && !record.previous.shape.IsEqual(record.requested.shape)
-                    && !_document->ReplaceShape(record.previous.label, candidate))
+                    && (record.requested.operation == OrdinaryTransformOperation::MeshSolidConversion
+                        // ReplaceShape keeps the representation; Make solid alone changes it.
+                        ? !_document->ReplaceMeshWithSolid(record.previous.label, candidate)
+                        : !_document->ReplaceShape(record.previous.label, candidate)))
                 || (carriesFaceColours
                     && !_document->CarryFaceColours(record.previous.label, record.requested.shape,
                         paintedLabels, paintedFaces))
