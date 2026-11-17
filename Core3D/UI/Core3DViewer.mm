@@ -75,6 +75,7 @@
 #include "BRepAlgoAPI_Cut.hxx"
 #include "BRepAlgoAPI_Fuse.hxx"
 #include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_ColorTool.hxx>
 #include <XCAFDoc_LayerTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFDoc_VisMaterial.hxx>
@@ -11510,6 +11511,70 @@ OrdinaryEditResult Core3DViewer::publishCreatedPrimitives(
     return lease ? lease.stageAndCommit() : failure;
 }
 
+// Fault 3 (desk lamp, build 5): Import inside a project opened a NEW project. The parts of an
+// app-created import document (the native importer's BinXCAF result) are added to the open
+// model as ONE ordinary creation: one Undo removes them all; names are kept; a colour is kept
+// as its nearest named colour; lengths are scaled when the two documents' units differ.
+OrdinaryEditResult Core3DViewer::insertPartsFromImportedDocument(const std::string& path,
+                                                                 int& inserted) noexcept {
+    inserted = 0;
+    if (![NSThread isMainThread] || path.empty() || myDoc.IsNull() || !canBeginCommittedEdit())
+        return OrdinaryEditResult::Busy;
+    Handle(OcctDocument) source = new OcctDocument();
+    std::vector<OrdinaryCreationRequest> requests;
+    try {
+        if (!source->OpenPrivateExportSnapshot(path, Message_ProgressRange()))
+            return OrdinaryEditResult::Invalid;
+        struct Close { Handle(OcctDocument) doc; ~Close() { if (!doc.IsNull()) doc->ClosePrivateExportSnapshot(); } } close{source};
+        const auto document = source->Document();
+        if (document.IsNull()) return OrdinaryEditResult::Invalid;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        const auto colors = XCAFDoc_DocumentTool::ColorTool(document->Main());
+        if (shapes.IsNull()) return OrdinaryEditResult::Invalid;
+        // XCAF length units in metres; a document without one (legacy) is in millimetres.
+        double sourceMeters = 0.001, targetMeters = 0.001;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(document, sourceMeters) || !(sourceMeters > 0)) sourceMeters = 0.001;
+        if (myDoc->Document().IsNull() || !XCAFDoc_DocumentTool::GetLengthUnit(myDoc->Document(), targetMeters)
+            || !(targetMeters > 0)) targetMeters = 0.001;
+        const double scale = sourceMeters > 0 && targetMeters > 0 && std::isfinite(sourceMeters / targetMeters)
+            ? sourceMeters / targetMeters : 1.0;
+        TDF_LabelSequence roots;
+        shapes->GetFreeShapes(roots);
+        if (roots.IsEmpty() || roots.Length() > 256) return OrdinaryEditResult::Invalid;
+        for (int index = 1; index <= roots.Length(); ++index) {
+            const TDF_Label label = roots.Value(index);
+            TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
+            if (shape.IsNull()) continue;
+            if (std::abs(scale - 1.0) > 1e-12) {
+                gp_Trsf scaling;
+                scaling.SetScale(gp::Origin(), scale);
+                BRepBuilderAPI_Transform scaled(shape, scaling, Standard_True);
+                if (!scaled.IsDone() || scaled.Shape().IsNull()) return OrdinaryEditResult::Invalid;
+                shape = scaled.Shape();
+            }
+            OrdinaryCreationRequest request;
+            request.presentation = new AIS_ColoredShape(shape);
+            myContext->ApplyDefaultMaterial(request.presentation);
+            request.representation = source->StoredGeometryRepresentationForLabel(label);
+            if (request.representation != OcctGeometryRepresentation::TriangleMesh)
+                request.representation = OcctGeometryRepresentation::BRep;
+            Quantity_Color color;
+            if (!colors.IsNull() && (colors->GetColor(label, XCAFDoc_ColorSurf, color)
+                                     || colors->GetColor(label, XCAFDoc_ColorGen, color)))
+                request.color = color.Name();
+            Handle(TDataStd_Name) named;
+            if (label.FindAttribute(TDataStd_Name::GetID(), named) && !named.IsNull()
+                && named->Get().Length() > 0 && named->Get().Length() <= 128)
+                request.name = named->Get();
+            requests.push_back(std::move(request));
+        }
+    } catch (...) { return OrdinaryEditResult::Invalid; }
+    if (requests.empty()) return OrdinaryEditResult::Invalid;
+    const auto result = publishCreatedPrimitives(requests);
+    if (result == OrdinaryEditResult::Committed) inserted = int(requests.size());
+    return result;
+}
+
 bool Core3DViewer::admitMeshCopy(OrdinaryCreationLedger& ledger) noexcept {
     try {
         if (!ledger.meshCopy || ledger.records.size()!=1 || !_shapeInteractor || !_objectInteractor
@@ -14741,11 +14806,15 @@ void Core3DViewer::setOrthoProjection(const OrthoProjectionType orthoType) {
 
         if (myView->Camera()->ProjectionType() != Graphic3d_Camera::Projection_Orthographic) {
             myView->Camera()->SetProjectionType(Graphic3d_Camera::Projection_Orthographic);
-			if (orthoType == OrthoProjectionTypeTop)
-				myView->Camera()->SetUp(gp::DX());
-			else if (orthoType == OrthoProjectionTypeBottom)
-				myView->Camera()->SetUp(-gp::DX());
         }
+        // Top and Bottom keep the up direction a fresh session shows (5.34.1),
+        // whether they come from the 3D view or from another flat view; it was
+        // set only on the first switch, so Top turned 90 degrees after a
+        // reopen (CTO 15 Nov 19:00, desk lamp fault 1).
+        if (orthoType == OrthoProjectionTypeTop)
+            myView->Camera()->SetUp(gp::DX());
+        else if (orthoType == OrthoProjectionTypeBottom)
+            myView->Camera()->SetUp(-gp::DX());
 
         myView->FitAll(0.2, Standard_False);
         myView->RedrawImmediate();
