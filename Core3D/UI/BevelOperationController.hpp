@@ -154,6 +154,11 @@ public:
     Standard_Boolean setRoundRadius(Standard_Real radius) noexcept;
     Standard_Real roundMetersPerUnit() const noexcept;
     Standard_Real roundMaximumRadiusMM() const noexcept;
+    //! Metres of the user's world per stored unit for the active Bevel:
+    //! document unit x the parts' common scale. 0 when no Bevel is active,
+    //! the unit is unreadable, or the selected parts have different scales
+    //! (one typed millimetre value cannot mean the same on each of them).
+    Standard_Real bevelMetersPerUnit() const noexcept;
     BevelApplyResult apply() noexcept;
     Standard_Boolean cancel() noexcept;
 
@@ -202,6 +207,8 @@ private:
         Standard_Size topologyNodeCount = 0;
         Standard_Size sourceEdgeCount = 0;
         std::shared_ptr<const RetainedBevelAdapter::Capture> retainedCapture;
+        // A standalone saved Hole that Apply bakes in its own command.
+        Standard_Boolean bakesSavedCut = Standard_False;
         std::shared_ptr<const RetainedBevelAdapter::PreparedPreview>
             retainedPrepared;
         std::optional<retained_edge_treatment::Edit> retainedEdit;

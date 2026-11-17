@@ -704,6 +704,12 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
         ? [GLController roundMaximumRadiusMM] : 0.0;
 }
 
+- (double)bevelMetersPerUnit {
+    return [NSThread isMainThread] && GLController != nil
+        && _currentGizmoType == PrimitiveGizmoTypeChamfer
+        ? [GLController bevelMetersPerUnit] : 0.0;
+}
+
 - (Core3DRoundFailureObservation)roundFailureObservation {
     if (![NSThread isMainThread] || GLController == nil
         || _currentGizmoType != PrimitiveGizmoTypeChamfer) {
@@ -717,6 +723,16 @@ Core3DModelingPreviewStatus Core3DCurrentModelingStatus(
         [self core3d_visibleRawR2BevelMetersPerUnit];
     if (metersPerUnit > 0.0 && std::isfinite(metersPerUnit)) {
         const double maximum = 20.0 / (metersPerUnit * 1000.0);
+        if (maximum > 0.0 && std::isfinite(maximum))
+            return {.min = -maximum, .max = maximum};
+    }
+    // The plain Bevel's limit is 15 mm as the user sees the part: convert it
+    // with the document unit and the part's scale (a 0.72 part may take
+    // 15 / 0.72 stored units). Without a single factor keep the old bounds;
+    // the editor refuses that selection before it shows the slider.
+    const double bevelMetersPerUnit = [self bevelMetersPerUnit];
+    if (bevelMetersPerUnit > 0.0 && std::isfinite(bevelMetersPerUnit)) {
+        const double maximum = 15.0 / (bevelMetersPerUnit * 1000.0);
         if (maximum > 0.0 && std::isfinite(maximum))
             return {.min = -maximum, .max = maximum};
     }

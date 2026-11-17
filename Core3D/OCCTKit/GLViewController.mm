@@ -3895,6 +3895,22 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     return _viewer->getShapeInteractor()->roundMaximumRadiusMM();
 }
 
+- (double)bevelMetersPerUnit {
+    Core3DViewController *rawOwner = Core3DVisibleRawR2BevelOwner(self);
+    if ([rawOwner core3d_hasVisibleRawR2Bevel]) {
+        // The visible raw R2 Bevel keeps its own entry contract (the slider
+        // value is its local amount; testRawR2VisibleChamfer...BothUnits pins
+        // it in metre documents). Report the identity factor so the editor
+        // shows and accepts that value unchanged.
+        return 0.001;
+    }
+    if (_viewer == nullptr || [self getGizmoType] != PrimitiveGizmoTypeChamfer
+        || _viewer->getShapeInteractor() == nullptr) {
+        return 0.0;
+    }
+    return _viewer->getShapeInteractor()->bevelMetersPerUnit();
+}
+
 - (Core3DRoundFailureObservation)roundFailureObservation {
     Core3DRoundFailureObservation result = {
         0,
@@ -6385,6 +6401,9 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
             state.sourceTopologyNodeCount),
         @"candidateTopologyNodeCount": @(
             state.candidateTopologyNodeCount),
+        @"debugFaceShape": @(state.debugFaceShape),
+        @"debugConeStep": @(state.debugConeStep),
+        @"debugComputeStage": @(state.debugComputeStage),
         @"candidateSolidCount": @(state.candidateSolidCount),
         @"sourceVolume": @(state.sourceVolume),
         @"candidateVolume": @(state.candidateVolume),

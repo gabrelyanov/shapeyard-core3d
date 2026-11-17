@@ -606,6 +606,8 @@ namespace core3d {
             std::vector<LinearArrayFaceFinish> expectedFaceFinishes;
             bool faceFinishesSealed = false;
             pattern_recipe_clone::Source originalSweepLoft;
+            // The source keeps a standalone saved Hole; the copy is plain.
+            bool sourceSavedCutCopiedPlain = false;
             pattern_recipe_clone::Prepared preparedSweepLoft;
             pattern_recipe_clone::Candidate candidateSweepLoft;
             bool sweepLoftCandidateSealed = false;
