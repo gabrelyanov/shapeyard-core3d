@@ -1425,6 +1425,10 @@ bool ApplyPrivateExportTransforms(
 
 bool BinarySTLFacetHasZeroArea(
     const std::array<float, 9>& vertices) noexcept {
+    // An exact-zero test: the compiler must not fuse a*b - c*d into one
+    // rounding, or two equal edges give a cross product of 8e-22 instead of 0
+    // and a facet with two identical corners is written (desk lamp rivets, K22).
+#pragma clang fp contract(off)
     const double firstToSecondX =
         static_cast<double>(vertices[3]) - vertices[0];
     const double firstToSecondY =
@@ -3582,7 +3586,8 @@ bool DebugMeshSavedGroupPrivateSurfaces(const TopoDS_Shape& shape) noexcept {
 
     std::set<std::string> selectedIdentifiers;
     if (selectedEntityIdentifiers != nil) {
-        if ((exportType != ExportTypeStl && exportType != ExportTypeObj && exportType != ExportTypeGltf)
+        if ((exportType != ExportTypeStl && exportType != ExportTypeObj && exportType != ExportTypeGltf
+                && exportType != ExportTypeStep)
             || selectedEntityIdentifiers.count == 0
             || selectedEntityIdentifiers.count > 50'000) {
             return nil;
@@ -3943,6 +3948,13 @@ bool DebugMeshSavedGroupPrivateSurfaces(const TopoDS_Shape& shape) noexcept {
 
 + (void)debugE4EvictSharedCache {
     core3d::decal_layer::bake::publication::DebugEvictAll();
+}
+
++ (BOOL)debugBinarySTLFacetHasZeroArea:(NSArray<NSNumber *> *)corners {
+    if (corners.count != 9) return NO;
+    std::array<float, 9> values{};
+    for (NSUInteger index = 0; index < 9; ++index) values[index] = corners[index].floatValue;
+    return BinarySTLFacetHasZeroArea(values);
 }
 
 + (NSDictionary<NSString *, id> *)debugParametricSTLRefinement:(double)metersPerUnit {

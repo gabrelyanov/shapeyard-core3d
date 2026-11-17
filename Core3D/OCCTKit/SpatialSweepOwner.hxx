@@ -37,6 +37,9 @@ struct Receipt final {
     std::string reason;
     std::string entityIdentifier;
     int historyDelta = 0;
+    // With reason "bend-too-tight": the largest radius, in millimetres, that
+    // this guide accepts. 0 when no number can be given.
+    double largestRadiusMM = 0;
 };
 
 class OcafOwner final {
