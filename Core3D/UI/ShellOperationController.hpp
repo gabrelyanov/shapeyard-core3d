@@ -11,6 +11,13 @@
 
 #include <AIS_Shape.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
+#include <Message_ProgressScope.hxx>
+#include <Precision.hxx>
+#include <TopoDS_Iterator.hxx>
+#include <algorithm>
+#include <cmath>
 #include <TopoDS.hxx>
 #include <gp_Cylinder.hxx>
 #include <GProp_GProps.hxx>
@@ -345,6 +352,10 @@ inline Standard_Boolean AnalyticPrimitiveForShell(
     } catch (...) { rebuilt.Nullify(); rebuiltOpenings.clear(); return Standard_False; }
 }
 
+inline Standard_Integer UnifiedPlanarSourceForShell(
+    const TopoDS_Shape& source, const std::vector<TopoDS_Face>& openings,
+    TopoDS_Shape& unified, std::vector<TopoDS_Face>& unifiedFaces) noexcept;
+
 //! Check seam (debug builds): while on, the guard below is skipped so a check
 //! can record, in a process of its own, what the kernel does without it.
 Standard_Boolean ShellOffsetGuardSkipped() noexcept;
@@ -432,8 +443,10 @@ inline Standard_Boolean MakeInwardShell(
     const TopoDS_Shape& source,
     const std::vector<TopoDS_Face>& faces,
     Standard_Real thickness, Standard_Real tolerance,
-    const Message_ProgressRange& progress = Message_ProgressRange())
+    const Message_ProgressRange& progress = Message_ProgressRange(),
+    Standard_Integer* normalizationStatus = nullptr)
 {
+    if (normalizationStatus != nullptr) *normalizationStatus = 0;
     TopoDS_Shape analytic; std::vector<TopoDS_Face> analyticFaces;
     const Standard_Boolean rebuilt =
         AnalyticPrimitiveForShell(source, faces, analytic, analyticFaces);
@@ -444,9 +457,30 @@ inline Standard_Boolean MakeInwardShell(
     }
     TopTools_ListOfShape openings;
     for (const auto& face : rebuilt ? analyticFaces : faces) openings.Append(face);
+    Message_ProgressScope scope(progress, "Shell", 2);
     builder.MakeThickSolidByJoin(rebuilt ? analytic : source, openings, -thickness, tolerance,
         BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Arc,
-        Standard_False, progress);
+        Standard_False, scope.Next());
+    if (rebuilt || !scope.More() || builder.MakeOffset().Error() == BRepOffset_UserBreak
+        || (builder.IsDone() && builder.MakeOffset().Error() == BRepOffset_NoError))
+        return Standard_True;
+    TopoDS_Shape unified;
+    std::vector<TopoDS_Face> unifiedFaces;
+    const Standard_Integer normalized = UnifiedPlanarSourceForShell(source, faces, unified, unifiedFaces);
+    if (normalizationStatus != nullptr) *normalizationStatus = normalized;
+    if (normalized <= 0) return Standard_True;
+    if (!scope.More()) return Standard_True;
+    // Kernel history supplies the faces; exact boundary geometry proves that
+    // the selected opening has not grown into a neighbouring coplanar patch.
+    if (!ShellOffsetGuardSkipped() && !ShellOffsetIsSafe(unified, unifiedFaces)) {
+        NoteShellOffsetGuardRefusal();
+        return Standard_False;
+    }
+    TopTools_ListOfShape unifiedOpenings;
+    for (const auto& face : unifiedFaces) unifiedOpenings.Append(face);
+    builder.MakeThickSolidByJoin(unified, unifiedOpenings, -thickness, tolerance,
+        BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Arc,
+        Standard_False, scope.Next());
     return Standard_True;
 }
 
@@ -570,6 +604,14 @@ struct ShellPreviewCapture {
 
 #ifdef DEBUG
 struct ShellPreviewDebugState {
+    // Last delivered result: 0 accepted; 1 precompute; 2 offset exception; 3 offset status;
+    // 4 identity; 5 topology; 6 BRep validity; 7 volume; 8 bounds;
+    // 9 containment; 10 source currentness; 11 preview installation.
+    Standard_Integer planarNormalizationStatus = 0;
+    Standard_Boolean usedPlanarNormalization = Standard_False;
+    Standard_Integer failureStage = -1;
+    Standard_Integer offsetError = -1;
+    Standard_Boolean offsetDone = Standard_False;
     ShellPreviewState state = ShellPreviewState::Unavailable;
     std::uint64_t generation = 0;
     std::uint64_t submittedCount = 0;
@@ -750,6 +792,11 @@ private:
     Standard_Boolean myStateValid = Standard_True;
     Standard_Boolean myOwnsDocumentCommand = Standard_False;
 #ifdef DEBUG
+    Standard_Integer myDebugPlanarNormalizationStatus = 0;
+    Standard_Boolean myDebugUsedPlanarNormalization = Standard_False;
+    Standard_Integer myDebugFailureStage = -1;
+    Standard_Integer myDebugOffsetError = -1;
+    Standard_Boolean myDebugOffsetDone = Standard_False;
     Standard_Boolean myDebugWorkerBlocked = Standard_False;
     Standard_Size myDebugMaximumCaptureTopologyNodes =
         kMaximumSourceTopologyNodes;
@@ -766,6 +813,134 @@ private:
 
     friend class ShellPreviewWorker;
 };
+
+//! Private offset input only. Callers have already bounded the complete source.
+//! Refuse partial coplanar openings. A rebuilt face needs unique kernel history
+//! and exactly the original 3D boundary curves, ranges and placements.
+inline Standard_Integer UnifiedPlanarSourceForShell(
+    const TopoDS_Shape& source, const std::vector<TopoDS_Face>& openings,
+    TopoDS_Shape& unified, std::vector<TopoDS_Face>& unifiedFaces) noexcept
+{
+    unified.Nullify(); unifiedFaces.clear();
+    try {
+        if (source.IsNull() || source.ShapeType() != TopAbs_SOLID || openings.empty())
+            return -__LINE__;
+        // Bound occurrences, including shared topology, before any full map or
+        // kernel traversal; use the existing Shell source budget unchanged.
+        const auto bounded = [](const TopoDS_Shape& shape) {
+            const Standard_Size maximum = ShellOperationController::kMaximumSourceTopologyNodes;
+            Standard_Size visited = 0;
+            std::vector<TopoDS_Shape> pending{shape};
+            while (!pending.empty()) {
+                const TopoDS_Shape current = pending.back(); pending.pop_back();
+                if (current.IsNull() || ++visited > maximum) return false;
+                for (TopoDS_Iterator child(current); child.More(); child.Next()) {
+                    if (visited + pending.size() >= maximum) return false;
+                    pending.push_back(child.Value());
+                }
+            }
+            return visited > 0;
+        };
+        if (!bounded(source)) return -__LINE__;
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(source, TopAbs_FACE, faces);
+        for (Standard_Integer i = 1; i <= faces.Extent(); ++i) {
+            if (BRepAdaptor_Surface(TopoDS::Face(faces(i)), Standard_True).GetType()
+                != GeomAbs_Plane) return -__LINE__;
+        }
+        ShapeUpgrade_UnifySameDomain merge(source, Standard_True, Standard_True, Standard_False);
+        merge.SetSafeInputMode(Standard_True);
+        for (const auto& opening : openings) {
+            const Standard_Integer index = faces.FindIndex(opening);
+            if (index == 0 || !faces(index).IsEqual(opening)) return -__LINE__;
+            const gp_Pln plane = BRepAdaptor_Surface(opening, Standard_True).Plane();
+            for (Standard_Integer i = 1; i <= faces.Extent(); ++i) {
+                if (i == index) continue;
+                const gp_Pln other = BRepAdaptor_Surface(TopoDS::Face(faces(i)), Standard_True).Plane();
+                if (plane.Axis().Direction().IsParallel(other.Axis().Direction(), Precision::Angular())
+                    && plane.Distance(other.Location()) <= Precision::Confusion())
+                    return -__LINE__;
+            }
+            TopTools_IndexedMapOfShape boundary;
+            TopExp::MapShapes(opening, TopAbs_EDGE, boundary);
+            TopExp::MapShapes(opening, TopAbs_VERTEX, boundary);
+            for (Standard_Integer i = 1; i <= boundary.Extent(); ++i) merge.KeepShape(boundary(i));
+        }
+        merge.Build();
+        const TopoDS_Shape candidate = merge.Shape();
+        if (candidate.IsNull() || candidate.ShapeType() != TopAbs_SOLID || candidate.IsSame(source)
+            || !bounded(candidate))
+            return -__LINE__;
+        TopTools_IndexedMapOfShape candidateFaces;
+        TopExp::MapShapes(candidate, TopAbs_FACE, candidateFaces);
+        if (candidateFaces.Extent() >= faces.Extent()) return -__LINE__;
+        const auto history = merge.History();
+        if (history.IsNull()) return -__LINE__;
+        std::vector<TopoDS_Face> mappedFaces;
+        TopTools_IndexedMapOfShape usedFaces;
+        const auto mapped = [&](const TopoDS_Shape& original,
+                                const TopTools_IndexedMapOfShape& members) -> TopoDS_Shape {
+            Standard_Integer index = members.FindIndex(original);
+            if (index > 0) return members(index);
+            if (history->IsRemoved(original) || !history->Generated(original).IsEmpty()) return {};
+            const auto& changed = history->Modified(original);
+            if (changed.Extent() != 1) return {};
+            index = members.FindIndex(changed.First());
+            return index > 0 ? members(index) : TopoDS_Shape();
+        };
+        for (const auto& opening : openings) {
+            const TopoDS_Shape mappedShape = mapped(opening, candidateFaces);
+            if (mappedShape.IsNull() || usedFaces.Contains(mappedShape)) return -__LINE__;
+            const TopoDS_Face face = TopoDS::Face(mappedShape);
+            if (!ShellFaceIsSinglePlanarOpening(face)) return -__LINE__;
+            gp_Pln beforePlane, afterPlane; gp_Dir beforeNormal, afterNormal;
+            if (!ShellFaceOutward(opening, beforePlane, beforeNormal)
+                || !ShellFaceOutward(face, afterPlane, afterNormal)
+                || !beforeNormal.IsEqual(afterNormal, Precision::Angular())
+                || beforePlane.Distance(afterPlane.Location()) > Precision::Confusion())
+                return -__LINE__;
+            TopTools_IndexedMapOfShape oldEdges, newEdges, usedEdges;
+            TopExp::MapShapes(opening, TopAbs_EDGE, oldEdges);
+            TopExp::MapShapes(face, TopAbs_EDGE, newEdges);
+            if (oldEdges.Extent() != newEdges.Extent()) return -__LINE__;
+            for (Standard_Integer i = 1; i <= oldEdges.Extent(); ++i) {
+                const TopoDS_Shape nextEdge = mapped(oldEdges(i), newEdges);
+                if (nextEdge.IsNull() || usedEdges.Contains(nextEdge)) return -__LINE__;
+                TopLoc_Location oldLocation, newLocation;
+                Standard_Real oldFirst, oldLast, newFirst, newLast;
+                const auto oldCurve = BRep_Tool::Curve(TopoDS::Edge(oldEdges(i)), oldLocation, oldFirst, oldLast);
+                const auto newCurve = BRep_Tool::Curve(TopoDS::Edge(nextEdge), newLocation, newFirst, newLast);
+                // Safe-input mode may copy a TEdge to update its pcurves. That
+                // may not alter any actual 3D curve, trim range or placement.
+                if (oldCurve.IsNull() || oldCurve != newCurve || !oldLocation.IsEqual(newLocation)
+                    || oldFirst != newFirst || oldLast != newLast) return -__LINE__;
+                usedEdges.Add(nextEdge);
+            }
+            usedFaces.Add(face); mappedFaces.push_back(face);
+        }
+        if (!BRepCheck_Analyzer(candidate, Standard_True).IsValid()) return -__LINE__;
+        GProp_GProps before, after;
+        BRepGProp::VolumeProperties(source, before);
+        BRepGProp::VolumeProperties(candidate, after);
+        if (!std::isfinite(before.Mass()) || !std::isfinite(after.Mass()) || before.Mass() <= 0
+            || std::abs(after.Mass() - before.Mass()) > 1.0e-10 * std::max(1.0, before.Mass()))
+            return -__LINE__;
+        Bnd_Box beforeBox, afterBox;
+        BRepBndLib::AddOptimal(source, beforeBox, Standard_False, Standard_False);
+        BRepBndLib::AddOptimal(candidate, afterBox, Standard_False, Standard_False);
+        if (beforeBox.IsVoid() || afterBox.IsVoid() || beforeBox.IsOpen() || afterBox.IsOpen())
+            return -__LINE__;
+        Standard_Real a[6], b[6];
+        beforeBox.Get(a[0], a[1], a[2], a[3], a[4], a[5]);
+        afterBox.Get(b[0], b[1], b[2], b[3], b[4], b[5]);
+        for (int i = 0; i < 6; ++i)
+            if (!std::isfinite(a[i]) || !std::isfinite(b[i])
+                || std::abs(a[i] - b[i]) > Precision::Confusion()) return -__LINE__;
+        unified = candidate;
+        unifiedFaces = std::move(mappedFaces);
+        return candidateFaces.Extent();
+    } catch (...) { unified.Nullify(); unifiedFaces.clear(); return -__LINE__; }
+}
 
 } // namespace core3d
 

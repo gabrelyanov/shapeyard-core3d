@@ -118,6 +118,9 @@ CORE3D_TRANSFORM_INSPECTOR_FINAL_CLASS NS_SWIFT_SENDABLE
 @property (nonatomic, assign, readonly) simd_double4 quaternionXYZW;
 @property (nonatomic, assign, readonly)
     simd_double3 canonicalEulerXYZDegrees;
+//! Session-only typed representation, always equivalent to quaternionXYZW.
+//! Falls back to canonical angles after document replacement or cache eviction.
+@property (nonatomic, assign, readonly) simd_double3 displayedEulerXYZDegrees;
 @property (nonatomic, assign, readonly) double uniformScale;
 @property (nonatomic, assign, readonly) double metersPerUnit;
 

@@ -114,6 +114,13 @@ struct ShellPreviewWorkerResult {
         ShellPreviewWorkerOutcome::Failed;
     TopoDS_Shape result;
     Standard_Boolean computeWasMainThread = Standard_False;
+#ifdef DEBUG
+    Standard_Integer planarNormalizationStatus = 0;
+    Standard_Boolean usedPlanarNormalization = Standard_False;
+    Standard_Integer failureStage = 1;
+    Standard_Integer offsetError = -1;
+    Standard_Boolean offsetDone = Standard_False;
+#endif
 };
 
 namespace {
@@ -431,8 +438,18 @@ Standard_Boolean IsValidInwardResult(
     const Standard_Real (&theSourceBounds)[6],
     const Standard_Real theTolerance,
     const Standard_Size theMaximumTopologyNodes,
-    const std::shared_ptr<std::atomic_bool>& theCancellation) noexcept
+    const std::shared_ptr<std::atomic_bool>& theCancellation
+#ifdef DEBUG
+    , Standard_Integer* theFailureStage = nullptr
+#endif
+    ) noexcept
 {
+#ifdef DEBUG
+    const auto stage = [&](Standard_Integer value) {
+        if (theFailureStage != nullptr) *theFailureStage = value;
+    };
+    stage(4); // Identity/type/source-volume gate.
+#endif
     const auto wasCancelled = [&]() {
         return theCancellation == nullptr
             || theCancellation->load(std::memory_order_relaxed);
@@ -444,6 +461,9 @@ Standard_Boolean IsValidInwardResult(
         || !std::isfinite(theSourceVolume) || theSourceVolume <= 0.0) {
         return Standard_False;
     }
+#ifdef DEBUG
+    stage(5); // Bounded topology.
+#endif
     Standard_Size aTopologyCount = 0;
     if (!CountBoundedTopology(
             theCandidate,
@@ -452,6 +472,9 @@ Standard_Boolean IsValidInwardResult(
         || wasCancelled()) {
         return Standard_False;
     }
+#ifdef DEBUG
+    stage(6); // Full BRep validity.
+#endif
     try {
         BRepCheck_Analyzer anAnalyzer(theCandidate, Standard_True);
         if (!anAnalyzer.IsValid() || wasCancelled()) {
@@ -460,12 +483,18 @@ Standard_Boolean IsValidInwardResult(
     } catch (...) {
         return Standard_False;
     }
+#ifdef DEBUG
+    stage(7); // Positive, smaller volume.
+#endif
     Standard_Real aCandidateVolume = 0.0;
     if (!ShapeVolume(theCandidate, aCandidateVolume)
         || wasCancelled()
         || !(aCandidateVolume < theSourceVolume)) {
         return Standard_False;
     }
+#ifdef DEBUG
+    stage(8); // Finite bounds.
+#endif
     Standard_Real aCandidateBounds[6] = {};
     if (!ShapeBounds(theCandidate, aCandidateBounds)
         || wasCancelled()) {
@@ -484,6 +513,9 @@ Standard_Boolean IsValidInwardResult(
         10.0 * theTolerance,
         64.0 * std::numeric_limits<Standard_Real>::epsilon()
             * aScale);
+#ifdef DEBUG
+    stage(9); // Bounds remain inside source.
+#endif
     for (Standard_Integer anAxis = 0; anAxis < 3; ++anAxis) {
         if (aCandidateBounds[anAxis]
                 < theSourceBounds[anAxis] - aContainmentTolerance
@@ -1186,12 +1218,23 @@ private:
             SHELL_DEBUG_PROBE(gShellDebugFaceShape, 0);
             SHELL_DEBUG_PROBE(gShellDebugConeStep, 0);
             SHELL_DEBUG_PROBE(gShellDebugComputeStage, 4);
-            // False: the guard would not let the kernel have this shell (it would crash the
-            // app, not fail). The result stays Failed, like any shell the kernel refuses.
+#ifdef DEBUG
+            aResult.failureStage = 2; // Offset construction, including exceptions.
+#endif
+            Standard_Integer normalized = 0;
+            // Preserve the trunk's crash refusal and Base's planar fallback diagnostics.
             if (!MakeInwardShell(aBuilder, theRequest.source, theRequest.openingFaces,
-                                 theRequest.thickness, theRequest.tolerance, aProgress->Start())) {
+                                 theRequest.thickness, theRequest.tolerance,
+                                 aProgress->Start(), &normalized)) {
                 return aResult;
             }
+#ifdef DEBUG
+            aResult.planarNormalizationStatus = normalized;
+            aResult.usedPlanarNormalization = normalized > 0;
+            aResult.offsetDone = aBuilder.IsDone();
+            aResult.offsetError = static_cast<Standard_Integer>(aBuilder.MakeOffset().Error());
+            aResult.failureStage = 3; // Offset completion/error gate.
+#endif
             SHELL_DEBUG_PROBE(gShellDebugComputeStage, aBuilder.IsDone()
                 ? 300 : 100 + static_cast<int>(aBuilder.MakeOffset().Error()));
             if (wasCancelled()
@@ -1214,7 +1257,11 @@ private:
                     theRequest.sourceBounds,
                     theRequest.tolerance,
                     theRequest.maximumResultTopologyNodes,
-                    theRequest.cancellation)) {
+                    theRequest.cancellation
+#ifdef DEBUG
+                    , &aResult.failureStage
+#endif
+                    )) {
                 SHELL_DEBUG_PROBE(gShellDebugComputeStage, 200);
                 if (wasCancelled()) {
                     aResult.outcome =
@@ -1224,6 +1271,9 @@ private:
             }
             aResult.result = aCandidate;
             aResult.outcome = ShellPreviewWorkerOutcome::Success;
+#ifdef DEBUG
+            aResult.failureStage = 0;
+#endif
             return aResult;
         } catch (...) {
             if (wasCancelled()) {
@@ -1806,10 +1856,20 @@ void ShellOperationController::acceptWorkerResult(
 #endif
         return;
     }
-    if (theResult.outcome != ShellPreviewWorkerOutcome::Success
-        || theResult.result.IsNull()
-        || !sourceIsCurrent()
-        || !installPreview(theResult.result)) {
+    // Preserve the original short-circuit order and call each gate only once.
+    const bool hasResult = theResult.outcome == ShellPreviewWorkerOutcome::Success
+        && !theResult.result.IsNull();
+    const bool sourceCurrent = hasResult && sourceIsCurrent();
+    const bool installed = sourceCurrent && installPreview(theResult.result);
+#ifdef DEBUG
+    myDebugFailureStage = !hasResult ? theResult.failureStage
+        : !sourceCurrent ? 10 : !installed ? 11 : 0;
+    myDebugPlanarNormalizationStatus = theResult.planarNormalizationStatus;
+    myDebugUsedPlanarNormalization = theResult.usedPlanarNormalization;
+    myDebugOffsetError = theResult.offsetError;
+    myDebugOffsetDone = theResult.offsetDone;
+#endif
+    if (!installed) {
         myCanApply = Standard_False;
         myState = ShellPreviewState::Failed;
         notifyPreviewStateChanged();
@@ -2277,10 +2337,13 @@ ShellApplyResult ShellOperationController::apply() noexcept
             || myPreviewResult->Shape().IsNull()) {
             return ShellApplyResult::NoChange;
         }
-        if (!mySource->profileRecord.label.IsNull()) {
-            myNamingHistory = myDoc->PrepareOrdinaryNamingHistory(0, mySource->label);
-            if (!myNamingHistory) return ShellApplyResult::NoChange;
-        }
+        const auto namingFamily = mySource->bakesSavedCut
+            ? OcctDocument::OrdinaryNamingFamily::SavedCutShell
+            : (mySource->profileRecord.label.IsNull()
+                ? OcctDocument::OrdinaryNamingFamily::UnretainedShell
+                : OcctDocument::OrdinaryNamingFamily::Profile);
+        myNamingHistory = myDoc->PrepareOrdinaryNamingHistory(0, mySource->label, namingFamily);
+        if (!myNamingHistory) return ShellApplyResult::NoChange;
         myPendingCandidate = myPreviewResult->Shape();
         myPendingProfile.reset();
         if (!mySource->profileShellOpenings.empty()) {
@@ -2422,6 +2485,11 @@ ShellOperationController::debugPreviewState() const noexcept
 {
     ShellPreviewDebugState aState;
     aState.state = myState;
+    aState.planarNormalizationStatus = myDebugPlanarNormalizationStatus;
+    aState.usedPlanarNormalization = myDebugUsedPlanarNormalization;
+    aState.failureStage = myDebugFailureStage;
+    aState.offsetError = myDebugOffsetError;
+    aState.offsetDone = myDebugOffsetDone;
     aState.generation = myGeneration;
     aState.activeOperation = hasActiveOperation();
     aState.canApply = canApply();

@@ -14441,6 +14441,11 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
                   @"nativeCommitCalls": @(costs[4]), @"nativeCommitSeconds": @(costs[5]),
                   @"creationPublishCalls": @(costs[6]), @"creationPublishSeconds": @(costs[7]),
                   @"creationViewerCalls": @(costs[8]), @"creationViewerSeconds": @(costs[9]),
+                  @"sceneAdmissionCalls": @(costs[10]), @"sceneAdmissionSeconds": @(costs[11]),
+                  @"sceneBuildCalls": @(costs[12]), @"sceneBuildSeconds": @(costs[13]),
+                  @"storedProfileReadCalls": @(costs[14]), @"storedProfileReadSeconds": @(costs[15]),
+                  @"storedEnclosureReadCalls": @(costs[16]), @"storedEnclosureReadSeconds": @(costs[17]),
+                  @"openingFenceReadCalls": @(costs[18]), @"openingFenceReadSeconds": @(costs[19]),
                   @"solidTimingCalls": @(_debugNativeSolidCosts[0]),
                   @"workerQueueSeconds": @(_debugNativeSolidCosts[1]),
                   @"workerBuildSeconds": @(_debugNativeSolidCosts[2]),
@@ -15279,6 +15284,19 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
 
 - (void)debugInvokeNativeDeleteSelected {
     [GLController deleteSelected];
+}
+
+- (BOOL)debugConfigureNativeDeleteFault:(NSInteger)mode {
+    if (![NSThread isMainThread] || mode < 0 || mode > 4 || GLController == nil
+        || !GLController.viewer || !GLController.viewer->getObjectInteractor()
+        || GLController.viewer->hasUnresolvedEdit()) return NO;
+    GLController.viewer->getObjectInteractor()->debugSetDeleteFailureMode(static_cast<int>(mode));
+    return YES;
+}
+- (NSInteger)debugNativeDeleteStagedRootCount {
+    if (![NSThread isMainThread] || GLController == nil || !GLController.viewer
+        || !GLController.viewer->getObjectInteractor()) return -1;
+    return GLController.viewer->getObjectInteractor()->_debugDeleteStagedRootCount;
 }
 
 - (PrimitiveGizmoType)debugNativeGizmoType {
@@ -23395,6 +23413,13 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
                           expectedSnapshot:
                               (Core3DTransformInspectorSnapshot *)snapshot {
     return [self commitTransformInspectorValue:value axis:axis expectedSnapshot:snapshot kind:core3d::TransformInspectorEditKind::Rotation];
+}
+
+- (Core3DTransformInspectorPositionCommitResult)
+    commitTransformInspectorDisplayedRotationValue:(double)value
+        axis:(Core3DTransformInspectorAxis)axis
+        expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot {
+    return [self commitTransformInspectorValue:value axis:axis expectedSnapshot:snapshot kind:core3d::TransformInspectorEditKind::DisplayedRotation];
 }
 
 - (Core3DTransformInspectorPositionCommitResult)
