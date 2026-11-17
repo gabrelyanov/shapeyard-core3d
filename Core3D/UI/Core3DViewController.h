@@ -590,6 +590,13 @@ __attribute__((objc_subclassing_restricted))
     faceAPointMM:(NSArray<NSNumber *> *)faceAPointMM faceBPointMM:(NSArray<NSNumber *> *)faceBPointMM
     expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(agentMeasureAngle(entityIdentifier:targetAlias:documentIdentifier:sourceSHA256:probeIdentifier:faceAPointMM:faceBPointMM:expected:));
+//! Release-safe READ-ONLY identity of the live document behind `expected` (measure lane for the
+//! ai lane): its persisted document ID and an opaque runtime instance token, see
+//! Core3DAgentDocumentIdentity. Stale unless `expected` is the current publication. It captures
+//! no planning context (a reviewed one stays current) and changes no selection, gizmo, document,
+//! undo/redo or render state. Never nil.
+- (Core3DAgentDocumentIdentity *)agentDocumentIdentityForExpected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(documentIdentity(expected:));
 //! Generate a padded triangle atlas on one selected untextured mesh; one Undo.
 - (Core3DMeshUVAtlasResult)generateTriangleUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
                                                          expected:(Core3DSceneSnapshot *)expected

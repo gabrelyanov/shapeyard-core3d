@@ -4111,6 +4111,13 @@ static bool core3dAgentVector3(NSArray<NSNumber *> *values, double out[3]) {
                                         snapA:(NSString *)snapA snapB:(NSString *)snapB
                                    distanceMM:(double)distanceMM;
 @end
+@interface Core3DAgentDocumentIdentity (Core3DEngineProducer)
+- (instancetype)initCore3DUnidentified:(Core3DAgentMeasurementStatus)status;
+- (instancetype)initCore3DIdentifiedWithDocumentIdentifier:(NSString *)documentIdentifier
+    instanceToken:(NSString *)instanceToken publicationSourceIdentifier:(NSString *)publicationSourceIdentifier
+    documentGeneration:(NSString *)documentGeneration modelRevision:(NSString *)modelRevision
+    presentationRevision:(NSString *)presentationRevision metersPerUnit:(double)metersPerUnit;
+@end
 @interface Core3DAgentAngleMeasurement (Core3DEngineProducer)
 - (instancetype)initCore3DUnmeasured:(Core3DAgentMeasurementStatus)status;
 - (instancetype)initCore3DMeasuredWithSource:(Core3DAgentMeasurementSource *)source
@@ -4147,6 +4154,12 @@ static bool core3dAgentVector3(NSArray<NSNumber *> *values, double out[3]) {
 #endif
     BOOL _nativeSolidCancelled;
     __weak Core3DModelingPlanningContext *_issuedModelingPlanningContext;
+    // Runtime token of the live document for documentIdentity(expected:) (measure lane): one
+    // per publication source and document generation, so a new viewer or a replaced document
+    // gets a new one and every caller on the same live document shares it.
+    NSString *_agentDocumentInstanceToken;
+    NSString *_agentDocumentInstancePublication;
+    uint64_t _agentDocumentInstanceGeneration;
     Core3DModelingPlanningContext *_modelingConstructionContext;
     Core3DShellOperation *_activeModelingShell;
     Core3DPushPullOperation *_activeModelingPushPull;
@@ -17020,6 +17033,44 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
         *source = fence;
         return Core3DAgentMeasurementStatusMeasured;
     } catch (...) { return Core3DAgentMeasurementStatusUnavailable; }
+}
+
+// Passive identity: reads the published scene and the document's persisted ID only. It never
+// captures or retires a planning context and selects, edits, renders or records nothing.
+- (Core3DAgentDocumentIdentity *)agentDocumentIdentityForExpected:(Core3DSceneSnapshot *)expected {
+    auto refuse = [](Core3DAgentMeasurementStatus status) {
+        return [[Core3DAgentDocumentIdentity alloc] initCore3DUnidentified:status];
+    };
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil || GLController.viewer == nullptr
+        || ![expected isKindOfClass:Core3DSceneSnapshot.class]) return refuse(Core3DAgentMeasurementStatusUnavailable);
+    try {
+        Core3DSceneSnapshot *current = [self captureSceneSnapshot];
+        if (current == nil || current.publicationSourceIdentifier.length == 0
+            || current.revisions.documentGeneration == 0) return refuse(Core3DAgentMeasurementStatusUnavailable);
+        if (![current.publicationSourceIdentifier isEqualToString:expected.publicationSourceIdentifier]
+            || current.revisions.documentGeneration != expected.revisions.documentGeneration
+            || current.revisions.modelRevision != expected.revisions.modelRevision
+            || current.revisions.presentationRevision != expected.revisions.presentationRevision)
+            return refuse(Core3DAgentMeasurementStatusStale);
+        const auto document = GLController.viewer->getDocument();
+        if (document.IsNull()) return refuse(Core3DAgentMeasurementStatusUnavailable);
+        NSString *documentID = [[NSString alloc] initWithUTF8String:document->DocumentIdentifier().c_str()];
+        if (documentID.length == 0 || documentID.length > 128) return refuse(Core3DAgentMeasurementStatusUnavailable);
+        if (_agentDocumentInstanceToken == nil
+            || ![_agentDocumentInstancePublication isEqualToString:current.publicationSourceIdentifier]
+            || _agentDocumentInstanceGeneration != current.revisions.documentGeneration) {
+            _agentDocumentInstanceToken = NSUUID.UUID.UUIDString;
+            _agentDocumentInstancePublication = [current.publicationSourceIdentifier copy];
+            _agentDocumentInstanceGeneration = current.revisions.documentGeneration;
+        }
+        return [[Core3DAgentDocumentIdentity alloc] initCore3DIdentifiedWithDocumentIdentifier:documentID
+            instanceToken:_agentDocumentInstanceToken
+            publicationSourceIdentifier:current.publicationSourceIdentifier
+            documentGeneration:[NSString stringWithFormat:@"%llu", (unsigned long long)current.revisions.documentGeneration]
+            modelRevision:[NSString stringWithFormat:@"%llu", (unsigned long long)current.revisions.modelRevision]
+            presentationRevision:[NSString stringWithFormat:@"%llu", (unsigned long long)current.revisions.presentationRevision]
+            metersPerUnit:current.metersPerUnit];
+    } catch (...) { return refuse(Core3DAgentMeasurementStatusUnavailable); }
 }
 
 - (Core3DAgentSolidMeasurement *)agentMeasureSolidOfEntityIdentifier:(NSString *)entityIdentifier
