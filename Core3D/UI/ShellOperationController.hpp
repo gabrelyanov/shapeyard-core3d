@@ -29,6 +29,11 @@
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
+#include <BRepLib.hxx>
+#include <Standard_Failure.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <cmath>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <gp_Pln.hxx>
@@ -337,6 +342,37 @@ inline Standard_Boolean AnalyticPrimitiveForShell(
     } catch (...) { rebuilt.Nullify(); rebuiltOpenings.clear(); return Standard_False; }
 }
 
+//! True when an opening face meets a neighbouring face smoothly (tangent along
+//! a shared edge), as the flat top of a cube rounded on every edge does. The
+//! offset kernel reads through a null pointer on such an opening (build-4 crash,
+//! 15 Nov 2026: BRepOffset_Tool::TryProject) and a crash cannot be caught, so
+//! Shell refuses before the kernel is called. Any doubt about an edge counts as
+//! smooth: a refusal is a sentence, a crash closes the app.
+inline Standard_Boolean ShellOpeningMeetsNeighbourSmoothly(
+    const TopoDS_Shape& source, const std::vector<TopoDS_Face>& openings) noexcept
+{
+    try {
+        TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+        TopExp::MapShapesAndUniqueAncestors(source, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+        const Standard_Real angle = 1.0 * M_PI / 180.0;
+        for (const auto& opening : openings) {
+            for (TopExp_Explorer edges(opening, TopAbs_EDGE); edges.More(); edges.Next()) {
+                const TopoDS_Edge edge = TopoDS::Edge(edges.Current());
+                if (BRep_Tool::Degenerated(edge)) continue;
+                const Standard_Integer index = edgeFaces.FindIndex(edge);
+                if (index == 0) return Standard_True;
+                for (TopTools_ListIteratorOfListOfShape it(edgeFaces(index)); it.More(); it.Next()) {
+                    const TopoDS_Face neighbour = TopoDS::Face(it.Value());
+                    if (neighbour.IsSame(opening)) continue;
+                    if (BRepLib::ContinuityOfFaces(edge, opening, neighbour, angle) != GeomAbs_C0)
+                        return Standard_True;
+                }
+            }
+        }
+        return Standard_False;
+    } catch (...) { return Standard_True; }
+}
+
 inline void MakeInwardShell(
     BRepOffsetAPI_MakeThickSolid& builder,
     const TopoDS_Shape& source,
@@ -344,6 +380,8 @@ inline void MakeInwardShell(
     Standard_Real thickness, Standard_Real tolerance,
     const Message_ProgressRange& progress = Message_ProgressRange())
 {
+    if (ShellOpeningMeetsNeighbourSmoothly(source, faces))
+        throw Standard_Failure("Shell opening meets a neighbouring face smoothly");
     TopoDS_Shape analytic; std::vector<TopoDS_Face> analyticFaces;
     const Standard_Boolean rebuilt =
         AnalyticPrimitiveForShell(source, faces, analytic, analyticFaces);
