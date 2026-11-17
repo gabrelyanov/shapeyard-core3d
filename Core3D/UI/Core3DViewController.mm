@@ -157,6 +157,9 @@ unsigned long long Core3DDebugColdOpenCandidateProbeValue(
 #include "../OCCTKit/NativeRigidPlacementEvidence.hxx"
 #include "../OCCTKit/SpatialSweepEditor.hxx"
 #include "../OCCTKit/SweepRebuildDefinition.hxx"
+// Release code (face colour route) uses these two; the block below is DEBUG only.
+#include <TDF_ChildIterator.hxx>
+#include <TDF_TagSource.hxx>
 #if DEBUG
 #include "../OCCTKit/NativeModelingReceipt.hxx"
 #include "../OCCTKit/ReceiptCatalogBinaryDriver.hxx"
@@ -173,7 +176,6 @@ unsigned long long Core3DDebugColdOpenCandidateProbeValue(
 #include <TDF_Tool.hxx>
 #include <TDF_AttributeIterator.hxx>
 #include <TDF_ChildIterator.hxx>
-#include <TDF_TagSource.hxx>
 #include <TDF_ListIteratorOfAttributeDeltaList.hxx>
 #include <TDF_Delta.hxx>
 #include <TDF_AttributeDelta.hxx>
