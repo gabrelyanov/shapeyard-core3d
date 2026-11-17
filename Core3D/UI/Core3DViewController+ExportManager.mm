@@ -550,8 +550,14 @@ NSArray<NSString *> *CaptureSelectedExportIdentifiers(Core3DSceneSnapshot *snaps
             // Fine also resolves angular curvature on swept surfaces. A chord
             // coefficient alone can admit visibly coarser large-radius turns.
             // This remains a bounded preset, not a physical-error guarantee.
+            // Fine turns at 12 degrees (CTO 17 Nov 12:47, games first): at 7.5
+            // every curved surface, however small, was split every 7.5 degrees
+            // and the desk lamp's shade alone was 318,838 triangles. The one
+            // constant to set back to 7.5 to reverse.
+            const Standard_Real fineDeviationAngleDegrees = 12.0;
             deviationAngle = (meshQuality == Core3DExportMeshQualityCoarse
-                ? 30.0 : (meshQuality == Core3DExportMeshQualityFine ? 7.5 : 20.0))
+                ? 30.0 : (meshQuality == Core3DExportMeshQualityFine
+                    ? fineDeviationAngleDegrees : 20.0))
                 * M_PI / 180.0;
         }
 
