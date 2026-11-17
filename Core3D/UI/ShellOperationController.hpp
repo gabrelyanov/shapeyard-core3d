@@ -437,7 +437,11 @@ Standard_Boolean TryPrepareFaceOperationSource(
     Standard_Size maximumStyledSubshapeLabels,
     FaceOperationSourceProof& proof,
     Standard_Boolean allowPlanarSpline = Standard_False,
-    Standard_Boolean allowSavedCut = Standard_False) noexcept;
+    Standard_Boolean allowSavedCut = Standard_False,
+    //! Push-pull and Split carry plain face colours across Apply (CarryFaceColours), so a part
+    //! with a face painted in a plain colour is admitted for them; Shell still refuses it, and
+    //! a face with a picture, an XCAF colour or a layer is refused for all of them.
+    Standard_Boolean allowStyledFaces = Standard_False) noexcept;
 
 //! Shell-only set capture; shares the bounded per-face admission with Extrude.
 Standard_Boolean TryPrepareShellOperationSource(
@@ -454,7 +458,8 @@ Standard_Boolean FaceOperationSourceProofIsCurrent(
     const Handle(OcctDocument)& document,
     const FaceOperationSourceProof& proof,
     Standard_Size maximumStyledSubshapeLabels,
-    Standard_Boolean allowSavedCut = Standard_False) noexcept;
+    Standard_Boolean allowSavedCut = Standard_False,
+    Standard_Boolean allowStyledFaces = Standard_False) noexcept;
 
 //! DEBUG/diagnostic index resolver that preserves TopExp's canonical unique
 //! face order but stops as soon as the requested face is known. Both the

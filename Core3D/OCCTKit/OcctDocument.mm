@@ -3079,6 +3079,7 @@ bool ValidateAttachmentRigDocument(
 #include "ProfileCurveFace.hxx"
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
@@ -13202,7 +13203,8 @@ Standard_Boolean OcctDocument::JoinFaceLooks(const TDF_Label& target,
 
 std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> OcctDocument::MatchFaceLooks(
     const TopoDS_Shape& result,
-    const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks) const noexcept {
+    const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks,
+    const Standard_Boolean eitherWay) const noexcept {
     std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> matched;
     try {
         if (result.IsNull() || looks.empty()) return matched;
@@ -13210,9 +13212,13 @@ std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> OcctDocument::MatchF
         const double tolerance = box.IsVoid() ? 1.0e-6 : 1.0e-5 * std::sqrt(box.SquareExtent());
         for (TopExp_Explorer face(result, TopAbs_FACE); face.More(); face.Next()) {
             gp_Pnt point;
-            if (!InteriorPointOfFace(TopoDS::Face(face.Current()), point)) continue;
+            const bool hasPoint = InteriorPointOfFace(TopoDS::Face(face.Current()), point);
+            if (!hasPoint && !eitherWay) continue;
             for (const auto& [coloured, material] : looks) {
-                if (!PointOnFace(point, coloured, tolerance)) continue;
+                gp_Pnt lookPoint;
+                if (!(hasPoint && PointOnFace(point, coloured, tolerance))
+                    && !(eitherWay && InteriorPointOfFace(coloured, lookPoint)
+                         && PointOnFace(lookPoint, TopoDS::Face(face.Current()), tolerance))) continue;
                 matched.emplace_back(TopoDS::Face(face.Current()), material);
                 break;
             }
@@ -13248,7 +13254,8 @@ Standard_Boolean OcctDocument::CaptureFaceColours(const TDF_Label& label, double
 
 Standard_Boolean OcctDocument::CarryFaceColours(const TDF_Label& target, const TopoDS_Shape& result,
     const std::vector<TDF_Label>& oldLabels,
-    const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& faces) noexcept {
+    const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& faces,
+    const Standard_Boolean eitherWay) noexcept {
     try {
         if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand() || target.IsNull() || result.IsNull())
             return Standard_False;
@@ -13269,7 +13276,7 @@ Standard_Boolean OcctDocument::CarryFaceColours(const TDF_Label& target, const T
             highWater = std::max(highWater, child.Value().Tag());
         tags->Set(highWater);
         std::vector<OcctPBRMaterialUpdate> updates;
-        for (const auto& [face, material] : MatchFaceLooks(result, faces)) {
+        for (const auto& [face, material] : MatchFaceLooks(result, faces, eitherWay)) {
             if (!shapes->IsSubShape(target, face)) return Standard_False;
             const TDF_Label label = shapes->AddSubShape(target, face);
             if (label.IsNull()) return Standard_False;
@@ -13277,6 +13284,43 @@ Standard_Boolean OcctDocument::CarryFaceColours(const TDF_Label& target, const T
         }
         return updates.empty() || SaveObjectPBRMaterials(updates);
     } catch (...) { return Standard_False; }
+}
+
+std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> OcctDocument::GrownFaceLooks(
+    const TopoDS_Shape& original, const TopoDS_Shape& result,
+    const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks) const noexcept {
+    std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> grown;
+    try {
+        if (original.IsNull() || result.IsNull() || looks.empty()) return grown;
+        Bnd_Box box; BRepBndLib::Add(result, box);
+        const double tolerance = box.IsVoid() ? 1.0e-6 : 1.0e-5 * std::sqrt(box.SquareExtent());
+        const auto planeOf = [](const TopoDS_Face& face, gp_Pln& plane) {
+            const BRepAdaptor_Surface surface(face, Standard_True);
+            if (surface.GetType() != GeomAbs_Plane) return false;
+            plane = surface.Plane();
+            return true;
+        };
+        for (TopExp_Explorer face(result, TopAbs_FACE); face.More(); face.Next()) {
+            const TopoDS_Face candidate = TopoDS::Face(face.Current());
+            gp_Pln plane; gp_Pnt point;
+            if (!planeOf(candidate, plane) || !InteriorPointOfFace(candidate, point)) continue;
+            bool existed = false;
+            for (TopExp_Explorer old(original, TopAbs_FACE); old.More() && !existed; old.Next())
+                existed = PointOnFace(point, TopoDS::Face(old.Current()), tolerance);
+            if (existed) continue;
+            for (const auto& [coloured, material] : looks) {
+                gp_Pln lookPlane;
+                if (!planeOf(coloured, lookPlane)
+                    || !plane.Axis().Direction().IsParallel(lookPlane.Axis().Direction(), 1.0e-6)
+                    || lookPlane.Distance(point) > tolerance) continue;
+                BRepExtrema_DistShapeShape distance(candidate, coloured);
+                if (!distance.IsDone() || distance.Value() > tolerance) continue;
+                grown.emplace_back(candidate, material);
+                break;
+            }
+        }
+    } catch (...) { grown.clear(); }
+    return grown;
 }
 
 Standard_Boolean OcctDocument::BooleanResultRecordForBake(

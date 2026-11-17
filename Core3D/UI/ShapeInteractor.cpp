@@ -1061,7 +1061,7 @@ namespace core3d {
 				ShellOperationController::kMaximumSourceTopologyNodes,
 				ShellOperationController::
 					kMaximumStyledSubshapeLabels,
-				theProof, Standard_True, Standard_True);
+				theProof, Standard_True, Standard_True, Standard_True);
 		} catch (...) {
 			theProof = FaceOperationSourceProof();
 			return Standard_False;
@@ -1234,7 +1234,7 @@ namespace core3d {
             if (!TryPrepareFaceOperationSource(myContext, myDoc, presentation, faces.front(),
                     ShellOperationController::kMaximumSourceTopologyNodes,
                     ShellOperationController::kMaximumStyledSubshapeLabels,
-                    captured, Standard_True, Standard_True)) return Standard_False;
+                    captured, Standard_True, Standard_True, Standard_True)) return Standard_False;
             TDF_Label admitted;
             Standard_Size subshapes = 0, profileEdges = 0;
             if (!tryPrepareExtrusionSelection(captured, admitted, subshapes, profileEdges))
@@ -1425,7 +1425,7 @@ namespace core3d {
 					myDoc,
 					theProof,
 					ShellOperationController::
-						kMaximumStyledSubshapeLabels, Standard_True)
+						kMaximumStyledSubshapeLabels, Standard_True, Standard_True)
 				|| theProof.topologyNodeCount
 					> ShellOperationController::
 						kMaximumSourceTopologyNodes) {
@@ -2042,8 +2042,51 @@ namespace core3d {
 				// Preview commands remain empty so AbortCommand is byte-neutral.
 				// Publish the detached candidate only at the Apply boundary; the
 				// existing OCAF command still supplies exactly one undo delta.
+				// Painted faces keep their colour (desk lamp 16a, CTO 17 Nov 05:13): the
+				// pushed or pulled face carries it to where it moved, a side face to the
+				// longer or shorter side, a split face to both pieces. Same Undo step.
+				std::vector<TDF_Label> faceLabels;
+				std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>
+					colouredFaces;
 				if (!myDoc->PrepareBooleanResultForFaceEdit(_extrusion.label)
-					|| !myDoc->ReplaceShape(_extrusion.label, candidate)) {
+					|| !myDoc->CaptureFaceColours(
+						_extrusion.label, 1.0, faceLabels, colouredFaces)) {
+					throw Standard_Failure(
+						"Unable to read the face colours before extrusion");
+				}
+				gp_Pln pickedPlane;
+				const TopoDS_Face& picked = _extrusion.selectedFace;
+				if (_extrusion.splitReferenceEdge < 0 && !colouredFaces.empty()
+					&& TryFaceOperationPlane(picked, pickedPlane)) {
+					gp_Dir outward = pickedPlane.Axis().Direction();
+					if (picked.Orientation() == TopAbs_REVERSED) {
+						outward.Reverse();
+					}
+					gp_Trsf move;
+					move.SetTranslation(gp_Vec(outward) * _extrusion.distance);
+					std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>
+						moved;
+					for (const auto& [face, material] : colouredFaces) {
+						if (!face.IsSame(picked)) continue;
+						const TopoDS_Shape placed =
+							BRepBuilderAPI_Transform(face, move, Standard_True)
+								.Shape();
+						if (!placed.IsNull()
+							&& placed.ShapeType() == TopAbs_FACE) {
+							moved.emplace_back(TopoDS::Face(placed), material);
+						}
+					}
+					const auto grown = myDoc->GrownFaceLooks(
+						_extrusion.originalShape, candidateShape, colouredFaces);
+					colouredFaces.insert(
+						colouredFaces.begin(), moved.begin(), moved.end());
+					colouredFaces.insert(
+						colouredFaces.end(), grown.begin(), grown.end());
+				}
+				if (!myDoc->ReplaceShape(_extrusion.label, candidate)
+					|| !myDoc->CarryFaceColours(_extrusion.label,
+						candidateShape, faceLabels, colouredFaces,
+						Standard_True)) {
 					throw Standard_Failure(
 						"Unable to replace extrusion result geometry");
 				}
@@ -2249,7 +2292,7 @@ namespace core3d {
 			face,
 			ShellOperationController::kMaximumSourceTopologyNodes,
 			ShellOperationController::kMaximumStyledSubshapeLabels,
-			proof, Standard_True, Standard_True)
+			proof, Standard_True, Standard_True, Standard_True)
 			&& beginExtrusionSelectionImpl(proof);
 	}
 

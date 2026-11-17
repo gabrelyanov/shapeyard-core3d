@@ -1914,14 +1914,24 @@ public:
         const std::vector<std::pair<TDF_Label, Handle(AIS_Shape)>>& tools, double scale,
         std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks) const noexcept;
     //! Each face of `result` that lies on one of `looks`, with that look (first match wins).
+    //! `eitherWay` also matches a result face that covers a look's face (a side face that Push-pull
+    //! made longer); only coplanar faces can match that way, so neighbours never take the look.
     Standard_EXPORT std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> MatchFaceLooks(
         const TopoDS_Shape& result,
+        const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks,
+        Standard_Boolean eitherWay = Standard_False) const noexcept;
+    //! Push-pull: a face of `result` that is new (lies on no face of `original`), flat, and in the
+    //! plane of a coloured face it touches continues that face (the upper strip of a side made
+    //! longer), so it takes that face's look. Faces that were there before never change look here.
+    Standard_EXPORT std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> GrownFaceLooks(
+        const TopoDS_Shape& original, const TopoDS_Shape& result,
         const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks) const noexcept;
     //! Inside the tool's open command, after the shape is replaced: drop the old face labels and
     //! give every face of `result` that lies on a coloured face that colour.
     Standard_EXPORT Standard_Boolean CarryFaceColours(const TDF_Label& label, const TopoDS_Shape& result,
         const std::vector<TDF_Label>& faceLabels,
-        const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& colouredFaces) noexcept;
+        const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& colouredFaces,
+        Standard_Boolean eitherWay = Standard_False) noexcept;
     //! A previous Join/Cut/Overlap result whose only record is its Boolean (originals) record:
     //! `record` names that record so a tool that bakes the part (Bevel) can drop it in its own
     //! command (Undo brings the editable result back). False for every other part.

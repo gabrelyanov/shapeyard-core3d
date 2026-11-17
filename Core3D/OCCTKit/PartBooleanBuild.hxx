@@ -203,6 +203,16 @@ inline TopoDS_Shape PersistenceMaterializeStable(const TopoDS_Shape& shape,
 #if DEBUG
             std::fprintf(stderr, "MATERIALIZE_UNSTABLE pass=%d bytes=%zu->%zu\n",
                          pass + 2, currentBytes.size(), nextBytes.size());
+            if (const char* dump = std::getenv("SHAPEYARD_MATERIALIZE_DUMP")) {
+                for (int side = 0; side < 2; ++side) {
+                    const std::string path = std::string(dump) + "/pass" + std::to_string(pass + 2)
+                        + (side ? "-after.brep" : "-before.brep");
+                    if (FILE* f = std::fopen(path.c_str(), "wb")) {
+                        const std::string& b = side ? nextBytes : currentBytes;
+                        std::fwrite(b.data(), 1, b.size(), f); std::fclose(f);
+                    }
+                }
+            }
             // Debug-only comparison switch for the failing-first check: the old single pass.
             if (std::getenv("SHAPEYARD_MATERIALIZE_ONE_PASS")) return current;
 #endif

@@ -38,6 +38,7 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_LayerTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
+#include <XCAFDoc_VisMaterial.hxx>
 #include <XCAFDoc_VisMaterialTool.hxx>
 
 #include <dispatch/dispatch.h>
@@ -185,7 +186,8 @@ Standard_Boolean TryReadMetersPerUnit(
 Standard_Boolean HasStyledXCAFSubshape(
     const Handle(TDocStd_Document)& theDocument,
     const TDF_Label& theDefinition,
-    const Standard_Size theMaximumLabels) noexcept
+    const Standard_Size theMaximumLabels,
+    const Standard_Boolean allowPlainFaceMaterials = Standard_False) noexcept
 {
     if (theDocument.IsNull() || theDefinition.IsNull()
         || theDefinition.Data() != theDocument->GetData()
@@ -213,14 +215,26 @@ Standard_Boolean HasStyledXCAFSubshape(
                 continue;
             }
             TDF_LabelSequence aLayers;
+            // A face painted with a plain colour (a material without pictures) is carried
+            // across Push-pull and Split; a picture, a colour or layer of another kind is not.
+            const Handle(XCAFDoc_VisMaterial) aMaterial =
+                aLabel.IsNull() ? Handle(XCAFDoc_VisMaterial)()
+                    : XCAFDoc_VisMaterialTool::GetShapeMaterial(aLabel);
+            const Standard_Boolean aMaterialBlocks = !aMaterial.IsNull()
+                && (!allowPlainFaceMaterials
+                    || !aMaterial->PbrMaterial().BaseColorTexture.IsNull()
+                    || !aMaterial->PbrMaterial().MetallicRoughnessTexture.IsNull()
+                    || !aMaterial->PbrMaterial().EmissiveTexture.IsNull()
+                    || !aMaterial->PbrMaterial().OcclusionTexture.IsNull()
+                    || !aMaterial->PbrMaterial().NormalTexture.IsNull()
+                    || !aMaterial->CommonMaterial().DiffuseTexture.IsNull());
             if (aLabel.IsNull()
                 || (!aColorTool.IsNull()
                     && (aColorTool->IsSet(aLabel, XCAFDoc_ColorGen)
                         || aColorTool->IsSet(aLabel, XCAFDoc_ColorSurf)
                         || aColorTool->IsSet(aLabel, XCAFDoc_ColorCurv)
                         || !XCAFDoc_ColorTool::IsVisible(aLabel)))
-                || !XCAFDoc_VisMaterialTool::GetShapeMaterial(
-                        aLabel).IsNull()
+                || aMaterialBlocks
                 || (!aLayerTool.IsNull()
                     && aLayerTool->GetLayers(aLabel, aLayers)
                     && !aLayers.IsEmpty())) {
@@ -683,7 +697,8 @@ Standard_Boolean TryPrepareFaceOperationSource(
     const Standard_Size theMaximumStyledSubshapeLabels,
     FaceOperationSourceProof& theProof,
     const Standard_Boolean allowPlanarSpline,
-    const Standard_Boolean allowSavedCut) noexcept
+    const Standard_Boolean allowSavedCut,
+    const Standard_Boolean allowStyledFaces) noexcept
 {
     theProof = FaceOperationSourceProof();
     if (theContext.IsNull() || theDocument.IsNull()
@@ -732,10 +747,13 @@ Standard_Boolean TryPrepareFaceOperationSource(
                 aTopologyNodeCount)) {
             return Standard_False;
         }
+        // A painted face (desk lamp 16a, CTO 17 Nov 05:13) only blocks the tools that would
+        // lose its colour; Push-pull and Split carry it to the faces of the result.
         if (HasStyledXCAFSubshape(
                 aDocument,
                 aLabel,
-                theMaximumStyledSubshapeLabels)
+                theMaximumStyledSubshapeLabels,
+                allowStyledFaces)
             || !BRepCheck_Analyzer(aShape, Standard_True).IsValid()) {
             return Standard_False;
         }
@@ -848,7 +866,8 @@ Standard_Boolean FaceOperationSourceProofIsCurrent(
     const Handle(OcctDocument)& theDocument,
     const FaceOperationSourceProof& theProof,
     const Standard_Size theMaximumStyledSubshapeLabels,
-    const Standard_Boolean allowSavedCut) noexcept
+    const Standard_Boolean allowSavedCut,
+    const Standard_Boolean allowStyledFaces) noexcept
 {
     if (theContext.IsNull() || theDocument.IsNull()
         || theProof.original.IsNull() || theProof.documentLabel.IsNull()
@@ -888,7 +907,8 @@ Standard_Boolean FaceOperationSourceProofIsCurrent(
             || HasStyledXCAFSubshape(
                 aDocument,
                 theProof.documentLabel,
-                theMaximumStyledSubshapeLabels)
+                theMaximumStyledSubshapeLabels,
+                allowStyledFaces)
             || theDocument->EntityIdentifierForLabel(
                 theProof.documentLabel) != theProof.entityIdentifier
             || theDocument->DefinitionIdentifierForLabel(
