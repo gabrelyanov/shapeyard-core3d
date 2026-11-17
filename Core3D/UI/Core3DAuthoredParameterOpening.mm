@@ -1560,7 +1560,28 @@ static NSString *sLastBakedBooleanPreviewRefusal = @"";
     nearX:(double)nx y:(double)ny z:(double)nz
     refusal:(NSString * _Nullable * _Nullable)refusal {
     if (refusal) *refusal = @"unsupported-source";
-    return NO;
+    if (![NSThread isMainThread] || ![entity isKindOfClass:NSString.class] || entity.length == 0
+        || count < 2 || count > 50)
+        return NO;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        if (!viewer) return NO;
+        const bool hasNear = std::isfinite(nx) && std::isfinite(ny) && std::isfinite(nz);
+        const gp_Pnt near(hasNear ? nx : 0, hasNear ? ny : 0, hasNear ? nz : 0);
+        std::string code;
+        const bool applied = viewer->applyHoleRow(entity.UTF8String ?: "", int(count), spacing,
+            hasNear ? &near : nullptr, code);
+        if (refusal) *refusal = [NSString stringWithUTF8String:code.c_str()];
+        if (applied) {
+            const SEL checkSelections = NSSelectorFromString(@"checkSelections");
+            if ([gl respondsToSelector:checkSelections])
+                ((void (*)(id, SEL))[gl methodForSelector:checkSelections])(gl, checkSelections);
+            [gl requestRender];
+        }
+        return applied ? YES : NO;
+    } catch (...) { return NO; }
 }
 
 - (BOOL)clearBooleanPairPreview {

@@ -2805,6 +2805,37 @@ bool Core3DViewer::applyThroughHole(const std::string& entity, const gp_Pnt& wor
     }catch(...){refusal="invalid-result";return false;}
 }
 
+bool Core3DViewer::applyHoleRow(const std::string& entity, int count, double spacing,
+    const gp_Pnt* worldNear, std::string& refusal) noexcept {
+    refusal="unsupported-source";
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()||entity.empty())return false;
+    try{
+        OCC_CATCH_SIGNALS
+        if(_booleanPairPreview)clearBooleanPairPreview();
+        Handle(AIS_Shape) presentation;TDF_Label label;
+        AIS_ListOfInteractive displayed;
+        myContext->DisplayedObjects(AIS_KOI_Shape,-1,displayed);
+        for(AIS_ListIteratorOfListOfInteractive item(displayed);item.More();item.Next()){
+            const auto candidate=Handle(AIS_Shape)::DownCast(item.Value());
+            if(candidate.IsNull())continue;
+            const TDF_Label candidateLabel=myDoc->ShapeLabel(candidate);
+            if(candidateLabel.IsNull()||myDoc->EntityIdentifierForLabel(candidateLabel)!=entity)continue;
+            if(!presentation.IsNull())return false;
+            presentation=candidate;label=candidateLabel;
+        }
+        if(presentation.IsNull()||label.IsNull())return false;
+        const gp_Trsf toWorld=presentation->LocalTransformation();
+        const double scale=std::abs(toWorld.ScaleFactor());
+        if(!(scale>0)||!std::isfinite(spacing))return false;
+        std::optional<gp_Pnt> localNear;
+        if(worldNear)localNear=worldNear->Transformed(toWorld.Inverted());
+        if(!myDoc->ApplyHoleRow(label,presentation,count,spacing/scale,
+            localNear?&*localNear:nullptr,refusal))return false;
+        redrawDocument();
+        return true;
+    }catch(...){refusal="invalid-result";return false;}
+}
+
 bool Core3DViewer::clearBooleanPairPreview(bool reselectTarget) noexcept {
     if(![NSThread isMainThread]||myContext.IsNull())return false;
     const auto state=std::move(_booleanPairPreview);

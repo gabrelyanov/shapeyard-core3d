@@ -13602,6 +13602,82 @@ Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
     }
 }
 
+// The hole itself, drilled into one valid solid (BuildThroughHole and Holes).
+static bool DrillSolidForHole(const TopoDS_Shape& source, const gp_Pnt& start,
+    const gp_Dir& direction, double radius, double depth, TopoDS_Shape& output,
+    std::string& refusal) {
+    output.Nullify();
+    Bnd_Box box; BRepBndLib::AddOptimal(source, box, Standard_False, Standard_False);
+    if (box.IsVoid()) return false;
+    const double reach = std::sqrt(box.SquareExtent()) + radius;
+    const gp_Vec along(direction);
+    const bool through = depth <= 0;
+    const double clearance = std::max(radius, reach * 1e-3);
+    gp_Pnt base = start.Translated(-along * (reach * 1e-3));
+    double length = through ? 2 * reach : depth + reach * 1e-3;
+    if (through) {
+        // "Through" means through the material the hole enters, stopping
+        // where it first comes out (a handle, not the cup behind it).
+        IntCurvesFace_ShapeIntersector crossings;
+        crossings.Load(source, Precision::Confusion());
+        crossings.Perform(gp_Lin(start, direction), -reach, reach);
+        const double eps = reach * 1e-6;
+        std::vector<std::pair<double, IntCurveSurface_TransitionOnCurve>> points;
+        for (Standard_Integer i = 1; i <= crossings.NbPnt(); ++i)
+            points.emplace_back(crossings.WParameter(i), crossings.Transition(i));
+        std::sort(points.begin(), points.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        double exit = -1, next = -1, behind = 0;
+        for (const auto& point : points) {
+            if (point.first < -eps) { behind = point.first; continue; }
+            if (exit < 0 && point.first > eps && point.second == IntCurveSurface_Out) {
+                exit = point.first;
+            } else if (exit >= 0 && point.first > exit + eps) {
+                next = point.first;
+                break;
+            }
+        }
+        if (exit > 0) {
+            const double forward = next > 0 ? std::min(clearance, (next - exit) / 2) : clearance;
+            const double backward = behind < 0 ? std::min(clearance, -behind / 2) : clearance;
+            base = start.Translated(-along * backward);
+            length = backward + exit + forward;
+        } else {
+            base = start.Translated(-along * reach);
+        }
+    }
+    BRepPrimAPI_MakeCylinder cylinder(gp_Ax2(base, direction), radius, length);
+    cylinder.Build();
+    if (!cylinder.IsDone()) { refusal = "invalid-result"; return false; }
+    TopTools_ListOfShape arguments, tools;
+    arguments.Append(source); tools.Append(cylinder.Shape());
+    BRepAlgoAPI_Cut cut;
+    cut.SetArguments(arguments); cut.SetTools(tools);
+    cut.SetRunParallel(Standard_False); cut.SetNonDestructive(Standard_True);
+    cut.SetFuzzyValue(Precision::Confusion());
+    cut.Build();
+    if (!cut.IsDone() || cut.HasErrors()) { refusal = "invalid-result"; return false; }
+    TopoDS_Shape result = cut.Shape();
+    if (result.ShapeType() == TopAbs_COMPOUND) {
+        TopoDS_Shape only; int solids = 0;
+        for (TopExp_Explorer it(result, TopAbs_SOLID); it.More(); it.Next()) { only = it.Current(); ++solids; }
+        if (solids != 1) { refusal = "invalid-result"; return false; }
+        result = only;
+    }
+    GProp_GProps before, after;
+    BRepGProp::VolumeProperties(source, before);
+    BRepGProp::VolumeProperties(result, after);
+    if (result.IsNull() || result.ShapeType() != TopAbs_SOLID
+        || !BRepCheck_Analyzer(result, Standard_True).IsValid()
+        || !(after.Mass() > 0) || !(after.Mass() < before.Mass() * (1 - 1e-9))) {
+        refusal = "empty-result";   // the hole misses the part
+        return false;
+    }
+    output = result;
+    refusal.clear();
+    return true;
+}
+
 Standard_Boolean OcctDocument::BuildThroughHole(
     const TDF_Label& label, const gp_Pnt& start, const gp_Dir& direction,
     double radius, double depth, TopoDS_Shape& output, std::string& refusal)
@@ -13637,75 +13713,8 @@ Standard_Boolean OcctDocument::BuildThroughHole(
         const TopoDS_Shape source = SingleSolidOf(DetachedCopy(XCAFDoc_ShapeTool::GetShape(label)));
         if (source.IsNull() || source.ShapeType() != TopAbs_SOLID
             || !BRepCheck_Analyzer(source, Standard_True).IsValid()) return Standard_False;
-        Bnd_Box box; BRepBndLib::AddOptimal(source, box, Standard_False, Standard_False);
-        if (box.IsVoid()) return Standard_False;
-        const double reach = std::sqrt(box.SquareExtent()) + radius;
-        const gp_Vec along(direction);
-        const bool through = depth <= 0;
-        const double clearance = std::max(radius, reach * 1e-3);
-        gp_Pnt base = start.Translated(-along * (reach * 1e-3));
-        double length = through ? 2 * reach : depth + reach * 1e-3;
-        if (through) {
-            // "Through" means through the material the hole enters, stopping
-            // where it first comes out (a handle, not the cup behind it).
-            IntCurvesFace_ShapeIntersector crossings;
-            crossings.Load(source, Precision::Confusion());
-            crossings.Perform(gp_Lin(start, direction), -reach, reach);
-            const double eps = reach * 1e-6;
-            std::vector<std::pair<double, IntCurveSurface_TransitionOnCurve>> points;
-            for (Standard_Integer i = 1; i <= crossings.NbPnt(); ++i)
-                points.emplace_back(crossings.WParameter(i), crossings.Transition(i));
-            std::sort(points.begin(), points.end(),
-                      [](const auto& a, const auto& b) { return a.first < b.first; });
-            double exit = -1, next = -1, behind = 0;
-            for (const auto& point : points) {
-                if (point.first < -eps) { behind = point.first; continue; }
-                if (exit < 0 && point.first > eps && point.second == IntCurveSurface_Out) {
-                    exit = point.first;
-                } else if (exit >= 0 && point.first > exit + eps) {
-                    next = point.first;
-                    break;
-                }
-            }
-            if (exit > 0) {
-                const double forward = next > 0 ? std::min(clearance, (next - exit) / 2) : clearance;
-                const double backward = behind < 0 ? std::min(clearance, -behind / 2) : clearance;
-                base = start.Translated(-along * backward);
-                length = backward + exit + forward;
-            } else {
-                base = start.Translated(-along * reach);
-            }
-        }
-        BRepPrimAPI_MakeCylinder cylinder(gp_Ax2(base, direction), radius, length);
-        cylinder.Build();
-        if (!cylinder.IsDone()) { refusal = "invalid-result"; return Standard_False; }
-        TopTools_ListOfShape arguments, tools;
-        arguments.Append(source); tools.Append(cylinder.Shape());
-        BRepAlgoAPI_Cut cut;
-        cut.SetArguments(arguments); cut.SetTools(tools);
-        cut.SetRunParallel(Standard_False); cut.SetNonDestructive(Standard_True);
-        cut.SetFuzzyValue(Precision::Confusion());
-        cut.Build();
-        if (!cut.IsDone() || cut.HasErrors()) { refusal = "invalid-result"; return Standard_False; }
-        TopoDS_Shape result = cut.Shape();
-        if (result.ShapeType() == TopAbs_COMPOUND) {
-            TopoDS_Shape only; int solids = 0;
-            for (TopExp_Explorer it(result, TopAbs_SOLID); it.More(); it.Next()) { only = it.Current(); ++solids; }
-            if (solids != 1) { refusal = "invalid-result"; return Standard_False; }
-            result = only;
-        }
-        GProp_GProps before, after;
-        BRepGProp::VolumeProperties(source, before);
-        BRepGProp::VolumeProperties(result, after);
-        if (result.IsNull() || result.ShapeType() != TopAbs_SOLID
-            || !BRepCheck_Analyzer(result, Standard_True).IsValid()
-            || !(after.Mass() > 0) || !(after.Mass() < before.Mass() * (1 - 1e-9))) {
-            refusal = "empty-result";   // the hole misses the part
-            return Standard_False;
-        }
-        output = result;
-        refusal.clear();
-        return Standard_True;
+        return DrillSolidForHole(source, start, direction, radius, depth, output, refusal)
+            ? Standard_True : Standard_False;
     } catch (...) { output.Nullify(); refusal = "invalid-result"; return Standard_False; }
 }
 
@@ -13754,6 +13763,229 @@ Standard_Boolean OcctDocument::ApplyThroughHole(
         if (!bakedRecord.IsNull()) bakedRecord.ForgetAllAttributes(Standard_True);
         // An earlier saved hole (a retained cut) is baked in this same command,
         // so Undo brings back exactly that saved, resizable hole.
+        if (core3d::retained_solid::HasRecord(label)
+            && !PrepareBooleanResultForFaceEdit(label)) {
+            myOcafDoc->AbortCommand();
+            return Standard_False;
+        }
+        ForgetInspectorPrimitiveRecord(label);
+        if (!ReplaceShape(label, shown)
+            || !XCAFDoc_ShapeTool::GetShape(label).IsEqual(result)
+            || !CarryFaceColours(label, result, oldFaceLabels, colouredFaces)) {
+            myOcafDoc->AbortCommand();
+            return Standard_False;
+        }
+        myOcafDoc->CommitCommand();
+        NotifyChanges();
+        refusal.clear();
+        return Standard_True;
+    } catch (...) {
+        try { if (!myOcafDoc.IsNull() && myOcafDoc->HasOpenCommand()) myOcafDoc->AbortCommand(); }
+        catch (...) {}
+        refusal = "invalid-result";
+        return Standard_False;
+    }
+}
+
+namespace {
+// K07 (desk lamp S55, CTO 17 Nov 12:47): "Holes" on an ordinary part that has a hole repeats
+// that hole in a row. The hole is read from the part's own faces: the inside wall of a hole
+// is a cylinder whose faces look towards its axis.
+struct OcctFoundHole {
+    gp_Pnt origin;          // a point on the axis
+    gp_Dir axis;
+    double radius = 0;
+    double low = 0, high = 0;   // the wall's extent along the axis, from origin
+};
+
+bool OcctFindHoles(const TopoDS_Shape& solid, std::vector<OcctFoundHole>& holes) {
+    holes.clear();
+    for (TopExp_Explorer faces(solid, TopAbs_FACE); faces.More(); faces.Next()) {
+        const TopoDS_Face face = TopoDS::Face(faces.Current());
+        BRepAdaptor_Surface surface(face, Standard_True);
+        if (surface.GetType() != GeomAbs_Cylinder) continue;
+        const gp_Cylinder cylinder = surface.Cylinder();
+        const double radius = cylinder.Radius();
+        if (!(radius > 0)) continue;
+        const double u = (surface.FirstUParameter() + surface.LastUParameter()) / 2;
+        const double v = (surface.FirstVParameter() + surface.LastVParameter()) / 2;
+        gp_Pnt point; gp_Vec du, dv;
+        surface.D1(u, v, point, du, dv);
+        gp_Vec normal = du.Crossed(dv);
+        if (normal.Magnitude() <= gp::Resolution()) continue;
+        if (face.Orientation() == TopAbs_REVERSED) normal.Reverse();
+        const gp_Ax1 line = cylinder.Axis();
+        const gp_Vec fromOrigin(line.Location(), point);
+        const gp_Vec along(line.Direction());
+        const gp_Pnt foot = line.Location().Translated(along * fromOrigin.Dot(along));
+        if (normal.Dot(gp_Vec(point, foot)) <= 0) continue;   // a boss, not a hole
+        // The same hole: same radius on the same line (a wall is often two half faces).
+        const double tolerance = std::max(1e-7, radius * 1e-6);
+        OcctFoundHole* same = nullptr;
+        for (auto& hole : holes) {
+            if (std::abs(hole.radius - radius) > tolerance) continue;
+            if (!hole.axis.IsParallel(line.Direction(), 1e-9)) continue;
+            const gp_Vec offset(hole.origin, line.Location());
+            const gp_Vec across = offset - gp_Vec(hole.axis) * offset.Dot(gp_Vec(hole.axis));
+            if (across.Magnitude() > tolerance) continue;
+            same = &hole; break;
+        }
+        if (!same) {
+            holes.push_back({line.Location(), line.Direction(), radius, 1e300, -1e300});
+            same = &holes.back();
+        }
+        for (TopExp_Explorer corners(face, TopAbs_VERTEX); corners.More(); corners.Next()) {
+            const gp_Pnt corner = BRep_Tool::Pnt(TopoDS::Vertex(corners.Current()));
+            const double t = gp_Vec(same->origin, corner).Dot(gp_Vec(same->axis));
+            same->low = std::min(same->low, t);
+            same->high = std::max(same->high, t);
+        }
+    }
+    holes.erase(std::remove_if(holes.begin(), holes.end(),
+        [](const OcctFoundHole& hole) { return !(hole.high > hole.low); }), holes.end());
+    return !holes.empty();
+}
+
+// The part's extent along a direction through `origin`, from its corners.
+void OcctExtentAlong(const TopoDS_Shape& solid, const gp_Pnt& origin, const gp_Dir& direction,
+                     double& low, double& high) {
+    low = 1e300; high = -1e300;
+    for (TopExp_Explorer corners(solid, TopAbs_VERTEX); corners.More(); corners.Next()) {
+        const double t = gp_Vec(origin, BRep_Tool::Pnt(TopoDS::Vertex(corners.Current())))
+            .Dot(gp_Vec(direction));
+        low = std::min(low, t); high = std::max(high, t);
+    }
+}
+} // namespace
+
+Standard_Boolean OcctDocument::BuildHoleRow(
+    const TDF_Label& label, int count, double spacing, const gp_Pnt* near,
+    TopoDS_Shape& output, std::string& refusal) const noexcept {
+    output.Nullify();
+    refusal = "unsupported-source";
+    try {
+        if (![NSThread isMainThread] || myOcafDoc.IsNull() || label.IsNull()
+            || label.Data() != myOcafDoc->GetData() || myOcafDoc->HasOpenCommand())
+            return Standard_False;
+        if (count < 2 || count > 50 || !std::isfinite(spacing) || spacing <= 0) {
+            refusal = "bad-row"; return Standard_False;
+        }
+        // The same parts Hole drills (BuildThroughHole's rules).
+        const auto coverage = RetainedRecipeCoverageForLabel(label);
+        if (coverage == OcctRetainedRecipeCoverage::InvalidOrUnknown
+            || coverage == OcctRetainedRecipeCoverage::CurrentProfile) return Standard_False;
+        if (coverage == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage) {
+            if (core3d::composite_recipe::HasRecord(label)) {
+                core3d::composite_recipe::Record composite;
+                if (!core3d::composite_recipe::Read(myOcafDoc, label, composite)
+                    || !composite.value || composite.label.IsNull()
+                    || !OriginalsFeature(composite.value->definition)) return Standard_False;
+            } else if (!CanBakeSavedCutForFaceEdit(label)) {
+                return Standard_False;
+            }
+        }
+        const TopoDS_Shape source = SingleSolidOf(DetachedCopy(XCAFDoc_ShapeTool::GetShape(label)));
+        if (source.IsNull() || source.ShapeType() != TopAbs_SOLID
+            || !BRepCheck_Analyzer(source, Standard_True).IsValid()) return Standard_False;
+        std::vector<OcctFoundHole> holes;
+        if (!OcctFindHoles(source, holes)) { refusal = "no-hole"; return Standard_False; }
+        // Several holes: the one whose axis passes nearest the tapped point.
+        if (holes.size() > 1 && !near) { refusal = "several-holes"; return Standard_False; }
+        const auto distance = [&](const OcctFoundHole& candidate) {
+            const gp_Vec offset(candidate.origin, *near);
+            const gp_Vec along(candidate.axis);
+            return (offset - along * offset.Dot(along)).Magnitude();
+        };
+        const OcctFoundHole hole = holes.size() == 1 ? holes.front()
+            : *std::min_element(holes.begin(), holes.end(),
+                [&](const auto& a, const auto& b) { return distance(a) < distance(b); });
+        // Which end the hole goes in from, and whether it goes through.
+        double partLow = 0, partHigh = 0;
+        OcctExtentAlong(source, hole.origin, hole.axis, partLow, partHigh);
+        const double reach = std::max(partHigh - partLow, hole.radius);
+        const double tolerance = reach * 1e-6;
+        const bool topOpen = std::abs(hole.high - partHigh) <= tolerance;
+        const bool bottomOpen = std::abs(hole.low - partLow) <= tolerance;
+        if (!topOpen && !bottomOpen) { refusal = "unsupported-hole"; return Standard_False; }
+        const double length = hole.high - hole.low;
+        const double depth = topOpen && bottomOpen ? 0 : length;
+        const gp_Vec axis(hole.axis);
+        const gp_Pnt entry = hole.origin.Translated(axis * (topOpen ? hole.high : hole.low));
+        const gp_Dir into = topOpen ? hole.axis.Reversed() : hole.axis;
+        // The row runs across the hole along the part's longest side, towards the more room.
+        gp_Dir row; double best = -1;
+        for (const gp_Dir candidate : {gp_Dir(1, 0, 0), gp_Dir(0, 1, 0), gp_Dir(0, 0, 1)}) {
+            if (std::abs(gp_Vec(candidate).Dot(axis)) > 1e-6) continue;
+            double low = 0, high = 0;
+            OcctExtentAlong(source, hole.origin, candidate, low, high);
+            if (high - low > best + tolerance) {
+                best = high - low;
+                row = high >= -low ? candidate : candidate.Reversed();
+            }
+        }
+        if (best < 0) {   // a slanted hole: across it, in the plane of its first local axis
+            gp_Vec across = gp_Vec(1, 0, 0) - axis * axis.X();
+            if (across.Magnitude() < 1e-6) across = gp_Vec(0, 1, 0) - axis * axis.Y();
+            row = gp_Dir(across);
+            double low = 0, high = 0;
+            OcctExtentAlong(source, hole.origin, row, low, high);
+            if (high < -low) row.Reverse();
+        }
+        if (spacing <= 2 * hole.radius * (1 + 1e-9)) { refusal = "holes-overlap"; return Standard_False; }
+        // Every new hole takes out what the first one took: a hole that runs off
+        // the part or into another is refused, never left half made.
+        const double expected = M_PI * hole.radius * hole.radius * length;
+        TopoDS_Shape drilled = source;
+        for (int index = 1; index < count; ++index) {
+            const gp_Pnt start = entry.Translated(gp_Vec(row) * (spacing * index));
+            GProp_GProps before, after;
+            BRepGProp::VolumeProperties(drilled, before);
+            TopoDS_Shape next;
+            if (!DrillSolidForHole(drilled, start, into, hole.radius, depth, next, refusal)) {
+                if (refusal == "empty-result") refusal = "row-leaves-part";
+                return Standard_False;
+            }
+            BRepGProp::VolumeProperties(next, after);
+            if (std::abs((before.Mass() - after.Mass()) - expected) > expected * 5e-3) {
+                refusal = "row-leaves-part"; return Standard_False;
+            }
+            drilled = next;
+        }
+        output = drilled;
+        refusal.clear();
+        return Standard_True;
+    } catch (...) { output.Nullify(); refusal = "invalid-result"; return Standard_False; }
+}
+
+Standard_Boolean OcctDocument::ApplyHoleRow(
+    const TDF_Label& label, const Handle(AIS_Shape)& presentation, int count, double spacing,
+    const gp_Pnt* near, std::string& refusal) noexcept {
+    try {
+        if (presentation.IsNull()) { refusal = "unsupported-source"; return Standard_False; }
+        TopoDS_Shape result;
+        if (!BuildHoleRow(label, count, spacing, near, result, refusal)) return Standard_False;
+        TDF_Label bakedRecord;
+        if (RetainedRecipeCoverageForLabel(label)
+                == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
+            && core3d::composite_recipe::HasRecord(label)) {
+            core3d::composite_recipe::Record composite;
+            if (!core3d::composite_recipe::Read(myOcafDoc, label, composite)
+                || composite.label.IsNull()) { refusal = "stale-source"; return Standard_False; }
+            bakedRecord = composite.label;
+        }
+        Handle(AIS_Shape) shown = new AIS_Shape(result);
+        shown->SetLocalTransformation(presentation->LocalTransformation());
+        std::vector<TDF_Label> oldFaceLabels;
+        std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> colouredFaces;
+        if (!CaptureFaceColours(label, 1.0, oldFaceLabels, colouredFaces)) {
+            refusal = "invalid-result";
+            return Standard_False;
+        }
+        refusal = "stale-source";
+        myOcafDoc->NewCommand();
+        if (!myOcafDoc->HasOpenCommand()) return Standard_False;
+        if (!bakedRecord.IsNull()) bakedRecord.ForgetAllAttributes(Standard_True);
+        // A saved, resizable hole is baked in this same command: Undo brings it back.
         if (core3d::retained_solid::HasRecord(label)
             && !PrepareBooleanResultForFaceEdit(label)) {
             myOcafDoc->AbortCommand();

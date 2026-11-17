@@ -1974,6 +1974,17 @@ public:
         const TDF_Label& label, const Handle(AIS_Shape)& presentation,
         const gp_Pnt& start, const gp_Dir& direction, double radius, double depth,
         std::string& refusal) noexcept;
+    //! Holes (K07): the part's hole repeated `count` times in a row, `spacing` apart
+    //! (part units), across the hole along the part's longest side. `near` (part
+    //! units, may be null) picks among several holes. Read-only; refusals: no-hole,
+    //! several-holes, holes-overlap, row-leaves-part, unsupported-hole, bad-row.
+    Standard_EXPORT Standard_Boolean BuildHoleRow(
+        const TDF_Label& label, int count, double spacing, const gp_Pnt* near,
+        TopoDS_Shape& result, std::string& refusal) const noexcept;
+    //! The same written as ONE undoable command (a saved hole is baked in it).
+    Standard_EXPORT Standard_Boolean ApplyHoleRow(
+        const TDF_Label& label, const Handle(AIS_Shape)& presentation, int count,
+        double spacing, const gp_Pnt* near, std::string& refusal) noexcept;
     //! The prepared result (in the target's own frame) and the two entity
     //! identifiers, for an on-model preview before Apply. Read-only.
     Standard_EXPORT Standard_Boolean BooleanPairPreparedPreview(
