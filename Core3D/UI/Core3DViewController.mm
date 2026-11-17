@@ -157,6 +157,9 @@ unsigned long long Core3DDebugColdOpenCandidateProbeValue(
 #include "../OCCTKit/NativeRigidPlacementEvidence.hxx"
 #include "../OCCTKit/SpatialSweepEditor.hxx"
 #include "../OCCTKit/SweepRebuildDefinition.hxx"
+// Release code (face colour route) uses these two; the block below is DEBUG only.
+#include <TDF_ChildIterator.hxx>
+#include <TDF_TagSource.hxx>
 #if DEBUG
 #include "../OCCTKit/NativeModelingReceipt.hxx"
 #include "../OCCTKit/ReceiptCatalogBinaryDriver.hxx"
@@ -5646,6 +5649,17 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
         }
         std::vector<OcctPBRMaterialUpdate> updates;
         for (const auto& style : pending) {
+            // A part keeps Position, Rotation and Scale as numbers on its children 1...8
+            // (FindChild, which never advances the tag source), and feature records up to
+            // 12. Reserve them, as the Material panel route and CarryFaceColours do: the
+            // first AddSubShape on a fresh part otherwise hands the face colour child 1,
+            // the Position X number (toy car, build 5: "a Hole moves the part after save").
+            Standard_Integer highWater = 12;
+            for (TDF_ChildIterator child(style.root, Standard_False); child.More(); child.Next())
+                highWater = std::max(highWater, child.Value().Tag());
+            const Handle(TDF_TagSource) tags = TDF_TagSource::Set(style.root);
+            if (tags.IsNull()) { Core3DAbortCommandNoThrow(transaction); return; }
+            tags->Set(std::max(highWater, tags->Get()));
             const auto label = shapes->AddSubShape(style.root, style.face);
             if (label.IsNull()) { Core3DAbortCommandNoThrow(transaction); return; }
             updates.push_back({label, style.material, {}, {}});

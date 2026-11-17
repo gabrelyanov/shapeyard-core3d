@@ -2808,6 +2808,69 @@ bool Core3DViewer::applyThroughHole(const std::string& entity, const gp_Pnt& wor
     }catch(...){refusal="invalid-result";return false;}
 }
 
+std::vector<std::vector<double>> Core3DViewer::roundHoles(const std::string& entity) noexcept {
+    std::vector<std::vector<double>> listed;
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()||entity.empty())return listed;
+    try{
+        OCC_CATCH_SIGNALS
+        Handle(AIS_Shape) presentation;TDF_Label label;
+        if(!FindEntityPresentation(myContext,myDoc,entity,presentation,label))return listed;
+        const gp_Trsf toWorld=presentation->LocalTransformation();
+        const double scale=std::abs(toWorld.ScaleFactor());
+        if(!(scale>0))return listed;
+        for(const auto& hole:myDoc->RoundHolesOfPart(label)){
+            if(hole.size()!=8)continue;
+            const gp_Pnt entry=gp_Pnt(hole[0],hole[1],hole[2]).Transformed(toWorld);
+            const gp_Dir into=gp_Dir(hole[3],hole[4],hole[5]).Transformed(toWorld);
+            listed.push_back({entry.X(),entry.Y(),entry.Z(),into.X(),into.Y(),into.Z(),
+                hole[6]*scale,hole[7]*scale});
+        }
+        return listed;
+    }catch(...){return {};}
+}
+
+bool Core3DViewer::applyHoleRow(const std::string& entity, int count, double spacing,
+    const gp_Pnt* worldNear, std::string& refusal) noexcept {
+    refusal="unsupported-source";
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()||entity.empty())return false;
+    try{
+        OCC_CATCH_SIGNALS
+        if(_booleanPairPreview)clearBooleanPairPreview();
+        Handle(AIS_Shape) presentation;TDF_Label label;
+        if(!FindEntityPresentation(myContext,myDoc,entity,presentation,label))return false;
+        const gp_Trsf toWorld=presentation->LocalTransformation();
+        const double scale=std::abs(toWorld.ScaleFactor());
+        if(!(scale>0))return false;
+        gp_Pnt localNear;
+        if(worldNear)localNear=worldNear->Transformed(toWorld.Inverted());
+        if(!myDoc->ApplyHoleRow(label,presentation,count,spacing/scale,
+            worldNear?&localNear:nullptr,refusal))return false;
+        redrawDocument();
+        return true;
+    }catch(...){refusal="invalid-result";return false;}
+}
+
+bool Core3DViewer::applyHoleResize(const std::string& entity, double radius,
+    const gp_Pnt* worldNear, std::string& refusal) noexcept {
+    refusal="unsupported-source";
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()||entity.empty())return false;
+    try{
+        OCC_CATCH_SIGNALS
+        if(_booleanPairPreview)clearBooleanPairPreview();
+        Handle(AIS_Shape) presentation;TDF_Label label;
+        if(!FindEntityPresentation(myContext,myDoc,entity,presentation,label))return false;
+        const gp_Trsf toWorld=presentation->LocalTransformation();
+        const double scale=std::abs(toWorld.ScaleFactor());
+        if(!(scale>0))return false;
+        gp_Pnt localNear;
+        if(worldNear)localNear=worldNear->Transformed(toWorld.Inverted());
+        if(!myDoc->ApplyHoleResize(label,presentation,radius/scale,
+            worldNear?&localNear:nullptr,refusal))return false;
+        redrawDocument();
+        return true;
+    }catch(...){refusal="invalid-result";return false;}
+}
+
 bool Core3DViewer::clearBooleanPairPreview(bool reselectTarget) noexcept {
     if(![NSThread isMainThread]||myContext.IsNull())return false;
     const auto state=std::move(_booleanPairPreview);
