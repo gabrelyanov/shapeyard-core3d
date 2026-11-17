@@ -1425,6 +1425,10 @@ bool ApplyPrivateExportTransforms(
 
 bool BinarySTLFacetHasZeroArea(
     const std::array<float, 9>& vertices) noexcept {
+    // An exact-zero test: the compiler must not fuse a*b - c*d into one
+    // rounding, or two equal edges give a cross product of 8e-22 instead of 0
+    // and a facet with two identical corners is written (desk lamp rivets, K22).
+#pragma clang fp contract(off)
     const double firstToSecondX =
         static_cast<double>(vertices[3]) - vertices[0];
     const double firstToSecondY =
