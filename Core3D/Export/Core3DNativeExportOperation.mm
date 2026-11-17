@@ -2553,6 +2553,19 @@ void MeshPrivateExportSurfaces(
     } else {
         whole.Next(4).Close();
     }
+    // Desk lamp E-MID (17 Nov): at Viewport quality the private document keeps
+    // the display mesh, which carries the same collapsed fillet-corner
+    // triangles; leave them out here too, as the presets, STL, FBX and USDZ do.
+    if (state->meshQuality == Core3DExportMeshQualityViewport) {
+        const Standard_Integer removedViewport = RemoveCollapsedExportTriangles(compound, state);
+#if DEBUG
+        if (removedViewport > 0) {
+            NSLog(@"[NativeExportMeshDiagnostic] removedCollapsedViewportTriangles=%d", removedViewport);
+        }
+#else
+        (void)removedViewport;
+#endif
+    }
     ThrowIfCancelled(state);
 
     if (state->meshQuality != Core3DExportMeshQualityViewport) {
