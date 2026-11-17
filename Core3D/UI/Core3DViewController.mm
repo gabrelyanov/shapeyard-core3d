@@ -248,6 +248,7 @@ unsigned long long Core3DDebugColdOpenCandidateProbeValue(
 #include <SelectMgr_SelectableObject.hxx>
 #include <SelectMgr_Selection.hxx>
 #include <SelectMgr_SensitiveEntity.hxx>
+#include <XCAFDoc_ShapeMapTool.hxx>
 #include <Precision.hxx>
 #include <StdSelect_BRepOwner.hxx>
 
