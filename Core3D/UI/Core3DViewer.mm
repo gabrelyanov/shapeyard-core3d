@@ -6083,6 +6083,7 @@ struct DocumentReplacementWork {
 
 void Core3DViewer::release() noexcept {
     _measurePicks.clear();
+    _measureMeshPicks.clear();
     if (_nativeOpeningState) _nativeOpeningState->owner = nullptr;
     _nativeOpeningState.reset();
     // Retire pre-commit source authority on main before graphics teardown.
@@ -6525,6 +6526,7 @@ NativeHistoryTransition Core3DViewer::performHistory(NativeHistoryDirection dire
 bool Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorType,
                                        ShapeSelectionMode theSelectionMode) {
     _measurePicks.clear();
+    _measureMeshPicks.clear();
     if (!IsStatelessManipulatorType(theManipulatorType)) {
         // Operation controllers own state that is not encoded by this enum.
         // Reconstructing one from the enum would fabricate a fresh ledger and
@@ -13940,6 +13942,7 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
 
 bool Core3DViewer::redrawDocument() noexcept {
     _measurePicks.clear();
+    _measureMeshPicks.clear();
     if (hasUnresolvedOrdinaryEdit() || HasActiveOperationLedger(_objectInteractor, _shapeInteractor)) {
         // A same-document rebuild is safe only after every typed operation has
         // retired its controller ledger. The manipulator enum alone cannot
@@ -15683,6 +15686,95 @@ Core3DViewer::measurePicksForCurrentSelection() noexcept {
     }
 }
 
+std::vector<Core3DViewer::MeasureMeshPick> Core3DViewer::measureMeshPicks() noexcept {
+    try {
+        _measureMeshPicks.erase(std::remove_if(_measureMeshPicks.begin(), _measureMeshPicks.end(),
+            [&](const MeasureMeshPick& pick) {
+                return pick.presentation.IsNull() || myContext.IsNull()
+                    || !myContext->IsDisplayed(pick.presentation);
+            }), _measureMeshPicks.end());
+        return _measureMeshPicks;
+    } catch (...) {
+        _measureMeshPicks.clear();
+        return {};
+    }
+}
+
+// The tap's ray against every displayed face that holds triangles but no surface (an imported mesh
+// not made solid); the front-most triangle hit gives its corner nearest the hit point.
+bool Core3DViewer::recordMeasureMeshPick(int theX, int theY) noexcept {
+    try {
+        if (myContext.IsNull() || myView.IsNull()) return false;
+        Standard_Real px = 0, py = 0, pz = 0, dx = 0, dy = 0, dz = 0;
+        myView->ConvertWithProj(theX, theY, px, py, pz, dx, dy, dz);
+        const gp_XYZ origin(px, py, pz);
+        gp_XYZ direction(dx, dy, dz);
+        const double length = direction.Modulus();
+        if (!std::isfinite(length) || length <= gp::Resolution()
+            || !std::isfinite(px) || !std::isfinite(py) || !std::isfinite(pz)) return false;
+        direction /= length;
+        double nearest = std::numeric_limits<double>::infinity();
+        gp_Pnt node;
+        Handle(AIS_InteractiveObject) hit;
+        AIS_ListOfInteractive displayed;
+        myContext->DisplayedObjects(displayed);
+        for (AIS_ListOfInteractive::Iterator objects(displayed); objects.More(); objects.Next()) {
+            const auto presentation = Handle(AIS_Shape)::DownCast(objects.Value());
+            if (presentation.IsNull() || presentation->Shape().IsNull()) continue;
+            for (TopExp_Explorer faces(presentation->Shape(), TopAbs_FACE); faces.More(); faces.Next()) {
+                const TopoDS_Face& face = TopoDS::Face(faces.Current());
+                TopLoc_Location location;
+                if (!BRep_Tool::Surface(face, location).IsNull()) continue;
+                const Handle(Poly_Triangulation) mesh = BRep_Tool::Triangulation(face, location);
+                if (mesh.IsNull() || mesh->NbTriangles() <= 0) continue;
+                gp_Trsf toWorld = presentation->Transformation();
+                toWorld.Multiply(location.Transformation());
+                for (Standard_Integer index = 1; index <= mesh->NbTriangles(); ++index) {
+                    Standard_Integer n[3] = {0, 0, 0};
+                    mesh->Triangle(index).Get(n[0], n[1], n[2]);
+                    const gp_Pnt corners[3] = {mesh->Node(n[0]).Transformed(toWorld),
+                        mesh->Node(n[1]).Transformed(toWorld), mesh->Node(n[2]).Transformed(toWorld)};
+                    const gp_XYZ e1 = corners[1].XYZ() - corners[0].XYZ();
+                    const gp_XYZ e2 = corners[2].XYZ() - corners[0].XYZ();
+                    const gp_XYZ p = direction.Crossed(e2);
+                    const double det = e1.Dot(p);
+                    if (!std::isfinite(det) || std::abs(det) <= std::numeric_limits<double>::min()) continue;
+                    const gp_XYZ s = origin - corners[0].XYZ();
+                    const double u = s.Dot(p) / det;
+                    if (!(u >= 0 && u <= 1)) continue;
+                    const gp_XYZ q = s.Crossed(e1);
+                    const double v = direction.Dot(q) / det;
+                    if (!(v >= 0 && u + v <= 1)) continue;
+                    const double along = e2.Dot(q) / det;
+                    if (!std::isfinite(along) || along >= nearest) continue;
+                    nearest = along;
+                    const gp_Pnt point(origin + direction * along);
+                    int best = 0;
+                    for (int corner = 1; corner < 3; ++corner)
+                        if (point.SquareDistance(corners[corner]) < point.SquareDistance(corners[best]))
+                            best = corner;
+                    node = corners[best];
+                    hit = presentation;
+                }
+            }
+        }
+        if (hit.IsNull()) return false;
+        const auto taken = std::find_if(_measureMeshPicks.begin(), _measureMeshPicks.end(),
+            [&](const MeasureMeshPick& pick) { return pick.node.Distance(node) <= Precision::Confusion(); });
+        if (taken != _measureMeshPicks.end()) {
+            _measureMeshPicks.erase(taken);
+            return true;
+        }
+        _measureMeshPicks.push_back(MeasureMeshPick{hit, node});
+        if (_measureMeshPicks.size() > 2)
+            _measureMeshPicks.erase(_measureMeshPicks.begin(), _measureMeshPicks.end() - 2);
+        return true;
+    } catch (...) {
+        _measureMeshPicks.clear();
+        return false;
+    }
+}
+
 #if DEBUG
 namespace {
 class Core3DMeasureFixtureSelector final : public StdSelect_ViewerSelector3d {
@@ -15892,6 +15984,18 @@ void Core3DViewer::Select(int theX, int theY) {
     } catch (...) {
         _measurePicks.clear();
     }
+    // Nothing selectable under the tap in edge mode: a part that is still an imported mesh has no
+    // edges, so the tap takes one of its corners for Measure. Any real selection forgets mesh picks.
+    try {
+        myContext->InitSelected();
+        if (myContext->MoreSelected()) {
+            _measureMeshPicks.clear();
+        } else if (_shapeInteractor->getSelectionMode() == ShapeSelectionMode::Edge) {
+            (void)recordMeasureMeshPick(theX, theY);
+        }
+    } catch (...) {
+        _measureMeshPicks.clear();
+    }
 
     int newCount = selectedCount();
 
@@ -15955,6 +16059,7 @@ void Core3DViewer::Select(int theX, int theY) {
 		}
         myContext->SelectDetected(AIS_SelectionScheme::AIS_SelectionScheme_Remove);
         myContext->ClearSelected(Standard_True);
+        _measureMeshPicks.clear();
         if (_objectInteractor == nullptr) { return; }
         if (_objectInteractor->getManipulatorType() == PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer
             && _shapeInteractor != nullptr) {
