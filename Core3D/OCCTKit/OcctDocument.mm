@@ -13364,6 +13364,13 @@ Standard_Boolean OcctDocument::ApplyBakedBooleanBatch(
                 }
                 placement.SetScaleFactor(1.0);
             }
+            // Store the result exactly as the file will hold it (signed zeros on curved faces
+            // come back as +0 from the file): a cold reopen must find the same faces
+            // (tutorial chest row 141: 'face witnesses changed for lid, param8 -0.0/0.0').
+            {
+                TopoDS_Shape stable;
+                if (FileStableShape(result, stable)) result = stable;
+            }
             Handle(AIS_Shape) shown = new AIS_Shape(result);
             shown->SetLocalTransformation(placement);
             made.emplace_back(result, shown);
