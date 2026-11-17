@@ -352,7 +352,8 @@ Receipt OcafOwner::create(const CreateRequest& request) noexcept {
             const auto& refused = first.built() ? second : first;
             if (refused.refusalPoint > 0)
                 refusal.reason += " at check " + std::to_string(refused.refusalPoint)
-                    + " value " + std::to_string(refused.refusalValue);
+                    + " value " + std::to_string(refused.refusalValue)
+                    + refused.refusalDetail;
 #endif
             return finish(std::move(refusal));
         }
