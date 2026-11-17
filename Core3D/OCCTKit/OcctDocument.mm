@@ -3100,6 +3100,7 @@ bool ValidateAttachmentRigDocument(
 #include <BRepAdaptor_Surface.hxx>
 #include <Standard_ErrorHandler.hxx>
 #include <TopExp.hxx>
+#include <gp_GTrsf.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Pln.hxx>
@@ -12996,20 +12997,24 @@ TopoDS_Shape SingleSolidOf(TopoDS_Shape shape) noexcept {
     } catch (...) { return TopoDS_Shape(); }
 }
 
-// A point inside a face (not on its border), for matching faces after a Boolean.
-bool InteriorPointOfFace(const TopoDS_Face& face, gp_Pnt& point) noexcept {
+// A point inside a face (not on its border), for matching faces after a Boolean. With `fine`, a
+// face that has no point of the coarse 7 x 7 grid inside it (a narrow rim: the 3 mm bottom of a
+// thin-walled shade, 17 Nov) is searched again on a 63 x 63 grid: at most 49 + 3,969 = 4,018
+// classifications for that face. Callers run the fine pass at most once per face per call.
+bool InteriorPointOfFace(const TopoDS_Face& face, gp_Pnt& point, const bool fine = true) noexcept {
     try {
         Standard_Real u0, u1, v0, v1;
         BRepTools::UVBounds(face, u0, u1, v0, v1);
         const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
         if (surface.IsNull()) return false;
-        for (int i = 1; i <= 7; ++i)
-            for (int j = 1; j <= 7; ++j) {
-                const gp_Pnt2d uv(u0 + (u1 - u0) * (i / 8.0 + (i % 2) * 0.011),
-                                  v0 + (v1 - v0) * (j / 8.0 + (j % 2) * 0.013));
-                BRepClass_FaceClassifier inside(face, uv, Precision::Confusion());
-                if (inside.State() == TopAbs_IN) { point = surface->Value(uv.X(), uv.Y()); return true; }
-            }
+        for (const int cells : {8, 64})
+            if (cells == 8 || fine) for (int i = 1; i < cells; ++i)
+                for (int j = 1; j < cells; ++j) {
+                    const gp_Pnt2d uv(u0 + (u1 - u0) * ((i + (i % 2) * 0.088) / cells),
+                                      v0 + (v1 - v0) * ((j + (j % 2) * 0.104) / cells));
+                    BRepClass_FaceClassifier inside(face, uv, Precision::Confusion());
+                    if (inside.State() == TopAbs_IN) { point = surface->Value(uv.X(), uv.Y()); return true; }
+                }
         return false;
     } catch (...) { return false; }
 }
@@ -13340,7 +13345,8 @@ std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> OcctDocument::MatchF
             for (const auto& [coloured, material] : looks) {
                 gp_Pnt lookPoint;
                 if (!(hasPoint && PointOnFace(point, coloured, tolerance))
-                    && !(eitherWay && InteriorPointOfFace(coloured, lookPoint)
+                    // The look side stays on the coarse grid: it runs once per result face.
+                    && !(eitherWay && InteriorPointOfFace(coloured, lookPoint, false)
                          && PointOnFace(lookPoint, TopoDS::Face(face.Current()), tolerance))) continue;
                 matched.emplace_back(TopoDS::Face(face.Current()), material);
                 break;
@@ -13348,6 +13354,36 @@ std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> OcctDocument::MatchF
         }
     } catch (...) { matched.clear(); }
     return matched;
+}
+
+std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> OcctDocument::ResizedFaceColours(
+    const TopoDS_Shape& result, const gp_GTrsf& sizeChange,
+    const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& painted) const noexcept {
+    std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> carried;
+    try {
+        if (result.IsNull() || painted.empty()) return carried;
+        const gp_GTrsf back = sizeChange.Inverted();
+        Bnd_Box box; BRepBndLib::Add(result, box);
+        const double tolerance = box.IsVoid() ? 1.0e-6 : 1.0e-5 * std::sqrt(box.SquareExtent());
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(result, TopAbs_FACE, faces);
+        for (Standard_Integer index = 1; index <= faces.Extent(); ++index) {
+            // One face that OCCT cannot handle loses only its own colour.
+            try {
+                const TopoDS_Face& face = TopoDS::Face(faces(index));
+                gp_Pnt point;
+                if (!InteriorPointOfFace(face, point)) continue;
+                gp_XYZ before = point.XYZ();
+                back.Transforms(before);
+                for (const auto& [old, material] : painted) {
+                    if (!PointOnFace(gp_Pnt(before), old, tolerance)) continue;
+                    carried.emplace_back(face, material);
+                    break;
+                }
+            } catch (...) {}
+        }
+    } catch (...) { carried.clear(); }
+    return carried;
 }
 
 Standard_Boolean OcctDocument::CaptureFaceColours(const TDF_Label& label, double scale,

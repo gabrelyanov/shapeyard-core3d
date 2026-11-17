@@ -4,7 +4,6 @@
 #include <TopoDS_Face.hxx>
 #include <TopoDS.hxx>
 #include <XCAFDoc_VisMaterialPBR.hxx>
-#include <BRepBuilderAPI_GTransform.hxx>
 
 #if DEBUG // Cut475 phase diagnostics only
 #include <cstdio>
@@ -2817,13 +2816,12 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 && !record.previous.shape.IsEqual(record.requested.shape)
                 && _document->CaptureFaceColours(record.previous.label, 1.0, paintedLabels, paintedFaces)
                 && keepFaceLabelsOnly(paintedLabels);
-            if (carriesFaceColours && record.requested.faceColourMap) {
-                for (auto& painted : paintedFaces) {
-                    BRepBuilderAPI_GTransform moved(painted.first, *record.requested.faceColourMap, Standard_True);
-                    if (moved.IsDone() && !moved.Shape().IsNull() && moved.Shape().ShapeType() == TopAbs_FACE)
-                        painted.first = TopoDS::Face(moved.Shape());
-                }
-            }
+            // Each painted face's colour follows by points mapped through the size change; a lone
+            // painted face is never rebuilt (its GTransform crashed in OCCT NurbsConvert on an
+            // already converted face: lamp shade, builds 5 and 6, 17 Nov).
+            if (carriesFaceColours && record.requested.faceColourMap)
+                paintedFaces = _document->ResizedFaceColours(record.requested.shape,
+                    *record.requested.faceColourMap, paintedFaces);
             if ((!featureStaged && !treatmentStagedR2 && !record.previous.shape.IsEqual(record.requested.shape)
                     && (record.requested.operation == OrdinaryTransformOperation::MeshSolidConversion
                         // ReplaceShape keeps the representation; Make solid alone changes it.
