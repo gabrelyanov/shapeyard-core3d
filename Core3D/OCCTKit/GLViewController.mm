@@ -3346,6 +3346,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         // every unowned committed presentation and picker tolerance are proven
         // canonical. OutcomeUnknown was rejected above; unrelated same-enum
         // drift still enters the normal cancellation-and-repair path.
+        _viewer->clearMeasureMeshPicks();
         return Core3DSelectionTypeChangeResultSucceeded;
     }
 
@@ -3420,6 +3421,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     // are verified. Reconcile the selection-dependent manipulator immediately,
     // including same-enum authority repair, before publishing public state.
     objectInteractor->attachManipulatorToSelection(false);
+    _viewer->clearMeasureMeshPicks();
     [self requestRender];
     return Core3DSelectionTypeChangeResultSucceeded;
 }
