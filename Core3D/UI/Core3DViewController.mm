@@ -246,6 +246,8 @@ unsigned long long Core3DDebugColdOpenCandidateProbeValue(
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <SelectMgr_SelectableObject.hxx>
+#include <SelectMgr_Selection.hxx>
+#include <SelectMgr_SensitiveEntity.hxx>
 #include <Precision.hxx>
 #include <StdSelect_BRepOwner.hxx>
 
@@ -5663,7 +5665,52 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     }
     // Founder test, build 8545: a colour put on a pocket floor showed only after the project
     // was reopened. Draw the parts again from the document, as reopening does.
+    // The redraw replaces every part's drawing and so drops the picked faces: More > Color
+    // right after a face material then had nothing to colour (CTO 17 Nov 12:47). Pick the
+    // same faces again on the new drawings, found by the part's label and the face's
+    // place in the part's face list.
+    std::vector<std::pair<TDF_Label, Standard_Integer>> repicks;
+    for (const auto& style : pending) {
+        TopTools_IndexedMapOfShape oldFaces;
+        if (!style.presentation->Shape().IsNull())
+            TopExp::MapShapes(style.presentation->Shape(), TopAbs_FACE, oldFaces);
+        const Standard_Integer index = oldFaces.FindIndex(style.face);
+        if (index > 0) repicks.emplace_back(style.root, index);
+    }
     (void)viewer->redrawDocument();
+    if (!repicks.empty()) {
+        try {
+            OCC_CATCH_SIGNALS
+            AIS_ListOfInteractive shown;
+            context->DisplayedObjects(AIS_KOI_Shape, -1, shown);
+            for (AIS_ListIteratorOfListOfInteractive it(shown); it.More(); it.Next()) {
+                const auto drawn = Handle(AIS_Shape)::DownCast(it.Value());
+                if (drawn.IsNull() || drawn->Shape().IsNull()) continue;
+                const auto label = doc->ShapeLabel(drawn);
+                if (label.IsNull()) continue;
+                TopTools_IndexedMapOfShape faces;
+                bool mapped = false;
+                for (const auto& pick : repicks) {
+                    if (!pick.first.IsEqual(label)) continue;
+                    if (!mapped) { TopExp::MapShapes(drawn->Shape(), TopAbs_FACE, faces); mapped = true; }
+                    if (pick.second > faces.Extent()) continue;
+                    const TopoDS_Shape& face = faces.FindKey(pick.second);
+                    const Handle(SelectMgr_Selection)& selection =
+                        drawn->Selection(AIS_Shape::SelectionMode(TopAbs_FACE));
+                    if (selection.IsNull()) continue;
+                    for (const auto& sensitive : selection->Entities()) {
+                        if (sensitive.IsNull() || sensitive->BaseSensitive().IsNull()) continue;
+                        const auto owner = Handle(StdSelect_BRepOwner)::DownCast(
+                            sensitive->BaseSensitive()->OwnerId());
+                        if (owner.IsNull() || !owner->HasShape() || !owner->Shape().IsSame(face)) continue;
+                        if (!context->IsSelected(owner)) context->AddOrRemoveSelected(owner, Standard_False);
+                        break;
+                    }
+                }
+            }
+        } catch (...) {
+        }
+    }
     [self.materialController didChangeSelectionWithMaterials:@[] colors:@[]];
     [self.materialController didChangeSelectionWithPBRMaterials:values];
     context->UpdateCurrentViewer();
