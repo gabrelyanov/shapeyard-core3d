@@ -3929,6 +3929,119 @@ static Core3DAgentCopyResult core3dAgentLineIntervals(const TopoDS_Shape& world,
     } catch (...) { intervals.clear(); return Core3DAgentCopyResult::Unavailable; }
 }
 
+// measure_distance / measure_angle (CTO 16 Nov 17:48). Both reach 0.5 mm from a
+// requested world-mm point onto the part's exact (mesh-free) topology.
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRep_Tool.hxx>
+#include <TopoDS.hxx>
+
+static constexpr double kCore3DAgentReachMM = 0.5;
+
+// Nearest distance (model units) from `point` to one edge or face, NaN if unknown.
+// A bounding box enlarged by `reach` skips sub-shapes that cannot be within reach.
+static double core3dAgentDistanceTo(const TopoDS_Vertex& probe, const gp_Pnt& point,
+    const TopoDS_Shape& part, double reach, gp_Pnt* nearest) {
+    Bnd_Box box; BRepBndLib::Add(part, box, Standard_False);
+    if (box.IsVoid()) return std::numeric_limits<double>::quiet_NaN();
+    box.Enlarge(reach);
+    if (box.IsOut(point)) return std::numeric_limits<double>::infinity();
+    BRepExtrema_DistShapeShape extrema(probe, part);
+    if (!extrema.IsDone() || extrema.NbSolution() < 1) return std::numeric_limits<double>::quiet_NaN();
+    const double value = extrema.Value();
+    if (nearest != nullptr) *nearest = extrema.PointOnShape2(1);
+    return value;
+}
+
+// The requested point taken onto the part: the nearest corner within reach, else
+// the nearest point of an edge within reach, else of a face within reach; two
+// different nearest places on one level are Ambiguous.
+static Core3DAgentMeasurementStatus core3dAgentTakeOntoPart(const TopoDS_Shape& world, double mm,
+    const double pointMM[3], gp_Pnt& taken, NSString * __strong *kind) noexcept {
+    try {
+        *kind = nil;
+        if (world.IsNull() || !std::isfinite(mm) || mm <= 0) return Core3DAgentMeasurementStatusUnavailable;
+        const gp_Pnt point(pointMM[0] / mm, pointMM[1] / mm, pointMM[2] / mm);
+        const double reach = kCore3DAgentReachMM / mm;
+        if (!std::isfinite(point.X()) || !std::isfinite(point.Y()) || !std::isfinite(point.Z())
+            || !std::isfinite(reach)) return Core3DAgentMeasurementStatusUnavailable;
+        TopTools_IndexedMapOfShape vertices, edges, faces;
+        TopExp::MapShapes(world, TopAbs_VERTEX, vertices);
+        TopExp::MapShapes(world, TopAbs_EDGE, edges);
+        TopExp::MapShapes(world, TopAbs_FACE, faces);
+        // Two different places equally near (within 0.000001 mm) on one level are no one
+        // answer: Ambiguous, never whichever corner, edge or face the map lists first.
+        const double tie = 1.0e-6 / mm;
+        double best = std::numeric_limits<double>::infinity();
+        bool ambiguous = false;
+        const auto consider = [&](double d, const gp_Pnt& at) {
+            if (!std::isfinite(d) || d > reach) return;
+            if (d < best - tie) { best = d; taken = at; ambiguous = false; }
+            else if (at.Distance(taken) > tie) ambiguous = true;
+        };
+        for (int i = 1; i <= vertices.Extent(); ++i) {
+            const gp_Pnt corner = BRep_Tool::Pnt(TopoDS::Vertex(vertices(i)));
+            consider(point.Distance(corner), corner);
+        }
+        if (std::isfinite(best)) {
+            if (ambiguous) return Core3DAgentMeasurementStatusAmbiguous;
+            *kind = @"vertex"; return Core3DAgentMeasurementStatusMeasured;
+        }
+        const TopoDS_Vertex probe = BRepBuilderAPI_MakeVertex(point).Vertex();
+        const std::pair<TopTools_IndexedMapOfShape *, NSString *> levels[] = {{&edges, @"edge"}, {&faces, @"face"}};
+        for (const auto& level : levels) {
+            for (int i = 1; i <= level.first->Extent(); ++i) {
+                const TopoDS_Shape& part = (*level.first)(i);
+                if (part.ShapeType() == TopAbs_EDGE && BRep_Tool::Degenerated(TopoDS::Edge(part))) continue;
+                gp_Pnt nearest;
+                const double d = core3dAgentDistanceTo(probe, point, part, reach, &nearest);
+                if (std::isnan(d)) return Core3DAgentMeasurementStatusUnavailable;
+                consider(d, nearest);
+            }
+            if (std::isfinite(best)) {
+                if (ambiguous) return Core3DAgentMeasurementStatusAmbiguous;
+                *kind = level.second; return Core3DAgentMeasurementStatusMeasured;
+            }
+        }
+        return Core3DAgentMeasurementStatusUnavailable;
+    } catch (...) { *kind = nil; return Core3DAgentMeasurementStatusUnavailable; }
+}
+
+// The one face within reach of the requested point, flat, with its outward unit
+// normal. Two or more flat faces within reach: Ambiguous; a curved face within
+// reach or none at all: Unavailable.
+static Core3DAgentMeasurementStatus core3dAgentFlatFaceAt(const TopoDS_Shape& world, double mm,
+    const double pointMM[3], int& faceIndex, gp_Dir& normal) noexcept {
+    try {
+        faceIndex = 0;
+        if (world.IsNull() || !std::isfinite(mm) || mm <= 0) return Core3DAgentMeasurementStatusUnavailable;
+        const gp_Pnt point(pointMM[0] / mm, pointMM[1] / mm, pointMM[2] / mm);
+        const double reach = kCore3DAgentReachMM / mm;
+        if (!std::isfinite(point.X()) || !std::isfinite(point.Y()) || !std::isfinite(point.Z())
+            || !std::isfinite(reach)) return Core3DAgentMeasurementStatusUnavailable;
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(world, TopAbs_FACE, faces);
+        const TopoDS_Vertex probe = BRepBuilderAPI_MakeVertex(point).Vertex();
+        int found = 0; bool curved = false;
+        for (int i = 1; i <= faces.Extent(); ++i) {
+            const double d = core3dAgentDistanceTo(probe, point, faces(i), reach, nullptr);
+            if (std::isnan(d)) return Core3DAgentMeasurementStatusUnavailable;
+            if (d > reach) continue;
+            const TopoDS_Face face = TopoDS::Face(faces(i));
+            const BRepAdaptor_Surface surface(face, Standard_True);
+            if (surface.GetType() != GeomAbs_Plane) { curved = true; continue; }
+            ++found;
+            faceIndex = i;
+            normal = surface.Plane().Axis().Direction();
+            if (face.Orientation() == TopAbs_REVERSED) normal.Reverse();
+        }
+        if (curved || found == 0) { faceIndex = 0; return Core3DAgentMeasurementStatusUnavailable; }
+        if (found > 1) { faceIndex = 0; return Core3DAgentMeasurementStatusAmbiguous; }
+        return Core3DAgentMeasurementStatusMeasured;
+    } catch (...) { faceIndex = 0; return Core3DAgentMeasurementStatusUnavailable; }
+}
+
 static bool core3dAgentVector3(NSArray<NSNumber *> *values, double out[3]) {
     if (![values isKindOfClass:NSArray.class] || values.count != 3) return false;
     for (NSUInteger i = 0; i < 3; ++i) {
@@ -3962,6 +4075,28 @@ static bool core3dAgentVector3(NSArray<NSNumber *> *values, double out[3]) {
                                      originMM:(NSArray<NSNumber *> *)originMM
                            requestedDirection:(NSArray<NSNumber *> *)requestedDirection
                                   intervalsMM:(NSArray<NSArray<NSNumber *> *> *)intervalsMM;
+@end
+
+@interface Core3DAgentDistanceMeasurement (Core3DEngineProducer)
+- (instancetype)initCore3DUnmeasured:(Core3DAgentMeasurementStatus)status;
+- (instancetype)initCore3DMeasuredWithSource:(Core3DAgentMeasurementSource *)source
+                              probeIdentifier:(NSString *)probeIdentifier
+                            requestedPointAMM:(NSArray<NSNumber *> *)requestedA
+                            requestedPointBMM:(NSArray<NSNumber *> *)requestedB
+                                     pointAMM:(NSArray<NSNumber *> *)pointA
+                                     pointBMM:(NSArray<NSNumber *> *)pointB
+                                        snapA:(NSString *)snapA snapB:(NSString *)snapB
+                                   distanceMM:(double)distanceMM;
+@end
+@interface Core3DAgentAngleMeasurement (Core3DEngineProducer)
+- (instancetype)initCore3DUnmeasured:(Core3DAgentMeasurementStatus)status;
+- (instancetype)initCore3DMeasuredWithSource:(Core3DAgentMeasurementSource *)source
+                              probeIdentifier:(NSString *)probeIdentifier
+                                 faceAPointMM:(NSArray<NSNumber *> *)faceAPoint
+                                 faceBPointMM:(NSArray<NSNumber *> *)faceBPoint
+                                  faceANormal:(NSArray<NSNumber *> *)faceANormal
+                                  faceBNormal:(NSArray<NSNumber *> *)faceBNormal
+                                 angleDegrees:(double)angleDegrees;
 @end
 
 @interface Core3DViewController () {
@@ -16946,6 +17081,84 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
     return [[Core3DAgentLineSectionMeasurement alloc] initCore3DMeasuredWithSource:source
         probeIdentifier:probeIdentifier originMM:@[@(origin[0]), @(origin[1]), @(origin[2])]
         requestedDirection:@[@(along[0]), @(along[1]), @(along[2])] intervalsMM:result];
+}
+
+// measure_distance (method occtExtremaDistance): both points taken onto the part,
+// then the straight distance between them in mm.
+- (Core3DAgentDistanceMeasurement *)agentMeasureDistanceOfEntityIdentifier:(NSString *)entityIdentifier
+    targetAlias:(NSString *)targetAlias documentIdentifier:(NSString *)documentIdentifier
+    sourceSHA256:(NSString *)sourceSHA256 probeIdentifier:(NSString *)probeIdentifier
+    pointAMM:(NSArray<NSNumber *> *)pointAMM pointBMM:(NSArray<NSNumber *> *)pointBMM
+    expected:(Core3DSceneSnapshot *)expected {
+    double a[3] = {0, 0, 0}, b[3] = {0, 0, 0};
+    if (![probeIdentifier isKindOfClass:NSString.class] || probeIdentifier.length == 0
+        || probeIdentifier.length > 128 || !core3dAgentVector3(pointAMM, a) || !core3dAgentVector3(pointBMM, b))
+        return [[Core3DAgentDistanceMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusUnavailable];
+    Core3DAgentMeasurementSource *source = nil;
+    TopoDS_Shape local, world; double mm = 0; std::size_t nodes = 0;
+    const auto status = [self core3d_agentMeasureEntity:entityIdentifier targetAlias:targetAlias
+        documentIdentifier:documentIdentifier sourceSHA256:sourceSHA256 method:@"occtExtremaDistance"
+        expected:expected source:&source local:&local world:&world millimetresPerUnit:&mm topologyNodes:&nodes];
+    if (status != Core3DAgentMeasurementStatusMeasured || source == nil)
+        return [[Core3DAgentDistanceMeasurement alloc] initCore3DUnmeasured:status];
+    gp_Pnt takenA, takenB; NSString *snapA = nil, *snapB = nil;
+    const auto statusA = core3dAgentTakeOntoPart(world, mm, a, takenA, &snapA);
+    if (statusA != Core3DAgentMeasurementStatusMeasured || snapA == nil)
+        return [[Core3DAgentDistanceMeasurement alloc] initCore3DUnmeasured:statusA];
+    const auto statusB = core3dAgentTakeOntoPart(world, mm, b, takenB, &snapB);
+    if (statusB != Core3DAgentMeasurementStatusMeasured || snapB == nil)
+        return [[Core3DAgentDistanceMeasurement alloc] initCore3DUnmeasured:statusB];
+    const double distance = takenA.Distance(takenB) * mm;
+    NSArray<NSNumber *> *onA = @[@(takenA.X() * mm), @(takenA.Y() * mm), @(takenA.Z() * mm)];
+    NSArray<NSNumber *> *onB = @[@(takenB.X() * mm), @(takenB.Y() * mm), @(takenB.Z() * mm)];
+    for (NSNumber *value in [onA arrayByAddingObjectsFromArray:onB])
+        if (!std::isfinite(value.doubleValue))
+            return [[Core3DAgentDistanceMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusUnavailable];
+    if (!std::isfinite(distance))
+        return [[Core3DAgentDistanceMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusUnavailable];
+    return [[Core3DAgentDistanceMeasurement alloc] initCore3DMeasuredWithSource:source
+        probeIdentifier:probeIdentifier
+        requestedPointAMM:@[@(a[0]), @(a[1]), @(a[2])] requestedPointBMM:@[@(b[0]), @(b[1]), @(b[2])]
+        pointAMM:onA pointBMM:onB snapA:snapA snapB:snapB distanceMM:distance];
+}
+
+// measure_angle (method occtPlanarAngle): the angle between the planes of two
+// different flat faces, 0...90 degrees, as Measure shows it for two faces.
+- (Core3DAgentAngleMeasurement *)agentMeasureAngleOfEntityIdentifier:(NSString *)entityIdentifier
+    targetAlias:(NSString *)targetAlias documentIdentifier:(NSString *)documentIdentifier
+    sourceSHA256:(NSString *)sourceSHA256 probeIdentifier:(NSString *)probeIdentifier
+    faceAPointMM:(NSArray<NSNumber *> *)faceAPointMM faceBPointMM:(NSArray<NSNumber *> *)faceBPointMM
+    expected:(Core3DSceneSnapshot *)expected {
+    double a[3] = {0, 0, 0}, b[3] = {0, 0, 0};
+    if (![probeIdentifier isKindOfClass:NSString.class] || probeIdentifier.length == 0
+        || probeIdentifier.length > 128 || !core3dAgentVector3(faceAPointMM, a) || !core3dAgentVector3(faceBPointMM, b))
+        return [[Core3DAgentAngleMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusUnavailable];
+    Core3DAgentMeasurementSource *source = nil;
+    TopoDS_Shape local, world; double mm = 0; std::size_t nodes = 0;
+    const auto status = [self core3d_agentMeasureEntity:entityIdentifier targetAlias:targetAlias
+        documentIdentifier:documentIdentifier sourceSHA256:sourceSHA256 method:@"occtPlanarAngle"
+        expected:expected source:&source local:&local world:&world millimetresPerUnit:&mm topologyNodes:&nodes];
+    if (status != Core3DAgentMeasurementStatusMeasured || source == nil)
+        return [[Core3DAgentAngleMeasurement alloc] initCore3DUnmeasured:status];
+    int faceA = 0, faceB = 0; gp_Dir normalA, normalB;
+    const auto statusA = core3dAgentFlatFaceAt(world, mm, a, faceA, normalA);
+    if (statusA != Core3DAgentMeasurementStatusMeasured)
+        return [[Core3DAgentAngleMeasurement alloc] initCore3DUnmeasured:statusA];
+    const auto statusB = core3dAgentFlatFaceAt(world, mm, b, faceB, normalB);
+    if (statusB != Core3DAgentMeasurementStatusMeasured)
+        return [[Core3DAgentAngleMeasurement alloc] initCore3DUnmeasured:statusB];
+    if (faceA == faceB)
+        return [[Core3DAgentAngleMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusUnavailable];
+    const double dot = std::clamp(std::abs(normalA.Dot(normalB)), 0.0, 1.0);
+    const double degrees = std::acos(dot) * 180.0 / M_PI;
+    if (!std::isfinite(degrees) || degrees < 0 || degrees > 90)
+        return [[Core3DAgentAngleMeasurement alloc] initCore3DUnmeasured:Core3DAgentMeasurementStatusUnavailable];
+    return [[Core3DAgentAngleMeasurement alloc] initCore3DMeasuredWithSource:source
+        probeIdentifier:probeIdentifier
+        faceAPointMM:@[@(a[0]), @(a[1]), @(a[2])] faceBPointMM:@[@(b[0]), @(b[1]), @(b[2])]
+        faceANormal:@[@(normalA.X()), @(normalA.Y()), @(normalA.Z())]
+        faceBNormal:@[@(normalB.X()), @(normalB.Y()), @(normalB.Z())]
+        angleDegrees:degrees];
 }
 // AGENT MEASURE (measure lane) END
 
