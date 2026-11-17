@@ -22454,6 +22454,25 @@ extern "C" double Core3DDebugMeasureAnglePairProbe(int pair) {
             [@{ @"selectedCount": @(topology.size()) } mutableCopy];
         Core3DMeasureAddDocumentUnit(viewer, result);
         const Handle(V3d_View)& view = viewer->ActiveView();
+        if (topology.empty()) {
+            // A part that is still an imported mesh has no edges: its tapped corners are the picks.
+            const auto corners = viewer->measureMeshPicks();
+            if (!corners.empty()) {
+                const gp_Pnt a = corners.front().node, b = corners.back().node;
+                result[@"selectedCount"] = @(corners.size());
+                if (corners.size() == 2) {
+                    const double distance = a.Distance(b);
+                    if (!std::isfinite(distance)) return result;
+                    result[@"distance"] = @(distance);
+                }
+                result[@"ax"] = @(a.X()); result[@"ay"] = @(a.Y()); result[@"az"] = @(a.Z());
+                result[@"bx"] = @(b.X()); result[@"by"] = @(b.Y()); result[@"bz"] = @(b.Z());
+                result[@"snapKindA"] = @1;
+                if (corners.size() == 2) result[@"snapKindB"] = @1;
+                Core3DMeasureProjection(view, topology, a, b, result);
+                return result;
+            }
+        }
         const auto picks = viewer->measurePicksForCurrentSelection();
         std::vector<TopoDS_Shape> elements;
         Core3DMeasureSnap snaps[2];
