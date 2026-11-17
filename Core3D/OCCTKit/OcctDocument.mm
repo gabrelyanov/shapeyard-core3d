@@ -3101,6 +3101,7 @@ bool ValidateAttachmentRigDocument(
 #include <Standard_ErrorHandler.hxx>
 #include <TopExp.hxx>
 #include <gp_GTrsf.hxx>
+#include <XCAFDoc_ShapeMapTool.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Pln.hxx>
@@ -13455,7 +13456,7 @@ Standard_Boolean OcctDocument::CarryFaceColours(const TDF_Label& target, const T
         tags->Set(highWater);
         std::vector<OcctPBRMaterialUpdate> updates;
         for (const auto& [face, material] : MatchFaceLooks(result, faces, eitherWay)) {
-            if (!shapes->IsSubShape(target, face)) return Standard_False;
+            if (!IsFaceOfCurrentShape(target, face)) return Standard_False;
             const TDF_Label label = shapes->AddSubShape(target, face);
             if (label.IsNull()) return Standard_False;
             updates.push_back({label, material, Handle(Image_Texture)(), Handle(Image_Texture)()});
@@ -20470,6 +20471,27 @@ Standard_Boolean OcctDocument::IsPresentationEditable(
         || aCafPresentation->IsEditablePresentation();
 }
 
+Standard_Boolean OcctDocument::IsFaceOfCurrentShape(
+    const TDF_Label& root, const TopoDS_Shape& face) const noexcept {
+    try {
+        if (myOcafDoc.IsNull() || root.IsNull() || face.IsNull() || face.ShapeType() != TopAbs_FACE
+            || root.Data() != myOcafDoc->GetData()) return Standard_False;
+        const Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
+        if (shapes.IsNull()) return Standard_False;
+        if (shapes->IsSubShape(root, face)) return Standard_True;
+        const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(root);
+        if (shape.IsNull()) return Standard_False;
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(shape, TopAbs_FACE, faces);
+        if (faces.FindIndex(face) == 0) return Standard_False;
+        if (myOcafDoc->HasOpenCommand()) {
+            Handle(XCAFDoc_ShapeMapTool) map;
+            if (root.FindAttribute(XCAFDoc_ShapeMapTool::GetID(), map) && !map.IsNull()) map->SetShape(shape);
+        }
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
 Standard_Boolean OcctDocument::IsEditableFreeSimpleDefinitionLabel(
     const TDF_Label& label) const {
     if (myOcafDoc.IsNull() || label.IsNull()
@@ -22695,7 +22717,7 @@ std::shared_ptr<const OcctPBRColourPreparation> OcctDocument::PreparePBRColourPa
             auto sourceLabel=label;
             if(!faces.empty()){
                 if(endpoint.face.IsNull()||endpoint.face.ShapeType()!=TopAbs_FACE
-                    ||!shapes->IsSubShape(endpoint.root,endpoint.face))return {};
+                    ||!IsFaceOfCurrentShape(endpoint.root,endpoint.face))return {};
                 TDF_Label actual;shapes->FindSubShape(endpoint.root,endpoint.face,actual);
                 if(!actual.IsEqual(label))return {};
                 for(std::size_t j=0;j<index;++j)
@@ -22784,7 +22806,7 @@ bool OcctDocument::StagePBRColourPatch(const std::shared_ptr<const OcctPBRColour
             if(PBRMaterialBytes(target.material,bytes)!=target.bytes)return refused(__LINE__);
             if(!target.face.IsNull()){
                 TDF_Label actual;shapes->FindSubShape(target.root,target.face,actual);
-                if(!actual.IsEqual(target.label)||!shapes->IsSubShape(target.root,target.face))return refused(__LINE__);
+                if(!actual.IsEqual(target.label)||!IsFaceOfCurrentShape(target.root,target.face))return refused(__LINE__);
                 if(target.label.IsNull()){
                     if(reservedRoots.insert(PBRLabelKey(target.root)).second){
                         // FindChild legacy fields need not advance TagSource.

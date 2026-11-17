@@ -2524,6 +2524,11 @@ public:
     //! False for a read-only XCAF component occurrence.
     Standard_Boolean IsPresentationEditable(
         Handle(AIS_InteractiveObject) object) const;
+    //! Is `face` (definition-local) a face of `root`'s current shape? After an Undo a part's cached
+    //! face map can still describe the undone shape (phone stand fault 2, Fable review F2), so the
+    //! shape itself decides. Inside an open command a stale cache is rebuilt, so FindSubShape and
+    //! AddSubShape can label the face. Never opens or commits a command.
+    Standard_Boolean IsFaceOfCurrentShape(const TDF_Label& root, const TopoDS_Shape& face) const noexcept;
     //! True only for a free, simple, whole XCAF definition label. Material
     //! authoring uses this stricter gate in addition to AIS editability.
     Standard_Boolean IsEditableFreeSimpleDefinitionLabel(
