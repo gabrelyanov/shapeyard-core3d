@@ -1633,6 +1633,14 @@ __attribute__((objc_subclassing_restricted))
                           expectedSnapshot:
                               (Core3DTransformInspectorSnapshot *)snapshot
     NS_SWIFT_NAME(commitTransformInspectorRotation(_:axis:expected:));
+//! Edit one component of displayedEulerXYZDegrees. Use this together with that
+//! readback in By numbers; the canonical rotation API keeps its old semantics.
+- (Core3DTransformInspectorPositionCommitResult)
+    commitTransformInspectorDisplayedRotationValue:(double)value
+        axis:(Core3DTransformInspectorAxis)axis
+        expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot
+    NS_SWIFT_NAME(commitTransformInspectorDisplayedRotation(_:axis:expected:));
+
 
 //! Set an absolute signed uniform scale factor, dimensionless. Magnitude must
 //! be greater than OCCT confusion tolerance and at most 1,000,000. Uses the
@@ -2557,6 +2565,13 @@ __attribute__((objc_subclassing_restricted))
 - (NSDictionary<NSString *, id> *)debugSelectAtWorldPointX:(double)x y:(double)y z:(double)z
     NS_SWIFT_NAME(debugSelectAtWorldPoint(x:y:z:));
 //! Replay native touch begin/cancel/select with UIKit's rounded projected pixel.
+//! Adds every part of an app-created import document (a Core3DNativeImportResult's primaryURL)
+//! to the open model as one creation (one Undo removes them all). Returns how many parts were
+//! added; 0 when nothing could be added (the model is unchanged).
+- (NSInteger)insertPartsFromImportedDocumentAtURL:(NSURL *)url
+    NS_SWIFT_NAME(insertPartsFromImportedDocument(at:));
+//! DEBUG probe: which guard last refused a face colour or material ("none" when it went through).
+- (NSString *)debugLastFacePBRRefusal;
 - (NSDictionary<NSString *, id> *)debugTapAtWorldPointX:(double)x y:(double)y z:(double)z
     NS_SWIFT_NAME(debugTapAtWorldPoint(x:y:z:));
 //! Replay a reported camera eye without changing its direction or any model/selection state.
@@ -2657,6 +2672,10 @@ __attribute__((objc_subclassing_restricted))
 //! reject both operations without changing document or selection state.
 - (void)debugInvokeNativeSelectAll;
 - (void)debugInvokeNativeDeleteSelected;
+//! Delete: 1 partial stage, 2 throw after commit, 3 commit/first-abort open,
+//! 4 two unavailable post-commit inspections. Zero clears the next fault.
+- (BOOL)debugConfigureNativeDeleteFault:(NSInteger)mode;
+- (NSInteger)debugNativeDeleteStagedRootCount;
 //! Direct native gizmo access for cache-reconciliation regressions. Setting the
 //! native value deliberately leaves the public cached tool untouched.
 - (PrimitiveGizmoType)debugNativeGizmoType;

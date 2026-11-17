@@ -13,6 +13,7 @@
 #include <gp_Pnt.hxx>
 #include <gp_Vec.hxx>
 #include <atomic>
+#include <limits>
 #include <memory>
 
 namespace core3d::spatial_sweep {
@@ -54,9 +55,17 @@ inline bool Step(const Handle(Adaptor3d_Curve)& curve,double a,double b,const Fr
 inline bool Append(const Handle(Adaptor3d_Curve)& curve,double a,double b,const Frame& start,
                    double tolerance,double range,std::uint32_t depth,std::vector<BishopTableNode>& nodes,
                    double& length,double& accumulated,std::size_t& leaves,const std::atomic_bool* cancelled){
-    if(cancelled&&cancelled->load())return false;PreparedSegment whole;if(!Step(curve,a,b,start,whole))return false;
-    const double mid=(a+b)/2;PreparedSegment left,right;if(!Step(curve,a,mid,start,left)||!Step(curve,mid,b,left.finish,right))return false;
-    const double defect=Angle(whole.finish.e1,right.finish.e1)+std::abs(whole.length-left.length-right.length)/std::max(1.0,left.length+right.length);
+    if(cancelled&&cancelled->load())return false;
+    // Round 1 K15: a span whose end tangent points straight back along its
+    // start tangent (the bottom of a U-shaped guide) has no single minimal
+    // rotation, so the span's one-step estimate cannot be formed. That says
+    // nothing about the guide: the span is split like any span whose estimate
+    // is too coarse. A guide that really stalls still refuses at the depth and
+    // leaf budget below; every span that could be estimated before is accepted
+    // or split exactly as before.
+    PreparedSegment whole,left,right;const double mid=(a+b)/2;
+    const bool estimated=Step(curve,a,b,start,whole)&&Step(curve,a,mid,start,left)&&Step(curve,mid,b,left.finish,right);
+    const double defect=estimated?Angle(whole.finish.e1,right.finish.e1)+std::abs(whole.length-left.length-right.length)/std::max(1.0,left.length+right.length):std::numeric_limits<double>::infinity();
     // One global budget for the whole path: each cell owns a deterministic
     // parameter-width share of it, and a cell whose defect would exceed the
     // remaining global allowance is refined locally instead of consuming it.

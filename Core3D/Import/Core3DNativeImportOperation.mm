@@ -2541,8 +2541,14 @@ void ImportSTL(
 
 constexpr std::size_t kOBJVertexStride = 8 * sizeof(float);
 constexpr std::size_t kOBJIndexStride = sizeof(std::uint32_t);
-constexpr std::size_t kMaximumOBJVertices = 600'000;
-constexpr std::size_t kMaximumOBJIndices = 600'000;
+// N05 (17 Nov 2026): the same ceiling as STL import (kMaximumSTLTriangles,
+// 250,000 triangles = 750,000 corners). At 200,000 triangles the app could not
+// read back its own Fine OBJ of a 225,688-triangle model whose STL imported.
+// The app's OBJ decoder holds the same two numbers
+// (ModelEditorOBJParser.Limits.nativeImport): change both together.
+constexpr std::size_t kMaximumOBJVertices = 750'000;
+constexpr std::size_t kMaximumOBJIndices = 750'000;
+static_assert(kMaximumOBJIndices == kMaximumSTLTriangles * 3);
 
 Core3DNativeImportMesh *DecodeOBJ(
     const std::shared_ptr<NativeImportState>& state,
@@ -2621,7 +2627,7 @@ void ImportOBJ(
     if (vertexCount > kMaximumOBJVertices || indexCount > kMaximumOBJIndices) {
         throw NativeImportFailure(
             Core3DNativeImportErrorResourceLimit,
-            "OBJ import supports up to 600,000 vertices and 200,000 triangles.");
+            "OBJ import supports up to 750,000 vertices and 250,000 triangles.");
     }
     if (indexCount % 3 != 0
         || vertexCount > std::numeric_limits<std::size_t>::max() / kOBJVertexStride

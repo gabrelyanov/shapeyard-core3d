@@ -24,6 +24,8 @@
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
+#include <BinTools.hxx>
+#include <cstring>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRep_Tool.hxx>
 #include <Poly_ListOfTriangulation.hxx>
@@ -585,6 +587,52 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 				return Standard_False;
 			}
 		}
+
+        // An ordinary mirrored body owns new geometry but has no recipe binding.
+        // Bring that private result through the same binary axis reconstruction
+        // as a saved file before publishing it. In particular gp_Ax3 readback
+        // can change the sign of zero after a reflection. Raw face witnesses
+        // and their digests remain exact; no comparison is normalised.
+        // Non-axis-aligned frames can cycle under kernel reconstruction. This
+        // is an optional preparation, not a new Mirror admission requirement:
+        // on failure the original private result is left completely untouched.
+        Standard_Boolean StabilizeOrdinaryMirrorResult(
+            TopoDS_Shape& theShape, Standard_Size theMaximumNodes) noexcept {
+            try {
+                Standard_Size originalNodes = 0;
+                if (!CountBoundedMirrorTopology(theShape, theMaximumNodes, originalNodes))
+                    return Standard_False;
+                std::string previous;
+                TopoDS_Shape candidate = theShape;
+                for (int pass = 0; pass < 4; ++pass) {
+                    // Reuse the engine's bounded binary geometry buffer (8 MiB),
+                    // without entering retained-treatment replay or its gates.
+                    retained_edge_treatment::detail::GeometryBuffer buffer;
+                    std::ostream writer(&buffer);
+                    BinTools::Write(candidate, writer, Standard_False, Standard_False,
+                                    BinTools_FormatVersion_VERSION_4);
+                    if (!writer.good() || buffer.size() == 0) return Standard_False;
+                    if (!previous.empty() && previous.size() == buffer.size()
+                        && std::memcmp(previous.data(), buffer.data(), buffer.size()) == 0) {
+                        theShape = candidate;
+                        return Standard_True;
+                    }
+                    previous.assign(buffer.data(), buffer.size());
+                    buffer.read();
+                    std::istream reader(&buffer);
+                    TopoDS_Shape restored;
+                    BinTools::Read(restored, reader);
+                    Standard_Size restoredNodes = 0;
+                    if (!reader.good() || restored.IsNull()
+                        || restored.ShapeType() != theShape.ShapeType()
+                        || restored.Orientation() != theShape.Orientation()
+                        || !CountBoundedMirrorTopology(restored, theMaximumNodes, restoredNodes)
+                        || restoredNodes != originalNodes) return Standard_False;
+                    candidate = restored;
+                }
+            } catch (...) {}
+            return Standard_False;
+        }
 
 		//! Build the same deterministic, first-occurrence face ordering as
 		//! TopExp::MapShapes using an explicit depth-first walk. Every topology
@@ -1402,53 +1450,113 @@ Standard_Boolean DuplicateFaceFinishesMatch(
         }
     }
 
+    struct PendingObjectDeletion {
+        OrdinaryEditCommandStamp command;
+        std::shared_ptr<ordinary_naming::Record> naming;
+        std::vector<std::pair<Handle(AIS_InteractiveObject), TDF_Label>> removals;
+        bool settled = false, committed = false;
+    };
+
+    bool ObjectInteractor::hasUnresolvedDeletion() const noexcept {
+        return _pendingDeletion != nullptr;
+    }
+
+    bool ObjectInteractor::reconcileDeletion() noexcept {
+        if (!_pendingDeletion) return true;
+        if (_reconcilingDeletion || myDoc.IsNull() || myContext.IsNull()) return false;
+        _reconcilingDeletion = true;
+        struct Exit { bool& value; ~Exit() { value = false; } } exit{_reconcilingDeletion};
+        const auto pending = _pendingDeletion;
+        try {
+            if (!pending->settled) {
+                auto observation = pending->command.observe();
+                if (observation == OrdinaryCommandObservation::OpenOwned)
+                    observation = pending->command.abortAndObserve();
+                if (observation != OrdinaryCommandObservation::ClosedWithPriorMarker
+                    && observation != OrdinaryCommandObservation::ClosedWithCandidateMarker) return false;
+                pending->committed = observation == OrdinaryCommandObservation::ClosedWithCandidateMarker;
+                if (!myDoc->SettleOrdinaryNamingHistory(pending->naming, pending->committed)) return false;
+                pending->settled = true;
+            } else if (!myDoc->SettleOrdinaryNamingHistory(pending->naming, pending->committed)) {
+                // A presentation retry must not adopt a later foreign delta.
+                return false;
+            }
+            if (pending->committed) {
+                detachManipulator(false);
+                for (const auto& removal : pending->removals)
+                    myContext->Remove(removal.first, Standard_False);
+                myContext->UpdateCurrentViewer();
+            }
+            if (!pending->command.releaseClosed()) return false;
+            // Keep recovery ownership through synchronous observers; they
+            // cannot start another edit or replace this interactor mid-publish.
+            if (pending->committed) {
+                try { myDoc->NotifyChanges(); } catch (...) {}
+            }
+            _pendingDeletion.reset();
+            return true;
+        } catch (...) { return false; }
+    }
+
     void ObjectInteractor::deleteSelected() {
-        if (hasUnresolvedEdit()) { return; }
-        if (_manipulator.IsNull() || !_manipulator->IsAttached()) { return; }
-		auto doc = myDoc->ChangeDocument();
-		if (doc.IsNull() || doc->HasOpenCommand()) { return; }
-
-        Handle(Core3DManipulatorObjectSequence) objects = _manipulator->Objects();
-		std::vector<std::pair<Handle(AIS_InteractiveObject), TDF_Label>> removals;
-        for (Core3DManipulatorObjectSequence::Iterator it(*objects); it.More(); it.Next()) {
-			const TDF_Label label = myDoc->ShapeLabel(it.Value());
-			if (label.IsNull()
-				|| !myDoc->IsPresentationEditable(it.Value())
-				|| !myDoc->IsEditableFreeSimpleDefinitionLabel(label)
-				|| myDoc->GeometryRepresentationForLabel(label)
-					== OcctGeometryRepresentation::Invalid) {
-				return;
-			}
-			for (const auto& removal : removals) {
-				if (removal.second.IsEqual(label)) { return; }
-			}
-			removals.push_back({it.Value(), label});
+        if (hasUnresolvedEdit()) return;
+        if (_manipulator.IsNull() || !_manipulator->IsAttached()) return;
+        const auto doc = myDoc->ChangeDocument();
+        if (doc.IsNull() || doc->HasOpenCommand()) return;
+        try {
+            auto pending = std::make_shared<PendingObjectDeletion>();
+            std::vector<TDF_Label> roots;
+            const auto objects = _manipulator->Objects();
+            for (Core3DManipulatorObjectSequence::Iterator it(*objects); it.More(); it.Next()) {
+                const TDF_Label label = myDoc->ShapeLabel(it.Value());
+                if (label.IsNull() || !myDoc->IsPresentationEditable(it.Value())
+                    || !myDoc->IsEditableFreeSimpleDefinitionLabel(label)
+                    || myDoc->GeometryRepresentationForLabel(label) == OcctGeometryRepresentation::Invalid)
+                    return;
+                for (const auto& prior : roots) if (prior.IsEqual(label)) return;
+                roots.push_back(label);
+                pending->removals.push_back({it.Value(), label});
+            }
+            if (roots.empty()) return;
+            pending->naming = myDoc->PrepareOrdinaryRemovalNamingHistory(roots);
+            if (!pending->naming) return;
+#if DEBUG
+            const int fault = std::exchange(_debugDeleteFailureMode, 0);
+            if (fault == 2) pending->command.debugSetCommitMode(4); // throws after close
+            if (fault == 3) {
+                pending->command.debugSetCommitMode(2); // throws with command open
+                pending->command.debugSetAbortMode(1); // first Abort fails open
+            }
+            if (fault == 4) pending->command.debugSetPostCommitInspectionFailureCount(2);
+#endif
+            // Retain before NewCommand; its outcome can be unknown even when
+            // begin throws or cannot inspect the transaction it just opened.
+            _pendingDeletion = pending;
+            const auto began = pending->command.begin(myDoc);
+            if (began != OrdinaryCommandBeginResult::Started) {
+                if (!pending->command.isRetained()
+                    && myDoc->SettleOrdinaryNamingHistory(pending->naming, Standard_False))
+                    _pendingDeletion.reset();
+                else (void)reconcileDeletion();
+                return;
+            }
+            bool staged = true;
+            for (const auto& removal : pending->removals) {
+                if (!myDoc->RemoveShape(removal.second)) { staged = false; break; }
+#if DEBUG
+                ++_debugDeleteStagedRootCount;
+                if (fault == 1) { staged = false; break; }
+#endif
+            }
+            if (staged) staged = myDoc->CaptureOrdinaryNamingCandidate(pending->naming);
+            if (staged) (void)pending->command.commitAndObserve();
+            else (void)pending->command.abortAndObserve();
+            (void)reconcileDeletion();
+        } catch (...) {
+            // Reconciliation may abort only the exact retained command. A
+            // foreign/open/unreadable state remains fenced with its ledger.
+            (void)reconcileDeletion();
         }
-		if (removals.empty()) { return; }
-
-		try {
-			doc->NewCommand();
-			for (const auto& removal : removals) {
-				if (!myDoc->RemoveShape(removal.second)) {
-					doc->AbortCommand();
-					return;
-				}
-			}
-			if (!doc->CommitCommand()) {
-				if (doc->HasOpenCommand()) { doc->AbortCommand(); }
-				return;
-			}
-		} catch (...) {
-			if (doc->HasOpenCommand()) { doc->AbortCommand(); }
-			return;
-		}
-
-		detachManipulator(false);
-		for (const auto& removal : removals) {
-			myContext->Remove(removal.first, Standard_False);
-		}
-		myDoc->NotifyChanges();
-        myContext->UpdateCurrentViewer();
     }
 
 	ObjectInteractor::DuplicateDocumentState
@@ -1856,27 +1964,39 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                 return std::any_of(sourceLabels.begin(), sourceLabels.end(), [&](const auto& source) { return source.IsEqual(label); });
             });
         };
-        const auto belongsToFullySelectedSavedGroup = [&](const TDF_Label& label) {
-            return std::any_of(groupBefore.groups.begin(), groupBefore.groups.end(), [&](const auto& group) {
-                return fullySelected(group) && std::any_of(group.members.begin(), group.members.end(),
-                    [&](const auto& member) { return member.IsEqual(label); });
-            });
-        };
         const auto activeGroups = std::count_if(groupBefore.groups.begin(), groupBefore.groups.end(), [](const auto& g) { return !g.members.empty(); });
         const auto copiedGroups = std::count_if(groupBefore.groups.begin(), groupBefore.groups.end(), fullySelected);
         if (activeGroups + copiedGroups > 128) { return; }
 
         Bnd_Box overallBox;
-        for (const DuplicateSource& source : sources) {
-            Bnd_Box b;
-            source.presentation->BoundingBox(b);
-            if (b.IsVoid()) { return; }
-            if(overallBox.IsVoid()) {
-                overallBox = b;
-            } else {
+        try {
+            for (const DuplicateSource& source : sources) {
+                Bnd_Box b;
+                const gp_Trsf transform = source.presentation->LocalTransformation();
+                if (source.representation == OcctGeometryRepresentation::TriangleMesh) {
+                    for (TopExp_Explorer faces(source.ownerShape, TopAbs_FACE); faces.More(); faces.Next()) {
+                        TopLoc_Location location;
+                        const auto mesh = BRep_Tool::Triangulation(TopoDS::Face(faces.Current()), location);
+                        if (mesh.IsNull()) { return; }
+                        for (int node = 1; node <= mesh->NbNodes(); ++node) {
+                            auto point = mesh->Node(node).Transformed(location.Transformation());
+                            point.Transform(transform);
+                            if (!IsFiniteBoundedPoint(point)) { return; }
+                            b.Add(point);
+                        }
+                    }
+                } else {
+                    // Measure the part as it stands, not a rotated local AABB
+                    // or presentation bounds enlarged for drawing tolerances.
+                    BRepBuilderAPI_Transform world(source.ownerShape, transform,
+                                                   Standard_True, Standard_False);
+                    if (!world.IsDone() || world.Shape().IsNull()) { return; }
+                    BRepBndLib::AddOptimal(world.Shape(), b, Standard_False, Standard_False);
+                }
+                if (b.IsVoid() || b.IsOpen()) { return; }
                 overallBox.Add(b);
             }
-        }
+        } catch (...) { return; }
 
 		if (overallBox.IsVoid()) { return; }
 		
@@ -1890,25 +2010,18 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 			return;
 		}
         
-        gp_Trsf minAxisDisplacement;
-		const Standard_Real aMinimumExtent = Precision::Confusion();
-		gp_Vec aDisplacement;
-		if (w > aMinimumExtent && d > aMinimumExtent) {
-			aDisplacement = w > d
-				? gp_Vec(0.0, d, 0.0)
-				: gp_Vec(w, 0.0, 0.0);
-		} else if (w > aMinimumExtent) {
-			aDisplacement = gp_Vec(w, 0.0, 0.0);
-		} else if (d > aMinimumExtent) {
-			aDisplacement = gp_Vec(0.0, d, 0.0);
-		} else if (h > aMinimumExtent) {
-			aDisplacement = gp_Vec(0.0, 0.0, h);
-		} else {
-			// Keep a point-sized legacy BRep visibly separate without risking
-			// the document coordinate bound.
-			aDisplacement = gp_Vec(10.0, 0.0, 0.0);
-		}
-		minAxisDisplacement.SetTranslation(aDisplacement);
+        // Keep the legacy one-width spacing, measured after the selected
+        // parts' scale and rotation. Translate along world X with a 1 mm floor.
+        // A selected set moves together so its relative layout is preserved.
+        double metersPerUnit = 0;
+        bool hasLengthUnit = false;
+        if (!ReadMirrorDocumentUnits(doc, metersPerUnit, hasLengthUnit)) { return; }
+        const double nudge = std::max(w, 0.001 / metersPerUnit);
+        if (!std::isfinite(nudge) || nudge <= 0.0
+            || nudge > limits::kMaximumModelCoordinateMagnitude) { return; }
+        const gp_Vec aDisplacement(nudge, 0.0, 0.0);
+        gp_Trsf worldDisplacement;
+        worldDisplacement.SetTranslation(aDisplacement);
         
 		std::vector<DuplicatePendingResult> duplicates;
         core3d::retained_edge_treatment::ReplayBudget treatmentBudget;
@@ -1941,13 +2054,9 @@ Standard_Boolean DuplicateFaceFinishesMatch(
                 if (source.sweepLoft.family
                         == pattern_recipe_clone::Family::AnalyticBoolean
                     && !pattern_recipe_clone::IsProperRigidPlacement(sourceTransform)) return;
-                // A complete saved group is one assembly operation: apply the
-                // admitted bounds displacement in document/world space so
-                // heterogeneous member transforms preserve their layout.
-                // Partial and ungrouped duplication retain existing behavior.
-                copy->SetLocalTransformation(belongsToFullySelectedSavedGroup(source.label)
-                    ? minAxisDisplacement.Multiplied(sourceTransform)
-                    : sourceTransform.Multiplied(minAxisDisplacement));
+                // Apply the same world translation to every selected part,
+                // including partial groups, preserving their relative layout.
+                copy->SetLocalTransformation(worldDisplacement.Multiplied(sourceTransform));
 				myDoc->LoadObjectMeterial(source.label, copy);
                 DuplicatePendingResult duplicate;
                 duplicate.presentation = copy;
@@ -3856,7 +3965,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
     }
 
     bool ObjectInteractor::hasUnresolvedEdit() const noexcept {
-        return hasUnresolvedDuplicate() || blocksForOrdinaryEdit();
+        return hasUnresolvedDeletion() || hasUnresolvedDuplicate() || blocksForOrdinaryEdit();
     }
 
     bool ObjectInteractor::blocksForOrdinaryEdit() const noexcept {
@@ -5494,18 +5603,33 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                 anAggregateTopologyNodes += retainedEnclosureNodes;
             }
 
-			gp_Pnt offset = theWorldPlane.Location();
-			gp_Dir mirrorAxis = theWorldPlane.Direction();
-			gp_Dir mirrorPln = theWorldPlane.XDirection();
-			
-			mirrorAxis.Transform(aTrsfSelected.Inverted());
-			mirrorPln.Transform(aTrsfSelected.Inverted());
-			offset.Transform(aTrsfSelected.Inverted());
-
-			gp_Trsf aTrsfMirror;
-			aTrsfMirror.SetMirror(gp_Ax2(offset, mirrorAxis, mirrorPln));
-			const gp_Trsf aBakedTransform =
-				aTrsfSelected * aTrsfMirror;
+            // Keep the reflected placement separate from every copied definition.
+            // With J a fixed local-X reflection and M the world-plane reflection,
+            // (M * T * J) * (J * S) == M * T * S. Recipe frames, retained bindings
+            // and treatment replay all receive J; By numbers receives M * T * J.
+            // The source signed scale and reflected origin remain editable, and
+            // later recipe edits still use the same frozen world reflection.
+            gp_Trsf aBakedTransform;
+            aBakedTransform.SetMirror(gp_Ax2(gp_Pnt(0, 0, 0),
+                gp_Dir(1, 0, 0), gp_Dir(0, 1, 0)));
+            gp_Trsf aWorldReflection;
+            aWorldReflection.SetMirror(theWorldPlane);
+            gp_Trsf anOccurrenceTransform = aWorldReflection
+                * aTrsfSelected * aBakedTransform;
+            // Sweep/loft Mirror is unavailable in the production capability
+            // layer. Leave its existing internal frame contract unchanged.
+            if (sweepLoft.family != pattern_recipe_clone::Family::None) {
+                gp_Pnt offset = theWorldPlane.Location();
+                gp_Dir mirrorAxis = theWorldPlane.Direction();
+                gp_Dir mirrorPln = theWorldPlane.XDirection();
+                mirrorAxis.Transform(aTrsfSelected.Inverted());
+                mirrorPln.Transform(aTrsfSelected.Inverted());
+                offset.Transform(aTrsfSelected.Inverted());
+                gp_Trsf aTrsfMirror;
+                aTrsfMirror.SetMirror(gp_Ax2(offset, mirrorAxis, mirrorPln));
+                aBakedTransform = aTrsfSelected * aTrsfMirror;
+                anOccurrenceTransform = gp_Trsf();
+            }
             if (!originalProfile.label.IsNull()) {
                 gp_Trsf originalFrame;
                 if (originalProfile.parameters.constructionFrame
@@ -5534,7 +5658,16 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                         && sweepLoft.family == pattern_recipe_clone::Family::None
                         ? Standard_False : Standard_True,
 				    Standard_False);
-			    aShapePrs = new AIS_Shape(aBRepTrsf.Shape());
+                TopoDS_Shape mirrored = aBRepTrsf.Shape();
+                if (originalProfile.label.IsNull() && originalEnclosure.label.IsNull()
+                    && sweepLoft.family == pattern_recipe_clone::Family::None) {
+                    // Retain existing rotated Mirror behavior if the bounded
+                    // persistence probe cannot prove a stable replacement.
+                    // All ordinary source/result gates below still apply.
+                    (void)StabilizeOrdinaryMirrorResult(mirrored,
+                        anAggregateLimit - anAggregateTopologyNodes);
+                }
+                aShapePrs = new AIS_Shape(mirrored);
             }
             TopoDS_Shape preparedProfileBinding;
             std::string profileIdentifier;
@@ -5609,6 +5742,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                         || retained.Shape().IsPartner(originalProfile.boundShape)
                         || retained.Shape().IsPartner(aShapePrs->Shape())
                         || !IsShapeWithinModelCoordinates(retained.Shape())
+                        || !IsShapeWithinModelCoordinates(retained.Shape(), anOccurrenceTransform)
                         || !IsTopologicallyValid(retained.Shape())
                         || !CountBoundedMirrorTopology(retained.Shape(), anAggregateLimit - anAggregateTopologyNodes, nodes)
                         || nodes != retainedProfileNodes) return Standard_False;
@@ -5616,9 +5750,15 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                     preparedProfileBinding = retained.Shape();
                 }
             }
+            // Treated profiles construct their replay presentation later than
+            // ordinary copies; both must carry the same occurrence authority.
+            if (!aShapePrs.IsNull())
+                aShapePrs->SetLocalTransformation(anOccurrenceTransform);
 			Standard_Size resultNodeCount = 0;
 			if (aShapePrs.IsNull() || aShapePrs->Shape().IsNull()
 				|| !IsShapeWithinModelCoordinates(aShapePrs->Shape())
+                || !IsShapeWithinModelCoordinates(aShapePrs->Shape(),
+                    aShapePrs->Transformation())
 				|| !CountBoundedMirrorTopology(
 					aShapePrs->Shape(),
 					anAggregateLimit - anAggregateTopologyNodes,
@@ -5644,6 +5784,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
                         || retained.Shape().IsPartner(originalEnclosure.boundShape)
                         || retained.Shape().IsPartner(aShapePrs->Shape())
                         || !IsShapeWithinModelCoordinates(retained.Shape())
+                        || !IsShapeWithinModelCoordinates(retained.Shape(), anOccurrenceTransform)
                         || !IsTopologicallyValid(retained.Shape())
                         || !CountBoundedMirrorTopology(retained.Shape(), anAggregateLimit - anAggregateTopologyNodes, nodes)
                         || nodes != retainedEnclosureNodes) return Standard_False;
@@ -5676,6 +5817,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 				sourceStoredShape,
 				aTrsfSelected,
 				aBakedTransform,
+                anOccurrenceTransform,
 				aSourceReferenceAxisState,
 				aSourceReferenceAxis,
                 profileOwner,
@@ -6254,6 +6396,7 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 				Bnd_Box aPreviewBox;
 				BRepBndLib::Add(
 					aPreview->Shape(), aPreviewBox, Standard_False);
+                aPreviewBox = aPreviewBox.Transformed(aPreview->Transformation());
 				// Moving a reflection plane by t moves the reflected result by
 				// 2*t along its normal. The current preview supplies the exact
 				// reference AABB at _mirrorPlaneOffset.
@@ -7049,6 +7192,10 @@ bool ObjectInteractor::repairCommittedMeshCopyPresentation(const OrdinaryCreatio
 				}
 				anAggregateNodes += aSourceNodes;
 				if (!myContext->IsDisplayed(aResult)
+                    || TransformDiffers(aResult->LocalTransformation(),
+                        aSource.resultTransform)
+                    || !IsShapeWithinModelCoordinates(aResult->Shape(),
+                        aResult->Transformation())
 					|| !CountBoundedMirrorTopology(
 						aResult->Shape(),
 						anAggregateLimit - anAggregateNodes,

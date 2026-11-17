@@ -35,6 +35,7 @@
                       position:(simd_double3)position
                 quaternionXYZW:(simd_double4)quaternionXYZW
       canonicalEulerXYZDegrees:(simd_double3)canonicalEulerXYZDegrees
+      displayedEulerXYZDegrees:(simd_double3)displayedEulerXYZDegrees
                   uniformScale:(double)uniformScale
                  metersPerUnit:(double)metersPerUnit
             localBoundsMinimum:(simd_double3)localBoundsMinimum
@@ -65,6 +66,7 @@ const double Core3DTransformInspectorMaximumPositionMagnitude =
                       position:(simd_double3)position
                 quaternionXYZW:(simd_double4)quaternionXYZW
       canonicalEulerXYZDegrees:(simd_double3)canonicalEulerXYZDegrees
+      displayedEulerXYZDegrees:(simd_double3)displayedEulerXYZDegrees
                   uniformScale:(double)uniformScale
                  metersPerUnit:(double)metersPerUnit
             localBoundsMinimum:(simd_double3)localBoundsMinimum
@@ -89,6 +91,7 @@ const double Core3DTransformInspectorMaximumPositionMagnitude =
         _position = position;
         _quaternionXYZW = quaternionXYZW;
         _canonicalEulerXYZDegrees = canonicalEulerXYZDegrees;
+        _displayedEulerXYZDegrees = displayedEulerXYZDegrees;
         _uniformScale = uniformScale;
         _metersPerUnit = metersPerUnit;
         _localBoundsMinimum = localBoundsMinimum;
@@ -200,6 +203,7 @@ Core3DTransformInspectorSnapshot *Core3DMakeStateSnapshot(
         position:zero3
         quaternionXYZW:(simd_double4){0.0, 0.0, 0.0, 1.0}
         canonicalEulerXYZDegrees:zero3
+        displayedEulerXYZDegrees:zero3
         uniformScale:1.0
         metersPerUnit:0.0
         localBoundsMinimum:zero3
@@ -524,6 +528,12 @@ Core3DTransformInspectorSnapshot *Core3DCreateTransformInspectorSnapshotDTO(
             || !Core3DQuaternionMatchesEuler(
                 measurement.quaternion,
                 measurement.extrinsicXYZDegrees)
+            || !Core3DIsFinite(measurement.displayedXYZDegrees)
+            || std::abs(measurement.displayedXYZDegrees.x) > core3d::limits::kMaximumModelCoordinateMagnitude
+            || std::abs(measurement.displayedXYZDegrees.y) > core3d::limits::kMaximumModelCoordinateMagnitude
+            || std::abs(measurement.displayedXYZDegrees.z) > core3d::limits::kMaximumModelCoordinateMagnitude
+            || !Core3DQuaternionMatchesEuler(
+                measurement.quaternion, measurement.displayedXYZDegrees)
             || !std::isfinite(measurement.uniformScale)
             || measurement.uniformScale == 0.0
             || !std::isfinite(measurement.metersPerUnit)
@@ -576,6 +586,8 @@ Core3DTransformInspectorSnapshot *Core3DCreateTransformInspectorSnapshotDTO(
                                           measurement.quaternion.w}
             canonicalEulerXYZDegrees:
                 Core3DMakeDouble3(measurement.extrinsicXYZDegrees)
+            displayedEulerXYZDegrees:
+                Core3DMakeDouble3(measurement.displayedXYZDegrees)
             uniformScale:measurement.uniformScale
             metersPerUnit:measurement.metersPerUnit
             localBoundsMinimum:boundsMinimum

@@ -4,6 +4,7 @@
 #include "../OCCTKit/DecalLayerPersistence.hxx"
 #include "../OCCTKit/DecalLayerBake.hxx"
 #include "../OCCTKit/OcctDocument.h"
+#include "../OCCTKit/PatternAllLabelAuthority.hxx"
 #include "../OCCTKit/EnclosurePersistence.hxx"
 #include "../Scene/OcctSceneSnapshotBuilder.hpp"
 #import "../Viewport/Core3DSceneSnapshotFactory.hpp"
@@ -70,6 +71,7 @@
 #include <UnitsMethods.hxx>
 #include <UnitsMethods_LengthUnit.hxx>
 #include <XCAFDoc_ColorTool.hxx>
+#include <XCAFDoc_LayerTool.hxx>
 #include <XCAFDoc_ColorType.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
@@ -278,6 +280,12 @@ public:
             throw NativeExportFailure(Core3DNativeExportErrorWriterFailed,
                 "The OBJ position staging file could not be opened.");
         }
+        // Export lane rule (17 Nov): OBJ is the document's units with Y up, the
+        // axis Blender, Unity and Roblox read, so a part stands as modelled.
+        // Shapeyard is Z up: (x, y, z) is written as (x, z, -y). Units are
+        // left as they are (no scale); positions, staged doubles and normals convert.
+        ChangeCoordinateSystemConverter().SetInputCoordinateSystem(RWMesh_CoordinateSystem_Zup);
+        ChangeCoordinateSystemConverter().SetOutputCoordinateSystem(RWMesh_CoordinateSystem_Yup);
     }
 
     // OCCT's context narrows positions to Float and prints six fractional
@@ -1417,6 +1425,10 @@ bool ApplyPrivateExportTransforms(
 
 bool BinarySTLFacetHasZeroArea(
     const std::array<float, 9>& vertices) noexcept {
+    // An exact-zero test: the compiler must not fuse a*b - c*d into one
+    // rounding, or two equal edges give a cross product of 8e-22 instead of 0
+    // and a facet with two identical corners is written (desk lamp rivets, K22).
+#pragma clang fp contract(off)
     const double firstToSecondX =
         static_cast<double>(vertices[3]) - vertices[0];
     const double firstToSecondY =
@@ -2545,6 +2557,19 @@ void MeshPrivateExportSurfaces(
     } else {
         whole.Next(4).Close();
     }
+    // Desk lamp E-MID (17 Nov): at Viewport quality the private document keeps
+    // the display mesh, which carries the same collapsed fillet-corner
+    // triangles; leave them out here too, as the presets, STL, FBX and USDZ do.
+    if (state->meshQuality == Core3DExportMeshQualityViewport) {
+        const Standard_Integer removedViewport = RemoveCollapsedExportTriangles(compound, state);
+#if DEBUG
+        if (removedViewport > 0) {
+            NSLog(@"[NativeExportMeshDiagnostic] removedCollapsedViewportTriangles=%d", removedViewport);
+        }
+#else
+        (void)removedViewport;
+#endif
+    }
     ThrowIfCancelled(state);
 
     if (state->meshQuality != Core3DExportMeshQualityViewport) {
@@ -2764,12 +2789,45 @@ NativeExportResult RunNativeExport(
         }
         TDF_LabelSequence rootLabels;
         std::set<std::string> matchedSelectedIdentifiers;
+        // A part the user hid (its own visibility, a hidden layer, or a
+        // suppressed Repeat copy) is left out, by the viewer's own rule
+        // (OcctViewer EffectiveVisibility), as FBX and USDZ already do from
+        // the scene's visible render items. Selected exports admit only
+        // visible parts before this point.
+        Handle(XCAFDoc_LayerTool) layerTool;
+        if (XCAFDoc_DocumentTool::CheckLayerTool(ocafDocument->Main())) {
+            layerTool = XCAFDoc_DocumentTool::LayerTool(ocafDocument->Main());
+        }
+        core3d::pattern_owner::RetainedPresentationIndex retainedPresentation;
+        if (!state->usesSelectedRoots
+            && !core3d::pattern_owner::CaptureRetainedPresentationIndex(
+                ocafDocument, retainedPresentation)) {
+            throw NativeExportFailure(
+                Core3DNativeExportErrorInvalidState,
+                "The hidden parts of this model could not be read.");
+        }
+        const auto isShownPart = [&](const TDF_Label& label) -> bool {
+            bool layersVisible = true;
+            TDF_LabelSequence layers;
+            if (!layerTool.IsNull() && layerTool->GetLayers(label, layers)) {
+                for (TDF_LabelSequence::Iterator layer(layers); layer.More(); layer.Next()) {
+                    if (!layerTool->IsVisible(layer.Value())) { layersVisible = false; break; }
+                }
+            }
+            return core3d::pattern_owner::EffectiveVisibility(
+                XCAFDoc_ColorTool::IsVisible(label) == Standard_True, layersVisible,
+                core3d::pattern_owner::StateForEntityIdentifier(
+                    retainedPresentation, document->EntityIdentifierForLabel(label)));
+        };
         for (Standard_Integer index = 1;
              index <= freeLabels.Length();
              ++index) {
             ThrowIfCancelled(state);
             const TDF_Label& label = freeLabels.Value(index);
             if (shapeTool->GetShape(label).IsNull()) {
+                continue;
+            }
+            if (!state->usesSelectedRoots && !isShownPart(label)) {
                 continue;
             }
             if (state->usesSelectedRoots) {
@@ -3528,7 +3586,8 @@ bool DebugMeshSavedGroupPrivateSurfaces(const TopoDS_Shape& shape) noexcept {
 
     std::set<std::string> selectedIdentifiers;
     if (selectedEntityIdentifiers != nil) {
-        if ((exportType != ExportTypeStl && exportType != ExportTypeObj && exportType != ExportTypeGltf)
+        if ((exportType != ExportTypeStl && exportType != ExportTypeObj && exportType != ExportTypeGltf
+                && exportType != ExportTypeStep)
             || selectedEntityIdentifiers.count == 0
             || selectedEntityIdentifiers.count > 50'000) {
             return nil;
@@ -3889,6 +3948,13 @@ bool DebugMeshSavedGroupPrivateSurfaces(const TopoDS_Shape& shape) noexcept {
 
 + (void)debugE4EvictSharedCache {
     core3d::decal_layer::bake::publication::DebugEvictAll();
+}
+
++ (BOOL)debugBinarySTLFacetHasZeroArea:(NSArray<NSNumber *> *)corners {
+    if (corners.count != 9) return NO;
+    std::array<float, 9> values{};
+    for (NSUInteger index = 0; index < 9; ++index) values[index] = corners[index].floatValue;
+    return BinarySTLFacetHasZeroArea(values);
 }
 
 + (NSDictionary<NSString *, id> *)debugParametricSTLRefinement:(double)metersPerUnit {

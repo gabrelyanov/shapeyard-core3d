@@ -536,6 +536,29 @@ __attribute__((objc_subclassing_restricted))
     radius:(double)radius depth:(double)depth
     refusal:(NSString * _Nullable * _Nullable)refusal
     NS_SWIFT_NAME(applyThroughHole(entity:pointX:y:z:directionX:y:z:radius:depth:refusal:));
+//! Round holes of a part, read from its solid (a Hole needs no record to be found):
+//! one entry per hole, world coordinates and document units,
+//! [px, py, pz, dx, dy, dz, radius, depth] (depth 0: through). Empty when it has none.
+- (NSArray<NSArray<NSNumber *> *> *)roundHolesOfEntity:(NSString *)entity
+    NS_SWIFT_NAME(roundHoles(entity:));
+//! Holes: repeat one round hole of the part in a row; `count` holes in all, `spacing`
+//! apart centre to centre (document units, negative turns the row round). The hole
+//! nearest to the given world point is repeated (NaN: the part's first hole). One Undo
+//! step. On refusal `refusal` gets the engine code (never shown to users): "no-hole",
+//! "holes-overlap", "row-leaves-part", "bad-values", "unsupported-source", ...
+- (BOOL)applyHoleRowOnEntity:(NSString *)entity
+    count:(NSInteger)count spacing:(double)spacing
+    nearX:(double)nx y:(double)ny z:(double)nz
+    refusal:(NSString * _Nullable * _Nullable)refusal
+    NS_SWIFT_NAME(applyHoleRow(entity:count:spacing:nearX:y:z:refusal:));
+//! Hole size for a round hole that has no saved-cut record: the same hole at `radius`
+//! (document units). One Undo step. Codes: "no-hole", "unchanged", "cannot-close",
+//! "hole-leaves-part", "holes-overlap", "bad-values", "unsupported-source", ...
+- (BOOL)applyHoleResizeOnEntity:(NSString *)entity
+    radius:(double)radius
+    nearX:(double)nx y:(double)ny z:(double)nz
+    refusal:(NSString * _Nullable * _Nullable)refusal
+    NS_SWIFT_NAME(applyHoleResize(entity:radius:nearX:y:z:refusal:));
 - (BOOL)hasBooleanPairPreview NS_SWIFT_NAME(hasBooleanPairPreview());
 //! Externally driven Stop for detached preparation. Once stopped, this exact
 //! opening can never prepare again and cannot affect a later opening.

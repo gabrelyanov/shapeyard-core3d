@@ -176,6 +176,10 @@ NS_SWIFT_SENDABLE
     NS_SWIFT_NAME(debugUseAbsoluteChord(mm:angleDegrees:initialInteriorControl:));
 + (NSDictionary<NSString *, id> *)debugParametricSTLRefinement:(double)metersPerUnit
     NS_SWIFT_NAME(debugParametricSTLRefinement(metersPerUnit:));
+//! The binary STL writer's flat-facet rule, for nine float corner coordinates
+//! (three corners x, y, z), so XCTest can feed it a facet read from a file.
++ (BOOL)debugBinarySTLFacetHasZeroArea:(NSArray<NSNumber *> *)corners
+    NS_SWIFT_NAME(debugBinarySTLFacetHasZeroArea(_:));
 //! Deterministic XCTest seam for proving that start/cancel never blocks the
 //! main run loop. Production builds do not expose or execute this barrier.
 + (void)debugSetWorkerPaused:(BOOL)paused

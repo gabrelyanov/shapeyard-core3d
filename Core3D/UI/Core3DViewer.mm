@@ -76,6 +76,7 @@
 #include "BRepAlgoAPI_Cut.hxx"
 #include "BRepAlgoAPI_Fuse.hxx"
 #include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_ColorTool.hxx>
 #include <XCAFDoc_LayerTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 #include <XCAFDoc_VisMaterial.hxx>
@@ -115,24 +116,26 @@ namespace {
 // timer, deadline, cancellation or native transaction is introduced here.
 class DebugHistoryCostScope final {
 public:
-    DebugHistoryCostScope(std::array<double, 10>& costs, std::size_t index) noexcept
+    DebugHistoryCostScope(std::array<double, 20>& costs, std::size_t index) noexcept
         : costs_([NSThread isMainThread] ? &costs : nullptr), index_(index),
           started_(std::chrono::steady_clock::now()) {}
-    ~DebugHistoryCostScope() noexcept {
+    ~DebugHistoryCostScope() noexcept { finish(); }
+    void finish() noexcept {
         if (!costs_) return;
         ++(*costs_)[index_];
         (*costs_)[index_ + 1] += std::chrono::duration<double>(
             std::chrono::steady_clock::now() - started_).count();
+        costs_ = nullptr;
     }
     DebugHistoryCostScope(const DebugHistoryCostScope&) = delete;
     DebugHistoryCostScope& operator=(const DebugHistoryCostScope&) = delete;
 private:
-    std::array<double, 10>* costs_;
+    std::array<double, 20>* costs_;
     std::size_t index_;
     std::chrono::steady_clock::time_point started_;
 };
 }
-std::array<double, 10> core3d::Core3DViewer::debugHistoryCostObservation() const noexcept {
+std::array<double, 20> core3d::Core3DViewer::debugHistoryCostObservation() const noexcept {
     if (![NSThread isMainThread]) return {};
     return _debugHistoryCosts;
 }
@@ -2806,6 +2809,69 @@ bool Core3DViewer::applyThroughHole(const std::string& entity, const gp_Pnt& wor
     }catch(...){refusal="invalid-result";return false;}
 }
 
+std::vector<std::vector<double>> Core3DViewer::roundHoles(const std::string& entity) noexcept {
+    std::vector<std::vector<double>> listed;
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()||entity.empty())return listed;
+    try{
+        OCC_CATCH_SIGNALS
+        Handle(AIS_Shape) presentation;TDF_Label label;
+        if(!FindEntityPresentation(myContext,myDoc,entity,presentation,label))return listed;
+        const gp_Trsf toWorld=presentation->LocalTransformation();
+        const double scale=std::abs(toWorld.ScaleFactor());
+        if(!(scale>0))return listed;
+        for(const auto& hole:myDoc->RoundHolesOfPart(label)){
+            if(hole.size()!=8)continue;
+            const gp_Pnt entry=gp_Pnt(hole[0],hole[1],hole[2]).Transformed(toWorld);
+            const gp_Dir into=gp_Dir(hole[3],hole[4],hole[5]).Transformed(toWorld);
+            listed.push_back({entry.X(),entry.Y(),entry.Z(),into.X(),into.Y(),into.Z(),
+                hole[6]*scale,hole[7]*scale});
+        }
+        return listed;
+    }catch(...){return {};}
+}
+
+bool Core3DViewer::applyHoleRow(const std::string& entity, int count, double spacing,
+    const gp_Pnt* worldNear, std::string& refusal) noexcept {
+    refusal="unsupported-source";
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()||entity.empty())return false;
+    try{
+        OCC_CATCH_SIGNALS
+        if(_booleanPairPreview)clearBooleanPairPreview();
+        Handle(AIS_Shape) presentation;TDF_Label label;
+        if(!FindEntityPresentation(myContext,myDoc,entity,presentation,label))return false;
+        const gp_Trsf toWorld=presentation->LocalTransformation();
+        const double scale=std::abs(toWorld.ScaleFactor());
+        if(!(scale>0))return false;
+        gp_Pnt localNear;
+        if(worldNear)localNear=worldNear->Transformed(toWorld.Inverted());
+        if(!myDoc->ApplyHoleRow(label,presentation,count,spacing/scale,
+            worldNear?&localNear:nullptr,refusal))return false;
+        redrawDocument();
+        return true;
+    }catch(...){refusal="invalid-result";return false;}
+}
+
+bool Core3DViewer::applyHoleResize(const std::string& entity, double radius,
+    const gp_Pnt* worldNear, std::string& refusal) noexcept {
+    refusal="unsupported-source";
+    if(![NSThread isMainThread]||myContext.IsNull()||myDoc.IsNull()||entity.empty())return false;
+    try{
+        OCC_CATCH_SIGNALS
+        if(_booleanPairPreview)clearBooleanPairPreview();
+        Handle(AIS_Shape) presentation;TDF_Label label;
+        if(!FindEntityPresentation(myContext,myDoc,entity,presentation,label))return false;
+        const gp_Trsf toWorld=presentation->LocalTransformation();
+        const double scale=std::abs(toWorld.ScaleFactor());
+        if(!(scale>0))return false;
+        gp_Pnt localNear;
+        if(worldNear)localNear=worldNear->Transformed(toWorld.Inverted());
+        if(!myDoc->ApplyHoleResize(label,presentation,radius/scale,
+            worldNear?&localNear:nullptr,refusal))return false;
+        redrawDocument();
+        return true;
+    }catch(...){refusal="invalid-result";return false;}
+}
+
 bool Core3DViewer::clearBooleanPairPreview(bool reselectTarget) noexcept {
     if(![NSThread isMainThread]||myContext.IsNull())return false;
     const auto state=std::move(_booleanPairPreview);
@@ -5287,7 +5353,8 @@ bool HasActiveOperationLedger(
 {
     try {
         if (theObjectInteractor != nullptr
-            && (theObjectInteractor->hasUnresolvedDuplicate()
+            && (theObjectInteractor->hasUnresolvedDeletion()
+                || theObjectInteractor->hasUnresolvedDuplicate()
                 || theObjectInteractor->isPickingMirrorPlane()
                 || theObjectInteractor->hasActiveBoolean()
                 || theObjectInteractor->hasUnresolvedBoolean()
@@ -6841,6 +6908,9 @@ std::shared_ptr<const native_opening::Fence>
 Core3DViewer::recaptureNativeOpeningFence(
     std::uint64_t contextIdentifier, std::uint32_t width, std::uint32_t height,
     const std::vector<std::string>& sourceReceipts) noexcept {
+#if DEBUG
+    DebugHistoryCostScope measured(_debugHistoryCosts, 18);
+#endif
     if (![NSThread isMainThread] || width == 0 || height == 0
         || !nativeOpeningReady(contextIdentifier)) {
 #if DEBUG
@@ -9384,6 +9454,9 @@ std::shared_ptr<NativeSolidWork> Core3DViewer::prepareEnclosureSolid(
 std::optional<StoredProfileSnapshot> Core3DViewer::storedProfileDefinition(
     const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
     std::uint32_t width, std::uint32_t height) noexcept {
+#if DEBUG
+    DebugHistoryCostScope measured(_debugHistoryCosts, 14);
+#endif
     if (![NSThread isMainThread] || !canBeginCommittedEdit() || myContext.IsNull()
         || myDoc.IsNull() || identity.entityIdentifier.empty() || width == 0 || height == 0) return {};
     try {
@@ -9586,6 +9659,9 @@ Standard_Boolean Core3DViewer::returnEdgeTreatmentTargetsToObjectMode(
 std::optional<StoredEnclosureSnapshot> Core3DViewer::storedEnclosureDefinition(
     const ObjectFrameIdentity& identity, std::uint64_t presentationRevision,
     std::uint32_t width, std::uint32_t height) noexcept {
+#if DEBUG
+    DebugHistoryCostScope measured(_debugHistoryCosts, 16);
+#endif
     if (![NSThread isMainThread] || !canBeginCommittedEdit() || myContext.IsNull()
         || myDoc.IsNull() || identity.entityIdentifier.empty() || width == 0 || height == 0) return {};
     try {
@@ -11213,6 +11289,7 @@ OrdinaryEditResult Core3DViewer::commitObjectAlignment(const std::shared_ptr<Obj
 
 bool Core3DViewer::hasUnresolvedOrdinaryEditExcludingQueuedLoad() const noexcept {
     return _documentReplacementWork != nullptr
+        || (_objectInteractor && _objectInteractor->hasUnresolvedDeletion())
         || (_ordinaryEditController != nullptr && _ordinaryEditController->blocksNormalWork());
 }
 bool Core3DViewer::hasUnresolvedOrdinaryEdit() const noexcept {
@@ -11249,6 +11326,9 @@ OrdinaryEditLease Core3DViewer::beginOrdinaryTransform(
 }
 OrdinaryEditResult Core3DViewer::reconcileOrdinaryEdit() noexcept {
     if (_queuedAssetLoadWork) return OrdinaryEditResult::Busy;
+    if (_objectInteractor && _objectInteractor->hasUnresolvedDeletion())
+        return _objectInteractor->reconcileDeletion() ? OrdinaryEditResult::NoChange
+            : OrdinaryEditResult::OutcomeUnknown;
     if (_documentReplacementWork) {
         return restoreDocumentReplacement() ? OrdinaryEditResult::NoChange : OrdinaryEditResult::OutcomeUnknown;
     }
@@ -11501,6 +11581,70 @@ OrdinaryEditResult Core3DViewer::publishCreatedPrimitives(
     auto lease = permit ? _ordinaryEditController->beginModelingCreation(requests,std::move(permit),&failure)
         : _ordinaryEditController->beginCreation(requests, &failure);
     return lease ? lease.stageAndCommit() : failure;
+}
+
+// Fault 3 (desk lamp, build 5): Import inside a project opened a NEW project. The parts of an
+// app-created import document (the native importer's BinXCAF result) are added to the open
+// model as ONE ordinary creation: one Undo removes them all; names are kept; a colour is kept
+// as its nearest named colour; lengths are scaled when the two documents' units differ.
+OrdinaryEditResult Core3DViewer::insertPartsFromImportedDocument(const std::string& path,
+                                                                 int& inserted) noexcept {
+    inserted = 0;
+    if (![NSThread isMainThread] || path.empty() || myDoc.IsNull() || !canBeginCommittedEdit())
+        return OrdinaryEditResult::Busy;
+    Handle(OcctDocument) source = new OcctDocument();
+    std::vector<OrdinaryCreationRequest> requests;
+    try {
+        if (!source->OpenPrivateExportSnapshot(path, Message_ProgressRange()))
+            return OrdinaryEditResult::Invalid;
+        struct Close { Handle(OcctDocument) doc; ~Close() { if (!doc.IsNull()) doc->ClosePrivateExportSnapshot(); } } close{source};
+        const auto document = source->Document();
+        if (document.IsNull()) return OrdinaryEditResult::Invalid;
+        const auto shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        const auto colors = XCAFDoc_DocumentTool::ColorTool(document->Main());
+        if (shapes.IsNull()) return OrdinaryEditResult::Invalid;
+        // XCAF length units in metres; a document without one (legacy) is in millimetres.
+        double sourceMeters = 0.001, targetMeters = 0.001;
+        if (!XCAFDoc_DocumentTool::GetLengthUnit(document, sourceMeters) || !(sourceMeters > 0)) sourceMeters = 0.001;
+        if (myDoc->Document().IsNull() || !XCAFDoc_DocumentTool::GetLengthUnit(myDoc->Document(), targetMeters)
+            || !(targetMeters > 0)) targetMeters = 0.001;
+        const double scale = sourceMeters > 0 && targetMeters > 0 && std::isfinite(sourceMeters / targetMeters)
+            ? sourceMeters / targetMeters : 1.0;
+        TDF_LabelSequence roots;
+        shapes->GetFreeShapes(roots);
+        if (roots.IsEmpty() || roots.Length() > 256) return OrdinaryEditResult::Invalid;
+        for (int index = 1; index <= roots.Length(); ++index) {
+            const TDF_Label label = roots.Value(index);
+            TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(label);
+            if (shape.IsNull()) continue;
+            if (std::abs(scale - 1.0) > 1e-12) {
+                gp_Trsf scaling;
+                scaling.SetScale(gp::Origin(), scale);
+                BRepBuilderAPI_Transform scaled(shape, scaling, Standard_True);
+                if (!scaled.IsDone() || scaled.Shape().IsNull()) return OrdinaryEditResult::Invalid;
+                shape = scaled.Shape();
+            }
+            OrdinaryCreationRequest request;
+            request.presentation = new AIS_ColoredShape(shape);
+            myContext->ApplyDefaultMaterial(request.presentation);
+            request.representation = source->StoredGeometryRepresentationForLabel(label);
+            if (request.representation != OcctGeometryRepresentation::TriangleMesh)
+                request.representation = OcctGeometryRepresentation::BRep;
+            Quantity_Color color;
+            if (!colors.IsNull() && (colors->GetColor(label, XCAFDoc_ColorSurf, color)
+                                     || colors->GetColor(label, XCAFDoc_ColorGen, color)))
+                request.color = color.Name();
+            Handle(TDataStd_Name) named;
+            if (label.FindAttribute(TDataStd_Name::GetID(), named) && !named.IsNull()
+                && named->Get().Length() > 0 && named->Get().Length() <= 128)
+                request.name = named->Get();
+            requests.push_back(std::move(request));
+        }
+    } catch (...) { return OrdinaryEditResult::Invalid; }
+    if (requests.empty()) return OrdinaryEditResult::Invalid;
+    const auto result = publishCreatedPrimitives(requests);
+    if (result == OrdinaryEditResult::Committed) inserted = int(requests.size());
+    return result;
 }
 
 bool Core3DViewer::admitMeshCopy(OrdinaryCreationLedger& ledger) noexcept {
@@ -13701,6 +13845,10 @@ AssetImportResult Core3DViewer::ImportCbf(const std::string& theFilename,
 			} catch (...) {}
 		}
 #endif
+		// Older empty files have no LayerTool until their first presentation.
+		// Install that display infrastructure on the isolated candidate, just as
+		// InitDoc does, before a saved baseline or an undoable Path can exist.
+		(void)XCAFDoc_DocumentTool::LayerTool(candidate->Main());
 		candidate->SetUndoLimit(OcctDocument::kNativeSessionUndoLimit);
 
 #if DEBUG
@@ -14730,11 +14878,15 @@ void Core3DViewer::setOrthoProjection(const OrthoProjectionType orthoType) {
 
         if (myView->Camera()->ProjectionType() != Graphic3d_Camera::Projection_Orthographic) {
             myView->Camera()->SetProjectionType(Graphic3d_Camera::Projection_Orthographic);
-			if (orthoType == OrthoProjectionTypeTop)
-				myView->Camera()->SetUp(gp::DX());
-			else if (orthoType == OrthoProjectionTypeBottom)
-				myView->Camera()->SetUp(-gp::DX());
         }
+        // Top and Bottom keep the up direction a fresh session shows (5.34.1),
+        // whether they come from the 3D view or from another flat view; it was
+        // set only on the first switch, so Top turned 90 degrees after a
+        // reopen (CTO 15 Nov 19:00, desk lamp fault 1).
+        if (orthoType == OrthoProjectionTypeTop)
+            myView->Camera()->SetUp(gp::DX());
+        else if (orthoType == OrthoProjectionTypeBottom)
+            myView->Camera()->SetUp(-gp::DX());
 
         myView->FitAll(0.2, Standard_False);
         myView->RedrawImmediate();
@@ -14968,6 +15120,7 @@ Core3DViewer::captureSceneSnapshot(
     scene::SceneSnapshotCaptureFailure* failureOut) noexcept {
 #if DEBUG
     DebugHistoryCostScope measured(_debugHistoryCosts, 0);
+    DebugHistoryCostScope admission(_debugHistoryCosts, 10);
 #endif
     if (failureOut != nullptr) *failureOut = {};
     if ((_nativeOpeningState && _nativeOpeningState->loftRollbackUnproven)
@@ -15062,6 +15215,10 @@ Core3DViewer::captureSceneSnapshot(
         case ShapeSelectionMode::Wire:
             return {};
     }
+#if DEBUG
+    admission.finish();
+    DebugHistoryCostScope build(_debugHistoryCosts, 12);
+#endif
     return _sceneSnapshotBuilder.Build(
         myDoc,
         myContext,
