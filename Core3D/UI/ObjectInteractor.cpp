@@ -1450,76 +1450,113 @@ Standard_Boolean DuplicateFaceFinishesMatch(
         }
     }
 
+    struct PendingObjectDeletion {
+        OrdinaryEditCommandStamp command;
+        std::shared_ptr<ordinary_naming::Record> naming;
+        std::vector<std::pair<Handle(AIS_InteractiveObject), TDF_Label>> removals;
+        bool settled = false, committed = false;
+    };
+
+    bool ObjectInteractor::hasUnresolvedDeletion() const noexcept {
+        return _pendingDeletion != nullptr;
+    }
+
+    bool ObjectInteractor::reconcileDeletion() noexcept {
+        if (!_pendingDeletion) return true;
+        if (_reconcilingDeletion || myDoc.IsNull() || myContext.IsNull()) return false;
+        _reconcilingDeletion = true;
+        struct Exit { bool& value; ~Exit() { value = false; } } exit{_reconcilingDeletion};
+        const auto pending = _pendingDeletion;
+        try {
+            if (!pending->settled) {
+                auto observation = pending->command.observe();
+                if (observation == OrdinaryCommandObservation::OpenOwned)
+                    observation = pending->command.abortAndObserve();
+                if (observation != OrdinaryCommandObservation::ClosedWithPriorMarker
+                    && observation != OrdinaryCommandObservation::ClosedWithCandidateMarker) return false;
+                pending->committed = observation == OrdinaryCommandObservation::ClosedWithCandidateMarker;
+                if (!myDoc->SettleOrdinaryNamingHistory(pending->naming, pending->committed)) return false;
+                pending->settled = true;
+            } else if (!myDoc->SettleOrdinaryNamingHistory(pending->naming, pending->committed)) {
+                // A presentation retry must not adopt a later foreign delta.
+                return false;
+            }
+            if (pending->committed) {
+                detachManipulator(false);
+                for (const auto& removal : pending->removals)
+                    myContext->Remove(removal.first, Standard_False);
+                myContext->UpdateCurrentViewer();
+            }
+            if (!pending->command.releaseClosed()) return false;
+            // Keep recovery ownership through synchronous observers; they
+            // cannot start another edit or replace this interactor mid-publish.
+            if (pending->committed) {
+                try { myDoc->NotifyChanges(); } catch (...) {}
+            }
+            _pendingDeletion.reset();
+            return true;
+        } catch (...) { return false; }
+    }
+
     void ObjectInteractor::deleteSelected() {
-        if (hasUnresolvedEdit()) { return; }
-        if (_manipulator.IsNull() || !_manipulator->IsAttached()) { return; }
-		auto doc = myDoc->ChangeDocument();
-		if (doc.IsNull() || doc->HasOpenCommand()) { return; }
-
-        Handle(Core3DManipulatorObjectSequence) objects = _manipulator->Objects();
-		std::vector<std::pair<Handle(AIS_InteractiveObject), TDF_Label>> removals;
-        for (Core3DManipulatorObjectSequence::Iterator it(*objects); it.More(); it.Next()) {
-			const TDF_Label label = myDoc->ShapeLabel(it.Value());
-			if (label.IsNull()
-				|| !myDoc->IsPresentationEditable(it.Value())
-				|| !myDoc->IsEditableFreeSimpleDefinitionLabel(label)
-				|| myDoc->GeometryRepresentationForLabel(label)
-					== OcctGeometryRepresentation::Invalid) {
-				return;
-			}
-			for (const auto& removal : removals) {
-				if (removal.second.IsEqual(label)) { return; }
-			}
-			removals.push_back({it.Value(), label});
-        }
-		if (removals.empty()) { return; }
-
+        if (hasUnresolvedEdit()) return;
+        if (_manipulator.IsNull() || !_manipulator->IsAttached()) return;
+        const auto doc = myDoc->ChangeDocument();
+        if (doc.IsNull() || doc->HasOpenCommand()) return;
+        try {
+            auto pending = std::make_shared<PendingObjectDeletion>();
+            std::vector<TDF_Label> roots;
+            const auto objects = _manipulator->Objects();
+            for (Core3DManipulatorObjectSequence::Iterator it(*objects); it.More(); it.Next()) {
+                const TDF_Label label = myDoc->ShapeLabel(it.Value());
+                if (label.IsNull() || !myDoc->IsPresentationEditable(it.Value())
+                    || !myDoc->IsEditableFreeSimpleDefinitionLabel(label)
+                    || myDoc->GeometryRepresentationForLabel(label) == OcctGeometryRepresentation::Invalid)
+                    return;
+                for (const auto& prior : roots) if (prior.IsEqual(label)) return;
+                roots.push_back(label);
+                pending->removals.push_back({it.Value(), label});
+            }
+            if (roots.empty()) return;
+            pending->naming = myDoc->PrepareOrdinaryRemovalNamingHistory(roots);
+            if (!pending->naming) return;
 #if DEBUG
-        const int fault = std::exchange(_debugDeleteFailureMode, 0);
+            const int fault = std::exchange(_debugDeleteFailureMode, 0);
+            if (fault == 2) pending->command.debugSetCommitMode(4); // throws after close
+            if (fault == 3) {
+                pending->command.debugSetCommitMode(2); // throws with command open
+                pending->command.debugSetAbortMode(1); // first Abort fails open
+            }
+            if (fault == 4) pending->command.debugSetPostCommitInspectionFailureCount(2);
 #endif
-		try {
-			doc->NewCommand();
-			for (const auto& removal : removals) {
-				if (!myDoc->RemoveShape(removal.second)) {
-					doc->AbortCommand();
-					return;
-				}
+            // Retain before NewCommand; its outcome can be unknown even when
+            // begin throws or cannot inspect the transaction it just opened.
+            _pendingDeletion = pending;
+            const auto began = pending->command.begin(myDoc);
+            if (began != OrdinaryCommandBeginResult::Started) {
+                if (!pending->command.isRetained()
+                    && myDoc->SettleOrdinaryNamingHistory(pending->naming, Standard_False))
+                    _pendingDeletion.reset();
+                else (void)reconcileDeletion();
+                return;
+            }
+            bool staged = true;
+            for (const auto& removal : pending->removals) {
+                if (!myDoc->RemoveShape(removal.second)) { staged = false; break; }
 #if DEBUG
                 ++_debugDeleteStagedRootCount;
-                if (fault == 1) { doc->AbortCommand(); return; }
+                if (fault == 1) { staged = false; break; }
 #endif
-			}
-#if DEBUG
-            if (fault == 3) throw Standard_Failure("Delete commit before close");
-#endif
-			if (!doc->CommitCommand()) {
-				if (doc->HasOpenCommand()) { doc->AbortCommand(); }
-				return;
-			}
-#if DEBUG
-            if (fault == 2 || fault == 4)
-                throw Standard_Failure("Delete after commit / inspection unavailable");
-#endif
-		} catch (...) {
-#if DEBUG
-            try {
-                if (doc->HasOpenCommand()) {
-                    if (fault == 3) throw Standard_Failure("Delete first abort before close");
-                    doc->AbortCommand();
-                }
-            } catch (...) {}
-#else
-            if (doc->HasOpenCommand()) { doc->AbortCommand(); }
-#endif
-			return;
-		}
-
-		detachManipulator(false);
-		for (const auto& removal : removals) {
-			myContext->Remove(removal.first, Standard_False);
-		}
-		myDoc->NotifyChanges();
-        myContext->UpdateCurrentViewer();
+            }
+            if (staged) staged = myDoc->CaptureOrdinaryNamingCandidate(pending->naming);
+            if (staged) (void)pending->command.commitAndObserve();
+            else (void)pending->command.abortAndObserve();
+            (void)reconcileDeletion();
+        } catch (...) {
+            // Reconciliation may abort only the exact retained command. A
+            // foreign/open/unreadable state remains fenced with its ledger.
+            (void)reconcileDeletion();
+        }
     }
 
 	ObjectInteractor::DuplicateDocumentState
@@ -3928,7 +3965,7 @@ Standard_Boolean DuplicateFaceFinishesMatch(
     }
 
     bool ObjectInteractor::hasUnresolvedEdit() const noexcept {
-        return hasUnresolvedDuplicate() || blocksForOrdinaryEdit();
+        return hasUnresolvedDeletion() || hasUnresolvedDuplicate() || blocksForOrdinaryEdit();
     }
 
     bool ObjectInteractor::blocksForOrdinaryEdit() const noexcept {

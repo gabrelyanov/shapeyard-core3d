@@ -2141,7 +2141,11 @@ public:
 #if DEBUG
     std::array<std::size_t, 3> DebugOrdinaryNamingHistoryStorage() const noexcept;
 #endif
-    enum class OrdinaryNamingFamily { Profile, UnretainedShell, SavedCutShell, BoundedCurveCreation };
+    enum class OrdinaryNamingFamily { Profile, UnretainedShell, SavedCutShell, BoundedCurveCreation, Removal };
+    // Only the ordinary Delete route issues these tokens. Its command stamp
+    // retains the token through exact prior/candidate settlement.
+    std::shared_ptr<core3d::ordinary_naming::Record> PrepareOrdinaryRemovalNamingHistory(
+        const std::vector<TDF_Label>& roots) noexcept;
     std::shared_ptr<core3d::ordinary_naming::Record> PrepareOrdinaryNamingHistory(
         std::size_t creationRootCount, const TDF_Label& existingOwner = {},
         OrdinaryNamingFamily family = OrdinaryNamingFamily::Profile) noexcept;
