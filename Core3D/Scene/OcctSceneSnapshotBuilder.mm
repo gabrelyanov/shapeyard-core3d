@@ -4455,12 +4455,26 @@ bool BuildBoundedCurveStroke(
         return refine(theLeft, aMiddle, theDepth - 1)
             && refine(aMiddle, theRight, theDepth - 1);
     };
+    StrokeSample aSpanLeft = aFirst;
     for (std::size_t aKnot = 1; aKnot < theSavedCurve.knots.size(); ++aKnot) {
         StrokeSample aRight;
-        if (!evaluate(theSavedCurve.knots[aKnot].value, aRight)
-            || !refine(aSamples.back(), aRight, kMaxCurveStrokeDepth)) {
+        if (!evaluate(theSavedCurve.knots[aKnot].value, aRight)) return false;
+        StrokeSample aSpanRight = aRight;
+        if (aKnot + 1 < theSavedCurve.knots.size()
+            && theSavedCurve.knots[aKnot].multiplicity == theSavedCurve.degree) {
+            // At a C0 knot Evaluate returns the next span's tangent. Testing
+            // that tangent against this span can never converge at a corner.
+            // Keep the exact knot position, but use this span's left limit for
+            // its angular proof; the next span retains the right-hand tangent.
+            StrokeSample aLeftLimit;
+            if (!evaluate(std::nextafter(aRight.parameter, aSpanLeft.parameter),
+                          aLeftLimit)) return false;
+            aSpanRight.tangent = aLeftLimit.tangent;
+        }
+        if (!refine(aSpanLeft, aSpanRight, kMaxCurveStrokeDepth)) {
             return false;
         }
+        aSpanLeft = aRight;
     }
     if (aSamples.size() < 2 || aSegmentCount + 1 != aSamples.size()) return false;
 
