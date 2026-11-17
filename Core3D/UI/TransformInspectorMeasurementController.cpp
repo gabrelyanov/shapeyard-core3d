@@ -2561,6 +2561,8 @@ TransformInspectorMeasurementController::commitPosition(
         change.label = aDefinition;
         change.presentation = aPresentation;
         change.shape = candidateShape;
+        // Colours put on single faces follow their faces to the new size.
+        if (sizes && dimensionTransform) change.faceColourMap = *dimensionTransform;
         change.inspectorPrimitiveKind = inspectorPrimitiveKind;
         if (inspectorPrimitiveKind != 0) {
             const double center = (dimensionBounds[anAxis] + dimensionBounds[anAxis + 3]) * 0.5;

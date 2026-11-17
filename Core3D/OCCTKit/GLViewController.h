@@ -46,6 +46,11 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, weak, nullable) id<GLViewControllerProtocol> delegate;
 @property (nonatomic, assign, readonly) BOOL isPreviewMode;
+/// While a tool waits for the user to tap a part (Subtract, Union), a tap
+/// that lands on the selected part's move arrows picks the part behind them;
+/// a drag that starts on an arrow still moves the selection. Off by default.
+/// (Plain selection of whole parts lets such a tap through without this.)
+@property (nonatomic, assign) BOOL tapsSelectThroughManipulator;
 @property (nonatomic, assign, readonly) NSUInteger renderedFrameCount;
 @property (nonatomic, assign, readonly) CGSize drawableSize;
 @property (nonatomic, assign, readonly, getter=isRenderLoopRunning) BOOL renderLoopRunning;
@@ -321,6 +326,12 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)redo;
 
 - (void)assetData:(void(^)(NSData *_Nullable))completion;
+/// Would Home's save succeed right now? 1 yes, 0 no, -1 cannot be told now (a tool or a
+/// preview is open). Main thread, synchronous; the same check assetData: runs.
+- (NSInteger)core3d_documentWouldSave;
+/// Check seam (Debug builds; no effect otherwise): the next `count` probes of a document that
+/// does save answer 0. assetData is not affected.
++ (void)debugSetForcedSaveProbeFailures:(NSInteger)count;
 - (void)setAssetData:(NSData *_Nonnull)data completion:(void(^)(Core3DAssetLoadResult result))completion;
 - (void)setAssetFileURL:(NSURL *_Nonnull)assetFileURL
       expectedByteCount:(unsigned long long)expectedByteCount

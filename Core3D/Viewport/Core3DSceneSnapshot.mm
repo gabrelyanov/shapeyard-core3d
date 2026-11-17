@@ -204,6 +204,8 @@ static_assert(sizeof(std::uint32_t) == 4,
                                   vertexCount:(NSUInteger)vertexCount
                                    indexCount:(NSUInteger)indexCount
                                facePrimitives:(NSArray<Core3DSceneFacePrimitiveSnapshot *> *)facePrimitives;
+//! Set once by the scene bridge right after creation, before the snapshot is shared.
+- (void)core3d_setEdgeDrawClassData:(NSData *)data;
 @end
 
 @interface Core3DSceneRenderItemSnapshot ()
@@ -1878,6 +1880,7 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
         static_assert(offsetof(EdgeSegment, faceIndex) == offsetof(Core3DSceneEdgeSegment, faceIndex));
         NSParameterAssert(edgeSegmentData.length % sizeof(Core3DSceneEdgeSegment) == 0);
         _edgeSegmentData = [edgeSegmentData copy];
+        _edgeDrawClassData = NSData.data;
         _edgeSegmentStride = sizeof(Core3DSceneEdgeSegment);
         _edgeSegmentCount = edgeSegmentData.length / _edgeSegmentStride;
         _vertexData = [vertexData copy];
@@ -1889,6 +1892,11 @@ TopoDS_Face Core3DDebugAuthoredGeometryFixture(NSInteger mode) {
         _facePrimitives = [facePrimitives copy];
     }
     return self;
+}
+
+- (void)core3d_setEdgeDrawClassData:(NSData *)data {
+    // Set once by the scene bridge right after creation, before the snapshot is shared.
+    _edgeDrawClassData = [data copy] ?: NSData.data;
 }
 
 @end
@@ -4477,7 +4485,7 @@ Core3DSceneMeshSnapshot *MeshFromScene(const MeshSnapshot& value) {
             value.primitives,
             FacePrimitiveFromScene);
 
-    return [[Core3DSceneMeshSnapshot alloc]
+    Core3DSceneMeshSnapshot *mesh = [[Core3DSceneMeshSnapshot alloc]
         initWithDefinitionIdentifier:StringFromUTF8(value.definitionIdentifier)
 paintedAtlasMasterDefinitionIdentifier:StringFromUTF8(
             value.paintedAtlasMasterDefinitionIdentifier)
@@ -4503,6 +4511,12 @@ paintedAtlasMasterDefinitionIdentifier:StringFromUTF8(
                          vertexCount:value.vertices.size()
                           indexCount:value.indices.size()
                       facePrimitives:primitives];
+    if (!value.edgeDrawClasses.empty()) {
+        [mesh core3d_setEdgeDrawClassData:
+            [NSData dataWithBytes:value.edgeDrawClasses.data()
+                           length:value.edgeDrawClasses.size()]];
+    }
+    return mesh;
 }
 
 Core3DSceneRenderItemSnapshot *RenderItemFromScene(const InstanceSnapshot& value) {

@@ -24,6 +24,7 @@
 #include <optional>
 #include <variant>
 #include <vector>
+#include <gp_GTrsf.hxx>
 
 namespace core3d {
 enum class PrimitiveManipulatorType;
@@ -221,6 +222,10 @@ struct OrdinaryTransformChange {
     // Native admission uses it only to carry an authored complete-group origin.
     std::optional<gp_Trsf> collectiveWorldDelta;
     OcctMeshUVAtlasOptions meshUVAtlasOptions;
+    // A resize that rebuilds the shape (Dimensions): how the old geometry maps
+    // onto the new one, so colours put on single faces follow their faces.
+    // Absent: such colours stay on the faces that did not move.
+    std::optional<gp_GTrsf> faceColourMap;
     std::optional<OrdinaryMeshVertexMove> meshVertexMove;
     std::optional<OrdinaryMeshRegionExtrude> meshRegionExtrude;
     std::optional<OrdinaryMeshRegionInset> meshRegionInset;

@@ -91,6 +91,63 @@ using namespace core3d;
 
 namespace {
 
+// Founder 15 Nov 2026: while whole objects are worked on, an edge between two faces that meet
+// smoothly (a fillet, the halves of a revolved face) and a closed seam between flat faces in one
+// plane (what a Join leaves) are not drawn when both faces look the same, so a model reads as an
+// object, not as a drawing. A crease, the outline, a border between two colours and a Split line
+// are drawn as always. The class of each edge was decided once at tessellation
+// (MeshSnapshot::edgeDrawClasses); this only reads it and compares the two faces' materials.
+// Returns the edge numbers of one drawn part that are left out; the black lines and the white
+// lines of a selected part both use it. Face and Edge modes never call it.
+template <class Scene, class Mesh, class Item>
+std::unordered_set<std::uint32_t> NativeLeftOutEdges(const Scene& scene, const Mesh& mesh, const Item& item)
+{
+    std::unordered_set<std::uint32_t> leftOut;
+    if (mesh.edgeDrawClasses.empty() || item.primitiveBindings.size() != mesh.primitives.size())
+        return leftOut;
+    const std::uint32_t noFace = std::numeric_limits<std::uint32_t>::max();
+    std::unordered_map<std::uint32_t, std::size_t> primitiveOfFace;
+    for (std::size_t index = 0; index < mesh.primitives.size(); ++index)
+        primitiveOfFace.emplace(mesh.primitives[index].faceIndex, index);
+    std::unordered_map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> facesOfEdge;
+    for (const auto& edge : mesh.edgeSegments) {
+        if (edge.edgeIndex >= mesh.edgeDrawClasses.size()
+            || mesh.edgeDrawClasses[edge.edgeIndex] == 0) continue;
+        auto& faces = facesOfEdge.emplace(edge.edgeIndex,
+            std::make_pair(edge.faceIndex, noFace)).first->second;
+        if (faces.first != edge.faceIndex && faces.second == noFace) faces.second = edge.faceIndex;
+    }
+    const auto sameLook = [&](std::uint32_t first, std::uint32_t second) {
+        if (first == second) return true;
+        if (first >= scene.materials.size() || second >= scene.materials.size()) return false;
+        const auto& a = scene.materials[first];
+        const auto& b = scene.materials[second];
+        const auto plain = [](const auto& material) {
+            return material.baseColorTextureIndex < 0 && material.emissiveTextureIndex < 0
+                && material.metallicRoughnessTextureIndex < 0
+                && material.occlusionTextureIndex < 0 && material.normalTextureIndex < 0;
+        };
+        const auto about = [](float x, float y) { return std::abs(x - y) < 1.0e-3f; };
+        return plain(a) && plain(b) && a.alphaMode == b.alphaMode
+            && about(a.baseColor.x, b.baseColor.x) && about(a.baseColor.y, b.baseColor.y)
+            && about(a.baseColor.z, b.baseColor.z) && about(a.baseColor.w, b.baseColor.w)
+            && about(a.emission.x, b.emission.x) && about(a.emission.y, b.emission.y)
+            && about(a.emission.z, b.emission.z)
+            && about(a.metallic, b.metallic) && about(a.roughness, b.roughness);
+    };
+    for (const auto& entry : facesOfEdge) {
+        if (entry.second.second == noFace) continue;
+        const auto first = primitiveOfFace.find(entry.second.first);
+        const auto second = primitiveOfFace.find(entry.second.second);
+        if (first == primitiveOfFace.end() || second == primitiveOfFace.end()) continue;
+        const auto& a = item.primitiveBindings[first->second];
+        const auto& b = item.primitiveBindings[second->second];
+        if (a.visible && b.visible && sameLook(a.materialIndex, b.materialIndex))
+            leftOut.insert(entry.first);
+    }
+    return leftOut;
+}
+
 void RemoveNativeSelectionStructure(Handle(Graphic3d_Structure)& structure)
 {
     if (structure.IsNull()) return;
@@ -1273,10 +1330,12 @@ Core3DAssetLoadResult StageQueuedAssetInput(Core3DQueuedAssetInput *input, Core3
 - (void)updateSelectedSurfaceAppearance;
 - (void)clearSelectedFaceWash;
 - (void)clearCommittedBoundaries;
+- (std::string)core3d_writeCheckedDocumentAt:(const std::string &)fn inconclusive:(BOOL *)inconclusive;
 - (void)updateCommittedBoundaries;
 - (void)updateSplitBoundaries:(const Handle(AIS_Shape)&)presentation;
 - (BOOL)performNativeHistoryDirection:(NativeHistoryDirection)direction
     ifCurrent:(const std::function<bool()>&)current;
+- (void)updateBoundariesOfPresentations:(const std::vector<Handle(AIS_Shape)>&)presentations;
 - (void)addCube:(UIBarButtonItem *)sender;
 - (BOOL)restoreBooleanActionForRetainedGizmoType:(PrimitiveGizmoType)type;
 - (BOOL)retireBooleanActionForGizmoType:(PrimitiveGizmoType)type;
@@ -1310,6 +1369,26 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     id delegate = controller.delegate;
     return [delegate isKindOfClass:Core3DViewController.class]
         ? static_cast<Core3DViewController *>(delegate) : nil;
+}
+
+// Plain selection: a tap that begins on the Move or Scale handles of the
+// selected part adds the part behind them (founder walk 15 Nov). One switch;
+// a screen check launches with SHAPEYARD_UITEST_TAPS_STOP_AT_HANDLES to show
+// the behaviour before the repair (Debug builds only).
+#ifdef DEBUG
+static NSInteger sDebugForcedSaveProbeFailures = 0;
+#endif
+static const BOOL kPlainTapsSelectBehindMoveHandles = YES;
+static BOOL PlainTapsSelectBehindMoveHandles()
+{
+#ifdef DEBUG
+    static const BOOL sStoppedByCheck =
+        getenv("SHAPEYARD_UITEST_TAPS_STOP_AT_HANDLES") != nullptr;
+    if (sStoppedByCheck) {
+        return NO;
+    }
+#endif
+    return kPlainTapsSelectBehindMoveHandles;
 }
 
 @implementation GLViewController {
@@ -1359,10 +1438,16 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     std::string _committedBoundaryDocument;
     const void *_committedBoundaryDocumentOwner;
     BOOL _committedBoundariesDirty;
+    // Whether the committed lines were last built for work on whole objects: smooth edges
+    // and closed same-plane seams are left out then, and must come back in Face and Edge mode.
+    int _committedBoundaryObjectMode;
 #if DEBUG
     double _debugHistoryDrawingCosts[5]; // Zero-initialized with the ObjC owner.
 #endif
     Handle(AIS_Shape) _splitBoundaryPresentation;
+    // Every shape whose own edges are drawn now in place of the committed lines: the Split
+    // candidate, or the result a tool is previewing (the first one is also kept above).
+    std::vector<Handle(AIS_Shape)> _boundaryPresentations;
     BOOL _rawTouchRendering;
     BOOL _rawTouchWasCancelled;
     NSMutableSet<UITouch *> *_rawViewportTouches;
@@ -1371,6 +1456,15 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     CGPoint _pinchPreviousTouch[2];
     UITapGestureRecognizer *_tapRecognizer;
     BOOL _suppressTapSelectionForManipulatorInteraction;
+    // A tap that began on a move arrow while taps select through the arrows:
+    // resolved once the raw touch and the arrows' own gesture have ended.
+    BOOL _pendingTapBehindManipulator;
+    CGPoint _pendingTapBehindManipulatorPoint;
+    // Where the finger went down, and whether it has left that spot: the tap
+    // recognizer still reports a short drag (up to 45 pt) as a tap, and a
+    // drag on an arrow moves the part and must pick nothing.
+    CGPoint _primaryTouchDownPoint;
+    BOOL _primaryTouchTravelled;
     BOOL _visibleRawR2BevelOwnsChamferTool;
 }
 
@@ -1432,6 +1526,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     if (self) {
         _viewer = std::make_shared<Core3DViewer>();
         _committedBoundariesDirty = YES;
+        _committedBoundaryObjectMode = -1;
         _assetDataQueue = dispatch_queue_create("com.shapeyard.sync", NULL);
 		_rawViewportTouches = [NSMutableSet set];
 		_isConstructorMode = false;
@@ -1815,11 +1910,23 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     for (auto& structure : _committedBoundaries) RemoveNativeSelectionStructure(structure);
     _committedBoundaries.clear();
     _splitBoundaryPresentation.Nullify();
+    _boundaryPresentations.clear();
     _committedBoundariesDirty = YES;
 }
 
 - (void)updateSplitBoundaries:(const Handle(AIS_Shape)&)presentation {
-    if (!_committedBoundariesDirty && _splitBoundaryPresentation == presentation) return;
+    const std::vector<Handle(AIS_Shape)> one{presentation};
+    [self updateBoundariesOfPresentations:one];
+}
+
+// The edges of shapes that are on screen but not in the document yet: the Split candidate, and
+// (HOLE-TOOLS-DIAGNOSIS 15 Nov, Q4) the result a tool is previewing. A previewed Shell showed no
+// opening and a previewed Cut no pocket, because a flat grey result without edge lines has
+// nothing to show them by. The lines live in this view's own structures; the shapes themselves
+// are not touched, so nothing stays behind when the tick turns a preview into the part.
+- (void)updateBoundariesOfPresentations:(const std::vector<Handle(AIS_Shape)>&)presentations {
+    if (presentations.empty()) return;
+    if (!_committedBoundariesDirty && _boundaryPresentations == presentations) return;
     std::vector<Handle(Graphic3d_Structure)> replacements;
     try {
         // Use the candidate's display tessellation, never triangle wireframe.
@@ -1827,6 +1934,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         // exactly as the committed scene extractor does. No document writes or
         // remeshing are needed, including while the preview command is open.
         std::vector<gp_Pnt> points;
+        for (const Handle(AIS_Shape)& presentation : presentations) {
         TopTools_IndexedMapOfShape faces, drawnEdges;
         TopExp::MapShapes(presentation->Shape(), TopAbs_FACE, faces);
         const auto transform = presentation->LocalTransformation();
@@ -1861,6 +1969,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
                 }
             }
         }
+        }
         if (!points.empty()) {
             Handle(Graphic3d_Structure) boundaries = new Graphic3d_Structure(_viewer->V3dViewer()->StructureManager());
             replacements.push_back(boundaries);
@@ -1881,7 +1990,8 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         [self clearCommittedBoundaries];
         _committedBoundaries = std::move(replacements);
         for (const auto& structure : _committedBoundaries) structure->Display();
-        _splitBoundaryPresentation = presentation;
+        _splitBoundaryPresentation = presentations.front();
+        _boundaryPresentations = presentations;
         _committedBoundariesDirty = NO;
     } catch (...) {
         for (auto& structure : replacements) RemoveNativeSelectionStructure(structure);
@@ -1899,6 +2009,12 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         [self updateSplitBoundaries:splitPresentation];
         return;
     }
+    // The result a tool is previewing (Shell, Bevel, Join, Cut, Hole) shows its own edges.
+    const auto previewed = _viewer->previewedResultPresentations();
+    if (!previewed.empty()) {
+        [self updateBoundariesOfPresentations:previewed];
+        return;
+    }
     const auto interactor = _viewer->getObjectInteractor();
     if (_viewer->hasUnresolvedEdit() || !_viewer->canBeginCommittedEdit()
         || (interactor && interactor->isManipulatorGestureActive())) {
@@ -1909,9 +2025,12 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     const auto document = _viewer->getDocument();
     if (document.IsNull()) { [self clearCommittedBoundaries]; return; }
     const auto documentIdentifier = document->DocumentIdentifier();
+    const int objectMode = (!shapeInteractor
+        || shapeInteractor->getSelectionMode() == ShapeSelectionMode::WholeShape) ? 1 : 0;
     if (!_committedBoundariesDirty && _splitBoundaryPresentation.IsNull()
         && _committedBoundaryDocument == documentIdentifier
-        && _committedBoundaryDocumentOwner == document->Document().get()) return;
+        && _committedBoundaryDocumentOwner == document->Document().get()
+        && _committedBoundaryObjectMode == objectMode) return;
     const CGSize drawable = self.drawableSize;
     if (drawable.width <= 0 || drawable.height <= 0) { [self clearCommittedBoundaries]; return; }
     const auto scene = _viewer->captureSceneSnapshot(drawable.width, drawable.height);
@@ -1938,8 +2057,15 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
             };
             std::vector<gp_Pnt> points;
             std::unordered_map<std::uint32_t, std::uint32_t> incidentFace;
+            // Object mode only: smooth edges and closed same-plane seams between faces that
+            // look the same are left out (see NativeLeftOutEdges). The white lines of a
+            // selected part follow the same rule in updateSelectedSurfaceAppearance.
+            const auto leftOutEdges = (objectMode == 1
+                    && scene->selectionMode == core3d::scene::ElementKind::Object)
+                ? NativeLeftOutEdges(*scene, mesh, item) : std::unordered_set<std::uint32_t>();
             for (const auto& edge : mesh.edgeSegments) {
                 if (!visibleFaces.count(edge.faceIndex)) continue;
+                if (leftOutEdges.count(edge.edgeIndex)) continue;
                 const auto inserted = incidentFace.emplace(edge.edgeIndex, edge.faceIndex);
                 if (!inserted.second && inserted.first->second != edge.faceIndex) continue;
                 // Match the selected-overlay cap. Never publish a partial scene.
@@ -1972,6 +2098,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         for (const auto& structure : _committedBoundaries) structure->Display();
         _committedBoundaryDocument = documentIdentifier;
         _committedBoundaryDocumentOwner = document->Document().get();
+        _committedBoundaryObjectMode = objectMode;
         _committedBoundariesDirty = NO;
     } catch (...) {
         for (auto& structure : replacements) RemoveNativeSelectionStructure(structure);
@@ -2121,9 +2248,16 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
         };
         std::unordered_map<std::uint32_t, std::uint32_t> incidentFace;
         const auto before = points.size();
+        // A selected whole part shows its outline and its creases in white, not its smooth
+        // edges or closed seams (founder, 15 Nov 2026). Face mode draws every edge of the
+        // chosen faces as before.
+        const auto leftOutEdges = (!faceMode && selection->second.object
+                && scene->selectionMode == core3d::scene::ElementKind::Object)
+            ? NativeLeftOutEdges(*scene, mesh, item) : std::unordered_set<std::uint32_t>();
         for (const auto& edge : mesh.edgeSegments) {
             if (!visibleFaces.count(edge.faceIndex)) continue;
             if (!selection->second.object && !selection->second.faces.count(edge.faceIndex)) continue;
+            if (leftOutEdges.count(edge.edgeIndex)) continue;
             const auto inserted = incidentFace.emplace(edge.edgeIndex, edge.faceIndex);
             // Keep every segment of a curved edge, but only one incident face.
             if (!inserted.second && inserted.first->second != edge.faceIndex) continue;
@@ -2534,6 +2668,11 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 		_rawTouchWasCancelled = NO;
 		_rawTouchRendering = YES;
 		_suppressTapSelectionForManipulatorInteraction = NO;
+		_pendingTapBehindManipulator = NO;
+		_primaryTouchTravelled = NO;
+		UITouch *aFirstTouch = [theTouches anyObject];
+		_primaryTouchDownPoint = aFirstTouch != nil
+			? [aFirstTouch locationInView:self.view] : CGPointZero;
 		[[self viewportView] beginInteractiveRendering];
 	}
 
@@ -2604,6 +2743,12 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     [super touchesMoved:theTouches withEvent:theEvent];
     
     UITouch *aTouch = [theTouches anyObject];
+    if (aTouch != NULL && !_primaryTouchTravelled) {
+        const CGPoint aNow = [aTouch locationInView:self.view];
+        // Six points: more than a tapping finger wanders, less than any drag.
+        _primaryTouchTravelled = hypot(aNow.x - _primaryTouchDownPoint.x,
+                                       aNow.y - _primaryTouchDownPoint.y) > 6.0;
+    }
     if ((aTouch != NULL) && theEvent.allTouches.count == 1) {
         const CGPoint point = [self drawablePointForPoint:[aTouch locationInView:self.view]];
         _viewer->Rotation((int)point.x, (int)point.y);
@@ -2640,6 +2785,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 	}
 	[_rawViewportTouches minusSet:touches];
 	[self endRawPrimaryInteractionIfNeededCancelled:NO];
+	[self resolvePendingTapBehindManipulatorIfSettled];
 
     return;
 }
@@ -2647,6 +2793,7 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 -(void) touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event{
     [super touchesCancelled:touches withEvent:event];
 	_rawTouchWasCancelled = YES;
+	_pendingTapBehindManipulator = NO;
 
     UITouch *aTouch = [touches anyObject];
     if (!_isPreviewMode && aTouch != NULL) {
@@ -2921,10 +3068,89 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 }
 #endif
 
+/// Whether a tap that began on the selected part's handles may go to the part
+/// behind them. Always while a tool waits for a tapped part (the editor sets
+/// tapsSelectThroughManipulator). Also in plain selection of whole parts with
+/// the Move or Scale handles showing: there a tap adds the part behind to the
+/// selection, exactly as a tap beside the handles would, and never takes a
+/// selected part out. Face and Edge selection and every other tool keep the
+/// old behaviour: a tap on a handle changes nothing.
+- (BOOL)tapMaySelectBehindManipulator
+{
+    if (_isPreviewMode || _isConstructorMode || _viewer == nullptr) {
+        return NO;
+    }
+    if (self.tapsSelectThroughManipulator) {
+        return YES;
+    }
+    if (!PlainTapsSelectBehindMoveHandles()) {
+        return NO;
+    }
+    const std::shared_ptr<ObjectInteractor> anInteractor =
+        _viewer->getObjectInteractor();
+    const std::shared_ptr<ShapeInteractor> aShapeInteractor =
+        _viewer->getShapeInteractor();
+    if (anInteractor == nullptr || aShapeInteractor == nullptr) {
+        return NO;
+    }
+    const PrimitiveManipulatorType aType = anInteractor->getManipulatorType();
+    if (aType != PrimitiveManipulatorType::PrimitiveGizmoTypeMoveRotate
+        && aType != PrimitiveManipulatorType::PrimitiveGizmoTypeScale) {
+        return NO;
+    }
+    // The same refusals as an ordinary tap in tapHandler.
+    return aShapeInteractor->getSelectionMode() == ShapeSelectionMode::WholeShape
+        && !anInteractor->hasActiveLinearArray()
+        && !anInteractor->hasActiveRadialArray()
+        && !aShapeInteractor->isShellSelectionFrozen();
+}
+
+/// A tap that began on a move arrow picks the part behind the arrows, but
+/// only after the raw touch has ended and the arrows have closed their own
+/// zero-move gesture: the pick never runs inside that gesture (an attempt
+/// that changed the arrows' pick state from the tap handler crashed there).
+- (void)resolvePendingTapBehindManipulatorIfSettled
+{
+    if (!_pendingTapBehindManipulator) {
+        return;
+    }
+    if (![self tapMaySelectBehindManipulator]) {
+        _pendingTapBehindManipulator = NO;
+        return;
+    }
+    const std::shared_ptr<ObjectInteractor> anInteractor =
+        _viewer->getObjectInteractor();
+    if (_rawViewportTouches.count != 0
+        || (anInteractor != nullptr
+            && anInteractor->isManipulatorGestureActive())) {
+        // The touch-up has not been delivered yet: it calls this again.
+        return;
+    }
+    _pendingTapBehindManipulator = NO;
+    const CGPoint aTapPoint = _pendingTapBehindManipulatorPoint;
+    if (_delegate
+        && [_delegate respondsToSelector:
+            @selector(viewer:willSelectAtDrawablePoint:drawableSize:)]) {
+        [_delegate viewer:self
+            willSelectAtDrawablePoint:aTapPoint
+                         drawableSize:self.drawableSize];
+    }
+    _viewer->SelectBehindMoveHandles((int)aTapPoint.x, (int)aTapPoint.y);
+    [self checkSelections];
+    [self requestRender];
+}
+
 - (void)tapHandler:(UITapGestureRecognizer *)tapRecognizer
 {
     if (_suppressTapSelectionForManipulatorInteraction) {
         _suppressTapSelectionForManipulatorInteraction = NO;
+        if (!_primaryTouchTravelled && [self tapMaySelectBehindManipulator]) {
+            _pendingTapBehindManipulatorPoint =
+                [self drawablePointForPoint:
+                    [tapRecognizer locationInView:self.view]];
+            _pendingTapBehindManipulator = YES;
+            [self resolvePendingTapBehindManipulatorIfSettled];
+        }
         return;
     }
     if (_isPreviewMode) {
@@ -7146,6 +7372,98 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
     return _viewer->getShapeInteractor()->getNumberOfDetectedEdges();
 }
 
+/// The one save check, shared by assetData: and core3d_documentWouldSave so the two cannot
+/// drift (SAVE-REFUSED-AFTER-JOIN-DIAGNOSIS 15 Nov, repair D). Main thread only. Writes the
+/// committed document to a file named after `fn` and reads that file back through the same
+/// checks opening a project runs. Returns the written file's path, or empty when the document
+/// would not save. `*inconclusive` is set, and nothing is written, while a tool or a preview
+/// holds the document: that is not a failure of the document.
+- (std::string)core3d_writeCheckedDocumentAt:(const std::string &)fn inconclusive:(BOOL *)inconclusive
+{
+    std::string cbfFilePath;
+    if (inconclusive != nullptr) *inconclusive = NO;
+    try {
+        if (_viewer != nullptr) {
+            const auto objectInteractor = _viewer->getObjectInteractor();
+            const auto shapeInteractor = _viewer->getShapeInteractor();
+            const bool hasTransientModeling =
+                objectInteractor == nullptr
+                || shapeInteractor == nullptr
+                || _viewer->hasUnresolvedEdit()
+                || objectInteractor->hasActiveBoolean()
+                || objectInteractor->hasUnresolvedBoolean()
+                || objectInteractor->hasUnresolvedMirrorObjects()
+                || objectInteractor->hasActiveLinearArray()
+                || objectInteractor->hasUnresolvedLinearArray()
+                || objectInteractor->hasActiveRadialArray()
+                || objectInteractor->hasUnresolvedRadialArray()
+                || shapeInteractor->hasActiveExtrusion()
+                || shapeInteractor->hasActiveShell()
+                || shapeInteractor->hasUnresolvedShell();
+            // Bevel previews own only transient AIS presentations and
+            // never retain an open OCAF command. Apply is synchronous
+            // on this main queue, so serializing here always captures
+            // a coherent committed document (not the transient trial).
+            // Keep recovery autosaves working while a user evaluates
+            // or retries a Bevel preview.
+            if (hasTransientModeling) {
+                if (inconclusive != nullptr) *inconclusive = YES;
+            } else {
+                cbfFilePath = _viewer->getDocument()->save(fn);
+            }
+            if (!cbfFilePath.empty()) {
+                const AssetImportResult validation = _viewer->ValidateCbf(cbfFilePath);
+                if (validation != AssetImportResult::Success) {
+                    NSLog(@"CBF validation failed after save: %d at %@",
+                          static_cast<int>(validation),
+                          [NSString stringForStdString:cbfFilePath]);
+                    cbfFilePath.clear();
+                }
+            }
+        }
+    } catch (...) {
+        cbfFilePath.clear();
+    }
+    return cbfFilePath;
+}
+
+/// Would Home's save succeed right now? 1 yes, 0 no, -1 cannot be told now (a tool or a
+/// preview is open, or this is not the main thread). Synchronous: one save to a temporary
+/// file, the read-back check, and the file is deleted again. Nothing in the document changes.
+- (NSInteger)core3d_documentWouldSave
+{
+    if (![NSThread isMainThread] || _viewer == nullptr || _isPreviewMode) return -1;
+    NSString *name = [NSString stringWithFormat:@"%@.probe.tmp", NSUUID.UUID.UUIDString];
+    NSURL *baseURL = [[NSFileManager.defaultManager temporaryDirectory] URLByAppendingPathComponent:name];
+    const std::string fn = baseURL.path.UTF8String;
+    BOOL inconclusive = NO;
+    const std::string written = [self core3d_writeCheckedDocumentAt:fn inconclusive:&inconclusive];
+    NSFileManager *fileManager = NSFileManager.defaultManager;
+    [fileManager removeItemAtURL:baseURL error:nil];
+    [fileManager removeItemAtPath:[baseURL.path stringByAppendingString:@".cbf"] error:nil];
+    [fileManager removeItemAtPath:[baseURL.path stringByAppendingString:@".xbf"] error:nil];
+    if (!written.empty()) {
+        [fileManager removeItemAtPath:[NSString stringForStdString:written] error:nil];
+    }
+    if (inconclusive) return -1;
+#ifdef DEBUG
+    // Check seam: the next probes of a document that does save answer "would not save",
+    // so a check can walk the route a refused save takes without a shape that trips it.
+    if (!written.empty() && sDebugForcedSaveProbeFailures > 0) {
+        --sDebugForcedSaveProbeFailures;
+        return 0;
+    }
+#endif
+    return written.empty() ? 0 : 1;
+}
+
++ (void)debugSetForcedSaveProbeFailures:(NSInteger)count
+{
+#ifdef DEBUG
+    sDebugForcedSaveProbeFailures = std::max<NSInteger>(0, count);
+#endif
+}
+
 - (void)assetData:(void(^)(NSData *_Nullable))completion {
     if (![NSThread isMainThread] || _queuedAssetOwner != nil
         || _pendingAssetDataCount == NSUIntegerMax) {
@@ -7172,50 +7490,8 @@ static Core3DViewController *Core3DVisibleRawR2BevelOwner(
 
         __block std::string cbfFilePath;
         dispatch_sync(dispatch_get_main_queue(), ^{
-            try {
-                if (strongSelf->_viewer != nullptr) {
-                    const auto objectInteractor =
-                        strongSelf->_viewer->getObjectInteractor();
-                    const auto shapeInteractor =
-                        strongSelf->_viewer->getShapeInteractor();
-                    const bool hasTransientModeling =
-                        objectInteractor == nullptr
-                        || shapeInteractor == nullptr
-                        || strongSelf->_viewer->hasUnresolvedEdit()
-                        || objectInteractor->hasActiveBoolean()
-                        || objectInteractor->hasUnresolvedBoolean()
-                        || objectInteractor->hasUnresolvedMirrorObjects()
-                        || objectInteractor->hasActiveLinearArray()
-                        || objectInteractor->hasUnresolvedLinearArray()
-                        || objectInteractor->hasActiveRadialArray()
-                        || objectInteractor->hasUnresolvedRadialArray()
-                        || shapeInteractor->hasActiveExtrusion()
-                        || shapeInteractor->hasActiveShell()
-                        || shapeInteractor->hasUnresolvedShell();
-                    // Bevel previews own only transient AIS presentations and
-                    // never retain an open OCAF command. Apply is synchronous
-                    // on this main queue, so serializing here always captures
-                    // a coherent committed document (not the transient trial).
-                    // Keep recovery autosaves working while a user evaluates
-                    // or retries a Bevel preview.
-                    if (!hasTransientModeling) {
-                        cbfFilePath = strongSelf->_viewer
-                            ->getDocument()->save(fn);
-                    }
-                    if (!cbfFilePath.empty()) {
-                        const AssetImportResult validation =
-                            strongSelf->_viewer->ValidateCbf(cbfFilePath);
-                        if (validation != AssetImportResult::Success) {
-                            NSLog(@"CBF validation failed after save: %d at %@",
-                                  static_cast<int>(validation),
-                                  [NSString stringForStdString:cbfFilePath]);
-                            cbfFilePath.clear();
-                        }
-                    }
-                }
-            } catch (...) {
-                cbfFilePath.clear();
-            }
+            BOOL inconclusive = NO;
+            cbfFilePath = [strongSelf core3d_writeCheckedDocumentAt:fn inconclusive:&inconclusive];
         });
 
         NSString *dataPath = cbfFilePath.empty()

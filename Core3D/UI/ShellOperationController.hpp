@@ -26,6 +26,12 @@
 #include <BRep_Tool.hxx>
 #include <GeomLib_IsPlanarSurface.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <GeomLProp_SLProps.hxx>
+#include <Geom2d_Curve.hxx>
+#include <Geom_Surface.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopoDS_Edge.hxx>
 #include <TopExp.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
@@ -33,7 +39,9 @@
 #include <TopoDS_Shape.hxx>
 #include <gp_Pln.hxx>
 
+#include <cmath>
 #include <cstdint>
+#include <initializer_list>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -337,7 +345,89 @@ inline Standard_Boolean AnalyticPrimitiveForShell(
     } catch (...) { rebuilt.Nullify(); rebuiltOpenings.clear(); return Standard_False; }
 }
 
-inline void MakeInwardShell(
+//! Check seam (debug builds): while on, the guard below is skipped so a check
+//! can record, in a process of its own, what the kernel does without it.
+Standard_Boolean ShellOffsetGuardSkipped() noexcept;
+void DebugSetShellOffsetGuardSkipped(Standard_Boolean skipped) noexcept;
+//! How often the guard has held a shell back from the kernel in this process
+//! (evidence for checks: a refusal that came from the guard, not the kernel).
+void NoteShellOffsetGuardRefusal() noexcept;
+Standard_Integer ShellOffsetGuardRefusalCount() noexcept;
+
+//! Whether the offset kernel may be given this shell at all. The kernel does not
+//! always refuse what it cannot hollow: for a cube with Bevel 3 on every edge,
+//! opened at its bottom face, it reads through a null pointer and the app closes
+//! (build 4, 15 Nov 2026: SIGSEGV in BRepOffset_Tool::TryProject under
+//! ContextIntByArc). A crash cannot be caught, so the kernel is not called when
+//! an opening face meets a neighbour smoothly along an edge (a flat face next
+//! to a fillet): the kernel builds a rounded joint between the opening and each
+//! neighbour's offset, and there is none to build. Probed without this guard,
+//! one process per case (15 Nov): every such opening either closed the process
+//! (fillets on every edge) or was refused by the kernel itself (a rounded
+//! cylinder rim, one or four filleted edges), so nothing the kernel can make is
+//! held back. A rounding smaller than the thickness away from the opening, a
+//! holed part and a flat Bevel were probed too: the kernel refuses or makes
+//! them, and they are left to it. Any doubt here is "not safe": the caller then
+//! reports an ordinary failed preview.
+inline Standard_Boolean ShellOffsetIsSafe(
+    const TopoDS_Shape& source, const std::vector<TopoDS_Face>& openings) noexcept
+{
+    try {
+        if (source.IsNull() || openings.empty()) return Standard_False;
+        TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
+        TopExp::MapShapesAndAncestors(source, TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
+        // The surface normal of a face at a place on one of its edges. Its sign is not used:
+        // an opening face reaches the worker as a copy whose orientation flag need not match
+        // the original's (build 4b, first try: the guard compared signed normals, saw
+        // "opposite" on the crash route and let the kernel have it).
+        const auto surfaceNormal = [](const TopoDS_Face& face, const TopoDS_Edge& edge,
+                                      const Standard_Real along, gp_Dir& normal) -> bool {
+            Standard_Real first = 0.0, last = 0.0;
+            const Handle(Geom2d_Curve) onSurface = BRep_Tool::CurveOnSurface(edge, face, first, last);
+            const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+            if (onSurface.IsNull() || surface.IsNull() || !std::isfinite(first) || !std::isfinite(last)
+                || std::abs(first) > 1.0e100 || std::abs(last) > 1.0e100) return false;
+            const gp_Pnt2d uv = onSurface->Value(first + (last - first) * along);
+            GeomLProp_SLProps properties(surface, uv.X(), uv.Y(), 1, 1.0e-9);
+            if (!properties.IsNormalDefined()) return false;
+            normal = properties.Normal();
+            return true;
+        };
+        for (const TopoDS_Face& opening : openings) {
+            for (TopExp_Explorer walk(opening, TopAbs_EDGE); walk.More(); walk.Next()) {
+                const TopoDS_Edge edge = TopoDS::Edge(walk.Current());
+                if (BRep_Tool::Degenerated(edge)) continue;
+                // Every edge of an opening has a neighbour in the solid it is cut from. An
+                // edge without one means the opening is not a face of this shape: not judged
+                // safe.
+                if (!facesOfEdges.Contains(edge)) return Standard_False;
+                const TopTools_ListOfShape& faces = facesOfEdges.FindFromKey(edge);
+                Standard_Boolean hasNeighbour = Standard_False;
+                for (TopTools_ListOfShape::Iterator other(faces); other.More(); other.Next()) {
+                    if (other.Value().IsSame(opening)) continue;
+                    hasNeighbour = Standard_True;
+                    const TopoDS_Face neighbour = TopoDS::Face(other.Value());
+                    // Smooth anywhere along the edge (the two surfaces' normals within about
+                    // eight degrees of one line) is smooth. Two faces of a valid solid never
+                    // fold back flat on each other, so the sign carries nothing.
+                    for (const Standard_Real along : {0.2, 0.5, 0.8}) {
+                        gp_Dir onOpening, onNeighbour;
+                        if (!surfaceNormal(opening, edge, along, onOpening)
+                            || !surfaceNormal(neighbour, edge, along, onNeighbour)
+                            || std::abs(onOpening.Dot(onNeighbour)) >= 0.990) return Standard_False;
+                    }
+                }
+                if (!hasNeighbour) return Standard_False;
+            }
+        }
+        return Standard_True;
+    } catch (...) { return Standard_False; }
+}
+
+//! Runs the offset kernel for an inward shell, unless the guard above says the
+//! kernel cannot be trusted with it; then nothing is built and false is
+//! returned (the caller's ordinary failure).
+inline Standard_Boolean MakeInwardShell(
     BRepOffsetAPI_MakeThickSolid& builder,
     const TopoDS_Shape& source,
     const std::vector<TopoDS_Face>& faces,
@@ -347,11 +437,17 @@ inline void MakeInwardShell(
     TopoDS_Shape analytic; std::vector<TopoDS_Face> analyticFaces;
     const Standard_Boolean rebuilt =
         AnalyticPrimitiveForShell(source, faces, analytic, analyticFaces);
+    if (!ShellOffsetGuardSkipped()
+        && !ShellOffsetIsSafe(rebuilt ? analytic : source, rebuilt ? analyticFaces : faces)) {
+        NoteShellOffsetGuardRefusal();
+        return Standard_False;
+    }
     TopTools_ListOfShape openings;
     for (const auto& face : rebuilt ? analyticFaces : faces) openings.Append(face);
     builder.MakeThickSolidByJoin(rebuilt ? analytic : source, openings, -thickness, tolerance,
         BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Arc,
         Standard_False, progress);
+    return Standard_True;
 }
 
 enum class ShellApplyResult : std::uint8_t {
@@ -377,7 +473,14 @@ enum class ShellPreviewState : std::uint8_t {
 struct FaceOperationSourceProof {
     Handle(AIS_Shape) original;
     TDF_Label documentLabel;
+    //! Exactly what the document stores and the presentation shows. Every
+    //! "is this still the same part" check compares against this one.
     TopoDS_Shape shape;
+    //! The one solid the tool builds from. The same object as `shape` for a
+    //! plain part. App Store 5.34.1 Join/Cut results and bevels made before
+    //! 15 Nov 2026 are stored as a compound around their one solid: then this
+    //! is that solid, and the tool's plain result replaces the wrapper.
+    TopoDS_Shape solid;
     // Single-face compatibility for Extrude; Shell consumes the ordered set below.
     TopoDS_Face openingFace;
     std::vector<TopoDS_Face> openingFaces;
@@ -394,6 +497,12 @@ struct FaceOperationSourceProof {
 //! the pole count is bounded before the adaptor copies any spline geometry.
 Standard_Boolean TryFaceOperationPlane(
     const TopoDS_Face& face, gp_Pln& plane) noexcept;
+
+//! The one solid a face tool builds from: the shape itself when it is a solid,
+//! or the single forward solid inside a compound that wraps exactly one child
+//! (taken with the wrapper's place and orientation; nothing is rebuilt). Null
+//! for anything else.
+TopoDS_Shape FaceOperationSolidOf(const TopoDS_Shape& shape) noexcept;
 
 //! Produce the shared idle/begin admission proof for face-local solid tools.
 //! theSelectedFace must have the same TShape, location, and orientation as the
@@ -557,6 +666,10 @@ public:
     void debugSetTransactionFailureCount(Standard_Size count) noexcept;
     void debugSetAbortFailureCount(Standard_Size count) noexcept;
     void debugSetPreviewEraseFailureCount(Standard_Size count) noexcept;
+    //! Check seam: lets a check, in a process of its own, give the kernel what the
+    //! offset guard holds back (see ShellOffsetIsSafe).
+    static void debugSetOffsetGuardSkipped(Standard_Boolean skipped) noexcept;
+    static Standard_Integer debugOffsetGuardRefusalCount() noexcept;
     void debugSetCommitMode(Standard_Integer mode) noexcept;
     void debugSetPostCommitInspectFailureCount(Standard_Size count) noexcept;
     Standard_Boolean debugMutateSourcePersistedTransform() noexcept;
@@ -567,7 +680,10 @@ private:
     struct Source {
         Handle(AIS_Shape) original;
         TDF_Label label;
+        // What the document stores (identity checks) and the one solid inside
+        // it (geometry); the same object for a plain part.
         TopoDS_Shape shape;
+        TopoDS_Shape solid;
         std::vector<TopoDS_Face> openingFaces;
         gp_Trsf transform;
         Standard_Integer selectionMode =

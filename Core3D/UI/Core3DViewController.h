@@ -243,6 +243,15 @@ __attribute__((objc_subclassing_restricted))
 - (BOOL)prepareOrdinaryEditForDocumentClose;
 - (BOOL)hasUnresolvedOrdinaryEdit;
 - (void)assetData:(void(^)(NSData *_Nullable))completion;
+/// Would Home's save succeed right now? 1 yes, 0 no, -1 cannot be told now (a tool or a
+/// preview is open, or the document is loading). Main thread, synchronous: the document is
+/// written to a temporary file and read back through the checks opening a project runs,
+/// exactly as assetData does (one shared helper). Nothing in the document changes.
+- (NSInteger)documentWouldSaveProbe NS_SWIFT_NAME(documentWouldSaveProbe());
+/// Check seam (Debug builds; no effect otherwise): the next `count` probes of a document that
+/// does save answer 0, so a check can walk the route a refused save takes. Home's save itself
+/// is not affected.
++ (void)debugSetForcedSaveProbeFailures:(NSInteger)count NS_SWIFT_NAME(debugSetForcedSaveProbeFailures(_:));
 - (NSData *_Nullable)thumbData;
 
 // Success means accepted; terminal completion follows private cleanup.
@@ -262,6 +271,12 @@ __attribute__((objc_subclassing_restricted))
             expectedSHA256:(NSString *)expectedSHA256
     NS_SWIFT_NAME(load(fromAssetFile:expectedByteCount:expectedSHA256:));
 - (void)saveSnapshot;
+//! Lifts the engine's lower-left axis triad by `points` (0 = default corner).
+- (void)setAxisTriadLiftPoints:(CGFloat)points;
+/// While a tool waits for a tapped part, a tap that begins on the selected
+/// part's move arrows picks the part behind them (a drag on an arrow still
+/// moves the part). Off by default.
+- (void)setTapsSelectThroughMoveHandles:(BOOL)enabled;
 //! Opt-in geometry snapping for ordinary Move; model units, zero disables.
 //! Refuses changes during an active edit. Does not alter grid preferences.
 - (BOOL)setGeometrySnappingTolerance:(double)tolerance;
@@ -447,6 +462,12 @@ __attribute__((objc_subclassing_restricted))
 - (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly
                 normalizedViewportRect:(CGRect)normalizedViewportRect
     NS_SWIFT_NAME(frameModel(selectedObjectsOnly:normalizedViewportRect:));
+//! As above; with fillingRect the model is zoomed until it reaches the rectangle
+//! with a small margin (the user's own Frame All and Frame Selected Objects).
+- (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly
+                normalizedViewportRect:(CGRect)normalizedViewportRect
+                           fillingRect:(BOOL)fillingRect
+    NS_SWIFT_NAME(frameModel(selectedObjectsOnly:normalizedViewportRect:fillingRect:));
 //! Focus one visible model occurrence without selecting it. The expected
 //! publication stream, document generation and model revision must still match.
 //! Camera/selection-only changes do not invalidate this read-only request.
@@ -1941,6 +1962,32 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(debugBeginBevel(entityIdentifiers:edgeTopologyIndicesByEntity:));
 - (NSDictionary<NSString *, NSNumber *> *)debugBevelState;
 - (void)debugSetBevelPreviewWorkerBlocked:(BOOL)blocked;
+//! Check seam: while on, a plain Bevel stores the builder's raw result (a
+//! compound around the one solid), as builds before 15 Nov 2026 did.
++ (void)debugSetPlainBevelKeepsBuilderWrapper:(BOOL)keeps
+    NS_SWIFT_NAME(debugSetPlainBevelKeepsBuilderWrapper(_:));
+//! Check seam for the drawing rule "smooth edges and closed same-plane seams are
+//! not drawn while whole objects are worked on": turns the rule's one switch on
+//! or off for parts tessellated from now on.
++ (void)debugSetLeavesSmoothEdgesAndSeamsOut:(BOOL)leavesOut
+    NS_SWIFT_NAME(debugSetLeavesSmoothEdgesAndSeamsOut(_:));
++ (BOOL)debugLeavesSmoothEdgesAndSeamsOut
+    NS_SWIFT_NAME(debugLeavesSmoothEdgesAndSeamsOut());
+//! Check seam: skips the Join / Cut / Overlap result guard, so a check can show
+//! what was stored before the guard existed. Debug builds only.
++ (void)debugSetBooleanPlausibilityGuardSkipped:(BOOL)skipped
+    NS_SWIFT_NAME(debugSetBooleanPlausibilityGuardSkipped(_:));
+//! How many times the plain builder ran for its last result (2 = the looser retry).
++ (NSInteger)debugLastBakedBooleanAttempts NS_SWIFT_NAME(debugLastBakedBooleanAttempts());
+//! The numbers-only guard of Join / Cut / Overlap (0, 1, 2), exactly as the
+//! engine applies it: inputVolumes[0] is the part that stays; boxes are min x y z,
+//! max x y z, or nil to judge by volume alone.
++ (BOOL)debugBooleanResultIsPlausibleForOperation:(NSInteger)operation
+                                     inputVolumes:(NSArray<NSNumber *> *)inputVolumes
+                                     resultVolume:(double)resultVolume
+                                        inputsBox:(nullable NSArray<NSNumber *> *)inputsBox
+                                        resultBox:(nullable NSArray<NSNumber *> *)resultBox
+    NS_SWIFT_NAME(debugBooleanResultIsPlausible(operation:inputVolumes:resultVolume:inputsBox:resultBox:));
 - (void)debugSetMaximumBevelCaptureTopologyNodes:(NSUInteger)limit;
 - (void)debugSetMaximumBevelResultTopologyNodes:(NSUInteger)limit;
 - (void)debugSetMaximumBevelResultSolids:(NSUInteger)limit;
@@ -1973,6 +2020,13 @@ __attribute__((objc_subclassing_restricted))
 //! expose latest-wins behavior without changing production scheduling.
 - (NSDictionary<NSString *, NSNumber *> *)debugShellState;
 - (void)debugSetShellPreviewWorkerBlocked:(BOOL)blocked;
+//! Check seam: gives the offset kernel what the Shell guard holds back. The
+//! kernel can then close the process; use it only in a check that runs in a
+//! process of its own.
++ (void)debugSetShellOffsetGuardSkipped:(BOOL)skipped
+    NS_SWIFT_NAME(debugSetShellOffsetGuardSkipped(_:));
+//! How often the Shell guard has held a shell back from the kernel in this process.
++ (NSInteger)debugShellOffsetGuardRefusalCount NS_SWIFT_NAME(debugShellOffsetGuardRefusalCount());
 - (void)debugSetMaximumShellCaptureTopologyNodes:(NSUInteger)limit;
 - (void)debugSetMaximumShellResultTopologyNodes:(NSUInteger)limit;
 - (void)debugSetShellTransactionFailureCount:(NSUInteger)count;
