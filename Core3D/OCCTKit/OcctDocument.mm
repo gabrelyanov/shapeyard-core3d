@@ -13073,6 +13073,36 @@ bool BakedBooleanAdmits(const OcctDocument& document, const TDF_Label& label,
             bakedRecord = composite.label;
             return true;
         }
+        // A part made by Case, Tube or a rectangular loft keeps its recipe until it is joined or
+        // cut (benchmark phone stand and desk lamp, 16-17 Nov: Union refused them). The plain
+        // route bakes it: the recipe is dropped in the same step and Undo brings it back.
+        if (coverage == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
+            && !core3d::composite_recipe::HasRecord(label)) {
+            core3d::retained_solid::Record retained;
+            core3d::enclosure::Record enclosure;
+            core3d::sweep_persistence::Record sweep;
+            core3d::loft_persistence::Record loft;
+            if (core3d::retained_solid::Read(document.Document(), label, retained) && !retained.value
+                && core3d::enclosure::Read(document.Document(), label, enclosure)
+                && core3d::sweep_persistence::Read(document.Document(), label, sweep)
+                && core3d::loft_persistence::Read(document.Document(), label, loft)) {
+                const int recipes = int(!enclosure.label.IsNull()) + int(!sweep.label.IsNull())
+                    + int(!loft.label.IsNull());
+                if (recipes == 1) {
+                    bakedRecord = !enclosure.label.IsNull() ? enclosure.label
+                        : !sweep.label.IsNull() ? sweep.label : loft.label;
+                    return true;
+                }
+            }
+        }
+        // A Curve 3D (drawn profile) part: same bake of its profile recipe.
+        if (coverage == OcctRetainedRecipeCoverage::CurrentProfile) {
+            core3d::profile::Record profile;
+            if (core3d::profile::Read(document.Document(), label, profile) && !profile.label.IsNull()) {
+                bakedRecord = profile.label;
+                return true;
+            }
+        }
         return coverage == OcctRetainedRecipeCoverage::Absent
             || document.CanBakeSavedCutForFaceEdit(label);
     } catch (...) { return false; }
