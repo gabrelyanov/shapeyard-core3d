@@ -3586,7 +3586,8 @@ bool DebugMeshSavedGroupPrivateSurfaces(const TopoDS_Shape& shape) noexcept {
 
     std::set<std::string> selectedIdentifiers;
     if (selectedEntityIdentifiers != nil) {
-        if ((exportType != ExportTypeStl && exportType != ExportTypeObj && exportType != ExportTypeGltf)
+        if ((exportType != ExportTypeStl && exportType != ExportTypeObj && exportType != ExportTypeGltf
+                && exportType != ExportTypeStep)
             || selectedEntityIdentifiers.count == 0
             || selectedEntityIdentifiers.count > 50'000) {
             return nil;
