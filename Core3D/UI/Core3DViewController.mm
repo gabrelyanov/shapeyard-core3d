@@ -4228,6 +4228,10 @@ static bool core3dAgentVector3(NSArray<NSNumber *> *values, double out[3]) {
 - (BOOL)frameCommittedSceneSelectedOnly:(BOOL)selectedObjectsOnly
                                  rect:(CGRect)rect
                        objectIdentity:(const core3d::ObjectFrameIdentity*)identity;
+- (BOOL)frameCommittedSceneSelectedOnly:(BOOL)selectedObjectsOnly
+                                 rect:(CGRect)rect
+                       objectIdentity:(const core3d::ObjectFrameIdentity*)identity
+                           fillingRect:(BOOL)fillingRect;
 
 - (BOOL)core3d_updateSelectionWithTextureData:(NSData*)data mediaType:(NSString*)mediaType
     slot:(OcctMaterialTextureSlot)slot error:(NSError* _Nullable * _Nullable)error;
@@ -5619,6 +5623,9 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
         auto value = Core3DMakePBRMaterial(style.material, YES, NO, NO, NO, NO, NO);
         if (value) [values addObject:value];
     }
+    // Founder test, build 8545: a colour put on a pocket floor showed only after the project
+    // was reopened. Draw the parts again from the document, as reopening does.
+    (void)viewer->redrawDocument();
     [self.materialController didChangeSelectionWithMaterials:@[] colors:@[]];
     [self.materialController didChangeSelectionWithPBRMaterials:values];
     context->UpdateCurrentViewer();
@@ -16289,6 +16296,14 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
                                            rect:rect objectIdentity:nullptr];
 }
 
+- (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly
+                normalizedViewportRect:(CGRect)rect
+                           fillingRect:(BOOL)fillingRect {
+    return [self frameCommittedSceneSelectedOnly:selectedObjectsOnly
+                                           rect:rect objectIdentity:nullptr
+                                    fillingRect:fillingRect];
+}
+
 - (BOOL)frameObjectWithEntityIdentifier:(NSString *)entityIdentifier
                              expected:(Core3DSceneSnapshot *)expected
                normalizedViewportRect:(CGRect)rect {
@@ -21597,6 +21612,17 @@ static bool Core3DPublishCommittedSpatialSweep(
     }
 }
 
+- (void)setTapsSelectThroughMoveHandles:(BOOL)enabled {
+    if (![NSThread isMainThread] || !GLController) return;
+    GLController.tapsSelectThroughManipulator = enabled;
+}
+
+- (void)setAxisTriadLiftPoints:(CGFloat)points {
+    if (![NSThread isMainThread] || !_isSetuped || !GLController || !GLController.viewer) return;
+    const CGFloat scale = self.view.window.screen.scale > 0 ? self.view.window.screen.scale : UIScreen.mainScreen.scale;
+    GLController.viewer->setTriedronLift(static_cast<int>(std::lround(std::max<CGFloat>(0, points) * scale)));
+}
+
 - (BOOL)setGeometrySnappingTolerance:(double)tolerance {
     if (![NSThread isMainThread] || !_isSetuped || !GLController
         || !GLController.viewer || !GLController.viewer->canBeginCommittedEdit()) return NO;
@@ -21857,6 +21883,14 @@ static bool Core3DPublishCommittedSpatialSweep(
 - (BOOL)frameCommittedSceneSelectedOnly:(BOOL)selectedObjectsOnly
                                  rect:(CGRect)rect
                        objectIdentity:(const core3d::ObjectFrameIdentity*)identity {
+    return [self frameCommittedSceneSelectedOnly:selectedObjectsOnly rect:rect
+                                  objectIdentity:identity fillingRect:NO];
+}
+
+- (BOOL)frameCommittedSceneSelectedOnly:(BOOL)selectedObjectsOnly
+                                 rect:(CGRect)rect
+                       objectIdentity:(const core3d::ObjectFrameIdentity*)identity
+                           fillingRect:(BOOL)fillingRect {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
         return NO;
     }
@@ -21871,7 +21905,8 @@ static bool Core3DPublishCommittedSpatialSweep(
     if (viewer == nullptr || !viewer->frameModel(selectedObjectsOnly,
             static_cast<std::uint32_t>(std::llround(size.width)),
             static_cast<std::uint32_t>(std::llround(size.height)),
-            rect.origin.x, rect.origin.y, rect.size.width, rect.size.height, identity)) {
+            rect.origin.x, rect.origin.y, rect.size.width, rect.size.height, identity,
+            fillingRect ? true : false)) {
         return NO;
     }
     [GLController requestRender];
@@ -24589,6 +24624,15 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     [GLController debugSetShellPreviewWorkerBlocked:blocked];
 }
 
++ (void)debugSetShellOffsetGuardSkipped:(BOOL)skipped {
+    core3d::ShellOperationController::debugSetOffsetGuardSkipped(
+        skipped ? Standard_True : Standard_False);
+}
+
++ (NSInteger)debugShellOffsetGuardRefusalCount {
+    return core3d::ShellOperationController::debugOffsetGuardRefusalCount();
+}
+
 - (void)debugSetMaximumShellCaptureTopologyNodes:(NSUInteger)limit {
     [GLController debugSetMaximumShellCaptureTopologyNodes:limit];
 }
@@ -26539,6 +26583,46 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
 
 - (void)debugSetBevelPreviewWorkerBlocked:(BOOL)blocked {
     [GLController debugSetBevelPreviewWorkerBlocked:blocked];
+}
+
++ (void)debugSetPlainBevelKeepsBuilderWrapper:(BOOL)keeps {
+    core3d::BevelOperationController::debugSetPlainResultKeepsBuilderWrapper(
+        keeps ? Standard_True : Standard_False);
+}
+
++ (void)debugSetLeavesSmoothEdgesAndSeamsOut:(BOOL)leavesOut {
+    core3d::scene::SetEdgeDrawClassesEnabled(leavesOut);
+}
+
++ (BOOL)debugLeavesSmoothEdgesAndSeamsOut {
+    return core3d::scene::EdgeDrawClassesEnabled();
+}
+
++ (void)debugSetBooleanPlausibilityGuardSkipped:(BOOL)skipped {
+    Core3DDebugSetBooleanPlausibilityGuardSkipped(skipped);
+}
+
++ (NSInteger)debugLastBakedBooleanAttempts {
+    return Core3DDebugLastBakedBooleanAttempts();
+}
+
++ (BOOL)debugBooleanResultIsPlausibleForOperation:(NSInteger)operation
+                                     inputVolumes:(NSArray<NSNumber *> *)inputVolumes
+                                     resultVolume:(double)resultVolume
+                                        inputsBox:(nullable NSArray<NSNumber *> *)inputsBox
+                                        resultBox:(nullable NSArray<NSNumber *> *)resultBox {
+    std::vector<double> volumes;
+    for (NSNumber *volume in inputVolumes) volumes.push_back(volume.doubleValue);
+    double inputs[6] = {}, result[6] = {};
+    const bool boxes = inputsBox.count == 6 && resultBox.count == 6;
+    if (boxes) {
+        for (NSUInteger index = 0; index < 6; ++index) {
+            inputs[index] = inputsBox[index].doubleValue;
+            result[index] = resultBox[index].doubleValue;
+        }
+    }
+    return Core3DBooleanResultIsPlausible(static_cast<int>(operation), volumes, resultVolume,
+        boxes ? inputs : nullptr, boxes ? result : nullptr) ? YES : NO;
 }
 
 - (void)debugSetMaximumBevelCaptureTopologyNodes:(NSUInteger)limit {
@@ -28500,6 +28584,15 @@ std::unordered_map<NSUInteger,B2BudgetSessionBox>& B2BudgetSessions(){
     [GLController assetData:^(NSData * _Nullable data) {
         completion(data);
     }];
+}
+
++ (void)debugSetForcedSaveProbeFailures:(NSInteger)count {
+    [GLViewController debugSetForcedSaveProbeFailures:count];
+}
+
+- (NSInteger)documentWouldSaveProbe {
+    if (![NSThread isMainThread] || _isLoading || !_isSetuped || GLController == nil) return -1;
+    return [GLController core3d_documentWouldSave];
 }
 
 - (NSData *)thumbData {
