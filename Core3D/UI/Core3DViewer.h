@@ -725,6 +725,15 @@ namespace core3d {
             double snapRadius = 0;
         };
         std::vector<MeasurePick> measurePicksForCurrentSelection() noexcept;
+        // A part that is still an imported mesh is one face of triangles with no edges, so a Measure
+        // tap in edge mode selects nothing on it; such a tap takes the corner of the triangle it lands
+        // on that is nearest the tap (world space). At most two; a tap on a taken corner gives it back.
+        struct MeasureMeshPick {
+            Handle(AIS_InteractiveObject) presentation;
+            gp_Pnt node;
+        };
+        std::vector<MeasureMeshPick> measureMeshPicks() noexcept;
+        void clearMeasureMeshPicks() noexcept { _measureMeshPicks.clear(); }
         void Select(int theX, int theY);
         void StartRotation(int theX, int theY);
         void Rotation(int theX, int theY);
@@ -1295,6 +1304,8 @@ namespace core3d {
         std::shared_ptr<TransformInspectorMeasurementController>
             _transformInspectorMeasurementController;
         std::vector<MeasurePick> _measurePicks;
+        std::vector<MeasureMeshPick> _measureMeshPicks;
+        bool recordMeasureMeshPick(int theX, int theY) noexcept;
         
         std::function<void(int,int)> _interactiveCallback;
         std::function<void(bool)> _geometrySnapFeedbackChangedCallback;
