@@ -13007,13 +13007,16 @@ bool InteriorPointOfFace(const TopoDS_Face& face, gp_Pnt& point) noexcept {
         BRepTools::UVBounds(face, u0, u1, v0, v1);
         const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
         if (surface.IsNull()) return false;
-        for (int i = 1; i <= 7; ++i)
-            for (int j = 1; j <= 7; ++j) {
-                const gp_Pnt2d uv(u0 + (u1 - u0) * (i / 8.0 + (i % 2) * 0.011),
-                                  v0 + (v1 - v0) * (j / 8.0 + (j % 2) * 0.013));
-                BRepClass_FaceClassifier inside(face, uv, Precision::Confusion());
-                if (inside.State() == TopAbs_IN) { point = surface->Value(uv.X(), uv.Y()); return true; }
-            }
+        // A coarse grid first, then a fine one: a narrow face (the rim of a thin-walled shade,
+        // a ring 3 mm wide on a 117 mm circle) has no point of the coarse grid inside it.
+        for (const int cells : {8, 64})
+            for (int i = 1; i < cells; ++i)
+                for (int j = 1; j < cells; ++j) {
+                    const gp_Pnt2d uv(u0 + (u1 - u0) * ((i + (i % 2) * 0.088) / cells),
+                                      v0 + (v1 - v0) * ((j + (j % 2) * 0.104) / cells));
+                    BRepClass_FaceClassifier inside(face, uv, Precision::Confusion());
+                    if (inside.State() == TopAbs_IN) { point = surface->Value(uv.X(), uv.Y()); return true; }
+                }
         return false;
     } catch (...) { return false; }
 }

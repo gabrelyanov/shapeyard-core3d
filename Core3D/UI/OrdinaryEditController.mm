@@ -4,7 +4,16 @@
 #include <TopoDS_Face.hxx>
 #include <TopoDS.hxx>
 #include <XCAFDoc_VisMaterialPBR.hxx>
-#include <BRepBuilderAPI_GTransform.hxx>
+#include <gp_GTrsf.hxx>
+#include <Bnd_Box.hxx>
+#include <BRepBndLib.hxx>
+#include <BRepTools.hxx>
+#include <BRep_Tool.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <Geom_Surface.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 
 #if DEBUG // Cut475 phase diagnostics only
 #include <cstdio>
@@ -49,6 +58,68 @@ struct Cut475Scope {
 #include <TDF_LabelSequence.hxx>
 #include <TDataStd_Integer.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
+
+namespace {
+// The colours put on single faces, after a Dimensions change: each face of the new shape whose
+// inside point, taken back through the inverse of the size change, lies on a painted face of the
+// old shape gets that face's colour. The painted faces are not rebuilt one by one: a
+// BRepBuilderAPI_GTransform of a lone face already converted to NURBS by an earlier change
+// crashed in BRepTools_NurbsConvertModification::NewCurve2d (SIGSEGV, lamp shade 17 Nov,
+// builds 5 and 6), so only points are mapped here. Every new face is listed at most once and
+// carries itself, so CarryFaceColours matches it to itself.
+std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> ResizedFaceColours(
+    const TopoDS_Shape& result, const gp_GTrsf& sizeChange,
+    const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& painted) noexcept {
+    std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> carried;
+    try {
+        if (result.IsNull() || painted.empty()) return carried;
+        const gp_GTrsf back = sizeChange.Inverted();
+        Bnd_Box box; BRepBndLib::Add(result, box);
+        const double tolerance = box.IsVoid() ? 1.0e-6 : 1.0e-5 * std::sqrt(box.SquareExtent());
+        const auto insidePoint = [](const TopoDS_Face& face, gp_Pnt& point) {
+            Standard_Real u0, u1, v0, v1;
+            BRepTools::UVBounds(face, u0, u1, v0, v1);
+            const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+            if (surface.IsNull()) return false;
+            // As InteriorPointOfFace (OcctDocument.mm): coarse grid, then a fine one for narrow faces.
+            for (const int cells : {8, 64})
+                for (int i = 1; i < cells; ++i)
+                    for (int j = 1; j < cells; ++j) {
+                        const gp_Pnt2d uv(u0 + (u1 - u0) * ((i + (i % 2) * 0.088) / cells),
+                                          v0 + (v1 - v0) * ((j + (j % 2) * 0.104) / cells));
+                        BRepClass_FaceClassifier inside(face, uv, Precision::Confusion());
+                        if (inside.State() == TopAbs_IN) { point = surface->Value(uv.X(), uv.Y()); return true; }
+                    }
+            return false;
+        };
+        const auto onFace = [tolerance](const gp_Pnt& point, const TopoDS_Face& face) {
+            const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+            if (surface.IsNull()) return false;
+            GeomAPI_ProjectPointOnSurf projection(point, surface);
+            if (!projection.IsDone() || projection.NbPoints() == 0
+                || projection.LowerDistance() > tolerance) return false;
+            Standard_Real u = 0, v = 0; projection.LowerDistanceParameters(u, v);
+            BRepClass_FaceClassifier inside(face, gp_Pnt2d(u, v), tolerance);
+            return inside.State() == TopAbs_IN || inside.State() == TopAbs_ON;
+        };
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(result, TopAbs_FACE, faces);
+        for (Standard_Integer index = 1; index <= faces.Extent(); ++index) {
+            const TopoDS_Face& face = TopoDS::Face(faces(index));
+            gp_Pnt point;
+            if (!insidePoint(face, point)) continue;
+            gp_XYZ before = point.XYZ();
+            back.Transforms(before);
+            for (const auto& [old, material] : painted) {
+                if (!onFace(gp_Pnt(before), old)) continue;
+                carried.emplace_back(face, material);
+                break;
+            }
+        }
+    } catch (...) { carried.clear(); }
+    return carried;
+}
+} // namespace
 
 namespace core3d {
 struct SweepRebuildGuard {
@@ -2817,13 +2888,8 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                 && !record.previous.shape.IsEqual(record.requested.shape)
                 && _document->CaptureFaceColours(record.previous.label, 1.0, paintedLabels, paintedFaces)
                 && keepFaceLabelsOnly(paintedLabels);
-            if (carriesFaceColours && record.requested.faceColourMap) {
-                for (auto& painted : paintedFaces) {
-                    BRepBuilderAPI_GTransform moved(painted.first, *record.requested.faceColourMap, Standard_True);
-                    if (moved.IsDone() && !moved.Shape().IsNull() && moved.Shape().ShapeType() == TopAbs_FACE)
-                        painted.first = TopoDS::Face(moved.Shape());
-                }
-            }
+            if (carriesFaceColours && record.requested.faceColourMap)
+                paintedFaces = ResizedFaceColours(record.requested.shape, *record.requested.faceColourMap, paintedFaces);
             if ((!featureStaged && !treatmentStagedR2 && !record.previous.shape.IsEqual(record.requested.shape)
                     && (record.requested.operation == OrdinaryTransformOperation::MeshSolidConversion
                         // ReplaceShape keeps the representation; Make solid alone changes it.
