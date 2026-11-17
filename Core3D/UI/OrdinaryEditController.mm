@@ -2799,11 +2799,24 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             // command and each colour is put on the face it belongs to in the new shape.
             std::vector<TDF_Label> paintedLabels;
             std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> paintedFaces;
+            // Only the labels of faces are dropped. CaptureFaceColours hands back every child
+            // label that holds a shape, and a part drawn as a profile (extruded outline, ring,
+            // revolved part, tube) keeps its own record in such a child, as an oval cylinder
+            // does: that child holds the whole solid, not a face. With the record dropped the
+            // readback below found it changed and every Dimensions change on such a part was
+            // refused (builds 5 and 6, 17 Nov). The record stays, as it did before 15 Nov.
+            const auto keepFaceLabelsOnly = [](std::vector<TDF_Label>& labels) {
+                labels.erase(std::remove_if(labels.begin(), labels.end(), [](const TDF_Label& child) {
+                    const TopoDS_Shape held = XCAFDoc_ShapeTool::GetShape(child);
+                    return held.IsNull() || held.ShapeType() != TopAbs_FACE;
+                }), labels.end());
+                return !labels.empty();
+            };
             const bool carriesFaceColours = !featureStaged && !treatmentStagedR2
                 && record.requested.operation == OrdinaryTransformOperation::Scale
                 && !record.previous.shape.IsEqual(record.requested.shape)
                 && _document->CaptureFaceColours(record.previous.label, 1.0, paintedLabels, paintedFaces)
-                && !paintedLabels.empty();
+                && keepFaceLabelsOnly(paintedLabels);
             if (carriesFaceColours && record.requested.faceColourMap) {
                 for (auto& painted : paintedFaces) {
                     BRepBuilderAPI_GTransform moved(painted.first, *record.requested.faceColourMap, Standard_True);
