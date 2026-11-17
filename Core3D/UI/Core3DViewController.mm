@@ -3042,6 +3042,7 @@ static bool Core3DHostSessionCurrent(Core3DModelingHostSession *session) {
 }
 @implementation Core3DModelingHostSession
 - (instancetype)initPrivate {return [super init];}
+- (BOOL)isCurrentHostAccountSession { return Core3DHostSessionCurrent(self); }
 + (instancetype)installHostAccountSession:(NSString *)scope generation:(NSString *)generation {
     if (![NSThread isMainThread]) return nil;
     // Even an invalid replacement retires old host authority; login failure

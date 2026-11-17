@@ -690,6 +690,8 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(installHostAccountSession(scope:generation:));
 + (void)retireHostAccountSession:(Core3DModelingHostSession *)session
     NS_SWIFT_NAME(retireHostAccountSession(_:));
+//! Passive authority check; NO off the main thread or after retirement/replacement.
+- (BOOL)isCurrentHostAccountSession NS_SWIFT_NAME(isCurrent());
 @end
 
 typedef NS_ENUM(NSInteger, Core3DModelingEvidenceCoverage) {
