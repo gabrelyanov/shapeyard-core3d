@@ -26796,6 +26796,10 @@ Standard_Boolean OcctDocument::StageBoundedCurveCreate(
 
         const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
         if (shapes.IsNull()) return Standard_False;
+        // This detached wire becomes document-owned below. Freeze it before
+        // the first saved state, as TNaming does when restoring it on Redo.
+        // Otherwise history changes the serialized Free bit on this same wire.
+        rebuilt.wire.Free(Standard_False);
         const TDF_Label owner = shapes->NewShape();
         shapes->SetShape(owner, rebuilt.wire);
         TDataStd_AsciiString::Set(owner, EntityIdentifierAttributeID(),
@@ -29412,6 +29416,7 @@ struct Side {
     std::vector<std::uint8_t> source, treatment;
     core3d::inspector_primitive::Record inspectorPrimitive;
     core3d::retained_solid::Record savedCut;
+    std::shared_ptr<const OcctBoundedCurveCapture> boundedCurve;
     std::string entityIdentifier, definitionIdentifier;
     std::string profileIdentifier;
     TDF_Label profileLabel;
@@ -29446,6 +29451,16 @@ bool CaptureOrdinaryNamingSide(const OcctDocument& owner,
         if (doc.IsNull() || label.IsNull() || label.Data() != doc->GetData()) return false;
         side.shape = XCAFDoc_ShapeTool::GetShape(label);
         if (side.shape.IsNull()) return false;
+        if (family == OcctDocument::OrdinaryNamingFamily::BoundedCurveCreation) {
+            core3d::bounded_curve::Record curve;
+            OcctBoundedCurveCapture exact;
+            if (!core3d::bounded_curve::Read(doc, label, curve) || !curve.value
+                || !owner.ReadBoundedCurveExact(curve.value->persisted.ownerState.owner, exact)
+                || !exact.record.owner.IsEqual(label)
+                || !CaptureTreatmentSubtreeNaming(label, side.naming)) return false;
+            side.boundedCurve = std::make_shared<const OcctBoundedCurveCapture>(std::move(exact));
+            return true;
+        }
         if (family == OcctDocument::OrdinaryNamingFamily::UnretainedShell
             || family == OcctDocument::OrdinaryNamingFamily::SavedCutShell) {
             // Only an admitted Shell may use these measured naming sides.
@@ -29514,6 +29529,8 @@ bool OrdinaryNamingSideMatches(const OcctDocument& owner,
         && expected.profileLabel == actual.profileLabel
         && expected.inspectorPrimitive.IsEqual(actual.inspectorPrimitive)
         && expected.savedCut.IsEqual(actual.savedCut)
+        && bool(expected.boundedCurve) == bool(actual.boundedCurve)
+        && (!expected.boundedCurve || expected.boundedCurve->IsEqual(*actual.boundedCurve))
         && expected.entityIdentifier == actual.entityIdentifier
         && expected.definitionIdentifier == actual.definitionIdentifier
         && expected.source == actual.source && expected.hasTreatment == actual.hasTreatment
@@ -29532,9 +29549,29 @@ std::size_t OrdinaryNamingStorage(const ordinary_naming::Record& record) noexcep
             for (const auto& naming : side->naming)
                 bytes += naming.labelEntry.capacity() + 1
                     + naming.shapePairs.capacity() * sizeof(std::pair<TopoDS_Shape, TopoDS_Shape>);
+            if (side->boundedCurve) {
+                const auto& curve = *side->boundedCurve;
+                const auto& definition = curve.persisted.value.definition;
+                const auto& visibility = curve.ownerReceipt.visibility;
+                const auto& object = visibility.object.object;
+                bytes += sizeof(curve) + 2 * sizeof(void*)
+                    + definition.controlPoints.capacity() * sizeof(core3d::bounded_curve::ControlPoint)
+                    + definition.knots.capacity() * sizeof(core3d::bounded_curve::Knot)
+                    + definition.weights.capacity() * sizeof(double)
+                    + curve.persisted.ownerState.tombstones.capacity() * sizeof(core3d::bounded_curve::UUID)
+                    + curve.documentIdentifier.capacity() + 1
+                    + curve.ownerReceipt.documentIdentifier.capacity() + 1
+                    + visibility.layers.capacity() * sizeof(TDF_Label)
+                    + (visibility.layerInvisibleAttributePresent.capacity() + 7) / 8
+                    + (visibility.object.name.Length() + 1) * sizeof(Standard_ExtCharacter)
+                    + object.entityIdentifier.capacity() + 1
+                    + object.definitionIdentifier.capacity() + 1
+                    + object.meshRegionPartition.capacity()
+                    + curve.ownerReceipt.appearance.visualValues.capacity() * sizeof(double);
+            }
         }
     }
-    // Shape handles and the immutable saved-cut payload share storage already
+    // Shape handles and immutable saved-cut/C1 payloads share storage already
     // held by the live OCAF delta; this record makes no BRep or payload copy.
     return bytes;
 }
@@ -29617,8 +29654,11 @@ std::shared_ptr<core3d::ordinary_naming::Record> OcctDocument::PrepareOrdinaryNa
             || myOcafDoc->GetUndoLimit() <= 0 || myOcafDoc->GetUndoLimit() > 1000
             || creationRootCount > 1024 || (creationRootCount == 0) == existingOwner.IsNull()
             || (family != OrdinaryNamingFamily::Profile && family != OrdinaryNamingFamily::UnretainedShell
-                && family != OrdinaryNamingFamily::SavedCutShell)
-            || (creationRootCount > 0 && family != OrdinaryNamingFamily::Profile)) return {};
+                && family != OrdinaryNamingFamily::SavedCutShell
+                && family != OrdinaryNamingFamily::BoundedCurveCreation)
+            || (creationRootCount > 0 && family != OrdinaryNamingFamily::Profile
+                && family != OrdinaryNamingFamily::BoundedCurveCreation)
+            || (family == OrdinaryNamingFamily::BoundedCurveCreation && creationRootCount != 1)) return {};
         PruneOrdinaryNamingHistory();
         if (myOrdinaryNamingHistory.size() >= kOrdinaryNamingRecords) return {};
         auto record = std::make_shared<ordinary_naming::Record>();
