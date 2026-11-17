@@ -1062,6 +1062,9 @@ struct OcctGeometryDuplicationRequest
     // Repeat copies supported authored face finishes onto new subshape labels.
     // Charge those labels as well as the whole-part appearance before copying.
     bool preservesAuthoredFaceMaterials = false;
+    // Duplicate only: a part whose standalone saved Hole could be baked is
+    // copied as a plain solid; the source keeps its resizable Hole record.
+    bool copiesSavedCutAsPlainSolid = false;
 };
 
 //! Register the app-owned BinOcaf/BinXCAF project formats with a narrow,
@@ -2495,6 +2498,16 @@ public:
     //! Push-pull may bake a standalone older saved cut; other topology tools
     //! retain HasNoSavedSweepForTopology's stricter admission.
     Standard_Boolean CanBakeSavedCutForFaceEdit(const TDF_Label& label) const noexcept;
+
+    //! Bevel/Round may also bake an ordinary saved Join/Cut/Overlap (its two
+    //! frozen originals, nothing else) inside their own Apply command, exactly
+    //! as PrepareBooleanResultForFaceEdit removes it for Push-pull. Read-only.
+    Standard_Boolean CanBakeBooleanResultForFaceEdit(const TDF_Label& label) const noexcept;
+
+    //! Either of the two bakeable records above.
+    Standard_Boolean CanBakeRecordForFaceEdit(const TDF_Label& label) const noexcept {
+        return CanBakeSavedCutForFaceEdit(label) || CanBakeBooleanResultForFaceEdit(label);
+    }
 
     //! Bake a saved Join/Cut/Overlap or standalone older cut before a face edit.
     //! Requires the face edit's open command: abort/undo restores the record.

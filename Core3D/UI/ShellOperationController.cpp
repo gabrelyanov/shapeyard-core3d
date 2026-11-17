@@ -815,6 +815,8 @@ Standard_Boolean TryPrepareShellOperationSource(
                     ShellOperationController::kMaximumSourceTopologyNodes,
                     ShellOperationController::kMaximumStyledSubshapeLabels, single,
                     // Resized Add shapes store flat faces as splines (mug body top).
+                    Standard_True,
+                    // A part with a saved Hole: Apply bakes the hole (route B1).
                     Standard_True))
                 return Standard_False;
             if (result.original.IsNull()) {
@@ -1129,6 +1131,9 @@ private:
                 new ShellCancellationIndicator(
                     theRequest.cancellation);
             BRepOffsetAPI_MakeThickSolid aBuilder;
+            SHELL_DEBUG_PROBE(gShellDebugFaceShape, 0);
+            SHELL_DEBUG_PROBE(gShellDebugConeStep, 0);
+            SHELL_DEBUG_PROBE(gShellDebugComputeStage, 4);
 #ifdef DEBUG
             aResult.failureStage = 2; // Offset construction, including exceptions.
 #endif
@@ -1142,6 +1147,8 @@ private:
             aResult.offsetError = static_cast<Standard_Integer>(aBuilder.MakeOffset().Error());
             aResult.failureStage = 3; // Offset completion/error gate.
 #endif
+            SHELL_DEBUG_PROBE(gShellDebugComputeStage, aBuilder.IsDone()
+                ? 300 : 100 + static_cast<int>(aBuilder.MakeOffset().Error()));
             if (wasCancelled()
                 || (!aBuilder.IsDone()
                     && aBuilder.MakeOffset().Error()
@@ -1167,6 +1174,7 @@ private:
                     , &aResult.failureStage
 #endif
                     )) {
+                SHELL_DEBUG_PROBE(gShellDebugComputeStage, 200);
                 if (wasCancelled()) {
                     aResult.outcome =
                         ShellPreviewWorkerOutcome::Cancelled;
@@ -1343,7 +1351,8 @@ Standard_Boolean ShellOperationController::tryPrepareSource(
                 myContext,
                 myDoc,
                 aProof,
-                kMaximumStyledSubshapeLabels)
+                kMaximumStyledSubshapeLabels,
+                Standard_True)
             || !ShellOpeningSetIsValid(aProof.shape, aProof.openingFaces,
                                   aProof.openingFaceTopologyIndices)) {
             return Standard_False;
@@ -1424,6 +1433,12 @@ Standard_Boolean ShellOperationController::tryPrepareSource(
 		if (coverage == OcctRetainedRecipeCoverage::CurrentProfile) {
 			if (aSource->profileShellOpenings.size() != aProof.openingFaces.size())
 				return Standard_False;
+		} else if (coverage == OcctRetainedRecipeCoverage::PresentOutsideP4Coverage
+				&& myDoc->CanBakeSavedCutForFaceEdit(aProof.documentLabel)) {
+			// Route B1: a standalone saved Hole is baked inside Apply's own
+			// command, exactly as Push-pull and Bevel do.
+			aSource->profileShellOpenings.clear();
+			aSource->bakesSavedCut = Standard_True;
 		} else if (coverage != OcctRetainedRecipeCoverage::Absent) {
 			return Standard_False;
 		}
@@ -1522,7 +1537,10 @@ Standard_Boolean ShellOperationController::sourceIsCurrent() const noexcept
             || mySource->original.IsNull()
             || mySource->shape.IsNull()
             || aStoredShape.IsNull()
-            || !IsBRepModelingLabel(myDoc, mySource->label)
+            || !IsBRepModelingLabel(myDoc, mySource->label,
+                mySource->bakesSavedCut)
+            || (mySource->bakesSavedCut
+                && !myDoc->CanBakeSavedCutForFaceEdit(mySource->label))
             || !myDoc->IsPresentationEditable(mySource->original)
             || !myDoc->ShapeLabel(mySource->original).IsEqual(
                 mySource->label)
@@ -2088,7 +2106,8 @@ ShellOperationController::inspectDocumentState() const noexcept
             profile::Record restored;
             if (!profile::Read(myDoc->Document(), mySource->label, restored)
                 || !restored.IsEqual(mySource->profileRecord)) return DocumentState::Other;
-            return IsBRepModelingLabel(myDoc, mySource->label)
+            return IsBRepModelingLabel(myDoc, mySource->label,
+                    mySource->bakesSavedCut)
                 ? DocumentState::Original
                 : DocumentState::Other;
         }
@@ -2272,7 +2291,9 @@ ShellApplyResult ShellOperationController::apply() noexcept
             return resolveAfterMutation();
         }
 #endif
-        if (!myDoc->ReplaceShape(mySource->label, myPreviewResult)
+        if ((mySource->bakesSavedCut
+                && !myDoc->PrepareBooleanResultForFaceEdit(mySource->label))
+            || !myDoc->ReplaceShape(mySource->label, myPreviewResult)
             || (myPendingProfile && !profile::Stage(aDocument, mySource->label,
                     *myPendingProfile, mySource->profileRecord.identifier, true))) {
             return resolveAfterMutation();
@@ -2450,6 +2471,9 @@ ShellOperationController::debugPreviewState() const noexcept
         aState.workerPending = aWorker.pending;
         aState.lastComputeWasMainThread =
             aWorker.lastComputeWasMainThread;
+        aState.debugFaceShape = gShellDebugFaceShape.load();
+        aState.debugConeStep = gShellDebugConeStep.load();
+        aState.debugComputeStage = gShellDebugComputeStage.load();
     }
     return aState;
 }
