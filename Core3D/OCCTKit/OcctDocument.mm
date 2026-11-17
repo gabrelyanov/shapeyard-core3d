@@ -12917,6 +12917,65 @@ Standard_Boolean OcctDocument::IsBooleanResultLabel(const TDF_Label& label) cons
     } catch (...) { return Standard_False; }
 }
 
+
+#if DEBUG
+// Check seams, Debug builds only (declared in OcctDocument.h inside its Debug block).
+namespace {
+std::atomic_bool gBooleanPlausibilityGuardSkipped{false};
+// How many times the plain builder ran for its last result: 1, or 2 when the looser retry was used.
+std::atomic<int> gBakedBooleanLastAttempts{0};
+}
+
+int Core3DDebugLastBakedBooleanAttempts() noexcept { return gBakedBooleanLastAttempts.load(); }
+
+void Core3DDebugSetBooleanPlausibilityGuardSkipped(const bool skipped) noexcept {
+    gBooleanPlausibilityGuardSkipped.store(skipped);
+}
+#endif
+
+// The guard as the two Join paths use it: the numbers test, unless a debug check has asked
+// to see what happens without it.
+static bool BooleanResultPassesGuard(
+    const int operation, const std::vector<double>& inputVolumes, const double resultVolume,
+    const double* inputsBox, const double* resultBox) noexcept {
+#if DEBUG
+    if (gBooleanPlausibilityGuardSkipped.load()) return true;
+#endif
+    return Core3DBooleanResultIsPlausible(operation, inputVolumes, resultVolume, inputsBox, resultBox);
+}
+
+bool Core3DBooleanResultIsPlausible(
+    const int operation, const std::vector<double>& inputVolumes, const double resultVolume,
+    const double* inputsBox, const double* resultBox) noexcept {
+    try {
+        if (operation < 0 || operation > 2 || inputVolumes.size() < 2) return true;
+        double largest = 0.0, smallest = std::numeric_limits<double>::infinity(), sum = 0.0;
+        for (const double volume : inputVolumes) {
+            if (!std::isfinite(volume) || !(volume > 0.0)) return true;
+            largest = std::max(largest, volume);
+            smallest = std::min(smallest, volume);
+            sum += volume;
+        }
+        if (!std::isfinite(resultVolume) || !(resultVolume > 0.0)) return false;
+        if (operation == 1) return resultVolume <= inputVolumes.front() * (1.0 + 1.0e-3);
+        if (operation == 2) return resultVolume <= smallest * (1.0 + 1.0e-3);
+        const double tolerance = 1.0e-3 * largest;
+        if (resultVolume < largest - tolerance || resultVolume > sum + tolerance) return false;
+        if (inputsBox == nullptr || resultBox == nullptr) return true;
+        double diagonal = 0.0;
+        for (int axis = 0; axis < 3; ++axis) {
+            if (!std::isfinite(inputsBox[axis]) || !std::isfinite(inputsBox[axis + 3])
+                || !std::isfinite(resultBox[axis]) || !std::isfinite(resultBox[axis + 3])) return false;
+            const double side = inputsBox[axis + 3] - inputsBox[axis];
+            diagonal += side * side;
+        }
+        const double slack = std::max(1.0e-9, 1.0e-3 * std::sqrt(diagonal));
+        for (int value = 0; value < 6; ++value)
+            if (std::abs(inputsBox[value] - resultBox[value]) > slack) return false;
+        return true;
+    } catch (...) { return false; }
+}
+
 namespace {
 // The plain (baked) Join / Cut / Overlap of two stored parts, in the frame of the part
 // that stays (0 union, 1 subtract, 2 intersect). Works on copies. Shared by Apply and the
@@ -13010,39 +13069,107 @@ bool BakedBooleanShapeOfMany(const TopoDS_Shape& targetStored, const gp_Trsf& ta
             if (!moved.IsDone()) { refusal = "invalid-result"; return false; }
             tools.Append(moved.Shape());
         }
-        const auto run = [&](BRepAlgoAPI_BooleanOperation& algorithm) {
-            algorithm.SetArguments(arguments); algorithm.SetTools(tools);
-            algorithm.SetRunParallel(Standard_False); algorithm.SetNonDestructive(Standard_True);
-            algorithm.SetFuzzyValue(Precision::Confusion());
-            algorithm.Build();
-            if (algorithm.IsDone() && !algorithm.HasErrors()) result = algorithm.Shape();
+        // The inputs are measured once; every attempt is judged against them.
+        std::vector<double> volumes;
+        Bnd_Box inputs;
+        const auto measure = [&](const TopoDS_Shape& shape) {
+            GProp_GProps properties;
+            BRepGProp::VolumeProperties(shape, properties);
+            volumes.push_back(properties.Mass());
+            if (operation == 0) BRepBndLib::AddOptimal(shape, inputs, Standard_False, Standard_False);
         };
-        if (operation == 0) { BRepAlgoAPI_Fuse a; run(a); }
-        else if (operation == 1) { BRepAlgoAPI_Cut a; run(a); }
-        else { BRepAlgoAPI_Common a; run(a); }
-        if (!result.IsNull() && result.ShapeType() != TopAbs_SOLID) {
-            TopoDS_Shape only; int solids = 0;
-            TopoDS_Compound pieces; BRep_Builder builder; builder.MakeCompound(pieces);
-            for (TopExp_Explorer it(result, TopAbs_SOLID); it.More(); it.Next()) {
-                only = it.Current(); ++solids; builder.Add(pieces, it.Current());
+        measure(targetShape);
+        for (TopTools_ListOfShape::Iterator tool(tools); tool.More(); tool.Next()) measure(tool.Value());
+        double inputsBox[6] = {};
+        const bool inputsBoxed = operation == 0 && !inputs.IsVoid() && !inputs.IsOpen();
+        if (inputsBoxed)
+            inputs.Get(inputsBox[0], inputsBox[1], inputsBox[2], inputsBox[3], inputsBox[4], inputsBox[5]);
+
+        // One run of the builder with the given fuzzy value: 0 = a result that can be trusted
+        // (left in `result`), 1 = no valid solid, 2 = a valid solid that cannot be what was asked for.
+        const auto attempt = [&](const double fuzzy) -> int {
+            result.Nullify();
+            const auto run = [&](BRepAlgoAPI_BooleanOperation& algorithm) {
+                algorithm.SetArguments(arguments); algorithm.SetTools(tools);
+                algorithm.SetRunParallel(Standard_False); algorithm.SetNonDestructive(Standard_True);
+                algorithm.SetFuzzyValue(fuzzy);
+                algorithm.Build();
+                if (algorithm.IsDone() && !algorithm.HasErrors()) result = algorithm.Shape();
+            };
+            if (operation == 0) { BRepAlgoAPI_Fuse a; run(a); }
+            else if (operation == 1) { BRepAlgoAPI_Cut a; run(a); }
+            else { BRepAlgoAPI_Common a; run(a); }
+            if (!result.IsNull() && result.ShapeType() != TopAbs_SOLID) {
+                TopoDS_Shape only; int solids = 0;
+                TopoDS_Compound pieces; BRep_Builder builder; builder.MakeCompound(pieces);
+                for (TopExp_Explorer it(result, TopAbs_SOLID); it.More(); it.Next()) {
+                    only = it.Current(); ++solids; builder.Add(pieces, it.Current());
+                }
+                // A part that was several pieces may stay several pieces; one piece stays a solid.
+                result = solids == 1 ? only : (severalPieces && solids >= 2 ? TopoDS_Shape(pieces) : TopoDS_Shape());
             }
-            // A part that was several pieces may stay several pieces; one piece stays a solid.
-            result = solids == 1 ? only : (severalPieces && solids >= 2 ? TopoDS_Shape(pieces) : TopoDS_Shape());
+            GProp_GProps mass;
+            if (!result.IsNull()) BRepGProp::VolumeProperties(result, mass);
+            if (result.IsNull() || !BRepCheck_Analyzer(result, Standard_True).IsValid()
+                || !(mass.Mass() > 0)) {
+                result.Nullify();
+                return 1;
+            }
+            // A valid solid is not yet the right one. The builder can return a small wrong piece
+            // without reporting an error (toy car, 15 Nov 2026: a Union left a fragment of the
+            // axle as "the body"). Preview and Apply both come through here, so a result that
+            // cannot be what was asked for never reaches the tick: both parts stay, no history step.
+            double resultBox[6] = {};
+            bool boxes = false;
+            if (inputsBoxed) {
+                Bnd_Box made;
+                BRepBndLib::AddOptimal(result, made, Standard_False, Standard_False);
+                if (!made.IsVoid() && !made.IsOpen()) {
+                    made.Get(resultBox[0], resultBox[1], resultBox[2], resultBox[3], resultBox[4], resultBox[5]);
+                    boxes = true;
+                }
+            }
+            if (!BooleanResultPassesGuard(operation, volumes, mass.Mass(),
+                    boxes ? inputsBox : nullptr, boxes ? resultBox : nullptr)) {
+                result.Nullify();
+                return 2;
+            }
+            return 0;
+        };
+#if DEBUG
+        gBakedBooleanLastAttempts.store(1);
+#endif
+        int outcome = attempt(Precision::Confusion());
+        if (outcome == 2 && operation == 0 && inputsBoxed) {
+            // Second and last try for a Join the guard refused: the same fuse with a looser
+            // coincidence tolerance, a ten-thousandth of the parts' size. Faces that should
+            // coincide but are microns apart (resized and bevelled parts are stored as
+            // approximated surfaces) are then treated as coinciding. Its result must pass the
+            // same validity check and the same guard, or the Join is refused as before.
+            const double dx = inputsBox[3] - inputsBox[0], dy = inputsBox[4] - inputsBox[1],
+                dz = inputsBox[5] - inputsBox[2];
+            const double looser = 1.0e-4 * std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (std::isfinite(looser) && looser > Precision::Confusion()) {
+#if DEBUG
+                gBakedBooleanLastAttempts.store(2);
+#endif
+                if (attempt(looser) == 0) outcome = 0; else outcome = 2;
+            }
         }
-        GProp_GProps mass;
-        if (!result.IsNull()) BRepGProp::VolumeProperties(result, mass);
-        if (result.IsNull() || !BRepCheck_Analyzer(result, Standard_True).IsValid()
-            || !(mass.Mass() > 0)) {
-            refusal = "invalid-result";
+        if (outcome != 0) {
+            refusal = outcome == 1 ? "invalid-result" : "unreliable-result";
             result.Nullify();
             return false;
         }
         // How much of the part a Cut took away (design system rule 11: a Cut that removes
         // nothing must not use up the cutter).
+        // (Build 5: the result's volume is measured here; the builder's own measure now lives
+        // inside each attempt, see the plausibility guard above.)
         if (removedShare && operation == 1) {
-            GProp_GProps whole;
+            GProp_GProps whole, left;
             BRepGProp::VolumeProperties(targetShape, whole);
-            if (whole.Mass() > 0) *removedShare = (whole.Mass() - mass.Mass()) / whole.Mass();
+            BRepGProp::VolumeProperties(result, left);
+            if (whole.Mass() > 0) *removedShare = (whole.Mass() - left.Mass()) / whole.Mass();
         }
         return true;
     } catch (...) { refusal = "invalid-result"; result.Nullify(); return false; }
@@ -13611,6 +13738,16 @@ Standard_Boolean OcctDocument::ApplyThroughHole(
         }
         Handle(AIS_Shape) shown = new AIS_Shape(result);
         shown->SetLocalTransformation(presentation->LocalTransformation());
+        // A colour put on one face is a label that points at that face. The hole replaces the
+        // shape, so every such label must follow in the same command (toy car, 15 Nov 2026:
+        // left behind, the label pointed at a face the part no longer had; the colour was gone
+        // and the project could not be saved until Undo). As Join/Cut and Bevel do.
+        std::vector<TDF_Label> oldFaceLabels;
+        std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> colouredFaces;
+        if (!CaptureFaceColours(label, 1.0, oldFaceLabels, colouredFaces)) {
+            refusal = "invalid-result";
+            return Standard_False;
+        }
         refusal = "stale-source";
         myOcafDoc->NewCommand();
         if (!myOcafDoc->HasOpenCommand()) return Standard_False;
@@ -13624,7 +13761,8 @@ Standard_Boolean OcctDocument::ApplyThroughHole(
         }
         ForgetInspectorPrimitiveRecord(label);
         if (!ReplaceShape(label, shown)
-            || !XCAFDoc_ShapeTool::GetShape(label).IsEqual(result)) {
+            || !XCAFDoc_ShapeTool::GetShape(label).IsEqual(result)
+            || !CarryFaceColours(label, result, oldFaceLabels, colouredFaces)) {
             myOcafDoc->AbortCommand();
             return Standard_False;
         }
@@ -13768,19 +13906,35 @@ core3d::authored_parameter::PairPrepareReply OcctDocument::PrepareBooleanSources
         observation.recipeBytes = std::move(recipes);
         observation.undoDepth = capture->state_->undoDepth;
         observation.redoDepth = capture->state_->redoDepth;
+        std::array<std::array<double, 6>, 2> sourceBounds{};
         for (std::size_t index = 0; index < 2; ++index) {
             observation.entityIdentifiers[index] =
                 capture->state_->sources[index].entityIdentifier;
             observation.sourceFeatureIdentifiers[index] =
                 capture->state_->sources[index].featureIdentifier;
-            std::array<double, 6> ignoredBounds; std::uint32_t ignoredLoops = 0;
+            std::uint32_t ignoredLoops = 0;
             if (!PairMeasure(observed[index], observation.sourceVolumes[index],
-                    ignoredBounds, ignoredLoops))
+                    sourceBounds[index], ignoredLoops))
                 return PairPrepareRefused(PairRefusal::UnprovedCorrespondence);
         }
         if (!PairMeasure(independent, observation.resultVolume,
                 observation.resultBounds, observation.resultClosedLoops, resultSet))
             return PairPrepareRefused(PairRefusal::InvalidResult);
+        // The same guard as the plain Join (toy car, 15 Nov 2026): a fuse that returns a small
+        // wrong piece is refused here, before any preview, so the tick never appears.
+        if (capture->state_->operation == pb::Operation::Union) {
+            double inputsBox[6] = {}, resultBox[6] = {};
+            for (int axis = 0; axis < 3; ++axis) {
+                inputsBox[axis] = std::min(sourceBounds[0][axis], sourceBounds[1][axis]);
+                inputsBox[axis + 3] = std::max(sourceBounds[0][axis + 3], sourceBounds[1][axis + 3]);
+                resultBox[axis] = observation.resultBounds[axis];
+                resultBox[axis + 3] = observation.resultBounds[axis + 3];
+            }
+            if (!BooleanResultPassesGuard(0,
+                    {observation.sourceVolumes[0], observation.sourceVolumes[1]},
+                    observation.resultVolume, inputsBox, resultBox))
+                return PairPrepareRefused(PairRefusal::InvalidResult);
+        }
         observation.resultMembership = {{1, 1}};
         PairPrepareReply reply;
         reply.status = PairStatus::Prepared; reply.refusal = PairRefusal::None;

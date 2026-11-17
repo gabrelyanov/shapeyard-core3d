@@ -442,6 +442,12 @@ CORE3D_SCENE_FINAL_CLASS NS_SWIFT_SENDABLE
 //! Periodic surface seams and degenerate edges are omitted. Empty for meshes
 //! without BRep edge polygons and native C1 wires. No GPU pick tokens are added.
 @property (nonatomic, copy, readonly) NSData *edgeSegmentData;
+//! One byte per topological edge, indexed like Core3DSceneEdgeSegment.edgeIndex;
+//! empty when unknown, and then every edge is drawn. 0 = an ordinary border,
+//! 1 = the two faces meet smoothly along the edge, 2 = a closed seam between two
+//! flat faces in one plane. Decided once at tessellation. While whole objects
+//! are worked on a renderer leaves 1 and 2 out where both faces look the same.
+@property (nonatomic, copy, readonly) NSData *edgeDrawClassData;
 @property (nonatomic, assign, readonly) NSUInteger edgeSegmentCount;
 @property (nonatomic, assign, readonly) NSUInteger edgeSegmentStride;
 //! Number of tessellated render vertices, not semantic topology vertices.
