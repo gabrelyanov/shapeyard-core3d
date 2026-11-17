@@ -246,6 +246,7 @@ unsigned long long Core3DDebugColdOpenCandidateProbeValue(
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <SelectMgr_SelectableObject.hxx>
+#include <XCAFDoc_ShapeMapTool.hxx>
 #include <Precision.hxx>
 #include <StdSelect_BRepOwner.hxx>
 
