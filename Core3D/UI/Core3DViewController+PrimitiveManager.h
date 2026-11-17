@@ -28,6 +28,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)setRoundRadius:(CGFloat)radius;
 - (double)roundMetersPerUnit;
 - (double)roundMaximumRadiusMM;
+- (double)bevelMetersPerUnit;
 - (Core3DRoundFailureObservation)roundFailureObservation;
 - (Boundaries)getChamferBoundaries;
 - (Core3DModelingOperationResult)tryApplyChamfer

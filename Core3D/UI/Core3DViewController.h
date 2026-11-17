@@ -556,6 +556,23 @@ __attribute__((objc_subclassing_restricted))
     originMM:(NSArray<NSNumber *> *)originMM direction:(NSArray<NSNumber *> *)direction
     expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(agentMeasureLineSection(entityIdentifier:targetAlias:documentIdentifier:sourceSHA256:probeIdentifier:originMM:direction:expected:));
+//! Same fence and guarantees for measure_distance (method occtExtremaDistance): the two
+//! requested world-mm points taken onto the part (corner, else edge, else face, each within
+//! 0.5 mm) and the distance between them in mm. See Core3DAgentDistanceMeasurement.
+- (Core3DAgentDistanceMeasurement *)agentMeasureDistanceOfEntityIdentifier:(NSString *)entityIdentifier
+    targetAlias:(NSString *)targetAlias documentIdentifier:(NSString *)documentIdentifier
+    sourceSHA256:(NSString *)sourceSHA256 probeIdentifier:(NSString *)probeIdentifier
+    pointAMM:(NSArray<NSNumber *> *)pointAMM pointBMM:(NSArray<NSNumber *> *)pointBMM
+    expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(agentMeasureDistance(entityIdentifier:targetAlias:documentIdentifier:sourceSHA256:probeIdentifier:pointAMM:pointBMM:expected:));
+//! Same fence and guarantees for measure_angle (method occtPlanarAngle): the angle in degrees
+//! (0...90) between the two flat faces of the part that the two world-mm points lie on.
+- (Core3DAgentAngleMeasurement *)agentMeasureAngleOfEntityIdentifier:(NSString *)entityIdentifier
+    targetAlias:(NSString *)targetAlias documentIdentifier:(NSString *)documentIdentifier
+    sourceSHA256:(NSString *)sourceSHA256 probeIdentifier:(NSString *)probeIdentifier
+    faceAPointMM:(NSArray<NSNumber *> *)faceAPointMM faceBPointMM:(NSArray<NSNumber *> *)faceBPointMM
+    expected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(agentMeasureAngle(entityIdentifier:targetAlias:documentIdentifier:sourceSHA256:probeIdentifier:faceAPointMM:faceBPointMM:expected:));
 //! Generate a padded triangle atlas on one selected untextured mesh; one Undo.
 - (Core3DMeshUVAtlasResult)generateTriangleUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
                                                          expected:(Core3DSceneSnapshot *)expected
