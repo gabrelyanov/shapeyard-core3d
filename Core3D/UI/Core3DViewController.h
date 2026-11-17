@@ -2466,6 +2466,8 @@ __attribute__((objc_subclassing_restricted))
 - (NSDictionary<NSString *, id> *)debugSelectAtWorldPointX:(double)x y:(double)y z:(double)z
     NS_SWIFT_NAME(debugSelectAtWorldPoint(x:y:z:));
 //! Replay native touch begin/cancel/select with UIKit's rounded projected pixel.
+//! DEBUG probe: which guard last refused a face colour or material ("none" when it went through).
+- (NSString *)debugLastFacePBRRefusal;
 - (NSDictionary<NSString *, id> *)debugTapAtWorldPointX:(double)x y:(double)y z:(double)z
     NS_SWIFT_NAME(debugTapAtWorldPoint(x:y:z:));
 //! Replay a reported camera eye without changing its direction or any model/selection state.
