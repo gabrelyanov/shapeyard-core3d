@@ -23576,8 +23576,27 @@ Standard_Boolean OcctDocument::ClearPartSubshapeAppearance(const TDF_Label& root
         || !EnsureGeometryRepresentationForMutation(root)) return Standard_False;
     const auto shapes = XCAFDoc_DocumentTool::ShapeTool(myOcafDoc->Main());
     if (shapes.IsNull()) return Standard_False;
+    // A part's own saved records (a Case's enclosure, a profile, sweep, loft, saved cut or bounded
+    // curve) live in child labels that hold a shape but are not faces of the part. They carry no
+    // look; skip them instead of refusing, else a colour swatch on a Case did nothing (desk lamp
+    // N03). Any other child that is not a face of the part still refuses.
+    core3d::profile::Record profile; core3d::enclosure::Record enclosure;
+    core3d::sweep_persistence::Record sweep; core3d::loft_persistence::Record loft;
+    core3d::retained_solid::Record retained; core3d::bounded_curve::Record curve;
+    if (!core3d::profile::Read(myOcafDoc, root, profile) || !core3d::enclosure::Read(myOcafDoc, root, enclosure)
+        || !core3d::sweep_persistence::Read(myOcafDoc, root, sweep) || !core3d::loft_persistence::Read(myOcafDoc, root, loft)
+        || !core3d::retained_solid::Read(myOcafDoc, root, retained) || !core3d::bounded_curve::Read(myOcafDoc, root, curve))
+        return Standard_False;
+    const auto isOwnRecord = [&](const TDF_Label& child) {
+        for (const TDF_Label* record : {&profile.label, &enclosure.label, &sweep.label, &loft.label,
+                                        &retained.label, &curve.label})
+            if (!record->IsNull() && child.IsEqual(*record)) return true;
+        return false;
+    };
     TDF_LabelSequence children;
     XCAFDoc_ShapeTool::GetSubShapes(root, children);
+    for (Standard_Integer index = children.Length(); index >= 1; --index)
+        if (isOwnRecord(children.Value(index))) children.Remove(index);
     for (Standard_Integer index = 1; index <= children.Length(); ++index) {
         const auto& label = children.Value(index);
         const auto shape = XCAFDoc_ShapeTool::GetShape(label);
@@ -45330,5 +45349,75 @@ std::map<std::string,bool> Core3DDebugSavedCutTrimDomainProbe(){
     if(failed>128)std::fprintf(stderr,"[cut-trim-probe] omitted-failures=%zu\n",failed-128);
     if(failed)std::fflush(stderr);
     return checks;
+}
+#endif
+
+#if DEBUG
+#include <BinMDF_ADriverTable.hxx>
+#include <BinObjMgt_SRelocationTable.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
+#include <CommonCrypto/CommonDigest.h>
+#include <array>
+#include <sstream>
+std::map<std::string, std::string> OcctDebugPartDigests(const OcctDocument& owner) noexcept {
+    std::map<std::string, std::string> result;
+    try {
+        OCC_CATCH_SIGNALS
+        const Handle(TDocStd_Document)& document = owner.Document();
+        if (document.IsNull()) return result;
+        const Handle(XCAFDoc_ShapeTool) shapes = XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        if (shapes.IsNull()) return result;
+        Handle(BinDrivers_DocumentStorageDriver) storage =
+            new core3d::receipt::v3::StorageDriver<core3d::text_relief::persistence::StorageDriver<core3d::loft_correspondence::persistence::StorageDriver<core3d::painted_atlas_bake::persistence::StorageDriver<core3d::face_image::persistence::resources::StorageDriver<core3d::general_loft::persistence::StorageDriver<core3d::feature_pattern_baseline::StorageDriver<core3d::feature_pattern_child::StorageDriver<core3d::bounded_curve::StorageDriver<core3d::composite_recipe::StorageDriver<core3d::retained_finishing::StorageDriver<core3d::asset_atlas::persistence::StorageDriver<core3d::spline_profile::StorageDriver<core3d::retained_solid::StorageDriver<core3d::retained_edge_treatment::StorageDriver<BinXCAFDrivers_DocumentStorageDriver>>>>>>>>>>>>>>>();
+        const Handle(BinMDF_ADriverTable) drivers = storage->AttributeDrivers(Message::DefaultMessenger());
+        if (drivers.IsNull()) return result;
+        TDF_LabelSequence roots;
+        shapes->GetFreeShapes(roots);
+        for (Standard_Integer i = 1; i <= roots.Length(); ++i) {
+            const TDF_Label root = roots.Value(i);
+            std::ostringstream out;
+            auto brep = [&](const TopoDS_Shape& shape) {
+                if (shape.IsNull()) { out << "null-shape\n"; return; }
+                BRepTools::Write(shape, out, Standard_False, Standard_False, TopTools_FormatVersion_VERSION_3);
+            };
+            auto visit = [&](const TDF_Label& label) {
+                TCollection_AsciiString entry; TDF_Tool::Entry(label, entry);
+                out << "label " << entry.ToCString() << "\n";
+                for (TDF_AttributeIterator it(label); it.More(); it.Next()) {
+                    const Handle(TDF_Attribute)& attribute = it.Value();
+                    char guid[Standard_GUID_SIZE_ALLOC]; attribute->ID().ToCString(guid);
+                    out << "attr " << attribute->DynamicType()->Name() << " " << guid << "\n";
+                    if (const auto named = Handle(TNaming_NamedShape)::DownCast(attribute); !named.IsNull()) {
+                        brep(named->Get());
+                        continue;
+                    }
+                    Handle(BinMDF_ADriver) driver;
+                    if (!drivers->GetDriver(attribute->DynamicType(), driver) || driver.IsNull()) {
+                        out << "no-driver\n"; continue;
+                    }
+                    BinObjMgt_Persistent persistent;
+                    BinObjMgt_SRelocationTable relocation(Standard_True);
+                    driver->Paste(attribute, persistent, relocation);
+                    persistent.Write(out);
+                    out << "\n";
+                }
+            };
+            visit(root);
+            for (TDF_ChildIterator child(root, Standard_True); child.More(); child.Next()) visit(child.Value());
+            const std::string bytes = out.str();
+            std::array<unsigned char, CC_SHA256_DIGEST_LENGTH> digest{};
+            CC_SHA256(bytes.data(), CC_LONG(bytes.size()), digest.data());
+            std::string hex; char two[3];
+            for (const auto byte : digest) { std::snprintf(two, sizeof two, "%02x", byte); hex += two; }
+            OcctObjectTransformState state;
+            TCollection_AsciiString entry; TDF_Tool::Entry(root, entry);
+            const std::string key = owner.CaptureObjectTransformStateForLabel(root, state) && !state.entityIdentifier.empty()
+                ? state.entityIdentifier : std::string("label:") + entry.ToCString();
+            result[key] = hex + " " + std::to_string(bytes.size());
+        }
+    } catch (...) {
+        result.clear();
+    }
+    return result;
 }
 #endif
