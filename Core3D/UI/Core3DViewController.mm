@@ -12117,6 +12117,19 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
         return nil;
     } catch (...) {return nil;}
 }
+#if DEBUG
+- (NSDictionary<NSString *, NSString *> *)debugPartDigests {
+    NSMutableDictionary<NSString *, NSString *> *result = [NSMutableDictionary dictionary];
+    if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) return result;
+    const auto doc = GLController.viewer->getDocument();
+    if (doc.IsNull()) return result;
+    for (const auto& [key, value] : OcctDebugPartDigests(*doc)) {
+        NSString *k = [NSString stringWithUTF8String:key.c_str()], *v = [NSString stringWithUTF8String:value.c_str()];
+        if (k && v) result[k] = v;
+    }
+    return result;
+}
+#endif
 - (NSDictionary<NSString *, id> *)debugStoredSweepForEntityIdentifier:(NSString *)identifier {
     if (![NSThread isMainThread] || !_isSetuped || !GLController.viewer
         || ![identifier isKindOfClass:[NSString class]] || identifier.length==0 || identifier.length>128) return nil;

@@ -57,6 +57,15 @@ struct SweepRebuildGuard {
         OcctScalarAppearanceState appearance;
         OcctReferenceAxis axis;
         OcctReferenceAxisReadState axisState;
+        // ANOTHER part whose look this catalog cannot read as plain numbers: a
+        // painted face, a picture, an imported colour, or one more saved record
+        // (oval cylinder, pattern, tube, draft). Its shape, records, placement
+        // and visibility are still compared through `visibility`; its look is
+        // not, and a sweep or loft rebuild never writes another part's look.
+        // Before 17 Nov one such part anywhere in the project closed Edit sweep
+        // radius / path for every Sweep (round 1, K16).
+        bool appearanceUnread=false;
+        int shapeHoldingChildren=0;
     };
     using Catalog=std::map<std::string,Entry>;
     Catalog previous,candidate;
@@ -125,8 +134,16 @@ bool CaptureSweepEditCatalog(const Handle(OcctDocument)& owner,
         || !CaptureCreationRoots(owner,roots) || !owner->CaptureSavedGroups(groups)) return false;
     for (const auto& [key,root]:roots) {
         SweepRebuildGuard::Entry entry;
-        if (!owner->CaptureObjectVisibilityStateForLabel(root.label,entry.visibility)
-            || !owner->CaptureScalarAppearanceForSavedSweepRebuild(root.label,entry.appearance)) return false;
+        if (!owner->CaptureObjectVisibilityStateForLabel(root.label,entry.visibility)) return false;
+        if (!owner->CaptureScalarAppearanceForSavedSweepRebuild(root.label,entry.appearance)) {
+            // Kept in the catalog instead of closing the edit. The part being
+            // edited is still read strictly: storedSweepDefinition /
+            // storedRectangularLoftDefinition before the edit, the paired
+            // document stage inside it, and SealSweepCandidate below.
+            entry.appearance={};entry.appearanceUnread=true;
+            TDF_LabelSequence held;XCAFDoc_ShapeTool::GetSubShapes(root.label,held);
+            entry.shapeHoldingChildren=held.Length();
+        }
         entry.axisState=owner->ReadReferenceAxisForLabel(root.label,entry.axis);
         if (entry.axisState==OcctReferenceAxisReadState::Invalid || !output.emplace(key,std::move(entry)).second) return false;
     }
@@ -134,6 +151,7 @@ bool CaptureSweepEditCatalog(const Handle(OcctDocument)& owner,
 }
 bool SweepEditEntryEqual(const SweepRebuildGuard::Entry& a,const SweepRebuildGuard::Entry& b) {
     if (!a.visibility.IsEqual(b.visibility) || !a.appearance.IsEqual(b.appearance)
+        || a.appearanceUnread!=b.appearanceUnread || a.shapeHoldingChildren!=b.shapeHoldingChildren
         || !sweep_rebuild::SameRawScalars(a.visibility.object.object.scalars,b.visibility.object.object.scalars)
         || !sweep_rebuild::SameRawScalars(a.appearance.visualValues,b.appearance.visualValues)
         || a.axisState!=b.axisState || a.axis.pivotSpace!=b.axis.pivotSpace
@@ -177,6 +195,8 @@ bool SealSweepCandidate(const Handle(OcctDocument)& owner,OrdinaryTransformLedge
         const auto found=guard.candidate.find(oldKey);if(found==guard.candidate.end()) return false;
         if (oldKey!=key) {if(!SweepEditEntryEqual(oldEntry,found->second))return false;continue;}
         sawTarget=true;auto normalized=found->second;
+        // The edited part itself is never taken on trust.
+        if (oldEntry.appearanceUnread || normalized.appearanceUnread) return false;
         const auto& before=oldEntry.visibility.object.object;
         auto& after=normalized.visibility.object.object;
         if (!after.shape.IsEqual(record.requested.shape)) return false;
