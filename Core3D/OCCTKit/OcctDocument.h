@@ -65,6 +65,7 @@ namespace core3d::composite_recipe { struct Payload; struct Record; }
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
+#include <gp_GTrsf.hxx>
 #include <gp_Vec.hxx>
 #include <cstdint>
 #include "ProfilePersistence.hxx"
@@ -1940,6 +1941,13 @@ public:
         const TopoDS_Shape& result,
         const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks,
         Standard_Boolean eitherWay = Standard_False) const noexcept;
+    //! A Dimensions change (`sizeChange` maps the old shape onto `result`): each face of `result`
+    //! whose inside point, taken back through the inverse of `sizeChange`, lies on one of the
+    //! `painted` faces of the old shape, with that face's look. Only points are mapped: a lone
+    //! painted face is never rebuilt (its GTransform crashed in OCCT NurbsConvert, 17 Nov).
+    Standard_EXPORT std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> ResizedFaceColours(
+        const TopoDS_Shape& result, const gp_GTrsf& sizeChange,
+        const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& painted) const noexcept;
     //! Push-pull: a face of `result` that is new (lies on no face of `original`), flat, and in the
     //! plane of a coloured face it touches continues that face (the upper strip of a side made
     //! longer), so it takes that face's look. Faces that were there before never change look here.
@@ -1973,6 +1981,47 @@ public:
     Standard_EXPORT Standard_Boolean ApplyThroughHole(
         const TDF_Label& label, const Handle(AIS_Shape)& presentation,
         const gp_Pnt& start, const gp_Dir& direction, double radius, double depth,
+        std::string& refusal) noexcept;
+    //! Round holes of a part, read from its stored solid: a Hole needs no record to be
+    //! found (a Hole on a joined, cut or painted part is plain geometry). One entry per
+    //! hole, part coordinates: [px, py, pz, dx, dy, dz, radius, depth]; the point is on the
+    //! axis where the hole starts, the direction goes into the part, depth 0 is "through".
+    //! Read-only; empty for a part the Hole command itself would refuse.
+    Standard_EXPORT std::vector<std::vector<double>> RoundHolesOfPart(
+        const TDF_Label& label) const noexcept;
+    //! Holes: the part with one of its round holes repeated `count` times in all (the
+    //! hole itself included), `spacing` apart centre to centre, without changing the
+    //! document. `nearPoint` picks the hole whose axis is nearest (null: the first).
+    //! The row runs square to the hole, along the part's longer side, towards the
+    //! side with more room; a negative spacing turns it round. Refusals: "no-hole",
+    //! "holes-overlap", "row-leaves-part", "bad-values", "unsupported-source",
+    //! "invalid-result".
+    Standard_EXPORT Standard_Boolean BuildHoleRow(
+        const TDF_Label& label, int count, double spacing, const gp_Pnt* nearPoint,
+        TopoDS_Shape& result, std::string& refusal) const noexcept;
+    //! The same as ONE undoable command (an earlier saved hole or Join record is baked
+    //! in that command, exactly as ApplyThroughHole does, so Undo gives it back).
+    Standard_EXPORT Standard_Boolean ApplyHoleRow(
+        const TDF_Label& label, const Handle(AIS_Shape)& presentation,
+        int count, double spacing, const gp_Pnt* nearPoint, std::string& refusal) noexcept;
+    //! Hole size for a hole that has no saved-cut record: the hole is closed and
+    //! drilled again at `radius` on the same axis, from the same side, to the same
+    //! floor. Refusals: "no-hole", "unchanged", "cannot-close", "hole-leaves-part",
+    //! "holes-overlap", "bad-values", "unsupported-source", "invalid-result".
+    Standard_EXPORT Standard_Boolean BuildHoleResize(
+        const TDF_Label& label, double radius, const gp_Pnt* nearPoint,
+        TopoDS_Shape& result, std::string& refusal) const noexcept;
+    //! The same as ONE undoable command.
+    Standard_EXPORT Standard_Boolean ApplyHoleResize(
+        const TDF_Label& label, const Handle(AIS_Shape)& presentation,
+        double radius, const gp_Pnt* nearPoint, std::string& refusal) noexcept;
+    //! Shared by the three commands above; not for other callers. The part's one
+    //! solid when the Hole command would take the part (`verified`: a checked copy).
+    Standard_Boolean HoleEditSource(const TDF_Label& label, TopoDS_Shape& source,
+        std::string& refusal, Standard_Boolean verified) const noexcept;
+    //! Shared: writes a drilled solid as one command, as ApplyThroughHole does.
+    Standard_Boolean CommitDrilledShape(const TDF_Label& label,
+        const Handle(AIS_Shape)& presentation, const TopoDS_Shape& result,
         std::string& refusal) noexcept;
     //! The prepared result (in the target's own frame) and the two entity
     //! identifiers, for an on-model preview before Apply. Read-only.
