@@ -137,7 +137,11 @@ namespace core3d {
             TDF_Label label;
             Handle(AIS_Shape) originalPresentation;
             Handle(AIS_Shape) candidatePresentation;
+            //! What the document stores: identity checks, Cancel and Undo.
             TopoDS_Shape originalShape;
+            //! The one solid Push-pull and Split build from (the same object
+            //! for a plain part, the single child of a part saved wrapped).
+            TopoDS_Shape sourceSolid;
             TopoDS_Face selectedFace;
             gp_Trsf transform;
             Standard_Real distance = 0.0;
@@ -157,6 +161,7 @@ namespace core3d {
                 return !label.IsNull()
                     && !originalPresentation.IsNull()
                     && !originalShape.IsNull()
+                    && !sourceSolid.IsNull()
                     && !selectedFace.IsNull();
             }
         };
@@ -270,6 +275,13 @@ namespace core3d {
             const std::vector<ShellOpeningSelector>& selectors,
             FaceOperationSourceProof& proof) const noexcept;
         Standard_Boolean beginCapturedShell(const FaceOperationSourceProof& proof) noexcept;
+        //! Typed Push-pull: ONE planar extremal cap of the single selected solid, by
+        //! {axis, side}; same resolver as Shell, Push-pull's own source admission.
+        Standard_Boolean capturePushPullFace(const std::string& entityIdentifier,
+            const ShellOpeningSelector& selector,
+            FaceOperationSourceProof& proof) const noexcept;
+        //! Unlike touch begin, never cancels someone else's push-pull.
+        Standard_Boolean beginCapturedExtrusion(const FaceOperationSourceProof& proof) noexcept;
         Standard_Boolean setShellThickness(
             Standard_Real thickness) noexcept;
         ShellApplyResult applyShell() noexcept;

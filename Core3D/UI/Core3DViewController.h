@@ -121,6 +121,28 @@ __attribute__((objc_subclassing_restricted))
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+typedef NS_ENUM(NSInteger, Core3DPushPullOperationState) {
+    Core3DPushPullOperationStateCaptured,
+    Core3DPushPullOperationStateReady,
+    //! Zero distance: nothing was opened, the model and history are unchanged.
+    Core3DPushPullOperationStateUnchanged,
+    Core3DPushPullOperationStateCommitted,
+    Core3DPushPullOperationStateCancelled,
+    Core3DPushPullOperationStateRejected,
+    Core3DPushPullOperationStateOutcomeUnknown,
+    Core3DPushPullOperationStateRetryableFailure,
+};
+//! Opaque typed Push-pull capture (lane push-pull for lane ai). Main-thread only.
+//! The face is the shared {axis, side} cap descriptor; the canonical face stays private.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DPushPullOperation : NSObject
+@property(nonatomic,copy,readonly) NSString *entityIdentifier;
+@property(nonatomic,strong,readonly) Core3DShellOpeningSelector *face;
+@property(nonatomic,readonly) double distanceMM;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 #ifdef DEBUG
 //! SAB-N2 fixed R1 stage boundaries. Values mirror the native controller enum.
 typedef NS_ENUM(NSInteger, Core3DDebugRetainedEdgeTreatmentFaultSite) {
@@ -214,6 +236,15 @@ __attribute__((objc_subclassing_restricted))
 - (BOOL)prepareOrdinaryEditForDocumentClose;
 - (BOOL)hasUnresolvedOrdinaryEdit;
 - (void)assetData:(void(^)(NSData *_Nullable))completion;
+/// Would Home's save succeed right now? 1 yes, 0 no, -1 cannot be told now (a tool or a
+/// preview is open, or the document is loading). Main thread, synchronous: the document is
+/// written to a temporary file and read back through the checks opening a project runs,
+/// exactly as assetData does (one shared helper). Nothing in the document changes.
+- (NSInteger)documentWouldSaveProbe NS_SWIFT_NAME(documentWouldSaveProbe());
+/// Check seam (Debug builds; no effect otherwise): the next `count` probes of a document that
+/// does save answer 0, so a check can walk the route a refused save takes. Home's save itself
+/// is not affected.
++ (void)debugSetForcedSaveProbeFailures:(NSInteger)count NS_SWIFT_NAME(debugSetForcedSaveProbeFailures(_:));
 - (NSData *_Nullable)thumbData;
 
 // Success means accepted; terminal completion follows private cleanup.
@@ -235,8 +266,9 @@ __attribute__((objc_subclassing_restricted))
 - (void)saveSnapshot;
 //! Lifts the engine's lower-left axis triad by `points` (0 = default corner).
 - (void)setAxisTriadLiftPoints:(CGFloat)points;
-/// While a tool waits for a tapped part, taps on the move arrows select the
-/// part behind them (drags still move). Off by default.
+/// While a tool waits for a tapped part, a tap that begins on the selected
+/// part's move arrows picks the part behind them (a drag on an arrow still
+/// moves the part). Off by default.
 - (void)setTapsSelectThroughMoveHandles:(BOOL)enabled;
 //! Opt-in geometry snapping for ordinary Move; model units, zero disables.
 //! Refuses changes during an active edit. Does not alter grid preferences.
@@ -423,6 +455,12 @@ __attribute__((objc_subclassing_restricted))
 - (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly
                 normalizedViewportRect:(CGRect)normalizedViewportRect
     NS_SWIFT_NAME(frameModel(selectedObjectsOnly:normalizedViewportRect:));
+//! As above; with fillingRect the model is zoomed until it reaches the rectangle
+//! with a small margin (the user's own Frame All and Frame Selected Objects).
+- (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly
+                normalizedViewportRect:(CGRect)normalizedViewportRect
+                           fillingRect:(BOOL)fillingRect
+    NS_SWIFT_NAME(frameModel(selectedObjectsOnly:normalizedViewportRect:fillingRect:));
 //! Focus one visible model occurrence without selecting it. The expected
 //! publication stream, document generation and model revision must still match.
 //! Camera/selection-only changes do not invalidate this read-only request.
@@ -573,6 +611,13 @@ __attribute__((objc_subclassing_restricted))
     faceAPointMM:(NSArray<NSNumber *> *)faceAPointMM faceBPointMM:(NSArray<NSNumber *> *)faceBPointMM
     expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(agentMeasureAngle(entityIdentifier:targetAlias:documentIdentifier:sourceSHA256:probeIdentifier:faceAPointMM:faceBPointMM:expected:));
+//! Release-safe READ-ONLY identity of the live document behind `expected` (measure lane for the
+//! ai lane): its persisted document ID and an opaque runtime instance token, see
+//! Core3DAgentDocumentIdentity. Stale unless `expected` is the current publication. It captures
+//! no planning context (a reviewed one stays current) and changes no selection, gizmo, document,
+//! undo/redo or render state. Never nil.
+- (Core3DAgentDocumentIdentity *)agentDocumentIdentityForExpected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(documentIdentity(expected:));
 //! Generate a padded triangle atlas on one selected untextured mesh; one Undo.
 - (Core3DMeshUVAtlasResult)generateTriangleUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
                                                          expected:(Core3DSceneSnapshot *)expected
@@ -1197,6 +1242,19 @@ __attribute__((objc_subclassing_restricted))
 - (Core3DShellOperationState)modelingShellState:(Core3DShellOperation *)operation NS_SWIFT_NAME(modelingShellState(_:));
 - (Core3DShellOperationState)applyModelingShell:(Core3DShellOperation *)operation NS_SWIFT_NAME(applyModelingShell(_:));
 - (Core3DShellOperationState)cancelModelingShell:(Core3DShellOperation *)operation NS_SWIFT_NAME(cancelModelingShell(_:));
+//! Typed Push-pull of ONE planar extremal cap of the single selected solid, chosen by
+//! {axis, side} in the part's own frame. Capture is read-only under the planning lease and
+//! refuses a split, ambiguous, curved, missing or stale cap (never the largest or first face).
+//! Distance is along the cap's OUTWARD normal in millimetres: + pulls out, - pushes in.
+//! Zero returns Unchanged with no history. Prepare shows the existing push-pull preview
+//! synchronously (Ready or Rejected); Apply commits one history step; Cancel restores.
+- (nullable Core3DPushPullOperation *)captureModelingPushPullWithFace:(Core3DShellOpeningSelector *)face
+    context:(Core3DModelingPlanningContext *)context NS_SWIFT_NAME(captureModelingPushPull(face:context:));
+- (Core3DPushPullOperationState)prepareModelingPushPull:(Core3DPushPullOperation *)operation distanceMM:(double)distance
+    NS_SWIFT_NAME(prepareModelingPushPull(_:distanceMM:));
+- (Core3DPushPullOperationState)modelingPushPullState:(Core3DPushPullOperation *)operation NS_SWIFT_NAME(modelingPushPullState(_:));
+- (Core3DPushPullOperationState)applyModelingPushPull:(Core3DPushPullOperation *)operation NS_SWIFT_NAME(applyModelingPushPull(_:));
+- (Core3DPushPullOperationState)cancelModelingPushPull:(Core3DPushPullOperation *)operation NS_SWIFT_NAME(cancelModelingPushPull(_:));
 // Additive opt-in capture. Existing capture/advertised catalogs remain unchanged.
 - (nullable Core3DModelingPlanningContext *)captureModelingPlanningContextIncludingSavedCutSource;
 - (nullable Core3DSavedCutSourceOperation *)beginModelingSavedCutSourceEdit:(Core3DSavedCutSourcePatch *)patch
@@ -1886,6 +1944,32 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(debugBeginBevel(entityIdentifiers:edgeTopologyIndicesByEntity:));
 - (NSDictionary<NSString *, NSNumber *> *)debugBevelState;
 - (void)debugSetBevelPreviewWorkerBlocked:(BOOL)blocked;
+//! Check seam: while on, a plain Bevel stores the builder's raw result (a
+//! compound around the one solid), as builds before 15 Nov 2026 did.
++ (void)debugSetPlainBevelKeepsBuilderWrapper:(BOOL)keeps
+    NS_SWIFT_NAME(debugSetPlainBevelKeepsBuilderWrapper(_:));
+//! Check seam for the drawing rule "smooth edges and closed same-plane seams are
+//! not drawn while whole objects are worked on": turns the rule's one switch on
+//! or off for parts tessellated from now on.
++ (void)debugSetLeavesSmoothEdgesAndSeamsOut:(BOOL)leavesOut
+    NS_SWIFT_NAME(debugSetLeavesSmoothEdgesAndSeamsOut(_:));
++ (BOOL)debugLeavesSmoothEdgesAndSeamsOut
+    NS_SWIFT_NAME(debugLeavesSmoothEdgesAndSeamsOut());
+//! Check seam: skips the Join / Cut / Overlap result guard, so a check can show
+//! what was stored before the guard existed. Debug builds only.
++ (void)debugSetBooleanPlausibilityGuardSkipped:(BOOL)skipped
+    NS_SWIFT_NAME(debugSetBooleanPlausibilityGuardSkipped(_:));
+//! How many times the plain builder ran for its last result (2 = the looser retry).
++ (NSInteger)debugLastBakedBooleanAttempts NS_SWIFT_NAME(debugLastBakedBooleanAttempts());
+//! The numbers-only guard of Join / Cut / Overlap (0, 1, 2), exactly as the
+//! engine applies it: inputVolumes[0] is the part that stays; boxes are min x y z,
+//! max x y z, or nil to judge by volume alone.
++ (BOOL)debugBooleanResultIsPlausibleForOperation:(NSInteger)operation
+                                     inputVolumes:(NSArray<NSNumber *> *)inputVolumes
+                                     resultVolume:(double)resultVolume
+                                        inputsBox:(nullable NSArray<NSNumber *> *)inputsBox
+                                        resultBox:(nullable NSArray<NSNumber *> *)resultBox
+    NS_SWIFT_NAME(debugBooleanResultIsPlausible(operation:inputVolumes:resultVolume:inputsBox:resultBox:));
 - (void)debugSetMaximumBevelCaptureTopologyNodes:(NSUInteger)limit;
 - (void)debugSetMaximumBevelResultTopologyNodes:(NSUInteger)limit;
 - (void)debugSetMaximumBevelResultSolids:(NSUInteger)limit;
@@ -1918,6 +2002,13 @@ __attribute__((objc_subclassing_restricted))
 //! expose latest-wins behavior without changing production scheduling.
 - (NSDictionary<NSString *, NSNumber *> *)debugShellState;
 - (void)debugSetShellPreviewWorkerBlocked:(BOOL)blocked;
+//! Check seam: gives the offset kernel what the Shell guard holds back. The
+//! kernel can then close the process; use it only in a check that runs in a
+//! process of its own.
++ (void)debugSetShellOffsetGuardSkipped:(BOOL)skipped
+    NS_SWIFT_NAME(debugSetShellOffsetGuardSkipped(_:));
+//! How often the Shell guard has held a shell back from the kernel in this process.
++ (NSInteger)debugShellOffsetGuardRefusalCount NS_SWIFT_NAME(debugShellOffsetGuardRefusalCount());
 - (void)debugSetMaximumShellCaptureTopologyNodes:(NSUInteger)limit;
 - (void)debugSetMaximumShellResultTopologyNodes:(NSUInteger)limit;
 - (void)debugSetShellTransactionFailureCount:(NSUInteger)count;

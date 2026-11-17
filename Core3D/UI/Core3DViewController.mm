@@ -2329,6 +2329,29 @@ static bool Core3DModelingLoftSupported(const core3d::rectangular_loft::Definiti
 }
 @end
 
+@interface Core3DPushPullOperation () {
+@public
+    __weak Core3DViewController *_pushPullOwner;
+    std::weak_ptr<core3d::Core3DViewer> _pushPullViewer;
+    std::weak_ptr<core3d::ShapeInteractor> _pushPullInteractor;
+    core3d::FaceOperationSourceProof _pushPullProof;
+    Core3DModelingPlanningContext *_pushPullContext;
+    Core3DPushPullOperationState _pushPullState;
+    BOOL _pushPullStarted;
+}
+@property(nonatomic,readwrite) double distanceMM;
+- (instancetype)initPrivateWithEntity:(NSString *)entity face:(Core3DShellOpeningSelector *)face;
+@end
+@implementation Core3DPushPullOperation
+- (instancetype)initPrivateWithEntity:(NSString *)entity face:(Core3DShellOpeningSelector *)face {
+    if ((self = [super init])) {
+        _entityIdentifier = [entity copy]; _face = face;
+        _pushPullState = Core3DPushPullOperationStateCaptured;
+    }
+    return self;
+}
+@end
+
 @interface Core3DPartBooleanEditResult ()
 - (instancetype)initWithOutcome:(Core3DPartBooleanEditOutcome)outcome
     reason:(NSString *)reason historyDelta:(NSInteger)historyDelta;
@@ -4088,6 +4111,13 @@ static bool core3dAgentVector3(NSArray<NSNumber *> *values, double out[3]) {
                                         snapA:(NSString *)snapA snapB:(NSString *)snapB
                                    distanceMM:(double)distanceMM;
 @end
+@interface Core3DAgentDocumentIdentity (Core3DEngineProducer)
+- (instancetype)initCore3DUnidentified:(Core3DAgentMeasurementStatus)status;
+- (instancetype)initCore3DIdentifiedWithDocumentIdentifier:(NSString *)documentIdentifier
+    instanceToken:(NSString *)instanceToken publicationSourceIdentifier:(NSString *)publicationSourceIdentifier
+    documentGeneration:(NSString *)documentGeneration modelRevision:(NSString *)modelRevision
+    presentationRevision:(NSString *)presentationRevision metersPerUnit:(double)metersPerUnit;
+@end
 @interface Core3DAgentAngleMeasurement (Core3DEngineProducer)
 - (instancetype)initCore3DUnmeasured:(Core3DAgentMeasurementStatus)status;
 - (instancetype)initCore3DMeasuredWithSource:(Core3DAgentMeasurementSource *)source
@@ -4124,8 +4154,15 @@ static bool core3dAgentVector3(NSArray<NSNumber *> *values, double out[3]) {
 #endif
     BOOL _nativeSolidCancelled;
     __weak Core3DModelingPlanningContext *_issuedModelingPlanningContext;
+    // Runtime token of the live document for documentIdentity(expected:) (measure lane): one
+    // per publication source and document generation, so a new viewer or a replaced document
+    // gets a new one and every caller on the same live document shares it.
+    NSString *_agentDocumentInstanceToken;
+    NSString *_agentDocumentInstancePublication;
+    uint64_t _agentDocumentInstanceGeneration;
     Core3DModelingPlanningContext *_modelingConstructionContext;
     Core3DShellOperation *_activeModelingShell;
+    Core3DPushPullOperation *_activeModelingPushPull;
     std::shared_ptr<core3d::ObjectAlignmentWork> _objectAlignmentWork;
     BOOL _objectAlignmentCancelled;
     Core3DMeshContactOperation *_meshContactOperation;
@@ -4191,6 +4228,10 @@ static bool core3dAgentVector3(NSArray<NSNumber *> *values, double out[3]) {
 - (BOOL)frameCommittedSceneSelectedOnly:(BOOL)selectedObjectsOnly
                                  rect:(CGRect)rect
                        objectIdentity:(const core3d::ObjectFrameIdentity*)identity;
+- (BOOL)frameCommittedSceneSelectedOnly:(BOOL)selectedObjectsOnly
+                                 rect:(CGRect)rect
+                       objectIdentity:(const core3d::ObjectFrameIdentity*)identity
+                           fillingRect:(BOOL)fillingRect;
 
 - (BOOL)core3d_updateSelectionWithTextureData:(NSData*)data mediaType:(NSString*)mediaType
     slot:(OcctMaterialTextureSlot)slot error:(NSError* _Nullable * _Nullable)error;
@@ -5620,6 +5661,9 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
         auto value = Core3DMakePBRMaterial(style.material, YES, NO, NO, NO, NO, NO);
         if (value) [values addObject:value];
     }
+    // Founder test, build 8545: a colour put on a pocket floor showed only after the project
+    // was reopened. Draw the parts again from the document, as reopening does.
+    (void)viewer->redrawDocument();
     [self.materialController didChangeSelectionWithMaterials:@[] colors:@[]];
     [self.materialController didChangeSelectionWithPBRMaterials:values];
     context->UpdateCurrentViewer();
@@ -16292,6 +16336,14 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
                                            rect:rect objectIdentity:nullptr];
 }
 
+- (BOOL)frameModelWithSelectedObjectsOnly:(BOOL)selectedObjectsOnly
+                normalizedViewportRect:(CGRect)rect
+                           fillingRect:(BOOL)fillingRect {
+    return [self frameCommittedSceneSelectedOnly:selectedObjectsOnly
+                                           rect:rect objectIdentity:nullptr
+                                    fillingRect:fillingRect];
+}
+
 - (BOOL)frameObjectWithEntityIdentifier:(NSString *)entityIdentifier
                              expected:(Core3DSceneSnapshot *)expected
                normalizedViewportRect:(CGRect)rect {
@@ -17036,6 +17088,44 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
         *source = fence;
         return Core3DAgentMeasurementStatusMeasured;
     } catch (...) { return Core3DAgentMeasurementStatusUnavailable; }
+}
+
+// Passive identity: reads the published scene and the document's persisted ID only. It never
+// captures or retires a planning context and selects, edits, renders or records nothing.
+- (Core3DAgentDocumentIdentity *)agentDocumentIdentityForExpected:(Core3DSceneSnapshot *)expected {
+    auto refuse = [](Core3DAgentMeasurementStatus status) {
+        return [[Core3DAgentDocumentIdentity alloc] initCore3DUnidentified:status];
+    };
+    if (![NSThread isMainThread] || !_isSetuped || GLController == nil || GLController.viewer == nullptr
+        || ![expected isKindOfClass:Core3DSceneSnapshot.class]) return refuse(Core3DAgentMeasurementStatusUnavailable);
+    try {
+        Core3DSceneSnapshot *current = [self captureSceneSnapshot];
+        if (current == nil || current.publicationSourceIdentifier.length == 0
+            || current.revisions.documentGeneration == 0) return refuse(Core3DAgentMeasurementStatusUnavailable);
+        if (![current.publicationSourceIdentifier isEqualToString:expected.publicationSourceIdentifier]
+            || current.revisions.documentGeneration != expected.revisions.documentGeneration
+            || current.revisions.modelRevision != expected.revisions.modelRevision
+            || current.revisions.presentationRevision != expected.revisions.presentationRevision)
+            return refuse(Core3DAgentMeasurementStatusStale);
+        const auto document = GLController.viewer->getDocument();
+        if (document.IsNull()) return refuse(Core3DAgentMeasurementStatusUnavailable);
+        NSString *documentID = [[NSString alloc] initWithUTF8String:document->DocumentIdentifier().c_str()];
+        if (documentID.length == 0 || documentID.length > 128) return refuse(Core3DAgentMeasurementStatusUnavailable);
+        if (_agentDocumentInstanceToken == nil
+            || ![_agentDocumentInstancePublication isEqualToString:current.publicationSourceIdentifier]
+            || _agentDocumentInstanceGeneration != current.revisions.documentGeneration) {
+            _agentDocumentInstanceToken = NSUUID.UUID.UUIDString;
+            _agentDocumentInstancePublication = [current.publicationSourceIdentifier copy];
+            _agentDocumentInstanceGeneration = current.revisions.documentGeneration;
+        }
+        return [[Core3DAgentDocumentIdentity alloc] initCore3DIdentifiedWithDocumentIdentifier:documentID
+            instanceToken:_agentDocumentInstanceToken
+            publicationSourceIdentifier:current.publicationSourceIdentifier
+            documentGeneration:[NSString stringWithFormat:@"%llu", (unsigned long long)current.revisions.documentGeneration]
+            modelRevision:[NSString stringWithFormat:@"%llu", (unsigned long long)current.revisions.modelRevision]
+            presentationRevision:[NSString stringWithFormat:@"%llu", (unsigned long long)current.revisions.presentationRevision]
+            metersPerUnit:current.metersPerUnit];
+    } catch (...) { return refuse(Core3DAgentMeasurementStatusUnavailable); }
 }
 
 - (Core3DAgentSolidMeasurement *)agentMeasureSolidOfEntityIdentifier:(NSString *)entityIdentifier
@@ -18511,6 +18601,156 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     return [self core3d_finishModelingShell:operation apply:NO];
 }
 
+- (Core3DPushPullOperation *)captureModelingPushPullWithFace:(Core3DShellOpeningSelector *)face
+    context:(Core3DModelingPlanningContext *)context {
+    if (!NSThread.isMainThread || ![self isModelingPlanningContextCurrent:context]
+        || _activeModelingPushPull || _activeModelingShell
+        || ![face isMemberOfClass:Core3DShellOpeningSelector.class]
+        || face.axis < Core3DShellOpeningAxisX || face.axis > Core3DShellOpeningAxisZ
+        || face.side < Core3DShellOpeningSideMinimum || face.side > Core3DShellOpeningSideMaximum
+        || context.scene.selection.selectedElements.count != 1 || !GLController) return nil;
+    try {
+        NSString *entity = context.scene.selection.selectedElements.firstObject.entityIdentifier;
+        if (entity.length == 0 || !entity.UTF8String) return nil;
+        const auto viewer = GLController.viewer;
+        const auto interactor = viewer ? viewer->getShapeInteractor() : nullptr;
+        if (!viewer || !interactor || !viewer->canBeginCommittedEdit()) return nil;
+        const core3d::ShellOpeningSelector selector{static_cast<core3d::ShellOpeningAxis>(face.axis),
+            static_cast<core3d::ShellOpeningSide>(face.side)};
+        core3d::FaceOperationSourceProof proof;
+        if (!interactor->capturePushPullFace(entity.UTF8String, selector, proof)
+            || ![self isModelingPlanningContextCurrent:context]) return nil;
+        Core3DShellOpeningSelector *canonical = [[Core3DShellOpeningSelector alloc] initWithAxis:face.axis side:face.side];
+        Core3DPushPullOperation *operation = [[Core3DPushPullOperation alloc] initPrivateWithEntity:entity face:canonical];
+        operation->_pushPullOwner = self; operation->_pushPullViewer = viewer;
+        operation->_pushPullInteractor = interactor;
+        operation->_pushPullContext = context; operation->_pushPullProof = std::move(proof);
+        return operation;
+    } catch (...) { return nil; }
+}
+
+- (BOOL)core3d_ownsModelingPushPull:(Core3DPushPullOperation *)operation {
+    return NSThread.isMainThread && [operation isMemberOfClass:Core3DPushPullOperation.class]
+        && operation->_pushPullOwner == self && GLController
+        && operation->_pushPullViewer.lock() == GLController.viewer;
+}
+
+- (Core3DPushPullOperationState)modelingPushPullState:(Core3DPushPullOperation *)operation {
+    if (![self core3d_ownsModelingPushPull:operation]) return Core3DPushPullOperationStateRejected;
+    const auto state = operation->_pushPullState;
+    if (!operation->_pushPullStarted) {
+        if (state == Core3DPushPullOperationStateCaptured
+            && ![self isModelingPlanningContextCurrent:operation->_pushPullContext])
+            operation->_pushPullState = Core3DPushPullOperationStateRejected;
+        return operation->_pushPullState;
+    }
+    if (state == Core3DPushPullOperationStateCommitted || state == Core3DPushPullOperationStateCancelled
+        || state == Core3DPushPullOperationStateRejected) return state;
+    const auto interactor = operation->_pushPullInteractor.lock();
+    if (_activeModelingPushPull != operation || !interactor
+        || GLController.viewer->getShapeInteractor() != interactor
+        || !interactor->hasActiveExtrusion() || _currentGizmoType != PrimitiveGizmoTypeExtrude)
+        return Core3DPushPullOperationStateOutcomeUnknown;
+    switch (interactor->extrusionPreviewState()) {
+        case core3d::ExtrusionPreviewState::Ready:
+            return interactor->canApplyExtrusion() ? Core3DPushPullOperationStateReady
+                : Core3DPushPullOperationStateRetryableFailure;
+        case core3d::ExtrusionPreviewState::OutcomeUnknown: return Core3DPushPullOperationStateOutcomeUnknown;
+        default: return Core3DPushPullOperationStateRetryableFailure;
+    }
+}
+
+- (Core3DPushPullOperationState)prepareModelingPushPull:(Core3DPushPullOperation *)operation distanceMM:(double)distance {
+    if (![self core3d_ownsModelingPushPull:operation]) return Core3DPushPullOperationStateRejected;
+    if (operation->_pushPullStarted || operation->_pushPullState != Core3DPushPullOperationStateCaptured)
+        return [self modelingPushPullState:operation];
+    operation->_pushPullState = Core3DPushPullOperationStateRejected;
+    if (_activeModelingPushPull || _activeModelingShell || !std::isfinite(distance)
+        || std::abs(distance) > 1000000
+        || ![self isModelingPlanningContextCurrent:operation->_pushPullContext]) return operation->_pushPullState;
+    if (distance == 0) {
+        // Contract: zero is unchanged with zero history. Nothing is opened.
+        operation.distanceMM = 0;
+        operation->_pushPullState = Core3DPushPullOperationStateUnchanged;
+        operation->_pushPullContext->_planningRetired = YES;
+        operation->_pushPullProof = {};
+        return operation->_pushPullState;
+    }
+    operation->_pushPullContext->_planningConsumed = YES;
+    const auto viewer = GLController.viewer;
+    const auto interactor = operation->_pushPullInteractor.lock();
+    if (!interactor || viewer->getShapeInteractor() != interactor || !viewer->canBeginCommittedEdit()
+        || !interactor->beginCapturedExtrusion(operation->_pushPullProof)) return operation->_pushPullState;
+    operation->_pushPullStarted = YES;
+    operation->_pushPullState = Core3DPushPullOperationStateReady; // live; polled below
+    _activeModelingPushPull = operation;
+    viewer->getObjectInteractor()->setManipulatorType(core3d::PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude);
+    _currentGizmoType = [GLController getGizmoType];
+    // One conversion at the native boundary: millimetres to the captured model unit.
+    const double factor = interactor->extrusionMetersPerUnit() * 1000.0;
+    const double local = distance / factor;
+    operation.distanceMM = distance;
+    const BOOL prepared = _currentGizmoType == PrimitiveGizmoTypeExtrude
+        && std::isfinite(factor) && factor > 0 && std::isfinite(local) && local != 0
+        && interactor->setExtrusionValueForSelection(local)
+        && interactor->canApplyExtrusion();
+    if (!prepared) {
+        // A refused distance (no valid solid, out of range) closes the preview it opened.
+        // Only a confirmed abort is a clean Rejected; otherwise the state stays unknown.
+        if (!interactor->cancelExtrusion()) return Core3DPushPullOperationStateOutcomeUnknown;
+        operation->_pushPullState = Core3DPushPullOperationStateRejected;
+        operation->_pushPullContext->_planningRetired = YES;
+        operation->_pushPullProof = {};
+        _activeModelingPushPull = nil;
+        [self setGizmoType:PrimitiveGizmoTypeNone];
+        [GLController requestRender];
+        return operation->_pushPullState;
+    }
+    self.can_apply = YES;
+    [GLController requestRender];
+    [self viewDidChangeViewportPresentationOverlay];
+    [self sendNotifyUIState:(UIStateChangingGizmo | UIStateChangingSelection | UIStateChangingApply)];
+    return [self modelingPushPullState:operation];
+}
+
+- (Core3DPushPullOperationState)core3d_finishModelingPushPull:(Core3DPushPullOperation *)operation apply:(BOOL)apply {
+    if (![self core3d_ownsModelingPushPull:operation]) return Core3DPushPullOperationStateRejected;
+    if (!operation->_pushPullStarted) {
+        if (!apply && operation->_pushPullState == Core3DPushPullOperationStateCaptured) {
+            operation->_pushPullState = Core3DPushPullOperationStateCancelled;
+            if (!operation->_pushPullContext->_planningConsumed)
+                operation->_pushPullContext->_planningRetired = YES;
+            operation->_pushPullProof = {};
+        }
+        return [self modelingPushPullState:operation];
+    }
+    const auto state = operation->_pushPullState;
+    if (state == Core3DPushPullOperationStateCommitted || state == Core3DPushPullOperationStateCancelled
+        || state == Core3DPushPullOperationStateRejected) return state;
+    const auto interactor = operation->_pushPullInteractor.lock();
+    if (_activeModelingPushPull != operation || !interactor
+        || GLController.viewer->getShapeInteractor() != interactor
+        || !interactor->hasActiveExtrusion() || _currentGizmoType != PrimitiveGizmoTypeExtrude)
+        return Core3DPushPullOperationStateOutcomeUnknown;
+    const auto result = apply ? [self tryApplyExtrusion] : [self tryCancelExtrusion];
+    if (result == Core3DModelingOperationResultSucceeded) {
+        operation->_pushPullState = apply ? Core3DPushPullOperationStateCommitted : Core3DPushPullOperationStateCancelled;
+        operation->_pushPullContext->_planningRetired = YES;
+        operation->_pushPullProof = {};
+        _activeModelingPushPull = nil;
+        [self setGizmoType:PrimitiveGizmoTypeNone];
+        return operation->_pushPullState;
+    }
+    return [self modelingPushPullState:operation];
+}
+
+- (Core3DPushPullOperationState)applyModelingPushPull:(Core3DPushPullOperation *)operation {
+    return [self core3d_finishModelingPushPull:operation apply:YES];
+}
+- (Core3DPushPullOperationState)cancelModelingPushPull:(Core3DPushPullOperation *)operation {
+    return [self core3d_finishModelingPushPull:operation apply:NO];
+}
+
 - (Core3DModelingPlanningContext *)captureModelingPlanningContext {
     if (![self core3d_canCaptureModelingContext]) return nil;
     try {
@@ -18823,6 +19063,8 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     [self core3d_retireReservationContext:context];
     if (_activeModelingShell && _activeModelingShell->_shellContext == context)
         (void)[self cancelModelingShell:_activeModelingShell];
+    if (_activeModelingPushPull && _activeModelingPushPull->_pushPullContext == context)
+        (void)[self cancelModelingPushPull:_activeModelingPushPull];
     Core3DSavedCutSourceJob *sourceJob=context->_planningSavedCutJob;
     if(sourceJob&&sourceJob->_planningContext==context)[sourceJob cancel];
     context->_planningRetired = YES;
@@ -21681,6 +21923,14 @@ static bool Core3DPublishCommittedSpatialSweep(
 - (BOOL)frameCommittedSceneSelectedOnly:(BOOL)selectedObjectsOnly
                                  rect:(CGRect)rect
                        objectIdentity:(const core3d::ObjectFrameIdentity*)identity {
+    return [self frameCommittedSceneSelectedOnly:selectedObjectsOnly rect:rect
+                                  objectIdentity:identity fillingRect:NO];
+}
+
+- (BOOL)frameCommittedSceneSelectedOnly:(BOOL)selectedObjectsOnly
+                                 rect:(CGRect)rect
+                       objectIdentity:(const core3d::ObjectFrameIdentity*)identity
+                           fillingRect:(BOOL)fillingRect {
     if (![NSThread isMainThread] || !_isSetuped || GLController == nil) {
         return NO;
     }
@@ -21695,7 +21945,8 @@ static bool Core3DPublishCommittedSpatialSweep(
     if (viewer == nullptr || !viewer->frameModel(selectedObjectsOnly,
             static_cast<std::uint32_t>(std::llround(size.width)),
             static_cast<std::uint32_t>(std::llround(size.height)),
-            rect.origin.x, rect.origin.y, rect.size.width, rect.size.height, identity)) {
+            rect.origin.x, rect.origin.y, rect.size.width, rect.size.height, identity,
+            fillingRect ? true : false)) {
         return NO;
     }
     [GLController requestRender];
@@ -22273,6 +22524,25 @@ extern "C" double Core3DDebugMeasureAnglePairProbe(int pair) {
             [@{ @"selectedCount": @(topology.size()) } mutableCopy];
         Core3DMeasureAddDocumentUnit(viewer, result);
         const Handle(V3d_View)& view = viewer->ActiveView();
+        if (topology.empty()) {
+            // A part that is still an imported mesh has no edges: its tapped corners are the picks.
+            const auto corners = viewer->measureMeshPicks();
+            if (!corners.empty()) {
+                const gp_Pnt a = corners.front().node, b = corners.back().node;
+                result[@"selectedCount"] = @(corners.size());
+                if (corners.size() == 2) {
+                    const double distance = a.Distance(b);
+                    if (!std::isfinite(distance)) return result;
+                    result[@"distance"] = @(distance);
+                }
+                result[@"ax"] = @(a.X()); result[@"ay"] = @(a.Y()); result[@"az"] = @(a.Z());
+                result[@"bx"] = @(b.X()); result[@"by"] = @(b.Y()); result[@"bz"] = @(b.Z());
+                result[@"snapKindA"] = @1;
+                if (corners.size() == 2) result[@"snapKindB"] = @1;
+                Core3DMeasureProjection(view, topology, a, b, result);
+                return result;
+            }
+        }
         const auto picks = viewer->measurePicksForCurrentSelection();
         std::vector<TopoDS_Shape> elements;
         Core3DMeasureSnap snaps[2];
@@ -24394,6 +24664,15 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
     [GLController debugSetShellPreviewWorkerBlocked:blocked];
 }
 
++ (void)debugSetShellOffsetGuardSkipped:(BOOL)skipped {
+    core3d::ShellOperationController::debugSetOffsetGuardSkipped(
+        skipped ? Standard_True : Standard_False);
+}
+
++ (NSInteger)debugShellOffsetGuardRefusalCount {
+    return core3d::ShellOperationController::debugOffsetGuardRefusalCount();
+}
+
 - (void)debugSetMaximumShellCaptureTopologyNodes:(NSUInteger)limit {
     [GLController debugSetMaximumShellCaptureTopologyNodes:limit];
 }
@@ -26344,6 +26623,46 @@ static bool core3dDebugSolidBoundaryLineIntervals(const TopoDS_Shape& world, dou
 
 - (void)debugSetBevelPreviewWorkerBlocked:(BOOL)blocked {
     [GLController debugSetBevelPreviewWorkerBlocked:blocked];
+}
+
++ (void)debugSetPlainBevelKeepsBuilderWrapper:(BOOL)keeps {
+    core3d::BevelOperationController::debugSetPlainResultKeepsBuilderWrapper(
+        keeps ? Standard_True : Standard_False);
+}
+
++ (void)debugSetLeavesSmoothEdgesAndSeamsOut:(BOOL)leavesOut {
+    core3d::scene::SetEdgeDrawClassesEnabled(leavesOut);
+}
+
++ (BOOL)debugLeavesSmoothEdgesAndSeamsOut {
+    return core3d::scene::EdgeDrawClassesEnabled();
+}
+
++ (void)debugSetBooleanPlausibilityGuardSkipped:(BOOL)skipped {
+    Core3DDebugSetBooleanPlausibilityGuardSkipped(skipped);
+}
+
++ (NSInteger)debugLastBakedBooleanAttempts {
+    return Core3DDebugLastBakedBooleanAttempts();
+}
+
++ (BOOL)debugBooleanResultIsPlausibleForOperation:(NSInteger)operation
+                                     inputVolumes:(NSArray<NSNumber *> *)inputVolumes
+                                     resultVolume:(double)resultVolume
+                                        inputsBox:(nullable NSArray<NSNumber *> *)inputsBox
+                                        resultBox:(nullable NSArray<NSNumber *> *)resultBox {
+    std::vector<double> volumes;
+    for (NSNumber *volume in inputVolumes) volumes.push_back(volume.doubleValue);
+    double inputs[6] = {}, result[6] = {};
+    const bool boxes = inputsBox.count == 6 && resultBox.count == 6;
+    if (boxes) {
+        for (NSUInteger index = 0; index < 6; ++index) {
+            inputs[index] = inputsBox[index].doubleValue;
+            result[index] = resultBox[index].doubleValue;
+        }
+    }
+    return Core3DBooleanResultIsPlausible(static_cast<int>(operation), volumes, resultVolume,
+        boxes ? inputs : nullptr, boxes ? result : nullptr) ? YES : NO;
 }
 
 - (void)debugSetMaximumBevelCaptureTopologyNodes:(NSUInteger)limit {
@@ -28305,6 +28624,15 @@ std::unordered_map<NSUInteger,B2BudgetSessionBox>& B2BudgetSessions(){
     [GLController assetData:^(NSData * _Nullable data) {
         completion(data);
     }];
+}
+
++ (void)debugSetForcedSaveProbeFailures:(NSInteger)count {
+    [GLViewController debugSetForcedSaveProbeFailures:count];
+}
+
+- (NSInteger)documentWouldSaveProbe {
+    if (![NSThread isMainThread] || _isLoading || !_isSetuped || GLController == nil) return -1;
+    return [GLController core3d_documentWouldSave];
 }
 
 - (NSData *)thumbData {
