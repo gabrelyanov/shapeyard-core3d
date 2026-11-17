@@ -11537,7 +11537,9 @@ OrdinaryEditResult Core3DViewer::insertPartsFromImportedDocument(const std::stri
             if (std::abs(scale - 1.0) > 1e-12) {
                 gp_Trsf scaling;
                 scaling.SetScale(gp::Origin(), scale);
-                BRepBuilderAPI_Transform scaled(shape, scaling, Standard_True);
+                // Copy the triangles too: a triangle-only part (STL, OBJ) is otherwise left at its
+                // file size in an inch or metre project (Fable review 17 Nov, K18).
+                BRepBuilderAPI_Transform scaled(shape, scaling, Standard_True, Standard_True);
                 if (!scaled.IsDone() || scaled.Shape().IsNull()) return OrdinaryEditResult::Invalid;
                 shape = scaled.Shape();
             }
