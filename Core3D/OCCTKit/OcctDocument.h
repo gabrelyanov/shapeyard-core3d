@@ -1974,17 +1974,47 @@ public:
         const TDF_Label& label, const Handle(AIS_Shape)& presentation,
         const gp_Pnt& start, const gp_Dir& direction, double radius, double depth,
         std::string& refusal) noexcept;
-    //! Holes (K07): the part's hole repeated `count` times in a row, `spacing` apart
-    //! (part units), across the hole along the part's longest side. `near` (part
-    //! units, may be null) picks among several holes. Read-only; refusals: no-hole,
-    //! several-holes, holes-overlap, row-leaves-part, unsupported-hole, bad-row.
+    //! Round holes of a part, read from its stored solid: a Hole needs no record to be
+    //! found (a Hole on a joined, cut or painted part is plain geometry). One entry per
+    //! hole, part coordinates: [px, py, pz, dx, dy, dz, radius, depth]; the point is on the
+    //! axis where the hole starts, the direction goes into the part, depth 0 is "through".
+    //! Read-only; empty for a part the Hole command itself would refuse.
+    Standard_EXPORT std::vector<std::vector<double>> RoundHolesOfPart(
+        const TDF_Label& label) const noexcept;
+    //! Holes: the part with one of its round holes repeated `count` times in all (the
+    //! hole itself included), `spacing` apart centre to centre, without changing the
+    //! document. `nearPoint` picks the hole whose axis is nearest (null: the first).
+    //! The row runs square to the hole, along the part's longer side, towards the
+    //! side with more room; a negative spacing turns it round. Refusals: "no-hole",
+    //! "holes-overlap", "row-leaves-part", "bad-values", "unsupported-source",
+    //! "invalid-result".
     Standard_EXPORT Standard_Boolean BuildHoleRow(
-        const TDF_Label& label, int count, double spacing, const gp_Pnt* near,
+        const TDF_Label& label, int count, double spacing, const gp_Pnt* nearPoint,
         TopoDS_Shape& result, std::string& refusal) const noexcept;
-    //! The same written as ONE undoable command (a saved hole is baked in it).
+    //! The same as ONE undoable command (an earlier saved hole or Join record is baked
+    //! in that command, exactly as ApplyThroughHole does, so Undo gives it back).
     Standard_EXPORT Standard_Boolean ApplyHoleRow(
-        const TDF_Label& label, const Handle(AIS_Shape)& presentation, int count,
-        double spacing, const gp_Pnt* near, std::string& refusal) noexcept;
+        const TDF_Label& label, const Handle(AIS_Shape)& presentation,
+        int count, double spacing, const gp_Pnt* nearPoint, std::string& refusal) noexcept;
+    //! Hole size for a hole that has no saved-cut record: the hole is closed and
+    //! drilled again at `radius` on the same axis, from the same side, to the same
+    //! floor. Refusals: "no-hole", "unchanged", "cannot-close", "hole-leaves-part",
+    //! "holes-overlap", "bad-values", "unsupported-source", "invalid-result".
+    Standard_EXPORT Standard_Boolean BuildHoleResize(
+        const TDF_Label& label, double radius, const gp_Pnt* nearPoint,
+        TopoDS_Shape& result, std::string& refusal) const noexcept;
+    //! The same as ONE undoable command.
+    Standard_EXPORT Standard_Boolean ApplyHoleResize(
+        const TDF_Label& label, const Handle(AIS_Shape)& presentation,
+        double radius, const gp_Pnt* nearPoint, std::string& refusal) noexcept;
+    //! Shared by the three commands above; not for other callers. The part's one
+    //! solid when the Hole command would take the part (`verified`: a checked copy).
+    Standard_Boolean HoleEditSource(const TDF_Label& label, TopoDS_Shape& source,
+        std::string& refusal, Standard_Boolean verified) const noexcept;
+    //! Shared: writes a drilled solid as one command, as ApplyThroughHole does.
+    Standard_Boolean CommitDrilledShape(const TDF_Label& label,
+        const Handle(AIS_Shape)& presentation, const TopoDS_Shape& result,
+        std::string& refusal) noexcept;
     //! The prepared result (in the target's own frame) and the two entity
     //! identifiers, for an on-model preview before Apply. Read-only.
     Standard_EXPORT Standard_Boolean BooleanPairPreparedPreview(
