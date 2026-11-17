@@ -1633,6 +1633,14 @@ __attribute__((objc_subclassing_restricted))
                           expectedSnapshot:
                               (Core3DTransformInspectorSnapshot *)snapshot
     NS_SWIFT_NAME(commitTransformInspectorRotation(_:axis:expected:));
+//! Edit one component of displayedEulerXYZDegrees. Use this together with that
+//! readback in By numbers; the canonical rotation API keeps its old semantics.
+- (Core3DTransformInspectorPositionCommitResult)
+    commitTransformInspectorDisplayedRotationValue:(double)value
+        axis:(Core3DTransformInspectorAxis)axis
+        expectedSnapshot:(Core3DTransformInspectorSnapshot *)snapshot
+    NS_SWIFT_NAME(commitTransformInspectorDisplayedRotation(_:axis:expected:));
+
 
 //! Set an absolute signed uniform scale factor, dimensionless. Magnitude must
 //! be greater than OCCT confusion tolerance and at most 1,000,000. Uses the
@@ -2657,6 +2665,10 @@ __attribute__((objc_subclassing_restricted))
 //! reject both operations without changing document or selection state.
 - (void)debugInvokeNativeSelectAll;
 - (void)debugInvokeNativeDeleteSelected;
+//! Delete: 1 partial stage, 2 throw after commit, 3 commit/first-abort open,
+//! 4 two unavailable post-commit inspections. Zero clears the next fault.
+- (BOOL)debugConfigureNativeDeleteFault:(NSInteger)mode;
+- (NSInteger)debugNativeDeleteStagedRootCount;
 //! Direct native gizmo access for cache-reconciliation regressions. Setting the
 //! native value deliberately leaves the public cached tool untouched.
 - (PrimitiveGizmoType)debugNativeGizmoType;

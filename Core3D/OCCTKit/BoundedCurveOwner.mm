@@ -109,6 +109,9 @@ struct OcafOwner::State final {
     std::map<std::uint64_t, Captured> captures;
     std::map<std::uint64_t, PreparedValue> preparations;
     std::map<std::uint64_t, retained_recipe::OwnerKey> pathIssuances;
+    // Retain the measured creation history through an unproven close. The
+    // document keeps finalized records bound to their actual live OCAF delta.
+    std::shared_ptr<ordinary_naming::Record> creationNaming;
 
     bool bound() const noexcept {
         try {
@@ -146,6 +149,7 @@ void OcafOwner::retireForDocumentReplacement() noexcept {
     state_->captures.clear();
     state_->preparations.clear();
     state_->pathIssuances.clear();
+    state_->creationNaming.reset();
     state_->context.reset();
     state_->owner = nullptr;
 }
@@ -188,20 +192,42 @@ Receipt OcafOwner::create(const CreateRequest& request) noexcept {
         native_opening::CommittedEditPublication publication;
         publication.created.push_back({issued.front().EntityIdentifier(), {}});
         const int undoBefore = state_->owner->Document()->GetAvailableUndos();
+        state_->creationNaming = state_->owner->PrepareOrdinaryNamingHistory(
+            1, {}, OcctDocument::OrdinaryNamingFamily::BoundedCurveCreation);
+        if (!state_->creationNaming)
+            return Refusal(scene, Outcome::busy, "create-history-budget-refused");
         auto lease = state_->context->beginCommandLease(
             fence, kFenceWidth, kFenceHeight);
-        if (!lease) return Refusal(scene, Outcome::busy, "command-refused");
+        if (!lease) {
+            state_->creationNaming.reset();
+            return Refusal(scene, Outcome::busy, "command-refused");
+        }
         OcctBoundedCurveCapture staged;
         if (!state_->owner->StageBoundedCurveCreate(*lease, issued.front(),
-                assigned, rebuilt, request.requestedName, staged)) {
-            const bool closed = lease->abort();
+                assigned, rebuilt, request.requestedName, staged)
+            || !state_->owner->TrackOrdinaryNamingCreationRoot(
+                state_->creationNaming, 0, staged.record.owner)
+            || !state_->owner->CaptureOrdinaryNamingCandidate(state_->creationNaming)) {
+            const bool closed = lease->abort()
+                && state_->owner->SettleOrdinaryNamingHistory(state_->creationNaming, false);
+            if (closed) state_->creationNaming.reset();
+            else state_->context->retainUnprovenEdit(publication);
             return Refusal(scene, closed ? Outcome::refused : Outcome::recoveryRequired,
                            closed ? "create-staging-refused" : "create-abort-unknown");
         }
         if (!lease->commit()) {
+            // A closed-but-unproven command stays fenced. Bind a companion
+            // only if its exact candidate and actual delta can be proved;
+            // this observation never clears the existing recovery outcome.
+            (void)state_->owner->SettleOrdinaryNamingHistory(state_->creationNaming, true);
             state_->context->retainUnprovenEdit(publication);
             return Refusal(scene, Outcome::outcomeUnknown, "create-close-unknown");
         }
+        if (!state_->owner->SettleOrdinaryNamingHistory(state_->creationNaming, true)) {
+            state_->context->retainUnprovenEdit(publication);
+            return Refusal(scene, Outcome::outcomeUnknown, "create-history-unproven");
+        }
+        state_->creationNaming.reset();
         OcctBoundedCurveCapture read;
         const int historyDelta = state_->owner->Document()->GetAvailableUndos() - undoBefore;
         if (historyDelta != 1
