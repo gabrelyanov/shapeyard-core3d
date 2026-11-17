@@ -15865,6 +15865,29 @@ static TopoDS_Shape Core3DMeasureRimForSeamPick(
 }
 
 // Model units covered by one screen pixel at `point` with the view's current camera.
+// OCCT's point picker reads a pixel row y as the row's lower edge ((height - 1 - y) from the
+// bottom) while a tap at continuous row y means y itself, as Project/UnProject do. The column needs
+// no correction. So a picked point sits one pixel row below the tapped spot on screen; a measure
+// pick is moved back up by that one row (EdgePick check, Top view with +X up: 2.98 for 3.0).
+static gp_Pnt Core3DMeasurePointUnderTappedRow(const Handle(V3d_View)& view,
+                                              const gp_Pnt& point) noexcept {
+    try {
+        if (view.IsNull() || view->Window().IsNull() || view->Camera().IsNull()) return point;
+        Standard_Integer width = 0, height = 0;
+        view->Window()->Size(width, height);
+        if (width <= 0 || height <= 0) return point;
+        const auto camera = view->Camera();
+        const gp_Pnt projected = camera->Project(point);
+        const gp_Pnt raised = camera->UnProject(gp_Pnt(
+            projected.X(), projected.Y() + 2.0 / height, projected.Z()));
+        if (!std::isfinite(raised.X()) || !std::isfinite(raised.Y()) || !std::isfinite(raised.Z()))
+            return point;
+        return raised;
+    } catch (...) {
+        return point;
+    }
+}
+
 static double Core3DMeasureUnitsPerPixelAtTap(const Handle(V3d_View)& view,
                                               const gp_Pnt& point) noexcept {
     try {
@@ -15988,6 +16011,7 @@ void Core3DViewer::selectAt(int theX, int theY, bool behindMoveHandles) {
             gp_Pnt point;
             int rank = 0;
             if (!Core3DMeasurePickedPointForOwner(selector, owner, point, rank)) continue;
+            point = Core3DMeasurePointUnderTappedRow(myView, point);
             TopoDS_Shape world = owner->Shape();
             const TopoDS_Shape rim = Core3DMeasureRimForSeamPick(selector, owner);
             if (!rim.IsNull()) world = rim;
