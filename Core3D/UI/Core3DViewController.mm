@@ -4088,6 +4088,13 @@ static bool core3dAgentVector3(NSArray<NSNumber *> *values, double out[3]) {
                                         snapA:(NSString *)snapA snapB:(NSString *)snapB
                                    distanceMM:(double)distanceMM;
 @end
+@interface Core3DAgentDocumentIdentity (Core3DEngineProducer)
+- (instancetype)initCore3DUnidentified:(Core3DAgentMeasurementStatus)status;
+- (instancetype)initCore3DIdentifiedWithDocumentIdentifier:(NSString *)documentIdentifier
+    instanceToken:(NSString *)instanceToken publicationSourceIdentifier:(NSString *)publicationSourceIdentifier
+    documentGeneration:(NSString *)documentGeneration modelRevision:(NSString *)modelRevision
+    presentationRevision:(NSString *)presentationRevision metersPerUnit:(double)metersPerUnit;
+@end
 @interface Core3DAgentAngleMeasurement (Core3DEngineProducer)
 - (instancetype)initCore3DUnmeasured:(Core3DAgentMeasurementStatus)status;
 - (instancetype)initCore3DMeasuredWithSource:(Core3DAgentMeasurementSource *)source
@@ -16996,6 +17003,12 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
         *source = fence;
         return Core3DAgentMeasurementStatusMeasured;
     } catch (...) { return Core3DAgentMeasurementStatusUnavailable; }
+}
+
+- (Core3DAgentDocumentIdentity *)agentDocumentIdentityForExpected:(Core3DSceneSnapshot *)expected {
+    // Not implemented yet (red-first check): always refused.
+    (void)expected;
+    return [[Core3DAgentDocumentIdentity alloc] initCore3DUnidentified:Core3DAgentMeasurementStatusUnavailable];
 }
 
 - (Core3DAgentSolidMeasurement *)agentMeasureSolidOfEntityIdentifier:(NSString *)entityIdentifier
