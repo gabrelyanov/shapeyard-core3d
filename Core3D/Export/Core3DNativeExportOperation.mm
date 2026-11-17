@@ -87,6 +87,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -375,7 +376,21 @@ protected:
                     const TDF_Label& label,
                     const TopLoc_Location& parentTrsf,
                     const XCAFPrs_Style& parentStyle,
-                    const TCollection_AsciiString& name) override {
+                    const TCollection_AsciiString& sourceName) override {
+        // OCCT writes no g line for a part without a name (a Case, a
+        // profile solid), so its faces fell into the previous part's group.
+        // Such a part is named the way the FBX writer names it.
+        const Standard_Integer ordinal = myLeafOrdinal++;
+        TCollection_AsciiString name = sourceName;
+        name.LeftAdjust();
+        name.RightAdjust();
+        if (name.IsEmpty()) {
+            char fallback[32];
+            std::snprintf(fallback, sizeof(fallback), "Part_%04d", static_cast<int>(ordinal));
+            name = TCollection_AsciiString(fallback);
+        } else {
+            name = sourceName;
+        }
         TopoDS_Shape shape;
         XCAFPrs_IndexedDataMapOfShapeStyle styles;
         if (!CollectNestedLocationStyles(label, shape, styles)) {
@@ -566,6 +581,7 @@ private:
     NCollection_Map<Handle(Image_Texture)> myTextures;
     Standard_Boolean myCreatesMaterialFile = Standard_False;
     bool myNestedStylesNeedMaterials = false;
+    Standard_Integer myLeafOrdinal = 0;
 };
 
 //! Rewrite only writer-owned coefficients under the captured convention.

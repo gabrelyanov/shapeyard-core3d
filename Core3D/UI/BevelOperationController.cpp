@@ -501,10 +501,19 @@ Standard_Boolean CanonicalPlainProfileBevelCandidate(
 //! CanonicalPlainProfileBevelCandidate, so the kept child keeps its located
 //! geometry; nothing is rebuilt. Anything else is returned unchanged and is
 //! judged by the usual result checks.
+#ifdef DEBUG
+std::atomic_bool gDebugPlainResultKeepsBuilderWrapper{false};
+#endif
+
 TopoDS_Shape PlainBevelResultWithoutWrapper(const TopoDS_Shape& theResult) noexcept
 {
     try {
         OCC_CATCH_SIGNALS
+#ifdef DEBUG
+        if (gDebugPlainResultKeepsBuilderWrapper.load()) {
+            return theResult;
+        }
+#endif
         if (theResult.IsNull() || theResult.ShapeType() != TopAbs_COMPOUND
             || theResult.Orientation() != TopAbs_FORWARD) {
             return theResult;
@@ -1276,7 +1285,7 @@ Standard_Boolean BevelOperationController::tryPrepareSources(
                             coverage, aSelection.retainedCapture)
                         || theSelection.size() != 1
                         || !myRetainedAdapter))
-                || (!hasRetainedCapture && !bakesSavedCut && !bakesBooleanResult
+                || (!hasRetainedCapture && !bakesBooleanResult && !bakesSavedCut
                     && coverage != OcctRetainedRecipeCoverage::Absent)) {
                 return Standard_False;
             }
@@ -2325,6 +2334,7 @@ BevelApplyResult BevelOperationController::apply() noexcept
                 TDF_Label record=source.bakedBooleanRecord;
                 if(!record.IsNull()) record.ForgetAllAttributes(Standard_True);
                 // Colours put on single faces stay on the faces they were on (founder test 14 Nov).
+                // A standalone saved Hole is baked first, in this same command (push-pull lane).
                 std::vector<TDF_Label> faceLabels;
                 std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> colouredFaces;
                 staged=(!source.bakesSavedCut
@@ -2608,6 +2618,12 @@ BevelOperationController::debugPreviewState() const noexcept
             aWorker.lastComputeWasMainThread;
     }
     return aState;
+}
+
+void BevelOperationController::debugSetPlainResultKeepsBuilderWrapper(
+    const Standard_Boolean keeps) noexcept
+{
+    gDebugPlainResultKeepsBuilderWrapper.store(keeps == Standard_True);
 }
 
 void BevelOperationController::debugSetWorkerBlocked(

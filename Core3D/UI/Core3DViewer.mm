@@ -6083,6 +6083,7 @@ struct DocumentReplacementWork {
 
 void Core3DViewer::release() noexcept {
     _measurePicks.clear();
+    _measureMeshPicks.clear();
     if (_nativeOpeningState) _nativeOpeningState->owner = nullptr;
     _nativeOpeningState.reset();
     // Retire pre-commit source authority on main before graphics teardown.
@@ -6525,6 +6526,7 @@ NativeHistoryTransition Core3DViewer::performHistory(NativeHistoryDirection dire
 bool Core3DViewer::recreateInteractors(PrimitiveManipulatorType theManipulatorType,
                                        ShapeSelectionMode theSelectionMode) {
     _measurePicks.clear();
+    _measureMeshPicks.clear();
     if (!IsStatelessManipulatorType(theManipulatorType)) {
         // Operation controllers own state that is not encoded by this enum.
         // Reconstructing one from the enum would fabricate a fresh ledger and
@@ -13940,6 +13942,7 @@ AssetImportResult Core3DViewer::ValidateCbf(const std::string &theFilename) cons
 
 bool Core3DViewer::redrawDocument() noexcept {
     _measurePicks.clear();
+    _measureMeshPicks.clear();
     if (hasUnresolvedOrdinaryEdit() || HasActiveOperationLedger(_objectInteractor, _shapeInteractor)) {
         // A same-document rebuild is safe only after every typed operation has
         // retired its controller ledger. The manipulator enum alone cannot
@@ -14313,7 +14316,8 @@ bool Core3DViewer::selectObjectFromBrowser(
 // Shared camera math only. Admission and authoritative bounds remain with
 // each caller; a failed fit restores the exact previous camera.
 static bool FitCameraToBounds(const Handle(V3d_View)& view, const Bnd_Box& bounds,
-    double targetX, double targetY, double targetWidth, double targetHeight) noexcept {
+    double targetX, double targetY, double targetWidth, double targetHeight,
+    bool fillTarget = false) noexcept {
     // Target coordinates are normalized to the full viewport, origin top-left.
     if (!std::isfinite(targetX) || !std::isfinite(targetY)
         || !std::isfinite(targetWidth) || !std::isfinite(targetHeight)
@@ -14379,6 +14383,78 @@ static bool FitCameraToBounds(const Handle(V3d_View)& view, const Bnd_Box& bound
                 camera->Copy(previousCamera);
                 return false;
             }
+            // The fit above is safe but loose: the full-view fit is shrunk by the target's
+            // smaller side whichever side limits the model, and every failed try zooms out
+            // by a fifth (a row of parts on a sideways phone came out under half the free
+            // area). A caller that asks to fill the target (the user's own Frame All and
+            // Frame Selected Objects) gets it tightened: zoom until the corner furthest from
+            // the target's centre reaches the target with a small margin, re-centring each
+            // time. Every corner is verified against the whole target again; a failed
+            // tightening keeps the safe fit. Every other caller keeps the fit it had.
+            Handle(Graphic3d_Camera) safeFit = new Graphic3d_Camera(camera);
+            const double kFill = 0.90;
+            const double halfWidth = (right - left) * 0.5, halfHeight = (top - bottom) * 0.5;
+            const double centerX = (left + right) * 0.5, centerY = (bottom + top) * 0.5;
+            bool tightened = fillTarget && halfWidth > 0.0 && halfHeight > 0.0;
+            for (int pass = 0; tightened && pass < 10; ++pass) {
+                // Where the corners are drawn now: their box on the picture. In perspective
+                // that box is not centred on the model's centre (the near end is drawn
+                // larger), so centre the box itself, then zoom until it reaches the target.
+                double lowX = 0.0, highX = 0.0, lowY = 0.0, highY = 0.0;
+                bool first = true;
+                for (const double x : {minX, maxX}) {
+                    for (const double y : {minY, maxY}) {
+                        for (const double z : {minZ, maxZ}) {
+                            const auto point = camera->Project(gp_Pnt(x, y, z));
+                            if (!std::isfinite(point.X()) || !std::isfinite(point.Y())
+                                || !std::isfinite(point.Z())) {
+                                tightened = false;
+                            } else if (first) {
+                                lowX = highX = point.X(); lowY = highY = point.Y();
+                                first = false;
+                            } else {
+                                lowX = std::min(lowX, point.X()); highX = std::max(highX, point.X());
+                                lowY = std::min(lowY, point.Y()); highY = std::max(highY, point.Y());
+                            }
+                        }
+                    }
+                }
+                if (!tightened || first) { tightened = false; break; }
+                const double depth = camera->Project(worldCenter).Z();
+                const auto drawnCenter = camera->UnProject(gp_Pnt(
+                    (lowX + highX) * 0.5, (lowY + highY) * 0.5, depth));
+                const auto targetCenter = camera->UnProject(gp_Pnt(centerX, centerY, depth));
+                gp_Trsf shift;
+                shift.SetTranslation(gp_Vec(targetCenter, drawnCenter));
+                camera->Transform(shift);
+                const double reach = std::max((highX - lowX) * 0.5 / halfWidth,
+                                              (highY - lowY) * 0.5 / halfHeight);
+                if (!std::isfinite(reach) || reach <= 1e-9) { tightened = false; break; }
+                const double ratio = reach / kFill;
+                const double offCenter = std::max(
+                    std::abs((lowX + highX) * 0.5 - centerX) / halfWidth,
+                    std::abs((lowY + highY) * 0.5 - centerY) / halfHeight);
+                if (std::abs(ratio - 1.0) < 0.01 && offCenter < 0.01) { break; }
+                const double scale = camera->Scale() * ratio;
+                if (!std::isfinite(scale) || scale <= 0.0) { tightened = false; break; }
+                camera->SetScale(scale);
+            }
+            if (tightened) {
+                for (const double x : {minX, maxX}) {
+                    for (const double y : {minY, maxY}) {
+                        for (const double z : {minZ, maxZ}) {
+                            const auto point = camera->Project(gp_Pnt(x, y, z));
+                            if (!std::isfinite(point.X()) || !std::isfinite(point.Y())
+                                || !std::isfinite(point.Z())
+                                || point.X() < left || point.X() > right
+                                || point.Y() < bottom || point.Y() > top) {
+                                tightened = false;
+                            }
+                        }
+                    }
+                }
+            }
+            if (fillTarget && !tightened) { camera->Copy(safeFit); }
         }
         view->ZFitAll();
         const gp_Pnt eye = camera->Eye();
@@ -14414,7 +14490,7 @@ bool Core3DViewer::frameModel(
     const std::uint32_t viewportHeight,
     const double targetX, const double targetY,
     const double targetWidth, const double targetHeight,
-    const ObjectFrameIdentity* objectIdentity) noexcept {
+    const ObjectFrameIdentity* objectIdentity, const bool fillTarget) noexcept {
     // Target coordinates are normalized to the full viewport, origin top-left.
     if (!std::isfinite(targetX) || !std::isfinite(targetY)
         || !std::isfinite(targetWidth) || !std::isfinite(targetHeight)
@@ -14474,7 +14550,7 @@ bool Core3DViewer::frameModel(
         }
         if (bounds.IsVoid() || bounds.IsWhole() || bounds.IsOpen()) { return false; }
         return FitCameraToBounds(myView, bounds,
-            targetX, targetY, targetWidth, targetHeight);
+            targetX, targetY, targetWidth, targetHeight, fillTarget);
     } catch (...) { return false; }
 }
 
@@ -15001,6 +15077,34 @@ Core3DViewer::captureSceneFrameSnapshot(
         myDoc,
         myView,
         scene::UInt2{viewportWidth, viewportHeight});
+}
+
+std::vector<Handle(AIS_Shape)> Core3DViewer::previewedResultPresentations() const noexcept {
+    std::vector<Handle(AIS_Shape)> shown;
+    try {
+        if (myContext.IsNull()) return shown;
+        std::vector<Handle(AIS_Shape)> candidates;
+        if (_rawR2PreviewPresentation && !_rawR2PreviewPresentation->preview.IsNull()) {
+            candidates.push_back(_rawR2PreviewPresentation->preview);
+        } else if (_booleanPairPreview && !_booleanPairPreview->preview.IsNull()) {
+            candidates.push_back(_booleanPairPreview->preview);
+            candidates.insert(candidates.end(), _booleanPairPreview->morePreviews.begin(),
+                              _booleanPairPreview->morePreviews.end());
+        } else if (_shapeInteractor != nullptr && _shapeInteractor->hasActiveShell()) {
+            ShellPreviewCapture shell;
+            if (_shapeInteractor->captureShellPreview(shell)) candidates.push_back(shell.result);
+        } else if (_shapeInteractor != nullptr && _shapeInteractor->hasActiveBevel()) {
+            BevelPreviewCapture bevel;
+            if (_shapeInteractor->captureBevelPreview(bevel)) candidates = bevel.results;
+        }
+        for (const Handle(AIS_Shape)& candidate : candidates) {
+            if (!candidate.IsNull() && !candidate->Shape().IsNull()
+                && myContext->IsDisplayed(candidate)) shown.push_back(candidate);
+        }
+    } catch (...) {
+        shown.clear();
+    }
+    return shown;
 }
 
 scene::OcctSceneSnapshotBuilder::OverlayPointer
@@ -15683,6 +15787,95 @@ Core3DViewer::measurePicksForCurrentSelection() noexcept {
     }
 }
 
+std::vector<Core3DViewer::MeasureMeshPick> Core3DViewer::measureMeshPicks() noexcept {
+    try {
+        _measureMeshPicks.erase(std::remove_if(_measureMeshPicks.begin(), _measureMeshPicks.end(),
+            [&](const MeasureMeshPick& pick) {
+                return pick.presentation.IsNull() || myContext.IsNull()
+                    || !myContext->IsDisplayed(pick.presentation);
+            }), _measureMeshPicks.end());
+        return _measureMeshPicks;
+    } catch (...) {
+        _measureMeshPicks.clear();
+        return {};
+    }
+}
+
+// The tap's ray against every displayed face that holds triangles but no surface (an imported mesh
+// not made solid); the front-most triangle hit gives its corner nearest the hit point.
+bool Core3DViewer::recordMeasureMeshPick(int theX, int theY) noexcept {
+    try {
+        if (myContext.IsNull() || myView.IsNull()) return false;
+        Standard_Real px = 0, py = 0, pz = 0, dx = 0, dy = 0, dz = 0;
+        myView->ConvertWithProj(theX, theY, px, py, pz, dx, dy, dz);
+        const gp_XYZ origin(px, py, pz);
+        gp_XYZ direction(dx, dy, dz);
+        const double length = direction.Modulus();
+        if (!std::isfinite(length) || length <= gp::Resolution()
+            || !std::isfinite(px) || !std::isfinite(py) || !std::isfinite(pz)) return false;
+        direction /= length;
+        double nearest = std::numeric_limits<double>::infinity();
+        gp_Pnt node;
+        Handle(AIS_InteractiveObject) hit;
+        AIS_ListOfInteractive displayed;
+        myContext->DisplayedObjects(displayed);
+        for (AIS_ListOfInteractive::Iterator objects(displayed); objects.More(); objects.Next()) {
+            const auto presentation = Handle(AIS_Shape)::DownCast(objects.Value());
+            if (presentation.IsNull() || presentation->Shape().IsNull()) continue;
+            for (TopExp_Explorer faces(presentation->Shape(), TopAbs_FACE); faces.More(); faces.Next()) {
+                const TopoDS_Face& face = TopoDS::Face(faces.Current());
+                TopLoc_Location location;
+                if (!BRep_Tool::Surface(face, location).IsNull()) continue;
+                const Handle(Poly_Triangulation) mesh = BRep_Tool::Triangulation(face, location);
+                if (mesh.IsNull() || mesh->NbTriangles() <= 0) continue;
+                gp_Trsf toWorld = presentation->Transformation();
+                toWorld.Multiply(location.Transformation());
+                for (Standard_Integer index = 1; index <= mesh->NbTriangles(); ++index) {
+                    Standard_Integer n[3] = {0, 0, 0};
+                    mesh->Triangle(index).Get(n[0], n[1], n[2]);
+                    const gp_Pnt corners[3] = {mesh->Node(n[0]).Transformed(toWorld),
+                        mesh->Node(n[1]).Transformed(toWorld), mesh->Node(n[2]).Transformed(toWorld)};
+                    const gp_XYZ e1 = corners[1].XYZ() - corners[0].XYZ();
+                    const gp_XYZ e2 = corners[2].XYZ() - corners[0].XYZ();
+                    const gp_XYZ p = direction.Crossed(e2);
+                    const double det = e1.Dot(p);
+                    if (!std::isfinite(det) || std::abs(det) <= std::numeric_limits<double>::min()) continue;
+                    const gp_XYZ s = origin - corners[0].XYZ();
+                    const double u = s.Dot(p) / det;
+                    if (!(u >= 0 && u <= 1)) continue;
+                    const gp_XYZ q = s.Crossed(e1);
+                    const double v = direction.Dot(q) / det;
+                    if (!(v >= 0 && u + v <= 1)) continue;
+                    const double along = e2.Dot(q) / det;
+                    if (!std::isfinite(along) || along >= nearest) continue;
+                    nearest = along;
+                    const gp_Pnt point(origin + direction * along);
+                    int best = 0;
+                    for (int corner = 1; corner < 3; ++corner)
+                        if (point.SquareDistance(corners[corner]) < point.SquareDistance(corners[best]))
+                            best = corner;
+                    node = corners[best];
+                    hit = presentation;
+                }
+            }
+        }
+        if (hit.IsNull()) return false;
+        const auto taken = std::find_if(_measureMeshPicks.begin(), _measureMeshPicks.end(),
+            [&](const MeasureMeshPick& pick) { return pick.node.Distance(node) <= Precision::Confusion(); });
+        if (taken != _measureMeshPicks.end()) {
+            _measureMeshPicks.erase(taken);
+            return true;
+        }
+        _measureMeshPicks.push_back(MeasureMeshPick{hit, node});
+        if (_measureMeshPicks.size() > 2)
+            _measureMeshPicks.erase(_measureMeshPicks.begin(), _measureMeshPicks.end() - 2);
+        return true;
+    } catch (...) {
+        _measureMeshPicks.clear();
+        return false;
+    }
+}
+
 #if DEBUG
 namespace {
 class Core3DMeasureFixtureSelector final : public StdSelect_ViewerSelector3d {
@@ -15764,6 +15957,29 @@ static TopoDS_Shape Core3DMeasureRimForSeamPick(
 }
 
 // Model units covered by one screen pixel at `point` with the view's current camera.
+// OCCT's point picker reads a pixel row y as the row's lower edge ((height - 1 - y) from the
+// bottom) while a tap at continuous row y means y itself, as Project/UnProject do. The column needs
+// no correction. So a picked point sits one pixel row below the tapped spot on screen; a measure
+// pick is moved back up by that one row (EdgePick check, Top view with +X up: 2.98 for 3.0).
+static gp_Pnt Core3DMeasurePointUnderTappedRow(const Handle(V3d_View)& view,
+                                              const gp_Pnt& point) noexcept {
+    try {
+        if (view.IsNull() || view->Window().IsNull() || view->Camera().IsNull()) return point;
+        Standard_Integer width = 0, height = 0;
+        view->Window()->Size(width, height);
+        if (width <= 0 || height <= 0) return point;
+        const auto camera = view->Camera();
+        const gp_Pnt projected = camera->Project(point);
+        const gp_Pnt raised = camera->UnProject(gp_Pnt(
+            projected.X(), projected.Y() + 2.0 / height, projected.Z()));
+        if (!std::isfinite(raised.X()) || !std::isfinite(raised.Y()) || !std::isfinite(raised.Z()))
+            return point;
+        return raised;
+    } catch (...) {
+        return point;
+    }
+}
+
 static double Core3DMeasureUnitsPerPixelAtTap(const Handle(V3d_View)& view,
                                               const gp_Pnt& point) noexcept {
     try {
@@ -15789,6 +16005,14 @@ static double Core3DMeasureUnitsPerPixelAtTap(const Handle(V3d_View)& view,
 }
 
 void Core3DViewer::Select(int theX, int theY) {
+    selectAt(theX, theY, false);
+}
+
+void Core3DViewer::SelectBehindMoveHandles(int theX, int theY) {
+    selectAt(theX, theY, true);
+}
+
+void Core3DViewer::selectAt(int theX, int theY, bool behindMoveHandles) {
     observeNativePlanningInteraction();
     if (_objectInteractor == nullptr || _shapeInteractor == nullptr) {
         return;
@@ -15850,7 +16074,20 @@ void Core3DViewer::Select(int theX, int theY) {
     // selection but keeps the same owners) before this tap, so an edge picked again records
     // where this tap landed, not where an earlier one did.
     (void)measurePicksForCurrentSelection();
-    OcctViewer::Select(theX, theY, AIS_SelectionScheme::AIS_SelectionScheme_XOR);
+    if (behindMoveHandles) {
+        // The arrows' own gesture must be over: never pick inside it.
+        if (_objectInteractor->isManipulatorGestureActive()) {
+            return;
+        }
+        // Only arrows (or the selected part) under the finger: the tap
+        // changes nothing, as a tap on an arrow always did.
+        if (!OcctViewer::SelectBehind(
+                theX, theY, _objectInteractor->manipulatorPresentation())) {
+            return;
+        }
+    } else {
+        OcctViewer::Select(theX, theY, AIS_SelectionScheme::AIS_SelectionScheme_XOR);
+    }
 
     try {
         (void)measurePicksForCurrentSelection();
@@ -15866,6 +16103,7 @@ void Core3DViewer::Select(int theX, int theY) {
             gp_Pnt point;
             int rank = 0;
             if (!Core3DMeasurePickedPointForOwner(selector, owner, point, rank)) continue;
+            point = Core3DMeasurePointUnderTappedRow(myView, point);
             TopoDS_Shape world = owner->Shape();
             const TopoDS_Shape rim = Core3DMeasureRimForSeamPick(selector, owner);
             if (!rim.IsNull()) world = rim;
@@ -15891,6 +16129,18 @@ void Core3DViewer::Select(int theX, int theY) {
             _measurePicks.erase(_measurePicks.begin(), _measurePicks.end() - 2);
     } catch (...) {
         _measurePicks.clear();
+    }
+    // Nothing selectable under the tap in edge mode: a part that is still an imported mesh has no
+    // edges, so the tap takes one of its corners for Measure. Any real selection forgets mesh picks.
+    try {
+        myContext->InitSelected();
+        if (myContext->MoreSelected()) {
+            _measureMeshPicks.clear();
+        } else if (_shapeInteractor->getSelectionMode() == ShapeSelectionMode::Edge) {
+            (void)recordMeasureMeshPick(theX, theY);
+        }
+    } catch (...) {
+        _measureMeshPicks.clear();
     }
 
     int newCount = selectedCount();
@@ -15955,6 +16205,7 @@ void Core3DViewer::Select(int theX, int theY) {
 		}
         myContext->SelectDetected(AIS_SelectionScheme::AIS_SelectionScheme_Remove);
         myContext->ClearSelected(Standard_True);
+        _measureMeshPicks.clear();
         if (_objectInteractor == nullptr) { return; }
         if (_objectInteractor->getManipulatorType() == PrimitiveManipulatorType::PrimitiveGizmoTypeChamfer
             && _shapeInteractor != nullptr) {
@@ -16226,6 +16477,7 @@ void Core3DViewer::Select(int theX, int theY) {
         const auto result = myView->Dump(thePath.ToCString());
         showGrid(true);
         myView->TriedronDisplay (Aspect_TOTP_LEFT_LOWER, Quantity_NOC_WHITE, 0.20, V3d_ZBUFFER); //FIXME: tmp solution!
+        applyTriedronLift();
         return result;
 
 // FIXME: commented non-working code

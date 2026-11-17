@@ -1079,6 +1079,19 @@ Standard_EXPORT void Core3DDefineSafeBinXCAFFormat(
 #include "NativeEditAuthority.hpp"
 #include <memory>
 namespace core3d::authority { class NativeObservedApplication; }
+// In every build: the plain Join / Cut / Overlap asks this before it stores a result.
+//! Whether a Join / Cut / Overlap result can be what was asked for, judged by
+//! numbers alone (toy car, 15 Nov 2026: a fuse returned a small wrong piece
+//! without reporting an error, and it was stored as the joined body).
+//! operation: 0 Join, 1 Cut, 2 Overlap. inputVolumes[0] is the part that stays,
+//! the others the tools. Join: the result is at least the largest input and at
+//! most their sum (within a thousandth of the largest), and, when both boxes
+//! are given (min x y z, max x y z), its box is the union of the inputs' boxes.
+//! Cut: not more than the part that stays. Overlap: not more than the smallest
+//! input. Inputs that cannot be measured are not judged (true, as before).
+Standard_EXPORT bool Core3DBooleanResultIsPlausible(
+    int operation, const std::vector<double>& inputVolumes, double resultVolume,
+    const double* inputsBox, const double* resultBox) noexcept;
 #if DEBUG
 #include <map>
 #include <string>
@@ -1100,6 +1113,13 @@ Standard_EXPORT std::map<std::string,bool> Core3DDebugRetainedPartBooleanProbe()
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanRingProbe(Standard_Integer scenario);
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanFilletProbe(Standard_Integer scenario);
 Standard_EXPORT void Core3DDebugSetRetainedFilletFailureCount(Standard_Integer count);
+//! Check seam (debug builds): with the guard skipped a check can show what the
+//! builder stored before the guard existed. Never skipped otherwise.
+Standard_EXPORT void Core3DDebugSetBooleanPlausibilityGuardSkipped(bool skipped) noexcept;
+//! How many times the plain Join / Cut / Overlap builder ran for its last
+//! result: 1, or 2 when a refused Join was tried once more with a looser
+//! coincidence tolerance.
+Standard_EXPORT int Core3DDebugLastBakedBooleanAttempts() noexcept;
 Standard_EXPORT std::map<std::string,bool> Core3DDebugSavedBooleanWedgeProbe(Standard_Integer scenario);
 Standard_EXPORT std::map<std::string,bool> Core3DDebugNativeBooleanOwnerProbe(Standard_Integer scenario);
 //! One-shot, non-reentrant capture of canonical pre-G0 writer bytes. The map
@@ -1914,14 +1934,24 @@ public:
         const std::vector<std::pair<TDF_Label, Handle(AIS_Shape)>>& tools, double scale,
         std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks) const noexcept;
     //! Each face of `result` that lies on one of `looks`, with that look (first match wins).
+    //! `eitherWay` also matches a result face that covers a look's face (a side face that Push-pull
+    //! made longer); only coplanar faces can match that way, so neighbours never take the look.
     Standard_EXPORT std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> MatchFaceLooks(
         const TopoDS_Shape& result,
+        const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks,
+        Standard_Boolean eitherWay = Standard_False) const noexcept;
+    //! Push-pull: a face of `result` that is new (lies on no face of `original`), flat, and in the
+    //! plane of a coloured face it touches continues that face (the upper strip of a side made
+    //! longer), so it takes that face's look. Faces that were there before never change look here.
+    Standard_EXPORT std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>> GrownFaceLooks(
+        const TopoDS_Shape& original, const TopoDS_Shape& result,
         const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& looks) const noexcept;
     //! Inside the tool's open command, after the shape is replaced: drop the old face labels and
     //! give every face of `result` that lies on a coloured face that colour.
     Standard_EXPORT Standard_Boolean CarryFaceColours(const TDF_Label& label, const TopoDS_Shape& result,
         const std::vector<TDF_Label>& faceLabels,
-        const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& colouredFaces) noexcept;
+        const std::vector<std::pair<TopoDS_Face, XCAFDoc_VisMaterialPBR>>& colouredFaces,
+        Standard_Boolean eitherWay = Standard_False) noexcept;
     //! A previous Join/Cut/Overlap result whose only record is its Boolean (originals) record:
     //! `record` names that record so a tool that bakes the part (Bevel) can drop it in its own
     //! command (Undo brings the editable result back). False for every other part.

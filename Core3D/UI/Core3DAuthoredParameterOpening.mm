@@ -1317,8 +1317,16 @@ static NSMapTable<Core3DViewController *, Core3DBooleanPairRecoveryIssuer *>
     } catch (...) { return NO; }
 }
 
+// Why the last plain preview was not shown (main thread only); empty when it was shown.
+static NSString *sLastBakedBooleanPreviewRefusal = @"";
+
+- (NSString *)lastBakedBooleanPreviewRefusal {
+    return [NSThread isMainThread] ? (sLastBakedBooleanPreviewRefusal ?: @"") : @"";
+}
+
 - (BOOL)showBakedBooleanPreviewTarget:(NSString *)target tool:(NSString *)tool
     operation:(Core3DPartBooleanOperation)operation {
+    if ([NSThread isMainThread]) sLastBakedBooleanPreviewRefusal = @"unsupported-source";
     if (![NSThread isMainThread] || ![target isKindOfClass:NSString.class]
         || ![tool isKindOfClass:NSString.class]) return NO;
     try {
@@ -1330,6 +1338,7 @@ static NSMapTable<Core3DViewController *, Core3DBooleanPairRecoveryIssuer *>
         const bool shown = viewer->showBakedBooleanPreview(target.UTF8String ?: "",
             tool.UTF8String ?: "",
             static_cast<int>(operation) - static_cast<int>(Core3DPartBooleanOperationUnion), code);
+        sLastBakedBooleanPreviewRefusal = shown ? @"" : ([NSString stringWithUTF8String:code.c_str()] ?: @"");
         if (shown) [gl requestRender];
         return shown ? YES : NO;
     } catch (...) { return NO; }
@@ -1362,6 +1371,7 @@ static NSMapTable<Core3DViewController *, Core3DBooleanPairRecoveryIssuer *>
 - (BOOL)showBakedBooleanPreviewTargets:(NSArray<NSString *> *)targets
     tools:(NSArray<NSString *> *)tools
     operation:(Core3DPartBooleanOperation)operation {
+    if ([NSThread isMainThread]) sLastBakedBooleanPreviewRefusal = @"unsupported-source";
     if (![NSThread isMainThread] || ![targets isKindOfClass:NSArray.class]
         || ![tools isKindOfClass:NSArray.class] || targets.count == 0 || tools.count == 0
         || targets.count + tools.count > 32) return NO;
@@ -1382,6 +1392,7 @@ static NSMapTable<Core3DViewController *, Core3DBooleanPairRecoveryIssuer *>
         std::string code;
         const bool shown = viewer->showBakedBooleanBatchPreview(targetEntities, toolEntities,
             static_cast<int>(operation) - static_cast<int>(Core3DPartBooleanOperationUnion), code);
+        sLastBakedBooleanPreviewRefusal = shown ? @"" : ([NSString stringWithUTF8String:code.c_str()] ?: @"");
         if (shown) [gl requestRender];
         return shown ? YES : NO;
     } catch (...) { return NO; }
