@@ -39,6 +39,7 @@ namespace core3d {
     struct OrdinaryNameLedger;
     struct OrdinaryVisibilityLedger;
     struct OrdinaryCreationLedger;
+    struct PendingObjectDeletion;
 
     enum struct PrimitiveManipulatorType {
         PrimitiveGizmoTypeNone = 0,
@@ -101,6 +102,8 @@ namespace core3d {
     class ObjectInteractor : public Interactor {
         friend class Core3DViewer;
         std::weak_ptr<OrdinaryEditController> _ordinaryEditController;
+        std::shared_ptr<PendingObjectDeletion> _pendingDeletion;
+        bool _reconcilingDeletion = false;
         bool blocksForOrdinaryEdit() const noexcept;
         bool hasUnresolvedEdit() const noexcept;
         bool captureOrdinaryTransformAuthority(OrdinaryTransformLedger& ledger) const noexcept;
@@ -141,6 +144,8 @@ namespace core3d {
         void selectLastObject();
 		void selectAll();
         void deleteSelected();
+        bool hasUnresolvedDeletion() const noexcept;
+        bool reconcileDeletion() noexcept;
 #if DEBUG
         void debugSetDeleteFailureMode(int mode) noexcept { _debugDeleteFailureMode = mode; _debugDeleteStagedRootCount = 0; }
         int _debugDeleteFailureMode = 0;
