@@ -121,6 +121,28 @@ __attribute__((objc_subclassing_restricted))
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+typedef NS_ENUM(NSInteger, Core3DPushPullOperationState) {
+    Core3DPushPullOperationStateCaptured,
+    Core3DPushPullOperationStateReady,
+    //! Zero distance: nothing was opened, the model and history are unchanged.
+    Core3DPushPullOperationStateUnchanged,
+    Core3DPushPullOperationStateCommitted,
+    Core3DPushPullOperationStateCancelled,
+    Core3DPushPullOperationStateRejected,
+    Core3DPushPullOperationStateOutcomeUnknown,
+    Core3DPushPullOperationStateRetryableFailure,
+};
+//! Opaque typed Push-pull capture (lane push-pull for lane ai). Main-thread only.
+//! The face is the shared {axis, side} cap descriptor; the canonical face stays private.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DPushPullOperation : NSObject
+@property(nonatomic,copy,readonly) NSString *entityIdentifier;
+@property(nonatomic,strong,readonly) Core3DShellOpeningSelector *face;
+@property(nonatomic,readonly) double distanceMM;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 #ifdef DEBUG
 //! SAB-N2 fixed R1 stage boundaries. Values mirror the native controller enum.
 typedef NS_ENUM(NSInteger, Core3DDebugRetainedEdgeTreatmentFaultSite) {
@@ -568,6 +590,13 @@ __attribute__((objc_subclassing_restricted))
     faceAPointMM:(NSArray<NSNumber *> *)faceAPointMM faceBPointMM:(NSArray<NSNumber *> *)faceBPointMM
     expected:(Core3DSceneSnapshot *)expected
     NS_SWIFT_NAME(agentMeasureAngle(entityIdentifier:targetAlias:documentIdentifier:sourceSHA256:probeIdentifier:faceAPointMM:faceBPointMM:expected:));
+//! Release-safe READ-ONLY identity of the live document behind `expected` (measure lane for the
+//! ai lane): its persisted document ID and an opaque runtime instance token, see
+//! Core3DAgentDocumentIdentity. Stale unless `expected` is the current publication. It captures
+//! no planning context (a reviewed one stays current) and changes no selection, gizmo, document,
+//! undo/redo or render state. Never nil.
+- (Core3DAgentDocumentIdentity *)agentDocumentIdentityForExpected:(Core3DSceneSnapshot *)expected
+    NS_SWIFT_NAME(documentIdentity(expected:));
 //! Generate a padded triangle atlas on one selected untextured mesh; one Undo.
 - (Core3DMeshUVAtlasResult)generateTriangleUVAtlasForEntityIdentifier:(NSString *)entityIdentifier
                                                          expected:(Core3DSceneSnapshot *)expected
@@ -1192,6 +1221,19 @@ __attribute__((objc_subclassing_restricted))
 - (Core3DShellOperationState)modelingShellState:(Core3DShellOperation *)operation NS_SWIFT_NAME(modelingShellState(_:));
 - (Core3DShellOperationState)applyModelingShell:(Core3DShellOperation *)operation NS_SWIFT_NAME(applyModelingShell(_:));
 - (Core3DShellOperationState)cancelModelingShell:(Core3DShellOperation *)operation NS_SWIFT_NAME(cancelModelingShell(_:));
+//! Typed Push-pull of ONE planar extremal cap of the single selected solid, chosen by
+//! {axis, side} in the part's own frame. Capture is read-only under the planning lease and
+//! refuses a split, ambiguous, curved, missing or stale cap (never the largest or first face).
+//! Distance is along the cap's OUTWARD normal in millimetres: + pulls out, - pushes in.
+//! Zero returns Unchanged with no history. Prepare shows the existing push-pull preview
+//! synchronously (Ready or Rejected); Apply commits one history step; Cancel restores.
+- (nullable Core3DPushPullOperation *)captureModelingPushPullWithFace:(Core3DShellOpeningSelector *)face
+    context:(Core3DModelingPlanningContext *)context NS_SWIFT_NAME(captureModelingPushPull(face:context:));
+- (Core3DPushPullOperationState)prepareModelingPushPull:(Core3DPushPullOperation *)operation distanceMM:(double)distance
+    NS_SWIFT_NAME(prepareModelingPushPull(_:distanceMM:));
+- (Core3DPushPullOperationState)modelingPushPullState:(Core3DPushPullOperation *)operation NS_SWIFT_NAME(modelingPushPullState(_:));
+- (Core3DPushPullOperationState)applyModelingPushPull:(Core3DPushPullOperation *)operation NS_SWIFT_NAME(applyModelingPushPull(_:));
+- (Core3DPushPullOperationState)cancelModelingPushPull:(Core3DPushPullOperation *)operation NS_SWIFT_NAME(cancelModelingPushPull(_:));
 // Additive opt-in capture. Existing capture/advertised catalogs remain unchanged.
 - (nullable Core3DModelingPlanningContext *)captureModelingPlanningContextIncludingSavedCutSource;
 - (nullable Core3DSavedCutSourceOperation *)beginModelingSavedCutSourceEdit:(Core3DSavedCutSourcePatch *)patch

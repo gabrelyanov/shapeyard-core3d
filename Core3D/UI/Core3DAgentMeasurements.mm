@@ -159,6 +159,34 @@
 @implementation Core3DAgentWorldPlacementMeasurement
 @end
 
+@implementation Core3DAgentDocumentIdentity
+- (instancetype)initCore3DUnidentified:(Core3DAgentMeasurementStatus)status {
+    self = [super init];
+    if (self == nil) return nil;
+    _status = status == Core3DAgentMeasurementStatusMeasured ? Core3DAgentMeasurementStatusUnavailable : status;
+    _documentIdentifier = @""; _instanceToken = @""; _publicationSourceIdentifier = @"";
+    _documentGeneration = @""; _modelRevision = @""; _presentationRevision = @"";
+    return self;
+}
+- (instancetype)initCore3DIdentifiedWithDocumentIdentifier:(NSString *)documentIdentifier
+    instanceToken:(NSString *)instanceToken publicationSourceIdentifier:(NSString *)publicationSourceIdentifier
+    documentGeneration:(NSString *)documentGeneration modelRevision:(NSString *)modelRevision
+    presentationRevision:(NSString *)presentationRevision metersPerUnit:(double)metersPerUnit {
+    if (documentIdentifier.length == 0 || instanceToken.length == 0 || publicationSourceIdentifier.length == 0
+        || documentGeneration.length == 0 || modelRevision.length == 0 || presentationRevision.length == 0
+        || !std::isfinite(metersPerUnit) || metersPerUnit <= 0)
+        return [self initCore3DUnidentified:Core3DAgentMeasurementStatusUnavailable];
+    self = [super init];
+    if (self == nil) return nil;
+    _status = Core3DAgentMeasurementStatusMeasured;
+    _documentIdentifier = [documentIdentifier copy]; _instanceToken = [instanceToken copy];
+    _publicationSourceIdentifier = [publicationSourceIdentifier copy];
+    _documentGeneration = [documentGeneration copy]; _modelRevision = [modelRevision copy];
+    _presentationRevision = [presentationRevision copy]; _metersPerUnit = metersPerUnit;
+    return self;
+}
+@end
+
 @implementation Core3DAgentStateCapture
 - (nullable instancetype)initWithDocumentIdentifier:(NSString *)documentIdentifier
                                  documentGeneration:(NSString *)documentGeneration

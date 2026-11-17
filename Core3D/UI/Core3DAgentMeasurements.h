@@ -112,6 +112,25 @@ typedef NS_ENUM(NSInteger, Core3DAgentMeasurementStatus) {
 @property(nonatomic, readonly, copy) NSArray<NSNumber *> *matrixColumnMajor;
 @end
 
+/// Passive identity of the live document behind one expected publication (measure lane for the
+/// ai lane, 16 Nov 21:35). `documentIdentifier` is the document's own persisted ID: the same in a
+/// planning context of this document, kept by save and reopen, different for another document.
+/// `instanceToken` is opaque and runtime only: every caller on one live document gets the same
+/// token, and a new, reopened or replaced document gets a new one. Both are "" unless Measured.
+/// Stale when `expected` is not the current publication (publication, document generation,
+/// model and presentation revisions); Unavailable off the main thread or without a document.
+@interface Core3DAgentDocumentIdentity : NSObject
+@property(nonatomic, readonly) Core3DAgentMeasurementStatus status;
+@property(nonatomic, readonly, copy) NSString *documentIdentifier;
+@property(nonatomic, readonly, copy) NSString *instanceToken;
+@property(nonatomic, readonly, copy) NSString *publicationSourceIdentifier;
+@property(nonatomic, readonly, copy) NSString *documentGeneration;
+@property(nonatomic, readonly, copy) NSString *modelRevision;
+@property(nonatomic, readonly, copy) NSString *presentationRevision;
+@property(nonatomic, readonly) double metersPerUnit;
+- (instancetype)init NS_UNAVAILABLE;
+@end
+
 /// Complete passive state evidence payload. Each value is the canonical native
 /// payload for one frozen commitment family, not a derived summary.
 @interface Core3DAgentStateCapture : NSObject
