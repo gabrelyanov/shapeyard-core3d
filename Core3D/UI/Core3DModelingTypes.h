@@ -678,6 +678,15 @@ __attribute__((objc_subclassing_restricted))
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+//! Main-thread renewal continuity only; never grants modelling authority.
+//! A later host installation invalidates it permanently, even after logout.
+__attribute__((objc_subclassing_restricted))
+@interface Core3DModelingHostRenewalFence : NSObject
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+- (BOOL)isCurrentHostAccountInstallation NS_SWIFT_NAME(isCurrent());
+@end
+
 // Insert after Core3DModelingPlanningContext's @end, before stored profile.
 //! Main-thread host session binding. Core does not authenticate these values.
 //! The trusted host session coordinator supplies a nonsecret namespace and
@@ -690,6 +699,9 @@ __attribute__((objc_subclassing_restricted))
     NS_SWIFT_NAME(installHostAccountSession(scope:generation:));
 + (void)retireHostAccountSession:(Core3DModelingHostSession *)session
     NS_SWIFT_NAME(retireHostAccountSession(_:));
+//! Capture before retiring the exact active session; nil requires a vacant slot.
++ (nullable Core3DModelingHostRenewalFence *)captureRenewalFenceForSession:(nullable Core3DModelingHostSession *)session
+    NS_SWIFT_NAME(captureRenewalFence(for:));
 //! Passive authority check; NO off the main thread or after retirement/replacement.
 - (BOOL)isCurrentHostAccountSession NS_SWIFT_NAME(isCurrent());
 @end

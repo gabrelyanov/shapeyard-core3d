@@ -3023,6 +3023,22 @@ static NSDictionary *Core3DRunNativeTombstoneProbe(NSInteger scenario) {
 - (instancetype)initPrivate;
 @end
 static Core3DModelingHostSession *Core3DInstalledHostSession; // main only
+// This identity belongs to the same native authority slot, not a second host
+// registry. Exact retirement preserves it; every attempted installation changes it.
+static NSObject *Core3DHostAccountInstallation; // main only
+@interface Core3DModelingHostRenewalFence () {
+@public
+    NSObject *_installation;
+}
+- (instancetype)initPrivate;
+@end
+@implementation Core3DModelingHostRenewalFence
+- (instancetype)initPrivate { return [super init]; }
+- (BOOL)isCurrentHostAccountInstallation {
+    return [NSThread isMainThread] && _installation
+        && _installation == Core3DHostAccountInstallation;
+}
+@end
 static bool Core3DRequestString(NSString *value,std::size_t limit,std::string&out) {
     out.clear();if (![value isKindOfClass:NSString.class]||value.length==0||value.length>limit) return false;
     // UTF-8 requires at least as many bytes as UTF-16 code units. Refuse
@@ -3043,8 +3059,17 @@ static bool Core3DHostSessionCurrent(Core3DModelingHostSession *session) {
 @implementation Core3DModelingHostSession
 - (instancetype)initPrivate {return [super init];}
 - (BOOL)isCurrentHostAccountSession { return Core3DHostSessionCurrent(self); }
++ (Core3DModelingHostRenewalFence *)captureRenewalFenceForSession:(Core3DModelingHostSession *)session {
+    if (![NSThread isMainThread]) return nil;
+    if (session ? !Core3DHostSessionCurrent(session) : Core3DInstalledHostSession != nil) return nil;
+    if (!Core3DHostAccountInstallation) Core3DHostAccountInstallation = [NSObject new];
+    Core3DModelingHostRenewalFence *fence = [[Core3DModelingHostRenewalFence alloc] initPrivate];
+    fence->_installation = Core3DHostAccountInstallation;
+    return fence;
+}
 + (instancetype)installHostAccountSession:(NSString *)scope generation:(NSString *)generation {
     if (![NSThread isMainThread]) return nil;
+    Core3DHostAccountInstallation = [NSObject new];
     // Even an invalid replacement retires old host authority; login failure
     // must not accidentally leave the previous account active.
     if (Core3DInstalledHostSession) { Core3DInstalledHostSession->_hostRetired=YES;
