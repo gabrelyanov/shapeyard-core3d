@@ -1211,6 +1211,45 @@ namespace core3d {
         return !hasActiveShell() && beginShellSelectionImpl(proof);
     }
 
+    Standard_Boolean ShapeInteractor::capturePushPullFace(
+        const std::string& entityIdentifier,
+        const ShellOpeningSelector& selector,
+        FaceOperationSourceProof& proof) const noexcept {
+        proof = FaceOperationSourceProof();
+        if (myContext.IsNull() || myDoc.IsNull() || hasActiveExtrusion()
+            || _extrusion.ownsCommand || entityIdentifier.empty()
+            || myContext->NbSelected() != 1) return Standard_False;
+        try {
+            OCC_CATCH_SIGNALS
+            myContext->InitSelected();
+            const auto presentation = Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
+            if (presentation.IsNull() || !myContext->IsDisplayed(presentation)) return Standard_False;
+            const auto label = myDoc->ShapeLabel(presentation);
+            if (label.IsNull() || myDoc->EntityIdentifierForLabel(label) != entityIdentifier)
+                return Standard_False;
+            std::vector<TopoDS_Face> faces;
+            if (!TryResolveShellOpeningSelectors(presentation->Shape(), {selector}, faces)
+                || faces.size() != 1) return Standard_False;
+            FaceOperationSourceProof captured;
+            if (!TryPrepareFaceOperationSource(myContext, myDoc, presentation, faces.front(),
+                    ShellOperationController::kMaximumSourceTopologyNodes,
+                    ShellOperationController::kMaximumStyledSubshapeLabels,
+                    captured, Standard_True, Standard_True)) return Standard_False;
+            TDF_Label admitted;
+            Standard_Size subshapes = 0, profileEdges = 0;
+            if (!tryPrepareExtrusionSelection(captured, admitted, subshapes, profileEdges))
+                return Standard_False;
+            proof = std::move(captured);
+            return Standard_True;
+        } catch (...) { proof = FaceOperationSourceProof(); return Standard_False; }
+    }
+
+    Standard_Boolean ShapeInteractor::beginCapturedExtrusion(
+        const FaceOperationSourceProof& proof) noexcept {
+        return !hasActiveExtrusion() && !_extrusion.ownsCommand
+            && beginExtrusionSelectionImpl(proof);
+    }
+
 	Standard_Boolean ShapeInteractor::beginShellSelection() noexcept {
 		if (myContext.IsNull() || _shellController == nullptr) {
 			return Standard_False;

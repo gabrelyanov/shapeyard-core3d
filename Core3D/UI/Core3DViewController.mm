@@ -2329,6 +2329,29 @@ static bool Core3DModelingLoftSupported(const core3d::rectangular_loft::Definiti
 }
 @end
 
+@interface Core3DPushPullOperation () {
+@public
+    __weak Core3DViewController *_pushPullOwner;
+    std::weak_ptr<core3d::Core3DViewer> _pushPullViewer;
+    std::weak_ptr<core3d::ShapeInteractor> _pushPullInteractor;
+    core3d::FaceOperationSourceProof _pushPullProof;
+    Core3DModelingPlanningContext *_pushPullContext;
+    Core3DPushPullOperationState _pushPullState;
+    BOOL _pushPullStarted;
+}
+@property(nonatomic,readwrite) double distanceMM;
+- (instancetype)initPrivateWithEntity:(NSString *)entity face:(Core3DShellOpeningSelector *)face;
+@end
+@implementation Core3DPushPullOperation
+- (instancetype)initPrivateWithEntity:(NSString *)entity face:(Core3DShellOpeningSelector *)face {
+    if ((self = [super init])) {
+        _entityIdentifier = [entity copy]; _face = face;
+        _pushPullState = Core3DPushPullOperationStateCaptured;
+    }
+    return self;
+}
+@end
+
 @interface Core3DPartBooleanEditResult ()
 - (instancetype)initWithOutcome:(Core3DPartBooleanEditOutcome)outcome
     reason:(NSString *)reason historyDelta:(NSInteger)historyDelta;
@@ -4126,6 +4149,7 @@ static bool core3dAgentVector3(NSArray<NSNumber *> *values, double out[3]) {
     __weak Core3DModelingPlanningContext *_issuedModelingPlanningContext;
     Core3DModelingPlanningContext *_modelingConstructionContext;
     Core3DShellOperation *_activeModelingShell;
+    Core3DPushPullOperation *_activeModelingPushPull;
     std::shared_ptr<core3d::ObjectAlignmentWork> _objectAlignmentWork;
     BOOL _objectAlignmentCancelled;
     Core3DMeshContactOperation *_meshContactOperation;
@@ -18471,6 +18495,156 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
     return [self core3d_finishModelingShell:operation apply:NO];
 }
 
+- (Core3DPushPullOperation *)captureModelingPushPullWithFace:(Core3DShellOpeningSelector *)face
+    context:(Core3DModelingPlanningContext *)context {
+    if (!NSThread.isMainThread || ![self isModelingPlanningContextCurrent:context]
+        || _activeModelingPushPull || _activeModelingShell
+        || ![face isMemberOfClass:Core3DShellOpeningSelector.class]
+        || face.axis < Core3DShellOpeningAxisX || face.axis > Core3DShellOpeningAxisZ
+        || face.side < Core3DShellOpeningSideMinimum || face.side > Core3DShellOpeningSideMaximum
+        || context.scene.selection.selectedElements.count != 1 || !GLController) return nil;
+    try {
+        NSString *entity = context.scene.selection.selectedElements.firstObject.entityIdentifier;
+        if (entity.length == 0 || !entity.UTF8String) return nil;
+        const auto viewer = GLController.viewer;
+        const auto interactor = viewer ? viewer->getShapeInteractor() : nullptr;
+        if (!viewer || !interactor || !viewer->canBeginCommittedEdit()) return nil;
+        const core3d::ShellOpeningSelector selector{static_cast<core3d::ShellOpeningAxis>(face.axis),
+            static_cast<core3d::ShellOpeningSide>(face.side)};
+        core3d::FaceOperationSourceProof proof;
+        if (!interactor->capturePushPullFace(entity.UTF8String, selector, proof)
+            || ![self isModelingPlanningContextCurrent:context]) return nil;
+        Core3DShellOpeningSelector *canonical = [[Core3DShellOpeningSelector alloc] initWithAxis:face.axis side:face.side];
+        Core3DPushPullOperation *operation = [[Core3DPushPullOperation alloc] initPrivateWithEntity:entity face:canonical];
+        operation->_pushPullOwner = self; operation->_pushPullViewer = viewer;
+        operation->_pushPullInteractor = interactor;
+        operation->_pushPullContext = context; operation->_pushPullProof = std::move(proof);
+        return operation;
+    } catch (...) { return nil; }
+}
+
+- (BOOL)core3d_ownsModelingPushPull:(Core3DPushPullOperation *)operation {
+    return NSThread.isMainThread && [operation isMemberOfClass:Core3DPushPullOperation.class]
+        && operation->_pushPullOwner == self && GLController
+        && operation->_pushPullViewer.lock() == GLController.viewer;
+}
+
+- (Core3DPushPullOperationState)modelingPushPullState:(Core3DPushPullOperation *)operation {
+    if (![self core3d_ownsModelingPushPull:operation]) return Core3DPushPullOperationStateRejected;
+    const auto state = operation->_pushPullState;
+    if (!operation->_pushPullStarted) {
+        if (state == Core3DPushPullOperationStateCaptured
+            && ![self isModelingPlanningContextCurrent:operation->_pushPullContext])
+            operation->_pushPullState = Core3DPushPullOperationStateRejected;
+        return operation->_pushPullState;
+    }
+    if (state == Core3DPushPullOperationStateCommitted || state == Core3DPushPullOperationStateCancelled
+        || state == Core3DPushPullOperationStateRejected) return state;
+    const auto interactor = operation->_pushPullInteractor.lock();
+    if (_activeModelingPushPull != operation || !interactor
+        || GLController.viewer->getShapeInteractor() != interactor
+        || !interactor->hasActiveExtrusion() || _currentGizmoType != PrimitiveGizmoTypeExtrude)
+        return Core3DPushPullOperationStateOutcomeUnknown;
+    switch (interactor->extrusionPreviewState()) {
+        case core3d::ExtrusionPreviewState::Ready:
+            return interactor->canApplyExtrusion() ? Core3DPushPullOperationStateReady
+                : Core3DPushPullOperationStateRetryableFailure;
+        case core3d::ExtrusionPreviewState::OutcomeUnknown: return Core3DPushPullOperationStateOutcomeUnknown;
+        default: return Core3DPushPullOperationStateRetryableFailure;
+    }
+}
+
+- (Core3DPushPullOperationState)prepareModelingPushPull:(Core3DPushPullOperation *)operation distanceMM:(double)distance {
+    if (![self core3d_ownsModelingPushPull:operation]) return Core3DPushPullOperationStateRejected;
+    if (operation->_pushPullStarted || operation->_pushPullState != Core3DPushPullOperationStateCaptured)
+        return [self modelingPushPullState:operation];
+    operation->_pushPullState = Core3DPushPullOperationStateRejected;
+    if (_activeModelingPushPull || _activeModelingShell || !std::isfinite(distance)
+        || std::abs(distance) > 1000000
+        || ![self isModelingPlanningContextCurrent:operation->_pushPullContext]) return operation->_pushPullState;
+    if (distance == 0) {
+        // Contract: zero is unchanged with zero history. Nothing is opened.
+        operation.distanceMM = 0;
+        operation->_pushPullState = Core3DPushPullOperationStateUnchanged;
+        operation->_pushPullContext->_planningRetired = YES;
+        operation->_pushPullProof = {};
+        return operation->_pushPullState;
+    }
+    operation->_pushPullContext->_planningConsumed = YES;
+    const auto viewer = GLController.viewer;
+    const auto interactor = operation->_pushPullInteractor.lock();
+    if (!interactor || viewer->getShapeInteractor() != interactor || !viewer->canBeginCommittedEdit()
+        || !interactor->beginCapturedExtrusion(operation->_pushPullProof)) return operation->_pushPullState;
+    operation->_pushPullStarted = YES;
+    operation->_pushPullState = Core3DPushPullOperationStateReady; // live; polled below
+    _activeModelingPushPull = operation;
+    viewer->getObjectInteractor()->setManipulatorType(core3d::PrimitiveManipulatorType::PrimitiveGizmoTypeExtrude);
+    _currentGizmoType = [GLController getGizmoType];
+    // One conversion at the native boundary: millimetres to the captured model unit.
+    const double factor = interactor->extrusionMetersPerUnit() * 1000.0;
+    const double local = distance / factor;
+    operation.distanceMM = distance;
+    const BOOL prepared = _currentGizmoType == PrimitiveGizmoTypeExtrude
+        && std::isfinite(factor) && factor > 0 && std::isfinite(local) && local != 0
+        && interactor->setExtrusionValueForSelection(local)
+        && interactor->canApplyExtrusion();
+    if (!prepared) {
+        // A refused distance (no valid solid, out of range) closes the preview it opened.
+        // Only a confirmed abort is a clean Rejected; otherwise the state stays unknown.
+        if (!interactor->cancelExtrusion()) return Core3DPushPullOperationStateOutcomeUnknown;
+        operation->_pushPullState = Core3DPushPullOperationStateRejected;
+        operation->_pushPullContext->_planningRetired = YES;
+        operation->_pushPullProof = {};
+        _activeModelingPushPull = nil;
+        [self setGizmoType:PrimitiveGizmoTypeNone];
+        [GLController requestRender];
+        return operation->_pushPullState;
+    }
+    self.can_apply = YES;
+    [GLController requestRender];
+    [self viewDidChangeViewportPresentationOverlay];
+    [self sendNotifyUIState:(UIStateChangingGizmo | UIStateChangingSelection | UIStateChangingApply)];
+    return [self modelingPushPullState:operation];
+}
+
+- (Core3DPushPullOperationState)core3d_finishModelingPushPull:(Core3DPushPullOperation *)operation apply:(BOOL)apply {
+    if (![self core3d_ownsModelingPushPull:operation]) return Core3DPushPullOperationStateRejected;
+    if (!operation->_pushPullStarted) {
+        if (!apply && operation->_pushPullState == Core3DPushPullOperationStateCaptured) {
+            operation->_pushPullState = Core3DPushPullOperationStateCancelled;
+            if (!operation->_pushPullContext->_planningConsumed)
+                operation->_pushPullContext->_planningRetired = YES;
+            operation->_pushPullProof = {};
+        }
+        return [self modelingPushPullState:operation];
+    }
+    const auto state = operation->_pushPullState;
+    if (state == Core3DPushPullOperationStateCommitted || state == Core3DPushPullOperationStateCancelled
+        || state == Core3DPushPullOperationStateRejected) return state;
+    const auto interactor = operation->_pushPullInteractor.lock();
+    if (_activeModelingPushPull != operation || !interactor
+        || GLController.viewer->getShapeInteractor() != interactor
+        || !interactor->hasActiveExtrusion() || _currentGizmoType != PrimitiveGizmoTypeExtrude)
+        return Core3DPushPullOperationStateOutcomeUnknown;
+    const auto result = apply ? [self tryApplyExtrusion] : [self tryCancelExtrusion];
+    if (result == Core3DModelingOperationResultSucceeded) {
+        operation->_pushPullState = apply ? Core3DPushPullOperationStateCommitted : Core3DPushPullOperationStateCancelled;
+        operation->_pushPullContext->_planningRetired = YES;
+        operation->_pushPullProof = {};
+        _activeModelingPushPull = nil;
+        [self setGizmoType:PrimitiveGizmoTypeNone];
+        return operation->_pushPullState;
+    }
+    return [self modelingPushPullState:operation];
+}
+
+- (Core3DPushPullOperationState)applyModelingPushPull:(Core3DPushPullOperation *)operation {
+    return [self core3d_finishModelingPushPull:operation apply:YES];
+}
+- (Core3DPushPullOperationState)cancelModelingPushPull:(Core3DPushPullOperation *)operation {
+    return [self core3d_finishModelingPushPull:operation apply:NO];
+}
+
 - (Core3DModelingPlanningContext *)captureModelingPlanningContext {
     if (![self core3d_canCaptureModelingContext]) return nil;
     try {
@@ -18783,6 +18957,8 @@ namespace core3d { extern std::string g_r179LastSelectRefusal; extern std::strin
     [self core3d_retireReservationContext:context];
     if (_activeModelingShell && _activeModelingShell->_shellContext == context)
         (void)[self cancelModelingShell:_activeModelingShell];
+    if (_activeModelingPushPull && _activeModelingPushPull->_pushPullContext == context)
+        (void)[self cancelModelingPushPull:_activeModelingPushPull];
     Core3DSavedCutSourceJob *sourceJob=context->_planningSavedCutJob;
     if(sourceJob&&sourceJob->_planningContext==context)[sourceJob cancel];
     context->_planningRetired = YES;

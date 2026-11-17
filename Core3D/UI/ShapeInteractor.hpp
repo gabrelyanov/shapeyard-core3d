@@ -270,6 +270,13 @@ namespace core3d {
             const std::vector<ShellOpeningSelector>& selectors,
             FaceOperationSourceProof& proof) const noexcept;
         Standard_Boolean beginCapturedShell(const FaceOperationSourceProof& proof) noexcept;
+        //! Typed Push-pull: ONE planar extremal cap of the single selected solid, by
+        //! {axis, side}; same resolver as Shell, Push-pull's own source admission.
+        Standard_Boolean capturePushPullFace(const std::string& entityIdentifier,
+            const ShellOpeningSelector& selector,
+            FaceOperationSourceProof& proof) const noexcept;
+        //! Unlike touch begin, never cancels someone else's push-pull.
+        Standard_Boolean beginCapturedExtrusion(const FaceOperationSourceProof& proof) noexcept;
         Standard_Boolean setShellThickness(
             Standard_Real thickness) noexcept;
         ShellApplyResult applyShell() noexcept;
