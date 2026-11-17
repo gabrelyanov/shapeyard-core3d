@@ -195,7 +195,11 @@ class TransformInspectorMeasurementController final
 public:
     static constexpr Standard_Size kMaximumBRepTopologyNodes = 8'192;
     static constexpr Standard_Size kMaximumTriangleMeshFaces = 4'096;
-    static constexpr Standard_Size kMaximumTriangleMeshSweepNodes = 262'144;
+    //! STL import keeps three points per triangle and admits up to 250,000
+    //! triangles (750,000 points); OBJ import admits 600,000 vertices. The
+    //! size sweep must cover both, or a large import reads "—" (desk lamp
+    //! N08: 105,088 triangles). The 20 ms watchdog still guards the device.
+    static constexpr Standard_Size kMaximumTriangleMeshSweepNodes = 786'432;
     static constexpr std::size_t kMaximumBoundsCacheEntries = 16;
     static constexpr std::size_t kMaximumNegativeBoundsCacheEntries = 8;
     static constexpr Standard_Real kMainThreadBoundsBudgetMilliseconds = 5.0;
