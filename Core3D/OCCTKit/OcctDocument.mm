@@ -13390,6 +13390,21 @@ Standard_Boolean OcctDocument::CarryFaceColours(const TDF_Label& target, const T
         for (const TDF_Label& old : oldLabels) {
             TDF_Label label = old;
             materials->UnSetShapeMaterial(label);
+            // Projects saved before the tag reservation can have a face colour on one of
+            // the part's placement children (1...8: Position, Rotation, Scale as numbers).
+            // Forgetting all of it dropped that number: the part stayed in place on screen
+            // and came back at 0 after save and reopen. Keep the number, forget the rest.
+            Handle(TDataStd_Real) placement;
+            if (label.Father().IsEqual(target) && label.Tag() >= 1 && label.Tag() <= 8
+                && label.FindAttribute(TDataStd_Real::GetID(), placement) && !placement.IsNull()) {
+                std::vector<Standard_GUID> others;
+                for (TDF_AttributeIterator it(label); it.More(); it.Next())
+                    if (it.Value()->ID() != TDataStd_Real::GetID()) others.push_back(it.Value()->ID());
+                for (const Standard_GUID& id : others) label.ForgetAttribute(id);
+                for (TDF_ChildIterator child(label, Standard_False); child.More(); child.Next())
+                    child.Value().ForgetAllAttributes(Standard_True);
+                continue;
+            }
             label.ForgetAllAttributes(Standard_True);
         }
         if (faces.empty()) return Standard_True;
