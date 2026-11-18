@@ -16,7 +16,6 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_LayerTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
-#include "../OCCTKit/CommittedFaceCheckedBits.h"
 #include <TDF_Tool.hxx>
 #include <cmath>
 #include <memory>
@@ -1779,8 +1778,6 @@ static NSString *sLastBakedBooleanPreviewRefusal = @"";
                 ? beforeRedraw.selection.selectedElements.firstObject : nil;
             NSString *keptEntity = kept.kind == Core3DSceneElementKindObject
                 ? kept.entityIdentifier : nil;
-            // Selecting the part again meshes it for picking; keep its saved bits.
-            const core3d::CommittedFaceCheckedBits keepFaceBits(document->Document());
             viewer->redrawDocument();
             if (keptEntity.length > 0) {
                 Core3DSceneSnapshot *afterRedraw = [self captureSceneSnapshot];
@@ -2248,8 +2245,10 @@ static NSString *sLastBakedBooleanPreviewRefusal = @"";
         if (owner.IsNull()) return NO;
         TopExp_Explorer face(XCAFDoc_ShapeTool::GetShape(owner), TopAbs_FACE);
         if (!face.More() || face.Current().TShape().IsNull()) return NO;
+        // A real change the proof reads. The Checked bit no longer counts: it is a
+        // meshing cache that the proof leaves out (K28 / joined mug, 18 Nov).
         const Handle(TopoDS_TShape)& tshape = face.Current().TShape();
-        tshape->Checked(!tshape->Checked());
+        tshape->Orientable(!tshape->Orientable());
         return YES;
     } catch (...) { return NO; }
 }
