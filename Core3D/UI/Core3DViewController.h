@@ -1775,6 +1775,8 @@ __attribute__((objc_subclassing_restricted))
 //! Exact current attached manipulator location; nil when no gizmo is attached.
 //! Read-only DEBUG evidence for saved-group pivot attachment paths.
 - (NSArray<NSNumber *> *_Nullable)debugAttachedManipulatorPosition;
+//! The attached Move handles' Z arrow direction (world, unit); nil when none (K13 check).
+- (NSArray<NSNumber *> *_Nullable)debugAttachedManipulatorZDirection;
 //! The handles' side in screen points (design system 7.2: 96 iPad, 72 iPhone).
 - (NSNumber *_Nullable)debugManipulatorSidePoints;
 //! How many displayed parts carry a highlight style of their own (a tool's colour); 0 when no
