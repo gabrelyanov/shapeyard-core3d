@@ -35,6 +35,7 @@
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Defeaturing.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepClass_FaceClassifier.hxx>
@@ -814,10 +815,23 @@ inline Standard_Boolean ShellAroundSmallRounds(
         if (source.IsNull() || source.ShapeType() != TopAbs_SOLID || rounds.empty())
             return Standard_False;
         Message_ProgressScope scope(progress, "Shell", 1);
+        // Remove Features marks the shapes it reads (the "checked" flag) and the part's
+        // shapes are the saved document's: it reads a deep copy, so Undo of this Shell
+        // gives back the same saved bytes.
+        BRepBuilderAPI_Copy copier(source, Standard_True, Standard_False);
+        if (!copier.IsDone() || copier.Shape().IsNull()) return Standard_False;
+        const auto copied = [&copier](const TopoDS_Face& face) -> TopoDS_Shape {
+            const TopTools_ListOfShape& now = copier.Modified(face);
+            return now.Extent() == 1 ? now.First() : TopoDS_Shape();
+        };
         BRepAlgoAPI_Defeaturing remove;
-        remove.SetShape(source);
+        remove.SetShape(copier.Shape());
         TopTools_ListOfShape unwanted;
-        for (const TopoDS_Face& face : rounds) unwanted.Append(face);
+        for (const TopoDS_Face& face : rounds) {
+            const TopoDS_Shape copy = copied(face);
+            if (copy.IsNull()) return Standard_False;
+            unwanted.Append(copy);
+        }
         remove.AddFacesToRemove(unwanted);
         remove.Build();
         if (!remove.IsDone() || remove.HasErrors()) return Standard_False;
@@ -829,8 +843,9 @@ inline Standard_Boolean ShellAroundSmallRounds(
         TopTools_IndexedMapOfShape sharpFaces;
         TopExp::MapShapes(sharp, TopAbs_FACE, sharpFaces);
         std::vector<TopoDS_Face> sharpOpenings;
-        for (const TopoDS_Face& opening : openings) {
-            if (remove.IsDeleted(opening)) return Standard_False;
+        for (const TopoDS_Face& given : openings) {
+            const TopoDS_Shape opening = copied(given);
+            if (opening.IsNull() || remove.IsDeleted(opening)) return Standard_False;
             const TopTools_ListOfShape& changed = remove.Modified(opening);
             if (changed.Extent() > 1) return Standard_False;
             const TopoDS_Shape now = changed.IsEmpty() ? TopoDS_Shape(opening) : changed.First();
