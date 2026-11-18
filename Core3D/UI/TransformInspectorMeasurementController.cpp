@@ -9,6 +9,8 @@
 #include "ObjectInteractor.hpp"
 #include "ShapeInteractor.hpp"
 #include "../Common/Core3DMobileResourceLimits.h"
+#include "../OCCTKit/AnalyticBooleanSolid.hxx"
+#include "../OCCTKit/CylindricalCutDefinition.hxx"
 
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBndLib.hxx>
@@ -2595,6 +2597,33 @@ TransformInspectorMeasurementController::commitPosition(
         if(unchangedPlacement) {
             // Reserved no-op proceeds with the exact original transform to
             // ordinary source/catalog proof, without a receipt-only command.
+        } else if (sizes && retainedPlacement.value) {
+            // HOLE-BOX-DIM (CTO 18 Nov 00:40): the part takes the new size and its saved Hole
+            // stays round, the same diameter in the same place measured from the centre. The
+            // hole-less base kept in the Hole's record is resized about the same centre and the
+            // same hole is cut again; stretching the drilled solid would make the hole an oval.
+            const auto* hole = std::get_if<core3d::retained_solid::Envelope>(&retainedPlacement.value->envelope);
+            if (!hole || retainedPlacement.value->base.IsNull() || !dimensionTransform) {
+                anOutcome.result = TransformInspectorPositionCommitResult::Unsupported;
+                return anOutcome;
+            }
+            BRepBuilderAPI_Copy baseCopy(retainedPlacement.value->base, Standard_True, Standard_False);
+            if (!baseCopy.IsDone() || baseCopy.Shape().IsNull()) {
+                anOutcome.result = TransformInspectorPositionCommitResult::InternalFailure;
+                return anOutcome;
+            }
+            BRepBuilderAPI_GTransform resizedBase(baseCopy.Shape(), *dimensionTransform, Standard_True);
+            std::atomic_bool stop{false};
+            core3d::analytic_boolean::Result cut;
+            if (!resizedBase.IsDone() || resizedBase.Shape().IsNull()
+                || core3d::analytic_boolean::Build(resizedBase.Shape(), core3d::cylindrical_cut::Recipe(*hole),
+                       stop, cut) != core3d::analytic_boolean::Status::Built
+                || cut.solid.IsNull()) {
+                // The hole no longer fits the new size: nothing changes.
+                anOutcome.result = TransformInspectorPositionCommitResult::Unsupported;
+                return anOutcome;
+            }
+            candidateShape = cut.solid;
         } else if (sizes) {
             const int kind = exactBaseline.inspectorPrimitive.IsCurrent(aStoredShape)
                 ? 2 : InspectorAnalyticPrimitiveKind(aStoredShape);
