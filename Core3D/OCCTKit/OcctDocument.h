@@ -2863,4 +2863,14 @@ private:
   std::unordered_set<std::string> myDependentReplayAuthorization;
 };
 
+#if DEBUG
+#include <map>
+#include <string>
+//! DEBUG: one SHA-256 per free part (entity identifier -> hex) over the part's exact shape (BRep
+//! text of every shape in its label tree) and every attribute in that tree as the project file's
+//! own binary drivers write it (colours, pictures, records). Two equal digests mean the part
+//! would be saved byte for byte the same. Used by the Edit sweep check (K16, CTO 17 Nov 18:09).
+Standard_EXPORT std::map<std::string, std::string> OcctDebugPartDigests(const OcctDocument& document) noexcept;
+#endif
+
 #endif // OcctDocument_h
