@@ -608,8 +608,9 @@ NSDictionary *ObserveRealizedLaw(double unit) {
         [&](const TopoDS_Shape& source, const Definition& value) {
             return Build(source, value, cancelledFlag);
         });
+    // K19: 4 x 4, since a box edge now takes any radius below the face width.
     const TopoDS_Shape tight = BRepPrimAPI_MakeBox(
-        6 * scale, 6 * scale, 40 * scale).Shape();
+        4 * scale, 4 * scale, 40 * scale).Shape();
     const auto clearance = RunCase(tight, definition,
         [&](const TopoDS_Shape& source, const Definition& value) {
             return Build(source, value, running);
