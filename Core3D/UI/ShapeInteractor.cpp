@@ -11,6 +11,10 @@
 #include <TopExp_Explorer.hxx>
 #include <StdSelect_BRepOwner.hxx>
 #include <BRep_Tool.hxx>
+#include <TopoDS.hxx>
+#include <Geom_Curve.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <StlAPI_Writer.hxx>
 #include <RWObj_CafWriter.hxx>
 #include <RWGltf_CafWriter.hxx>
@@ -1032,8 +1036,12 @@ namespace core3d {
 				// side and the new strip above it); Bevel then failed on that seam
 				// (phone stand 56, CTO 17 Nov 05:13). Merge only those seams: every
 				// edge the source had away from the pulled face is kept, so a Split
-				// line elsewhere stays where the user drew it.
+				// line elsewhere stays where the user drew it. The merge is an extra:
+				// it has its own catch, so if OCCT fails inside it the un-merged
+				// solid is kept and the Push-pull still applies (Fable review K11).
 				if (isProtrusion) {
+					try {
+					OCC_CATCH_SIGNALS
 					TopTools_IndexedMapOfShape faceEdges;
 					TopExp::MapShapes(workingFace, TopAbs_EDGE, faceEdges);
 					TopTools_IndexedMapOfShape sourceEdges;
@@ -1041,9 +1049,41 @@ namespace core3d {
 					TopTools_MapOfShape keep;
 					for (TopExp_Explorer edge(candidate, TopAbs_EDGE);
 						 edge.More(); edge.Next()) {
-						if (sourceEdges.Contains(edge.Current())
-							&& !faceEdges.Contains(edge.Current())) {
+						if (faceEdges.Contains(edge.Current())) {
+							continue;
+						}
+						if (sourceEdges.Contains(edge.Current())) {
 							keep.Add(edge.Current());
+							continue;
+						}
+						// An edge the pull made is merged away only when it lies on the
+						// pulled face's old border (a side meets its own new strip
+						// there). The seam between two strips that rise from a Split
+						// side stays, so each half keeps its own face and colour.
+						const TopoDS_Edge& made = TopoDS::Edge(edge.Current());
+						Standard_Real first = 0.0;
+						Standard_Real last = 0.0;
+						Handle(Geom_Curve) curve =
+							BRep_Tool::Curve(made, first, last);
+						if (curve.IsNull()) {
+							keep.Add(made);
+							continue;
+						}
+						const gp_Pnt middle = curve->Value((first + last) / 2.0);
+						const Standard_Real reach = 10.0 * std::max(
+							BRep_Tool::Tolerance(made), Precision::Confusion());
+						Standard_Boolean onBorder = Standard_False;
+						const TopoDS_Vertex probe =
+							BRepBuilderAPI_MakeVertex(middle).Vertex();
+						for (Standard_Integer index = 1;
+							 index <= faceEdges.Extent() && !onBorder; ++index) {
+							BRepExtrema_DistShapeShape distance(
+								probe, faceEdges(index));
+							onBorder = distance.IsDone()
+								&& distance.Value() <= reach;
+						}
+						if (!onBorder) {
+							keep.Add(made);
 						}
 					}
 					ShapeUpgrade_UnifySameDomain unify(
@@ -1064,6 +1104,9 @@ namespace core3d {
 						candidate = unified;
 						candidateSubshapeCount = unifiedCount;
 						candidateSolidCount = unifiedSolids;
+					}
+					} catch (...) {
+						// candidate is still the checked, un-merged solid.
 					}
 				}
 				// The OCCT contract explicitly defines GeomControls=false as a
