@@ -31738,10 +31738,11 @@ Standard_Boolean OcctDocument::ApplyTreatmentHistoryAfterHistoryChange(
 }
 
 namespace {
-// TRIAL (Fable REOPEN-BYTES patch C, for K10 Split on a round cap): TNaming_DeltaOnModification::Apply
+// Fable REOPEN-BYTES patch C (round 1 K10, Split on a round cap): TNaming_DeltaOnModification::Apply
 // and TNaming_DeltaOnRemoval::Apply rebuild the restored NamedShape through a new TNaming_Builder,
-// which advances the version. The delta carries the attribute as it was; note its version before
-// the history step and put it back afterwards. Additions are skipped: that step removes them.
+// which advances its version, so Undo/Redo saved one number different from the step it restores.
+// The delta carries the attribute as it was; note its version before the history step and put it
+// back afterwards. Additions are skipped: that step removes them.
 struct NamingVersionNote { TDF_Label label; Standard_Integer version; };
 std::vector<NamingVersionNote> NamingVersionsCarriedBy(const Handle(TDF_Delta)& delta) {
     std::vector<NamingVersionNote> notes;
