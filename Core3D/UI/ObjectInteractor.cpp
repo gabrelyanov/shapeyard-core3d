@@ -1226,6 +1226,12 @@ Standard_Boolean DuplicateFaceFinishesMatch(
 			return gp_XYZ();
 	}
 
+	gp_XYZ ObjectInteractor::manipulatorZDirection() {
+		if (!_manipulator.IsNull())
+			return _manipulator->Position().Direction().XYZ();
+		return gp_XYZ(0, 0, 1);
+	}
+
     PresentationOverlayCaptureStatus
     ObjectInteractor::captureIdlePresentationOverlay(
         scene::PresentationOverlayContent& theContent,
