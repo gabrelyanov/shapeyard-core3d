@@ -936,6 +936,11 @@ inline Standard_Boolean ShellAroundSmallRounds(
 //! handed back in `made` (the builder then holds nothing) and the caller
 //! validates it like any other result.
 //! Returns false only when the guard held the shell back and nothing was made.
+inline Standard_Boolean MakeInwardShellOnCopy(
+    BRepOffsetAPI_MakeThickSolid& builder, const TopoDS_Shape& source,
+    const std::vector<TopoDS_Face>& faces, Standard_Real thickness, Standard_Real tolerance,
+    const Message_ProgressRange& progress, Standard_Integer* normalizationStatus, TopoDS_Shape* made);
+
 inline Standard_Boolean MakeInwardShell(
     BRepOffsetAPI_MakeThickSolid& builder,
     const TopoDS_Shape& source,
@@ -949,6 +954,29 @@ inline Standard_Boolean MakeInwardShell(
         return MakeInwardShellPlain(builder, source, faces, thickness, tolerance, progress,
                                     normalizationStatus, Standard_False, nullptr, nullptr, nullptr);
     made->Nullify();
+    // DIAGNOSTIC (18 Nov 01:08, push-pull): every route reads a deep copy of the part, to learn
+    // whether a step in here marks the part's own shapes (Undo bytes of the lamp-shade Shell).
+    BRepBuilderAPI_Copy partCopier(source, Standard_True, Standard_False);
+    if (!partCopier.IsDone() || partCopier.Shape().IsNull()) return Standard_False;
+    std::vector<TopoDS_Face> copiedFaces;
+    for (const TopoDS_Face& face : faces) {
+        const TopTools_ListOfShape& now = partCopier.Modified(face);
+        if (now.Extent() != 1) return Standard_False;
+        copiedFaces.push_back(TopoDS::Face(now.First()));
+    }
+    return MakeInwardShellOnCopy(builder, partCopier.Shape(), copiedFaces, thickness, tolerance,
+                                 progress, normalizationStatus, made);
+}
+
+inline Standard_Boolean MakeInwardShellOnCopy(
+    BRepOffsetAPI_MakeThickSolid& builder,
+    const TopoDS_Shape& source,
+    const std::vector<TopoDS_Face>& faces,
+    Standard_Real thickness, Standard_Real tolerance,
+    const Message_ProgressRange& progress,
+    Standard_Integer* normalizationStatus,
+    TopoDS_Shape* made)
+{
     ShellRoundedEdges rounded;
     const Standard_Boolean known = ShellRoundedEdgesOf(source, faces, thickness, tolerance, rounded);
     Message_ProgressScope scope(progress, "Shell", 2);
