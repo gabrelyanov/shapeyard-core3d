@@ -5,6 +5,7 @@
 #include <StdSelect_ViewerSelector3d.hxx>
 #endif
 #include "../OCCTKit/PlanarSweepTangentArc.hxx"
+#include "../OCCTKit/CommittedFaceCheckedBits.h"
 #include "../OCCTKit/PartBooleanOwner.hxx"
 #include "../OCCTKit/PartBooleanFamilyAdmission.hxx"
 #include "../OCCTKit/PartBooleanPersistence.hxx"
@@ -21819,6 +21820,14 @@ static bool Core3DPublishCommittedSpatialSweep(
         identity.documentGeneration = expected.revisions.documentGeneration;
         identity.modelRevision = expected.revisions.modelRevision;
         bool selectionWasTouched = false;
+        // Selecting a part meshes it for picking and highlighting, which sets the Checked bit
+        // of some of its faces; that bit is written into the saved file, so only selecting a
+        // part made the project save different bytes, and a later Undo gave those marked faces
+        // back (lamp shade Width, 18 Nov: 7 of 9 faces checked before selecting, 9 after).
+        // Keep every part's face bits as they were, through the selection refresh too.
+        const auto selectionDocument = GLController.viewer->getDocument();
+        const core3d::CommittedFaceCheckedBits keepFaceBits(
+            selectionDocument.IsNull() ? Handle(TDocStd_Document)() : selectionDocument->Document());
         const bool selected = GLController.viewer->selectObjectFromBrowser(
             identity, static_cast<std::uint32_t>(std::llround(size.width)),
             static_cast<std::uint32_t>(std::llround(size.height)), selectionWasTouched);
