@@ -284,6 +284,8 @@ bool TryInspectorRepresentation(
     return false;
 }
 
+// The one capability a bakeable saved Hole gets back (NonuniformScale, Dimensions).
+constexpr std::uint64_t kSavedHoleBakeCapabilities=1ull<<5;
 bool TryInspectorOwnedRepresentation(const Handle(OcctDocument)& owner,const TDF_Label& label,
     TransformInspectorGeometryRepresentation& representation,std::uint64_t& capabilities) noexcept {
     try {
@@ -291,7 +293,14 @@ bool TryInspectorOwnedRepresentation(const Handle(OcctDocument)& owner,const TDF
             ||!TryInspectorRepresentation(owner->StoredGeometryRepresentationForLabel(label),representation,capabilities))return false;
         core3d::retained_solid::Record retained;
         if(!core3d::retained_solid::Read(owner->Document(),label,retained))return false;
-        if(retained.value)capabilities&=~core3d::cylindrical_cut::UnsupportedOccurrenceCapabilities;
+        if(retained.value){
+            std::uint64_t unsupported=core3d::cylindrical_cut::UnsupportedOccurrenceCapabilities;
+            // HOLE-BOX-DIM (round 1): Dimensions on a part with a standalone saved Hole bakes the
+            // hole into the part inside its own command (as Push-pull, Bevel and Shell do; Undo
+            // restores the resizable hole), so By numbers keeps the one-axis resize for it.
+            if(owner->CanBakeSavedCutForFaceEdit(label))unsupported&=~kSavedHoleBakeCapabilities;
+            capabilities&=~unsupported;
+        }
         return true;
     }catch(...){return false;}
 }
@@ -2554,8 +2563,10 @@ TransformInspectorMeasurementController::commitPosition(
         // Derived cuts must prove live ordinary source/catalog admission even
         // for no-op requests. They remain excluded from reserved placement.
         core3d::retained_solid::Record retainedPlacement;
+        // HOLE-BOX-DIM: a size change on a standalone saved Hole bakes the hole in this command.
         if(!core3d::retained_solid::Read(aDocument,aDefinition,retainedPlacement)
-            ||(retainedPlacement.value&&(placementPermit||sizes||(scales&&theRequest.value<=0)))) {
+            ||(retainedPlacement.value&&(placementPermit||(scales&&theRequest.value<=0)
+                ||(sizes&&!myDoc->CanBakeSavedCutForFaceEdit(aDefinition))))) {
             anOutcome.result=TransformInspectorPositionCommitResult::Unsupported;return anOutcome;
         }
         if (unchangedPlacement&&!placementPermit&&!retainedPlacement.value) {
@@ -2664,6 +2675,7 @@ TransformInspectorMeasurementController::commitPosition(
             change.inspectorPrimitiveBounds = dimensionBounds;
         }
         change.transform = aCandidateTransform;
+        change.bakeSavedCut = sizes && !unchangedPlacement && bool(retainedPlacement.value);
         change.operation = (scales || sizes) ? OrdinaryTransformOperation::Scale
             : rotates ? OrdinaryTransformOperation::Rotate : OrdinaryTransformOperation::Translate;
 #ifdef DEBUG

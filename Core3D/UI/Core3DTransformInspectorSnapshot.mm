@@ -378,9 +378,13 @@ constexpr bool Core3DHasExpectedCapabilities(
         case Core3DTransformInspectorRepresentationBRep:
             // Native retained-cut capture emits this exact reduced mask. This
             // validates a DTO shape, not retained-feature or Reserved authority.
+            // A bakeable saved Hole also keeps NonuniformScale (Dimensions, HOLE-BOX-DIM).
             return capabilities == kBRepModelCapabilities
                 || capabilities == (kBRepModelCapabilities
-                    & ~core3d::cylindrical_cut::UnsupportedOccurrenceCapabilities);
+                    & ~core3d::cylindrical_cut::UnsupportedOccurrenceCapabilities)
+                || capabilities == (kBRepModelCapabilities
+                    & ~(core3d::cylindrical_cut::UnsupportedOccurrenceCapabilities
+                        & ~static_cast<std::uint64_t>(Core3DModelCapabilityNonuniformScale)));
         case Core3DTransformInspectorRepresentationTriangleMesh:
             return capabilities == kTriangleMeshModelCapabilities;
         case Core3DTransformInspectorRepresentationUnknown:
@@ -395,6 +399,8 @@ constexpr auto kRetainedCutInspectorCapabilities = kBRepModelCapabilities
     & ~core3d::cylindrical_cut::UnsupportedOccurrenceCapabilities;
 static_assert(Core3DHasExpectedCapabilities(Core3DTransformInspectorRepresentationBRep,
     kRetainedCutInspectorCapabilities));
+static_assert(Core3DHasExpectedCapabilities(Core3DTransformInspectorRepresentationBRep,
+    kRetainedCutInspectorCapabilities | static_cast<std::uint64_t>(Core3DModelCapabilityNonuniformScale)));
 static_assert(!Core3DHasExpectedCapabilities(Core3DTransformInspectorRepresentationBRep, 0));
 static_assert(!Core3DHasExpectedCapabilities(Core3DTransformInspectorRepresentationBRep,
     kRetainedCutInspectorCapabilities | static_cast<std::uint64_t>(Core3DModelCapabilityBoolean)));
