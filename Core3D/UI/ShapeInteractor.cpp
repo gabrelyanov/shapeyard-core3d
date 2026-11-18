@@ -39,6 +39,10 @@
 #include <BinTools_FormatVersion.hxx>
 #include <TopTools_FormatVersion.hxx>
 #include <BRepBndLib.hxx>
+#include <Bnd_Box.hxx>
+#include <TopLoc_Location.hxx>
+#include <gp_Ax3.hxx>
+#include <gp_Trsf.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <Prs3d_Drawer.hxx>
@@ -612,9 +616,101 @@ namespace core3d {
 			return properties.CentreOfMass();
 		}
 
+		//! What Split measures its line from: a point, and the direction the
+		//! line runs in.
+		struct SplitReference {
+			gp_Pnt middle;
+			gp_Dir along;
+			Standard_Real length = 0.0;
+		};
+
+		//! The sides a flat face can be split from, in a fixed order. A face
+		//! with straight edges: those edges, as before (same order, same
+		//! indices). A face with none (K10: the round cap of a switch, a
+		//! cylinder's end): the four sides of the tightest box around the face
+		//! that is square to the part's own axes, so that "From the left edge,
+		//! 6 mm" on a 12 mm cap cuts it in half. The order and the box depend
+		//! only on the face's geometry, so the preview's detached copy and the
+		//! menu agree on every index.
+		std::vector<SplitReference> FaceSplitReferences(const TopoDS_Face& face) {
+			std::vector<SplitReference> result;
+			for (const TopoDS_Edge& edge : StraightFaceEdges(face)) {
+				SplitReference reference;
+				if (!StraightFaceEdgeDirection(edge, reference.along)) {
+					continue;
+				}
+				const BRepAdaptor_Curve curve(edge);
+				reference.middle = curve.Value(
+					0.5 * (curve.FirstParameter() + curve.LastParameter()));
+				GProp_GProps length;
+				BRepGProp::LinearProperties(edge, length);
+				reference.length = length.Mass();
+				result.push_back(reference);
+			}
+			if (!result.empty()) {
+				return result;
+			}
+			gp_Pln plane;
+			if (!TryFaceOperationPlane(face, plane)) {
+				return result;
+			}
+			const gp_Vec normal(plane.Axis().Direction());
+			// The part's axis that lies flattest in the face, then the next.
+			const Standard_Real lean[3] = {
+				std::abs(normal.X()), std::abs(normal.Y()), std::abs(normal.Z())};
+			int order[3] = {0, 1, 2};
+			std::stable_sort(order, order + 3, [&](const int a, const int b) {
+				return lean[a] < lean[b];
+			});
+			const auto axis = [](const int k) {
+				return gp_Vec(k == 0 ? 1.0 : 0.0, k == 1 ? 1.0 : 0.0, k == 2 ? 1.0 : 0.0);
+			};
+			gp_Vec across = axis(order[0]) - normal * axis(order[0]).Dot(normal);
+			if (across.Magnitude() <= Precision::Confusion()) {
+				return result;
+			}
+			across.Normalize();
+			gp_Vec up = normal.Crossed(across);
+			if (up.Dot(axis(order[1])) < 0.0) {
+				up.Reverse();
+			}
+			// The face seen in its own frame: X across, Y up, Z out of the plane.
+			gp_Trsf toFrame;
+			toFrame.SetTransformation(gp_Ax3(
+				plane.Location(), gp_Dir(across.Crossed(up)), gp_Dir(across)));
+			Bnd_Box box;
+			BRepBndLib::AddOptimal(
+				face.Moved(TopLoc_Location(toFrame)), box,
+				Standard_False, Standard_False);
+			if (box.IsVoid() || box.IsOpen()) {
+				return result;
+			}
+			Standard_Real x0, y0, z0, x1, y1, z1;
+			box.Get(x0, y0, z0, x1, y1, z1);
+			if (!(x1 - x0 > Precision::Confusion())
+				|| !(y1 - y0 > Precision::Confusion())) {
+				return result;
+			}
+			const gp_Trsf fromFrame = toFrame.Inverted();
+			const auto side = [&](const Standard_Real x, const Standard_Real y,
+								  const gp_Vec& along, const Standard_Real length) {
+				SplitReference reference;
+				reference.middle = gp_Pnt(x, y, 0.0).Transformed(fromFrame);
+				reference.along = gp_Dir(along);
+				reference.length = length;
+				result.push_back(reference);
+			};
+			side(x0, 0.5 * (y0 + y1), up, y1 - y0);
+			side(x1, 0.5 * (y0 + y1), up, y1 - y0);
+			side(0.5 * (x0 + x1), y0, across, x1 - x0);
+			side(0.5 * (x0 + x1), y1, across, x1 - x0);
+			return result;
+		}
+
 		//! Split one planar face of a solid by a straight line parallel to one
-		//! of its straight edges, `offset` model units inside the face. The
-		//! result is the same solid with one more face; the volume is unchanged.
+		//! of its sides (FaceSplitReferences), `offset` model units inside the
+		//! face. The result is the same solid with one more face; the volume
+		//! is unchanged.
 		Standard_Boolean BuildFaceSplitCandidate(
 			const TopoDS_Shape& source,
 			const TopoDS_Face& face,
@@ -649,21 +745,14 @@ namespace core3d {
 					failureStage = 22;
 					return Standard_False;
 				}
-				const std::vector<TopoDS_Edge> edges =
-					StraightFaceEdges(workingFace);
-				if (static_cast<std::size_t>(edgeIndex) >= edges.size()) {
+				const std::vector<SplitReference> references =
+					FaceSplitReferences(workingFace);
+				if (static_cast<std::size_t>(edgeIndex) >= references.size()) {
 					failureStage = 23;
 					return Standard_False;
 				}
-				const BRepAdaptor_Curve reference(edges[edgeIndex]);
-				gp_Dir along;
-				if (!StraightFaceEdgeDirection(edges[edgeIndex], along)) {
-					failureStage = 23;
-					return Standard_False;
-				}
-				const gp_Pnt middle = reference.Value(
-					0.5 * (reference.FirstParameter()
-						+ reference.LastParameter()));
+				const gp_Dir along = references[edgeIndex].along;
+				const gp_Pnt middle = references[edgeIndex].middle;
 				gp_Vec inward = gp_Vec(plane.Axis().Direction())
 					.Crossed(gp_Vec(along));
 				if (inward.Magnitude() <= Precision::Confusion()) {
@@ -1392,6 +1481,12 @@ namespace core3d {
 			: _shellController->metersPerUnit();
 	}
 
+	Standard_Real ShapeInteractor::shellRefusedRoundedEdgeRadius() const noexcept {
+		return _shellController == nullptr
+			? 0.0
+			: _shellController->refusedRoundedEdgeRadius();
+	}
+
 	std::pair<Standard_Real, Standard_Real>
 	ShapeInteractor::shellThicknessRange() const noexcept {
 		return _shellController == nullptr
@@ -1875,12 +1970,9 @@ namespace core3d {
 				transform = proof.transform;
 			}
 			const gp_Pnt centroid = FaceCentroid(face);
-			for (const TopoDS_Edge& edge
-				 : StraightFaceEdges(face)) {
-				const BRepAdaptor_Curve curve(edge);
-				const gp_Pnt middle = curve.Value(
-					0.5 * (curve.FirstParameter() + curve.LastParameter()));
-				gp_Vec side(centroid, middle);
+			for (const SplitReference& reference
+				 : FaceSplitReferences(face)) {
+				gp_Vec side(centroid, reference.middle);
 				side.Transform(transform);
 				const Standard_Real components[3] = {
 					side.X(), side.Y(), side.Z()};
@@ -1892,9 +1984,7 @@ namespace core3d {
 				}
 				std::string name(components[axis] < 0.0 ? "-" : "+");
 				name += "XYZ"[axis];
-				GProp_GProps length;
-				BRepGProp::LinearProperties(edge, length);
-				result.emplace_back(name, length.Mass());
+				result.emplace_back(name, reference.length);
 			}
 		} catch (...) {
 			result.clear();
@@ -1909,7 +1999,7 @@ namespace core3d {
 				return Standard_False;
 			}
 			const Standard_Integer count = static_cast<Standard_Integer>(
-				StraightFaceEdges(_extrusion.selectedFace).size());
+				FaceSplitReferences(_extrusion.selectedFace).size());
 			if (index < -1 || index >= count) {
 				return Standard_False;
 			}

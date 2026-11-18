@@ -250,6 +250,8 @@ unsigned long long Core3DDebugColdOpenCandidateProbeValue(
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <SelectMgr_SelectableObject.hxx>
 #include <XCAFDoc_ShapeMapTool.hxx>
+#include <SelectMgr_Selection.hxx>
+#include <SelectMgr_SensitiveEntity.hxx>
 #include <Precision.hxx>
 #include <StdSelect_BRepOwner.hxx>
 
@@ -5584,7 +5586,6 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
         XCAFDoc_VisMaterialPBR material;
     };
     std::vector<FaceStyle> pending;
-    std::vector<TDF_Label> staleMapRoots;
     try {
         for (context->InitSelected(); context->MoreSelected(); context->NextSelected()) {
             const auto presentation = Handle(AIS_Shape)::DownCast(context->SelectedInteractive());
@@ -5594,20 +5595,11 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
                 || owner->Shape().ShapeType() != TopAbs_FACE || root.IsNull()) { Core3DFacePBRRefuse(@"no-face-owner"); return; }
             if (!doc->IsPresentationEditable(presentation)) { Core3DFacePBRRefuse(@"presentation-not-editable"); return; }
             if (!doc->IsEditableFreeSimpleDefinitionLabel(root)) { Core3DFacePBRRefuse(@"root-not-free-simple"); return; }
-            if (!shapes->IsSubShape(root, owner->Shape())) {
-                // The part's cached sub-shape map can still describe an undone edit (fault 2,
-                // phone stand: a Hole, Undo, then a face colour did nothing). Trust the shape
-                // itself: a face of the document's shape is valid; its map is rebuilt inside
-                // this colour's own command below.
-                const TopoDS_Shape labelShape = XCAFDoc_ShapeTool::GetShape(root);
-                TopTools_IndexedMapOfShape labelFaces;
-                if (!labelShape.IsNull()) TopExp::MapShapes(labelShape, TopAbs_FACE, labelFaces);
-                if (labelFaces.FindIndex(owner->Shape()) == 0) {
-                    Core3DFacePBRRefuse(@"face-not-subshape-of-root"); return;
-                }
-                if (std::none_of(staleMapRoots.begin(), staleMapRoots.end(),
-                                 [&](const TDF_Label& old) { return old.IsEqual(root); }))
-                    staleMapRoots.push_back(root);
+            // The part's cached face map can still describe an undone edit (fault 2, phone stand:
+            // a Hole, Undo, then a face colour did nothing); the shape itself decides, and the map
+            // is rebuilt inside this colour's own command below (OcctDocument::IsFaceOfCurrentShape).
+            if (!doc->IsFaceOfCurrentShape(root, owner->Shape())) {
+                Core3DFacePBRRefuse(@"face-not-subshape-of-root"); return;
             }
             if (pending.size() >= 64) { Core3DFacePBRRefuse(@"too-many"); return; }
             // Owner shape is definition-local; SelectedShape applies the instance
@@ -5642,11 +5634,6 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
         if (pending.empty()) { Core3DFacePBRRefuse(@"nothing-selected"); return; }
         transaction->NewCommand();
         if (!transaction->HasOpenCommand()) return;
-        for (const auto& root : staleMapRoots) {
-            Handle(XCAFDoc_ShapeMapTool) map;
-            if (root.FindAttribute(XCAFDoc_ShapeMapTool::GetID(), map) && !map.IsNull())
-                map->SetShape(XCAFDoc_ShapeTool::GetShape(root));
-        }
         std::vector<OcctPBRMaterialUpdate> updates;
         for (const auto& style : pending) {
             // A part keeps Position, Rotation and Scale as numbers on its children 1...8
@@ -5660,6 +5647,7 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
             const Handle(TDF_TagSource) tags = TDF_TagSource::Set(style.root);
             if (tags.IsNull()) { Core3DAbortCommandNoThrow(transaction); return; }
             tags->Set(std::max(highWater, tags->Get()));
+            if (!doc->IsFaceOfCurrentShape(style.root, style.face)) { Core3DAbortCommandNoThrow(transaction); return; }
             const auto label = shapes->AddSubShape(style.root, style.face);
             if (label.IsNull()) { Core3DAbortCommandNoThrow(transaction); return; }
             updates.push_back({label, style.material, {}, {}});
@@ -5678,7 +5666,52 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     }
     // Founder test, build 8545: a colour put on a pocket floor showed only after the project
     // was reopened. Draw the parts again from the document, as reopening does.
+    // The redraw replaces every part's drawing and so drops the picked faces: More > Color
+    // right after a face material then had nothing to colour (CTO 17 Nov 12:47). Pick the
+    // same faces again on the new drawings, found by the part's label and the face's
+    // place in the part's face list.
+    std::vector<std::pair<TDF_Label, Standard_Integer>> repicks;
+    for (const auto& style : pending) {
+        TopTools_IndexedMapOfShape oldFaces;
+        if (!style.presentation->Shape().IsNull())
+            TopExp::MapShapes(style.presentation->Shape(), TopAbs_FACE, oldFaces);
+        const Standard_Integer index = oldFaces.FindIndex(style.face);
+        if (index > 0) repicks.emplace_back(style.root, index);
+    }
     (void)viewer->redrawDocument();
+    if (!repicks.empty()) {
+        try {
+            OCC_CATCH_SIGNALS
+            AIS_ListOfInteractive shown;
+            context->DisplayedObjects(AIS_KOI_Shape, -1, shown);
+            for (AIS_ListIteratorOfListOfInteractive it(shown); it.More(); it.Next()) {
+                const auto drawn = Handle(AIS_Shape)::DownCast(it.Value());
+                if (drawn.IsNull() || drawn->Shape().IsNull()) continue;
+                const auto label = doc->ShapeLabel(drawn);
+                if (label.IsNull()) continue;
+                TopTools_IndexedMapOfShape faces;
+                bool mapped = false;
+                for (const auto& pick : repicks) {
+                    if (!pick.first.IsEqual(label)) continue;
+                    if (!mapped) { TopExp::MapShapes(drawn->Shape(), TopAbs_FACE, faces); mapped = true; }
+                    if (pick.second > faces.Extent()) continue;
+                    const TopoDS_Shape& face = faces.FindKey(pick.second);
+                    const Handle(SelectMgr_Selection)& selection =
+                        drawn->Selection(AIS_Shape::SelectionMode(TopAbs_FACE));
+                    if (selection.IsNull()) continue;
+                    for (const auto& sensitive : selection->Entities()) {
+                        if (sensitive.IsNull() || sensitive->BaseSensitive().IsNull()) continue;
+                        const auto owner = Handle(StdSelect_BRepOwner)::DownCast(
+                            sensitive->BaseSensitive()->OwnerId());
+                        if (owner.IsNull() || !owner->HasShape() || !owner->Shape().IsSame(face)) continue;
+                        if (!context->IsSelected(owner)) context->AddOrRemoveSelected(owner, Standard_False);
+                        break;
+                    }
+                }
+            }
+        } catch (...) {
+        }
+    }
     [self.materialController didChangeSelectionWithMaterials:@[] colors:@[]];
     [self.materialController didChangeSelectionWithPBRMaterials:values];
     context->UpdateCurrentViewer();
@@ -12084,6 +12117,19 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
         return nil;
     } catch (...) {return nil;}
 }
+#if DEBUG
+- (NSDictionary<NSString *, NSString *> *)debugPartDigests {
+    NSMutableDictionary<NSString *, NSString *> *result = [NSMutableDictionary dictionary];
+    if (![NSThread isMainThread] || GLController == nil || GLController.viewer == nullptr) return result;
+    const auto doc = GLController.viewer->getDocument();
+    if (doc.IsNull()) return result;
+    for (const auto& [key, value] : OcctDebugPartDigests(*doc)) {
+        NSString *k = [NSString stringWithUTF8String:key.c_str()], *v = [NSString stringWithUTF8String:value.c_str()];
+        if (k && v) result[k] = v;
+    }
+    return result;
+}
+#endif
 - (NSDictionary<NSString *, id> *)debugStoredSweepForEntityIdentifier:(NSString *)identifier {
     if (![NSThread isMainThread] || !_isSetuped || !GLController.viewer
         || ![identifier isKindOfClass:[NSString class]] || identifier.length==0 || identifier.length>128) return nil;
@@ -15338,6 +15384,16 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     if (![NSThread isMainThread] || GLController == nil || !GLController.viewer
         || !GLController.viewer->getObjectInteractor()) return -1;
     return GLController.viewer->getObjectInteractor()->_debugDeleteStagedRootCount;
+}
+- (NSInteger)debugNativeDeleteRefusalStage {
+    if (![NSThread isMainThread] || GLController == nil || !GLController.viewer
+        || !GLController.viewer->getObjectInteractor()) return -1;
+    // Delete guard * 100 + Pattern-original detach clause (K27 diagnostic).
+    return GLController.viewer->getObjectInteractor()->_debugDeleteRefusal * 100
+        + OcctDebugPatternDetachStage();
+}
++ (NSString *)debugNamedShapeReadSummary {
+    return [NSString stringWithUTF8String:OcctDebugNamedShapeReadSummary().c_str()] ?: @"";
 }
 
 - (PrimitiveGizmoType)debugNativeGizmoType {

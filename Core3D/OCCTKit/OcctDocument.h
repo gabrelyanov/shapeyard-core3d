@@ -96,6 +96,10 @@ class XCAFDoc_VisMaterial;
 class OcctDocument;
 
 class Message_ProgressRange;
+//! DEBUG readout: which clause of RemoveShapePreservingPatternMembers last refused (0 = none).
+int OcctDebugPatternDetachStage() noexcept;
+//! DEBUG readout: the last NamedShape records read from a file (byte-drift diagnostic).
+std::string OcctDebugNamedShapeReadSummary() noexcept;
 namespace core3d { class OrdinaryEditController; class Core3DViewer; class BevelOperationController; class SavedCutSourceDetachedResult; class SavedProgramSourceDetachedResult; }
 namespace core3d::native_opening { class CommandLease; }
 namespace core3d::native_opening { class Context; }
@@ -2524,6 +2528,11 @@ public:
     //! False for a read-only XCAF component occurrence.
     Standard_Boolean IsPresentationEditable(
         Handle(AIS_InteractiveObject) object) const;
+    //! Is `face` (definition-local) a face of `root`'s current shape? After an Undo a part's cached
+    //! face map can still describe the undone shape (phone stand fault 2, Fable review F2), so the
+    //! shape itself decides. Inside an open command a stale cache is rebuilt, so FindSubShape and
+    //! AddSubShape can label the face. Never opens or commits a command.
+    Standard_Boolean IsFaceOfCurrentShape(const TDF_Label& root, const TopoDS_Shape& face) const noexcept;
     //! True only for a free, simple, whole XCAF definition label. Material
     //! authoring uses this stricter gate in addition to AIS editability.
     Standard_Boolean IsEditableFreeSimpleDefinitionLabel(
@@ -2607,6 +2616,12 @@ public:
     Standard_Boolean HasUnroutedRetainedDependent(
         const TDF_Label& label) const noexcept;
     
+    //! Delete's explicit detach/remove route, inside its existing OCAF command.
+    //! Validates the complete D2 member set, removes only its association,
+    //! and leaves independent member shapes/identities/appearance untouched.
+    //! The ordinary RemoveShape dependency guard remains authoritative.
+    Standard_Boolean RemoveShapePreservingPatternMembers(const TDF_Label& label) noexcept;
+
     void RemoveShape(TopoDS_Shape object);
     void RemoveShape(Handle(AIS_Shape) object);
     void RemoveShape(Handle(AIS_InteractiveObject) object);
@@ -2643,6 +2658,12 @@ public:
     void NotifyChanges();
 
 private:
+  // Delete validates only its complete D2 member set. All public capture
+  // callers retain the existing whole-document free-root admission.
+  Standard_Boolean CapturePatternLabelsForScope(
+      const std::string& selectedEntityIdentifier,
+      std::shared_ptr<const core3d::pattern_owner::AllLabelSnapshot>& snapshot,
+      bool membersOnly) const noexcept;
   // Read-only capture validation for stages that already hold the ordinary
   // command. Public capture still performs shared tool-input admission.
   Standard_Boolean ValidateCylindricalCutSource(
@@ -2862,5 +2883,15 @@ private:
   // ReplaceShape/RemoveShape calls remain fail-closed for retained dependents.
   std::unordered_set<std::string> myDependentReplayAuthorization;
 };
+
+#if DEBUG
+#include <map>
+#include <string>
+//! DEBUG: one SHA-256 per free part (entity identifier -> hex) over the part's exact shape (BRep
+//! text of every shape in its label tree) and every attribute in that tree as the project file's
+//! own binary drivers write it (colours, pictures, records). Two equal digests mean the part
+//! would be saved byte for byte the same. Used by the Edit sweep check (K16, CTO 17 Nov 18:09).
+Standard_EXPORT std::map<std::string, std::string> OcctDebugPartDigests(const OcctDocument& document) noexcept;
+#endif
 
 #endif // OcctDocument_h

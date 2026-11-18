@@ -8276,7 +8276,7 @@ bool CaptureColourFaces(const Handle(OcctDocument)& doc,const OrdinaryNameLedger
         const auto root=doc->ShapeLabel(presentation);
         if(presentation.IsNull()||Handle(AIS_ColoredShape)::DownCast(presentation).IsNull()
             ||root.IsNull()||!doc->IsEditableFreeSimpleDefinitionLabel(root)||!doc->IsPresentationEditable(presentation)
-            ||!shapes->IsSubShape(root,owner->Shape()))return false;
+            ||!doc->IsFaceOfCurrentShape(root,owner->Shape()))return false;
         if(std::count_if(authority.selectedPresentations.begin(),authority.selectedPresentations.end(),
             [&](const auto& value){return value.presentation==presentation;})!=1)return false;
         if(std::any_of(faces.begin(),faces.end(),[&](const auto& face){return face.root.IsEqual(root)&&face.face.IsSame(owner->Shape());}))return false;
@@ -11620,7 +11620,9 @@ OrdinaryEditResult Core3DViewer::insertPartsFromImportedDocument(const std::stri
             if (std::abs(scale - 1.0) > 1e-12) {
                 gp_Trsf scaling;
                 scaling.SetScale(gp::Origin(), scale);
-                BRepBuilderAPI_Transform scaled(shape, scaling, Standard_True);
+                // Copy the triangles too: a triangle-only part (STL, OBJ) is otherwise left at its
+                // file size in an inch or metre project (Fable review 17 Nov, K18).
+                BRepBuilderAPI_Transform scaled(shape, scaling, Standard_True, Standard_True);
                 if (!scaled.IsDone() || scaled.Shape().IsNull()) return OrdinaryEditResult::Invalid;
                 shape = scaled.Shape();
             }

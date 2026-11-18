@@ -2337,6 +2337,11 @@ __attribute__((objc_subclassing_restricted))
 + (NSDictionary<NSString *,id> *)debugRectangularLoftFamilyBudget;
 
 
+#if DEBUG
+//! Entity identifier -> "sha256 byteCount" of each part as the project file would store it
+//! (exact shape and every attribute through the file's own drivers). K16 check.
+- (NSDictionary<NSString *, NSString *> *)debugPartDigests NS_SWIFT_NAME(debugPartDigests());
+#endif
 //! Read-only existing saved record and fixed malformed production-loader fixtures.
 - (nullable NSDictionary<NSString *, id> *)debugStoredSweepForEntityIdentifier:(NSString *)identifier
     NS_SWIFT_NAME(debugStoredSweep(entityIdentifier:));
@@ -2676,6 +2681,10 @@ __attribute__((objc_subclassing_restricted))
 //! 4 two unavailable post-commit inspections. Zero clears the next fault.
 - (BOOL)debugConfigureNativeDeleteFault:(NSInteger)mode;
 - (NSInteger)debugNativeDeleteStagedRootCount;
+//! K27 diagnostic: Delete guard * 100 + Pattern-original detach clause; 0 = committed.
+- (NSInteger)debugNativeDeleteRefusalStage;
+//! Byte-drift diagnostic: the last NamedShape records read from a file.
++ (NSString *)debugNamedShapeReadSummary;
 //! Direct native gizmo access for cache-reconciliation regressions. Setting the
 //! native value deliberately leaves the public cached tool untouched.
 - (PrimitiveGizmoType)debugNativeGizmoType;
