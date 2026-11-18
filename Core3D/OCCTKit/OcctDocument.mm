@@ -34,6 +34,7 @@
 #include <TDF_DeltaList.hxx>
 #include <TDF_AttributeDelta.hxx>
 #include <TDF_AttributeDeltaList.hxx>
+#include <TDF_DeltaOnAddition.hxx>
 #include <TDF_ChildIterator.hxx>
 #include <TDF_Tool.hxx>
 #include <algorithm>
@@ -31736,6 +31737,38 @@ Standard_Boolean OcctDocument::ApplyTreatmentHistoryAfterHistoryChange(
     } catch (...) { return Standard_False; }
 }
 
+namespace {
+// TRIAL (Fable REOPEN-BYTES patch C, for K10 Split on a round cap): TNaming_DeltaOnModification::Apply
+// and TNaming_DeltaOnRemoval::Apply rebuild the restored NamedShape through a new TNaming_Builder,
+// which advances the version. The delta carries the attribute as it was; note its version before
+// the history step and put it back afterwards. Additions are skipped: that step removes them.
+struct NamingVersionNote { TDF_Label label; Standard_Integer version; };
+std::vector<NamingVersionNote> NamingVersionsCarriedBy(const Handle(TDF_Delta)& delta) {
+    std::vector<NamingVersionNote> notes;
+    try {
+        if (delta.IsNull()) return notes;
+        for (TDF_ListIteratorOfAttributeDeltaList it(delta->AttributeDeltas()); it.More(); it.Next()) {
+            const Handle(TDF_AttributeDelta)& item = it.Value();
+            if (item.IsNull() || item->IsKind(STANDARD_TYPE(TDF_DeltaOnAddition))) continue;
+            const Handle(TNaming_NamedShape) carried =
+                Handle(TNaming_NamedShape)::DownCast(item->Attribute());
+            if (!carried.IsNull()) notes.push_back({item->Label(), carried->Version()});
+        }
+    } catch (...) { notes.clear(); }
+    return notes;
+}
+void RestoreNamingVersions(const std::vector<NamingVersionNote>& notes) noexcept {
+    try {
+        for (const auto& note : notes) {
+            Handle(TNaming_NamedShape) live;
+            if (!note.label.IsNull()
+                && note.label.FindAttribute(TNaming_NamedShape::GetID(), live) && !live.IsNull())
+                live->SetVersion(note.version);
+        }
+    } catch (...) {}
+}
+} // namespace
+
 Standard_Boolean OcctDocument::undo() {
     RetainedValidationOperationScope validationOperation;
     RetireBooleanOriginalsEditor();
@@ -31761,7 +31794,9 @@ Standard_Boolean OcctDocument::undo() {
             }
         }
         const auto ordinaryDelta = myOcafDoc->GetUndos().Last();
+        const auto namingNotes = NamingVersionsCarriedBy(ordinaryDelta);
         if (myOcafDoc->Undo()) {
+            RestoreNamingVersions(namingNotes);
             if (!ApplyOrdinaryNamingHistory(ordinaryDelta, Standard_True)) return Standard_False;
             // Restoration precedes the authority fence advance, NotifyChanges,
             // redraw and any externally visible success; a failed validation
@@ -31818,7 +31853,9 @@ Standard_Boolean OcctDocument::redo() {
             }
         }
         const auto ordinaryDelta = myOcafDoc->GetRedos().First();
+        const auto namingNotes = NamingVersionsCarriedBy(ordinaryDelta);
 		if (myOcafDoc->Redo()) {
+            RestoreNamingVersions(namingNotes);
             if (!ApplyOrdinaryNamingHistory(ordinaryDelta, Standard_False)) return Standard_False;
             // Restoration precedes the authority fence advance, NotifyChanges,
             // redraw and any externally visible success; a failed validation
