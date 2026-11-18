@@ -743,6 +743,18 @@ bool OcctViewer::ZoomByFactor(double theX, double theY, double theFactor) noexce
         if (camera->Scale() <= 0.0 || camera->Distance() <= 0.0
             || camera->ZFar() <= camera->ZNear()
             || (!camera->IsOrthographic() && camera->ZNear() <= 0.0)) { return restore(); }
+        // The zoom-out floor of Zoom() (722edb24, founder test of build 8545):
+        // a pinch out stops while the model is about a tenth of the view, so
+        // the model never shrinks to a dot. The pinch still counts as handled,
+        // so spreading the fingers again zooms in at once.
+        if (theFactor < 1.0) {
+            const Standard_Real ratio = ModelToViewRatio(myView, myContext, myDoc);
+            if (ratio >= 0.0 && ratio < kMinimumModelToViewRatio) {
+                myView->Camera()->Copy(previous);
+                myView->Invalidate();
+                return true;
+            }
+        }
         myView->Invalidate();
         return true;
     } catch (...) { return restore(); }
