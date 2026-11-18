@@ -12206,27 +12206,39 @@ bool Core3DViewer::debugProbeMeshUVRepackStorageRefusal(int mode) noexcept {
 }
 #endif
 
+#if DEBUG
+// Round 1 N04 diagnostic: which Mesh copy guard refused (0 = none yet).
+extern "C" { int Core3DDebugMeshCopyRejectStage = 0; }
+#define N04_STAGE(n) (Core3DDebugMeshCopyRejectStage = (n))
+#else
+#define N04_STAGE(n) ((void)0)
+#endif
 OrdinaryEditResult Core3DViewer::createSourceRetainedMeshCopy(
     const ObjectFrameIdentity& identity,std::uint32_t width,std::uint32_t height) noexcept {
+    N04_STAGE(0);
     if (![NSThread isMainThread]) return OrdinaryEditResult::Invalid;
-    if (!canBeginCommittedEdit() || !_ordinaryEditController) return OrdinaryEditResult::Busy;
+    if (!canBeginCommittedEdit() || !_ordinaryEditController) { N04_STAGE(1); return OrdinaryEditResult::Busy; }
     try {
+        N04_STAGE(2);
         if (width==0 || height==0 || identity.entityIdentifier.empty() || identity.entityIdentifier.size()>128
             || identity.publicationSourceIdentifier.empty() || identity.publicationSourceIdentifier.size()>128
             || identity.entityIdentifier.find('\0')!=std::string::npos
             || identity.publicationSourceIdentifier.find('\0')!=std::string::npos
             || !_shapeInteractor || _shapeInteractor->getSelectionMode()!=ShapeSelectionMode::WholeShape)
             return OrdinaryEditResult::Invalid;
+        N04_STAGE(3);
         const auto snapshot=captureSceneSnapshot(width,height);
         if (!snapshot || snapshot->publicationSourceIdentifier!=identity.publicationSourceIdentifier
             || snapshot->revisions.documentGeneration!=identity.documentGeneration
             || snapshot->revisions.model!=identity.modelRevision || myContext.IsNull() || myDoc.IsNull())
             return OrdinaryEditResult::Invalid;
+        N04_STAGE(4);
         myContext->InitSelected();if (!myContext->MoreSelected()) return OrdinaryEditResult::Invalid;
         const auto presentation=Handle(AIS_Shape)::DownCast(myContext->SelectedInteractive());
         myContext->NextSelected();if (myContext->MoreSelected() || presentation.IsNull()) return OrdinaryEditResult::Invalid;
         const auto label=myDoc->ShapeLabel(presentation);
         OcctObjectNameState source;
+        N04_STAGE(5);
         if (label.IsNull() || myDoc->EntityIdentifierForLabel(label)!=identity.entityIdentifier
             || !myDoc->CaptureObjectNameStateForLabel(label,source)) return OrdinaryEditResult::Invalid;
         TCollection_ExtendedString name("Mesh copy");
@@ -12235,7 +12247,9 @@ OrdinaryEditResult Core3DViewer::createSourceRetainedMeshCopy(
             if (OcctObjectNameIsValid(candidate)) name=candidate;
         }
         OrdinaryEditResult failure=OrdinaryEditResult::Invalid;
+        N04_STAGE(6);
         auto lease=_ordinaryEditController->beginMeshCopy(presentation,name,&failure);
+        if (lease) N04_STAGE(90);
         return lease?lease.stageAndCommit():failure;
     } catch (...) {return OrdinaryEditResult::Invalid;}
 }
