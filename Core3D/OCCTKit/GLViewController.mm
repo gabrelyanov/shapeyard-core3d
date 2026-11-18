@@ -4327,6 +4327,8 @@ static BOOL PlainTapsSelectBehindMoveHandles()
     parameters.minimumThickness = range.first;
     parameters.maximumThickness = range.second;
     parameters.metersPerUnit = interactor->shellMetersPerUnit();
+    parameters.refusedRoundedEdgeRadius =
+        interactor->shellRefusedRoundedEdgeRadius();
     return parameters;
 }
 
