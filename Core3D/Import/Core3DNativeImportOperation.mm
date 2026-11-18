@@ -2676,8 +2676,13 @@ void ImportOBJ(
                 Core3DNativeImportErrorReadFailed,
                 "The OBJ decoder returned an invalid vertex normal.");
         }
-        points[vertex] = gp_Pnt(x, y, z);
-        normals.emplace_back(nx, ny, nz);
+        // OBJ is Y up (export lane rule, 17 Nov; what Blender, Unity and
+        // Roblox write, and what the app's own OBJ export writes since it
+        // turned Z up into Y up as (x, z, -y)). Shapeyard is Z up, so the
+        // file's (X, Y, Z) is the model's (X, -Z, Y): the exact inverse, a
+        // rotation (winding and outward normals stay). Units are unchanged.
+        points[vertex] = gp_Pnt(x, -z, y);
+        normals.emplace_back(nx, -nz, ny);
     }
 
     const unsigned char *indexBytes = static_cast<const unsigned char *>(
