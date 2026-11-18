@@ -6473,6 +6473,46 @@ void Core3DViewer::restoreHistorySelection() noexcept
     } catch (...) { _historySelectionStamp.reset(); }
 }
 
+namespace {
+// Undo and Redo give a part back with the same TShapes it had before; showing it again
+// (redrawDocument) can change their Checked bit, which the saved BRep stream stores, so
+// the project would save different bytes after Undo. Keep that bit of every shape of
+// every part as Undo/Redo left it, through the redraw only (round 1 K02, lamp shade).
+class HistoryRedrawCheckedBits final {
+public:
+    explicit HistoryRedrawCheckedBits(const Handle(TDocStd_Document)& document) noexcept {
+        try {
+            if (document.IsNull()) return;
+            const Handle(XCAFDoc_ShapeTool) shapes =
+                XCAFDoc_DocumentTool::ShapeTool(document->Main());
+            if (shapes.IsNull()) return;
+            TDF_LabelSequence roots;
+            shapes->GetFreeShapes(roots);
+            TopTools_IndexedMapOfShape all;
+            for (int i = 1; i <= roots.Length(); ++i) {
+                const TopoDS_Shape shape = XCAFDoc_ShapeTool::GetShape(roots.Value(i));
+                if (shape.IsNull()) continue;
+                all.Add(shape);
+                TopExp::MapShapes(shape, all);
+                if (all.Extent() > 200000) return;
+            }
+            bits_.reserve(std::size_t(all.Extent()));
+            for (int i = 1; i <= all.Extent(); ++i)
+                if (!all(i).TShape().IsNull())
+                    bits_.emplace_back(all(i).TShape(), all(i).TShape()->Checked());
+        } catch (...) { bits_.clear(); }
+    }
+    ~HistoryRedrawCheckedBits() {
+        for (auto& entry : bits_)
+            if (!entry.first.IsNull()) entry.first->Checked(entry.second);
+    }
+    HistoryRedrawCheckedBits(const HistoryRedrawCheckedBits&) = delete;
+    HistoryRedrawCheckedBits& operator=(const HistoryRedrawCheckedBits&) = delete;
+private:
+    std::vector<std::pair<Handle(TopoDS_TShape), Standard_Boolean>> bits_;
+};
+} // namespace
+
 NativeHistoryTransition Core3DViewer::performHistory(NativeHistoryDirection direction)
 {
     NativeHistoryTransition result;
@@ -6572,6 +6612,7 @@ NativeHistoryTransition Core3DViewer::performHistory(NativeHistoryDirection dire
         result.outcome = changed ? NativeHistoryOutcome::HistoryChanged
                                  : NativeHistoryOutcome::HistoryFailed;
         if (changed && myDoc == document && document->Document() == nativeDocument) {
+            const HistoryRedrawCheckedBits keepCheckedBits(nativeDocument);
             result.documentRedrawn = redrawDocument();
             if (result.documentRedrawn) restoreHistorySelection();
         }
