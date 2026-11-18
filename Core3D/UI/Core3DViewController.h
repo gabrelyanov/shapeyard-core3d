@@ -1691,6 +1691,12 @@ __attribute__((objc_subclassing_restricted))
 
 - (void)setGizmoType:(PrimitiveGizmoType)type;
 
+//! Release API (Fable review 2, 18 Nov: it sat inside the DEBUG block). Adds every part of an app-created import document (a Core3DNativeImportResult's primaryURL)
+//! to the open model as one creation (one Undo removes them all). Returns how many parts were
+//! added; 0 when nothing could be added (the model is unchanged).
+- (NSInteger)insertPartsFromImportedDocumentAtURL:(NSURL *)url
+    NS_SWIFT_NAME(insertPartsFromImportedDocument(at:));
+
 #ifdef DEBUG
 //! Re-run the production selection callback without changing AIS owners.
 - (void)debugRefreshSelectionState;
@@ -2572,11 +2578,6 @@ __attribute__((objc_subclassing_restricted))
 - (NSDictionary<NSString *, id> *)debugSelectAtWorldPointX:(double)x y:(double)y z:(double)z
     NS_SWIFT_NAME(debugSelectAtWorldPoint(x:y:z:));
 //! Replay native touch begin/cancel/select with UIKit's rounded projected pixel.
-//! Adds every part of an app-created import document (a Core3DNativeImportResult's primaryURL)
-//! to the open model as one creation (one Undo removes them all). Returns how many parts were
-//! added; 0 when nothing could be added (the model is unchanged).
-- (NSInteger)insertPartsFromImportedDocumentAtURL:(NSURL *)url
-    NS_SWIFT_NAME(insertPartsFromImportedDocument(at:));
 //! DEBUG probe: which guard last refused a face colour or material ("none" when it went through).
 - (NSString *)debugLastFacePBRRefusal;
 - (NSDictionary<NSString *, id> *)debugTapAtWorldPointX:(double)x y:(double)y z:(double)z
