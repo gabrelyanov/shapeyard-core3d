@@ -127,6 +127,49 @@ struct ShellPreviewWorkerResult {
 
 namespace {
 
+// BRepCheck_Analyzer sets the TShape Checked bit on the shapes it examines, and the saved
+// project stream carries that bit. Run on the part a face tool opens on (admission, before
+// any Undo step exists), it changed the part's own saved bytes: Undo after Shell on the
+// bevelled lamp shade (round 1 K02) or after Split on a round cap (K10) gave back the part
+// with bits it never had. This puts back the Modified and Checked bits of every shape of the
+// part when the check ends (Modified first: setting it clears Checked). Geometry and the
+// other flags are untouched.
+class LivePartBookkeepingBits final {
+public:
+    explicit LivePartBookkeepingBits(const TopoDS_Shape& thePart) noexcept {
+        try {
+            if (thePart.IsNull()) return;
+            TopTools_IndexedMapOfShape aShapes;
+            TopExp::MapShapes(thePart, aShapes);
+            myBits.reserve(std::size_t(aShapes.Extent()) + 1);
+            Keep(thePart.TShape());
+            for (Standard_Integer anIndex = 1; anIndex <= aShapes.Extent(); ++anIndex)
+                Keep(aShapes(anIndex).TShape());
+        } catch (...) { myBits.clear(); }
+    }
+    ~LivePartBookkeepingBits() {
+        for (auto& anEntry : myBits) {
+            anEntry.shape->Modified(anEntry.modified);
+            anEntry.shape->Checked(anEntry.checked);
+        }
+    }
+    LivePartBookkeepingBits(const LivePartBookkeepingBits&) = delete;
+    LivePartBookkeepingBits& operator=(const LivePartBookkeepingBits&) = delete;
+private:
+    struct Entry { Handle(TopoDS_TShape) shape; Standard_Boolean modified, checked; };
+    void Keep(const Handle(TopoDS_TShape)& theShape) {
+        if (!theShape.IsNull()) myBits.push_back({theShape, theShape->Modified(), theShape->Checked()});
+    }
+    std::vector<Entry> myBits;
+};
+
+Standard_Boolean LivePartIsValid(const TopoDS_Shape& thePart) noexcept {
+    try {
+        const LivePartBookkeepingBits aKeep(thePart);
+        return BRepCheck_Analyzer(thePart, Standard_True).IsValid();
+    } catch (...) { return Standard_False; }
+}
+
 constexpr Standard_Real kLegacyMetersPerUnit = 0.001;
 constexpr Standard_Real kPhysicalKernelToleranceMeters = 1.0e-6;
 
@@ -818,7 +861,7 @@ Standard_Boolean TryPrepareFaceOperationSource(
                 aLabel,
                 theMaximumStyledSubshapeLabels,
                 allowStyledFaces)
-            || !BRepCheck_Analyzer(aShape, Standard_True).IsValid()) {
+            || !LivePartIsValid(aShape)) {
             return Standard_False;
         }
 
