@@ -2328,6 +2328,9 @@ ShellApplyResult ShellOperationController::apply() noexcept
     if (!hasActiveOperation() || mySource == nullptr) {
         return ShellApplyResult::NoChange;
     }
+    // The part's own shapes leave the project here and come back on Undo; keep their
+    // Checked bits as they were (see SourceCheckedBits), so Undo saves the same bytes.
+    const SourceCheckedBits keepSourceBits(mySource->shape);
     const auto inspectAfterCommit = [this]() noexcept {
 #ifdef DEBUG
         if (myDebugPostCommitInspectFailureCount > 0) {
