@@ -830,10 +830,18 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
                 ledger.cutPrevious=request.cutSource;
                 sweepNoChange=request.cutProgramSourceRebuild->isNoChange();
             }
+            // HOLE-BOX-DIM: one Dimensions change on a standalone saved Hole, placement unchanged,
+            // geometry changed, no other record, bakeable by the same rule Push-pull uses.
+            if(request.bakeSavedCut&&(permit||changes.size()!=1||!geometryChanges
+                ||request.operation!=OrdinaryTransformOperation::Scale||request.rotationAroundPivot
+                ||!record.previous.retained.value||!MatricesEqual(record.previous.transform,request.transform)
+                ||request.cut||request.cutSource||request.cutProgramEdit||request.inspectorPrimitiveKind!=0
+                ||!_document->CanBakeSavedCutForFaceEdit(request.label)))
+                CORE3D_CUT_REFUSE("ordinary.admission:" CORE3D_CUT_STRINGIFY(__LINE__), reject(OrdinaryEditResult::Invalid));
             if(record.previous.retained.value&&!IsCylindricalCutOperation(request.operation)
                 &&request.operation!=OrdinaryTransformOperation::CylindricalCutSourceRebuild
                 &&request.operation!=OrdinaryTransformOperation::CylindricalCutProgramSourceRebuild
-                && !treatmentRoute) {
+                && !treatmentRoute && !request.bakeSavedCut) {
                 // An occurrence edit never changes the original-local result,
                 // retained base or cylinder. No reserved-placement fallback.
                 OcctCylindricalCutSource cut;double originalRadius=0,candidateRadius=0;
@@ -2842,7 +2850,9 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
             if (carriesFaceColours && record.requested.faceColourMap)
                 paintedFaces = _document->ResizedFaceColours(record.requested.shape,
                     *record.requested.faceColourMap, paintedFaces);
-            if ((!featureStaged && !treatmentStagedR2 && !record.previous.shape.IsEqual(record.requested.shape)
+            if ((record.requested.bakeSavedCut
+                    && !_document->PrepareBooleanResultForFaceEdit(record.previous.label))
+                || (!featureStaged && !treatmentStagedR2 && !record.previous.shape.IsEqual(record.requested.shape)
                     && (record.requested.operation == OrdinaryTransformOperation::MeshSolidConversion
                         // ReplaceShape keeps the representation; Make solid alone changes it.
                         ? !_document->ReplaceMeshWithSolid(record.previous.label, candidate)
@@ -2956,6 +2966,8 @@ OrdinaryEditResult OrdinaryEditController::stageAndCommit(std::uint64_t token) n
                             || !record.candidate.retained.current.IsEqual(record.candidate.shape)
                             || !record.candidate.edgeTreatmentR2
                             || !record.candidate.edgeTreatmentR2->current.IsEqual(record.candidate.shape))
+                        : record.requested.bakeSavedCut
+                        ? (bool(record.candidate.retained.value) || !record.candidate.retained.label.IsNull())
                         : !record.candidate.retained.IsEqual(record.previous.retained)))
                 || (treatmentStaged
                     ?(!record.candidate.edgeTreatment||!ledger.edgeTreatmentReadback

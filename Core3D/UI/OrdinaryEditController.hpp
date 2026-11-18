@@ -271,6 +271,10 @@ struct OrdinaryTransformChange {
     // mutually exclusive with the snapshot and migration arms above.
     std::shared_ptr<const retained_edge_treatment::r2::EnrollmentCapture> edgeTreatmentEnrollmentR2;
     std::shared_ptr<const retained_edge_treatment::r2::DetachedResult> edgeTreatmentResultR2;
+    // Dimensions on a part with a standalone saved Hole (HOLE-BOX-DIM): the hole's record is
+    // removed in this same command (OcctDocument::PrepareBooleanResultForFaceEdit, as Push-pull
+    // does) and the resized solid keeps the hole as plain geometry; Undo restores the record.
+    bool bakeSavedCut = false;
     // Inspector-only lineage, bound to the exact candidate in the same OCAF command.
     int inspectorPrimitiveKind = 0;
     std::array<double, 6> inspectorPrimitiveBounds{};

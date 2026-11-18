@@ -2681,6 +2681,10 @@ __attribute__((objc_subclassing_restricted))
 //! 4 two unavailable post-commit inspections. Zero clears the next fault.
 - (BOOL)debugConfigureNativeDeleteFault:(NSInteger)mode;
 - (NSInteger)debugNativeDeleteStagedRootCount;
+//! K27 diagnostic: Delete guard * 100 + Pattern-original detach clause; 0 = committed.
+- (NSInteger)debugNativeDeleteRefusalStage;
+//! Byte-drift diagnostic: the last NamedShape records read from a file.
++ (NSString *)debugNamedShapeReadSummary;
 //! Direct native gizmo access for cache-reconciliation regressions. Setting the
 //! native value deliberately leaves the public cached tool untouched.
 - (PrimitiveGizmoType)debugNativeGizmoType;
