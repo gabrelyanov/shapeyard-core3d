@@ -681,12 +681,20 @@ Standard_Boolean ReplayProfileShells(
             if (!TryResolveShellOpeningSelectors(current, selectors, faces) || cancelled.load()) return Standard_False;
             Handle(ShellCancellationIndicator) progress = new ShellCancellationIndicator(stop);
             BRepOffsetAPI_MakeThickSolid builder;
-            if (!MakeInwardShell(builder, current, faces, step.thickness, tolerance, progress->Start()))
+            // The same routes as the Shell tool that made this step: the builder first, then
+            // the routes for a bevelled or rounded part, whose solid comes back in `made`.
+            TopoDS_Shape made;
+            if (!MakeInwardShell(builder, current, faces, step.thickness, tolerance, progress->Start(),
+                                 nullptr, &made))
                 return Standard_False;
-            if (cancelled.load() || !builder.IsDone() || builder.MakeOffset().Error() != BRepOffset_NoError
-                || !IsValidInwardResult(builder.Shape(), current, volume, bounds, tolerance,
-                                       ShellOperationController::kMaximumResultTopologyNodes, stop)) return Standard_False;
-            current = builder.Shape();
+            const Standard_Boolean viaBuilder = made.IsNull();
+            if (cancelled.load()
+                || (viaBuilder && (!builder.IsDone() || builder.MakeOffset().Error() != BRepOffset_NoError)))
+                return Standard_False;
+            const TopoDS_Shape shelled = viaBuilder ? builder.Shape() : made;
+            if (!IsValidInwardResult(shelled, current, volume, bounds, tolerance,
+                                     ShellOperationController::kMaximumResultTopologyNodes, stop)) return Standard_False;
+            current = shelled;
         }
         if (!moveTo(finalFrame) || cancelled.load()) return Standard_False;
         result = current; return Standard_True;

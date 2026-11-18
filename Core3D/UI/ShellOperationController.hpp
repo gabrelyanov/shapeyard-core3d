@@ -909,10 +909,10 @@ inline Standard_Boolean ShellAroundSmallRounds(
 }
 
 //! Makes an inward shell.
-//! Without `made` (a saved profile's replay, a check of the kernel boundary):
-//! exactly the routes that existed before 17 Nov 2026, and the caller reads the
-//! builder.
-//! With `made` (the Shell tool): the same routes first, so every shell that was
+//! Without `made` (a check of the kernel boundary): exactly the routes that
+//! existed before 17 Nov 2026, and the caller reads the builder.
+//! With `made` (the Shell tool, and a saved profile's replay of a Shell step the
+//! tool made, so a later size change rebuilds it the same way): the same routes first, so every shell that was
 //! made before is made the same way, byte for byte. Only when they make nothing
 //! are the two routes for a bevelled or rounded part tried; a solid they make is
 //! handed back in `made` (the builder then holds nothing) and the caller
