@@ -743,8 +743,10 @@ NSDictionary *B3RefusalProbe() {
     bool ok = true;
     for (double unit : {0.001, 1.0, 0.01}) {
         const double scale = 0.001 / unit;
+        // K19: 4 x 4, since a box edge now takes any radius below the face
+        // width (the 5 mm end of this law fitted the old 6 x 6 box).
         const TopoDS_Shape tight = BRepPrimAPI_MakeBox(
-            6 * scale, 6 * scale, 40 * scale).Shape();
+            4 * scale, 4 * scale, 40 * scale).Shape();
         const TopoDS_Shape regular = BRepPrimAPI_MakeBox(
             30 * scale, 30 * scale, 40 * scale).Shape();
         const TopoDS_Shape drifted = BRepPrimAPI_MakeBox(
