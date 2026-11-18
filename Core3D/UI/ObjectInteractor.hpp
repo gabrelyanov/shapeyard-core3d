@@ -227,6 +227,8 @@ namespace core3d {
         bool manipulatorRotationAllowed() const { return _manipulatorRotationAllowed; }
 		Handle(TopLoc_Datum3D) manipulatorTransform();
 		gp_XYZ manipulatorPosition();
+		//! The Move handles' Z arrow direction (world); +Z when no handles are attached.
+		gp_XYZ manipulatorZDirection();
 		//! The handles' configured side in view pixels (design system 7.2).
 		float manipulatorSide() const { return _manipulatorSide; }
 		//! DEBUG/UI-test evidence: where the real hit test finds each Scale handle

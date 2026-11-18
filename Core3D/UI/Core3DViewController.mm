@@ -8179,6 +8179,17 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     } catch (...) { return nil; }
 }
 
+- (NSArray<NSNumber *> *_Nullable)debugAttachedManipulatorZDirection {
+    if (![NSThread isMainThread] || GLController == nil
+        || GLController.viewer == nullptr) { return nil; }
+    const auto interactor = GLController.viewer->getObjectInteractor();
+    if (interactor == nullptr || !interactor->isManipulatorAttached()) { return nil; }
+    const gp_XYZ direction = interactor->manipulatorZDirection();
+    if (!std::isfinite(direction.X()) || !std::isfinite(direction.Y())
+        || !std::isfinite(direction.Z()) || direction.Modulus() < 1e-9) { return nil; }
+    return @[@(direction.X()), @(direction.Y()), @(direction.Z())];
+}
+
 - (NSArray<NSNumber *> *_Nullable)debugAttachedManipulatorPosition {
     if (![NSThread isMainThread] || GLController == nil
         || GLController.viewer == nullptr) { return nil; }
