@@ -8179,6 +8179,17 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     } catch (...) { return nil; }
 }
 
+- (NSArray<NSNumber *> *_Nullable)debugAttachedManipulatorZDirection {
+    if (![NSThread isMainThread] || GLController == nil
+        || GLController.viewer == nullptr) { return nil; }
+    const auto interactor = GLController.viewer->getObjectInteractor();
+    if (interactor == nullptr || !interactor->isManipulatorAttached()) { return nil; }
+    const gp_XYZ direction = interactor->manipulatorZDirection();
+    if (!std::isfinite(direction.X()) || !std::isfinite(direction.Y())
+        || !std::isfinite(direction.Z()) || direction.Modulus() < 1e-9) { return nil; }
+    return @[@(direction.X()), @(direction.Y()), @(direction.Z())];
+}
+
 - (NSArray<NSNumber *> *_Nullable)debugAttachedManipulatorPosition {
     if (![NSThread isMainThread] || GLController == nil
         || GLController.viewer == nullptr) { return nil; }
@@ -15391,6 +15402,17 @@ static inline void Core3DFacePBRRefuse(NSString *reason) { gCore3DFacePBRRefusal
     // Delete guard * 100 + Pattern-original detach clause (K27 diagnostic).
     return GLController.viewer->getObjectInteractor()->_debugDeleteRefusal * 100
         + OcctDebugPatternDetachStage();
+}
+#if DEBUG
+extern "C" int Core3DDebugMeshCopyRejectStage;
+#endif
+- (NSInteger)debugMeshCopyRejectStage {
+    // N04 diagnostic: the last Mesh copy guard reached (Core3DViewer / OrdinaryEditController).
+#if DEBUG
+    return Core3DDebugMeshCopyRejectStage;
+#else
+    return -1;
+#endif
 }
 + (NSString *)debugNamedShapeReadSummary {
     return [NSString stringWithUTF8String:OcctDebugNamedShapeReadSummary().c_str()] ?: @"";

@@ -127,6 +127,34 @@ struct ShellPreviewWorkerResult {
 
 namespace {
 
+// The part's own Checked bits, put back when this object goes out of scope. Taking the
+// part's picture off the screen and putting it back while the Shell preview shows marks
+// shapes the project stores (the saved bytes after Cancel, or after Apply and Undo, then
+// differ from the bytes before); the same idiom as StoredShapeCacheBits in OcctDocument.mm.
+class SourceCheckedBits final {
+public:
+    explicit SourceCheckedBits(const TopoDS_Shape& shape) noexcept {
+        try {
+            if (shape.IsNull()) return;
+            TopTools_IndexedMapOfShape all;
+            TopExp::MapShapes(shape, all);
+            if (all.Extent() > 200000) return;
+            bits_.reserve(std::size_t(all.Extent()) + 1);
+            bits_.emplace_back(shape.TShape(), shape.TShape()->Checked());
+            for (int i = 1; i <= all.Extent(); ++i)
+                if (!all(i).TShape().IsNull()) bits_.emplace_back(all(i).TShape(), all(i).TShape()->Checked());
+        } catch (...) { bits_.clear(); }
+    }
+    ~SourceCheckedBits() {
+        for (auto& entry : bits_)
+            if (!entry.first.IsNull()) entry.first->Checked(entry.second);
+    }
+    SourceCheckedBits(const SourceCheckedBits&) = delete;
+    SourceCheckedBits& operator=(const SourceCheckedBits&) = delete;
+private:
+    std::vector<std::pair<Handle(TopoDS_TShape), Standard_Boolean>> bits_;
+};
+
 constexpr Standard_Real kLegacyMetersPerUnit = 0.001;
 constexpr Standard_Real kPhysicalKernelToleranceMeters = 1.0e-6;
 
@@ -1916,6 +1944,7 @@ Standard_Boolean ShellOperationController::installPreview(
         || theResult.ShapeType() != TopAbs_SOLID) {
         return Standard_False;
     }
+    const SourceCheckedBits keepSourceBits(mySource->shape);
     Handle(AIS_Shape) aPresentation;
     try {
         OCC_CATCH_SIGNALS
@@ -1966,6 +1995,8 @@ Standard_Boolean ShellOperationController::discardPreview(
     }
 #endif
     bool didResolveAll = true;
+    const SourceCheckedBits keepSourceBits(
+        mySource != nullptr ? mySource->shape : TopoDS_Shape());
     if (!myContext.IsNull()) {
         if (!myPreviewResult.IsNull()) {
             try {

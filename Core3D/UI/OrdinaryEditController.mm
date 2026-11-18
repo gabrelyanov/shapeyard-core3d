@@ -1141,6 +1141,9 @@ OrdinaryEditLease OrdinaryEditController::beginTransformImpl(
 }
 
 
+#if DEBUG
+extern "C" int Core3DDebugMeshCopyRejectStage;
+#endif
 OrdinaryEditLease OrdinaryEditController::beginMeshCopy(
     const Handle(AIS_Shape)& source, const TCollection_ExtendedString& name,
     OrdinaryEditResult* failure) noexcept {
@@ -1149,27 +1152,46 @@ OrdinaryEditLease OrdinaryEditController::beginMeshCopy(
         if (failure) *failure=result;
         return OrdinaryEditLease();
     };
+#if DEBUG
+    const auto stage=[](int n) { Core3DDebugMeshCopyRejectStage=n; };
+#else
+    const auto stage=[](int) {};
+#endif
     if (![NSThread isMainThread]) return reject(OrdinaryEditResult::Invalid);
-    if (blocksNormalWork()) return reject(OrdinaryEditResult::Busy);
+    if (blocksNormalWork()) { stage(10); return reject(OrdinaryEditResult::Busy); }
     try {
+        stage(11);
         if (_document.IsNull() || _document->Document().IsNull()
             || _document->Document()->HasOpenCommand() || source.IsNull()
-            || !OcctObjectNameIsValid(name) || !_document->IsPresentationEditable(source)
-            || !_document->ValidateGeometryRepresentations()) return reject(OrdinaryEditResult::Invalid);
+            || !OcctObjectNameIsValid(name)) return reject(OrdinaryEditResult::Invalid);
+        stage(12);
+        if (!_document->IsPresentationEditable(source)) return reject(OrdinaryEditResult::Invalid);
+        stage(13);
+        if (!_document->ValidateGeometryRepresentations()) return reject(OrdinaryEditResult::Invalid);
         OrdinaryMeshCopySource copy;copy.presentation=source;copy.destinationName=name;
         const auto label=_document->ShapeLabel(source);
+        stage(14);
         if (!_document->CaptureObjectVisibilityStateForLabel(label,copy.previous)
-            || !copy.previous.IsEffectivelyVisible()
-            || copy.previous.object.object.resolvedRepresentation!=OcctGeometryRepresentation::BRep
-            || !copy.previous.object.object.shape.IsEqual(source->Shape())
-            || !MatricesEqual(copy.previous.object.object.transform,source->LocalTransformation())
-            || !_document->CaptureScalarAppearanceForMeshCopy(label,copy.appearance)) return reject(OrdinaryEditResult::Invalid);
+            || !copy.previous.IsEffectivelyVisible()) return reject(OrdinaryEditResult::Invalid);
+        stage(15);
+        if (copy.previous.object.object.resolvedRepresentation!=OcctGeometryRepresentation::BRep)
+            return reject(OrdinaryEditResult::Invalid);
+        stage(16);
+        if (!copy.previous.object.object.shape.IsEqual(source->Shape())) return reject(OrdinaryEditResult::Invalid);
+        stage(17);
+        if (!MatricesEqual(copy.previous.object.object.transform,source->LocalTransformation()))
+            return reject(OrdinaryEditResult::Invalid);
+        stage(18);
+        if (!_document->CaptureScalarAppearanceForMeshCopy(label,copy.appearance)) return reject(OrdinaryEditResult::Invalid);
         copy.axisState=_document->ReadReferenceAxisForLabel(label,copy.axis);
+        stage(19);
         if (copy.axisState==OcctReferenceAxisReadState::Invalid) return reject(OrdinaryEditResult::Invalid);
         std::atomic_bool cancelled(false);
         meshcopy::CurrentTessellationCopy geometry;
-        if (meshcopy::PrepareCurrentTessellationCopy(source->Shape(),geometry,cancelled)
-            !=meshcopy::PreparationResult::Ready) return reject(OrdinaryEditResult::Invalid);
+        const auto prepared=meshcopy::PrepareCurrentTessellationCopy(source->Shape(),geometry,cancelled);
+        stage(20+static_cast<int>(prepared));
+        if (prepared!=meshcopy::PreparationResult::Ready) return reject(OrdinaryEditResult::Invalid);
+        stage(30);
         // Thread the N1 provenance with the ledger; it is persisted on the
         // copy label in the same creation command (see stageCreationAndCommit).
         copy.faces=std::move(geometry.faces);

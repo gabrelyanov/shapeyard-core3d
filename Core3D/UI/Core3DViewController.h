@@ -1775,6 +1775,8 @@ __attribute__((objc_subclassing_restricted))
 //! Exact current attached manipulator location; nil when no gizmo is attached.
 //! Read-only DEBUG evidence for saved-group pivot attachment paths.
 - (NSArray<NSNumber *> *_Nullable)debugAttachedManipulatorPosition;
+//! The attached Move handles' Z arrow direction (world, unit); nil when none (K13 check).
+- (NSArray<NSNumber *> *_Nullable)debugAttachedManipulatorZDirection;
 //! The handles' side in screen points (design system 7.2: 96 iPad, 72 iPhone).
 - (NSNumber *_Nullable)debugManipulatorSidePoints;
 //! How many displayed parts carry a highlight style of their own (a tool's colour); 0 when no
@@ -2683,6 +2685,8 @@ __attribute__((objc_subclassing_restricted))
 - (NSInteger)debugNativeDeleteStagedRootCount;
 //! K27 diagnostic: Delete guard * 100 + Pattern-original detach clause; 0 = committed.
 - (NSInteger)debugNativeDeleteRefusalStage;
+//! N04 diagnostic: the last Mesh copy guard reached (2-6 viewer, 10-19 source, 20+PreparationResult tessellation, 30 creation, 90 staged).
+- (NSInteger)debugMeshCopyRejectStage;
 //! Byte-drift diagnostic: the last NamedShape records read from a file.
 + (NSString *)debugNamedShapeReadSummary;
 //! Direct native gizmo access for cache-reconciliation regressions. Setting the
