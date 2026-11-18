@@ -1191,7 +1191,10 @@ Core3DDraftFacesNativeSnapshot *DFPublicSnapshot(const DFEditingState& state) {
     for (NSString *key in NSProcessInfo.processInfo.environment) {
         if ([key hasPrefix:@"SHAPEYARD_UITEST_B4_DRAFT_FACES_"]
             && ![key isEqualToString:@"SHAPEYARD_UITEST_B4_DRAFT_FACES_SOURCE"]
-            && ![key isEqualToString:@"SHAPEYARD_UITEST_B4_DRAFT_FACES_UNKNOWN_CLOSE"])
+            && ![key isEqualToString:@"SHAPEYARD_UITEST_B4_DRAFT_FACES_UNKNOWN_CLOSE"]
+            // Keeps the Slant panel open after Apply for the UI test's native observation
+            // (the panel closes after Apply since 14 Nov); it fixes nothing in the document.
+            && ![key isEqualToString:@"SHAPEYARD_UITEST_B4_DRAFT_FACES_HOLD_AFTER_APPLY"])
             return NO;
     }
     _debugCloseUnprovenArmed = true;
