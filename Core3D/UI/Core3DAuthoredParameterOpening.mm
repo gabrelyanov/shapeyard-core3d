@@ -16,6 +16,7 @@
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_LayerTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
+#include "../OCCTKit/CommittedFaceCheckedBits.h"
 #include <TDF_Tool.hxx>
 #include <cmath>
 #include <memory>
@@ -1778,6 +1779,8 @@ static NSString *sLastBakedBooleanPreviewRefusal = @"";
                 ? beforeRedraw.selection.selectedElements.firstObject : nil;
             NSString *keptEntity = kept.kind == Core3DSceneElementKindObject
                 ? kept.entityIdentifier : nil;
+            // Selecting the part again meshes it for picking; keep its saved bits.
+            const core3d::CommittedFaceCheckedBits keepFaceBits(document->Document());
             viewer->redrawDocument();
             if (keptEntity.length > 0) {
                 Core3DSceneSnapshot *afterRedraw = [self captureSceneSnapshot];
@@ -2231,6 +2234,24 @@ static NSString *sLastBakedBooleanPreviewRefusal = @"";
         return document->DebugAppendBooleanOriginalsSuffix(context, owner,
             std::uint32_t(size.width), std::uint32_t(size.height));
     } catch (...) { return 1; }
+}
+
+- (BOOL)debugFlipFirstFaceCheckedBit:(NSString *)entityIdentifier {
+    if (![NSThread isMainThread]) return NO;
+    try {
+        GLViewController *gl = [self.glController isKindOfClass:GLViewController.class]
+            ? (GLViewController *)self.glController : nil;
+        const auto viewer = gl ? gl.viewer : nullptr;
+        if (!viewer) return NO;
+        const TDF_Label owner = ExactRoot(viewer->getDocument(),
+            entityIdentifier.UTF8String ?: "");
+        if (owner.IsNull()) return NO;
+        TopExp_Explorer face(XCAFDoc_ShapeTool::GetShape(owner), TopAbs_FACE);
+        if (!face.More() || face.Current().TShape().IsNull()) return NO;
+        const Handle(TopoDS_TShape)& tshape = face.Current().TShape();
+        tshape->Checked(!tshape->Checked());
+        return YES;
+    } catch (...) { return NO; }
 }
 
 - (BOOL)debugInstallBooleanSourceHiddenLayer:(NSString *)entityIdentifier {

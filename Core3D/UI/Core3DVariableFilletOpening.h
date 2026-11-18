@@ -17,6 +17,11 @@ FOUNDATION_EXPORT NSString *const Core3DVariableFilletRefusalReasonKey;
 //! NSError userInfo key carrying the native refusal ordinal (NSNumber int).
 FOUNDATION_EXPORT NSString *const Core3DVariableFilletRefusalRawValueKey;
 
+//! NSError userInfo key present on a @"b3.local-clearance" refusal when the
+//! issued edge could be measured: the radius (NSNumber double, millimetres)
+//! every station of the law must stay below on this edge.
+FOUNDATION_EXPORT NSString *const Core3DVariableFilletRadiusLimitMMKey;
+
 typedef NS_ERROR_ENUM(Core3DVariableFilletErrorDomain, Core3DVariableFilletError) {
     Core3DVariableFilletErrorInvalidThread = 1,
     Core3DVariableFilletErrorUnavailable,

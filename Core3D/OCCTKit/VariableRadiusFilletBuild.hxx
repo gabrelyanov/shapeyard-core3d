@@ -20,6 +20,7 @@
 #include <Law_Constant.hxx>
 #include <Law_Function.hxx>
 #include <Law_Linear.hxx>
+#include <Precision.hxx>
 #include <Standard_Failure.hxx>
 #include <TColStd_Array1OfInteger.hxx>
 #include <TColStd_Array1OfReal.hxx>
@@ -28,6 +29,7 @@
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <TopoDS.hxx>
+#include <gp_Lin.hxx>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -279,28 +281,69 @@ inline bool resolve(const TopoDS_Shape& shape, const OrientedEdgeAnchor& anchor,
     refusal = Refusal::None; return true;
 }
 
-inline bool rectangularFaceClearance(const TopoDS_Face& face, const TopoDS_Edge& selected,
-                                     double tolerance, double& clearance) {
+// K19: width of a planar support face in front of the selected straight edge.
+// It is the smallest distance from that edge to any boundary edge of the same
+// face that does not touch it. An edge that touches the selected one (the
+// neighbour at a corner, or the straight continuation a Push-pull leaves
+// behind) bounds the ends of the blend, not its width, so it is not measured;
+// only a face with no other edge at all (a triangle) falls back to the far
+// corner of its touching edges. The face no longer has to be a four-edge
+// rectangle: a face clipped by a Flat Bevel (five or six edges), a trapezoid
+// bevel face and a face with a hole are all measured. A rectangle keeps the
+// exact value the four-edge rule produced: the BRepExtrema distance to its
+// one opposite edge.
+inline bool supportFaceClearance(const TopoDS_Face& face, const TopoDS_Edge& selected,
+                                 double tolerance, double& clearance) {
+    clearance = 0;
     BRepAdaptor_Surface surface(face);
     if (surface.GetType() != GeomAbs_Plane) return false;
-    TopTools_IndexedMapOfShape edges; TopExp::MapShapes(face, TopAbs_EDGE, edges);
-    if (edges.Extent() != 4) return false;
     BRepAdaptor_Curve selectedCurve(selected);
     if (selectedCurve.GetType() != GeomAbs_Line) return false;
-    unsigned oppositeCount = 0; double candidate = 0;
+    TopTools_IndexedMapOfShape edges; TopExp::MapShapes(face, TopAbs_EDGE, edges);
+    if (!edges.Contains(selected) || edges.Extent() < 2 || edges.Extent() > 512) return false;
+    TopTools_IndexedMapOfShape selectedVertices;
+    TopExp::MapShapes(selected, TopAbs_VERTEX, selectedVertices);
+    const gp_Lin selectedLine = selectedCurve.Line();
+    double opposite = INFINITY, corner = INFINITY;
     for (int index = 1; index <= edges.Extent(); ++index) {
         const TopoDS_Edge edge = TopoDS::Edge(edges(index));
-        if (edge.IsSame(selected)) continue;
-        BRepAdaptor_Curve curve(edge);
-        if (curve.GetType() != GeomAbs_Line) return false;
-        if (!curve.Line().Direction().IsParallel(selectedCurve.Line().Direction(), 1e-10)) continue;
+        if (edge.IsSame(selected) || BRep_Tool::Degenerated(edge)) continue;
+        TopTools_IndexedMapOfShape vertices;
+        TopExp::MapShapes(edge, TopAbs_VERTEX, vertices);
+        bool touching = false;
+        for (int vertex = 1; vertex <= vertices.Extent(); ++vertex)
+            if (selectedVertices.Contains(vertices(vertex))) touching = true;
+        if (touching) {
+            for (int vertex = 1; vertex <= vertices.Extent(); ++vertex) {
+                if (selectedVertices.Contains(vertices(vertex))) continue;
+                const double away = selectedLine.Distance(
+                    BRep_Tool::Pnt(TopoDS::Vertex(vertices(vertex))));
+                if (std::isfinite(away) && away > tolerance) corner = std::min(corner, away);
+            }
+            continue;
+        }
         BRepExtrema_DistShapeShape distance(selected, edge); distance.Perform();
         if (!distance.IsDone() || distance.NbSolution() == 0
             || !std::isfinite(distance.Value()) || distance.Value() <= tolerance) return false;
-        candidate = distance.Value(); ++oppositeCount;
+        opposite = std::min(opposite, distance.Value());
     }
-    if (oppositeCount != 1) return false;
+    const double candidate = std::isfinite(opposite) ? opposite : corner;
+    if (!std::isfinite(candidate) || candidate <= tolerance) return false;
     clearance = candidate; return true;
+}
+
+// K19: does the largest radius of the law fit beside the edge? Every law the
+// half-width rule admitted stays admitted (a saved Taper must rebuild exactly
+// as before). Beyond it the true bound decides: a blend of radius r between
+// two flat faces leaves each face r * tan(turn / 2) away from the edge, where
+// turn is the angle between the outward normals (a box edge: r itself), so r
+// fits while that setback is smaller than the face width. The kernel build
+// and every post-build proof still judge the candidate afterwards.
+inline bool radiusFits(double maximumRadius, double clearance, double radiusLimit,
+                       double tolerance) noexcept {
+    if (!std::isfinite(maximumRadius) || !std::isfinite(clearance)) return false;
+    if (maximumRadius < clearance / 2) return true;
+    return std::isfinite(radiusLimit) && maximumRadius + tolerance < radiusLimit;
 }
 
 inline bool outwardNormal(const TopoDS_Face& face, gp_Dir& normal) {
@@ -330,8 +373,10 @@ inline bool signedNormalCorrespondence(const std::array<gp_Dir, 2>& supportNorma
 inline bool continuousClearance(const TopoDS_Shape& shape, const TopoDS_Edge& edge,
                                 const OrientedEdgeAnchor& anchor, double tolerance,
                                 double& clearance, Refusal& refusal,
-                                bool reverseEnumeration = false) {
+                                bool reverseEnumeration = false,
+                                double* radiusLimit = nullptr) {
     clearance = INFINITY;
+    if (radiusLimit) *radiusLimit = 0;
     TopTools_IndexedDataMapOfShapeListOfShape owners;
     TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, owners);
     if (!owners.Contains(edge)) { refusal = Refusal::Clearance; return false; }
@@ -343,7 +388,7 @@ inline bool continuousClearance(const TopoDS_Shape& shape, const TopoDS_Edge& ed
     for (int index = 1; index <= uniqueFaces.Extent(); ++index) {
         double faceClearance = 0;
         const TopoDS_Face face = TopoDS::Face(uniqueFaces(index));
-        if (!rectangularFaceClearance(face, edge, tolerance, faceClearance)
+        if (!supportFaceClearance(face, edge, tolerance, faceClearance)
             || !outwardNormal(face, supportNormals[std::size_t(index - 1)])) {
             refusal = Refusal::Clearance; return false;
         }
@@ -354,6 +399,13 @@ inline bool continuousClearance(const TopoDS_Shape& shape, const TopoDS_Edge& ed
     }
     if (!signedNormalCorrespondence(supportNormals, anchor, reverseEnumeration)) {
         refusal = Refusal::OrientationDrift; return false;
+    }
+    if (radiusLimit) {
+        const double reach = std::tan(supportNormals[0].Angle(supportNormals[1]) / 2);
+        if (!std::isfinite(reach) || !(reach > 0)) {
+            refusal = Refusal::Clearance; return false;
+        }
+        *radiusLimit = clearance / reach;
     }
     refusal = Refusal::None; return true;
 }
@@ -846,6 +898,29 @@ inline void debugMultiLawToDocument(DebugMultiStationLawObservation& value,
 #endif
 } // namespace detail
 
+// K19: the largest radius the anchored edge can take on this source, in the
+// source's own units, so a clearance refusal can name the range. Read-only;
+// false when the edge or its two flat support faces are not admitted.
+inline bool RadiusLimitLocal(const TopoDS_Shape& source, const OrientedEdgeAnchor& anchor,
+                             double metersPerLocalUnit, double& limitLocal) noexcept {
+    limitLocal = 0;
+    try {
+        if (source.IsNull() || !std::isfinite(metersPerLocalUnit)
+            || metersPerLocalUnit <= 0) return false;
+        const double tolerance = std::max(Precision::Confusion() * 32,
+                                          1e-7 / metersPerLocalUnit);
+        TopoDS_Edge edge; Refusal refusal = Refusal::None;
+        double clearance = 0, limit = 0;
+        if (!detail::resolve(source, anchor, tolerance, edge, refusal)
+            || !detail::continuousClearance(source, edge, anchor, tolerance,
+                                            clearance, refusal, false, &limit))
+            return false;
+        limit = std::max(limit - tolerance, clearance / 2);
+        if (!std::isfinite(limit) || limit <= 0) return false;
+        limitLocal = limit; return true;
+    } catch (...) { limitLocal = 0; return false; }
+}
+
 inline BuildResult Build(const TopoDS_Shape& source, const Definition& definition,
                          const std::atomic_bool& cancelled,
                          retained_topology_budget::Counter* sharedDebt = nullptr) noexcept {
@@ -891,25 +966,27 @@ inline BuildResult Build(const TopoDS_Shape& source, const Definition& definitio
         std::vector<detail::AuthoredParameterMap> mappings;
         mappings.reserve(workingDefinition.edges.size());
         double minimumClearance = INFINITY;
+        double minimumRadiusLimit = INFINITY;
         for (const auto& anchor : workingDefinition.edges) {
             if (cancelled.load()) return decline(Refusal::Cancelled);
             TopoDS_Edge edge;
             if (!detail::resolve(input, anchor, tolerance, edge, refusal)) return decline(refusal);
             if (BRep_Tool::IsClosed(edge)) return decline(Refusal::ClosedLoop);
-            double clearance = 0;
+            double clearance = 0, radiusLimit = 0;
             if (!detail::continuousClearance(input, edge, anchor, tolerance,
-                                             clearance, refusal))
+                                             clearance, refusal, false, &radiusLimit))
                 return decline(refusal);
             detail::AuthoredParameterMap mapping;
             if (!detail::authoredParameterMap(edge, anchor, tolerance, mapping))
                 return decline(Refusal::OrientationDrift);
             minimumClearance = std::min(minimumClearance, clearance);
+            minimumRadiusLimit = std::min(minimumRadiusLimit, radiusLimit);
             edges.push_back(edge); mappings.push_back(mapping);
             output.evidence.consumedEdges.push_back(anchor.identifier);
         }
         const double maximumRadius = std::max(workingDefinition.stations[0].radiusLocal,
                                                workingDefinition.stations[1].radiusLocal);
-        if (!std::isfinite(minimumClearance) || maximumRadius >= minimumClearance / 2)
+        if (!detail::radiusFits(maximumRadius, minimumClearance, minimumRadiusLimit, tolerance))
             return decline(Refusal::Clearance);
 
         BRepFilletAPI_MakeFillet fillet(input);
@@ -1192,25 +1269,27 @@ inline BuildResult BuildMultiStation(const TopoDS_Shape& source,
         std::vector<detail::AuthoredParameterMap> mappings;
         mappings.reserve(workingDefinition.edges.size());
         double minimumClearance = INFINITY;
+        double minimumRadiusLimit = INFINITY;
         for (const auto& anchor : workingDefinition.edges) {
             if (cancelled.load()) return decline(Refusal::Cancelled);
             TopoDS_Edge edge;
             if (!detail::resolve(input, anchor, tolerance, edge, refusal)) return decline(refusal);
             if (BRep_Tool::IsClosed(edge)) return decline(Refusal::ClosedLoop);
-            double clearance = 0;
+            double clearance = 0, radiusLimit = 0;
             if (!detail::continuousClearance(input, edge, anchor, tolerance,
-                                             clearance, refusal))
+                                             clearance, refusal, false, &radiusLimit))
                 return decline(refusal);
             detail::AuthoredParameterMap mapping;
             if (!detail::authoredParameterMap(edge, anchor, tolerance, mapping))
                 return decline(Refusal::OrientationDrift);
             minimumClearance = std::min(minimumClearance, clearance);
+            minimumRadiusLimit = std::min(minimumRadiusLimit, radiusLimit);
             edges.push_back(edge); mappings.push_back(mapping);
             output.evidence.consumedEdges.push_back(anchor.identifier);
         }
         double maximumRadius = 0;
         if (!MaximumRadiusLocal(workingDefinition, maximumRadius)
-            || !std::isfinite(minimumClearance) || maximumRadius >= minimumClearance / 2)
+            || !detail::radiusFits(maximumRadius, minimumClearance, minimumRadiusLimit, tolerance))
             return decline(Refusal::Clearance);
 
         BRepFilletAPI_MakeFillet fillet(input);
