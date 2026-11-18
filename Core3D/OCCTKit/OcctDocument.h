@@ -2607,6 +2607,12 @@ public:
     Standard_Boolean HasUnroutedRetainedDependent(
         const TDF_Label& label) const noexcept;
     
+    //! Delete's explicit detach/remove route, inside its existing OCAF command.
+    //! Validates the complete D2 member set, removes only its association,
+    //! and leaves independent member shapes/identities/appearance untouched.
+    //! The ordinary RemoveShape dependency guard remains authoritative.
+    Standard_Boolean RemoveShapePreservingPatternMembers(const TDF_Label& label) noexcept;
+
     void RemoveShape(TopoDS_Shape object);
     void RemoveShape(Handle(AIS_Shape) object);
     void RemoveShape(Handle(AIS_InteractiveObject) object);
@@ -2643,6 +2649,12 @@ public:
     void NotifyChanges();
 
 private:
+  // Delete validates only its complete D2 member set. All public capture
+  // callers retain the existing whole-document free-root admission.
+  Standard_Boolean CapturePatternLabelsForScope(
+      const std::string& selectedEntityIdentifier,
+      std::shared_ptr<const core3d::pattern_owner::AllLabelSnapshot>& snapshot,
+      bool membersOnly) const noexcept;
   // Read-only capture validation for stages that already hold the ordinary
   // command. Public capture still performs shared tool-input admission.
   Standard_Boolean ValidateCylindricalCutSource(

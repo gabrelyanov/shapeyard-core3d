@@ -25707,6 +25707,13 @@ bool R179AccumulateCost(
 Standard_Boolean OcctDocument::CapturePatternAllLabelSnapshot(
     const std::string& selectedEntityIdentifier,
     std::shared_ptr<const core3d::pattern_owner::AllLabelSnapshot>& snapshot) const noexcept {
+    return CapturePatternLabelsForScope(selectedEntityIdentifier, snapshot, false);
+}
+
+Standard_Boolean OcctDocument::CapturePatternLabelsForScope(
+    const std::string& selectedEntityIdentifier,
+    std::shared_ptr<const core3d::pattern_owner::AllLabelSnapshot>& snapshot,
+    bool membersOnly) const noexcept {
     snapshot.reset();
     try {
         OCC_CATCH_SIGNALS
@@ -25744,9 +25751,24 @@ Standard_Boolean OcctDocument::CapturePatternAllLabelSnapshot(
         if (shapes.IsNull()) return Standard_False;
         TDF_LabelSequence roots; shapes->GetFreeShapes(roots);
         std::map<std::string, OcctExactLabelReceipt> labels;
+        std::set<std::string> memberIdentities;
+        memberIdentities.insert(retained_solid::UUIDText(definition.source.entity));
+        for (const auto& member : definition.members)
+            memberIdentities.insert(retained_solid::UUIDText(member.identity));
+        std::set<std::string> seenRootIdentities;
         for (Standard_Integer index = 1; index <= roots.Length(); ++index) {
+            const TDF_Label root = roots.Value(index);
+            const std::string rootEntity = EntityIdentifierForLabel(root);
+            // Still reject ambiguous identities anywhere in the document.
+            // An unrelated painted part is outside Delete's mutation scope;
+            // it need not meet the generic exact-copy appearance admission.
+            if (membersOnly) {
+                if (rootEntity.empty() || !seenRootIdentities.insert(rootEntity).second)
+                    return Standard_False;
+                if (memberIdentities.count(rootEntity) == 0) continue;
+            }
             OcctExactLabelReceipt receipt;
-            if (!CaptureExactFreeLabel(roots.Value(index), receipt)) return Standard_False;
+            if (!CaptureExactFreeLabel(root, receipt)) return Standard_False;
             const std::string& entity = receipt.visibility.object.object.entityIdentifier;
             if (!labels.emplace(entity, std::move(receipt)).second) return Standard_False;
         }
@@ -26429,6 +26451,79 @@ Standard_Boolean OcctDocument::HasUnroutedRetainedDependent(
         return R179HasRetainedDependent(myOcafDoc, entity)
             ? Standard_True : Standard_False;
     } catch (...) { return Standard_True; }
+}
+
+Standard_Boolean OcctDocument::RemoveShapePreservingPatternMembers(
+    const TDF_Label& label) noexcept {
+    try {
+        OCC_CATCH_SIGNALS
+        if (myOcafDoc.IsNull() || !myOcafDoc->HasOpenCommand()
+            || label.IsNull() || label.Data() != myOcafDoc->GetData())
+            return Standard_False;
+        if (!HasUnroutedRetainedDependent(label)) return RemoveShape(label);
+
+        // D2 members are already independent native shapes. Detach changes
+        // only the validated association, never their geometry or recipes.
+        // Ambiguous/multiple records, foreign families and malformed members
+        // refuse; the caller aborts the complete Delete command on any failure.
+        std::shared_ptr<const core3d::pattern_owner::AllLabelSnapshot> captured;
+        if (!CapturePatternLabelsForScope(EntityIdentifierForLabel(label), captured, true)
+            || !captured || captured->recordLabel.IsNull()
+            || !captured->source.visibility.object.object.label.IsEqual(label))
+            return Standard_False;
+        core3d::pattern::Definition definition;
+        if (!core3d::pattern::Decode(captured->canonicalRecordBytes, definition)
+            || core3d::retained_solid::UUIDText(definition.source.entity)
+                != EntityIdentifierForLabel(label)) return Standard_False;
+
+        core3d::dependent_replay::Limits limits;
+        std::vector<R179Dependent> dependencies;
+        std::vector<std::string> authorized;
+        R179DependentRefusal refusal = R179DependentRefusal::CorruptTable;
+        if (!R179DiscoverDependentClosure(myOcafDoc, definition.source.entity,
+                limits, dependencies, authorized, refusal)
+            || dependencies.size() != 1
+            || dependencies.front().family != R179DependentFamily::PatternD2
+            || dependencies.front().feature != definition.feature
+            || !dependencies.front().recordLabel.IsEqual(captured->recordLabel)
+            || dependencies.front().canonicalRecordBytes != captured->canonicalRecordBytes)
+            return Standard_False;
+
+        // Forget the envelope only. An unexpected sibling attribute stays
+        // live and makes the strict record reader refuse below, causing Abort.
+        captured->recordLabel.ForgetAttribute(TDataStd_ByteArray::GetID());
+        std::vector<core3d::pattern::Record> remaining;
+        if (!core3d::pattern::ReadAll(myOcafDoc, remaining)
+            || HasUnroutedRetainedDependent(label)) return Standard_False;
+        for (const auto& record : remaining)
+            if (record.definition.feature == definition.feature) return Standard_False;
+        for (const auto& member : captured->members) {
+            OcctExactLabelReceipt current;
+            core3d::pattern_recipe_clone::Source currentRecipe;
+            if (!ReadExactFreeLabel(member.receipt, current)
+                || !core3d::pattern_recipe_clone::Capture(myOcafDoc,
+                    member.receipt.visibility.object.object.label, currentRecipe)
+                || !core3d::pattern_recipe_clone::IsEqual(member.recipe, currentRecipe)
+                || HasUnroutedRetainedDependent(
+                    member.receipt.visibility.object.object.label))
+                return Standard_False;
+        }
+        // Keep generic removal's dependency/material rules, then independently
+        // prove every survivor before the caller may commit. Abort restores
+        // both the association and source if any post-removal read disagrees.
+        if (!RemoveShape(label)) return Standard_False;
+        for (const auto& member : captured->members) {
+            if (member.receipt.visibility.object.object.label.IsEqual(label)) continue;
+            OcctExactLabelReceipt current;
+            core3d::pattern_recipe_clone::Source currentRecipe;
+            if (!ReadExactFreeLabel(member.receipt, current)
+                || !core3d::pattern_recipe_clone::Capture(myOcafDoc,
+                    member.receipt.visibility.object.object.label, currentRecipe)
+                || !core3d::pattern_recipe_clone::IsEqual(member.recipe, currentRecipe))
+                return Standard_False;
+        }
+        return Standard_True;
+    } catch (...) { return Standard_False; }
 }
 
 core3d::dependent_replay::Refusal OcctDocument::PrepareDependentReplayPlan(

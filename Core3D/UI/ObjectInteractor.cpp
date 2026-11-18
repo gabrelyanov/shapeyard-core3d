@@ -1542,7 +1542,8 @@ Standard_Boolean DuplicateFaceFinishesMatch(
             }
             bool staged = true;
             for (const auto& removal : pending->removals) {
-                if (!myDoc->RemoveShape(removal.second)) { staged = false; break; }
+                // K27: deleting a Pattern's original keeps its copies as parts of their own.
+                if (!myDoc->RemoveShapePreservingPatternMembers(removal.second)) { staged = false; break; }
 #if DEBUG
                 ++_debugDeleteStagedRootCount;
                 if (fault == 1) { staged = false; break; }
